@@ -21,7 +21,17 @@ vi.mock("./ai", () => ({
   aiPrepare: vi.fn(() => Promise.resolve({ pages: 1, chars: 500, enough: true })),
   aiCancel: vi.fn(() => Promise.resolve()),
   aiClose: vi.fn(() => Promise.resolve()),
-  loadSettings: () => ({ model: null, effort: "low", consent: false, hideSources: false, width: 400, mode: "docked", float: null }),
+  aiToolDecision: vi.fn(() => Promise.resolve()),
+  loadSettings: () => ({
+    model: null,
+    effort: "low",
+    consent: false,
+    hideSources: false,
+    width: 400,
+    mode: "docked",
+    float: null,
+    permissions: "ask",
+  }),
   saveSettings: vi.fn(),
   MODES: ["docked", "floating", "bar"],
   MODE_NAMES: { docked: "Docked", floating: "Floating", bar: "Command bar" },
@@ -129,6 +139,68 @@ describe("assistant store", () => {
     expect(useAi.getState().chats[1].messages[1].state).toBe("streaming");
     emit({ kind: "cancelled" });
     expect(useAi.getState().chats[1].messages[1].state).toBe("cancelled");
+  });
+
+  it("sends the permission mode and the selection with the question", () => {
+    useAi.getState().setSettings({ consent: true, permissions: "auto" });
+    useAi.setState({ selection: { text: "thirty days", page: 2 } });
+    useAi.getState().ask(1, { kind: "ask", question: "q" });
+    expect(vi.mocked(ai.aiAsk).mock.calls[0][1]).toMatchObject({
+      permissions: "auto",
+      selection: { text: "thirty days", page: 2 },
+    });
+    useAi.getState().setSettings({ permissions: "ask" });
+  });
+
+  describe("tool activity", () => {
+    const act = (state: string, id = "c1") =>
+      ({ kind: "activity", id, tool: "rotate_page", class: "edit", label: "Rotate page 4", state, detail: null }) as ChatEvent;
+    const start = () => {
+      useAi.getState().setSettings({ consent: true });
+      useAi.getState().ask(1, { kind: "ask", question: "q" });
+    };
+    const bot = () => useAi.getState().chats[1].messages[1];
+
+    it("keeps one entry per call and follows it through its states", () => {
+      start();
+      emit(act("waiting"));
+      emit(act("running"));
+      emit({ ...act("done", "c2"), tool: "search", class: "read", label: 'Searched "Ciri"' } as ChatEvent);
+      emit(act("done"));
+      expect(bot().activity.map((a) => [a.id, a.state])).toEqual([
+        ["c1", "done"],
+        ["c2", "done"],
+      ]);
+    });
+
+    it("Apply and Reject answer at once and tell the backend", () => {
+      start();
+      emit(act("waiting"));
+      useAi.getState().decide(1, "c1", true);
+      expect(bot().activity[0].state).toBe("running");
+      expect(ai.aiToolDecision).toHaveBeenCalledWith(1, "c1", true);
+      emit(act("waiting", "c3"));
+      useAi.getState().decide(1, "c3", false);
+      expect(bot().activity[1].state).toBe("rejected");
+      expect(ai.aiToolDecision).toHaveBeenLastCalledWith(1, "c3", false);
+    });
+
+    it("an unanswered card does not outlive the turn", () => {
+      start();
+      emit(act("waiting"));
+      emit({ kind: "cancelled" });
+      expect(bot().activity[0].state).toBe("rejected");
+    });
+
+    it("moves the view when the assistant goes to a page or shows a source", () => {
+      start();
+      emit({ kind: "ui", action: { type: "goTo", page: 8 } });
+      expect(goTo).toHaveBeenLastCalledWith(1, 8, undefined);
+      expect(useAi.getState().mark).toBeNull();
+      emit({ kind: "ui", action: { type: "show", page: 3, rects: [[10, 300, 50, 320]], quote: "q" } });
+      expect(goTo).toHaveBeenLastCalledWith(1, 3, 210);
+      expect(useAi.getState().mark).toMatchObject({ doc: 1, page: 3, n: 0 });
+    });
   });
 
   it("drops the chat when its tab closes", () => {

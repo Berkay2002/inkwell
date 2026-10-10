@@ -249,6 +249,7 @@ pub fn run() {
             ai::ai_prepare,
             ai::ai_ask,
             ai::ai_cancel,
+            ai::ai_tool_decision,
             ai::ai_close,
         ])
         .setup(|app| {

@@ -9,12 +9,18 @@
 //   slow-start    thread/start answers after 1.5 s
 //   stall-start   thread/start is never answered
 //   grandchild    starts a child process of its own at initialize and logs its pid
+//   tools=<json>  before answering, calls the dynamic tools listed as
+//                 [{"tool": "get_text", "arguments": {...}, "delay": ms}] one by one (a server request
+//                 `item/tool/call`), logs each reply, and cites a passage found in the replies
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import readline from "node:readline";
 
 const mode = process.argv[2] ?? "ok";
 const flag = process.argv[3];
+const script = mode.startsWith("tools=") ? JSON.parse(mode.slice(6)) : null;
+let experimental = false;
+let srvIds = -1; // server request ids start at 0, like codex's
 let threads = 0;
 let turns = 0;
 const interrupted = new Set();
@@ -32,6 +38,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const p = m.params ?? {};
   switch (m.method) {
     case "initialize":
+      experimental = p.capabilities?.experimentalApi === true;
+      log(`initialize experimentalApi=${experimental}`);
       if (mode === "grandchild") {
         const gc = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
         log(`grandchild ${gc.pid}`);
@@ -69,7 +77,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       break;
     case "thread/start": {
       const id = `thr-${++threads}`;
-      log(`thread/start ${id} sandbox=${p.sandbox} approval=${p.approvalPolicy} ephemeral=${p.ephemeral} model=${p.model ?? "-"}`);
+      const names = (p.dynamicTools ?? []).map((t) => t.name).join(",");
+      log(`thread/start ${id} sandbox=${p.sandbox} approval=${p.approvalPolicy} ephemeral=${p.ephemeral} model=${p.model ?? "-"} tools=${names}`);
+      if (p.dynamicTools && !experimental) {
+        out({ id: m.id, error: { code: -32600, message: "thread/start.dynamicTools requires experimentalApi capability" } });
+        break;
+      }
       if (mode === "stall-start") break; // never answered
       const answer = () => out({ id: m.id, result: { thread: { id }, model: p.model ?? "fake-1" } });
       if (mode === "slow-start") setTimeout(answer, 1500);
@@ -123,9 +136,33 @@ async function runTurn(id, p) {
     log(`approval answered with ${reply.error ? "error" : "result"}`);
   }
 
+  let toolText = "";
+  for (const step of script ?? []) {
+    if (step.delay) await sleep(step.delay);
+    const cid = `c${srvIds + 2}`;
+    out({ method: "item/started", params: { threadId: tid, turnId: turn, item: { type: "agentMessage", id: cid, text: "", phase: "commentary" } } });
+    out({ method: "item/agentMessage/delta", params: { threadId: tid, turnId: turn, itemId: cid, delta: "Let me look. " } });
+    out({ method: "item/completed", params: { threadId: tid, turnId: turn, item: { type: "agentMessage", id: cid, text: "Let me look. ", phase: "commentary" } } });
+    const rid = ++srvIds;
+    const reply = await new Promise((res) => {
+      replies.set(rid, res);
+      out({
+        id: rid,
+        method: "item/tool/call",
+        params: { threadId: tid, turnId: turn, callId: `call-${rid}`, namespace: null, tool: step.tool, arguments: step.arguments ?? {} },
+      });
+    });
+    const items = reply.result?.contentItems ?? [];
+    const t = items.filter((i) => i.type === "inputText").map((i) => i.text).join("\n");
+    const images = items.filter((i) => i.type === "inputImage").length;
+    toolText += t + "\n";
+    const what = reply.error ? `error:${reply.error.message}` : `success=${reply.result.success} images=${images}`;
+    log(`tool-reply ${step.tool} ${what} :: ${t.replace(/\s+/g, " ").slice(0, 90)}`);
+  }
+
   let text;
   if (p.outputSchema) {
-    const first = /\[(p\d+\.\d+)\] ([^\n]{0,80})/.exec(prompt);
+    const first = /\[(p\d+\.\d+)\] ([^\n]{0,80})/.exec(toolText || prompt);
     const quote = first ? first[2].trim().split(" ").slice(0, 6).join(" ") : "";
     const answer = `Fake answer about it [1].\nSecond "quoted" line, café 😀 and a \\ backslash [1].`;
     text = JSON.stringify({
@@ -138,6 +175,7 @@ async function runTurn(id, p) {
   }
   if (mode === "slow") text = JSON.stringify({ answer: "word ".repeat(400), citations: [], followups: [] });
 
+  out({ method: "item/started", params: { threadId: tid, turnId: turn, item: { type: "agentMessage", id: "i1", text: "", phase: "final_answer" } } });
   const step = mode === "slow" ? 8 : 7;
   const gap = mode === "slow" ? 40 : 3;
   let sent = 0;
@@ -152,7 +190,7 @@ async function runTurn(id, p) {
     sent++;
     await sleep(gap);
   }
-  out({ method: "item/completed", params: { threadId: tid, turnId: turn, completedAtMs: Date.now(), item: { type: "agentMessage", id: "i1", text } } });
+  out({ method: "item/completed", params: { threadId: tid, turnId: turn, completedAtMs: Date.now(), item: { type: "agentMessage", id: "i1", text, phase: "final_answer" } } });
   out({
     method: "thread/tokenUsage/updated",
     params: { threadId: tid, turnId: turn, tokenUsage: { last: { inputTokens: 100, outputTokens: 20, totalTokens: 120 }, total: {} } },

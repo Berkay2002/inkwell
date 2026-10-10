@@ -1,21 +1,41 @@
 //! One warm `codex app-server` shared by every open document; one ephemeral thread per document
-//! chat. A turn = document excerpts (only those not sent before) + the task, streamed back as
-//! events. The server is started lazily, restarted after a crash, and never blocks on approvals.
+//! chat. A turn = a small header (title, outline, page in view, selection; the whole text only for a
+//! short document) + the task, streamed back as events. The model pulls what it needs through
+//! Inkwell's dynamic tools (`tools.rs`), whose calls are answered here, in the turn's stream loop,
+//! under the user's permission mode. The server is started lazily and restarted after a crash.
 
-use super::rpc::{CLOSED, Client, RpcError, SpawnSpec};
+use super::rpc::{CLOSED, Client, RpcError, SpawnSpec, TOOL_CALL};
 use super::text::{self, Citation, DocText, Task};
+use super::tools::{self, Class, Ctx, DocHost, Mode, Selected, Tool, UiAction};
 use crate::engine::DocId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// No notification for this long and the server is considered hung.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+/// An Apply / Reject card nobody answered is a rejection after this long.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+/// Header lines of the outline sent with the first turn of a long document.
+const HEADER_OUTLINE_LINES: usize = 60;
+
+/// How far a tool call got; the activity trail and the approval card render it.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ActState {
+    /// Needs the user's Apply / Reject.
+    Waiting,
+    Running,
+    Done,
+    Failed,
+    Rejected,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -38,6 +58,10 @@ pub enum ChatEvent {
         chunks_total: usize,
         usage: Option<Value>,
     },
+    /// A tool call of this turn, at each step of its life (same `id` throughout).
+    Activity { id: String, tool: String, class: Class, label: String, state: ActState, detail: Option<String> },
+    /// The model moved the user's view (go_to_page, show_source).
+    Ui { action: UiAction },
     Error { message: String, hint: Option<String> },
     Cancelled,
 }
@@ -52,8 +76,14 @@ pub struct AskRequest {
     pub name: String,
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// 0-based page in view; its text is always included when the document is sent in part.
+    /// 0-based page in view.
     pub current_page: Option<u32>,
+    /// The text selected in the viewer, if any.
+    #[serde(default)]
+    pub selection: Option<Selected>,
+    /// What the model may change without asking (`ask` when absent).
+    #[serde(default)]
+    pub permissions: Mode,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,10 +165,16 @@ struct Session {
     /// Serialises `thread/start` so `state` is never held across an RPC.
     start: Mutex<()>,
     state: Mutex<SessionState>,
+    /// Tool calls waiting for Apply / Reject, by call id.
+    approvals: Mutex<HashMap<String, Sender<bool>>>,
 }
 
 pub struct Assistant {
     spec: Box<dyn Fn() -> Option<SpawnSpec> + Send + Sync>,
+    /// The dynamic tools every thread is started with (`register` adds to them).
+    tools: RwLock<Vec<Arc<Tool>>>,
+    /// Documents with at most this many characters go into the first turn whole.
+    inline_max: AtomicUsize,
     /// Only ever locked briefly: never across a spawn or an RPC.
     server: Mutex<Option<Server>>,
     /// Serialises starting a server.
@@ -166,6 +202,8 @@ impl Assistant {
     ) -> Arc<Self> {
         Arc::new(Self {
             spec,
+            tools: RwLock::new(tools::builtin()),
+            inline_max: AtomicUsize::new(text::INLINE_CHARS),
             server: Mutex::new(None),
             starting: Mutex::new(()),
             next_gen: AtomicU64::new(0),
@@ -174,6 +212,24 @@ impl Assistant {
             idle_timeout,
             call_timeout,
         })
+    }
+
+    /// Adds a tool. Threads already started do not get it, so register before the first question.
+    pub fn register(&self, tool: Arc<Tool>) {
+        self.tools.write().unwrap().push(tool);
+    }
+
+    /// Overrides the short-document threshold (`text::INLINE_CHARS`); used to measure it.
+    pub fn set_inline_max(&self, chars: usize) {
+        self.inline_max.store(chars, Ordering::SeqCst);
+    }
+
+    /// The user's answer to a waiting tool call. Unknown or already settled ids are ignored.
+    pub fn decide(&self, doc: DocId, call_id: &str, allow: bool) {
+        let Some(s) = self.sessions.lock().unwrap().get(&doc).cloned() else { return };
+        if let Some(tx) = s.approvals.lock().unwrap().remove(call_id) {
+            let _ = tx.send(allow);
+        }
     }
 
     pub fn server_pid(&self) -> Option<u32> {
@@ -204,7 +260,11 @@ impl Assistant {
             hint: Some("install"),
         })?;
         let client = Client::spawn(&spec)?;
-        let init = json!({ "clientInfo": { "name": "inkwell", "title": "Inkwell", "version": env!("CARGO_PKG_VERSION") } });
+        // `experimentalApi` is what lets `thread/start` carry `dynamicTools` (codex refuses it otherwise).
+        let init = json!({
+            "clientInfo": { "name": "inkwell", "title": "Inkwell", "version": env!("CARGO_PKG_VERSION") },
+            "capabilities": { "experimentalApi": true },
+        });
         let r = client.call("initialize", init, self.call_timeout).and_then(|_| client.notify("initialized", None));
         if let Err(e) = r {
             client.kill();
@@ -347,6 +407,7 @@ impl Assistant {
             "approvalPolicy": "never",
             "cwd": std::env::temp_dir().to_string_lossy(),
             "baseInstructions": text::BASE_INSTRUCTIONS,
+            "dynamicTools": tools::specs(&self.tools.read().unwrap()),
         });
         if let Some(m) = model.filter(|m| !m.is_empty()) {
             p["model"] = json!(m);
@@ -374,12 +435,14 @@ impl Assistant {
     // ---- turns ----------------------------------------------------------------------------
 
     /// Starts a turn on its own thread and returns at once; everything arrives through `sink`.
-    /// `load` produces the document text (cached after the first call).
+    /// `load` produces the document text (cached after the first call); `host` is the engine side
+    /// the tools need (outline, page images, metadata).
     pub fn ask(
         self: &Arc<Self>,
         doc: DocId,
         req: AskRequest,
         load: impl FnOnce() -> Result<Arc<DocText>, String> + Send + 'static,
+        host: Arc<dyn DocHost>,
         sink: Sink,
     ) -> Result<(), String> {
         let session = self.session(doc);
@@ -391,11 +454,12 @@ impl Assistant {
         std::thread::Builder::new()
             .name("ai-turn".into())
             .spawn(move || {
-                let ev = match me.run_turn(&session, req, load, &sink) {
+                let ev = match me.run_turn(&session, req, load, &*host, &sink) {
                     Ok(ev) => ev,
                     Err(f) => ChatEvent::Error { message: f.message, hint: f.hint.map(str::to_string) },
                 };
                 *session.active.lock().unwrap() = None;
+                session.approvals.lock().unwrap().clear();
                 session.busy.store(false, Ordering::SeqCst);
                 sink(ev);
             })
@@ -408,6 +472,7 @@ impl Assistant {
         session: &Arc<Session>,
         req: AskRequest,
         load: impl FnOnce() -> Result<Arc<DocText>, String>,
+        host: &dyn DocHost,
         sink: &Sink,
     ) -> Result<ChatEvent, Failure> {
         let t0 = Instant::now();
@@ -433,24 +498,38 @@ impl Assistant {
             return Ok(ChatEvent::Cancelled);
         }
 
-        // what to send: the retrieval for this task minus what the model already has
-        let (input, fresh_ids, chunks_total, chunks_sent) = {
+        // What to send: the header on a thread's first question (plus the whole text of a short
+        // document); everything else the model reads through the tools.
+        let selection_task = matches!(req.task, Task::Selection { .. });
+        let first = !session.state.lock().unwrap().intro_sent && !selection_task;
+        let inline = first && text.chars <= self.inline_max.load(Ordering::SeqCst);
+        let header = if first { header_text(host) } else { String::new() };
+        let (input, fresh_ids, sent_before) = {
             let st = session.state.lock().unwrap();
-            let idx = if req.task.cited() {
-                text::pick(&text, req.task.query(), &req.task.focus_pages(req.current_page), text::BUDGET_CHARS)
-            } else {
-                Vec::new()
+            let chunks: Vec<&text::Chunk> = if inline { text.chunks.iter().collect() } else { Vec::new() };
+            let info = text::TurnInfo {
+                name: &req.name,
+                pages: text.pages,
+                first,
+                header: &header,
+                inline: &chunks,
+                viewing: req.current_page,
+                selection: req.selection.as_ref().map(|s| (s.text.as_str(), s.page)),
             };
-            let partial = idx.len() < text.chunks.len();
-            let fresh: Vec<&text::Chunk> = idx.iter().map(|&i| &text.chunks[i]).filter(|c| !st.sent.contains(&c.id)).collect();
-            let input = text::build_turn(&req.task, &req.name, text.pages, &fresh, !st.intro_sent, partial);
-            let ids: Vec<String> = fresh.iter().map(|c| c.id.clone()).collect();
-            let n = fresh.len();
-            // drop notifications left over from an earlier turn
+            let input = text::build_turn(&req.task, &info);
+            let ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
+            // drop notifications left over from an earlier turn; a tool call among them would leave
+            // codex waiting for ever
             if let Some(rx) = &st.rx {
-                while rx.try_recv().is_ok() {}
+                while let Ok(m) = rx.try_recv() {
+                    if m.get("method").and_then(Value::as_str) == Some(TOOL_CALL) {
+                        if let Some(id) = m.get("id") {
+                            client.refuse(id, "that turn is over");
+                        }
+                    }
+                }
             }
-            (input, ids, text.chunks.len(), n)
+            (input, ids, st.sent.len())
         };
 
         let mut params = json!({
@@ -472,7 +551,7 @@ impl Assistant {
         let turn_id = started.pointer("/turn/id").and_then(Value::as_str).unwrap_or_default().to_string();
         {
             let mut st = session.state.lock().unwrap();
-            st.intro_sent = true;
+            st.intro_sent |= first;
             st.sent.extend(fresh_ids);
         }
         if let Some(a) = session.active.lock().unwrap().as_mut() {
@@ -486,7 +565,8 @@ impl Assistant {
 
         // ---- stream --------------------------------------------------------------------
         let rx = session.state.lock().unwrap().rx.take().ok_or_else(|| Failure::new("no event stream"))?;
-        let outcome = self.stream(&rx, &client, session, &req, &turn_id, t0, sink);
+        let ctx = TurnCtx { req: &req, text: &text, host };
+        let outcome = self.stream(&rx, &client, session, &ctx, &turn_id, t0, sink);
         session.state.lock().unwrap().rx = Some(rx);
         let (final_text, first_ms, usage) = match outcome {
             Ok(Streamed::Completed { text, first_ms, usage }) => (text, first_ms, usage),
@@ -523,8 +603,8 @@ impl Assistant {
             first_token_ms: first_ms,
             total_ms: t0.elapsed().as_millis() as u64,
             prep_ms,
-            chunks_sent,
-            chunks_total,
+            chunks_sent: sent.len().saturating_sub(sent_before),
+            chunks_total: text.chunks.len(),
             usage,
         })
     }
@@ -535,18 +615,21 @@ impl Assistant {
         rx: &Receiver<Value>,
         client: &Client,
         session: &Session,
-        req: &AskRequest,
+        ctx: &TurnCtx,
         turn_id: &str,
         t0: Instant,
         sink: &Sink,
     ) -> Result<Streamed, Failure> {
         let cancelled = || session.cancel.load(Ordering::SeqCst);
-        let cited = req.task.cited();
+        let cited = ctx.req.task.cited();
         let mut raw = String::new();
         let mut shown = 0usize;
         let mut final_text: Option<String> = None;
         let mut first_ms = None;
         let mut usage = None;
+        // Messages the model wrote between tool calls ("Let me look that up"): not part of the answer.
+        let mut commentary: HashSet<String> = HashSet::new();
+        let mut page = ctx.req.current_page.unwrap_or(0);
         loop {
             let msg = match rx.recv_timeout(self.idle_timeout) {
                 Ok(m) => m,
@@ -569,10 +652,26 @@ impl Assistant {
             let p = &msg["params"];
             // a notification of another turn of the same thread (late tail of an earlier one)
             let other_turn = |id: Option<&str>| id.is_some_and(|i| !turn_id.is_empty() && i != turn_id);
+            let item_id = p.get("itemId").and_then(Value::as_str).unwrap_or_default();
             match method {
                 CLOSED if cancelled() => return Ok(Streamed::Interrupted),
                 CLOSED => return Err(Failure { message: String::new(), hint: Some("dead") }),
-                "item/agentMessage/delta" if !other_turn(p.get("turnId").and_then(Value::as_str)) => {
+                TOOL_CALL => {
+                    let Some(id) = msg.get("id") else { continue };
+                    if other_turn(p.get("turnId").and_then(Value::as_str)) {
+                        client.refuse(id, "that turn is over");
+                    } else {
+                        self.tool_call(id, p, client, session, ctx, &mut page, sink);
+                    }
+                }
+                "item/started" if p.pointer("/item/type").and_then(Value::as_str) == Some("agentMessage") => {
+                    if p.pointer("/item/phase").and_then(Value::as_str) == Some("commentary") {
+                        if let Some(id) = p.pointer("/item/id").and_then(Value::as_str) {
+                            commentary.insert(id.to_string());
+                        }
+                    }
+                }
+                "item/agentMessage/delta" if !other_turn(p.get("turnId").and_then(Value::as_str)) && !commentary.contains(item_id) => {
                     raw.push_str(p.get("delta").and_then(Value::as_str).unwrap_or_default());
                     let visible = if cited { text::partial_answer(&raw) } else { raw.clone() };
                     if visible.len() > shown {
@@ -584,8 +683,12 @@ impl Assistant {
                     }
                 }
                 "item/completed" if p.pointer("/item/type").and_then(Value::as_str) == Some("agentMessage") => {
-                    if let Some(t) = p.pointer("/item/text").and_then(Value::as_str) {
-                        final_text = Some(t.to_string());
+                    let id = p.pointer("/item/id").and_then(Value::as_str).unwrap_or_default();
+                    let is_commentary = commentary.contains(id) || p.pointer("/item/phase").and_then(Value::as_str) == Some("commentary");
+                    if !is_commentary {
+                        if let Some(t) = p.pointer("/item/text").and_then(Value::as_str) {
+                            final_text = Some(t.to_string());
+                        }
                     }
                 }
                 "thread/tokenUsage/updated" => usage = p.pointer("/tokenUsage/last").cloned(),
@@ -608,6 +711,144 @@ impl Assistant {
             }
         }
     }
+
+    // ---- tools ----------------------------------------------------------------------------
+
+    /// Answers one `item/tool/call`: finds the tool, applies the permission mode (waiting for the
+    /// user when it needs to), runs it and replies with its result. Every outcome, a refusal
+    /// included, is a reply the model can read; the turn is never left hanging.
+    #[allow(clippy::too_many_arguments)]
+    fn tool_call(
+        &self,
+        rpc_id: &Value,
+        p: &Value,
+        client: &Client,
+        session: &Session,
+        ctx: &TurnCtx,
+        page: &mut u32,
+        sink: &Sink,
+    ) {
+        let call_id = p.get("callId").and_then(Value::as_str).unwrap_or_default().to_string();
+        let name = p.get("tool").and_then(Value::as_str).unwrap_or_default().to_string();
+        let args = match p.get("arguments") {
+            // some models hand the arguments over as a JSON string
+            Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
+            Some(v) => v.clone(),
+            None => Value::Null,
+        };
+        let args = if args.is_null() { json!({}) } else { args };
+        let reply = |r: &Result<tools::Output, String>| {
+            let _ = client.respond(rpc_id, tools::response(r));
+        };
+        let tool = self.tools.read().unwrap().iter().find(|t| t.name == name).cloned();
+        let Some(tool) = tool else {
+            let why = format!("Unknown tool \"{name}\".");
+            sink(ChatEvent::Activity {
+                id: call_id,
+                tool: name,
+                class: Class::Read,
+                label: "Called an unknown tool".into(),
+                state: ActState::Failed,
+                detail: Some(why.clone()),
+            });
+            reply(&Err(why));
+            return;
+        };
+        let label = (tool.label)(&args);
+        let act = |state: ActState, detail: Option<String>| {
+            sink(ChatEvent::Activity {
+                id: call_id.clone(),
+                tool: name.clone(),
+                class: tool.class,
+                label: label.clone(),
+                state,
+                detail,
+            });
+        };
+        if session.closed.load(Ordering::SeqCst) || session.cancel.load(Ordering::SeqCst) {
+            act(ActState::Failed, Some("stopped".into()));
+            reply(&Err("The request was stopped.".into()));
+            return;
+        }
+        if ctx.req.permissions.needs_approval(tool.class) {
+            // registered before the card is announced: the answer may come back at once
+            let (tx, rx) = mpsc::channel();
+            session.approvals.lock().unwrap().insert(call_id.clone(), tx);
+            act(ActState::Waiting, None);
+            if !self.await_decision(session, &call_id, rx) {
+                act(ActState::Rejected, None);
+                reply(&Err("The user rejected this change, so nothing was changed. Do not try it again; \
+                            say what you would have done and ask how they want to proceed."
+                    .into()));
+                return;
+            }
+        }
+        act(ActState::Running, None);
+        let tc = Ctx {
+            text: ctx.text,
+            host: ctx.host,
+            name: &ctx.req.name,
+            current_page: *page,
+            selection: ctx.req.selection.as_ref(),
+        };
+        let out = catch_unwind(AssertUnwindSafe(|| (tool.run)(&tc, &args)))
+            .unwrap_or_else(|_| Err("The tool failed unexpectedly.".into()));
+        match &out {
+            Ok(o) => {
+                session.state.lock().unwrap().sent.extend(o.seen.iter().cloned());
+                if let Some(ui) = &o.ui {
+                    match ui {
+                        UiAction::GoTo { page: p } | UiAction::Show { page: p, .. } => *page = *p,
+                    }
+                    sink(ChatEvent::Ui { action: ui.clone() });
+                }
+                act(ActState::Done, None);
+            }
+            Err(e) => act(ActState::Failed, Some(e.clone())),
+        }
+        reply(&out);
+    }
+
+    /// Waits for the user's Apply / Reject. A cancel, a closed tab or the timeout is a rejection.
+    fn await_decision(&self, session: &Session, call_id: &str, rx: Receiver<bool>) -> bool {
+        let deadline = Instant::now() + APPROVAL_TIMEOUT;
+        let allow = loop {
+            match rx.recv_timeout(Duration::from_millis(150)) {
+                Ok(a) => break a,
+                Err(RecvTimeoutError::Timeout) => {
+                    if session.cancel.load(Ordering::SeqCst) || session.closed.load(Ordering::SeqCst) || Instant::now() > deadline {
+                        break false;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break false,
+            }
+        };
+        session.approvals.lock().unwrap().remove(call_id);
+        allow
+    }
+}
+
+/// What a turn's tool calls work against.
+struct TurnCtx<'a> {
+    req: &'a AskRequest,
+    text: &'a DocText,
+    host: &'a dyn DocHost,
+}
+
+/// Title and outline for the first message of a thread.
+fn header_text(host: &dyn DocHost) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    if let Some((_, t)) = host.meta().into_iter().find(|(k, _)| *k == "title") {
+        let _ = writeln!(s, "Title: {t}");
+    }
+    if let Ok(items) = host.outline() {
+        if !items.is_empty() {
+            let (lines, cut) = tools::outline_lines(&items, HEADER_OUTLINE_LINES);
+            let _ = write!(s, "Outline:\n{lines}{}", if cut { "(more entries: use get_outline)\n" } else { "" });
+        }
+    }
+    s
 }
 
 enum Streamed {

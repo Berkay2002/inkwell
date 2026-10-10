@@ -6,14 +6,39 @@ pub mod chat;
 pub mod codex;
 pub mod rpc;
 pub mod text;
+pub mod tools;
 
-use crate::engine::{DocId, Engine};
+use crate::engine::{DocId, Engine, OutlineItem, pool::class};
 pub use chat::Assistant;
 use chat::{AskRequest, ChatEvent, Prepared, Status};
 use std::sync::Arc;
 use tauri::State;
 use tauri::ipc::Channel;
 use text::DocText;
+
+/// The engine side of one open document, for the tools. A tab that closed meanwhile makes every
+/// call fail with "document closed", which the model reads.
+struct EngineHost {
+    eng: Arc<Engine>,
+    doc: DocId,
+}
+
+impl tools::DocHost for EngineHost {
+    fn meta(&self) -> Vec<(&'static str, String)> {
+        let doc = self.doc;
+        self.eng.call(class::BACKGROUND, move |e| e.metadata(doc)).unwrap_or_default()
+    }
+
+    fn outline(&self) -> Result<Vec<OutlineItem>, String> {
+        let doc = self.doc;
+        self.eng.call(class::INTERACTIVE, move |e| e.outline(doc)).map_err(|e| e.to_string())
+    }
+
+    fn page_png(&self, page: u32, max_px: u32) -> Result<Vec<u8>, String> {
+        let doc = self.doc;
+        self.eng.call(class::INTERACTIVE, move |e| e.page_png(doc, page, max_px)).map_err(|e| e.to_string())
+    }
+}
 
 type Ai<'a> = State<'a, Arc<Assistant>>;
 type Eng<'a> = State<'a, Arc<Engine>>;
@@ -54,6 +79,7 @@ pub async fn ai_prepare(eng: Eng<'_>, ai: Ai<'_>, doc: DocId) -> Result<Prepared
 #[tauri::command]
 pub fn ai_ask(eng: Eng<'_>, ai: Ai<'_>, doc: DocId, req: AskRequest, on_event: Channel<ChatEvent>) -> Result<(), String> {
     let (eng, ai) = (eng.inner().clone(), ai.inner().clone());
+    let host = Arc::new(EngineHost { eng: eng.clone(), doc });
     let loader = {
         let ai = ai.clone();
         move || text_for(&eng, &ai, doc)
@@ -62,6 +88,7 @@ pub fn ai_ask(eng: Eng<'_>, ai: Ai<'_>, doc: DocId, req: AskRequest, on_event: C
         doc,
         req,
         loader,
+        host,
         Arc::new(move |e| {
             let _ = on_event.send(e);
         }),
@@ -71,6 +98,12 @@ pub fn ai_ask(eng: Eng<'_>, ai: Ai<'_>, doc: DocId, req: AskRequest, on_event: C
 #[tauri::command]
 pub fn ai_cancel(ai: Ai<'_>, doc: DocId) {
     ai.cancel(doc);
+}
+
+/// Apply (`allow`) or Reject of the change card the assistant is waiting on.
+#[tauri::command]
+pub fn ai_tool_decision(ai: Ai<'_>, doc: DocId, call_id: String, allow: bool) {
+    ai.decide(doc, &call_id, allow);
 }
 
 /// The document was closed: drop its chat thread and cached text.

@@ -43,17 +43,42 @@ export type Task =
   | { kind: "summarizePage"; page: number }
   | { kind: "selection"; action: "explain" | "rewrite" | "summarize"; text: string; page: number; style?: string };
 
+/** What the assistant may change without asking (see `src-tauri/src/ai/tools.rs`). */
+export type Permissions = "ask" | "auto" | "full";
+export const PERMISSIONS: Permissions[] = ["ask", "auto", "full"];
+
 export interface AskRequest {
   task: Task;
   name: string;
   model?: string | null;
   effort?: string | null;
   currentPage?: number | null;
+  /** The text selected in the viewer, 0-based page. */
+  selection?: { text: string; page: number } | null;
+  permissions?: Permissions;
 }
+
+/** One tool call of a turn, at its latest step. `waiting` is a card needing Apply / Reject. */
+export interface Activity {
+  id: string;
+  tool: string;
+  class: "read" | "edit" | "destructive";
+  /** What and where, ready to show ("Searched “Ciri”", "Deleted page 4"). */
+  label: string;
+  state: "waiting" | "running" | "done" | "failed" | "rejected";
+  detail: string | null;
+}
+
+/** The model moved the user's view. */
+export type UiAction =
+  | { type: "goTo"; page: number }
+  | { type: "show"; page: number; rects: Rect4[]; quote: string };
 
 export type ChatEvent =
   | { kind: "status"; phase: "reading" | "connecting" | "thinking" }
   | { kind: "delta"; text: string }
+  | ({ kind: "activity" } & Activity)
+  | { kind: "ui"; action: UiAction }
   | {
       kind: "done";
       answer: string;
@@ -72,6 +97,9 @@ export const aiStatus = () => invoke<AiStatus>("ai_status");
 export const aiPrepare = (doc: number) => invoke<Prepared>("ai_prepare", { doc });
 export const aiCancel = (doc: number) => invoke<void>("ai_cancel", { doc });
 export const aiClose = (doc: number) => invoke<void>("ai_close", { doc });
+/** The user's Apply (true) or Reject (false) on a waiting tool call. */
+export const aiToolDecision = (doc: number, callId: string, allow: boolean) =>
+  invoke<void>("ai_tool_decision", { doc, callId, allow });
 
 /** Starts a question; every event of the answer arrives through `onEvent`. */
 export function aiAsk(doc: number, req: AskRequest, onEvent: (e: ChatEvent) => void) {
@@ -103,6 +131,8 @@ export interface AiSettings {
   mode: AiMode;
   /** Floating sheet position and size; null until the user moves it. */
   float: Geo | null;
+  /** ask: every change waits for Apply; auto: edits run, destructive ones ask; full: all run. */
+  permissions: Permissions;
 }
 
 const KEY = "inkwell.ai";
@@ -114,12 +144,17 @@ const DEFAULTS: AiSettings = {
   width: 400,
   mode: "docked",
   float: null,
+  permissions: "ask",
 };
 
 export function loadSettings(): AiSettings {
   try {
     const s: AiSettings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
-    return MODES.includes(s.mode) ? s : { ...s, mode: "docked" };
+    return {
+      ...s,
+      mode: MODES.includes(s.mode) ? s.mode : "docked",
+      permissions: PERMISSIONS.includes(s.permissions) ? s.permissions : "ask",
+    };
   } catch {
     return DEFAULTS;
   }
