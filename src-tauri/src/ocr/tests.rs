@@ -504,7 +504,14 @@ fn characters_outside_the_bmp_and_rtl_scripts_survive_extraction_and_search() {
     assert!(t.contains("\u{645}\u{631}\u{62D}\u{628}\u{627}"), "{t:?}");
     // Inside a mixed word the digits and Latin letters stay readable runs (MuPDF returns visual order).
     assert!(t.contains("2024abc"), "{t:?}");
-    assert_eq!(search(&out, 0, "\u{645}\u{631}\u{62D}\u{628}\u{627}").len(), 2);
+    // MuPDF reports an RTL hit as one quad per letter; they all sit on the two word boxes.
+    let hits = search(&out, 0, "\u{645}\u{631}\u{62D}\u{628}\u{627}");
+    assert!(!hits.is_empty());
+    for h in &hits {
+        let (cx, cy) = centre(h);
+        let on_word = |y0: f32, x1: f32| (y0..y0 + 14.0).contains(&cy) && (72.0..x1).contains(&cx);
+        assert!(on_word(140.0, 140.0) || on_word(180.0, 200.0), "hit at {cx},{cy}");
+    }
     assert!(!t.chars().any(|c| c == '\u{FFFD}'), "{t:?}");
     assert_eq!(search(&out, 0, "A\u{1D400}B\u{1F600}").len(), 1);
 }
