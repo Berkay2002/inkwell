@@ -172,7 +172,8 @@ pub fn page_list_label(pages: &[i64]) -> String {
 
 fn pages_requested(args: &Value) -> Vec<i64> {
     if let Some(a) = args.get("pages").and_then(Value::as_array) {
-        return a.iter().filter_map(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok())).collect();
+        // capped like a range: a model-built list of millions of pages must not stall the turn
+        return a.iter().take(500).filter_map(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok())).collect();
     }
     match (int(args, "from"), int(args, "to").or_else(|| int(args, "from"))) {
         (Some(a), Some(b)) if a <= b => (a..=b.min(a + 500)).collect(),

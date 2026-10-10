@@ -405,6 +405,8 @@ impl Assistant {
             "ephemeral": true,
             "sandbox": "read-only",
             "approvalPolicy": "never",
+            // No environment: drops apply_patch and any file/exec access; dynamic tools still work (codex 0.159).
+            "environments": [],
             "cwd": std::env::temp_dir().to_string_lossy(),
             "baseInstructions": text::BASE_INSTRUCTIONS,
             "dynamicTools": tools::specs(&self.tools.read().unwrap()),

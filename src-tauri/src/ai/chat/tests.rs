@@ -161,7 +161,7 @@ fn streams_the_answer_and_resolves_the_citation() {
     assert_eq!((citations[0].n, citations[0].page, citations[0].exact), (1, Some(0), true));
     assert_eq!(citations[0].rects, vec![[50.0, 100.0, 500.0, 112.0]]);
     let err = stderr(&a);
-    assert!(err.contains("thread/start thr-1 sandbox=read-only approval=never ephemeral=true"), "{err}");
+    assert!(err.contains("thread/start thr-1 sandbox=read-only approval=never ephemeral=true envs=[]"), "{err}");
     assert!(err.contains("effort=low") && err.contains("schema=yes"), "{err}");
 }
 

@@ -44,6 +44,9 @@ const OFF_FEATURES: &[&str] = &[
     "worktrees",
     // NOT "code_mode_host": codex 0.159 reaches dynamic tools through it. With it off the model is told
     // "tool host is disabled" and never sends `item/tool/call` (checked against the real server).
+    // Still exposed in 0.159 with no switch found: exec's runtime (no fs/net/process), clock, wait,
+    // request_user_input (unavailable in Default mode) and spawn_agent (`multi_agent=false` doesn't drop it;
+    // `agents.max_threads=0` breaks startup). Sub-agents are read-only and get no Inkwell tools.
     "realtime_conversation",
     "shell_tool",
     "unified_exec",

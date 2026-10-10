@@ -78,7 +78,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     case "thread/start": {
       const id = `thr-${++threads}`;
       const names = (p.dynamicTools ?? []).map((t) => t.name).join(",");
-      log(`thread/start ${id} sandbox=${p.sandbox} approval=${p.approvalPolicy} ephemeral=${p.ephemeral} model=${p.model ?? "-"} tools=${names}`);
+      log(`thread/start ${id} sandbox=${p.sandbox} approval=${p.approvalPolicy} ephemeral=${p.ephemeral} envs=${JSON.stringify(p.environments)} model=${p.model ?? "-"} tools=${names}`);
       if (p.dynamicTools && !experimental) {
         out({ id: m.id, error: { code: -32600, message: "thread/start.dynamicTools requires experimentalApi capability" } });
         break;
