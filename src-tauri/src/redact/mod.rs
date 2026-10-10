@@ -1110,7 +1110,13 @@ fn zip_entries(z: &[u8], inflate: &dyn Fn(&mut dyn std::io::Read) -> Option<Vec<
         let raw = z.get(start..start.checked_add(size)?)?;
         let data = match method {
             0 => raw.to_vec(),
-            8 => inflate(&mut flate2::read::DeflateDecoder::new(raw))?,
+            8 => {
+                // All of the entry's bytes must be deflate data: bytes past the end of the stream
+                // could hold another local entry that the unlisted walk skips as inside this one.
+                let mut d = flate2::read::DeflateDecoder::new(raw);
+                let data = inflate(&mut d)?;
+                (d.total_in() == size as u64).then_some(data)?
+            }
             _ => return None,
         };
         (data.len() == usize_).then_some((start + size, data))
@@ -1136,7 +1142,11 @@ fn zip_entries(z: &[u8], inflate: &dyn Fn(&mut dyn std::io::Read) -> Option<Vec<
         p += 46 + nlen + xlen + clen;
     }
     // Local headers outside the listed entries' data.
-    let unlisted = (0..z.len()).filter(|&q| z[q..].starts_with(b"PK\x03\x04") && !listed.iter().any(|r| r.contains(&q)));
+    // Sorted for a binary search: a scan per header is entries x headers. With overlapping entries
+    // a header may count as unlisted wrongly; it then gets parsed (or fails closed), never skipped.
+    listed.sort_by_key(|r| r.start);
+    let inside = |q: usize| listed.partition_point(|r| r.start <= q).checked_sub(1).is_some_and(|i| listed[i].contains(&q));
+    let unlisted = (0..z.len()).filter(|&q| z[q..].starts_with(b"PK\x03\x04") && !inside(q));
     for lho in unlisted.collect::<Vec<_>>() {
         let (flags, method) = (u16_at(lho + 6)?, u16_at(lho + 8)?);
         if flags & 1 != 0 {
