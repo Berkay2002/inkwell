@@ -9,6 +9,8 @@ import { TileCanvas } from "./TileCanvas";
 interface Props {
   docId: number;
   page: number;
+  /** Edit generation: the page's text changes with it. */
+  rev: number;
   rot: Rot;
   /** Displayed size in points. */
   size: Size;
@@ -45,7 +47,7 @@ export const PageView = memo(function PageView(p: Props) {
   };
   const underTiles = under?.filter((u) => u.scale !== scale) ?? [];
 
-  const lines = usePageText(docId, page, p.wantText);
+  const lines = usePageText(docId, p.rev, page, p.wantText);
   // The assistant's last clicked citation, highlighted on its page.
   const mark = useAi((s) => (s.mark && s.mark.doc === docId && s.mark.page === page ? s.mark : null));
 
@@ -92,16 +94,16 @@ export const PageView = memo(function PageView(p: Props) {
 
 const rectStyle = (r: Rect4) => ({ left: r[0], top: r[1], width: r[2] - r[0], height: r[3] - r[1] });
 
-function usePageText(doc: number, page: number, enabled: boolean) {
+function usePageText(doc: number, rev: number, page: number, enabled: boolean) {
   const [lines, setLines] = useState<api.TextLine[] | null>(null);
   useLayoutEffect(() => {
     if (!enabled) return;
     let live = true;
-    cached(`${doc}:${page}`, () => api.pageText(doc, page)).then((l) => live && setLines(l), () => {});
+    cached(`${doc}:${rev}:${page}`, () => api.pageText(doc, page)).then((l) => live && setLines(l), () => {});
     return () => {
       live = false;
     };
-  }, [doc, page, enabled]);
+  }, [doc, rev, page, enabled]);
   return enabled ? lines : null;
 }
 

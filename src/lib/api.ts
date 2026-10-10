@@ -95,3 +95,36 @@ export async function fetchTile(
   const buf = await res.arrayBuffer();
   return { w, h, rgba: new Uint8ClampedArray(buf) };
 }
+
+// ---- editing (src-tauri/src/engine/edit.rs) ----
+
+/** Page numbers are 0-based indices into the current generation. */
+export type EditOp =
+  | { op: "rotate"; pages: number[]; quarterTurns: number }
+  | { op: "delete"; pages: number[] }
+  /** `to`: the gap before page `to`, counted before the move (`pageCount` = the end). */
+  | { op: "move"; pages: number[]; to: number }
+  | { op: "insertBlank"; at: number; like: number }
+  | { op: "insertFile"; at: number; path: string; pages?: number[] | null; password?: string | null };
+
+export interface EditState {
+  rev: number;
+  pageCount: number;
+  sizes: Size[];
+  path: string;
+  dirty: boolean;
+  /** Labels of what Undo / Redo would do. */
+  undo: string | null;
+  redo: string | null;
+  redacted: boolean;
+}
+
+export const editApply = (doc: number, op: EditOp) => invoke<EditState>("edit_apply", { doc, op });
+export const editUndo = (doc: number) => invoke<EditState>("edit_undo", { doc });
+export const editRedo = (doc: number) => invoke<EditState>("edit_redo", { doc });
+/** `path`: Save as. */
+export const saveDocument = (doc: number, path?: string) => invoke<EditState>("save_document", { doc, path: path ?? null });
+export const extractPages = (doc: number, pages: number[], out: string, deleteAfter: boolean) =>
+  invoke<EditState>("extract_pages", { doc, pages, out, deleteAfter });
+export const splitDocument = (doc: number, every: number) => invoke<{ files: string[] }>("split_document", { doc, every });
+export const mergeFiles = (paths: string[], out: string) => invoke<number>("merge_files", { paths, out });
