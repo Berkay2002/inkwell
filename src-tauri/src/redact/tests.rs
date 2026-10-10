@@ -484,5 +484,98 @@ fn attachment_copy_stays_critical() {
     match apply(&mut doc, &ApplyOptions { sanitize: Sanitize::NONE, ..Default::default() }) {
         Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.critical && l.place.contains("stream")), "{l:?}"),
         r => panic!("expected a leak, got {r:?}"),
+
+fn one_page(content: &[u8], page_extra: &str, more: &[Vec<u8>], catalog_extra: &str) -> Vec<u8> {
+    let mut bodies = vec![
+        obj(&format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>")),
+        obj("<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
+        obj("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"),
+        obj(&format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R {page_extra} >>")),
+        stream("", content),
+    ];
+    bodies.extend_from_slice(more);
+    pdf(&bodies, "")
+}
+
+/// "Redact pages" must also take content outside the crop box and off the page: viewers hide it,
+/// but it is in the file and comes back when the crop box is reset.
+#[test]
+fn redact_page_takes_content_outside_the_crop_box() {
+    let bytes = one_page(
+        b"BT /F1 12 Tf 72 700 Td (OUTSIDECROP-SECRET) Tj ET BT /F1 12 Tf -400 300 Td (OFFPAGE-SECRET) Tj ET\n\
+BT /F1 12 Tf 72 400 Td (ONPAGE-SECRET) Tj ET",
+        "/CropBox [0 0 612 500]",
+        &[],
+        "",
+    );
+    let mut doc = PdfDocument::from_bytes(&bytes).unwrap();
+    mark_page(&mut doc, 0, &MarkStyle::default()).unwrap();
+    apply(&mut doc, &ApplyOptions::default()).unwrap();
+    let out = save_to_vec(&doc).unwrap();
+    let l = leaks(&out, &["OUTSIDECROP-SECRET", "OFFPAGE-SECRET", "ONPAGE-SECRET"]);
+    assert!(l.is_empty(), "{l:?}");
+}
+
+/// A page thumbnail is a picture of the unredacted page; it must go with the redaction, also
+/// with sanitize off.
+#[test]
+fn redaction_drops_the_page_thumbnail() {
+    let thumb = stream("/Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0]);
+    let bytes = one_page(b"BT /F1 12 Tf 72 700 Td (THUMB-SECRET) Tj ET", "/Thumb 6 0 R /PieceInfo << >>", &[thumb], "");
+    let mut doc = PdfDocument::from_bytes(&bytes).unwrap();
+    let hits = find(&doc, &Query::Text { needle: "THUMB-SECRET".into(), case_sensitive: true, whole_word: false }).unwrap();
+    mark_hits(&mut doc, &hits, &MarkStyle::default()).unwrap();
+    apply(&mut doc, &ApplyOptions { sanitize: Sanitize::NONE, ..Default::default() }).unwrap();
+    let re = PdfDocument::from_bytes(&save_to_vec(&doc).unwrap()).unwrap();
+    let page = re.find_page(0).unwrap();
+    assert!(page.get_dict("Thumb").unwrap().is_none() && page.get_dict("PieceInfo").unwrap().is_none());
+}
+
+/// Binary strings (an attachment checksum, a signature's /Contents) hold NUL bytes; scanning
+/// them used to fail apply with InvalidUtf8.
+#[test]
+fn binary_strings_do_not_break_apply() {
+    let sig = obj("<< /Type /Sig /Filter /Adobe.PPKLite /Contents <3082000500ff00000000> >>");
+    let bytes = one_page(
+        b"BT /F1 12 Tf 72 700 Td (BINARY-SECRET) Tj ET",
+        "/Annots [7 0 R]",
+        &[sig, obj("<< /Type /Annot /Subtype /Widget /FT /Sig /T (sig) /V 6 0 R /Rect [300 100 400 150] /P 4 0 R >>")],
+        "/AcroForm << /Fields [7 0 R] >>",
+    );
+    for sanitize in [Sanitize::default(), Sanitize::NONE] {
+        let mut doc = PdfDocument::from_bytes(&bytes).unwrap();
+        let hits = find(&doc, &Query::Text { needle: "BINARY-SECRET".into(), case_sensitive: true, whole_word: false }).unwrap();
+        mark_hits(&mut doc, &hits, &MarkStyle::default()).unwrap();
+        apply(&mut doc, &ApplyOptions { sanitize, ..Default::default() }).unwrap();
+        assert!(!page_text(&doc).contains("BINARY-SECRET"));
+    }
+}
+
+/// MuPDF cuts neither soft-mask groups nor tiling patterns: an image inside one, partly under a
+/// mark, would keep its pixels. Apply must refuse instead of reporting success.
+#[test]
+fn image_in_soft_mask_or_pattern_is_refused() {
+    let img = stream("/Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0, 255]);
+    let smask = one_page(
+        b"q /GS1 gs 0 0 1 rg 0 0 612 792 re f Q",
+        "",
+        &[img.clone(), stream("/Type /XObject /Subtype /Form /BBox [0 0 612 792] /Group << /S /Transparency /CS /DeviceGray >> /Resources << /XObject << /Im1 6 0 R >> >>", b"q 100 0 0 100 200 400 cm /Im1 Do Q")],
+        "",
+    );
+    let smask = String::from_utf8_lossy(&smask).replace("/Font << /F1 3 0 R >>", "/ExtGState << /GS1 << /SMask << /S /Luminosity /G 7 0 R >> >> >>");
+    let pattern = one_page(
+        b"/Pattern cs /P1 scn 200 400 100 100 re f",
+        "",
+        &[img, stream("/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 100 100] /XStep 100 /YStep 100 /Matrix [1 0 0 1 200 400] /Resources << /XObject << /Im1 6 0 R >> >>", b"q 100 0 0 100 0 0 cm /Im1 Do Q")],
+        "",
+    );
+    let pattern = String::from_utf8_lossy(&pattern).replace("/Font << /F1 3 0 R >>", "/Pattern << /P1 7 0 R >>");
+    for bytes in [smask, pattern] {
+        let mut doc = PdfDocument::from_bytes(bytes.as_bytes()).unwrap();
+        add_area_mark(&mut doc, 0, Rect { x0: 190.0, y0: 282.0, x1: 250.0, y1: 402.0 }, &MarkStyle::default()).unwrap();
+        match apply(&mut doc, &ApplyOptions::default()) {
+            Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.place.contains("soft mask or tiling pattern")), "{l:?}"),
+            r => panic!("expected a refusal, got {r:?}"),
+        }
     }
 }

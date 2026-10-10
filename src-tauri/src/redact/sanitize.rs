@@ -3,7 +3,7 @@
 //! popups). Independent of the per-category switches, anything that quotes a redacted string
 //! (annotation, form field, docinfo entry, XMP packet, bookmark) is always removed.
 
-use super::{RedactError, annots_of, needle_regex, prune_resources, scan_strings, subtype};
+use super::{RedactError, annots_of, needle_regex, prune_resources, scan_strings, subtype, text_of};
 use mupdf::pdf::{PdfDocument, PdfObject, PdfRedactImageMethod, PdfRedactLineArtMethod, PdfRedactOptions, PdfRedactTextMethod};
 use mupdf::text_page::{TextCharFlags, TextPageFlags};
 use mupdf::{Buffer, Outline};
@@ -76,7 +76,7 @@ pub struct SanitizeReport {
     pub bookmarks: u32,
 }
 
-fn del(o: &mut PdfObject, key: &str) -> Result<u32> {
+pub(super) fn del(o: &mut PdfObject, key: &str) -> Result<u32> {
     Ok(if o.get_dict(key)?.is_some() {
         o.dict_delete(key)?;
         1
@@ -207,7 +207,7 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
             for i in 0..info.dict_len()? {
                 if let (Some(k), Some(v)) = (info.get_dict_key(i as i32)?, info.get_dict_val(i as i32)?)
                     && v.is_string()?
-                    && quotes(&res, &v.as_string()?)
+                    && quotes(&res, &text_of(&v)?)
                 {
                     keys.push(String::from_utf8_lossy(&k.as_name()?).into_owned());
                 }

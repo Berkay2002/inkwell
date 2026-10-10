@@ -264,10 +264,13 @@ pub fn add_area_mark(doc: &mut PdfDocument, page: i32, area: Rect, style: &MarkS
     add_mark(doc, page, &[area.quad()], style)
 }
 
-/// "Redact pages": one mark over the whole page.
+/// "Redact pages": one mark over the whole page and far beyond it, because content outside the
+/// crop box (or the media box) is not shown but is still in the file. UIs should clip it to the page.
 pub fn mark_page(doc: &mut PdfDocument, page: i32, style: &MarkStyle) -> Result<i32> {
-    let bounds = doc.load_page(page)?.bounds()?;
-    add_area_mark(doc, page, bounds, style)
+    let b = doc.load_page(page)?.bounds()?;
+    // shortcut: content placed more than 1e6 pt off the page survives; use a bbox device if that shows up.
+    let m = 1.0e6;
+    add_area_mark(doc, page, Rect { x0: b.x0 - m, y0: b.y0 - m, x1: b.x1 + m, y1: b.y1 + m }, style)
 }
 
 /// One mark per hit.
@@ -470,7 +473,7 @@ pub fn collect_targets(doc: &PdfDocument, fields: bool) -> Result<Targets> {
                     if let Some(s) = a.get_dict_inheritable(key)?
                         && s.is_string()?
                     {
-                        push_needle(&mut t.needles, &s.as_string()?);
+                        push_needle(&mut t.needles, &text_of(&s)?);
                     }
                 }
             }
@@ -539,10 +542,22 @@ pub fn apply(doc: &mut PdfDocument, opts: &ApplyOptions) -> Result<ApplyReport> 
         remove_annots_under(doc, pm, fields, &mut rep)?;
         doc.load_pdf_page(pm.page)?.redact_with_options(redact)?;
         prune_resources(doc, pm.page)?;
+        // A thumbnail is a picture of the unredacted page; piece info can hold the editing app's
+        // copy of it (Illustrator keeps the whole artwork there). Neither shows up as text.
+        let mut obj = doc.find_page(pm.page)?;
+        rep.metadata += sanitize::del(&mut obj, "Thumb")? + sanitize::del(&mut obj, "PieceInfo")?;
     }
 
     let mut early = VerifyReport::default();
     check_page_text(doc, &targets, true, &mut early, &mut HashSet::new())?;
+    for pm in &targets.pages {
+        if let Some(res) = doc.find_page(pm.page)?.get_dict_inheritable("Resources")?
+            && uncut_image(&res, 0)?
+        {
+            let place = format!("page {}: image in a soft mask or tiling pattern (MuPDF does not cut those)", pm.page + 1);
+            early.leaks.push(Leak { needle: String::new(), place, critical: true });
+        }
+    }
     if !early.is_clean() {
         return Err(RedactError::Leaked(early.leaks));
     }
@@ -553,6 +568,7 @@ pub fn apply(doc: &mut PdfDocument, opts: &ApplyOptions) -> Result<ApplyReport> 
     let mut sanitize = sanitize::sanitize(doc, &opts.sanitize, &targets.needles)?;
     sanitize.annotations += rep.annotations;
     sanitize.form_fields += rep.form_fields;
+    sanitize.metadata += rep.metadata;
 
     let verify = verify_bytes(&save_to_vec(doc)?, &targets)?;
     if !verify.is_clean() {
@@ -624,6 +640,65 @@ pub(super) fn prune_resources(doc: &mut PdfDocument, page: i32) -> Result<()> {
     }
     obj.dict_put("Resources", doc.add_object(&res)?)?;
     Ok(())
+}
+
+/// Whether `res` (after redaction and pruning) still draws an image through a soft-mask group or
+/// a tiling pattern, directly or in a form XObject. MuPDF cuts neither, so the pixels under a
+/// mark would survive while the page text check sees nothing.
+// shortcut: also refuses when that mask or pattern lies away from the marks; compare its bbox with the marks if this blocks real files.
+fn uncut_image(res: &PdfObject, depth: u32) -> Result<bool> {
+    let vals = |cat: &str| -> Result<Vec<PdfObject>> {
+        let Some(d) = res.get_dict(cat)? else { return Ok(Vec::new()) };
+        (0..d.dict_len()? as i32).filter_map(|i| d.get_dict_val(i).transpose()).map(|r| Ok(r?)).collect()
+    };
+    let has_image = |o: &PdfObject| -> Result<bool> {
+        let Some(r) = o.get_dict("Resources")? else { return Ok(false) };
+        images_in(&r, 0)
+    };
+    if depth > 8 {
+        return Ok(false);
+    }
+    for p in vals("Pattern")? {
+        if has_image(&p)? {
+            return Ok(true);
+        }
+    }
+    for gs in vals("ExtGState")? {
+        if let Some(sm) = gs.get_dict("SMask")?
+            && sm.is_dict()?
+            && let Some(g) = sm.get_dict("G")?
+            && has_image(&g)?
+        {
+            return Ok(true);
+        }
+    }
+    for x in vals("XObject")? {
+        if !sanitize::is_image(&x)?
+            && let Some(r) = x.get_dict("Resources")?
+            && uncut_image(&r, depth + 1)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `res` draws any image XObject, directly or through nested form XObjects.
+fn images_in(res: &PdfObject, depth: u32) -> Result<bool> {
+    let Some(xo) = res.get_dict("XObject")? else { return Ok(false) };
+    for i in 0..xo.dict_len()? as i32 {
+        let Some(x) = xo.get_dict_val(i)? else { continue };
+        if sanitize::is_image(&x)? {
+            return Ok(true);
+        }
+        if depth < 8
+            && let Some(r) = x.get_dict("Resources")?
+            && images_in(&r, depth + 1)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn draw_overlays(doc: &mut PdfDocument, pm: &PageMarks) -> Result<()> {
@@ -795,12 +870,22 @@ pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
     Ok(rep)
 }
 
+/// A PDF string as text. MuPDF writes a NUL as C0 80, which `as_string` rejects, so binary strings
+/// (checksums, signature /Contents) fall back to their bytes as Latin-1.
+// shortcut: a UTF-16 string holding a NUL char is then read byte-wise; decode UTF-16 here if that shows up.
+pub(super) fn text_of(o: &PdfObject) -> Result<String> {
+    match o.as_string() {
+        Err(mupdf::Error::InvalidUtf8) => Ok(o.as_bytes()?.iter().map(|&b| b as char).collect()),
+        r => Ok(r?),
+    }
+}
+
 fn scan_strings(o: &PdfObject, depth: u32, f: &mut dyn FnMut(&str)) -> Result<()> {
     if depth > 32 || (depth > 0 && o.is_indirect()?) {
         return Ok(());
     }
     if o.is_string()? {
-        f(&o.as_string()?);
+        f(&text_of(o)?);
     } else if o.is_array()? {
         for i in 0..o.len()? {
             if let Some(x) = o.get_array(i as i32)? {
