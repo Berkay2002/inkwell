@@ -575,3 +575,66 @@ fn review_text_and_search_of_an_old_generation_are_stale() {
     let entry = eng.doc_entry(id).unwrap();
     assert!(matches!(eng.search_page_at(&entry, Some(0), 0, "fixture"), Err(EngineError::Stale)));
 }
+
+#[cfg(windows)]
+#[test]
+fn save_keeps_the_files_streams_and_follows_links() {
+    let d = dir("replace");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    // An alternate data stream (Windows keeps e.g. the download zone there) survives the save.
+    std::fs::write(format!("{path}:inkwell-note"), b"keep me").unwrap();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    eng.apply(id, EditOp::Delete { pages: vec![0] }).unwrap();
+    eng.save(id, None).unwrap();
+    assert_eq!(std::fs::read(format!("{path}:inkwell-note")).unwrap(), b"keep me");
+    assert_eq!(labels(&reopen(&path).0, 1), vec![2, 3]);
+    let leftovers: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n != "a.pdf").collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // Through a symbolic link (needs Developer Mode or admin; skipped otherwise): the link stays.
+    let link = d.join("link.pdf");
+    if std::os::windows::fs::symlink_file(&path, &link).is_ok() {
+        let link = link.to_string_lossy().into_owned();
+        let eng = Engine::new(2, 64 << 20);
+        let id = eng.open(&link).unwrap().doc;
+        eng.apply(id, EditOp::Delete { pages: vec![0] }).unwrap();
+        eng.save(id, None).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(labels(&reopen(&path).0, 1), vec![3]);
+    } else {
+        println!("symlink test skipped: no privilege");
+    }
+}
+
+#[test]
+fn copying_over_in_place_when_the_folder_takes_no_new_files() {
+    let d = dir("copyover");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let new = fixture::build(&pages(2));
+    copy_over(Path::new(&path), &new, 2, None).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), new);
+    // Bytes that do not read back are never copied over the file.
+    assert!(copy_over(Path::new(&path), b"%PDF-1.7 junk", 2, None).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), new);
+}
+
+#[test]
+fn stale_save_temps_are_removed_on_open() {
+    let d = dir("stale");
+    let path = fixture_at(&d, "a.pdf", &pages(1));
+    let old = d.join(".a.pdf.1.abc.inkwell-tmp");
+    let fresh = d.join(".a.pdf.2.def.inkwell-tmp");
+    let other = d.join(".b.pdf.1.abc.inkwell-tmp");
+    for f in [&old, &fresh, &other] {
+        std::fs::write(f, b"x").unwrap();
+    }
+    let hours_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 3600);
+    for f in [&old, &other] {
+        std::fs::File::options().write(true).open(f).unwrap().set_modified(hours_ago).unwrap();
+    }
+    Engine::new(1, 1 << 20).open(&path).unwrap();
+    assert!(!old.exists(), "a stale temp file stayed");
+    assert!(fresh.exists(), "a save in progress lost its temp file");
+    assert!(other.exists(), "another file's temp was removed");
+}

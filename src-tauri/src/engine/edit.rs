@@ -574,17 +574,31 @@ fn write_synced(path: &Path, bytes: &[u8], create_new: bool) -> std::io::Result<
 }
 
 /// Replaces (or creates) `target` with `bytes`. The bytes go to a temporary file next to it,
-/// which is read back before it is renamed over the target: a failure at any point leaves the
-/// target as it was.
+/// which is read back before it replaces the target: a failure at any point leaves the target as
+/// it was. A link is followed: the file it points to is replaced, the link stays.
+///
+/// When no file can be created in the target's folder (but the file itself is writable), the
+/// bytes are verified in %TEMP% and copied over the target, with a backup copy restored if that
+/// fails.
 fn write_atomic(target: &Path, bytes: &[u8], pages: u32, password: Option<&str>) -> Result<()> {
+    let target = &resolve_link(target);
     let tmp = temp_for(target);
-    let r = (|| {
-        write_synced(&tmp, bytes, true).map_err(io)?;
-        verify(&tmp, pages, password)?;
+    match write_synced(&tmp, bytes, true) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && target.exists() => {
+            let _ = std::fs::remove_file(&tmp);
+            return copy_over(target, bytes, pages, password);
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(io(e));
+        }
+    }
+    let r = verify(&tmp, pages, password).and_then(|()| {
         // A virus scanner or the search indexer may hold a new file for a moment (up to 2 s).
         let mut tries = 0;
         loop {
-            match std::fs::rename(&tmp, target) {
+            match replace_file(&tmp, target) {
                 Ok(()) => return Ok(()),
                 Err(_) if tries < 40 => {
                     tries += 1;
@@ -593,11 +607,103 @@ fn write_atomic(target: &Path, bytes: &[u8], pages: u32, password: Option<&str>)
                 Err(e) => return Err(io(e)),
             }
         }
-    })();
+    });
     if r.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     r
+}
+
+fn resolve_link(p: &Path) -> PathBuf {
+    if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+        if let Ok(real) = std::fs::canonicalize(p) {
+            return real;
+        }
+    }
+    p.to_path_buf()
+}
+
+/// Moves `tmp` over `target`. On Windows an existing target is replaced with ReplaceFileW, which
+/// keeps its ACLs, attributes and alternate data streams. Either `target` holds the new bytes
+/// afterwards, or it is exactly as before.
+#[cfg(windows)]
+fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW};
+    if !target.exists() {
+        return std::fs::rename(tmp, target);
+    }
+    let wide = |p: &Path| p.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>();
+    // With a backup name, every failure leaves both files under their own names, but one: the
+    // original was moved to the backup and the new file could not take its place. Undone below.
+    let backup = tmp.with_extension("inkwell-bak");
+    let ok = unsafe {
+        ReplaceFileW(
+            wide(target).as_ptr(),
+            wide(tmp).as_ptr(),
+            wide(&backup).as_ptr(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if ok != 0 {
+        let _ = std::fs::remove_file(&backup);
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if !target.exists() && backup.exists() {
+        std::fs::rename(&backup, target)?;
+    }
+    let _ = std::fs::remove_file(&backup);
+    Err(err)
+}
+
+#[cfg(not(windows))]
+fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(tmp, target)
+}
+
+/// The fallback of [`write_atomic`] for a folder that takes no new files: verify in %TEMP%, keep a
+/// copy of the target there, write the target in place, restore the copy if that fails.
+fn copy_over(target: &Path, bytes: &[u8], pages: u32, password: Option<&str>) -> Result<()> {
+    let dir = std::env::temp_dir();
+    let tmp = temp_for(&dir.join(target.file_name().unwrap_or_default()));
+    let backup = tmp.with_extension("inkwell-bak");
+    let r = (|| {
+        write_synced(&tmp, bytes, true).map_err(io)?;
+        verify(&tmp, pages, password)?;
+        std::fs::copy(target, &backup).map_err(io)?;
+        let written = write_synced(target, bytes, false).map_err(io).and_then(|()| verify(target, pages, password));
+        if written.is_err() {
+            std::fs::copy(&backup, target).map_err(|e| {
+                EngineError::Io(format!("the file could not be written, and restoring it failed too ({e}); the original is at {}", backup.display()))
+            })?;
+        }
+        written
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    // Kept only when the original could not be put back.
+    if !matches!(&r, Err(EngineError::Io(m)) if m.contains("restoring it failed")) {
+        let _ = std::fs::remove_file(&backup);
+    }
+    r
+}
+
+/// Removes temporary files of saves to `path` that crashed more than an hour ago.
+pub(super) fn clean_stale_temps(path: &Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
+    let prefix = format!(".{}.", name.to_string_lossy());
+    let Ok(list) = std::fs::read_dir(dir) else { return };
+    let hour = std::time::Duration::from_secs(3600);
+    for e in list.flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        let ours = n.starts_with(&prefix) && (n.ends_with(".inkwell-tmp") || n.ends_with(".inkwell-bak"));
+        let old = e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|a| a > hour));
+        if ours && old && e.file_type().is_ok_and(|t| t.is_file()) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// Writes a file that must not exist yet. Removed again if it does not read back.
@@ -945,9 +1051,20 @@ impl Engine {
             (0..n).step_by(every as usize).map(|s| (s..(s + every).min(n)).collect()).collect();
         let names = part_names(Path::new(&entry.path()), chunks.len());
         let mut files = Vec::new();
-        for (pages, name) in chunks.iter().zip(&names) {
-            let bytes = new_pdf(&[(&ed.doc.doc, pages)])?;
-            write_new(name, &bytes, pages.len() as u32)?;
+        for (k, (pages, name)) in chunks.iter().zip(&names).enumerate() {
+            let r = new_pdf(&[(&ed.doc.doc, pages)]).and_then(|bytes| write_new(name, &bytes, pages.len() as u32));
+            if let Err(e) = r {
+                if files.is_empty() {
+                    return Err(e);
+                }
+                let done: Vec<_> = files.iter().map(|f: &String| Path::new(f).file_name().unwrap_or_default().to_string_lossy()).collect();
+                return Err(EngineError::Io(format!(
+                    "part {} of {} could not be written ({e}); written: {}",
+                    k + 1,
+                    chunks.len(),
+                    done.join(", ")
+                )));
+            }
             files.push(name.to_string_lossy().into_owned());
         }
         Ok(SplitResult { files })

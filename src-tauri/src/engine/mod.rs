@@ -274,6 +274,7 @@ impl Engine {
     /// the error-adjacent `OpenInfo` flow) via [`Engine::open_pending`].
     pub fn open(&self, path: &str) -> Result<OpenInfo> {
         check_pdf(path)?;
+        edit::clean_stale_temps(std::path::Path::new(path));
         let entry = self.register(path);
         match self.finish_open(&entry) {
             Ok(info) => Ok(info),
@@ -290,6 +291,7 @@ impl Engine {
         if let Err(e) = check_pdf(path) {
             return (0, Err(e));
         }
+        edit::clean_stale_temps(std::path::Path::new(path));
         let entry = self.register(path);
         let r = self.finish_open(&entry);
         if let Err(e) = &r {
