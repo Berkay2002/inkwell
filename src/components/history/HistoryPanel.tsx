@@ -38,6 +38,8 @@ export function HistoryToggle() {
   );
 }
 
+const baseName = (p: string) => p.split(/[\\/]/).pop() || "document";
+
 export async function pickAndCompareFiles() {
   try {
     const sel = await pickCompareFiles();
@@ -46,7 +48,7 @@ export async function pickAndCompareFiles() {
       doc: null,
       a: { kind: "picked", token: sel[0].token },
       b: { kind: "picked", token: sel[1].token },
-      names: [sel[0].name, sel[1].name],
+      names: [baseName(sel[0].path), baseName(sel[1].path)],
     });
   } catch (e) {
     useStore.getState().setUi({ error: String(e) });

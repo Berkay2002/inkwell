@@ -53,7 +53,7 @@ export interface FileRef {
 }
 
 /** Open dialog (run by Rust). */
-export const pickOpen = (multiple: boolean, title?: "locate") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
+export const pickOpen = (multiple: boolean, title?: "locate" | "compare") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
 /** Save dialog (run by Rust) in the folder of document `doc` or of open token `near`, with file name `name`. */
 export const pickSave = (name: string, at: { doc?: number; near?: string } = {}) =>
   invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null });

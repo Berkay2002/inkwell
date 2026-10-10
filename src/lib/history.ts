@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { type FileRef, pickOpen } from "./api";
 
 export type Rect4 = [number, number, number, number];
 
@@ -43,12 +44,6 @@ export interface HistoryState {
 
 /** What a command reads PDF bytes from. */
 export type Source = { kind: "version"; id: string } | { kind: "current" } | { kind: "picked"; token: string };
-
-/** A file chosen in the native dialog run by Rust; the UI only ever holds its token. */
-export interface Picked {
-  token: string;
-  name: string;
-}
 
 export type ChangeKind =
   | "pageAdded"
@@ -142,8 +137,13 @@ export const historyConfirmSame = (doc: number, candidate: string | null) =>
 export const historyDelete = (doc: number) => invoke<void>("history_delete", { doc });
 export const historyNeverKeep = (doc: number, never: boolean) => invoke<void>("history_never_keep", { doc, never });
 export const historyCompare = (doc: number | null, a: Source, b: Source) => invoke<Comparison>("history_compare", { doc, a, b });
-/** Runs the file dialog in Rust; null = cancelled. Exactly two files. */
-export const pickCompareFiles = () => invoke<Picked[] | null>("history_pick_compare");
+/** Runs the file dialog in Rust (`pick_open`); null = cancelled. Exactly two files. */
+export async function pickCompareFiles(): Promise<FileRef[] | null> {
+  const files = await pickOpen(true, "compare");
+  if (!files.length) return null;
+  if (files.length !== 2) throw new Error("Pick exactly 2 PDF files to compare.");
+  return files;
+}
 export const historyVisualDiff = (doc: number | null, a: Source, aPage: number, b: Source, bPage: number, scale: number, hints: Rect4[] = []) =>
   invoke<VisualDiff>("history_visual_diff", { doc, a, aPage, b, bPage, scale, hints });
 

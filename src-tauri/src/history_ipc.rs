@@ -4,6 +4,7 @@
 
 use crate::diff::{self, BytesId, CompareOptions, Comparison, VisualDiff};
 use crate::engine::{DocId as EngDoc, Engine};
+use crate::paths::Paths;
 use crate::history::{self, Author, HistoryError, Resolution, SessionGuard, Store, Target, VersionId, VersionInfo};
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -13,7 +14,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::ipc::Response;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, State, Window};
 
 type Hist<'a> = State<'a, Arc<History>>;
 
@@ -75,15 +76,21 @@ pub enum Source {
     Version { id: String },
     /// The file of the document on disk now.
     Current,
-    /// A file the user chose in the native dialog run by `history_pick_compare` (the UI never names a path).
+    /// An open token from `pick_open` (paths.rs); commands turn it into `File` with `resolve` before the work starts.
     Picked { token: String },
+    /// What `Picked` resolves to. Never read from the webview.
+    #[serde(skip_deserializing)]
+    File { path: PathBuf },
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Picked {
-    token: String,
-    name: String,
+impl Source {
+    /// Turns a token into the file it names for `window`; unknown, spent or other-window tokens are refused.
+    pub fn resolve(self, reg: &Paths, window: &str) -> Result<Source, String> {
+        match self {
+            Source::Picked { token } => Ok(Source::File { path: reg.open(window, &token).map_err(err)?.into() }),
+            s => Ok(s),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -93,53 +100,11 @@ pub struct RestoreOut {
     version: VersionInfo,
 }
 
-/// Dialog-picked paths: the dialog runs on the Rust side, the UI only ever holds the tokens.
-/// Self-contained so it can move to a shared token registry (`paths.rs`) unchanged.
-#[derive(Default)]
-pub struct PickRegistry {
-    picks: Mutex<HashMap<String, PathBuf>>,
-    next: std::sync::atomic::AtomicU64,
-}
-
-impl PickRegistry {
-    /// Remembers the files the user just picked and returns one token each. Replaces earlier picks.
-    pub fn issue(&self, paths: Vec<PathBuf>) -> Vec<Picked> {
-        let mut picks = self.picks.lock();
-        picks.clear();
-        paths
-            .into_iter()
-            .map(|p| {
-                let token = format!("pick-{}", self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-                let name = p.file_name().map_or_else(|| "document".into(), |n| n.to_string_lossy().into_owned());
-                picks.insert(token.clone(), p);
-                Picked { token, name }
-            })
-            .collect()
-    }
-
-    /// The path behind a token; `None` for anything that was not issued.
-    pub fn resolve(&self, token: &str) -> Option<PathBuf> {
-        self.picks.lock().get(token).cloned()
-    }
-
-    /// Runs the native "pick N PDFs" dialog (blocking) and issues tokens. `None` = cancelled.
-    pub fn pick_pdfs(&self, app: &AppHandle, exactly: usize) -> Result<Option<Vec<Picked>>, String> {
-        use tauri_plugin_dialog::DialogExt;
-        let Some(files) = app.dialog().file().add_filter("PDF documents", &["pdf"]).blocking_pick_files() else { return Ok(None) };
-        if files.len() != exactly {
-            return Err(format!("Pick exactly {exactly} PDF files to compare."));
-        }
-        let paths = files.into_iter().map(|f| f.into_path().map_err(err)).collect::<Result<Vec<_>, _>>()?;
-        Ok(Some(self.issue(paths)))
-    }
-}
-
 pub struct History {
     root: PathBuf,
     store: Mutex<Option<Arc<Store>>>,
     docs: Mutex<HashMap<EngDoc, Bound>>,
     /// The only way a UI-supplied file reaches `load`.
-    picks: PickRegistry,
     /// Recently read sources, so paging through a version does not decrypt it once per page.
     bytes: Mutex<LruCache<String, Arc<(BytesId, Vec<u8>)>>>,
     /// MuPDF work of the diff module, one thread at a time.
@@ -161,7 +126,6 @@ impl History {
             root,
             store: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
-            picks: PickRegistry::default(),
             bytes: Mutex::new(LruCache::new(NonZeroUsize::new(6).unwrap())),
             diff_lock: Mutex::new(()),
         }
@@ -386,8 +350,8 @@ impl History {
 
     /// The bytes behind a source (decrypted history stays in memory only).
     /// Authorization comes first and never depends on the cache: a version needs a binding for `doc`
-    /// (looked up from the engine id, failing closed), `Current` the bound document's own file, a pick
-    /// a token from `register_picks`. Nothing else names a file.
+    /// (looked up from the engine id, failing closed), `Current` the bound document's own file, a file
+    /// resolved from a `paths.rs` token. Nothing else names a file.
     fn load(&self, doc: Option<EngDoc>, src: &Source) -> Result<Arc<(BytesId, Vec<u8>)>, String> {
         enum Origin {
             Version(Arc<Store>, history::DocId, VersionId),
@@ -409,10 +373,8 @@ impl History {
                 let (_, _, p) = self.bound(doc.ok_or("no document")?)?;
                 (file_key(&p)?, Origin::File(p))
             }
-            Source::Picked { token } => {
-                let p = self.picks.resolve(token).ok_or("that file was not chosen in the compare dialog")?;
-                (file_key(&p)?, Origin::File(p))
-            }
+            Source::File { path } => (file_key(path)?, Origin::File(path.clone())),
+            Source::Picked { .. } => return Err("unresolved file token".into()),
         };
         if let Some(v) = self.bytes.lock().get(&key) {
             return Ok(v.clone());
@@ -570,22 +532,16 @@ pub async fn history_never_keep(h: Hist<'_>, doc: EngDoc, never: bool) -> Result
 }
 
 #[tauri::command]
-pub async fn history_compare(h: Hist<'_>, doc: Option<EngDoc>, a: Source, b: Source) -> Result<Comparison, String> {
+pub async fn history_compare(window: Window, h: Hist<'_>, reg: State<'_, Paths>, doc: Option<EngDoc>, a: Source, b: Source) -> Result<Comparison, String> {
+    let (a, b) = (a.resolve(&reg, window.label())?, b.resolve(&reg, window.label())?);
     let h = h.inner().clone();
     off(move || h.compare(doc, &a, &b)).await
 }
 
-/// "Compare files": the native dialog runs here, and only the two files chosen in it can be read afterwards
-/// (as `Source::Picked`). `None` = cancelled.
-#[tauri::command]
-pub async fn history_pick_compare(app: AppHandle, h: Hist<'_>) -> Result<Option<Vec<Picked>>, String> {
-    let h = h.inner().clone();
-    off(move || h.picks.pick_pdfs(&app, 2)).await
-}
-
 /// One page as a PNG (`scale` 1 = one pixel per point). Over IPC only: no temp file.
 #[tauri::command]
-pub async fn history_render(h: Hist<'_>, doc: Option<EngDoc>, source: Source, page: u32, scale: f32) -> Result<Response, String> {
+pub async fn history_render(window: Window, h: Hist<'_>, reg: State<'_, Paths>, doc: Option<EngDoc>, source: Source, page: u32, scale: f32) -> Result<Response, String> {
+    let source = source.resolve(&reg, window.label())?;
     let h = h.inner().clone();
     off(move || h.render(doc, &source, page, scale.clamp(0.25, 4.0))).await.map(Response::new)
 }
@@ -593,7 +549,9 @@ pub async fn history_render(h: Hist<'_>, doc: Option<EngDoc>, source: Source, pa
 /// Changed regions between two pages (boxes in page points); the PNGs come from `history_render`.
 #[tauri::command]
 pub async fn history_visual_diff(
+    window: Window,
     h: Hist<'_>,
+    reg: State<'_, Paths>,
     doc: Option<EngDoc>,
     a: Source,
     a_page: u32,
@@ -602,6 +560,7 @@ pub async fn history_visual_diff(
     scale: f32,
     hints: Vec<diff::Rect4>,
 ) -> Result<VisualDiff, String> {
+    let (a, b) = (a.resolve(&reg, window.label())?, b.resolve(&reg, window.label())?);
     let h = h.inner().clone();
     off(move || h.visual_diff(doc, &a, a_page, &b, b_page, scale.clamp(0.25, 4.0), &hints)).await
 }
@@ -734,28 +693,30 @@ mod tests {
         assert!(h.versions(1).is_err());
     }
 
-    /// The UI cannot name a path: only tokens from the dialog work, and a new pick replaces the old ones.
+    /// The UI cannot name a path: only open tokens issued to this window resolve, and an unresolved one reads nothing.
     #[test]
-    fn only_picked_files_are_read() {
+    fn only_token_files_are_read() {
         let dir = tmp("picks");
         let (f1, f2) = (dir.join("one.pdf"), dir.join("two.pdf"));
         std::fs::copy(sample("edit-source.pdf"), &f1).unwrap();
         std::fs::copy(sample("edit-out-02-addtext.pdf"), &f2).unwrap();
         let h = History::with_root(dir.join("store"));
-        for bad in ["", "../one.pdf", f1.to_str().unwrap(), "pick-999"] {
+        let reg = Paths::default();
+        let (t1, t2) = (reg.issue_open("main", f1.to_string_lossy().into_owned()), reg.issue_open("main", f2.to_string_lossy().into_owned()));
+        for bad in ["", "../one.pdf", f1.to_str().unwrap(), "pick-999", t1.token.as_str()] {
             let s = Source::Picked { token: bad.into() };
+            // unresolved sources read nothing; the token only works for its own window
             assert!(h.render(None, &s, 0, 0.5).is_err(), "{bad}");
-            assert!(h.compare(None, &s, &s).is_err(), "{bad}");
+            if bad != t1.token {
+                assert!(s.clone().resolve(&reg, "main").is_err(), "{bad}");
+            }
         }
-        // the old wire form with a raw path no longer parses
-        assert!(serde_json::from_str::<Source>(r#"{"kind":"file","path":"C:\\x.pdf"}"#).is_err());
-        let p = h.picks.issue(vec![f1.clone(), f2.clone()]);
-        assert_eq!(p[0].name, "one.pdf");
-        let (a, b) = (Source::Picked { token: p[0].token.clone() }, Source::Picked { token: p[1].token.clone() });
+        assert!(Source::Picked { token: t1.token.clone() }.resolve(&reg, "other").is_err());
+        // the old wire form with a raw path (and the internal File form) do not parse
+        assert!(serde_json::from_str::<Source>(r#"{"kind":"file","path":"C:\x.pdf"}"#).is_err());
+        let (a, b) = (Source::Picked { token: t1.token }.resolve(&reg, "main").unwrap(), Source::Picked { token: t2.token }.resolve(&reg, "main").unwrap());
         assert!(!h.compare(None, &a, &b).unwrap().identical);
         assert!(!h.render(None, &a, 0, 0.5).unwrap().is_empty());
-        h.picks.issue(vec![f2]);
-        assert!(h.render(None, &a, 0, 0.5).is_err());
     }
 
     /// "Same document?" accepts only a history the document was offered.
