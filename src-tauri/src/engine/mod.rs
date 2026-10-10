@@ -828,6 +828,11 @@ impl Engine {
         Ok((l.rev, src))
     }
 
+    /// The password the user unlocked `id` with (redaction checks its encrypted output with it).
+    pub(crate) fn password(&self, id: DocId) -> Result<Option<String>> {
+        Ok(self.entry(id)?.password.lock().clone())
+    }
+
     pub fn set_cache_budget(&self, bytes: usize) {
         self.tiles.lock().set_budget(bytes);
     }

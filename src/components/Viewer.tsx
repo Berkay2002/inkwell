@@ -16,6 +16,7 @@ import {
   typicalSize,
   visibleRange,
 } from "../lib/layout";
+import { type Mark, useRedact } from "../lib/redact";
 import { type Want, tileClient } from "../lib/tiles";
 import { type DocState, type Rect4, useStore } from "../store";
 import { PageView } from "./PageView";
@@ -32,6 +33,7 @@ interface Anchor {
 /** Extra CSS px around the viewport for which tiles are prefetched. */
 const MARGIN = 256;
 const EMPTY: never[] = [];
+const NO_MARKS: Mark[] = [];
 
 export function Viewer({ doc }: { doc: DocState }) {
   const { id, sizes, rot, zoom, zoomMode, rev } = doc;
@@ -159,6 +161,12 @@ export function Viewer({ doc }: { doc: DocState }) {
     }
     return m;
   }, [doc.search.hits]);
+  const redactMarks = useRedact((s) => s.docs[id]?.marks);
+  const marksByPage = useMemo(() => {
+    const m = new Map<number, Mark[]>();
+    for (const k of redactMarks ?? []) m.set(k.page, [...(m.get(k.page) ?? []), k]);
+    return m;
+  }, [redactMarks]);
   const currentHit = doc.search.hits[doc.search.current]?.rect ?? null;
 
   const stable = useRef(new Map<number, { sig: string; tiles: TileRef[] }>());
@@ -223,6 +231,7 @@ export function Viewer({ doc }: { doc: DocState }) {
           wantText={i >= vf && i <= vl}
           hits={hitsByPage.get(i) ?? EMPTY}
           currentHit={currentHit}
+          marks={marksByPage.get(i) ?? NO_MARKS}
         />,
       );
     }

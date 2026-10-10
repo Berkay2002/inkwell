@@ -798,7 +798,7 @@ fn packed_attachments_are_scanned() {
         // One budget for all unpacking: past it, attachments count as unread.
         if what == "gzip" {
             let t = Targets { pages: Vec::new(), needles: vec!["ATTACH-SECRET".into()] };
-            let l = verify_at(&bytes, &t, 0, &std::cell::Cell::new(5)).unwrap().leaks;
+            let l = verify_at(&bytes, &t, 0, &std::cell::Cell::new(5), None).unwrap().leaks;
             assert!(l.iter().any(|l| l.critical && l.place.contains("scan budget")), "{l:?}");
         }
     }

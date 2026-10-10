@@ -25,6 +25,7 @@
 //! - Text inside a text attachment that is itself encoded (base64 in a mail file, hex, quoted-
 //!   printable) is not decoded. Sanitize with embedded files on removes attachments outright.
 
+pub mod app;
 mod patterns;
 mod sanitize;
 #[cfg(test)]
@@ -54,6 +55,10 @@ pub enum RedactError {
     /// The document still contains redacted content. It has been partly modified: discard it.
     #[error("redaction left recoverable content in {} place(s)", .0.len())]
     Leaked(Vec<Leak>),
+    /// The written copy is encrypted and there is no password to check it with: nothing is
+    /// known about what it contains, so it is not used.
+    #[error("the redacted copy is encrypted and there is no password to check it with")]
+    NeedsPassword,
 }
 
 type Result<T> = std::result::Result<T, RedactError>;
@@ -329,7 +334,8 @@ pub fn add_mark(doc: &mut PdfDocument, page: i32, quads: &[Quad], style: &MarkSt
     let [red, green, blue] = style.fill;
     // MuPDF refuses /IC on Redact (the spec allows it), so write it directly.
     a.object().dict_put("IC", doc.new_object_from_str(&format!("[{red} {green} {blue}]"))?)?;
-    a.set_color(AnnotationColor::Rgb { red: 1.0, green: 0.0, blue: 0.0 })?;
+    // Outline in the app's ink (#1A1C20), not MuPDF's default red: the UI draws marks without red.
+    a.set_color(AnnotationColor::Rgb { red: 0.102, green: 0.110, blue: 0.125 })?;
     if let Some(t) = &style.overlay_text {
         a.object().dict_put("OverlayText", PdfObject::new_string(t)?)?;
     }
@@ -573,6 +579,9 @@ pub struct ApplyOptions {
     pub images: PdfRedactImageMethod,
     pub line_art: PdfRedactLineArtMethod,
     pub sanitize: Sanitize,
+    /// The document's user password, if it has one: the copy is written encrypted as the
+    /// original was, and verify needs it to read the copy back.
+    pub password: Option<String>,
 }
 
 impl Default for ApplyOptions {
@@ -581,6 +590,7 @@ impl Default for ApplyOptions {
             images: PdfRedactImageMethod::Pixels,
             line_art: PdfRedactLineArtMethod::RemoveIfCovered,
             sanitize: Sanitize::default(),
+            password: None,
         }
     }
 }
@@ -657,7 +667,7 @@ pub fn apply(doc: &mut PdfDocument, opts: &ApplyOptions) -> Result<ApplyReport> 
     sanitize.metadata += rep.metadata;
 
     let bytes = save_to_vec(doc)?;
-    let verify = verify_bytes(&bytes, &targets)?;
+    let verify = verify_at(&bytes, &targets, 0, &std::cell::Cell::new(SCAN_BUDGET), opts.password.as_deref())?;
     if !verify.is_clean() {
         return Err(RedactError::Leaked(verify.leaks));
     }
@@ -909,7 +919,7 @@ fn check_page_text(
 /// Reopens a written copy and searches it everywhere: page text, every object's strings, every
 /// decoded non-image stream, and the raw file bytes.
 pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
-    verify_at(bytes, t, 0, &std::cell::Cell::new(SCAN_BUDGET))
+    verify_at(bytes, t, 0, &std::cell::Cell::new(SCAN_BUDGET), None)
 }
 
 /// Bytes verify unpacks from attachments in total (all gzip, zip and nested PDF streams together):
@@ -917,13 +927,17 @@ pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
 const SCAN_BUDGET: u64 = 512 << 20;
 
 /// `verify_bytes` at attachment nesting `depth` (a PDF attached to a PDF...). `left` is what is
-/// left of `SCAN_BUDGET`.
-fn verify_at(bytes: &[u8], t: &Targets, depth: u32, left: &std::cell::Cell<u64>) -> Result<VerifyReport> {
+/// left of `SCAN_BUDGET`. An encrypted copy is read with `password`; without the right one it is
+/// `NeedsPassword`, never clean.
+fn verify_at(bytes: &[u8], t: &Targets, depth: u32, left: &std::cell::Cell<u64>, password: Option<&str>) -> Result<VerifyReport> {
     let mut rep = VerifyReport::default();
     if t.needles.is_empty() {
         return Ok(rep);
     }
-    let doc = PdfDocument::from_bytes(bytes)?;
+    let mut doc = PdfDocument::from_bytes(bytes)?;
+    if doc.needs_password()? && !password.is_some_and(|pw| doc.authenticate(pw).unwrap_or(false)) {
+        return Err(RedactError::NeedsPassword);
+    }
     let mut visible = HashSet::new();
     check_page_text(&doc, t, false, &mut rep, &mut visible)?;
 
@@ -1046,7 +1060,7 @@ fn scan_attachment(
             Ok(d) if d.needs_password()? => leaks.push(unread("attached PDF needs a password")),
             Ok(_) => {
                 let sub = Targets { pages: Vec::new(), needles: t.needles.clone() };
-                for l in verify_at(data, &sub, depth + 1, left)?.leaks {
+                for l in verify_at(data, &sub, depth + 1, left, None)?.leaks {
                     leaks.push(Leak { needle: l.needle, place: format!("{place}: attached PDF: {}", l.place), critical: true });
                 }
             }

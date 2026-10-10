@@ -1,6 +1,7 @@
 import { type DocState, useStore } from "../store";
 import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
+import { useRedact } from "./redact";
 import { useHistory } from "./historyStore";
 import { pickAndCompareFiles } from "../components/history/HistoryPanel";
 import { pickOpen } from "./api";
@@ -163,6 +164,7 @@ export const commands: Command[] = [
       useHistory.getState().toggle();
     },
   },
+  { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   {
     id: "history-compare",
     title: "Compare with\u2026",

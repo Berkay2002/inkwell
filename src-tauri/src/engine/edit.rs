@@ -177,6 +177,9 @@ struct Step {
     drops: bool,
     /// A redaction step: its snapshot is a full rewrite, and so is every save that includes it.
     redacts: bool,
+    /// The snapshot is the file exactly as a save must write it (the redaction engine's verified
+    /// bytes): saving this step writes them as they are, not a rewrite of them.
+    exact: bool,
     sizes: Arc<Vec<[f32; 2]>>,
 }
 
@@ -289,7 +292,7 @@ impl Editor {
             doc = open_snap(&snap, entry)?;
         }
         let sizes = Arc::new(page_sizes(&doc.doc)?);
-        let base = Step { snap, label: "Opened".into(), source: EditSource::User, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, sizes };
+        let base = Step { snap, label: "Opened".into(), source: EditSource::User, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, exact: false, sizes };
         Ok(Editor { doc, steps: vec![base], cur: 0, saved: Some(0) })
     }
 
@@ -1028,7 +1031,7 @@ impl Engine {
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
                 let step =
-                    Step { snap, label: op.label(), source, at_ms: now_ms(), pages, drops, redacts: false, sizes: Arc::new(after) };
+                    Step { snap, label: op.label(), source, at_ms: now_ms(), pages, drops, redacts: false, exact: false, sizes: Arc::new(after) };
                 Ok(Some((step, doc)))
             }
         });
@@ -1078,13 +1081,50 @@ impl Engine {
         redaction: bool,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
+        self.custom(id, label, source, redaction, |d| Ok((f(d)?, None)))
+    }
+
+    /// A redaction whose result is a finished file: `f` changes the document and returns the
+    /// pages it touched and the bytes it verified (`redact::ApplyReport::bytes`). Those bytes
+    /// become the step's snapshot, and a save of this step writes exactly them. Otherwise as
+    /// [`Engine::apply_custom`] with `redaction`.
+    pub fn apply_redaction(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Vec<u8>)>,
+    ) -> Result<EditState> {
+        self.custom(id, label, source, true, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
+    }
+
+    /// Runs `f` on the authoritative document (marks included) without changing it. `f` must not
+    /// change the document or keep page handles.
+    pub fn read_custom<R>(&self, id: DocId, f: impl FnOnce(&PdfDocument) -> Result<R>) -> Result<R> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        catch_unwind(AssertUnwindSafe(|| f(&ed.doc.doc))).unwrap_or(Err(EngineError::Panic))
+    }
+
+    fn custom(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        redaction: bool,
+        f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
+    ) -> Result<EditState> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
         let len = ed.step().snap.len;
         let ran = catch_unwind(AssertUnwindSafe(|| f(&mut ed.doc.doc))).unwrap_or(Err(EngineError::Panic));
-        let changed = ran.and_then(|pages| {
-            let snap = if redaction {
+        let changed = ran.and_then(|(pages, bytes)| {
+            let exact = bytes.is_some();
+            let snap = if let Some(b) = bytes {
+                Snap { len: b.len(), bytes: Arc::new(b) }
+            } else if redaction {
                 let out = write_doc(&ed.doc.doc, rewrite_opts(), len)?;
                 Snap { len: out.len(), bytes: Arc::new(out) }
             } else {
@@ -1093,7 +1133,7 @@ impl Engine {
             let doc = open_snap(&snap, &entry)?;
             let sizes = Arc::new(page_sizes(&doc.doc)?);
             let drops = sizes.len() < ed.step().sizes.len();
-            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, sizes }, doc))
+            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, exact, sizes }, doc))
         });
         match changed {
             Ok((step, doc)) => {
@@ -1258,7 +1298,10 @@ impl Engine {
         let ed = self.lane(&entry, &mut lane)?;
         let rewrite = ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
         let full;
-        let bytes: &[u8] = if rewrite {
+        let bytes: &[u8] = if ed.step().exact {
+            // The redaction engine's verified file: any other write of it is unverified.
+            ed.bytes()
+        } else if rewrite {
             // From a throwaway copy: a garbage-collecting write leaves its document unable to take
             // incremental updates, which every later edit needs.
             full = write_doc(&open_snap(&ed.step().snap, &entry)?.doc, rewrite_opts(), ed.step().snap.len)?;

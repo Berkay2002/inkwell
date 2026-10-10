@@ -8,6 +8,7 @@ import { HistoryBanner, HistoryPanel } from "./components/history/HistoryPanel";
 import { VersionView } from "./components/history/VersionView";
 import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
+import { RedactPanel } from "./components/redact/RedactPanel";
 import { Sidebar } from "./components/Sidebar";
 import { ToolsPanel } from "./components/ToolsPanel";
 import { Viewer } from "./components/Viewer";
@@ -112,6 +113,7 @@ export default function App() {
               <ToolsPanel doc={doc} />
               <AssistantPanel doc={doc} />
               <HistoryPanel doc={doc} />
+              <RedactPanel doc={doc} />
             </div>
           )}
         </>

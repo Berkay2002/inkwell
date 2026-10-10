@@ -1,0 +1,445 @@
+/* Redact rail: the docked shell and tokens come from the assistant's dock and the app. */
+.rd-dock {
+  animation: rd-slide 240ms ease-out;
+}
+@keyframes rd-slide {
+  from {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rd-dock {
+    animation: none;
+  }
+}
+.rd-panel {
+  overflow: hidden;
+}
+.rd-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.rd-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+
+/* buttons */
+.rd-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 15px;
+  color: var(--accent);
+  background: var(--surface);
+  white-space: nowrap;
+}
+.rd-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.rd-btn.primary {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.rd-btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+.rd-btn:disabled {
+  opacity: 0.45;
+}
+
+/* manual tools */
+.rd-tool-row {
+  display: flex;
+  gap: 8px;
+}
+.rd-tool {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 6px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--surface);
+  text-align: left;
+  line-height: 1.2;
+}
+.rd-tool:hover {
+  background: var(--surface-2);
+}
+.rd-tool.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.rd-round {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 15px;
+  background: var(--surface-2);
+}
+.rd-tool.on .rd-round {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.rd-hint {
+  margin: 6px 4px 0;
+  font-size: 12px;
+}
+.rd-pages {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.rd-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 15px;
+  background: var(--surface);
+  outline: none;
+}
+.rd-input:focus-visible {
+  border-color: var(--accent);
+}
+.rd-input.bad {
+  border-color: var(--danger);
+}
+
+/* find and pills */
+.rd-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 17px;
+  background: var(--surface);
+  color: var(--text-2);
+}
+.rd-search:focus-within {
+  border-color: var(--accent);
+}
+.rd-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  color: var(--text);
+}
+.rd-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.rd-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface);
+}
+.rd-pill:hover {
+  background: var(--surface-2);
+}
+.rd-pill.on {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.rd-count {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+.rd-pill.on .rd-count {
+  color: inherit;
+  opacity: 0.85;
+}
+.rd-count.zero {
+  opacity: 0.6;
+}
+.rd-found {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.rd-hits {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.rd-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+.rd-hit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 4px 10px;
+}
+.rd-hit + .rd-hit {
+  border-top: 1px solid var(--border);
+}
+.rd-hit input,
+.rd-check input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.rd-snippet {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  padding: 4px 0;
+}
+.rd-snippet:hover {
+  text-decoration: underline;
+}
+.rd-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-radius: 11px;
+  white-space: nowrap;
+}
+.rd-chip.crit {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+}
+
+/* marks list */
+.rd-none {
+  margin: 0;
+  padding: 0 2px;
+}
+.rd-marks h4,
+.rd-card h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.rd-marks ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.rd-mark-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 3px 6px 3px 10px;
+}
+.rd-mark-row + .rd-mark-row {
+  border-top: 1px solid var(--border);
+}
+.rd-kind {
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--text-2);
+}
+.rd-mark-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  padding: 4px 0;
+}
+.rd-error {
+  margin: 0;
+  color: var(--danger);
+}
+
+/* apply section and cards */
+.rd-apply,
+.rd-card {
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+.rd-apply h3,
+.rd-card h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 650;
+}
+.rd-apply p,
+.rd-card p {
+  margin: 0 0 10px;
+}
+.rd-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 8px;
+  font-weight: 600;
+}
+.rd-rows {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+.rd-rows li {
+  display: flex;
+  justify-content: space-between;
+  padding: 5px 2px;
+  border-top: 1px solid var(--border);
+}
+.rd-rows li.zero {
+  color: var(--text-2);
+}
+.rd-num {
+  font-variant-numeric: tabular-nums;
+}
+.rd-saves {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+.rd-saves strong {
+  font-weight: 600;
+  color: var(--text);
+}
+.rd-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.rd-checked {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.rd-tick {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 4px;
+  color: var(--accent-fg);
+  background: var(--accent);
+}
+.rd-checked.warn .rd-tick {
+  background: var(--danger);
+}
+.rd-leaks {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+.rd-leaks li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 7px 2px;
+  border-top: 1px solid var(--border);
+}
+.rd-leak-needle {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.rd-leaks li.critical .rd-leak-needle {
+  color: var(--danger);
+}
+.rd-card.refused {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+}
+.rd-card.refused h3 {
+  color: var(--danger);
+}
+.ax-panel .rd-btn,
+.ax-panel .rd-tool,
+.ax-panel .rd-pill {
+  cursor: default;
+}
+
+/* marks on the page (drawn in page space, scaled by --z so lines stay thin) */
+.rd-mark {
+  position: absolute;
+  border-radius: calc(3px / var(--z));
+  /* the engine draws its own red edge on a marked box; the inset line covers it */
+  box-shadow: inset 0 0 0 calc(2.5px / var(--z)) #1a1c20, 0 0 0 calc(1.5px / var(--z)) #1a1c20;
+  outline: calc(1.5px / var(--z)) dashed #1a1c20;
+  outline-offset: calc(3px / var(--z));
+  background:
+    repeating-linear-gradient(135deg, rgb(26 28 32 / 0.55) 0 calc(1.5px / var(--z)), transparent calc(1.5px / var(--z)) calc(5px / var(--z))),
+    rgb(26 28 32 / 0.16);
+  pointer-events: none;
+}
+.rd-mark.page-wide {
+  background:
+    repeating-linear-gradient(135deg, rgb(26 28 32 / 0.4) 0 calc(1.5px / var(--z)), transparent calc(1.5px / var(--z)) calc(7px / var(--z))),
+    rgb(26 28 32 / 0.1);
+}
+.rd-mark.drawing {
+  background: rgb(26 28 32 / 0.12);
+}
+.rd-capture {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+  touch-action: none;
+}
