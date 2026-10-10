@@ -104,6 +104,57 @@ fn save_after_redaction_writes_exactly_the_verified_bytes() {
     assert!(std::fs::read(&out).unwrap() == verified, "save wrote other bytes");
 }
 
+/// The fixture with "needle" on pages 1 and 3, encrypted with user password "secret".
+fn encrypted(test: &str) -> (PathBuf, String) {
+    use mupdf::pdf::{Encryption, PdfWriteOptions};
+    let d = dir(test);
+    let path = d.join("s.pdf").to_string_lossy().into_owned();
+    let src = PdfDocument::from_bytes(&fixture::build(&Fixture { pages: 3, lines: 4, needle_every: 2, ..Default::default() })).unwrap();
+    let mut o = PdfWriteOptions::default();
+    o.set_encryption(Encryption::Aes256).set_user_password("secret").set_owner_password("owner");
+    src.save_with_options(&path, o).unwrap();
+    (d, path)
+}
+
+#[test]
+fn encrypted_input_is_verified_with_its_password_and_stays_encrypted() {
+    let (d, path) = encrypted("encrypted");
+    let eng = Engine::new(2, 64 << 20);
+    let (id, _) = eng.open_pending(&path);
+    eng.authenticate(id, "secret").unwrap();
+    let hits = find(&eng, id, &needle()).unwrap();
+    assert!(hits.len() >= 2, "{hits:?}");
+    mark_hits(&eng, id, &hits, EditSource::User).unwrap();
+
+    let out = d.join("s_Redacted.pdf").to_string_lossy().into_owned();
+    let r = apply(&eng, id, Sanitize::default(), Some(out.clone()), EditSource::User).unwrap();
+    let ApplyOutcome::Applied { verify, .. } = r else { panic!("not applied: {r:?}") };
+    assert!(verify.is_clean());
+
+    let mut doc = mupdf::Document::open(out.as_str()).unwrap();
+    assert!(doc.needs_password().unwrap(), "the redacted copy lost its encryption");
+    assert!(!doc.authenticate("wrong").unwrap());
+    let eng2 = Engine::new(2, 64 << 20);
+    let (id2, _) = eng2.open_pending(&out);
+    eng2.authenticate(id2, "secret").unwrap();
+    assert!(find(&eng2, id2, &needle()).unwrap().is_empty(), "redacted text readable with the password");
+    assert_eq!(eng2.doc_entry(id2).unwrap().page_count(), 3);
+}
+
+#[test]
+fn encrypted_output_without_its_password_fails_closed() {
+    let (_d, path) = encrypted("encrypted_nopw");
+    let mut doc = mupdf::Document::open(path.as_str()).unwrap();
+    assert!(doc.authenticate("secret").unwrap());
+    let mut doc = PdfDocument::try_from(doc).unwrap();
+    let hits = crate::redact::find(&doc, &Query::Text { needle: "needle".into(), case_sensitive: false, whole_word: true }).unwrap();
+    crate::redact::mark_hits(&mut doc, &hits, &MarkStyle::default()).unwrap();
+    // No password to check the written copy with: refuse, never report it clean.
+    let r = crate::redact::apply(&mut doc, &ApplyOptions::default());
+    assert!(matches!(r, Err(RedactError::NeedsPassword)), "{r:?}");
+    assert!(matches!(err(RedactError::NeedsPassword), EngineError::NeedsPassword));
+}
+
 #[test]
 fn a_failed_apply_changes_nothing() {
     let (_d, _p, eng, id) = open("fail");

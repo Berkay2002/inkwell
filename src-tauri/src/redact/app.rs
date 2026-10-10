@@ -13,6 +13,7 @@ type Result<T> = std::result::Result<T, EngineError>;
 fn err(e: RedactError) -> EngineError {
     match e {
         RedactError::Pdf(e) => EngineError::Mupdf(e.to_string()),
+        RedactError::NeedsPassword => EngineError::NeedsPassword,
         e => EngineError::Invalid(e.to_string()),
     }
 }
@@ -165,7 +166,7 @@ pub fn apply(eng: &Engine, doc: DocId, sanitize: Sanitize, save_to: Option<Strin
     if n == 0 {
         return Err(EngineError::Invalid("nothing is marked for redaction".into()));
     }
-    let opts = ApplyOptions { sanitize, ..ApplyOptions::default() };
+    let opts = ApplyOptions { sanitize, password: eng.password(doc)?, ..ApplyOptions::default() };
     let mut report = None;
     let mut leaks = None;
     let label = format!("Redact {n} item{}", s(n));
