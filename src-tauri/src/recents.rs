@@ -98,6 +98,27 @@ pub async fn recents_save(app: tauri::AppHandle, json: String) -> Result<(), Str
     blocking(move || write_json(&dir, &json)).await?.map_err(|e| e.to_string())
 }
 
+/// Opens Explorer with the file selected ("Show in folder").
+#[tauri::command]
+pub async fn reveal_in_folder(path: String) -> Result<(), String> {
+    // Windows paths cannot contain a quote, so a quote here is not a path: refuse rather than build a command line from it.
+    if path.contains('"') || !Path::new(&path).exists() {
+        return Err("not a file".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // explorer wants `/select,"<path>"` as one argument; its exit code is meaningless
+        std::process::Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{path}\""))
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    Err("only available on Windows".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

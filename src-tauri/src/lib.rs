@@ -241,6 +241,7 @@ pub fn run() {
             recents::stat_files,
             recents::recents_load,
             recents::recents_save,
+            recents::reveal_in_folder,
         ])
         .setup(|app| {
             #[cfg(windows)]

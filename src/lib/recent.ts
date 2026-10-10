@@ -12,6 +12,8 @@ export interface Recent {
   mtime?: number;
   /** First page as a small WebP data URL. */
   thumb?: string;
+  /** Page the viewer was on last (0-based): "Continue reading" resumes there. */
+  lastPage?: number;
 }
 
 /** Unpinned entries kept; pinned ones never expire. */
@@ -65,6 +67,34 @@ export function relTime(ts: number, now: number): string {
   if (days < 7) return `${days} days ago`;
   const date = `${d.getDate()} ${MONTHS[d.getMonth()]}`;
   return d.getFullYear() === today.getFullYear() ? date : `${date} ${d.getFullYear()}`;
+}
+
+const clock = (d: Date) => `${d.getHours() % 12 || 12}:${String(d.getMinutes()).padStart(2, "0")} ${d.getHours() < 12 ? "AM" : "PM"}`;
+
+/** "Today, 2:14 PM" / "Yesterday, 11:03 AM" / "Oct 22, 4:36 PM" / "Oct 22, 2024, 4:36 PM"; "" when unknown. */
+export function whenLabel(ts: number, now: number): string {
+  if (ts <= 0) return "";
+  const d = new Date(ts);
+  const t = new Date(now);
+  const days = Math.round((Date.UTC(t.getFullYear(), t.getMonth(), t.getDate()) - Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
+  if (days <= 0) return `Today, ${clock(d)}`;
+  if (days === 1) return `Yesterday, ${clock(d)}`;
+  const date = `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  return `${date}${d.getFullYear() === t.getFullYear() ? "" : `, ${d.getFullYear()}`}, ${clock(d)}`;
+}
+
+export const greeting = (hour: number) => (hour < 5 || hour >= 18 ? "Good evening." : hour < 12 ? "Good morning." : "Good afternoon.");
+
+/** Entries grouped by folder, folders ordered by their newest entry. */
+export function groupByDir(list: Recent[]): { dir: string; items: Recent[] }[] {
+  const groups = new Map<string, { dir: string; items: Recent[] }>();
+  for (const r of list) {
+    const dir = dirName(r.path);
+    const k = keyOf(dir);
+    if (!groups.has(k)) groups.set(k, { dir, items: [] });
+    groups.get(k)!.items.push(r);
+  }
+  return [...groups.values()];
 }
 
 /** Pinned first, then most recently opened. The input is already newest first, so the sort is stable. */

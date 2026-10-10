@@ -1,308 +1,226 @@
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { open } from "@tauri-apps/plugin-dialog";
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { openDialog } from "../lib/commands";
-import { type Recent, baseName, dirName, formatSize, keyOf, ordered, relTime, shortDir } from "../lib/recent";
+import { type Recent, baseName, dirName, formatSize, greeting, keyOf, ordered, shortDir, whenLabel } from "../lib/recent";
+import { quickTools, launchTool } from "../lib/tools";
 import { useRecents } from "../recents";
 import { type Theme, useStore } from "../store";
-import { Icon, type IconName } from "./Icons";
+import { FileMenu, SearchPill, Thumb, useDropOver, useNow, useRecentsSync } from "./FileParts";
+import { Icon } from "./Icons";
+import { Library } from "./Library";
+import { MenuButton, type MenuEntry } from "./Menu";
 
-const isPdf = (p: string) => /\.pdf$/i.test(p);
-type View = "grid" | "list";
+const open = (path: string) => void useStore.getState().openPath(path);
+const CONTINUE = 4;
+const RECENT_ROWS = 6;
 
-/** Ink nib on an accent tile. The gradient comes from the --brand-* tokens, so it follows the theme. */
-export function BrandMark({ size = 28 }: { size?: number }) {
+/** Start screen: greeting, quick tools, continue reading, recent files. "See all" switches to the library. */
+export function Home() {
+  const [view, setView] = useState<"home" | "library">("home");
+  const { over, handlers } = useDropOver();
+  useRecentsSync();
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden>
-      <defs>
-        <linearGradient id="brand-fill" x1="4" y1="2" x2="28" y2="30" gradientUnits="userSpaceOnUse">
-          <stop offset="0" style={{ stopColor: "var(--brand-a)" }} />
-          <stop offset="1" style={{ stopColor: "var(--brand-b)" }} />
-        </linearGradient>
-      </defs>
-      <rect width="32" height="32" rx="9" fill="url(#brand-fill)" />
-      <path
-        d="M16 26.5 9.6 16.4C8.7 11.8 11.4 8 16 5.5c4.6 2.5 7.3 6.3 6.4 10.9Z"
-        fill="#fff"
-        fillOpacity="0.95"
-      />
-      <path d="M16 26.5v-9.4" stroke="var(--brand-b)" strokeWidth="1.5" strokeLinecap="round" />
-      <circle cx="16" cy="14.2" r="1.7" fill="var(--brand-b)" />
-    </svg>
+    <div className={over ? "home over" : "home"} {...handlers}>
+      {view === "home" ? <Landing over={over} onLibrary={() => setView("library")} /> : <Library over={over} onHome={() => setView("home")} />}
+    </div>
   );
 }
 
-const Kbd = ({ children }: { children: string }) => <kbd className="kbd">{children}</kbd>;
+const themes: [Theme, string][] = [
+  ["system", "Match system"],
+  ["light", "Light"],
+  ["dark", "Dark"],
+];
 
-const themeIcon: Record<Theme, IconName> = { system: "system", light: "sun", dark: "moon" };
-const nextTheme: Record<Theme, Theme> = { system: "light", light: "dark", dark: "system" };
-const themeName: Record<Theme, string> = { system: "Theme: match system", light: "Theme: light", dark: "Theme: dark" };
-
-export function Home() {
+function Landing({ over, onLibrary }: { over: boolean; onLibrary: () => void }) {
   const items = useRecents((s) => s.items);
   const exists = useRecents((s) => s.exists);
   const ready = useRecents((s) => s.ready);
   const theme = useStore((s) => s.theme);
-  const [over, setOver] = useState(false);
-  const [view, setView] = useState<View>(() => (localStorage.getItem("inkwell.homeView") === "list" ? "list" : "grid"));
-  const [confirmClear, setConfirmClear] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
-  const grid = useRef<HTMLUListElement>(null);
+  const now = useNow();
 
-  // Files dragged from Explorer arrive as Tauri events (the webview never sees DOM drag events for them).
-  useEffect(() => {
-    let off: (() => void) | undefined;
-    let cancelled = false;
-    getCurrentWebview()
-      .onDragDropEvent((e) => {
-        const p = e.payload;
-        if (p.type === "enter") setOver(p.paths.some(isPdf));
-        else if (p.type !== "over") setOver(false);
-      })
-      .then((u) => (cancelled ? u() : (off = u)))
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-      off?.();
-    };
-  }, []);
+  const missing = (r: Recent) => exists[keyOf(r.path)] === false;
+  const reading = items.filter((r) => !missing(r)).slice(0, CONTINUE);
+  const taken = new Set(reading.map((r) => keyOf(r.path)));
+  const recent = ordered(items.filter((r) => !taken.has(keyOf(r.path)))).slice(0, RECENT_ROWS);
+  const empty = ready && items.length === 0;
 
-  // Existence and freshness of the listed files; again whenever the window regains focus.
-  useEffect(() => {
-    const check = () => void useRecents.getState().refresh().then(() => useRecents.getState().backfillThumbs());
-    check();
-    window.addEventListener("focus", check);
-    const tick = setInterval(() => setNow(Date.now()), 60_000);
-    return () => {
-      window.removeEventListener("focus", check);
-      clearInterval(tick);
-    };
-  }, [ready]);
-
-  useEffect(() => {
-    if (!confirmClear) return;
-    const t = setTimeout(() => setConfirmClear(false), 3500);
-    return () => clearTimeout(t);
-  }, [confirmClear]);
-
-  const setViewMode = (v: View) => {
-    localStorage.setItem("inkwell.homeView", v);
-    setView(v);
-  };
-
-  const list = ordered(items);
-  const hasPinned = list.some((r) => r.pinned);
-
-  const onGridKey = (e: KeyboardEvent) => {
-    const el = e.target as HTMLElement;
-    if (!el.dataset.card || e.ctrlKey || e.metaKey || e.altKey) return;
-    const cards = [...grid.current!.querySelectorAll<HTMLElement>("[data-card]:not(:disabled)")];
-    const i = cards.indexOf(el);
-    const go = (c?: HTMLElement) => {
-      if (!c) return;
-      c.focus();
-      c.scrollIntoView({ block: "nearest" });
-      e.preventDefault();
-    };
-    const r = el.getBoundingClientRect();
-    // nearest card in the next row up/down: the row first, then the closest column
-    const vertical = (dir: 1 | -1) => {
-      const cand = cards.filter((c) => (dir === 1 ? c.getBoundingClientRect().top > r.top + 4 : c.getBoundingClientRect().top < r.top - 4));
-      if (cand.length === 0) return undefined;
-      const rowTop = dir === 1 ? Math.min(...cand.map((c) => c.getBoundingClientRect().top)) : Math.max(...cand.map((c) => c.getBoundingClientRect().top));
-      return cand
-        .filter((c) => Math.abs(c.getBoundingClientRect().top - rowTop) < 4)
-        .sort((a, b) => Math.abs(a.getBoundingClientRect().left - r.left) - Math.abs(b.getBoundingClientRect().left - r.left))[0];
-    };
-    if (e.key === "ArrowRight") go(cards[i + 1]);
-    else if (e.key === "ArrowLeft") go(cards[i - 1]);
-    else if (e.key === "ArrowDown") go(vertical(1));
-    else if (e.key === "ArrowUp") go(vertical(-1));
-    else if (e.key.toLowerCase() === "p") {
-      useRecents.getState().togglePin(el.dataset.path!);
-      requestAnimationFrame(() => grid.current?.querySelector<HTMLElement>(`[data-key="${CSS.escape(keyOf(el.dataset.path!))}"]`)?.focus());
-      e.preventDefault();
-    } else if (e.key === "Delete" || e.key === "Backspace") {
-      const next = cards[i + 1] ?? cards[i - 1];
-      const nextKey = next?.dataset.key;
-      useRecents.getState().remove(el.dataset.path!);
-      requestAnimationFrame(() => nextKey && grid.current?.querySelector<HTMLElement>(`[data-key="${CSS.escape(nextKey)}"]`)?.focus());
-      e.preventDefault();
-    }
-  };
+  const settings: MenuEntry[] = [
+    ...themes.map(([t, label]): MenuEntry => ({ label: `Theme: ${label}`, checked: theme === t, onSelect: () => useStore.getState().setTheme(t) })),
+    "sep",
+    { label: "Command palette", hint: "Ctrl+K", onSelect: () => useStore.getState().setUi({ paletteOpen: true }) },
+    { label: "Clear recent files", onSelect: () => useRecents.getState().clear() },
+  ];
 
   return (
-    <div
-      className={over ? "home over" : "home"}
-      onDragEnter={(e) => {
-        e.preventDefault();
-        setOver(true);
-      }}
-      onDragOver={(e) => e.preventDefault()}
-      onDragLeave={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver(false);
-      }}
-      onDrop={() => setOver(false)}
-    >
-      <div className="home-bg" aria-hidden />
-      <div className="home-scroll">
-        <header className="home-top">
-          <div className="brand">
-            <BrandMark size={26} />
-            <span className="wordmark">Inkwell</span>
-          </div>
-          <div className="home-tools">
-            <button className="chip" onClick={() => useStore.getState().setUi({ paletteOpen: true })}>
-              <Icon name="command" size={14} />
-              Commands
-              <span className="keys">
-                <Kbd>Ctrl</Kbd>
-                <Kbd>K</Kbd>
-              </span>
-            </button>
-            <button
-              className="icon-btn"
-              title={themeName[theme]}
-              aria-label={themeName[theme]}
-              onClick={() => useStore.getState().setTheme(nextTheme[theme])}
-            >
-              <Icon name={themeIcon[theme]} />
-            </button>
-          </div>
-        </header>
+    <div className="landing">
+      <header className="land-top">
+        <HomeSearch />
+        <MenuButton className="icon-btn gear" label="Settings" items={settings}>
+          <Icon name="settings" size={18} />
+        </MenuButton>
+      </header>
 
-        <main className={ready && list.length === 0 ? "home-main first-run" : "home-main"}>
-          <section className="drop rise" aria-label="Open a PDF" style={{ "--i": 0 } as React.CSSProperties}>
-            <div className="drop-glyph">
-              <Icon name={over ? "open" : "upload"} size={26} />
-            </div>
-            <div className="drop-text">
-              <h1>{over ? "Drop to open" : "Open a PDF"}</h1>
-              <p className="dim">Drag a file here, or choose one from your computer.</p>
-            </div>
-            <button className="btn primary big" onClick={() => void openDialog()}>
-              <Icon name="open" />
+      <div className="land-body">
+        <h1 className="greet">{greeting(new Date(now).getHours())}</h1>
+
+        <ul className="tools" aria-label="Quick tools">
+          {quickTools.map((t) => (
+            <li key={t.id}>
+              <button className="tool" onClick={() => void launchTool(t.id)}>
+                <Icon name={t.icon} size={26} />
+                {t.label}
+              </button>
+            </li>
+          ))}
+        </ul>
+
+        {empty && (
+          <section className="empty-panel" aria-label="No recent files">
+            <span className="empty-glyph">
+              <Icon name="file" size={30} />
+            </span>
+            <h2>No recent files yet</h2>
+            <p className="dim">Files you open show up here, with a thumbnail and where you stopped reading.</p>
+            <button className="btn primary" onClick={() => void openDialog()}>
+              <Icon name="open" size={16} />
               Open file
-              <span className="keys">
-                <Kbd>Ctrl</Kbd>
-                <Kbd>O</Kbd>
-              </span>
+              <span className="keys">Ctrl+O</span>
             </button>
           </section>
+        )}
 
-          {list.length > 0 && (
-            <section className="recents rise" aria-label="Recent files" style={{ "--i": 1 } as React.CSSProperties}>
-              <div className="recents-head">
-                <h2>
-                  Recent <span className="dim count">{list.length}</span>
-                </h2>
-                <div className="recents-tools">
-                  <div className="seg-group" role="group" aria-label="Layout">
-                    <button className={view === "grid" ? "icon-btn on" : "icon-btn"} title="Thumbnails" aria-label="Thumbnails" onClick={() => setViewMode("grid")}>
-                      <Icon name="grid" size={15} />
-                    </button>
-                    <button className={view === "list" ? "icon-btn on" : "icon-btn"} title="List" aria-label="List" onClick={() => setViewMode("list")}>
-                      <Icon name="outline" size={15} />
-                    </button>
-                  </div>
-                  {confirmClear ? (
-                    <button
-                      className="link danger"
-                      onClick={() => {
-                        useRecents.getState().clear();
-                        setConfirmClear(false);
-                      }}
-                    >
-                      {hasPinned ? "Clear unpinned?" : "Clear all?"} Click to confirm
-                    </button>
-                  ) : (
-                    <button className="link" onClick={() => setConfirmClear(true)}>
-                      Clear
-                    </button>
-                  )}
-                </div>
-              </div>
-              <ul className={view === "list" ? "cards list" : "cards"} ref={grid} onKeyDown={onGridKey}>
-                {list.map((r, n) => (
-                  <Card key={keyOf(r.path)} r={r} missing={exists[keyOf(r.path)] === false} now={now} index={n} />
-                ))}
-              </ul>
-            </section>
-          )}
-        </main>
+        {reading.length > 0 && (
+          <section aria-label="Continue reading">
+            <div className="sec-head">
+              <h2>Continue reading</h2>
+              <button className="see-all" onClick={onLibrary}>
+                See all
+              </button>
+            </div>
+            <ul className="reading">
+              {reading.map((r) => (
+                <ReadCard key={keyOf(r.path)} r={r} />
+              ))}
+            </ul>
+          </section>
+        )}
 
-        <footer className="home-foot">
-          <Icon name="lock" size={13} />
-          Files are opened and processed on this PC. Nothing is uploaded.
-        </footer>
+        {recent.length > 0 && (
+          <section aria-label="Recent files">
+            <div className="sec-head">
+              <h2>Recent</h2>
+              <button className="see-all" onClick={onLibrary}>
+                See all
+              </button>
+            </div>
+            <ul className="recent-list">
+              {recent.map((r) => (
+                <RecentRow key={keyOf(r.path)} r={r} missing={missing(r)} now={now} />
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <div className="drop-hint-wrap">
+          <div className="drop-hint" role="note">
+            <Icon name={over ? "open" : "file"} size={18} />
+            {over ? "Release to open" : "Drop a PDF anywhere to open it"}
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-function Card({ r, missing, now, index }: { r: Recent; missing: boolean; now: number; index: number }) {
-  const name = baseName(r.path);
-  const dir = dirName(r.path);
-  const meta = [
-    r.pages != null ? `${r.pages} ${r.pages === 1 ? "page" : "pages"}` : null,
-    r.size != null ? formatSize(r.size) : null,
-    r.opened > 0 ? relTime(r.opened, now) : null,
-  ].filter(Boolean);
-  const st = useRecents.getState;
-  const locate = async () => {
-    const sel = await open({ multiple: false, filters: [{ name: "PDF documents", extensions: ["pdf"] }], title: `Locate ${name}` });
-    if (typeof sel !== "string") return;
-    await st().relocate(r.path, sel);
-    void useStore.getState().openPath(sel);
+/** Search over the recent list: a results popup under the field; Enter opens the highlighted match. */
+function HomeSearch() {
+  const items = useRecents((s) => s.items);
+  const exists = useRecents((s) => s.exists);
+  const [q, setQ] = useState("");
+  const [hl, setHl] = useState(0);
+  const needle = q.trim().toLowerCase();
+  const hits = needle
+    ? ordered(items)
+        .filter((r) => exists[keyOf(r.path)] !== false && r.path.toLowerCase().includes(needle))
+        .slice(0, 6)
+    : [];
+  const pick = (r: Recent) => {
+    setQ("");
+    open(r.path);
   };
-  const cls = ["card", r.pinned ? "pinned" : "", missing ? "missing" : ""].filter(Boolean).join(" ");
 
   return (
-    <li className={cls} style={{ "--i": Math.min(index, 12) } as React.CSSProperties}>
-      <button
-        className="card-open"
-        data-card
-        data-path={r.path}
-        data-key={keyOf(r.path)}
-        disabled={missing}
-        title={r.path}
-        onClick={() => void useStore.getState().openPath(r.path)}
-      >
-        <span className="thumb-box">
-          {r.thumb ? (
-            <img src={r.thumb} alt="" draggable={false} />
-          ) : (
-            <span className="thumb-ph">
-              <Icon name={missing ? "fileX" : "file"} size={22} />
-            </span>
-          )}
+    <SearchPill
+      value={q}
+      placeholder="Search your files"
+      onChange={(v) => {
+        setQ(v);
+        setHl(0);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          setHl((h) => Math.max(0, Math.min(hits.length - 1, h + (e.key === "ArrowDown" ? 1 : -1))));
+          e.preventDefault();
+        } else if (e.key === "Enter" && hits[hl]) pick(hits[hl]);
+      }}
+    >
+      {needle && (
+        <ul className="search-results" role="listbox">
+          {hits.length === 0 && <li className="dim none">No recent file matches “{q.trim()}”</li>}
+          {hits.map((r, n) => (
+            <li key={keyOf(r.path)}>
+              <button className={n === hl ? "on" : undefined} role="option" aria-selected={n === hl} onMouseEnter={() => setHl(n)} onClick={() => pick(r)}>
+                <Icon name="file" size={16} />
+                <span className="name">{baseName(r.path)}</span>
+                <span className="dim dir">{shortDir(dirName(r.path))}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </SearchPill>
+  );
+}
+
+function ReadCard({ r }: { r: Recent }) {
+  const total = r.pages ?? 0;
+  const page = r.lastPage != null && total > 0 ? Math.min(r.lastPage, total - 1) : null;
+  const pct = page != null ? ((page + 1) / total) * 100 : 0;
+  const label = page != null ? `p. ${page + 1} of ${total}` : total > 0 ? `${total} ${total === 1 ? "page" : "pages"}` : "";
+  return (
+    <li className="read-card">
+      <button className="read-open" title={r.path} onClick={() => open(r.path)}>
+        <span className="read-page">
+          <Thumb r={r} size={30} />
         </span>
-        <span className="card-text">
-          <span className="card-name">{name}</span>
-          <span className="card-dir dim">{shortDir(dir)}</span>
-          <span className="card-meta dim">{missing ? "File not found" : meta.join(" · ")}</span>
-        </span>
+        <span className="read-name">{baseName(r.path)}</span>
       </button>
-      <div className="card-actions">
-        {missing ? (
-          <button className="mini" onClick={() => void locate()}>
-            Locate…
-          </button>
-        ) : (
-          <button
-            className={r.pinned ? "icon-btn sm on" : "icon-btn sm"}
-            title={r.pinned ? "Unpin (P)" : "Pin to top (P)"}
-            aria-label={r.pinned ? "Unpin" : "Pin to top"}
-            aria-pressed={!!r.pinned}
-            onClick={() => st().togglePin(r.path)}
-          >
-            <Icon name="pin" size={14} />
-          </button>
-        )}
-        <button className="icon-btn sm" title="Remove from list (Del)" aria-label="Remove from list" onClick={() => st().remove(r.path)}>
-          <Icon name="close" size={14} />
-        </button>
+      <div className="read-foot">
+        <span className="bar" aria-hidden>
+          <span style={{ width: `${pct}%` }} />
+        </span>
+        <span className="read-label dim">{label}</span>
+        <FileMenu r={r} missing={false} />
       </div>
+    </li>
+  );
+}
+
+function RecentRow({ r, missing, now }: { r: Recent; missing: boolean; now: number }) {
+  return (
+    <li className={missing ? "recent-row missing" : "recent-row"}>
+      <button className="recent-open" disabled={missing} title={r.path} onClick={() => open(r.path)}>
+        <span className="file-glyph">
+          <Icon name={missing ? "fileX" : "file"} size={18} />
+        </span>
+        <span className="recent-name">
+          {baseName(r.path)}
+          {r.pinned && <Icon name="pin" size={13} />}
+        </span>
+        <span className="recent-when dim">{missing ? "File not found" : whenLabel(r.opened, now)}</span>
+        <span className="recent-size dim">{r.size != null ? formatSize(r.size) : ""}</span>
+      </button>
+      <FileMenu r={r} missing={missing} />
     </li>
   );
 }

@@ -71,9 +71,9 @@ export default function App() {
 
   return (
     <div className="app">
+      <TabBar />
       {doc ? (
         <>
-          <TabBar />
           <Toolbar doc={doc} />
           <div className="main">
             <Sidebar doc={doc} />

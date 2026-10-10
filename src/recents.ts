@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { create } from "zustand";
+import { type StoreApi, create } from "zustand";
 import * as api from "./lib/api";
-import { previewScaleKey, PREVIEW_EDGE, type Size } from "./lib/layout";
+import { previewScaleKey, PREVIEW_EDGE, TILE, type Size } from "./lib/layout";
 import { type Recent, clean, fromLegacy, isJunk, keyOf, parse, upsert } from "./lib/recent";
 
 interface FileStat {
@@ -30,6 +30,10 @@ interface RecentsStore {
   remove: (path: string) => void;
   /** Forgets every unpinned entry. */
   clear: () => void;
+  /** Remembers the page (0-based) the viewer was on, for "Continue reading". */
+  setPage: (path: string, page: number) => void;
+  /** Where reading stopped, once the stored list is loaded. */
+  lastPageOf: (path: string) => Promise<number | undefined>;
   relocate: (oldPath: string, newPath: string) => Promise<void>;
 }
 
@@ -58,6 +62,7 @@ export const useRecents = create<RecentsStore>((set, get) => {
   const mutate = async (f: (l: Recent[]) => Recent[]) => {
     await loaded;
     const items = f(get().items);
+    if (items === get().items) return;
     set({ items });
     saving = saving.then(() => invoke("recents_save", { json: JSON.stringify(items) })).catch(() => {});
   };
@@ -117,6 +122,7 @@ export const useRecents = create<RecentsStore>((set, get) => {
         size: stat?.exists ? stat.size : prev?.size,
         mtime: stat?.exists ? stat.modified : prev?.mtime,
         thumb: fresh ? prev.thumb : undefined,
+        lastPage: prev?.pages === info.pageCount ? prev.lastPage : undefined,
       };
       await mutate((l) => upsert(l, entry));
       if (entry.thumb || locked) return;
@@ -185,6 +191,18 @@ export const useRecents = create<RecentsStore>((set, get) => {
     remove: (path) => void mutate((l) => l.filter((r) => keyOf(r.path) !== keyOf(path))),
     clear: () => void mutate((l) => l.filter((r) => r.pinned)),
 
+    setPage: (path, page) =>
+      void mutate((l) => {
+        const i = l.findIndex((r) => keyOf(r.path) === keyOf(path));
+        if (i < 0 || l[i].lastPage === page) return l;
+        return l.map((r, n) => (n === i ? { ...r, lastPage: page } : r));
+      }),
+
+    lastPageOf: async (path) => {
+      await loaded;
+      return get().items.find((r) => keyOf(r.path) === keyOf(path))?.lastPage;
+    },
+
     relocate: async (oldPath, newPath) => {
       let s: FileStat | undefined;
       try {
@@ -201,3 +219,70 @@ export const useRecents = create<RecentsStore>((set, get) => {
     },
   };
 });
+
+/** Larger first page for the library preview: one tile of TILE px, cached for the last few selections. */
+const previews = new Map<string, string>();
+const PREVIEWS_KEPT = 12;
+
+/** Data URL of the first page at preview size; null for protected or unreadable files (the caller falls back to the thumbnail). */
+export async function previewOf(r: Recent): Promise<string | null> {
+  const key = `${keyOf(r.path)}|${r.mtime ?? 0}`;
+  const hit = previews.get(key);
+  if (hit) return hit;
+  let doc: number | null = null;
+  try {
+    const o = await api.openDocument(r.path);
+    doc = o.doc;
+    if (o.status !== "opened") return null;
+    const edge = Math.max(o.firstPage[0], o.firstPage[1]);
+    const t = await api.fetchTile(doc, 0, 0, Math.max(1, Math.floor((TILE / edge) * 1000)), 0, 0, 1, 0, THUMB_STREAM, 0);
+    if (!t) return null;
+    const url = encodeThumb(t);
+    previews.set(key, url);
+    if (previews.size > PREVIEWS_KEPT) previews.delete(previews.keys().next().value!);
+    return url;
+  } catch {
+    return null;
+  } finally {
+    if (doc != null) void api.closeDocument(doc);
+  }
+}
+
+/** "Show in folder": Explorer with the file selected. */
+export const revealInFolder = (path: string) => invoke("reveal_in_folder", { path }).catch(() => {});
+
+interface Tracked {
+  docs: Record<number, { id: number; path: string; currentPage: number }>;
+  goTo: (id: number, page: number) => void;
+}
+
+/**
+ * Keeps each open document's page in its recents entry (debounced) and puts a newly opened one back where
+ * it was. Takes the main store as an argument: store.ts imports this module, so importing it back would be a cycle.
+ */
+export function trackReadingPosition(store: StoreApi<Tracked>) {
+  return store.subscribe((s, prev) => {
+    for (const d of Object.values(s.docs)) {
+      const before = prev.docs[d.id];
+      if (!before) {
+        void useRecents
+          .getState()
+          .lastPageOf(d.path)
+          .then((page) => {
+            const now = store.getState().docs[d.id];
+            if (page && now && now.currentPage === 0) store.getState().goTo(d.id, page);
+          });
+      } else if (before.currentPage !== d.currentPage) {
+        clearTimeout(timers.get(d.id));
+        timers.set(
+          d.id,
+          setTimeout(() => {
+            timers.delete(d.id);
+            useRecents.getState().setPage(d.path, d.currentPage);
+          }, 700),
+        );
+      }
+    }
+  });
+}
+const timers = new Map<number, ReturnType<typeof setTimeout>>();

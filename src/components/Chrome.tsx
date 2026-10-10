@@ -3,6 +3,7 @@ import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { type DocState, type Theme, useStore } from "../store";
 import { Icon, type IconName } from "./Icons";
+import { WindowControls } from "./WindowControls";
 
 const st = () => useStore.getState();
 
@@ -11,7 +12,16 @@ export function TabBar() {
   const docs = useStore((s) => s.docs);
   const active = useStore((s) => s.active);
   return (
-    <div className="tabbar" role="tablist">
+    <div className="tabbar" role="tablist" data-tauri-drag-region>
+      <div
+        role="tab"
+        aria-selected={active == null}
+        className={active == null ? "tab home-tab on" : "tab home-tab"}
+        onMouseDown={(e) => e.button === 0 && useStore.setState({ active: null })}
+      >
+        <Icon name="home" size={14} />
+        <span className="tab-name">Home</span>
+      </div>
       {order.map((id) => (
         <div
           key={id}
@@ -41,6 +51,8 @@ export function TabBar() {
       <button className="icon-btn" title="Open file (Ctrl+O)" onClick={() => void openDialog()}>
         <Icon name="plus" />
       </button>
+      <span className="grow" data-tauri-drag-region />
+      <WindowControls />
     </div>
   );
 }

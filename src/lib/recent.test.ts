@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_UNPINNED, clean, formatSize, fromLegacy, isJunk, keyOf, ordered, parse, relTime, shortDir, upsert } from "./recent";
+import { MAX_UNPINNED, clean, formatSize, fromLegacy, greeting, groupByDir, isJunk, keyOf, ordered, parse, relTime, shortDir, upsert, whenLabel } from "./recent";
 
 const R = (path: string, opened = 0, extra = {}) => ({ path, opened, ...extra });
 
@@ -55,6 +55,20 @@ describe("display", () => {
     expect(relTime(new Date(2026, 9, 6, 9, 0).getTime(), now)).toBe("4 days ago");
     expect(relTime(new Date(2026, 2, 1).getTime(), now)).toBe("1 Mar");
     expect(relTime(new Date(2025, 2, 1).getTime(), now)).toBe("1 Mar 2025");
+  });
+  it("dated labels and greeting", () => {
+    expect(whenLabel(new Date(2026, 9, 10, 14, 14).getTime(), now)).toBe("Today, 2:14 PM");
+    expect(whenLabel(new Date(2026, 9, 9, 11, 3).getTime(), now)).toBe("Yesterday, 11:03 AM");
+    expect(whenLabel(new Date(2026, 8, 22, 0, 5).getTime(), now)).toBe("Sep 22, 12:05 AM");
+    expect(whenLabel(new Date(2025, 9, 22, 16, 36).getTime(), now)).toBe("Oct 22, 2025, 4:36 PM");
+    expect(whenLabel(0, now)).toBe("");
+    expect([4, 5, 11, 12, 17, 18, 23].map(greeting)).toEqual([
+      "Good evening.", "Good morning.", "Good morning.", "Good afternoon.", "Good afternoon.", "Good evening.", "Good evening.",
+    ]);
+  });
+  it("groups by folder in order of the newest entry", () => {
+    const g = groupByDir([R("C:\\a\\1.pdf"), R("C:\\b\\2.pdf"), R("c:/A/3.pdf")]);
+    expect(g.map((x) => x.items.length)).toEqual([2, 1]);
   });
   it("sizes and folders", () => {
     expect(formatSize(999)).toBe("999 B");
