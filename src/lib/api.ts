@@ -54,12 +54,19 @@ export interface FileRef {
 
 /** Open dialog (run by Rust). */
 export const pickOpen = (multiple: boolean, title?: "locate" | "compare") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
+/** What a save dialog filters for; PDF unless told otherwise. */
+export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word";
 /** Save dialog (run by Rust) in the folder of document `doc` or of open token `near`, with file name `name`. */
-export const pickSave = (name: string, at: { doc?: number; near?: string } = {}) =>
-  invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null });
+export const pickSave = (name: string, at: { doc?: number; near?: string } = {}, kind?: SaveKind) =>
+  invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null, kind: kind ?? null });
+/** Open dialog for what Create builds a PDF from: images (several) or one text file. */
+export const pickSource = (kind: "images" | "text", multiple: boolean) => invoke<FileRef[]>("pick_source", { kind, multiple });
+/** Folder dialog (run by Rust); the token names the folder a multi-file export writes into. */
+export const pickFolder = (doc?: number) => invoke<FileRef | null>("pick_folder", { doc: doc ?? null });
 /** Open token for a path the user chose before (recent list); Rust refuses any other path. */
 export const knownFile = (path: string) => invoke<FileRef>("known_file", { path });
-export const openDocument = (file: string) => invoke<OpenOutcome>("open_document", { file });
+/** `scratch`: a created file nobody saved yet (no version history until it is saved as). */
+export const openDocument = (file: string, scratch = false) => invoke<OpenOutcome>("open_document", { file, scratch });
 export const authenticate = (doc: number, password: string) => invoke<OpenInfo>("authenticate", { doc, password });
 export const closeDocument = (doc: number) => invoke<void>("close_document", { doc });
 export const outline = (doc: number) => invoke<OutlineItem[]>("outline", { doc });
@@ -251,6 +258,77 @@ export function compressStart(job: number, req: CompressRequest, onProgress: (p:
   ch.onmessage = onProgress;
   return invoke<CompressReport>("compress_start", { job, req, onProgress: ch });
 }
+
+// ---- export and create (src-tauri/src/convert) ----
+
+export type ImageFormat = "png" | "jpeg" | "tiff";
+
+export type ExportKind =
+  | { kind: "images"; format: ImageFormat; dpi: number; gray: boolean; quality: number }
+  | { kind: "text"; layout: boolean }
+  | { kind: "html"; xhtml: boolean }
+  | { kind: "extractImages"; minSide: number }
+  | { kind: "word" };
+
+export interface ExportRequest {
+  doc: number;
+  kind: ExportKind;
+  /** One-based range like "1-3, 5"; omitted = every page. */
+  pages?: string;
+  /** Save token: a file (`pickSave`) or, for several files, a folder (`pickFolder`). */
+  saveTo: string;
+}
+
+export interface ExportOutput {
+  files: string[];
+  folder: string;
+  bytes: number;
+  pages: number;
+  warnings: string[];
+}
+
+export interface ConvertProgress {
+  done: number;
+  total: number;
+  fraction: number;
+}
+
+export type CreateSource =
+  | { kind: "images"; files: string[] }
+  | { kind: "text"; file: string }
+  | { kind: "blank"; pages: number }
+  | { kind: "clipboard" };
+
+export type CreatePageSize = "fit" | "a4" | "letter";
+
+export interface CreateRequest {
+  source: CreateSource;
+  pageSize: CreatePageSize;
+  /** Points on every side. */
+  margin: number;
+  fontSize?: number;
+}
+
+export interface Created {
+  file: FileRef;
+  pages: number;
+  warnings: string[];
+}
+
+export function exportStart(job: number, req: ExportRequest, onProgress: (p: ConvertProgress) => void) {
+  const ch = new Channel<ConvertProgress>();
+  ch.onmessage = onProgress;
+  return invoke<ExportOutput>("export_start", { job, req, onProgress: ch });
+}
+
+export function createStart(job: number, req: CreateRequest, onProgress: (p: ConvertProgress) => void) {
+  const ch = new Channel<ConvertProgress>();
+  ch.onmessage = onProgress;
+  return invoke<Created>("create_start", { job, req, onProgress: ch });
+}
+
+/** Deletes a created file that was never saved; `file` is its open token. */
+export const discardScratch = (file: string) => invoke<boolean>("discard_scratch", { file });
 
 export const toolCancel = (job: number) => invoke<void>("tool_cancel", { job });
 export const ocrLanguages = () => invoke<OcrLanguages>("ocr_languages");
