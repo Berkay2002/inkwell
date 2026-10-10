@@ -624,29 +624,30 @@ button.ax-cite:hover {
   flex: none;
   padding: 6px 12px 4px;
 }
-/* one row, fully round, no border, a soft raised surface; the textarea grows upward */
+/* One row, fully round, no border, a soft raised surface. Everything in it is a 40px circle or a
+   40px-tall text box (24px lines + 8px padding), 9px inside the pill, so the "+", the text, the icons
+   and the send button share one centre line and the pill ends are concentric with the end buttons.
+   The textarea grows upward by whole lines; the buttons stay on the last line. */
 .ax-input {
   display: flex;
   align-items: flex-end;
-  gap: 4px;
-  min-height: 56px;
-  padding: 8px 8px 8px 10px;
+  gap: 2px;
+  min-height: 58px;
+  padding: 9px;
   background: var(--ax-pill, var(--ax-panel));
-  border-radius: 28px;
+  border-radius: 29px;
   box-shadow: var(--ax-shadow);
 }
 .ax-input textarea {
   flex: 1;
   min-width: 0;
-  min-height: 24px;
-  max-height: 120px;
-  margin: 8px 8px 8px 4px;
-  font-size: 14.5px;
-  padding: 0;
+  max-height: 136px;
+  padding: 8px 8px 8px 3px;
   resize: none;
   field-sizing: content;
   font: inherit;
-  line-height: 1.45;
+  font-size: 15px;
+  line-height: 24px;
   color: var(--ax-text);
   background: transparent;
   border: 0;
@@ -654,19 +655,19 @@ button.ax-cite:hover {
 }
 .ax-input textarea::placeholder {
   color: var(--ax-dim);
-  opacity: 0.8;
-}
-.ax-input .ax-pop-wrap {
-  align-self: flex-end;
-  margin-bottom: 2px;
+  opacity: 0.55;
 }
 .ax-input .ax-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 18px;
+  width: 40px;
+  height: 40px;
+  border-radius: 20px;
 }
 .ax-input .ax-pop-wrap:first-child .ax-icon {
   color: var(--ax-text);
+}
+/* the model button keeps a filled circle, like the brain in the reference */
+.ax-input .ax-pop-wrap:has(+ .ax-send) .ax-icon {
+  background: var(--surface-2, var(--ax-bubble));
 }
 .ax-send {
   display: grid;
@@ -674,11 +675,14 @@ button.ax-cite:hover {
   flex: none;
   width: 40px;
   height: 40px;
-  color: var(--ax-on-accent);
-  background: var(--ax-accent);
+  margin-left: 6px;
+  color: var(--ax-surface);
+  background: var(--ax-text);
   border-radius: 20px;
 }
-/* disabled stays solid ink blue: a see-through blue over cream reads as lilac */
+.ax-send:disabled {
+  opacity: 0.35;
+}
 .ax-panel :focus-visible,
 .ax-bar :focus-visible {
   outline-color: var(--ax-accent);
