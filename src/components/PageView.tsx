@@ -84,7 +84,8 @@ function usePageText(doc: number, page: number, enabled: boolean) {
 }
 
 let measureCtx: CanvasRenderingContext2D | null = null;
-const FONT = '"Segoe UI", system-ui, sans-serif';
+// Closest to Helvetica/Arial metrics, which most PDFs use; per-line scaleX absorbs the rest.
+const FONT = 'Arial, "Segoe UI", sans-serif';
 
 /** Transparent, selectable text laid over the page; each line is stretched to its true width. */
 const TextLines = memo(function TextLines({ lines }: { lines: api.TextLine[] }) {

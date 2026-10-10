@@ -176,6 +176,25 @@ pub fn cache_budget_bytes() -> usize {
     std::env::var("INKWELL_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(384) << 20
 }
 
+/// WebView2's own shortcuts (Ctrl+R reload, Ctrl+F find, Ctrl+=/-/0 browser zoom, F5, Ctrl+P ...)
+/// would fight the app's; the UI handles every shortcut itself.
+#[cfg(windows)]
+fn disable_browser_accelerators(app: &tauri::App) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+    use windows_core::Interface;
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.with_webview(|wv| unsafe {
+            if let Ok(core) = wv.controller().CoreWebView2() {
+                if let Ok(settings) = core.Settings() {
+                    if let Ok(s3) = settings.cast::<ICoreWebView2Settings3>() {
+                        let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
+                    }
+                }
+            }
+        });
+    }
+}
+
 pub fn run() {
     let engine = Engine::new(Engine::default_workers(), cache_budget_bytes());
     let proto_engine = engine.clone();
@@ -216,8 +235,8 @@ pub fn run() {
             tile_raw,
         ])
         .setup(|app| {
-            // Fail loudly in dev if the main window is missing from the config.
-            let _ = app.get_webview_window("main");
+            #[cfg(windows)]
+            disable_browser_accelerators(app);
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -35,6 +35,9 @@ thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
+# Same versions tauri already pulls in; used to switch off WebView2's browser shortcuts.
+webview2-com = "0.39"
+windows-core = "0.62"
 
 [profile.release]
 codegen-units = 1
