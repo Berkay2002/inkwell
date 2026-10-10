@@ -19,6 +19,10 @@ use msbuild::Msbuild;
 pub type Result<T> = result::Result<T, Box<dyn Error>>;
 
 fn main() {
+    // Explicit, so a new file in wrapper/ (merged from a branch) always rebuilds the wrapper and its bindings.
+    for path in ["build.rs", "wrapper", "mupdf/source", "mupdf/include"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
     if let Err(e) = run() {
         eprintln!("\n{e}");
         exit(1);
