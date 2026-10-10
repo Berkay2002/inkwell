@@ -1,5 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { type DocState, useStore } from "../store";
+import { MODES, MODE_NAMES, type Task } from "./ai";
+import { readViewerSelection, useAi } from "./aiStore";
 import { stepZoom } from "./layout";
 
 export interface Command {
@@ -101,7 +103,43 @@ export const commands: Command[] = [
   { id: "theme-light", title: "Theme: light", run: () => st().setTheme("light") },
   { id: "theme-dark", title: "Theme: dark", run: () => st().setTheme("dark") },
   { id: "palette", title: "Command palette", keys: ["Ctrl+K"], run: () => st().setUi({ paletteOpen: true }) },
+  { id: "ai-toggle", title: "AI Assistant: show or hide", keys: ["Ctrl+Shift+A"], needsDoc: true, run: () => useAi.getState().toggle() },
+  { id: "ai-layout-cycle", title: "Assistant: next layout", keys: ["Ctrl+Shift+L"], needsDoc: true, run: () => useAi.getState().cycleMode() },
+  ...MODES.map((m) => ({
+    id: `ai-layout-${m}`,
+    title: `Assistant: ${MODE_NAMES[m].toLowerCase()} layout`,
+    needsDoc: true,
+    run: () => useAi.getState().setMode(m),
+  })),
+  {
+    id: "ai-summarize",
+    title: "AI Assistant: summarize this document",
+    needsDoc: true,
+    run: withDoc((d) => askAi(d.id, { kind: "summarizeDocument" })),
+  },
+  {
+    id: "ai-summarize-page",
+    title: "AI Assistant: summarize this page",
+    needsDoc: true,
+    run: withDoc((d) => askAi(d.id, { kind: "summarizePage", page: d.currentPage })),
+  },
+  ...(["explain", "rewrite", "summarize"] as const).map((action) => ({
+    id: `ai-${action}-selection`,
+    title: `AI Assistant: ${action} selected text`,
+    needsDoc: true,
+    run: withDoc((d) => {
+      const sel = readViewerSelection() ?? useAi.getState().selection;
+      if (sel) askAi(d.id, { kind: "selection", action, text: sel.text, page: sel.page });
+    }),
+  })),
+  { id: "ai-clear", title: "AI Assistant: clear chat", needsDoc: true, run: withDoc((d) => useAi.getState().clear(d.id)) },
 ];
+
+function askAi(doc: number, task: Task) {
+  const ai = useAi.getState();
+  ai.setOpen(true);
+  ai.ask(doc, task);
+}
 
 /** "Ctrl+Shift+Tab" style name of a key event; shift is only part of it for letters and named keys. */
 export function comboOf(e: KeyboardEvent): string {

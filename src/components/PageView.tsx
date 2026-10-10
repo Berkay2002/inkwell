@@ -1,5 +1,6 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as api from "../lib/api";
+import { useAi } from "../lib/aiStore";
 import { type Rot, type Size, type TileRef, pageSpaceTransform, tileKeyStr } from "../lib/layout";
 import { cached } from "../lib/tiles";
 import type { Rect4 } from "../store";
@@ -45,6 +46,8 @@ export const PageView = memo(function PageView(p: Props) {
   const underTiles = under?.filter((u) => u.scale !== scale) ?? [];
 
   const lines = usePageText(docId, page, p.wantText);
+  // The assistant's last clicked citation, highlighted on its page.
+  const mark = useAi((s) => (s.mark && s.mark.doc === docId && s.mark.page === page ? s.mark : null));
 
   return (
     <div className="page" style={{ top: p.top, left: p.left, width: size[0] * zoom, height: size[1] * zoom }} data-page={page}>
@@ -62,6 +65,25 @@ export const PageView = memo(function PageView(p: Props) {
         {p.hits.map((r, i) => (
           <div key={i} className={r === p.currentHit ? "hit current" : "hit"} style={rectStyle(r)} />
         ))}
+        {mark?.rects.map((r, i) => (
+          <div key={`${mark.nonce}.${i}`} className="cite-mark" style={rectStyle(r)} />
+        ))}
+        {mark && mark.rects.length > 0 && (
+          // Just before the start of the sentence, upright and the same size at any zoom or rotation.
+          <span
+            key={`b${mark.nonce}`}
+            className="cite-badge"
+            style={{
+              left: mark.rects[0][0],
+              top: mark.rects[0][1],
+              transform: `translate(-100%, -50%) rotate(${-rot * 90}deg) scale(${1 / zoom})`,
+              transformOrigin: "100% 50%",
+              marginLeft: -3 / zoom,
+            }}
+          >
+            {mark.n}
+          </span>
+        )}
         {lines && <TextLines lines={lines} />}
       </div>
     </div>

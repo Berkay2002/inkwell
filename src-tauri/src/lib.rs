@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod engine;
 pub mod recents;
 
@@ -207,6 +208,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
+        .manage(ai::Assistant::new())
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
             let Some((key, stream, epoch, rank)) = parse_tile_request(request.uri()) else {
                 return responder.respond(reply(404, Vec::new(), None));
@@ -242,6 +244,11 @@ pub fn run() {
             recents::recents_load,
             recents::recents_save,
             recents::reveal_in_folder,
+            ai::ai_status,
+            ai::ai_prepare,
+            ai::ai_ask,
+            ai::ai_cancel,
+            ai::ai_close,
         ])
         .setup(|app| {
             #[cfg(windows)]

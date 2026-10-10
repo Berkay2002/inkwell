@@ -1550,6 +1550,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "thiserror 2.0.21",
+ "toml 0.8.2",
  "webview2-com",
  "windows-core",
  "windows-sys 0.60.2",
