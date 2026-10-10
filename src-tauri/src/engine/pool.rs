@@ -6,7 +6,7 @@
 use parking_lot::{Condvar, Mutex};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Background jobs allowed to run at once. They all end up serialised on their document's lock,
 /// so more than one would only park workers that visible tiles could use.
@@ -22,20 +22,22 @@ pub mod class {
     pub const BACKGROUND: u8 = 2;
 }
 
+/// Where a job sits in the queue. All of it may change while the job waits (the class only ever
+/// goes down: a main-view request joining a thumbnail job).
 #[derive(Default)]
 pub struct Prio {
+    pub class: AtomicU8,
     pub epoch: AtomicU64,
     pub rank: AtomicU32,
 }
 
 impl Prio {
-    pub fn new(epoch: u64, rank: u32) -> Arc<Self> {
-        Arc::new(Self { epoch: AtomicU64::new(epoch), rank: AtomicU32::new(rank) })
+    pub fn new(class: u8, epoch: u64, rank: u32) -> Arc<Self> {
+        Arc::new(Self { class: AtomicU8::new(class), epoch: AtomicU64::new(epoch), rank: AtomicU32::new(rank) })
     }
 }
 
 pub struct Job {
-    pub class: u8,
     pub prio: Arc<Prio>,
     pub run: Box<dyn FnOnce() + Send>,
 }
@@ -89,7 +91,7 @@ impl Drop for Pool {
 
 fn worker(s: Arc<Shared>) {
     loop {
-        let job = {
+        let (job, background) = {
             let mut q = s.queue.lock();
             loop {
                 if s.stop.load(Ordering::SeqCst) {
@@ -98,15 +100,15 @@ fn worker(s: Arc<Shared>) {
                 let bg_full = s.bg_running.load(Ordering::SeqCst) >= MAX_BACKGROUND;
                 if let Some(i) = best(&q, bg_full) {
                     let job = q.swap_remove(i);
-                    if job.class == class::BACKGROUND {
+                    let background = job.prio.class.load(Ordering::SeqCst) == class::BACKGROUND;
+                    if background {
                         s.bg_running.fetch_add(1, Ordering::SeqCst);
                     }
-                    break job;
+                    break (job, background);
                 }
                 s.cv.wait(&mut q);
             }
         };
-        let background = job.class == class::BACKGROUND;
         // A bad PDF must never take a worker down.
         let _ = catch_unwind(AssertUnwindSafe(job.run));
         if background {
@@ -122,10 +124,10 @@ fn worker(s: Arc<Shared>) {
 fn best(q: &[Job], bg_full: bool) -> Option<usize> {
     q.iter()
         .enumerate()
-        .filter(|(_, j)| !(bg_full && j.class == class::BACKGROUND))
+        .filter(|(_, j)| !(bg_full && j.prio.class.load(Ordering::Relaxed) == class::BACKGROUND))
         .min_by_key(|(_, j)| {
             (
-                j.class,
+                j.prio.class.load(Ordering::Relaxed),
                 std::cmp::Reverse(j.prio.epoch.load(Ordering::Relaxed)),
                 j.prio.rank.load(Ordering::Relaxed),
             )

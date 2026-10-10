@@ -9,6 +9,7 @@
 //! tiles from it in parallel. Replicas are not tied to threads, so closing a file frees them all.
 
 pub mod cache;
+pub mod edit;
 pub mod fixture;
 pub mod fonts;
 pub mod pool;
@@ -27,7 +28,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 pub type DocId = u32;
 /// Tile edge in device pixels.
@@ -51,6 +52,13 @@ pub enum EngineError {
     Panic,
     #[error("not a PDF file")]
     NotPdf,
+    /// The document changed (an edit landed) while this request was waiting; ask again.
+    #[error("stale")]
+    Stale,
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{0}")]
+    Io(String),
 }
 
 impl From<mupdf::Error> for EngineError {
@@ -125,6 +133,9 @@ const DOC_SLOTS: usize = 4;
 struct SharedDoc {
     doc: Document,
     rev: u32,
+    /// The snapshot the copy reads in place (None: the file on disk). Declared after `doc` so
+    /// the document is dropped first.
+    _bytes: Option<Arc<Vec<u8>>>,
 }
 
 // SAFETY: a MuPDF document may move between threads as long as only one thread uses it at a time
@@ -132,34 +143,62 @@ struct SharedDoc {
 // (`mupdf::Context::get()`).
 unsafe impl Send for SharedDoc {}
 
-pub struct DocEntry {
-    pub id: DocId,
-    pub path: String,
-    password: Mutex<Option<String>>,
-    page_count: AtomicU32,
-    epochs: [AtomicU64; STREAMS],
-    search_gen: AtomicU64,
+/// A snapshot of the document: the first `len` bytes of `bytes` are a complete PDF.
+#[derive(Clone)]
+struct Snap {
+    bytes: Arc<Vec<u8>>,
+    len: usize,
+}
+
+/// What one edit generation looks like. Swapped as a whole, so a page index is always read
+/// together with the generation it belongs to.
+struct Layout {
     /// Bumped by anything that changes the document's content; part of every tile and list key,
     /// so nothing rendered from the old content is served afterwards.
-    edit_gen: AtomicU32,
+    rev: u32,
+    page_count: u32,
+    sizes: Vec<[f32; 2]>,
+    /// Where replicas of this generation read from; None until the first edit (the file on disk).
+    snap: Option<Snap>,
+}
+
+pub struct DocEntry {
+    pub id: DocId,
+    path: RwLock<String>,
+    password: Mutex<Option<String>>,
+    epochs: [AtomicU64; STREAMS],
+    search_gen: AtomicU64,
+    layout: RwLock<Layout>,
     /// Set first thing on close: nothing may (re)open the file afterwards.
     closed: AtomicBool,
     slots: [Mutex<Option<SharedDoc>>; DOC_SLOTS],
     next_slot: AtomicUsize,
-    pub sizes: RwLock<Vec<[f32; 2]>>,
+    /// The edit lane: the authoritative document and its history, created on the first edit.
+    /// Every mutation holds this lock for its whole run, so edits to one file are serial.
+    editor: Mutex<Option<edit::Editor>>,
 }
 
 impl DocEntry {
     pub fn page_count(&self) -> u32 {
-        self.page_count.load(Ordering::Relaxed)
+        self.layout.read().page_count
     }
 
     pub fn generation(&self) -> u32 {
-        self.edit_gen.load(Ordering::SeqCst)
+        self.layout.read().rev
+    }
+
+    pub fn path(&self) -> String {
+        self.path.read().clone()
+    }
+
+    /// Page sizes (points, `/Rotate` applied) of the current generation.
+    pub fn sizes(&self) -> Vec<[f32; 2]> {
+        self.layout.read().sizes.clone()
     }
 }
 
-struct ListSlot(OnceLock<std::result::Result<Arc<DisplayList>, EngineError>>);
+/// A display list being built or built. Errors are not kept: the next request tries again.
+struct ListSlot(Mutex<Option<Arc<DisplayList>>>);
 
 /// (document, edit generation, page)
 type ListKey = (DocId, u32, u32);
@@ -265,16 +304,15 @@ impl Engine {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let entry = Arc::new(DocEntry {
             id,
-            path: path.to_string(),
+            path: RwLock::new(path.to_string()),
             password: Mutex::new(None),
-            page_count: AtomicU32::new(0),
             epochs: Default::default(),
             search_gen: AtomicU64::new(0),
-            edit_gen: AtomicU32::new(0),
+            layout: RwLock::new(Layout { rev: 0, page_count: 0, sizes: Vec::new(), snap: None }),
             closed: AtomicBool::new(false),
             slots: Default::default(),
             next_slot: AtomicUsize::new(0),
-            sizes: RwLock::new(Vec::new()),
+            editor: Mutex::new(None),
         });
         self.docs.write().insert(id, entry.clone());
         entry
@@ -300,11 +338,14 @@ impl Engine {
             let title = doc.metadata(MetadataName::Title).ok().filter(|t| !t.trim().is_empty());
             Ok((count, [b.width(), b.height()], title))
         })?;
-        entry.page_count.store(count, Ordering::SeqCst);
-        *entry.sizes.write() = vec![first; count as usize];
+        {
+            let mut l = entry.layout.write();
+            l.page_count = count;
+            l.sizes = vec![first; count as usize];
+        }
         Ok(OpenInfo {
             doc: entry.id,
-            path: entry.path.clone(),
+            path: entry.path(),
             page_count: count,
             title,
             first_page: first,
@@ -316,6 +357,11 @@ impl Engine {
     /// it as soon as it finishes (`with_doc`).
     pub fn close(&self, id: DocId) {
         let entry = self.docs.write().remove(&id);
+        // Before the caches are emptied: a render finishing now checks `closed` under the cache
+        // lock, so it either sees it or inserts before the purge below.
+        if let Some(entry) = &entry {
+            entry.closed.store(true, Ordering::SeqCst);
+        }
         self.tiles.lock().drop_doc(id);
         {
             let mut lists = self.lists.lock();
@@ -325,12 +371,15 @@ impl Engine {
             }
         }
         if let Some(entry) = entry {
-            entry.closed.store(true, Ordering::SeqCst);
             // Busy replicas are dropped by their user when it sees `closed`.
             for slot in &entry.slots {
                 if let Some(mut g) = slot.try_lock() {
                     *g = None;
                 }
+            }
+            // A running edit drops it when it sees `closed`.
+            if let Some(mut ed) = entry.editor.try_lock() {
+                *ed = None;
             }
         }
     }
@@ -340,7 +389,9 @@ impl Engine {
     /// Returns the new generation.
     pub fn bump_generation(&self, id: DocId) -> Result<u32> {
         let entry = self.entry(id)?;
-        Ok(entry.edit_gen.fetch_add(1, Ordering::SeqCst) + 1)
+        let mut l = entry.layout.write();
+        l.rev += 1;
+        Ok(l.rev)
     }
 
     /// A free replica, preferring one that is already open; blocks only when all are busy.
@@ -364,6 +415,11 @@ impl Engine {
     /// Runs `f` with a replica of the document, opening (and authenticating) one on first use.
     /// Keep `f` short so visible tiles are not starved.
     fn with_doc<R>(&self, entry: &DocEntry, f: impl FnOnce(&Document) -> Result<R>) -> Result<R> {
+        self.with_doc_rev(entry, |doc, _| f(doc))
+    }
+
+    /// `with_doc`, also telling `f` which edit generation the replica holds.
+    fn with_doc_rev<R>(&self, entry: &DocEntry, f: impl FnOnce(&Document, u32) -> Result<R>) -> Result<R> {
         // Make sure this thread's MuPDF context exists before any document it will drop.
         let _ = mupdf::Context::get();
         let mut slot = Self::lock_slot(entry);
@@ -371,26 +427,23 @@ impl Engine {
             *slot = None;
             return Err(EngineError::NoDoc);
         }
-        let rev = entry.generation();
+        let (rev, snap) = {
+            let l = entry.layout.read();
+            (l.rev, l.snap.clone())
+        };
         if slot.as_ref().is_some_and(|d| d.rev != rev) {
             *slot = None;
         }
         if slot.is_none() {
-            let mut d = Document::open(entry.path.as_str())?;
-            if d.needs_password()? {
-                let pw = entry.password.lock().clone();
-                match pw {
-                    None => return Err(EngineError::NeedsPassword),
-                    Some(pw) => {
-                        if !d.authenticate(&pw)? {
-                            return Err(EngineError::BadPassword);
-                        }
-                    }
-                }
-            }
-            *slot = Some(SharedDoc { doc: d, rev });
+            let mut d = match &snap {
+                None => Document::open(entry.path().as_str())?,
+                // SAFETY: snapshots are never mutated, and the slot keeps them alive past the document.
+                Some(s) => unsafe { Document::from_shared_bytes(&s.bytes[..s.len], "application/pdf")? },
+            };
+            authenticate(&mut d, entry)?;
+            *slot = Some(SharedDoc { doc: d, rev, _bytes: snap.map(|s| s.bytes) });
         }
-        let r = f(&slot.as_ref().expect("opened above").doc);
+        let r = f(&slot.as_ref().expect("opened above").doc, rev);
         if entry.closed.load(Ordering::SeqCst) {
             // closed while we were working: nobody else will drop it
             *slot = None;
@@ -407,8 +460,7 @@ impl Engine {
         let (tx, rx) = std::sync::mpsc::channel();
         let eng = self.clone();
         self.pool.submit(Job {
-            class,
-            prio: Prio::new(u64::MAX, 0),
+            prio: Prio::new(class, u64::MAX, 0),
             run: Box::new(move || {
                 let _ = tx.send(f(&eng));
             }),
@@ -420,23 +472,38 @@ impl Engine {
     // ---- pages ----------------------------------------------------------------------------
 
     fn page_list(&self, entry: &DocEntry, rev: u32, page: u32) -> Result<Arc<DisplayList>> {
-        if page >= entry.page_count() {
-            return Err(EngineError::BadPage(page));
+        {
+            let l = entry.layout.read();
+            if l.rev != rev {
+                return Err(EngineError::Stale);
+            }
+            if page >= l.page_count {
+                return Err(EngineError::BadPage(page));
+            }
         }
         let slot = {
             let mut lists = self.lists.lock();
+            if entry.closed.load(Ordering::SeqCst) {
+                return Err(EngineError::NoDoc);
+            }
             lists
-                .get_or_insert((entry.id, rev, page), || Arc::new(ListSlot(OnceLock::new())))
+                .get_or_insert((entry.id, rev, page), || Arc::new(ListSlot(Mutex::new(None))))
                 .clone()
         };
-        slot.0
-            .get_or_init(|| {
-                self.with_doc(entry, |doc| {
-                    let list = doc.load_page(page as i32)?.to_display_list(true)?;
-                    Ok(Arc::new(list))
-                })
-            })
-            .clone()
+        // Held while building, so a second request for the same page waits for the first.
+        let mut built = slot.0.lock();
+        if let Some(list) = &*built {
+            return Ok(list.clone());
+        }
+        let list = self.with_doc_rev(entry, |doc, held| {
+            // The replica may already hold a newer generation than the one asked for.
+            if held != rev {
+                return Err(EngineError::Stale);
+            }
+            Ok(Arc::new(doc.load_page(page as i32)?.to_display_list(true)?))
+        })?;
+        *built = Some(list.clone());
+        Ok(list)
     }
 
     /// Computes page sizes in chunks and hands each chunk to `sink(start, sizes)`.
@@ -447,20 +514,25 @@ impl Engine {
     ) -> Result<()> {
         let entry = self.entry(id)?;
         const CHUNK: u32 = 128;
-        let n = entry.page_count();
+        let (rev, n) = {
+            let l = entry.layout.read();
+            (l.rev, l.page_count)
+        };
         for (ci, start) in (0..n).step_by(CHUNK as usize).enumerate() {
             let eng = self.clone();
             let entry = entry.clone();
             let sink = sink.clone();
             self.pool.submit(Job {
-                class: class::BACKGROUND,
-                prio: Prio::new(0, ci as u32),
+                prio: Prio::new(class::BACKGROUND, 0, ci as u32),
                 run: Box::new(move || {
                     let end = (start + CHUNK).min(n);
                     // One lock per page, so a visible tile never waits for a whole chunk.
                     let mut sizes = Vec::with_capacity((end - start) as usize);
                     for p in start..end {
-                        let size = eng.with_doc(&entry, |doc| {
+                        let size = eng.with_doc_rev(&entry, |doc, held| {
+                            if held != rev {
+                                return Err(EngineError::Stale);
+                            }
                             let b = doc.load_page(p as i32)?.bounds()?;
                             Ok([b.width(), b.height()])
                         });
@@ -470,9 +542,13 @@ impl Engine {
                         }
                     }
                     {
-                        let mut all = entry.sizes.write();
+                        // An edit since the scan started brought its own sizes.
+                        let mut l = entry.layout.write();
+                        if l.rev != rev {
+                            return;
+                        }
                         for (i, s) in sizes.iter().enumerate() {
-                            if let Some(slot) = all.get_mut(start as usize + i) {
+                            if let Some(slot) = l.sizes.get_mut(start as usize + i) {
                                 *slot = *s;
                             }
                         }
@@ -553,6 +629,8 @@ impl Engine {
         }
         let stream = stream.min(STREAMS - 1);
         entry.epochs[stream].fetch_max(epoch, Ordering::SeqCst);
+        // thumbnails (any stream but the main view) never delay the page being read
+        let class = if stream == 0 { class::VISIBLE } else { class::INTERACTIVE };
 
         if let Some(t) = self.tiles.lock().get(&key) {
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -563,23 +641,20 @@ impl Engine {
         let prio = {
             let mut inflight = self.inflight.lock();
             if let Some(inf) = inflight.get_mut(&key) {
+                // A main-view request joining a thumbnail job makes it a main-view job.
+                inf.prio.class.fetch_min(class, Ordering::SeqCst);
                 inf.prio.epoch.fetch_max(epoch, Ordering::SeqCst);
                 inf.prio.rank.store(rank, Ordering::Relaxed);
                 inf.waiters.push(Waiter { stream, epoch, respond });
                 return;
             }
-            let prio = Prio::new(epoch, rank);
+            let prio = Prio::new(class, epoch, rank);
             inflight.insert(key, Inflight { prio: prio.clone(), waiters: vec![Waiter { stream, epoch, respond }] });
             prio
         };
 
         let eng = self.clone();
-        self.pool.submit(Job {
-            // thumbnails (any stream but the main view) never delay the page being read
-            class: if stream == 0 { class::VISIBLE } else { class::INTERACTIVE },
-            prio,
-            run: Box::new(move || eng.run_tile(entry, key)),
-        });
+        self.pool.submit(Job { prio, run: Box::new(move || eng.run_tile(entry, key)) });
     }
 
     fn run_tile(&self, entry: Arc<DocEntry>, key: TileKey) {
@@ -610,12 +685,19 @@ impl Engine {
             Ok(Ok(tile)) => {
                 self.rendered.fetch_add(1, Ordering::Relaxed);
                 self.render_us.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
-                // Not for a document that was closed while this rendered.
-                if !entry.closed.load(Ordering::SeqCst) {
-                    self.tiles.lock().insert(key, tile.clone());
+                // Not for a document that was closed, or edited, while this rendered. Checked
+                // under the cache lock, which `close` takes only after setting `closed`.
+                let mut tiles = self.tiles.lock();
+                if entry.closed.load(Ordering::SeqCst) {
+                    TileOutcome::Failed(EngineError::NoDoc.to_string())
+                } else if key.rev != entry.generation() {
+                    TileOutcome::Stale
+                } else {
+                    tiles.insert(key, tile.clone());
+                    TileOutcome::Ready(tile)
                 }
-                TileOutcome::Ready(tile)
             }
+            Ok(Err(EngineError::Stale)) => TileOutcome::Stale,
             Ok(Err(e)) => TileOutcome::Failed(e.to_string()),
             Err(_) => TileOutcome::Failed(EngineError::Panic.to_string()),
         };
@@ -718,8 +800,7 @@ impl Engine {
             let remaining = remaining.clone();
             let total_hits = total_hits.clone();
             self.pool.submit(Job {
-                class: class::BACKGROUND,
-                prio: Prio::new(0, ci as u32),
+                prio: Prio::new(class::BACKGROUND, 0, ci as u32),
                 run: Box::new(move || {
                     let start = ci as u32 * CHUNK;
                     let end = (start + CHUNK).min(n);
@@ -771,6 +852,22 @@ impl Engine {
     }
 }
 
+/// Unlocks `d` with the password the user gave for the entry, if it needs one.
+fn authenticate(d: &mut Document, entry: &DocEntry) -> Result<()> {
+    if d.needs_password()? {
+        let pw = entry.password.lock().clone();
+        match pw {
+            None => return Err(EngineError::NeedsPassword),
+            Some(pw) => {
+                if !d.authenticate(&pw)? {
+                    return Err(EngineError::BadPassword);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Accepts a file only if `%PDF-` appears in its first KiB (where readers look for the header).
 fn check_pdf(path: &str) -> Result<()> {
     use std::io::Read;
@@ -800,3 +897,6 @@ pub fn view_matrix(bounds: Rect, rot: u8, scale: f32) -> (Matrix, i32, i32) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_followups;
