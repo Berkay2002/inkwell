@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod compress;
 pub mod engine;
 pub mod recents;
 
@@ -259,3 +260,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running Inkwell");
 }
+
