@@ -28,6 +28,7 @@ async fn blocking<R: Send + 'static>(f: impl FnOnce() -> Result<R, EngineError> 
 async fn open_document(eng: Eng<'_>, path: String) -> Result<OpenOutcome, EngineError> {
     let eng = eng.inner().clone();
     blocking(move || {
+        let path = recents::canonical(&path);
         let (doc, r) = eng.open_pending(&path);
         match r {
             Ok(info) => Ok(OpenOutcome::Opened(info)),

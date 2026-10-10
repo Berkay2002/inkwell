@@ -2,6 +2,7 @@ import { create } from "zustand";
 import * as api from "./lib/api";
 import type { OutlineItem } from "./lib/api";
 import { type Rot, type Size, clamp, ZOOM_MAX, ZOOM_MIN } from "./lib/layout";
+import { keyOf } from "./lib/recent";
 import { dropCached } from "./lib/tiles";
 import { useRecents } from "./recents";
 
@@ -138,8 +139,8 @@ export const useStore = create<Store>((set, get) => {
     error: null,
 
     openPath: (path) => {
-      const k = path.toLowerCase();
-      const existing = Object.values(get().docs).find((d) => d.path.toLowerCase() === k);
+      const k = keyOf(path);
+      const existing = Object.values(get().docs).find((d) => keyOf(d.path) === k);
       if (existing) {
         set({ active: existing.id });
         return Promise.resolve();
@@ -149,8 +150,14 @@ export const useStore = create<Store>((set, get) => {
       const job = (async () => {
         try {
           const r = await api.openDocument(path);
-          if (r.status === "opened") addDoc(r);
-          else {
+          if (r.status === "opened") {
+            // Rust canonicalised the path: a different spelling of an open file is the same tab.
+            const dup = Object.values(get().docs).find((d) => keyOf(d.path) === keyOf(r.path));
+            if (dup) {
+              void api.closeDocument(r.doc);
+              set({ active: dup.id });
+            } else addDoc(r);
+          } else {
             // only one password prompt at a time: release the one being replaced
             const old = get().password;
             if (old && old.doc !== r.doc) void api.closeDocument(old.doc);

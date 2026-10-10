@@ -41,6 +41,11 @@ pub fn strip_verbatim(p: &str) -> String {
     }
 }
 
+/// Canonical, display-ready spelling of `path` (resolves `..`, slashes, case, 8.3 names); the input when it can't be resolved.
+pub fn canonical(path: &str) -> String {
+    std::fs::canonicalize(path).map(|c| strip_verbatim(&c.to_string_lossy())).unwrap_or_else(|_| path.to_string())
+}
+
 pub fn stat_one(path: &str) -> FileStat {
     let missing = || FileStat { path: path.to_string(), exists: false, size: 0, modified: 0 };
     let p = Path::new(path);
@@ -48,7 +53,7 @@ pub fn stat_one(path: &str) -> FileStat {
     if !meta.is_file() {
         return missing();
     }
-    let canon = std::fs::canonicalize(p).map(|c| strip_verbatim(&c.to_string_lossy())).unwrap_or_else(|_| path.to_string());
+    let canon = canonical(path);
     let modified = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
     FileStat { path: canon, exists: true, size: meta.len(), modified }
 }
@@ -128,6 +133,21 @@ mod tests {
         assert_eq!(strip_verbatim(r"\\?\C:\Docs\a.pdf"), r"C:\Docs\a.pdf");
         assert_eq!(strip_verbatim(r"\\?\UNC\srv\share\a.pdf"), r"\\srv\share\a.pdf");
         assert_eq!(strip_verbatim(r"C:\Docs\a.pdf"), r"C:\Docs\a.pdf");
+    }
+
+    #[test]
+    fn canonical_unifies_spellings() {
+        let dir = std::env::temp_dir().join("inkwell-tests").join("canon");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let f = dir.join("Doc.pdf");
+        std::fs::write(&f, b"%PDF-1.4").unwrap();
+        let want = canonical(&f.to_string_lossy());
+        let p = f.to_string_lossy().to_string();
+        assert_eq!(canonical(&p.replace('\\', "/")), want);
+        assert_eq!(canonical(&p.to_lowercase()).to_lowercase(), want.to_lowercase());
+        let dotted = dir.join("sub").join("..").join("Doc.pdf");
+        assert_eq!(canonical(&dotted.to_string_lossy()), want);
+        assert_eq!(canonical(r"Z:\no\such.pdf"), r"Z:\no\such.pdf");
     }
 
     #[test]
