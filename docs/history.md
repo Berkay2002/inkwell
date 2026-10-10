@@ -185,7 +185,8 @@ re-compressed fixture, where zstd works hardest).
   `Ambiguous` -> ask, then `confirm_same` or `attach`. `Excluded` -> no history.
 - Window focus: `check_external(doc, path)`.
 - Save (engine rule 5, after the rename): `commit(doc, bytes, NewVersion { author: User, kind: Save, label, summary,
-  pages_touched })`; the bytes are what was written.
+  pages_touched })`; the bytes are what was written. A Save of the bytes the head Autosave holds promotes that
+  autosave to the Save (same version, one atomic manifest rewrite) instead of being folded away.
 - edit-core checkpoint after an assistant turn that changed something: `commit` with `kind: Checkpoint`,
   `author: Assistant { turn_id }`, label = the turn's label, summary = the entries' labels, pages = union of pages
   touched. A labelled checkpoint is recorded even when bytes equal the head.

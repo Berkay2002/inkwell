@@ -415,6 +415,16 @@ impl Inner {
         let force = (meta.kind == Kind::Checkpoint && !meta.label.is_empty()) || meta.name.is_some();
         if let Some(h) = head.filter(|h| h.content_hash == content_hash && !force) {
             let id = h.id;
+            // A save of what was just autosaved: the autosave becomes the Save (the explicit save is the
+            // version people look for). Same id, time and content; the manifest is replaced atomically.
+            if meta.kind == Kind::Save && h.kind == Kind::Autosave {
+                let mut m = h.clone();
+                (m.author, m.kind, m.label, m.summary, m.pages_touched) = (meta.author, meta.kind, meta.label, meta.summary, meta.pages_touched);
+                let dir = doc_dir(&self.root, doc);
+                write_atomic(&manifest_path(&dir, id), &st.keys.seal(doc, Obj::Manifest, &id.0, &serde_json::to_vec(&m)?))?;
+                sync_dir(&dir.join("versions"));
+                st.versions.get_mut(&id).unwrap().m = m;
+            }
             return Ok(st.info(&st.versions[&id]));
         }
         let dir = doc_dir(&self.root, doc);

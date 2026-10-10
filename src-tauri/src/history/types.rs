@@ -113,8 +113,9 @@ pub struct NewVersion {
     pub pages_touched: Vec<u32>,
 }
 
-/// Immutable, encrypted at rest. `name` is the name given at commit; later renames live in the
-/// doc's `names` record (manifests are never rewritten).
+/// Encrypted at rest. `name` is the name given at commit; later renames live in the doc's `names`
+/// record. Content never changes; the one rewrite is an Autosave head promoted to the Save of the
+/// same bytes (author, kind, label, summary, pages).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Manifest {
     pub id: VersionId,

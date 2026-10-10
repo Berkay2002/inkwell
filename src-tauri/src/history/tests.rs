@@ -104,6 +104,33 @@ fn byte_exact_restore_of_every_version() {
     }
 }
 
+/// A save of what was just autosaved is not folded away: the autosave becomes that Save, also after a reopen.
+#[test]
+fn save_of_the_autosaved_bytes_promotes_the_autosave() {
+    let (_d, root, s, doc) = setup("promote", &pdf(2, "01"));
+    let edited = edits(&pdf(2, "01"), 1, true).pop().unwrap();
+    let a = s.autosave(doc, &edited).unwrap();
+    let before = s.versions(doc).unwrap().len();
+    let mut m = meta(Kind::Save, "Saved");
+    m.summary = vec!["Rotate p. 1".into()];
+    m.pages_touched = vec![0];
+    let v = s.commit(doc, &edited, m).unwrap();
+    assert_eq!((v.id, v.created), (a.id, a.created), "the same version");
+    let vs = s.versions(doc).unwrap();
+    assert_eq!(vs.len(), before, "exactly one version for the autosave and the save");
+    assert_eq!((vs[0].kind.clone(), vs[0].label.as_str(), vs[0].author.clone()), (Kind::Save, "Saved", Author::User));
+    assert_eq!((vs[0].summary.clone(), vs[0].pages_touched.clone()), (vec!["Rotate p. 1".to_string()], vec![0]));
+    assert_eq!(vs.iter().filter(|v| v.kind == Kind::Autosave).count(), 0);
+    assert!(s.read(doc, v.id).unwrap() == edited);
+    // a second save of the same bytes changes nothing; an autosave of them never demotes the Save
+    assert_eq!(s.commit(doc, &edited, meta(Kind::Save, "again")).unwrap().label, "Saved");
+    assert_eq!(s.autosave(doc, &edited).unwrap().kind, Kind::Save);
+    drop(s);
+    let s = Store::open(&root).unwrap();
+    let vs = s.versions(doc).unwrap();
+    assert_eq!((vs.len(), vs[0].kind.clone()), (before, Kind::Save));
+}
+
 #[test]
 fn commit_dedups_unless_labelled_checkpoint() {
     let (_d, _r, s, doc) = setup("dedup-head", &pdf(3, "01"));
