@@ -305,7 +305,8 @@ impl Recognizer for TesseractCli {
         if let Some(d) = self.tessdata_dir() {
             cmd.arg("--tessdata-dir").arg(d);
         }
-        let out = cmd.output().map_err(|e| OcrError::Backend(format!("tesseract: {e}")))?;
+        // Same hardening as a recognition: no console window, killed after the timeout.
+        let out = run_child(cmd, Vec::new(), self.timeout, &AtomicBool::new(false))?;
         let text = String::from_utf8_lossy(&out.stdout);
         Ok(text
             .lines()

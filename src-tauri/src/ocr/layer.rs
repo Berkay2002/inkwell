@@ -207,7 +207,7 @@ pub(crate) fn layer_stream(page: &PageResult, user_from_page: &Matrix, codes: &C
         let bottom = line.iter().map(|w| w.bbox[3]).fold(f32::MIN, f32::max);
         let fs = (bottom - top).max(1.0);
         for w in line {
-            let units = codes.encode(&w.text);
+            let units = codes.encode(&visual_order(&w.text));
             if units.is_empty() {
                 continue;
             }
@@ -238,6 +238,30 @@ pub(crate) fn layer_stream(page: &PageResult, user_from_page: &Matrix, codes: &C
     }
     s.push_str("ET\nQ\nEMC\n");
     s.into_bytes()
+}
+
+/// A PDF string always advances left to right, and extractors read a right-to-left run (Arabic,
+/// Hebrew) back from the right, as producers store it: in visual order. A word that is mostly RTL is
+/// therefore written reversed, with the runs of digits and Latin letters inside it kept readable.
+fn visual_order(text: &str) -> String {
+    if !super::order::mostly_rtl(std::iter::once(text)) {
+        return text.to_string();
+    }
+    let mut chars: Vec<char> = text.chars().rev().collect();
+    let embedded = |c: char| c.is_ascii_alphanumeric();
+    let mut i = 0;
+    while i < chars.len() {
+        if embedded(chars[i]) {
+            let start = i;
+            while i < chars.len() && embedded(chars[i]) {
+                i += 1;
+            }
+            chars[start..i].reverse();
+        } else {
+            i += 1;
+        }
+    }
+    chars.into_iter().collect()
 }
 
 /// Drops the content streams that earlier OCR runs of ours appended. Returns how many.

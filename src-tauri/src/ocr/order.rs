@@ -30,10 +30,10 @@ fn is_rtl(c: char) -> bool {
     matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)
 }
 
-/// More RTL letters than other letters among `words`.
-fn mostly_rtl<'a>(words: impl Iterator<Item = &'a Word>) -> bool {
+/// More RTL letters than other letters in `texts`.
+pub(crate) fn mostly_rtl<'a>(texts: impl Iterator<Item = &'a str>) -> bool {
     let (mut rtl, mut other) = (0usize, 0usize);
-    for c in words.flat_map(|w| w.text.chars()).filter(|c| c.is_alphabetic()) {
+    for c in texts.flat_map(str::chars).filter(|c| c.is_alphabetic()) {
         if is_rtl(c) {
             rtl += 1;
         } else {
@@ -72,7 +72,7 @@ pub(crate) fn reading_order(lines: Vec<Vec<Word>>) -> Vec<Vec<Word>> {
     heights.sort_by(|a, b| a.total_cmp(b));
     let mh = heights[heights.len() / 2].max(1.0);
 
-    let rtl = mostly_rtl(lines.iter().flatten());
+    let rtl = mostly_rtl(lines.iter().flatten().map(|w| w.text.as_str()));
     let mut frags = Vec::new();
     for mut l in lines {
         l.sort_by(|a, b| a.bbox[0].total_cmp(&b.bbox[0]));
@@ -169,7 +169,7 @@ fn leaf(mut frags: Vec<Frag>, out: &mut Vec<Vec<Word>>) {
         }
     }
     for (_, _, mut words) in lines {
-        if mostly_rtl(words.iter()) {
+        if mostly_rtl(words.iter().map(|w| w.text.as_str())) {
             words.sort_by(|a, b| b.bbox[2].total_cmp(&a.bbox[2]));
         } else {
             words.sort_by(|a, b| a.bbox[0].total_cmp(&b.bbox[0]));

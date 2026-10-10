@@ -488,19 +488,23 @@ fn contents_len(path: &std::path::Path, page: i32) -> usize {
 
 #[test]
 fn characters_outside_the_bmp_and_rtl_scripts_survive_extraction_and_search() {
-    let lines = vec![vec![
-        ("A\u{1D400}B\u{1F600}", [72.0, 100.0, 160.0, 114.0]),
-        ("\u{E000}\u{1F600}x", [170.0, 100.0, 230.0, 114.0]),
-        ("\u{645}\u{631}\u{62D}\u{628}\u{627}", [240.0, 100.0, 300.0, 114.0]),
-    ]];
+    let lines = vec![
+        vec![("A\u{1D400}B\u{1F600}", [72.0, 100.0, 160.0, 114.0]), ("\u{E000}\u{1F600}x", [170.0, 100.0, 230.0, 114.0])],
+        // Arabic on its own line (marhaba), then a word with digits and Latin letters inside it.
+        vec![("\u{645}\u{631}\u{62D}\u{628}\u{627}", [72.0, 140.0, 140.0, 154.0])],
+        vec![("\u{645}\u{631}\u{62D}\u{628}\u{627}2024abc", [72.0, 180.0, 200.0, 194.0])],
+    ];
     let (out, rep) = run_stub(&[blank_scan(612.0, 792.0)], &Stub::new(lines), &opts72(), "astral");
     assert_eq!(rep.pages_recognized, 1);
     let t = page_text(&out, 0);
     assert!(t.contains("A\u{1D400}B\u{1F600}"), "astral characters were split or lost: {t:?}");
     // A real private-use character keeps its identity next to the codes handed out for emoji.
     assert!(t.contains("\u{E000}\u{1F600}x"), "{t:?}");
-    // MuPDF lays an RTL run out in its own order, so only the letters are compared.
-    assert!("\u{645}\u{631}\u{62D}\u{628}\u{627}".chars().all(|c| t.contains(c)), "{t:?}");
+    // Logical order comes back out: search and copy of an Arabic word work.
+    assert!(t.contains("\u{645}\u{631}\u{62D}\u{628}\u{627}"), "{t:?}");
+    // Inside a mixed word the digits and Latin letters stay readable runs (MuPDF returns visual order).
+    assert!(t.contains("2024abc"), "{t:?}");
+    assert_eq!(search(&out, 0, "\u{645}\u{631}\u{62D}\u{628}\u{627}").len(), 2);
     assert!(!t.chars().any(|c| c == '\u{FFFD}'), "{t:?}");
     assert_eq!(search(&out, 0, "A\u{1D400}B\u{1F600}").len(), 1);
 }
@@ -660,6 +664,21 @@ fn a_signed_document_is_copied_with_a_warning() {
     let out = dir.join("out.pdf");
     let rep = ocr_file(&input, &out, &Stub::new(stub_words()), &opts72(), &no_progress, &AtomicBool::new(false)).unwrap();
     assert!(rep.warnings.iter().any(|w| w.contains("signed")), "{:?}", rep.warnings);
+    // A file MuPDF had to repair cannot be saved incrementally: full save, other warning.
+    let mut broken = build_ext(
+        &[Pg::Scan { w: 612.0, h: 792.0, bmp: Bitmap { w: 8, h: 8, pixels: vec![255; 64] }, rotate: 0, sloppy_cm: false }],
+        "/AcroForm << /Fields [] /SigFlags 3 >>",
+        "",
+    );
+    let at = broken.windows(9).rposition(|w| w == b"startxref").unwrap() + 10;
+    broken[at] = b'9'; // the offset now points past the real table
+    let rin = dir.join("repaired.pdf");
+    std::fs::write(&rin, &broken).unwrap();
+    let rout = dir.join("repaired-out.pdf");
+    let rep = ocr_file(&rin, &rout, &Stub::new(stub_words()), &opts72(), &no_progress, &AtomicBool::new(false)).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.contains("invalid")), "{:?}", rep.warnings);
+    assert!(!std::fs::read(&rout).unwrap().starts_with(&broken), "a full save rewrites the file");
+    assert_eq!(search(&rout, 0, "Invoice").len(), 1);
     // An unsigned file carries none.
     let plain = dir.join("plain.pdf");
     std::fs::write(&plain, build(&[blank_scan(612.0, 792.0)])).unwrap();
