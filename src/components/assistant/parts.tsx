@@ -27,9 +27,10 @@ const PATHS = {
     "M12 5.2A3 3 0 0 0 6.6 6.7 3.2 3.2 0 0 0 4.6 10c0 .9.4 1.7 1 2.2A3.3 3.3 0 0 0 7 17a3 3 0 0 0 5 1.6zM12 5.2a3 3 0 0 1 5.4 1.5 3.2 3.2 0 0 1 2 3.3c0 .9-.4 1.7-1 2.2A3.3 3.3 0 0 1 17 17a3 3 0 0 1-5 1.6M12 5.2v13.4",
 } as const;
 
-export function Glyph({ name, size = 16 }: { name: keyof typeof PATHS; size?: number }) {
+/** `stroke` is the line width in screen px (default: 1.8 of the 24-unit drawing grid). */
+export function Glyph({ name, size = 16, stroke }: { name: keyof typeof PATHS; size?: number; stroke?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={name === "more" ? 3.2 : 1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke ? (stroke * 24) / size : name === "more" ? 3.2 : 1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d={PATHS[name]} />
     </svg>
   );
@@ -83,7 +84,7 @@ export function ModelPicker({ up = false, icon = false }: { up?: boolean; icon?:
           aria-expanded={open}
           onClick={() => setOpen(!open)}
         >
-          <Glyph name="brain" size={18} />
+          <Glyph name="brain" size={20} stroke={1.75} />
         </button>
       ) : (
         <button className="ax-pill" title="Model and reasoning effort" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -498,7 +499,7 @@ function AttachMenu({ doc }: { doc: DocState }) {
   return (
     <div className="ax-pop-wrap" ref={ref}>
       <button className="ax-icon" title="Add the selection or page" aria-label="Add the selection or page" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <Glyph name="plus" size={20} />
+        <Glyph name="plus" size={20} stroke={2} />
       </button>
       {open && (
         <div className="ax-pop up" role="menu">
@@ -571,11 +572,11 @@ export function Composer({
         <ModelPicker up icon />
         {streaming ? (
           <button className="ax-send" title="Stop" aria-label="Stop" onClick={() => st().cancel(doc.id)}>
-            <Glyph name="stop" size={14} />
+            <Glyph name="stop" size={18} stroke={2.5} />
           </button>
         ) : (
           <button className="ax-send" title="Send" aria-label="Send" disabled={!text.trim() || noText} onClick={send}>
-            <Glyph name="send" size={16} />
+            <Glyph name="send" size={20} stroke={2.5} />
           </button>
         )}
       </div>
