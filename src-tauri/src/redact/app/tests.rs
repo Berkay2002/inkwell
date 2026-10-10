@@ -190,7 +190,8 @@ fn sanitize_preview_leaves_the_document() {
     let (_d, _p, eng, id) = open("preview");
     let hits = find(&eng, id, &needle()).unwrap();
     let s = mark_hits(&eng, id, &hits, EditSource::User).unwrap();
-    preview_sanitize(&eng, id, &Sanitize::default()).unwrap();
+    let p = preview_sanitize(&eng, id, &Sanitize::default()).unwrap();
+    assert_eq!(p.annotations, 0, "the marks themselves are not comments");
     assert_eq!(eng.edit_state(id).unwrap().rev, s.rev);
     assert_eq!(list_marks(&eng, id).unwrap().len(), hits.len());
 }

@@ -155,6 +155,10 @@ pub fn preview_sanitize(eng: &Engine, doc: DocId, opts: &Sanitize) -> Result<San
         let bytes = super::save_to_vec(d).map_err(err)?;
         let mut copy = PdfDocument::from_bytes(&bytes).map_err(|e| EngineError::Mupdf(e.to_string()))?;
         let t = super::collect_targets(&copy, opts.form_fields_under_marks).map_err(err)?;
+        // Apply removes the marks before it sanitizes: they are not comments to count.
+        for m in super::list_marks(&copy).map_err(err)? {
+            super::remove_mark(&mut copy, m.page, m.xref).map_err(err)?;
+        }
         super::sanitize(&mut copy, opts, &t.needles).map_err(err)
     })
 }

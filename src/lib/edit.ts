@@ -4,6 +4,7 @@ import { useStore } from "../store";
 import * as api from "./api";
 import type { EditOp, EditState } from "./api";
 import { formatRange } from "./pageRange";
+import { useRedact } from "./redact";
 import { dropCached } from "./tiles";
 
 /**
@@ -33,6 +34,8 @@ export function applyState(id: number, s: EditState) {
     currentPage: Math.min(d.currentPage, s.pageCount - 1),
     ...(revChanged ? { outline: null } : {}),
   });
+  // Undo and redo add and remove redaction marks.
+  if (revChanged && useRedact.getState().docs[id]) void useRedact.getState().refreshMarks(id);
   // Hits point at the old pages.
   if (revChanged && d.search.query) st().runSearch(id, d.search.query);
 }

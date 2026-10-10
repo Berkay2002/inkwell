@@ -334,7 +334,8 @@ pub fn add_mark(doc: &mut PdfDocument, page: i32, quads: &[Quad], style: &MarkSt
     let [red, green, blue] = style.fill;
     // MuPDF refuses /IC on Redact (the spec allows it), so write it directly.
     a.object().dict_put("IC", doc.new_object_from_str(&format!("[{red} {green} {blue}]"))?)?;
-    a.set_color(AnnotationColor::Rgb { red: 1.0, green: 0.0, blue: 0.0 })?;
+    // Outline in the app's ink (#1A1C20), not MuPDF's default red: the UI draws marks without red.
+    a.set_color(AnnotationColor::Rgb { red: 0.102, green: 0.110, blue: 0.125 })?;
     if let Some(t) = &style.overlay_text {
         a.object().dict_put("OverlayText", PdfObject::new_string(t)?)?;
     }

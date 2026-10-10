@@ -3,6 +3,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import { useStore } from "../store";
 import { useAi } from "./aiStore";
+import { useRedact } from "./redact";
 import * as api from "./history";
 import type { Comparison, HistoryState, Source, VersionInfo } from "./history";
 import { type Filter, parentOf, versionTitle, when } from "./historyLogic";
@@ -92,6 +93,7 @@ export const useHistory = create<HStore>((set, get) => {
         // one docked panel at a time
         const ai = useAi.getState();
         if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
+        useRedact.getState().setOpen(false);
         const a = useStore.getState().active;
         if (a != null) void get().refresh(a);
       } else set({ selected: {}, renaming: null });
@@ -273,3 +275,14 @@ export function startHistoryEvents() {
     );
   });
 }
+
+// The Redact rail docks too.
+useAi.subscribe((s, prev) => {
+  if (s.open && !prev.open && s.settings.mode === "docked") useRedact.getState().setOpen(false);
+});
+useRedact.subscribe((s, prev) => {
+  if (!s.open || prev.open) return;
+  useHistory.getState().setOpen(false);
+  const ai = useAi.getState();
+  if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
+});

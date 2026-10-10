@@ -5,7 +5,7 @@ vi.mock("./edit", () => ({ applyState: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
 import { applyState } from "./edit";
-import { useRedact, type Hit, type Mark } from "./redact";
+import { markLabel, SANITIZE_OFF, useRedact, type Hit, type Mark } from "./redact";
 
 const inv = vi.mocked(invoke);
 const hit = (page: number, text: string): Hit => ({ page, text, quads: [[0, 0, 1, 0, 0, 1, 1, 1]] });
@@ -93,5 +93,42 @@ describe("redact store", () => {
     await r().apply(1);
     expect(r().get(1).phase).toBe("confirm");
     expect(r().get(1).error).toMatch(/redact_apply/);
+  });
+
+  it("counts every pattern when asked, and remembers the query of the hits", async () => {
+    reply({ redact_find: [hit(0, "a"), hit(1, "b")] });
+    await r().loadCounts(1);
+    expect(inv).toHaveBeenCalledTimes(6);
+    expect(r().get(1).counts).toEqual({ personnummer: 2, ssn: 2, card: 2, iban: 2, email: 2, phone: 2 });
+    await r().find(1, { kind: "pattern", pattern: "iban" });
+    expect(r().get(1).query).toEqual({ kind: "pattern", pattern: "iban" });
+    r().clearFind(1);
+    expect(r().get(1)).toMatchObject({ query: null, hits: [], checked: [] });
+  });
+
+  it("\"Also remove hidden information\" off sends all options false, on asks for the defaults", async () => {
+    reply({ redact_options: options });
+    await r().removeHidden(1, false);
+    expect(inv).toHaveBeenLastCalledWith("redact_options", { doc: 1, sanitize: SANITIZE_OFF });
+    expect(Object.values(SANITIZE_OFF).some(Boolean)).toBe(false);
+    await r().removeHidden(1, true);
+    expect(inv).toHaveBeenLastCalledWith("redact_options", { doc: 1, sanitize: undefined });
+  });
+
+  it("labels a mark with its text, or says area or page", async () => {
+    const q: Mark["quads"] = [[10, 10, 50, 10, 10, 20, 50, 20]];
+    const h = { page: 1, text: "alex@example.com", quads: q };
+    reply({ redact_find: [h] });
+    await r().find(1, { kind: "pattern", pattern: "email" });
+    reply({ redact_mark: state, redact_list_marks: [{ page: 1, xref: 7, quads: q, wholePage: false }] });
+    await r().markChecked(1);
+    const m = r().get(1).marks[0];
+    expect(markLabel(m, r().get(1).labels)).toBe("alex@example.com");
+
+    const area = { page: 3, xref: 8, quads: q, wholePage: false };
+    reply({ redact_mark: state, redact_list_marks: [m, area] });
+    await r().mark(1, { kind: "area", page: 3, area: [0, 0, 5, 5] });
+    expect(markLabel(area, r().get(1).labels)).toBe("Area on page 4");
+    expect(markLabel({ ...area, page: 8, xref: 9, wholePage: true }, {})).toBe("Page 9");
   });
 });

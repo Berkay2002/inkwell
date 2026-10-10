@@ -42,10 +42,55 @@ export const redactApi = {
     invoke<ApplyOutcome>("redact_apply", { doc, options: { sanitize, save } }),
 };
 
+export const PATTERNS: { id: Pattern; label: string }[] = [
+  { id: "personnummer", label: "Personnummer" },
+  { id: "ssn", label: "SSN" },
+  { id: "card", label: "Card number" },
+  { id: "iban", label: "IBAN" },
+  { id: "email", label: "E-mail" },
+  { id: "phone", label: "Phone" },
+];
+
+export const SANITIZE_OFF: Sanitize = {
+  metadata: false, hiddenLayers: false, hiddenText: false, scriptsActions: false,
+  embeddedFiles: false, annotations: false, formFieldsUnderMarks: false, bookmarks: false,
+};
+
+const keyOf = (m: Mark) => `${m.page}:${m.xref}`;
+const near = (a: Quad, b: Quad) => a.every((v, i) => Math.abs(v - b[i]) < 1);
+
+/** What the new marks are, for the marks list: a hit's text, "" for an area. (The file only knows quads.) */
+function learn(labels: Record<string, string>, before: Mark[], after: Mark[], what: MarkWhat): Record<string, string> {
+  const had = new Set(before.map(keyOf));
+  const fresh = after.filter((m) => !had.has(keyOf(m)));
+  const out = { ...labels };
+  if (what.kind === "area") fresh.forEach((m) => (out[keyOf(m)] = ""));
+  if (what.kind === "hits")
+    for (const h of what.hits) {
+      const i = fresh.findIndex((m) => m.page === h.page && m.quads[0] && h.quads[0] && near(m.quads[0], h.quads[0]));
+      if (i >= 0) out[keyOf(fresh.splice(i, 1)[0])] = h.text;
+    }
+  return out;
+}
+
+/** The marks list's text for a mark: the marked text, "Area on page N" or "Page N". */
+export function markLabel(m: Mark, labels: Record<string, string>): string {
+  const l = labels[keyOf(m)];
+  if (m.wholePage) return `Page ${m.page + 1}`;
+  if (l) return l;
+  return l === "" ? `Area on page ${m.page + 1}` : `Mark on page ${m.page + 1}`;
+}
+
 export type Phase = "marking" | "confirm" | "applying" | "report" | "refused";
 
 export interface DocRedact {
+  /** What `hits` came from (the active pill or the typed text). */
+  query: FindQuery | null;
+  /** Hits per pattern, filled when the rail opens. */
+  counts: Partial<Record<Pattern, number>>;
   hits: Hit[];
+  /** `page:xref` -> the marked text ("" for an area), learned when a mark is made in this session. */
+  labels: Record<string, string>;
   /** Indexes into `hits` that "Mark n" will mark. */
   checked: number[];
   marks: Mark[];
@@ -55,12 +100,21 @@ export interface DocRedact {
   error: string | null;
 }
 
-const fresh = (): DocRedact => ({ hits: [], checked: [], marks: [], phase: "marking", options: null, outcome: null, error: null });
+const fresh = (): DocRedact => ({ query: null, counts: {}, labels: {}, hits: [], checked: [], marks: [], phase: "marking", options: null, outcome: null, error: null });
 
 interface RedactStore {
+  /** The right rail is showing, and the area tool (drag on a page) is armed. */
+  open: boolean;
+  tool: boolean;
+  setOpen: (open: boolean) => void;
+  setTool: (on: boolean) => void;
   docs: Record<number, DocRedact>;
+  loadCounts: (doc: number) => Promise<void>;
+  /** "Also remove hidden information": all sanitize options off, or back to the defaults. */
+  removeHidden: (doc: number, on: boolean) => Promise<void>;
   get: (doc: number) => DocRedact;
   find: (doc: number, q: FindQuery) => Promise<void>;
+  clearFind: (doc: number) => void;
   toggleHit: (doc: number, i: number) => void;
   markChecked: (doc: number) => Promise<void>;
   mark: (doc: number, what: MarkWhat) => Promise<void>;
@@ -86,19 +140,39 @@ export const useRedact = create<RedactStore>((set, get) => {
       patch(doc, { error: msg(e) });
     }
   };
-  const edited = async (doc: number, s: EditState) => {
+  const edited = async (doc: number, s: EditState, what?: MarkWhat) => {
+    const before = get().get(doc).marks;
     applyState(doc, s);
     await get().refreshMarks(doc);
+    const d = get().get(doc);
+    if (what) patch(doc, { labels: learn(d.labels, before, d.marks, what) });
   };
 
   return {
+    open: false,
+    tool: false,
+    setOpen: (open) => set({ open, ...(open ? {} : { tool: false }) }),
+    setTool: (tool) => set({ tool }),
     docs: {},
+    loadCounts: (doc) =>
+      run(doc, async () => {
+        const counts: DocRedact["counts"] = {};
+        await Promise.all(
+          PATTERNS.map(async ({ id }) => {
+            counts[id] = (await redactApi.find(doc, { kind: "pattern", pattern: id })).length;
+          }),
+        );
+        patch(doc, { counts });
+      }),
+    removeHidden: (doc, on) =>
+      run(doc, async () => patch(doc, { options: await redactApi.options(doc, on ? undefined : SANITIZE_OFF) })),
     get: (doc) => get().docs[doc] ?? fresh(),
     find: (doc, q) =>
       run(doc, async () => {
         const hits = await redactApi.find(doc, q);
-        patch(doc, { hits, checked: hits.map((_, i) => i), error: null });
+        patch(doc, { query: q, hits, checked: hits.map((_, i) => i), error: null });
       }),
+    clearFind: (doc) => patch(doc, { query: null, hits: [], checked: [] }),
     toggleHit: (doc, i) => {
       const c = get().get(doc).checked;
       patch(doc, { checked: c.includes(i) ? c.filter((x) => x !== i) : [...c, i].sort((a, b) => a - b) });
@@ -108,10 +182,11 @@ export const useRedact = create<RedactStore>((set, get) => {
         const d = get().get(doc);
         const hits = d.checked.map((i) => d.hits[i]);
         if (!hits.length) return;
-        await edited(doc, await redactApi.mark(doc, { kind: "hits", hits }));
-        patch(doc, { hits: [], checked: [] });
+        const what: MarkWhat = { kind: "hits", hits };
+        await edited(doc, await redactApi.mark(doc, what), what);
+        patch(doc, { hits: [], checked: [], query: null });
       }),
-    mark: (doc, what) => run(doc, async () => edited(doc, await redactApi.mark(doc, what))),
+    mark: (doc, what) => run(doc, async () => edited(doc, await redactApi.mark(doc, what), what)),
     unmark: (doc, marks) =>
       run(doc, async () => edited(doc, await redactApi.unmark(doc, marks.map((m) => [m.page, m.xref])))),
     refreshMarks: (doc) => run(doc, async () => patch(doc, { marks: await redactApi.listMarks(doc) })),

@@ -2,6 +2,7 @@ import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as api from "../lib/api";
 import { useAi } from "../lib/aiStore";
 import { type Rot, type Size, type TileRef, pageSpaceTransform, tileKeyStr } from "../lib/layout";
+import { type Mark, useRedact } from "../lib/redact";
 import { cached } from "../lib/tiles";
 import type { Rect4 } from "../store";
 import { TileCanvas } from "./TileCanvas";
@@ -26,6 +27,8 @@ interface Props {
   wantText: boolean;
   hits: Rect4[];
   currentHit: Rect4 | null;
+  /** Redaction marks on this page. */
+  marks: Mark[];
 }
 
 export const PageView = memo(function PageView(p: Props) {
@@ -51,6 +54,17 @@ export const PageView = memo(function PageView(p: Props) {
   // The assistant's last clicked citation, highlighted on its page.
   const mark = useAi((s) => (s.mark && s.mark.doc === docId && s.mark.page === page ? s.mark : null));
 
+  // "Mark text or area": a drag over the page makes an area mark (page points, y down).
+  const armed = useRedact((s) => s.tool);
+  const space = useRef<HTMLDivElement>(null);
+  const [drag, setDrag] = useState<{ a: [number, number]; b: [number, number] } | null>(null);
+  const toPage = (e: React.PointerEvent): [number, number] => {
+    const m = new DOMMatrix(getComputedStyle(space.current!).transform).inverse();
+    const r = e.currentTarget.getBoundingClientRect();
+    const q = m.transformPoint({ x: e.clientX - r.left, y: e.clientY - r.top });
+    return [Math.min(Math.max(q.x, 0), rawSize[0]), Math.min(Math.max(q.y, 0), rawSize[1])];
+  };
+
   return (
     <div className="page" style={{ top: p.top, left: p.left, width: size[0] * zoom, height: size[1] * zoom }} data-page={page}>
       <TileCanvas docId={docId} tile={preview} size={size} zoom={zoom} cover />
@@ -61,12 +75,17 @@ export const PageView = memo(function PageView(p: Props) {
         <TileCanvas key={tileKeyStr(docId, t)} docId={docId} tile={t} size={size} zoom={zoom} onDrawn={onDrawn} />
       ))}
       <div
+        ref={space}
         className="pagespace"
         style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom) }}
       >
         {p.hits.map((r, i) => (
           <div key={i} className={r === p.currentHit ? "hit current" : "hit"} style={rectStyle(r)} />
         ))}
+        {p.marks.map((m) => (
+          <div key={m.xref} className={m.wholePage ? "rd-mark page-wide" : "rd-mark"} style={{ ...rectStyle(markRect(m, rawSize)), "--z": zoom } as React.CSSProperties} />
+        ))}
+        {drag && <div className="rd-mark drawing" style={{ ...rectStyle(dragRect(drag)), "--z": zoom } as React.CSSProperties} />}
         {mark?.rects.map((r, i) => (
           <div key={`${mark.nonce}.${i}`} className="cite-mark" style={rectStyle(r)} />
         ))}
@@ -88,9 +107,39 @@ export const PageView = memo(function PageView(p: Props) {
         )}
         {lines && <TextLines lines={lines} />}
       </div>
+      {armed && (
+        <div
+          className="rd-capture"
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            const a = toPage(e);
+            setDrag({ a, b: a });
+          }}
+          onPointerMove={(e) => drag && setDrag({ a: drag.a, b: toPage(e) })}
+          onPointerUp={() => {
+            if (!drag) return;
+            const [x0, y0, x1, y1] = dragRect(drag);
+            setDrag(null);
+            if (x1 - x0 >= 3 && y1 - y0 >= 3) void useRedact.getState().mark(docId, { kind: "area", page, area: [x0, y0, x1, y1] });
+          }}
+          onPointerCancel={() => setDrag(null)}
+        />
+      )}
     </div>
   );
 });
+
+const dragRect = (d: { a: [number, number]; b: [number, number] }): Rect4 => [
+  Math.min(d.a[0], d.b[0]), Math.min(d.a[1], d.b[1]), Math.max(d.a[0], d.b[0]), Math.max(d.a[1], d.b[1]),
+];
+
+/** A mark's box in page space: the bounds of its quads; a whole-page mark reaches far past the page, so it is clipped. */
+export function markRect(m: Mark, size: Size): Rect4 {
+  if (m.wholePage || m.quads.length === 0) return [0, 0, size[0], size[1]];
+  const xs = m.quads.flatMap((q) => [q[0], q[2], q[4], q[6]]);
+  const ys = m.quads.flatMap((q) => [q[1], q[3], q[5], q[7]]);
+  return [Math.max(0, Math.min(...xs)), Math.max(0, Math.min(...ys)), Math.min(size[0], Math.max(...xs)), Math.min(size[1], Math.max(...ys))];
+}
 
 const rectStyle = (r: Rect4) => ({ left: r[0], top: r[1], width: r[2] - r[0], height: r[3] - r[1] });
 
