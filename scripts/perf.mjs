@@ -1,12 +1,13 @@
 // Drives a running Inkwell through WebView2's DevTools endpoint: frame timing, tile transport,
 // memory and screenshots. Start the app first with
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222'; inkwell.exe <big.pdf> <small.pdf>
-// then: node scripts/perf.mjs <screens-dir>
-import { spawnSync } from "node:child_process";
+// then: node scripts/perf.mjs <screens-dir> [--mem-only]   (--mem-only stops after the scroll/zoom memory measurement)
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
 const out = process.argv[2] ?? "docs/screens/phase1";
+const memOnly = process.argv.includes("--mem-only");
 fs.mkdirSync(out, { recursive: true });
 
 const targets = await (await fetch("http://127.0.0.1:9222/json")).json();
@@ -28,6 +29,46 @@ const ev = async (expression) => {
   const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? "eval failed");
   return r.result.value;
+};
+// Memory of inkwell.exe plus every WebView2 process it owns, by role (browser / renderer / gpu / utility).
+const MEM_PS = `$ids = @{}; Get-Process inkwell -ErrorAction SilentlyContinue | % { $ids[[int]$_.Id] = 'inkwell' };
+  Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | ? { $_.CommandLine -match 'app.inkwell.desktop' } | % {
+    $t = if ($_.CommandLine -match '--type=([a-z-]+)') { $matches[1] } else { 'browser' }; $ids[[int]$_.ProcessId] = $t };
+  $ids.GetEnumerator() | % { $q = Get-Process -Id $_.Key -ErrorAction SilentlyContinue; if ($q) {
+    [pscustomobject]@{ role = $_.Value; ws = [math]::Round($q.WorkingSet64/1MB,1); priv = [math]::Round($q.PrivateMemorySize64/1MB,1) } } } | ConvertTo-Json -Compress`;
+const memNow = () =>
+  new Promise((res) =>
+    execFile("powershell", ["-NoProfile", "-Command", MEM_PS], { encoding: "utf8" }, (err, out) => {
+      try {
+        const roles = {};
+        let ws = 0, priv = 0;
+        for (const r of [].concat(JSON.parse(out))) {
+          roles[r.role] = +((roles[r.role] ?? 0) + r.ws).toFixed(1);
+          ws += r.ws;
+          priv += r.priv;
+        }
+        res({ ws: +ws.toFixed(1), priv: +priv.toFixed(1), roles });
+      } catch {
+        res(null);
+      }
+    }),
+  );
+/** Samples memNow() back to back until stop(); returns the sample with the highest working set. */
+const sampleMemory = () => {
+  let run = true;
+  const samples = [];
+  const loop = (async () => {
+    while (run) {
+      const m = await memNow();
+      if (m) samples.push(m);
+    }
+  })();
+  return async () => {
+    run = false;
+    await loop;
+    const peak = samples.reduce((a, b) => (b.ws > a.ws ? b : a), { ws: 0 });
+    return { samples: samples.length, peak };
+  };
 };
 const shot = async (name) => {
   await ev("window.__settle()");
@@ -82,7 +123,8 @@ await ev(`__S().getState().activate(${big.id}); __S().getState().setSidebar('thu
 await ev("__sleep(600)");
 const result = { doc: big };
 
-// --- scrolling and zoom frame timing
+// --- scrolling and zoom frame timing (memory sampled throughout)
+const stopSampling = sampleMemory();
 await ev("document.querySelector('.viewer').scrollTop = 0; __settle()");
 result.scrollSteady = await ev(`(async () => {
   const v = document.querySelector('.viewer');
@@ -104,6 +146,26 @@ result.zoom = await ev(`(async () => {
   const s2 = await __settle();
   return { in: { ...__stats(dIn), settleMs: Math.round(s1) }, out: { ...__stats(dOut), settleMs: Math.round(s2) } };
 })()`);
+// --- memory: peak during the scroll/zoom scenario, then steady state after it has gone idle
+const scenarioPeak = await stopSampling();
+await ev("__sleep(6000)");
+await send("Performance.enable");
+const metrics = Object.fromEntries((await send("Performance.getMetrics")).metrics.map((m) => [m.name, m.value]));
+const steady = await memNow();
+result.memoryMB = {
+  scenarioPeak: scenarioPeak.peak,
+  scenarioSamples: scenarioPeak.samples,
+  steady,
+  rendererJsHeap: +(metrics.JSHeapUsedSize / 1048576).toFixed(1),
+  canvases: await ev("document.querySelectorAll('canvas').length"),
+  engine: await ev(`window.__TAURI_INTERNALS__.invoke('engine_stats')`),
+};
+
+if (memOnly) {
+  fs.writeFileSync(path.join(out, "perf.json"), JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(result.memoryMB, null, 2));
+  process.exit(0);
+}
 result.stats = await ev(`window.__TAURI_INTERNALS__.invoke('engine_stats')`);
 
 // --- text layer sanity: lines exist and sit inside their page box
@@ -146,25 +208,6 @@ result.transport = await ev(`(async () => {
   return { tiles: N, tileBytes: 512 * 512 * 4, coldRenderMs: cold, protocolMs: protocol, ipcMs: ipc,
     protocolPerTile: +(protocol / N).toFixed(2), ipcPerTile: +(ipc / N).toFixed(2) };
 })()`);
-
-// --- process memory (inkwell + its WebView2 children)
-const mem = spawnSync(
-  "powershell",
-  [
-    "-NoProfile",
-    "-Command",
-    `$p = @(Get-Process inkwell -ErrorAction SilentlyContinue | % { @{n='inkwell';id=$_.Id} });
-     $w = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | ? { $_.CommandLine -match 'app.inkwell.desktop' } | % { @{n='webview2';id=$_.ProcessId} };
-     ($p + $w) | % { $q = Get-Process -Id $_.id -ErrorAction SilentlyContinue; if ($q) { [pscustomobject]@{ name=$_.n; ws=[math]::Round($q.WorkingSet64/1MB,1); priv=[math]::Round($q.PrivateMemorySize64/1MB,1) } } } | ConvertTo-Json -Compress`,
-  ],
-  { encoding: "utf8" },
-);
-try {
-  const rows = JSON.parse(mem.stdout);
-  result.memoryMB = { rows: [].concat(rows), totalWs: +[].concat(rows).reduce((a, r) => a + r.ws, 0).toFixed(1) };
-} catch {
-  result.memoryMB = mem.stdout || mem.stderr;
-}
 
 fs.writeFileSync(path.join(out, "perf.json"), JSON.stringify(result, null, 2));
 console.log(JSON.stringify(result, null, 2));

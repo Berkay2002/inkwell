@@ -173,7 +173,7 @@ fn reply(status: u16, body: Vec<u8>, dims: Option<(u32, u32)>) -> tauri::http::R
 }
 
 pub fn cache_budget_bytes() -> usize {
-    std::env::var("INKWELL_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(384) << 20
+    std::env::var("INKWELL_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(64) << 20
 }
 
 /// WebView2's own shortcuts (Ctrl+R reload, Ctrl+F find, Ctrl+=/-/0 browser zoom, F5, Ctrl+P ...)
