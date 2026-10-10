@@ -2,6 +2,7 @@ import { create } from "zustand";
 import * as api from "./lib/api";
 import type { OutlineItem } from "./lib/api";
 import { type Rot, type Size, clamp, ZOOM_MAX, ZOOM_MIN } from "./lib/layout";
+import { keyOf } from "./lib/recent";
 import { dropCached } from "./lib/tiles";
 import { useRecents } from "./recents";
 
@@ -45,6 +46,13 @@ export interface DocState {
   currentPage: number;
   /** Edit generation reported by the engine; tiles are keyed by it. */
   rev: number;
+  /** Edited since opened or last saved (see lib/edit.ts). */
+  dirty: boolean;
+  /** What Undo / Redo would do, null when there is nothing. */
+  undoLabel: string | null;
+  redoLabel: string | null;
+  /** The Organize pages view is showing instead of the reader. */
+  organize: boolean;
   /** Where the viewer was when the tab was last left. */
   scroll: { page: number; yPt: number };
   outline: OutlineItem[] | null;
@@ -110,6 +118,10 @@ export const useStore = create<Store>((set, get) => {
       zoom: 1,
       currentPage: 0,
       rev: 0,
+      dirty: false,
+      undoLabel: null,
+      redoLabel: null,
+      organize: false,
       scroll: { page: 0, yPt: 0 },
       outline: null,
       search: emptySearch(),
@@ -122,8 +134,9 @@ export const useStore = create<Store>((set, get) => {
       active: doc.id,
       password: null,
     }));
-    // Page sizes stream in after the first page is already visible.
-    void api.pageSizes(doc.id, (start, sizes) => get().setSizes(doc.id, start, sizes));
+    // Page sizes stream in after the first page is already visible. An edit reports all sizes
+    // itself, so chunks of the file as opened are dropped once one lands.
+    void api.pageSizes(doc.id, (start, sizes) => get().docs[doc.id]?.rev === 0 && get().setSizes(doc.id, start, sizes));
   };
 
   return {
@@ -138,8 +151,8 @@ export const useStore = create<Store>((set, get) => {
     error: null,
 
     openPath: (path) => {
-      const k = path.toLowerCase();
-      const existing = Object.values(get().docs).find((d) => d.path.toLowerCase() === k);
+      const k = keyOf(path);
+      const existing = Object.values(get().docs).find((d) => keyOf(d.path) === k);
       if (existing) {
         set({ active: existing.id });
         return Promise.resolve();
@@ -149,8 +162,14 @@ export const useStore = create<Store>((set, get) => {
       const job = (async () => {
         try {
           const r = await api.openDocument(path);
-          if (r.status === "opened") addDoc(r);
-          else {
+          if (r.status === "opened") {
+            // Rust canonicalised the path: a different spelling of an open file is the same tab.
+            const dup = Object.values(get().docs).find((d) => keyOf(d.path) === keyOf(r.path));
+            if (dup) {
+              void api.closeDocument(r.doc);
+              set({ active: dup.id });
+            } else addDoc(r);
+          } else {
             // only one password prompt at a time: release the one being replaced
             const old = get().password;
             if (old && old.doc !== r.doc) void api.closeDocument(old.doc);
