@@ -401,7 +401,7 @@ fn a_hundred_pages_stay_cancellable_and_report_progress() {
     assert!(!output.exists(), "a cancelled run must not leave an output");
     assert!(!output.with_extension("ocr-tmp").exists());
     let seen = seen.lock().unwrap();
-    assert!(seen.windows(2).all(|w| w[0] <= w[1] || true) && seen.len() == calls);
+    assert_eq!(seen.len(), calls);
 }
 
 #[test]
@@ -523,10 +523,7 @@ fn real_backends_make_a_scan_searchable() {
 fn study_sample_compared_with_acrobat() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples");
     let (scan, acrobat) = (dir.join("ocr-in-01.pdf"), dir.join("ocr-out-01-english.pdf"));
-    if !scan.exists() || !acrobat.exists() {
-        eprintln!("skipped: study samples not present");
-        return;
-    }
+    assert!(scan.exists() && acrobat.exists(), "study samples are committed; missing: {dir:?}");
     for (b, lang) in real_backends() {
         let out = std::env::temp_dir().join("inkwell-ocr-tests").join(format!("study-{}.pdf", b.name()));
         std::fs::create_dir_all(out.parent().unwrap()).unwrap();

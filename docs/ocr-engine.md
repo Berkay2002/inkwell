@@ -22,10 +22,14 @@ one worker, ms/page = open + render + recognise, median of 3 after warm-up.
 Pick: **Windows.Media.Ocr is the default** (5-15x faster, nothing to install, equal or better on 7 of 9
 cases). **Tesseract stays behind the same `Recognizer` trait** for hosts without the language pack or
 when the user asks for a language Windows lacks (needs `tesseract.exe`; found via `INKWELL_TESSERACT`,
-`E:\Tools\Tesseract-OCR`, Program Files, PATH). **MuPDF's own OCR is not used**: it needs
-`mupdf/tesseract` (libtesseract.lib 237 MB + leptonica 20 MB, +5 min on every clean build), its pdfocr
-writer rasterises and re-encodes the page image (fails the "never touch the image" rule), and it was
-the least accurate and slowest of the three.
+`E:\Tools\Tesseract-OCR`, Program Files, PATH). **MuPDF's own OCR is not used as the writer**: its pdfocr device rasterises the page and re-encodes the
+image, which breaks the "never touch the image" rule. As a *recognizer* it is in-process Tesseract
+(`mupdf/tesseract`, built on the vendored MSBuild path; exe 9.0 MB vs 7.5 MB, the vendored build
+already compiles libtesseract/leptonica): 0.22-0.47 s/page on the clean cases, several times faster
+than the CLI and no `tesseract.exe` to install, at the cost of shipping tessdata and flipping a cargo
+feature. Its accuracy (measured at 300 dpi, same layout-analysis failures as Tesseract at 300 on the
+table and small text) is not better than the CLI's, and it was not benchmarked at 200 dpi or with
+`swe+eng`. Left as an option for replacing the CLI backend; not wired in.
 
 Default render resolution is 200 dpi: as accurate as 300 on every case, faster, and Tesseract's
 layout analysis was better at 200 on the table.
