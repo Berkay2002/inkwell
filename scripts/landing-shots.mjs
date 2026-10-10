@@ -17,23 +17,24 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "inkwell-landing-"));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // A believable document tree, so the screenshots read like a real machine.
+// [relative path, sample, opened ago (ms), pinned, last page (0-based)]
 const files = [
-  ["Documents/Work/Finance/Quarterly report Q3.pdf", "edit-source.pdf", 12 * 60e3, false],
-  ["Documents/Home/Lease agreement.pdf", "form-source.pdf", 3 * 3600e3, true],
-  ["Downloads/Invoice 2026-0412.pdf", "compress-source.pdf", 26 * 3600e3, false],
-  ["Documents/Work/Conference notes.pdf", "pages-a.pdf", 3 * 86400e3, false],
-  ["Documents/Personal/Passport scan.pdf", "scan-source.pdf", 9 * 86400e3, false],
-  ["Documents/Work/Project proposal.pdf", "redact-source.pdf", 14 * 86400e3, false],
-  ["Documents/Taxes/Tax return 2025.pdf", null, 40 * 86400e3, false], // missing on purpose
-  ["Documents/Work/Meeting minutes.pdf", "org-out-01-ops.pdf", 60 * 86400e3, false],
+  ["Documents/Work/Finance/Quarterly report Q3.pdf", "pages-a.pdf", 12 * 60e3, false, 2],
+  ["Documents/Home/Lease agreement.pdf", "org-out-02-insert.pdf", 3 * 3600e3, true, 2],
+  ["Downloads/Invoice 2026-0412.pdf", "compress-source.pdf", 26 * 3600e3, false, 0],
+  ["Documents/Work/Conference notes.pdf", "edit-source.pdf", 3 * 86400e3, false, 0],
+  ["Documents/Personal/Passport scan.pdf", "scan-source.pdf", 9 * 86400e3, false, 0],
+  ["Documents/Work/Project proposal.pdf", "redact-source.pdf", 14 * 86400e3, false, 0],
+  ["Documents/Taxes/Tax return 2025.pdf", null, 40 * 86400e3, false, 0], // missing on purpose
+  ["Documents/Work/Meeting minutes.pdf", "org-out-01-ops.pdf", 60 * 86400e3, false, 0],
 ];
-const seed = files.map(([rel, src, ago, pinned]) => {
+const seed = files.map(([rel, src, ago, pinned, lastPage]) => {
   const p = path.join(root, "Users", "Alex", ...rel.split("/"));
   if (src) {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.copyFileSync(path.join(samples, src), p);
   }
-  return { path: p, opened: Date.now() - ago, ...(pinned ? { pinned: true } : {}) };
+  return { path: p, opened: Date.now() - ago, ...(pinned ? { pinned: true } : {}), ...(lastPage ? { lastPage } : {}) };
 });
 
 async function launch(name, recents) {
@@ -81,8 +82,10 @@ async function launch(name, recents) {
   const shot = async (file) => {
     const r = await send("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(out, file), Buffer.from(r.data, "base64"));
-    console.log("screenshot", file);
+    console.log("screenshot", path.resolve(out, file));
   };
+  const click = (sel, nth = 0) =>
+    ev(`(() => { const e = document.querySelectorAll(${JSON.stringify(sel)})[${nth}]; if (!e) return false; e.click(); return true; })()`);
   const close = () => {
     try {
       ws.close();
@@ -96,87 +99,118 @@ async function launch(name, recents) {
     }
   };
   for (let i = 0; i < 80 && !(await ev("!!window.__inkwell").catch(() => false)); i++) await sleep(250);
-  return { ev, shot, send, close, data };
+  return { ev, shot, send, click, close, data };
 }
 
 const theme = (app, t) => app.ev(`window.__inkwell.useStore.getState().setTheme('${t}'); true`);
+const hasThumbs = (app) => app.ev("document.querySelectorAll('.read-page img, .mini-thumb img, .lib-thumb img').length");
 
 try {
-  // 1. nothing opened yet
+  // 1. nothing opened yet: home with empty recents
   let app = await launch("empty", null);
   try {
     await app.ev("document.fonts.ready.then(() => true)");
     for (const t of ["light", "dark"]) {
       await theme(app, t);
-      await sleep(1200);
-      await app.shot(`empty-${t}.png`);
+      await sleep(1000);
+      await app.shot(`home-empty-${t}.png`);
     }
   } finally {
     app.close();
   }
   await sleep(1500);
 
-  // 2. a filled list, one pinned, one missing
+  // 2. a filled list, one pinned, one missing: home, library, preview
   app = await launch("filled", seed);
   try {
-    const present = seed.filter((r) => fs.existsSync(r.path)).length;
-    for (let i = 0; i < 80; i++) {
-      if ((await app.ev("document.querySelectorAll('.thumb-box img').length")) >= present) break;
-      await sleep(250);
-    }
-    console.log("thumbnails", await app.ev("document.querySelectorAll('.thumb-box img').length"), "of", present);
+    const present = Math.min(4, seed.filter((r) => fs.existsSync(r.path)).length);
+    for (let i = 0; i < 80 && (await hasThumbs(app)) < present; i++) await sleep(250);
+    console.log("thumbnails on home", await hasThumbs(app), "of", present);
     for (const t of ["light", "dark"]) {
       await theme(app, t);
-      await sleep(1200);
-      await app.shot(`recents-${t}.png`);
-
-      // hover the second card (pin + remove buttons appear)
-      const r = await app.ev(
-        `(() => { const b = document.querySelectorAll('.card')[2].getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + 60 }; })()`,
-      );
-      await app.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: r.x, y: r.y });
-      await sleep(300);
-      await app.shot(`hover-${t}.png`);
-      await app.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 2, y: 2 });
-
-      // an OS drag cannot be synthesized from a page: the DOM drag events drive the same state
-      await app.ev("document.querySelector('.home').dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true })); true");
-      await sleep(400);
-      await app.shot(`dragover-${t}.png`);
-      await app.ev("document.querySelector('.home').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true })); true");
+      await sleep(1000);
+      await app.shot(`home-${t}.png`);
     }
+
+    // another row selected: the preview pane follows
     await theme(app, "light");
-    await app.ev("document.querySelector('[aria-label=\"List\"]').click(); true");
-    await sleep(600);
-    await app.shot("list-light.png");
-    // a narrow window: cards reflow
+    await app.click(".trow-open", 1);
+    await sleep(1500);
+    await app.shot("home-selected-light.png");
+
+    // a "..." menu open on the first recent row
+    await theme(app, "light");
+    await app.click(".recent-table .more");
+    await sleep(300);
+    await app.shot("home-menu-light.png");
+    await app.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+
+    // an OS drag cannot be synthesized from a page: the DOM drag events drive the same state
+    await app.ev("document.querySelector('.home').dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true })); true");
+    await sleep(400);
+    await app.shot("home-dragover-light.png");
+    await app.ev("document.querySelector('.home').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true })); true");
+
+    // narrow window: tools and cards reflow
     await app.send("Emulation.setDeviceMetricsOverride", { width: 760, height: 700, deviceScaleFactor: 1, mobile: false });
-    await app.ev("document.querySelector('[aria-label=\"Thumbnails\"]').click(); true");
+    await sleep(500);
+    await app.shot("home-narrow-light.png");
+    await app.send("Emulation.clearDeviceMetricsOverride");
+
+    // library via "See all"
+    await app.click(".nav-item", 1);
+    await sleep(800);
+    for (let i = 0; i < 40 && (await app.ev("document.querySelectorAll('.lib-thumb img').length")) < 5; i++) await sleep(250);
+    for (const t of ["light", "dark"]) {
+      await theme(app, t);
+      await sleep(800);
+      await app.shot(`library-${t}.png`);
+    }
+
+    // select the first file: list + preview
+    await app.click(".lib-row", 0);
+    await sleep(1500);
+    for (const t of ["light", "dark"]) {
+      await theme(app, t);
+      await sleep(800);
+      await app.shot(`preview-${t}.png`);
+    }
+    // the missing file's preview
+    await theme(app, "light");
+    await app.click(".lib-row", 6);
     await sleep(600);
-    await app.shot("narrow-light.png");
+    await app.shot("preview-missing-light.png");
   } finally {
     app.close();
   }
   await sleep(1500);
 
-  // 3. opening documents records them: one entry per file however the path is spelled, with a thumbnail
+  // 3. opening documents records them (one entry per file however the path is spelled, with a thumbnail)
+  //    and reading position is stored and restored
   app = await launch("open", null);
   try {
     const f = seed[0].path;
+    const st = "window.__inkwell.useStore.getState()";
     const open = async (p) => {
-      await app.ev(`window.__inkwell.useStore.getState().openPath(${JSON.stringify(p)})`);
+      await app.ev(`${st}.openPath(${JSON.stringify(p)})`);
       await sleep(1500);
     };
     await open(f);
     await open(f.replaceAll("\\", "/").toLowerCase());
     const n = await app.ev("Object.keys(window.__inkwell.useStore.getState().docs).length");
-    await app.ev("(() => { const s = window.__inkwell.useStore.getState(); Object.keys(s.docs).forEach((id) => s.closeDoc(Number(id))); return true; })()");
+    const id = await app.ev(`${st}.active`);
+    await app.ev(`${st}.goTo(${id}, 2); true`);
+    await sleep(1500);
+    await app.ev(`(() => { const s = ${st}; Object.keys(s.docs).forEach((i) => s.closeDoc(Number(i))); return true; })()`);
     await sleep(1500);
     const saved = JSON.parse(fs.readFileSync(path.join(app.data, "recents.json"), "utf8"));
-    console.log("docs opened", n, "| recents entries", saved.length, "| thumb", !!saved[0]?.thumb, "| pages", saved[0]?.pages);
+    console.log("docs opened", n, "| entries", saved.length, "| thumb", !!saved[0]?.thumb, "| pages", saved[0]?.pages, "| lastPage", saved[0]?.lastPage);
+    await open(f);
+    const cur = await app.ev(`${st}.docs[${st}.active].currentPage`);
+    console.log("reopened at page index", cur, "(expected 2)");
     await theme(app, "light");
     await sleep(800);
-    await app.shot("after-open-light.png");
+    await app.shot("viewer-tabs-light.png");
   } finally {
     app.close();
   }

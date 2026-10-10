@@ -1,26 +1,32 @@
-import { useState } from "react";
+import { type KeyboardEvent, useRef, useState } from "react";
 import { openDialog } from "../lib/commands";
-import { type Recent, baseName, dirName, formatSize, greeting, keyOf, ordered, shortDir, whenLabel } from "../lib/recent";
-import { quickTools, launchTool } from "../lib/tools";
-import { useRecents } from "../recents";
+import { type Recent, baseName, dirName, formatSize, greeting, keyOf, ordered, relTime, shortDir, whenLabel } from "../lib/recent";
+import { launchTool, quickTools } from "../lib/tools";
+import { revealInFolder, useRecents } from "../recents";
 import { type Theme, useStore } from "../store";
-import { FileMenu, SearchPill, Thumb, useDropOver, useNow, useRecentsSync } from "./FileParts";
+import { FileMenu, NavItem, SearchPill, Thumb, useDropOver, useNow, usePreviewSrc, useRecentsSync } from "./FileParts";
 import { Icon } from "./Icons";
-import { Library } from "./Library";
+import { Library, type Scope } from "./Library";
 import { MenuButton, type MenuEntry } from "./Menu";
 
 const open = (path: string) => void useStore.getState().openPath(path);
-const CONTINUE = 4;
-const RECENT_ROWS = 6;
+const CONTINUE = 3;
+const RECENT_ROWS = 8;
 
-/** Start screen: greeting, quick tools, continue reading, recent files. "See all" switches to the library. */
+/** Start screen: sidebar always visible; Home shows tools, continue reading and recent files with a preview. */
 export function Home() {
-  const [view, setView] = useState<"home" | "library">("home");
+  const [view, setView] = useState<"home" | Scope>("home");
   const { over, handlers } = useDropOver();
   useRecentsSync();
   return (
     <div className={over ? "home over" : "home"} {...handlers}>
-      {view === "home" ? <Landing over={over} onLibrary={() => setView("library")} /> : <Library over={over} onHome={() => setView("home")} />}
+      <nav className="lib-nav" aria-label="Start">
+        <NavItem icon="home" label="Home" on={view === "home"} onClick={() => setView("home")} />
+        <NavItem icon="clock" label="Recent" on={view === "recent" || view === "folders"} onClick={() => setView("recent")} />
+        <NavItem icon="pin" label="Pinned" on={view === "pinned"} onClick={() => setView("pinned")} />
+        <NavItem icon="system" label="This PC" onClick={() => void openDialog()} />
+      </nav>
+      {view === "home" ? <Landing over={over} onSeeAll={() => setView("recent")} /> : <Library over={over} scope={view} onScope={setView} />}
     </div>
   );
 }
@@ -31,17 +37,19 @@ const themes: [Theme, string][] = [
   ["dark", "Dark"],
 ];
 
-function Landing({ over, onLibrary }: { over: boolean; onLibrary: () => void }) {
+function Landing({ over, onSeeAll }: { over: boolean; onSeeAll: () => void }) {
   const items = useRecents((s) => s.items);
   const exists = useRecents((s) => s.exists);
   const ready = useRecents((s) => s.ready);
   const theme = useStore((s) => s.theme);
   const now = useNow();
+  const [sel, setSel] = useState<string | null>(null);
+  const table = useRef<HTMLUListElement>(null);
 
   const missing = (r: Recent) => exists[keyOf(r.path)] === false;
   const reading = items.filter((r) => !missing(r)).slice(0, CONTINUE);
-  const taken = new Set(reading.map((r) => keyOf(r.path)));
-  const recent = ordered(items.filter((r) => !taken.has(keyOf(r.path)))).slice(0, RECENT_ROWS);
+  const rows = ordered(items).slice(0, RECENT_ROWS);
+  const selected = rows.find((r) => keyOf(r.path) === sel) ?? rows[0];
   const empty = ready && items.length === 0;
 
   const settings: MenuEntry[] = [
@@ -51,81 +59,147 @@ function Landing({ over, onLibrary }: { over: boolean; onLibrary: () => void }) 
     { label: "Clear recent files", onSelect: () => useRecents.getState().clear() },
   ];
 
+  // arrows move the selection, Enter opens it, P pins, Delete removes
+  const onRowKey = (e: KeyboardEvent) => {
+    const el = e.target as HTMLElement;
+    if (!el.dataset.row || e.ctrlKey || e.metaKey || e.altKey) return;
+    const all = [...table.current!.querySelectorAll<HTMLElement>("[data-row]")];
+    const i = all.indexOf(el);
+    const go = (c?: HTMLElement) => {
+      if (!c) return;
+      c.focus();
+      setSel(c.dataset.key!);
+      e.preventDefault();
+    };
+    if (e.key === "ArrowDown") go(all[i + 1]);
+    else if (e.key === "ArrowUp") go(all[i - 1]);
+    else if (e.key === "p" || e.key === "P") {
+      useRecents.getState().togglePin(el.dataset.path!);
+      e.preventDefault();
+    } else if (e.key === "Delete") {
+      const next = all[i + 1] ?? all[i - 1];
+      useRecents.getState().remove(el.dataset.path!);
+      if (next) setSel(next.dataset.key!);
+      e.preventDefault();
+    }
+  };
+
   return (
     <div className="landing">
       <header className="land-top">
         <HomeSearch />
+        <button className="btn ghost open-file" onClick={() => void openDialog()}>
+          <Icon name="open" size={16} />
+          Open file
+          <span className="keys">Ctrl+O</span>
+        </button>
         <MenuButton className="icon-btn gear" label="Settings" items={settings}>
           <Icon name="settings" size={18} />
         </MenuButton>
       </header>
 
-      <div className="land-body">
-        <h1 className="greet">{greeting(new Date(now).getHours())}</h1>
+      <h1 className="greet">{greeting(new Date(now).getHours())}</h1>
 
-        <ul className="tools" aria-label="Quick tools">
-          {quickTools.map((t) => (
-            <li key={t.id}>
-              <button className="tool" onClick={() => void launchTool(t.id)}>
-                <Icon name={t.icon} size={26} />
-                {t.label}
-              </button>
-            </li>
-          ))}
-        </ul>
-
-        {empty && (
-          <section className="empty-panel" aria-label="No recent files">
-            <span className="empty-glyph">
-              <Icon name="file" size={30} />
-            </span>
-            <h2>No recent files yet</h2>
-            <p className="dim">Files you open show up here, with a thumbnail and where you stopped reading.</p>
-            <button className="btn primary" onClick={() => void openDialog()}>
-              <Icon name="open" size={16} />
-              Open file
-              <span className="keys">Ctrl+O</span>
+      <ul className="tools" aria-label="Quick tools">
+        {quickTools.map((t) => (
+          <li key={t.id}>
+            <button className="tool" onClick={() => void launchTool(t.id)}>
+              <Icon name={t.icon} size={22} />
+              {t.label}
             </button>
-          </section>
-        )}
+          </li>
+        ))}
+      </ul>
 
-        {reading.length > 0 && (
-          <section aria-label="Continue reading">
-            <div className="sec-head">
-              <h2>Continue reading</h2>
-              <button className="see-all" onClick={onLibrary}>
-                See all
-              </button>
-            </div>
-            <ul className="reading">
-              {reading.map((r) => (
-                <ReadCard key={keyOf(r.path)} r={r} />
-              ))}
-            </ul>
-          </section>
-        )}
+      {empty && (
+        <section className="empty-panel" aria-label="No recent files">
+          <span className="empty-glyph">
+            <Icon name="file" size={30} />
+          </span>
+          <h2>No recent files yet</h2>
+          <p className="dim">Files you open show up here, with a thumbnail and where you stopped reading.</p>
+          <button className="btn primary" onClick={() => void openDialog()}>
+            <Icon name="open" size={16} />
+            Open file
+            <span className="keys">Ctrl+O</span>
+          </button>
+        </section>
+      )}
 
-        {recent.length > 0 && (
+      {reading.length > 0 && (
+        <section aria-label="Continue reading">
+          <div className="sec-head">
+            <h2>Continue reading</h2>
+          </div>
+          <ul className="reading">
+            {reading.map((r) => (
+              <ReadCard key={keyOf(r.path)} r={r} now={now} />
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {rows.length > 0 && selected && (
+        <div className="recent-grid">
           <section aria-label="Recent files">
             <div className="sec-head">
               <h2>Recent</h2>
-              <button className="see-all" onClick={onLibrary}>
+              <button className="see-all" onClick={onSeeAll}>
                 See all
               </button>
             </div>
-            <ul className="recent-list">
-              {recent.map((r) => (
-                <RecentRow key={keyOf(r.path)} r={r} missing={missing(r)} now={now} />
-              ))}
+            <div className="trow thead" aria-hidden>
+              <span>Name</span>
+              <span>Modified</span>
+              <span className="r">Size</span>
+              <span />
+            </div>
+            <ul className="recent-table" ref={table} onKeyDown={onRowKey}>
+              {rows.map((r) => {
+                const k = keyOf(r.path);
+                const gone = missing(r);
+                const cls = ["trow", k === keyOf(selected.path) ? "on" : "", gone ? "missing" : ""].filter(Boolean).join(" ");
+                return (
+                  <li key={k} className={cls}>
+                    <button
+                      className="trow-open"
+                      data-row
+                      data-path={r.path}
+                      data-key={k}
+                      title={r.path}
+                      aria-current={k === keyOf(selected.path)}
+                      onClick={() => setSel(k)}
+                      onDoubleClick={() => !gone && open(r.path)}
+                    >
+                      <span className="trow-name">
+                        <span className="mini-thumb">
+                          <Thumb r={r} missing={gone} size={16} />
+                        </span>
+                        <span className="trow-text">
+                          <span className="lib-name">
+                            {baseName(r.path)}
+                            {r.pinned && <Icon name="pin" size={13} />}
+                          </span>
+                          <span className="dim small">{gone ? "File not found" : r.pages != null ? `${r.pages} ${r.pages === 1 ? "page" : "pages"}` : ""}</span>
+                        </span>
+                      </span>
+                      <span className="dim">{gone ? "" : whenLabel(r.mtime ?? r.opened, now)}</span>
+                      <span className="dim r">{r.size != null && !gone ? formatSize(r.size) : ""}</span>
+                    </button>
+                    <FileMenu r={r} missing={gone} />
+                  </li>
+                );
+              })}
             </ul>
           </section>
-        )}
+          <HomePreview r={selected} missing={missing(selected)} now={now} />
+        </div>
+      )}
 
-        <div className="drop-hint-wrap">
-          <div className="drop-hint" role="note">
-            <Icon name={over ? "open" : "file"} size={18} />
-            {over ? "Release to open" : "Drop a PDF anywhere to open it"}
-          </div>
+      <div className="drop-hint-wrap">
+        <div className="drop-hint" role="note">
+          <Icon name={over ? "open" : "file"} size={18} />
+          {over ? "Release to open" : "Drop a PDF anywhere to open it"}
         </div>
       </div>
     </div>
@@ -182,45 +256,74 @@ function HomeSearch() {
   );
 }
 
-function ReadCard({ r }: { r: Recent }) {
+function ReadCard({ r, now }: { r: Recent; now: number }) {
   const total = r.pages ?? 0;
   const page = r.lastPage != null && total > 0 ? Math.min(r.lastPage, total - 1) : null;
-  const pct = page != null ? ((page + 1) / total) * 100 : 0;
-  const label = page != null ? `p. ${page + 1} of ${total}` : total > 0 ? `${total} ${total === 1 ? "page" : "pages"}` : "";
+  const pages = total > 0 ? `${total} ${total === 1 ? "page" : "pages"}` : "";
   return (
     <li className="read-card">
       <button className="read-open" title={r.path} onClick={() => open(r.path)}>
         <span className="read-page">
-          <Thumb r={r} size={30} />
+          <Thumb r={r} size={26} />
         </span>
-        <span className="read-name">{baseName(r.path)}</span>
+        <span className="read-text">
+          <span className="read-name">{baseName(r.path)}</span>
+          {r.opened > 0 && <span className="dim">Last opened {relTime(r.opened, now)}</span>}
+          <span className="dim">{page != null && page > 0 ? `p. ${page + 1} of ${total}` : pages}</span>
+          {page != null && page > 0 && (
+            <span className="bar" aria-hidden>
+              <span style={{ width: `${((page + 1) / total) * 100}%` }} />
+            </span>
+          )}
+        </span>
       </button>
-      <div className="read-foot">
-        <span className="bar" aria-hidden>
-          <span style={{ width: `${pct}%` }} />
-        </span>
-        <span className="read-label dim">{label}</span>
-        <FileMenu r={r} missing={false} />
-      </div>
     </li>
   );
 }
 
-function RecentRow({ r, missing, now }: { r: Recent; missing: boolean; now: number }) {
+/** Right-hand pane of Home: large first page, a few facts, Open and Show in folder. */
+function HomePreview({ r, missing, now }: { r: Recent; missing: boolean; now: number }) {
+  const src = usePreviewSrc(r, missing);
+  const facts: [string, string][] = [
+    ["Type", "PDF document"],
+    ["Size", r.size != null ? formatSize(r.size) : "—"],
+    ["Modified", whenLabel(r.mtime ?? r.opened, now) || "—"],
+    ["Pages", r.pages != null ? String(r.pages) : "—"],
+  ];
   return (
-    <li className={missing ? "recent-row missing" : "recent-row"}>
-      <button className="recent-open" disabled={missing} title={r.path} onClick={() => open(r.path)}>
-        <span className="file-glyph">
-          <Icon name={missing ? "fileX" : "file"} size={18} />
-        </span>
-        <span className="recent-name">
-          {baseName(r.path)}
-          {r.pinned && <Icon name="pin" size={13} />}
-        </span>
-        <span className="recent-when dim">{missing ? "File not found" : whenLabel(r.opened, now)}</span>
-        <span className="recent-size dim">{r.size != null ? formatSize(r.size) : ""}</span>
-      </button>
-      <FileMenu r={r} missing={missing} />
-    </li>
+    <aside className="home-preview" aria-label="Preview">
+      <div className="hp-stage">
+        {src ? (
+          <img src={src} alt={`First page of ${baseName(r.path)}`} draggable={false} />
+        ) : (
+          <span className="preview-ph">
+            <Icon name={missing ? "fileX" : "file"} size={40} />
+          </span>
+        )}
+      </div>
+      <h3 className="hp-name" title={r.path}>
+        {baseName(r.path)}
+      </h3>
+      {missing ? (
+        <p className="danger">File not found at {shortDir(dirName(r.path))}</p>
+      ) : (
+        <dl className="facts">
+          {facts.map(([k, v]) => (
+            <div key={k}>
+              <dt className="dim">{k}</dt>
+              <dd>{v}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      <div className="hp-actions">
+        <button className="btn primary" disabled={missing} onClick={() => open(r.path)}>
+          Open
+        </button>
+        <button className="btn ghost" disabled={missing} onClick={() => void revealInFolder(r.path)}>
+          Show in folder
+        </button>
+      </div>
+    </aside>
   );
 }

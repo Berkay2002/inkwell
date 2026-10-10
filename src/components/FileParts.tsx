@@ -2,9 +2,9 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { type Recent, baseName } from "../lib/recent";
-import { revealInFolder, useRecents } from "../recents";
+import { previewOf, revealInFolder, useRecents } from "../recents";
 import { useStore } from "../store";
-import { Icon } from "./Icons";
+import { Icon, type IconName } from "./Icons";
 import { MenuButton, type MenuEntry } from "./Menu";
 
 const isPdf = (p: string) => /\.pdf$/i.test(p);
@@ -108,6 +108,32 @@ export function FileMenu({ r, missing }: { r: Recent; missing: boolean }) {
     <MenuButton className="icon-btn more" label={`Actions for ${baseName(r.path)}`} items={fileMenu(r, missing)}>
       <Icon name="more" size={18} />
     </MenuButton>
+  );
+}
+
+/** Larger first page of `r`: the thumbnail at once, the sharper render when it arrives. */
+export function usePreviewSrc(r: Recent, missing: boolean): string | undefined {
+  const [big, setBig] = useState<string | null>(null);
+  useEffect(() => {
+    setBig(null);
+    if (missing) return;
+    let live = true;
+    void previewOf(r).then((u) => live && setBig(u));
+    return () => {
+      live = false;
+    };
+    // the entry object changes on every list update; the file itself is identified by path and mtime
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [r.path, r.mtime, missing]);
+  return missing ? undefined : (big ?? r.thumb);
+}
+
+export function NavItem({ icon, label, on, onClick }: { icon: IconName; label: string; on?: boolean; onClick: () => void }) {
+  return (
+    <button className={on ? "nav-item on" : "nav-item"} aria-current={on ? "page" : undefined} onClick={onClick}>
+      <Icon name={icon} size={18} />
+      {label}
+    </button>
   );
 }
 

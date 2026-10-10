@@ -1,24 +1,23 @@
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, useRef, useState } from "react";
 import { openDialog } from "../lib/commands";
 import { type Recent, baseName, dirName, formatSize, groupByDir, keyOf, ordered, relTime, shortDir } from "../lib/recent";
 import { openWithAssistant } from "../lib/tools";
-import { previewOf, revealInFolder, useRecents } from "../recents";
+import { revealInFolder, useRecents } from "../recents";
 import { useStore } from "../store";
-import { FileMenu, SearchPill, Thumb, locateFile, useNow } from "./FileParts";
+import { FileMenu, SearchPill, Thumb, locateFile, useNow, usePreviewSrc } from "./FileParts";
 import { Icon, type IconName } from "./Icons";
 
-type Scope = "recent" | "pinned" | "folders";
+export type Scope = "recent" | "pinned" | "folders";
 
 const open = (path: string) => void useStore.getState().openPath(path);
 const pagesLabel = (n: number) => `${n} ${n === 1 ? "page" : "pages"}`;
 const openedLabel = (r: Recent, now: number) => (r.opened > 0 ? `Opened ${relTime(r.opened, now)}` : "");
 
-/** All recent files: sidebar, drop panel and list; selecting a file turns it into list + preview. */
-export function Library({ over, onHome }: { over: boolean; onHome: () => void }) {
+/** All recent files: drop panel and list; selecting a file turns it into list + preview. The sidebar belongs to Home. */
+export function Library({ over, scope, onScope }: { over: boolean; scope: Scope; onScope: (s: Scope) => void }) {
   const items = useRecents((s) => s.items);
   const exists = useRecents((s) => s.exists);
   const now = useNow();
-  const [scope, setScope] = useState<Scope>("recent");
   const [pinnedFirst, setPinnedFirst] = useState(true);
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState<string | null>(null);
@@ -35,20 +34,13 @@ export function Library({ over, onHome }: { over: boolean; onHome: () => void })
 
   return (
     <div className="lib" onKeyDown={(e) => e.key === "Escape" && sel && setSel(null)}>
-      <nav className="lib-nav" aria-label="Library">
-        <NavItem icon="home" label="Home" onClick={onHome} />
-        <NavItem icon="clock" label="Recent" on={scope !== "pinned"} onClick={() => setScope("recent")} />
-        <NavItem icon="pin" label="Pinned" on={scope === "pinned"} onClick={() => setScope("pinned")} />
-        <NavItem icon="system" label="This PC" onClick={() => void openDialog()} />
-      </nav>
-
       {selected ? (
         <main className="lib-main split">
           <section className="panel lib-listcol">
             <div className="lib-search">{search}</div>
             <div className="pills wide" role="tablist">
               {(["recent", "pinned", "folders"] as Scope[]).map((s) => (
-                <button key={s} role="tab" aria-selected={scope === s} className={scope === s ? "on" : undefined} onClick={() => setScope(s)}>
+                <button key={s} role="tab" aria-selected={scope === s} className={scope === s ? "on" : undefined} onClick={() => onScope(s)}>
                   {s[0].toUpperCase() + s.slice(1)}
                 </button>
               ))}
@@ -89,15 +81,6 @@ export function Library({ over, onHome }: { over: boolean; onHome: () => void })
         </main>
       )}
     </div>
-  );
-}
-
-function NavItem({ icon, label, on, onClick }: { icon: IconName; label: string; on?: boolean; onClick: () => void }) {
-  return (
-    <button className={on ? "nav-item on" : "nav-item"} aria-current={on ? "page" : undefined} onClick={onClick}>
-      <Icon name={icon} size={18} />
-      {label}
-    </button>
   );
 }
 
@@ -203,19 +186,7 @@ function Rows({
 }
 
 function Preview({ r, missing, now }: { r: Recent; missing: boolean; now: number }) {
-  const [big, setBig] = useState<string | null>(null);
-  useEffect(() => {
-    setBig(null);
-    if (missing) return;
-    let live = true;
-    void previewOf(r).then((u) => live && setBig(u));
-    return () => {
-      live = false;
-    };
-    // the entry object changes on every list update; the file itself is identified by path and mtime
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [r.path, r.mtime, missing]);
-  const src = !missing ? (big ?? r.thumb) : undefined;
+  const src = usePreviewSrc(r, missing);
   const details: [IconName, string][] = [
     ["file", r.pages != null ? pagesLabel(r.pages) : ""],
     ["organize", r.size != null ? formatSize(r.size) : ""],

@@ -13,6 +13,12 @@ export function TabBar() {
   const active = useStore((s) => s.active);
   return (
     <div className="tabbar" role="tablist" data-tauri-drag-region>
+      <span className="brand" data-tauri-drag-region>
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden>
+          <path d="M12 2.5c3.6 4.3 6.5 7.5 6.5 11a6.5 6.5 0 0 1-13 0c0-3.5 2.9-6.7 6.5-11Z" fill="currentColor" />
+        </svg>
+        Inkwell
+      </span>
       <div
         role="tab"
         aria-selected={active == null}
