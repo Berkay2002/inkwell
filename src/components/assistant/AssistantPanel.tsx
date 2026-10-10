@@ -11,7 +11,6 @@ import {
   FOOTNOTE,
   Gate,
   Messages,
-  ModelPicker,
   MoreMenu,
   NoText,
   type Variant,
@@ -80,7 +79,6 @@ function Header({ doc }: { doc: DocState }) {
     <div className="ax-head">
       <span className="ax-title">Assistant</span>
       <span className="grow" />
-      <ModelPicker />
       <MoreMenu doc={doc} />
       <CloseButton />
     </div>
@@ -189,8 +187,7 @@ function Floating({ doc }: { doc: DocState }) {
       <div className="ax-head drag" {...events("move")}>
         <span className="ax-title">Assistant</span>
         <span className="grow" />
-        <ModelPicker />
-        <MoreMenu doc={doc} />
+          <MoreMenu doc={doc} />
         <CloseButton />
       </div>
       <div className="ax-seg" role="tablist">
@@ -341,7 +338,7 @@ function Bar({ doc }: { doc: DocState }) {
               ))}
             </div>
           )}
-          <Composer doc={doc} variant="bar" lead={<MoreMenu doc={doc} up />} trail={<ModelPicker up icon />} />
+          <Composer doc={doc} variant="bar" trail={<MoreMenu doc={doc} up />} />
         </div>
       )}
       <Connector />
