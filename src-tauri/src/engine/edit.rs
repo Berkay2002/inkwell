@@ -19,6 +19,7 @@ use mupdf::{Document, Size};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::Write;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ impl EditOp {
     /// What the step is called in the undo menu and the history, e.g. "Rotate pp. 2-3 by 90°".
     pub fn label(&self) -> String {
         match self {
-            EditOp::Rotate { pages, quarter_turns } => format!("Rotate {} by {}°", page_ranges(pages), quarter_turns * 90),
+            EditOp::Rotate { pages, quarter_turns } => format!("Rotate {} by {}°", page_ranges(pages), *quarter_turns as i64 * 90),
             EditOp::Delete { pages } => format!("Delete {}", page_ranges(pages)),
             EditOp::Move { pages, to } => format!("Move {} to position {}", page_ranges(pages), to + 1),
             EditOp::InsertBlank { at, .. } => format!("Insert blank page as p. {}", at + 1),
@@ -368,7 +369,8 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
     match op {
         EditOp::Rotate { pages, quarter_turns } => {
             let pages = check_pages(pages, n)?;
-            if quarter_turns.rem_euclid(4) == 0 {
+            let quarter_turns = quarter_turns.rem_euclid(4);
+            if quarter_turns == 0 {
                 return Ok(None);
             }
             let mut out = sizes.to_vec();
@@ -667,7 +669,9 @@ impl Engine {
 
     fn apply_locked(&self, entry: &DocEntry, ed: &mut Editor, op: &EditOp, source: EditSource) -> Result<EditState> {
         let sizes = ed.step().sizes.clone();
-        let changed = run(&mut ed.doc.doc, op, &sizes).and_then(|c| match c {
+        // A panic must also roll back below, or the next edit would snapshot what it left behind.
+        let ran = catch_unwind(AssertUnwindSafe(|| run(&mut ed.doc.doc, op, &sizes))).unwrap_or(Err(EngineError::Panic));
+        let changed = ran.and_then(|c| match c {
             None => Ok(None),
             Some((after, drops)) => {
                 let snap = ed.snapshot()?;
@@ -728,7 +732,8 @@ impl Engine {
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
         let len = ed.step().snap.len;
-        let changed = f(&mut ed.doc.doc).and_then(|pages| {
+        let ran = catch_unwind(AssertUnwindSafe(|| f(&mut ed.doc.doc))).unwrap_or(Err(EngineError::Panic));
+        let changed = ran.and_then(|pages| {
             let snap = if redaction {
                 let out = write_doc(&ed.doc.doc, rewrite_opts(), len)?;
                 Snap { len: out.len(), bytes: Arc::new(out) }
@@ -768,7 +773,11 @@ impl Engine {
         let mut lane = entry.editor.lock();
         let Some(ed) = lane.as_mut() else { return Ok(clean_state(&entry)) };
         let cur = ed.cur;
+        // The kept steps' bytes may still hold what dropped steps removed: saves keep rewriting.
+        let (drops, redacts) = (ed.steps[..=cur].iter().any(|s| s.drops), ed.steps[..=cur].iter().any(|s| s.redacts));
         ed.steps.drain(..cur);
+        ed.steps[0].drops |= drops;
+        ed.steps[0].redacts |= redacts;
         ed.saved = ed.saved.and_then(|s| s.checked_sub(cur));
         ed.cur = 0;
         Ok(ed.state(&entry))
@@ -788,14 +797,16 @@ impl Engine {
     /// Shows the document as of history entry `index` (undo or redo up to it). Later entries
     /// stay redoable until the next edit.
     pub fn restore(&self, id: DocId, index: usize) -> Result<EditState> {
-        let entry = self.entry(id)?;
-        let lane = entry.editor.lock();
-        let len = lane.as_ref().map_or(1, |ed| ed.steps.len());
-        drop(lane);
-        if index >= len {
+        // Checked under the lane lock: an edit in between may have dropped the entry.
+        let mut bad = index > 0;
+        let state = self.travel(id, |ed| {
+            bad = index >= ed.steps.len();
+            Some(index).filter(|_| !bad)
+        })?;
+        if bad {
             return Err(invalid(format!("no history entry {index}")));
         }
-        self.travel(id, |_| Some(index))
+        Ok(state)
     }
 
     /// Every step since the file was opened, oldest first (entry 0 is the file as opened).
@@ -869,7 +880,9 @@ impl Engine {
         let rewrite = ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
         let full;
         let bytes: &[u8] = if rewrite {
-            full = write_doc(&ed.doc.doc, rewrite_opts(), ed.step().snap.len)?;
+            // From a throwaway copy: a garbage-collecting write leaves its document unable to take
+            // incremental updates, which every later edit needs.
+            full = write_doc(&open_snap(&ed.step().snap, &entry)?.doc, rewrite_opts(), ed.step().snap.len)?;
             &full
         } else {
             ed.bytes()

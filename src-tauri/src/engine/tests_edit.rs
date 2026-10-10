@@ -481,3 +481,97 @@ fn a_redaction_never_leaves_the_old_bytes_behind() {
     let lane = entry.editor.lock();
     assert!(lane.as_ref().unwrap().steps.iter().all(|s| !s.snap.bytes.starts_with(&original)));
 }
+
+// ---- pre-merge review regressions ----------------------------------------------------------
+
+#[test]
+fn review_edit_after_a_full_rewrite_save() {
+    let d = dir("review_rewrite_then_edit");
+    let path = fixture_at(&d, "a.pdf", &pages(4));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap();
+    eng.save(id, None).unwrap();
+    // The full rewrite must not leave the authoritative document unusable for the next edit.
+    eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    eng.apply(id, EditOp::Move { pages: vec![2], to: 0 }).unwrap();
+    assert_eq!(labels(&eng, id), vec![4, 1, 3]);
+    eng.save(id, None).unwrap();
+    let (e2, i2) = reopen(&path);
+    assert_eq!(labels(&e2, i2), vec![4, 1, 3]);
+    assert!(e2.page_text(i2, 1).unwrap()[0].b[2] > PAGE_W, "rotation lost");
+    eng.undo(id).unwrap();
+    assert_eq!(labels(&eng, id), vec![1, 3, 4]);
+}
+
+#[test]
+fn review_saving_a_password_protected_file_keeps_it_encrypted() {
+    use mupdf::pdf::Encryption;
+    let d = dir("review_encrypted");
+    let path = d.join("s.pdf").to_string_lossy().into_owned();
+    {
+        let src = PdfDocument::from_bytes(&fixture::build(&pages(3))).unwrap();
+        let mut o = PdfWriteOptions::default();
+        o.set_encryption(Encryption::Aes256).set_user_password("secret").set_owner_password("owner");
+        src.save_with_options(&path, o).unwrap();
+    }
+    for (i, op) in [EditOp::Rotate { pages: vec![0], quarter_turns: 1 }, EditOp::Delete { pages: vec![1] }].into_iter().enumerate() {
+        let eng = Engine::new(2, 64 << 20);
+        let (id, _) = eng.open_pending(&path);
+        eng.authenticate(id, "secret").unwrap();
+        eng.apply(id, op).unwrap();
+        eng.save(id, None).unwrap();
+        let mut doc = Document::open(path.as_str()).unwrap();
+        assert!(doc.needs_password().unwrap(), "save {i} wrote the file without its password");
+        assert!(doc.authenticate("secret").unwrap());
+    }
+}
+
+#[test]
+fn review_a_panicking_custom_edit_is_rolled_back() {
+    let d = dir("review_panic");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        eng.apply_custom(id, "Redact".into(), EditSource::User, true, |doc| {
+            doc.delete_page(1)?;
+            panic!("redaction engine bug");
+        })
+    }));
+    assert!(matches!(r, Ok(Err(_))), "panic escaped the edit lane");
+    // The next, unrelated edit must not carry the half-done redaction with it.
+    eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    assert_eq!(labels(&eng, id), vec![1, 2, 3]);
+    // A huge turn count is not an overflow.
+    let s = eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: i32::MAX }).unwrap();
+    assert_eq!(s.sizes[0], UPRIGHT);
+}
+
+#[test]
+fn review_forget_history_keeps_the_rewrite_flags() {
+    let d = dir("review_forget");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let original = std::fs::read(&path).unwrap();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap();
+    eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    eng.forget_history(id).unwrap();
+    eng.save(id, None).unwrap();
+    assert!(!std::fs::read(&path).unwrap().starts_with(&original), "deleted page content kept in the saved file");
+}
+
+#[test]
+fn review_text_and_search_of_an_old_generation_are_stale() {
+    let d = dir("review_text_rev");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    eng.apply(id, EditOp::Delete { pages: vec![0] }).unwrap();
+    // A caller that read rev 0 asks for page 0's text: it must not get rev 1's page 0.
+    assert!(matches!(eng.page_text_at(id, 0, 0), Err(EngineError::Stale)));
+    assert!(eng.page_text_at(id, 1, 0).is_ok());
+    let entry = eng.doc_entry(id).unwrap();
+    assert!(matches!(eng.search_page_at(&entry, Some(0), 0, "fixture"), Err(EngineError::Stale)));
+}
