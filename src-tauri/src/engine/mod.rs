@@ -7,6 +7,7 @@
 
 pub mod cache;
 pub mod fixture;
+pub mod fonts;
 pub mod pool;
 
 use cache::{Tile, TileCache, TileKey};
@@ -171,6 +172,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(workers: usize, cache_budget: usize) -> Arc<Self> {
+        fonts::install();
         Arc::new(Self {
             docs: RwLock::new(HashMap::new()),
             next_id: AtomicU32::new(1),
