@@ -92,7 +92,7 @@ export function ModelPicker({ up = false, icon = false }: { up?: boolean; icon?:
         </button>
       )}
       {open && (
-        <div className={up ? "ax-pop up" : "ax-pop"} role="menu">
+        <div className={`ax-pop${icon ? " right" : ""}${up ? " up" : ""}`} role="menu">
           <div className="ax-pop-label">Model</div>
           {models.map((m) => (
             <button
@@ -483,18 +483,52 @@ function SelStrip({ doc, variant }: { doc: DocState; variant: Variant }) {
   );
 }
 
-/** The question box: a pill with a round send button. `lead` sits inside it before the text, `trail`
- *  before the send button. */
+/** The "+" in the composer: what to put in front of the assistant besides typing. */
+function AttachMenu({ doc }: { doc: DocState }) {
+  const selection = useAi((s) => s.selection);
+  const { open, setOpen, ref } = usePop();
+  const ask = useAi.getState().ask;
+  const items = [
+    ...(selection
+      ? [{ title: "Explain the selection", run: () => ask(doc.id, { kind: "selection", action: "explain", text: selection.text, page: selection.page }) }]
+      : []),
+    { title: `Summarize page ${doc.currentPage + 1}`, run: () => ask(doc.id, { kind: "summarizePage", page: doc.currentPage }) },
+    { title: "Summarize the document", run: () => ask(doc.id, { kind: "summarizeDocument" }) },
+  ];
+  return (
+    <div className="ax-pop-wrap" ref={ref}>
+      <button className="ax-icon" title="Add the selection or page" aria-label="Add the selection or page" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <Glyph name="plus" size={20} />
+      </button>
+      {open && (
+        <div className="ax-pop up" role="menu">
+          {items.map((i) => (
+            <button
+              key={i.title}
+              onClick={() => {
+                setOpen(false);
+                i.run();
+              }}
+            >
+              {i.title}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The question box, after the Codex and ChatGPT composers: one rounded row with "+", the question,
+ *  the model as an icon and a round send button. `trail` sits before the model icon. */
 export function Composer({
   doc,
   variant,
-  lead,
   trail,
   onSend,
 }: {
   doc: DocState;
   variant: Variant;
-  lead?: ReactNode;
   trail?: ReactNode;
   onSend?: () => void;
 }) {
@@ -516,7 +550,7 @@ export function Composer({
     <div className={`ax-compose ${variant}`}>
       <SelStrip doc={doc} variant={variant} />
       <div className="ax-input">
-        {lead}
+        <AttachMenu doc={doc} />
         <textarea
           value={text}
           rows={1}
@@ -534,6 +568,7 @@ export function Composer({
           }}
         />
         {trail}
+        <ModelPicker up icon />
         {streaming ? (
           <button className="ax-send" title="Stop" aria-label="Stop" onClick={() => st().cancel(doc.id)}>
             <Glyph name="stop" size={14} />

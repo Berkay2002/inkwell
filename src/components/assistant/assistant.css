@@ -624,24 +624,24 @@ button.ax-cite:hover {
   flex: none;
   padding: 6px 12px 4px;
 }
+/* one row, fully round, no border, a soft raised surface; the textarea grows upward */
 .ax-input {
   display: flex;
   align-items: flex-end;
-  gap: 8px;
-  padding: 6px 6px 6px 16px;
-  background: var(--ax-panel);
-  border: 1px solid var(--ax-border);
-  border-radius: 24px;
-}
-.ax-input:focus-within {
-  border-color: var(--ax-accent);
+  gap: 4px;
+  min-height: 56px;
+  padding: 8px 8px 8px 10px;
+  background: var(--ax-pill, var(--ax-panel));
+  border-radius: 28px;
+  box-shadow: var(--ax-shadow);
 }
 .ax-input textarea {
   flex: 1;
   min-width: 0;
   min-height: 24px;
   max-height: 120px;
-  margin: 4px 0;
+  margin: 8px 8px 8px 4px;
+  font-size: 14.5px;
   padding: 0;
   resize: none;
   field-sizing: content;
@@ -654,16 +654,29 @@ button.ax-cite:hover {
 }
 .ax-input textarea::placeholder {
   color: var(--ax-dim);
+  opacity: 0.8;
+}
+.ax-input .ax-pop-wrap {
+  align-self: flex-end;
+  margin-bottom: 2px;
+}
+.ax-input .ax-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 18px;
+}
+.ax-input .ax-pop-wrap:first-child .ax-icon {
+  color: var(--ax-text);
 }
 .ax-send {
   display: grid;
   place-items: center;
   flex: none;
-  width: 32px;
-  height: 32px;
+  width: 40px;
+  height: 40px;
   color: var(--ax-on-accent);
   background: var(--ax-accent);
-  border-radius: 16px;
+  border-radius: 20px;
 }
 /* disabled stays solid ink blue: a see-through blue over cream reads as lilac */
 .ax-panel :focus-visible,
@@ -714,37 +727,14 @@ button.ax-cite:hover {
   font-family: var(--ax-font);
   color: var(--ax-text);
 }
-/* one pill, after ChatGPT's composer: menu icon, question, plain model text, round send button */
+.ax-bar {
+  --ax-pill: var(--ax-surface);
+}
 .ax-bar .ax-compose {
   padding: 0;
 }
 .ax-bar .ax-input {
-  align-items: center;
-  gap: 4px;
-  min-height: 56px;
-  padding: 8px 10px 8px 10px;
-  background: var(--ax-surface);
-  border-radius: 28px;
   box-shadow: var(--ax-shadow-lg);
-}
-.ax-bar .ax-input textarea {
-  margin: 0 8px 0 4px;
-  font-size: 14.5px;
-}
-.ax-bar .ax-input .ax-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 18px;
-  color: var(--ax-text);
-}
-/* the model picker is just a brain icon here; the tooltip carries the model and effort */
-.ax-bar .ax-input .ax-pop-wrap:last-of-type .ax-icon {
-  color: var(--ax-dim);
-}
-.ax-bar .ax-send {
-  width: 40px;
-  height: 40px;
-  border-radius: 20px;
 }
 .ax-bar .ax-selstrip {
   position: absolute;
