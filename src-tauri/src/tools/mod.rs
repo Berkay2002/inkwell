@@ -172,8 +172,8 @@ pub struct CompressRequest {
     pub choose_output: bool,
 }
 
-/// `output`: where to write, chosen on the Rust side; `None` = `<name> (compressed).pdf` next to
-/// the input. Never overwritten.
+/// `output`: where to write, chosen in a dialog on the Rust side (it may replace the file the user
+/// confirmed, never the input); `None` = `<name> (compressed).pdf` next to the input, never overwritten.
 pub fn run_compress(
     eng: &Engine,
     req: &CompressRequest,
@@ -186,6 +186,9 @@ pub fn run_compress(
         Some(c) => Options { preset: Preset::Custom, ..c.clone() },
         None => Options::preset(req.preset),
     };
+    // A name only gets here from the save dialog, where the user confirmed replacing a file. The
+    // input is still never replaced (the engine checks).
+    opts.replace_output = output.is_some();
     opts.output = output;
     opts.password = None;
     // The fraction only ever grows, whatever the stages report.

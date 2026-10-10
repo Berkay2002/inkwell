@@ -311,6 +311,25 @@ fn a_chosen_output_is_used_and_cancelled_compress_leaves_no_file() {
     let chosen = d.join("small.pdf");
     let rep = run_compress(&eng, &creq(id), Some(chosen.clone()), &AtomicBool::new(false), &mut |_| {}).unwrap();
     assert_eq!(rep.output, chosen);
+
+    // A name confirmed in the dialog may replace an existing file, never the input.
+    let again = run_compress(&eng, &creq(id), Some(chosen.clone()), &AtomicBool::new(false), &mut |_| {}).unwrap();
+    assert_eq!(again.output, chosen);
+    assert_eq!(files(&d), ["opt-in-01.pdf", "small.pdf"]);
+    let input = d.join("opt-in-01.pdf");
+    let before = std::fs::read(&input).unwrap();
+    let r = run_compress(&eng, &creq(id), Some(input.clone()), &AtomicBool::new(false), &mut |_| {});
+    assert!(r.unwrap_err().0.contains("overwrite the input"));
+    assert_eq!(std::fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn an_output_in_the_webview_json_is_ignored() {
+    let o: Options = serde_json::from_str(r#"{"output":"C:\\x.pdf","replaceOutput":true,"password":"p"}"#).unwrap();
+    assert!(o.output.is_none() && !o.replace_output);
+    let r: CompressRequest = serde_json::from_str(r#"{"doc":1,"custom":{"output":"C:\\x.pdf","replaceOutput":true}}"#).unwrap();
+    let c = r.custom.unwrap();
+    assert!(c.output.is_none() && !c.replace_output);
 }
 
 #[test]

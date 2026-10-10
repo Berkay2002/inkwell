@@ -97,8 +97,15 @@ pub struct Options {
     /// Pages rendered before/after for the visual check (spread evenly; 0 = skip the check).
     pub visual_pages: u32,
     pub password: Option<String>,
-    /// Where to write; default `<name> (compressed).pdf` next to the input. Never overwritten.
+    /// Where to write; default `<name> (compressed).pdf` next to the input. Never replaces an existing
+    /// file unless `replace_output` says so. Not part of the wire format: a webview cannot name a file,
+    /// the command fills it from a dialog on the Rust side.
+    #[serde(skip)]
     pub output: Option<PathBuf>,
+    /// `output` may replace the file already there (the user confirmed that in the save dialog).
+    /// The input itself is never replaced.
+    #[serde(skip)]
+    pub replace_output: bool,
 }
 
 impl Default for Options {
@@ -134,6 +141,7 @@ impl Options {
             visual_pages: 8,
             password: None,
             output: None,
+            replace_output: false,
         }
     }
 }
@@ -301,11 +309,15 @@ impl Drop for TempFile {
     }
 }
 
-/// Gives `tmp`'s content the name `out` without ever replacing a file that is already there. A hard link
-/// does it atomically; file systems without links (FAT32, exFAT, some network shares) get an exclusive
-/// create plus a copy. The caller removes `tmp` afterwards.
-fn publish(tmp: &Path, out: &Path) -> Result<(), Error> {
+/// Gives `tmp`'s content the name `out`. Without `replace` it never replaces a file that is already
+/// there: a hard link does it atomically; file systems without links (FAT32, exFAT, some network
+/// shares) get an exclusive create plus a copy. With `replace` (a dialog-confirmed name) `tmp` is
+/// renamed over `out`. The caller removes `tmp` afterwards.
+fn publish(tmp: &Path, out: &Path, replace: bool) -> Result<(), Error> {
     use std::io::ErrorKind::AlreadyExists;
+    if replace {
+        return Ok(fs::rename(tmp, out)?);
+    }
     match fs::hard_link(tmp, out) {
         Ok(()) => return Ok(()),
         Err(e) if e.kind() == AlreadyExists => return Err(Error::OutputExists(out.to_path_buf())),
@@ -352,7 +364,12 @@ fn resolve_output(input: &Path, opts: &Options) -> Result<PathBuf, Error> {
     let out = opts.output.clone().unwrap_or_else(|| default_output(input));
     if out.exists() {
         let same = matches!((fs::canonicalize(input), fs::canonicalize(&out)), (Ok(a), Ok(b)) if a == b);
-        return Err(if same { Error::SameFile } else { Error::OutputExists(out) });
+        if same {
+            return Err(Error::SameFile);
+        }
+        if !opts.replace_output {
+            return Err(Error::OutputExists(out));
+        }
     }
     Ok(out)
 }
@@ -538,7 +555,7 @@ pub fn compress(
         warnings.push("The document is signed; the signatures are invalid in the compressed copy.".into());
     }
     let size_after = if kept_original { size_before } else { written };
-    publish(&tmp.0, &out_path)?;
+    publish(&tmp.0, &out_path, opts.replace_output)?;
     drop(tmp);
     let finish = |e: Error, p: &Path| {
         let _ = fs::remove_file(p);
