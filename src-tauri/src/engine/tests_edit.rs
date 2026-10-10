@@ -58,14 +58,14 @@ fn rotate_undo_redo() {
     assert_eq!(s.rev, 1);
     assert_eq!(s.sizes, vec![UPRIGHT, TURNED, UPRIGHT]);
     assert!(s.dirty);
-    assert_eq!((s.undo.as_deref(), s.redo.as_deref()), (Some("Rotate page"), None));
+    assert_eq!((s.undo.as_deref(), s.redo.as_deref()), (Some("Rotate p. 2 by 90°"), None));
     // Tiles of the new generation show it: 792 x 612 at scale 1.
     let entry = eng.doc_entry(id).unwrap();
     let t = eng.render_tile(&entry, &TileKey { doc: id, rev: 1, page: 1, rot: 0, scale: 1000, tx: 1, ty: 1 }).unwrap();
     assert_eq!((t.w, t.h), (792 - 512, 612 - 512));
 
     let s = eng.undo(id).unwrap();
-    assert_eq!((s.rev, s.dirty, s.redo.as_deref()), (2, false, Some("Rotate page")));
+    assert_eq!((s.rev, s.dirty, s.redo.as_deref()), (2, false, Some("Rotate p. 2 by 90°")));
     assert_eq!(s.sizes, vec![UPRIGHT; 3]);
     let s = eng.redo(id).unwrap();
     assert_eq!((s.rev, s.sizes[1]), (3, TURNED));
@@ -254,7 +254,7 @@ fn extract_split_merge() {
     assert_eq!(labels(&e2, i2), vec![2, 4]);
     // Extract with delete: one undo step.
     let s = eng.extract(id, &[0], &d.join("first.pdf").to_string_lossy(), true).unwrap();
-    assert_eq!((s.page_count, s.undo.as_deref()), (4, Some("Delete page")));
+    assert_eq!((s.page_count, s.undo.as_deref()), (4, Some("Delete p. 1")));
     eng.undo(id).unwrap();
 
     let r = eng.split(id, 2).unwrap();
@@ -377,4 +377,107 @@ fn renders_during_edits_match_their_generation() {
     }
     println!("checked {checked} tiles across {} generations", truth.len());
     assert!(checked >= 80, "only {checked} renders completed");
+}
+
+#[test]
+fn history_lists_steps_and_undoes_an_assistant_turn_at_once() {
+    let d = dir("history");
+    let path = fixture_at(&d, "a.pdf", &pages(5));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let turn = |t: &str| EditSource::Assistant { turn: t.into() };
+
+    eng.apply(id, EditOp::Rotate { pages: vec![1, 2, 4], quarter_turns: 1 }).unwrap();
+    eng.apply_from(id, EditOp::Delete { pages: vec![0] }, turn("t1")).unwrap();
+    eng.apply_from(id, EditOp::Move { pages: vec![0], to: 4 }, turn("t1")).unwrap();
+    let s = eng.apply_from(id, EditOp::InsertBlank { at: 1, like: 0 }, turn("t2")).unwrap();
+    assert_eq!(s.undo.as_deref(), Some("Insert blank page as p. 2"));
+
+    let h = eng.history(id).unwrap();
+    let rows: Vec<_> = h.iter().map(|e| (e.label.as_str(), e.pages.clone(), e.current)).collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("Opened", vec![], false),
+            ("Rotate pp. 2-3, 5 by 90°", vec![1, 2, 4], false),
+            ("Delete p. 1", vec![0], false),
+            ("Move p. 1 to position 5", vec![3], false),
+            ("Insert blank page as p. 2", vec![1], true),
+        ]
+    );
+    assert_eq!(h[2].source, turn("t1"));
+    assert!(h[0].saved && h.windows(2).all(|w| w[0].at_ms <= w[1].at_ms));
+
+    // Turn t2, then all of turn t1 in one call.
+    let s = eng.undo(id).unwrap();
+    assert_eq!(s.undo.as_deref(), Some("Delete p. 1 and 1 more"));
+    let s = eng.undo(id).unwrap();
+    assert_eq!(labels(&eng, id), vec![1, 2, 3, 4, 5]);
+    assert_eq!((s.undo.as_deref(), s.redo.as_deref()), (Some("Rotate pp. 2-3, 5 by 90°"), Some("Delete p. 1 and 1 more")));
+    eng.redo(id).unwrap();
+    assert_eq!(labels(&eng, id), vec![3, 4, 5, 2]);
+
+    // Restore to any entry, forward or back; the history itself is unchanged.
+    assert_eq!(eng.restore(id, 4).unwrap().page_count, 5);
+    let s = eng.restore(id, 0).unwrap();
+    assert!(!s.dirty);
+    assert_eq!(labels(&eng, id), vec![1, 2, 3, 4, 5]);
+    assert_eq!(eng.history(id).unwrap().len(), 5);
+    assert!(eng.restore(id, 5).is_err());
+}
+
+#[test]
+fn a_redaction_never_leaves_the_old_bytes_behind() {
+    let d = dir("redact");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let original = std::fs::read(&path).unwrap();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let hooked = Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
+    let h = hooked.clone();
+    set_redaction_hook(move |doc| h.store(doc, std::sync::atomic::Ordering::SeqCst));
+
+    eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    // A failing custom edit, halfway through: rolled back, no step.
+    let before = eng.edit_state(id).unwrap();
+    let r = eng.apply_custom(id, "Redact".into(), EditSource::User, true, |doc| {
+        doc.delete_page(1)?;
+        Err(EngineError::Invalid("leaked".into()))
+    });
+    assert!(r.is_err());
+    assert_eq!(eng.edit_state(id).unwrap(), before);
+    assert_eq!(labels(&eng, id), vec![1, 2, 3]);
+
+    // Stand-in for the redaction engine: remove page 2.
+    let s = eng
+        .apply_custom(id, "Redact p. 2".into(), EditSource::User, true, |doc| {
+            doc.delete_page(1)?;
+            Ok(vec![1])
+        })
+        .unwrap();
+    assert_eq!(labels(&eng, id), vec![1, 3]);
+    assert!(s.redacted);
+    assert_eq!(hooked.load(std::sync::atomic::Ordering::SeqCst), id);
+    {
+        let entry = eng.doc_entry(id).unwrap();
+        let lane = entry.editor.lock();
+        let ed = lane.as_ref().unwrap();
+        let snap = &ed.step().snap;
+        assert!(!snap.bytes[..snap.len].starts_with(&original), "the redaction step is an incremental update");
+    }
+    // Later edits stay cheap, but saving rewrites.
+    eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    eng.save(id, None).unwrap();
+    assert!(!std::fs::read(&path).unwrap().starts_with(&original));
+
+    // Purge what came before the redaction: no step holds the unredacted buffer any more.
+    eng.undo(id).unwrap();
+    let s = eng.forget_history(id).unwrap();
+    assert!(s.redacted && s.undo.is_none() && s.redo.is_some());
+    let h = eng.history(id).unwrap();
+    assert_eq!(h.len(), 2);
+    assert!(h[0].label.starts_with("Redact"));
+    let entry = eng.doc_entry(id).unwrap();
+    let lane = entry.editor.lock();
+    assert!(lane.as_ref().unwrap().steps.iter().all(|s| !s.snap.bytes.starts_with(&original)));
 }

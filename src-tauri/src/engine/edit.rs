@@ -43,17 +43,81 @@ pub enum EditOp {
 }
 
 impl EditOp {
-    /// What the step is called in the undo menu.
+    /// What the step is called in the undo menu and the history, e.g. "Rotate pp. 2-3 by 90°".
     pub fn label(&self) -> String {
-        let n = |p: &Vec<u32>| if p.len() == 1 { "page".to_string() } else { format!("{} pages", p.len()) };
         match self {
-            EditOp::Rotate { pages, .. } => format!("Rotate {}", n(pages)),
-            EditOp::Delete { pages } => format!("Delete {}", n(pages)),
-            EditOp::Move { pages, .. } => format!("Move {}", n(pages)),
-            EditOp::InsertBlank { .. } => "Insert blank page".into(),
-            EditOp::InsertFile { .. } => "Insert pages".into(),
+            EditOp::Rotate { pages, quarter_turns } => format!("Rotate {} by {}°", page_ranges(pages), quarter_turns * 90),
+            EditOp::Delete { pages } => format!("Delete {}", page_ranges(pages)),
+            EditOp::Move { pages, to } => format!("Move {} to position {}", page_ranges(pages), to + 1),
+            EditOp::InsertBlank { at, .. } => format!("Insert blank page as p. {}", at + 1),
+            EditOp::InsertFile { path, .. } => format!(
+                "Insert pages from {}",
+                Path::new(path).file_name().map_or_else(|| path.clone(), |f| f.to_string_lossy().into_owned())
+            ),
         }
     }
+
+    /// The pages (0-based) the step touched: in the document after it, but for a delete the
+    /// pages it removed (numbered before it).
+    fn touched(&self, count_before: usize, count_after: usize) -> Vec<u32> {
+        let set = |p: &[u32]| p.iter().copied().collect::<BTreeSet<u32>>().into_iter().collect::<Vec<_>>();
+        match self {
+            EditOp::Rotate { pages, .. } | EditOp::Delete { pages } => set(pages),
+            EditOp::Move { pages, to } => {
+                let pages = set(pages);
+                let first = to - pages.iter().filter(|&&p| p < *to).count() as u32;
+                (first..first + pages.len() as u32).collect()
+            }
+            EditOp::InsertBlank { at, .. } | EditOp::InsertFile { at, .. } => {
+                (*at..*at + count_after.saturating_sub(count_before) as u32).collect()
+            }
+        }
+    }
+}
+
+/// "p. 4", "pp. 2-3, 7" (1-based).
+fn page_ranges(pages: &[u32]) -> String {
+    let set: BTreeSet<u32> = pages.iter().copied().collect();
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for p in set {
+        match runs.last_mut() {
+            Some((_, end)) if *end + 1 == p => *end = p,
+            _ => runs.push((p, p)),
+        }
+    }
+    let list = runs
+        .iter()
+        .map(|&(a, b)| if a == b { format!("{}", a + 1) } else { format!("{}-{}", a + 1, b + 1) })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if pages.len() == 1 { format!("p. {list}") } else { format!("pp. {list}") }
+}
+
+/// Who made an edit. All steps of one assistant turn form one group: undone and redone as a unit.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum EditSource {
+    #[default]
+    User,
+    Assistant { turn: String },
+}
+
+/// One entry of [`Engine::history`].
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    /// Pass to [`Engine::restore`]. 0 is the file as opened.
+    pub index: usize,
+    pub label: String,
+    pub source: EditSource,
+    /// Unix time in milliseconds.
+    pub at_ms: u64,
+    /// See [`EditOp::touched`]; empty for entry 0.
+    pub pages: Vec<u32>,
+    /// The document currently shows this entry.
+    pub current: bool,
+    /// This entry is what the file on disk holds.
+    pub saved: bool,
 }
 
 /// The document as the UI should show it after a call.
@@ -72,6 +136,8 @@ pub struct EditState {
     /// Label of the step Undo would revert / Redo would reapply.
     pub undo: Option<String>,
     pub redo: Option<String>,
+    /// A redaction is part of what the document shows: every save is a full rewrite.
+    pub redacted: bool,
 }
 
 /// Files written by [`Engine::split`].
@@ -93,10 +159,16 @@ unsafe impl Send for AuthDoc {}
 
 #[derive(Clone)]
 struct Step {
+    /// The whole file as of this step: the history can render any page before and after it.
     snap: Snap,
     label: String,
+    source: EditSource,
+    at_ms: u64,
+    pages: Vec<u32>,
     /// Removed content (deleted pages): the bytes still carry it, so a save must rewrite the file.
     drops: bool,
+    /// A redaction step: its snapshot is a full rewrite, and so is every save that includes it.
+    redacts: bool,
     sizes: Arc<Vec<[f32; 2]>>,
 }
 
@@ -108,6 +180,19 @@ pub struct Editor {
     cur: usize,
     /// The step whose content is in the file on disk.
     saved: Option<usize>,
+}
+
+type RedactionHook = Arc<dyn Fn(DocId) + Send + Sync>;
+static REDACTION_HOOK: parking_lot::Mutex<Option<RedactionHook>> = parking_lot::Mutex::new(None);
+
+/// Called (outside the edit lane) with the document after each redaction lands, so a version
+/// store can purge what it kept from before it.
+pub fn set_redaction_hook(hook: impl Fn(DocId) + Send + Sync + 'static) {
+    *REDACTION_HOOK.lock() = Some(Arc::new(hook));
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 fn io(e: std::io::Error) -> EngineError {
@@ -132,10 +217,11 @@ fn write_doc(doc: &PdfDocument, opts: PdfWriteOptions, capacity: usize) -> Resul
     Ok(out)
 }
 
-/// A complete file without anything unreferenced (deleted pages are really gone).
+/// A complete file without anything unreferenced or duplicated (deleted pages and redacted
+/// content are really gone).
 fn rewrite_opts() -> PdfWriteOptions {
     let mut o = PdfWriteOptions::default();
-    o.set_garbage_level(1).set_compress(true);
+    o.set_garbage_level(3).set_compress(true);
     o
 }
 
@@ -173,7 +259,7 @@ impl Editor {
             doc = open_snap(&snap, entry)?;
         }
         let sizes = Arc::new(page_sizes(&doc.doc)?);
-        let base = Step { snap, label: String::new(), drops: false, sizes };
+        let base = Step { snap, label: "Opened".into(), source: EditSource::User, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, sizes };
         Ok(Editor { doc, steps: vec![base], cur: 0, saved: Some(0) })
     }
 
@@ -218,11 +304,44 @@ impl Editor {
         self.cur += 1;
     }
 
+    /// Steps `i` and `i - 1` belong to the same assistant turn.
+    fn joined(&self, i: usize) -> bool {
+        i > 1 && matches!(&self.steps[i].source, EditSource::Assistant { .. }) && self.steps[i].source == self.steps[i - 1].source
+    }
+
+    /// Where Undo goes: before the current step, or before its whole assistant turn.
+    fn undo_target(&self) -> Option<usize> {
+        let mut i = self.cur.checked_sub(1)?;
+        while self.joined(i + 1) {
+            i -= 1;
+        }
+        Some(i)
+    }
+
+    /// Where Redo goes: the next step, or the end of its assistant turn.
+    fn redo_target(&self) -> Option<usize> {
+        let mut i = self.cur + 1;
+        if i >= self.steps.len() {
+            return None;
+        }
+        while i + 1 < self.steps.len() && self.joined(i + 1) {
+            i += 1;
+        }
+        Some(i)
+    }
+
+    /// The label of the steps from `a` to `b` (inclusive).
+    fn label(&self, a: usize, b: usize) -> String {
+        let l = &self.steps[a].label;
+        if a == b { l.clone() } else { format!("{l} and {} more", b - a) }
+    }
+
     fn state(&self, entry: &DocEntry) -> EditState {
         EditState {
             dirty: self.saved != Some(self.cur),
-            undo: (self.cur > 0).then(|| self.steps[self.cur].label.clone()),
-            redo: self.steps.get(self.cur + 1).map(|s| s.label.clone()),
+            undo: self.undo_target().map(|t| self.label(t + 1, self.cur)),
+            redo: self.redo_target().map(|t| self.label(self.cur + 1, t)),
+            redacted: self.steps[..=self.cur].iter().any(|s| s.redacts),
             ..clean_state(entry)
         }
     }
@@ -238,6 +357,7 @@ fn clean_state(entry: &DocEntry) -> EditState {
         dirty: false,
         undo: None,
         redo: None,
+        redacted: false,
     }
 }
 
@@ -440,7 +560,9 @@ fn verify(path: &Path, pages: u32, password: Option<&str>) -> Result<()> {
 /// `<dir>/.<name>.<pid>.inkwell-tmp`: hidden, next to the target so the rename stays on one volume.
 fn temp_for(target: &Path) -> PathBuf {
     let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    target.with_file_name(format!(".{name}.{}.inkwell-tmp", std::process::id()))
+    // Unique, and created with create_new: never follows a planted file or link.
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    target.with_file_name(format!(".{name}.{}.{nonce:x}.inkwell-tmp", std::process::id()))
 }
 
 fn write_synced(path: &Path, bytes: &[u8], create_new: bool) -> std::io::Result<()> {
@@ -455,7 +577,7 @@ fn write_synced(path: &Path, bytes: &[u8], create_new: bool) -> std::io::Result<
 fn write_atomic(target: &Path, bytes: &[u8], pages: u32, password: Option<&str>) -> Result<()> {
     let tmp = temp_for(target);
     let r = (|| {
-        write_synced(&tmp, bytes, false).map_err(io)?;
+        write_synced(&tmp, bytes, true).map_err(io)?;
         verify(&tmp, pages, password)?;
         // A virus scanner or the search indexer may hold a new file for a moment (up to 2 s).
         let mut tries = 0;
@@ -543,14 +665,17 @@ impl Engine {
         ed.state(entry)
     }
 
-    fn apply_locked(&self, entry: &DocEntry, ed: &mut Editor, op: &EditOp) -> Result<EditState> {
+    fn apply_locked(&self, entry: &DocEntry, ed: &mut Editor, op: &EditOp, source: EditSource) -> Result<EditState> {
         let sizes = ed.step().sizes.clone();
         let changed = run(&mut ed.doc.doc, op, &sizes).and_then(|c| match c {
             None => Ok(None),
-            Some((sizes, drops)) => {
+            Some((after, drops)) => {
                 let snap = ed.snapshot()?;
                 let doc = open_snap(&snap, entry)?;
-                Ok(Some((Step { snap, label: op.label(), drops, sizes: Arc::new(sizes) }, doc)))
+                let pages = op.touched(sizes.len(), after.len());
+                let step =
+                    Step { snap, label: op.label(), source, at_ms: now_ms(), pages, drops, redacts: false, sizes: Arc::new(after) };
+                Ok(Some((step, doc)))
             }
         });
         match changed {
@@ -573,32 +698,137 @@ impl Engine {
     /// Applies one edit as one undo step and returns the new state. Edits to the same document
     /// run one at a time; renders keep going meanwhile and switch to the new generation after.
     pub fn apply(&self, id: DocId, op: EditOp) -> Result<EditState> {
+        self.apply_from(id, op, EditSource::User)
+    }
+
+    /// [`Engine::apply`] on behalf of `source`. Consecutive edits of one assistant turn are one
+    /// group: a single [`Engine::undo`] reverts the whole turn.
+    pub fn apply_from(&self, id: DocId, op: EditOp, source: EditSource) -> Result<EditState> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
-        self.apply_locked(&entry, ed, &op)
+        self.apply_locked(&entry, ed, &op, source)
     }
 
-    /// Reverts the last step. A no-op (returning the state) when there is nothing to undo.
-    pub fn undo(&self, id: DocId) -> Result<EditState> {
-        self.travel(id, -1)
+    /// An edit that is not an [`EditOp`] (the redaction engine): `f` changes the document and
+    /// returns the pages it touched. Same lane, history and generation as `apply`; if `f` fails,
+    /// even halfway, the document is rolled back to the current step. `f` must not keep page
+    /// handles. With `redaction`, the step's snapshot is a full garbage-collected rewrite (an
+    /// incremental one would keep the removed content), every save including it rewrites the
+    /// file, and the [`set_redaction_hook`] hook runs.
+    pub fn apply_custom(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        redaction: bool,
+        f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
+    ) -> Result<EditState> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        let len = ed.step().snap.len;
+        let changed = f(&mut ed.doc.doc).and_then(|pages| {
+            let snap = if redaction {
+                let out = write_doc(&ed.doc.doc, rewrite_opts(), len)?;
+                Snap { len: out.len(), bytes: Arc::new(out) }
+            } else {
+                ed.snapshot()?
+            };
+            let doc = open_snap(&snap, &entry)?;
+            let sizes = Arc::new(page_sizes(&doc.doc)?);
+            let drops = sizes.len() < ed.step().sizes.len();
+            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, sizes }, doc))
+        });
+        match changed {
+            Ok((step, doc)) => {
+                ed.push(step);
+                ed.doc = doc;
+                let state = self.publish(&entry, ed);
+                drop(lane);
+                if redaction {
+                    if let Some(hook) = REDACTION_HOOK.lock().clone() {
+                        hook(id);
+                    }
+                }
+                Ok(state)
+            }
+            Err(e) => {
+                ed.doc = open_snap(&ed.step().snap, &entry)?;
+                Err(e)
+            }
+        }
     }
 
-    /// Reapplies the step undone last. A no-op when there is nothing to redo.
-    pub fn redo(&self, id: DocId) -> Result<EditState> {
-        self.travel(id, 1)
-    }
-
-    fn travel(&self, id: DocId, dir: isize) -> Result<EditState> {
+    /// Drops every history entry before the current one (e.g. the versions from before a
+    /// redaction): they can no longer be restored. Redo stays. Called right after a redaction,
+    /// this frees every byte of the unredacted versions (a redaction step starts a new buffer).
+    pub fn forget_history(&self, id: DocId) -> Result<EditState> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
         let Some(ed) = lane.as_mut() else { return Ok(clean_state(&entry)) };
-        let to = ed.cur as isize + dir;
-        if to < 0 || to as usize >= ed.steps.len() {
-            return Ok(ed.state(&entry));
+        let cur = ed.cur;
+        ed.steps.drain(..cur);
+        ed.saved = ed.saved.and_then(|s| s.checked_sub(cur));
+        ed.cur = 0;
+        Ok(ed.state(&entry))
+    }
+
+    /// Reverts the last step (or the last assistant turn). A no-op (returning the state) when
+    /// there is nothing to undo.
+    pub fn undo(&self, id: DocId) -> Result<EditState> {
+        self.travel(id, |ed| ed.undo_target())
+    }
+
+    /// Reapplies what was undone last. A no-op when there is nothing to redo.
+    pub fn redo(&self, id: DocId) -> Result<EditState> {
+        self.travel(id, |ed| ed.redo_target())
+    }
+
+    /// Shows the document as of history entry `index` (undo or redo up to it). Later entries
+    /// stay redoable until the next edit.
+    pub fn restore(&self, id: DocId, index: usize) -> Result<EditState> {
+        let entry = self.entry(id)?;
+        let lane = entry.editor.lock();
+        let len = lane.as_ref().map_or(1, |ed| ed.steps.len());
+        drop(lane);
+        if index >= len {
+            return Err(invalid(format!("no history entry {index}")));
         }
-        ed.doc = open_snap(&ed.steps[to as usize].snap, &entry)?;
-        ed.cur = to as usize;
+        self.travel(id, |_| Some(index))
+    }
+
+    /// Every step since the file was opened, oldest first (entry 0 is the file as opened).
+    pub fn history(&self, id: DocId) -> Result<Vec<HistoryEntry>> {
+        let entry = self.entry(id)?;
+        let lane = entry.editor.lock();
+        let Some(ed) = lane.as_ref() else {
+            let at_ms = now_ms();
+            return Ok(vec![HistoryEntry { index: 0, label: "Opened".into(), source: EditSource::User, at_ms, pages: vec![], current: true, saved: true }]);
+        };
+        Ok(ed
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, s)| HistoryEntry {
+                index: i,
+                label: s.label.clone(),
+                source: s.source.clone(),
+                at_ms: s.at_ms,
+                pages: s.pages.clone(),
+                current: i == ed.cur,
+                saved: ed.saved == Some(i),
+            })
+            .collect())
+    }
+
+    fn travel(&self, id: DocId, target: impl FnOnce(&Editor) -> Option<usize>) -> Result<EditState> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let Some(ed) = lane.as_mut() else { return Ok(clean_state(&entry)) };
+        let Some(to) = target(ed).filter(|&t| t != ed.cur) else { return Ok(ed.state(&entry)) };
+        ed.doc = open_snap(&ed.steps[to].snap, &entry)?;
+        ed.cur = to;
         Ok(self.publish(&entry, ed))
     }
 
@@ -636,7 +866,7 @@ impl Engine {
             self.check_not_open(&target, Some(id))?;
         }
         let ed = self.lane(&entry, &mut lane)?;
-        let rewrite = ed.steps[1..=ed.cur].iter().any(|s| s.drops);
+        let rewrite = ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
         let full;
         let bytes: &[u8] = if rewrite {
             full = write_doc(&ed.doc.doc, rewrite_opts(), ed.step().snap.len)?;
@@ -682,7 +912,7 @@ impl Engine {
         let bytes = new_pdf(&[(&ed.doc.doc, &pages)])?;
         write_atomic(Path::new(out), &bytes, pages.len() as u32, None)?;
         if delete_after {
-            self.apply_locked(&entry, ed, &EditOp::Delete { pages })
+            self.apply_locked(&entry, ed, &EditOp::Delete { pages }, EditSource::User)
         } else {
             Ok(ed.state(&entry))
         }
