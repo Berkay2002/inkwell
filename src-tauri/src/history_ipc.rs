@@ -862,9 +862,8 @@ mod tests {
         rotate(&eng, doc, Default::default());
         assert_eq!(h.autosave_all(&eng), vec![doc]);
         let kinds: Vec<Kind> = h.versions(doc).unwrap().into_iter().map(|v| v.kind).collect();
-        // (the store folds a save of the autosaved bytes into that version)
-        assert_eq!(kinds.iter().filter(|k| **k == Kind::Autosave).count(), 2, "{kinds:?}");
-        assert_eq!(kinds[0], Kind::Autosave);
+        // the save of the autosaved bytes turned that autosave into the Save
+        assert_eq!(kinds, vec![Kind::Autosave, Kind::Save, Kind::Import]);
     }
 
     /// Save a copy writes only to a save token's file, once, and the path becomes known.
