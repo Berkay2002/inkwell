@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod compress;
 pub mod engine;
+pub mod ocr;
 pub mod recents;
 pub mod redact;
 

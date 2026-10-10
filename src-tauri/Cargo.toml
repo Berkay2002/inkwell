@@ -44,6 +44,8 @@ windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win
 # Same versions tauri already pulls in; used to switch off WebView2's browser shortcuts.
 webview2-com = "0.39"
 windows-core = "0.62"
+# Windows.Media.Ocr (OCR backend); already in the tree through tauri, this only adds feature flags.
+windows = { version = "0.62", features = ["Media_Ocr", "Graphics_Imaging", "Storage_Streams", "Globalization", "Foundation_Collections"] }
 
 [profile.release]
 codegen-units = 1
