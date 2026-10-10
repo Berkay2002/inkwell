@@ -203,6 +203,29 @@ describe("page summary and rows", () => {
     expect(rowOf(rows, chg("pageRemoved", { aPage: 2 }))).toBe(3);
     expect(rowOf(rows, chg("metadataChanged"))).toBe(-1);
   });
+
+  it("puts a replaced page on one row, both sides", () => {
+    // A pages 1 and 3 were swapped for B pages 1 and 3 (each pair shares a gap); only the first has a pageReplaced change
+    const pages = { aPages: 4, bPages: 4, bToA: [0, null, 2, null], removedA: [1, 3] };
+    const rows = alignRows(pages);
+    expect(rows).toEqual([
+      { a: 0, b: 0 },
+      { a: 1, b: 1 },
+      { a: 2, b: 2 },
+      { a: 3, b: 3 },
+    ]);
+    expect(rowOf(rows, chg("pageReplaced", { aPage: 1, bPage: 1 }))).toBe(1);
+    const replaced = chg("pageReplaced", { aPage: 1, bPage: 1 });
+    expect(pageSummary(cmp(pages, [replaced]))).toEqual(["Page 4 inserted", "Page 4 removed", "Page 2 replaced"]);
+  });
+
+  it("an inserted page next to a removed one in another gap is not paired", () => {
+    expect(alignRows({ aPages: 2, bPages: 2, bToA: [null, 0], removedA: [1] })).toEqual([
+      { a: null, b: 0 },
+      { a: 0, b: 1 },
+      { a: 1, b: null },
+    ]);
+  });
 });
 
 describe("inline word diff", () => {
