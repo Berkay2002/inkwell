@@ -34,7 +34,7 @@ lru = "0.12"
 thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security", "Win32_Foundation"] }
 # Same versions tauri already pulls in; used to switch off WebView2's browser shortcuts.
 webview2-com = "0.39"
 windows-core = "0.62"
