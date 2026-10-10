@@ -124,7 +124,41 @@ id (dangling by design: the timeline shows a gap, not a lie).
 
 ## Benchmark and the chunking choice
 
-BENCH
+Bytes stored: first version (KiB) / mean per later version (KiB). Logical = mean file size.
+
+| sequence | logical KiB | CDC 16 KiB | CDC 64 KiB | object-level | whole-file zstd |
+|---|---|---|---|---|---|
+| fixture 200p: incremental x10 | 824.6 | 34.6 / 2.5 | 18.3 / 1.5 | 137.2 / 16.4 | 13.3 / 14.1 |
+| fixture 200p: full rewrite x10 | 821.0 | 34.6 / 8.5 | 18.3 / 10.0 | 137.2 / 29.2 | 13.3 / 12.7 |
+| fixture 200p: rewrite garbage+compress x10 | 190.1 | 34.6 / 15.5 | 18.3 / 26.3 | 137.2 / 30.3 | 13.3 / 26.1 |
+| compress-source (images): incremental x10 | 2599.1 | 2605.3 / 21.2 | 2598.1 / 86.9 | 2596.1 / 2.9 | 2593.7 / 2594.6 |
+| compress-source (images): full rewrite x10 | 2597.3 | 2605.3 / 37.5 | 2598.1 / 147.7 | 2596.1 / 262.0 | 2593.7 / 2594.2 |
+| compress-source (images): rewrite garbage+compress x10 | 2597.3 | 2605.3 / 37.5 | 2598.1 / 147.1 | 2596.1 / 262.1 | 2593.7 / 2594.2 |
+| Acrobat edit: edit-source -> edit-out-* | 67.4 | 54.5 / 43.1 | 54.2 / 40.3 | 58.2 / 38.9 | 52.9 / 59.8 |
+| Acrobat redact: redact-source -> red-out-* | 53.5 | 49.5 / 51.8 | 49.2 / 50.4 | 56.3 / 54.8 | 48.8 / 50.0 |
+| Acrobat optimize: opt-in-01 -> opt-out-* | 1601.7 | 2605.3 / 854.0 | 2598.1 / 902.6 | 2596.1 / 1062.3 | 2593.7 / 1508.6 |
+| Acrobat form: form-source -> frm-out-* | 33.3 | 28.5 / 29.8 | 28.5 / 29.0 | 34.4 / 33.4 | 28.1 / 28.5 |
+| **total stored, all sequences (KiB)** | | 21549.0 | 24962.9 | 28934.9 | 105795.9 |
+| split+hash+compress, ms per MB | | 0.9 | 0.8 | 1.2 | 1.0 |
+
+Real store commit (default chunking, XChaCha20-Poly1305, temp+fsync+rename):
+
+| sequence | stored after first (KiB/version) | commit ms per MB |
+|---|---|---|
+| fixture 200p: incremental x10 | 2.4 | 11.0 |
+| fixture 200p: full rewrite x10 | 8.4 | 18.5 |
+| fixture 200p: rewrite garbage+compress x10 | 15.4 | 94.0 |
+| compress-source (images): incremental x10 | 21.1 | 5.1 |
+| compress-source (images): full rewrite x10 | 37.4 | 5.2 |
+| compress-source (images): rewrite garbage+compress x10 | 37.4 | 5.5 |
+
+Measured 2026-10-10 with `cargo run --release --bin history_bench` (Ryzen 7 7800X3D, NVMe). Choice: **FastCDC, avg
+16 KiB (min 4, max 64)**: the smallest total over all sequences (21.5 MB vs 25.0 MB for 64 KiB, 28.9 MB for
+object-level dedup, 105.8 MB for whole-file zstd). Object-level dedup only wins on incremental saves of an image-heavy
+file (2.9 vs 21.2 KiB/version) and loses on every full rewrite, so it was not kept. Acrobat's own saves rewrite and
+re-compress most streams: those versions cost close to their full compressed size whatever the method (edit, redact,
+form rows); that is the floor for per-document encrypted storage. Commit cost is 5-20 ms per MB (94 ms/MB on the
+re-compressed fixture, where zstd works hardest).
 
 ## Integration points (for edit-core and the panel)
 
