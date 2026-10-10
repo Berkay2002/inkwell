@@ -750,18 +750,45 @@ fn packed_attachments_are_scanned() {
         ],
         "",
     );
-    let cases: [(&str, Vec<u8>); 4] =
-        [("gzip", gz.finish().unwrap()), ("zip", zip("a.txt", secret)), ("binary", vec![0, 1, 2, 3, 0xff, 0x10]), ("pdf", nested)];
-    for (what, data) in cases {
+    let gz = gz.finish().unwrap();
+    // A harmless first gzip member: `gunzip` reads on into the second.
+    let mut first = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    first.write_all(b"harmless").unwrap();
+    let multi = [first.finish().unwrap(), gz.clone()].concat();
+    // A deflated local entry the central directory does not list.
+    let (listed, unlisted) = (zip("a.txt", b"harmless"), zip("b.txt", secret));
+    let cd = |z: &[u8]| u32::from_le_bytes(z[z.len() - 6..z.len() - 2].try_into().unwrap()) as usize;
+    let extra = &unlisted[..cd(&unlisted)];
+    let mut hidden_zip = [&listed[..cd(&listed)], extra, &listed[cd(&listed)..]].concat();
+    let n = hidden_zip.len();
+    hidden_zip[n - 6..n - 2].copy_from_slice(&((cd(&listed) + extra.len()) as u32).to_le_bytes());
+    let cases: [(&str, Vec<u8>, &str); 8] = [
+        ("gzip", gz.clone(), "/Type /EmbeddedFile"),
+        ("gzip without /Type", gz.clone(), ""),
+        ("multi-member gzip", multi, "/Type /EmbeddedFile"),
+        ("zip", zip("a.txt", secret), "/Type /EmbeddedFile"),
+        ("unlisted zip entry", hidden_zip, "/Type /EmbeddedFile"),
+        ("binary", vec![0, 1, 2, 3, 0xff, 0x10], "/Type /EmbeddedFile"),
+        // "ATTACH" in EBCDIC: no control bytes, but not UTF-8.
+        ("ebcdic", vec![0xC1, 0xE3, 0xE3, 0xC1, 0xC3, 0xC8], "/Type /EmbeddedFile"),
+        ("pdf", nested, "/Type /EmbeddedFile"),
+    ];
+    for (what, data, dict) in cases {
         let bytes = one_page(
             b"BT /F1 12 Tf 72 700 Td (ATTACH-SECRET) Tj ET",
             "",
-            &[obj("<< /Type /Filespec /F (a) /EF << /F 7 0 R >> >>"), stream("/Type /EmbeddedFile", &data)],
+            &[obj("<< /Type /Filespec /F (a) /EF << /F 7 0 R >> >>"), stream(dict, &data)],
             "/Names << /EmbeddedFiles << /Names [(a) 6 0 R] >> >>",
         );
         match redact_none(&bytes, "ATTACH-SECRET").1 {
             Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.critical && l.place.contains("attachment")), "{what}: {l:?}"),
             r => panic!("{what}: expected a leak, got {r:?}"),
+        }
+        // One budget for all unpacking: past it, attachments count as unread.
+        if what == "gzip" {
+            let t = Targets { pages: Vec::new(), needles: vec!["ATTACH-SECRET".into()] };
+            let l = verify_at(&bytes, &t, 0, &std::cell::Cell::new(5)).unwrap().leaks;
+            assert!(l.iter().any(|l| l.critical && l.place.contains("scan budget")), "{l:?}");
         }
     }
 }

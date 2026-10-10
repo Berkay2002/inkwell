@@ -22,6 +22,8 @@
 //!   quoted in a content stream outside the marks is not caught.
 //! - Names (5+ chars) are searched too, so redacting a word that is part of a standard PDF name
 //!   (e.g. "Resources") fails unless the word still shows elsewhere on a page.
+//! - Text inside a text attachment that is itself encoded (base64 in a mail file, hex, quoted-
+//!   printable) is not decoded. Sanitize with embedded files on removes attachments outright.
 
 mod patterns;
 mod sanitize;
@@ -902,14 +904,16 @@ fn check_page_text(
 /// Reopens a written copy and searches it everywhere: page text, every object's strings, every
 /// decoded non-image stream, and the raw file bytes.
 pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
-    verify_at(bytes, t, 0)
+    verify_at(bytes, t, 0, &std::cell::Cell::new(SCAN_BUDGET))
 }
 
-/// Largest decompressed attachment verify reads; bigger ones count as unread.
-const MAX_INFLATE: u64 = 256 << 20;
+/// Bytes verify unpacks from attachments in total (all gzip, zip and nested PDF streams together):
+/// past it an attachment counts as unread, so a pile of small bombs cannot exhaust memory.
+const SCAN_BUDGET: u64 = 512 << 20;
 
-/// `verify_bytes` at attachment nesting `depth` (a PDF attached to a PDF...).
-fn verify_at(bytes: &[u8], t: &Targets, depth: u32) -> Result<VerifyReport> {
+/// `verify_bytes` at attachment nesting `depth` (a PDF attached to a PDF...). `left` is what is
+/// left of `SCAN_BUDGET`.
+fn verify_at(bytes: &[u8], t: &Targets, depth: u32, left: &std::cell::Cell<u64>) -> Result<VerifyReport> {
     let mut rep = VerifyReport::default();
     if t.needles.is_empty() {
         return Ok(rep);
@@ -928,6 +932,24 @@ fn verify_at(bytes: &[u8], t: &Targets, depth: u32) -> Result<VerifyReport> {
     let (raw, rn) = set(8)?;
     // (needle, place, critical even if the needle is still visible elsewhere on a page)
     let mut hits: Vec<(&String, String, bool)> = Vec::new();
+
+    // Attachments by reference from a file specification's /EF, not only by their optional /Type.
+    let mut attached = HashSet::new();
+    for i in 1..doc.xref_len()? as i32 {
+        if let Ok(Some(o)) = doc.xref_object(i)
+            && o.is_dict()?
+            && let Some(ef) = o.get_dict("EF")?
+            && ef.is_dict()?
+        {
+            for k in 0..ef.dict_len()? as i32 {
+                if let Some(v) = ef.get_dict_val(k)?
+                    && v.is_indirect()?
+                {
+                    attached.insert(v.as_indirect()?);
+                }
+            }
+        }
+    }
 
     for i in 1..doc.xref_len()? as i32 {
         // Anything verify cannot read counts as a leak: it was not checked.
@@ -965,8 +987,16 @@ fn verify_at(bytes: &[u8], t: &Targets, depth: u32) -> Result<VerifyReport> {
             };
             // Only page content can explain a hit by an unmarked occurrence; attachments and XMP cannot.
             let ty = r.get_dict("Type")?.map(|t| t.as_name()).transpose()?;
-            if ty.as_deref() == Some(b"EmbeddedFile") {
-                scan_attachment(&data, t, (&streams, &tn), depth, &format!("object {i}: attachment"), &mut rep.leaks)?;
+            if depth > 0 {
+                let n = data.len() as u64;
+                if n > left.get() {
+                    rep.leaks.push(unread("over the attachment scan budget"));
+                    continue;
+                }
+                left.set(left.get() - n);
+            }
+            if ty.as_deref() == Some(b"EmbeddedFile") || attached.contains(&i) {
+                scan_attachment(&data, t, (&streams, &tn), (depth, left), &format!("object {i}: attachment"), &mut rep.leaks)?;
                 continue;
             }
             let strict = ty.as_deref() == Some(b"Metadata");
@@ -990,7 +1020,7 @@ fn scan_attachment(
     data: &[u8],
     t: &Targets,
     (set, ns): (&regex::bytes::RegexSet, &[&String]),
-    depth: u32,
+    (depth, left): (u32, &std::cell::Cell<u64>),
     place: &str,
     leaks: &mut Vec<Leak>,
 ) -> Result<()> {
@@ -998,8 +1028,9 @@ fn scan_attachment(
     let unread = |why: &str| Leak { needle: String::new(), place: format!("{place}: {why}"), critical: true };
     let inflate = |r: &mut dyn Read| -> Option<Vec<u8>> {
         let mut out = Vec::new();
-        r.take(MAX_INFLATE + 1).read_to_end(&mut out).ok()?;
-        (out.len() as u64 <= MAX_INFLATE).then_some(out)
+        r.take(left.get() + 1).read_to_end(&mut out).ok()?;
+        left.set(left.get().checked_sub(out.len() as u64)?);
+        Some(out)
     };
     if depth > 4 {
         leaks.push(unread("nested too deep to scan"));
@@ -1008,15 +1039,16 @@ fn scan_attachment(
             Err(_) => leaks.push(unread("attached PDF does not open")),
             Ok(_) => {
                 let sub = Targets { pages: Vec::new(), needles: t.needles.clone() };
-                for l in verify_at(data, &sub, depth + 1)?.leaks {
+                for l in verify_at(data, &sub, depth + 1, left)?.leaks {
                     leaks.push(Leak { needle: l.needle, place: format!("{place}: attached PDF: {}", l.place), critical: true });
                 }
             }
         }
     } else if data.starts_with(&[0x1f, 0x8b]) {
-        match inflate(&mut flate2::read::GzDecoder::new(data)) {
-            Some(d) => scan_attachment(&d, t, (set, ns), depth + 1, &format!("{place}: gzip"), leaks)?,
-            None => leaks.push(unread("gzip data that does not decode")),
+        // Every member: a plain GzDecoder stops after the first, `gunzip` does not.
+        match inflate(&mut flate2::read::MultiGzDecoder::new(data)) {
+            Some(d) => scan_attachment(&d, t, (set, ns), (depth + 1, left), &format!("{place}: gzip"), leaks)?,
+            None => leaks.push(unread("gzip data that does not decode or is over the scan budget")),
         }
     } else if data.starts_with(b"PK\x03\x04") || data.starts_with(b"PK\x05\x06") {
         // The raw bytes too: stored entries, comments, data outside the central directory.
@@ -1026,10 +1058,10 @@ fn scan_attachment(
         match zip_entries(data, &inflate) {
             Some(entries) => {
                 for (name, d) in entries {
-                    scan_attachment(&d, t, (set, ns), depth + 1, &format!("{place}: zip entry {name}"), leaks)?;
+                    scan_attachment(&d, t, (set, ns), (depth + 1, left), &format!("{place}: zip entry {name}"), leaks)?;
                 }
             }
-            None => leaks.push(unread("zip archive verify cannot read (encrypted, zip64 or unknown method)")),
+            None => leaks.push(unread("zip archive verify cannot read (encrypted, zip64, unknown method or over the scan budget)")),
         }
     } else {
         let text: std::borrow::Cow<[u8]> = match data {
@@ -1038,8 +1070,9 @@ fn scan_attachment(
                 let units = rest.chunks_exact(2).map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) });
                 String::from_utf16_lossy(&units.collect::<Vec<_>>()).into_bytes().into()
             }
-            // Text: no control bytes other than whitespace (UTF-8 and single-byte encodings pass).
-            _ if !data.iter().any(|&b| b < 0x09 || (0x0e..0x20).contains(&b)) => data.into(),
+            // Text: valid UTF-8 without control bytes other than whitespace. Single-byte encodings
+            // (EBCDIC, Latin-1 accents) fail closed: their letters are not where the regex looks.
+            _ if std::str::from_utf8(data).is_ok() && !data.iter().any(|&b| b < 0x09 || (0x0e..0x20).contains(&b)) => data.into(),
             _ => {
                 leaks.push(unread("binary attachment verify cannot read (sanitize embedded files to remove it)"));
                 return Ok(());
@@ -1052,8 +1085,9 @@ fn scan_attachment(
     Ok(())
 }
 
-/// Entries of a zip archive (stored or deflated), from its central directory. None when it uses
-/// anything else (encryption, zip64, other methods) or is malformed.
+/// Entries of a zip archive (stored or deflated), from its central directory, plus deflated local
+/// entries the directory does not list (readers that walk local headers extract them). None when
+/// it uses anything else (encryption, zip64, other methods) or is malformed.
 fn zip_entries(z: &[u8], inflate: &dyn Fn(&mut dyn std::io::Read) -> Option<Vec<u8>>) -> Option<Vec<(String, Vec<u8>)>> {
     let u16_at = |p: usize| Some(u16::from_le_bytes(z.get(p..p + 2)?.try_into().ok()?) as usize);
     let u32_at = |p: usize| Some(u32::from_le_bytes(z.get(p..p + 4)?.try_into().ok()?) as usize);
@@ -1062,7 +1096,7 @@ fn zip_entries(z: &[u8], inflate: &dyn Fn(&mut dyn std::io::Read) -> Option<Vec<
     if count == 0xffff || p == 0xffff_ffff {
         return None;
     }
-    let mut out = Vec::new();
+    let (mut out, mut listed) = (Vec::new(), HashSet::new());
     for _ in 0..count {
         if !z.get(p..)?.starts_with(b"PK\x01\x02") || u16_at(p + 8)? & 1 != 0 {
             return None;
@@ -1073,6 +1107,7 @@ fn zip_entries(z: &[u8], inflate: &dyn Fn(&mut dyn std::io::Read) -> Option<Vec<
         if !z.get(lho..)?.starts_with(b"PK\x03\x04") {
             return None;
         }
+        listed.insert(lho);
         let start = lho + 30 + u16_at(lho + 26)? + u16_at(lho + 28)?;
         let raw = z.get(start..start.checked_add(size)?)?;
         let data = match method {
@@ -1082,6 +1117,20 @@ fn zip_entries(z: &[u8], inflate: &dyn Fn(&mut dyn std::io::Read) -> Option<Vec<
         };
         out.push((name, data));
         p += 46 + nlen + xlen + clen;
+    }
+    // Stored local entries are in the raw bytes the caller searches; deflated ones need inflating.
+    for lho in (0..z.len()).filter(|&q| z[q..].starts_with(b"PK") && !listed.contains(&q)) {
+        if u16_at(lho + 6)? & 1 != 0 {
+            return None;
+        }
+        match u16_at(lho + 8)? {
+            0 => {}
+            8 => {
+                let start = lho + 30 + u16_at(lho + 26)? + u16_at(lho + 28)?;
+                out.push(("(not in the directory)".into(), inflate(&mut flate2::read::DeflateDecoder::new(z.get(start..)?))?));
+            }
+            _ => return None,
+        }
     }
     Some(out)
 }
