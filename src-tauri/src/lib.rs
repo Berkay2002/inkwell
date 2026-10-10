@@ -218,15 +218,33 @@ async fn edit_redo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
 
 /// `to`: a save token (Save as); omitted: save over the document's own file.
 #[tauri::command]
-async fn save_document(window: Window, eng: Eng<'_>, reg: Reg<'_>, doc: DocId, to: Option<String>) -> Result<EditState, EngineError> {
+async fn save_document(
+    window: Window,
+    app: tauri::AppHandle,
+    eng: Eng<'_>,
+    reg: Reg<'_>,
+    hist: State<'_, Arc<History>>,
+    doc: DocId,
+    to: Option<String>,
+) -> Result<EditState, EngineError> {
     let to = to.map(|t| reg.take_save(window.label(), &t)).transpose()?;
-    let eng = eng.inner().clone();
+    let (eng, hist) = (eng.inner().clone(), hist.inner().clone());
     blocking(move || {
-        let s = eng.save(doc, to.as_deref())?;
+        let (state, saved) = eng.save_recorded(doc, to.as_deref())?;
         if let Some(to) = &to {
             window.state::<Paths>().learn(to);
         }
-        Ok(s)
+        match saved {
+            // Save as: the document is another file now, with a history of its own
+            Some(s) if s.moved => hist.spawn_open(app, doc, state.path.clone()),
+            // history errors never fail a save
+            Some(s) => match hist.saved(doc, &s) {
+                Ok(_) => drop(app.emit("history-changed", doc)),
+                Err(e) => eprintln!("inkwell history: {e}"),
+            },
+            None => {}
+        }
+        Ok(state)
     })
     .await
 }
@@ -395,13 +413,18 @@ fn disable_browser_accelerators(app: &tauri::App) {
 pub fn run() {
     let engine = Engine::new(Engine::default_workers(), cache_budget_bytes());
     let proto_engine = engine.clone();
+    let hist = Arc::new(History::new());
+    let h = hist.clone();
+    // a saved redaction then replaces the versions from before it (history_ipc::History::saved)
+    engine::edit::set_redaction_hook(move |doc| h.on_redactions_applied(doc));
+    let autosave = (hist.clone(), engine.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
         .manage(ai::Assistant::new())
         .manage(Paths::default())
-        .manage(Arc::new(History::new()))
+        .manage(hist)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 on_drop(window, paths);
@@ -457,6 +480,7 @@ pub fn run() {
             history_ipc::history_compare,
             history_ipc::history_render,
             history_ipc::history_visual_diff,
+            history_ipc::history_checkpoint,
             save_document,
             extract_pages,
             split_document,
@@ -473,9 +497,10 @@ pub fn run() {
             ai::ai_set_permissions,
             ai::ai_close,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(windows)]
             disable_browser_accelerators(app);
+            autosave.0.spawn_autosave(app.handle().clone(), autosave.1.clone());
             if let Some(json) = recents::data_dir(app.handle()).ok().and_then(|(d, _)| recents::read_json(&d)) {
                 app.state::<Paths>().learn_recents(&json);
             }

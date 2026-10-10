@@ -15,7 +15,7 @@ From the phase 1 pre-merge review. The viewer keeps up to `DOC_SLOTS=4` read-onl
 
 The webview never hands Rust a path. Every command that reads or writes a file takes a token; Rust is the only source of paths.
 
-- **Get a token**: `pick_open(multiple, title?) -> FileRef[]` (`title`: one of Rust's fixed titles, `"locate"`) and `pick_save(name, doc? | near?) -> FileRef | null` run the
+- **Get a token**: `pick_open(multiple, title?) -> FileRef[]` (`title`: one of Rust's fixed titles, `"locate"` = "Locate the moved file", `"compare"` = "Choose two PDFs to compare"; add a variant to `PickTitle` in lib.rs for a new one, never pass text) and `pick_save(name, doc? | near?) -> FileRef | null` run the
   dialogs in Rust (off the UI thread). Drag-drop (`files-dropped` event) and command-line files (`initial_files`) come
   with tokens. `known_file(path) -> FileRef` re-issues one for a path the user chose before (the stored recent list);
   any other path is refused. `FileRef = { token, path }`: `path` is for display and dedupe only.
@@ -32,6 +32,7 @@ The webview never hands Rust a path. Every command that reads or writes a file t
   nothing by `recents_save`, and the old list is left in place rather than deleted.
 
 New tools (history, compress, OCR, redact) take the same tokens: never add a command parameter that is a path.
+`history_save_copy(doc, version, to)` takes a save token from `pick_save` and makes the copy's path known.
 
 ## Open follow-ups (fix at the start of phase 2)
 - `engine/mod.rs` `run_tile`/`page_list`: a stale in-flight request for rev N can build from content N+1 and cache it as N.

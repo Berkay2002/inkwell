@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { type FileRef, pickOpen } from "./api";
+import { type FileRef, pickOpen, pickSave } from "./api";
 
 export type Rect4 = [number, number, number, number];
 
@@ -128,8 +128,13 @@ export const historyVersions = (doc: number) => invoke<VersionInfo[]>("history_v
 export const historyCheck = (doc: number) => invoke<VersionInfo | null>("history_check", { doc });
 export const historyRestore = (doc: number, version: string) => invoke<RestoreOut>("history_restore", { doc, version });
 export const historyRecover = (doc: number) => invoke<RestoreOut>("history_recover", { doc });
-export const historySaveCopy = (doc: number, version: string, suggested: string) =>
-  invoke<string | null>("history_save_copy", { doc, version, suggested });
+/** Save dialog (in Rust, next to the document), then writes the version there; null = cancelled. */
+export async function historySaveCopy(doc: number, version: string, suggested: string): Promise<string | null> {
+  const to = await pickSave(suggested, { doc });
+  return to ? invoke<string>("history_save_copy", { doc, version, to: to.token }) : null;
+}
+/** After an assistant turn: a checkpoint version if the document ends with the turn's changes. */
+export const historyCheckpoint = (doc: number) => invoke<VersionInfo | null>("history_checkpoint", { doc });
 export const historyName = (doc: number, version: string, name: string | null) =>
   invoke<VersionInfo>("history_name", { doc, version, name });
 export const historyConfirmSame = (doc: number, candidate: string | null) =>

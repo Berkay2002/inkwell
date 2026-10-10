@@ -190,6 +190,28 @@ pub struct Editor {
     saved: Option<usize>,
 }
 
+/// What a save wrote, for the version history.
+pub struct Saved {
+    pub bytes: Vec<u8>,
+    /// Labels of the edits since the last save.
+    pub summary: Vec<String>,
+    pub pages: Vec<u32>,
+    /// The content includes a redaction.
+    pub redacts: bool,
+    /// Save as: the document now lives at another path.
+    pub moved: bool,
+}
+
+/// The assistant turn a document's current state ends with (see [`Engine::assistant_turn`]).
+pub struct Turn {
+    pub turn: String,
+    pub label: String,
+    pub summary: Vec<String>,
+    pub pages: Vec<u32>,
+    /// The content as Save would write it.
+    pub bytes: Vec<u8>,
+}
+
 type RedactionHook = Arc<dyn Fn(DocId) + Send + Sync>;
 static REDACTION_HOOK: parking_lot::Mutex<Option<RedactionHook>> = parking_lot::Mutex::new(None);
 
@@ -342,6 +364,23 @@ impl Editor {
     fn label(&self, a: usize, b: usize) -> String {
         let l = &self.steps[a].label;
         if a == b { l.clone() } else { format!("{l} and {} more", b - a) }
+    }
+
+    /// Labels of the steps `a..=b`, and the pages they touched (sorted, once each).
+    fn changes(&self, a: usize, b: usize) -> (Vec<String>, Vec<u32>) {
+        let steps = self.steps.get(a..=b).unwrap_or_default();
+        let mut pages: Vec<u32> = steps.iter().flat_map(|s| s.pages.iter().copied()).collect();
+        pages.sort_unstable();
+        pages.dedup();
+        (steps.iter().map(|s| s.label.clone()).collect(), pages)
+    }
+
+    /// The current content as Save writes it: rewritten once anything was removed, else the snapshot.
+    fn content(&self, entry: &DocEntry) -> Result<Vec<u8>> {
+        if self.steps[..=self.cur].iter().any(|s| s.drops || s.redacts) {
+            return write_doc(&open_snap(&self.step().snap, entry)?.doc, rewrite_opts(), self.step().snap.len);
+        }
+        Ok(self.bytes().to_vec())
     }
 
     fn state(&self, entry: &DocEntry) -> EditState {
@@ -1166,10 +1205,22 @@ impl Engine {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
         let Some(ed) = lane.as_mut().filter(|ed| ed.saved != Some(ed.cur)) else { return Ok(None) };
-        if ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts) {
-            return Ok(Some(write_doc(&open_snap(&ed.step().snap, &entry)?.doc, rewrite_opts(), ed.step().snap.len)?));
+        ed.content(&entry).map(Some)
+    }
+
+    /// The assistant turn the document's current state ends with, for a version history
+    /// checkpoint; `None` when the last step is not the assistant's.
+    pub fn assistant_turn(&self, id: DocId) -> Result<Option<Turn>> {
+        let entry = self.entry(id)?;
+        let lane = entry.editor.lock();
+        let Some(ed) = lane.as_ref() else { return Ok(None) };
+        let EditSource::Assistant { turn } = ed.step().source.clone() else { return Ok(None) };
+        let mut a = ed.cur;
+        while ed.joined(a) {
+            a -= 1;
         }
-        Ok(Some(ed.bytes().to_vec()))
+        let (summary, pages) = ed.changes(a, ed.cur);
+        Ok(Some(Turn { turn, label: ed.label(a, ed.cur), summary, pages, bytes: ed.content(&entry)? }))
     }
 
     /// An error if `path` is open in Inkwell (other than as `except`).
@@ -1189,12 +1240,17 @@ impl Engine {
     /// way the bytes go to a temporary file that is read back, the replicas let go of the old
     /// file, and only then does a rename replace it.
     pub fn save(&self, id: DocId, to: Option<&str>) -> Result<EditState> {
+        self.save_recorded(id, to).map(|(s, _)| s)
+    }
+
+    /// [`Engine::save`], plus what was written (`None` when there was nothing to save).
+    pub fn save_recorded(&self, id: DocId, to: Option<&str>) -> Result<(EditState, Option<Saved>)> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
         let target = to.map(str::to_string).unwrap_or_else(|| entry.path());
         let same = same_path(&target, &entry.path());
         if same && lane.as_ref().is_none_or(|ed| ed.saved == Some(ed.cur)) {
-            return Ok(lane.as_ref().map_or_else(|| clean_state(&entry), |ed| ed.state(&entry)));
+            return Ok((lane.as_ref().map_or_else(|| clean_state(&entry), |ed| ed.state(&entry)), None));
         }
         if !same {
             self.check_not_open(&target, Some(id))?;
@@ -1220,11 +1276,16 @@ impl Engine {
             self.release_file(&entry);
         }
         write_atomic(Path::new(&target), bytes, pages, password.as_deref())?;
+        // the steps since the last save (all of them when the file holds none of the current ones)
+        let from = ed.saved.filter(|&s| s < ed.cur).map_or(1, |s| s + 1);
+        let (summary, pages) = ed.changes(from, ed.cur);
+        let redacts = ed.steps[..=ed.cur].iter().any(|s| s.redacts);
+        let saved = Saved { bytes: bytes.to_vec(), summary, pages, redacts, moved: !same };
         if !same {
             *entry.path.write() = target;
         }
         ed.saved = Some(ed.cur);
-        Ok(ed.state(&entry))
+        Ok((ed.state(&entry), Some(saved)))
     }
 
     /// Drops every replica that has the file on disk open (rule 5). Waits for busy ones.
