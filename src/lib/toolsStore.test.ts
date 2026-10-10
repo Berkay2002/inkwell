@@ -24,6 +24,7 @@ vi.mock("./api", () => ({
 
 import { useStore } from "../store";
 import * as api from "./api";
+import { useAi } from "./aiStore";
 import * as edits from "./edit";
 import { formatBytes, useTools } from "./toolsStore";
 
@@ -182,6 +183,47 @@ describe("OCR sheet", () => {
     await useTools.getState().start({ saveAs: true });
     expect(vi.mocked(api.ocrStart).mock.calls[0][1].saveAs).toBe(true);
     expect(edits.applyState).not.toHaveBeenCalled();
+  });
+});
+
+describe("the right-hand rail", () => {
+  it("records the pages an OCR run has finished, for the thumbnails", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue({ windows: ["en-US"], tesseract: null } as never);
+    useTools.getState().open("ocr");
+    await flush();
+    vi.mocked(api.ocrStart).mockImplementation((_j, _r, onP) => {
+      onP({ done: 1, total: 3, page: 2 });
+      onP({ done: 2, total: 3, page: 0 });
+      return new Promise(() => {}) as never;
+    });
+    void useTools.getState().start();
+    await flush();
+    expect(useTools.getState().sheet?.donePages).toEqual([2, 0]);
+    expect(useTools.getState().sheet?.progress).toBeCloseTo(2 / 3);
+  });
+
+  it("is the only right-side panel: it closes the assistant, and the assistant closes an idle rail", async () => {
+    vi.mocked(api.compressAudit).mockResolvedValue(audit() as never);
+    useAi.setState({ open: true });
+    useTools.getState().open("compress");
+    expect(useAi.getState().open).toBe(false);
+    await flush();
+
+    useAi.setState({ open: true });
+    expect(useTools.getState().sheet).toBeNull();
+    useAi.setState({ open: false });
+  });
+
+  it("keeps a running tool and sends the assistant away instead", async () => {
+    vi.mocked(api.compressAudit).mockResolvedValue(audit() as never);
+    useTools.getState().open("compress");
+    await flush();
+    vi.mocked(api.compressStart).mockReturnValue(new Promise(() => {}) as never);
+    void useTools.getState().start();
+    await flush();
+    useAi.setState({ open: true });
+    expect(useAi.getState().open).toBe(false);
+    expect(useTools.getState().sheet?.phase).toBe("running");
   });
 });
 

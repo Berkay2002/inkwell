@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
+import { useAi } from "./aiStore";
 import type { CompressAuditReply, CompressPreset, CompressReport, OcrBackend, OcrLanguages, OcrOutcome } from "./api";
 import * as edits from "./edit";
 
@@ -52,6 +53,8 @@ export interface Sheet {
   force: boolean;
   available: OcrLanguages | null;
   recognized: OcrOutcome | null;
+  /** 0-based pages finished so far in an OCR run (the thumbnails tick them). */
+  donePages: number[];
   /** The document had edits when the sheet opened: compress saves them first. */
   needsSave: boolean;
 }
@@ -108,6 +111,7 @@ const blank = (tool: ToolKind, doc: number): Sheet => ({
   force: false,
   available: null,
   recognized: null,
+  donePages: [],
   needsSave: false,
 });
 
@@ -161,6 +165,9 @@ export const useTools = create<ToolsStore>((set, get) => {
         scope: opts?.scope ?? "all",
         range: opts?.range ?? "",
       };
+      // One right-side panel at a time: the rail replaces the assistant; Organize has no rail.
+      useAi.getState().setOpen(false);
+      if (d.organize) st().patch(d.id, { organize: false });
       set({ sheet });
       void (tool === "compress" ? loadAudit(sheet) : loadLanguages(sheet));
     },
@@ -215,6 +222,9 @@ export const useTools = create<ToolsStore>((set, get) => {
           const cur = st().docs[d.id];
           const pages =
             sheet.scope === "page" ? String((cur?.currentPage ?? 0) + 1) : sheet.scope === "range" ? sheet.range : undefined;
+          // The page thumbnails show which pages are done.
+          if (st().sidebar !== "thumbs") st().setSidebar("thumbs");
+          patch({ donePages: [] });
           const out = await api.ocrStart(
             job,
             {
@@ -225,7 +235,20 @@ export const useTools = create<ToolsStore>((set, get) => {
               backend: sheet.backend,
               saveAs: opts?.saveAs,
             },
-            (p) => upd({ progress: p.total ? p.done / p.total : 0, status: `Reading page ${p.page + 1} (${p.done} of ${p.total})` }),
+            (p) =>
+              job === current &&
+              set((s) =>
+                s.sheet
+                  ? {
+                      sheet: {
+                        ...s.sheet,
+                        progress: p.total ? p.done / p.total : 0,
+                        status: `Reading page ${p.page + 1} (${p.done} of ${p.total})`,
+                        donePages: [...s.sheet.donePages, p.page],
+                      },
+                    }
+                  : s,
+              ),
           );
           if (out.state) edits.applyState(d.id, out.state);
           const first = sheet.languages[0];
@@ -261,6 +284,14 @@ export const useTools = create<ToolsStore>((set, get) => {
       await st().openPath(path);
     },
   };
+});
+
+// The assistant opening closes an idle rail; a running tool keeps the right side to itself.
+useAi.subscribe((s, prev) => {
+  if (!s.open || prev.open) return;
+  const t = useTools.getState();
+  if (t.sheet?.phase === "running") useAi.setState({ open: false });
+  else if (t.sheet) useTools.setState({ sheet: null });
 });
 
 const STAGE: Record<string, string> = {

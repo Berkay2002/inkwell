@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import type { IconName } from "../components/Icons";
 import { useStore } from "../store";
+import { useTools } from "./toolsStore";
 
 export type ToolId = "organize" | "edit" | "annotate" | "fill" | "redact" | "ocr" | "compress" | "merge";
 
@@ -17,6 +18,14 @@ export const quickTools: { id: ToolId; label: string; icon: IconName }[] = [
 
 /** Later phases register the real tool here; until one does, a tool just opens the picked file. */
 export const toolHandlers: Partial<Record<ToolId, (path: string) => void | Promise<void>>> = {};
+
+/** Home's quick tools: open the picked file, then the rail for it (the sheet needs the open document). */
+for (const id of ["ocr", "compress"] as const) {
+  toolHandlers[id] = async (path) => {
+    await useStore.getState().openPath(path);
+    useTools.getState().open(id);
+  };
+}
 
 // TODO(editing phases): set toolHandlers[id] when the tool exists (it receives the picked path).
 export async function launchTool(id: ToolId) {

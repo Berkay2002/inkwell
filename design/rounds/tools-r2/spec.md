@@ -8,6 +8,14 @@ unreadable. Same three ideas, nothing else changed; only the render changes:
   The start and result states are described in the notes below for the build and are not rendered.
 - Large crisp UI text, sharp hairlines, realistic copy.
 
+Verdict (2026-10-11): b-rail approved. The user, relayed by the inkwell session: "Go with b-rail, but before approving, how does
+adobe do it?", and after seeing Acrobat's left-panel tool list and the PDF Optimizer modal: "Sure I approve b-rail".
+Picks: design/approved/tools-compress.png (b-rail-1-compress-options) and tools-ocr.png (b-rail-2-ocr-progress).
+Build notes: the rail takes the assistant dock's width and chrome and the app's colour tokens (not the render's brighter blue);
+only one right-side panel is open at a time (opening Tools closes the assistant and the other way round; a running tool keeps
+the side). Starts: toolbar "Tools" menu, command palette, page context menu. Left out of the first build: the "Page range" field
+on Compress (the engine has no page range) and "Customize" (the engine takes custom options; the rail has no editor for them yet).
+
 Ideas (unchanged from r1):
 - a-popover: a "Tools" toolbar menu opens one anchored white sheet that changes state in place (options, progress, result).
 - b-rail: the tool is a 340 px right-hand rail beside the document; page thumbnails tick as pages finish. Start from a page's

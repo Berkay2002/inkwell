@@ -4,6 +4,7 @@ import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
+import { useTools } from "./toolsStore";
 
 export interface Command {
   id: string;
@@ -78,6 +79,14 @@ export const commands: Command[] = [
   { id: "extract-page", title: "Extract this page…", needsDoc: true, run: withDoc((d) => void edits.extract(d.id, [d.currentPage])) },
   { id: "split", title: "Split into single pages", needsDoc: true, run: withDoc((d) => void edits.split(d.id, 1)) },
   { id: "merge", title: "Merge files…", run: () => void edits.mergeFiles() },
+  { id: "compress", title: "Compress file…", needsDoc: true, run: () => useTools.getState().open("compress") },
+  { id: "ocr", title: "Recognize text (OCR)…", needsDoc: true, run: () => useTools.getState().open("ocr") },
+  {
+    id: "ocr-page",
+    title: "Recognize text on this page",
+    needsDoc: true,
+    run: () => useTools.getState().open("ocr", undefined, { scope: "page" }),
+  },
   { id: "next-tab", title: "Next tab", keys: ["Ctrl+Tab", "Ctrl+PageDown"], run: () => st().cycleTab(1) },
   { id: "prev-tab", title: "Previous tab", keys: ["Ctrl+Shift+Tab", "Ctrl+PageUp"], run: () => st().cycleTab(-1) },
   { id: "find", title: "Find in document", keys: ["Ctrl+F"], needsDoc: true, run: () => st().setUi({ searchOpen: true }) },
