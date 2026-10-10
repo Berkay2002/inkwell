@@ -1,0 +1,6 @@
+.claude/worktrees/
+.claude/briefs/
+node_modules/
+dist/
+target/
+*.log
