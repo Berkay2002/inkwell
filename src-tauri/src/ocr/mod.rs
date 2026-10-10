@@ -14,6 +14,7 @@
 pub mod backend;
 mod glyphless;
 mod layer;
+mod order;
 
 #[cfg(test)]
 mod tests;
@@ -85,6 +86,10 @@ pub struct PageResult {
     /// straight or the engine does not say. Detection only: the page image is never changed, the
     /// text layer is rotated to follow the scan instead.
     pub skew_deg: Option<f32>,
+    /// Degrees (0, 90, 180, 270) the page raster was turned clockwise to read it, because the scan
+    /// was fed sideways or upside down. Words are in the turned frame, `to_page` undoes it. The page
+    /// itself is never rotated.
+    pub rotation: u16,
     /// Displayed page size in points (the text frame rotates about its centre).
     pub page_size: [f32; 2],
     pub ms: u32,
@@ -93,11 +98,27 @@ pub struct PageResult {
 impl PageResult {
     /// Maps a text-frame point to the displayed page.
     pub(crate) fn to_page(&self, x: f32, y: f32) -> (f32, f32) {
-        let Some(deg) = self.skew_deg else { return (x, y) };
-        let (s, c) = deg.to_radians().sin_cos();
-        let (cx, cy) = (self.page_size[0] / 2.0, self.page_size[1] / 2.0);
-        let (dx, dy) = (x - cx, y - cy);
-        (cx + dx * c - dy * s, cy + dx * s + dy * c)
+        let [w, h] = self.page_size;
+        // Frame the engine saw: the page turned by `rotation`.
+        let (fw, fh) = if self.rotation % 180 == 90 { (h, w) } else { (w, h) };
+        let (mut x, mut y) = (x, y);
+        if let Some(deg) = self.skew_deg {
+            let (s, c) = deg.to_radians().sin_cos();
+            let (cx, cy) = (fw / 2.0, fh / 2.0);
+            let (dx, dy) = (x - cx, y - cy);
+            (x, y) = (cx + dx * c - dy * s, cy + dx * s + dy * c);
+        }
+        match self.rotation % 360 {
+            90 => (y, h - x),
+            180 => (w - x, h - y),
+            270 => (w - y, x),
+            _ => (x, y),
+        }
+    }
+
+    /// Direction of the text baseline on the displayed page, degrees clockwise (y down).
+    pub(crate) fn baseline_deg(&self) -> f32 {
+        self.skew_deg.unwrap_or(0.0) - self.rotation as f32
     }
 
     /// Recognised words as axis-aligned boxes on the page as displayed, in reading order.
@@ -133,6 +154,8 @@ pub struct Options {
     pub dpi: u32,
     /// Read pages even if they already have text, and replace an earlier layer of ours.
     pub force: bool,
+    /// Look for pages scanned sideways or upside down when the first read finds little text.
+    pub detect_orientation: bool,
     /// Pages recognised at once.
     pub workers: usize,
 }
@@ -140,7 +163,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-        Self { pages: None, languages: Vec::new(), dpi: 200, force: false, workers: (cores / 2).clamp(1, 6) }
+        Self { pages: None, languages: Vec::new(), dpi: 200, force: false, detect_orientation: true, workers: (cores / 2).clamp(1, 6) }
     }
 }
 
@@ -290,28 +313,88 @@ fn to_words(raw: RawPage, scale: f32) -> (Vec<Vec<Word>>, Option<f32>) {
             let words = l.words.into_iter().map(|w| Word { text: normalize(w.text), bbox: w.rect.map(|v| v / scale) }).collect();
             join_number_fragments(words)
         })
-        .filter(|l| !l.is_empty())
+        .filter(|l: &Vec<Word>| !l.is_empty())
         .collect();
+    let lines = order::reading_order(lines);
     let skew = raw.angle_deg.filter(|a| a.abs() >= MIN_SKEW_DEG && a.abs() <= MAX_SKEW_DEG);
     (lines, skew)
 }
 
-fn read_page(
-    doc: &PdfDocument,
-    backend: &dyn Recognizer,
-    opts: &Options,
-    index: u32,
-) -> Result<(PageStatus, Vec<Vec<Word>>, Option<f32>, [f32; 2]), OcrError> {
+struct Read {
+    status: PageStatus,
+    lines: Vec<Vec<Word>>,
+    skew_deg: Option<f32>,
+    rotation: u16,
+    page_size: [f32; 2],
+}
+
+/// How much real-looking text a recognition found: characters in alphabetic words of three or more
+/// letters with a vowel (or a non-Latin letter). Upright text of any size scores high; text read
+/// sideways comes back as short fragments and punctuation.
+fn plausibility(raw: &RawPage) -> (usize, usize, usize) {
+    let (mut words, mut chars, mut tall) = (0, 0, 0);
+    for w in raw.lines.iter().flat_map(|l| &l.words) {
+        let t: Vec<char> = w.text.chars().filter(|c| !matches!(c, '.' | ',' | ':' | ';' | '!' | '?')).collect();
+        let ok = t.len() >= 3
+            && t.iter().all(|c| c.is_alphabetic())
+            && t.iter().any(|c| "aeiouyAEIOUYåäöÅÄÖéèêáíóúüÜ".contains(*c) || !c.is_ascii() && !c.is_uppercase() && !c.is_lowercase());
+        if ok {
+            words += 1;
+            chars += t.len();
+            // Tesseract reads sideways text where it lies: tall boxes around three-letter words.
+            if w.rect[3] - w.rect[1] > w.rect[2] - w.rect[0] {
+                tall += 1;
+            }
+        }
+    }
+    (words, chars, tall)
+}
+
+/// A first read this good is upright; skip the search.
+const HEALTHY_WORDS: usize = 8;
+const HEALTHY_CHARS: usize = 60;
+
+/// Clockwise degrees to turn `bmp` so its text is upright. `upright` is the read at 0 degrees.
+fn find_rotation(backend: &dyn Recognizer, bmp: &Bitmap, languages: &[String], upright: &RawPage) -> u16 {
+    let (words0, chars0, tall0) = plausibility(upright);
+    if words0 >= HEALTHY_WORDS && chars0 >= HEALTHY_CHARS && tall0 * 2 < words0 {
+        return 0;
+    }
+    if let Some(r) = backend.osd_rotation(bmp) {
+        return r;
+    }
+    // No detector: read the page turned each way at half size and keep the clear winner.
+    let small = if bmp.w.max(bmp.h) >= 1600 { bmp.halved() } else { bmp.rotated(0) };
+    let mut best = (0u16, chars0);
+    for r in [90u16, 180, 270] {
+        let Ok(raw) = backend.recognize(&small.rotated(r), languages) else { continue };
+        let (_, chars, _) = plausibility(&raw);
+        if chars > best.1 {
+            best = (r, chars);
+        }
+    }
+    // Turning needs a clear win: a handful of short words is not evidence.
+    if best.0 != 0 && best.1 >= chars0 * 3 / 2 + 24 { best.0 } else { 0 }
+}
+
+fn read_page(doc: &PdfDocument, backend: &dyn Recognizer, opts: &Options, index: u32) -> Result<Read, OcrError> {
     let b = doc.load_page(index as i32)?.bounds()?;
-    let size = [b.x1 - b.x0, b.y1 - b.y0];
+    let page_size = [b.x1 - b.x0, b.y1 - b.y0];
     if !opts.force && page_has_text(doc, index)? {
-        return Ok((PageStatus::SkippedHasText, Vec::new(), None, size));
+        return Ok(Read { status: PageStatus::SkippedHasText, lines: Vec::new(), skew_deg: None, rotation: 0, page_size });
     }
     let (bmp, scale) = render(doc, index, opts.dpi, backend.max_dimension())?;
-    let raw = backend.recognize(&bmp, &opts.languages)?;
-    let (lines, skew) = to_words(raw, scale);
+    let mut raw = backend.recognize(&bmp, &opts.languages)?;
+    let mut rotation = 0;
+    if opts.detect_orientation {
+        rotation = find_rotation(backend, &bmp, &opts.languages, &raw);
+        if rotation != 0 {
+            raw = backend.recognize(&bmp.rotated(rotation), &opts.languages)?;
+        }
+    }
+    let (lines, skew_deg) = to_words(raw, scale);
     let status = if lines.is_empty() { PageStatus::NoText } else { PageStatus::Recognized };
-    Ok((status, lines, skew, size))
+    Ok(Read { status, lines, skew_deg, rotation, page_size })
 }
 
 /// Stage 1. Never writes. `progress` is called from worker threads after each page; set `cancel`
@@ -365,16 +448,20 @@ pub fn recognize(
                         }
                         Err(e) => Err(OcrError::Pdf(e.to_string())),
                     };
-                    let (status, lines, skew_deg, page_size) = match r {
-                        Ok(v) => v,
-                        Err(e) => (PageStatus::Failed(e.to_string()), Vec::new(), None, [0.0, 0.0]),
-                    };
+                    let r = r.unwrap_or_else(|e| Read {
+                        status: PageStatus::Failed(e.to_string()),
+                        lines: Vec::new(),
+                        skew_deg: None,
+                        rotation: 0,
+                        page_size: [0.0, 0.0],
+                    });
                     results.lock().unwrap().push(PageResult {
                         page,
-                        status,
-                        lines,
-                        skew_deg,
-                        page_size,
+                        status: r.status,
+                        lines: r.lines,
+                        skew_deg: r.skew_deg,
+                        rotation: r.rotation,
+                        page_size: r.page_size,
                         ms: t.elapsed().as_millis() as u32,
                     });
                     let n = done.fetch_add(1, Ordering::Relaxed) as u32 + 1;
@@ -468,6 +555,7 @@ pub struct PageSummary {
     pub status: PageStatus,
     pub words: u32,
     pub skew_deg: Option<f32>,
+    pub rotation: u16,
     pub ms: u32,
 }
 
@@ -537,6 +625,7 @@ pub fn ocr_file(
                 status: p.status.clone(),
                 words: p.lines.iter().map(|l| l.len() as u32).sum(),
                 skew_deg: p.skew_deg,
+                rotation: p.rotation,
                 ms: p.ms,
             })
             .collect(),

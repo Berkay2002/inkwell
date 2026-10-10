@@ -14,6 +14,43 @@ pub struct Bitmap {
     pub pixels: Vec<u8>,
 }
 
+impl Bitmap {
+    /// Turned clockwise by 90, 180 or 270 degrees (anything else returns a copy).
+    pub fn rotated(&self, cw_deg: u16) -> Bitmap {
+        let (w, h) = (self.w as usize, self.h as usize);
+        let px = &self.pixels;
+        let (nw, nh) = if cw_deg % 180 == 90 { (h, w) } else { (w, h) };
+        let mut out = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                // destination of source pixel (x, y)
+                let (dx, dy) = match cw_deg % 360 {
+                    90 => (h - 1 - y, x),
+                    180 => (w - 1 - x, h - 1 - y),
+                    270 => (y, w - 1 - x),
+                    _ => (x, y),
+                };
+                out[dy * nw + dx] = px[y * w + x];
+            }
+        }
+        Bitmap { w: nw as u32, h: nh as u32, pixels: out }
+    }
+
+    /// Half size by 2x2 averaging (orientation trials do not need full resolution).
+    pub fn halved(&self) -> Bitmap {
+        let (w, h) = ((self.w / 2).max(1) as usize, (self.h / 2).max(1) as usize);
+        let sw = self.w as usize;
+        let mut out = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let at = |dx: usize, dy: usize| self.pixels[((2 * y + dy).min(self.h as usize - 1)) * sw + (2 * x + dx).min(sw - 1)] as u32;
+                out.push(((at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1)) / 4) as u8);
+            }
+        }
+        Bitmap { w: w as u32, h: h as u32, pixels: out }
+    }
+}
+
 /// A recognised word; `rect` is `[x0, y0, x1, y1]` in bitmap pixels, y down.
 #[derive(Clone, Debug)]
 pub struct RawWord {
@@ -41,6 +78,12 @@ pub trait Recognizer: Send + Sync {
     fn max_dimension(&self) -> u32;
     /// `languages` is in priority order (BCP-47 tags); empty = the backend's default.
     fn recognize(&self, bmp: &Bitmap, languages: &[String]) -> Result<RawPage, OcrError>;
+    /// Degrees (0/90/180/270) to turn `bmp` clockwise to make its text upright, when the engine has
+    /// a dedicated detector (Tesseract OSD). `None` = no opinion; the caller then tries rotations
+    /// with [`recognize`](Self::recognize).
+    fn osd_rotation(&self, _bmp: &Bitmap) -> Option<u16> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -101,7 +144,12 @@ mod winrt {
 
         fn recognize(&self, bmp: &Bitmap, languages: &[String]) -> Result<RawPage, OcrError> {
             // One engine per call: creation is cheap next to recognition and keeps this `Sync`.
-            let engine = engine_for(languages.first().map(String::as_str))?;
+            // The first requested language that has a pack wins (the API has no per-word confidence
+            // to merge several engines' results with, see docs/ocr-engine.md).
+            let engine = match languages.iter().find_map(|t| engine_for(Some(t)).ok()) {
+                Some(e) => e,
+                None => engine_for(languages.first().map(String::as_str))?,
+            };
             let w = DataWriter::new().map_err(werr)?;
             w.WriteBytes(&bmp.pixels).map_err(werr)?;
             let buf = w.DetachBuffer().map_err(werr)?;
@@ -163,20 +211,48 @@ const ISO3: &[(&str, &str)] = &[
 ];
 
 impl TesseractCli {
-    /// `INKWELL_TESSERACT` (exe path), then `E:\Tools\Tesseract-OCR`, `Program Files`, `PATH`.
-    pub fn discover() -> Option<Self> {
-        let mut cands: Vec<PathBuf> = Vec::new();
-        if let Ok(p) = std::env::var("INKWELL_TESSERACT") {
-            cands.push(p.into());
+    /// Where to look for `tesseract.exe`, in order: the host's `ocr.tesseractPath` setting
+    /// (`configured`), `INKWELL_TESSERACT`, then `Tesseract-OCR	esseract.exe` under `%ProgramFiles%`
+    /// and `%ProgramFiles(x86)%`. Neither `PATH` nor the current directory is searched, and no
+    /// location is hard-coded. Existence is not checked here.
+    pub fn candidates(configured: Option<&Path>, env: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+        let mut c: Vec<PathBuf> = Vec::new();
+        if let Some(p) = configured.filter(|p| !p.as_os_str().is_empty()) {
+            c.push(p.to_path_buf());
         }
-        cands.push(r"E:\Tools\Tesseract-OCR\tesseract.exe".into());
-        cands.push(r"C:\Program Files\Tesseract-OCR\tesseract.exe".into());
-        if let Ok(path) = std::env::var("PATH") {
-            cands.extend(std::env::split_paths(&path).map(|d| d.join("tesseract.exe")));
+        if let Some(p) = env("INKWELL_TESSERACT").filter(|p| !p.is_empty()) {
+            c.push(p.into());
         }
-        let exe = cands.into_iter().find(|p| p.is_file())?;
-        let tessdata = exe.parent().map(|d| d.join("tessdata")).filter(|d| d.is_dir());
-        Some(Self { exe, tessdata })
+        for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(dir) = env(var).filter(|d| !d.is_empty()) {
+                c.push(PathBuf::from(dir).join("Tesseract-OCR").join("tesseract.exe"));
+            }
+        }
+        c
+    }
+
+    /// First existing candidate that has a `tessdata` folder beside it. The resolved path is logged
+    /// before it is ever run.
+    pub fn discover(configured: Option<&Path>) -> Option<Self> {
+        for cand in Self::candidates(configured, &|k| std::env::var_os(k)) {
+            if !cand.is_file() {
+                continue;
+            }
+            // Resolved absolute path. canonicalize's `\\?\` prefix on Windows breaks Tesseract's own
+            // path handling (its --tessdata-dir), so it is stripped for plain drive paths.
+            let exe = cand.canonicalize().unwrap_or(cand);
+            let exe = match exe.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+                Some(plain) if !plain.starts_with(r"UNC\") => PathBuf::from(plain),
+                _ => exe,
+            };
+            let Some(tessdata) = exe.parent().map(|d| d.join("tessdata")).filter(|d| d.is_dir()) else {
+                eprintln!("ocr: skipping {} (no tessdata folder beside it)", exe.display());
+                continue;
+            };
+            eprintln!("ocr: using Tesseract at {}", exe.display());
+            return Some(Self { exe, tessdata: Some(tessdata) });
+        }
+        None
     }
 
     fn lang_arg(languages: &[String]) -> String {
@@ -262,6 +338,38 @@ impl Recognizer for TesseractCli {
         }
         Ok(parse_tsv(&String::from_utf8_lossy(&out.stdout)))
     }
+
+    fn osd_rotation(&self, bmp: &Bitmap) -> Option<u16> {
+        let tessdata = self.tessdata_dir()?;
+        if !tessdata.join("osd.traineddata").is_file() {
+            return None;
+        }
+        let mut cmd = Command::new(&self.exe);
+        cmd.args(["stdin", "stdout", "--psm", "0", "-l", "osd", "--tessdata-dir"]).arg(tessdata);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = cmd.spawn().ok()?;
+        let data = pgm(bmp);
+        let mut stdin = child.stdin.take()?;
+        let feeder = std::thread::spawn(move || stdin.write_all(&data));
+        let out = child.wait_with_output().ok()?;
+        let _ = feeder.join();
+        parse_osd(&String::from_utf8_lossy(&out.stdout))
+    }
+}
+
+/// `Rotate: 270` and `Orientation confidence: 11.3` from `--psm 0` output; low confidence = `None`.
+pub(crate) fn parse_osd(text: &str) -> Option<u16> {
+    let field = |key: &str| {
+        text.lines().find_map(|l| l.strip_prefix(key)).and_then(|v| v.trim().parse::<f32>().ok())
+    };
+    let rotate = field("Rotate:")?;
+    let confidence = field("Orientation confidence:")?;
+    (confidence >= 2.0).then_some((rotate as u16) % 360)
 }
 
 /// Word rows (level 5) grouped by block/paragraph/line, in the order Tesseract emits them.

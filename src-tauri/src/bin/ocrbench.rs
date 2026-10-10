@@ -15,7 +15,7 @@ fn main() {
     }
     let backend: Box<dyn Recognizer> = match a[1].as_str() {
         "windows" => Box::new(WinRtOcr),
-        "tesseract" => Box::new(TesseractCli::discover().expect("tesseract not found")),
+        "tesseract" => Box::new(TesseractCli::discover(None).expect("tesseract not found")),
         b => panic!("unknown backend {b}"),
     };
     let langs: Vec<String> = if a[2] == "-" { Vec::new() } else { a[2].split('+').map(String::from).collect() };

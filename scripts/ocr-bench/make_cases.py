@@ -189,6 +189,20 @@ def skew(im, gt, dpi, deg):
     return rot, out
 
 
+def turn(im, gt, dpi, deg):
+    """A page scanned sideways: the upright page turned clockwise by 90, 180 or 270 degrees."""
+    w_pt, h_pt = im.size[0] * 72 / dpi, im.size[1] * 72 / dpi
+    rot = im.rotate(-deg, expand=True, fillcolor=255)
+    f = {90: lambda x, y: (h_pt - y, x), 180: lambda x, y: (w_pt - x, h_pt - y), 270: lambda x, y: (y, w_pt - x)}[deg]
+    out = []
+    for g in gt:
+        x0, y0, x1, y1 = g["box"]
+        pts = [f(x, y) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        out.append({"t": g["t"], "box": [min(xs), min(ys), max(xs), max(ys)]})
+    return rot, out
+
+
 def noisy(im):
     rnd = random.Random(7)
     im = im.filter(ImageFilter.GaussianBlur(0.9))
@@ -243,6 +257,15 @@ def main():
 
     ims, gts = case_clean(300, pt=7.5)
     save(out_dir, "c09_small", ims, gts, 300, "Arial 7.5pt at 300 dpi")
+
+    for deg in (90, 180, 270):
+        r, g = turn(im, gt, 300, deg)
+        save(out_dir, f"c{10 + deg // 90 - 1}_turn{deg}", r, g, 300, f"clean page scanned turned {deg} degrees clockwise")
+
+    # 40 pages for worker scaling (not scored: no ground truth file)
+    many = out_dir / "many40.pdf"
+    im.save(many, "PDF", save_all=True, append_images=[im] * 39, resolution=300)
+    print("many40", 40, "pages")
 
 
 if __name__ == "__main__":

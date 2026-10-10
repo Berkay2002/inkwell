@@ -12,6 +12,7 @@ use mupdf::pdf::PdfDocument;
 use mupdf::{Quad, TextPageFlags};
 
 use super::backend::{Bitmap, RawLine, RawPage, RawWord, Recognizer, TesseractCli};
+use super::order::reading_order;
 #[cfg(windows)]
 use super::backend::WinRtOcr;
 use super::*;
@@ -125,12 +126,21 @@ fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
     v
 }
 
-/// Rasterises one line set at `dpi` and wraps it as a scan page (no text in the result).
-fn scan_of(lines: &[&str], dpi: u32) -> Pg {
+fn scan_bitmap(lines: &[&str], dpi: u32) -> Bitmap {
     let text = build(&[Pg::Text(lines.iter().map(|s| s.to_string()).collect())]);
     let doc = PdfDocument::from_bytes(&text).unwrap();
-    let (bmp, _) = render(&doc, 0, dpi, 20000).unwrap();
-    Pg::Scan { w: 612.0, h: 792.0, bmp, rotate: 0, sloppy_cm: false }
+    render(&doc, 0, dpi, 20000).unwrap().0
+}
+
+/// Rasterises one line set at `dpi` and wraps it as a scan page (no text in the result).
+fn scan_of(lines: &[&str], dpi: u32) -> Pg {
+    Pg::Scan { w: 612.0, h: 792.0, bmp: scan_bitmap(lines, dpi), rotate: 0, sloppy_cm: false }
+}
+
+/// The same page fed to the scanner turned clockwise by `deg`: a landscape (or upside-down) image.
+fn turned_scan_of(lines: &[&str], dpi: u32, deg: u16) -> Pg {
+    let (w, h) = if deg % 180 == 90 { (792.0, 612.0) } else { (612.0, 792.0) };
+    Pg::Scan { w, h, bmp: scan_bitmap(lines, dpi).rotated(deg), rotate: 0, sloppy_cm: false }
 }
 
 fn write_tmp(name: &str, bytes: &[u8]) -> PathBuf {
@@ -164,13 +174,15 @@ struct Stub {
     /// (text, [x0, y0, x1, y1]) in bitmap pixels; one line per entry of `lines`.
     lines: Vec<Vec<(&'static str, [f32; 4])>>,
     angle: Option<f32>,
+    /// What `osd_rotation` answers (a stand-in for Tesseract's detector).
+    osd: Option<u16>,
     delay: Duration,
     calls: AtomicUsize,
 }
 
 impl Stub {
     fn new(lines: Vec<Vec<(&'static str, [f32; 4])>>) -> Self {
-        Self { lines, angle: None, delay: Duration::ZERO, calls: AtomicUsize::new(0) }
+        Self { lines, angle: None, osd: None, delay: Duration::ZERO, calls: AtomicUsize::new(0) }
     }
 }
 
@@ -183,6 +195,9 @@ impl Recognizer for Stub {
     }
     fn max_dimension(&self) -> u32 {
         10000
+    }
+    fn osd_rotation(&self, _bmp: &Bitmap) -> Option<u16> {
+        self.osd
     }
     fn recognize(&self, _bmp: &Bitmap, _languages: &[String]) -> Result<RawPage, OcrError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -207,7 +222,7 @@ fn stub_words() -> Vec<Vec<(&'static str, [f32; 4])>> {
 }
 
 fn opts72() -> Options {
-    Options { dpi: 72, workers: 2, ..Options::default() }
+    Options { dpi: 72, workers: 2, detect_orientation: false, ..Options::default() }
 }
 
 fn no_progress(_: Progress) {}
@@ -261,7 +276,7 @@ fn page_boxes_and_image_bytes_are_untouched() {
     let input = write_tmp("bytes-in.pdf", &input_bytes);
     let output = input.with_file_name("bytes-out.pdf");
     let stub = Stub::new(stub_words());
-    let opts = Options { dpi: 72, workers: 1, ..Options::default() };
+    let opts = Options { dpi: 72, workers: 1, detect_orientation: false, ..Options::default() };
     ocr_file(&input, &output, &stub, &opts, &no_progress, &AtomicBool::new(false)).unwrap();
     let out_bytes = std::fs::read(&output).unwrap();
     // The incremental update leaves every original byte (image stream included) where it was.
@@ -479,7 +494,7 @@ fn real_backends() -> Vec<(Box<dyn Recognizer>, &'static str)> {
     if WinRtOcr.languages().map(|l| l.iter().any(|t| t.starts_with("en"))).unwrap_or(false) {
         v.push((Box::new(WinRtOcr), "en-US"));
     }
-    if let Some(t) = TesseractCli::discover() {
+    if let Some(t) = TesseractCli::discover(None) {
         if t.languages().map(|l| l.iter().any(|x| x == "en")).unwrap_or(false) {
             v.push((Box::new(t), "en"));
         }
@@ -542,4 +557,195 @@ fn study_sample_compared_with_acrobat() {
         let orig = std::fs::read(&scan).unwrap();
         assert!(std::fs::read(&out).unwrap().starts_with(&orig));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Orientation
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn bitmap_rotation_is_clockwise() {
+    // 3 x 2 image: a b c / d e f
+    let b = Bitmap { w: 3, h: 2, pixels: vec![1, 2, 3, 4, 5, 6] };
+    assert_eq!((b.rotated(90).w, b.rotated(90).h, b.rotated(90).pixels), (2, 3, vec![4, 1, 5, 2, 6, 3]));
+    assert_eq!(b.rotated(180).pixels, vec![6, 5, 4, 3, 2, 1]);
+    assert_eq!((b.rotated(270).w, b.rotated(270).pixels), (2, vec![3, 6, 2, 5, 1, 4]));
+    assert_eq!(b.rotated(90).rotated(270).pixels, b.pixels);
+}
+
+#[test]
+fn a_sideways_scan_gets_its_words_mapped_back_to_the_page() {
+    // Landscape 400 x 300 pt image whose text must be turned 90 degrees clockwise to read.
+    // The stub reads the turned raster (300 x 400) and reports words in that frame.
+    let mut stub = Stub::new(stub_words());
+    stub.osd = Some(90);
+    let opts = Options { detect_orientation: true, ..opts72() };
+    let (out, rep) = run_stub(&[blank_scan(400.0, 300.0)], &stub, &opts, "sideways");
+    assert_eq!(rep.pages[0].rotation, 90);
+    assert_eq!(stub.calls.load(Ordering::SeqCst), 2, "one read to find out, one turned");
+    // Turned frame (x, y) -> page (y, h - x) with h = 300: "Invoice" centre (96, 107) -> (107, 204).
+    let hits = search(&out, 0, "Invoice");
+    assert_eq!(hits.len(), 1);
+    let (cx, cy) = centre(&hits[0]);
+    assert!((cx - 107.0).abs() < 4.0 && (cy - 204.0).abs() < 8.0, "({cx},{cy})");
+    // The page itself is untouched.
+    let doc = PdfDocument::open(out.to_string_lossy().as_ref()).unwrap();
+    let b = doc.load_page(0).unwrap().bounds().unwrap();
+    assert_eq!((b.x1 - b.x0, b.y1 - b.y0), (400.0, 300.0));
+    assert_eq!(page_text(&out, 0).split_whitespace().count(), 5);
+}
+
+#[test]
+fn an_upright_page_is_not_turned() {
+    let stub = Stub::new(stub_words());
+    let opts = Options { detect_orientation: true, ..opts72() };
+    let (_, rep) = run_stub(&[blank_scan(612.0, 792.0)], &stub, &opts, "upright-detect");
+    assert_eq!(rep.pages[0].rotation, 0);
+}
+
+#[test]
+fn osd_output_is_parsed() {
+    let osd = "Page number: 0\nOrientation in degrees: 90\nRotate: 270\nOrientation confidence: 11.26\n";
+    assert_eq!(backend::parse_osd(osd), Some(270));
+    assert_eq!(backend::parse_osd("Rotate: 90\nOrientation confidence: 0.4\n"), None);
+    assert_eq!(backend::parse_osd("Too few characters. Skipping this page"), None);
+}
+
+#[test]
+fn real_backends_read_scans_fed_sideways() {
+    let backends = real_backends();
+    if backends.is_empty() {
+        eprintln!("skipped: no OCR backend available");
+        return;
+    }
+    // "quick" on the upright 612 x 792 page, from the vector original.
+    let truth = {
+        let src = write_tmp("turn-src.pdf", &build(&[Pg::Text(SCAN_LINES.iter().map(|s| s.to_string()).collect())]));
+        centre(&search(&src, 0, "quick")[0])
+    };
+    for (b, lang) in backends {
+        for deg in [90u16, 180, 270] {
+            let name = format!("turn{deg}-{}", b.name());
+            let input = write_tmp(&format!("{name}-in.pdf"), &build(&[turned_scan_of(&SCAN_LINES, 200, deg)]));
+            let output = input.with_file_name(format!("{name}-out.pdf"));
+            let _ = std::fs::remove_file(&output);
+            let opts = Options { languages: vec![lang.into()], workers: 1, ..Options::default() };
+            let rep = ocr_file(&input, &output, b.as_ref(), &opts, &no_progress, &AtomicBool::new(false)).unwrap();
+            eprintln!("{} fed turned {deg}: rotation {} in {} ms", b.name(), rep.pages[0].rotation, rep.pages[0].ms);
+            // The scan was turned clockwise by `deg`; the engine's turn undoes it.
+            assert_eq!(rep.pages[0].rotation, 360 - deg, "{} {deg}", b.name());
+            let words: Vec<String> = page_text(&output, 0).split_whitespace().map(String::from).collect();
+            for w in ["quick", "$1,234.56", "jane.tester@example.com", "Scanned"] {
+                assert!(words.iter().any(|x| x == w), "{} {deg}: {w} missing from {words:?}", b.name());
+            }
+            let (w, h) = (612.0, 792.0);
+            let expect = match deg {
+                90 => (h - truth.1, truth.0),
+                180 => (w - truth.0, h - truth.1),
+                _ => (truth.1, w - truth.0),
+            };
+            let hits = search(&output, 0, "quick");
+            assert_eq!(hits.len(), 1, "{} {deg}", b.name());
+            let c = centre(&hits[0]);
+            assert!((c.0 - expect.0).abs() < 8.0 && (c.1 - expect.1).abs() < 8.0, "{} {deg}: {c:?} vs {expect:?}", b.name());
+            // Words in reading order of the upright page.
+            let want: Vec<&str> = SCAN_LINES[..4].iter().flat_map(|l| l.split_whitespace()).collect();
+            let got: Vec<&str> = words.iter().map(String::as_str).collect();
+            assert_eq!(&got[..want.len()], &want[..], "{} {deg}", b.name());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reading order
+// ---------------------------------------------------------------------------------------------
+
+fn w(text: &str, x: f32, y: f32) -> Word {
+    Word { text: text.into(), bbox: [x, y, x + 6.0 * text.len() as f32, y + 10.0] }
+}
+
+fn texts(lines: &[Vec<Word>]) -> Vec<String> {
+    lines.iter().map(|l| l.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")).collect()
+}
+
+#[test]
+fn a_table_the_engine_returns_by_column_is_read_by_row() {
+    // What Windows OCR gives for a ruled table: one "line" per cell stack, column after column.
+    let col = |x: f32, cells: &[&str]| -> Vec<Vec<Word>> {
+        cells.iter().enumerate().map(|(i, t)| t.split(' ').enumerate().map(|(j, p)| w(p, x + 40.0 * j as f32, 100.0 + 22.0 * i as f32)).collect()).collect()
+    };
+    let mut lines = Vec::new();
+    lines.extend(col(72.0, &["Item", "A-100", "B-220"]));
+    lines.extend(col(216.0, &["Description", "Hex bolt M8", "Steel bracket"]));
+    lines.extend(col(360.0, &["Qty", "120", "18"]));
+    let got = texts(&reading_order(lines));
+    assert_eq!(got, ["Item Description Qty", "A-100 Hex bolt M8 120", "B-220 Steel bracket 18"]);
+}
+
+#[test]
+fn text_columns_are_read_one_after_the_other() {
+    let sentence = |x: f32, y: f32, tag: &str| -> Vec<Word> { (0..8).map(|i| w(&format!("{tag}{i}"), x + 42.0 * i as f32, y)).collect() };
+    // Interleaved as a row-by-row engine would return them; a full-width title on top.
+    let mut lines = vec![vec![w("Title", 72.0, 60.0), w("of", 120.0, 60.0), w("page", 150.0, 60.0)]];
+    for row in 0..4 {
+        let y = 100.0 + 14.0 * row as f32;
+        lines.push(sentence(72.0, y, &format!("L{row}_")));
+        lines.push(sentence(450.0, y, &format!("R{row}_")));
+    }
+    let got = texts(&reading_order(lines));
+    assert_eq!(got[0], "Title of page");
+    assert!(got[1].starts_with("L0_0") && got[4].starts_with("L3_0"), "{got:?}");
+    assert!(got[5].starts_with("R0_0") && got[8].starts_with("R3_0"), "{got:?}");
+}
+
+#[test]
+fn a_single_column_keeps_its_line_order() {
+    let lines: Vec<Vec<Word>> = (0..6).map(|i| (0..9).map(|j| w(&format!("w{i}{j}"), 72.0 + 40.0 * j as f32, 100.0 + 14.0 * i as f32)).collect()).collect();
+    let before = texts(&lines);
+    assert_eq!(texts(&reading_order(lines)), before);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Languages and Tesseract discovery
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(windows)]
+#[test]
+fn windows_language_priority_falls_through_to_an_installed_pack() {
+    let packs = WinRtOcr.languages().unwrap();
+    eprintln!("installed Windows OCR packs: {packs:?}");
+    assert!(!packs.is_empty());
+    let bmp = scan_bitmap(&SCAN_LINES, 200);
+    // First requested pack is not installed: the next one is used instead of failing.
+    let have = packs.iter().find(|p| p.starts_with("en")).expect("en pack").clone();
+    let raw = WinRtOcr.recognize(&bmp, &["xx-XX".to_string(), have]).unwrap();
+    assert!(raw.lines.iter().flat_map(|l| &l.words).any(|w| w.text == "quick"));
+    assert!(matches!(WinRtOcr.recognize(&bmp, &["xx-XX".to_string()]), Err(OcrError::LanguageUnavailable(_))));
+}
+
+#[test]
+fn tesseract_is_searched_in_a_fixed_order_and_never_on_path() {
+    let env = |k: &str| -> Option<std::ffi::OsString> {
+        match k {
+            "INKWELL_TESSERACT" => Some(r"D:\env\tesseract.exe".into()),
+            "ProgramFiles" => Some(r"C:\Program Files".into()),
+            "ProgramFiles(x86)" => Some(r"C:\Program Files (x86)".into()),
+            "PATH" => Some(r"C:\evil".into()),
+            _ => None,
+        }
+    };
+    let got = TesseractCli::candidates(Some(std::path::Path::new(r"D:\setting\tesseract.exe")), &env);
+    let got: Vec<String> = got.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    assert_eq!(
+        got,
+        [
+            r"D:\setting\tesseract.exe",
+            r"D:\env\tesseract.exe",
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+    );
+    // Nothing configured and no environment: nothing to try (in particular no PATH, no cwd).
+    assert!(TesseractCli::candidates(None, &|_| None).is_empty());
+    assert!(TesseractCli::candidates(Some(std::path::Path::new("")), &|_| None).is_empty());
 }

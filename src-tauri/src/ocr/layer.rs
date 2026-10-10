@@ -102,7 +102,7 @@ fn num(out: &mut String, v: f32) {
 pub(crate) fn layer_stream(page: &PageResult, user_from_page: &Matrix) -> (Vec<u8>, u32) {
     let m = user_from_page;
     // Baseline direction on the displayed page and its "up" (y is down there).
-    let (sin, cos) = page.skew_deg.unwrap_or(0.0).to_radians().sin_cos();
+    let (sin, cos) = page.baseline_deg().to_radians().sin_cos();
     let (ux, uy) = (m.a * cos + m.c * sin, m.b * cos + m.d * sin);
     let (vx, vy) = (m.a * sin - m.c * cos, m.b * sin - m.d * cos);
     let mut max_code = 0u32;
