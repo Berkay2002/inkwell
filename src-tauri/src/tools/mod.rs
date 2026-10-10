@@ -6,6 +6,7 @@
 //! current snapshot, then `ocr::apply` runs inside `Engine::apply_custom` on the serial lane, so it
 //! is one undo step and the normal Save writes it.
 
+pub mod paths;
 #[cfg(test)]
 mod tests;
 
@@ -142,8 +143,10 @@ pub fn predict(audit: &Audit) -> Vec<Prediction> {
         .collect()
 }
 
-pub fn audit_for_ui(path: &Path, password: Option<&str>) -> Result<AuditReply, ToolError> {
-    let audit = compress::audit_file(path, password)?;
+pub fn audit_for_ui(eng: &Engine, doc: DocId) -> Result<AuditReply, ToolError> {
+    let path = PathBuf::from(eng.doc_entry(doc)?.path());
+    let path = path.as_path();
+    let audit = compress::audit_file(path, None)?;
     let out = compress::default_output(path);
     Ok(AuditReply {
         size: std::fs::metadata(path).map_err(|e| ToolError(e.to_string()))?.len(),
@@ -155,29 +158,36 @@ pub fn audit_for_ui(path: &Path, password: Option<&str>) -> Result<AuditReply, T
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompressRequest {
-    pub path: String,
+    /// The open document; its file on disk is the input (the UI saves pending edits first).
+    pub doc: DocId,
     #[serde(default)]
     pub preset: Preset,
-    /// Options from the Customize panel; wins over `preset` (which is then `custom`).
+    /// Options from a Customize panel; wins over `preset` (which is then `custom`). Its `output`
+    /// and `password` are ignored: see [`run_compress`].
     pub custom: Option<Options>,
-    /// Defaults to `<name> (compressed).pdf` next to the input. Never overwritten.
-    pub output: Option<String>,
-    pub password: Option<String>,
+    /// Name the file in a dialog instead of `<name> (compressed).pdf` (used when that is taken).
+    #[serde(default)]
+    pub choose_output: bool,
 }
 
+/// `output`: where to write, chosen on the Rust side; `None` = `<name> (compressed).pdf` next to
+/// the input. Never overwritten.
 pub fn run_compress(
+    eng: &Engine,
     req: &CompressRequest,
+    output: Option<PathBuf>,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(compress::Progress),
 ) -> Result<compress::Report, ToolError> {
+    let input = PathBuf::from(eng.doc_entry(req.doc)?.path());
     let mut opts = match &req.custom {
         Some(c) => Options { preset: Preset::Custom, ..c.clone() },
         None => Options::preset(req.preset),
     };
-    opts.output = req.output.as_ref().map(PathBuf::from).or(opts.output);
-    opts.password = req.password.clone().or(opts.password);
+    opts.output = output;
+    opts.password = None;
     // The fraction only ever grows, whatever the stages report.
     let mut last = 0.0f32;
     let mut mono = |mut p: compress::Progress| {
@@ -185,7 +195,7 @@ pub fn run_compress(
         last = p.fraction;
         progress(p);
     };
-    Ok(compress::compress(Path::new(&req.path), &opts, cancel, &mut mono)?)
+    Ok(compress::compress(&input, &opts, cancel, &mut mono)?)
 }
 
 // ---------------------------------------------------------------- OCR
@@ -214,12 +224,19 @@ pub struct TesseractInfo {
     pub languages: Vec<String>,
 }
 
-pub fn ocr_languages(tesseract_path: Option<&str>) -> OcrLanguages {
+/// A configured Tesseract location is run as a program, so it has to be named like one.
+pub(crate) fn configured_tesseract(path: Option<&Path>) -> Option<&Path> {
+    let p = path.filter(|p| !p.as_os_str().is_empty())?;
+    let name = p.file_stem()?.to_string_lossy().to_ascii_lowercase();
+    (name == "tesseract").then_some(p)
+}
+
+pub fn ocr_languages(tesseract_path: Option<&Path>) -> OcrLanguages {
     #[cfg(windows)]
     let windows = ocr::backend::WinRtOcr.languages().unwrap_or_default();
     #[cfg(not(windows))]
     let windows = Vec::new();
-    let tesseract = TesseractCli::discover(tesseract_path.map(Path::new)).map(|t| TesseractInfo {
+    let tesseract = TesseractCli::discover(configured_tesseract(tesseract_path)).map(|t| TesseractInfo {
         languages: t.languages().unwrap_or_default(),
         path: t.exe.to_string_lossy().into_owned(),
     });
@@ -228,9 +245,9 @@ pub fn ocr_languages(tesseract_path: Option<&str>) -> OcrLanguages {
 
 /// The recogniser for `choice`. Tesseract is only ever the configured path, `INKWELL_TESSERACT` or
 /// the Program Files install (see `TesseractCli::discover`), never `PATH`.
-pub fn make_backend(choice: BackendChoice, tesseract_path: Option<&str>) -> Result<Box<dyn Recognizer>, ToolError> {
+pub fn make_backend(choice: BackendChoice, tesseract_path: Option<&Path>) -> Result<Box<dyn Recognizer>, ToolError> {
     match choice {
-        BackendChoice::Tesseract => TesseractCli::discover(tesseract_path.map(Path::new))
+        BackendChoice::Tesseract => TesseractCli::discover(configured_tesseract(tesseract_path))
             .map(|t| Box::new(t) as Box<dyn Recognizer>)
             .ok_or_else(|| ToolError("tesseract-not-found".into())),
         #[cfg(windows)]
@@ -241,7 +258,7 @@ pub fn make_backend(choice: BackendChoice, tesseract_path: Option<&str>) -> Resu
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OcrRequest {
     pub doc: DocId,
     /// One-based range like `1-3, 5`; none = every page.
@@ -253,9 +270,9 @@ pub struct OcrRequest {
     pub force: bool,
     #[serde(default)]
     pub backend: BackendChoice,
-    pub tesseract_path: Option<String>,
-    /// Write a new file instead of changing the open document.
-    pub save_as: Option<String>,
+    /// Write a new file (named in a dialog) instead of changing the open document.
+    #[serde(default)]
+    pub save_as: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,9 +295,11 @@ fn options_for(eng: &Engine, req: &OcrRequest) -> Result<ocr::Options, ToolError
 }
 
 /// Runs OCR on an open document. `progress` sees `done` only ever grow (workers finish out of order).
+/// `save_as`: the file for `req.save_as`, chosen on the Rust side.
 pub fn run_ocr(
     eng: &Engine,
     req: &OcrRequest,
+    save_as: Option<&Path>,
     backend: &dyn Recognizer,
     progress: &(dyn Fn(ocr::Progress) + Sync),
     cancel: &AtomicBool,
@@ -294,7 +313,7 @@ pub fn run_ocr(
     };
     let (rev, source) = eng.doc_source(req.doc)?;
 
-    if let Some(out) = &req.save_as {
+    if let Some(out) = save_as {
         // A new file is made from what the document shows now: pending edits included.
         return Ok(match &source {
             DocSource::Path(p) => ocr_to_file(Path::new(p), out, backend, &opts, &mono, cancel)?,
@@ -368,12 +387,12 @@ fn no_page_readable(rec: &ocr::Recognition) -> Option<String> {
 
 fn ocr_to_file(
     input: &Path,
-    out: &str,
+    out: &Path,
     backend: &dyn Recognizer,
     opts: &ocr::Options,
     progress: &(dyn Fn(ocr::Progress) + Sync),
     cancel: &AtomicBool,
 ) -> Result<OcrOutcome, OcrError> {
-    let report = ocr::ocr_file(input, Path::new(out), backend, opts, progress, cancel)?;
-    Ok(OcrOutcome { report, state: None, output: Some(out.to_string()) })
+    let report = ocr::ocr_file(input, out, backend, opts, progress, cancel)?;
+    Ok(OcrOutcome { report, state: None, output: Some(out.to_string_lossy().into_owned()) })
 }

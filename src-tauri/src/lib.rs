@@ -162,21 +162,32 @@ async fn tool_blocking<R: Send + 'static>(
 }
 
 #[tauri::command]
-async fn compress_audit(path: String, password: Option<String>) -> Result<tools::AuditReply, tools::ToolError> {
-    tool_blocking(move || tools::audit_for_ui(std::path::Path::new(&path), password.as_deref())).await
+async fn compress_audit(eng: Eng<'_>, doc: DocId) -> Result<tools::AuditReply, tools::ToolError> {
+    let eng = eng.inner().clone();
+    tool_blocking(move || tools::audit_for_ui(&eng, doc)).await
 }
 
-/// `job`: an id the UI picks, for `tool_cancel`.
+/// `job`: an id the UI picks, for `tool_cancel`. The output file is named by a dialog shown here.
 #[tauri::command]
 async fn compress_start(
+    app: tauri::AppHandle,
+    eng: Eng<'_>,
     jobs: JobState<'_>,
     job: u64,
     req: tools::CompressRequest,
     on_progress: Channel<compress::Progress>,
 ) -> Result<compress::Report, tools::ToolError> {
+    let eng = eng.inner().clone();
     let guard = jobs.inner().begin(job);
     tool_blocking(move || {
-        tools::run_compress(&req, &guard.cancel, &mut |p| {
+        let output = if req.choose_output {
+            let input = std::path::PathBuf::from(eng.doc_entry(req.doc)?.path());
+            let out = tools::paths::choose_output(&app, &compress::default_output(&input));
+            Some(out.ok_or_else(|| tools::ToolError("cancelled".into()))?)
+        } else {
+            None
+        };
+        tools::run_compress(&eng, &req, output, &guard.cancel, &mut |p| {
             let _ = on_progress.send(p);
         })
     })
@@ -188,26 +199,58 @@ fn tool_cancel(jobs: JobState<'_>, job: u64) {
     jobs.cancel(job);
 }
 
+type Paths<'a> = State<'a, Arc<tools::paths::ToolPaths>>;
+
 #[tauri::command]
-async fn ocr_languages(tesseract_path: Option<String>) -> Result<tools::OcrLanguages, tools::ToolError> {
-    tool_blocking(move || Ok(tools::ocr_languages(tesseract_path.as_deref()))).await
+async fn ocr_languages(paths: Paths<'_>) -> Result<tools::OcrLanguages, tools::ToolError> {
+    let configured = paths.tesseract();
+    tool_blocking(move || Ok(tools::ocr_languages(configured.as_deref()))).await
+}
+
+/// Shows a file picker for tesseract.exe and remembers the choice. Returns it for display.
+#[tauri::command]
+async fn ocr_choose_tesseract(app: tauri::AppHandle, paths: Paths<'_>) -> Result<Option<String>, tools::ToolError> {
+    let paths = paths.inner().clone();
+    tool_blocking(move || {
+        let Some(p) = tools::paths::choose_tesseract(&app) else { return Ok(None) };
+        paths.set_tesseract(Some(p.clone())).map_err(tools::ToolError)?;
+        Ok(Some(p.to_string_lossy().into_owned()))
+    })
+    .await
+}
+
+#[tauri::command]
+fn ocr_clear_tesseract(paths: Paths<'_>) -> Result<(), tools::ToolError> {
+    paths.set_tesseract(None).map_err(tools::ToolError)
 }
 
 #[tauri::command]
 async fn ocr_start(
+    app: tauri::AppHandle,
     eng: Eng<'_>,
     jobs: JobState<'_>,
+    paths: Paths<'_>,
     job: u64,
     req: tools::OcrRequest,
     on_progress: Channel<ocr::Progress>,
 ) -> Result<tools::OcrOutcome, tools::ToolError> {
     let eng = eng.inner().clone();
     let guard = jobs.inner().begin(job);
+    let tesseract = paths.tesseract();
     tool_blocking(move || {
-        let backend = tools::make_backend(req.backend, req.tesseract_path.as_deref())?;
+        let save_as = if req.save_as {
+            let input = std::path::PathBuf::from(eng.doc_entry(req.doc)?.path());
+            let stem = input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "document".into());
+            let out = tools::paths::choose_output(&app, &input.with_file_name(format!("{stem} (searchable).pdf")));
+            Some(out.ok_or_else(|| tools::ToolError("cancelled".into()))?)
+        } else {
+            None
+        };
+        let backend = tools::make_backend(req.backend, tesseract.as_deref())?;
         tools::run_ocr(
             &eng,
             &req,
+            save_as.as_deref(),
             backend.as_ref(),
             &|p| {
                 let _ = on_progress.send(p);
@@ -376,6 +419,8 @@ pub fn run() {
             compress_start,
             tool_cancel,
             ocr_languages,
+            ocr_choose_tesseract,
+            ocr_clear_tesseract,
             ocr_start,
             recents::stat_files,
             recents::recents_load,
@@ -392,6 +437,7 @@ pub fn run() {
         .setup(|app| {
             #[cfg(windows)]
             disable_browser_accelerators(app);
+            app.manage(Arc::new(tools::paths::ToolPaths::load(app.handle())));
             Ok(())
         })
         .run(tauri::generate_context!())

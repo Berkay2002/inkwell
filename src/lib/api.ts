@@ -128,3 +128,118 @@ export const extractPages = (doc: number, pages: number[], out: string, deleteAf
   invoke<EditState>("extract_pages", { doc, pages, out, deleteAfter });
 export const splitDocument = (doc: number, every: number) => invoke<{ files: string[] }>("split_document", { doc, every });
 export const mergeFiles = (paths: string[], out: string) => invoke<number>("merge_files", { paths, out });
+
+// ---- compress and OCR (src-tauri/src/tools/mod.rs) ----
+
+export type CompressPreset = "smallest" | "balanced" | "highQuality";
+
+export interface CompressAudit {
+  total: number;
+  categories: { category: "images" | "fonts" | "contentStreams" | "metadata" | "structure" | "other"; bytes: number; objects: number }[];
+  images: number;
+  fonts: number;
+}
+
+export interface CompressAuditReply {
+  audit: CompressAudit;
+  size: number;
+  defaultOutput: string;
+  outputExists: boolean;
+  /** Estimated bytes of the output per preset: a guide, the report has the real size. */
+  predictions: { preset: CompressPreset; bytes: number }[];
+}
+
+export interface CompressProgress {
+  stage: "open" | "scan" | "images" | "fonts" | "write" | "verify";
+  /** 0..1 over the whole job, never decreasing. */
+  fraction: number;
+  page: number;
+  pages: number;
+}
+
+export interface CompressReport {
+  input: string;
+  output: string;
+  sizeBefore: number;
+  sizeAfter: number;
+  savedBytes: number;
+  savedPercent: number;
+  keptOriginal: boolean;
+  pages: number;
+  /** Render comparison of before and after (8 pages at most); null when skipped. */
+  visual: { maxDiff: number; meanDiff: number; psnr: number } | null;
+  warnings: string[];
+}
+
+/** Documents are named by id; the output file is picked by a dialog the Rust side shows. */
+export interface CompressRequest {
+  doc: number;
+  preset: CompressPreset;
+  /** Full options from a Customize panel; wins over `preset`. */
+  custom?: unknown;
+  /** Ask where to write instead of `<name> (compressed).pdf` (the default name is taken). */
+  chooseOutput?: boolean;
+}
+
+export type OcrBackend = "windows" | "tesseract";
+
+export interface OcrLanguages {
+  windows: string[];
+  tesseract: { path: string; languages: string[] } | null;
+}
+
+export interface OcrRequest {
+  doc: number;
+  /** One-based range like "1-3, 5"; omitted = every page. */
+  pages?: string;
+  languages: string[];
+  force: boolean;
+  backend: OcrBackend;
+  /** Write a new file (named in a dialog the Rust side shows) instead of changing the document. */
+  saveAs?: boolean;
+}
+
+export interface OcrProgress {
+  done: number;
+  total: number;
+  page: number;
+}
+
+export interface OcrReport {
+  backend: string;
+  pagesRequested: number;
+  pagesRecognized: number;
+  pagesSkippedText: number;
+  pagesNoText: number;
+  pagesFailed: number;
+  words: number;
+  totalMs: number;
+  warnings: string[];
+}
+
+export interface OcrOutcome {
+  report: OcrReport;
+  /** The document after an in-place run; null for `saveAs`. */
+  state: EditState | null;
+  output: string | null;
+}
+
+export const compressAudit = (doc: number) => invoke<CompressAuditReply>("compress_audit", { doc });
+
+export function compressStart(job: number, req: CompressRequest, onProgress: (p: CompressProgress) => void) {
+  const ch = new Channel<CompressProgress>();
+  ch.onmessage = onProgress;
+  return invoke<CompressReport>("compress_start", { job, req, onProgress: ch });
+}
+
+export const toolCancel = (job: number) => invoke<void>("tool_cancel", { job });
+export const ocrLanguages = () => invoke<OcrLanguages>("ocr_languages");
+/** Opens a file picker (Rust side) and remembers tesseract.exe; resolves to the path or null. */
+export const ocrChooseTesseract = () => invoke<string | null>("ocr_choose_tesseract");
+export const ocrClearTesseract = () => invoke<void>("ocr_clear_tesseract");
+
+export function ocrStart(job: number, req: OcrRequest, onProgress: (p: OcrProgress) => void) {
+  const ch = new Channel<OcrProgress>();
+  ch.onmessage = onProgress;
+  return invoke<OcrOutcome>("ocr_start", { job, req, onProgress: ch });
+}

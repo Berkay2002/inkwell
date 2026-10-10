@@ -101,8 +101,7 @@ fn req(doc: DocId) -> OcrRequest {
         languages: vec![],
         force: false,
         backend: BackendChoice::Windows,
-        tesseract_path: None,
-        save_as: None,
+        save_as: false,
     }
 }
 
@@ -116,7 +115,7 @@ fn ocr_in_place_is_one_undo_step_and_survives_save_and_reopen() {
     let (eng, id, path) = open(&d, "scan.pdf", 3);
     assert_eq!(text_of(&eng, id, 0), "");
 
-    let out = run_ocr(&eng, &req(id), &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
+    let out = run_ocr(&eng, &req(id), None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
     let st = out.state.unwrap();
     assert_eq!(out.report.pages_recognized, 3);
     assert_eq!(st.undo.as_deref(), Some("Recognize text (3 pages)"));
@@ -143,7 +142,7 @@ fn ocr_progress_only_grows_and_ends_at_the_total() {
     let (eng, id, _) = open(&d, "scan.pdf", 12);
     let seen = Mutex::new(Vec::new());
     let stub = Stub { delay_ms: 5, ..Stub::new() };
-    run_ocr(&eng, &req(id), &stub, &|p| seen.lock().unwrap().push(p.done), &AtomicBool::new(false)).unwrap();
+    run_ocr(&eng, &req(id), None, &stub, &|p| seen.lock().unwrap().push(p.done), &AtomicBool::new(false)).unwrap();
     let seen = seen.into_inner().unwrap();
     assert!(seen.windows(2).all(|w| w[0] < w[1]), "{seen:?}");
     assert_eq!(seen.last(), Some(&12));
@@ -157,7 +156,7 @@ fn cancelled_ocr_changes_nothing_and_writes_nothing() {
     let stub = Stub { delay_ms: 30, ..Stub::new() };
 
     // In place: cancelled after the first page.
-    let r = run_ocr(&eng, &req(id), &stub, &|_| cancel.store(true, Ordering::Relaxed), &cancel);
+    let r = run_ocr(&eng, &req(id), None, &stub, &|_| cancel.store(true, Ordering::Relaxed), &cancel);
     assert_eq!(r.unwrap_err().0, "cancelled");
     let st = eng.edit_state(id).unwrap();
     assert!(!st.dirty && st.undo.is_none());
@@ -168,7 +167,8 @@ fn cancelled_ocr_changes_nothing_and_writes_nothing() {
     cancel.store(false, Ordering::Relaxed);
     let r = run_ocr(
         &eng,
-        &OcrRequest { save_as: Some(out.to_string_lossy().into_owned()), ..req(id) },
+        &OcrRequest { save_as: true, ..req(id) },
+        Some(&out),
         &stub,
         &|_| cancel.store(true, Ordering::Relaxed),
         &cancel,
@@ -186,7 +186,7 @@ fn an_edit_that_lands_during_recognition_makes_the_run_stale() {
     *stub.during.lock().unwrap() = Some(Box::new(move || {
         e2.apply(id, EditOp::Delete { pages: vec![0] }).unwrap();
     }));
-    let r = run_ocr(&eng, &req(id), &stub, &|_| {}, &AtomicBool::new(false));
+    let r = run_ocr(&eng, &req(id), None, &stub, &|_| {}, &AtomicBool::new(false));
     assert_eq!(r.unwrap_err().0, "stale");
     // Only the user's delete is in the history.
     assert_eq!(eng.edit_state(id).unwrap().undo.as_deref(), Some("Delete p. 1"));
@@ -198,10 +198,11 @@ fn save_as_new_file_leaves_the_document_alone_and_never_overwrites() {
     let (eng, id, path) = open(&d, "scan.pdf", 2);
     // A pending edit is part of the new file.
     eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap();
-    let out = d.join("scan (ocr).pdf").to_string_lossy().into_owned();
-    let r = OcrRequest { save_as: Some(out.clone()), ..req(id) };
+    let out_path = d.join("scan (ocr).pdf");
+    let out = out_path.to_string_lossy().into_owned();
+    let r = OcrRequest { save_as: true, ..req(id) };
 
-    let done = run_ocr(&eng, &r, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
+    let done = run_ocr(&eng, &r, Some(&out_path), &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
     assert!(done.state.is_none());
     assert_eq!(done.output.as_deref(), Some(out.as_str()));
     assert_eq!(done.report.pages_recognized, 1);
@@ -214,7 +215,7 @@ fn save_as_new_file_leaves_the_document_alone_and_never_overwrites() {
     assert_eq!(std::fs::read(&path).unwrap(), blank_pdf(2));
 
     let before = std::fs::read(&out).unwrap();
-    let again = run_ocr(&eng, &r, &Stub::new(), &|_| {}, &AtomicBool::new(false));
+    let again = run_ocr(&eng, &r, Some(&out_path), &Stub::new(), &|_| {}, &AtomicBool::new(false));
     assert_eq!(again.unwrap_err().0, "output-exists");
     assert_eq!(std::fs::read(&out).unwrap(), before);
     assert!(!files(&d).iter().any(|f| f.contains("inkwell-ocr")), "{:?}", files(&d));
@@ -225,19 +226,19 @@ fn a_page_range_limits_the_pages_and_text_pages_are_skipped() {
     let d = dir("range");
     let (eng, id, _) = open(&d, "scan.pdf", 4);
     let r = OcrRequest { pages: Some("2-3".into()), ..req(id) };
-    let out = run_ocr(&eng, &r, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
+    let out = run_ocr(&eng, &r, None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(out.report.pages_recognized, 2);
     assert_eq!(out.state.unwrap().undo.as_deref(), Some("Recognize text (2 pages)"));
     assert!(text_of(&eng, id, 0).is_empty() && text_of(&eng, id, 1).contains("Invoice"));
 
     // Same pages again: they have text now, so nothing is written and no undo step is added.
-    let out = run_ocr(&eng, &r, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
+    let out = run_ocr(&eng, &r, None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(out.report.pages_skipped_text, 2);
     assert_eq!(out.state.unwrap().undo.as_deref(), Some("Recognize text (2 pages)"));
     assert_eq!(eng.history(id).unwrap().len(), 2);
 
     let bad = OcrRequest { pages: Some("9".into()), ..req(id) };
-    assert!(run_ocr(&eng, &bad, &Stub::new(), &|_| {}, &AtomicBool::new(false)).is_err());
+    assert!(run_ocr(&eng, &bad, None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).is_err());
 }
 
 #[test]
@@ -246,30 +247,36 @@ fn tesseract_is_only_found_where_discover_looks() {
     let missing = d.join("nope").join("tesseract.exe");
     // Not on PATH, not in the working directory: a missing configured path is an error code.
     if TesseractCli::discover(Some(&missing)).is_none() {
-        let e = make_backend(BackendChoice::Tesseract, Some(missing.to_str().unwrap())).err().unwrap();
+        let e = make_backend(BackendChoice::Tesseract, Some(&missing)).err().unwrap();
         assert_eq!(e.0, "tesseract-not-found");
     }
+    // The path is run as a program: only something named tesseract is accepted.
+    assert!(configured_tesseract(Some(Path::new("C:\\Windows\\System32\\cmd.exe"))).is_none());
+    assert!(configured_tesseract(Some(Path::new("C:\\T\\Tesseract.EXE"))).is_some());
 }
 
 // ---------------------------------------------------------------- compress
 
-fn sample_copy(d: &Path) -> String {
+fn sample_doc(d: &Path) -> (Arc<Engine>, DocId, String) {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples/opt-in-01.pdf");
     let to = d.join("opt-in-01.pdf");
     std::fs::copy(src, &to).unwrap();
-    to.to_string_lossy().into_owned()
+    let path = to.to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    (eng, id, path)
 }
 
-fn creq(path: &str) -> CompressRequest {
-    CompressRequest { path: path.into(), preset: Preset::Smallest, custom: None, output: None, password: None }
+fn creq(doc: DocId) -> CompressRequest {
+    CompressRequest { doc, preset: Preset::Smallest, custom: None, choose_output: false }
 }
 
 #[test]
 fn compress_reports_monotonic_progress_writes_next_to_the_input_and_refuses_to_overwrite() {
     let d = dir("compress");
-    let path = sample_copy(&d);
+    let (eng, id, _) = sample_doc(&d);
     let mut fractions = Vec::new();
-    let rep = run_compress(&creq(&path), &AtomicBool::new(false), &mut |p| fractions.push(p.fraction)).unwrap();
+    let rep = run_compress(&eng, &creq(id), None, &AtomicBool::new(false), &mut |p| fractions.push(p.fraction)).unwrap();
     assert!(fractions.windows(2).all(|w| w[0] <= w[1]), "{fractions:?}");
     assert_eq!(fractions.last().copied(), Some(1.0));
     assert!(rep.size_after < rep.size_before && !rep.kept_original);
@@ -277,38 +284,71 @@ fn compress_reports_monotonic_progress_writes_next_to_the_input_and_refuses_to_o
     assert_eq!(files(&d), ["opt-in-01 (compressed).pdf", "opt-in-01.pdf"]);
 
     let before = std::fs::read(&rep.output).unwrap();
-    let again = run_compress(&creq(&path), &AtomicBool::new(false), &mut |_| {});
+    let again = run_compress(&eng, &creq(id), None, &AtomicBool::new(false), &mut |_| {});
     assert_eq!(again.unwrap_err().0, "output-exists");
     assert_eq!(std::fs::read(&rep.output).unwrap(), before);
     assert_eq!(files(&d).len(), 2);
+    // The audit now knows the default name is taken.
+    assert!(audit_for_ui(&eng, id).unwrap().output_exists);
 }
 
 #[test]
-fn cancelled_compress_leaves_no_file_and_bad_options_are_a_code() {
+fn a_chosen_output_is_used_and_cancelled_compress_leaves_no_file() {
     let d = dir("compress-cancel");
-    let path = sample_copy(&d);
+    let (eng, id, _) = sample_doc(&d);
     let cancel = AtomicBool::new(false);
-    let r = run_compress(&creq(&path), &cancel, &mut |_| cancel.store(true, Ordering::Relaxed));
+    let r = run_compress(&eng, &creq(id), None, &cancel, &mut |_| cancel.store(true, Ordering::Relaxed));
     assert_eq!(r.unwrap_err().0, "cancelled");
     assert_eq!(files(&d), ["opt-in-01.pdf"]);
 
     let mut custom = Options::preset(Preset::Balanced);
     custom.images.color.to_ppi = 5;
-    let r = run_compress(&CompressRequest { custom: Some(custom), ..creq(&path) }, &AtomicBool::new(false), &mut |_| {});
+    let bad = CompressRequest { custom: Some(custom), ..creq(id) };
+    let r = run_compress(&eng, &bad, None, &AtomicBool::new(false), &mut |_| {});
     assert_eq!(r.unwrap_err().0, "invalid-options");
     assert_eq!(files(&d), ["opt-in-01.pdf"]);
+
+    let chosen = d.join("small.pdf");
+    let rep = run_compress(&eng, &creq(id), Some(chosen.clone()), &AtomicBool::new(false), &mut |_| {}).unwrap();
+    assert_eq!(rep.output, chosen);
 }
 
 #[test]
 fn the_audit_predicts_smaller_files_for_smaller_presets() {
     let d = dir("audit");
-    let path = sample_copy(&d);
-    let a = audit_for_ui(Path::new(&path), None).unwrap();
+    let (eng, id, _) = sample_doc(&d);
+    let a = audit_for_ui(&eng, id).unwrap();
     assert!(!a.output_exists);
     let p = |x: Preset| a.predictions.iter().find(|p| p.preset == x).unwrap().bytes;
     assert!(p(Preset::Smallest) < p(Preset::Balanced));
     assert!(p(Preset::Balanced) < p(Preset::HighQuality));
     assert!(p(Preset::HighQuality) < a.size);
+}
+
+/// The webview may only name documents (by id), never files: requests have no path fields and
+/// refuse unknown ones, and no command of this module takes a string or a path.
+#[test]
+fn the_commands_take_no_raw_path_from_the_webview() {
+    let bad = r#"{"doc":1,"path":"C:\x.pdf"}"#;
+    assert!(serde_json::from_str::<CompressRequest>(bad).is_err());
+    assert!(serde_json::from_str::<CompressRequest>(r#"{"doc":1,"output":"C:\x.pdf"}"#).is_err());
+    assert!(serde_json::from_str::<OcrRequest>(r#"{"doc":1,"saveAs":"C:\x.pdf"}"#).is_err());
+    assert!(serde_json::from_str::<OcrRequest>(r#"{"doc":1,"tesseractPath":"C:\t.exe"}"#).is_err());
+    assert!(serde_json::from_str::<OcrRequest>(r#"{"doc":1,"saveAs":true}"#).is_ok());
+
+    let lib = include_str!("../lib.rs");
+    let mut seen = 0;
+    for name in ["compress_audit", "compress_start", "tool_cancel", "ocr_languages", "ocr_choose_tesseract", "ocr_clear_tesseract", "ocr_start"] {
+        let at = lib.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("no command {name}"));
+        let rest = &lib[at..];
+        let end = [rest.find(") ->"), rest.find(") {")].into_iter().flatten().min().unwrap();
+        let sig = &rest[..end];
+        for bad in [": String", "PathBuf", ": &str", "Vec<String>", "Option<String>"] {
+            assert!(!sig.contains(bad), "{name} takes {bad}: {sig}");
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 7);
 }
 
 #[test]
