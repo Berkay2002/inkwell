@@ -152,6 +152,8 @@ pub enum Error {
     OutputExists(PathBuf),
     #[error("the output would overwrite the input")]
     SameFile,
+    #[error("invalid options: {0}")]
+    InvalidOptions(String),
     #[error("verification failed: {0}")]
     Verify(String),
     #[error("{0}")]
@@ -168,6 +170,7 @@ impl Serialize for Error {
             Error::NeedsPassword => "needs-password".to_string(),
             Error::BadPassword => "bad-password".to_string(),
             Error::OutputExists(_) => "output-exists".to_string(),
+            Error::InvalidOptions(_) => "invalid-options".to_string(),
             other => other.to_string(),
         })
     }
@@ -267,13 +270,64 @@ impl Run<'_> {
     }
 }
 
-/// Removes the file when dropped unless it was renamed away.
+/// A scratch file next to the output, unique per job (process id, counter, random), created exclusively
+/// so two jobs on the same input never share one. Removed when dropped.
 struct TempFile(PathBuf);
+
+impl TempFile {
+    fn new(out_path: &Path) -> Result<Self, Error> {
+        use std::hash::{BuildHasher, Hasher};
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let name = out_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        loop {
+            let nonce = std::collections::hash_map::RandomState::new().build_hasher().finish();
+            let path = out_path.with_file_name(format!(
+                ".{name}.inkwell-{}-{}-{nonce:016x}.tmp",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
 
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
+}
+
+/// Gives `tmp`'s content the name `out` without ever replacing a file that is already there. A hard link
+/// does it atomically; file systems without links (FAT32, exFAT, some network shares) get an exclusive
+/// create plus a copy. The caller removes `tmp` afterwards.
+fn publish(tmp: &Path, out: &Path) -> Result<(), Error> {
+    use std::io::ErrorKind::AlreadyExists;
+    match fs::hard_link(tmp, out) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == AlreadyExists => return Err(Error::OutputExists(out.to_path_buf())),
+        Err(_) => copy_exclusive(tmp, out),
+    }
+}
+
+/// `out` is created exclusively and filled from `tmp`; a failed copy leaves nothing behind.
+fn copy_exclusive(tmp: &Path, out: &Path) -> Result<(), Error> {
+    use std::io::ErrorKind::AlreadyExists;
+    let mut dst = match fs::OpenOptions::new().write(true).create_new(true).open(out) {
+        Ok(f) => f,
+        Err(e) if e.kind() == AlreadyExists => return Err(Error::OutputExists(out.to_path_buf())),
+        Err(e) => return Err(e.into()),
+    };
+    let copied = fs::File::open(tmp).and_then(|mut src| std::io::copy(&mut src, &mut dst)).and_then(|_| dst.sync_all());
+    if let Err(e) = copied {
+        drop(dst);
+        let _ = fs::remove_file(out);
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 fn open_pdf(path: &Path, password: Option<&str>) -> Result<PdfDocument, Error> {
@@ -301,6 +355,31 @@ fn resolve_output(input: &Path, opts: &Options) -> Result<PathBuf, Error> {
         return Err(if same { Error::SameFile } else { Error::OutputExists(out) });
     }
     Ok(out)
+}
+
+/// Resolution bounds for a downsampling class: 36 ppi is already unreadable, 2400 is above any scanner.
+const PPI: std::ops::RangeInclusive<u32> = 36..=2400;
+
+fn validate(opts: &Options) -> Result<(), Error> {
+    let bad = |m: String| Err(Error::InvalidOptions(m));
+    for (name, c) in [("colour", &opts.images.color), ("gray", &opts.images.gray), ("monochrome", &opts.images.mono)] {
+        // above_ppi 0 means "never downsample"; the target is then unused.
+        if c.above_ppi != 0 {
+            if !PPI.contains(&c.above_ppi) || !PPI.contains(&c.to_ppi) {
+                return bad(format!("{name}: ppi must be between {} and {}", PPI.start(), PPI.end()));
+            }
+            if c.to_ppi > c.above_ppi {
+                return bad(format!("{name}: target ppi {} is above the threshold {}", c.to_ppi, c.above_ppi));
+            }
+        }
+        if matches!(c.codec, Codec::Jpeg | Codec::Jpx) && !(1..=100).contains(&c.quality) {
+            return bad(format!("{name}: quality must be 1 to 100"));
+        }
+    }
+    if opts.garbage > 4 {
+        return bad("garbage level must be 0 to 4".into());
+    }
+    Ok(())
 }
 
 fn image_options(img: &Images) -> Option<ImageRewriteOptions> {
@@ -375,6 +454,7 @@ pub fn compress(
     let mut run = Run { cancel, progress, t0: now, last: now, timings: Vec::new() };
     let mut warnings = Vec::new();
     run.check()?;
+    validate(opts)?;
     run.emit(Stage::Open, 0.0, 0.0, 0, 0);
 
     let out_path = resolve_output(input, opts)?;
@@ -393,9 +473,6 @@ pub fn compress(
     let signed = doc.catalog()?.get_dict("AcroForm")?.and_then(|f| f.get_dict("SigFlags").ok().flatten())
         .and_then(|f| f.as_int().ok())
         .is_some_and(|f| f & 1 != 0);
-    if signed {
-        warnings.push("The document is signed; the signatures are invalid in the compressed copy.".into());
-    }
 
     // 2. Extras the user asked to drop.
     let stripped = strip::strip(&mut doc, &opts.strip, pages)?;
@@ -443,30 +520,26 @@ pub fn compress(
             catalog.dict_put("Version", mupdf::pdf::PdfObject::new_name("1.5")?)?;
         }
     }
-    let tmp = TempFile(out_path.with_file_name(format!(
-        ".{}.inkwell-{}.tmp",
-        out_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-        std::process::id()
-    )));
+    let tmp = TempFile::new(&out_path)?;
     doc.save_with_options(&tmp.0.to_string_lossy(), write_options(opts))?;
     drop(doc);
     run.lap("write");
     run.check()?;
 
-    // 6. Never worse.
+    // 6. Never worse, except that dropping what the user asked to drop is never undone.
     let written = fs::metadata(&tmp.0)?.len();
-    let kept_original = written >= size_before;
+    let kept_original = written >= size_before && !stripped.any();
+    if written >= size_before && stripped.any() {
+        warnings.push("The copy is larger than the original because extras were removed.".into());
+    }
     if kept_original {
         fs::copy(input, &tmp.0)?;
+    } else if signed {
+        warnings.push("The document is signed; the signatures are invalid in the compressed copy.".into());
     }
     let size_after = if kept_original { size_before } else { written };
-    // A hard link fails when the target exists (rename would replace it on Windows); the temp file is
-    // removed by `TempFile` afterwards.
-    match fs::hard_link(&tmp.0, &out_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(Error::OutputExists(out_path)),
-        Err(e) => return Err(e.into()),
-    }
+    publish(&tmp.0, &out_path)?;
+    drop(tmp);
     let finish = |e: Error, p: &Path| {
         let _ = fs::remove_file(p);
         e

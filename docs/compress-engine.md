@@ -13,7 +13,8 @@ compress::compress(&input, &opts, &cancel, &mut progress)   // same, on the call
 compress::default_output(&input)                  // "<name> (compressed).pdf" next to the input
 ```
 
-Errors serialise to codes: `cancelled`, `needs-password`, `bad-password`, `output-exists`; the rest are messages.
+Errors serialise to codes: `cancelled`, `needs-password`, `bad-password`, `output-exists`, `invalid-options`
+(ppi outside 36..=2400 or target above threshold, JPEG/JPX quality outside 1..=100, garbage above 4); the rest are messages.
 `Options`, `Report`, `Audit`, `Progress` are serde (camelCase) and ready for the IPC layer.
 
 ## Presets
@@ -40,7 +41,11 @@ Reproduce: `cargo test --lib compress::tests::presets -- --nocapture --test-thre
 ## Behaviour guarantees (all covered by tests)
 
 - Never worse: when the result is not smaller the original bytes are copied to the output and `keptOriginal` is true.
-- Never overwrites: existing output -> `output-exists`; output == input -> error; the temp file is removed on any failure.
+  Exception: if a `strip.*` option actually removed something, the stripped copy is written even when bigger
+  (warning "larger than the original because extras were removed").
+- Never overwrites: existing output -> `output-exists`; output == input -> error; the output name is claimed
+  atomically (hard link, or exclusive create + copy on file systems without links), temp names are unique per job,
+  so concurrent jobs on one input cannot corrupt each other; temp files are removed on any failure.
 - Cancel is polled per page and between stages; a cancelled job leaves no file behind.
 - The output is reopened, its page count checked, re-audited and render-compared (up to 8 pages, 96 ppi):
   `visual.maxDiff`, `meanDiff`, `psnr`, per page.
@@ -60,5 +65,6 @@ Rust side: `vendor/mupdf/src/pdf/document/optimize.rs`.
 - No linearisation ("Fast Web View"): MuPDF removed it.
 - No JBIG2 encoder: monochrome images use CCITT G4 (or Flate).
 - No font unembedding; subsetting only with `subsetFonts`.
-- Soft masks and images with colour-key masks are left as they are; alpha images are not recompressed.
+- Soft masks and images with colour-key masks are left as they are; alpha images are not recompressed
+  (1-bit stencil masks are, as CCITT G4 image masks).
 - Signed documents are rewritten, so signatures become invalid (a warning is reported).

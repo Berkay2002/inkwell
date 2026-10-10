@@ -30,6 +30,13 @@ pub struct StripReport {
     pub bookmarks: bool,
 }
 
+impl StripReport {
+    /// Something the user asked to drop was actually there and is gone.
+    pub fn any(&self) -> bool {
+        self.metadata || self.bookmarks || self.thumbnails + self.embedded_files + self.javascript > 0
+    }
+}
+
 fn is_name(o: &PdfObject, key: &str, want: &[u8]) -> bool {
     o.get_dict(key)
         .ok()

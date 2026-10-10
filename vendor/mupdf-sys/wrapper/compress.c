@@ -26,7 +26,7 @@
 	  - per-image failure tolerance (an image that cannot be rewritten is kept as is),
 	  - counters of what happened,
 	  - the unique-image dpi index kept in step when an image is skipped (upstream drifts there),
-	  - alpha pixmaps left alone (their sample layout does not match the rebuilt image).
+	  - alpha pixmaps left alone (their sample layout does not match the rebuilt image), except imagemasks.
 	Static helpers are private to this file; the public entry points are mupdf_pdf_rewrite_images_progress
 	and mupdf_pdf_subset_all_fonts at the bottom.
 */
@@ -620,6 +620,8 @@ ink_fz_recompress_image_as_fax(fz_context *ctx, fz_pixmap *pix)
 	fz_var(bmp);
 	fz_var(cbuf);
 	fz_var(inv_buffer);
+	/* pix is replaced inside the try block and dropped in the always block. */
+	fz_var(pix);
 
 	fz_keep_pixmap(ctx, pix);
 	fz_try(ctx)
@@ -768,7 +770,8 @@ ink_do_image_rewrite_inner(fz_context *ctx, ink_image_info *info, fz_image **ima
 
 	/* What sort of image is this? */
 	pix = fz_get_pixmap_from_image(ctx, *image, NULL, NULL, NULL, NULL);
-	if (pix->alpha)
+	/* An imagemask's pixmap is alpha only (n == 1), which the bitonal path treats as gray. */
+	if (pix->alpha && !(*image)->imagemask)
 	{
 		fz_drop_pixmap(ctx, pix);
 		return;

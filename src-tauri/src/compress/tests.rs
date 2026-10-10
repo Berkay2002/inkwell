@@ -492,3 +492,166 @@ fn report_shows_where_the_bytes_went() {
     let json = serde_json::to_string(&r.after).unwrap();
     assert!(json.contains("\"images\""));
 }
+
+// ---------------------------------------------------------------- review follow-ups
+
+fn text_doc_with(extra: impl FnOnce(&mut PdfDocument)) -> PdfDocument {
+    let mut doc = PdfDocument::from_bytes(&fixture::build(&fixture::Fixture { pages: 6, chapter_every: 1, needle_every: 0, lines: 6 })).unwrap();
+    extra(&mut doc);
+    doc
+}
+
+fn has_entry(p: &Path, key: &str) -> bool {
+    open_pdf(p, None).unwrap().catalog().unwrap().get_dict(key).unwrap().is_some()
+}
+
+#[test]
+fn stripping_is_not_undone_by_never_worse() {
+    let s = Scratch::new();
+    let packed = s.path("packed.pdf");
+    let doc = text_doc_with(|d| {
+        let js = d.new_object_from_str("<< /S /JavaScript /JS (app.alert\\(1\\)) >>").unwrap();
+        d.catalog().unwrap().dict_put("OpenAction", js).unwrap();
+    });
+    // already as tight as the writer makes it: objects packed, garbage collected
+    doc.save_with_options(packed.to_str().unwrap(), write_options(&Options::default())).unwrap();
+    assert!(has_entry(&packed, "OpenAction"));
+
+    // writing it back loosely is bigger than the input, so without a strip the original is kept
+    let mut o = Options::preset(Preset::Custom);
+    o.object_streams = false;
+    o.garbage = 0;
+    o.output = Some(s.path("plain.pdf"));
+    let r = run(&packed, &o).unwrap();
+    assert!(r.kept_original && has_entry(&r.output, "OpenAction"));
+
+    // ... but asked to drop JavaScript, the stripped copy is written even though it is bigger
+    o.strip.javascript = true;
+    o.output = Some(s.path("stripped.pdf"));
+    let r = run(&packed, &o).unwrap();
+    assert!(!r.kept_original);
+    assert!(r.size_after > r.size_before, "{} -> {}", r.size_before, r.size_after);
+    assert!(!has_entry(&r.output, "OpenAction"));
+    assert_eq!(r.stripped.javascript, 1);
+    assert!(r.warnings.iter().any(|w| w.contains("larger than the original")), "{:?}", r.warnings);
+    assert_eq!(r.saved_bytes, 0);
+}
+
+#[test]
+fn signed_warning_only_when_the_copy_is_written() {
+    let s = Scratch::new();
+    let sign = |d: &mut PdfDocument| {
+        let f = d.new_object_from_str("<< /Fields [] /SigFlags 3 >>").unwrap();
+        d.catalog().unwrap().dict_put("AcroForm", f).unwrap();
+    };
+    // loose input: the compressed copy is written
+    let loose = s.path("loose.pdf");
+    text_doc_with(sign).save(loose.to_str().unwrap()).unwrap();
+    let r = run(&loose, &Options::default()).unwrap();
+    assert!(!r.kept_original);
+    assert!(r.warnings.iter().any(|w| w.contains("signed")), "{:?}", r.warnings);
+
+    // tight input: nothing to gain, the original stays and so do its signatures
+    let tight = s.path("tight.pdf");
+    text_doc_with(sign).save_with_options(tight.to_str().unwrap(), write_options(&Options::default())).unwrap();
+    let r = run(&tight, &Options::default()).unwrap();
+    assert!(r.kept_original);
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+}
+
+#[test]
+fn concurrent_jobs_on_one_input_never_corrupt_the_output() {
+    let s = Scratch::new();
+    let input = s.path("heavy.pdf");
+    image_heavy(&input, 3);
+    let jobs: Vec<Job> = (0..3).map(|_| spawn(input.clone(), Options::default(), |_| {})).collect();
+    let results: Vec<_> = jobs.into_iter().map(Job::join).collect();
+    let ok = results.iter().filter(|r| r.is_ok()).count();
+    assert!(ok >= 1, "{results:?}");
+    for r in &results {
+        assert!(matches!(r, Ok(_) | Err(Error::OutputExists(_))), "{r:?}");
+    }
+    let out = s.path("heavy (compressed).pdf");
+    assert_eq!(open(&out).page_count().unwrap(), 3);
+    assert!(diff(&input, &out, 3).psnr > 36.0);
+    // no temp files left by the losers
+    assert_eq!(s.files(), vec!["heavy (compressed).pdf".to_string(), "heavy.pdf".to_string()]);
+}
+
+#[test]
+fn publish_never_replaces_and_has_a_copy_fallback() {
+    let s = Scratch::new();
+    let (tmp, out) = (s.path("t.tmp"), s.path("o.pdf"));
+    fs::write(&tmp, b"payload").unwrap();
+    publish(&tmp, &out).unwrap();
+    assert_eq!(fs::read(&out).unwrap(), b"payload");
+    assert!(matches!(publish(&tmp, &out), Err(Error::OutputExists(_))));
+
+    // the path taken on file systems without hard links
+    let out2 = s.path("o2.pdf");
+    copy_exclusive(&tmp, &out2).unwrap();
+    assert_eq!(fs::read(&out2).unwrap(), b"payload");
+    assert!(matches!(copy_exclusive(&tmp, &out2), Err(Error::OutputExists(_))));
+    assert_eq!(fs::read(&out2).unwrap(), b"payload");
+}
+
+#[test]
+fn nonsense_options_are_rejected_before_any_work() {
+    let s = Scratch::new();
+    let input = s.copy("redact-source.pdf");
+    let cases: Vec<(&str, Box<dyn Fn(&mut Options)>)> = vec![
+        ("to_ppi 0", Box::new(|o| o.images.color.to_ppi = 0)),
+        ("above 10", Box::new(|o| o.images.gray.above_ppi = 10)),
+        ("above 5000", Box::new(|o| o.images.mono.above_ppi = 5000)),
+        ("to above threshold", Box::new(|o| { o.images.color.above_ppi = 150; o.images.color.to_ppi = 300; })),
+        ("quality 0", Box::new(|o| o.images.color.quality = 0)),
+        ("quality 101", Box::new(|o| o.images.gray.quality = 101)),
+        ("garbage 5", Box::new(|o| o.garbage = 5)),
+    ];
+    for (name, f) in cases {
+        let mut o = Options::preset(Preset::Custom);
+        f(&mut o);
+        match run(&input, &o) {
+            Err(e @ Error::InvalidOptions(_)) => assert_eq!(serde_json::to_string(&e).unwrap(), "\"invalid-options\""),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    // "never downsample" is still fine
+    let mut o = Options::preset(Preset::Custom);
+    o.images.color.above_ppi = 0;
+    o.images.color.to_ppi = 0;
+    run(&input, &o).unwrap();
+    assert_eq!(s.files().len(), 2, "rejected runs left files: {:?}", s.files());
+}
+
+/// A 1-bit stencil mask (ImageMask true), painted black through a page: MuPDF's pixmap for it is alpha only.
+#[test]
+fn stencil_masks_get_ccitt_and_look_the_same() {
+    let s = Scratch::new();
+    let input = s.path("stencil.pdf");
+    {
+        let mut doc = PdfDocument::new();
+        let mut bits = vec![0u8; 100 * 600];
+        for (i, b) in bits.iter_mut().enumerate() {
+            *b = if (i / 100 / 20) % 2 == 0 { 0x0F } else { 0xC3 };
+        }
+        let dict = doc.new_object_from_str("<< /Type /XObject /Subtype /Image /Width 800 /Height 600 /ImageMask true /BitsPerComponent 1 >>").unwrap();
+        let image = doc.add_stream(&mupdf::Buffer::from_bytes(&bits).unwrap(), Some(&dict), false).unwrap();
+        let mut page = doc.new_page(Size::A4).unwrap();
+        let o = InsertImageOptions::default();
+        page.insert_image(&mut doc, Rect::new(36.0, 36.0, 324.0, 261.0), PageImageSource::ExistingXref(image.as_indirect().unwrap()), o).unwrap();
+        doc.save(input.to_str().unwrap()).unwrap();
+    }
+    let r = run(&input, &Options::default()).unwrap();
+    assert_eq!(r.images.replaced, 1, "{:?}", r.images);
+    assert!(r.size_after * 3 < r.size_before, "{} -> {}", r.size_before, r.size_after);
+    let d = open_pdf(&r.output, None).unwrap();
+    let fax = (1..d.xref_len().unwrap())
+        .filter_map(|x| d.xref_object(x as i32).ok().flatten())
+        .any(|o| {
+            let t = o.to_string();
+            t.contains("CCITTFaxDecode") && t.contains("/ImageMask true")
+        });
+    assert!(fax, "the stencil was not re-encoded as a CCITT image mask");
+    assert_eq!(r.visual.unwrap().max_diff, 0);
+}
