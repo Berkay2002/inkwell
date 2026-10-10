@@ -488,7 +488,15 @@ impl Drop for TempFile {
 /// Gives `tmp`'s content the name `out` without ever replacing an existing file (a hard link is
 /// atomic; file systems without links get an exclusive create and a copy). The caller drops `tmp`.
 fn publish(tmp: &Path, out: &Path) -> Result<(), OcrError> {
+    publish_with(tmp, out, false)
+}
+
+/// `replace`: `out` may be a file the user confirmed replacing (it is renamed over).
+fn publish_with(tmp: &Path, out: &Path, replace: bool) -> Result<(), OcrError> {
     use std::io::ErrorKind::AlreadyExists;
+    if replace {
+        return std::fs::rename(tmp, out).map_err(|e| OcrError::Io(e.to_string()));
+    }
     let exists = || OcrError::OutputExists(out.display().to_string());
     match std::fs::hard_link(tmp, out) {
         Ok(()) => Ok(()),
@@ -512,7 +520,7 @@ fn publish(tmp: &Path, out: &Path) -> Result<(), OcrError> {
 
 /// True when `output` names the same file as `input` (case, symlinks, `..` resolved), whether or
 /// not `output` exists yet.
-fn is_same_file(input: &Path, output: &Path) -> bool {
+pub(crate) fn is_same_file(input: &Path, output: &Path) -> bool {
     let Ok(input) = input.canonicalize() else { return false };
     let resolved = match output.canonicalize() {
         Ok(p) => p,
@@ -722,10 +730,24 @@ pub fn ocr_file(
     progress: &(dyn Fn(Progress) + Sync),
     cancel: &AtomicBool,
 ) -> Result<Report, OcrError> {
+    ocr_file_with(input, output, false, backend, opts, progress, cancel)
+}
+
+/// [`ocr_file`], where `replace` lets `output` replace a file already there (a name the user
+/// confirmed in a save dialog). The input is never replaced.
+pub fn ocr_file_with(
+    input: &Path,
+    output: &Path,
+    replace: bool,
+    backend: &dyn Recognizer,
+    opts: &Options,
+    progress: &(dyn Fn(Progress) + Sync),
+    cancel: &AtomicBool,
+) -> Result<Report, OcrError> {
     if is_same_file(input, output) {
         return Err(OcrError::Io("output must be a different file than the input".into()));
     }
-    if output.exists() {
+    if output.exists() && !replace {
         return Err(OcrError::OutputExists(output.display().to_string()));
     }
     let rec = recognize(&Input::Path(input), backend, opts, progress, cancel)?;
@@ -768,7 +790,7 @@ pub fn ocr_file(
             }
         }
         drop(doc);
-        publish(full.as_ref().map_or(&tmp.0, |f| &f.0), output)
+        publish_with(full.as_ref().map_or(&tmp.0, |f| &f.0), output, replace)
     }));
     drop(full);
     drop(tmp);

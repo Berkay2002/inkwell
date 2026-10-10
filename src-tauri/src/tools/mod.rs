@@ -317,6 +317,11 @@ pub fn run_ocr(
     let (rev, source) = eng.doc_source(req.doc)?;
 
     if let Some(out) = save_as {
+        // The dialog may confirm replacing a file, but never the document's own (the source may be
+        // a snapshot in memory, so the engine's own input check would not see it).
+        if ocr::is_same_file(Path::new(&eng.doc_entry(req.doc)?.path()), out) {
+            return Err(OcrError::Io("output must be a different file than the input".into()).into());
+        }
         // A new file is made from what the document shows now: pending edits included.
         return Ok(match &source {
             DocSource::Path(p) => ocr_to_file(Path::new(p), out, backend, &opts, &mono, cancel)?,
@@ -396,6 +401,7 @@ fn ocr_to_file(
     progress: &(dyn Fn(ocr::Progress) + Sync),
     cancel: &AtomicBool,
 ) -> Result<OcrOutcome, OcrError> {
-    let report = ocr::ocr_file(input, out, backend, opts, progress, cancel)?;
+    // `out` only comes from the save dialog, where replacing a file was confirmed.
+    let report = ocr::ocr_file_with(input, out, true, backend, opts, progress, cancel)?;
     Ok(OcrOutcome { report, state: None, output: Some(out.to_string_lossy().into_owned()) })
 }

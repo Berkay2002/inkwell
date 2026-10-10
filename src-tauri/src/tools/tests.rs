@@ -214,10 +214,16 @@ fn save_as_new_file_leaves_the_document_alone_and_never_overwrites() {
     assert!(text_of(&eng, id, 0).is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), blank_pdf(2));
 
-    let before = std::fs::read(&out).unwrap();
-    let again = run_ocr(&eng, &r, Some(&out_path), &Stub::new(), &|_| {}, &AtomicBool::new(false));
-    assert_eq!(again.unwrap_err().0, "output-exists");
-    assert_eq!(std::fs::read(&out).unwrap(), before);
+    // A name confirmed in the dialog may replace an existing file (here a stale one; Windows needs
+    // it closed first)...
+    probe.close(pid.doc);
+    std::fs::write(&out_path, b"stale").unwrap();
+    run_ocr(&eng, &r, Some(&out_path), &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(text_of(&probe, probe.open(&out).unwrap().doc, 0).contains("Invoice"));
+    // ...but never the document's own file, even though the source is an in-memory snapshot.
+    let own = run_ocr(&eng, &r, Some(Path::new(&path)), &Stub::new(), &|_| {}, &AtomicBool::new(false));
+    assert!(own.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), blank_pdf(2));
     assert!(!files(&d).iter().any(|f| f.contains("inkwell-ocr")), "{:?}", files(&d));
 }
 
