@@ -1,0 +1,359 @@
+/* AI assistant panel. Uses the app's tokens (styles.css) so light/dark follow the theme. */
+.assistant {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  min-width: 0;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+}
+.assistant-grip {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 2;
+  touch-action: none;
+}
+.assistant-grip:hover {
+  background: var(--accent-soft);
+}
+.assistant-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 42px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.assistant-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.assistant-select {
+  height: 26px;
+  max-width: 120px;
+  padding: 0 4px;
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.assistant-menu {
+  position: relative;
+}
+.assistant-pop {
+  position: absolute;
+  right: 0;
+  top: 32px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.assistant-pop button {
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.assistant-pop button:hover {
+  background: var(--surface-2);
+}
+.assistant-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+.assistant-body.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.assistant-lead {
+  margin: 4px 0 12px;
+  color: var(--text-dim);
+}
+.assistant-foot {
+  flex: none;
+  padding: 6px 12px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+}
+.assistant .dim {
+  color: var(--text-dim);
+}
+.assistant .small {
+  font-size: 11px;
+}
+.assistant .row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.assistant .card {
+  padding: 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.assistant .card h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+.assistant .card p {
+  margin: 0 0 10px;
+  line-height: 1.45;
+}
+.assistant code {
+  padding: 1px 4px;
+  background: var(--surface-2);
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+.starters {
+  display: grid;
+  gap: 8px;
+}
+.starter {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.starter:hover {
+  border-color: var(--accent);
+}
+.starter span {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* messages */
+.msg {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.msg p,
+.msg ul,
+.msg ol,
+.msg h4 {
+  margin: 0 0 8px;
+}
+.msg ul,
+.msg ol {
+  padding-left: 20px;
+}
+.msg h4 {
+  font-size: 13px;
+}
+.msg.user {
+  align-self: flex-end;
+  max-width: 88%;
+  padding: 7px 11px;
+  background: var(--accent-soft);
+  border-radius: 12px 12px 3px 12px;
+  white-space: pre-wrap;
+}
+.msg.error {
+  padding: 10px 12px;
+  border: 1px solid rgb(220 70 70 / 0.5);
+  border-radius: var(--radius);
+}
+.caret {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: caret 1s steps(2) infinite;
+}
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+.cite-group {
+  white-space: nowrap;
+}
+.cite {
+  display: inline-grid;
+  place-items: center;
+  min-width: 17px;
+  height: 17px;
+  margin: 0 1px;
+  padding: 0 4px;
+  vertical-align: 1px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 9px;
+}
+button.cite:hover,
+.cite.on {
+  color: #fff;
+  background: var(--accent);
+}
+.cite.off {
+  color: var(--text-dim);
+  background: var(--surface-2);
+}
+.sources {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0;
+  padding: 0;
+  list-style: none;
+}
+.source {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  text-align: left;
+  font-size: 12px;
+  border-radius: 6px;
+}
+.source:hover,
+.source.on {
+  background: var(--surface-2);
+}
+.source .pg {
+  flex: none;
+  color: var(--text-dim);
+}
+.source .q {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.link {
+  font-size: 12px;
+  color: var(--accent);
+}
+.followups {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+}
+.chip {
+  padding: 4px 10px;
+  text-align: left;
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+.chip:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.chip:disabled {
+  opacity: 0.4;
+}
+
+/* composer */
+.assistant-compose {
+  flex: none;
+  padding: 8px 12px 0;
+  border-top: 1px solid var(--border);
+}
+.selstrip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 8px;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+}
+.selq {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.icon-btn.small {
+  width: 24px;
+  height: 24px;
+}
+.input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+.input-row textarea {
+  flex: 1;
+  min-height: 34px;
+  max-height: 120px;
+  padding: 7px 9px;
+  resize: none;
+  field-sizing: content;
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+.input-row textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* the quote a citation points at, drawn inside the page's own coordinate space */
+.cite-mark {
+  position: absolute;
+  background: rgb(79 70 229 / 0.2);
+  outline: 2px solid var(--accent);
+  border-radius: 2px;
+  pointer-events: none;
+  animation: cite-pulse 0.9s ease-out;
+}
+.cite-badge {
+  position: absolute;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: grid;
+  place-items: center;
+  font: 600 11px/1 var(--font);
+  color: #fff;
+  background: var(--accent);
+  border-radius: 9px;
+  pointer-events: none;
+  transform-origin: 0 0;
+}
+@keyframes cite-pulse {
+  from {
+    outline-width: 8px;
+    outline-color: transparent;
+  }
+}

@@ -352,8 +352,8 @@ pub fn excerpts_block(chunks: &[&Chunk]) -> String {
 
 const CITE_RULES: &str = "Reply with the JSON object only. \"answer\": markdown (short paragraphs, **bold**, \"- \" bullets, \
 no headings or tables); put a marker like [1] right after each statement the excerpts support, using one number per source. \
-\"citations\": one entry per number used: \"n\", \"chunks\" (the ids in square brackets of the supporting excerpts, e.g. \
-\"p3.2\") and \"quote\" (a verbatim phrase of at most 25 words from the main supporting excerpt). \"followups\": three short \
+\"citations\": one entry per number used: \"n\", \"chunks\" (the ids in square brackets of every supporting excerpt, e.g. \
+[\"p3.2\"]; a different number for each separate passage) and \"quote\" (a verbatim phrase of at most 25 words from the main supporting excerpt). \"followups\": three short \
 follow-up questions the document can answer.";
 
 /// The user message of one turn. `fresh` are the excerpts not yet sent in this conversation.

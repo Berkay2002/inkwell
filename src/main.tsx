@@ -1,11 +1,12 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { useAi } from "./lib/aiStore";
 import { useStore } from "./store";
 import "./styles.css";
 
 // Handle for automated checks (benchmarks, screenshots); harmless in normal use.
-(window as unknown as { __inkwell: unknown }).__inkwell = { useStore };
+(window as unknown as { __inkwell: unknown }).__inkwell = { useStore, useAi };
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

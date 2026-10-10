@@ -1,6 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect } from "react";
+import { AssistantPanel } from "./components/assistant/AssistantPanel";
 import { Icon } from "./components/Icons";
 import { SearchBar, TabBar, Toolbar } from "./components/Chrome";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
@@ -81,6 +82,7 @@ export default function App() {
               <Viewer key={doc.id} doc={doc} />
               {searchOpen && <SearchBar key={doc.id} doc={doc} />}
             </div>
+            <AssistantPanel doc={doc} />
           </div>
         </>
       ) : (

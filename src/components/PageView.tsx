@@ -1,5 +1,6 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as api from "../lib/api";
+import { useAi } from "../lib/aiStore";
 import { type Rot, type Size, type TileRef, pageSpaceTransform, tileKeyStr } from "../lib/layout";
 import { cached } from "../lib/tiles";
 import type { Rect4 } from "../store";
@@ -45,6 +46,8 @@ export const PageView = memo(function PageView(p: Props) {
   const underTiles = under?.filter((u) => u.scale !== scale) ?? [];
 
   const lines = usePageText(docId, page, p.wantText);
+  // The assistant's last clicked citation, outlined on its page.
+  const mark = useAi((s) => (s.mark && s.mark.doc === docId && s.mark.page === page ? s.mark : null));
 
   return (
     <div className="page" style={{ top: p.top, left: p.left, width: size[0] * zoom, height: size[1] * zoom }} data-page={page}>
@@ -62,6 +65,14 @@ export const PageView = memo(function PageView(p: Props) {
         {p.hits.map((r, i) => (
           <div key={i} className={r === p.currentHit ? "hit current" : "hit"} style={rectStyle(r)} />
         ))}
+        {mark?.rects.map((r, i) => (
+          <div key={`${mark.nonce}.${i}`} className="cite-mark" style={rectStyle(r)} />
+        ))}
+        {mark && mark.rects.length > 0 && (
+          <span className="cite-badge" style={{ left: mark.rects[0][0] - 4, top: mark.rects[0][1] - 20 }}>
+            {mark.n}
+          </span>
+        )}
         {lines && <TextLines lines={lines} />}
       </div>
     </div>
