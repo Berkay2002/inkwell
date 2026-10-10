@@ -157,6 +157,30 @@ export const ZOOM_MIN = 0.1;
 export const ZOOM_MAX = 16;
 export const ZOOM_STEPS = [0.1, 0.25, 0.33, 0.5, 0.67, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8, 12, 16];
 
+/** Zoom of a fit mode for a viewport of `w`×`h` CSS px and the document's typical page size; null for custom zoom. */
+export function fitZoom(mode: "fitWidth" | "fitPage" | "custom", typical: Size, w: number, h: number): number | null {
+  if (mode === "custom" || w <= 0) return null;
+  const fw = (w - 2 * PAD) / typical[0];
+  return clamp(mode === "fitWidth" ? fw : Math.min(fw, (h - 2 * PAD) / typical[1]), ZOOM_MIN, ZOOM_MAX);
+}
+
+/**
+ * Where to scroll after the layout changed so the anchor stays put: the same point of the same page
+ * at the same viewport offset. In the fit modes the pages are centred, so is the view.
+ */
+export function anchoredScroll(
+  L: Pick<Layout, "tops" | "contentWidth">,
+  zoom: number,
+  a: { page: number; yPt: number; vy: number; xFrac: number; vx: number },
+  clientW: number,
+  fit: boolean,
+): { top: number; left: number } {
+  return {
+    top: L.tops[a.page] + a.yPt * zoom - a.vy,
+    left: fit ? Math.max(0, (L.contentWidth - clientW) / 2) : a.xFrac * L.contentWidth - a.vx,
+  };
+}
+
 export function stepZoom(z: number, dir: 1 | -1): number {
   if (dir > 0) return ZOOM_STEPS.find((s) => s > z * 1.001) ?? ZOOM_MAX;
   return [...ZOOM_STEPS].reverse().find((s) => s < z / 1.001) ?? ZOOM_MIN;
