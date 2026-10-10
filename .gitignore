@@ -26,3 +26,4 @@ src-tauri/gen/schemas/
 *.local
 !vendor/**/*.sln
 design/rounds/*/render*.log
+__pycache__/
