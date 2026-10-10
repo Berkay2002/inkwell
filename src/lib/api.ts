@@ -43,14 +43,30 @@ export interface EngineStats {
   misses: number;
 }
 
-export const openDocument = (path: string) => invoke<OpenOutcome>("open_document", { path });
+/**
+ * A file the user chose. Commands take the token only (src-tauri/src/paths.rs); `path` is for display
+ * and for telling open tabs apart. Open tokens can be reused, save tokens work once.
+ */
+export interface FileRef {
+  token: string;
+  path: string;
+}
+
+/** Open dialog (run by Rust). */
+export const pickOpen = (multiple: boolean, title?: "locate") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
+/** Save dialog (run by Rust) in the folder of document `doc` or of open token `near`, with file name `name`. */
+export const pickSave = (name: string, at: { doc?: number; near?: string } = {}) =>
+  invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null });
+/** Open token for a path the user chose before (recent list); Rust refuses any other path. */
+export const knownFile = (path: string) => invoke<FileRef>("known_file", { path });
+export const openDocument = (file: string) => invoke<OpenOutcome>("open_document", { file });
 export const authenticate = (doc: number, password: string) => invoke<OpenInfo>("authenticate", { doc, password });
 export const closeDocument = (doc: number) => invoke<void>("close_document", { doc });
 export const outline = (doc: number) => invoke<OutlineItem[]>("outline", { doc });
 export const pageText = (doc: number, page: number) => invoke<TextLine[]>("page_text", { doc, page });
 export const cancelSearch = (doc: number) => invoke<void>("cancel_search", { doc });
 export const engineStats = () => invoke<EngineStats>("engine_stats");
-export const initialFiles = () => invoke<string[]>("initial_files");
+export const initialFiles = () => invoke<FileRef[]>("initial_files");
 
 export function pageSizes(doc: number, onChunk: (start: number, sizes: Size[]) => void) {
   const ch = new Channel<{ start: number; sizes: Size[] }>();
@@ -105,7 +121,8 @@ export type EditOp =
   /** `to`: the gap before page `to`, counted before the move (`pageCount` = the end). */
   | { op: "move"; pages: number[]; to: number }
   | { op: "insertBlank"; at: number; like: number }
-  | { op: "insertFile"; at: number; path: string; pages?: number[] | null; password?: string | null };
+  /** `file`: an open token. */
+  | { op: "insertFile"; at: number; file: string; pages?: number[] | null; password?: string | null };
 
 export interface EditState {
   rev: number;
@@ -122,9 +139,11 @@ export interface EditState {
 export const editApply = (doc: number, op: EditOp) => invoke<EditState>("edit_apply", { doc, op });
 export const editUndo = (doc: number) => invoke<EditState>("edit_undo", { doc });
 export const editRedo = (doc: number) => invoke<EditState>("edit_redo", { doc });
-/** `path`: Save as. */
-export const saveDocument = (doc: number, path?: string) => invoke<EditState>("save_document", { doc, path: path ?? null });
+/** `to`: a save token (Save as). */
+export const saveDocument = (doc: number, to?: string) => invoke<EditState>("save_document", { doc, to: to ?? null });
+/** `out`: a save token. */
 export const extractPages = (doc: number, pages: number[], out: string, deleteAfter: boolean) =>
   invoke<EditState>("extract_pages", { doc, pages, out, deleteAfter });
 export const splitDocument = (doc: number, every: number) => invoke<{ files: string[] }>("split_document", { doc, every });
-export const mergeFiles = (paths: string[], out: string) => invoke<number>("merge_files", { paths, out });
+/** `files`: open tokens; `out`: a save token. Returns the result to open. */
+export const mergeFiles = (files: string[], out: string) => invoke<FileRef>("merge_files", { files, out });

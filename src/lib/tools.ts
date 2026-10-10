@@ -1,6 +1,6 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import type { IconName } from "../components/Icons";
 import { useStore } from "../store";
+import { type FileRef, pickOpen } from "./api";
 
 export type ToolId = "organize" | "edit" | "annotate" | "fill" | "redact" | "ocr" | "compress" | "merge";
 
@@ -16,13 +16,13 @@ export const quickTools: { id: ToolId; label: string; icon: IconName }[] = [
 ];
 
 /** Later phases register the real tool here; until one does, a tool just opens the picked file. */
-export const toolHandlers: Partial<Record<ToolId, (path: string) => void | Promise<void>>> = {};
+export const toolHandlers: Partial<Record<ToolId, (file: FileRef) => void | Promise<void>>> = {};
 
-// TODO(editing phases): set toolHandlers[id] when the tool exists (it receives the picked path).
+// TODO(editing phases): set toolHandlers[id] when the tool exists (it receives the picked file's token and path).
 export async function launchTool(id: ToolId) {
-  const sel = await open({ multiple: false, filters: [{ name: "PDF documents", extensions: ["pdf"] }] });
-  if (typeof sel !== "string") return;
-  await (toolHandlers[id] ?? useStore.getState().openPath)(sel);
+  const [f] = await pickOpen(false);
+  if (!f) return;
+  await (toolHandlers[id] ?? ((f: FileRef) => useStore.getState().openPath(f.path, f.token)))(f);
 }
 
 // TODO(assistant): open the assistant panel on the opened document with a summarize request.
