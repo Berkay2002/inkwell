@@ -23,6 +23,8 @@ const PATHS = {
   check: "M6 12.5l4 4 8-9",
   copy: "M9 9h9.5v11H9zM6 15V4h9.5",
   plus: "M12 6v12M6 12h12",
+  brain:
+    "M12 5.2A3 3 0 0 0 6.6 6.7 3.2 3.2 0 0 0 4.6 10c0 .9.4 1.7 1 2.2A3.3 3.3 0 0 0 7 17a3 3 0 0 0 5 1.6zM12 5.2a3 3 0 0 1 5.4 1.5 3.2 3.2 0 0 1 2 3.3c0 .9-.4 1.7-1 2.2A3.3 3.3 0 0 1 17 17a3 3 0 0 1-5 1.6M12 5.2v13.4",
 } as const;
 
 export function Glyph({ name, size = 16 }: { name: keyof typeof PATHS; size?: number }) {
@@ -57,8 +59,9 @@ export function usePop() {
   return { open, setOpen, ref };
 }
 
-/** The model and effort in one pill; the popover lists what Codex offers. */
-export function ModelPicker({ up = false }: { up?: boolean }) {
+/** The model and effort in one pill (or, with `icon`, a brain icon whose tooltip names them); the
+ *  popover lists what Codex offers. */
+export function ModelPicker({ up = false, icon = false }: { up?: boolean; icon?: boolean }) {
   const status = useAi((s) => s.status);
   const settings = useAi((s) => s.settings);
   const { open, setOpen, ref } = usePop();
@@ -68,16 +71,26 @@ export function ModelPicker({ up = false }: { up?: boolean }) {
   const efforts = model.efforts;
   const effort = efforts.includes(settings.effort) ? settings.effort : (model.defaultEffort ?? efforts[0]);
   const set = useAi.getState().setSettings;
+  const label = `${model.name}${effort ? ` · ${cap(effort)}` : ""}`;
 
   return (
     <div className="ax-pop-wrap" ref={ref}>
-      <button className="ax-pill" title="Model and reasoning effort" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <span className="ax-pill-text">
-          {model.name}
-          {effort ? ` · ${cap(effort)}` : ""}
-        </span>
-        <Glyph name="down" size={13} />
-      </button>
+      {icon ? (
+        <button
+          className="ax-icon"
+          title={`Model and reasoning effort: ${label}`}
+          aria-label={`Model and reasoning effort: ${label}`}
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+        >
+          <Glyph name="brain" size={18} />
+        </button>
+      ) : (
+        <button className="ax-pill" title="Model and reasoning effort" aria-expanded={open} onClick={() => setOpen(!open)}>
+          <span className="ax-pill-text">{label}</span>
+          <Glyph name="down" size={13} />
+        </button>
+      )}
       {open && (
         <div className={up ? "ax-pop up" : "ax-pop"} role="menu">
           <div className="ax-pop-label">Model</div>
@@ -413,10 +426,10 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
       ) : (
         <Markdown
           text={m.text}
+          caret={m.state === "streaming"}
           cites={{ known, active, onCite: (n) => cites.get(n) && useAi.getState().showCitation(doc.id, cites.get(n)!) }}
         />
       )}
-      {m.state === "streaming" && m.text !== "" && <span className="ax-caret" />}
       {m.state === "cancelled" && <p className="dim small">Stopped.</p>}
       {m.state === "done" && (
         <>
@@ -470,8 +483,21 @@ function SelStrip({ doc, variant }: { doc: DocState; variant: Variant }) {
   );
 }
 
-/** The question box: a pill with a round send button. `trail` sits inside it, before the send button. */
-export function Composer({ doc, variant, trail, onSend }: { doc: DocState; variant: Variant; trail?: ReactNode; onSend?: () => void }) {
+/** The question box: a pill with a round send button. `lead` sits inside it before the text, `trail`
+ *  before the send button. */
+export function Composer({
+  doc,
+  variant,
+  lead,
+  trail,
+  onSend,
+}: {
+  doc: DocState;
+  variant: Variant;
+  lead?: ReactNode;
+  trail?: ReactNode;
+  onSend?: () => void;
+}) {
   const [text, setText] = useState("");
   const streaming = useAi((s) => !!s.chats[doc.id]?.messages.some((m) => m.state === "streaming"));
   const prep = useAi((s) => s.chats[doc.id]?.prep);
@@ -490,6 +516,7 @@ export function Composer({ doc, variant, trail, onSend }: { doc: DocState; varia
     <div className={`ax-compose ${variant}`}>
       <SelStrip doc={doc} variant={variant} />
       <div className="ax-input">
+        {lead}
         <textarea
           value={text}
           rows={1}

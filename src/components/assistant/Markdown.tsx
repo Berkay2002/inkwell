@@ -72,17 +72,36 @@ function inline(text: string, c: CiteProps): ReactNode[] {
   });
 }
 
-export function Markdown({ text, cites }: { text: string; cites: CiteProps }) {
+/** `caret` puts the streaming cursor at the end of the last block, inline with its text. */
+export function Markdown({ text, cites, caret = false }: { text: string; cites: CiteProps; caret?: boolean }) {
+  const bs = blocks(text);
+  const tail = (isLast: boolean) => (caret && isLast ? <span className="ax-caret" /> : null);
   return (
     <>
-      {blocks(text).map((b, i) => {
-        if (b.t === "p") return <p key={i}>{inline(b.text, cites)}</p>;
-        if (b.t === "h") return <h4 key={i}>{inline(b.text, cites)}</h4>;
+      {bs.map((b, i) => {
+        const last = i === bs.length - 1;
+        if (b.t === "p")
+          return (
+            <p key={i}>
+              {inline(b.text, cites)}
+              {tail(last)}
+            </p>
+          );
+        if (b.t === "h")
+          return (
+            <h4 key={i}>
+              {inline(b.text, cites)}
+              {tail(last)}
+            </h4>
+          );
         const L = b.t;
         return (
           <L key={i}>
             {b.items.map((it, j) => (
-              <li key={j}>{inline(it, cites)}</li>
+              <li key={j}>
+                {inline(it, cites)}
+                {tail(last && j === b.items.length - 1)}
+              </li>
             ))}
           </L>
         );

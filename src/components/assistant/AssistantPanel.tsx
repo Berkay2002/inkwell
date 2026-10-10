@@ -93,7 +93,7 @@ function Docked({ doc }: { doc: DocState }) {
   const width = useAi((s) => s.settings.width);
   const drag = useRef<{ x: number; w: number } | null>(null);
   return (
-    <aside className="ax-dock" style={{ width }} aria-label="Assistant">
+    <aside className="ax-dock" style={{ width: `min(${width}px, 45vw)` }} aria-label="Assistant">
       <div
         className="ax-grip"
         onPointerDown={(e) => {
@@ -341,16 +341,7 @@ function Bar({ doc }: { doc: DocState }) {
               ))}
             </div>
           )}
-          <Composer
-            doc={doc}
-            variant="bar"
-            trail={
-              <>
-                <MoreMenu doc={doc} up />
-                <ModelPicker up />
-              </>
-            }
-          />
+          <Composer doc={doc} variant="bar" lead={<MoreMenu doc={doc} up />} trail={<ModelPicker up icon />} />
         </div>
       )}
       <Connector />

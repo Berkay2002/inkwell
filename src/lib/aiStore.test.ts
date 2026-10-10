@@ -122,6 +122,15 @@ describe("assistant store", () => {
     expect(useAi.getState().mark).toBeNull();
   });
 
+  it("a finished, cancelled or failed turn is no longer streaming (nothing keeps the cursor)", () => {
+    useAi.getState().setSettings({ consent: true });
+    useAi.getState().ask(1, { kind: "ask", question: "q" });
+    emit({ kind: "delta", text: "partial" });
+    expect(useAi.getState().chats[1].messages[1].state).toBe("streaming");
+    emit({ kind: "cancelled" });
+    expect(useAi.getState().chats[1].messages[1].state).toBe("cancelled");
+  });
+
   it("drops the chat when its tab closes", () => {
     useAi.setState({ chats: { 1: { messages: [], prep: null } } });
     useStore.setState({ docs: {}, order: [], active: null });

@@ -1,22 +1,26 @@
 /* AI assistant: three layouts (docked, floating, command bar) and the on-page citation mark.
-   Colours and radii live in this one block so a restyle of the app's tokens merges cleanly. */
+   Colours and radii live in this one block. Each takes the app's global token (the warm palette:
+   --window, --surface, --border, --text, --text-2, --radius-*, --shadow-*) and only falls back to
+   its own value when the app does not define it. */
 :root {
-  --ax-window: light-dark(#f4f2ed, #141517);
-  --ax-surface: light-dark(#ffffff, #1b1d21);
+  --ax-window: var(--window, light-dark(#f4f2ed, #141517));
+  --ax-surface: var(--surface, light-dark(#ffffff, #1b1d21));
   --ax-panel: light-dark(#faf8f4, #212328);
-  --ax-text: light-dark(#1a1c20, #e9ebf0);
-  --ax-dim: light-dark(#6b675f, #a0a3ab);
-  --ax-border: light-dark(#e3ded4, #2e3138);
+  --ax-text: var(--text, light-dark(#1a1c20, #e9ebf0));
+  --ax-dim: var(--text-2, light-dark(#6b675f, #a0a3ab));
+  --ax-border: var(--border, light-dark(#e3ded4, #2e3138));
+  /* ponytail: the app's current --accent is still indigo, so the ink blue stays local until the
+     warm palette lands; then this line becomes `var(--accent, ...)`. */
   --ax-accent: light-dark(#2e4b8f, #8ba5e8);
   --ax-on-accent: light-dark(#ffffff, #0e1424);
   --ax-accent-soft: light-dark(rgb(46 75 143 / 0.1), rgb(139 165 232 / 0.16));
   --ax-bubble: light-dark(#eeebe3, #292c32);
   --ax-hl: light-dark(rgb(46 75 143 / 0.22), rgb(110 140 220 / 0.34));
-  --ax-r: 12px;
-  --ax-r-sm: 8px;
-  --ax-r-lg: 16px;
-  --ax-shadow: 0 1px 2px rgb(30 28 24 / 0.05), 0 6px 24px rgb(30 28 24 / 0.1);
-  --ax-shadow-lg: 0 2px 6px rgb(30 28 24 / 0.07), 0 16px 48px rgb(30 28 24 / 0.18);
+  --ax-r: var(--radius-md, 12px);
+  --ax-r-sm: var(--radius-sm, 8px);
+  --ax-r-lg: var(--radius-lg, 16px);
+  --ax-shadow: var(--shadow-1, 0 1px 2px rgb(30 28 24 / 0.05), 0 6px 24px rgb(30 28 24 / 0.1));
+  --ax-shadow-lg: var(--shadow-2, 0 2px 6px rgb(30 28 24 / 0.07), 0 16px 48px rgb(30 28 24 / 0.18));
   --ax-font: "Segoe UI Variable Text", "Segoe UI Variable", "Inter", "Segoe UI", system-ui, sans-serif;
 }
 
@@ -663,8 +667,10 @@ button.ax-cite:hover {
   background: var(--ax-accent);
   border-radius: 16px;
 }
-.ax-send:disabled {
-  opacity: 0.35;
+/* disabled stays solid ink blue: a see-through blue over cream reads as lilac */
+.ax-panel :focus-visible,
+.ax-bar :focus-visible {
+  outline-color: var(--ax-accent);
 }
 .ax-selstrip {
   display: flex;
@@ -710,33 +716,37 @@ button.ax-cite:hover {
   font-family: var(--ax-font);
   color: var(--ax-text);
 }
-/* one pill: question, "...", model chip, round send button */
+/* one pill, after ChatGPT's composer: menu icon, question, plain model text, round send button */
 .ax-bar .ax-compose {
   padding: 0;
 }
 .ax-bar .ax-input {
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-height: 56px;
-  padding: 8px 10px 8px 24px;
+  padding: 8px 10px 8px 10px;
   background: var(--ax-surface);
   border-radius: 28px;
   box-shadow: var(--ax-shadow-lg);
 }
 .ax-bar .ax-input textarea {
-  margin: 0;
+  margin: 0 8px 0 4px;
   font-size: 14.5px;
 }
-.ax-bar .ax-input .ax-pill {
-  background: transparent;
+.ax-bar .ax-input .ax-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 18px;
+  color: var(--ax-text);
+}
+/* the model picker is just a brain icon here; the tooltip carries the model and effort */
+.ax-bar .ax-input .ax-pop-wrap:last-of-type .ax-icon {
+  color: var(--ax-dim);
 }
 .ax-bar .ax-send {
   width: 40px;
   height: 40px;
   border-radius: 20px;
-}
-.ax-bar .ax-send:disabled {
-  opacity: 0.55;
 }
 .ax-bar .ax-selstrip {
   position: absolute;
