@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod annot;
 pub mod compress;
 pub mod diff;
 pub mod engine;
@@ -600,6 +601,12 @@ pub fn run() {
             ocr_choose_tesseract,
             ocr_clear_tesseract,
             ocr_start,
+            annot::app::annot_list,
+            annot::app::annot_add,
+            annot::app::annot_edit,
+            annot::app::annot_delete,
+            annot::app::annot_reply,
+            annot::app::annot_state,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,
