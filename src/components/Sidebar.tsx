@@ -1,6 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { OutlineItem } from "../lib/api";
-import { computeLayout, previewScaleKey, rotated, typicalSize, visibleRange } from "../lib/layout";
+import { computeLayout, previewScaleKey, rotated, type Size, visibleRange } from "../lib/layout";
 import { type Want, tileClient } from "../lib/tiles";
 import { type DocState, useStore } from "../store";
 import { Icon } from "./Icons";
@@ -37,8 +37,9 @@ function Thumbnails({ doc }: { doc: DocState }) {
   const el = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, h: 0 });
   const [menu, setMenu] = useState<{ x: number; y: number; page: number } | null>(null);
-  const zoom = THUMB_W / typicalSize(sizes, rot)[0];
-  const layout = useMemo(() => computeLayout(sizes, rot, zoom, 0), [sizes, rot, zoom]);
+  // Every page fits the column width (a landscape page among portrait ones too).
+  const fitted = useMemo(() => sizes.map((s) => rotated(s, rot)).map(([w, h]) => [THUMB_W, (h * THUMB_W) / w] as Size), [sizes, rot]);
+  const layout = useMemo(() => computeLayout(fitted, 0, 1, 0), [fitted]);
 
   useLayoutEffect(() => {
     const s = el.current!;
@@ -86,7 +87,7 @@ function Thumbnails({ doc }: { doc: DocState }) {
         }}
         title={`Page ${i + 1}`}
       >
-        <TileCanvas docId={id} tile={tile} size={size} zoom={zoom} stream={1} cover />
+        <TileCanvas docId={id} tile={tile} size={size} zoom={THUMB_W / size[0]} stream={1} cover />
         <span className="thumb-num">{i + 1}</span>
       </button>,
     );

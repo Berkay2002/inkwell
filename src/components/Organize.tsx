@@ -19,8 +19,8 @@ const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)"
 const PAD = 24;
 const GAP_X = 22;
 const GAP_Y = 18;
+/** Narrowest page cell: a 1440 px window at 100% fits 6 (design/approved/organize.png), wider windows more. */
 const MIN_CELL = 160;
-const MAX_COLS = 6;
 /** Page box height per unit of cell width (US Letter portrait fits with a little air). */
 const BOX_ASPECT = 1.36;
 /** Below the page box: gap + number badge. */
@@ -53,7 +53,7 @@ interface Grid {
 
 function gridFor(width: number): Grid {
   const inner = Math.max(0, width - 2 * PAD);
-  const cols = clamp(Math.floor((inner + GAP_X) / (MIN_CELL + GAP_X)), 1, MAX_COLS);
+  const cols = Math.max(1, Math.floor((inner + GAP_X) / (MIN_CELL + GAP_X)));
   const cell = (inner - (cols - 1) * GAP_X) / cols;
   const box = Math.round(cell * BOX_ASPECT);
   return { cols, cell, box, rowH: box + LABEL_H + GAP_Y };
