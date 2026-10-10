@@ -93,7 +93,8 @@ export function CompareView() {
 
   // Scroll both sides to the change (one scroller holds both columns, so one scroll does it).
   useEffect(() => {
-    if (cur === null || !done || !scroller.current) return;
+    // flash is 0 until the user steps or clicks: the first change is selected silently, the pages stay at scroll 0
+    if (cur === null || !flash || !done || !scroller.current) return;
     const c = done.changes[cur];
     const r = rowOf(rows, c);
     const row = scroller.current.querySelector<HTMLElement>(`[data-row="${r}"]`);
@@ -280,10 +281,9 @@ function VersionTrack({ req, versions, onSet }: { req: CompareReq; versions: Ver
         title={`${title} · click: After, Alt-click: Before`}
         onClick={(e) => onSet(e.altKey || e.shiftKey || target === "a" ? "a" : "b", id)}
       >
-        <span className="hx-dot" aria-hidden>
-          {a && <i className="hx-handle-a">Before</i>}
-          {b && <i className="hx-handle-b">After</i>}
-        </span>
+        {a && <i className="hx-handle-a" aria-hidden>Before</i>}
+        {b && <i className="hx-handle-b" aria-hidden>After</i>}
+        <span className="hx-dot" aria-hidden />
         <span className="hx-node-time">{time}</span>
       </button>
     );

@@ -332,6 +332,17 @@ fn page_removed() {
 }
 
 #[test]
+fn page_replaced_is_one_change() {
+    let a = base(3);
+    let mut b = base(3);
+    b.pages[1] = PageSpec { lines: vec![(72.0, 700.0, "An entirely different page about saffron".into())], ..Default::default() };
+    let c = cmp(&a, &b);
+    assert_eq!(kinds(&c), vec![ChangeKind::PageReplaced]);
+    assert_eq!((c.changes[0].a_page, c.changes[0].b_page), (Some(1), Some(1)));
+    assert_eq!(c.changes[0].label, "Page 2 replaced");
+}
+
+#[test]
 fn page_moved_is_the_minimal_set() {
     let a = base(5);
     let mut b = base(5);

@@ -53,6 +53,7 @@ export interface Picked {
 export type ChangeKind =
   | "pageAdded"
   | "pageRemoved"
+  | "pageReplaced"
   | "pageMoved"
   | "pageRotated"
   | "pageBoxChanged"

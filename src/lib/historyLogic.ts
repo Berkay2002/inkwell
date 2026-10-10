@@ -115,6 +115,7 @@ export const CATEGORIES: { id: Category; label: string }[] = [
 const CATEGORY: Record<ChangeKind, Category> = {
   pageAdded: "pages",
   pageRemoved: "pages",
+  pageReplaced: "pages",
   pageMoved: "pages",
   pageRotated: "pages",
   pageBoxChanged: "pages",
@@ -219,9 +220,12 @@ const pagesWord = (a: number, b: number) => (a === b ? `Page ${a}` : `Pages ${a}
 export function pageSummary(c: Comparison): string[] {
   const out: string[] = [];
   const label = (r: [number, number][], verb: string) => r.forEach(([a, b]) => out.push(`${pagesWord(a + 1, b + 1)} ${verb}`));
-  const added = c.pages.bToA.flatMap((a, j) => (a === null ? [j] : []));
+  const replaced = new Map(c.changes.flatMap((ch) => (ch.kind === "pageReplaced" && ch.bPage !== null ? [[ch.bPage, ch.aPage] as const] : [])));
+  const replacedA = new Set(replaced.values());
+  const added = c.pages.bToA.flatMap((a, j) => (a === null && !replaced.has(j) ? [j] : []));
   label(ranges(added), "inserted");
-  label(ranges(c.pages.removedA), "removed");
+  label(ranges(c.pages.removedA.filter((a) => !replacedA.has(a))), "removed");
+  label(ranges([...replaced.keys()]), "replaced");
   const moved = c.changes
     .flatMap((ch) => (ch.detail.type === "pageMoved" ? [ch.detail as { type: string; from: number; to: number }] : []))
     .sort((x, y) => x.to - y.to);
@@ -252,6 +256,11 @@ export function alignRows(m: PageMap): Row[] {
   let r = 0;
   m.bToA.forEach((a, b) => {
     if (a !== null) while (r < removed.length && removed[r] < a) rows.push({ a: removed[r++], b: null });
+    else {
+      // an unmatched B page sharing its gap with a removed A page is a replaced page: one row
+      const next = m.bToA.slice(b + 1).find((x) => x !== null) ?? Infinity;
+      if (r < removed.length && removed[r] < next) return rows.push({ a: removed[r++], b });
+    }
     rows.push({ a, b });
   });
   while (r < removed.length) rows.push({ a: removed[r++], b: null });
@@ -314,7 +323,7 @@ export function marksFor(changes: Change[], side: "a" | "b"): Mark[] {
     }
     if (tone === "add" && side === "a") return;
     if (tone === "del" && side === "b") return;
-    if (c.kind === "pageAdded" || c.kind === "pageRemoved") out.push({ rect: null, tone, change, page });
+    if (c.kind === "pageAdded" || c.kind === "pageRemoved" || c.kind === "pageReplaced") out.push({ rect: null, tone, change, page });
     else if (rect) out.push({ rect, tone, change, page });
   });
   return out;

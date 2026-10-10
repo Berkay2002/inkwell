@@ -98,6 +98,8 @@ impl PageMap {
 pub enum ChangeKind {
     PageAdded,
     PageRemoved,
+    /// An unmatched page of A and one of B at the same position.
+    PageReplaced,
     PageMoved,
     PageRotated,
     PageBoxChanged,

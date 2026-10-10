@@ -50,6 +50,12 @@ const shot = async (name) => {
   fs.writeFileSync(path.join(out, name), Buffer.from(r.data, "base64"));
   console.log("screenshot", name);
 };
+const narrow = async (name) => {
+  await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 900, deviceScaleFactor: 1, mobile: false });
+  await shot(name);
+  await send("Emulation.clearDeviceMetricsOverride");
+  await sleep(300);
+};
 const click = (sel, text) =>
   ev(`(() => { const els = [...document.querySelectorAll(${JSON.stringify(sel)})]; const b = ${text ? `els.find((e) => e.textContent.trim() === ${JSON.stringify(text)})` : "els[0]"}; b?.click(); return !!b })()`);
 const rect = (sel) => ev(`(() => { const r = document.querySelector(${JSON.stringify(sel)})?.getBoundingClientRect(); return r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null })()`);
@@ -114,6 +120,7 @@ await ev(`window.__H.getState().openCompare({ doc: ${lease}, a: { kind: "version
 await until(`document.querySelectorAll(".hx-rev").length > 0 && document.querySelectorAll(".hx-crow .hx-page img").length >= 2`, "the comparison");
 report.compare = await ev(`({ cards: document.querySelectorAll(".hx-rev").length, summary: [...document.querySelectorAll(".hx-summary li")].map((e) => e.textContent), cats: [...document.querySelectorAll(".hx-cats button")].map((e) => e.textContent) })`);
 await shot("compare-2up-light.png");
+await narrow("compare-2up-narrow-light.png");
 await click(".hx-rev-main", undefined);
 await shot("compare-2up-selected-light.png");
 await theme("dark");
@@ -121,6 +128,7 @@ await shot("compare-2up-dark.png");
 await theme("light");
 // the version track along the bottom: click a node = After, Alt-click = Before (the dropdowns follow)
 report.track = await ev(`[...document.querySelectorAll(".hx-node")].map((n) => n.getAttribute("aria-label"))`);
+await ev(`document.querySelector(".hx-cscroll").scrollTop = 0`);
 await shot("compare-track-light.png");
 await theme("dark");
 await shot("compare-track-dark.png");
@@ -171,6 +179,35 @@ await theme("light");
 await click(".hx-rev[data-cat=metadata] .hx-rev-main", undefined);
 await shot("compare-metadata-expanded-light.png");
 await ev(`window.__H.getState().closeCompare()`);
+
+// ---- Restore: an older version comes back in the same tab, as a new "Restored" version on top ----
+await activate(lease);
+await until(`window.__H.getState().docs[${lease}]?.state?.status === "ready"`, "history ready");
+await ev(`window.__H.getState().setOpen(true)`);
+const tabsBefore = await ev(`(() => { const s = window.__S.getState(); return s.order.map((i) => s.docs[i].name) })()`);
+await click(".hx-row .hx-title", "Signed by tenant");
+await until(`!!document.querySelector(".hx-vbar")`, "the version view");
+if (await ev(`!!window.__S.getState().docs[${lease}].dirty`)) throw new Error("lease.pdf is dirty: the native confirm cannot be clicked over CDP");
+await click(".hx-vbar .hx-btn.primary", "Restore this version");
+await until(`(() => { const s = window.__S.getState(); const d = s.docs[s.active]; return s.docs[${lease}] === undefined && d?.name === "lease.pdf" })()`, "the reload in place");
+const lease2 = await ev(`window.__S.getState().active`);
+await until(`window.__H.getState().docs[${lease2}]?.state?.status === "ready" && [...document.querySelectorAll(".hx-item .hx-title")].some((e) => /Restored/.test(e.textContent)) && !document.querySelector(".hx-vbar")`, "the refreshed panel");
+await until(`document.querySelectorAll(".viewer img, .viewer canvas").length > 0`, "the restored page");
+report.restore = await ev(`(() => {
+  const s = window.__S.getState();
+  return { tabs: s.order.map((i) => s.docs[i].name), active: s.docs[s.active].name, top: window.__H.getState().docs[s.active].versions[0].label };
+})()`);
+if (JSON.stringify(report.restore.tabs) !== JSON.stringify(tabsBefore)) throw new Error(`tabs changed: ${tabsBefore} -> ${report.restore.tabs}`);
+if (report.restore.active !== "lease.pdf") throw new Error("lease.pdf is not the active tab");
+if (!/^Restored/.test(report.restore.top)) throw new Error(`top version is "${report.restore.top}", not "Restored"`);
+// (named versions are pinned above the day groups, so "on top" means newest in the store)
+// the file is now the original again: no differences against the version it was restored from
+const vs = await ev(`window.__H.getState().docs[${lease2}].versions.map((v) => ({ id: v.id, name: v.name }))`);
+const orig = vs.find((v) => v.name === "Signed by tenant");
+report.restore.sameAsVersion = await ev(`window.__TAURI_INTERNALS__.invoke("history_compare", { doc: ${lease2}, a: { kind: "version", id: ${JSON.stringify(orig.id)} }, b: { kind: "current" } }).then((c) => c.identical)`);
+if (!report.restore.sameAsVersion) throw new Error("the restored file differs from the version");
+await shot("restore-after-light.png");
+await narrow("restore-after-narrow-light.png");
 
 console.log(JSON.stringify(report, null, 2));
 ws.close();

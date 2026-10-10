@@ -49,13 +49,25 @@ pub fn compare(a: &[u8], b: &[u8], opts: &CompareOptions) -> Result<Comparison> 
     };
 
     let mut ch: Vec<Change> = Vec::new();
+    // An unmatched A page and an unmatched B page in the same gap between matched pages are one
+    // replaced page (paired in order), not a removal plus an addition.
+    let gap_b = |j: usize| b2a[..j].iter().filter(|m| m.is_some()).count();
+    let a_matched: Vec<usize> = b2a.iter().flatten().copied().collect();
+    let gap_a = |i: usize| a_matched.iter().filter(|&&x| x < i).count();
+    let mut free_a: Vec<usize> = map.removed_a.iter().map(|&i| i as usize).collect();
     for (j, m) in b2a.iter().enumerate() {
-        if m.is_none() {
-            ch.push(page_change(ChangeKind::PageAdded, None, Some(j), format!("Page {} added", j + 1), Detail::None));
+        if m.is_some() {
+            continue;
+        }
+        match free_a.iter().position(|&i| gap_a(i) == gap_b(j)) {
+            Some(k) => {
+                let i = free_a.remove(k);
+                ch.push(page_change(ChangeKind::PageReplaced, Some(i), Some(j), format!("Page {} replaced", j + 1), Detail::None));
+            }
+            None => ch.push(page_change(ChangeKind::PageAdded, None, Some(j), format!("Page {} added", j + 1), Detail::None)),
         }
     }
-    for &i in &map.removed_a {
-        let i = i as usize;
+    for i in free_a {
         ch.push(page_change(ChangeKind::PageRemoved, Some(i), None, format!("Page {} removed", i + 1), Detail::None));
     }
     // moves: matched pages not on the longest increasing run of A-indices in B order
