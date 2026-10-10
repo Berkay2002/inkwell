@@ -583,9 +583,16 @@ fn publish_never_replaces_and_has_a_copy_fallback() {
     let s = Scratch::new();
     let (tmp, out) = (s.path("t.tmp"), s.path("o.pdf"));
     fs::write(&tmp, b"payload").unwrap();
-    publish(&tmp, &out).unwrap();
+    publish(&tmp, &out, false).unwrap();
     assert_eq!(fs::read(&out).unwrap(), b"payload");
-    assert!(matches!(publish(&tmp, &out), Err(Error::OutputExists(_))));
+    assert!(matches!(publish(&tmp, &out, false), Err(Error::OutputExists(_))));
+
+    // a dialog-confirmed name may be replaced
+    let (tmp2, out3) = (s.path("t2.tmp"), s.path("o3.pdf"));
+    fs::write(&out3, b"old").unwrap();
+    fs::write(&tmp2, b"new").unwrap();
+    publish(&tmp2, &out3, true).unwrap();
+    assert_eq!(fs::read(&out3).unwrap(), b"new");
 
     // the path taken on file systems without hard links
     let out2 = s.path("o2.pdf");

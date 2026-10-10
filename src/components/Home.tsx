@@ -1,8 +1,11 @@
-import { type KeyboardEvent, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { ocrChooseTesseract, ocrClearTesseract, ocrLanguages } from "../lib/api";
+import { useTools } from "../lib/toolsStore";
 import { openDialog } from "../lib/commands";
 import { type Recent, baseName, dirName, formatSize, greeting, keyOf, ordered, relTime, shortDir, whenLabel } from "../lib/recent";
 import { launchTool, quickTools } from "../lib/tools";
 import { revealInFolder, useRecents } from "../recents";
+import type { CompressPreset } from "../lib/api";
 import { type Theme, useStore } from "../store";
 import { FileMenu, NavItem, SearchPill, Thumb, useDropOver, useNow, usePreviewSrc, useRecentsSync } from "./FileParts";
 import { Icon } from "./Icons";
@@ -52,8 +55,25 @@ function Landing({ over, onSeeAll }: { over: boolean; onSeeAll: () => void }) {
   const selected = rows.find((r) => keyOf(r.path) === sel) ?? rows[0];
   const empty = ready && items.length === 0;
 
+  const tools = useTools((s) => s.settings);
+  const [langs, setLangs] = useState<string[]>([]);
+  useEffect(() => {
+    ocrLanguages().then((l) => setLangs(l.windows), () => {});
+  }, []);
+  const presets: [CompressPreset, string][] = [
+    ["smallest", "Smallest"],
+    ["balanced", "Balanced"],
+    ["highQuality", "High quality"],
+  ];
+  const set = useTools.getState().setSettings;
+
   const settings: MenuEntry[] = [
     ...themes.map(([t, label]): MenuEntry => ({ label: `Theme: ${label}`, checked: theme === t, onSelect: () => useStore.getState().setTheme(t) })),
+    "sep",
+    ...presets.map(([p, label]): MenuEntry => ({ label: `Compress preset: ${label}`, checked: tools.compressPreset === p, onSelect: () => set({ compressPreset: p }) })),
+    ...langs.map((l): MenuEntry => ({ label: `OCR language: ${l}`, checked: tools.ocrLanguage === l, onSelect: () => set({ ocrLanguage: l }) })),
+    { label: "Tesseract location…", onSelect: () => void ocrChooseTesseract().then((p) => p && set({ ocrBackend: "tesseract" })) },
+    { label: "Forget Tesseract location", onSelect: () => void ocrClearTesseract().then(() => set({ ocrBackend: "windows" })) },
     "sep",
     { label: "Command palette", hint: "Ctrl+K", onSelect: () => useStore.getState().setUi({ paletteOpen: true }) },
     { label: "Clear recent files", onSelect: () => useRecents.getState().clear() },

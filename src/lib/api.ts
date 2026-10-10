@@ -147,3 +147,119 @@ export const extractPages = (doc: number, pages: number[], out: string, deleteAf
 export const splitDocument = (doc: number, every: number) => invoke<{ files: string[] }>("split_document", { doc, every });
 /** `files`: open tokens; `out`: a save token. Returns the result to open. */
 export const mergeFiles = (files: string[], out: string) => invoke<FileRef>("merge_files", { files, out });
+
+// ---- compress and OCR (src-tauri/src/tools/mod.rs) ----
+
+export type CompressPreset = "smallest" | "balanced" | "highQuality";
+
+export interface CompressAudit {
+  total: number;
+  categories: { category: "images" | "fonts" | "contentStreams" | "metadata" | "structure" | "other"; bytes: number; objects: number }[];
+  images: number;
+  fonts: number;
+}
+
+export interface CompressAuditReply {
+  audit: CompressAudit;
+  size: number;
+  defaultOutput: string;
+  outputExists: boolean;
+  /** Estimated bytes of the output per preset: a guide, the report has the real size. */
+  predictions: { preset: CompressPreset; bytes: number }[];
+}
+
+export interface CompressProgress {
+  stage: "open" | "scan" | "images" | "fonts" | "write" | "verify";
+  /** 0..1 over the whole job, never decreasing. */
+  fraction: number;
+  page: number;
+  pages: number;
+}
+
+export interface CompressReport {
+  input: string;
+  output: string;
+  sizeBefore: number;
+  sizeAfter: number;
+  savedBytes: number;
+  savedPercent: number;
+  keptOriginal: boolean;
+  pages: number;
+  /** Render comparison of before and after (8 pages at most); null when skipped. */
+  visual: { maxDiff: number; meanDiff: number; psnr: number } | null;
+  warnings: string[];
+}
+
+/** Documents are named by id; an output file by a save token from `pickSave`. */
+export interface CompressRequest {
+  doc: number;
+  preset: CompressPreset;
+  /** Full options from a Customize panel; wins over `preset`. */
+  custom?: unknown;
+  /** Save token for the output instead of `<name> (compressed).pdf` (used when that name is taken). */
+  saveTo?: string;
+}
+
+export type OcrBackend = "windows" | "tesseract";
+
+export interface OcrLanguages {
+  windows: string[];
+  tesseract: { path: string; languages: string[] } | null;
+}
+
+export interface OcrRequest {
+  doc: number;
+  /** One-based range like "1-3, 5"; omitted = every page. */
+  pages?: string;
+  languages: string[];
+  force: boolean;
+  backend: OcrBackend;
+  /** Save token: write a new file instead of changing the document. */
+  saveTo?: string;
+}
+
+export interface OcrProgress {
+  done: number;
+  total: number;
+  page: number;
+}
+
+/** The engine's report as it serializes (snake_case: the AI tools read the same shape). */
+export interface OcrReport {
+  backend: string;
+  pages_requested: number;
+  pages_recognized: number;
+  pages_skipped_text: number;
+  pages_no_text: number;
+  pages_failed: number;
+  words: number;
+  total_ms: number;
+  warnings: string[];
+}
+
+export interface OcrOutcome {
+  report: OcrReport;
+  /** The document after an in-place run; null for `saveTo`. */
+  state: EditState | null;
+  output: string | null;
+}
+
+export const compressAudit = (doc: number) => invoke<CompressAuditReply>("compress_audit", { doc });
+
+export function compressStart(job: number, req: CompressRequest, onProgress: (p: CompressProgress) => void) {
+  const ch = new Channel<CompressProgress>();
+  ch.onmessage = onProgress;
+  return invoke<CompressReport>("compress_start", { job, req, onProgress: ch });
+}
+
+export const toolCancel = (job: number) => invoke<void>("tool_cancel", { job });
+export const ocrLanguages = () => invoke<OcrLanguages>("ocr_languages");
+/** Opens a file picker (Rust side) and remembers tesseract.exe; resolves to the path or null. */
+export const ocrChooseTesseract = () => invoke<string | null>("ocr_choose_tesseract");
+export const ocrClearTesseract = () => invoke<void>("ocr_clear_tesseract");
+
+export function ocrStart(job: number, req: OcrRequest, onProgress: (p: OcrProgress) => void) {
+  const ch = new Channel<OcrProgress>();
+  ch.onmessage = onProgress;
+  return invoke<OcrOutcome>("ocr_start", { job, req, onProgress: ch });
+}

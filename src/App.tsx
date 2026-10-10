@@ -9,6 +9,7 @@ import { VersionView } from "./components/history/VersionView";
 import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { Sidebar } from "./components/Sidebar";
+import { ToolsPanel } from "./components/ToolsPanel";
 import { Viewer } from "./components/Viewer";
 import { type FileRef, initialFiles } from "./lib/api";
 import { commandFor } from "./lib/commands";
@@ -108,6 +109,7 @@ export default function App() {
                 {searchOpen && !viewing && <SearchBar key={doc.id} doc={doc} />}
                 <HistoryBanner doc={doc} />
               </div>
+              <ToolsPanel doc={doc} />
               <AssistantPanel doc={doc} />
               <HistoryPanel doc={doc} />
             </div>

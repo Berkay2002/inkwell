@@ -8,6 +8,7 @@ pub mod ocr;
 pub mod paths;
 pub mod recents;
 pub mod redact;
+pub mod tools;
 
 use engine::cache::TileKey;
 use engine::edit::{EditOp, EditState, SplitResult};
@@ -289,6 +290,112 @@ async fn merge_files(window: Window, eng: Eng<'_>, reg: Reg<'_>, files: Vec<Stri
     .await
 }
 
+// ---- compress and OCR (see tools) ----------------------------------------------------------------
+
+type JobState<'a> = State<'a, Arc<tools::Jobs>>;
+
+async fn tool_blocking<R: Send + 'static>(
+    f: impl FnOnce() -> Result<R, tools::ToolError> + Send + 'static,
+) -> Result<R, tools::ToolError> {
+    tauri::async_runtime::spawn_blocking(f).await.unwrap_or_else(|_| Err(tools::ToolError("the tool crashed".into())))
+}
+
+#[tauri::command]
+async fn compress_audit(eng: Eng<'_>, doc: DocId) -> Result<tools::AuditReply, tools::ToolError> {
+    let eng = eng.inner().clone();
+    tool_blocking(move || tools::audit_for_ui(&eng, doc)).await
+}
+
+/// `job`: an id the UI picks, for `tool_cancel`. `req.save_to`: a save token from `pick_save`.
+#[tauri::command]
+async fn compress_start(
+    window: Window,
+    eng: Eng<'_>,
+    reg: Reg<'_>,
+    jobs: JobState<'_>,
+    job: u64,
+    req: tools::CompressRequest,
+    on_progress: Channel<compress::Progress>,
+) -> Result<compress::Report, tools::ToolError> {
+    let output = req.save_to.as_deref().map(|t| reg.take_save(window.label(), t)).transpose()?.map(std::path::PathBuf::from);
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    tool_blocking(move || {
+        let r = tools::run_compress(&eng, &req, output, &guard.cancel, &mut |p| {
+            let _ = on_progress.send(p);
+        })?;
+        window.state::<Paths>().learn(&r.output.to_string_lossy());
+        Ok(r)
+    })
+    .await
+}
+
+#[tauri::command]
+fn tool_cancel(jobs: JobState<'_>, job: u64) {
+    jobs.cancel(job);
+}
+
+type Tess<'a> = State<'a, Arc<tools::paths::ToolPaths>>;
+
+#[tauri::command]
+async fn ocr_languages(paths: Tess<'_>) -> Result<tools::OcrLanguages, tools::ToolError> {
+    let configured = paths.tesseract();
+    tool_blocking(move || Ok(tools::ocr_languages(configured.as_deref()))).await
+}
+
+/// Shows a file picker for tesseract.exe and remembers the choice. Returns it for display.
+#[tauri::command]
+async fn ocr_choose_tesseract(app: tauri::AppHandle, paths: Tess<'_>) -> Result<Option<String>, tools::ToolError> {
+    let paths = paths.inner().clone();
+    tool_blocking(move || {
+        let Some(p) = tools::paths::choose_tesseract(&app) else { return Ok(None) };
+        paths.set_tesseract(Some(p.clone())).map_err(tools::ToolError)?;
+        Ok(Some(p.to_string_lossy().into_owned()))
+    })
+    .await
+}
+
+#[tauri::command]
+fn ocr_clear_tesseract(paths: Tess<'_>) -> Result<(), tools::ToolError> {
+    paths.set_tesseract(None).map_err(tools::ToolError)
+}
+
+/// `req.save_to`: a save token from `pick_save`; none = change the open document.
+#[tauri::command]
+async fn ocr_start(
+    window: Window,
+    eng: Eng<'_>,
+    reg: Reg<'_>,
+    jobs: JobState<'_>,
+    paths: Tess<'_>,
+    job: u64,
+    req: tools::OcrRequest,
+    on_progress: Channel<ocr::Progress>,
+) -> Result<tools::OcrOutcome, tools::ToolError> {
+    let save_as = req.save_to.as_deref().map(|t| reg.take_save(window.label(), t)).transpose()?.map(std::path::PathBuf::from);
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    let tesseract = paths.tesseract();
+    tool_blocking(move || {
+        let backend = tools::make_backend(req.backend, tesseract.as_deref())?;
+        let r = tools::run_ocr(
+            &eng,
+            &req,
+            save_as.as_deref(),
+            backend.as_ref(),
+            &|p| {
+                let _ = on_progress.send(p);
+            },
+            &guard.cancel,
+        )?;
+        if let Some(out) = &r.output {
+            window.state::<Paths>().learn(out);
+        }
+        Ok(r)
+    })
+    .await
+}
+
 #[tauri::command]
 fn engine_stats(eng: Eng<'_>) -> EngineStats {
     eng.stats()
@@ -424,6 +531,7 @@ pub fn run() {
         .manage(engine)
         .manage(ai::Assistant::new())
         .manage(Paths::default())
+        .manage(Arc::new(tools::Jobs::default()))
         .manage(hist)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
@@ -485,6 +593,13 @@ pub fn run() {
             extract_pages,
             split_document,
             merge_files,
+            compress_audit,
+            compress_start,
+            tool_cancel,
+            ocr_languages,
+            ocr_choose_tesseract,
+            ocr_clear_tesseract,
+            ocr_start,
             recents::stat_files,
             recents::recents_load,
             recents::recents_save,
@@ -504,6 +619,7 @@ pub fn run() {
             if let Some(json) = recents::data_dir(app.handle()).ok().and_then(|(d, _)| recents::read_json(&d)) {
                 app.state::<Paths>().learn_recents(&json);
             }
+            app.manage(Arc::new(tools::paths::ToolPaths::load(app.handle())));
             Ok(())
         })
         .run(tauri::generate_context!())

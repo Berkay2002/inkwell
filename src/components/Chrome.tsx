@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { requestClose } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
+import { useTools } from "../lib/toolsStore";
 import { type DocState, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
 import { HistoryToggle } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
+import { MenuButton } from "./Menu";
 import { ModeSwitch } from "./Organize";
 import { WindowControls } from "./WindowControls";
 
@@ -127,6 +129,16 @@ export function Toolbar({ doc }: { doc: DocState }) {
       <Btn icon="rotate" title={`Rotate${keys("rotate-cw")}`} onClick={() => st().rotate(id, 1)} />
       <span className="grow" />
       <Btn icon="search" title={`Find${keys("find")}`} on={searchOpen} onClick={() => st().setUi({ searchOpen: !searchOpen })} />
+      <MenuButton
+        className="ax-toggle"
+        label="Tools"
+        items={[
+          { label: "Compress file…", onSelect: () => useTools.getState().open("compress", id) },
+          { label: "Recognize text…", onSelect: () => useTools.getState().open("ocr", id) },
+        ]}
+      >
+        Tools
+      </MenuButton>
       <HistoryToggle />
       <AssistantToggle />
       <Btn icon={themeIcon[theme]} title={`Theme: ${theme}`} onClick={() => st().setTheme(nextTheme[theme])} />

@@ -2,6 +2,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import type { OutlineItem } from "../lib/api";
 import { computeLayout, previewScaleKey, rotated, type Size, visibleRange } from "../lib/layout";
 import { type Want, tileClient } from "../lib/tiles";
+import { useTools } from "../lib/toolsStore";
 import { type DocState, useStore } from "../store";
 import { Icon } from "./Icons";
 import { ContextMenu, pageActions } from "./PageMenu";
@@ -37,6 +38,9 @@ function Thumbnails({ doc }: { doc: DocState }) {
   const el = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, h: 0 });
   const [menu, setMenu] = useState<{ x: number; y: number; page: number } | null>(null);
+  // Pages a running (or just finished) OCR job has read.
+  const done = useTools((s) => (s.sheet?.tool === "ocr" && s.sheet.doc === id ? s.sheet.donePages : null));
+  const ticked = useMemo(() => (done ? new Set(done) : null), [done]);
   // Every page fits the column width (a landscape page among portrait ones too).
   const fitted = useMemo(() => sizes.map((s) => rotated(s, rot)).map(([w, h]) => [THUMB_W, (h * THUMB_W) / w] as Size), [sizes, rot]);
   const layout = useMemo(() => computeLayout(fitted, 0, 1, 0), [fitted]);
@@ -89,6 +93,11 @@ function Thumbnails({ doc }: { doc: DocState }) {
       >
         <TileCanvas docId={id} tile={tile} size={size} zoom={THUMB_W / size[0]} stream={1} cover />
         <span className="thumb-num">{i + 1}</span>
+        {ticked?.has(i) && (
+          <span className="thumb-tick" aria-label="Recognized">
+            <Icon name="check" size={12} />
+          </span>
+        )}
       </button>,
     );
   }

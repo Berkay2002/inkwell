@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import * as edits from "../lib/edit";
 import { formatRange } from "../lib/pageRange";
+import { useTools } from "../lib/toolsStore";
 import type { DocState } from "../store";
 import type { MenuEntry } from "./Menu";
 
@@ -21,6 +22,10 @@ export function pageActions(
     { label: "Insert blank page after", onSelect: () => void edits.edit(id, { op: "insertBlank", at: last + 1, like: last }) },
     { label: "Insert pages from file…", onSelect: () => void edits.insertFile(id, last + 1) },
     { label: pages.length > 1 ? `Extract pages ${formatRange(pages)}…` : "Extract page…", onSelect: () => void edits.extract(id, pages) },
+    {
+      label: pages.length > 1 ? `Recognize text on pages ${formatRange(pages)}…` : "Recognize text on this page…",
+      onSelect: () => useTools.getState().open("ocr", id, { scope: "range", range: formatRange(pages) }),
+    },
     "sep",
     {
       label: pages.length > 1 ? `Delete ${pages.length} pages` : "Delete page",

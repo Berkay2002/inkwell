@@ -1,0 +1,210 @@
+/* Compress / Recognize text rail. Chrome (dock, head, buttons, segmented pills) comes from
+   assistant.css; this file only adds what the rail's body needs. Tokens: the app's own. */
+.tl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 6px;
+}
+.tl-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--ax-border);
+}
+.tl-wide {
+  justify-content: center;
+  width: 100%;
+  height: 36px;
+  border-radius: 18px;
+}
+.tl-mono {
+  font-variant-numeric: tabular-nums;
+  font-family: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  font-size: 12.5px;
+}
+.tl-big {
+  margin: 4px 0 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+.tl-label {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ax-dim);
+}
+.tl-now {
+  margin: 6px 0 0;
+}
+
+/* presets */
+.tl-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tl-preset {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  text-align: left;
+  color: var(--ax-text);
+  background: var(--ax-surface);
+  border: 1px solid var(--ax-border);
+  border-radius: var(--ax-r);
+}
+.tl-preset:hover {
+  border-color: color-mix(in srgb, var(--ax-accent) 45%, var(--ax-border));
+}
+.tl-preset.on {
+  background: var(--ax-accent-soft);
+  border-color: var(--ax-accent);
+}
+.tl-radio {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--border-strong, var(--ax-border));
+  border-radius: 50%;
+}
+.tl-preset.on .tl-radio {
+  border: 5px solid var(--ax-accent);
+}
+.tl-preset-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tl-preset-name {
+  font-weight: 600;
+}
+
+/* progress */
+.tl-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tl-track {
+  height: 6px;
+  overflow: hidden;
+  background: var(--ax-bubble);
+  border-radius: 3px;
+}
+.tl-track span {
+  display: block;
+  height: 100%;
+  background: var(--ax-accent);
+  border-radius: 3px;
+  transition: width 160ms ease-out;
+}
+
+/* result */
+.tl-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+.tl-bars > div {
+  display: grid;
+  gap: 4px;
+}
+.tl-bar {
+  display: block;
+  height: 10px;
+  background: var(--border-strong, var(--ax-border));
+  border-radius: 5px;
+  transition: width 400ms ease-out;
+}
+.tl-bar.after {
+  background: var(--ax-accent);
+}
+.tl-counts {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 12px;
+  margin: 10px 0 0;
+}
+.tl-counts dt {
+  color: var(--ax-dim);
+}
+.tl-counts dd {
+  margin: 0;
+  text-align: right;
+}
+.tl-file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-warn {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--ax-bubble);
+  border-radius: var(--ax-r-sm);
+}
+
+/* fields */
+.tl-seg {
+  display: flex;
+  align-self: stretch;
+  margin: 0;
+}
+.tl-seg button {
+  flex: 1;
+  padding: 4px 6px;
+}
+.tl-seg button:disabled {
+  opacity: 0.45;
+}
+.tl-field {
+  height: 34px;
+  padding: 0 12px;
+  color: var(--ax-text);
+  font: inherit;
+  background: var(--ax-surface);
+  border: 1px solid var(--ax-border);
+  border-radius: 17px;
+}
+.tl-field:focus-visible {
+  outline: 2px solid var(--ax-accent);
+  outline-offset: 1px;
+}
+.tl-field.bad {
+  border-color: var(--danger);
+}
+.tl-link {
+  align-self: flex-start;
+  padding: 2px 0;
+  color: var(--ax-accent);
+}
+.tl-link:hover {
+  text-decoration: underline;
+}
+.tl-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+/* thumbnails of the finished pages (Sidebar) */
+.thumb-tick {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #fff;
+}

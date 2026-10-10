@@ -33,6 +33,7 @@ The webview never hands Rust a path. Every command that reads or writes a file t
 
 New tools (history, compress, OCR, redact) take the same tokens: never add a command parameter that is a path.
 `history_save_copy(doc, version, to)` takes a save token from `pick_save` and makes the copy's path known.
+`compress_start` and `ocr_start` take the output as `req.saveTo` (a `pick_save` token, spent by the command, result path learned). The Tesseract exe is picked in a Rust dialog (`ocr_choose_tesseract`) and kept in app config only.
 
 ## Open follow-ups (fix at the start of phase 2)
 - `engine/mod.rs` `run_tile`/`page_list`: a stale in-flight request for rev N can build from content N+1 and cache it as N.
