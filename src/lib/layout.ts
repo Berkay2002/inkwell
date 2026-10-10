@@ -109,6 +109,8 @@ export interface TileRef {
   scale: number; // thousandths
   tx: number;
   ty: number;
+  /** The document's edit generation; absent means 0 (never edited). */
+  rev?: number;
 }
 
 /**
@@ -122,6 +124,7 @@ export function tilesForRect(
   zoom: number,
   scale: number,
   view: { x0: number; y0: number; x1: number; y1: number },
+  rev = 0,
 ): TileRef[] {
   const k = scale / zoom; // device px per CSS px
   const wPx = Math.ceil(size[0] * scale);
@@ -134,13 +137,13 @@ export function tilesForRect(
   const cx = ((view.x0 + view.x1) / 2) * k;
   const cy = ((view.y0 + view.y1) / 2) * k;
   for (let ty = y0; ty <= y1; ty++) {
-    for (let tx = x0; tx <= x1; tx++) out.push({ page, rot, scale: scaleKey(scale), tx, ty });
+    for (let tx = x0; tx <= x1; tx++) out.push({ page, rot, scale: scaleKey(scale), tx, ty, ...(rev ? { rev } : {}) });
   }
   const dist = (t: TileRef) => Math.hypot((t.tx + 0.5) * TILE - cx, (t.ty + 0.5) * TILE - cy);
   return out.sort((a, b) => dist(a) - dist(b));
 }
 
-export const tileKeyStr = (doc: number, t: TileRef) => `${doc}/${t.page}/${t.rot}/${t.scale}/${t.tx}/${t.ty}`;
+export const tileKeyStr = (doc: number, t: TileRef) => `${doc}/${t.page}/${t.rot}/${t.scale}/${t.tx}/${t.ty}/${t.rev ?? 0}`;
 
 /** CSS transform mapping an unrotated page-space box (points) onto the rotated page at `zoom`. */
 export function pageSpaceTransform(size: Size, rot: Rot, zoom: number): string {

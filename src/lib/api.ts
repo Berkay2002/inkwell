@@ -84,8 +84,9 @@ export async function fetchTile(
   epoch: number,
   rank: number,
   stream: number,
+  rev: number,
 ): Promise<TileData | null> {
-  const url = `${TILE_ORIGIN}/t/${doc}/${page}/${rot}/${scale}/${tx}/${ty}?e=${epoch}&r=${rank}&s=${stream}`;
+  const url = `${TILE_ORIGIN}/t/${doc}/${page}/${rot}/${scale}/${tx}/${ty}?e=${epoch}&r=${rank}&s=${stream}&g=${rev}`;
   const res = await fetch(url);
   if (res.status === 410) return null;
   if (!res.ok) throw new Error(`tile ${res.status}`);

@@ -11,7 +11,7 @@ fn write_fixture(name: &str, f: &Fixture) -> String {
 }
 
 fn key(doc: DocId, page: u32, rot: u8, scale: u32, tx: u16, ty: u16) -> TileKey {
-    TileKey { doc, page, rot, scale, tx, ty }
+    TileKey { doc, rev: 0, page, rot, scale, tx, ty }
 }
 
 fn px(t: &Tile, x: u32, y: u32) -> [u8; 4] {
@@ -204,9 +204,10 @@ fn stale_epochs_are_skipped() {
     let _busy = std::thread::spawn({
         let eng = eng.clone();
         move || {
-            eng.call(class::VISIBLE, move |_| {
+            eng.call(class::VISIBLE, move |_| -> Result<()> {
                 started_tx.send(()).unwrap();
                 gate_rx.recv().unwrap();
+                Ok(())
             })
         }
     });
@@ -271,4 +272,181 @@ fn view_rotation_is_clockwise_and_scale_culls_in_device_space() {
     assert!(near(x0, 36.0) && near(x1, 576.0) && near(y0, 792.0 - 92.0) && near(y1, 792.0 - 36.0), "rot2: {x0} {y0} {x1} {y1}");
     let (x0, y0, x1, y1) = band_bbox(&eng, id, 3, 1000);
     assert!(near(x0, 36.0) && near(x1, 92.0) && near(y0, 36.0) && near(y1, 576.0), "rot3: {x0} {y0} {x1} {y1}");
+}
+/// Renames `from` to `to`, retrying for a moment: a worker finishing its last operation on a
+/// just-closed document may still hold the file for a few milliseconds.
+fn rename_soon(from: &str, to: &str) -> std::io::Result<()> {
+    let mut last = Ok(());
+    for _ in 0..60 {
+        last = std::fs::rename(from, to);
+        if last.is_ok() {
+            return last;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    last
+}
+
+#[test]
+fn close_releases_the_file() {
+    let eng = Engine::new(4, 64 << 20);
+    let path = write_fixture("close.pdf", &Fixture { pages: 5, ..Default::default() });
+    let id = eng.open(&path).unwrap().doc;
+    let entry = eng.doc_entry(id).unwrap();
+    // Render on a worker so the document has been used from more than one thread.
+    let (e2, en2) = (eng.clone(), entry.clone());
+    eng.call(class::VISIBLE, move |_| e2.render_tile(&en2, &key(id, 1, 0, 1000, 0, 0)).map(|_| ())).unwrap();
+    eng.render_tile(&entry, &key(id, 2, 0, 1000, 0, 0)).unwrap();
+    drop(entry);
+
+    eng.close(id);
+    let moved = format!("{path}.moved");
+    std::fs::rename(&path, &moved).expect("file still open after close");
+    std::fs::rename(&moved, &path).unwrap();
+}
+
+#[test]
+fn close_with_queued_work_never_reopens_the_file() {
+    let eng = Engine::new(1, 64 << 20);
+    let path = write_fixture("close-queued.pdf", &Fixture { pages: 300, ..Default::default() });
+    let id = eng.open(&path).unwrap().doc;
+
+    // Hold the only worker, queue a page-size scan and a tile, close, then let them run.
+    let (gate_tx, gate_rx) = mpsc::channel::<()>();
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let busy = std::thread::spawn({
+        let eng = eng.clone();
+        move || {
+            eng.call(class::VISIBLE, move |_| -> Result<()> {
+                started_tx.send(()).unwrap();
+                gate_rx.recv().unwrap();
+                Ok(())
+            })
+        }
+    });
+    started_rx.recv().unwrap();
+    eng.scan_sizes(id, Arc::new(|_, _| {})).unwrap();
+    let (tx, rx) = mpsc::channel();
+    eng.request_tile(key(id, 3, 0, 1000, 0, 0), 0, 1, 0, Box::new(move |o| {
+        let _ = tx.send(matches!(o, TileOutcome::Failed(_) | TileOutcome::Stale));
+    }));
+
+    eng.close(id);
+    gate_tx.send(()).unwrap();
+    busy.join().unwrap().unwrap();
+    assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(), "tile for a closed document was served");
+
+    let moved = format!("{path}.moved");
+    rename_soon(&path, &moved).expect("a queued job reopened the closed document");
+    std::fs::rename(&moved, &path).unwrap();
+}
+
+#[test]
+fn close_evicts_only_that_documents_display_lists() {
+    let eng = Engine::new(2, 64 << 20);
+    let a = eng.open(&write_fixture("lists-a.pdf", &Fixture { pages: 3, ..Default::default() })).unwrap().doc;
+    let b = eng.open(&write_fixture("lists-b.pdf", &Fixture { pages: 3, ..Default::default() })).unwrap().doc;
+    for id in [a, b] {
+        let entry = eng.doc_entry(id).unwrap();
+        for page in 0..2 {
+            eng.render_tile(&entry, &key(id, page, 0, 1000, 0, 0)).unwrap();
+        }
+    }
+    assert_eq!(eng.stats().lists, 4);
+    eng.close(a);
+    assert_eq!(eng.stats().lists, 2);
+    // The other document still renders from its cached lists.
+    let entry = eng.doc_entry(b).unwrap();
+    eng.render_tile(&entry, &key(b, 0, 0, 1000, 0, 0)).unwrap();
+    assert!(eng.doc_entry(a).is_err());
+}
+
+#[test]
+fn old_generations_are_never_served() {
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&write_fixture("gen.pdf", &Fixture { pages: 2, ..Default::default() })).unwrap().doc;
+    let ask = |k: TileKey| {
+        let (tx, rx) = mpsc::channel();
+        eng.request_tile(k, 0, 1, 0, Box::new(move |o| {
+            let _ = tx.send(match o {
+                TileOutcome::Ready(_) => "ready",
+                TileOutcome::Stale => "stale",
+                TileOutcome::Failed(_) => "failed",
+            });
+        }));
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
+    };
+    let old = key(id, 0, 0, 1000, 0, 0);
+    assert_eq!(ask(old), "ready");
+    assert_eq!(eng.bump_generation(id).unwrap(), 1);
+    // The cached tile and any display list belong to generation 0 and must not answer for 1.
+    assert_eq!(ask(old), "stale");
+    let new = TileKey { rev: 1, ..old };
+    assert_eq!(ask(new), "ready");
+    assert_eq!(eng.stats().rendered, 2);
+}
+
+#[test]
+fn rejects_files_that_are_not_pdfs() {
+    let eng = Engine::new(1, 8 << 20);
+    let dir = std::env::temp_dir().join("inkwell-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = dir.join("fake.pdf");
+    std::fs::write(&fake, b"just some text, not a document").unwrap();
+    let fake = fake.to_string_lossy().into_owned();
+    assert!(matches!(eng.open(&fake), Err(EngineError::NotPdf)));
+    assert!(matches!(eng.open_pending(&fake).1, Err(EngineError::NotPdf)));
+    assert!(eng.open(dir.join("does-not-exist.pdf").to_str().unwrap()).is_err());
+}
+
+#[test]
+fn many_threads_share_one_document() {
+    let eng = Engine::new(4, 64 << 20);
+    let id = eng.open(&write_fixture("shared.pdf", &Fixture { pages: 24, ..Default::default() })).unwrap().doc;
+    let entry = eng.doc_entry(id).unwrap();
+    let threads: Vec<_> = (0..8u32)
+        .map(|t| {
+            let (eng, entry) = (eng.clone(), entry.clone());
+            std::thread::spawn(move || {
+                for p in 0..24 {
+                    let page = (p + t * 3) % 24;
+                    let tile = eng.render_tile(&entry, &key(id, page, 0, 1000, 0, 0)).unwrap();
+                    assert_eq!((tile.w, tile.h), (512, 512));
+                    eng.page_text(id, page).unwrap();
+                    eng.search_page(&entry, page, "fixture").unwrap();
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+}
+
+/// Does N cold pages in parallel finish faster than serially? `INKWELL_PROBE_PDF=... cargo test --release --lib probe_parallel -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn probe_parallel() {
+    use std::time::Instant;
+    let path = std::env::var("INKWELL_PROBE_PDF").expect("INKWELL_PROBE_PDF");
+    let eng = Engine::new(1, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let entry = eng.doc_entry(id).unwrap();
+    let t = Instant::now();
+    for p in 20..24u32 {
+        eng.render_tile(&entry, &key(id, p, 0, 370, 0, 0)).unwrap();
+    }
+    println!("serial 4 previews: {:?}", t.elapsed());
+    let t = Instant::now();
+    std::thread::scope(|s| {
+        for p in 30..34u32 {
+            let (eng, entry) = (&eng, &entry);
+            s.spawn(move || {
+                let t = Instant::now();
+                eng.render_tile(entry, &key(id, p, 0, 370, 0, 0)).unwrap();
+                println!("  parallel p{p}: {:?}", t.elapsed());
+            });
+        }
+    });
+    println!("parallel 4 previews: {:?}", t.elapsed());
 }

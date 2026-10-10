@@ -64,7 +64,7 @@ class TileClient {
       if (this.pending.size >= MAX_PENDING || this.pending.has(key) || this.failed.has(key) || this.subs.get(key)?.drawn) return;
       this.pending.add(key);
       const t = w.tile;
-      fetchTile(w.doc, t.page, t.rot, t.scale, t.tx, t.ty, epoch, rank, stream).then(
+      fetchTile(w.doc, t.page, t.rot, t.scale, t.tx, t.ty, epoch, rank, stream, t.rev ?? 0).then(
         (data) => {
           this.pending.delete(key);
           const sub = data && this.subs.get(key);

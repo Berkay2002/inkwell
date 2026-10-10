@@ -1,9 +1,12 @@
 //! Document service around MuPDF.
 //!
-//! Threading model: every worker thread lazily opens its *own* `fz_document` per `DocId`
-//! (thread-local handle), so no MuPDF object is ever shared between threads except
-//! `DisplayList`, which MuPDF documents as safe to run concurrently. A page is interpreted once
-//! into a cached display list, then any number of workers rasterise tiles from it in parallel.
+//! Threading model: a file is parsed into a few `fz_document` replicas at most (`DOC_SLOTS`), each
+//! behind its own mutex in the [`DocEntry`] and used by whichever worker holds the lock (each
+//! thread has its own context cloned from the same base, which is what MuPDF requires). Replicas
+//! are opened on demand: a lone user of a file only ever has one. Only page interpretation, text,
+//! search and outline need a document; a page is interpreted once into a cached `DisplayList`,
+//! which MuPDF documents as safe to run concurrently, and any number of workers rasterise
+//! tiles from it in parallel. Replicas are not tied to threads, so closing a file frees them all.
 
 pub mod cache;
 pub mod fixture;
@@ -20,12 +23,10 @@ use mupdf::{
 use parking_lot::{Mutex, RwLock};
 use pool::{Job, Pool, Prio, class};
 use serde::Serialize;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub type DocId = u32;
@@ -48,6 +49,8 @@ pub enum EngineError {
     BadPage(u32),
     #[error("render failed unexpectedly")]
     Panic,
+    #[error("not a PDF file")]
+    NotPdf,
 }
 
 impl From<mupdf::Error> for EngineError {
@@ -114,6 +117,21 @@ pub enum TileOutcome {
 
 type TileResponder = Box<dyn FnOnce(TileOutcome) + Send>;
 
+/// Parsed replicas per file. Interpreting a heavy page (large images) can take hundreds of
+/// milliseconds; with one replica a screenful of cold pages would queue behind each other.
+const DOC_SLOTS: usize = 4;
+
+/// One parsed copy, and the edit generation it was opened at.
+struct SharedDoc {
+    doc: Document,
+    rev: u32,
+}
+
+// SAFETY: a MuPDF document may move between threads as long as only one thread uses it at a time
+// (its slot's mutex) and every thread works through its own context cloned from the same base
+// (`mupdf::Context::get()`).
+unsafe impl Send for SharedDoc {}
+
 pub struct DocEntry {
     pub id: DocId,
     pub path: String,
@@ -121,6 +139,13 @@ pub struct DocEntry {
     page_count: AtomicU32,
     epochs: [AtomicU64; STREAMS],
     search_gen: AtomicU64,
+    /// Bumped by anything that changes the document's content; part of every tile and list key,
+    /// so nothing rendered from the old content is served afterwards.
+    edit_gen: AtomicU32,
+    /// Set first thing on close: nothing may (re)open the file afterwards.
+    closed: AtomicBool,
+    slots: [Mutex<Option<SharedDoc>>; DOC_SLOTS],
+    next_slot: AtomicUsize,
     pub sizes: RwLock<Vec<[f32; 2]>>,
 }
 
@@ -128,13 +153,26 @@ impl DocEntry {
     pub fn page_count(&self) -> u32 {
         self.page_count.load(Ordering::Relaxed)
     }
+
+    pub fn generation(&self) -> u32 {
+        self.edit_gen.load(Ordering::SeqCst)
+    }
 }
 
 struct ListSlot(OnceLock<std::result::Result<Arc<DisplayList>, EngineError>>);
 
+/// (document, edit generation, page)
+type ListKey = (DocId, u32, u32);
+
+struct Waiter {
+    stream: usize,
+    epoch: u64,
+    respond: TileResponder,
+}
+
 struct Inflight {
     prio: Arc<Prio>,
-    waiters: Vec<TileResponder>,
+    waiters: Vec<Waiter>,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -151,19 +189,13 @@ pub struct EngineStats {
     pub misses: u64,
 }
 
-thread_local! {
-    static HANDLES: RefCell<HashMap<DocId, Rc<Document>>> = RefCell::new(HashMap::new());
-    static SEEN_CLOSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
 pub struct Engine {
     docs: RwLock<HashMap<DocId, Arc<DocEntry>>>,
     next_id: AtomicU32,
     pool: Pool,
     tiles: Mutex<TileCache>,
-    lists: Mutex<LruCache<(DocId, u32), Arc<ListSlot>>>,
+    lists: Mutex<LruCache<ListKey, Arc<ListSlot>>>,
     inflight: Mutex<HashMap<TileKey, Inflight>>,
-    closes: AtomicU64,
     rendered: AtomicU64,
     render_us: AtomicU64,
     hits: AtomicU64,
@@ -180,7 +212,6 @@ impl Engine {
             tiles: Mutex::new(TileCache::new(cache_budget)),
             lists: Mutex::new(LruCache::new(NonZeroUsize::new(48).unwrap())),
             inflight: Mutex::new(HashMap::new()),
-            closes: AtomicU64::new(0),
             rendered: AtomicU64::new(0),
             render_us: AtomicU64::new(0),
             hits: AtomicU64::new(0),
@@ -203,6 +234,7 @@ impl Engine {
     /// Opens `path`. Returns `NeedsPassword` (with the document kept registered under the id in
     /// the error-adjacent `OpenInfo` flow) via [`Engine::open_pending`].
     pub fn open(&self, path: &str) -> Result<OpenInfo> {
+        check_pdf(path)?;
         let entry = self.register(path);
         match self.finish_open(&entry) {
             Ok(info) => Ok(info),
@@ -216,6 +248,9 @@ impl Engine {
     /// Like `open`, but keeps the registration when a password is needed so the UI can
     /// `authenticate` against the returned id.
     pub fn open_pending(&self, path: &str) -> (DocId, Result<OpenInfo>) {
+        if let Err(e) = check_pdf(path) {
+            return (0, Err(e));
+        }
         let entry = self.register(path);
         let r = self.finish_open(&entry);
         if let Err(e) = &r {
@@ -235,6 +270,10 @@ impl Engine {
             page_count: AtomicU32::new(0),
             epochs: Default::default(),
             search_gen: AtomicU64::new(0),
+            edit_gen: AtomicU32::new(0),
+            closed: AtomicBool::new(false),
+            slots: Default::default(),
+            next_slot: AtomicUsize::new(0),
             sizes: RwLock::new(Vec::new()),
         });
         self.docs.write().insert(id, entry.clone());
@@ -244,8 +283,6 @@ impl Engine {
     pub fn authenticate(&self, id: DocId, password: &str) -> Result<OpenInfo> {
         let entry = self.entry(id)?;
         *entry.password.lock() = Some(password.to_string());
-        // Drop any handle this thread cached before the password was known.
-        HANDLES.with(|h| h.borrow_mut().remove(&id));
         let r = self.finish_open(&entry);
         if r.is_err() {
             *entry.password.lock() = None;
@@ -274,54 +311,99 @@ impl Engine {
         })
     }
 
+    /// Releases the document and everything cached for it. The file handle is gone when this
+    /// returns, unless a worker is mid-operation on the document, in which case that worker drops
+    /// it as soon as it finishes (`with_doc`).
     pub fn close(&self, id: DocId) {
-        self.docs.write().remove(&id);
+        let entry = self.docs.write().remove(&id);
         self.tiles.lock().drop_doc(id);
-        self.lists.lock().clear();
-        self.closes.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut lists = self.lists.lock();
+            let stale: Vec<ListKey> = lists.iter().map(|(k, _)| *k).filter(|k| k.0 == id).collect();
+            for k in stale {
+                lists.pop(&k);
+            }
+        }
+        if let Some(entry) = entry {
+            entry.closed.store(true, Ordering::SeqCst);
+            // Busy replicas are dropped by their user when it sees `closed`.
+            for slot in &entry.slots {
+                if let Some(mut g) = slot.try_lock() {
+                    *g = None;
+                }
+            }
+        }
     }
 
-    /// Runs `f` with this thread's handle for the document, opening (and authenticating) it on
-    /// first use.
-    fn with_doc<R>(&self, entry: &DocEntry, f: impl FnOnce(&Document) -> Result<R>) -> Result<R> {
-        // Create this thread's MuPDF context before HANDLES so it is destroyed after the documents.
-        let _ = mupdf::Context::get();
-        let closes = self.closes.load(Ordering::Relaxed);
-        if SEEN_CLOSES.with(|c| c.replace(closes)) != closes {
-            let live = self.docs.read();
-            HANDLES.with(|h| h.borrow_mut().retain(|id, _| live.contains_key(id)));
+    /// Declares that the document's content changed: tiles and display lists rendered before
+    /// this are never served again, and replicas opened before it are reopened on next use.
+    /// Returns the new generation.
+    pub fn bump_generation(&self, id: DocId) -> Result<u32> {
+        let entry = self.entry(id)?;
+        Ok(entry.edit_gen.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    /// A free replica, preferring one that is already open; blocks only when all are busy.
+    fn lock_slot(entry: &DocEntry) -> parking_lot::MutexGuard<'_, Option<SharedDoc>> {
+        let mut empty = None;
+        for s in &entry.slots {
+            if let Some(g) = s.try_lock() {
+                if g.is_some() {
+                    return g;
+                }
+                empty.get_or_insert(g);
+            }
         }
-        let cached = HANDLES.with(|h| h.borrow().get(&entry.id).cloned());
-        let doc = match cached {
-            Some(d) => d,
-            None => {
-                let mut d = Document::open(entry.path.as_str())?;
-                if d.needs_password()? {
-                    let pw = entry.password.lock().clone();
-                    match pw {
-                        None => return Err(EngineError::NeedsPassword),
-                        Some(pw) => {
-                            if !d.authenticate(&pw)? {
-                                return Err(EngineError::BadPassword);
-                            }
+        if let Some(g) = empty {
+            return g;
+        }
+        let i = entry.next_slot.fetch_add(1, Ordering::Relaxed) % DOC_SLOTS;
+        entry.slots[i].lock()
+    }
+
+    /// Runs `f` with a replica of the document, opening (and authenticating) one on first use.
+    /// Keep `f` short so visible tiles are not starved.
+    fn with_doc<R>(&self, entry: &DocEntry, f: impl FnOnce(&Document) -> Result<R>) -> Result<R> {
+        // Make sure this thread's MuPDF context exists before any document it will drop.
+        let _ = mupdf::Context::get();
+        let mut slot = Self::lock_slot(entry);
+        if entry.closed.load(Ordering::SeqCst) {
+            *slot = None;
+            return Err(EngineError::NoDoc);
+        }
+        let rev = entry.generation();
+        if slot.as_ref().is_some_and(|d| d.rev != rev) {
+            *slot = None;
+        }
+        if slot.is_none() {
+            let mut d = Document::open(entry.path.as_str())?;
+            if d.needs_password()? {
+                let pw = entry.password.lock().clone();
+                match pw {
+                    None => return Err(EngineError::NeedsPassword),
+                    Some(pw) => {
+                        if !d.authenticate(&pw)? {
+                            return Err(EngineError::BadPassword);
                         }
                     }
                 }
-                let d = Rc::new(d);
-                HANDLES.with(|h| h.borrow_mut().insert(entry.id, d.clone()));
-                d
             }
-        };
-        f(&doc)
+            *slot = Some(SharedDoc { doc: d, rev });
+        }
+        let r = f(&slot.as_ref().expect("opened above").doc);
+        if entry.closed.load(Ordering::SeqCst) {
+            // closed while we were working: nobody else will drop it
+            *slot = None;
+        }
+        r
     }
 
-    /// Runs `f` on a pool worker and blocks for the result. For commands that want the
-    /// worker-local document handle.
+    /// Runs `f` on a pool worker and blocks for the result.
     pub fn call<R: Send + 'static>(
         self: &Arc<Self>,
         class: u8,
-        f: impl FnOnce(&Engine) -> R + Send + 'static,
-    ) -> R {
+        f: impl FnOnce(&Engine) -> Result<R> + Send + 'static,
+    ) -> Result<R> {
         let (tx, rx) = std::sync::mpsc::channel();
         let eng = self.clone();
         self.pool.submit(Job {
@@ -331,19 +413,20 @@ impl Engine {
                 let _ = tx.send(f(&eng));
             }),
         });
-        rx.recv().expect("worker dropped result")
+        // A panicking job drops the sender; report it instead of taking the caller down.
+        rx.recv().map_err(|_| EngineError::Panic)?
     }
 
     // ---- pages ----------------------------------------------------------------------------
 
-    fn page_list(&self, entry: &DocEntry, page: u32) -> Result<Arc<DisplayList>> {
+    fn page_list(&self, entry: &DocEntry, rev: u32, page: u32) -> Result<Arc<DisplayList>> {
         if page >= entry.page_count() {
             return Err(EngineError::BadPage(page));
         }
         let slot = {
             let mut lists = self.lists.lock();
             lists
-                .get_or_insert((entry.id, page), || Arc::new(ListSlot(OnceLock::new())))
+                .get_or_insert((entry.id, rev, page), || Arc::new(ListSlot(OnceLock::new())))
                 .clone()
         };
         slot.0
@@ -374,18 +457,17 @@ impl Engine {
                 prio: Prio::new(0, ci as u32),
                 run: Box::new(move || {
                     let end = (start + CHUNK).min(n);
-                    let sizes = eng
-                        .with_doc(&entry, |doc| {
-                            let mut v = Vec::with_capacity((end - start) as usize);
-                            for p in start..end {
-                                let b = doc.load_page(p as i32)?.bounds()?;
-                                v.push([b.width(), b.height()]);
-                            }
-                            Ok(v)
-                        })
-                        .unwrap_or_default();
-                    if sizes.is_empty() {
-                        return;
+                    // One lock per page, so a visible tile never waits for a whole chunk.
+                    let mut sizes = Vec::with_capacity((end - start) as usize);
+                    for p in start..end {
+                        let size = eng.with_doc(&entry, |doc| {
+                            let b = doc.load_page(p as i32)?.bounds()?;
+                            Ok([b.width(), b.height()])
+                        });
+                        match size {
+                            Ok(s) => sizes.push(s),
+                            Err(_) => return,
+                        }
                     }
                     {
                         let mut all = entry.sizes.write();
@@ -417,7 +499,7 @@ impl Engine {
 
     pub fn page_text(&self, id: DocId, page: u32) -> Result<Vec<TextLine>> {
         let entry = self.entry(id)?;
-        let list = self.page_list(&entry, page)?;
+        let list = self.page_list(&entry, entry.generation(), page)?;
         let origin = list.bounds();
         let tp = list.to_text_page(TextPageFlags::empty())?;
         let mut out = Vec::new();
@@ -466,6 +548,9 @@ impl Engine {
             Ok(e) => e,
             Err(e) => return respond(TileOutcome::Failed(e.to_string())),
         };
+        if key.rev != entry.generation() {
+            return respond(TileOutcome::Stale);
+        }
         let stream = stream.min(STREAMS - 1);
         entry.epochs[stream].fetch_max(epoch, Ordering::SeqCst);
 
@@ -480,43 +565,63 @@ impl Engine {
             if let Some(inf) = inflight.get_mut(&key) {
                 inf.prio.epoch.fetch_max(epoch, Ordering::SeqCst);
                 inf.prio.rank.store(rank, Ordering::Relaxed);
-                inf.waiters.push(respond);
+                inf.waiters.push(Waiter { stream, epoch, respond });
                 return;
             }
             let prio = Prio::new(epoch, rank);
-            inflight.insert(key, Inflight { prio: prio.clone(), waiters: vec![respond] });
+            inflight.insert(key, Inflight { prio: prio.clone(), waiters: vec![Waiter { stream, epoch, respond }] });
             prio
         };
 
         let eng = self.clone();
-        let job_prio = prio.clone();
         self.pool.submit(Job {
-            class: class::VISIBLE,
+            // thumbnails (any stream but the main view) never delay the page being read
+            class: if stream == 0 { class::VISIBLE } else { class::INTERACTIVE },
             prio,
-            run: Box::new(move || eng.run_tile(entry, key, stream, job_prio)),
+            run: Box::new(move || eng.run_tile(entry, key)),
         });
     }
 
-    fn run_tile(&self, entry: Arc<DocEntry>, key: TileKey, stream: usize, prio: Arc<Prio>) {
-        let stale = prio.epoch.load(Ordering::SeqCst) < entry.epochs[stream].load(Ordering::SeqCst);
-        let outcome = if stale {
-            TileOutcome::Stale
-        } else {
-            let started = std::time::Instant::now();
-            match catch_unwind(AssertUnwindSafe(|| self.render_tile(&entry, &key))) {
-                Ok(Ok(tile)) => {
-                    self.rendered.fetch_add(1, Ordering::Relaxed);
-                    self.render_us.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
-                    self.tiles.lock().insert(key, tile.clone());
-                    TileOutcome::Ready(tile)
+    fn run_tile(&self, entry: Arc<DocEntry>, key: TileKey) {
+        // The same tile can be wanted by several streams (the page preview is both a thumbnail and
+        // the main view's underlay): it is stale only once every one of them has moved on.
+        let stale = {
+            let mut inflight = self.inflight.lock();
+            match inflight.get(&key) {
+                None => return,
+                Some(inf) => {
+                    let all_stale = inf.waiters.iter().all(|w| w.epoch < entry.epochs[w.stream].load(Ordering::SeqCst));
+                    if all_stale {
+                        let waiters = inflight.remove(&key).map(|i| i.waiters).unwrap_or_default();
+                        drop(inflight);
+                        for w in waiters {
+                            (w.respond)(TileOutcome::Stale);
+                        }
+                    }
+                    all_stale
                 }
-                Ok(Err(e)) => TileOutcome::Failed(e.to_string()),
-                Err(_) => TileOutcome::Failed(EngineError::Panic.to_string()),
             }
+        };
+        if stale {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let outcome = match catch_unwind(AssertUnwindSafe(|| self.render_tile(&entry, &key))) {
+            Ok(Ok(tile)) => {
+                self.rendered.fetch_add(1, Ordering::Relaxed);
+                self.render_us.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                // Not for a document that was closed while this rendered.
+                if !entry.closed.load(Ordering::SeqCst) {
+                    self.tiles.lock().insert(key, tile.clone());
+                }
+                TileOutcome::Ready(tile)
+            }
+            Ok(Err(e)) => TileOutcome::Failed(e.to_string()),
+            Err(_) => TileOutcome::Failed(EngineError::Panic.to_string()),
         };
         let waiters = self.inflight.lock().remove(&key).map(|i| i.waiters).unwrap_or_default();
         for w in waiters {
-            w(match &outcome {
+            (w.respond)(match &outcome {
                 TileOutcome::Ready(t) => TileOutcome::Ready(t.clone()),
                 TileOutcome::Stale => TileOutcome::Stale,
                 TileOutcome::Failed(e) => TileOutcome::Failed(e.clone()),
@@ -526,7 +631,7 @@ impl Engine {
 
     /// Synchronous render, used by the worker and by tests/benchmarks.
     pub fn render_tile(&self, entry: &DocEntry, key: &TileKey) -> Result<Tile> {
-        let list = self.page_list(entry, key.page)?;
+        let list = self.page_list(entry, key.rev, key.page)?;
         let scale = key.scale as f32 / 1000.0;
         let (m, pw, ph) = view_matrix(list.bounds(), key.rot, scale);
         let x0 = key.tx as i32 * TILE as i32;
@@ -663,6 +768,20 @@ impl Engine {
                 })
                 .collect())
         })
+    }
+}
+
+/// Accepts a file only if `%PDF-` appears in its first KiB (where readers look for the header).
+fn check_pdf(path: &str) -> Result<()> {
+    use std::io::Read;
+    let mut head = [0u8; 1024];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut head))
+        .map_err(|e| EngineError::Mupdf(format!("cannot read file: {e}")))?;
+    if head[..n].windows(5).any(|w| w == b"%PDF-") {
+        Ok(())
+    } else {
+        Err(EngineError::NotPdf)
     }
 }
 

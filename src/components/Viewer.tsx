@@ -34,7 +34,7 @@ const MARGIN = 256;
 const EMPTY: never[] = [];
 
 export function Viewer({ doc }: { doc: DocState }) {
-  const { id, sizes, rot, zoom, zoomMode } = doc;
+  const { id, sizes, rot, zoom, zoomMode, rev } = doc;
   const el = useRef<HTMLDivElement>(null);
   const [vp, setVp] = useState({ w: 0, h: 0 });
   const [pos, setPos] = useState({ top: 0, left: 0 });
@@ -151,7 +151,7 @@ export function Viewer({ doc }: { doc: DocState }) {
 
   const stable = useRef(new Map<number, { sig: string; tiles: TileRef[] }>());
   const keepSame = (page: number, tiles: TileRef[]) => {
-    const sig = tiles.map((t) => `${t.rot}/${t.scale}/${t.tx}/${t.ty}`).join("|");
+    const sig = tiles.map((t) => `${t.rot}/${t.scale}/${t.tx}/${t.ty}/${t.rev ?? 0}`).join("|");
     const e = stable.current.get(page);
     if (e?.sig === sig) return e.tiles;
     stable.current.set(page, { sig, tiles });
@@ -186,10 +186,10 @@ export function Viewer({ doc }: { doc: DocState }) {
                 x1: pos.left + vp.w - left + MARGIN,
                 y0: vTop - tops[i] - MARGIN,
                 y1: vBot - tops[i] + MARGIN,
-              }),
+              }, rev),
             )
           : EMPTY;
-      const preview: TileRef = { page: i, rot, scale: previewScaleKey(size), tx: 0, ty: 0 };
+      const preview: TileRef = { page: i, rot, scale: previewScaleKey(size), tx: 0, ty: 0, ...(rev ? { rev } : {}) };
       (i >= vf && i <= vl ? previews : farPreviews).push({ doc: id, tile: preview });
       const d = i < vf ? vf - i : i > vl ? i - vl : 0;
       for (const t of tiles) real.push({ d, w: { doc: id, tile: t } });

@@ -32,7 +32,7 @@ function PanelTab({ name, label }: { name: "thumbs" | "outline"; label: string }
 }
 
 function Thumbnails({ doc }: { doc: DocState }) {
-  const { id, sizes, rot, currentPage } = doc;
+  const { id, sizes, rot, currentPage, rev } = doc;
   const el = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, h: 0 });
   const zoom = THUMB_W / typicalSize(sizes, rot)[0];
@@ -70,7 +70,7 @@ function Thumbnails({ doc }: { doc: DocState }) {
   const mid = view.top + view.h / 2;
   for (let i = vf; i <= vl; i++) {
     const size = rotated(sizes[i], rot);
-    const tile = { page: i, rot, scale: previewScaleKey(size), tx: 0, ty: 0 };
+    const tile = { page: i, rot, scale: previewScaleKey(size), tx: 0, ty: 0, ...(rev ? { rev } : {}) };
     wanted.push({ d: Math.abs(tops[i] + heights[i] / 2 - mid), w: { doc: id, tile } });
     items.push(
       <button

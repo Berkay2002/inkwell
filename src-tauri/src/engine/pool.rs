@@ -6,7 +6,11 @@
 use parking_lot::{Condvar, Mutex};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+
+/// Background jobs allowed to run at once. They all end up serialised on their document's lock,
+/// so more than one would only park workers that visible tiles could use.
+const MAX_BACKGROUND: usize = 1;
 
 /// Job classes, lowest runs first.
 pub mod class {
@@ -40,6 +44,8 @@ struct Shared {
     queue: Mutex<Vec<Job>>,
     cv: Condvar,
     stop: AtomicBool,
+    /// Changed only while holding `queue`, so a waiting worker cannot miss the wake-up.
+    bg_running: AtomicUsize,
 }
 
 pub struct Pool {
@@ -52,6 +58,7 @@ impl Pool {
             queue: Mutex::new(Vec::new()),
             cv: Condvar::new(),
             stop: AtomicBool::new(false),
+            bg_running: AtomicUsize::new(0),
         });
         for i in 0..threads {
             let s = shared.clone();
@@ -88,20 +95,34 @@ fn worker(s: Arc<Shared>) {
                 if s.stop.load(Ordering::SeqCst) {
                     return;
                 }
-                if let Some(i) = best(&q) {
-                    break q.swap_remove(i);
+                let bg_full = s.bg_running.load(Ordering::SeqCst) >= MAX_BACKGROUND;
+                if let Some(i) = best(&q, bg_full) {
+                    let job = q.swap_remove(i);
+                    if job.class == class::BACKGROUND {
+                        s.bg_running.fetch_add(1, Ordering::SeqCst);
+                    }
+                    break job;
                 }
                 s.cv.wait(&mut q);
             }
         };
+        let background = job.class == class::BACKGROUND;
         // A bad PDF must never take a worker down.
         let _ = catch_unwind(AssertUnwindSafe(job.run));
+        if background {
+            {
+                let _q = s.queue.lock();
+                s.bg_running.fetch_sub(1, Ordering::SeqCst);
+            }
+            s.cv.notify_all();
+        }
     }
 }
 
-fn best(q: &[Job]) -> Option<usize> {
+fn best(q: &[Job], bg_full: bool) -> Option<usize> {
     q.iter()
         .enumerate()
+        .filter(|(_, j)| !(bg_full && j.class == class::BACKGROUND))
         .min_by_key(|(_, j)| {
             (
                 j.class,

@@ -14,6 +14,7 @@ Tauri 2 (WebView2) shell, Rust engine on MuPDF, React + TypeScript + Vite UI. No
 | `src/` | React UI: virtualized page list, tile canvases, text layer, tabs, sidebar, command palette |
 | `scripts/perf.mjs` | Frame-timing, transport and memory harness driven over WebView2 DevTools; writes `docs/screens/phase1/` |
 | `vendor/mupdf/` | mupdf 0.8.0 with a one-line MSVC fix (`max_align_t` assertion) |
+| `vendor/mupdf-sys/` | mupdf-sys 0.8.0 with JPEG 2000 decoding made thread-parallel (`load-jpx.c`: stock MuPDF decodes JPX under its global FreeType lock, one image at a time) |
 
 ## Build and run
 
@@ -29,7 +30,7 @@ cd src-tauri && cargo test --lib
 cargo run --release --bin bench -- 1000
 ```
 
-`inkwell.exe a.pdf b.pdf` opens the files in tabs. `INKWELL_CACHE_MB` sets the tile cache budget (default 384).
+`inkwell.exe a.pdf b.pdf` opens the files in tabs. `INKWELL_CACHE_MB` sets the tile cache budget (default 64; the app idles near 550 MB in total with WebView2 in low-end-device mode).
 
 ## Keys
 

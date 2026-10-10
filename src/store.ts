@@ -42,6 +42,8 @@ export interface DocState {
   zoomMode: ZoomMode;
   zoom: number;
   currentPage: number;
+  /** Edit generation reported by the engine; tiles are keyed by it. */
+  rev: number;
   /** Where the viewer was when the tab was last left. */
   scroll: { page: number; yPt: number };
   outline: OutlineItem[] | null;
@@ -98,6 +100,8 @@ interface Store {
 let navNonce = 0;
 const latestSearch = new Map<number, number>();
 let searchSeq = 0;
+/** Paths being opened right now (lower-cased): a second request joins the first instead of opening twice. */
+const opening = new Map<string, Promise<void>>();
 
 export const useStore = create<Store>((set, get) => {
   const addDoc = (info: api.OpenInfo) => {
@@ -112,6 +116,7 @@ export const useStore = create<Store>((set, get) => {
       zoomMode: "fitWidth",
       zoom: 1,
       currentPage: 0,
+      rev: 0,
       scroll: { page: 0, yPt: 0 },
       outline: null,
       search: emptySearch(),
@@ -142,16 +147,33 @@ export const useStore = create<Store>((set, get) => {
     password: null,
     error: null,
 
-    openPath: async (path) => {
-      const existing = Object.values(get().docs).find((d) => d.path.toLowerCase() === path.toLowerCase());
-      if (existing) return set({ active: existing.id });
-      try {
-        const r = await api.openDocument(path);
-        if (r.status === "opened") addDoc(r);
-        else set({ password: { doc: r.doc, path: r.path } });
-      } catch (e) {
-        set({ error: `Could not open ${baseName(path)}: ${String(e)}` });
+    openPath: (path) => {
+      const k = path.toLowerCase();
+      const existing = Object.values(get().docs).find((d) => d.path.toLowerCase() === k);
+      if (existing) {
+        set({ active: existing.id });
+        return Promise.resolve();
       }
+      const running = opening.get(k);
+      if (running) return running;
+      const job = (async () => {
+        try {
+          const r = await api.openDocument(path);
+          if (r.status === "opened") addDoc(r);
+          else {
+            // only one password prompt at a time: release the one being replaced
+            const old = get().password;
+            if (old && old.doc !== r.doc) void api.closeDocument(old.doc);
+            set({ password: { doc: r.doc, path: r.path } });
+          }
+        } catch (e) {
+          set({ error: `Could not open ${baseName(path)}: ${String(e)}` });
+        } finally {
+          opening.delete(k);
+        }
+      })();
+      opening.set(k, job);
+      return job;
     },
 
     submitPassword: async (password) => {

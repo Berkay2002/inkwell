@@ -60,7 +60,7 @@ fn main() {
     let info = eng.open(&path).unwrap();
     let t_open = t0.elapsed();
     let entry = eng.doc_entry(info.doc).unwrap();
-    let key = |page: u32, tx: u16, ty: u16, scale: u32| TileKey { doc: info.doc, page, rot: 0, scale, tx, ty };
+    let key = |page: u32, tx: u16, ty: u16, scale: u32| TileKey { doc: info.doc, rev: 0, page, rot: 0, scale, tx, ty };
     let tile = eng.render_tile(&entry, &key(0, 0, 0, 1500)).unwrap();
     let t_first = t0.elapsed();
     println!(

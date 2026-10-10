@@ -9,6 +9,8 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct TileKey {
     pub doc: DocId,
+    /// The document's edit generation when the tile was asked for.
+    pub rev: u32,
     pub page: u32,
     pub rot: u8,
     pub scale: u32,

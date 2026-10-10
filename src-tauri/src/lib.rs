@@ -16,9 +16,10 @@ enum OpenOutcome {
     NeedsPassword { doc: DocId, path: String },
 }
 
-/// Runs blocking engine work off the async runtime's worker threads.
-async fn blocking<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
-    tauri::async_runtime::spawn_blocking(f).await.expect("blocking task panicked")
+/// Runs blocking engine work off the async runtime's worker threads. A panic in `f` becomes an
+/// error the UI's promise rejects with, not a dead command.
+async fn blocking<R: Send + 'static>(f: impl FnOnce() -> Result<R, EngineError> + Send + 'static) -> Result<R, EngineError> {
+    tauri::async_runtime::spawn_blocking(f).await.unwrap_or(Err(EngineError::Panic))
 }
 
 #[tauri::command]
@@ -125,13 +126,14 @@ async fn tile_raw(
     let eng = eng.inner().clone();
     blocking(move || {
         let entry = eng.doc_entry(doc)?;
-        let t = eng.render_tile(&entry, &TileKey { doc, page, rot, scale, tx, ty })?;
+        let rev = entry.generation();
+        let t = eng.render_tile(&entry, &TileKey { doc, rev, page, rot, scale, tx, ty })?;
         Ok(Response::new(t.rgba.as_ref().clone()))
     })
     .await
 }
 
-/// `/t/{doc}/{page}/{rot}/{scale}/{tx}/{ty}?e={epoch}&r={rank}&s={stream}` -> raw RGBA with
+/// `/t/{doc}/{page}/{rot}/{scale}/{tx}/{ty}?e={epoch}&r={rank}&s={stream}&g={generation}` -> raw RGBA with
 /// `x-tile-w` / `x-tile-h` headers. 410 means "superseded, ignore".
 fn parse_tile_request(uri: &tauri::http::Uri) -> Option<(TileKey, usize, u64, u32)> {
     let mut parts = uri.path().trim_start_matches('/').split('/');
@@ -139,8 +141,9 @@ fn parse_tile_request(uri: &tauri::http::Uri) -> Option<(TileKey, usize, u64, u3
         return None;
     }
     let mut n = || parts.next()?.parse::<u32>().ok();
-    let key = TileKey {
+    let mut key = TileKey {
         doc: n()?,
+        rev: 0,
         page: n()?,
         rot: n()? as u8,
         scale: n()?,
@@ -153,6 +156,7 @@ fn parse_tile_request(uri: &tauri::http::Uri) -> Option<(TileKey, usize, u64, u3
             Some(("e", v)) => epoch = v.parse().unwrap_or(0),
             Some(("r", v)) => rank = v.parse().unwrap_or(0),
             Some(("s", v)) => stream = v.parse().unwrap_or(0),
+            Some(("g", v)) => key.rev = v.parse().unwrap_or(0),
             _ => {}
         }
     }

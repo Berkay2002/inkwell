@@ -11,6 +11,7 @@ import { commandFor, openDialog } from "./lib/commands";
 import { useActiveDoc, useStore } from "./store";
 
 const isPdf = (p: string) => /\.pdf$/i.test(p);
+let launchFilesOpened = false;
 
 export default function App() {
   const doc = useActiveDoc();
@@ -32,14 +33,20 @@ export default function App() {
 
   useEffect(() => {
     const st = useStore.getState();
-    initialFiles().then((files) => files.forEach((f) => void st.openPath(f)), () => {});
+    // Command-line files are opened once per app run (StrictMode runs this effect twice in dev).
+    if (!launchFilesOpened) {
+      launchFilesOpened = true;
+      initialFiles().then((files) => files.forEach((f) => void st.openPath(f)), () => {});
+    }
 
+    // The listener registers asynchronously: if this effect is torn down first, unlisten on arrival.
     let off: (() => void) | undefined;
+    let cancelled = false;
     getCurrentWebview()
       .onDragDropEvent((e) => {
         if (e.payload.type === "drop") e.payload.paths.filter(isPdf).forEach((p) => void st.openPath(p));
       })
-      .then((u) => (off = u))
+      .then((u) => (cancelled ? u() : (off = u)))
       .catch(() => {});
 
     const onKey = (e: KeyboardEvent) => {
@@ -55,6 +62,7 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     window.addEventListener("contextmenu", noMenu);
     return () => {
+      cancelled = true;
       off?.();
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("contextmenu", noMenu);
