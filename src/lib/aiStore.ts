@@ -1,6 +1,16 @@
 import { create } from "zustand";
 import * as ai from "./ai";
-import { MODES, type AiMode, type AiSettings, type AiStatus, type Citation, type Prepared, type Rect4, type Task } from "./ai";
+import {
+  MODES,
+  type Activity,
+  type AiMode,
+  type AiSettings,
+  type AiStatus,
+  type Citation,
+  type Prepared,
+  type Rect4,
+  type Task,
+} from "./ai";
 import { useStore } from "../store";
 
 export interface Msg {
@@ -11,6 +21,8 @@ export interface Msg {
   text: string;
   citations: Citation[];
   followups: string[];
+  /** The tool calls of this turn (searches, page reads, changes), in order. */
+  activity: Activity[];
   state: "streaming" | "done" | "error" | "cancelled";
   phase?: string;
   error?: string;
@@ -59,6 +71,8 @@ interface AiStore {
   prepare: (doc: number) => void;
   ask: (doc: number, task: Task, label?: string) => void;
   cancel: (doc: number) => void;
+  /** Apply (true) or Reject (false) a change the assistant is waiting to make. */
+  decide: (doc: number, callId: string, allow: boolean) => void;
   clear: (doc: number) => void;
   closeChat: (doc: number) => void;
   grantConsent: () => void;
@@ -84,20 +98,34 @@ export const useAi = create<AiStore>((set, get) => {
   const patchMsg = (doc: number, id: number, f: (m: Msg) => Msg) =>
     patchChat(doc, (c) => ({ ...c, messages: c.messages.map((m) => (m.id === id ? f(m) : m)) }));
 
+  /** The turn is over: a card nobody answered did not run. */
+  const settle = (acts: Activity[]): Activity[] =>
+    acts.map((a) =>
+      a.state === "waiting" ? { ...a, state: "rejected" } : a.state === "running" ? { ...a, state: "failed" } : a,
+    );
+
   const run = (doc: number, task: Task, label: string) => {
     const d = useStore.getState().docs[doc];
     if (!d) return;
     const st = get();
     const chat = st.chats[doc] ?? EMPTY_CHAT;
     if (chat.messages.some((m) => m.state === "streaming")) return;
-    const user: Msg = { id: ++msgId, role: "user", kind: task.kind, text: label, citations: [], followups: [], state: "done" };
-    const bot: Msg = { id: ++msgId, role: "assistant", text: "", citations: [], followups: [], state: "streaming", phase: "reading" };
+    const user: Msg = { id: ++msgId, role: "user", kind: task.kind, text: label, citations: [], followups: [], activity: [], state: "done" };
+    const bot: Msg = { id: ++msgId, role: "assistant", text: "", citations: [], followups: [], activity: [], state: "streaming", phase: "reading" };
     patchChat(doc, (c) => ({ ...c, messages: [...c.messages, user, bot] }), true);
     set({ mark: null, sheet: true });
     const model = st.settings.model;
     ai.aiAsk(
       doc,
-      { task, name: d.name, model, effort: st.settings.effort, currentPage: d.currentPage },
+      {
+        task,
+        name: d.name,
+        model,
+        effort: st.settings.effort,
+        currentPage: d.currentPage,
+        selection: st.selection,
+        permissions: st.settings.permissions,
+      },
       (e) => {
         switch (e.kind) {
           case "status":
@@ -106,26 +134,50 @@ export const useAi = create<AiStore>((set, get) => {
           case "delta":
             patchMsg(doc, bot.id, (m) => ({ ...m, text: m.text + e.text, phase: "answering" }));
             break;
+          case "activity": {
+            const { kind: _kind, ...a } = e;
+            patchMsg(doc, bot.id, (m) => ({
+              ...m,
+              activity: m.activity.some((x) => x.id === a.id)
+                ? m.activity.map((x) => (x.id === a.id ? a : x))
+                : [...m.activity, a],
+            }));
+            break;
+          }
+          case "ui": {
+            const a = e.action;
+            reveal(doc, a.page, a.type === "show" ? a.rects : [], 0);
+            break;
+          }
           case "done":
             patchMsg(doc, bot.id, (m) => ({
               ...m,
               text: e.answer,
               citations: e.citations,
               followups: e.followups,
+              activity: settle(m.activity),
               state: "done",
               timing: { firstTokenMs: e.firstTokenMs, totalMs: e.totalMs, prepMs: e.prepMs },
             }));
             break;
           case "error":
-            patchMsg(doc, bot.id, (m) => ({ ...m, state: "error", error: e.message, hint: e.hint }));
+            patchMsg(doc, bot.id, (m) => ({ ...m, activity: settle(m.activity), state: "error", error: e.message, hint: e.hint }));
             if (e.hint === "login" || e.hint === "install") get().refreshStatus();
             break;
           case "cancelled":
-            patchMsg(doc, bot.id, (m) => ({ ...m, state: "cancelled" }));
+            patchMsg(doc, bot.id, (m) => ({ ...m, activity: settle(m.activity), state: "cancelled" }));
             break;
         }
       },
-    ).catch((err) => patchMsg(doc, bot.id, (m) => ({ ...m, state: "error", error: String(err), hint: null })));
+    ).catch((err) =>
+      patchMsg(doc, bot.id, (m) => ({ ...m, activity: settle(m.activity), state: "error", error: String(err), hint: null })),
+    );
+  };
+
+  /** Scrolls the document to `page` and outlines `rects` there (`n` is the source badge lit, 0 = none). */
+  const reveal = (doc: number, page: number, rects: Rect4[], n: number) => {
+    set({ mark: rects.length || n ? { doc, page, rects, n, nonce: ++markNonce } : null });
+    useStore.getState().goTo(doc, page, rects.length ? Math.max(0, Math.min(...rects.map((r) => r[1])) - 90) : undefined);
   };
 
   return {
@@ -190,6 +242,21 @@ export const useAi = create<AiStore>((set, get) => {
 
     cancel: (doc) => void ai.aiCancel(doc),
 
+    decide: (doc, callId, allow) => {
+      // the card answers at once; the activity events that follow confirm or correct it
+      const step = (state: Activity["state"], from: Activity["state"]) =>
+        patchChat(doc, (c) => ({
+          ...c,
+          messages: c.messages.map((m) => ({
+            ...m,
+            activity: m.activity.map((a) => (a.id === callId && a.state === from ? { ...a, state } : a)),
+          })),
+        }));
+      const next = allow ? "running" : "rejected";
+      step(next, "waiting");
+      ai.aiToolDecision(doc, callId, allow).catch(() => step("failed", next));
+    },
+
     clear: (doc) => {
       // a fresh thread: the model forgets the conversation (a turn in flight is interrupted)
       set((s) => ({ chats: { ...s.chats, [doc]: { messages: [], prep: s.chats[doc]?.prep ?? null } }, mark: null }));
@@ -220,6 +287,8 @@ export const useAi = create<AiStore>((set, get) => {
       const settings = { ...get().settings, ...p };
       ai.saveSettings(settings);
       set({ settings });
+      // a turn in flight must not keep the looser mode it started with
+      if (p.permissions) for (const doc of Object.keys(get().chats)) void ai.aiSetPermissions(Number(doc), p.permissions);
     },
 
     setSelection: (selection) => {
@@ -229,12 +298,10 @@ export const useAi = create<AiStore>((set, get) => {
     },
 
     showCitation: (doc, c) => {
-      const st = useStore.getState();
       if (c.page == null) return;
       const m = get().mark;
       if (m && m.doc === doc && m.n === c.n && m.page === c.page && m.rects === c.rects) return set({ mark: null });
-      set({ mark: { doc, page: c.page, rects: c.rects, n: c.n, nonce: ++markNonce } });
-      st.goTo(doc, c.page, c.rects.length ? Math.max(0, Math.min(...c.rects.map((r) => r[1])) - 90) : undefined);
+      reveal(doc, c.page, c.rects, c.n);
     },
     clearMark: () => set({ mark: null }),
 

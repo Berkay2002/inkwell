@@ -134,6 +134,17 @@ fn outline_maps_chapters_to_pages() {
 }
 
 #[test]
+fn page_png_of_an_old_generation_is_refused() {
+    let eng = Engine::new(2, 64 << 20);
+    let path = write_fixture("png-rev.pdf", &Fixture { pages: 1, ..Default::default() });
+    let id = eng.open(&path).unwrap().doc;
+    assert!(eng.page_png(id, 0, 0, 256).is_ok());
+    let rev = eng.bump_generation(id).unwrap();
+    assert!(matches!(eng.page_png(id, 0, 0, 256), Err(EngineError::Changed)));
+    assert!(eng.page_png(id, rev, 0, 256).is_ok());
+}
+
+#[test]
 fn password_flow() {
     // Encrypt the fixture with MuPDF itself.
     let dir = std::env::temp_dir().join("inkwell-tests");

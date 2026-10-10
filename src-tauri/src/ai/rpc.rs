@@ -2,8 +2,11 @@
 //! tests can drive it with a stub server.
 //!
 //! One reader thread routes everything the server says: responses to the waiting `call`, server
-//! requests (approvals, tool calls) are answered with an error so nothing ever blocks, and
-//! notifications go to the sink registered for their `threadId`. One writer thread owns stdin, fed
+//! requests (approvals, elicitations) are answered with an error so nothing ever blocks, dynamic
+//! tool calls (`item/tool/call`) are handed to the sink of their thread (the turn answers them
+//! with `respond`; a thread nobody listens to gets a refusal), and notifications go to the sink
+//! registered for their `threadId`. Tool handlers never run on the reader thread: they may wait
+//! for the user. One writer thread owns stdin, fed
 //! by a channel, so a slow pipe never blocks a caller or the reader. One more thread drains stderr
 //! (a full pipe stalls the child) and keeps the tail for error messages.
 
@@ -40,6 +43,8 @@ pub struct SpawnSpec {
 
 /// Notification sent to a thread's sink when the process went away.
 pub const CLOSED: &str = "__closed__";
+/// The one server request Inkwell answers: a call of one of the dynamic tools it registered.
+pub const TOOL_CALL: &str = "item/tool/call";
 
 pub struct Client {
     pub pid: u32,
@@ -137,6 +142,16 @@ impl Client {
         }
     }
 
+    /// Answers a server request (a tool call) with `result`. `id` is echoed exactly as received.
+    pub fn respond(&self, id: &Value, result: Value) -> Result<(), RpcError> {
+        self.send(&json!({ "id": id, "result": result })).map_err(|_| self.closed())
+    }
+
+    /// Answers a server request with a JSON-RPC error.
+    pub fn refuse(&self, id: &Value, message: &str) {
+        let _ = self.send(&json!({ "id": id, "error": { "code": -32601, "message": message } }));
+    }
+
     pub fn notify(&self, method: &str, params: Option<Value>) -> Result<(), RpcError> {
         let mut m = json!({ "method": method });
         if let Some(p) = params {
@@ -222,9 +237,19 @@ impl Client {
         let method = v.get("method").and_then(Value::as_str);
         match (method, v.get("id")) {
             (Some(m), Some(id)) => {
-                // approvals / tool calls / elicitations: refuse everything, never block
-                let reply = json!({ "id": id, "error": { "code": -32601, "message": format!("inkwell does not support {m}") } });
-                let _ = self.send(&reply);
+                // A tool call goes to its thread's sink (the stream loop of the turn answers it); when
+                // nobody listens any more (the tab was closed) it is refused at once.
+                if m == TOOL_CALL {
+                    let tid = v.pointer("/params/threadId").and_then(Value::as_str).map(str::to_string);
+                    let delivered = tid
+                        .is_some_and(|t| self.sinks.lock().unwrap().get(&t).is_some_and(|tx| tx.send(v.clone()).is_ok()));
+                    if !delivered {
+                        self.refuse(id, "the document is not open any more");
+                    }
+                    return;
+                }
+                // approvals / elicitations / anything else: refuse, never block
+                self.refuse(id, &format!("inkwell does not support {m}"));
             }
             (Some(_), None) => {
                 let tid = v.pointer("/params/threadId").and_then(Value::as_str).map(str::to_string);

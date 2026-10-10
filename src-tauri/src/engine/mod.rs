@@ -16,7 +16,7 @@ pub mod pool;
 use cache::{Tile, TileCache, TileKey};
 use lru::LruCache;
 use mupdf::{
-    Colorspace, Device, DisplayList, Document, Matrix, MetadataName, Pixmap,
+    Colorspace, Device, DisplayList, Document, ImageFormat, Matrix, MetadataName, Pixmap,
     rect::{IRect, Rect},
     text_page::{TextBlockType, TextPageFlags},
 };
@@ -51,6 +51,8 @@ pub enum EngineError {
     Panic,
     #[error("not a PDF file")]
     NotPdf,
+    #[error("the document changed since this was asked for")]
+    Changed,
 }
 
 impl From<mupdf::Error> for EngineError {
@@ -495,6 +497,55 @@ impl Engine {
         }
         let entry = self.entry(id)?;
         self.with_doc(&entry, |doc| Ok(doc.outlines()?.iter().map(conv).collect()))
+    }
+
+    /// The document's non-empty info fields as (label, value), for the assistant.
+    pub fn metadata(&self, id: DocId) -> Result<Vec<(&'static str, String)>> {
+        let entry = self.entry(id)?;
+        self.with_doc(&entry, |doc| {
+            let fields = [
+                ("title", MetadataName::Title),
+                ("author", MetadataName::Author),
+                ("subject", MetadataName::Subject),
+                ("keywords", MetadataName::Keywords),
+                ("creator", MetadataName::Creator),
+                ("producer", MetadataName::Producer),
+                ("created", MetadataName::CreationDate),
+                ("modified", MetadataName::ModDate),
+            ];
+            Ok(fields
+                .into_iter()
+                .filter_map(|(k, n)| doc.metadata(n).ok().map(|v| (k, v.trim().to_string())))
+                .filter(|(_, v)| !v.is_empty())
+                .collect())
+        })
+    }
+
+    /// One whole page as a PNG whose longer side is at most `max_px` (never scaled up past 2x), of
+    /// edit generation `rev`: `Changed` when the document is already past it, or moves on while the
+    /// page renders (docs/engine-rules.md rule 3), so an image never mixes with text of another state.
+    pub fn page_png(&self, id: DocId, rev: u32, page: u32, max_px: u32) -> Result<Vec<u8>> {
+        let entry = self.entry(id)?;
+        if entry.generation() != rev {
+            return Err(EngineError::Changed);
+        }
+        let list = self.page_list(&entry, rev, page)?;
+        let b = list.bounds();
+        let scale = (max_px as f32 / b.width().max(b.height()).max(1.0)).min(2.0);
+        let (m, w, h) = view_matrix(b, 0, scale);
+        let rect = IRect { x0: 0, y0: 0, x1: w, y1: h };
+        let mut pix = Pixmap::new_with_rect(&Colorspace::device_rgb(), rect, false)?;
+        pix.clear_with(0xff)?;
+        {
+            let dev = Device::from_pixmap(&pix)?;
+            list.run(&dev, &m, Rect::new(0.0, 0.0, w as f32, h as f32))?;
+        }
+        let mut out = Vec::new();
+        pix.write_to(&mut out, ImageFormat::PNG)?;
+        if entry.generation() != rev {
+            return Err(EngineError::Changed);
+        }
+        Ok(out)
     }
 
     pub fn page_text(&self, id: DocId, page: u32) -> Result<Vec<TextLine>> {

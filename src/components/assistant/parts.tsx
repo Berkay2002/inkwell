@@ -2,7 +2,10 @@ import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState }
 import type { Citation } from "../../lib/ai";
 import { type Msg, readViewerSelection, useAi } from "../../lib/aiStore";
 import type { DocState } from "../../store";
+import { isVerified } from "../../lib/activity";
+import { ActivityTrail } from "./ActivityTrail";
 import { Markdown } from "./Markdown";
+import { PermissionItems } from "./PermissionItems";
 
 export type Variant = "docked" | "floating" | "bar";
 
@@ -153,6 +156,8 @@ export function MoreMenu({ doc, up = false }: { doc: DocState; up?: boolean }) {
           <button onClick={run(() => st().setSettings({ hideSources: !settings.hideSources }))}>
             {settings.hideSources ? "Show sources under answers" : "Hide sources under answers"}
           </button>
+          <div className="ax-pop-sep" />
+          <PermissionItems value={settings.permissions} onPick={(p) => run(() => st().setSettings({ permissions: p }))()} tick={<Glyph name="check" size={13} />} />
           <div className="ax-pop-sep" />
           <button onClick={run(() => st().setOpen(false))}>Close assistant</button>
         </div>
@@ -327,7 +332,7 @@ function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: 
   const show = (c: Citation) => useAi.getState().showCitation(doc.id, c);
   return (
     <ul className={`ax-sources ${variant}`}>
-      {m.citations.map((c) => {
+      {m.citations.filter(isVerified).map((c) => {
         const on = active === c.n;
         const page = c.page != null ? `p. ${c.page + 1}` : "";
         const cls = on ? "ax-source on" : "ax-source";
@@ -400,7 +405,7 @@ function Followups({ doc, m, variant }: { doc: DocState; m: Msg; variant: Varian
 export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocState; m: Msg; variant: Variant; isLast: boolean; plain?: boolean }) {
   const mark = useAi((s) => s.mark);
   const hide = useAi((s) => s.settings.hideSources);
-  const cites = useMemo(() => new Map(m.citations.map((c) => [c.n, c])), [m.citations]);
+  const cites = useMemo(() => new Map(m.citations.filter(isVerified).map((c) => [c.n, c])), [m.citations]);
   const known = useMemo(() => new Set(cites.keys()), [cites]);
   const active = mark && mark.doc === doc.id ? mark.n : null;
 
@@ -418,6 +423,7 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
 
   return (
     <div className="ax-a">
+      <ActivityTrail doc={doc.id} m={m} />
       {m.text === "" && m.state === "streaming" ? (
         <p className="dim">{PHASES[m.phase ?? "reading"] ?? "Thinking…"}</p>
       ) : (
@@ -430,7 +436,7 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
       {m.state === "cancelled" && <p className="dim small">Stopped.</p>}
       {m.state === "done" && (
         <>
-          {!hide && m.citations.length > 0 && <Sources doc={doc} m={m} variant={variant} active={active} />}
+          {!hide && m.citations.some(isVerified) && <Sources doc={doc} m={m} variant={variant} active={active} />}
           <div className="ax-actions">
             <button className="ax-link" onClick={() => void navigator.clipboard.writeText(m.text)}>
               Copy

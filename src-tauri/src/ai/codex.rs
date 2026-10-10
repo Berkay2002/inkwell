@@ -42,7 +42,12 @@ const OFF_FEATURES: &[&str] = &[
     "shell_snapshot",
     "workspace_dependencies",
     "worktrees",
-    "code_mode_host",
+    // NOT "code_mode_host": codex 0.159 reaches dynamic tools through it. With it off the model is told
+    // "tool host is disabled" and never sends `item/tool/call` (checked against the real server).
+    // Still exposed in 0.159 with no switch found: exec's runtime (no fs/net/process), clock, wait,
+    // request_user_input (unavailable in Default mode) and spawn_agent (`multi_agent=false` doesn't drop it;
+    // `agents.max_threads=0` breaks startup). Sub-agents are read-only and get no Inkwell tools; Stop and
+    // close unsubscribe the threads named in the turn's `collabAgentToolCall` items (chat.rs `interrupt`).
     "realtime_conversation",
     "shell_tool",
     "unified_exec",
@@ -187,6 +192,16 @@ url = "http://x"
     #[test]
     fn an_unparsable_config_still_gets_the_header_scan() {
         assert_eq!(mcp_server_names("[mcp_servers.a]\nbroken = \n"), ["a"]);
+    }
+
+    #[test]
+    fn the_code_mode_host_stays_on_because_dynamic_tools_ride_on_it() {
+        let a = server_args("");
+        assert!(!a.iter().any(|x| x.contains("code_mode_host")), "{a:?}");
+        // and nothing that would give the model a shell of its own is on
+        for f in ["shell_tool", "unified_exec", "apps", "plugins"] {
+            assert!(a.iter().any(|x| *x == format!("features.{f}=false")), "{f}");
+        }
     }
 
     #[test]

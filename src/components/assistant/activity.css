@@ -1,0 +1,74 @@
+/* The assistant's activity trail and change-approval cards. Tokens come from assistant.css. */
+.ax-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.ax-trail {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ax-dim);
+  background: var(--ax-panel);
+  border: 1px solid var(--ax-border);
+  border-radius: var(--ax-r-sm);
+}
+.ax-trail-line {
+  display: block;
+  width: 100%;
+  padding: 5px 10px;
+  text-align: left;
+  color: inherit;
+  border-radius: inherit;
+}
+.ax-trail-line:hover {
+  color: var(--ax-text);
+}
+.ax-trail-text {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ax-trail.open .ax-trail-text {
+  white-space: normal;
+}
+.ax-trail-list {
+  margin: 0;
+  padding: 2px 10px 7px 24px;
+  list-style: disc;
+}
+.ax-trail-list li.edit,
+.ax-trail-list li.destructive {
+  color: var(--ax-text);
+}
+.ax-trail-state,
+.ax-trail-why {
+  margin-left: 6px;
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.ax-approve {
+  padding: 10px 12px;
+  background: var(--ax-panel);
+  border: 1px solid color-mix(in srgb, var(--ax-accent) 45%, var(--ax-border));
+  border-radius: var(--ax-r);
+}
+.ax-approve.destructive {
+  border-color: color-mix(in srgb, var(--danger, #b3261e) 55%, var(--ax-border));
+}
+.ax-approve-what {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ax-text);
+}
+.ax-approve-where {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ax-dim);
+}
+.ax-approve .ax-row {
+  margin-top: 9px;
+}
