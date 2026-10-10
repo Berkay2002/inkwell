@@ -104,7 +104,7 @@ await sleep(1200);
 await shot("10-citation-jump-dark.png");
 
 // narrow window
-await send("Emulation.setDeviceMetricsOverride", { width: 820, height: 760, deviceScaleFactor: 1, mobile: false });
+await send("Emulation.setDeviceMetricsOverride", { width: 720, height: 760, deviceScaleFactor: 1, mobile: false });
 await sleep(800);
 await shot("11-narrow-dark.png");
 await send("Emulation.clearDeviceMetricsOverride");
