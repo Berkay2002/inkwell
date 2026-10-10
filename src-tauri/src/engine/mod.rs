@@ -541,18 +541,18 @@ impl Engine {
                             Err(_) => return,
                         }
                     }
-                    {
-                        // An edit since the scan started brought its own sizes.
-                        let mut l = entry.layout.write();
-                        if l.rev != rev {
-                            return;
-                        }
-                        for (i, s) in sizes.iter().enumerate() {
-                            if let Some(slot) = l.sizes.get_mut(start as usize + i) {
-                                *slot = *s;
-                            }
+                    // An edit since the scan started brought its own sizes.
+                    let mut l = entry.layout.write();
+                    if l.rev != rev {
+                        return;
+                    }
+                    for (i, s) in sizes.iter().enumerate() {
+                        if let Some(slot) = l.sizes.get_mut(start as usize + i) {
+                            *slot = *s;
                         }
                     }
+                    // Sent before an edit can publish, so the UI never gets them after its new sizes.
+                    let _l = parking_lot::RwLockWriteGuard::downgrade(l);
                     sink(start, sizes);
                 }),
             });
@@ -574,8 +574,14 @@ impl Engine {
     }
 
     pub fn page_text(&self, id: DocId, page: u32) -> Result<Vec<TextLine>> {
+        let rev = self.entry(id)?.generation();
+        self.page_text_at(id, rev, page)
+    }
+
+    /// `page_text` of generation `rev`: `Stale` once an edit has landed since.
+    pub fn page_text_at(&self, id: DocId, rev: u32, page: u32) -> Result<Vec<TextLine>> {
         let entry = self.entry(id)?;
-        let list = self.page_list(&entry, entry.generation(), page)?;
+        let list = self.page_list(&entry, rev, page)?;
         let origin = list.bounds();
         let tp = list.to_text_page(TextPageFlags::empty())?;
         let mut out = Vec::new();
@@ -783,7 +789,10 @@ impl Engine {
         let entry = self.entry(id)?;
         let sid = entry.search_gen.fetch_add(1, Ordering::SeqCst) + 1;
         let query = query.trim().to_string();
-        let n = entry.page_count();
+        let (rev, n) = {
+            let l = entry.layout.read();
+            (l.rev, l.page_count)
+        };
         if query.is_empty() {
             sink(SearchEvent::Done { search: sid, hits: 0, pages: n });
             return Ok(sid);
@@ -808,7 +817,11 @@ impl Engine {
                         if entry.search_gen.load(Ordering::SeqCst) != sid {
                             return;
                         }
-                        let rects = eng.search_page(&entry, p, &query).unwrap_or_default();
+                        // Page numbers belong to `rev`: an edit ends the search (the UI searches again).
+                        let rects = match eng.search_page_at(&entry, Some(rev), p, &query) {
+                            Err(EngineError::Stale) => break,
+                            r => r.unwrap_or_default(),
+                        };
                         if !rects.is_empty() {
                             total_hits.fetch_add(rects.len() as u32, Ordering::Relaxed);
                             sink(SearchEvent::Hits { search: sid, page: p, rects });
@@ -834,7 +847,15 @@ impl Engine {
     }
 
     pub fn search_page(&self, entry: &DocEntry, page: u32, needle: &str) -> Result<Vec<[f32; 4]>> {
-        self.with_doc(entry, |doc| {
+        self.search_page_at(entry, None, page, needle)
+    }
+
+    /// `search_page` on generation `rev` (any if None): `Stale` once an edit has landed since.
+    fn search_page_at(&self, entry: &DocEntry, rev: Option<u32>, page: u32, needle: &str) -> Result<Vec<[f32; 4]>> {
+        self.with_doc_rev(entry, |doc, held| {
+            if rev.is_some_and(|r| r != held) {
+                return Err(EngineError::Stale);
+            }
             let p = doc.load_page(page as i32)?;
             let origin = p.bounds()?;
             let quads = p.search(needle, 512)?;
