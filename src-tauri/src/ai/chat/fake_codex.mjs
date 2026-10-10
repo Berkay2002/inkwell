@@ -6,6 +6,10 @@
 //   hang      streams two deltas then goes silent
 //   fail      the turn fails with an `unauthorized` error
 //   approval  sends an approval request mid-turn and only finishes once it was refused
+//   slow-start    thread/start answers after 1.5 s
+//   stall-start   thread/start is never answered
+//   grandchild    starts a child process of its own at initialize and logs its pid
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import readline from "node:readline";
 
@@ -28,6 +32,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const p = m.params ?? {};
   switch (m.method) {
     case "initialize":
+      if (mode === "grandchild") {
+        const gc = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+        log(`grandchild ${gc.pid}`);
+      }
       out({ id: m.id, result: { userAgent: "fake-codex/1", codexHome: "x" } });
       break;
     case "account/read":
@@ -62,7 +70,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     case "thread/start": {
       const id = `thr-${++threads}`;
       log(`thread/start ${id} sandbox=${p.sandbox} approval=${p.approvalPolicy} ephemeral=${p.ephemeral} model=${p.model ?? "-"}`);
-      out({ id: m.id, result: { thread: { id }, model: p.model ?? "fake-1" } });
+      if (mode === "stall-start") break; // never answered
+      const answer = () => out({ id: m.id, result: { thread: { id }, model: p.model ?? "fake-1" } });
+      if (mode === "slow-start") setTimeout(answer, 1500);
+      else answer();
       break;
     }
     case "thread/unsubscribe":

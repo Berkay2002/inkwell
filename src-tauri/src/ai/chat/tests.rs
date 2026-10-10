@@ -21,6 +21,13 @@ fn fake(mode: &str) -> Arc<Assistant> {
     fake_with(mode, None, Duration::from_secs(15))
 }
 
+/// Like `fake`, with a short request timeout.
+fn fake_call_timeout(mode: &str, call: Duration) -> Arc<Assistant> {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/src/ai/chat/fake_codex.mjs");
+    let spec = SpawnSpec { program: "node".into(), args: vec![script.to_string(), mode.to_string()], cwd: std::env::temp_dir() };
+    Assistant::with_timeouts(Box::new(move || Some(spec.clone())), Duration::from_secs(15), call)
+}
+
 fn chunk(id: &str, page: u32, text: &str) -> Chunk {
     Chunk {
         id: id.into(),
@@ -30,13 +37,17 @@ fn chunk(id: &str, page: u32, text: &str) -> Chunk {
     }
 }
 
-fn contract() -> Arc<DocText> {
+fn contract_rev(rev: u32) -> Arc<DocText> {
     let chunks = vec![
         chunk("p1.1", 0, "Either party may terminate this agreement with thirty days written notice to the other party."),
         chunk("p2.1", 1, "The supplier shall deliver the goods within sixty days of the signing of this agreement."),
     ];
     let chars = chunks.iter().map(|c| c.text.len()).sum();
-    Arc::new(DocText { rev: 0, pages: 2, chunks, chars })
+    Arc::new(DocText { rev, pages: 2, chunks, chars })
+}
+
+fn contract() -> Arc<DocText> {
+    contract_rev(0)
 }
 
 fn ask_req(q: &str) -> AskRequest {
@@ -49,13 +60,28 @@ fn ask_req(q: &str) -> AskRequest {
     }
 }
 
-fn start(a: &Arc<Assistant>, req: AskRequest, text: Arc<DocText>) -> mpsc::Receiver<ChatEvent> {
+fn start_doc(a: &Arc<Assistant>, doc: DocId, req: AskRequest, text: Arc<DocText>) -> mpsc::Receiver<ChatEvent> {
     let (tx, rx) = mpsc::channel();
     let sink: Sink = Arc::new(move |e| {
         let _ = tx.send(e);
     });
-    a.ask(DOC, req, move || Ok(text), sink).unwrap();
+    a.ask(doc, req, move || Ok(text), sink).unwrap();
     rx
+}
+
+fn start(a: &Arc<Assistant>, req: AskRequest, text: Arc<DocText>) -> mpsc::Receiver<ChatEvent> {
+    start_doc(a, DOC, req, text)
+}
+
+/// Blocks until the answer has started streaming.
+fn first_delta(rx: &mpsc::Receiver<ChatEvent>) {
+    loop {
+        match rx.recv_timeout(Duration::from_secs(20)).expect("a delta") {
+            ChatEvent::Delta { .. } => return,
+            ChatEvent::Error { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
 }
 
 fn finish(rx: &mpsc::Receiver<ChatEvent>) -> Vec<ChatEvent> {
@@ -210,6 +236,109 @@ fn closing_the_document_unsubscribes_its_thread() {
     a.close_doc(DOC);
     assert!(wait_for(|| client.stderr_tail().contains("unsubscribed thr-1")), "{}", client.stderr_tail());
     assert!(a.texts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn closing_one_document_mid_turn_leaves_the_server_and_other_chats_alone() {
+    let a = fake("slow");
+    let rx_a = start_doc(&a, 1, ask_req("a?"), contract());
+    let rx_b = start_doc(&a, 2, ask_req("b?"), contract());
+    first_delta(&rx_a);
+    first_delta(&rx_b);
+    let pid = a.server_pid().expect("server running");
+
+    a.close_doc(1);
+    let ev = finish(&rx_a);
+    assert!(matches!(ev.last(), Some(ChatEvent::Cancelled)), "closed tab ends cancelled, not failed: {:?}", ev.last());
+
+    let ev = finish(&rx_b);
+    assert!(matches!(ev.last(), Some(ChatEvent::Done { .. })), "the other document's turn must finish: {:?}", ev.last());
+    assert_eq!(a.server_pid(), Some(pid), "the shared server must survive");
+    assert!(!stderr(&a).contains("dying"), "{}", stderr(&a));
+    // and it still serves new questions without a restart
+    let ev = run(&a, ask_req("again?"), contract());
+    assert!(matches!(ev.last(), Some(ChatEvent::Done { .. })), "{:?}", ev.last());
+    assert_eq!(a.server_pid(), Some(pid));
+    a.close_doc(2);
+    a.close_doc(DOC);
+}
+
+#[test]
+fn clearing_a_chat_mid_turn_also_spares_the_server() {
+    // the UI's "Clear chat" is `ai_close` on the same document, then a fresh turn later
+    let a = fake("slow");
+    let rx = start(&a, ask_req("a?"), contract());
+    first_delta(&rx);
+    let pid = a.server_pid().unwrap();
+    a.close_doc(DOC);
+    assert!(matches!(finish(&rx).last(), Some(ChatEvent::Cancelled)));
+    assert_eq!(a.server_pid(), Some(pid));
+    assert!(wait_for(|| !a.session(DOC).busy.load(Ordering::SeqCst)));
+}
+
+#[test]
+fn warming_a_document_does_not_make_the_first_question_wait_or_fail() {
+    let a = fake("slow-start");
+    let warm = {
+        let a = a.clone();
+        std::thread::spawn(move || a.warm(DOC, 0))
+    };
+    assert!(wait_for(|| a.server_pid().is_some()));
+    std::thread::sleep(Duration::from_millis(150)); // warm is now inside its slow thread/start
+    let ev = run(&a, ask_req("quick question?"), contract()); // `ask` would panic on "still answering"
+    assert!(matches!(ev.last(), Some(ChatEvent::Done { .. })), "{:?}", ev.last());
+    warm.join().unwrap();
+    assert_eq!(stderr(&a).matches("thread/start").count(), 1, "{}", stderr(&a));
+}
+
+#[test]
+fn a_hung_request_replaces_the_server() {
+    let a = fake_call_timeout("stall-start", Duration::from_millis(2500));
+    let ev = run(&a, ask_req("hello?"), contract());
+    match ev.last().unwrap() {
+        ChatEvent::Error { message, .. } => assert!(message.contains("did not answer in time"), "{message}"),
+        e => panic!("{e:?}"),
+    }
+    assert!(a.server_pid().is_none(), "a server that stopped answering must be dropped");
+}
+
+#[test]
+fn an_edited_document_gets_a_new_thread() {
+    let a = fake("ok");
+    assert!(matches!(run(&a, ask_req("one?"), contract_rev(0)).last(), Some(ChatEvent::Done { .. })));
+    assert!(matches!(run(&a, ask_req("two?"), contract_rev(1)).last(), Some(ChatEvent::Done { .. })));
+    let client = a.server.lock().unwrap().as_ref().unwrap().client.clone();
+    assert!(wait_for(|| client.stderr_tail().contains("unsubscribed thr-1")), "{}", client.stderr_tail());
+    let err = stderr(&a);
+    assert_eq!(err.matches("thread/start").count(), 2, "{err}");
+    // the excerpts go out again on the new thread
+    assert!(err.contains("turn thr-2 turn-2") && err.contains("excerpts=2"), "{err}");
+}
+
+#[cfg(windows)]
+#[test]
+fn killing_the_server_takes_its_children_with_it() {
+    let running = |pid: u32| {
+        let o = std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())
+    };
+    let a = fake("grandchild");
+    let _ = a.status(); // starts the server
+    let client = a.server.lock().unwrap().as_ref().unwrap().client.clone();
+    assert!(wait_for(|| client.stderr_tail().contains("grandchild ")), "{}", client.stderr_tail());
+    let tail = client.stderr_tail();
+    let gc: u32 = tail.lines().find_map(|l| l.strip_prefix("grandchild ")).unwrap().trim().parse().unwrap();
+    assert!(running(gc), "grandchild {gc} should be running");
+    client.kill();
+    let mut gone = false;
+    for _ in 0..40 {
+        if !running(gc) {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(gone, "grandchild {gc} outlived the server");
 }
 
 #[test]

@@ -68,8 +68,12 @@ let markNonce = 0;
 const EMPTY_CHAT: Chat = { messages: [], prep: null };
 
 export const useAi = create<AiStore>((set, get) => {
-  const patchChat = (doc: number, f: (c: Chat) => Chat) =>
-    set((s) => ({ chats: { ...s.chats, [doc]: f(s.chats[doc] ?? EMPTY_CHAT) } }));
+  // Late events of a closed tab must not bring its chat back: only `create` starts a chat.
+  const patchChat = (doc: number, f: (c: Chat) => Chat, create = false) =>
+    set((s) => {
+      const c = s.chats[doc] ?? (create ? EMPTY_CHAT : null);
+      return c ? { chats: { ...s.chats, [doc]: f(c) } } : s;
+    });
   const patchMsg = (doc: number, id: number, f: (m: Msg) => Msg) =>
     patchChat(doc, (c) => ({ ...c, messages: c.messages.map((m) => (m.id === id ? f(m) : m)) }));
 
@@ -81,7 +85,7 @@ export const useAi = create<AiStore>((set, get) => {
     if (chat.messages.some((m) => m.state === "streaming")) return;
     const user: Msg = { id: ++msgId, role: "user", text: label, citations: [], followups: [], state: "done" };
     const bot: Msg = { id: ++msgId, role: "assistant", text: "", citations: [], followups: [], state: "streaming", phase: "reading" };
-    patchChat(doc, (c) => ({ ...c, messages: [...c.messages, user, bot] }));
+    patchChat(doc, (c) => ({ ...c, messages: [...c.messages, user, bot] }), true);
     set({ mark: null });
     const model = st.settings.model;
     ai.aiAsk(
@@ -145,8 +149,8 @@ export const useAi = create<AiStore>((set, get) => {
 
     prepare: (doc) => {
       const c = get().chats[doc] ?? EMPTY_CHAT;
-      if (c.prep) return;
-      patchChat(doc, (c) => ({ ...c, prep: "loading" }));
+      if (c.prep && c.prep !== "failed") return; // a failed read is tried again on the next open
+      patchChat(doc, (c) => ({ ...c, prep: "loading" }), true);
       ai.aiPrepare(doc).then(
         (prep) => patchChat(doc, (c) => ({ ...c, prep })),
         () => patchChat(doc, (c) => ({ ...c, prep: "failed" })),
@@ -173,9 +177,12 @@ export const useAi = create<AiStore>((set, get) => {
     cancel: (doc) => void ai.aiCancel(doc),
 
     clear: (doc) => {
-      void ai.aiClose(doc); // a fresh thread: the model forgets the conversation
+      // a fresh thread: the model forgets the conversation (a turn in flight is interrupted)
       set((s) => ({ chats: { ...s.chats, [doc]: { messages: [], prep: s.chats[doc]?.prep ?? null } }, mark: null }));
-      setTimeout(() => void ai.aiPrepare(doc).catch(() => {}), 0);
+      void ai
+        .aiClose(doc)
+        .then(() => ai.aiPrepare(doc))
+        .catch(() => {});
     },
 
     closeChat: (doc) => {

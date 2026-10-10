@@ -120,24 +120,34 @@ struct SessionState {
     /// Excerpt ids the model already has in this thread.
     sent: HashSet<String>,
     intro_sent: bool,
+    /// Text revision the thread's excerpts came from; an edit starts a new thread.
+    rev: u32,
 }
 
 #[derive(Default)]
 struct Session {
     busy: AtomicBool,
     cancel: AtomicBool,
+    /// The tab is gone: nothing started for it may outlive it.
+    closed: AtomicBool,
     /// (client, thread, turn) of the turn in flight, for interrupt.
     active: Mutex<Option<(Arc<Client>, String, Option<String>)>>,
+    /// Serialises `thread/start` so `state` is never held across an RPC.
+    start: Mutex<()>,
     state: Mutex<SessionState>,
 }
 
 pub struct Assistant {
     spec: Box<dyn Fn() -> Option<SpawnSpec> + Send + Sync>,
+    /// Only ever locked briefly: never across a spawn or an RPC.
     server: Mutex<Option<Server>>,
+    /// Serialises starting a server.
+    starting: Mutex<()>,
     next_gen: AtomicU64,
     sessions: Mutex<HashMap<DocId, Arc<Session>>>,
     texts: Mutex<HashMap<DocId, Arc<DocText>>>,
     idle_timeout: Duration,
+    call_timeout: Duration,
 }
 
 impl Assistant {
@@ -146,13 +156,23 @@ impl Assistant {
     }
 
     pub fn with_spec(spec: Box<dyn Fn() -> Option<SpawnSpec> + Send + Sync>, idle_timeout: Duration) -> Arc<Self> {
+        Self::with_timeouts(spec, idle_timeout, CALL_TIMEOUT)
+    }
+
+    pub fn with_timeouts(
+        spec: Box<dyn Fn() -> Option<SpawnSpec> + Send + Sync>,
+        idle_timeout: Duration,
+        call_timeout: Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             spec,
             server: Mutex::new(None),
+            starting: Mutex::new(()),
             next_gen: AtomicU64::new(0),
             sessions: Mutex::new(HashMap::new()),
             texts: Mutex::new(HashMap::new()),
             idle_timeout,
+            call_timeout,
         })
     }
 
@@ -164,11 +184,20 @@ impl Assistant {
         self.sessions.lock().unwrap().entry(doc).or_default().clone()
     }
 
-    /// The running server, started (and initialized) on first use or after it died.
+    fn live_server(&self) -> Option<(Arc<Client>, u64)> {
+        let g = self.server.lock().unwrap();
+        g.as_ref().filter(|s| s.client.is_alive()).map(|s| (s.client.clone(), s.epoch))
+    }
+
+    /// The running server, started (and initialized) on first use or after it died. The `server`
+    /// lock is not held while codex starts, so `close_doc` never waits behind a slow start.
     fn ensure_server(&self) -> Result<(Arc<Client>, u64), Failure> {
-        let mut g = self.server.lock().unwrap();
-        if let Some(s) = g.as_ref().filter(|s| s.client.is_alive()) {
-            return Ok((s.client.clone(), s.epoch));
+        if let Some(s) = self.live_server() {
+            return Ok(s);
+        }
+        let _starting = self.starting.lock().unwrap();
+        if let Some(s) = self.live_server() {
+            return Ok(s); // another thread started it while this one waited
         }
         let spec = (self.spec)().ok_or_else(|| Failure {
             message: "The Codex CLI is not installed.".into(),
@@ -176,14 +205,23 @@ impl Assistant {
         })?;
         let client = Client::spawn(&spec)?;
         let init = json!({ "clientInfo": { "name": "inkwell", "title": "Inkwell", "version": env!("CARGO_PKG_VERSION") } });
-        let r = client.call("initialize", init, CALL_TIMEOUT).and_then(|_| client.notify("initialized", None));
+        let r = client.call("initialize", init, self.call_timeout).and_then(|_| client.notify("initialized", None));
         if let Err(e) = r {
             client.kill();
             return Err(e.into());
         }
         let epoch = self.next_gen.fetch_add(1, Ordering::SeqCst) + 1;
-        *g = Some(Server { client: client.clone(), epoch });
+        *self.server.lock().unwrap() = Some(Server { client: client.clone(), epoch });
         Ok((client, epoch))
+    }
+
+    /// A request whose timeout means the server is hung: it is replaced, not retried.
+    fn rpc(&self, client: &Arc<Client>, method: &str, params: Value) -> Result<Value, RpcError> {
+        let r = client.call(method, params, self.call_timeout);
+        if matches!(r, Err(RpcError::Timeout)) {
+            self.drop_server(client);
+        }
+        r
     }
 
     fn drop_server(&self, client: &Arc<Client>) {
@@ -206,7 +244,7 @@ impl Assistant {
                 return st;
             }
         };
-        match client.call("account/read", json!({ "refreshToken": false }), CALL_TIMEOUT) {
+        match self.rpc(&client, "account/read", json!({ "refreshToken": false })) {
             Ok(v) => {
                 if let Some(a) = v.get("account").filter(|a| !a.is_null()) {
                     st.logged_in = true;
@@ -216,7 +254,7 @@ impl Assistant {
             }
             Err(e) => st.error = Some(e.to_string()),
         }
-        match client.call("model/list", json!({}), CALL_TIMEOUT) {
+        match self.rpc(&client, "model/list", json!({})) {
             Ok(v) => {
                 st.models = v
                     .get("data")
@@ -249,28 +287,29 @@ impl Assistant {
     }
 
     /// Warms the document's thread (the first `thread/start` is slow) so the first question is quick.
-    pub fn warm(&self, doc: DocId) {
-        let Ok((client, epoch)) = self.ensure_server() else { return };
+    /// `rev` is the text revision the excerpts will come from. It does not take `busy`: a question
+    /// asked meanwhile waits for the same `thread/start` instead of being refused.
+    pub fn warm(&self, doc: DocId, rev: u32) {
         let session = self.session(doc);
-        if session.busy.swap(true, Ordering::SeqCst) {
-            return;
+        if session.busy.load(Ordering::SeqCst) {
+            return; // a turn is running; it has its thread
         }
-        let _ = self.ensure_thread(&client, epoch, &session, None);
-        session.busy.store(false, Ordering::SeqCst);
+        let Ok((client, epoch)) = self.ensure_server() else { return };
+        let _ = self.ensure_thread(&client, epoch, &session, None, rev);
     }
 
+    /// The tab was closed. A turn in flight is interrupted (and ends as `Cancelled`); the shared
+    /// server and every other document's chat are left alone.
     pub fn close_doc(&self, doc: DocId) {
         self.texts.lock().unwrap().remove(&doc);
         let Some(s) = self.sessions.lock().unwrap().remove(&doc) else { return };
+        s.closed.store(true, Ordering::SeqCst);
         s.cancel.store(true, Ordering::SeqCst);
-        let client = self.server.lock().unwrap().as_ref().map(|s| s.client.clone());
+        interrupt(&s); // before the unsubscribe: the turn's stream reads the cancel flag, not a dead server
+        let client = self.live_server().map(|(c, _)| c);
         let thread = s.state.lock().unwrap().thread.take();
         if let (Some(client), Some((_, tid))) = (client, thread) {
-            client.unsubscribe(&tid);
-            // best effort, off the caller's thread: the server drops the thread now
-            std::thread::spawn(move || {
-                let _ = client.call("thread/unsubscribe", json!({ "threadId": tid }), Duration::from_secs(5));
-            });
+            release_thread(&client, tid);
         }
     }
 
@@ -286,12 +325,21 @@ impl Assistant {
         epoch: u64,
         session: &Session,
         model: Option<&str>,
+        rev: u32,
     ) -> Result<String, Failure> {
-        let mut st = session.state.lock().unwrap();
-        if let Some((g, id)) = &st.thread {
-            if *g == epoch && client.is_alive() {
-                return Ok(id.clone());
+        // `start` serialises thread starts; `state` is only held briefly, never across the RPC.
+        let _start = session.start.lock().unwrap();
+        let stale = {
+            let st = session.state.lock().unwrap();
+            match &st.thread {
+                Some((g, id)) if *g == epoch && client.is_alive() && st.rev == rev => return Ok(id.clone()),
+                // same server, but the document text changed: the old excerpts are wrong
+                Some((g, id)) if *g == epoch && client.is_alive() => Some(id.clone()),
+                _ => None,
             }
+        };
+        if let Some(id) = stale {
+            release_thread(client, id);
         }
         let mut p = json!({
             "ephemeral": true,
@@ -303,16 +351,23 @@ impl Assistant {
         if let Some(m) = model.filter(|m| !m.is_empty()) {
             p["model"] = json!(m);
         }
-        let r = client.call("thread/start", p, CALL_TIMEOUT)?;
+        let r = self.rpc(client, "thread/start", p)?;
         let id = r
             .pointer("/thread/id")
             .and_then(Value::as_str)
             .ok_or_else(|| Failure::new("codex returned no thread id"))?
             .to_string();
-        st.rx = Some(client.subscribe(&id));
+        if session.closed.load(Ordering::SeqCst) {
+            release_thread(client, id); // the tab went away while the thread was starting
+            return Err(Failure::new("The document was closed."));
+        }
+        let rx = client.subscribe(&id);
+        let mut st = session.state.lock().unwrap();
+        st.rx = Some(rx);
         st.thread = Some((epoch, id.clone()));
         st.sent.clear();
         st.intro_sent = false;
+        st.rev = rev;
         Ok(id)
     }
 
@@ -373,7 +428,10 @@ impl Assistant {
             sink(ChatEvent::Status { phase: "connecting" });
         }
         let (client, epoch) = self.ensure_server()?;
-        let thread = self.ensure_thread(&client, epoch, session, req.model.as_deref())?;
+        let thread = self.ensure_thread(&client, epoch, session, req.model.as_deref(), text.rev)?;
+        if session.cancel.load(Ordering::SeqCst) {
+            return Ok(ChatEvent::Cancelled);
+        }
 
         // what to send: the retrieval for this task minus what the model already has
         let (input, fresh_ids, chunks_total, chunks_sent) = {
@@ -410,12 +468,7 @@ impl Assistant {
         }
         *session.active.lock().unwrap() = Some((client.clone(), thread.clone(), None));
         sink(ChatEvent::Status { phase: "thinking" });
-        let started = client.call("turn/start", params, CALL_TIMEOUT).map_err(|e| {
-            if matches!(e, RpcError::Timeout) {
-                self.drop_server(&client);
-            }
-            Failure::from(e)
-        })?;
+        let started = self.rpc(&client, "turn/start", params)?;
         let turn_id = started.pointer("/turn/id").and_then(Value::as_str).unwrap_or_default().to_string();
         {
             let mut st = session.state.lock().unwrap();
@@ -433,7 +486,7 @@ impl Assistant {
 
         // ---- stream --------------------------------------------------------------------
         let rx = session.state.lock().unwrap().rx.take().ok_or_else(|| Failure::new("no event stream"))?;
-        let outcome = self.stream(&rx, &req, &turn_id, t0, sink);
+        let outcome = self.stream(&rx, &client, session, &req, &turn_id, t0, sink);
         session.state.lock().unwrap().rx = Some(rx);
         let (final_text, first_ms, usage) = match outcome {
             Ok(Streamed::Completed { text, first_ms, usage }) => (text, first_ms, usage),
@@ -476,7 +529,18 @@ impl Assistant {
         })
     }
 
-    fn stream(&self, rx: &Receiver<Value>, req: &AskRequest, turn_id: &str, t0: Instant, sink: &Sink) -> Result<Streamed, Failure> {
+    #[allow(clippy::too_many_arguments)]
+    fn stream(
+        &self,
+        rx: &Receiver<Value>,
+        client: &Client,
+        session: &Session,
+        req: &AskRequest,
+        turn_id: &str,
+        t0: Instant,
+        sink: &Sink,
+    ) -> Result<Streamed, Failure> {
+        let cancelled = || session.cancel.load(Ordering::SeqCst);
         let cited = req.task.cited();
         let mut raw = String::new();
         let mut shown = 0usize;
@@ -489,13 +553,24 @@ impl Assistant {
                 Err(RecvTimeoutError::Timeout) => {
                     return Err(Failure { message: "Codex stopped responding.".into(), hint: Some("dead") });
                 }
-                Err(RecvTimeoutError::Disconnected) => return Err(Failure { message: String::new(), hint: Some("dead") }),
+                // The sink is removed when the document is closed (or its thread replaced): that is a
+                // cancel, never a reason to kill the server every tab shares.
+                Err(RecvTimeoutError::Disconnected) => {
+                    return if cancelled() {
+                        Ok(Streamed::Interrupted)
+                    } else if !client.is_alive() {
+                        Err(Failure { message: String::new(), hint: Some("dead") })
+                    } else {
+                        Err(Failure::new("The answer stream ended unexpectedly. Ask again."))
+                    };
+                }
             };
             let method = msg.get("method").and_then(Value::as_str).unwrap_or_default();
             let p = &msg["params"];
             // a notification of another turn of the same thread (late tail of an earlier one)
             let other_turn = |id: Option<&str>| id.is_some_and(|i| !turn_id.is_empty() && i != turn_id);
             match method {
+                CLOSED if cancelled() => return Ok(Streamed::Interrupted),
                 CLOSED => return Err(Failure { message: String::new(), hint: Some("dead") }),
                 "item/agentMessage/delta" if !other_turn(p.get("turnId").and_then(Value::as_str)) => {
                     raw.push_str(p.get("delta").and_then(Value::as_str).unwrap_or_default());
@@ -538,6 +613,15 @@ impl Assistant {
 enum Streamed {
     Completed { text: String, first_ms: Option<u64>, usage: Option<Value> },
     Interrupted,
+}
+
+/// Stops listening to a thread and tells the server to drop it (best effort, off the caller's thread).
+fn release_thread(client: &Arc<Client>, thread: String) {
+    client.unsubscribe(&thread);
+    let client = client.clone();
+    std::thread::spawn(move || {
+        let _ = client.call("thread/unsubscribe", json!({ "threadId": thread }), Duration::from_secs(5));
+    });
 }
 
 fn interrupt(s: &Session) {

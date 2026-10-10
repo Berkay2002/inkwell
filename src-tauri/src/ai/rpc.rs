@@ -3,7 +3,8 @@
 //!
 //! One reader thread routes everything the server says: responses to the waiting `call`, server
 //! requests (approvals, tool calls) are answered with an error so nothing ever blocks, and
-//! notifications go to the sink registered for their `threadId`. One more thread drains stderr
+//! notifications go to the sink registered for their `threadId`. One writer thread owns stdin, fed
+//! by a channel, so a slow pipe never blocks a caller or the reader. One more thread drains stderr
 //! (a full pipe stalls the child) and keeps the tail for error messages.
 
 use serde_json::{Value, json};
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -42,8 +43,11 @@ pub const CLOSED: &str = "__closed__";
 
 pub struct Client {
     pub pid: u32,
-    stdin: Mutex<ChildStdin>,
+    /// Lines for the writer thread (the only owner of stdin).
+    outbox: Sender<Vec<u8>>,
     child: Mutex<Child>,
+    /// This server's own Job object: `kill` takes grandchildren with it.
+    job: Option<job::Job>,
     next_id: AtomicI64,
     pending: Mutex<HashMap<i64, Sender<Result<Value, RpcError>>>>,
     sinks: Mutex<HashMap<String, Sender<Value>>>,
@@ -67,14 +71,19 @@ impl Client {
         let mut child = cmd
             .spawn()
             .map_err(|e| RpcError::Spawn(format!("could not start {}: {e}", spec.program.display())))?;
-        job::adopt(&child);
+        let job = job::Job::new();
+        if let Some(j) = &job {
+            j.adopt(&child);
+        }
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
         let stdin = child.stdin.take().expect("piped");
+        let (outbox, lines) = mpsc::channel();
         let c = Arc::new(Client {
             pid: child.id(),
-            stdin: Mutex::new(stdin),
+            outbox,
             child: Mutex::new(child),
+            job,
             next_id: AtomicI64::new(0),
             pending: Mutex::new(HashMap::new()),
             sinks: Mutex::new(HashMap::new()),
@@ -85,6 +94,9 @@ impl Client {
         std::thread::Builder::new().name("ai-rpc-read".into()).spawn(move || r.read_loop(stdout)).ok();
         let r = c.clone();
         std::thread::Builder::new().name("ai-rpc-err".into()).spawn(move || r.drain_stderr(stderr)).ok();
+        // Holds only a Weak: the thread ends when the Client (and with it the channel's sender) is gone.
+        let weak = Arc::downgrade(&c);
+        std::thread::Builder::new().name("ai-rpc-write".into()).spawn(move || write_loop(stdin, lines, weak)).ok();
         Ok(c)
     }
 
@@ -97,7 +109,11 @@ impl Client {
         self.stderr_tail.lock().unwrap().iter().cloned().collect::<Vec<_>>().join("\n")
     }
 
+    /// Ends the server and everything it started.
     pub fn kill(&self) {
+        if let Some(j) = &self.job {
+            j.terminate();
+        }
         let _ = self.child.lock().unwrap().kill();
     }
 
@@ -148,12 +164,11 @@ impl Client {
         RpcError::Closed(if t.trim().is_empty() { None } else { Some(t) })
     }
 
-    fn send(&self, msg: &Value) -> std::io::Result<()> {
+    /// Queues one message for the writer thread. Fails only when the writer is gone.
+    fn send(&self, msg: &Value) -> Result<(), ()> {
         let mut line = serde_json::to_vec(msg).expect("serializable");
         line.push(b'\n');
-        let mut w = self.stdin.lock().unwrap();
-        w.write_all(&line)?;
-        w.flush()
+        self.outbox.send(line).map_err(|_| ())
     }
 
     fn drain_stderr(&self, stderr: impl std::io::Read) {
@@ -192,6 +207,14 @@ impl Client {
         for (id, tx) in self.sinks.lock().unwrap().drain() {
             let _ = tx.send(json!({ "method": CLOSED, "params": { "threadId": id } }));
         }
+        // Reap the process without holding the child lock across a blocking wait (`kill` needs it).
+        for _ in 0..50 {
+            match self.child.lock().unwrap().try_wait() {
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                _ => return,
+            }
+        }
+        self.kill();
         let _ = self.child.lock().unwrap().wait();
     }
 
@@ -232,42 +255,72 @@ impl Client {
     }
 }
 
-/// A Job object with KILL_ON_JOB_CLOSE: the server dies with Inkwell, however Inkwell dies.
+fn write_loop(mut stdin: ChildStdin, lines: Receiver<Vec<u8>>, client: Weak<Client>) {
+    for line in lines {
+        if stdin.write_all(&line).and_then(|_| stdin.flush()).is_err() {
+            // a broken pipe: end the process so pending calls fail instead of waiting for their timeout
+            if let Some(c) = client.upgrade() {
+                c.kill();
+            }
+            return;
+        }
+    }
+}
+
+/// One Job object per server with KILL_ON_JOB_CLOSE: the server (and anything it spawned) dies with
+/// Inkwell however Inkwell dies, and `terminate` ends the whole tree on demand.
 #[cfg(windows)]
 mod job {
     use std::os::windows::io::AsRawHandle;
-    use std::sync::OnceLock;
-    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
     };
 
-    static JOB: OnceLock<usize> = OnceLock::new();
+    /// The handle as an integer, so the type is Send + Sync.
+    pub struct Job(usize);
 
-    fn handle() -> HANDLE {
-        *JOB.get_or_init(|| unsafe {
-            let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if h.is_null() {
-                return 0;
+    impl Job {
+        pub fn new() -> Option<Job> {
+            unsafe {
+                let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if h.is_null() {
+                    return None;
+                }
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let ok = SetInformationJobObject(
+                    h,
+                    JobObjectExtendedLimitInformation,
+                    (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+                if ok == 0 {
+                    CloseHandle(h);
+                    return None;
+                }
+                Some(Job(h as usize))
             }
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let ok = SetInformationJobObject(
-                h,
-                JobObjectExtendedLimitInformation,
-                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            if ok == 0 { 0 } else { h as usize }
-        }) as HANDLE
+        }
+
+        pub fn adopt(&self, child: &std::process::Child) {
+            unsafe {
+                AssignProcessToJobObject(self.0 as HANDLE, child.as_raw_handle() as HANDLE);
+            }
+        }
+
+        pub fn terminate(&self) {
+            unsafe {
+                TerminateJobObject(self.0 as HANDLE, 1);
+            }
+        }
     }
 
-    pub fn adopt(child: &std::process::Child) {
-        let h = handle();
-        if !h.is_null() {
+    impl Drop for Job {
+        fn drop(&mut self) {
             unsafe {
-                AssignProcessToJobObject(h, child.as_raw_handle() as HANDLE);
+                CloseHandle(self.0 as HANDLE);
             }
         }
     }
@@ -275,5 +328,12 @@ mod job {
 
 #[cfg(not(windows))]
 mod job {
-    pub fn adopt(_: &std::process::Child) {}
+    pub struct Job;
+    impl Job {
+        pub fn new() -> Option<Job> {
+            Some(Job)
+        }
+        pub fn adopt(&self, _: &std::process::Child) {}
+        pub fn terminate(&self) {}
+    }
 }

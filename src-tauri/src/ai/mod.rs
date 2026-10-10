@@ -42,8 +42,8 @@ pub async fn ai_prepare(eng: Eng<'_>, ai: Ai<'_>, doc: DocId) -> Result<Prepared
         let t = text_for(&eng, &ai, doc)?;
         let out = Prepared { pages: t.pages, chars: t.chars, enough: t.enough() };
         if out.enough {
-            let ai = ai.clone();
-            std::thread::spawn(move || ai.warm(doc));
+            let (ai, rev) = (ai.clone(), t.rev);
+            std::thread::spawn(move || ai.warm(doc, rev));
         }
         Ok(out)
     })
@@ -75,6 +75,7 @@ pub fn ai_cancel(ai: Ai<'_>, doc: DocId) {
 
 /// The document was closed: drop its chat thread and cached text.
 #[tauri::command]
-pub fn ai_close(ai: Ai<'_>, doc: DocId) {
-    ai.close_doc(doc);
+pub async fn ai_close(ai: Ai<'_>, doc: DocId) -> Result<(), String> {
+    let ai = ai.inner().clone();
+    off_thread(move || ai.close_doc(doc)).await
 }

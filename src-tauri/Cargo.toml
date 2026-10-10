@@ -32,6 +32,8 @@ mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"]
 parking_lot = "0.12"
 lru = "0.12"
 thiserror = "2"
+# Reads the user's codex config.toml (MCP server names). Already in the tree through tauri's build deps.
+toml = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security", "Win32_Foundation"] }

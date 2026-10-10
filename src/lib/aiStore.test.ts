@@ -74,6 +74,27 @@ describe("assistant store", () => {
     expect(useAi.getState().mark).toBeNull();
   });
 
+  it("does not bring a closed tab's chat back when a late event arrives", () => {
+    useAi.getState().setSettings({ consent: true });
+    useAi.getState().ask(1, { kind: "ask", question: "q" });
+    useStore.setState({ docs: {}, order: [], active: null });
+    expect(useAi.getState().chats[1]).toBeUndefined();
+    emit({ kind: "delta", text: "late" });
+    emit({ kind: "cancelled" });
+    expect(useAi.getState().chats[1]).toBeUndefined();
+  });
+
+  it("tries the document read again after a failure", async () => {
+    vi.mocked(ai.aiPrepare).mockRejectedValueOnce(new Error("boom"));
+    useAi.getState().prepare(1);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(useAi.getState().chats[1].prep).toBe("failed");
+    useAi.getState().prepare(1);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(useAi.getState().chats[1].prep).toMatchObject({ enough: true });
+    expect(ai.aiPrepare).toHaveBeenCalledTimes(2);
+  });
+
   it("drops the chat when its tab closes", () => {
     useAi.setState({ chats: { 1: { messages: [], prep: null } } });
     useStore.setState({ docs: {}, order: [], active: null });

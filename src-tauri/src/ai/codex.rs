@@ -75,9 +75,27 @@ pub fn resolve_binary() -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file()))
 }
 
-/// Names of the servers declared as `[mcp_servers.NAME]` (or a sub-table of it) in config.toml.
-/// `-c` can't empty a table, so each one is switched off by name.
+/// Names of the servers in config.toml's `mcp_servers` table, however they are written
+/// (`[mcp_servers.x]`, `[mcp_servers]` + `x = {..}`, `mcp_servers.x.command = ..`, an inline table),
+/// as `-c` key path segments. `-c` can't empty a table, so each one is switched off by name.
 pub fn mcp_server_names(config: &str) -> Vec<String> {
+    let Ok(doc) = config.parse::<toml::Table>() else {
+        // Not valid TOML (codex itself will complain): fall back to spotting `[mcp_servers.x]` headers.
+        return scan_headers(config);
+    };
+    let Some(toml::Value::Table(servers)) = doc.get("mcp_servers") else { return Vec::new() };
+    servers.keys().map(|k| key_segment(k)).collect()
+}
+
+fn key_segment(k: &str) -> String {
+    if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        k.to_string()
+    } else {
+        format!("\"{}\"", k.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+fn scan_headers(config: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in config.lines() {
         let Some(rest) = line.trim().strip_prefix('[') else { continue };
@@ -142,7 +160,33 @@ url = "http://x"
 [mcp_servers.fs-tools_2]
 [projects.'C:\a']
 "#;
-        assert_eq!(mcp_server_names(cfg), ["github", "\"my server\"", "fs-tools_2"]);
+        let mut names = mcp_server_names(cfg);
+        names.sort();
+        assert_eq!(names, ["\"my server\"", "fs-tools_2", "github"]);
+    }
+
+    #[test]
+    fn finds_servers_written_as_a_table_of_inline_tables() {
+        let cfg = "[mcp_servers]\nfoo = { command = \"x\", args = [\"a\"] }\n\"b r\" = { url = \"http://x\" }\n";
+        let mut names = mcp_server_names(cfg);
+        names.sort();
+        assert_eq!(names, ["\"b r\"", "foo"]);
+    }
+
+    #[test]
+    fn finds_servers_written_with_dotted_keys() {
+        let cfg = "mcp_servers.foo.command = \"npx\"\nmcp_servers.foo.args = [\"-y\"]\nmcp_servers.bar.url = \"http://x\"\n[other]\nx = 1\n";
+        let mut names = mcp_server_names(cfg);
+        names.sort();
+        assert_eq!(names, ["bar", "foo"]);
+        // and inside a header, mixed with a sub-table
+        let cfg = "[mcp_servers.a]\ncommand = \"c\"\n[mcp_servers.a.env]\nK = \"v\"\n";
+        assert_eq!(mcp_server_names(cfg), ["a"]);
+    }
+
+    #[test]
+    fn an_unparsable_config_still_gets_the_header_scan() {
+        assert_eq!(mcp_server_names("[mcp_servers.a]\nbroken = \n"), ["a"]);
     }
 
     #[test]
