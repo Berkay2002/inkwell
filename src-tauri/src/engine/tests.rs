@@ -140,7 +140,7 @@ fn page_png_of_an_old_generation_is_refused() {
     let id = eng.open(&path).unwrap().doc;
     assert!(eng.page_png(id, 0, 0, 256).is_ok());
     let rev = eng.bump_generation(id).unwrap();
-    assert!(matches!(eng.page_png(id, 0, 0, 256), Err(EngineError::Changed)));
+    assert!(matches!(eng.page_png(id, 0, 0, 256), Err(EngineError::Stale)));
     assert!(eng.page_png(id, rev, 0, 256).is_ok());
 }
 

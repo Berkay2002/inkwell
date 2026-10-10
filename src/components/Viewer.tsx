@@ -198,6 +198,7 @@ export function Viewer({ doc }: { doc: DocState }) {
           key={i}
           docId={id}
           page={i}
+          rev={rev}
           rot={rot}
           size={size}
           rawSize={sizes[i]}

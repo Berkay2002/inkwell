@@ -4,6 +4,7 @@ import { computeLayout, previewScaleKey, rotated, typicalSize, visibleRange } fr
 import { type Want, tileClient } from "../lib/tiles";
 import { type DocState, useStore } from "../store";
 import { Icon } from "./Icons";
+import { ContextMenu, pageActions } from "./PageMenu";
 import { TileCanvas } from "./TileCanvas";
 
 const THUMB_W = 150;
@@ -35,6 +36,7 @@ function Thumbnails({ doc }: { doc: DocState }) {
   const { id, sizes, rot, currentPage, rev } = doc;
   const el = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, h: 0 });
+  const [menu, setMenu] = useState<{ x: number; y: number; page: number } | null>(null);
   const zoom = THUMB_W / typicalSize(sizes, rot)[0];
   const layout = useMemo(() => computeLayout(sizes, rot, zoom, 0), [sizes, rot, zoom]);
 
@@ -78,6 +80,10 @@ function Thumbnails({ doc }: { doc: DocState }) {
         className={i === currentPage ? "thumb on" : "thumb"}
         style={{ top: tops[i], left: (THUMB_W + 40 - widths[i]) / 2, width: widths[i], height: heights[i] }}
         onClick={() => useStore.getState().goTo(id, i)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY, page: i });
+        }}
         title={`Page ${i + 1}`}
       >
         <TileCanvas docId={id} tile={tile} size={size} zoom={zoom} stream={1} cover />
@@ -97,12 +103,15 @@ function Thumbnails({ doc }: { doc: DocState }) {
   return (
     <div className="thumbs" ref={el} onScroll={() => setView({ top: el.current!.scrollTop, h: el.current!.clientHeight })}>
       <div style={{ position: "relative", height: total, width: THUMB_W + 40 }}>{items}</div>
+      {menu && menu.page < doc.pageCount && (
+        <ContextMenu x={menu.x} y={menu.y} items={pageActions(doc, [menu.page])} onClose={() => setMenu(null)} />
+      )}
     </div>
   );
 }
 
 function Outline({ doc }: { doc: DocState }) {
-  useEffect(() => useStore.getState().loadOutline(doc.id), [doc.id]);
+  useEffect(() => useStore.getState().loadOutline(doc.id), [doc.id, doc.rev]);
   if (!doc.outline) return <div className="empty">Loading…</div>;
   if (doc.outline.length === 0) return <div className="empty">This document has no outline.</div>;
   return (

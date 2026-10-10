@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// A document with at most this many characters (about 3k tokens) goes into the first turn whole;
 /// anything longer is read through the tools (see `Assistant::inline_max`).
@@ -68,6 +68,7 @@ pub fn extract(eng: &Arc<Engine>, doc: DocId) -> Result<DocText, EngineError> {
     let rev = entry.generation();
     let pages = entry.page_count().min(MAX_PAGES);
     let next = AtomicU32::new(0);
+    let stale = AtomicBool::new(false);
     let mut per_page: Vec<Vec<Chunk>> = Vec::new();
     per_page.resize_with(pages as usize, Vec::new);
     let results = std::sync::Mutex::new(&mut per_page);
@@ -79,13 +80,23 @@ pub fn extract(eng: &Arc<Engine>, doc: DocId) -> Result<DocText, EngineError> {
                     if p >= pages {
                         break;
                     }
-                    let lines = eng.call(class::BACKGROUND, move |e| e.page_text(doc, p)).unwrap_or_default();
+                    // An edit landing mid-extract makes the text mix revisions: report it instead of a partial result.
+                    let lines = match eng.call(class::BACKGROUND, move |e| e.page_text_at(doc, rev, p)) {
+                        Err(EngineError::Stale) => {
+                            stale.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        r => r.unwrap_or_default(),
+                    };
                     let chunks = chunk_page(p, &lines);
                     results.lock().unwrap()[p as usize] = chunks;
                 }
             });
         }
     });
+    if stale.load(Ordering::Relaxed) {
+        return Err(EngineError::Stale);
+    }
     let chunks: Vec<Chunk> = per_page.into_iter().flatten().collect();
     let chars = chunks.iter().map(|c| c.text.len()).sum();
     Ok(DocText { rev, pages, chunks, chars })

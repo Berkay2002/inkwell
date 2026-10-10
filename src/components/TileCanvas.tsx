@@ -22,7 +22,7 @@ export const TileCanvas = memo(function TileCanvas({ docId, tile, size, zoom, st
   const ref = useRef<HTMLCanvasElement>(null);
   const onDrawnRef = useRef(onDrawn);
   onDrawnRef.current = onDrawn;
-  const { page, rot, scale, tx, ty } = tile;
+  const { page, rot, scale, tx, ty, rev } = tile;
   const key = tileKeyStr(docId, tile);
 
   useEffect(() => {
@@ -41,10 +41,10 @@ export const TileCanvas = memo(function TileCanvas({ docId, tile, size, zoom, st
         onDrawnRef.current?.(key);
       },
     };
-    const t = { page, rot, scale, tx, ty };
+    const t = { page, rot, scale, tx, ty, rev };
     tileClient.register(stream, docId, t, sub);
     return () => tileClient.unregister(stream, docId, t, sub);
-    // key covers docId/page/rot/scale/tx/ty
+    // key covers docId/page/rot/scale/tx/ty/rev
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, stream]);
 

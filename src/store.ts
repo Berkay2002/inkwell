@@ -46,6 +46,13 @@ export interface DocState {
   currentPage: number;
   /** Edit generation reported by the engine; tiles are keyed by it. */
   rev: number;
+  /** Edited since opened or last saved (see lib/edit.ts). */
+  dirty: boolean;
+  /** What Undo / Redo would do, null when there is nothing. */
+  undoLabel: string | null;
+  redoLabel: string | null;
+  /** The Organize pages view is showing instead of the reader. */
+  organize: boolean;
   /** Where the viewer was when the tab was last left. */
   scroll: { page: number; yPt: number };
   outline: OutlineItem[] | null;
@@ -111,6 +118,10 @@ export const useStore = create<Store>((set, get) => {
       zoom: 1,
       currentPage: 0,
       rev: 0,
+      dirty: false,
+      undoLabel: null,
+      redoLabel: null,
+      organize: false,
       scroll: { page: 0, yPt: 0 },
       outline: null,
       search: emptySearch(),
@@ -123,8 +134,9 @@ export const useStore = create<Store>((set, get) => {
       active: doc.id,
       password: null,
     }));
-    // Page sizes stream in after the first page is already visible.
-    void api.pageSizes(doc.id, (start, sizes) => get().setSizes(doc.id, start, sizes));
+    // Page sizes stream in after the first page is already visible. An edit reports all sizes
+    // itself, so chunks of the file as opened are dropped once one lands.
+    void api.pageSizes(doc.id, (start, sizes) => get().docs[doc.id]?.rev === 0 && get().setSizes(doc.id, start, sizes));
   };
 
   return {
