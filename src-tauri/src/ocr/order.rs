@@ -9,6 +9,11 @@
 //! * everything else is read **row by row** and left to right: a table's cells are one to three
 //!   words, so a gutter between them is not a column break.
 //!
+//! Right-to-left scripts (Hebrew, Arabic) read from the right: a line whose letters are mostly
+//! RTL is ordered by descending x, and when the page is mostly RTL its columns are taken right to
+//! left. Digits and Latin words embedded in a RTL line stay in that sequence by position; a full
+//! bidi run split is not attempted.
+//!
 //! Fragments are engine lines (split where a gap is wider than two word heights), never single
 //! words, so a skewed line from an engine that does not deskew stays one unit.
 
@@ -20,6 +25,23 @@ const GUTTER: f32 = 1.5;
 const FRAGMENT_GAP: f32 = 2.0;
 /// Both sides of a column cut need at least this many words in the median fragment.
 const COLUMN_MIN_WORDS: usize = 3;
+
+fn is_rtl(c: char) -> bool {
+    matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)
+}
+
+/// More RTL letters than other letters among `words`.
+fn mostly_rtl<'a>(words: impl Iterator<Item = &'a Word>) -> bool {
+    let (mut rtl, mut other) = (0usize, 0usize);
+    for c in words.flat_map(|w| w.text.chars()).filter(|c| c.is_alphabetic()) {
+        if is_rtl(c) {
+            rtl += 1;
+        } else {
+            other += 1;
+        }
+    }
+    rtl > other
+}
 
 struct Frag {
     words: Vec<Word>,
@@ -50,6 +72,7 @@ pub(crate) fn reading_order(lines: Vec<Vec<Word>>) -> Vec<Vec<Word>> {
     heights.sort_by(|a, b| a.total_cmp(b));
     let mh = heights[heights.len() / 2].max(1.0);
 
+    let rtl = mostly_rtl(lines.iter().flatten());
     let mut frags = Vec::new();
     for mut l in lines {
         l.sort_by(|a, b| a.bbox[0].total_cmp(&b.bbox[0]));
@@ -65,22 +88,23 @@ pub(crate) fn reading_order(lines: Vec<Vec<Word>>) -> Vec<Vec<Word>> {
         }
     }
     let mut out = Vec::new();
-    cut(frags, mh, &mut out);
+    cut(frags, mh, rtl, &mut out);
     out
 }
 
-fn cut(frags: Vec<Frag>, mh: f32, out: &mut Vec<Vec<Word>>) {
+fn cut(frags: Vec<Frag>, mh: f32, rtl: bool, out: &mut Vec<Vec<Word>>) {
     if frags.len() > 1 {
         if let Some(x) = split_columns(&frags, mh) {
             let (left, right): (Vec<_>, Vec<_>) = frags.into_iter().partition(|f| f.b[2] <= x);
-            cut(left, mh, out);
-            cut(right, mh, out);
+            let (first, second) = if rtl { (right, left) } else { (left, right) };
+            cut(first, mh, rtl, out);
+            cut(second, mh, rtl, out);
             return;
         }
         let bands = split_rows(frags);
         if bands.len() > 1 {
             for band in bands {
-                cut(band, mh, out);
+                cut(band, mh, rtl, out);
             }
             return;
         }
@@ -145,7 +169,11 @@ fn leaf(mut frags: Vec<Frag>, out: &mut Vec<Vec<Word>>) {
         }
     }
     for (_, _, mut words) in lines {
-        words.sort_by(|a, b| a.bbox[0].total_cmp(&b.bbox[0]));
+        if mostly_rtl(words.iter()) {
+            words.sort_by(|a, b| b.bbox[2].total_cmp(&a.bbox[2]));
+        } else {
+            words.sort_by(|a, b| a.bbox[0].total_cmp(&b.bbox[0]));
+        }
         out.push(words);
     }
 }

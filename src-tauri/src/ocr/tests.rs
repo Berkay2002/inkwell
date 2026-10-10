@@ -33,6 +33,11 @@ enum Pg {
 }
 
 fn build(pages: &[Pg]) -> Vec<u8> {
+    build_ext(pages, "", "")
+}
+
+/// `catalog_extra` goes into the catalog dictionary, `scan_fonts` into the resources of scan pages.
+fn build_ext(pages: &[Pg], catalog_extra: &str, scan_fonts: &str) -> Vec<u8> {
     let mut out: Vec<u8> = b"%PDF-1.4\n".to_vec();
     let mut offs: Vec<usize> = Vec::new();
     let first = 4usize; // 1 catalog, 2 pages, 3 font
@@ -70,7 +75,7 @@ fn build(pages: &[Pg]) -> Vec<u8> {
                     page_no,
                     format!(
                         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Rotate {rotate} \
-                         /Resources << /XObject << /Im0 {} 0 R >> >> /Contents {} 0 R >>",
+                         /Resources << /XObject << /Im0 {} 0 R >> {scan_fonts} >> /Contents {} 0 R >>",
                         page_no + 1,
                         page_no + 2
                     )
@@ -95,7 +100,7 @@ fn build(pages: &[Pg]) -> Vec<u8> {
         }
     }
     let mut all: Vec<(usize, Vec<u8>)> = vec![
-        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (1, format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>").into_bytes()),
         (2, format!("<< /Type /Pages /Kids [{kids}] /Count {} >>", pages.len()).into_bytes()),
         (3, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec()),
     ];
@@ -178,11 +183,15 @@ struct Stub {
     osd: Option<u16>,
     delay: Duration,
     calls: AtomicUsize,
+    /// Every recognition fails with this message.
+    fail: Option<&'static str>,
+    /// Every recognition panics.
+    panics: bool,
 }
 
 impl Stub {
     fn new(lines: Vec<Vec<(&'static str, [f32; 4])>>) -> Self {
-        Self { lines, angle: None, osd: None, delay: Duration::ZERO, calls: AtomicUsize::new(0) }
+        Self { lines, angle: None, osd: None, delay: Duration::ZERO, calls: AtomicUsize::new(0), fail: None, panics: false }
     }
 }
 
@@ -196,12 +205,18 @@ impl Recognizer for Stub {
     fn max_dimension(&self) -> u32 {
         10000
     }
-    fn osd_rotation(&self, _bmp: &Bitmap) -> Option<u16> {
+    fn osd_rotation(&self, _bmp: &Bitmap, _cancel: &AtomicBool) -> Option<u16> {
         self.osd
     }
-    fn recognize(&self, _bmp: &Bitmap, _languages: &[String]) -> Result<RawPage, OcrError> {
+    fn recognize(&self, _bmp: &Bitmap, _languages: &[String], _cancel: &AtomicBool) -> Result<RawPage, OcrError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         std::thread::sleep(self.delay);
+        if self.panics {
+            panic!("stub recognizer panics");
+        }
+        if let Some(m) = self.fail {
+            return Err(OcrError::Backend(m.into()));
+        }
         Ok(RawPage {
             lines: self
                 .lines
@@ -275,6 +290,7 @@ fn page_boxes_and_image_bytes_are_untouched() {
     let input_bytes = build(&[scan]);
     let input = write_tmp("bytes-in.pdf", &input_bytes);
     let output = input.with_file_name("bytes-out.pdf");
+    let _ = std::fs::remove_file(&output);
     let stub = Stub::new(stub_words());
     let opts = Options { dpi: 72, workers: 1, detect_orientation: false, ..Options::default() };
     ocr_file(&input, &output, &stub, &opts, &no_progress, &AtomicBool::new(false)).unwrap();
@@ -380,6 +396,7 @@ fn forcing_again_replaces_our_layer() {
     let forced = Options { force: true, workers: 1, ..opts72() };
     let (first, _) = run_stub(&pages, &stub, &forced, "twice-a");
     let second = first.with_file_name("twice-b.pdf");
+    let _ = std::fs::remove_file(&second);
     let rep = ocr_file(&first, &second, &stub, &forced, &no_progress, &AtomicBool::new(false)).unwrap();
     assert_eq!(rep.pages_recognized, 1);
     assert_eq!(search(&second, 0, "Invoice").len(), 1, "a second layer would double every hit");
@@ -443,6 +460,255 @@ fn output_equals_input_is_refused_and_bad_pages_are_reported() {
     let o = Options { pages: Some(vec![7]), ..opts72() };
     let r = recognize(&Input::Path(&input), &stub, &o, &no_progress, &AtomicBool::new(false));
     assert!(matches!(r, Err(OcrError::BadPage(7))));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review fixes: text, files, failures
+// ---------------------------------------------------------------------------------------------
+
+/// A scratch directory of its own, so leftovers of one test cannot be blamed on another.
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join("inkwell-ocr-tests").join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn files_in(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    v.sort();
+    v
+}
+
+fn contents_len(path: &std::path::Path, page: i32) -> usize {
+    let doc = PdfDocument::open(path.to_string_lossy().as_ref()).unwrap();
+    let p = doc.load_pdf_page(page).unwrap();
+    p.object().get_dict("Contents").unwrap().unwrap().len().unwrap()
+}
+
+#[test]
+fn characters_outside_the_bmp_and_rtl_scripts_survive_extraction_and_search() {
+    let lines = vec![vec![
+        ("A\u{1D400}B\u{1F600}", [72.0, 100.0, 160.0, 114.0]),
+        ("\u{E000}\u{1F600}x", [170.0, 100.0, 230.0, 114.0]),
+        ("\u{645}\u{631}\u{62D}\u{628}\u{627}", [240.0, 100.0, 300.0, 114.0]),
+    ]];
+    let (out, rep) = run_stub(&[blank_scan(612.0, 792.0)], &Stub::new(lines), &opts72(), "astral");
+    assert_eq!(rep.pages_recognized, 1);
+    let t = page_text(&out, 0);
+    assert!(t.contains("A\u{1D400}B\u{1F600}"), "astral characters were split or lost: {t:?}");
+    // A real private-use character keeps its identity next to the codes handed out for emoji.
+    assert!(t.contains("\u{E000}\u{1F600}x"), "{t:?}");
+    // MuPDF lays an RTL run out in its own order, so only the letters are compared.
+    assert!("\u{645}\u{631}\u{62D}\u{628}\u{627}".chars().all(|c| t.contains(c)), "{t:?}");
+    assert!(!t.chars().any(|c| c == '\u{FFFD}'), "{t:?}");
+    assert_eq!(search(&out, 0, "A\u{1D400}B\u{1F600}").len(), 1);
+}
+
+#[test]
+fn right_to_left_lines_and_columns_are_read_from_the_right() {
+    let ar = |s: &str, x: f32, y: f32| Word { text: s.into(), bbox: [x, y, x + 40.0, y + 10.0] };
+    // One Arabic line, engine order left to right: logical order starts at the rightmost word.
+    let line = vec![ar("\u{62B}\u{62B}\u{62B}", 100.0, 100.0), ar("\u{62A}\u{62A}\u{62A}", 160.0, 100.0), ar("\u{627}\u{627}\u{627}", 220.0, 100.0)];
+    let out = reading_order(vec![line]);
+    assert_eq!(texts(&out), ["\u{627}\u{627}\u{627} \u{62A}\u{62A}\u{62A} \u{62B}\u{62B}\u{62B}"]);
+    // Latin lines are unaffected.
+    let latin = vec![w("one", 100.0, 100.0), w("two", 160.0, 100.0)];
+    assert_eq!(texts(&reading_order(vec![latin])), ["one two"]);
+    // Two Arabic columns of three-word lines: the right column first.
+    let col = |x: f32, tag: &str| -> Vec<Vec<Word>> {
+        (0..4).map(|i| (0..3).map(|j| ar(&format!("{tag}{tag}{i}{j}"), x + 45.0 * j as f32, 100.0 + 14.0 * i as f32)).collect()).collect()
+    };
+    let out = reading_order([col(60.0, "\u{644}"), col(400.0, "\u{631}")].concat());
+    let flat: Vec<String> = out.iter().flatten().map(|wd| wd.text.clone()).collect();
+    assert!(flat[0].contains('\u{631}') && flat[flat.len() - 1].contains('\u{644}'), "{flat:?}");
+    // Within a right-column line the rightmost word comes first.
+    assert_eq!(flat[..3], ["\u{631}\u{631}02", "\u{631}\u{631}01", "\u{631}\u{631}00"], "{flat:?}");
+}
+
+#[test]
+fn output_is_never_written_over_an_existing_file_or_the_input() {
+    let dir = scratch("overwrite");
+    let input = dir.join("in.pdf");
+    let bytes = build(&[blank_scan(612.0, 792.0)]);
+    std::fs::write(&input, &bytes).unwrap();
+    let stub = Stub::new(stub_words());
+    let go = |out: &std::path::Path| ocr_file(&input, out, &stub, &opts72(), &no_progress, &AtomicBool::new(false));
+
+    // An existing output stays as it was.
+    let existing = dir.join("out.pdf");
+    std::fs::write(&existing, b"precious").unwrap();
+    assert!(matches!(go(&existing), Err(OcrError::OutputExists(_))));
+    assert_eq!(std::fs::read(&existing).unwrap(), b"precious");
+
+    // The input by another spelling: `.`/`..` segments, and case on Windows.
+    assert!(matches!(go(&dir.join(".").join("in.pdf")), Err(OcrError::Io(_))));
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    assert!(matches!(go(&dir.join("sub").join("..").join("in.pdf")), Err(OcrError::Io(_))));
+    #[cfg(windows)]
+    assert!(matches!(go(&dir.join("IN.PDF")), Err(OcrError::Io(_))));
+    assert_eq!(std::fs::read(&input).unwrap(), bytes);
+
+    // Nothing but the two files and the empty directory is left behind.
+    assert_eq!(files_in(&dir), ["in.pdf", "out.pdf", "sub"]);
+}
+
+#[test]
+fn publish_refuses_to_replace_and_temp_files_remove_themselves() {
+    let dir = scratch("publish");
+    let out = dir.join("o.pdf");
+    std::fs::write(&out, b"mine").unwrap();
+    let a = TempFile::beside(&out).unwrap();
+    let b = TempFile::beside(&out).unwrap();
+    assert_ne!(a.0, b.0);
+    std::fs::write(&a.0, b"new").unwrap();
+    assert!(matches!(publish(&a.0, &out), Err(OcrError::OutputExists(_))));
+    assert_eq!(std::fs::read(&out).unwrap(), b"mine");
+    std::fs::remove_file(&out).unwrap();
+    publish(&a.0, &out).unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"new");
+    drop((a, b));
+    assert_eq!(files_in(&dir), ["o.pdf"]);
+}
+
+#[test]
+fn a_run_where_every_page_fails_is_an_error_and_leaves_nothing() {
+    for (name, stub) in [
+        ("failing", Stub { fail: Some("engine broke"), ..Stub::new(stub_words()) }),
+        ("panicking", Stub { panics: true, ..Stub::new(stub_words()) }),
+    ] {
+        let dir = scratch(name);
+        let input = dir.join("in.pdf");
+        std::fs::write(&input, build(&[blank_scan(612.0, 792.0), blank_scan(612.0, 792.0)])).unwrap();
+        let out = dir.join("out.pdf");
+        let r = ocr_file(&input, &out, &stub, &opts72(), &no_progress, &AtomicBool::new(false));
+        assert!(matches!(r, Err(OcrError::Backend(_))), "{name}: {r:?}");
+        assert_eq!(files_in(&dir), ["in.pdf"], "{name}");
+    }
+}
+
+#[test]
+fn a_missing_language_fails_once_before_any_page_is_read() {
+    let stub = Stub::new(stub_words());
+    let input = write_tmp("lang-in.pdf", &build(&[blank_scan(612.0, 792.0), blank_scan(612.0, 792.0)]));
+    let o = Options { languages: vec!["xx-XX".into()], ..opts72() };
+    let r = recognize(&Input::Path(&input), &stub, &o, &no_progress, &AtomicBool::new(false));
+    assert!(matches!(r, Err(OcrError::LanguageUnavailable(_))));
+    assert_eq!(stub.calls.load(Ordering::SeqCst), 0);
+    // Several languages: one installed pack is enough, the missing ones are skipped.
+    let o = Options { languages: vec!["xx-XX".into(), "en-GB".into()], ..opts72() };
+    assert!(recognize(&Input::Path(&input), &stub, &o, &no_progress, &AtomicBool::new(false)).is_ok());
+}
+
+#[test]
+fn byte_input_is_read_once_and_no_scratch_file_is_left() {
+    let bytes = build(&(0..8).map(|_| blank_scan(612.0, 792.0)).collect::<Vec<_>>());
+    let stub = Stub::new(stub_words());
+    let o = Options { workers: 4, ..opts72() };
+    let rec = recognize(&Input::Bytes(&bytes), &stub, &o, &no_progress, &AtomicBool::new(false)).unwrap();
+    assert_eq!(rec.pages.len(), 8);
+    assert!(rec.pages.iter().all(|p| matches!(p.status, PageStatus::Recognized)));
+    let mine = format!(".inkwell-ocr-input.pdf.inkwell-ocr-{}-", std::process::id());
+    assert!(files_in(&std::env::temp_dir()).iter().all(|n| !n.starts_with(&mine)));
+}
+
+#[test]
+fn forcing_again_does_not_stack_wrapper_streams() {
+    let dir = scratch("stack");
+    let first_in = dir.join("a.pdf");
+    std::fs::write(&first_in, build(&[blank_scan(612.0, 792.0)])).unwrap();
+    let stub = Stub::new(stub_words());
+    let forced = Options { force: true, workers: 1, ..opts72() };
+    let mut src = first_in.clone();
+    let mut lens = Vec::new();
+    for n in 1..=3 {
+        let out = dir.join(format!("r{n}.pdf"));
+        ocr_file(&src, &out, &stub, &forced, &no_progress, &AtomicBool::new(false)).unwrap();
+        lens.push(contents_len(&out, 0));
+        assert_eq!(search(&out, 0, "Invoice").len(), 1);
+        src = out;
+    }
+    assert_eq!(lens[0], lens[1], "{lens:?}");
+    assert_eq!(lens[1], lens[2], "{lens:?}");
+}
+
+#[test]
+fn our_font_name_is_not_taken_when_the_page_already_uses_it() {
+    let dir = scratch("fontname");
+    let input = dir.join("in.pdf");
+    // The page already has an unrelated font under the name we would pick.
+    let scan = Pg::Scan { w: 612.0, h: 792.0, bmp: Bitmap { w: 8, h: 8, pixels: vec![255; 64] }, rotate: 0, sloppy_cm: false };
+    std::fs::write(&input, build_ext(&[scan], "", "/Font << /InkOcrF 3 0 R >>")).unwrap();
+    let out = dir.join("out.pdf");
+    let rep = ocr_file(&input, &out, &Stub::new(stub_words()), &opts72(), &no_progress, &AtomicBool::new(false)).unwrap();
+    assert_eq!(rep.pages_recognized, 1);
+    let doc = PdfDocument::open(out.to_string_lossy().as_ref()).unwrap();
+    let page = doc.load_pdf_page(0).unwrap();
+    let fonts = page.object().get_dict_inheritable("Resources").unwrap().unwrap().get_dict("Font").unwrap().unwrap();
+    let base = |n: &str| fonts.get_dict(n).unwrap().unwrap().get_dict("BaseFont").unwrap().unwrap().as_name().unwrap().to_vec();
+    assert_eq!(base("InkOcrF"), b"Helvetica", "the page's own font must be left alone");
+    assert_eq!(base("InkOcrF1"), b"InkOcrGlyphless");
+    assert_eq!(search(&out, 0, "Invoice").len(), 1);
+}
+
+#[test]
+fn a_signed_document_is_copied_with_a_warning() {
+    let dir = scratch("signed");
+    let input = dir.join("in.pdf");
+    let scan = Pg::Scan { w: 612.0, h: 792.0, bmp: Bitmap { w: 8, h: 8, pixels: vec![255; 64] }, rotate: 0, sloppy_cm: false };
+    std::fs::write(&input, build_ext(&[scan], "/AcroForm << /Fields [] /SigFlags 3 >>", "")).unwrap();
+    let out = dir.join("out.pdf");
+    let rep = ocr_file(&input, &out, &Stub::new(stub_words()), &opts72(), &no_progress, &AtomicBool::new(false)).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.contains("signed")), "{:?}", rep.warnings);
+    // An unsigned file carries none.
+    let plain = dir.join("plain.pdf");
+    std::fs::write(&plain, build(&[blank_scan(612.0, 792.0)])).unwrap();
+    let rep = ocr_file(&plain, &dir.join("plain-out.pdf"), &Stub::new(stub_words()), &opts72(), &no_progress, &AtomicBool::new(false)).unwrap();
+    assert!(rep.warnings.is_empty());
+}
+
+#[test]
+fn a_child_process_is_killed_on_timeout_and_on_cancel() {
+    use super::backend::run_child;
+    #[cfg(windows)]
+    let sleeper = || {
+        let mut c = std::process::Command::new("ping");
+        c.args(["-n", "30", "127.0.0.1"]);
+        c
+    };
+    #[cfg(not(windows))]
+    let sleeper = || {
+        let mut c = std::process::Command::new("sleep");
+        c.arg("30");
+        c
+    };
+    let t = Instant::now();
+    let r = run_child(sleeper(), Vec::new(), Duration::from_millis(300), &AtomicBool::new(false));
+    assert!(matches!(&r, Err(OcrError::Backend(m)) if m.contains("timed out")), "{r:?}");
+    assert!(t.elapsed() < Duration::from_secs(10));
+
+    let cancel = AtomicBool::new(false);
+    let t = Instant::now();
+    let r = std::thread::scope(|s| {
+        s.spawn(|| {
+            std::thread::sleep(Duration::from_millis(200));
+            cancel.store(true, Ordering::SeqCst);
+        });
+        run_child(sleeper(), Vec::new(), Duration::from_secs(60), &cancel)
+    });
+    assert!(matches!(r, Err(OcrError::Cancelled)), "{r:?}");
+    assert!(t.elapsed() < Duration::from_secs(10));
+}
+
+#[test]
+fn a_cancelled_run_writes_nothing() {
+    let dir = scratch("cancelled");
+    let input = dir.join("in.pdf");
+    std::fs::write(&input, build(&[blank_scan(612.0, 792.0)])).unwrap();
+    let out = dir.join("out.pdf");
+    let r = ocr_file(&input, &out, &Stub::new(stub_words()), &opts72(), &no_progress, &AtomicBool::new(true));
+    assert!(matches!(r, Err(OcrError::Cancelled)), "{r:?}");
+    assert_eq!(files_in(&dir), ["in.pdf"]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -542,6 +808,7 @@ fn study_sample_compared_with_acrobat() {
     for (b, lang) in real_backends() {
         let out = std::env::temp_dir().join("inkwell-ocr-tests").join(format!("study-{}.pdf", b.name()));
         std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&out);
         let opts = Options { languages: vec![lang.into()], workers: 1, ..Options::default() };
         ocr_file(&scan, &out, b.as_ref(), &opts, &no_progress, &AtomicBool::new(false)).unwrap();
         let ours = page_text(&out, 0);
@@ -718,9 +985,9 @@ fn windows_language_priority_falls_through_to_an_installed_pack() {
     let bmp = scan_bitmap(&SCAN_LINES, 200);
     // First requested pack is not installed: the next one is used instead of failing.
     let have = packs.iter().find(|p| p.starts_with("en")).expect("en pack").clone();
-    let raw = WinRtOcr.recognize(&bmp, &["xx-XX".to_string(), have]).unwrap();
+    let raw = WinRtOcr.recognize(&bmp, &["xx-XX".to_string(), have], &AtomicBool::new(false)).unwrap();
     assert!(raw.lines.iter().flat_map(|l| &l.words).any(|w| w.text == "quick"));
-    assert!(matches!(WinRtOcr.recognize(&bmp, &["xx-XX".to_string()]), Err(OcrError::LanguageUnavailable(_))));
+    assert!(matches!(WinRtOcr.recognize(&bmp, &["xx-XX".to_string()], &AtomicBool::new(false)), Err(OcrError::LanguageUnavailable(_))));
 }
 
 #[test]

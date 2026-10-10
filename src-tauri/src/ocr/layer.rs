@@ -13,8 +13,9 @@ use mupdf::{Buffer, Matrix};
 use super::glyphless::GLYPHLESS_TTF;
 use super::{OcrError, PageResult};
 
-/// Resource name of the font in a page's `/Font` dictionary.
-pub(crate) const FONT_RES: &str = "InkOcrF";
+/// Preferred resource name of the font in a page's `/Font` dictionary; [`font_name_for`] picks an
+/// unused variant when the page already has something under it.
+const FONT_RES: &str = "InkOcrF";
 /// Marked-content tag that opens every layer stream; used to find and replace our own layers.
 const TAG: &str = "InkOcr";
 const BASE_FONT: &str = "InkOcrGlyphless";
@@ -30,10 +31,108 @@ fn deflate(data: &[u8]) -> Vec<u8> {
     z.finish().expect("finish Vec")
 }
 
-/// Adds the shared font. `max_code` is the largest UTF-16 code unit the layers use: the
-/// CIDToGIDMap only needs to reach it, which keeps it a few hundred bytes for Latin text.
-pub(crate) fn install_font(doc: &mut PdfDocument, max_code: u32) -> Result<PdfObject, OcrError> {
-    let max_code = max_code.clamp(0x7f, 0xffff);
+/// Characters outside the BMP (emoji, mathematical letters) cannot be one code of a 2-byte
+/// Identity-H string, and a surrogate pair would extract as two lone surrogates. Each distinct one
+/// gets a code in the Private Use Area instead and the ToUnicode map turns it back into the pair.
+pub(crate) struct Codes {
+    /// `(code, character)` in assignment order.
+    astral: Vec<(u16, char)>,
+    max_unit: u32,
+}
+
+impl Codes {
+    pub(crate) fn build<'a>(texts: impl Iterator<Item = &'a str>) -> Self {
+        let mut astral: Vec<char> = Vec::new();
+        let mut used_pua = std::collections::BTreeSet::new();
+        let mut max_unit = 0x7f;
+        for t in texts {
+            for c in t.chars() {
+                if c as u32 > 0xFFFF {
+                    if !astral.contains(&c) {
+                        astral.push(c);
+                    }
+                } else {
+                    max_unit = max_unit.max(c as u32);
+                    if (0xE000..=0xF8FF).contains(&(c as u32)) {
+                        used_pua.insert(c as u32);
+                    }
+                }
+            }
+        }
+        // Codes already used by real private-use characters are skipped; the PUA block holds 6400.
+        let mut free = (0xE000u32..=0xF8FF).filter(|c| !used_pua.contains(c));
+        let astral: Vec<(u16, char)> = astral.into_iter().map_while(|c| free.next().map(|code| (code as u16, c))).collect();
+        if let Some(&(code, _)) = astral.last() {
+            max_unit = max_unit.max(code as u32);
+        }
+        Self { astral, max_unit }
+    }
+
+    /// UTF-16 code units for the layer: BMP characters as themselves, astral ones as their PUA code.
+    /// An astral character beyond the 6400 codes is replaced by U+FFFD.
+    pub(crate) fn encode(&self, text: &str) -> Vec<u16> {
+        let mut out = Vec::with_capacity(text.len());
+        for c in text.chars().filter(|c| !c.is_control()) {
+            if (c as u32) <= 0xFFFF {
+                out.push(c as u16);
+            } else {
+                out.push(self.astral.iter().find(|(_, a)| *a == c).map_or(0xFFFD, |(code, _)| *code));
+            }
+        }
+        out
+    }
+
+    fn unit_codes(&self) -> impl Iterator<Item = u16> + '_ {
+        self.astral.iter().map(|(code, _)| *code)
+    }
+}
+
+/// ToUnicode CMap: identity everywhere except the assigned codes, which map to their surrogate pair.
+fn to_unicode_cmap(codes: &Codes) -> String {
+    let mut assigned: Vec<u16> = codes.unit_codes().collect();
+    assigned.sort_unstable();
+    // Identity ranges covering 0000-FFFF without the assigned codes.
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    let mut start = 0u32;
+    for a in assigned.iter().map(|&a| a as u32) {
+        if a > start {
+            ranges.push((start, a - 1));
+        }
+        start = a + 1;
+    }
+    if start <= 0xFFFF {
+        ranges.push((start, 0xFFFF));
+    }
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+         1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    for chunk in ranges.chunks(100) {
+        cmap.push_str(&format!("{} beginbfrange\n", chunk.len()));
+        for (a, b) in chunk {
+            cmap.push_str(&format!("<{a:04X}> <{b:04X}> <{a:04X}>\n"));
+        }
+        cmap.push_str("endbfrange\n");
+    }
+    for chunk in codes.astral.chunks(100) {
+        cmap.push_str(&format!("{} beginbfchar\n", chunk.len()));
+        for (code, c) in chunk {
+            let mut u = [0u16; 2];
+            let u = c.encode_utf16(&mut u);
+            cmap.push_str(&format!("<{code:04X}> <{:04X}{:04X}>\n", u[0], u[1]));
+        }
+        cmap.push_str("endbfchar\n");
+    }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    cmap
+}
+
+/// Adds the shared font. The CIDToGIDMap only needs to reach the largest code the layers use,
+/// which keeps it a few hundred bytes for Latin text.
+pub(crate) fn install_font(doc: &mut PdfDocument, codes: &Codes) -> Result<PdfObject, OcrError> {
+    let max_code = codes.max_unit.clamp(0x7f, 0xffff);
     let mut map = Vec::with_capacity((max_code as usize + 1) * 2);
     for _ in 0..=max_code {
         map.extend_from_slice(&[0, 1]); // every CID -> glyph 1 (the empty one)
@@ -48,13 +147,8 @@ pub(crate) fn install_font(doc: &mut PdfDocument, max_code: u32) -> Result<PdfOb
     let map_buf = Buffer::from_bytes(&map).map_err(mupdf_err)?;
     let map = doc.add_stream(&map_buf, Some(&map_dict), true).map_err(mupdf_err)?;
 
-    const CMAP: &str = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
-        /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
-        /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
-        1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
-        1 beginbfrange\n<0000> <FFFF> <0000>\nendbfrange\n\
-        endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
-    let cmap_buf = Buffer::from_bytes(CMAP.as_bytes()).map_err(mupdf_err)?;
+    let cmap = to_unicode_cmap(codes);
+    let cmap_buf = Buffer::from_bytes(cmap.as_bytes()).map_err(mupdf_err)?;
     let tounicode = doc.add_stream(&cmap_buf, None, false).map_err(mupdf_err)?;
 
     let r = |o: &PdfObject| o.as_indirect().map_err(mupdf_err);
@@ -99,13 +193,12 @@ fn num(out: &mut String, v: f32) {
 /// inverse of the page transform), which also covers `/Rotate` and a CropBox offset. A skewed
 /// scan gets its words laid along the skewed baseline.
 /// Returns the stream and the largest UTF-16 code unit used.
-pub(crate) fn layer_stream(page: &PageResult, user_from_page: &Matrix) -> (Vec<u8>, u32) {
+pub(crate) fn layer_stream(page: &PageResult, user_from_page: &Matrix, codes: &Codes, font_res: &str) -> Vec<u8> {
     let m = user_from_page;
     // Baseline direction on the displayed page and its "up" (y is down there).
     let (sin, cos) = page.baseline_deg().to_radians().sin_cos();
     let (ux, uy) = (m.a * cos + m.c * sin, m.b * cos + m.d * sin);
     let (vx, vy) = (m.a * sin - m.c * cos, m.b * sin - m.d * cos);
-    let mut max_code = 0u32;
     let mut s = String::with_capacity(page.lines.len() * 200);
     s.push_str(&format!("/{TAG} BMC\nq\nBT\n3 Tr\n"));
     let mut last_fs = -1.0f32;
@@ -114,11 +207,10 @@ pub(crate) fn layer_stream(page: &PageResult, user_from_page: &Matrix) -> (Vec<u
         let bottom = line.iter().map(|w| w.bbox[3]).fold(f32::MIN, f32::max);
         let fs = (bottom - top).max(1.0);
         for w in line {
-            let units: Vec<u16> = w.text.chars().filter(|c| !c.is_control()).collect::<String>().encode_utf16().collect();
+            let units = codes.encode(&w.text);
             if units.is_empty() {
                 continue;
             }
-            max_code = units.iter().fold(max_code, |a, &u| a.max(u as u32));
             let width = (w.bbox[2] - w.bbox[0]).max(0.5);
             // Every glyph advances 0.5 em, so Tz stretches the run to the box width.
             let tz = 200.0 * width / (fs * units.len() as f32);
@@ -126,7 +218,7 @@ pub(crate) fn layer_stream(page: &PageResult, user_from_page: &Matrix) -> (Vec<u
             let ex = m.a * x + m.c * y + m.e;
             let ey = m.b * x + m.d * y + m.f;
             if fs != last_fs {
-                s.push_str(&format!("/{FONT_RES} "));
+                s.push_str(&format!("/{font_res} "));
                 num(&mut s, fs);
                 s.push_str(" Tf\n");
                 last_fs = fs;
@@ -145,7 +237,7 @@ pub(crate) fn layer_stream(page: &PageResult, user_from_page: &Matrix) -> (Vec<u
         }
     }
     s.push_str("ET\nQ\nEMC\n");
-    (s.into_bytes(), max_code)
+    s.into_bytes()
 }
 
 /// Drops the content streams that earlier OCR runs of ours appended. Returns how many.
@@ -170,13 +262,58 @@ pub(crate) fn strip_layers(doc: &mut PdfDocument, page: &mut PdfPage) -> Result<
         }
     }
     if dropped > 0 {
+        // `add_layer` brackets the contents in a `q` stream and a `Q` stream each time; take the
+        // pair that went with the layer out so reruns do not stack wrappers.
+        let len = keep.len().map_err(mupdf_err)?;
+        let bare = |i: usize, op: &[u8]| {
+            keep.get_array(i as i32)
+                .ok()
+                .flatten()
+                .and_then(|o| o.read_stream().ok())
+                .is_some_and(|b| b.trim_ascii() == op)
+        };
+        if len >= 3 && bare(0, b"q") && bare(len as usize - 1, b"Q") {
+            let mut inner = doc.new_array().map_err(mupdf_err)?;
+            for i in 1..len - 1 {
+                if let Some(item) = keep.get_array(i as i32).map_err(mupdf_err)? {
+                    inner.array_push(item).map_err(mupdf_err)?;
+                }
+            }
+            keep = inner;
+        }
         page_obj.dict_put("Contents", keep).map_err(mupdf_err)?;
     }
     Ok(dropped)
 }
 
-/// Appends `stream` to the page and registers the font in the page's resources.
-pub(crate) fn add_layer(doc: &mut PdfDocument, page: &mut PdfPage, font: &PdfObject, stream: &[u8]) -> Result<(), OcrError> {
+/// Resource name for our font on this page: [`FONT_RES`] unless the page's own fonts already use
+/// it, then `InkOcrF1`, `InkOcrF2`... A name that holds a font of ours from an earlier run is reused
+/// (and overwritten) so reruns do not pile up entries.
+pub(crate) fn font_name_for(page: &PdfPage) -> String {
+    let fonts = page
+        .object()
+        .get_dict_inheritable("Resources")
+        .ok()
+        .flatten()
+        .and_then(|r| r.get_dict("Font").ok().flatten());
+    let Some(fonts) = fonts else { return FONT_RES.to_string() };
+    for n in 0.. {
+        let name = if n == 0 { FONT_RES.to_string() } else { format!("{FONT_RES}{n}") };
+        match fonts.get_dict(name.as_str()).ok().flatten() {
+            None => return name,
+            Some(f) => {
+                let ours = f.get_dict("BaseFont").ok().flatten().and_then(|b| b.as_name().ok()).is_some_and(|b| b == BASE_FONT.as_bytes());
+                if ours {
+                    return name;
+                }
+            }
+        }
+    }
+    unreachable!()
+}
+
+/// Appends `stream` to the page and registers the font in the page's resources under `font_res`.
+pub(crate) fn add_layer(doc: &mut PdfDocument, page: &mut PdfPage, font: &PdfObject, font_res: &str, stream: &[u8]) -> Result<(), OcrError> {
     let mut page_obj = page.object();
 
     // Own resources dictionary: the original may be inherited or shared with other pages.
@@ -189,7 +326,7 @@ pub(crate) fn add_layer(doc: &mut PdfDocument, page: &mut PdfPage, font: &PdfObj
         Some(f) if f.is_dict().map_err(mupdf_err)? => f.copy_dict().map_err(mupdf_err)?,
         _ => doc.new_dict().map_err(mupdf_err)?,
     };
-    fonts.dict_put(FONT_RES, font.clone()).map_err(mupdf_err)?;
+    fonts.dict_put(font_res, font.clone()).map_err(mupdf_err)?;
     res.dict_put("Font", fonts).map_err(mupdf_err)?;
     page_obj.dict_put("Resources", res).map_err(mupdf_err)?;
 

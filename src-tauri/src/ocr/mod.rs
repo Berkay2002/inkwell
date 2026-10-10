@@ -42,6 +42,8 @@ pub enum OcrError {
     BadPage(u32),
     #[error("{0}")]
     Io(String),
+    #[error("output already exists: {0}")]
+    OutputExists(String),
     #[error("cancelled")]
     Cancelled,
 }
@@ -156,14 +158,15 @@ pub struct Options {
     pub force: bool,
     /// Look for pages scanned sideways or upside down when the first read finds little text.
     pub detect_orientation: bool,
-    /// Pages recognised at once.
+    /// Pages recognised at once. The default is half the logical cores, at most 8: Windows OCR
+    /// scaled 92 -> 50 -> 26 -> 15 ms/page at 1/2/4/8 workers and only to 12 at 16 (docs/ocr-engine.md).
     pub workers: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-        Self { pages: None, languages: Vec::new(), dpi: 200, force: false, detect_orientation: true, workers: (cores / 2).clamp(1, 6) }
+        Self { pages: None, languages: Vec::new(), dpi: 200, force: false, detect_orientation: true, workers: (cores / 2).clamp(1, 8) }
     }
 }
 
@@ -328,73 +331,204 @@ struct Read {
     page_size: [f32; 2],
 }
 
-/// How much real-looking text a recognition found: characters in alphabetic words of three or more
-/// letters with a vowel (or a non-Latin letter). Upright text of any size scores high; text read
-/// sideways comes back as short fragments and punctuation.
-fn plausibility(raw: &RawPage) -> (usize, usize, usize) {
-    let (mut words, mut chars, mut tall) = (0, 0, 0);
-    for w in raw.lines.iter().flat_map(|l| &l.words) {
-        let t: Vec<char> = w.text.chars().filter(|c| !matches!(c, '.' | ',' | ':' | ';' | '!' | '?')).collect();
-        let ok = t.len() >= 3
-            && t.iter().all(|c| c.is_alphabetic())
-            && t.iter().any(|c| "aeiouyAEIOUYåäöÅÄÖéèêáíóúüÜ".contains(*c) || !c.is_ascii() && !c.is_uppercase() && !c.is_lowercase());
-        if ok {
-            words += 1;
-            chars += t.len();
-            // Tesseract reads sideways text where it lies: tall boxes around three-letter words.
-            if w.rect[3] - w.rect[1] > w.rect[2] - w.rect[0] {
-                tall += 1;
-            }
-        }
-    }
-    (words, chars, tall)
+/// Very common words of the main Latin-script languages. Text read upside down or sideways comes
+/// back as word-shaped junk (`n`/`u`, `p`/`d` swap), but junk is not "the", "och" or "der".
+const STOPWORDS: &[&str] = &[
+    "the", "and", "of", "to", "in", "is", "that", "for", "with", "on", "are", "as", "was", "be", "by", "it", "this",
+    "from", "at", "or", "not", "have", "has", "will", "an", "which", "their", "all", "och", "att", "det", "som",
+    "en", "är", "på", "för", "med", "av", "den", "till", "har", "inte", "om", "ett", "de", "vi", "kan", "jag",
+    "der", "die", "und", "das", "nicht", "ist", "ein", "zu", "mit", "von", "le", "la", "les", "des", "et", "est",
+    "une", "pour", "dans", "que", "qui", "pas", "el", "los", "las", "una", "por", "con", "para", "del", "es",
+];
+
+struct Plausibility {
+    /// Alphabetic words of three or more letters with a vowel (or a non-Latin letter).
+    words: usize,
+    chars: usize,
+    /// Of those, words whose box is taller than wide: Tesseract reads sideways text where it lies.
+    tall: usize,
+    stops: usize,
 }
 
-/// A first read this good is upright; skip the search.
-const HEALTHY_WORDS: usize = 8;
-const HEALTHY_CHARS: usize = 60;
+impl Plausibility {
+    fn of(raw: &RawPage) -> Self {
+        let mut p = Plausibility { words: 0, chars: 0, tall: 0, stops: 0 };
+        for w in raw.lines.iter().flat_map(|l| &l.words) {
+            let t: String = w.text.chars().filter(|c| !matches!(c, '.' | ',' | ':' | ';' | '!' | '?')).collect();
+            if !t.is_empty() && STOPWORDS.contains(&t.to_lowercase().as_str()) {
+                p.stops += 1;
+            }
+            let n = t.chars().count();
+            let ok = n >= 3
+                && t.chars().all(|c| c.is_alphabetic())
+                && t.chars().any(|c| "aeiouyAEIOUYåäöÅÄÖéèêáíóúüÜ".contains(c) || !c.is_ascii() && !c.is_uppercase() && !c.is_lowercase());
+            if ok {
+                p.words += 1;
+                p.chars += n;
+                if w.rect[3] - w.rect[1] > w.rect[2] - w.rect[0] {
+                    p.tall += 1;
+                }
+            }
+        }
+        p
+    }
+
+    /// Larger = more like real text.
+    fn score(&self) -> usize {
+        self.chars + 10 * self.stops
+    }
+
+    /// Upright running text: enough words, mostly wider than tall, with the usual share of
+    /// common words (about 40% in English; junk has a few percent).
+    fn healthy(&self) -> bool {
+        self.words >= 8 && self.chars >= 60 && self.tall * 2 < self.words && self.stops * 8 >= self.words
+    }
+}
 
 /// Clockwise degrees to turn `bmp` so its text is upright. `upright` is the read at 0 degrees.
-fn find_rotation(backend: &dyn Recognizer, bmp: &Bitmap, languages: &[String], upright: &RawPage) -> u16 {
-    let (words0, chars0, tall0) = plausibility(upright);
-    if words0 >= HEALTHY_WORDS && chars0 >= HEALTHY_CHARS && tall0 * 2 < words0 {
+/// A page in a language outside the stopword list pays for three half-size reads and stays at 0
+/// unless a turn is a clear win.
+fn find_rotation(backend: &dyn Recognizer, bmp: &Bitmap, languages: &[String], upright: &RawPage, cancel: &AtomicBool) -> u16 {
+    let first = Plausibility::of(upright);
+    if first.healthy() {
         return 0;
     }
-    if let Some(r) = backend.osd_rotation(bmp) {
+    if let Some(r) = backend.osd_rotation(bmp, cancel) {
         return r;
     }
     // No detector: read the page turned each way at half size and keep the clear winner.
     let small = if bmp.w.max(bmp.h) >= 1600 { bmp.halved() } else { bmp.rotated(0) };
-    let mut best = (0u16, chars0);
+    let mut best = (0u16, first.score());
     for r in [90u16, 180, 270] {
-        let Ok(raw) = backend.recognize(&small.rotated(r), languages) else { continue };
-        let (_, chars, _) = plausibility(&raw);
-        if chars > best.1 {
-            best = (r, chars);
+        let Ok(raw) = backend.recognize(&small.rotated(r), languages, cancel) else { continue };
+        let sc = Plausibility::of(&raw).score();
+        if sc > best.1 {
+            best = (r, sc);
         }
     }
     // Turning needs a clear win: a handful of short words is not evidence.
-    if best.0 != 0 && best.1 >= chars0 * 3 / 2 + 24 { best.0 } else { 0 }
+    if best.0 != 0 && best.1 >= first.score() * 3 / 2 + 24 { best.0 } else { 0 }
 }
 
-fn read_page(doc: &PdfDocument, backend: &dyn Recognizer, opts: &Options, index: u32) -> Result<Read, OcrError> {
+fn read_page(doc: &PdfDocument, backend: &dyn Recognizer, opts: &Options, index: u32, cancel: &AtomicBool) -> Result<Read, OcrError> {
     let b = doc.load_page(index as i32)?.bounds()?;
     let page_size = [b.x1 - b.x0, b.y1 - b.y0];
     if !opts.force && page_has_text(doc, index)? {
         return Ok(Read { status: PageStatus::SkippedHasText, lines: Vec::new(), skew_deg: None, rotation: 0, page_size });
     }
     let (bmp, scale) = render(doc, index, opts.dpi, backend.max_dimension())?;
-    let mut raw = backend.recognize(&bmp, &opts.languages)?;
+    let mut raw = backend.recognize(&bmp, &opts.languages, cancel)?;
     let mut rotation = 0;
     if opts.detect_orientation {
-        rotation = find_rotation(backend, &bmp, &opts.languages, &raw);
+        rotation = find_rotation(backend, &bmp, &opts.languages, &raw, cancel);
         if rotation != 0 {
-            raw = backend.recognize(&bmp.rotated(rotation), &opts.languages)?;
+            raw = backend.recognize(&bmp.rotated(rotation), &opts.languages, cancel)?;
         }
     }
     let (lines, skew_deg) = to_words(raw, scale);
     let status = if lines.is_empty() { PageStatus::NoText } else { PageStatus::Recognized };
     Ok(Read { status, lines, skew_deg, rotation, page_size })
+}
+
+fn same_language(a: &str, b: &str) -> bool {
+    let primary = |t: &str| t.split(['-', '_']).next().unwrap_or(t).to_ascii_lowercase();
+    primary(a) == primary(b)
+}
+
+/// One check before any page is read: a run in a language the backend lacks would otherwise
+/// "succeed" with every page failed.
+fn check_languages(backend: &dyn Recognizer, requested: &[String]) -> Result<(), OcrError> {
+    let have = backend.languages()?;
+    if have.is_empty() {
+        return Err(OcrError::LanguageUnavailable("no OCR language is installed".into()));
+    }
+    match requested.first() {
+        Some(first) if !requested.iter().any(|r| have.iter().any(|h| same_language(r, h))) => {
+            Err(OcrError::LanguageUnavailable(first.clone()))
+        }
+        _ => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Scratch files
+// ---------------------------------------------------------------------------------------------
+
+/// A scratch file next to `near`, unique per call (process id, counter, random) and created
+/// exclusively, so it can never be an existing file such as the input. Removed when dropped.
+struct TempFile(PathBuf);
+
+impl TempFile {
+    fn beside(near: &Path) -> Result<Self, OcrError> {
+        use std::hash::{BuildHasher, Hasher};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let name = near.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        loop {
+            let nonce = std::collections::hash_map::RandomState::new().build_hasher().finish();
+            let path = near.with_file_name(format!(
+                ".{name}.inkwell-ocr-{}-{}-{nonce:016x}.tmp",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(OcrError::Io(e.to_string())),
+            }
+        }
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Gives `tmp`'s content the name `out` without ever replacing an existing file (a hard link is
+/// atomic; file systems without links get an exclusive create and a copy). The caller drops `tmp`.
+fn publish(tmp: &Path, out: &Path) -> Result<(), OcrError> {
+    use std::io::ErrorKind::AlreadyExists;
+    let exists = || OcrError::OutputExists(out.display().to_string());
+    match std::fs::hard_link(tmp, out) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == AlreadyExists => Err(exists()),
+        Err(_) => {
+            let mut dst = match std::fs::OpenOptions::new().write(true).create_new(true).open(out) {
+                Ok(f) => f,
+                Err(e) if e.kind() == AlreadyExists => return Err(exists()),
+                Err(e) => return Err(OcrError::Io(e.to_string())),
+            };
+            let copied = std::fs::File::open(tmp).and_then(|mut src| std::io::copy(&mut src, &mut dst)).and_then(|_| dst.sync_all());
+            if let Err(e) = copied {
+                drop(dst);
+                let _ = std::fs::remove_file(out);
+                return Err(OcrError::Io(e.to_string()));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// True when `output` names the same file as `input` (case, symlinks, `..` resolved), whether or
+/// not `output` exists yet.
+fn is_same_file(input: &Path, output: &Path) -> bool {
+    let Ok(input) = input.canonicalize() else { return false };
+    let resolved = match output.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            let parent = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+            match (parent.canonicalize(), output.file_name()) {
+                (Ok(p), Some(n)) => p.join(n),
+                _ => return false,
+            }
+        }
+    };
+    if cfg!(windows) {
+        input.to_string_lossy().eq_ignore_ascii_case(&resolved.to_string_lossy())
+    } else {
+        input == resolved
+    }
 }
 
 /// Stage 1. Never writes. `progress` is called from worker threads after each page; set `cancel`
@@ -407,6 +541,20 @@ pub fn recognize(
     cancel: &AtomicBool,
 ) -> Result<Recognition, OcrError> {
     let started = Instant::now();
+    check_languages(backend, &opts.languages)?;
+    // Workers each open their own document; bytes would be copied once per worker, so a byte
+    // input is written to one temp file they all read.
+    let spill;
+    let spilled;
+    let input: &Input = match input {
+        Input::Bytes(b) => {
+            spill = TempFile::beside(&std::env::temp_dir().join("inkwell-ocr-input.pdf"))?;
+            std::fs::write(&spill.0, b).map_err(|e| OcrError::Io(e.to_string()))?;
+            spilled = Input::Path(&spill.0);
+            &spilled
+        }
+        other => other,
+    };
     let count = page_count(input)?;
     let pages: Vec<u32> = match &opts.pages {
         Some(p) => {
@@ -439,7 +587,7 @@ pub fn recognize(
                         Ok(d) => {
                             // A backend panic must not take the whole run (and the UI) with it.
                             let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                read_page(d, backend, opts, page)
+                                read_page(d, backend, opts, page, cancel)
                             }));
                             match run {
                                 Ok(r) => r,
@@ -448,6 +596,10 @@ pub fn recognize(
                         }
                         Err(e) => Err(OcrError::Pdf(e.to_string())),
                     };
+                    // A cancelled page is not a failed page: leave it out.
+                    if matches!(r, Err(OcrError::Cancelled)) {
+                        return;
+                    }
                     let r = r.unwrap_or_else(|e| Read {
                         status: PageStatus::Failed(e.to_string()),
                         lines: Vec::new(),
@@ -498,12 +650,8 @@ pub fn apply(doc: &mut PdfDocument, results: &[PageResult], replace: bool) -> Re
     if todo.is_empty() {
         return Ok(report);
     }
-    let max_code = todo
-        .iter()
-        .flat_map(|r| r.lines.iter().flatten())
-        .flat_map(|w| w.text.encode_utf16())
-        .fold(0u32, |a, u| a.max(u as u32));
-    let font = layer::install_font(doc, max_code)?;
+    let codes = layer::Codes::build(todo.iter().flat_map(|r| r.lines.iter().flatten()).map(|w| w.text.as_str()));
+    let font = layer::install_font(doc, &codes)?;
     for r in todo {
         let mut page = doc.load_pdf_page(r.page as i32)?;
         if replace {
@@ -514,8 +662,9 @@ pub fn apply(doc: &mut PdfDocument, results: &[PageResult], replace: bool) -> Re
         let user_from_page = page_from_user
             .invert()
             .ok_or_else(|| OcrError::Pdf(format!("page {} has a singular transform", r.page + 1)))?;
-        let (stream, _) = layer::layer_stream(r, &user_from_page);
-        layer::add_layer(doc, &mut page, &font, &stream)?;
+        let font_res = layer::font_name_for(&page);
+        let stream = layer::layer_stream(r, &user_from_page, &codes, &font_res);
+        layer::add_layer(doc, &mut page, &font, &font_res, &stream)?;
         report.pages_written += 1;
         report.words += r.lines.iter().map(|l| l.len() as u32).sum::<u32>();
     }
@@ -547,6 +696,8 @@ pub struct Report {
     pub words: u32,
     pub total_ms: u64,
     pub pages: Vec<PageSummary>,
+    /// Things the user should know about the output (a signed file, for one).
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -559,8 +710,10 @@ pub struct PageSummary {
     pub ms: u32,
 }
 
-/// Scan in, searchable copy out: recognise, add the layer to a copy of `input`, save to `output`.
-/// `input` and `output` must differ. On cancel nothing is written and `Err(Cancelled)` is returned.
+/// Scan in, searchable copy out: recognise, add the layer to a copy of `input`, publish it as
+/// `output`. `output` must not exist and must not be the input (`Err(OutputExists)` / `Err(Io)`):
+/// neither the input nor anything else is ever replaced. On cancel, or when no page could be read,
+/// nothing is written and an error is returned.
 pub fn ocr_file(
     input: &Path,
     output: &Path,
@@ -569,43 +722,66 @@ pub fn ocr_file(
     progress: &(dyn Fn(Progress) + Sync),
     cancel: &AtomicBool,
 ) -> Result<Report, OcrError> {
-    if input == output {
+    if is_same_file(input, output) {
         return Err(OcrError::Io("output must be a different file than the input".into()));
+    }
+    if output.exists() {
+        return Err(OcrError::OutputExists(output.display().to_string()));
     }
     let rec = recognize(&Input::Path(input), backend, opts, progress, cancel)?;
     if rec.cancelled {
         return Err(OcrError::Cancelled);
     }
-    // Work on a temp copy beside the output: an incremental save appends to the file it was
-    // opened from, and a failure must never leave a half-written output.
-    let tmp: PathBuf = output.with_extension("ocr-tmp");
-    let mut applied = ApplyReport::default();
-    let r = (|| {
-        std::fs::copy(input, &tmp).map_err(|e| OcrError::Io(e.to_string()))?;
-        // Windows refuses to rename a file that is still open: `doc` lives in its own scope.
-        let full = {
-            let mut doc = Input::Path(&tmp).open()?;
-            applied = apply(&mut doc, &rec.pages, opts.force)?;
-            if applied.pages_written == 0 {
-                None
-            } else if doc.can_be_saved_incrementally() {
-                save(&doc, &tmp)?;
-                None
-            } else {
-                let full = output.with_extension("ocr-full");
-                save(&doc, &full)?;
-                Some(full)
-            }
-        };
-        if let Some(full) = full {
-            std::fs::rename(&full, &tmp).map_err(|e| OcrError::Io(e.to_string()))?;
-        }
-        std::fs::rename(&tmp, output).map_err(|e| OcrError::Io(e.to_string()))
-    })();
-    if r.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    let failed: Vec<&str> = rec.pages.iter().filter_map(|p| match &p.status { PageStatus::Failed(m) => Some(m.as_str()), _ => None }).collect();
+    if !failed.is_empty() && rec.pages.iter().all(|p| !matches!(p.status, PageStatus::Recognized)) {
+        return Err(OcrError::Backend(format!("no page could be read: {}", failed[0])));
     }
-    r?;
+
+    // Work on a scratch copy beside the output: an incremental save appends to the file it was
+    // opened from, and a failure must never leave a half-written output or touch the input.
+    let tmp = TempFile::beside(output)?;
+    let mut applied = ApplyReport::default();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut full: Option<TempFile> = None;
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), OcrError> {
+        let io = |e: std::io::Error| OcrError::Io(e.to_string());
+        let mut dst = std::fs::OpenOptions::new().write(true).truncate(true).open(&tmp.0).map_err(io)?;
+        std::io::copy(&mut std::fs::File::open(input).map_err(io)?, &mut dst).map_err(io)?;
+        drop(dst);
+        // The document must be closed before its file is linked or renamed (Windows).
+        let mut doc = Input::Path(&tmp.0).open()?;
+        applied = apply(&mut doc, &rec.pages, opts.force)?;
+        if applied.pages_written > 0 {
+            let signed = doc
+                .catalog()
+                .ok()
+                .and_then(|c| c.get_dict("AcroForm").ok().flatten())
+                .and_then(|f| f.get_dict("SigFlags").ok().flatten())
+                .and_then(|f| f.as_int().ok())
+                .is_some_and(|f| f & 1 != 0);
+            if doc.can_be_saved_incrementally() {
+                save(&doc, &tmp.0)?;
+                if signed {
+                    warnings.push("The document is signed; the signature covers the original revision only and viewers may report the copy as modified.".into());
+                }
+            } else {
+                let f = TempFile::beside(output)?;
+                save(&doc, &f.0)?;
+                full = Some(f);
+                if signed {
+                    warnings.push("The document is signed; the signatures are invalid in the OCR copy.".into());
+                }
+            }
+        }
+        drop(doc);
+        publish(full.as_ref().map_or(&tmp.0, |f| &f.0), output)
+    }));
+    drop(full);
+    drop(tmp);
+    match r {
+        Ok(r) => r?,
+        Err(_) => return Err(OcrError::Backend("OCR crashed while writing the copy".into())),
+    }
 
     let count = |f: fn(&PageStatus) -> bool| rec.pages.iter().filter(|p| f(&p.status)).count() as u32;
     Ok(Report {
@@ -629,5 +805,6 @@ pub fn ocr_file(
                 ms: p.ms,
             })
             .collect(),
+        warnings,
     })
 }

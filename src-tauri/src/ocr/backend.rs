@@ -1,9 +1,11 @@
 //! Recognition backends. A backend turns a grey bitmap into words with pixel boxes; everything else
 //! (rendering, coordinates, the PDF text layer) lives outside and is backend-independent.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use super::OcrError;
 
@@ -76,12 +78,14 @@ pub trait Recognizer: Send + Sync {
     fn languages(&self) -> Result<Vec<String>, OcrError>;
     /// Largest bitmap side the engine accepts.
     fn max_dimension(&self) -> u32;
-    /// `languages` is in priority order (BCP-47 tags); empty = the backend's default.
-    fn recognize(&self, bmp: &Bitmap, languages: &[String]) -> Result<RawPage, OcrError>;
+    /// `languages` is in priority order (BCP-47 tags); empty = the backend's default. `cancel` is
+    /// polled by backends that run long (a child process is killed when it is set); a cancelled
+    /// call returns `Err(Cancelled)`.
+    fn recognize(&self, bmp: &Bitmap, languages: &[String], cancel: &AtomicBool) -> Result<RawPage, OcrError>;
     /// Degrees (0/90/180/270) to turn `bmp` clockwise to make its text upright, when the engine has
     /// a dedicated detector (Tesseract OSD). `None` = no opinion; the caller then tries rotations
     /// with [`recognize`](Self::recognize).
-    fn osd_rotation(&self, _bmp: &Bitmap) -> Option<u16> {
+    fn osd_rotation(&self, _bmp: &Bitmap, _cancel: &AtomicBool) -> Option<u16> {
         None
     }
 }
@@ -142,7 +146,11 @@ mod winrt {
             OcrEngine::MaxImageDimension().unwrap_or(10000)
         }
 
-        fn recognize(&self, bmp: &Bitmap, languages: &[String]) -> Result<RawPage, OcrError> {
+        fn recognize(&self, bmp: &Bitmap, languages: &[String], cancel: &AtomicBool) -> Result<RawPage, OcrError> {
+            // A page takes 0.1-0.3 s and the operation cannot be interrupted: check before starting.
+            if cancel.load(Ordering::Relaxed) {
+                return Err(OcrError::Cancelled);
+            }
             // One engine per call: creation is cheap next to recognition and keeps this `Sync`.
             // The first requested language that has a pack wins (the API has no per-word confidence
             // to merge several engines' results with, see docs/ocr-engine.md).
@@ -186,7 +194,12 @@ mod winrt {
 pub struct TesseractCli {
     pub exe: PathBuf,
     pub tessdata: Option<PathBuf>,
+    /// A run longer than this is killed (a corrupt scan can make Tesseract spin).
+    pub timeout: Duration,
 }
+
+/// Default for [`TesseractCli::timeout`].
+pub const TESSERACT_TIMEOUT: Duration = Duration::from_secs(180);
 
 const ISO3: &[(&str, &str)] = &[
     ("en", "eng"),
@@ -212,7 +225,7 @@ const ISO3: &[(&str, &str)] = &[
 
 impl TesseractCli {
     /// Where to look for `tesseract.exe`, in order: the host's `ocr.tesseractPath` setting
-    /// (`configured`), `INKWELL_TESSERACT`, then `Tesseract-OCR	esseract.exe` under `%ProgramFiles%`
+    /// (`configured`), `INKWELL_TESSERACT`, then `Tesseract-OCR\tesseract.exe` under `%ProgramFiles%`
     /// and `%ProgramFiles(x86)%`. Neither `PATH` nor the current directory is searched, and no
     /// location is hard-coded. Existence is not checked here.
     pub fn candidates(configured: Option<&Path>, env: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
@@ -250,7 +263,7 @@ impl TesseractCli {
                 continue;
             };
             eprintln!("ocr: using Tesseract at {}", exe.display());
-            return Some(Self { exe, tessdata: Some(tessdata) });
+            return Some(Self { exe, tessdata: Some(tessdata), timeout: TESSERACT_TIMEOUT });
         }
         None
     }
@@ -307,7 +320,7 @@ impl Recognizer for TesseractCli {
         32000
     }
 
-    fn recognize(&self, bmp: &Bitmap, languages: &[String]) -> Result<RawPage, OcrError> {
+    fn recognize(&self, bmp: &Bitmap, languages: &[String], cancel: &AtomicBool) -> Result<RawPage, OcrError> {
         let mut cmd = Command::new(&self.exe);
         cmd.args(["stdin", "stdout", "--oem", "1", "--psm", "3", "-l"]).arg(Self::lang_arg(languages));
         if let Some(d) = self.tessdata_dir() {
@@ -316,19 +329,7 @@ impl Recognizer for TesseractCli {
         cmd.arg("tsv");
         // Pages already run in parallel: keep each process on one thread.
         cmd.env("OMP_THREAD_LIMIT", "1");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| OcrError::Backend(format!("tesseract: {e}")))?;
-        let data = pgm(bmp);
-        let mut stdin = child.stdin.take().expect("piped");
-        // Feed on a thread so a full stdout pipe cannot deadlock a large page.
-        let feeder = std::thread::spawn(move || stdin.write_all(&data));
-        let out = child.wait_with_output().map_err(|e| OcrError::Backend(format!("tesseract: {e}")))?;
-        let _ = feeder.join();
+        let out = run_child(cmd, pgm(bmp), self.timeout, cancel)?;
         if !out.status.success() {
             return Err(OcrError::Backend(format!(
                 "tesseract exited with {}: {}",
@@ -339,34 +340,72 @@ impl Recognizer for TesseractCli {
         Ok(parse_tsv(&String::from_utf8_lossy(&out.stdout)))
     }
 
-    fn osd_rotation(&self, bmp: &Bitmap) -> Option<u16> {
+    fn osd_rotation(&self, bmp: &Bitmap, cancel: &AtomicBool) -> Option<u16> {
         let tessdata = self.tessdata_dir()?;
         if !tessdata.join("osd.traineddata").is_file() {
             return None;
         }
         let mut cmd = Command::new(&self.exe);
         cmd.args(["stdin", "stdout", "--psm", "0", "-l", "osd", "--tessdata-dir"]).arg(tessdata);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        let mut child = cmd.spawn().ok()?;
-        let data = pgm(bmp);
-        let mut stdin = child.stdin.take()?;
-        let feeder = std::thread::spawn(move || stdin.write_all(&data));
-        let out = child.wait_with_output().ok()?;
-        let _ = feeder.join();
+        let out = run_child(cmd, pgm(bmp), self.timeout, cancel).ok()?;
         parse_osd(&String::from_utf8_lossy(&out.stdout))
     }
 }
 
+/// Runs `cmd` with `input` on stdin and collects its output. The child is killed when `cancel` is
+/// set or `timeout` passes, so neither a stuck page nor a cancelled job leaves a process behind.
+pub(crate) fn run_child(mut cmd: Command, input: Vec<u8>, timeout: Duration, cancel: &AtomicBool) -> Result<std::process::Output, OcrError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let err = |e: std::io::Error| OcrError::Backend(format!("tesseract: {e}"));
+    let mut child = cmd.spawn().map_err(err)?;
+    let mut stdin = child.stdin.take().expect("piped");
+    let mut stdout = child.stdout.take().expect("piped");
+    let mut stderr = child.stderr.take().expect("piped");
+    // All three pipes on their own threads: a full stdout pipe cannot deadlock a large page, and
+    // killing the child closes them, which ends the threads.
+    let feeder = std::thread::spawn(move || stdin.write_all(&input));
+    let out_t = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = stdout.read_to_end(&mut v);
+        v
+    });
+    let err_t = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = stderr.read_to_end(&mut v);
+        v
+    });
+    let started = Instant::now();
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {}
+            Err(e) => break Err(err(e)),
+        }
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err(OcrError::Cancelled);
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err(OcrError::Backend(format!("tesseract timed out after {} s", timeout.as_secs())));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let _ = feeder.join();
+    let (stdout, stderr) = (out_t.join().unwrap_or_default(), err_t.join().unwrap_or_default());
+    Ok(std::process::Output { status: outcome?, stdout, stderr })
+}
+
 /// `Rotate: 270` and `Orientation confidence: 11.3` from `--psm 0` output; low confidence = `None`.
 pub(crate) fn parse_osd(text: &str) -> Option<u16> {
-    let field = |key: &str| {
-        text.lines().find_map(|l| l.strip_prefix(key)).and_then(|v| v.trim().parse::<f32>().ok())
-    };
+    let field = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)).and_then(|v| v.trim().parse::<f32>().ok());
     let rotate = field("Rotate:")?;
     let confidence = field("Orientation confidence:")?;
     (confidence >= 2.0).then_some((rotate as u16) % 360)
