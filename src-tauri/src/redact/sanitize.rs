@@ -274,16 +274,20 @@ fn fix_name_trees(doc: &PdfDocument) -> Result<()> {
     if let Some(st) = cat.get_dict("StructTreeRoot")? {
         roots.extend(st.get_dict("IDTree")?);
     }
+    let mut seen = HashSet::new();
     for mut root in roots {
-        fix_tree(&mut root, 0)?;
+        fix_tree(&mut root, 0, &mut seen)?;
     }
     Ok(())
 }
 
 /// Fixes one name-tree node; returns its first and last key, None when it holds none.
-fn fix_tree(node: &mut PdfObject, depth: u32) -> Result<Option<(PdfObject, PdfObject)>> {
-    if depth > 32 {
-        let place = "a name tree deeper than 32 levels (not sanitized)".to_string();
+/// `seen`: nodes visited so far. A node reached twice (shared kids, a cycle) fails closed: shared
+/// kids would be walked once per path, 2^32 times for a tree that lists each kid twice.
+fn fix_tree(node: &mut PdfObject, depth: u32, seen: &mut HashSet<i32>) -> Result<Option<(PdfObject, PdfObject)>> {
+    let shared = node.is_indirect()? && !seen.insert(num(node)?);
+    if depth > 32 || shared {
+        let place = "a name tree deeper than 32 levels or with shared nodes (not sanitized)".to_string();
         return Err(RedactError::Leaked(vec![super::Leak { needle: String::new(), place, critical: true }]));
     }
     let mut bounds: Option<(PdfObject, PdfObject)> = None;
@@ -299,7 +303,7 @@ fn fix_tree(node: &mut PdfObject, depth: u32) -> Result<Option<(PdfObject, PdfOb
     {
         for i in (0..kids.len()? as i32).rev() {
             let Some(mut kid) = kids.get_array(i)? else { continue };
-            match fix_tree(&mut kid, depth + 1)? {
+            match fix_tree(&mut kid, depth + 1, seen)? {
                 None => kids.array_delete(i)?,
                 Some((first, last)) => {
                     bounds = Some(match bounds {

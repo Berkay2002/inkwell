@@ -1008,3 +1008,46 @@ fn scrub_fails_closed_past_depth_32() {
     let r = sanitize(&mut doc, &Sanitize::NONE, &[]);
     assert!(matches!(r, Err(RedactError::Leaked(_))), "{r:?}");
 }
+
+/// A listed deflated entry whose stated size runs past its deflate stream over another local entry:
+/// the walk for unlisted entries skips that one as inside the first, so it must fail closed.
+#[test]
+fn zip_entry_size_covering_another_entry_fails_closed() {
+    let a = zip("a.txt", b"harmless");
+    let b = zip("b.txt", b"copy of ATTACH-SECRET");
+    let cd = |z: &[u8]| u32::from_le_bytes(z[z.len() - 6..z.len() - 2].try_into().unwrap()) as usize;
+    let (a_local, a_cd, b_local) = (&a[..cd(&a)], &a[cd(&a)..a.len() - 22], &b[..cd(&b)]);
+    let size = (u32::from_le_bytes(a_local[18..22].try_into().unwrap()) as usize + b_local.len()) as u32;
+    let mut z = [a_local, b_local, a_cd, &a[a.len() - 22..]].concat();
+    let new_cd = a_local.len() + b_local.len();
+    z[18..22].copy_from_slice(&size.to_le_bytes());
+    z[new_cd + 20..new_cd + 24].copy_from_slice(&size.to_le_bytes());
+    let n = z.len();
+    z[n - 6..n - 2].copy_from_slice(&(new_cd as u32).to_le_bytes());
+    let bytes = one_page(
+        b"BT /F1 12 Tf 72 700 Td (ATTACH-SECRET) Tj ET",
+        "",
+        &[obj("<< /Type /Filespec /F (a) /EF << /F 7 0 R >> >>"), stream("/Type /EmbeddedFile", &z)],
+        "/Names << /EmbeddedFiles << /Names [(a) 6 0 R] >> >>",
+    );
+    match redact_none(&bytes, "ATTACH-SECRET").1 {
+        Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.critical && l.place.contains("attachment")), "{l:?}"),
+        r => panic!("expected a leak, got {r:?}"),
+    }
+}
+
+/// A name tree listing the same kid twice per level would be walked 2^depth times; shared nodes
+/// fail closed instead.
+#[test]
+fn name_tree_with_shared_kids_fails_closed() {
+    let bytes = one_page(
+        b"BT /F1 12 Tf 72 700 Td (SHARED-SECRET) Tj ET",
+        "",
+        &[obj("<< /Kids [7 0 R 7 0 R] >>"), obj("<< /Names [(SHARED-SECRET) [4 0 R /Fit]] /Limits [(SHARED-SECRET) (SHARED-SECRET)] >>")],
+        "/Names << /Dests 6 0 R >>",
+    );
+    match redact_none(&bytes, "SHARED-SECRET").1 {
+        Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.place.contains("shared nodes")), "{l:?}"),
+        r => panic!("expected a refusal, got {r:?}"),
+    }
+}
