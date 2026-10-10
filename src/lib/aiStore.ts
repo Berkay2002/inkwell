@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as ai from "./ai";
+import { historyCheckpoint } from "./history";
 import {
   MODES,
   type Activity,
@@ -127,6 +128,8 @@ export const useAi = create<AiStore>((set, get) => {
         permissions: st.settings.permissions,
       },
       (e) => {
+        // the turn is over: what it changed (if anything) becomes a version history checkpoint
+        if (e.kind === "done" || e.kind === "error" || e.kind === "cancelled") void historyCheckpoint(doc).catch(() => {});
         switch (e.kind) {
           case "status":
             patchMsg(doc, bot.id, (m) => ({ ...m, phase: e.phase }));

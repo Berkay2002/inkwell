@@ -193,6 +193,11 @@ re-compressed fixture, where zstd works hardest).
   snapshot (engine rule 2).
 - Redaction apply: write the redacted file, then `redactions_applied(doc, keep, redacted_bytes, meta)` **instead
   of** the Save commit (it records the redacted bytes itself).
+- Wired (history_ipc.rs "edit-core hooks"): `save_document` -> `History::saved` (Save as rebinds the document
+  to its new file instead); the UI calls `history_checkpoint(doc)` when an assistant turn ends (done, error or
+  cancelled) and Rust checks the document ends with that turn's steps (`Engine::assistant_turn`, once per turn);
+  `spawn_autosave` every 2 minutes for documents whose unsaved content changed; the engine's redaction hook marks the
+  document and the next save that includes the redaction goes through `redactions_applied` (keep = `keeps_pre_redaction`).
 - Never keep (by path): on `Err(Ambiguous(candidates))` ask which history, then `set_never_keep(Target::Doc(d), true)`.
 - Close: drop the `SessionGuard`.
 - Settings: `usage()`, `policy()` / `set_policy()`, `prune()` (`Maintenance { pruned, freed_bytes, skipped }`; show

@@ -3,9 +3,10 @@
 //! History errors are logged and shown in the panel; they never fail an open.
 
 use crate::diff::{self, BytesId, CompareOptions, Comparison, VisualDiff};
+use crate::engine::edit::{Saved, Turn};
 use crate::engine::{DocId as EngDoc, Engine};
 use crate::paths::Paths;
-use crate::history::{self, Author, HistoryError, Resolution, SessionGuard, Store, Target, VersionId, VersionInfo};
+use crate::history::{self, Author, HistoryError, Kind, NewVersion, Resolution, SessionGuard, Store, Target, VersionId, VersionInfo};
 use lru::LruCache;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::ipc::Response;
-use tauri::{AppHandle, Emitter, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 type Hist<'a> = State<'a, Arc<History>>;
 
@@ -100,10 +101,25 @@ pub struct RestoreOut {
     version: VersionInfo,
 }
 
+/// How often open documents with new unsaved edits are autosaved.
+const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// What edit-core's hooks remember per open document.
+#[derive(Default)]
+struct Marks {
+    /// A redaction landed since the open: the next save that includes it purges the older versions.
+    redaction_pending: bool,
+    /// The assistant turn last recorded as a checkpoint.
+    checkpointed: Option<String>,
+    /// The engine generation of the last autosave (or of the last look that found nothing unsaved).
+    autosaved_rev: u32,
+}
+
 pub struct History {
     root: PathBuf,
     store: Mutex<Option<Arc<Store>>>,
     docs: Mutex<HashMap<EngDoc, Bound>>,
+    marks: Mutex<HashMap<EngDoc, Marks>>,
     /// The only way a UI-supplied file reaches `load`.
     /// Recently read sources, so paging through a version does not decrypt it once per page.
     bytes: Mutex<LruCache<String, Arc<(BytesId, Vec<u8>)>>>,
@@ -126,6 +142,7 @@ impl History {
             root,
             store: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
+            marks: Mutex::new(HashMap::new()),
             bytes: Mutex::new(LruCache::new(NonZeroUsize::new(6).unwrap())),
             diff_lock: Mutex::new(()),
         }
@@ -205,6 +222,7 @@ impl History {
     /// The document was closed (or is about to be reopened): drops the session.
     pub fn forget(&self, doc: EngDoc) {
         self.docs.lock().remove(&doc);
+        self.marks.lock().remove(&doc);
         // Decrypted versions must not outlive the binding that was allowed to read them.
         self.bytes.lock().clear();
     }
@@ -341,6 +359,102 @@ impl History {
             self.bind(doc, &path);
         }
         Ok(())
+    }
+
+    // ---- edit-core hooks (docs/history.md, "Integration points") ------------------------------
+
+    /// A save over the document's own file: records the bytes written. When they include a redaction
+    /// made since the open, `redactions_applied` records them instead and the versions from before
+    /// it are destroyed (unless the user chose to keep pre-redaction history).
+    pub fn saved(&self, doc: EngDoc, s: &Saved) -> Result<VersionInfo, String> {
+        let (store, hdoc, _) = self.bound(doc)?;
+        let meta = |label: &str| NewVersion {
+            author: Author::User,
+            kind: Kind::Save,
+            label: label.into(),
+            summary: s.summary.clone(),
+            name: None,
+            pages_touched: s.pages.clone(),
+        };
+        let pending = self.marks.lock().get(&doc).is_some_and(|m| m.redaction_pending);
+        if !(pending && s.redacts) {
+            return store.commit(hdoc, &s.bytes, meta("Saved")).map_err(err);
+        }
+        let keep = store.keeps_pre_redaction(hdoc).map_err(err)?;
+        let v = store.redactions_applied(hdoc, keep, &s.bytes, meta("Applied redactions")).map_err(err)?;
+        self.marks.lock().entry(doc).or_default().redaction_pending = false;
+        // decrypted bytes of purged versions must not stay readable from the cache
+        self.bytes.lock().clear();
+        Ok(v)
+    }
+
+    /// Engine redaction hook: a redaction landed in `doc` (in memory; the purge waits for the save).
+    pub fn on_redactions_applied(&self, doc: EngDoc) {
+        self.marks.lock().entry(doc).or_default().redaction_pending = true;
+    }
+
+    /// An assistant turn ended with changes: one checkpoint per turn, even when the bytes equal the head.
+    pub fn checkpoint(&self, doc: EngDoc, t: Turn) -> Result<Option<VersionInfo>, String> {
+        if self.marks.lock().get(&doc).is_some_and(|m| m.checkpointed.as_deref() == Some(t.turn.as_str())) {
+            return Ok(None);
+        }
+        let (store, hdoc, _) = self.bound(doc)?;
+        let meta = NewVersion {
+            author: Author::Assistant { turn_id: t.turn.clone() },
+            kind: Kind::Checkpoint,
+            label: t.label,
+            summary: t.summary,
+            name: None,
+            pages_touched: t.pages,
+        };
+        let v = store.commit(hdoc, &t.bytes, meta).map_err(err)?;
+        self.marks.lock().entry(doc).or_default().checkpointed = Some(t.turn);
+        Ok(Some(v))
+    }
+
+    /// Autosaves each bound document whose unsaved content changed since the last look. Returns the
+    /// documents that got a version.
+    pub fn autosave_all(&self, eng: &Engine) -> Vec<EngDoc> {
+        let docs: Vec<EngDoc> = self.docs.lock().iter().filter(|(_, b)| b.hdoc.is_some()).map(|(d, _)| *d).collect();
+        let mut out = vec![];
+        for doc in docs {
+            let Ok(rev) = eng.doc_entry(doc).map(|e| e.generation()) else { continue };
+            if self.marks.lock().get(&doc).is_some_and(|m| m.autosaved_rev == rev) {
+                continue;
+            }
+            let r = (|| {
+                let Some(bytes) = eng.unsaved_bytes(doc).map_err(err)? else { return Ok(false) };
+                let (store, hdoc, _) = self.bound(doc)?;
+                store.autosave(hdoc, &bytes).map_err(err)?;
+                Ok::<_, String>(true)
+            })();
+            match r {
+                Ok(recorded) => {
+                    self.marks.lock().entry(doc).or_default().autosaved_rev = rev;
+                    if recorded {
+                        out.push(doc);
+                    }
+                }
+                Err(e) => eprintln!("inkwell history: autosave: {e}"),
+            }
+        }
+        out
+    }
+
+    /// The autosave timer: every `AUTOSAVE_EVERY`, for the life of the app.
+    pub fn spawn_autosave(self: &Arc<Self>, app: AppHandle, eng: Arc<Engine>) {
+        let me = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(AUTOSAVE_EVERY);
+            for doc in me.autosave_all(&eng) {
+                let _ = app.emit("history-changed", doc);
+            }
+        });
+    }
+
+    pub fn save_copy(&self, doc: EngDoc, version: &str, dest: &Path) -> Result<(), String> {
+        let (store, hdoc, _) = self.bound(doc)?;
+        store.save_copy(hdoc, version.parse().map_err(err)?, dest, true).map_err(err)
     }
 
     pub fn name(&self, doc: EngDoc, version: &str, name: Option<String>) -> Result<VersionInfo, String> {
@@ -487,20 +601,30 @@ pub async fn history_recover(h: Hist<'_>, eng: State<'_, Arc<Engine>>, doc: EngD
     restore_with(eng.inner().clone(), h.inner().clone(), doc, v).await
 }
 
-/// Asks for a destination, writes the version there. `None` = the user cancelled.
+/// Writes `version` to the file of save token `to` (from `pick_save`); returns its path, now a known one.
 #[tauri::command]
-pub async fn history_save_copy(app: AppHandle, h: Hist<'_>, doc: EngDoc, version: String, suggested: String) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
+pub async fn history_save_copy(window: Window, h: Hist<'_>, reg: State<'_, Paths>, doc: EngDoc, version: String, to: String) -> Result<String, String> {
+    let dest = reg.take_save(window.label(), &to).map_err(err)?;
     let h = h.inner().clone();
     off(move || {
-        let (store, hdoc, _) = h.bound(doc)?;
-        let v: VersionId = version.parse().map_err(err)?;
-        let Some(dest) = app.dialog().file().set_file_name(suggested).add_filter("PDF documents", &["pdf"]).blocking_save_file() else {
-            return Ok(None);
-        };
-        let dest = dest.into_path().map_err(err)?;
-        store.save_copy(hdoc, v, &dest, true).map_err(err)?;
-        Ok(Some(dest.to_string_lossy().into_owned()))
+        h.save_copy(doc, &version, Path::new(&dest))?;
+        window.state::<Paths>().learn(&dest);
+        Ok(dest)
+    })
+    .await
+}
+
+/// After an assistant turn: records it as a checkpoint if the document ends with its changes.
+#[tauri::command]
+pub async fn history_checkpoint(app: AppHandle, h: Hist<'_>, eng: State<'_, Arc<Engine>>, doc: EngDoc) -> Result<Option<VersionInfo>, String> {
+    let (h, eng) = (h.inner().clone(), eng.inner().clone());
+    off(move || {
+        let Some(turn) = eng.assistant_turn(doc).map_err(err)? else { return Ok(None) };
+        let v = h.checkpoint(doc, turn)?;
+        if v.is_some() {
+            let _ = app.emit("history-changed", doc);
+        }
+        Ok(v)
     })
     .await
 }
@@ -653,6 +777,110 @@ mod tests {
         h.docs.lock().insert(doc, Bound::new(file));
         h.bind(doc, file);
         assert_eq!(h.state(doc).status, Status::Ready);
+    }
+
+    /// An engine document on a copy of `sample`, bound to a history in `dir/store`.
+    fn opened(dir: &Path, sample_name: &str) -> (History, Arc<Engine>, EngDoc, PathBuf) {
+        let file = dir.join("doc.pdf");
+        std::fs::copy(sample(sample_name), &file).unwrap();
+        let eng = Engine::new(1, 1 << 20);
+        let doc = match eng.open_pending(&file.to_string_lossy()) {
+            (doc, Ok(_)) => doc,
+            (_, Err(e)) => panic!("{e:?}"),
+        };
+        let h = History::with_root(dir.join("store"));
+        bound_doc(&h, doc, &file);
+        (h, eng, doc, file)
+    }
+
+    fn rotate(eng: &Engine, doc: EngDoc, source: crate::engine::edit::EditSource) {
+        eng.apply_from(doc, crate::engine::edit::EditOp::Rotate { pages: vec![0], quarter_turns: 1 }, source).unwrap();
+    }
+
+    /// Save -> a Save version of the bytes written; a save including a redaction -> `redactions_applied`.
+    #[test]
+    fn saves_commit_and_a_saved_redaction_purges() {
+        let dir = tmp("wire-save");
+        let (h, eng, doc, file) = opened(&dir, "edit-source.pdf");
+        rotate(&eng, doc, Default::default());
+        let (_, s) = eng.save_recorded(doc, None).unwrap();
+        let s = s.unwrap();
+        assert_eq!(s.bytes, std::fs::read(&file).unwrap());
+        let v = h.saved(doc, &s).unwrap();
+        assert_eq!((v.kind, v.label.as_str()), (Kind::Save, "Saved"));
+        assert_eq!(v.pages_touched, vec![0]);
+        assert_eq!(h.versions(doc).unwrap().len(), 2);
+        assert!(eng.save_recorded(doc, None).unwrap().1.is_none(), "nothing to save, nothing recorded");
+
+        // a redaction lands (the engine hook), then the save replaces every older version
+        eng.apply_custom(doc, "Redact".into(), Default::default(), true, |_| Ok(vec![0])).unwrap();
+        h.on_redactions_applied(doc);
+        let s = eng.save_recorded(doc, None).unwrap().1.unwrap();
+        assert!(s.redacts);
+        assert_eq!(h.saved(doc, &s).unwrap().label, "Applied redactions");
+        assert_eq!(h.versions(doc).unwrap().len(), 1);
+        // later saves are plain commits again
+        rotate(&eng, doc, Default::default());
+        let s = eng.save_recorded(doc, None).unwrap().1.unwrap();
+        assert_eq!(h.saved(doc, &s).unwrap().label, "Saved");
+        assert_eq!(h.versions(doc).unwrap().len(), 2);
+    }
+
+    /// An assistant turn that changed the document -> one Checkpoint with the turn's label and pages.
+    #[test]
+    fn assistant_turns_checkpoint_once() {
+        let dir = tmp("wire-turn");
+        let (h, eng, doc, _) = opened(&dir, "edit-source.pdf");
+        let turn = crate::engine::edit::EditSource::Assistant { turn: "t1".into() };
+        assert!(eng.assistant_turn(doc).unwrap().is_none());
+        rotate(&eng, doc, turn.clone());
+        rotate(&eng, doc, turn);
+        let t = eng.assistant_turn(doc).unwrap().unwrap();
+        assert_eq!((t.turn.as_str(), t.summary.len(), t.pages.clone()), ("t1", 2, vec![0]));
+        assert!(t.label.ends_with("and 1 more"), "{}", t.label);
+        let v = h.checkpoint(doc, t).unwrap().unwrap();
+        assert_eq!(v.kind, Kind::Checkpoint);
+        assert!(matches!(&v.author, Author::Assistant { turn_id } if turn_id == "t1"));
+        assert!(h.checkpoint(doc, eng.assistant_turn(doc).unwrap().unwrap()).unwrap().is_none(), "once per turn");
+        rotate(&eng, doc, Default::default());
+        assert!(eng.assistant_turn(doc).unwrap().is_none(), "the user edited after the turn");
+        assert_eq!(h.versions(doc).unwrap().len(), 2);
+    }
+
+    /// The autosave tick records unsaved content once per change, never a clean document.
+    #[test]
+    fn autosave_records_new_unsaved_edits_only() {
+        let dir = tmp("wire-autosave");
+        let (h, eng, doc, _) = opened(&dir, "edit-source.pdf");
+        assert!(h.autosave_all(&eng).is_empty(), "clean");
+        rotate(&eng, doc, Default::default());
+        assert_eq!(h.autosave_all(&eng), vec![doc]);
+        assert!(h.autosave_all(&eng).is_empty(), "nothing new since");
+        let s = eng.save_recorded(doc, None).unwrap().1.unwrap();
+        h.saved(doc, &s).unwrap();
+        assert!(h.autosave_all(&eng).is_empty(), "saved");
+        rotate(&eng, doc, Default::default());
+        assert_eq!(h.autosave_all(&eng), vec![doc]);
+        let kinds: Vec<Kind> = h.versions(doc).unwrap().into_iter().map(|v| v.kind).collect();
+        // (the store folds a save of the autosaved bytes into that version)
+        assert_eq!(kinds.iter().filter(|k| **k == Kind::Autosave).count(), 2, "{kinds:?}");
+        assert_eq!(kinds[0], Kind::Autosave);
+    }
+
+    /// Save a copy writes only to a save token's file, once, and the path becomes known.
+    #[test]
+    fn save_copy_goes_through_a_save_token() {
+        let dir = tmp("wire-copy");
+        let (h, _eng, doc, _) = opened(&dir, "edit-source.pdf");
+        let v = h.versions(doc).unwrap()[0].id.to_string();
+        let reg = Paths::default();
+        let dest = dir.join("copy.pdf").to_string_lossy().into_owned();
+        let t = reg.issue_save("main", dest.clone());
+        assert!(reg.take_save("main", &dest).is_err(), "a raw path is not a token");
+        let to = reg.take_save("main", &t.token).unwrap();
+        h.save_copy(doc, &v, Path::new(&to)).unwrap();
+        assert!(std::fs::metadata(&dest).unwrap().len() > 0);
+        assert!(reg.take_save("main", &t.token).is_err(), "used once");
     }
 
     /// Every history command acts only on a document the engine id is bound to; paths come only from picks.
