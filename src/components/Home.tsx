@@ -271,7 +271,7 @@ function ReadCard({ r, now }: { r: Recent; now: number }) {
           {r.opened > 0 && <span className="dim">Last opened {relTime(r.opened, now)}</span>}
           <span className="dim">{page != null && page > 0 ? `p. ${page + 1} of ${total}` : pages}</span>
           {page != null && page > 0 && (
-            <span className="bar" aria-hidden>
+            <span className="read-bar" aria-hidden>
               <span style={{ width: `${((page + 1) / total) * 100}%` }} />
             </span>
           )}
