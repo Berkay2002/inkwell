@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
 import { useAi } from "./aiStore";
-import type { CompressAuditReply, CompressPreset, CompressReport, OcrBackend, OcrLanguages, OcrOutcome } from "./api";
+import type { CompressAuditReply, CompressEstimate, CompressPreset, CompressReport, OcrBackend, OcrLanguages, OcrOutcome } from "./api";
 import * as edits from "./edit";
 
 /**
@@ -51,6 +51,10 @@ export interface Sheet {
   // compress
   preset: CompressPreset;
   audit: CompressAuditReply | null;
+  /** Sample-based sizes per preset; null while they are worked out (or when that failed). */
+  estimates: CompressEstimate[] | null;
+  /** Job id of the running estimate, so closing the rail can stop it. */
+  estimateJob: number;
   compressed: CompressReport | null;
   // ocr
   scope: OcrScope;
@@ -110,6 +114,8 @@ const blank = (tool: ToolKind, doc: number): Sheet => ({
   error: null,
   preset: "balanced",
   audit: null,
+  estimates: null,
+  estimateJob: 0,
   compressed: null,
   scope: "all",
   range: "",
@@ -131,11 +137,28 @@ export const useTools = create<ToolsStore>((set, get) => {
   async function loadAudit(sheet: Sheet) {
     try {
       const audit = await api.compressAudit(sheet.doc);
-      if (get().sheet?.doc === sheet.doc && get().sheet?.tool === "compress") patch({ audit });
+      if (get().sheet?.doc !== sheet.doc || get().sheet?.tool !== "compress") return;
+      patch({ audit });
     } catch (e) {
       patch({ phase: "error", error: friendly(e) });
+      return;
+    }
+    // The sizes take longer than the audit: they arrive on their own, the panel shows "…" until then.
+    const job = ++jobSeq;
+    patch({ estimateJob: job });
+    try {
+      const estimates = await api.compressEstimate(job, sheet.doc);
+      if (get().sheet?.estimateJob === job) patch({ estimates });
+    } catch {
+      /* cancelled, or a file the sampler cannot read: no prediction beats a wrong one */
     }
   }
+
+  /** Stops a running estimate: the rail closed, or the real job is about to need the CPU. */
+  const stopEstimate = () => {
+    const job = get().sheet?.estimateJob;
+    if (job) void api.toolCancel(job).catch(() => {});
+  };
 
   async function loadLanguages(sheet: Sheet) {
     const s = get().settings;
@@ -175,12 +198,14 @@ export const useTools = create<ToolsStore>((set, get) => {
       // One right-side panel at a time: the rail replaces the assistant; Organize has no rail.
       useAi.getState().setOpen(false);
       if (d.organize) st().patch(d.id, { organize: false });
+      stopEstimate();
       set({ sheet });
       void (tool === "compress" ? loadAudit(sheet) : loadLanguages(sheet));
     },
 
     close: () => {
       if (get().sheet?.phase === "running") get().cancel();
+      stopEstimate();
       set({ sheet: null });
     },
 
@@ -204,6 +229,7 @@ export const useTools = create<ToolsStore>((set, get) => {
       if (!sheet || sheet.phase === "running") return;
       const d = st().docs[sheet.doc];
       if (!d) return;
+      stopEstimate();
       const job = ++jobSeq;
       current = job;
       const upd = live(job);
@@ -288,6 +314,7 @@ export const useTools = create<ToolsStore>((set, get) => {
       const s = get().sheet;
       const path = s?.compressed?.output ?? s?.recognized?.output;
       if (!path) return;
+      stopEstimate();
       set({ sheet: null });
       await st().openPath(path);
     },
@@ -299,7 +326,7 @@ useAi.subscribe((s, prev) => {
   if (!s.open || prev.open) return;
   const t = useTools.getState();
   if (t.sheet?.phase === "running") useAi.setState({ open: false });
-  else if (t.sheet) useTools.setState({ sheet: null });
+  else if (t.sheet) t.close();
 });
 
 const STAGE: Record<string, string> = {

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::compress::{self, Audit, Category, Options, Preset};
+use crate::compress::{self, Audit, Options, Preset};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, DocSource, Engine, EngineError};
 use crate::ocr::backend::{Recognizer, TesseractCli};
@@ -107,40 +107,20 @@ impl Jobs {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Prediction {
-    pub preset: Preset,
-    /// Estimated size of the compressed file in bytes.
-    pub bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AuditReply {
     pub audit: Audit,
     pub size: u64,
     /// Where the compressed file would go, and whether that name is already taken.
     pub default_output: String,
     pub output_exists: bool,
-    pub predictions: Vec<Prediction>,
 }
 
-/// Share of the image bytes each preset keeps, measured on the study scans (docs/compress-engine.md:
-/// 1.2% / 9% / 23% of a 300 ppi photo scan). Images that are already small shrink less, so this is a
-/// guide ("about 2 MB"), never below what a re-run would find: the result screen shows the real size.
-// ponytail: fixed ratios; derive from per-image ppi once the audit reports it.
-const IMAGE_KEEP: [(Preset, f64); 3] = [(Preset::Smallest, 0.12), (Preset::Balanced, 0.30), (Preset::HighQuality, 0.55)];
-
-pub fn predict(audit: &Audit) -> Vec<Prediction> {
-    let images = audit.bytes(Category::Images) as f64;
-    let fonts = audit.bytes(Category::Fonts) as f64;
-    IMAGE_KEEP
-        .iter()
-        .map(|&(preset, keep)| {
-            let font_keep = if preset == Preset::Smallest { 0.5 } else { 1.0 };
-            let saved = images * (1.0 - keep) + fonts * (1.0 - font_keep);
-            Prediction { preset, bytes: (audit.total as f64 - saved).max(1.0) as u64 }
-        })
-        .collect()
+/// Sample-based predicted sizes (see `compress::estimate`). Separate from the audit because it recompresses
+/// real images: the UI runs it after the audit and cancels it with the job id when the rail closes.
+pub fn estimate_for_ui(eng: &Engine, doc: DocId, cancel: &AtomicBool) -> Result<Vec<compress::estimate::Estimate>, ToolError> {
+    let path = PathBuf::from(eng.doc_entry(doc)?.path());
+    let audit = compress::audit_file(&path, None)?;
+    Ok(compress::estimate::estimate(&path, None, &audit, cancel)?)
 }
 
 pub fn audit_for_ui(eng: &Engine, doc: DocId) -> Result<AuditReply, ToolError> {
@@ -152,7 +132,6 @@ pub fn audit_for_ui(eng: &Engine, doc: DocId) -> Result<AuditReply, ToolError> {
         size: std::fs::metadata(path).map_err(|e| ToolError(e.to_string()))?.len(),
         default_output: out.to_string_lossy().into_owned(),
         output_exists: out.exists(),
-        predictions: predict(&audit),
         audit,
     })
 }
