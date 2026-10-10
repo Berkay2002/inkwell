@@ -4,6 +4,7 @@ pub mod engine;
 pub mod ocr;
 pub mod recents;
 pub mod redact;
+pub mod tools;
 
 use engine::cache::TileKey;
 use engine::edit::{EditOp, EditState, SplitResult};
@@ -150,6 +151,73 @@ async fn merge_files(eng: Eng<'_>, paths: Vec<String>, out: String) -> Result<u3
     blocking(move || eng.merge(&paths, &out)).await
 }
 
+// ---- compress and OCR (see tools) ----------------------------------------------------------------
+
+type JobState<'a> = State<'a, Arc<tools::Jobs>>;
+
+async fn tool_blocking<R: Send + 'static>(
+    f: impl FnOnce() -> Result<R, tools::ToolError> + Send + 'static,
+) -> Result<R, tools::ToolError> {
+    tauri::async_runtime::spawn_blocking(f).await.unwrap_or_else(|_| Err(tools::ToolError("the tool crashed".into())))
+}
+
+#[tauri::command]
+async fn compress_audit(path: String, password: Option<String>) -> Result<tools::AuditReply, tools::ToolError> {
+    tool_blocking(move || tools::audit_for_ui(std::path::Path::new(&path), password.as_deref())).await
+}
+
+/// `job`: an id the UI picks, for `tool_cancel`.
+#[tauri::command]
+async fn compress_start(
+    jobs: JobState<'_>,
+    job: u64,
+    req: tools::CompressRequest,
+    on_progress: Channel<compress::Progress>,
+) -> Result<compress::Report, tools::ToolError> {
+    let guard = jobs.inner().begin(job);
+    tool_blocking(move || {
+        tools::run_compress(&req, &guard.cancel, &mut |p| {
+            let _ = on_progress.send(p);
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+fn tool_cancel(jobs: JobState<'_>, job: u64) {
+    jobs.cancel(job);
+}
+
+#[tauri::command]
+async fn ocr_languages(tesseract_path: Option<String>) -> Result<tools::OcrLanguages, tools::ToolError> {
+    tool_blocking(move || Ok(tools::ocr_languages(tesseract_path.as_deref()))).await
+}
+
+#[tauri::command]
+async fn ocr_start(
+    eng: Eng<'_>,
+    jobs: JobState<'_>,
+    job: u64,
+    req: tools::OcrRequest,
+    on_progress: Channel<ocr::Progress>,
+) -> Result<tools::OcrOutcome, tools::ToolError> {
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    tool_blocking(move || {
+        let backend = tools::make_backend(req.backend, req.tesseract_path.as_deref())?;
+        tools::run_ocr(
+            &eng,
+            &req,
+            backend.as_ref(),
+            &|p| {
+                let _ = on_progress.send(p);
+            },
+            &guard.cancel,
+        )
+    })
+    .await
+}
+
 #[tauri::command]
 fn engine_stats(eng: Eng<'_>) -> EngineStats {
     eng.stats()
@@ -265,6 +333,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
         .manage(ai::Assistant::new())
+        .manage(Arc::new(tools::Jobs::default()))
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
             let Some((key, stream, epoch, rank)) = parse_tile_request(request.uri()) else {
                 return responder.respond(reply(404, Vec::new(), None));
@@ -303,6 +372,11 @@ pub fn run() {
             extract_pages,
             split_document,
             merge_files,
+            compress_audit,
+            compress_start,
+            tool_cancel,
+            ocr_languages,
+            ocr_start,
             recents::stat_files,
             recents::recents_load,
             recents::recents_save,

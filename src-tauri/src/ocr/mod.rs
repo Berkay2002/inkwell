@@ -752,13 +752,7 @@ pub fn ocr_file(
         let mut doc = Input::Path(&tmp.0).open()?;
         applied = apply(&mut doc, &rec.pages, opts.force)?;
         if applied.pages_written > 0 {
-            let signed = doc
-                .catalog()
-                .ok()
-                .and_then(|c| c.get_dict("AcroForm").ok().flatten())
-                .and_then(|f| f.get_dict("SigFlags").ok().flatten())
-                .and_then(|f| f.as_int().ok())
-                .is_some_and(|f| f & 1 != 0);
+            let signed = is_signed(&doc);
             if doc.can_be_saved_incrementally() {
                 save(&doc, &tmp.0)?;
                 if signed {
@@ -783,8 +777,23 @@ pub fn ocr_file(
         Err(_) => return Err(OcrError::Backend("OCR crashed while writing the copy".into())),
     }
 
+    Ok(build_report(&rec, &applied, warnings))
+}
+
+/// The document has a signature (AcroForm `SigFlags` & 1): saving after OCR no longer validates it.
+pub fn is_signed(doc: &PdfDocument) -> bool {
+    doc.catalog()
+        .ok()
+        .and_then(|c| c.get_dict("AcroForm").ok().flatten())
+        .and_then(|f| f.get_dict("SigFlags").ok().flatten())
+        .and_then(|f| f.as_int().ok())
+        .is_some_and(|f| f & 1 != 0)
+}
+
+/// The summary of a run: what [`ocr_file`] returns, also for an in-place run through the edit core.
+pub fn build_report(rec: &Recognition, applied: &ApplyReport, warnings: Vec<String>) -> Report {
     let count = |f: fn(&PageStatus) -> bool| rec.pages.iter().filter(|p| f(&p.status)).count() as u32;
-    Ok(Report {
+    Report {
         backend: rec.backend,
         pages_requested: rec.pages.len() as u32,
         pages_recognized: count(|s| *s == PageStatus::Recognized),
@@ -806,5 +815,5 @@ pub fn ocr_file(
             })
             .collect(),
         warnings,
-    })
+    }
 }

@@ -150,6 +150,13 @@ struct Snap {
     len: usize,
 }
 
+/// Where the current content of a document can be read from (see [`Engine::doc_source`]).
+pub enum DocSource {
+    Path(String),
+    /// The first `len` bytes are a complete PDF.
+    Bytes(Arc<Vec<u8>>, usize),
+}
+
 /// What one edit generation looks like. Swapped as a whole, so a page index is always read
 /// together with the generation it belongs to.
 struct Layout {
@@ -806,6 +813,19 @@ impl Engine {
 
     pub fn doc_entry(&self, id: DocId) -> Result<Arc<DocEntry>> {
         self.entry(id)
+    }
+
+    /// What the document currently shows, with the generation it belongs to (read together, so a
+    /// page index taken from it is valid for that `rev`): the snapshot after an edit, the file
+    /// on disk before the first one.
+    pub fn doc_source(&self, id: DocId) -> Result<(u32, DocSource)> {
+        let entry = self.entry(id)?;
+        let l = entry.layout.read();
+        let src = match &l.snap {
+            Some(s) => DocSource::Bytes(s.bytes.clone(), s.len),
+            None => DocSource::Path(entry.path()),
+        };
+        Ok((l.rev, src))
     }
 
     pub fn set_cache_budget(&self, bytes: usize) {
