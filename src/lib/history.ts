@@ -42,7 +42,13 @@ export interface HistoryState {
 }
 
 /** What a command reads PDF bytes from. */
-export type Source = { kind: "version"; id: string } | { kind: "current" } | { kind: "file"; path: string };
+export type Source = { kind: "version"; id: string } | { kind: "current" } | { kind: "picked"; token: string };
+
+/** A file chosen in the native dialog run by Rust; the UI only ever holds its token. */
+export interface Picked {
+  token: string;
+  name: string;
+}
 
 export type ChangeKind =
   | "pageAdded"
@@ -70,7 +76,18 @@ export interface TextRun {
   boxesB: Rect4[];
 }
 
-export type Detail = { type: "pageMoved"; from: number; to: number } | { type: "text"; runs: TextRun[] } | { type: string };
+export interface MetadataField {
+  source: "info" | "xmp";
+  field: string;
+  old: string | null;
+  new: string | null;
+}
+
+export type Detail =
+  | { type: "pageMoved"; from: number; to: number }
+  | { type: "text"; runs: TextRun[] }
+  | { type: "metadata"; fields: MetadataField[] }
+  | { type: string };
 
 export interface Change {
   kind: ChangeKind;
@@ -124,9 +141,10 @@ export const historyConfirmSame = (doc: number, candidate: string | null) =>
 export const historyDelete = (doc: number) => invoke<void>("history_delete", { doc });
 export const historyNeverKeep = (doc: number, never: boolean) => invoke<void>("history_never_keep", { doc, never });
 export const historyCompare = (doc: number | null, a: Source, b: Source) => invoke<Comparison>("history_compare", { doc, a, b });
-export const compareFiles = (pathA: string, pathB: string) => invoke<Comparison>("compare_files", { pathA, pathB });
-export const historyVisualDiff = (doc: number | null, a: Source, aPage: number, b: Source, bPage: number, scale: number) =>
-  invoke<VisualDiff>("history_visual_diff", { doc, a, aPage, b, bPage, scale });
+/** Runs the file dialog in Rust; null = cancelled. Exactly two files. */
+export const pickCompareFiles = () => invoke<Picked[] | null>("history_pick_compare");
+export const historyVisualDiff = (doc: number | null, a: Source, aPage: number, b: Source, bPage: number, scale: number, hints: Rect4[] = []) =>
+  invoke<VisualDiff>("history_visual_diff", { doc, a, aPage, b, bPage, scale, hints });
 
 /** A rendered page as an object URL (revoke it when done). Pixels per point = `scale`. */
 export async function renderPage(doc: number | null, source: Source, page: number, scale: number): Promise<string> {
@@ -134,4 +152,4 @@ export async function renderPage(doc: number | null, source: Source, page: numbe
   return URL.createObjectURL(new Blob([buf], { type: "image/png" }));
 }
 
-export const sourceKey = (s: Source) => (s.kind === "version" ? `v:${s.id}` : s.kind === "file" ? `f:${s.path}` : "current");
+export const sourceKey = (s: Source) => (s.kind === "version" ? `v:${s.id}` : s.kind === "picked" ? `p:${s.token}` : "current");

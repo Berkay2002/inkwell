@@ -111,13 +111,19 @@ report.backToCurrent = await ev(`!document.querySelector(".hx-version") && !!doc
 
 // ---- Compare: the original against the file as it is now ----
 await ev(`window.__H.getState().openCompare({ doc: ${lease}, a: { kind: "version", id: ${JSON.stringify(first.id)} }, b: { kind: "current" } })`);
-await until(`document.querySelectorAll(".hx-card").length > 0 && document.querySelectorAll(".hx-crow .hx-page img").length >= 2`, "the comparison");
-report.compare = await ev(`({ cards: document.querySelectorAll(".hx-card").length, summary: [...document.querySelectorAll(".hx-summary li")].map((e) => e.textContent), cats: [...document.querySelectorAll(".hx-cats button")].map((e) => e.textContent) })`);
+await until(`document.querySelectorAll(".hx-rev").length > 0 && document.querySelectorAll(".hx-crow .hx-page img").length >= 2`, "the comparison");
+report.compare = await ev(`({ cards: document.querySelectorAll(".hx-rev").length, summary: [...document.querySelectorAll(".hx-summary li")].map((e) => e.textContent), cats: [...document.querySelectorAll(".hx-cats button")].map((e) => e.textContent) })`);
 await shot("compare-2up-light.png");
-await click(".hx-card", undefined);
+await click(".hx-rev-main", undefined);
 await shot("compare-2up-selected-light.png");
 await theme("dark");
 await shot("compare-2up-dark.png");
+await theme("light");
+// the version track along the bottom: click a node = After, Alt-click = Before (the dropdowns follow)
+report.track = await ev(`[...document.querySelectorAll(".hx-node")].map((n) => n.getAttribute("aria-label"))`);
+await shot("compare-track-light.png");
+await theme("dark");
+await shot("compare-track-dark.png");
 await theme("light");
 
 // Swipe: the divider follows the pointer 1:1 (real mouse events over CDP)
@@ -145,6 +151,25 @@ await click(".hx-seg.inline button", "2-up");
 await ev(`window.__H.getState().setCompare({ a: { kind: "version", id: ${JSON.stringify(first.id)} }, b: { kind: "version", id: ${JSON.stringify(asst.id)} } })`);
 await sleep(1500);
 await shot("compare-versions-light.png");
+await theme("dark");
+await shot("compare-versions-dark.png");
+await theme("light");
+await ev(`window.__H.getState().closeCompare()`);
+
+// ---- metadata changes are one collapsed entry, expandable ----
+await activate(notes);
+const nv = await ev(`window.__H.getState().docs[${notes}].versions.map((v) => ({ id: v.id, kind: v.kind.type }))`);
+const nImport = nv.find((v) => v.kind === "import");
+const nAuto = nv.find((v) => v.kind === "autosave");
+await ev(`window.__H.getState().openCompare({ doc: ${notes}, a: { kind: "version", id: ${JSON.stringify(nImport.id)} }, b: { kind: "version", id: ${JSON.stringify(nAuto.id)} } })`);
+await until(`document.querySelectorAll(".hx-rev").length > 0`, "the notes comparison");
+report.metaRows = await ev(`[...document.querySelectorAll(".hx-rev[data-cat=metadata] .hx-rev-label")].map((e) => e.textContent)`);
+await shot("compare-metadata-collapsed-light.png");
+await theme("dark");
+await shot("compare-metadata-collapsed-dark.png");
+await theme("light");
+await click(".hx-rev[data-cat=metadata] .hx-rev-main", undefined);
+await shot("compare-metadata-expanded-light.png");
 await ev(`window.__H.getState().closeCompare()`);
 
 console.log(JSON.stringify(report, null, 2));

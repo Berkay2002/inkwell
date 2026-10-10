@@ -1,24 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import type { Change, Comparison, VersionInfo } from "../../lib/history";
+import { type Change, type Comparison, type VersionInfo, pickCompareFiles } from "../../lib/history";
 import {
   FILTERS,
-  GLYPH,
-  TONE_WORD,
   WHO_WORD,
   clock,
   dayLabel,
   groupVersions,
   pageChips,
-  toneOf,
   versionTitle,
   when,
   whoOf,
-  changePage,
 } from "../../lib/historyLogic";
 import { useHistory } from "../../lib/historyStore";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
+import { RevRow } from "./RevRow";
 import { MenuButton } from "../Menu";
 import "./history.css";
 
@@ -43,18 +39,18 @@ export function HistoryToggle() {
 }
 
 export async function pickAndCompareFiles() {
-  const sel = await open({ multiple: true, filters: [{ name: "PDF documents", extensions: ["pdf"] }] });
-  if (!sel || sel.length !== 2) {
-    if (sel && sel.length) useStore.getState().setUi({ error: "Pick exactly two PDF files to compare." });
-    return;
+  try {
+    const sel = await pickCompareFiles();
+    if (!sel) return;
+    useHistory.getState().openCompare({
+      doc: null,
+      a: { kind: "picked", token: sel[0].token },
+      b: { kind: "picked", token: sel[1].token },
+      names: [sel[0].name, sel[1].name],
+    });
+  } catch (e) {
+    useStore.getState().setUi({ error: String(e) });
   }
-  const name = (p: string) => p.split(/[\\/]/).pop() ?? p;
-  useHistory.getState().openCompare({
-    doc: null,
-    a: { kind: "file", path: sel[0] },
-    b: { kind: "file", path: sel[1] },
-    names: [name(sel[0]), name(sel[1])],
-  });
 }
 
 /** Over the page: "Recover unsaved changes" after a crash, or "same document?" when the file could be an old one. */
@@ -436,15 +432,5 @@ export function ChangeLines({ cmp, v, cur, onPick }: { cmp: Comparison; v: Versi
 }
 
 function ChangeButton({ c, on, onClick }: { c: Change; on: boolean; onClick: () => void }) {
-  const tone = toneOf(c);
-  const p = changePage(c);
-  return (
-    <button className={`hx-change${on ? " on" : ""}`} onClick={onClick}>
-      <span className={`hx-glyph ${tone}`} title={TONE_WORD[tone]} aria-label={TONE_WORD[tone]}>
-        {GLYPH[tone]}
-      </span>
-      <span className="hx-change-text">{c.label}</span>
-      {p !== null && <span className="hx-chip">p. {p + 1}</span>}
-    </button>
-  );
+  return <RevRow change={c} on={on} onClick={onClick} />;
 }

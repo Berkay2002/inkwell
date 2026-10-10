@@ -17,6 +17,7 @@ import {
   rowOf,
   stepIndex,
   toneOf,
+  trackDays,
   uncovered,
 } from "./historyLogic";
 
@@ -245,5 +246,13 @@ describe("marks", () => {
   it("drops pixel boxes already explained by a mark", () => {
     const marks = [{ rect: [0, 0, 100, 20] as [number, number, number, number], tone: "add" as const, change: 0, page: 0 }];
     expect(uncovered([[5, 2, 50, 18], [200, 200, 220, 220]], marks)).toEqual([[200, 200, 220, 220]]);
+  });
+});
+
+describe("version track", () => {
+  it("groups oldest first by day", () => {
+    const vs = [ver("c", at(2026, 10, 10, 9)), ver("a", at(2026, 10, 9, 8)), ver("b", at(2026, 10, 9, 16)), ver("d", at(2026, 10, 10, 14))];
+    const days = trackDays(vs, NOW);
+    expect(days.map((d) => [d.label, d.items.map((v) => v.id)])).toEqual([["Yesterday", ["a", "b"]], ["Today", ["c", "d"]]]);
   });
 });

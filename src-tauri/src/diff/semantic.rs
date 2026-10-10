@@ -4,7 +4,7 @@ use super::pages::{lis, match_pages};
 use super::snap::{self, ImageRef, PageSnap, Snap, Word};
 use super::types::*;
 use similar::{Algorithm, DiffOp, capture_diff_slices_deadline};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -567,9 +567,31 @@ fn new_opaque_fills(sa: &Snap, sb: &Snap, ia: usize, ib: usize) -> Vec<Rect4> {
 
 // ---- document level ---------------------------------------------------------------------------
 
-const VOLATILE_INFO: &[&str] = &["ModDate", "Producer"];
-const VOLATILE_XMP: &[&str] =
-    &["xmp:ModifyDate", "xmp:MetadataDate", "xmpMM:InstanceID", "xmpMM:DocumentID", "xmpMM:OriginalDocumentID", "xmpMM:VersionID", "xmpMM:History", "pdf:Producer", "xmpMM:RenditionClass"];
+/// Producer / tool bookkeeping that changes on every save: never worth a line in the change list.
+pub(super) fn is_noise(source: MetadataSource, key: &str, creation_unchanged: bool) -> bool {
+    match source {
+        MetadataSource::Info => matches!(key, "Producer" | "Creator" | "ModDate" | "Trapped"),
+        MetadataSource::Xmp => {
+            key.starts_with("pdfx:PTEX")
+                || matches!(
+                    key,
+                    "xmp:CreatorTool"
+                        | "xmp:ModifyDate"
+                        | "xmp:MetadataDate"
+                        | "pdf:Producer"
+                        | "pdf:Trapped"
+                        | "dc:format"
+                        | "xmpMM:DocumentID"
+                        | "xmpMM:InstanceID"
+                        | "xmpMM:VersionID"
+                        | "xmpMM:History"
+                        | "xmpMM:OriginalDocumentID"
+                        | "xmpMM:RenditionClass"
+                )
+                || (key == "xmp:CreateDate" && creation_unchanged)
+        }
+    }
+}
 
 fn info_map(s: &Snap) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
@@ -657,40 +679,38 @@ fn xmp_map(s: &Snap) -> BTreeMap<String, String> {
     m
 }
 
+/// All real metadata differences as ONE change "Metadata changed (n)"; the fields are in its detail.
 fn metadata_changes(sa: &Snap, sb: &Snap, opts: &CompareOptions, ch: &mut Vec<Change>) {
-    let sets: [(MetadataSource, BTreeMap<String, String>, BTreeMap<String, String>, &[&str]); 2] = [
-        (MetadataSource::Info, info_map(sa), info_map(sb), VOLATILE_INFO),
-        (MetadataSource::Xmp, xmp_map(sa), xmp_map(sb), VOLATILE_XMP),
-    ];
-    for (source, a, b, volatile) in sets {
-        let keys: HashSet<&String> = a.keys().chain(b.keys()).collect();
-        let mut keys: Vec<_> = keys.into_iter().collect();
-        keys.sort();
+    let (ia, ib) = (info_map(sa), info_map(sb));
+    let creation_unchanged = ia.get("CreationDate") == ib.get("CreationDate");
+    let sets = [(MetadataSource::Info, ia, ib), (MetadataSource::Xmp, xmp_map(sa), xmp_map(sb))];
+    let mut fields = Vec::new();
+    for (source, a, b) in sets {
+        let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
         for k in keys {
-            if !opts.include_volatile_metadata && volatile.contains(&k.as_str()) {
+            if !opts.include_volatile_metadata && is_noise(source, k, creation_unchanged) {
                 continue;
             }
-            let (old, new) = (a.get(k).cloned(), b.get(k).cloned());
-            if old == new {
-                continue;
+            // An empty value and a missing one are the same to a reader (Acrobat writes empty Author/Title).
+            let get = |m: &BTreeMap<String, String>| m.get(k).filter(|v| !v.trim().is_empty()).cloned();
+            let (old, new) = (get(&a), get(&b));
+            if old != new {
+                fields.push(MetadataField { source, field: k.clone(), old, new });
             }
-            let label = match (&old, &new) {
-                (Some(o), Some(n)) => format!("{k} changed: '{}' -> '{}'", clip(o), clip(n)),
-                (None, Some(n)) => format!("{k} added: '{}'", clip(n)),
-                (Some(o), None) => format!("{k} removed (was '{}')", clip(o)),
-                _ => continue,
-            };
-            ch.push(Change {
-                kind: ChangeKind::MetadataChanged,
-                a_page: None,
-                b_page: None,
-                rect_a: None,
-                rect_b: None,
-                label,
-                detail: Detail::Metadata { source, field: k.clone(), old, new },
-            });
         }
     }
+    if fields.is_empty() {
+        return;
+    }
+    ch.push(Change {
+        kind: ChangeKind::MetadataChanged,
+        a_page: None,
+        b_page: None,
+        rect_a: None,
+        rect_b: None,
+        label: format!("Metadata changed ({})", fields.len()),
+        detail: Detail::Metadata { fields },
+    });
 }
 
 fn flatten_outline(o: &[mupdf::Outline], depth: u32, out: &mut Vec<(u32, String, Option<u32>)>) {

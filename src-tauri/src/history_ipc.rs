@@ -73,9 +73,17 @@ pub struct StateOut {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Source {
     Version { id: String },
-    /// The file on disk now.
+    /// The file of the document on disk now.
     Current,
-    File { path: String },
+    /// A file the user chose in the native dialog run by `history_pick_compare` (the UI never names a path).
+    Picked { token: String },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Picked {
+    token: String,
+    name: String,
 }
 
 #[derive(Serialize)]
@@ -85,10 +93,53 @@ pub struct RestoreOut {
     version: VersionInfo,
 }
 
+/// Dialog-picked paths: the dialog runs on the Rust side, the UI only ever holds the tokens.
+/// Self-contained so it can move to a shared token registry (`paths.rs`) unchanged.
+#[derive(Default)]
+pub struct PickRegistry {
+    picks: Mutex<HashMap<String, PathBuf>>,
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl PickRegistry {
+    /// Remembers the files the user just picked and returns one token each. Replaces earlier picks.
+    pub fn issue(&self, paths: Vec<PathBuf>) -> Vec<Picked> {
+        let mut picks = self.picks.lock();
+        picks.clear();
+        paths
+            .into_iter()
+            .map(|p| {
+                let token = format!("pick-{}", self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+                let name = p.file_name().map_or_else(|| "document".into(), |n| n.to_string_lossy().into_owned());
+                picks.insert(token.clone(), p);
+                Picked { token, name }
+            })
+            .collect()
+    }
+
+    /// The path behind a token; `None` for anything that was not issued.
+    pub fn resolve(&self, token: &str) -> Option<PathBuf> {
+        self.picks.lock().get(token).cloned()
+    }
+
+    /// Runs the native "pick N PDFs" dialog (blocking) and issues tokens. `None` = cancelled.
+    pub fn pick_pdfs(&self, app: &AppHandle, exactly: usize) -> Result<Option<Vec<Picked>>, String> {
+        use tauri_plugin_dialog::DialogExt;
+        let Some(files) = app.dialog().file().add_filter("PDF documents", &["pdf"]).blocking_pick_files() else { return Ok(None) };
+        if files.len() != exactly {
+            return Err(format!("Pick exactly {exactly} PDF files to compare."));
+        }
+        let paths = files.into_iter().map(|f| f.into_path().map_err(err)).collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(self.issue(paths)))
+    }
+}
+
 pub struct History {
     root: PathBuf,
     store: Mutex<Option<Arc<Store>>>,
     docs: Mutex<HashMap<EngDoc, Bound>>,
+    /// The only way a UI-supplied file reaches `load`.
+    picks: PickRegistry,
     /// Recently read sources, so paging through a version does not decrypt it once per page.
     bytes: Mutex<LruCache<String, Arc<(BytesId, Vec<u8>)>>>,
     /// MuPDF work of the diff module, one thread at a time.
@@ -110,6 +161,7 @@ impl History {
             root,
             store: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
+            picks: PickRegistry::default(),
             bytes: Mutex::new(LruCache::new(NonZeroUsize::new(6).unwrap())),
             diff_lock: Mutex::new(()),
         }
@@ -189,6 +241,8 @@ impl History {
     /// The document was closed (or is about to be reopened): drops the session.
     pub fn forget(&self, doc: EngDoc) {
         self.docs.lock().remove(&doc);
+        // Decrypted versions must not outlive the binding that was allowed to read them.
+        self.bytes.lock().clear();
     }
 
     fn bound(&self, doc: EngDoc) -> Result<(Arc<Store>, history::DocId, PathBuf), String> {
@@ -241,7 +295,22 @@ impl History {
     }
 
     pub fn confirm_same(&self, doc: EngDoc, candidate: Option<String>) -> Result<(), String> {
-        let path = self.docs.lock().get(&doc).ok_or("this document is not open")?.path.clone();
+        let path = {
+            let docs = self.docs.lock();
+            let b = docs.get(&doc).ok_or("this document is not open")?;
+            // Only answers a question that was asked; the binding stays as it was when refused.
+            if b.status != Status::Ambiguous {
+                return Err("this document has no pending question about its history".into());
+            }
+            let c = match &candidate {
+                Some(c) => Some(c.parse::<history::DocId>().map_err(err)?),
+                None => None,
+            };
+            if c.is_some_and(|c| !b.candidates.contains(&c)) {
+                return Err("that history was not offered for this document".into());
+            }
+            b.path.clone()
+        };
         let store = self.store().map_err(err)?;
         let mut b = Bound::new(&path);
         let r = match candidate {
@@ -316,37 +385,41 @@ impl History {
     }
 
     /// The bytes behind a source (decrypted history stays in memory only).
+    /// Authorization comes first and never depends on the cache: a version needs a binding for `doc`
+    /// (looked up from the engine id, failing closed), `Current` the bound document's own file, a pick
+    /// a token from `register_picks`. Nothing else names a file.
     fn load(&self, doc: Option<EngDoc>, src: &Source) -> Result<Arc<(BytesId, Vec<u8>)>, String> {
-        let (key, path) = match src {
-            Source::Version { id } => (format!("v:{id}"), None),
+        enum Origin {
+            Version(Arc<Store>, history::DocId, VersionId),
+            File(PathBuf),
+        }
+        let file_key = |p: &Path| -> Result<String, String> {
+            let m = std::fs::metadata(p).map_err(err)?;
+            let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+            Ok(format!("f:{}:{t}:{}", p.display(), m.len()))
+        };
+        let (key, origin) = match src {
+            Source::Version { id } => {
+                let (store, hdoc, _) = self.bound(doc.ok_or("no document")?)?;
+                let v: VersionId = id.parse().map_err(err)?;
+                // per history document: two documents never share an entry
+                (format!("v:{hdoc}:{v}"), Origin::Version(store, hdoc, v))
+            }
             Source::Current => {
                 let (_, _, p) = self.bound(doc.ok_or("no document")?)?;
-                let m = std::fs::metadata(&p).map_err(err)?;
-                let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-                (format!("c:{}:{t}:{}", p.display(), m.len()), Some(p))
+                (file_key(&p)?, Origin::File(p))
             }
-            Source::File { path } => {
-                let p = PathBuf::from(path);
-                let m = std::fs::metadata(&p).map_err(err)?;
-                let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-                (format!("f:{path}:{t}:{}", m.len()), Some(p))
+            Source::Picked { token } => {
+                let p = self.picks.resolve(token).ok_or("that file was not chosen in the compare dialog")?;
+                (file_key(&p)?, Origin::File(p))
             }
-        };
-        // Version keys are per document: add the history doc so two documents never share an entry.
-        let key = match (src, doc) {
-            (Source::Version { .. }, Some(d)) => format!("{d}:{key}"),
-            _ => key,
         };
         if let Some(v) = self.bytes.lock().get(&key) {
             return Ok(v.clone());
         }
-        let bytes = match (src, path) {
-            (Source::Version { id }, _) => {
-                let (store, hdoc, _) = self.bound(doc.ok_or("no document")?)?;
-                store.read(hdoc, id.parse().map_err(err)?).map_err(err)?
-            }
-            (_, Some(p)) => std::fs::read(p).map_err(err)?,
-            _ => return Err("no source".into()),
+        let bytes = match origin {
+            Origin::Version(store, hdoc, v) => store.read(hdoc, v).map_err(err)?,
+            Origin::File(p) => std::fs::read(p).map_err(err)?,
         };
         let v = Arc::new((BytesId::of(&bytes), bytes));
         self.bytes.lock().put(key, v.clone());
@@ -365,10 +438,10 @@ impl History {
         diff::render_page(s.0, &s.1, page, scale).map_err(err)?.to_png().map_err(err)
     }
 
-    pub fn visual_diff(&self, doc: Option<EngDoc>, a: &Source, ap: u32, b: &Source, bp: u32, scale: f32) -> Result<VisualDiff, String> {
+    pub fn visual_diff(&self, doc: Option<EngDoc>, a: &Source, ap: u32, b: &Source, bp: u32, scale: f32, hints: &[diff::Rect4]) -> Result<VisualDiff, String> {
         let (a, b) = (self.load(doc, a)?, self.load(doc, b)?);
         let _g = self.diff_lock.lock();
-        diff::visual_diff(&a.1, ap, &b.1, bp, scale).map_err(err)
+        diff::visual_diff_hinted(&a.1, ap, &b.1, bp, scale, hints).map_err(err)
     }
 }
 
@@ -425,6 +498,11 @@ pub async fn history_check(h: Hist<'_>, doc: EngDoc) -> Result<Option<VersionInf
 
 async fn restore_with(eng: Arc<Engine>, h: Arc<History>, doc: EngDoc, version: String) -> Result<RestoreOut, String> {
     off(move || {
+        // Unsaved edits are about to be discarded: keep them as an autosave version first.
+        if let Some(bytes) = eng.unsaved_bytes(doc).map_err(err)? {
+            let (store, hdoc, _) = h.bound(doc)?;
+            store.autosave(hdoc, &bytes).map_err(err)?;
+        }
         let (path, bytes, info) = h.prepare_restore(doc, &version)?;
         // Engine rule 5: release every replica of the old file, then rename over it.
         eng.close(doc);
@@ -497,11 +575,12 @@ pub async fn history_compare(h: Hist<'_>, doc: Option<EngDoc>, a: Source, b: Sou
     off(move || h.compare(doc, &a, &b)).await
 }
 
-/// Two arbitrary PDFs; no store involved.
+/// "Compare files": the native dialog runs here, and only the two files chosen in it can be read afterwards
+/// (as `Source::Picked`). `None` = cancelled.
 #[tauri::command]
-pub async fn compare_files(h: Hist<'_>, path_a: String, path_b: String) -> Result<Comparison, String> {
+pub async fn history_pick_compare(app: AppHandle, h: Hist<'_>) -> Result<Option<Vec<Picked>>, String> {
     let h = h.inner().clone();
-    off(move || h.compare(None, &Source::File { path: path_a }, &Source::File { path: path_b })).await
+    off(move || h.picks.pick_pdfs(&app, 2)).await
 }
 
 /// One page as a PNG (`scale` 1 = one pixel per point). Over IPC only: no temp file.
@@ -521,9 +600,10 @@ pub async fn history_visual_diff(
     b: Source,
     b_page: u32,
     scale: f32,
+    hints: Vec<diff::Rect4>,
 ) -> Result<VisualDiff, String> {
     let h = h.inner().clone();
-    off(move || h.visual_diff(doc, &a, a_page, &b, b_page, scale.clamp(0.25, 4.0))).await
+    off(move || h.visual_diff(doc, &a, a_page, &b, b_page, scale.clamp(0.25, 4.0), &hints)).await
 }
 
 #[cfg(test)]
@@ -608,6 +688,93 @@ mod tests {
         probe("org-out-01-ops.pdf", "org-out-02-insert.pdf");
         probe("red-in-01.pdf", "red-out-02-apply-sanitize.pdf");
         drop(store);
+    }
+
+    fn bound_doc(h: &History, doc: EngDoc, file: &Path) {
+        h.docs.lock().insert(doc, Bound::new(file));
+        h.bind(doc, file);
+        assert_eq!(h.state(doc).status, Status::Ready);
+    }
+
+    /// Every history command acts only on a document the engine id is bound to; paths come only from picks.
+    #[test]
+    fn refuses_what_is_not_bound() {
+        let dir = tmp("refuse");
+        let (f1, f2) = (dir.join("one.pdf"), dir.join("two.pdf"));
+        std::fs::copy(sample("edit-source.pdf"), &f1).unwrap();
+        std::fs::copy(sample("form-source.pdf"), &f2).unwrap();
+        let h = History::with_root(dir.join("store"));
+        bound_doc(&h, 1, &f1);
+        bound_doc(&h, 2, &f2);
+        let v1 = h.versions(1).unwrap()[0].id.to_string();
+        let v1s = Source::Version { id: v1.clone() };
+
+        // never-opened engine doc: everything is refused
+        assert!(h.versions(99).is_err());
+        assert!(h.check(99).is_err());
+        assert!(h.name(99, &v1, None).is_err());
+        assert!(h.delete(99).is_err());
+        assert!(h.prepare_restore(99, &v1).is_err());
+        assert!(h.compare(Some(99), &v1s, &Source::Current).is_err());
+        assert!(h.render(Some(99), &Source::Current, 0, 0.5).is_err());
+        assert!(h.visual_diff(Some(99), &v1s, 0, &Source::Current, 0, 1.0, &[]).is_err());
+        // a version needs a document; so does the current file
+        assert!(h.render(None, &v1s, 0, 0.5).is_err());
+        assert!(h.render(None, &Source::Current, 0, 0.5).is_err());
+        // another document's version id is not readable through this document
+        assert!(h.render(Some(2), &v1s, 0, 0.5).is_err());
+        assert!(h.render(Some(1), &v1s, 0, 0.5).is_ok());
+        // fail closed: a binding without a history (error / off) reads nothing, cached or not
+        h.docs.lock().insert(3, Bound::new(&f1));
+        assert!(h.render(Some(3), &v1s, 0, 0.5).is_err());
+        assert!(h.render(Some(3), &Source::Current, 0, 0.5).is_err());
+        // a closed document loses access even though its bytes were cached a moment ago
+        h.forget(1);
+        assert!(h.render(Some(1), &v1s, 0, 0.5).is_err());
+        assert!(h.versions(1).is_err());
+    }
+
+    /// The UI cannot name a path: only tokens from the dialog work, and a new pick replaces the old ones.
+    #[test]
+    fn only_picked_files_are_read() {
+        let dir = tmp("picks");
+        let (f1, f2) = (dir.join("one.pdf"), dir.join("two.pdf"));
+        std::fs::copy(sample("edit-source.pdf"), &f1).unwrap();
+        std::fs::copy(sample("edit-out-02-addtext.pdf"), &f2).unwrap();
+        let h = History::with_root(dir.join("store"));
+        for bad in ["", "../one.pdf", f1.to_str().unwrap(), "pick-999"] {
+            let s = Source::Picked { token: bad.into() };
+            assert!(h.render(None, &s, 0, 0.5).is_err(), "{bad}");
+            assert!(h.compare(None, &s, &s).is_err(), "{bad}");
+        }
+        // the old wire form with a raw path no longer parses
+        assert!(serde_json::from_str::<Source>(r#"{"kind":"file","path":"C:\\x.pdf"}"#).is_err());
+        let p = h.picks.issue(vec![f1.clone(), f2.clone()]);
+        assert_eq!(p[0].name, "one.pdf");
+        let (a, b) = (Source::Picked { token: p[0].token.clone() }, Source::Picked { token: p[1].token.clone() });
+        assert!(!h.compare(None, &a, &b).unwrap().identical);
+        assert!(!h.render(None, &a, 0, 0.5).unwrap().is_empty());
+        h.picks.issue(vec![f2]);
+        assert!(h.render(None, &a, 0, 0.5).is_err());
+    }
+
+    /// "Same document?" accepts only a history the document was offered.
+    #[test]
+    fn confirm_same_refuses_foreign_histories() {
+        let dir = tmp("confirm");
+        let (f1, f2) = (dir.join("one.pdf"), dir.join("two.pdf"));
+        std::fs::copy(sample("edit-source.pdf"), &f1).unwrap();
+        std::fs::copy(sample("form-source.pdf"), &f2).unwrap();
+        let h = History::with_root(dir.join("store"));
+        bound_doc(&h, 1, &f1);
+        let foreign = h.docs.lock().get(&1).unwrap().hdoc.unwrap().to_string();
+        bound_doc(&h, 2, &f2);
+        // not offered (the document is Ready, no candidates)
+        assert!(h.confirm_same(2, Some(foreign)).is_err());
+        assert!(h.confirm_same(2, Some("nonsense".into())).is_err());
+        assert!(h.confirm_same(77, None).is_err());
+        // the document is still bound to its own history
+        assert_eq!(h.versions(2).unwrap().len(), 1);
     }
 
     /// Open hook: New -> attach (Import), reopen -> Known (no new version), outside change -> External,

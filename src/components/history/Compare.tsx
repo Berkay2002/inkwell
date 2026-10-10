@@ -3,22 +3,17 @@ import { type Comparison, type Rect4, type Source, type VersionInfo, historyComp
 import {
   CATEGORIES,
   type Category,
-  GLYPH,
   type Mark,
-  TONE_WORD,
   alignRows,
   categoryCounts,
-  categoryOf,
-  changePage,
+  clock,
   flatOrder,
   groupChanges,
-  inlineRuns,
   marksFor,
   pageSummary,
   rowOf,
   stepIndex,
-  textRuns,
-  toneOf,
+  trackDays,
   uncovered,
   versionTitle,
   when,
@@ -26,6 +21,7 @@ import {
 import { type CompareReq, useHistory } from "../../lib/historyStore";
 import { Icon } from "../Icons";
 import { PageImg, SCALE, clearPageCache } from "./PageImg";
+import { RevRow } from "./RevRow";
 
 type Mode = "twoup" | "swipe" | "onion";
 const MODES: { id: Mode; label: string }[] = [
@@ -220,22 +216,14 @@ export function CompareView() {
                 </ul>
               )}
               {counts && done.changes.length > 0 && (
-                <div className="hx-cats" role="group" aria-label="Filter by type">
+                <div className="hx-seg hx-cats" role="group" aria-label="Filter by type">
+                  <button className={!cats ? "on" : ""} aria-pressed={!cats} onClick={() => setCats(null)}>
+                    All
+                  </button>
                   {CATEGORIES.filter((c) => counts[c.id] > 0).map((c) => {
-                    const on = !cats || cats.has(c.id);
+                    const on = !!cats && cats.size === 1 && cats.has(c.id);
                     return (
-                      <button
-                        key={c.id}
-                        className={on ? "on" : ""}
-                        aria-pressed={on}
-                        onClick={() => {
-                          const all = CATEGORIES.filter((x) => counts[x.id] > 0).map((x) => x.id);
-                          const now = new Set(cats ?? all);
-                          if (now.has(c.id)) now.delete(c.id);
-                          else now.add(c.id);
-                          setCats(now.size === all.length ? null : now);
-                        }}
-                      >
+                      <button key={c.id} className={on ? "on" : ""} aria-pressed={on} onClick={() => setCats(on ? null : new Set([c.id]))}>
                         {c.label} <span className="n">{counts[c.id]}</span>
                       </button>
                     );
@@ -248,9 +236,11 @@ export function CompareView() {
                 )}
                 {groups.map((g) => (
                   <section key={g.page ?? "doc"}>
-                    <h4 className="hx-day">{g.page === null ? "Document" : `Page ${g.page + 1}`}</h4>
+                    <h4 className="hx-day">
+                      {g.page === null ? "Document" : `Page ${g.page + 1}`} <span className="n">{g.items.length}</span>
+                    </h4>
                     {g.items.map(({ change, index }) => (
-                      <Card key={index} change={change} n={order.indexOf(index) + 1} on={cur === index} onClick={() => select(index)} />
+                      <RevRow key={index} change={change} on={cur === index} onClick={() => select(index)} />
                     ))}
                   </section>
                 ))}
@@ -258,6 +248,68 @@ export function CompareView() {
             </>
           )}
         </aside>
+      </div>
+      {req.doc !== null && versions.length > 0 && <VersionTrack req={req} versions={versions} onSet={pick} />}
+    </div>
+  );
+}
+
+/** The versions along the bottom, oldest first by day. Click sets After; Alt/Shift-click or the toggle sets Before. */
+function VersionTrack({ req, versions, onSet }: { req: CompareReq; versions: VersionInfo[]; onSet: (side: "a" | "b", value: string) => void }) {
+  const [target, setTarget] = useState<"a" | "b">("b");
+  const days = useMemo(() => trackDays(versions, Date.now()), [versions]);
+  const strip = useRef<HTMLDivElement>(null);
+  const is = (src: Source, id: string) => (id === "current" ? src.kind === "current" : src.kind === "version" && src.id === id);
+  const move = (e: React.KeyboardEvent) => {
+    const dir = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!dir) return;
+    const all = [...(strip.current?.querySelectorAll<HTMLButtonElement>("button.hx-node") ?? [])];
+    const i = all.indexOf(document.activeElement as HTMLButtonElement);
+    all[Math.min(all.length - 1, Math.max(0, i + dir))]?.focus();
+    e.preventDefault();
+  };
+  const node = (id: string, title: string, time: string) => {
+    const a = is(req.a, id);
+    const b = is(req.b, id);
+    return (
+      <button
+        key={id}
+        className={`hx-node${a ? " is-a" : ""}${b ? " is-b" : ""}`}
+        aria-pressed={a || b}
+        aria-label={`${title}, ${time}${a ? ", Before" : ""}${b ? ", After" : ""}`}
+        title={`${title} · click: After, Alt-click: Before`}
+        onClick={(e) => onSet(e.altKey || e.shiftKey || target === "a" ? "a" : "b", id)}
+      >
+        <span className="hx-dot" aria-hidden>
+          {a && <i className="hx-handle-a">Before</i>}
+          {b && <i className="hx-handle-b">After</i>}
+        </span>
+        <span className="hx-node-time">{time}</span>
+      </button>
+    );
+  };
+  return (
+    <div className="hx-track" aria-label="Versions">
+      <strong className="hx-track-title">Versions</strong>
+      <div className="hx-seg inline" role="group" aria-label="A click sets">
+        <button className={target === "a" ? "on" : ""} aria-pressed={target === "a"} onClick={() => setTarget("a")}>
+          Before
+        </button>
+        <button className={target === "b" ? "on" : ""} aria-pressed={target === "b"} onClick={() => setTarget("b")}>
+          After
+        </button>
+      </div>
+      <div className="hx-strip" ref={strip} onKeyDown={move}>
+        {days.map((d) => (
+          <div key={d.key} className="hx-track-day">
+            <span className="hx-track-label">{d.label}</span>
+            <div className="hx-track-items">{d.items.map((v) => node(v.id, versionTitle(v), clock(v.created)))}</div>
+          </div>
+        ))}
+        <div className="hx-track-day">
+          <span className="hx-track-label">Now</span>
+          <div className="hx-track-items">{node("current", "Current file", "file")}</div>
+        </div>
       </div>
     </div>
   );
@@ -365,7 +417,9 @@ function CompareRow({
   useEffect(() => {
     if (!diffs || !seen || row.a === null || row.b === null) return;
     let live = true;
-    historyVisualDiff(req.doc, req.a, row.a, req.b, row.b, 1).then(
+    // regions a semantic change explains are kept however faint
+    const hints = [...(ma ?? []), ...(mb ?? [])].flatMap((m) => (m.rect ? [m.rect] : []));
+    historyVisualDiff(req.doc, req.a, row.a, req.b, row.b, 1, hints).then(
       (d) => live && setVb(d.boxes),
       () => {},
     );
@@ -373,7 +427,7 @@ function CompareRow({
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [diffs, seen, row.a, row.b, sourceKey(req.a), sourceKey(req.b)]);
+  }, [diffs, seen, row.a, row.b, sourceKey(req.a), sourceKey(req.b), ma, mb]);
 
   const vboxes = useMemo(() => (diffs ? uncovered(vb, [...(ma ?? []), ...(mb ?? [])]) : undefined), [diffs, vb, ma, mb]);
   const cell = (side: "a" | "b") => {
@@ -427,39 +481,5 @@ function CompareRow({
         </div>
       )}
     </div>
-  );
-}
-
-function Card({ change, n, on, onClick }: { change: import("../../lib/history").Change; n: number; on: boolean; onClick: () => void }) {
-  const tone = toneOf(change);
-  const p = changePage(change);
-  const runs = textRuns(change);
-  const isText = change.kind === "textChanged" && runs.length > 0;
-  return (
-    <button className={`hx-card${on ? " on" : ""}`} onClick={onClick} data-cat={categoryOf(change)}>
-      <span className="hx-num">{n}</span>
-      <span className="hx-card-body">
-        <span className="hx-card-title">
-          <span className={`hx-glyph ${tone}`} title={TONE_WORD[tone]} aria-label={TONE_WORD[tone]}>
-            {GLYPH[tone]}
-          </span>
-          {isText ? `${TONE_WORD[tone]} text` : change.label}
-        </span>
-        {isText && (
-          <span className="hx-inline">
-            {inlineRuns(runs).map((r, i) =>
-              r.op === "delete" ? (
-                <del key={i}>{r.text} </del>
-              ) : r.op === "insert" ? (
-                <ins key={i}>{r.text} </ins>
-              ) : (
-                <span key={i}>{r.text} </span>
-              ),
-            )}
-          </span>
-        )}
-      </span>
-      {p !== null && <span className="hx-chip">p. {p + 1}</span>}
-    </button>
   );
 }

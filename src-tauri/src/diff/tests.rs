@@ -530,7 +530,30 @@ fn graphics_only_change_is_reported() {
 // ---- document level ---------------------------------------------------------------------------
 
 #[test]
-fn metadata_changed_ignores_volatile_fields() {
+fn metadata_bookkeeping_only_is_no_change() {
+    let a = base(1);
+    let mut b = a.clone();
+    for (k, v) in [("ModDate", "D:20261010120000Z"), ("Producer", "Inkwell 0.2"), ("Creator", "Word"), ("Trapped", "False")] {
+        b.info.push((k.into(), v.into()));
+    }
+    let c = cmp(&a, &b);
+    assert!(c.changes.is_empty(), "{:?}", labels(&c));
+    assert!(c.identical);
+}
+
+#[test]
+fn empty_metadata_fields_equal_missing_ones() {
+    let a = base(1);
+    let mut b = a.clone();
+    for k in ["Keywords", "Subject"] {
+        b.info.push((k.into(), "".into()));
+    }
+    let c = cmp(&a, &b);
+    assert!(c.changes.is_empty(), "{:?}", labels(&c));
+}
+
+#[test]
+fn metadata_changes_collapse_into_one() {
     let a = base(1);
     let mut b = a.clone();
     b.info[0].1 = "Annual report".into();
@@ -538,9 +561,23 @@ fn metadata_changed_ignores_volatile_fields() {
     b.info.push(("Producer".into(), "Inkwell 0.2".into()));
     let c = cmp(&a, &b);
     assert_eq!(kinds(&c), vec![ChangeKind::MetadataChanged]);
-    assert_eq!(c.changes[0].label, "Title changed: 'Quarterly report' -> 'Annual report'");
+    assert_eq!(c.changes[0].label, "Metadata changed (1)");
+    let Detail::Metadata { fields } = &c.changes[0].detail else { panic!() };
+    assert_eq!((fields[0].field.as_str(), fields[0].old.as_deref(), fields[0].new.as_deref()), ("Title", Some("Quarterly report"), Some("Annual report")));
     let all = compare(&build(&a), &build(&b), &CompareOptions { include_volatile_metadata: true, ..Default::default() }).unwrap();
-    assert_eq!(all.changes.len(), 3);
+    assert_eq!(all.changes[0].label, "Metadata changed (3)");
+}
+
+#[test]
+fn metadata_noise_rules() {
+    use super::types::MetadataSource::{Info, Xmp};
+    use super::semantic::is_noise;
+    for k in ["xmp:CreatorTool", "xmp:ModifyDate", "xmp:MetadataDate", "pdf:Producer", "pdfx:PTEX.Fullbanner", "xmpMM:DocumentID", "xmpMM:InstanceID", "xmpMM:VersionID", "xmpMM:History", "dc:format", "pdf:Trapped"] {
+        assert!(is_noise(Xmp, k, false), "{k}");
+    }
+    assert!(!is_noise(Xmp, "dc:title", true));
+    assert!(!is_noise(Info, "Title", true));
+    assert!(is_noise(Xmp, "xmp:CreateDate", true) && !is_noise(Xmp, "xmp:CreateDate", false));
 }
 
 #[test]
@@ -631,6 +668,27 @@ fn visual_diff_one_word_gives_one_box() {
     // png export works
     let png = v.before.to_png().unwrap();
     assert_eq!(&png[1..4], b"PNG");
+}
+
+#[test]
+fn visual_diff_ignores_subpixel_jitter() {
+    let mut a = base(1);
+    a.pages[0].lines.push((72.0, 500.0, "The quick brown fox jumps over the lazy dog".into()));
+    a.pages[0].lines.push((72.0, 480.0, "Signed by: blank".into()));
+    let mut b = a.clone();
+    for l in &mut b.pages[0].lines {
+        l.0 += 0.2;
+    }
+    let (ba, bb) = (build(&a), build(&b));
+    let v = visual_diff(&ba, 0, &bb, 0, 1.5).unwrap();
+    assert!(v.boxes.is_empty(), "{:?}", v.boxes);
+    // a region is kept when a semantic change rect touches it
+    let mut c = a.clone();
+    c.pages[0].lines[1].2.push_str(" and more");
+    let bc = build(&c);
+    let strict = visual_diff(&ba, 0, &bc, 0, 1.5).unwrap().boxes.len();
+    let hinted = visual_diff_hinted(&ba, 0, &bc, 0, 1.5, &[[72.0, 300.0, 400.0, 320.0]]).unwrap().boxes.len();
+    assert!(hinted >= strict && hinted >= 1);
 }
 
 #[test]

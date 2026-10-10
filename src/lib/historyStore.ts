@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { message } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import { useStore } from "../store";
 import { useAi } from "./aiStore";
@@ -65,11 +66,11 @@ export const useHistory = create<HStore>((set, get) => {
   const patchDoc = (doc: number, f: (d: DocHistory) => DocHistory) =>
     set((s) => ({ docs: { ...s.docs, [doc]: f(s.docs[doc] ?? { state: null, versions: [] }) } }));
 
-  /** Closes the tab and opens the rewritten file again: the engine's replicas must not outlive the old bytes. */
+  /** The engine closed the document to rewrite its file: opens the file again in the same tab. */
   const reopen = async (doc: number, r: api.RestoreOut, message: string) => {
-    const st = useStore.getState();
-    st.closeDoc(doc);
-    await st.openPath(r.path);
+    await useStore.getState().reloadInPlace(doc, r.path);
+    const now = useStore.getState().active;
+    if (get().open && now != null) void get().refresh(now);
     toast(message);
   };
 
@@ -152,6 +153,15 @@ export const useHistory = create<HStore>((set, get) => {
     restore: async (doc, id) => {
       const d = useStore.getState().docs[doc];
       const v = get().docs[doc]?.versions.find((x) => x.id === id);
+      if (d?.dirty) {
+        // The unsaved edits are kept as an autosave version first, so they stay recoverable.
+        const ok = await message(`${d.name} has unsaved changes. Restoring replaces them (they stay in the version history as an autosave).`, {
+          title: "Inkwell",
+          kind: "warning",
+          buttons: { ok: "Restore", cancel: "Cancel" },
+        });
+        if (ok !== "Ok" && ok !== "Restore") return;
+      }
       try {
         const r = await api.historyRestore(doc, id);
         await reopen(doc, r, `Restored ${v ? `"${versionTitle(v)}" from ${when(v.created, Date.now())}` : "the version"}${d ? ` in ${d.name}` : ""}`);

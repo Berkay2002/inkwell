@@ -346,3 +346,24 @@ export function inlineRuns(runs: TextRun[], context = 3): { op: TextRun["op"]; t
     return { op: r.op, text: `${head} … ${tail}` };
   });
 }
+
+// ---- version track (Compare's bottom strip) ---------------------------------------------------------
+
+export interface TrackDay {
+  key: string;
+  label: string;
+  items: VersionInfo[];
+}
+
+/** Oldest first, grouped by day: the order the strip draws them in. */
+export function trackDays(all: VersionInfo[], now: number): TrackDay[] {
+  const sorted = [...all].sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : 1));
+  const days: TrackDay[] = [];
+  for (const v of sorted) {
+    const label = dayLabel(v.created, now);
+    const last = days[days.length - 1];
+    if (last && last.label === label) last.items.push(v);
+    else days.push({ key: `${label}:${v.id}`, label, items: [v] });
+  }
+  return days;
+}

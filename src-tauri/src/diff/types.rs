@@ -152,7 +152,7 @@ pub enum Detail {
     #[serde(rename_all = "camelCase")]
     Redaction { via: RedactionVia, rects: Vec<Rect4>, words_removed: u32 },
     #[serde(rename_all = "camelCase")]
-    Metadata { source: MetadataSource, field: String, old: Option<String>, new: Option<String> },
+    Metadata { fields: Vec<MetadataField> },
     #[serde(rename_all = "camelCase")]
     Bookmarks { items: Vec<BookmarkChange> },
     #[serde(rename_all = "camelCase")]
@@ -207,6 +207,15 @@ pub enum RedactionVia {
     Annotation,
     /// Text vanished and an opaque filled box now covers where it was.
     OpaqueBox,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataField {
+    pub source: MetadataSource,
+    pub field: String,
+    pub old: Option<String>,
+    pub new: Option<String>,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]

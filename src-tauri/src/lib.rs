@@ -338,7 +338,7 @@ pub fn run() {
             history_ipc::history_delete,
             history_ipc::history_never_keep,
             history_ipc::history_compare,
-            history_ipc::compare_files,
+            history_ipc::history_pick_compare,
             history_ipc::history_render,
             history_ipc::history_visual_diff,
         ])

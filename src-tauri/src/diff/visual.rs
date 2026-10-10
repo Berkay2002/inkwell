@@ -16,6 +16,11 @@ use std::sync::{Arc, OnceLock};
 const CACHE_BYTES: usize = 256 << 20;
 /// Per-channel difference above which a pixel counts as changed (anti-aliasing tolerant).
 const THRESHOLD: i32 = 32;
+/// A pixel this different (3x3 means) counts towards a region being real; a region needs `MIN_STRONG` of them.
+const STRONG: i32 = 48;
+/// Minimum difference of the 3x3 means for a pixel to count at all.
+const BLUR_MIN: i32 = 24;
+const MIN_STRONG: u32 = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BytesId(pub [u8; 32]);
@@ -152,6 +157,11 @@ pub struct VisualDiff {
 }
 
 pub fn visual_diff(a: &[u8], a_page: u32, b: &[u8], b_page: u32, scale: f32) -> Result<VisualDiff> {
+    visual_diff_hinted(a, a_page, b, b_page, scale, &[])
+}
+
+/// `hints`: rects (page points) of semantic changes; regions touching one are kept however faint.
+pub fn visual_diff_hinted(a: &[u8], a_page: u32, b: &[u8], b_page: u32, scale: f32, hints: &[Rect4]) -> Result<VisualDiff> {
     let (ia, ib) = (BytesId::of(a), BytesId::of(b));
     let (mut ra, mut rb) = (render_page(ia, a, a_page, scale)?, render_page(ib, b, b_page, scale)?);
     if ra.scale != rb.scale {
@@ -159,65 +169,111 @@ pub fn visual_diff(a: &[u8], a_page: u32, b: &[u8], b_page: u32, scale: f32) -> 
         let s = ra.scale.min(rb.scale);
         (ra, rb) = (render_page(ia, a, a_page, s)?, render_page(ib, b, b_page, s)?);
     }
-    Ok(diff_rasters(ra, rb, scale))
+    Ok(diff_rasters_hinted(ra, rb, hints))
 }
 
-/// Pixel diff of two renders made at the same scale. Boxes use the rasters' effective scale
-/// (`Raster::scale`); `_requested_scale` is ignored (kept for callers).
+/// Pixel diff of two renders made at the same scale (no semantic hints: see [`diff_rasters_hinted`]).
 pub fn diff_rasters(before: Arc<Raster>, after: Arc<Raster>, _requested_scale: f32) -> VisualDiff {
+    diff_rasters_hinted(before, after, &[])
+}
+
+/// A pixel differs only if it is not explained by a sub-pixel shift: its 3x3 neighbourhood must differ too. Regions then need `MIN_STRONG` strongly changed pixels to count, unless they
+/// touch a `hints` rect (a semantic change, page points). Boxes use the rasters' effective scale.
+pub fn diff_rasters_hinted(before: Arc<Raster>, after: Arc<Raster>, hints: &[Rect4]) -> VisualDiff {
     let scale = before.scale.min(after.scale);
     let (w, h) = (before.width.max(after.width) as usize, before.height.max(after.height) as usize);
-    let mut mask = vec![0u8; w * h];
-    let mut changed = 0u32;
-    let differs = |p: &[u8], q: &[u8]| (0..3).any(|c| (p[c] as i32 - q[c] as i32).abs() > THRESHOLD);
-    const WHITE: [u8; 4] = [255; 4];
-    if before.width == after.width && before.height == after.height {
-        for (m, (p, q)) in mask.iter_mut().zip(before.rgba.chunks_exact(4).zip(after.rgba.chunks_exact(4))) {
-            if p != q && differs(p, q) {
-                *m = 1;
-                changed += 1;
+    // both on a white canvas of the larger size
+    let canvas = |r: &Raster| -> Vec<u8> {
+        if r.width as usize == w && r.height as usize == h {
+            return r.rgba.clone();
+        }
+        let mut v = vec![255u8; w * h * 4];
+        for y in 0..r.height as usize {
+            let n = r.width as usize * 4;
+            v[y * w * 4..y * w * 4 + n].copy_from_slice(&r.rgba[y * n..(y + 1) * n]);
+        }
+        v
+    };
+    let (ca, cb) = (canvas(&before), canvas(&after));
+    let delta = |p: &[u8], q: &[u8]| (0..3).map(|c| (p[c] as i32 - q[c] as i32).abs()).max().unwrap_or(0);
+    // 3x3 mean at (x, y): a sub-pixel shift of an edge barely moves it, a real change does
+    let blur = |img: &[u8], x: usize, y: usize| {
+        let mut sum = [0i32; 3];
+        let (mut n, ys, xs) = (0, y.saturating_sub(1)..=(y + 1).min(h - 1), x.saturating_sub(1)..=(x + 1).min(w - 1));
+        for yy in ys {
+            for xx in xs.clone() {
+                for (c, s) in sum.iter_mut().enumerate() {
+                    *s += img[(yy * w + xx) * 4 + c] as i32;
+                }
+                n += 1;
             }
         }
-    } else {
-        // pages of different size: compare on a white canvas of the larger size
-        let px = |r: &Raster, x: usize, y: usize| -> [u8; 4] {
-            if x < r.width as usize && y < r.height as usize {
-                let i = (y * r.width as usize + x) * 4;
-                [r.rgba[i], r.rgba[i + 1], r.rgba[i + 2], 255]
-            } else {
-                WHITE
+        sum.map(|s| s / n)
+    };
+    let mut mask = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            if delta(&ca[i..i + 4], &cb[i..i + 4]) <= THRESHOLD {
+                continue;
             }
-        };
-        for y in 0..h {
-            for x in 0..w {
-                if differs(&px(&before, x, y), &px(&after, x, y)) {
-                    mask[y * w + x] = 1;
-                    changed += 1;
-                }
+            let (p, q) = (blur(&ca, x, y), blur(&cb, x, y));
+            let d = (0..3).map(|c| (p[c] - q[c]).abs()).max().unwrap_or(0);
+            if d > BLUR_MIN {
+                mask[y * w + x] = if d >= STRONG { 2 } else { 1 };
             }
         }
     }
+    // isolated single pixels are rendering noise
+    let near = |x: usize, y: usize| {
+        (y.saturating_sub(1)..=(y + 1).min(h - 1)).any(|yy| (x.saturating_sub(1)..=(x + 1).min(w - 1)).any(|xx| (xx, yy) != (x, y) && mask[yy * w + xx] != 0))
+    };
+    let lonely: Vec<usize> = (0..w * h).filter(|&i| mask[i] != 0 && !near(i % w, i / w)).collect();
+    for i in lonely {
+        mask[i] = 0;
+    }
+    let strong: Vec<u8> = mask.iter().map(|&m| (m == 2) as u8).collect();
+    let mask: Vec<u8> = mask.iter().map(|&m| (m != 0) as u8).collect();
 
     let r = ((2.0 * scale).round() as usize).max(1);
-    let mask = dilate(&mask, w, h, r);
-    let mut boxes_px = components(&mask, w, h);
+    let grown = dilate(&mask, w, h, r);
+    let mut boxes_px = components(&grown, w, h);
     // join regions closer than a few pixels, then pad
     let gap = (6.0 * scale).round() as i64;
     merge_boxes(&mut boxes_px, gap);
     let pad = (2.0 * scale).round() as i64;
-    let boxes_px: Vec<[u32; 4]> = boxes_px
-        .into_iter()
-        .map(|b| {
-            [
-                (b[0] as i64 - pad).max(0) as u32,
-                (b[1] as i64 - pad).max(0) as u32,
-                (b[2] as i64 + pad).min(w as i64) as u32,
-                (b[3] as i64 + pad).min(h as i64) as u32,
-            ]
-        })
-        .collect();
+    let hint_px: Vec<[f32; 4]> = hints.iter().map(|r| [r[0] * scale, r[1] * scale, r[2] * scale, r[3] * scale]).collect();
+    let mut changed = 0u32;
+    let mut kept_mask = vec![0u8; w * h];
+    let mut boxes_out: Vec<[u32; 4]> = Vec::new();
+    for b in boxes_px {
+        let (mut n_strong, mut n_all) = (0u32, 0u32);
+        for y in b[1] as usize..b[3] as usize {
+            for x in b[0] as usize..b[2] as usize {
+                n_strong += strong[y * w + x] as u32;
+                n_all += mask[y * w + x] as u32;
+            }
+        }
+        let hinted = hint_px.iter().any(|r| r[0] < b[2] as f32 && r[2] > b[0] as f32 && r[1] < b[3] as f32 && r[3] > b[1] as f32);
+        if n_strong < MIN_STRONG && !hinted {
+            continue;
+        }
+        changed += n_all;
+        for y in b[1] as usize..b[3] as usize {
+            for x in b[0] as usize..b[2] as usize {
+                kept_mask[y * w + x] = grown[y * w + x];
+            }
+        }
+        boxes_out.push([
+            (b[0] as i64 - pad).max(0) as u32,
+            (b[1] as i64 - pad).max(0) as u32,
+            (b[2] as i64 + pad).min(w as i64) as u32,
+            (b[3] as i64 + pad).min(h as i64) as u32,
+        ]);
+    }
+    let boxes_px = boxes_out;
     let boxes = boxes_px.iter().map(|b| [b[0] as f32 / scale, b[1] as f32 / scale, b[2] as f32 / scale, b[3] as f32 / scale]).collect();
-    let mask = mask.into_iter().map(|v| if v != 0 { 255 } else { 0 }).collect();
+    let mask = kept_mask.into_iter().map(|v| if v != 0 { 255 } else { 0 }).collect();
     VisualDiff { width: w as u32, height: h as u32, scale, before, after, boxes, boxes_px, mask, changed_pixels: changed }
 }
 

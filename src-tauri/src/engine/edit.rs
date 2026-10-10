@@ -955,6 +955,18 @@ impl Engine {
         Ok(lane.as_ref().map_or_else(|| clean_state(&entry), |ed| ed.state(&entry)))
     }
 
+    /// What Save would write for the current content, `None` when there are no unsaved edits
+    /// (for the version history's autosave before a restore discards them).
+    pub fn unsaved_bytes(&self, id: DocId) -> Result<Option<Vec<u8>>> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let Some(ed) = lane.as_mut().filter(|ed| ed.saved != Some(ed.cur)) else { return Ok(None) };
+        if ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts) {
+            return Ok(Some(write_doc(&open_snap(&ed.step().snap, &entry)?.doc, rewrite_opts(), ed.step().snap.len)?));
+        }
+        Ok(Some(ed.bytes().to_vec()))
+    }
+
     /// An error if `path` is open in Inkwell (other than as `except`).
     fn check_not_open(&self, path: &str, except: Option<DocId>) -> Result<()> {
         let open = self.docs.read().values().any(|e| Some(e.id) != except && same_path(&e.path(), path));

@@ -19,7 +19,7 @@ pub mod visual;
 mod tests;
 
 pub use types::*;
-pub use visual::{BytesId, Raster, VisualDiff, diff_rasters, render_page, render_page_pw, visual_diff};
+pub use visual::{BytesId, Raster, VisualDiff, diff_rasters, diff_rasters_hinted, render_page, render_page_pw, visual_diff, visual_diff_hinted};
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
