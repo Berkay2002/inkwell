@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { commands, prettyKeys } from "../lib/commands";
+import { useRecents } from "../recents";
 import { useStore } from "../store";
 
 const st = () => useStore.getState();
@@ -12,7 +13,7 @@ interface Item {
 }
 
 export function CommandPalette() {
-  const recent = useStore((s) => s.recent);
+  const recent = useRecents((s) => s.items);
   const hasDoc = useStore((s) => s.active != null);
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
@@ -22,7 +23,7 @@ export function CommandPalette() {
     const cmds = commands
       .filter((c) => hasDoc || !c.needsDoc)
       .map((c) => ({ title: c.title, hint: c.keys?.[0] && prettyKeys(c.keys[0]), run: c.run }));
-    const files = recent.map((p) => ({ title: `Open ${fileName(p)}`, hint: p, run: () => void st().openPath(p) }));
+    const files = recent.map(({ path: p }) => ({ title: `Open ${fileName(p)}`, hint: p, run: () => void st().openPath(p) }));
     const words = q.toLowerCase().split(/\s+/).filter(Boolean);
     return [...cmds, ...files].filter((i) => words.every((w) => i.title.toLowerCase().includes(w)));
   }, [q, recent, hasDoc]);

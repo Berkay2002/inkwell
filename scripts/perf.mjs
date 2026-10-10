@@ -1,5 +1,6 @@
 // Drives a running Inkwell through WebView2's DevTools endpoint: frame timing, tile transport,
 // memory and screenshots. Start the app first with
+//   $env:INKWELL_DATA_DIR="$env:TEMP\inkwell-perf-data"   # keeps the run out of the user's recent-files list
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222'; inkwell.exe <big.pdf> <small.pdf>
 // then: node scripts/perf.mjs <screens-dir> [--mem-only]   (--mem-only stops after the scroll/zoom memory measurement)
 import { execFile } from "node:child_process";

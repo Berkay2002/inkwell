@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod recents;
 
 use engine::cache::TileKey;
 use engine::{DocId, Engine, EngineError, EngineStats, OpenInfo, OutlineItem, SearchEvent, TextLine, TileOutcome};
@@ -237,6 +238,9 @@ pub fn run() {
             set_cache_budget,
             initial_files,
             tile_raw,
+            recents::stat_files,
+            recents::recents_load,
+            recents::recents_save,
         ])
         .setup(|app| {
             #[cfg(windows)]
