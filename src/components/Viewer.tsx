@@ -161,7 +161,9 @@ export function Viewer({ doc }: { doc: DocState }) {
   const { tops, heights, widths, contentWidth, total } = layout;
   const vTop = pos.top;
   const vBot = pos.top + vp.h;
-  const renderScale = scaleKey(bucketScale(settled, dpr));
+  // Zooming in lags behind (the stretched old tiles stand in); zooming out re-renders at once,
+  // otherwise the visible area would be covered with far too many high-resolution tiles.
+  const renderScale = scaleKey(bucketScale(Math.min(settled, zoom), dpr));
   const s = renderScale / 1000;
   const pages: React.ReactNode[] = [];
   const previews: Want[] = [];

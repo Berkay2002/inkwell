@@ -23,7 +23,9 @@ class TileClient {
   private subs = new Map<string, Sub>();
   private epoch: [number, number] = [0, 0];
   private signature: [string, string] = ["", ""];
-  private seenDocs = new Set<number>();
+  private wanted: [Want[], Want[]] = [[], []];
+  /** Keys with a request on the wire: at most one per tile, or duplicate responses pile up in memory. */
+  private pending = new Set<string>();
 
   register(stream: Stream, doc: number, tile: TileRef, sub: Sub) {
     this.subs.set(`${stream}:${tileKeyStr(doc, tile)}`, sub);
@@ -39,20 +41,33 @@ class TileClient {
     const sig = wanted.map((w) => tileKeyStr(w.doc, w.tile)).join("|");
     if (sig === this.signature[stream]) return;
     this.signature[stream] = sig;
-    const epoch = ++this.epoch[stream];
-    wanted.forEach((w, rank) => {
+    this.wanted[stream] = wanted;
+    this.epoch[stream]++;
+    this.issue(stream);
+  }
+
+  /**
+   * Requests every wanted, undrawn tile that has no request in flight, tagged with the current
+   * epoch. A request overtaken by a newer epoch comes back stale and is re-issued from here if
+   * the tile is still wanted.
+   */
+  private issue(stream: Stream) {
+    const epoch = this.epoch[stream];
+    this.wanted[stream].forEach((w, rank) => {
       const key = `${stream}:${tileKeyStr(w.doc, w.tile)}`;
-      if (this.subs.get(key)?.drawn) return;
-      this.seenDocs.add(w.doc);
+      if (this.pending.has(key) || this.subs.get(key)?.drawn) return;
+      this.pending.add(key);
       const t = w.tile;
       fetchTile(w.doc, t.page, t.rot, t.scale, t.tx, t.ty, epoch, rank, stream).then(
         (data) => {
-          if (!data) return;
+          this.pending.delete(key);
+          if (!data) return this.issue(stream);
           const sub = this.subs.get(key);
           if (sub && !sub.drawn) sub.draw(data);
         },
         () => {
-          /* a failed tile stays blank; the preview underneath remains */
+          // a failed tile stays blank; the preview underneath remains
+          this.pending.delete(key);
         },
       );
     });
@@ -61,6 +76,7 @@ class TileClient {
   /** Forget the wanted set, e.g. when the viewer unmounts. */
   clear(stream: Stream) {
     this.signature[stream] = "";
+    this.wanted[stream] = [];
   }
 }
 

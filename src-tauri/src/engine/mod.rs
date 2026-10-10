@@ -573,7 +573,7 @@ impl Engine {
         EngineStats {
             cache_bytes: t.bytes(),
             cache_tiles: t.len(),
-            cache_budget: 0,
+            cache_budget: t.budget(),
             lists: self.lists.lock().len(),
             queued: self.pool.pending(),
             rendered: self.rendered.load(Ordering::Relaxed),

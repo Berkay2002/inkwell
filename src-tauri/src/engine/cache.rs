@@ -48,6 +48,10 @@ impl TileCache {
         self.evict();
     }
 
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
     pub fn set_budget(&mut self, budget: usize) {
         self.budget = budget;
         self.evict();

@@ -12,11 +12,13 @@ interface Props {
   stream?: Stream;
   /** Fill the whole page box (page preview) instead of positioning by tile index. */
   cover?: boolean;
+  /** Stand-in from the previous render scale; never requested itself. */
+  under?: boolean;
   onDrawn?: (key: string) => void;
 }
 
 /** One tile: positioned in page CSS space, painted by the tile client when its pixels arrive. */
-export const TileCanvas = memo(function TileCanvas({ docId, tile, size, zoom, stream = 0, cover, onDrawn }: Props) {
+export const TileCanvas = memo(function TileCanvas({ docId, tile, size, zoom, stream = 0, cover, under, onDrawn }: Props) {
   const ref = useRef<HTMLCanvasElement>(null);
   const onDrawnRef = useRef(onDrawn);
   onDrawnRef.current = onDrawn;
@@ -55,5 +57,5 @@ export const TileCanvas = memo(function TileCanvas({ docId, tile, size, zoom, st
         width: (Math.min(TILE, Math.ceil(size[0] * s) - tx * TILE) / s) * zoom,
         height: (Math.min(TILE, Math.ceil(size[1] * s) - ty * TILE) / s) * zoom,
       };
-  return <canvas ref={ref} className={cover ? "tile preview" : "tile"} style={style} />;
+  return <canvas ref={ref} className={cover ? "tile preview" : under ? "tile under" : "tile"} style={style} />;
 });

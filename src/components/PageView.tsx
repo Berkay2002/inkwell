@@ -35,6 +35,7 @@ export const PageView = memo(function PageView(p: Props) {
   const drawn = useRef(new Set<string>());
   useLayoutEffect(() => {
     if (last.current.scale !== scale) setUnder(last.current.tiles);
+    else if (under && tiles.length === 0) setUnder(null);
     last.current = { scale, tiles };
   });
   const onDrawn = (key: string) => {
@@ -49,7 +50,7 @@ export const PageView = memo(function PageView(p: Props) {
     <div className="page" style={{ top: p.top, left: p.left, width: size[0] * zoom, height: size[1] * zoom }} data-page={page}>
       <TileCanvas docId={docId} tile={preview} size={size} zoom={zoom} cover />
       {underTiles.map((t) => (
-        <TileCanvas key={tileKeyStr(docId, t)} docId={docId} tile={t} size={size} zoom={zoom} />
+        <TileCanvas key={tileKeyStr(docId, t)} docId={docId} tile={t} size={size} zoom={zoom} under />
       ))}
       {tiles.map((t) => (
         <TileCanvas key={tileKeyStr(docId, t)} docId={docId} tile={t} size={size} zoom={zoom} onDrawn={onDrawn} />
