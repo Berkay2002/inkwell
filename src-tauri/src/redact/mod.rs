@@ -25,6 +25,7 @@
 //! - Text inside a text attachment that is itself encoded (base64 in a mail file, hex, quoted-
 //!   printable) is not decoded. Sanitize with embedded files on removes attachments outright.
 
+pub mod app;
 mod patterns;
 mod sanitize;
 #[cfg(test)]
