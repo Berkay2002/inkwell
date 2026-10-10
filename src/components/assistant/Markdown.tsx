@@ -48,19 +48,19 @@ function inline(text: string, c: CiteProps): ReactNode[] {
     if (part.startsWith("[") && /^\[\d/.test(part)) {
       const nums = part.slice(1, -1).split(/[,;]/).map((n) => Number(n.trim()));
       return (
-        <span key={i} className="cite-group">
+        <span key={i} className="ax-cite-group">
           {nums.map((n) =>
             c.known.has(n) ? (
               <button
                 key={n}
-                className={c.active === n ? "cite on" : "cite"}
+                className={c.active === n ? "ax-cite on" : "ax-cite"}
                 title="Show in document"
                 onClick={() => c.onCite(n)}
               >
                 {n}
               </button>
             ) : (
-              <span key={n} className="cite off">
+              <span key={n} className="ax-cite off">
                 {n}
               </span>
             ),

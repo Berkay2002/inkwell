@@ -1,11 +1,13 @@
 import { create } from "zustand";
 import * as ai from "./ai";
-import type { AiSettings, AiStatus, Citation, Prepared, Rect4, Task } from "./ai";
+import { MODES, type AiMode, type AiSettings, type AiStatus, type Citation, type Prepared, type Rect4, type Task } from "./ai";
 import { useStore } from "../store";
 
 export interface Msg {
   id: number;
   role: "user" | "assistant";
+  /** Of a user message: what was asked (the floating layout's Summary tab finds the summary by it). */
+  kind?: Task["kind"];
   text: string;
   citations: Citation[];
   followups: string[];
@@ -43,11 +45,16 @@ interface AiStore {
   chats: Record<number, Chat>;
   selection: Selection | null;
   mark: Mark | null;
+  /** Command-bar layout: the answer sheet is showing. */
+  sheet: boolean;
   /** A question asked before the user agreed to send text to OpenAI. */
   pending: { doc: number; task: Task; label: string } | null;
 
   setOpen: (open: boolean) => void;
   toggle: () => void;
+  setMode: (mode: AiMode) => void;
+  cycleMode: () => void;
+  setSheet: (sheet: boolean) => void;
   refreshStatus: () => void;
   prepare: (doc: number) => void;
   ask: (doc: number, task: Task, label?: string) => void;
@@ -83,10 +90,10 @@ export const useAi = create<AiStore>((set, get) => {
     const st = get();
     const chat = st.chats[doc] ?? EMPTY_CHAT;
     if (chat.messages.some((m) => m.state === "streaming")) return;
-    const user: Msg = { id: ++msgId, role: "user", text: label, citations: [], followups: [], state: "done" };
+    const user: Msg = { id: ++msgId, role: "user", kind: task.kind, text: label, citations: [], followups: [], state: "done" };
     const bot: Msg = { id: ++msgId, role: "assistant", text: "", citations: [], followups: [], state: "streaming", phase: "reading" };
     patchChat(doc, (c) => ({ ...c, messages: [...c.messages, user, bot] }), true);
-    set({ mark: null });
+    set({ mark: null, sheet: true });
     const model = st.settings.model;
     ai.aiAsk(
       doc,
@@ -128,6 +135,7 @@ export const useAi = create<AiStore>((set, get) => {
     chats: {},
     selection: null,
     mark: null,
+    sheet: false,
     pending: null,
 
     setOpen: (open) => {
@@ -136,6 +144,12 @@ export const useAi = create<AiStore>((set, get) => {
       else set({ mark: null });
     },
     toggle: () => get().setOpen(!get().open),
+    setMode: (mode) => {
+      get().setSettings({ mode });
+      get().setOpen(true);
+    },
+    cycleMode: () => get().setMode(MODES[(MODES.indexOf(get().settings.mode) + 1) % MODES.length]),
+    setSheet: (sheet) => set(sheet ? { sheet } : { sheet, mark: null }),
 
     refreshStatus: () => {
       if (get().status === "loading") return;

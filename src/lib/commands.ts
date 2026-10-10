@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { type DocState, useStore } from "../store";
-import type { Task } from "./ai";
+import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
 import { stepZoom } from "./layout";
 
@@ -104,6 +104,13 @@ export const commands: Command[] = [
   { id: "theme-dark", title: "Theme: dark", run: () => st().setTheme("dark") },
   { id: "palette", title: "Command palette", keys: ["Ctrl+K"], run: () => st().setUi({ paletteOpen: true }) },
   { id: "ai-toggle", title: "AI Assistant: show or hide", keys: ["Ctrl+Shift+A"], needsDoc: true, run: () => useAi.getState().toggle() },
+  { id: "ai-layout-cycle", title: "Assistant: next layout", keys: ["Ctrl+Shift+L"], needsDoc: true, run: () => useAi.getState().cycleMode() },
+  ...MODES.map((m) => ({
+    id: `ai-layout-${m}`,
+    title: `Assistant: ${MODE_NAMES[m].toLowerCase()} layout`,
+    needsDoc: true,
+    run: () => useAi.getState().setMode(m),
+  })),
   {
     id: "ai-summarize",
     title: "AI Assistant: summarize this document",

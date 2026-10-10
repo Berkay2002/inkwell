@@ -1,6 +1,7 @@
-// Drives a running Inkwell through WebView2's DevTools endpoint and captures the AI assistant panel
-// (light/dark, streaming answer, citation jump, selection actions, setup states). Real questions go to
-// the logged-in Codex; every UI step is an in-app store event or a DOM click, never an OS-level input.
+// Drives a running Inkwell through WebView2's DevTools endpoint and captures the AI assistant in its
+// three layouts (docked, floating, command bar), light and dark, plus a citation jump and the setup
+// states. Real questions go to the logged-in Codex; UI steps are in-app store events, DOM clicks, or
+// CDP mouse events on the floating sheet's header (never OS-level input).
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222'; inkwell.exe report.pdf
 //   node scripts/assistant-shots.mjs docs/screens/assistant
 import fs from "node:fs";
@@ -31,7 +32,7 @@ const ev = async (expression) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const shot = async (name) => {
-  await sleep(600); // tiles + transitions settle
+  await sleep(700); // tiles + transitions settle
   const r = await send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(out, name), Buffer.from(r.data, "base64"));
   console.log("screenshot", name);
@@ -56,64 +57,105 @@ const answered = async (limitMs = 120000) => {
   }
 };
 const theme = (t) => ev(`window.__S.getState().setTheme(${JSON.stringify(t)})`);
+const mode = (m) => ev(`window.__ai.getState().setMode(${JSON.stringify(m)})`);
 const ask = (task) => ev(`window.__ai.getState().ask(window.__doc(), ${JSON.stringify(task)})`);
+const click = (sel, text) =>
+  ev(`(() => { const els = [...document.querySelectorAll(${JSON.stringify(sel)})]; const b = ${text ? `els.find((e) => e.textContent.trim() === ${JSON.stringify(text)})` : "els[els.length - 1]"}; b?.click(); return !!b })()`);
+const rect = (sel) =>
+  ev(`(() => { const r = document.querySelector(${JSON.stringify(sel)})?.getBoundingClientRect(); return r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null })()`);
+const mouse = (type, x, y) => send("Input.dispatchMouseEvent", { type, x, y, button: "left", buttons: type === "mouseReleased" ? 0 : 1, clickCount: 1 });
 const report = {};
 
-// reset to a known state
-await ev(`(() => { const a = window.__ai.getState(); a.setSettings({ consent: false }); a.setOpen(true); a.clear(window.__doc()); return true })()`);
+// ---- docked (the default) ----
+await ev(`(() => { const a = window.__ai.getState(); a.setSettings({ consent: false, mode: "docked", float: null }); a.setOpen(true); a.clear(window.__doc()); return true })()`);
 await theme("light");
 await sleep(1500);
-await shot("01-empty-light.png");
+await shot("docked-empty-light.png");
 
-// consent card (first question)
 await ask({ kind: "summarizeDocument" });
 await sleep(300);
-await shot("02-consent-light.png");
+await shot("docked-consent-light.png");
 await ev(`window.__ai.getState().grantConsent()`);
 await sleep(1500);
-await shot("03-streaming-light.png");
+await shot("docked-streaming-light.png");
 report.summarize = await answered();
-await shot("04-summary-light.png");
-
-await ask({ kind: "ask", question: "Why did gross margin improve, and how long can the company run on its cash?" });
-report.question = await answered();
-await shot("05-answer-light.png");
-
-// citation jump: the first source row of the last answer
-await ev(`document.querySelector('.msg.bot:last-of-type .source')?.click()`);
-await sleep(1200);
-await shot("06-citation-jump-light.png");
 
 // selection actions (a store event stands in for dragging a selection across the page)
 await ev(`window.__ai.getState().setSelection({ text: "A supplier shortage of lidar modules delayed 140 units in the third quarter, and we ended the year with a backlog of 310 orders.", page: 0 })`);
 await sleep(300);
-await shot("07-selection-light.png");
-await ev(`[...document.querySelectorAll('.selstrip .chip')].find((b) => b.textContent === 'Explain')?.click()`);
+await shot("docked-selection-light.png");
+await click(".ax-selstrip .ax-chip", "Explain");
 report.explain = await answered();
-await shot("08-explain-light.png");
 
-// dark theme
+await ask({ kind: "ask", question: "Why did gross margin improve, and how long can the company run on its cash?" });
+report.question = await answered();
+await shot("docked-answer-light.png");
+
+// citation jump: the first source row of the last answer
+await click(".ax-source");
+await sleep(1200);
+await shot("docked-citation-light.png");
+
 await theme("dark");
 await sleep(500);
-await shot("09-explain-dark.png");
-await ev(`document.querySelector('.msg.bot:last-of-type .source')?.click()`);
-await ask({ kind: "ask", question: "What are the main risks and what is the outlook for fiscal 2026?" });
-report.risks = await answered();
-await ev(`document.querySelector('.msg.bot:last-of-type .source')?.click()`);
-await sleep(1200);
-await shot("10-citation-jump-dark.png");
+await shot("docked-citation-dark.png");
+await ev(`window.__ai.getState().clearMark()`);
+await shot("docked-answer-dark.png");
 
-// narrow window
+// ---- floating ----
+await mode("floating");
+await click(".ax-source");
+await sleep(900);
+await shot("floating-dark.png");
+await click(".ax-seg button", "Summary");
+await shot("floating-summary-dark.png");
+await click(".ax-seg button", "Chat");
+await theme("light");
+await shot("floating-light.png");
+
+// drag the sheet by its header and resize it from the corner, with real mouse events over CDP
+const h = await rect(".ax-panel.floating .ax-head");
+await mouse("mousePressed", h.x + 60, h.y + 20);
+await mouse("mouseMoved", h.x - 140, h.y + 60);
+await mouse("mouseReleased", h.x - 140, h.y + 60);
+const moved = await ev(`window.__ai.getState().settings.float`);
+const rz = await rect(".ax-rz.se");
+await mouse("mousePressed", rz.x + 8, rz.y + 8);
+await mouse("mouseMoved", rz.x + 8 + 60, rz.y + 8 - 40);
+await mouse("mouseReleased", rz.x + 68, rz.y - 32);
+const resized = await ev(`window.__ai.getState().settings.float`);
+report.floatGeometry = { start: h, moved, resized, stored: await ev(`localStorage.getItem("inkwell.ai")`) };
+await shot("floating-moved-light.png");
+
+// ---- command bar ----
+await ev(`window.__ai.getState().setSettings({ float: null })`);
+await mode("bar");
+await click(".ax-source");
+await sleep(900);
+await shot("bar-light.png");
+await theme("dark");
+await shot("bar-dark.png");
+await ev(`window.__ai.getState().clearMark(); window.__ai.getState().clear(window.__doc())`);
+await sleep(600);
+await shot("bar-empty-dark.png");
+await theme("light");
+await shot("bar-empty-light.png");
+
+// ---- narrow window, docked ----
+await mode("docked");
 await send("Emulation.setDeviceMetricsOverride", { width: 720, height: 760, deviceScaleFactor: 1, mobile: false });
 await sleep(800);
-await shot("11-narrow-dark.png");
+await shot("docked-narrow-light.png");
+await mode("bar");
+await sleep(500);
+await shot("bar-narrow-light.png");
 await send("Emulation.clearDeviceMetricsOverride");
+await mode("docked");
 
-// setup states (store injection; the real status is restored afterwards)
-await theme("light");
+// ---- setup states (store injection; the real status is restored afterwards) ----
 for (const [name, status] of [
-  ["12-not-installed-light.png", { installed: false, loggedIn: false, account: null, plan: null, models: [], error: null }],
-  ["13-not-logged-in-light.png", { installed: true, loggedIn: false, account: null, plan: null, models: [], error: null }],
+  ["docked-not-installed-light.png", { installed: false, loggedIn: false, account: null, plan: null, models: [], error: null }],
+  ["docked-not-logged-in-light.png", { installed: true, loggedIn: false, account: null, plan: null, models: [], error: null }],
 ]) {
   await ev(`window.__ai.setState({ status: ${JSON.stringify(status)}, chats: {} })`);
   await sleep(300);
@@ -123,5 +165,12 @@ await ev(`window.__ai.getState().refreshStatus()`);
 await sleep(1500);
 
 fs.writeFileSync(path.join(out, "latency-report.json"), JSON.stringify(report, null, 1));
-console.log(JSON.stringify(Object.fromEntries(Object.entries(report).map(([k, v]) => [k, { ...v.timing, citations: v.citations, chars: v.text.length }])), null, 1));
+console.log(
+  JSON.stringify(
+    Object.fromEntries(Object.entries(report).filter(([, v]) => v.timing).map(([k, v]) => [k, { ...v.timing, citations: v.citations, chars: v.text.length }])),
+    null,
+    1,
+  ),
+);
+console.log(JSON.stringify(report.floatGeometry));
 ws.close();

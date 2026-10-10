@@ -82,20 +82,44 @@ export function aiAsk(doc: number, req: AskRequest, onEvent: (e: ChatEvent) => v
 
 // ---- settings kept on this machine (never chats) ---------------------------------------------
 
+export type AiMode = "docked" | "floating" | "bar";
+export const MODES: AiMode[] = ["docked", "floating", "bar"];
+export const MODE_NAMES: Record<AiMode, string> = { docked: "Docked", floating: "Floating", bar: "Command bar" };
+
+export interface Geo {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface AiSettings {
   model: string | null;
   effort: string;
   consent: boolean;
   hideSources: boolean;
+  /** Docked width in px. */
   width: number;
+  mode: AiMode;
+  /** Floating sheet position and size; null until the user moves it. */
+  float: Geo | null;
 }
 
 const KEY = "inkwell.ai";
-const DEFAULTS: AiSettings = { model: null, effort: "low", consent: false, hideSources: false, width: 400 };
+const DEFAULTS: AiSettings = {
+  model: null,
+  effort: "low",
+  consent: false,
+  hideSources: false,
+  width: 400,
+  mode: "docked",
+  float: null,
+};
 
 export function loadSettings(): AiSettings {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    const s: AiSettings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    return MODES.includes(s.mode) ? s : { ...s, mode: "docked" };
   } catch {
     return DEFAULTS;
   }

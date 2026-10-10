@@ -1,77 +1,101 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Citation } from "../../lib/ai";
-import { type Msg, readViewerSelection, useAi } from "../../lib/aiStore";
+import { type PointerEvent as RPointerEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { Geo } from "../../lib/ai";
+import { useAi } from "../../lib/aiStore";
 import type { DocState } from "../../store";
-import { Markdown } from "./Markdown";
+import {
+  Answer,
+  CloseButton,
+  Composer,
+  Consent,
+  Empty,
+  FOOTNOTE,
+  Gate,
+  Messages,
+  ModelPicker,
+  MoreMenu,
+  NoText,
+  type Variant,
+  startersFor,
+  useViewerSelection,
+} from "./parts";
 import "./assistant.css";
 
-const PHASES: Record<string, string> = {
-  reading: "Reading the document…",
-  connecting: "Connecting to Codex…",
-  thinking: "Thinking…",
-};
-
-const sparkle =
-  "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9ZM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8Z";
-
-export function SparkIcon({ size = 16 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d={sparkle} />
-    </svg>
-  );
-}
-
+/** A plain text button in the toolbar (no icon: the panel is called what it is). */
 export function AssistantToggle() {
   const open = useAi((s) => s.open);
   return (
     <button
-      className={open ? "icon-btn on" : "icon-btn"}
-      title="AI Assistant (Ctrl+Shift+A)"
-      aria-label="AI Assistant"
+      className={open ? "ax-toggle on" : "ax-toggle"}
+      title="Assistant (Ctrl+Shift+A)"
+      aria-pressed={open}
       onClick={() => useAi.getState().toggle()}
     >
-      <SparkIcon />
+      Assistant
     </button>
   );
 }
 
 export function AssistantPanel({ doc }: { doc: DocState }) {
   const open = useAi((s) => s.open);
-  const width = useAi((s) => s.settings.width);
-  const drag = useRef<{ x: number; w: number } | null>(null);
-
-  // Selection tracking: a selection in the viewer is kept until the user clicks in the viewer again
-  // (clicking a panel button or opening the palette must not lose it). Runs while the panel is closed
-  // too, so the palette's "explain selected text" has something to read.
-  useEffect(() => {
-    const onSel = () => {
-      const s = readViewerSelection();
-      if (s) useAi.getState().setSelection(s);
-    };
-    const onDown = (e: MouseEvent) => {
-      if ((e.target as Element | null)?.closest(".viewer")) useAi.getState().setSelection(null);
-    };
-    document.addEventListener("selectionchange", onSel);
-    document.addEventListener("mousedown", onDown, true);
-    return () => {
-      document.removeEventListener("selectionchange", onSel);
-      document.removeEventListener("mousedown", onDown, true);
-    };
-  }, []);
-
-  // A different tab means a different document: its selection is not this one's.
-  useEffect(() => useAi.getState().setSelection(null), [doc.id]);
+  const mode = useAi((s) => s.settings.mode);
+  useViewerSelection(doc.id);
 
   useEffect(() => {
     if (open) useAi.getState().prepare(doc.id);
   }, [open, doc.id]);
 
   if (!open) return null;
+  if (mode === "floating") return <Floating doc={doc} />;
+  if (mode === "bar") return <Bar doc={doc} />;
+  return <Docked doc={doc} />;
+}
+
+/** What the panel shows below its header: consent, sign-in, the chat or the starters, then the composer. */
+function Content({ doc, variant, onSend, summary = false }: { doc: DocState; variant: Variant; onSend?: () => void; summary?: boolean }) {
+  const status = useAi((s) => s.status);
+  const pending = useAi((s) => s.pending?.doc === doc.id);
+  const hasMsgs = useAi((s) => (s.chats[doc.id]?.messages.length ?? 0) > 0);
+  const ready = typeof status === "object" && status !== null && status.installed && status.loggedIn;
   return (
-    <aside className="assistant" style={{ width }} aria-label="AI Assistant">
+    <>
+      {pending ? (
+        <Consent />
+      ) : !ready ? (
+        <Gate />
+      ) : summary ? (
+        <Summary doc={doc} />
+      ) : hasMsgs ? (
+        <Messages doc={doc} variant={variant} />
+      ) : (
+        <Empty doc={doc} />
+      )}
+      {ready && !pending && <Composer doc={doc} variant={variant} onSend={onSend} />}
+      <div className="ax-foot">{FOOTNOTE}</div>
+    </>
+  );
+}
+
+function Header({ doc }: { doc: DocState }) {
+  return (
+    <div className="ax-head">
+      <span className="ax-title">Assistant</span>
+      <span className="grow" />
+      <ModelPicker />
+      <MoreMenu doc={doc} />
+      <CloseButton />
+    </div>
+  );
+}
+
+// ---- docked ------------------------------------------------------------------------------------
+
+function Docked({ doc }: { doc: DocState }) {
+  const width = useAi((s) => s.settings.width);
+  const drag = useRef<{ x: number; w: number } | null>(null);
+  return (
+    <aside className="ax-dock" style={{ width }} aria-label="Assistant">
       <div
-        className="assistant-grip"
+        className="ax-grip"
         onPointerDown={(e) => {
           drag.current = { x: e.clientX, w: width };
           e.currentTarget.setPointerCapture(e.pointerId);
@@ -86,403 +110,283 @@ export function AssistantPanel({ doc }: { doc: DocState }) {
           useAi.getState().setSettings({});
         }}
       />
-      <Body doc={doc} />
+      <section className="ax-panel docked">
+        <Header doc={doc} />
+        <Content doc={doc} variant="docked" />
+      </section>
     </aside>
   );
 }
 
-function Body({ doc }: { doc: DocState }) {
-  const status = useAi((s) => s.status);
-  const chat = useAi((s) => s.chats[doc.id]);
-  const pending = useAi((s) => s.pending);
-  const ready = typeof status === "object" && status !== null && status.installed && status.loggedIn;
+// ---- floating ----------------------------------------------------------------------------------
 
-  return (
-    <>
-      <Header doc={doc} />
-      {pending && pending.doc === doc.id ? (
-        <Consent />
-      ) : !ready ? (
-        <Gate />
-      ) : chat && chat.messages.length > 0 ? (
-        <Messages doc={doc} />
-      ) : (
-        <Empty doc={doc} />
-      )}
-      {ready && !(pending && pending.doc === doc.id) && <Composer doc={doc} />}
-      <div className="assistant-foot">Sent to OpenAI through your Codex login. Chats are not saved.</div>
-    </>
-  );
+const MIN_W = 320;
+const MIN_H = 300;
+
+function clampGeo(g: Geo, iw: number, ih: number): Geo {
+  const w = Math.round(Math.min(Math.max(g.w, MIN_W), Math.max(MIN_W, iw - 16)));
+  const h = Math.round(Math.min(Math.max(g.h, MIN_H), Math.max(MIN_H, ih - 16)));
+  return {
+    w,
+    h,
+    x: Math.round(Math.min(Math.max(g.x, 8), Math.max(8, iw - w - 8))),
+    y: Math.round(Math.min(Math.max(g.y, 8), Math.max(8, ih - h - 8))),
+  };
 }
 
-function Header({ doc }: { doc: DocState }) {
-  const status = useAi((s) => s.status);
-  const settings = useAi((s) => s.settings);
-  const [menu, setMenu] = useState(false);
-  const models = typeof status === "object" && status ? status.models : [];
-  const model = models.find((m) => m.id === settings.model) ?? models.find((m) => m.isDefault) ?? models[0];
-  const efforts = model?.efforts ?? [];
-  const st = useAi.getState;
-
-  return (
-    <div className="assistant-head">
-      <span className="assistant-title">
-        <SparkIcon size={15} /> Assistant
-      </span>
-      <span className="grow" />
-      {models.length > 0 && (
-        <>
-          <select
-            className="assistant-select"
-            title="Model"
-            value={model?.id}
-            onChange={(e) => {
-              const next = models.find((m) => m.id === e.target.value);
-              // A model may not offer the effort chosen for the previous one.
-              const effort = next && !next.efforts.includes(settings.effort) ? (next.defaultEffort ?? next.efforts[0]) : undefined;
-              st().setSettings({ model: e.target.value, ...(effort ? { effort } : {}) });
-            }}
-          >
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-          {efforts.length > 0 && (
-            <select
-              className="assistant-select"
-              title="Reasoning effort: lower is faster"
-              value={efforts.includes(settings.effort) ? settings.effort : (model?.defaultEffort ?? efforts[0])}
-              onChange={(e) => st().setSettings({ effort: e.target.value })}
-            >
-              {efforts.map((e) => (
-                <option key={e} value={e}>
-                  {e}
-                </option>
-              ))}
-            </select>
-          )}
-        </>
-      )}
-      <div className="assistant-menu">
-        <button className="icon-btn" title="More" aria-label="More" onClick={() => setMenu(!menu)}>
-          ⋯
-        </button>
-        {menu && (
-          <div className="assistant-pop" onMouseLeave={() => setMenu(false)}>
-            <button
-              onClick={() => {
-                st().clear(doc.id);
-                setMenu(false);
-              }}
-            >
-              Clear chat
-            </button>
-            <button
-              onClick={() => {
-                void navigator.clipboard.writeText(st().transcript(doc.id));
-                setMenu(false);
-              }}
-            >
-              Copy whole chat
-            </button>
-            <button onClick={() => st().setSettings({ hideSources: !settings.hideSources })}>
-              {settings.hideSources ? "Show sources under answers" : "Hide sources under answers"}
-            </button>
-            <button
-              onClick={() => {
-                st().setOpen(false);
-                setMenu(false);
-              }}
-            >
-              Close panel
-            </button>
-          </div>
-        )}
-      </div>
-      <button className="icon-btn" title="Close" aria-label="Close assistant" onClick={() => st().setOpen(false)}>
-        ✕
-      </button>
-    </div>
-  );
+function defaultGeo(iw: number, ih: number): Geo {
+  const w = 380;
+  const h = Math.min(640, ih - 120);
+  return { w, h, x: iw - w - 24, y: 92 };
 }
 
-/** Not installed / not signed in / still checking. */
-function Gate() {
-  const status = useAi((s) => s.status);
-  const refresh = () => useAi.getState().refreshStatus();
-  if (status === null || status === "loading")
-    return (
-      <div className="assistant-body">
-        <p className="dim">Checking Codex…</p>
-      </div>
-    );
-  return (
-    <div className="assistant-body">
-      <div className="card">
-        {!status.installed ? (
-          <>
-            <h3>Codex isn’t installed</h3>
-            <p>
-              The assistant uses your ChatGPT subscription through the Codex CLI. Install it, then sign in with{" "}
-              <code>codex login</code>.
-            </p>
-          </>
-        ) : (
-          <>
-            <h3>Sign in to Codex</h3>
-            <p>
-              Run <code>codex login</code> in a terminal and choose “Sign in with ChatGPT”. Inkwell never sees your
-              password or token.
-            </p>
-          </>
-        )}
-        {status.error && <p className="dim small">{status.error}</p>}
-        <button className="btn primary" onClick={refresh}>
-          Check again
-        </button>
-      </div>
-    </div>
-  );
-}
+type Grab = "move" | "sw" | "se";
 
-function Consent() {
-  return (
-    <div className="assistant-body">
-      <div className="card">
-        <h3>Send this document to OpenAI?</h3>
-        <p>
-          To answer, Inkwell sends the relevant text of this document (and your questions) to ChatGPT through your
-          Codex login. Nothing is stored by Inkwell: chats disappear when you close the tab.
-        </p>
-        <div className="row">
-          <button className="btn primary" onClick={() => useAi.getState().grantConsent()}>
-            Allow and continue
-          </button>
-          <button className="btn" onClick={() => useAi.getState().declineConsent()}>
-            Not now
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+function Floating({ doc }: { doc: DocState }) {
+  const saved = useAi((s) => s.settings.float);
+  const [, tick] = useState(0);
+  const [tab, setTab] = useState<"chat" | "summary">("chat");
+  const grab = useRef<{ kind: Grab; px: number; py: number; g: Geo } | null>(null);
+  const iw = window.innerWidth;
+  const ih = window.innerHeight;
+  const g = clampGeo(saved ?? defaultGeo(iw, ih), iw, ih);
 
-function Empty({ doc }: { doc: DocState }) {
-  const prep = useAi((s) => s.chats[doc.id]?.prep ?? null);
-  const ask = useAi.getState().ask;
-  const noText = typeof prep === "object" && prep !== null && !prep.enough;
-  if (noText)
-    return (
-      <div className="assistant-body">
-        <div className="card">
-          <h3>No readable text</h3>
-          <p>This PDF has no selectable text (it is probably a scan), so the assistant has nothing to read.</p>
-        </div>
-      </div>
-    );
-  const starters: { title: string; hint: string; run: () => void }[] = [
-    { title: "Summarize this document", hint: "Short overview with page references", run: () => ask(doc.id, { kind: "summarizeDocument" }) },
-    {
-      title: "Key takeaways",
-      hint: "The main points as a list",
-      run: () => ask(doc.id, { kind: "ask", question: "List the key takeaways of this document." }),
-    },
-    {
-      title: "What stands out?",
-      hint: "Important or surprising details",
-      run: () => ask(doc.id, { kind: "ask", question: "What are the most important or surprising points in this document?" }),
-    },
-    {
-      title: `Summarize page ${doc.currentPage + 1}`,
-      hint: "Only the page you are on",
-      run: () => ask(doc.id, { kind: "summarizePage", page: doc.currentPage }),
-    },
-  ];
+  useEffect(() => {
+    const f = () => tick((n) => n + 1);
+    window.addEventListener("resize", f);
+    return () => window.removeEventListener("resize", f);
+  }, []);
+
+  const start = (kind: Grab) => (e: RPointerEvent<HTMLElement>) => {
+    if (e.button !== 0 || (e.target as Element).closest("button, select, input, textarea")) return;
+    grab.current = { kind, px: e.clientX, py: e.clientY, g };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const move = (e: RPointerEvent<HTMLElement>) => {
+    const s = grab.current;
+    if (!s) return;
+    const dx = e.clientX - s.px;
+    const dy = e.clientY - s.py;
+    let n: Geo = s.g;
+    if (s.kind === "move") n = { ...s.g, x: s.g.x + dx, y: s.g.y + dy };
+    else if (s.kind === "se") n = { ...s.g, w: s.g.w + dx, h: s.g.h + dy };
+    else {
+      // south-west: the right edge stays where it is
+      const w = Math.max(MIN_W, s.g.w - dx);
+      n = { ...s.g, x: s.g.x + s.g.w - w, w, h: s.g.h + dy };
+    }
+    useAi.setState((st) => ({ settings: { ...st.settings, float: clampGeo(n, window.innerWidth, window.innerHeight) } }));
+  };
+  const end = () => {
+    if (!grab.current) return;
+    grab.current = null;
+    useAi.getState().setSettings({});
+  };
+  const events = (kind: Grab) => ({ onPointerDown: start(kind), onPointerMove: move, onPointerUp: end, onPointerCancel: end });
+
   return (
-    <div className="assistant-body">
-      <p className="assistant-lead">Ask about “{doc.name}” or start with one of these.</p>
-      <div className="starters">
-        {starters.map((s) => (
-          <button key={s.title} className="starter" onClick={s.run}>
-            <strong>{s.title}</strong>
-            <span>{s.hint}</span>
+    <section className="ax-panel floating" style={{ left: g.x, top: g.y, width: g.w, height: g.h }} aria-label="Assistant">
+      <div className="ax-head drag" {...events("move")}>
+        <span className="ax-title">Assistant</span>
+        <span className="grow" />
+        <ModelPicker />
+        <MoreMenu doc={doc} />
+        <CloseButton />
+      </div>
+      <div className="ax-seg" role="tablist">
+        {(["chat", "summary"] as const).map((t) => (
+          <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
+            {t === "chat" ? "Chat" : "Summary"}
           </button>
         ))}
       </div>
-      {prep === "loading" && <p className="dim small">Reading the document…</p>}
-    </div>
+      <Content doc={doc} variant="floating" summary={tab === "summary"} onSend={() => setTab("chat")} />
+      <span className="ax-rz sw" {...events("sw")} />
+      <span className="ax-rz se" {...events("se")} />
+    </section>
   );
 }
 
-function Messages({ doc }: { doc: DocState }) {
-  const messages = useAi((s) => s.chats[doc.id]?.messages ?? []);
-  const el = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
-  const last = messages[messages.length - 1];
-
-  useLayoutEffect(() => {
-    const e = el.current;
-    if (e && stick.current) e.scrollTop = e.scrollHeight;
-  }, [messages]);
-
-  return (
-    <div
-      className="assistant-body messages"
-      ref={el}
-      onScroll={(e) => {
-        const t = e.currentTarget;
-        stick.current = t.scrollHeight - t.scrollTop - t.clientHeight < 48;
-      }}
-    >
-      {messages.map((m) => (m.role === "user" ? <div key={m.id} className="msg user">{m.text}</div> : <Answer key={m.id} doc={doc} m={m} isLast={m === last} />))}
-    </div>
-  );
-}
-
-function Answer({ doc, m, isLast }: { doc: DocState; m: Msg; isLast: boolean }) {
-  const mark = useAi((s) => s.mark);
-  const hide = useAi((s) => s.settings.hideSources);
-  const cites = useMemo(() => new Map(m.citations.map((c) => [c.n, c])), [m.citations]);
-  const known = useMemo(() => new Set(cites.keys()), [cites]);
-  const show = (c: Citation) => useAi.getState().showCitation(doc.id, c);
-  const active = mark && mark.doc === doc.id ? mark.n : null;
-  const ask = useAi.getState().ask;
-
-  if (m.state === "error")
+/** The floating layout's Summary tab: the document summary, asked for on demand. */
+function Summary({ doc }: { doc: DocState }) {
+  const all = useAi((s) => s.chats[doc.id]?.messages);
+  const prep = useAi((s) => s.chats[doc.id]?.prep);
+  let bot;
+  for (let i = (all?.length ?? 0) - 2; i >= 0; i--) {
+    if (all![i].role === "user" && all![i].kind === "summarizeDocument") {
+      bot = all![i + 1];
+      break;
+    }
+  }
+  if (bot)
     return (
-      <div className="msg bot error">
-        <p>{m.error}</p>
-        {(m.hint === "login" || m.hint === "install") && (
-          <button className="btn" onClick={() => useAi.getState().refreshStatus()}>
-            Check Codex again
-          </button>
-        )}
+      <div className="ax-body">
+        <Answer doc={doc} m={bot} variant="floating" isLast={false} plain />
       </div>
     );
+  if (typeof prep === "object" && prep !== null && !prep.enough)
+    return (
+      <div className="ax-body">
+        <NoText />
+      </div>
+    );
+  return (
+    <div className="ax-body">
+      <div className="ax-card">
+        <h3>Summary of “{doc.name}”</h3>
+        <p>A short overview of the whole document, with page references.</p>
+        <button className="ax-btn primary" onClick={() => useAi.getState().ask(doc.id, { kind: "summarizeDocument" })}>
+          Summarize this document
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---- command bar -------------------------------------------------------------------------------
+
+interface Box {
+  l: number;
+  r: number;
+  t: number;
+  b: number;
+}
+
+/** The viewer area's rectangle in window coordinates, kept current. */
+function useStageBox(): Box | null {
+  const [box, setBox] = useState<Box | null>(null);
+  useLayoutEffect(() => {
+    const el = document.querySelector(".stage");
+    if (!el) return;
+    const f = () => {
+      const b = el.getBoundingClientRect();
+      setBox((p) => (p && p.l === b.left && p.r === b.right && p.t === b.top && p.b === b.bottom ? p : { l: b.left, r: b.right, t: b.top, b: b.bottom }));
+    };
+    f();
+    const ro = new ResizeObserver(f);
+    ro.observe(el);
+    window.addEventListener("resize", f);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", f);
+    };
+  }, []);
+  return box;
+}
+
+const BAR_H = 52;
+const GAP = 14;
+
+function Bar({ doc }: { doc: DocState }) {
+  const box = useStageBox();
+  const status = useAi((s) => s.status);
+  const sheet = useAi((s) => s.sheet);
+  const pending = useAi((s) => s.pending?.doc === doc.id);
+  const messages = useAi((s) => s.chats[doc.id]?.messages);
+  const selection = useAi((s) => s.selection !== null);
+  const prep = useAi((s) => s.chats[doc.id]?.prep);
+  const ready = typeof status === "object" && status !== null && status.installed && status.loggedIn;
+  const last = messages && messages.length >= 2 ? messages[messages.length - 1] : undefined;
+  const forced = pending || !ready;
+  const showSheet = forced || (sheet && !!messages && messages.length > 0);
+  const noText = typeof prep === "object" && prep !== null && !prep.enough;
+  if (!box) return null;
+
+  const iw = window.innerWidth;
+  const ih = window.innerHeight;
+  const barBottom = ih - box.b + 18;
+  const stripH = selection ? 50 : 0;
+  const sheetBottom = barBottom + (ready && !pending ? BAR_H + GAP + stripH : 0);
+  const stageW = box.r - box.l;
+  const st = useAi.getState;
 
   return (
-    <div className="msg bot">
-      {m.text === "" && m.state === "streaming" ? (
-        <p className="dim">{PHASES[m.phase ?? "reading"] ?? "Thinking…"}</p>
-      ) : (
-        <Markdown text={m.text} cites={{ known, active, onCite: (n) => cites.get(n) && show(cites.get(n)!) }} />
-      )}
-      {m.state === "streaming" && m.text !== "" && <span className="caret" />}
-      {m.state === "cancelled" && <p className="dim small">Stopped.</p>}
-      {m.state === "done" && (
-        <>
-          {!hide && m.citations.length > 0 && (
-            <ul className="sources">
-              {m.citations.map((c) => (
-                <li key={c.n}>
-                  <button className={active === c.n ? "source on" : "source"} onClick={() => show(c)} title="Show in document">
-                    <span className="cite">{c.n}</span>
-                    <span className="pg">{c.page != null ? `p. ${c.page + 1}` : "—"}</span>
-                    <span className="q">{c.quote}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          <div className="msg-actions">
-            <button className="link" onClick={() => void navigator.clipboard.writeText(m.text)}>
-              Copy
-            </button>
-            {m.timing && (
-              <span className="dim small" title={`prep ${m.timing.prepMs} ms`}>
-                {m.timing.firstTokenMs != null ? `${(m.timing.firstTokenMs / 1000).toFixed(1)} s to first word · ` : ""}
-                {(m.timing.totalMs / 1000).toFixed(1)} s
-              </span>
+    <>
+      {showSheet && (
+        <section
+          className="ax-panel ax-bar-sheet"
+          style={{
+            right: iw - box.r + 16,
+            bottom: sheetBottom,
+            width: Math.min(420, Math.max(300, stageW - 32)),
+            maxHeight: Math.max(220, box.b - box.t - (sheetBottom - (ih - box.b)) - 16),
+          }}
+          aria-label="Assistant"
+        >
+          <div className="ax-head">
+            <span className="ax-title">Assistant</span>
+            <span className="grow" />
+            {last && last.state === "done" && (
+              <button className="ax-btn small" onClick={() => void navigator.clipboard.writeText(last.text)}>
+                Copy
+              </button>
             )}
+            <button className="ax-btn small" disabled={!messages?.length} onClick={() => st().clear(doc.id)}>
+              New chat
+            </button>
+            <CloseButton onClick={forced ? undefined : () => st().setSheet(false)} />
           </div>
-          {isLast && m.followups.length > 0 && (
-            <div className="followups">
-              {m.followups.map((f) => (
-                <button key={f} className="chip" onClick={() => ask(doc.id, { kind: "ask", question: f })}>
-                  {f}
+          {pending ? <Consent /> : !ready ? <Gate /> : <Messages doc={doc} variant="bar" lastOnly />}
+          <div className="ax-foot">{FOOTNOTE}</div>
+        </section>
+      )}
+      {ready && !pending && (
+        <div className="ax-bar" style={{ left: (box.l + box.r) / 2, bottom: barBottom, width: Math.min(580, Math.max(280, stageW - 32)) }}>
+          {!messages?.length && !noText && (
+            <div className="ax-bar-starters">
+              {startersFor(doc).map((s) => (
+                <button key={s.title} className="ax-chip" onClick={s.run}>
+                  {s.title}
                 </button>
               ))}
             </div>
           )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function Composer({ doc }: { doc: DocState }) {
-  const [text, setText] = useState("");
-  const selection = useAi((s) => s.selection);
-  const messages = useAi((s) => s.chats[doc.id]?.messages);
-  const streaming = !!messages?.some((m) => m.state === "streaming");
-  const prep = useAi((s) => s.chats[doc.id]?.prep);
-  const noText = typeof prep === "object" && prep !== null && !prep.enough;
-  const st = useAi.getState;
-
-  const send = () => {
-    const q = text.trim();
-    if (!q || streaming || noText) return;
-    setText("");
-    st().ask(doc.id, { kind: "ask", question: q });
-  };
-  const sel = (action: "explain" | "rewrite" | "summarize") => {
-    if (!selection || streaming) return;
-    st().ask(doc.id, { kind: "selection", action, text: selection.text, page: selection.page });
-    st().setSelection(null);
-    window.getSelection()?.removeAllRanges();
-  };
-
-  return (
-    <div className="assistant-compose">
-      {selection && (
-        <div className="selstrip">
-          <span className="selq" title={selection.text}>
-            p. {selection.page + 1} · “{selection.text.slice(0, 80)}”
-          </span>
-          <div className="row">
-            <button className="chip" disabled={streaming} onClick={() => sel("explain")}>
-              Explain
-            </button>
-            <button className="chip" disabled={streaming} onClick={() => sel("rewrite")}>
-              Rewrite
-            </button>
-            <button className="chip" disabled={streaming} onClick={() => sel("summarize")}>
-              Summarize
-            </button>
-            <button className="icon-btn small" title="Dismiss" aria-label="Dismiss selection" onClick={() => st().setSelection(null)}>
-              ✕
-            </button>
+          <div className="ax-bar-row">
+            <Composer doc={doc} variant="bar" lead={<ModelPicker up />} />
+            <MoreMenu doc={doc} up />
           </div>
         </div>
       )}
-      <div className="input-row">
-        <textarea
-          value={text}
-          rows={1}
-          placeholder={noText ? "This PDF has no readable text" : "Ask about this document"}
-          disabled={noText}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-            // Ctrl+Arrow moves by word here; it must not turn the page.
-            if ((e.ctrlKey || e.metaKey) && e.key.startsWith("Arrow")) e.stopPropagation();
-          }}
-        />
-        {streaming ? (
-          <button className="btn" onClick={() => st().cancel(doc.id)}>
-            Stop
-          </button>
-        ) : (
-          <button className="btn primary" disabled={!text.trim() || noText} onClick={send}>
-            Send
-          </button>
-        )}
-      </div>
-    </div>
+      <Connector />
+    </>
+  );
+}
+
+/** A thin curve from the source row in the sheet to its badge on the page. */
+function Connector() {
+  const mark = useAi((s) => s.mark);
+  const [line, setLine] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  useEffect(() => {
+    if (!mark) {
+      setLine(null);
+      return;
+    }
+    let raf = 0;
+    const tick = () => {
+      const src = document.querySelector<HTMLElement>(`.ax-bar-sheet [data-source="${mark.n}"]`);
+      const badge = document.querySelector<HTMLElement>(".cite-badge");
+      const stage = document.querySelector(".stage")?.getBoundingClientRect();
+      let next = null;
+      if (src && badge && stage) {
+        const a = src.getBoundingClientRect();
+        const b = badge.getBoundingClientRect();
+        const x2 = b.left + b.width / 2;
+        const y2 = b.top + b.height / 2;
+        if (x2 > stage.left && x2 < stage.right && y2 > stage.top && y2 < stage.bottom)
+          next = { x1: Math.round(a.left), y1: Math.round(a.top + a.height / 2), x2: Math.round(x2), y2: Math.round(y2) };
+      }
+      setLine((p) => (p && next && p.x1 === next.x1 && p.y1 === next.y1 && p.x2 === next.x2 && p.y2 === next.y2 ? p : next));
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, [mark]);
+  if (!line) return null;
+  const dx = Math.max(40, Math.abs(line.x1 - line.x2) / 2);
+  return (
+    <svg className="ax-connector" aria-hidden>
+      <path d={`M${line.x1} ${line.y1} C${line.x1 - dx} ${line.y1} ${line.x2 + dx} ${line.y2} ${line.x2} ${line.y2}`} />
+      <circle cx={line.x1} cy={line.y1} r="3" />
+    </svg>
   );
 }

@@ -21,8 +21,10 @@ vi.mock("./ai", () => ({
   aiPrepare: vi.fn(() => Promise.resolve({ pages: 1, chars: 500, enough: true })),
   aiCancel: vi.fn(() => Promise.resolve()),
   aiClose: vi.fn(() => Promise.resolve()),
-  loadSettings: () => ({ model: null, effort: "low", consent: false, hideSources: false, width: 400 }),
+  loadSettings: () => ({ model: null, effort: "low", consent: false, hideSources: false, width: 400, mode: "docked", float: null }),
   saveSettings: vi.fn(),
+  MODES: ["docked", "floating", "bar"],
+  MODE_NAMES: { docked: "Docked", floating: "Floating", bar: "Command bar" },
 }));
 
 import * as ai from "./ai";
@@ -93,6 +95,31 @@ describe("assistant store", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(useAi.getState().chats[1].prep).toMatchObject({ enough: true });
     expect(ai.aiPrepare).toHaveBeenCalledTimes(2);
+  });
+
+  it("cycles the layout docked, floating, bar, docked and keeps it in the saved settings", () => {
+    useAi.setState({ open: false, settings: { ...useAi.getState().settings, mode: "docked" } });
+    useAi.getState().cycleMode();
+    expect(useAi.getState().settings.mode).toBe("floating");
+    expect(useAi.getState().open).toBe(true);
+    useAi.getState().cycleMode();
+    expect(useAi.getState().settings.mode).toBe("bar");
+    expect(ai.saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "bar" }));
+    useAi.getState().cycleMode();
+    expect(useAi.getState().settings.mode).toBe("docked");
+    useAi.getState().setMode("bar");
+    expect(useAi.getState().settings.mode).toBe("bar");
+  });
+
+  it("opens the bar's answer sheet when a question is asked and clears the mark when it is closed", () => {
+    useAi.getState().setSettings({ consent: true });
+    useAi.setState({ sheet: false });
+    useAi.getState().ask(1, { kind: "ask", question: "q" });
+    expect(useAi.getState().sheet).toBe(true);
+    expect(useAi.getState().chats[1].messages[0].kind).toBe("ask");
+    useAi.setState({ mark: { doc: 1, page: 0, rects: [], n: 1, nonce: 1 } });
+    useAi.getState().setSheet(false);
+    expect(useAi.getState().mark).toBeNull();
   });
 
   it("drops the chat when its tab closes", () => {
