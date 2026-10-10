@@ -97,7 +97,7 @@ let searchSeq = 0;
 const opening = new Map<string, Promise<void>>();
 
 export const useStore = create<Store>((set, get) => {
-  const addDoc = (info: api.OpenInfo) => {
+  const addDoc = (info: api.OpenInfo, locked = false) => {
     const doc: DocState = {
       id: info.doc,
       path: info.path,
@@ -115,7 +115,7 @@ export const useStore = create<Store>((set, get) => {
       search: emptySearch(),
       nav: null,
     };
-    void useRecents.getState().record(info);
+    void useRecents.getState().record(info, locked);
     set((s) => ({
       docs: { ...s.docs, [doc.id]: doc },
       order: s.order.includes(doc.id) ? s.order : [...s.order, doc.id],
@@ -170,7 +170,7 @@ export const useStore = create<Store>((set, get) => {
       const p = get().password;
       if (!p) return;
       try {
-        addDoc(await api.authenticate(p.doc, password));
+        addDoc(await api.authenticate(p.doc, password), true);
       } catch (e) {
         set({ password: { ...p, error: String(e) === "bad-password" ? "Wrong password, try again." : String(e) } });
       }

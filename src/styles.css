@@ -529,12 +529,12 @@ select {
   justify-content: space-between;
   height: 60px;
 }
-.brand {
+.home .brand {
   display: flex;
   align-items: center;
   gap: 10px;
 }
-.wordmark {
+.home .wordmark {
   font-size: 16px;
   font-weight: 650;
   letter-spacing: -0.015em;
@@ -544,7 +544,7 @@ select {
   align-items: center;
   gap: 6px;
 }
-.chip {
+.home .chip {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -555,7 +555,7 @@ select {
   background: var(--surface-glass);
   color: var(--text-dim);
 }
-.chip:hover {
+.home .chip:hover {
   color: var(--text);
   border-color: var(--border-strong);
 }
@@ -577,7 +577,7 @@ select {
   font-size: 12px;
 }
 
-.kbd {
+.home .kbd {
   display: inline-grid;
   place-items: center;
   min-width: 20px;
@@ -590,17 +590,17 @@ select {
   color: var(--text-dim);
   font: 600 11px/1 var(--font);
 }
-.keys {
+.home .keys {
   display: inline-flex;
   gap: 3px;
   margin-left: 6px;
 }
-.btn.primary .kbd {
+.home .btn.primary .kbd {
   border-color: rgb(255 255 255 / 0.3);
   background: rgb(255 255 255 / 0.16);
   color: #fff;
 }
-.btn.big {
+.home .btn.big {
   height: 42px;
   padding: 0 18px;
   border-radius: 11px;
@@ -610,12 +610,12 @@ select {
     transform 0.12s,
     box-shadow 0.12s;
 }
-.btn.big:hover {
+.home .btn.big:hover {
   transform: translateY(-1px);
   box-shadow: 0 12px 26px -10px var(--accent);
 }
 
-.drop {
+.home .drop {
   display: flex;
   align-items: center;
   gap: 20px;
@@ -629,20 +629,20 @@ select {
     background-color 0.15s,
     transform 0.15s;
 }
-.drop-text {
+.home .drop-text {
   flex: 1;
   min-width: 0;
 }
-.drop h1 {
+.home .drop h1 {
   margin: 0 0 2px;
   font-size: 20px;
   font-weight: 650;
   letter-spacing: -0.02em;
 }
-.drop p {
+.home .drop p {
   margin: 0;
 }
-.drop-glyph {
+.home .drop-glyph {
   display: grid;
   place-items: center;
   flex: none;
@@ -674,52 +674,52 @@ select {
   transform: translateY(-2px) scale(1.06);
 }
 
-.recents-head {
+.home .recents-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 14px;
 }
-.recents-head h2 {
+.home .recents-head h2 {
   margin: 0;
   font-size: 13px;
   font-weight: 650;
 }
-.count {
+.home .count {
   margin-left: 4px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
-.recents-tools {
+.home .recents-tools {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.seg-group {
+.home .seg-group {
   display: flex;
   gap: 2px;
   padding: 2px;
   border-radius: 8px;
   background: var(--surface-2);
 }
-.seg-group .icon-btn {
+.home .seg-group .icon-btn {
   width: 26px;
   height: 26px;
 }
-.link {
+.home .link {
   padding: 4px 8px;
   border-radius: 6px;
   color: var(--text-dim);
 }
-.link:hover {
+.home .link:hover {
   background: var(--surface-2);
   color: var(--text);
 }
-.link.danger {
+.home .link.danger {
   color: #e5484d;
 }
 
-.cards {
+.home .cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
   gap: 16px;
@@ -727,7 +727,7 @@ select {
   padding: 0;
   list-style: none;
 }
-.card {
+.home .card {
   position: relative;
   border: 1px solid var(--border);
   border-radius: 13px;
@@ -737,12 +737,12 @@ select {
     box-shadow 0.14s,
     border-color 0.14s;
 }
-.card:hover {
+.home .card:hover {
   transform: translateY(-2px);
   border-color: var(--border-strong);
   box-shadow: var(--shadow);
 }
-.card-open {
+.home .card-open {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -751,10 +751,10 @@ select {
   border-radius: 12px;
   text-align: left;
 }
-.card-open:disabled {
+.home .card-open:disabled {
   cursor: default;
 }
-.thumb-box {
+.home .thumb-box {
   display: grid;
   place-items: center;
   aspect-ratio: 3 / 4;
@@ -763,7 +763,7 @@ select {
   border-radius: 8px;
   background: var(--surface-2);
 }
-.thumb-box img {
+.home .thumb-box img {
   max-width: 100%;
   max-height: 100%;
   border-radius: 2px;
@@ -771,44 +771,44 @@ select {
   box-shadow:
     0 1px 3px rgb(0 0 0 / 0.22),
     0 0 0 1px rgb(0 0 0 / 0.06);
-  animation: fade 0.25s ease-out;
+  animation: home-fade 0.25s ease-out;
 }
-.thumb-ph {
+.home .thumb-ph {
   display: grid;
   place-items: center;
   color: var(--text-dim);
   opacity: 0.6;
 }
-.card-text {
+.home .card-text {
   display: flex;
   flex-direction: column;
   gap: 1px;
   min-width: 0;
 }
-.card-name,
-.card-dir,
-.card-meta {
+.home .card-name,
+.home .card-dir,
+.home .card-meta {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.card-name {
+.home .card-name {
   font-weight: 600;
 }
-.card-dir,
-.card-meta {
+.home .card-dir,
+.home .card-meta {
   font-size: 12px;
 }
-.card-actions {
+.home .card-actions {
   position: absolute;
   top: 16px;
   right: 16px;
   display: flex;
   gap: 4px;
 }
-.card-actions .icon-btn,
-.card-actions .mini {
+.home .card-actions .icon-btn,
+.home .card-actions .mini {
   background: var(--surface);
   box-shadow:
     0 1px 2px rgb(0 0 0 / 0.2),
@@ -816,22 +816,22 @@ select {
   opacity: 0;
   transition: opacity 0.12s;
 }
-.card:hover .card-actions .icon-btn,
-.card:focus-within .card-actions .icon-btn,
-.card-actions .icon-btn.on,
-.card.missing .card-actions .icon-btn,
-.card.missing .card-actions .mini {
+.home .card:hover .card-actions .icon-btn,
+.home .card:focus-within .card-actions .icon-btn,
+.home .card-actions .icon-btn.on,
+.home .card.missing .card-actions .icon-btn,
+.home .card.missing .card-actions .mini {
   opacity: 1;
 }
-.card-actions .icon-btn.on svg {
+.home .card-actions .icon-btn.on svg {
   fill: currentColor;
 }
-.icon-btn.sm {
+.home .icon-btn.sm {
   width: 26px;
   height: 26px;
   border-radius: 7px;
 }
-.mini {
+.home .mini {
   height: 26px;
   padding: 0 10px;
   border-radius: 7px;
@@ -839,64 +839,64 @@ select {
   font-weight: 600;
   color: var(--accent);
 }
-.card.missing .thumb-box {
+.home .card.missing .thumb-box {
   opacity: 0.55;
   filter: grayscale(1);
 }
-.card.missing .card-name {
+.home .card.missing .card-name {
   color: var(--text-dim);
 }
-.card.missing .card-meta {
+.home .card.missing .card-meta {
   color: #e5484d;
 }
 
-.cards.list {
+.home .cards.list {
   grid-template-columns: 1fr;
   gap: 6px;
 }
-.list .card-open {
+.home .list .card-open {
   flex-direction: row;
   align-items: center;
   padding: 8px 96px 8px 12px;
 }
-.list .thumb-box {
+.home .list .thumb-box {
   flex: none;
   width: 36px;
   padding: 3px;
 }
-.list .card-text {
+.home .list .card-text {
   flex: 1;
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1.3fr);
   align-items: center;
   gap: 16px;
 }
-.list .card-actions {
+.home .list .card-actions {
   top: 50%;
   right: 12px;
   transform: translateY(-50%);
 }
-.list .card:hover {
+.home .list .card:hover {
   transform: none;
 }
 
-@keyframes rise {
+@keyframes home-rise {
   from {
     opacity: 0;
     transform: translateY(10px);
   }
 }
-@keyframes fade {
+@keyframes home-fade {
   from {
     opacity: 0;
   }
 }
-.rise {
-  animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+.home .rise {
+  animation: home-rise 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
   animation-delay: calc(var(--i, 0) * 80ms);
 }
-.card {
-  animation: rise 0.4s cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+.home .card {
+  animation: home-rise 0.4s cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
   animation-delay: calc(120ms + var(--i, 0) * 28ms);
 }
 @media (prefers-reduced-motion: reduce) {

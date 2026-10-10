@@ -3,7 +3,7 @@
 export interface Recent {
   /** Path to open and show: canonical with on-disk casing once the file was seen by the shell. */
   path: string;
-  /** Last opened, ms since epoch. */
+  /** Last opened, ms since epoch; 0 when unknown (entries imported from the old list). */
   opened: number;
   pinned?: boolean;
   pages?: number;
@@ -109,8 +109,8 @@ export function parse(json: string | null): Recent[] | null {
   }
 }
 
-/** The pre-recents-store list was bare paths, newest first. */
-export function fromLegacy(paths: unknown, now: number): Recent[] {
+/** The pre-recents-store list was bare paths, newest first; their open times are unknown (`opened: 0`). */
+export function fromLegacy(paths: unknown): Recent[] {
   if (!Array.isArray(paths)) return [];
-  return paths.filter((p): p is string => typeof p === "string").map((path, i) => ({ path, opened: now - i }));
+  return paths.filter((p): p is string => typeof p === "string").map((path) => ({ path, opened: 0 }));
 }

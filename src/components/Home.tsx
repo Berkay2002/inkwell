@@ -96,7 +96,7 @@ export function Home() {
   const onGridKey = (e: KeyboardEvent) => {
     const el = e.target as HTMLElement;
     if (!el.dataset.card || e.ctrlKey || e.metaKey || e.altKey) return;
-    const cards = [...grid.current!.querySelectorAll<HTMLElement>("[data-card]")];
+    const cards = [...grid.current!.querySelectorAll<HTMLElement>("[data-card]:not(:disabled)")];
     const i = cards.indexOf(el);
     const go = (c?: HTMLElement) => {
       if (!c) return;
@@ -246,7 +246,7 @@ function Card({ r, missing, now, index }: { r: Recent; missing: boolean; now: nu
   const meta = [
     r.pages != null ? `${r.pages} ${r.pages === 1 ? "page" : "pages"}` : null,
     r.size != null ? formatSize(r.size) : null,
-    relTime(r.opened, now),
+    r.opened > 0 ? relTime(r.opened, now) : null,
   ].filter(Boolean);
   const st = useRecents.getState;
   const locate = async () => {

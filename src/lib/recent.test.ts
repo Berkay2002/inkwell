@@ -40,7 +40,8 @@ describe("list", () => {
     expect(parse(null)).toBeNull();
     expect(parse("{")).toEqual([]);
     expect(parse(JSON.stringify([{ path: "a", opened: 1 }, { path: 3 }, null]))).toEqual([{ path: "a", opened: 1 }]);
-    expect(fromLegacy(["a", 1, "b"], 10)).toEqual([{ path: "a", opened: 10 }, { path: "b", opened: 9 }]);
+    // imported entries keep their order but claim no open time (the card then shows no "just now")
+    expect(fromLegacy(["a", 1, "b"])).toEqual([{ path: "a", opened: 0 }, { path: "b", opened: 0 }]);
   });
 });
 

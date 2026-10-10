@@ -22,7 +22,8 @@ interface RecentsStore {
   /** Existence by `keyOf(path)`, filled by `refresh`; absent means not checked yet. */
   exists: Record<string, boolean>;
   ready: boolean;
-  record: (info: api.OpenInfo) => Promise<void>;
+  /** `locked`: the document needed a password, so no first-page image of it is kept on disk. */
+  record: (info: api.OpenInfo, locked?: boolean) => Promise<void>;
   refresh: () => Promise<void>;
   backfillThumbs: () => Promise<void>;
   togglePin: (path: string) => void;
@@ -74,7 +75,7 @@ export const useRecents = create<RecentsStore>((set, get) => {
       else if (!r.isolated) {
         // first run of the stored list: take over the old localStorage one
         try {
-          items = fromLegacy(JSON.parse(localStorage.getItem(LEGACY_KEY) ?? "[]"), Date.now());
+          items = fromLegacy(JSON.parse(localStorage.getItem(LEGACY_KEY) ?? "[]"));
         } catch {
           /* unreadable legacy list: start empty */
         }
@@ -97,7 +98,7 @@ export const useRecents = create<RecentsStore>((set, get) => {
     exists: {},
     ready: false,
 
-    record: async (info) => {
+    record: async (info, locked = false) => {
       await loaded;
       let stat: FileStat | undefined;
       try {
@@ -108,7 +109,7 @@ export const useRecents = create<RecentsStore>((set, get) => {
       const path = stat?.exists ? stat.path : info.path;
       if (isJunk(path)) return;
       const prev = get().items.find((r) => keyOf(r.path) === keyOf(path));
-      const fresh = prev && stat?.exists && prev.mtime === stat.modified && prev.size === stat.size;
+      const fresh = !locked && prev && stat?.exists && prev.mtime === stat.modified && prev.size === stat.size;
       const entry: Recent = {
         path,
         opened: Date.now(),
@@ -118,7 +119,7 @@ export const useRecents = create<RecentsStore>((set, get) => {
         thumb: fresh ? prev.thumb : undefined,
       };
       await mutate((l) => upsert(l, entry));
-      if (entry.thumb) return;
+      if (entry.thumb || locked) return;
       // the document is open already, so its first page costs one tile, usually a cache hit
       try {
         const thumb = await thumbOf(info.doc, info.firstPage);
@@ -150,7 +151,7 @@ export const useRecents = create<RecentsStore>((set, get) => {
         return { ...r, path: s.path, size: s.size, mtime: s.modified, thumb: stale ? undefined : r.thumb };
       });
       set({ exists });
-      if (changed) await mutate(() => next);
+      if (changed) await mutate(() => clean(next));
     },
 
     /** Makes missing thumbnails one file at a time; password-protected or damaged files keep their placeholder. */
