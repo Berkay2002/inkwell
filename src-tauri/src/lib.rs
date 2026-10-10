@@ -1,5 +1,7 @@
 pub mod ai;
+pub mod diff;
 pub mod engine;
+pub mod history;
 pub mod recents;
 
 use engine::cache::TileKey;
