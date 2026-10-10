@@ -40,7 +40,14 @@ pub enum EditOp {
     /// Inserts an empty page at index `at` (`0..=page_count`) with the page box of page `like`.
     InsertBlank { at: u32, like: u32 },
     /// Inserts pages of another PDF at index `at`: `pages` of it (in its order), or all of them.
-    InsertFile { at: u32, path: String, pages: Option<Vec<u32>>, password: Option<String> },
+    /// From the UI, `file` is an open token (paths.rs) that `edit_apply` swaps for the path.
+    InsertFile {
+        at: u32,
+        #[serde(rename = "file")]
+        path: String,
+        pages: Option<Vec<u32>>,
+        password: Option<String>,
+    },
 }
 
 impl EditOp {
@@ -479,10 +486,13 @@ const PAGE_KEYS: [&str; 9] =
     ["Contents", "Resources", "MediaBox", "CropBox", "BleedBox", "TrimBox", "ArtBox", "Rotate", "UserUnit"];
 
 /// Copies `pages` of `src` into `dst` at index `at`, sharing one graft map so resources used by
-/// several pages (fonts, images) are copied once. Unlike MuPDF's own page graft, comments and
-/// web links come along.
+/// several pages (fonts, images) are copied once. Unlike MuPDF's own page graft, the annotations
+/// come along: comments, web links, links between the copied pages (pointed at the copies) and
+/// form fields (their field tree rebuilt in `dst`'s form). See docs/insert-links-widgets.md.
 fn graft_pages(dst: &mut PdfDocument, src: &PdfDocument, pages: &[u32], at: i32) -> Result<()> {
     let mut map = dst.new_graft_map()?;
+    // Pass 1: the pages themselves, so links in pass 2 can point at any of them.
+    let mut made = Vec::with_capacity(pages.len());
     for (i, &p) in pages.iter().enumerate() {
         let from = src.find_page(p as i32)?;
         let mut dict = dst.new_dict()?;
@@ -492,46 +502,241 @@ fn graft_pages(dst: &mut PdfDocument, src: &PdfDocument, pages: &[u32], at: i32)
                 dict.dict_put(key, map.graft_object(&v)?)?;
             }
         }
-        if let Some(annots) = from.get_dict("Annots")? {
-            let copied = graft_annots(dst, &mut map, &annots)?;
-            if copied.len()? > 0 {
-                dict.dict_put("Annots", copied)?;
-            }
-        }
         let page = dst.add_object(&dict)?;
         dst.insert_page(at + i as i32, &page)?;
+        made.push((from, page));
+    }
+    // Pass 2: their annotations.
+    let mut g = Graft { src, pages, made: &made, fields: Default::default(), names: None };
+    for (from, page) in &made {
+        if let Some(annots) = from.get_dict("Annots")? {
+            let copied = g.annots(dst, &mut map, &annots, page)?;
+            if copied.len()? > 0 {
+                page.clone().dict_put("Annots", copied)?;
+            }
+        }
     }
     Ok(())
 }
 
-/// The annotations that stand on their own. Left out: form widgets (their fields live in the
-/// source's AcroForm), popups (rebuilt by viewers), and links into the source's own pages. The
-/// back-references (/P, /Popup, /Parent, /IRT) are dropped, or grafting would pull in the
-/// whole source page tree.
-fn graft_annots(dst: &mut PdfDocument, map: &mut PdfGraftMap, annots: &PdfObject) -> Result<PdfObject> {
-    let mut out = dst.new_array()?;
-    for a in annots.array_iter()? {
-        let Some(a) = a?.resolve()? else { continue };
-        if !a.is_dict()? {
-            continue;
+/// State of one [`graft_pages`] call's annotation pass.
+struct Graft<'a> {
+    src: &'a PdfDocument,
+    pages: &'a [u32],
+    /// Source page and its copy, in `pages` order.
+    made: &'a [(PdfObject, PdfObject)],
+    /// Source field object number to its copy in `dst`.
+    fields: std::collections::HashMap<i32, PdfObject>,
+    /// Names of `dst`'s root fields, loaded with the first field copied.
+    names: Option<std::collections::HashSet<String>>,
+}
+
+/// Keys never grafted as they are: they point back into the source's page or field tree.
+const BACK_REFS: [&str; 7] = ["P", "Popup", "Parent", "IRT", "Kids", "A", "AA"];
+
+impl Graft<'_> {
+    /// The annotations of one page, ready for `page`: popups are rebuilt by viewers and left
+    /// out, and so is a link whose target page was not copied.
+    fn annots(&mut self, dst: &mut PdfDocument, map: &mut PdfGraftMap, annots: &PdfObject, page: &PdfObject) -> Result<PdfObject> {
+        let mut out = dst.new_array()?;
+        for item in annots.array_iter()? {
+            let item = item?;
+            let num = if item.is_indirect()? { item.as_indirect()? } else { 0 };
+            let Some(a) = item.resolve()? else { continue };
+            if !a.is_dict()? {
+                continue;
+            }
+            let sub = name_of(a.get_dict("Subtype")?);
+            if sub == b"Popup" {
+                continue;
+            }
+            // Where a link or button goes: a web address, a copied page, or nowhere we can follow.
+            let action = a.get_dict("A")?;
+            let kind = action.as_ref().map(|act| name_of(act.get_dict("S").ok().flatten())).unwrap_or_default();
+            let target = match a.get_dict("Dest")? {
+                Some(d) => Some(d),
+                None if kind == b"GoTo" => action.as_ref().and_then(|act| act.get_dict("D").ok().flatten()),
+                None => None,
+            };
+            let dest = match &target {
+                Some(t) => self.dest(dst, map, t)?,
+                None => None,
+            };
+            let keep_action = matches!(kind.as_slice(), b"URI" | b"Named");
+            if sub == b"Link" && dest.is_none() && !keep_action {
+                continue;
+            }
+            let mut c = a.copy_dict()?;
+            for k in BACK_REFS {
+                c.dict_delete(k)?;
+            }
+            c.dict_delete("Dest")?;
+            let mut copy = map.graft_object(&c)?;
+            if let Some(d) = dest {
+                copy.dict_put("Dest", d)?;
+            } else if keep_action {
+                copy.dict_put("A", map.graft_object(action.as_ref().unwrap())?)?;
+            }
+            copy.dict_put("P", page.clone())?;
+            let r = dst.add_object(&copy)?;
+            if sub == b"Widget" {
+                self.field(dst, map, &a, num, &r)?;
+            }
+            out.array_push(r)?;
         }
-        let sub = a.get_dict("Subtype")?.and_then(|s| s.as_name().ok()).unwrap_or_default();
-        let web_link = a
-            .get_dict("A")?
-            .and_then(|act| act.get_dict("S").ok().flatten())
-            .and_then(|s| s.as_name().ok())
-            .is_some_and(|s| s == b"URI");
-        if sub == b"Widget" || sub == b"Popup" || (sub == b"Link" && !web_link) {
-            continue;
+        Ok(out)
+    }
+
+    /// `target` (an explicit destination, a named one, or `<< /D … >>`) made explicit in `dst`
+    /// when its page was copied, else None.
+    fn dest(&self, dst: &PdfDocument, map: &mut PdfGraftMap, target: &PdfObject) -> Result<Option<PdfObject>> {
+        let mut t = target.resolve()?;
+        for _ in 0..4 {
+            let Some(cur) = t else { return Ok(None) };
+            if cur.is_array()? {
+                let Some(page) = cur.get_array(0)? else { return Ok(None) };
+                let Ok(n) = self.src.lookup_page_number(&page) else { return Ok(None) };
+                let Some(k) = self.pages.iter().position(|&p| p as i32 == n) else { return Ok(None) };
+                let mut d = dst.new_array()?;
+                d.array_push(self.made[k].1.clone())?;
+                for i in 1..cur.len()? as i32 {
+                    if let Some(v) = cur.get_array(i)? {
+                        d.array_push(map.graft_object(&v)?)?;
+                    }
+                }
+                return Ok(Some(d));
+            }
+            t = if cur.is_dict()? {
+                cur.get_dict("D")?.map(|d| d.resolve()).transpose()?.flatten()
+            } else if cur.is_name()? {
+                let name = String::from_utf8_lossy(&cur.as_name()?).into_owned();
+                let dests = self.src.catalog()?.get_dict("Dests")?;
+                dests.map(|d| d.get_dict(name.as_str())).transpose()?.flatten()
+            } else if cur.is_string()? {
+                // MuPDF flattens /Root /Names /Dests into a dict keyed by name.
+                let tree = self.src.load_name_tree(PdfObject::new_name("Dests")?)?;
+                if tree.is_dict()? { tree.get_dict(cur.as_string()?.as_str())? } else { None }
+            } else {
+                None
+            };
+            t = t.map(|v| v.resolve()).transpose()?.flatten();
         }
-        let mut c = a.copy_dict()?;
-        for k in ["P", "Popup", "Parent", "IRT"] {
+        Ok(None)
+    }
+
+    /// Hooks the copied widget `copy` (of source widget `w`, object `num`) into `dst`'s form: its
+    /// field and the field's parents are rebuilt once per graft, keeping only the kids copied.
+    fn field(&mut self, dst: &mut PdfDocument, map: &mut PdfGraftMap, w: &PdfObject, num: i32, copy: &PdfObject) -> Result<()> {
+        if num != 0 {
+            self.fields.insert(num, copy.clone());
+        }
+        match w.get_dict("Parent")? {
+            Some(p) if p.is_indirect()? => {
+                let parent = self.parent(dst, map, p.as_indirect()?)?;
+                link_kid(&parent, copy)?;
+            }
+            _ => self.add_root(dst, map, copy)?,
+        }
+        Ok(())
+    }
+
+    /// The copy of source field `num` (made with its own parents when first needed).
+    fn parent(&mut self, dst: &mut PdfDocument, map: &mut PdfGraftMap, num: i32) -> Result<PdfObject> {
+        if let Some(r) = self.fields.get(&num) {
+            return Ok(r.clone());
+        }
+        let node = self.src.new_indirect(num, 0)?;
+        let Some(f) = node.resolve()? else { return Err(EngineError::Invalid("a form field is missing".into())) };
+        let mut c = f.copy_dict()?;
+        for k in BACK_REFS {
             c.dict_delete(k)?;
         }
-        let g = map.graft_object(&c)?;
-        out.array_push(dst.add_object(&g)?)?;
+        let mut copy = map.graft_object(&c)?;
+        copy.dict_put("Kids", dst.new_array()?)?;
+        let r = dst.add_object(&copy)?;
+        self.fields.insert(num, r.clone());
+        match f.get_dict("Parent")? {
+            // A loop in a broken field tree ends at the field already copied.
+            Some(p) if p.is_indirect()? && !self.fields.contains_key(&p.as_indirect()?) => {
+                let up = self.parent(dst, map, p.as_indirect()?)?;
+                link_kid(&up, &r)?;
+            }
+            Some(p) if p.is_indirect()? => link_kid(&self.fields[&p.as_indirect()?].clone(), &r)?,
+            _ => self.add_root(dst, map, &r)?,
+        }
+        Ok(r)
     }
-    Ok(out)
+
+    /// Adds a root field to `dst`'s /AcroForm /Fields, renamed "name (2)", "name (3)" … when a
+    /// field of that name is already there (fields of one name share their value).
+    fn add_root(&mut self, dst: &mut PdfDocument, map: &mut PdfGraftMap, field: &PdfObject) -> Result<()> {
+        let mut catalog = dst.catalog()?;
+        let mut form = match catalog.get_dict("AcroForm")? {
+            Some(f) => f,
+            None => {
+                let mut f = dst.new_dict()?;
+                f.dict_put("Fields", dst.new_array()?)?;
+                let f = dst.add_object(&f)?;
+                catalog.dict_put("AcroForm", f.clone())?;
+                f
+            }
+        };
+        let mut list = match form.get_dict("Fields")? {
+            Some(l) => l,
+            None => {
+                form.dict_put("Fields", dst.new_array()?)?;
+                form.get_dict("Fields")?.unwrap()
+            }
+        };
+        // The source form's defaults (fonts, appearance) where `dst` has none.
+        if let Some(sf) = self.src.catalog()?.get_dict("AcroForm")? {
+            for key in ["DR", "DA"] {
+                if form.get_dict(key)?.is_none() {
+                    if let Some(v) = sf.get_dict(key)? {
+                        form.dict_put(key, map.graft_object(&v)?)?;
+                    }
+                }
+            }
+        }
+        if self.names.is_none() {
+            let mut names = std::collections::HashSet::new();
+            for f in list.array_iter()? {
+                if let Some(t) = f?.get_dict("T")? {
+                    names.insert(t.as_string()?);
+                }
+            }
+            self.names = Some(names);
+        }
+        let names = self.names.as_mut().unwrap();
+        if let Some(t) = field.get_dict("T")? {
+            let base = t.as_string()?;
+            let mut name = base.clone();
+            let mut n = 2;
+            while names.contains(&name) {
+                name = format!("{base} ({n})");
+                n += 1;
+            }
+            if name != base {
+                field.clone().dict_put("T", PdfObject::new_string(&name)?)?;
+            }
+            names.insert(name);
+        }
+        list.array_push(field.clone())?;
+        Ok(())
+    }
+}
+
+fn link_kid(parent: &PdfObject, kid: &PdfObject) -> Result<()> {
+    kid.clone().dict_put("Parent", parent.clone())?;
+    // Every parent copy is made with a /Kids array (see `Graft::parent`).
+    if let Some(mut kids) = parent.get_dict("Kids")? {
+        kids.array_push(kid.clone())?;
+    }
+    Ok(())
+}
+
+fn name_of(o: Option<PdfObject>) -> Vec<u8> {
+    o.and_then(|s| s.as_name().ok()).unwrap_or_default()
 }
 
 /// A new PDF of `pages` of `src`.

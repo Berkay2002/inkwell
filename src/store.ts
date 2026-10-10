@@ -77,7 +77,8 @@ interface Store {
   password: { doc: number; path: string; error?: string } | null;
   error: string | null;
 
-  openPath: (path: string) => Promise<void>;
+  /** Opens (or switches to) a file: `token` from a dialog or drop, else Rust must know `path` (recent list). */
+  openPath: (path: string, token?: string) => Promise<void>;
   submitPassword: (password: string) => Promise<void>;
   cancelPassword: () => void;
   closeDoc: (id: number) => void;
@@ -152,7 +153,7 @@ export const useStore = create<Store>((set, get) => {
     password: null,
     error: null,
 
-    openPath: (path) => {
+    openPath: (path, token) => {
       const k = keyOf(path);
       const existing = Object.values(get().docs).find((d) => keyOf(d.path) === k);
       if (existing) {
@@ -163,7 +164,7 @@ export const useStore = create<Store>((set, get) => {
       if (running) return running;
       const job = (async () => {
         try {
-          const r = await api.openDocument(path);
+          const r = await api.openDocument(token ?? (await api.knownFile(path)).token);
           if (r.status === "opened") {
             // Rust canonicalised the path: a different spelling of an open file is the same tab.
             const dup = Object.values(get().docs).find((d) => keyOf(d.path) === keyOf(r.path));

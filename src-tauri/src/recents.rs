@@ -5,6 +5,7 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+use crate::paths::Paths;
 use tauri::Manager;
 
 const FILE: &str = "recents.json";
@@ -58,7 +59,7 @@ pub fn stat_one(path: &str) -> FileStat {
     FileStat { path: canon, exists: true, size: meta.len(), modified }
 }
 
-fn data_dir(app: &tauri::AppHandle) -> Result<(PathBuf, bool), String> {
+pub(crate) fn data_dir(app: &tauri::AppHandle) -> Result<(PathBuf, bool), String> {
     if let Some(d) = std::env::var_os("INKWELL_DATA_DIR").filter(|d| !d.is_empty()) {
         return Ok((PathBuf::from(d), true));
     }
@@ -82,9 +83,15 @@ async fn blocking<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> 
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())
 }
 
+/// Paths Inkwell was not given (see paths.rs) read as missing: the UI learns nothing about them.
 #[tauri::command]
-pub async fn stat_files(paths: Vec<String>) -> Result<Vec<FileStat>, String> {
-    blocking(move || paths.iter().map(|p| stat_one(p)).collect()).await
+pub async fn stat_files(app: tauri::AppHandle, paths: Vec<String>) -> Result<Vec<FileStat>, String> {
+    blocking(move || {
+        let reg = app.state::<Paths>();
+        let missing = |p: &String| FileStat { path: p.clone(), exists: false, size: 0, modified: 0 };
+        paths.iter().map(|p| if reg.known(p) { stat_one(p) } else { missing(p) }).collect()
+    })
+    .await
 }
 
 #[tauri::command]
@@ -100,14 +107,16 @@ pub async fn recents_load(app: tauri::AppHandle) -> Result<RecentsFile, String> 
 #[tauri::command]
 pub async fn recents_save(app: tauri::AppHandle, json: String) -> Result<(), String> {
     let (dir, _) = data_dir(&app)?;
+    // only paths the user chose stay listed: the list is where `known_file` finds them again
+    let json = app.state::<Paths>().filter_recents(&json)?;
     blocking(move || write_json(&dir, &json)).await?.map_err(|e| e.to_string())
 }
 
 /// Opens Explorer with the file selected ("Show in folder").
 #[tauri::command]
-pub async fn reveal_in_folder(path: String) -> Result<(), String> {
+pub async fn reveal_in_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
     // Windows paths cannot contain a quote, so a quote here is not a path: refuse rather than build a command line from it.
-    if path.contains('"') || !Path::new(&path).exists() {
+    if path.contains('"') || !app.state::<Paths>().known(&path) || !Path::new(&path).exists() {
         return Err("not a file".into());
     }
     #[cfg(windows)]

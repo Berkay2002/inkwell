@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   PAD,
   PAGE_GAP,
+  anchoredScroll,
   bucketScale,
   computeLayout,
   currentPage,
+  fitZoom,
   pageAt,
   pageSpaceTransform,
   previewScaleKey,
@@ -106,5 +108,44 @@ describe("page space transform", () => {
     expect(pageSpaceTransform(letter, 1, 1)).toContain("translate(792px,0px) rotate(90deg)");
     expect(pageSpaceTransform(letter, 2, 1)).toContain("translate(612px,792px) rotate(180deg)");
     expect(pageSpaceTransform(letter, 3, 1)).toContain("translate(0px,612px) rotate(270deg)");
+  });
+});
+
+describe("refit when the stage changes width", () => {
+  const letter: [number, number] = [612, 792];
+  const sizes = Array.from({ length: 10 }, () => letter);
+
+  it("fits the typical page to the new width or page", () => {
+    expect(fitZoom("fitWidth", letter, 1045, 800)).toBeCloseTo((1045 - 2 * PAD) / 612);
+    expect(fitZoom("fitWidth", letter, 645, 800)).toBeCloseTo((645 - 2 * PAD) / 612);
+    expect(fitZoom("fitPage", letter, 1045, 800)).toBeCloseTo((800 - 2 * PAD) / 792);
+    expect(fitZoom("custom", letter, 1045, 800)).toBeNull();
+    expect(fitZoom("fitWidth", letter, 0, 800)).toBeNull();
+  });
+
+  it("keeps the same page and offset at the top of the view across a refit", () => {
+    const before = computeLayout(sizes, 0, fitZoom("fitWidth", letter, 1045, 800)!, 1045);
+    const zoomB = fitZoom("fitWidth", letter, 1045, 800)!;
+    const scrollTop = before.tops[3] + 120;
+    const a = { page: pageAt(before.tops, scrollTop), yPt: 120 / zoomB, vy: 0, xFrac: 0.5, vx: 645 / 2 };
+    const zoomA = fitZoom("fitWidth", letter, 645, 800)!;
+    const after = computeLayout(sizes, 0, zoomA, 645);
+    const to = anchoredScroll(after, zoomA, a, 645, true);
+    expect(pageAt(after.tops, to.top)).toBe(3);
+    expect((to.top - after.tops[3]) / zoomA).toBeCloseTo(120 / zoomB);
+    // The page exactly fills the width: nothing to scroll sideways.
+    expect(after.contentWidth).toBe(645);
+    expect(to.left).toBe(0);
+  });
+
+  it("centres the view on the pages when a wider page makes the content overflow", () => {
+    const mixed = [...sizes.slice(0, 9), [792, 612] as [number, number]];
+    const z = fitZoom("fitWidth", letter, 645, 800)!;
+    const L = computeLayout(mixed, 0, z, 645);
+    const to = anchoredScroll(L, z, { page: 2, yPt: 0, vy: 0, xFrac: 0, vx: 0 }, 645, true);
+    expect(L.contentWidth).toBeGreaterThan(645);
+    // A portrait page sits centred in the content, so it is fully in view with equal margins.
+    const left = (L.contentWidth - L.widths[2]) / 2 - to.left;
+    expect(left).toBeCloseTo(645 - (left + L.widths[2]));
   });
 });

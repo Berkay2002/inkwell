@@ -638,3 +638,145 @@ fn stale_save_temps_are_removed_on_open() {
     assert!(fresh.exists(), "a save in progress lost its temp file");
     assert!(other.exists(), "another file's temp was removed");
 }
+
+/// Two blank pages. Page 1: a link to page 2 (explicit), a link to page 2 through a named
+/// destination, a web link, the text field "name" (= "Ada"), and the first widget of the field
+/// "addr" (= "Main St"), whose second widget is on page 2.
+fn linked_source() -> Vec<u8> {
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /Names << /Dests 12 0 R >> \
+         /AcroForm << /Fields [7 0 R 8 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 9 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 13 0 R 7 0 R 10 0 R] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [11 0 R] >>",
+        "<< /Type /Annot /Subtype /Link /Rect [72 700 200 720] /Dest [4 0 R /Fit] >>",
+        "<< /Type /Annot /Subtype /Link /Rect [72 670 200 690] /A << /S /GoTo /D (second) >> >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (Ada) /Rect [72 600 300 620] /P 3 0 R >>",
+        "<< /FT /Tx /T (addr) /V (Main St) /Kids [10 0 R 11 0 R] >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Annot /Subtype /Widget /Parent 8 0 R /Rect [72 560 300 580] /P 3 0 R >>",
+        "<< /Type /Annot /Subtype /Widget /Parent 8 0 R /Rect [72 560 300 580] /P 4 0 R >>",
+        "<< /Names [(second) [4 0 R /XYZ 0 792 0]] >>",
+        "<< /Type /Annot /Subtype /Link /Rect [72 640 200 660] /A << /S /URI /URI (https://example.com/) >> >>",
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offs = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let x = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offs {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+/// Per page: its links (the page index they go to, -1 for a web link) and its widgets' field names.
+fn links_and_widgets(path: &str) -> Vec<(Vec<i32>, Vec<String>)> {
+    let doc = PdfDocument::open(path).unwrap();
+    (0..doc.page_count().unwrap())
+        .map(|p| {
+            let page = doc.find_page(p).unwrap();
+            let (mut links, mut widgets) = (Vec::new(), Vec::new());
+            if let Some(annots) = page.get_dict("Annots").unwrap() {
+                for a in annots.array_iter().unwrap() {
+                    let a = a.unwrap().resolve().unwrap().unwrap();
+                    match name_of(a.get_dict("Subtype").unwrap()).as_slice() {
+                        b"Link" => links.push(match a.get_dict("Dest").unwrap() {
+                            Some(d) => doc.lookup_page_number(&d.get_array(0).unwrap().unwrap()).unwrap(),
+                            None => -1,
+                        }),
+                        b"Widget" => {
+                            let mut f = a.clone();
+                            while f.get_dict("T").unwrap().is_none() {
+                                f = f.get_dict("Parent").unwrap().expect("a widget outside any field");
+                            }
+                            // The widget must be on this very page.
+                            let on = doc.lookup_page_number(&a.get_dict("P").unwrap().unwrap()).unwrap();
+                            assert_eq!(on, p);
+                            widgets.push(f.get_dict("T").unwrap().unwrap().as_string().unwrap());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (links, widgets)
+        })
+        .collect()
+}
+
+/// The root fields of the form: name, value, number of widgets.
+fn form_fields(path: &str) -> Vec<(String, String, usize)> {
+    let doc = PdfDocument::open(path).unwrap();
+    let Some(form) = doc.catalog().unwrap().get_dict("AcroForm").unwrap() else { return vec![] };
+    form.get_dict("Fields")
+        .unwrap()
+        .unwrap()
+        .array_iter()
+        .unwrap()
+        .map(|f| {
+            let f = f.unwrap();
+            let s = |k: &str| f.get_dict(k).unwrap().map(|v| v.as_string().unwrap()).unwrap_or_default();
+            let kids = f.get_dict("Kids").unwrap().map(|k| k.len().unwrap()).unwrap_or(1);
+            (s("T"), s("V"), kids)
+        })
+        .collect()
+}
+
+#[test]
+fn inserted_pages_keep_their_links_and_form_fields() {
+    let d = dir("insertlinks");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let src = d.join("form.pdf");
+    std::fs::write(&src, linked_source()).unwrap();
+    let src = src.to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+
+    eng.apply(id, EditOp::InsertFile { at: 1, path: src.clone(), pages: None, password: None }).unwrap();
+    eng.save(id, None).unwrap();
+    let pages = links_and_widgets(&path);
+    assert_eq!(pages.len(), 5);
+    // Both links to the source's page 2 now go to its copy, page index 2.
+    assert_eq!(pages[1], (vec![2, 2, -1], vec!["name".to_string(), "addr".to_string()]));
+    assert_eq!(pages[2], (vec![], vec!["addr".to_string()]));
+    assert_eq!(form_fields(&path), [("name".into(), "Ada".into(), 1), ("addr".into(), "Main St".into(), 2)]);
+
+    // A second copy: its fields are renamed so they keep values of their own.
+    eng.apply(id, EditOp::InsertFile { at: 5, path: src.clone(), pages: None, password: None }).unwrap();
+    eng.save(id, None).unwrap();
+    let names: Vec<String> = form_fields(&path).into_iter().map(|f| f.0).collect();
+    assert_eq!(names, ["name", "addr", "name (2)", "addr (2)"]);
+    assert_eq!(links_and_widgets(&path)[5].0, vec![6, 6, -1]);
+
+    // Extracting the first copy takes its links and fields along.
+    let out = d.join("part.pdf").to_string_lossy().into_owned();
+    eng.extract(id, &[1, 2], &out, false).unwrap();
+    assert_eq!(links_and_widgets(&out)[0].0, vec![1, 1, -1]);
+    assert_eq!(form_fields(&out), [("name".into(), "Ada".into(), 1), ("addr".into(), "Main St".into(), 2)]);
+
+    // Undo takes the form back with the pages.
+    eng.undo(id).unwrap();
+    eng.undo(id).unwrap();
+    eng.save(id, None).unwrap();
+    assert!(form_fields(&path).is_empty());
+}
+
+#[test]
+fn a_link_whose_page_stays_behind_is_dropped() {
+    let d = dir("insertone");
+    let path = fixture_at(&d, "a.pdf", &pages(2));
+    let src = d.join("form.pdf");
+    std::fs::write(&src, linked_source()).unwrap();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let src = src.to_string_lossy().into_owned();
+    eng.apply(id, EditOp::InsertFile { at: 0, path: src, pages: Some(vec![0]), password: None }).unwrap();
+    eng.save(id, None).unwrap();
+    // The web link stays; the widgets stay, "addr" with only the widget that came along.
+    assert_eq!(links_and_widgets(&path)[0], (vec![-1], vec!["name".to_string(), "addr".to_string()]));
+    assert_eq!(form_fields(&path), [("name".into(), "Ada".into(), 1), ("addr".into(), "Main St".into(), 1)]);
+}

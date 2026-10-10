@@ -1,9 +1,9 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import { type DocState, useStore } from "../store";
 import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
 import { useHistory } from "./historyStore";
 import { pickAndCompareFiles } from "../components/history/HistoryPanel";
+import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
 
@@ -29,8 +29,7 @@ const withDoc = (f: (d: DocState) => void) => () => {
 };
 
 export async function openDialog() {
-  const sel = await open({ multiple: true, filters: [{ name: "PDF documents", extensions: ["pdf"] }] });
-  for (const p of sel ?? []) await st().openPath(p);
+  for (const f of await pickOpen(true)) await st().openPath(f.path, f.token);
 }
 
 export const focusPageInput = () => {

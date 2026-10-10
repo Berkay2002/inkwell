@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { message, open, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
 import * as api from "./api";
 import type { EditOp, EditState } from "./api";
@@ -14,8 +14,6 @@ import { dropCached } from "./tiles";
 const st = () => useStore.getState();
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 const stem = (p: string) => baseName(p).replace(/\.pdf$/i, "");
-const dirOf = (p: string) => p.slice(0, Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/")) + 1);
-const PDF = [{ name: "PDF documents", extensions: ["pdf"] }];
 
 /** Makes the engine's state the document's: new generation, pages, sizes, labels. */
 export function applyState(id: number, s: EditState) {
@@ -67,8 +65,8 @@ export const save = (id: number) => withState(id, () => api.saveDocument(id));
 export async function saveAs(id: number) {
   const d = st().docs[id];
   if (!d) return;
-  const path = await saveDialog({ defaultPath: d.path, filters: PDF });
-  if (path) return withState(id, () => api.saveDocument(id, path));
+  const to = await api.pickSave(baseName(d.path), { doc: id });
+  if (to) return withState(id, () => api.saveDocument(id, to.token));
 }
 
 /** Writes `pages` to a new file (asked for), optionally deleting them here as one undo step. */
@@ -76,10 +74,10 @@ export async function extract(id: number, pages: number[], deleteAfter = false) 
   const d = st().docs[id];
   if (!d || pages.length === 0) return;
   const label = formatRange(pages);
-  const path = await saveDialog({ defaultPath: `${dirOf(d.path)}${stem(d.path)} (pages ${label}).pdf`, filters: PDF });
-  if (!path) return;
-  const s = await withState(id, () => api.extractPages(id, pages, path, deleteAfter));
-  if (s) st().setUi({ error: `Saved ${pages.length === 1 ? "page" : "pages"} ${label} to ${baseName(path)}` });
+  const out = await api.pickSave(`${stem(d.path)} (pages ${label}).pdf`, { doc: id });
+  if (!out) return;
+  const s = await withState(id, () => api.extractPages(id, pages, out.token, deleteAfter));
+  if (s) st().setUi({ error: `Saved ${pages.length === 1 ? "page" : "pages"} ${label} to ${baseName(out.path)}` });
 }
 
 /** `<name>_Part<n>.pdf` files of `every` pages next to the document. */
@@ -90,20 +88,22 @@ export async function split(id: number, every: number) {
 
 /** Inserts another PDF's pages at `at`. */
 export async function insertFile(id: number, at: number) {
-  const path = await open({ multiple: false, filters: PDF });
-  if (typeof path === "string") return edit(id, { op: "insertFile", at, path });
+  const [f] = await api.pickOpen(false);
+  if (f) return edit(id, { op: "insertFile", at, file: f.token });
 }
 
 /** Asks for PDFs and an output file, merges them in the order picked and opens the result. */
-export async function mergeFiles(first?: string) {
-  const picked = await open({ multiple: true, filters: PDF });
-  const paths = [...(first ? [first] : []), ...(picked ?? [])];
-  if (paths.length < 2) return;
-  const out = await saveDialog({ defaultPath: `${dirOf(paths[0])}${stem(paths[0])} (merged).pdf`, filters: PDF });
-  if (!out) return;
+export async function mergeFiles() {
   try {
-    await api.mergeFiles(paths, out);
-    await st().openPath(out);
+    const files = await api.pickOpen(true);
+    if (files.length < 2) return;
+    const out = await api.pickSave(`${stem(files[0].path)} (merged).pdf`, { near: files[0].token });
+    if (!out) return;
+    const merged = await api.mergeFiles(
+      files.map((f) => f.token),
+      out.token,
+    );
+    await st().openPath(merged.path, merged.token);
   } catch (e) {
     st().setUi({ error: String(e) });
   }

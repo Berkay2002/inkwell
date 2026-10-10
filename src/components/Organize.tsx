@@ -1,5 +1,5 @@
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { pickOpen } from "../lib/api";
 import * as edits from "../lib/edit";
 import { clamp, previewScaleKey, type Size, type TileRef } from "../lib/layout";
 import { formatRange, movedIndices, parseRange } from "../lib/pageRange";
@@ -239,10 +239,9 @@ export function Organize({ doc }: { doc: DocState }) {
 
 /** Merge files: other PDFs' pages added at the end, one undo step each. */
 async function mergeInto(id: number) {
-  const picked = await openDialog({ multiple: true, filters: [{ name: "PDF documents", extensions: ["pdf"] }] });
-  for (const path of picked ?? []) {
+  for (const f of await pickOpen(true)) {
     const n = st().docs[id]?.pageCount;
-    if (n == null || !(await edits.edit(id, { op: "insertFile", at: n, path }))) return;
+    if (n == null || !(await edits.edit(id, { op: "insertFile", at: n, file: f.token }))) return;
   }
 }
 
