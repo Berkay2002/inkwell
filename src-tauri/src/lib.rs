@@ -2,6 +2,7 @@ pub mod ai;
 pub mod compress;
 pub mod engine;
 pub mod recents;
+pub mod redact;
 
 use engine::cache::TileKey;
 use engine::edit::{EditOp, EditState, SplitResult};
