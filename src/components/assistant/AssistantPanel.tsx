@@ -42,9 +42,9 @@ export function AssistantPanel({ doc }: { doc: DocState }) {
   const drag = useRef<{ x: number; w: number } | null>(null);
 
   // Selection tracking: a selection in the viewer is kept until the user clicks in the viewer again
-  // (clicking a panel button must not lose it).
+  // (clicking a panel button or opening the palette must not lose it). Runs while the panel is closed
+  // too, so the palette's "explain selected text" has something to read.
   useEffect(() => {
-    if (!open) return;
     const onSel = () => {
       const s = readViewerSelection();
       if (s) useAi.getState().setSelection(s);
@@ -58,7 +58,7 @@ export function AssistantPanel({ doc }: { doc: DocState }) {
       document.removeEventListener("selectionchange", onSel);
       document.removeEventListener("mousedown", onDown, true);
     };
-  }, [open]);
+  }, []);
 
   // A different tab means a different document: its selection is not this one's.
   useEffect(() => useAi.getState().setSelection(null), [doc.id]);
@@ -136,7 +136,12 @@ function Header({ doc }: { doc: DocState }) {
             className="assistant-select"
             title="Model"
             value={model?.id}
-            onChange={(e) => st().setSettings({ model: e.target.value })}
+            onChange={(e) => {
+              const next = models.find((m) => m.id === e.target.value);
+              // A model may not offer the effort chosen for the previous one.
+              const effort = next && !next.efforts.includes(settings.effort) ? (next.defaultEffort ?? next.efforts[0]) : undefined;
+              st().setSettings({ model: e.target.value, ...(effort ? { effort } : {}) });
+            }}
           >
             {models.map((m) => (
               <option key={m.id} value={m.id}>
@@ -464,6 +469,8 @@ function Composer({ doc }: { doc: DocState }) {
               e.preventDefault();
               send();
             }
+            // Ctrl+Arrow moves by word here; it must not turn the page.
+            if ((e.ctrlKey || e.metaKey) && e.key.startsWith("Arrow")) e.stopPropagation();
           }}
         />
         {streaming ? (
