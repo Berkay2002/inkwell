@@ -2,7 +2,7 @@
 :root {
   color-scheme: light dark;
   /* Shared by every screen (start screen, viewer chrome, assistant panel): warm paper tones, one ink-blue accent. */
-  --bg: light-dark(#f4f2ed, #17181b);
+  --window: light-dark(#f4f2ed, #17181b);
   --surface: light-dark(#ffffff, #202226);
   --surface-2: light-dark(#eeebe4, #2a2c31);
   --sidebar: light-dark(#ece9e2, #1c1d21);
@@ -10,22 +10,22 @@
   --border: light-dark(#e3ded4, #2f3136);
   --border-strong: light-dark(#cfc9bc, #3e4148);
   --text: light-dark(#1a1c20, #eceae6);
-  --text-dim: light-dark(#6b675f, #a29e96);
+  --text-2: light-dark(#6b675f, #a29e96);
   --accent: light-dark(#2e4b8f, #6384d8);
   --accent-fg: light-dark(#ffffff, #0b1328);
-  --accent-soft: light-dark(rgb(46 75 143 / 0.13), rgb(99 132 216 / 0.18));
+  --accent-soft: light-dark(rgb(46 75 143 / 0.1), rgb(99 132 216 / 0.18));
+  --accent-tint: light-dark(#dde5f3, #27324d);
   --danger: light-dark(#b3261e, #ff8a7a);
   --hit: rgb(255 214 0 / 0.5);
   --hit-current: rgb(255 120 0 / 0.55);
-  --shadow: 0 1px 2px rgb(0 0 0 / 0.18), 0 6px 18px rgb(0 0 0 / 0.14);
+  /* soft, diffuse, warm-tinted: 1 = resting cards, 2 = raised or hovered, 3 = popups and dialogs */
   --sh-1: light-dark(rgb(60 45 20 / 0.07), rgb(0 0 0 / 0.3));
   --sh-2: light-dark(rgb(60 45 20 / 0.1), rgb(0 0 0 / 0.3));
   --sh-3: light-dark(rgb(60 45 20 / 0.18), rgb(0 0 0 / 0.45));
-  --shadow-sm: 0 1px 2px var(--sh-1), 0 2px 8px var(--sh-1);
-  --shadow-md: 0 2px 4px var(--sh-1), 0 8px 24px var(--sh-2);
-  --shadow-lg: 0 4px 10px var(--sh-2), 0 16px 40px var(--sh-3);
-  --radius-sm: 6px;
-  --radius: 8px;
+  --shadow-1: 0 1px 2px var(--sh-1), 0 2px 8px var(--sh-1);
+  --shadow-2: 0 2px 4px var(--sh-1), 0 8px 24px var(--sh-2);
+  --shadow-3: 0 4px 10px var(--sh-2), 0 16px 40px var(--sh-3);
+  --radius-sm: 8px;
   --radius-md: 10px;
   --radius-lg: 14px;
   --radius-pill: 999px;
@@ -48,7 +48,7 @@ body,
   margin: 0;
 }
 body {
-  background: var(--bg);
+  background: var(--window);
   color: var(--text);
   font: 13px/1.4 var(--font);
   overflow: hidden;
@@ -68,7 +68,7 @@ select {
   color: inherit;
 }
 .dim {
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -88,7 +88,7 @@ select {
   gap: 2px;
   height: 40px;
   padding: 6px 0 0 8px;
-  background: var(--bg);
+  background: var(--window);
   overflow: hidden;
   user-select: none;
 }
@@ -110,16 +110,16 @@ select {
   align-items: center;
   gap: 8px;
   height: 34px;
-  min-width: 56px;
+  min-width: 0;
+  overflow: hidden;
   max-width: 220px;
   padding: 0 6px 0 12px;
   border-radius: var(--radius-md) var(--radius-md) 0 0;
-  color: var(--text-dim);
+  color: var(--text-2);
   flex: 0 1 180px;
 }
 .tab.home-tab {
   flex: none;
-  min-width: 0;
   padding-right: 14px;
 }
 .tab:hover {
@@ -154,7 +154,7 @@ select {
   display: grid;
   place-items: center;
   width: 46px;
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .winctl button:hover {
   background: var(--surface-2);
@@ -208,7 +208,7 @@ select {
   width: 30px;
   height: 30px;
   border-radius: 6px;
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .icon-btn:hover:not(:disabled) {
   background: var(--surface-2);
@@ -261,7 +261,7 @@ select {
   flex-direction: column;
   width: 220px;
   flex: none;
-  background: var(--surface);
+  background: var(--sidebar);
   border-right: 1px solid var(--border);
 }
 .sidebar-tabs {
@@ -273,7 +273,7 @@ select {
   flex: 1;
   height: 26px;
   border-radius: 6px;
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .seg.on {
   background: var(--accent-soft);
@@ -305,7 +305,7 @@ select {
   transform: translateX(-50%);
   padding: 0 7px;
   border-radius: 9px;
-  background: rgb(20 22 26 / 0.72);
+  background: rgb(30 27 22 / 0.72);
   color: #fff;
   font-size: 11px;
 }
@@ -322,7 +322,7 @@ select {
   height: 18px;
   display: grid;
   place-items: center;
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .twisty.open svg {
   transform: rotate(90deg);
@@ -341,11 +341,11 @@ select {
   background: var(--surface-2);
 }
 .outline-title:disabled {
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .empty {
   padding: 16px;
-  color: var(--text-dim);
+  color: var(--text-2);
   text-align: center;
 }
 
@@ -364,7 +364,7 @@ select {
 .page {
   position: absolute;
   background: #fff;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-2);
   overflow: hidden;
   contain: layout paint;
 }
@@ -402,7 +402,7 @@ select {
 }
 .textlayer ::selection,
 .textlayer > div::selection {
-  background: rgb(60 120 255 / 0.35);
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
   color: transparent;
 }
 
@@ -418,7 +418,7 @@ select {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-2);
 }
 .searchbar input {
   width: 200px;
@@ -450,7 +450,7 @@ select {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: 0 18px 60px rgb(0 0 0 / 0.35);
+  box-shadow: var(--shadow-3);
   overflow: hidden;
 }
 .palette input {
@@ -548,9 +548,9 @@ select {
   max-width: 70vw;
   padding: 10px 16px;
   background: var(--text);
-  color: var(--bg);
+  color: var(--window);
   border-radius: 10px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-2);
 }
 
 /* start screen: home, library, preview. Tokens (--surface, --radius-*, --shadow-*, --accent) are global, see :root. */
@@ -561,7 +561,7 @@ select {
   grid-template-columns: 200px minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
-  background: var(--bg);
+  background: var(--window);
 }
 .home .grow {
   flex: 1;
@@ -584,8 +584,8 @@ select {
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
-  color: var(--text-dim);
+  box-shadow: var(--shadow-1);
+  color: var(--text-2);
 }
 .home .pill-search:focus-within {
   border-color: var(--accent);
@@ -600,7 +600,7 @@ select {
   color: var(--text);
 }
 .home .pill-search input::placeholder {
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .home .search-results {
   position: absolute;
@@ -614,7 +614,7 @@ select {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-3);
 }
 .home .search-results button {
   display: flex;
@@ -650,7 +650,7 @@ select {
 .home .thumb-ph {
   display: grid;
   place-items: center;
-  color: var(--text-dim);
+  color: var(--text-2);
   opacity: 0.7;
 }
 .home .sec-head {
@@ -696,7 +696,7 @@ select {
 .home .pills button {
   padding: 5px 16px;
   border-radius: var(--radius-pill);
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .home .pills.wide button {
   flex: 1;
@@ -734,7 +734,7 @@ select {
   padding: 0 18px;
 }
 .land-top .open-file .keys {
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .land-top .gear {
   flex: none;
@@ -765,14 +765,14 @@ select {
   height: 70px;
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
   transition:
     transform 0.12s,
     box-shadow 0.12s;
 }
 .tool:hover {
   transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-2);
 }
 
 .reading {
@@ -786,11 +786,11 @@ select {
 .read-card {
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
   transition: box-shadow 0.12s;
 }
 .read-card:hover {
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-2);
 }
 .read-open {
   display: flex;
@@ -808,7 +808,7 @@ select {
   width: 84px;
   height: 108px;
   overflow: hidden;
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   background: var(--surface-2);
 }
 .read-page img {
@@ -866,7 +866,7 @@ select {
 .trow.thead {
   height: 28px;
   padding: 0 0 0 12px;
-  color: var(--text-dim);
+  color: var(--text-2);
   font-size: 12px;
 }
 .recent-table .trow {
@@ -880,7 +880,7 @@ select {
   background: var(--surface-2);
 }
 .recent-table .trow.on {
-  background: var(--accent-soft);
+  background: var(--accent-tint);
   border-top-color: transparent;
 }
 .trow-open {
@@ -934,7 +934,7 @@ select {
   font-variant-numeric: tabular-nums;
 }
 .trow.missing .lib-name {
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .trow.missing .small {
   color: var(--danger);
@@ -945,30 +945,30 @@ select {
   top: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px;
+  gap: 8px;
+  padding: 14px;
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
 }
 .hp-stage {
   display: grid;
   place-items: center;
-  height: 230px;
-  padding: 12px;
+  height: clamp(120px, calc(100vh - 640px), 260px);
+  padding: 10px;
   overflow: hidden;
   border-radius: var(--radius-md);
-  background: var(--bg);
+  background: var(--window);
 }
 .hp-stage img {
   max-width: 100%;
   max-height: 100%;
   border-radius: 3px;
   background: #fff;
-  box-shadow: 0 0 0 1px var(--border-strong), var(--shadow-sm);
+  box-shadow: 0 0 0 1px var(--border-strong), var(--shadow-1);
 }
 .hp-name {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   font-size: 15px;
   font-weight: 600;
   overflow: hidden;
@@ -977,14 +977,14 @@ select {
 }
 .facts {
   margin: 0;
-  padding-bottom: 12px;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--border);
 }
 .facts > div {
   display: grid;
   grid-template-columns: 78px minmax(0, 1fr);
   gap: 8px;
-  padding: 3px 0;
+  padding: 1px 0;
 }
 .facts dd {
   margin: 0;
@@ -1014,7 +1014,7 @@ select {
   padding: 36px 24px;
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
   text-align: center;
 }
 .empty-panel h2 {
@@ -1034,7 +1034,7 @@ select {
   height: 64px;
   border-radius: var(--radius-lg);
   background: var(--surface-2);
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 
 .drop-hint-wrap {
@@ -1048,11 +1048,26 @@ select {
   height: 44px;
   border: 1.5px dashed var(--border-strong);
   border-radius: var(--radius-lg);
-  color: var(--text-dim);
+  color: var(--text-2);
   transition:
     border-color 0.15s,
     background-color 0.15s,
     color 0.15s;
+}
+/* while a PDF is dragged over the window: the whole content area turns accent, wherever it is scrolled to */
+.home.over::after {
+  content: "Release to open";
+  position: absolute;
+  inset: 10px 10px 10px 210px;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  font-size: 18px;
+  font-weight: 600;
+  pointer-events: none;
 }
 .home.over .drop-hint,
 .home.over .drop-panel {
@@ -1098,7 +1113,7 @@ select {
   background: var(--surface-2);
 }
 .nav-item.on {
-  background: var(--accent-soft);
+  background: var(--accent-tint);
   color: var(--accent);
   font-weight: 600;
 }
@@ -1128,7 +1143,7 @@ select {
   border: 1.5px dashed var(--border-strong);
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
   text-align: center;
   transition:
     border-color 0.15s,
@@ -1160,7 +1175,7 @@ select {
   padding-right: 10px;
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
 }
 .lib-rows li > svg {
   flex: none;
@@ -1178,10 +1193,10 @@ select {
   text-align: left;
 }
 .lib-rows li:hover {
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-2);
 }
 .lib-rows li.on {
-  background: var(--accent-soft);
+  background: var(--accent-tint);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 .lib-thumb {
@@ -1190,7 +1205,7 @@ select {
   width: 56px;
   height: 64px;
   overflow: hidden;
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   background: var(--surface-2);
 }
 .lib-thumb img {
@@ -1224,7 +1239,7 @@ select {
   font-variant-numeric: tabular-nums;
 }
 .lib-rows li.missing .lib-name {
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .lib-rows li.missing .lib-dir {
   color: var(--danger);
@@ -1237,7 +1252,7 @@ select {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 
 /* library with a selection: list and preview */
@@ -1253,7 +1268,7 @@ select {
   min-width: 0;
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-1);
 }
 .lib-listcol {
   gap: 12px;
@@ -1278,7 +1293,7 @@ select {
   box-shadow: none;
 }
 .lib-rows.split li.on {
-  background: var(--accent-soft);
+  background: var(--accent-tint);
 }
 .lib-rows.split .lib-row {
   grid-template-columns: 56px minmax(0, 1fr) auto;
@@ -1309,7 +1324,7 @@ select {
   max-height: 100%;
   border-radius: 4px;
   background: #fff;
-  box-shadow: 0 0 0 1px var(--border-strong), var(--shadow-md);
+  box-shadow: 0 0 0 1px var(--border-strong), var(--shadow-2);
 }
 .preview-ph {
   display: grid;
@@ -1318,7 +1333,7 @@ select {
   height: 240px;
   border-radius: var(--radius-md);
   background: var(--surface-2);
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .preview-name {
   margin: 0;
@@ -1337,7 +1352,7 @@ select {
   padding: 0 0 16px;
   list-style: none;
   border-bottom: 1px solid var(--border);
-  color: var(--text-dim);
+  color: var(--text-2);
 }
 .details li {
   display: flex;
@@ -1367,7 +1382,7 @@ select {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-3);
 }
 .ink-menu button {
   display: flex;

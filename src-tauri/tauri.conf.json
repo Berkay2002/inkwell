@@ -20,7 +20,7 @@
         "minWidth": 720,
         "minHeight": 480,
         "decorations": false,
-        "backgroundColor": "#101114",
+        "backgroundColor": "#17181b",
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --enable-low-end-device-mode"
       }
     ],

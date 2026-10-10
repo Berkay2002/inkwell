@@ -34,6 +34,7 @@ const seed = files.map(([rel, src, ago, pinned, lastPage]) => {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.copyFileSync(path.join(samples, src), p);
   }
+  if (src) fs.utimesSync(p, new Date(Date.now() - ago), new Date(Date.now() - ago)); // a believable "Modified" column
   return { path: p, opened: Date.now() - ago, ...(pinned ? { pinned: true } : {}), ...(lastPage ? { lastPage } : {}) };
 });
 
@@ -126,6 +127,9 @@ try {
     const present = Math.min(4, seed.filter((r) => fs.existsSync(r.path)).length);
     for (let i = 0; i < 80 && (await hasThumbs(app)) < present; i++) await sleep(250);
     console.log("thumbnails on home", await hasThumbs(app), "of", present);
+    // the preview pane's buttons must be visible without scrolling
+    const fold = await app.ev("(() => { const b = document.querySelector('.hp-actions')?.getBoundingClientRect(); return b ? [Math.round(b.bottom), innerHeight] : null; })()");
+    console.log("preview buttons bottom / viewport height", fold, fold && fold[0] <= fold[1] ? "ok" : "BELOW THE FOLD");
     for (const t of ["light", "dark"]) {
       await theme(app, t);
       await sleep(1000);
@@ -208,9 +212,22 @@ try {
     await open(f);
     const cur = await app.ev(`${st}.docs[${st}.active].currentPage`);
     console.log("reopened at page index", cur, "(expected 2)");
-    await theme(app, "light");
+    // many tabs in a narrow window: the window controls must stay inside it
+    for (const q of seed.filter((r) => fs.existsSync(r.path))) await open(q.path);
+    await app.send("Emulation.setDeviceMetricsOverride", { width: 760, height: 700, deviceScaleFactor: 1, mobile: false });
+    await sleep(500);
+    const ctl = await app.ev("(() => { const b = document.querySelector('.winctl .close')?.getBoundingClientRect(); return b ? [Math.round(b.right), innerWidth, document.querySelectorAll('.tab').length] : null; })()");
+    console.log("close button right / window width / tabs", ctl, ctl && ctl[0] <= ctl[1] ? "ok" : "PUSHED OFF-SCREEN");
+    await app.shot("viewer-tabs-narrow-light.png");
+    await app.send("Emulation.clearDeviceMetricsOverride");
+    // the viewer with a document open, in both themes (a closed-and-reopened file, back at its page)
+    await app.ev(`(() => { const s = ${st}; const d = Object.values(s.docs).find((x) => x.path === ${JSON.stringify(f)}); if (d) s.activate(d.id); return !!d; })()`);
     await sleep(800);
-    await app.shot("viewer-tabs-light.png");
+    for (const t of ["light", "dark"]) {
+      await theme(app, t);
+      await sleep(800);
+      await app.shot(`viewer-${t}.png`);
+    }
   } finally {
     app.close();
   }
