@@ -1,6 +1,8 @@
 import { type DocState, useStore } from "../store";
 import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
+import { useHistory } from "./historyStore";
+import { pickAndCompareFiles } from "../components/history/HistoryPanel";
 import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
@@ -142,6 +144,30 @@ export const commands: Command[] = [
   { id: "theme-system", title: "Theme: match system", run: () => st().setTheme("system") },
   { id: "theme-light", title: "Theme: light", run: () => st().setTheme("light") },
   { id: "theme-dark", title: "Theme: dark", run: () => st().setTheme("dark") },
+  {
+    id: "history",
+    title: "Version history",
+    keys: ["Ctrl+Alt+H"],
+    needsDoc: true,
+    run: () => {
+      useHistory.getState().closeCompare();
+      useHistory.getState().toggle();
+    },
+  },
+  {
+    id: "history-compare",
+    title: "Compare with\u2026",
+    needsDoc: true,
+    run: withDoc((d) => {
+      const h = useHistory.getState();
+      const vs = h.docs[d.id]?.versions ?? [];
+      // the selected version, else the one before the newest; against the file as it is now
+      const a = h.selected[d.id] ?? (vs[1] ?? vs[0])?.id;
+      if (!a) return st().setUi({ error: "This document has no earlier version to compare with yet." });
+      h.openCompare({ doc: d.id, a: { kind: "version", id: a }, b: { kind: "current" } });
+    }),
+  },
+  { id: "compare-files", title: "Compare files\u2026", run: () => void pickAndCompareFiles() },
   { id: "palette", title: "Command palette", keys: ["Ctrl+K"], run: () => st().setUi({ paletteOpen: true }) },
   { id: "ai-toggle", title: "AI Assistant: show or hide", keys: ["Ctrl+Shift+A"], needsDoc: true, run: () => useAi.getState().toggle() },
   { id: "ai-layout-cycle", title: "Assistant: next layout", keys: ["Ctrl+Shift+L"], needsDoc: true, run: () => useAi.getState().cycleMode() },

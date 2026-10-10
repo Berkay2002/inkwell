@@ -1,6 +1,9 @@
 pub mod ai;
 pub mod compress;
+pub mod diff;
 pub mod engine;
+pub mod history;
+pub mod history_ipc;
 pub mod ocr;
 pub mod paths;
 pub mod recents;
@@ -9,6 +12,7 @@ pub mod redact;
 use engine::cache::TileKey;
 use engine::edit::{EditOp, EditState, SplitResult};
 use engine::{DocId, Engine, EngineError, EngineStats, OpenInfo, OutlineItem, SearchEvent, TextLine, TileOutcome};
+use history_ipc::History;
 use paths::{FileRef, Paths};
 use serde::Serialize;
 use std::sync::Arc;
@@ -41,6 +45,7 @@ const PDF: &[&str] = &["pdf"];
 #[serde(rename_all = "camelCase")]
 enum PickTitle {
     Locate,
+    Compare,
 }
 
 /// Open dialog in Rust; the picked files come back as open tokens.
@@ -48,8 +53,10 @@ enum PickTitle {
 async fn pick_open(window: Window, multiple: bool, title: Option<PickTitle>) -> Result<Vec<FileRef>, EngineError> {
     blocking(move || {
         let mut d = window.dialog().file().set_parent(&window).add_filter("PDF documents", PDF);
-        if let Some(PickTitle::Locate) = title {
-            d = d.set_title("Locate the moved file");
+        match title {
+            Some(PickTitle::Locate) => d = d.set_title("Locate the moved file"),
+            Some(PickTitle::Compare) => d = d.set_title("Choose two PDFs to compare"),
+            None => {}
         }
         let picked = if multiple { d.blocking_pick_files() } else { d.blocking_pick_file().map(|f| vec![f]) };
         let reg = window.state::<Paths>();
@@ -97,10 +104,10 @@ async fn known_file(window: Window, path: String) -> Result<FileRef, EngineError
 }
 
 #[tauri::command]
-async fn open_document(window: Window, eng: Eng<'_>, reg: Reg<'_>, file: String) -> Result<OpenOutcome, EngineError> {
+async fn open_document(window: Window, app: tauri::AppHandle, eng: Eng<'_>, reg: Reg<'_>, hist: State<'_, Arc<History>>, file: String) -> Result<OpenOutcome, EngineError> {
     let path = reg.open(window.label(), &file)?;
     let eng = eng.inner().clone();
-    blocking(move || {
+    let r = blocking(move || {
         let path = recents::canonical(&path);
         // the recent list stores this spelling
         window.state::<Paths>().learn(&path);
@@ -111,17 +118,27 @@ async fn open_document(window: Window, eng: Eng<'_>, reg: Reg<'_>, file: String)
             Err(e) => Err(e),
         }
     })
-    .await
+    .await;
+    // History is resolved in the background after the open; its errors never reach this command.
+    if let Ok(OpenOutcome::Opened(info)) = &r {
+        hist.inner().spawn_open(app, info.doc, info.path.clone());
+    }
+    r
 }
 
 #[tauri::command]
-async fn authenticate(eng: Eng<'_>, doc: DocId, password: String) -> Result<OpenInfo, EngineError> {
+async fn authenticate(app: tauri::AppHandle, eng: Eng<'_>, hist: State<'_, Arc<History>>, doc: DocId, password: String) -> Result<OpenInfo, EngineError> {
     let eng = eng.inner().clone();
-    blocking(move || eng.authenticate(doc, &password)).await
+    let r = blocking(move || eng.authenticate(doc, &password)).await;
+    if let Ok(info) = &r {
+        hist.inner().spawn_open(app, info.doc, info.path.clone());
+    }
+    r
 }
 
 #[tauri::command]
-fn close_document(eng: Eng<'_>, doc: DocId) {
+fn close_document(eng: Eng<'_>, hist: State<'_, Arc<History>>, doc: DocId) {
+    hist.forget(doc);
     eng.close(doc);
 }
 
@@ -384,6 +401,7 @@ pub fn run() {
         .manage(engine)
         .manage(ai::Assistant::new())
         .manage(Paths::default())
+        .manage(Arc::new(History::new()))
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 on_drop(window, paths);
@@ -426,6 +444,19 @@ pub fn run() {
             edit_apply,
             edit_undo,
             edit_redo,
+            history_ipc::history_state,
+            history_ipc::history_versions,
+            history_ipc::history_check,
+            history_ipc::history_restore,
+            history_ipc::history_recover,
+            history_ipc::history_save_copy,
+            history_ipc::history_name,
+            history_ipc::history_confirm_same,
+            history_ipc::history_delete,
+            history_ipc::history_never_keep,
+            history_ipc::history_compare,
+            history_ipc::history_render,
+            history_ipc::history_visual_diff,
             save_document,
             extract_pages,
             split_document,

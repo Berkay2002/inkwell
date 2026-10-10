@@ -16,6 +16,14 @@
   --accent-soft: light-dark(rgb(46 75 143 / 0.1), rgb(99 132 216 / 0.18));
   --accent-tint: light-dark(#dde5f3, #27324d);
   --danger: light-dark(#b3261e, #ff8a7a);
+  /* Diff marks only (version history, compare): the Word / GitHub meanings in muted, warm tones.
+     Always shown with a +, − or ~ glyph or a label, never colour alone. */
+  --diff-add: light-dark(#3a7a4b, #7fc592);
+  --diff-add-bg: light-dark(rgb(58 122 75 / 0.14), rgb(127 197 146 / 0.17));
+  --diff-del: light-dark(#a3453b, #ee9488);
+  --diff-del-bg: light-dark(rgb(163 69 59 / 0.12), rgb(238 148 136 / 0.16));
+  --diff-chg: light-dark(#a06d12, #e3b45e);
+  --diff-chg-bg: light-dark(rgb(160 109 18 / 0.14), rgb(227 180 94 / 0.17));
   --hit: rgb(255 214 0 / 0.5);
   --hit-current: rgb(255 120 0 / 0.55);
   /* soft, diffuse, warm-tinted: 1 = resting cards, 2 = raised or hovered, 3 = popups and dialogs */
