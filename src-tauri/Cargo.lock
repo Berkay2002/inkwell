@@ -1544,6 +1544,7 @@ dependencies = [
  "lru",
  "mupdf",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

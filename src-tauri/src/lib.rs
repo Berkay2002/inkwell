@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod engine;
 pub mod recents;
+pub mod redact;
 
 use engine::cache::TileKey;
 use engine::{DocId, Engine, EngineError, EngineStats, OpenInfo, OutlineItem, SearchEvent, TextLine, TileOutcome};
