@@ -27,7 +27,7 @@ const PATHS = {
 
 export function Glyph({ name, size = 16 }: { name: keyof typeof PATHS; size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={name === "more" ? 3.2 : 1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d={PATHS[name]} />
     </svg>
   );
@@ -470,8 +470,8 @@ function SelStrip({ doc, variant }: { doc: DocState; variant: Variant }) {
   );
 }
 
-/** The question box: a pill with a round send button. `lead` sits inside it, before the text. */
-export function Composer({ doc, variant, lead, onSend }: { doc: DocState; variant: Variant; lead?: ReactNode; onSend?: () => void }) {
+/** The question box: a pill with a round send button. `trail` sits inside it, before the send button. */
+export function Composer({ doc, variant, trail, onSend }: { doc: DocState; variant: Variant; trail?: ReactNode; onSend?: () => void }) {
   const [text, setText] = useState("");
   const streaming = useAi((s) => !!s.chats[doc.id]?.messages.some((m) => m.state === "streaming"));
   const prep = useAi((s) => s.chats[doc.id]?.prep);
@@ -490,7 +490,6 @@ export function Composer({ doc, variant, lead, onSend }: { doc: DocState; varian
     <div className={`ax-compose ${variant}`}>
       <SelStrip doc={doc} variant={variant} />
       <div className="ax-input">
-        {lead}
         <textarea
           value={text}
           rows={1}
@@ -507,6 +506,7 @@ export function Composer({ doc, variant, lead, onSend }: { doc: DocState; varian
             if ((e.ctrlKey || e.metaKey) && e.key.startsWith("Arrow")) e.stopPropagation();
           }}
         />
+        {trail}
         {streaming ? (
           <button className="ax-send" title="Stop" aria-label="Stop" onClick={() => st().cancel(doc.id)}>
             <Glyph name="stop" size={14} />

@@ -341,10 +341,16 @@ function Bar({ doc }: { doc: DocState }) {
               ))}
             </div>
           )}
-          <div className="ax-bar-row">
-            <Composer doc={doc} variant="bar" lead={<ModelPicker up />} />
-            <MoreMenu doc={doc} up />
-          </div>
+          <Composer
+            doc={doc}
+            variant="bar"
+            trail={
+              <>
+                <MoreMenu doc={doc} up />
+                <ModelPicker up />
+              </>
+            }
+          />
         </div>
       )}
       <Connector />

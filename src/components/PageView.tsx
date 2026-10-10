@@ -69,14 +69,16 @@ export const PageView = memo(function PageView(p: Props) {
           <div key={`${mark.nonce}.${i}`} className="cite-mark" style={rectStyle(r)} />
         ))}
         {mark && mark.rects.length > 0 && (
-          // Centred on the start of the sentence and kept upright and the same size at any zoom or rotation.
+          // Just before the start of the sentence, upright and the same size at any zoom or rotation.
           <span
             key={`b${mark.nonce}`}
             className="cite-badge"
             style={{
               left: mark.rects[0][0],
               top: mark.rects[0][1],
-              transform: `translate(-50%, -50%) rotate(${-rot * 90}deg) scale(${1 / zoom})`,
+              transform: `translate(-100%, -50%) rotate(${-rot * 90}deg) scale(${1 / zoom})`,
+              transformOrigin: "100% 50%",
+              marginLeft: -3 / zoom,
             }}
           >
             {mark.n}

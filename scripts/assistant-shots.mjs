@@ -57,7 +57,19 @@ const answered = async (limitMs = 120000) => {
   }
 };
 const theme = (t) => ev(`window.__S.getState().setTheme(${JSON.stringify(t)})`);
-const mode = (m) => ev(`window.__ai.getState().setMode(${JSON.stringify(m)})`);
+const mode = async (m) => {
+  await ev(`window.__ai.getState().setMode(${JSON.stringify(m)})`);
+  await sleep(900); // the viewer re-fits its width to the new layout before anything jumps
+  // Exactly one layout is on screen at a time: the one that was asked for.
+  const live = await ev(`({
+    docked: document.querySelectorAll(".ax-dock").length,
+    floating: document.querySelectorAll(".ax-panel.floating").length,
+    bar: document.querySelectorAll(".ax-bar, .ax-bar-sheet").length > 0 ? 1 : 0,
+  })`);
+  const shown = Object.keys(live).filter((k) => live[k] > 0);
+  if (shown.length !== 1 || shown[0] !== m) throw new Error(`layout ${m} requested, on screen: ${JSON.stringify(live)}`);
+  console.log("layout", m, "only");
+};
 const ask = (task) => ev(`window.__ai.getState().ask(window.__doc(), ${JSON.stringify(task)})`);
 const click = (sel, text) =>
   ev(`(() => { const els = [...document.querySelectorAll(${JSON.stringify(sel)})]; const b = ${text ? `els.find((e) => e.textContent.trim() === ${JSON.stringify(text)})` : "els[els.length - 1]"}; b?.click(); return !!b })()`);
@@ -104,6 +116,7 @@ await shot("docked-answer-dark.png");
 
 // ---- floating ----
 await mode("floating");
+await ev(`window.__ai.getState().clearMark()`);
 await click(".ax-source");
 await sleep(900);
 await shot("floating-dark.png");
@@ -130,6 +143,7 @@ await shot("floating-moved-light.png");
 // ---- command bar ----
 await ev(`window.__ai.getState().setSettings({ float: null })`);
 await mode("bar");
+await ev(`window.__ai.getState().clearMark()`);
 await click(".ax-source");
 await sleep(900);
 await shot("bar-light.png");

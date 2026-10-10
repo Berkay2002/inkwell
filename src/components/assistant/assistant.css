@@ -710,39 +710,33 @@ button.ax-cite:hover {
   font-family: var(--ax-font);
   color: var(--ax-text);
 }
-.ax-bar-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.ax-bar-row .ax-compose {
-  flex: 1;
-  min-width: 0;
+/* one pill: question, "...", model chip, round send button */
+.ax-bar .ax-compose {
   padding: 0;
 }
-.ax-bar-row .ax-input {
+.ax-bar .ax-input {
   align-items: center;
-  min-height: 52px;
-  padding: 8px 8px 8px 8px;
+  gap: 6px;
+  min-height: 56px;
+  padding: 8px 10px 8px 24px;
   background: var(--ax-surface);
-  border-radius: 26px;
+  border-radius: 28px;
   box-shadow: var(--ax-shadow-lg);
 }
-.ax-bar-row .ax-input textarea {
-  margin: 0 4px;
+.ax-bar .ax-input textarea {
+  margin: 0;
+  font-size: 14.5px;
 }
-.ax-bar-row .ax-send {
-  width: 36px;
-  height: 36px;
-  border-radius: 18px;
+.ax-bar .ax-input .ax-pill {
+  background: transparent;
 }
-.ax-bar-row > .ax-pop-wrap > .ax-icon {
+.ax-bar .ax-send {
   width: 40px;
   height: 40px;
   border-radius: 20px;
-  background: var(--ax-surface);
-  border: 1px solid var(--ax-border);
-  box-shadow: var(--ax-shadow);
+}
+.ax-bar .ax-send:disabled {
+  opacity: 0.55;
 }
 .ax-bar .ax-selstrip {
   position: absolute;
