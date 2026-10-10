@@ -1,6 +1,6 @@
 import { type PointerEvent as RPointerEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { barWidth } from "./barWidth";
-import type { Geo } from "../../lib/ai";
+import { type Geo, MODES, MODE_NAMES } from "../../lib/ai";
 import { useAi } from "../../lib/aiStore";
 import type { DocState } from "../../store";
 import {
@@ -9,8 +9,8 @@ import {
   Composer,
   Consent,
   Empty,
-  FOOTNOTE,
   Gate,
+  Glyph,
   Messages,
   MoreMenu,
   NoText,
@@ -22,15 +22,33 @@ import "./assistant.css";
 /** A plain text button in the toolbar (no icon: the panel is called what it is). */
 export function AssistantToggle() {
   const open = useAi((s) => s.open);
+  const mode = useAi((s) => s.settings.mode);
+  const st = useAi.getState;
   return (
-    <button
-      className={open ? "ax-toggle on" : "ax-toggle"}
-      title="Assistant (Ctrl+Shift+A)"
-      aria-pressed={open}
-      onClick={() => useAi.getState().toggle()}
-    >
-      Assistant
-    </button>
+    <div className="ax-toggle-group">
+      <button
+        className={open ? "ax-toggle on" : "ax-toggle"}
+        title="Assistant (Ctrl+Shift+A)"
+        aria-pressed={open}
+        onClick={() => st().toggle()}
+      >
+        Assistant
+      </button>
+      <div className="ax-layouts" role="radiogroup" aria-label="Assistant layout">
+        {MODES.map((m) => (
+          <button
+            key={m}
+            role="radio"
+            aria-checked={open && m === mode}
+            title={`${MODE_NAMES[m]} (Ctrl+Shift+L cycles)`}
+            aria-label={MODE_NAMES[m]}
+            onClick={() => (open && m === mode ? st().setOpen(false) : st().setMode(m))}
+          >
+            <Glyph name={m} size={16} stroke={1.6} />
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -69,7 +87,6 @@ function Content({ doc, variant, onSend, summary = false }: { doc: DocState; var
         <Empty doc={doc} />
       )}
       {ready && !pending && <Composer doc={doc} variant={variant} onSend={onSend} />}
-      <div className="ax-foot">{FOOTNOTE}</div>
     </>
   );
 }
@@ -322,8 +339,7 @@ function Bar({ doc }: { doc: DocState }) {
             <CloseButton onClick={forced ? undefined : () => st().setSheet(false)} />
           </div>
           {pending ? <Consent /> : !ready ? <Gate /> : <Messages doc={doc} variant="bar" lastOnly />}
-          <div className="ax-foot">{FOOTNOTE}</div>
-        </section>
+            </section>
       )}
       {ready && !pending && (
         <div className="ax-bar" style={{ left: (box.l + box.r) / 2, bottom: barBottom, width: barWidth(stageW) }}>

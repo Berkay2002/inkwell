@@ -38,6 +38,36 @@
   color: var(--ax-accent);
   font-weight: 600;
 }
+/* Assistant button + its three layouts, side by side in the toolbar: one click to switch. */
+.ax-toggle-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.ax-layouts {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  margin-left: 2px;
+  background: var(--surface-2);
+  border-radius: 14px;
+}
+.ax-layouts button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 24px;
+  border-radius: 12px;
+  color: var(--text-2);
+}
+.ax-layouts button:hover {
+  color: var(--text);
+}
+.ax-layouts button[aria-checked="true"] {
+  background: var(--surface);
+  color: var(--ax-accent);
+  box-shadow: var(--shadow-1);
+}
 
 /* ---- shells ---- */
 .ax-dock {
@@ -251,13 +281,6 @@
 .ax-lead {
   margin: 4px 0 14px;
   color: var(--ax-dim);
-}
-.ax-foot {
-  flex: none;
-  padding: 2px 16px 11px;
-  font-size: 11px;
-  color: var(--ax-dim);
-  text-align: center;
 }
 .ax-row {
   display: flex;
@@ -622,7 +645,7 @@ button.ax-cite:hover {
 .ax-compose {
   position: relative;
   flex: none;
-  padding: 6px 12px 4px;
+  padding: 6px 12px 12px;
 }
 /* One row, fully round, no border, a soft raised surface. Everything in it is a 36px circle or a
    36px-tall text box (22px lines + 7px padding), 6px inside the pill, so the "+", the text, the icons
