@@ -20,8 +20,11 @@ use std::time::{Duration, Instant};
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// No notification for this long and the server is considered hung.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(180);
-/// An Apply / Reject card nobody answered is a rejection after this long.
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+/// An Apply / Reject card nobody answered is a rejection after this long. Below what the real
+/// server waits for a tool result: codex 0.159 still took a reply at 273 s and had given up by
+/// 330 s (live test `live_how_late_may_an_apply_be`), and a change must never run after the
+/// model was told it did not happen.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(240);
 /// Header lines of the outline sent with the first turn of a long document.
 const HEADER_OUTLINE_LINES: usize = 60;
 

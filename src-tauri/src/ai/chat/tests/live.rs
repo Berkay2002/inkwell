@@ -160,12 +160,15 @@ fn live_a_slow_apply_still_lands() {
     }
 }
 
-/// Past `APPROVAL_TIMEOUT` (300 s) too: proves what the real server does with a reply that late.
-/// `INKWELL_LIVE_LONG=1` as well, since it takes minutes.
+/// Finds how long the real server keeps waiting for a tool result: `INKWELL_LIVE_WAIT=<seconds>`
+/// answers the card that late (default 60) with our own limit lifted, and prints what the model
+/// made of it. Codex 0.159: replies at 150, 210 and 273 s were taken; by 330 s it had given up
+/// (the model said "did not return a result" while the late change still ran), so
+/// `APPROVAL_TIMEOUT` (240 s) must stay below that.
 #[test]
-fn live_an_apply_after_330_s_still_lands() {
-    if live() && std::env::var("INKWELL_LIVE_LONG").as_deref() == Ok("1") {
-        slow_apply(330, Some(Duration::from_secs(400)));
+fn live_how_late_may_an_apply_be() {
+    if let (true, Ok(w)) = (live(), std::env::var("INKWELL_LIVE_WAIT")) {
+        slow_apply(w.parse().unwrap(), Some(Duration::from_secs(900)));
     }
 }
 
