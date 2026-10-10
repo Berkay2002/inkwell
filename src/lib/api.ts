@@ -205,15 +205,16 @@ export interface OcrProgress {
   page: number;
 }
 
+/** The engine's report as it serializes (snake_case: the AI tools read the same shape). */
 export interface OcrReport {
   backend: string;
-  pagesRequested: number;
-  pagesRecognized: number;
-  pagesSkippedText: number;
-  pagesNoText: number;
-  pagesFailed: number;
+  pages_requested: number;
+  pages_recognized: number;
+  pages_skipped_text: number;
+  pages_no_text: number;
+  pages_failed: number;
   words: number;
-  totalMs: number;
+  total_ms: number;
   warnings: string[];
 }
 

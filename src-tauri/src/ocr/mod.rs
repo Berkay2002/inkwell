@@ -487,6 +487,7 @@ impl Drop for TempFile {
 
 /// Gives `tmp`'s content the name `out` without ever replacing an existing file (a hard link is
 /// atomic; file systems without links get an exclusive create and a copy). The caller drops `tmp`.
+#[cfg(test)]
 fn publish(tmp: &Path, out: &Path) -> Result<(), OcrError> {
     publish_with(tmp, out, false)
 }

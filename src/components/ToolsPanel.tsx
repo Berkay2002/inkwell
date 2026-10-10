@@ -249,26 +249,26 @@ function OcrDone({ sheet }: { sheet: Sheet }) {
   const o = sheet.recognized;
   if (!o) return null;
   const r = o.report;
-  const undoable = o.state != null && r.pagesRecognized > 0;
+  const undoable = o.state != null && r.pages_recognized > 0;
   return (
     <>
       <div className="ax-body tl-body">
         <p className="tl-big">
-          {o.output ? "Saved a searchable copy" : r.pagesRecognized === 1 ? "1 page recognized" : `${r.pagesRecognized} pages recognized`}
+          {o.output ? "Saved a searchable copy" : r.pages_recognized === 1 ? "1 page recognized" : `${r.pages_recognized} pages recognized`}
         </p>
         <dl className="tl-counts">
           <dt>Recognized</dt>
-          <dd className="tl-mono">{r.pagesRecognized}</dd>
+          <dd className="tl-mono">{r.pages_recognized}</dd>
           <dt>Already had text</dt>
-          <dd className="tl-mono">{r.pagesSkippedText}</dd>
-          {r.pagesNoText > 0 && (
+          <dd className="tl-mono">{r.pages_skipped_text}</dd>
+          {r.pages_no_text > 0 && (
             <>
               <dt>No text found</dt>
-              <dd className="tl-mono">{r.pagesNoText}</dd>
+              <dd className="tl-mono">{r.pages_no_text}</dd>
             </>
           )}
           <dt>Failed</dt>
-          <dd className="tl-mono">{r.pagesFailed}</dd>
+          <dd className="tl-mono">{r.pages_failed}</dd>
         </dl>
         {r.words > 0 && <p className="dim small">{r.words} words added.</p>}
         {o.output && (
@@ -294,7 +294,7 @@ function OcrDone({ sheet }: { sheet: Sheet }) {
             </button>
           )
         )}
-        {!o.output && r.pagesRecognized > 0 && (
+        {!o.output && r.pages_recognized > 0 && (
           <button className="ax-btn tl-wide" onClick={() => void edits.saveAs(sheet.doc)}>
             Save as new file…
           </button>

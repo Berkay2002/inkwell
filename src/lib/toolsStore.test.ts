@@ -140,7 +140,7 @@ describe("compress sheet", () => {
 describe("OCR sheet", () => {
   const langs = { windows: ["en-US", "sv-SE"], tesseract: null };
   const outcome = {
-    report: { pagesRecognized: 10, pagesSkippedText: 2, pagesFailed: 0 },
+    report: { pages_recognized: 10, pages_skipped_text: 2, pages_failed: 0 },
     state: { rev: 1, undo: "Recognize text (10 pages)" },
     output: null,
   };
