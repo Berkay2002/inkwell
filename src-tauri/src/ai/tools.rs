@@ -5,7 +5,8 @@
 //! How to add a tool (phases 2-5 bring the real edit tools):
 //! 1. Write a `Tool` below (or `Assistant::register` it): `name`, a `description` the model reads,
 //!    the JSON `schema` of its arguments, its `class`, a `label` for the activity trail and the
-//!    approval card, and `run`.
+//!    approval card, and `run`. The label is all the user sees on an Apply / Reject card, so it
+//!    names what and where: "Delete p. 4", "Rotate pp. 2-5 by 90°".
 //! 2. Pick the class honestly. `Read` always runs. `Edit` changes the document and asks first in
 //!    the `ask` mode. `Destructive` (deleting pages, redacting, overwriting) asks in `ask` and `auto`.
 //!    The permission check lives in the turn's tool handler, never in the tool.

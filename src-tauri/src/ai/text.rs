@@ -467,25 +467,19 @@ pub fn norm_str(s: &str) -> String {
     normalized(&[Line { b: [0.0; 4], t: s.to_string() }]).0
 }
 
-/// Indices of the lines of `chunk` that hold `quote` (or, failing that, its opening).
+/// Indices of the lines of `chunk` that hold `quote` in full. A quote that only starts like the
+/// text, or that was reworded, is not found: a source badge must never point at words that are not there.
 fn quote_lines(chunk: &Chunk, quote: &str) -> Option<Vec<usize>> {
     let q = norm_str(quote);
     if q.chars().count() < 8 {
         return None;
     }
     let (hay, owner) = normalized(&chunk.lines);
-    let attempt = |needle: &str| -> Option<Vec<usize>> {
-        let off = hay.find(needle)?;
-        let start = hay[..off].chars().count();
-        let end = start + needle.chars().count();
-        let mut v: Vec<usize> = owner[start..end].to_vec();
-        v.dedup();
-        Some(v)
-    };
-    attempt(&q).or_else(|| {
-        let head: String = q.chars().take(30).collect();
-        (head.chars().count() >= 12).then(|| attempt(&head)).flatten()
-    })
+    let off = hay.find(&q)?;
+    let start = hay[..off].chars().count();
+    let mut v: Vec<usize> = owner[start..start + q.chars().count()].to_vec();
+    v.dedup();
+    Some(v)
 }
 
 fn page_of_id(id: &str) -> Option<u32> {
@@ -733,5 +727,9 @@ mod tests {
         assert!(locate(&d, 2, "terminate this agreement with thirty days").is_none(), "wrong page");
         assert!(locate(&d, 1, "an invented sentence about something else").is_none());
         assert!(locate(&d, 1, "ok").is_none(), "too short to verify anything");
+        assert!(
+            locate(&d, 1, "terminate this agreement with thirty days of reflection and then some").is_none(),
+            "a quote that starts right and then drifts is not on the page"
+        );
     }
 }

@@ -156,6 +156,58 @@ fn live_codex_reads_a_page_image_and_has_no_shell() {
     assert!(read, "the model did not read the number from the page image");
 }
 
+/// A person reads the card for a while: the real server must still be waiting for the reply when
+/// Apply comes 90 s later, and the turn must finish with the change made.
+#[test]
+fn live_a_slow_apply_still_lands() {
+    if !live() {
+        return;
+    }
+    let d = Live::open("ai-live-slow.pdf", drawn_number_pdf("4271"));
+    let a = Assistant::new();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h = hits.clone();
+    a.register(Arc::new(Tool {
+        name: "set_page_note".into(),
+        description: "Attaches a short note to a page of the document.".into(),
+        schema: json!({ "type": "object", "additionalProperties": false, "required": ["page", "note"],
+            "properties": { "page": { "type": "integer" }, "note": { "type": "string" } } }),
+        class: Class::Edit,
+        label: |a| format!("Add a note to p. {}", a["page"].as_i64().unwrap_or(0)),
+        run: Arc::new(move |_, _| {
+            h.fetch_add(1, Ordering::SeqCst);
+            Ok(tools::Output::text("The note was added."))
+        }),
+    }));
+    let (tx, rx) = mpsc::channel();
+    let sink: Sink = Arc::new(move |e| {
+        let _ = tx.send(e);
+    });
+    let host = Arc::new(crate::ai::EngineHost { eng: d.eng.clone(), doc: d.doc });
+    let req = ask_req("Add the note \"check this\" to page 2 with set_page_note, then say whether it was applied.");
+    let text = d.text.clone();
+    a.ask(d.doc, req, move || Ok(text), host, sink).unwrap();
+    let t0 = Instant::now();
+    let mut decided = None;
+    let ev = loop {
+        let e = rx.recv_timeout(Duration::from_secs(180)).expect("an event within 180 s");
+        if let ChatEvent::Activity { id, state: ActState::Waiting, .. } = &e {
+            println!("card shown after {} ms; answering in 90 s", t0.elapsed().as_millis());
+            std::thread::sleep(Duration::from_secs(90));
+            a.decide(d.doc, id, true);
+            decided = Some(t0.elapsed());
+        }
+        if matches!(e, ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Cancelled) {
+            break e;
+        }
+    };
+    println!("decided at {decided:?}; ended with {ev:?}");
+    assert!(decided.is_some(), "the model never asked");
+    assert!(matches!(ev, ChatEvent::Done { .. }), "{ev:?}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    a.close_doc(d.doc);
+}
+
 /// The same question with the whole text in the turn and with tools only, at three document sizes.
 #[test]
 fn live_inline_threshold() {

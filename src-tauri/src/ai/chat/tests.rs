@@ -559,6 +559,30 @@ fn ask_mode_waits_for_apply_and_a_rejection_changes_nothing() {
     assert_eq!(states(&ev, "test_edit"), [ActState::Waiting, ActState::Running, ActState::Done]);
 }
 
+/// A person takes a while: a card that waits longer than the silence limit must not end the turn.
+#[test]
+fn a_slow_apply_outlives_the_silence_watchdog() {
+    let a = fake_with(r#"tools=[{"tool":"test_edit"}]"#, None, Duration::from_secs(2));
+    let (edits, _) = edit_tools(&a);
+    let rx = start(&a, ask_req("go"), contract());
+    let mut ev = Vec::new();
+    loop {
+        let e = rx.recv_timeout(Duration::from_secs(30)).expect("an event within 30 s");
+        if let ChatEvent::Activity { id, state: ActState::Waiting, .. } = &e {
+            std::thread::sleep(Duration::from_secs(6)); // three times the silence limit
+            a.decide(DOC, id, true);
+        }
+        let last = matches!(e, ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Cancelled);
+        ev.push(e);
+        if last {
+            break;
+        }
+    }
+    done(&ev);
+    assert_eq!(edits.load(Ordering::SeqCst), 1);
+    assert_eq!(states(&ev, "test_edit"), [ActState::Waiting, ActState::Running, ActState::Done]);
+}
+
 #[test]
 fn auto_mode_applies_edits_but_asks_before_destructive_calls() {
     let a = tool_server(r#"[{"tool":"test_edit"},{"tool":"test_destroy"}]"#);
@@ -818,7 +842,7 @@ fn live_codex_smoke() {
     let dir = std::env::temp_dir().join("inkwell-tests");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("ai-live-40.pdf");
-    std::fs::write(&path, fixture::build(&Fixture { pages: 40, needle_every: 7, ..Default::default() })).unwrap();
+    std::fs::write(&path, fixture::build(&Fixture { pages: 40, needle_every: 7, chapter_every: 10, ..Default::default() })).unwrap();
     let eng = Engine::new(4, 64 << 20);
     let id = eng.open(path.to_str().unwrap()).unwrap().doc;
     let t0 = Instant::now();
@@ -858,19 +882,30 @@ fn live_codex_smoke() {
         selection: None,
         permissions: Mode::Ask,
     };
-    let ev = run(&a, req(Task::SummarizeDocument), text.clone());
-    show("summarize", &ev);
+    // the real engine behind the tools: real title, outline and page images
+    let go =|r: AskRequest| {
+        let (tx, rx) = mpsc::channel();
+        let sink: Sink = Arc::new(move |e| {
+            let _ = tx.send(e);
+        });
+        let (text, host) = (text.clone(), Arc::new(crate::ai::EngineHost { eng: eng.clone(), doc: id }));
+        a.ask(DOC, r, move || Ok(text), host, sink).unwrap();
+        finish(&rx)
+    };
+    let first = go(req(Task::SummarizeDocument));
+    show("summarize", &first);
 
-    let ev = run(&a, req(Task::Ask { question: "On which pages does the word needle appear? Cite each.".into() }), text.clone());
+    let ev = go(req(Task::Ask { question: "On which pages does the word needle appear? Cite each.".into() }));
     show("needle", &ev);
     let ChatEvent::Done { citations, answer, .. } = ev.last().unwrap() else { unreachable!() };
     assert!(!answer.is_empty());
     assert!(citations.iter().any(|c| c.page.is_some() && !c.rects.is_empty()), "at least one citation must highlight lines");
-    // 40 pages is over the inline threshold: the model has to read through the tools
+    // 40 pages is over the inline threshold: the model has to read through the tools (the second
+    // question may be answered from what the first one already read, so count both turns)
     assert!(
-        ev.iter().any(|e| matches!(e, ChatEvent::Activity { tool, state: ActState::Done, .. } if tool == "search" || tool == "get_text")),
+        first.iter().chain(&ev).any(|e| matches!(e, ChatEvent::Activity { tool, state: ActState::Done, .. } if tool == "search" || tool == "get_text")),
         "the model never called search or get_text"
     );
     assert!(citations.iter().filter(|c| c.exact).all(|c| !c.rects.is_empty()), "a verified source outlines its lines");
-    a.close_doc(id);
+    a.close_doc(DOC);
 }
