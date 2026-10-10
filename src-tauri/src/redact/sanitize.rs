@@ -104,7 +104,16 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
     let mut cat = doc.catalog()?;
 
     if o.hidden_layers {
+        // Oracle against lexer differentials: with /OCProperties gone every layer shows, so any
+        // text MuPDF shows now and did not show before is hidden content the stripping missed.
+        let before = page_chars(doc)?;
         r.hidden_layer_blocks = strip_hidden_layers(doc)?;
+        for (p, (b, a)) in before.iter().zip(page_chars(doc)?).enumerate() {
+            if a.iter().any(|(c, n)| b.get(c).is_none_or(|m| m < n)) {
+                let place = format!("page {}: hidden layer content left after sanitize", p + 1);
+                return Err(RedactError::Leaked(vec![super::Leak { needle: String::new(), place, critical: true }]));
+            }
+        }
     }
     if o.hidden_text {
         r.hidden_text_pages = strip_invisible_text(doc)?;
@@ -223,6 +232,19 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
         }
     }
     Ok(r)
+}
+
+/// Per page: how often each char appears in the text MuPDF shows.
+fn page_chars(doc: &PdfDocument) -> Result<Vec<std::collections::HashMap<char, u32>>> {
+    let mut v = Vec::new();
+    for p in 0..doc.page_count()? {
+        let mut m = std::collections::HashMap::new();
+        for c in super::index_page(&doc.load_page(p)?)?.text.chars().filter(|c| !c.is_whitespace()) {
+            *m.entry(c).or_insert(0) += 1;
+        }
+        v.push(m);
+    }
+    Ok(v)
 }
 
 fn count_outlines(t: &[Outline]) -> u32 {
@@ -405,7 +427,7 @@ fn oc_hidden(oc: &PdfObject, off: &HashSet<i32>) -> Result<bool> {
         _ => return Ok(true),
     }
     if let Some(ve) = oc.get_dict("VE")? {
-        return Ok(!ve_visible(&ve, off, 0)?);
+        return Ok(!ve_visible(&ve, off, 0, &mut 10_000)?);
     }
     let states: Vec<bool> = ref_nums(oc.get_dict("OCGs")?)?.iter().map(|n| !off.contains(n)).collect();
     if states.is_empty() {
@@ -423,11 +445,14 @@ fn oc_hidden(oc: &PdfObject, off: &HashSet<i32>) -> Result<bool> {
 }
 
 /// Evaluates an OCMD /VE visibility expression ([/And|/Or|/Not operand...], operands OCGs or
-/// nested expressions). Malformed or too deep = not visible.
-fn ve_visible(ve: &PdfObject, off: &HashSet<i32>, depth: u32) -> Result<bool> {
-    if depth > 16 {
+/// nested expressions). Malformed, too deep or too big = not visible. `budget` bounds the work:
+/// shared indirect sub-expressions would otherwise be evaluated fanout^depth times.
+fn ve_visible(ve: &PdfObject, off: &HashSet<i32>, depth: u32, budget: &mut u32) -> Result<bool> {
+    if depth > 16 || *budget == 0 {
+        *budget = 0;
         return Ok(false);
     }
+    *budget -= 1;
     if !ve.is_array()? {
         return Ok(ve.is_indirect()? && !off.contains(&num(ve)?));
     }
@@ -436,7 +461,7 @@ fn ve_visible(ve: &PdfObject, off: &HashSet<i32>, depth: u32) -> Result<bool> {
     let mut args = Vec::new();
     for i in 1..ve.len()? as i32 {
         if let Some(x) = ve.get_array(i)? {
-            args.push(ve_visible(&x, off, depth + 1)?);
+            args.push(ve_visible(&x, off, depth + 1, budget)?);
         }
     }
     Ok(match (op.as_slice(), args.as_slice()) {
@@ -481,6 +506,15 @@ fn layer_names(res: &Option<PdfObject>, off: &HashSet<i32>) -> Result<(Names, Na
             hidden.insert(k);
         } else if name_of(&v, "Subtype")?.as_deref() == Some(b"Form") {
             nested.push((v, Some(res.clone())));
+        }
+    }
+    // Soft-mask groups draw too: hidden content there is shown once /OCProperties is gone.
+    for (_, gs) in entries("ExtGState")? {
+        if let Some(sm) = gs.get_dict("SMask")?
+            && sm.is_dict()?
+            && let Some(g) = sm.get_dict("G")?
+        {
+            nested.push((g, Some(res.clone())));
         }
     }
     for (_, v) in entries("Pattern")? {

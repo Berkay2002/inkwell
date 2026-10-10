@@ -484,6 +484,8 @@ fn attachment_copy_stays_critical() {
     match apply(&mut doc, &ApplyOptions { sanitize: Sanitize::NONE, ..Default::default() }) {
         Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.critical && l.place.contains("stream")), "{l:?}"),
         r => panic!("expected a leak, got {r:?}"),
+    }
+}
 
 fn one_page(content: &[u8], page_extra: &str, more: &[Vec<u8>], catalog_extra: &str) -> Vec<u8> {
     let mut bodies = vec![
@@ -578,4 +580,61 @@ fn image_in_soft_mask_or_pattern_is_refused() {
             r => panic!("expected a refusal, got {r:?}"),
         }
     }
+}
+
+/// A page with layer 6 (off) and `res` added to its resources.
+fn layered(content: &[u8], res: &str, more: &[Vec<u8>]) -> Vec<u8> {
+    let mut objs = vec![obj("<< /Type /OCG /Name (L) >>")];
+    objs.extend_from_slice(more);
+    let b = one_page(content, "", &objs, "/OCProperties << /OCGs [6 0 R] /D << /OFF [6 0 R] >> >>");
+    // Same length replacement target is not needed: MuPDF repairs the shifted xref.
+    String::from_utf8_lossy(&b).replace("/Font << /F1 3 0 R >>", &format!("/Font << /F1 3 0 R >> /Properties << /oc1 6 0 R >> {res}")).into_bytes()
+}
+
+fn strip_layers(bytes: &[u8]) -> (PdfDocument, Result<SanitizeReport>) {
+    let mut doc = PdfDocument::from_bytes(bytes).unwrap();
+    let r = sanitize(&mut doc, &Sanitize { hidden_layers: true, ..Sanitize::NONE }, &[]);
+    (doc, r)
+}
+
+/// Hidden content in a soft-mask group used to stay in the file and show once /OCProperties went.
+#[test]
+fn hidden_layer_in_soft_mask_group_is_stripped() {
+    let grp = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 612 792] /Group << /S /Transparency /CS /DeviceGray >> /Resources << /Font << /F1 3 0 R >> /Properties << /oc1 6 0 R >> >>",
+        b"1 g 0 0 612 792 re f /OC /oc1 BDC 0 g BT /F1 24 Tf 72 700 Td (HIDDEN-SMASK) Tj ET EMC",
+    );
+    let bytes = layered(b"q /GS1 gs 0 0 1 rg 0 0 612 792 re f Q", "/ExtGState << /GS1 << /SMask << /S /Luminosity /G 7 0 R >> >> >>", &[grp]);
+    let (doc, r) = strip_layers(&bytes);
+    assert_eq!(r.unwrap().hidden_layer_blocks, 1);
+    assert!(leaks(&save_to_vec(&doc).unwrap(), &["HIDDEN-SMASK"]).is_empty());
+}
+
+/// Inline image data holding " EI EMC " fools the content lexer into closing the hidden block
+/// early; MuPDF reads the image by its size and then shows the text. Sanitize must refuse.
+#[test]
+fn hidden_layer_lexer_differential_fails_closed() {
+    let mut c = b"/OC /oc1 BDC BI /W 16 /H 1 /BPC 8 /CS /G ID ".to_vec();
+    c.extend_from_slice(b" EI EMC aaaaaaaa EI BT /F1 12 Tf 72 700 Td (HIDDEN-INLINE) Tj ET EMC");
+    let (_, r) = strip_layers(&layered(&c, "", &[]));
+    assert!(matches!(r, Err(RedactError::Leaked(_))), "{r:?}");
+}
+
+/// /VE sub-expressions shared by reference used to be evaluated fanout^depth times (4^11: 4.5 s,
+/// 8^16: years). Now bounded; an over-budget expression counts as hidden.
+#[test]
+fn ocmd_visibility_expression_is_bounded() {
+    let depth = 16;
+    let mut more = vec![obj("<< /Type /OCMD /VE 8 0 R >>")];
+    for d in 0..depth {
+        let next = if d + 1 == depth { "6 0 R".to_string() } else { format!("{} 0 R", 9 + d) };
+        more.push(obj(&format!("[/Or {}]", vec![next; 8].join(" "))));
+    }
+    let bytes = layered(b"/OC /oc2 BDC BT /F1 12 Tf 72 700 Td (VE-HIDDEN) Tj ET EMC", "", &more);
+    let bytes = String::from_utf8_lossy(&bytes).replace("/oc1 6 0 R", "/oc1 6 0 R /oc2 7 0 R").into_bytes();
+    let t = std::time::Instant::now();
+    let (doc, r) = strip_layers(&bytes);
+    assert_eq!(r.unwrap().hidden_layer_blocks, 1);
+    assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
+    assert!(leaks(&save_to_vec(&doc).unwrap(), &["VE-HIDDEN"]).is_empty());
 }

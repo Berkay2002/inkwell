@@ -511,6 +511,10 @@ pub struct ApplyReport {
     pub sanitize: SanitizeReport,
     /// Non-critical findings only (e.g. the same text still appears where it was not marked).
     pub verify: VerifyReport,
+    /// The full rewrite that `verify` checked. Save exactly these bytes: any other write of `doc`
+    /// (an incremental save above all, which keeps the original bytes) is unverified.
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 /// The only write options allowed after a redaction: full rewrite, unreachable objects dropped.
@@ -570,7 +574,8 @@ pub fn apply(doc: &mut PdfDocument, opts: &ApplyOptions) -> Result<ApplyReport> 
     sanitize.form_fields += rep.form_fields;
     sanitize.metadata += rep.metadata;
 
-    let verify = verify_bytes(&save_to_vec(doc)?, &targets)?;
+    let bytes = save_to_vec(doc)?;
+    let verify = verify_bytes(&bytes, &targets)?;
     if !verify.is_clean() {
         return Err(RedactError::Leaked(verify.leaks));
     }
@@ -579,6 +584,7 @@ pub fn apply(doc: &mut PdfDocument, opts: &ApplyOptions) -> Result<ApplyReport> 
         marks: targets.pages.iter().map(|p| p.marks.len()).sum(),
         sanitize,
         verify,
+        bytes,
     })
 }
 
@@ -656,7 +662,7 @@ fn uncut_image(res: &PdfObject, depth: u32) -> Result<bool> {
         images_in(&r, 0)
     };
     if depth > 8 {
-        return Ok(false);
+        return Ok(true); // not walked = not known to be safe
     }
     for p in vals("Pattern")? {
         if has_image(&p)? {
@@ -691,9 +697,8 @@ fn images_in(res: &PdfObject, depth: u32) -> Result<bool> {
         if sanitize::is_image(&x)? {
             return Ok(true);
         }
-        if depth < 8
-            && let Some(r) = x.get_dict("Resources")?
-            && images_in(&r, depth + 1)?
+        if let Some(r) = x.get_dict("Resources")?
+            && (depth >= 8 || images_in(&r, depth + 1)?)
         {
             return Ok(true);
         }
@@ -842,7 +847,16 @@ pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
     let mut hits: Vec<(&String, String, bool)> = Vec::new();
 
     for i in 1..doc.xref_len()? as i32 {
-        let Ok(Some(obj)) = doc.xref_object(i) else { continue };
+        // Anything verify cannot read counts as a leak: it was not checked.
+        let unread = |what: &str| Leak { needle: String::new(), place: format!("object {i}: {what}"), critical: true };
+        let obj = match doc.xref_object(i) {
+            Ok(Some(o)) => o,
+            Ok(None) => continue,
+            Err(_) => {
+                rep.leaks.push(unread("unreadable"));
+                continue;
+            }
+        };
         let mut found = HashSet::new();
         scan_strings(&obj, 0, &mut |s| found.extend(strings.matches(s.as_bytes()).iter()))?;
         for k in found {
@@ -850,9 +864,11 @@ pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
         }
         // `is_stream` needs the reference: a resolved dict has lost its object number.
         let r = doc.new_indirect(i, 0)?;
-        if r.is_stream()? && !sanitize::is_image(&r)?
-            && let Ok(data) = doc.xref_stream(i)
-        {
+        if r.is_stream()? && !sanitize::is_image(&r)? {
+            let Ok(data) = doc.xref_stream(i) else {
+                rep.leaks.push(unread("stream that does not decode"));
+                continue;
+            };
             // Only page content can explain a hit by an unmarked occurrence; attachments and XMP cannot.
             let ty = r.get_dict("Type")?.map(|t| t.as_name()).transpose()?;
             let strict = matches!(ty.as_deref(), Some(b"EmbeddedFile" | b"Metadata"));
@@ -881,8 +897,12 @@ pub(super) fn text_of(o: &PdfObject) -> Result<String> {
 }
 
 fn scan_strings(o: &PdfObject, depth: u32, f: &mut dyn FnMut(&str)) -> Result<()> {
-    if depth > 32 || (depth > 0 && o.is_indirect()?) {
-        return Ok(());
+    if depth > 0 && o.is_indirect()? {
+        return Ok(()); // scanned on its own
+    }
+    if depth > 32 {
+        let place = "an object nested deeper than 32 levels (not scanned)".to_string();
+        return Err(RedactError::Leaked(vec![Leak { needle: String::new(), place, critical: true }]));
     }
     if o.is_string()? {
         f(&text_of(o)?);
