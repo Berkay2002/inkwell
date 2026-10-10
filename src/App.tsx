@@ -1,51 +1,112 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { useEffect } from "react";
+import { Icon } from "./components/Icons";
+import { SearchBar, TabBar, Toolbar } from "./components/Chrome";
+import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
+import { Sidebar } from "./components/Sidebar";
+import { Viewer } from "./components/Viewer";
+import { initialFiles } from "./lib/api";
+import { commandFor, openDialog } from "./lib/commands";
+import { useActiveDoc, useStore } from "./store";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+const isPdf = (p: string) => /\.pdf$/i.test(p);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+export default function App() {
+  const doc = useActiveDoc();
+  const theme = useStore((s) => s.theme);
+  const paletteOpen = useStore((s) => s.paletteOpen);
+  const searchOpen = useStore((s) => s.searchOpen);
+  const hasPassword = useStore((s) => s.password != null);
+
+  useEffect(() => {
+    if (theme === "system") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
+  useEffect(() => {
+    getCurrentWindow()
+      .setTitle(doc ? `${doc.name} — Inkwell` : "Inkwell")
+      .catch(() => {});
+  }, [doc?.name]);
+
+  useEffect(() => {
+    const st = useStore.getState();
+    initialFiles().then((files) => files.forEach((f) => void st.openPath(f)), () => {});
+
+    let off: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((e) => {
+        if (e.payload.type === "drop") e.payload.paths.filter(isPdf).forEach((p) => void st.openPath(p));
+      })
+      .then((u) => (off = u))
+      .catch(() => {});
+
+    const onKey = (e: KeyboardEvent) => {
+      const c = commandFor(e);
+      if (c) {
+        e.preventDefault();
+        if (!c.needsDoc || useStore.getState().active != null) c.run();
+      } else if (e.key === "Escape" && useStore.getState().searchOpen) {
+        useStore.getState().setUi({ searchOpen: false });
+      }
+    };
+    const noMenu = (e: MouseEvent) => e.preventDefault();
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("contextmenu", noMenu);
+    return () => {
+      off?.();
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("contextmenu", noMenu);
+    };
+  }, []);
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <div className="app">
+      <TabBar />
+      {doc ? (
+        <>
+          <Toolbar doc={doc} />
+          <div className="main">
+            <Sidebar doc={doc} />
+            <div className="stage">
+              <Viewer key={doc.id} doc={doc} />
+              {searchOpen && <SearchBar key={doc.id} doc={doc} />}
+            </div>
+          </div>
+        </>
+      ) : (
+        <Welcome />
+      )}
+      {paletteOpen && <CommandPalette />}
+      {hasPassword && <PasswordDialog />}
+      <Toast />
+    </div>
   );
 }
 
-export default App;
+function Welcome() {
+  const recent = useStore((s) => s.recent);
+  return (
+    <div className="welcome">
+      <h1>Inkwell</h1>
+      <p className="dim">Drop a PDF anywhere, or</p>
+      <button className="btn primary" onClick={() => void openDialog()}>
+        <Icon name="open" /> Open a PDF
+      </button>
+      <p className="dim hint">Ctrl+O to open · Ctrl+K for commands</p>
+      {recent.length > 0 && (
+        <div className="recent">
+          <h3>Recent</h3>
+          {recent.map((p) => (
+            <button key={p} className="recent-item" title={p} onClick={() => void useStore.getState().openPath(p)}>
+              <Icon name="file" size={14} />
+              <span>{p.split(/[\\/]/).pop()}</span>
+              <span className="dim path">{p}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

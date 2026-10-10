@@ -1,0 +1,316 @@
+import { create } from "zustand";
+import * as api from "./lib/api";
+import type { OutlineItem } from "./lib/api";
+import { type Rot, type Size, clamp, ZOOM_MAX, ZOOM_MIN } from "./lib/layout";
+import { dropCached } from "./lib/tiles";
+
+export type ZoomMode = "fitWidth" | "fitPage" | "custom";
+export type Theme = "system" | "light" | "dark";
+export type SidebarPanel = "none" | "thumbs" | "outline";
+export type Rect4 = [number, number, number, number];
+
+export interface Hit {
+  page: number;
+  rect: Rect4;
+}
+
+export interface SearchState {
+  query: string;
+  /** Engine search id; events from older searches are ignored. */
+  id: number | null;
+  hits: Hit[];
+  /** Index into `hits`, -1 when nothing is selected yet. */
+  current: number;
+  done: boolean;
+}
+
+export interface NavRequest {
+  page: number;
+  /** Optional y offset inside the page, in points (unrotated page space). */
+  y?: number;
+  nonce: number;
+}
+
+export interface DocState {
+  id: number;
+  path: string;
+  name: string;
+  title: string | null;
+  pageCount: number;
+  sizes: Size[];
+  rot: Rot;
+  zoomMode: ZoomMode;
+  zoom: number;
+  currentPage: number;
+  /** Where the viewer was when the tab was last left. */
+  scroll: { page: number; yPt: number };
+  outline: OutlineItem[] | null;
+  search: SearchState;
+  nav: NavRequest | null;
+}
+
+const emptySearch = (): SearchState => ({ query: "", id: null, hits: [], current: -1, done: true });
+
+const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
+
+const loadTheme = (): Theme => (localStorage.getItem("inkwell.theme") as Theme | null) ?? "system";
+const loadRecent = (): string[] => {
+  try {
+    return JSON.parse(localStorage.getItem("inkwell.recent") ?? "[]");
+  } catch {
+    return [];
+  }
+};
+
+interface Store {
+  docs: Record<number, DocState>;
+  order: number[];
+  active: number | null;
+  sidebar: SidebarPanel;
+  theme: Theme;
+  paletteOpen: boolean;
+  searchOpen: boolean;
+  recent: string[];
+  password: { doc: number; path: string; error?: string } | null;
+  error: string | null;
+
+  openPath: (path: string) => Promise<void>;
+  submitPassword: (password: string) => Promise<void>;
+  cancelPassword: () => void;
+  closeDoc: (id: number) => void;
+  activate: (id: number) => void;
+  cycleTab: (dir: 1 | -1) => void;
+  patch: (id: number, p: Partial<DocState>) => void;
+  setSizes: (id: number, start: number, sizes: Size[]) => void;
+  setZoom: (id: number, zoom: number) => void;
+  setZoomMode: (id: number, m: ZoomMode) => void;
+  rotate: (id: number, dir: 1 | -1) => void;
+  goTo: (id: number, page: number, y?: number) => void;
+  setSidebar: (p: SidebarPanel) => void;
+  toggleSidebar: (p: Exclude<SidebarPanel, "none">) => void;
+  setTheme: (t: Theme) => void;
+  setUi: (p: Partial<Pick<Store, "paletteOpen" | "searchOpen" | "error">>) => void;
+  runSearch: (id: number, query: string) => void;
+  stepHit: (id: number, dir: 1 | -1) => void;
+  loadOutline: (id: number) => void;
+}
+
+let navNonce = 0;
+const latestSearch = new Map<number, number>();
+let searchSeq = 0;
+
+export const useStore = create<Store>((set, get) => {
+  const addDoc = (info: api.OpenInfo) => {
+    const doc: DocState = {
+      id: info.doc,
+      path: info.path,
+      name: baseName(info.path),
+      title: info.title,
+      pageCount: info.pageCount,
+      sizes: Array.from({ length: info.pageCount }, () => info.firstPage),
+      rot: 0,
+      zoomMode: "fitWidth",
+      zoom: 1,
+      currentPage: 0,
+      scroll: { page: 0, yPt: 0 },
+      outline: null,
+      search: emptySearch(),
+      nav: null,
+    };
+    const recent = [info.path, ...get().recent.filter((p) => p !== info.path)].slice(0, 10);
+    localStorage.setItem("inkwell.recent", JSON.stringify(recent));
+    set((s) => ({
+      docs: { ...s.docs, [doc.id]: doc },
+      order: s.order.includes(doc.id) ? s.order : [...s.order, doc.id],
+      active: doc.id,
+      recent,
+      password: null,
+    }));
+    // Page sizes stream in after the first page is already visible.
+    void api.pageSizes(doc.id, (start, sizes) => get().setSizes(doc.id, start, sizes));
+  };
+
+  return {
+    docs: {},
+    order: [],
+    active: null,
+    sidebar: "thumbs",
+    theme: loadTheme(),
+    paletteOpen: false,
+    searchOpen: false,
+    recent: loadRecent(),
+    password: null,
+    error: null,
+
+    openPath: async (path) => {
+      const existing = Object.values(get().docs).find((d) => d.path.toLowerCase() === path.toLowerCase());
+      if (existing) return set({ active: existing.id });
+      try {
+        const r = await api.openDocument(path);
+        if (r.status === "opened") addDoc(r);
+        else set({ password: { doc: r.doc, path: r.path } });
+      } catch (e) {
+        set({ error: `Could not open ${baseName(path)}: ${String(e)}` });
+      }
+    },
+
+    submitPassword: async (password) => {
+      const p = get().password;
+      if (!p) return;
+      try {
+        addDoc(await api.authenticate(p.doc, password));
+      } catch (e) {
+        set({ password: { ...p, error: String(e) === "bad-password" ? "Wrong password, try again." : String(e) } });
+      }
+    },
+
+    cancelPassword: () => {
+      const p = get().password;
+      if (p) void api.closeDocument(p.doc);
+      set({ password: null });
+    },
+
+    closeDoc: (id) => {
+      void api.cancelSearch(id);
+      void api.closeDocument(id);
+      dropCached(`${id}:`);
+      set((s) => {
+        const order = s.order.filter((d) => d !== id);
+        const docs = { ...s.docs };
+        delete docs[id];
+        let active = s.active;
+        if (active === id) {
+          const i = s.order.indexOf(id);
+          active = order[Math.min(i, order.length - 1)] ?? null;
+        }
+        return { docs, order, active };
+      });
+    },
+
+    activate: (id) => set({ active: id }),
+
+    cycleTab: (dir) => {
+      const { order, active } = get();
+      if (order.length < 2 || active == null) return;
+      set({ active: order[(order.indexOf(active) + dir + order.length) % order.length] });
+    },
+
+    patch: (id, p) =>
+      set((s) => (s.docs[id] ? { docs: { ...s.docs, [id]: { ...s.docs[id], ...p } } } : s)),
+
+    setSizes: (id, start, sizes) =>
+      set((s) => {
+        const d = s.docs[id];
+        if (!d) return s;
+        const next = d.sizes.slice();
+        sizes.forEach((v, i) => {
+          if (start + i < next.length) next[start + i] = v;
+        });
+        return { docs: { ...s.docs, [id]: { ...d, sizes: next } } };
+      }),
+
+    setZoom: (id, zoom) => get().patch(id, { zoom: clamp(zoom, ZOOM_MIN, ZOOM_MAX), zoomMode: "custom" }),
+    setZoomMode: (id, zoomMode) => get().patch(id, { zoomMode }),
+    rotate: (id, dir) => {
+      const d = get().docs[id];
+      if (d) get().patch(id, { rot: ((d.rot + dir + 4) % 4) as Rot });
+    },
+
+    goTo: (id, page, y) => {
+      const d = get().docs[id];
+      if (!d) return;
+      const p = clamp(Math.round(page), 0, d.pageCount - 1);
+      get().patch(id, { nav: { page: p, y, nonce: ++navNonce }, currentPage: p });
+    },
+
+    setSidebar: (sidebar) => set({ sidebar }),
+    toggleSidebar: (p) => set((s) => ({ sidebar: s.sidebar === p ? "none" : p })),
+    setTheme: (theme) => {
+      localStorage.setItem("inkwell.theme", theme);
+      set({ theme });
+    },
+    setUi: (p) => set(p),
+
+    runSearch: (id, query) => {
+      const d = get().docs[id];
+      if (!d) return;
+      const q = query.trim();
+      if (!q) {
+        latestSearch.delete(id);
+        void api.cancelSearch(id);
+        return get().patch(id, { search: emptySearch() });
+      }
+      const seq = ++searchSeq;
+      latestSearch.set(id, seq);
+      const mine = { ...emptySearch(), query, done: false };
+      get().patch(id, { search: mine });
+
+      let buffer: Hit[] = [];
+      let queued = false;
+      let searchId: number | null = null;
+      const flush = () => {
+        queued = false;
+        const cur = get().docs[id];
+        if (!cur || cur.search.id !== searchId) return;
+        const hits = cur.search.hits.concat(buffer);
+        buffer = [];
+        hits.sort((a, b) => a.page - b.page || a.rect[1] - b.rect[1] || a.rect[0] - b.rect[0]);
+        let current = cur.search.current;
+        if (current === -1 && hits.length > 0) {
+          current = Math.max(0, hits.findIndex((h) => h.page >= cur.currentPage));
+          get().goTo(id, hits[current].page, Math.max(0, hits[current].rect[1] - 80));
+        }
+        get().patch(id, { search: { ...cur.search, hits, current } });
+      };
+
+      const pending: api.SearchEvent[] = [];
+      const handle = (e: api.SearchEvent) => {
+        if (e.search !== searchId) return;
+        if (e.kind === "hits") {
+          for (const r of e.rects) buffer.push({ page: e.page, rect: r });
+          if (!queued) {
+            queued = true;
+            requestAnimationFrame(flush);
+          }
+        } else {
+          requestAnimationFrame(() => {
+            flush();
+            const cur = get().docs[id];
+            if (cur && cur.search.id === searchId) get().patch(id, { search: { ...cur.search, done: true } });
+          });
+        }
+      };
+
+      api
+        .search(id, q, (e) => (searchId == null ? pending.push(e) : handle(e)))
+        .then((sid) => {
+          if (latestSearch.get(id) !== seq || !get().docs[id]) return;
+          searchId = sid;
+          get().patch(id, { search: { ...get().docs[id].search, id: sid } });
+          pending.splice(0).forEach(handle);
+        })
+        .catch((e) => set({ error: String(e) }));
+    },
+
+    stepHit: (id, dir) => {
+      const d = get().docs[id];
+      if (!d || d.search.hits.length === 0) return;
+      const n = d.search.hits.length;
+      const current = (d.search.current + dir + n) % n;
+      get().patch(id, { search: { ...d.search, current } });
+      const h = d.search.hits[current];
+      get().goTo(id, h.page, Math.max(0, h.rect[1] - 80));
+    },
+
+    loadOutline: (id) => {
+      const d = get().docs[id];
+      if (!d || d.outline) return;
+      api
+        .outline(id)
+        .then((o) => get().patch(id, { outline: o }))
+        .catch(() => get().patch(id, { outline: [] }));
+    },
+  };
+});
+
+export const useActiveDoc = () => useStore((s) => (s.active != null ? s.docs[s.active] : undefined));
