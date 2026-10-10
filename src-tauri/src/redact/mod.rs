@@ -202,8 +202,8 @@ fn literal_regex(needle: &str, case_sensitive: bool, whole_word: bool) -> Result
 
 /// A second view of the page text with joins a reader makes but extraction does not: spaces
 /// inside letter-spaced runs ("K E R N", 3+ single chars) and a hyphen between two letters (a
-/// WinAnsi soft hyphen extracts as '-'). Dropped chars become hidden, so their quads still go with
-/// a match. Also returns where the drops are, so `find` keeps only matches that need one.
+/// WinAnsi soft hyphen extracts as '-') or before a line break and a letter. Dropped chars become
+/// hidden, so their quads still go with a match. Also returns where the drops are, so `find` keeps only matches that need one.
 fn joined(pt: &PageText) -> Option<(PageText, Vec<usize>)> {
     let t: Vec<(usize, char)> = pt.text.char_indices().collect();
     let sep = |i: usize| t.get(i).is_none_or(|c| c.1 == ' ' || c.1 == '\n');
@@ -227,6 +227,11 @@ fn joined(pt: &PageText) -> Option<(PageText, Vec<usize>)> {
     for i in 1..t.len().saturating_sub(1) {
         if t[i].1 == '-' && t[i - 1].1.is_alphabetic() && t[i + 1].1.is_alphabetic() {
             drop[i] = true;
+        }
+        // A hyphen at the end of a block's last line, the word going on in the next block.
+        if t[i].1 == '-' && t[i - 1].1.is_alphabetic() && t[i + 1].1 == '\n' && t.get(i + 2).is_some_and(|c| c.1.is_alphabetic()) {
+            drop[i] = true;
+            drop[i + 1] = true;
         }
     }
     if !drop.contains(&true) {
@@ -1037,6 +1042,8 @@ fn scan_attachment(
     } else if data.starts_with(b"%PDF") {
         match PdfDocument::from_bytes(data) {
             Err(_) => leaks.push(unread("attached PDF does not open")),
+            // Without the password its strings and streams stay ciphertext and nothing matches.
+            Ok(d) if d.needs_password()? => leaks.push(unread("attached PDF needs a password")),
             Ok(_) => {
                 let sub = Targets { pages: Vec::new(), needles: t.needles.clone() };
                 for l in verify_at(data, &sub, depth + 1, left)?.leaks {
@@ -1085,9 +1092,10 @@ fn scan_attachment(
     Ok(())
 }
 
-/// Entries of a zip archive (stored or deflated), from its central directory, plus deflated local
-/// entries the directory does not list (readers that walk local headers extract them). None when
-/// it uses anything else (encryption, zip64, other methods) or is malformed.
+/// Entries of a zip archive (stored or deflated), from its central directory, plus local entries
+/// the directory does not list (readers that walk local headers extract them). None when it uses
+/// anything else (encryption, zip64, other methods), the directory and a local header disagree on
+/// sizes, or it is malformed: a size that hides part of the data must not pass.
 fn zip_entries(z: &[u8], inflate: &dyn Fn(&mut dyn std::io::Read) -> Option<Vec<u8>>) -> Option<Vec<(String, Vec<u8>)>> {
     let u16_at = |p: usize| Some(u16::from_le_bytes(z.get(p..p + 2)?.try_into().ok()?) as usize);
     let u32_at = |p: usize| Some(u32::from_le_bytes(z.get(p..p + 4)?.try_into().ok()?) as usize);
@@ -1096,18 +1104,8 @@ fn zip_entries(z: &[u8], inflate: &dyn Fn(&mut dyn std::io::Read) -> Option<Vec<
     if count == 0xffff || p == 0xffff_ffff {
         return None;
     }
-    let (mut out, mut listed) = (Vec::new(), HashSet::new());
-    for _ in 0..count {
-        if !z.get(p..)?.starts_with(b"PK\x01\x02") || u16_at(p + 8)? & 1 != 0 {
-            return None;
-        }
-        let (method, size, lho) = (u16_at(p + 10)?, u32_at(p + 20)?, u32_at(p + 42)?);
-        let (nlen, xlen, clen) = (u16_at(p + 28)?, u16_at(p + 30)?, u16_at(p + 32)?);
-        let name = String::from_utf8_lossy(z.get(p + 46..p + 46 + nlen)?).into_owned();
-        if !z.get(lho..)?.starts_with(b"PK\x03\x04") {
-            return None;
-        }
-        listed.insert(lho);
+    // Local entry at `lho` with `size` bytes of `method` data: (data start, decoded data).
+    let entry = |lho: usize, method: usize, size: usize, usize_: usize| -> Option<(usize, Vec<u8>)> {
         let start = lho + 30 + u16_at(lho + 26)? + u16_at(lho + 28)?;
         let raw = z.get(start..start.checked_add(size)?)?;
         let data = match method {
@@ -1115,22 +1113,46 @@ fn zip_entries(z: &[u8], inflate: &dyn Fn(&mut dyn std::io::Read) -> Option<Vec<
             8 => inflate(&mut flate2::read::DeflateDecoder::new(raw))?,
             _ => return None,
         };
+        (data.len() == usize_).then_some((start + size, data))
+    };
+    let (mut out, mut listed) = (Vec::new(), Vec::new());
+    for _ in 0..count {
+        if !z.get(p..)?.starts_with(b"PK\x01\x02") || u16_at(p + 8)? & 1 != 0 {
+            return None;
+        }
+        let (flags, method, size, usize_, lho) = (u16_at(p + 8)?, u16_at(p + 10)?, u32_at(p + 20)?, u32_at(p + 24)?, u32_at(p + 42)?);
+        let (nlen, xlen, clen) = (u16_at(p + 28)?, u16_at(p + 30)?, u16_at(p + 32)?);
+        let name = String::from_utf8_lossy(z.get(p + 46..p + 46 + nlen)?).into_owned();
+        if !z.get(lho..)?.starts_with(b"PK\x03\x04") || u16_at(lho + 8)? != method || (method == 0 && size != usize_) {
+            return None;
+        }
+        // Without a data descriptor (flag 3) the local header carries the sizes too: they must agree.
+        if flags & 8 == 0 && (u32_at(lho + 18)? != size || u32_at(lho + 22)? != usize_) {
+            return None;
+        }
+        let (end, data) = entry(lho, method, size, usize_)?;
+        listed.push(lho..end);
         out.push((name, data));
         p += 46 + nlen + xlen + clen;
     }
-    // Stored local entries are in the raw bytes the caller searches; deflated ones need inflating.
-    for lho in (0..z.len()).filter(|&q| z[q..].starts_with(b"PK") && !listed.contains(&q)) {
-        if u16_at(lho + 6)? & 1 != 0 {
+    // Local headers outside the listed entries' data.
+    let unlisted = (0..z.len()).filter(|&q| z[q..].starts_with(b"PK\x03\x04") && !listed.iter().any(|r| r.contains(&q)));
+    for lho in unlisted.collect::<Vec<_>>() {
+        let (flags, method) = (u16_at(lho + 6)?, u16_at(lho + 8)?);
+        if flags & 1 != 0 {
             return None;
         }
-        match u16_at(lho + 8)? {
-            0 => {}
+        let data = match method {
+            // Sizes in a data descriptor after the data are unknown here: deflate ends by itself,
+            // stored data does not.
+            0 if flags & 8 == 0 => entry(lho, 0, u32_at(lho + 18)?, u32_at(lho + 22)?)?.1,
             8 => {
                 let start = lho + 30 + u16_at(lho + 26)? + u16_at(lho + 28)?;
-                out.push(("(not in the directory)".into(), inflate(&mut flate2::read::DeflateDecoder::new(z.get(start..)?))?));
+                inflate(&mut flate2::read::DeflateDecoder::new(z.get(start..)?))?
             }
             _ => return None,
-        }
+        };
+        out.push(("(not in the directory)".into(), data));
     }
     Some(out)
 }

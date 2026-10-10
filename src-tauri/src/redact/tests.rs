@@ -709,21 +709,26 @@ fn short_name_quoting_is_found_and_stripped() {
     assert!(l.is_empty(), "{l:?}");
 }
 
-/// A zip archive with one deflated entry.
+/// A zip archive with one entry, deflated or stored.
 fn zip(name: &str, data: &[u8]) -> Vec<u8> {
+    zip_as(name, data, false)
+}
+
+fn zip_as(name: &str, data: &[u8], stored: bool) -> Vec<u8> {
     use std::io::Write;
     let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
     e.write_all(data).unwrap();
-    let packed = e.finish().unwrap();
+    let packed = if stored { data.to_vec() } else { e.finish().unwrap() };
+    let method = if stored { 0 } else { 8 };
     let mut crc = flate2::Crc::new();
     crc.update(data);
     let (crc, n, c, u) = (crc.sum().to_le_bytes(), (name.len() as u16).to_le_bytes(), (packed.len() as u32).to_le_bytes(), (data.len() as u32).to_le_bytes());
     // Version, flags, method 8, time/date, crc, sizes, name length, extra length.
-    let common = [&[20, 0, 0, 0, 8, 0, 0, 0, 0, 0][..], &crc, &c, &u, &n, &[0, 0]].concat();
+    let common = [&[20, 0, 0, 0, method, 0, 0, 0, 0, 0][..], &crc, &c, &u, &n, &[0, 0]].concat();
     let mut z = [b"PK\x03\x04", &common[..], name.as_bytes(), &packed].concat();
     let cd = z.len() as u32;
-    // Central directory: version made by, the common fields, comment length, disk, attributes, offset.
-    z.extend_from_slice(&[b"PK\x01\x02", &[20, 0][..], &common, &[0; 8], &0u32.to_le_bytes(), name.as_bytes()].concat());
+    // Central directory: version made by, the common fields, comment length, disk, attributes, offset 0.
+    z.extend_from_slice(&[b"PK\x01\x02", &[20, 0][..], &common, &[0; 10], &0u32.to_le_bytes(), name.as_bytes()].concat());
     let cd_len = z.len() as u32 - cd;
     z.extend_from_slice(&[b"PK\x05\x06", &[0, 0, 0, 0, 1, 0, 1, 0][..], &cd_len.to_le_bytes(), &cd.to_le_bytes(), &[0, 0]].concat());
     z
@@ -781,7 +786,13 @@ fn packed_attachments_are_scanned() {
             "/Names << /EmbeddedFiles << /Names [(a) 6 0 R] >> >>",
         );
         match redact_none(&bytes, "ATTACH-SECRET").1 {
-            Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.critical && l.place.contains("attachment")), "{what}: {l:?}"),
+            Err(RedactError::Leaked(l)) => {
+                assert!(l.iter().any(|l| l.critical && l.place.contains("attachment")), "{what}: {l:?}");
+                // Zips are read, not reported unreadable.
+                if what.contains("zip") {
+                    assert!(l.iter().all(|l| !l.place.contains("cannot read")) && l.iter().any(|l| l.needle == "ATTACH-SECRET"), "{what}: {l:?}");
+                }
+            }
             r => panic!("{what}: expected a leak, got {r:?}"),
         }
         // One budget for all unpacking: past it, attachments count as unread.
@@ -871,4 +882,129 @@ fn hidden_layer_unused_xobject_and_widget_go() {
     r.unwrap();
     let l = leaks(&save_to_vec(&doc).unwrap(), &["UNUSED-HIDDEN", "WIDGET-HIDDEN"]);
     assert!(l.is_empty(), "{l:?}");
+}
+
+/// A clean zip passes; a password-protected attached PDF and a stored entry whose directory size
+/// hides its tail count as unread.
+#[test]
+fn attachment_edge_cases() {
+    let attach = |data: &[u8]| {
+        one_page(
+            b"BT /F1 12 Tf 72 700 Td (ATTACH-SECRET) Tj ET",
+            "",
+            &[obj("<< /Type /Filespec /F (a) /EF << /F 7 0 R >> >>"), stream("/Type /EmbeddedFile", data)],
+            "/Names << /EmbeddedFiles << /Names [(a) 6 0 R] >> >>",
+        )
+    };
+    let (_, r) = redact_none(&attach(&zip("a.txt", b"hello world")), "ATTACH-SECRET");
+    r.unwrap();
+
+    let unread = |data: &[u8], why: &str| match redact_none(&attach(data), "ATTACH-SECRET").1 {
+        Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.critical && l.place.contains(why)), "{why}: {l:?}"),
+        r => panic!("{why}: expected a leak, got {r:?}"),
+    };
+    // Standard security handler with a user password: the empty password does not open it.
+    let locked = pdf(
+        &[obj("<< /Type /Catalog /Pages 2 0 R >>"), obj("<< /Type /Pages /Kids [] /Count 0 >>")],
+        &format!(
+            "/Encrypt << /Filter /Standard /V 1 /R 2 /O <{0}> /U <{0}> /P -4 >> /ID [<00112233445566778899aabbccddeeff> <00112233445566778899aabbccddeeff>]",
+            "ab".repeat(32)
+        ),
+    );
+    unread(&locked, "needs a password");
+
+    // A stored entry whose directory sizes (8) cut it short of the local header's.
+    let mut cut = zip_as("a.txt", b"harmless text, ATTACH-SECRET in the tail", true);
+    let n = cut.len();
+    let cd = u32::from_le_bytes(cut[n - 6..n - 2].try_into().unwrap()) as usize;
+    cut[cd + 20..cd + 28].copy_from_slice(&[8, 0, 0, 0, 8, 0, 0, 0]);
+    unread(&cut, "cannot read");
+}
+
+/// Name-tree entries quoting the needle go; /Limits are recomputed and emptied leaves dropped.
+#[test]
+fn name_tree_limits_are_recomputed() {
+    let bytes = one_page(
+        b"BT /F1 12 Tf 72 700 Td (LIMIT-SECRET) Tj ET",
+        "",
+        &[
+            obj("<< /Kids [7 0 R] >>"),
+            obj("<< /Kids [8 0 R 9 0 R] /Limits [(LIMIT-SECRET) (zzz)] >>"),
+            obj("<< /Names [(LIMIT-SECRET) [4 0 R /Fit]] /Limits [(LIMIT-SECRET) (LIMIT-SECRET)] >>"),
+            obj("<< /Names [(yyy) [4 0 R /Fit] (zzz) [4 0 R /Fit]] /Limits [(yyy) (zzz)] >>"),
+        ],
+        "/Names << /Dests 6 0 R >>",
+    );
+    let (doc, r) = redact_none(&bytes, "LIMIT-SECRET");
+    r.unwrap();
+    let names = doc.catalog().unwrap().get_dict("Names").unwrap().unwrap();
+    let mid = names.get_dict("Dests").unwrap().unwrap().get_dict("Kids").unwrap().unwrap().get_array(0).unwrap().unwrap();
+    assert_eq!(mid.get_dict("Kids").unwrap().unwrap().len().unwrap(), 1);
+    let limits = mid.get_dict("Limits").unwrap().unwrap();
+    assert_eq!(text_of(&limits.get_array(0).unwrap().unwrap()).unwrap(), "yyy");
+    assert_eq!(text_of(&limits.get_array(1).unwrap().unwrap()).unwrap(), "zzz");
+    let l = leaks(&save_to_vec(&doc).unwrap(), &["LIMIT-SECRET"]);
+    assert!(l.is_empty(), "{l:?}");
+}
+
+/// A field's /T is required: a quoting one is replaced, not deleted.
+#[test]
+fn quoting_field_name_gets_a_placeholder() {
+    let bytes = one_page(
+        b"BT /F1 12 Tf 72 700 Td (FIELDNAME-SECRET) Tj ET",
+        "/Annots [7 0 R]",
+        &[
+            obj("<< /FT /Tx /T (FIELDNAME-SECRET) /Kids [7 0 R] >>"),
+            obj("<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [300 100 400 120] /P 4 0 R >>"),
+        ],
+        "/AcroForm << /Fields [6 0 R] >>",
+    );
+    let (doc, r) = redact_none(&bytes, "FIELDNAME-SECRET");
+    r.unwrap();
+    let af = doc.catalog().unwrap().get_dict("AcroForm").unwrap().unwrap();
+    let t = af.get_dict("Fields").unwrap().unwrap().get_array(0).unwrap().unwrap().get_dict("T").unwrap().expect("/T kept");
+    assert!(text_of(&t).unwrap().starts_with("redacted-"));
+}
+
+/// Invisible text in an annotation the annotation switch removes must not fail sanitize.
+#[test]
+fn invisible_text_in_removed_annotation() {
+    let bytes = one_page(
+        b"BT /F1 12 Tf 72 700 Td (VISIBLE) Tj ET",
+        "/Annots [6 0 R]",
+        &[
+            obj("<< /Type /Annot /Subtype /Stamp /Rect [72 300 272 330] /AP << /N 7 0 R >> >>"),
+            stream("/Type /XObject /Subtype /Form /BBox [0 0 200 30] /Resources << /Font << /F1 3 0 R >> >>", b"BT 3 Tr /F1 12 Tf 5 10 Td (STAMP-OCR) Tj ET"),
+        ],
+        "",
+    );
+    let mut doc = PdfDocument::from_bytes(&bytes).unwrap();
+    sanitize(&mut doc, &Sanitize { hidden_text: true, annotations: true, ..Sanitize::NONE }, &[]).unwrap();
+    assert!(leaks(&save_to_vec(&doc).unwrap(), &["STAMP-OCR"]).is_empty());
+}
+
+/// A word hyphenated across two text blocks.
+#[test]
+fn find_hyphen_across_blocks() {
+    let bytes = one_page(b"BT /F1 12 Tf 72 700 Td (redac-) Tj ET BT /F1 12 Tf 72 300 Td (tion) Tj ET", "", &[], "");
+    let doc = PdfDocument::from_bytes(&bytes).unwrap();
+    assert_eq!(find(&doc, &text_q("redaction")).unwrap().len(), 1, "{:?}", page_text(&doc));
+}
+
+/// The hidden-layer oracle compares glyph positions: removed visible text with the same letters
+/// must not cancel out revealed text elsewhere.
+#[test]
+fn oracle_compares_positions() {
+    let g = |v: &[(char, i32, i32)]| v.iter().map(|&k| (k, 1)).collect::<sanitize::Glyphs>();
+    assert!(!sanitize::revealed(&g(&[('A', 0, 0), ('B', 10, 0)]), &g(&[('A', 0, 0)])));
+    assert!(sanitize::revealed(&g(&[('A', 0, 0)]), &g(&[('A', 0, 50)])));
+}
+
+/// Scrub fails closed on direct nesting past 32 levels instead of skipping the rest.
+#[test]
+fn scrub_fails_closed_past_depth_32() {
+    let deep = format!("/X {}{}", "[".repeat(40), "]".repeat(40));
+    let mut doc = PdfDocument::from_bytes(&one_page(b"", "", &[], &deep)).unwrap();
+    let r = sanitize(&mut doc, &Sanitize::NONE, &[]);
+    assert!(matches!(r, Err(RedactError::Leaked(_))), "{r:?}");
 }

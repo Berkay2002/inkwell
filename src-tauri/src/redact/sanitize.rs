@@ -114,16 +114,12 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
         let before = page_chars(doc)?;
         r.hidden_layer_blocks = strip_hidden_layers(doc)?;
         for (p, (b, a)) in before.iter().zip(page_chars(doc)?).enumerate() {
-            if a.iter().any(|(c, n)| b.get(c).is_none_or(|m| m < n)) {
+            if revealed(b, &a) {
                 let place = format!("page {}: hidden layer content left after sanitize", p + 1);
                 return Err(RedactError::Leaked(vec![super::Leak { needle: String::new(), place, critical: true }]));
             }
         }
     }
-    if o.hidden_text {
-        r.hidden_text_pages = strip_invisible_text(doc)?;
-    }
-
     if o.scripts_actions {
         r.scripts_actions += del(&mut cat, "OpenAction")? + del(&mut cat, "AA")?;
         if let Some(mut names) = cat.get_dict("Names")? {
@@ -196,6 +192,10 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
             }
         }
     }
+    // After annotation removal: invisible text in an annotation the switches removed is gone.
+    if o.hidden_text {
+        r.hidden_text_pages = strip_invisible_text(doc)?;
+    }
 
     if o.bookmarks {
         r.bookmarks = count_outlines(&doc.outlines()?);
@@ -247,8 +247,80 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
             }
         }
     }
+    let quoting = r.quoting;
     scrub_reachable(doc, o, &res, &mut r)?;
+    if r.quoting > quoting {
+        fix_name_trees(doc)?;
+    }
     Ok(r)
+}
+
+/// Whether the page shows a glyph after stripping (same char at the same place) that it did not
+/// show before.
+pub(super) fn revealed(before: &Glyphs, after: &Glyphs) -> bool {
+    after.iter().any(|(c, n)| before.get(c).is_none_or(|m| m < n))
+}
+
+/// After name-tree entries were removed: drops leaves left empty and recomputes /Limits, which
+/// would otherwise still quote a removed key (and mislead lookups).
+fn fix_name_trees(doc: &PdfDocument) -> Result<()> {
+    let cat = doc.catalog()?;
+    let mut roots = Vec::new();
+    if let Some(names) = cat.get_dict("Names")? {
+        for i in 0..names.dict_len()? as i32 {
+            roots.extend(names.get_dict_val(i)?);
+        }
+    }
+    if let Some(st) = cat.get_dict("StructTreeRoot")? {
+        roots.extend(st.get_dict("IDTree")?);
+    }
+    for mut root in roots {
+        fix_tree(&mut root, 0)?;
+    }
+    Ok(())
+}
+
+/// Fixes one name-tree node; returns its first and last key, None when it holds none.
+fn fix_tree(node: &mut PdfObject, depth: u32) -> Result<Option<(PdfObject, PdfObject)>> {
+    if depth > 32 {
+        let place = "a name tree deeper than 32 levels (not sanitized)".to_string();
+        return Err(RedactError::Leaked(vec![super::Leak { needle: String::new(), place, critical: true }]));
+    }
+    let mut bounds: Option<(PdfObject, PdfObject)> = None;
+    if let Some(names) = node.get_dict("Names")?
+        && names.is_array()?
+        && names.len()? >= 2
+    {
+        let n = names.len()? as i32;
+        bounds = names.get_array(0)?.zip(names.get_array((n - 2) & !1)?);
+    }
+    if let Some(mut kids) = node.get_dict("Kids")?
+        && kids.is_array()?
+    {
+        for i in (0..kids.len()? as i32).rev() {
+            let Some(mut kid) = kids.get_array(i)? else { continue };
+            match fix_tree(&mut kid, depth + 1)? {
+                None => kids.array_delete(i)?,
+                Some((first, last)) => {
+                    bounds = Some(match bounds {
+                        None => (first, last),
+                        // Kids run in key order, last kid first here.
+                        Some((_, l)) => (first, l),
+                    });
+                }
+            }
+        }
+    }
+    if let Some(mut limits) = node.get_dict("Limits")? {
+        match &bounds {
+            Some((first, last)) if limits.is_array()? && limits.len()? == 2 => {
+                limits.array_put(0, first.clone())?;
+                limits.array_put(1, last.clone())?;
+            }
+            _ => node.dict_delete("Limits")?,
+        }
+    }
+    Ok(bounds)
 }
 
 /// Text-bearing keys removed wherever their value quotes a redacted string: tagged-PDF alternate
@@ -304,8 +376,13 @@ fn scrub(o: &mut PdfObject, opts: &Sanitize, res: &[Regex], r: &mut SanitizeRepo
                 if let Some(v) = o.get_dict(key)?
                     && quoting_value(&v, res, matches!(key, "RC" | "RV"))?
                 {
-                    o.dict_delete(key)?;
                     r.quoting += 1;
+                    // A field's /T and an outline's /Title are required: a placeholder instead.
+                    if matches!(key, "T" | "Title") {
+                        o.dict_put(key, PdfObject::new_string(&format!("redacted-{}", r.quoting))?)?;
+                    } else {
+                        o.dict_delete(key)?;
+                    }
                 }
             }
             if let Some(mut names) = o.get_dict("Names")?
@@ -339,7 +416,7 @@ fn scrub(o: &mut PdfObject, opts: &Sanitize, res: &[Regex], r: &mut SanitizeRepo
 }
 
 /// Per page: how often each char appears at each (rounded) position in the text MuPDF shows.
-type Glyphs = std::collections::HashMap<(char, i32, i32), u32>;
+pub(super) type Glyphs = std::collections::HashMap<(char, i32, i32), u32>;
 
 fn page_chars(doc: &PdfDocument) -> Result<Vec<Glyphs>> {
     let mut v = Vec::new();
