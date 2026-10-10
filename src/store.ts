@@ -77,10 +77,13 @@ interface Store {
   password: { doc: number; path: string; error?: string } | null;
   error: string | null;
 
-  openPath: (path: string) => Promise<void>;
+  /** Opens (or switches to) a file: `token` from a dialog or drop, else Rust must know `path` (recent list). */
+  openPath: (path: string, token?: string) => Promise<void>;
   submitPassword: (password: string) => Promise<void>;
   cancelPassword: () => void;
   closeDoc: (id: number) => void;
+  /** The file behind tab `id` was rewritten and its engine document closed: opens it again in the same tab slot, keeping the view. */
+  reloadInPlace: (id: number, path: string) => Promise<void>;
   activate: (id: number) => void;
   cycleTab: (dir: 1 | -1) => void;
   patch: (id: number, p: Partial<DocState>) => void;
@@ -150,7 +153,7 @@ export const useStore = create<Store>((set, get) => {
     password: null,
     error: null,
 
-    openPath: (path) => {
+    openPath: (path, token) => {
       const k = keyOf(path);
       const existing = Object.values(get().docs).find((d) => keyOf(d.path) === k);
       if (existing) {
@@ -161,7 +164,7 @@ export const useStore = create<Store>((set, get) => {
       if (running) return running;
       const job = (async () => {
         try {
-          const r = await api.openDocument(path);
+          const r = await api.openDocument(token ?? (await api.knownFile(path)).token);
           if (r.status === "opened") {
             // Rust canonicalised the path: a different spelling of an open file is the same tab.
             const dup = Object.values(get().docs).find((d) => keyOf(d.path) === keyOf(r.path));
@@ -216,6 +219,36 @@ export const useStore = create<Store>((set, get) => {
         }
         return { docs, order, active };
       });
+    },
+
+    reloadInPlace: async (id, path) => {
+      const old = get().docs[id];
+      if (!old) return get().openPath(path);
+      void api.cancelSearch(id);
+      dropCached(`${id}:`);
+      try {
+        const r = await api.openDocument(path);
+        if (r.status !== "opened") {
+          if (r.status === "needsPassword") void api.closeDocument(r.doc);
+          throw new Error("the restored file needs a password");
+        }
+        const wasActive = get().active === id;
+        const at = get().order.indexOf(id);
+        addDoc(r);
+        set((s) => {
+          const docs = { ...s.docs };
+          delete docs[id];
+          const order = s.order.filter((d) => d !== id && d !== r.doc);
+          order.splice(Math.min(at, order.length), 0, r.doc);
+          const keep = { rot: old.rot, zoomMode: old.zoomMode, zoom: old.zoom, scroll: old.scroll, organize: false };
+          docs[r.doc] = { ...docs[r.doc], ...keep };
+          return { docs, order, active: wasActive ? r.doc : s.active === r.doc ? (s.order.find((d) => d !== r.doc && d !== id) ?? r.doc) : s.active };
+        });
+        get().goTo(r.doc, Math.min(old.currentPage, r.pageCount - 1));
+      } catch (e) {
+        get().closeDoc(id);
+        set({ error: `Could not reopen ${old.name}: ${String(e)}` });
+      }
     },
 
     activate: (id) => set({ active: id }),

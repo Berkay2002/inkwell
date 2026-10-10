@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "bench"
 path = "src/bin/bench.rs"
 
+[[bin]]
+name = "history_bench"
+path = "src/bin/history_bench.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -36,14 +40,24 @@ regex = "1"
 flate2 = "1"
 # Reads the user's codex config.toml (MCP server names). Already in the tree through tauri's build deps.
 toml = "0.8"
+# Version history store (history/) and compare (diff/).
+fastcdc = "3"
+blake3 = "1"
+zstd = "0.13"
+chacha20poly1305 = "0.10"
+getrandom = "0.3"
+similar = "2"
+zeroize = "1"
 # Encodes page images for tool results. Already in the tree through tauri.
 base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory"] }
 # Same versions tauri already pulls in; used to switch off WebView2's browser shortcuts.
 webview2-com = "0.39"
 windows-core = "0.62"
+# Windows.Media.Ocr (OCR backend); already in the tree through tauri, this only adds feature flags.
+windows = { version = "0.62", features = ["Media_Ocr", "Graphics_Imaging", "Storage_Streams", "Globalization", "Foundation_Collections"] }
 
 [profile.release]
 codegen-units = 1

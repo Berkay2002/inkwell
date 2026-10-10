@@ -1,4 +1,4 @@
-# Insert from file: keep links and form widgets (engine change, not done yet)
+# Insert from file: keep links and form widgets (done: f488dbe)
 
 Today `graft_pages` (src-tauri/src/engine/edit.rs) copies each page alone, and `graft_annots` drops
 form widgets and every link that is not a web link: their targets (pages, fields) live elsewhere

@@ -4,6 +4,7 @@ import { requestClose } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { type DocState, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
+import { HistoryToggle } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
 import { ModeSwitch } from "./Organize";
 import { WindowControls } from "./WindowControls";
@@ -126,6 +127,7 @@ export function Toolbar({ doc }: { doc: DocState }) {
       <Btn icon="rotate" title={`Rotate${keys("rotate-cw")}`} onClick={() => st().rotate(id, 1)} />
       <span className="grow" />
       <Btn icon="search" title={`Find${keys("find")}`} on={searchOpen} onClick={() => st().setUi({ searchOpen: !searchOpen })} />
+      <HistoryToggle />
       <AssistantToggle />
       <Btn icon={themeIcon[theme]} title={`Theme: ${theme}`} onClick={() => st().setTheme(nextTheme[theme])} />
       <Btn icon="command" title={`Command palette${keys("palette")}`} onClick={() => st().setUi({ paletteOpen: true })} />

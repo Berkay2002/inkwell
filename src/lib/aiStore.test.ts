@@ -38,7 +38,10 @@ vi.mock("./ai", () => ({
   MODE_NAMES: { docked: "Docked", floating: "Floating", bar: "Command bar" },
 }));
 
+vi.mock("./history", () => ({ historyCheckpoint: vi.fn(() => Promise.resolve(null)) }));
+
 import * as ai from "./ai";
+import { historyCheckpoint } from "./history";
 import { useAi } from "./aiStore";
 import { useStore } from "../store";
 
@@ -140,6 +143,15 @@ describe("assistant store", () => {
     expect(useAi.getState().chats[1].messages[1].state).toBe("streaming");
     emit({ kind: "cancelled" });
     expect(useAi.getState().chats[1].messages[1].state).toBe("cancelled");
+  });
+
+  it("asks for a history checkpoint when a turn ends, however it ends", () => {
+    useAi.getState().setSettings({ consent: true });
+    useAi.getState().ask(1, { kind: "ask", question: "q" });
+    emit({ kind: "delta", text: "partial" });
+    expect(historyCheckpoint).not.toHaveBeenCalled();
+    emit({ kind: "error", message: "x", hint: null } as ChatEvent);
+    expect(historyCheckpoint).toHaveBeenCalledWith(1);
   });
 
   it("sends the permission mode and the selection with the question", () => {

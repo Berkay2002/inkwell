@@ -15,6 +15,7 @@ const closeDocument = vi.fn((_d: number) => Promise.resolve());
 vi.mock("./api", () => ({
   openDocument: vi.fn(() => Promise.resolve({ status: "opened", doc: ++next, path: String.raw`C:\Docs\A.pdf`, title: null, pageCount: 1, firstPage: [10, 10] })),
   closeDocument,
+  knownFile: vi.fn((path: string) => Promise.resolve({ token: "t", path })),
   pageSizes: vi.fn(() => Promise.resolve()),
   cancelSearch: vi.fn(() => Promise.resolve()),
 }));

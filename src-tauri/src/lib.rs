@@ -1,18 +1,27 @@
 pub mod ai;
 pub mod compress;
+pub mod diff;
 pub mod engine;
+pub mod history;
+pub mod history_ipc;
+pub mod ocr;
+pub mod paths;
 pub mod recents;
 pub mod redact;
 
 use engine::cache::TileKey;
 use engine::edit::{EditOp, EditState, SplitResult};
 use engine::{DocId, Engine, EngineError, EngineStats, OpenInfo, OutlineItem, SearchEvent, TextLine, TileOutcome};
+use history_ipc::History;
+use paths::{FileRef, Paths};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Response};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State, Window};
+use tauri_plugin_dialog::DialogExt;
 
 type Eng<'a> = State<'a, Arc<Engine>>;
+type Reg<'a> = State<'a, Paths>;
 
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
@@ -27,11 +36,81 @@ async fn blocking<R: Send + 'static>(f: impl FnOnce() -> Result<R, EngineError> 
     tauri::async_runtime::spawn_blocking(f).await.unwrap_or(Err(EngineError::Panic))
 }
 
+// ---- files: the UI names them by token only (see paths.rs) -------------------------------------
+
+const PDF: &[&str] = &["pdf"];
+
+/// Dialog titles the UI may ask for (the text is Rust's, never the webview's).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum PickTitle {
+    Locate,
+    Compare,
+}
+
+/// Open dialog in Rust; the picked files come back as open tokens.
 #[tauri::command]
-async fn open_document(eng: Eng<'_>, path: String) -> Result<OpenOutcome, EngineError> {
-    let eng = eng.inner().clone();
+async fn pick_open(window: Window, multiple: bool, title: Option<PickTitle>) -> Result<Vec<FileRef>, EngineError> {
     blocking(move || {
+        let mut d = window.dialog().file().set_parent(&window).add_filter("PDF documents", PDF);
+        match title {
+            Some(PickTitle::Locate) => d = d.set_title("Locate the moved file"),
+            Some(PickTitle::Compare) => d = d.set_title("Choose two PDFs to compare"),
+            None => {}
+        }
+        let picked = if multiple { d.blocking_pick_files() } else { d.blocking_pick_file().map(|f| vec![f]) };
+        let reg = window.state::<Paths>();
+        Ok(picked
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|f| f.into_path().ok())
+            .map(|p| reg.issue_open(window.label(), p.to_string_lossy().into_owned()))
+            .collect())
+    })
+    .await
+}
+
+/// Save dialog in Rust, starting in the folder of open document `doc` or of open token `near`,
+/// with `name` (a file name, nothing more) filled in. The result is a one-use save token.
+#[tauri::command]
+async fn pick_save(
+    window: Window,
+    eng: Eng<'_>,
+    doc: Option<DocId>,
+    near: Option<String>,
+    name: String,
+) -> Result<Option<FileRef>, EngineError> {
+    let near = match (doc, near) {
+        (Some(doc), _) => Some(eng.doc_entry(doc)?.path()),
+        (None, Some(t)) => Some(window.state::<Paths>().open(window.label(), &t)?),
+        _ => None,
+    };
+    blocking(move || {
+        let name = std::path::Path::new(&name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut d = window.dialog().file().set_parent(&window).add_filter("PDF documents", PDF).set_file_name(name);
+        if let Some(dir) = near.as_deref().and_then(|p| std::path::Path::new(p).parent()) {
+            d = d.set_directory(dir);
+        }
+        let picked = d.blocking_save_file().and_then(|f| f.into_path().ok());
+        Ok(picked.map(|p| window.state::<Paths>().issue_save(window.label(), p.to_string_lossy().into_owned())))
+    })
+    .await
+}
+
+/// An open token for a file the user chose before (recent list, Locate): Rust checks it knows the path.
+#[tauri::command]
+async fn known_file(window: Window, path: String) -> Result<FileRef, EngineError> {
+    blocking(move || window.state::<Paths>().known_file(window.label(), path)).await
+}
+
+#[tauri::command]
+async fn open_document(window: Window, app: tauri::AppHandle, eng: Eng<'_>, reg: Reg<'_>, hist: State<'_, Arc<History>>, file: String) -> Result<OpenOutcome, EngineError> {
+    let path = reg.open(window.label(), &file)?;
+    let eng = eng.inner().clone();
+    let r = blocking(move || {
         let path = recents::canonical(&path);
+        // the recent list stores this spelling
+        window.state::<Paths>().learn(&path);
         let (doc, r) = eng.open_pending(&path);
         match r {
             Ok(info) => Ok(OpenOutcome::Opened(info)),
@@ -39,17 +118,27 @@ async fn open_document(eng: Eng<'_>, path: String) -> Result<OpenOutcome, Engine
             Err(e) => Err(e),
         }
     })
-    .await
+    .await;
+    // History is resolved in the background after the open; its errors never reach this command.
+    if let Ok(OpenOutcome::Opened(info)) = &r {
+        hist.inner().spawn_open(app, info.doc, info.path.clone());
+    }
+    r
 }
 
 #[tauri::command]
-async fn authenticate(eng: Eng<'_>, doc: DocId, password: String) -> Result<OpenInfo, EngineError> {
+async fn authenticate(app: tauri::AppHandle, eng: Eng<'_>, hist: State<'_, Arc<History>>, doc: DocId, password: String) -> Result<OpenInfo, EngineError> {
     let eng = eng.inner().clone();
-    blocking(move || eng.authenticate(doc, &password)).await
+    let r = blocking(move || eng.authenticate(doc, &password)).await;
+    if let Ok(info) = &r {
+        hist.inner().spawn_open(app, info.doc, info.path.clone());
+    }
+    r
 }
 
 #[tauri::command]
-fn close_document(eng: Eng<'_>, doc: DocId) {
+fn close_document(eng: Eng<'_>, hist: State<'_, Arc<History>>, doc: DocId) {
+    hist.forget(doc);
     eng.close(doc);
 }
 
@@ -100,8 +189,17 @@ fn cancel_search(eng: Eng<'_>, doc: DocId) {
 
 // ---- editing (see engine::edit) ----------------------------------------------------------------
 
+/// Swaps the file token of an insert for its path.
+pub(crate) fn resolve_op(reg: &Paths, window: &str, op: &mut EditOp) -> Result<(), EngineError> {
+    if let EditOp::InsertFile { path, .. } = op {
+        *path = reg.open(window, path)?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
-async fn edit_apply(eng: Eng<'_>, doc: DocId, op: EditOp) -> Result<EditState, EngineError> {
+async fn edit_apply(window: Window, eng: Eng<'_>, reg: Reg<'_>, doc: DocId, mut op: EditOp) -> Result<EditState, EngineError> {
+    resolve_op(&reg, window.label(), &mut op)?;
     let eng = eng.inner().clone();
     blocking(move || eng.apply(doc, op)).await
 }
@@ -118,23 +216,58 @@ async fn edit_redo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
     blocking(move || eng.redo(doc)).await
 }
 
-/// `path`: Save as; omitted: save over the document's own file.
+/// `to`: a save token (Save as); omitted: save over the document's own file.
 #[tauri::command]
-async fn save_document(eng: Eng<'_>, doc: DocId, path: Option<String>) -> Result<EditState, EngineError> {
-    let eng = eng.inner().clone();
-    blocking(move || eng.save(doc, path.as_deref())).await
+async fn save_document(
+    window: Window,
+    app: tauri::AppHandle,
+    eng: Eng<'_>,
+    reg: Reg<'_>,
+    hist: State<'_, Arc<History>>,
+    doc: DocId,
+    to: Option<String>,
+) -> Result<EditState, EngineError> {
+    let to = to.map(|t| reg.take_save(window.label(), &t)).transpose()?;
+    let (eng, hist) = (eng.inner().clone(), hist.inner().clone());
+    blocking(move || {
+        let (state, saved) = eng.save_recorded(doc, to.as_deref())?;
+        if let Some(to) = &to {
+            window.state::<Paths>().learn(to);
+        }
+        match saved {
+            // Save as: the document is another file now, with a history of its own
+            Some(s) if s.moved => hist.spawn_open(app, doc, state.path.clone()),
+            // history errors never fail a save
+            Some(s) => match hist.saved(doc, &s) {
+                Ok(_) => drop(app.emit("history-changed", doc)),
+                Err(e) => eprintln!("inkwell history: {e}"),
+            },
+            None => {}
+        }
+        Ok(state)
+    })
+    .await
 }
 
+/// `out`: a save token.
 #[tauri::command]
 async fn extract_pages(
+    window: Window,
     eng: Eng<'_>,
+    reg: Reg<'_>,
     doc: DocId,
     pages: Vec<u32>,
     out: String,
     delete_after: bool,
 ) -> Result<EditState, EngineError> {
+    let out = reg.take_save(window.label(), &out)?;
     let eng = eng.inner().clone();
-    blocking(move || eng.extract(doc, &pages, &out, delete_after)).await
+    blocking(move || {
+        let s = eng.extract(doc, &pages, &out, delete_after)?;
+        window.state::<Paths>().learn(&out);
+        Ok(s)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -143,10 +276,17 @@ async fn split_document(eng: Eng<'_>, doc: DocId, every: u32) -> Result<SplitRes
     blocking(move || eng.split(doc, every)).await
 }
 
+/// `files`: open tokens, in order; `out`: a save token. Returns an open token for the result.
 #[tauri::command]
-async fn merge_files(eng: Eng<'_>, paths: Vec<String>, out: String) -> Result<u32, EngineError> {
+async fn merge_files(window: Window, eng: Eng<'_>, reg: Reg<'_>, files: Vec<String>, out: String) -> Result<FileRef, EngineError> {
+    let paths = files.iter().map(|t| reg.open(window.label(), t)).collect::<Result<Vec<_>, _>>()?;
+    let out = reg.take_save(window.label(), &out)?;
     let eng = eng.inner().clone();
-    blocking(move || eng.merge(&paths, &out)).await
+    blocking(move || {
+        eng.merge(&paths, &out)?;
+        Ok(window.state::<Paths>().issue_open(window.label(), out))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -161,11 +301,25 @@ fn set_cache_budget(eng: Eng<'_>, megabytes: usize) {
 
 /// Files passed on the command line (and, later, by the Windows file association).
 #[tauri::command]
-fn initial_files() -> Vec<String> {
+fn initial_files(window: Window, reg: Reg<'_>) -> Vec<FileRef> {
     std::env::args()
         .skip(1)
         .filter(|a| !a.starts_with('-') && std::path::Path::new(a).is_file())
+        .map(|a| reg.issue_open(window.label(), a))
         .collect()
+}
+
+/// Files dropped on a window from Explorer: open tokens for the PDFs, sent to that window.
+fn on_drop(window: &Window, paths: &[std::path::PathBuf]) {
+    let reg = window.state::<Paths>();
+    let refs: Vec<FileRef> = paths
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")))
+        .map(|p| reg.issue_open(window.label(), p.to_string_lossy().into_owned()))
+        .collect();
+    if !refs.is_empty() {
+        let _ = window.emit_to(window.label(), "files-dropped", refs);
+    }
 }
 
 /// Same tile as the `inkwell://` protocol, delivered through the IPC channel. Kept so the
@@ -259,11 +413,23 @@ fn disable_browser_accelerators(app: &tauri::App) {
 pub fn run() {
     let engine = Engine::new(Engine::default_workers(), cache_budget_bytes());
     let proto_engine = engine.clone();
+    let hist = Arc::new(History::new());
+    let h = hist.clone();
+    // a saved redaction then replaces the versions from before it (history_ipc::History::saved)
+    engine::edit::set_redaction_hook(move |doc| h.on_redactions_applied(doc));
+    let autosave = (hist.clone(), engine.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
         .manage(ai::Assistant::new())
+        .manage(Paths::default())
+        .manage(hist)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                on_drop(window, paths);
+            }
+        })
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
             let Some((key, stream, epoch, rank)) = parse_tile_request(request.uri()) else {
                 return responder.respond(reply(404, Vec::new(), None));
@@ -283,6 +449,9 @@ pub fn run() {
             );
         })
         .invoke_handler(tauri::generate_handler![
+            pick_open,
+            pick_save,
+            known_file,
             open_document,
             authenticate,
             close_document,
@@ -298,6 +467,20 @@ pub fn run() {
             edit_apply,
             edit_undo,
             edit_redo,
+            history_ipc::history_state,
+            history_ipc::history_versions,
+            history_ipc::history_check,
+            history_ipc::history_restore,
+            history_ipc::history_recover,
+            history_ipc::history_save_copy,
+            history_ipc::history_name,
+            history_ipc::history_confirm_same,
+            history_ipc::history_delete,
+            history_ipc::history_never_keep,
+            history_ipc::history_compare,
+            history_ipc::history_render,
+            history_ipc::history_visual_diff,
+            history_ipc::history_checkpoint,
             save_document,
             extract_pages,
             split_document,
@@ -320,9 +503,13 @@ pub fn run() {
             ai::ai_set_permissions,
             ai::ai_close,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(windows)]
             disable_browser_accelerators(app);
+            autosave.0.spawn_autosave(app.handle().clone(), autosave.1.clone());
+            if let Some(json) = recents::data_dir(app.handle()).ok().and_then(|(d, _)| recents::read_json(&d)) {
+                app.state::<Paths>().learn_recents(&json);
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
