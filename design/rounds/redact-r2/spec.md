@@ -15,6 +15,13 @@ Known drift, not worth another render: a-panel's result puts the panel on the le
 the build keeps one side). b-margin's result chrome differs a little (tab row, toolbar). The review has 4 marks but
 the counts say 7 (the copy is set by the build).
 
+Verdict (2026-10-11): c-sweep, plus a-panel's manual area and page tools, docked on the right. The user, after seeing
+Acrobat's Redact panel, Comments-pane marks, Search window and _Redacted output: "Ok do your recommendation". The
+recommendation (inkwell's, adopted by the user): "c-sweep, plus a-panel's manual area and page tools, docked on the
+right like b-rail". Build: one right rail like the assistant and Tools rails, with the manual tools at its top, then find
+and pattern pills with counts, hits as page snippets grouped by page, the marks list, sanitize inline (no modal), and the
+result card. The app's colour tokens, not the render's.
+
 ## Shared
 
 Render: one flat screenshot of one Windows 11 desktop application window, seen straight on, filling the whole
