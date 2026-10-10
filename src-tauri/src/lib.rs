@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod engine;
+pub mod ocr;
 pub mod recents;
 
 use engine::cache::TileKey;

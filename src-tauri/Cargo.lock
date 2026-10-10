@@ -1541,6 +1541,7 @@ dependencies = [
 name = "inkwell"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "lru",
  "mupdf",
  "parking_lot",
@@ -1552,6 +1553,7 @@ dependencies = [
  "thiserror 2.0.21",
  "toml 0.8.2",
  "webview2-com",
+ "windows",
  "windows-core",
  "windows-sys 0.60.2",
 ]
