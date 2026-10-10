@@ -2,10 +2,12 @@ pub mod ai;
 pub mod diff;
 pub mod engine;
 pub mod history;
+pub mod history_ipc;
 pub mod recents;
 
 use engine::cache::TileKey;
 use engine::{DocId, Engine, EngineError, EngineStats, OpenInfo, OutlineItem, SearchEvent, TextLine, TileOutcome};
+use history_ipc::History;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Response};
@@ -27,9 +29,9 @@ async fn blocking<R: Send + 'static>(f: impl FnOnce() -> Result<R, EngineError> 
 }
 
 #[tauri::command]
-async fn open_document(eng: Eng<'_>, path: String) -> Result<OpenOutcome, EngineError> {
+async fn open_document(app: tauri::AppHandle, eng: Eng<'_>, hist: State<'_, Arc<History>>, path: String) -> Result<OpenOutcome, EngineError> {
     let eng = eng.inner().clone();
-    blocking(move || {
+    let r = blocking(move || {
         let path = recents::canonical(&path);
         let (doc, r) = eng.open_pending(&path);
         match r {
@@ -38,17 +40,27 @@ async fn open_document(eng: Eng<'_>, path: String) -> Result<OpenOutcome, Engine
             Err(e) => Err(e),
         }
     })
-    .await
+    .await;
+    // History is resolved in the background after the open; its errors never reach this command.
+    if let Ok(OpenOutcome::Opened(info)) = &r {
+        hist.inner().spawn_open(app, info.doc, info.path.clone());
+    }
+    r
 }
 
 #[tauri::command]
-async fn authenticate(eng: Eng<'_>, doc: DocId, password: String) -> Result<OpenInfo, EngineError> {
+async fn authenticate(app: tauri::AppHandle, eng: Eng<'_>, hist: State<'_, Arc<History>>, doc: DocId, password: String) -> Result<OpenInfo, EngineError> {
     let eng = eng.inner().clone();
-    blocking(move || eng.authenticate(doc, &password)).await
+    let r = blocking(move || eng.authenticate(doc, &password)).await;
+    if let Ok(info) = &r {
+        hist.inner().spawn_open(app, info.doc, info.path.clone());
+    }
+    r
 }
 
 #[tauri::command]
-fn close_document(eng: Eng<'_>, doc: DocId) {
+fn close_document(eng: Eng<'_>, hist: State<'_, Arc<History>>, doc: DocId) {
+    hist.forget(doc);
     eng.close(doc);
 }
 
@@ -212,6 +224,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
         .manage(ai::Assistant::new())
+        .manage(Arc::new(History::new()))
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
             let Some((key, stream, epoch, rank)) = parse_tile_request(request.uri()) else {
                 return responder.respond(reply(404, Vec::new(), None));
@@ -252,6 +265,20 @@ pub fn run() {
             ai::ai_ask,
             ai::ai_cancel,
             ai::ai_close,
+            history_ipc::history_state,
+            history_ipc::history_versions,
+            history_ipc::history_check,
+            history_ipc::history_restore,
+            history_ipc::history_recover,
+            history_ipc::history_save_copy,
+            history_ipc::history_name,
+            history_ipc::history_confirm_same,
+            history_ipc::history_delete,
+            history_ipc::history_never_keep,
+            history_ipc::history_compare,
+            history_ipc::compare_files,
+            history_ipc::history_render,
+            history_ipc::history_visual_diff,
         ])
         .setup(|app| {
             #[cfg(windows)]

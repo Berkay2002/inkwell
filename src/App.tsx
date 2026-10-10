@@ -3,12 +3,16 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect } from "react";
 import { AssistantPanel } from "./components/assistant/AssistantPanel";
 import { SearchBar, TabBar, Toolbar } from "./components/Chrome";
+import { CompareView } from "./components/history/Compare";
+import { HistoryBanner, HistoryPanel } from "./components/history/HistoryPanel";
+import { VersionView } from "./components/history/VersionView";
 import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { Sidebar } from "./components/Sidebar";
 import { Viewer } from "./components/Viewer";
 import { initialFiles } from "./lib/api";
 import { commandFor } from "./lib/commands";
+import { startHistoryEvents, useHistory } from "./lib/historyStore";
 import { useActiveDoc, useStore } from "./store";
 
 const isPdf = (p: string) => /\.pdf$/i.test(p);
@@ -20,11 +24,21 @@ export default function App() {
   const paletteOpen = useStore((s) => s.paletteOpen);
   const searchOpen = useStore((s) => s.searchOpen);
   const hasPassword = useStore((s) => s.password != null);
+  const compare = useHistory((s) => s.compare);
+  const viewing = useHistory((s) => (doc ? s.selected[doc.id] : undefined));
+  const showCompare = compare != null && (compare.doc === null || compare.doc === doc?.id);
 
   useEffect(() => {
     if (theme === "system") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => startHistoryEvents(), []);
+
+  // Every open document's history state (recovery and "same document?" prompts show over the page).
+  useEffect(() => {
+    if (doc) void useHistory.getState().refresh(doc.id);
+  }, [doc?.id]);
 
   useEffect(() => {
     getCurrentWindow()
@@ -76,15 +90,27 @@ export default function App() {
       {doc ? (
         <>
           <Toolbar doc={doc} />
-          <div className="main">
-            <Sidebar doc={doc} />
-            <div className="stage">
-              <Viewer key={doc.id} doc={doc} />
-              {searchOpen && <SearchBar key={doc.id} doc={doc} />}
+          {showCompare ? (
+            <div className="main">
+              <CompareView />
             </div>
-            <AssistantPanel doc={doc} />
-          </div>
+          ) : (
+            <div className="main">
+              <Sidebar doc={doc} />
+              <div className="stage">
+                {viewing ? <VersionView key={`${doc.id}:${viewing}`} doc={doc} versionId={viewing} /> : <Viewer key={doc.id} doc={doc} />}
+                {searchOpen && !viewing && <SearchBar key={doc.id} doc={doc} />}
+                <HistoryBanner doc={doc} />
+              </div>
+              <AssistantPanel doc={doc} />
+              <HistoryPanel doc={doc} />
+            </div>
+          )}
         </>
+      ) : showCompare ? (
+        <div className="main" style={{ gridRow: "2 / 4" }}>
+          <CompareView />
+        </div>
       ) : (
         <Home />
       )}

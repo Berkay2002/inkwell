@@ -1,0 +1,249 @@
+import { describe, expect, it } from "vitest";
+import type { Change, Comparison, VersionInfo } from "./history";
+import {
+  alignRows,
+  categoryCounts,
+  dayLabel,
+  flatOrder,
+  groupChanges,
+  groupVersions,
+  inlineRuns,
+  marksFor,
+  matchesFilter,
+  mergeLine,
+  pageChips,
+  pageSummary,
+  parentOf,
+  rowOf,
+  stepIndex,
+  toneOf,
+  uncovered,
+} from "./historyLogic";
+
+const at = (y: number, mo: number, d: number, h = 12, mi = 0) => new Date(y, mo - 1, d, h, mi).getTime();
+const NOW = at(2026, 10, 10, 15);
+
+const ver = (id: string, created: number, o: Partial<VersionInfo> = {}): VersionInfo => ({
+  id,
+  parents: [],
+  created,
+  author: { type: "user" },
+  kind: { type: "save" },
+  label: "Saved",
+  summary: [],
+  name: null,
+  pagesTouched: [],
+  size: 1,
+  broken: false,
+  ...o,
+});
+
+describe("day grouping", () => {
+  it("labels today, yesterday and older days", () => {
+    expect(dayLabel(at(2026, 10, 10, 1), NOW)).toBe("Today");
+    expect(dayLabel(at(2026, 10, 9, 23), NOW)).toBe("Yesterday");
+    expect(dayLabel(at(2026, 10, 2), NOW)).toBe("2 Oct");
+    expect(dayLabel(at(2025, 12, 31), NOW)).toBe("31 Dec 2025");
+  });
+
+  it("yesterday works across a month boundary", () => {
+    expect(dayLabel(at(2026, 9, 30), at(2026, 10, 1, 8))).toBe("Yesterday");
+  });
+
+  it("groups newest first, pins named versions and keeps them out of the days", () => {
+    const vs = [
+      ver("a", at(2026, 10, 9, 16)),
+      ver("b", at(2026, 10, 10, 9)),
+      ver("c", at(2026, 10, 10, 14), { author: { type: "assistant", turn_id: "t" } }),
+      ver("d", at(2026, 10, 2, 10), { name: "Signed by tenant" }),
+    ];
+    const g = groupVersions(vs, "all", false, NOW);
+    expect(g.pinned.map((v) => v.id)).toEqual(["d"]);
+    expect(g.days.map((d) => [d.label, d.items.map((v) => v.id)])).toEqual([
+      ["Today", ["c", "b"]],
+      ["Yesterday", ["a"]],
+    ]);
+  });
+
+  it("only named versions hides the days", () => {
+    const vs = [ver("a", at(2026, 10, 9)), ver("n", at(2026, 10, 8), { name: "Final" })];
+    const g = groupVersions(vs, "all", true, NOW);
+    expect(g.pinned.map((v) => v.id)).toEqual(["n"]);
+    expect(g.days).toEqual([]);
+  });
+});
+
+describe("filters", () => {
+  const you = ver("y", 1);
+  const asst = ver("a", 2, { author: { type: "assistant", turn_id: "t" } });
+  const out = ver("o", 3, { author: { type: "external" }, kind: { type: "external" } });
+  const auto = ver("s", 4, { author: { type: "autosave" }, kind: { type: "autosave" } });
+  const first = ver("i", 0, { author: { type: "external" }, kind: { type: "import" } });
+  it("splits by author", () => {
+    const names = (f: Parameters<typeof matchesFilter>[1]) => [you, asst, out, auto, first].filter((v) => matchesFilter(v, f)).map((v) => v.id);
+    expect(names("all")).toEqual(["y", "a", "o", "s", "i"]);
+    expect(names("you")).toEqual(["y", "s"]);
+    expect(names("assistant")).toEqual(["a"]);
+    expect(names("outside")).toEqual(["o"]);
+  });
+
+  it("combines with the named toggle", () => {
+    const vs = [ver("n", 5, { name: "Mine" }), ver("m", 6, { name: "Theirs", author: { type: "assistant", turn_id: "t" } })];
+    expect(groupVersions(vs, "assistant", true, NOW).pinned.map((v) => v.id)).toEqual(["m"]);
+  });
+});
+
+describe("version helpers", () => {
+  it("finds the parent, else the next older version", () => {
+    const a = ver("a", 1);
+    const b = ver("b", 2, { parents: ["a"] });
+    const c = ver("c", 3, { parents: ["gone"] });
+    expect(parentOf([c, b, a], b)?.id).toBe("a");
+    expect(parentOf([c, b, a], c)?.id).toBe("b");
+    expect(parentOf([c, b, a], a)).toBeNull();
+  });
+
+  it("page chips are 1-based and capped", () => {
+    expect(pageChips([2, 0])).toEqual(["p. 1", "p. 3"]);
+    expect(pageChips([0, 1, 2, 3, 4])).toEqual(["p. 1", "p. 2", "p. 3", "+2"]);
+    expect(pageChips([])).toEqual([]);
+  });
+});
+
+const chg = (kind: Change["kind"], o: Partial<Change> = {}): Change => ({
+  kind,
+  aPage: null,
+  bPage: null,
+  rectA: null,
+  rectB: null,
+  label: kind,
+  detail: { type: "none" },
+  ...o,
+});
+
+describe("change lists", () => {
+  const changes: Change[] = [
+    chg("metadataChanged"),
+    chg("textChanged", { aPage: 2, bPage: 2 }),
+    chg("annotationAdded", { bPage: 0 }),
+    chg("pageAdded", { bPage: 2 }),
+    chg("formFieldChanged", { aPage: 0, bPage: 0 }),
+  ];
+
+  it("groups by page with the document last and honours the category filter", () => {
+    const g = groupChanges(changes, null);
+    expect(g.map((x) => [x.page, x.items.map((i) => i.index)])).toEqual([
+      [0, [2, 4]],
+      [2, [1, 3]],
+      [null, [0]],
+    ]);
+    expect(flatOrder(g)).toEqual([2, 4, 1, 3, 0]);
+    const only = groupChanges(changes, new Set(["text", "forms"]));
+    expect(flatOrder(only)).toEqual([4, 1]);
+  });
+
+  it("counts by category", () => {
+    expect(categoryCounts(changes)).toEqual({ text: 1, images: 0, annotations: 1, pages: 1, forms: 1, metadata: 1 });
+  });
+
+  it("stepper wraps and starts from either end", () => {
+    expect(stepIndex(-1, 1, 4)).toBe(0);
+    expect(stepIndex(-1, -1, 4)).toBe(3);
+    expect(stepIndex(3, 1, 4)).toBe(0);
+    expect(stepIndex(0, -1, 4)).toBe(3);
+    expect(stepIndex(1, 1, 4)).toBe(2);
+    expect(stepIndex(0, 1, 0)).toBe(-1);
+  });
+
+  it("tone follows the direction of a text change", () => {
+    const run = (op: "equal" | "insert" | "delete") => ({ op, text: "x", boxesA: [], boxesB: [] });
+    const t = (ops: ("equal" | "insert" | "delete")[]) => chg("textChanged", { detail: { type: "text", runs: ops.map(run) } });
+    expect(toneOf(t(["equal", "insert"]))).toBe("add");
+    expect(toneOf(t(["delete"]))).toBe("del");
+    expect(toneOf(t(["delete", "insert"]))).toBe("chg");
+    expect(toneOf(chg("annotationRemoved"))).toBe("del");
+  });
+});
+
+describe("page summary and rows", () => {
+  const cmp = (o: Partial<Comparison["pages"]>, changes: Change[] = []): Comparison => ({
+    pages: { aPages: 6, bPages: 6, bToA: [0, 1, null, 2, 3, 4], removedA: [], ...o },
+    changes,
+    identical: false,
+  });
+
+  it("names inserted, removed, moved and rotated pages", () => {
+    const moved = [
+      chg("pageMoved", { detail: { type: "pageMoved", from: 4, to: 8 } }),
+      chg("pageMoved", { detail: { type: "pageMoved", from: 5, to: 9 } }),
+      chg("pageMoved", { detail: { type: "pageMoved", from: 0, to: 2 } }),
+      chg("pageRotated", { bPage: 3 }),
+    ];
+    expect(pageSummary(cmp({ removedA: [1] }, moved))).toEqual([
+      "Page 3 inserted",
+      "Page 2 removed",
+      "Page 1 moved to 3",
+      "Pages 5-6 moved to 9",
+      "Page 4 rotated",
+    ]);
+    expect(pageSummary(cmp({ bToA: [0, null, null, 1] }))).toEqual(["Pages 2-3 inserted"]);
+  });
+
+  it("aligns pages into rows, removed pages keep their place", () => {
+    const rows = alignRows({ aPages: 4, bPages: 4, bToA: [0, null, 1, 3], removedA: [2] });
+    expect(rows).toEqual([
+      { a: 0, b: 0 },
+      { a: null, b: 1 },
+      { a: 1, b: 2 },
+      { a: 2, b: null },
+      { a: 3, b: 3 },
+    ]);
+    expect(rowOf(rows, chg("textChanged", { aPage: 1, bPage: 2 }))).toBe(2);
+    expect(rowOf(rows, chg("pageRemoved", { aPage: 2 }))).toBe(3);
+    expect(rowOf(rows, chg("metadataChanged"))).toBe(-1);
+  });
+});
+
+describe("inline word diff", () => {
+  it("keeps a little context around the edit", () => {
+    const eq = (text: string) => ({ op: "equal" as const, text, boxesA: [], boxesB: [] });
+    const out = inlineRuns([
+      eq("one two three four five six seven eight nine ten"),
+      { op: "delete", text: "old", boxesA: [], boxesB: [] },
+      { op: "insert", text: "new", boxesA: [], boxesB: [] },
+      eq("a b c d e f g h i j"),
+    ]);
+    expect(out.map((r) => r.text)).toEqual(["… eight nine ten", "old", "new", "a b c …"]);
+    expect(inlineRuns([eq("short bit")])[0].text).toBe("short bit");
+  });
+});
+
+describe("marks", () => {
+  it("merges word boxes on one line", () => {
+    expect(mergeLine([[0, 0, 10, 10], [12, 0, 20, 10], [0, 20, 10, 30]])).toEqual([[0, 0, 20, 10], [0, 20, 10, 30]]);
+  });
+
+  it("draws inserted words on B, deleted on A, nothing for additions on A", () => {
+    const text = chg("textChanged", {
+      aPage: 0,
+      bPage: 0,
+      detail: {
+        type: "text",
+        runs: [
+          { op: "delete", text: "blank", boxesA: [[1, 1, 5, 5]], boxesB: [] },
+          { op: "insert", text: "Novak", boxesA: [], boxesB: [[2, 2, 9, 9]] },
+        ],
+      },
+    });
+    const added = chg("annotationAdded", { bPage: 1, rectB: [0, 0, 4, 4] });
+    const a = marksFor([text, added], "a");
+    const b = marksFor([text, added], "b");
+    expect(a.map((m) => [m.tone, m.change])).toEqual([["del", 0]]);
+    expect(b.map((m) => [m.tone, m.change, m.page])).toEqual([["add", 0, 0], ["add", 1, 1]]);
+  });
+
+  it("drops pixel boxes already explained by a mark", () => {
+    const marks = [{ rect: [0, 0, 100, 20] as [number, number, number, number], tone: "add" as const, change: 0, page: 0 }];
+    expect(uncovered([[5, 2, 50, 18], [200, 200, 220, 220]], marks)).toEqual([[200, 200, 220, 220]]);
+  });
+});
