@@ -74,6 +74,9 @@ pub struct SanitizeReport {
     pub annotations: u32,
     pub form_fields: u32,
     pub bookmarks: u32,
+    /// Other text quoting a redacted string: tagged-PDF alt text, page labels, URIs, named
+    /// destinations, rich text and the like.
+    pub quoting: u32,
 }
 
 pub(super) fn del(o: &mut PdfObject, key: &str) -> Result<u32> {
@@ -105,7 +108,9 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
 
     if o.hidden_layers {
         // Oracle against lexer differentials: with /OCProperties gone every layer shows, so any
-        // text MuPDF shows now and did not show before is hidden content the stripping missed.
+        // glyph MuPDF shows now and did not show before (same char at the same place) is hidden
+        // content the stripping missed. Positions, not just counts: visible text cut by the fail-
+        // closed rules must not cancel out revealed text with the same letters.
         let before = page_chars(doc)?;
         r.hidden_layer_blocks = strip_hidden_layers(doc)?;
         for (p, (b, a)) in before.iter().zip(page_chars(doc)?).enumerate() {
@@ -164,7 +169,7 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
         let n = drop_annots(&mut page, |a, st| {
             let quoting = {
                 let mut q = false;
-                scan_strings(a, 0, &mut |s| q |= quotes(&res, s))?;
+                scan_strings(a, 0, &mut |s, name| q |= !name && quotes(&res, s))?;
                 q
             };
             if st == b"Widget" {
@@ -230,17 +235,118 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
         {
             r.metadata += del(&mut cat, "Metadata")?;
         }
+        // Old-style named destinations are name keys of the catalog /Dests dict.
+        if let Some(mut dests) = cat.get_dict("Dests")? {
+            for i in (0..dests.dict_len()? as i32).rev() {
+                if let Some(k) = dests.get_dict_key(i)?
+                    && quotes(&res, &String::from_utf8_lossy(&k.as_name()?))
+                {
+                    dests.dict_delete(k)?;
+                    r.quoting += 1;
+                }
+            }
+        }
     }
+    scrub_reachable(doc, o, &res, &mut r)?;
     Ok(r)
 }
 
-/// Per page: how often each char appears in the text MuPDF shows.
-fn page_chars(doc: &PdfDocument) -> Result<Vec<std::collections::HashMap<char, u32>>> {
+/// Text-bearing keys removed wherever their value quotes a redacted string: tagged-PDF alternate
+/// text, titles and expansions, page label prefixes, URIs, rich text, field values and tooltips.
+const QUOTE_KEYS: [&str; 17] =
+    ["ActualText", "Alt", "E", "T", "TU", "TM", "URI", "RC", "RV", "DS", "P", "Contents", "V", "DV", "Title", "Subj", "NM"];
+
+/// Walks every object reachable from the trailer: removes what the switches remove wherever it
+/// sits (XMP and piece info on any object, additional actions and JavaScript on any dict, embedded
+/// file streams of any file specification) and text quoting a redacted string (`QUOTE_KEYS`,
+/// name-tree entries whose key quotes it).
+fn scrub_reachable(doc: &PdfDocument, o: &Sanitize, res: &[Regex], r: &mut SanitizeReport) -> Result<()> {
+    let mut refs = Vec::new();
+    scrub(&mut doc.trailer()?, o, res, r, 0, &mut refs)?;
+    let mut seen = HashSet::new();
+    while let Some(n) = refs.pop() {
+        if seen.insert(n) {
+            scrub(&mut doc.new_indirect(n, 0)?, o, res, r, 0, &mut refs)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a string (or, with `streams`, a text stream such as rich text) quotes a redacted string.
+fn quoting_value(v: &PdfObject, res: &[Regex], streams: bool) -> Result<bool> {
+    Ok(if v.is_string()? {
+        quotes(res, &text_of(v)?)
+    } else if streams && v.is_stream()? {
+        quotes(res, &String::from_utf8_lossy(&v.read_stream()?))
+    } else {
+        false
+    })
+}
+
+fn scrub(o: &mut PdfObject, opts: &Sanitize, res: &[Regex], r: &mut SanitizeReport, depth: u32, refs: &mut Vec<i32>) -> Result<()> {
+    if depth > 32 {
+        let place = "an object nested deeper than 32 levels (not sanitized)".to_string();
+        return Err(RedactError::Leaked(vec![super::Leak { needle: String::new(), place, critical: true }]));
+    }
+    let children = if o.is_dict()? {
+        if opts.metadata {
+            r.metadata += del(o, "Metadata")? + del(o, "PieceInfo")?;
+        }
+        if opts.scripts_actions {
+            r.scripts_actions += del(o, "AA")? + del(o, "JS")?;
+        }
+        if opts.embedded_files {
+            r.embedded_files += del(o, "EF")? + del(o, "RichMediaContent")?;
+        }
+        if !res.is_empty() {
+            for key in QUOTE_KEYS {
+                // Only rich text may be a stream: /Contents of a page is its content stream.
+                if let Some(v) = o.get_dict(key)?
+                    && quoting_value(&v, res, matches!(key, "RC" | "RV"))?
+                {
+                    o.dict_delete(key)?;
+                    r.quoting += 1;
+                }
+            }
+            if let Some(mut names) = o.get_dict("Names")?
+                && names.is_array()?
+            {
+                for i in (0..names.len()? as i32 / 2).rev() {
+                    if let Some(k) = names.get_array(2 * i)?
+                        && quoting_value(&k, res, false)?
+                    {
+                        names.array_delete(2 * i + 1)?;
+                        names.array_delete(2 * i)?;
+                        r.quoting += 1;
+                    }
+                }
+            }
+        }
+        (0..o.dict_len()? as i32).map(|i| o.get_dict_val(i)).collect::<std::result::Result<Vec<_>, _>>()?
+    } else if o.is_array()? {
+        (0..o.len()? as i32).map(|i| o.get_array(i)).collect::<std::result::Result<Vec<_>, _>>()?
+    } else {
+        return Ok(());
+    };
+    for mut c in children.into_iter().flatten() {
+        if c.is_indirect()? {
+            refs.push(c.as_indirect()?);
+        } else {
+            scrub(&mut c, opts, res, r, depth + 1, refs)?;
+        }
+    }
+    Ok(())
+}
+
+/// Per page: how often each char appears at each (rounded) position in the text MuPDF shows.
+type Glyphs = std::collections::HashMap<(char, i32, i32), u32>;
+
+fn page_chars(doc: &PdfDocument) -> Result<Vec<Glyphs>> {
     let mut v = Vec::new();
     for p in 0..doc.page_count()? {
-        let mut m = std::collections::HashMap::new();
-        for c in super::index_page(&doc.load_page(p)?)?.text.chars().filter(|c| !c.is_whitespace()) {
-            *m.entry(c).or_insert(0) += 1;
+        let mut m = Glyphs::new();
+        for c in super::index_page(&doc.load_page(p)?)?.chars.iter().filter(|c| !c.hidden && !c.c.is_whitespace()) {
+            *m.entry((c.c, c.quad.ul.x.round() as i32, c.quad.ul.y.round() as i32)).or_insert(0) += 1;
         }
         v.push(m);
     }
@@ -339,27 +445,49 @@ pub(super) fn is_image(o: &PdfObject) -> Result<bool> {
     Ok(o.get_dict("Subtype")?.map(|s| s.as_name()).transpose()?.as_deref() == Some(b"Image"))
 }
 
-/// Removes invisible text page by page with a page-sized redaction that only targets invisible text.
+fn has_invisible_text(doc: &PdfDocument, p: i32) -> Result<bool> {
+    Ok(doc
+        .load_page(p)?
+        .to_text_page(TextPageFlags::empty())?
+        .blocks()
+        .flat_map(|b| b.lines().flat_map(|l| l.chars().map(|c| c.flags()).collect::<Vec<_>>()).collect::<Vec<_>>())
+        .any(|f| !f.intersects(TextCharFlags::FILLED | TextCharFlags::STROKED)))
+}
+
+/// Removes invisible text page by page with a page-sized redaction that only targets invisible
+/// text. The page's annotations are set aside meanwhile: MuPDF drops every link and free-text
+/// annotation a redaction touches, and this one touches all of them.
 fn strip_invisible_text(doc: &mut PdfDocument) -> Result<u32> {
     let mut n = 0;
     for p in 0..doc.page_count()? {
-        let mut page = doc.load_pdf_page(p)?;
-        let invisible = page
-            .to_text_page(TextPageFlags::empty())?
-            .blocks()
-            .flat_map(|b| b.lines().flat_map(|l| l.chars().map(|c| c.flags()).collect::<Vec<_>>()).collect::<Vec<_>>())
-            .any(|f| !f.intersects(TextCharFlags::FILLED | TextCharFlags::STROKED));
-        if !invisible {
+        if !has_invisible_text(doc, p)? {
             continue;
         }
-        let bounds = page.bounds()?;
-        let annot = page.add_redact_annotation(bounds)?;
-        annot.apply_redaction_with_options(PdfRedactOptions {
-            black_boxes: false,
-            image_method: PdfRedactImageMethod::None,
-            line_art: PdfRedactLineArtMethod::None,
-            text: PdfRedactTextMethod::RemoveInvisible,
-        })?;
+        let mut obj = doc.find_page(p)?;
+        let annots = obj.get_dict("Annots")?;
+        if annots.is_some() {
+            obj.dict_delete("Annots")?;
+        }
+        {
+            let mut page = doc.load_pdf_page(p)?;
+            let bounds = page.bounds()?;
+            let annot = page.add_redact_annotation(bounds)?;
+            annot.apply_redaction_with_options(PdfRedactOptions {
+                black_boxes: false,
+                image_method: PdfRedactImageMethod::None,
+                line_art: PdfRedactLineArtMethod::None,
+                text: PdfRedactTextMethod::RemoveInvisible,
+            })?;
+        }
+        match annots {
+            Some(a) => obj.dict_put("Annots", a)?,
+            None => obj.dict_delete("Annots")?,
+        }
+        // Invisible text MuPDF did not cut (e.g. in an annotation appearance) must not pass as removed.
+        if has_invisible_text(doc, p)? {
+            let place = format!("page {}: invisible text left after sanitize", p + 1);
+            return Err(RedactError::Leaked(vec![super::Leak { needle: String::new(), place, critical: true }]));
+        }
         n += 1;
     }
     Ok(n)
@@ -408,8 +536,9 @@ fn off_ocgs(doc: &PdfDocument) -> Result<Option<HashSet<i32>>> {
         }
     }
     for &n in &all {
-        let state = doc.new_indirect(n, 0)?.get_dict("Usage")?.and_then(|u| u.get_dict("View").ok().flatten());
-        if let Some(v) = state.and_then(|v| v.get_dict("ViewState").ok().flatten())
+        let usage = doc.new_indirect(n, 0)?.get_dict("Usage")?;
+        let view = usage.map(|u| u.get_dict("View")).transpose()?.flatten();
+        if let Some(v) = view.map(|v| v.get_dict("ViewState")).transpose()?.flatten()
             && v.as_name()? == b"OFF"
         {
             off.insert(n);
@@ -581,12 +710,24 @@ fn strip_hidden_layers(doc: &mut PdfDocument) -> Result<u32> {
                 let mut first = streams[0].clone();
                 first.write_stream_buffer(&Buffer::from_bytes(&out)?)?;
                 page.dict_put("Contents", first)?;
-                drop_hidden_xobjects(&res, &hidden)?;
                 prune_resources(doc, p as i32)?;
                 count += n;
             }
         }
-        count += drop_annots(&mut page, |a, _| Ok(a.get_dict("OC")?.map(|oc| oc_hidden(&oc, &off)).transpose()? == Some(true)))?;
+        // Hidden XObjects go even when nothing draws them: they would still carry their content.
+        drop_hidden_xobjects(&res, &hidden)?;
+        let mut widgets = Vec::new();
+        count += drop_annots(&mut page, |a, st| {
+            let gone = a.get_dict("OC")?.map(|oc| oc_hidden(&oc, &off)).transpose()? == Some(true);
+            if gone && st == b"Widget" {
+                widgets.push(a.clone());
+            }
+            Ok(gone)
+        })?;
+        // A hidden widget's field (and its value) must not stay in the form.
+        for w in widgets {
+            remove_field(doc, &w)?;
+        }
         for a in annots_of(&page)? {
             let Some(ap) = a.get_dict("AP")? else { continue };
             for key in ["N", "R", "D"] {
@@ -611,9 +752,9 @@ fn strip_hidden_layers(doc: &mut PdfDocument) -> Result<u32> {
             let (out, n) = strip_hidden(&form.read_stream()?, &shown, &hidden);
             if n > 0 {
                 form.write_stream_buffer(&Buffer::from_bytes(&out)?)?;
-                drop_hidden_xobjects(&res, &hidden)?;
                 count += n;
             }
+            drop_hidden_xobjects(&res, &hidden)?;
             stack.extend(nested);
         }
     }
@@ -765,20 +906,22 @@ fn strip_hidden(src: &[u8], shown: &HashSet<Vec<u8>>, xobjs: &HashSet<Vec<u8>>) 
             b">>" | b"]" if nest > 0 => nest -= 1,
             _ => {}
         }
-        // Words inside an operand dict or array (`5 0 R`, `true`) are not operators.
         let Tok::Op(op) = tok else {
             operands.push((start, tok));
             continue;
         };
-        if nest > 0 {
+        // `R` inside an operand dict is a reference, not an operator. Any other operator ends a
+        // dangling `[` or `<<`: viewers recover differently there, so the block is judged anyway.
+        if nest > 0 && op == b"R" {
             operands.push((start, Tok::Other));
             continue;
         }
+        nest = 0;
         let first = operands.first().map_or(start, |o| o.0);
         match (dropping, op.as_slice()) {
             (None, b"BDC")
-                if matches!(operands.first(), Some((_, Tok::Name(oc))) if oc == b"OC")
-                    && !matches!(operands.as_slice(), [_, (_, Tok::Name(n))] if shown.contains(n)) =>
+                if operands.iter().any(|o| matches!(&o.1, Tok::Name(oc) if oc == b"OC"))
+                    && !matches!(operands.as_slice(), [(_, Tok::Name(oc)), (_, Tok::Name(n))] if oc == b"OC" && shown.contains(n)) =>
             {
                 dropping = Some((first, 1));
             }
@@ -832,5 +975,11 @@ BI /W 1 /H 1 ID \x00EMC\xff EI  /OC /OC2 BDC (kept) Tj EMC % EMC comment\n/#4Fth
             strip_hidden(b"a /OC <</Type/OCMD/OCGs 5 0 R>> BDC (x) Tj EMC /OC /Nope BDC (y) Tj EMC b", &props, &xobjs),
             (b"a   b".to_vec(), 2)
         );
+        // A dangling `[` (or `<<`) before a hidden block or a hidden Do must not hide it from the cut.
+        assert_eq!(strip_hidden(b"a [ /OC /OC1 BDC (x) Tj EMC b", &props, &xobjs), (b"a  b".to_vec(), 1));
+        assert_eq!(strip_hidden(b"a << /OC /OC1 BDC (x) Tj EMC b", &props, &xobjs), (b"a  b".to_vec(), 1));
+        assert_eq!(strip_hidden(b"a [ /Im1 Do b", &props, &xobjs), (b"a  b".to_vec(), 1));
+        // TJ arrays and references in property dicts still work.
+        assert_eq!(strip_hidden(b"[(a) -20 (b)] TJ /OC /OC2 BDC EMC", &props, &xobjs).1, 0);
     }
 }

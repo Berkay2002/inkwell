@@ -13,6 +13,15 @@
 //! resources a fully covered pattern/form leaves unused are pruned; no empty /AcroForm is added;
 //! and a full rewrite is re-read and searched before `apply` succeeds. Known limit: text inside a
 //! partly covered tiling pattern or soft mask is not cut by MuPDF, so `apply` refuses (Leaked).
+//!
+//! Limits that stay (verify cannot close them):
+//! - A corrupt stream MuPDF decodes partially passes as the part it decoded: the tail past the
+//!   corruption is neither searched nor removed. A stream that fails outright counts as a leak.
+//! - Needles under 5 chars are searched in page text and object strings (3+) only, not in streams,
+//!   names or raw bytes (8+ there): in binary data they would match by chance. A short code
+//!   quoted in a content stream outside the marks is not caught.
+//! - Names (5+ chars) are searched too, so redacting a word that is part of a standard PDF name
+//!   (e.g. "Resources") fails unless the word still shows elsewhere on a page.
 
 mod patterns;
 mod sanitize;
@@ -189,6 +198,59 @@ fn literal_regex(needle: &str, case_sensitive: bool, whole_word: bool) -> Result
     Ok(Some(RegexBuilder::new(&pat).case_insensitive(!case_sensitive).build()?))
 }
 
+/// A second view of the page text with joins a reader makes but extraction does not: spaces
+/// inside letter-spaced runs ("K E R N", 3+ single chars) and a hyphen between two letters (a
+/// WinAnsi soft hyphen extracts as '-'). Dropped chars become hidden, so their quads still go with
+/// a match. Also returns where the drops are, so `find` keeps only matches that need one.
+fn joined(pt: &PageText) -> Option<(PageText, Vec<usize>)> {
+    let t: Vec<(usize, char)> = pt.text.char_indices().collect();
+    let sep = |i: usize| t.get(i).is_none_or(|c| c.1 == ' ' || c.1 == '\n');
+    let single = |i: usize| !sep(i) && (i == 0 || sep(i - 1)) && sep(i + 1);
+    let mut drop = vec![false; t.len()];
+    let mut i = 0;
+    while i < t.len() {
+        if !single(i) {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while t.get(j + 1).is_some_and(|c| c.1 == ' ') && single(j + 2) {
+            j += 2;
+        }
+        if j >= i + 4 {
+            (i + 1..j).step_by(2).for_each(|s| drop[s] = true);
+        }
+        i = j + 1;
+    }
+    for i in 1..t.len().saturating_sub(1) {
+        if t[i].1 == '-' && t[i - 1].1.is_alphabetic() && t[i + 1].1.is_alphabetic() {
+            drop[i] = true;
+        }
+    }
+    if !drop.contains(&true) {
+        return None;
+    }
+    let mut text = String::with_capacity(pt.text.len());
+    let mut map = vec![0; pt.text.len() + 1];
+    let mut dropped = HashSet::new();
+    for (k, &(b, c)) in t.iter().enumerate() {
+        map[b] = text.len();
+        if drop[k] {
+            dropped.insert(b);
+        } else {
+            text.push(c);
+        }
+    }
+    map[pt.text.len()] = text.len();
+    let chars = pt
+        .chars
+        .iter()
+        .map(|c| IChar { byte: map[c.byte], c: c.c, quad: c.quad.clone(), line: c.line, hidden: c.hidden || dropped.contains(&c.byte) })
+        .collect();
+    let at = dropped.iter().map(|&b| map[b]).collect();
+    Some((PageText { text, chars }, at))
+}
+
 pub fn find(doc: &Document, query: &Query) -> Result<Vec<Hit>> {
     let re = match query {
         Query::Text { needle, case_sensitive, whole_word } => literal_regex(needle, *case_sensitive, *whole_word)?,
@@ -203,15 +265,23 @@ pub fn find(doc: &Document, query: &Query) -> Result<Vec<Hit>> {
     let mut hits = Vec::new();
     for p in 0..doc.page_count()? {
         let pt = index_page(&doc.load_page(p)?)?;
-        let ranges = match (query, &re) {
-            (Query::Pattern(pat), _) => pat.find(&pt.text),
-            (_, Some(re)) => re.find_iter(&pt.text).filter(|m| !m.is_empty()).map(|m| m.range()).collect(),
-            _ => Vec::new(),
-        };
-        for r in ranges {
-            let quads = pt.quads(&r);
-            if !quads.is_empty() {
-                hits.push(Hit { page: p, text: pt.text[r].to_owned(), quads });
+        let alt = joined(&pt);
+        let views = std::iter::once((&pt, None)).chain(alt.as_ref().map(|(v, at)| (v, Some(at))));
+        for (pt, joins) in views {
+            let ranges = match (query, &re) {
+                (Query::Pattern(pat), _) => pat.find(&pt.text),
+                (_, Some(re)) => re.find_iter(&pt.text).filter(|m| !m.is_empty()).map(|m| m.range()).collect(),
+                _ => Vec::new(),
+            };
+            for r in ranges {
+                // The joined view only adds matches that need a join; the rest the plain view has.
+                if joins.is_some_and(|at| !at.iter().any(|&b| r.start < b && b < r.end)) {
+                    continue;
+                }
+                let quads = pt.quads(&r);
+                if !quads.is_empty() {
+                    hits.push(Hit { page: p, text: pt.text[r].to_owned(), quads });
+                }
             }
         }
     }
@@ -400,6 +470,11 @@ fn push_needle(needles: &mut Vec<String>, s: &str) {
         }
     };
     add(&s);
+    // Letter-spaced text ("K E R N") is quoted elsewhere without the spaces.
+    let toks: Vec<&str> = s.split(' ').collect();
+    if toks.len() >= 3 && toks.iter().all(|t| t.chars().count() == 1) {
+        add(&toks.concat());
+    }
     // Long single words too, so a name or code quoted elsewhere is caught on its own.
     for w in s.split(' ') {
         let w = w.trim_matches(|c: char| !c.is_alphanumeric());
@@ -827,6 +902,14 @@ fn check_page_text(
 /// Reopens a written copy and searches it everywhere: page text, every object's strings, every
 /// decoded non-image stream, and the raw file bytes.
 pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
+    verify_at(bytes, t, 0)
+}
+
+/// Largest decompressed attachment verify reads; bigger ones count as unread.
+const MAX_INFLATE: u64 = 256 << 20;
+
+/// `verify_bytes` at attachment nesting `depth` (a PDF attached to a PDF...).
+fn verify_at(bytes: &[u8], t: &Targets, depth: u32) -> Result<VerifyReport> {
     let mut rep = VerifyReport::default();
     if t.needles.is_empty() {
         return Ok(rep);
@@ -857,10 +940,21 @@ pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
                 continue;
             }
         };
-        let mut found = HashSet::new();
-        scan_strings(&obj, 0, &mut |s| found.extend(strings.matches(s.as_bytes()).iter()))?;
+        let (mut found, mut found_names) = (HashSet::new(), HashSet::new());
+        scan_strings(&obj, 0, &mut |s, name| {
+            // Names (e.g. /Dests keys, resource names) only for needles of 5+ chars: shorter ones
+            // match standard names like /Font or /Page by chance.
+            if name {
+                found_names.extend(streams.matches(s.as_bytes()).iter());
+            } else {
+                found.extend(strings.matches(s.as_bytes()).iter());
+            }
+        })?;
         for k in found {
             hits.push((sn[k], format!("object {i}: string"), true));
+        }
+        for k in found_names {
+            hits.push((tn[k], format!("object {i}: name"), false));
         }
         // `is_stream` needs the reference: a resolved dict has lost its object number.
         let r = doc.new_indirect(i, 0)?;
@@ -871,7 +965,11 @@ pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
             };
             // Only page content can explain a hit by an unmarked occurrence; attachments and XMP cannot.
             let ty = r.get_dict("Type")?.map(|t| t.as_name()).transpose()?;
-            let strict = matches!(ty.as_deref(), Some(b"EmbeddedFile" | b"Metadata"));
+            if ty.as_deref() == Some(b"EmbeddedFile") {
+                scan_attachment(&data, t, (&streams, &tn), depth, &format!("object {i}: attachment"), &mut rep.leaks)?;
+                continue;
+            }
+            let strict = ty.as_deref() == Some(b"Metadata");
             for k in streams.matches(&data).iter() {
                 hits.push((tn[k], format!("object {i}: stream"), strict));
             }
@@ -886,6 +984,108 @@ pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
     Ok(rep)
 }
 
+/// Searches an attachment's content, every hit critical. Unpacks what it can (gzip, zip, an
+/// attached PDF, UTF-16 text); anything it cannot read counts as a leak, because it was not checked.
+fn scan_attachment(
+    data: &[u8],
+    t: &Targets,
+    (set, ns): (&regex::bytes::RegexSet, &[&String]),
+    depth: u32,
+    place: &str,
+    leaks: &mut Vec<Leak>,
+) -> Result<()> {
+    use std::io::Read;
+    let unread = |why: &str| Leak { needle: String::new(), place: format!("{place}: {why}"), critical: true };
+    let inflate = |r: &mut dyn Read| -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        r.take(MAX_INFLATE + 1).read_to_end(&mut out).ok()?;
+        (out.len() as u64 <= MAX_INFLATE).then_some(out)
+    };
+    if depth > 4 {
+        leaks.push(unread("nested too deep to scan"));
+    } else if data.starts_with(b"%PDF") {
+        match PdfDocument::from_bytes(data) {
+            Err(_) => leaks.push(unread("attached PDF does not open")),
+            Ok(_) => {
+                let sub = Targets { pages: Vec::new(), needles: t.needles.clone() };
+                for l in verify_at(data, &sub, depth + 1)?.leaks {
+                    leaks.push(Leak { needle: l.needle, place: format!("{place}: attached PDF: {}", l.place), critical: true });
+                }
+            }
+        }
+    } else if data.starts_with(&[0x1f, 0x8b]) {
+        match inflate(&mut flate2::read::GzDecoder::new(data)) {
+            Some(d) => scan_attachment(&d, t, (set, ns), depth + 1, &format!("{place}: gzip"), leaks)?,
+            None => leaks.push(unread("gzip data that does not decode")),
+        }
+    } else if data.starts_with(b"PK\x03\x04") || data.starts_with(b"PK\x05\x06") {
+        // The raw bytes too: stored entries, comments, data outside the central directory.
+        for k in set.matches(data).iter() {
+            leaks.push(Leak { needle: ns[k].clone(), place: format!("{place}: zip bytes"), critical: true });
+        }
+        match zip_entries(data, &inflate) {
+            Some(entries) => {
+                for (name, d) in entries {
+                    scan_attachment(&d, t, (set, ns), depth + 1, &format!("{place}: zip entry {name}"), leaks)?;
+                }
+            }
+            None => leaks.push(unread("zip archive verify cannot read (encrypted, zip64 or unknown method)")),
+        }
+    } else {
+        let text: std::borrow::Cow<[u8]> = match data {
+            [0xff, 0xfe, rest @ ..] | [0xfe, 0xff, rest @ ..] => {
+                let le = data[0] == 0xff;
+                let units = rest.chunks_exact(2).map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) });
+                String::from_utf16_lossy(&units.collect::<Vec<_>>()).into_bytes().into()
+            }
+            // Text: no control bytes other than whitespace (UTF-8 and single-byte encodings pass).
+            _ if !data.iter().any(|&b| b < 0x09 || (0x0e..0x20).contains(&b)) => data.into(),
+            _ => {
+                leaks.push(unread("binary attachment verify cannot read (sanitize embedded files to remove it)"));
+                return Ok(());
+            }
+        };
+        for k in set.matches(&text).iter() {
+            leaks.push(Leak { needle: ns[k].clone(), place: place.to_string(), critical: true });
+        }
+    }
+    Ok(())
+}
+
+/// Entries of a zip archive (stored or deflated), from its central directory. None when it uses
+/// anything else (encryption, zip64, other methods) or is malformed.
+fn zip_entries(z: &[u8], inflate: &dyn Fn(&mut dyn std::io::Read) -> Option<Vec<u8>>) -> Option<Vec<(String, Vec<u8>)>> {
+    let u16_at = |p: usize| Some(u16::from_le_bytes(z.get(p..p + 2)?.try_into().ok()?) as usize);
+    let u32_at = |p: usize| Some(u32::from_le_bytes(z.get(p..p + 4)?.try_into().ok()?) as usize);
+    let eocd = (0..z.len().saturating_sub(21)).rev().take(65_557).find(|&p| z[p..].starts_with(b"PK\x05\x06"))?;
+    let (count, mut p) = (u16_at(eocd + 10)?, u32_at(eocd + 16)?);
+    if count == 0xffff || p == 0xffff_ffff {
+        return None;
+    }
+    let mut out = Vec::new();
+    for _ in 0..count {
+        if !z.get(p..)?.starts_with(b"PK\x01\x02") || u16_at(p + 8)? & 1 != 0 {
+            return None;
+        }
+        let (method, size, lho) = (u16_at(p + 10)?, u32_at(p + 20)?, u32_at(p + 42)?);
+        let (nlen, xlen, clen) = (u16_at(p + 28)?, u16_at(p + 30)?, u16_at(p + 32)?);
+        let name = String::from_utf8_lossy(z.get(p + 46..p + 46 + nlen)?).into_owned();
+        if !z.get(lho..)?.starts_with(b"PK\x03\x04") {
+            return None;
+        }
+        let start = lho + 30 + u16_at(lho + 26)? + u16_at(lho + 28)?;
+        let raw = z.get(start..start.checked_add(size)?)?;
+        let data = match method {
+            0 => raw.to_vec(),
+            8 => inflate(&mut flate2::read::DeflateDecoder::new(raw))?,
+            _ => return None,
+        };
+        out.push((name, data));
+        p += 46 + nlen + xlen + clen;
+    }
+    Some(out)
+}
+
 /// A PDF string as text. MuPDF writes a NUL as C0 80, which `as_string` rejects, so binary strings
 /// (checksums, signature /Contents) fall back to their bytes as Latin-1.
 // shortcut: a UTF-16 string holding a NUL char is then read byte-wise; decode UTF-16 here if that shows up.
@@ -896,7 +1096,9 @@ pub(super) fn text_of(o: &PdfObject) -> Result<String> {
     }
 }
 
-fn scan_strings(o: &PdfObject, depth: u32, f: &mut dyn FnMut(&str)) -> Result<()> {
+/// Calls `f(text, is_name)` for every string and every name (values and dict keys) in `o`,
+/// not following references.
+fn scan_strings(o: &PdfObject, depth: u32, f: &mut dyn FnMut(&str, bool)) -> Result<()> {
     if depth > 0 && o.is_indirect()? {
         return Ok(()); // scanned on its own
     }
@@ -904,8 +1106,11 @@ fn scan_strings(o: &PdfObject, depth: u32, f: &mut dyn FnMut(&str)) -> Result<()
         let place = "an object nested deeper than 32 levels (not scanned)".to_string();
         return Err(RedactError::Leaked(vec![Leak { needle: String::new(), place, critical: true }]));
     }
+    let name = |n: &PdfObject| -> Result<String> { Ok(String::from_utf8_lossy(&n.as_name()?).into_owned()) };
     if o.is_string()? {
-        f(&text_of(o)?);
+        f(&text_of(o)?, false);
+    } else if o.is_name()? {
+        f(&name(o)?, true);
     } else if o.is_array()? {
         for i in 0..o.len()? {
             if let Some(x) = o.get_array(i as i32)? {
@@ -914,6 +1119,9 @@ fn scan_strings(o: &PdfObject, depth: u32, f: &mut dyn FnMut(&str)) -> Result<()
         }
     } else if o.is_dict()? {
         for i in 0..o.dict_len()? {
+            if let Some(k) = o.get_dict_key(i as i32)? {
+                f(&name(&k)?, true);
+            }
             if let Some(x) = o.get_dict_val(i as i32)? {
                 scan_strings(&x, depth + 1, f)?;
             }

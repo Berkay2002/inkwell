@@ -263,7 +263,7 @@ fn verify_catches_incomplete_redaction() {
     let mut doc = sample();
     mark_hits(&mut doc, &hits, &MarkStyle::default()).unwrap();
     match apply(&mut doc, &ApplyOptions { sanitize: Sanitize::NONE, ..Default::default() }) {
-        Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.needle == "123-45-6789" && l.place.contains("stream")), "{l:?}"),
+        Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.needle == "123-45-6789" && l.place.contains("attachment")), "{l:?}"),
         r => panic!("expected a leak, got {r:?}"),
     }
 }
@@ -482,7 +482,7 @@ fn attachment_copy_stays_critical() {
     assert_eq!(hits.len(), 2);
     mark_hits(&mut doc, &hits[..1], &MarkStyle::default()).unwrap();
     match apply(&mut doc, &ApplyOptions { sanitize: Sanitize::NONE, ..Default::default() }) {
-        Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.critical && l.place.contains("stream")), "{l:?}"),
+        Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.critical && l.place.contains("attachment")), "{l:?}"),
         r => panic!("expected a leak, got {r:?}"),
     }
 }
@@ -637,4 +637,211 @@ fn ocmd_visibility_expression_is_bounded() {
     assert_eq!(r.unwrap().hidden_layer_blocks, 1);
     assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
     assert!(leaks(&save_to_vec(&doc).unwrap(), &["VE-HIDDEN"]).is_empty());
+}
+
+fn text_q(needle: &str) -> Query {
+    Query::Text { needle: needle.into(), case_sensitive: true, whole_word: false }
+}
+
+/// Marks every hit of `needle` and applies with sanitize off.
+fn redact_none(bytes: &[u8], needle: &str) -> (PdfDocument, Result<ApplyReport>) {
+    let mut doc = PdfDocument::from_bytes(bytes).unwrap();
+    let hits = find(&doc, &text_q(needle)).unwrap();
+    assert!(!hits.is_empty(), "fixture: {needle} not found");
+    mark_hits(&mut doc, &hits, &MarkStyle::default()).unwrap();
+    let r = apply(&mut doc, &ApplyOptions { sanitize: Sanitize::NONE, ..Default::default() });
+    (doc, r)
+}
+
+/// Tagged-PDF alt text, a page label prefix, a link URI and rich text quoting the redacted string
+/// are removed (they used to make apply refuse the file).
+#[test]
+fn tagged_file_quotes_are_stripped() {
+    let bytes = one_page(
+        b"/P << /MCID 0 >> BDC BT /F1 12 Tf 72 700 Td (TAGGED-SECRET) Tj ET EMC",
+        "/Annots [8 0 R 9 0 R] /StructParents 0",
+        &[
+            obj("<< /Type /StructTreeRoot /K 7 0 R >>"),
+            obj("<< /Type /StructElem /S /P /P 6 0 R /Pg 4 0 R /K 0 /ActualText (TAGGED-SECRET) /Alt (alt TAGGED-SECRET) /T (TAGGED-SECRET title) /E (TAGGED-SECRET) >>"),
+            obj("<< /Type /Annot /Subtype /Link /Rect [72 100 200 120] /A 10 0 R >>"),
+            obj("<< /Type /Annot /Subtype /FreeText /Rect [300 100 500 150] /Contents (note) /DA (/Helv 10 Tf 0 g) /RC 11 0 R >>"),
+            obj("<< /S /URI /URI (https://example.com/TAGGED-SECRET) >>"),
+            stream("", b"<body><p>TAGGED-SECRET</p></body>"),
+        ],
+        "/StructTreeRoot 6 0 R /MarkInfo << /Marked true >> /PageLabels << /Nums [0 << /S /D /P (TAGGED-SECRET-) >>] >>",
+    );
+    let (doc, r) = redact_none(&bytes, "TAGGED-SECRET");
+    assert!(r.unwrap().sanitize.quoting >= 5);
+    let l = leaks(&save_to_vec(&doc).unwrap(), &["TAGGED-SECRET"]);
+    assert!(l.is_empty(), "{l:?}");
+}
+
+/// Removing invisible text must keep the page's links and free-text annotations: MuPDF drops
+/// every one a redaction touches, and the page-sized pass touches all of them.
+#[test]
+fn hidden_text_keeps_annotations() {
+    let bytes = one_page(
+        b"BT /F1 12 Tf 72 700 Td (VISIBLE) Tj ET BT 3 Tr /F1 12 Tf 72 650 Td (OCR-LAYER) Tj ET",
+        "/Annots [6 0 R 7 0 R]",
+        &[
+            obj("<< /Type /Annot /Subtype /Link /Rect [72 100 200 120] /A << /S /URI /URI (https://example.com) >> >>"),
+            obj("<< /Type /Annot /Subtype /FreeText /Rect [300 100 500 150] /Contents (note) /DA (/Helv 10 Tf 0 g) >>"),
+        ],
+        "",
+    );
+    let mut doc = PdfDocument::from_bytes(&bytes).unwrap();
+    let r = sanitize(&mut doc, &Sanitize { hidden_text: true, ..Sanitize::NONE }, &[]).unwrap();
+    assert_eq!(r.hidden_text_pages, 1);
+    let saved = save_to_vec(&doc).unwrap();
+    assert!(leaks(&saved, &["OCR-LAYER"]).is_empty());
+    let re = PdfDocument::from_bytes(&saved).unwrap();
+    assert_eq!(re.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().len().unwrap(), 2);
+}
+
+/// Short names (a /Dests key) are checked for 5+ char needles, and sanitize removes the key.
+#[test]
+fn short_name_quoting_is_found_and_stripped() {
+    let bytes = one_page(b"BT /F1 12 Tf 72 700 Td (KODEX) Tj ET", "", &[], "/Dests << /KODEX [4 0 R /Fit] >>");
+    assert!(leaks(&bytes, &["KODEX"]).iter().any(|l| l.place.contains("name")));
+    let (doc, r) = redact_none(&bytes, "KODEX");
+    assert_eq!(r.unwrap().sanitize.quoting, 1);
+    let l = leaks(&save_to_vec(&doc).unwrap(), &["KODEX"]);
+    assert!(l.is_empty(), "{l:?}");
+}
+
+/// A zip archive with one deflated entry.
+fn zip(name: &str, data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    e.write_all(data).unwrap();
+    let packed = e.finish().unwrap();
+    let mut crc = flate2::Crc::new();
+    crc.update(data);
+    let (crc, n, c, u) = (crc.sum().to_le_bytes(), (name.len() as u16).to_le_bytes(), (packed.len() as u32).to_le_bytes(), (data.len() as u32).to_le_bytes());
+    // Version, flags, method 8, time/date, crc, sizes, name length, extra length.
+    let common = [&[20, 0, 0, 0, 8, 0, 0, 0, 0, 0][..], &crc, &c, &u, &n, &[0, 0]].concat();
+    let mut z = [b"PK\x03\x04", &common[..], name.as_bytes(), &packed].concat();
+    let cd = z.len() as u32;
+    // Central directory: version made by, the common fields, comment length, disk, attributes, offset.
+    z.extend_from_slice(&[b"PK\x01\x02", &[20, 0][..], &common, &[0; 8], &0u32.to_le_bytes(), name.as_bytes()].concat());
+    let cd_len = z.len() as u32 - cd;
+    z.extend_from_slice(&[b"PK\x05\x06", &[0, 0, 0, 0, 1, 0, 1, 0][..], &cd_len.to_le_bytes(), &cd.to_le_bytes(), &[0, 0]].concat());
+    z
+}
+
+/// Compressed and binary attachments: verify unpacks gzip, zip and attached PDFs, and fails
+/// closed on what it cannot read.
+#[test]
+fn packed_attachments_are_scanned() {
+    use std::io::Write;
+    let secret = b"copy of ATTACH-SECRET";
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(secret).unwrap();
+    let mut zl = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    zl.write_all(b"BT /F1 12 Tf 72 700 Td (ATTACH-SECRET) Tj ET").unwrap();
+    // An attached PDF whose page text is in a compressed stream: only a nested verify sees it.
+    let nested = pdf(
+        &[
+            obj("<< /Type /Catalog /Pages 2 0 R >>"),
+            obj("<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
+            obj("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"),
+            obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>"),
+            stream("/Filter /FlateDecode", &zl.finish().unwrap()),
+        ],
+        "",
+    );
+    let cases: [(&str, Vec<u8>); 4] =
+        [("gzip", gz.finish().unwrap()), ("zip", zip("a.txt", secret)), ("binary", vec![0, 1, 2, 3, 0xff, 0x10]), ("pdf", nested)];
+    for (what, data) in cases {
+        let bytes = one_page(
+            b"BT /F1 12 Tf 72 700 Td (ATTACH-SECRET) Tj ET",
+            "",
+            &[obj("<< /Type /Filespec /F (a) /EF << /F 7 0 R >> >>"), stream("/Type /EmbeddedFile", &data)],
+            "/Names << /EmbeddedFiles << /Names [(a) 6 0 R] >> >>",
+        );
+        match redact_none(&bytes, "ATTACH-SECRET").1 {
+            Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.critical && l.place.contains("attachment")), "{what}: {l:?}"),
+            r => panic!("{what}: expected a leak, got {r:?}"),
+        }
+    }
+}
+
+/// Letter-spaced text (spaces or kerning gaps between letters) and a WinAnsi soft hyphen.
+#[test]
+fn find_letter_spaced_and_soft_hyphen() {
+    let bytes = one_page(
+        b"BT /F1 12 Tf 72 700 Td (K E R N) Tj ET BT /F1 12 Tf 72 650 Td [(K) -900 (E) -900 (R) -900 (N)] TJ ET\n\
+BT /F1 12 Tf 72 600 Td (redac\\255tion) Tj ET",
+        "",
+        &[],
+        "",
+    );
+    let doc = PdfDocument::from_bytes(&bytes).unwrap();
+    assert_eq!(find(&doc, &text_q("KERN")).unwrap().len(), 2, "{}", page_text(&doc));
+    assert_eq!(find(&doc, &text_q("redaction")).unwrap().len(), 1, "{}", page_text(&doc));
+}
+
+/// JBIG2 (MMR-coded generic region, 16x16 all black): covered pixels turn white.
+#[test]
+fn jbig2_image_under_mark_is_blanked() {
+    // T.6: row 0 = horizontal mode, white run 0, black run 16; every later row = V0 V0.
+    let bits = format!("001{}{}{}", "00110101", "0000010111", "11".repeat(15));
+    let mmr: Vec<u8> =
+        bits.as_bytes().chunks(8).map(|c| c.iter().enumerate().fold(0u8, |b, (i, &x)| b | ((x - b'0') << (7 - i)))).collect();
+    let be = |n: u32| n.to_be_bytes();
+    let region = [be(16), be(16), be(0), be(0)].concat();
+    // Page information segment (type 48), then an immediate lossless generic region (type 38, MMR).
+    let j = [
+        &be(0)[..], &[48, 0, 1], &be(19), &region, &[0, 0, 0],
+        &be(1), &[38, 0, 1], &be(18 + mmr.len() as u32), &region, &[0, 1], &mmr,
+    ]
+    .concat();
+    let bytes = pdf(
+        &[
+            obj("<< /Type /Catalog /Pages 2 0 R >>"),
+            obj("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>"),
+            stream("", b"q 100 0 0 100 200 400 cm /Im1 Do Q"),
+            stream("/Type /XObject /Subtype /Image /Width 16 /Height 16 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode", &j),
+        ],
+        "",
+    );
+    // Whether pixel (x, y) of the page's image is white.
+    let white = |doc: &PdfDocument, x: usize, y: usize| {
+        let xo = doc.find_page(0).unwrap().get_dict("Resources").unwrap().unwrap().get_dict("XObject").unwrap().unwrap();
+        let im = xo.get_dict_val(0).unwrap().unwrap();
+        let bpc = im.get_dict("BitsPerComponent").unwrap().unwrap().as_int().unwrap() as usize;
+        let data = doc.xref_stream(im.as_indirect().unwrap()).unwrap();
+        let bit = x * bpc;
+        let v = (data[y * (16 * bpc).div_ceil(8) + bit / 8] >> (8 - bpc - bit % 8)) as usize & ((1 << bpc) - 1);
+        v == (1 << bpc) - 1
+    };
+    let mut doc = PdfDocument::from_bytes(&bytes).unwrap();
+    assert!(!white(&doc, 0, 8) && !white(&doc, 15, 8), "fixture does not decode to black");
+    add_area_mark(&mut doc, 0, Rect { x0: 190.0, y0: 282.0, x1: 250.0, y1: 402.0 }, &MarkStyle::default()).unwrap();
+    apply(&mut doc, &ApplyOptions::default()).unwrap();
+    let re = PdfDocument::from_bytes(&save_to_vec(&doc).unwrap()).unwrap();
+    for y in 0..16 {
+        assert!(white(&re, 0, y), "covered pixel kept at row {y}");
+        assert!(!white(&re, 15, y), "uncovered pixel changed at row {y}");
+    }
+}
+
+/// An unused XObject in a hidden layer and a widget in a hidden layer (with its field value) go.
+#[test]
+fn hidden_layer_unused_xobject_and_widget_go() {
+    let form = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 300 50] /OC 6 0 R /Resources << /Font << /F1 3 0 R >> >>",
+        b"BT /F1 12 Tf 0 10 Td (UNUSED-HIDDEN) Tj ET",
+    );
+    let widget = obj("<< /Type /Annot /Subtype /Widget /FT /Tx /T (f) /V (WIDGET-HIDDEN) /OC 6 0 R /Rect [72 100 200 120] /P 4 0 R >>");
+    let bytes = layered(b"BT /F1 12 Tf 72 700 Td (SHOWN) Tj ET", "/XObject << /Fx 7 0 R >>", &[form, widget]);
+    let bytes = String::from_utf8_lossy(&bytes)
+        .replace("/Contents 5 0 R", "/Contents 5 0 R /Annots [8 0 R]")
+        .replace("/OCProperties", "/AcroForm << /Fields [8 0 R] >> /OCProperties")
+        .into_bytes();
+    let (doc, r) = strip_layers(&bytes);
+    r.unwrap();
+    let l = leaks(&save_to_vec(&doc).unwrap(), &["UNUSED-HIDDEN", "WIDGET-HIDDEN"]);
+    assert!(l.is_empty(), "{l:?}");
 }

@@ -1541,6 +1541,7 @@ dependencies = [
 name = "inkwell"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "lru",
  "mupdf",
  "parking_lot",
