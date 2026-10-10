@@ -164,8 +164,15 @@ export interface CompressAuditReply {
   size: number;
   defaultOutput: string;
   outputExists: boolean;
-  /** Estimated bytes of the output per preset: a guide, the report has the real size. */
-  predictions: { preset: CompressPreset; bytes: number }[];
+}
+
+/** Predicted size per preset, from recompressing a sample of the file's images. */
+export interface CompressEstimate {
+  preset: CompressPreset;
+  bytes: number;
+  /** The range it should fall in; equal when the sample covered every image. */
+  low: number;
+  high: number;
 }
 
 export interface CompressProgress {
@@ -245,6 +252,8 @@ export interface OcrOutcome {
 }
 
 export const compressAudit = (doc: number) => invoke<CompressAuditReply>("compress_audit", { doc });
+/** Runs on its own thread; `toolCancel(job)` stops it. */
+export const compressEstimate = (job: number, doc: number) => invoke<CompressEstimate[]>("compress_estimate", { job, doc });
 
 export function compressStart(job: number, req: CompressRequest, onProgress: (p: CompressProgress) => void) {
   const ch = new Channel<CompressProgress>();

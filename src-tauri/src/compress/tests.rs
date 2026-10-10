@@ -662,3 +662,68 @@ fn stencil_masks_get_ccitt_and_look_the_same() {
     assert!(fax, "the stencil was not re-encoded as a CCITT image mask");
     assert_eq!(r.visual.unwrap().max_diff, 0);
 }
+
+// ---------------------------------------------------------------- estimate
+
+/// The predicted size of every preset is within 30% of what the compressor really writes, on every
+/// study sample that has images; prints the numbers (run with --nocapture).
+#[test]
+fn the_estimate_is_within_30_percent_of_the_real_size_on_the_study_samples() {
+    let scratch = Scratch::new();
+    let mut checked = 0;
+    for name in ["compress-source.pdf", "opt-in-01.pdf", "scan-source.pdf", "ocr-in-01.pdf", "red-in-01.pdf", "red-in-03.pdf", "ai-in-01.pdf", "ai-in-02.pdf"] {
+        let input = scratch.copy(name);
+        let full = audit_file(&input, None).unwrap();
+        if full.images == 0 {
+            continue;
+        }
+        let t = Instant::now();
+        let est = estimate::estimate(&input, None, &full, &AtomicBool::new(false)).unwrap();
+        let ms = t.elapsed().as_millis();
+        for e in &est {
+            let mut o = Options::preset(e.preset);
+            o.output = Some(scratch.path(&format!("{name}-{:?}.pdf", e.preset)));
+            let real = run(&input, &o).unwrap().size_after as f64;
+            let err = (e.bytes as f64 - real) / real;
+            println!(
+                "{name:22} {:12} total {:>9} est {:>9} [{:>9}..{:>9}] real {:>9} err {:+5.1}% ({ms} ms)",
+                format!("{:?}", e.preset), full.total, e.bytes, e.low, e.high, real as u64, err * 100.0
+            );
+            assert!(err.abs() <= 0.30, "{name} {:?}: estimated {} real {real}", e.preset, e.bytes);
+            assert!(e.low <= e.bytes && e.bytes <= e.high);
+        }
+        checked += 1;
+    }
+    assert!(checked >= 2, "samples with images: {checked}");
+}
+
+/// A big, image-heavy file: the sample covers a small part of it; the estimate is close and the range
+/// still holds the real size. Prints the time (a release build is the one that matters: < 1 s).
+#[test]
+fn the_estimate_of_an_image_heavy_file_brackets_the_real_size() {
+    let s = Scratch::new();
+    let input = s.path("heavy.pdf");
+    // Distinct photos on every page (identical images would be merged across the whole file, which a
+    // sample of a few pages cannot see; the range is wide for those files).
+    let mut doc = PdfDocument::new();
+    for i in 0..40u32 {
+        let mut page = doc.new_page(Size::A4).unwrap();
+        let o = InsertImageOptions::default();
+        page.insert_image(&mut doc, Rect::new(36.0, 36.0, 400.0, 300.0), PageImageSource::Pixmap(&photo(1100, 800, true, i * 2 + 1)), o).unwrap();
+        page.insert_image(&mut doc, Rect::new(36.0, 320.0, 300.0, 520.0), PageImageSource::Pixmap(&photo(800, 600, false, i * 2 + 2)), o).unwrap();
+    }
+    doc.save(input.to_str().unwrap()).unwrap();
+    let full = audit_file(&input, None).unwrap();
+    let t = Instant::now();
+    let est = estimate::estimate(&input, None, &full, &AtomicBool::new(false)).unwrap();
+    println!("heavy.pdf {} B estimated in {} ms", full.total, t.elapsed().as_millis());
+    for e in &est {
+        let mut o = Options::preset(e.preset);
+        o.output = Some(s.path(&format!("heavy-{:?}.pdf", e.preset)));
+        let real = run(&input, &o).unwrap().size_after;
+        let err = (e.bytes as f64 - real as f64) / real as f64;
+        println!("  {:?}: est {} [{}..{}] real {real} err {:+.1}%", e.preset, e.bytes, e.low, e.high, err * 100.0);
+        assert!(err.abs() <= 0.30, "{:?}", e.preset);
+        assert!(e.low <= real && real <= e.high, "{:?}: {real} outside {}..{}", e.preset, e.low, e.high);
+    }
+}

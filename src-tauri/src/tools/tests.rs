@@ -339,15 +339,17 @@ fn an_output_in_the_webview_json_is_ignored() {
 }
 
 #[test]
-fn the_audit_predicts_smaller_files_for_smaller_presets() {
+fn the_estimate_orders_the_presets_and_a_cancel_stops_it() {
     let d = dir("audit");
     let (eng, id, _) = sample_doc(&d);
     let a = audit_for_ui(&eng, id).unwrap();
     assert!(!a.output_exists);
-    let p = |x: Preset| a.predictions.iter().find(|p| p.preset == x).unwrap().bytes;
+    let e = estimate_for_ui(&eng, id, &AtomicBool::new(false)).unwrap();
+    let p = |x: Preset| e.iter().find(|p| p.preset == x).unwrap().bytes;
     assert!(p(Preset::Smallest) < p(Preset::Balanced));
-    assert!(p(Preset::Balanced) < p(Preset::HighQuality));
-    assert!(p(Preset::HighQuality) < a.size);
+    assert!(p(Preset::Balanced) <= p(Preset::HighQuality));
+    assert!(p(Preset::HighQuality) <= a.size);
+    assert_eq!(estimate_for_ui(&eng, id, &AtomicBool::new(true)).unwrap_err().0, "cancelled");
 }
 
 /// The webview may only name documents (by id), never files: requests have no path fields and
@@ -363,7 +365,7 @@ fn the_commands_take_no_raw_path_from_the_webview() {
 
     let lib = include_str!("../lib.rs");
     let mut seen = 0;
-    for name in ["compress_audit", "compress_start", "tool_cancel", "ocr_languages", "ocr_choose_tesseract", "ocr_clear_tesseract", "ocr_start"] {
+    for name in ["compress_audit", "compress_estimate", "compress_start", "tool_cancel", "ocr_languages", "ocr_choose_tesseract", "ocr_clear_tesseract", "ocr_start"] {
         let at = lib.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("no command {name}"));
         let rest = &lib[at..];
         let end = [rest.find(") ->"), rest.find(") {")].into_iter().flatten().min().unwrap();
@@ -373,7 +375,7 @@ fn the_commands_take_no_raw_path_from_the_webview() {
         }
         seen += 1;
     }
-    assert_eq!(seen, 7);
+    assert_eq!(seen, 8);
 }
 
 #[test]

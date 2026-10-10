@@ -15,6 +15,7 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({}) }));
 vi.mock("./edit", () => ({ save: vi.fn(() => Promise.resolve()), undo: vi.fn(() => Promise.resolve()), applyState: vi.fn() }));
 vi.mock("./api", () => ({
   compressAudit: vi.fn(),
+  compressEstimate: vi.fn(),
   compressStart: vi.fn(),
   pickSave: vi.fn(),
   toolCancel: vi.fn(() => Promise.resolve()),
@@ -34,12 +35,12 @@ const audit = (outputExists = false) => ({
   size: 8_400_000,
   defaultOutput: "C:\\d\\a (compressed).pdf",
   outputExists,
-  predictions: [
-    { preset: "smallest", bytes: 900_000 },
-    { preset: "balanced", bytes: 2_100_000 },
-    { preset: "highQuality", bytes: 4_000_000 },
-  ],
 });
+const estimates = [
+  { preset: "smallest", bytes: 900_000, low: 800_000, high: 1_200_000 },
+  { preset: "balanced", bytes: 2_100_000, low: 2_100_000, high: 2_100_000 },
+  { preset: "highQuality", bytes: 4_000_000, low: 4_000_000, high: 4_000_000 },
+];
 const report = { output: "C:\\d\\a (compressed).pdf", sizeBefore: 8_400_000, sizeAfter: 2_000_000, savedPercent: 76 };
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -53,16 +54,19 @@ function doc(dirty = false) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.compressEstimate).mockResolvedValue(estimates as never);
   useTools.setState({ sheet: null, settings: { ocrLanguage: null, ocrBackend: "windows", compressPreset: "balanced" } });
   doc();
 });
 
 describe("compress sheet", () => {
-  it("loads the audit with predictions, runs, shows progress and the result", async () => {
+  it("loads the audit and then the sampled estimates, runs, shows progress and the result", async () => {
     vi.mocked(api.compressAudit).mockResolvedValue(audit() as never);
     useTools.getState().open("compress");
     await flush();
-    expect(useTools.getState().sheet?.audit?.predictions).toHaveLength(3);
+    await flush();
+    expect(useTools.getState().sheet?.audit?.size).toBe(8_400_000);
+    expect(useTools.getState().sheet?.estimates).toHaveLength(3);
 
     let report$!: (v: unknown) => void;
     vi.mocked(api.compressStart).mockImplementation((_j, _r, onP) => {
@@ -136,6 +140,39 @@ describe("compress sheet", () => {
     await flush();
     useTools.getState().cancel();
     const job = vi.mocked(api.compressStart).mock.calls[0][0];
+    expect(api.toolCancel).toHaveBeenCalledWith(job);
+  });
+});
+
+describe("compress estimate", () => {
+  it("is cancelled when the rail closes, and a late answer is ignored", async () => {
+    vi.mocked(api.compressAudit).mockResolvedValue(audit() as never);
+    let answer!: (v: unknown) => void;
+    vi.mocked(api.compressEstimate).mockReturnValue(new Promise((r) => (answer = r)) as never);
+    useTools.getState().open("compress");
+    await flush();
+    await flush();
+    const job = vi.mocked(api.compressEstimate).mock.calls[0][0];
+    expect(useTools.getState().sheet?.estimates).toBeNull();
+    useTools.getState().close();
+    expect(api.toolCancel).toHaveBeenCalledWith(job);
+    answer(estimates);
+    await flush();
+    expect(useTools.getState().sheet).toBeNull();
+  });
+
+  it("is cancelled when Compress starts, and a failed estimate leaves the sizes blank", async () => {
+    vi.mocked(api.compressAudit).mockResolvedValue(audit() as never);
+    vi.mocked(api.compressEstimate).mockRejectedValue("cancelled");
+    useTools.getState().open("compress");
+    await flush();
+    await flush();
+    expect(useTools.getState().sheet?.estimates).toBeNull();
+    expect(useTools.getState().sheet?.phase).toBe("options");
+    const job = useTools.getState().sheet!.estimateJob;
+    vi.mocked(api.compressStart).mockReturnValue(new Promise(() => {}) as never);
+    void useTools.getState().start();
+    await flush();
     expect(api.toolCancel).toHaveBeenCalledWith(job);
   });
 });
