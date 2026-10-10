@@ -167,6 +167,23 @@ struct Session {
     state: Mutex<SessionState>,
     /// Tool calls waiting for Apply / Reject, by call id.
     approvals: Mutex<HashMap<String, Sender<bool>>>,
+    /// Threads of sub-agents the model started (`spawn_agent` cannot be switched off): Stop and
+    /// close unsubscribe them too, which makes the server unload them.
+    children: Mutex<Vec<String>>,
+    /// The permission mode every tool call is checked against. Set when a question starts and by
+    /// `set_permissions`, so tightening it mid-turn applies to the very next call.
+    mode: Mutex<Mode>,
+}
+
+/// How a call that needed the user's say ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Decision {
+    Apply,
+    Reject,
+    /// No answer within the limit: final, a late Apply is ignored.
+    TimedOut,
+    /// The turn was stopped or the tab closed while the card waited.
+    Stopped,
 }
 
 pub struct Assistant {
@@ -175,6 +192,8 @@ pub struct Assistant {
     tools: RwLock<Vec<Arc<Tool>>>,
     /// Documents with at most this many characters go into the first turn whole.
     inline_max: AtomicUsize,
+    /// How long a change card may wait for Apply / Reject, in ms.
+    approval_ms: AtomicU64,
     /// Only ever locked briefly: never across a spawn or an RPC.
     server: Mutex<Option<Server>>,
     /// Serialises starting a server.
@@ -204,6 +223,7 @@ impl Assistant {
             spec,
             tools: RwLock::new(tools::builtin()),
             inline_max: AtomicUsize::new(text::INLINE_CHARS),
+            approval_ms: AtomicU64::new(APPROVAL_TIMEOUT.as_millis() as u64),
             server: Mutex::new(None),
             starting: Mutex::new(()),
             next_gen: AtomicU64::new(0),
@@ -222,6 +242,20 @@ impl Assistant {
     /// Overrides the short-document threshold (`text::INLINE_CHARS`); used to measure it.
     pub fn set_inline_max(&self, chars: usize) {
         self.inline_max.store(chars, Ordering::SeqCst);
+    }
+
+    /// Overrides how long a card may wait (`APPROVAL_TIMEOUT`); tests and the live limit probe.
+    pub fn set_approval_timeout(&self, d: Duration) {
+        self.approval_ms.store(d.as_millis() as u64, Ordering::SeqCst);
+    }
+
+    /// Changes the permission mode of the document's turn in flight (and of the next one, which
+    /// brings its own). A call already waiting for the user keeps waiting; the next call is checked
+    /// against the new mode, so tightening full -> ask takes effect at once.
+    pub fn set_permissions(&self, doc: DocId, mode: Mode) {
+        if let Some(s) = self.sessions.lock().unwrap().get(&doc) {
+            *s.mode.lock().unwrap() = mode;
+        }
     }
 
     /// The user's answer to a waiting tool call. Unknown or already settled ids are ignored.
@@ -452,6 +486,8 @@ impl Assistant {
             return Err("The assistant is still answering the previous question.".into());
         }
         session.cancel.store(false, Ordering::SeqCst);
+        // before the turn thread exists: a `set_permissions` that follows can never be overwritten
+        *session.mode.lock().unwrap() = req.permissions;
         let me = self.clone();
         std::thread::Builder::new()
             .name("ai-turn".into())
@@ -666,6 +702,17 @@ impl Assistant {
                         self.tool_call(id, p, client, session, ctx, &mut page, sink);
                     }
                 }
+                "item/started" | "item/completed"
+                    if p.pointer("/item/type").and_then(Value::as_str) == Some("collabAgentToolCall") =>
+                {
+                    let ids = p.pointer("/item/receiverThreadIds").and_then(Value::as_array);
+                    let mut kids = session.children.lock().unwrap();
+                    for id in ids.into_iter().flatten().filter_map(Value::as_str) {
+                        if !kids.iter().any(|k| k == id) {
+                            kids.push(id.to_string());
+                        }
+                    }
+                }
                 "item/started" if p.pointer("/item/type").and_then(Value::as_str) == Some("agentMessage") => {
                     if p.pointer("/item/phase").and_then(Value::as_str) == Some("commentary") {
                         if let Some(id) = p.pointer("/item/id").and_then(Value::as_str) {
@@ -772,16 +819,30 @@ impl Assistant {
             reply(&Err("The request was stopped.".into()));
             return;
         }
-        if ctx.req.permissions.needs_approval(tool.class) {
+        // read now, not at the start of the turn: the user may have tightened it since
+        let mode = *session.mode.lock().unwrap();
+        if mode.needs_approval(tool.class) {
             // registered before the card is announced: the answer may come back at once
             let (tx, rx) = mpsc::channel();
             session.approvals.lock().unwrap().insert(call_id.clone(), tx);
             act(ActState::Waiting, None);
-            if !self.await_decision(session, &call_id, rx) {
-                act(ActState::Rejected, None);
-                reply(&Err("The user rejected this change, so nothing was changed. Do not try it again; \
-                            say what you would have done and ask how they want to proceed."
-                    .into()));
+            let (why, text) = match self.await_decision(session, &call_id, rx) {
+                Decision::Apply => (None, None),
+                Decision::Reject => (
+                    None,
+                    Some("The user rejected this change, so nothing was changed. Do not try it again; \
+                          say what you would have done and ask how they want to proceed."),
+                ),
+                Decision::TimedOut => (
+                    Some("no answer in time"),
+                    Some("The user did not answer in time, so the change was NOT made and cannot be made any more. \
+                          Do not try it again unless they ask; say what you would have done."),
+                ),
+                Decision::Stopped => (Some("stopped"), Some("The request was stopped, so nothing was changed.")),
+            };
+            if let Some(text) = text {
+                act(ActState::Rejected, why.map(str::to_string));
+                reply(&Err(text.into()));
                 return;
             }
         }
@@ -811,22 +872,31 @@ impl Assistant {
         reply(&out);
     }
 
-    /// Waits for the user's Apply / Reject. A cancel, a closed tab or the timeout is a rejection.
-    fn await_decision(&self, session: &Session, call_id: &str, rx: Receiver<bool>) -> bool {
-        let deadline = Instant::now() + APPROVAL_TIMEOUT;
-        let allow = loop {
+    /// Waits for the user's Apply / Reject. A cancel, a closed tab and the timeout each end it, and
+    /// the call is final then: the pending entry is removed, so a late Apply finds nothing to answer.
+    fn await_decision(&self, session: &Session, call_id: &str, rx: Receiver<bool>) -> Decision {
+        let deadline = Instant::now() + Duration::from_millis(self.approval_ms.load(Ordering::SeqCst));
+        let decision = loop {
             match rx.recv_timeout(Duration::from_millis(150)) {
-                Ok(a) => break a,
+                Ok(true) => break Decision::Apply,
+                Ok(false) => break Decision::Reject,
                 Err(RecvTimeoutError::Timeout) => {
-                    if session.cancel.load(Ordering::SeqCst) || session.closed.load(Ordering::SeqCst) || Instant::now() > deadline {
-                        break false;
+                    if session.cancel.load(Ordering::SeqCst) || session.closed.load(Ordering::SeqCst) {
+                        break Decision::Stopped;
+                    }
+                    if Instant::now() > deadline {
+                        break Decision::TimedOut;
                     }
                 }
-                Err(RecvTimeoutError::Disconnected) => break false,
+                Err(RecvTimeoutError::Disconnected) => break Decision::Stopped,
             }
         };
-        session.approvals.lock().unwrap().remove(call_id);
-        allow
+        // `decide` takes the sender out of this map: once it is gone (or the receiver dropped), a
+        // late answer is a no-op. Removing under the lock settles a decide racing the timeout.
+        let mut pending = session.approvals.lock().unwrap();
+        pending.remove(call_id);
+        // an Apply that slipped in between the last poll and the removal came too late: still final
+        decision
     }
 }
 
@@ -869,9 +939,15 @@ fn release_thread(client: &Arc<Client>, thread: String) {
 
 fn interrupt(s: &Session) {
     let a = s.active.lock().unwrap().clone();
-    if let Some((client, thread, Some(turn))) = a {
+    let kids = std::mem::take(&mut *s.children.lock().unwrap());
+    if let Some((client, thread, turn)) = a {
         std::thread::spawn(move || {
-            let _ = client.call("turn/interrupt", json!({ "threadId": thread, "turnId": turn }), Duration::from_secs(10));
+            if let Some(turn) = turn {
+                let _ = client.call("turn/interrupt", json!({ "threadId": thread, "turnId": turn }), Duration::from_secs(10));
+            }
+            for k in kids {
+                let _ = client.call("thread/unsubscribe", json!({ "threadId": k }), Duration::from_secs(5));
+            }
         });
     }
 }

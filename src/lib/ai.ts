@@ -97,6 +97,8 @@ export const aiStatus = () => invoke<AiStatus>("ai_status");
 export const aiPrepare = (doc: number) => invoke<Prepared>("ai_prepare", { doc });
 export const aiCancel = (doc: number) => invoke<void>("ai_cancel", { doc });
 export const aiClose = (doc: number) => invoke<void>("ai_close", { doc });
+/** The mode changed while a turn runs: its very next tool call is checked against it. */
+export const aiSetPermissions = (doc: number, mode: Permissions) => invoke<void>("ai_set_permissions", { doc, mode });
 /** The user's Apply (true) or Reject (false) on a waiting tool call. */
 export const aiToolDecision = (doc: number, callId: string, allow: boolean) =>
   invoke<void>("ai_tool_decision", { doc, callId, allow });

@@ -287,6 +287,8 @@ export const useAi = create<AiStore>((set, get) => {
       const settings = { ...get().settings, ...p };
       ai.saveSettings(settings);
       set({ settings });
+      // a turn in flight must not keep the looser mode it started with
+      if (p.permissions) for (const doc of Object.keys(get().chats)) void ai.aiSetPermissions(Number(doc), p.permissions);
     },
 
     setSelection: (selection) => {

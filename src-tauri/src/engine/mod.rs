@@ -51,6 +51,8 @@ pub enum EngineError {
     Panic,
     #[error("not a PDF file")]
     NotPdf,
+    #[error("the document changed since this was asked for")]
+    Changed,
 }
 
 impl From<mupdf::Error> for EngineError {
@@ -519,10 +521,15 @@ impl Engine {
         })
     }
 
-    /// One whole page as a PNG whose longer side is at most `max_px` (never scaled up past 2x).
-    pub fn page_png(&self, id: DocId, page: u32, max_px: u32) -> Result<Vec<u8>> {
+    /// One whole page as a PNG whose longer side is at most `max_px` (never scaled up past 2x), of
+    /// edit generation `rev`: `Changed` when the document is already past it, or moves on while the
+    /// page renders (docs/engine-rules.md rule 3), so an image never mixes with text of another state.
+    pub fn page_png(&self, id: DocId, rev: u32, page: u32, max_px: u32) -> Result<Vec<u8>> {
         let entry = self.entry(id)?;
-        let list = self.page_list(&entry, entry.generation(), page)?;
+        if entry.generation() != rev {
+            return Err(EngineError::Changed);
+        }
+        let list = self.page_list(&entry, rev, page)?;
         let b = list.bounds();
         let scale = (max_px as f32 / b.width().max(b.height()).max(1.0)).min(2.0);
         let (m, w, h) = view_matrix(b, 0, scale);
@@ -535,6 +542,9 @@ impl Engine {
         }
         let mut out = Vec::new();
         pix.write_to(&mut out, ImageFormat::PNG)?;
+        if entry.generation() != rev {
+            return Err(EngineError::Changed);
+        }
         Ok(out)
     }
 

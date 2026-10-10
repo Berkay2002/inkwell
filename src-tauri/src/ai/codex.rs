@@ -46,7 +46,8 @@ const OFF_FEATURES: &[&str] = &[
     // "tool host is disabled" and never sends `item/tool/call` (checked against the real server).
     // Still exposed in 0.159 with no switch found: exec's runtime (no fs/net/process), clock, wait,
     // request_user_input (unavailable in Default mode) and spawn_agent (`multi_agent=false` doesn't drop it;
-    // `agents.max_threads=0` breaks startup). Sub-agents are read-only and get no Inkwell tools.
+    // `agents.max_threads=0` breaks startup). Sub-agents are read-only and get no Inkwell tools; Stop and
+    // close unsubscribe the threads named in the turn's `collabAgentToolCall` items (chat.rs `interrupt`).
     "realtime_conversation",
     "shell_tool",
     "unified_exec",

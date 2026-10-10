@@ -34,9 +34,9 @@ impl tools::DocHost for EngineHost {
         self.eng.call(class::INTERACTIVE, move |e| e.outline(doc)).map_err(|e| e.to_string())
     }
 
-    fn page_png(&self, page: u32, max_px: u32) -> Result<Vec<u8>, String> {
+    fn page_png(&self, rev: u32, page: u32, max_px: u32) -> Result<Vec<u8>, String> {
         let doc = self.doc;
-        self.eng.call(class::INTERACTIVE, move |e| e.page_png(doc, page, max_px)).map_err(|e| e.to_string())
+        self.eng.call(class::INTERACTIVE, move |e| e.page_png(doc, rev, page, max_px)).map_err(|e| e.to_string())
     }
 }
 
@@ -104,6 +104,12 @@ pub fn ai_cancel(ai: Ai<'_>, doc: DocId) {
 #[tauri::command]
 pub fn ai_tool_decision(ai: Ai<'_>, doc: DocId, call_id: String, allow: bool) {
     ai.decide(doc, &call_id, allow);
+}
+
+/// The user changed the permission mode while a turn runs: the very next tool call obeys it.
+#[tauri::command]
+pub fn ai_set_permissions(ai: Ai<'_>, doc: DocId, mode: tools::Mode) {
+    ai.set_permissions(doc, mode);
 }
 
 /// The document was closed: drop its chat thread and cached text.

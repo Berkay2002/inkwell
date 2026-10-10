@@ -83,7 +83,7 @@ impl DocHost for FakeHost {
     fn outline(&self) -> Result<Vec<crate::engine::OutlineItem>, String> {
         Ok(vec![crate::engine::OutlineItem { title: "Termination".into(), page: Some(0), uri: None, children: Vec::new() }])
     }
-    fn page_png(&self, _: u32, _: u32) -> Result<Vec<u8>, String> {
+    fn page_png(&self, _: u32, _: u32, _: u32) -> Result<Vec<u8>, String> {
         Ok(vec![0x89, b'P', b'N', b'G'])
     }
 }
@@ -581,6 +581,89 @@ fn a_slow_apply_outlives_the_silence_watchdog() {
     done(&ev);
     assert_eq!(edits.load(Ordering::SeqCst), 1);
     assert_eq!(states(&ev, "test_edit"), [ActState::Waiting, ActState::Running, ActState::Done]);
+}
+
+/// Full -> ask while a turn runs: the very next call is held for the user, not run under the old mode.
+#[test]
+fn tightening_the_mode_mid_turn_holds_the_next_call() {
+    let a = tool_server(r#"[{"tool":"test_edit"},{"tool":"test_edit","delay":1500}]"#);
+    let (edits, _) = edit_tools(&a);
+    let req = AskRequest { permissions: Mode::Full, ..ask_req("go") };
+    let rx = start(&a, req, contract());
+    let mut ev = Vec::new();
+    loop {
+        let e = rx.recv_timeout(Duration::from_secs(30)).expect("an event within 30 s");
+        match &e {
+            ChatEvent::Activity { state: ActState::Done, .. } => a.set_permissions(DOC, Mode::Ask),
+            ChatEvent::Activity { id, state: ActState::Waiting, .. } => a.decide(DOC, id, false),
+            _ => {}
+        }
+        let last = matches!(e, ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Cancelled);
+        ev.push(e);
+        if last {
+            break;
+        }
+    }
+    done(&ev);
+    assert_eq!(edits.load(Ordering::SeqCst), 1, "the second call must not run under full");
+    assert_eq!(
+        states(&ev, "test_edit"),
+        [ActState::Running, ActState::Done, ActState::Waiting, ActState::Rejected]
+    );
+}
+
+/// A call whose card timed out is final as rejected: a late Apply must not run what the model gave up on.
+#[test]
+fn a_timed_out_approval_is_final_even_if_apply_arrives_late() {
+    let a = tool_server(r#"[{"tool":"test_edit"}]"#);
+    a.set_approval_timeout(Duration::from_millis(300));
+    let (edits, _) = edit_tools(&a);
+    let rx = start(&a, ask_req("go"), contract());
+    let mut ev = Vec::new();
+    let mut id = String::new();
+    loop {
+        let e = rx.recv_timeout(Duration::from_secs(30)).expect("an event within 30 s");
+        match &e {
+            ChatEvent::Activity { id: i, state: ActState::Waiting, .. } => id = i.clone(),
+            ChatEvent::Activity { state: ActState::Rejected, detail, .. } => {
+                assert_eq!(detail.as_deref(), Some("no answer in time"));
+                a.decide(DOC, &id, true); // too late
+            }
+            _ => {}
+        }
+        let last = matches!(e, ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Cancelled);
+        ev.push(e);
+        if last {
+            break;
+        }
+    }
+    done(&ev);
+    assert_eq!(edits.load(Ordering::SeqCst), 0);
+    assert_eq!(states(&ev, "test_edit"), [ActState::Waiting, ActState::Rejected]);
+    assert!(stderr(&a).contains("did not answer in time"), "{}", stderr(&a));
+}
+
+/// `spawn_agent` cannot be switched off: Stop must also end the sub-agent threads the model started.
+#[test]
+fn stop_also_unsubscribes_the_sub_agents_of_the_turn() {
+    let a = tool_server(r#"[{"spawn":"kid-1"},{"tool":"test_edit"}]"#);
+    edit_tools(&a);
+    let rx = start(&a, ask_req("go"), contract());
+    let mut ev = Vec::new();
+    loop {
+        let e = rx.recv_timeout(Duration::from_secs(30)).expect("an event within 30 s");
+        if matches!(e, ChatEvent::Activity { state: ActState::Waiting, .. }) {
+            a.cancel(DOC);
+        }
+        let last = matches!(e, ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Cancelled);
+        ev.push(e);
+        if last {
+            break;
+        }
+    }
+    assert!(matches!(ev.last(), Some(ChatEvent::Cancelled)), "{:?}", ev.last());
+    std::thread::sleep(Duration::from_millis(300)); // the unsubscribe goes out on its own thread
+    assert!(stderr(&a).contains("unsubscribed kid-1"), "{}", stderr(&a));
 }
 
 #[test]

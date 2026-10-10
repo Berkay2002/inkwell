@@ -74,8 +74,9 @@ pub trait DocHost: Send + Sync {
     /// Non-empty info fields (title, author, ...).
     fn meta(&self) -> Vec<(&'static str, String)>;
     fn outline(&self) -> Result<Vec<OutlineItem>, String>;
-    /// The whole page as a PNG, longer side at most `max_px`.
-    fn page_png(&self, page: u32, max_px: u32) -> Result<Vec<u8>, String>;
+    /// The whole page as a PNG, longer side at most `max_px`, of the document state `rev` (the text
+    /// revision the tools read): an error when the document is no longer at it.
+    fn page_png(&self, rev: u32, page: u32, max_px: u32) -> Result<Vec<u8>, String>;
 }
 
 pub struct Ctx<'a> {
@@ -495,7 +496,7 @@ fn selection(c: &Ctx, _: &Value) -> Result<Output, String> {
 
 fn page_image(c: &Ctx, a: &Value) -> Result<Output, String> {
     let p = page_of(a, "page", c.text.pages)?;
-    let png = c.host.page_png(p, IMAGE_PX)?;
+    let png = c.host.page_png(c.text.rev, p, IMAGE_PX)?;
     let seen = c.text.chunks.iter().filter(|k| k.page == p).map(|k| k.id.clone()).collect();
     let text = format!("Page {} of {}, as an image (in exec: image(url) shows it).", p + 1, c.text.pages);
     Ok(Output { text, image: Some(png), seen, ..Default::default() })
@@ -557,7 +558,7 @@ mod tests {
         fn outline(&self) -> Result<Vec<OutlineItem>, String> {
             Ok(Vec::new())
         }
-        fn page_png(&self, _: u32, _: u32) -> Result<Vec<u8>, String> {
+        fn page_png(&self, _: u32, _: u32, _: u32) -> Result<Vec<u8>, String> {
             Err("no renderer".into())
         }
     }

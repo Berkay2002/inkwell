@@ -130,7 +130,7 @@ fn live_codex_reads_a_page_image_and_has_no_shell() {
     assert!(!d.text.chunks.iter().any(|c| c.text.contains("4271")), "the number must exist only as a drawing");
     {
         use crate::ai::tools::DocHost as _;
-        let png = crate::ai::EngineHost { eng: d.eng.clone(), doc: d.doc }.page_png(1, 1024).unwrap();
+        let png = crate::ai::EngineHost { eng: d.eng.clone(), doc: d.doc }.page_png(d.text.rev, 1, 1024).unwrap();
         let p = std::env::temp_dir().join("inkwell-tests").join("ai-live-image-page2.png");
         std::fs::write(&p, &png).unwrap();
         println!("page 2 png: {} bytes at {}", png.len(), p.display());
@@ -142,11 +142,6 @@ fn live_codex_reads_a_page_image_and_has_no_shell() {
     let (asked, read) = (tools_used(&ev).iter().any(|t| t.starts_with("get_page_image")), answer.contains("4271"));
     a.close_doc(d.doc);
 
-    if let Ok(q) = std::env::var("INKWELL_PROBE") {
-        let ev = d.ask(&a, &q, 1);
-        let ChatEvent::Done { answer, .. } = ev.last().unwrap() else { panic!("{:?}", ev.last()) };
-        println!("probe tools: {:?}\nprobe answer: {answer}", tools_used(&ev));
-    }
     // the model has the document tools and nothing else: no shell of its own
     let ev = d.ask(&a, "List every tool you can call, by exact name, and say whether you can run shell commands.", 0);
     let ChatEvent::Done { answer, .. } = ev.last().unwrap() else { panic!("{:?}", ev.last()) };
@@ -160,11 +155,26 @@ fn live_codex_reads_a_page_image_and_has_no_shell() {
 /// Apply comes 90 s later, and the turn must finish with the change made.
 #[test]
 fn live_a_slow_apply_still_lands() {
-    if !live() {
-        return;
+    if live() {
+        slow_apply(90, None);
     }
+}
+
+/// Past `APPROVAL_TIMEOUT` (300 s) too: proves what the real server does with a reply that late.
+/// `INKWELL_LIVE_LONG=1` as well, since it takes minutes.
+#[test]
+fn live_an_apply_after_330_s_still_lands() {
+    if live() && std::env::var("INKWELL_LIVE_LONG").as_deref() == Ok("1") {
+        slow_apply(330, Some(Duration::from_secs(400)));
+    }
+}
+
+fn slow_apply(wait_s: u64, timeout: Option<Duration>) {
     let d = Live::open("ai-live-slow.pdf", drawn_number_pdf("4271"));
     let a = Assistant::new();
+    if let Some(t) = timeout {
+        a.set_approval_timeout(t);
+    }
     let hits = Arc::new(AtomicUsize::new(0));
     let h = hits.clone();
     a.register(Arc::new(Tool {
@@ -192,8 +202,8 @@ fn live_a_slow_apply_still_lands() {
     let ev = loop {
         let e = rx.recv_timeout(Duration::from_secs(180)).expect("an event within 180 s");
         if let ChatEvent::Activity { id, state: ActState::Waiting, .. } = &e {
-            println!("card shown after {} ms; answering in 90 s", t0.elapsed().as_millis());
-            std::thread::sleep(Duration::from_secs(90));
+            println!("card shown after {} ms; answering in {wait_s} s", t0.elapsed().as_millis());
+            std::thread::sleep(Duration::from_secs(wait_s));
             a.decide(d.doc, id, true);
             decided = Some(t0.elapsed());
         }

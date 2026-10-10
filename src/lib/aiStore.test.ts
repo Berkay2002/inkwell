@@ -22,6 +22,7 @@ vi.mock("./ai", () => ({
   aiCancel: vi.fn(() => Promise.resolve()),
   aiClose: vi.fn(() => Promise.resolve()),
   aiToolDecision: vi.fn(() => Promise.resolve()),
+  aiSetPermissions: vi.fn(() => Promise.resolve()),
   loadSettings: () => ({
     model: null,
     effort: "low",
@@ -150,6 +151,16 @@ describe("assistant store", () => {
       selection: { text: "thirty days", page: 2 },
     });
     useAi.getState().setSettings({ permissions: "ask" });
+  });
+
+  it("tells a turn in flight when the permission mode is tightened", () => {
+    useAi.getState().setSettings({ consent: true, permissions: "full" });
+    useAi.getState().ask(1, { kind: "ask", question: "q" });
+    useAi.getState().setSettings({ permissions: "ask" });
+    expect(ai.aiSetPermissions).toHaveBeenCalledWith(1, "ask");
+    vi.mocked(ai.aiSetPermissions).mockClear();
+    useAi.getState().setSettings({ hideSources: true }); // unrelated settings do not ping the backend
+    expect(ai.aiSetPermissions).not.toHaveBeenCalled();
   });
 
   describe("tool activity", () => {

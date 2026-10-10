@@ -250,6 +250,7 @@ pub fn run() {
             ai::ai_ask,
             ai::ai_cancel,
             ai::ai_tool_decision,
+            ai::ai_set_permissions,
             ai::ai_close,
         ])
         .setup(|app| {

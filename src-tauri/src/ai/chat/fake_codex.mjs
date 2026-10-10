@@ -11,7 +11,8 @@
 //   grandchild    starts a child process of its own at initialize and logs its pid
 //   tools=<json>  before answering, calls the dynamic tools listed as
 //                 [{"tool": "get_text", "arguments": {...}, "delay": ms}] one by one (a server request
-//                 `item/tool/call`), logs each reply, and cites a passage found in the replies
+//                 `item/tool/call`), logs each reply, and cites a passage found in the replies;
+//                 a step {"spawn": "<thread id>"} announces a sub-agent thread instead of calling a tool
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import readline from "node:readline";
@@ -139,6 +140,18 @@ async function runTurn(id, p) {
   let toolText = "";
   for (const step of script ?? []) {
     if (step.delay) await sleep(step.delay);
+    if (step.spawn) {
+      // the model started a sub-agent (collab tool): its thread id is only seen here
+      out({
+        method: "item/started",
+        params: {
+          threadId: tid,
+          turnId: turn,
+          item: { type: "collabAgentToolCall", id: `agent-${step.spawn}`, tool: "spawnAgent", status: "inProgress", receiverThreadIds: [step.spawn] },
+        },
+      });
+      continue;
+    }
     const cid = `c${srvIds + 2}`;
     out({ method: "item/started", params: { threadId: tid, turnId: turn, item: { type: "agentMessage", id: cid, text: "", phase: "commentary" } } });
     out({ method: "item/agentMessage/delta", params: { threadId: tid, turnId: turn, itemId: cid, delta: "Let me look. " } });
