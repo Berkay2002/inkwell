@@ -460,10 +460,13 @@ pub fn compress(
         fs::copy(input, &tmp.0)?;
     }
     let size_after = if kept_original { size_before } else { written };
-    if out_path.exists() {
-        return Err(Error::OutputExists(out_path));
+    // A hard link fails when the target exists (rename would replace it on Windows); the temp file is
+    // removed by `TempFile` afterwards.
+    match fs::hard_link(&tmp.0, &out_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(Error::OutputExists(out_path)),
+        Err(e) => return Err(e.into()),
     }
-    fs::rename(&tmp.0, &out_path)?;
     let finish = |e: Error, p: &Path| {
         let _ = fs::remove_file(p);
         e

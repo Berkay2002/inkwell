@@ -188,9 +188,14 @@ fn every_sample_survives_every_preset() {
             let r = run(&input, &o).unwrap_or_else(|e| panic!("{name} {p:?}: {e}"));
             assert!(r.size_after <= r.size_before, "{name} {p:?} grew");
             assert_eq!(text(&r.output), before, "{name} {p:?}: text changed");
+            let v = r.visual.as_ref().unwrap();
+            println!("{name:40} {p:?}: {} -> {} B, max {} mean {:.3} psnr {:.1}", r.size_before, r.size_after, v.max_diff, v.mean_diff, v.psnr);
             if r.before.images == 0 {
-                assert_eq!(r.visual.as_ref().unwrap().max_diff, 0, "{name} {p:?}: pixels changed without any image");
+                assert_eq!(v.max_diff, 0, "{name} {p:?}: pixels changed without any image");
             }
+            // A garbled image (wrong colourspace, stride, inverted data) lands near 29 dB; legitimate
+            // Smallest-preset loss on the samples stays well above this.
+            assert!(v.psnr >= 30.0 && v.mean_diff <= 4.0, "{name} {p:?}: {v:?}");
         }
     }
 }

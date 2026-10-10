@@ -57,6 +57,8 @@ pub(crate) fn strip(doc: &mut PdfDocument, s: &Strip, pages: usize) -> Result<St
     if s.metadata {
         r.metadata = remove(&mut catalog, "Metadata");
         r.metadata |= remove(&mut doc.trailer()?, "Info");
+        // Application-private data (Photoshop, InDesign ...) travels in PieceInfo; pages carry their own XMP.
+        r.metadata |= remove(&mut catalog, "PieceInfo");
     }
     if s.bookmarks {
         r.bookmarks = remove(&mut catalog, "Outlines");
@@ -79,9 +81,16 @@ pub(crate) fn strip(doc: &mut PdfDocument, s: &Strip, pages: usize) -> Result<St
         }
     }
 
-    if s.thumbnails || s.javascript || s.embedded_files {
+    if s.metadata || s.thumbnails || s.javascript || s.embedded_files {
         for i in 0..pages {
             let mut page = doc.find_page(i as i32)?;
+            if s.metadata {
+                r.metadata |= remove(&mut page, "Metadata");
+                r.metadata |= remove(&mut page, "PieceInfo");
+            }
+            if s.embedded_files {
+                r.embedded_files += remove(&mut page, "AF") as u32;
+            }
             if s.thumbnails {
                 r.thumbnails += remove(&mut page, "Thumb") as u32;
             }
