@@ -84,7 +84,7 @@ export function ModelPicker({ up = false, icon = false }: { up?: boolean; icon?:
           aria-expanded={open}
           onClick={() => setOpen(!open)}
         >
-          <Glyph name="brain" size={20} stroke={1.75} />
+          <Glyph name="brain" size={18} stroke={1.75} />
         </button>
       ) : (
         <button className="ax-pill" title="Model and reasoning effort" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -499,7 +499,7 @@ function AttachMenu({ doc }: { doc: DocState }) {
   return (
     <div className="ax-pop-wrap" ref={ref}>
       <button className="ax-icon" title="Add the selection or page" aria-label="Add the selection or page" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <Glyph name="plus" size={20} stroke={2} />
+        <Glyph name="plus" size={18} stroke={2} />
       </button>
       {open && (
         <div className="ax-pop up" role="menu">
@@ -576,7 +576,7 @@ export function Composer({
           </button>
         ) : (
           <button className="ax-send" title="Send" aria-label="Send" disabled={!text.trim() || noText} onClick={send}>
-            <Glyph name="send" size={20} stroke={2.5} />
+            <Glyph name="send" size={18} stroke={2.5} />
           </button>
         )}
       </div>

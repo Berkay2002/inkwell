@@ -1,4 +1,5 @@
 import { type PointerEvent as RPointerEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { barWidth } from "./barWidth";
 import type { Geo } from "../../lib/ai";
 import { useAi } from "../../lib/aiStore";
 import type { DocState } from "../../store";
@@ -14,7 +15,6 @@ import {
   MoreMenu,
   NoText,
   type Variant,
-  startersFor,
   useViewerSelection,
 } from "./parts";
 import "./assistant.css";
@@ -271,7 +271,7 @@ function useStageBox(): Box | null {
   return box;
 }
 
-const BAR_H = 52;
+const BAR_H = 48;
 const GAP = 14;
 
 function Bar({ doc }: { doc: DocState }) {
@@ -281,12 +281,10 @@ function Bar({ doc }: { doc: DocState }) {
   const pending = useAi((s) => s.pending?.doc === doc.id);
   const messages = useAi((s) => s.chats[doc.id]?.messages);
   const selection = useAi((s) => s.selection !== null);
-  const prep = useAi((s) => s.chats[doc.id]?.prep);
   const ready = typeof status === "object" && status !== null && status.installed && status.loggedIn;
   const last = messages && messages.length >= 2 ? messages[messages.length - 1] : undefined;
   const forced = pending || !ready;
   const showSheet = forced || (sheet && !!messages && messages.length > 0);
-  const noText = typeof prep === "object" && prep !== null && !prep.enough;
   if (!box) return null;
 
   const iw = window.innerWidth;
@@ -305,7 +303,7 @@ function Bar({ doc }: { doc: DocState }) {
           style={{
             right: iw - box.r + 16,
             bottom: sheetBottom,
-            width: Math.min(420, Math.max(300, stageW - 32)),
+            width: Math.min(560, Math.max(320, stageW * 0.34), stageW - 32),
             maxHeight: Math.max(220, box.b - box.t - (sheetBottom - (ih - box.b)) - 16),
           }}
           aria-label="Assistant"
@@ -328,16 +326,7 @@ function Bar({ doc }: { doc: DocState }) {
         </section>
       )}
       {ready && !pending && (
-        <div className="ax-bar" style={{ left: (box.l + box.r) / 2, bottom: barBottom, width: Math.min(580, Math.max(280, stageW - 32)) }}>
-          {!messages?.length && !noText && (
-            <div className="ax-bar-starters">
-              {startersFor(doc).map((s) => (
-                <button key={s.title} className="ax-chip" onClick={s.run}>
-                  {s.title}
-                </button>
-              ))}
-            </div>
-          )}
+        <div className="ax-bar" style={{ left: (box.l + box.r) / 2, bottom: barBottom, width: barWidth(stageW) }}>
           <Composer doc={doc} variant="bar" trail={<MoreMenu doc={doc} up />} />
         </div>
       )}
