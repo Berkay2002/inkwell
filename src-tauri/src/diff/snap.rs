@@ -6,7 +6,7 @@ use super::content::{self, ResCat};
 use super::types::*;
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::{Matrix, Rect, TextPageFlags};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -27,6 +27,9 @@ const LOSSLESS: &[&[u8]] = &[
 
 const MAX_DEPTH: u32 = 28;
 const MAX_FORM_DEPTH: u32 = 6;
+/// Form expansions per page: forms reused under many names at every nesting level would otherwise
+/// expand exponentially (a crafted file could hang the compare). Past it, forms hash structurally.
+const MAX_FORMS_PER_PAGE: u32 = 512;
 
 #[derive(Clone, Debug)]
 pub struct ImageRef {
@@ -66,6 +69,7 @@ pub struct Snap {
     pub pages: Vec<PageSnap>,
     memo: RefCell<HashMap<i32, Hash>>,
     active: RefCell<HashSet<i32>>,
+    forms_left: Cell<u32>,
     words: RefCell<HashMap<usize, Rc<Vec<Word>>>>,
 }
 
@@ -136,6 +140,7 @@ impl Snap {
             pages: Vec::with_capacity(n),
             memo: RefCell::default(),
             active: RefCell::default(),
+            forms_left: Cell::new(MAX_FORMS_PER_PAGE),
             words: RefCell::default(),
         };
         for i in 0..n {
@@ -147,6 +152,7 @@ impl Snap {
 
     fn read_page(&self, i: usize) -> Result<PageSnap> {
         let page = self.doc.find_page(i as i32)?;
+        self.forms_left.set(MAX_FORMS_PER_PAGE);
         let res = gdi(&page, "Resources");
         let mut images = Vec::new();
         let mut ocr = false;
@@ -204,7 +210,7 @@ impl Snap {
             h.update(name);
             // Not resolved: a stream is only a stream through its indirect reference.
             let subtype = gd(&entry, "Subtype").and_then(|s| name_of(&s));
-            if *cat == ResCat::XObject && subtype.as_deref() == Some("Form") && depth < MAX_FORM_DEPTH {
+            if *cat == ResCat::XObject && subtype.as_deref() == Some("Form") && depth < MAX_FORM_DEPTH && self.take_form() {
                 let s = &entry;
                 let form_res = gd(s, "Resources");
                 let form_res = form_res.as_ref().or(res);
@@ -227,6 +233,12 @@ impl Snap {
             }
         }
         *h.finalize().as_bytes()
+    }
+
+    fn take_form(&self) -> bool {
+        let n = self.forms_left.get();
+        self.forms_left.set(n.saturating_sub(1));
+        n > 0
     }
 
     /// Structural hash: independent of object numbers, dictionary key order, number formatting and

@@ -741,3 +741,41 @@ fn real_sample_pairs() {
         }
     }
 }
+
+/// A form drawn under ten names from its own resources: without the per-page form budget this
+/// expands 10^6 times and the compare hangs.
+#[test]
+fn self_referencing_forms_do_not_explode() {
+    let names: String = (0..10).map(|i| format!("/F{i} 4 0 R ")).collect();
+    let draws: String = (0..10).map(|i| format!("/F{i} Do ")).collect();
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources 5 0 R /Contents 6 0 R >>"),
+        format!("<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources 5 0 R /Length {} >>
+stream
+{draws}
+endstream", draws.len()),
+        format!("<< /XObject << {names}>> >>"),
+        format!("<< /Length {} >>
+stream
+{draws}
+endstream", draws.len()),
+    ];
+    let mut pdf = b"%PDF-1.7
+".to_vec();
+    for (i, o) in objs.iter().enumerate() {
+        pdf.extend(format!("{} 0 obj
+{o}
+endobj
+", i + 1).bytes());
+    }
+    pdf.extend(b"trailer
+<< /Root 1 0 R /Size 7 >>
+%%EOF
+");
+    let t = std::time::Instant::now();
+    let c = compare(&pdf, &pdf, &CompareOptions::default()).unwrap();
+    assert!(c.identical);
+    assert!(t.elapsed().as_secs_f32() < 3.0, "took {:?}", t.elapsed());
+}
