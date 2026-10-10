@@ -36,13 +36,20 @@ async fn blocking<R: Send + 'static>(f: impl FnOnce() -> Result<R, EngineError> 
 
 const PDF: &[&str] = &["pdf"];
 
+/// Dialog titles the UI may ask for (the text is Rust's, never the webview's).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum PickTitle {
+    Locate,
+}
+
 /// Open dialog in Rust; the picked files come back as open tokens.
 #[tauri::command]
-async fn pick_open(window: Window, multiple: bool, title: Option<String>) -> Result<Vec<FileRef>, EngineError> {
+async fn pick_open(window: Window, multiple: bool, title: Option<PickTitle>) -> Result<Vec<FileRef>, EngineError> {
     blocking(move || {
         let mut d = window.dialog().file().set_parent(&window).add_filter("PDF documents", PDF);
-        if let Some(t) = title {
-            d = d.set_title(t);
+        if let Some(PickTitle::Locate) = title {
+            d = d.set_title("Locate the moved file");
         }
         let picked = if multiple { d.blocking_pick_files() } else { d.blocking_pick_file().map(|f| vec![f]) };
         let reg = window.state::<Paths>();
@@ -197,7 +204,14 @@ async fn edit_redo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
 async fn save_document(window: Window, eng: Eng<'_>, reg: Reg<'_>, doc: DocId, to: Option<String>) -> Result<EditState, EngineError> {
     let to = to.map(|t| reg.take_save(window.label(), &t)).transpose()?;
     let eng = eng.inner().clone();
-    blocking(move || eng.save(doc, to.as_deref())).await
+    blocking(move || {
+        let s = eng.save(doc, to.as_deref())?;
+        if let Some(to) = &to {
+            window.state::<Paths>().learn(to);
+        }
+        Ok(s)
+    })
+    .await
 }
 
 /// `out`: a save token.
@@ -213,7 +227,12 @@ async fn extract_pages(
 ) -> Result<EditState, EngineError> {
     let out = reg.take_save(window.label(), &out)?;
     let eng = eng.inner().clone();
-    blocking(move || eng.extract(doc, &pages, &out, delete_after)).await
+    blocking(move || {
+        let s = eng.extract(doc, &pages, &out, delete_after)?;
+        window.state::<Paths>().learn(&out);
+        Ok(s)
+    })
+    .await
 }
 
 #[tauri::command]

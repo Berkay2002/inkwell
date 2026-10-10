@@ -83,8 +83,7 @@ export function Thumb({ r, missing, size = 22 }: { r: Recent; missing?: boolean;
 
 /** Asks for the file's new place, repairs the entry and opens it. */
 export async function locateFile(r: Recent) {
-  const name = baseName(r.path);
-  const [f] = await pickOpen(false, `Locate ${name}`);
+  const [f] = await pickOpen(false, "locate");
   if (!f) return;
   await useRecents.getState().relocate(r.path, f.path);
   void useStore.getState().openPath(f.path, f.token);

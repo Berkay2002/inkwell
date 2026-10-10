@@ -42,21 +42,28 @@ fn bad() -> EngineError {
 
 impl Paths {
     fn issue(&self, window: &str, path: String, save: bool) -> FileRef {
+        let mut t = self.tokens.lock().unwrap();
+        // one open token per window and file, however often it is asked for
+        if !save {
+            if let Some((token, _)) = t.iter().find(|(_, e)| !e.save && e.window == window && e.path == path) {
+                return FileRef { token: token.clone(), path };
+            }
+        }
         let mut b = [0u8; 16];
         getrandom::fill(&mut b).expect("system random source");
         let token: String = b.iter().map(|x| format!("{x:02x}")).collect();
-        self.learn(&path);
-        let e = Entry { path: path.clone(), window: window.to_string(), save };
-        self.tokens.lock().unwrap().insert(token.clone(), e);
+        t.insert(token.clone(), Entry { path: path.clone(), window: window.to_string(), save });
         FileRef { token, path }
     }
 
     /// A file the user chose to read, for `window`.
     pub fn issue_open(&self, window: &str, path: String) -> FileRef {
+        self.learn(&path);
         self.issue(window, path, false)
     }
 
-    /// A file the user chose to write in a save dialog, for `window`, good for one write.
+    /// A file the user chose to write in a save dialog, for `window`, good for one write. The path
+    /// becomes known only once the write succeeded (the command calls `learn`).
     pub fn issue_save(&self, window: &str, path: String) -> FileRef {
         self.issue(window, path, true)
     }
@@ -155,10 +162,14 @@ mod tests {
         let o = p.issue_open(W, f.clone());
         assert_eq!(p.open(W, &o.token).unwrap(), f);
         assert_eq!(p.open(W, &o.token).unwrap(), f, "open tokens can be used again");
+        assert_eq!(p.issue_open(W, f.clone()).token, o.token, "asking again reuses the token");
+        assert_ne!(p.issue_open("other", f.clone()).token, o.token);
+        assert_eq!(p.tokens.lock().unwrap().len(), 2);
         assert!(p.open("other", &o.token).is_err(), "tokens belong to one window");
         assert!(p.take_save(W, &o.token).is_err(), "an open token never names a write");
 
         let s = p.issue_save(W, d.join("out.pdf").to_string_lossy().into_owned());
+        assert!(!p.known(&s.path), "a save target is known only after the write");
         assert!(p.open(W, &s.token).is_err(), "a save token is not for reading");
         assert!(p.take_save("other", &s.token).is_err());
         assert!(p.take_save(W, &s.token).is_ok());

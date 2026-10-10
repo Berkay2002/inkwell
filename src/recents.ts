@@ -91,7 +91,8 @@ export const useRecents = create<RecentsStore>((set, get) => {
         items = cleaned;
         await invoke("recents_save", { json: JSON.stringify(items) });
       }
-      if (migrated) localStorage.removeItem(LEGACY_KEY);
+      // The old list stays in localStorage: Rust drops its paths (it was never told about them), and
+      // deleting it would lose them for good. See docs/engine-rules.md, "File paths".
     } catch {
       // no shell (plain browser) or unreadable store: an empty list is the safe fallback
     }
