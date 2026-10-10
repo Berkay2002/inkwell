@@ -186,6 +186,22 @@ export const STAMPS = ["Approved", "Draft", "Confidential"] as const;
 /** Rough size of a stamp for its name, in points. */
 export const stampSize = (name: string): [number, number] => [Math.max(110, 22 + name.length * 13), 40];
 
+/**
+ * Page-space point (unrotated page, points) -> CSS px inside the page box at `rot` quarter turns
+ * clockwise and `zoom`; the same mapping as `pageSpaceTransform` in layout.ts.
+ */
+export function toScreen(p: Pt, size: [number, number], rot: 0 | 1 | 2 | 3, zoom: number): Pt {
+  const [x, y] = p;
+  const [w, h] = size;
+  const q = ([[x, y], [h - y, x], [w - x, h - y], [y, w - x]] as Pt[])[rot];
+  return [q[0] * zoom, q[1] * zoom];
+}
+
+/** Bounding box in CSS px of a page-space rect. */
+export function rectToScreen(r: Rect4, size: [number, number], rot: 0 | 1 | 2 | 3, zoom: number): Rect4 {
+  return normRect(toScreen([r[0], r[1]], size, rot, zoom), toScreen([r[2], r[3]], size, rot, zoom));
+}
+
 export const rgbHex = (c: RGB | null, fallback = "#1A1C20") =>
   c ? `#${c.map((v) => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, "0")).join("")}` : fallback;
 
