@@ -1,8 +1,11 @@
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { type Citation, MODES, MODE_NAMES } from "../../lib/ai";
+import type { Citation } from "../../lib/ai";
 import { type Msg, readViewerSelection, useAi } from "../../lib/aiStore";
 import type { DocState } from "../../store";
+import { isVerified } from "../../lib/activity";
+import { ActivityTrail } from "./ActivityTrail";
 import { Markdown } from "./Markdown";
+import { PermissionItems } from "./PermissionItems";
 
 export type Variant = "docked" | "floating" | "bar";
 
@@ -23,6 +26,9 @@ const PATHS = {
   check: "M6 12.5l4 4 8-9",
   copy: "M9 9h9.5v11H9zM6 15V4h9.5",
   plus: "M12 6v12M6 12h12",
+  docked: "M4 5.5h16v13H4zM14.5 5.5v13",
+  floating: "M4 5.5h16v13H4zM12.5 8.5h5v7h-5z",
+  bar: "M4 5.5h16v13H4zM8 14.5h8",
   brain:
     "M12 5.2A3 3 0 0 0 6.6 6.7 3.2 3.2 0 0 0 4.6 10c0 .9.4 1.7 1 2.2A3.3 3.3 0 0 0 7 17a3 3 0 0 0 5 1.6zM12 5.2a3 3 0 0 1 5.4 1.5 3.2 3.2 0 0 1 2 3.3c0 .9-.4 1.7-1 2.2A3.3 3.3 0 0 1 17 17a3 3 0 0 1-5 1.6M12 5.2v13.4",
 } as const;
@@ -84,7 +90,7 @@ export function ModelPicker({ up = false, icon = false }: { up?: boolean; icon?:
           aria-expanded={open}
           onClick={() => setOpen(!open)}
         >
-          <Glyph name="brain" size={20} stroke={1.75} />
+          <Glyph name="brain" size={18} stroke={1.75} />
         </button>
       ) : (
         <button className="ax-pill" title="Model and reasoning effort" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -129,7 +135,7 @@ export function ModelPicker({ up = false, icon = false }: { up?: boolean; icon?:
   );
 }
 
-/** The "..." menu: chat actions and the layout. */
+/** The "..." menu: chat actions. */
 export function MoreMenu({ doc, up = false }: { doc: DocState; up?: boolean }) {
   const settings = useAi((s) => s.settings);
   const { open, setOpen, ref } = usePop();
@@ -150,13 +156,8 @@ export function MoreMenu({ doc, up = false }: { doc: DocState; up?: boolean }) {
           <button onClick={run(() => st().setSettings({ hideSources: !settings.hideSources }))}>
             {settings.hideSources ? "Show sources under answers" : "Hide sources under answers"}
           </button>
-          <div className="ax-pop-label">Layout</div>
-          {MODES.map((m) => (
-            <button key={m} role="menuitemradio" aria-checked={m === settings.mode} onClick={run(() => st().setMode(m))}>
-              <span className="ax-tick">{m === settings.mode && <Glyph name="check" size={13} />}</span>
-              {MODE_NAMES[m]}
-            </button>
-          ))}
+          <div className="ax-pop-sep" />
+          <PermissionItems value={settings.permissions} onPick={(p) => run(() => st().setSettings({ permissions: p }))()} tick={<Glyph name="check" size={13} />} />
           <div className="ax-pop-sep" />
           <button onClick={run(() => st().setOpen(false))}>Close assistant</button>
         </div>
@@ -331,7 +332,7 @@ function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: 
   const show = (c: Citation) => useAi.getState().showCitation(doc.id, c);
   return (
     <ul className={`ax-sources ${variant}`}>
-      {m.citations.map((c) => {
+      {m.citations.filter(isVerified).map((c) => {
         const on = active === c.n;
         const page = c.page != null ? `p. ${c.page + 1}` : "";
         const cls = on ? "ax-source on" : "ax-source";
@@ -404,7 +405,7 @@ function Followups({ doc, m, variant }: { doc: DocState; m: Msg; variant: Varian
 export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocState; m: Msg; variant: Variant; isLast: boolean; plain?: boolean }) {
   const mark = useAi((s) => s.mark);
   const hide = useAi((s) => s.settings.hideSources);
-  const cites = useMemo(() => new Map(m.citations.map((c) => [c.n, c])), [m.citations]);
+  const cites = useMemo(() => new Map(m.citations.filter(isVerified).map((c) => [c.n, c])), [m.citations]);
   const known = useMemo(() => new Set(cites.keys()), [cites]);
   const active = mark && mark.doc === doc.id ? mark.n : null;
 
@@ -422,6 +423,7 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
 
   return (
     <div className="ax-a">
+      <ActivityTrail doc={doc.id} m={m} />
       {m.text === "" && m.state === "streaming" ? (
         <p className="dim">{PHASES[m.phase ?? "reading"] ?? "Thinking…"}</p>
       ) : (
@@ -434,7 +436,7 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
       {m.state === "cancelled" && <p className="dim small">Stopped.</p>}
       {m.state === "done" && (
         <>
-          {!hide && m.citations.length > 0 && <Sources doc={doc} m={m} variant={variant} active={active} />}
+          {!hide && m.citations.some(isVerified) && <Sources doc={doc} m={m} variant={variant} active={active} />}
           <div className="ax-actions">
             <button className="ax-link" onClick={() => void navigator.clipboard.writeText(m.text)}>
               Copy
@@ -499,7 +501,7 @@ function AttachMenu({ doc }: { doc: DocState }) {
   return (
     <div className="ax-pop-wrap" ref={ref}>
       <button className="ax-icon" title="Add the selection or page" aria-label="Add the selection or page" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <Glyph name="plus" size={20} stroke={2} />
+        <Glyph name="plus" size={18} stroke={2} />
       </button>
       {open && (
         <div className="ax-pop up" role="menu">
@@ -576,7 +578,7 @@ export function Composer({
           </button>
         ) : (
           <button className="ax-send" title="Send" aria-label="Send" disabled={!text.trim() || noText} onClick={send}>
-            <Glyph name="send" size={20} stroke={2.5} />
+            <Glyph name="send" size={18} stroke={2.5} />
           </button>
         )}
       </div>
@@ -584,7 +586,6 @@ export function Composer({
   );
 }
 
-export const FOOTNOTE = "Sent to OpenAI through your Codex login. Chats are not saved.";
 
 /** A selection in the viewer is kept until the user clicks in the viewer again (clicking a panel
  *  button or opening the palette must not lose it). Runs while the panel is closed too, so the

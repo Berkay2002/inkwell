@@ -38,6 +38,36 @@
   color: var(--ax-accent);
   font-weight: 600;
 }
+/* Assistant button + its three layouts, side by side in the toolbar: one click to switch. */
+.ax-toggle-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.ax-layouts {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  margin-left: 2px;
+  background: var(--surface-2);
+  border-radius: 14px;
+}
+.ax-layouts button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 24px;
+  border-radius: 12px;
+  color: var(--text-2);
+}
+.ax-layouts button:hover {
+  color: var(--text);
+}
+.ax-layouts button[aria-checked="true"] {
+  background: var(--surface);
+  color: var(--ax-accent);
+  box-shadow: var(--shadow-1);
+}
 
 /* ---- shells ---- */
 .ax-dock {
@@ -251,13 +281,6 @@
 .ax-lead {
   margin: 4px 0 14px;
   color: var(--ax-dim);
-}
-.ax-foot {
-  flex: none;
-  padding: 2px 16px 11px;
-  font-size: 11px;
-  color: var(--ax-dim);
-  text-align: center;
 }
 .ax-row {
   display: flex;
@@ -622,32 +645,32 @@ button.ax-cite:hover {
 .ax-compose {
   position: relative;
   flex: none;
-  padding: 6px 12px 4px;
+  padding: 6px 12px 12px;
 }
-/* One row, fully round, no border, a soft raised surface. Everything in it is a 40px circle or a
-   40px-tall text box (24px lines + 8px padding), 9px inside the pill, so the "+", the text, the icons
+/* One row, fully round, no border, a soft raised surface. Everything in it is a 36px circle or a
+   36px-tall text box (22px lines + 7px padding), 6px inside the pill, so the "+", the text, the icons
    and the send button share one centre line and the pill ends are concentric with the end buttons.
    The textarea grows upward by whole lines; the buttons stay on the last line. */
 .ax-input {
   display: flex;
   align-items: flex-end;
   gap: 2px;
-  min-height: 58px;
-  padding: 9px;
+  min-height: 48px;
+  padding: 6px;
   background: var(--ax-pill, var(--ax-panel));
-  border-radius: 29px;
+  border-radius: 24px;
   box-shadow: var(--ax-shadow);
 }
 .ax-input textarea {
   flex: 1;
   min-width: 0;
   max-height: 136px;
-  padding: 8px 8px 8px 3px;
+  padding: 7px 8px 7px 3px;
   resize: none;
   field-sizing: content;
   font: inherit;
-  font-size: 15px;
-  line-height: 24px;
+  font-size: 14.5px;
+  line-height: 22px;
   color: var(--ax-text);
   background: transparent;
   border: 0;
@@ -658,9 +681,9 @@ button.ax-cite:hover {
   opacity: 0.55;
 }
 .ax-input .ax-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 20px;
+  width: 36px;
+  height: 36px;
+  border-radius: 18px;
 }
 .ax-input .ax-pop-wrap:first-child .ax-icon {
   color: var(--ax-text);
@@ -673,12 +696,12 @@ button.ax-cite:hover {
   display: grid;
   place-items: center;
   flex: none;
-  width: 40px;
-  height: 40px;
-  margin-left: 6px;
+  width: 36px;
+  height: 36px;
+  margin-left: 4px;
   color: var(--ax-surface);
   background: var(--ax-text);
-  border-radius: 20px;
+  border-radius: 18px;
 }
 .ax-send:disabled {
   opacity: 0.35;
@@ -745,17 +768,6 @@ button.ax-cite:hover {
   left: 0;
   right: 0;
   bottom: 100%;
-  background: var(--ax-surface);
-  box-shadow: var(--ax-shadow);
-}
-.ax-bar-starters {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.ax-bar-starters .ax-chip {
   background: var(--ax-surface);
   box-shadow: var(--ax-shadow);
 }

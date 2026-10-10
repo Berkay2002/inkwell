@@ -13,6 +13,8 @@ import { Viewer } from "./components/Viewer";
 import { initialFiles } from "./lib/api";
 import { commandFor } from "./lib/commands";
 import { startHistoryEvents, useHistory } from "./lib/historyStore";
+import { guardWindowClose } from "./lib/edit";
+import { Organize } from "./components/Organize";
 import { useActiveDoc, useStore } from "./store";
 
 const isPdf = (p: string) => /\.pdf$/i.test(p);
@@ -66,6 +68,8 @@ export default function App() {
 
     const onKey = (e: KeyboardEvent) => {
       const c = commandFor(e);
+      const t = e.target as HTMLElement | null;
+      if (c?.notInText && t?.closest("input, textarea, [contenteditable]")) return;
       if (c) {
         e.preventDefault();
         if (!c.needsDoc || useStore.getState().active != null) c.run();
@@ -76,7 +80,9 @@ export default function App() {
     const noMenu = (e: MouseEvent) => e.preventDefault();
     window.addEventListener("keydown", onKey);
     window.addEventListener("contextmenu", noMenu);
+    const unguard = guardWindowClose();
     return () => {
+      unguard();
       cancelled = true;
       off?.();
       window.removeEventListener("keydown", onKey);
@@ -87,7 +93,9 @@ export default function App() {
   return (
     <div className="app">
       <TabBar />
-      {doc ? (
+      {doc?.organize ? (
+        <Organize key={doc.id} doc={doc} />
+      ) : doc ? (
         <>
           <Toolbar doc={doc} />
           {showCompare ? (

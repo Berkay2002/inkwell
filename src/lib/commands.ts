@@ -4,6 +4,7 @@ import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
 import { useHistory } from "./historyStore";
 import { pickAndCompareFiles } from "../components/history/HistoryPanel";
+import * as edits from "./edit";
 import { stepZoom } from "./layout";
 
 export interface Command {
@@ -12,6 +13,8 @@ export interface Command {
   /** First entry is shown in the palette; all of them trigger the command. */
   keys?: string[];
   needsDoc?: boolean;
+  /** Left to the text field when one has focus (its own undo, select all ...). */
+  notInText?: boolean;
   run: () => void;
 }
 
@@ -38,7 +41,45 @@ export const focusPageInput = () => {
 
 export const commands: Command[] = [
   { id: "open", title: "Open file…", keys: ["Ctrl+O"], run: () => void openDialog() },
-  { id: "close", title: "Close tab", keys: ["Ctrl+W"], needsDoc: true, run: withDoc((d) => st().closeDoc(d.id)) },
+  { id: "close", title: "Close tab", keys: ["Ctrl+W"], needsDoc: true, run: withDoc((d) => void edits.requestClose(d.id)) },
+  { id: "save", title: "Save", keys: ["Ctrl+S"], needsDoc: true, run: withDoc((d) => void edits.save(d.id)) },
+  { id: "save-as", title: "Save as…", keys: ["Ctrl+Shift+S"], needsDoc: true, run: withDoc((d) => void edits.saveAs(d.id)) },
+  { id: "undo", title: "Undo", keys: ["Ctrl+Z"], needsDoc: true, notInText: true, run: withDoc((d) => void edits.undo(d.id)) },
+  { id: "redo", title: "Redo", keys: ["Ctrl+Y", "Ctrl+Shift+Z"], needsDoc: true, notInText: true, run: withDoc((d) => void edits.redo(d.id)) },
+  {
+    id: "organize",
+    title: "Organize pages",
+    keys: ["Ctrl+Shift+O"],
+    needsDoc: true,
+    run: withDoc((d) => st().patch(d.id, { organize: !d.organize })),
+  },
+  {
+    id: "insert-blank",
+    title: "Insert blank page after this one",
+    needsDoc: true,
+    run: withDoc((d) => void edits.edit(d.id, { op: "insertBlank", at: d.currentPage + 1, like: d.currentPage })),
+  },
+  {
+    id: "insert-file",
+    title: "Insert pages from file after this page…",
+    needsDoc: true,
+    run: withDoc((d) => void edits.insertFile(d.id, d.currentPage + 1)),
+  },
+  {
+    id: "rotate-page-cw",
+    title: "Rotate this page clockwise (saved in the file)",
+    needsDoc: true,
+    run: withDoc((d) => void edits.edit(d.id, { op: "rotate", pages: [d.currentPage], quarterTurns: 1 })),
+  },
+  {
+    id: "delete-page",
+    title: "Delete this page",
+    needsDoc: true,
+    run: withDoc((d) => d.pageCount > 1 && void edits.edit(d.id, { op: "delete", pages: [d.currentPage] })),
+  },
+  { id: "extract-page", title: "Extract this page…", needsDoc: true, run: withDoc((d) => void edits.extract(d.id, [d.currentPage])) },
+  { id: "split", title: "Split into single pages", needsDoc: true, run: withDoc((d) => void edits.split(d.id, 1)) },
+  { id: "merge", title: "Merge files…", run: () => void edits.mergeFiles() },
   { id: "next-tab", title: "Next tab", keys: ["Ctrl+Tab", "Ctrl+PageDown"], run: () => st().cycleTab(1) },
   { id: "prev-tab", title: "Previous tab", keys: ["Ctrl+Shift+Tab", "Ctrl+PageUp"], run: () => st().cycleTab(-1) },
   { id: "find", title: "Find in document", keys: ["Ctrl+F"], needsDoc: true, run: () => st().setUi({ searchOpen: true }) },

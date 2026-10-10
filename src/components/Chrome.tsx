@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
+import { requestClose } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { type DocState, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
 import { HistoryToggle } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
+import { ModeSwitch } from "./Organize";
 import { WindowControls } from "./WindowControls";
 
 const st = () => useStore.getState();
@@ -40,17 +42,18 @@ export function TabBar() {
           onMouseDown={(e) => {
             if (e.button === 1) {
               e.preventDefault();
-              st().closeDoc(id);
+              void requestClose(id);
             } else if (e.button === 0) st().activate(id);
           }}
         >
           <Icon name="file" size={14} />
           <span className="tab-name">{docs[id].name}</span>
+          {docs[id].dirty && <span className="tab-dirty" title="Unsaved changes" />}
           <button
             className="tab-close"
             aria-label="Close tab"
             onMouseDown={(e) => e.stopPropagation()}
-            onClick={() => st().closeDoc(id)}
+            onClick={() => void requestClose(id)}
           >
             <Icon name="close" size={12} />
           </button>
@@ -92,6 +95,8 @@ export function Toolbar({ doc }: { doc: DocState }) {
 
   return (
     <div className="toolbar">
+      <ModeSwitch doc={doc} />
+      <span className="sep" />
       <Btn icon="sidebar" title={`Toggle sidebar${keys("sidebar")}`} on={sidebar !== "none"} onClick={() => st().toggleSidebar("thumbs")} />
       <Btn icon="outline" title="Outline" on={sidebar === "outline"} onClick={() => st().toggleSidebar("outline")} />
       <span className="sep" />

@@ -1,11 +1,13 @@
 pub mod ai;
 pub mod diff;
+pub mod compress;
 pub mod engine;
 pub mod history;
 pub mod history_ipc;
 pub mod recents;
 
 use engine::cache::TileKey;
+use engine::edit::{EditOp, EditState, SplitResult};
 use engine::{DocId, Engine, EngineError, EngineStats, OpenInfo, OutlineItem, SearchEvent, TextLine, TileOutcome};
 use history_ipc::History;
 use serde::Serialize;
@@ -107,6 +109,57 @@ fn search(eng: Eng<'_>, doc: DocId, query: String, on_event: Channel<SearchEvent
 #[tauri::command]
 fn cancel_search(eng: Eng<'_>, doc: DocId) {
     eng.cancel_search(doc);
+}
+
+// ---- editing (see engine::edit) ----------------------------------------------------------------
+
+#[tauri::command]
+async fn edit_apply(eng: Eng<'_>, doc: DocId, op: EditOp) -> Result<EditState, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.apply(doc, op)).await
+}
+
+#[tauri::command]
+async fn edit_undo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.undo(doc)).await
+}
+
+#[tauri::command]
+async fn edit_redo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.redo(doc)).await
+}
+
+/// `path`: Save as; omitted: save over the document's own file.
+#[tauri::command]
+async fn save_document(eng: Eng<'_>, doc: DocId, path: Option<String>) -> Result<EditState, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.save(doc, path.as_deref())).await
+}
+
+#[tauri::command]
+async fn extract_pages(
+    eng: Eng<'_>,
+    doc: DocId,
+    pages: Vec<u32>,
+    out: String,
+    delete_after: bool,
+) -> Result<EditState, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.extract(doc, &pages, &out, delete_after)).await
+}
+
+#[tauri::command]
+async fn split_document(eng: Eng<'_>, doc: DocId, every: u32) -> Result<SplitResult, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.split(doc, every)).await
+}
+
+#[tauri::command]
+async fn merge_files(eng: Eng<'_>, paths: Vec<String>, out: String) -> Result<u32, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.merge(&paths, &out)).await
 }
 
 #[tauri::command]
@@ -256,6 +309,13 @@ pub fn run() {
             set_cache_budget,
             initial_files,
             tile_raw,
+            edit_apply,
+            edit_undo,
+            edit_redo,
+            save_document,
+            extract_pages,
+            split_document,
+            merge_files,
             recents::stat_files,
             recents::recents_load,
             recents::recents_save,
@@ -264,6 +324,8 @@ pub fn run() {
             ai::ai_prepare,
             ai::ai_ask,
             ai::ai_cancel,
+            ai::ai_tool_decision,
+            ai::ai_set_permissions,
             ai::ai_close,
             history_ipc::history_state,
             history_ipc::history_versions,
@@ -288,3 +350,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running Inkwell");
 }
+

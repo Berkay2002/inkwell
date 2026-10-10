@@ -1,9 +1,10 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { OutlineItem } from "../lib/api";
-import { computeLayout, previewScaleKey, rotated, typicalSize, visibleRange } from "../lib/layout";
+import { computeLayout, previewScaleKey, rotated, type Size, visibleRange } from "../lib/layout";
 import { type Want, tileClient } from "../lib/tiles";
 import { type DocState, useStore } from "../store";
 import { Icon } from "./Icons";
+import { ContextMenu, pageActions } from "./PageMenu";
 import { TileCanvas } from "./TileCanvas";
 
 const THUMB_W = 150;
@@ -35,8 +36,10 @@ function Thumbnails({ doc }: { doc: DocState }) {
   const { id, sizes, rot, currentPage, rev } = doc;
   const el = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, h: 0 });
-  const zoom = THUMB_W / typicalSize(sizes, rot)[0];
-  const layout = useMemo(() => computeLayout(sizes, rot, zoom, 0), [sizes, rot, zoom]);
+  const [menu, setMenu] = useState<{ x: number; y: number; page: number } | null>(null);
+  // Every page fits the column width (a landscape page among portrait ones too).
+  const fitted = useMemo(() => sizes.map((s) => rotated(s, rot)).map(([w, h]) => [THUMB_W, (h * THUMB_W) / w] as Size), [sizes, rot]);
+  const layout = useMemo(() => computeLayout(fitted, 0, 1, 0), [fitted]);
 
   useLayoutEffect(() => {
     const s = el.current!;
@@ -78,9 +81,13 @@ function Thumbnails({ doc }: { doc: DocState }) {
         className={i === currentPage ? "thumb on" : "thumb"}
         style={{ top: tops[i], left: (THUMB_W + 40 - widths[i]) / 2, width: widths[i], height: heights[i] }}
         onClick={() => useStore.getState().goTo(id, i)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY, page: i });
+        }}
         title={`Page ${i + 1}`}
       >
-        <TileCanvas docId={id} tile={tile} size={size} zoom={zoom} stream={1} cover />
+        <TileCanvas docId={id} tile={tile} size={size} zoom={THUMB_W / size[0]} stream={1} cover />
         <span className="thumb-num">{i + 1}</span>
       </button>,
     );
@@ -97,12 +104,15 @@ function Thumbnails({ doc }: { doc: DocState }) {
   return (
     <div className="thumbs" ref={el} onScroll={() => setView({ top: el.current!.scrollTop, h: el.current!.clientHeight })}>
       <div style={{ position: "relative", height: total, width: THUMB_W + 40 }}>{items}</div>
+      {menu && menu.page < doc.pageCount && (
+        <ContextMenu x={menu.x} y={menu.y} items={pageActions(doc, [menu.page])} onClose={() => setMenu(null)} />
+      )}
     </div>
   );
 }
 
 function Outline({ doc }: { doc: DocState }) {
-  useEffect(() => useStore.getState().loadOutline(doc.id), [doc.id]);
+  useEffect(() => useStore.getState().loadOutline(doc.id), [doc.id, doc.rev]);
   if (!doc.outline) return <div className="empty">Loading…</div>;
   if (doc.outline.length === 0) return <div className="empty">This document has no outline.</div>;
   return (

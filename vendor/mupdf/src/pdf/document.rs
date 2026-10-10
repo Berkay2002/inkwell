@@ -16,6 +16,12 @@ use crate::{
     Image, Outline, SimpleFontEncoding, Size, WriteMode,
 };
 
+// Inkwell patch: image rewriting with progress/cancel, font subsetting, objstm write flag.
+mod optimize;
+pub use optimize::{
+    ImageClassOptions, ImageRewriteOptions, ImageRewriteStats, Recompress, RewriteProgress,
+};
+
 bitflags! {
     pub struct Permission: u32 {
         const PRINT = PDF_PERM_PRINT as _;

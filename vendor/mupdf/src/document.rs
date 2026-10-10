@@ -85,6 +85,31 @@ impl Document {
         .map(|inner| Self { inner })
     }
 
+    /// Like [`Document::from_bytes`], but reads `bytes` in place instead of copying them.
+    ///
+    /// # Safety
+    /// `bytes` must stay alive and unchanged until the document, and everything loaded from it,
+    /// has been dropped.
+    pub unsafe fn from_shared_bytes(bytes: &[u8], magic: &str) -> Result<Self, Error> {
+        let c_magic = CString::new(magic)?;
+        let buf = unsafe {
+            Buffer::from_raw(fz_new_buffer_from_shared_data(
+                context(),
+                bytes.as_ptr(),
+                bytes.len(),
+            ))
+        };
+        // The stream the document keeps holds its own reference to the buffer.
+        unsafe {
+            ffi_try!(mupdf_open_document_from_bytes(
+                context(),
+                buf.inner,
+                c_magic.as_ptr()
+            ))
+        }
+        .map(|inner| Self { inner })
+    }
+
     pub fn recognize(magic: &str) -> Result<bool, Error> {
         let c_magic = CString::new(magic)?;
         unsafe { ffi_try!(mupdf_recognize_document(context(), c_magic.as_ptr())) }

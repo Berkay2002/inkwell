@@ -1,5 +1,6 @@
 import { type PointerEvent as RPointerEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { Geo } from "../../lib/ai";
+import { barWidth } from "./barWidth";
+import { type Geo, MODES, MODE_NAMES } from "../../lib/ai";
 import { useAi } from "../../lib/aiStore";
 import type { DocState } from "../../store";
 import {
@@ -8,13 +9,12 @@ import {
   Composer,
   Consent,
   Empty,
-  FOOTNOTE,
   Gate,
+  Glyph,
   Messages,
   MoreMenu,
   NoText,
   type Variant,
-  startersFor,
   useViewerSelection,
 } from "./parts";
 import "./assistant.css";
@@ -22,15 +22,33 @@ import "./assistant.css";
 /** A plain text button in the toolbar (no icon: the panel is called what it is). */
 export function AssistantToggle() {
   const open = useAi((s) => s.open);
+  const mode = useAi((s) => s.settings.mode);
+  const st = useAi.getState;
   return (
-    <button
-      className={open ? "ax-toggle on" : "ax-toggle"}
-      title="Assistant (Ctrl+Shift+A)"
-      aria-pressed={open}
-      onClick={() => useAi.getState().toggle()}
-    >
-      Assistant
-    </button>
+    <div className="ax-toggle-group">
+      <button
+        className={open ? "ax-toggle on" : "ax-toggle"}
+        title="Assistant (Ctrl+Shift+A)"
+        aria-pressed={open}
+        onClick={() => st().toggle()}
+      >
+        Assistant
+      </button>
+      <div className="ax-layouts" role="radiogroup" aria-label="Assistant layout">
+        {MODES.map((m) => (
+          <button
+            key={m}
+            role="radio"
+            aria-checked={open && m === mode}
+            title={`${MODE_NAMES[m]} (Ctrl+Shift+L cycles)`}
+            aria-label={MODE_NAMES[m]}
+            onClick={() => (open && m === mode ? st().setOpen(false) : st().setMode(m))}
+          >
+            <Glyph name={m} size={16} stroke={1.6} />
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -69,7 +87,6 @@ function Content({ doc, variant, onSend, summary = false }: { doc: DocState; var
         <Empty doc={doc} />
       )}
       {ready && !pending && <Composer doc={doc} variant={variant} onSend={onSend} />}
-      <div className="ax-foot">{FOOTNOTE}</div>
     </>
   );
 }
@@ -271,7 +288,7 @@ function useStageBox(): Box | null {
   return box;
 }
 
-const BAR_H = 52;
+const BAR_H = 48;
 const GAP = 14;
 
 function Bar({ doc }: { doc: DocState }) {
@@ -281,12 +298,10 @@ function Bar({ doc }: { doc: DocState }) {
   const pending = useAi((s) => s.pending?.doc === doc.id);
   const messages = useAi((s) => s.chats[doc.id]?.messages);
   const selection = useAi((s) => s.selection !== null);
-  const prep = useAi((s) => s.chats[doc.id]?.prep);
   const ready = typeof status === "object" && status !== null && status.installed && status.loggedIn;
   const last = messages && messages.length >= 2 ? messages[messages.length - 1] : undefined;
   const forced = pending || !ready;
   const showSheet = forced || (sheet && !!messages && messages.length > 0);
-  const noText = typeof prep === "object" && prep !== null && !prep.enough;
   if (!box) return null;
 
   const iw = window.innerWidth;
@@ -305,7 +320,7 @@ function Bar({ doc }: { doc: DocState }) {
           style={{
             right: iw - box.r + 16,
             bottom: sheetBottom,
-            width: Math.min(420, Math.max(300, stageW - 32)),
+            width: Math.min(560, Math.max(320, stageW * 0.34), stageW - 32),
             maxHeight: Math.max(220, box.b - box.t - (sheetBottom - (ih - box.b)) - 16),
           }}
           aria-label="Assistant"
@@ -324,20 +339,10 @@ function Bar({ doc }: { doc: DocState }) {
             <CloseButton onClick={forced ? undefined : () => st().setSheet(false)} />
           </div>
           {pending ? <Consent /> : !ready ? <Gate /> : <Messages doc={doc} variant="bar" lastOnly />}
-          <div className="ax-foot">{FOOTNOTE}</div>
-        </section>
+            </section>
       )}
       {ready && !pending && (
-        <div className="ax-bar" style={{ left: (box.l + box.r) / 2, bottom: barBottom, width: Math.min(580, Math.max(280, stageW - 32)) }}>
-          {!messages?.length && !noText && (
-            <div className="ax-bar-starters">
-              {startersFor(doc).map((s) => (
-                <button key={s.title} className="ax-chip" onClick={s.run}>
-                  {s.title}
-                </button>
-              ))}
-            </div>
-          )}
+        <div className="ax-bar" style={{ left: (box.l + box.r) / 2, bottom: barBottom, width: barWidth(stageW) }}>
           <Composer doc={doc} variant="bar" trail={<MoreMenu doc={doc} up />} />
         </div>
       )}
