@@ -28,6 +28,8 @@ Verdict (2026-10-10): no single pick. User: "Honestly same idea with the startin
 
 Verdict 2 (2026-10-10, supersedes the mix): User: "But if you ask me what is the best landing/starting page, its B. But those other two are also good candidates but for other types of views." Build: b-gallery is the home screen (approved/home.png). a-sidebar becomes the Library view (approved/library.png) and c-split its selected-file preview layout (approved/library-2.png). d-mix dropped.
 
+Verdict 3 (2026-10-10, final): User: "Also yes use the d-mix, it looks good. Best of all." Build d-mix as the home screen (approved/home.png). The sidebar's Recent/Pinned/This PC pages use the library layouts (approved/library.png, library-2.png). b-gallery is superseded.
+
 ## Shared
 
 Render: a flat screenshot of one Windows 11 desktop application window, 1440 x 960, seen straight on, filling the
