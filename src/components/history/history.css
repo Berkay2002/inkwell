@@ -516,16 +516,19 @@
   border-radius: 2px;
 }
 .hx-mark.add {
+  --hx-tone: var(--diff-add);
   color: var(--diff-add);
   background: var(--diff-add-bg);
   border-color: var(--diff-add);
 }
 .hx-mark.del {
+  --hx-tone: var(--diff-del);
   color: var(--diff-del);
   background: var(--diff-del-bg);
   border-color: var(--diff-del);
 }
 .hx-mark.chg {
+  --hx-tone: var(--diff-chg);
   color: var(--diff-chg);
   background: var(--diff-chg-bg);
   border-color: var(--diff-chg);
@@ -551,7 +554,7 @@
   font: 700 11px/1 var(--font);
   font-style: normal;
   color: #fff;
-  background: currentColor;
+  background: var(--hx-tone, currentColor);
   border-radius: 4px;
 }
 .hx-mark i {
