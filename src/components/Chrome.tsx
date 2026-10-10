@@ -3,6 +3,7 @@ import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { type DocState, type Theme, useStore } from "../store";
 import { Icon, type IconName } from "./Icons";
+import { WindowControls } from "./WindowControls";
 
 const st = () => useStore.getState();
 
@@ -11,7 +12,22 @@ export function TabBar() {
   const docs = useStore((s) => s.docs);
   const active = useStore((s) => s.active);
   return (
-    <div className="tabbar" role="tablist">
+    <div className="tabbar" role="tablist" data-tauri-drag-region>
+      <span className="brand" data-tauri-drag-region>
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden>
+          <path d="M12 2.5c3.6 4.3 6.5 7.5 6.5 11a6.5 6.5 0 0 1-13 0c0-3.5 2.9-6.7 6.5-11Z" fill="currentColor" />
+        </svg>
+        Inkwell
+      </span>
+      <div
+        role="tab"
+        aria-selected={active == null}
+        className={active == null ? "tab home-tab on" : "tab home-tab"}
+        onMouseDown={(e) => e.button === 0 && useStore.setState({ active: null })}
+      >
+        <Icon name="home" size={14} />
+        <span className="tab-name">Home</span>
+      </div>
       {order.map((id) => (
         <div
           key={id}
@@ -41,6 +57,8 @@ export function TabBar() {
       <button className="icon-btn" title="Open file (Ctrl+O)" onClick={() => void openDialog()}>
         <Icon name="plus" />
       </button>
+      <span className="grow" data-tauri-drag-region />
+      <WindowControls />
     </div>
   );
 }

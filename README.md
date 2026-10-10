@@ -13,6 +13,8 @@ Tauri 2 (WebView2) shell, Rust engine on MuPDF, React + TypeScript + Vite UI. No
 | `src-tauri/src/bin/bench.rs` | Engine benchmark on a generated 1000-page fixture |
 | `src/` | React UI: virtualized page list, tile canvases, text layer, tabs, sidebar, command palette |
 | `scripts/perf.mjs` | Frame-timing, transport and memory harness driven over WebView2 DevTools; writes `docs/screens/phase1/` |
+| `src-tauri/src/recents.rs`, `src/recents.ts`, `src/components/Home.tsx` | Start screen: recent list stored in `<app data>/recents.json`, file stats, first-page thumbnails |
+| `scripts/landing-shots.mjs` | Start-screen screenshots (light/dark, empty/filled/drag-over) in an isolated profile; writes `docs/screens/landing/` |
 | `vendor/mupdf/` | mupdf 0.8.0 with a one-line MSVC fix (`max_align_t` assertion) |
 | `vendor/mupdf-sys/` | mupdf-sys 0.8.0 with JPEG 2000 decoding made thread-parallel (`load-jpx.c`: stock MuPDF decodes JPX under its global FreeType lock, one image at a time) |
 
@@ -30,7 +32,7 @@ cd src-tauri && cargo test --lib
 cargo run --release --bin bench -- 1000
 ```
 
-`inkwell.exe a.pdf b.pdf` opens the files in tabs. `INKWELL_CACHE_MB` sets the tile cache budget (default 64; the app idles near 550 MB in total with WebView2 in low-end-device mode).
+`inkwell.exe a.pdf b.pdf` opens the files in tabs. `INKWELL_DATA_DIR` moves the recent-files list (and keeps the old localStorage list from being imported): set it whenever a test or benchmark launches the app so it never writes the real recents. Files under an `inkwell-tests` or `inkwell-bench` folder are never listed anyway. `INKWELL_CACHE_MB` sets the tile cache budget (default 64; the app idles near 550 MB in total with WebView2 in low-end-device mode).
 
 ## Keys
 

@@ -1,13 +1,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect } from "react";
-import { Icon } from "./components/Icons";
 import { SearchBar, TabBar, Toolbar } from "./components/Chrome";
+import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { Sidebar } from "./components/Sidebar";
 import { Viewer } from "./components/Viewer";
 import { initialFiles } from "./lib/api";
-import { commandFor, openDialog } from "./lib/commands";
+import { commandFor } from "./lib/commands";
 import { useActiveDoc, useStore } from "./store";
 
 const isPdf = (p: string) => /\.pdf$/i.test(p);
@@ -84,37 +84,11 @@ export default function App() {
           </div>
         </>
       ) : (
-        <Welcome />
+        <Home />
       )}
       {paletteOpen && <CommandPalette />}
       {hasPassword && <PasswordDialog />}
       <Toast />
-    </div>
-  );
-}
-
-function Welcome() {
-  const recent = useStore((s) => s.recent);
-  return (
-    <div className="welcome">
-      <h1>Inkwell</h1>
-      <p className="dim">Drop a PDF anywhere, or</p>
-      <button className="btn primary" onClick={() => void openDialog()}>
-        <Icon name="open" /> Open a PDF
-      </button>
-      <p className="dim hint">Ctrl+O to open · Ctrl+K for commands</p>
-      {recent.length > 0 && (
-        <div className="recent">
-          <h3>Recent</h3>
-          {recent.map((p) => (
-            <button key={p} className="recent-item" title={p} onClick={() => void useStore.getState().openPath(p)}>
-              <Icon name="file" size={14} />
-              <span>{p.split(/[\\/]/).pop()}</span>
-              <span className="dim path">{p}</span>
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

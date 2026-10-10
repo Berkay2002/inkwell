@@ -3,6 +3,7 @@ import * as api from "./lib/api";
 import type { OutlineItem } from "./lib/api";
 import { type Rot, type Size, clamp, ZOOM_MAX, ZOOM_MIN } from "./lib/layout";
 import { dropCached } from "./lib/tiles";
+import { useRecents } from "./recents";
 
 export type ZoomMode = "fitWidth" | "fitPage" | "custom";
 export type Theme = "system" | "light" | "dark";
@@ -56,13 +57,6 @@ const emptySearch = (): SearchState => ({ query: "", id: null, hits: [], current
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
 const loadTheme = (): Theme => (localStorage.getItem("inkwell.theme") as Theme | null) ?? "system";
-const loadRecent = (): string[] => {
-  try {
-    return JSON.parse(localStorage.getItem("inkwell.recent") ?? "[]");
-  } catch {
-    return [];
-  }
-};
 
 interface Store {
   docs: Record<number, DocState>;
@@ -72,7 +66,6 @@ interface Store {
   theme: Theme;
   paletteOpen: boolean;
   searchOpen: boolean;
-  recent: string[];
   password: { doc: number; path: string; error?: string } | null;
   error: string | null;
 
@@ -104,7 +97,7 @@ let searchSeq = 0;
 const opening = new Map<string, Promise<void>>();
 
 export const useStore = create<Store>((set, get) => {
-  const addDoc = (info: api.OpenInfo) => {
+  const addDoc = (info: api.OpenInfo, locked = false) => {
     const doc: DocState = {
       id: info.doc,
       path: info.path,
@@ -122,13 +115,11 @@ export const useStore = create<Store>((set, get) => {
       search: emptySearch(),
       nav: null,
     };
-    const recent = [info.path, ...get().recent.filter((p) => p !== info.path)].slice(0, 10);
-    localStorage.setItem("inkwell.recent", JSON.stringify(recent));
+    void useRecents.getState().record(info, locked);
     set((s) => ({
       docs: { ...s.docs, [doc.id]: doc },
       order: s.order.includes(doc.id) ? s.order : [...s.order, doc.id],
       active: doc.id,
-      recent,
       password: null,
     }));
     // Page sizes stream in after the first page is already visible.
@@ -143,7 +134,6 @@ export const useStore = create<Store>((set, get) => {
     theme: loadTheme(),
     paletteOpen: false,
     searchOpen: false,
-    recent: loadRecent(),
     password: null,
     error: null,
 
@@ -180,7 +170,7 @@ export const useStore = create<Store>((set, get) => {
       const p = get().password;
       if (!p) return;
       try {
-        addDoc(await api.authenticate(p.doc, password));
+        addDoc(await api.authenticate(p.doc, password), true);
       } catch (e) {
         set({ password: { ...p, error: String(e) === "bad-password" ? "Wrong password, try again." : String(e) } });
       }
