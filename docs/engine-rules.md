@@ -11,6 +11,24 @@ From the phase 1 pre-merge review. The viewer keeps up to `DOC_SLOTS=4` read-onl
 4. Page organize changes `page_count` and `sizes`: swap them atomically with the generation; page indices belong to one generation.
 5. Save = write from the authoritative doc to a temp file, release every replica/display list on the old file (see `close()`), then rename over the original.
 
+## File paths: tokens only (`src-tauri/src/paths.rs`)
+
+The webview never hands Rust a path. Every command that reads or writes a file takes a token; Rust is the only source of paths.
+
+- **Get a token**: `pick_open(multiple, title?) -> FileRef[]` and `pick_save(name, doc? | near?) -> FileRef | null` run the
+  dialogs in Rust (off the UI thread). Drag-drop (`files-dropped` event) and command-line files (`initial_files`) come
+  with tokens. `known_file(path) -> FileRef` re-issues one for a path the user chose before (the stored recent list);
+  any other path is refused. `FileRef = { token, path }`: `path` is for display and dedupe only.
+- **Kinds**: open tokens name a file to read and can be reused; save tokens come only from `pick_save` and work once.
+  Both belong to the window that got them. Unknown, spent, wrong-kind or other-window tokens are `Invalid`.
+- **Open documents** are named by doc id. Save over the file is `save_document(doc)`; its path never leaves the engine.
+- **In a command**: `reg.open(window.label(), &token)?` for inputs, `reg.take_save(window.label(), &token)?` for
+  outputs, before the blocking work; a result file to open comes back as `reg.issue_open(...)` (see `merge_files`).
+- Known paths (`stat_files`, `reveal_in_folder`, `recents_save`) are every path a token was issued for plus the stored
+  recent list. `recents_save` drops entries for other paths. The webview's `dialog:allow-open/save` permissions are off.
+
+New tools (history, compress, OCR, redact) take the same tokens: never add a command parameter that is a path.
+
 ## Open follow-ups (fix at the start of phase 2)
 - `engine/mod.rs` `run_tile`/`page_list`: a stale in-flight request for rev N can build from content N+1 and cache it as N.
   Return `Stale` when `rev != entry.generation()` and re-check before the cache insert. (Medium; must be fixed before any edit lands.)

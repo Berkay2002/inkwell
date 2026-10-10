@@ -18,11 +18,17 @@ vi.mock("./api", () => ({
   search: vi.fn(() => Promise.resolve(7)),
   cancelSearch: vi.fn(() => Promise.resolve()),
   openDocument: vi.fn(),
+  knownFile: vi.fn((path: string) => Promise.resolve({ token: `known:${path}`, path })),
+  pickOpen: vi.fn(),
+  pickSave: vi.fn(),
+  editApply: vi.fn(),
+  saveDocument: vi.fn(),
   closeDocument: vi.fn(() => Promise.resolve()),
   pageSizes: vi.fn(() => Promise.resolve()),
 }));
 
 import * as api from "./api";
+import * as edits from "./edit";
 import { applyState } from "./edit";
 import { useStore } from "../store";
 
@@ -63,5 +69,31 @@ describe("openPath", () => {
     expect(api.closeDocument).toHaveBeenCalledWith(9);
     expect(useStore.getState().order).toEqual([1]);
     expect(useStore.getState().active).toBe(1);
+  });
+
+  it("asks Rust for a token unless the file came with one", async () => {
+    useStore.setState({ docs: {}, order: [], active: null });
+    vi.mocked(api.openDocument).mockResolvedValue({ status: "opened", doc: 3, path: "C:/x.pdf" } as never);
+    await useStore.getState().openPath("C:/Docs/recent.pdf");
+    expect(api.openDocument).toHaveBeenLastCalledWith("known:C:/Docs/recent.pdf");
+    useStore.setState({ docs: {}, order: [], active: null });
+    await useStore.getState().openPath("C:/Docs/picked.pdf", "tok");
+    expect(api.openDocument).toHaveBeenLastCalledWith("tok");
+  });
+});
+
+describe("file edits send tokens, never paths", () => {
+  it("insert, Save as", async () => {
+    useStore.setState({ docs: { 1: doc(1, "C:/Docs/a.pdf") }, order: [1], active: 1 });
+    vi.mocked(api.pickOpen).mockResolvedValue([{ token: "in", path: "C:/Docs/b.pdf" }]);
+    vi.mocked(api.editApply).mockResolvedValue({ rev: 1, pageCount: 2, sizes: [], path: "C:/Docs/a.pdf", dirty: true, undo: null, redo: null, redacted: false });
+    await edits.insertFile(1, 0);
+    expect(api.editApply).toHaveBeenCalledWith(1, { op: "insertFile", at: 0, file: "in" });
+
+    vi.mocked(api.pickSave).mockResolvedValue({ token: "out", path: "C:/Docs/c.pdf" });
+    vi.mocked(api.saveDocument).mockResolvedValue({ rev: 1, pageCount: 2, sizes: [], path: "C:/Docs/c.pdf", dirty: false, undo: null, redo: null, redacted: false });
+    await edits.saveAs(1);
+    expect(api.pickSave).toHaveBeenCalledWith("a.pdf", { doc: 1 });
+    expect(api.saveDocument).toHaveBeenCalledWith(1, "out");
   });
 });

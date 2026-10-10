@@ -40,7 +40,14 @@ pub enum EditOp {
     /// Inserts an empty page at index `at` (`0..=page_count`) with the page box of page `like`.
     InsertBlank { at: u32, like: u32 },
     /// Inserts pages of another PDF at index `at`: `pages` of it (in its order), or all of them.
-    InsertFile { at: u32, path: String, pages: Option<Vec<u32>>, password: Option<String> },
+    /// From the UI, `file` is an open token (paths.rs) that `edit_apply` swaps for the path.
+    InsertFile {
+        at: u32,
+        #[serde(rename = "file")]
+        path: String,
+        pages: Option<Vec<u32>>,
+        password: Option<String>,
+    },
 }
 
 impl EditOp {

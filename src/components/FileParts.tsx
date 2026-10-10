@@ -1,6 +1,6 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
+import { pickOpen } from "../lib/api";
 import { type Recent, baseName } from "../lib/recent";
 import { previewOf, revealInFolder, useRecents } from "../recents";
 import { useStore } from "../store";
@@ -84,10 +84,10 @@ export function Thumb({ r, missing, size = 22 }: { r: Recent; missing?: boolean;
 /** Asks for the file's new place, repairs the entry and opens it. */
 export async function locateFile(r: Recent) {
   const name = baseName(r.path);
-  const sel = await open({ multiple: false, filters: [{ name: "PDF documents", extensions: ["pdf"] }], title: `Locate ${name}` });
-  if (typeof sel !== "string") return;
-  await useRecents.getState().relocate(r.path, sel);
-  void useStore.getState().openPath(sel);
+  const [f] = await pickOpen(false, `Locate ${name}`);
+  if (!f) return;
+  await useRecents.getState().relocate(r.path, f.path);
+  void useStore.getState().openPath(f.path, f.token);
 }
 
 export function fileMenu(r: Recent, missing: boolean): MenuEntry[] {
