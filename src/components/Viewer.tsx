@@ -2,12 +2,12 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   PAD,
   type TileRef,
-  ZOOM_MAX,
-  ZOOM_MIN,
+  anchoredScroll,
   bucketScale,
   clamp,
   computeLayout,
   currentPage,
+  fitZoom,
   pageAt,
   previewScaleKey,
   rotated,
@@ -71,7 +71,21 @@ export function Viewer({ doc }: { doc: DocState }) {
   useLayoutEffect(() => {
     const s = el.current!;
     setVp({ w: s.clientWidth, h: s.clientHeight });
-    const ro = new ResizeObserver(() => setVp({ w: s.clientWidth, h: s.clientHeight }));
+    // The stage changes width with the window, the sidebar and the docked assistant. Re-anchor on
+    // the top of the view (same page, same offset) for the new size, and refit in the same render
+    // so no frame shows the old zoom in the new width.
+    const ro = new ResizeObserver(() => {
+      const w = s.clientWidth;
+      const h = s.clientHeight;
+      const { layout: L, zoom: z, doc: d } = cur.current;
+      if (L.tops.length > 1) {
+        const page = pageAt(L.tops, s.scrollTop);
+        anchor.current = { page, yPt: (s.scrollTop - L.tops[page]) / z, vy: 0, xFrac: (s.scrollLeft + w / 2) / L.contentWidth, vx: w / 2 };
+      }
+      setVp({ w, h });
+      const fz = fitZoom(d.zoomMode, typicalSize(d.sizes, d.rot), w, h);
+      if (fz != null && Math.abs(fz - z) > 1e-3) useStore.getState().patch(id, { zoom: fz });
+    });
     ro.observe(s);
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
@@ -93,13 +107,10 @@ export function Viewer({ doc }: { doc: DocState }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Fit modes follow the viewport and the typical page size.
-  useEffect(() => {
-    if (zoomMode === "custom" || vp.w === 0) return;
-    const [w, h] = typicalSize(sizes, rot);
-    const fw = (vp.w - 2 * PAD) / w;
-    const z = clamp(zoomMode === "fitWidth" ? fw : Math.min(fw, (vp.h - 2 * PAD) / h), ZOOM_MIN, ZOOM_MAX);
-    if (Math.abs(z - zoom) > 1e-3) useStore.getState().patch(id, { zoom: z });
+  // Fit modes follow the mode, the typical page size and the viewport (resizes refit in the observer).
+  useLayoutEffect(() => {
+    const z = fitZoom(zoomMode, typicalSize(sizes, rot), vp.w, vp.h);
+    if (z != null && Math.abs(z - zoom) > 1e-3) useStore.getState().patch(id, { zoom: z });
   }, [id, zoomMode, sizes, rot, vp.w, vp.h, zoom]);
 
   // Keep the anchored content in place whenever the layout changes (zoom, rotation, late sizes).
@@ -112,8 +123,9 @@ export function Viewer({ doc }: { doc: DocState }) {
       xFrac: 0.5,
       vx: s.clientWidth / 2,
     };
-    s.scrollTop = layout.tops[a.page] + a.yPt * zoom - a.vy;
-    s.scrollLeft = a.xFrac * layout.contentWidth - a.vx;
+    const to = anchoredScroll(layout, zoom, a, s.clientWidth, zoomMode !== "custom");
+    s.scrollTop = to.top;
+    s.scrollLeft = to.left;
     anchor.current = a;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout]);
