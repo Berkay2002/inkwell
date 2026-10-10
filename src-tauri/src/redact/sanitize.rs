@@ -3,7 +3,7 @@
 //! popups). Independent of the per-category switches, anything that quotes a redacted string
 //! (annotation, form field, docinfo entry, XMP packet, bookmark) is always removed.
 
-use super::{RedactError, annots_of, needle_regex, scan_strings, subtype};
+use super::{RedactError, annots_of, needle_regex, prune_resources, scan_strings, subtype};
 use mupdf::pdf::{PdfDocument, PdfObject, PdfRedactImageMethod, PdfRedactLineArtMethod, PdfRedactOptions, PdfRedactTextMethod};
 use mupdf::text_page::{TextCharFlags, TextPageFlags};
 use mupdf::{Buffer, Outline};
@@ -288,8 +288,13 @@ pub(super) fn drop_annots(
 /// that end up empty, up to /AcroForm /Fields.
 pub(super) fn remove_field(doc: &PdfDocument, widget: &PdfObject) -> Result<()> {
     let mut node = widget.clone();
+    let mut seen = HashSet::new();
     loop {
         let n = num(&node)?;
+        // A /Parent cycle would otherwise loop forever.
+        if !seen.insert(n) {
+            return Ok(());
+        }
         let (mut list, parent) = match node.get_dict("Parent")? {
             Some(p) => (p.get_dict("Kids")?, Some(p)),
             None => (doc.catalog()?.get_dict("AcroForm")?.map(|f| f.get_dict("Fields")).transpose()?.flatten(), None),
@@ -358,23 +363,49 @@ fn ref_nums(o: Option<PdfObject>) -> Result<HashSet<i32>> {
 }
 
 /// Object numbers of the OCGs that are off in the default configuration (None = no layers).
+/// Fails closed: an OCG that some /AS auto-state or a /Usage /View /ViewState OFF could turn off
+/// counts as off too.
 fn off_ocgs(doc: &PdfDocument) -> Result<Option<HashSet<i32>>> {
     let Some(ocp) = doc.catalog()?.get_dict("OCProperties")? else { return Ok(None) };
     let all = ref_nums(ocp.get_dict("OCGs")?)?;
-    let Some(d) = ocp.get_dict("D")? else { return Ok(Some(HashSet::new())) };
-    let base_off = d.get_dict("BaseState")?.map(|b| b.as_name()).transpose()?.as_deref() == Some(b"OFF");
-    Ok(Some(if base_off {
-        let on = ref_nums(d.get_dict("ON")?)?;
-        all.difference(&on).copied().collect()
-    } else {
-        ref_nums(d.get_dict("OFF")?)?
-    }))
+    let mut off = HashSet::new();
+    if let Some(d) = ocp.get_dict("D")? {
+        let base_off = d.get_dict("BaseState")?.map(|b| b.as_name()).transpose()?.as_deref() == Some(b"OFF");
+        off = if base_off {
+            let on = ref_nums(d.get_dict("ON")?)?;
+            all.difference(&on).copied().collect()
+        } else {
+            ref_nums(d.get_dict("OFF")?)?
+        };
+        if let Some(r#as) = d.get_dict("AS")? {
+            for i in 0..r#as.len()? as i32 {
+                if let Some(a) = r#as.get_array(i)? {
+                    off.extend(ref_nums(a.get_dict("OCGs")?)?);
+                }
+            }
+        }
+    }
+    for &n in &all {
+        let state = doc.new_indirect(n, 0)?.get_dict("Usage")?.and_then(|u| u.get_dict("View").ok().flatten());
+        if let Some(v) = state.and_then(|v| v.get_dict("ViewState").ok().flatten())
+            && v.as_name()? == b"OFF"
+        {
+            off.insert(n);
+        }
+    }
+    Ok(Some(off))
 }
 
-/// Whether an /OC value (OCG or OCMD reference) is hidden.
+/// Whether an /OC value (OCG or OCMD reference) is hidden. Anything it can't evaluate counts as
+/// hidden: sanitize must not keep layer content it isn't sure about.
 fn oc_hidden(oc: &PdfObject, off: &HashSet<i32>) -> Result<bool> {
-    if oc.get_dict("Type")?.map(|t| t.as_name()).transpose()?.as_deref() != Some(b"OCMD") {
-        return Ok(off.contains(&num(oc)?));
+    match oc.get_dict("Type")?.map(|t| t.as_name()).transpose()?.as_deref() {
+        Some(b"OCG") => return Ok(off.contains(&num(oc)?)),
+        Some(b"OCMD") => {}
+        _ => return Ok(true),
+    }
+    if let Some(ve) = oc.get_dict("VE")? {
+        return Ok(!ve_visible(&ve, off, 0)?);
     }
     let states: Vec<bool> = ref_nums(oc.get_dict("OCGs")?)?.iter().map(|n| !off.contains(n)).collect();
     if states.is_empty() {
@@ -382,88 +413,174 @@ fn oc_hidden(oc: &PdfObject, off: &HashSet<i32>) -> Result<bool> {
     }
     let policy = oc.get_dict("P")?.map(|p| p.as_name()).transpose()?.unwrap_or_else(|| b"AnyOn".to_vec());
     let visible = match policy.as_slice() {
+        b"AnyOn" => states.iter().any(|&s| s),
         b"AllOn" => states.iter().all(|&s| s),
         b"AnyOff" => states.iter().any(|&s| !s),
         b"AllOff" => states.iter().all(|&s| !s),
-        _ => states.iter().any(|&s| s),
+        _ => false,
     };
     Ok(!visible)
 }
 
-/// Names in `res`'s `/Properties` and `/XObject` that are hidden, plus the visible form XObjects.
-type Names = HashSet<Vec<u8>>;
-
-fn hidden_names(res: &Option<PdfObject>, off: &HashSet<i32>) -> Result<(Names, Names, Vec<PdfObject>)> {
-    let (mut props, mut xobjs, mut forms) = (HashSet::new(), HashSet::new(), Vec::new());
-    let Some(res) = res else { return Ok((props, xobjs, forms)) };
-    if let Some(p) = res.get_dict("Properties")? {
-        for i in 0..p.dict_len()? as i32 {
-            if let (Some(k), Some(v)) = (p.get_dict_key(i)?, p.get_dict_val(i)?)
-                && oc_hidden(&v, off)?
-            {
-                props.insert(k.as_name()?);
-            }
+/// Evaluates an OCMD /VE visibility expression ([/And|/Or|/Not operand...], operands OCGs or
+/// nested expressions). Malformed or too deep = not visible.
+fn ve_visible(ve: &PdfObject, off: &HashSet<i32>, depth: u32) -> Result<bool> {
+    if depth > 16 {
+        return Ok(false);
+    }
+    if !ve.is_array()? {
+        return Ok(ve.is_indirect()? && !off.contains(&num(ve)?));
+    }
+    let Some(op) = ve.get_array(0)? else { return Ok(false) };
+    let op = if op.is_name()? { op.as_name()? } else { return Ok(false) };
+    let mut args = Vec::new();
+    for i in 1..ve.len()? as i32 {
+        if let Some(x) = ve.get_array(i)? {
+            args.push(ve_visible(&x, off, depth + 1)?);
         }
     }
-    if let Some(x) = res.get_dict("XObject")? {
-        for i in 0..x.dict_len()? as i32 {
-            let (Some(k), Some(v)) = (x.get_dict_key(i)?, x.get_dict_val(i)?) else { continue };
-            if let Some(oc) = v.get_dict("OC")?
-                && oc_hidden(&oc, off)?
-            {
-                xobjs.insert(k.as_name()?);
-            } else if v.get_dict("Subtype")?.map(|s| s.as_name()).transpose()?.as_deref() == Some(b"Form") {
-                forms.push(v);
-            }
-        }
-    }
-    Ok((props, xobjs, forms))
+    Ok(match (op.as_slice(), args.as_slice()) {
+        (_, []) => false,
+        (b"And", a) => a.iter().all(|&s| s),
+        (b"Or", a) => a.iter().any(|&s| s),
+        (b"Not", [s]) => !s,
+        _ => false,
+    })
 }
 
-/// Deletes content in hidden layers from every page and form XObject, hidden annotations, then
-/// /OCProperties. Returns how many blocks went.
+type Names = HashSet<Vec<u8>>;
+type Nested = Vec<(PdfObject, Option<PdfObject>)>;
+
+/// For content drawn with `res`: the `/Properties` names that are visible, the `/XObject` names
+/// that are hidden, and the nested content streams to visit next (form XObjects, tiling patterns,
+/// Type3 glyph procedures) with the resources they fall back to.
+fn layer_names(res: &Option<PdfObject>, off: &HashSet<i32>) -> Result<(Names, Names, Nested)> {
+    let (mut shown, mut hidden, mut nested) = (HashSet::new(), HashSet::new(), Vec::new());
+    let Some(res) = res else { return Ok((shown, hidden, nested)) };
+    let name_of = |o: &PdfObject, k: &str| -> Result<Option<Vec<u8>>> { o.get_dict(k)?.map(|s| s.as_name()).transpose().map_err(Into::into) };
+    let entries = |cat: &str| -> Result<Vec<(Vec<u8>, PdfObject)>> {
+        let mut v = Vec::new();
+        if let Some(d) = res.get_dict(cat)? {
+            for i in 0..d.dict_len()? as i32 {
+                if let (Some(k), Some(x)) = (d.get_dict_key(i)?, d.get_dict_val(i)?) {
+                    v.push((k.as_name()?, x));
+                }
+            }
+        }
+        Ok(v)
+    };
+    for (k, v) in entries("Properties")? {
+        if !oc_hidden(&v, off)? {
+            shown.insert(k);
+        }
+    }
+    for (k, v) in entries("XObject")? {
+        if let Some(oc) = v.get_dict("OC")?
+            && oc_hidden(&oc, off)?
+        {
+            hidden.insert(k);
+        } else if name_of(&v, "Subtype")?.as_deref() == Some(b"Form") {
+            nested.push((v, Some(res.clone())));
+        }
+    }
+    for (_, v) in entries("Pattern")? {
+        if v.get_dict("PatternType")?.map(|t| t.as_int()).transpose()? == Some(1) {
+            nested.push((v, Some(res.clone())));
+        }
+    }
+    for (_, f) in entries("Font")? {
+        if name_of(&f, "Subtype")?.as_deref() == Some(b"Type3")
+            && let Some(procs) = f.get_dict("CharProcs")?
+        {
+            let fres = f.get_dict("Resources")?.or(Some(res.clone()));
+            for i in 0..procs.dict_len()? as i32 {
+                if let Some(p) = procs.get_dict_val(i)? {
+                    nested.push((p, fres.clone()));
+                }
+            }
+        }
+    }
+    Ok((shown, hidden, nested))
+}
+
+/// Deletes the hidden XObjects from `res`: they are hidden wherever they are drawn, and unused
+/// they would still carry their content into the file.
+fn drop_hidden_xobjects(res: &Option<PdfObject>, hidden: &Names) -> Result<()> {
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    if let Some(mut x) = res.as_ref().map(|r| r.get_dict("XObject")).transpose()?.flatten() {
+        for i in (0..x.dict_len()? as i32).rev() {
+            if let Some(k) = x.get_dict_key(i)?
+                && hidden.contains(&k.as_name()?)
+            {
+                x.dict_delete(k)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Deletes content in hidden layers from every page, form XObject, tiling pattern, Type3 glyph
+/// and annotation appearance stream, hidden annotations, then /OCProperties. Returns how many
+/// blocks went.
 fn strip_hidden_layers(doc: &mut PdfDocument) -> Result<u32> {
     let Some(off) = off_ocgs(doc)? else { return Ok(0) };
     let mut count = 0;
-    if !off.is_empty() {
-        let mut seen = HashSet::new();
-        for mut page in pages(doc)? {
-            let res = page.get_dict_inheritable("Resources")?;
-            let (props, xobjs, forms) = hidden_names(&res, &off)?;
-            if let Some(c) = page.get_dict("Contents")? {
-                let streams: Vec<PdfObject> = if c.is_array()? {
-                    (0..c.len()? as i32).filter_map(|i| c.get_array(i).transpose()).collect::<std::result::Result<_, _>>()?
-                } else {
-                    vec![c]
-                };
-                let mut data = Vec::new();
-                for s in &streams {
-                    data.extend(s.read_stream()?);
-                    data.push(b'\n');
-                }
-                let (out, n) = strip_hidden(&data, &props, &xobjs);
-                if n > 0 {
-                    let mut first = streams[0].clone();
-                    first.write_stream_buffer(&Buffer::from_bytes(&out)?)?;
-                    page.dict_put("Contents", first)?;
-                    count += n;
+    let mut seen = HashSet::new();
+    for (p, mut page) in pages(doc)?.into_iter().enumerate() {
+        let res = page.get_dict_inheritable("Resources")?;
+        let (shown, hidden, mut stack) = layer_names(&res, &off)?;
+        if let Some(c) = page.get_dict("Contents")? {
+            let streams: Vec<PdfObject> = if c.is_array()? {
+                (0..c.len()? as i32).filter_map(|i| c.get_array(i).transpose()).collect::<std::result::Result<_, _>>()?
+            } else {
+                vec![c]
+            };
+            let mut data = Vec::new();
+            for s in &streams {
+                data.extend(s.read_stream()?);
+                data.push(b'\n');
+            }
+            let (out, n) = strip_hidden(&data, &shown, &hidden);
+            if n > 0 {
+                let mut first = streams[0].clone();
+                first.write_stream_buffer(&Buffer::from_bytes(&out)?)?;
+                page.dict_put("Contents", first)?;
+                drop_hidden_xobjects(&res, &hidden)?;
+                prune_resources(doc, p as i32)?;
+                count += n;
+            }
+        }
+        count += drop_annots(&mut page, |a, _| Ok(a.get_dict("OC")?.map(|oc| oc_hidden(&oc, &off)).transpose()? == Some(true)))?;
+        for a in annots_of(&page)? {
+            let Some(ap) = a.get_dict("AP")? else { continue };
+            for key in ["N", "R", "D"] {
+                let Some(v) = ap.get_dict(key)? else { continue };
+                if v.is_stream()? {
+                    stack.push((v, None));
+                } else if v.is_dict()? {
+                    for i in 0..v.dict_len()? as i32 {
+                        if let Some(s) = v.get_dict_val(i)? {
+                            stack.push((s, None));
+                        }
+                    }
                 }
             }
-            let mut stack: Vec<(PdfObject, Option<PdfObject>)> = forms.into_iter().map(|f| (f, res.clone())).collect();
-            while let Some((mut form, parent_res)) = stack.pop() {
-                if !seen.insert(num(&form)?) {
-                    continue;
-                }
-                let res = form.get_dict("Resources")?.or(parent_res);
-                let (props, xobjs, forms) = hidden_names(&res, &off)?;
-                let (out, n) = strip_hidden(&form.read_stream()?, &props, &xobjs);
-                if n > 0 {
-                    form.write_stream_buffer(&Buffer::from_bytes(&out)?)?;
-                    count += n;
-                }
-                stack.extend(forms.into_iter().map(|f| (f, res.clone())));
+        }
+        while let Some((mut form, parent_res)) = stack.pop() {
+            if !form.is_stream()? || !seen.insert(num(&form)?) {
+                continue;
             }
-            count += drop_annots(&mut page, |a, _| Ok(a.get_dict("OC")?.map(|oc| oc_hidden(&oc, &off)).transpose()? == Some(true)))?;
+            let res = form.get_dict("Resources")?.or(parent_res);
+            let (shown, hidden, nested) = layer_names(&res, &off)?;
+            let (out, n) = strip_hidden(&form.read_stream()?, &shown, &hidden);
+            if n > 0 {
+                form.write_stream_buffer(&Buffer::from_bytes(&out)?)?;
+                drop_hidden_xobjects(&res, &hidden)?;
+                count += n;
+            }
+            stack.extend(nested);
         }
     }
     doc.catalog()?.dict_delete("OCProperties")?;
@@ -600,21 +717,34 @@ pub(super) fn names_in(src: &[u8]) -> HashSet<Vec<u8>> {
     Lexer { s: src, pos: 0 }.filter_map(|(_, _, t)| if let Tok::Name(n) = t { Some(n) } else { None }).collect()
 }
 
-/// Cuts `/OC /name BDC ... EMC` blocks whose layer is hidden and `/name Do` of hidden XObjects.
-fn strip_hidden(src: &[u8], props: &HashSet<Vec<u8>>, xobjs: &HashSet<Vec<u8>>) -> (Vec<u8>, u32) {
+/// Cuts `/OC ... BDC ... EMC` blocks unless the operand is a name in `shown` (so inline OC dicts
+/// and unknown names go too) and `/name Do` of hidden XObjects.
+fn strip_hidden(src: &[u8], shown: &HashSet<Vec<u8>>, xobjs: &HashSet<Vec<u8>>) -> (Vec<u8>, u32) {
     let mut out = Vec::with_capacity(src.len());
     let (mut copied, mut count) = (0, 0);
     let mut operands: Vec<(usize, Tok)> = Vec::new();
     let mut dropping: Option<(usize, u32)> = None;
+    let mut nest = 0;
     for (start, end, tok) in (Lexer { s: src, pos: 0 }) {
+        match &src[start..end] {
+            b"<<" | b"[" => nest += 1,
+            b">>" | b"]" if nest > 0 => nest -= 1,
+            _ => {}
+        }
+        // Words inside an operand dict or array (`5 0 R`, `true`) are not operators.
         let Tok::Op(op) = tok else {
             operands.push((start, tok));
             continue;
         };
+        if nest > 0 {
+            operands.push((start, Tok::Other));
+            continue;
+        }
         let first = operands.first().map_or(start, |o| o.0);
         match (dropping, op.as_slice()) {
             (None, b"BDC")
-                if matches!(operands.as_slice(), [(_, Tok::Name(oc)), (_, Tok::Name(n))] if oc == b"OC" && props.contains(n)) =>
+                if matches!(operands.first(), Some((_, Tok::Name(oc))) if oc == b"OC")
+                    && !matches!(operands.as_slice(), [_, (_, Tok::Name(n))] if shown.contains(n)) =>
             {
                 dropping = Some((first, 1));
             }
@@ -650,7 +780,7 @@ mod tests {
 
     #[test]
     fn strips_hidden_blocks() {
-        let props: HashSet<Vec<u8>> = [b"OC1".to_vec()].into();
+        let props: HashSet<Vec<u8>> = [b"OC2".to_vec()].into();
         let xobjs: HashSet<Vec<u8>> = [b"Im1".to_vec()].into();
         let src = b"q (a\\) EMC (b)) Tj /OC /OC1 BDC BT (SECRET) Tj /Span <</ActualText (x)>> BDC (y) Tj EMC ET EMC \
 BI /W 1 /H 1 ID \x00EMC\xff EI /Im1 Do /OC /OC2 BDC (kept) Tj EMC % EMC comment\n/#4Fther Do Q";
@@ -663,5 +793,10 @@ BI /W 1 /H 1 ID \x00EMC\xff EI  /OC /OC2 BDC (kept) Tj EMC % EMC comment\n/#4Fth
         );
         // An unterminated hidden block is cut to the end.
         assert_eq!(strip_hidden(b"a /OC /OC1 BDC (x) Tj", &props, &xobjs), (b"a ".to_vec(), 1));
+        // Inline OC dicts and names missing from /Properties fail closed.
+        assert_eq!(
+            strip_hidden(b"a /OC <</Type/OCMD/OCGs 5 0 R>> BDC (x) Tj EMC /OC /Nope BDC (y) Tj EMC b", &props, &xobjs),
+            (b"a   b".to_vec(), 2)
+        );
     }
 }

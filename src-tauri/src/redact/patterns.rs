@@ -28,19 +28,19 @@ impl Pattern {
         [Pattern::Personnummer, Pattern::Ssn, Pattern::Iban, Pattern::Card, Pattern::Email, Pattern::Phone];
 
     fn regex(self) -> &'static Regex {
-        static PNR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:19|20)?(\d{6})[-+ ]?(\d{4})\b").unwrap());
-        static SSN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(\d{3})[- ](\d{2})[- ](\d{4})\b").unwrap());
+        static PNR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:19|20)?([0-9]{6})[-+ ]?([0-9]{4})\b").unwrap());
+        static SSN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([0-9]{3})[- ]([0-9]{2})[- ]([0-9]{4})\b").unwrap());
         static IBAN: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"\b[A-Z]{2}\d{2}(?:(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?|[A-Z0-9]{11,30})\b").unwrap()
+            Regex::new(r"\b[A-Z]{2}[0-9]{2}(?:(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?|[A-Z0-9]{11,30})\b").unwrap()
         });
         static CARD: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"\b(?:\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{1,7}|\d{4}[ -]?\d{6}[ -]?\d{4,5}|\d{13,19})\b").unwrap()
+            Regex::new(r"\b(?:[0-9]{4}[ -]?[0-9]{4}[ -]?[0-9]{4}[ -]?[0-9]{1,7}|[0-9]{4}[ -]?[0-9]{6}[ -]?[0-9]{4,5}|[0-9]{13,19})\b").unwrap()
         });
         static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b").unwrap()
         });
         static PHONE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"(?:\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?|\(\d{1,4}\)[ .-]?|\b)\d{2,4}(?:[ .-]\d{2,4}){1,4}\b").unwrap()
+            Regex::new(r"(?:\+[0-9]{1,3}[ .-]?(?:\([0-9]{1,4}\)[ .-]?)?|\([0-9]{1,4}\)[ .-]?|\b)[0-9]{2,4}(?:[ .-][0-9]{2,4}){1,4}\b").unwrap()
         });
         match self {
             Pattern::Personnummer => &PNR,
@@ -55,6 +55,9 @@ impl Pattern {
     fn valid(self, m: &str) -> bool {
         let digits: Vec<u8> = m.bytes().filter(u8::is_ascii_digit).map(|b| b - b'0').collect();
         match self {
+            // Regexes are ASCII-only ([0-9]), but guard the counts anyway: a panic here aborts `find`.
+            Pattern::Personnummer if digits.len() < 10 => false,
+            Pattern::Ssn if digits.len() != 9 => false,
             Pattern::Personnummer => {
                 let d = &digits[digits.len() - 10..];
                 let month = d[2] * 10 + d[3];
@@ -130,5 +133,9 @@ mod tests {
             ["4111 1111 1111 1111", "3782 822463 10005"]);
         assert_eq!(hits(Email, "mail jane.tester@example.com or legal@example.co.uk."), ["jane.tester@example.com", "legal@example.co.uk"]);
         assert_eq!(hits(Phone, "Phone: (555) 010-4477, +46 70 123 45 67, on 2026-01-15, v1.40.28"), ["(555) 010-4477", "+46 70 123 45 67"]);
+        // Non-ASCII digits used to match \d and then panic the validators.
+        for p in Pattern::ALL {
+            assert!(hits(p, "１２３-４５-６７８９ ١٢٣٤٥٦-٧٨٩٠ ８１１２１８-９８７６").is_empty());
+        }
     }
 }

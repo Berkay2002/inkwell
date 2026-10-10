@@ -405,3 +405,84 @@ fn covered_pattern_text_is_gone() {
     apply(&mut doc, &ApplyOptions::default()).unwrap();
     assert!(leaks(&save_to_vec(&doc).unwrap(), &["PATTERN-SECRET"]).is_empty());
 }
+
+/// Hidden-layer content in every place sanitize must look, including constructs it can't fully
+/// evaluate (those fail closed).
+#[test]
+fn hidden_layers_fail_closed() {
+    let t = |y: u32, s: &str| format!("BT /F1 12 Tf 72 {y} Td ({s}) Tj ET");
+    let content = format!(
+        "/OC /L1 BDC {} EMC\n/OC /M1 BDC {} EMC\n/OC /L2 BDC {} EMC\n/OC /L3 BDC {} EMC\n/OC <</Type/OCMD/OCGs 8 0 R>> BDC {} EMC\n/Fm2 Do\n/Pattern cs /P1 scn 72 300 300 100 re f",
+        t(700, "OFF-SECRET"), t(680, "VE-SECRET"), t(660, "USAGE-SECRET"), t(640, "ON-TEXT"), t(620, "INLINE-SECRET")
+    );
+    let bytes = pdf(
+        &[
+            obj("<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [6 0 R 7 0 R 8 0 R] /D << /OFF [6 0 R] >> >> >>"),
+            obj("<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
+            obj("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"),
+            obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> /Properties << /L1 6 0 R /L2 7 0 R /L3 8 0 R /M1 9 0 R >> /XObject << /Fm2 10 0 R >> /Pattern << /P1 11 0 R >> >> /Contents 5 0 R /Annots [12 0 R] >>"),
+            stream("", content.as_bytes()),
+            obj("<< /Type /OCG /Name (off) >>"),
+            obj("<< /Type /OCG /Name (usage) /Usage << /View << /ViewState /OFF >> >> >>"),
+            obj("<< /Type /OCG /Name (on) >>"),
+            obj("<< /Type /OCMD /VE [/Not 8 0 R] >>"),
+            stream("/Type /XObject /Subtype /Form /BBox [0 0 300 50] /OC 6 0 R /Resources << /Font << /F1 3 0 R >> >>", t(10, "XOBJ-SECRET").as_bytes()),
+            stream("/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 300 100] /XStep 300 /YStep 100 /Resources << /Font << /F1 3 0 R >> /Properties << /L1 6 0 R >> >>", format!("/OC /L1 BDC {} EMC", t(40, "PATTERN-SECRET")).as_bytes()),
+            obj("<< /Type /Annot /Subtype /Square /Rect [72 100 272 130] /AP << /N 13 0 R >> >>"),
+            stream("/Type /XObject /Subtype /Form /BBox [0 0 200 30] /Resources << /Font << /F1 3 0 R >> /Properties << /L1 6 0 R >> >>", format!("/OC /L1 BDC {} EMC", t(10, "AP-SECRET")).as_bytes()),
+        ],
+        "",
+    );
+    let mut doc = PdfDocument::from_bytes(&bytes).unwrap();
+    let rep = sanitize(&mut doc, &Sanitize { hidden_layers: true, ..Sanitize::NONE }, &[]).unwrap();
+    assert!(rep.hidden_layer_blocks >= 7, "{rep:?}");
+    let saved = save_to_vec(&doc).unwrap();
+    let secrets = ["OFF-SECRET", "VE-SECRET", "USAGE-SECRET", "INLINE-SECRET", "XOBJ-SECRET", "PATTERN-SECRET", "AP-SECRET"];
+    let l = leaks(&saved, &secrets);
+    assert!(l.is_empty(), "{l:?}");
+    assert!(page_text(&PdfDocument::from_bytes(&saved).unwrap()).contains("ON-TEXT"));
+}
+
+/// A /Parent cycle in the field tree must not hang field removal.
+#[test]
+fn remove_field_survives_parent_cycle() {
+    let bytes = pdf(
+        &[
+            obj("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] >> >>"),
+            obj("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>"),
+            obj("<< /Type /Annot /Subtype /Widget /FT /Tx /Rect [0 0 10 10] /Parent 5 0 R >>"),
+            obj("<< /T (a) /Kids [4 0 R] /Parent 6 0 R >>"),
+            obj("<< /T (b) /Kids [5 0 R] /Parent 5 0 R >>"),
+        ],
+        "",
+    );
+    let doc = PdfDocument::from_bytes(&bytes).unwrap();
+    let w = doc.new_indirect(4, 0).unwrap();
+    sanitize::remove_field(&doc, &w).unwrap();
+}
+
+/// An unmarked visible copy of the text must not excuse a copy in an attachment.
+#[test]
+fn attachment_copy_stays_critical() {
+    let bytes = pdf(
+        &[
+            obj("<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [(a.txt) 6 0 R] >> >> >>"),
+            obj("<< /Type /Pages /Kids [4 0 R] /Count 1 >>"),
+            obj("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"),
+            obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>"),
+            stream("", b"BT /F1 12 Tf 72 700 Td (CODE-77881) Tj ET BT /F1 12 Tf 72 600 Td (CODE-77881) Tj ET"),
+            obj("<< /Type /Filespec /F (a.txt) /EF << /F 7 0 R >> >>"),
+            stream("/Type /EmbeddedFile", b"copy of CODE-77881"),
+        ],
+        "",
+    );
+    let mut doc = PdfDocument::from_bytes(&bytes).unwrap();
+    let hits = find(&doc, &Query::Text { needle: "CODE-77881".into(), case_sensitive: true, whole_word: true }).unwrap();
+    assert_eq!(hits.len(), 2);
+    mark_hits(&mut doc, &hits[..1], &MarkStyle::default()).unwrap();
+    match apply(&mut doc, &ApplyOptions { sanitize: Sanitize::NONE, ..Default::default() }) {
+        Err(RedactError::Leaked(l)) => assert!(l.iter().any(|l| l.critical && l.place.contains("stream")), "{l:?}"),
+        r => panic!("expected a leak, got {r:?}"),
+    }
+}

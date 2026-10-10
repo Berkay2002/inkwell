@@ -592,7 +592,7 @@ fn remove_annots_under(doc: &mut PdfDocument, pm: &PageMarks, fields: bool, rep:
 /// Drops page resources the redacted content no longer names: a fully covered pattern or form
 /// is no longer drawn but would still carry its text into the file. Works on a copy of the
 /// resources because they may be shared with other pages.
-fn prune_resources(doc: &mut PdfDocument, page: i32) -> Result<()> {
+pub(super) fn prune_resources(doc: &mut PdfDocument, page: i32) -> Result<()> {
     let mut obj = doc.find_page(page)?;
     let Some(res) = obj.get_dict_inheritable("Resources")? else { return Ok(()) };
     let mut data = Vec::new();
@@ -763,30 +763,34 @@ pub fn verify_bytes(bytes: &[u8], t: &Targets) -> Result<VerifyReport> {
     let (strings, sn) = set(3)?;
     let (streams, tn) = set(5)?;
     let (raw, rn) = set(8)?;
-    let mut hits: Vec<(&String, String)> = Vec::new();
+    // (needle, place, critical even if the needle is still visible elsewhere on a page)
+    let mut hits: Vec<(&String, String, bool)> = Vec::new();
 
     for i in 1..doc.xref_len()? as i32 {
         let Ok(Some(obj)) = doc.xref_object(i) else { continue };
         let mut found = HashSet::new();
         scan_strings(&obj, 0, &mut |s| found.extend(strings.matches(s.as_bytes()).iter()))?;
         for k in found {
-            hits.push((sn[k], format!("object {i}: string")));
+            hits.push((sn[k], format!("object {i}: string"), true));
         }
         // `is_stream` needs the reference: a resolved dict has lost its object number.
         let r = doc.new_indirect(i, 0)?;
         if r.is_stream()? && !sanitize::is_image(&r)?
             && let Ok(data) = doc.xref_stream(i)
         {
+            // Only page content can explain a hit by an unmarked occurrence; attachments and XMP cannot.
+            let ty = r.get_dict("Type")?.map(|t| t.as_name()).transpose()?;
+            let strict = matches!(ty.as_deref(), Some(b"EmbeddedFile" | b"Metadata"));
             for k in streams.matches(&data).iter() {
-                hits.push((tn[k], format!("object {i}: stream")));
+                hits.push((tn[k], format!("object {i}: stream"), strict));
             }
         }
     }
     for k in raw.matches(bytes).iter() {
-        hits.push((rn[k], "raw file bytes".into()));
+        hits.push((rn[k], "raw file bytes".into(), false));
     }
-    for (n, place) in hits {
-        rep.leaks.push(Leak { needle: n.clone(), place, critical: !visible.contains(n) });
+    for (n, place, strict) in hits {
+        rep.leaks.push(Leak { needle: n.clone(), place, critical: strict || !visible.contains(n) });
     }
     Ok(rep)
 }
