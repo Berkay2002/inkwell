@@ -3,8 +3,19 @@
 use super::pages::{lis, match_pages};
 use super::snap::{self, ImageRef, PageSnap, Snap, Word};
 use super::types::*;
-use similar::{Algorithm, DiffOp, capture_diff_slices};
+use similar::{Algorithm, DiffOp, capture_diff_slices_deadline};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::Hash;
+use std::time::{Duration, Instant};
+
+/// Time budget of one sequence diff (a page's words, the bookmark list).
+const DIFF_BUDGET: Duration = Duration::from_millis(200);
+
+/// Myers diff with a deadline: past it, the rest is reported as one coarse replace (still a
+/// correct diff, just not minimal), so a huge or fully rewritten page can't hang the compare.
+pub(super) fn seq_diff<T: Hash + Eq + Ord>(a: &[T], b: &[T]) -> Vec<DiffOp> {
+    capture_diff_slices_deadline(Algorithm::Myers, a, b, Some(Instant::now() + DIFF_BUDGET))
+}
 
 /// Equal words between two edits that still count as one edit region.
 const GAP: usize = 3;
@@ -447,7 +458,7 @@ fn text_changes(sa: &Snap, sb: &Snap, ia: usize, ib: usize, wa: &[Word], wb: &[W
     let ta: Vec<&str> = wa.iter().map(|w| w.text.as_str()).collect();
     let tb: Vec<&str> = wb.iter().map(|w| w.text.as_str()).collect();
     let mut atoms: Vec<(RunOp, Option<usize>, Option<usize>)> = Vec::new();
-    for op in capture_diff_slices(Algorithm::Myers, &ta, &tb) {
+    for op in seq_diff(&ta, &tb) {
         match op {
             DiffOp::Equal { old_index, new_index, len } => {
                 atoms.extend((0..len).map(|k| (RunOp::Equal, Some(old_index + k), Some(new_index + k))))
@@ -699,7 +710,7 @@ fn bookmark_changes(sa: &Snap, sb: &Snap, map: &PageMap, ch: &mut Vec<Change>) {
     let mut items: Vec<BookmarkChange> = Vec::new();
     let removed = |e: &(u32, String, Option<u32>)| BookmarkChange { op: BookmarkOp::Removed, depth: e.0, title: e.1.clone(), old_title: None, old_page: e.2, new_page: None };
     let added = |e: &(u32, String, Option<u32>)| BookmarkChange { op: BookmarkOp::Added, depth: e.0, title: e.1.clone(), old_title: None, old_page: None, new_page: e.2 };
-    for op in capture_diff_slices(Algorithm::Myers, &ka, &kb) {
+    for op in seq_diff(&ka, &kb) {
         match op {
             DiffOp::Equal { old_index, new_index, len } => {
                 for k in 0..len {

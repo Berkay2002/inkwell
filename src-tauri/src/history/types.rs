@@ -194,6 +194,18 @@ pub struct Usage {
     pub total: u64,
     pub chunks: u64,
     pub versions: u64,
+    /// Docs that could not be opened (e.g. their key no longer unwraps): not counted above.
+    pub skipped: Vec<DocId>,
+}
+
+/// Result of `Store::prune` / `Store::gc`.
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Maintenance {
+    pub pruned: usize,
+    pub freed_bytes: u64,
+    /// Docs that could not be opened (e.g. their key no longer unwraps): left untouched.
+    pub skipped: Vec<DocId>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -206,6 +218,8 @@ pub struct FsckReport {
     pub bad_manifests: u32,
     /// Versions listed as `broken` (chunks missing).
     pub broken_versions: u32,
+    /// Docs that could not be opened (e.g. their key no longer unwraps): left untouched.
+    pub skipped: Vec<DocId>,
 }
 
 /// Target of "Never keep history for this file".
@@ -235,6 +249,9 @@ pub enum HistoryError {
     NeverKeep,
     #[error("the file already exists")]
     Exists,
+    /// Several histories may belong to the file: ask which one (or none) first.
+    #[error("more than one history may belong to this file")]
+    Ambiguous(Vec<DocId>),
     #[error("{0}")]
     Invalid(String),
 }

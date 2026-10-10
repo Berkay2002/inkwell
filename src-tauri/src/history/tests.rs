@@ -212,7 +212,7 @@ fn caps_prune_oldest_unnamed_first() {
     s.name(doc, ids[1], Some("named".into())).unwrap();
     let total = s.usage().unwrap().total;
     s.set_policy(Policy { per_doc_cap_bytes: total * 6 / 10, ..Policy::default() }).unwrap();
-    let pruned = s.prune().unwrap();
+    let pruned = s.prune().unwrap().pruned;
     let left: Vec<VersionId> = s.versions(doc).unwrap().iter().map(|v| v.id).collect();
     assert!(pruned > 0);
     assert!(left.contains(&ids[1]) && left.contains(ids.last().unwrap()));
@@ -240,7 +240,7 @@ fn gc_removes_only_unreferenced_chunks() {
     fs::create_dir_all(stray.parent().unwrap()).unwrap();
     fs::write(&stray, b"junk").unwrap();
     let before = s.usage().unwrap().chunks;
-    assert_eq!(s.gc().unwrap(), 4);
+    assert_eq!(s.gc().unwrap().freed_bytes, 4);
     assert!(!stray.exists());
     assert_eq!(s.usage().unwrap().chunks, before - 1);
     // Prune the oldest two by policy (all_days 0, daily 0 => monthly keeps one); every survivor reads.
@@ -279,25 +279,146 @@ fn no_plaintext_at_rest_and_shred_leaves_nothing() {
     assert_eq!(s.doc_for_file(&dir.join("doc.pdf")).unwrap(), Resolution::New);
 }
 
+fn redacted(id: &str) -> Vec<u8> {
+    pdf(4, id).into_iter().chain(*b"% redacted\n").collect()
+}
+
+fn lock_for_read(p: &Path) -> fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_SHARE_READ only: others can copy it, nobody can delete it.
+    fs::OpenOptions::new().read(true).share_mode(1).open(p).unwrap()
+}
+
 #[test]
 fn redaction_purge_destroys_old_key() {
     let (_d, root, s, doc) = setup("redact", &pdf(4, "04"));
-    let key = root.join("docs").join(doc.to_string()).join("key.dpapi");
+    let ddir = root.join("docs").join(doc.to_string());
+    let key = ddir.join("key.dpapi");
     let old_key = fs::read(&key).unwrap();
     let old = s.versions(doc).unwrap()[0].id;
-    s.redactions_applied(doc, false).unwrap();
-    assert!(s.versions(doc).unwrap().is_empty());
+    let old_chunks = all_files(&ddir.join("chunks"));
+    let red = redacted("04");
+    let v = s.redactions_applied(doc, false, &red, meta(Kind::Save, "Applied redactions")).unwrap();
+    // Shred, rekey and the first redacted version in one step.
+    assert_eq!(s.versions(doc).unwrap().iter().map(|v| v.id).collect::<Vec<_>>(), vec![v.id]);
     assert!(s.read(doc, old).is_err());
     assert_ne!(fs::read(&key).unwrap(), old_key);
-    assert!(fs::read_dir(root.join("docs").join(doc.to_string()).join("chunks")).is_err());
-    let red = pdf(4, "04").into_iter().chain(*b"% redacted\n").collect::<Vec<u8>>();
-    let v = s.commit(doc, &red, meta(Kind::Save, "Applied redactions")).unwrap();
+    assert!(old_chunks.iter().all(|c| !c.exists()));
     assert!(s.read(doc, v.id).unwrap() == red);
     assert!(!s.keeps_pre_redaction(doc).unwrap());
+    assert!(s.check_external(doc, &_d.join("doc.pdf")).unwrap().is_some(), "the caller writes the file first");
 
-    s.redactions_applied(doc, true).unwrap();
+    let red2 = [&red[..], b"% again\n"].concat();
+    s.redactions_applied(doc, true, &red2, meta(Kind::Save, "Applied redactions")).unwrap();
     assert!(s.keeps_pre_redaction(doc).unwrap());
+    assert_eq!(s.versions(doc).unwrap().len(), 3);
+}
+
+#[test]
+fn failed_commit_reloads_from_disk_and_gc_keeps_its_chunks() {
+    let (_d, _r, s, doc) = setup("fail-wal", &pdf(4, "0a"));
+    let mut b = pdf(4, "0a");
+    b.extend_from_slice(&crypto::random::<70000>());
+    store::FAIL_AT.with(|f| f.set("wal-delete"));
+    let r = s.commit(doc, &b, meta(Kind::Save, "s"));
+    store::FAIL_AT.with(|f| f.set(""));
+    assert!(r.is_err());
+    // The manifest reached the disk before the failure: the reloaded state lists it, GC keeps it.
+    let vs = s.versions(doc).unwrap();
+    assert_eq!(vs.len(), 2);
+    s.gc().unwrap();
+    assert!(s.read(doc, vs[0].id).unwrap() == b);
+}
+
+#[test]
+fn failed_redaction_purge_never_commits_into_a_keyless_doc() {
+    let (dir, root, s, doc) = setup("fail-rekey", &pdf(4, "0b"));
+    let red = redacted("0b");
+    store::FAIL_AT.with(|f| f.set("rekey"));
+    let r = s.redactions_applied(doc, false, &red, meta(Kind::Save, "Applied redactions"));
+    store::FAIL_AT.with(|f| f.set(""));
+    assert!(r.is_err());
+    // Old key destroyed, new one not in place: the next use finishes the shred instead of
+    // recording versions that a later fsck would delete.
+    assert!(s.commit(doc, &red, meta(Kind::Save, "s")).is_err());
+    assert!(!root.join("docs").join(doc.to_string()).exists());
+    assert_eq!(s.doc_for_file(&dir.join("doc.pdf")).unwrap(), Resolution::New);
+}
+
+#[test]
+fn redaction_purge_reports_leftovers_and_can_be_retried() {
+    let (_d, root, s, doc) = setup("redact-locked", &pdf(4, "0c"));
+    s.name(doc, s.versions(doc).unwrap()[0].id, Some("x".into())).unwrap();
+    let names = root.join("docs").join(doc.to_string()).join("names");
+    let red = redacted("0c");
+    let lock = lock_for_read(&names);
+    assert!(s.redactions_applied(doc, false, &red, meta(Kind::Save, "r")).is_err());
+    drop(lock);
+    let v = s.redactions_applied(doc, false, &red, meta(Kind::Save, "r")).unwrap();
+    assert!(!names.exists());
     assert_eq!(s.versions(doc).unwrap().len(), 1);
+    assert!(s.read(doc, v.id).unwrap() == red);
+}
+
+#[test]
+fn relocate_destroys_old_keys_and_reports_leftovers() {
+    let (dir, root, s, doc) = setup("relocate-locked", &pdf(4, "0d"));
+    let ddir = root.join("docs").join(doc.to_string());
+    let chunk = all_files(&ddir.join("chunks"))[0].clone();
+    let lock = lock_for_read(&chunk);
+    let left = s.relocate(&dir.join("moved")).unwrap();
+    assert_eq!(left, vec![chunk]);
+    assert!(!root.join("index.key").exists());
+    assert!(!ddir.join("key.dpapi").exists());
+    drop(lock);
+    assert!(s.read(doc, s.versions(doc).unwrap()[0].id).is_ok());
+}
+
+#[test]
+fn file_id_only_where_ids_are_stable() {
+    assert!(identity::stable_ids("NTFS") && identity::stable_ids("ReFS"));
+    for fs in ["FAT32", "FAT", "exFAT", "UDF", "CSC-CACHE", ""] {
+        assert!(!identity::stable_ids(fs), "{fs}");
+    }
+    assert_eq!(identity::usable(identity::FileId { volume: 7, id: 0 }), None);
+    let d = tmp("fid");
+    fs::write(d.join("a.pdf"), b"x").unwrap();
+    assert!(identity::file_id(&d.join("a.pdf")).is_some_and(|f| f.id != 0), "temp dir is on NTFS here");
+}
+
+#[test]
+fn never_keep_on_an_ambiguous_path_asks_first() {
+    let (dir, root, s, doc) = setup("never-ambiguous", &pdf(4, "abcd01"));
+    let other = dir.join("other");
+    fs::create_dir_all(&other).unwrap();
+    let edited = other.join("edited.pdf");
+    fs::write(&edited, [&fs::read(dir.join("doc.pdf")).unwrap()[..], b"% changed\n"].concat()).unwrap();
+    assert_eq!(s.doc_for_file(&edited).unwrap(), Resolution::Ambiguous { candidates: vec![doc] });
+    match s.set_never_keep(Target::Path(edited.clone()), true) {
+        Err(HistoryError::Ambiguous(c)) => assert_eq!(c, vec![doc]),
+        r => panic!("{r:?}"),
+    }
+    assert!(!root.join("never.json").exists());
+    assert_eq!(s.versions(doc).unwrap().len(), 1);
+}
+
+#[test]
+fn a_doc_whose_key_does_not_unwrap_is_skipped_not_fatal() {
+    let (dir, root, s, a) = setup("bad-key", &pdf(3, "0e"));
+    let other = dir.join("other.pdf");
+    fs::write(&other, pdf(3, "0f")).unwrap();
+    let b = s.attach(&other).unwrap();
+    drop(s);
+    let key = root.join("docs").join(a.to_string()).join("key.dpapi");
+    fs::write(&key, b"not a DPAPI blob").unwrap();
+    let s = Store::open(&root).unwrap();
+    assert_eq!(s.fsck().unwrap().skipped, vec![a]);
+    assert_eq!(s.gc().unwrap().skipped, vec![a]);
+    assert_eq!(s.prune().unwrap().skipped, vec![a]);
+    let u = s.usage().unwrap();
+    assert_eq!((u.skipped, u.per_doc.len()), (vec![a], 1));
+    assert!(s.read(b, s.versions(b).unwrap()[0].id).is_ok());
+    assert!(key.exists(), "a doc we can't open is never deleted");
 }
 
 #[test]
@@ -322,7 +443,7 @@ fn never_keep_and_tamper() {
     assert_eq!(rep.bad_manifests, 1);
     assert!(man.with_extension("bad").exists());
     assert!(s.versions(doc).unwrap().is_empty());
-    assert_eq!(s.gc().unwrap(), 0, "GC must not touch a damaged doc");
+    assert_eq!(s.gc().unwrap().freed_bytes, 0, "GC must not touch a damaged doc");
 
     let file = dir.join("doc.pdf");
     s.set_never_keep(Target::Path(file.clone()), true).unwrap();
@@ -385,7 +506,7 @@ fn relocate_keeps_every_version_readable() {
     s.name(doc, ids[1], Some("first".into())).unwrap();
     let new_root = dir.join("moved-store");
     assert!(s.relocate(&root.join("inside")).is_err());
-    s.relocate(&new_root).unwrap();
+    assert_eq!(s.relocate(&new_root).unwrap(), Vec::<PathBuf>::new());
     assert_eq!(s.root(), std::path::absolute(&new_root).unwrap());
     for (id, b) in ids.iter().zip(&seq) {
         assert!(s.read(doc, *id).unwrap() == *b);

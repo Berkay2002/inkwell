@@ -57,21 +57,33 @@ unwrap it for the same user. Closing that needs keys that never touch disk unwra
 encrypting a key file that is rotated on shred). Add if the threat model includes forensic recovery from the
 user's own logged-in account.
 
-`redactions_applied(doc, keep_history)`:
-- `false` (default): shred everything (key first), create a fresh key, keep the doc's identity (minus the head
-  content hash, which is a hash of unredacted bytes); the caller then commits the redacted file as the first version.
-- `true`: keep it all and set `keep_pre_redaction` in identity.json (the UI shows "pre-redaction history kept";
-  `Store::keeps_pre_redaction`).
+`redactions_applied(doc, keep_history, redacted_bytes, meta) -> VersionInfo`, called after the redacted file is
+written, in place of the Save commit. One operation under the doc's mutex, so a `check_external` (window focus)
+can't record anything between the purge and the redacted version:
+- `false` (default): write a fresh key beside the old one (temp file), forget the old key and versions in memory,
+  destroy the old `key.dpapi`, rename the new key in, delete manifests, chunks, names and WAL (errors are returned,
+  not ignored; a retry finishes the job), keep the doc's identity (minus the head content hash, a hash of unredacted
+  bytes), then commit `redacted_bytes` as the first version. A crash between the destroy and the rename leaves a
+  keyless doc, which fsck shreds.
+- `true`: keep it all, set `keep_pre_redaction` in identity.json (the UI shows "pre-redaction history kept";
+  `Store::keeps_pre_redaction`), and commit `redacted_bytes`.
+
+Keys in memory (`Keys`, the index key, DPAPI outputs) are wiped on drop (`zeroize`), including a key replaced by a
+redaction purge.
 
 `set_never_keep(Target::Doc | Target::Path, true)`: records a tombstone (index-keyed hashes of path, file id and
 /ID; a file matching any of them is excluded), then shreds the doc. `doc_for_file` then returns `Excluded` and
-`attach` fails with `NeverKeep`. `false` (by path) lifts every tombstone that shares a hash with the file.
+`attach` fails with `NeverKeep`. `false` (by path) lifts every tombstone that shares a hash with the file. A path
+that resolves `Ambiguous` fails with `HistoryError::Ambiguous(candidates)` and writes nothing: the UI asks which
+history, then calls again with `Target::Doc`.
 
 ## Identity (`doc_for_file`)
 
 1. Tombstone match -> `Excluded`.
 2. NTFS file id + volume serial (`GetFileInformationByHandleEx(FileIdInfo)`, fallback `GetFileInformationByHandle`)
-   -> `Known`. Survives rename and move within a volume, and in-place overwrites.
+   -> `Known`. Survives rename and move within a volume, and in-place overwrites. Only used when the volume is NTFS
+   or ReFS (`GetVolumeInformationByHandleW`) and the id is not 0: FAT/exFAT, SMB shares and cloud drives can return
+   0 or reuse ids, so there no file id is recorded (nor hashed into tombstones) and lookup goes on to step 3.
 3. Otherwise read the file: content hash equal to the head of exactly one doc -> `Known` (a copy, or a move across
    volumes). Several -> `Ambiguous`.
 4. Else the trailer /ID (first element, parsed from the last trailer or xref-stream dict, no MuPDF): one doc with
@@ -92,6 +104,12 @@ manifest exists, decrypts and whose chunks all verify is kept, otherwise its man
 to GC); manifests that don't decrypt are renamed to `*.bad` (reported, never deleted, and the doc is excluded from
 prune and GC); manifests with missing chunks are listed with `broken: true`, and `read` fails on them. An unreadable
 `names` record also marks the doc damaged (so named versions can't be mistaken for prunable ones).
+
+The per-doc state is cached after fsck. Any operation on a doc that fails drops that cache, so the next use reloads
+from disk (a commit whose manifest landed but whose WAL delete failed is then listed, not lost). Prune and GC reload
+each doc from its manifests on disk before planning or sweeping, never trusting the cache. Store-wide passes
+(`fsck`, `prune`, `gc`, `usage`) skip a doc that can't be opened (e.g. its key no longer unwraps under DPAPI) and list
+it in `skipped`, instead of failing for every doc; nothing of a skipped doc is deleted.
 
 Concurrency: one `Store` per process (every method takes `&self`); a `parking_lot::Mutex` per doc; a `RwLock` over
 the root so `relocate` waits for in-flight operations; `<root>/lock` opened with share mode 0, so a second process gets
@@ -173,7 +191,12 @@ re-compressed fixture, where zstd works hardest).
   touched. A labelled checkpoint is recorded even when bytes equal the head.
 - Autosave timer (every N minutes of activity, only when dirty): `autosave(doc, snapshot_bytes)` from the in-memory
   snapshot (engine rule 2).
-- Redaction apply: `redactions_applied(doc, keep)` **before** committing the redacted file.
+- Redaction apply: write the redacted file, then `redactions_applied(doc, keep, redacted_bytes, meta)` **instead
+  of** the Save commit (it records the redacted bytes itself).
+- Never keep (by path): on `Err(Ambiguous(candidates))` ask which history, then `set_never_keep(Target::Doc(d), true)`.
 - Close: drop the `SessionGuard`.
-- Settings: `usage()`, `policy()` / `set_policy()`, `prune()`, `relocate(new_root)` (persist the new root in app
-  settings after it returns Ok; an old root holds `moved-to.txt`, and `Store::open` on it returns `Moved(path)`).
+- Settings: `usage()`, `policy()` / `set_policy()`, `prune()` (`Maintenance { pruned, freed_bytes, skipped }`; show
+  skipped docs as unreadable), `relocate(new_root) -> leftovers` (persist the new root in app settings after it
+  returns Ok; the old keys are destroyed first, then the old tree removed; non-empty leftovers are old files that
+  could not be deleted, e.g. held open, worth telling the user. An old root holds `moved-to.txt`, and `Store::open`
+  on it returns `Moved(path)`).

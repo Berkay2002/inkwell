@@ -45,6 +45,7 @@ zstd = "0.13"
 chacha20poly1305 = "0.10"
 getrandom = "0.3"
 similar = "2"
+zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory"] }

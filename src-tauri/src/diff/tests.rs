@@ -646,6 +646,42 @@ fn visual_diff_pages_of_different_size_and_errors() {
 }
 
 #[test]
+fn render_is_capped_at_max_pixels() {
+    let mut a = base(1);
+    a.pages[0].lines.push((72.0, 500.0, "Signed by: blank".into()));
+    let mut b = a.clone();
+    b.pages[0].lines.last_mut().unwrap().2 = "Signed by: A. Novak".into();
+    let (ba, bb) = (build(&a), build(&b));
+    // Letter at 12x would be 7344 x 9504 = 70 MP.
+    let r = render_page(BytesId::of(&ba), &ba, 0, 12.0).unwrap();
+    assert!((r.width as f32) * (r.height as f32) <= visual::MAX_PIXELS, "{} x {}", r.width, r.height);
+    assert!(r.scale < 12.0 && (r.width as f32 - 612.0 * r.scale).abs() <= 1.0);
+    // The diff reports the effective scale, and its boxes stay in page space.
+    let v = visual_diff(&ba, 0, &bb, 0, 12.0).unwrap();
+    assert_eq!(v.scale, r.scale);
+    let small = visual_diff(&ba, 0, &bb, 0, 1.0).unwrap();
+    assert_eq!(v.boxes.len(), small.boxes.len());
+    assert!((v.boxes[0][0] - small.boxes[0][0]).abs() < 4.0, "{:?} vs {:?}", v.boxes, small.boxes);
+}
+
+#[test]
+fn word_diff_has_a_deadline() {
+    // Two pages of 30k words with nothing in common: unbounded Myers takes many seconds here.
+    let a: Vec<String> = (0..30_000).map(|i| format!("a{i}")).collect();
+    let b: Vec<String> = (0..30_000).map(|i| format!("b{i}")).collect();
+    let t = Instant::now();
+    let ops = semantic::seq_diff(&a, &b);
+    assert!(t.elapsed().as_secs_f32() < 2.0, "{:?}", t.elapsed());
+    let (del, ins) = ops.iter().fold((0, 0), |(d, i), op| match *op {
+        similar::DiffOp::Delete { old_len, .. } => (d + old_len, i),
+        similar::DiffOp::Insert { new_len, .. } => (d, i + new_len),
+        similar::DiffOp::Replace { old_len, new_len, .. } => (d + old_len, i + new_len),
+        similar::DiffOp::Equal { .. } => (d, i),
+    });
+    assert_eq!((del, ins), (30_000, 30_000), "still a complete diff");
+}
+
+#[test]
 fn render_cache_is_shared_and_keyed() {
     clear_cache_for_test();
     let a = build(&base(2));

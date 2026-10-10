@@ -3,6 +3,7 @@
 use super::types::{ChunkId, DocId, Hash, HistoryError, Result};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use zeroize::{Zeroize, Zeroizing};
 
 pub fn random<const N: usize>() -> [u8; N] {
     let mut b = [0u8; N];
@@ -18,7 +19,7 @@ pub enum Obj {
     Names = b'n' as isize,
 }
 
-/// Everything derived from one document's random key.
+/// Everything derived from one document's random key. Wiped on drop (the AEAD wipes its own key).
 pub struct Keys {
     aead: XChaCha20Poly1305,
     chunk_id: [u8; 32],
@@ -27,9 +28,9 @@ pub struct Keys {
 
 impl Keys {
     pub fn new(doc_key: &[u8; 32]) -> Self {
-        let aead_key = blake3::derive_key("inkwell history 2026-10 object encryption", doc_key);
+        let aead_key = Zeroizing::new(blake3::derive_key("inkwell history 2026-10 object encryption", doc_key));
         Keys {
-            aead: XChaCha20Poly1305::new(&aead_key.into()),
+            aead: XChaCha20Poly1305::new((&*aead_key).into()),
             chunk_id: blake3::derive_key("inkwell history 2026-10 chunk id", doc_key),
             content: blake3::derive_key("inkwell history 2026-10 content hash", doc_key),
         }
@@ -68,6 +69,13 @@ impl Keys {
             .decrypt(XNonce::from_slice(&sealed[..24]), Payload { msg: &sealed[24..], aad: &aad })
             .map_err(|_| HistoryError::Integrity("decryption failed".into()))?;
         unpack(&packed)
+    }
+}
+
+impl Drop for Keys {
+    fn drop(&mut self) {
+        self.chunk_id.zeroize();
+        self.content.zeroize();
     }
 }
 
@@ -118,10 +126,10 @@ pub fn protect(key: &[u8; 32]) -> Result<Vec<u8>> {
     let ok = unsafe {
         CryptProtectData(&input, std::ptr::null(), &entropy, std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
     };
-    take_blob(ok, out)
+    take_blob(ok, out).map(|v| v.to_vec())
 }
 
-pub fn unprotect(blob: &[u8]) -> Result<[u8; 32]> {
+pub fn unprotect(blob: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData};
     let input = CRYPT_INTEGER_BLOB { cbData: blob.len() as u32, pbData: blob.as_ptr() as *mut u8 };
     let entropy = CRYPT_INTEGER_BLOB { cbData: ENTROPY.len() as u32, pbData: ENTROPY.as_ptr() as *mut u8 };
@@ -131,16 +139,17 @@ pub fn unprotect(blob: &[u8]) -> Result<[u8; 32]> {
         CryptUnprotectData(&input, std::ptr::null_mut(), &entropy, std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
     };
     let v = take_blob(ok, out)?;
-    v.try_into().map_err(|_| HistoryError::Dpapi)
+    let k: [u8; 32] = v.as_slice().try_into().map_err(|_| HistoryError::Dpapi)?;
+    Ok(Zeroizing::new(k))
 }
 
-fn take_blob(ok: windows_sys::core::BOOL, out: windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB) -> Result<Vec<u8>> {
+fn take_blob(ok: windows_sys::core::BOOL, out: windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB) -> Result<Zeroizing<Vec<u8>>> {
     if ok == 0 || out.pbData.is_null() {
         return Err(HistoryError::Dpapi);
     }
     // SAFETY: DPAPI returned `cbData` bytes at `pbData`, allocated with LocalAlloc.
     unsafe {
-        let v = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+        let v = Zeroizing::new(std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec());
         std::ptr::write_bytes(out.pbData, 0, out.cbData as usize);
         windows_sys::Win32::Foundation::LocalFree(out.pbData as _);
         Ok(v)

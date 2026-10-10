@@ -26,11 +26,16 @@ impl BytesId {
     }
 }
 
+/// Largest render, in pixels (160 MB of RGBA).
+pub const MAX_PIXELS: f32 = 40e6;
+
 /// A rendered page: tightly packed RGBA, opaque white paper.
 #[derive(Debug)]
 pub struct Raster {
     pub width: u32,
     pub height: u32,
+    /// The scale actually used: lower than asked when the page would exceed `MAX_PIXELS`.
+    pub scale: f32,
     pub rgba: Vec<u8>,
 }
 
@@ -77,7 +82,10 @@ pub fn render_page_pw(id: BytesId, bytes: &[u8], page: u32, scale: f32, password
     if let Some(r) = cache().lock().lru.get(&key) {
         return Ok(r.clone());
     }
-    let r = Arc::new(render(bytes, page, scale, password)?);
+    // Panics inside MuPDF become an error, as in `compare`.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(bytes, page, scale, password)))
+        .unwrap_or(Err(DiffError::Panic))?;
+    let r = Arc::new(r);
     let mut c = cache().lock();
     if let Some(old) = c.lru.put(key, r.clone()) {
         c.bytes -= old.rgba.len();
@@ -98,6 +106,10 @@ fn render(bytes: &[u8], page: u32, scale: f32, password: Option<&str>) -> Result
         return Err(DiffError::BadPage { page });
     }
     let p = doc.load_page(page as i32)?;
+    let b = p.bounds()?;
+    let area = ((b.x1 - b.x0) * (b.y1 - b.y0)).max(1.0);
+    // 0.99: the pixmap rounds its edges outward.
+    let scale = scale.min((MAX_PIXELS / area).sqrt() * 0.99);
     let pix = p.to_pixmap(&Matrix::new_scale(scale, scale), &Colorspace::device_rgb(), false, true)?;
     let (w, h, n) = (pix.width() as usize, pix.height() as usize, pix.n() as usize);
     let stride = pix.stride() as usize;
@@ -116,7 +128,7 @@ fn render(bytes: &[u8], page: u32, scale: f32, password: Option<&str>) -> Result
             }
         }
     }
-    Ok(Raster { width: w as u32, height: h as u32, rgba })
+    Ok(Raster { width: w as u32, height: h as u32, scale, rgba })
 }
 
 #[derive(Serialize, Debug)]
@@ -140,12 +152,20 @@ pub struct VisualDiff {
 }
 
 pub fn visual_diff(a: &[u8], a_page: u32, b: &[u8], b_page: u32, scale: f32) -> Result<VisualDiff> {
-    let ra = render_page(BytesId::of(a), a, a_page, scale)?;
-    let rb = render_page(BytesId::of(b), b, b_page, scale)?;
+    let (ia, ib) = (BytesId::of(a), BytesId::of(b));
+    let (mut ra, mut rb) = (render_page(ia, a, a_page, scale)?, render_page(ib, b, b_page, scale)?);
+    if ra.scale != rb.scale {
+        // One page hit the pixel cap: compare both at the smaller scale.
+        let s = ra.scale.min(rb.scale);
+        (ra, rb) = (render_page(ia, a, a_page, s)?, render_page(ib, b, b_page, s)?);
+    }
     Ok(diff_rasters(ra, rb, scale))
 }
 
-pub fn diff_rasters(before: Arc<Raster>, after: Arc<Raster>, scale: f32) -> VisualDiff {
+/// Pixel diff of two renders made at the same scale. Boxes use the rasters' effective scale
+/// (`Raster::scale`); `_requested_scale` is ignored (kept for callers).
+pub fn diff_rasters(before: Arc<Raster>, after: Arc<Raster>, _requested_scale: f32) -> VisualDiff {
+    let scale = before.scale.min(after.scale);
     let (w, h) = (before.width.max(after.width) as usize, before.height.max(after.height) as usize);
     let mut mask = vec![0u8; w * h];
     let mut changed = 0u32;

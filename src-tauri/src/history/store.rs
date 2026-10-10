@@ -12,8 +12,23 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
 const FORMAT: u32 = 1;
+
+// Test-only failure point, for data-loss paths that are otherwise hard to hit.
+#[cfg(test)]
+thread_local! {
+    pub(super) static FAIL_AT: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+}
+
+fn fault(_at: &str) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_AT.with(|f| f.get()) == _at {
+        return Err(std::io::Error::other(format!("injected failure at {_at}")).into());
+    }
+    Ok(())
+}
 /// FastCDC bounds (min, avg, max), picked by `history_bench` (docs/history.md).
 pub const CDC: (u32, u32, u32) = (4 << 10, 16 << 10, 64 << 10);
 
@@ -100,7 +115,7 @@ impl DocState {
 struct Inner {
     root: PathBuf,
     _lock: File,
-    index_key: [u8; 32],
+    index_key: Zeroizing<[u8; 32]>,
     policy: Mutex<Policy>,
     never: Mutex<Vec<Tombstone>>,
     /// Docs whose session marker was left by a process that died.
@@ -199,6 +214,15 @@ fn destroy_file(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `remove_file` / `remove_dir_all` where "already gone" is success.
+fn remove_any(path: &Path) -> Result<()> {
+    let r = if path.is_dir() { fs::remove_dir_all(path) } else { fs::remove_file(path) };
+    match r {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -307,7 +331,7 @@ impl Inner {
             }
             Err(e) => return Err(e.into()),
         };
-        let keys = Keys::new(&crypto::unprotect(&wrapped)?);
+        let keys = Keys::new(&*crypto::unprotect(&wrapped)?);
         let identity: Identity = read_json(&dir.join("identity.json"))?.unwrap_or_default();
 
         if let Some(wal) = read_json::<Wal>(&dir.join("wal")).ok().flatten() {
@@ -426,6 +450,7 @@ impl Inner {
         }
         write_atomic(&manifest_path(&dir, m.id), &st.keys.seal(doc, Obj::Manifest, &m.id.0, &serde_json::to_vec(&m)?))?;
         sync_dir(&dir.join("versions"));
+        fault("wal-delete")?;
         fs::remove_file(dir.join("wal"))?;
 
         st.identity.head_hash = Some(self.ikey("content", bytes));
@@ -442,24 +467,17 @@ impl Inner {
         Ok(st.info(&st.versions[&id]))
     }
 
-    /// Deletes everything of the doc except identity: key first.
-    fn shred_contents(&self, doc: DocId) -> Result<()> {
+    /// Deletes the doc's versions, chunks, names and WAL (not the key, not the identity).
+    fn remove_contents(&self, doc: DocId) -> Result<()> {
         let dir = doc_dir(&self.root, doc);
-        destroy_file(&dir.join("key.dpapi"))?;
-        for sub in ["versions", "chunks"] {
-            match fs::remove_dir_all(dir.join(sub)) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                _ => {}
-            }
-        }
-        for f in ["names", "wal"] {
-            let _ = fs::remove_file(dir.join(f));
+        for sub in ["versions", "chunks", "names", "wal"] {
+            remove_any(&dir.join(sub))?;
         }
         Ok(())
     }
 
     fn new_key(&self, doc: DocId) -> Result<Keys> {
-        let key: [u8; 32] = crypto::random();
+        let key = Zeroizing::new(crypto::random::<32>());
         let dir = doc_dir(&self.root, doc);
         write_atomic(&dir.join("key.dpapi"), &crypto::protect(&key)?)?;
         sync_dir(&dir);
@@ -544,7 +562,7 @@ impl Store {
         let index_key = match fs::read(root.join("index.key")) {
             Ok(b) => crypto::unprotect(&b)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let k = crypto::random();
+                let k = Zeroizing::new(crypto::random());
                 write_atomic(&root.join("index.key"), &crypto::protect(&k)?)?;
                 k
             }
@@ -586,7 +604,8 @@ impl Store {
         self.docs.lock().entry(doc).or_default().clone()
     }
 
-    /// Runs `f` under the doc's lock, running fsck on first use.
+    /// Runs `f` under the doc's lock, running fsck on first use. If `f` fails, the cached state is
+    /// dropped (disk and cache may disagree after a partial write), so the next use reloads via fsck.
     fn with_doc<R>(&self, doc: DocId, f: impl FnOnce(&Inner, &mut DocState) -> Result<R>) -> Result<R> {
         let inn = self.inner.read();
         let slot = self.slot(doc);
@@ -594,10 +613,15 @@ impl Store {
         if g.is_none() {
             *g = Some(inn.fsck_doc(doc, &mut FsckReport::default())?);
         }
-        f(&inn, g.as_mut().expect("loaded above"))
+        let r = f(&inn, g.as_mut().expect("loaded above"));
+        if r.is_err() {
+            *g = None;
+        }
+        r
     }
 
-    /// Runs recovery on every document now (otherwise it runs on each doc's first use).
+    /// Runs recovery on every document now (otherwise it runs on each doc's first use). A doc
+    /// that can't be opened (e.g. its key no longer unwraps) is listed in `skipped`.
     pub fn fsck(&self) -> Result<FsckReport> {
         let inn = self.inner.read();
         let mut rep = FsckReport::default();
@@ -607,7 +631,10 @@ impl Store {
             *g = match inn.fsck_doc(doc, &mut rep) {
                 Ok(st) => Some(st),
                 Err(HistoryError::NotFound) => None,
-                Err(e) => return Err(e),
+                Err(_) => {
+                    rep.skipped.push(doc);
+                    None
+                }
             };
         }
         Ok(rep)
@@ -835,7 +862,7 @@ impl Store {
             return Err(HistoryError::NotFound);
         }
         *g = None;
-        inn.shred_contents(doc)?;
+        destroy_file(&dir.join("key.dpapi"))?;
         fs::remove_dir_all(&dir)?;
         sync_dir(&inn.root.join("docs"));
         inn.stale.lock().remove(&doc);
@@ -848,23 +875,40 @@ impl Store {
         self.shred(doc)
     }
 
-    /// After redactions were applied. `keep_history = false` (default): shred every earlier
-    /// version and start a fresh key; the caller then commits the redacted file. `true`: keep it
-    /// and flag the doc "pre-redaction history kept".
-    pub fn redactions_applied(&self, doc: DocId, keep_history: bool) -> Result<()> {
+    /// After the redacted file was written, in place of the Save commit, as one locked operation
+    /// (so `check_external` can't slip an unredacted file in between). `keep_history = false`
+    /// (default): shred every earlier version, start a fresh key and record `redacted` as the first
+    /// version. `true`: keep it, flag the doc "pre-redaction history kept", and record `redacted`.
+    pub fn redactions_applied(&self, doc: DocId, keep_history: bool, redacted: &[u8], meta: NewVersion) -> Result<VersionInfo> {
         self.with_doc(doc, |inn, st| {
             if keep_history {
                 st.identity.keep_pre_redaction = true;
-                return inn.write_identity(doc, &st.identity);
+                inn.write_identity(doc, &st.identity)?;
+                return inn.commit(doc, st, redacted, meta);
             }
-            inn.shred_contents(doc)?;
-            st.keys = inn.new_key(doc)?;
+            let dir = doc_dir(&inn.root, doc);
+            // The new key goes beside the old one first, so the doc is keyless only between the
+            // destroy and the rename (a crash there: fsck finishes the shred).
+            let key = Zeroizing::new(crypto::random::<32>());
+            let tmp = dir.join(format!("key.dpapi.tmp-{}", hex8()));
+            let mut f = File::create(&tmp)?;
+            f.write_all(&crypto::protect(&key)?)?;
+            f.sync_all()?;
+            drop(f);
+            // Forget the old key and versions in memory before anything is deleted (drop zeroizes).
+            st.keys = Keys::new(&key);
             st.versions.clear();
             st.names.clear();
             st.has_bad = false;
             st.identity.head_hash = None;
             st.identity.keep_pre_redaction = false;
-            inn.write_identity(doc, &st.identity)
+            destroy_file(&dir.join("key.dpapi"))?;
+            fault("rekey")?;
+            fs::rename(&tmp, dir.join("key.dpapi"))?;
+            sync_dir(&dir);
+            inn.remove_contents(doc)?;
+            inn.write_identity(doc, &st.identity)?;
+            inn.commit(doc, st, redacted, meta)
         })
     }
 
@@ -873,7 +917,9 @@ impl Store {
     }
 
     /// "Never keep history for this file": shreds its history and records a keyed-hash tombstone
-    /// (path, file id, /ID) so it is never recorded again. `false` lifts it (by path).
+    /// (path, file id, /ID) so it is never recorded again. `false` lifts it (by path). A path that
+    /// resolves `Ambiguous` fails with `HistoryError::Ambiguous(candidates)` and writes nothing:
+    /// ask which history, then call again with `Target::Doc`.
     pub fn set_never_keep(&self, target: Target, never: bool) -> Result<()> {
         let (hashes, doc) = {
             let inn = self.inner.read();
@@ -885,16 +931,18 @@ impl Store {
                 Target::Doc(d) => {
                     let id: Identity = read_json(&doc_dir(&inn.root, *d).join("identity.json"))?.ok_or(HistoryError::NotFound)?;
                     let mut h: Vec<Hash> = id.path_hash.into_iter().chain(id.pdf_ids).collect();
-                    h.extend(id.file_id.map(|f| inn.fid_hash(f)));
+                    h.extend(id.file_id.and_then(identity::usable).map(|f| inn.fid_hash(f)));
                     (h, Some(*d))
                 }
             }
         };
         let doc = match (doc, &target) {
             (Some(d), _) => Some(d),
-            (None, Target::Path(p)) if never => match self.doc_for_file(p) {
-                Ok(Resolution::Known { doc }) => Some(doc),
-                _ => None,
+            // Ambiguous: writing the tombstone would leave the matching history behind. Ask first.
+            (None, Target::Path(p)) if never => match self.doc_for_file(p)? {
+                Resolution::Known { doc } => Some(doc),
+                Resolution::Ambiguous { candidates } => return Err(HistoryError::Ambiguous(candidates)),
+                Resolution::New | Resolution::Excluded => None,
             },
             _ => None,
         };
@@ -914,26 +962,28 @@ impl Store {
         Ok(())
     }
 
-    /// Applies the retention policy (and the caps), then GC. Returns the number of versions pruned.
-    pub fn prune(&self) -> Result<usize> {
+    /// Applies the retention policy (and the caps), then GC. Docs that can't be opened are left
+    /// alone and listed in `skipped`.
+    pub fn prune(&self) -> Result<Maintenance> {
         let policy = self.policy();
         let now = now_ms();
-        let mut pruned = 0;
+        let mut out = Maintenance::default();
         let mut total: Vec<(DocId, Vec<VersionInfo>, HashMap<ChunkId, u64>)> = Vec::new();
         for doc in self.docs() {
             let r = self.with_doc(doc, |inn, st| {
+                // Plan from the manifests on disk, not a possibly stale cache.
+                *st = inn.fsck_doc(doc, &mut FsckReport::default())?;
                 if st.has_bad {
-                    return Ok((Vec::new(), HashMap::new()));
+                    return Ok((0, Vec::new(), HashMap::new()));
                 }
                 let sizes = inn.chunk_sizes(doc, st);
                 let keep = plan_retention(&st.infos(), &policy, now, |k| cost_of(st, &sizes, k));
-                pruned += remove_versions(inn, doc, st, |v| !keep.contains(v))?;
-                Ok((st.infos(), sizes))
+                let n = remove_versions(inn, doc, st, |v| !keep.contains(v))?;
+                Ok((n, st.infos(), sizes))
             });
-            match r {
-                Ok((vs, sizes)) => total.push((doc, vs, sizes)),
-                Err(HistoryError::NotFound) => {}
-                Err(e) => return Err(e),
+            if let Some((n, vs, sizes)) = per_doc(r, doc, &mut out.skipped) {
+                out.pruned += n;
+                total.push((doc, vs, sizes));
             }
         }
         if policy.total_cap_bytes > 0 {
@@ -973,23 +1023,35 @@ impl Store {
             for (doc, vs, _) in &total {
                 let drop: HashSet<VersionId> = vs.iter().map(|v| v.id).filter(|v| !keep.contains(&(*doc, *v))).collect();
                 if !drop.is_empty() {
-                    pruned += self.with_doc(*doc, |inn, st| remove_versions(inn, *doc, st, |v| drop.contains(v)))?;
+                    let r = self.with_doc(*doc, |inn, st| remove_versions(inn, *doc, st, |v| drop.contains(v)));
+                    out.pruned += per_doc(r, *doc, &mut out.skipped).unwrap_or(0);
                 }
             }
         }
-        self.gc()?;
-        Ok(pruned)
+        let g = self.gc()?;
+        out.freed_bytes = g.freed_bytes;
+        for d in g.skipped {
+            if !out.skipped.contains(&d) {
+                out.skipped.push(d);
+            }
+        }
+        Ok(out)
     }
 
     /// Mark-and-sweep: deletes chunk files no manifest of their doc references. Runs under each
-    /// doc's lock, so no commit of that doc is in flight; docs with a pending WAL or an unreadable
-    /// manifest are skipped. Returns bytes freed.
-    pub fn gc(&self) -> Result<u64> {
-        let mut freed = 0;
+    /// doc's lock, so no commit of that doc is in flight; the live set comes from the manifests on
+    /// disk (reloaded), not the cache. Docs with a pending WAL or an unreadable manifest are left
+    /// alone; docs that can't be opened are listed in `skipped`.
+    pub fn gc(&self) -> Result<Maintenance> {
+        let mut out = Maintenance::default();
         for doc in self.docs() {
             let r = self.with_doc(doc, |inn, st| {
                 let dir = doc_dir(&inn.root, doc);
-                if st.has_bad || dir.join("wal").exists() {
+                if dir.join("wal").exists() {
+                    return Ok(0);
+                }
+                *st = inn.fsck_doc(doc, &mut FsckReport::default())?;
+                if st.has_bad {
                     return Ok(0);
                 }
                 let live: HashSet<String> =
@@ -1006,13 +1068,9 @@ impl Store {
                 }
                 Ok(n)
             });
-            match r {
-                Ok(n) => freed += n,
-                Err(HistoryError::NotFound) => {}
-                Err(e) => return Err(e),
-            }
+            out.freed_bytes += per_doc(r, doc, &mut out.skipped).unwrap_or(0);
         }
-        Ok(freed)
+        Ok(out)
     }
 
     pub fn usage(&self) -> Result<Usage> {
@@ -1029,15 +1087,11 @@ impl Store {
                     chunks: chunks as u64,
                 })
             });
-            match r {
-                Ok(d) => {
-                    u.total += d.bytes;
-                    u.chunks += d.chunks;
-                    u.versions += d.versions;
-                    u.per_doc.push(d);
-                }
-                Err(HistoryError::NotFound) => {}
-                Err(e) => return Err(e),
+            if let Some(d) = per_doc(r, doc, &mut u.skipped) {
+                u.total += d.bytes;
+                u.chunks += d.chunks;
+                u.versions += d.versions;
+                u.per_doc.push(d);
             }
         }
         Ok(u)
@@ -1045,7 +1099,9 @@ impl Store {
 
     /// Moves the store: copy, verify every manifest and chunk at the new place, switch, then
     /// remove the old tree (leaving `moved-to.txt`). On any failure the old store is untouched.
-    pub fn relocate(&self, new_root: &Path) -> Result<()> {
+    /// After the switch, every old key is destroyed first, then the rest is removed; returns the
+    /// old files that could not be removed (empty when the old tree is clean).
+    pub fn relocate(&self, new_root: &Path) -> Result<Vec<PathBuf>> {
         let mut inn = self.inner.write();
         let old = inn.root.clone();
         let new_root = std::path::absolute(new_root)?;
@@ -1071,17 +1127,49 @@ impl Store {
         // The move has happened: from here on, failures only leave old files behind, so they
         // must not be reported as a failed move (the caller would keep pointing at the old place).
         let _ = fs::write(old.join("moved-to.txt"), new_root.to_string_lossy().as_bytes());
+        let mut left = Vec::new();
+        // Keys first: whatever then can't be deleted is undecryptable.
+        let mut keys = vec![old.join("index.key")];
+        keys.extend(fs::read_dir(old.join("docs")).into_iter().flatten().flatten().map(|e| e.path().join("key.dpapi")));
+        for k in keys {
+            if destroy_file(&k).is_err() {
+                left.push(k);
+            }
+        }
         for e in fs::read_dir(&old).into_iter().flatten().flatten() {
             let p = e.path();
-            match e.file_name().to_str() {
-                Some("lock" | "moved-to.txt") => {}
-                _ if p.is_dir() => drop(fs::remove_dir_all(&p)),
-                _ => drop(fs::remove_file(&p)),
+            if matches!(e.file_name().to_str(), Some("lock" | "moved-to.txt")) {
+                continue;
             }
+            // File by file, so one file held open doesn't keep the rest.
+            let mut files = vec![p.clone()];
+            if p.is_dir() {
+                files.clear();
+                walk(&p, &mut files);
+            }
+            left.extend(files.into_iter().filter(|f| remove_any(f).is_err()));
+            let _ = remove_any(&p);
         }
         drop(old_lock);
         let _ = fs::remove_file(old.join("lock"));
-        Ok(())
+        left.sort();
+        left.dedup();
+        Ok(left)
+    }
+}
+
+/// One doc's result in a store-wide pass: NotFound (shredded meanwhile) is nothing; any other
+/// error (e.g. a key DPAPI no longer unwraps) skips the doc instead of failing the whole pass.
+fn per_doc<T>(r: Result<T>, doc: DocId, skipped: &mut Vec<DocId>) -> Option<T> {
+    match r {
+        Ok(t) => Some(t),
+        Err(HistoryError::NotFound) => None,
+        Err(_) => {
+            if !skipped.contains(&doc) {
+                skipped.push(doc);
+            }
+            None
+        }
     }
 }
 
@@ -1106,7 +1194,7 @@ fn verify_tree(root: &Path) -> Result<()> {
     for e in fs::read_dir(root.join("docs")).into_iter().flatten().flatten() {
         let Some(doc) = e.file_name().to_str().and_then(|s| s.parse::<DocId>().ok()) else { continue };
         let dir = e.path();
-        let keys = Keys::new(&crypto::unprotect(&fs::read(dir.join("key.dpapi"))?)?);
+        let keys = Keys::new(&*crypto::unprotect(&fs::read(dir.join("key.dpapi"))?)?);
         let mut seen = HashSet::new();
         for v in fs::read_dir(dir.join("versions")).into_iter().flatten().flatten() {
             let p = v.path();

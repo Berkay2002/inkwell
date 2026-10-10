@@ -1658,6 +1658,7 @@ dependencies = [
  "webview2-com",
  "windows-core",
  "windows-sys 0.60.2",
+ "zeroize",
  "zstd",
 ]
 

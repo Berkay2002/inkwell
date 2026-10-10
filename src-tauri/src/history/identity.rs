@@ -12,26 +12,49 @@ pub struct FileId {
     pub id: u128,
 }
 
+/// The file id, only where it is stable and unique: NTFS and ReFS. FAT/exFAT, SMB shares and cloud
+/// drives can return 0 or reuse ids, so there the caller falls back to content, /ID and path.
 pub fn file_id(path: &Path) -> Option<FileId> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        GetVolumeInformationByHandleW,
     };
     let f = std::fs::File::open(path).ok()?;
     let h = f.as_raw_handle() as _;
     // SAFETY: `h` is a live handle for the duration of the calls; the out structs are plain data.
-    unsafe {
+    let id = unsafe {
+        let mut fs = [0u16; 64];
+        let n = std::ptr::null_mut();
+        if GetVolumeInformationByHandleW(h, n, 0, n as _, n as _, n as _, fs.as_mut_ptr(), fs.len() as u32) == 0 {
+            return None;
+        }
+        let len = fs.iter().position(|&c| c == 0).unwrap_or(fs.len());
+        if !stable_ids(&String::from_utf16_lossy(&fs[..len])) {
+            return None;
+        }
         let mut info: FILE_ID_INFO = std::mem::zeroed();
-        if GetFileInformationByHandleEx(h, FileIdInfo, &mut info as *mut _ as _, std::mem::size_of::<FILE_ID_INFO>() as u32) != 0 {
-            return Some(FileId { volume: info.VolumeSerialNumber, id: u128::from_le_bytes(info.FileId.Identifier) });
-        }
         let mut bh: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
-        if GetFileInformationByHandle(h, &mut bh) != 0 {
+        if GetFileInformationByHandleEx(h, FileIdInfo, &mut info as *mut _ as _, std::mem::size_of::<FILE_ID_INFO>() as u32) != 0 {
+            FileId { volume: info.VolumeSerialNumber, id: u128::from_le_bytes(info.FileId.Identifier) }
+        } else if GetFileInformationByHandle(h, &mut bh) != 0 {
             let idx = ((bh.nFileIndexHigh as u64) << 32) | bh.nFileIndexLow as u64;
-            return Some(FileId { volume: bh.dwVolumeSerialNumber as u64, id: idx as u128 });
+            FileId { volume: bh.dwVolumeSerialNumber as u64, id: idx as u128 }
+        } else {
+            return None;
         }
-    }
-    None
+    };
+    usable(id)
+}
+
+/// Filesystems whose file ids survive renames and are not reused while the file exists.
+pub fn stable_ids(fs_name: &str) -> bool {
+    fs_name.eq_ignore_ascii_case("NTFS") || fs_name.eq_ignore_ascii_case("ReFS")
+}
+
+/// A zero id is "no id" (some drivers return it for every file).
+pub fn usable(f: FileId) -> Option<FileId> {
+    (f.id != 0).then_some(f)
 }
 
 /// The first (permanent) element of the last trailer's /ID, raw string bytes. Works for classic
