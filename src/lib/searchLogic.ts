@@ -264,8 +264,8 @@ export function staleLine(s: { added: number; changed: number; removed: number; 
 }
 
 /** What a finished build says: "1 804 files, 12 new, 3 changed; 2 could not be read". */
-export function buildLine(b: { files: number; added: number; changed: number; removed: number; damaged: number; password: number; cancelled: boolean }): string {
-  if (b.cancelled) return "Stopped. The previous index is still in use.";
+export function buildLine(b: { files: number; added: number; changed: number; removed: number; damaged: number; password: number; cancelled: boolean }, hadIndex = true): string {
+  if (b.cancelled) return hadIndex ? "Stopped. The previous index is still in use." : "Stopped. Build it again to search this catalog.";
   const head = [`${plural(b.files, "file", "files")}`];
   if (b.added) head.push(`${b.added} new`);
   if (b.changed) head.push(`${b.changed} changed`);

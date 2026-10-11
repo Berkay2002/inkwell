@@ -292,6 +292,7 @@ export const useSearch = create<Rail>((set, get) => ({
 
   buildCatalog: async (id, full = false) => {
     if (get().build?.running) return;
+    const hadIndex = (get().catalogs.find((c) => c.id === id)?.built ?? 0) > 0;
     set({ build: { id, job: null, done: 0, total: 0, running: true, line: "" } });
     const apply = (p: Partial<CatalogBuild>) => set((s) => (s.build?.id === id ? { build: { ...s.build, ...p } } : s));
     try {
@@ -300,7 +301,7 @@ export const useSearch = create<Rail>((set, get) => ({
         else if (e.kind === "progress") apply({ done: e.done, total: e.total });
         else set((s) => ({ catalogs: s.catalogs.map((c) => (c.id === id ? e.catalog : c)) }));
       });
-      apply({ running: false, line: buildLine(sum) });
+      apply({ running: false, line: buildLine(sum, hadIndex) });
     } catch (e) {
       apply({ running: false, line: String(e) });
     }

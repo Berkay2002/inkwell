@@ -627,11 +627,11 @@ fn a_document_lists_at_most_the_document_cap_and_says_so() {
 #[test]
 fn an_in_document_search_finishes_while_a_long_folder_search_runs() {
     let d = dir("starve");
-    // 40 files of 150 pages: seconds of work for the folder search.
+    // 150 files of 150 pages: seconds of work for the folder search, even on a fast machine.
     let pages: Vec<Vec<&str>> = (0..150).map(|i| if i % 50 == 0 { vec!["the needle is here"] } else { vec!["nothing at all on this page"] }).collect();
     let bytes = plain(&pages);
     let mut files = Vec::new();
-    for i in 0..40 {
+    for i in 0..150 {
         files.push(write(&d, &format!("f{i:02}.pdf"), bytes.clone()));
     }
     let open = write(&d, "open.pdf", plain(&[vec!["a needle in the open document"], vec!["another needle"]]));

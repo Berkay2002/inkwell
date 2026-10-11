@@ -126,10 +126,10 @@ pub async fn catalog_build(window: Window, jobs: State<'_, Arc<Jobs>>, id: Strin
         let r = super::build(&dir, full, &cancel, &move |done, total| {
             let _ = ev.send(BuildEvent::Progress { job, done, total });
         });
-        if let Ok(summary) = &r {
-            if let Ok(catalog) = super::load_meta(&dir) {
-                let _ = on_event.send(BuildEvent::Done { job, summary: summary.clone(), catalog });
-            }
+        if let Ok(summary) = &r
+            && let Ok(catalog) = super::load_meta(&dir)
+        {
+            let _ = on_event.send(BuildEvent::Done { job, summary: summary.clone(), catalog });
         }
         r
     })
@@ -141,10 +141,10 @@ pub async fn catalog_build(window: Window, jobs: State<'_, Arc<Jobs>>, id: Strin
 
 #[tauri::command]
 pub fn catalog_cancel(window: Window, jobs: State<'_, Arc<Jobs>>, job: u64) {
-    if let Some((w, c)) = jobs.live.lock().unwrap().get(&job) {
-        if w == window.label() {
-            c.store(true, Ordering::SeqCst);
-        }
+    if let Some((w, c)) = jobs.live.lock().unwrap().get(&job)
+        && w == window.label()
+    {
+        c.store(true, Ordering::SeqCst);
     }
 }
 

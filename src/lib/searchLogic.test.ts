@@ -178,5 +178,6 @@ describe("catalog lines", () => {
     const b = { files: 30, added: 0, changed: 2, removed: 0, damaged: 1, password: 1, cancelled: false };
     expect(buildLine(b)).toBe("30 files, 2 changed; 2 could not be read");
     expect(buildLine({ ...b, cancelled: true })).toMatch(/previous index/);
+    expect(buildLine({ ...b, cancelled: true }, false)).toMatch(/Build it again/);
   });
 });
