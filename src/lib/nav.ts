@@ -542,16 +542,16 @@ export async function followLink(doc: number, t: api.LinkTarget): Promise<void> 
 
 /** A link to another PDF: the file it names, in full, is shown before it opens in a tab of its own. */
 export async function confirmOpenFile(doc: number, name: string, page: number | null): Promise<boolean> {
-  let ref: api.FileRef;
+  let shown: string;
   try {
-    ref = await api.linkFileRef(doc, name);
+    shown = await api.linkFilePath(doc, name);
   } catch (e) {
     await message(String(e), { title: "Link", kind: "info" });
     return false;
   }
   const r = await message(`This link opens the file:
 
-${ref.path}
+${shown}
 
 Open it in a new tab?`, {
     title: "Open linked file",
@@ -559,6 +559,14 @@ Open it in a new tab?`, {
     buttons: { ok: "Open", cancel: "Cancel" },
   });
   if (r !== "Ok" && r !== "Open") return false;
+  // The token that lets the file open is issued only now, after the person said yes.
+  let ref: api.FileRef;
+  try {
+    ref = await api.linkFileRef(doc, name);
+  } catch (e) {
+    await message(String(e), { title: "Link", kind: "info" });
+    return false;
+  }
   await useStore.getState().openPath(ref.path, ref.token);
   const now = useStore.getState().active;
   if (page != null && now != null) useStore.getState().goTo(now, page);

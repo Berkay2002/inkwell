@@ -436,7 +436,33 @@ fn the_name_a_file_link_got_is_returned_and_one_above_the_folder_uses_dot_dot() 
 fn a_link_may_not_launch_a_program_or_a_script() {
     let (eng, id, _, d) = fixture_doc("launch", 1);
     let target = |name: &str| NewTarget::File { file: d.join(name).to_string_lossy().into_owned(), page: None };
-    for bad in ["setup.exe", "run.BAT", "x.ps1", "a.vbs", "trick.exe.", "noextension", "page.hta", "tool.lnk"] {
+    for bad in [
+        "setup.exe",
+        "run.BAT",
+        "x.ps1",
+        "a.vbs",
+        "trick.exe.",
+        "noextension",
+        "page.hta",
+        "tool.lnk",
+        "a.appref-ms",
+        "a.settingcontent-ms",
+        "a.application",
+        "a.website",
+        "a.library-ms",
+        "a.search-ms",
+        "a.chm",
+        "a.mht",
+        "a.xll",
+        "a.wsc",
+        "a.sct",
+        "a.iso",
+        "a.vhd",
+        "macros.docm",
+        "macros.xlsm",
+        "old.doc",
+        "report.pdf.exe",
+    ] {
         let r = apply(
             &eng,
             id,
@@ -672,4 +698,33 @@ fn a_deleted_link_is_not_left_in_the_saved_bytes() {
     go(&eng, id, LinkOp::Delete { page: 0, ids: vec![e.id.unwrap()] });
     eng.save(id, None).unwrap();
     assert!(!has(&path), "the deleted link's address is not kept in the file");
+}
+
+#[test]
+fn deleting_a_link_of_a_signed_document_keeps_the_signed_bytes() {
+    // A signature field with a value (object 5); /P 3 certification allows deleting links.
+    let cat = "/AcroForm << /SigFlags 3 /Fields [5 0 R] >> /Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 3 >> >> ] >> >>";
+    let sig = "<< /FT /Sig /T (Signature1) /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> >> >>".to_string();
+    let (eng, id, path, _d) = opened("signed-delete", &page_with_annots("", cat, &[link_annot("/A << /S /URI /URI (https://secret.example/) >>")], &[sig]));
+    assert!(eng.read_custom(id, |d| Ok(crate::outline::signed(d))).unwrap(), "the signature is seen");
+    let original = std::fs::read(&path).unwrap();
+    let link = list(&eng, id, 0).unwrap().links[0].id;
+    go(&eng, id, LinkOp::Delete { page: 0, ids: vec![link] });
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the file was rewritten: the signature would no longer verify");
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    assert!(list(&eng2, id2, 0).unwrap().links.is_empty(), "the link is gone when it is read again");
+}
+
+#[test]
+fn deleting_a_link_of_an_unsigned_document_still_leaves_its_address_out_of_the_file() {
+    let (eng, id, path, _d) = opened("unsigned-delete", &page_with_annots("", "", &[link_annot("/A << /S /URI /URI (https://secret.example/) >>")], &[]));
+    assert!(!eng.read_custom(id, |d| Ok(crate::outline::signed(d))).unwrap());
+    let link = list(&eng, id, 0).unwrap().links[0].id;
+    go(&eng, id, LinkOp::Delete { page: 0, ids: vec![link] });
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(!String::from_utf8_lossy(&saved).contains("secret.example"), "a deleted link's address does not stay in the file");
 }

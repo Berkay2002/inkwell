@@ -441,9 +441,14 @@ endstream", content.len()),
 
 /// A one-page file with the outline items `items` (objects 7..; `/Outlines` is 4, the page 5) and a heading on the page.
 fn outline_pdf(root: &str, items: &[String]) -> Vec<u8> {
+    outline_pdf_with("", root, items)
+}
+
+/// `outline_pdf` with `catalog` more keys in the document catalog (built whole, so the xref stays exact).
+fn outline_pdf_with(catalog: &str, root: &str, items: &[String]) -> Vec<u8> {
     let content = "BT /F1 24 Tf 72 700 Td (Chapter One) Tj ET BT /F1 12 Tf 72 600 Td (Plain body text of the document, long enough.) Tj ET BT /F1 12 Tf 72 560 Td (More plain body text in the same size here.) Tj ET";
     let mut objs = vec![
-        "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>".to_string(),
+        format!("<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R {catalog} >>"),
         "<< /Type /Pages /Kids [5 0 R] /Count 1 >>".to_string(),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
         root.to_string(),
@@ -468,8 +473,31 @@ fn count_key(eng: &Engine, id: DocId, num: i32) -> Option<i64> {
     eng.read_custom(id, |d| Ok(number(&d.new_indirect(num, 0)?.get_dict("Count")?).map(|c| c as i64))).unwrap()
 }
 
+/// Every kind of change, tried on `real`: each returns (none hangs), refuses, and none changes the document.
+fn assert_every_edit_is_refused(eng: &Engine, id: DocId, real: i32, expect: &str) {
+    let before = eng.edit_state(id).unwrap();
+    let ops = [
+        BookmarkOp::Add { parent: None, index: None, title: "C".into(), page: 0, at: None },
+        BookmarkOp::Add { parent: Some(real), index: None, title: "C".into(), page: 0, at: None },
+        BookmarkOp::Delete { ids: vec![real] },
+        BookmarkOp::Move { id: real, parent: None, index: 0 },
+        BookmarkOp::FromHeadings { replace: true },
+        BookmarkOp::FromHeadings { replace: false },
+        BookmarkOp::Rename { id: real, title: "R".into() },
+        BookmarkOp::SetOpen { id: real, open: false },
+    ];
+    for op in ops {
+        match apply(eng, id, rev(eng, id), &op, EditSource::User) {
+            Err(EngineError::Invalid(m)) => assert!(m.contains(expect), "{op:?}: {m}"),
+            other => panic!("{op:?}: {other:?}"),
+        }
+    }
+    let after = eng.edit_state(id).unwrap();
+    assert_eq!((after.rev, after.undo), (before.rev, before.undo), "nothing was changed");
+}
+
 #[test]
-fn outline_items_shared_by_two_parents_are_met_once_and_edits_return() {
+fn outline_items_shared_by_two_parents_are_met_once_and_left_as_they_are() {
     let d = dir("outline", "shared");
     // A (7) and B (8) both have X (9) as their first child; X has Y (10) after it.
     let (eng, id, _) = open_bytes(
@@ -487,15 +515,12 @@ fn outline_items_shared_by_two_parents_are_met_once_and_edits_return() {
     );
     let b = list(&eng, id).unwrap();
     assert_eq!(titles(&b.items), ["A", "B"]);
-    assert_eq!(titles(&b.items[0].children), ["X", "Y"]);
+    assert_eq!(titles(&b.items[0].children), ["X", "Y"], "the first parent to reach them has them");
     assert!(b.items[1].children.is_empty(), "an item already met is not listed again");
     assert_eq!(b.count, 4);
-    go(&eng, id, BookmarkOp::Add { parent: None, index: None, title: "C".into(), page: 0, at: None });
-    go(&eng, id, BookmarkOp::Delete { ids: vec![8] });
-    go(&eng, id, BookmarkOp::Move { id: 9, parent: None, index: 0 });
-    go(&eng, id, BookmarkOp::FromHeadings { replace: true });
-    let after = list(&eng, id).unwrap();
-    assert_eq!(titles(&after.items), ["Chapter One"]);
+    assert!(b.truncated, "the list says something was left out");
+    // Relinking either parent would cut the other's list: nothing is changed, and nothing hangs.
+    assert_every_edit_is_refused(&eng, id, 7, "more than one place");
 }
 
 #[test]
@@ -516,15 +541,11 @@ fn a_long_chain_of_items_that_all_point_at_each_other_does_not_hang() {
     let (eng, id, _) = open_bytes(&d, "bomb.pdf", &outline_pdf("<< /Type /Outlines /First 7 0 R /Last 7 0 R >>", &items));
     let b = list(&eng, id).unwrap();
     assert_eq!(b.count, n as u32, "every item is listed once");
-    go(&eng, id, BookmarkOp::Add { parent: Some(7), index: None, title: "New".into(), page: 0, at: None });
-    go(&eng, id, BookmarkOp::Move { id: 8, parent: Some(20), index: 0 });
-    go(&eng, id, BookmarkOp::Delete { ids: vec![9, 30] });
-    go(&eng, id, BookmarkOp::FromHeadings { replace: false });
-    assert!(list(&eng, id).unwrap().count > 0);
+    assert_every_edit_is_refused(&eng, id, 9, "more than one place");
 }
 
 #[test]
-fn a_cyclic_outline_is_listed_and_edited() {
+fn a_cyclic_outline_is_listed_and_left_as_it_is() {
     let d = dir("outline", "cycle");
     // 7 is its own first child and its own next item; 8 is under 7 and points back at it.
     let (eng, id, _) = open_bytes(
@@ -538,11 +559,28 @@ fn a_cyclic_outline_is_listed_and_edited() {
     let b = list(&eng, id).unwrap();
     assert_eq!(titles(&b.items), ["Loop"]);
     assert!(b.items[0].children.is_empty());
-    go(&eng, id, BookmarkOp::Rename { id: 7, title: "Looped".into() });
-    go(&eng, id, BookmarkOp::Add { parent: Some(7), index: None, title: "Inside".into(), page: 0, at: None });
-    let e = go(&eng, id, BookmarkOp::Delete { ids: vec![7] });
-    assert_eq!(e.count, 2, "the item and the one made under it");
-    assert!(list(&eng, id).unwrap().items.is_empty());
+    assert_every_edit_is_refused(&eng, id, 7, "more than one place");
+}
+
+#[test]
+fn a_chain_that_loops_back_into_itself_is_mended_by_an_edit() {
+    let d = dir("outline", "loop-back");
+    // A (7) -> B (8) -> A again: the same chain comes back to its start, so nothing is lost by cutting it.
+    let (eng, id, _) = open_bytes(
+        &d,
+        "loopback.pdf",
+        &outline_pdf(
+            "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 2 >>",
+            &[item_obj("A", "/Parent 4 0 R /Next 8 0 R"), item_obj("B", "/Parent 4 0 R /Prev 7 0 R /Next 7 0 R")],
+        ),
+    );
+    assert_eq!(titles(&list(&eng, id).unwrap().items), ["A", "B"]);
+    go(&eng, id, BookmarkOp::Rename { id: 7, title: "Alpha".into() });
+    let c = go(&eng, id, BookmarkOp::Add { parent: None, index: None, title: "C".into(), page: 0, at: None }).id.unwrap();
+    assert_eq!(titles(&list(&eng, id).unwrap().items), ["Alpha", "B", "C"]);
+    // The cycle is gone: B goes on to the new item and the last one has no /Next.
+    assert_eq!(link_of(&eng, id, 8, "Next"), Some(c));
+    assert_eq!(link_of(&eng, id, c, "Next"), None);
 }
 
 #[test]
@@ -666,13 +704,13 @@ fn a_change_that_changes_nothing_makes_no_undo_step() {
 #[test]
 fn a_certified_document_keeps_its_bookmarks() {
     let d = dir("outline", "certified");
-    let pdf = outline_pdf("<< /Type /Outlines /First 7 0 R /Last 7 0 R /Count 1 >>", &[item_obj("A", "/Parent 4 0 R")]);
-    // The catalog gets a `/Perms /DocMDP` entry whose `/P` is 1; the xref offsets move and MuPDF rebuilds them.
-    let text = String::from_utf8_lossy(&pdf).replace(
-        "/Outlines 4 0 R >>",
-        "/Outlines 4 0 R /Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 1 >> >> ] >> >> >>",
+    // The catalog has a `/Perms /DocMDP` entry whose `/P` is 1.
+    let pdf = outline_pdf_with(
+        "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 1 >> >> ] >> >>",
+        "<< /Type /Outlines /First 7 0 R /Last 7 0 R /Count 1 >>",
+        &[item_obj("A", "/Parent 4 0 R")],
     );
-    let (eng, id, _) = open_bytes(&d, "cert.pdf", text.as_bytes());
+    let (eng, id, _) = open_bytes(&d, "cert.pdf", &pdf);
     let r = apply(&eng, id, rev(&eng, id), &BookmarkOp::Rename { id: 7, title: "B".into() }, EditSource::User);
     match r {
         Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
@@ -713,4 +751,57 @@ fn bookmarks_follow_their_pages_through_insert_move_and_delete() {
     assert!(matches!(&b.items[0].dest, Dest::Broken { .. }), "{:?}", b.items[0].dest);
     // The rest still edits and nests.
     go(&eng, id, BookmarkOp::Rename { id: b.items[0].id, title: "Gone".into() });
+}
+
+/// An outline in a file that carries a signature field with a value (its bytes are what the signature covers).
+fn signed_outline() -> Vec<u8> {
+    outline_pdf_with(
+        "/AcroForm << /SigFlags 3 /Fields [9 0 R] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 2 >>",
+        &[
+            item_obj("A", "/Parent 4 0 R /Next 8 0 R"),
+            item_obj("B", "/Parent 4 0 R /Prev 7 0 R"),
+            "<< /FT /Sig /T (Signature1) /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> >> >>"
+                .to_string(),
+        ],
+    )
+}
+
+#[test]
+fn deleting_bookmarks_of_a_signed_document_keeps_the_signed_bytes() {
+    for replace_headings in [false, true] {
+        let d = dir("outline", if replace_headings { "signed-headings" } else { "signed-delete" });
+        let (eng, id, path) = open_bytes(&d, "signed.pdf", &signed_outline());
+        assert!(eng.read_custom(id, |doc| Ok(signed(doc))).unwrap(), "the signature is seen");
+        let original = std::fs::read(&path).unwrap();
+        if replace_headings {
+            go(&eng, id, BookmarkOp::FromHeadings { replace: true });
+        } else {
+            go(&eng, id, BookmarkOp::Delete { ids: vec![8] });
+        }
+        eng.save(id, None).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        // An incremental update: every byte the signature covers is where it was.
+        assert!(saved.len() > original.len() && saved.starts_with(&original), "replace_headings={replace_headings}: the file was rewritten");
+        // And the change is there when it is read again.
+        let eng2 = Engine::new(2, 64 << 20);
+        let id2 = eng2.open(&path).unwrap().doc;
+        let t = titles(&list(&eng2, id2).unwrap().items);
+        assert_eq!(t, if replace_headings { vec!["Chapter One".to_string()] } else { vec!["A".to_string()] });
+    }
+}
+
+#[test]
+fn an_unsigned_document_is_still_rewritten_without_what_was_deleted() {
+    let d = dir("outline", "unsigned-delete");
+    let pdf = outline_pdf(
+        "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 2 >>",
+        &[item_obj("A", "/Parent 4 0 R /Next 8 0 R"), item_obj("Secret title", "/Parent 4 0 R /Prev 7 0 R")],
+    );
+    let (eng, id, path) = open_bytes(&d, "plain.pdf", &pdf);
+    assert!(!eng.read_custom(id, |doc| Ok(signed(doc))).unwrap());
+    go(&eng, id, BookmarkOp::Delete { ids: vec![8] });
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(!String::from_utf8_lossy(&saved).contains("Secret title"), "a deleted bookmark's title does not stay in the file");
 }

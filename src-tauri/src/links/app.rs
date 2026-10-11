@@ -63,8 +63,16 @@ pub async fn link_pick_file(window: Window) -> Result<Option<FileRef>> {
     .await
 }
 
+/// The path of the PDF a file link names, for the confirmation to show in full. No token is issued: the
+/// file is only named here. A name that is not a PDF found from the document is refused with the reason.
+#[tauri::command]
+pub fn link_file_path(eng: Eng<'_>, doc: DocId, name: String) -> Result<String> {
+    let path = eng.doc_entry(doc)?.path();
+    Ok(super::resolve_file_link(&path, &name)?.to_string_lossy().into_owned())
+}
+
 /// The PDF a file link names, as an open token, for the tab to open it. Call it only after the person
-/// confirmed; a name that is not a PDF next to the document is refused with the reason.
+/// confirmed what `link_file_path` showed: the token is what lets the file be opened.
 #[tauri::command]
 pub fn link_file_ref(window: Window, eng: Eng<'_>, doc: DocId, name: String) -> Result<FileRef> {
     let path = eng.doc_entry(doc)?.path();

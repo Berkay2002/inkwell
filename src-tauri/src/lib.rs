@@ -993,6 +993,7 @@ pub fn run() {
             links::app::link_check_url,
             links::app::link_pick_file,
             links::app::link_open_url,
+            links::app::link_file_path,
             links::app::link_file_ref,
             textedit::app::text_fonts,
             imageedit::app::image_blocks,

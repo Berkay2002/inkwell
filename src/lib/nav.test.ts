@@ -21,6 +21,7 @@ vi.mock("./api", () => ({
   linksUrls: vi.fn(),
   linkCheckUrl: vi.fn(),
   linkOpenUrl: vi.fn(),
+  linkFilePath: vi.fn(),
   linkFileRef: vi.fn(),
 }));
 
@@ -362,11 +363,13 @@ describe("following a link in Read mode", () => {
   });
 
   it("shows the whole path of a file link and opens it only on Open", async () => {
+    vi.mocked(api.linkFilePath).mockResolvedValue("C:\docs\other.pdf");
     vi.mocked(api.linkFileRef).mockResolvedValue({ token: "t1", path: "C:\docs\other.pdf" });
     vi.mocked(message).mockResolvedValue("Cancel");
     await followLink(1, { kind: "file", name: "other.pdf", page: 3 });
     expect(String(vi.mocked(message).mock.calls[0][0])).toContain("C:\docs\other.pdf");
     expect(openPath).not.toHaveBeenCalled();
+    expect(api.linkFileRef, "no token before the person said yes").not.toHaveBeenCalled();
     vi.mocked(message).mockResolvedValue("Ok");
     await followLink(1, { kind: "file", name: "other.pdf", page: 3 });
     expect(openPath).toHaveBeenCalledWith("C:\docs\other.pdf", "t1");
@@ -374,7 +377,7 @@ describe("following a link in Read mode", () => {
   });
 
   it("reports a file link that is refused and opens nothing", async () => {
-    vi.mocked(api.linkFileRef).mockRejectedValue("Inkwell opens only PDF files from a link");
+    vi.mocked(api.linkFilePath).mockRejectedValue("Inkwell opens only PDF files from a link");
     vi.mocked(message).mockResolvedValue("Ok");
     await followLink(1, { kind: "file", name: "run.exe", page: null });
     expect(openPath).not.toHaveBeenCalled();

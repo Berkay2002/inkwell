@@ -28,6 +28,8 @@ change.
 | `links_audit` | `doc` | `{ total, external, broken, rows (first 200 broken: page, id, what) }`: every page's links, nothing changed |
 | `link_check_url` | `url` | the address as it would be linked, or an error saying why not |
 | `link_pick_file` | none | an open token (`FileRef`) for any file |
+| `link_file_path` | `doc, name` | the path a file link resolves to, for the confirm to show: no token is issued |
+| `link_file_ref` | `doc, name` | the same file as an open token: called only after the person said Open |
 | `link_open_url` | `url` | opens the address (only after the UI's confirm; the gate runs again) |
 
 - Ids are the PDF object numbers of the outline item or link annotation: stable across undo and redo. A `rev` older
@@ -44,10 +46,20 @@ change.
   PDFDocEncoding); destination `/Dest [page …]` or `/A` (GoTo, URI, other kept as "other"); `/C` clamped to 0..1,
   `/F` bit 1 italic, bit 2 bold; open when `/Count` is positive (Acrobat does the same). At most 50 000 items and
   depth 48 are read; more are left as they are (`truncated`), and such an outline is not edited.
-- The outline is walked once from the root, first in first out, each item met once (`outline::Shape`): a link to an
-  item already met (a shared chain or a cycle) or to a deleted object ends that chain. Parent and children come from
-  that walk and never from an item's own `/Parent`, so a wrong `/Parent` can't misplace a move or delete, and the
-  work is bounded by the items, not by how the file links them. An item not found by the walk is `Stale`.
+- **Signed documents stay incremental.** `outline::signed` is true for a `/DocMDP` or `/UR3` permission, an
+  `/AcroForm` with `/SigFlags` bit 1, or a field `/FT /Sig` with a `/V`. Deleting bookmarks (Delete, From headings
+  with Replace) and deleting links normally drop their objects so the next Save is a full rewrite without them
+  (a deleted title or address does not stay in the file); for a signed document that would invalidate every
+  signature, so the step keeps the objects and Save appends an incremental update that leaves the signed bytes
+  where they are. The deleted item is gone for readers, its bytes are not.
+- The outline is walked once from the root, first in first out, each item met once (`outline::Shape`): a link to a
+  deleted object ends that chain, and so does a link to an item already met. When that item was met by the same
+  chain (a loop back into itself) nothing is lost and an edit mends it; when another chain has it (two parents
+  sharing items, a cycle between chains) the outline is `tangled`: it is listed with `truncated` set and no edit
+  is made ("this outline reaches some bookmarks from more than one place"), because relinking one parent would cut
+  the items of the other. Parent and children come from that walk and never from an item's own `/Parent`, so a
+  wrong `/Parent` can't misplace a move or delete, and the work is bounded by the items, not by how the file
+  links them. An item not found by the walk is `Stale`.
 - A certified document (a `/DocMDP` signature) is not changed: bookmarks and links refuse with a message, since any
   change would void the certification. An op that changes nothing (same name, same place) makes no undo step.
 - Write: items are edited in place and relinked (`/First /Last /Prev /Next /Parent`), `/Count` of every ancestor is
@@ -85,20 +97,27 @@ change.
   document's folder, with `/` between the parts and `../` to go up: the paths are compared without regard to case
   and `\\?\` is dropped. A file on another drive or share is refused with that reason: no path of this machine is
   written into a document. The name stored comes back in `LinkEdited.name` and the rail says "This link looks for
-  <name> relative to the document". `/F` is a byte string, `/UF` a UTF-16 text string. Launch links refuse
-  executables and scripts (`.exe`, `.bat`, `.ps1`, `.js`, `.lnk`, … and files without an extension).
+  <name> relative to the document". `/F` is a byte string, `/UF` a UTF-16 text string. A link to a PDF is a GoToR;
+  any other file is a Launch, allowed only for documents (`OPENABLE`: pdf, txt, text, md, csv, tsv, log, png, jpg,
+  jpeg, gif, bmp, tif, tiff, webp, docx, xlsx, pptx, odt, ods, odp). Everything else is refused, not listed as
+  dangerous: programs, scripts, shortcuts, `.appref-ms`, `.chm`, disk images, Office files that can hold macros,
+  and a file without an extension. The check ignores trailing dots and spaces and splits on `/` and `\`.
 - **Link edits** keep a link's other keys: an existing Launch, GoToR, JavaScript or named action survives a change
   of rectangle or border. Deleting a link also takes it out of the structure tree (`/StructParent`, `/K` object
-  references), and the deletion is an `apply_removing` step.
+  references), and the deletion is an `apply_removing` step (an ordinary `apply_custom` one in a signed document,
+  see above).
 - **Opening** an address: from the rail's "Open address…" or by clicking a link in Read mode, always after a confirm
   dialog showing the address, and through the gate again. Nothing opens on its own.
 - **Read mode** (`ReadLinks.tsx`, hidden while Edit is open): each link of the pages near the view is a hit area
   over its rectangle. Hovering shows where it goes (page number, address, file name). A page link jumps to its
   target at once; a web, mail or file link asks first, showing the whole address or path; an action Inkwell does
   not follow ("other") and a broken link do nothing (the hover says why). The links are also reachable by Tab.
-- **File links** (`link_file_ref`): the name is resolved against the folder of the document (`..` goes up from it),
-  may not be absolute or hold `:`, and must be an existing `.pdf`; anything else is refused with the reason. The
-  confirm shows the resolved path, and Open opens it in a new tab (the page of a GoToR is jumped to afterwards).
+- **File links** (`link_file_path`, then `link_file_ref`): the name is resolved against the folder of the document
+  (`..` goes up from it), may not be absolute or hold `:`, and must be an existing `.pdf`; anything else is
+  refused with the reason (a Launch link included: Read mode never runs anything). The confirm shows the path
+  `link_file_path` resolved, with no token issued; only when the person answers Open is `link_file_ref` called,
+  which issues the open token, and the file opens in a new tab (the page of a GoToR is jumped to afterwards).
+  Cancel leaves no token behind.
 - **Reading** loads the `/Dests` name tree once per read and takes an annotation's object number and generation from
   the walk of `/Annots`; "from web addresses" applies the same 2 pt minimum the link gets, so the preview count
   is the number made.
@@ -141,3 +160,11 @@ change.
 CDP pass on a copy of `docs/study/samples/bookmarks-links-source.pdf`: `scripts/bookmarks-shots.mjs` (32 checks: add, rename,
 drag reorder and nest, undo and redo, set destination, style, collapse, sidebar menu, draw a link, gate refusal, open
 confirm, audit, save, reopen); screens, light and dark, in `docs/screens/bookmarks/`.
+
+Second pass, for the review fixes: `scripts/links-review-shots.mjs`. The app is started with `bm-copy.pdf`, a
+`hostile.pdf` (a GoToR to `C:/Windows/x.pdf` and a Launch of `run.bat`), a PDF in a sibling folder, a PDF on another
+drive and `run.bat`; the file picker is answered with their tokens at the page's fetch. It checks Read-mode links
+(hit areas, hover titles, the web address asked first, the page jump), both hostile links refused with no token,
+bookmark add, move and delete (key, undo, redo; the deleted title is not in the saved file), a file link one
+folder up made as `../other/sibling.pdf`, a PDF on another drive and a program refused, and a file link that asks
+first and issues its token only after Open.

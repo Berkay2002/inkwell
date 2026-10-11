@@ -331,10 +331,13 @@ struct Shape {
     kids: HashMap<Option<i32>, Vec<i32>>,
     /// Items were left out: more than [`MAX_ITEMS`], or deeper than [`MAX_DEPTH`].
     truncated: bool,
+    /// A chain ran into an item that another chain had already taken (a shared item): the file reaches
+    /// that item from two places, and relinking either parent would cut the other's list.
+    tangled: bool,
 }
 
 fn shape(root: &PdfObject) -> Result<Shape> {
-    let mut s = Shape { refs: HashMap::new(), parent: HashMap::new(), kids: HashMap::new(), truncated: false };
+    let mut s = Shape { refs: HashMap::new(), parent: HashMap::new(), kids: HashMap::new(), truncated: false, tangled: false };
     let mut seen: HashSet<i32> = HashSet::new();
     if root.is_indirect()? {
         seen.insert(root.as_indirect()?);
@@ -343,6 +346,7 @@ fn shape(root: &PdfObject) -> Result<Shape> {
     let mut todo: VecDeque<(Option<i32>, PdfObject, usize)> = VecDeque::from([(None, root.clone(), 0)]);
     while let Some((key, obj, depth)) = todo.pop_front() {
         let mut list = Vec::new();
+        let mut chain: HashSet<i32> = HashSet::new();
         let mut cur = obj.get_dict("First")?;
         while let Some(item) = cur {
             // A link to nothing, or to something that is not an item (a deleted object), ends the chain.
@@ -350,13 +354,20 @@ fn shape(root: &PdfObject) -> Result<Shape> {
                 break;
             }
             let id = item.as_indirect()?;
-            if !seen.insert(id) {
+            if seen.contains(&id) {
+                // An item met before ends the chain. One met in this very chain (a cycle back) loses
+                // nothing, and relinking mends it; one another chain took is shared.
+                if !chain.contains(&id) {
+                    s.tangled = true;
+                }
                 break;
             }
             if depth >= MAX_DEPTH || s.refs.len() >= MAX_ITEMS {
                 s.truncated = true;
                 break;
             }
+            seen.insert(id);
+            chain.insert(id);
             cur = item.get_dict("Next")?;
             s.refs.insert(id, item.clone());
             s.parent.insert(id, key);
@@ -394,10 +405,15 @@ impl Shape {
         false
     }
 
-    /// An outline that was cut short is not changed: the part left out would be given wrong counts.
+    /// An outline that was cut short, or that shares items between parents, is not changed: the part left out would be given wrong counts.
     fn editable(&self) -> Result<()> {
         if self.truncated {
             return Err(EngineError::Invalid("this outline is too large, or nested too deep, to be changed here".into()));
+        }
+        if self.tangled {
+            return Err(EngineError::Invalid(
+                "this outline reaches some bookmarks from more than one place, so Inkwell leaves it as it is".into(),
+            ));
         }
         Ok(())
     }
@@ -459,7 +475,7 @@ pub fn read(doc: &PdfDocument, rev: u32) -> Result<Bookmarks> {
     let sh = shape(&root)?;
     let mut r = Reader { doc, sh: &sh, spaces: HashMap::new(), names: Names::default() };
     let items = r.level(None)?;
-    Ok(Bookmarks { rev, count: count_items(&items), items, truncated: sh.truncated })
+    Ok(Bookmarks { rev, count: count_items(&items), items, truncated: sh.truncated || sh.tangled })
 }
 
 pub fn list(eng: &Engine, doc: DocId) -> Result<Bookmarks> {
@@ -484,6 +500,60 @@ pub(crate) fn certified(doc: &PdfDocument) -> Result<Option<i32>> {
         }
     }
     Ok(Some(p))
+}
+
+/// The document is signed: `/AcroForm /SigFlags` bit 1, a certification (`/Perms`), or a signature
+/// field that has a value. Saving it in full would void the signatures (they cover the bytes of the file
+/// as it was), so changes to it stay incremental: nothing that was written is rewritten.
+pub(crate) fn signed(doc: &PdfDocument) -> bool {
+    signed_inner(doc).unwrap_or(false)
+}
+
+fn signed_inner(doc: &PdfDocument) -> Result<bool> {
+    let cat = doc.catalog()?;
+    if cat.get_dict("Perms")?.is_some_and(|p| p.get_dict("DocMDP").ok().flatten().is_some() || p.get_dict("UR3").ok().flatten().is_some()) {
+        return Ok(true);
+    }
+    let Some(form) = cat.get_dict("AcroForm")? else { return Ok(false) };
+    if number(&form.get_dict("SigFlags")?).is_some_and(|f| f as i32 & 1 != 0) {
+        return Ok(true);
+    }
+    // Any field with `/FT /Sig` and a `/V`, found in the field tree (bounded: each field once).
+    let mut todo: Vec<(PdfObject, bool)> = Vec::new();
+    if let Some(fields) = form.get_dict("Fields")?.filter(|f| f.is_array().unwrap_or(false)) {
+        for i in 0..fields.len()?.min(10_000) as i32 {
+            if let Some(f) = fields.get_array(i)? {
+                todo.push((f, false));
+            }
+        }
+    }
+    let mut seen: HashSet<i32> = HashSet::new();
+    let mut budget = 20_000;
+    while let Some((field, inherited)) = todo.pop() {
+        budget -= 1;
+        if budget < 0 {
+            break;
+        }
+        if field.is_indirect()? && !seen.insert(field.as_indirect()?) {
+            continue;
+        }
+        if !field.resolve().ok().flatten().is_some_and(|d| d.is_dict().unwrap_or(false)) {
+            continue;
+        }
+        let kind = name_of(field.get_dict("FT")?);
+        let is_sig = if kind.is_empty() { inherited } else { kind == "Sig" };
+        if is_sig && field.get_dict("V")?.is_some() {
+            return Ok(true);
+        }
+        if let Some(kids) = field.get_dict("Kids")?.filter(|k| k.is_array().unwrap_or(false)) {
+            for i in 0..kids.len()?.min(10_000) as i32 {
+                if let Some(k) = kids.get_array(i)? {
+                    todo.push((k, is_sig));
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 // ---- writing ----
@@ -852,7 +922,10 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<Option<(Opti
 pub fn apply(eng: &Engine, doc: DocId, rev: u32, op: &BookmarkOp, source: EditSource) -> Result<BookmarkEdited> {
     let entry = eng.doc_entry(doc)?;
     let mut out = (None, 0);
-    let removes = matches!(op, BookmarkOp::Delete { .. } | BookmarkOp::FromHeadings { replace: true });
+    // A removal makes the next Save a full rewrite, which would void a signature: a signed document's
+    // deleted items stay in the file as unused objects, and its save stays incremental.
+    let removes = matches!(op, BookmarkOp::Delete { .. } | BookmarkOp::FromHeadings { replace: true })
+        && !eng.read_custom(doc, |d| Ok(signed(d)))?;
     let state = eng.apply_custom_unless_noop(doc, label(op), source, removes, |d| {
         if entry.generation() != rev {
             return Err(EngineError::Stale);

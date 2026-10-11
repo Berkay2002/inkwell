@@ -417,6 +417,9 @@ export const linkCheckUrl = (url: string) => invoke<string>("link_check_url", { 
 /** Any file, as an open token. */
 export const linkPickFile = () => invoke<FileRef | null>("link_pick_file");
 /** The PDF a file link names (next to the document), as an open token; refused with the reason otherwise. */
+/** Where a file link looks, in full, for the confirmation: no token is issued. */
+export const linkFilePath = (doc: number, name: string) => invoke<string>("link_file_path", { doc, name });
+/** The open token for a file link's PDF: ask only after the person confirmed `linkFilePath`. */
 export const linkFileRef = (doc: number, name: string) => invoke<FileRef>("link_file_ref", { doc, name });
 /** Only after the person confirmed. */
 export const linkOpenUrl = (url: string) => invoke<void>("link_open_url", { url });

@@ -602,10 +602,12 @@ fn byte_string(doc: &PdfDocument, text: &str) -> Result<PdfObject> {
     Ok(doc.new_object_from_str(&hex)?)
 }
 
-/// File types a link may not launch: a program or a script would run from the document.
-const RUNNABLE: &[&str] = &[
-    "exe", "com", "scr", "pif", "bat", "cmd", "ps1", "psm1", "psd1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "msi", "msp", "msc",
-    "lnk", "url", "cpl", "reg", "inf", "scf", "jar", "dll", "sh", "command", "app", "py", "pl", "rb", "appx", "msix", "gadget", "ws",
+/// The kinds of file a link may open: documents the system shows, none of which runs code when it is
+/// opened (not a program, a script, a shortcut, a disk image, or an Office file that can hold macros). Anything
+/// not listed is refused: a list of what is dangerous is always one entry short.
+const OPENABLE: &[&str] = &[
+    "pdf", "txt", "text", "md", "csv", "tsv", "log", "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "docx", "xlsx", "pptx",
+    "odt", "ods", "odp",
 ];
 
 /// The refusal for a file a link must not open, or `None`.
@@ -613,9 +615,9 @@ fn runnable(name: &str) -> Option<EngineError> {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim_end_matches(['.', ' ']);
     let ext = base.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
     match ext {
-        Some(e) if !RUNNABLE.contains(&e.as_str()) => None,
-        Some(_) | None => Some(EngineError::Invalid(format!(
-            "A link can't open {base}: a document is not allowed to run a program or a script, or a file Inkwell can't tell the kind of."
+        Some(e) if OPENABLE.contains(&e.as_str()) => None,
+        _ => Some(EngineError::Invalid(format!(
+            "A link can't open {base}: a link opens only documents (PDF, text, images, Word, Excel, PowerPoint and OpenDocument files without macros), never a program, a script or a file Inkwell can't tell the kind of."
         ))),
     }
 }
@@ -960,7 +962,9 @@ pub fn apply(eng: &Engine, doc: DocId, rev: u32, op: &LinkOp, source: EditSource
     let entry = eng.doc_entry(doc)?;
     let path = eng.edit_state(doc)?.path;
     let mut out = (None, 0, None);
-    let removes = matches!(op, LinkOp::Delete { .. });
+    // A removal makes the next Save a full rewrite, which would void a signature (a /P 3 certified file
+    // allows deleting links): a signed document's save stays incremental.
+    let removes = matches!(op, LinkOp::Delete { .. }) && !eng.read_custom(doc, |d| Ok(crate::outline::signed(d)))?;
     let state = eng.apply_custom_unless_noop(doc, label(op), source, removes, |d| {
         if entry.generation() != rev {
             return Err(EngineError::Stale);
