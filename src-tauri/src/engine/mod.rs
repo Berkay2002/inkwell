@@ -187,6 +187,9 @@ pub struct DocEntry {
     /// The edit lane: the authoritative document and its history, created on the first edit.
     /// Every mutation holds this lock for its whole run, so edits to one file are serial.
     editor: Mutex<Option<edit::Editor>>,
+    /// The form scripts of this document (their runtime lives on a thread of its own, started on first
+    /// use); dropped with the entry when the document closes.
+    scripts: Arc<crate::forms::js::Scripts>,
 }
 
 impl DocEntry {
@@ -281,6 +284,13 @@ impl Engine {
         self.docs.read().get(&id).cloned().ok_or(EngineError::NoDoc)
     }
 
+    /// The form scripts of an open document and the file's name (for `this.documentFileName`).
+    pub fn doc_scripts(&self, id: DocId) -> Result<(Arc<crate::forms::js::Scripts>, String)> {
+        let entry = self.entry(id)?;
+        let name = std::path::Path::new(&entry.path()).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Ok((entry.scripts.clone(), name))
+    }
+
     /// Opens `path`. Returns `NeedsPassword` (with the document kept registered under the id in
     /// the error-adjacent `OpenInfo` flow) via [`Engine::open_pending`].
     pub fn open(&self, path: &str) -> Result<OpenInfo> {
@@ -327,6 +337,7 @@ impl Engine {
             slots: Default::default(),
             next_slot: AtomicUsize::new(0),
             editor: Mutex::new(None),
+            scripts: Arc::new(crate::forms::js::Scripts::new()),
         });
         self.docs.write().insert(id, entry.clone());
         entry

@@ -9,8 +9,9 @@
 //! `AFSimple_Calculate`, and simplified field notation). Acrobat itself writes exactly these
 //! calls from the Format, Validate and Calculate tabs. This module recognises them, runs them
 //! natively (format for display, keystroke check on commit, validation, calculation), and
-//! writes them back when a form is authored. Other scripts are kept untouched and reported as
-//! unsupported; they need the JavaScript engine (M6.4).
+//! writes them back when a form is authored. A script that is exactly one such call takes this fast
+//! path; every other script runs in the JavaScript engine (`js.rs`), whose AF functions call the same code,
+//! or, with scripts off, stays untouched in the file and is not run.
 
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
@@ -273,17 +274,6 @@ impl Parser<'_> {
     }
 }
 
-/// The first call to `name(` in `js` and its arguments.
-fn call(js: &str, name: &str) -> Option<Vec<Arg>> {
-    let at = js.find(&format!("{name}("))?;
-    // Not part of a longer identifier (AFDate_Format vs AFDate_FormatEx).
-    if js[..at].chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_') {
-        return None;
-    }
-    let mut p = Parser { s: js.as_bytes(), i: at + name.len() + 1, depth: 0 };
-    p.list(b')')
-}
-
 /// Acrobat's AFDate_Format(n) / AFTime_Format(n) presets.
 pub const DATE_PRESETS: [&str; 14] = [
     "m/d",
@@ -303,43 +293,63 @@ pub const DATE_PRESETS: [&str; 14] = [
 ];
 pub const TIME_PRESETS: [&str; 4] = ["HH:MM", "h:MM tt", "HH:MM:ss", "h:MM:ss tt"];
 
-pub fn parse_format(js: &str) -> Option<Format> {
-    let a = |args: &[Arg], i: usize| args.get(i).and_then(Arg::num).unwrap_or(0.0).clamp(0.0, 255.0) as u8;
-    if let Some(args) = call(js, "AFNumber_Format") {
-        return Some(Format::Number {
-            decimals: a(&args, 0),
-            sep: a(&args, 1),
-            neg: a(&args, 2),
+/// The format a call to one of the `...Format` functions stands for (`AFNumber_Format(2, 0, 0, 0, "$", true)`).
+fn format_from(name: &str, args: &[Arg]) -> Option<Format> {
+    let a = |i: usize| args.get(i).and_then(Arg::num).unwrap_or(0.0).clamp(0.0, 255.0) as u8;
+    Some(match name {
+        "AFNumber_Format" => Format::Number {
+            decimals: a(0),
+            sep: a(1),
+            neg: a(2),
             currency: args.get(4).and_then(Arg::string).unwrap_or_default(),
             prepend: args.get(5).is_none_or(Arg::truthy),
-        });
-    }
-    if let Some(args) = call(js, "AFPercent_Format") {
-        return Some(Format::Percent { decimals: a(&args, 0), sep: a(&args, 1) });
-    }
-    if let Some(args) = call(js, "AFDate_FormatEx") {
-        return Some(Format::Date(args.first().and_then(Arg::string)?));
-    }
-    if let Some(args) = call(js, "AFDate_Format") {
-        return Some(Format::Date(DATE_PRESETS.get(a(&args, 0) as usize)?.to_string()));
-    }
-    if let Some(args) = call(js, "AFTime_FormatEx") {
-        return Some(Format::Time(args.first().and_then(Arg::string)?));
-    }
-    if let Some(args) = call(js, "AFTime_Format") {
-        return Some(Format::Time(TIME_PRESETS.get(a(&args, 0) as usize)?.to_string()));
-    }
-    if let Some(args) = call(js, "AFSpecial_Format") {
-        return Some(Format::Special(a(&args, 0).min(3)));
-    }
-    if let Some(args) = call(js, "AFSpecial_KeystrokeEx") {
-        return Some(Format::Mask(args.first().and_then(Arg::string)?));
-    }
-    None
+        },
+        "AFPercent_Format" => Format::Percent { decimals: a(0), sep: a(1) },
+        "AFDate_FormatEx" => Format::Date(args.first().and_then(Arg::string)?),
+        "AFDate_Format" => Format::Date(DATE_PRESETS.get(a(0) as usize)?.to_string()),
+        "AFTime_FormatEx" => Format::Time(args.first().and_then(Arg::string)?),
+        "AFTime_Format" => Format::Time(TIME_PRESETS.get(a(0) as usize)?.to_string()),
+        "AFSpecial_Format" => Format::Special(a(0).min(3)),
+        "AFSpecial_KeystrokeEx" => Format::Mask(args.first().and_then(Arg::string)?),
+        _ => return None,
+    })
+}
+
+const FORMAT_CALLS: [&str; 8] = [
+    "AFNumber_Format",
+    "AFPercent_Format",
+    "AFDate_FormatEx",
+    "AFDate_Format",
+    "AFTime_FormatEx",
+    "AFTime_Format",
+    "AFSpecial_Format",
+    "AFSpecial_KeystrokeEx",
+];
+
+/// The Format tab's setting when `js` is nothing but one call to an `AF...Format` function (or the
+/// special mask keystroke). A script that does more than that is not this setting: it goes to the
+/// script engine, or stays unrun.
+pub fn parse_format(js: &str) -> Option<Format> {
+    FORMAT_CALLS.into_iter().find_map(|name| sole_call(js, name).and_then(|args| format_from(name, &args)))
+}
+
+/// The Format tab's setting when `js` (a keystroke script) is nothing but one `AF...Keystroke` call.
+pub fn parse_keystroke(js: &str) -> Option<Format> {
+    const CALLS: [(&str, &str); 8] = [
+        ("AFNumber_Keystroke", "AFNumber_Format"),
+        ("AFPercent_Keystroke", "AFPercent_Format"),
+        ("AFDate_KeystrokeEx", "AFDate_FormatEx"),
+        ("AFDate_Keystroke", "AFDate_Format"),
+        ("AFTime_KeystrokeEx", "AFTime_FormatEx"),
+        ("AFTime_Keystroke", "AFTime_Format"),
+        ("AFSpecial_Keystroke", "AFSpecial_Format"),
+        ("AFSpecial_KeystrokeEx", "AFSpecial_KeystrokeEx"),
+    ];
+    CALLS.into_iter().find_map(|(call, format)| sole_call(js, call).and_then(|args| format_from(format, &args)))
 }
 
 pub fn parse_validate(js: &str) -> Option<Validate> {
-    let args = call(js, "AFRange_Validate")?;
+    let args = sole_call(js, "AFRange_Validate")?;
     let flag = |i: usize| args.get(i).is_some_and(Arg::truthy);
     let num = |i: usize| args.get(i).and_then(Arg::num);
     Some(Validate::Range { min: if flag(0) { num(1) } else { None }, max: if flag(2) { num(3) } else { None } })
@@ -351,7 +361,7 @@ pub fn parse_calculate(js: &str) -> Option<Calculate> {
         let expr = js.get(a + 6..b)?.trim().to_string();
         return Some(Calculate::Notation(expr));
     }
-    let args = call(js, "AFSimple_Calculate")?;
+    let args = sole_call(js, "AFSimple_Calculate")?;
     let op = match args.first().and_then(Arg::string)?.as_str() {
         "SUM" => CalcOp::Sum,
         "PRD" => CalcOp::Product,
@@ -808,6 +818,29 @@ pub fn keystroke(f: &Format, field: &str, value: &str) -> Result<String, String>
     }
 }
 
+/// The Keystroke event while typing: can `text` (the entry as it would be after this change) still
+/// become a value the format accepts? Deleting is always allowed.
+pub fn partial_ok(f: &Format, text: &str) -> bool {
+    let prefix_fits = |mask: &str| {
+        let slots: Vec<char> = mask.chars().filter(|c| matches!(c, '9' | 'A' | 'O' | 'X')).collect();
+        let typed: Vec<char> = text.chars().filter(|c| c.is_alphanumeric()).collect();
+        typed.len() <= slots.len()
+            && typed.iter().zip(&slots).all(|(c, m)| match m {
+                '9' => c.is_ascii_digit(),
+                'A' => c.is_alphabetic(),
+                _ => true,
+            })
+    };
+    match f {
+        Format::None => true,
+        Format::Number { currency, .. } => text.chars().all(|c| c.is_ascii_digit() || c.is_whitespace() || "+-.,()%$\u{20ac}\u{a3}\u{a5}'".contains(c) || currency.contains(c)),
+        Format::Percent { .. } => text.chars().all(|c| c.is_ascii_digit() || c.is_whitespace() || "+-.,()%'".contains(c)),
+        Format::Date(_) | Format::Time(_) => text.chars().all(|c| c.is_alphanumeric() || c.is_whitespace() || "/-.:,".contains(c)),
+        Format::Special(n) => prefix_fits(SPECIAL_MASKS[(*n).min(3) as usize]),
+        Format::Mask(m) => prefix_fits(m),
+    }
+}
+
 /// The Validate event: `Err` with Acrobat's message when the value is out of range.
 pub fn validate(v: &Validate, value: &str) -> Result<(), String> {
     let Validate::Range { min, max } = v else { return Ok(()) };
@@ -1076,16 +1109,35 @@ pub enum ButtonAction {
     Script { source: String },
 }
 
-/// The arguments of `js` when it is nothing but one call to `name(...)`, with an optional `;`.
-/// A call inside a condition or beside other statements is not the call alone.
+/// `t` without the whitespace and the `//` and `/* */` comments in front of it.
+fn skip_comments(mut t: &str) -> &str {
+    loop {
+        t = t.trim_start();
+        if let Some(rest) = t.strip_prefix("//") {
+            t = rest.find('\n').map_or("", |i| &rest[i + 1..]);
+        } else if let Some(rest) = t.strip_prefix("/*") {
+            match rest.split_once("*/") {
+                Some((_, r)) => t = r,
+                None => return "",
+            }
+        } else {
+            return t;
+        }
+    }
+}
+
+/// The arguments of `js` when it is nothing but one call to `name(...)`, with an optional `;` (and
+/// comments around it). A call inside a condition or beside other statements is not the call alone.
 fn sole_call(js: &str, name: &str) -> Option<Vec<Arg>> {
-    let t = js.trim();
+    let t = skip_comments(js);
     if !t.starts_with(&format!("{name}(")) {
         return None;
     }
     let mut p = Parser { s: t.as_bytes(), i: name.len() + 1, depth: 0 };
     let args = p.list(b')')?;
-    t[p.i..].chars().all(|c| c == ';' || c.is_whitespace()).then_some(args)
+    let rest = skip_comments(&t[p.i..]);
+    let rest = rest.strip_prefix(';').map_or(rest, skip_comments);
+    rest.is_empty().then_some(args)
 }
 
 /// Recognise the common one-line button scripts. Only a script that is just the call counts:

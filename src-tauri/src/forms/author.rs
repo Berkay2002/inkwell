@@ -90,7 +90,7 @@ fn unique_name(taken: &[String], base: &str) -> String {
     (1..).map(|n| format!("{base}{n}")).find(|n| !taken.contains(n)).unwrap_or_default()
 }
 
-fn ensure_dict(doc: &PdfDocument, parent: &mut PdfObject, key: &str) -> Result<PdfObject> {
+pub(crate) fn ensure_dict(doc: &PdfDocument, parent: &mut PdfObject, key: &str) -> Result<PdfObject> {
     if let Some(d) = get(parent, key).filter(|d| d.is_dict().unwrap_or(false)) {
         return Ok(d);
     }
@@ -143,7 +143,7 @@ fn seed_on_state(doc: &mut PdfDocument, w: &mut PdfObject, on: &str) -> Result<(
     Ok(())
 }
 
-fn color_array(doc: &PdfDocument, o: &mut PdfObject, k: &str, c: [f32; 3]) -> Result<()> {
+pub(crate) fn color_array(doc: &PdfDocument, o: &mut PdfObject, k: &str, c: [f32; 3]) -> Result<()> {
     put_nums(doc, o, k, &c)
 }
 
@@ -387,7 +387,7 @@ fn remove_ref(a: &mut PdfObject, num: i32) -> Result<()> {
     Ok(())
 }
 
-fn set_flag(ff: &mut i32, f: FieldFlags, on: bool) {
+pub(crate) fn set_flag(ff: &mut i32, f: FieldFlags, on: bool) {
     if on {
         *ff |= f.bits();
     } else {

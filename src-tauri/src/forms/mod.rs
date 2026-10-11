@@ -4,8 +4,10 @@
 //! Every change is one `Engine::apply_custom` step: one undo step, kept by Save, recorded in history.
 //! Geometry is in page space (points, y down, as the viewer shows the page); a widget is named by
 //! `(page, xref)`. MuPDF builds the appearance streams other viewers show; MuPDF is built without
-//! JavaScript, so format, keystroke, validate and calculate run natively from the AcroForm
-//! function calls Acrobat writes (`af.rs`) and never touch a script engine, the network or files.
+//! JavaScript. The AcroForm function calls Acrobat writes for format, keystroke, validate and calculate
+//! run natively (`af.rs`, the fast path); every other field script runs in the sandboxed script engine
+//! (`js.rs`, glue in `scripts.rs`) unless the person turned scripts off for the file. Neither touches
+//! the network or files.
 //!
 //! A text field's `/V` keeps the raw value; its appearance shows the formatted one (as Acrobat does).
 //! Form data export and import (FDF, XFDF, JSON) is not built (see docs/forms.md).
@@ -21,10 +23,14 @@ pub mod af;
 pub mod app;
 mod author;
 pub mod detect;
+pub mod js;
+mod scripts;
 #[cfg(test)]
 mod tests;
 
 pub use author::*;
+pub use scripts::{Report, Stepped};
+use scripts::Rt;
 
 use af::{ButtonAction, Calculate, Format, Validate};
 
@@ -142,13 +148,25 @@ pub(crate) fn text(o: &PdfObject) -> Option<String> {
 
 /// A string, name or (decoded) stream as text: script sources are written either way.
 pub(crate) fn text_or_stream(o: &PdfObject) -> Option<String> {
-    text(o).or_else(|| {
-        if o.is_stream().unwrap_or(false) {
-            o.read_stream().ok().map(|b| String::from_utf8_lossy(&b).into_owned())
-        } else {
-            None
-        }
-    })
+    if o.is_string().unwrap_or(false) {
+        // `as_string` fails on UTF-16 (Acrobat writes non-ASCII scripts that way).
+        return text(o).or_else(|| o.as_bytes().ok().map(|b| decode_text(&b)));
+    }
+    text(o).or_else(|| if o.is_stream().unwrap_or(false) { o.read_stream().ok().map(|b| decode_text(&b)) } else { None })
+}
+
+/// Bytes of a PDF text string or script stream: UTF-16 with a byte order mark, UTF-8, or Latin-1-ish text.
+fn decode_text(b: &[u8]) -> String {
+    let utf16 = |rest: &[u8], be: bool| {
+        let units: Vec<u16> = rest.chunks_exact(2).map(|p| if be { u16::from_be_bytes([p[0], p[1]]) } else { u16::from_le_bytes([p[0], p[1]]) }).collect();
+        String::from_utf16_lossy(&units)
+    };
+    match b {
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, true),
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, false),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        _ => String::from_utf8_lossy(b).into_owned(),
+    }
 }
 
 pub(crate) fn nums(o: &PdfObject) -> Vec<f32> {
@@ -353,7 +371,7 @@ fn aa_js(e: &Entry, key: &str) -> Option<String> {
 }
 
 fn format_of(e: &Entry) -> Format {
-    aa_js(e, "F").and_then(|js| af::parse_format(&js)).or_else(|| aa_js(e, "K").and_then(|js| af::parse_format(&js))).unwrap_or_default()
+    aa_js(e, "F").and_then(|js| af::parse_format(&js)).or_else(|| aa_js(e, "K").and_then(|js| af::parse_keystroke(&js))).unwrap_or_default()
 }
 
 fn validate_of(e: &Entry) -> Validate {
@@ -364,9 +382,14 @@ fn calculate_of(e: &Entry) -> Calculate {
     aa_js(e, "C").and_then(|js| af::parse_calculate(&js)).unwrap_or_default()
 }
 
+/// The field has a format, keystroke, validate or calculate script that is not one of the AF calls
+/// (so it needs the script engine).
 fn has_unknown_script(e: &Entry) -> bool {
-    let known = |k: &str, ok: bool| aa_js(e, k).is_some_and(|_| !ok);
-    known("F", format_of(e) != Format::None) || known("V", validate_of(e) != Validate::None) || known("C", calculate_of(e) != Calculate::None)
+    let unknown = |k: &str, known: &dyn Fn(&str) -> bool| aa_js(e, k).is_some_and(|js| !known(&js));
+    unknown("F", &|js| af::parse_format(js).is_some())
+        || unknown("K", &|js| af::parse_keystroke(js).is_some())
+        || unknown("V", &|js| af::parse_validate(js).is_some())
+        || unknown("C", &|js| af::parse_calculate(js).is_some())
 }
 
 fn action_of(e: &Entry) -> Option<ButtonAction> {
@@ -427,7 +450,7 @@ fn da_of(o: &PdfObject) -> String {
     })
 }
 
-fn dto_of(e: &Entry) -> FieldDto {
+fn dto_of(rt: &Rt, snapshot: Option<&[js::FieldState]>, e: &Entry) -> FieldDto {
     let ff = field_ff(e);
     let o = &e.obj;
     let mk = get(o, "MK");
@@ -444,7 +467,7 @@ fn dto_of(e: &Entry) -> FieldDto {
             None => !value.is_empty() && value != "Off" && (export.is_empty() || value == export),
         };
     let format = format_of(e);
-    let shown = if matches!(e.kind, FieldKind::Text | FieldKind::Combo) { af::format_value(&format, &value) } else { value.clone() };
+    let shown = if matches!(e.kind, FieldKind::Text | FieldKind::Combo) { rt.shown(snapshot, e, &value) } else { value.clone() };
     let border_width = get(o, "BS").and_then(|b| get(&b, "W")).and_then(|w| w.as_float().ok()).unwrap_or(1.0);
     FieldDto {
         page: e.page,
@@ -483,14 +506,21 @@ fn dto_of(e: &Entry) -> FieldDto {
         caption: mk.as_ref().and_then(|m| get(m, "CA")).as_ref().and_then(text).unwrap_or_default(),
         action: if e.kind == FieldKind::Button { action_of(e) } else { None },
         tooltip: get(&e.field, "TU").or_else(|| get(o, "TU")).as_ref().and_then(text).unwrap_or_default(),
-        script: has_unknown_script(e),
+        script: !rt.js_on() && has_unknown_script(e),
     }
 }
 
 /// Every form field widget of the document, page by page, in each page's tab order.
 pub fn list(doc: &PdfDocument) -> Result<FormDto> {
-    let fields = scan(doc)?.iter().map(dto_of).collect();
-    Ok(FormDto { fields, xfa: doc.has_xfa_form().unwrap_or(false) })
+    list_with(&Rt::off(doc))
+}
+
+/// [`list`] with the format scripts of the fields run by `rt`.
+fn list_with(rt: &Rt) -> Result<FormDto> {
+    let entries = rt.entries()?;
+    let snapshot = rt.js_on().then(|| scripts::field_states(entries));
+    let fields = entries.iter().map(|e| dto_of(rt, snapshot.as_deref(), e)).collect();
+    Ok(FormDto { fields, xfa: rt.doc().has_xfa_form().unwrap_or(false) })
 }
 
 // ---- appearance --------------------------------------------------------------------------------
@@ -498,8 +528,13 @@ pub fn list(doc: &PdfDocument) -> Result<FormDto> {
 /// Rebuilds the appearance stream of a widget. A field with a format keeps its raw `/V` but
 /// draws the formatted text, as Acrobat does.
 pub(crate) fn refresh(doc: &PdfDocument, e: &Entry) -> Result<()> {
-    settle_need_appearances(doc, e.xref)?;
-    refresh_one(doc, e)
+    refresh_with(&Rt::off(doc), e)
+}
+
+/// [`refresh`] with the Format script of the field run by `rt` when it is not a plain AF call.
+pub(crate) fn refresh_with(rt: &Rt, e: &Entry) -> Result<()> {
+    settle_need_appearances(rt, e.xref)?;
+    refresh_one(rt, e)
 }
 
 /// A form that says `/NeedAppearances true` makes MuPDF redraw every field from its raw `/V` when
@@ -507,7 +542,8 @@ pub(crate) fn refresh(doc: &PdfDocument, e: &Entry) -> Result<()> {
 /// editor writes appearances the flag is cleared, after the other fields that draw from a value get
 /// theirs too (many such forms carry no box or button appearances at all), so what the file shows is
 /// what was written.
-fn settle_need_appearances(doc: &PdfDocument, except: i32) -> Result<()> {
+fn settle_need_appearances(rt: &Rt, except: i32) -> Result<()> {
+    let doc = rt.doc();
     let Some(mut acro) = doc.catalog().ok().and_then(|c| get(&c, "AcroForm")) else { return Ok(()) };
     if !get(&acro, "NeedAppearances").and_then(|n| n.as_bool().ok()).unwrap_or(false) {
         return Ok(());
@@ -515,20 +551,21 @@ fn settle_need_appearances(doc: &PdfDocument, except: i32) -> Result<()> {
     acro.dict_put("NeedAppearances", PdfObject::new_bool(false))?;
     for o in scan(doc)? {
         if o.xref != except && matches!(o.kind, FieldKind::Text | FieldKind::Combo | FieldKind::List | FieldKind::Checkbox | FieldKind::Radio) {
-            refresh_one(doc, &o)?;
+            refresh_one(rt, &o)?;
         }
     }
     Ok(())
 }
 
-fn refresh_one(doc: &PdfDocument, e: &Entry) -> Result<()> {
+fn refresh_one(rt: &Rt, e: &Entry) -> Result<()> {
+    let doc = rt.doc();
     let page = doc.load_pdf_page(e.page as i32)?;
     let mut w = page.load_widget(e.xref)?.ok_or_else(|| bad(format!("no field {} on page {}", e.xref, e.page + 1)))?;
     let mut field = e.field.clone();
     let raw = geti(&field, "V").and_then(|v| text(&v));
     let shown = match (&raw, e.kind) {
         (Some(r), FieldKind::Text | FieldKind::Combo) => {
-            let f = af::format_value(&format_of(e), r);
+            let f = rt.shown(None, e, r);
             (f != *r).then_some(f)
         }
         _ => None,
@@ -568,50 +605,6 @@ fn names_to_values(entries: &[Entry]) -> HashMap<String, String> {
         .filter(|e| !matches!(e.kind, FieldKind::Button | FieldKind::Signature))
         .map(|e| (e.name.clone(), values_of(geti(&e.field, "V")).into_iter().next().unwrap_or_default()))
         .collect()
-}
-
-/// Runs every field's calculation once, in the AcroForm's `/CO` order (document order without
-/// one), as Acrobat does after a value changes. Returns the pages whose appearance changed.
-fn recalculate(doc: &PdfDocument, entries: &[Entry]) -> Result<Vec<u32>> {
-    let calc: Vec<(&Entry, Calculate)> = per_field(entries)
-        .into_iter()
-        .filter(|e| matches!(e.kind, FieldKind::Text | FieldKind::Combo))
-        .map(|e| (e, calculate_of(e)))
-        .filter(|(_, c)| *c != Calculate::None)
-        .collect();
-    if calc.is_empty() {
-        return Ok(Vec::new());
-    }
-    let order: Vec<i32> = doc
-        .catalog()
-        .ok()
-        .and_then(|c| get(&c, "AcroForm"))
-        .and_then(|f| get(&f, "CO"))
-        .map(|a| (0..a.len().unwrap_or(0).min(4096) as i32).filter_map(|i| a.get_array(i).ok().flatten()?.as_indirect().ok()).collect())
-        .unwrap_or_default();
-    let mut calc = calc;
-    calc.sort_by_key(|(e, _)| order.iter().position(|x| *x == e.node).unwrap_or(usize::MAX));
-    let mut values = names_to_values(entries);
-    let mut pages = Vec::new();
-    for (e, c) in calc {
-        let lookup = |name: &str| -> Vec<String> {
-            let prefix = format!("{name}.");
-            values.iter().filter(|(k, _)| k.as_str() == name || k.starts_with(&prefix)).map(|(_, v)| v.clone()).collect()
-        };
-        let Some(new) = af::calculate(&c, &lookup) else { continue };
-        let old = values.get(&e.name).cloned().unwrap_or_default();
-        if new == old {
-            continue;
-        }
-        let mut field = e.field.clone();
-        put_str(&mut field, "V", &new)?;
-        values.insert(e.name.clone(), new);
-        for w in entries.iter().filter(|w| w.node == e.node) {
-            refresh(doc, w)?;
-            pages.push(w.page);
-        }
-    }
-    Ok(pages)
 }
 
 fn pages_of(mut v: Vec<u32>) -> Vec<u32> {
@@ -686,28 +679,24 @@ fn set_value_is_noop(doc: &PdfDocument, page: u32, xref: i32, value: &FieldValue
 }
 
 /// Sets a field. A value that does not fit the field's format or range is rejected with
-/// Acrobat's message; the document is left unchanged. Returns the pages that changed.
+/// Acrobat's message; the document is left unchanged. Returns the pages that changed. (Native code only;
+/// [`set_value_one`] and [`set_value_report`] run the field's scripts too.)
 pub fn set_value(doc: &mut PdfDocument, page: u32, xref: i32, value: &FieldValue) -> Result<Vec<u32>> {
-    let entries = scan(doc)?;
+    set_value_rt(&Rt::off(doc), page, xref, value)
+}
+
+fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec<u32>> {
+    let entries = rt.entries()?;
     let e = entries.iter().find(|e| e.page == page && e.xref == xref).ok_or_else(|| bad(format!("no field {xref} on page {}", page + 1)))?;
     let ff = field_ff(e);
     if flag(ff, FieldFlags::READ_ONLY) {
         return Err(bad(format!("The field [ {} ] is read-only", e.name)));
     }
-    let mut field = e.field.clone();
     let mut touched = vec![page];
-    match e.kind {
+    let mut changed = Vec::new();
+    let value = match e.kind {
         FieldKind::Button | FieldKind::Signature => return Err(bad("this field has no value to fill")),
-        FieldKind::Checkbox | FieldKind::Radio => {
-            let Some((v, states)) = button_plan(&entries, e, value)? else { return Ok(Vec::new()) };
-            put_name(&mut field, "V", &v)?;
-            for (w, state) in states {
-                let w = entries.iter().find(|x| x.xref == w).expect("a widget of the field");
-                let mut o = w.obj.clone();
-                put_name(&mut o, "AS", &state)?;
-                touched.push(w.page);
-            }
-        }
+        FieldKind::Checkbox | FieldKind::Radio => value.clone(),
         FieldKind::Text | FieldKind::Combo | FieldKind::List => {
             let strings: Vec<String> = match value {
                 FieldValue::Text(s) => vec![s.clone()],
@@ -726,38 +715,81 @@ pub fn set_value(doc: &mut PdfDocument, page: u32, xref: i32, value: &FieldValue
                 }
             }
             if matches!(e.kind, FieldKind::Text | FieldKind::Combo) {
-                stored = af::keystroke(&format_of(e), &e.name, &stored).map_err(bad)?;
-                af::validate(&validate_of(e), &stored).map_err(bad)?;
+                let (kept, by_key) = rt.keystroke(e, &stored).map_err(bad)?;
+                stored = kept;
+                changed.extend(by_key);
+                changed.extend(rt.validate(e, &stored).map_err(bad)?);
             }
-            if strings.len() > 1 {
-                let mut a = doc.new_array()?;
-                for s in &strings {
-                    a.array_push(PdfObject::new_string(s)?)?;
+            if strings.len() > 1 { FieldValue::Many(strings) } else { FieldValue::Text(stored) }
+        }
+    };
+    touched.extend(store(rt, e, &value)?);
+    // What the key and validate scripts did to other fields (values, colours, visibility ...).
+    touched.extend(scripts::apply_changes(rt, &changed)?);
+    touched.extend(scripts::cascade(rt)?);
+    Ok(pages_of(touched))
+}
+
+/// Stores `value` in the field of `e` and redraws it: its `/V`, and the `/AS` of each widget of a
+/// check box or radio group. No keystroke, validate or read-only check. Returns the pages it drew.
+/// (Check boxes and radios keep the appearance they have: MuPDF draws both states.)
+fn store(rt: &Rt, e: &Entry, value: &FieldValue) -> Result<Vec<u32>> {
+    let doc = rt.doc();
+    let entries = rt.entries()?;
+    let mut field = e.field.clone();
+    let mut touched = Vec::new();
+    match e.kind {
+        FieldKind::Button | FieldKind::Signature => return Err(bad("this field has no value to fill")),
+        FieldKind::Checkbox | FieldKind::Radio => {
+            let Some((v, states)) = button_plan(entries, e, value)? else { return Ok(Vec::new()) };
+            put_name(&mut field, "V", &v)?;
+            for (w, state) in states {
+                let w = entries.iter().find(|x| x.xref == w).expect("a widget of the field");
+                let mut o = w.obj.clone();
+                put_name(&mut o, "AS", &state)?;
+                touched.push(w.page);
+            }
+        }
+        FieldKind::Text | FieldKind::Combo | FieldKind::List => {
+            match value {
+                FieldValue::Many(v) if v.len() > 1 => {
+                    let mut a = doc.new_array()?;
+                    for s in v {
+                        a.array_push(PdfObject::new_string(s)?)?;
+                    }
+                    field.dict_put("V", a)?;
                 }
-                field.dict_put("V", a)?;
-            } else {
-                put_str(&mut field, "V", &stored)?;
+                FieldValue::Many(v) => put_str(&mut field, "V", v.first().map_or("", String::as_str))?,
+                FieldValue::Text(s) => put_str(&mut field, "V", s)?,
+                FieldValue::Checked(_) => return Err(bad("a text field takes text")),
             }
             for w in entries.iter().filter(|w| w.node == e.node) {
-                refresh(doc, w)?;
+                refresh_with(rt, w)?;
                 touched.push(w.page);
             }
         }
     }
-    // Check boxes and radios keep the appearance they have (MuPDF draws both states); others were refreshed.
-    touched.extend(recalculate(doc, &entries)?);
-    Ok(pages_of(touched))
+    Ok(touched)
+}
+
+/// A script's value for a field, stored (see [`store`]).
+pub(crate) fn write_values(rt: &Rt, e: &Entry, values: &[String]) -> Result<Vec<u32>> {
+    store(rt, e, &scripts::as_field_value(values, e.kind))
 }
 
 /// Resets fields to their default values: the fields whose widgets are listed (by xref), or the
 /// whole form ("Clear Form") when `which` is `None`. Returns the pages that changed.
 pub fn reset(doc: &mut PdfDocument, which: Option<&[i32]>) -> Result<Vec<u32>> {
-    let entries = scan(doc)?;
+    reset_rt(&Rt::off(doc), which)
+}
+
+fn reset_rt(rt: &Rt, which: Option<&[i32]>) -> Result<Vec<u32>> {
+    let entries = rt.entries()?;
     let mut done: Vec<i32> = Vec::new();
     let mut touched = Vec::new();
-    for e in &entries {
+    for e in entries {
         // Only fields that hold something other than their default are touched.
-        if done.contains(&e.node) || !reset_differs(&entries, e, which) {
+        if done.contains(&e.node) || !reset_differs(entries, e, which) {
             continue;
         }
         done.push(e.node);
@@ -775,7 +807,7 @@ pub fn reset(doc: &mut PdfDocument, which: Option<&[i32]>) -> Result<Vec<u32>> {
                 let mut o = w.obj.clone();
                 put_name(&mut o, "AS", &state)?;
             } else {
-                refresh(doc, w)?;
+                refresh_with(rt, w)?;
             }
             touched.push(w.page);
         }
@@ -784,8 +816,7 @@ pub fn reset(doc: &mut PdfDocument, which: Option<&[i32]>) -> Result<Vec<u32>> {
         return Ok(Vec::new());
     }
     // Reset may have emptied what calculations read.
-    let entries = scan(doc)?;
-    touched.extend(recalculate(doc, &entries)?);
+    touched.extend(scripts::cascade(rt)?);
     Ok(pages_of(touched))
 }
 
@@ -821,23 +852,75 @@ fn reset_differs(entries: &[Entry], e: &Entry, which: Option<&[i32]>) -> bool {
 
 // ---- engine wiring: one undo step each ---------------------------------------------------------
 
+fn rt_of<'a>(d: &'a PdfDocument, scripts: &'a js::Scripts, name: &str) -> Rt<'a> {
+    Rt::new(d, Some(scripts), name)
+}
+
 pub fn list_all(eng: &Engine, doc: DocId) -> Result<FormDto> {
-    eng.read_custom(doc, |d| list(d))
+    let (scripts, name) = eng.doc_scripts(doc)?;
+    eng.read_custom(doc, |d| list_with(&rt_of(d, &scripts, &name)))
+}
+
+/// What the Scripts note of the forms rail shows.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptsState {
+    pub has_scripts: bool,
+    pub enabled: bool,
+    pub log: Vec<js::LogLine>,
+}
+
+pub fn scripts_state(eng: &Engine, doc: DocId) -> Result<ScriptsState> {
+    let (scripts, _) = eng.doc_scripts(doc)?;
+    let has_scripts = eng.read_custom(doc, |d| Ok(scripts::has_scripts(d, &scan(d)?)))?;
+    Ok(ScriptsState { has_scripts, enabled: scripts.enabled(), log: scripts.log() })
+}
+
+/// Turns the scripts of one open document on or off (kept in memory, not in the file).
+pub fn scripts_enable(eng: &Engine, doc: DocId, on: bool) -> Result<ScriptsState> {
+    let (scripts, _) = eng.doc_scripts(doc)?;
+    scripts.set_enabled(on);
+    scripts_state(eng, doc)
 }
 
 pub fn set_value_one(eng: &Engine, doc: DocId, page: u32, xref: i32, value: &FieldValue, source: EditSource) -> Result<EditState> {
+    set_value_report(eng, doc, page, xref, value, source).map(|s| s.state)
+}
+
+/// [`set_value_one`] with what the scripts raised (alerts to show, requests to ask the person about).
+pub fn set_value_report(eng: &Engine, doc: DocId, page: u32, xref: i32, value: &FieldValue, source: EditSource) -> Result<Stepped> {
     // Filling what is already there changes nothing, so it is not a step in the history.
     if eng.read_custom(doc, |d| Ok(set_value_is_noop(d, page, xref, value).unwrap_or(false)))? {
-        return eng.edit_state(doc);
+        return Ok(Stepped { state: eng.edit_state(doc)?, report: Report::default() });
     }
-    eng.apply_custom(doc, format!("Fill field on p. {}", page + 1), source, false, |d| set_value(d, page, xref, value))
+    let (scripts, name) = eng.doc_scripts(doc)?;
+    let mut report = Report::default();
+    let state = eng.apply_custom(doc, format!("Fill field on p. {}", page + 1), source, false, |d| {
+        let rt = rt_of(d, &scripts, &name);
+        let r = set_value_rt(&rt, page, xref, value);
+        report = rt.report.take();
+        r
+    })?;
+    Ok(Stepped { state, report })
 }
 
 pub fn reset_one(eng: &Engine, doc: DocId, which: Option<Vec<i32>>, source: EditSource) -> Result<EditState> {
+    reset_report(eng, doc, which, source).map(|s| s.state)
+}
+
+pub fn reset_report(eng: &Engine, doc: DocId, which: Option<Vec<i32>>, source: EditSource) -> Result<Stepped> {
     // A reset with nothing to reset is not a step in the history.
     if !eng.read_custom(doc, |d| reset_would_change(d, which.as_deref()))? {
-        return eng.edit_state(doc);
+        return Ok(Stepped { state: eng.edit_state(doc)?, report: Report::default() });
     }
     let label = if which.is_none() { "Clear form".to_string() } else { "Reset fields".to_string() };
-    eng.apply_custom(doc, label, source, false, |d| reset(d, which.as_deref()))
+    let (scripts, name) = eng.doc_scripts(doc)?;
+    let mut report = Report::default();
+    let state = eng.apply_custom(doc, label, source, false, |d| {
+        let rt = rt_of(d, &scripts, &name);
+        let r = reset_rt(&rt, which.as_deref());
+        report = rt.report.take();
+        r
+    })?;
+    Ok(Stepped { state, report })
 }

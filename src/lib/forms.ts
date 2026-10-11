@@ -12,11 +12,45 @@ import { detectedToNew } from "./formsLogic";
  * step with the panel.
  */
 
+/** `app.alert` from a field script: shown by the UI (never a native dialog). */
+export interface ScriptAlert {
+  message: string;
+  title?: string;
+  field?: string;
+}
+
+/** Something a script asked for. The engine never does any of it; the UI asks first (links: http, https, mailto only). */
+export type ScriptRequest =
+  | { kind: "reset"; fields: string[] }
+  | { kind: "print" }
+  | { kind: "goToPage"; page: number }
+  | { kind: "launchUrl"; url: string }
+  | { kind: "submit"; url: string }
+  | { kind: "focus"; field: string }
+  | { kind: "beep" };
+
+/** The edit state after a fill or reset, with what the field scripts raised. */
+export type Stepped = EditState & { alerts: ScriptAlert[]; requests: ScriptRequest[] };
+
+export interface ScriptLogLine {
+  level: "info" | "warn" | "error";
+  field?: string;
+  message: string;
+}
+
+export interface ScriptsState {
+  hasScripts: boolean;
+  enabled: boolean;
+  log: ScriptLogLine[];
+}
+
 export const formsApi = {
   list: (doc: number) => invoke<Form>("forms_list", { doc }),
   setValue: (doc: number, page: number, xref: number, value: FieldValue) =>
-    invoke<EditState>("forms_set_value", { doc, page, xref, value }),
-  reset: (doc: number, fields: number[] | null) => invoke<EditState>("forms_reset", { doc, fields }),
+    invoke<Stepped>("forms_set_value", { doc, page, xref, value }),
+  reset: (doc: number, fields: number[] | null) => invoke<Stepped>("forms_reset", { doc, fields }),
+  scripts: (doc: number) => invoke<ScriptsState>("forms_scripts", { doc }),
+  scriptsEnable: (doc: number, on: boolean) => invoke<ScriptsState>("forms_scripts_enable", { doc, on }),
   add: (doc: number, page: number, what: NewField) => invoke<{ state: EditState; xref: number }>("forms_add", { doc, page, what }),
   addMany: (doc: number, page: number, items: NewField[]) => invoke<EditState>("forms_add_many", { doc, page, items }),
   move: (doc: number, page: number, xref: number, rect: Rect4) => invoke<EditState>("forms_move", { doc, page, xref, rect }),

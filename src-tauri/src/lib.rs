@@ -826,6 +826,8 @@ pub fn run() {
             forms::app::forms_list,
             forms::app::forms_set_value,
             forms::app::forms_reset,
+            forms::app::forms_scripts,
+            forms::app::forms_scripts_enable,
             forms::app::forms_add,
             forms::app::forms_add_many,
             forms::app::forms_move,
