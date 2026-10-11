@@ -397,23 +397,29 @@ fn ecdsa_rs(sig: &[u8], field_len: usize, notes: &mut Vec<&'static str>) -> Opti
 struct SysRng;
 
 impl rsa::rand_core::TryRng for SysRng {
-    type Error = getrandom::Error;
+    // Infallible as the `rsa` crate requires: an OS without randomness can't sign safely anyway.
+    type Error = std::convert::Infallible;
 
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         let mut b = [0u8; 4];
-        getrandom::fill(&mut b)?;
+        fill(&mut b);
         Ok(u32::from_le_bytes(b))
     }
 
     fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         let mut b = [0u8; 8];
-        getrandom::fill(&mut b)?;
+        fill(&mut b);
         Ok(u64::from_le_bytes(b))
     }
 
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        getrandom::fill(dst)
+        fill(dst);
+        Ok(())
     }
+}
+
+fn fill(dst: &mut [u8]) {
+    getrandom::fill(dst).expect("OS random generator failed");
 }
 
 impl rsa::rand_core::TryCryptoRng for SysRng {}

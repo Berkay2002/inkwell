@@ -694,6 +694,7 @@ pub fn run() {
         .manage(Paths::default())
         .manage(Arc::new(tools::Jobs::default()))
         .manage(hist)
+        .manage(sign::app::Ids::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 on_drop(window, paths);
@@ -781,6 +782,11 @@ pub fn run() {
             fillsign::app::fillsign_saved_add,
             fillsign::app::fillsign_saved_add_file,
             fillsign::app::fillsign_saved_remove,
+            sign::app::sign_identities,
+            sign::app::sign_open_id_file,
+            sign::app::sign_create_test_id,
+            sign::app::sign_document,
+            sign::app::sign_list,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

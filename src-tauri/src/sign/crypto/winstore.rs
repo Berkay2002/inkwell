@@ -112,8 +112,8 @@ pub fn open_identity(fingerprint_hex: &str) -> Result<DigitalId, SignError> {
         .find(|c| fingerprint(c) == wanted)
         .ok_or_else(|| SignError::Crypto("that certificate is no longer in the Windows certificate store".into()))?;
     let chain = super::trust::win::chain(&cert, None, None).map(|c: Chain| c.certs_der()).unwrap_or_default();
-    let others = chain.into_iter().filter(|d| d != cert.der());
-    identity(cert, others.collect())
+    let others: Vec<Vec<u8>> = chain.into_iter().filter(|d| d != cert.der()).collect();
+    identity(cert, others)
 }
 
 /// A [`DigitalId`] whose key signs through the certificate context. `others` are DER issuers.

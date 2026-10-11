@@ -96,7 +96,7 @@ impl Store {
 
     fn keys(&self, create: bool) -> Result<Option<Keys>> {
         match std::fs::read(self.key_path()) {
-            Ok(b) => Ok(Some(Keys::new(&crypto::unprotect(&b).map_err(io)?))),
+            Ok(b) => Ok(Some(Keys::new(&*crypto::unprotect(&b).map_err(io)?))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
                 let key = zeroize::Zeroizing::new(crypto::random::<32>());
                 write_atomic(&self.key_path(), &crypto::protect(&key).map_err(io)?).map_err(io)?;

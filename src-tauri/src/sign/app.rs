@@ -135,7 +135,7 @@ fn store_identities() -> Result<Vec<Identity>> {
             email: String::new(),
             issuer: s.issuer,
             self_signed: false,
-            not_after: s.not_after,
+            not_after: s.not_after.as_ref().map(day).unwrap_or_default(),
             unusable: s.unusable,
         })
         .collect())

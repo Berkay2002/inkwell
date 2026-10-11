@@ -390,7 +390,7 @@ fn appearance(doc: &mut PdfDocument, size: [f32; 2], rotate: i32, name: &str, li
     dict += "/Resources<<";
     dict += &resources;
     dict += ">>>>";
-    let mut form = doc.new_object_from_str(&dict).map_err(pdf_err)?;
+    let form = doc.new_object_from_str(&dict).map_err(pdf_err)?;
     if let Some(xobj) = img_obj {
         let mut res = form.get_dict("Resources").map_err(pdf_err)?.ok_or_else(|| refuse("Resources"))?;
         let mut xo = doc.new_dict().map_err(pdf_err)?;
