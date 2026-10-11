@@ -13,6 +13,7 @@
 
 pub mod backend;
 mod glyphless;
+pub mod lang;
 mod layer;
 mod order;
 

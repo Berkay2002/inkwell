@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::OcrError;
+use super::lang::ISO3;
 
 /// 8-bit grey page raster, tightly packed (`pixels.len() == w * h`).
 pub struct Bitmap {
@@ -200,28 +201,6 @@ pub struct TesseractCli {
 
 /// Default for [`TesseractCli::timeout`].
 pub const TESSERACT_TIMEOUT: Duration = Duration::from_secs(180);
-
-const ISO3: &[(&str, &str)] = &[
-    ("en", "eng"),
-    ("sv", "swe"),
-    ("de", "deu"),
-    ("fr", "fra"),
-    ("es", "spa"),
-    ("it", "ita"),
-    ("nl", "nld"),
-    ("pt", "por"),
-    ("da", "dan"),
-    ("nb", "nor"),
-    ("no", "nor"),
-    ("fi", "fin"),
-    ("pl", "pol"),
-    ("cs", "ces"),
-    ("ru", "rus"),
-    ("tr", "tur"),
-    ("ja", "jpn"),
-    ("zh", "chi_sim"),
-    ("ko", "kor"),
-];
 
 impl TesseractCli {
     /// Where to look for `tesseract.exe`, in order: the host's `ocr.tesseractPath` setting
