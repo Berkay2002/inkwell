@@ -2,21 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
-import { openA11y } from "../lib/a11y";
-import { useConvert } from "../lib/convertStore";
-import { useMarks } from "../lib/marksStore";
 import { useProtect } from "../lib/protectStore";
-import { useTools } from "../lib/toolsStore";
 import { pageOfLabel, useSheets } from "../lib/organizePlus";
+import { pageBoxCh } from "../lib/pageBox";
+import { type PageDark, togglePageDark } from "../lib/pageDark";
+import { usePagesDark, useSystemDark } from "../lib/usePagesDark";
 import { type DocState, pageLabel, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
-import { HistoryToggle, openCompareSetup } from "./history/HistoryPanel";
+import { HistoryToggle } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
 import { MenuButton } from "./Menu";
 import { CommentsToggle } from "./comments/CommentsPanel";
 import { FormsToggle } from "./forms/FormsPanel";
 import { RedactToggle } from "./redact/RedactPanel";
 import { ModeSwitch } from "./Organize";
+import { ToolsMenu } from "./ToolsMenu";
 import { WindowControls } from "./WindowControls";
 
 const st = () => useStore.getState();
@@ -86,7 +86,7 @@ export function TabBar() {
 
 function Btn({ icon, title, on, onClick, disabled }: { icon: IconName; title: string; on?: boolean; onClick: () => void; disabled?: boolean }) {
   return (
-    <button className={on ? "icon-btn on" : "icon-btn"} title={title} aria-label={title} onClick={onClick} disabled={disabled}>
+    <button className={on ? "icon-btn on" : "icon-btn"} title={title} aria-label={title} aria-pressed={on} onClick={onClick} disabled={disabled}>
       <Icon name={icon} />
     </button>
   );
@@ -111,6 +111,7 @@ export function Toolbar({ doc }: { doc: DocState }) {
   return (
     <div className="toolbar">
       <ModeSwitch doc={doc} />
+      <ToolsMenu doc={doc} />
       <span className="sep" />
       {doc.organize ? (
         <>
@@ -123,26 +124,6 @@ export function Toolbar({ doc }: { doc: DocState }) {
       <span className="grow" />
       <span className="tb-cluster" onClickCapture={leaveOrganize}>
         <Btn icon="search" title={`Find${keys("find")}`} on={searchOpen && !doc.organize} onClick={() => st().setUi({ searchOpen: doc.organize ? true : !searchOpen })} />
-        <MenuButton
-          className="ax-toggle"
-          label="Tools"
-          items={[
-            { label: "Compress file…", onSelect: () => useTools.getState().open("compress", id) },
-            { label: "Recognize text…", onSelect: () => useTools.getState().open("ocr", id) },
-            { label: "Header & footer…", onSelect: () => useMarks.getState().open("headerFooter", id) },
-            { label: "Watermark…", onSelect: () => useMarks.getState().open("watermark", id) },
-            { label: "Background…", onSelect: () => useMarks.getState().open("background", id) },
-            { label: "Bates numbering…", onSelect: () => useMarks.getState().open("bates", id) },
-            { label: "Protect with a password…", onSelect: () => useProtect.getState().open("protect", id) },
-            { label: "Security…", onSelect: () => useProtect.getState().open("security", id) },
-            { label: "Compare files…", onSelect: () => void openCompareSetup({ id, name: doc.name }) },
-            { label: "Check accessibility…", onSelect: openA11y },
-            { label: "Export…", onSelect: () => useConvert.getState().openExport(id) },
-            { label: "Create PDF…", onSelect: () => useConvert.getState().openCreate() },
-          ]}
-        >
-          Tools
-        </MenuButton>
         <CommentsToggle />
         <FormsToggle />
         <RedactToggle />
@@ -194,7 +175,55 @@ function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => s
       <Btn icon="plus" title={`Zoom in${keys("zoom-in")}`} onClick={() => st().setZoom(id, stepZoom(doc.zoom, 1))} />
       <Btn icon="rotate" title={`Rotate${keys("rotate-cw")}`} onClick={() => st().rotate(id, 1)} />
       <Btn icon="present" title={`Full screen${keys("present")}`} onClick={() => useSheets.getState().openPresent(id, doc.currentPage)} />
+      <span className="sep" />
+      <DarkPagesButton />
     </>
+  );
+}
+
+const pageModes: [PageDark, string][] = [
+  ["follow", "Follow app theme"],
+  ["on", "Always dark"],
+  ["off", "Always normal"],
+];
+
+/**
+ * Shows the pages dark or normal, whatever the app's own theme (the file is never changed). A page-view
+ * setting like zoom and rotate: the button flips it, the chevron (or a right-click) chooses Follow / dark / normal.
+ */
+function DarkPagesButton() {
+  const dark = usePagesDark();
+  const systemDark = useSystemDark();
+  const setting = useStore((s) => s.pageDark);
+  const group = useRef<HTMLSpanElement>(null);
+  const keys = commands.find((c) => c.id === "toggle-dark-pages")?.keys?.[0];
+  const title = `${dark ? "Normal pages" : "Dark pages"}${keys ? ` (${prettyKeys(keys)})` : ""}`;
+  return (
+    <span
+      ref={group}
+      className="dp-split"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        group.current?.querySelector<HTMLButtonElement>(".dp-chev")?.click();
+      }}
+    >
+      <Btn
+        icon="pageDark"
+        title={title}
+        on={dark}
+        onClick={() => {
+          const s = st();
+          s.setPageDark(togglePageDark(s.pageDark, s.theme, systemDark));
+        }}
+      />
+      <MenuButton
+        className="icon-btn dp-chev"
+        label="Page colours"
+        items={pageModes.map(([m, label]) => ({ label, checked: setting === m, onSelect: () => st().setPageDark(m) }))}
+      >
+        <Icon name="down" size={10} />
+      </MenuButton>
+    </span>
   );
 }
 
@@ -217,7 +246,7 @@ function PageBox({ doc }: { doc: DocState }) {
     <div className="pagebox">
       <input
         id="page-input"
-        style={labelled ? { width: 68 } : undefined}
+        style={{ width: `${pageBoxCh(doc.pageCount, labelled)}ch` }}
         value={text}
         inputMode="numeric"
         onFocus={() => (editing.current = true)}

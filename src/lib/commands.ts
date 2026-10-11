@@ -10,6 +10,7 @@ import { openCompareSetup } from "../components/history/HistoryPanel";
 import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
+import { togglePageDark } from "./pageDark";
 import { useConvert } from "./convertStore";
 import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
@@ -227,6 +228,20 @@ export const commands: Command[] = [
   { id: "theme-system", title: "Theme: match system", run: () => st().setTheme("system") },
   { id: "theme-light", title: "Theme: light", run: () => st().setTheme("light") },
   { id: "theme-dark", title: "Theme: dark", run: () => st().setTheme("dark") },
+  {
+    id: "toggle-dark-pages",
+    title: "Toggle dark pages",
+    keys: ["Ctrl+Alt+D"],
+    // AltGr layouts send Ctrl+Alt: leave it to a text or form field
+    notInText: true,
+    run: () => {
+      const s = st();
+      s.setPageDark(togglePageDark(s.pageDark, s.theme, window.matchMedia("(prefers-color-scheme: dark)").matches));
+    },
+  },
+  { id: "pages-follow", title: "Pages: follow app theme", run: () => st().setPageDark("follow") },
+  { id: "pages-dark", title: "Pages: always dark", run: () => st().setPageDark("on") },
+  { id: "pages-normal", title: "Pages: always normal", run: () => st().setPageDark("off") },
   {
     id: "history",
     title: "Version history",

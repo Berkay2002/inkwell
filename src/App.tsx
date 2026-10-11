@@ -29,6 +29,7 @@ import { commandFor } from "./lib/commands";
 import { useCombine } from "./lib/combineStore";
 import { startHistoryEvents, useHistory } from "./lib/historyStore";
 import { guardWindowClose } from "./lib/edit";
+import { usePagesDark } from "./lib/usePagesDark";
 import { Organize } from "./components/Organize";
 import { useActiveDoc, useStore } from "./store";
 
@@ -48,6 +49,13 @@ export default function App() {
     if (theme === "system") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  // The pages' own colours: styles.css inverts the page images under data-pages="dark".
+  const pagesDark = usePagesDark();
+  useEffect(() => {
+    if (pagesDark) document.documentElement.dataset.pages = "dark";
+    else document.documentElement.removeAttribute("data-pages");
+  }, [pagesDark]);
 
   useEffect(() => startHistoryEvents(), []);
   useEffect(() => wireCommentRail(), []);

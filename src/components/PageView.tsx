@@ -4,10 +4,13 @@ import type { Shown } from "../lib/a11y";
 import { useAi } from "../lib/aiStore";
 import { type Rot, type Size, type TileRef, pageSpaceTransform, tileKeyStr } from "../lib/layout";
 import { type Mark, useRedact } from "../lib/redact";
+import { displayRect, naturalRects } from "../lib/pageDark";
 import { cached } from "../lib/tiles";
+import { usePagesDark } from "../lib/usePagesDark";
 import type { Rect4 } from "../store";
 import { AnnotLayer } from "./comments/AnnotLayer";
 import { MarkPreview } from "./MarkPreview";
+import { NaturalImage } from "./NaturalImage";
 import { TextEditLayer } from "./edit/TextEditLayer";
 import { FormLayer } from "./forms/FormLayer";
 import { TileCanvas } from "./TileCanvas";
@@ -58,6 +61,13 @@ export const PageView = memo(function PageView(p: Props) {
   const underTiles = under?.filter((u) => u.scale !== scale) ?? [];
 
   const lines = usePageText(docId, p.rev, page, p.wantText);
+  // Dark pages: the pictures on the page stay in their own colours.
+  const natural = useNaturalImages(docId, p.rev, page, rawSize);
+  // ... as boxes on the displayed page in CSS px, the space the tiles are drawn in
+  const naturalBoxes = useMemo(
+    () => natural.map((r) => displayRect(r, rawSize, rot).map((v) => v * zoom) as Rect4),
+    [natural, rawSize, rot, zoom],
+  );
   // The assistant's last clicked citation, highlighted on its page.
   const mark = useAi((s) => (s.mark && s.mark.doc === docId && s.mark.page === page ? s.mark : null));
 
@@ -80,6 +90,9 @@ export const PageView = memo(function PageView(p: Props) {
       ))}
       {tiles.map((t) => (
         <TileCanvas key={tileKeyStr(docId, t)} docId={docId} tile={t} size={size} zoom={zoom} onDrawn={onDrawn} />
+      ))}
+      {naturalBoxes.map((r, i) => (
+        <NaturalImage key={`n${i}`} rect={r} />
       ))}
       <div
         ref={space}
@@ -172,6 +185,31 @@ function usePageText(doc: number, rev: number, page: number, enabled: boolean) {
     };
   }, [doc, rev, page, enabled]);
   return enabled ? lines : null;
+}
+
+const NO_RECTS: Rect4[] = [];
+
+/** Boxes of the page's pictures to show in their own colours; none unless the pages are dark. */
+function useNaturalImages(doc: number, rev: number, page: number, size: Size): Rect4[] {
+  const dark = usePagesDark();
+  const [rects, setRects] = useState<Rect4[]>(NO_RECTS);
+  useLayoutEffect(() => {
+    if (!dark) {
+      setRects(NO_RECTS);
+      return;
+    }
+    let live = true;
+    cached(`${doc}:${rev}:${page}:img`, () => api.pageImages(doc, page)).then(
+      (images) => live && setRects(naturalRects(images, size)),
+      () => live && setRects(NO_RECTS),
+    );
+    return () => {
+      live = false;
+    };
+    // `size` is the page's own size: it changes only with the page
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dark, doc, rev, page, size[0], size[1]]);
+  return rects;
 }
 
 let measureCtx: CanvasRenderingContext2D | null = null;

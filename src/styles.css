@@ -229,15 +229,28 @@ select {
 .icon-btn:disabled {
   opacity: 0.35;
 }
+/* dark pages: the toggle with a small chevron for Follow / always dark / always normal */
+.dp-split {
+  display: inline-flex;
+  align-items: center;
+}
+.dp-split .dp-chev {
+  width: 16px;
+  margin-left: -2px;
+  padding: 0;
+}
 .pagebox {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 .pagebox input {
-  width: 48px;
+  /* the width is set inline in ch from the page count (pageBoxCh): a compact box like "1 / 91" */
+  width: 3ch;
   height: 28px;
+  padding: 0 2px;
   text-align: center;
+  font-variant-numeric: tabular-nums;
   background: var(--surface-2);
   border: 1px solid transparent;
   border-radius: 6px;
@@ -412,6 +425,82 @@ select {
 .textlayer > div::selection {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
   color: transparent;
+}
+
+/* Dark pages (data-pages is set on <html> by App.tsx).
+   Only the rendered page images are inverted, in one place: every .tile canvas (reader, thumbnails and
+   the Organize grid). The file, print, export and the assistant's page images are never touched.
+   Everything laid over the page keeps real colours and is adjusted below to stay readable on black. */
+:root[data-pages="dark"] .tile,
+:root[data-pages="dark"] .mk-preview,
+:root[data-pages="dark"] .org-ghost canvas {
+  /* invert + turn the hue back, then pull the range in: paper becomes a dark grey just above the
+     viewer's canvas (#1c1c1c) and ink an off-white (#e3e3e3) instead of pure black and white */
+  filter: invert(1) hue-rotate(180deg) contrast(0.78);
+}
+:root[data-pages="dark"] .page,
+:root[data-pages="dark"] .thumb,
+:root[data-pages="dark"] .org-page,
+:root[data-pages="dark"] .org-ghost canvas {
+  /* what paper turns into, so a tile that has not drawn yet does not flash */
+  background: #1c1c1c;
+}
+:root[data-pages="dark"] .page {
+  /* the page's own tokens (form fields, comment popovers, selection) resolve to their dark values */
+  color-scheme: dark;
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.16),
+    var(--shadow-2);
+}
+:root[data-pages="dark"] .org-page {
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.16);
+}
+/* A photo inside a dark page: a canvas laid over the filtered tiles that holds the same region copied from the
+   untouched tile pixels (NaturalImage), so the photo's colours are exactly the rendered ones. It carries no
+   filter itself. The boxes never overlap (naturalRects). */
+.nat-img {
+  position: absolute;
+  pointer-events: none;
+}
+/* multiply is invisible on black: lay translucent colour over the page instead */
+:root[data-pages="dark"] .hit {
+  mix-blend-mode: normal;
+  background: rgb(255 214 0 / 0.34);
+}
+:root[data-pages="dark"] .hit.current {
+  background: rgb(255 140 0 / 0.5);
+  outline-color: rgb(255 170 60);
+}
+:root[data-pages="dark"] .textlayer ::selection,
+:root[data-pages="dark"] .textlayer > div::selection {
+  background: rgb(90 150 255 / 0.5);
+}
+:root[data-pages="dark"] .cite-mark {
+  mix-blend-mode: normal;
+}
+:root[data-pages="dark"] .rd-mark {
+  box-shadow:
+    inset 0 0 0 calc(2.5px / var(--z)) #eceef3,
+    0 0 0 calc(1.5px / var(--z)) #eceef3;
+  outline-color: #eceef3;
+  background:
+    repeating-linear-gradient(135deg, rgb(236 238 243 / 0.6) 0 calc(1.5px / var(--z)), transparent calc(1.5px / var(--z)) calc(5px / var(--z))),
+    rgb(236 238 243 / 0.18);
+}
+:root[data-pages="dark"] .rd-mark.page-wide {
+  background:
+    repeating-linear-gradient(135deg, rgb(236 238 243 / 0.45) 0 calc(1.5px / var(--z)), transparent calc(1.5px / var(--z)) calc(7px / var(--z))),
+    rgb(236 238 243 / 0.1);
+}
+:root[data-pages="dark"] .rd-mark.drawing {
+  background: rgb(236 238 243 / 0.16);
+}
+:root[data-pages="dark"] .a11y-mark {
+  outline-color: #ff7a6c;
+  background: rgb(255 122 108 / 0.16);
+}
+:root[data-pages="dark"] .a11y-mark.whole {
+  background: none;
 }
 
 /* floating search bar */
@@ -1422,6 +1511,67 @@ select {
   margin: 4px 6px;
   border: 0;
   background: var(--border);
+}
+
+/* Tools: beside Read | Edit | Organize, same pill look, with a filter box and grouped list in its menu */
+.ax-toggle.tools-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  height: 36px;
+  margin-left: 8px;
+  padding: 0 10px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+}
+.ax-toggle.tools-btn:hover,
+.ax-toggle.tools-btn[aria-expanded="true"] {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.tools-btn svg:last-child {
+  color: var(--text-2);
+}
+.tools-menu {
+  min-width: 260px;
+  max-height: min(72vh, 580px);
+  overflow-y: auto;
+}
+.tools-filter {
+  width: 100%;
+  height: 32px;
+  margin-bottom: 2px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.tools-filter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.tools-head {
+  padding: 10px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.tools-menu button[role="option"] {
+  padding-left: 10px;
+}
+.tools-menu button[role="option"].active {
+  background: var(--surface-2);
+}
+.tools-none {
+  padding: 12px 10px;
+  color: var(--text-2);
 }
 
 @media (prefers-reduced-motion: reduce) {

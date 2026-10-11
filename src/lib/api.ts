@@ -71,6 +71,16 @@ export const authenticate = (doc: number, password: string) => invoke<OpenInfo>(
 export const closeDocument = (doc: number) => invoke<void>("close_document", { doc });
 export const outline = (doc: number) => invoke<OutlineItem[]>("outline", { doc });
 export const pageText = (doc: number, page: number) => invoke<TextLine[]>("page_text", { doc, page });
+/** An image a page draws: `rect` is what shows of it, in page space (points, origin top left). */
+export interface PageImageBlock {
+  rect: [number, number, number, number];
+  colorSpace: string;
+  /** Has a soft mask or a stencil mask: its shape is not the box. */
+  masked: boolean;
+}
+/** The images page `page` draws (dark pages keep the photographs in their own colours). */
+export const pageImages = (doc: number, page: number) =>
+  invoke<{ rev: number; images: PageImageBlock[] }>("image_blocks", { doc, page }).then((b) => b.images);
 export const cancelSearch = (doc: number) => invoke<void>("cancel_search", { doc });
 export const engineStats = () => invoke<EngineStats>("engine_stats");
 export const initialFiles = () => invoke<FileRef[]>("initial_files");
