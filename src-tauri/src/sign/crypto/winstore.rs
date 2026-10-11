@@ -185,10 +185,15 @@ impl ExternalKey for StoreKey {
     fn sign(&self, alg: DigestAlg, msg: &[u8]) -> Result<Vec<u8>, SignError> {
         let digest = alg.digest(&[msg]);
         let (mut handle, mut spec, mut owned) = (0usize, 0u32, 0i32);
+        // A PFX imported without persisting its key carries the live key handle as a property
+        // (the context owns it); CryptAcquireCertificatePrivateKey doesn't look there.
+        let mut size = std::mem::size_of::<usize>() as u32;
+        // SAFETY: a live context; `handle` is a usize-sized out buffer of `size` bytes.
+        let attached = unsafe { CertGetCertificateContextProperty(self.cert.0, CERT_NCRYPT_KEY_HANDLE_PROP_ID, &mut handle as *mut usize as *mut _, &mut size) } != 0;
         // Not silent: a smart card or token that needs a PIN or touch can show its own prompt.
         // SAFETY: the context is live; the out parameters are valid for the call.
-        let ok = unsafe { CryptAcquireCertificatePrivateKey(self.cert.0, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, null(), &mut handle, &mut spec, &mut owned) };
-        if ok == 0 {
+        let ok = attached || unsafe { CryptAcquireCertificatePrivateKey(self.cert.0, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, null(), &mut handle, &mut spec, &mut owned) } != 0;
+        if !ok {
             // SAFETY: reads the calling thread's last error.
             let code = unsafe { GetLastError() };
             return Err(SignError::Crypto(format!(

@@ -117,7 +117,7 @@ pub(super) mod win {
 
         /// Whether the context has a private key attached (a key provider reference, or a live key handle).
         pub fn has_key(&self) -> bool {
-            [CERT_KEY_PROV_INFO_PROP_ID, CERT_KEY_PROV_HANDLE_PROP_ID].into_iter().any(|prop| {
+            [CERT_KEY_PROV_INFO_PROP_ID, CERT_KEY_PROV_HANDLE_PROP_ID, CERT_KEY_CONTEXT_PROP_ID, CERT_NCRYPT_KEY_HANDLE_PROP_ID].into_iter().any(|prop| {
                 let mut size = 0u32;
                 // SAFETY: a size-only query (null buffer) on a live context.
                 unsafe { CertGetCertificateContextProperty(self.0, prop, null_mut(), &mut size) != 0 }
