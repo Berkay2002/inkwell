@@ -176,7 +176,7 @@ fn every_sample_survives_every_preset() {
     let mut names: Vec<String> = fs::read_dir(samples())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".pdf") && !n.starts_with("opt-out") && !n.contains("_Part"))
+        .filter(|n| n.ends_with(".pdf") && !n.starts_with("opt-out") && !n.starts_with("prot-out") && !n.contains("_Part"))
         .collect();
     names.sort();
     for name in names {

@@ -178,7 +178,7 @@ pub fn apply(eng: &Engine, doc: DocId, sanitize: Sanitize, save_to: Option<Strin
     if n == 0 {
         return Err(EngineError::Invalid("nothing is marked for redaction".into()));
     }
-    let opts = ApplyOptions { sanitize, password: eng.password(doc)?, ..ApplyOptions::default() };
+    let opts = ApplyOptions { sanitize, password: eng.password(doc)?.map(|p| p.to_string()), ..ApplyOptions::default() };
     let mut report = None;
     let mut leaks = None;
     let label = format!("Redact {n} item{}", s(n));

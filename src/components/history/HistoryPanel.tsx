@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { type Change, type Comparison, type VersionInfo, pickCompareFiles } from "../../lib/history";
+import type { Change, Comparison, VersionInfo } from "../../lib/history";
 import {
   FILTERS,
   WHO_WORD,
@@ -38,21 +38,20 @@ export function HistoryToggle() {
   );
 }
 
-const baseName = (p: string) => p.split(/[\\/]/).pop() || "document";
-
-export async function pickAndCompareFiles() {
-  try {
-    const sel = await pickCompareFiles();
-    if (!sel) return;
-    useHistory.getState().openCompare({
-      doc: null,
-      a: { kind: "picked", token: sel[0].token },
-      b: { kind: "picked", token: sel[1].token },
-      names: [baseName(sel[0].path), baseName(sel[1].path)],
-    });
-  } catch (e) {
-    useStore.getState().setUi({ error: String(e) });
-  }
+/** Opens Compare on its setup page. With a document: it is the new side and the version before the newest the old one. */
+export async function openCompareSetup(doc?: { id: number; name: string }) {
+  const h = useHistory.getState();
+  if (!doc) return h.openCompare({ doc: null, a: { kind: "current" }, b: { kind: "current" }, names: ["", ""], stage: "setup" });
+  if (!h.docs[doc.id]?.versions.length) await h.refresh(doc.id).catch(() => {});
+  const vs = useHistory.getState().docs[doc.id]?.versions ?? [];
+  const old = vs[1] ?? vs[0];
+  h.openCompare({
+    doc: doc.id,
+    a: old ? { kind: "version", id: old.id } : { kind: "current" },
+    b: { kind: "current" },
+    names: ["", doc.name],
+    stage: "setup",
+  });
 }
 
 /** Over the page: "Recover unsaved changes" after a crash, or "same document?" when the file could be an old one. */
@@ -114,7 +113,7 @@ function Header({ doc }: { doc: DocState }) {
           className="ax-icon"
           label="More"
           items={[
-            { label: "Compare files…", onSelect: () => void pickAndCompareFiles() },
+            { label: "Compare files…", onSelect: () => void openCompareSetup({ id: doc.id, name: doc.name }) },
             ...(ready
               ? [
                   "sep" as const,

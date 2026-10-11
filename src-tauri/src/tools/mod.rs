@@ -73,11 +73,32 @@ impl From<EngineError> for ToolError {
     }
 }
 
-/// Cancel flags of the running jobs, by the id the UI picked. A cancel that arrives before its job
-/// has registered is remembered, so the job starts cancelled.
+/// Cancel flags of the running jobs, by the id the UI picked. A cancel that arrives before its job has registered is
+/// remembered (the job then starts cancelled), but only for the last few ids; a cancel for a job that has finished
+/// is dropped, so neither can pile up or reach a later job.
 #[derive(Default)]
 pub struct Jobs {
     flags: Mutex<HashMap<u64, Arc<AtomicBool>>>,
+    rings: Mutex<Rings>,
+}
+
+/// Ids a cancel arrived for before their job began, and ids of jobs that ended: the last few of each.
+#[derive(Default)]
+struct Rings {
+    early: std::collections::VecDeque<u64>,
+    ended: std::collections::VecDeque<u64>,
+}
+
+const RING: usize = 64;
+
+impl Rings {
+    fn push(ring: &mut std::collections::VecDeque<u64>, id: u64) {
+        ring.retain(|x| *x != id);
+        if ring.len() == RING {
+            ring.pop_front();
+        }
+        ring.push_back(id);
+    }
 }
 
 pub struct JobGuard {
@@ -89,17 +110,35 @@ pub struct JobGuard {
 impl Drop for JobGuard {
     fn drop(&mut self) {
         self.jobs.flags.lock().remove(&self.id);
+        let mut r = self.jobs.rings.lock();
+        Rings::push(&mut r.ended, self.id);
     }
 }
 
 impl Jobs {
     pub fn begin(self: &Arc<Self>, id: u64) -> JobGuard {
         let cancel = self.flags.lock().entry(id).or_default().clone();
+        let mut r = self.rings.lock();
+        r.ended.retain(|x| *x != id);
+        if let Some(i) = r.early.iter().position(|x| *x == id) {
+            r.early.remove(i);
+            cancel.store(true, Ordering::Relaxed);
+        }
+        drop(r);
         JobGuard { jobs: self.clone(), id, cancel }
     }
 
+    /// Stops a running job. A cancel for an id that has already finished is ignored; one for an id nobody began yet
+    /// is held for it (a few at most).
     pub fn cancel(&self, id: u64) {
-        self.flags.lock().entry(id).or_default().store(true, Ordering::Relaxed);
+        if let Some(f) = self.flags.lock().get(&id) {
+            f.store(true, Ordering::Relaxed);
+            return;
+        }
+        let mut r = self.rings.lock();
+        if !r.ended.contains(&id) {
+            Rings::push(&mut r.early, id);
+        }
     }
 }
 
@@ -119,14 +158,15 @@ pub struct AuditReply {
 /// real images: the UI runs it after the audit and cancels it with the job id when the rail closes.
 pub fn estimate_for_ui(eng: &Engine, doc: DocId, cancel: &AtomicBool) -> Result<Vec<compress::estimate::Estimate>, ToolError> {
     let path = PathBuf::from(eng.doc_entry(doc)?.path());
-    let audit = compress::audit_file(&path, None)?;
-    Ok(compress::estimate::estimate(&path, None, &audit, cancel)?)
+    let password = eng.file_password(doc)?;
+    let audit = compress::audit_file(&path, password.as_ref().map(|p| p.as_str()))?;
+    Ok(compress::estimate::estimate(&path, password.as_ref().map(|p| p.as_str()), &audit, cancel)?)
 }
 
 pub fn audit_for_ui(eng: &Engine, doc: DocId) -> Result<AuditReply, ToolError> {
     let path = PathBuf::from(eng.doc_entry(doc)?.path());
     let path = path.as_path();
-    let audit = compress::audit_file(path, None)?;
+    let audit = compress::audit_file(path, eng.file_password(doc)?.as_ref().map(|p| p.as_str()))?;
     let out = compress::default_output(path);
     Ok(AuditReply {
         size: std::fs::metadata(path).map_err(|e| ToolError(e.to_string()))?.len(),
@@ -168,7 +208,8 @@ pub fn run_compress(
     // input is still never replaced (the engine checks).
     opts.replace_output = output.is_some();
     opts.output = output;
-    opts.password = None;
+    // The file on disk is what compress reads: its password, which Save may have just changed.
+    opts.password = eng.file_password(req.doc)?.map(|p| p.to_string());
     // The fraction only ever grows, whatever the stages report.
     let mut last = 0.0f32;
     let mut mono = |mut p: compress::Progress| {

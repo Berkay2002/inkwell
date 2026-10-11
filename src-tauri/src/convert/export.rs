@@ -134,6 +134,8 @@ pub struct ExportOutput {
 // ---------------------------------------------------------------- source
 
 fn open_source(eng: &Engine, doc: DocId) -> Result<(Document, String), Error> {
+    // Exports write unprotected files: not from a file whose owner restricted copying or page changes.
+    eng.ensure_extractable(doc)?;
     let entry = eng.doc_entry(doc)?;
     let stem = Path::new(&entry.path()).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let (_, source) = eng.doc_source(doc)?;
