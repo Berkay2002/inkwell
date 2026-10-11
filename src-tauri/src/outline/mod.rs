@@ -483,31 +483,50 @@ pub fn list(eng: &Engine, doc: DocId) -> Result<Bookmarks> {
     eng.read_custom(doc, |d| read(d, entry.generation()))
 }
 
-/// The entries of an array object, at most `max` of them; nothing for anything else.
-fn array_items(a: Option<PdfObject>, max: usize) -> Vec<PdfObject> {
-    let Some(a) = a.filter(|a| a.is_array().unwrap_or(false)) else { return Vec::new() };
-    (0..a.len().unwrap_or(0).min(max) as i32).filter_map(|i| a.get_array(i).ok().flatten()).collect()
+/// What a walk of the form could not finish. A caller that asks whether the document is certified refuses on it
+/// (`signed` says yes): what was skipped may be the signature that was looked for.
+fn unchecked() -> EngineError {
+    EngineError::Invalid(
+        "This document's form is too large or too damaged to check for a certification, so Inkwell treats it as certified and leaves it as it is."
+            .into(),
+    )
+}
+
+/// The entries of an array object (nothing for anything else). An array longer than `max`, or an entry that cannot be
+/// read, is an error and not a shorter list: whatever is dropped may be what the caller is looking for.
+fn array_items(a: Option<PdfObject>, max: usize) -> Result<Vec<PdfObject>> {
+    let Some(a) = a.filter(|a| a.is_array().unwrap_or(false)) else { return Ok(Vec::new()) };
+    let n = a.len()?;
+    if n > max {
+        return Err(unchecked());
+    }
+    let mut items = Vec::with_capacity(n);
+    for i in 0..n as i32 {
+        items.extend(a.get_array(i)?);
+    }
+    Ok(items)
 }
 
 /// The `/V` of every signature field that has one (its own, or the nearest of its ancestors in the walk), found in
-/// the AcroForm's field tree. Bounded (each field once per state, a cap on fields and on what is waiting), and a
-/// damaged node is skipped, never an error.
-fn signature_values(form: &PdfObject) -> Vec<PdfObject> {
+/// the AcroForm's field tree. Bounded (each field once per state, a cap on fields and on what is waiting). A node
+/// that is not a dictionary is skipped; a walk that hits a cap or cannot read a node is an error ([`unchecked`]), never
+/// a shorter answer.
+fn signature_values(form: &PdfObject) -> Result<Vec<PdfObject>> {
     const CAP: usize = 20_000;
     let mut found = Vec::new();
     // (field, is a signature by inheritance, the /V inherited from above and who it is: its object number, or its
-    // holder's when it is direct, -1 when neither has one)
+    // holder's when it is direct)
     let mut todo: Vec<(PdfObject, bool, Option<(PdfObject, i32)>)> =
-        array_items(form.get_dict("Fields").ok().flatten(), CAP).into_iter().map(|f| (f, false, None)).collect();
+        array_items(form.get_dict("Fields")?, CAP)?.into_iter().map(|f| (f, false, None)).collect();
     // Once per (field, inherited type, inherited value): the same field reached from two parents is read in each state.
     let mut seen: HashSet<(i32, bool, i32)> = HashSet::new();
     let mut budget = CAP;
     let number_of = |o: &PdfObject| o.is_indirect().unwrap_or(false).then(|| o.as_indirect().ok()).flatten();
     while let Some((field, inherited, above)) = todo.pop() {
-        budget -= 1;
         if budget == 0 {
-            break;
+            return Err(unchecked());
         }
+        budget -= 1;
         let num = number_of(&field);
         if let Some(n) = num {
             if !seen.insert((n, inherited, above.as_ref().map_or(i32::MIN, |a| a.1))) {
@@ -517,10 +536,12 @@ fn signature_values(form: &PdfObject) -> Vec<PdfObject> {
         if !field.resolve().ok().flatten().is_some_and(|d| d.is_dict().unwrap_or(false)) {
             continue;
         }
-        let kind = name_of(field.get_dict("FT").ok().flatten());
+        let kind = name_of(field.get_dict("FT")?);
         let is_sig = if kind.is_empty() { inherited } else { kind == "Sig" };
-        let value = field.get_dict("V").ok().flatten().map(|v| {
-            let id = number_of(&v).or(num).unwrap_or(-1);
+        let value = field.get_dict("V")?.map(|v| {
+            // A direct value in a direct field has no number: its DocMDP stands for it, so two of them that certify
+            // alike are one state and a revisit of the same one is not a new state (negative, clear of -1 and MIN).
+            let id = number_of(&v).or(num).unwrap_or_else(|| -10 - reference_p(&v).unwrap_or(0));
             (v, id)
         });
         let value = value.or(above);
@@ -528,20 +549,29 @@ fn signature_values(form: &PdfObject) -> Vec<PdfObject> {
             found.extend(value.as_ref().map(|v| v.0.clone()));
         }
         let room = CAP.saturating_sub(todo.len());
-        todo.extend(array_items(field.get_dict("Kids").ok().flatten(), room).into_iter().map(|k| (k, is_sig, value.clone())));
+        todo.extend(array_items(field.get_dict("Kids")?, room)?.into_iter().map(|k| (k, is_sig, value.clone())));
     }
-    found
+    Ok(found)
 }
 
-/// The `/P` of the `/DocMDP` transform in a signature's `/Reference` array (2 when it names none, or one outside
-/// 1..=3); `None` when the signature has no such transform. Several: the strictest, whatever the order.
+/// The `/P` of the `/DocMDP` transform in a signature's `/Reference` array: 2 when it names none (the default), 1 when
+/// it names one that is not 1, 2 or 3 (a damaged certification is the strictest, not the loosest); `None` when the
+/// signature has no such transform. Several: the strictest, whatever the order. A `/Reference` that is one dictionary
+/// is read as the one entry it would be, and one with more than 16 entries as `/P 1`.
 fn reference_p(sig: &PdfObject) -> Option<i32> {
-    array_items(sig.get_dict("Reference").ok().flatten(), 16)
-        .iter()
+    let refs = sig.get_dict("Reference").ok().flatten();
+    let list = match refs {
+        Some(r) if r.is_dict().unwrap_or(false) => vec![r],
+        r => match array_items(r, 16) {
+            Ok(list) => list,
+            Err(_) => return Some(1),
+        },
+    };
+    list.iter()
         .filter(|r| name_of(r.get_dict("TransformMethod").ok().flatten()) == "DocMDP")
         .map(|r| {
-            let p = r.get_dict("TransformParams").ok().flatten().and_then(|t| t.get_dict("P").ok().flatten());
-            number(&p).map(|v| v as i32).filter(|v| (1..=3).contains(v)).unwrap_or(2)
+            let p = r.get_dict("TransformParams").ok().flatten().and_then(|t| t.get_dict("P").ok().flatten()).filter(|p| !p.is_null().unwrap_or(false));
+            if p.is_none() { 2 } else { number(&p).filter(|v| matches!(*v, 1.0 | 2.0 | 3.0)).map_or(1, |v| v as i32) }
         })
         .min()
 }
@@ -558,7 +588,10 @@ pub(crate) fn certified(doc: &PdfDocument) -> Result<Option<i32>> {
         Some(sig) if !sig.is_null().unwrap_or(true) => Some(reference_p(&sig).unwrap_or(2)),
         _ => None,
     };
-    let from_fields = cat.get_dict("AcroForm").ok().flatten().and_then(|form| signature_values(&form).iter().filter_map(reference_p).min());
+    let from_fields = match cat.get_dict("AcroForm")? {
+        Some(form) => signature_values(&form)?.iter().filter_map(reference_p).min(),
+        None => None,
+    };
     Ok(from_catalog.into_iter().chain(from_fields).min())
 }
 
@@ -566,7 +599,7 @@ pub(crate) fn certified(doc: &PdfDocument) -> Result<Option<i32>> {
 /// field that has a value. Saving it in full would void the signatures (they cover the bytes of the file
 /// as it was), so changes to it stay incremental: nothing that was written is rewritten.
 pub(crate) fn signed(doc: &PdfDocument) -> bool {
-    signed_inner(doc).unwrap_or(false)
+    signed_inner(doc).unwrap_or(true)
 }
 
 fn signed_inner(doc: &PdfDocument) -> Result<bool> {
@@ -578,7 +611,7 @@ fn signed_inner(doc: &PdfDocument) -> Result<bool> {
     if number(&form.get_dict("SigFlags")?).is_some_and(|f| f as i32 & 1 != 0) {
         return Ok(true);
     }
-    Ok(!signature_values(&form).is_empty())
+    Ok(!signature_values(&form)?.is_empty())
 }
 
 // ---- writing ----

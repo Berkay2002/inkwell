@@ -463,7 +463,7 @@ fn is_signed(doc: &mupdf::pdf::PdfDocument) -> Option<bool> {
     if ocr::is_signed(doc) {
         return Some(true);
     }
-    if crate::outline::certified(doc).map_or(true, |c| c.is_some()) {
+    if crate::outline::certified(doc).ok()?.is_some() {
         return Some(true);
     }
     let form = crate::forms::list(doc).ok()?;

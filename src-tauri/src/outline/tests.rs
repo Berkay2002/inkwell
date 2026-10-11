@@ -721,11 +721,17 @@ fn a_certified_document_keeps_its_bookmarks() {
 
 /// `certified` and `signed` of a file whose catalog carries `catalog` and whose objects 7, 8, ... are `objs`.
 fn certification_of(name: &str, catalog: &str, objs: &[&str]) -> (Option<i32>, bool) {
+    let (certified, signed) = checked_certification_of(name, catalog, objs);
+    (certified.unwrap(), signed)
+}
+
+/// As [`certification_of`], with `certified`'s own result (an error is an answer here, `signed` still gives one).
+fn checked_certification_of(name: &str, catalog: &str, objs: &[&str]) -> (std::result::Result<Option<i32>, EngineError>, bool) {
     let d = dir("outline", name);
     let items: Vec<String> = objs.iter().map(|o| o.to_string()).collect();
     let pdf = outline_pdf_with(catalog, "<< /Type /Outlines /Count 0 >>", &items);
     let (eng, id, _) = open_bytes(&d, "c.pdf", &pdf);
-    eng.read_custom(id, |doc| Ok((certified(doc)?, signed(doc)))).unwrap()
+    eng.read_custom(id, |doc| Ok((certified(doc), signed(doc)))).unwrap()
 }
 
 /// A signature value whose `/Reference` holds `refs` (raw dictionaries).
@@ -746,14 +752,20 @@ fn a_signature_field_that_certifies_the_document_is_seen_like_the_catalog_entry(
     assert_eq!(certification_of("cat-1", &cat("/TransformParams << /P 1 >>"), &[]), (Some(1), true));
     assert_eq!(certification_of("cat-default", &cat(""), &[]), (Some(2), true));
     assert_eq!(certification_of("cat-null", "/Perms << /DocMDP null >>", &[]).0, None);
-    // The field's own reference: P 3, no /P (2), a /P outside 1..=3 (2).
+    // The field's own reference: P 3, no /P (2). A /P that is there and is not 1, 2 or 3 is the strictest (1).
     let p3 = field(&doc_mdp("/TransformParams << /P 3 >>"));
     assert_eq!(certification_of("field-3", form, &[&p3]), (Some(3), true));
     let none = field(&doc_mdp("/TransformParams << /Type /TransformParams >>"));
     assert_eq!(certification_of("field-default", form, &[&none]).0, Some(2));
     assert_eq!(certification_of("field-no-params", form, &[&field(&doc_mdp(""))]).0, Some(2));
-    let wild = field(&doc_mdp("/TransformParams << /P 99 >>"));
-    assert_eq!(certification_of("field-99", form, &[&wild]).0, Some(2));
+    for (name, p) in [("99", "99"), ("0", "0"), ("name", "/One"), ("string", "(1)"), ("fraction", "2.5"), ("array", "[2]")] {
+        let wild = field(&doc_mdp(&format!("/TransformParams << /P {p} >>")));
+        assert_eq!(certification_of(&format!("field-p-{name}"), form, &[&wild]).0, Some(1), "/P {p}");
+    }
+    let null_p = field(&doc_mdp("/TransformParams << /P null >>"));
+    assert_eq!(certification_of("field-p-null", form, &[&null_p]).0, Some(2));
+    let cat_bad = |p: &str| format!("/Perms << /DocMDP << /Type /Sig /Reference [ {} ] >> >>", doc_mdp(&format!("/TransformParams << /P {p} >>")));
+    assert_eq!(certification_of("cat-p-0", &cat_bad("0"), &[]).0, Some(1));
     // Several references: the strictest, in whatever order they come.
     let two = field(&format!("{} {}", doc_mdp("/TransformParams << /P 3 >>"), doc_mdp("/TransformParams << /P 1 >>")));
     assert_eq!(certification_of("field-two", form, &[&two]).0, Some(1));
@@ -800,6 +812,79 @@ fn the_signature_type_and_value_are_found_through_the_field_tree() {
     // Not a signature field: a text field's /V is not looked at.
     let text = format!("<< /FT /Tx /T (T) {v} >>");
     assert_eq!(certification_of("text-field", "/AcroForm << /Fields [7 0 R] >>", &[&text]), (None, false));
+}
+
+#[test]
+fn a_signature_of_a_shape_no_writer_makes_is_read_toward_refusing() {
+    let form = "/AcroForm << /Fields [7 0 R] >>";
+    let certifying = doc_mdp("/TransformParams << /P 1 >>");
+    // /V that is not a dictionary: a value, so signed, and no DocMDP to read.
+    for (name, v) in [("string", "(text)"), ("int", "12"), ("name", "/Sig")] {
+        let obj = format!("<< /FT /Sig /T (S) /V {v} >>");
+        assert_eq!(certification_of(&format!("v-{name}"), form, &[&obj]), (None, true), "/V {v}");
+    }
+    // /Reference that is one dictionary where an array belongs: read as the one entry it would be.
+    let lone = format!("<< /FT /Sig /T (S) /V << /Type /Sig /Contents <00> /Reference {certifying} >> >>");
+    assert_eq!(certification_of("reference-dict", form, &[&lone]), (Some(1), true));
+    // /Reference that is neither: nothing to read, still signed.
+    let junk = "<< /FT /Sig /T (S) /V << /Type /Sig /Contents <00> /Reference (x) >> >>";
+    assert_eq!(certification_of("reference-string", form, &[junk]), (None, true));
+    // More references than are read: the strictest answer, not the first 16.
+    let many = format!("<< /FT /Sig /T (S) /V << /Type /Sig /Contents <00> /Reference [ {} {certifying} ] >> >>", "<< /TransformMethod /FieldMDP >> ".repeat(16));
+    assert_eq!(certification_of("reference-many", form, &[&many]), (Some(1), true));
+}
+
+/// A form whose first field (object 7) is a certifying signature (`/P 1`), then `n` references to one plain text field
+/// (object 8), and `kids` of those under a parent (object 9) listed last.
+fn crowded_form(name: &str, n: usize, kids: usize) -> (std::result::Result<Option<i32>, EngineError>, bool) {
+    let certifying = format!("<< /FT /Sig /T (S) {} >>", sig_value(&doc_mdp("/TransformParams << /P 1 >>")));
+    let parent = format!("<< /T (P) /Kids [{}] >>", "8 0 R ".repeat(kids));
+    let fields = format!("[7 0 R {}{}]", "8 0 R ".repeat(n), if kids > 0 { "9 0 R" } else { "" });
+    checked_certification_of(name, &format!("/AcroForm << /Fields {fields} >>"), &[&certifying, "<< /FT /Tx /T (t) >>", &parent])
+}
+
+#[test]
+fn a_walk_that_hits_its_caps_refuses_instead_of_answering_not_certified() {
+    // Exactly at the cap: fine, and the signature is found.
+    assert_eq!(crowded_form("cap-exact", 19_999, 0).0.unwrap(), Some(1));
+    // One field past the cap in /Fields: an error, and signed (nothing else says so).
+    let (c, signed) = crowded_form("cap-fields", 20_000, 0);
+    assert!(matches!(&c, Err(EngineError::Invalid(m)) if m.contains("certified")), "{c:?}");
+    assert!(signed);
+    // The nodes of the walk add up past the cap: the certifying field at the front is the last one popped.
+    let (c, signed) = crowded_form("cap-budget", 1, 19_998);
+    assert!(matches!(&c, Err(EngineError::Invalid(m)) if m.contains("certified")), "{c:?}");
+    assert!(signed);
+    // A caller that refuses on a certified document refuses on that too.
+    let d = dir("outline", "cap-caller");
+    let certifying = format!("<< /FT /Sig /T (S) {} >>", sig_value(&doc_mdp("/TransformParams << /P 1 >>")));
+    let parent = format!("<< /T (P) /Kids [{}] >>", "8 0 R ".repeat(19_999));
+    let pdf = outline_pdf_with("/AcroForm << /Fields [7 0 R 9 0 R] >>", "<< /Type /Outlines /Count 0 >>", &[certifying, "<< /FT /Tx /T (t) >>".into(), parent]);
+    let (eng, id, _) = open_bytes(&d, "big.pdf", &pdf);
+    match apply(&eng, id, rev(&eng, id), &BookmarkOp::Rename { id: 7, title: "B".into() }, EditSource::User) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_field_shared_by_parents_that_hold_their_value_inline_is_read_under_each() {
+    // Both parents are direct (no object number), so only what each one certifies tells their states apart.
+    let approval = "/V << /Type /Sig /ByteRange [0 10 20 30] /Contents <00> >>";
+    let certifying = sig_value(&doc_mdp("/TransformParams << /P 1 >>"));
+    for (name, a, b) in [("inline-ab", approval, certifying.as_str()), ("inline-ba", certifying.as_str(), approval)] {
+        let form = format!("/AcroForm << /Fields [ << /T (A) {a} /Kids [7 0 R] >> << /T (B) {b} /Kids [7 0 R] >> ] >>");
+        assert_eq!(certification_of(name, &form, &["<< /FT /Sig /T (K) >>"]), (Some(1), true), "{name}");
+    }
+}
+
+#[test]
+fn a_direct_value_that_loops_back_to_its_field_ends_the_walk() {
+    // 7 -> a direct kid with a direct /V -> 7: every lap is the same state, so it is read once (and it is an answer,
+    // not the error a walk that never ran out of new states would end in).
+    let v = sig_value(&doc_mdp("/TransformParams << /P 3 >>"));
+    let looped = format!("<< /FT /Sig /T (A) /Kids [ << /T (B) {v} /Kids [7 0 R] >> ] >>");
+    assert_eq!(certification_of("direct-loop", "/AcroForm << /Fields [7 0 R] >>", &[&looped]), (Some(3), true));
 }
 
 #[test]
