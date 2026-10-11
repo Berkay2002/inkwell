@@ -1,6 +1,7 @@
 import { type DocState, useStore } from "../store";
 import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
+import { openA11y, useA11y } from "./a11y";
 import { useRedact } from "./redact";
 import { useSearch } from "./searchStore";
 import { useAnnot } from "./annot";
@@ -11,6 +12,7 @@ import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
 import { useConvert } from "./convertStore";
+import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
 import { usePrint } from "./printStore";
 import { useTextEdit } from "./textEdit";
@@ -118,6 +120,11 @@ export const commands: Command[] = [
     needsDoc: true,
     run: () => useTools.getState().open("ocr", undefined, { scope: "page" }),
   },
+  { id: "header-footer", title: "Add header and footer…", needsDoc: true, run: () => useMarks.getState().open("headerFooter") },
+  { id: "page-numbers", title: "Add page numbers…", needsDoc: true, run: () => useMarks.getState().open("headerFooter") },
+  { id: "watermark", title: "Add watermark…", needsDoc: true, run: () => useMarks.getState().open("watermark") },
+  { id: "background", title: "Add background…", needsDoc: true, run: () => useMarks.getState().open("background") },
+  { id: "bates", title: "Add Bates numbering…", needsDoc: true, run: () => useMarks.getState().open("bates") },
   { id: "protect", title: "Protect with a password…", needsDoc: true, run: () => useProtect.getState().open("protect") },
   { id: "security", title: "Document properties and security…", needsDoc: true, run: () => useProtect.getState().open("security") },
   { id: "export", title: "Export pages, text or images…", needsDoc: true, run: () => useConvert.getState().openExport() },
@@ -221,6 +228,12 @@ export const commands: Command[] = [
       useHistory.getState().closeCompare();
       useHistory.getState().toggle();
     },
+  },
+  {
+    id: "a11y",
+    title: "Check accessibility…",
+    needsDoc: true,
+    run: () => (useA11y.getState().open ? useA11y.getState().setOpen(false) : openA11y()),
   },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },
