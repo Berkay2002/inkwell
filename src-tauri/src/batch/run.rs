@@ -453,7 +453,7 @@ fn tree_size(p: &Path) -> u64 {
 // ---------------------------------------------------------------- signatures
 
 /// A signature the file carries: the "signatures exist" flag, a certification (DocMDP), or a signature
-/// field that has a value.
+/// field that has a value. A form that cannot be listed (too large to scan) counts as signed.
 fn is_signed(doc: &mupdf::pdf::PdfDocument) -> bool {
     if ocr::is_signed(doc) {
         return true;
@@ -464,7 +464,7 @@ fn is_signed(doc: &mupdf::pdf::PdfDocument) -> bool {
         .and_then(|c| c.get_dict("Perms").ok().flatten())
         .is_some_and(|p| p.get_dict("DocMDP").ok().flatten().is_some_and(|d| !d.is_null().unwrap_or(true)));
     certified
-        || crate::forms::list(doc).is_ok_and(|f| {
+        || crate::forms::list(doc).map_or(true, |f| {
             f.fields.iter().any(|f| {
                 f.kind == crate::forms::FieldKind::Signature
                     && doc

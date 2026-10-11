@@ -461,3 +461,56 @@ fn links_do_not_count_against_the_annotation_budget() {
     assert_eq!(l.items.len(), 1);
     assert!(!l.incomplete);
 }
+
+/// 2000 pages with a direct `/Annots` of 1001 references to object 4 (a square): 2 002 000 entries,
+/// all but the first a repeat. Objects: 3 note, 4 square.
+fn repeated_square_file() -> Vec<u8> {
+    let refs = "4 0 R ".repeat(1001);
+    pages_and(2000, vec![NOTE.into(), SQUARE.into()], |_| format!("/Annots [{refs}]"))
+}
+
+#[test]
+fn repeated_entries_past_the_scan_budget_leave_pages_out_and_say_so() {
+    let (eng, id) = open_raw("repeats", repeated_square_file());
+    let l = list_status(&eng, id).unwrap();
+    assert_eq!(l.items.iter().map(|a| (a.page, a.xref)).collect::<Vec<_>>(), vec![(0, 4)]);
+    assert!(l.incomplete);
+    // The walk itself stops: pages after the cap are not looked at.
+    let mut walk = AnnotWalk::default();
+    eng.read_custom(id, |d| {
+        while !walk.incomplete {
+            let _ = walk.page(d, 1, Which::Comments)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(walk.scanned > MAX_SCANNED);
+}
+
+#[test]
+fn unshared_links_do_not_use_the_scan_budget_whatever_the_page_count() {
+    // 300 pages x 200 links of their own, and a note on every page: 60 000 entries met once each.
+    let (pages, per) = (300usize, 200usize);
+    let link = "<< /Type /Annot /Subtype /Link /Rect [0 0 20 20] >>";
+    let mut rest: Vec<String> = (0..pages).map(|_| NOTE.to_string()).collect();
+    rest.extend((0..pages * per).map(|_| link.to_string()));
+    let bytes = pages_and(pages, rest, |i| {
+        let links: String = (0..per).map(|j| format!("{} 0 R ", 3 + pages + i * per + j)).collect();
+        format!("/Annots [{} 0 R {links}]", 3 + i)
+    });
+    let (eng, id) = open_raw("unshared-links", bytes);
+    let (n, scanned, incomplete) = eng
+        .read_custom(id, |d| {
+            let mut walk = AnnotWalk::default();
+            let mut n = 0;
+            for p in 0..d.page_count()? as u32 {
+                n += walk.page(d, p, Which::Comments)?.map_or(0, |f| f.nums.len());
+            }
+            Ok((n, walk.scanned, walk.incomplete))
+        })
+        .unwrap();
+    assert_eq!((n, scanned, incomplete), (pages, 0, false));
+    let l = list_status(&eng, id).unwrap();
+    assert_eq!(l.items.len(), pages);
+    assert!(!l.incomplete);
+}

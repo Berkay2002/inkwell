@@ -1838,3 +1838,47 @@ fn a_reversed_form_whose_widgets_keep_their_old_p_lists_every_field_fast() {
     assert_eq!(form.fields.len(), pages * per);
     assert!(form.fields.iter().enumerate().all(|(n, f)| f.page == (n / per) as u32));
 }
+
+/// 2000 pages whose direct `/Annots` list object 3 (a widget) 1001 times: past the scan budget.
+fn repeated_widget_form() -> Vec<u8> {
+    let refs = "3 0 R ".repeat(1001);
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [3 0 R] >> >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count 2000 >>", (0..2000).map(|i| format!("{} 0 R ", 4 + i)).collect::<String>()),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (A) /Rect [72 100 200 120] /F 4 >>".to_string(),
+    ];
+    objs.extend((0..2000).map(|_| format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{refs}] >>")));
+    pdf_of(&objs)
+}
+
+#[test]
+fn a_form_past_the_scan_budget_is_refused_not_listed_with_fields_missing() {
+    let (eng, id, _) = open_bytes("scan-repeats", repeated_widget_form());
+    let err = match list_all(&eng, id) {
+        Err(e) => e.to_string(),
+        Ok(f) => panic!("{} fields listed", f.fields.len()),
+    };
+    assert!(err.contains("too large to edit safely"), "{err}");
+}
+
+#[test]
+fn a_form_whose_pages_carry_many_unshared_links_lists_every_field() {
+    // 300 pages x 200 links of their own (60 000 entries), widgets A and B on page 150
+    let (pages, per) = (300usize, 200usize);
+    let first = 3 + 2 + pages * per;
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [3 0 R 4 0 R] >> >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count {pages} >>", (0..pages).map(|i| format!("{} 0 R ", first + i)).collect::<String>()),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (A) /Rect [72 100 200 120] /F 4 >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (B) /Rect [72 140 200 160] /F 4 >>".to_string(),
+    ];
+    objs.extend((0..pages * per).map(|_| "<< /Type /Annot /Subtype /Link /Rect [0 0 20 20] >>".to_string()));
+    for i in 0..pages {
+        let links: String = (0..per).map(|j| format!("{} 0 R ", 5 + i * per + j)).collect();
+        let widgets = if i == 150 { "3 0 R 4 0 R " } else { "" };
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{widgets}{links}] >>"));
+    }
+    let (eng, id, _) = open_bytes("scan-links", pdf_of(&objs));
+    let form = list_all(&eng, id).unwrap();
+    assert_eq!(form.fields.iter().map(|f| (f.page, f.name.as_str())).collect::<Vec<_>>(), vec![(150, "A"), (150, "B")]);
+}

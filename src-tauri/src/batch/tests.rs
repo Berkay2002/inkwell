@@ -1301,6 +1301,24 @@ fn signatures_are_found_by_flag_certification_and_signed_field() {
 }
 
 #[test]
+fn a_file_whose_form_cannot_be_scanned_counts_as_signed() {
+    // A signature field with a value, no SigFlags, no DocMDP, on 2000 pages that each repeat its
+    // widget 1001 times: past the form scan budget, so the field list errors.
+    let d = dir("signed-unscannable");
+    let refs = "3 0 R ".repeat(1001);
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [3 0 R] >> >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count 2000 >>", (0..2000).map(|i| format!("{} 0 R ", 4 + i)).collect::<String>()),
+        "<< /Type /Annot /Subtype /Widget /FT /Sig /T (S) /Rect [0 0 50 20] /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /Contents <00> /ByteRange [0 0 0 0] >> >>".to_string(),
+    ];
+    objs.extend((0..2000).map(|_| format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{refs}] /Resources << >> >>")));
+    let f = put(&d, "big.pdf", &assemble(&objs, ""));
+    let r = go(&action("n", vec![footer("<<1>>")]), &[f], None);
+    assert_eq!(r.files[0].status, Status::Skipped, "{:?}", r.files[0].reason);
+    assert!(r.files[0].reason.as_deref().unwrap().starts_with("signed:"));
+}
+
+#[test]
 fn an_imported_name_stays_within_the_limit() {
     let d = dir("long-name");
     let s = Store::new(d.join("actions"));

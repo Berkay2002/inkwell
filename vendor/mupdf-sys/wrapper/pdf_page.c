@@ -108,6 +108,7 @@ fz_rect mupdf_pdf_page_bounds(fz_context *ctx, fz_document *doc, int number, mup
 {
     fz_rect rect = fz_empty_rect;
     fz_matrix ctm = fz_identity;
+    fz_var(rect);
     fz_try(ctx)
     {
         pdf_document *pdf = pdf_specifics(ctx, doc);

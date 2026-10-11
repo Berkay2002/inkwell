@@ -283,11 +283,12 @@ fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
 /// Annotations loaded for one document by [`list`]: past this the rest of the pages are left out
 /// and the list says so (`incomplete`).
 const MAX_LOADED: usize = 50_000;
-/// Array entries [`AnnotWalk`] looks at in one document, loaded or not.
+/// Entries [`AnnotWalk`] meets again in one document (an object an earlier array listed too). The
+/// first sight of an object is not counted, so a file's size does not use the budget up.
 const MAX_SCANNED: usize = 2_000_000;
 
 /// The comments of a document, and whether some were left out (past [`MAX_LOADED`] annotations or
-/// [`MAX_SCANNED`] array entries).
+/// [`MAX_SCANNED`] repeated array entries).
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AnnotList {
@@ -326,23 +327,49 @@ pub(crate) struct Fresh {
 pub(crate) struct AnnotWalk {
     arrays: HashSet<i32>,
     seen: HashSet<i32>,
-    /// Pages asked about as a `/P` owner: what each lists, read (and charged) once.
-    listed: HashMap<i32, Listed>,
+    /// What each indirect entry met so far is, so that meeting it again costs no dictionary read.
+    class: HashMap<i32, Class>,
+    /// What an owner page's array lists, read once per array (by object number when it is indirect).
+    listed: HashMap<ListKey, HashSet<i32>>,
     scanned: usize,
     /// The scan cap was hit: pages from then on are left out.
     pub incomplete: bool,
 }
 
-/// The objects a page lists in `/Annots`, and that array's number when it is an indirect one.
-#[derive(Default)]
-struct Listed {
-    array: Option<i32>,
-    nums: HashSet<i32>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+    NotDict,
+    /// Loading the page makes no annotation of it.
+    Link,
+    Widget,
+    Other,
+}
+
+impl Class {
+    fn of(e: &PdfObject) -> Result<Class> {
+        if !e.is_dict()? {
+            return Ok(Class::NotDict);
+        }
+        Ok(match e.get_dict("Subtype")?.and_then(|s| s.as_name().ok()).as_deref() {
+            Some(b"Link" | b"Popup") => Class::Link,
+            Some(b"Widget") => Class::Widget,
+            _ => Class::Other,
+        })
+    }
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum ListKey {
+    /// An indirect `/Annots` array, by object number.
+    Array(i32),
+    /// A direct one, by the page that has it.
+    Page(i32),
 }
 
 impl AnnotWalk {
-    fn charge(&mut self, n: usize) -> bool {
-        self.scanned = self.scanned.saturating_add(n);
+    /// Counts one repeated entry; true once the budget is gone.
+    fn repeat(&mut self) -> bool {
+        self.scanned += 1;
         if self.scanned > MAX_SCANNED {
             self.incomplete = true;
         }
@@ -351,6 +378,9 @@ impl AnnotWalk {
 
     /// `None` when loading page `p` would add nothing (no annotations, or all assigned already).
     pub fn page(&mut self, doc: &PdfDocument, p: u32, which: Which) -> Result<Option<Fresh>> {
+        if self.incomplete {
+            return Ok(None);
+        }
         let Some(annots) = doc.find_page(p as i32)?.get_dict("Annots")? else { return Ok(None) };
         if !annots.is_array()? {
             return Ok(None);
@@ -359,33 +389,39 @@ impl AnnotWalk {
         if annots.is_indirect()? && !self.arrays.insert(annots.as_indirect()?) {
             return Ok(None);
         }
-        let len = annots.len()?;
-        if self.charge(len) {
-            return Ok(None);
-        }
         let mut fresh = Fresh { nums: HashSet::new(), direct: false, loaded: 0 };
-        for i in 0..len {
+        for i in 0..annots.len()? {
             let Some(e) = annots.get_array(i as i32)? else { continue };
-            if !e.is_dict()? {
-                continue;
-            }
-            let sub = e.get_dict("Subtype")?.and_then(|s| s.as_name().ok());
-            if !matches!(sub.as_deref(), Some(b"Link" | b"Popup")) {
+            let num = if e.is_indirect()? { Some(e.as_indirect()?) } else { None };
+            let class = match num.and_then(|n| self.class.get(&n).copied()) {
+                Some(c) => {
+                    if self.repeat() {
+                        return Ok(None);
+                    }
+                    c
+                }
+                None => {
+                    let c = Class::of(&e)?;
+                    if let Some(n) = num {
+                        self.class.insert(n, c);
+                    }
+                    c
+                }
+            };
+            if matches!(class, Class::Other | Class::Widget) {
                 fresh.loaded += 1;
             }
-            let widget = sub.as_deref() == Some(b"Widget");
             let wanted = match which {
-                Which::Widgets => widget,
-                Which::Comments => !widget && !matches!(sub.as_deref(), Some(b"Link" | b"Popup")),
+                Which::Widgets => class == Class::Widget,
+                Which::Comments => class == Class::Other,
             };
             if !wanted {
                 continue;
             }
-            if !e.is_indirect()? {
+            let Some(num) = num else {
                 fresh.direct = true;
                 continue;
-            }
-            let num = e.as_indirect()?;
+            };
             if self.seen.contains(&num) || self.belongs_later(doc, &e, p, num)? {
                 continue;
             }
@@ -402,28 +438,25 @@ impl AnnotWalk {
         if q <= p as i32 || q >= doc.page_count()? {
             return Ok(false);
         }
-        if !self.listed.contains_key(&q) {
-            let mut l = Listed::default();
-            if let Some(list) = doc.find_page(q)?.get_dict("Annots")?.filter(|a| a.is_array().unwrap_or(false)) {
-                let len = list.len()?;
-                if self.charge(len) {
-                    return Ok(false);
-                }
-                if list.is_indirect()? {
-                    l.array = Some(list.as_indirect()?);
-                }
-                for i in 0..len {
-                    if let Some(x) = list.get_array(i as i32)?.filter(|x| x.is_indirect().unwrap_or(false)) {
-                        l.nums.insert(x.as_indirect()?);
-                    }
-                }
-            }
-            self.listed.insert(q, l);
-        }
+        let Some(list) = doc.find_page(q)?.get_dict("Annots")?.filter(|a| a.is_array().unwrap_or(false)) else { return Ok(false) };
+        let key = if list.is_indirect()? { ListKey::Array(list.as_indirect()?) } else { ListKey::Page(q) };
         // That page's array is the one being walked or was walked: it will not be visited again, so
         // the annotation stays with the first page that has it.
-        let l = &self.listed[&q];
-        Ok(l.nums.contains(&num) && !l.array.is_some_and(|a| self.arrays.contains(&a)))
+        if matches!(key, ListKey::Array(a) if self.arrays.contains(&a)) {
+            return Ok(false);
+        }
+        if let Some(nums) = self.listed.get(&key) {
+            return Ok(nums.contains(&num));
+        }
+        let mut nums = HashSet::new();
+        for i in 0..list.len()? {
+            if let Some(x) = list.get_array(i as i32)?.filter(|x| x.is_indirect().unwrap_or(false)) {
+                nums.insert(x.as_indirect()?);
+            }
+        }
+        let found = nums.contains(&num);
+        self.listed.insert(key, nums);
+        Ok(found)
     }
 }
 

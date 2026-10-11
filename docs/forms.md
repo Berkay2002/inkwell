@@ -19,7 +19,7 @@ tool strip while preparing a form.
 - Calculated fields are read-only to the person filling and re-run after every change in `/CO` order.
 - The field list walks the pages' `/Annots` like the comment list ([comments.md](comments.md)): shared arrays are read once and
   a widget two pages list through different arrays (no `/P` naming the later one) belongs to the first page only. A file
-  with more than 2 000 000 array entries is refused ("this file's form is too large to edit safely") rather than shown with
+  with more than 2 000 000 repeated array entries (an object an earlier array listed) is refused ("this file's form is too large to edit safely") rather than shown with
   fields missing.
 
 ## Scripts
