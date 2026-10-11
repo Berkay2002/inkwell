@@ -525,3 +525,33 @@ fn a_damaged_signed_file_is_never_rewritten() {
     eng.save(id, None).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
+
+#[test]
+fn security_and_signatures_never_meet() {
+    use crate::protect::{Changes as Rights, Cipher, Printing, ProtectSpec};
+    let spec = || ProtectSpec {
+        open_password: None,
+        permissions_password: Some("owner only".into()),
+        printing: Printing::High,
+        changes: Rights::AllButExtract,
+        copy: false,
+        accessibility: true,
+        cipher: Cipher::Aes256,
+    };
+    let r = req(0, [300.0, 600.0, 520.0, 680.0]);
+    // A signed document refuses new security: the rewrite would break its signatures.
+    let (eng, id, _) = open_bytes("secure-signed", &signed("secure-signed-src", None));
+    let e = eng.protect(id, spec(), None, EditSource::User).unwrap_err();
+    assert!(e.to_string().contains("signed"), "{e}");
+    // Pending security refuses a signature (Save would rewrite it away) ...
+    let (eng, id, path) = open("secure-pending");
+    eng.protect(id, spec(), None, EditSource::User).unwrap();
+    assert!(sign_step(&eng, id, &ids().0, &r, "Sign".into()).unwrap_err().to_string().contains("security"));
+    // ... and so does a saved one, and an encrypted file opened as it is.
+    eng.save(id, None).unwrap();
+    assert!(sign_step(&eng, id, &ids().0, &r, "Sign".into()).is_err());
+    let locked = std::fs::read(&path).unwrap();
+    let (eng, id, _) = open_bytes("secure-encrypted", &locked);
+    let e = sign_step(&eng, id, &ids().0, &r, "Sign".into()).unwrap_err();
+    assert!(e.to_string().contains("password-protected"), "{e}");
+}

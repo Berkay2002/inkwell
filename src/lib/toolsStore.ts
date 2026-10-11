@@ -91,6 +91,7 @@ export const FRIENDLY: Record<string, string> = {
   "needs-password": "This file needs its password.",
   "bad-password": "That password is not right.",
   "invalid-options": "Those settings are not valid.",
+  "needs-permissions-password": "This file doesn't allow copying or page changes. Open it with its permissions password, or remove its security first.",
   "language-unavailable": "That OCR language is not installed.",
   "tesseract-not-found": "Tesseract was not found. Set its location in the OCR options.",
   stale: "The document changed while it was being read. Run it again.",

@@ -15,6 +15,7 @@ import { SignBanner, SignCreator, SignStrip } from "./components/sign/SignTools"
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
 import { ConvertPanel } from "./components/ConvertPanel";
+import { ProtectPanel, SecurityNotice } from "./components/ProtectPanel";
 import { PrintSheet } from "./components/PrintSheet";
 import { ToolsPanel } from "./components/ToolsPanel";
 import { Viewer } from "./components/Viewer";
@@ -119,12 +120,14 @@ export default function App() {
                 {viewing ? <VersionView key={`${doc.id}:${viewing}`} doc={doc} versionId={viewing} /> : <Viewer key={doc.id} doc={doc} />}
                 {searchOpen && !viewing && <SearchBar key={doc.id} doc={doc} />}
                 <HistoryBanner doc={doc} />
+                <SecurityNotice doc={doc} />
                 <CommentTools doc={doc} />
                 <SignStrip doc={doc} />
                 {!viewing && <SignBanner doc={doc} />}
               </div>
               <ToolsPanel doc={doc} />
               <ConvertPanel doc={doc} />
+              <ProtectPanel doc={doc} />
               <AssistantPanel doc={doc} />
               <HistoryPanel doc={doc} />
               <RedactPanel doc={doc} />

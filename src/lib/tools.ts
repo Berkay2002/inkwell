@@ -2,9 +2,10 @@ import type { IconName } from "../components/Icons";
 import { useStore } from "../store";
 import { type FileRef, pickOpen } from "./api";
 import { useConvert } from "./convertStore";
+import { useProtect } from "./protectStore";
 import { useTools } from "./toolsStore";
 
-export type ToolId = "organize" | "edit" | "annotate" | "fill" | "redact" | "ocr" | "compress" | "merge" | "export" | "create";
+export type ToolId = "organize" | "edit" | "annotate" | "fill" | "redact" | "ocr" | "compress" | "protect" | "merge" | "export" | "create";
 
 export const quickTools: { id: ToolId; label: string; icon: IconName }[] = [
   { id: "organize", label: "Organize", icon: "organize" },
@@ -14,6 +15,7 @@ export const quickTools: { id: ToolId; label: string; icon: IconName }[] = [
   { id: "redact", label: "Redact", icon: "redact" },
   { id: "ocr", label: "OCR", icon: "ocr" },
   { id: "compress", label: "Compress", icon: "compress" },
+  { id: "protect", label: "Protect", icon: "lock" },
   { id: "merge", label: "Merge", icon: "merge" },
   { id: "export", label: "Export", icon: "share" },
   { id: "create", label: "Create PDF", icon: "filePlus" },
@@ -29,6 +31,11 @@ for (const id of ["ocr", "compress"] as const) {
     useTools.getState().open(id);
   };
 }
+
+toolHandlers.protect = async (f) => {
+  await useStore.getState().openPath(f.path, f.token);
+  useProtect.getState().open("protect");
+};
 
 toolHandlers.export = async (f) => {
   await useStore.getState().openPath(f.path, f.token);
