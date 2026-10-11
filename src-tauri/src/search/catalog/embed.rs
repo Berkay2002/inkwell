@@ -73,9 +73,10 @@ pub fn read(doc: &PdfDocument, pages: u32, id: &str) -> Option<FileText> {
     Some(t)
 }
 
-/// What every object or dictionary entry costs against the budget, whatever it holds: the budget bounds the
-/// walk as well as the bytes, so entries that carry nothing cannot be walked for free.
-const NODE: usize = 32;
+/// Steps a fingerprint may take per file: pages, content-stream parts, annotations, dictionary entries and
+/// array items, whatever they hold. The byte budget cannot bound a walk over entries that carry nothing (an
+/// array of 100 000 references to one empty stream, shared by every page).
+const NODES: usize = 2_000_000;
 
 /// First visit of an indirect object (by number); a direct object is always new.
 fn fresh(o: &PdfObject, seen: &mut HashSet<i32>) -> bool {
@@ -90,6 +91,7 @@ struct Feed {
     h: blake3::Hasher,
     left: usize,
     per: usize,
+    nodes: usize,
 }
 
 impl Feed {
@@ -98,7 +100,14 @@ impl Feed {
         Some(())
     }
 
+    /// `n` steps of the walk; `None` when the file is over its steps.
+    fn step(&mut self, n: usize) -> Option<()> {
+        self.nodes = self.nodes.checked_sub(n)?;
+        Some(())
+    }
+
     fn stream(&mut self, s: &PdfObject) -> Option<()> {
+        self.step(1)?;
         let b = s.read_stream_capped(self.per.min(self.left)).ok()?;
         self.left -= b.len();
         self.h.update(&(b.len() as u64).to_le_bytes());
@@ -122,7 +131,7 @@ impl Feed {
     /// and streams by their decoded bytes (not `/Length`, `/Filter`: a recompressing save keeps the hash).
     /// `None`: nested too deep or over the budget.
     fn obj(&mut self, o: &PdfObject, depth: u32) -> Option<()> {
-        self.charge(NODE)?;
+        self.step(1)?;
         if depth > DEPTH {
             return None;
         }
@@ -134,7 +143,7 @@ impl Feed {
         }
         if is(o.is_dict()) {
             let n = o.dict_len().ok()?;
-            self.charge(n.saturating_mul(NODE))?;
+            self.step(n)?;
             let mut keys: Vec<(Vec<u8>, i32)> = Vec::new();
             for i in 0..n as i32 {
                 if let Some(k) = o.get_dict_key(i).ok().flatten().and_then(|k| k.as_name().ok()) {
@@ -158,7 +167,7 @@ impl Feed {
             }
         } else if is(o.is_array()) {
             let n = o.len().ok()?;
-            self.charge(n.saturating_mul(NODE))?;
+            self.step(n)?;
             self.h.update(b"a");
             for i in 0..n as i32 {
                 match o.get_array(i).ok().flatten() {
@@ -219,7 +228,7 @@ impl Feed {
         for cat in ["Font", "XObject", "Pattern", "Properties"] {
             let Some(d) = res.get_dict(cat).ok().flatten().filter(|d| d.is_dict().unwrap_or(false)) else { continue };
             for i in 0..d.dict_len().ok()? as i32 {
-                self.charge(NODE)?;
+                self.step(1)?;
                 let Some(o) = d.get_dict_val(i).ok().flatten() else { continue };
                 match cat {
                     "Font" => self.font(&o, seen)?,
@@ -250,7 +259,11 @@ pub fn fingerprint(doc: &PdfDocument) -> Option<String> {
 
 /// [`fingerprint`] with its bounds given (tests use small ones).
 pub(super) fn fingerprint_with(doc: &PdfDocument, per_stream: usize, total: usize) -> Option<String> {
-    let mut f = Feed { h: blake3::Hasher::new(), left: total, per: per_stream };
+    fingerprint_in(doc, per_stream, total, NODES)
+}
+
+pub(super) fn fingerprint_in(doc: &PdfDocument, per_stream: usize, total: usize, nodes: usize) -> Option<String> {
+    let mut f = Feed { h: blake3::Hasher::new(), left: total, per: per_stream, nodes };
     let mut seen = HashSet::new();
     // Layer defaults: what is switched off is not visible text.
     if let Some(oc) = doc.catalog().ok().and_then(|c| get(&c, "OCProperties")) {
@@ -259,18 +272,24 @@ pub(super) fn fingerprint_with(doc: &PdfDocument, per_stream: usize, total: usiz
     }
     let n = doc.page_count().ok()?.max(0);
     for p in 0..n {
+        f.step(1)?;
         f.h.update(&p.to_le_bytes());
         let Ok(page) = doc.find_page(p) else { continue };
         if let Some(c) = get(&page, "Contents") {
-            let parts: Vec<PdfObject> = if c.is_array().unwrap_or(false) {
-                (0..c.len().unwrap_or(0)).filter_map(|i| c.get_array(i as i32).ok().flatten()).collect()
+            if c.is_array().unwrap_or(false) {
+                let len = c.len().unwrap_or(0);
+                f.step(len)?;
+                for i in 0..len as i32 {
+                    if let Some(s) = c.get_array(i).ok().flatten() {
+                        f.stream(&s)?;
+                    }
+                }
             } else {
-                vec![c]
-            };
-            for s in parts {
-                f.stream(&s)?;
+                f.stream(&c)?;
             }
         }
+        // The annotations are walked by the shared reader below: count them first.
+        f.step(get(&page, "Annots").and_then(|a| a.len().ok()).unwrap_or(0))?;
         if let Some(res) = page.get_dict_inheritable("Resources").ok().flatten() {
             f.resources(&res, 0, &mut seen)?;
         }

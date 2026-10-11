@@ -631,8 +631,30 @@ fn a_resources_dict_shared_by_many_pages_is_walked_once_and_a_huge_one_runs_the_
     let doc = PdfDocument::open(&*p).unwrap();
     let t = std::time::Instant::now();
     assert!(embed::fingerprint_with(&doc, 1 << 20, 64 << 20).is_some(), "walked once, well inside the budget");
-    assert!(embed::fingerprint_with(&doc, 1 << 20, 1 << 20).is_none(), "20000 entries are not free: the budget runs out");
+    assert!(embed::fingerprint_in(&doc, 1 << 20, 64 << 20, 10_000).is_none(), "20000 entries are not free: the walk runs out of steps");
     assert!(t.elapsed().as_secs() < 60, "{:?}", t.elapsed());
+}
+
+/// Entries that carry nothing (references to one empty stream, to nothing) still cost steps, however many pages share them.
+#[test]
+fn empty_content_parts_and_annotation_lists_shared_by_pages_cost_steps() {
+    let pages = 50;
+    let parts: String = (0..20_000).map(|_| "4 0 R ").collect();
+    let kids: String = (0..pages).map(|i| format!("{} 0 R ", 6 + i)).collect();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {pages} >>"),
+        format!("[{parts}]"),
+        stream_obj("", ""),
+        "[]".to_string(),
+    ];
+    objs.extend((0..pages).map(|_| "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 3 0 R /Annots 3 0 R >>".to_string()));
+    let base = dir("catalog-fp-steps");
+    let p = write(&base, "a.pdf", crate::search::tests::pdf_of(&objs));
+    let doc = PdfDocument::open(&*p).unwrap();
+    let t = std::time::Instant::now();
+    assert!(embed::fingerprint_in(&doc, 1 << 20, 64 << 20, 100_000).is_none(), "a million empty parts are not free");
+    assert!(t.elapsed().as_secs() < 30, "{:?}", t.elapsed());
 }
 
 #[test]
