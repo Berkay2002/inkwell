@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { PrintDuplex, PrintOrientation, PrintPageOrder } from "../lib/api";
-import { PER_SHEET, type PrintOptions, type PrintSheetState, usePrint } from "../lib/printStore";
+import { outcomeLine, PER_SHEET, type PrintOptions, type PrintSheetState, usePrint } from "../lib/printStore";
 import { Icon } from "./Icons";
 import "./print.css";
 
@@ -130,9 +130,7 @@ function Options({ sheet }: { sheet: PrintSheetState }) {
   const set = (p: Partial<PrintOptions>) => act().set(p);
   const caps = sheet.caps;
   const perSheetPreset = (PER_SHEET as readonly number[]).includes(o.perSheet);
-  const summary = sheet.plan
-    ? `${sheet.plan.papers} ${sheet.plan.papers === 1 ? "sheet" : "sheets"} of paper${o.copies > 1 ? `, ${o.copies} copies` : ""}`
-    : "";
+  const outcome = outcomeLine(sheet.plan, o, caps);
   return (
     <>
       <div className="pr-body">
@@ -382,7 +380,9 @@ function Options({ sheet }: { sheet: PrintSheetState }) {
         </Field>
       </div>
       <footer className="pr-foot">
-        <span className="pr-summary dim">{summary}</span>
+        <span className="pr-outcome" aria-live="polite">
+          {outcome}
+        </span>
         <span className="grow" />
         <button className="btn ghost" onClick={() => act().close()}>
           Cancel

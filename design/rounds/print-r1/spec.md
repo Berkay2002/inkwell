@@ -8,7 +8,14 @@ c-ticket one each. The sheet is `--cols 2`.
 
 ## Verdict
 
-(pending: inkwell picks; the user delegated design picks to the orchestrator, 2026-10-11)
+2026-10-11: **a-sheet, as built.** The user delegated design picks to the orchestrator ("choose what is both standard and
+what pdfcraft and acrobat has, but also some hint of uniqueness"); the pick below is berka-43's (the orchestrator), adopted
+by the user through that delegation, not the user's own. In berka-43's words: "a-sheet, as built. It keeps Acrobat's
+standard modal with the preview on the left. Take one thing from c-ticket: make the outcome line ("6 sheets of A4, both
+sides, 2 copies") the prominent summary beside the Print button, and update it live. Skip a-sheet-2."
+b-rail and c-ticket are dropped; a-sheet-2-booklet was never rendered and is skipped.
+Approved: `design/approved/print.png` (a-sheet-1-options). Built as `src/components/PrintSheet.tsx`; the outcome line is
+`outcomeLine` in `src/lib/printStore.ts`. Screens of the build: `docs/screens/print/`.
 
 Render notes: `a-sheet-2-booklet` was not rendered (the image tool's usage limit was reached, 2026-10-11); the
 booklet state is described above and is built from the engine's own preview. `c-ticket` came out as a wider panel with

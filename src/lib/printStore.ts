@@ -122,6 +122,18 @@ export function toSettings(o: PrintOptions, caps: PrinterCaps | null, current: n
   };
 }
 
+/** The promise above the Print button, in the words a person would say: "6 sheets of A4, both sides, 2 copies". */
+export function outcomeLine(plan: PrintPlan | null, o: PrintOptions, caps: PrinterCaps | null): string {
+  if (!plan) return "";
+  const paper = caps?.papers.find((p) => p.id === o.paperId)?.name.replace(/\s*\(.*$/, "");
+  const s = toSettings(o, caps, 0);
+  const parts = [`${plan.papers} ${plan.papers === 1 ? "sheet" : "sheets"} of ${paper || "paper"}`];
+  if (s.duplex !== "off") parts.push("both sides");
+  if (s.copies > 1) parts.push(`${s.copies} copies`);
+  if (s.grayscale) parts.push("grayscale");
+  return parts.join(", ");
+}
+
 /** What the sheet remembers between runs: the choices people set once, not the page range or copies. */
 const REMEMBERED = ["printer", "mode", "sizeMode", "perSheet", "order", "border", "autoRotate", "sides", "binding", "content", "grayscale", "collate", "duplex", "orientation"] as const;
 const KEY = "inkwell.print";

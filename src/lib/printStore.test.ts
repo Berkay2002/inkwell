@@ -27,7 +27,7 @@ vi.mock("./api", () => ({
 import { useStore } from "../store";
 import * as api from "./api";
 import type { PaperInfo, PrinterCaps } from "./api";
-import { defaultOptions, loadRemembered, pickPaper, toSettings, usePrint } from "./printStore";
+import { defaultOptions, loadRemembered, outcomeLine, pickPaper, toSettings, usePrint } from "./printStore";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 /** The sheet has planned and drawn its first preview. */
@@ -93,6 +93,23 @@ describe("toSettings", () => {
     const s = toSettings(defaultOptions(), null, 0);
     expect(s.paper.id).toBeNull();
     expect(s.paper.width).toBeCloseTo(595.28);
+  });
+});
+
+describe("outcomeLine", () => {
+  const a4caps = caps({ papers: [{ ...A4, name: "A4 (210 x 297 mm)" }] });
+  const o = { ...defaultOptions(), printer: "P", paperId: 9 };
+  it("says sheets of paper, sides and copies in words", () => {
+    expect(outcomeLine({ ...plan, papers: 6 }, { ...o, duplex: "longEdge", copies: 2 }, a4caps)).toBe("6 sheets of A4, both sides, 2 copies");
+  });
+  it("is singular and quiet when there is nothing to add", () => {
+    expect(outcomeLine({ ...plan, papers: 1 }, o, a4caps)).toBe("1 sheet of A4");
+  });
+  it("leaves out both sides when the printer cannot, and names grayscale", () => {
+    expect(outcomeLine(plan, { ...o, duplex: "longEdge", grayscale: true }, { ...a4caps, duplex: false })).toBe("6 sheets of A4, grayscale");
+  });
+  it("is empty until there is a plan", () => {
+    expect(outcomeLine(null, o, a4caps)).toBe("");
   });
 });
 
