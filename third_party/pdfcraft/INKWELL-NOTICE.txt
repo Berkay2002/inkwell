@@ -1,0 +1,6 @@
+Inkwell uses code adapted from pdfcraft (read-only clone at commit b8ddf71), licensed MIT OR Apache-2.0
+(LICENSE-MIT, LICENSE-APACHE and pdfcraft's NOTICE sit next to this file).
+
+Adapted files carry a header naming the pdfcraft path:
+- src-tauri/src/convert/docx.rs   <- crates/export/src/lib.rs, crates/export/src/zip.rs   (Word writer)
+- src-tauri/src/convert/create.rs <- crates/create/src/lib.rs   (text decoding and wrapping rules, TIFF page handling)

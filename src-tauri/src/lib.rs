@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod compress;
+pub mod convert;
 pub mod diff;
 pub mod engine;
 pub mod history;
@@ -49,6 +50,26 @@ enum PickTitle {
     Compare,
 }
 
+/// What the save dialog filters for (the UI never names a pattern).
+#[derive(serde::Deserialize, Default, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+enum SaveKind {
+    #[default]
+    Pdf,
+    Text,
+    Html,
+    Xhtml,
+    Word,
+}
+
+/// What an open dialog for Create filters for.
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+enum SourceKind {
+    Images,
+    Text,
+}
+
 /// Open dialog in Rust; the picked files come back as open tokens.
 #[tauri::command]
 async fn pick_open(window: Window, multiple: bool, title: Option<PickTitle>) -> Result<Vec<FileRef>, EngineError> {
@@ -80,6 +101,7 @@ async fn pick_save(
     doc: Option<DocId>,
     near: Option<String>,
     name: String,
+    kind: Option<SaveKind>,
 ) -> Result<Option<FileRef>, EngineError> {
     let near = match (doc, near) {
         (Some(doc), _) => Some(eng.doc_entry(doc)?.path()),
@@ -88,7 +110,14 @@ async fn pick_save(
     };
     blocking(move || {
         let name = std::path::Path::new(&name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut d = window.dialog().file().set_parent(&window).add_filter("PDF documents", PDF).set_file_name(name);
+        let d = window.dialog().file().set_parent(&window).set_file_name(name);
+        let mut d = match kind.unwrap_or_default() {
+            SaveKind::Pdf => d.add_filter("PDF documents", PDF),
+            SaveKind::Text => d.add_filter("Text", &["txt"]),
+            SaveKind::Html => d.add_filter("HTML", &["html", "htm"]),
+            SaveKind::Xhtml => d.add_filter("XHTML", &["xhtml"]),
+            SaveKind::Word => d.add_filter("Word document", &["docx"]),
+        };
         if let Some(dir) = near.as_deref().and_then(|p| std::path::Path::new(p).parent()) {
             d = d.set_directory(dir);
         }
@@ -104,8 +133,48 @@ async fn known_file(window: Window, path: String) -> Result<FileRef, EngineError
     blocking(move || window.state::<Paths>().known_file(window.label(), path)).await
 }
 
+/// Open dialog for the files Create builds a PDF from (images or one text file); open tokens come back.
 #[tauri::command]
-async fn open_document(window: Window, app: tauri::AppHandle, eng: Eng<'_>, reg: Reg<'_>, hist: State<'_, Arc<History>>, file: String) -> Result<OpenOutcome, EngineError> {
+async fn pick_source(window: Window, kind: SourceKind, multiple: bool) -> Result<Vec<FileRef>, EngineError> {
+    blocking(move || {
+        let d = window.dialog().file().set_parent(&window);
+        let d = match kind {
+            SourceKind::Images => d.set_title("Choose images").add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"]),
+            SourceKind::Text => d.set_title("Choose a text file").add_filter("Text", &["txt", "text", "md", "log", "csv"]),
+        };
+        let picked = if multiple { d.blocking_pick_files() } else { d.blocking_pick_file().map(|f| vec![f]) };
+        let reg = window.state::<Paths>();
+        Ok(picked
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|f| f.into_path().ok())
+            .map(|p| reg.issue_open(window.label(), p.to_string_lossy().into_owned()))
+            .collect())
+    })
+    .await
+}
+
+/// Folder dialog in Rust, starting next to open document `doc`; the result is a one-use save token
+/// (it names the folder a multi-file export writes into).
+#[tauri::command]
+async fn pick_folder(window: Window, eng: Eng<'_>, doc: Option<DocId>) -> Result<Option<FileRef>, EngineError> {
+    let near = match doc {
+        Some(doc) => Some(eng.doc_entry(doc)?.path()),
+        None => None,
+    };
+    blocking(move || {
+        let mut d = window.dialog().file().set_parent(&window).set_title("Choose a folder for the files");
+        if let Some(dir) = near.as_deref().and_then(|p| std::path::Path::new(p).parent()) {
+            d = d.set_directory(dir);
+        }
+        let picked = d.blocking_pick_folder().and_then(|f| f.into_path().ok());
+        Ok(picked.map(|p| window.state::<Paths>().issue_save(window.label(), p.to_string_lossy().into_owned())))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn open_document(window: Window, app: tauri::AppHandle, eng: Eng<'_>, reg: Reg<'_>, hist: State<'_, Arc<History>>, file: String, scratch: Option<bool>) -> Result<OpenOutcome, EngineError> {
     let path = reg.open(window.label(), &file)?;
     let eng = eng.inner().clone();
     let r = blocking(move || {
@@ -121,7 +190,8 @@ async fn open_document(window: Window, app: tauri::AppHandle, eng: Eng<'_>, reg:
     })
     .await;
     // History is resolved in the background after the open; its errors never reach this command.
-    if let Ok(OpenOutcome::Opened(info)) = &r {
+    // A scratch file (a created PDF nobody has saved yet) gets its history when it is saved as.
+    if let (Ok(OpenOutcome::Opened(info)), false) = (&r, scratch.unwrap_or(false)) {
         hist.inner().spawn_open(app, info.doc, info.path.clone());
     }
     r
@@ -409,6 +479,78 @@ async fn ocr_start(
     .await
 }
 
+// ---- export and create (see convert) -------------------------------------------------------------
+
+/// `req.save_to`: a save token from `pick_save` (one file) or `pick_folder` (several files).
+#[tauri::command]
+async fn export_start(
+    window: Window,
+    eng: Eng<'_>,
+    reg: Reg<'_>,
+    jobs: JobState<'_>,
+    job: u64,
+    req: convert::ExportRequest,
+    on_progress: Channel<convert::Progress>,
+) -> Result<convert::ExportOutput, tools::ToolError> {
+    let to = std::path::PathBuf::from(reg.take_save(window.label(), &req.save_to)?);
+    let target = if req.kind.is_folder() { convert::Target::Folder(to) } else { convert::Target::File(to) };
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    tool_blocking(move || {
+        if let convert::Target::Folder(d) = &target {
+            if !d.is_dir() {
+                return Err(tools::ToolError(format!("{} is not a folder", d.display())));
+            }
+        }
+        let r = convert::export(&eng, &req, target, &guard.cancel, &mut |p| {
+            let _ = on_progress.send(p);
+        })?;
+        window.state::<Paths>().learn(&r.folder);
+        for f in &r.files {
+            window.state::<Paths>().learn(f);
+        }
+        Ok(r)
+    })
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Created {
+    file: FileRef,
+    pages: u32,
+    warnings: Vec<String>,
+}
+
+/// Builds a PDF into a scratch folder and returns an open token for it (the UI opens it as an unsaved tab).
+#[tauri::command]
+async fn create_start(
+    window: Window,
+    reg: Reg<'_>,
+    jobs: JobState<'_>,
+    job: u64,
+    req: convert::CreateRequest,
+    on_progress: Channel<convert::Progress>,
+) -> Result<Created, tools::ToolError> {
+    let source = req.source.resolve(&|t| reg.open(window.label(), t))?;
+    let guard = jobs.inner().begin(job);
+    tool_blocking(move || {
+        let r = convert::create(&source, &req, &guard.cancel, &mut |p| {
+            let _ = on_progress.send(p);
+        })?;
+        let file = window.state::<Paths>().issue_open(window.label(), r.path);
+        Ok(Created { file, pages: r.pages, warnings: r.warnings })
+    })
+    .await
+}
+
+/// Deletes a created file that was never saved (its tab was closed, or it was saved elsewhere).
+#[tauri::command]
+fn discard_scratch(window: Window, reg: Reg<'_>, file: String) -> Result<bool, EngineError> {
+    let path = reg.open(window.label(), &file)?;
+    Ok(convert::discard_scratch(std::path::Path::new(&path)))
+}
+
 #[tauri::command]
 fn engine_stats(eng: Eng<'_>) -> EngineStats {
     eng.stats()
@@ -614,6 +756,11 @@ pub fn run() {
             ocr_choose_tesseract,
             ocr_clear_tesseract,
             ocr_start,
+            pick_source,
+            pick_folder,
+            export_start,
+            create_start,
+            discard_scratch,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

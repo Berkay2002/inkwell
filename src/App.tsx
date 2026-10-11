@@ -10,6 +10,7 @@ import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { RedactPanel } from "./components/redact/RedactPanel";
 import { Sidebar } from "./components/Sidebar";
+import { ConvertPanel } from "./components/ConvertPanel";
 import { ToolsPanel } from "./components/ToolsPanel";
 import { Viewer } from "./components/Viewer";
 import { type FileRef, initialFiles } from "./lib/api";
@@ -111,6 +112,7 @@ export default function App() {
                 <HistoryBanner doc={doc} />
               </div>
               <ToolsPanel doc={doc} />
+              <ConvertPanel doc={doc} />
               <AssistantPanel doc={doc} />
               <HistoryPanel doc={doc} />
               <RedactPanel doc={doc} />
@@ -122,7 +124,10 @@ export default function App() {
           <CompareView />
         </div>
       ) : (
-        <Home />
+        <div className="home-wrap">
+          <Home />
+          <ConvertPanel doc={null} />
+        </div>
       )}
       {paletteOpen && <CommandPalette />}
       {hasPassword && <PasswordDialog />}

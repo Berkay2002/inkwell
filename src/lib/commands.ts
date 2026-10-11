@@ -7,6 +7,7 @@ import { pickAndCompareFiles } from "../components/history/HistoryPanel";
 import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
+import { useConvert } from "./convertStore";
 import { useTools } from "./toolsStore";
 
 export interface Command {
@@ -89,6 +90,11 @@ export const commands: Command[] = [
     needsDoc: true,
     run: () => useTools.getState().open("ocr", undefined, { scope: "page" }),
   },
+  { id: "export", title: "Export pages, text or images…", needsDoc: true, run: () => useConvert.getState().openExport() },
+  { id: "export-word", title: "Export to Word…", needsDoc: true, run: () => useConvert.getState().openExport(undefined, "word") },
+  { id: "create-pdf", title: "Create PDF…", run: () => useConvert.getState().openCreate() },
+  { id: "create-clipboard", title: "Create PDF from the clipboard image", run: () => useConvert.getState().openCreate("clipboard") },
+  { id: "create-blank", title: "Create a blank PDF…", run: () => useConvert.getState().openCreate("blank") },
   { id: "next-tab", title: "Next tab", keys: ["Ctrl+Tab", "Ctrl+PageDown"], run: () => st().cycleTab(1) },
   { id: "prev-tab", title: "Previous tab", keys: ["Ctrl+Shift+Tab", "Ctrl+PageUp"], run: () => st().cycleTab(-1) },
   { id: "find", title: "Find in document", keys: ["Ctrl+F"], needsDoc: true, run: () => st().setUi({ searchOpen: true }) },

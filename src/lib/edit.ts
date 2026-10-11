@@ -63,13 +63,22 @@ export const edit = (id: number, op: EditOp) => withState(id, () => api.editAppl
 export const undo = (id: number) => withState(id, () => api.editUndo(id));
 export const redo = (id: number) => withState(id, () => api.editRedo(id));
 
-export const save = (id: number) => withState(id, () => api.saveDocument(id));
+/** A created file that was never saved has no place yet: Save asks where it goes. */
+export const save = (id: number) => (st().docs[id]?.scratch ? saveAs(id) : withState(id, () => api.saveDocument(id)));
 
 export async function saveAs(id: number) {
   const d = st().docs[id];
   if (!d) return;
   const to = await api.pickSave(baseName(d.path), { doc: id });
-  if (to) return withState(id, () => api.saveDocument(id, to.token));
+  if (!to) return;
+  const s = await withState(id, () => api.saveDocument(id, to.token));
+  // Saved: the scratch copy is not needed any more.
+  const scratch = st().docs[id]?.scratch;
+  if (s && scratch) {
+    st().patch(id, { scratch: null });
+    void api.discardScratch(scratch).catch(() => {});
+  }
+  return s;
 }
 
 /** Writes `pages` to a new file (asked for), optionally deleting them here as one undo step. */
@@ -115,8 +124,8 @@ export async function mergeFiles() {
 /** Save / Don't save / Cancel for a document with unsaved edits. True when it may close. */
 async function settle(id: number): Promise<boolean> {
   const d = st().docs[id];
-  if (!d?.dirty) return true;
-  const r = await message(`Save the changes to ${d.name} before closing?`, {
+  if (!d || (!d.dirty && !d.scratch)) return true;
+  const r = await message(d.scratch ? `Save ${d.name} before closing? It has not been saved yet.` : `Save the changes to ${d.name} before closing?`, {
     title: "Inkwell",
     kind: "warning",
     buttons: { yes: "Save", no: "Don't save", cancel: "Cancel" },
@@ -124,6 +133,9 @@ async function settle(id: number): Promise<boolean> {
   if (r === "Yes" || r === "Save") return (await save(id)) != null && !st().docs[id]?.dirty;
   return r === "No" || r === "Don't save";
 }
+
+/** Tab closes and the window close button treat an unsaved created file like a document with edits. */
+export const unsaved = (id: number) => st().docs[id]?.dirty || st().docs[id]?.scratch != null;
 
 /** Closes the tab, asking first when it has unsaved edits. */
 export async function requestClose(id: number) {
@@ -136,7 +148,7 @@ export function guardWindowClose(): () => void {
   let dead = false;
   getCurrentWindow()
     .onCloseRequested(async (e) => {
-      const dirty = st().order.filter((id) => st().docs[id]?.dirty);
+      const dirty = st().order.filter(unsaved);
       if (dirty.length === 0) return;
       e.preventDefault();
       for (const id of dirty) {

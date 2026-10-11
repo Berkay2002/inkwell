@@ -48,6 +48,8 @@ export interface DocState {
   rev: number;
   /** Edited since opened or last saved (see lib/edit.ts). */
   dirty: boolean;
+  /** Open token of a created file that nobody has saved yet: Save asks where it goes, closing asks first. */
+  scratch: string | null;
   /** What Undo / Redo would do, null when there is nothing. */
   undoLabel: string | null;
   redoLabel: string | null;
@@ -78,7 +80,7 @@ interface Store {
   error: string | null;
 
   /** Opens (or switches to) a file: `token` from a dialog or drop, else Rust must know `path` (recent list). */
-  openPath: (path: string, token?: string) => Promise<void>;
+  openPath: (path: string, token?: string, scratch?: boolean) => Promise<void>;
   submitPassword: (password: string) => Promise<void>;
   cancelPassword: () => void;
   closeDoc: (id: number) => void;
@@ -108,7 +110,7 @@ let searchSeq = 0;
 const opening = new Map<string, Promise<void>>();
 
 export const useStore = create<Store>((set, get) => {
-  const addDoc = (info: api.OpenInfo, locked = false) => {
+  const addDoc = (info: api.OpenInfo, locked = false, scratch: string | null = null) => {
     const doc: DocState = {
       id: info.doc,
       path: info.path,
@@ -122,6 +124,7 @@ export const useStore = create<Store>((set, get) => {
       currentPage: 0,
       rev: 0,
       dirty: false,
+      scratch,
       undoLabel: null,
       redoLabel: null,
       organize: false,
@@ -130,7 +133,8 @@ export const useStore = create<Store>((set, get) => {
       search: emptySearch(),
       nav: null,
     };
-    void useRecents.getState().record(info, locked);
+    // A created file is not a recent until it is saved somewhere.
+    if (!scratch) void useRecents.getState().record(info, locked);
     set((s) => ({
       docs: { ...s.docs, [doc.id]: doc },
       order: s.order.includes(doc.id) ? s.order : [...s.order, doc.id],
@@ -153,7 +157,7 @@ export const useStore = create<Store>((set, get) => {
     password: null,
     error: null,
 
-    openPath: (path, token) => {
+    openPath: (path, token, scratch = false) => {
       const k = keyOf(path);
       const existing = Object.values(get().docs).find((d) => keyOf(d.path) === k);
       if (existing) {
@@ -164,14 +168,15 @@ export const useStore = create<Store>((set, get) => {
       if (running) return running;
       const job = (async () => {
         try {
-          const r = await api.openDocument(token ?? (await api.knownFile(path)).token);
+          const file = token ?? (await api.knownFile(path)).token;
+          const r = scratch ? await api.openDocument(file, true) : await api.openDocument(file);
           if (r.status === "opened") {
             // Rust canonicalised the path: a different spelling of an open file is the same tab.
             const dup = Object.values(get().docs).find((d) => keyOf(d.path) === keyOf(r.path));
             if (dup) {
               void api.closeDocument(r.doc);
               set({ active: dup.id });
-            } else addDoc(r);
+            } else addDoc(r, false, scratch ? file : null);
           } else {
             // only one password prompt at a time: release the one being replaced
             const old = get().password;
@@ -205,8 +210,10 @@ export const useStore = create<Store>((set, get) => {
     },
 
     closeDoc: (id) => {
+      const scratch = get().docs[id]?.scratch;
       void api.cancelSearch(id);
-      void api.closeDocument(id);
+      // the engine releases the file first; the scratch file goes right after
+      void Promise.resolve(api.closeDocument(id)).finally(() => scratch && void api.discardScratch(scratch).catch(() => {}));
       dropCached(`${id}:`);
       set((s) => {
         const order = s.order.filter((d) => d !== id);
