@@ -86,7 +86,7 @@ impl EditOp {
 }
 
 /// "p. 4", "pp. 2-3, 7" (1-based).
-fn page_ranges(pages: &[u32]) -> String {
+pub(crate) fn page_ranges(pages: &[u32]) -> String {
     let set: BTreeSet<u32> = pages.iter().copied().collect();
     let mut runs: Vec<(u32, u32)> = Vec::new();
     for p in set {
@@ -250,7 +250,7 @@ fn open_snap(s: &Snap, entry: &DocEntry) -> Result<AuthDoc> {
     Ok(AuthDoc { doc: PdfDocument::try_from(d)?, _bytes: s.bytes.clone() })
 }
 
-fn write_doc(doc: &PdfDocument, mut opts: PdfWriteOptions, capacity: usize) -> Result<Vec<u8>> {
+pub(crate) fn write_doc(doc: &PdfDocument, mut opts: PdfWriteOptions, capacity: usize) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(capacity);
     let written = doc.write_to_with_options(&mut out, opts);
     // The options carry the new passwords: do not leave them behind on the stack.
@@ -261,7 +261,7 @@ fn write_doc(doc: &PdfDocument, mut opts: PdfWriteOptions, capacity: usize) -> R
 
 /// A complete file without anything unreferenced or duplicated (deleted pages and redacted
 /// content are really gone).
-fn rewrite_opts() -> PdfWriteOptions {
+pub(crate) fn rewrite_opts() -> PdfWriteOptions {
     let mut o = PdfWriteOptions::default();
     o.set_garbage_level(3).set_compress(true);
     o
@@ -544,7 +544,7 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
 }
 
 /// Another PDF to take pages from.
-fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocument> {
+pub(crate) fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocument> {
     check_pdf(path)?;
     let mut d = Document::open(path)?;
     if d.needs_password()? {
@@ -1010,7 +1010,7 @@ pub(super) fn clean_stale_temps(path: &Path) {
 }
 
 /// Writes a file that must not exist yet. Removed again if it does not read back.
-fn write_new(target: &Path, bytes: &[u8], pages: u32) -> Result<()> {
+pub(crate) fn write_new(target: &Path, bytes: &[u8], pages: u32) -> Result<()> {
     write_synced(target, bytes, true).map_err(io)?;
     verify(target, pages, Readback::default()).inspect_err(|_| {
         let _ = std::fs::remove_file(target);
@@ -1348,7 +1348,7 @@ impl Engine {
     }
 
     /// An error if `path` is open in Inkwell (other than as `except`).
-    fn check_not_open(&self, path: &str, except: Option<DocId>) -> Result<()> {
+    pub(crate) fn check_not_open(&self, path: &str, except: Option<DocId>) -> Result<()> {
         let open = self.docs.read().values().any(|e| Some(e.id) != except && same_path(&e.path(), path));
         if open {
             Err(invalid("that file is open in Inkwell; close it first"))

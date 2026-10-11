@@ -9,12 +9,14 @@ import { VersionView } from "./components/history/VersionView";
 import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
+import { A11yPanel } from "./components/a11y/A11yPanel";
 import { EditPanel } from "./components/edit/EditPanel";
 import { FormTools, FormsPanel } from "./components/forms/FormsPanel";
 import { RedactPanel } from "./components/redact/RedactPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
 import { ConvertPanel } from "./components/ConvertPanel";
+import { MarksPanel } from "./components/MarksPanel";
 import { ProtectPanel, SecurityNotice } from "./components/ProtectPanel";
 import { PrintSheet } from "./components/PrintSheet";
 import { ToolsPanel } from "./components/ToolsPanel";
@@ -127,9 +129,11 @@ export default function App() {
               <ToolsPanel doc={doc} />
               <ConvertPanel doc={doc} />
               <ProtectPanel doc={doc} />
+              <MarksPanel doc={doc} />
               <AssistantPanel doc={doc} />
               <HistoryPanel doc={doc} />
               <RedactPanel doc={doc} />
+              <A11yPanel doc={doc} />
               <CommentsPanel doc={doc} />
               <EditPanel doc={doc} />
               <FormsPanel doc={doc} />

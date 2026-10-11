@@ -13,21 +13,21 @@ use mupdf::size::Size;
 use mupdf::{Font, Image, Rect};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const PAGE_W: f32 = 595.0;
-const PAGE_H: f32 = 842.0;
-const MARGIN: f32 = 48.0;
+pub(crate) const PAGE_W: f32 = 595.0;
+pub(crate) const PAGE_H: f32 = 842.0;
+pub(crate) const MARGIN: f32 = 48.0;
 /// Changed pages shown as pictures; the list above them covers every change.
 pub const MAX_PICTURE_PAGES: usize = 60;
 /// Longest text shown for one side of a text change.
 const CLIP_CHARS: usize = 600;
 
-type Rgb = (f32, f32, f32);
-const INK: Rgb = (0.10, 0.11, 0.125);
-const DIM: Rgb = (0.42, 0.40, 0.37);
-const RULE: Rgb = (0.89, 0.87, 0.83);
-const ADD: Rgb = (0.12, 0.50, 0.25);
-const DEL: Rgb = (0.75, 0.18, 0.15);
-const CHG: Rgb = (0.70, 0.45, 0.05);
+pub(crate) type Rgb = (f32, f32, f32);
+pub(crate) const INK: Rgb = (0.10, 0.11, 0.125);
+pub(crate) const DIM: Rgb = (0.42, 0.40, 0.37);
+pub(crate) const RULE: Rgb = (0.89, 0.87, 0.83);
+pub(crate) const ADD: Rgb = (0.12, 0.50, 0.25);
+pub(crate) const DEL: Rgb = (0.75, 0.18, 0.15);
+pub(crate) const CHG: Rgb = (0.70, 0.45, 0.05);
 
 fn tone_of(c: &Change) -> (Rgb, &'static str) {
     use ChangeKind::*;
@@ -139,7 +139,8 @@ struct Sheet {
     images: Vec<(Rect, Vec<u8>)>,
 }
 
-struct Writer {
+/// A paged A4 text writer (also used by the accessibility report).
+pub(crate) struct Writer {
     pdf: PdfDocument,
     reg: Face,
     bold: Face,
@@ -147,12 +148,12 @@ struct Writer {
     f2: PdfObject,
     sheet: Option<Sheet>,
     /// Pen position: the top of the next thing, PDF coordinates (up).
-    y: f32,
+    pub(crate) y: f32,
     pages: u32,
 }
 
 impl Writer {
-    fn new() -> Result<Writer> {
+    pub(crate) fn new() -> Result<Writer> {
         let mut pdf = PdfDocument::new();
         let (reg, bold) = (Face { font: Font::new("Helvetica")? }, Face { font: Font::new("Helvetica-Bold")? });
         let f1 = pdf.add_font(&reg.font)?;
@@ -164,7 +165,7 @@ impl Writer {
         format!("{:.3} {:.3} {:.3}", c.0, c.1, c.2)
     }
 
-    fn page(&mut self) -> Result<()> {
+    pub(crate) fn page(&mut self) -> Result<()> {
         self.flush()?;
         self.sheet = Some(Sheet { ops: String::new(), images: Vec::new() });
         self.y = PAGE_H - MARGIN;
@@ -195,14 +196,14 @@ impl Writer {
     }
 
     /// Starts a new page when `h` points do not fit under the pen.
-    fn room(&mut self, h: f32) -> Result<()> {
+    pub(crate) fn room(&mut self, h: f32) -> Result<()> {
         if self.sheet.is_none() || self.y - h < MARGIN {
             self.page()?;
         }
         Ok(())
     }
 
-    fn text(&mut self, x: f32, baseline: f32, size: f32, bold: bool, colour: Rgb, s: &str) {
+    pub(crate) fn text(&mut self, x: f32, baseline: f32, size: f32, bold: bool, colour: Rgb, s: &str) {
         let (font, name) = if bold { (&self.bold, "F2") } else { (&self.reg, "F1") };
         let hex = font.hex(s);
         if hex.is_empty() {
@@ -212,7 +213,7 @@ impl Writer {
         self.ops().push_str(&op);
     }
 
-    fn fill(&mut self, r: [f32; 4], colour: Rgb) {
+    pub(crate) fn fill(&mut self, r: [f32; 4], colour: Rgb) {
         let op = format!("{} rg {:.2} {:.2} {:.2} {:.2} re f\n", Self::rgb(colour), r[0], r[1], r[2] - r[0], r[3] - r[1]);
         self.ops().push_str(&op);
     }
@@ -222,8 +223,18 @@ impl Writer {
         self.ops().push_str(&op);
     }
 
+    /// Ends the last page and serialises the document.
+    pub(crate) fn finish(mut self) -> Result<Vec<u8>> {
+        self.flush()?;
+        let mut out = Vec::new();
+        let mut opts = PdfWriteOptions::default();
+        opts.set_compress(true).set_compress_images(true).set_compress_fonts(true).set_garbage_level(2);
+        self.pdf.write_to_with_options(&mut out, opts)?;
+        Ok(out)
+    }
+
     /// Wrapped paragraph; returns nothing, moves the pen down.
-    fn para(&mut self, x: f32, width: f32, size: f32, bold: bool, colour: Rgb, s: &str) -> Result<()> {
+    pub(crate) fn para(&mut self, x: f32, width: f32, size: f32, bold: bool, colour: Rgb, s: &str) -> Result<()> {
         let lines = if bold { self.bold.wrap(s, size, width) } else { self.reg.wrap(s, size, width) };
         let lead = size * 1.35;
         for l in lines {

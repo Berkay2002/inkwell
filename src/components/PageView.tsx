@@ -1,11 +1,13 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as api from "../lib/api";
+import type { Shown } from "../lib/a11y";
 import { useAi } from "../lib/aiStore";
 import { type Rot, type Size, type TileRef, pageSpaceTransform, tileKeyStr } from "../lib/layout";
 import { type Mark, useRedact } from "../lib/redact";
 import { cached } from "../lib/tiles";
 import type { Rect4 } from "../store";
 import { AnnotLayer } from "./comments/AnnotLayer";
+import { MarkPreview } from "./MarkPreview";
 import { TextEditLayer } from "./edit/TextEditLayer";
 import { FormLayer } from "./forms/FormLayer";
 import { TileCanvas } from "./TileCanvas";
@@ -32,6 +34,8 @@ interface Props {
   currentHit: Rect4 | null;
   /** Redaction marks on this page. */
   marks: Mark[];
+  /** The accessibility checker's "Show": the finding to outline on this page. */
+  a11y: Shown | null;
 }
 
 export const PageView = memo(function PageView(p: Props) {
@@ -82,12 +86,20 @@ export const PageView = memo(function PageView(p: Props) {
         className="pagespace"
         style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom) }}
       >
+        <MarkPreview docId={docId} page={page} size={rawSize} />
         {p.hits.map((r, i) => (
           <div key={i} className={r === p.currentHit ? "hit current" : "hit"} style={rectStyle(r)} />
         ))}
         {p.marks.map((m) => (
           <div key={m.xref} className={m.wholePage ? "rd-mark page-wide" : "rd-mark"} style={{ ...rectStyle(markRect(m, rawSize)), "--z": zoom } as React.CSSProperties} />
         ))}
+        {p.a11y && (
+          <div
+            key={p.a11y.nonce}
+            className={p.a11y.rect ? "a11y-mark" : "a11y-mark whole"}
+            style={{ ...rectStyle(p.a11y.rect ?? [0, 0, rawSize[0], rawSize[1]]), "--z": zoom } as React.CSSProperties}
+          />
+        )}
         {drag && <div className="rd-mark drawing" style={{ ...rectStyle(dragRect(drag)), "--z": zoom } as React.CSSProperties} />}
         {mark?.rects.map((r, i) => (
           <div key={`${mark.nonce}.${i}`} className="cite-mark" style={rectStyle(r)} />
