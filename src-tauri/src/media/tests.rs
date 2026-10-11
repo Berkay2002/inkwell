@@ -343,3 +343,27 @@ fn listing_and_serving_leave_the_document_alone() {
     assert!(before == after, "file, revision and history are unchanged");
     assert!(!eng.edit_state(id).unwrap().dirty, "no unsaved edits");
 }
+
+/// The committed sample (scripts/media-sample.py): a real H.264 mp4 and a real mp3.
+#[test]
+fn the_sample_file_lists_what_the_windows_check_expects() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/study/samples/media-source.pdf");
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(path).unwrap().doc;
+    let items = list_all(&eng, id).unwrap();
+    assert_eq!(items.len(), 4, "{items:#?}");
+    let video = by_kind(&items, Kind::RichMedia);
+    assert_eq!((video.page, video.title.as_str()), (0, "Test video"));
+    let a = video.assets.iter().find(|a| a.name == "clip.mp4").unwrap();
+    assert!(a.playable && a.mime.as_deref() == Some("video/mp4"), "{a:?}");
+    assert!(video.assets.iter().any(|a| a.name == "player.swf" && !a.playable));
+    let audio = by_kind(&items, Kind::Screen);
+    assert!(audio.playable && audio.assets[0].mime.as_deref() == Some("audio/mpeg"), "{audio:?}");
+    assert!(!by_kind(&items, Kind::ThreeD).playable);
+    assert!(!by_kind(&items, Kind::Movie).playable);
+    // the route plays the whole mp4: ranges stitch back to the stream
+    let cache = Cache::default();
+    let r = serve(&eng, &cache, id, &video.play.clone().unwrap(), Some("bytes=0-"));
+    assert_eq!(r.status, 206);
+    assert_eq!(&r.body[4..8], b"ftyp");
+}

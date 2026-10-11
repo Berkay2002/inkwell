@@ -158,6 +158,12 @@ export const commands: Command[] = [
     needsDoc: true,
     run: () => st().setSidebar("attachments"),
   },
+  {
+    id: "media",
+    title: "Media in this document",
+    needsDoc: true,
+    run: () => st().setSidebar("media"),
+  },
   { id: "compress", title: "Compress file…", needsDoc: true, run: () => useTools.getState().open("compress") },
   { id: "ocr", title: "Recognize text (OCR)…", needsDoc: true, run: () => useTools.getState().open("ocr") },
   {
