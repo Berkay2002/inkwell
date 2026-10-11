@@ -300,7 +300,7 @@ pub(crate) fn scan(doc: &PdfDocument) -> Result<Vec<Entry>> {
     }
     // Better no list than a form with fields missing: edits and calculations read all of them.
     if walk.incomplete {
-        return Err(bad("too many annotations to read the form fields"));
+        return Err(bad("this file's form is too large to edit safely"));
     }
     Ok(out)
 }
