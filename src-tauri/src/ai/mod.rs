@@ -1,9 +1,13 @@
 //! The AI assistant: chat, summaries and cited answers about an open document, powered by the
-//! user's own ChatGPT subscription through the locally logged-in Codex CLI (`codex app-server`).
-//! No API keys, nothing persisted; text leaves the machine only on an explicit user action.
+//! user's own subscription through the locally logged-in CLI of their choice: Codex (ChatGPT,
+//! `codex app-server`) or Claude Code (`claude`, see `claude/`). No API keys, nothing persisted;
+//! text leaves the machine only on an explicit user action.
 
 pub mod chat;
+pub mod claude;
 pub mod codex;
+mod gate;
+pub mod provider;
 pub mod rpc;
 pub mod text;
 pub mod tools;
@@ -11,6 +15,8 @@ pub mod tools;
 use crate::engine::{DocId, Engine, OutlineItem, pool::class};
 pub use chat::Assistant;
 use chat::{AskRequest, ChatEvent, Prepared, Status};
+pub use provider::{Hub, Provider, ProviderId};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
 use tauri::ipc::Channel;
@@ -40,35 +46,36 @@ impl tools::DocHost for EngineHost {
     }
 }
 
-type Ai<'a> = State<'a, Arc<Assistant>>;
+type Ai<'a> = State<'a, Arc<Hub>>;
 type Eng<'a> = State<'a, Arc<Engine>>;
 
-fn text_for(eng: &Arc<Engine>, ai: &Assistant, doc: DocId) -> Result<Arc<DocText>, String> {
+fn text_for(eng: &Arc<Engine>, hub: &Hub, doc: DocId) -> Result<Arc<DocText>, String> {
     let rev = eng.doc_entry(doc).map_err(|e| e.to_string())?.generation();
-    ai.doc_text(doc, rev, || text::extract(eng, doc).map_err(|e| e.to_string()))
+    hub.doc_text(doc, rev, || text::extract(eng, doc).map_err(|e| e.to_string()))
 }
 
 async fn off_thread<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> Result<R, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())
 }
 
-/// Installed / signed in / models. Starts the codex server if it is not running yet.
+/// Installed / signed in / models of the chosen provider (Codex when none is named). Starts its CLI
+/// if it is not running yet.
 #[tauri::command]
-pub async fn ai_status(ai: Ai<'_>) -> Result<Status, String> {
-    let ai = ai.inner().clone();
-    off_thread(move || ai.status()).await
+pub async fn ai_status(ai: Ai<'_>, provider: Option<ProviderId>) -> Result<Status, String> {
+    let p = ai.provider(provider.unwrap_or_default());
+    off_thread(move || p.status()).await
 }
 
-/// Reads the document's text (cached) and warms its chat thread, so the first question is quick.
+/// Reads the document's text (cached) and warms its chat, so the first question is quick.
 #[tauri::command]
-pub async fn ai_prepare(eng: Eng<'_>, ai: Ai<'_>, doc: DocId) -> Result<Prepared, String> {
+pub async fn ai_prepare(eng: Eng<'_>, ai: Ai<'_>, doc: DocId, provider: Option<ProviderId>) -> Result<Prepared, String> {
     let (eng, ai) = (eng.inner().clone(), ai.inner().clone());
     off_thread(move || {
         let t = text_for(&eng, &ai, doc)?;
         let out = Prepared { pages: t.pages, chars: t.chars, enough: t.enough() };
         if out.enough {
-            let (ai, rev) = (ai.clone(), t.rev);
-            std::thread::spawn(move || ai.warm(doc, rev));
+            let (p, rev) = (ai.provider(provider.unwrap_or_default()), t.rev);
+            std::thread::spawn(move || p.warm(doc, rev));
         }
         Ok(out)
     })
@@ -77,14 +84,22 @@ pub async fn ai_prepare(eng: Eng<'_>, ai: Ai<'_>, doc: DocId) -> Result<Prepared
 
 /// Starts a question; the answer streams through `on_event`. Returns once the turn is queued.
 #[tauri::command]
-pub fn ai_ask(eng: Eng<'_>, ai: Ai<'_>, doc: DocId, req: AskRequest, on_event: Channel<ChatEvent>) -> Result<(), String> {
+pub fn ai_ask(
+    eng: Eng<'_>,
+    ai: Ai<'_>,
+    doc: DocId,
+    req: AskRequest,
+    provider: Option<ProviderId>,
+    on_event: Channel<ChatEvent>,
+) -> Result<(), String> {
     let (eng, ai) = (eng.inner().clone(), ai.inner().clone());
     let host = Arc::new(EngineHost { eng: eng.clone(), doc });
-    let loader = {
+    let p = ai.provider(provider.unwrap_or_default());
+    let loader: provider::Loader = {
         let ai = ai.clone();
-        move || text_for(&eng, &ai, doc)
+        Box::new(move || text_for(&eng, &ai, doc))
     };
-    ai.ask(
+    p.ask(
         doc,
         req,
         loader,
@@ -112,7 +127,13 @@ pub fn ai_set_permissions(ai: Ai<'_>, doc: DocId, mode: tools::Mode) {
     ai.set_permissions(doc, mode);
 }
 
-/// The document was closed: drop its chat thread and cached text.
+/// The user's own path to `claude` (a setting); an empty string goes back to looking for it.
+#[tauri::command]
+pub fn ai_set_claude_path(ai: Ai<'_>, path: Option<String>) {
+    ai.claude().set_executable(path.map(PathBuf::from));
+}
+
+/// The document was closed: drop its chats and cached text.
 #[tauri::command]
 pub async fn ai_close(ai: Ai<'_>, doc: DocId) -> Result<(), String> {
     let ai = ai.inner().clone();

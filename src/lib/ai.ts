@@ -10,6 +10,11 @@ export interface ModelInfo {
   isDefault: boolean;
 }
 
+/** Which CLI answers: Codex (ChatGPT subscription) or Claude Code (Claude subscription). */
+export type ProviderId = "codex" | "claude";
+export const PROVIDERS: ProviderId[] = ["codex", "claude"];
+export const PROVIDER_NAMES: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
+
 export interface AiStatus {
   installed: boolean;
   loggedIn: boolean;
@@ -17,6 +22,8 @@ export interface AiStatus {
   plan: string | null;
   models: ModelInfo[];
   error: string | null;
+  /** The CLI's own version, when it said. */
+  version?: string | null;
 }
 
 export interface Prepared {
@@ -77,6 +84,8 @@ export type UiAction =
 export type ChatEvent =
   | { kind: "status"; phase: "reading" | "connecting" | "thinking" }
   | { kind: "delta"; text: string }
+  /** What was streamed so far was a preamble before a tool call, not the answer: start the text again. */
+  | { kind: "reset" }
   | ({ kind: "activity" } & Activity)
   | { kind: "ui"; action: UiAction }
   | {
@@ -93,8 +102,10 @@ export type ChatEvent =
   | { kind: "error"; message: string; hint: string | null }
   | { kind: "cancelled" };
 
-export const aiStatus = () => invoke<AiStatus>("ai_status");
-export const aiPrepare = (doc: number) => invoke<Prepared>("ai_prepare", { doc });
+export const aiStatus = (provider: ProviderId) => invoke<AiStatus>("ai_status", { provider });
+export const aiPrepare = (doc: number, provider: ProviderId) => invoke<Prepared>("ai_prepare", { doc, provider });
+/** The user's own path to `claude` (empty = look for it). */
+export const aiSetClaudePath = (path: string | null) => invoke<void>("ai_set_claude_path", { path });
 export const aiCancel = (doc: number) => invoke<void>("ai_cancel", { doc });
 export const aiClose = (doc: number) => invoke<void>("ai_close", { doc });
 /** The mode changed while a turn runs: its very next tool call is checked against it. */
@@ -104,10 +115,10 @@ export const aiToolDecision = (doc: number, callId: string, allow: boolean) =>
   invoke<void>("ai_tool_decision", { doc, callId, allow });
 
 /** Starts a question; every event of the answer arrives through `onEvent`. */
-export function aiAsk(doc: number, req: AskRequest, onEvent: (e: ChatEvent) => void) {
+export function aiAsk(doc: number, req: AskRequest, provider: ProviderId, onEvent: (e: ChatEvent) => void) {
   const ch = new Channel<ChatEvent>();
   ch.onmessage = onEvent;
-  return invoke<void>("ai_ask", { doc, req, onEvent: ch });
+  return invoke<void>("ai_ask", { doc, req, provider, onEvent: ch });
 }
 
 // ---- settings kept on this machine (never chats) ---------------------------------------------
@@ -124,9 +135,18 @@ export interface Geo {
 }
 
 export interface AiSettings {
+  /** The provider a document without its own choice uses (the last one picked). */
+  provider: ProviderId;
+  /** Model and effort chosen for Codex; Claude's are `claudeModel` / `claudeEffort`. */
   model: string | null;
   effort: string;
+  claudeModel: string | null;
+  claudeEffort: string | null;
+  /** The user's own path to claude(.exe), when it is not on PATH. */
+  claudePath: string | null;
+  /** Agreed to send document text to OpenAI (Codex) / to Anthropic (Claude): each is asked once. */
   consent: boolean;
+  claudeConsent: boolean;
   hideSources: boolean;
   /** Docked width in px. */
   width: number;
@@ -139,9 +159,14 @@ export interface AiSettings {
 
 const KEY = "inkwell.ai";
 const DEFAULTS: AiSettings = {
+  provider: "codex",
   model: null,
   effort: "low",
+  claudeModel: null,
+  claudeEffort: null,
+  claudePath: null,
   consent: false,
+  claudeConsent: false,
   hideSources: false,
   width: 400,
   mode: "docked",
@@ -154,6 +179,7 @@ export function loadSettings(): AiSettings {
     const s: AiSettings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
     return {
       ...s,
+      provider: PROVIDERS.includes(s.provider) ? s.provider : "codex",
       mode: MODES.includes(s.mode) ? s.mode : "docked",
       permissions: PERMISSIONS.includes(s.permissions) ? s.permissions : "ask",
     };

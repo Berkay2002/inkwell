@@ -295,7 +295,7 @@ fn write_loop(mut stdin: ChildStdin, lines: Receiver<Vec<u8>>, client: Weak<Clie
 /// One Job object per server with KILL_ON_JOB_CLOSE: the server (and anything it spawned) dies with
 /// Inkwell however Inkwell dies, and `terminate` ends the whole tree on demand.
 #[cfg(windows)]
-mod job {
+pub(super) mod job {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
@@ -352,7 +352,7 @@ mod job {
 }
 
 #[cfg(not(windows))]
-mod job {
+pub(super) mod job {
     pub struct Job;
     impl Job {
         pub fn new() -> Option<Job> {

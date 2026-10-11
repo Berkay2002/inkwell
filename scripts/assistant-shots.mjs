@@ -167,16 +167,27 @@ await send("Emulation.clearDeviceMetricsOverride");
 await mode("docked");
 
 // ---- setup states (store injection; the real status is restored afterwards) ----
-for (const [name, status] of [
-  ["docked-not-installed-light.png", { installed: false, loggedIn: false, account: null, plan: null, models: [], error: null }],
-  ["docked-not-logged-in-light.png", { installed: true, loggedIn: false, account: null, plan: null, models: [], error: null }],
-]) {
-  await ev(`window.__ai.setState({ status: ${JSON.stringify(status)}, chats: {} })`);
-  await sleep(300);
-  await shot(name);
-}
-await ev(`window.__ai.getState().refreshStatus()`);
-await sleep(1500);
+const setup = async (provider, prefix) => {
+  for (const [name, status] of [
+    [`docked-${prefix}not-installed-light.png`, { installed: false, loggedIn: false, account: null, plan: null, models: [], error: null }],
+    [`docked-${prefix}not-logged-in-light.png`, { installed: true, loggedIn: false, account: null, plan: null, models: [], error: null }],
+  ]) {
+    await ev(`(() => { const a = window.__ai; a.getState().setProvider(window.__doc(), ${JSON.stringify(provider)}); a.setState({ statuses: { ...a.getState().statuses, ${provider}: ${JSON.stringify(status)} } }); return true })()`);
+    await sleep(300);
+    await shot(name);
+  }
+};
+await setup("codex", "");
+await setup("claude", "claude-");
+// the provider picker, open (light and dark)
+await click(".ax-head .ax-pill");
+await sleep(300);
+await shot("docked-provider-picker-light.png");
+await theme("dark");
+await shot("docked-provider-picker-dark.png");
+await theme("light");
+await ev(`(() => { const a = window.__ai.getState(); a.setProvider(window.__doc(), "codex"); a.refreshStatus("codex"); a.refreshStatus("claude"); return true })()`);
+await sleep(2500);
 
 fs.writeFileSync(path.join(out, "latency-report.json"), JSON.stringify(report, null, 1));
 console.log(

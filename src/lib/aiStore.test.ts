@@ -13,7 +13,7 @@ vi.hoisted(() => {
 
 let emit: (e: ChatEvent) => void = () => {};
 vi.mock("./ai", () => ({
-  aiAsk: vi.fn((_doc: number, _req: unknown, cb: (e: ChatEvent) => void) => {
+  aiAsk: vi.fn((_doc: number, _req: unknown, _provider: string, cb: (e: ChatEvent) => void) => {
     emit = cb;
     return Promise.resolve();
   }),
@@ -23,10 +23,16 @@ vi.mock("./ai", () => ({
   aiClose: vi.fn(() => Promise.resolve()),
   aiToolDecision: vi.fn(() => Promise.resolve()),
   aiSetPermissions: vi.fn(() => Promise.resolve()),
+  aiSetClaudePath: vi.fn(() => Promise.resolve()),
   loadSettings: () => ({
+    provider: "codex",
     model: null,
     effort: "low",
+    claudeModel: null,
+    claudeEffort: null,
+    claudePath: null,
     consent: false,
+    claudeConsent: false,
     hideSources: false,
     width: 400,
     mode: "docked",
@@ -42,7 +48,7 @@ vi.mock("./history", () => ({ historyCheckpoint: vi.fn(() => Promise.resolve(nul
 
 import * as ai from "./ai";
 import { historyCheckpoint } from "./history";
-import { useAi } from "./aiStore";
+import { providerOf, useAi } from "./aiStore";
 import { useStore } from "../store";
 
 const goTo = vi.fn();
@@ -55,7 +61,13 @@ beforeEach(() => {
     active: 1,
     goTo,
   });
-  useAi.setState({ chats: {}, pending: null, mark: null, settings: { ...useAi.getState().settings, consent: false } });
+  useAi.setState({
+    chats: {},
+    pending: null,
+    mark: null,
+    statuses: {},
+    settings: { ...useAi.getState().settings, consent: false, claudeConsent: false, provider: "codex" },
+  });
 });
 
 describe("assistant store", () => {
@@ -223,6 +235,97 @@ describe("assistant store", () => {
       emit({ kind: "ui", action: { type: "show", page: 3, rects: [[10, 300, 50, 320]], quote: "q" } });
       expect(goTo).toHaveBeenLastCalledWith(1, 3, 210);
       expect(useAi.getState().mark).toMatchObject({ doc: 1, page: 3, n: 0 });
+    });
+  });
+
+  describe("providers", () => {
+    const CLAUDE_MODELS = [
+      { id: "default", name: "Default", efforts: ["low", "medium", "high"], defaultEffort: null, isDefault: true },
+      { id: "haiku", name: "Haiku", efforts: [], defaultEffort: null, isDefault: false },
+    ];
+    const claudeStatus = { installed: true, loggedIn: true, account: null, plan: "max", models: CLAUDE_MODELS, error: null };
+
+    it("asks Codex by default and sends the provider with the question", () => {
+      useAi.getState().setSettings({ consent: true });
+      useAi.getState().ask(1, { kind: "ask", question: "q" });
+      expect(vi.mocked(ai.aiAsk).mock.calls[0][2]).toBe("codex");
+    });
+
+    it("keeps one choice per document and remembers the last one for the next", async () => {
+      useStore.setState({
+        docs: { 1: { id: 1, name: "a.pdf", currentPage: 0 } as never, 2: { id: 2, name: "b.pdf", currentPage: 0 } as never },
+        order: [1, 2],
+      });
+      useAi.getState().setProvider(1, "claude");
+      expect(useAi.getState().chats[1].provider).toBe("claude");
+      expect(useAi.getState().settings.provider).toBe("claude");
+      expect(ai.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ provider: "claude" }));
+      useAi.getState().setProvider(2, "codex");
+      expect(providerOf(useAi.getState(), 1)).toBe("claude");
+      expect(providerOf(useAi.getState(), 2)).toBe("codex");
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ai.aiClose).toHaveBeenCalledWith(1);
+      expect(ai.aiPrepare).toHaveBeenCalledWith(1, "claude");
+    });
+
+    it("switching starts a new chat and is refused while an answer streams", () => {
+      useAi.getState().setSettings({ consent: true });
+      useAi.getState().ask(1, { kind: "ask", question: "q" });
+      useAi.getState().setProvider(1, "claude"); // streaming: ignored
+      expect(providerOf(useAi.getState(), 1)).toBe("codex");
+      emit({ kind: "cancelled" });
+      useAi.getState().setProvider(1, "claude");
+      expect(useAi.getState().chats[1].messages).toEqual([]);
+    });
+
+    it("asks for consent for each provider separately", () => {
+      useAi.getState().setSettings({ consent: true });
+      useAi.getState().setProvider(1, "claude");
+      useAi.getState().ask(1, { kind: "ask", question: "q" });
+      expect(ai.aiAsk).not.toHaveBeenCalled();
+      expect(useAi.getState().pending?.doc).toBe(1);
+      useAi.getState().grantConsent();
+      expect(useAi.getState().settings.claudeConsent).toBe(true);
+      expect(vi.mocked(ai.aiAsk).mock.calls[0][2]).toBe("claude");
+    });
+
+    it("sends Claude only a model and effort its own list offers", () => {
+      useAi.getState().setSettings({ consent: true, claudeConsent: true, model: "gpt-x", effort: "xhigh", claudeModel: "haiku", claudeEffort: "high" });
+      useAi.setState({ statuses: { claude: claudeStatus } });
+      useAi.getState().setProvider(1, "claude");
+      useAi.getState().ask(1, { kind: "ask", question: "q" });
+      // haiku has no efforts: the effort is dropped, never the Codex one
+      expect(vi.mocked(ai.aiAsk).mock.calls[0][1]).toMatchObject({ model: "haiku", effort: null });
+      emit({ kind: "cancelled" });
+      useAi.getState().setSettings({ claudeModel: "gpt-x" }); // an id from another provider
+      useAi.getState().ask(1, { kind: "ask", question: "q2" });
+      expect(vi.mocked(ai.aiAsk).mock.calls[1][1]).toMatchObject({ model: null, effort: null });
+    });
+
+    it("keeps a status per provider and looks again for the one asked", async () => {
+      useAi.getState().refreshStatus("codex");
+      useAi.getState().refreshStatus("claude");
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ai.aiStatus).toHaveBeenCalledWith("codex");
+      expect(ai.aiStatus).toHaveBeenCalledWith("claude");
+      expect(ai.aiSetClaudePath).toHaveBeenCalledTimes(1);
+      expect(Object.keys(useAi.getState().statuses).sort()).toEqual(["claude", "codex"]);
+    });
+
+    it("a path to claude is applied and the check repeated", async () => {
+      useAi.getState().setSettings({ claudePath: "C:\\tools\\claude.exe" });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ai.aiSetClaudePath).toHaveBeenCalledWith("C:\\tools\\claude.exe");
+      expect(ai.aiStatus).toHaveBeenCalledWith("claude");
+    });
+
+    it("a reset event empties the lead-in text before a tool call", () => {
+      useAi.getState().setSettings({ consent: true });
+      useAi.getState().ask(1, { kind: "ask", question: "q" });
+      emit({ kind: "delta", text: "Let me look. " });
+      emit({ kind: "reset" });
+      emit({ kind: "delta", text: "Answer" });
+      expect(useAi.getState().chats[1].messages[1].text).toBe("Answer");
     });
   });
 

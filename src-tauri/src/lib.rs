@@ -844,7 +844,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
-        .manage(ai::Assistant::new())
+        .manage(ai::Hub::new())
         .manage(Paths::default())
         .manage(Arc::new(tools::Jobs::default()))
         .manage(Arc::new(search::files::FolderSearches::default()))
@@ -1005,6 +1005,7 @@ pub fn run() {
             ai::ai_cancel,
             ai::ai_tool_decision,
             ai::ai_set_permissions,
+            ai::ai_set_claude_path,
             ai::ai_close,
         ])
         .setup(move |app| {

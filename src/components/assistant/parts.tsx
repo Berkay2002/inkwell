@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Citation } from "../../lib/ai";
-import { type Msg, readViewerSelection, useAi } from "../../lib/aiStore";
+import { type Citation, PROVIDERS, PROVIDER_NAMES, type ProviderId } from "../../lib/ai";
+import { type Msg, pickOf, providerOf, readViewerSelection, useAi } from "../../lib/aiStore";
 import type { DocState } from "../../store";
 import { isVerified } from "../../lib/activity";
 import { ActivityTrail } from "./ActivityTrail";
@@ -9,11 +9,20 @@ import { PermissionItems } from "./PermissionItems";
 
 export type Variant = "docked" | "floating" | "bar";
 
-const PHASES: Record<string, string> = {
-  reading: "Reading the document…",
-  connecting: "Connecting to Codex…",
-  thinking: "Thinking…",
+const phaseText = (provider: ProviderId, phase: string): string =>
+  phase === "reading"
+    ? "Reading the document…"
+    : phase === "connecting"
+      ? `Connecting to ${PROVIDER_NAMES[provider]}…`
+      : "Thinking…";
+
+/** What the user is told about whose subscription pays and where the text goes. */
+export const PROVIDER_NOTE: Record<ProviderId, string> = {
+  codex: "Uses your ChatGPT login through Codex.",
+  claude: "Uses your Claude Code login; usage counts against your Claude plan.",
 };
+
+const CLAUDE_INSTALL_URL = "https://docs.claude.com/en/docs/claude-code/setup";
 
 const PATHS = {
   doc: "M7 3.5h6.5L18 8v12.5H7zM13.5 3.5V8H18",
@@ -67,17 +76,25 @@ export function usePop() {
 }
 
 /** The model and effort in one pill (or, with `icon`, a brain icon whose tooltip names them); the
- *  popover lists what Codex offers. */
-export function ModelPicker({ up = false, icon = false }: { up?: boolean; icon?: boolean }) {
-  const status = useAi((s) => s.status);
+ *  popover lists what the document's provider offers. */
+export function ModelPicker({ doc, up = false, icon = false }: { doc: number; up?: boolean; icon?: boolean }) {
+  const provider = useAi((s) => providerOf(s, doc));
+  const status = useAi((s) => s.statuses[provider]);
   const settings = useAi((s) => s.settings);
   const { open, setOpen, ref } = usePop();
   const models = typeof status === "object" && status ? status.models : [];
-  const model = models.find((m) => m.id === settings.model) ?? models.find((m) => m.isDefault) ?? models[0];
+  const pick = pickOf(settings, provider);
+  const model = models.find((m) => m.id === pick.model) ?? models.find((m) => m.isDefault) ?? models[0];
   if (!model) return null;
   const efforts = model.efforts;
-  const effort = efforts.includes(settings.effort) ? settings.effort : (model.defaultEffort ?? efforts[0]);
-  const set = useAi.getState().setSettings;
+  const effort = pick.effort && efforts.includes(pick.effort) ? pick.effort : (model.defaultEffort ?? efforts[0]);
+  // Codex keeps its choice in `model` / `effort`, Claude in `claudeModel` / `claudeEffort`
+  const set = (p: { model?: string; effort?: string }) =>
+    useAi.getState().setSettings(
+      provider === "claude"
+        ? { ...(p.model !== undefined ? { claudeModel: p.model } : {}), ...(p.effort !== undefined ? { claudeEffort: p.effort } : {}) }
+        : p,
+    );
   const label = `${model.name}${effort ? ` · ${cap(effort)}` : ""}`;
 
   return (
@@ -108,7 +125,7 @@ export function ModelPicker({ up = false, icon = false }: { up?: boolean; icon?:
               aria-checked={m.id === model.id}
               onClick={() => {
                 // A model may not offer the effort chosen for the previous one.
-                const next = m.efforts.includes(settings.effort) ? undefined : (m.defaultEffort ?? m.efforts[0]);
+                const next = pick.effort && m.efforts.includes(pick.effort) ? undefined : (m.defaultEffort ?? m.efforts[0]);
                 set({ model: m.id, ...(next ? { effort: next } : {}) });
               }}
             >
@@ -135,6 +152,63 @@ export function ModelPicker({ up = false, icon = false }: { up?: boolean; icon?:
   );
 }
 
+/** The provider choices of a document: Codex | Claude with the plan when it is known, then the
+ *  note on whose subscription is used. `tick` is the check mark; `after` runs on a pick. */
+function ProviderItems({ doc, after }: { doc: number; after?: () => void }) {
+  const provider = useAi((s) => providerOf(s, doc));
+  const statuses = useAi((s) => s.statuses);
+  const busy = useAi((s) => !!s.chats[doc]?.messages.some((m) => m.state === "streaming"));
+  const hasMsgs = useAi((s) => (s.chats[doc]?.messages.length ?? 0) > 0);
+  return (
+    <>
+      <div className="ax-pop-label">Assistant</div>
+      {PROVIDERS.map((p) => {
+        const s = statuses[p];
+        const plan = typeof s === "object" && s.loggedIn ? s.plan : null;
+        return (
+          <button
+            key={p}
+            role="menuitemradio"
+            aria-checked={p === provider}
+            disabled={busy}
+            onClick={() => {
+              useAi.getState().setProvider(doc, p);
+              after?.();
+            }}
+          >
+            <span className="ax-tick">{p === provider && <Glyph name="check" size={13} />}</span>
+            {PROVIDER_NAMES[p]}
+            {plan && <span className="ax-prov-plan">{cap(plan)}</span>}
+          </button>
+        );
+      })}
+      <p className="ax-pop-note">
+        {PROVIDER_NOTE[provider]}
+        {hasMsgs ? " Switching starts a new chat." : ""}
+      </p>
+    </>
+  );
+}
+
+/** The provider in a pill next to the title. */
+export function ProviderPicker({ doc, up = false }: { doc: number; up?: boolean }) {
+  const provider = useAi((s) => providerOf(s, doc));
+  const { open, setOpen, ref } = usePop();
+  return (
+    <div className="ax-pop-wrap" ref={ref}>
+      <button className="ax-pill" title="Which assistant answers" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span className="ax-pill-text">{PROVIDER_NAMES[provider]}</span>
+        <Glyph name="down" size={13} />
+      </button>
+      {open && (
+        <div className={`ax-pop${up ? " up" : ""}`} role="menu">
+          <ProviderItems doc={doc} after={() => setOpen(false)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** The "..." menu: chat actions. */
 export function MoreMenu({ doc, up = false }: { doc: DocState; up?: boolean }) {
   const settings = useAi((s) => s.settings);
@@ -151,6 +225,8 @@ export function MoreMenu({ doc, up = false }: { doc: DocState; up?: boolean }) {
       </button>
       {open && (
         <div className={up ? "ax-pop right up" : "ax-pop right"} role="menu">
+          <ProviderItems doc={doc.id} after={() => setOpen(false)} />
+          <div className="ax-pop-sep" />
           <button onClick={run(() => st().clear(doc.id))}>Clear chat</button>
           <button onClick={run(() => void navigator.clipboard.writeText(st().transcript(doc.id)))}>Copy whole chat</button>
           <button onClick={run(() => st().setSettings({ hideSources: !settings.hideSources }))}>
@@ -175,52 +251,140 @@ export function CloseButton({ onClick }: { onClick?: () => void }) {
 }
 
 /** Not installed / not signed in / still checking. */
-export function Gate() {
-  const status = useAi((s) => s.status);
+export function Gate({ doc }: { doc: number }) {
+  const provider = useAi((s) => providerOf(s, doc));
+  const status = useAi((s) => s.statuses[provider] ?? null);
+  const claudePath = useAi((s) => s.settings.claudePath);
+  const name = PROVIDER_NAMES[provider];
+  const other = PROVIDERS.find((p) => p !== provider)!;
   if (status === null || status === "loading")
     return (
       <div className="ax-body">
-        <p className="dim">Checking Codex…</p>
+        <p className="dim">Checking {name}…</p>
       </div>
     );
+  const command = provider === "claude" ? "claude login" : "codex login";
   return (
     <div className="ax-body">
       <div className="ax-card">
         {!status.installed ? (
+          provider === "claude" ? (
+            <>
+              <h3>Claude Code isn’t installed</h3>
+              <p>
+                The assistant uses your Claude subscription through the Claude Code CLI. Install it from{" "}
+                <code>{CLAUDE_INSTALL_URL}</code>, then run <code>claude login</code> in a terminal.
+              </p>
+              <div className="ax-row" style={{ marginBottom: 12 }}>
+                <CopyButton text={CLAUDE_INSTALL_URL} label="Copy install link" />
+              </div>
+              <ClaudePath value={claudePath} />
+            </>
+          ) : (
+            <>
+              <h3>Codex isn’t installed</h3>
+              <p>
+                The assistant uses your ChatGPT subscription through the Codex CLI. Install it, then sign in with{" "}
+                <code>codex login</code>.
+              </p>
+            </>
+          )
+        ) : provider === "claude" ? (
           <>
-            <h3>Codex isn’t installed</h3>
+            <h3>Sign in to Claude Code</h3>
             <p>
-              The assistant uses your ChatGPT subscription through the Codex CLI. Install it, then sign in with{" "}
-              <code>codex login</code>.
+              Run <code>{command}</code> in a terminal and sign in with your Claude account. Inkwell never sees your
+              password or token.
             </p>
+            <div className="ax-row" style={{ marginBottom: 12 }}>
+              <CopyButton text={command} label="Copy command" />
+            </div>
           </>
         ) : (
           <>
             <h3>Sign in to Codex</h3>
             <p>
-              Run <code>codex login</code> in a terminal and choose “Sign in with ChatGPT”. Inkwell never sees your
+              Run <code>{command}</code> in a terminal and choose “Sign in with ChatGPT”. Inkwell never sees your
               password or token.
             </p>
           </>
         )}
         {status.error && <p className="dim small">{status.error}</p>}
-        <button className="ax-btn primary" onClick={() => useAi.getState().refreshStatus()}>
-          Check again
-        </button>
+        <div className="ax-row">
+          <button className="ax-btn primary" onClick={() => useAi.getState().refreshStatus(provider)}>
+            Check again
+          </button>
+          <button className="ax-btn" onClick={() => useAi.getState().setProvider(doc, other)}>
+            Use {PROVIDER_NAMES[other]} instead
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
-export function Consent() {
+/** A small button that puts `text` on the clipboard and says so. */
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      className="ax-btn small"
+      onClick={() => {
+        void navigator.clipboard.writeText(text);
+        setDone(true);
+        setTimeout(() => setDone(false), 1500);
+      }}
+    >
+      {done ? "Copied" : label}
+    </button>
+  );
+}
+
+/** Where `claude` lives when it is not on PATH (the setting behind "not installed"). */
+function ClaudePath({ value }: { value: string | null }) {
+  const [text, setText] = useState(value ?? "");
+  return (
+    <div className="ax-path">
+      <input
+        value={text}
+        placeholder="Already installed? Path to claude.exe"
+        aria-label="Path to claude"
+        spellCheck={false}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") useAi.getState().setSettings({ claudePath: text.trim() || null });
+        }}
+      />
+      <button className="ax-btn small" onClick={() => useAi.getState().setSettings({ claudePath: text.trim() || null })}>
+        Use
+      </button>
+    </div>
+  );
+}
+
+export function Consent({ doc }: { doc: number }) {
+  const provider = useAi((s) => providerOf(s, doc));
   return (
     <div className="ax-body">
       <div className="ax-card">
-        <h3>Send this document to OpenAI?</h3>
-        <p>
-          To answer, Inkwell sends the relevant text of this document (and your questions) to ChatGPT through your
-          Codex login. Nothing is stored by Inkwell: chats disappear when you close the tab.
-        </p>
+        {provider === "claude" ? (
+          <>
+            <h3>Send this document to Anthropic?</h3>
+            <p>
+              To answer, Inkwell sends the relevant text of this document (and your questions) to Claude through your
+              Claude Code login. It counts against your Claude plan. Nothing is stored by Inkwell: chats disappear when
+              you close the tab.
+            </p>
+          </>
+        ) : (
+          <>
+            <h3>Send this document to OpenAI?</h3>
+            <p>
+              To answer, Inkwell sends the relevant text of this document (and your questions) to ChatGPT through your
+              Codex login. Nothing is stored by Inkwell: chats disappear when you close the tab.
+            </p>
+          </>
+        )}
         <div className="ax-row">
           <button className="ax-btn primary" onClick={() => useAi.getState().grantConsent()}>
             Allow and continue
@@ -408,14 +572,15 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
   const cites = useMemo(() => new Map(m.citations.filter(isVerified).map((c) => [c.n, c])), [m.citations]);
   const known = useMemo(() => new Set(cites.keys()), [cites]);
   const active = mark && mark.doc === doc.id ? mark.n : null;
+  const provider = useAi((s) => providerOf(s, doc.id));
 
   if (m.state === "error")
     return (
       <div className="ax-a error">
         <p>{m.error}</p>
         {(m.hint === "login" || m.hint === "install") && (
-          <button className="ax-btn" onClick={() => useAi.getState().refreshStatus()}>
-            Check Codex again
+          <button className="ax-btn" onClick={() => useAi.getState().refreshStatus(provider)}>
+            Check {PROVIDER_NAMES[provider]} again
           </button>
         )}
       </div>
@@ -425,7 +590,7 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
     <div className="ax-a">
       <ActivityTrail doc={doc.id} m={m} />
       {m.text === "" && m.state === "streaming" ? (
-        <p className="dim">{PHASES[m.phase ?? "reading"] ?? "Thinking…"}</p>
+        <p className="dim">{phaseText(provider, m.phase ?? "reading")}</p>
       ) : (
         <Markdown
           text={m.text}
@@ -571,7 +736,7 @@ export function Composer({
           }}
         />
         {trail}
-        <ModelPicker up icon />
+        <ModelPicker doc={doc.id} up icon />
         {streaming ? (
           <button className="ax-send" title="Stop" aria-label="Stop" onClick={() => st().cancel(doc.id)}>
             <Glyph name="stop" size={18} stroke={2.5} />
