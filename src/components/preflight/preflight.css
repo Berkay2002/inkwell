@@ -1,0 +1,182 @@
+/* Preflight rail: it reuses the accessibility rail's shell and classes (a11y.css); only the new parts are here. */
+.pf-panel {
+  --pf-ok: var(--a11y-pass);
+  --pf-bad: var(--a11y-fail);
+}
+.pf-profile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 4px 0;
+}
+.pf-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.pf-select {
+  align-self: stretch;
+  max-width: none;
+}
+.pf-ok {
+  color: var(--a11y-pass);
+}
+.pf-bad {
+  color: var(--a11y-fail);
+}
+.pf-clause {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.pf-where {
+  min-width: 0;
+}
+.pf-need {
+  color: var(--a11y-manual);
+}
+
+/* outcome card: the fix groups as a checklist, the predicted outcome under it */
+.pf-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pf-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 5px 4px;
+  border-radius: 8px;
+}
+.pf-check:hover {
+  background: var(--accent-soft);
+}
+.pf-check input {
+  flex: none;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+.pf-check label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  cursor: pointer;
+}
+.pf-check.off label {
+  cursor: default;
+  opacity: 0.6;
+}
+.pf-check-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.pf-check-name {
+  font-weight: 600;
+}
+.pf-check-n {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.pf-check-effect {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.35;
+}
+.pf-line {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  font-weight: 600;
+  line-height: 1.35;
+}
+.pf-lang {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pf-lang .a11y-select {
+  flex: 1;
+}
+.a11y-seg-pick {
+  display: flex;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+}
+.a11y-seg-pick button {
+  flex: 1;
+  min-height: 28px;
+  border-radius: 14px;
+  color: var(--text-2);
+}
+.a11y-seg-pick button.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.a11y-seg-pick button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.pf-fixed {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Document properties badge */
+.pf-claim {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 10px 0 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2, var(--surface));
+}
+.pf-claim-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.pf-claim-glyph {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--a11y-pass, #2f7d4f);
+  color: var(--surface);
+  font-size: 11px;
+  line-height: 1;
+}
+.pf-claim-note {
+  flex: 1 1 100%;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.pf-claim-verify {
+  align-self: center;
+}

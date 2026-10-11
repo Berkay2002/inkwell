@@ -1,4 +1,5 @@
 import { openA11y } from "./a11y";
+import { openPreflight } from "./preflight";
 import { openCompareSetup } from "../components/history/HistoryPanel";
 import { type DocState, useStore } from "../store";
 import { pickOpen } from "./api";
@@ -42,6 +43,17 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
       keywords: "ocr scan scanned searchable read text image",
       command: "ocr",
       onSelect: () => useTools.getState().open("ocr", id),
+    },
+    {
+      id: "preflight",
+      group: "optimize",
+      icon: "check",
+      label: "Preflight",
+      description: "Check and convert for long-term archiving",
+      detail: "Checks the file against PDF/A, PDF/UA or PDF/X, shows each rule that fails, and converts it into a new file or in place. A report you can export; it is not a full validation.",
+      keywords: "PDF/A archive preflight PDF/X PDF/UA conform standard validate",
+      command: "preflight",
+      onSelect: openPreflight,
     },
     {
       id: "header-footer",
