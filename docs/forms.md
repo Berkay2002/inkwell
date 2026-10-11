@@ -53,8 +53,11 @@ compiles the text in a throwaway engine without evaluating it.
   `importDataObject`, `getURL` and alert loops. A call built from pieces of text is not seen, so a clean header is not a
   guarantee. Scripts inside XFA forms are not covered.
 - Every edit is one undo step. Replace, delete and clear are removing edits: the old text is not left in the saved bytes.
-- An edit changes the file. The running forms engine is not reloaded: document scripts take effect when the file is next
-  opened.
+- An edit changes the file, not the running forms engine, which reads the named document scripts once per open document
+  and keeps them (`forms/js.rs`, `doc_scripts`). If the forms rail has not listed the fields since the file was opened,
+  the first listing after an edit reads the edited scripts and runs them under the normal scripts-on policy. Once it has
+  read them, an edited, added or deleted script takes effect when the file is closed and opened again. Actions
+  (open, save, print, page) are never run, so they have no such delay.
 - Not an assistant tool: the sheet is something a person opens, so a script can only be changed by someone who looked.
 
 ## Preparing a form

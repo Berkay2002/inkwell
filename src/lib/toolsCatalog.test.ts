@@ -34,7 +34,9 @@ const items: ToolItem[] = [
   mk("background", "Background", "marks", "Put a colour or image behind page content", "colour color image paper behind"),
   mk("bates", "Bates numbering", "marks", "Number pages for legal filings", "legal numbers page numbers court prefix"),
   mk("protect", "Protect with a password", "protect", "Require a password to open the file", "encrypt lock secure password open"),
+  mk("doc-javascript", "Document JavaScript", "scripts", "See, edit or remove the scripts in this file", "javascript script code action open save print launch url acrobat macro"),
   mk("export", "Export", "convert", "Save as Word, images, text and more", "save as word docx image jpg png text html convert"),
+  mk("create-portfolio", "Create PDF Portfolio", "convert", "Bundle files of any kind into one PDF", "portfolio bundle package collection attach combine files folder"),
   mk("compare", "Compare files", "check", "Compare this file with another file or an earlier version", "diff differences changes versions side by side"),
 ];
 const ids = (r: ToolItem[]) => r.map((i) => i.id);

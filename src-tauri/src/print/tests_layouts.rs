@@ -652,19 +652,20 @@ fn sized_page(media: (u32, u32), page: &str, content: &str) -> Vec<u8> {
 #[test]
 fn a_page_with_a_user_unit_prints_at_its_real_size() {
     let d = dir("user-unit");
-    // /UserUnit 2: a 612 x 792 box in user units is a 1224 x 1584 pt page, and the square is 400 pt across
-    let unit = sized_page((612, 792), "/UserUnit 2", "0 g 100 100 200 200 re f");
+    // /UserUnit 2: a 200 x 250 box in user units is a 400 x 500 pt page, all of it black
+    let unit = sized_page((200, 250), "/UserUnit 2", "0 g 0 0 200 250 re f");
     // the same page written in points
-    let plain = sized_page((1224, 1584), "", "2 0 0 2 0 0 cm 0 g 100 100 200 200 re f");
+    let plain = sized_page((400, 500), "", "0 g 0 0 400 500 re f");
     let (eng, doc, _) = open_bytes(&d, "unit.pdf", &unit);
     let (eng2, doc2, _) = open_bytes(&d, "plain.pdf", &plain);
-    let s = settings(Layout::default());
+    // Actual size: a page that kept its /UserUnit as 1 would print at 200 x 250 pt, a quarter of the ink
+    let s = settings(Layout::Size { mode: SizeMode::Actual, percent: 100.0 });
     let (a, b) = (d.join("a.pdf"), d.join("b.pdf"));
     save(&eng, doc, &s, &a).unwrap();
     save(&eng2, doc2, &s, &b).unwrap();
     let (ink_a, ink_b) = (dark(&a, 0), dark(&b, 0));
-    assert!(ink_b > 1_000 && ink_a.abs_diff(ink_b) * 100 <= ink_b, "{ink_a} vs {ink_b}");
-    // the sheet is the paper, and the page was fitted whole: the square covers the same share of it as in the twin
+    assert!((195_000..205_000).contains(&ink_b), "twin: {ink_b}");
+    assert!(ink_a.abs_diff(ink_b) * 100 <= ink_b, "{ink_a} vs {ink_b}");
     let o = mupdf::Document::open(a.to_string_lossy().as_ref()).unwrap();
     assert!(near(f64::from(o.load_page(0).unwrap().bounds().unwrap().width()), 612.0));
     // and it is what the preview draws
