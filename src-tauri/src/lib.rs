@@ -8,6 +8,8 @@ pub mod diff;
 pub mod engine;
 pub mod history;
 pub mod history_ipc;
+pub mod imageedit;
+pub mod marks;
 pub mod ocr;
 pub mod paths;
 pub mod preflight;
@@ -805,6 +807,10 @@ pub fn run() {
             protect::app::protect_apply,
             protect_and_save,
             protect::app::remove_security,
+            marks::app::marks_info,
+            marks::app::marks_add,
+            marks::app::marks_remove,
+            marks::app::marks_bates_files,
             tool_cancel,
             ocr_languages,
             ocr_choose_tesseract,
@@ -845,6 +851,8 @@ pub fn run() {
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
+            imageedit::app::image_blocks,
+            imageedit::app::image_edit,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

@@ -7,10 +7,10 @@
 //! See docs/text-edit.md.
 
 pub mod app;
-mod content;
+pub(crate) mod content;
 pub(crate) mod encodings;
 mod font;
-mod text;
+pub(crate) mod text;
 
 pub use text::{Align, Fallback, Issue, TextChange};
 
@@ -99,7 +99,7 @@ pub struct TextEdited {
 }
 
 /// User space → page space, and the page's origin there.
-fn page_space(doc: &PdfDocument, page: u32) -> Result<Matrix> {
+pub(crate) fn page_space(doc: &PdfDocument, page: u32) -> Result<Matrix> {
     let p = doc.find_page(page as i32)?;
     let m = p.page_ctm()?;
     let b = doc.load_page(page as i32)?.bounds()?;
