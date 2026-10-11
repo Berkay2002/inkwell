@@ -116,6 +116,50 @@ export interface PageImageBlock {
 /** The images page `page` draws (dark pages keep the photographs in their own colours). */
 export const pageImages = (doc: number, page: number) =>
   invoke<{ rev: number; images: PageImageBlock[] }>("image_blocks", { doc, page }).then((b) => b.images);
+
+// ---- editing images in place (src-tauri/src/imageedit, docs/image-edit.md) ----
+
+/** One image a page draws, with what the editor needs: all rectangles are page space (points, y down). */
+export interface ImageBlock extends PageImageBlock {
+  /** Pass to `imageEdit` with the `rev` of the list it came from. */
+  index: number;
+  kind: "xObject" | "inline";
+  /** The whole image's box: larger than `rect` when a clip crops it. */
+  fullRect: [number, number, number, number];
+  /** The placement: unit square to user space. */
+  matrix: [number, number, number, number, number, number];
+  /** Pixel size. */
+  width: number;
+  height: number;
+  bitsPerComponent: number;
+  /** The stream's filters, outermost first. */
+  filter: string[];
+  name?: string | null;
+  xref?: number | null;
+  editable: boolean;
+  reason?: string | null;
+}
+
+export interface ImageBlocks {
+  rev: number;
+  images: ImageBlock[];
+}
+
+/** `file`: an open token from `pickSource("images", …)`. `rect`s are the box to fit, in page space. */
+export type ImageChange =
+  | { op: "move"; dx: number; dy: number }
+  | { op: "resize"; rect: [number, number, number, number]; keepAspect: boolean }
+  | { op: "rotate"; quarterTurns: number }
+  | { op: "flip"; horizontal: boolean }
+  | { op: "delete" }
+  | { op: "replace"; file: string }
+  | { op: "crop"; rect: [number, number, number, number]; pixels: boolean }
+  | { op: "add"; file: string; rect: [number, number, number, number]; keepAspect?: boolean };
+
+export const imageBlocks = (doc: number, page: number) => invoke<ImageBlocks>("image_blocks", { doc, page });
+/** `index` is null for `add`. A `rev` older than the document's is refused as "stale". */
+export const imageEdit = (doc: number, rev: number, page: number, index: number | null, change: ImageChange) =>
+  invoke<{ state: EditState }>("image_edit", { doc, rev, page, index, change });
 export const cancelSearch = (doc: number) => invoke<void>("cancel_search", { doc });
 export const engineStats = () => invoke<EngineStats>("engine_stats");
 export const initialFiles = () => invoke<FileRef[]>("initial_files");
@@ -591,11 +635,84 @@ function stripKind<T extends { kind: string }>(m: T): Omit<T, "kind"> {
 
 export type CompressPreset = "smallest" | "balanced" | "highQuality";
 
+export type AuditCategory =
+  | "images"
+  | "fonts"
+  | "contentStreams"
+  | "forms"
+  | "comments"
+  | "links"
+  | "bookmarks"
+  | "thumbnails"
+  | "embeddedFiles"
+  | "metadata"
+  | "structure"
+  | "other";
+
+/** One font by name, as the audit lists it (what "Unembed" works on). */
+export interface FontUsage {
+  /** `/BaseFont` as written, subset tag included. */
+  name: string;
+  kind: string;
+  embedded: boolean;
+  subset: boolean;
+  /** Stored size of the font file(s). */
+  bytes: number;
+  canUnembed: boolean;
+  whyNot: string | null;
+}
+
 export interface CompressAudit {
   total: number;
-  categories: { category: "images" | "fonts" | "contentStreams" | "metadata" | "structure" | "other"; bytes: number; objects: number }[];
+  /** The categories add up to `total`; `percent` is the share of the file, 0..100. */
+  categories: { category: AuditCategory; bytes: number; objects: number; percent: number }[];
   images: number;
   fonts: number;
+  fontList: FontUsage[];
+}
+
+export type ImageCodec = "retain" | "jpeg" | "jpx" | "flate" | "fax";
+
+export interface ImageClassSettings {
+  /** Downsample images shown above this many ppi (0 = never). */
+  abovePpi: number;
+  toPpi: number;
+  codec: ImageCodec;
+  quality: number;
+}
+
+export interface DiscardSettings {
+  metadata: boolean;
+  thumbnails: boolean;
+  embeddedFiles: boolean;
+  javascript: boolean;
+  bookmarks: boolean;
+  formActions: boolean;
+  alternateImages: boolean;
+  privateData: boolean;
+  links: boolean;
+  invalidLinks: boolean;
+}
+
+/** The engine's `Options` as it serializes: the three presets and the Advanced settings are the same thing. */
+export interface CompressOptions {
+  preset: CompressPreset | "custom";
+  images: { color: ImageClassSettings; gray: ImageClassSettings; mono: ImageClassSettings; onlyIfSmaller: boolean };
+  subsetFonts: boolean;
+  unembedFonts: string[];
+  unembedAll: boolean;
+  transparency: { flatten: boolean; ppi: number };
+  compressStreams: boolean;
+  objectStreams: boolean;
+  /** 0 none, 1 unused, 2 + renumber, 3 + identical objects, 4 + identical streams. */
+  garbage: number;
+  strip: DiscardSettings;
+  visualPages: number;
+}
+
+export interface NamedCompressPreset {
+  name: string;
+  options: CompressOptions;
 }
 
 export interface CompressAuditReply {
@@ -603,11 +720,13 @@ export interface CompressAuditReply {
   size: number;
   defaultOutput: string;
   outputExists: boolean;
+  /** The document carries signatures; the compressed copy invalidates them. */
+  signed: boolean;
 }
 
 /** Predicted size per preset, from recompressing a sample of the file's images. */
 export interface CompressEstimate {
-  preset: CompressPreset;
+  preset: CompressPreset | "custom";
   bytes: number;
   /** The range it should fall in; equal when the sample covered every image. */
   low: number;
@@ -615,7 +734,7 @@ export interface CompressEstimate {
 }
 
 export interface CompressProgress {
-  stage: "open" | "scan" | "images" | "fonts" | "write" | "verify";
+  stage: "open" | "scan" | "flatten" | "images" | "fonts" | "write" | "verify";
   /** 0..1 over the whole job, never decreasing. */
   fraction: number;
   page: number;
@@ -631,17 +750,45 @@ export interface CompressReport {
   savedPercent: number;
   keptOriginal: boolean;
   pages: number;
-  /** Render comparison of before and after (8 pages at most); null when skipped. */
-  visual: { maxDiff: number; meanDiff: number; psnr: number } | null;
+  /** Render comparison of before and after (the sampled pages, plus every page the run flattened or gave
+   *  another font); null when skipped. `worstPage` is zero-based. */
+  visual: {
+    maxDiff: number;
+    meanDiff: number;
+    psnr: number;
+    /** The difference 99.9 % of the compared samples stay under. */
+    p999Diff: number;
+    worstPage: number;
+    pagesChecked: number;
+    pagesTotal: number;
+  } | null;
   warnings: string[];
+  before: CompressAudit;
+  after: CompressAudit;
+  /** What the discard options took out, by option. */
+  stripped: {
+    metadata: boolean;
+    bookmarks: boolean;
+    thumbnails: number;
+    embeddedFiles: number;
+    javascript: number;
+    formActions: number;
+    alternateImages: number;
+    privateData: number;
+    links: number;
+    invalidLinks: number;
+  };
+  unembedded: { files: number; bytes: number; skipped: [string, string][] };
+  /** 1-based pages drawn as a picture, and the ones that use transparency and could not be. */
+  flattened: { pages: number[]; skipped: [number, string][] };
 }
 
 /** Documents are named by id; an output file by a save token from `pickSave`. */
 export interface CompressRequest {
   doc: number;
   preset: CompressPreset;
-  /** Full options from a Customize panel; wins over `preset`. */
-  custom?: unknown;
+  /** The Advanced settings; wins over `preset`. */
+  custom?: CompressOptions;
   /** Save token for the output instead of `<name> (compressed).pdf` (used when that name is taken). */
   saveTo?: string;
 }
@@ -693,6 +840,16 @@ export interface OcrOutcome {
 export const compressAudit = (doc: number) => invoke<CompressAuditReply>("compress_audit", { doc });
 /** Runs on its own thread; `toolCancel(job)` stops it. */
 export const compressEstimate = (job: number, doc: number) => invoke<CompressEstimate[]>("compress_estimate", { job, doc });
+
+/** The three presets as the engine defines them: the starting point of the Advanced settings. */
+export const compressPresetOptions = () => invoke<Record<CompressPreset, CompressOptions>>("compress_preset_options");
+/** One estimate for a set of Advanced settings (on the same sample). `toolCancel(job)` stops it. */
+export const compressEstimateCustom = (job: number, doc: number, options: CompressOptions) =>
+  invoke<CompressEstimate>("compress_estimate_custom", { job, doc, options });
+export const compressPresets = () => invoke<NamedCompressPreset[]>("compress_presets");
+export const compressPresetSave = (name: string, options: CompressOptions) =>
+  invoke<NamedCompressPreset[]>("compress_preset_save", { name, options });
+export const compressPresetDelete = (name: string) => invoke<NamedCompressPreset[]>("compress_preset_delete", { name });
 
 export function compressStart(job: number, req: CompressRequest, onProgress: (p: CompressProgress) => void) {
   const ch = new Channel<CompressProgress>();
