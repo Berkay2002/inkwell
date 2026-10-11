@@ -23,6 +23,7 @@ pub mod af;
 pub mod app;
 mod author;
 pub mod detect;
+pub mod doc_js;
 pub mod js;
 mod scripts;
 #[cfg(test)]

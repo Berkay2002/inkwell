@@ -190,9 +190,11 @@ fn plan_info_counts_the_sides_sent() {
     let info = plan_info(&eng, doc, &s).unwrap();
     // 3 sides make 2 papers with a blank back, twice
     assert_eq!((info.sheets, info.sides, info.papers), (3, 8, 4));
+    // Save as PDF has one of each, padded to whole papers: 3 sides become 4 pages
+    assert_eq!(info.pdf_sides, 4);
     let simplex = Settings { duplex: Duplex::Off, ..s };
     let info = plan_info(&eng, doc, &simplex).unwrap();
-    assert_eq!((info.sides, info.papers), (6, 6));
+    assert_eq!((info.sides, info.papers, info.pdf_sides), (6, 6, 3));
 }
 
 #[cfg(windows)]
