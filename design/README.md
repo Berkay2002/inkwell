@@ -16,6 +16,7 @@ shadows), warm palette (window #F4F2ED, surfaces #FFFFFF, panel #FAF8F4, text #1
 | compare | approved/compare.png, compare-2.png | Compare files: setup page (old and new file slots, content switches) and result (side by side, summary chips as filters, change list, connectors, linked page strips) (compare-r1 a-stage) |
 | redact | approved/redact-review.png, redact-result.png, redact-tools.png | Redact rail: find and hits, after-apply report, manual tools row (redact-r2 c-sweep + a-panel tools) |
 | comments | approved/comments.png, comments-2.png | Comments rail (grouped by page, search, filter, replies) with the floating tool strip, and a selected annotation with handles and popover (comments-r1 a-rail) |
+| forms | approved/forms.png, forms-2.png | Forms rail: fill on the page with the field list and progress, and Prepare form with the floating field strip and the selected field's properties in the rail (forms-r1 a-rail) |
 | print | approved/print.png | Print sheet: centred modal, preview left, one calm option column right, outcome line beside Print (print-r1 a-sheet) |
 
 2026-10-10, history-r1: the user asked for "the most standard way" of showing versions and diffs (Google Docs / Word
