@@ -76,10 +76,13 @@ format we control and version.
   The second `/ID` string is not part of the match: MuPDF writes a new one on every save, Inkwell's own included.
   The fingerprint detects honest edits, not a forger: a crafted file can always carry an index that is "current"
   but says other words, the same as invisible text in the PDF itself.
+  A save that merges duplicate objects, or a layer `/Order` nested deeper than about six levels, makes the index "not
+  current": a build reads the pages instead (slower, never wrong).
 - What is removed with the text: redaction and sanitize always drop the embedded index (it is a compressed copy of
   the page text, which the byte check cannot see inside); deleting pages, editing text, removing attachments or
-  annotations, PDF/A conversion to a new file, Bates numbering with replace, and Compress "strip" drop it unless it
-  still matches the file. Extract, split and combine build new files and carry none.
+  annotations, PDF/A conversion to a new file, Bates numbering with replace, and a Compress or batch run (dropped
+  extras, flattened pages, unembedded fonts) drop it unless it still matches the file; the metadata and private-data
+  options remove it with the rest of `/PieceInfo`. Extract, split and combine build new files and carry none.
 - Bounds: 20 MB of text per file (cut and counted), 100 000 pages, 50 000 bookmarks, 96 MB of inflated index.
 - Estimate (before the first build, from a listing): about 25 MB/s on two threads plus 20 ms per file, and an index of
   about 3 % of the PDF bytes plus 2 KB per file. A guess to set expectations, not a promise.

@@ -2,8 +2,19 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
 import { useAi } from "./aiStore";
-import type { CompressAuditReply, CompressEstimate, CompressPreset, CompressReport, OcrBackend, OcrLanguages, OcrOutcome } from "./api";
+import type {
+  CompressAuditReply,
+  CompressEstimate,
+  CompressOptions,
+  CompressPreset,
+  CompressReport,
+  NamedCompressPreset,
+  OcrBackend,
+  OcrLanguages,
+  OcrOutcome,
+} from "./api";
 import * as edits from "./edit";
+import { forPreset, normalizeOptions, validateOptions } from "./optimizer";
 
 /**
  * Compress and OCR share one sheet that changes state in place: options, running, done (or error).
@@ -18,6 +29,8 @@ async function askSaveTo(doc: number, name: string) {
 }
 
 export type ToolKind = "compress" | "ocr";
+/** The Compress sheet shows the three presets, or the Advanced settings (Acrobat's Optimized PDF). */
+export type CompressMode = "presets" | "advanced";
 export type Phase = "options" | "running" | "done" | "error";
 export type OcrScope = "all" | "page" | "range";
 
@@ -26,10 +39,19 @@ export interface ToolSettings {
   ocrLanguage: string | null;
   ocrBackend: OcrBackend;
   compressPreset: CompressPreset;
+  compressMode: CompressMode;
+  /** The Advanced settings as they were left (without the fonts picked for one document). */
+  compressAdvanced: CompressOptions | null;
 }
 
 const KEY = "inkwell.tools";
-const DEFAULTS: ToolSettings = { ocrLanguage: null, ocrBackend: "windows", compressPreset: "balanced" };
+const DEFAULTS: ToolSettings = {
+  ocrLanguage: null,
+  ocrBackend: "windows",
+  compressPreset: "balanced",
+  compressMode: "presets",
+  compressAdvanced: null,
+};
 
 export function loadToolSettings(): ToolSettings {
   try {
@@ -56,6 +78,19 @@ export interface Sheet {
   /** Job id of the running estimate, so closing the rail can stop it. */
   estimateJob: number;
   compressed: CompressReport | null;
+  mode: CompressMode;
+  /** The Advanced settings; null until the engine's defaults have arrived. */
+  advanced: CompressOptions | null;
+  /** The engine's three presets, the starting points of the Advanced settings. */
+  defaults: Record<CompressPreset, CompressOptions> | null;
+  /** Saved settings by name. */
+  saved: NamedCompressPreset[];
+  /** The saved settings the sheet last loaded or saved (so a change can say "changed"). */
+  savedName: string | null;
+  savedError: string | null;
+  /** Size of the Advanced settings; null while it is worked out. */
+  customEstimate: CompressEstimate | null;
+  customEstimateJob: number;
   // ocr
   scope: OcrScope;
   range: string;
@@ -77,6 +112,14 @@ interface ToolsStore {
   close: () => void;
   set: (p: Partial<Sheet>) => void;
   setSettings: (p: Partial<ToolSettings>) => void;
+  setMode: (m: CompressMode) => void;
+  /** Changes the Advanced settings and asks for a new size. */
+  setAdvanced: (fn: (o: CompressOptions) => CompressOptions) => void;
+  /** Resets the Advanced settings to one of the three presets. */
+  startFrom: (p: CompressPreset) => void;
+  savePreset: (name: string) => Promise<void>;
+  loadPreset: (name: string) => void;
+  deletePreset: (name: string) => Promise<void>;
   /** File picker for tesseract.exe (shown by the Rust side), then the languages are read again. */
   chooseTesseract: () => Promise<void>;
   start: (opts?: { saveAs?: boolean }) => Promise<void>;
@@ -118,6 +161,14 @@ const blank = (tool: ToolKind, doc: number): Sheet => ({
   estimates: null,
   estimateJob: 0,
   compressed: null,
+  mode: "presets",
+  advanced: null,
+  defaults: null,
+  saved: [],
+  savedName: null,
+  savedError: null,
+  customEstimate: null,
+  customEstimateJob: 0,
   scope: "all",
   range: "",
   languages: [],
@@ -144,6 +195,8 @@ export const useTools = create<ToolsStore>((set, get) => {
       patch({ phase: "error", error: friendly(e) });
       return;
     }
+    // The Advanced settings start from the engine's own presets; saved settings come from its data folder.
+    void loadAdvanced(sheet);
     // The sizes take longer than the audit: they arrive on their own, the panel shows "…" until then.
     const job = ++jobSeq;
     patch({ estimateJob: job });
@@ -153,12 +206,56 @@ export const useTools = create<ToolsStore>((set, get) => {
     } catch {
       /* cancelled, or a file the sampler cannot read: no prediction beats a wrong one */
     }
+    if (get().sheet?.mode === "advanced") scheduleEstimate(0);
+  }
+
+  async function loadAdvanced(sheet: Sheet) {
+    try {
+      const [defaults, saved] = await Promise.all([api.compressPresetOptions(), api.compressPresets().catch(() => [])]);
+      const cur = get().sheet;
+      if (!cur || cur.doc !== sheet.doc || cur.tool !== "compress") return;
+      const base = defaults[get().settings.compressPreset] ?? defaults.balanced;
+      const kept = get().settings.compressAdvanced;
+      patch({
+        defaults,
+        saved: saved.map((p) => ({ ...p, options: normalizeOptions(defaults.balanced, p.options) })),
+        advanced: forPreset(kept ? normalizeOptions(base, kept) : base),
+      });
+    } catch {
+      /* no engine defaults: the Advanced tab stays empty and the presets still work */
+    }
+  }
+
+  let estimateTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The size of the Advanced settings, a moment after the last change (it recompresses a sample). */
+  function scheduleEstimate(delay = 600) {
+    clearTimeout(estimateTimer);
+    const s = get().sheet;
+    if (!s || s.tool !== "compress" || s.mode !== "advanced" || !s.advanced) return;
+    if (s.customEstimateJob) void api.toolCancel(s.customEstimateJob).catch(() => {});
+    if (validateOptions(s.advanced)) return void patch({ customEstimate: null, customEstimateJob: 0 });
+    patch({ customEstimate: null });
+    estimateTimer = setTimeout(async () => {
+      const sheet = get().sheet;
+      if (!sheet?.advanced || sheet.phase !== "options" || sheet.mode !== "advanced") return;
+      const job = ++jobSeq;
+      patch({ customEstimateJob: job });
+      try {
+        const customEstimate = await api.compressEstimateCustom(job, sheet.doc, sheet.advanced);
+        if (get().sheet?.customEstimateJob === job) patch({ customEstimate });
+      } catch {
+        /* cancelled, or a file the sampler cannot read: no prediction beats a wrong one */
+      }
+    }, delay);
   }
 
   /** Stops a running estimate: the rail closed, or the real job is about to need the CPU. */
   const stopEstimate = () => {
-    const job = get().sheet?.estimateJob;
-    if (job) void api.toolCancel(job).catch(() => {});
+    clearTimeout(estimateTimer);
+    const sheet = get().sheet;
+    for (const job of [sheet?.estimateJob, sheet?.customEstimateJob]) {
+      if (job) void api.toolCancel(job).catch(() => {});
+    }
   };
 
   async function loadLanguages(sheet: Sheet) {
@@ -191,6 +288,7 @@ export const useTools = create<ToolsStore>((set, get) => {
       const sheet: Sheet = {
         ...blank(tool, d.id),
         preset: s.compressPreset,
+        mode: s.compressMode ?? "presets",
         backend: s.ocrBackend,
         needsSave: d.dirty,
         scope: opts?.scope ?? "all",
@@ -216,6 +314,72 @@ export const useTools = create<ToolsStore>((set, get) => {
       const settings = { ...get().settings, ...p };
       localStorage.setItem(KEY, JSON.stringify(settings));
       set({ settings });
+    },
+
+    setMode: (mode) => {
+      patch({ mode });
+      get().setSettings({ compressMode: mode });
+      if (mode === "advanced") scheduleEstimate(0);
+      else {
+        clearTimeout(estimateTimer);
+        const job = get().sheet?.customEstimateJob;
+        if (job) void api.toolCancel(job).catch(() => {});
+      }
+    },
+
+    setAdvanced: (fn) => {
+      const cur = get().sheet?.advanced;
+      if (!cur) return;
+      const next = { ...fn(cur), preset: "custom" as const };
+      patch({ advanced: next, savedError: null });
+      get().setSettings({ compressAdvanced: forPreset(next) });
+      scheduleEstimate();
+    },
+
+    startFrom: (p) => {
+      const base = get().sheet?.defaults?.[p];
+      if (!base) return;
+      patch({ savedName: null });
+      get().setAdvanced(() => ({ ...base }));
+    },
+
+    savePreset: async (name) => {
+      const o = get().sheet?.advanced;
+      if (!o) return;
+      try {
+        const saved = await api.compressPresetSave(name, forPreset(o));
+        const base = get().sheet?.defaults?.balanced;
+        patch({
+          saved: base ? saved.map((p) => ({ ...p, options: normalizeOptions(base, p.options) })) : saved,
+          savedName: name.trim(),
+          savedError: null,
+        });
+      } catch (e) {
+        patch({ savedError: friendly(e) });
+      }
+    },
+
+    loadPreset: (name) => {
+      const sheet = get().sheet;
+      const p = sheet?.saved.find((x) => x.name === name);
+      if (!sheet || !p) return patch({ savedName: null });
+      // Fonts are picked per document: the ones in this document stay as they were.
+      patch({ savedName: p.name });
+      get().setAdvanced((cur) => ({ ...p.options, unembedFonts: cur.unembedFonts }));
+    },
+
+    deletePreset: async (name) => {
+      try {
+        const saved = await api.compressPresetDelete(name);
+        const base = get().sheet?.defaults?.balanced;
+        patch({
+          saved: base ? saved.map((p) => ({ ...p, options: normalizeOptions(base, p.options) })) : saved,
+          savedName: get().sheet?.savedName === name ? null : (get().sheet?.savedName ?? null),
+          savedError: null,
+        });
+      } catch (e) {
+        patch({ savedError: friendly(e) });
+      }
     },
 
     chooseTesseract: async () => {
@@ -244,10 +408,18 @@ export const useTools = create<ToolsStore>((set, get) => {
           }
           // A taken default name is asked for in a save dialog.
           const saveTo = sheet.audit?.outputExists ? await askSaveTo(d.id, baseName(sheet.audit.defaultOutput)) : undefined;
-          const report = await api.compressStart(job, { doc: d.id, preset: sheet.preset, saveTo }, (p) =>
+          // Advanced: the whole set of settings; presets: just the name, the engine knows the rest.
+          const advanced = sheet.mode === "advanced" && sheet.advanced ? sheet.advanced : undefined;
+          const req = advanced ? { doc: d.id, preset: sheet.preset, custom: advanced, saveTo } : { doc: d.id, preset: sheet.preset, saveTo };
+          const report = await api.compressStart(job, req, (p) =>
             upd({
               progress: p.fraction,
-              status: p.stage === "images" && p.pages > 0 ? `Optimizing images, page ${p.page} of ${p.pages}` : STAGE[p.stage],
+              status:
+                p.stage === "images" && p.pages > 0
+                  ? `Optimizing images, page ${p.page} of ${p.pages}`
+                  : p.stage === "flatten" && p.pages > 0
+                    ? `Flattening transparency, ${p.page} of ${p.pages} pages`
+                    : STAGE[p.stage],
             }),
           );
           get().setSettings({ compressPreset: sheet.preset });
@@ -333,6 +505,7 @@ useAi.subscribe((s, prev) => {
 const STAGE: Record<string, string> = {
   open: "Opening",
   scan: "Looking at what is in the file",
+  flatten: "Flattening transparency",
   images: "Optimizing images",
   fonts: "Subsetting fonts",
   write: "Writing the new file",

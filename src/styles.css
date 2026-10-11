@@ -26,6 +26,9 @@
   --diff-chg-bg: light-dark(rgb(160 109 18 / 0.14), rgb(227 180 94 / 0.17));
   --hit: rgb(255 214 0 / 0.5);
   --hit-current: rgb(255 120 0 / 0.55);
+  /* over a picture on the page (not themed: the picture is not): what a crop dims, and its outline */
+  --crop-dim: rgb(0 0 0 / 0.45);
+  --crop-line: #fff;
   /* soft, diffuse, warm-tinted: 1 = resting cards, 2 = raised or hovered, 3 = popups and dialogs */
   --sh-1: light-dark(rgb(60 45 20 / 0.07), rgb(0 0 0 / 0.3));
   --sh-2: light-dark(rgb(60 45 20 / 0.1), rgb(0 0 0 / 0.3));
