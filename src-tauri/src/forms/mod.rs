@@ -379,7 +379,9 @@ fn action_of(e: &Entry) -> Option<ButtonAction> {
             let fields = fs
                 .map(|f| (0..f.len().unwrap_or(0).min(1024) as i32).filter_map(|i| f.get_array(i).ok().flatten()).filter_map(|x| text(&x).or_else(|| Some(full_name(&x)))).collect())
                 .unwrap_or_default();
-            ButtonAction::Reset { fields }
+            // Flags bit 1: reset every field except the listed ones.
+            let exclude = int_of(&a, "Flags").unwrap_or(0) & 1 != 0;
+            ButtonAction::Reset { fields, exclude }
         }
         "SubmitForm" => {
             let f = get(&a, "F");
@@ -392,16 +394,19 @@ fn action_of(e: &Entry) -> Option<ButtonAction> {
     })
 }
 
-/// `(font size, colour)` from the default appearance string (`/Helv 12 Tf 0 0 1 rg`).
+// Adapted from pdfcraft (MIT OR Apache-2.0), crates/forms/src/appearance.rs @ b8ddf71 (parse_da)
+/// `(font name, font size, colour)` from the default appearance string (`/Helv 12 Tf 0 0 1 rg`).
+/// The size is finite and 0..=300 (0 is automatic) and the colour components finite, so
+/// `NaN` or `inf` in a file are never written back.
 pub(crate) fn parse_da(da: &str) -> (String, f32, [f32; 3]) {
     let t: Vec<&str> = da.split_whitespace().collect();
     let (mut font, mut size, mut color) = ("Helv".to_string(), 0.0, [0.0; 3]);
     for (i, w) in t.iter().enumerate() {
-        let num = |j: usize| t.get(j).and_then(|s| s.parse::<f32>().ok());
+        let num = |j: usize| t.get(j).and_then(|s| s.parse::<f32>().ok()).filter(|v| v.is_finite());
         match *w {
             "Tf" if i >= 2 => {
                 font = t[i - 2].trim_start_matches('/').to_string();
-                size = num(i - 1).unwrap_or(0.0);
+                size = num(i - 1).filter(|s| *s >= 0.0).unwrap_or(0.0).min(300.0);
             }
             "g" if i >= 1 => color = [num(i - 1).unwrap_or(0.0); 3],
             "rg" if i >= 3 => color = [num(i - 3).unwrap_or(0.0), num(i - 2).unwrap_or(0.0), num(i - 1).unwrap_or(0.0)],
@@ -493,6 +498,29 @@ pub fn list(doc: &PdfDocument) -> Result<FormDto> {
 /// Rebuilds the appearance stream of a widget. A field with a format keeps its raw `/V` but
 /// draws the formatted text, as Acrobat does.
 pub(crate) fn refresh(doc: &PdfDocument, e: &Entry) -> Result<()> {
+    settle_need_appearances(doc, e.xref)?;
+    refresh_one(doc, e)
+}
+
+/// A form that says `/NeedAppearances true` makes MuPDF redraw every field from its raw `/V` when
+/// a page loads, so a formatted display (`$1,234.50`) would come back as `1234.5`. Once this
+/// editor writes appearances the flag is cleared, after the other text fields get theirs too, so
+/// what the file shows is what was written.
+fn settle_need_appearances(doc: &PdfDocument, except: i32) -> Result<()> {
+    let Some(mut acro) = doc.catalog().ok().and_then(|c| get(&c, "AcroForm")) else { return Ok(()) };
+    if !get(&acro, "NeedAppearances").and_then(|n| n.as_bool().ok()).unwrap_or(false) {
+        return Ok(());
+    }
+    acro.dict_put("NeedAppearances", PdfObject::new_bool(false))?;
+    for o in scan(doc)? {
+        if o.xref != except && matches!(o.kind, FieldKind::Text | FieldKind::Combo | FieldKind::List) {
+            refresh_one(doc, &o)?;
+        }
+    }
+    Ok(())
+}
+
+fn refresh_one(doc: &PdfDocument, e: &Entry) -> Result<()> {
     let page = doc.load_pdf_page(e.page as i32)?;
     let mut w = page.load_widget(e.xref)?.ok_or_else(|| bad(format!("no field {} on page {}", e.xref, e.page + 1)))?;
     let mut field = e.field.clone();
@@ -591,6 +619,71 @@ fn pages_of(mut v: Vec<u32>) -> Vec<u32> {
     v
 }
 
+/// What turning a check box or radio button on or off stores: the field's `/V` and the `/AS` of
+/// each of its widgets (every widget whose on-state is the chosen name turns on, the others off).
+/// `None` when a radio group that cannot be switched off is asked to be.
+fn button_plan(entries: &[Entry], e: &Entry, value: &FieldValue) -> Result<Option<(String, Vec<(i32, String)>)>> {
+    let on = on_state(&e.obj).unwrap_or_else(|| "Yes".into());
+    // A radio button is chosen by name or by being turned on.
+    let want = match value {
+        FieldValue::Checked(b) => b.then(|| on.clone()),
+        FieldValue::Text(s) if s == "Off" || s.is_empty() => None,
+        FieldValue::Text(s) => Some(s.clone()),
+        FieldValue::Many(_) => return Err(bad("a check box takes on or off")),
+    };
+    if want.is_none() && e.kind == FieldKind::Radio && flag(field_ff(e), FieldFlags::NO_TOGGLE_TO_OFF) {
+        return Ok(None);
+    }
+    let states = entries
+        .iter()
+        .filter(|w| w.node == e.node)
+        .map(|w| {
+            let mine = on_state(&w.obj).unwrap_or_else(|| "Yes".into());
+            let state = match &want {
+                Some(s) if *s == mine => mine,
+                _ => "Off".to_string(),
+            };
+            (w.xref, state)
+        })
+        .collect();
+    Ok(Some((want.unwrap_or_else(|| "Off".into()), states)))
+}
+
+/// True when `set_value` would leave the document exactly as it is (a radio button that is already
+/// chosen, text typed that is already there): such a fill is not an undo step.
+fn set_value_is_noop(doc: &PdfDocument, page: u32, xref: i32, value: &FieldValue) -> Result<bool> {
+    let entries = scan(doc)?;
+    let Some(e) = entries.iter().find(|e| e.page == page && e.xref == xref) else { return Ok(false) };
+    if flag(field_ff(e), FieldFlags::READ_ONLY) {
+        return Ok(false);
+    }
+    let current = values_of(geti(&e.field, "V"));
+    Ok(match e.kind {
+        FieldKind::Button | FieldKind::Signature => false,
+        FieldKind::Checkbox | FieldKind::Radio => match button_plan(&entries, e, value) {
+            Ok(None) => true,
+            Ok(Some((v, states))) => {
+                let cur_v = current.first().map_or("Off", String::as_str);
+                let same_as = |w: i32, state: &str| {
+                    entries.iter().find(|x| x.xref == w).is_some_and(|x| get(&x.obj, "AS").as_ref().and_then(text).as_deref().unwrap_or("Off") == state)
+                };
+                (cur_v == v || (cur_v.is_empty() && v == "Off")) && states.iter().all(|(w, s)| same_as(*w, s))
+            }
+            Err(_) => false,
+        },
+        FieldKind::Text | FieldKind::Combo | FieldKind::List => {
+            let typed: Vec<&String> = match value {
+                FieldValue::Text(s) => vec![s],
+                FieldValue::Many(v) => v.iter().collect(),
+                FieldValue::Checked(_) => return Ok(false),
+            };
+            let typed: Vec<&str> = typed.into_iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
+            let current: Vec<&str> = current.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
+            typed == current
+        }
+    })
+}
+
 /// Sets a field. A value that does not fit the field's format or range is rejected with
 /// Acrobat's message; the document is left unchanged. Returns the pages that changed.
 pub fn set_value(doc: &mut PdfDocument, page: u32, xref: i32, value: &FieldValue) -> Result<Vec<u32>> {
@@ -605,25 +698,10 @@ pub fn set_value(doc: &mut PdfDocument, page: u32, xref: i32, value: &FieldValue
     match e.kind {
         FieldKind::Button | FieldKind::Signature => return Err(bad("this field has no value to fill")),
         FieldKind::Checkbox | FieldKind::Radio => {
-            let on = on_state(&e.obj).unwrap_or_else(|| "Yes".into());
-            // A radio button is chosen by name or by being turned on.
-            let want = match value {
-                FieldValue::Checked(b) => b.then(|| on.clone()),
-                FieldValue::Text(s) if s == "Off" || s.is_empty() => None,
-                FieldValue::Text(s) => Some(s.clone()),
-                FieldValue::Many(_) => return Err(bad("a check box takes on or off")),
-            };
-            if want.is_none() && e.kind == FieldKind::Radio && flag(ff, FieldFlags::NO_TOGGLE_TO_OFF) {
-                return Ok(Vec::new());
-            }
-            put_name(&mut field, "V", want.as_deref().unwrap_or("Off"))?;
-            for w in entries.iter().filter(|w| w.node == e.node) {
-                let mine = on_state(&w.obj).unwrap_or_else(|| "Yes".into());
-                let state = match (&want, e.kind) {
-                    (Some(s), FieldKind::Radio) if *s == mine => mine,
-                    (Some(_), FieldKind::Checkbox) if w.xref == xref => mine,
-                    _ => "Off".to_string(),
-                };
+            let Some((v, states)) = button_plan(&entries, e, value)? else { return Ok(Vec::new()) };
+            put_name(&mut field, "V", &v)?;
+            for (w, state) in states {
+                let w = entries.iter().find(|x| x.xref == w).expect("a widget of the field");
                 let mut o = w.obj.clone();
                 put_name(&mut o, "AS", &state)?;
                 touched.push(w.page);
@@ -677,11 +755,8 @@ pub fn reset(doc: &mut PdfDocument, which: Option<&[i32]>) -> Result<Vec<u32>> {
     let mut done: Vec<i32> = Vec::new();
     let mut touched = Vec::new();
     for e in &entries {
-        let pick = match which {
-            None => true,
-            Some(w) => w.contains(&e.xref) || w.contains(&e.node),
-        };
-        if !pick || done.contains(&e.node) || matches!(e.kind, FieldKind::Button | FieldKind::Signature) || flag(field_ff(e), FieldFlags::READ_ONLY) {
+        // Only fields that hold something other than their default are touched.
+        if done.contains(&e.node) || !reset_differs(&entries, e, which) {
             continue;
         }
         done.push(e.node);
@@ -704,10 +779,43 @@ pub fn reset(doc: &mut PdfDocument, which: Option<&[i32]>) -> Result<Vec<u32>> {
             touched.push(w.page);
         }
     }
+    if done.is_empty() {
+        return Ok(Vec::new());
+    }
     // Reset may have emptied what calculations read.
     let entries = scan(doc)?;
     touched.extend(recalculate(doc, &entries)?);
     Ok(pages_of(touched))
+}
+
+/// True when resetting `which` would change something (so an empty reset is not an undo step).
+fn reset_would_change(doc: &PdfDocument, which: Option<&[i32]>) -> Result<bool> {
+    let entries = scan(doc)?;
+    Ok(entries.iter().any(|e| reset_differs(&entries, e, which)))
+}
+
+/// Whether `e` is one of the fields being reset and holds something other than its default.
+fn reset_differs(entries: &[Entry], e: &Entry, which: Option<&[i32]>) -> bool {
+    let pick = match which {
+        None => true,
+        Some(w) => w.contains(&e.xref) || w.contains(&e.node),
+    };
+    if !pick || matches!(e.kind, FieldKind::Button | FieldKind::Signature) || flag(field_ff(e), FieldFlags::READ_ONLY) {
+        return false;
+    }
+    let is_button = matches!(e.kind, FieldKind::Checkbox | FieldKind::Radio);
+    let norm = |v: Vec<String>| -> Vec<String> { v.into_iter().filter(|s| !s.is_empty() && !(is_button && s == "Off")).collect() };
+    let dv = norm(values_of(geti(&e.field, "DV")));
+    if norm(values_of(geti(&e.field, "V"))) != dv {
+        return true;
+    }
+    // The widgets of a box or button show the default too.
+    is_button
+        && entries.iter().filter(|w| w.node == e.node).any(|w| {
+            let mine = on_state(&w.obj).unwrap_or_else(|| "Yes".into());
+            let want = if dv.first() == Some(&mine) { mine } else { "Off".to_string() };
+            get(&w.obj, "AS").as_ref().and_then(text).as_deref().unwrap_or("Off") != want
+        })
 }
 
 // ---- engine wiring: one undo step each ---------------------------------------------------------
@@ -717,10 +825,18 @@ pub fn list_all(eng: &Engine, doc: DocId) -> Result<FormDto> {
 }
 
 pub fn set_value_one(eng: &Engine, doc: DocId, page: u32, xref: i32, value: &FieldValue, source: EditSource) -> Result<EditState> {
+    // Filling what is already there changes nothing, so it is not a step in the history.
+    if eng.read_custom(doc, |d| Ok(set_value_is_noop(d, page, xref, value).unwrap_or(false)))? {
+        return eng.edit_state(doc);
+    }
     eng.apply_custom(doc, format!("Fill field on p. {}", page + 1), source, false, |d| set_value(d, page, xref, value))
 }
 
 pub fn reset_one(eng: &Engine, doc: DocId, which: Option<Vec<i32>>, source: EditSource) -> Result<EditState> {
+    // A reset with nothing to reset is not a step in the history.
+    if !eng.read_custom(doc, |d| reset_would_change(d, which.as_deref()))? {
+        return eng.edit_state(doc);
+    }
     let label = if which.is_none() { "Clear form".to_string() } else { "Reset fields".to_string() };
     eng.apply_custom(doc, label, source, false, |d| reset(d, which.as_deref()))
 }

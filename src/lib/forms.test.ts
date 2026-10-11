@@ -15,6 +15,7 @@ import {
   move,
   onPage,
   progress,
+  resetTargets,
   resize,
   rows,
   summary,
@@ -119,6 +120,13 @@ describe("forms logic", () => {
     ];
     expect(progress(all)).toEqual([2, 3]);
     expect(missingRequired(all).map((x) => x.xref)).toEqual([2]);
+  });
+
+  it("resets the named fields, or with exclude everything but them", () => {
+    const all = [f({ xref: 1, name: "A" }), f({ xref: 2, name: "B" }), f({ xref: 3, name: "G.x" }), f({ xref: 4, name: "C" })];
+    expect(resetTargets(all, [])).toBeNull();
+    expect(resetTargets(all, ["A", "G"])).toEqual([1, 3]);
+    expect(resetTargets(all, ["A", "G"], true)).toEqual([2, 4]);
   });
 
   it("orders a page's widgets by tab order", () => {

@@ -73,6 +73,18 @@ fn base_name(k: FieldKind) -> &'static str {
     SIZES.iter().find(|(_, x)| *x == k).map_or("Field", |(n, _)| n)
 }
 
+/// An export value is the name a box or button turns on to: not empty, and never `Off`, which is
+/// what every box and button shows when it is not chosen.
+fn check_export(export: &str) -> Result<()> {
+    if export.trim().is_empty() {
+        return Err(bad("an export value cannot be empty"));
+    }
+    if export == "Off" {
+        return Err(bad("an export value cannot be Off, which is the name of the unchosen state"));
+    }
+    Ok(())
+}
+
 /// `Text1`, `Text2`, ... the first one that no field uses.
 fn unique_name(taken: &[String], base: &str) -> String {
     (1..).map(|n| format!("{base}{n}")).find(|n| !taken.contains(n)).unwrap_or_default()
@@ -240,6 +252,7 @@ pub fn add(doc: &mut PdfDocument, page: u32, what: &NewField) -> Result<i32> {
     if what.kind == FieldKind::Radio {
         let kids = existing_group.map_or(0, |g| entries.iter().filter(|e| e.node == g.node).count());
         let export = what.export.clone().unwrap_or_else(|| format!("Choice{}", kids + 1));
+        check_export(&export)?;
         seed_on_state(doc, &mut widget, &export)?;
         let mut parent = match existing_group {
             Some(g) => g.field.clone(),
@@ -271,6 +284,7 @@ pub fn add(doc: &mut PdfDocument, page: u32, what: &NewField) -> Result<i32> {
         }
         if what.kind == FieldKind::Checkbox {
             let export = what.export.clone().unwrap_or_else(|| "Yes".into());
+            check_export(&export)?;
             seed_on_state(doc, &mut widget, &export)?;
             put_name(&mut widget, "V", "Off")?;
         }
@@ -349,8 +363,12 @@ pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
         } else if let Some(mut f) = form.as_ref().and_then(|f| get(f, "Fields")) {
             remove_ref(&mut f, *x)?;
         }
-        if let Some(mut co) = form.as_ref().and_then(|f| get(f, "CO")) {
-            remove_ref(&mut co, e.node)?;
+        // A field with other widgets left keeps its place in the calculation order.
+        let left = entries.iter().filter(|s| s.node == e.node && !xrefs.contains(&s.xref)).count();
+        if left == 0 {
+            if let Some(mut co) = form.as_ref().and_then(|f| get(f, "CO")) {
+                remove_ref(&mut co, e.node)?;
+            }
         }
     }
     let entries = scan(doc)?;
@@ -415,17 +433,28 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
     let mut field = e.field.clone();
     let mut widget = e.obj.clone();
     let siblings: Vec<&Entry> = entries.iter().filter(|s| s.node == e.node).collect();
+    let mut renamed: Option<(String, String)> = None;
     if let Some(n) = &patch.name {
         let n = n.trim();
         if n.is_empty() {
             return Err(bad("a field needs a name"));
         }
-        if entries.iter().any(|o| o.node != e.node && o.name == n) {
-            return Err(bad(format!("A field named {n} already exists")));
+        // A dotted name sets the last part; the parents keep their names. What is checked is the full
+        // name that is written: the parents' names and that last part.
+        let leaf = n.rsplit('.').next().unwrap_or(n).trim();
+        if leaf.is_empty() {
+            return Err(bad("a field needs a name"));
+        }
+        let parents = get(&field, "Parent").map(|p| full_name(&p)).unwrap_or_default();
+        let full = if parents.is_empty() { leaf.to_string() } else { format!("{parents}.{leaf}") };
+        if full != e.name {
+            let clash = |o: &Entry| o.node != e.node && (o.name == full || o.name.starts_with(&format!("{full}.")) || full.starts_with(&format!("{}.", o.name)));
+            if entries.iter().any(clash) {
+                return Err(bad(format!("A field named {full} already exists")));
+            }
+            renamed = Some((e.name.clone(), full));
         }
         let own_t = get(&field, "T").as_ref().and_then(text).unwrap_or_default();
-        // A dotted name sets the last part; the parents keep their names.
-        let leaf = n.rsplit('.').next().unwrap_or(n);
         if own_t != leaf {
             put_str(&mut field, "T", leaf)?;
         }
@@ -513,8 +542,8 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
     }
     if patch.font_size.is_some() || patch.text_color.is_some() {
         let (font, size, color) = parse_da(&da_of(&e.obj));
-        let size = patch.font_size.map_or(size, |s| s.clamp(0.0, 300.0));
-        let c = patch.text_color.unwrap_or(color);
+        let size = patch.font_size.map_or(size, |s| if s.is_finite() { s.clamp(0.0, 300.0) } else { 0.0 });
+        let c = patch.text_color.map_or(color, |c| c.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }));
         let da = format!("/{font} {size} Tf {} {} {} rg", c[0], c[1], c[2]);
         for s in &siblings {
             let mut o = s.obj.clone();
@@ -584,8 +613,11 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
     if let Some(a) = &patch.action {
         let mut act = doc.new_dict()?;
         match a {
-            ButtonAction::Reset { fields } => {
+            ButtonAction::Reset { fields, exclude } => {
                 put_name(&mut act, "S", "ResetForm")?;
+                if *exclude && !fields.is_empty() {
+                    put_int(&mut act, "Flags", 1)?;
+                }
                 if !fields.is_empty() {
                     let mut arr = doc.new_array()?;
                     for f in fields {
@@ -618,9 +650,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
         widget.dict_put("A", act)?;
     }
     if let (Some(export), FieldKind::Checkbox | FieldKind::Radio) = (&patch.export, e.kind) {
-        if export.trim().is_empty() {
-            return Err(bad("an export value cannot be empty"));
-        }
+        check_export(export)?;
         let was_on = get(&e.obj, "AS").as_ref().and_then(text).is_some_and(|s| s != "Off");
         seed_on_state(doc, &mut widget, export)?;
         put_name(&mut widget, "AS", if was_on { export } else { "Off" })?;
@@ -628,12 +658,36 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
             put_name(&mut field, "V", export)?;
         }
     }
+    // Calculations that list the old name follow the field to its new one.
+    if let Some((old, new)) = &renamed {
+        follow_rename(doc, &entries, old, new)?;
+    }
     for s in &siblings {
         refresh(doc, s)?;
     }
-    // A changed format changes what calculations produce.
-    let entries = scan(doc)?;
-    let _ = entries;
+    Ok(())
+}
+
+/// `AFSimple_Calculate` lists that name the field `old` (or a field below it) name `new` instead.
+fn follow_rename(doc: &PdfDocument, entries: &[Entry], old: &str, new: &str) -> Result<()> {
+    let below = format!("{old}.");
+    let mut seen: Vec<i32> = Vec::new();
+    for e in entries {
+        if seen.contains(&e.node) {
+            continue;
+        }
+        seen.push(e.node);
+        let Calculate::Simple { op, fields } = calculate_of(e) else { continue };
+        if !fields.iter().any(|f| f == old || f.starts_with(&below)) {
+            continue;
+        }
+        let fields = fields
+            .into_iter()
+            .map(|f| if f == old { new.to_string() } else if let Some(rest) = f.strip_prefix(&below) { format!("{new}.{rest}") } else { f })
+            .collect();
+        let mut field = e.field.clone();
+        put_js(doc, &mut field, "C", af::calculate_js(&Calculate::Simple { op, fields }))?;
+    }
     Ok(())
 }
 
@@ -660,13 +714,17 @@ fn af_js_string(s: &str) -> String {
 /// removes it so the array order rules.
 pub fn set_tab_order(doc: &mut PdfDocument, page: u32, order: &[i32], tabs: Option<&str>) -> Result<()> {
     let entries = scan_page(doc, page)?;
+    let mut seen: Vec<i32> = Vec::with_capacity(order.len());
     for x in order {
         if !entries.iter().any(|e| e.xref == *x) {
             return Err(bad(format!("no field {x} on page {}", page + 1)));
         }
+        if seen.contains(x) {
+            return Err(bad(format!("field {x} is listed twice in the tab order")));
+        }
+        seen.push(*x);
     }
     let mut want: Vec<i32> = order.to_vec();
-    want.dedup();
     for e in &entries {
         if !want.contains(&e.xref) {
             want.push(e.xref);

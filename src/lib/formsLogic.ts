@@ -22,7 +22,7 @@ export type Calculate =
   | { kind: "simple"; value: { op: CalcOp; fields: string[] } }
   | { kind: "notation"; value: string };
 export type ButtonAction =
-  | { kind: "reset"; fields: string[] }
+  | { kind: "reset"; fields: string[]; exclude?: boolean }
   | { kind: "named"; name: string }
   | { kind: "uri"; uri: string }
   | { kind: "alert"; message: string }
@@ -261,10 +261,14 @@ export const HANDLES: Handle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 /** Calculated fields are filled by the form, not by the person. */
 export const isCalculated = (f: Field): boolean => f.calculate.kind !== "none";
 
-/** The widgets a reset button names (all of a field's widgets, and the fields below a parent name); null is the whole form. */
-export function resetTargets(all: Field[], names: string[]): number[] | null {
+/**
+ * The widgets a reset button names (all of a field's widgets, and the fields below a parent name); null is the
+ * whole form. With `exclude` the button resets everything except the named fields.
+ */
+export function resetTargets(all: Field[], names: string[], exclude = false): number[] | null {
   if (names.length === 0) return null;
-  return all.filter((f) => names.some((n) => f.name === n || f.name.startsWith(`${n}.`))).map((f) => f.xref);
+  const named = (f: Field) => names.some((n) => f.name === n || f.name.startsWith(`${n}.`));
+  return all.filter((f) => named(f) !== exclude).map((f) => f.xref);
 }
 
 /** The text size a field is drawn at on the page: its own, or about 70% of its height (a line of text) when automatic. */

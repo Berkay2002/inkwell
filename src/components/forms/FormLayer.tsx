@@ -273,7 +273,23 @@ function TextEditor({ f, className, label, locked, onCommit, onChange }: {
 }) {
   const [v, setV] = useState(f.value);
   const list = useId();
-  useEffect(() => setV(f.value), [f.value, f.xref]);
+  // What is typed, what is saved and how to save it, for the commit when the control goes away (closing the
+  // document, switching to Prepare form) without having lost focus first.
+  const live = useRef({ v: f.value, saved: f.value, commit: onCommit });
+  live.current.saved = f.value;
+  live.current.commit = onCommit;
+  const show = (s: string) => {
+    live.current.v = s;
+    setV(s);
+  };
+  useEffect(() => show(f.value), [f.value, f.xref]);
+  useEffect(
+    () => () => {
+      const l = live.current;
+      if (l.v !== l.saved) void l.commit(l.v);
+    },
+    [],
+  );
   const width = f.rect[2] - f.rect[0];
   const comb = f.comb && f.maxLen > 0 ? { letterSpacing: Math.max(0, width / f.maxLen - fontSize(f) * 0.55), paddingLeft: Math.max(0, width / f.maxLen / 2 - fontSize(f) * 0.27) } : undefined;
   const props = {
@@ -286,20 +302,20 @@ function TextEditor({ f, className, label, locked, onCommit, onChange }: {
     style: comb,
     onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       const typed = e.target.value;
-      setV(typed);
+      show(typed);
       onChange();
       // Picking an entry from the list commits at once; typing waits for the field to lose focus.
       const pick = f.kind === "combo" ? f.options.find((o) => o.export === typed || o.label === typed) : undefined;
       if (pick && pick.export !== f.value) void onCommit(pick.export);
     },
     onBlur: () => {
-      if (v !== f.value) void onCommit(v);
+      if (live.current.v !== f.value) void onCommit(live.current.v);
     },
   };
   const keys = (multi: boolean) => (e: React.KeyboardEvent) => {
     e.stopPropagation();
     if (e.key === "Escape") {
-      setV(f.value);
+      show(f.value);
       onChange();
       (e.target as HTMLElement).blur();
     } else if (e.key === "Enter" && (!multi || e.ctrlKey)) {
@@ -327,7 +343,7 @@ function buttonTitle(f: Field): string {
   const base = f.tooltip || f.caption || f.name;
   if (!a) return base;
   if (a.kind === "submit") return `${base} (nothing is sent from Inkwell)`;
-  if (a.kind === "reset") return `${base} (resets ${a.fields.length ? "these fields" : "the form"})`;
+  if (a.kind === "reset") return `${base} (resets ${a.fields.length ? (a.exclude ? "all but these fields" : "these fields") : "the form"})`;
   return base;
 }
 
@@ -338,7 +354,7 @@ function run(docId: number, a: ButtonAction | null, all: Field[]) {
   const d = s.docs[docId];
   switch (a.kind) {
     case "reset": {
-      const t = resetTargets(all, a.fields);
+      const t = resetTargets(all, a.fields, a.exclude);
       void fm().clear(docId, t ?? undefined);
       break;
     }

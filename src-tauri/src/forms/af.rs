@@ -1059,8 +1059,12 @@ mod tests {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ButtonAction {
-    /// Reset fields: the listed ones, or all when empty.
-    Reset { fields: Vec<String> },
+    /// Reset fields: the listed ones, or all when empty; with `exclude`, everything except the listed ones.
+    Reset {
+        fields: Vec<String>,
+        #[serde(default)]
+        exclude: bool,
+    },
     /// A named action: Print, NextPage, PrevPage, FirstPage, LastPage, ...
     Named { name: String },
     Uri { uri: String },
@@ -1072,25 +1076,38 @@ pub enum ButtonAction {
     Script { source: String },
 }
 
-/// Recognise the common one-line button scripts.
+/// The arguments of `js` when it is nothing but one call to `name(...)`, with an optional `;`.
+/// A call inside a condition or beside other statements is not the call alone.
+fn sole_call(js: &str, name: &str) -> Option<Vec<Arg>> {
+    let t = js.trim();
+    if !t.starts_with(&format!("{name}(")) {
+        return None;
+    }
+    let mut p = Parser { s: t.as_bytes(), i: name.len() + 1, depth: 0 };
+    let args = p.list(b')')?;
+    t[p.i..].chars().all(|c| c == ';' || c.is_whitespace()).then_some(args)
+}
+
+/// Recognise the common one-line button scripts. Only a script that is just the call counts:
+/// `if (app.alert("Sure?") == 4) this.resetForm();` stays a script.
 pub fn button_script(js: &str) -> ButtonAction {
     let t = js.trim();
     // Print takes an options object whose contents don't change what Inkwell does.
     if t.starts_with("this.print(") || t.starts_with("print(") || t.contains(";this.print(") || t.contains("; this.print(") {
         return ButtonAction::Named { name: "Print".into() };
     }
-    if let Some(args) = call(t, "this.resetForm").or_else(|| call(t, "resetForm")) {
+    if let Some(args) = sole_call(t, "this.resetForm").or_else(|| sole_call(t, "resetForm")) {
         let fields = match args.first() {
             Some(Arg::List(l)) => l.iter().filter_map(Arg::string).collect(),
             Some(Arg::Str(s)) => vec![s.clone()],
             _ => Vec::new(),
         };
-        return ButtonAction::Reset { fields };
+        return ButtonAction::Reset { fields, exclude: false };
     }
-    if let Some(message) = call(t, "app.alert").and_then(|args| args.first().and_then(Arg::string)) {
+    if let Some(message) = sole_call(t, "app.alert").and_then(|args| args.first().and_then(Arg::string)) {
         return ButtonAction::Alert { message };
     }
-    if let Some(uri) = call(t, "app.launchURL").and_then(|args| args.first().and_then(Arg::string)) {
+    if let Some(uri) = sole_call(t, "app.launchURL").and_then(|args| args.first().and_then(Arg::string)) {
         return ButtonAction::Uri { uri };
     }
     let compact: String = t.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1114,12 +1131,29 @@ mod button_tests {
     #[test]
     fn common_button_scripts_are_recognised() {
         assert_eq!(button_script("this.print({bUI: true});"), named("Print"));
-        assert_eq!(button_script("this.resetForm([\"a\", \"b\"]);"), ButtonAction::Reset { fields: vec!["a".into(), "b".into()] });
-        assert_eq!(button_script("this.resetForm();"), ButtonAction::Reset { fields: vec![] });
+        assert_eq!(button_script("this.resetForm([\"a\", \"b\"]);"), ButtonAction::Reset { fields: vec!["a".into(), "b".into()], exclude: false });
+        assert_eq!(button_script("this.resetForm();"), ButtonAction::Reset { fields: vec![], exclude: false });
         assert_eq!(button_script("app.alert('Thanks!');"), ButtonAction::Alert { message: "Thanks!".into() });
         assert_eq!(button_script("app.launchURL(\"https://example.org\", true);"), ButtonAction::Uri { uri: "https://example.org".into() });
         assert_eq!(button_script("this.pageNum++;"), named("NextPage"));
         assert!(matches!(button_script("var x = 1; doStuff(x);"), ButtonAction::Script { .. }));
+    }
+
+    /// Only a script that is just the call counts; a condition or a second statement makes it a script Inkwell does not run.
+    #[test]
+    fn a_reset_inside_other_code_is_not_a_reset_button() {
+        for js in [
+            "if (app.alert(\"Clear everything?\", 2, 2) == 4) this.resetForm();",
+            "this.resetForm(); this.submitForm(\"https://example.org\");",
+            "var ok = true; this.resetForm();",
+            "x = this.resetForm();",
+            "if (app.alert('Sure?')) app.alert('Done');",
+            "this.dirty && app.launchURL('https://example.org');",
+        ] {
+            assert!(matches!(button_script(js), ButtonAction::Script { .. }), "{js}");
+        }
+        assert_eq!(button_script("  this.resetForm( ) ;  "), ButtonAction::Reset { fields: vec![], exclude: false });
+        assert_eq!(button_script("resetForm('a');"), ButtonAction::Reset { fields: vec!["a".into()], exclude: false });
     }
 }
 

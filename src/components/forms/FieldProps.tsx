@@ -265,12 +265,15 @@ function ButtonProps({ f, all, set }: { f: Field; all: Field[]; set: (p: FieldPa
       {a?.kind === "reset" && (
         <div className="fm-field">
           <span>Fields to reset (none ticked: the whole form)</span>
+          {a.fields.length > 0 && (
+            <Check label="Reset all but the ticked fields" checked={!!a.exclude} onChange={(exclude) => set({ action: { kind: "reset", fields: a.fields, exclude } })} />
+          )}
           {names.map((n) => (
             <Check
               key={n}
               label={n}
               checked={a.fields.includes(n)}
-              onChange={(on) => set({ action: { kind: "reset", fields: on ? [...a.fields, n] : a.fields.filter((x) => x !== n) } })}
+              onChange={(on) => set({ action: { kind: "reset", fields: on ? [...a.fields, n] : a.fields.filter((x) => x !== n), exclude: a.exclude } })}
             />
           ))}
         </div>
