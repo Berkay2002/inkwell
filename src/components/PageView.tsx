@@ -5,6 +5,7 @@ import { type Rot, type Size, type TileRef, pageSpaceTransform, tileKeyStr } fro
 import { type Mark, useRedact } from "../lib/redact";
 import { cached } from "../lib/tiles";
 import type { Rect4 } from "../store";
+import { AnnotLayer } from "./comments/AnnotLayer";
 import { TileCanvas } from "./TileCanvas";
 
 interface Props {
@@ -107,6 +108,7 @@ export const PageView = memo(function PageView(p: Props) {
         )}
         {lines && <TextLines lines={lines} />}
       </div>
+      <AnnotLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       {armed && (
         <div
           className="rd-capture"

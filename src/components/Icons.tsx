@@ -47,6 +47,20 @@ const PATHS = {
   area: "M4 7V4h3M10 4h4M17 4h3v3M20 10v4M20 17v3h-3M14 20h-4M7 20H4v-3M4 14v-4",
   textT: "M5 5h14M12 5v14M9 19h6",
   redo: "m15 14 5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13",
+  cursor: "m5 3 14 7-6 2-2 6Z",
+  highlight: "m9 11-5 5v4h4l5-5M9 11l6-6 4 4-6 6ZM4 21h16",
+  underline: "M7 4v7a5 5 0 0 0 10 0V4M5 20h14",
+  strike: "M5 12h14M16 7a4 4 0 0 0-4-2c-2.5 0-4 1.2-4 3s1.5 2.5 4 4 4 2.2 4 4-1.5 3-4 3a4 4 0 0 1-4-2",
+  squiggle: "M7 4v7a5 5 0 0 0 10 0V4M4 20q2-2 4 0t4 0 4 0 4 0",
+  note: "M5 4h14a1 1 0 0 1 1 1v10l-5 5H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1ZM15 20v-4a1 1 0 0 1 1-1h4",
+  pen: "M3 17c3-8 5-10 7-8s-2 8 1 8 4-5 6-5 2 3 4 3",
+  rect: "M4 6h16v12H4Z",
+  ellipse: "M12 5c4.5 0 8 3 8 7s-3.5 7-8 7-8-3-8-7 3.5-7 8-7Z",
+  line: "M5 19 19 5",
+  arrow: "M5 19 19 5M10 5h9v9",
+  polygon: "m12 3 8 6-3 11H7L4 9Z",
+  stamp: "M9 14V9a3 3 0 1 1 6 0v5M5 14h14v4H5ZM5 21h14",
+  reply: "M10 8 4 13l6 5M4 13h9a7 7 0 0 1 7 7",
 };
 
 export type IconName = keyof typeof PATHS;

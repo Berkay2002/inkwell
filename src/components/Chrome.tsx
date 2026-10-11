@@ -8,6 +8,7 @@ import { AssistantToggle } from "./assistant/AssistantPanel";
 import { HistoryToggle } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
 import { MenuButton } from "./Menu";
+import { CommentsToggle } from "./comments/CommentsPanel";
 import { RedactToggle } from "./redact/RedactPanel";
 import { ModeSwitch } from "./Organize";
 import { WindowControls } from "./WindowControls";
@@ -140,6 +141,7 @@ export function Toolbar({ doc }: { doc: DocState }) {
       >
         Tools
       </MenuButton>
+      <CommentsToggle />
       <RedactToggle />
       <HistoryToggle />
       <AssistantToggle />
