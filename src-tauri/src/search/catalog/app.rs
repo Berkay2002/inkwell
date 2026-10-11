@@ -62,8 +62,9 @@ pub fn forget_all(root: &std::path::Path, jobs: &Jobs, path: &std::path::Path) -
     for m in super::list(root) {
         let Some(_held) = jobs.hold(&m.id) else {
             // Written into the catalog's folder: a quit before it is free does not lose it (`replay_pending`).
+            // When it cannot be kept, `defer_forget` has wiped the catalog's stored text instead.
             if let Err(e) = super::defer_forget(&root.join(&m.id), path) {
-                eprintln!("inkwell catalog {}: {e}", m.id);
+                eprintln!("inkwell catalog {}: could not keep the file to forget, its stored text was removed: {e}", m.id);
             }
             continue;
         };

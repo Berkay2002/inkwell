@@ -1047,3 +1047,85 @@ fn a_forget_waiting_for_a_busy_catalog_survives_a_restart() {
     settle_pending(&d, &[base.join("c.pdf")]).unwrap();
     assert!(!pending_path(&d).exists());
 }
+
+fn blobs(d: &Path) -> usize {
+    std::fs::read_dir(text_dir(d)).unwrap().count()
+}
+
+#[test]
+fn a_full_pending_list_wipes_the_stored_text_instead_of_dropping_a_path() {
+    let (_, folder, d) = built("pending-full");
+    assert!(blobs(&d) > 20);
+    defer_forget_max(&d, &folder.join("a.pdf"), 2).unwrap();
+    defer_forget_max(&d, &folder.join("b.pdf"), 2).unwrap();
+    assert_eq!(pending(&d).len(), 2);
+    assert!(blobs(&d) > 20, "within the bound nothing is wiped");
+    defer_forget_max(&d, &folder.join("c.pdf"), 2).unwrap();
+    assert_eq!((blobs(&d), pending(&d).len()), (0, 0));
+    assert!(!index_path(&d, 1).exists());
+    // A refresh reads every file again (the rows' text is gone) and the catalog answers.
+    let s = build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert!(s.extracted > 20 && s.kept == 0, "{s:?}");
+    assert!(!flat(&catalog_search(&d, "notice", SearchOpts::default())).0.is_empty());
+}
+
+#[test]
+fn an_unreadable_pending_list_is_not_taken_for_an_empty_one() {
+    // Read: wiped and removed, nothing to replay.
+    let (_, _, d) = built("pending-corrupt-read");
+    std::fs::write(pending_path(&d), b"{ nope").unwrap();
+    assert!(pending(&d).is_empty());
+    assert_eq!(blobs(&d), 0);
+    assert!(!pending_path(&d).exists());
+
+    // Added to: the earlier entries it held are not overwritten with one.
+    let (_, folder, d) = built("pending-corrupt-add");
+    std::fs::write(pending_path(&d), b"[1, 2").unwrap();
+    defer_forget(&d, &folder.join("a.pdf")).unwrap();
+    assert_eq!(blobs(&d), 0);
+    assert!(pending(&d).is_empty());
+
+    // Settled: the same.
+    let (_, _, d) = built("pending-corrupt-settle");
+    std::fs::write(pending_path(&d), b"nope").unwrap();
+    settle_pending(&d, &[]).unwrap();
+    assert_eq!(blobs(&d), 0);
+
+    // A missing file is simply empty.
+    let (_, _, d) = built("pending-missing");
+    assert!(pending(&d).is_empty());
+    assert!(blobs(&d) > 20);
+}
+
+#[test]
+fn a_pending_list_that_cannot_be_written_wipes_the_stored_text_and_says_so() {
+    let (_, folder, d) = built("pending-unwritable");
+    // The list's name is taken by a folder: nothing can be written there.
+    std::fs::create_dir_all(pending_path(&d)).unwrap();
+    assert!(defer_forget(&d, &folder.join("a.pdf")).is_err());
+    assert_eq!(blobs(&d), 0);
+    assert!(!index_path(&d, 1).exists());
+
+    // Not through a busy catalog's forget_all alone: that also leaves the list empty and the catalog wiped.
+    let (root, folder, d) = built("pending-unwritable-all");
+    std::fs::create_dir_all(pending_path(&d)).unwrap();
+    let id = load_meta(&d).unwrap().id;
+    let jobs = super::app::Jobs::default();
+    jobs.guarded(&id, || {
+        assert_eq!(super::app::forget_all(&root, &jobs, &folder.join("a.pdf")), 0);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(blobs(&d), 0);
+}
+
+#[test]
+fn a_kept_row_whose_stored_text_is_gone_is_read_again() {
+    let (_, _, d) = built("missing-blob");
+    let t = load_table(&d, 1).unwrap();
+    let r = t.files.iter().find(|r| r.status == Status::Indexed).unwrap();
+    std::fs::remove_file(text_path(&d, r.fid)).unwrap();
+    let s = build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert_eq!((s.extracted, s.added), (1, 0), "{s:?}");
+    assert!(read_text(&d, load_table(&d, 2).unwrap().files.iter().find(|x| x.path == r.path).unwrap().fid).is_some());
+}
