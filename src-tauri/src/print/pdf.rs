@@ -1,10 +1,12 @@
 //! Save as PDF: the print plan written as a new vector PDF, one page per sheet side.
 //!
+//! Adapted from pdfcraft (MIT OR Apache-2.0), crates/print/src/lib.rs @ b8ddf71 (one Form XObject per
+//! source page used, drawn with `q <matrix> <clip> re W n <matrix> /Name Do Q`). The objects are
+//! built with MuPDF instead of pdfcraft's own PDF model, and the placements come from `layout`.
+//!
 //! The same sheets the preview and the printer draw (`layout`), the same page choice and content
-//! mode (`render::Source`), only the target is a file. Each source page used becomes one Form
-//! XObject, placed by its matrix and clipped to its cell or tile, so a poster's tiles and an N-up
-//! sheet's cells share one copy of the page. Idea after pdfcraft's writer (crates/print/src/spool.rs
-//! @ b8ddf71, "one form per source page used"); the object work is MuPDF's.
+//! mode (`render::Source`), only the target is a file. A poster's tiles and an N-up sheet's cells
+//! share one copy of each page.
 //!
 //! The open document is never touched: pages come from the private copy `Source` parses, and the
 //! output is a new file.

@@ -340,11 +340,11 @@ function Options({ sheet }: { sheet: PrintSheetState }) {
               <input
                 className="tl-field"
                 type="number"
-                min={10}
+                min={1}
                 max={1000}
                 aria-label="Tile scale in percent"
                 value={o.tileScale}
-                onChange={(e) => set({ tileScale: Math.max(10, Math.min(1000, Number(e.target.value) || 100)) })}
+                onChange={(e) => set({ tileScale: Math.max(1, Math.min(1000, Number(e.target.value) || 100)) })}
               />
               <span className="dim">% tile scale</span>
             </div>

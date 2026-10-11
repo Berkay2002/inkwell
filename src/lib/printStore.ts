@@ -149,7 +149,8 @@ export function toSettings(o: PrintOptions, caps: PrinterCaps | null, current: n
     collate: o.collate,
     // A booklet of only the fronts or only the backs goes through the printer a side at a time.
     duplex: (caps && !caps.duplex) || (o.mode === "booklet" && o.sides !== "both") ? "off" : o.duplex,
-    grayscale: o.grayscale,
+    // the toggle is off without a printer, and a remembered grey must not tint the preview of a file that keeps colour
+    grayscale: o.printer ? o.grayscale : false,
     layout,
     content: o.content,
   };
@@ -161,6 +162,9 @@ export function outcomeLine(plan: PrintPlan | null, o: PrintOptions, caps: Print
   const paper = paperList(caps, o.printer).find((p) => p.id === o.paperId)?.name.replace(/\s*\(.*$/, "");
   const s = toSettings(o, caps, 0);
   const parts = [`${plan.papers} ${plan.papers === 1 ? "sheet" : "sheets"} of ${paper || "paper"}`];
+  if (s.duplex !== "off") parts.push("both sides");
+  if (s.copies > 1) parts.push(`${s.copies} copies`);
+  if (s.grayscale) parts.push("grayscale");
   if (o.mode === "poster") {
     // the same grid on every page when the pages are alike, which is the case worth stating
     const t = plan.faces[0]?.tile;
@@ -172,9 +176,6 @@ export function outcomeLine(plan: PrintPlan | null, o: PrintOptions, caps: Print
     // outermost sheet unshifted, innermost by the full amount
     if (s.layout.kind === "booklet" && s.layout.creep > 0 && pages > 4) parts.push(`creep up to ${(s.layout.creep / MM).toFixed(1)} mm at the centre`);
   }
-  if (s.duplex !== "off") parts.push("both sides");
-  if (s.copies > 1) parts.push(`${s.copies} copies`);
-  if (s.grayscale) parts.push("grayscale");
   return parts.join(", ");
 }
 

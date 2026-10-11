@@ -26,4 +26,4 @@ Adapted files carry a header naming the pdfcraft path:
 - src-tauri/src/marks/text.rs    <- crates/fonts/src/lib.rs  (WinAnsi bytes, string literals)
 - src-tauri/src/search/mod.rs      <- crates/render/src/text.rs   (find_opts: case folding, white space collapse, whole-word check)
 - src-tauri/src/print/layout.rs    <- crates/print/src/lib.rs, crates/print/src/range.rs   (Size, Multiple, Booklet and Poster layouts, page choice, sequencing)
-- src-tauri/src/print/pdf.rs       <- crates/print/src/spool.rs   (Save as PDF: one form XObject per source page used, placed and clipped per cell or tile)
+- src-tauri/src/print/pdf.rs       <- crates/print/src/lib.rs   (Save as PDF: one form XObject per source page used, placed and clipped per cell or tile)
