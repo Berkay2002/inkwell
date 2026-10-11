@@ -191,6 +191,7 @@ fn slow_apply(wait_s: u64, timeout: Option<Duration>) {
             h.fetch_add(1, Ordering::SeqCst);
             Ok(tools::Output::text("The note was added."))
         }),
+        check: None,
     }));
     let (tx, rx) = mpsc::channel();
     let sink: Sink = Arc::new(move |e| {

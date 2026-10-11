@@ -484,6 +484,7 @@ fn edit_tools(a: &Assistant) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
                 h.fetch_add(1, Ordering::SeqCst);
                 Ok(tools::Output::text("changed"))
             }),
+            check: None,
         }));
         hits
     };

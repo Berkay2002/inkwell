@@ -7,6 +7,7 @@ pub mod chat;
 pub mod codex;
 pub mod rpc;
 pub mod text;
+pub mod toolbox;
 pub mod tools;
 
 use crate::engine::edit::EditSource;

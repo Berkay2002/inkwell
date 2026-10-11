@@ -819,13 +819,42 @@ impl Assistant {
             reply(&Err("The request was stopped.".into()));
             return;
         }
+        let progress = |s: String| act(ActState::Running, Some(s));
+        let tc = Ctx {
+            text: ctx.text,
+            host: ctx.host,
+            name: &ctx.req.name,
+            current_page: *page,
+            selection: ctx.req.selection.as_ref(),
+            cancel: &session.cancel,
+            progress: &progress,
+        };
+        // a change that cannot happen is refused before the user is asked, and the card says
+        // exactly what will change
+        let mut card = None;
+        if let Some(check) = &tool.check {
+            match catch_unwind(AssertUnwindSafe(|| check(&tc, &args))) {
+                Ok(Ok(detail)) => card = detail,
+                Ok(Err(e)) => {
+                    act(ActState::Failed, Some(e.clone()));
+                    reply(&Err(e));
+                    return;
+                }
+                Err(_) => {
+                    let e = "The tool failed unexpectedly.".to_string();
+                    act(ActState::Failed, Some(e.clone()));
+                    reply(&Err(e));
+                    return;
+                }
+            }
+        }
         // read now, not at the start of the turn: the user may have tightened it since
         let mode = *session.mode.lock().unwrap();
         if mode.needs_approval(tool.class) {
             // registered before the card is announced: the answer may come back at once
             let (tx, rx) = mpsc::channel();
             session.approvals.lock().unwrap().insert(call_id.clone(), tx);
-            act(ActState::Waiting, None);
+            act(ActState::Waiting, card);
             let (why, text) = match self.await_decision(session, &call_id, rx) {
                 Decision::Apply => (None, None),
                 Decision::Reject => (
@@ -847,13 +876,6 @@ impl Assistant {
             }
         }
         act(ActState::Running, None);
-        let tc = Ctx {
-            text: ctx.text,
-            host: ctx.host,
-            name: &ctx.req.name,
-            current_page: *page,
-            selection: ctx.req.selection.as_ref(),
-        };
         let out = catch_unwind(AssertUnwindSafe(|| (tool.run)(&tc, &args)))
             .unwrap_or_else(|_| Err("The tool failed unexpectedly.".into()));
         match &out {

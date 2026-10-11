@@ -34,11 +34,11 @@ match, shows them in the Redact rail for review, and applies on the user's word.
 
 | Tool | Class | What it does |
 |---|---|---|
-| `redact_find_and_mark` | edit | `text` / `pattern` (email, phone, personnummer, ssn, iban, card) / `regex`, optional `pages`, `case_sensitive`, `whole_word`. One mark per match (`redact::app::mark_hits`). Skips matches already marked. Pattern matches are masked in the reply. Over 500 matches is an `Err`: narrow it. |
+| `redact_find_and_mark` | edit | `text` / `pattern` (email, phone, personnummer, ssn, iban, card) / `regex`, optional `pages`, `case_sensitive`, `whole_word`. One mark per match (`redact::app::mark_hits`). Skips matches already marked. Pattern matches are masked in the reply (a regex is at most 200 characters, 1 MB compiled). Over 500 matches is an `Err`: narrow it. |
 | `redact_mark_area` | edit | a rectangle of a page as fractions 0-1 of its size (for pictures, stamps, signatures) |
-| `redact_list_marks` | read | ids (`p3#41`), page, marked text |
-| `redact_unmark` | edit | `marks` ids or `all` |
-| `redact_apply` | permanent | applies every mark with the Sanitize options (default all on), in memory: the file on disk is untouched until the user saves. Takes `expected_marks` and `pages` as listed so the card names exactly what will happen; it refuses if the document no longer matches. Verification report goes to the Redact rail. An engine refusal (recoverable content) is an `Err` that leaves the marks. |
+| `redact_list_marks` | read | ids (`p3#41`), page, marked text (as it is in the document: the user needs it to review, and it is what the card shows), and `marks_digest` |
+| `redact_unmark` | edit | `marks` ids or `all` (not both) |
+| `redact_apply` | permanent | applies every mark with the Sanitize options (default all on; unknown option names are an `Err`), in memory: the file on disk is untouched until the user saves. Takes `expected_marks`, `pages` and `marks_digest` exactly as `redact_list_marks` gave them; the digest is checked before the card is shown and again inside the edit lane's lock, so the user approves exactly the marks that get applied. The card lists the first marked texts, every sanitize option that is on ("delete ALL comments and markup", "strip metadata and all hidden data") and the ones kept. Verification report goes to the Redact rail. An engine refusal (recoverable content) is an `Err` that leaves the marks. |
 | `list_comments` | read | ids, kind, author, text, reply parent |
 | `add_comment` | edit | `kind`: highlight / underline / strikeout / squiggly on every match of `find` (one step), `note` at text or a page point, `reply` to a comment id |
 | `list_form_fields` | read | ids (`p2#17`), name, type, value, choices, read-only, required |
@@ -52,9 +52,17 @@ and let the user review, and to call `redact_apply` only when asked.
 ## Rules every action tool follows
 
 - One call, one undo step; a call that changes nothing is `Err` (and pushes no step).
-- A signed document (`ocr::is_signed`) refuses what would break the signature (`redact_apply`,
-  `organize_pages`, `delete_pages`) with a sentence the model relays: "This document is digitally signed ...
-  save a copy of the file and make the change there." Markup and form fills are incremental updates and go in.
+- Signatures are read once (`src-tauri/src/signed.rs`): a signature field with a value, `/Perms /DocMDP`, or
+  `SigFlags`. What a change may do then follows the certification: no certification: content changes
+  (`redact_apply`, `organize_pages`, `delete_pages`) are refused with "This document is digitally signed ... save
+  a copy of the file and make the change there", markup and form fills are incremental updates and go in;
+  DocMDP P=1: nothing; P=2: form fills only, no comments or marks; P=3: forms and comments. A form field a
+  signature locked (`/Lock`, FieldMDP: All / Include / Exclude) is not filled. A signed document whose save would
+  be a full rewrite (repaired on open, or redacted) refuses every change.
+- The refusal comes **before** the approval card (`Tool.check`), so the user is never asked to approve what
+  cannot happen. The same check runs again when the tool runs.
+- The card must say what happens: `fill_form_fields` shows `name = value` per field, `add_comment` says "every
+  match (N)" or "the first match" and the note text, `redact_apply` the marked texts and sanitize options.
 - Document text in a result (matched text, comments, field values) is data: inside `<<<DOCUMENT ... DOCUMENT>>>`
   and defanged, like every excerpt.
 - Arguments are named in the user's terms (1-based pages, fractions of the page); ids come from the `list_*` tools.

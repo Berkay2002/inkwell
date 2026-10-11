@@ -19,6 +19,7 @@ pub mod protect;
 pub mod recents;
 pub mod redact;
 pub mod search;
+pub mod signed;
 pub mod textedit;
 pub mod tools;
 

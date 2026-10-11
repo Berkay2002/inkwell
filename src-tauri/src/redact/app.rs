@@ -144,20 +144,42 @@ pub fn unmark(eng: &Engine, doc: DocId, marks: &[(u32, i32)], source: EditSource
     })
 }
 
+fn mark_dtos(d: &PdfDocument) -> Result<Vec<MarkDto>> {
+    let marks = super::list_marks(d).map_err(err)?;
+    Ok(marks
+        .iter()
+        .map(|m| MarkDto {
+            page: m.page as u32,
+            xref: m.xref,
+            whole_page: m.quads.iter().any(|q| q.ul.x < -1.0e5),
+            quads: m.quads.iter().map(quad_dto).collect(),
+            label: m.label.clone(),
+        })
+        .collect())
+}
+
 pub fn list_marks(eng: &Engine, doc: DocId) -> Result<Vec<MarkDto>> {
-    eng.read_custom(doc, |d| {
-        let marks = super::list_marks(d).map_err(err)?;
-        Ok(marks
-            .iter()
-            .map(|m| MarkDto {
-                page: m.page as u32,
-                xref: m.xref,
-                whole_page: m.quads.iter().any(|q| q.ul.x < -1.0e5),
-                quads: m.quads.iter().map(quad_dto).collect(),
-                label: m.label.clone(),
-            })
-            .collect())
-    })
+    eng.read_custom(doc, mark_dtos)
+}
+
+/// A fingerprint of what is marked: which marks, where and what text. Two lists with the same
+/// digest are the same redaction; the assistant hands it back to apply exactly what was reviewed.
+pub fn marks_digest(marks: &[MarkDto]) -> String {
+    let mut keys: Vec<String> = marks
+        .iter()
+        .map(|m| {
+            let q: Vec<String> = m.quads.iter().map(|q| format!("{q:?}")).collect();
+            format!("{}#{}|{}|{}", m.page, m.xref, q.join(","), m.label.as_deref().unwrap_or(""))
+        })
+        .collect();
+    keys.sort_unstable();
+    // FNV-1a, 64 bit: stable across runs and builds
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in keys.join("\n").bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 /// What `sanitize` would remove if Apply ran now (counts for the confirm), on a throwaway copy.
@@ -177,6 +199,23 @@ pub fn preview_sanitize(eng: &Engine, doc: DocId, opts: &Sanitize) -> Result<San
 /// Applies every mark as one undo step labelled "Redact n items", then, with `save_to`, saves the
 /// verified bytes there (Save as: the document then lives there; the original file is untouched).
 pub fn apply(eng: &Engine, doc: DocId, sanitize: Sanitize, save_to: Option<String>, source: EditSource) -> Result<ApplyOutcome> {
+    apply_expecting(eng, doc, sanitize, save_to, source, None)
+}
+
+/// The text of the `Invalid` error [`apply_expecting`] fails with when the marks are not the ones
+/// the caller reviewed.
+pub const MARKS_CHANGED: &str = "the redaction marks changed";
+
+/// [`apply`], but with `expect` (a [`marks_digest`]) checked inside the edit lane, under the
+/// document's lock: nothing can change the marks between the check and the redaction.
+pub fn apply_expecting(
+    eng: &Engine,
+    doc: DocId,
+    sanitize: Sanitize,
+    save_to: Option<String>,
+    source: EditSource,
+    expect: Option<&str>,
+) -> Result<ApplyOutcome> {
     let n = list_marks(eng, doc)?.len();
     if n == 0 {
         return Err(EngineError::Invalid("nothing is marked for redaction".into()));
@@ -185,19 +224,26 @@ pub fn apply(eng: &Engine, doc: DocId, sanitize: Sanitize, save_to: Option<Strin
     let mut report = None;
     let mut leaks = None;
     let label = format!("Redact {n} item{}", s(n));
-    let r = eng.apply_redaction(doc, label, source, |d| match super::apply(d, &opts) {
-        Ok(mut rep) => {
-            let bytes = std::mem::take(&mut rep.bytes);
-            let pages = rep.pages.iter().map(|&p| p as u32).collect();
-            on_redactions_applied(doc, &bytes);
-            report = Some(rep);
-            Ok((pages, bytes))
+    let r = eng.apply_redaction(doc, label, source, |d| {
+        if let Some(want) = expect {
+            if marks_digest(&mark_dtos(d)?) != want {
+                return Err(EngineError::Invalid(MARKS_CHANGED.into()));
+            }
         }
-        Err(RedactError::Leaked(l)) => {
-            leaks = Some(l);
-            Err(EngineError::Invalid("redaction refused".into()))
+        match super::apply(d, &opts) {
+            Ok(mut rep) => {
+                let bytes = std::mem::take(&mut rep.bytes);
+                let pages = rep.pages.iter().map(|&p| p as u32).collect();
+                on_redactions_applied(doc, &bytes);
+                report = Some(rep);
+                Ok((pages, bytes))
+            }
+            Err(RedactError::Leaked(l)) => {
+                leaks = Some(l);
+                Err(EngineError::Invalid("redaction refused".into()))
+            }
+            Err(e) => Err(err(e)),
         }
-        Err(e) => Err(err(e)),
     });
     if let Some(leaks) = leaks {
         return Ok(ApplyOutcome::Refused { leaks });
@@ -332,6 +378,24 @@ pub async fn redact_apply(app: tauri::AppHandle, eng: Eng<'_>, doc: DocId, optio
         apply(&eng, doc, options.sanitize, save_to, EditSource::User)
     })
     .await
+}
+
+/// Sanitize without a redaction (the assistant's "remove hidden information"): one undo step that
+/// removes what `o` names. `apply_removing`, so a save rewrites the file and what was removed is not
+/// left in the saved bytes.
+pub fn sanitize_doc(eng: &Engine, doc: DocId, o: Sanitize, source: EditSource) -> Result<(EditState, SanitizeReport)> {
+    let mut report = SanitizeReport::default();
+    let state = eng.apply_removing(doc, "Remove hidden information".into(), source, |d| {
+        report = super::sanitize(d, &o, &[]).map_err(err)?;
+        let r = &report;
+        let removed = r.metadata + r.hidden_layer_blocks + r.hidden_text_pages + r.scripts_actions + r.embedded_files + r.annotations + r.form_fields + r.bookmarks;
+        if removed == 0 {
+            // an error rolls the step back: a no-op leaves no undo step
+            return Err(EngineError::Invalid("There is nothing of the kinds asked for to remove in this document.".into()));
+        }
+        Ok((0..d.page_count()?.max(0) as u32).collect())
+    })?;
+    Ok((state, report))
 }
 
 #[cfg(test)]

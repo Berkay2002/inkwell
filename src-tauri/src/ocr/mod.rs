@@ -803,14 +803,10 @@ pub fn ocr_file_with(
     Ok(build_report(&rec, &applied, warnings))
 }
 
-/// The document has a signature (AcroForm `SigFlags` & 1): saving after OCR no longer validates it.
+/// The document carries a signature (a signed field, a certification or the AcroForm `SigFlags`
+/// bit, see `signed.rs`): saving after OCR no longer validates it.
 pub fn is_signed(doc: &PdfDocument) -> bool {
-    doc.catalog()
-        .ok()
-        .and_then(|c| c.get_dict("AcroForm").ok().flatten())
-        .and_then(|f| f.get_dict("SigFlags").ok().flatten())
-        .and_then(|f| f.as_int().ok())
-        .is_some_and(|f| f & 1 != 0)
+    crate::signed::is_signed(doc)
 }
 
 /// The summary of a run: what [`ocr_file`] returns, also for an in-place run through the edit core.

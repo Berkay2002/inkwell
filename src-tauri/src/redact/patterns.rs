@@ -28,8 +28,8 @@ impl Pattern {
         [Pattern::Personnummer, Pattern::Ssn, Pattern::Iban, Pattern::Card, Pattern::Email, Pattern::Phone];
 
     fn regex(self) -> &'static Regex {
-        static PNR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:19|20)?([0-9]{6})[-+ ]?([0-9]{4})\b").unwrap());
-        static SSN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([0-9]{3})[- ]([0-9]{2})[- ]([0-9]{4})\b").unwrap());
+        static PNR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:19|20)?([0-9]{6})(?: ?[-+] ?| )?([0-9]{4})\b").unwrap());
+        static SSN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([0-9]{3})[- ]?([0-9]{2})[- ]?([0-9]{4})\b").unwrap());
         static IBAN: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"\b[A-Z]{2}[0-9]{2}(?:(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?|[A-Z0-9]{11,30})\b").unwrap()
         });
@@ -66,7 +66,10 @@ impl Pattern {
             }
             Pattern::Ssn => {
                 let (area, group, serial) = (&digits[..3], &digits[3..5], &digits[5..]);
-                area != [0, 0, 0] && area != [6, 6, 6] && group != [0, 0] && serial != [0, 0, 0, 0]
+                // written without separators it is any nine digits: the area numbers that are
+                // not issued (9xx) are left out then, to keep other numbers out
+                let bare = m.bytes().all(|b| b.is_ascii_digit());
+                area != [0, 0, 0] && area != [6, 6, 6] && group != [0, 0] && serial != [0, 0, 0, 0] && !(bare && area[0] == 9)
             }
             Pattern::Iban => {
                 let s: Vec<u8> = m.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
@@ -127,6 +130,9 @@ mod tests {
     fn patterns() {
         assert_eq!(hits(Personnummer, "pnr 19811218-9876 och 811218-9876, fel 811218-9875"), ["19811218-9876", "811218-9876"]);
         assert_eq!(hits(Ssn, "SSN: 123-45-6789, 987-65-4321, bad 000-12-3456"), ["123-45-6789", "987-65-4321"]);
+        // without separators, and as personnummer with spaces around the dash
+        assert_eq!(hits(Ssn, "SSN 123456789 or 123 45 6789, not 987654321 or 1234567890"), ["123456789", "123 45 6789"]);
+        assert_eq!(hits(Personnummer, "pnr 811218 - 9876, 811218 9876 and 811218+9876"), ["811218 - 9876", "811218 9876", "811218+9876"]);
         assert_eq!(hits(Iban, "IBAN SE45 5000 0000 0583 9825 7466 or GB82WEST12345698765432, bad GB82WEST12345698765433"),
             ["SE45 5000 0000 0583 9825 7466", "GB82WEST12345698765432"]);
         assert_eq!(hits(Card, "Credit card: 4111 1111 1111 1111 exp 12/27, amex 3782 822463 10005, bad 4111 1111 1111 1112"),

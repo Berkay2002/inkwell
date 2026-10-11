@@ -286,11 +286,15 @@ fn joined(pt: &PageText) -> Option<(PageText, Vec<usize>)> {
     Some((PageText { text, chars }, at))
 }
 
+/// The compiled-size limit of a user's regex (the NFA and the lazy DFA each): a pattern that needs
+/// more is refused rather than left to eat memory.
+pub const REGEX_SIZE_LIMIT: usize = 1 << 20;
+
 pub fn find(doc: &Document, query: &Query) -> Result<Vec<Hit>> {
     let re = match query {
         Query::Text { needle, case_sensitive, whole_word } => literal_regex(needle, *case_sensitive, *whole_word)?,
         Query::Regex { pattern, case_sensitive } => {
-            Some(RegexBuilder::new(pattern).case_insensitive(!case_sensitive).build()?)
+            Some(RegexBuilder::new(pattern).case_insensitive(!case_sensitive).size_limit(REGEX_SIZE_LIMIT).dfa_size_limit(REGEX_SIZE_LIMIT).build()?)
         }
         Query::Pattern(_) => None,
     };

@@ -14,16 +14,16 @@ use std::sync::atomic::AtomicBool;
 
 const SAMPLE: &[u8] = include_bytes!("../../../../docs/study/samples/redact-source.pdf");
 
-struct Host {
-    eng: Arc<Engine>,
-    doc: DocId,
-    edited: AtomicBool,
-    lane: bool,
+pub(in crate::ai) struct Host {
+    pub(in crate::ai) eng: Arc<Engine>,
+    pub(in crate::ai) doc: DocId,
+    pub(in crate::ai) edited: AtomicBool,
+    pub(in crate::ai) lane: bool,
 }
 
 impl DocHost for Host {
     fn meta(&self) -> Vec<(&'static str, String)> {
-        Vec::new()
+        self.eng.metadata(self.doc).unwrap_or_default()
     }
     fn outline(&self) -> Result<Vec<OutlineItem>, String> {
         Ok(Vec::new())
@@ -41,7 +41,7 @@ impl DocHost for Host {
     }
 }
 
-fn open_bytes(test: &str, bytes: Vec<u8>) -> Host {
+pub(in crate::ai) fn open_bytes(test: &str, bytes: Vec<u8>) -> Host {
     let d: PathBuf = std::env::temp_dir().join("inkwell-tests").join(format!("ai-actions-{test}"));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -53,14 +53,14 @@ fn open_bytes(test: &str, bytes: Vec<u8>) -> Host {
 }
 
 /// Three pages; "needle" is on pages 1 and 3.
-fn fixture_doc(test: &str) -> Host {
+pub(in crate::ai) fn fixture_doc(test: &str) -> Host {
     open_bytes(test, fixture::build(&Fixture { pages: 3, lines: 4, needle_every: 2, ..Default::default() }))
 }
 
 fn call(h: &Host, name: &str, args: Value) -> Result<Output, String> {
     let t = tools().into_iter().find(|t| t.name == name).unwrap_or_else(|| panic!("no tool {name}"));
     let text = DocText { rev: 0, pages: 0, chunks: Vec::new(), chars: 0 };
-    let c = Ctx { text: &text, host: h, name: "a.pdf", current_page: 0, selection: None };
+    let c = Ctx { text: &text, host: h, name: "a.pdf", current_page: 0, selection: None, cancel: &crate::ai::tools::NEVER, progress: &crate::ai::tools::quiet };
     (t.run)(&c, &args)
 }
 
@@ -75,11 +75,11 @@ fn err_of(h: &Host, name: &str, args: Value) -> String {
     }
 }
 
-fn steps(h: &Host) -> usize {
+pub(in crate::ai) fn steps(h: &Host) -> usize {
     h.eng.history(h.doc).unwrap().len()
 }
 
-fn rev(h: &Host) -> u32 {
+pub(in crate::ai) fn rev(h: &Host) -> u32 {
     h.eng.edit_state(h.doc).unwrap().rev
 }
 
@@ -87,12 +87,17 @@ fn marks(h: &Host) -> Vec<crate::redact::app::MarkDto> {
     list_marks(&h.eng, h.doc).unwrap()
 }
 
+/// The digest `redact_list_marks` gives for the document's marks now.
+fn digest(h: &Host) -> String {
+    crate::redact::app::marks_digest(&marks(h))
+}
+
 fn needle_hits(h: &Host) -> usize {
     let q = FindQuery::Text { needle: "needle".into(), case_sensitive: false, whole_word: false };
     crate::redact::app::find(&h.eng, h.doc, &q).unwrap().len()
 }
 
-fn sign(h: &Host) {
+pub(in crate::ai) fn sign(h: &Host) {
     h.eng
         .apply_custom(h.doc, "Sign".into(), EditSource::User, false, |d| {
             let f = d.new_object_from_str("<< /Fields [] /SigFlags 3 >>")?;
@@ -194,9 +199,15 @@ fn applying_asks_in_every_mode_and_the_card_names_what_is_redacted() {
     for m in [Mode::Ask, Mode::Auto, Mode::Full] {
         assert!(m.needs_approval(t.class), "{m:?} must ask before a redaction");
     }
+    // the card names everything that goes with the marks: every option is on by default and
+    // comments are among them
     let label = (t.label)(&json!({ "expected_marks": 3, "pages": [1, 2, 3] }));
-    assert_eq!(label, "Permanently redact 3 marks on pp. 1-3");
-    assert_eq!((t.label)(&json!({ "expected_marks": 1, "pages": [4] })), "Permanently redact 1 mark on p. 4");
+    assert_eq!(label, "Permanently redact 3 marks on pp. 1-3, delete ALL comments and markup, strip metadata and all hidden data");
+    let keep = (t.label)(&json!({ "expected_marks": 1, "pages": [4], "sanitize": { "annotations": false, "metadata": false } }));
+    assert_eq!(
+        keep,
+        "Permanently redact 1 mark on p. 4, strip hidden layers, hidden text, scripts and actions, attached files, bookmarks, keep metadata, comments"
+    );
     // marking and listing never wait in Auto
     for t in tools().into_iter().filter(|t| t.class != Class::Permanent && t.class != Class::Destructive) {
         assert!(!Mode::Auto.needs_approval(t.class), "{}", t.name);
@@ -210,13 +221,18 @@ fn apply_removes_the_text_and_one_undo_brings_the_turn_back() {
     assert_eq!(needle_hits(&h), 2);
 
     // what the user was shown must be what is there
-    let e = err_of(&h, "redact_apply", json!({ "expected_marks": 5, "pages": [1, 3] }));
+    let d = digest(&h);
+    let e = err_of(&h, "redact_apply", json!({ "expected_marks": 5, "pages": [1, 3], "marks_digest": d }));
     assert!(e.contains("not what you listed"), "{e}");
-    let e = err_of(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1] }));
+    let e = err_of(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1], "marks_digest": d }));
+    assert!(e.contains("not what you listed"), "{e}");
+    let e = err_of(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1, 3] }));
+    assert!(e.contains("marks_digest"), "a digest is required: {e}");
+    let e = err_of(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1, 3], "marks_digest": "0000000000000000" }));
     assert!(e.contains("not what you listed"), "{e}");
     assert_eq!(needle_hits(&h), 2, "a refused apply changed nothing");
 
-    let o = ok(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1, 3] }));
+    let o = ok(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1, 3], "marks_digest": d }));
     match &o.ui {
         Some(UiAction::Edited { redacted: Some(r), .. }) => {
             assert_eq!(r["marks"], 2);
@@ -238,7 +254,7 @@ fn apply_removes_the_text_and_one_undo_brings_the_turn_back() {
 fn applying_without_marks_is_an_error() {
     let h = fixture_doc("apply-none");
     let (r, s) = (rev(&h), steps(&h));
-    let e = err_of(&h, "redact_apply", json!({ "expected_marks": 1, "pages": [1] }));
+    let e = err_of(&h, "redact_apply", json!({ "expected_marks": 1, "pages": [1], "marks_digest": "x" }));
     assert!(e.contains("nothing marked"), "{e}");
     assert_eq!((rev(&h), steps(&h)), (r, s));
 }
@@ -381,10 +397,11 @@ fn page_changes_that_do_nothing_or_are_wrong_are_errors() {
 fn a_signed_document_refuses_what_would_break_the_signature() {
     let h = fixture_doc("signed");
     ok(&h, "redact_find_and_mark", json!({ "text": "needle" }));
+    let d = digest(&h);
     sign(&h);
     let (r, s) = (rev(&h), steps(&h));
     for (tool, args) in [
-        ("redact_apply", json!({ "expected_marks": 2, "pages": [1, 3] })),
+        ("redact_apply", json!({ "expected_marks": 2, "pages": [1, 3], "marks_digest": d })),
         ("organize_pages", json!({ "action": "rotate", "pages": [1], "degrees": 90 })),
         ("delete_pages", json!({ "pages": [1] })),
     ] {
@@ -402,7 +419,7 @@ fn without_an_edit_lane_nothing_is_changed() {
     h.lane = false;
     for (tool, args) in [
         ("redact_find_and_mark", json!({ "text": "needle" })),
-        ("redact_apply", json!({ "expected_marks": 1, "pages": [1] })),
+        ("redact_apply", json!({ "expected_marks": 1, "pages": [1], "marks_digest": "x" })),
         ("add_comment", json!({ "kind": "note", "page": 1, "x": 0.1, "y": 0.1, "text": "a" })),
         ("organize_pages", json!({ "action": "rotate", "pages": [1], "degrees": 90 })),
         ("delete_pages", json!({ "pages": [1] })),
@@ -434,4 +451,201 @@ fn the_registry_names_are_unique_and_the_classes_are_honest() {
     let prompt = crate::ai::text::BASE_INSTRUCTIONS;
     assert!(prompt.contains("You CAN change the document"));
     assert!(!prompt.contains("cannot redact") && !prompt.contains("can't redact"));
+}
+
+// ---- certification, field locks and the pre-approval check ------------------------------------
+
+/// Installs a signed signature field (and, with `p`, a certification of that level); `lock` is
+/// the field's `/Lock` dictionary body, e.g. `/Action /All`.
+fn certify(h: &Host, p: Option<i32>, lock: Option<&str>) {
+    h.eng
+        .apply_custom(h.doc, "Certify".into(), EditSource::User, false, |d| {
+            let refs = match p {
+                Some(p) => format!(
+                    "/Reference [ << /Type /SigRef /TransformMethod /DocMDP /TransformParams << /Type /TransformParams /P {p} /V /1.2 >> >> ]"
+                ),
+                None => String::new(),
+            };
+            let sig = d.new_object_from_str(&format!("<< /Type /Sig /Filter /Adobe.PPKLite /ByteRange [0 0 0 0] /Contents <00> {refs} >>"))?;
+            let mut field = d.new_object_from_str("<< /FT /Sig /T (Signature1) /Type /Annot /Subtype /Widget /Rect [0 0 0 0] >>")?;
+            field.dict_put("V", sig.clone())?;
+            if let Some(l) = lock {
+                let lock = d.new_object_from_str(&format!("<< /Type /SigFieldLock {l} >>"))?;
+                field.dict_put("Lock", lock)?;
+            }
+            let field = d.add_object(&field)?;
+            let mut form = match d.catalog()?.get_dict("AcroForm")? {
+                Some(f) => f,
+                None => {
+                    let f = d.new_object_from_str("<< /Fields [] >>")?;
+                    d.catalog()?.dict_put("AcroForm", f.clone())?;
+                    f
+                }
+            };
+            let mut fields = form.get_dict("Fields")?.expect("a Fields array");
+            fields.array_push(field)?;
+            // no SigFlags: the signed field alone must be enough to count as signed
+            if p.is_some() {
+                let mut perms = d.new_object_from_str("<< >>")?;
+                perms.dict_put("DocMDP", sig)?;
+                d.catalog()?.dict_put("Perms", perms)?;
+            }
+            Ok(vec![0])
+        })
+        .unwrap();
+}
+
+fn card(h: &Host, tool: &str, args: Value) -> Result<Option<String>, String> {
+    let t = tools().into_iter().find(|t| t.name == tool).unwrap();
+    let text = DocText { rev: 0, pages: 0, chunks: Vec::new(), chars: 0 };
+    let c = Ctx { text: &text, host: h, name: "a.pdf", current_page: 0, selection: None, cancel: &crate::ai::tools::NEVER, progress: &crate::ai::tools::quiet };
+    (t.check.as_ref().unwrap_or_else(|| panic!("{tool} has no pre-approval check")))(&c, &args)
+}
+
+#[test]
+fn a_signed_field_counts_even_without_sigflags_and_is_refused_before_the_card() {
+    let h = fixture_doc("sigfield");
+    certify(&h, None, None);
+    let (r, s) = (rev(&h), steps(&h));
+    // the card is never shown for a change the signature forbids
+    for (tool, args) in [
+        ("organize_pages", json!({ "action": "rotate", "pages": [1], "degrees": 90 })),
+        ("delete_pages", json!({ "pages": [1] })),
+    ] {
+        let e = card(&h, tool, args.clone()).unwrap_err();
+        assert!(e.contains("digitally signed"), "{tool}: {e}");
+        assert!(err_of(&h, tool, args).contains("digitally signed"), "{tool}");
+    }
+    assert_eq!((rev(&h), steps(&h)), (r, s));
+    // an uncertified signature still lets markup in
+    assert!(card(&h, "add_comment", json!({ "kind": "note", "page": 1, "x": 0.1, "y": 0.1, "text": "a" })).is_ok());
+}
+
+#[test]
+fn a_certification_limits_comments_and_form_filling_to_what_it_allows() {
+    // P=1: nothing may change; P=2: forms but no comments; P=3: forms and comments
+    for (p, comments, forms) in [(1, false, false), (2, false, true), (3, true, true)] {
+        let h = with_field(&format!("certified-{p}"));
+        certify(&h, Some(p), None);
+        let c = card(&h, "add_comment", json!({ "kind": "note", "page": 1, "x": 0.1, "y": 0.1, "text": "a" }));
+        assert_eq!(c.is_ok(), comments, "P={p} comments: {c:?}");
+        let f = card(&h, "fill_form_fields", json!({ "fields": [{ "field": "Full name", "value": "A" }] }));
+        assert_eq!(f.is_ok(), forms, "P={p} forms: {f:?}");
+        if !comments {
+            let e = err_of(&h, "add_comment", json!({ "kind": "note", "page": 1, "x": 0.1, "y": 0.1, "text": "a" }));
+            assert!(e.contains("certified") && e.contains("save a copy"), "{e}");
+            let e = err_of(&h, "redact_find_and_mark", json!({ "text": "needle" }));
+            assert!(e.contains("certified"), "marking is an annotation too: {e}");
+        }
+        if !forms {
+            let e = err_of(&h, "fill_form_fields", json!({ "fields": [{ "field": "Full name", "value": "A" }] }));
+            assert!(e.contains("certified") && e.contains("save a copy"), "{e}");
+            assert_eq!(name_value(&h), "");
+        } else {
+            ok(&h, "fill_form_fields", json!({ "fields": [{ "field": "Full name", "value": "A" }] }));
+            assert_eq!(name_value(&h), "A");
+        }
+    }
+}
+
+#[test]
+fn a_field_a_signature_locked_is_not_filled() {
+    let h = with_field("locked");
+    certify(&h, Some(3), Some("/Action /Include /Fields [(Full name)]"));
+    let e = card(&h, "fill_form_fields", json!({ "fields": [{ "field": "Full name", "value": "A" }] })).unwrap_err();
+    assert!(e.contains("locked by a signature") && e.contains("Full name"), "{e}");
+    assert!(err_of(&h, "fill_form_fields", json!({ "fields": [{ "field": "Full name", "value": "A" }] })).contains("locked"));
+    assert_eq!(name_value(&h), "");
+
+    // /Exclude: every field but the listed ones is frozen
+    let h = with_field("locked-exclude");
+    certify(&h, Some(3), Some("/Action /Exclude /Fields [(Other)]"));
+    assert!(card(&h, "fill_form_fields", json!({ "fields": [{ "field": "Full name", "value": "A" }] })).is_err());
+    let h = with_field("locked-exclude-ok");
+    certify(&h, Some(3), Some("/Action /Exclude /Fields [(Full name)]"));
+    assert!(card(&h, "fill_form_fields", json!({ "fields": [{ "field": "Full name", "value": "A" }] })).is_ok());
+}
+
+#[test]
+fn a_signed_document_that_needs_a_full_rewrite_is_refused_for_every_change() {
+    let h = fixture_doc("rewrite");
+    ok(&h, "redact_find_and_mark", json!({ "text": "needle" }));
+    let d = digest(&h);
+    ok(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1, 3], "marks_digest": d }));
+    // a redaction makes every later save a full rewrite; with a signature on top, no change may go in
+    sign(&h);
+    let e = err_of(&h, "add_comment", json!({ "kind": "note", "page": 1, "x": 0.1, "y": 0.1, "text": "a" }));
+    assert!(e.contains("repair") || e.contains("rewrite"), "{e}");
+}
+
+#[test]
+fn the_apply_card_shows_the_marked_text_and_refuses_what_is_not_the_reviewed_list() {
+    let h = fixture_doc("apply-card");
+    ok(&h, "redact_find_and_mark", json!({ "text": "needle" }));
+    let d = digest(&h);
+    let detail = card(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1, 3], "marks_digest": d })).unwrap().unwrap();
+    assert!(detail.to_lowercase().contains("needle") && detail.contains("1, 3"), "{detail}");
+    // the list changed after review: the same call is refused before any card
+    ok(&h, "redact_mark_area", json!({ "page": 2, "left": 0.1, "top": 0.1, "right": 0.5, "bottom": 0.2 }));
+    let e = card(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1, 3], "marks_digest": d })).unwrap_err();
+    assert!(e.contains("not what you listed"), "{e}");
+    // the listing carries the digest the apply needs
+    let listed = ok(&h, "redact_list_marks", json!({}));
+    assert!(listed.text.contains(&format!("marks_digest: {}", digest(&h))), "{}", listed.text);
+}
+
+#[test]
+fn the_apply_card_names_what_else_goes_and_unknown_options_are_refused() {
+    let h = fixture_doc("apply-opts");
+    ok(&h, "redact_find_and_mark", json!({ "text": "needle" }));
+    let d = digest(&h);
+    let e = card(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1, 3], "marks_digest": d, "sanitize": { "everything": true } })).unwrap_err();
+    assert!(e.contains("no option \"everything\""), "{e}");
+    let e = err_of(&h, "redact_apply", json!({ "expected_marks": 2, "pages": [1, 3], "marks_digest": d, "sanitize": { "metadata": "no" } }));
+    assert!(e.contains("true or false"), "{e}");
+    assert_eq!(needle_hits(&h), 2);
+}
+
+#[test]
+fn the_fill_card_shows_each_field_and_its_value_and_hidden_fields_are_not_offered() {
+    let h = with_field("fill-card");
+    let c = card(&h, "fill_form_fields", json!({ "fields": [{ "field": "Full name", "value": "SE45 5000 0000 0583 9825 7466" }] })).unwrap().unwrap();
+    assert!(c.contains("Full name = “SE45 5000 0000 0583 9825 7466”"), "{c}");
+    // not by id either: an id that is not listed is not a field
+    let e = err_of(&h, "fill_form_fields", json!({ "fields": [{ "field": "p1#999999", "value": "x" }] }));
+    assert!(e.contains("no form field"), "{e}");
+}
+
+#[test]
+fn unmarking_with_both_marks_and_all_is_refused_and_a_long_regex_too() {
+    let h = fixture_doc("unmark-both");
+    ok(&h, "redact_find_and_mark", json!({ "text": "needle" }));
+    let (r, s) = (rev(&h), steps(&h));
+    let id = {
+        let m = &marks(&h)[0];
+        format!("p{}#{}", m.page + 1, m.xref)
+    };
+    let e = err_of(&h, "redact_unmark", json!({ "all": true, "marks": [id] }));
+    assert!(e.contains("not both"), "{e}");
+    let label = (tools().into_iter().find(|t| t.name == "redact_unmark").unwrap().label)(&json!({ "all": true, "marks": ["p1#1"] }));
+    assert_eq!(label, "Remove all redaction marks");
+    let long = "a".repeat(201);
+    let e = err_of(&h, "redact_find_and_mark", json!({ "regex": long }));
+    assert!(e.contains("too long"), "{e}");
+    assert_eq!((rev(&h), steps(&h)), (r, s));
+}
+
+#[test]
+fn the_comment_card_says_how_many_matches_and_what_the_note_says() {
+    let h = fixture_doc("comment-card");
+    let args = json!({ "kind": "highlight", "find": "needle", "text": "check" });
+    let t = tools().into_iter().find(|t| t.name == "add_comment").unwrap();
+    assert_eq!((t.label)(&args), "Highlight every match of “needle” with the note “check”");
+    assert_eq!(card(&h, "add_comment", args).unwrap().unwrap(), "2 matches on pp. 1, 3");
+    let first = json!({ "kind": "highlight", "find": "needle", "first_only": true });
+    assert_eq!((t.label)(&first), "Highlight the first match of “needle”");
+    assert_eq!(card(&h, "add_comment", first).unwrap().unwrap(), "1 match on p. 1");
+    assert_eq!((t.label)(&json!({ "kind": "reply", "parent": "p1#2", "text": "Agreed" })), "Reply to a comment: “Agreed”");
+    let org = tools().into_iter().find(|t| t.name == "organize_pages").unwrap();
+    assert_eq!((org.label)(&json!({ "action": "insert_blank" })), "Insert a blank page at the end");
 }
