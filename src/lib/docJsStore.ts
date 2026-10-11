@@ -25,7 +25,7 @@ export interface DocJsSheet {
   check: DocJsCheck | null;
   /** A Save of a script with a syntax error waits for a yes. */
   confirmSave: boolean;
-  /** Something with unsaved changes is waiting for a yes to discard them: close, or the id to switch to. */
+  /** Something with unsaved changes is waiting for a yes to discard them: "close", "add" (a new script), or the id to switch to. */
   confirmDiscard: string | null;
   /** The name being typed for a new script / the new name of the selected one; null when not doing either. */
   adding: string | null;
@@ -152,7 +152,9 @@ export const useDocJs = create<DocJsStore>((set, get) => {
       patch({ list, error: null });
       const cur = select ?? get().sheet?.selected ?? null;
       const next = cur && exists(list, cur) ? cur : firstScript(list);
-      if (next === get().sheet?.selected && keepText) return;
+      // Unsaved typing stays; otherwise the editor shows the file as it is now (an undo changes it under the sheet).
+      const s = get().sheet;
+      if (next === s?.selected && keepText && s && dirty(s)) return;
       if (next) await load(next);
       else patch({ selected: null, text: "", saved: "", check: null, tooLarge: false });
     } catch (e) {
@@ -272,6 +274,9 @@ export const useDocJs = create<DocJsStore>((set, get) => {
       if (to === "close") {
         patch({ text: s.saved });
         get().close();
+      } else if (to === "add") {
+        patch({ text: s.saved, confirmDiscard: null });
+        void get().commitAdd();
       } else {
         void load(to);
       }
@@ -282,6 +287,11 @@ export const useDocJs = create<DocJsStore>((set, get) => {
     commitAdd: async () => {
       const s = get().sheet;
       if (!s || s.adding == null) return;
+      // Adding selects the new script, which would drop unsaved typing: ask first.
+      if (dirty(s)) {
+        patch({ confirmDiscard: "add" });
+        return;
+      }
       const name = s.adding.trim();
       await apply({ op: "add", name: name === "" ? null : name, source: "" }, (r) => r.id);
     },

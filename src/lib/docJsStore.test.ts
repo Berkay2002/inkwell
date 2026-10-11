@@ -214,6 +214,43 @@ describe("document JavaScript sheet", () => {
     expect(api.docJsList).toHaveBeenCalledTimes(1);
   });
 
+  it("shows the file's text again after an undo, and keeps unsaved typing", async () => {
+    await open();
+    useDocJs.getState().setText("var a = 2;");
+    await vi.advanceTimersByTimeAsync(300);
+    vi.mocked(api.docJsSource).mockImplementation(async (_d, id) => src(id, "var a = 2;"));
+    await useDocJs.getState().save();
+    expect(sheet().text).toBe("var a = 2;");
+    expect(dirty(sheet())).toBe(false);
+    // Ctrl+Z elsewhere: the file goes back, the editor follows
+    vi.mocked(api.docJsSource).mockImplementation(async (_d, id) => src(id, "var a = 1;"));
+    useStore.setState({ docs: { 7: { rev: 5, pageCount: 4 } as never } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sheet().text).toBe("var a = 1;");
+    expect(dirty(sheet())).toBe(false);
+    // typing that is not saved survives another edit's refresh
+    useDocJs.getState().setText("typing");
+    useStore.setState({ docs: { 7: { rev: 6, pageCount: 4 } as never } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sheet().text).toBe("typing");
+  });
+
+  it("asks before a new script drops unsaved typing", async () => {
+    await open();
+    useDocJs.getState().setText("typing");
+    useDocJs.getState().startAdd();
+    vi.mocked(api.docJsApply).mockResolvedValueOnce({ state: {} as never, id: "n:Script 1" });
+    await useDocJs.getState().commitAdd();
+    expect(api.docJsApply).not.toHaveBeenCalled();
+    expect(sheet().confirmDiscard).toBe("add");
+    useDocJs.getState().answerDiscard(false);
+    expect(sheet().text).toBe("typing");
+    await useDocJs.getState().commitAdd();
+    useDocJs.getState().answerDiscard(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.docJsApply).toHaveBeenCalledWith(7, { op: "add", name: null, source: "" });
+  });
+
   it("shows a script over 1 MiB as too large and never edits it", async () => {
     vi.mocked(api.docJsSource).mockResolvedValue({ id: "n:Init", text: "", size: 5_000_000, tooLarge: true });
     await open();
