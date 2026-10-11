@@ -536,6 +536,34 @@ fn pages_not_exported_leave_no_comments_in_a_shared_resources_dict() {
 }
 
 #[test]
+fn resources_inherited_from_the_page_tree_do_not_carry_an_unused_pages_comments() {
+    let d = dir("inherited-annots");
+    // the pages have no /Resources of their own: the /Pages node holds them
+    let objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /Resources << /Font << /F1 5 0 R >> >> /MediaBox [0 0 612 792] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Annots [8 0 R] >>".to_string(),
+        HELV.to_string(),
+        stream("", "BT /F1 24 Tf 72 700 Td (PAGEONE) Tj ET"),
+        stream("", "BT /F1 24 Tf 72 700 Td (PAGETWO) Tj ET"),
+        "<< /Type /Annot /Subtype /Square /Rect [100 100 300 300] /F 4 /C [1 0 0] /AP << /N 9 0 R >> >>".to_string(),
+        stream("/Type /XObject /Subtype /Form /BBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >>", "BT /F1 18 Tf 10 100 Td (SECRETNOTE) Tj ET"),
+    ];
+    let (eng, doc, _) = open_bytes(&d, "inherited.pdf", &raw_pdf(&objs));
+    let base = Settings { content: Content::DocumentAndMarkups, ..settings(Layout::default()) };
+    let export = |range: &str, name: &str| {
+        let out = d.join(name);
+        save(&eng, doc, &Settings { range: Range::Pages { text: range.into() }, ..base.clone() }, &out).unwrap();
+        out
+    };
+    assert!(streams_mention(&export("2", "two.pdf"), "SECRETNOTE"));
+    let one = export("1", "one.pdf");
+    assert!(streams_mention(&one, "PAGEONE"));
+    assert!(!streams_mention(&one, "SECRETNOTE"));
+}
+
+#[test]
 fn layers_that_are_off_stay_off_in_the_file() {
     let d = dir("layers");
     let bytes = one_page(

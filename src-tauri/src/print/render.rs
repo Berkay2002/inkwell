@@ -2,7 +2,7 @@
 //! shows is what the printer gets: same pages, same content mode, same matrices; only the
 //! resolution differs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mupdf::pdf::{AnnotationFlags, PdfDocument, Permission};
 use mupdf::{Colorspace, Device, DisplayList, IRect, Matrix, Pixmap, Rect};
@@ -130,10 +130,11 @@ impl Source {
     /// carry (and the writer graft) the comments of every other page. Unused pages lose their
     /// /Annots and used pages get a Resources dict, and an XObject dict, of their own.
     fn isolate(&mut self, pages: &[u32]) -> Result<(), RenderError> {
+        let keep: HashSet<u32> = pages.iter().copied().collect();
         let count = self.doc.page_count()?.max(0) as u32;
         for index in 0..count {
             let mut page = self.doc.find_page(index as i32)?;
-            if !pages.contains(&index) {
+            if !keep.contains(&index) {
                 page.dict_delete("Annots")?;
                 continue;
             }
