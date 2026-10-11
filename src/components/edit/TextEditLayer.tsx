@@ -23,7 +23,8 @@ const MIN_WIDTH = 24;
 /** Edit mode's layer on one page: block outlines, the editor over the selected block, and the add-text box. */
 export const TextEditLayer = memo(function TextEditLayer(p: Props) {
   const open = useTextEdit((s) => s.open);
-  return open ? <Layer {...p} /> : null;
+  const section = useTextEdit((s) => s.section);
+  return open && section === "text" ? <Layer {...p} /> : null;
 });
 
 type Drag = { mode: "move" | "l" | "r"; start: [number, number]; d: [number, number] };

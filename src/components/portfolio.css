@@ -1,0 +1,152 @@
+/* PDF Portfolio view: the collection's files as a list, in the stage where the pages would be. */
+.pf {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  color: var(--text);
+}
+.pf-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.pf-bar .grow {
+  flex: 1;
+}
+.pf-count {
+  color: var(--text-2);
+  font-size: 12px;
+}
+.pf-grid {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+.pf-grid:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.pf-row {
+  display: grid;
+  align-items: center;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+}
+.pf-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-2);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.pf-th {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.pf-th:hover {
+  color: var(--text);
+}
+.pf-th .pf-default {
+  font-size: 10px;
+  opacity: 0.7;
+}
+.pf-body {
+  position: relative;
+}
+.pf-body .pf-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  cursor: default;
+}
+.pf-body .pf-row:hover {
+  background: var(--surface-2);
+}
+.pf-body .pf-row[aria-selected="true"] {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.pf-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pf-cell.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.pf-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pf-name > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pf-name svg {
+  flex: none;
+  color: var(--text-2);
+}
+.pf-folder .pf-name > span {
+  font-weight: 600;
+}
+.pf-twist {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+}
+.pf-twist svg {
+  transition: transform 0.1s;
+}
+.pf-twist.open svg {
+  transform: rotate(90deg);
+}
+.pf-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-2);
+}
+.pf-note {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-2, 0 2px 8px rgb(0 0 0 / 0.15));
+  font-size: 12.5px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pf-twist svg {
+    transition: none;
+  }
+}

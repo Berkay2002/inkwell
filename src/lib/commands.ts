@@ -17,9 +17,10 @@ import { useConvert } from "./convertStore";
 import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
 import { usePrint } from "./printStore";
-import { useTextEdit } from "./textEdit";
+import { openEditSection, useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 import { useSheets } from "./organizePlus";
+import { createPortfolio } from "./portfolioStore";
 
 export interface Command {
   id: string;
@@ -63,6 +64,18 @@ export const commands: Command[] = [
       if (d.organize) st().patch(d.id, { organize: false });
       te.setOpen(!te.open || d.organize);
     }),
+  },
+  {
+    id: "edit-links",
+    title: "Edit links",
+    needsDoc: true,
+    run: withDoc((d) => openEditSection(d.id, "links")),
+  },
+  {
+    id: "edit-bookmarks",
+    title: "Edit bookmarks",
+    needsDoc: true,
+    run: withDoc((d) => openEditSection(d.id, "bookmarks")),
   },
   {
     id: "add-text",
@@ -115,6 +128,7 @@ export const commands: Command[] = [
   { id: "extract-page", title: "Extract this page…", needsDoc: true, run: withDoc((d) => void edits.extract(d.id, [d.currentPage])) },
   { id: "split", title: "Split into single pages", needsDoc: true, run: withDoc((d) => void edits.split(d.id, 1)) },
   { id: "merge", title: "Combine files…", run: () => edits.combineFiles() },
+  { id: "create-portfolio", title: "Create PDF Portfolio…", run: () => void createPortfolio() },
   {
     id: "page-labels",
     title: "Page labels…",

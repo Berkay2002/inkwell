@@ -655,6 +655,12 @@ pub fn claim(doc: &PdfDocument) -> Result<Option<Claim>> {
     check::claim(doc)
 }
 
+/// Which device colour spaces (gray, RGB, CMYK) the pages still use, not counting ones a Default
+/// colour space covers (print production's "is any RGB left" question).
+pub fn device_colours(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<[bool; 3]> {
+    Ok(check::survey(doc, progress, cancel)?.device)
+}
+
 /// What a file's own claim says, as a profile this module can verify.
 pub fn claimed_profile(label: &str) -> Option<Profile> {
     Profile::ALL.iter().copied().find(|p| p.label().eq_ignore_ascii_case(label))

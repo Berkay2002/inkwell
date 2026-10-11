@@ -58,6 +58,8 @@ pub mod pdf;
 pub mod pixmap;
 /// Point type
 pub mod point;
+/// Print production: separation-aware pixmaps, ICC colour spaces, colour conversion
+pub mod prepress;
 /// A representation for a region defined by 4 points
 pub mod quad;
 /// Rectangle types
@@ -123,7 +125,8 @@ pub use pixmap::{ColorUsage, ImageFormat, Pixel, Pixmap, PixmapDigest};
 pub use point::Point;
 pub use quad::Quad;
 pub use rect::{IRect, Rect};
-pub use separations::Separations;
+pub use prepress::{ConvertColors, IccColorspace, IccKind};
+pub use separations::{SeparationBehavior, Separations};
 pub use shade::Shade;
 pub use size::Size;
 pub use stroke_state::{LineCap, LineJoin, StrokeState};

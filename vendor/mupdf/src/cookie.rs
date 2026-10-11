@@ -23,6 +23,14 @@ impl Cookie {
         }
     }
 
+    /// [`Cookie::abort`] through a shared reference, for a device callback that runs while the cookie is lent to
+    /// the page run (the flag is one plain write the C side also reads unsynchronized).
+    pub fn abort_shared(&self) {
+        unsafe {
+            (*self.inner).abort = 1;
+        }
+    }
+
     /// Communicates rendering progress back to the application.
     /// Increments as a page is being rendered.
     pub fn progress(&self) -> i32 {
@@ -50,6 +58,32 @@ impl Cookie {
         unsafe {
             (*self.inner).incomplete = val;
         }
+    }
+}
+
+/// A way to abort a page run from another thread: the flag is one plain write the C side reads without locking, which is
+/// what the cookie is for ("another thread wants to abort a job"). Borrowing the cookie keeps it alive while the handle is.
+#[derive(Debug)]
+pub struct AbortHandle<'a> {
+    inner: *mut fz_cookie,
+    _cookie: std::marker::PhantomData<&'a Cookie>,
+}
+
+// SAFETY: see the type's doc; the only use is writing the abort flag, and the borrow keeps the cookie allocated.
+unsafe impl Send for AbortHandle<'_> {}
+unsafe impl Sync for AbortHandle<'_> {}
+
+impl AbortHandle<'_> {
+    pub fn abort(&self) {
+        unsafe {
+            (*self.inner).abort = 1;
+        }
+    }
+}
+
+impl Cookie {
+    pub fn abort_handle(&self) -> AbortHandle<'_> {
+        AbortHandle { inner: self.inner, _cookie: std::marker::PhantomData }
     }
 }
 

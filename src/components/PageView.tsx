@@ -9,7 +9,9 @@ import { cached } from "../lib/tiles";
 import { usePagesDark } from "../lib/usePagesDark";
 import type { Rect4 } from "../store";
 import { AnnotLayer } from "./comments/AnnotLayer";
+import { LinkLayer } from "./edit/LinkLayer";
 import { MarkPreview } from "./MarkPreview";
+import { ReadLinks } from "./ReadLinks";
 import { NaturalImage } from "./NaturalImage";
 import { TextEditLayer } from "./edit/TextEditLayer";
 import { FormLayer } from "./forms/FormLayer";
@@ -136,9 +138,11 @@ export const PageView = memo(function PageView(p: Props) {
         )}
         {lines && <TextLines lines={lines} />}
       </div>
+      <ReadLinks docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <FormLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <AnnotLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <TextEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
+      <LinkLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       {armed && (
         <div
           className="rd-capture"

@@ -415,6 +415,15 @@ impl Build {
         self.fz_enable("BROTLI", brotli);
         self.fz_enable("DOCX_OUTPUT", docx_output);
 
+        // The Windows project always builds MuPDF's bundled MuJS, whose exported js_malloc, js_realloc,
+        // js_free and js_strdup collide with QuickJS's (the form script engine links QuickJS). MuJS is
+        // only ever called from inside MuPDF, so give those four names a prefix.
+        if let Self::Msbuild(_) = self {
+            for name in ["js_malloc", "js_realloc", "js_free", "js_strdup"] {
+                self.define(name, &format!("mujs_{name}"));
+            }
+        }
+
         // gates which features get built
         self.make_bool("xps", xps);
         self.make_bool("svg", svg);

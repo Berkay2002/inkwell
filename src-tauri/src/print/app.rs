@@ -7,9 +7,9 @@ use std::sync::Arc;
 use tauri::ipc::{Channel, Response};
 use tauri::{Manager, State, Window};
 
-use super::{PlanInfo, Progress, Report, Settings, win};
+use super::{pdf, PlanInfo, Progress, Report, Settings, win};
 use crate::engine::{DocId, Engine};
-use crate::paths::Paths;
+use crate::paths::{FileRef, Paths};
 use crate::tools::{Jobs, ToolError};
 
 type Eng<'a> = State<'a, Arc<Engine>>;
@@ -99,6 +99,43 @@ pub async fn print_start(
             window.state::<Paths>().learn(&o.to_string_lossy());
         }
         Ok(r)
+    })
+    .await
+}
+
+/// What Save as PDF made: the new file (an open token, for a new tab) and its size.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPdf {
+    pub file: FileRef,
+    pub pages: u32,
+    pub sheets: u32,
+}
+
+/// Writes the plan as a new PDF to `save_to` (a save token from `pick_save`). Needs no printer.
+/// `job` is an id the UI picks, for `tool_cancel`; `on_progress` counts sheets written.
+#[tauri::command]
+pub async fn print_save_pdf(
+    window: Window,
+    eng: Eng<'_>,
+    reg: State<'_, Paths>,
+    jobs: State<'_, Arc<Jobs>>,
+    job: u64,
+    doc: DocId,
+    settings: Settings,
+    save_to: String,
+    on_progress: Channel<Progress>,
+) -> Result<SavedPdf, ToolError> {
+    let out = reg.take_save(window.label(), &save_to)?;
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    blocking(move || {
+        let out = PathBuf::from(out);
+        let r = pdf::save(&eng, doc, &settings, &out, &guard.cancel, &mut |p| {
+            let _ = on_progress.send(p);
+        })?;
+        let file = window.state::<Paths>().issue_open(window.label(), out.to_string_lossy().into_owned());
+        Ok(SavedPdf { file, pages: r.pages, sheets: r.sheets })
     })
     .await
 }

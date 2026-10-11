@@ -194,6 +194,17 @@ pub struct StoredText {
     pub lines: Vec<(u32, [f32; 4])>,
 }
 
+/// `s` folded the way a find folds it (case-insensitive, accents kept), for ordering names the way
+/// searching matches them.
+pub(crate) fn fold_text(s: &str) -> String {
+    let mut f = Folder::new(SearchOpts::default());
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        f.push(c, &mut out);
+    }
+    out.into_iter().collect()
+}
+
 /// The characters of one page, in reading order, with a synthetic space between lines.
 pub struct PageChars {
     /// What the page shows, one entry per character; `None` rect for a synthetic space.

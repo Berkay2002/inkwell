@@ -372,6 +372,149 @@ export interface NewTextBox {
   width?: number;
 }
 
+// ---- bookmarks and links (src-tauri/src/outline, src-tauri/src/links) ----
+
+export type BookmarkDest =
+  | { kind: "none" }
+  /** `at`: the point shown at the top left of the view, page space. */
+  | { kind: "page"; page: number; at: [number, number] | null }
+  | { kind: "uri"; uri: string }
+  | { kind: "other"; what: string }
+  /** A destination that can't be followed (a missing named destination or page); `what` says which. */
+  | { kind: "broken"; what: string };
+
+export interface Bookmark {
+  /** The item's object number: stable across undo. */
+  id: number;
+  title: string;
+  dest: BookmarkDest;
+  open: boolean;
+  bold: boolean;
+  italic: boolean;
+  color: [number, number, number] | null;
+  children: Bookmark[];
+}
+
+export interface Bookmarks {
+  rev: number;
+  items: Bookmark[];
+  count: number;
+  /** More items than are read: the rest is left as it is and can't be edited. */
+  truncated: boolean;
+}
+
+export type BookmarkOp =
+  | { op: "add"; parent: number | null; index: number | null; title: string; page: number; at: [number, number] | null }
+  | { op: "rename"; id: number; title: string }
+  | { op: "delete"; ids: number[] }
+  | { op: "move"; id: number; parent: number | null; index: number }
+  | { op: "setDest"; id: number; page: number; at: [number, number] | null }
+  | { op: "setOpen"; id: number; open: boolean }
+  | { op: "setStyle"; id: number; bold?: boolean; italic?: boolean; color?: [number, number, number]; resetColor?: boolean }
+  | { op: "fromHeadings"; replace: boolean };
+
+export interface BookmarkEdited {
+  state: EditState;
+  id: number | null;
+  count: number;
+}
+
+export interface HeadingPreview {
+  count: number;
+  levels: number;
+  /** `tags`: the file's own heading tags; `size`: guessed from the size of the text. */
+  source: "tags" | "size";
+  rows: { title: string; page: number; level: number }[];
+}
+
+export type LinkTarget =
+  | { kind: "page"; page: number; at: [number, number] | null }
+  | { kind: "uri"; uri: string }
+  | { kind: "file"; name: string; page: number | null }
+  | { kind: "other"; what: string }
+  | { kind: "broken"; what: string };
+
+export interface LinkBorder {
+  visible: boolean;
+  width: number;
+  color: [number, number, number];
+}
+
+export interface PageLink {
+  /** The annotation's object number. */
+  id: number;
+  /** x0, y0, x1, y1 in page space. */
+  rect: [number, number, number, number];
+  target: LinkTarget;
+  border: LinkBorder;
+}
+
+export interface PageLinks {
+  rev: number;
+  links: PageLink[];
+}
+
+export type NewLinkTarget =
+  | { kind: "page"; page: number; at: [number, number] | null }
+  | { kind: "uri"; uri: string }
+  /** `file`: an open token from `linkPickFile`. */
+  | { kind: "file"; file: string; page: number | null };
+
+export interface BorderSpec {
+  visible: boolean;
+  width?: number;
+  color?: [number, number, number];
+}
+
+export type LinkOp =
+  | { op: "add"; page: number; rect: [number, number, number, number]; target: NewLinkTarget; border?: BorderSpec }
+  | { op: "setTarget"; page: number; id: number; target: NewLinkTarget }
+  | { op: "setRect"; page: number; id: number; rect: [number, number, number, number] }
+  | { op: "setBorder"; page: number; id: number; border: BorderSpec }
+  | { op: "delete"; page: number; ids: number[] }
+  | { op: "fromUrls" };
+
+export interface LinkEdited {
+  state: EditState;
+  id: number | null;
+  count: number;
+  /** A link to a file: the name the link now has for it, found from the folder of the document. */
+  name: string | null;
+}
+
+export interface LinkAudit {
+  total: number;
+  external: number;
+  broken: number;
+  /** The first broken ones. */
+  rows: { page: number; id: number; what: string }[];
+}
+
+export interface UrlPreview {
+  count: number;
+  pages: number;
+  rows: { page: number; url: string }[];
+}
+
+export const bookmarksList = (doc: number) => invoke<Bookmarks>("bookmarks_list", { doc });
+export const bookmarksApply = (doc: number, rev: number, op: BookmarkOp) => invoke<BookmarkEdited>("bookmarks_apply", { doc, rev, op });
+export const bookmarksHeadings = (doc: number) => invoke<HeadingPreview>("bookmarks_headings", { doc });
+export const linksList = (doc: number, page: number) => invoke<PageLinks>("links_list", { doc, page });
+export const linksApply = (doc: number, rev: number, op: LinkOp) => invoke<LinkEdited>("links_apply", { doc, rev, op });
+export const linksUrls = (doc: number) => invoke<UrlPreview>("links_urls", { doc });
+export const linksAudit = (doc: number) => invoke<LinkAudit>("links_audit", { doc });
+/** An address as it would be linked (gate: https, http, mailto), or an error saying why not. */
+export const linkCheckUrl = (url: string) => invoke<string>("link_check_url", { url });
+/** Any file, as an open token. */
+export const linkPickFile = () => invoke<FileRef | null>("link_pick_file");
+/** The PDF a file link names (next to the document), as an open token; refused with the reason otherwise. */
+/** Where a file link looks, in full, for the confirmation: no token is issued. */
+export const linkFilePath = (doc: number, name: string) => invoke<string>("link_file_path", { doc, name });
+/** The open token for a file link's PDF: ask only after the person confirmed `linkFilePath`. */
+export const linkFileRef = (doc: number, name: string) => invoke<FileRef>("link_file_ref", { doc, name });
+/** Only after the person confirmed. */
+export const linkOpenUrl = (url: string) => invoke<void>("link_open_url", { url });
+
 export const textBlocks = (doc: number, page: number) => invoke<TextBlocks>("text_blocks", { doc, page });
 export const textEdit = (doc: number, rev: number, page: number, index: number, change: BlockChange) =>
   invoke<TextEdited>("text_edit", { doc, rev, page, index, change });
@@ -776,7 +919,10 @@ export type PrintRange = { kind: "all" } | { kind: "current"; page: number } | {
 export type PrintLayout =
   | { kind: "size"; mode: PrintSizeMode; percent: number }
   | { kind: "multiple"; perSheet: number; order: PrintPageOrder; border: boolean; autoRotate: boolean }
-  | { kind: "booklet"; sides: "both" | "frontOnly" | "backOnly"; binding: "left" | "right" };
+  /** `creep` in points: how much closer to the spine the innermost sheet's pages sit than the outermost's. */
+  | { kind: "booklet"; sides: "both" | "frontOnly" | "backOnly"; binding: "left" | "right"; creep: number }
+  /** `scale` in percent, `overlap` in points. */
+  | { kind: "poster"; scale: number; overlap: number; cutMarks: boolean; labels: boolean };
 
 export interface PrintSettings {
   printer: string | null;
@@ -799,6 +945,8 @@ export interface PrintFace {
   height: number;
   /** Source pages on this side (1-based), in the order drawn. */
   pages: number[];
+  /** Poster: which tile of its page this side is (0-based) in a `cols` x `rows` grid. */
+  tile: { col: number; row: number; cols: number; rows: number } | null;
 }
 
 export interface PrintPlan {
@@ -836,6 +984,22 @@ export function printStart(job: number, doc: number, settings: PrintSettings, sa
   const ch = new Channel<PrintProgress>();
   ch.onmessage = onProgress;
   return invoke<PrintReport>("print_start", { job, doc, settings, saveTo, onProgress: ch });
+}
+
+export interface PrintSavedPdf {
+  /** The new file, as an open token for a new tab. */
+  file: FileRef;
+  /** Source pages chosen. */
+  pages: number;
+  /** Pages of the new file. */
+  sheets: number;
+}
+
+/** Writes the plan as a new vector PDF at `saveTo` (a save token from `pickSave`). Needs no printer. */
+export function printSavePdf(job: number, doc: number, settings: PrintSettings, saveTo: string, onProgress: (p: PrintProgress) => void) {
+  const ch = new Channel<PrintProgress>();
+  ch.onmessage = onProgress;
+  return invoke<PrintSavedPdf>("print_save_pdf", { job, doc, settings, saveTo, onProgress: ch });
 }
 
 // ---- combine, attachments, page labels, transitions (src-tauri/src/organize) ----
@@ -919,6 +1083,73 @@ export const attachmentOpen = (doc: number, id: string) => invoke<FileRef>("atta
 export const attachmentsRemove = (doc: number, ids: string[]) => invoke<EditState>("attachments_remove", { doc, ids });
 export const attachmentDescribe = (doc: number, id: string, text: string) =>
   invoke<EditState>("attachment_describe", { doc, id, text });
+
+// ---- PDF Portfolios (src-tauri/src/organize/portfolio) ----
+
+export interface PortfolioField {
+  key: string;
+  name: string;
+  /** The schema's subtype: S, D, N, F, Desc, Size, ModDate, CreationDate, CompressedSize. */
+  subtype: string;
+  kind: "text" | "number" | "date";
+  visible: boolean;
+}
+
+export interface PortfolioSortKey {
+  /** Index into `fields`. */
+  field: number;
+  ascending: boolean;
+}
+
+export interface PortfolioFolder {
+  id: number;
+  name: string;
+  parent: number | null;
+}
+
+export interface PortfolioFile {
+  /** The attachment id: what `attachmentOpen`, `attachmentSave` and the other attachment calls take. */
+  id: string;
+  name: string;
+  description: string;
+  size: number;
+  mime: string | null;
+  isPdf: boolean;
+  hasData: boolean;
+  folder: number | null;
+  /** What each field shows, in `fields` order. */
+  cells: string[];
+  /** The value's place among all files per field (equal values share one; null: none). Sorting is a sort of these. */
+  ranks: (number | null)[];
+}
+
+export interface PortfolioInfo {
+  /** The schema's fields in the author's column order. */
+  fields: PortfolioField[];
+  /** The collection's own sort: `files` come in this order. */
+  sort: PortfolioSortKey[];
+  view: "details" | "tile" | "hidden" | "custom";
+  /** The file that opens first (an attachment id). */
+  initial: string | null;
+  /** Parents before children, siblings by name. */
+  folders: PortfolioFolder[];
+  files: PortfolioFile[];
+}
+
+export interface PortfolioExtracted {
+  folder: string;
+  written: string[];
+  skipped: string[];
+}
+
+/** The portfolio view of a document; null for a plain PDF. Rejects when the collection is unusable (folders that loop). */
+export const portfolioInfo = (doc: number) => invoke<PortfolioInfo | null>("portfolio_info", { doc });
+/** Open dialog for the files of a new portfolio (any type). */
+export const pickPortfolioFiles = () => invoke<FileRef[]>("pick_portfolio_files");
+/** `out`: a save token from `pickSave`. Resolves to an open token for the new file. The sources are only read. */
+export const portfolioCreate = (files: string[], out: string) => invoke<FileRef>("portfolio_create", { files, out });
+/** `to`: a folder token from `pickFolder`. Never replaces a file there. */
+export const portfolioExtractAll = (doc: number, to: string) => invoke<PortfolioExtracted>("portfolio_extract_all", { doc, to });
 
 export type LabelStyle = "none" | "decimal" | "upperRoman" | "lowerRoman" | "upperAlpha" | "lowerAlpha";
 
