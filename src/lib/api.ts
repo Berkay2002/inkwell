@@ -1026,6 +1026,8 @@ export interface PrintPlan {
   papers: number;
   /** Sides sent to the printer for all copies, blank backs included: what a job's progress counts to. */
   sides: number;
+  /** Pages Save as PDF writes, two-sided padding included: what its progress counts to. */
+  pdfSides: number;
   faces: PrintFace[];
   editRev: number;
 }
@@ -1263,3 +1265,90 @@ export interface PageTrans {
 export const transitionsList = (doc: number) => invoke<PageTrans[]>("transitions_list", { doc });
 export const transitionsSet = (doc: number, pages: number[], change: PageTrans) =>
   invoke<EditState>("transitions_set", { doc, pages, change });
+
+/** Document JavaScript (src-tauri/src/forms/doc_js.rs). Nothing here runs a script. */
+export interface DocJsMeta {
+  /** Bytes of source; 0 when it was not read. */
+  size: number;
+  /** Over 1 MiB: not shown or scanned here. */
+  tooLarge: boolean;
+  /** Not read: the listing had read its share of script text. */
+  unread: boolean;
+  /** Keys of the capabilities the source mentions. */
+  risks: string[];
+}
+export interface DocJsNamed extends DocJsMeta {
+  /** `n:<name>`. */
+  id: string;
+  name: string;
+}
+export interface DocJsStep extends DocJsMeta {
+  /** `d:<event>:<i>` or `p:<page>:<event>:<i>`; `d:open:<i>` is the open action. */
+  id: string;
+  javascript: boolean;
+  /** What a step that is not JavaScript does. */
+  what: string;
+}
+export interface DocJsSlot {
+  /** `d:<event>` or `p:<page>:<event>`. */
+  id: string;
+  label: string;
+  page: number | null;
+  steps: DocJsStep[];
+}
+export interface DocJsCounts {
+  fields: number;
+  fieldScripts: number;
+  links: number;
+  bookmarks: number;
+}
+export interface DocJsCapability {
+  key: string;
+  label: string;
+  count: number;
+  places: string[];
+}
+export interface DocJsList {
+  named: DocJsNamed[];
+  docActions: DocJsSlot[];
+  pageActions: DocJsSlot[];
+  counts: DocJsCounts;
+  capabilities: DocJsCapability[];
+  incomplete: boolean;
+  /** Signed: an edit is saved as an update and the signature will show the change. */
+  signed: boolean;
+  /** Certified (any /P): script edits are refused. */
+  certified: boolean;
+}
+export interface DocJsSource {
+  id: string;
+  text: string;
+  size: number;
+  tooLarge: boolean;
+}
+export interface DocJsCheck {
+  ok: boolean;
+  message: string | null;
+  /** 1-based. */
+  line: number | null;
+  column: number | null;
+  /** Over what the engine runs (256 KiB): not compiled. */
+  tooLarge: boolean;
+}
+export type DocJsOp =
+  | { op: "add"; name: string | null; source: string }
+  | { op: "rename"; id: string; name: string }
+  | { op: "setSource"; id: string; source: string }
+  | { op: "delete"; id: string };
+export interface DocJsApplied {
+  state: EditState;
+  /** The id of the script an `add` made (and of a renamed one). */
+  id: string | null;
+  /** Set when the file is signed and the edit changed it. */
+  warning: string | null;
+}
+
+export const docJsList = (doc: number) => invoke<DocJsList>("doc_js_list", { doc });
+export const docJsSource = (doc: number, id: string) => invoke<DocJsSource>("doc_js_source", { doc, id });
+export const docJsCheck = (source: string) => invoke<DocJsCheck>("doc_js_check", { source });
+export const docJsApply = (doc: number, op: DocJsOp) => invoke<DocJsApplied>("doc_js_apply", { doc, op });

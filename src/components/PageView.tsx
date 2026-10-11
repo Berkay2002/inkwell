@@ -9,6 +9,7 @@ import { cached } from "../lib/tiles";
 import { usePagesDark } from "../lib/usePagesDark";
 import type { Rect4 } from "../store";
 import { AnnotLayer } from "./comments/AnnotLayer";
+import { OrderLayer } from "./a11y/OrderLayer";
 import { LinkLayer } from "./edit/LinkLayer";
 import { usePrepress } from "../lib/prepressStore";
 import { MarkPreview } from "./MarkPreview";
@@ -158,6 +159,7 @@ export const PageView = memo(function PageView(p: Props) {
       <ImageEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <TextEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <LinkLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
+      <OrderLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       {armed && (
         <div
           className="rd-capture"

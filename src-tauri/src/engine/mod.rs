@@ -580,7 +580,7 @@ impl Engine {
                             if held != rev {
                                 return Err(EngineError::Stale);
                             }
-                            let b = doc.load_page(p as i32)?.bounds()?;
+                            let b = doc.pdf_page_bounds(p as i32)?;
                             Ok([b.width(), b.height()])
                         });
                         match size {
