@@ -155,6 +155,56 @@ export const splitDocument = (doc: number, every: number) => invoke<{ files: str
 /** `files`: open tokens; `out`: a save token. Returns the result to open. */
 export const mergeFiles = (files: string[], out: string) => invoke<FileRef>("merge_files", { files, out });
 
+// ---- password security (src-tauri/src/protect) ----
+
+export type Printing = "none" | "low" | "high";
+export type Changes = "none" | "pages" | "forms" | "comments" | "allButExtract";
+export type Cipher = "aes256" | "aes128";
+
+/** What to set. Passwords stay in this object only until the command returns. */
+export interface ProtectSpec {
+  openPassword: string | null;
+  permissionsPassword: string | null;
+  printing: Printing;
+  changes: Changes;
+  copy: boolean;
+  accessibility: boolean;
+  cipher: Cipher;
+}
+
+export interface Rights {
+  printing: Printing;
+  modify: boolean;
+  annotate: boolean;
+  forms: boolean;
+  assemble: boolean;
+  copy: boolean;
+  accessibility: boolean;
+}
+
+export interface SecurityInfo {
+  encrypted: boolean;
+  /** "AES-256", "AES-128", "RC4 128-bit" ... */
+  method: string | null;
+  revision: number | null;
+  openPassword: boolean;
+  rights: Rights;
+  restricted: boolean;
+  /** This session may change or remove the security without a permissions password. */
+  unlocked: boolean;
+  /** Where it comes from: the file as opened, set in this session, or removed in this session. */
+  origin: "file" | "set" | "removed";
+  /** Set or removed here and not saved yet. */
+  unsaved: boolean;
+}
+
+export const securityInfo = (doc: number) => invoke<SecurityInfo>("security_info", { doc });
+/** One undo step; Save or Save as writes it. `permissionsPassword`: only when the file already has restrictions. */
+export const protectApply = (doc: number, spec: ProtectSpec, permissionsPassword?: string | null) =>
+  invoke<EditState>("protect_apply", { doc, spec, permissionsPassword: permissionsPassword ?? null });
+export const removeSecurity = (doc: number, permissionsPassword?: string | null) =>
+  invoke<EditState>("remove_security", { doc, permissionsPassword: permissionsPassword ?? null });
+
 // ---- compress and OCR (src-tauri/src/tools/mod.rs) ----
 
 export type CompressPreset = "smallest" | "balanced" | "highQuality";

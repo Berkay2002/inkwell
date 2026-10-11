@@ -395,3 +395,27 @@ fn a_file_without_security_has_nothing_to_remove() {
     assert!(matches!(eng.remove_security(id, None, EditSource::User), Err(EngineError::Invalid(_))));
     assert_eq!(invalid_code(eng.protect(id, ProtectSpec { open_password: None, permissions_password: None, ..spec() }, None, EditSource::User)), "nothing-to-set");
 }
+
+#[test]
+fn the_file_on_disk_is_read_with_its_new_password_by_the_tools() {
+    // Compress and the like read the file on disk: after Save wrote a new password it is the new one.
+    let d = dir("file-password");
+    let src = fixture_at(&d, "a.pdf", 2);
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &src);
+    assert_eq!(eng.file_password(id).unwrap(), None);
+
+    eng.protect(id, spec(), None, EditSource::User).unwrap();
+    // set but not written yet: the file on disk is still the plain one
+    assert_eq!(eng.file_password(id).unwrap(), None);
+    eng.save(id, None).unwrap();
+    assert_eq!(eng.file_password(id).unwrap().as_deref(), Some("open sesame"));
+    let audit = crate::compress::audit_file(Path::new(&src), eng.file_password(id).unwrap().as_deref()).unwrap();
+    assert!(audit.total > 0);
+
+    // removed and saved: no password again
+    eng.remove_security(id, Some("owner-secret"), EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    assert_eq!(eng.file_password(id).unwrap(), None);
+    assert!(crate::compress::audit_file(Path::new(&src), None).is_ok());
+}

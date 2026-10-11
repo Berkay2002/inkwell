@@ -9,6 +9,7 @@ import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
 import { useConvert } from "./convertStore";
+import { useProtect } from "./protectStore";
 import { useTools } from "./toolsStore";
 
 export interface Command {
@@ -91,6 +92,8 @@ export const commands: Command[] = [
     needsDoc: true,
     run: () => useTools.getState().open("ocr", undefined, { scope: "page" }),
   },
+  { id: "protect", title: "Protect with a password…", needsDoc: true, run: () => useProtect.getState().open("protect") },
+  { id: "security", title: "Document properties and security…", needsDoc: true, run: () => useProtect.getState().open("security") },
   { id: "export", title: "Export pages, text or images…", needsDoc: true, run: () => useConvert.getState().openExport() },
   { id: "export-word", title: "Export to Word…", needsDoc: true, run: () => useConvert.getState().openExport(undefined, "word") },
   { id: "create-pdf", title: "Create PDF…", run: () => useConvert.getState().openCreate() },

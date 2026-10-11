@@ -1381,6 +1381,11 @@ impl Engine {
             *entry.path.write() = target;
         }
         ed.saved = Some(ed.cur);
+        *entry.file_password.lock() = match ed.security() {
+            Some(SecurityChange::Set(s)) => Some(s.open().map(str::to_string)),
+            Some(SecurityChange::Remove) => Some(None),
+            None => None,
+        };
         Ok((ed.state(&entry), Some(saved)))
     }
 

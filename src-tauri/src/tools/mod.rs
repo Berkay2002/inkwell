@@ -119,14 +119,15 @@ pub struct AuditReply {
 /// real images: the UI runs it after the audit and cancels it with the job id when the rail closes.
 pub fn estimate_for_ui(eng: &Engine, doc: DocId, cancel: &AtomicBool) -> Result<Vec<compress::estimate::Estimate>, ToolError> {
     let path = PathBuf::from(eng.doc_entry(doc)?.path());
-    let audit = compress::audit_file(&path, None)?;
-    Ok(compress::estimate::estimate(&path, None, &audit, cancel)?)
+    let password = eng.file_password(doc)?;
+    let audit = compress::audit_file(&path, password.as_deref())?;
+    Ok(compress::estimate::estimate(&path, password.as_deref(), &audit, cancel)?)
 }
 
 pub fn audit_for_ui(eng: &Engine, doc: DocId) -> Result<AuditReply, ToolError> {
     let path = PathBuf::from(eng.doc_entry(doc)?.path());
     let path = path.as_path();
-    let audit = compress::audit_file(path, None)?;
+    let audit = compress::audit_file(path, eng.file_password(doc)?.as_deref())?;
     let out = compress::default_output(path);
     Ok(AuditReply {
         size: std::fs::metadata(path).map_err(|e| ToolError(e.to_string()))?.len(),
@@ -168,7 +169,8 @@ pub fn run_compress(
     // input is still never replaced (the engine checks).
     opts.replace_output = output.is_some();
     opts.output = output;
-    opts.password = None;
+    // The file on disk is what compress reads: its password, which Save may have just changed.
+    opts.password = eng.file_password(req.doc)?;
     // The fraction only ever grows, whatever the stages report.
     let mut last = 0.0f32;
     let mut mono = |mut p: compress::Progress| {

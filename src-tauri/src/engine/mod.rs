@@ -173,6 +173,9 @@ pub struct DocEntry {
     pub id: DocId,
     path: RwLock<String>,
     password: Mutex<Option<String>>,
+    /// The open password of the file on disk after a save that set or removed security (`None` until
+    /// then: the file is as it was opened and `password` unlocks it).
+    file_password: Mutex<Option<Option<String>>>,
     epochs: [AtomicU64; STREAMS],
     search_gen: AtomicU64,
     layout: RwLock<Layout>,
@@ -315,6 +318,7 @@ impl Engine {
             id,
             path: RwLock::new(path.to_string()),
             password: Mutex::new(None),
+            file_password: Mutex::new(None),
             epochs: Default::default(),
             search_gen: AtomicU64::new(0),
             layout: RwLock::new(Layout { rev: 0, page_count: 0, sizes: Vec::new(), snap: None }),
@@ -831,6 +835,14 @@ impl Engine {
     /// The password the user unlocked `id` with (redaction checks its encrypted output with it).
     pub(crate) fn password(&self, id: DocId) -> Result<Option<String>> {
         Ok(self.entry(id)?.password.lock().clone())
+    }
+
+    /// The password that opens the file on disk now: after Save wrote new password security it is the
+    /// new open password, which the in-memory snapshots (`password`) do not share.
+    pub(crate) fn file_password(&self, id: DocId) -> Result<Option<String>> {
+        let entry = self.entry(id)?;
+        let over = entry.file_password.lock().clone();
+        Ok(over.unwrap_or_else(|| entry.password.lock().clone()))
     }
 
     pub fn set_cache_budget(&self, bytes: usize) {
