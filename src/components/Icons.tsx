@@ -67,7 +67,6 @@ const PATHS = {
   calendar: "M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1ZM4 10h16M8 3v4M16 3v4",
   nib: "M12 3 6.5 10.5 8.5 18h7l2-7.5ZM12 3v6.5M8.5 21h7",
   question: "M9.2 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 4.5M12 18h.01",
-  signature: "M3 15c3-7 5-9 7-7s-2 7 1 7 4-4 6-4 2 2.5 4 2.5M3 20h18",
   print: "M7 9V3h10v6M7 17H5a1 1 0 0 1-1-1v-5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v5a1 1 0 0 1-1 1h-2M7 14h10v7H7Z",
   textField: "M3 7h18v10H3ZM7 10v4",
   checkSquare: "M4 4h16v16H4ZM8 12l3 3 5-6",
