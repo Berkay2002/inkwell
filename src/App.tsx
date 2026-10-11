@@ -98,7 +98,10 @@ export default function App() {
     <div className="app">
       <TabBar />
       {doc?.organize ? (
-        <Organize key={doc.id} doc={doc} />
+        <>
+          <Toolbar doc={doc} />
+          <Organize key={doc.id} doc={doc} />
+        </>
       ) : doc ? (
         <>
           <Toolbar doc={doc} />

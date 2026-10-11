@@ -26,69 +26,14 @@
   background: var(--accent);
   color: var(--accent-fg);
 }
-.mode-pill.big {
-  padding: 4px;
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-1);
-}
-.mode-pill.big button {
-  gap: 10px;
-  height: 40px;
-  padding: 0 26px 0 22px;
-  border-radius: var(--radius-md);
-  font-size: 15px;
-}
 
-.org-toolbar {
-  grid-area: bar;
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: center;
-  padding: 0 20px;
-  background: var(--window);
-}
-.org-toolbar-side {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.org-toolbar-side.end {
-  justify-content: flex-end;
-}
-.org-icon {
-  display: grid;
-  place-items: center;
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-md);
-}
-.org-icon:hover:not(:disabled) {
-  background: var(--surface-2);
-}
-.org-icon:disabled {
-  opacity: 0.4;
-}
-.org-done {
-  height: 44px;
-  min-width: 112px;
-  margin-left: 22px;
-  padding: 0 24px;
-  border-radius: var(--radius-md);
-  background: var(--accent);
-  color: var(--accent-fg);
-  font-size: 15px;
-  font-weight: 500;
-}
-.org-done:hover {
-  filter: brightness(1.08);
-}
 
 /* Takes the toolbar and main rows of .app; the panel runs up beside the toolbar, as in the design. */
 .org {
   position: relative;
-  grid-row: 2 / span 2;
+  grid-row: 3;
   display: grid;
-  grid-template: "panel bar" 60px "panel grid" 1fr / 232px 1fr;
+  grid-template: "panel grid" 1fr / 232px 1fr;
   min-height: 0;
 }
 
