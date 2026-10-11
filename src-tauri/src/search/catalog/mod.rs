@@ -782,8 +782,11 @@ fn index_file(sh: &Shared, job: &Job) -> Option<FileRec> {
     }
     rec.head_tail = sample_of(&mut std::io::Cursor::new(&bytes), job.size);
     // A file that makes MuPDF panic is skipped like a damaged one.
-    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Probe {
-        let Ok(doc) = PdfDocument::from_bytes(&bytes) else { return Probe::Bad(Status::Damaged) };
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || -> Probe {
+        let opened = PdfDocument::from_bytes(&bytes);
+        // The document holds its own copy: this one is not kept for the (long) read of the pages.
+        drop(bytes);
+        let Ok(doc) = opened else { return Probe::Bad(Status::Damaged) };
         if doc.needs_password().unwrap_or(true) {
             return Probe::Bad(Status::Password);
         }
