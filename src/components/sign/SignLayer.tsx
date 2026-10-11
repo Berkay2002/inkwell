@@ -65,7 +65,11 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
   };
   const down = (e: React.PointerEvent) => {
     const q = toPage(e);
-    if (tool === "text") return setText(q);
+    if (tool === "text") {
+      // Keep the pointer from taking focus back from the editor that mounts now.
+      e.preventDefault();
+      return setText(q);
+    }
     if (tool === "date") return void sg().place(docId, { page, type: "text", at: [q[0], q[1] - 8], text: today() });
     if ((MARKS as string[]).includes(tool)) return void sg().place(docId, { page, type: "mark", mark: tool as MarkKind, at: q });
     if (tool === "signature" || tool === "initials") return placeImage(tool, q);
@@ -147,7 +151,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
           </div>
         )}
         {tool === "digital" &&
-          fields?.map((f) => (
+          fields?.filter((f) => f.field !== draft?.field).map((f) => (
             <button
               key={f.field}
               className="sg-field"

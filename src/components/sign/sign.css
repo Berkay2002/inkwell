@@ -21,15 +21,14 @@
 }
 .sg-tile {
   position: relative;
-  width: 38px;
-  height: 30px;
   margin: 1px 0;
 }
 .sg-tile-btn {
   display: grid;
   place-items: center;
-  width: 100%;
-  height: 100%;
+  /* fixed: a percentage collapses inside the shrink-to-fit strip */
+  width: 38px;
+  height: 30px;
   padding: 2px;
   color: var(--text-2);
   font-size: 10px;
