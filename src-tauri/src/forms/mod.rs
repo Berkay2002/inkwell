@@ -12,6 +12,7 @@
 //! A text field's `/V` keeps the raw value; its appearance shows the formatted one (as Acrobat does).
 //! Form data export and import (FDF, XFDF, JSON) is not built (see docs/forms.md).
 
+use crate::annot::{AnnotWalk, Which};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use mupdf::pdf::{FieldFlags, PdfDocument, PdfObject, WidgetType};
@@ -275,19 +276,31 @@ fn full_name(w: &PdfObject) -> String {
     parts.join(".")
 }
 
+/// Every widget of the document, page by page. Only pages that have widgets no earlier page had are
+/// loaded (see [`AnnotWalk`]): a widget that several pages list is returned once, for the first.
 pub(crate) fn scan(doc: &PdfDocument) -> Result<Vec<Entry>> {
     let mut out = Vec::new();
+    let mut walk = AnnotWalk::default();
     for p in 0..doc.page_count()?.max(0) as u32 {
+        let Some(fresh) = walk.page(doc, p, Which::Widgets)? else { continue };
+        let mut pending = fresh.nums;
         let page = doc.load_pdf_page(p as i32)?;
         for (i, w) in page.widgets().enumerate() {
             let Some(kind) = w.r#type().ok().and_then(kind_of) else { continue };
             let a = w.annotation();
             let (obj, xref, r) = (a.object(), a.xref()?, a.rect()?);
+            if !(if xref == 0 { fresh.direct } else { pending.remove(&xref) }) {
+                continue;
+            }
             let field = field_of(&obj);
             let own = get(&obj, "T").is_some() || get(&obj, "Parent").is_none();
             let node = if own { xref } else { field.as_indirect().unwrap_or(xref) };
             out.push(Entry { page: p, xref, node, tab: i as u32, kind, name: full_name(&obj), rect: [r.x0, r.y0, r.x1, r.y1], obj, field });
         }
+    }
+    // Better no list than a form with fields missing: edits and calculations read all of them.
+    if walk.incomplete {
+        return Err(bad("too many annotations to read the form fields"));
     }
     Ok(out)
 }

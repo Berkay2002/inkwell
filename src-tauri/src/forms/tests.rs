@@ -1705,3 +1705,86 @@ fn write_the_form_javascript_sample() {
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("docs").join("study").join("samples").join("_gen").join("formsjs-sample.pdf");
     std::fs::write(out, formsjs_sample()).unwrap();
 }
+
+/// What `scan` was before it skipped pages: every page loaded, every widget listed.
+fn scan_by_loading_every_page(doc: &PdfDocument) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for p in 0..doc.page_count().unwrap() as u32 {
+        let page = doc.load_pdf_page(p as i32).unwrap();
+        for (i, w) in page.widgets().enumerate() {
+            let Some(kind) = w.r#type().ok().and_then(kind_of) else { continue };
+            let a = w.annotation();
+            let (obj, xref, r) = (a.object(), a.xref().unwrap(), a.rect().unwrap());
+            let field = field_of(&obj);
+            let own = get(&obj, "T").is_some() || get(&obj, "Parent").is_none();
+            let node = if own { xref } else { field.as_indirect().unwrap_or(xref) };
+            out.push(Entry { page: p, xref, node, tab: i as u32, kind, name: full_name(&obj), rect: [r.x0, r.y0, r.x1, r.y1], obj, field });
+        }
+    }
+    out
+}
+
+fn key(e: &Entry) -> (u32, i32, i32, u32, FieldKind, String, [f32; 4]) {
+    (e.page, e.xref, e.node, e.tab, e.kind, e.name.clone(), e.rect)
+}
+
+fn scans_agree(eng: &Engine, id: DocId) -> usize {
+    let (want, got) = eng
+        .read_custom(id, |d| Ok((scan_by_loading_every_page(d).iter().map(key).collect::<Vec<_>>(), scan(d)?.iter().map(key).collect::<Vec<_>>())))
+        .unwrap();
+    assert_eq!(got, want);
+    got.len()
+}
+
+#[test]
+fn the_field_scan_equals_loading_every_page_on_normal_forms() {
+    // Fields of every kind added across both pages of a plain file
+    let (eng, id, _) = open("scan-equal");
+    let kinds = [FieldKind::Text, FieldKind::Checkbox, FieldKind::Radio, FieldKind::Combo, FieldKind::List, FieldKind::Button, FieldKind::Signature];
+    for (i, kind) in kinds.into_iter().enumerate() {
+        let y = 100.0 + 40.0 * i as f32;
+        add1(&eng, id, (i % 2) as u32, nf(kind, &format!("f{i}"), [72.0, y, 200.0, y + 20.0]));
+    }
+    assert_eq!(scans_agree(&eng, id), kinds.len());
+    for (name, bytes) in [("shared", shared_widgets_form()), ("need", need_appearances_form())] {
+        let (eng, id, _) = open_bytes(&format!("scan-{name}"), bytes);
+        assert!(scans_agree(&eng, id) >= 2);
+    }
+    if let Some(bytes) = study_sample("form-source.pdf") {
+        let (eng, id, _) = open_bytes("scan-study", bytes);
+        assert!(scans_agree(&eng, id) > 0);
+    }
+}
+
+#[test]
+fn two_thousand_pages_sharing_twenty_thousand_annotations_list_their_fields_fast() {
+    let list: String = (0..20_000).map(|_| "4 0 R ").collect();
+    let widget = |t: &str, y: u32| format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T ({t}) /Rect [72 {y} 200 {}] /F 4 >>", y + 20);
+    // 3 note, 4 square, 5 the shared array, 6 and 7 widgets, 8 their array; pages from 9
+    let rest = vec![
+        "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] >>".to_string(),
+        "<< /Type /Annot /Subtype /Square /Rect [40 40 90 90] >>".to_string(),
+        format!("[3 0 R {list}]"),
+        widget("A", 100),
+        widget("B", 140),
+        "[6 0 R 7 0 R]".to_string(),
+    ];
+    let first = 3 + rest.len();
+    let kids: String = (0..2000).map(|i| format!("{} 0 R ", first + i)).collect();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 7 0 R] >> >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count 2000 >>"),
+    ];
+    objs.extend(rest);
+    objs.extend((0..2000).map(|i| {
+        let annots = if i == 1234 { 8 } else { 5 };
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots {annots} 0 R >>")
+    }));
+    let (eng, id, _) = open_bytes("scan-hostile", pdf_of(&objs));
+    let t = std::time::Instant::now();
+    let form = list_all(&eng, id).unwrap();
+    let took = t.elapsed();
+    eprintln!("form list, 2000 pages x 20 000 shared annotations: {took:?}");
+    assert_eq!(form.fields.iter().map(|f| (f.page, f.name.as_str())).collect::<Vec<_>>(), vec![(1234, "A"), (1234, "B")]);
+    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+}

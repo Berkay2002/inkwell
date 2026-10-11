@@ -117,7 +117,7 @@ export function CommentTools({ doc }: { doc: DocState }) {
   );
 }
 
-const NO_DOC = { items: [] as Annot[], selected: null, editing: null, filter: "all" as const, query: "", error: null };
+const NO_DOC = { items: [] as Annot[], selected: null, editing: null, filter: "all" as const, query: "", error: null, incomplete: false };
 
 export function CommentsPanel({ doc }: { doc: DocState }) {
   const open = useAnnot((s) => s.open);
@@ -176,6 +176,7 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
               ))}
             </section>
           ))}
+          {d.incomplete && <p className="dim">This document has too many annotations to list them all. Some are not shown.</p>}
           {d.error && (
             <p className="cm-error" role="alert">
               {d.error}

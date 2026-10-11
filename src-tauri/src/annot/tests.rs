@@ -246,3 +246,174 @@ fn a_page_edit_after_annotating_keeps_them() {
     eng.apply(id, EditOp::Move { pages: vec![1], to: 0 }).unwrap();
     assert_eq!(kinds(&eng, id), vec![(Kind::Note, 0)]);
 }
+
+// ---- listing without loading every page --------------------------------------------------------
+
+/// Objects numbered from 1 in order (1 is the catalog).
+fn pdf_of(objs: &[String]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offs = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let x = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offs {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+/// Objects 1 and 2 (catalog, page tree) for pages that are objects `first..first + n`, then `rest`.
+fn pages_and(n: usize, rest: Vec<String>, page: impl Fn(usize) -> String) -> Vec<u8> {
+    let first = 3 + rest.len();
+    let kids: String = (0..n).map(|i| format!("{} 0 R ", first + i)).collect();
+    let mut objs = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string(), format!("<< /Type /Pages /Kids [{kids}] /Count {n} >>")];
+    objs.extend(rest);
+    objs.extend((0..n).map(|i| format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {} >>", page(i))));
+    pdf_of(&objs)
+}
+
+fn open_raw(test: &str, bytes: Vec<u8>) -> (Arc<Engine>, DocId) {
+    let p = dir(test).join("a.pdf");
+    std::fs::write(&p, bytes).unwrap();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&p.to_string_lossy()).unwrap().doc;
+    (eng, id)
+}
+
+const NOTE: &str = "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (shared) /T (Ada) >>";
+const SQUARE: &str = "<< /Type /Annot /Subtype /Square /Rect [40 40 90 90] /Contents (box) >>";
+
+#[test]
+fn pages_that_share_an_annots_array_list_each_annotation_once() {
+    // 3 note, 4 square, 5 the array, pages 6..=8
+    let (eng, id) = open_raw("shared", pages_and(3, vec![NOTE.into(), SQUARE.into(), "[3 0 R 4 0 R]".into()], |_| "/Annots 5 0 R".into()));
+    let l = list_status(&eng, id).unwrap();
+    assert_eq!(l.items.iter().map(|a| (a.page, a.xref, a.kind)).collect::<Vec<_>>(), vec![(0, 3, Kind::Note), (0, 4, Kind::Rectangle)]);
+    assert!(!l.incomplete);
+}
+
+#[test]
+fn an_annotation_listed_by_two_pages_goes_to_the_page_its_p_names_or_else_the_first() {
+    // 3 note (/P is page 3 = object 7), 4 square (no /P); pages are objects 5, 6, 7
+    let note = "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (a) /P 7 0 R >>";
+    let pages = ["/Annots [3 0 R 4 0 R]", "/Annots [4 0 R]", "/Annots [3 0 R]"];
+    let (eng, id) = open_raw("owner", pages_and(3, vec![note.into(), SQUARE.into()], |i| pages[i].into()));
+    let got: Vec<_> = list_all(&eng, id).unwrap().iter().map(|a| (a.page, a.xref)).collect();
+    assert_eq!(got, vec![(0, 4), (2, 3)]);
+}
+
+/// What `list` was before it skipped pages: every page loaded, every annotation listed.
+fn list_by_loading_every_page(doc: &PdfDocument) -> Vec<AnnotDto> {
+    let mut all = Vec::new();
+    for p in 0..doc.page_count().unwrap() as u32 {
+        let page = doc.load_pdf_page(p as i32).unwrap();
+        for a in page.annotations() {
+            if a.r#type().is_ok_and(is_comment) {
+                all.push(dto(p, &a).unwrap());
+            }
+        }
+    }
+    let mut out: Vec<AnnotDto> = Vec::new();
+    let mut states: Vec<(i32, String)> = Vec::new();
+    for d in all {
+        match (&d.state, d.parent) {
+            (Some(s), Some(parent)) => states.push((parent, s.clone())),
+            _ => out.push(d),
+        }
+    }
+    for (parent, s) in states {
+        if let Some(d) = out.iter_mut().find(|d| d.xref == parent) {
+            d.resolved = s == "Completed";
+            d.state = Some(s);
+        }
+    }
+    out
+}
+
+fn same_as_loading_every_page(eng: &Engine, id: DocId) -> usize {
+    let want = eng.read_custom(id, |d| Ok(list_by_loading_every_page(d))).unwrap();
+    let got = list_status(eng, id).unwrap();
+    assert_eq!(got.items, want);
+    assert!(!got.incomplete);
+    want.len()
+}
+
+#[test]
+fn a_normal_file_lists_what_loading_every_page_lists() {
+    let (eng, id, _) = open("equal-engine");
+    let mut notes = Vec::new();
+    for (i, (_, what)) in every_type().into_iter().enumerate() {
+        let x = add1(&eng, id, (i % 2) as u32, what);
+        if matches!(what_kind(&eng, id, x), Kind::Note) {
+            notes.push((i % 2, x));
+        }
+    }
+    let (page, parent) = notes[0];
+    reply_one(&eng, id, page as u32, parent, "agreed", "Sam", EditSource::User).unwrap();
+    state_one(&eng, id, page as u32, parent, "Completed", "Sam", EditSource::User).unwrap();
+    assert!(same_as_loading_every_page(&eng, id) >= 13);
+
+    // Links, a popup, a widget, a redaction mark and an inline dictionary are not comments (or not
+    // shared): the same list either way.
+    let objs = vec![
+        "<< /Type /Annot /Subtype /Link /Rect [0 0 20 20] /A << /S /URI /URI (https://example.com) >> >>".to_string(),
+        "<< /Type /Annot /Subtype /Popup /Rect [0 0 20 20] >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (f) /Rect [0 0 20 20] >>".to_string(),
+        "<< /Type /Annot /Subtype /Redact /Rect [0 0 20 20] >>".to_string(),
+        NOTE.to_string(),
+        "<< /Type /Annot /Subtype /Highlight /Rect [10 10 90 30] /QuadPoints [10 30 90 30 10 10 90 10] >>".to_string(),
+    ];
+    let pages = [
+        "/Annots [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R << /Type /Annot /Subtype /Square /Rect [1 1 5 5] /Contents (inline) >>]",
+        "",
+        "/Annots [8 0 R 3 0 R]",
+        "/Annots [<< /Type /Annot /Subtype /Circle /Rect [1 1 5 5] >> 8 0 R]",
+    ];
+    let (eng, id) = open_raw("equal-raw", pages_and(4, objs, |i| pages[i].into()));
+    // The note is on page 0 only; the highlight on pages 2 and 3 is one object (listed once, on page 2:
+    // loading every page lists it twice).
+    let got = list_status(&eng, id).unwrap().items;
+    assert_eq!(got.iter().map(|a| (a.page, a.kind)).collect::<Vec<_>>(), vec![(0, Kind::Note), (0, Kind::Rectangle), (2, Kind::Highlight), (3, Kind::Ellipse)]);
+    let every = eng.read_custom(id, |d| Ok(list_by_loading_every_page(d))).unwrap();
+    assert_eq!(every.len(), got.len() + 1);
+    assert!(got.iter().all(|a| every.contains(a)));
+}
+
+fn what_kind(eng: &Engine, id: DocId, xref: i32) -> Kind {
+    list_all(eng, id).unwrap().into_iter().find(|a| a.xref == xref).map(|a| a.kind).unwrap()
+}
+
+#[test]
+fn two_thousand_pages_sharing_twenty_thousand_annotations_list_fast() {
+    let list: String = (0..20_000).map(|_| "4 0 R ").collect();
+    // 3 note, 4 square, 5 the array of 20 000 references to the square
+    let bytes = pages_and(2000, vec![NOTE.into(), SQUARE.into(), format!("[3 0 R {list}]")], |_| "/Annots 5 0 R".into());
+    let (eng, id) = open_raw("hostile", bytes);
+    let t = std::time::Instant::now();
+    let l = list_status(&eng, id).unwrap();
+    let took = t.elapsed();
+    eprintln!("annot list, 2000 pages x 20 000 shared annotations: {took:?}");
+    assert_eq!(l.items.len(), 2);
+    assert!(!l.incomplete);
+    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+}
+
+#[test]
+fn the_listing_stops_at_its_annotation_budget_and_says_so() {
+    // Two pages with an array of 30 000 distinct annotations each: the second is over the budget.
+    let n = 30_000;
+    let mut rest: Vec<String> = (0..2 * n).map(|_| SQUARE.to_string()).collect();
+    for k in 0..2 {
+        rest.push(format!("[{}]", (0..n).map(|i| format!("{} 0 R ", 3 + k * n + i)).collect::<String>()));
+    }
+    let arrays = 3 + 2 * n;
+    let (eng, id) = open_raw("budget", pages_and(2, rest, |i| format!("/Annots {} 0 R", arrays + i)));
+    let l = list_status(&eng, id).unwrap();
+    assert_eq!(l.items.len(), n);
+    assert!(l.items.iter().all(|a| a.page == 0));
+    assert!(l.incomplete);
+}
