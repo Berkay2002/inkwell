@@ -1,0 +1,880 @@
+// Adapted from pdfcraft (MIT OR Apache-2.0), crates/a11y/src/{lib,content}.rs @ b8ddf71
+//! Accessibility (Acrobat's "Accessibility checker" and "Autotag"): a check that reads the
+//! document and reports, per rule, Passed / Failed / Needs manual check / Skipped with the page,
+//! object and a fix hint; safe automatic fixes, each one edit-core step (undoable, kept by Save);
+//! and a best-effort autotag that builds a basic structure tree from MuPDF's structured text.
+//!
+//! The rules, which are automatic and which manual, and the gaps are in docs/a11y.md.
+
+use crate::engine::edit::{EditSource, EditState};
+use crate::engine::{DocId, Engine, EngineError};
+use mupdf::pdf::{PdfDocument, PdfObject};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub mod app;
+pub mod autotag;
+pub mod content;
+pub mod tree;
+#[cfg(test)]
+mod tests;
+
+use tree::{Tree, name, text, xref_of};
+
+pub type Result<T> = std::result::Result<T, EngineError>;
+
+fn bad(m: impl Into<String>) -> EngineError {
+    EngineError::Invalid(m.into())
+}
+
+/// The rules, in report order. Serialised as their stable ids (`tagged-pdf`, `title`, ...).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum Rule {
+    TaggedPdf,
+    Title,
+    DisplayDocTitle,
+    PrimaryLanguage,
+    FigureAltText,
+    ReadingOrder,
+    TableHeaders,
+    HeadingNesting,
+    ListStructure,
+    TaggedLinks,
+    FieldTooltips,
+    ColorContrast,
+    FontsUnicode,
+    Bookmarks,
+    TabOrder,
+}
+
+impl Rule {
+    pub const ALL: [Rule; 15] = [
+        Rule::TaggedPdf,
+        Rule::Title,
+        Rule::DisplayDocTitle,
+        Rule::PrimaryLanguage,
+        Rule::FigureAltText,
+        Rule::ReadingOrder,
+        Rule::TableHeaders,
+        Rule::HeadingNesting,
+        Rule::ListStructure,
+        Rule::TaggedLinks,
+        Rule::FieldTooltips,
+        Rule::ColorContrast,
+        Rule::FontsUnicode,
+        Rule::Bookmarks,
+        Rule::TabOrder,
+    ];
+
+    /// `(id, name, fix hint, automatic fix)`; the fix is a [`Fix`] tag (`"title"`, ...).
+    fn info(self) -> (&'static str, &'static str, &'static str, Option<&'static str>) {
+        match self {
+            Rule::TaggedPdf => (
+                "tagged-pdf",
+                "Tagged PDF",
+                "Tags give the document a structure assistive technology can follow. Re-export it tagged from the source application, or run Autotag (best effort) and review the result.",
+                Some("autotag"),
+            ),
+            Rule::Title => ("title", "Title", "Give the document a meaningful title in its properties.", Some("title")),
+            Rule::DisplayDocTitle => (
+                "display-doc-title",
+                "Title in title bar",
+                "Viewers should show the document title, not the file name (Initial view: Show document title).",
+                Some("displayDocTitle"),
+            ),
+            Rule::PrimaryLanguage => (
+                "primary-language",
+                "Primary language",
+                "Screen readers choose their voice from the document language. Set it (for example en-US).",
+                Some("language"),
+            ),
+            Rule::FigureAltText => (
+                "figure-alt-text",
+                "Figures alternate text",
+                "Describe each figure in alternate text, or retag purely decorative images as artifacts.",
+                Some("figureAlt"),
+            ),
+            Rule::ReadingOrder => (
+                "reading-order",
+                "Reading order",
+                "Assistive technology reads in tag order. Where it differs from the order the page is drawn in, check that the tags read naturally and reorder them if not; content outside the tags is not read at all.",
+                None,
+            ),
+            Rule::TableHeaders => ("table-headers", "Table headers", "Mark the header cells of each table as TH.", None),
+            Rule::HeadingNesting => (
+                "heading-nesting",
+                "Heading nesting",
+                "Heading levels should not skip (an H1 followed by an H3). Retag the headings.",
+                None,
+            ),
+            Rule::ListStructure => (
+                "list-structure",
+                "List structure",
+                "Lists are L > LI > (Lbl, LBody). Fix the list's tags.",
+                None,
+            ),
+            Rule::TaggedLinks => (
+                "tagged-links",
+                "Tagged links",
+                "Each link annotation must be in the tag tree inside a Link element to be announced.",
+                None,
+            ),
+            Rule::FieldTooltips => (
+                "field-tooltips",
+                "Form field tooltips",
+                "Each form field needs a tooltip (TU) that says what to enter.",
+                Some("fieldTooltips"),
+            ),
+            Rule::ColorContrast => (
+                "color-contrast",
+                "Color contrast",
+                "Check by eye or with a contrast tool that text contrasts enough with its background (WCAG 4.5:1 for body text).",
+                None,
+            ),
+            Rule::FontsUnicode => (
+                "fonts-unicode",
+                "Character encoding",
+                "Fonts must map their characters to Unicode (ToUnicode) so text can be read aloud and copied. Recreate the PDF with the fonts embedded properly, or run OCR.",
+                None,
+            ),
+            Rule::Bookmarks => ("bookmarks", "Bookmarks", "Documents over 20 pages need bookmarks for their main sections.", None),
+            Rule::TabOrder => (
+                "tab-order",
+                "Tab order",
+                "Pages with links, comments or fields should tab in structure order (Tabs /S).",
+                Some("tabOrder"),
+            ),
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        self.info().0
+    }
+
+    pub fn name(self) -> &'static str {
+        self.info().1
+    }
+
+    pub fn hint(self) -> &'static str {
+        self.info().2
+    }
+
+    pub fn fix(self) -> Option<&'static str> {
+        self.info().3
+    }
+
+    /// Only a person can judge it.
+    pub fn manual(self) -> bool {
+        self == Rule::ColorContrast
+    }
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Status {
+    Passed,
+    Failed,
+    /// Needs manual check.
+    Manual,
+    /// Does not apply (for example a structure rule on an untagged document).
+    Skipped,
+}
+
+/// One problem.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Finding {
+    /// 0-based page.
+    pub page: Option<u32>,
+    /// What it is about, e.g. `Figure`, `Link annotation`, `Font Helvetica`, `Field "name"`.
+    pub object: Option<String>,
+    /// Object number, when the object is an indirect PDF object (`figureAlt` takes it).
+    pub xref: Option<i32>,
+    pub message: String,
+}
+
+impl Finding {
+    fn doc(message: impl Into<String>) -> Finding {
+        Finding { page: None, object: None, xref: None, message: message.into() }
+    }
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleResult {
+    pub rule: Rule,
+    pub name: &'static str,
+    pub status: Status,
+    pub hint: &'static str,
+    /// The [`Fix`] that addresses it automatically, if any.
+    pub fix: Option<&'static str>,
+    pub findings: Vec<Finding>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Report {
+    pub pages: u32,
+    pub tagged: bool,
+    pub results: Vec<RuleResult>,
+}
+
+impl Report {
+    pub fn result(&self, rule: Rule) -> &RuleResult {
+        self.results.iter().find(|r| r.rule == rule).expect("every rule is reported")
+    }
+
+    pub fn status(&self, rule: Rule) -> Status {
+        self.result(rule).status
+    }
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Progress {
+    /// Pages scanned so far.
+    pub done: u32,
+    pub pages: u32,
+}
+
+/// Findings beyond this many per rule are summarised ("... and n more").
+const MAX_FINDINGS: usize = 200;
+
+// ---- reading helpers -----------------------------------------------------------------------------
+
+fn is_true(o: Option<PdfObject>) -> Result<bool> {
+    Ok(match o {
+        Some(v) if v.is_bool()? => v.as_bool()?,
+        _ => false,
+    })
+}
+
+fn dict(o: &PdfObject, key: &str) -> Result<Option<PdfObject>> {
+    Ok(o.get_dict(key)?.filter(|v| v.is_dict().unwrap_or(false)))
+}
+
+/// The page's annotations (Popups left out) with their object numbers.
+pub(crate) fn annots(page: &PdfObject) -> Result<Vec<(i32, PdfObject)>> {
+    let mut out = Vec::new();
+    let Some(a) = page.get_dict("Annots")?.filter(|a| a.is_array().unwrap_or(false)) else { return Ok(out) };
+    for x in a.array_iter()? {
+        let x = x?;
+        if x.is_dict()? && name(&x, "Subtype")?.as_deref() != Some("Popup") {
+            out.push((xref_of(&x)?, x));
+        }
+    }
+    Ok(out)
+}
+
+/// The decoded content of a page (its streams joined).
+pub(crate) fn page_content(page: &PdfObject) -> Result<Vec<u8>> {
+    let Some(c) = page.get_dict("Contents")? else { return Ok(Vec::new()) };
+    if c.is_array()? {
+        let mut out = Vec::new();
+        for s in c.array_iter()? {
+            let s = s?;
+            if s.is_stream()? {
+                out.extend(s.read_stream()?);
+                out.push(b'\n');
+            }
+        }
+        Ok(out)
+    } else if c.is_stream()? {
+        Ok(c.read_stream()?)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// The form field a widget belongs to: the widget itself when it has a name, else its parent.
+fn field_of(widget: &PdfObject) -> Result<Option<PdfObject>> {
+    if widget.get_dict("T")?.is_some() {
+        return Ok(Some(widget.clone()));
+    }
+    Ok(widget.get_dict("Parent")?.filter(|p| p.is_dict().unwrap_or(false)))
+}
+
+fn full_name(field: &PdfObject) -> Result<String> {
+    let mut parts = Vec::new();
+    let mut node = Some(field.clone());
+    for _ in 0..64 {
+        let Some(n) = node else { break };
+        if let Some(t) = text(&n, "T")? {
+            parts.push(t);
+        }
+        node = n.get_dict("Parent")?.filter(|p| p.is_dict().unwrap_or(false));
+    }
+    parts.reverse();
+    Ok(parts.join("."))
+}
+
+/// What one page's content holds.
+#[derive(Default)]
+struct PageScan {
+    /// MCIDs of the page's own content in drawing order (first occurrence).
+    mcids: Vec<i32>,
+    /// Fonts used (here or in form XObjects): object number (0: direct) and the font.
+    fonts: Vec<(i32, PdfObject)>,
+}
+
+const MAX_FORM_DEPTH: usize = 12;
+
+fn res_lookup(res: Option<&PdfObject>, cat: &str, key: &[u8]) -> Result<Option<PdfObject>> {
+    let Some(r) = res else { return Ok(None) };
+    let Some(d) = dict(r, cat)? else { return Ok(None) };
+    Ok(d.get_dict(String::from_utf8_lossy(key).into_owned())?)
+}
+
+fn scan_stream(data: &[u8], res: Option<&PdfObject>, top: bool, depth: usize, seen: &mut HashSet<i32>, out: &mut PageScan) -> Result<()> {
+    let mut mcid_seen: HashSet<i32> = out.mcids.iter().copied().collect();
+    for op in content::parse(data) {
+        match op.name.as_slice() {
+            b"BDC" if top => {
+                let mcid = match op.operands.get(1) {
+                    Some(d @ content::Operand::Dict(_)) => d.get(b"MCID").map(|m| m.num() as i32),
+                    Some(content::Operand::Name(n)) => match res_lookup(res, "Properties", n)? {
+                        Some(p) if p.is_dict()? => p.get_dict("MCID")?.map(|m| m.as_int()).transpose()?,
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(m) = mcid.filter(|m| mcid_seen.insert(*m)) {
+                    out.mcids.push(m);
+                }
+            }
+            b"Tf" => {
+                if let Some(f) = op.operands.first().and_then(|o| o.name()).map(|n| res_lookup(res, "Font", n)).transpose()?.flatten() {
+                    let x = xref_of(&f)?;
+                    if x == 0 || !out.fonts.iter().any(|(n, _)| *n == x) {
+                        out.fonts.push((x, f));
+                    }
+                }
+            }
+            b"Do" if depth < MAX_FORM_DEPTH => {
+                let Some(x) = op.operands.first().and_then(|o| o.name()).map(|n| res_lookup(res, "XObject", n)).transpose()?.flatten() else { continue };
+                if !x.is_stream()? || name(&x, "Subtype")?.as_deref() != Some("Form") {
+                    continue;
+                }
+                let n = xref_of(&x)?;
+                if n != 0 && !seen.insert(n) {
+                    continue;
+                }
+                let inner = dict(&x, "Resources")?;
+                let data = x.read_stream().unwrap_or_default();
+                scan_stream(&data, inner.as_ref().or(res), false, depth + 1, seen, out)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn scan_page(page: &PdfObject) -> Result<PageScan> {
+    let mut out = PageScan::default();
+    let res = page.get_dict_inheritable("Resources")?.filter(|r| r.is_dict().unwrap_or(false));
+    let data = page_content(page)?;
+    scan_stream(&data, res.as_ref(), true, 0, &mut HashSet::new(), &mut out)?;
+    Ok(out)
+}
+
+/// Whether text in this font can be mapped to Unicode: a ToUnicode CMap, a standard encoding,
+/// or a predefined CJK collection.
+fn maps_to_unicode(f: &PdfObject) -> Result<bool> {
+    if f.get_dict("ToUnicode")?.is_some() {
+        return Ok(true);
+    }
+    let enc = f.get_dict("Encoding")?;
+    Ok(match name(f, "Subtype")?.as_deref() {
+        Some("Type0") => {
+            let identity = match &enc {
+                Some(e) if e.is_name()? => e.as_name()?.starts_with(b"Identity"),
+                _ => false,
+            };
+            let ordering = f
+                .get_dict("DescendantFonts")?
+                .filter(|d| d.is_array().unwrap_or(false))
+                .and_then(|d| d.get_array(0).ok().flatten())
+                .and_then(|d| d.get_dict("CIDSystemInfo").ok().flatten())
+                .and_then(|c| c.get_dict("Ordering").ok().flatten())
+                .and_then(|o| o.as_string().ok());
+            let known = matches!(ordering.as_deref(), Some("Japan1" | "GB1" | "CNS1" | "Korea1" | "KR"));
+            !identity && known
+        }
+        Some("Type3") => enc.is_some(),
+        _ => match &enc {
+            Some(e) if e.is_name()? || e.is_dict()? => true,
+            _ => {
+                // The font's built-in encoding: standard unless the font is symbolic.
+                let flags = f
+                    .get_dict("FontDescriptor")?
+                    .and_then(|d| d.get_dict("Flags").ok().flatten())
+                    .and_then(|v| v.as_int().ok())
+                    .unwrap_or(32);
+                let base = name(f, "BaseFont")?.unwrap_or_default();
+                flags & 4 == 0 || matches!(base.as_str(), "Symbol" | "ZapfDingbats")
+            }
+        },
+    })
+}
+
+// ---- the check -----------------------------------------------------------------------------------
+
+/// Runs every rule. `progress` is called per page; `cancel` is polled between pages.
+pub fn check(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Report> {
+    let n = doc.page_count()?.max(0) as u32;
+    let index = tree::page_index(doc)?;
+    let tree = Tree::read(doc, &index)?;
+    let cat = doc.catalog()?;
+
+    let mut scans = Vec::with_capacity(n as usize);
+    let mut pages = Vec::with_capacity(n as usize);
+    for p in 0..n {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(bad("cancelled"));
+        }
+        let obj = doc.find_page(p as i32)?;
+        scans.push(scan_page(&obj)?);
+        pages.push(obj);
+        progress(Progress { done: p + 1, pages: n });
+    }
+
+    let mut results = Vec::with_capacity(Rule::ALL.len());
+    for rule in Rule::ALL {
+        let (status, mut findings) = if rule.manual() {
+            (Status::Manual, Vec::new())
+        } else {
+            match run_rule(rule, doc, &cat, &tree, &pages, &scans)? {
+                None => (Status::Skipped, Vec::new()),
+                Some(f) => (if f.is_empty() { Status::Passed } else { Status::Failed }, f),
+            }
+        };
+        if findings.len() > MAX_FINDINGS {
+            let more = findings.len() - MAX_FINDINGS;
+            findings.truncate(MAX_FINDINGS);
+            findings.push(Finding::doc(format!("... and {more} more")));
+        }
+        results.push(RuleResult { rule, name: rule.name(), status, hint: rule.hint(), fix: rule.fix(), findings });
+    }
+    Ok(Report { pages: n, tagged: tree.exists, results })
+}
+
+fn elem_finding(t: &Tree, i: usize, what: &str) -> Finding {
+    let e = &t.elems[i];
+    let at = e.page.map(|p| format!(" on page {}", p + 1)).unwrap_or_default();
+    Finding {
+        page: e.page,
+        object: Some(e.ty.clone()),
+        xref: (e.xref != 0).then_some(e.xref),
+        message: format!("{} element{at}: {what}", e.ty),
+    }
+}
+
+/// `None`: the rule does not apply (Skipped).
+fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[PdfObject], scans: &[PageScan]) -> Result<Option<Vec<Finding>>> {
+    let mut out = Vec::new();
+    let structure = matches!(rule, Rule::FigureAltText | Rule::ReadingOrder | Rule::TableHeaders | Rule::HeadingNesting | Rule::ListStructure);
+    if structure && !t.exists {
+        return Ok(None);
+    }
+    let order = t.preorder();
+    match rule {
+        Rule::TaggedPdf => {
+            if !t.exists {
+                out.push(Finding::doc("The document has no tags (structure tree)"));
+            }
+            if !is_true(dict(cat, "MarkInfo")?.map(|m| m.get_dict("Marked")).transpose()?.flatten())? {
+                out.push(Finding::doc("The document isn't marked as tagged (MarkInfo /Marked true)"));
+            }
+        }
+        Rule::Title => {
+            let info = doc.trailer()?.get_dict("Info")?.filter(|i| i.is_dict().unwrap_or(false));
+            if info.map(|i| text(&i, "Title")).transpose()?.flatten().is_none() {
+                out.push(Finding::doc("The document has no title"));
+            }
+        }
+        Rule::DisplayDocTitle => {
+            if !is_true(dict(cat, "ViewerPreferences")?.map(|v| v.get_dict("DisplayDocTitle")).transpose()?.flatten())? {
+                out.push(Finding::doc("Viewers show the file name, not the document title (DisplayDocTitle is not set)"));
+            }
+        }
+        Rule::PrimaryLanguage => {
+            if text(cat, "Lang")?.is_none() {
+                out.push(Finding::doc("No document language is set"));
+            }
+        }
+        Rule::FigureAltText => {
+            for &i in &order {
+                if t.is(i, "Figure") && !t.elems[i].alt && !t.ancestors(i).any(|a| t.elems[a].alt) {
+                    out.push(elem_finding(t, i, "no alternate text"));
+                }
+            }
+        }
+        Rule::ReadingOrder => {
+            let mut tagged: HashMap<u32, Vec<i32>> = HashMap::new();
+            let mut seen = HashSet::new();
+            for &(p, m) in &t.order {
+                if seen.insert((p, m)) {
+                    tagged.entry(p).or_default().push(m);
+                }
+            }
+            for (p, scan) in scans.iter().enumerate() {
+                let p = p as u32;
+                let tags = tagged.remove(&p).unwrap_or_default();
+                let in_tags: HashSet<i32> = tags.iter().copied().collect();
+                let drawn: HashSet<i32> = scan.mcids.iter().copied().collect();
+                let orphans = scan.mcids.iter().filter(|m| !in_tags.contains(m)).count();
+                if orphans > 0 {
+                    out.push(Finding {
+                        page: Some(p),
+                        object: Some("Marked content".into()),
+                        xref: None,
+                        message: format!("Page {}: {orphans} marked-content item{} not in the tag tree (never read)", p + 1, if orphans == 1 { " is" } else { "s are" }),
+                    });
+                }
+                let a: Vec<i32> = tags.iter().copied().filter(|m| drawn.contains(m)).collect();
+                let b: Vec<i32> = scan.mcids.iter().copied().filter(|m| in_tags.contains(m)).collect();
+                if let Some(k) = (0..a.len()).find(|&k| a[k] != b[k]) {
+                    out.push(Finding {
+                        page: Some(p),
+                        object: Some("Marked content".into()),
+                        xref: None,
+                        message: format!(
+                            "Page {}: the tags read in a different order than the page is drawn (tag order reaches MCID {} where content order has MCID {})",
+                            p + 1,
+                            a[k],
+                            b[k]
+                        ),
+                    });
+                }
+            }
+        }
+        Rule::TableHeaders => {
+            for &i in &order {
+                if !t.is(i, "Table") {
+                    continue;
+                }
+                let has_th = t.table_rows(i).iter().any(|&r| t.elems[r].children.iter().any(|&c| t.is(c, "TH")));
+                if !has_th {
+                    out.push(elem_finding(t, i, "no header cells (TH)"));
+                }
+            }
+        }
+        Rule::HeadingNesting => {
+            let mut prev = 0u8;
+            for &i in &order {
+                let level = match t.elems[i].ty.as_bytes() {
+                    [b'H', d @ b'1'..=b'6'] => d - b'0',
+                    _ => continue,
+                };
+                if level > prev + 1 {
+                    let what = if prev == 0 { format!("the first heading is an H{level}") } else { format!("H{level} follows an H{prev}") };
+                    out.push(elem_finding(t, i, &format!("{what}; heading levels should not skip")));
+                }
+                prev = level;
+            }
+        }
+        Rule::ListStructure => {
+            for &i in &order {
+                match t.elems[i].ty.as_str() {
+                    "LI" if !t.parent_is(i, &["L"]) => out.push(elem_finding(t, i, "not in an L (list)")),
+                    "Lbl" | "LBody" if !t.parent_is(i, &["LI", "TOCI", "BibEntry", "Note", "FENote"]) => {
+                        out.push(elem_finding(t, i, "not in an LI (list item)"))
+                    }
+                    "L" => {
+                        let stray = t.elems[i].children.iter().filter(|&&c| !matches!(t.elems[c].ty.as_str(), "LI" | "L" | "Caption" | "NonStruct" | "Artifact")).count();
+                        if stray > 0 {
+                            out.push(elem_finding(t, i, &format!("{stray} child element{} that are not LI", if stray == 1 { "" } else { "s" })));
+                        }
+                        if t.elems[i].children.is_empty() {
+                            out.push(elem_finding(t, i, "an empty list"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Rule::TaggedLinks => {
+            for (p, page) in pages.iter().enumerate() {
+                for (x, a) in annots(page)? {
+                    if name(&a, "Subtype")?.as_deref() != Some("Link") {
+                        continue;
+                    }
+                    let owner = t.annot_owner.get(&x).copied();
+                    let why = if !t.exists {
+                        Some("the document isn't tagged".to_string())
+                    } else if owner.is_none() {
+                        Some("not in the tag tree".to_string())
+                    } else if a.get_dict("StructParent")?.is_none() {
+                        Some("no /StructParent entry".to_string())
+                    } else {
+                        owner.filter(|o| !t.is(*o, "Link")).map(|o| format!("tagged as {}, not Link", t.elems[o].ty))
+                    };
+                    if let Some(why) = why {
+                        out.push(Finding {
+                            page: Some(p as u32),
+                            object: Some("Link annotation".into()),
+                            xref: (x != 0).then_some(x),
+                            message: format!("Link on page {}: {why}", p + 1),
+                        });
+                    }
+                }
+            }
+        }
+        Rule::FieldTooltips => {
+            let mut seen = HashSet::new();
+            for (p, page) in pages.iter().enumerate() {
+                for (_, a) in annots(page)? {
+                    if name(&a, "Subtype")?.as_deref() != Some("Widget") {
+                        continue;
+                    }
+                    let Some(field) = field_of(&a)? else { continue };
+                    let x = xref_of(&field)?;
+                    if x != 0 && !seen.insert(x) {
+                        continue;
+                    }
+                    if text(&field, "TU")?.is_none() {
+                        let n = full_name(&field)?;
+                        out.push(Finding {
+                            page: Some(p as u32),
+                            object: Some(format!("Field \"{n}\"")),
+                            xref: (x != 0).then_some(x),
+                            message: format!("Field \"{n}\" on page {} has no tooltip (TU)", p + 1),
+                        });
+                    }
+                }
+            }
+        }
+        Rule::FontsUnicode => {
+            let mut seen = HashSet::new();
+            for (p, scan) in scans.iter().enumerate() {
+                for (x, f) in &scan.fonts {
+                    if (*x != 0 && !seen.insert(*x)) || maps_to_unicode(f)? {
+                        continue;
+                    }
+                    let base = name(f, "BaseFont")?.unwrap_or_else(|| "(unnamed)".into());
+                    out.push(Finding {
+                        page: Some(p as u32),
+                        object: Some(format!("Font {base}")),
+                        xref: (*x != 0).then_some(*x),
+                        message: format!("Font {base} on page {} doesn't map its characters to Unicode", p + 1),
+                    });
+                }
+            }
+        }
+        Rule::Bookmarks => {
+            let has = dict(cat, "Outlines")?.map(|o| o.get_dict("First")).transpose()?.flatten().is_some();
+            if pages.len() > 20 && !has {
+                out.push(Finding::doc(format!("{} pages and no bookmarks", pages.len())));
+            }
+        }
+        Rule::TabOrder => {
+            for (p, page) in pages.iter().enumerate() {
+                if !annots(page)?.is_empty() && name(page, "Tabs")?.as_deref() != Some("S") {
+                    out.push(Finding {
+                        page: Some(p as u32),
+                        object: Some("Page".into()),
+                        xref: xref_of(page).ok().filter(|x| *x != 0),
+                        message: format!("Page {} has links, comments or fields but doesn't tab in structure order", p + 1),
+                    });
+                }
+            }
+        }
+        Rule::ColorContrast => {}
+    }
+    Ok(Some(out))
+}
+
+// ---- fixes ---------------------------------------------------------------------------------------
+
+/// A safe automatic fix. Each is one undo step. Serialised as `{"fix": "language", "lang": "en-US"}`.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "fix", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum Fix {
+    /// Sets the document title; without one, the file name (without extension).
+    Title { title: Option<String> },
+    /// Sets the document language (a BCP 47 tag such as `en-US`).
+    Language { lang: String },
+    /// Viewers show the title in the title bar (ViewerPreferences /DisplayDocTitle).
+    DisplayDocTitle,
+    /// Every page with annotations tabs in structure order (/Tabs /S).
+    TabOrder,
+    /// Every field without a tooltip gets one made from its name ("first_name" -> "First name").
+    FieldTooltips,
+    /// Alternate text for the figure element with this object number (from the report).
+    FigureAlt { xref: i32, alt: String },
+    /// Best-effort tags for an untagged document (see `autotag`).
+    Autotag,
+}
+
+impl Fix {
+    pub fn label(&self) -> String {
+        match self {
+            Fix::Title { .. } => "Set document title".into(),
+            Fix::Language { lang } => format!("Set document language to {}", lang.trim()),
+            Fix::DisplayDocTitle => "Show document title in title bar".into(),
+            Fix::TabOrder => "Set tab order to structure order".into(),
+            Fix::FieldTooltips => "Add form field tooltips".into(),
+            Fix::FigureAlt { .. } => "Set figure alternate text".into(),
+            Fix::Autotag => "Autotag (best effort)".into(),
+        }
+    }
+}
+
+/// A PDF text string: literal when it is plain ASCII, else UTF-16BE with a byte order mark.
+pub(crate) fn text_obj(doc: &PdfDocument, s: &str) -> Result<PdfObject> {
+    let s: String = s.chars().filter(|c| !c.is_control()).collect();
+    if s.is_ascii() {
+        return Ok(PdfObject::new_string(&s)?);
+    }
+    let hex: String = s.encode_utf16().map(|u| format!("{u:04X}")).collect();
+    Ok(doc.new_object_from_str(&format!("<FEFF{hex}>"))?)
+}
+
+/// "first_name" -> "First name", "dateOfBirth" -> "Date of birth".
+pub fn tooltip_from_name(n: &str) -> String {
+    let mut words = String::new();
+    let mut prev_lower = false;
+    for c in n.chars() {
+        if matches!(c, '_' | '-' | '.' | ' ') {
+            words.push(' ');
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower {
+            words.push(' ');
+        }
+        prev_lower = c.is_lowercase() || c.is_ascii_digit();
+        words.extend(c.to_lowercase());
+    }
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut cs = words.chars();
+    cs.next().map(|f| f.to_uppercase().chain(cs).collect()).unwrap_or_default()
+}
+
+fn valid_lang(l: &str) -> bool {
+    let mut parts = l.split('-');
+    let first = parts.next().unwrap_or("");
+    (2..=8).contains(&first.len())
+        && first.chars().all(|c| c.is_ascii_alphabetic())
+        && parts.all(|p| (1..=8).contains(&p.len()) && p.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// Applies `fix` to `doc`; returns the pages it touched. `file_stem` names an untitled document.
+/// Fails, changing nothing that matters, when there is nothing to fix.
+pub fn apply_fix(doc: &mut PdfDocument, fix: &Fix, file_stem: &str) -> Result<Vec<u32>> {
+    let mut cat = doc.catalog()?;
+    match fix {
+        Fix::Title { title } => {
+            let t = title.as_deref().map(str::trim).filter(|t| !t.is_empty()).unwrap_or(file_stem).trim().to_owned();
+            if t.is_empty() {
+                return Err(bad("give the document title"));
+            }
+            let mut info = match doc.trailer()?.get_dict("Info")?.filter(|i| i.is_dict().unwrap_or(false)) {
+                Some(i) => i,
+                None => {
+                    // Adding the object starts the incremental section; only then is the trailer
+                    // the one the update writes.
+                    let i = doc.add_object(&doc.new_dict()?)?;
+                    doc.trailer()?.dict_put("Info", i.clone())?;
+                    i
+                }
+            };
+            info.dict_put("Title", text_obj(doc, &t)?)?;
+            Ok(Vec::new())
+        }
+        Fix::Language { lang } => {
+            let l = lang.trim();
+            if !valid_lang(l) {
+                return Err(bad(format!("\"{l}\" is not a language tag (for example en-US)")));
+            }
+            cat.dict_put("Lang", PdfObject::new_string(l)?)?;
+            Ok(Vec::new())
+        }
+        Fix::DisplayDocTitle => {
+            match dict(&cat, "ViewerPreferences")? {
+                Some(mut v) => v.dict_put("DisplayDocTitle", PdfObject::new_bool(true))?,
+                None => cat.dict_put("ViewerPreferences", doc.new_object_from_str("<</DisplayDocTitle true>>")?)?,
+            }
+            Ok(Vec::new())
+        }
+        Fix::TabOrder => {
+            let mut touched = Vec::new();
+            for p in 0..doc.page_count()? {
+                let mut page = doc.find_page(p)?;
+                if !annots(&page)?.is_empty() && name(&page, "Tabs")?.as_deref() != Some("S") {
+                    page.dict_put("Tabs", PdfObject::new_name("S")?)?;
+                    touched.push(p as u32);
+                }
+            }
+            if touched.is_empty() {
+                return Err(bad("every page already tabs in structure order"));
+            }
+            Ok(touched)
+        }
+        Fix::FieldTooltips => {
+            let mut touched = Vec::new();
+            let mut seen = HashSet::new();
+            for p in 0..doc.page_count()? {
+                let page = doc.find_page(p)?;
+                for (_, a) in annots(&page)? {
+                    if name(&a, "Subtype")?.as_deref() != Some("Widget") {
+                        continue;
+                    }
+                    let Some(mut field) = field_of(&a)? else { continue };
+                    let x = xref_of(&field)?;
+                    if (x != 0 && !seen.insert(x)) || text(&field, "TU")?.is_some() {
+                        continue;
+                    }
+                    let n = text(&field, "T")?.unwrap_or_default();
+                    let tip = tooltip_from_name(&n);
+                    if tip.is_empty() {
+                        continue;
+                    }
+                    field.dict_put("TU", text_obj(doc, &tip)?)?;
+                    if touched.last() != Some(&(p as u32)) {
+                        touched.push(p as u32);
+                    }
+                }
+            }
+            if touched.is_empty() {
+                return Err(bad("no field is missing a tooltip"));
+            }
+            Ok(touched)
+        }
+        Fix::FigureAlt { xref, alt } => {
+            let alt = alt.trim();
+            if alt.is_empty() {
+                return Err(bad("give the alternate text"));
+            }
+            let index = tree::page_index(doc)?;
+            let t = Tree::read(doc, &index)?;
+            let Some(e) = t.elems.iter().find(|e| e.xref == *xref && *xref != 0) else {
+                return Err(bad(format!("object {xref} is not a structure element")));
+            };
+            if e.ty != "Figure" {
+                return Err(bad(format!("object {xref} is a {} element, not a Figure", e.ty)));
+            }
+            let page = e.page;
+            let mut obj = doc.new_indirect(*xref, 0)?;
+            obj.dict_put("Alt", text_obj(doc, alt)?)?;
+            Ok(page.into_iter().collect())
+        }
+        Fix::Autotag => autotag::run(doc),
+    }
+}
+
+// ---- engine entry points -------------------------------------------------------------------------
+
+/// Checks the document as it is now (unsaved edits included), on the edit lane.
+pub fn check_doc(eng: &Engine, doc: DocId, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Report> {
+    eng.read_custom(doc, |d| check(d, progress, cancel))
+}
+
+/// Applies one fix as one undo step.
+pub fn fix_doc(eng: &Engine, doc: DocId, fix: &Fix, source: EditSource) -> Result<EditState> {
+    let path = eng.doc_entry(doc)?.path();
+    let stem = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    eng.apply_custom(doc, fix.label(), source, false, |d| apply_fix(d, fix, &stem))
+}
