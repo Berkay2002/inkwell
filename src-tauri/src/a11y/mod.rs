@@ -17,10 +17,19 @@ pub mod app;
 pub mod autotag;
 pub mod content;
 pub mod locate;
+pub mod matterhorn;
+pub mod order;
 pub mod report;
+pub mod tags;
 pub mod tree;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_structure;
+#[cfg(test)]
+mod tests_matterhorn;
+#[cfg(test)]
+mod tests_hostile;
 
 use locate::Locator;
 use tree::{Tree, name, text, xref_of};
@@ -29,6 +38,15 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 
 fn bad(m: impl Into<String>) -> EngineError {
     EngineError::Invalid(m.into())
+}
+
+/// Where the tag tree and the ParentTree disagree (see `tags::problems`).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Problem {
+    pub page: Option<u32>,
+    pub xref: Option<i32>,
+    pub message: String,
 }
 
 /// The rules, in report order. Serialised as their stable ids (`tagged-pdf`, `title`, ...).
@@ -50,10 +68,22 @@ pub enum Rule {
     FontsUnicode,
     Bookmarks,
     TabOrder,
+    ContentMarking,
+    RoleMap,
+    LanguageValues,
+    Metadata,
+    AccessibilityPermission,
+    TableStructure,
+    AnnotationsTagged,
+    FontsEmbedded,
+    Xfa,
+    OptionalContent,
+    ParentTree,
+    TableScope,
 }
 
 impl Rule {
-    pub const ALL: [Rule; 15] = [
+    pub const ALL: [Rule; 27] = [
         Rule::TaggedPdf,
         Rule::Title,
         Rule::DisplayDocTitle,
@@ -69,6 +99,18 @@ impl Rule {
         Rule::FontsUnicode,
         Rule::Bookmarks,
         Rule::TabOrder,
+        Rule::ContentMarking,
+        Rule::RoleMap,
+        Rule::LanguageValues,
+        Rule::Metadata,
+        Rule::AccessibilityPermission,
+        Rule::TableStructure,
+        Rule::AnnotationsTagged,
+        Rule::FontsEmbedded,
+        Rule::Xfa,
+        Rule::OptionalContent,
+        Rule::ParentTree,
+        Rule::TableScope,
     ];
 
     /// `(id, name, fix hint, automatic fix)`; the fix is a [`Fix`] tag (`"title"`, ...).
@@ -149,6 +191,63 @@ impl Rule {
                 "Pages with links, comments or fields should tab in structure order (Tabs /S).",
                 Some("tabOrder"),
             ),
+            Rule::ContentMarking => (
+                "content-marking",
+                "Content tagged or artifact",
+                "Every piece of text, image and graphic must be in the tag tree or marked as an artifact, and artifacts and tags must not be nested in each other. Tag the content, or mark it as artifact in the reading order.",
+                None,
+            ),
+            Rule::RoleMap => (
+                "role-map",
+                "Role map",
+                "Custom tag types must map to a standard type, in a map that doesn't loop, and standard types may not be remapped. Fix the role map or retag the elements.",
+                None,
+            ),
+            Rule::LanguageValues => ("language-values", "Language values", "Every /Lang, on the document and on tags, must be a valid language tag such as en-US.", None),
+            Rule::Metadata => (
+                "metadata",
+                "XMP metadata",
+                "A PDF/UA file carries XMP metadata with a title (dc:title) and the PDF/UA identification (pdfuaid:part 1).",
+                Some("metadata"),
+            ),
+            Rule::AccessibilityPermission => (
+                "accessibility-permission",
+                "Accessibility permission",
+                "Encryption must allow content extraction for accessibility (permission bit 10). Save the document without that restriction.",
+                None,
+            ),
+            Rule::TableStructure => (
+                "table-structure",
+                "Table structure",
+                "Tables are Table > TR > TH/TD (with optional THead, TBody and TFoot); rows must line up, and /Headers must name header cells that exist.",
+                None,
+            ),
+            Rule::AnnotationsTagged => (
+                "annotations-tagged",
+                "Annotations in the tag tree",
+                "Form fields belong in a Form element and other annotations in an Annot element, each with a description (Contents, or alternate text on the tag).",
+                None,
+            ),
+            Rule::FontsEmbedded => ("fonts-embedded", "Embedded fonts", "Every font must be embedded in the file. Re-create the PDF with its fonts embedded.", None),
+            Rule::Xfa => ("xfa", "XFA forms", "Forms described by XFA can't be tagged. Convert the form to an AcroForm.", None),
+            Rule::OptionalContent => (
+                "optional-content",
+                "Optional content",
+                "Each optional content configuration needs a /Name and must not use /AS (automatic state).",
+                None,
+            ),
+            Rule::ParentTree => (
+                "parent-tree",
+                "Tag tree links",
+                "Marked content and annotations map back to their tags through the ParentTree, and each tag's /P is its parent. Repair the links.",
+                Some("parentTree"),
+            ),
+            Rule::TableScope => (
+                "table-scope",
+                "Table header scope",
+                "Give each header cell (TH) a Scope (Row, Column or Both), or have the data cells name their headers with /Headers.",
+                None,
+            ),
         }
     }
 
@@ -160,10 +259,11 @@ impl Rule {
     pub fn group(self) -> &'static str {
         match self {
             Rule::TaggedPdf | Rule::Title | Rule::DisplayDocTitle | Rule::PrimaryLanguage | Rule::ReadingOrder | Rule::Bookmarks | Rule::ColorContrast => "Document",
-            Rule::TaggedLinks | Rule::TabOrder | Rule::FontsUnicode => "Page content",
-            Rule::FieldTooltips => "Forms",
+            Rule::TaggedLinks | Rule::TabOrder | Rule::FontsUnicode | Rule::ContentMarking | Rule::AnnotationsTagged | Rule::FontsEmbedded | Rule::OptionalContent => "Page content",
+            Rule::RoleMap | Rule::LanguageValues | Rule::Metadata | Rule::AccessibilityPermission | Rule::ParentTree => "Document",
+            Rule::FieldTooltips | Rule::Xfa => "Forms",
             Rule::FigureAltText => "Alternate text",
-            Rule::TableHeaders => "Tables",
+            Rule::TableHeaders | Rule::TableStructure | Rule::TableScope => "Tables",
             Rule::ListStructure => "Lists",
             Rule::HeadingNesting => "Headings",
         }
@@ -239,6 +339,10 @@ pub struct RuleResult {
 pub struct Report {
     pub pages: u32,
     pub tagged: bool,
+    /// A `/DocMDP` certification: no accessibility edit is made to the document (see [`edit_doc`]).
+    pub certified: bool,
+    /// Signed: edits are saved after the signed bytes, which stay as they were.
+    pub signed: bool,
     pub results: Vec<RuleResult>,
 }
 
@@ -340,6 +444,10 @@ struct PageScan {
     mcids: Vec<i32>,
     /// Fonts used (here or in form XObjects): object number (0: direct) and the font.
     fonts: Vec<(i32, PdfObject)>,
+    /// How its content is marked: what is neither tagged nor artifact, and nesting.
+    marking: matterhorn::Marking,
+    /// Forms already checked for their own marking.
+    marked_forms: HashSet<i32>,
 }
 
 const MAX_FORM_DEPTH: usize = 12;
@@ -350,9 +458,13 @@ fn res_lookup(res: Option<&PdfObject>, cat: &str, key: &[u8]) -> Result<Option<P
     Ok(d.get_dict(String::from_utf8_lossy(key).into_owned())?)
 }
 
-fn scan_stream(data: &[u8], res: Option<&PdfObject>, top: bool, depth: usize, seen: &mut HashSet<i32>, out: &mut PageScan) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn scan_stream(data: &[u8], res: Option<&PdfObject>, top: bool, depth: usize, seen: &mut HashSet<i32>, marks: &mut Vec<matterhorn::Mark>, track: bool, out: &mut PageScan) -> Result<()> {
     let mut mcid_seen: HashSet<i32> = out.mcids.iter().copied().collect();
     for op in content::parse(data) {
+        if track {
+            matterhorn::track(&op, res, marks, &mut out.marking)?;
+        }
         match op.name.as_slice() {
             b"BDC" if top => {
                 let mcid = match op.operands.get(1) {
@@ -381,12 +493,17 @@ fn scan_stream(data: &[u8], res: Option<&PdfObject>, top: bool, depth: usize, se
                     continue;
                 }
                 let n = xref_of(&x)?;
-                if n != 0 && !seen.insert(n) {
+                // A form drawn inside tagged content or an artifact is covered by that; one drawn outside
+                // is checked for its own marking (once per form).
+                let covered = marks.iter().any(|k| matches!(k, matterhorn::Mark::Tagged | matterhorn::Mark::Artifact));
+                let mark_it = track && !covered && (n == 0 || out.marked_forms.insert(n));
+                let scan_it = n == 0 || seen.insert(n);
+                if !mark_it && !scan_it {
                     continue;
                 }
                 let inner = dict(&x, "Resources")?;
                 let data = x.read_stream().unwrap_or_default();
-                scan_stream(&data, inner.as_ref().or(res), false, depth + 1, seen, out)?;
+                scan_stream(&data, inner.as_ref().or(res), false, depth + 1, seen, &mut Vec::new(), mark_it, out)?;
             }
             _ => {}
         }
@@ -398,7 +515,7 @@ fn scan_page(page: &PdfObject) -> Result<PageScan> {
     let mut out = PageScan::default();
     let res = page.get_dict_inheritable("Resources")?.filter(|r| r.is_dict().unwrap_or(false));
     let data = page_content(page)?;
-    scan_stream(&data, res.as_ref(), true, 0, &mut HashSet::new(), &mut out)?;
+    scan_stream(&data, res.as_ref(), true, 0, &mut HashSet::new(), &mut Vec::new(), true, &mut out)?;
     Ok(out)
 }
 
@@ -514,7 +631,7 @@ pub fn check(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &Ato
         }
         results.push(RuleResult { rule, name: rule.name(), group: rule.group(), status, hint: rule.hint(), fix: rule.fix(), findings });
     }
-    Ok(Report { pages: n, tagged: tree.exists, results })
+    Ok(Report { pages: n, tagged: tree.exists, certified: crate::outline::certified(doc)?.is_some(), signed: crate::outline::signed(doc), results })
 }
 
 fn elem_finding(t: &Tree, loc: &Locator, i: usize, what: &str) -> Finding {
@@ -532,7 +649,20 @@ fn elem_finding(t: &Tree, loc: &Locator, i: usize, what: &str) -> Finding {
 /// `None`: the rule does not apply (Skipped).
 fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[PdfObject], scans: &[PageScan], loc: &Locator) -> Result<Option<Vec<Finding>>> {
     let mut out = Vec::new();
-    let structure = matches!(rule, Rule::FigureAltText | Rule::ReadingOrder | Rule::TableHeaders | Rule::HeadingNesting | Rule::ListStructure);
+    let structure = matches!(
+        rule,
+        Rule::FigureAltText
+            | Rule::ReadingOrder
+            | Rule::TableHeaders
+            | Rule::HeadingNesting
+            | Rule::ListStructure
+            | Rule::ContentMarking
+            | Rule::RoleMap
+            | Rule::TableStructure
+            | Rule::TableScope
+            | Rule::AnnotationsTagged
+            | Rule::ParentTree
+    );
     if structure && !t.exists {
         return Ok(None);
     }
@@ -544,6 +674,9 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
             }
             if !is_true(dict(cat, "MarkInfo")?.map(|m| m.get_dict("Marked")).transpose()?.flatten())? {
                 out.push(Finding::doc("The document isn't marked as tagged (MarkInfo /Marked true)"));
+            }
+            if is_true(dict(cat, "MarkInfo")?.map(|m| m.get_dict("Suspects")).transpose()?.flatten())? {
+                out.push(Finding::doc("The tags are marked as suspect (MarkInfo /Suspects true)"));
             }
         }
         Rule::Title => {
@@ -633,6 +766,12 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
                     out.push(elem_finding(t, loc, i, &format!("{what}; heading levels should not skip")));
                 }
                 prev = level;
+            }
+            // H and H1-H6 together.
+            if let Some(&h) = order.iter().find(|&&i| t.is(i, "H"))
+                && order.iter().any(|&i| matches!(t.elems[i].ty.as_bytes(), [b'H', b'1'..=b'6']))
+            {
+                out.push(elem_finding(t, loc, h, "an unnumbered H is used together with numbered headings (H1-H6)"));
             }
         }
         Rule::ListStructure => {
@@ -745,6 +884,109 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
                 }
             }
         }
+        Rule::ContentMarking => {
+            for (p, scan) in scans.iter().enumerate() {
+                let m = &scan.marking;
+                let at = |what: &str, message: String| Finding {
+                    page: Some(p as u32),
+                    object: Some(what.into()),
+                    xref: xref_of(&pages[p]).ok().filter(|x| *x != 0),
+                    rect: None,
+                    message,
+                };
+                if m.untagged() > 0 {
+                    out.push(at("Page content", format!("Page {}: {} neither tagged nor marked as artifact", p + 1, m.describe())));
+                }
+                if m.artifact_in_tagged > 0 {
+                    out.push(at("Artifact", format!("Page {}: {} artifact{} inside tagged content", p + 1, m.artifact_in_tagged, if m.artifact_in_tagged == 1 { " is" } else { "s are" })));
+                }
+                if m.tagged_in_artifact > 0 {
+                    out.push(at("Tagged content", format!("Page {}: {} tagged item{} inside an artifact", p + 1, m.tagged_in_artifact, if m.tagged_in_artifact == 1 { " is" } else { "s are" })));
+                }
+            }
+        }
+        Rule::RoleMap => out.extend(matterhorn::role_map(t)),
+        Rule::LanguageValues => {
+            if let Some(l) = text(cat, "Lang")?
+                && !valid_lang(&l)
+            {
+                out.push(Finding::doc(format!("The document language \"{l}\" is not a valid language tag")));
+            }
+            for &i in &order {
+                if let Some(l) = &t.elems[i].lang
+                    && !valid_lang(l)
+                {
+                    out.push(elem_finding(t, loc, i, &format!("the language \"{l}\" is not a valid language tag")));
+                }
+            }
+        }
+        Rule::Metadata => out.extend(matterhorn::metadata(cat)?),
+        Rule::AccessibilityPermission => out.extend(matterhorn::permissions(doc)?),
+        Rule::TableStructure => out.extend(matterhorn::table_structure(t, loc)),
+        Rule::TableScope => out.extend(matterhorn::table_scope(t, loc)),
+        Rule::AnnotationsTagged => {
+            for (p, page) in pages.iter().enumerate() {
+                for (x, a) in annots(page)? {
+                    let sub = name(&a, "Subtype")?.unwrap_or_default();
+                    if matches!(sub.as_str(), "PrinterMark" | "TrapNet") {
+                        continue;
+                    }
+                    // Hidden and NoView annotations are not presented.
+                    if a.get_dict("F")?.and_then(|v| v.as_int().ok()).unwrap_or(0) & (2 | 32) != 0 {
+                        continue;
+                    }
+                    let owner = t.annot_owner.get(&x).copied();
+                    let rect = locate::annot_box(page, &a)?;
+                    let described = text(&a, "Contents")?.is_some();
+                    let mut finding = |why: String| {
+                        out.push(Finding {
+                            page: Some(p as u32),
+                            object: Some(format!("{sub} annotation")),
+                            xref: (x != 0).then_some(x),
+                            rect,
+                            message: format!("{sub} annotation on page {}: {why}", p + 1),
+                        })
+                    };
+                    match (sub.as_str(), owner) {
+                        // Links that are not in the tree at all are the tagged-links rule's.
+                        ("Link", Some(o)) if t.is(o, "Link") && !t.elems[o].alt && !described => finding("no description (Contents or alternate text)".into()),
+                        ("Link", _) => {}
+                        ("Widget", None) => finding("not in the tag tree (needs a Form element)".into()),
+                        ("Widget", Some(o)) if !t.is(o, "Form") => finding(format!("tagged as {}, not Form", t.elems[o].ty)),
+                        ("Widget", _) => {}
+                        (_, None) => finding("not in the tag tree (needs an Annot element)".into()),
+                        (_, Some(o)) if !t.is(o, "Annot") => finding(format!("tagged as {}, not Annot", t.elems[o].ty)),
+                        (_, Some(o)) if !t.elems[o].alt && !described => finding("no description (Contents or alternate text)".into()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Rule::FontsEmbedded => {
+            let mut seen = HashSet::new();
+            for (p, scan) in scans.iter().enumerate() {
+                for (x, f) in &scan.fonts {
+                    if (*x != 0 && !seen.insert(*x)) || matterhorn::font_embedded(f)? {
+                        continue;
+                    }
+                    let base = name(f, "BaseFont")?.unwrap_or_else(|| "(unnamed)".into());
+                    out.push(Finding {
+                        page: Some(p as u32),
+                        object: Some(format!("Font {base}")),
+                        xref: (*x != 0).then_some(*x),
+                        rect: None,
+                        message: format!("Font {base} on page {} is not embedded", p + 1),
+                    });
+                }
+            }
+        }
+        Rule::Xfa => out.extend(matterhorn::xfa(cat)?),
+        Rule::OptionalContent => out.extend(matterhorn::optional_content(cat)?),
+        Rule::ParentTree => {
+            for pr in tags::problems(doc)? {
+                out.push(Finding { page: pr.page, object: Some("Tag tree".into()), xref: pr.xref, rect: None, message: pr.message });
+            }
+        }
         Rule::ColorContrast => {}
     }
     Ok(Some(out))
@@ -770,6 +1012,10 @@ pub enum Fix {
     FigureAlt { xref: i32, alt: String },
     /// Best-effort tags for an untagged document (see `autotag`).
     Autotag,
+    /// Adds the PDF/UA identification and the title to the XMP metadata (made if the file has none).
+    Metadata,
+    /// Rebuilds the ParentTree (page keys, MCID entries, annotation keys) from the tag tree.
+    ParentTree,
     /// Several of the fixes above as one undo step ("Fix all safe issues"). Each that has nothing
     /// to do is skipped; the step is refused only when none applied.
     Many { fixes: Vec<Fix> },
@@ -785,6 +1031,8 @@ impl Fix {
             Fix::FieldTooltips => "Add form field tooltips".into(),
             Fix::FigureAlt { .. } => "Set figure alternate text".into(),
             Fix::Autotag => "Autotag (best effort)".into(),
+            Fix::ParentTree => "Repair tag tree links".into(),
+            Fix::Metadata => "Add PDF/UA metadata".into(),
             Fix::Many { fixes } => format!("Fix {} accessibility issue{}", fixes.len(), if fixes.len() == 1 { "" } else { "s" }),
         }
     }
@@ -935,6 +1183,27 @@ pub fn apply_fix_with(doc: &mut PdfDocument, fix: &Fix, file_stem: &str, progres
             Ok(page.into_iter().collect())
         }
         Fix::Autotag => autotag::run(doc, progress, cancel),
+        Fix::ParentTree => tags::repair_parent_tree(doc),
+        Fix::Metadata => {
+            let info = doc.trailer()?.get_dict("Info")?.filter(|i| i.is_dict().unwrap_or(false));
+            let title = info.map(|i| text(&i, "Title")).transpose()?.flatten().unwrap_or_else(|| file_stem.trim().to_owned());
+            if title.is_empty() {
+                return Err(bad("give the document a title first"));
+            }
+            let current = matterhorn::xmp_strict(&cat)?;
+            let new = match &current {
+                None => matterhorn::new_xmp(&title),
+                Some(x) => matterhorn::amend_xmp(x, &title)?,
+            };
+            if current.as_deref() == Some(new.as_str()) {
+                return Err(bad("the metadata already identifies the file as PDF/UA and has a title"));
+            }
+            let mut stm = doc.add_stream(&mupdf::Buffer::from_bytes(new.as_bytes())?, None, false)?;
+            stm.dict_put("Type", PdfObject::new_name("Metadata")?)?;
+            stm.dict_put("Subtype", PdfObject::new_name("XML")?)?;
+            cat.dict_put("Metadata", stm)?;
+            Ok(Vec::new())
+        }
         Fix::Many { fixes } => {
             let mut touched: Vec<u32> = Vec::new();
             let mut applied = 0;
@@ -986,7 +1255,7 @@ pub fn report_bytes(eng: &Engine, doc: DocId, pdf: bool, date: &str, progress: &
 }
 
 /// The document as it is now, in a copy of its own (the published snapshot, or the file before any edit).
-fn open_copy(eng: &Engine, doc: DocId) -> Result<PdfDocument> {
+pub(crate) fn open_copy(eng: &Engine, doc: DocId) -> Result<PdfDocument> {
     let (_, source) = eng.doc_source(doc)?;
     let mut d = match &source {
         DocSource::Path(p) => PdfDocument::open(p.as_str())?,
@@ -1002,6 +1271,33 @@ fn open_copy(eng: &Engine, doc: DocId) -> Result<PdfDocument> {
     Ok(d)
 }
 
+/// Every accessibility write goes through here: a certified document is refused (any change to it, the tags
+/// included, voids the certification; as outline/mod.rs does), and the step is never one that rewrites the file,
+/// so a signed document's save stays incremental and its signed bytes stay as they were.
+fn edit_doc(eng: &Engine, doc: DocId, label: String, source: EditSource, f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>) -> Result<EditState> {
+    eng.apply_custom(doc, label, source, false, |d| {
+        if crate::outline::certified(d)?.is_some() {
+            return Err(bad(
+                "This document is certified. Changing its tags or reading order would void the certification, so Inkwell leaves them as they are.",
+            ));
+        }
+        f(d)
+    })
+}
+
+/// Whether the document is certified or signed, as it is now: what the edit controls are gated on, known
+/// without the check having run.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Protection {
+    pub certified: bool,
+    pub signed: bool,
+}
+
+pub fn protection_doc(eng: &Engine, doc: DocId) -> Result<Protection> {
+    eng.read_custom(doc, |d| Ok(Protection { certified: crate::outline::certified(d)?.is_some(), signed: crate::outline::signed(d) }))
+}
+
 /// Applies one fix as one undo step.
 pub fn fix_doc(eng: &Engine, doc: DocId, fix: &Fix, source: EditSource) -> Result<EditState> {
     fix_doc_with(eng, doc, fix, source, &mut |_| {}, &AtomicBool::new(false))
@@ -1011,5 +1307,81 @@ pub fn fix_doc(eng: &Engine, doc: DocId, fix: &Fix, source: EditSource) -> Resul
 pub fn fix_doc_with(eng: &Engine, doc: DocId, fix: &Fix, source: EditSource, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<EditState> {
     let path = eng.doc_entry(doc)?.path();
     let stem = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    eng.apply_custom(doc, fix.label(), source, false, |d| apply_fix_with(d, fix, &stem, progress, cancel))
+    edit_doc(eng, doc, fix.label(), source, |d| apply_fix_with(d, fix, &stem, progress, cancel))
+}
+
+// ---- reading order and tags ----------------------------------------------------------------------
+
+/// The regions of a page in reading order, with a text preview and a box each (see `order`). Reads its own
+/// copy of the current generation, like the check.
+pub fn reading_order_doc(eng: &Engine, doc: DocId, page: u32) -> Result<order::ReadingOrder> {
+    order::reading_order(&open_copy(eng, doc)?, page)
+}
+
+/// The tag tree, nested; with `page`, only the branches that hold content on that page.
+pub fn tags_doc(eng: &Engine, doc: DocId, page: Option<u32>) -> Result<Vec<tags::TagNode>> {
+    tags::tags(&open_copy(eng, doc)?, page)
+}
+
+/// Where the ParentTree and the tags disagree (empty: they agree).
+pub fn tag_problems_doc(eng: &Engine, doc: DocId) -> Result<Vec<Problem>> {
+    tags::problems(&open_copy(eng, doc)?)
+}
+
+/// Puts the regions of a page in a new reading order, as one undo step.
+pub fn reorder_doc(eng: &Engine, doc: DocId, page: u32, order: &[i32], source: EditSource) -> Result<EditState> {
+    edit_doc(eng, doc, "Change reading order".into(), source, |d| tags::reorder(d, page, order))
+}
+
+/// Changes an element's role (`Artifact` marks its content as artifact), as one undo step.
+pub fn set_role_doc(eng: &Engine, doc: DocId, xref: i32, role: &str, source: EditSource) -> Result<EditState> {
+    let label = if role.trim() == "Artifact" { "Mark as artifact".to_string() } else { format!("Change tag to {}", role.trim()) };
+    edit_doc(eng, doc, label, source, |d| tags::set_role(d, xref, role))
+}
+
+/// Takes an element's content out of the reading order and marks it as artifact, as one undo step.
+pub fn artifact_doc(eng: &Engine, doc: DocId, xref: i32, source: EditSource) -> Result<EditState> {
+    edit_doc(eng, doc, "Mark as artifact".into(), source, |d| tags::artifact(d, xref))
+}
+
+/// Merges one region into another, as one undo step.
+pub fn merge_doc(eng: &Engine, doc: DocId, into: i32, from: i32, source: EditSource) -> Result<EditState> {
+    edit_doc(eng, doc, "Merge regions".into(), source, |d| tags::merge(d, into, from))
+}
+
+/// Most regions one merge takes, `into` included.
+const MAX_MERGE: usize = 100;
+
+/// Merges several regions into `into` (in the order given), as one undo step: a refusal part way leaves the
+/// document as it was.
+pub fn merge_many_doc(eng: &Engine, doc: DocId, into: i32, from: &[i32], source: EditSource) -> Result<EditState> {
+    // Each merge reads the tree again (the one before changed it), so the count is bounded.
+    if from.is_empty() || from.len() >= MAX_MERGE {
+        return Err(bad(format!("choose between two and {MAX_MERGE} regions to merge")));
+    }
+    edit_doc(eng, doc, "Merge regions".into(), source, |d| {
+        let mut pages = Vec::new();
+        for &f in from {
+            pages.extend(tags::merge(d, into, f)?);
+        }
+        pages.sort_unstable();
+        pages.dedup();
+        Ok(pages)
+    })
+}
+
+/// Splits a region before the content item with this MCID, as one undo step.
+pub fn split_doc(eng: &Engine, doc: DocId, xref: i32, at_mcid: i32, role: Option<&str>, source: EditSource) -> Result<EditState> {
+    edit_doc(eng, doc, "Split region".into(), source, |d| tags::split(d, xref, at_mcid, role))
+}
+
+/// Edits one node's role, alternate text, actual text, language, table scope or headers, as one undo step.
+pub fn edit_tag_doc(eng: &Engine, doc: DocId, xref: i32, patch: &tags::TagPatch, source: EditSource) -> Result<EditState> {
+    edit_doc(eng, doc, patch.label(), source, |d| tags::edit_tag(d, xref, patch))
+}
+
+/// Moves a node under `parent` (0: the top of the tree), before or after its kid `anchor` (last when
+/// there is none), as one undo step.
+pub fn move_tag_doc(eng: &Engine, doc: DocId, xref: i32, parent: i32, anchor: Option<i32>, after: bool, source: EditSource) -> Result<EditState> {
+    edit_doc(eng, doc, "Move tag".into(), source, |d| tags::move_node(d, xref, parent, anchor, after))
 }

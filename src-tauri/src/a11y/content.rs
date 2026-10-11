@@ -10,6 +10,9 @@ pub enum Operand {
     Num(f32),
     Name(Vec<u8>),
     Dict(Vec<(Vec<u8>, Operand)>),
+    /// A literal or hex string, decoded to its bytes.
+    Str(Vec<u8>),
+    Array(Vec<Operand>),
     Other,
 }
 
@@ -20,6 +23,10 @@ impl Operand {
 
     pub fn name(&self) -> Option<&[u8]> {
         if let Operand::Name(n) = self { Some(n) } else { None }
+    }
+
+    pub fn str(&self) -> Option<&[u8]> {
+        if let Operand::Str(s) = self { Some(s) } else { None }
     }
 
     pub fn get(&self, key: &[u8]) -> Option<&Operand> {
@@ -107,25 +114,79 @@ impl Lexer<'_> {
         out
     }
 
-    fn literal(&mut self) {
+    fn literal(&mut self) -> Vec<u8> {
         self.i += 1;
         let mut depth = 1;
+        let mut out = Vec::new();
         while self.i < self.s.len() && depth > 0 {
-            match self.s[self.i] {
-                b'\\' => self.i += 1,
-                b'(' => depth += 1,
-                b')' => depth -= 1,
-                _ => {}
+            let c = self.s[self.i];
+            match c {
+                b'\\' => {
+                    self.i += 1;
+                    match self.s.get(self.i).copied() {
+                        Some(b'n') => out.push(b'\n'),
+                        Some(b'r') => out.push(b'\r'),
+                        Some(b't') => out.push(b'\t'),
+                        Some(b'b') => out.push(8),
+                        Some(b'f') => out.push(12),
+                        Some(d @ b'0'..=b'7') => {
+                            let mut v = u32::from(d - b'0');
+                            for _ in 0..2 {
+                                match self.s.get(self.i + 1) {
+                                    Some(d @ b'0'..=b'7') => {
+                                        v = v * 8 + u32::from(d - b'0');
+                                        self.i += 1;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            out.push(v as u8);
+                        }
+                        // A backslash before a line break continues the string on the next line.
+                        Some(b'\r') => {
+                            if self.s.get(self.i + 1) == Some(&b'\n') {
+                                self.i += 1;
+                            }
+                        }
+                        Some(b'\n') | None => {}
+                        Some(o) => out.push(o),
+                    }
+                }
+                b'(' => {
+                    depth += 1;
+                    out.push(c);
+                }
+                b')' => {
+                    depth -= 1;
+                    if depth > 0 {
+                        out.push(c);
+                    }
+                }
+                _ => out.push(c),
             }
             self.i += 1;
         }
+        out
     }
 
-    fn hex(&mut self) {
+    fn hex(&mut self) -> Vec<u8> {
+        self.i += 1;
+        let mut out = Vec::new();
+        let mut hi: Option<u8> = None;
         while self.i < self.s.len() && self.s[self.i] != b'>' {
+            if let Some(d) = (self.s[self.i] as char).to_digit(16) {
+                match hi.take() {
+                    Some(h) => out.push(h << 4 | d as u8),
+                    None => hi = Some(d as u8),
+                }
+            }
             self.i += 1;
         }
+        if let Some(h) = hi {
+            out.push(h << 4);
+        }
         self.i += 1;
+        out
     }
 
     /// One operand, or `Err(keyword)` when the next token is an operator. `None` at the end.
@@ -134,10 +195,7 @@ impl Lexer<'_> {
         let c = *self.s.get(self.i)?;
         Some(match c {
             b'/' => Ok(Operand::Name(self.name())),
-            b'(' => {
-                self.literal();
-                Ok(Operand::Other)
-            }
+            b'(' => Ok(Operand::Str(self.literal())),
             b'<' if self.s.get(self.i + 1) == Some(&b'<') => {
                 self.i += 2;
                 let mut d = Vec::new();
@@ -167,12 +225,10 @@ impl Lexer<'_> {
                 }
                 Ok(Operand::Dict(d))
             }
-            b'<' => {
-                self.hex();
-                Ok(Operand::Other)
-            }
+            b'<' => Ok(Operand::Str(self.hex())),
             b'[' => {
                 self.i += 1;
+                let mut items = Vec::new();
                 loop {
                     self.skip_space();
                     match self.s.get(self.i) {
@@ -181,14 +237,14 @@ impl Lexer<'_> {
                             self.i += 1;
                             break;
                         }
-                        Some(_) => {
-                            if self.token(depth + 1).is_none() {
-                                break;
-                            }
-                        }
+                        Some(_) => match self.token(depth + 1) {
+                            Some(Ok(v)) if depth < MAX_NEST => items.push(v),
+                            Some(_) => {}
+                            None => break,
+                        },
                     }
                 }
-                Ok(Operand::Other)
+                Ok(Operand::Array(items))
             }
             b')' | b'>' | b']' | b'{' | b'}' => {
                 self.i += 1;
@@ -346,5 +402,16 @@ mod tests {
         assert_eq!(&s[bdc.start..bdc.end], b"/P <</MCID 3 /Lang (en)>> BDC");
         assert_eq!(&s[ops[8].start..ops[8].end], b"BI /W 2 /H 1 /BPC 8 /CS /G ID \x00EI\xff EI");
         assert_eq!(ops[10].operands[0].name(), Some(&b"Im 1"[..]));
+    }
+
+    #[test]
+    fn strings_and_arrays_keep_their_bytes() {
+        let ops = parse(b"[(a\\(b\\) \\101\\n) -250 <48 65 6C6c6F> (nested (par) ens)] TJ <4>Tj");
+        let Operand::Array(items) = &ops[0].operands[0] else { panic!("{:?}", ops[0]) };
+        assert_eq!(items[0].str(), Some(&b"a(b) A\n"[..]));
+        assert_eq!(items[1], Operand::Num(-250.0));
+        assert_eq!(items[2].str(), Some(&b"Hello"[..]));
+        assert_eq!(items[3].str(), Some(&b"nested (par) ens"[..]));
+        assert_eq!(ops[1].operands[0].str(), Some(&[0x40u8][..]), "an odd hex digit is padded with 0");
     }
 }

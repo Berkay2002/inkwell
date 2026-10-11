@@ -108,12 +108,26 @@ pub fn refusal(names: &[String]) -> String {
     )
 }
 
+/// What a program needs to run on Linux and macOS (the variables of the profile, temp, the shell
+/// and the locale); `LC_*` and `XDG_*` are matched by prefix.
+#[cfg(not(windows))]
+fn allowed_on_unix(up: &str) -> bool {
+    matches!(up, "USER" | "LOGNAME" | "TMPDIR" | "SHELL" | "LANGUAGE" | "TZ")
+        || up.starts_with("LC_")
+        || up.starts_with("XDG_")
+}
+
+#[cfg(windows)]
+fn allowed_on_unix(_: &str) -> bool {
+    false
+}
+
 /// The environment the child gets: the allowlist and the keep-list of `vars`, nothing else.
 pub fn child_env(vars: &[(String, String)]) -> Vec<(String, String)> {
     vars.iter()
         .filter(|(k, _)| {
             let up = k.to_ascii_uppercase();
-            ALLOW.contains(&up.as_str()) || KEEP.contains(&up.as_str())
+            ALLOW.contains(&up.as_str()) || KEEP.contains(&up.as_str()) || allowed_on_unix(&up)
         })
         .cloned()
         .collect()
@@ -298,6 +312,33 @@ mod tests {
                 "Claude_Config_Dir",
                 "CLAUDE_CODE_GIT_BASH_PATH"
             ]
+        );
+    }
+
+    /// On Linux and macOS the profile and locale variables of that platform pass too.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_unix_child_keeps_its_profile_temp_shell_and_locale() {
+        let v = vars(&[
+            ("USER", "a"),
+            ("LOGNAME", "a"),
+            ("HOME", "/home/a"),
+            ("TMPDIR", "/tmp"),
+            ("SHELL", "/bin/bash"),
+            ("LC_CTYPE", "C.UTF-8"),
+            ("XDG_CONFIG_HOME", "/home/a/.config"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("http_proxy", "http://p:1"),
+            ("LD_PRELOAD", "/evil.so"),
+            ("SSH_AUTH_SOCK", "/s"),
+            ("DISPLAY", ":0"),
+            ("ANTHROPIC_API_KEY", "sk"),
+            ("CLAUDECODE", "1"),
+        ]);
+        let names: Vec<String> = child_env(&v).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            names,
+            ["USER", "LOGNAME", "HOME", "TMPDIR", "SHELL", "LC_CTYPE", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "http_proxy"]
         );
     }
 

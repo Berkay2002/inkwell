@@ -90,7 +90,7 @@ fn unique_name(taken: &[String], base: &str) -> String {
     (1..).map(|n| format!("{base}{n}")).find(|n| !taken.contains(n)).unwrap_or_default()
 }
 
-fn ensure_dict(doc: &PdfDocument, parent: &mut PdfObject, key: &str) -> Result<PdfObject> {
+pub(crate) fn ensure_dict(doc: &PdfDocument, parent: &mut PdfObject, key: &str) -> Result<PdfObject> {
     if let Some(d) = get(parent, key).filter(|d| d.is_dict().unwrap_or(false)) {
         return Ok(d);
     }
@@ -143,7 +143,7 @@ fn seed_on_state(doc: &mut PdfDocument, w: &mut PdfObject, on: &str) -> Result<(
     Ok(())
 }
 
-fn color_array(doc: &PdfDocument, o: &mut PdfObject, k: &str, c: [f32; 3]) -> Result<()> {
+pub(crate) fn color_array(doc: &PdfDocument, o: &mut PdfObject, k: &str, c: [f32; 3]) -> Result<()> {
     put_nums(doc, o, k, &c)
 }
 
@@ -387,7 +387,7 @@ fn remove_ref(a: &mut PdfObject, num: i32) -> Result<()> {
     Ok(())
 }
 
-fn set_flag(ff: &mut i32, f: FieldFlags, on: bool) {
+pub(crate) fn set_flag(ff: &mut i32, f: FieldFlags, on: bool) {
     if on {
         *ff |= f.bits();
     } else {
@@ -401,7 +401,7 @@ const AA_KEYS: [&str; 14] = ["E", "X", "D", "U", "Fo", "Bl", "PO", "PC", "PV", "
 /// An additional action running `js`, replacing the one under `key`. The /AA dictionary is built
 /// whole and put once: a nested dictionary changed through an old handle can be left behind by the
 /// document's journal.
-fn put_js(doc: &PdfDocument, field: &mut PdfObject, key: &str, js: Option<String>) -> Result<()> {
+pub(crate) fn put_js(doc: &PdfDocument, field: &mut PdfObject, key: &str, js: Option<String>) -> Result<()> {
     let mut aa = doc.new_dict()?;
     let mut n = 0;
     if let Some(old) = get(field, "AA") {
@@ -580,7 +580,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
         match af::format_js(f) {
             Some((fmt, key)) => {
                 put_js(doc, &mut field, "F", (!fmt.is_empty()).then_some(fmt))?;
-                put_js(doc, &mut field, "K", Some(key))?;
+                put_js(doc, &mut field, "K", (!key.is_empty()).then_some(key))?;
             }
             None => {
                 put_js(doc, &mut field, "F", None)?;
@@ -605,7 +605,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
                 }
             }
         }
-        if *c != Calculate::None {
+        if af::calculate_js(c).is_some() {
             co.array_push(doc.new_indirect(num, 0)?)?;
         }
         form.dict_put("CO", co)?;
@@ -923,6 +923,52 @@ pub fn delete_many(eng: &Engine, doc: DocId, items: &[(u32, i32)], source: EditS
             delete(d, pg, &xs)?;
         }
         Ok(pages.clone())
+    })
+}
+
+/// Writes `/AcroForm /CO`: the calculated fields (`node` of each) in the order they run. Every field with a calculate script
+/// that is not listed follows, in its current order. Returns false when this is the order already written.
+pub fn set_calc_order(doc: &mut PdfDocument, nodes: &[i32]) -> Result<bool> {
+    let entries = scan(doc)?;
+    let current = calc_order_of(doc, &entries);
+    let mut seen: Vec<i32> = Vec::with_capacity(nodes.len());
+    for n in nodes {
+        if !entries.iter().any(|e| e.node == *n && aa_js(e, "C").is_some()) {
+            return Err(bad(format!("field {n} has no calculation")));
+        }
+        if seen.contains(n) {
+            return Err(bad(format!("field {n} is listed twice in the calculation order")));
+        }
+        seen.push(*n);
+    }
+    let mut want = seen.clone();
+    want.extend(current.iter().copied().filter(|n| !seen.contains(n)));
+    if want == written_calc_order(doc) {
+        return Ok(false);
+    }
+    let mut form = acro_form(doc)?;
+    let mut co = doc.new_array()?;
+    for n in &want {
+        co.array_push(doc.new_indirect(*n, 0)?)?;
+    }
+    form.dict_put("CO", co)?;
+    Ok(true)
+}
+
+pub fn calc_order_one(eng: &Engine, doc: DocId, nodes: &[i32], source: EditSource) -> Result<EditState> {
+    // The same order is not a step in the history.
+    let nodes_v = nodes.to_vec();
+    if !eng.read_custom(doc, |d| {
+        let entries = scan(d)?;
+        let mut want = nodes_v.clone();
+        want.extend(calc_order_of(d, &entries).into_iter().filter(|n| !nodes_v.contains(n)));
+        Ok(want != written_calc_order(d))
+    })? {
+        return eng.edit_state(doc);
+    }
+    eng.apply_custom(doc, "Change calculation order".into(), source, false, |d| {
+        set_calc_order(d, nodes)?;
+        Ok(vec![])
     })
 }
 

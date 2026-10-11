@@ -3,11 +3,14 @@
 //!
 //! Adapted from pdfcraft (MIT OR Apache-2.0), crates/print/src/lib.rs and range.rs @ b8ddf71.
 //! Differences: sheet space is y-down with its origin at the top left (the GDI and MuPDF device
-//! convention), a placement carries its own scale/rotation instead of a PDF matrix, and the sheets
-//! are drawn by `render`, not written as a PDF. Poster tiling is not carried over.
+//! convention) and a placement carries its own scale/rotation instead of a PDF matrix. The sheets
+//! are drawn by `render` or written as a PDF by `pdf`, from the same plan. Poster cut marks sit on
+//! the edges of the overlap strip (pdfcraft puts them at the printable corners), and booklets get
+//! creep, which pdfcraft does not have.
 //!
 //! Orders and counts follow Acrobat's Print dialog (docs/study/12-print.md): the pages are chosen
-//! (range, odd or even among them, reversed), then laid on sheets by Size, Multiple or Booklet.
+//! (range, odd or even among them, reversed), then laid on sheets by Size, Multiple, Booklet or
+//! Poster.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +20,14 @@ pub const MARGIN: f64 = 18.0;
 /// Gap between cells of a Multiple sheet.
 const GAP: f64 = 6.0;
 const MAX_CELLS: usize = 100;
+/// Sheets one poster job may need, over all its pages.
+pub const MAX_POSTER_SHEETS: usize = 1024;
+/// 50 mm: the largest overlap between poster tiles.
+pub const MAX_OVERLAP: f64 = 50.0 / 25.4 * 72.0;
+/// 3 mm: the largest booklet creep.
+pub const MAX_CREEP: f64 = 3.0 / 25.4 * 72.0;
+/// Size of a poster label's text, in points.
+pub const LABEL_PT: f64 = 7.0;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum LayoutError {
@@ -102,6 +113,22 @@ pub enum Layout {
         sides: BookletSides,
         #[serde(default)]
         binding: Binding,
+        /// Points the pages of the innermost sheet sit closer to the spine than those of the
+        /// outermost, growing evenly between (paper thickness).
+        #[serde(default)]
+        creep: f64,
+    },
+    /// Each page enlarged by `scale` percent and cut into sheet-sized tiles that overlap by
+    /// `overlap` points, in reading order.
+    Poster {
+        #[serde(default = "hundred")]
+        scale: f64,
+        #[serde(default = "default_overlap")]
+        overlap: f64,
+        #[serde(default)]
+        cut_marks: bool,
+        #[serde(default)]
+        labels: bool,
     },
 }
 
@@ -110,6 +137,10 @@ fn hundred() -> f64 {
 }
 fn yes() -> bool {
     true
+}
+/// 6 mm.
+fn default_overlap() -> f64 {
+    6.0 / 25.4 * 72.0
 }
 
 impl Default for Layout {
@@ -155,6 +186,29 @@ pub struct Sheet {
     pub placed: Vec<Placement>,
     /// Page borders (Multiple), as rectangles in sheet space.
     pub borders: Vec<[f64; 4]>,
+    /// Poster cut marks: `[x0, y0, x1, y1]` hairlines in the margin, in sheet space.
+    pub lines: Vec<[f64; 4]>,
+    /// Poster labels, in the margin.
+    pub labels: Vec<Label>,
+    /// Poster: which tile of its page this side is.
+    pub tile: Option<Tile>,
+}
+
+/// A line of text on a sheet, Helvetica at `LABEL_PT`, its baseline starting at `(x, y)`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Label {
+    pub x: f64,
+    pub y: f64,
+    pub text: String,
+}
+
+/// Position of a poster tile in its page's grid (all 0-based, `cols` x `rows` tiles).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Tile {
+    pub col: u32,
+    pub row: u32,
+    pub cols: u32,
+    pub rows: u32,
 }
 
 impl Sheet {
@@ -231,7 +285,7 @@ pub fn layout(sizes: &[(f64, f64)], pages: &[u32], paper: (f64, f64), orientatio
                     SizeMode::Custom if percent.is_finite() && percent > 0.0 && percent <= 10_000.0 => percent / 100.0,
                     SizeMode::Custom => return Err(LayoutError::Invalid("the scale must be between 0% and 10000%".into())),
                 };
-                sheets.push(Sheet { w, h, placed: vec![place_in(p, d, [0.0, 0.0, w, h], s, false, [0.0, 0.0, w, h])], borders: vec![] });
+                sheets.push(Sheet { w, h, placed: vec![place_in(p, d, [0.0, 0.0, w, h], s, false, [0.0, 0.0, w, h])], ..Sheet::default() });
             }
         }
         Layout::Multiple { per_sheet, order, border, auto_rotate } => {
@@ -281,14 +335,24 @@ pub fn layout(sizes: &[(f64, f64)], pages: &[u32], paper: (f64, f64), orientatio
                 sheets.push(sheet);
             }
         }
-        Layout::Booklet { sides, binding } => {
+        Layout::Booklet { sides, binding, creep } => {
+            if !(creep.is_finite() && (0.0..=MAX_CREEP + 1e-6).contains(&creep)) {
+                return Err(LayoutError::Invalid("the creep must be between 0 and 3 mm".into()));
+            }
             // Padded to a multiple of 4 with blanks (None).
             let n4 = pages.len().div_ceil(4) * 4;
+            let papers = n4 / 4;
             let at = |i: usize| pages.get(i).copied();
             let (w, h) = oriented(paper, Orientation::Landscape, true);
             let half = (w - 2.0 * MARGIN) / 2.0;
-            let cells = [[MARGIN, MARGIN, MARGIN + half, h - MARGIN], [MARGIN + half, MARGIN, w - MARGIN, h - MARGIN]];
-            for k in 0..n4 / 4 {
+            // A single sheet has no inner one to move: no creep, no room kept for it.
+            let creep = if papers > 1 { creep } else { 0.0 };
+            // Each page keeps `creep` clear of the fold so the inner sheets can slide toward it
+            // without crossing: the cell itself moves, clip included.
+            let cells = [[MARGIN, MARGIN, MARGIN + half - creep, h - MARGIN], [MARGIN + half + creep, MARGIN, w - MARGIN, h - MARGIN]];
+            for k in 0..papers {
+                // sheet k from the outside: 0 for the outermost, `creep` for the innermost
+                let shift = if papers > 1 { creep * k as f64 / (papers - 1) as f64 } else { 0.0 };
                 let front = (at(n4 - 1 - 2 * k), at(2 * k));
                 let back = (at(2 * k + 1), at(n4 - 2 - 2 * k));
                 let mut faces = Vec::new();
@@ -301,14 +365,89 @@ pub fn layout(sizes: &[(f64, f64)], pages: &[u32], paper: (f64, f64), orientatio
                 for (l, r) in faces {
                     let (l, r) = if binding == Binding::Right { (r, l) } else { (l, r) };
                     let mut sheet = Sheet { w, h, ..Sheet::default() };
-                    for (p, cell) in [(l, cells[0]), (r, cells[1])] {
+                    for (p, cell, dx) in [(l, cells[0], shift), (r, cells[1], -shift)] {
                         if let Some(p) = p {
+                            let cell = [cell[0] + dx, cell[1], cell[2] + dx, cell[3]];
                             let d = size_of(p)?;
                             let s = fit_scale(d, (cell[2] - cell[0], cell[3] - cell[1]));
                             sheet.placed.push(place_in(p, d, cell, s, false, cell));
                         }
                     }
                     sheets.push(sheet);
+                }
+            }
+        }
+        Layout::Poster { scale, overlap, cut_marks, labels } => {
+            if !(scale.is_finite() && scale > 0.0 && scale <= 10_000.0) {
+                return Err(LayoutError::Invalid("the tile scale must be between 0% and 10000%".into()));
+            }
+            if !(overlap.is_finite() && (0.0..=MAX_OVERLAP + 1e-6).contains(&overlap)) {
+                return Err(LayoutError::Invalid("the overlap must be between 0 and 50 mm".into()));
+            }
+            let s = scale / 100.0;
+            let mut total = 0usize;
+            for &p in &pages {
+                let d = size_of(p)?;
+                let (w, h) = oriented(paper, orientation, d.0 > d.1);
+                let (tw, th) = (w - 2.0 * MARGIN, h - 2.0 * MARGIN);
+                if overlap * 2.0 >= tw.min(th) {
+                    return Err(LayoutError::Invalid("the overlap is larger than half a tile".into()));
+                }
+                // Each tile advances by `step`; the last one may reach past the page.
+                let (sw, sh) = (d.0 * s, d.1 * s);
+                let (step_x, step_y) = (tw - overlap, th - overlap);
+                let count = |len: f64, step: f64| ((len - overlap) / step - 1e-9).ceil().max(1.0) as usize;
+                let (cols, rows) = (count(sw, step_x), count(sh, step_y));
+                // counted before anything is allocated: a big page at a big scale is a mistake
+                total = total.saturating_add(cols.saturating_mul(rows));
+                if total > MAX_POSTER_SHEETS {
+                    return Err(LayoutError::Invalid(format!("the poster would need more than {MAX_POSTER_SHEETS} sheets")));
+                }
+                for row in 0..rows {
+                    for col in 0..cols {
+                        let (x, y) = (MARGIN - col as f64 * step_x, MARGIN - row as f64 * step_y);
+                        let clip = [MARGIN.max(x), MARGIN.max(y), (MARGIN + tw).min(x + sw), (MARGIN + th).min(y + sh)];
+                        let mut sheet = Sheet {
+                            w,
+                            h,
+                            placed: vec![Placement { page: p, x, y, scale: s, rotate: false, clip }],
+                            tile: Some(Tile { col: col as u32, row: row as u32, cols: cols as u32, rows: rows as u32 }),
+                            ..Sheet::default()
+                        };
+                        if cut_marks {
+                            // Ticks in the margin where a neighbour's printed area begins or ends:
+                            // the edges of the overlap strip (the printable edge when there is none).
+                            let mut vertical = Vec::new();
+                            let mut horizontal = Vec::new();
+                            if col > 0 {
+                                vertical.push(MARGIN + overlap);
+                            }
+                            if col + 1 < cols {
+                                vertical.push(MARGIN + tw - overlap);
+                            }
+                            if row > 0 {
+                                horizontal.push(MARGIN + overlap);
+                            }
+                            if row + 1 < rows {
+                                horizontal.push(MARGIN + th - overlap);
+                            }
+                            for x in vertical {
+                                sheet.lines.push([x, 2.0, x, MARGIN - 2.0]);
+                                sheet.lines.push([x, h - MARGIN + 2.0, x, h - 2.0]);
+                            }
+                            for y in horizontal {
+                                sheet.lines.push([2.0, y, MARGIN - 2.0, y]);
+                                sheet.lines.push([w - MARGIN + 2.0, y, w - 2.0, y]);
+                            }
+                        }
+                        if labels {
+                            let text = format!("Page {}, row {} of {}, column {} of {}", p + 1, row + 1, rows, col + 1, cols);
+                            // Helvetica averages about half an em a character
+                            let x = ((w - text.len() as f64 * LABEL_PT * 0.5) / 2.0).max(2.0);
+                            sheet.labels.push(Label { x, y: MARGIN - 6.0, text });
+                        }
+                        sheets.push(sheet);
+                    }
                 }
             }
         }

@@ -14,13 +14,19 @@ export type Format =
   /** 0 zip, 1 zip + 4, 2 phone, 3 social security number. */
   | { kind: "special"; value: number }
   /** 9 digit, A letter, O letter or digit, X any. */
-  | { kind: "mask"; value: string };
-export type Validate = { kind: "none" } | { kind: "range"; min: number | null; max: number | null };
+  | { kind: "mask"; value: string }
+  /** "Custom": the format script (`/AA /F`) and the keystroke script (`/AA /K`); either may be empty. */
+  | { kind: "custom"; value: { format: string; keystroke: string } };
+export type Validate =
+  | { kind: "none" }
+  | { kind: "range"; min: number | null; max: number | null }
+  | { kind: "custom"; source: string };
 export type CalcOp = "sum" | "product" | "average" | "minimum" | "maximum";
 export type Calculate =
   | { kind: "none" }
   | { kind: "simple"; value: { op: CalcOp; fields: string[] } }
-  | { kind: "notation"; value: string };
+  | { kind: "notation"; value: string }
+  | { kind: "custom"; value: string };
 export type ButtonAction =
   | { kind: "reset"; fields: string[]; exclude?: boolean }
   | { kind: "named"; name: string }
@@ -76,6 +82,8 @@ export interface Field {
 
 export interface Form {
   fields: Field[];
+  /** The `node` of each calculated field, in the order the calculations run. */
+  calcOrder: number[];
   xfa: boolean;
 }
 
@@ -323,3 +331,136 @@ export const fromHex = (h: string): RGB => [1, 3, 5].map((i) => parseInt(h.slice
 export const calcSources = (all: Field[], self: Field): string[] => [
   ...new Set(all.filter((f) => f.kind === "text" && f.node !== self.node).map((f) => f.name)),
 ];
+
+// ---- scripts: links, prompts, calculation order -----------------------------------------------------
+
+/** Bidirectional controls (embeddings, overrides, isolates): text that uses them can show a link in an order it is not in. */
+const BIDI = /[\u202A-\u202E\u2066-\u2069]/g;
+
+/** `text` without bidirectional controls (shown in dialogs where a script's text must not reorder what follows). */
+export const stripBidi = (text: string): string => text.replace(BIDI, "");
+
+/**
+ * A link a script asked to open, or null when it may not be offered: only http, https and mailto, with no
+ * credentials in the address. Returned in its normalised form.
+ */
+export function safeLink(url: string): string | null {
+  const t = stripBidi(url).trim();
+  if (t === "" || t.length > 4096) return null;
+  let u: URL;
+  try {
+    u = new URL(t);
+  } catch {
+    return null;
+  }
+  if (!["http:", "https:", "mailto:"].includes(u.protocol)) return null;
+  if (u.username || u.password) return null;
+  return u.href;
+}
+
+/** The most prompts that wait for the person at once; a script that raises more than this is flooding. */
+export const MAX_PROMPTS = 20;
+
+/** `queue` with `incoming` after it, without going past [`MAX_PROMPTS`]; `dropped` is how many did not fit. */
+export function capPrompts<T>(queue: T[], incoming: T[], max = MAX_PROMPTS): { queue: T[]; dropped: number } {
+  const room = Math.max(0, max - queue.length);
+  return { queue: [...queue, ...incoming.slice(0, room)], dropped: Math.max(0, incoming.length - room) };
+}
+
+/**
+ * Save from inside a field: the typed value is committed first (it would only commit when the field loses focus),
+ * then `run` starts (the save). A value that is unchanged is not committed again; a refused one still lets the save run.
+ */
+export async function commitThenRun(typed: string, saved: string, commit: (v: string) => Promise<unknown>, run: () => void): Promise<void> {
+  if (typed !== saved) await commit(typed);
+  run();
+}
+
+/** What the UI asks the person about: a script's message, or a link or a submit it wants. Never acted on without them. */
+export type ScriptPrompt =
+  | { kind: "alert"; title: string; message: string; field?: string }
+  | { kind: "link"; url: string }
+  | { kind: "submit"; url: string };
+
+/** What a script asked that needs no question: the UI does these straight away. */
+export type ScriptAction =
+  | { kind: "reset"; fields: string[] }
+  | { kind: "goToPage"; page: number }
+  | { kind: "focus"; field: string }
+  | { kind: "print" };
+
+export interface ScriptEffects {
+  prompts: ScriptPrompt[];
+  actions: ScriptAction[];
+}
+
+interface RawAlert {
+  message: string;
+  title?: string;
+  field?: string;
+}
+type RawRequest =
+  | { kind: "reset"; fields: string[] }
+  | { kind: "print" }
+  | { kind: "goToPage"; page: number }
+  | { kind: "launchUrl"; url: string }
+  | { kind: "submit"; url: string }
+  | { kind: "focus"; field: string }
+  | { kind: "beep" };
+
+/** Sorts the alerts and requests of one fill: alerts first (in order), then links and submits to ask about, and the rest to do. */
+export function effectsOf(alerts: RawAlert[], requests: RawRequest[]): ScriptEffects {
+  const prompts: ScriptPrompt[] = alerts.map((a) => ({ kind: "alert", title: stripBidi(a.title ?? "").trim() || "Inkwell", message: stripBidi(a.message), field: a.field }));
+  const actions: ScriptAction[] = [];
+  for (const r of requests) {
+    switch (r.kind) {
+      case "launchUrl": {
+        const url = safeLink(r.url);
+        if (url) prompts.push({ kind: "link", url });
+        break;
+      }
+      case "submit": {
+        const url = safeLink(r.url);
+        if (url) prompts.push({ kind: "submit", url });
+        break;
+      }
+      case "reset":
+        actions.push({ kind: "reset", fields: r.fields });
+        break;
+      case "goToPage":
+        actions.push({ kind: "goToPage", page: r.page });
+        break;
+      case "focus":
+        actions.push({ kind: "focus", field: r.field });
+        break;
+      case "print":
+        actions.push({ kind: "print" });
+        break;
+      case "beep":
+        // Nothing to show: a beep has no place in a quiet window.
+        break;
+    }
+  }
+  return { prompts, actions };
+}
+
+/** The first widget of each field in `order` (the calculation order), skipping nodes that are gone. */
+export function calcFields(all: Field[], order: number[]): Field[] {
+  return order.flatMap((n) => {
+    const f = all.find((x) => x.node === n);
+    return f ? [f] : [];
+  });
+}
+
+/** `list` with the item at `from` moved to `to` (clamped to the list). */
+export function moved<T>(list: T[], from: number, to: number): T[] {
+  if (from < 0 || from >= list.length) return list;
+  const t = Math.max(0, Math.min(list.length - 1, to));
+  const next = list.slice();
+  const [x] = next.splice(from, 1);
+  next.splice(t, 0, x);
+  return next;
+}
+
+/** How many lines of the script log are worth a badge: warnings and errors. */
+export const logCount = (log: { level: string }[]): number => log.filter((l) => l.level !== "info").length;

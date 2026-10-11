@@ -398,8 +398,8 @@ export function Consent({ doc }: { doc: number }) {
             <h3>Send this document to Anthropic?</h3>
             <p>
               To answer, Inkwell sends the relevant text of this document (and your questions) to Claude through your
-              Claude Code login. It counts against your Claude plan. Nothing is stored by Inkwell: chats disappear when
-              you close the tab.
+              Claude Code login. It counts against your Claude plan. Claude Code keeps its own transcript of the chat on
+              this computer (~/.claude/projects).
             </p>
           </>
         ) : (

@@ -1,0 +1,389 @@
+//! Measurement annotations: a `/Line` (`/IT /LineDimension`), `/PolyLine` (`/PolyLineDimension`) or `/Polygon`
+//! (`/PolygonDimension`) with a `/Measure`, the value in `/Contents` and an appearance stream that draws it.
+//!
+//! The geometry is made through MuPDF's annotation calls (page space, which MuPDF turns into user space for
+//! `/L` and `/Vertices`); the appearance is written here, because MuPDF's own would not draw the label for a
+//! polyline or polygon. A later colour change through `annot_edit` makes MuPDF redraw the shape without the label.
+
+use super::calc::{Kind, P2, PageGeom, Quantity, Scale, bounds, dist, polygon_centroid};
+use super::dict::{self, MeasureDict};
+use crate::annot::pdf_now;
+use crate::engine::EngineError;
+use mupdf::color::AnnotationColor;
+use mupdf::pdf::{AnnotationFlags, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject, PdfPage};
+use mupdf::{Buffer, Font, Point};
+use serde::Serialize;
+use std::fmt::Write as _;
+
+type Result<T> = std::result::Result<T, EngineError>;
+
+fn bad(m: impl Into<String>) -> EngineError {
+    EngineError::Invalid(m.into())
+}
+
+/// Stroke and label colour of a new measurement.
+const COLOR: [f32; 3] = [0.80, 0.15, 0.12];
+const LABEL_SIZE: f64 = 10.0;
+const LINE_WIDTH: f64 = 1.0;
+
+/// A measurement annotation as the panel lists it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureDto {
+    pub page: u32,
+    pub xref: i32,
+    pub kind: Kind,
+    /// Page space, as the viewer shows the page.
+    pub points: Vec<[f32; 2]>,
+    /// The label as stored.
+    pub contents: String,
+    pub author: String,
+    /// Computed from the points and the annotation's own `/Measure`, so a file from Acrobat shows Acrobat's scale.
+    pub quantity: Quantity,
+    /// `None` when the measure uses a unit this app has no name for (the quantity is still right).
+    pub scale: Option<Scale>,
+}
+
+/// The page's user space <-> page space transform and `/UserUnit`.
+pub fn page_geom(page: &PdfPage) -> Result<PageGeom> {
+    let m = page.ctm()?;
+    PageGeom::new([m.a, m.b, m.c, m.d, m.e, m.f].map(f64::from)).ok_or_else(|| bad("this page has no usable size"))
+}
+
+/// Most points a measurement takes, and the farthest a coordinate may be from the origin (page space, points).
+pub const MAX_POINTS: usize = 10_000;
+pub const MAX_COORD: f32 = 1e7;
+
+fn check_points(kind: Kind, pts: &[[f32; 2]]) -> Result<()> {
+    if pts.len() > MAX_POINTS {
+        return Err(bad(format!("a measurement takes at most {MAX_POINTS} points")));
+    }
+    let enough = match kind {
+        Kind::Distance => pts.len() == 2,
+        _ => pts.len() >= kind.min_points(),
+    };
+    if !enough {
+        return Err(bad(match kind {
+            Kind::Distance => "a distance needs exactly two points",
+            Kind::Perimeter => "a perimeter needs at least two points",
+            Kind::Area => "an area needs at least three points",
+        }));
+    }
+    if pts.iter().any(|p| !p[0].is_finite() || !p[1].is_finite()) {
+        return Err(bad("a point is not a number"));
+    }
+    if pts.iter().any(|p| p[0].abs() > MAX_COORD || p[1].abs() > MAX_COORD) {
+        return Err(bad("a point is too far from the page"));
+    }
+    if pts.windows(2).all(|w| w[0] == w[1]) {
+        return Err(bad("the points are all in the same place"));
+    }
+    Ok(())
+}
+
+/// The measure to use for a measurement starting at `first` (page space): the scale given, else the page's viewport
+/// there, else 1 in = 1 in.
+fn resolve(page: &PdfPage, geom: &PageGeom, scale: Option<&Scale>, first: [f32; 2]) -> Result<MeasureDict> {
+    if let Some(s) = scale {
+        s.validate().map_err(bad)?;
+        return Ok(MeasureDict::from_scale(s, geom.user_unit));
+    }
+    let at = geom.to_user([f64::from(first[0]), f64::from(first[1])]);
+    Ok(dict::viewport_measure(&page.object(), Some(at))?.unwrap_or_else(|| MeasureDict::from_scale(&Scale::default(), geom.user_unit)))
+}
+
+fn user_points(geom: &PageGeom, pts: &[[f32; 2]]) -> Vec<P2> {
+    pts.iter().map(|p| geom.to_user([f64::from(p[0]), f64::from(p[1])])).collect()
+}
+
+/// The value of a measurement without making it (the readout while the user is still clicking points).
+pub fn value(doc: &PdfDocument, page: u32, kind: Kind, pts: &[[f32; 2]], scale: Option<&Scale>) -> Result<Quantity> {
+    check_points(kind, pts)?;
+    let p = doc.load_pdf_page(page as i32)?;
+    let geom = page_geom(&p)?;
+    Ok(resolve(&p, &geom, scale, pts[0])?.quantity(kind, &user_points(&geom, pts)))
+}
+
+/// The scale of the page (its widest viewport) and whether the page has one; 1 in = 1 in when it has none.
+pub fn page_scale(doc: &PdfDocument, page: u32) -> Result<(Scale, bool)> {
+    let p = doc.load_pdf_page(page as i32)?;
+    let uu = page_geom(&p)?.user_unit;
+    Ok(match dict::viewport_measure(&p.object(), None)?.and_then(|m| m.scale(uu)) {
+        Some(s) => (s, true),
+        None => (Scale::default(), false),
+    })
+}
+
+/// Makes `scale` the scale of the whole page (a viewport over the crop box).
+pub fn set_page_scale(doc: &mut PdfDocument, page: u32, scale: &Scale) -> Result<()> {
+    scale.validate().map_err(bad)?;
+    let p = doc.load_pdf_page(page as i32)?;
+    let uu = page_geom(&p)?.user_unit;
+    let mut obj = p.object();
+    dict::set_page_measure(doc, &mut obj, &MeasureDict::from_scale(scale, uu))
+}
+
+/// Creates the measurement on `page` and returns the annotation's xref and value. `pts` are in page space.
+pub fn add(doc: &mut PdfDocument, page: u32, kind: Kind, pts: &[[f32; 2]], scale: Option<&Scale>, author: &str) -> Result<(i32, Quantity)> {
+    check_points(kind, pts)?;
+    let mut p = doc.load_pdf_page(page as i32)?;
+    let geom = page_geom(&p)?;
+    let measure = resolve(&p, &geom, scale, pts[0])?;
+    let q = measure.quantity(kind, &user_points(&geom, pts));
+
+    let points: Vec<Point> = pts.iter().map(|v| Point { x: v[0], y: v[1] }).collect();
+    let mut a = match kind {
+        Kind::Distance => p.add_line_annotation(points[0], points[1])?,
+        Kind::Perimeter => p.add_polyline_annotation(points)?,
+        Kind::Area => p.add_polygon_annotation(points)?,
+    };
+    // No /IC: the light wash of an area lives only in our appearance, so a redraw by another viewer (or by MuPDF) draws
+    // the outline rather than a solid fill.
+    a.set_color(AnnotationColor::Rgb { red: COLOR[0], green: COLOR[1], blue: COLOR[2] })?;
+    a.set_border_width(LINE_WIDTH as f32)?;
+    a.set_flags(AnnotationFlags::IS_PRINT)?;
+    a.set_contents(&q.text)?;
+    if !author.is_empty() {
+        a.set_author(author)?;
+    }
+    let now = pdf_now();
+    let mut o = a.object();
+    o.dict_put("M", PdfObject::new_string(&now)?)?;
+    o.dict_put("CreationDate", PdfObject::new_string(&now)?)?;
+    o.dict_put("Subj", PdfObject::new_string(kind.subject())?)?;
+    o.dict_put("IT", PdfObject::new_name(kind.intent())?)?;
+    let m = measure.write(doc)?;
+    o.dict_put("Measure", m)?;
+    // MuPDF builds its own appearance here; ours replaces it (it draws the label and, for a line, the end ticks).
+    a.update()?;
+    let ap = appearance(doc, &geom, kind, pts, &q.text)?;
+    let mut o = a.object();
+    o.dict_put("Rect", rect_obj(doc, ap.bbox)?)?;
+    let mut ap_dict = doc.new_dict()?;
+    ap_dict.dict_put("N", ap.form)?;
+    o.dict_put("AP", ap_dict)?;
+    Ok((a.xref()?, q))
+}
+
+struct Appearance {
+    form: PdfObject,
+    /// User space.
+    bbox: [f64; 4],
+}
+
+fn rect_obj(doc: &PdfDocument, b: [f64; 4]) -> Result<PdfObject> {
+    let mut arr = doc.new_array()?;
+    for v in b {
+        arr.array_push(PdfObject::new_real(v as f32)?)?;
+    }
+    Ok(arr)
+}
+
+/// Draws the measurement in page space (y down, so text can be set the way it reads on screen) under a `cm` that maps
+/// page space to user space; the form's box is the drawing's box in user space.
+fn appearance(doc: &mut PdfDocument, geom: &PageGeom, kind: Kind, pts: &[[f32; 2]], label: &str) -> Result<Appearance> {
+    let pg: Vec<P2> = pts.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect();
+    let w = text_width(label, LABEL_SIZE);
+    // Where the label sits and which way it reads: along the line, never upside down.
+    let along = |a: P2, b: P2| {
+        let l = dist(a, b).max(1e-9);
+        let d = [(b[0] - a[0]) / l, (b[1] - a[1]) / l];
+        if d[0] < -1e-9 || (d[0].abs() <= 1e-9 && d[1] > 0.0) { [-d[0], -d[1]] } else { d }
+    };
+    let (dir, origin) = match kind {
+        Kind::Area => {
+            // Centred on the centroid, the baseline a third of the text height below it.
+            let c = polygon_centroid(&pg);
+            ([1.0, 0.0], [c[0] - w / 2.0, c[1] + LABEL_SIZE * 0.35])
+        }
+        _ => {
+            let (a, b) = pg
+                .windows(2)
+                .map(|s| (s[0], s[1]))
+                .max_by(|x, y| dist(x.0, x.1).total_cmp(&dist(y.0, y.1)))
+                .unwrap_or((pg[0], pg[1]));
+            let dir = along(a, b);
+            let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+            let up = [dir[1], -dir[0]];
+            let lift = LINE_WIDTH / 2.0 + 3.0;
+            (dir, [mid[0] - dir[0] * w / 2.0 + up[0] * lift, mid[1] - dir[1] * w / 2.0 + up[1] * lift])
+        }
+    };
+    let up = [dir[1], -dir[0]];
+    let text_box = [
+        origin,
+        [origin[0] + dir[0] * w, origin[1] + dir[1] * w],
+        [origin[0] + dir[0] * w + up[0] * LABEL_SIZE, origin[1] + dir[1] * w + up[1] * LABEL_SIZE],
+        [origin[0] + up[0] * LABEL_SIZE, origin[1] + up[1] * LABEL_SIZE],
+    ];
+
+    let f = |v: f64| format!("{v:.4}");
+    let [cr, cg, cb] = COLOR.map(f64::from);
+    let mut s = String::new();
+    let m = geom.page_to_user();
+    let _ = writeln!(s, "q\n{} {} {} {} {} {} cm", f(m[0]), f(m[1]), f(m[2]), f(m[3]), f(m[4]), f(m[5]));
+    let path = |s: &mut String, close: bool| {
+        for (i, p) in pg.iter().enumerate() {
+            let _ = writeln!(s, "{} {} {}", f(p[0]), f(p[1]), if i == 0 { "m" } else { "l" });
+        }
+        if close {
+            s.push_str("h\n");
+        }
+    };
+    let mut extent: Vec<P2> = pg.clone();
+    extent.extend(text_box);
+    match kind {
+        Kind::Distance => {
+            let _ = writeln!(s, "{cr:.3} {cg:.3} {cb:.3} RG {LINE_WIDTH} w 0 J");
+            path(&mut s, false);
+            s.push_str("S\n");
+            // Short ticks across both ends, as on a dimension line.
+            let d = along(pg[0], pg[1]);
+            for e in [pg[0], pg[1]] {
+                let (x0, y0, x1, y1) = (e[0] - d[1] * 5.0, e[1] + d[0] * 5.0, e[0] + d[1] * 5.0, e[1] - d[0] * 5.0);
+                let _ = writeln!(s, "{} {} m {} {} l S", f(x0), f(y0), f(x1), f(y1));
+                extent.extend([[x0, y0], [x1, y1]]);
+            }
+        }
+        Kind::Perimeter => {
+            let _ = writeln!(s, "{cr:.3} {cg:.3} {cb:.3} RG {LINE_WIDTH} w 1 J 1 j");
+            path(&mut s, false);
+            s.push_str("S\n");
+        }
+        Kind::Area => {
+            s.push_str("q /GS1 gs\n");
+            let _ = writeln!(s, "{cr:.3} {cg:.3} {cb:.3} rg {cr:.3} {cg:.3} {cb:.3} RG {LINE_WIDTH} w 1 j");
+            path(&mut s, true);
+            s.push_str("B\nQ\n");
+        }
+    }
+    // The label: a white halo under the coloured text so it reads over drawings.
+    let tm = format!("{} {} {} {} {} {} Tm", f(dir[0]), f(dir[1]), f(up[0]), f(up[1]), f(origin[0]), f(origin[1]));
+    let lit = literal(label);
+    let _ = writeln!(s, "BT /Helv {LABEL_SIZE} Tf 1 Tr 3 w 1 1 1 RG {tm} {lit} Tj ET");
+    let _ = writeln!(s, "BT /Helv {LABEL_SIZE} Tf 0 Tr {cr:.3} {cg:.3} {cb:.3} rg {tm} {lit} Tj ET");
+    s.push_str("Q\n");
+
+    // Box in user space: the page-space extent, padded for the stroke and the halo, through the transform.
+    let (x0, y0, x1, y1) = bounds(&extent);
+    let pad = LINE_WIDTH / 2.0 + 2.0;
+    let corners = [[x0 - pad, y0 - pad], [x1 + pad, y0 - pad], [x1 + pad, y1 + pad], [x0 - pad, y1 + pad]].map(|c| geom.to_user(c));
+    let (bx0, by0, bx1, by1) = bounds(&corners);
+    let bbox = [bx0, by0, bx1, by1];
+
+    let mut font = doc.new_dict()?;
+    font.dict_put("Type", PdfObject::new_name("Font")?)?;
+    font.dict_put("Subtype", PdfObject::new_name("Type1")?)?;
+    font.dict_put("BaseFont", PdfObject::new_name("Helvetica")?)?;
+    font.dict_put("Encoding", PdfObject::new_name("WinAnsiEncoding")?)?;
+    let font = doc.add_object(&font)?;
+    let mut fonts = doc.new_dict()?;
+    fonts.dict_put("Helv", font)?;
+    let mut gs = doc.new_dict()?;
+    gs.dict_put("Type", PdfObject::new_name("ExtGState")?)?;
+    gs.dict_put("ca", PdfObject::new_real(0.12)?)?;
+    gs.dict_put("CA", PdfObject::new_real(1.0)?)?;
+    let mut states = doc.new_dict()?;
+    states.dict_put("GS1", gs)?;
+    let mut res = doc.new_dict()?;
+    res.dict_put("Font", fonts)?;
+    res.dict_put("ExtGState", states)?;
+    let mut dict = doc.new_dict()?;
+    dict.dict_put("Type", PdfObject::new_name("XObject")?)?;
+    dict.dict_put("Subtype", PdfObject::new_name("Form")?)?;
+    dict.dict_put("BBox", rect_obj(doc, bbox)?)?;
+    dict.dict_put("Resources", res)?;
+    let buf = Buffer::from_bytes(s.as_bytes())?;
+    let form = doc.add_stream(&buf, Some(&dict), false)?;
+    Ok(Appearance { form, bbox })
+}
+
+/// The advance of `text` in Helvetica at `size`, from MuPDF's metrics for the base face.
+fn text_width(text: &str, size: f64) -> f64 {
+    let font = Font::new("Helvetica").ok();
+    let em: f64 = text
+        .chars()
+        .map(|c| {
+            font.as_ref()
+                .and_then(|f| f.encode_character(c as i32).ok().filter(|g| *g > 0 || c == ' ').and_then(|g| f.advance_glyph(g).ok()))
+                .map_or(0.55, f64::from)
+        })
+        .sum();
+    em * size
+}
+
+/// A PDF literal string in WinAnsiEncoding (Latin-1 range; anything else becomes `?`), delimiters escaped.
+fn literal(text: &str) -> String {
+    let mut out = String::from("(");
+    for c in text.chars() {
+        let b = match c {
+            '\u{20}'..='\u{7e}' | '\u{a0}'..='\u{ff}' => c,
+            _ => '?',
+        };
+        match b {
+            '(' | ')' | '\\' => {
+                out.push('\\');
+                out.push(b);
+            }
+            c if (c as u32) < 0x80 => out.push(c),
+            c => {
+                let _ = write!(out, "\\{:03o}", c as u32);
+            }
+        }
+    }
+    out.push(')');
+    out
+}
+
+fn text_of(o: &PdfObject, key: &str) -> String {
+    o.get_dict(key).ok().flatten().and_then(|v| v.as_string().ok()).unwrap_or_default()
+}
+
+fn dto(page: u32, a: &PdfAnnotation, kind: Kind, pts: Vec<[f32; 2]>, geom: &PageGeom, measure: &MeasureDict) -> Result<MeasureDto> {
+    let o = a.object();
+    let quantity = measure.quantity(kind, &user_points(geom, &pts));
+    Ok(MeasureDto {
+        page,
+        xref: a.xref()?,
+        kind,
+        points: pts,
+        contents: text_of(&o, "Contents"),
+        author: text_of(&o, "T"),
+        quantity,
+        scale: measure.scale(geom.user_unit),
+    })
+}
+
+/// Every measurement annotation (a line, polyline or polygon with a readable `/Measure`) in page order.
+pub fn list(doc: &PdfDocument) -> Result<Vec<MeasureDto>> {
+    let mut out = Vec::new();
+    for pg in 0..doc.page_count()? as u32 {
+        let page = doc.load_pdf_page(pg as i32)?;
+        // A page whose transform cannot be inverted (/UserUnit 0) has nothing we can value; the rest still list.
+        let Ok(geom) = page_geom(&page) else { continue };
+        for a in page.annotations() {
+            let kind = match a.r#type() {
+                Ok(PdfAnnotationType::Line) => Kind::Distance,
+                Ok(PdfAnnotationType::PolyLine) => Kind::Perimeter,
+                Ok(PdfAnnotationType::Polygon) => Kind::Area,
+                _ => continue,
+            };
+            // One malformed annotation (no readable /Measure, bad geometry) is left out, not the whole list.
+            let Some(measure) = a.object().get_dict("Measure").ok().flatten().and_then(|m| MeasureDict::read(&m).ok().flatten()) else {
+                continue;
+            };
+            let pts: Result<Vec<[f32; 2]>> = if kind == Kind::Distance {
+                a.line().map(|(s, e)| vec![[s.x, s.y], [e.x, e.y]]).map_err(Into::into)
+            } else {
+                a.vertices().map(|v| v.iter().map(|p| [p.x, p.y]).collect()).map_err(Into::into)
+            };
+            if let Ok(pts) = pts
+                && pts.len() >= 2
+                && let Ok(d) = dto(pg, &a, kind, pts, &geom, &measure)
+            {
+                out.push(d);
+            }
+        }
+    }
+    Ok(out)
+}

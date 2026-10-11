@@ -20,6 +20,8 @@ import { usePrint } from "./printStore";
 import { openEditSection, useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 import { useSheets } from "./organizePlus";
+import { useDocJs } from "./docJsStore";
+import { createPortfolio } from "./portfolioStore";
 
 export interface Command {
   id: string;
@@ -127,6 +129,8 @@ export const commands: Command[] = [
   { id: "extract-page", title: "Extract this page…", needsDoc: true, run: withDoc((d) => void edits.extract(d.id, [d.currentPage])) },
   { id: "split", title: "Split into single pages", needsDoc: true, run: withDoc((d) => void edits.split(d.id, 1)) },
   { id: "merge", title: "Combine files…", run: () => edits.combineFiles() },
+  { id: "create-portfolio", title: "Create PDF Portfolio…", run: () => void createPortfolio() },
+  { id: "doc-javascript", title: "Document JavaScript…", needsDoc: true, run: withDoc((d) => useDocJs.getState().open(d.id)) },
   {
     id: "page-labels",
     title: "Page labels…",
@@ -291,8 +295,15 @@ export const commands: Command[] = [
     id: "a11y",
     title: "Check accessibility…",
     needsDoc: true,
-    run: () => (useA11y.getState().open ? useA11y.getState().setOpen(false) : openA11y()),
+    run: () => {
+      const a = useA11y.getState();
+      if (a.open && a.view === "check") a.setOpen(false);
+      else openA11y("check");
+    },
   },
+  { id: "a11y-order", title: "Reading order tool…", needsDoc: true, run: () => openA11y("order") },
+  { id: "a11y-tags", title: "Tags (tag tree)…", needsDoc: true, run: () => openA11y("tags") },
+  { id: "a11y-matterhorn", title: "Matterhorn results…", needsDoc: true, run: () => openA11y("matterhorn") },
   {
     id: "preflight",
     title: "Preflight (PDF/A, PDF/UA, PDF/X)…",

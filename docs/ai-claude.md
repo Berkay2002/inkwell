@@ -18,8 +18,9 @@ Hard line, enforced in `ai/claude/exe.rs` and covered by tests:
   `CLAUDE_CODE_OAUTH_TOKEN` for the child;
 * the child's environment is an **allowlist**, not a filter: only the variables a Windows program
   needs (PATH, PATHEXT, SystemRoot, TEMP/TMP, USERPROFILE/HOME, APPDATA/LOCALAPPDATA, ProgramData,
-  the ProgramFiles family, LANG/LC_ALL, the proxy and CA-bundle variables) plus `CLAUDE_CONFIG_DIR`
-  and `CLAUDE_CODE_GIT_BASH_PATH` reach it. Every other variable of Inkwell's process, including any
+  the ProgramFiles family, LANG/LC_ALL, the proxy and CA-bundle variables; on Linux and macOS also
+  USER, LOGNAME, TMPDIR, SHELL, TZ and `LC_*` / `XDG_*`) plus `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_CODE_GIT_BASH_PATH` reach it. Every other variable of Inkwell's process, including any
   `CLAUDE*` / `ANTHROPIC*` one (an Inkwell started from a Claude Code terminal would pass on that
   session's ids and message socket) and every unrelated secret, stays out;
 * when the user's own environment sets one of the variables above (or switches to Bedrock / Vertex /

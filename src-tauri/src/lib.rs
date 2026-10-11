@@ -1,6 +1,7 @@
 pub mod a11y;
 pub mod ai;
 pub mod annot;
+pub mod batch;
 pub mod forms;
 pub mod compress;
 pub mod convert;
@@ -11,11 +12,13 @@ pub mod history_ipc;
 pub mod imageedit;
 pub mod links;
 pub mod marks;
+pub mod measure;
 pub mod ocr;
 pub mod organize;
 pub mod outline;
 pub mod paths;
 pub mod preflight;
+pub mod prepress;
 pub mod print;
 pub mod protect;
 pub mod recents;
@@ -233,8 +236,9 @@ async fn authenticate(app: tauri::AppHandle, eng: Eng<'_>, hist: State<'_, Arc<H
 }
 
 #[tauri::command]
-fn close_document(eng: Eng<'_>, hist: State<'_, Arc<History>>, doc: DocId) {
+fn close_document(eng: Eng<'_>, hist: State<'_, Arc<History>>, pre: State<'_, Arc<prepress::app::Prepress>>, doc: DocId) {
     hist.forget(doc);
+    pre.drop_doc(doc);
     eng.close(doc);
 }
 
@@ -551,6 +555,52 @@ async fn compress_estimate(
     tool_blocking(move || tools::estimate_for_ui(&eng, doc, &guard.cancel)).await
 }
 
+/// The three presets as `Options`: what the Advanced settings start from.
+#[tauri::command]
+fn compress_preset_options() -> std::collections::BTreeMap<&'static str, compress::Options> {
+    use compress::Preset;
+    [("smallest", Preset::Smallest), ("balanced", Preset::Balanced), ("highQuality", Preset::HighQuality)]
+        .into_iter()
+        .map(|(k, p)| (k, compress::Options::preset(p)))
+        .collect()
+}
+
+/// The Advanced settings' size, on the same sample. `job` as above.
+#[tauri::command]
+async fn compress_estimate_custom(
+    eng: Eng<'_>,
+    jobs: JobState<'_>,
+    job: u64,
+    doc: DocId,
+    options: compress::Options,
+) -> Result<compress::estimate::Estimate, tools::ToolError> {
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    tool_blocking(move || tools::estimate_custom_for_ui(&eng, doc, &options, &guard.cancel)).await
+}
+
+#[tauri::command]
+async fn compress_presets(app: tauri::AppHandle) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::load(&dir))).await
+}
+
+#[tauri::command]
+async fn compress_preset_save(
+    app: tauri::AppHandle,
+    name: String,
+    options: compress::Options,
+) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::save(&dir, &name, &options)?)).await
+}
+
+#[tauri::command]
+async fn compress_preset_delete(app: tauri::AppHandle, name: String) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::delete(&dir, &name)?)).await
+}
+
 /// `job`: an id the UI picks, for `tool_cancel`. `req.save_to`: a save token from `pick_save`.
 #[tauri::command]
 async fn compress_start(
@@ -842,6 +892,8 @@ pub fn run() {
     // a saved redaction then replaces the versions from before it (history_ipc::History::saved)
     engine::edit::set_redaction_hook(move |doc| h.on_redactions_applied(doc));
     let autosave = (hist.clone(), engine.clone());
+    let prepress = Arc::new(prepress::app::Prepress::default());
+    let proto_prepress = prepress.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -849,14 +901,35 @@ pub fn run() {
         .manage(ai::Hub::new())
         .manage(Paths::default())
         .manage(Arc::new(tools::Jobs::default()))
+        .manage(Arc::new(measure::SnapCache::default()))
         .manage(Arc::new(search::files::FolderSearches::default()))
         .manage(hist)
+        .manage(prepress)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 on_drop(window, paths);
             }
         })
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
+            // `/p/...`: a page tile in a print production view (plates, coverage)
+            if let Some((key, view, stream, epoch, rank)) = prepress::app::parse_tile_request(request.uri()) {
+                proto_prepress.request_tile(
+                    &proto_engine,
+                    key,
+                    view,
+                    stream,
+                    epoch,
+                    rank,
+                    Box::new(move |outcome| {
+                        responder.respond(match outcome {
+                            TileOutcome::Ready(t) => reply(200, t.rgba.as_ref().clone(), Some((t.w, t.h))),
+                            TileOutcome::Stale => reply(410, Vec::new(), None),
+                            TileOutcome::Failed(e) => reply(500, e.into_bytes(), None),
+                        })
+                    }),
+                );
+                return;
+            }
             let Some((key, stream, epoch, rank)) = parse_tile_request(request.uri()) else {
                 return responder.respond(reply(404, Vec::new(), None));
             };
@@ -920,6 +993,11 @@ pub fn run() {
             merge_files,
             compress_audit,
             compress_estimate,
+            compress_estimate_custom,
+            compress_preset_options,
+            compress_presets,
+            compress_preset_save,
+            compress_preset_delete,
             compress_start,
             protect::app::security_info,
             protect::app::protect_apply,
@@ -930,6 +1008,14 @@ pub fn run() {
             marks::app::marks_remove,
             marks::app::marks_bates_files,
             tool_cancel,
+            batch::app::batch_list,
+            batch::app::batch_save,
+            batch::app::batch_delete,
+            batch::app::batch_import,
+            batch::app::batch_export,
+            batch::app::batch_validate,
+            batch::app::batch_run,
+            batch::app::batch_cancel,
             ocr_languages,
             ocr_choose_tesseract,
             ocr_clear_tesseract,
@@ -943,6 +1029,25 @@ pub fn run() {
             a11y::app::a11y_fix,
             a11y::app::a11y_preview,
             a11y::app::a11y_export_report,
+            prepress::app::prepress_separations,
+            prepress::app::prepress_view,
+            prepress::app::prepress_ink,
+            prepress::app::prepress_inspect,
+            prepress::app::prepress_convert,
+            prepress::app::prepress_boxes,
+            prepress::app::prepress_marks,
+            a11y::app::a11y_protection,
+            a11y::app::a11y_reading_order,
+            a11y::app::a11y_tags,
+            a11y::app::a11y_tag_problems,
+            a11y::app::a11y_reorder,
+            a11y::app::a11y_set_role,
+            a11y::app::a11y_artifact,
+            a11y::app::a11y_merge_regions,
+            a11y::app::a11y_merge_many,
+            a11y::app::a11y_split_region,
+            a11y::app::a11y_edit_tag,
+            a11y::app::a11y_move_tag,
             preflight::app::preflight_check,
             preflight::app::preflight_claim,
             preflight::app::preflight_fix,
@@ -955,14 +1060,28 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            measure::app::measure_scale_get,
+            measure::app::measure_scale_set,
+            measure::app::measure_add,
+            measure::app::measure_value,
+            measure::app::measure_list,
+            measure::app::measure_snap,
             forms::app::forms_list,
             forms::app::forms_set_value,
             forms::app::forms_reset,
+            forms::app::forms_scripts,
+            forms::app::forms_scripts_enable,
+            forms::app::doc_js_list,
+            forms::app::doc_js_source,
+            forms::app::doc_js_check,
+            forms::app::doc_js_apply,
             forms::app::forms_add,
             forms::app::forms_add_many,
             forms::app::forms_move,
             forms::app::forms_edit,
             forms::app::forms_delete,
+            forms::app::forms_calc_order,
+            forms::app::forms_format_preview,
             forms::app::forms_tab_order,
             forms::app::forms_arrange,
             forms::app::forms_detect,
@@ -975,6 +1094,10 @@ pub fn run() {
             organize::app::attachment_open,
             organize::app::attachments_remove,
             organize::app::attachment_describe,
+            organize::app::portfolio_info,
+            organize::app::pick_portfolio_files,
+            organize::app::portfolio_create,
+            organize::app::portfolio_extract_all,
             organize::app::labels_list,
             organize::app::labels_set,
             organize::app::labels_remove,
@@ -1009,6 +1132,7 @@ pub fn run() {
             print::app::print_plan,
             print::app::print_preview,
             print::app::print_start,
+            print::app::print_save_pdf,
             recents::stat_files,
             recents::recents_load,
             recents::recents_save,
@@ -1033,6 +1157,7 @@ pub fn run() {
             }
             app.manage(Arc::new(tools::paths::ToolPaths::load(app.handle())));
             ai::restore_claude_path(app.handle(), &app.state::<Arc<ai::Hub>>());
+            batch::app::sweep_at_startup(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -14,6 +14,13 @@ pub struct FileId {
 
 /// The file id, only where it is stable and unique: NTFS and ReFS. FAT/exFAT, SMB shares and cloud
 /// drives can return 0 or reuse ids, so there the caller falls back to content, /ID and path.
+/// Non-Windows builds (engine tests on macOS/Linux): no stable id, callers fall back.
+#[cfg(not(windows))]
+pub fn file_id(_path: &Path) -> Option<FileId> {
+    None
+}
+
+#[cfg(windows)]
 pub fn file_id(path: &Path) -> Option<FileId> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
