@@ -221,7 +221,7 @@ function Options({ sheet }: { sheet: PrintSheetState }) {
               items={[
                 { id: "fit", label: "Fit" },
                 { id: "shrink", label: "Shrink" },
-                { id: "actual", label: "Actual size" },
+                { id: "actual", label: "Actual" },
                 { id: "custom", label: "Custom" },
               ]}
               onChange={(sizeMode) => set({ sizeMode })}

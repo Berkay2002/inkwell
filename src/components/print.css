@@ -1,7 +1,7 @@
 /* The Print sheet: centred over the viewer, the page as it comes out on the left, the options on the right. */
-.pr-scrim {
+.scrim.pr-scrim {
   align-items: center;
-  padding-top: 0;
+  padding: 0;
   z-index: 20;
 }
 .pr-sheet {
@@ -37,6 +37,7 @@
 .pr-main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-rows: minmax(0, 1fr);
   flex: 1;
   min-height: 0;
 }
@@ -44,6 +45,7 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   background: var(--bg);
 }
 .pr-stage {
@@ -54,10 +56,13 @@
   justify-content: center;
   min-height: 0;
   padding: 20px;
+  overflow: hidden;
 }
 .pr-paper {
   max-width: 100%;
   max-height: 100%;
+  min-height: 0;
+  object-fit: contain;
   background: #fff;
   box-shadow: var(--shadow-2, var(--shadow-3));
   transition: opacity 0.12s;
@@ -99,6 +104,7 @@
   border-left: 1px solid var(--border);
 }
 .pr-body {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -139,11 +145,17 @@
   gap: 8px;
   min-height: 32px;
 }
-.pr-seg {
+.ax-seg.pr-seg {
+  display: flex;
   width: 100%;
+  margin: 0;
+  box-sizing: border-box;
 }
 .pr-seg button {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  padding-inline: 4px;
+  white-space: nowrap;
 }
 .pr-foot {
   display: flex;
