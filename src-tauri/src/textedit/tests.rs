@@ -423,3 +423,117 @@ fn study_sample_hidden_layer_is_flagged() {
     assert_eq!((secret.editable, secret.issue), (false, Some(Issue::Hidden)));
     assert!(tb.blocks.iter().any(|b| b.editable), "the visible text stays editable");
 }
+
+fn add_box(eng: &Engine, id: DocId, t: &str, at: [f32; 2], width: Option<f32>) -> EditState {
+    let new = NewTextBox { text: t.into(), size: 14.0, color: [0.0, 0.0, 0.0], at, width };
+    add(eng, id, rev(eng, id), 0, &new, EditSource::User).unwrap()
+}
+
+#[test]
+fn line_spacing_bold_and_italic_are_changes_of_their_own() {
+    let d = dir("spacing");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let b0 = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    assert!((b0.line_spacing.unwrap() - 14.0 / 12.0).abs() < 0.05, "{:?}", b0.line_spacing);
+    assert_eq!(blocks(&eng, id, 0).unwrap().blocks[0].line_spacing, None, "one line has no spacing");
+
+    let ch = BlockChange { line_spacing: Some(2.0), ..Default::default() };
+    let r = edit(&eng, id, rev(&eng, id), 0, 1, &ch, EditSource::User).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Format text on p. 1"));
+    assert!(r.fallback.is_none());
+    let b = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    assert!((b.line_spacing.unwrap() - 2.0).abs() < 0.05, "{:?}", b.line_spacing);
+    assert_eq!(b.text, b0.text);
+    let bad = BlockChange { line_spacing: Some(9.0), ..Default::default() };
+    assert!(edit(&eng, id, rev(&eng, id), 0, 1, &bad, EditSource::User).is_err());
+
+    let ch = BlockChange { bold: Some(true), italic: Some(true), ..Default::default() };
+    let r = edit(&eng, id, rev(&eng, id), 0, 1, &ch, EditSource::User).unwrap();
+    let fb = r.fallback.expect("a restyled block is set in a standard face");
+    assert_eq!((fb.font.as_str(), fb.embedded), ("Helvetica-BoldOblique", false), "{fb:?}");
+    assert!(fb.reason.contains("bold italic"), "{}", fb.reason);
+    let b = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    assert!(b.bold && b.italic, "{b:?}");
+    assert_eq!(b.text, b0.text);
+
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    let again = blocks(&eng2, id2, 0).unwrap().blocks[1].clone();
+    assert!(again.bold && again.italic && (again.line_spacing.unwrap() - 2.0).abs() < 0.05, "{again:?}");
+}
+
+#[test]
+fn adds_a_text_box_that_undoes_and_survives_save_and_reopen() {
+    let d = dir("add");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let s = add_box(&eng, id, "Paid in full", [100.0, 400.0], None);
+    assert_eq!(s.undo.as_deref(), Some("Add text on p. 1"));
+    assert!(s.dirty);
+    let tb = blocks(&eng, id, 0).unwrap();
+    assert_eq!(tb.blocks.len(), 3, "{:?}", tb.blocks);
+    let n = tb.blocks.iter().find(|b| b.text == "Paid in full").expect("the new block is listed");
+    assert!((n.rect[0] - 100.0).abs() < 1.0 && (n.rect[1] - 400.0).abs() < 4.0, "{:?}", n.rect);
+    assert_eq!((n.font.as_str(), n.size.round(), n.editable), ("Helvetica", 14.0, true));
+    assert!(text(&eng, id).contains("Quarterly report"), "the page keeps its text: {}", text(&eng, id));
+
+    // The new block is an ordinary one: it can be edited.
+    let i = n.index;
+    set_text(&eng, id, i, "Paid in full on 3 May");
+    assert!(text(&eng, id).contains("Paid in full on 3 May"));
+    eng.undo(id).unwrap();
+    eng.undo(id).unwrap();
+    assert_eq!(blocks(&eng, id, 0).unwrap().blocks.len(), 2);
+    assert!(!eng.edit_state(id).unwrap().dirty);
+    eng.redo(id).unwrap();
+
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    let t = eng2.page_text(id2, 0).unwrap().iter().map(|l| l.t.trim().to_string()).collect::<Vec<_>>().join(" ");
+    assert!(t.contains("Paid in full") && t.contains("Quarterly report"), "{t}");
+}
+
+#[test]
+fn an_added_box_wraps_to_its_width_and_takes_other_scripts() {
+    let d = dir("add-wrap");
+    let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    add_box(&eng, id, "The deposit is returned within thirty days of the end of the lease.", [72.0, 300.0], Some(150.0));
+    let b = blocks(&eng, id, 0).unwrap().blocks.into_iter().find(|b| b.text.starts_with("The deposit")).unwrap();
+    assert!(b.lines.len() >= 3 && b.lines.iter().all(|l| l[2] - l[0] <= 150.5), "{:?}", b.lines);
+    // Greek needs more than WinAnsi: the standard face is embedded.
+    add_box(&eng, id, "Ευχαριστώ", [72.0, 500.0], None);
+    assert!(text(&eng, id).contains("Ευχαριστώ"), "{}", text(&eng, id));
+    assert!(add(&eng, id, rev(&eng, id), 0, &NewTextBox { text: "  ".into(), size: 12.0, color: [0.0; 3], at: [0.0, 0.0], width: None }, EditSource::User).is_err());
+    assert!(add(&eng, id, rev(&eng, id) + 1, 0, &NewTextBox { text: "x".into(), size: 12.0, color: [0.0; 3], at: [0.0, 0.0], width: None }, EditSource::User).is_err());
+}
+
+#[test]
+fn adding_text_again_does_not_nest_another_wrapper() {
+    let d = dir("add-twice");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    for (i, t) in ["First note", "Second note", "Third note"].iter().enumerate() {
+        add_box(&eng, id, t, [72.0, 300.0 + 40.0 * i as f32], None);
+    }
+    eng.save(id, None).unwrap();
+    // The page's contents: the original stream, one `q` before and one `Q` after it, one stream per box.
+    let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+    let contents = doc.find_page(0).unwrap().get_dict("Contents").unwrap().unwrap();
+    assert_eq!(contents.len().unwrap(), 1 + 2 + 3);
+    let t = text(&eng, id);
+    assert!(t.contains("First note") && t.contains("Second note") && t.contains("Third note") && t.contains("Quarterly report"), "{t}");
+}
+
+#[test]
+fn text_added_to_a_rotated_page_reads_upright() {
+    let d = dir("add-rotated");
+    let bytes = String::from_utf8(pdf(TWO_BLOCKS, &[("F1", HELV)], &[])).unwrap().replace("/MediaBox [0 0 612 792]", "/MediaBox [0 0 612 792] /Rotate 90");
+    let (eng, id, _) = open(&d, bytes.as_bytes());
+    // The page as shown is 792 wide and 612 tall.
+    add_box(&eng, id, "Rotated note", [200.0, 100.0], None);
+    let b = blocks(&eng, id, 0).unwrap().blocks.into_iter().find(|b| b.text == "Rotated note").expect("listed");
+    assert!(b.rect[2] - b.rect[0] > b.rect[3] - b.rect[1], "a horizontal line in page space: {:?}", b.rect);
+    assert!((b.rect[0] - 200.0).abs() < 1.5 && (b.rect[1] - 100.0).abs() < 4.0, "{:?}", b.rect);
+}

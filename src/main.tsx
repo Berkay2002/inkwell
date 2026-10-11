@@ -8,13 +8,14 @@ import { useHistory } from "./lib/historyStore";
 import { useConvert } from "./lib/convertStore";
 import { usePrint } from "./lib/printStore";
 import { useProtect } from "./lib/protectStore";
+import { useTextEdit } from "./lib/textEdit";
 import { useTools } from "./lib/toolsStore";
 import { redactApi, useRedact } from "./lib/redact";
 import { useStore } from "./store";
 import "./styles.css";
 
 // Handle for automated checks (benchmarks, screenshots); harmless in normal use.
-(window as unknown as { __inkwell: unknown }).__inkwell = { useStore, useAi, useHistory, useTools, useConvert, useRedact, redactApi, useAnnot, usePrint, useProtect };
+(window as unknown as { __inkwell: unknown }).__inkwell = { useStore, useAi, useHistory, useTools, useConvert, useRedact, redactApi, useAnnot, usePrint, useProtect, useTextEdit };
 trackReadingPosition(useStore);
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
