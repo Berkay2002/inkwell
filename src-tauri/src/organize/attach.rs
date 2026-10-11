@@ -40,6 +40,8 @@ pub struct NewFile {
     pub name: String,
     pub data: Vec<u8>,
     pub description: String,
+    /// The file's own time of last change (Unix seconds), kept as /Params /ModDate.
+    pub modified: Option<i64>,
 }
 
 const MAX_ENTRIES: usize = 50_000;
@@ -48,9 +50,9 @@ const MAX_ENTRIES: usize = 50_000;
 pub const MAX_ATTACH: u64 = 512 << 20;
 
 /// One entry of the embedded-files name tree.
-struct Entry {
-    key: String,
-    spec: PdfObject,
+pub(super) struct Entry {
+    pub(super) key: String,
+    pub(super) spec: PdfObject,
 }
 
 fn names_root(doc: &PdfDocument) -> Result<Option<PdfObject>> {
@@ -59,7 +61,7 @@ fn names_root(doc: &PdfDocument) -> Result<Option<PdfObject>> {
 }
 
 /// The tree's entries, flattened (a /Kids tree too), in key order.
-fn tree(doc: &PdfDocument) -> Result<Vec<Entry>> {
+pub(super) fn tree(doc: &PdfDocument) -> Result<Vec<Entry>> {
     fn walk(node: &PdfObject, depth: usize, out: &mut Vec<Entry>) -> Result<()> {
         let Some(node) = node.resolve()? else { return Ok(()) };
         if depth > 8 || !node.is_dict()? {
@@ -93,7 +95,7 @@ fn tree(doc: &PdfDocument) -> Result<Vec<Entry>> {
 }
 
 /// Writes `entries` as one flat, sorted name tree (none: the entry is removed).
-fn write_tree(doc: &mut PdfDocument, mut entries: Vec<Entry>) -> Result<()> {
+pub(super) fn write_tree(doc: &mut PdfDocument, mut entries: Vec<Entry>) -> Result<()> {
     let mut catalog = doc.catalog()?;
     let mut names = match get(&catalog, "Names").and_then(|n| n.resolve().ok().flatten()).filter(|n| n.is_dict().unwrap_or(false)) {
         Some(n) => n,
@@ -124,7 +126,7 @@ fn write_tree(doc: &mut PdfDocument, mut entries: Vec<Entry>) -> Result<()> {
 }
 
 /// The embedded file's stream of a file specification.
-fn stream_of(spec: &PdfObject) -> Option<PdfObject> {
+pub(super) fn stream_of(spec: &PdfObject) -> Option<PdfObject> {
     let spec = spec.resolve().ok().flatten()?;
     if !spec.is_dict().ok()? {
         return None;
@@ -137,7 +139,7 @@ fn stream_of(spec: &PdfObject) -> Option<PdfObject> {
         .find(|s| s.is_stream().unwrap_or(false))
 }
 
-fn info(spec: &PdfObject, fallback: &str, id: String, kind: AttachKind, page: Option<u32>, note: Option<String>) -> Attachment {
+pub(super) fn info(spec: &PdfObject, fallback: &str, id: String, kind: AttachKind, page: Option<u32>, note: Option<String>) -> Attachment {
     let resolved = spec.resolve().ok().flatten().filter(|s| s.is_dict().unwrap_or(false));
     let text = |k: &str| resolved.as_ref().and_then(|s| get(s, k)).and_then(|v| v.as_string().ok()).filter(|s| !s.is_empty());
     // The name comes from the file: no folder, nothing that reorders or hides text, nothing a file
@@ -192,7 +194,7 @@ pub fn list(doc: &PdfDocument) -> Result<Vec<Attachment>> {
 }
 
 /// Where an attachment's file specification is.
-fn locate(doc: &PdfDocument, id: &str) -> Result<PdfObject> {
+pub(super) fn locate(doc: &PdfDocument, id: &str) -> Result<PdfObject> {
     if let Some(key) = id.strip_prefix("n:") {
         return tree(doc)?.into_iter().find(|e| e.key == key).map(|e| e.spec).ok_or_else(|| bad("that attachment is no longer in the document"));
     }
@@ -230,7 +232,7 @@ pub fn read_data_capped(doc: &PdfDocument, id: &str, cap: usize) -> Result<(Stri
 }
 
 /// A name no other entry of the tree has: `x.txt`, then `x (2).txt`, `x (3).txt` …
-fn unique(taken: &HashSet<String>, name: &str) -> String {
+pub(super) fn unique(taken: &HashSet<String>, name: &str) -> String {
     if !taken.contains(&name.to_lowercase()) {
         return name.to_string();
     }
@@ -250,7 +252,7 @@ fn is_invisible(c: char) -> bool {
 }
 
 /// `s` without control characters (a line break stays) and without the invisible ones.
-fn strip_invisible(s: &str) -> String {
+pub(super) fn strip_invisible(s: &str) -> String {
     s.chars().filter(|&c| (!c.is_control() || c == '\n') && !is_invisible(c)).collect()
 }
 
@@ -275,7 +277,7 @@ pub fn clean_name(name: &str) -> String {
     }
 }
 
-fn mime_for(name: &str) -> &'static str {
+pub(super) fn mime_for(name: &str) -> &'static str {
     match name.rsplit('.').next().map(str::to_lowercase).as_deref() {
         Some("pdf") => "application/pdf",
         Some("txt" | "log" | "md") => "text/plain",
@@ -303,22 +305,29 @@ pub fn add(doc: &mut PdfDocument, files: &[NewFile]) -> Result<Vec<u32>> {
     let existing = tree(doc)?;
     write_tree(doc, existing)?;
     for f in files {
-        let taken: HashSet<String> = tree(doc)?.into_iter().map(|e| e.key.to_lowercase()).collect();
-        let name = unique(&taken, &clean_name(&f.name));
-        let mut opts = EmbeddedFileOptions::new(&name);
-        opts.mime_type = Some(mime_for(&name));
-        opts.add_checksum = true;
-        let made = doc.add_embedded_file(&name, &f.data, opts)?;
-        if !f.description.is_empty() {
-            if let Some(mut spec) = doc.new_indirect(made.xref, 0)?.resolve()? {
-                put_str(&mut spec, "Desc", &f.description)?;
-            }
-        }
-        // MuPDF appended it; keep the keys in order.
-        let all = tree(doc)?;
-        write_tree(doc, all)?;
+        add_one(doc, f)?;
     }
     Ok(Vec::new())
+}
+
+/// Attaches one file to a document whose tree is already flat; the key it got (its name, made unique).
+pub(super) fn add_one(doc: &mut PdfDocument, f: &NewFile) -> Result<String> {
+    let taken: HashSet<String> = tree(doc)?.into_iter().map(|e| e.key.to_lowercase()).collect();
+    let name = unique(&taken, &clean_name(&f.name));
+    let mut opts = EmbeddedFileOptions::new(&name);
+    opts.mime_type = Some(mime_for(&name));
+    opts.add_checksum = true;
+    opts.modified = f.modified;
+    let made = doc.add_embedded_file(&name, &f.data, opts)?;
+    if !f.description.is_empty() {
+        if let Some(mut spec) = doc.new_indirect(made.xref, 0)?.resolve()? {
+            put_str(&mut spec, "Desc", &f.description)?;
+        }
+    }
+    // MuPDF appended it; keep the keys in order.
+    let all = tree(doc)?;
+    write_tree(doc, all)?;
+    Ok(name)
 }
 
 /// Takes the attachments out (document-level: the name tree and /AF; annotations: the page).
@@ -434,7 +443,7 @@ mod tests {
     #[test]
     fn a_stream_over_the_cap_is_refused() {
         let mut doc = PdfDocument::new();
-        let file = NewFile { name: "zeros.bin".into(), data: vec![0u8; 3 << 20], description: String::new() };
+        let file = NewFile { name: "zeros.bin".into(), data: vec![0u8; 3 << 20], description: String::new(), modified: None };
         add(&mut doc, &[file]).unwrap();
         let (name, bytes) = read_data_capped(&doc, "n:zeros.bin", 4 << 20).unwrap();
         assert_eq!((name.as_str(), bytes.len()), ("zeros.bin", 3 << 20));
@@ -449,7 +458,7 @@ mod tests {
         use flate2::{Compression, write::ZlibEncoder};
         use std::io::Write;
         let mut doc = PdfDocument::new();
-        let file = NewFile { name: "bomb.bin".into(), data: vec![1u8; 16], description: String::new() };
+        let file = NewFile { name: "bomb.bin".into(), data: vec![1u8; 16], description: String::new(), modified: None };
         add(&mut doc, &[file]).unwrap();
         let spec = locate(&doc, "n:bomb.bin").unwrap();
         let mut stream = stream_of(&spec).unwrap();

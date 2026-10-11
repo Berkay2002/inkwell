@@ -25,11 +25,13 @@ import { CombineSheet } from "./components/CombineSheet";
 import { LabelsSheet, TransitionsSheet } from "./components/OrganizePlus";
 import { Presentation } from "./components/Presentation";
 import { ToolsPanel } from "./components/ToolsPanel";
+import { PortfolioCoverNote, PortfolioView } from "./components/PortfolioView";
 import { Viewer } from "./components/Viewer";
 import { type FileRef, initialFiles } from "./lib/api";
 import { commandFor } from "./lib/commands";
 import { useCombine } from "./lib/combineStore";
 import { startHistoryEvents, useHistory } from "./lib/historyStore";
+import { usePortfolio } from "./lib/portfolioStore";
 import { guardWindowClose } from "./lib/edit";
 import { usePagesDark } from "./lib/usePagesDark";
 import { useToolPrefs } from "./lib/toolPrefs";
@@ -47,6 +49,7 @@ export default function App() {
   const compare = useHistory((s) => s.compare);
   const viewing = useHistory((s) => (doc ? s.selected[doc.id] : undefined));
   const showCompare = compare != null && (compare.doc === null || compare.doc === doc?.id);
+  const portfolio = usePortfolio((s) => (doc ? s.docs[doc.id] : undefined));
 
   useEffect(() => {
     if (theme === "system") document.documentElement.removeAttribute("data-theme");
@@ -79,6 +82,11 @@ export default function App() {
   // Page labels show in the page box and under every thumbnail: read again with every generation.
   useEffect(() => {
     if (doc) useStore.getState().loadLabels(doc.id);
+  }, [doc?.id, doc?.rev]);
+
+  // A PDF Portfolio (a /Collection over its embedded files) opens as a file list: read again with every generation.
+  useEffect(() => {
+    if (doc) void usePortfolio.getState().load(doc.id);
   }, [doc?.id, doc?.rev]);
 
   useEffect(() => {
@@ -152,7 +160,14 @@ export default function App() {
             <div className="main">
               <Sidebar doc={doc} />
               <div className="stage">
-                {viewing ? <VersionView key={`${doc.id}:${viewing}`} doc={doc} versionId={viewing} /> : <Viewer key={doc.id} doc={doc} />}
+                {viewing ? (
+                  <VersionView key={`${doc.id}:${viewing}`} doc={doc} versionId={viewing} />
+                ) : portfolio?.info && !portfolio.cover ? (
+                  <PortfolioView key={doc.id} doc={doc} info={portfolio.info} />
+                ) : (
+                  <Viewer key={doc.id} doc={doc} />
+                )}
+                {!viewing && portfolio?.info && portfolio.cover && <PortfolioCoverNote doc={doc} />}
                 {searchOpen && !viewing && <SearchBar key={doc.id} doc={doc} />}
                 <HistoryBanner doc={doc} />
                 <SecurityNotice doc={doc} />

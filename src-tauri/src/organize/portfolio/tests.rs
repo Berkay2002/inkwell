@@ -1,0 +1,438 @@
+//! Portfolios: reading the collection, creating one, extracting, and editing one through the edit lane.
+
+use super::*;
+use crate::engine::edit::EditSource;
+use crate::engine::fixture::{self, Fixture};
+use crate::engine::{DocId, Engine};
+use crate::organize::attach::{self, Entry, NewFile};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+fn dir(test: &str) -> PathBuf {
+    let d = std::env::temp_dir().join("inkwell-tests").join(format!("portfolio-{test}"));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn open(path: &str) -> (Arc<Engine>, DocId) {
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(path).unwrap().doc;
+    (eng, id)
+}
+
+fn pdf(d: &Path, name: &str, pages: usize) -> String {
+    let p = d.join(name);
+    std::fs::write(&p, fixture::build(&Fixture { pages, chapter_every: 0, lines: 4, ..Default::default() })).unwrap();
+    p.to_string_lossy().into_owned()
+}
+
+// ---- building portfolios by hand ----------------------------------------------------------------
+
+fn file(name: &str, data: &[u8]) -> NewFile {
+    NewFile { name: name.into(), data: data.to_vec(), description: String::new(), modified: None }
+}
+
+fn dict(doc: &mut PdfDocument, ty: &str) -> PdfObject {
+    let mut d = doc.new_dict().unwrap();
+    put_name(&mut d, "Type", ty).unwrap();
+    d
+}
+
+/// (key, subtype, shown name, /O, visible)
+type FieldSpec = (&'static str, &'static str, &'static str, i32, bool);
+
+fn set_collection(doc: &mut PdfDocument, fields: &[FieldSpec], sort: &[(&str, bool)], folders: Option<PdfObject>, initial: Option<&str>) {
+    let mut schema = dict(doc, "CollectionSchema");
+    for (key, sub, name, order, visible) in fields {
+        let mut f = dict(doc, "CollectionField");
+        put_name(&mut f, "Subtype", sub).unwrap();
+        put_str(&mut f, "N", name).unwrap();
+        put_int(&mut f, "O", *order).unwrap();
+        f.dict_put("V", PdfObject::new_bool(*visible)).unwrap();
+        schema.dict_put(*key, f).unwrap();
+    }
+    let mut coll = dict(doc, "Collection");
+    coll.dict_put("Schema", schema).unwrap();
+    if !sort.is_empty() {
+        let mut s = dict(doc, "CollectionSort");
+        let mut keys = doc.new_array().unwrap();
+        let mut asc = doc.new_array().unwrap();
+        for (k, a) in sort {
+            keys.array_push(PdfObject::new_name(k).unwrap()).unwrap();
+            asc.array_push(PdfObject::new_bool(*a)).unwrap();
+        }
+        s.dict_put("S", keys).unwrap();
+        s.dict_put("A", asc).unwrap();
+        coll.dict_put("Sort", s).unwrap();
+    }
+    if let Some(f) = folders {
+        coll.dict_put("Folders", f).unwrap();
+    }
+    if let Some(d) = initial {
+        put_str(&mut coll, "D", d).unwrap();
+    }
+    doc.catalog().unwrap().dict_put("Collection", coll).unwrap();
+}
+
+fn spec_of(doc: &PdfDocument, key: &str) -> PdfObject {
+    let e = tree(doc).unwrap().into_iter().find(|e| e.key == key).unwrap();
+    e.spec.resolve().unwrap().unwrap()
+}
+
+fn set_ci(doc: &mut PdfDocument, key: &str, strs: &[(&str, &str)], nums: &[(&str, i32)]) {
+    let mut ci = dict(doc, "CollectionItem");
+    for (k, v) in strs {
+        put_str(&mut ci, k, v).unwrap();
+    }
+    for (k, v) in nums {
+        put_int(&mut ci, k, *v).unwrap();
+    }
+    spec_of(doc, key).dict_put("CI", ci).unwrap();
+}
+
+/// Renames embedded files' keys (a folder prefix), in place.
+fn rename_keys(doc: &mut PdfDocument, renames: &[(&str, &str)]) {
+    let mut entries: Vec<Entry> = tree(doc).unwrap();
+    for e in &mut entries {
+        if let Some((_, to)) = renames.iter().find(|(from, _)| *from == e.key) {
+            e.key = (*to).to_string();
+        }
+    }
+    attach::write_tree(doc, entries).unwrap();
+}
+
+fn folder(doc: &mut PdfDocument, id: i32, name: &str) -> PdfObject {
+    let mut f = dict(doc, "Folder");
+    put_int(&mut f, "ID", id).unwrap();
+    if !name.is_empty() {
+        put_str(&mut f, "Name", name).unwrap();
+    }
+    doc.add_object(&f).unwrap()
+}
+
+fn resolved(o: &PdfObject) -> PdfObject {
+    o.resolve().unwrap().unwrap()
+}
+
+const FOUR: [FieldSpec; 5] = [
+    ("Name", "F", "Name", 0, true),
+    ("Author", "S", "Author", 1, true),
+    ("Pages", "N", "Pages", 2, true),
+    ("Due", "D", "Due", 3, true),
+    ("Notes", "S", "Notes", 4, false),
+];
+
+/// A portfolio with a five-field schema, a two-key sort and nested folders.
+fn sample() -> PdfDocument {
+    let mut doc = PdfDocument::new();
+    for n in ["alpha.pdf", "beta.pdf", "gamma.txt", "delta.pdf", "epsilon.pdf"] {
+        attach::add_one(&mut doc, &file(n, n.as_bytes())).unwrap();
+    }
+    rename_keys(&mut doc, &[("beta.pdf", "<1>beta.pdf"), ("gamma.txt", "<2>gamma.txt"), ("delta.pdf", "<3>delta.pdf")]);
+    set_ci(&mut doc, "alpha.pdf", &[("Author", "Zed"), ("Due", "D:20260301")], &[("Pages", 10)]);
+    set_ci(&mut doc, "<1>beta.pdf", &[("Author", "Amy")], &[("Pages", 9)]);
+    set_ci(&mut doc, "<2>gamma.txt", &[("Author", "amy")], &[("Pages", 100)]);
+    set_ci(&mut doc, "<3>delta.pdf", &[("Author", "Bob"), ("Due", "D:20250101120000+02'00'")], &[("Pages", 2)]);
+    // root > Reports (1) > 2026 (2), and Archive (3) beside Reports
+    let b = folder(&mut doc, 2, "2026");
+    let mut c = folder(&mut doc, 3, "Archive");
+    let mut a = folder(&mut doc, 1, "Reports");
+    resolved(&a).dict_put("Child", b).unwrap();
+    resolved(&a).dict_put("Next", c.clone()).unwrap();
+    let _ = &mut c;
+    let mut root = dict(&mut doc, "Folder");
+    put_int(&mut root, "ID", 0).unwrap();
+    root.dict_put("Child", a.clone()).unwrap();
+    let _ = &mut a;
+    let root = doc.add_object(&root).unwrap();
+    set_collection(&mut doc, &FOUR, &[("Author", true), ("Pages", false)], Some(root), Some("alpha.pdf"));
+    doc
+}
+
+#[test]
+fn a_plain_pdf_is_not_a_portfolio() {
+    let mut doc = PdfDocument::new();
+    attach::add_one(&mut doc, &file("a.txt", b"x")).unwrap();
+    assert!(read(&doc).unwrap().is_none());
+}
+
+#[test]
+fn schema_sort_and_folders_come_out_in_the_authors_order() {
+    let doc = sample();
+    let info = read(&doc).unwrap().unwrap();
+    assert_eq!(info.view, "details");
+    assert_eq!(info.fields.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(), ["Name", "Author", "Pages", "Due", "Notes"]);
+    assert_eq!(info.fields.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>(), ["text", "text", "number", "date", "text"]);
+    assert_eq!(info.fields.iter().map(|f| f.visible).collect::<Vec<_>>(), [true, true, true, true, false]);
+    assert_eq!(info.sort, [SortKey { field: 1, ascending: true }, SortKey { field: 2, ascending: false }]);
+    assert_eq!(info.initial.as_deref(), Some("n:alpha.pdf"));
+
+    // Author ascending (case-insensitive: "Amy" and "amy" tie), then pages descending; no author last.
+    let names: Vec<&str> = info.files.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["gamma.txt", "beta.pdf", "delta.pdf", "alpha.pdf", "epsilon.pdf"]);
+    let gamma = &info.files[0];
+    assert_eq!(gamma.id, "n:<2>gamma.txt");
+    assert_eq!(gamma.cells, ["gamma.txt", "amy", "100", "", ""]);
+    assert!(!gamma.is_pdf && info.files[1].is_pdf);
+    // dates read as dates: 2025 comes before 2026, and the zone moves the clock (10:00 UTC for 12:00+02:00)
+    let due = |n: &str| info.files.iter().find(|f| f.name == n).unwrap();
+    assert!(due("delta.pdf").ranks[3] < due("alpha.pdf").ranks[3]);
+    assert_eq!(due("delta.pdf").cells[3], "2025-01-01 12:00");
+    assert_eq!(due("epsilon.pdf").ranks[1], None);
+
+    // folders: parents first, siblings by name; files map through the <id> prefix
+    let f: Vec<(&str, Option<u32>)> = info.folders.iter().map(|f| (f.name.as_str(), f.parent)).collect();
+    assert_eq!(f, [("Archive", None), ("Reports", None), ("2026", Some(1))]);
+    let in_folder = |n: &str| due(n).folder;
+    assert_eq!((in_folder("beta.pdf"), in_folder("gamma.txt"), in_folder("delta.pdf"), in_folder("alpha.pdf")), (Some(1), Some(2), Some(3), None));
+}
+
+#[test]
+fn without_a_ci_the_files_own_facts_fill_the_columns() {
+    let mut doc = PdfDocument::new();
+    let f = NewFile { name: "q3.pdf".into(), data: vec![7u8; 2048], description: "Quarterly".into(), modified: Some(1_700_000_000) };
+    attach::add_one(&mut doc, &f).unwrap();
+    let fields: [FieldSpec; 4] = [("N", "F", "Name", 0, true), ("S", "Size", "Size", 1, true), ("M", "ModDate", "Modified", 2, true), ("D", "Desc", "Description", 3, true)];
+    set_collection(&mut doc, &fields, &[], None, None);
+    let info = read(&doc).unwrap().unwrap();
+    assert_eq!(info.files[0].cells, ["q3.pdf", "2.0 KB", "2023-11-14 22:13", "Quarterly"]);
+    // and a /CI that has the word wins
+    set_ci(&mut doc, "q3.pdf", &[("D", "Final"), ("M", "D:20240102030405Z")], &[("S", 5)]);
+    let info = read(&doc).unwrap().unwrap();
+    assert_eq!(info.files[0].cells, ["q3.pdf", "5 B", "2024-01-02 03:04", "Final"]);
+}
+
+#[test]
+fn a_sub_item_brings_its_prefix() {
+    let mut doc = PdfDocument::new();
+    attach::add_one(&mut doc, &file("a.txt", b"x")).unwrap();
+    set_collection(&mut doc, &[("Rev", "S", "Revision", 0, true)], &[], None, None);
+    let mut sub = dict(&mut doc, "CollectionSubitem");
+    put_str(&mut sub, "D", "12").unwrap();
+    put_str(&mut sub, "P", "Rev. ").unwrap();
+    let mut ci = dict(&mut doc, "CollectionItem");
+    ci.dict_put("Rev", sub).unwrap();
+    spec_of(&doc, "a.txt").dict_put("CI", ci).unwrap();
+    assert_eq!(read(&doc).unwrap().unwrap().files[0].cells, ["Rev. 12"]);
+}
+
+#[test]
+fn folders_that_loop_are_refused() {
+    // a sibling that points back at itself
+    let mut doc = PdfDocument::new();
+    let a = folder(&mut doc, 1, "A");
+    resolved(&a).dict_put("Next", a.clone()).unwrap();
+    let mut root = dict(&mut doc, "Folder");
+    root.dict_put("Child", a).unwrap();
+    let root = doc.add_object(&root).unwrap();
+    set_collection(&mut doc, &[], &[], Some(root), None);
+    let e = read(&doc).unwrap_err().to_string();
+    assert!(e.contains("loop"), "{e}");
+
+    // a child that is its own ancestor
+    let mut doc = PdfDocument::new();
+    let a = folder(&mut doc, 1, "A");
+    let b = folder(&mut doc, 2, "B");
+    resolved(&a).dict_put("Child", b.clone()).unwrap();
+    resolved(&b).dict_put("Child", a.clone()).unwrap();
+    let mut root = dict(&mut doc, "Folder");
+    root.dict_put("Child", a).unwrap();
+    let root = doc.add_object(&root).unwrap();
+    set_collection(&mut doc, &[], &[], Some(root), None);
+    assert!(read(&doc).unwrap_err().to_string().contains("loop"));
+}
+
+#[test]
+fn folders_nested_too_deep_are_refused() {
+    let mut doc = PdfDocument::new();
+    let mut parent = folder(&mut doc, 1, "d1");
+    let first = parent.clone();
+    for i in 2..=40 {
+        let c = folder(&mut doc, i, "d");
+        resolved(&parent).dict_put("Child", c.clone()).unwrap();
+        parent = c;
+    }
+    let mut root = dict(&mut doc, "Folder");
+    root.dict_put("Child", first).unwrap();
+    let root = doc.add_object(&root).unwrap();
+    set_collection(&mut doc, &[], &[], Some(root), None);
+    assert!(read(&doc).unwrap_err().to_string().contains("deeply"));
+}
+
+#[test]
+fn natural_order_and_dates() {
+    let mut names = ["file10", "File2", "file1", "file02", "a", "B"].map(|s| fold_text(s));
+    names.sort_by(|a, b| natural_cmp(a, b));
+    assert_eq!(names, ["a", "b", "file1", "file2", "file02", "file10"].map(String::from));
+    // a digit run of any length compares without overflowing
+    assert_eq!(natural_cmp(&"9".repeat(40), &format!("1{}", "0".repeat(40))), Ordering::Less);
+    assert_eq!(parse_pdf_date("D:20260102").unwrap(), (1_767_312_000, "2026-01-02".to_string()));
+    assert_eq!(parse_pdf_date("D:20260102030405-05'00'").unwrap().0, 1_767_312_000 + 3 * 3600 + 4 * 60 + 5 + 5 * 3600);
+    assert!(parse_pdf_date("D:2026133").is_none() && parse_pdf_date("not a date").is_none());
+}
+
+// ---- create --------------------------------------------------------------------------------------
+
+fn sources(files: &[(&str, &str)]) -> Vec<Source> {
+    files.iter().map(|(n, p)| Source { name: (*n).into(), path: (*p).into() }).collect()
+}
+
+#[test]
+fn create_writes_a_portfolio_that_reads_back_byte_identical() {
+    let d = dir("create");
+    let a = pdf(&d, "a.pdf", 2);
+    let b = pdf(&d, "b.pdf", 1);
+    let c = d.join("notes.txt");
+    std::fs::write(&c, "line one\nline two\n").unwrap();
+    std::fs::create_dir_all(d.join("other")).unwrap();
+    let c2 = d.join("other").join("notes.txt");
+    std::fs::write(&c2, "second\n").unwrap();
+    let before: Vec<Vec<u8>> = [&a, &b].iter().map(|p| std::fs::read(p).unwrap()).collect();
+    let out = d.join("Portfolio.pdf").to_string_lossy().into_owned();
+
+    let eng = Engine::new(2, 64 << 20);
+    let src = sources(&[("notes.txt", c.to_str().unwrap()), ("b.pdf", &b), ("a.pdf", &a), ("notes.txt", c2.to_str().unwrap())]);
+    let made = create(&eng, &src, &out).unwrap();
+    assert_eq!(made.files, 4);
+
+    let (e2, id) = open(&out);
+    let info = e2.read_custom(id, |d| read(d)).unwrap().expect("a /Collection");
+    // the reader that ignores /Collection sees a cover page
+    assert_eq!(e2.read_custom(id, |d| Ok(d.page_count()?)).unwrap(), 1);
+    assert_eq!(info.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Name", "Description", "Size", "Modified"]);
+    assert_eq!(info.sort, [SortKey { field: 0, ascending: true }]);
+    // sorted by name, a clash kept both ("notes (2).txt"), the first PDF opens first
+    let names: Vec<&str> = info.files.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["a.pdf", "b.pdf", "notes (2).txt", "notes.txt"]);
+    assert_eq!(info.initial.as_deref(), Some("n:b.pdf"));
+    for (f, want) in info.files.iter().zip(["a.pdf", "b.pdf", "notes (2).txt", "notes.txt"]) {
+        assert!(!f.cells[2].is_empty() && !f.cells[3].is_empty(), "{want}: {:?}", f.cells);
+        assert_eq!(f.cells[0], want);
+    }
+    let read_back = |key: &str| e2.read_custom(id, |d| attach::read_data(d, &format!("n:{key}"))).unwrap().1;
+    assert_eq!(read_back("a.pdf"), before[0]);
+    assert_eq!(read_back("b.pdf"), before[1]);
+    assert_eq!(read_back("notes.txt"), b"line one\nline two\n");
+    assert_eq!(read_back("notes (2).txt"), b"second\n");
+    // the sources are as they were
+    assert_eq!(std::fs::read(&a).unwrap(), before[0]);
+    assert_eq!(std::fs::read(&b).unwrap(), before[1]);
+    assert_eq!(std::fs::read(&c).unwrap(), b"line one\nline two\n");
+}
+
+#[test]
+fn create_refuses_what_it_should() {
+    let d = dir("create-refuse");
+    let a = pdf(&d, "a.pdf", 1);
+    let eng = Engine::new(2, 64 << 20);
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    assert!(create(&eng, &[], &out).is_err());
+    let many: Vec<Source> = (0..=super::make::CREATE_MAX_FILES).map(|_| Source { name: "a.pdf".into(), path: a.clone() }).collect();
+    assert!(create(&eng, &many, &out).unwrap_err().to_string().contains("500"));
+    // writing over one of its own sources
+    let e = create(&eng, &sources(&[("a.pdf", &a)]), &a).unwrap_err().to_string();
+    assert!(e.contains("being written"), "{e}");
+    assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&a).unwrap());
+    // a folder is not a file
+    assert!(create(&eng, &sources(&[("d", d.to_str().unwrap())]), &out).is_err());
+    assert!(!Path::new(&out).exists());
+}
+
+// ---- extract -------------------------------------------------------------------------------------
+
+fn hostile() -> PdfDocument {
+    let mut doc = PdfDocument::new();
+    let long = format!("{}.pdf", "n".repeat(300));
+    let names = ["../../x.exe", "CON", "a\u{7}b\u{202E}.txt", long.as_str(), "..\\..\\x.exe"];
+    for (i, n) in names.iter().enumerate() {
+        attach::add_one(&mut doc, &file(&format!("f{i}.bin"), format!("data{i}").as_bytes())).unwrap();
+        let mut spec = spec_of(&doc, &format!("f{i}.bin"));
+        put_str(&mut spec, "UF", n).unwrap();
+        put_str(&mut spec, "F", n).unwrap();
+    }
+    doc
+}
+
+#[test]
+fn hostile_names_are_cleaned_and_nothing_is_overwritten() {
+    let d = dir("extract");
+    let out = d.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    // a file already there stays as it is
+    std::fs::write(out.join("CON.keep"), "mine").unwrap();
+    std::fs::write(out.join("x.exe"), "mine").unwrap();
+    let doc = hostile();
+
+    let r = extract_all(&doc, &out).unwrap();
+    assert!(r.skipped.is_empty(), "{:?}", r.skipped);
+    let long = format!("{}.pdf", "n".repeat(196));
+    assert_eq!(r.written, ["x (2).exe", "_CON", "ab.txt", long.as_str(), "x (3).exe"]);
+    assert_eq!(long.chars().count(), 200);
+    assert_eq!(std::fs::read_to_string(out.join("x.exe")).unwrap(), "mine");
+    assert_eq!(std::fs::read(out.join("x (2).exe")).unwrap(), b"data0");
+    // nothing escaped the folder
+    assert!(!d.join("x.exe").exists() && !d.parent().unwrap().join("x.exe").exists());
+    assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 7);
+
+    // and again: every file gets another number, none is replaced
+    let again = extract_all(&doc, &out).unwrap();
+    assert_eq!(again.written.len(), 5);
+    assert!(again.written.iter().all(|n| !r.written.contains(n)), "{:?}", again.written);
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 12);
+    assert_eq!(std::fs::read(out.join("x (2).exe")).unwrap(), b"data0");
+    assert!(extract_all(&doc, &d.join("nope")).is_err());
+}
+
+#[test]
+fn extract_leaves_the_document_as_it_was() {
+    let d = dir("extract-same");
+    let a = pdf(&d, "a.pdf", 1);
+    let made = d.join("p.pdf").to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    create(&eng, &sources(&[("a.pdf", &a)]), &made).unwrap();
+    let before = std::fs::read(&made).unwrap();
+    let (e2, id) = open(&made);
+    let out = d.join("files");
+    std::fs::create_dir_all(&out).unwrap();
+    let r = e2.read_custom(id, |doc| extract_all(doc, &out)).unwrap();
+    assert_eq!(r.written, ["a.pdf"]);
+    assert_eq!(std::fs::read(out.join("a.pdf")).unwrap(), std::fs::read(&a).unwrap());
+    assert_eq!(std::fs::read(&made).unwrap(), before);
+    assert!(!e2.edit_state(id).unwrap().dirty);
+}
+
+// ---- editing a portfolio ---------------------------------------------------------------------------
+
+#[test]
+fn adding_describing_and_removing_keep_the_collection_in_step() {
+    let d = dir("edit");
+    let a = pdf(&d, "a.pdf", 1);
+    let made = d.join("p.pdf").to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    create(&eng, &sources(&[("a.pdf", &a)]), &made).unwrap();
+    let (e2, id) = open(&made);
+    let user = || EditSource::User;
+
+    crate::organize::attach_add(&e2, id, vec![NewFile { name: "extra.txt".into(), data: b"hello".to_vec(), description: String::new(), modified: Some(1_700_000_000) }], user()).unwrap();
+    let info = crate::organize::portfolio_info(&e2, id).unwrap().unwrap();
+    let extra = info.files.iter().find(|f| f.name == "extra.txt").unwrap();
+    assert_eq!(extra.cells, ["extra.txt", "", "5 B", "2023-11-14 22:13"]);
+
+    crate::organize::attach_describe(&e2, id, "n:extra.txt", "Hello file", user()).unwrap();
+    let info = crate::organize::portfolio_info(&e2, id).unwrap().unwrap();
+    assert_eq!(info.files.iter().find(|f| f.name == "extra.txt").unwrap().cells[1], "Hello file");
+
+    // the initial document goes: /D no longer names a file that is not there
+    crate::organize::attach_remove(&e2, id, &["n:a.pdf".to_string()], user()).unwrap();
+    let info = crate::organize::portfolio_info(&e2, id).unwrap().unwrap();
+    assert_eq!(info.initial, None);
+    assert_eq!(info.files.len(), 1);
+
+    // one undo step each, and the saved file reads back the same
+    let saved = e2.save(id, None).unwrap().path;
+    let (e3, i3) = open(&saved);
+    let again = crate::organize::portfolio_info(&e3, i3).unwrap().unwrap();
+    assert_eq!(again.files.iter().map(|f| f.cells.clone()).collect::<Vec<_>>(), info.files.iter().map(|f| f.cells.clone()).collect::<Vec<_>>());
+}

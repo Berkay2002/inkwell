@@ -20,6 +20,7 @@ import { usePrint } from "./printStore";
 import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 import { useSheets } from "./organizePlus";
+import { createPortfolio } from "./portfolioStore";
 
 export interface Command {
   id: string;
@@ -115,6 +116,7 @@ export const commands: Command[] = [
   { id: "extract-page", title: "Extract this page…", needsDoc: true, run: withDoc((d) => void edits.extract(d.id, [d.currentPage])) },
   { id: "split", title: "Split into single pages", needsDoc: true, run: withDoc((d) => void edits.split(d.id, 1)) },
   { id: "merge", title: "Combine files…", run: () => edits.combineFiles() },
+  { id: "create-portfolio", title: "Create PDF Portfolio…", run: () => void createPortfolio() },
   {
     id: "page-labels",
     title: "Page labels…",
