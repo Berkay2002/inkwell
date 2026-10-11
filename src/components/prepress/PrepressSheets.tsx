@@ -308,6 +308,7 @@ function ConvertView({ sheet }: { sheet: ConvertSheet }) {
           <div className="pr-state">
             <p className="pp-lead">Converted, but not saved as a new file.</p>
             <p>{remainingText(sheet.result.report)}</p>
+            {sheet.closing && <p className="pr-note bad">The open document holds the converted colours, and Save would write them over the original file. Undo the conversion, or keep it?</p>}
           </div>
         )}
         {sheet.phase !== "running" && <Protect doc={sheet.doc} />}
@@ -340,13 +341,23 @@ function ConvertView({ sheet }: { sheet: ConvertSheet }) {
             Cancel
           </button>
         )}
-        {sheet.phase === "unsaved" && (
+        {sheet.phase === "unsaved" && !sheet.closing && (
           <>
             <button className="btn ghost" onClick={() => act().closeSheet()}>
               Close
             </button>
             <button className="btn primary" onClick={() => void act().saveConverted()}>
               Save as…
+            </button>
+          </>
+        )}
+        {sheet.phase === "unsaved" && sheet.closing && (
+          <>
+            <button className="btn ghost" onClick={() => act().keepConversion()}>
+              Keep
+            </button>
+            <button className="btn primary" onClick={() => void act().undoConversion()}>
+              Undo conversion
             </button>
           </>
         )}

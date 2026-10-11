@@ -12,7 +12,7 @@ vi.hoisted(() => {
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn(), message: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({}) }));
-vi.mock("./edit", () => ({ queued: vi.fn((_doc: number, f: () => unknown) => f()), applyState: vi.fn() }));
+vi.mock("./edit", () => ({ queued: vi.fn((_doc: number, f: () => unknown) => f()), applyState: vi.fn(), undo: vi.fn(() => Promise.resolve()) }));
 vi.mock("./api", () => ({
   pickSave: vi.fn(),
   saveDocument: vi.fn(),
@@ -39,7 +39,7 @@ vi.mock("./prepressApi", () => ({
 
 import { useStore } from "../store";
 import * as api from "./api";
-import { applyState } from "./edit";
+import { applyState, undo } from "./edit";
 import { usePlates, viewFailed } from "./platesView";
 import { prepressApi, type PageBoxes } from "./prepressApi";
 import { toPt } from "./prepressLogic";
@@ -243,6 +243,60 @@ describe("Convert Colors", () => {
     expect(prepressApi.saveOther).toHaveBeenCalledWith(1, "tok-2");
     expect(prepressApi.convert).toHaveBeenCalledTimes(1);
     expect(st().sheet).toMatchObject({ phase: "done", error: null, result: { path: "C:\\d\\other-name.pdf" } });
+  });
+
+  describe("closing after a failed write", () => {
+    const unsaved = async () => {
+      st().openConvert();
+      st().review();
+      vi.mocked(api.pickSave).mockResolvedValue({ token: "tok-1", path: "C:\\d\\new.pdf" });
+      vi.mocked(prepressApi.convert).mockResolvedValue({ state: state(4), report, saved: false, saveError: "Access is denied." });
+      await st().runConvert();
+      // applyState is mocked: the document is at the generation the conversion made
+      useStore.setState((s) => ({ docs: { ...s.docs, 1: { ...s.docs[1], rev: 4 } } }));
+    };
+
+    it("asks first, and a second close goes back to the sheet", async () => {
+      await unsaved();
+      st().closeSheet();
+      expect(st().sheet).toMatchObject({ phase: "unsaved", closing: true });
+      st().closeSheet();
+      expect(st().sheet).toMatchObject({ phase: "unsaved", closing: false });
+      expect(undo).not.toHaveBeenCalled();
+    });
+
+    it("Undo takes the conversion back and closes", async () => {
+      await unsaved();
+      st().closeSheet();
+      await st().undoConversion();
+      expect(undo).toHaveBeenCalledExactlyOnceWith(1);
+      expect(st().sheet).toBeNull();
+    });
+
+    it("Keep closes and leaves the document as it is", async () => {
+      await unsaved();
+      st().closeSheet();
+      st().keepConversion();
+      expect(undo).not.toHaveBeenCalled();
+      expect(st().sheet).toBeNull();
+    });
+
+    it("does not undo a step that is not the conversion", async () => {
+      await unsaved();
+      useStore.setState((s) => ({ docs: { ...s.docs, 1: { ...s.docs[1], rev: 5 } } }));
+      st().closeSheet();
+      await st().undoConversion();
+      expect(undo).not.toHaveBeenCalled();
+      expect(st().sheet).toBeNull();
+    });
+
+    it("keeps the sheet and says so when the undo fails", async () => {
+      await unsaved();
+      vi.mocked(undo).mockRejectedValueOnce("Nothing to undo");
+      st().closeSheet();
+      await st().undoConversion();
+      expect(st().sheet).toMatchObject({ phase: "unsaved", error: "Nothing to undo" });
+    });
   });
 
   it("never writes over the original file or one that is open in another tab", async () => {
