@@ -1374,13 +1374,17 @@ pub fn add_text(doc: &mut PdfDocument, page: u32, new: &NewText) -> Result<()> {
     ops.push(Op::new("Q", vec![]));
 
     let old = page_streams(&p)?;
+    // The page's own content is wrapped once: a page that already starts with our `q` and has our
+    // `Q` after its content is in a clean state at its end, so the new text only goes last.
+    let wrapped = old.first().is_some_and(|(_, d)| d == WRAP_OPEN) && old.iter().skip(1).any(|(_, d)| d == WRAP_CLOSE);
     let mut list = Vec::with_capacity(old.len() + 3);
-    list.push(flate_stream(doc, b"q
-")?);
+    if !wrapped {
+        list.push(flate_stream(doc, WRAP_OPEN)?);
+    }
     list.extend(old.into_iter().map(|(obj, _)| obj));
-    list.push(flate_stream(doc, b"
-Q
-")?);
+    if !wrapped {
+        list.push(flate_stream(doc, WRAP_CLOSE)?);
+    }
     list.push(flate_stream(doc, &serialize_ops(&ops))?);
     let mut arr = doc.new_array()?;
     for o in list {
@@ -1390,6 +1394,10 @@ Q
     page_obj.dict_put("Contents", arr)?;
     Ok(())
 }
+
+/// The streams `add_text` puts before and after a page's own content.
+const WRAP_OPEN: &[u8] = b"q\n";
+const WRAP_CLOSE: &[u8] = b"\nQ\n";
 
 fn flate_stream(doc: &mut PdfDocument, data: &[u8]) -> Result<PdfObject> {
     let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());

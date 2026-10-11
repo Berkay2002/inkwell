@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
 import type { BlockChange, TextArea, TextBlock, TextFallback } from "./api";
-import { addText, editText } from "./edit";
+import { addText, editText, setLeaveGuard } from "./edit";
 
 /**
  * Editing text in place: the viewer's Edit mode. A page's blocks come from one `text_blocks` call
@@ -45,12 +45,14 @@ export interface DocTextEdit {
   adding: NewBox | null;
   /** A quiet sentence under the format controls: a font that was replaced, or why a block is locked. */
   notice: string | null;
+  /** The engine refused what was typed: it is kept, and leaving the block twice drops it. */
+  failed: boolean;
 }
 
 /** What "Add text" starts with (Acrobat's default is about 12 pt). */
 export const NEW_TEXT = { size: 12, color: [0, 0, 0] as Rgb };
 
-const empty = (): DocTextEdit => ({ pages: {}, selected: null, draft: null, adding: null, notice: null });
+const empty = (): DocTextEdit => ({ pages: {}, selected: null, draft: null, adding: null, notice: null, failed: false });
 
 // ---- pure helpers (tested in textEdit.test.ts) ----
 
@@ -115,8 +117,9 @@ export function changeFor(block: TextBlock, draft: string | null, patch: BlockCh
 
 /** One sentence for a font that was replaced. The engine's reason names the original font and the letter. */
 export function fallbackNote(fb: TextFallback): string {
-  const face = fb.font.replace(/-/g, " ").replace("Oblique", "Italic");
-  return `${fb.reason[0].toUpperCase()}${fb.reason.slice(1)}, so this block is now set in ${face}${fb.embedded ? " (embedded in the file)" : ""}.`;
+  const face = `${fb.font.replace(/-/g, " ").replace("Oblique", "Italic")}${fb.embedded ? " (embedded in the file)" : ""}`;
+  const why = fb.reason.trim();
+  return why ? `${why[0].toUpperCase()}${why.slice(1)}, so this block is now set in ${face}.` : `This block is now set in ${face}.`;
 }
 
 /** A guess at where in `text` a click at (x, y) landed in a block of `lines` lines: proportional, not exact. */
@@ -140,7 +143,7 @@ interface Store {
 
   /** Lists the page's blocks for the document's current generation (cached; one call per page and generation). */
   load: (doc: number, page: number) => Promise<void>;
-  /** Selects a block (committing what was typed into the previous one first). */
+  /** Selects a block (sending what was typed into the previous one first; it stays when that fails). */
   select: (doc: number, ref: BlockRef | null) => Promise<void>;
   setDraft: (doc: number, text: string) => void;
   /** Sends the typed text, if it differs. */
@@ -153,11 +156,20 @@ interface Store {
   setAdding: (doc: number, text: string) => void;
   /** Puts the typed text on the page, or drops it when it is empty. */
   finishAdding: (doc: number) => Promise<void>;
+  /** Drops what was typed (and a new box) without sending it: the way out of text the engine refused. */
+  discard: (doc: number) => void;
   dismissNotice: (doc: number) => void;
   setNotice: (doc: number, notice: string | null) => void;
 }
 
 const inflight = new Map<string, Promise<void>>();
+/** One change of a document at a time, in the order asked for: a commit that finds nothing left to send does nothing. */
+const queues = new Map<number, Promise<unknown>>();
+function queued<T>(doc: number, f: () => Promise<T>): Promise<T> {
+  const run = (queues.get(doc) ?? Promise.resolve()).then(f, f);
+  queues.set(doc, run.catch(() => undefined));
+  return run;
+}
 
 export const useTextEdit = create<Store>((set, get) => {
   const patchDoc = (doc: number, p: Partial<DocTextEdit>) =>
@@ -168,12 +180,90 @@ export const useTextEdit = create<Store>((set, get) => {
     return d.selected ? (d.pages[d.selected.page]?.blocks[d.selected.index] ?? null) : null;
   };
   const docRev = (doc: number) => useStore.getState().docs[doc]?.rev ?? 0;
+  /** Documents with a change in flight: that change settles its own selection. */
+  const applying = new Set<number>();
 
-  /** Lists the page again whatever is cached. */
-  const reload = async (doc: number, page: number) => {
+  const fetchPage = async (doc: number, page: number) => {
     const r = await api.textBlocks(doc, page);
     patchDoc(doc, { pages: { ...of(doc).pages, [page]: { rev: r.rev, blocks: r.blocks, areas: r.areas } } });
     return r;
+  };
+
+  /**
+   * Lists the page again. When the document moved on under a selection (undo, redo, a restored
+   * version), the selection follows its block by position, or is dropped with its typed text: an
+   * index must never point at another block.
+   */
+  const reload = async (doc: number, page: number) => {
+    const before = of(doc);
+    const sel = before.selected;
+    const was = sel && sel.page === page ? (before.pages[page]?.blocks[sel.index] ?? null) : null;
+    const r = await fetchPage(doc, page);
+    if (sel && was && !applying.has(doc)) {
+      const now = of(doc);
+      if (now.selected?.page === page && now.selected.index === sel.index) {
+        const same = closestBlock(was, r.blocks);
+        if (!same) patchDoc(doc, { selected: null, draft: null });
+        else if (same.index !== sel.index) {
+          patchDoc(doc, { selected: { page, index: same.index }, draft: now.draft ? { ...now.draft, page, index: same.index } : null });
+        }
+      }
+    }
+    return r;
+  };
+
+  /** Sends the typed text and `patch` as one change. Runs inside the document's queue. */
+  const applyNow = async (doc: number, patch: BlockChange) => {
+    const d = of(doc);
+    const ref = d.selected;
+    const block = selectedBlock(doc);
+    const page = ref ? d.pages[ref.page] : undefined;
+    if (!ref || !block || !page) return;
+    const sent = d.draft?.text ?? null;
+    const change = changeFor(block, sent, patch);
+    if (!change) {
+      // Typed back to what it was: nothing to send.
+      if (sent != null) patchDoc(doc, { draft: null });
+      return;
+    }
+    applying.add(doc);
+    try {
+      const r = await editText(doc, page.rev, ref.page, ref.index, change);
+      if (r.kind === "error") {
+        // Keep everything typed: the block stays selected with its draft, and the person is told why.
+        patchDoc(doc, { failed: true, notice: `This change could not be applied: ${r.message}` });
+        return;
+      }
+      const fresh = await fetchPage(doc, ref.page);
+      const moved: [number, number] = patch.offset ?? [0, 0];
+      const same = closestBlock(block, fresh.blocks, r.kind === "ok" ? moved : [0, 0]);
+      const cur = of(doc).draft;
+      if (r.kind === "stale") {
+        // The document moved on under us: the block is found again by position and keeps its draft.
+        patchDoc(doc, {
+          selected: same ? { page: ref.page, index: same.index } : null,
+          draft: same && cur ? { ...cur, page: ref.page, index: same.index } : null,
+          failed: false,
+          notice: same ? null : "The page changed, so the text typed in that block was not applied.",
+        });
+        return;
+      }
+      // Only the text that was sent is settled: keystrokes made while it was in flight stay as the draft.
+      const keep = cur && cur.text !== sent && same ? { ...cur, page: ref.page, index: same.index } : null;
+      patchDoc(doc, {
+        selected: same ? { page: ref.page, index: same.index } : null,
+        draft: keep,
+        failed: false,
+        notice: r.value.fallback ? fallbackNote(r.value.fallback) : null,
+      });
+    } finally {
+      applying.delete(doc);
+    }
+  };
+
+  const commitNow = async (doc: number) => {
+    // A refused text is not sent again until it is changed (typing clears `failed`).
+    if (of(doc).selected && of(doc).draft && !of(doc).failed) await applyNow(doc, {});
   };
 
   return {
@@ -184,7 +274,9 @@ export const useTextEdit = create<Store>((set, get) => {
       const ids = Object.keys(get().docs).map(Number);
       set({ open, tool: "select" });
       void Promise.all(ids.map((id) => get().commit(id))).then(() => {
-        if (!get().open) for (const id of ids) patchDoc(id, { selected: null, draft: null, adding: null, notice: null });
+        if (get().open) return;
+        // Typed text that could not be sent stays (with its block) for the person to see on return.
+        for (const id of ids) if (!of(id).failed) patchDoc(id, { selected: null, draft: null, adding: null, notice: null });
       });
     },
     tool: "select",
@@ -210,71 +302,59 @@ export const useTextEdit = create<Store>((set, get) => {
       const cur = of(doc).selected;
       if (cur && ref && cur.page === ref.page && cur.index === ref.index) return;
       await get().commit(doc);
+      // A change the engine refused keeps its block: moving on would lose the typed text.
+      if (of(doc).failed) return;
       patchDoc(doc, { selected: ref, draft: null, notice: null });
     },
 
     setDraft: (doc, text) => {
       const sel = of(doc).selected;
-      if (sel) patchDoc(doc, { draft: { ...sel, text } });
+      if (sel) patchDoc(doc, { draft: { ...sel, text }, failed: false });
     },
 
-    commit: async (doc) => {
-      const d = of(doc);
-      const block = selectedBlock(doc);
-      if (!d.selected || !block || !d.draft) return;
-      const change = changeFor(block, d.draft.text);
-      if (!change) return void patchDoc(doc, { draft: null });
-      await get().apply(doc, {});
-    },
-
-    apply: async (doc, patch) => {
-      const d = of(doc);
-      const ref = d.selected;
-      const block = selectedBlock(doc);
-      const page = ref ? d.pages[ref.page] : undefined;
-      if (!ref || !block || !page) return;
-      const change = changeFor(block, d.draft?.text ?? null, patch);
-      if (!change) return;
-      const r = await editText(doc, page.rev, ref.page, ref.index, change);
-      patchDoc(doc, { draft: null });
-      if (!r) {
-        // The document moved on under us: list the page again and keep the selection by position.
-        const fresh = await reload(doc, ref.page);
-        const same = closestBlock(block, fresh.blocks);
-        patchDoc(doc, { selected: same ? { page: ref.page, index: same.index } : null });
-        return;
-      }
-      const fresh = await reload(doc, ref.page);
-      const moved: [number, number] = patch.offset ?? [0, 0];
-      const same = closestBlock(block, fresh.blocks, moved);
-      patchDoc(doc, {
-        selected: same ? { page: ref.page, index: same.index } : null,
-        notice: r.fallback ? fallbackNote(r.fallback) : null,
-      });
-    },
-
+    commit: (doc) => queued(doc, () => commitNow(doc)),
+    apply: (doc, patch) => queued(doc, () => applyNow(doc, patch)),
     move: (doc, d) => get().apply(doc, { offset: d }),
 
     startAdding: (doc, page, at) => {
-      patchDoc(doc, { adding: { page, at, text: "" }, selected: null, draft: null, notice: null });
+      patchDoc(doc, { adding: { page, at, text: "" }, selected: null, draft: null, failed: false, notice: null });
     },
 
     setAdding: (doc, text) => {
       const a = of(doc).adding;
-      if (a) patchDoc(doc, { adding: { ...a, text } });
+      if (a) patchDoc(doc, { adding: { ...a, text }, failed: false });
     },
 
-    finishAdding: async (doc) => {
-      const a = of(doc).adding;
-      patchDoc(doc, { adding: null });
+    finishAdding: (doc) =>
+      queued(doc, async () => {
+        const a = of(doc).adding;
+        if (!a) return;
+        if (!a.text.trim()) {
+          patchDoc(doc, { adding: null, failed: false });
+          set({ tool: "select" });
+          return;
+        }
+        const box = { text: a.text, size: NEW_TEXT.size, color: NEW_TEXT.color, at: a.at };
+        // One retry when the document moved on since the box was started.
+        let r = await addText(doc, docRev(doc), a.page, box);
+        if (r.kind === "stale") r = await addText(doc, docRev(doc), a.page, box);
+        if (r.kind !== "ok") {
+          // The box and what was typed stay, so it can be fixed or tried again.
+          patchDoc(doc, { failed: true, notice: r.kind === "error" ? `This text could not be added: ${r.message}` : "The page changed; try adding the text again." });
+          return;
+        }
+        patchDoc(doc, { adding: null, failed: false });
+        set({ tool: "select" });
+        const fresh = await fetchPage(doc, a.page);
+        // The new block is the one that starts where it was put.
+        const dist = (b: TextBlock) => Math.hypot(b.rect[0] - a.at[0], b.rect[1] - a.at[1]);
+        const mine = fresh.blocks.filter((b) => b.editable).sort((p, q) => dist(p) - dist(q))[0];
+        if (mine) patchDoc(doc, { selected: { page: a.page, index: mine.index } });
+      }),
+
+    discard: (doc) => {
+      patchDoc(doc, { selected: null, draft: null, adding: null, failed: false, notice: null });
       set({ tool: "select" });
-      if (!a || !a.text.trim()) return;
-      const rev = docRev(doc);
-      const s = await addText(doc, rev, a.page, { text: a.text, size: NEW_TEXT.size, color: NEW_TEXT.color, at: a.at });
-      const fresh = await reload(doc, a.page);
-      // The new block is the one that starts where it was put.
-      const mine = fresh.blocks.filter((b) => b.editable).sort((p, q) => Math.hypot(p.rect[0] - a.at[0], p.rect[1] - a.at[1]) - Math.hypot(q.rect[0] - a.at[0], q.rect[1] - a.at[1]))[0];
-      if (s && mine) patchDoc(doc, { selected: { page: a.page, index: mine.index } });
     },
 
     dismissNotice: (doc) => patchDoc(doc, { notice: null }),
@@ -282,13 +362,34 @@ export const useTextEdit = create<Store>((set, get) => {
   };
 });
 
-// A closed tab's block lists are not kept.
+// Typed text is part of the document's unsaved state: closing a tab or the window sends it first
+// (edit.ts asks the person only when it could not be sent).
+setLeaveGuard({
+  flush: (id) => useTextEdit.getState().commit(id),
+  unsent: (id) => {
+    const d = useTextEdit.getState().docs[id];
+    if (!d) return null;
+    if (d.adding && d.adding.text.trim()) return d.adding.text;
+    const b = d.selected ? d.pages[d.selected.page]?.blocks[d.selected.index] : null;
+    return d.draft && b && d.draft.text !== b.text ? d.draft.text : null;
+  },
+});
+
 useStore.subscribe((s, prev) => {
-  const gone = Object.keys(useTextEdit.getState().docs).filter((k) => !s.docs[Number(k)] && prev.docs[Number(k)]);
-  if (gone.length === 0) return;
-  useTextEdit.setState((t) => {
-    const docs = { ...t.docs };
-    for (const k of gone) delete docs[Number(k)];
-    return { docs };
-  });
+  const te = useTextEdit.getState();
+  // A closed tab's block lists are not kept.
+  const gone = Object.keys(te.docs).filter((k) => !s.docs[Number(k)] && prev.docs[Number(k)]);
+  if (gone.length > 0) {
+    useTextEdit.setState((t) => {
+      const docs = { ...t.docs };
+      for (const k of gone) delete docs[Number(k)];
+      return { docs };
+    });
+  }
+  // Leaving a tab, or turning to Organize, unmounts the editor without a blur: send what was typed.
+  if (prev.active != null && s.active !== prev.active && s.docs[prev.active]) void te.commit(prev.active);
+  for (const k of Object.keys(s.docs)) {
+    const id = Number(k);
+    if (s.docs[id].organize && prev.docs[id] && !prev.docs[id].organize) void te.commit(id);
+  }
 });

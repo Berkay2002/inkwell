@@ -85,6 +85,7 @@ export function EditPanel({ doc }: { doc: DocState }) {
                   <li key={b.index}>
                     <button
                       className={d?.selected?.page === doc.currentPage && d.selected.index === b.index ? "te-item on" : "te-item"}
+                      {...keepFocus}
                       onClick={() =>
                         b.editable
                           ? void te().select(id, { page: doc.currentPage, index: b.index })
@@ -237,7 +238,6 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
           className="te-select te-keep"
           aria-label="Line spacing"
           value={nearest(block.lineSpacing ?? 1.2)}
-          disabled={block.lineSpacing == null && block.lines.length < 2 && false}
           onChange={(e) => apply({ lineSpacing: Number(e.target.value) })}
         >
           {SPACINGS.map((s) => (

@@ -225,6 +225,24 @@ const back = withText(reopened, "revised");
 check("size and colour survive reopening", back && back.size > sizeBefore + 2 && Math.abs(back.color[2] - 0x8f / 255) < 0.02, JSON.stringify(back && { size: back.size, color: back.color }));
 await both("edit-reopened");
 
+// ---- typed text is not lost on close: Ctrl+W sends it first, then asks about the unsaved edit ----
+// The native "Save changes?" dialog is stubbed at the page's invoke (answering Cancel): no OS-level input.
+await ev(`(() => { const i = window.__TAURI_INTERNALS__; window.__dlg = []; const o = i.invoke.bind(i); i.invoke = (cmd, args, opts) => cmd === "plugin:dialog|message" ? (window.__dlg.push(args), Promise.resolve("Cancel")) : o(cmd, args, opts); })()`);
+const before = withText(await blocks(), "revised");
+const [bx0, by0, bx1, by1] = before.rect;
+const pb = await ev(`(() => { const r = document.querySelector(".page[data-page='0']").getBoundingClientRect(); return { left: r.left, top: r.top, w: r.width }; })()`);
+const z = pb.w / d0.sizes[0];
+await click(pb.left + ((bx0 + bx1) / 2) * z, pb.top + ((by0 + by1) / 2) * z);
+await settle(async () => (await centre(".te-editor")) != null, "editor before close");
+await typeOver(`${before.text} guarded`);
+check("the text is typed but not yet sent", (await edit()).draft?.text?.endsWith("guarded") === true);
+await key("w", "KeyW", 87, CTRL);
+await settle(async () => (await ev(`window.__dlg.length`)) > 0, "close prompt");
+const asked = await ev(`String(window.__dlg[0].message)`);
+check("closing asks about the unsaved edit instead of dropping it", /Save the changes/.test(asked), asked);
+check("the typed text was sent first", (await blocks()).some((b) => b.text.endsWith("guarded")), JSON.stringify((await blocks()).map((b) => b.text)));
+check("Cancel keeps the tab open", (await ev(`${S}.getState().active != null`)) === true);
+
 await key("e", "KeyE", 69, CTRL);
 await send("Emulation.setFocusEmulationEnabled", { enabled: false });
 for (const f of ["_editor.png", "_adding.png"]) fs.rmSync(path.join(out, f), { force: true });

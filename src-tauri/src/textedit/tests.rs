@@ -511,6 +511,22 @@ fn an_added_box_wraps_to_its_width_and_takes_other_scripts() {
 }
 
 #[test]
+fn adding_text_again_does_not_nest_another_wrapper() {
+    let d = dir("add-twice");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    for (i, t) in ["First note", "Second note", "Third note"].iter().enumerate() {
+        add_box(&eng, id, t, [72.0, 300.0 + 40.0 * i as f32], None);
+    }
+    eng.save(id, None).unwrap();
+    // The page's contents: the original stream, one `q` before and one `Q` after it, one stream per box.
+    let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+    let contents = doc.find_page(0).unwrap().get_dict("Contents").unwrap().unwrap();
+    assert_eq!(contents.len().unwrap(), 1 + 2 + 3);
+    let t = text(&eng, id);
+    assert!(t.contains("First note") && t.contains("Second note") && t.contains("Third note") && t.contains("Quarterly report"), "{t}");
+}
+
+#[test]
 fn text_added_to_a_rotated_page_reads_upright() {
     let d = dir("add-rotated");
     let bytes = String::from_utf8(pdf(TWO_BLOCKS, &[("F1", HELV)], &[])).unwrap().replace("/MediaBox [0 0 612 792]", "/MediaBox [0 0 612 792] /Rotate 90");

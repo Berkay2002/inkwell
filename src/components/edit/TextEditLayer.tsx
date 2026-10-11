@@ -50,6 +50,14 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
     return [Math.min(Math.max(q.x, 0), rawSize[0]), Math.min(Math.max(q.y, 0), rawSize[1])];
   };
 
+  /** Leaves the block or box being typed in. After the engine refused its text once, leaving drops it. */
+  const leave = () => {
+    const d = te().docs[docId];
+    if (d?.failed) te().discard(docId);
+    else if (d?.adding) void te().finishAdding(docId);
+    else void te().select(docId, null);
+  };
+
   const mine = selected && selected.page === page ? (listed?.blocks[selected.index] ?? null) : null;
   const typed = mine && draft && draft.page === page && draft.index === selected!.index ? draft.text : (mine?.text ?? "");
 
@@ -109,8 +117,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
           className="te-bg"
           onPointerDown={(e) => {
             e.stopPropagation();
-            if (adding) void te().finishAdding(docId);
-            else void te().select(docId, null);
+            leave();
           }}
         />
       )}
@@ -146,7 +153,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
           rect={view(mine.rect)}
           caret={caretAt.current ? caretFor(mine, typed, caretAt.current[0], caretAt.current[1]) : typed.length}
           onChange={(t) => te().setDraft(docId, t)}
-          onDone={() => void te().select(docId, null)}
+          onDone={leave}
           onCommit={() => void te().commit(docId)}
           onHistory={(again) => void (again ? redo(docId) : undo(docId))}
           grips={{ down: startDrag, move: dragTo, up: dragEnd }}
@@ -157,7 +164,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
           at={adding.at}
           value={adding.text}
           onChange={(t) => te().setAdding(docId, t)}
-          onDone={() => void te().finishAdding(docId)}
+          onDone={leave}
         />
       )}
     </div>
