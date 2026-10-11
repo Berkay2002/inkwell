@@ -27,13 +27,20 @@
   outline-style: dashed;
   outline-color: var(--danger);
 }
-/* the arrow cursor of reading: any bead that a click follows */
-.th-bead.read {
-  pointer-events: auto;
-  cursor:
+/* reading: the number tag (Show beads) or the whole bead (while reading, no other tool) follows the article */
+.th-space {
+  --th-arrow:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10.5' fill='%23fff' stroke='%23222' stroke-width='1.5'/%3E%3Cpath d='M7 12h9m-4-4 4 4-4 4' fill='none' stroke='%23222' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
       12 12,
     pointer;
+}
+.th-bead.grab {
+  pointer-events: auto;
+  cursor: var(--th-arrow);
+}
+.th-bead.tag .th-num {
+  pointer-events: auto;
+  cursor: var(--th-arrow);
 }
 .th-bead.edit {
   pointer-events: auto;

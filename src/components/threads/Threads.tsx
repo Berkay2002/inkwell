@@ -3,11 +3,14 @@ import type { ArticleThread, ThreadInfo } from "../../lib/api";
 import { useAnnot } from "../../lib/annot";
 import { useForms } from "../../lib/forms";
 import { computeLayout } from "../../lib/layout";
+import { useNav } from "../../lib/nav";
 import { useRedact } from "../../lib/redact";
-import { beadZoom, threadOf, useThreads } from "../../lib/threads";
+import { useTextEdit } from "../../lib/textEdit";
+import { beadZoom, propsDraft, readsKeys, sameInfo, threadOf, useThreads } from "../../lib/threads";
 import { type DocState, type ZoomMode, useStore } from "../../store";
 import { Icon } from "../Icons";
 import { Shell, useEscape } from "../OrganizePlus";
+import { useOtherToolHeld } from "./held";
 import "./threads.css";
 
 const th = () => useThreads.getState();
@@ -38,15 +41,14 @@ export function ThreadHost({ doc }: { doc: DocState }) {
   }, [wantList, id, doc.rev]);
 
   // One page tool at a time: arming the Article tool puts the others down, and arming another puts it down.
-  const redacting = useRedact((s) => s.tool);
-  const annotating = useAnnot((s) => s.tool) !== "select";
-  const preparing = useForms((s) => s.tool) !== "select";
-  const other = redacting || annotating || preparing;
+  const other = useOtherToolHeld();
   useEffect(() => {
     if (!tool) return;
     useRedact.getState().setTool(false);
     useAnnot.getState().setTool("select");
     useForms.getState().setTool("select");
+    useTextEdit.getState().setTool("select");
+    useNav.getState().setLinkTool("select");
   }, [tool]);
   useEffect(() => {
     if (other) th().setTool(false);
@@ -76,7 +78,11 @@ export function ThreadHost({ doc }: { doc: DocState }) {
     const b = threadOf(th().get(id), follow.thread)?.beads.find((x) => x.id === follow.bead);
     const view = document.querySelector<HTMLElement>(".viewer");
     if (!b || !view) return;
-    before.current ??= { doc: id, zoom: d.zoom, zoomMode: d.zoomMode };
+    if (!before.current) {
+      before.current = { doc: id, zoom: d.zoom, zoomMode: d.zoomMode };
+      // the keys of reading go to the page: focus leaves the panel button or list that started it
+      view.focus({ preventScroll: true });
+    }
     const z = beadZoom(b.rect, d.rot, view.clientWidth);
     s.patch(id, { zoom: z, zoomMode: "custom" });
     s.goTo(id, b.page, Math.max(0, b.rect[1] - 8 / z), b.rect[0]);
@@ -95,6 +101,8 @@ export function ThreadHost({ doc }: { doc: DocState }) {
         th().stopFollow();
         return;
       }
+      // Enter and the arrows stay with a button or list that has focus (the pill's Stop, the sidebar's lists)
+      if (!pageHasFocus()) return;
       const dir = e.key === "Enter" ? (e.shiftKey ? -1 : 1) : e.key === "ArrowDown" && !e.shiftKey ? 1 : e.key === "ArrowUp" && !e.shiftKey ? -1 : 0;
       if (!dir) return;
       e.preventDefault();
@@ -111,6 +119,7 @@ export function ThreadHost({ doc }: { doc: DocState }) {
     const key = (e: KeyboardEvent) => {
       if (inText(e) || modal() || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key !== "Escape" && e.key !== "End") return;
+      if (e.key === "End" && !pageHasFocus()) return;
       const s = th();
       if (s.selected?.doc === id) s.finish();
       else if (e.key === "Escape") s.setTool(false);
@@ -160,6 +169,12 @@ export function ThreadHost({ doc }: { doc: DocState }) {
   );
 }
 
+/** Focus is in the viewer or on nothing (the body): the keys of reading and of the tool are the page's. */
+function pageHasFocus(): boolean {
+  const a = document.activeElement;
+  return readsKeys({ body: !a || a === document.body, inViewer: !!a?.closest(".viewer") });
+}
+
 /** One step of reading: scroll on inside the bead while there is more of it, else go to the next (or previous) bead. */
 function advance(id: number, dir: 1 | -1) {
   const s = useStore.getState();
@@ -186,13 +201,14 @@ function advance(id: number, dir: 1 | -1) {
 
 function PropsSheet({ doc, thread }: { doc: number; thread: ArticleThread }) {
   const close = () => th().closeProps();
-  const [info, setInfo] = useState<ThreadInfo>({ ...thread.info, title: thread.info.title || thread.title });
+  const [initial] = useState(() => propsDraft(thread));
+  const [info, setInfo] = useState<ThreadInfo>(initial);
   const set = (k: keyof ThreadInfo) => (e: React.ChangeEvent<HTMLInputElement>) => setInfo({ ...info, [k]: e.target.value });
   useEscape(true, close);
   const apply = () => {
     close();
-    const same = (Object.keys(info) as (keyof ThreadInfo)[]).every((k) => info[k] === thread.info[k]);
-    if (!same) void th().describe(doc, thread.id, info);
+    // what the form opened with is not an edit: the fallback title is not written back as a /Title
+    if (!sameInfo(info, initial)) void th().describe(doc, thread.id, info);
   };
   const field = (k: keyof ThreadInfo, label: string, first = false) => (
     <label className="op-field">

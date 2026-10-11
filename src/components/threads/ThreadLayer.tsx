@@ -2,7 +2,8 @@ import { memo, useMemo, useRef, useState } from "react";
 import type { ArticleThread, ThreadBead } from "../../lib/api";
 import { type Handle, type Rect4, HANDLES, move, resize } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
-import { beadNumber, stepBead, useThreads } from "../../lib/threads";
+import { beadNumber, beadPointer, stepBead, useThreads } from "../../lib/threads";
+import { useOtherToolHeld } from "./held";
 import "./threads.css";
 
 interface Props {
@@ -30,16 +31,18 @@ export const ThreadLayer = memo(function ThreadLayer(p: Props) {
   const tool = useThreads((s) => s.tool);
   const follow = useThreads((s) => (s.follow?.doc === p.docId ? s.follow : null));
   if (!list || !(show || tool || follow)) return null;
-  return <Layer {...p} list={list} tool={tool} follow={follow?.bead ?? null} followThread={follow?.thread ?? null} />;
+  return <Layer {...p} list={list} show={show} tool={tool} follow={follow?.bead ?? null} followThread={follow?.thread ?? null} />;
 });
 
 type Drag = { mode: "move" | { resize: Handle }; start: Pt; rect0: Rect4; rect: Rect4; moved: boolean; bead: number };
 type Item = { t: ArticleThread; b: ThreadBead };
 
-function Layer({ docId, page, rot, rawSize, zoom, list, tool, follow, followThread }: Props & {
-  list: ArticleThread[]; tool: boolean; follow: number | null; followThread: number | null;
+function Layer({ docId, page, rot, rawSize, zoom, list, show, tool, follow, followThread }: Props & {
+  list: ArticleThread[]; show: boolean; tool: boolean; follow: number | null; followThread: number | null;
 }) {
   const selected = useThreads((s) => (s.selected?.doc === docId ? s.selected : null));
+  const other = useOtherToolHeld();
+  const pointer = beadPointer({ tool, follow: follow != null, show, other });
   const space = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [draft, setDraft] = useState<{ a: Pt; b: Pt } | null>(null);
@@ -106,8 +109,9 @@ function Layer({ docId, page, rot, rawSize, zoom, list, tool, follow, followThre
       !tool && it.b.id === follow ? "cur" : "",
       !tool && it.b.id === next ? "next" : "",
       it.t.damaged ? "bad" : "",
-      tool && !it.t.damaged ? "edit" : "",
-      !tool ? "read" : "",
+      pointer === "edit" && !it.t.damaged ? "edit" : "",
+      pointer === "all" ? "grab" : "",
+      pointer === "tag" ? "tag" : "",
     ].filter(Boolean).join(" ");
   };
 

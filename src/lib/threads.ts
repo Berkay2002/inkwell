@@ -61,6 +61,40 @@ export function nextTitle(list: ArticleThread[]): string {
   return `Article ${n}`;
 }
 
+/** The page tools that can be in the hand besides the Article tool (each is "select" or off when it is not). */
+export interface ToolsHeld {
+  redact: boolean;
+  annot: string;
+  forms: string;
+  /** Edit mode's text tool, and the link tool. */
+  text: string;
+  link: string;
+}
+
+export const otherToolHeld = (t: ToolsHeld): boolean =>
+  t.redact || t.annot !== "select" || t.forms !== "select" || t.text !== "select" || t.link !== "select";
+
+/**
+ * What the beads on a page take of the pointer. Outlines alone never do ("Show beads" must not get between the
+ * person and the comment, form, text or link tools underneath): with nothing else in the hand the number tag does
+ * (a click reads from that bead), and while an article is being read the whole bead does. With the Article tool
+ * the beads are what it edits.
+ */
+export function beadPointer(s: { tool: boolean; follow: boolean; show: boolean; other: boolean }): "edit" | "all" | "tag" | "none" {
+  if (s.tool) return "edit";
+  if (s.other) return "none";
+  return s.follow ? "all" : s.show ? "tag" : "none";
+}
+
+/** The reading keys (Enter, arrows) belong to the page: not to a button or a list that has focus. */
+export const readsKeys = (focus: { body: boolean; inViewer: boolean }): boolean => focus.body || focus.inViewer;
+
+/** The Properties form as it opens: an article with no title shows the name it is listed under. */
+export const propsDraft = (t: ArticleThread): ThreadInfo => ({ ...t.info, title: t.info.title || t.title });
+
+export const sameInfo = (a: ThreadInfo, b: ThreadInfo): boolean =>
+  a.title === b.title && a.subject === b.subject && a.author === b.author && a.keywords === b.keywords;
+
 // ---- the store -----------------------------------------------------------------------------
 
 interface Threads {

@@ -24,6 +24,8 @@ use std::collections::{HashMap, HashSet};
 pub const MAX_THREADS: usize = 1_000;
 /// Beads read from one thread, and made in one.
 pub const MAX_BEADS: usize = 10_000;
+/// Beads visited in all by one read of the document (a thousand articles may share one ring).
+const MAX_TOTAL_BEADS: usize = 100_000;
 /// The smallest side of a bead, in points.
 const MIN_SIDE: f32 = 3.0;
 /// Characters kept of each entry of a thread's /I.
@@ -80,8 +82,11 @@ impl Pages {
         let mut nums = Vec::with_capacity(n as usize);
         for i in 0..n {
             let o = doc.find_page(i)?;
+            // A page that is not an indirect object (0) cannot be named by /P: it holds no beads.
             let num = if o.is_indirect()? { o.as_indirect()? } else { 0 };
-            by_num.insert(num, i as u32);
+            if num > 0 {
+                by_num.insert(num, i as u32);
+            }
             nums.push(num);
         }
         Ok(Self { by_num, nums })
@@ -122,6 +127,8 @@ enum End {
     Open,
     Loop,
     Cap,
+    /// The document's total budget of beads ran out before this thread was read.
+    Budget,
     Broken,
 }
 
@@ -136,20 +143,33 @@ impl Ring {
         self.beads.iter().position(|b| b.flaw.is_some()).unwrap_or(self.beads.len())
     }
 
+    /// Does each /V name the bead before it (of a ring that closes)?
+    fn links_back(&self) -> bool {
+        let n = self.beads.len();
+        (0..n).all(|i| self.beads[i].prev == Some(self.beads[(i + n - 1) % n].id))
+    }
+
+    /// The beads of this thread: the walk stops at a bead of another article, which is not one of them.
+    fn own(&self) -> impl Iterator<Item = &Raw> {
+        self.beads.iter().filter(|b| b.flaw != Some(Flaw::Foreign))
+    }
+
+    /// A ring that is whole except that some beads are on pages that were deleted: the only damage page
+    /// deletion may mend.
+    fn only_pages_missing(&self) -> bool {
+        self.end == End::Closed && self.beads.iter().all(|b| matches!(b.flaw, None | Some(Flaw::NoPage))) && self.links_back()
+    }
+
     fn damage(&self) -> Option<String> {
         if let Some(f) = self.beads.iter().find_map(|b| b.flaw) {
             return Some(f.text().into());
         }
         match self.end {
-            End::Closed => {
-                // The ring closes; are the links back right (each /V names the bead before)?
-                let n = self.beads.len();
-                let wrong = (0..n).any(|i| self.beads[i].prev != Some(self.beads[(i + n - 1) % n].id));
-                wrong.then(|| "The links back to the previous beads are wrong.".into())
-            }
+            End::Closed => (!self.links_back()).then(|| "The links back to the previous beads are wrong.".into()),
             End::Open => Some("The chain of beads does not come back to its first bead.".into()),
             End::Loop => Some("The chain of beads loops back into its middle.".into()),
             End::Cap => Some(format!("The article has more than {MAX_BEADS} beads.")),
+            End::Budget => Some("The document has too many article beads to read this article.".into()),
             End::Broken => Some("A link in the chain of beads is broken.".into()),
         }
     }
@@ -184,8 +204,10 @@ fn raw_bead(r: &PdfObject, d: &PdfObject, id: i32, tid: i32, pages: &Pages) -> R
     Raw { obj: r.share(), id, prev, page, user, flaw }
 }
 
-/// The chain of beads of `thread` from /F: iterative, loop-safe and capped.
-fn walk(thread: &PdfObject, tid: i32, pages: &Pages) -> Result<Ring> {
+/// The chain of beads of `thread` from /F: iterative, loop-safe and capped, at most `budget` beads in all (it
+/// is spent as beads are visited, so one budget can be shared by every thread of a read). It stops at the first
+/// bead of another article: what lies beyond is not this thread's.
+fn walk(thread: &PdfObject, tid: i32, pages: &Pages, budget: &mut usize) -> Result<Ring> {
     let mut ring = Ring { beads: Vec::new(), end: End::Open };
     let Some(first) = get(thread, "F") else { return Ok(ring) };
     let Some(first_id) = indirect_num(&first) else {
@@ -211,7 +233,18 @@ fn walk(thread: &PdfObject, tid: i32, pages: &Pages) -> Result<Ring> {
             ring.end = End::Cap;
             break;
         }
-        ring.beads.push(raw_bead(&cur, &d, id, tid, pages));
+        if *budget == 0 {
+            ring.end = End::Budget;
+            break;
+        }
+        *budget -= 1;
+        let bead = raw_bead(&cur, &d, id, tid, pages);
+        let foreign = bead.flaw == Some(Flaw::Foreign);
+        ring.beads.push(bead);
+        if foreign {
+            ring.end = End::Broken;
+            break;
+        }
         match get(&d, "N") {
             None => break,
             Some(n) if indirect_num(&n) == Some(first_id) => {
@@ -255,8 +288,10 @@ fn info_of(thread: &PdfObject) -> Info {
 
 /// Where the page's user space lands on the page as it is shown (y down, its box at the origin).
 fn page_matrix(doc: &PdfDocument, pages: &Pages, p: u32) -> Result<Matrix> {
-    let num = *pages.nums.get(p as usize).ok_or(crate::engine::EngineError::BadPage(p))?;
-    doc.new_indirect(num, 0)?.page_ctm().map_err(Into::into)
+    if p as usize >= pages.nums.len() {
+        return Err(crate::engine::EngineError::BadPage(p));
+    }
+    doc.find_page(p as i32)?.page_ctm().map_err(Into::into)
 }
 
 fn map_rect(m: &Matrix, r: [f32; 4]) -> [f32; 4] {
@@ -271,9 +306,9 @@ fn map_rect(m: &Matrix, r: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-fn view(doc: &PdfDocument, id: i32, obj: &PdfObject, n: usize, pages: &Pages, ctms: &mut HashMap<u32, Matrix>) -> Result<Thread> {
+fn view(doc: &PdfDocument, id: i32, obj: &PdfObject, n: usize, pages: &Pages, ctms: &mut HashMap<u32, Matrix>, budget: &mut usize) -> Result<Thread> {
     let thread = obj.resolve()?.unwrap_or_else(|| obj.share());
-    let ring = walk(&thread, id, pages)?;
+    let ring = walk(&thread, id, pages, budget)?;
     let info = info_of(&thread);
     let mut beads = Vec::new();
     for b in &ring.beads[..ring.good()] {
@@ -300,7 +335,8 @@ pub fn read_all(doc: &PdfDocument) -> Result<Vec<Thread>> {
     }
     let pages = Pages::of(doc)?;
     let mut ctms = HashMap::new();
-    objs.iter().enumerate().map(|(n, (id, o))| view(doc, *id, o, n, &pages, &mut ctms)).collect()
+    let mut budget = MAX_TOTAL_BEADS;
+    objs.iter().enumerate().map(|(n, (id, o))| view(doc, *id, o, n, &pages, &mut ctms, &mut budget)).collect()
 }
 
 // ---- writing ------------------------------------------------------------------------------------
@@ -321,10 +357,17 @@ impl Entry {
 /// Makes `thread`'s ring from `entries` (empty: no beads left) and brings the /B arrays of every page it
 /// had beads on or has now in line: this thread's beads in ring order after the ones already there that
 /// are not its own. Returns the pages touched.
-fn commit(doc: &mut PdfDocument, pages: &Pages, thread: &PdfObject, old: &[Raw], entries: Vec<Entry>) -> Result<Vec<u32>> {
+fn commit<'a>(
+    doc: &mut PdfDocument,
+    pages: &Pages,
+    thread: &PdfObject,
+    old: impl IntoIterator<Item = &'a Raw>,
+    entries: Vec<Entry>,
+) -> Result<Vec<u32>> {
     if entries.len() > MAX_BEADS {
         return Err(bad(format!("an article can have at most {MAX_BEADS} beads")));
     }
+    let old: Vec<&Raw> = old.into_iter().collect();
     // Every bead object exists before any link is written.
     let mut refs: Vec<PdfObject> = Vec::with_capacity(entries.len());
     for e in &entries {
@@ -342,6 +385,9 @@ fn commit(doc: &mut PdfDocument, pages: &Pages, thread: &PdfObject, old: &[Raw],
         let mut b = refs[i].share();
         b.dict_put("T", thread.share())?;
         let num = *pages.nums.get(e.page as usize).ok_or(crate::engine::EngineError::BadPage(e.page))?;
+        if num == 0 {
+            return Err(bad("that page cannot hold article beads"));
+        }
         b.dict_put("P", doc.new_indirect(num, 0)?)?;
         let mut r = doc.new_array()?;
         for v in e.user {
@@ -387,20 +433,22 @@ fn commit(doc: &mut PdfDocument, pages: &Pages, thread: &PdfObject, old: &[Raw],
     Ok(touched)
 }
 
-/// Takes `id` out of /Threads (the key goes with the last thread).
-fn unlist(doc: &mut PdfDocument, keep: impl Fn(i32) -> bool) -> Result<()> {
+/// Takes every entry of /Threads for which `drop` says so out of the array, in place: entries this code does
+/// not list (past the cap, not indirect) stay as they were. The key goes with the last entry.
+fn unlist(doc: &mut PdfDocument, drop: impl Fn(i32) -> bool) -> Result<()> {
     let mut cat = doc.catalog()?;
-    let objs = thread_objs(doc)?;
-    let mut arr = doc.new_array()?;
-    for (id, o) in &objs {
-        if keep(*id) {
-            arr.array_push(o.share())?;
+    let Some(mut arr) = get(&cat, "Threads").filter(|a| a.is_array().unwrap_or(false)) else { return Ok(()) };
+    let mut at = Vec::new();
+    for i in 0..arr.len()? {
+        if arr.get_array(i as i32)?.and_then(|t| indirect_num(&t)).is_some_and(&drop) {
+            at.push(i as i32);
         }
+    }
+    for &i in at.iter().rev() {
+        arr.array_delete(i)?;
     }
     if arr.len()? == 0 {
         cat.dict_delete("Threads")?;
-    } else {
-        cat.dict_put("Threads", arr)?;
     }
     Ok(())
 }
@@ -413,7 +461,7 @@ struct Loaded {
 
 fn load(doc: &PdfDocument, pages: &Pages, id: i32) -> Result<Loaded> {
     let (_, obj) = thread_objs(doc)?.into_iter().find(|(i, _)| *i == id).ok_or_else(|| bad("that article is no longer in the document"))?;
-    let ring = walk(&obj.resolve()?.unwrap_or_else(|| obj.share()), id, pages)?;
+    let ring = walk(&obj.resolve()?.unwrap_or_else(|| obj.share()), id, pages, &mut (MAX_BEADS + 1))?;
     Ok(Loaded { obj, ring })
 }
 
@@ -439,8 +487,15 @@ fn user_rect(doc: &PdfDocument, pages: &Pages, page: u32, r: [f32; 4]) -> Result
     if !r.iter().all(|x| x.is_finite()) {
         return Err(bad("the bead's rectangle is not a number"));
     }
+    if pages.nums[page as usize] == 0 {
+        return Err(bad("that page cannot hold article beads"));
+    }
     let [w, h] = crate::engine::edit::page_size(doc, page)?;
-    let c = [r[0].min(r[2]).clamp(0.0, w), r[1].min(r[3]).clamp(0.0, h), r[0].max(r[2]).clamp(0.0, w), r[1].max(r[3]).clamp(0.0, h)];
+    // (clamp panics on a NaN or inverted range)
+    if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
+        return Err(bad("the page has no usable size"));
+    }
+    let c = [r[0].min(r[2]).max(0.0).min(w), r[1].min(r[3]).max(0.0).min(h), r[0].max(r[2]).max(0.0).min(w), r[1].max(r[3]).max(0.0).min(h)];
     if c[2] - c[0] < MIN_SIDE || c[3] - c[1] < MIN_SIDE {
         return Err(bad("the bead is too small (at least 3 points a side, inside the page)"));
     }
@@ -472,7 +527,7 @@ pub fn create(doc: &mut PdfDocument, title: &str, page: u32, rect: [f32; 4]) -> 
             cat.dict_put("Threads", a)?;
         }
     }
-    commit(doc, &pages, &thread, &[], vec![Entry { obj: None, page, user }])
+    commit(doc, &pages, &thread, std::iter::empty(), vec![Entry { obj: None, page, user }])
 }
 
 /// A bead after `after` (the end of the article when none).
@@ -489,7 +544,7 @@ pub fn add_bead(doc: &mut PdfDocument, thread: i32, after: Option<i32>, page: u3
     };
     let user = user_rect(doc, &pages, page, rect)?;
     entries.insert(at, Entry { obj: None, page, user });
-    commit(doc, &pages, &l.obj, &l.ring.beads, entries)
+    commit(doc, &pages, &l.obj, l.ring.own(), entries)
 }
 
 /// Moves or resizes a bead (and puts it on another page when `page` differs).
@@ -500,7 +555,7 @@ pub fn move_bead(doc: &mut PdfDocument, thread: i32, bead: i32, page: u32, rect:
     let i = l.bead(bead)?;
     entries[i].page = page;
     entries[i].user = user_rect(doc, &pages, page, rect)?;
-    commit(doc, &pages, &l.obj, &l.ring.beads, entries)
+    commit(doc, &pages, &l.obj, l.ring.own(), entries)
 }
 
 /// Takes a bead out; the last one takes the article with it.
@@ -513,23 +568,30 @@ pub fn delete_bead(doc: &mut PdfDocument, thread: i32, bead: i32) -> Result<Vec<
         return delete_thread(doc, thread);
     }
     entries.remove(i);
-    commit(doc, &pages, &l.obj, &l.ring.beads, entries)
+    commit(doc, &pages, &l.obj, l.ring.own(), entries)
 }
 
 /// Removes the article, damaged or not, and its beads from the pages' /B.
 pub fn delete_thread(doc: &mut PdfDocument, thread: i32) -> Result<Vec<u32>> {
     let pages = Pages::of(doc)?;
     let l = load(doc, &pages, thread)?;
-    unlist(doc, |i| i != thread)?;
-    let mut touched = commit(doc, &pages, &l.obj, &l.ring.beads, Vec::new())?;
+    unlist(doc, |i| i == thread)?;
+    // A damaged ring may run into another article's beads (without a /T of theirs to tell): those stay.
+    let claimed = if l.ring.damage().is_some() { claimed_by_others(doc, &pages)? } else { HashSet::new() };
+    let mut touched = commit(doc, &pages, &l.obj, l.ring.own().filter(|b| !claimed.contains(&b.id)), Vec::new())?;
     if l.ring.damage().is_some() {
         // Beads past the break are not in the ring but may still be on a page's /B.
+        let mut budget = MAX_TOTAL_BEADS;
         for p in 0..pages.nums.len() as u32 {
             let mut page = doc.find_page(p as i32)?;
             let Some(cur) = get(&page, "B").filter(|c| c.is_array().unwrap_or(false)) else { continue };
             let mut keep = doc.new_array()?;
             let mut dropped = false;
             for i in 0..cur.len()?.min(MAX_BEADS * 2) {
+                if budget == 0 {
+                    break;
+                }
+                budget -= 1;
                 let Some(item) = cur.get_array(i as i32)? else { continue };
                 let ours = item.resolve()?.and_then(|b| get(&b, "T")).is_some_and(|t| indirect_num(&t) == Some(thread));
                 if ours {
@@ -551,6 +613,17 @@ pub fn delete_thread(doc: &mut PdfDocument, thread: i32) -> Result<Vec<u32>> {
         touched.dedup();
     }
     Ok(touched)
+}
+
+/// The ids of the beads the articles still in /Threads run through.
+fn claimed_by_others(doc: &PdfDocument, pages: &Pages) -> Result<HashSet<i32>> {
+    let mut budget = MAX_TOTAL_BEADS;
+    let mut out = HashSet::new();
+    for (id, obj) in thread_objs(doc)? {
+        let ring = walk(&obj.resolve()?.unwrap_or_else(|| obj.share()), id, pages, &mut budget)?;
+        out.extend(ring.own().map(|b| b.id));
+    }
+    Ok(out)
 }
 
 /// The info as it is kept: no control characters, trimmed, at most 1000 characters each.
@@ -586,18 +659,35 @@ pub fn set_info(doc: &mut PdfDocument, thread: i32, info: &Info) -> Result<Vec<u
     Ok(Vec::new())
 }
 
-/// Moves the article to position `to` of /Threads.
+/// Moves the article to position `to` of the articles /Threads lists. The array is rewritten whole from its
+/// own entries, so those this code does not list (past the cap, not indirect) keep their places.
 pub fn reorder(doc: &mut PdfDocument, thread: i32, to: usize) -> Result<Vec<u32>> {
-    let objs = thread_objs(doc)?;
-    let from = objs.iter().position(|(i, _)| *i == thread).ok_or_else(|| bad("that article is no longer in the document"))?;
-    let mut order: Vec<PdfObject> = objs.iter().map(|(_, o)| o.share()).collect();
-    let moved = order.remove(from);
-    order.insert(to.min(order.len()), moved);
-    let mut arr = doc.new_array()?;
-    for o in order {
-        arr.array_push(o)?;
+    let mut cat = doc.catalog()?;
+    let arr = get(&cat, "Threads").filter(|a| a.is_array().unwrap_or(false)).ok_or_else(|| bad("that article is no longer in the document"))?;
+    // the listed entries, and every non-null entry of the array in order
+    let listed = thread_objs(doc)?;
+    let mut raw: Vec<PdfObject> = Vec::new();
+    for i in 0..arr.len()? {
+        if let Some(o) = arr.get_array(i as i32)? {
+            raw.push(o);
+        }
     }
-    doc.catalog()?.dict_put("Threads", arr)?;
+    let gone = || bad("that article is no longer in the document");
+    let at = |raw: &[PdfObject], id: i32| raw.iter().position(|o| indirect_num(o) == Some(id));
+    let from = listed.iter().position(|(i, _)| *i == thread).ok_or_else(gone)?;
+    let to = to.min(listed.len() - 1);
+    if to == from {
+        return Ok(Vec::new());
+    }
+    let moved = raw.remove(at(&raw, thread).ok_or_else(gone)?);
+    // the entry that was at `to` is still there: the article goes behind it when moving down, before it when up
+    let t = at(&raw, listed[to].0).ok_or_else(gone)?;
+    raw.insert(if to > from { t + 1 } else { t }, moved);
+    let mut out = doc.new_array()?;
+    for o in raw {
+        out.array_push(o)?;
+    }
+    cat.dict_put("Threads", out)?;
     Ok(Vec::new())
 }
 
@@ -609,20 +699,23 @@ pub fn after_delete(doc: &mut PdfDocument) -> Result<()> {
         return Ok(());
     }
     let pages = Pages::of(doc)?;
+    let mut budget = MAX_TOTAL_BEADS;
     let mut gone: Vec<i32> = Vec::new();
     for (id, obj) in &objs {
-        let ring = walk(&obj.resolve()?.unwrap_or_else(|| obj.share()), *id, &pages)?;
-        if !ring.beads.iter().any(|b| b.flaw == Some(Flaw::NoPage)) {
+        let ring = walk(&obj.resolve()?.unwrap_or_else(|| obj.share()), *id, &pages, &mut budget)?;
+        // Only an article that was whole before the delete is mended; a damaged one is left as it is (its
+        // ring may run through other articles' beads).
+        if !ring.beads.iter().any(|b| b.flaw == Some(Flaw::NoPage)) || !ring.only_pages_missing() {
             continue;
         }
         let entries: Vec<Entry> = ring.beads.iter().filter(|b| b.flaw.is_none()).filter_map(Entry::of).collect();
         if entries.is_empty() {
             gone.push(*id);
         }
-        commit(doc, &pages, obj, &ring.beads, entries)?;
+        commit(doc, &pages, obj, ring.own(), entries)?;
     }
     if !gone.is_empty() {
-        unlist(doc, |i| !gone.contains(&i))?;
+        unlist(doc, |i| gone.contains(&i))?;
     }
     Ok(())
 }

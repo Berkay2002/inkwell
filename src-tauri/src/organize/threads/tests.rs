@@ -57,7 +57,7 @@ fn check(eng: &Engine, id: DocId) {
         let ids: Vec<i32> = threads.iter().map(|(i, _)| *i).collect();
         for (tid, t) in &threads {
             let dict = t.resolve()?.unwrap();
-            let ring = walk(&dict, *tid, &pages)?;
+            let ring = walk(&dict, *tid, &pages, &mut MAX_TOTAL_BEADS.clone())?;
             assert_eq!(ring.end, End::Closed, "ring of {tid} closes");
             assert!(!ring.beads.is_empty());
             assert!(ring.damage().is_none(), "{tid}: {:?}", ring.damage());
@@ -96,7 +96,7 @@ fn check(eng: &Engine, id: DocId) {
 fn beads_of(d: &PdfDocument, tid: i32) -> Vec<PdfObject> {
     let pages = Pages::of(d).unwrap();
     let (_, t) = thread_objs(d).unwrap().into_iter().find(|(i, _)| *i == tid).unwrap();
-    walk(&t.resolve().unwrap().unwrap(), tid, &pages).unwrap().beads.into_iter().map(|b| b.obj).collect()
+    walk(&t.resolve().unwrap().unwrap(), tid, &pages, &mut MAX_TOTAL_BEADS.clone()).unwrap().beads.into_iter().map(|b| b.obj).collect()
 }
 
 fn tamper(eng: &Engine, id: DocId, f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>) {
@@ -250,7 +250,7 @@ fn rotated_and_cropped_pages_round_trip() {
     let user = eng
         .read_custom(id, |d| {
             let t = thread_objs(d)?.remove(0);
-            let ring = walk(&t.1.resolve()?.unwrap(), t.0, &Pages::of(d)?)?;
+            let ring = walk(&t.1.resolve()?.unwrap(), t.0, &Pages::of(d)?, &mut MAX_TOTAL_BEADS.clone())?;
             Ok(ring.beads[0].user.unwrap())
         })
         .unwrap();
@@ -458,4 +458,254 @@ fn extracting_and_splitting_leave_the_beads_behind() {
     check(&eng, id);
     let l = list(&eng, id);
     assert_eq!(l.len(), 1, "article B had no beads left");
+}
+
+// ---- review fixes -----------------------------------------------------------------------------
+
+/// B's first bead object (raw), for tampering.
+fn first_bead(eng: &Engine, id: DocId, tid: i32) -> PdfObject {
+    let mut out = None;
+    eng.read_custom(id, |d| {
+        out = Some(beads_of(d, tid).remove(0));
+        Ok(())
+    })
+    .unwrap();
+    out.unwrap()
+}
+
+#[test]
+fn a_damaged_article_that_runs_into_another_leaves_the_other_alone() {
+    // A's last bead links on into B's ring. B's beads carry /T = B, so the walk of A stops at them.
+    for delete_page_instead in [false, true] {
+        let (eng, id, _d) = open(&format!("into-b-{delete_page_instead}"), 4);
+        let (a, b) = two_threads(&eng, id);
+        let b1 = first_bead(&eng, id, b);
+        tamper(&eng, id, |d| {
+            let mut last = beads_of(d, a).remove(2);
+            last.dict_put("N", b1.share())?;
+            Ok(vec![])
+        });
+        let l = list(&eng, id);
+        assert!(l[0].damaged.is_some());
+        assert_eq!(l[0].beads.len(), 3, "A's own beads are the readable prefix");
+        assert!(l[1].damaged.is_none());
+        if delete_page_instead {
+            // page 2 holds B's first bead: B is mended, A (damaged) is not rewritten
+            eng.apply(id, EditOp::Delete { pages: vec![2] }).unwrap();
+            let l = list(&eng, id);
+            assert_eq!(l.len(), 2);
+            assert!(l[0].damaged.is_some(), "A is still damaged, not silently repaired");
+            assert_eq!(l[0].beads.len(), 3);
+            assert!(l[1].damaged.is_none());
+            assert_eq!(l[1].beads.len(), 1);
+            eng.read_custom(id, |d| {
+                let pages = Pages::of(d)?;
+                let (_, t) = thread_objs(d)?.remove(1);
+                let ring = walk(&t.resolve()?.unwrap(), b, &pages, &mut MAX_TOTAL_BEADS.clone())?;
+                assert_eq!((ring.end, ring.beads.len()), (End::Closed, 1), "B's ring is closed and whole");
+                Ok(())
+            })
+            .unwrap();
+        } else {
+            thread_delete(&eng, id, a, USER).unwrap();
+            check(&eng, id);
+            let l = list(&eng, id);
+            assert_eq!(l.len(), 1);
+            assert_eq!(l[0].id, b);
+            assert_eq!(l[0].beads.len(), 2, "B keeps both beads, and both stay on their pages' /B");
+        }
+    }
+}
+
+#[test]
+fn deleting_a_damaged_article_keeps_the_beads_of_a_ring_it_runs_into_even_without_a_t() {
+    let (eng, id, _d) = open("into-b-no-t", 4);
+    let (a, b) = two_threads(&eng, id);
+    let b1 = first_bead(&eng, id, b);
+    tamper(&eng, id, |d| {
+        // B's beads have no /T (allowed on read); A's last bead runs into them
+        for mut x in beads_of(d, b) {
+            x.dict_delete("T")?;
+        }
+        let mut last = beads_of(d, a).remove(2);
+        last.dict_put("N", b1.share())?;
+        Ok(vec![])
+    });
+    assert!(list(&eng, id)[0].damaged.is_some());
+    let on_pages = |eng: &Engine| -> Vec<Vec<i32>> {
+        let mut out = Vec::new();
+        eng.read_custom(id, |d| {
+            for p in 2..4 {
+                out.push(b_ids(&d.find_page(p)?));
+            }
+            Ok(())
+        })
+        .unwrap();
+        out
+    };
+    let before = on_pages(&eng);
+    assert!(before.iter().all(|p| p.len() == 1));
+    thread_delete(&eng, id, a, USER).unwrap();
+    assert_eq!(on_pages(&eng), before, "B's beads are still listed on their pages");
+    let l = list(&eng, id);
+    assert_eq!((l.len(), l[0].id, l[0].beads.len()), (1, b, 2));
+}
+
+#[test]
+fn rectangles_on_a_page_with_no_usable_size_are_refused_not_a_panic() {
+    let (eng, id, _d) = open("size", 2);
+    tamper(&eng, id, |d| {
+        let mut page = d.find_page(0)?;
+        let mut r = d.new_array()?;
+        for v in [0.0, 0.0, 0.0, 0.0] {
+            r.array_push(PdfObject::new_real(v)?)?;
+        }
+        page.dict_put("MediaBox", r)?;
+        Ok(vec![])
+    });
+    // MuPDF may substitute a default size for it; either way the answer is an error or a bead inside the page
+    match thread_create(&eng, id, "Odd", 0, R, USER) {
+        Ok(_) => {
+            let l = list(&eng, id);
+            assert!(l[0].damaged.is_none());
+        }
+        Err(e) => assert!(!e.to_string().is_empty()),
+    }
+    // NaN and infinity never reach the clamp
+    assert!(thread_create(&eng, id, "Odd", 1, [f32::NAN, 0.0, 10.0, 10.0], USER).is_err());
+    assert!(thread_create(&eng, id, "Odd", 1, [0.0, 0.0, f32::INFINITY, 10.0], USER).is_err());
+}
+
+#[test]
+fn a_page_that_is_not_an_indirect_object_holds_no_beads() {
+    let (eng, id, _d) = open("direct-page", 3);
+    tamper(&eng, id, |d| {
+        // the first page becomes a direct dictionary in the page tree's /Kids
+        let root = get(&d.catalog()?, "Pages").unwrap();
+        let mut kids = get(&root, "Kids").unwrap();
+        let page = kids.get_array(0)?.unwrap().resolve()?.unwrap();
+        kids.array_put(0, page)?;
+        Ok(vec![])
+    });
+    let mut direct = false;
+    eng.read_custom(id, |d| {
+        direct = Pages::of(d)?.nums[0] == 0;
+        Ok(())
+    })
+    .unwrap();
+    if !direct {
+        // this MuPDF build hands back the page by reference anyway: nothing to refuse
+        return;
+    }
+    assert!(thread_create(&eng, id, "No", 0, R, USER).is_err(), "no /P 0 0 R is ever written");
+    thread_create(&eng, id, "Yes", 1, R, USER).unwrap();
+    let l = list(&eng, id);
+    assert_eq!((l.len(), l[0].beads.len(), l[0].beads[0].page, l[0].damaged.is_none()), (1, 1, 1, true));
+    eng.read_custom(id, |d| {
+        let pages = Pages::of(d)?;
+        let bead = beads_of(d, l[0].id).remove(0).resolve()?.unwrap();
+        assert_eq!(get(&bead, "P").and_then(|p| indirect_num(&p)), Some(pages.nums[1]));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_thousand_articles_sharing_one_big_ring_are_read_within_the_total_budget() {
+    let (eng, id, _d) = open("budget", 1);
+    thread_create(&eng, id, "Big", 0, R, USER).unwrap();
+    let tid = list(&eng, id)[0].id;
+    tamper(&eng, id, |d| {
+        let (_, t) = thread_objs(d)?.into_iter().next().unwrap();
+        let mut first = beads_of(d, tid).remove(0);
+        first.dict_delete("T")?;
+        let page = d.new_indirect(Pages::of(d)?.nums[0], 0)?;
+        let total = 6_000;
+        let mut refs = vec![first.share()];
+        for _ in 1..total {
+            let mut b = d.new_dict()?;
+            put_name(&mut b, "Type", "Bead")?;
+            b.dict_put("P", page.share())?;
+            let mut r = d.new_array()?;
+            for v in [10.0, 10.0, 90.0, 90.0] {
+                r.array_push(PdfObject::new_real(v)?)?;
+            }
+            b.dict_put("R", r)?;
+            refs.push(d.add_object(&b)?);
+        }
+        for i in 0..total {
+            let mut b = refs[i].share();
+            b.dict_put("N", refs[(i + 1) % total].share())?;
+            b.dict_put("V", refs[(i + total - 1) % total].share())?;
+        }
+        // thirty more articles that all start at the same bead
+        let mut arr = get(&d.catalog()?, "Threads").unwrap();
+        for _ in 0..30 {
+            let mut th = d.new_dict()?;
+            put_name(&mut th, "Type", "Thread")?;
+            th.dict_put("F", first.share())?;
+            arr.array_push(d.add_object(&th)?)?;
+        }
+        let _ = t;
+        Ok(vec![])
+    });
+    let l = list(&eng, id);
+    assert_eq!(l.len(), 31);
+    assert!(l[0].damaged.is_none() && l[0].beads.len() == 6_000);
+    let last = l.last().unwrap();
+    assert!(last.damaged.as_deref().is_some_and(|m| m.contains("too many")), "{:?}", last.damaged);
+    let visited: usize = l.iter().map(|t| t.beads.len()).sum();
+    assert!(visited <= MAX_TOTAL_BEADS, "{visited} beads read in all");
+    // and an edit under the budget still works
+    assert!(thread_delete(&eng, id, tid, USER).is_ok());
+}
+
+#[test]
+fn deleting_or_moving_an_article_keeps_the_entries_it_does_not_list() {
+    let (eng, id, _d) = open("array", 1);
+    thread_create(&eng, id, "First", 0, R, USER).unwrap();
+    thread_create(&eng, id, "Second", 0, R, USER).unwrap();
+    let ids: Vec<i32> = list(&eng, id).iter().map(|t| t.id).collect();
+    // a direct entry in between, and more than MAX_THREADS articles after: only the first 1000 are listed
+    tamper(&eng, id, |d| {
+        let mut arr = get(&d.catalog()?, "Threads").unwrap();
+        let mut direct = d.new_dict()?;
+        put_name(&mut direct, "Type", "Thread")?;
+        arr.array_push(direct)?;
+        for _ in 0..MAX_THREADS {
+            let mut th = d.new_dict()?;
+            put_name(&mut th, "Type", "Thread")?;
+            arr.array_push(d.add_object(&th)?)?;
+        }
+        Ok(vec![])
+    });
+    let len = |eng: &Engine| -> usize {
+        let mut n = 0;
+        eng.read_custom(id, |d| {
+            n = get(&d.catalog()?, "Threads").unwrap().len()?;
+            Ok(())
+        })
+        .unwrap();
+        n
+    };
+    let before = len(&eng);
+    assert_eq!(before, 2 + 1 + MAX_THREADS);
+    assert_eq!(list(&eng, id).len(), MAX_THREADS);
+    thread_reorder(&eng, id, ids[0], 1, USER).unwrap();
+    assert_eq!(len(&eng), before, "nothing dropped by a reorder");
+    assert_eq!(list(&eng, id)[1].id, ids[0]);
+    thread_delete(&eng, id, ids[1], USER).unwrap();
+    assert_eq!(len(&eng), before - 1, "only the deleted article left the array");
+}
+
+#[test]
+fn properties_applied_unchanged_are_no_step() {
+    let (eng, id, _d) = open("props-same", 1);
+    thread_create(&eng, id, "", 0, R, USER).unwrap();
+    let t = list(&eng, id).remove(0);
+    let before = eng.edit_state(id).unwrap().undo;
+    // a form that opened with the listed fallback ("Article 1") and was applied as it was: the UI sends
+    // nothing; the same info through the engine is no step either
+    thread_set_info(&eng, id, t.id, &t.info, USER).unwrap();
+    assert_eq!(eng.edit_state(id).unwrap().undo, before);
 }

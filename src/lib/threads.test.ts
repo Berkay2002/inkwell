@@ -6,7 +6,7 @@ vi.mock("../store", () => ({ useStore: { getState: () => ({ setUi: vi.fn() }) } 
 
 import { invoke } from "@tauri-apps/api/core";
 import type { ArticleThread } from "./api";
-import { beadNumber, beadZoom, nextTitle, reconcile, stepBead, useThreads } from "./threads";
+import { beadNumber, beadPointer, beadZoom, nextTitle, otherToolHeld, propsDraft, readsKeys, reconcile, sameInfo, stepBead, useThreads } from "./threads";
 
 const inv = vi.mocked(invoke);
 const bead = (id: number, page: number, w = 200) => ({ id, page, rect: [50, 100, 50 + w, 400] as [number, number, number, number] });
@@ -167,5 +167,50 @@ describe("helpers", () => {
     expect(nextTitle([])).toBe("Article 1");
     expect(nextTitle(LIST)).toBe("Article 3");
     expect(nextTitle([thread(1, "Article 2", [bead(2, 0)])])).toBe("Article 3");
+  });
+});
+
+describe("beads and the other page tools", () => {
+  const idle = { redact: false, annot: "select", forms: "select", text: "select", link: "select" };
+
+  it("outlines never take the pointer: Show beads gives only the number tag, reading the whole bead", () => {
+    expect(beadPointer({ tool: false, follow: false, show: true, other: false })).toBe("tag");
+    expect(beadPointer({ tool: false, follow: true, show: true, other: false })).toBe("all");
+    expect(beadPointer({ tool: false, follow: true, show: false, other: false })).toBe("all");
+    expect(beadPointer({ tool: false, follow: false, show: false, other: false })).toBe("none");
+  });
+
+  it("a tool in the hand keeps the pointer from the beads, tag included", () => {
+    expect(beadPointer({ tool: false, follow: true, show: true, other: true })).toBe("none");
+    expect(beadPointer({ tool: false, follow: false, show: true, other: true })).toBe("none");
+    // the Article tool itself edits them
+    expect(beadPointer({ tool: true, follow: false, show: false, other: false })).toBe("edit");
+  });
+
+  it("every page tool counts as in the hand: mark text, comments, forms, text edit, links", () => {
+    expect(otherToolHeld(idle)).toBe(false);
+    expect(otherToolHeld({ ...idle, redact: true })).toBe(true);
+    expect(otherToolHeld({ ...idle, annot: "pen" })).toBe(true);
+    expect(otherToolHeld({ ...idle, forms: "text" })).toBe(true);
+    expect(otherToolHeld({ ...idle, text: "text" })).toBe(true);
+    expect(otherToolHeld({ ...idle, link: "draw" })).toBe(true);
+  });
+
+  it("the reading keys belong to the page, not to a focused button or list", () => {
+    expect(readsKeys({ body: true, inViewer: false })).toBe(true);
+    expect(readsKeys({ body: false, inViewer: true })).toBe(true);
+    expect(readsKeys({ body: false, inViewer: false })).toBe(false);
+  });
+});
+
+describe("article properties", () => {
+  it("opens with the listed name as the title and counts that as unchanged", () => {
+    const t = thread(10, "Article 2", [bead(11, 0)]);
+    t.info.title = "";
+    const open = propsDraft(t);
+    expect(open.title).toBe("Article 2");
+    expect(sameInfo(open, propsDraft(t))).toBe(true);
+    expect(sameInfo({ ...open, author: "A" }, open)).toBe(false);
+    expect(sameInfo({ ...open, title: "Story" }, open)).toBe(false);
   });
 });
