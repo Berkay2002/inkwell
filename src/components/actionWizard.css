@@ -1,0 +1,719 @@
+/* The Action Wizard: one centred sheet like Combine. Three views: the list of actions, the editor, the run. */
+.scrim.aw-scrim {
+  align-items: center;
+  padding: 0;
+  z-index: 20;
+}
+.aw-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(1040px, 96vw);
+  height: min(720px, 90vh);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+}
+.aw-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  height: 48px;
+  padding: 0 14px 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+.aw-title {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aw-back {
+  height: 30px;
+  padding: 0 12px 0 8px;
+}
+.aw-back svg {
+  transform: scaleX(-1);
+}
+.aw-sheet .tl-seg {
+  margin: 0;
+}
+.aw-sheet .tl-seg button {
+  white-space: nowrap;
+}
+.aw-sheet select.tl-field {
+  padding-right: 8px;
+}
+
+/* ---- the list ---- */
+.aw-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.aw-toolbar-note {
+  font-size: 12.5px;
+}
+.aw-banner {
+  flex: none;
+  margin: 0;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  border-bottom: 1px solid var(--border);
+}
+.aw-files .aw-banner {
+  margin: 8px 0 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--diff-chg);
+  background: var(--diff-chg-bg);
+}
+.aw-body {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 16px 16px;
+  overflow-y: auto;
+  background: var(--window);
+}
+.aw-section {
+  margin: 16px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.aw-none {
+  margin: 0;
+}
+.aw-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.aw-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.aw-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.aw-card-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aw-badge {
+  flex: none;
+  padding: 1px 8px;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-pill);
+}
+.aw-card-desc,
+.aw-card-out {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.aw-card-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0;
+  padding: 0 0 0 20px;
+  font-size: 13px;
+}
+.aw-card-steps li.bad {
+  color: var(--danger);
+}
+.aw-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 8px;
+}
+.aw-card-actions .btn {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+.aw-card-actions .btn.danger {
+  color: #fff;
+  background: var(--danger);
+}
+
+/* ---- the editor ---- */
+.aw-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.aw-meta {
+  display: flex;
+  gap: 12px;
+  flex: none;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.aw-grow {
+  flex: 1;
+}
+.aw-grow2 {
+  flex: 2;
+}
+.aw-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.aw-field .tl-field {
+  width: 100%;
+  box-sizing: border-box;
+}
+.aw-num-field {
+  width: 120px;
+}
+.aw-wide {
+  width: 100%;
+}
+.aw-label {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.aw-cols {
+  display: grid;
+  grid-template-columns: 236px minmax(200px, 0.85fr) minmax(320px, 1.5fr);
+  flex: 1;
+  min-height: 0;
+  background: var(--window);
+}
+.aw-library,
+.aw-sequence,
+.aw-options {
+  min-height: 0;
+  overflow-y: auto;
+}
+.aw-library {
+  padding: 4px 8px 12px;
+  border-right: 1px solid var(--border);
+}
+.aw-sequence {
+  padding: 0 12px 12px;
+  border-right: 1px solid var(--border);
+}
+.aw-group-title,
+.aw-col-title {
+  margin: 12px 4px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.aw-col-title.aw-flat {
+  margin: 0;
+}
+.aw-lib-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  text-align: left;
+  border-radius: var(--radius-sm);
+}
+.aw-lib-item:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.aw-lib-item:disabled {
+  opacity: 0.5;
+}
+.aw-lib-item > svg {
+  flex: none;
+  color: var(--text-2);
+}
+.aw-lib-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.aw-lib-desc {
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+.aw-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-2);
+}
+.aw-empty p {
+  margin: 0;
+  max-width: 38ch;
+}
+.aw-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.aw-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.aw-steps.dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+.aw-step {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px 4px 2px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.aw-step.on {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.aw-step.bad:not(.on) {
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
+}
+.aw-step.lifted {
+  opacity: 0.55;
+}
+.aw-step.drop-before::before,
+.aw-step.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.aw-step.drop-before::before {
+  top: -6px;
+}
+.aw-step.drop-after::after {
+  bottom: -6px;
+}
+.aw-grip {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 34px;
+  color: var(--text-2);
+  border-radius: 6px;
+  cursor: grab;
+  touch-action: none;
+}
+.aw-grip:hover {
+  background: var(--surface-2);
+}
+.aw-step-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 4px;
+  text-align: left;
+}
+.aw-num {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-radius: 11px;
+}
+.aw-step.on .aw-num {
+  color: var(--accent-fg);
+  background: var(--accent);
+}
+.aw-step-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.aw-step-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aw-step-sub {
+  font-size: 12px;
+  line-height: 1.3;
+}
+.bad {
+  color: var(--danger);
+}
+.warn {
+  color: var(--diff-chg);
+}
+.aw-options {
+  background: var(--surface);
+}
+.aw-options .aw-col-title {
+  margin: 12px 16px 6px;
+}
+.aw-opt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 16px 16px;
+}
+.aw-opt-body p {
+  margin: 0;
+}
+.aw-pad {
+  margin: 0;
+  padding: 4px 16px;
+}
+.aw-issue {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  border-radius: var(--radius-sm);
+}
+.aw-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.aw-note svg {
+  flex: none;
+  margin-top: 2px;
+}
+.aw-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.aw-six {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.aw-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.aw-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+.aw-hint {
+  font-size: 12px;
+}
+.aw-hint-block {
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.aw-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.aw-query {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.aw-query select {
+  width: 104px;
+  flex: none;
+}
+.aw-query input.tl-field {
+  min-width: 0;
+}
+.aw-add {
+  align-self: flex-start;
+  height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+.aw-prop {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.aw-prop .aw-check {
+  min-height: 34px;
+}
+.aw-prop .aw-field {
+  flex: 1;
+}
+.aw-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  flex: none;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+.aw-rule {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.aw-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.aw-suffix {
+  width: 130px;
+}
+.aw-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--border);
+}
+.aw-outcome {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.aw-outcome.dim {
+  font-weight: 400;
+  font-size: 13px;
+}
+.aw-outcome.bad {
+  color: var(--danger);
+}
+
+/* ---- the run ---- */
+.aw-run {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(300px, 1fr);
+  flex: 1;
+  min-height: 0;
+  background: var(--window);
+}
+.aw-files,
+.aw-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 12px 16px;
+  overflow-y: auto;
+}
+.aw-files {
+  border-right: 1px solid var(--border);
+}
+.aw-files-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.aw-files-head .btn {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+.aw-recursive {
+  font-size: 13px;
+  color: var(--text-2);
+}
+.aw-filelist,
+.aw-results {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.aw-file,
+.aw-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 6px 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.aw-file-main,
+.aw-result-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.aw-file-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aw-pv,
+.aw-result-sub {
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+.aw-pv.ok {
+  color: var(--diff-add);
+}
+.aw-plan-steps {
+  margin: 0;
+  padding: 0 0 0 22px;
+  font-size: 14px;
+}
+.aw-plan-out {
+  margin: 0;
+  font-size: 13px;
+}
+.aw-passwords {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.aw-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.aw-preview-bar .btn {
+  flex: none;
+}
+.aw-preview-sum {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.aw-preview-sum.warn {
+  border-color: color-mix(in srgb, var(--diff-chg) 50%, var(--border));
+}
+.aw-preview-sum .dim {
+  font-weight: 400;
+}
+.aw-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  padding: 14px 16px;
+  overflow-y: auto;
+  background: var(--window);
+}
+.aw-bar {
+  flex: none;
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.aw-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+.aw-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--border-strong);
+}
+.aw-dot.running {
+  background: var(--accent);
+}
+.aw-dot.ok {
+  background: var(--diff-add);
+}
+.aw-dot.skipped {
+  background: var(--diff-chg);
+}
+.aw-dot.error {
+  background: var(--danger);
+}
+.aw-state {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.aw-state.error {
+  color: var(--danger);
+}
+.aw-state.skipped {
+  color: var(--diff-chg);
+}
+.aw-reveal {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+.aw-result-sub.warn {
+  color: var(--diff-chg);
+}

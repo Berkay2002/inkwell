@@ -95,7 +95,7 @@ export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "any";
 export const pickSave = (name: string, at: { doc?: number; near?: string } = {}, kind?: SaveKind) =>
   invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null, kind: kind ?? null });
 /** Open dialog for what Create builds a PDF from: images (several) or one text file. */
-export const pickSource = (kind: "images" | "text", multiple: boolean) => invoke<FileRef[]>("pick_source", { kind, multiple });
+export const pickSource = (kind: "images" | "text" | "json", multiple: boolean) => invoke<FileRef[]>("pick_source", { kind, multiple });
 /** Folder dialog (run by Rust); the token names the folder a multi-file export writes into. */
 export const pickFolder = (doc?: number) => invoke<FileRef | null>("pick_folder", { doc: doc ?? null });
 /** Open token for a path the user chose before (recent list); Rust refuses any other path. */
@@ -1103,3 +1103,175 @@ export interface PageTrans {
 export const transitionsList = (doc: number) => invoke<PageTrans[]>("transitions_list", { doc });
 export const transitionsSet = (doc: number, pages: number[], change: PageTrans) =>
   invoke<EditState>("transitions_set", { doc, pages, change });
+
+// ---- batch actions (Action Wizard; src-tauri/src/batch, docs/batch.md) ----
+
+export type BatchPreset = "smallest" | "balanced" | "highQuality" | "custom";
+export interface BatchSanitize {
+  metadata: boolean;
+  hiddenLayers: boolean;
+  hiddenText: boolean;
+  scriptsActions: boolean;
+  embeddedFiles: boolean;
+  annotations: boolean;
+  formFieldsUnderMarks: boolean;
+  bookmarks: boolean;
+}
+export type BatchPattern = "personnummer" | "ssn" | "iban" | "card" | "email" | "phone";
+export type BatchQuery =
+  | { type: "pattern"; pattern: BatchPattern }
+  | { type: "text"; text: string; caseSensitive: boolean; wholeWord: boolean }
+  | { type: "regex"; regex: string; caseSensitive: boolean };
+export interface BatchHeaderFooter {
+  text: SixTexts;
+  style: MarkStyle;
+  margins: [number, number, number, number];
+  startNumber: number;
+}
+export interface BatchWatermark {
+  text: string;
+  /** Pictures are refused by a batch (their file token does not outlast a session). */
+  picture: null;
+  style: MarkStyle;
+  scale: number;
+  opacity: number;
+  rotation: number;
+  behind: boolean;
+  offset: [number, number];
+  showOnScreen: boolean;
+  showInPrint: boolean;
+}
+export interface BatchBates {
+  prefix: string;
+  suffix: string;
+  digits: number;
+  start: number;
+  slot: number;
+  style: MarkStyle;
+  margins: [number, number, number, number];
+}
+
+/** One step. The engine's set is closed; `invalid` is what a file's unknown step reads as (never sent back). */
+export type BatchStep =
+  | { kind: "compress"; preset: BatchPreset }
+  | { kind: "ocr"; languages: string[]; force: boolean; backend: OcrBackend }
+  | ({ kind: "headerFooter" } & BatchHeaderFooter)
+  | ({ kind: "watermark" } & BatchWatermark)
+  | { kind: "bates"; bates: BatchBates; continueAcrossFiles: boolean }
+  /** The passwords exist only in a run's request: the engine never stores or returns them. */
+  | { kind: "protect"; printing: Printing; changes: Changes; copy: boolean; accessibility: boolean; cipher: Cipher; openPassword?: string; permissionsPassword?: string }
+  | ({ kind: "sanitize" } & BatchSanitize)
+  | { kind: "redact"; queries: BatchQuery[]; overlayText: string | null; sanitize: BatchSanitize }
+  | { kind: "flattenForms" }
+  | { kind: "exportImages"; format: ImageFormat; dpi: number; gray: boolean; quality: number }
+  | { kind: "exportText"; layout: boolean }
+  | { kind: "setProperties"; title: string | null; author: string | null; subject: string | null; keywords: string | null; creator: string | null; producer: string | null }
+  | { kind: "invalid"; name: string; why: string };
+
+export type BatchStepKind = Exclude<BatchStep["kind"], "invalid">;
+
+export type BatchOutput = { kind: "nextToSource"; suffix: string } | { kind: "folder"; suffix: string };
+
+export interface BatchAction {
+  /** Empty for a new action; the engine gives it one when it is saved. */
+  id: string;
+  name: string;
+  description: string;
+  steps: BatchStep[];
+  output: BatchOutput;
+  onError: "skip" | "stop";
+  /** Read-only action that ships with the app: Duplicate it to change it. */
+  builtIn: boolean;
+}
+
+export interface BatchIssue {
+  /** Index of the step; null for the action itself. */
+  step: number | null;
+  code: "name" | "no-steps" | "output" | "order" | "unknown-step" | "forbidden-step" | "invalid-step" | "unavailable";
+  message: string;
+}
+
+export type BatchStatus = "ok" | "skipped" | "error";
+
+export interface BatchOutputFile {
+  path: string;
+  /** Open token of a file the run made. */
+  token: string | null;
+}
+
+export interface BatchFileReport {
+  index: number;
+  input: string;
+  name: string;
+  status: BatchStatus;
+  reason: string | null;
+  sizeBefore: number;
+  sizeAfter: number | null;
+  outputs: BatchOutputFile[];
+  notes: string[];
+  warnings: string[];
+  stepsDone: number;
+  ms: number;
+}
+
+export interface BatchReport {
+  action: string;
+  files: BatchFileReport[];
+  ok: number;
+  skipped: number;
+  errors: number;
+  cancelled: boolean;
+  stopped: boolean;
+}
+
+export type BatchEvent =
+  | { event: "started"; files: number }
+  | { event: "fileStarted"; index: number; total: number; name: string }
+  | { event: "step"; index: number; step: number; steps: number; label: string }
+  | { event: "fileDone"; index: number; report: BatchFileReport }
+  | { event: "finished"; ok: number; skipped: number; errors: number; cancelled: boolean };
+
+export interface BatchFilePreview {
+  index: number;
+  input: string;
+  name: string;
+  status: BatchStatus;
+  reason: string | null;
+  steps: string[];
+  outputs: string[];
+}
+
+export interface BatchPreview {
+  action: string;
+  files: BatchFilePreview[];
+  ok: number;
+  skipped: number;
+  errors: number;
+}
+
+export const batchList = () => invoke<BatchAction[]>("batch_list");
+export const batchSave = (action: BatchAction) => invoke<BatchAction>("batch_save", { action });
+export const batchDelete = (id: string) => invoke<void>("batch_delete", { id });
+/** `file`: an open token of an exported action (`pickSource("json")`). Stored under a new id. */
+export const batchImport = (file: string) => invoke<BatchAction>("batch_import", { file });
+/** `saveTo`: a save token from `pickSave(name, {}, "any")`. Passwords are never written. */
+export const batchExport = (action: BatchAction, saveTo: string) => invoke<void>("batch_export", { action, saveTo });
+export const batchValidate = (action: BatchAction) => invoke<BatchIssue[]>("batch_validate", { action });
+/** `files`: open tokens. A dry run: per file, would it run or be skipped, and under which names. Writes nothing. */
+export const batchPreview = (action: BatchAction, files: string[]) => invoke<BatchPreview>("batch_preview", { action, files });
+/** `folder`: an open token of a directory (`pickSearchFolder`). The PDFs in it come back as open tokens (at most 500). */
+export const batchFolderFiles = (folder: string, recursive: boolean) =>
+  invoke<{ files: FileRef[]; capped: boolean }>("batch_folder_files", { folder, recursive });
+/** `folder`: a save token from `pickFolder`, needed when the action's output is a folder. `batchCancel(job)` stops it. */
+export function batchRun(
+  job: number,
+  action: BatchAction,
+  files: string[],
+  folder: string | null,
+  onEvent: (e: BatchEvent) => void,
+) {
+  const ch = new Channel<BatchEvent>();
+  ch.onmessage = onEvent;
+  return invoke<BatchReport>("batch_run", { job, action, files, folder, onEvent: ch });
+}
+export const batchCancel = (job: number) => invoke<void>("batch_cancel", { job });
