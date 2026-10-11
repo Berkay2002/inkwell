@@ -118,7 +118,11 @@ fn model_of(cs: &Colorspace) -> &'static str {
 fn colour(kind: ObjectKind, cs: &Colorspace, color: &[f32], alpha: f32, cp: ColorParams, bounds: Rect) -> Inspected {
     let n = cs.n() as usize;
     let values: Vec<f32> = color.iter().copied().take(n).collect();
-    let cmyk = cs.convert_color(&values, &Colorspace::device_cmyk(), None, ColorParams::default()).ok().filter(|c| c.len() == 4);
+    // an image has no single colour: nothing to convert (and the conversion needs all components)
+    let cmyk = (values.len() == n)
+        .then(|| cs.convert_color(&values, &Colorspace::device_cmyk(), None, ColorParams::default()).ok())
+        .flatten()
+        .filter(|c| c.len() == 4);
     let mut colorants = Vec::new();
     if cs.is_separation() {
         colorants = (0..cs.n()).filter_map(|i| cs.colorant(i)).collect();

@@ -94,7 +94,8 @@ DeviceCMYK. Annotation appearances, forms and patterns are filtered too.
   file) or `profile` (a CMYK ICC file the command reads from an open token; it also becomes the file's
   `GTS_PDFX` output intent, named `condition`). The values are computed through the profile by MuPDF's lcms2
   and written as DeviceCMYK. A profile that is not a CMYK ICC profile is refused.
-- Transparency groups on the page and its forms whose blending space was a converted kind are set to
+- Transparency groups on the page and its forms whose blending space was a converted kind (DeviceRGB, CalRGB, Lab, a
+  3-component ICC profile; gray likewise) are set to
   DeviceCMYK. Afterwards the report says which device spaces are still in use (`remaining`: gray, RGB, CMYK),
   asked of the PDF/X checker's survey (`preflight::device_colours`, so Default colour spaces count the same
   way). Images come out uncompressed (written Flate); run Compress to make them small again.
@@ -127,8 +128,10 @@ come back for what was skipped (no bleed, a page too small for colour bars).
   reduced), no rich-black or overprint fixups.
 - Overprint preview needs MuPDF's rendering, which follows PDF 1.7 overprint (OPM, `All`, `None`); it does not
   simulate the press' dot gain or the paper white.
-- The document's output intent is not used when painting (MuPDF paints DeviceCMYK through its own CMYK
-  profile): the CMYK plates are the page's CMYK, not a proof.
+- MuPDF paints DeviceCMYK through the output intent's CMYK profile when the file has one, so a file with an
+  output intent is measured and shown as that profile converts its CMYK (a black image converted through a
+  profile and then given that intent reads as rich black on screen although its samples are K alone). The
+  plates are a preview, not a proof.
 
 ## Tests
 

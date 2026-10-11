@@ -44,6 +44,7 @@ pub struct MarksSpec {
     pub length: Option<f32>,
 }
 
+/// The registration colour space's resource name; a number is added when the page already uses it.
 const REG: &str = "IwReg";
 
 fn num(v: f32) -> String {
@@ -69,12 +70,12 @@ impl Layout {
         self.offset + self.length.max(14.0) + 4.0
     }
 
-    fn content(&self, set: MarkSet, weight: f32, notes: &mut Vec<String>) -> String {
+    fn content(&self, set: MarkSet, weight: f32, reg: &str, notes: &mut Vec<String>) -> String {
         let [tx0, ty0, tx1, ty1] = self.trim;
         let [bx0, by0, bx1, by1] = self.bleed;
         let (o, l) = (self.offset, self.length);
         let mut s = String::new();
-        let _ = writeln!(s, "q\n/{REG} CS 1 SCN {} w 0 J 0 j", num(weight));
+        let _ = writeln!(s, "q\n/{reg} CS 1 SCN {} w 0 J 0 j", num(weight));
         if set.crop {
             for (x, xs) in [(tx0, -1.0), (tx1, 1.0)] {
                 for (y, ys) in [(ty0, -1.0), (ty1, 1.0)] {
@@ -243,8 +244,15 @@ fn mark_page(doc: &mut PdfDocument, index: u32, spec: &MarksSpec, notes: &mut Ve
         Some(c) if c.is_dict()? => c.copy_dict()?,
         _ => doc.new_dict()?,
     };
+    // a name the page does not use: existing content keeps its own colour space
+    let mut reg_name = REG.to_string();
+    let mut n = 0;
+    while csd.get_dict(reg_name.as_str())?.is_some() {
+        n += 1;
+        reg_name = format!("{REG}{n}");
+    }
     let reg = registration_space(doc)?;
-    csd.dict_put(REG, reg)?;
+    csd.dict_put(reg_name.as_str(), reg)?;
     res.dict_put("ColorSpace", csd)?;
     page.dict_put("Resources", res)?;
 
@@ -258,7 +266,7 @@ fn mark_page(doc: &mut PdfDocument, index: u32, spec: &MarksSpec, notes: &mut Ve
         }
     }
     let (opens, closes) = q_balance(&data);
-    let marks = lay.content(spec.marks, weight, notes);
+    let marks = lay.content(spec.marks, weight, &reg_name, notes);
     let add = |doc: &mut PdfDocument, text: &str| -> Result<PdfObject> { Ok(doc.add_stream(&Buffer::from_bytes(text.as_bytes())?, None, false)?) };
     let mut out = doc.new_array_with_capacity(list.len() as i32 + 3)?;
     out.array_push(add(doc, &format!("{}q\n", "q\n".repeat(opens)))?)?;

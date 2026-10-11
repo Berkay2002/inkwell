@@ -240,6 +240,32 @@ static void image_rewrite(fz_context *ctx, void *opaque, fz_image **image, fz_ma
             fz_drop_pixmap(ctx, out);
             out = plain;
         }
+        if (cd->preserve_black && (kind == 1 || kind == 2) && pix->colorspace && !fz_colorspace_is_indexed(ctx, pix->colorspace)
+            && (fz_colorspace_is_gray(ctx, pix->colorspace) || fz_colorspace_is_rgb(ctx, pix->colorspace))
+            && pix->w == out->w && pix->h == out->h && out->n >= 4)
+        {
+            /* pure black pixels are K alone, as black colours are, however the profile would mix them */
+            int x, y, c, nc = fz_colorspace_n(ctx, pix->colorspace);
+            for (y = 0; y < pix->h; y++)
+            {
+                unsigned char *s = pix->samples + (size_t)y * pix->stride;
+                unsigned char *d = out->samples + (size_t)y * out->stride;
+                for (x = 0; x < pix->w; x++)
+                {
+                    int black = 1;
+                    for (c = 0; c < nc; c++)
+                        if (s[c])
+                            black = 0;
+                    if (black)
+                    {
+                        d[0] = d[1] = d[2] = 0;
+                        d[3] = (pix->alpha && out->alpha) ? s[nc] : 255;
+                    }
+                    s += pix->n;
+                    d += out->n;
+                }
+            }
+        }
         *image = fz_new_image_from_pixmap(ctx, out, orig->mask);
         fz_drop_image(ctx, orig);
     }

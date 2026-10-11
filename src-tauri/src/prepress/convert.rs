@@ -98,12 +98,38 @@ fn document_profile(doc: &PdfDocument) -> Result<Option<Vec<u8>>> {
     Ok(None)
 }
 
+/// What a group's blending space is made of: `Some(true)` RGB-like (DeviceRGB, CalRGB, Lab, a 3-component
+/// ICC profile), `Some(false)` gray-like, None for CMYK and anything else.
+fn blending_space(cs: &PdfObject) -> Option<bool> {
+    if cs.is_name().ok()? {
+        return match String::from_utf8_lossy(&cs.as_name().ok()?).as_ref() {
+            "DeviceRGB" => Some(true),
+            "DeviceGray" => Some(false),
+            _ => None,
+        };
+    }
+    if !cs.is_array().ok()? {
+        return None;
+    }
+    let first = cs.get_array(0).ok().flatten()?;
+    match String::from_utf8_lossy(&first.as_name().ok()?).as_ref() {
+        "CalRGB" | "Lab" => Some(true),
+        "CalGray" => Some(false),
+        "ICCBased" => match cs.get_array(1).ok().flatten()?.get_dict("N").ok().flatten()?.as_int().ok()? {
+            3 => Some(true),
+            1 => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// A transparency group of the page or a form whose blending space is a converted kind is set to DeviceCMYK.
 fn fix_groups(doc: &PdfDocument, page: &PdfObject, spec: &ConvertSpec, seen: &mut HashSet<i32>) -> Result<()> {
-    let want = |n: &str| (spec.rgb && n == "DeviceRGB") || (spec.gray && n == "DeviceGray");
-    fn group(o: &PdfObject, want: &dyn Fn(&str) -> bool) -> Result<()> {
+    let want = |rgb: bool| if rgb { spec.rgb } else { spec.gray };
+    fn group(o: &PdfObject, want: &dyn Fn(bool) -> bool) -> Result<()> {
         if let Some(mut g) = o.get_dict("Group")?.filter(|g| g.is_dict().unwrap_or(false)) {
-            if name_of(&g, "CS").is_some_and(|n| want(&n)) {
+            if g.get_dict("CS")?.and_then(|cs| blending_space(&cs)).is_some_and(want) {
                 g.dict_put("CS", PdfObject::new_name("DeviceCMYK")?)?;
             }
         }

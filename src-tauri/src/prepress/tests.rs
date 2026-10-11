@@ -767,3 +767,57 @@ fn requests_for_one_tile_join_one_render() {
     assert_eq!(tiles.len(), 3, "everyone gets the tile");
     assert!(tiles.windows(2).all(|w| w[0] == w[1]));
 }
+
+// ---- review: calibrated groups, a taken resource name, black image pixels --------------------------------
+
+#[test]
+fn a_calibrated_blending_space_is_set_to_cmyk_too() {
+    let group = "/Group<</S/Transparency/CS[/CalRGB<</WhitePoint[0.95 1 1.09]>>]>>";
+    let (eng, doc) = open("group-cal", &build("", &[(group, "0.2 0.4 0.6 rg 50 600 100 100 re f\n")], &[]));
+    convert(&eng, doc, &spec(true, false, false), None).unwrap();
+    let cs = |eng: &Engine| {
+        eng.read_custom(doc, |pdf| Ok(String::from_utf8_lossy(&pdf.find_page(0)?.get_dict("Group")?.unwrap().get_dict("CS")?.unwrap().as_name().unwrap_or_default()).into_owned())).unwrap()
+    };
+    assert_eq!(cs(&eng), "DeviceCMYK");
+    // a CMYK group is left as it is, and gray was not asked for
+    let (eng, doc) = open("group-gray", &build("", &[("/Group<</S/Transparency/CS/DeviceGray>>", "0.5 g 50 600 100 100 re f\n")], &[]));
+    convert(&eng, doc, &spec(true, false, false), None).unwrap();
+    assert_eq!(cs(&eng), "DeviceGray");
+}
+
+#[test]
+fn marks_keep_the_colour_space_a_page_already_calls_iwreg() {
+    let res = "/ColorSpace<</IwReg[/Separation/Gold/DeviceCMYK<</FunctionType 2/Domain[0 1]/C0[0 0 0 0]/C1[0 0.5 1 0]/N 1>>]>>";
+    let (eng, doc) = open("iwreg", &build(res, &[("", "/IwReg cs 1 scn 100 500 100 100 re f\n")], &[]));
+    add_printer_marks(&eng, doc, &MarksSpec { pages: None, marks: MarkSet::default(), weight: None, offset: None, length: None }, EditSource::User).unwrap();
+    let s = page_separations(&eng, doc, 0).unwrap();
+    assert!(s.spots.iter().any(|p| p.name == "Gold"), "{:?}", s.spots);
+    let hit = inspect_at(&eng, doc, 0, 150.0, 792.0 - 550.0, 4).unwrap();
+    assert_eq!((hit[0].model, hit[0].colorants.clone()), ("spot", vec!["Gold".to_string()]), "the page's own use of the name is untouched");
+    assert!(contents(&eng, doc, 0).contains("/IwReg1 CS"), "the marks use a name of their own");
+}
+
+#[test]
+fn black_image_pixels_stay_k_only_through_a_profile() {
+    // an all-black RGB image, drawn large
+    let image = stream("/Type/XObject/Subtype/Image/Width 2/Height 1/ColorSpace/DeviceRGB/BitsPerComponent 8", &[0; 6]);
+    let bytes = build("/XObject<</Im0 102 0 R>>", &[("", "q 200 0 0 200 100 500 cm /Im0 Do Q\n")], &[(102, image)]);
+    // the samples of the converted image: C M Y K per pixel
+    let samples = |preserve: bool| {
+        let (eng, doc) = open(if preserve { "img-black-on" } else { "img-black-off" }, &bytes);
+        let s = ConvertSpec { intent: IntentSource::Profile, preserve_black: preserve, ..spec(true, false, false) };
+        convert(&eng, doc, &s, Some(&cmyk_profile("ps_cmyk"))).unwrap();
+        let at = inspect_at(&eng, doc, 0, 200.0, 792.0 - 600.0, 1).unwrap();
+        assert_eq!((at[0].kind, at[0].image), (ObjectKind::Image, Some([2, 1, 8])));
+        eng.read_custom(doc, |pdf| {
+            let xo = pdf.find_page(0)?.get_dict("Resources")?.unwrap().get_dict("XObject")?.unwrap();
+            assert_eq!(String::from_utf8_lossy(&xo.get_dict_val(0)?.unwrap().get_dict("ColorSpace")?.unwrap().as_name()?), "DeviceCMYK");
+            Ok(xo.get_dict_val(0)?.unwrap().read_stream()?)
+        })
+        .unwrap()
+    };
+    let rich = samples(false);
+    assert_eq!(rich.len(), 8);
+    assert!(rich[0] as u32 + rich[1] as u32 + rich[2] as u32 > 60, "the profile mixes black from several inks: {rich:?}");
+    assert_eq!(samples(true), [0, 0, 0, 255, 0, 0, 0, 255], "black is K alone");
+}
