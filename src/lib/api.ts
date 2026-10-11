@@ -63,6 +63,8 @@ export type FilesEvent =
       cloudOnly: number;
       cancelled: boolean;
       capped: boolean;
+      /** Catalog searches: files whose stored text is of another version than the file on disk (left out). */
+      stale: number;
     };
 
 export type SearchScope = { kind: "folder"; token: string; recursive: boolean } | { kind: "files"; tokens: string[] };
@@ -188,6 +190,99 @@ export function searchFiles(scope: SearchScope, query: string, opts: FindOpts, o
 export const cancelSearchFiles = (search: number) => invoke<void>("cancel_search_files", { search });
 /** An open token for file `index` of search `search` (a result being opened); the path never reaches the page. */
 export const searchFileToken = (search: number, index: number) => invoke<FileRef>("search_file_token", { search, index });
+
+// ---- catalogs: a saved full-text index over a folder (src-tauri/src/search/catalog) ----------------
+
+export interface CatalogMeta {
+  id: string;
+  name: string;
+  folder: string;
+  recursive: boolean;
+  created: number;
+  /** Unix milliseconds the live index was built; 0 when it never was. */
+  built: number;
+  generation: number;
+  files: number;
+  indexed: number;
+  pages: number;
+  damaged: number;
+  password: number;
+  cloudOnly: number;
+  cut: number;
+  capped: boolean;
+  indexLen: number;
+}
+
+export interface CatalogSummary {
+  files: number;
+  kept: number;
+  extracted: number;
+  fromEmbedded: number;
+  added: number;
+  changed: number;
+  removed: number;
+  damaged: number;
+  password: number;
+  cloudOnly: number;
+  pages: number;
+  cut: number;
+  capped: boolean;
+  cancelled: boolean;
+}
+
+/** What a refresh would change; `unusable`: never built, or the index must be built again. */
+export interface CatalogStale {
+  added: number;
+  changed: number;
+  removed: number;
+  unusable: boolean;
+}
+
+export interface CatalogEstimate {
+  files: number;
+  bytes: number;
+  secs: number;
+  indexBytes: number;
+  capped: boolean;
+}
+
+export type CatalogBuildEvent =
+  | { kind: "started"; job: number }
+  | { kind: "progress"; job: number; done: number; total: number }
+  | { kind: "done"; job: number; summary: CatalogSummary; catalog: CatalogMeta };
+
+/** What a document carries of an embedded search index. */
+export interface Embedded {
+  present: boolean;
+  /** Same /ID, page count and page content as the file now: a build reads it. */
+  current: boolean;
+  pages: number;
+  bytes: number;
+  /** Why the index cannot be written, updated or removed (certified, signed document); null when it can. */
+  blocked: string | null;
+}
+
+export const catalogEstimate = (folder: string, recursive: boolean) => invoke<CatalogEstimate>("catalog_estimate", { folder, recursive });
+export const catalogCreate = (folder: string, name: string, recursive: boolean) => invoke<CatalogMeta>("catalog_create", { folder, name, recursive });
+export const catalogList = () => invoke<CatalogMeta[]>("catalog_list");
+export const catalogDelete = (id: string) => invoke<void>("catalog_delete", { id });
+export const catalogStale = (id: string) => invoke<CatalogStale>("catalog_stale", { id });
+/** Builds (`full`) or refreshes a catalog; resolves with what it did. Cancel with `catalogCancel(job)` from the `started` event. */
+export function catalogBuild(id: string, full: boolean, onEvent: (e: CatalogBuildEvent) => void) {
+  const ch = new Channel<CatalogBuildEvent>();
+  ch.onmessage = onEvent;
+  return invoke<CatalogSummary>("catalog_build", { id, full, onEvent: ch });
+}
+export const catalogCancel = (job: number) => invoke<void>("catalog_cancel", { job });
+/** Searches a catalog; same events and ids as `searchFiles`, so `searchFileToken` and `cancelSearchFiles` work on it. */
+export function catalogSearch(id: string, query: string, opts: FindOpts, onEvent: (e: FilesEvent) => void) {
+  const ch = new Channel<FilesEvent>();
+  ch.onmessage = onEvent;
+  return invoke<number>("catalog_search", { id, query, opts, onEvent: ch });
+}
+export const indexEmbedded = (doc: number) => invoke<Embedded>("index_embedded", { doc });
+export const indexEmbed = (doc: number) => invoke<EditState>("index_embed", { doc });
+export const indexUnembed = (doc: number) => invoke<EditState>("index_unembed", { doc });
 
 /** Origin of the tile protocol: WebView2 serves custom schemes as http://<scheme>.localhost. */
 export const TILE_ORIGIN = navigator.userAgent.includes("Windows") ? "http://inkwell.localhost" : "inkwell://localhost";

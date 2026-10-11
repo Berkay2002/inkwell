@@ -242,6 +242,9 @@ fn verify_written(path: &Path, pages: u32, password: Option<&str>) -> Result<(),
 /// Writes `doc` at `out` and reads it back.
 fn finish(doc: &PdfDocument, out: &Path, opts: PdfWriteOptions, password: Option<&str>) -> Result<Outcome, StepError> {
     let pages = doc.page_count()?.max(0) as u32;
+    // Whatever the step took out (annotations, form fields, bookmarks, pages) is not kept in an embedded search
+    // index: it goes unless it still matches the file.
+    crate::search::catalog::embed::drop_if_stale(doc)?;
     let bytes = write_doc(doc, opts, 1 << 20)?;
     std::fs::write(out, &bytes)?;
     verify_written(out, pages, password)?;
