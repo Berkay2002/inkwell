@@ -11,7 +11,9 @@
 //   $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv2"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9227'
 //   src-tauri\target\debug\inkwell.exe "$d\compress-source.pdf" "$d\form-source.pdf" "$d\redact-source.pdf" "$d\Big v1.pdf"
-//   node scripts/pdfa-shots.mjs docs/screens/pdfa 9227
+//   node scripts/pdfa-shots.mjs docs/screens/pdfa 9227       (PDFA_REPORT=<file> also writes the JSON report there)
+//   The app converts a 1200-page document in well under a second here, so the live progress bar is caught with a
+//   poll and the cancel is tried at once; the 412-of-1200 check screen is put into the store.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -210,29 +212,59 @@ await activate(big.id);
 await ev(`window.__P.getState().setOpen(true)`);
 await ev(`(() => { window.__gap = 0; let last = performance.now(); const tick = (t) => { window.__gap = Math.max(window.__gap, t - last); last = t; requestAnimationFrame(tick) }; requestAnimationFrame(tick); return true })()`);
 await sleep(300);
-await ev(`window.__gap = 0`);
-await ev(`window.__P.getState().check(${big.id})`);
-const tBig = Date.now();
-await until(`!!document.querySelector(".a11y-run")`, "check progress", 20000, 20).catch(() => {});
-report.checkProgress = await text(".a11y-run");
-if (report.checkProgress) {
-  const r = await send("Page.captureScreenshot", { format: "png" });
-  fs.writeFileSync(path.join(out, "pdfa-checking-light.png"), Buffer.from(r.data, "base64"));
-  console.log("screenshot pdfa-checking-light.png");
-}
 await waitChecked(big.id, "the 1200-page report");
-report.bigCheck = { ms: Date.now() - tBig, maxFrameGapMs: Math.round(await ev(`window.__gap`)), rules: (await pf(big.id)).results.length };
+await ev(`window.__gap = 0`);
+await ev(`(() => { window.__seen = []; const id = ${big.id}; window.__unsub = window.__P.subscribe((s) => { const d = s.docs[id]; const last = window.__seen[window.__seen.length - 1]; if (!last || last[0] !== d?.phase) window.__seen.push([d?.phase, d?.progress ? d.progress.stage + " " + d.progress.done + "/" + d.progress.pages : null]); }); return true })()`);
+const tBig = Date.now();
+await ev(`(() => { void window.__P.getState().check(${big.id}); return true })()`);
+await waitChecked(big.id, "the 1200-page report, run again");
+report.bigCheck = { ms: Date.now() - tBig, pages: await ev(`window.__S.getState().docs[${big.id}].pageCount`), maxFrameGapMs: Math.round(await ev(`window.__gap`)), rules: (await pf(big.id)).results.length, phases: await ev(`window.__seen`) };
 
-// cancel part-way: the rail is idle and the document untouched
+// the progress bar itself: a check this size is quicker than a poll, so the screen is put into the store at 412 of 1200
+await ev(`(() => { const s = window.__P.getState(); const d = s.docs[${big.id}]; window.__P.setState({ docs: { ...s.docs, [${big.id}]: { ...d, phase: "checking", job: 0, progress: { stage: "check", done: 412, pages: 1200 } } } }); return true })()`);
+await shot("pdfa-checking", ["light"]);
+await ev(`(() => { const s = window.__P.getState(); const d = s.docs[${big.id}]; window.__P.setState({ docs: { ...s.docs, [${big.id}]: { ...d, phase: "idle", progress: null } } }); return true })()`);
+
+// cancel a conversion at once: the rail is idle and the document untouched
+await ev(`window.__P.getState().setOutput(${big.id}, "inPlace")`);
+await until(`!!document.querySelector(".pf-outcome .a11y-btn.primary:not([disabled])")`, "the Convert button (big)");
 const revBig = await rev(big.id);
-await ev(`window.__P.getState().check(${big.id})`);
-await until(`(() => { const p = window.__P.getState().docs[${big.id}].progress; return p && p.done >= 10 })()`, "progress", 30000, 5).catch(() => {});
+await ev(`(() => { void window.__P.getState().convert(${big.id}); return true })()`);
+await sleep(25);
 const tCancel = Date.now();
 await ev(`window.__P.getState().cancel(${big.id})`);
-await until(`window.__P.getState().docs[${big.id}].phase === "idle"`, "the check to stop", 30000, 20);
-report.cancel = { ms: Date.now() - tCancel, revSame: (await rev(big.id)) === revBig, error: (await pf(big.id)).error };
-await shot("pdfa-cancelled", ["light"]);
+await until(`window.__P.getState().docs[${big.id}].phase === "idle"`, "the conversion to stop", 60000, 20);
+await sleep(400);
+report.cancel = { ms: Date.now() - tCancel, revSame: (await rev(big.id)) === revBig, error: (await pf(big.id)).error, undo: await undoLabel(big.id) };
+if (!report.cancel.revSame) {
+  // 1200 pages convert faster than a cancel can land: take that one step back so the full run below starts clean
+  await clickUndo();
+  await until(`window.__S.getState().docs[${big.id}].rev === ${revBig} || window.__S.getState().docs[${big.id}].undoLabel !== ${JSON.stringify(report.cancel.undo)}`, "undo of the finished conversion");
+  report.cancel.finishedBeforeCancel = true;
+}
+
+// the whole conversion in this document: progress shown, frames keep coming, one undo step
+await waitChecked(big.id, "the report before converting").catch(() => {});
+const revB2 = await rev(big.id);
+await ev(`window.__gap = 0`);
+await ev(`window.__seen.length = 0`);
+const tConv = Date.now();
+await ev(`(() => { void window.__P.getState().convert(${big.id}); return true })()`);
+const live = await until(`!!document.querySelector(".a11y-run")`, "convert progress", 15000, 5).catch(() => false);
+if (live) {
+  report.convertProgress = await text(".a11y-run");
+  const r = await send("Page.captureScreenshot", { format: "png" });
+  fs.writeFileSync(path.join(out, "pdfa-converting-light.png"), Buffer.from(r.data, "base64"));
+  console.log("screenshot pdfa-converting-light.png");
+}
+await until(`window.__S.getState().docs[${big.id}].rev > ${revB2}`, "the big conversion", 180000, 50);
+await waitChecked(big.id, "the report after the big conversion");
+const bigAfter = await pf(big.id);
+report.bigConvert = { ms: Date.now() - tConv, maxFrameGapMs: Math.round(await ev(`window.__gap`)), phases: await ev(`window.__seen`), progressSeen: !!live, undo: await undoLabel(big.id), conforms: bigAfter.conforms, failed: bigAfter.results.filter((r) => r[1] === "failed") };
+await ev(`window.__unsub()`);
 
 await ev(`window.__P.getState().setOpen(false)`);
-console.log(JSON.stringify(report, null, 2));
+const dump = JSON.stringify(report, null, 2);
+if (process.env.PDFA_REPORT) fs.writeFileSync(process.env.PDFA_REPORT, dump);
+console.log(dump);
 ws.close();
