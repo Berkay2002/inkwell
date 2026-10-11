@@ -10,6 +10,7 @@ import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
 import { useConvert } from "./convertStore";
+import { usePrint } from "./printStore";
 import { useTools } from "./toolsStore";
 
 export interface Command {
@@ -94,6 +95,7 @@ export const commands: Command[] = [
   },
   { id: "export", title: "Export pages, text or images…", needsDoc: true, run: () => useConvert.getState().openExport() },
   { id: "export-word", title: "Export to Word…", needsDoc: true, run: () => useConvert.getState().openExport(undefined, "word") },
+  { id: "print", title: "Print…", keys: ["Ctrl+P"], needsDoc: true, run: () => usePrint.getState().open() },
   { id: "create-pdf", title: "Create PDF…", run: () => useConvert.getState().openCreate() },
   { id: "create-clipboard", title: "Create PDF from the clipboard image", run: () => useConvert.getState().openCreate("clipboard") },
   { id: "create-blank", title: "Create a blank PDF…", run: () => useConvert.getState().openCreate("blank") },
