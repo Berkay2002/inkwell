@@ -863,6 +863,12 @@ pub struct TextChange {
     pub offset: Option<[f64; 2]>,
     /// Reflow to this width in user space.
     pub width: Option<f64>,
+    /// Distance between lines as a multiple of the font size.
+    pub line_spacing: Option<f64>,
+    /// Bold and italic ask for the standard face of that style (the block's own font is replaced,
+    /// which is reported as a fallback).
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
 }
 
 /// The font new text was set in when the block's own could not show it.
@@ -989,30 +995,51 @@ fn family_of(base: &str) -> usize {
     }
 }
 
-/// Chooses the face for `text`: the block's own font when it has every glyph, else a standard
-/// font, else an embedded standard face.
+/// Chooses the face for `text`: the block's own font when it has every glyph (and no other style
+/// was asked for), else a standard font, else an embedded standard face. `style` is the
+/// requested (bold, italic); unset keeps the block's.
 fn choose_face(
     doc: &mut PdfDocument,
     pc: &PageContent,
     first: &Line,
     text: &str,
     cache_font: Rc<Metrics>,
+    style: (Option<bool>, Option<bool>),
 ) -> Result<(Face, Option<Fallback>)> {
     let words: String = text.chars().filter(|c| *c != ' ' && *c != '\n').collect();
-    if cache_font.limit.is_none() && first.decodable && cache_font.encode(&words).is_some() {
+    let (bold, italic) = (style.0.unwrap_or(first.bold), style.1.unwrap_or(first.italic));
+    let restyled = bold != first.bold || italic != first.italic;
+    if !restyled && cache_font.limit.is_none() && first.decodable && cache_font.encode(&words).is_some() {
         let space = cache_font.encode(" ").is_some();
         return Ok((Face::Own { name: first.font.clone(), m: cache_font, space }, None));
     }
     let missing = text.chars().find(|c| *c != '\n' && *c != ' ' && cache_font.encode(&c.to_string()).is_none());
     let why = match (cache_font.limit, missing) {
+        _ if restyled => format!("{} is replaced by a standard face to set it {}", first.base_font, style_name(bold, italic)),
         (Some(Limit::Type3), _) => format!("{} is a Type 3 font", first.base_font),
         (_, Some(c)) if cache_font.subset => format!("the embedded subset of {} has no glyph for '{c}'", first.base_font),
         (_, Some(c)) => format!("{} has no glyph for '{c}'", first.base_font),
         _ => format!("{} can't show the new text", first.base_font),
     };
-    let std = STD14[family_of(&first.base_font)][first.bold as usize + 2 * first.italic as usize];
+    let std = STD14[family_of(&first.base_font)][bold as usize + 2 * italic as usize];
+    let (face, fb) = std_face(doc, &pc.page, std, text, why)?;
+    Ok((face, Some(fb)))
+}
+
+fn style_name(bold: bool, italic: bool) -> &'static str {
+    match (bold, italic) {
+        (true, true) => "bold italic",
+        (true, false) => "bold",
+        (false, true) => "italic",
+        (false, false) => "regular",
+    }
+}
+
+/// The standard 14 font `std` as a new resource of `page`: WinAnsi Type1 when `text` allows,
+/// else the face embedded as Type0/Identity-H. `why` goes into the fallback.
+fn std_face(doc: &mut PdfDocument, page: &PdfObject, std: &str, text: &str, why: String) -> Result<(Face, Fallback)> {
     let font = Font::new(std)?;
-    let fonts = font_dict(doc, &pc.page)?;
+    let fonts = font_dict(doc, page)?;
     let name = free_name(Some(&fonts), "IwEd");
     let mut fonts = fonts;
     if text.chars().filter(|c| *c != '\n').all(|c| win_ansi_byte(c).is_some()) {
@@ -1024,7 +1051,7 @@ fn choose_face(
         let r = doc.add_object(&f)?;
         fonts.dict_put(name.as_str(), r)?;
         let fb = Fallback { font: std.into(), embedded: false, reason: why };
-        return Ok((Face::Std { name: name.into_bytes(), font }, Some(fb)));
+        return Ok((Face::Std { name: name.into_bytes(), font }, fb));
     }
     if let Some(c) = text.chars().find(|c| *c != '\n' && *c != ' ' && font.encode_character(*c as i32).map_or(true, |g| g <= 0)) {
         return Err(invalid(format!("no available font can show '{c}' (U+{:04X})", c as u32)));
@@ -1032,7 +1059,7 @@ fn choose_face(
     let r = doc.add_font(&font)?;
     fonts.dict_put(name.as_str(), r)?;
     let fb = Fallback { font: std.into(), embedded: true, reason: why };
-    Ok((Face::Embedded { name: name.into_bytes(), font }, Some(fb)))
+    Ok((Face::Embedded { name: name.into_bytes(), font }, fb))
 }
 
 /// The operators of every line drawn in the same area as one of `rects` (fake bold, a second
@@ -1082,7 +1109,7 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         .join("\n");
     let mut cache = HashMap::new();
     let metrics = metrics_for(pc.fonts.as_ref(), &first.font, &mut cache);
-    let (face, fallback) = choose_face(doc, &pc, first, &text, metrics)?;
+    let (face, fallback) = choose_face(doc, &pc, first, &text, metrics, (change.bold, change.italic))?;
     let st = &o.state;
     let advance = |s: &str| -> f64 {
         let t = if face.has_space() {
@@ -1126,7 +1153,12 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         width = widest;
         wrapped = wrap(&text, width + 0.5, advance);
     }
-    let lead = if members.len() > 1 {
+    let lead = if let Some(m) = change.line_spacing {
+        if !(m.is_finite() && (0.5..=5.0).contains(&m)) {
+            return Err(invalid("the line spacing must be between 0.5 and 5 times the font size"));
+        }
+        m * size
+    } else if members.len() > 1 {
         (spans[0].2 - spans[1].2) * size / old_size
     } else if st.leading > 0.0 {
         st.leading * size / old_size
@@ -1261,6 +1293,111 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     });
     write_contents(doc, &pc, new_data)?;
     Ok(fallback)
+}
+
+/// New text for [`add_text`].
+pub struct NewText<'a> {
+    pub text: &'a str,
+    /// Font size in points.
+    pub size: f64,
+    /// RGB 0..1.
+    pub color: [f64; 3],
+    /// Top left of the box, in page space (the page as shown, y down).
+    pub at: [f64; 2],
+    /// Wrap to this width (page space); none keeps the lines as typed.
+    pub width: Option<f64>,
+    /// Page space to user space.
+    pub back: Matrix,
+}
+
+/// Puts `new` on the page as a text object of its own, in Helvetica (embedded when the text
+/// needs more than WinAnsi). The page's own content is wrapped in `q`/`Q` so the new text starts
+/// from a clean graphics state, and is otherwise untouched.
+pub fn add_text(doc: &mut PdfDocument, page: u32, new: &NewText) -> Result<()> {
+    let count = doc.page_count()?.max(0) as u32;
+    if page >= count {
+        return Err(EngineError::BadPage(page));
+    }
+    let [r, g, b] = new.color;
+    if ![r, g, b].iter().all(|v| (0.0..=1.0).contains(v)) {
+        return Err(invalid("colour components must be between 0 and 1"));
+    }
+    if !(new.size.is_finite() && (1.0..=1000.0).contains(&new.size)) {
+        return Err(invalid("the font size must be between 1 and 1000 points"));
+    }
+    if !new.at.iter().all(|v| v.is_finite() && v.abs() < 1e6) {
+        return Err(invalid("the text can't be placed there"));
+    }
+    let text = new
+        .text
+        .replace("\r\n", "\n")
+        .split('\n')
+        .map(|p| p.split(paragraph_separator).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        return Err(invalid("there is no text to add"));
+    }
+    let p = doc.find_page(page as i32)?;
+    let (face, _) = std_face(doc, &p, "Helvetica", &text, String::new())?;
+    let size = new.size;
+    let advance = |s: &str| face.advance(s, size, 0.0, 0.0);
+    let lines: Vec<String> = match new.width {
+        Some(w) if w.is_finite() && w > 0.0 => wrap(&text, w.clamp(size, 14_400.0) + 0.5, advance).into_iter().map(|l| l.0).collect(),
+        Some(_) => return Err(invalid("the width must be a positive number")),
+        None => text.split('\n').map(str::to_string).collect(),
+    };
+    // Text space: x along the line, y up as the page is shown. The first baseline sits under the
+    // top of the box by about the font's ascent.
+    let flip = Matrix([1.0, 0.0, 0.0, -1.0, 0.0, 0.0]);
+    let lin = Matrix([new.back.0[0], new.back.0[1], new.back.0[2], new.back.0[3], 0.0, 0.0]);
+    let upright = flip.then(&lin);
+    let (ux, uy) = new.back.apply(new.at[0], new.at[1] + size * 0.94);
+    let mut ops = vec![
+        Op::new("q", vec![]),
+        Op::new("cm", vec![num(upright.0[0]), num(upright.0[1]), num(upright.0[2]), num(upright.0[3]), num(ux), num(uy)]),
+        Op::new("MP", vec![Obj::name("TouchUp_TextEdit")]),
+        Op::new("BT", vec![]),
+        Op::new("rg", vec![num(r), num(g), num(b)]),
+        Op::new("Tf", vec![Obj::name(&String::from_utf8_lossy(face.name())), num(size)]),
+    ];
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            ops.push(Op::new("Td", vec![num(0.0), num(-size * 1.2)]));
+        }
+        if !line.is_empty() {
+            let bytes = face.encode(line).ok_or_else(|| invalid(format!("\"{line}\" can't be shown")))?;
+            ops.push(Op::new("Tj", vec![Obj::Str(bytes)]));
+        }
+    }
+    ops.push(Op::new("ET", vec![]));
+    ops.push(Op::new("Q", vec![]));
+
+    let old = page_streams(&p)?;
+    let mut list = Vec::with_capacity(old.len() + 3);
+    list.push(flate_stream(doc, b"q
+")?);
+    list.extend(old.into_iter().map(|(obj, _)| obj));
+    list.push(flate_stream(doc, b"
+Q
+")?);
+    list.push(flate_stream(doc, &serialize_ops(&ops))?);
+    let mut arr = doc.new_array()?;
+    for o in list {
+        arr.array_push(o)?;
+    }
+    let mut page_obj = p;
+    page_obj.dict_put("Contents", arr)?;
+    Ok(())
+}
+
+fn flate_stream(doc: &mut PdfDocument, data: &[u8]) -> Result<PdfObject> {
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(data).map_err(|e| EngineError::Io(e.to_string()))?;
+    let packed = z.finish().map_err(|e| EngineError::Io(e.to_string()))?;
+    let mut dict = doc.new_dict()?;
+    dict.dict_put("Filter", PdfObject::new_name("FlateDecode")?)?;
+    Ok(doc.add_stream(&Buffer::from_bytes(&packed)?, Some(&dict), true)?)
 }
 
 /// What replaces removed show operator `i`: the same moves without painting. A ' or " still

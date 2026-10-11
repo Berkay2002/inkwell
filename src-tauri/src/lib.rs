@@ -779,6 +779,7 @@ pub fn run() {
             annot::app::annot_state,
             textedit::app::text_blocks,
             textedit::app::text_edit,
+            textedit::app::text_add,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

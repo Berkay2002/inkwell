@@ -66,6 +66,37 @@ export const edit = (id: number, op: EditOp) => withState(id, () => api.editAppl
 export const undo = (id: number) => withState(id, () => api.editUndo(id));
 export const redo = (id: number) => withState(id, () => api.editRedo(id));
 
+/**
+ * Changes one text block (src-tauri/src/textedit). `Stale` means the document moved on since the
+ * block list: that is not an error to show, the caller lists the page again (null result).
+ */
+export function editText(id: number, rev: number, page: number, index: number, change: api.BlockChange) {
+  return serial(id, async () => {
+    try {
+      const r = await api.textEdit(id, rev, page, index, change);
+      applyState(id, r.state);
+      return r;
+    } catch (e) {
+      if (String(e) === "stale") return null;
+      throw e;
+    }
+  });
+}
+
+/** Adds a text box to a page. */
+export function addText(id: number, rev: number, page: number, box: api.NewTextBox) {
+  return serial(id, async () => {
+    try {
+      const s = await api.textAdd(id, rev, page, box);
+      applyState(id, s);
+      return s;
+    } catch (e) {
+      if (String(e) === "stale") return null;
+      throw e;
+    }
+  });
+}
+
 /** A created file that was never saved has no place yet: Save asks where it goes. */
 export const save = (id: number) => (st().docs[id]?.scratch ? saveAs(id) : withState(id, () => api.saveDocument(id)));
 
