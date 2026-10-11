@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tauri::ipc::Response;
+use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 type Hist<'a> = State<'a, Arc<History>>;
@@ -125,6 +126,8 @@ pub struct History {
     bytes: Mutex<LruCache<String, Arc<(BytesId, Vec<u8>)>>>,
     /// MuPDF work of the diff module, one thread at a time.
     diff_lock: Mutex<()>,
+    /// The latest comparisons by (bytes of A, bytes of B).
+    compared: Mutex<LruCache<(BytesId, BytesId), Arc<Comparison>>>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -145,6 +148,7 @@ impl History {
             marks: Mutex::new(HashMap::new()),
             bytes: Mutex::new(LruCache::new(NonZeroUsize::new(6).unwrap())),
             diff_lock: Mutex::new(()),
+            compared: Mutex::new(LruCache::new(NonZeroUsize::new(4).unwrap())),
         }
     }
 
@@ -503,9 +507,30 @@ impl History {
     }
 
     pub fn compare(&self, doc: Option<EngDoc>, a: &Source, b: &Source) -> Result<Comparison, String> {
+        self.compare_job(doc, a, b, &AtomicBool::new(false), &mut |_| {}).map(|c| (*c).clone())
+    }
+
+    /// The comparison of two sources, from the cache when these exact bytes were compared a moment ago
+    /// (the report and the view ask for the same one). `cancel` is polled between pages.
+    pub fn compare_job(&self, doc: Option<EngDoc>, a: &Source, b: &Source, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<Arc<Comparison>, String> {
+        let (a, b) = (self.load(doc, a)?, self.load(doc, b)?);
+        let key = (a.0, b.0);
+        if let Some(c) = self.compared.lock().get(&key) {
+            return Ok(c.clone());
+        }
+        let _g = self.diff_lock.lock();
+        let c = Arc::new(diff::compare_with(&a.1, &b.1, &CompareOptions::default(), cancel, on).map_err(err)?);
+        self.compared.lock().put(key, c.clone());
+        Ok(c)
+    }
+
+    /// The comparison of two sources as a PDF report. Returns its bytes; the caller writes them.
+    pub fn report(&self, doc: Option<EngDoc>, a: &Source, b: &Source, names: (&str, &str), date: &str, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<Vec<u8>, String> {
+        let cmp = self.compare_job(doc, a, b, cancel, on)?;
         let (a, b) = (self.load(doc, a)?, self.load(doc, b)?);
         let _g = self.diff_lock.lock();
-        diff::compare(&a.1, &b.1, &CompareOptions::default()).map_err(err)
+        let input = diff::report::ReportInput { a: &a.1, b: &b.1, a_name: names.0, b_name: names.1, date };
+        diff::report::build(&input, &cmp, cancel, on).map_err(err)
     }
 
     pub fn render(&self, doc: Option<EngDoc>, src: &Source, page: u32, scale: f32) -> Result<Vec<u8>, String> {
@@ -660,6 +685,64 @@ pub async fn history_compare(window: Window, h: Hist<'_>, reg: State<'_, Paths>,
     let (a, b) = (a.resolve(&reg, window.label())?, b.resolve(&reg, window.label())?);
     let h = h.inner().clone();
     off(move || h.compare(doc, &a, &b)).await
+}
+
+/// Compare mode's comparison: as `history_compare`, with progress and a cancel (`tool_cancel(job)`, the id
+/// is the caller's). A cancelled run fails with "cancelled".
+#[tauri::command]
+pub async fn history_compare_run(
+    window: Window,
+    h: Hist<'_>,
+    reg: State<'_, Paths>,
+    jobs: State<'_, Arc<crate::tools::Jobs>>,
+    job: u64,
+    doc: Option<EngDoc>,
+    a: Source,
+    b: Source,
+    on_progress: Channel<diff::Progress>,
+) -> Result<Comparison, String> {
+    let (a, b) = (a.resolve(&reg, window.label())?, b.resolve(&reg, window.label())?);
+    let h = h.inner().clone();
+    let guard = jobs.inner().begin(job);
+    off(move || {
+        h.compare_job(doc, &a, &b, &guard.cancel, &mut |p| {
+            let _ = on_progress.send(p);
+        })
+        .map(|c| (*c).clone())
+    })
+    .await
+}
+
+/// Writes the comparison report to the file of save token `to` (from `pick_save`); returns its path.
+/// `names` and `date` are display text for the report's header.
+#[tauri::command]
+pub async fn history_compare_report(
+    window: Window,
+    h: Hist<'_>,
+    reg: State<'_, Paths>,
+    jobs: State<'_, Arc<crate::tools::Jobs>>,
+    job: u64,
+    doc: Option<EngDoc>,
+    a: Source,
+    b: Source,
+    names: (String, String),
+    date: String,
+    to: String,
+    on_progress: Channel<diff::Progress>,
+) -> Result<String, String> {
+    let (a, b) = (a.resolve(&reg, window.label())?, b.resolve(&reg, window.label())?);
+    let dest = reg.take_save(window.label(), &to).map_err(err)?;
+    let h = h.inner().clone();
+    let guard = jobs.inner().begin(job);
+    off(move || {
+        let bytes = h.report(doc, &a, &b, (&names.0, &names.1), &date, &guard.cancel, &mut |p| {
+            let _ = on_progress.send(p);
+        })?;
+        write_replace(Path::new(&dest), &bytes).map_err(|e| format!("could not write {dest}: {e}"))?;
+        window.state::<Paths>().learn(&dest);
+        Ok(dest)
+    })
+    .await
 }
 
 /// One page as a PNG (`scale` 1 = one pixel per point). Over IPC only: no temp file.

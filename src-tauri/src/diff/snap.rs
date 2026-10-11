@@ -46,10 +46,29 @@ pub struct WidgetInfo {
     pub rect: Rect4,
 }
 
+/// How a word is set: font family (subset prefix and weight/slant suffix kept as the file names it),
+/// size rounded to half a point, fill colour as 0xRRGGBB.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Style {
+    pub font: String,
+    /// Twice the size in points, so halves compare exactly.
+    pub size2: i32,
+    pub rgb: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Word {
     pub text: String,
     pub rect: Rect4,
+    pub style: Style,
+}
+
+/// "ABCDEF+Helvetica-Bold" -> "Helvetica-Bold".
+fn font_label(name: &str) -> String {
+    match name.split_once('+') {
+        Some((tag, rest)) if tag.len() == 6 && tag.bytes().all(|b| b.is_ascii_uppercase()) => rest.to_string(),
+        _ => name.to_string(),
+    }
 }
 
 pub struct PageSnap {
@@ -132,7 +151,8 @@ fn to_page_space(v: &[f32], ctm: &Matrix) -> Rect4 {
 }
 
 impl Snap {
-    pub fn open(bytes: &[u8], side: Side, password: Option<&str>) -> Result<Snap> {
+    /// `step(done, total)` is called after each page; it returns false to stop (the open is cancelled).
+    pub fn open(bytes: &[u8], side: Side, password: Option<&str>, step: &mut dyn FnMut(u32, u32) -> bool) -> Result<Snap> {
         let doc = open_doc(bytes, side, password)?;
         let n = doc.page_count()?.max(0) as usize;
         let mut snap = Snap {
@@ -146,6 +166,9 @@ impl Snap {
         for i in 0..n {
             let p = snap.read_page(i)?;
             snap.pages.push(p);
+            if !step(i as u32 + 1, n as u32) {
+                return Err(DiffError::Cancelled);
+            }
         }
         Ok(snap)
     }
@@ -363,7 +386,7 @@ impl Snap {
         let w: Vec<Word> = (|| -> Result<Vec<Word>> {
             let list = self.doc.load_page(i as i32)?.to_display_list(false)?;
             let tp = list.to_text_page(TextPageFlags::empty())?;
-            Ok(tp.words().into_iter().map(|w| Word { text: w.text, rect: rect4(w.bounds) }).collect())
+            Ok(page_words(&tp))
         })()
         .unwrap_or_default();
         let w = Rc::new(w);
@@ -396,6 +419,48 @@ impl Snap {
         })()
         .unwrap_or_default()
     }
+}
+
+/// The words of a text page with their boxes and style (the first character's), in reading order.
+/// Splits like `TextPage::words`: on whitespace, within a line.
+fn page_words(tp: &mupdf::TextPage) -> Vec<Word> {
+    use mupdf::text_page::TextBlockType;
+    let mut out = Vec::new();
+    for block in tp.blocks().filter(|b| b.r#type() == TextBlockType::Text) {
+        for line in block.lines() {
+            let mut cur = String::new();
+            let mut bounds: Option<Rect> = None;
+            let mut style: Option<Style> = None;
+            let flush = |cur: &mut String, bounds: &mut Option<Rect>, style: &mut Option<Style>, out: &mut Vec<Word>| {
+                if let (false, Some(b), Some(s)) = (cur.is_empty(), bounds.take(), style.take()) {
+                    out.push(Word { text: std::mem::take(cur), rect: rect4(b), style: s });
+                }
+                cur.clear();
+            };
+            for ch in line.chars() {
+                let Some(c) = ch.char() else { continue };
+                if c.is_whitespace() {
+                    flush(&mut cur, &mut bounds, &mut style, &mut out);
+                    continue;
+                }
+                let q = Rect::from(ch.quad());
+                bounds = Some(match bounds {
+                    Some(b) => b.r#union(&q),
+                    None => q,
+                });
+                if style.is_none() {
+                    let font = ch
+                        .font()
+                        .and_then(|f| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| font_label(f.name()))).ok())
+                        .unwrap_or_default();
+                    style = Some(Style { font, size2: (ch.size() * 2.0).round() as i32, rgb: ch.argb() & 0x00FF_FFFF });
+                }
+                cur.push(c);
+            }
+            flush(&mut cur, &mut bounds, &mut style, &mut out);
+        }
+    }
+    out
 }
 
 pub fn open_doc(bytes: &[u8], side: Side, password: Option<&str>) -> Result<PdfDocument> {

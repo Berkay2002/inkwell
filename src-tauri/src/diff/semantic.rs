@@ -6,6 +6,7 @@ use super::types::*;
 use similar::{Algorithm, DiffOp, capture_diff_slices_deadline};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Time budget of one sequence diff (a page's words, the bookmark list).
@@ -22,7 +23,24 @@ const GAP: usize = 3;
 /// Unchanged words kept around a text edit for context.
 const CTX: usize = 2;
 
-pub fn compare(a: &[u8], b: &[u8], opts: &CompareOptions) -> Result<Comparison> {
+/// Stops a comparison at the next page boundary when `cancel` is set, and reports where it is.
+struct Ctl<'a> {
+    cancel: &'a AtomicBool,
+    on: &'a mut dyn FnMut(Progress),
+}
+
+impl Ctl<'_> {
+    fn tick(&mut self, stage: Stage, done: u32, total: u32) -> Result<()> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(DiffError::Cancelled);
+        }
+        (self.on)(Progress { stage, done, total });
+        Ok(())
+    }
+}
+
+pub fn compare(a: &[u8], b: &[u8], opts: &CompareOptions, cancel: &AtomicBool, on: &mut dyn FnMut(Progress)) -> Result<Comparison> {
+    let mut ctl = Ctl { cancel, on };
     if a == b {
         // Same bytes: nothing to look at, but still validate the file and report its pages.
         let n = snap::open_doc(a, Side::A, opts.password_a.as_deref())?.page_count()?.max(0) as u32;
@@ -33,8 +51,9 @@ pub fn compare(a: &[u8], b: &[u8], opts: &CompareOptions) -> Result<Comparison> 
             identical: true,
         });
     }
-    let sa = Snap::open(a, Side::A, opts.password_a.as_deref())?;
-    let sb = Snap::open(b, Side::B, opts.password_b.as_deref())?;
+    let sa = Snap::open(a, Side::A, opts.password_a.as_deref(), &mut |d, t| ctl.tick(Stage::First, d, t).is_ok())?;
+    let sb = Snap::open(b, Side::B, opts.password_b.as_deref(), &mut |d, t| ctl.tick(Stage::Second, d, t).is_ok())?;
+    ctl.tick(Stage::Pages, 0, 0)?;
     let b2a = match_pages(&sa, &sb);
     let (na, nb) = (sa.pages.len(), sb.pages.len());
     let mut a_seen = vec![false; na];
@@ -85,10 +104,12 @@ pub fn compare(a: &[u8], b: &[u8], opts: &CompareOptions) -> Result<Comparison> 
             ));
         }
     }
-    for &(i, j) in &matched {
+    for (k, &(i, j)) in matched.iter().enumerate() {
+        ctl.tick(Stage::Pages, k as u32, matched.len() as u32)?;
         compare_page(&sa, &sb, i, j, &mut ch);
     }
 
+    ctl.tick(Stage::Document, 0, 0)?;
     metadata_changes(&sa, &sb, opts, &mut ch);
     bookmark_changes(&sa, &sb, &map, &mut ch);
     attachment_changes(&sa, &sb, &mut ch);
@@ -483,6 +504,7 @@ fn text_changes(sa: &Snap, sb: &Snap, ia: usize, ib: usize, wa: &[Word], wb: &[W
             }
         }
     }
+    format_changes(ia, ib, wa, wb, &atoms, ch);
     // edit regions: changed atoms separated by at most GAP unchanged words
     let mut groups: Vec<(usize, usize)> = Vec::new();
     for (i, _) in atoms.iter().enumerate().filter(|(_, a)| a.0 != RunOp::Equal) {
@@ -563,6 +585,60 @@ fn text_changes(sa: &Snap, sb: &Snap, ia: usize, ib: usize, wa: &[Word], wb: &[W
             rect_b: union(rects_b),
             label,
             detail: Detail::Text { runs },
+        });
+    }
+}
+
+type FormatRun<'a> = (Vec<FormatProp>, Vec<&'a Word>, Vec<&'a Word>);
+
+/// Same words, set differently: consecutive equal words whose font, size or colour changed the same way
+/// are one change.
+fn format_changes(ia: usize, ib: usize, wa: &[Word], wb: &[Word], atoms: &[(RunOp, Option<usize>, Option<usize>)], ch: &mut Vec<Change>) {
+    let colour_far = |p: u32, q: u32| (0..3).any(|k| ((p >> (8 * k)) & 0xFF).abs_diff((q >> (8 * k)) & 0xFF) > 8);
+    let props = |x: &Word, y: &Word| -> Vec<FormatProp> {
+        let (sx, sy) = (&x.style, &y.style);
+        let mut v = Vec::new();
+        if !sx.font.eq_ignore_ascii_case(&sy.font) {
+            v.push(FormatProp { name: "font".into(), old: sx.font.clone(), new: sy.font.clone() });
+        }
+        if sx.size2 != sy.size2 {
+            let pt = |s: i32| if s % 2 == 0 { format!("{}", s / 2) } else { format!("{}.5", s / 2) };
+            v.push(FormatProp { name: "size".into(), old: pt(sx.size2), new: pt(sy.size2) });
+        }
+        if colour_far(sx.rgb, sy.rgb) {
+            v.push(FormatProp { name: "colour".into(), old: format!("#{:06x}", sx.rgb), new: format!("#{:06x}", sy.rgb) });
+        }
+        v
+    };
+    let mut run: Option<FormatRun> = None;
+    let mut done: Vec<FormatRun> = Vec::new();
+    for &(op, x, y) in atoms {
+        let p = match (op, x, y) {
+            (RunOp::Equal, Some(x), Some(y)) => Some((props(&wa[x], &wb[y]), &wa[x], &wb[y])).filter(|(p, _, _)| !p.is_empty()),
+            _ => None,
+        };
+        let same = matches!((&p, &run), (Some((p, _, _)), Some(r)) if r.0 == *p);
+        if let (true, Some((_, x, y)), Some(r)) = (same, &p, run.as_mut()) {
+            r.1.push(x);
+            r.2.push(y);
+        } else {
+            done.extend(run.take());
+            run = p.map(|(p, x, y)| (p, vec![x], vec![y]));
+        }
+    }
+    done.extend(run);
+    let n = ib + 1;
+    for (props, xs, ys) in done {
+        let text = clip(&ys.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "));
+        let what = props.iter().map(|p| format!("{} {} -> {}", p.name, p.old, p.new)).collect::<Vec<_>>().join(", ");
+        ch.push(Change {
+            kind: ChangeKind::FormatChanged,
+            a_page: Some(ia as u32),
+            b_page: Some(ib as u32),
+            rect_a: union(xs.iter().map(|w| w.rect)),
+            rect_b: union(ys.iter().map(|w| w.rect)),
+            label: format!("Formatting changed on p. {n}: '{text}': {what}"),
+            detail: Detail::Format { text, props },
         });
     }
 }
