@@ -289,57 +289,78 @@ async fn pick_search_folder(window: Window) -> Result<Option<FileRef>, EngineErr
     .await
 }
 
-/// Searches several PDFs for `query` in the background; events (one per file with hits, progress, done) go to
-/// `on_event`, each hit file with an open token. Returns the search id for `cancel_search_files`.
+/// Searches several PDFs for `query` in the background; events (`started` first, then one per file with hits,
+/// progress, done) go to `on_event`. Returns the search id (also in `started`, which comes before the folder is
+/// listed) for `cancel_search_files`. A result's open token comes from `search_file_token` when it is opened.
 #[tauri::command]
 async fn search_files(
     window: Window,
-    eng: Eng<'_>,
     searches: State<'_, Arc<search::files::FolderSearches>>,
     scope: SearchScope,
     query: String,
     opts: Option<SearchOpts>,
     on_event: Channel<search::files::FilesEvent>,
 ) -> Result<u64, EngineError> {
-    use search::files::{list_pdfs, FilesEvent};
-    let eng = eng.inner().clone();
+    use search::files::{list_pdfs, list_picked, FilesEvent, Listing};
     let searches = searches.inner().clone();
+    // The id exists before the (possibly long) walk, so Cancel reaches it.
+    let (id, cancel) = searches.begin();
+    let _ = on_event.send(FilesEvent::Started { search: id });
     blocking(move || {
-        let reg = window.state::<Paths>();
-        let (files, capped) = match scope {
-            SearchScope::Folder { token, recursive } => {
-                let dir = std::path::PathBuf::from(reg.open(window.label(), &token)?);
-                if !dir.is_dir() {
-                    return Err(EngineError::Io(format!("{} is not a folder", dir.display())));
+        let listed: Result<Listing, EngineError> = (|| {
+            let reg = window.state::<Paths>();
+            match scope {
+                SearchScope::Folder { token, recursive } => {
+                    let dir = std::path::PathBuf::from(reg.open(window.label(), &token)?);
+                    if !dir.is_dir() {
+                        return Err(EngineError::Io(format!("{} is not a folder", dir.display())));
+                    }
+                    Ok(list_pdfs(&dir, recursive, &cancel))
                 }
-                list_pdfs(&dir, recursive)
+                SearchScope::Files { tokens } => {
+                    let mut files = Vec::new();
+                    for t in &tokens {
+                        files.push(std::path::PathBuf::from(reg.open(window.label(), t)?));
+                    }
+                    Ok(list_picked(files))
+                }
             }
-            SearchScope::Files { tokens } => {
-                let mut files = Vec::new();
-                for t in &tokens {
-                    files.push(std::path::PathBuf::from(reg.open(window.label(), t)?));
-                }
-                let capped = files.len() > search::files::MAX_FILES;
-                files.truncate(search::files::MAX_FILES);
-                (files, capped)
+        })();
+        let listing = match listed {
+            Ok(l) => l,
+            Err(e) => {
+                // Say it ended, so nothing waits for it.
+                searches.cancel(id);
+                searches.run(id, cancel, Vec::new(), false, 0, "", SearchOpts::default(), Arc::new(move |e| {
+                    let _ = on_event.send(e);
+                }));
+                return Err(e);
             }
         };
-        let w = window.clone();
-        Ok(searches.start(
-            &eng,
-            files,
-            capped,
+        searches.run(
+            id,
+            cancel,
+            listing.files,
+            listing.capped,
+            listing.cloud_only,
             &query,
             opts.unwrap_or_default(),
-            Arc::new(move |mut e| {
-                if let FilesEvent::File { path, token, .. } = &mut e {
-                    *token = w.state::<Paths>().issue_open(w.label(), path.clone()).token;
-                }
+            Arc::new(move |e| {
                 let _ = on_event.send(e);
             }),
-        ))
+        );
+        Ok(id)
     })
     .await
+}
+
+/// An open token for file `index` of search `search` (a result the user opens), issued now.
+#[tauri::command]
+fn search_file_token(window: Window, searches: State<'_, Arc<search::files::FolderSearches>>, search: u64, index: u32) -> Result<FileRef, EngineError> {
+    let path = searches
+        .path_of(search, index)
+        .ok_or_else(|| EngineError::Io("that search result is no longer available".into()))?;
+    Ok(window.state::<Paths>().issue_open(window.label(), path.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -858,6 +879,7 @@ pub fn run() {
             pick_search_folder,
             search_files,
             cancel_search_files,
+            search_file_token,
             engine_stats,
             set_cache_budget,
             initial_files,

@@ -1,11 +1,11 @@
 //! The find options, snippets, comments, fields and bookmarks, the engine events, and folder search
 //! (listing, caps, cancel), on small PDFs built here.
 
-use super::files::{list_pdfs, search_file, FilesEvent, FolderSearches, Skip, PER_FILE};
+use super::files::{list_pdfs, list_picked, search_file, FilesEvent, FolderSearches, Skip, PER_FILE, TOTAL};
 use super::*;
 use crate::engine::{DocId, Engine, SearchEvent};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -335,11 +335,11 @@ fn the_engine_search_of_bookmarks_reports_the_page_they_go_to() {
 // ---- search across files -------------------------------------------------------------------------
 
 /// Runs a folder search to its `Done` and returns every event.
-fn run_files(eng: &Arc<Engine>, files: Vec<PathBuf>, query: &str, o: SearchOpts) -> Vec<FilesEvent> {
+fn run_files(files: Vec<PathBuf>, query: &str, o: SearchOpts) -> Vec<FilesEvent> {
     let searches = Arc::new(FolderSearches::default());
     let (tx, rx) = mpsc::channel();
     let tx = std::sync::Mutex::new(tx);
-    searches.start(eng, files, false, query, o, Arc::new(move |e| {
+    searches.start(files, false, query, o, Arc::new(move |e| {
         let _ = tx.lock().unwrap().send(e);
     }));
     let mut out = Vec::new();
@@ -368,19 +368,19 @@ fn tree(test: &str) -> PathBuf {
 fn a_folder_lists_its_pdfs_with_or_without_sub_folders() {
     let d = tree("list");
     let names = |v: Vec<PathBuf>| v.iter().map(|p| p.strip_prefix(&d).unwrap().to_string_lossy().replace('\\', "/")).collect::<Vec<_>>();
-    let (flat, capped) = list_pdfs(&d, false);
-    assert!(!capped);
-    assert_eq!(names(flat), vec!["a.pdf", "b.PDF", "broken.pdf"]);
-    let (deep, _) = list_pdfs(&d, true);
-    assert_eq!(names(deep), vec!["a.pdf", "b.PDF", "broken.pdf", "sub/c.pdf", "sub/deeper/d.pdf"]);
+    let go = AtomicBool::new(false);
+    let flat = list_pdfs(&d, false, &go);
+    assert!(!flat.capped && !flat.cancelled && flat.cloud_only == 0);
+    assert_eq!(names(flat.files), vec!["a.pdf", "b.PDF", "broken.pdf"]);
+    let deep = list_pdfs(&d, true, &go);
+    assert_eq!(names(deep.files), vec!["a.pdf", "b.PDF", "broken.pdf", "sub/c.pdf", "sub/deeper/d.pdf"]);
 }
 
 #[test]
 fn a_folder_search_groups_hits_by_file_and_skips_what_it_cannot_read() {
     let d = tree("run");
-    let eng = Engine::new(2, 64 << 20);
-    let (files, _) = list_pdfs(&d, true);
-    let ev = run_files(&eng, files, "notice", opts());
+    let files = list_pdfs(&d, true, &AtomicBool::new(false)).files;
+    let ev = run_files(files, "notice", opts());
 
     let mut found: Vec<(String, u32, u32, Vec<u32>)> = ev
         .iter()
@@ -409,9 +409,8 @@ fn a_folder_search_groups_hits_by_file_and_skips_what_it_cannot_read() {
 #[test]
 fn the_options_reach_the_files() {
     let d = tree("opts");
-    let eng = Engine::new(2, 64 << 20);
-    let (files, _) = list_pdfs(&d, true);
-    let ev = run_files(&eng, files, "Notice", SearchOpts { case_sensitive: true, ..opts() });
+    let files = list_pdfs(&d, true, &AtomicBool::new(false)).files;
+    let ev = run_files(files, "Notice", SearchOpts { case_sensitive: true, ..opts() });
     let Some(FilesEvent::Done { matched, hits, .. }) = ev.last() else { panic!("no Done") };
     assert_eq!((*matched, *hits), (1, 1));
 }
@@ -451,11 +450,10 @@ fn cancel_stops_a_folder_search_between_pages() {
     for i in 0..60 {
         files.push(write(&d, &format!("f{i:02}.pdf"), bytes.clone()));
     }
-    let eng = Engine::new(2, 64 << 20);
     let searches = Arc::new(FolderSearches::default());
     let (tx, rx) = mpsc::channel();
     let tx = std::sync::Mutex::new(tx);
-    let id = searches.start(&eng, files, false, "needle", opts(), Arc::new(move |e| {
+    let id = searches.start(files, false, "needle", opts(), Arc::new(move |e| {
         let _ = tx.lock().unwrap().send(e);
     }));
     // Wait for the first file, then cancel.
@@ -509,4 +507,221 @@ fn what_a_form_field_holds_is_found_after_save_and_reopen() {
     }
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!((got[0].source, got[0].text.as_str(), got[0].before.as_str()), (Source::Field, "NOTICE", "written "));
+}
+
+// ---- matching: what the reviewer asked for -----------------------------------------------------------------
+
+fn text_hits(text: &str, query: &str, o: SearchOpts) -> usize {
+    PageChars::of_text(text).find(&Query::new(query, o).expect("a query"), Source::Text).len()
+}
+
+#[test]
+fn a_soft_hyphen_is_never_part_of_the_text() {
+    // Searching for the word finds it however the writer broke it, and the query's own soft hyphen is ignored.
+    assert_eq!(text_hits("co\u{ad}operate fully", "cooperate", opts()), 1);
+    assert_eq!(text_hits("cooperate fully", "co\u{ad}operate", opts()), 1);
+    assert_eq!(text_hits("caf\u{e9}\u{ad}teria", "cafeteria",SearchOpts { ignore_accents: true, ..opts() }), 1);
+}
+
+#[test]
+fn composed_and_decomposed_letters_are_the_same_text() {
+    let composed = "un caf\u{e9} noir";
+    let decomposed = "un cafe\u{301} noir";
+    for text in [composed, decomposed] {
+        assert_eq!(text_hits(text, "caf\u{e9}", opts()), 1, "{text:?} for the composed query");
+        assert_eq!(text_hits(text, "cafe\u{301}", opts()), 1, "{text:?} for the decomposed query");
+        // Without ignoring accents "cafe" is not "café", composed or not; with it, it is.
+        assert_eq!(text_hits(text, "cafe", opts()), 0, "{text:?}");
+        assert_eq!(text_hits(text, "cafe", SearchOpts { ignore_accents: true, ..opts() }), 1, "{text:?}");
+        assert_eq!(text_hits(text, "cafe", SearchOpts { whole_words: true, ..opts() }), 0, "{text:?}");
+    }
+}
+
+#[test]
+fn case_folding_is_full() {
+    assert_eq!(text_hits("Stra\u{df}e", "STRASSE", opts()), 1);
+    assert_eq!(text_hits("STRASSE", "stra\u{df}e", opts()), 1);
+    // A final sigma and a medial one are the same letter in capitals and lower case.
+    assert_eq!(text_hits("\u{3bf}\u{3b4}\u{3cc}\u{3c2}", "\u{39f}\u{394}\u{38c}\u{3a3}", opts()), 1);
+    assert_eq!(text_hits("\u{3a3}\u{3bf}\u{3c6}\u{3cc}\u{3c2}", "\u{3c3}\u{3bf}\u{3c6}\u{3cc}\u{3c3}", opts()), 1);
+    // Case counts when asked for.
+    assert_eq!(text_hits("Stra\u{df}e", "STRASSE", SearchOpts { case_sensitive: true, ..opts() }), 0);
+}
+
+#[test]
+fn a_hyphen_that_ends_a_line_is_found_both_ways() {
+    let b = plain(&[vec!["it is a well-", "known fact and we co-", "operate fully"]]);
+    // Kept: the author's hyphen. Dropped: the writer's.
+    assert_eq!(count(&b, "well-known", opts()), 1);
+    assert_eq!(count(&b, "wellknown", opts()), 1);
+    assert_eq!(count(&b, "co-operate", opts()), 1);
+    assert_eq!(count(&b, "cooperate", opts()), 1);
+    // The same place is one result, not two.
+    assert_eq!(count(&b, "known", opts()), 1);
+    assert_eq!(count(&b, "well", opts()), 1);
+}
+
+#[test]
+fn text_comments_and_fields_share_one_page_budget() {
+    // 1990 hits in the text, then a sticky note and a field of 30 hits each: the page lists 2000 in all.
+    let line = "a ".repeat(40);
+    let lines: Vec<&str> = (0..50).map(|_| line.as_str()).collect();
+    let mut stretch: Vec<&str> = lines;
+    stretch.truncate(49); // 1960 hits
+    let ten = "a ".repeat(30);
+    let note = format!("<< /Type /Annot /Subtype /Text /Rect [300 600 320 620] /Contents ({ten}) /F 4 >>");
+    let field = format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (F) /V ({ten}) /Rect [72 400 300 420] /F 4 /DA (/Helv 12 Tf 0 g) >>");
+    let extra = Extra {
+        catalog: "/AcroForm << /Fields [7 0 R] /DA (/Helv 0 Tf 0 g) >>".into(),
+        annots: "6 0 R 7 0 R".into(),
+        objs: vec![note, field],
+    };
+    let b = doc_with(&[stretch], extra);
+    let all = SearchOpts { comments: true, fields: true, ..opts() };
+    let got = hits(&b, "a", all);
+    assert_eq!(got.len(), 2000, "text + comments + fields on one page");
+    assert_eq!(got.iter().filter(|h| h.1.source == Source::Text).count(), 1960);
+    assert_eq!(got.iter().filter(|h| h.1.source == Source::Comment).count(), 30);
+    assert_eq!(got.iter().filter(|h| h.1.source == Source::Field).count(), 10, "the field gets what is left");
+}
+
+fn engine_search(eng: &Arc<Engine>, id: DocId, query: &str, o: SearchOpts) -> (u32, u32, bool) {
+    let (tx, rx) = mpsc::channel();
+    let tx = std::sync::Mutex::new(tx);
+    eng.search_with(id, query.into(), o, Arc::new(move |e| {
+        let _ = tx.lock().unwrap().send(e);
+    }))
+    .unwrap();
+    let mut listed = 0u32;
+    loop {
+        match rx.recv_timeout(Duration::from_secs(60)).expect("a Done event") {
+            SearchEvent::Hits { hits, .. } => listed += hits.len() as u32,
+            SearchEvent::Progress { .. } => {}
+            SearchEvent::Done { hits, capped, .. } => return (listed, hits, capped),
+        }
+    }
+}
+
+#[test]
+fn a_document_lists_at_most_the_document_cap_and_says_so() {
+    let d = dir("doccap");
+    // 30 pages of 400 hits: 12 000 in all, the search stops at 5000.
+    let line = "a ".repeat(40);
+    let page: Vec<&str> = (0..10).map(|_| line.as_str()).collect();
+    let pages: Vec<Vec<&str>> = (0..30).map(|_| page.clone()).collect();
+    let p = write(&d, "big.pdf", plain(&pages));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&p.to_string_lossy()).unwrap().doc;
+    let (listed, hits, capped) = engine_search(&eng, id, "a", opts());
+    assert_eq!((listed, hits, capped), (DOC_CAP as u32, DOC_CAP as u32, true));
+    // A search that fits says nothing of the kind.
+    let (listed, hits, capped) = engine_search(&eng, id, "a a a a a", opts());
+    assert!(!capped && listed == hits && hits > 0, "{listed} {hits} {capped}");
+}
+
+// ---- search across files: the review's findings -----------------------------------------------------------
+
+#[test]
+fn an_in_document_search_finishes_while_a_long_folder_search_runs() {
+    let d = dir("starve");
+    // 40 files of 150 pages: seconds of work for the folder search.
+    let pages: Vec<Vec<&str>> = (0..150).map(|i| if i % 50 == 0 { vec!["the needle is here"] } else { vec!["nothing at all on this page"] }).collect();
+    let bytes = plain(&pages);
+    let mut files = Vec::new();
+    for i in 0..40 {
+        files.push(write(&d, &format!("f{i:02}.pdf"), bytes.clone()));
+    }
+    let open = write(&d, "open.pdf", plain(&[vec!["a needle in the open document"], vec!["another needle"]]));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&open.to_string_lossy()).unwrap().doc;
+
+    let searches = Arc::new(FolderSearches::default());
+    let folder_done = Arc::new(AtomicBool::new(false));
+    let fd = folder_done.clone();
+    let folder = searches.start(files, false, "needle", opts(), Arc::new(move |e| {
+        if matches!(e, FilesEvent::Done { .. }) {
+            fd.store(true, Ordering::SeqCst);
+        }
+    }));
+    // Let the folder search get going, then search the open document: it must not wait for the folder.
+    std::thread::sleep(Duration::from_millis(200));
+    let t0 = std::time::Instant::now();
+    let (listed, hits, _) = engine_search(&eng, id, "needle", opts());
+    let took = t0.elapsed();
+    assert_eq!((listed, hits), (2, 2));
+    assert!(!folder_done.load(Ordering::SeqCst), "the folder search was already over ({took:?}): make it longer");
+    assert!(took < Duration::from_secs(5), "took {took:?}");
+    searches.cancel(folder);
+}
+
+#[test]
+fn listing_stops_when_cancelled_and_leaves_out_cloud_only_files() {
+    let d = tree("listcancel");
+    let stop = AtomicBool::new(true);
+    let l = list_pdfs(&d, true, &stop);
+    assert!(l.cancelled && l.files.is_empty(), "{l:?}");
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
+        let cloud = d.join("cloud.pdf");
+        std::fs::write(&cloud, plain(&[vec!["notice in the cloud"]])).unwrap();
+        let wide: Vec<u16> = cloud.as_os_str().encode_wide().chain(Some(0)).collect();
+        // FILE_ATTRIBUTE_OFFLINE: what a placeholder that is not on this PC looks like.
+        assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), 0x1000) }, 0, "could not mark the file");
+        let go = AtomicBool::new(false);
+        let l = list_pdfs(&d, true, &go);
+        assert_eq!(l.cloud_only, 1);
+        assert!(!l.files.iter().any(|p| p.ends_with("cloud.pdf")));
+        let picked = list_picked(vec![cloud.clone(), d.join("a.pdf")]);
+        assert_eq!((picked.cloud_only, picked.files.len()), (1, 1));
+    }
+}
+
+#[test]
+fn the_listing_room_is_shared_by_the_workers() {
+    let d = dir("room");
+    // Each file has 120 hits (100 listed); 60 files would list 6000 without the shared cap.
+    let line = "needle ".repeat(10);
+    let page: Vec<&str> = (0..12).map(|_| line.as_str()).collect();
+    let bytes = plain(&[page]);
+    let mut files = Vec::new();
+    for i in 0..60 {
+        files.push(write(&d, &format!("f{i:02}.pdf"), bytes.clone()));
+    }
+    let ev = run_files(files, "needle", opts());
+    let listed: usize = ev.iter().map(|e| if let FilesEvent::File { items, .. } = e { items.len() } else { 0 }).sum();
+    assert_eq!(listed, TOTAL, "listed exactly the cap");
+    let Some(FilesEvent::Done { matched, hits, .. }) = ev.last() else { panic!("no Done") };
+    assert_eq!((*matched, *hits), (60, 60 * 120), "every hit is still counted");
+}
+
+#[test]
+fn a_result_is_opened_through_its_search_and_only_the_latest_search_answers() {
+    let d = tree("lazy");
+    let files = list_pdfs(&d, true, &AtomicBool::new(false)).files;
+    let searches = Arc::new(FolderSearches::default());
+    let (tx, rx) = mpsc::channel();
+    let tx = std::sync::Mutex::new(tx);
+    let first = searches.start(files.clone(), false, "notice", opts(), Arc::new(move |e| {
+        let _ = tx.lock().unwrap().send(e);
+    }));
+    let mut found = Vec::new();
+    loop {
+        match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+            FilesEvent::File { index, path, .. } => found.push((index, path)),
+            FilesEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(!found.is_empty());
+    for (index, path) in &found {
+        assert_eq!(searches.path_of(first, *index).unwrap().to_string_lossy(), *path);
+    }
+    assert!(searches.path_of(first, 999).is_none());
+    // A newer search forgets the older one's files.
+    let second = searches.start(files, false, "zzz-nothing", opts(), Arc::new(|_| {}));
+    assert!(searches.path_of(first, found[0].0).is_none());
+    assert!(searches.path_of(second, found[0].0).is_none());
 }

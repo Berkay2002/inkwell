@@ -18,6 +18,8 @@ export interface FolderRun {
   matched: number;
   hits: number;
   skipped: number;
+  /** PDFs left unread because they are only in the cloud. */
+  cloudOnly: number;
   /** The folder held more PDFs than a search looks at. */
   capped: boolean;
   cancelled: boolean;
@@ -52,7 +54,7 @@ interface Rail {
 export type Target = { kind: "folder"; token: string; path: string } | { kind: "files"; tokens: string[]; paths: string[] };
 
 const emptyRun = (query: string): FolderRun => ({
-  id: null, query, running: true, scanned: 0, total: 0, files: [], matched: 0, hits: 0, skipped: 0, capped: false, cancelled: false,
+  id: null, query, running: true, scanned: 0, total: 0, files: [], matched: 0, hits: 0, skipped: 0, cloudOnly: 0, capped: false, cancelled: false,
 });
 
 let runSeq = 0;
@@ -118,14 +120,23 @@ export const useSearch = create<Rail>((set, get) => ({
       }
     };
     let id: number | null = null;
-    const pending: api.FilesEvent[] = [];
     const handle = (e: api.FilesEvent) => {
-      if (seq !== runSeq || e.search !== id) return;
+      if (seq !== runSeq) {
+        // A newer search took over: end this one as soon as its id is known.
+        if (e.kind === "started") void api.cancelSearchFiles(e.search);
+        return;
+      }
+      if (e.kind === "started") {
+        // Known before the folder is listed, so Cancel reaches the walk too.
+        id = e.search;
+        apply({ id });
+        return;
+      }
+      if (e.search !== id) return;
       if (e.kind === "file") {
         files = insertFile(files, {
           index: e.index,
           path: e.path,
-          token: e.token,
           name: e.name,
           pageCount: e.pageCount,
           hits: e.hits,
@@ -137,7 +148,7 @@ export const useSearch = create<Rail>((set, get) => ({
       } else if (e.kind === "progress") {
         apply({ scanned: e.scanned, total: e.total });
       } else {
-        apply({ files, running: false, scanned: e.cancelled ? get().run?.scanned ?? 0 : e.files, total: e.files, matched: e.matched, hits: e.hits, skipped: e.skipped, capped: e.capped, cancelled: e.cancelled });
+        apply({ files, running: false, scanned: e.cancelled ? get().run?.scanned ?? 0 : e.files, total: e.files, matched: e.matched, hits: e.hits, skipped: e.skipped, cloudOnly: e.cloudOnly, capped: e.capped, cancelled: e.cancelled });
       }
     };
 
@@ -146,15 +157,16 @@ export const useSearch = create<Rail>((set, get) => ({
         target.kind === "folder" ? { kind: "folder", token: target.token, recursive: get().recursive } : { kind: "files", tokens: target.tokens },
         q,
         useFind.getState().opts,
-        (e) => (id == null ? pending.push(e) : handle(e)),
+        handle,
       );
       if (seq !== runSeq) {
         void api.cancelSearchFiles(sid);
         return;
       }
-      id = sid;
-      apply({ id: sid });
-      pending.splice(0).forEach(handle);
+      if (id == null) {
+        id = sid;
+        apply({ id: sid });
+      }
     } catch (e) {
       if (seq === runSeq) {
         apply({ running: false });
@@ -177,7 +189,17 @@ export const useSearch = create<Rail>((set, get) => ({
     const hit = g.items[item];
     if (!run) return;
     const st = useStore.getState();
-    await st.openPath(g.path, g.token);
+    // The open token is issued now, for this one result (not for every file in the list).
+    let token: string | undefined;
+    if (run.id != null) {
+      try {
+        token = (await api.searchFileToken(run.id, g.index)).token;
+      } catch (e) {
+        st.setUi({ error: String(e) });
+        return;
+      }
+    }
+    await st.openPath(g.path, token);
     const doc = Object.values(useStore.getState().docs).find((d) => keyOf(d.path) === keyOf(g.path));
     if (!doc) return;
     useFind.getState().setDraft(doc.id, run.query);

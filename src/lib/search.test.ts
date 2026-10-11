@@ -21,6 +21,9 @@ const searchCall = vi.fn();
 const searchFilesCall = vi.fn();
 const cancelSearch = vi.fn(() => Promise.resolve());
 const cancelSearchFiles = vi.fn(() => Promise.resolve());
+const searchFileToken = vi.fn((_search: number, index: number) => Promise.resolve({ token: `tok-${index}`, path: "" }));
+/** What `searchFiles` answers with: the id at once, or never (the folder is still being listed). */
+let filesAnswer: () => Promise<number> = () => Promise.resolve(7);
 
 vi.mock("./api", () => ({
   openDocument: vi.fn(() =>
@@ -31,6 +34,7 @@ vi.mock("./api", () => ({
   pageSizes: vi.fn(() => Promise.resolve()),
   cancelSearch,
   cancelSearchFiles,
+  searchFileToken,
   search: (doc: number, q: string, opts: unknown, onEvent: Send) => {
     searchCall(doc, q, opts);
     docSend = onEvent;
@@ -39,7 +43,9 @@ vi.mock("./api", () => ({
   searchFiles: (scope: unknown, q: string, opts: unknown, onEvent: Send) => {
     searchFilesCall(scope, q, opts);
     filesSend = onEvent;
-    return Promise.resolve(7);
+    // The engine says "started" before it lists anything.
+    onEvent({ kind: "started", search: 7 });
+    return filesAnswer();
   },
   pickOpen: vi.fn(() => Promise.resolve([{ token: "f1", path: String.raw`C:\Docs\A.pdf` }, { token: "f2", path: String.raw`C:\Docs\B.pdf` }])),
   pickSearchFolder: vi.fn(() => Promise.resolve({ token: "folder-token", path: String.raw`C:\Docs\Housing` })),
@@ -100,6 +106,17 @@ describe("search in a document", () => {
     expect(useStore.getState().docs[id].search.current).toBe(0);
   });
 
+  it("keeps whether the engine stopped at its hit limit", async () => {
+    const { useStore } = await setup();
+    await useStore.getState().openPath(String.raw`C:\Docs\D.pdf`);
+    const id = useStore.getState().active!;
+    useStore.getState().runSearch(id, "x");
+    await tick();
+    docSend({ kind: "hits", search: 41, page: 0, hits: [found("x", 10)] });
+    docSend({ kind: "done", search: 41, hits: 1, pages: 30, capped: true });
+    expect(useStore.getState().docs[id].search).toMatchObject({ done: true, capped: true });
+  });
+
   it("stop ends the search, keeps what was found and ignores late events", async () => {
     const { useStore } = await setup();
     await useStore.getState().openPath(String.raw`C:\Docs\C.pdf`);
@@ -116,7 +133,7 @@ describe("search in a document", () => {
 
 describe("search across files", () => {
   const fileEvent = (index: number, name: string, hits = 2) => ({
-    kind: "file", search: 7, index, path: `C:\\Docs\\Housing\\${name}`, token: `tok-${index}`, name, pageCount: 4, hits, pages: 1, truncated: false,
+    kind: "file", search: 7, index, path: `C:\\Docs\\Housing\\${name}`, name, pageCount: 4, hits, pages: 1, truncated: false,
     items: [{ ...found("notice", 30), page: 2 }],
   });
 
@@ -132,9 +149,9 @@ describe("search across files", () => {
     filesSend({ kind: "progress", search: 7, scanned: 3, total: 4 });
     expect(useSearch.getState().run!.files.map((f) => f.name)).toEqual(["a.pdf", "c.pdf"]);
     expect([useSearch.getState().run!.scanned, useSearch.getState().run!.total]).toEqual([3, 4]);
-    filesSend({ kind: "done", search: 7, files: 4, matched: 2, hits: 7, skipped: 1, cancelled: false, capped: false });
+    filesSend({ kind: "done", search: 7, files: 4, matched: 2, hits: 7, skipped: 1, cloudOnly: 3, cancelled: false, capped: false });
     const r = useSearch.getState().run!;
-    expect([r.running, r.matched, r.hits, r.skipped, r.scanned]).toEqual([false, 2, 7, 1, 4]);
+    expect([r.running, r.matched, r.hits, r.skipped, r.cloudOnly, r.scanned]).toEqual([false, 2, 7, 1, 3, 4]);
     expect(useFind.getState().history[0]).toBe("notice");
   });
 
@@ -158,6 +175,22 @@ describe("search across files", () => {
     expect(useSearch.getState().run!.query).toBe("two");
   });
 
+  it("can be cancelled while the folder is still being listed", async () => {
+    const { useSearch } = await setup();
+    await useSearch.getState().pickFolder();
+    filesAnswer = () => new Promise<number>(() => {});
+    try {
+      void useSearch.getState().startFolder("notice");
+      await tick();
+      // The command has not answered, but "started" gave the id.
+      expect(useSearch.getState().run!.id).toBe(7);
+      useSearch.getState().cancelFolder();
+      expect(cancelSearchFiles).toHaveBeenCalledWith(7);
+    } finally {
+      filesAnswer = () => Promise.resolve(7);
+    }
+  });
+
   it("cancel asks the engine to stop and says so at once", async () => {
     const { useSearch } = await setup();
     await useSearch.getState().pickFolder();
@@ -174,6 +207,8 @@ describe("search across files", () => {
     filesSend({ ...fileEvent(0, "A.pdf"), path: String.raw`C:\Docs\A.pdf` });
     const g = useSearch.getState().run!.files[0];
     await useSearch.getState().openAt(g, 0);
+    // the open token is asked for now, for this one file
+    expect(searchFileToken).toHaveBeenCalledWith(7, 0);
     const id = useStore.getState().active!;
     expect(useStore.getState().docs[id].path).toBe(String.raw`C:\Docs\A.pdf`);
     expect(useFind.getState().drafts[id]).toBe("notice");

@@ -21,8 +21,11 @@ use serde::{Deserialize, Serialize};
 
 /// Characters of context kept on each side of a hit.
 pub const CONTEXT: usize = 48;
-/// Hits kept per page (a page of "a" searched for "a" would otherwise flood the list).
-const PAGE_CAP: usize = 2000;
+/// Hits kept per page, across text, comments and form fields together (a page of "a" searched for "a" would
+/// otherwise flood the list).
+pub const PAGE_CAP: usize = 2000;
+/// Hits one in-document search lists; after this the search stops and says it listed the first ones only.
+pub const DOC_CAP: usize = 5000;
 /// Longest query that is searched.
 const QUERY_CAP: usize = 256;
 
@@ -122,29 +125,42 @@ impl Folder {
         Folder { opts, nfd: icu_normalizer::DecomposingNormalizerBorrowed::new_nfd() }
     }
 
-    /// Appends the folded forms of `c` to `out`.
+    /// Appends the folded forms of `c` to `out`: a soft hyphen is nothing, white space is one space, letters are
+    /// decomposed (so "é" and "e" + U+0301 are the same text, on both sides), then case-folded unless the case
+    /// counts, and their marks dropped when accents are ignored.
     fn push(&mut self, c: char, out: &mut Vec<char>) {
+        if c == '\u{ad}' {
+            return;
+        }
         let c = if c.is_whitespace() || c == '\u{a0}' { ' ' } else { c };
-        if c == ' ' || (c.is_ascii() && self.opts.case_sensitive) {
+        if c == ' ' {
+            out.push(c);
+        } else if c.is_ascii() {
+            self.case(c, out);
+        } else {
+            let mut buf = [0u8; 4];
+            let s: &str = c.encode_utf8(&mut buf);
+            let d = self.nfd.normalize(s);
+            for x in d.chars() {
+                if self.opts.ignore_accents && is_mark(x) {
+                    continue;
+                }
+                self.case(x, out);
+            }
+        }
+    }
+
+    fn case(&self, c: char, out: &mut Vec<char>) {
+        if self.opts.case_sensitive {
             out.push(c);
             return;
         }
-        let one = |d: char, out: &mut Vec<char>| {
-            if self.opts.case_sensitive {
-                out.push(d);
-            } else {
-                out.extend(d.to_lowercase());
-            }
-        };
-        if self.opts.ignore_accents && !c.is_ascii() {
-            let mut buf = [0u8; 4];
-            let s: &str = c.encode_utf8(&mut buf);
-            let d = self.nfd.normalize(s).into_owned();
-            for x in d.chars().filter(|x| !is_mark(*x)) {
-                one(x, out);
-            }
-        } else {
-            one(c, out);
+        // Full case folding for what `to_lowercase` leaves apart: "Straße" is "STRASSE", a final sigma is a sigma.
+        match c {
+            'ß' | 'ẞ' => out.extend(['s', 's']),
+            'ς' => out.push('σ'),
+            'ſ' => out.push('s'),
+            _ => out.extend(c.to_lowercase()),
         }
     }
 }
@@ -223,13 +239,35 @@ impl PageChars {
         PageChars { chars, skip }
     }
 
-    /// Every match of `q`, in reading order.
+    /// Every match of `q`, in reading order, at most `PAGE_CAP`.
     pub fn find(&self, q: &Query, source: Source) -> Vec<Hit> {
+        self.find_limit(q, source, PAGE_CAP)
+    }
+
+    /// Every match of `q`, in reading order, at most `limit`.
+    pub fn find_limit(&self, q: &Query, source: Source, limit: usize) -> Vec<Hit> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut spans = self.spans(q, false, limit);
+        if self.skip.iter().any(|s| *s) {
+            // A hyphen that ends a line is the writer's, not the author's ("co-" "operate"), unless it is: look
+            // again with every such hyphen kept ("well-" "known"), and take what either reading finds.
+            spans.extend(self.spans(q, true, limit));
+            spans.sort_unstable();
+            spans.dedup_by_key(|s| s.0);
+            spans.truncate(limit);
+        }
+        spans.into_iter().map(|(start, end)| self.hit(start, end, source)).collect()
+    }
+
+    /// Where `q` matches, as (first, last) character indexes, with the line-end hyphens dropped or kept.
+    fn spans(&self, q: &Query, keep_hyphens: bool, limit: usize) -> Vec<(usize, usize)> {
         let mut f = Folder::new(q.opts);
         let mut flat: Vec<(char, usize)> = Vec::with_capacity(self.chars.len());
         let mut buf: Vec<char> = Vec::new();
         for (i, (c, _, _)) in self.chars.iter().enumerate() {
-            if self.skip[i] {
+            if self.skip[i] && !keep_hyphens {
                 continue;
             }
             buf.clear();
@@ -241,19 +279,21 @@ impl PageChars {
         let flat = collapse(flat);
         let n = q.needle.len();
         let word = |k: Option<&(char, usize)>| k.is_some_and(|c| c.0.is_alphanumeric());
-        let mut hits = Vec::new();
+        let mark = |k: Option<&(char, usize)>| k.is_some_and(|c| is_mark(c.0));
+        let mut out = Vec::new();
         let mut i = 0;
-        while i + n <= flat.len() && hits.len() < PAGE_CAP {
-            let bounded = !q.opts.whole_words || (!word(i.checked_sub(1).and_then(|p| flat.get(p))) && !word(flat.get(i + n)));
+        while i + n <= flat.len() && out.len() < limit {
+            // With accents counting, "cafe" is not the start of "café" (a mark follows) nor a whole word of it.
+            let bounded = !mark(flat.get(i + n))
+                && (!q.opts.whole_words || (!word(i.checked_sub(1).and_then(|p| flat.get(p))) && !word(flat.get(i + n))));
             if bounded && flat[i..i + n].iter().map(|c| c.0).eq(q.needle.iter().copied()) {
-                let (start, end) = (flat[i].1, flat[i + n - 1].1);
-                hits.push(self.hit(start, end, source));
+                out.push((flat[i].1, flat[i + n - 1].1));
                 i += n;
             } else {
                 i += 1;
             }
         }
-        hits
+        out
     }
 
     /// The hit that covers characters `start..=end`.
@@ -312,9 +352,11 @@ fn tail(s: &str, n: usize) -> String {
 pub fn find_in_page(doc: &Document, page: u32, q: &Query) -> Result<Vec<Hit>> {
     let p = doc.load_page(page as i32)?;
     let mut hits = PageChars::of(&p)?.find(q, Source::Text);
-    if !(q.opts.comments || q.opts.fields) {
+    if !(q.opts.comments || q.opts.fields) || hits.len() >= PAGE_CAP {
         return Ok(hits);
     }
+    // One budget per page across text, comments and fields: the page never lists more than `PAGE_CAP`.
+    let room = |hits: &Vec<Hit>| PAGE_CAP.saturating_sub(hits.len());
     let origin = p.bounds()?;
     // Not every document is a PDF with annotations; the text hits stand either way.
     let Ok(pp) = PdfPage::try_from(p) else { return Ok(hits) };
@@ -327,7 +369,7 @@ pub fn find_in_page(doc: &Document, page: u32, q: &Query) -> Result<Vec<Hit>> {
             }
             let Ok(Some(c)) = a.contents() else { continue };
             let Ok(b) = a.bounds() else { continue };
-            for mut h in PageChars::of_text(c).find(q, Source::Comment) {
+            for mut h in PageChars::of_text(c).find_limit(q, Source::Comment, room(&hits)) {
                 h.rects = vec![rect(b)];
                 hits.push(h);
             }
@@ -337,7 +379,7 @@ pub fn find_in_page(doc: &Document, page: u32, q: &Query) -> Result<Vec<Hit>> {
         for w in pp.widgets() {
             let Ok(Some(v)) = w.value() else { continue };
             let Ok(b) = w.annotation().bounds() else { continue };
-            for mut h in PageChars::of_text(&v).find(q, Source::Field) {
+            for mut h in PageChars::of_text(&v).find_limit(q, Source::Field, room(&hits)) {
                 h.rects = vec![rect(b)];
                 hits.push(h);
             }

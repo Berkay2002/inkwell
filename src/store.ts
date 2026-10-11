@@ -4,7 +4,7 @@ import type { OutlineItem } from "./lib/api";
 import { type Rot, type Size, clamp, ZOOM_MAX, ZOOM_MIN } from "./lib/layout";
 import { useFind } from "./lib/findStore";
 import { keyOf } from "./lib/recent";
-import { type Hit, byPosition, hitY, pickCurrent } from "./lib/searchLogic";
+import { type Hit, hitY, mergeHits, pickCurrent } from "./lib/searchLogic";
 import { dropCached } from "./lib/tiles";
 import { useRecents } from "./recents";
 
@@ -25,6 +25,8 @@ export interface SearchState {
   /** Pages read so far and the page count, while the search runs. */
   scanned: number;
   total: number;
+  /** The search stopped at its hit limit: the list is the first hits only. */
+  capped: boolean;
 }
 
 export interface NavRequest {
@@ -63,7 +65,7 @@ export interface DocState {
   nav: NavRequest | null;
 }
 
-const emptySearch = (): SearchState => ({ query: "", id: null, hits: [], current: -1, done: true, scanned: 0, total: 0 });
+const emptySearch = (): SearchState => ({ query: "", id: null, hits: [], current: -1, done: true, scanned: 0, total: 0, capped: false });
 
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
@@ -334,10 +336,10 @@ export const useStore = create<Store>((set, get) => {
         let current = cur.search.current;
         if (buffer.length > 0) {
           // The sorted list grows as pages report; the current hit keeps pointing at the same one.
-          const keep = current >= 0 ? hits[current] : null;
-          hits = hits.concat(buffer).sort(byPosition);
+          const merged = mergeHits(hits, buffer, current >= 0 ? hits[current] : null);
+          hits = merged.hits;
           buffer = [];
-          if (keep) current = hits.indexOf(keep);
+          if (current >= 0) current = merged.keep;
         }
         if (current === -1 && hits.length > 0) {
           // With a focus the start waits for the page that has it (hits stream in page by page).
@@ -367,7 +369,7 @@ export const useStore = create<Store>((set, get) => {
         } else {
           requestAnimationFrame(() => {
             const cur0 = get().docs[id];
-            if (cur0 && cur0.search.id === searchId) get().patch(id, { search: { ...cur0.search, done: true, scanned: cur0.search.total } });
+            if (cur0 && cur0.search.id === searchId) get().patch(id, { search: { ...cur0.search, done: true, scanned: cur0.search.total, capped: e.capped } });
             flush();
           });
         }

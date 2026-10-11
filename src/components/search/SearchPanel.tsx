@@ -80,6 +80,7 @@ function FileResults({ doc, draft }: { doc: DocState; draft: string }) {
           <i style={{ width: `${pct}%` }} />
         </div>
       )}
+      {search.done && search.capped && <p className="sr-note">Showing the first {n.toLocaleString("en-US")} results. Narrow the search to see the rest.</p>}
       <div
         ref={list}
         className="sr-list"
@@ -182,6 +183,11 @@ function FolderResults({ query }: { query: string }) {
       {!run.running && run.skipped > 0 && (
         <p className="sr-note">
           {run.skipped} {run.skipped === 1 ? "file" : "files"} could not be read (damaged, or protected with a password).
+        </p>
+      )}
+      {!run.running && run.cloudOnly > 0 && (
+        <p className="sr-note">
+          {run.cloudOnly} cloud-only {run.cloudOnly === 1 ? "file" : "files"} skipped (not downloaded to this PC, so not read).
         </p>
       )}
       {run.capped && <p className="sr-note">The folder has more PDFs than one search reads; only the first {run.total.toLocaleString("en-US")} were searched.</p>}

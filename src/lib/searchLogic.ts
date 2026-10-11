@@ -108,6 +108,31 @@ export function groupByPage(hits: Hit[]): PageGroup[] {
   return out;
 }
 
+/**
+ * `hits` (sorted) with `incoming` merged in, and where `keep` (one of `hits`) ended up (-1 for none). Pages report
+ * in order, so the common case is a plain append; otherwise it is one linear merge, never a full sort.
+ */
+export function mergeHits(hits: Hit[], incoming: Hit[], keep: Hit | null): { hits: Hit[]; keep: number } {
+  if (incoming.length === 0) return { hits, keep: keep ? hits.indexOf(keep) : -1 };
+  const add = incoming.length > 1 ? [...incoming].sort(byPosition) : incoming;
+  const last = hits[hits.length - 1];
+  if (!last || byPosition(last, add[0]) <= 0) {
+    return { hits: hits.concat(add), keep: keep ? hits.indexOf(keep) : -1 };
+  }
+  const out: Hit[] = new Array(hits.length + add.length);
+  let i = 0;
+  let j = 0;
+  let k = 0;
+  let at = -1;
+  while (i < hits.length || j < add.length) {
+    const takeOld = j >= add.length || (i < hits.length && byPosition(hits[i], add[j]) <= 0);
+    const h = takeOld ? hits[i++] : add[j++];
+    if (takeOld && h === keep) at = k;
+    out[k++] = h;
+  }
+  return { hits: out, keep: at };
+}
+
 /** Reading order: page, then top to bottom, then left to right; a bookmark comes before the text of its page. */
 export function byPosition(a: Hit, b: Hit): number {
   const ay = a.rects[0]?.[1] ?? -1;
@@ -159,7 +184,6 @@ export const SOURCE_LABEL: Record<HitSource, string> = {
 export interface FileGroup {
   index: number;
   path: string;
-  token: string;
   name: string;
   pageCount: number;
   hits: number;

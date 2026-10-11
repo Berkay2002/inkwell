@@ -1,13 +1,15 @@
 //! Search across files: every PDF in a folder (optionally its sub-folders) or a list of files the user picked.
 //!
-//! Runs on the engine's background workers, two files at a time, so the page tiles of the open document stay
-//! first in line. One file is open at a time per worker and dropped as soon as it has been read; what is kept
-//! is bounded (a file lists at most `PER_FILE` hits, a search at most `TOTAL` listed hits, and counts go on).
-//! Cancelling ends it between two pages. Paths come in as tokens (paths.rs); the events carry the path for
-//! display and the command turns it into an open token for the window.
+//! Runs on its own two threads per search (below normal priority on Windows), outside the engine's pool: the
+//! pool's background lane is one job wide and shared with in-document search, the page-size scan and the AI
+//! reads, which a search over hundreds of files would otherwise starve. One file is open at a time per thread
+//! and dropped as soon as it has been read; what is kept is bounded (a file lists at most `PER_FILE` hits, a
+//! search at most `TOTAL` listed hits, and counts go on). Cancelling ends it between two pages, and also the
+//! walk over a folder. Files that are only in the cloud (OneDrive placeholders) are not read, so a search never
+//! starts a download; they are counted. Paths come in as tokens (paths.rs); the events carry the path for
+//! display, and a result's open token is issued when the result is opened (`FolderSearches::path_of`).
 
 use super::{find_in_page, Hit, Query, SearchOpts};
-use crate::engine::Engine;
 use mupdf::Document;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -21,6 +23,9 @@ pub const PER_FILE: usize = 100;
 pub const TOTAL: usize = 5000;
 /// Files looked at in one search.
 pub const MAX_FILES: usize = 20_000;
+/// Directory entries looked at while listing a folder (files, sub-folders, whatever else); after this the
+/// listing stops and says it was cut.
+pub const MAX_VISITED: usize = 200_000;
 /// Files read at the same time.
 const PARALLEL: usize = 2;
 
@@ -36,14 +41,15 @@ pub struct PageHit {
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FilesEvent {
+    /// The search exists (before the folder is listed): this id cancels it.
+    #[serde(rename_all = "camelCase")]
+    Started { search: u64 },
     /// A file with at least one hit. `hits` counts them all, `items` lists the first few.
     #[serde(rename_all = "camelCase")]
     File {
         search: u64,
         index: u32,
         path: String,
-        /// An open token for `path`, issued by the command that forwards the event (empty from the worker).
-        token: String,
         name: String,
         page_count: u32,
         hits: u32,
@@ -55,7 +61,17 @@ pub enum FilesEvent {
     #[serde(rename_all = "camelCase")]
     Progress { search: u64, scanned: u32, total: u32 },
     #[serde(rename_all = "camelCase")]
-    Done { search: u64, files: u32, matched: u32, hits: u32, skipped: u32, cancelled: bool, capped: bool },
+    Done {
+        search: u64,
+        files: u32,
+        matched: u32,
+        hits: u32,
+        skipped: u32,
+        /// Files left unread because they are only in the cloud.
+        cloud_only: u32,
+        cancelled: bool,
+        capped: bool,
+    },
 }
 
 /// What one file gave.
@@ -116,49 +132,112 @@ pub fn search_file(path: &Path, q: &Query, cancel: &AtomicBool, list: usize) -> 
     Ok(r)
 }
 
-/// The PDFs under `root` (sorted by path within each folder; sub-folders after the files of their parent),
-/// at most `MAX_FILES`; `true` when the cap cut the list. Links to folders are not followed.
-pub fn list_pdfs(root: &Path, recursive: bool) -> (Vec<PathBuf>, bool) {
-    let mut out = Vec::new();
+/// What a walk over a folder found.
+#[derive(Debug, Default)]
+pub struct Listing {
+    pub files: Vec<PathBuf>,
+    /// The walk was cut short (`MAX_FILES` files or `MAX_VISITED` entries).
+    pub capped: bool,
+    /// PDFs that are only in the cloud and were left out.
+    pub cloud_only: u32,
+    pub cancelled: bool,
+}
+
+/// `true` for a file that is only a placeholder (OneDrive and the like): reading it would download it.
+pub fn is_cloud_only(m: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_OFFLINE
+        m.file_attributes() & (0x0040_0000 | 0x0004_0000 | 0x0000_1000) != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = m;
+        false
+    }
+}
+
+/// The PDFs under `root` (sorted by path within each folder; sub-folders after the files of their parent), at
+/// most `MAX_FILES`, looking at most `MAX_VISITED` entries. Links to folders are not followed; cloud-only files
+/// are not read and cloud-only folders are not entered. `cancel` is looked at between folders and every few
+/// hundred entries.
+pub fn list_pdfs(root: &Path, recursive: bool, cancel: &AtomicBool) -> Listing {
+    let mut out = Listing::default();
+    let mut visited = 0usize;
     let mut stack = vec![root.to_path_buf()];
-    let mut capped = false;
-    while let Some(dir) = stack.pop() {
+    'walk: while let Some(dir) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            out.cancelled = true;
+            break;
+        }
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         let mut files = Vec::new();
         let mut dirs = Vec::new();
         for e in rd.flatten() {
+            visited += 1;
+            if visited > MAX_VISITED {
+                out.capped = true;
+                break 'walk;
+            }
+            if visited % 256 == 0 && cancel.load(Ordering::Relaxed) {
+                out.cancelled = true;
+                break 'walk;
+            }
             let Ok(t) = e.file_type() else { continue };
             let p = e.path();
             if t.is_dir() {
+                // Listing a cloud-only folder would fetch it.
+                if e.metadata().is_ok_and(|m| is_cloud_only(&m)) {
+                    continue;
+                }
                 dirs.push(p);
             } else if t.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("pdf")) {
-                files.push(p);
+                if e.metadata().is_ok_and(|m| is_cloud_only(&m)) {
+                    out.cloud_only += 1;
+                } else {
+                    files.push(p);
+                }
             }
         }
         files.sort_by_key(|p| p.to_string_lossy().to_lowercase());
         for f in files {
-            if out.len() >= MAX_FILES {
-                capped = true;
-                break;
+            if out.files.len() >= MAX_FILES {
+                out.capped = true;
+                break 'walk;
             }
-            out.push(f);
+            out.files.push(f);
         }
         if recursive {
             dirs.sort_by_key(|p| std::cmp::Reverse(p.to_string_lossy().to_lowercase()));
             stack.extend(dirs);
         }
-        if capped {
-            break;
-        }
     }
-    (out, capped)
+    out
 }
 
-/// The searches that are running, so one can be cancelled by id.
+/// Picked files, in order, without those that are only in the cloud; at most `MAX_FILES`.
+pub fn list_picked(paths: Vec<PathBuf>) -> Listing {
+    let mut out = Listing::default();
+    for p in paths {
+        if std::fs::metadata(&p).is_ok_and(|m| is_cloud_only(&m)) {
+            out.cloud_only += 1;
+        } else if out.files.len() >= MAX_FILES {
+            out.capped = true;
+        } else {
+            out.files.push(p);
+        }
+    }
+    out
+}
+
+/// The searches that are running, so one can be cancelled by id, and the files with hits of the latest one, so a
+/// result can be opened (its open token is issued then, not for every file in the list).
 #[derive(Default)]
 pub struct FolderSearches {
     next: AtomicU64,
     live: Mutex<HashMap<u64, Arc<AtomicBool>>>,
+    found: Mutex<(u64, HashMap<u32, PathBuf>)>,
 }
 
 struct Run {
@@ -170,8 +249,10 @@ struct Run {
     scanned: AtomicU32,
     matched: AtomicU32,
     hits: AtomicU32,
+    /// Hits listed so far, across files (reserved before a file's items are sent).
     listed: AtomicU32,
     skipped: AtomicU32,
+    cloud_only: u32,
     in_flight: AtomicU32,
     capped: bool,
     sink: Arc<dyn Fn(FilesEvent) + Send + Sync>,
@@ -179,24 +260,50 @@ struct Run {
 }
 
 impl FolderSearches {
-    /// Starts a search over `files`; events go to `sink` (from worker threads). Returns the search id.
+    /// A new search id, cancellable from now on (before the files are listed). Forgets the previous search's files.
+    pub fn begin(&self) -> (u64, Arc<AtomicBool>) {
+        let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.live.lock().unwrap().insert(id, cancel.clone());
+        *self.found.lock().unwrap() = (id, HashMap::new());
+        (id, cancel)
+    }
+
+    /// `begin` and `run` in one step, for a list of files that is already known.
     pub fn start(
         self: &Arc<Self>,
-        eng: &Arc<Engine>,
         files: Vec<PathBuf>,
         capped: bool,
         query: &str,
         opts: SearchOpts,
         sink: Arc<dyn Fn(FilesEvent) + Send + Sync>,
     ) -> u64 {
-        let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
-        let cancel = Arc::new(AtomicBool::new(false));
+        let (id, cancel) = self.begin();
+        self.run(id, cancel, files, capped, 0, query, opts, sink);
+        id
+    }
+
+    /// Runs search `id` (from `begin`) over `files`; events go to `sink` (from the search's threads).
+    #[allow(clippy::too_many_arguments)]
+    pub fn run(
+        self: &Arc<Self>,
+        id: u64,
+        cancel: Arc<AtomicBool>,
+        files: Vec<PathBuf>,
+        capped: bool,
+        cloud_only: u32,
+        query: &str,
+        opts: SearchOpts,
+        sink: Arc<dyn Fn(FilesEvent) + Send + Sync>,
+    ) {
         let total = files.len() as u32;
-        let Some(q) = Query::new(query, opts).filter(|_| total > 0) else {
-            sink(FilesEvent::Done { search: id, files: total, matched: 0, hits: 0, skipped: 0, cancelled: false, capped });
-            return id;
+        let cancelled = cancel.load(Ordering::SeqCst);
+        let Some(q) = Query::new(query, opts).filter(|_| total > 0 && !cancelled) else {
+            self.live.lock().unwrap().remove(&id);
+            sink(FilesEvent::Done { search: id, files: total, matched: 0, hits: 0, skipped: 0, cloud_only, cancelled, capped });
+            return;
         };
-        self.live.lock().unwrap().insert(id, cancel.clone());
+        let threads = PARALLEL.min(total as usize);
         let run = Arc::new(Run {
             id,
             q,
@@ -208,29 +315,82 @@ impl FolderSearches {
             hits: AtomicU32::new(0),
             listed: AtomicU32::new(0),
             skipped: AtomicU32::new(0),
-            in_flight: AtomicU32::new(0),
+            cloud_only,
+            in_flight: AtomicU32::new(threads as u32),
             capped,
             sink,
             owner: self.clone(),
         });
-        for k in 0..PARALLEL.min(total as usize) {
-            run.in_flight.fetch_add(1, Ordering::SeqCst);
+        for k in 0..threads {
             let r = run.clone();
-            eng.spawn_background(k as u32, move |_| worker(r));
+            let spawned = std::thread::Builder::new().name(format!("inkwell-search-{k}")).spawn(move || worker(r));
+            if spawned.is_err() {
+                // No thread for this one: it leaves at once (the last to leave says Done).
+                leave(&run);
+            }
         }
-        id
     }
 
-    /// Ends search `id` between two pages; its `Done` event says it was cancelled.
+    /// Ends search `id` between two pages (or in the middle of listing a folder); its `Done` event says it was
+    /// cancelled.
     pub fn cancel(&self, id: u64) {
         if let Some(c) = self.live.lock().unwrap().get(&id) {
             c.store(true, Ordering::SeqCst);
         }
     }
+
+    /// The path of file `index` of search `id`, if that search is the latest and listed the file.
+    pub fn path_of(&self, id: u64, index: u32) -> Option<PathBuf> {
+        let f = self.found.lock().unwrap();
+        if f.0 == id {
+            f.1.get(&index).cloned()
+        } else {
+            None
+        }
+    }
 }
 
-/// Takes files off the queue until it is empty or the search is cancelled; the last worker out says `Done`.
+/// Lowers this thread's priority a little, so tile rendering and typing win against a long search.
+fn be_polite() {
+    #[cfg(windows)]
+    // SAFETY: plain calls on the current thread's pseudo handle.
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+/// One thread of the search is done (its work ran out, it was cancelled, or it panicked); the last says `Done`.
+fn leave(run: &Arc<Run>) {
+    if run.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+        let cancelled = run.cancel.load(Ordering::SeqCst);
+        run.owner.live.lock().unwrap().remove(&run.id);
+        (run.sink)(FilesEvent::Done {
+            search: run.id,
+            files: run.total,
+            matched: run.matched.load(Ordering::Relaxed),
+            hits: run.hits.load(Ordering::Relaxed),
+            skipped: run.skipped.load(Ordering::Relaxed),
+            cloud_only: run.cloud_only,
+            cancelled,
+            capped: run.capped,
+        });
+    }
+}
+
+/// Calls `leave` however the thread ends, so a panic cannot leave a search without its `Done`.
+struct Leave(Arc<Run>);
+
+impl Drop for Leave {
+    fn drop(&mut self) {
+        leave(&self.0);
+    }
+}
+
+/// Takes files off the queue until it is empty or the search is cancelled.
 fn worker(run: Arc<Run>) {
+    let _leave = Leave(run.clone());
+    be_polite();
     // Make sure this thread's MuPDF context exists before any document it will drop.
     let _ = mupdf::Context::get();
     loop {
@@ -239,18 +399,32 @@ fn worker(run: Arc<Run>) {
         }
         let Some((index, path)) = run.queue.lock().unwrap().pop_front() else { break };
         let room = TOTAL.saturating_sub(run.listed.load(Ordering::Relaxed) as usize);
-        match search_file(&path, &run.q, &run.cancel, room) {
-            Ok(r) => {
+        // A file that makes MuPDF panic is skipped like a damaged one.
+        let one = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| search_file(&path, &run.q, &run.cancel, room)))
+            .unwrap_or(Err(Skip::Unreadable));
+        match one {
+            Ok(mut r) => {
                 if r.hits > 0 {
+                    // Reserve the listing room atomically: two threads must not both fill the last of it.
+                    let want = r.items.len() as u32;
+                    let total = TOTAL as u32;
+                    let before = run
+                        .listed
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| Some(c + want.min(total.saturating_sub(c))))
+                        .unwrap_or(0);
+                    let kept = want.min(total.saturating_sub(before)) as usize;
+                    if kept < r.items.len() {
+                        r.items.truncate(kept);
+                        r.truncated = true;
+                    }
                     run.matched.fetch_add(1, Ordering::Relaxed);
                     run.hits.fetch_add(r.hits, Ordering::Relaxed);
-                    run.listed.fetch_add(r.items.len() as u32, Ordering::Relaxed);
+                    run.owner.found.lock().unwrap().1.insert(index, path.clone());
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     (run.sink)(FilesEvent::File {
                         search: run.id,
                         index,
                         path: path.to_string_lossy().into_owned(),
-                        token: String::new(),
                         name,
                         page_count: r.page_count,
                         hits: r.hits,
@@ -267,18 +441,5 @@ fn worker(run: Arc<Run>) {
         }
         let scanned = run.scanned.fetch_add(1, Ordering::SeqCst) + 1;
         (run.sink)(FilesEvent::Progress { search: run.id, scanned, total: run.total });
-    }
-    if run.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
-        let cancelled = run.cancel.load(Ordering::SeqCst);
-        run.owner.live.lock().unwrap().remove(&run.id);
-        (run.sink)(FilesEvent::Done {
-            search: run.id,
-            files: run.total,
-            matched: run.matched.load(Ordering::Relaxed),
-            hits: run.hits.load(Ordering::Relaxed),
-            skipped: run.skipped.load(Ordering::Relaxed),
-            cancelled,
-            capped: run.capped,
-        });
     }
 }

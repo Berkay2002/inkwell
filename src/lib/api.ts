@@ -32,17 +32,18 @@ export interface TextLine {
 export type SearchEvent =
   | { kind: "hits"; search: number; page: number; hits: Found[] }
   | { kind: "progress"; search: number; scanned: number; total: number }
-  | { kind: "done"; search: number; hits: number; pages: number };
+  /** `capped`: the search stopped at 5000 hits; the ones listed are the first. */
+  | { kind: "done"; search: number; hits: number; pages: number; capped: boolean };
 
 /** What a search across files reports (src-tauri/src/search/files.rs). */
 export type FilesEvent =
+  /** The search exists: this id cancels it, even while the folder is still being listed. */
+  | { kind: "started"; search: number }
   | {
       kind: "file";
       search: number;
       index: number;
       path: string;
-      /** An open token for `path`. */
-      token: string;
       name: string;
       pageCount: number;
       hits: number;
@@ -51,7 +52,18 @@ export type FilesEvent =
       items: (Found & { page: number })[];
     }
   | { kind: "progress"; search: number; scanned: number; total: number }
-  | { kind: "done"; search: number; files: number; matched: number; hits: number; skipped: number; cancelled: boolean; capped: boolean };
+  | {
+      kind: "done";
+      search: number;
+      files: number;
+      matched: number;
+      hits: number;
+      skipped: number;
+      /** PDFs left unread because they are only in the cloud (OneDrive placeholders). */
+      cloudOnly: number;
+      cancelled: boolean;
+      capped: boolean;
+    };
 
 export type SearchScope = { kind: "folder"; token: string; recursive: boolean } | { kind: "files"; tokens: string[] };
 
@@ -120,6 +132,8 @@ export function searchFiles(scope: SearchScope, query: string, opts: FindOpts, o
   return invoke<number>("search_files", { scope, query, opts, onEvent: ch });
 }
 export const cancelSearchFiles = (search: number) => invoke<void>("cancel_search_files", { search });
+/** An open token for file `index` of search `search` (a result being opened); the path never reaches the page. */
+export const searchFileToken = (search: number, index: number) => invoke<FileRef>("search_file_token", { search, index });
 
 /** Origin of the tile protocol: WebView2 serves custom schemes as http://<scheme>.localhost. */
 export const TILE_ORIGIN = navigator.userAgent.includes("Windows") ? "http://inkwell.localhost" : "inkwell://localhost";

@@ -14,11 +14,16 @@ across files) and `store.ts` (`runSearch`, `stepHit`, `selectHit`, `stopSearch`)
   is on.
 - Matching: case folding (Unicode), runs of white space count as one, a phrase may run over a line break (one
   highlight per line), a hyphen that ends a line and is followed by a word joins the two halves ("co-" "operate" finds
-  "cooperate"). Whole words: the characters on both sides must not be letters or digits. Ignore accents: letters are
-  compared without their marks (é = e), the query's too.
+  "cooperate"; "well-" "known" is found as "well-known" too, one result either way). A soft hyphen is never part of
+  the text. Letters are compared in decomposed form on both sides, so "é" typed as one character or as "e" plus an
+  accent is the same, and "ß" is "ss", a final "ς" is "σ" (case folding). Whole words: the characters on both sides
+  must not be letters or digits. Ignore accents: letters are compared without their marks (é = e), the query's too;
+  without it "cafe" does not find "café".
 - Comments: the text of every markup annotation (not links, widgets, popups or redaction marks); the highlight is the
   annotation's rectangle. Form fields: the field's value. Bookmarks: the title of an outline entry that goes to a page.
-- A query is at most 256 characters; a page lists at most 2000 hits (the rest of the page is counted as read).
+- A query is at most 256 characters; a page lists at most 2000 hits in all (text, comments and form fields share
+  that budget). One in-document search lists at most 5000 hits, then stops and the rail says "Showing the first 5,000
+  results".
 
 ## Search rail
 - This file: the hits grouped under their page with the words around each (bold on a pale amber wash), the count
@@ -30,16 +35,22 @@ across files) and `store.ts` (`runSearch`, `stepHit`, `selectHit`, `stopSearch`)
   pages. Each file lists its first two hits, "Show 10 more" adds ten; the file's name opens it at the first hit and a
   row opens it at that hit with the query in the find box. Damaged and password-protected files are skipped and
   counted.
-- Bounds: 100 listed hits per file, 5000 listed in one search (counting goes on), 20 000 files, one document open per
-  worker at a time and dropped after it is read.
+- Bounds: 100 listed hits per file, 5000 listed in one search (counting goes on), 20 000 files, 200 000 directory
+  entries looked at while listing, one document open per thread at a time and dropped after it is read.
+- Runs on two threads of its own per search (below normal priority), not on the engine's pool, so it cannot starve
+  in-document search, page-size scanning or the AI reads. Cancel also reaches the listing of the folder.
+- Cloud-only files (OneDrive placeholders: offline / recall-on-open / recall-on-data-access) are not read, so a search
+  never starts a download; the rail says "N cloud-only files skipped".
 - History: the last ten queries (Enter, or clicking a result, or running a folder search records one), newest first,
   from the clock in the rail's field; "Clear recent searches" empties it. Stored only in this app's local storage.
 
 ## Commands (Tauri)
 `search(doc, query, opts, onEvent)` streams `hits` (per page, each with rects and snippet), `progress` and `done`;
 `cancel_search(doc)`; `pick_search_folder()` returns an open token for a folder (paths.rs: the webview never names a
-path); `search_files(scope, query, opts, onEvent)` with `scope` a folder token or file tokens streams `file`,
-`progress`, `done`; `cancel_search_files(search)`.
+path); `search_files(scope, query, opts, onEvent)` with `scope` a folder token or file tokens streams `started` (the id,
+before the folder is listed), `file`, `progress`, `done`; `cancel_search_files(search)`;
+`search_file_token(search, index)` issues the open token of a result when it is opened (tokens are not issued for
+every file in the list; only the latest search's files can be opened).
 
 ## Checked
 `cargo test --lib search::` (matcher options, snippets, comments/fields/bookmarks, engine events, folder listing,

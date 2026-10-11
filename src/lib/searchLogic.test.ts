@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_OPTS, type FileGroup, type Hit, byPosition, changedOptions, filesLine, folderName, groupByPage, insertFile, optsKey, parseHistory,
-  parseOpts, pickCurrent, pushHistory, resultsLine, shortDir, visibleRows,
+  mergeHits, parseOpts, pickCurrent, pushHistory, resultsLine, shortDir, visibleRows,
 } from "./searchLogic";
 
 const hit = (page: number, y: number | null, text = "notice"): Hit => ({
@@ -13,7 +13,7 @@ const hit = (page: number, y: number | null, text = "notice"): Hit => ({
   source: y == null ? "bookmark" : "text",
 });
 const file = (index: number, hits = 1, items = 1): FileGroup => ({
-  index, path: `C:\\Docs\\Housing\\f${index}.pdf`, token: `t${index}`, name: `f${index}.pdf`, pageCount: 3, hits, pages: 1, truncated: false,
+  index, path: `C:\\Docs\\Housing\\f${index}.pdf`, name: `f${index}.pdf`, pageCount: 3, hits, pages: 1, truncated: false,
   items: Array.from({ length: items }, (_, i) => hit(i, 5)),
 });
 
@@ -119,5 +119,40 @@ describe("across files", () => {
     expect(filesLine(3, 18, 64, 64, true, false)).toBe("18 results in 3 files");
     expect(filesLine(0, 0, 64, 64, true, false)).toBe("No results in 64 files");
     expect(filesLine(1, 2, 10, 64, true, true)).toBe("2 results in 1 file (stopped at 10 of 64)");
+  });
+});
+
+describe("merging hits as pages report", () => {
+  it("appends pages that come in order without touching the current hit", () => {
+    const a = [hit(0, 10), hit(1, 20)];
+    const r = mergeHits(a, [hit(2, 5), hit(2, 30)], a[1]);
+    expect(r.hits.map((h) => [h.page, h.rects[0][1]])).toEqual([[0, 10], [1, 20], [2, 5], [2, 30]]);
+    expect(r.keep).toBe(1);
+  });
+
+  it("merges a page that arrives late, sorted, and follows the current hit", () => {
+    const a = [hit(0, 10), hit(4, 20), hit(4, 80)];
+    const incoming = [hit(2, 50), hit(2, 5)];
+    const r = mergeHits(a, incoming, a[1]);
+    expect(r.hits.map((h) => [h.page, h.rects[0][1]])).toEqual([[0, 10], [2, 5], [2, 50], [4, 20], [4, 80]]);
+    expect(r.keep).toBe(3);
+    expect(r.hits[r.keep]).toBe(a[1]);
+    // nothing is mutated
+    expect(a).toHaveLength(3);
+    expect(incoming.map((h) => h.rects[0][1])).toEqual([50, 5]);
+  });
+
+  it("handles an empty list, no current hit and nothing incoming", () => {
+    expect(mergeHits([], [hit(1, 1)], null)).toEqual({ hits: [hit(1, 1)], keep: -1 });
+    const a = [hit(0, 1)];
+    expect(mergeHits(a, [], a[0])).toEqual({ hits: a, keep: 0 });
+  });
+
+  it("agrees with a full sort on shuffled input", () => {
+    const all = Array.from({ length: 200 }, (_, i) => hit(Math.floor(i / 7), (i * 37) % 100));
+    const sorted = [...all].sort(byPosition);
+    let list: Hit[] = [];
+    for (let i = 0; i < all.length; i += 13) list = mergeHits(list, all.slice(i, i + 13), null).hits;
+    expect(list.map((h) => [h.page, h.rects[0][1]])).toEqual(sorted.map((h) => [h.page, h.rects[0][1]]));
   });
 });

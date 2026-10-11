@@ -117,8 +117,9 @@ pub enum SearchEvent {
     /// After each chunk of pages: how many of the `total` have been read.
     #[serde(rename_all = "camelCase")]
     Progress { search: u64, scanned: u32, total: u32 },
+    /// `capped`: the search stopped at `search::DOC_CAP` hits; the ones listed are the first.
     #[serde(rename_all = "camelCase")]
-    Done { search: u64, hits: u32, pages: u32 },
+    Done { search: u64, hits: u32, pages: u32, capped: bool },
 }
 
 pub enum TileOutcome {
@@ -900,7 +901,7 @@ impl Engine {
             (l.rev, l.page_count)
         };
         let Some(query) = crate::search::Query::new(&query, opts) else {
-            sink(SearchEvent::Done { search: sid, hits: 0, pages: n });
+            sink(SearchEvent::Done { search: sid, hits: 0, pages: n, capped: false });
             return Ok(sid);
         };
         let query = Arc::new(query);
@@ -910,7 +911,14 @@ impl Engine {
         let chunks = page_chunks + opts.bookmarks as usize;
         let remaining = Arc::new(AtomicUsize::new(chunks));
         let total_hits = Arc::new(AtomicU32::new(0));
+        let capped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let scanned = Arc::new(AtomicU32::new(0));
+        /// Takes up to `n` of the document-wide listing room; fewer (or none) means the cap was reached.
+        fn reserve(total: &AtomicU32, n: usize) -> usize {
+            let cap = crate::search::DOC_CAP as u32;
+            let before = total.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| Some(c + (n as u32).min(cap.saturating_sub(c)))).unwrap_or(cap);
+            (n as u32).min(cap.saturating_sub(before)) as usize
+        }
         for ci in 0..chunks {
             let eng = self.clone();
             let entry = entry.clone();
@@ -918,6 +926,7 @@ impl Engine {
             let query = query.clone();
             let remaining = remaining.clone();
             let total_hits = total_hits.clone();
+            let capped = capped.clone();
             let scanned = scanned.clone();
             self.pool.submit(Job {
                 prio: Prio::new(class::BACKGROUND, 0, ci as u32),
@@ -937,9 +946,15 @@ impl Engine {
                                     by_page.entry(p).or_default().push(h);
                                 }
                             }
-                            for (page, hits) in by_page {
-                                total_hits.fetch_add(hits.len() as u32, Ordering::Relaxed);
-                                sink(SearchEvent::Hits { search: sid, page, hits });
+                            for (page, mut hits) in by_page {
+                                let kept = reserve(&total_hits, hits.len());
+                                if kept < hits.len() {
+                                    hits.truncate(kept);
+                                    capped.store(true, Ordering::Relaxed);
+                                }
+                                if !hits.is_empty() {
+                                    sink(SearchEvent::Hits { search: sid, page, hits });
+                                }
                             }
                         }
                     } else {
@@ -949,13 +964,21 @@ impl Engine {
                             if entry.search_gen.load(Ordering::SeqCst) != sid {
                                 return;
                             }
+                            if total_hits.load(Ordering::Relaxed) as usize >= crate::search::DOC_CAP {
+                                capped.store(true, Ordering::Relaxed);
+                                break;
+                            }
                             // Page numbers belong to `rev`: an edit ends the search (the UI searches again).
-                            let hits = match eng.search_hits_at(&entry, Some(rev), p, &query) {
+                            let mut hits = match eng.search_hits_at(&entry, Some(rev), p, &query) {
                                 Err(EngineError::Stale) => break,
                                 r => r.unwrap_or_default(),
                             };
+                            let kept = reserve(&total_hits, hits.len());
+                            if kept < hits.len() {
+                                hits.truncate(kept);
+                                capped.store(true, Ordering::Relaxed);
+                            }
                             if !hits.is_empty() {
-                                total_hits.fetch_add(hits.len() as u32, Ordering::Relaxed);
                                 sink(SearchEvent::Hits { search: sid, page: p, hits });
                             }
                         }
@@ -967,18 +990,13 @@ impl Engine {
                             search: sid,
                             hits: total_hits.load(Ordering::Relaxed),
                             pages: n,
+                            capped: capped.load(Ordering::Relaxed),
                         });
                     }
                 }),
             });
         }
         Ok(sid)
-    }
-
-    /// Runs `f` on a pool worker at background priority and returns at once.
-    pub fn spawn_background(self: &Arc<Self>, rank: u32, f: impl FnOnce(&Arc<Engine>) + Send + 'static) {
-        let eng = self.clone();
-        self.pool.submit(Job { prio: Prio::new(class::BACKGROUND, 0, rank), run: Box::new(move || f(&eng)) });
     }
 
     pub fn cancel_search(&self, id: DocId) {
