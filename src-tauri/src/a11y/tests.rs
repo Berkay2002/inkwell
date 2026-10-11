@@ -613,6 +613,39 @@ fn check_reports_progress_per_page() {
 }
 
 #[test]
+fn cancel_is_seen_after_the_page_scan() {
+    // Cancelled while the last page reports progress: the rule pass stops before the report.
+    let s = Spec { pages: (0..3).map(|_| (String::new(), TEXT.to_string())).collect(), ..Spec::default() };
+    let doc = PdfDocument::from_bytes(&build(&s)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let e = check(&doc, &mut |p| cancel.store(p.done == p.pages, Ordering::Relaxed), &cancel).unwrap_err();
+    assert_eq!(e.to_string(), "cancelled");
+}
+
+#[test]
+fn autotag_keeps_text_around_an_image_inside_a_text_object() {
+    // `BT Tj /Im1 Do Tj ET`: the image run must not push the text runs out of order.
+    let mut s = Spec::default();
+    s.pages[0].1 = "BT /F1 12 Tf 72 700 Td (Before the image) Tj /Im1 Do (after it) Tj ET".into();
+    let path = file("autotag-do-in-bt", &s);
+    let (eng, id) = open(&path);
+    let before = texts(&eng, id);
+    fix_doc(&eng, id, &Fix::Autotag, EditSource::User).unwrap();
+    assert_eq!(texts(&eng, id), before);
+    let data = eng.read_custom(id, |d| page_content(&d.find_page(0)?)).unwrap();
+    let marked: Vec<String> = content::parse(&data)
+        .iter()
+        .filter(|o| o.is(b"BDC"))
+        .map(|o| String::from_utf8_lossy(o.operands[0].name().unwrap()).into_owned())
+        .collect();
+    assert_eq!(marked, ["P", "Figure", "P"], "both text runs and the image are tagged");
+    // Every marked run reaches the tree (the figure is placed by position, so tag order may differ).
+    let r = check_eng(&eng, id);
+    assert_eq!(r.status(Rule::TaggedPdf), Status::Passed);
+    assert!(!r.result(Rule::ReadingOrder).findings.iter().any(|f| f.message.contains("not in the tag tree")));
+}
+
+#[test]
 fn report_serialises_with_rule_ids() {
     let v = serde_json::to_value(report(&Spec::default())).unwrap();
     assert_eq!(v["results"][0]["rule"], "tagged-pdf");

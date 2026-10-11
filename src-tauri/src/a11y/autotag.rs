@@ -186,12 +186,21 @@ fn runs(ops: &[Op], res: Option<&PdfObject>, page_ctm: Matrix, lines: &[Line]) -
             _ if content::paints_path(op) => {
                 let start = path_start.take().unwrap_or(op.start);
                 if depth == 0 {
+                    close(&mut open, &mut out);
                     out.push(Run { start, end: op.end, target: Target::Artifact });
                 }
             }
             b"n" => path_start = None,
-            b"sh" if depth == 0 => out.push(Run { start: op.start, end: op.end, target: Target::Artifact }),
-            b"BI" if depth == 0 => out.push(Run { start: op.start, end: op.end, target: Target::Figure(bbox_of(&ctm, UNIT)) }),
+            // A non-text run closes the open text run first, so runs stay in content order even
+            // when an image or shading sits inside a text object (`BT Tj /Im0 Do Tj ET`).
+            b"sh" if depth == 0 => {
+                close(&mut open, &mut out);
+                out.push(Run { start: op.start, end: op.end, target: Target::Artifact });
+            }
+            b"BI" if depth == 0 => {
+                close(&mut open, &mut out);
+                out.push(Run { start: op.start, end: op.end, target: Target::Figure(bbox_of(&ctm, UNIT)) });
+            }
             b"Do" if depth == 0 => {
                 let Some(x) = op.operands.first().and_then(|o| o.name()).map(xobject).transpose()?.flatten() else { continue };
                 let target = match name(&x, "Subtype")?.as_deref() {
@@ -221,6 +230,7 @@ fn runs(ops: &[Op], res: Option<&PdfObject>, page_ctm: Matrix, lines: &[Line]) -
                     }
                     _ => continue,
                 };
+                close(&mut open, &mut out);
                 out.push(Run { start: op.start, end: op.end, target });
             }
             _ => {}
@@ -485,8 +495,11 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
             let mut out = Vec::with_capacity(data.len() + marks.len() * 24);
             let mut at = 0;
             for (s, e, prefix) in &marks {
-                // `in_order` already dropped overlapping runs; never slice backwards.
-                if *s < at || *e < *s || *e > data.len() {
+                // `in_order` already dropped overlapping runs, so this never fires; if it did, the
+                // MCID would already be assigned, so it is a bug, but slicing backwards would panic.
+                let ok = *s >= at && *e >= *s && *e <= data.len();
+                debug_assert!(ok, "marks out of order: {s}..{e} after {at}");
+                if !ok {
                     continue;
                 }
                 out.extend_from_slice(&data[at..*s]);
