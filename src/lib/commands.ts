@@ -173,6 +173,8 @@ export const commands: Command[] = [
     title: "Article threads",
     needsDoc: true,
     run: openArticles,
+  },
+  {
     id: "media",
     title: "Media in this document",
     needsDoc: true,
