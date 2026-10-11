@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { trackReadingPosition } from "./recents";
+import { useA11y } from "./lib/a11y";
 import { useAi } from "./lib/aiStore";
 import { useAnnot } from "./lib/annot";
 import { useHistory } from "./lib/historyStore";
@@ -13,7 +14,7 @@ import { useStore } from "./store";
 import "./styles.css";
 
 // Handle for automated checks (benchmarks, screenshots); harmless in normal use.
-(window as unknown as { __inkwell: unknown }).__inkwell = { useStore, useAi, useHistory, useTools, useConvert, useRedact, redactApi, useAnnot, usePrint };
+(window as unknown as { __inkwell: unknown }).__inkwell = { useStore, useAi, useHistory, useTools, useConvert, useRedact, redactApi, useAnnot, usePrint, useA11y };
 trackReadingPosition(useStore);
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

@@ -1,0 +1,442 @@
+/* Accessibility rail: the docked shell and tokens come from the assistant's dock and the app. */
+.a11y-dock {
+  animation: a11y-slide 240ms ease-out;
+}
+@keyframes a11y-slide {
+  from {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .a11y-dock {
+    animation: none;
+  }
+  .a11y-mark {
+    animation: none;
+  }
+}
+.a11y-panel {
+  overflow: hidden;
+  --a11y-pass: light-dark(#2f7d4f, #7fc592);
+  --a11y-fail: light-dark(#b3392f, #ee9488);
+  --a11y-manual: light-dark(#b7791f, #e3b45e);
+}
+.a11y-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.a11y-foot {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex: none;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+
+/* buttons */
+.a11y-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 15px;
+  color: var(--accent);
+  background: var(--surface);
+  white-space: nowrap;
+}
+.a11y-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.a11y-btn.primary {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.a11y-btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+.a11y-btn.wide {
+  flex: 1;
+  flex-direction: column;
+  gap: 0;
+  padding: 5px 14px;
+  border-radius: 18px;
+  line-height: 1.25;
+}
+.a11y-btn.wide small {
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.88;
+}
+.a11y-btn:disabled {
+  opacity: 0.45;
+}
+.a11y-quiet,
+.a11y-link {
+  color: var(--accent);
+  padding: 4px 8px;
+  border-radius: 12px;
+}
+.a11y-quiet:hover:not(:disabled),
+.a11y-link:hover {
+  background: var(--accent-soft);
+}
+.a11y-quiet:disabled {
+  opacity: 0.45;
+}
+.a11y-link {
+  align-self: flex-start;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+.a11y-btn:focus-visible,
+.a11y-quiet:focus-visible,
+.a11y-link:focus-visible,
+.a11y-group-head:focus-visible,
+.a11y-finding-main:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* summary */
+.a11y-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 4px 0;
+}
+.a11y-result {
+  margin: 0;
+  font-weight: 600;
+}
+.a11y-seg {
+  display: flex;
+  gap: 2px;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.a11y-seg i {
+  flex-basis: 0;
+  min-width: 6px;
+}
+.a11y-seg .failed {
+  background: var(--a11y-fail);
+}
+.a11y-seg .manual {
+  background: var(--a11y-manual);
+}
+.a11y-seg .passed {
+  background: var(--a11y-pass);
+}
+.a11y-seg .skipped {
+  background: var(--border-strong);
+}
+
+/* autotag card and progress */
+.a11y-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2, var(--surface));
+}
+.a11y-card p {
+  margin: 0;
+  color: var(--text-2);
+  line-height: 1.4;
+}
+.a11y-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.a11y-run {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.a11y-run-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.a11y-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.a11y-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 180ms ease-out;
+}
+.a11y-error {
+  margin: 0;
+  color: var(--danger);
+}
+.a11y-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+/* groups and rules */
+.a11y-group {
+  display: flex;
+  flex-direction: column;
+}
+.a11y-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px;
+  border-radius: 8px;
+  text-align: left;
+}
+.a11y-group-head:hover {
+  background: var(--accent-soft);
+}
+.a11y-group-name {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.a11y-group-n {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.a11y-group .chev {
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+  transition: transform 120ms ease-out;
+}
+.a11y-group .chev.open {
+  transform: rotate(90deg);
+}
+.a11y-rules {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.a11y-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px 4px 7px 6px;
+  border-top: 1px solid var(--border);
+}
+.a11y-rule.failed,
+.a11y-rule.manual {
+  padding-bottom: 10px;
+}
+.a11y-rule-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+.a11y-rule-name {
+  font-weight: 600;
+}
+.a11y-rule.passed .a11y-rule-name,
+.a11y-rule.skipped .a11y-rule-name {
+  font-weight: 400;
+  color: var(--text-2);
+}
+.a11y-status {
+  margin-left: auto;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.a11y-status.passed {
+  color: var(--a11y-pass);
+}
+.a11y-status.failed {
+  color: var(--a11y-fail);
+}
+.a11y-status.manual {
+  color: var(--a11y-manual);
+}
+.a11y-status.skipped {
+  color: var(--text-2);
+}
+.a11y-glyph {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--surface);
+}
+.a11y-glyph.passed {
+  background: var(--a11y-pass);
+}
+.a11y-glyph.failed {
+  background: var(--a11y-fail);
+}
+.a11y-glyph.manual {
+  background: var(--a11y-manual);
+}
+.a11y-glyph.skipped {
+  background: var(--border-strong);
+}
+.a11y-hint {
+  margin: 0 0 0 28px;
+  color: var(--text-2);
+  line-height: 1.4;
+}
+.a11y-effect {
+  margin: 0 0 0 28px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.a11y-rule > .a11y-actions,
+.a11y-rule > .a11y-select,
+.a11y-rule > .a11y-findings,
+.a11y-rule > .a11y-link,
+.a11y-rule > .a11y-note {
+  margin-left: 28px;
+}
+.a11y-select {
+  align-self: flex-start;
+  max-width: calc(100% - 28px);
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 15px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* findings */
+.a11y-findings {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.a11y-finding {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.a11y-finding-main {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  border-radius: 8px;
+  text-align: left;
+  line-height: 1.35;
+}
+.a11y-finding-main:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.a11y-where {
+  flex: none;
+  min-width: 36px;
+  color: var(--text-2);
+}
+.a11y-msg {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.a11y-alt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+}
+.a11y-thumb {
+  position: relative;
+  flex: none;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+.a11y-thumb img {
+  position: absolute;
+  max-width: none;
+  user-select: none;
+}
+.a11y-alt-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.a11y-alt-field input {
+  min-width: 0;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 15px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+}
+.a11y-alt-field input:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.a11y-alt-field .a11y-btn {
+  align-self: flex-start;
+}
+
+/* the finding on the page ("Show") */
+.a11y-mark {
+  position: absolute;
+  pointer-events: none;
+  border-radius: calc(3px / var(--z));
+  outline: calc(2.5px / var(--z)) solid #b3392f;
+  outline-offset: calc(2px / var(--z));
+  background: rgb(179 57 47 / 0.12);
+  animation: a11y-pulse 1.1s ease-out 2;
+}
+.a11y-mark.whole {
+  outline-offset: calc(-3px / var(--z));
+  background: none;
+}
+@keyframes a11y-pulse {
+  0% {
+    background: rgb(179 57 47 / 0.4);
+  }
+  100% {
+    background: rgb(179 57 47 / 0.12);
+  }
+}

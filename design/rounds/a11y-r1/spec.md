@@ -34,11 +34,20 @@ facts out in a rail, not three palettes:
 
 ## How Acrobat Pro does it
 
-See `docs/study/14-a11y.md`; the short version is filled in below once that note is final.
+Read from the shipping files only (`docs/study/14-a11y.md`; nothing was driven). The check has an options dialog (report
+options, pages, one check box per rule in seven groups), progress ("Evaluating page", "Evaluating structure"), and a result
+panel that is a tree: the seven groups, each rule as "Rule - Status" (Passed, Failed, Needs manual check, Skipped, plus
+"Passed manually" and "Failed manually" a person sets). Per rule: Fix, Pass or Fail, Skip Rule, Explain, Check Again, Show
+Report and, for findings with an element, Show in Tags / Content panel. The report is HTML: a Summary of counts, then one
+table per group (Rule Name, Status, Description). Fix mostly opens another tool (the Reading Order tool, a dialog per
+figure); "Add tags to document" runs with no preview.
 
 ## How pdfcraft does it
 
-(filled in below)
+Same seven groups (headers go red with "(n issues)"), rows "Rule - Failed" with a status icon, a click on a row with findings
+expands them and a click on a finding goes to its page. Fix exists for three rules (language and title open Properties, tab
+order applies); Skip Rule persists; it re-checks after a fix. The HTML report has a Summary and a table per group, with
+findings as bullets and no page links. Autotag and reading order are planned there, not built.
 
 ## Verdict
 

@@ -1,6 +1,7 @@
 import { type DocState, useStore } from "../store";
 import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
+import { openA11y, useA11y } from "./a11y";
 import { useRedact } from "./redact";
 import { useAnnot } from "./annot";
 import { useHistory } from "./historyStore";
@@ -172,6 +173,12 @@ export const commands: Command[] = [
       useHistory.getState().closeCompare();
       useHistory.getState().toggle();
     },
+  },
+  {
+    id: "a11y",
+    title: "Check accessibility…",
+    needsDoc: true,
+    run: () => (useA11y.getState().open ? useA11y.getState().setOpen(false) : openA11y()),
   },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },

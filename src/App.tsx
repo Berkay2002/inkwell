@@ -9,6 +9,7 @@ import { VersionView } from "./components/history/VersionView";
 import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
+import { A11yPanel } from "./components/a11y/A11yPanel";
 import { RedactPanel } from "./components/redact/RedactPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
@@ -124,6 +125,7 @@ export default function App() {
               <AssistantPanel doc={doc} />
               <HistoryPanel doc={doc} />
               <RedactPanel doc={doc} />
+              <A11yPanel doc={doc} />
               <CommentsPanel doc={doc} />
             </div>
           )}
