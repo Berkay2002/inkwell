@@ -401,7 +401,7 @@ const AA_KEYS: [&str; 14] = ["E", "X", "D", "U", "Fo", "Bl", "PO", "PC", "PV", "
 /// An additional action running `js`, replacing the one under `key`. The /AA dictionary is built
 /// whole and put once: a nested dictionary changed through an old handle can be left behind by the
 /// document's journal.
-fn put_js(doc: &PdfDocument, field: &mut PdfObject, key: &str, js: Option<String>) -> Result<()> {
+pub(crate) fn put_js(doc: &PdfDocument, field: &mut PdfObject, key: &str, js: Option<String>) -> Result<()> {
     let mut aa = doc.new_dict()?;
     let mut n = 0;
     if let Some(old) = get(field, "AA") {

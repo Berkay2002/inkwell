@@ -6,6 +6,8 @@
   'use strict';
   const H = g.__h;
   delete g.__h;
+  // Test builds only: a host call that cannot be interrupted.
+  if (H.sleep) g.__sleep = H.sleep;
   const Str = String;
   const J = JSON.stringify.bind(JSON);
   const P = JSON.parse.bind(JSON);
@@ -173,7 +175,9 @@
   const util = softly(
     {
       printf(fmt, ...args) {
-        return H.printf(S(fmt), J(args.map((a) => [Number(a), S(a)])));
+        const r = H.printf(S(fmt), J(args.map((a) => [Number(a), S(a)])));
+        if (r.startsWith('\u0000ERR:')) throw new RangeError(r.slice(5));
+        return r;
       },
       printd(fmt, d) {
         if (!(d instanceof Date) || isNaN(d.getTime())) throw new TypeError('util.printd needs a Date');
