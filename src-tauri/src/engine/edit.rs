@@ -485,6 +485,10 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
             if let Some(labels) = &labels {
                 let _ = crate::organize::labels::after_delete(doc, labels, &pages, n as u32);
             }
+            // Article beads on the deleted pages are unlinked in the same step. As with the labels, a failure
+            // here never undoes the delete: the beads then point at a page that is gone, and the article is
+            // listed as damaged (Delete and Properties still work on it).
+            let _ = crate::organize::threads::after_delete(doc);
             let out = (0..n as u32).filter(|p| pages.binary_search(p).is_err()).map(|p| sizes[p as usize]).collect();
             Ok(Some((out, true)))
         }
@@ -1240,6 +1244,10 @@ impl Engine {
         let changed = ran.and_then(|c| match c {
             None => Ok(None),
             Some((after, drops)) => {
+                // Deleted pages are not left in the embedded search index either.
+                if drops {
+                    crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
+                }
                 let snap = ed.snapshot()?;
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
@@ -1434,7 +1442,18 @@ impl Engine {
     ) -> Result<EditState> {
         let ed = self.lane(entry, lane)?;
         let len = ed.step().snap.len;
-        let ran = catch_unwind(AssertUnwindSafe(|| f(&mut ed.doc.doc))).unwrap_or(Err(EngineError::Panic));
+        let page_count = ed.step().sizes.len();
+        let ran = catch_unwind(AssertUnwindSafe(|| {
+            let out = f(&mut ed.doc.doc)?;
+            // An edit that takes content out (pages included, as `drops` below sees them) must not leave it
+            // in the embedded search index.
+            let fewer = ed.doc.doc.page_count().is_ok_and(|n| (n.max(0) as usize) < page_count);
+            if (removes || redaction || fewer) && !unchanged.is_some_and(std::cell::Cell::get) {
+                crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
+            }
+            Ok(out)
+        }))
+        .unwrap_or(Err(EngineError::Panic));
         if ran.is_ok() && unchanged.is_some_and(std::cell::Cell::get) {
             return Ok(ed.state(entry));
         }

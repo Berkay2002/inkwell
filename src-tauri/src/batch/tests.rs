@@ -1030,6 +1030,23 @@ fn flatten_turns_form_fields_into_page_content() {
     assert_eq!(digest(Path::new(&r.files[0].outputs[0].path)), digest(&plain));
 }
 
+/// A step that takes content out (here: the form fields) must not leave the embedded search index that still lists it.
+#[test]
+fn a_batch_output_drops_an_embedded_index_the_step_made_stale() {
+    use crate::search::catalog::embed;
+    let d = dir("embedded-index");
+    let mut doc = PdfDocument::from_bytes(&form_pdf()).unwrap();
+    embed::add(&mut doc).unwrap();
+    let f = put(&d, "indexed.pdf", &crate::redact::save_to_vec(&doc).unwrap());
+    let before = PdfDocument::open(f.to_string_lossy().as_ref()).unwrap();
+    assert!(embed::status(&before).current, "the fixture carries a current index");
+    drop(before);
+    let r = go(&action("F", vec![Step::FlattenForms(FlattenFormsStep {})]), &[f], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    let out = PdfDocument::open(&r.files[0].outputs[0].path).unwrap();
+    assert!(!embed::status(&out).present, "the stale index is not kept in the output");
+}
+
 #[test]
 fn the_built_in_actions_run_end_to_end() {
     let d = dir("builtins");

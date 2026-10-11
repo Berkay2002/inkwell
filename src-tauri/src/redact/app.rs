@@ -326,7 +326,12 @@ pub async fn redact_apply(app: tauri::AppHandle, eng: Eng<'_>, doc: DocId, optio
         } else {
             None
         };
-        apply(&eng, doc, options.sanitize, save_to, EditSource::User)
+        let out = apply(&eng, doc, options.sanitize, save_to, EditSource::User)?;
+        // The redacted copy may have replaced a file a catalog lists: no catalog keeps that file's old text.
+        if let ApplyOutcome::Applied { saved_to: Some(p), .. } = &out {
+            crate::search::catalog::app::forget_saved(&app, p);
+        }
+        Ok(out)
     })
     .await
 }

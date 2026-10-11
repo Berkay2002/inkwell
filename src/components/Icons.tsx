@@ -78,6 +78,8 @@ const PATHS = {
   tools: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76Z",
   // a page with a half-filled circle on it (not the app theme's moon)
   pageDark: "M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM12 9a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 9v8",
+  // two linked columns: an article continuing from one box into the next
+  article: "M4 5h6v14H4ZM14 5h6v14h-6ZM10 12h4",
   play: "M7 4.5v15l12-7.5Z",
   playOff: "M7 4.5v15l12-7.5ZM4 4l16 16",
   paperclip: "m21 11-9 9a5.5 5.5 0 0 1-7.8-7.8l9-9a3.7 3.7 0 0 1 5.2 5.2l-9 9a1.8 1.8 0 0 1-2.6-2.6l8.2-8.2",
