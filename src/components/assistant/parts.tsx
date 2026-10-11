@@ -298,7 +298,6 @@ export function Messages({ doc, variant, lastOnly = false }: { doc: DocState; va
   }, [all, lastOnly]);
   const el = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
-  const last = messages[messages.length - 1];
 
   useLayoutEffect(() => {
     const e = el.current;
@@ -320,7 +319,7 @@ export function Messages({ doc, variant, lastOnly = false }: { doc: DocState; va
             {m.text}
           </div>
         ) : (
-          <Answer key={m.id} doc={doc} m={m} variant={variant} isLast={m === last} />
+          <Answer key={m.id} doc={doc} m={m} variant={variant} />
         ),
       )}
     </div>
@@ -388,21 +387,7 @@ function PageSketch({ doc, c }: { doc: DocState; c: Citation }) {
   );
 }
 
-function Followups({ doc, m, variant }: { doc: DocState; m: Msg; variant: Variant }) {
-  const ask = useAi.getState().ask;
-  return (
-    <div className={`ax-followups ${variant}`}>
-      {m.followups.map((f) => (
-        <button key={f} className="ax-chip" onClick={() => ask(doc.id, { kind: "ask", question: f })}>
-          <span>{f}</span>
-          {variant === "floating" && <Glyph name="chev" size={14} />}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocState; m: Msg; variant: Variant; isLast: boolean; plain?: boolean }) {
+export function Answer({ doc, m, variant }: { doc: DocState; m: Msg; variant: Variant }) {
   const mark = useAi((s) => s.mark);
   const hide = useAi((s) => s.settings.hideSources);
   const cites = useMemo(() => new Map(m.citations.filter(isVerified).map((c) => [c.n, c])), [m.citations]);
@@ -448,7 +433,6 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
               </span>
             )}
           </div>
-          {isLast && !plain && m.followups.length > 0 && <Followups doc={doc} m={m} variant={variant} />}
         </>
       )}
     </div>

@@ -78,10 +78,9 @@ describe("assistant store", () => {
     expect(bot.state).toBe("streaming");
 
     const citations = [{ n: 1, page: 4, rects: [[1, 2, 3, 4]], quote: "q", chunk: "p5.1", exact: true }] as never;
-    emit({ kind: "done", answer: "Hello [1]", citations, followups: ["more?"], firstTokenMs: 10, totalMs: 20, prepMs: 1, chunksSent: 1, chunksTotal: 1 });
+    emit({ kind: "done", answer: "Hello [1]", citations, firstTokenMs: 10, totalMs: 20, prepMs: 1, chunksSent: 1, chunksTotal: 1 });
     const done = useAi.getState().chats[1].messages[1];
     expect(done.state).toBe("done");
-    expect(done.followups).toEqual(["more?"]);
   });
 
   it("jumps to a citation, marks it, and toggles the mark off on a second click", () => {

@@ -24,7 +24,6 @@ export interface Msg {
   kind?: Task["kind"];
   text: string;
   citations: Citation[];
-  followups: string[];
   /** The tool calls of this turn (searches, page reads, changes), in order. */
   activity: Activity[];
   state: "streaming" | "done" | "error" | "cancelled";
@@ -114,8 +113,8 @@ export const useAi = create<AiStore>((set, get) => {
     const st = get();
     const chat = st.chats[doc] ?? EMPTY_CHAT;
     if (chat.messages.some((m) => m.state === "streaming")) return;
-    const user: Msg = { id: ++msgId, role: "user", kind: task.kind, text: label, citations: [], followups: [], activity: [], state: "done" };
-    const bot: Msg = { id: ++msgId, role: "assistant", text: "", citations: [], followups: [], activity: [], state: "streaming", phase: "reading" };
+    const user: Msg = { id: ++msgId, role: "user", kind: task.kind, text: label, citations: [], activity: [], state: "done" };
+    const bot: Msg = { id: ++msgId, role: "assistant", text: "", citations: [], activity: [], state: "streaming", phase: "reading" };
     patchChat(doc, (c) => ({ ...c, messages: [...c.messages, user, bot] }), true);
     set({ mark: null, sheet: true });
     const model = st.settings.model;
@@ -161,7 +160,6 @@ export const useAi = create<AiStore>((set, get) => {
               ...m,
               text: e.answer,
               citations: e.citations,
-              followups: e.followups,
               activity: settle(m.activity),
               state: "done",
               timing: { firstTokenMs: e.firstTokenMs, totalMs: e.totalMs, prepMs: e.prepMs },

@@ -181,12 +181,11 @@ async function runTurn(id, p) {
     text = JSON.stringify({
       answer,
       citations: first ? [{ n: 1, chunks: [first[1]], quote }] : [],
-      followups: ["What else?", "Why so?", "Who wrote it?"],
     });
   } else {
     text = "Plain **markdown** reply.\n\n- one\n- two";
   }
-  if (mode === "slow") text = JSON.stringify({ answer: "word ".repeat(400), citations: [], followups: [] });
+  if (mode === "slow") text = JSON.stringify({ answer: "word ".repeat(400), citations: [] });
 
   out({ method: "item/started", params: { threadId: tid, turnId: turn, item: { type: "agentMessage", id: "i1", text: "", phase: "final_answer" } } });
   const step = mode === "slow" ? 8 : 7;

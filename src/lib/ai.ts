@@ -94,7 +94,6 @@ export type ChatEvent =
       kind: "done";
       answer: string;
       citations: Citation[];
-      followups: string[];
       firstTokenMs: number | null;
       totalMs: number;
       prepMs: number;

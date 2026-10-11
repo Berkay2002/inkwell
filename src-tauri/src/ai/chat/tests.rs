@@ -146,7 +146,7 @@ fn deltas(ev: &[ChatEvent]) -> String {
 fn streams_the_answer_and_resolves_the_citation() {
     let a = fake("ok");
     let ev = run(&a, ask_req("How do I end the agreement?"), contract());
-    let ChatEvent::Done { answer, citations, followups, first_token_ms, usage, chunks_sent, chunks_total, .. } = ev.last().unwrap() else {
+    let ChatEvent::Done { answer, citations, first_token_ms, usage, chunks_sent, chunks_total, .. } = ev.last().unwrap() else {
         panic!("not done: {:?}", ev.last());
     };
     // the deltas, concatenated, are exactly the final answer (escapes, accents, emoji, backslash)
@@ -154,7 +154,6 @@ fn streams_the_answer_and_resolves_the_citation() {
     assert!(answer.contains("\"quoted\" line, café 😀 and a \\ backslash [1]"), "{answer}");
     assert!(ev.iter().filter(|e| matches!(e, ChatEvent::Delta { .. })).count() > 3, "must stream in pieces");
     assert!(first_token_ms.is_some());
-    assert_eq!(followups.len(), 3);
     assert_eq!(usage.as_ref().unwrap()["inputTokens"], 100);
     assert_eq!((*chunks_sent, *chunks_total), (2, 2));
     assert_eq!(citations.len(), 1);
@@ -944,13 +943,13 @@ fn live_codex_smoke() {
             }
         }
         match ev.last().unwrap() {
-        ChatEvent::Done { answer, citations, followups, first_token_ms, total_ms, prep_ms, chunks_sent, chunks_total, usage } => {
+        ChatEvent::Done { answer, citations, first_token_ms, total_ms, prep_ms, chunks_sent, chunks_total, usage } => {
             println!(
                 "{label}: first token {:?} ms, total {total_ms} ms (prep {prep_ms} ms), chunks {chunks_sent}/{chunks_total}, usage {usage:?}",
                 first_token_ms
             );
             println!("  answer: {}", answer.replace('\n', "\n          "));
-            println!("  citations: {citations:#?}\n  followups: {followups:?}");
+            println!("  citations: {citations:#?}");
         }
         e => panic!("{label}: {e:?}"),
         }
