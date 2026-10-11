@@ -98,13 +98,26 @@ pub fn search_file(path: &Path, q: &Query, cancel: &AtomicBool, list: usize) -> 
         return Err(Skip::Unreadable);
     }
     let n = doc.page_count().map_err(|_| Skip::Unreadable)?.max(0) as u32;
-    let mut r = FileResult { page_count: n, ..Default::default() };
-    let cap = PER_FILE.min(list);
-    for p in 0..n {
+    let bookmarks = q.opts().bookmarks.then(|| super::bookmark_hits(&doc, q).unwrap_or_default());
+    collect(n, 0..n, PER_FILE.min(list), cancel, |p| find_in_page(&doc, p, q).unwrap_or_default(), bookmarks)
+}
+
+/// What a file gave, from the hits of each of `pages` (in order) and its bookmark hits: the one place that
+/// counts and lists them, shared by a search that reads the file and one that reads a catalog.
+pub fn collect(
+    page_count: u32,
+    pages: impl Iterator<Item = u32>,
+    cap: usize,
+    cancel: &AtomicBool,
+    mut hits_of: impl FnMut(u32) -> Vec<Hit>,
+    bookmarks: Option<Vec<(u32, Hit)>>,
+) -> Result<FileResult, Skip> {
+    let mut r = FileResult { page_count, ..Default::default() };
+    for p in pages {
         if cancel.load(Ordering::Relaxed) {
             return Err(Skip::Cancelled);
         }
-        let Ok(hits) = find_in_page(&doc, p, q) else { continue };
+        let hits = hits_of(p);
         if hits.is_empty() {
             continue;
         }
@@ -118,8 +131,8 @@ pub fn search_file(path: &Path, q: &Query, cancel: &AtomicBool, list: usize) -> 
             }
         }
     }
-    if q.opts().bookmarks {
-        for (p, h) in super::bookmark_hits(&doc, q).unwrap_or_default() {
+    if let Some(marks) = bookmarks {
+        for (p, h) in marks {
             r.hits += 1;
             if r.items.len() < cap {
                 r.items.push(PageHit { page: p, hit: h });
@@ -359,6 +372,11 @@ impl FolderSearches {
         }
     }
 
+    /// Search `id` has ended (a catalog search, which does not go through `run`): it can no longer be cancelled.
+    pub fn finish(&self, id: u64) {
+        self.state.lock().unwrap().live.remove(&id);
+    }
+
     /// Notes that file `index` of search `id` had hits. Ignored unless `id` is still `window`'s latest search: a
     /// cancelled search finishing its last file must not write into the next one's list.
     pub fn record(&self, window: &str, id: u64, index: u32, path: PathBuf) {
@@ -380,7 +398,7 @@ impl FolderSearches {
 }
 
 /// Lowers this thread's priority a little, so tile rendering and typing win against a long search.
-fn be_polite() {
+pub(crate) fn be_polite() {
     #[cfg(windows)]
     // SAFETY: plain calls on the current thread's pseudo handle.
     unsafe {

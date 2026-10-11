@@ -848,6 +848,7 @@ pub fn run() {
         .manage(Paths::default())
         .manage(Arc::new(tools::Jobs::default()))
         .manage(Arc::new(search::files::FolderSearches::default()))
+        .manage(Arc::new(search::catalog::app::Jobs::default()))
         .manage(hist)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
@@ -888,6 +889,17 @@ pub fn run() {
             search_files,
             cancel_search_files,
             search_file_token,
+            search::catalog::app::catalog_estimate,
+            search::catalog::app::catalog_create,
+            search::catalog::app::catalog_list,
+            search::catalog::app::catalog_delete,
+            search::catalog::app::catalog_stale,
+            search::catalog::app::catalog_build,
+            search::catalog::app::catalog_cancel,
+            search::catalog::app::catalog_search,
+            search::catalog::app::index_embedded,
+            search::catalog::app::index_embed,
+            search::catalog::app::index_unembed,
             engine_stats,
             set_cache_budget,
             initial_files,
