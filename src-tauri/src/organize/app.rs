@@ -5,8 +5,9 @@ use super::attach::{Attachment, MAX_ATTACH, NewFile, clean_name};
 use super::combine::{self, CombineOptions, Plan, SourceSpec};
 use super::labels::{LabelSpec, LabelStyle};
 use super::portfolio::{self, PortfolioInfo, Source};
+use super::threads::{Info, Thread};
 use super::trans::{PageTrans, TransChange};
-use super::{LabelsDto, attach_add, attach_data, attach_describe, attach_list, attach_remove, labels_apply, labels_clear, labels_get, trans_get, trans_set};
+use super::{LabelsDto, attach_add, attach_data, attach_describe, attach_list, attach_remove, labels_apply, labels_clear, labels_get, thread_add_bead, thread_create, thread_delete, thread_delete_bead, thread_move_bead, thread_reorder, thread_set_info, threads_get, trans_get, trans_set};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use crate::paths::{FileRef, Paths};
@@ -242,6 +243,57 @@ pub async fn transitions_set(eng: Eng<'_>, doc: DocId, pages: Vec<u32>, change: 
     blocking(move || trans_set(&eng, doc, &pages, &change, EditSource::User)).await
 }
 
+
+// ---- article threads ----------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn threads_list(eng: Eng<'_>, doc: DocId) -> Result<Vec<Thread>> {
+    let eng = eng.inner().clone();
+    blocking(move || threads_get(&eng, doc)).await
+}
+
+#[tauri::command]
+pub async fn thread_start(eng: Eng<'_>, doc: DocId, title: String, page: u32, rect: [f32; 4]) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || thread_create(&eng, doc, &title, page, rect, EditSource::User)).await
+}
+
+/// `after`: the bead to put the new one behind; none puts it at the end.
+#[tauri::command]
+pub async fn thread_bead_add(eng: Eng<'_>, doc: DocId, thread: i32, after: Option<i32>, page: u32, rect: [f32; 4]) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || thread_add_bead(&eng, doc, thread, after, page, rect, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn thread_bead_move(eng: Eng<'_>, doc: DocId, thread: i32, bead: i32, page: u32, rect: [f32; 4]) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || thread_move_bead(&eng, doc, thread, bead, page, rect, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn thread_bead_delete(eng: Eng<'_>, doc: DocId, thread: i32, bead: i32) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || thread_delete_bead(&eng, doc, thread, bead, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn thread_remove(eng: Eng<'_>, doc: DocId, thread: i32) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || thread_delete(&eng, doc, thread, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn thread_describe(eng: Eng<'_>, doc: DocId, thread: i32, info: Info) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || thread_set_info(&eng, doc, thread, &info, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn thread_move(eng: Eng<'_>, doc: DocId, thread: i32, to: u32) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || thread_reorder(&eng, doc, thread, to, EditSource::User)).await
+}
 
 // ---- portfolios ---------------------------------------------------------------------------------
 

@@ -63,6 +63,8 @@ export type FilesEvent =
       cloudOnly: number;
       cancelled: boolean;
       capped: boolean;
+      /** Catalog searches: files whose stored text is of another version than the file on disk (left out). */
+      stale: number;
     };
 
 export type SearchScope = { kind: "folder"; token: string; recursive: boolean } | { kind: "files"; tokens: string[] };
@@ -189,6 +191,99 @@ export const cancelSearchFiles = (search: number) => invoke<void>("cancel_search
 /** An open token for file `index` of search `search` (a result being opened); the path never reaches the page. */
 export const searchFileToken = (search: number, index: number) => invoke<FileRef>("search_file_token", { search, index });
 
+// ---- catalogs: a saved full-text index over a folder (src-tauri/src/search/catalog) ----------------
+
+export interface CatalogMeta {
+  id: string;
+  name: string;
+  folder: string;
+  recursive: boolean;
+  created: number;
+  /** Unix milliseconds the live index was built; 0 when it never was. */
+  built: number;
+  generation: number;
+  files: number;
+  indexed: number;
+  pages: number;
+  damaged: number;
+  password: number;
+  cloudOnly: number;
+  cut: number;
+  capped: boolean;
+  indexLen: number;
+}
+
+export interface CatalogSummary {
+  files: number;
+  kept: number;
+  extracted: number;
+  fromEmbedded: number;
+  added: number;
+  changed: number;
+  removed: number;
+  damaged: number;
+  password: number;
+  cloudOnly: number;
+  pages: number;
+  cut: number;
+  capped: boolean;
+  cancelled: boolean;
+}
+
+/** What a refresh would change; `unusable`: never built, or the index must be built again. */
+export interface CatalogStale {
+  added: number;
+  changed: number;
+  removed: number;
+  unusable: boolean;
+}
+
+export interface CatalogEstimate {
+  files: number;
+  bytes: number;
+  secs: number;
+  indexBytes: number;
+  capped: boolean;
+}
+
+export type CatalogBuildEvent =
+  | { kind: "started"; job: number }
+  | { kind: "progress"; job: number; done: number; total: number }
+  | { kind: "done"; job: number; summary: CatalogSummary; catalog: CatalogMeta };
+
+/** What a document carries of an embedded search index. */
+export interface Embedded {
+  present: boolean;
+  /** Same /ID, page count and page content as the file now: a build reads it. */
+  current: boolean;
+  pages: number;
+  bytes: number;
+  /** Why the index cannot be written, updated or removed (certified, signed document); null when it can. */
+  blocked: string | null;
+}
+
+export const catalogEstimate = (folder: string, recursive: boolean) => invoke<CatalogEstimate>("catalog_estimate", { folder, recursive });
+export const catalogCreate = (folder: string, name: string, recursive: boolean) => invoke<CatalogMeta>("catalog_create", { folder, name, recursive });
+export const catalogList = () => invoke<CatalogMeta[]>("catalog_list");
+export const catalogDelete = (id: string) => invoke<void>("catalog_delete", { id });
+export const catalogStale = (id: string) => invoke<CatalogStale>("catalog_stale", { id });
+/** Builds (`full`) or refreshes a catalog; resolves with what it did. Cancel with `catalogCancel(job)` from the `started` event. */
+export function catalogBuild(id: string, full: boolean, onEvent: (e: CatalogBuildEvent) => void) {
+  const ch = new Channel<CatalogBuildEvent>();
+  ch.onmessage = onEvent;
+  return invoke<CatalogSummary>("catalog_build", { id, full, onEvent: ch });
+}
+export const catalogCancel = (job: number) => invoke<void>("catalog_cancel", { job });
+/** Searches a catalog; same events and ids as `searchFiles`, so `searchFileToken` and `cancelSearchFiles` work on it. */
+export function catalogSearch(id: string, query: string, opts: FindOpts, onEvent: (e: FilesEvent) => void) {
+  const ch = new Channel<FilesEvent>();
+  ch.onmessage = onEvent;
+  return invoke<number>("catalog_search", { id, query, opts, onEvent: ch });
+}
+export const indexEmbedded = (doc: number) => invoke<Embedded>("index_embedded", { doc });
+export const indexEmbed = (doc: number) => invoke<EditState>("index_embed", { doc });
+export const indexUnembed = (doc: number) => invoke<EditState>("index_unembed", { doc });
+
 /** Origin of the tile protocol: WebView2 serves custom schemes as http://<scheme>.localhost. */
 export const TILE_ORIGIN = navigator.userAgent.includes("Windows") ? "http://inkwell.localhost" : "inkwell://localhost";
 
@@ -210,8 +305,11 @@ export async function fetchTile(
   rank: number,
   stream: number,
   rev: number,
+  /** A registered print-production view: the tile comes from the `p` route in its plates. */
+  view?: number,
 ): Promise<TileData | null> {
-  const url = `${TILE_ORIGIN}/t/${doc}/${page}/${rot}/${scale}/${tx}/${ty}?e=${epoch}&r=${rank}&s=${stream}&g=${rev}`;
+  const route = view ? "p" : "t";
+  const url = `${TILE_ORIGIN}/${route}/${doc}/${page}/${rot}/${scale}/${tx}/${ty}?e=${epoch}&r=${rank}&s=${stream}&g=${rev}${view ? `&v=${view}` : ""}`;
   const res = await fetch(url);
   if (res.status === 410) return null;
   if (!res.ok) throw new Error(`tile ${res.status}`);
@@ -1137,6 +1235,8 @@ export interface PrintPlan {
   papers: number;
   /** Sides sent to the printer for all copies, blank backs included: what a job's progress counts to. */
   sides: number;
+  /** Pages Save as PDF writes, two-sided padding included: what its progress counts to. */
+  pdfSides: number;
   faces: PrintFace[];
   editRev: number;
 }
@@ -1371,6 +1471,140 @@ export interface PageTrans {
   autoAdvance: number | null;
 }
 
+// ---- article threads ----
+
+export interface ThreadInfo {
+  title: string;
+  subject: string;
+  author: string;
+  keywords: string;
+}
+
+export interface ThreadBead {
+  /** The bead's object number: valid for the generation it was listed at. */
+  id: number;
+  page: number;
+  /** x0, y0, x1, y1 in points on the page as shown (y down). */
+  rect: [number, number, number, number];
+}
+
+export interface ArticleThread {
+  id: number;
+  title: string;
+  info: ThreadInfo;
+  beads: ThreadBead[];
+  /** Why the article cannot be edited (only Delete and Properties are offered), or null. */
+  damaged: string | null;
+}
+
+/** Whether the document is certified (no edit is made) or signed (an edit is saved as an update after the signature). */
+export interface DocProtection {
+  certified: boolean;
+  signed: boolean;
+}
+export const docProtection = (doc: number) => invoke<DocProtection>("a11y_protection", { doc });
+export const threadsList = (doc: number) => invoke<ArticleThread[]>("threads_list", { doc });
+export const threadStart = (doc: number, title: string, page: number, rect: ThreadBead["rect"]) =>
+  invoke<EditState>("thread_start", { doc, title, page, rect });
+/** `after`: the bead to put the new one behind; null puts it at the end. */
+export const threadBeadAdd = (doc: number, thread: number, after: number | null, page: number, rect: ThreadBead["rect"]) =>
+  invoke<EditState>("thread_bead_add", { doc, thread, after, page, rect });
+export const threadBeadMove = (doc: number, thread: number, bead: number, page: number, rect: ThreadBead["rect"]) =>
+  invoke<EditState>("thread_bead_move", { doc, thread, bead, page, rect });
+export const threadBeadDelete = (doc: number, thread: number, bead: number) =>
+  invoke<EditState>("thread_bead_delete", { doc, thread, bead });
+export const threadRemove = (doc: number, thread: number) => invoke<EditState>("thread_remove", { doc, thread });
+export const threadDescribe = (doc: number, thread: number, info: ThreadInfo) =>
+  invoke<EditState>("thread_describe", { doc, thread, info });
+export const threadMove = (doc: number, thread: number, to: number) => invoke<EditState>("thread_move", { doc, thread, to });
+
 export const transitionsList = (doc: number) => invoke<PageTrans[]>("transitions_list", { doc });
 export const transitionsSet = (doc: number, pages: number[], change: PageTrans) =>
   invoke<EditState>("transitions_set", { doc, pages, change });
+
+/** Document JavaScript (src-tauri/src/forms/doc_js.rs). Nothing here runs a script. */
+export interface DocJsMeta {
+  /** Bytes of source; 0 when it was not read. */
+  size: number;
+  /** Over 1 MiB: not shown or scanned here. */
+  tooLarge: boolean;
+  /** Not read: the listing had read its share of script text. */
+  unread: boolean;
+  /** Keys of the capabilities the source mentions. */
+  risks: string[];
+}
+export interface DocJsNamed extends DocJsMeta {
+  /** `n:<name>`. */
+  id: string;
+  name: string;
+}
+export interface DocJsStep extends DocJsMeta {
+  /** `d:<event>:<i>` or `p:<page>:<event>:<i>`; `d:open:<i>` is the open action. */
+  id: string;
+  javascript: boolean;
+  /** What a step that is not JavaScript does. */
+  what: string;
+}
+export interface DocJsSlot {
+  /** `d:<event>` or `p:<page>:<event>`. */
+  id: string;
+  label: string;
+  page: number | null;
+  steps: DocJsStep[];
+}
+export interface DocJsCounts {
+  fields: number;
+  fieldScripts: number;
+  links: number;
+  bookmarks: number;
+}
+export interface DocJsCapability {
+  key: string;
+  label: string;
+  count: number;
+  places: string[];
+}
+export interface DocJsList {
+  named: DocJsNamed[];
+  docActions: DocJsSlot[];
+  pageActions: DocJsSlot[];
+  counts: DocJsCounts;
+  capabilities: DocJsCapability[];
+  incomplete: boolean;
+  /** Signed: an edit is saved as an update and the signature will show the change. */
+  signed: boolean;
+  /** Certified (any /P): script edits are refused. */
+  certified: boolean;
+}
+export interface DocJsSource {
+  id: string;
+  text: string;
+  size: number;
+  tooLarge: boolean;
+}
+export interface DocJsCheck {
+  ok: boolean;
+  message: string | null;
+  /** 1-based. */
+  line: number | null;
+  column: number | null;
+  /** Over what the engine runs (256 KiB): not compiled. */
+  tooLarge: boolean;
+}
+export type DocJsOp =
+  | { op: "add"; name: string | null; source: string }
+  | { op: "rename"; id: string; name: string }
+  | { op: "setSource"; id: string; source: string }
+  | { op: "delete"; id: string };
+export interface DocJsApplied {
+  state: EditState;
+  /** The id of the script an `add` made (and of a renamed one). */
+  id: string | null;
+  /** Set when the file is signed and the edit changed it. */
+  warning: string | null;
+}
+
+export const docJsList = (doc: number) => invoke<DocJsList>("doc_js_list", { doc });
+export const docJsSource = (doc: number, id: string) => invoke<DocJsSource>("doc_js_source", { doc, id });
+export const docJsCheck = (source: string) => invoke<DocJsCheck>("doc_js_check", { source });
+export const docJsApply = (doc: number, op: DocJsOp) => invoke<DocJsApplied>("doc_js_apply", { doc, op });

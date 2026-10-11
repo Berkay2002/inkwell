@@ -44,6 +44,77 @@ across files) and `store.ts` (`runSearch`, `stepHit`, `selectHit`, `stopSearch`)
 - History: the last ten queries (Enter, or clicking a result, or running a folder search records one), newest first,
   from the clock in the rail's field; "Clear recent searches" empties it. Stored only in this app's local storage.
 
+## Catalog
+A catalog is a saved full-text index over a folder: build it once, search it in milliseconds, refresh it when files
+change. Own index, not tantivy, for three reasons: (1) the index only narrows which pages to look at, and the same
+matcher as the folder search decides every hit, so results are identical for every option combination (a test
+compares 16 option sets over 23 queries); (2) tantivy brings about 60 crates and a long build for ranking and
+analysers a verbatim finder does not use; (3) the index must also fit inside a PDF (below), which needs a small
+format we control and version.
+
+- Storage: `<app data>/catalogs/<id>/`: `catalog.json` (list entry, written last by rename, so it is the commit),
+  `table-<gen>.json` (files: size, mtime, head/tail hash, pages), `index-<gen>.bin` (magic, version, blake3, varint
+  postings of space-delimited words in the widest fold), `text/<fid>.zst` (the per-page records the matcher reads).
+  A damaged or foreign-version index (or `catalog.json`) is never trusted: the catalog is listed as not built,
+  `check` reports it `unusable` and a build recreates it. A file whose worker died counts as damaged.
+- Candidate rule: one word must be a substring of a term; several words are first=suffix, middle=exact, last=prefix;
+  a query of marks only verifies every page. Hits carry the line's box, not exact character rectangles.
+- Refresh: a file with the same size and mtime is kept without being opened; a moved file is kept by size, mtime and
+  head/tail hash; a changed mtime is re-indexed. Damaged and password-protected files are skipped and counted, and
+  tried again at every refresh (only an indexed row is kept). A build reads each PDF into memory (up to 128 MB; a
+  larger one is opened by path) so no handle stays on it, and `catalog.json`, table and index are fsynced before the
+  rename. Cancel leaves the previous generation live.
+- A search checks every candidate file against the disk (size, mtime). A file that is not the one that was indexed is
+  left out and counted (`done.stale`, a note under the results), so a catalog never answers from text that was
+  saved over. A save that includes a redaction (`save_document`, `protect_and_save`) makes every catalog forget that
+  file: row, stored text and postings are rewritten as a new generation (`forget`), and the file is "new" until the
+  next refresh. A catalog that is being built forgets it when the build ends (the search check hides it meanwhile): the
+  path waits in `forget-pending.json` in the catalog's folder, so a quit does not lose it, and is replayed at startup,
+  when the catalogs are listed, and at the next hold. If the postings cannot be rewritten, or the entry or table is
+  unreadable, the stored text and the live index are deleted: the catalog reads "needs a rebuild" and keeps no words
+  of the file. The same is asked for (`forget-wipe` marker in the catalog's folder, memory if it cannot be written)
+  when the waiting list is unreadable (a missing file is an empty list), cannot be written, or would pass 1000 paths:
+  a path is never dropped. The wipe is not done by whoever finds this out, because the catalog is held by a build that
+  would write its words back: it runs under the hold of whoever frees the catalog, after the build, and the marker
+  and list stay while it fails. The next build reads every file again. A Save as, and Redact's own save, that replace a listed file do the same.
+- Embedded index: `/Root/PieceInfo/Inkwell` (`/Private` stream) holds the records of that file. A build reads it only
+  if the trailer `/ID`, the page count, the version and a fingerprint of page content and annotations all match,
+  so a file changed by another tool is read normally. Embedding and removing are one undo step each
+  (`index_embed`, `index_unembed`; `index_embedded` reports present/current and `blocked`). A certified or signed
+  document gets no index written, updated or removed (refused with the reason; the buttons are disabled): an update
+  or removal rewrites the file, which voids signatures, and a certification allows none of it. This is stricter
+  than the common rule for edit features (signed: incremental save plus a warning) on purpose: the first Embed on a
+  signed file would be incremental, but Update and Remove are not, and one rule is easier to explain than three.
+- An embedded index is untrusted input, like hidden text in the PDF itself: it can claim words that are not
+  visible, and bookmarks on pages the file does not have are dropped. A build checks the dict (`/DocID`, `/Pages`)
+  before decoding the blob, inflates it under a bound, and compares a fingerprint of the page content (page
+  streams, Form XObjects and patterns under the resources to depth 8, fonts (`/ToUnicode` and `/Encoding`; the whole
+  font with its CMaps, descendant fonts and font programs when there is no `/ToUnicode`), marked-content property
+  lists, the layers' defaults, comment and field values as the records read them, bookmarks) read under a
+  per-stream and a per-file budget; every entry walked costs budget, and a `Resources` shared by pages is walked once.
+  The second `/ID` string is not part of the match: MuPDF writes a new one on every save, Inkwell's own included.
+  The fingerprint detects honest edits, not a forger: a crafted file can always carry an index that is "current"
+  but says other words, the same as invisible text in the PDF itself.
+  A save that merges duplicate objects, or a layer `/Order` nested deeper than about six levels, makes the index "not
+  current": a build reads the pages instead (slower, never wrong).
+- What is removed with the text: redaction and sanitize always drop the embedded index (it is a compressed copy of
+  the page text, which the byte check cannot see inside); deleting pages, editing text, removing attachments or
+  annotations, PDF/A conversion to a new file, Bates numbering with replace, and a Compress or batch run (dropped
+  extras, flattened pages, unembedded fonts) drop it unless it still matches the file; the metadata and private-data
+  options remove it with the rest of `/PieceInfo`. Extract, split and combine build new files and carry none.
+- Bounds: 20 MB of stored page records per file, measured as the JSON that is written (a page that does not fit is
+  left out, the file is marked cut and counted), bookmark titles 5 MB on top, 100 000 pages, 50 000 bookmarks, 96 MB
+  of inflated index (a record that would inflate past it is not written).
+- Estimate (before the first build, from a listing): about 25 MB/s on two threads plus 20 ms per file, and an index of
+  about 3 % of the PDF bytes plus 2 KB per file. A guess to set expectations, not a promise.
+- Commands: `catalog_estimate`, `catalog_create`, `catalog_list`, `catalog_delete`, `catalog_stale`,
+  `catalog_build(id, full, onEvent)` (`started`, `progress`, `done`), `catalog_cancel(job)`,
+  `catalog_search(id, query, opts, onEvent)` (the folder search's events; results open through `search_file_token`).
+  Not exposed to the AI assistant.
+- Rail: Folder scope lists "Catalog: <name>" with Refresh and Delete and a badge ("2 new, 1 changed"); "New
+  catalog…" picks a folder, names it and shows the estimate ("~1 800 files, about 2 minutes, ~40 MB") before
+  building with progress and Cancel. "Embed search index" / "Remove embedded index" sit above the file results.
+
 ## Commands (Tauri)
 `search(doc, query, opts, onEvent)` streams `hits` (per page, each with rects and snippet), `progress` and `done`;
 `cancel_search(doc)`; `pick_search_folder()` returns an open token for a folder (paths.rs: the webview never names a
@@ -54,5 +125,7 @@ every file in the list; only the latest search's files can be opened).
 
 ## Checked
 `cargo test --lib search::` (matcher options, snippets, comments/fields/bookmarks, engine events, folder listing,
-caps, skip, cancel, save and reopen), `src/lib/searchLogic.test.ts`, `src/lib/search.test.ts`, and
+caps, skip, cancel, save and reopen; `search::catalog`: parity with the folder search, refresh reads only changed
+files, damaged/encrypted skipped and retried, cancel keeps the old index, corrupt index rebuilt, embedded index and
+its undo, signed/certified refused, a saved redaction gone from index and results, changed files left out), `src/lib/searchLogic.test.ts`, `src/lib/search.test.ts`, and
 `scripts/search-shots.mjs` (CDP on generated copies; screens in `docs/screens/search/`).

@@ -536,8 +536,18 @@ fn reference_locks(v: &PdfObject) -> Vec<Lock> {
 
 /// The locks of the signatures that carry a signature (`/V`): the field's `/Lock` and every one its `/Reference`
 /// entries carry (Acrobat writes both when it certifies with locked fields, so a DocMDP `/P 1` anywhere locks
-/// everything). A signature that names neither (a plain approval signature) leaves the form to be filled.
-pub(crate) fn locks_of(entries: &[Entry]) -> Vec<Lock> {
+/// everything). A signature that names neither (a plain approval signature) leaves the form to be filled. A document
+/// certified with `/P 1` (also in the catalog only, which no field shows) locks every field; when that cannot be read,
+/// so does the doubt.
+pub(crate) fn locks_of(doc: &PdfDocument, entries: &[Entry]) -> Vec<Lock> {
+    let mut locks = locks_of_fields(entries);
+    if crate::outline::certified(doc).map_or(true, |c| c == Some(1)) {
+        locks.push(Lock::All);
+    }
+    locks
+}
+
+fn locks_of_fields(entries: &[Entry]) -> Vec<Lock> {
     per_field(entries)
         .into_iter()
         .filter(|e| e.kind == FieldKind::Signature)
@@ -548,20 +558,6 @@ pub(crate) fn locks_of(entries: &[Entry]) -> Vec<Lock> {
             locks
         })
         .collect()
-}
-
-/// Whether a signature in the document certifies it (DocMDP `/P` 2 or 3, 2 when absent). Such a document allows form
-/// values to change, and nothing else: read-only, required, display, colours and text size would break the certification.
-fn certified(entries: &[Entry]) -> bool {
-    per_field(entries).into_iter().filter(|e| e.kind == FieldKind::Signature).any(|e| {
-        let Some(v) = geti(&e.field, "V").filter(|v| v.is_dict().unwrap_or(false)) else { return false };
-        let Some(refs) = get(&v, "Reference") else { return false };
-        (0..refs.len().unwrap_or(0).min(16) as i32).any(|i| {
-            let Some(r) = refs.get_array(i).ok().flatten() else { return false };
-            get(&r, "TransformMethod").as_ref().and_then(text).as_deref() == Some("DocMDP")
-                && matches!(get(&r, "TransformParams").and_then(|p| int_of(&p, "P")).unwrap_or(2), 2 | 3)
-        })
-    })
 }
 
 /// A script may not write to a signature widget, nor to a field a signature in the document covers.
@@ -583,8 +579,10 @@ pub(crate) fn apply_changes(rt: &Rt, changed: &[FieldChange]) -> Result<Vec<u32>
     rt.pending.borrow_mut().clear();
     let doc = rt.doc();
     let entries = rt.entries()?;
-    let locks = locks_of(entries);
-    let values_only = certified(entries);
+    let locks = locks_of(doc, entries);
+    // Certified (in the catalog or on a signature): form values may change, nothing else. A /P 1 locks every field
+    // (`locks_of`), so there nothing is written at all.
+    let values_only = crate::outline::certified(doc)?.is_some();
     let mut pages = Vec::new();
     for ch in changed {
         let new = &ch.state;
@@ -703,7 +701,7 @@ pub(crate) fn cascade(rt: &Rt) -> Result<Vec<u32>> {
     calc.sort_by_key(|(e, _)| order.iter().position(|x| *x == e.node).unwrap_or(usize::MAX));
     let started = Instant::now();
     let mut values = names_to_values(entries);
-    let locks = locks_of(entries);
+    let locks = locks_of(rt.doc(), entries);
     let mut pages = Vec::new();
     'passes: for _ in 0..MAX_PASSES {
         let mut changed_any = false;

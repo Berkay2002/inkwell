@@ -1030,6 +1030,23 @@ fn flatten_turns_form_fields_into_page_content() {
     assert_eq!(digest(Path::new(&r.files[0].outputs[0].path)), digest(&plain));
 }
 
+/// A step that takes content out (here: the form fields) must not leave the embedded search index that still lists it.
+#[test]
+fn a_batch_output_drops_an_embedded_index_the_step_made_stale() {
+    use crate::search::catalog::embed;
+    let d = dir("embedded-index");
+    let mut doc = PdfDocument::from_bytes(&form_pdf()).unwrap();
+    embed::add(&mut doc).unwrap();
+    let f = put(&d, "indexed.pdf", &crate::redact::save_to_vec(&doc).unwrap());
+    let before = PdfDocument::open(f.to_string_lossy().as_ref()).unwrap();
+    assert!(embed::status(&before).current, "the fixture carries a current index");
+    drop(before);
+    let r = go(&action("F", vec![Step::FlattenForms(FlattenFormsStep {})]), &[f], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    let out = PdfDocument::open(&r.files[0].outputs[0].path).unwrap();
+    assert!(!embed::status(&out).present, "the stale index is not kept in the output");
+}
+
 #[test]
 fn the_built_in_actions_run_end_to_end() {
     let d = dir("builtins");
@@ -1298,6 +1315,41 @@ fn signatures_are_found_by_flag_certification_and_signed_field() {
             assert!(r.files[0].reason.as_deref().unwrap().starts_with("signed:"), "{name}");
         }
     }
+}
+
+#[test]
+fn a_file_whose_form_cannot_be_scanned_is_left_alone_as_possibly_signed() {
+    // A signature field with a value, no SigFlags, no DocMDP, on 2000 pages that each repeat its
+    // widget 1001 times: past the form scan budget, so the field list errors.
+    let d = dir("signed-unscannable");
+    let refs = "3 0 R ".repeat(1001);
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [3 0 R] >> >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count 2000 >>", (0..2000).map(|i| format!("{} 0 R ", 4 + i)).collect::<String>()),
+        "<< /Type /Annot /Subtype /Widget /FT /Sig /T (S) /Rect [0 0 50 20] /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /Contents <00> /ByteRange [0 0 0 0] >> >>".to_string(),
+    ];
+    objs.extend((0..2000).map(|_| format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{refs}] /Resources << >> >>")));
+    let f = put(&d, "big.pdf", &assemble(&objs, ""));
+    let r = go(&action("n", vec![footer("<<1>>")]), &[f], None);
+    assert_eq!(r.files[0].status, Status::Skipped, "{:?}", r.files[0].reason);
+    assert!(r.files[0].reason.as_deref().unwrap().starts_with("could not check whether the file is signed:"), "{:?}", r.files[0].reason);
+}
+
+#[test]
+fn a_file_whose_form_is_too_large_to_check_for_a_certification_is_left_alone_as_possibly_signed() {
+    // No SigFlags and no signature at all, but 20 001 entries in /Fields: past what the certification walk reads, so
+    // the answer is "could not check", not "not signed".
+    let d = dir("certification-unchecked");
+    let objs = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{}] >> >>", "3 0 R ".repeat(20_001)),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /FT /Tx /T (t) >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>".to_string(),
+    ];
+    let f = put(&d, "wide.pdf", &assemble(&objs, ""));
+    let r = go(&action("n", vec![footer("<<1>>")]), &[f], None);
+    assert_eq!(r.files[0].status, Status::Skipped, "{:?}", r.files[0].reason);
+    assert!(r.files[0].reason.as_deref().unwrap().starts_with("could not check whether the file is signed:"), "{:?}", r.files[0].reason);
 }
 
 #[test]

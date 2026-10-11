@@ -102,6 +102,28 @@ fz_matrix mupdf_pdf_page_transform(fz_context *ctx, pdf_page *page, mupdf_error_
     return ctm;
 }
 
+// What fz_bound_page reports for page `number` (crop box through the page transform), read from the
+// page dictionary alone: loading a pdf_page also loads every annotation and link and scans the resources.
+fz_rect mupdf_pdf_page_bounds(fz_context *ctx, fz_document *doc, int number, mupdf_error_t **errptr)
+{
+    fz_rect rect = fz_empty_rect;
+    fz_matrix ctm = fz_identity;
+    fz_var(rect);
+    fz_try(ctx)
+    {
+        pdf_document *pdf = pdf_specifics(ctx, doc);
+        if (!pdf)
+            fz_throw(ctx, FZ_ERROR_ARGUMENT, "not a PDF document");
+        pdf_page_obj_transform(ctx, pdf_lookup_page_obj(ctx, pdf, number), &rect, &ctm);
+        rect = fz_transform_rect(rect, ctm);
+    }
+    fz_catch(ctx)
+    {
+        mupdf_save_error(ctx, errptr);
+    }
+    return rect;
+}
+
 fz_matrix mupdf_pdf_page_obj_transform(fz_context *ctx, pdf_obj *page, mupdf_error_t **errptr)
 {
     fz_matrix ctm = fz_identity;

@@ -24,6 +24,13 @@ const cancelSearchFiles = vi.fn(() => Promise.resolve());
 const searchFileToken = vi.fn((_search: number, index: number) => Promise.resolve({ token: `tok-${index}`, path: "" }));
 /** What `searchFiles` answers with: the id at once, or never (the folder is still being listed). */
 let filesAnswer: () => Promise<number> = () => Promise.resolve(7);
+let buildSend: Send = () => {};
+const catalogSearchCall = vi.fn();
+const catalogCancel = vi.fn(() => Promise.resolve());
+const catalogDelete = vi.fn(() => Promise.resolve());
+let buildDone: () => Promise<unknown> = () => Promise.resolve({});
+const meta = (id: string, name: string, built = 1) => ({ id, name, folder: `C:/Docs/${name}`, recursive: true, built, files: 3 });
+let catalogs = [meta("c1", "Housing"), meta("c2", "Fresh", 0)];
 
 vi.mock("./api", () => ({
   openDocument: vi.fn(() =>
@@ -46,6 +53,23 @@ vi.mock("./api", () => ({
     // The engine says "started" before it lists anything.
     onEvent({ kind: "started", search: 7 });
     return filesAnswer();
+  },
+  catalogList: vi.fn(() => Promise.resolve(catalogs)),
+  catalogStale: vi.fn((id: string) => Promise.resolve({ added: id === "c1" ? 2 : 0, changed: id === "c1" ? 1 : 0, removed: 0, unusable: id === "c2" })),
+  catalogEstimate: vi.fn(() => Promise.resolve({ files: 1800, bytes: 1e9, secs: 120, indexBytes: 40 * 1024 * 1024, capped: false })),
+  catalogCreate: vi.fn((_f: string, name: string) => Promise.resolve(meta("c3", name, 0))),
+  catalogDelete,
+  catalogCancel,
+  catalogBuild: (id: string, full: boolean, onEvent: Send) => {
+    buildSend = onEvent;
+    onEvent({ kind: "started", job: 9 });
+    return buildDone().then(() => ({ files: 3, added: 3, changed: 0, removed: 0, damaged: 0, password: 0, cancelled: false, id, full }));
+  },
+  catalogSearch: (id: string, q: string, opts: unknown, onEvent: Send) => {
+    catalogSearchCall(id, q, opts);
+    filesSend = onEvent;
+    onEvent({ kind: "started", search: 7 });
+    return Promise.resolve(7);
   },
   pickOpen: vi.fn(() => Promise.resolve([{ token: "f1", path: String.raw`C:\Docs\A.pdf` }, { token: "f2", path: String.raw`C:\Docs\B.pdf` }])),
   pickSearchFolder: vi.fn(() => Promise.resolve({ token: "folder-token", path: String.raw`C:\Docs\Housing` })),
@@ -219,5 +243,82 @@ describe("search across files", () => {
     // the hit on page 3 at y 30 was asked for, not the first one in the document
     expect(s.hits[s.current]).toMatchObject({ page: 2 });
     expect(s.hits[s.current].rects[0][1]).toBe(30);
+  });
+});
+
+describe("search in a catalog", () => {
+  const reset = async () => {
+    const { useSearch } = await setup();
+    useSearch.setState({ target: null, run: null, build: null, draft: null, catalogs: [], stale: {} });
+    return useSearch;
+  };
+
+  it("lists the catalogs with what a refresh would change", async () => {
+    const useSearch = await reset();
+    await useSearch.getState().loadCatalogs();
+    expect(useSearch.getState().catalogs.map((c) => c.name)).toEqual(["Housing", "Fresh"]);
+    expect(useSearch.getState().stale.c1).toMatchObject({ added: 2, changed: 1 });
+    expect(useSearch.getState().stale.c2.unusable).toBe(true);
+  });
+
+  it("searches the selected catalog with the folder search's events and opens a hit by its search id", async () => {
+    const useSearch = await reset();
+    await useSearch.getState().loadCatalogs();
+    useSearch.getState().selectCatalog("c1");
+    expect(useSearch.getState().target).toEqual({ kind: "catalog", id: "c1", name: "Housing" });
+    await useSearch.getState().startFolder(" notice ");
+    expect(catalogSearchCall).toHaveBeenCalledWith("c1", "notice", expect.anything());
+    expect(searchFilesCall).not.toHaveBeenCalled();
+    filesSend({ kind: "file", search: 7, index: 0, path: String.raw`C:\Docs\Housing\A.pdf`, name: "A.pdf", pageCount: 4, hits: 1, pages: 1, truncated: false, items: [{ ...found("notice", 30), page: 2 }] });
+    filesSend({ kind: "done", search: 7, files: 3, matched: 1, hits: 1, skipped: 0, cloudOnly: 0, cancelled: false, capped: false });
+    expect(useSearch.getState().run).toMatchObject({ running: false, matched: 1, scanned: 3 });
+    await useSearch.getState().openAt(useSearch.getState().run!.files[0], 0);
+    expect(searchFileToken).toHaveBeenCalledWith(7, 0);
+  });
+
+  it("shows the estimate for a picked folder, and a new catalog is created, selected and built with progress", async () => {
+    const useSearch = await reset();
+    await useSearch.getState().newCatalog();
+    expect(useSearch.getState().draft).toMatchObject({ token: "folder-token", name: "Housing", recursive: true });
+    expect(useSearch.getState().draft!.estimate!.files).toBe(1800);
+    useSearch.getState().patchDraft({ name: "Rentals" });
+    let finish = () => {};
+    buildDone = () => new Promise<void>((r) => (finish = r));
+    try {
+      const made = useSearch.getState().createCatalog();
+      await tick();
+      expect(useSearch.getState().draft).toBeNull();
+      expect(useSearch.getState().target).toEqual({ kind: "catalog", id: "c3", name: "Rentals" });
+      buildSend({ kind: "progress", job: 9, done: 2, total: 3 });
+      expect(useSearch.getState().build).toMatchObject({ id: "c3", job: 9, done: 2, total: 3, running: true });
+      useSearch.getState().cancelBuild();
+      expect(catalogCancel).toHaveBeenCalledWith(9);
+      finish();
+      await made;
+    } finally {
+      buildDone = () => Promise.resolve({});
+    }
+    expect(useSearch.getState().build).toMatchObject({ running: false, line: "3 files, 3 new" });
+  });
+
+  it("re-reads the estimate when sub-folders are switched, and a cancelled sheet leaves nothing behind", async () => {
+    const useSearch = await reset();
+    await useSearch.getState().newCatalog();
+    useSearch.getState().patchDraft({ recursive: false });
+    expect(useSearch.getState().draft).toMatchObject({ recursive: false, estimate: null });
+    await tick();
+    expect(useSearch.getState().draft!.estimate).not.toBeNull();
+    useSearch.getState().dropDraft();
+    expect(useSearch.getState().draft).toBeNull();
+  });
+
+  it("deleting the selected catalog clears the target and its results", async () => {
+    const useSearch = await reset();
+    await useSearch.getState().loadCatalogs();
+    useSearch.getState().selectCatalog("c1");
+    await useSearch.getState().removeCatalog("c1");
+    expect(catalogDelete).toHaveBeenCalledWith("c1");
+    expect(useSearch.getState()).toMatchObject({ target: null, run: null });
+    expect(useSearch.getState().catalogs.map((c) => c.id)).toEqual(["c2"]);
   });
 });
