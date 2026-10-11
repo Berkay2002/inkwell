@@ -1,9 +1,10 @@
 import type { IconName } from "../components/Icons";
 import { useStore } from "../store";
 import { type FileRef, pickOpen } from "./api";
+import { useConvert } from "./convertStore";
 import { useTools } from "./toolsStore";
 
-export type ToolId = "organize" | "edit" | "annotate" | "fill" | "redact" | "ocr" | "compress" | "merge";
+export type ToolId = "organize" | "edit" | "annotate" | "fill" | "redact" | "ocr" | "compress" | "merge" | "export" | "create";
 
 export const quickTools: { id: ToolId; label: string; icon: IconName }[] = [
   { id: "organize", label: "Organize", icon: "organize" },
@@ -14,6 +15,8 @@ export const quickTools: { id: ToolId; label: string; icon: IconName }[] = [
   { id: "ocr", label: "OCR", icon: "ocr" },
   { id: "compress", label: "Compress", icon: "compress" },
   { id: "merge", label: "Merge", icon: "merge" },
+  { id: "export", label: "Export", icon: "share" },
+  { id: "create", label: "Create PDF", icon: "filePlus" },
 ];
 
 /** Later phases register the real tool here; until one does, a tool just opens the picked file. */
@@ -27,8 +30,15 @@ for (const id of ["ocr", "compress"] as const) {
   };
 }
 
+toolHandlers.export = async (f) => {
+  await useStore.getState().openPath(f.path, f.token);
+  useConvert.getState().openExport();
+};
+
 // TODO(editing phases): set toolHandlers[id] when the tool exists (it receives the picked file's token and path).
 export async function launchTool(id: ToolId) {
+  // Create needs no document: its rail opens on Home.
+  if (id === "create") return useConvert.getState().openCreate();
   const [f] = await pickOpen(false);
   if (!f) return;
   await (toolHandlers[id] ?? ((f: FileRef) => useStore.getState().openPath(f.path, f.token)))(f);

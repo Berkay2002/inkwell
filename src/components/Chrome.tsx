@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { requestClose } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
+import { useConvert } from "../lib/convertStore";
 import { useTools } from "../lib/toolsStore";
 import { type DocState, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
@@ -136,6 +137,8 @@ export function Toolbar({ doc }: { doc: DocState }) {
         items={[
           { label: "Compress file…", onSelect: () => useTools.getState().open("compress", id) },
           { label: "Recognize text…", onSelect: () => useTools.getState().open("ocr", id) },
+          { label: "Export…", onSelect: () => useConvert.getState().openExport(id) },
+          { label: "Create PDF…", onSelect: () => useConvert.getState().openCreate() },
         ]}
       >
         Tools

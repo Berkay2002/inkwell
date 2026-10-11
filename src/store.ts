@@ -169,7 +169,7 @@ export const useStore = create<Store>((set, get) => {
       const job = (async () => {
         try {
           const file = token ?? (await api.knownFile(path)).token;
-          const r = await api.openDocument(file, scratch);
+          const r = scratch ? await api.openDocument(file, true) : await api.openDocument(file);
           if (r.status === "opened") {
             // Rust canonicalised the path: a different spelling of an open file is the same tab.
             const dup = Object.values(get().docs).find((d) => keyOf(d.path) === keyOf(r.path));

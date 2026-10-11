@@ -179,6 +179,45 @@
 .tl-field.bad {
   border-color: var(--danger);
 }
+.tl-row {
+  display: flex;
+  gap: 8px;
+}
+.tl-row .tl-field {
+  flex: 1;
+  min-width: 0;
+}
+.tl-row .tl-num {
+  flex: none;
+  width: 84px;
+}
+.tl-files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tl-files li {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.tl-files .tl-file {
+  flex: 1;
+  min-width: 0;
+}
+/* Home with the Create rail beside it */
+.home-wrap {
+  display: flex;
+  grid-row: 2 / 4;
+  min-height: 0;
+}
+.home-wrap > .home {
+  flex: 1;
+  min-width: 0;
+}
 .tl-link {
   align-self: flex-start;
   padding: 2px 0;
