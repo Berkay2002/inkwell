@@ -39,9 +39,12 @@ vi.mock("./ai", () => ({
 }));
 
 vi.mock("./history", () => ({ historyCheckpoint: vi.fn(() => Promise.resolve(null)) }));
+vi.mock("./edit", () => ({ applyState: vi.fn() }));
 
 import * as ai from "./ai";
+import { applyState } from "./edit";
 import { historyCheckpoint } from "./history";
+import { useRedact } from "./redact";
 import { useAi } from "./aiStore";
 import { useStore } from "../store";
 
@@ -173,6 +176,39 @@ describe("assistant store", () => {
     vi.mocked(ai.aiSetPermissions).mockClear();
     useAi.getState().setSettings({ hideSources: true }); // unrelated settings do not ping the backend
     expect(ai.aiSetPermissions).not.toHaveBeenCalled();
+  });
+
+  describe("changes the assistant made", () => {
+    const state = { rev: 3, pageCount: 4, sizes: [], path: "a.pdf", dirty: true, undo: "Redact 2 items", redo: null, redacted: true };
+    const report = { marks: 2, sanitize: { metadata: 1 }, verify: { leaks: [] } };
+    const start = () => {
+      useAi.getState().setSettings({ consent: true });
+      useAi.getState().ask(1, { kind: "ask", question: "redact my name" });
+    };
+
+    it("adopts the new generation like any edit and does not move the view", () => {
+      start();
+      emit({ kind: "ui", action: { type: "edited", state, redacted: null } } as ChatEvent);
+      expect(applyState).toHaveBeenCalledWith(1, state);
+      expect(goTo).not.toHaveBeenCalled();
+      expect(useAi.getState().mark).toBeNull();
+    });
+
+    it("shows an applied redaction in the Redact rail, unless the assistant is docked there", () => {
+      useRedact.setState({ open: false, docs: {} });
+      start();
+      useAi.setState({ settings: { ...useAi.getState().settings, mode: "docked" } });
+      emit({ kind: "ui", action: { type: "edited", state, redacted: report } } as ChatEvent);
+      expect(useRedact.getState().docs[1]).toMatchObject({
+        phase: "report",
+        outcome: { status: "applied", marks: 2, savedTo: null },
+      });
+      expect(useRedact.getState().open).toBe(false);
+
+      useAi.setState({ settings: { ...useAi.getState().settings, mode: "floating" } });
+      emit({ kind: "ui", action: { type: "edited", state, redacted: report } } as ChatEvent);
+      expect(useRedact.getState().open).toBe(true);
+    });
   });
 
   describe("tool activity", () => {

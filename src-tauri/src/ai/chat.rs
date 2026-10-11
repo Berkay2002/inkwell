@@ -863,8 +863,8 @@ impl Assistant {
             Ok(o) => {
                 session.state.lock().unwrap().sent.extend(o.seen.iter().cloned());
                 if let Some(ui) = &o.ui {
-                    match ui {
-                        UiAction::GoTo { page: p } | UiAction::Show { page: p, .. } => *page = *p,
+                    if let Some(p) = ui.page() {
+                        *page = p;
                     }
                     sink(ChatEvent::Ui { action: ui.clone() });
                 }

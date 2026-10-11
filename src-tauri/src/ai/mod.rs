@@ -2,16 +2,19 @@
 //! user's own ChatGPT subscription through the locally logged-in Codex CLI (`codex app-server`).
 //! No API keys, nothing persisted; text leaves the machine only on an explicit user action.
 
+pub mod actions;
 pub mod chat;
 pub mod codex;
 pub mod rpc;
 pub mod text;
 pub mod tools;
 
+use crate::engine::edit::EditSource;
 use crate::engine::{DocId, Engine, OutlineItem, pool::class};
 pub use chat::Assistant;
 use chat::{AskRequest, ChatEvent, Prepared, Status};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::State;
 use tauri::ipc::Channel;
 use text::DocText;
@@ -37,6 +40,51 @@ impl tools::DocHost for EngineHost {
     fn page_png(&self, rev: u32, page: u32, max_px: u32) -> Result<Vec<u8>, String> {
         let doc = self.doc;
         self.eng.call(class::INTERACTIVE, move |e| e.page_png(doc, rev, page, max_px)).map_err(|e| e.to_string())
+    }
+}
+
+/// The host of one turn: the engine side plus the edit lane the action tools change the document
+/// through. Every change of the turn is made as `EditSource::Assistant { turn }`, so the whole turn
+/// is one undo unit; once one landed, page images are rendered from the document as it is now.
+struct ActingHost {
+    inner: EngineHost,
+    turn: String,
+    edited: AtomicBool,
+}
+
+impl ActingHost {
+    fn new(eng: Arc<Engine>, doc: DocId) -> Self {
+        static TURNS: AtomicU64 = AtomicU64::new(1);
+        let n = TURNS.fetch_add(1, Ordering::Relaxed);
+        ActingHost { inner: EngineHost { eng, doc }, turn: format!("assistant-{n}"), edited: AtomicBool::new(false) }
+    }
+}
+
+impl tools::DocHost for ActingHost {
+    fn meta(&self) -> Vec<(&'static str, String)> {
+        self.inner.meta()
+    }
+
+    fn outline(&self) -> Result<Vec<OutlineItem>, String> {
+        self.inner.outline()
+    }
+
+    fn page_png(&self, rev: u32, page: u32, max_px: u32) -> Result<Vec<u8>, String> {
+        let rev = if self.edited.load(Ordering::SeqCst) {
+            self.inner.eng.doc_entry(self.inner.doc).map_err(|e| e.to_string())?.generation()
+        } else {
+            rev
+        };
+        self.inner.page_png(rev, page, max_px)
+    }
+
+    fn lane(&self) -> Option<tools::Lane<'_>> {
+        Some(tools::Lane {
+            eng: &self.inner.eng,
+            doc: self.inner.doc,
+            source: EditSource::Assistant { turn: self.turn.clone() },
+            edited: &self.edited,
+        })
     }
 }
 
@@ -79,7 +127,7 @@ pub async fn ai_prepare(eng: Eng<'_>, ai: Ai<'_>, doc: DocId) -> Result<Prepared
 #[tauri::command]
 pub fn ai_ask(eng: Eng<'_>, ai: Ai<'_>, doc: DocId, req: AskRequest, on_event: Channel<ChatEvent>) -> Result<(), String> {
     let (eng, ai) = (eng.inner().clone(), ai.inner().clone());
-    let host = Arc::new(EngineHost { eng: eng.clone(), doc });
+    let host = Arc::new(ActingHost::new(eng.clone(), doc));
     let loader = {
         let ai = ai.clone();
         move || text_for(&eng, &ai, doc)

@@ -8,7 +8,8 @@
 //!    approval card, and `run`. The label is all the user sees on an Apply / Reject card, so it
 //!    names what and where: "Delete p. 4", "Rotate pp. 2-5 by 90°".
 //! 2. Pick the class honestly. `Read` always runs. `Edit` changes the document and asks first in
-//!    the `ask` mode. `Destructive` (deleting pages, redacting, overwriting) asks in `ask` and `auto`.
+//!    the `ask` mode. `Destructive` (deleting pages, overwriting) asks in `ask` and `auto`.
+//!    `Permanent` (redaction: it cannot be taken back from the saved file) asks in every mode.
 //!    The permission check lives in the turn's tool handler, never in the tool.
 //! 3. An `Edit` or `Destructive` handler must go through the document's authoritative engine lane
 //!    (docs/engine-rules.md 1-3) so that one call is exactly one undo step, and must return `Err`
@@ -18,7 +19,8 @@
 //!    of those passages verify.
 
 use super::text::{self, Chunk, DocText};
-use crate::engine::OutlineItem;
+use crate::engine::edit::{EditSource, EditState};
+use crate::engine::{DocId, Engine, OutlineItem};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -32,6 +34,8 @@ pub enum Class {
     Read,
     Edit,
     Destructive,
+    /// Cannot be taken back from the saved file (a redaction): asks in every mode, Full too.
+    Permanent,
 }
 
 /// The user's permission mode (`inkwell.ai` settings).
@@ -49,7 +53,7 @@ pub enum Mode {
 
 impl Mode {
     pub fn needs_approval(self, class: Class) -> bool {
-        !matches!((self, class), (_, Class::Read) | (Mode::Full, _) | (Mode::Auto, Class::Edit))
+        !matches!((self, class), (_, Class::Read) | (Mode::Full, Class::Edit | Class::Destructive) | (Mode::Auto, Class::Edit))
     }
 }
 
@@ -59,6 +63,20 @@ impl Mode {
 pub enum UiAction {
     GoTo { page: u32 },
     Show { page: u32, rects: Vec<[f32; 4]>, quote: String },
+    /// The assistant changed the document: the UI adopts the new generation (its pages, undo
+    /// label, marks and comments). `redacted` is the report of a redaction that was just applied
+    /// (`marks`, `sanitize`, `verify`): the Redact rail opens on it.
+    Edited { state: EditState, redacted: Option<Value> },
+}
+
+impl UiAction {
+    /// The page this action puts in view, if it does.
+    pub fn page(&self) -> Option<u32> {
+        match self {
+            UiAction::GoTo { page } | UiAction::Show { page, .. } => Some(*page),
+            UiAction::Edited { .. } => None,
+        }
+    }
 }
 
 /// The selection in the viewer when the question was asked.
@@ -77,6 +95,21 @@ pub trait DocHost: Send + Sync {
     /// The whole page as a PNG, longer side at most `max_px`, of the document state `rev` (the text
     /// revision the tools read): an error when the document is no longer at it.
     fn page_png(&self, rev: u32, page: u32, max_px: u32) -> Result<Vec<u8>, String>;
+    /// The edit lane of the document, for the tools that change it (`actions.rs`). `None` where
+    /// there is no engine behind the host.
+    fn lane(&self) -> Option<Lane<'_>> {
+        None
+    }
+}
+
+/// The engine side an action tool works through: every change is one step of the document's own
+/// edit lane (docs/engine-rules.md 1-3), made under `source` so a whole assistant turn undoes as one.
+pub struct Lane<'a> {
+    pub eng: &'a Arc<Engine>,
+    pub doc: DocId,
+    pub source: EditSource,
+    /// Set after a change landed, so the host renders the document as it is now.
+    pub edited: &'a std::sync::atomic::AtomicBool,
 }
 
 pub struct Ctx<'a> {
@@ -145,12 +178,12 @@ pub fn response(r: &Result<Output, String>) -> Value {
 
 // ---- argument helpers -------------------------------------------------------------------------
 
-fn int(args: &Value, key: &str) -> Option<i64> {
+pub(super) fn int(args: &Value, key: &str) -> Option<i64> {
     args.get(key).and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)).or_else(|| v.as_str()?.trim().parse().ok()))
 }
 
 /// A 1-based page argument as a 0-based index, checked against the document.
-fn page_of(args: &Value, key: &str, pages: u32) -> Result<u32, String> {
+pub(super) fn page_of(args: &Value, key: &str, pages: u32) -> Result<u32, String> {
     let p = int(args, key).ok_or_else(|| format!("\"{key}\" is required: a page number from 1 to {pages}."))?;
     if p < 1 || p > pages as i64 {
         return Err(format!("Page {p} does not exist: the document has {pages} page{}.", if pages == 1 { "" } else { "s" }));
@@ -171,7 +204,7 @@ pub fn page_list_label(pages: &[i64]) -> String {
     }
 }
 
-fn pages_requested(args: &Value) -> Vec<i64> {
+pub(super) fn pages_requested(args: &Value) -> Vec<i64> {
     if let Some(a) = args.get("pages").and_then(Value::as_array) {
         // capped like a range: a model-built list of millions of pages must not stall the turn
         return a.iter().take(500).filter_map(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok())).collect();
@@ -182,7 +215,7 @@ fn pages_requested(args: &Value) -> Vec<i64> {
     }
 }
 
-fn clip(s: &str, max: usize) -> String {
+pub(super) fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -191,7 +224,7 @@ fn clip(s: &str, max: usize) -> String {
     out
 }
 
-fn lower_ws(s: &str) -> String {
+pub(super) fn lower_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
@@ -201,7 +234,7 @@ const DEFAULT_CHARS: usize = 12_000;
 const MAX_CHARS: usize = 40_000;
 const IMAGE_PX: u32 = 1400;
 
-fn tool(
+pub(super) fn tool(
     name: &str,
     description: &str,
     schema: Value,
@@ -212,8 +245,14 @@ fn tool(
     Arc::new(Tool { name: name.into(), description: description.into(), schema, class, label, run: Arc::new(run) })
 }
 
-/// The tools every document gets.
+/// The tools every document gets: reading and navigating here, changing in `actions.rs`.
 pub fn builtin() -> Vec<Arc<Tool>> {
+    let mut all = read_tools();
+    all.extend(super::actions::tools());
+    all
+}
+
+fn read_tools() -> Vec<Arc<Tool>> {
     let none = json!({ "type": "object", "properties": {}, "additionalProperties": false });
     let page = |what: &str| json!({ "type": "integer", "minimum": 1, "description": what });
     vec![
@@ -540,6 +579,10 @@ mod tests {
         }
         assert!(!Ask.needs_approval(Read) && Ask.needs_approval(Edit) && Ask.needs_approval(Destructive));
         assert!(!Auto.needs_approval(Read) && !Auto.needs_approval(Edit) && Auto.needs_approval(Destructive));
+        // a redaction asks in every mode
+        for m in [Ask, Auto, Full] {
+            assert!(m.needs_approval(Permanent), "{m:?}");
+        }
     }
 
     #[test]

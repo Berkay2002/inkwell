@@ -652,7 +652,7 @@ fn button_plan(entries: &[Entry], e: &Entry, value: &FieldValue) -> Result<Optio
 
 /// True when `set_value` would leave the document exactly as it is (a radio button that is already
 /// chosen, text typed that is already there): such a fill is not an undo step.
-fn set_value_is_noop(doc: &PdfDocument, page: u32, xref: i32, value: &FieldValue) -> Result<bool> {
+pub(crate) fn set_value_is_noop(doc: &PdfDocument, page: u32, xref: i32, value: &FieldValue) -> Result<bool> {
     let entries = scan(doc)?;
     let Some(e) = entries.iter().find(|e| e.page == page && e.xref == xref) else { return Ok(false) };
     if flag(field_ff(e), FieldFlags::READ_ONLY) {

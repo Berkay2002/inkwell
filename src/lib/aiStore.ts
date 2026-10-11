@@ -1,6 +1,9 @@
 import { create } from "zustand";
 import * as ai from "./ai";
+import { applyState } from "./edit";
+import { useForms } from "./forms";
 import { historyCheckpoint } from "./history";
+import { useRedact } from "./redact";
 import {
   MODES,
   type Activity,
@@ -149,7 +152,8 @@ export const useAi = create<AiStore>((set, get) => {
           }
           case "ui": {
             const a = e.action;
-            reveal(doc, a.page, a.type === "show" ? a.rects : [], 0);
+            if (a.type === "edited") adopt(doc, a);
+            else reveal(doc, a.page, a.type === "show" ? a.rects : [], 0);
             break;
           }
           case "done":
@@ -175,6 +179,25 @@ export const useAi = create<AiStore>((set, get) => {
     ).catch((err) =>
       patchMsg(doc, bot.id, (m) => ({ ...m, activity: settle(m.activity), state: "error", error: String(err), hint: null })),
     );
+  };
+
+  /** The assistant changed the document: its new generation becomes the document's, as after any edit,
+   *  and a redaction it applied is shown in the Redact rail (a docked assistant keeps its place: the
+   *  message has a Review in Redact button instead). */
+  const adopt = (doc: number, a: Extract<ai.UiAction, { type: "edited" }>) => {
+    applyState(doc, a.state);
+    if (useForms.getState().docs[doc]) void useForms.getState().refresh(doc);
+    const r = a.redacted;
+    if (!r) return;
+    useRedact.getState().showApplied(doc, {
+      status: "applied",
+      state: a.state,
+      marks: r.marks,
+      sanitize: r.sanitize,
+      verify: r.verify,
+      savedTo: null,
+    });
+    if (get().settings.mode !== "docked") useRedact.getState().setOpen(true);
   };
 
   /** Scrolls the document to `page` and outlines `rects` there (`n` is the source badge lit, 0 = none). */

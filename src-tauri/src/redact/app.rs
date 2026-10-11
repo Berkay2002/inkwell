@@ -35,6 +35,8 @@ fn quad_of(d: &QuadDto) -> Quad {
 pub enum FindQuery {
     Text { needle: String, case_sensitive: bool, whole_word: bool },
     Pattern { pattern: Pattern },
+    /// For the assistant: anything the named patterns do not cover (dates, reference numbers).
+    Regex { pattern: String, case_sensitive: bool },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -83,6 +85,7 @@ pub fn find(eng: &Engine, doc: DocId, q: &FindQuery) -> Result<Vec<HitDto>> {
     let q = match q.clone() {
         FindQuery::Text { needle, case_sensitive, whole_word } => Query::Text { needle, case_sensitive, whole_word },
         FindQuery::Pattern { pattern } => Query::Pattern(pattern),
+        FindQuery::Regex { pattern, case_sensitive } => Query::Regex { pattern, case_sensitive },
     };
     let hits = eng.read_custom(doc, |d| super::find(d, &q).map_err(err))?;
     Ok(hits.iter().map(|h| HitDto { page: h.page as u32, text: h.text.clone(), quads: h.quads.iter().map(quad_dto).collect(), before: h.before.clone(), after: h.after.clone() }).collect())

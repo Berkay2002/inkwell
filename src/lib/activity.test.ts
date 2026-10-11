@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isVerified, trailSummary, waiting } from "./activity";
+import { isVerified, touchedRedaction, trailSummary, waiting } from "./activity";
 import type { Activity, Citation } from "./ai";
 
 const act = (label: string, state: Activity["state"] = "done", id = label): Activity => ({
@@ -28,6 +28,16 @@ describe("activity trail", () => {
   it("lists only the calls that wait for the user", () => {
     expect(waiting([act("a"), act("b", "waiting"), act("c", "running")]).map((a) => a.label)).toEqual(["b"]);
     expect(waiting(undefined)).toEqual([]);
+  });
+
+  it("offers Review in Redact only after a redaction tool really changed something", () => {
+    const r = (tool: string, cls: Activity["class"], state: Activity["state"]): Activity => ({ ...act(tool, state), tool, class: cls });
+    expect(touchedRedaction([r("redact_find_and_mark", "edit", "done")])).toBe(true);
+    expect(touchedRedaction([r("redact_apply", "permanent", "done")])).toBe(true);
+    expect(touchedRedaction([r("redact_list_marks", "read", "done")])).toBe(false);
+    expect(touchedRedaction([r("redact_find_and_mark", "edit", "failed"), r("redact_apply", "permanent", "rejected")])).toBe(false);
+    expect(touchedRedaction([r("add_comment", "edit", "done")])).toBe(false);
+    expect(touchedRedaction(undefined)).toBe(false);
   });
 
   it("trusts a citation only when its quote was found on a page", () => {
