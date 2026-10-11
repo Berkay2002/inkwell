@@ -6,7 +6,9 @@ import { openA11y } from "../lib/a11y";
 import { useConvert } from "../lib/convertStore";
 import { useMarks } from "../lib/marksStore";
 import { useProtect } from "../lib/protectStore";
+import { togglePageDark } from "../lib/pageDark";
 import { useTools } from "../lib/toolsStore";
+import { usePagesDark, useSystemDark } from "../lib/usePagesDark";
 import { type DocState, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
 import { HistoryToggle, openCompareSetup } from "./history/HistoryPanel";
@@ -167,6 +169,7 @@ function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => s
       <Btn icon="outline" title="Outline" on={sidebar === "outline"} onClick={() => st().toggleSidebar("outline")} />
       <span className="sep" />
       <PageBox doc={doc} />
+      <DarkPagesButton />
       <span className="sep" />
       <Btn icon="minus" title={`Zoom out${keys("zoom-out")}`} onClick={() => st().setZoom(id, stepZoom(doc.zoom, -1))} />
       <select
@@ -192,6 +195,24 @@ function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => s
       <Btn icon="plus" title={`Zoom in${keys("zoom-in")}`} onClick={() => st().setZoom(id, stepZoom(doc.zoom, 1))} />
       <Btn icon="rotate" title={`Rotate${keys("rotate-cw")}`} onClick={() => st().rotate(id, 1)} />
     </>
+  );
+}
+
+/** Shows the pages dark or normal, whatever the app's own theme (the file is never changed). */
+function DarkPagesButton() {
+  const dark = usePagesDark();
+  const systemDark = useSystemDark();
+  const keys = commands.find((c) => c.id === "toggle-dark-pages")?.keys?.[0];
+  return (
+    <Btn
+      icon="pageDark"
+      title={`${dark ? "Normal pages" : "Dark pages"}${keys ? ` (${prettyKeys(keys)})` : ""}`}
+      on={dark}
+      onClick={() => {
+        const s = st();
+        s.setPageDark(togglePageDark(s.pageDark, s.theme, systemDark));
+      }}
+    />
   );
 }
 

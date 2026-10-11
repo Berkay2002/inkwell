@@ -71,9 +71,15 @@ const PATHS = {
   pushButton: "M3 8h18v8H3ZM8 12h8",
   signature: "M3 16c3-6 4-9 6-9s0 8 2 8 3-4 5-4 2 2 4 2M3 21h18",
   wand: "M15 4v3M13.5 5.5h3M19 11v2M18 12h2M5 20 15 10l-2-2L3 18ZM9 5v2M8 6h2",
+  pageDark: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM12 3v18",
 };
 
 export type IconName = keyof typeof PATHS;
+
+/** Parts of an icon that are filled in as well as stroked. */
+const FILLS: Partial<Record<IconName, string>> = {
+  pageDark: "M12 3a9 9 0 0 1 0 18Z",
+};
 
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   return (
@@ -89,6 +95,7 @@ export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
       aria-hidden
     >
       <path d={PATHS[name]} />
+      {FILLS[name] && <path d={FILLS[name]} fill="currentColor" />}
     </svg>
   );
 }

@@ -4,7 +4,7 @@ Sources: pdfcraft ROADMAP.md (area breadth/ready %), acrobat-features.toml ids, 
 
 | Area | pdfcraft (ROADMAP breadth/ready; TOML) | Inkwell (file evidence) | Gap |
 |---|---|---|---|
-| Viewer | B 62.5/55; pages drawn by vendored hayro | Viewer.tsx, TileCanvas.tsx; search, outline, page_text commands (lib.rs) | Renderer decision |
+| Viewer | B 62.5/55; pages drawn by vendored hayro | Viewer.tsx, TileCanvas.tsx; search, outline, page_text commands (lib.rs); dark pages: toolbar toggle, Off/On/Follow app theme, photos stay natural (docs/page-dark.md) | Renderer decision |
 | Find | view.find shipped; advanced search partial | search, cancel_search commands; no options UI found | Find options, results panel |
 | Organize | D 61.2/70; organize.* shipped | Organize.tsx; extract_pages, split_document; graft keeps links and widgets (docs/insert-links-widgets.md) | Transitions, portfolios |
 | Combine/split | organize.combine-files, split-* shipped; combine-options partial | merge_files, split_document commands | Combine options |

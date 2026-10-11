@@ -4,7 +4,9 @@ import type { Shown } from "../lib/a11y";
 import { useAi } from "../lib/aiStore";
 import { type Rot, type Size, type TileRef, pageSpaceTransform, tileKeyStr } from "../lib/layout";
 import { type Mark, useRedact } from "../lib/redact";
+import { naturalRects } from "../lib/pageDark";
 import { cached } from "../lib/tiles";
+import { usePagesDark } from "../lib/usePagesDark";
 import type { Rect4 } from "../store";
 import { AnnotLayer } from "./comments/AnnotLayer";
 import { MarkPreview } from "./MarkPreview";
@@ -58,6 +60,8 @@ export const PageView = memo(function PageView(p: Props) {
   const underTiles = under?.filter((u) => u.scale !== scale) ?? [];
 
   const lines = usePageText(docId, p.rev, page, p.wantText);
+  // Dark pages: the pictures on the page stay in their own colours.
+  const natural = useNaturalImages(docId, p.rev, page, rawSize);
   // The assistant's last clicked citation, highlighted on its page.
   const mark = useAi((s) => (s.mark && s.mark.doc === docId && s.mark.page === page ? s.mark : null));
 
@@ -86,6 +90,9 @@ export const PageView = memo(function PageView(p: Props) {
         className="pagespace"
         style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom) }}
       >
+        {natural.map((r, i) => (
+          <div key={`n${i}`} className="nat-img" style={rectStyle(r)} />
+        ))}
         <MarkPreview docId={docId} page={page} size={rawSize} />
         {p.hits.map((r, i) => (
           <div key={i} className={r === p.currentHit ? "hit current" : "hit"} style={rectStyle(r)} />
@@ -172,6 +179,31 @@ function usePageText(doc: number, rev: number, page: number, enabled: boolean) {
     };
   }, [doc, rev, page, enabled]);
   return enabled ? lines : null;
+}
+
+const NO_RECTS: Rect4[] = [];
+
+/** Boxes of the page's pictures to show in their own colours; none unless the pages are dark. */
+function useNaturalImages(doc: number, rev: number, page: number, size: Size): Rect4[] {
+  const dark = usePagesDark();
+  const [rects, setRects] = useState<Rect4[]>(NO_RECTS);
+  useLayoutEffect(() => {
+    if (!dark) {
+      setRects(NO_RECTS);
+      return;
+    }
+    let live = true;
+    cached(`${doc}:${rev}:${page}:img`, () => api.pageImages(doc, page)).then(
+      (images) => live && setRects(naturalRects(images, size)),
+      () => live && setRects(NO_RECTS),
+    );
+    return () => {
+      live = false;
+    };
+    // `size` is the page's own size: it changes only with the page
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dark, doc, rev, page, size[0], size[1]]);
+  return rects;
 }
 
 let measureCtx: CanvasRenderingContext2D | null = null;

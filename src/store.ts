@@ -2,6 +2,7 @@ import { create } from "zustand";
 import * as api from "./lib/api";
 import type { OutlineItem } from "./lib/api";
 import { type Rot, type Size, clamp, ZOOM_MAX, ZOOM_MIN } from "./lib/layout";
+import { PAGE_DARK_KEY, type PageDark, parsePageDark } from "./lib/pageDark";
 import { keyOf } from "./lib/recent";
 import { dropCached } from "./lib/tiles";
 import { useRecents } from "./recents";
@@ -67,6 +68,7 @@ const emptySearch = (): SearchState => ({ query: "", id: null, hits: [], current
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
 const loadTheme = (): Theme => (localStorage.getItem("inkwell.theme") as Theme | null) ?? "system";
+const loadPageDark = (): PageDark => parsePageDark(localStorage.getItem(PAGE_DARK_KEY));
 
 interface Store {
   docs: Record<number, DocState>;
@@ -74,6 +76,8 @@ interface Store {
   active: number | null;
   sidebar: SidebarPanel;
   theme: Theme;
+  /** Dark pages: off, on, or follow the app theme (the default). A display filter, never the file. */
+  pageDark: PageDark;
   paletteOpen: boolean;
   searchOpen: boolean;
   password: { doc: number; path: string; error?: string } | null;
@@ -97,6 +101,7 @@ interface Store {
   setSidebar: (p: SidebarPanel) => void;
   toggleSidebar: (p: Exclude<SidebarPanel, "none">) => void;
   setTheme: (t: Theme) => void;
+  setPageDark: (p: PageDark) => void;
   setUi: (p: Partial<Pick<Store, "paletteOpen" | "searchOpen" | "error">>) => void;
   runSearch: (id: number, query: string) => void;
   stepHit: (id: number, dir: 1 | -1) => void;
@@ -152,6 +157,7 @@ export const useStore = create<Store>((set, get) => {
     active: null,
     sidebar: "thumbs",
     theme: loadTheme(),
+    pageDark: loadPageDark(),
     paletteOpen: false,
     searchOpen: false,
     password: null,
@@ -299,6 +305,10 @@ export const useStore = create<Store>((set, get) => {
     setTheme: (theme) => {
       localStorage.setItem("inkwell.theme", theme);
       set({ theme });
+    },
+    setPageDark: (pageDark) => {
+      localStorage.setItem(PAGE_DARK_KEY, pageDark);
+      set({ pageDark });
     },
     setUi: (p) => set(p),
 
