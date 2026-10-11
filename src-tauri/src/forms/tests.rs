@@ -1387,10 +1387,11 @@ fn the_form_javascript_sample_behaves_like_the_checklist() {
     assert_eq!(field(&eng2, id2, "Born").value, "18/04/1991");
     assert_eq!(field(&eng2, id2, "Code").shown, "#AB1");
 
-    // scripts off: not run, kept
+    // scripts off: the script engine does not run (the custom Tax keeps its value), Acrobat's own calls still do
     scripts_enable(&eng2, id2, false).unwrap();
     fill(&eng2, id2, "Rent", text("5")).unwrap();
-    assert_eq!(field(&eng2, id2, "Total").value, "1250.5");
+    assert_eq!(field(&eng2, id2, "Total").value, "255.5", "AFSimple_Calculate takes the native fast path");
+    assert_eq!(field(&eng2, id2, "Tax").value, "312.63", "the custom calculation did not run");
 }
 
 /// Writes the sample for the runtime checks: `cargo test --lib write_the_form_javascript_sample -- --ignored`.
