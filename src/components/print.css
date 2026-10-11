@@ -1,0 +1,169 @@
+/* The Print sheet: centred over the viewer, the page as it comes out on the left, the options on the right. */
+.pr-scrim {
+  align-items: center;
+  padding-top: 0;
+  z-index: 20;
+}
+.pr-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(1020px, 94vw);
+  height: min(760px, 90vh);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+}
+.pr-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  height: 48px;
+  padding: 0 14px 0 18px;
+  border-bottom: 1px solid var(--border);
+}
+.pr-title {
+  font-weight: 600;
+}
+.pr-doc {
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  flex: 1;
+  min-height: 0;
+}
+.pr-preview {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg);
+}
+.pr-stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 20px;
+}
+.pr-paper {
+  max-width: 100%;
+  max-height: 100%;
+  background: #fff;
+  box-shadow: var(--shadow-2, var(--shadow-3));
+  transition: opacity 0.12s;
+}
+.pr-paper.busy {
+  opacity: 0.7;
+}
+.pr-note {
+  margin: 0;
+  max-width: 34ch;
+  text-align: center;
+}
+.pr-note.bad {
+  color: var(--danger, #c0392b);
+}
+.pr-pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 44px;
+  padding: 0 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.pr-pager-text {
+  min-width: 64px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.pr-pager-pages {
+  margin-left: 10px;
+  font-size: 12.5px;
+}
+.pr-side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+}
+.pr-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+  padding: 14px 18px;
+  overflow-y: auto;
+}
+.pr-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.pr-label {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.pr-pair {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+.pr-pair > * {
+  flex: 1;
+  min-width: 0;
+}
+.pr-pair > .pr-check {
+  flex: none;
+}
+.pr-pair > .dim {
+  flex: none;
+  align-self: center;
+}
+.pr-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+.pr-seg {
+  width: 100%;
+}
+.pr-seg button {
+  flex: 1;
+}
+.pr-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 12px 18px 14px;
+  border-top: 1px solid var(--border);
+}
+.pr-summary {
+  font-size: 12.5px;
+}
+.pr-state {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 24px 22px;
+}
+.pr-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}

@@ -55,7 +55,7 @@ export interface FileRef {
 /** Open dialog (run by Rust). */
 export const pickOpen = (multiple: boolean, title?: "locate" | "compare") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
 /** What a save dialog filters for; PDF unless told otherwise. */
-export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word";
+export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "any";
 /** Save dialog (run by Rust) in the folder of document `doc` or of open token `near`, with file name `name`. */
 export const pickSave = (name: string, at: { doc?: number; near?: string } = {}, kind?: SaveKind) =>
   invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null, kind: kind ?? null });
@@ -349,4 +349,109 @@ export function ocrStart(job: number, req: OcrRequest, onProgress: (p: OcrProgre
   const ch = new Channel<OcrProgress>();
   ch.onmessage = onProgress;
   return invoke<OcrOutcome>("ocr_start", { job, req, onProgress: ch });
+}
+
+// ---- print (src-tauri/src/print) ----
+
+export interface PrinterInfo {
+  name: string;
+  isDefault: boolean;
+  /** Prints to a file (Microsoft Print to PDF, the XPS writer): the user is asked where. */
+  toFile: boolean;
+}
+
+export interface PrinterList {
+  printers: PrinterInfo[];
+  /** INKWELL_PRINT_DIR is set: print-to-file printers write there without asking (automation). */
+  fileDirSet: boolean;
+}
+
+export interface PaperInfo {
+  /** The driver's DMPAPER number. */
+  id: number;
+  name: string;
+  /** Points, portrait. */
+  width: number;
+  height: number;
+}
+
+export interface PrinterCaps {
+  papers: PaperInfo[];
+  trays: { id: number; name: string }[];
+  duplex: boolean;
+  color: boolean;
+  collate: boolean;
+  maxCopies: number;
+}
+
+export type PrintOrientation = "auto" | "portrait" | "landscape";
+export type PrintSubset = "all" | "odd" | "even";
+export type PrintDuplex = "off" | "longEdge" | "shortEdge";
+export type PrintContent = "document" | "documentAndMarkups" | "formFieldsOnly";
+export type PrintSizeMode = "fit" | "actual" | "shrink" | "custom";
+export type PrintPageOrder = "horizontal" | "horizontalReversed" | "vertical" | "verticalReversed";
+
+export type PrintRange = { kind: "all" } | { kind: "current"; page: number } | { kind: "pages"; text: string };
+
+export type PrintLayout =
+  | { kind: "size"; mode: PrintSizeMode; percent: number }
+  | { kind: "multiple"; perSheet: number; order: PrintPageOrder; border: boolean; autoRotate: boolean }
+  | { kind: "booklet"; sides: "both" | "frontOnly" | "backOnly"; binding: "left" | "right" };
+
+export interface PrintSettings {
+  printer: string | null;
+  paper: { id: number | null; width: number; height: number };
+  tray: number | null;
+  orientation: PrintOrientation;
+  range: PrintRange;
+  subset: PrintSubset;
+  reverse: boolean;
+  copies: number;
+  collate: boolean;
+  duplex: PrintDuplex;
+  grayscale: boolean;
+  layout: PrintLayout;
+  content: PrintContent;
+}
+
+export interface PrintFace {
+  width: number;
+  height: number;
+  /** Source pages on this side (1-based), in the order drawn. */
+  pages: number[];
+}
+
+export interface PrintPlan {
+  pages: number;
+  /** Sides of paper per copy. */
+  sheets: number;
+  /** Physical sheets for all copies. */
+  papers: number;
+  faces: PrintFace[];
+  editRev: number;
+}
+
+export interface PrintProgress {
+  done: number;
+  total: number;
+}
+
+export interface PrintReport {
+  printer: string;
+  pages: number;
+  sides: number;
+}
+
+export const printPrinters = () => invoke<PrinterList>("print_printers");
+export const printCapabilities = (printer: string) => invoke<PrinterCaps | null>("print_capabilities", { printer });
+export const printPlan = (doc: number, settings: PrintSettings) => invoke<PrintPlan>("print_plan", { doc, settings });
+/** PNG bytes of side `sheet` (0-based), `maxPx` on its longer edge: the printer path's own drawing. */
+export const printPreview = (doc: number, settings: PrintSettings, sheet: number, maxPx: number) =>
+  invoke<ArrayBuffer>("print_preview", { doc, settings, sheet, maxPx });
+
+/** `saveTo`: a save token from `pickSave`, for printers that print to a file. `toolCancel(job)` stops it. */
+export function printStart(job: number, doc: number, settings: PrintSettings, saveTo: string | null, onProgress: (p: PrintProgress) => void) {
+  const ch = new Channel<PrintProgress>();
+  ch.onmessage = onProgress;
+  return invoke<PrintReport>("print_start", { job, doc, settings, saveTo, onProgress: ch });
 }
