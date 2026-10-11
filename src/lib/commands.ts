@@ -3,6 +3,7 @@ import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
 import { openA11y, useA11y } from "./a11y";
 import { openPreflight, usePreflight } from "./preflight";
+import { openConvertColors, openOutputPreview, openPageBoxes, openPrinterMarks, usePrepress } from "./prepressStore";
 import { useRedact } from "./redact";
 import { useSearch } from "./searchStore";
 import { useAnnot } from "./annot";
@@ -316,6 +317,15 @@ export const commands: Command[] = [
     needsDoc: true,
     run: () => (usePreflight.getState().open ? usePreflight.getState().setOpen(false) : openPreflight()),
   },
+  {
+    id: "output-preview",
+    title: "Output Preview (plates, ink coverage)",
+    needsDoc: true,
+    run: () => (usePrepress.getState().open ? usePrepress.getState().setOpen(false) : openOutputPreview()),
+  },
+  { id: "convert-colors", title: "Convert Colors to CMYK…", needsDoc: true, run: openConvertColors },
+  { id: "printer-marks", title: "Add printer's marks…", needsDoc: true, run: openPrinterMarks },
+  { id: "page-boxes", title: "Set page boxes (trim, bleed)…", needsDoc: true, run: openPageBoxes },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },
   { id: "forms", title: "Forms", keys: ["Ctrl+Alt+F"], needsDoc: true, run: () => useForms.getState().setOpen(!useForms.getState().open) },

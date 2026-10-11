@@ -10,7 +10,7 @@ use crate::engine::{DocId, Engine};
 use crate::textedit::content as cs;
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::Buffer;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,12 +196,21 @@ fn registration_space(doc: &mut PdfDocument) -> Result<PdfObject> {
     Ok(a)
 }
 
-fn mark_page(doc: &mut PdfDocument, index: u32, spec: &MarksSpec, notes: &mut Vec<String>) -> Result<()> {
-    let mut page = doc.find_page(index as i32)?;
-    let media = effective(&page, BoxKind::Media)?;
-    let crop = effective(&page, BoxKind::Crop)?;
-    let trim = effective(&page, BoxKind::Trim)?;
-    let bleed = union(effective(&page, BoxKind::Bleed)?, trim);
+/// Where the marks of one page go: validated, with the media box they need.
+struct Plan {
+    crop: Box4,
+    trim: Box4,
+    weight: f32,
+    lay: Layout,
+    /// The media box the marks need (the old one where it already holds them).
+    new_media: Box4,
+}
+
+fn plan(page: &PdfObject, spec: &MarksSpec) -> Result<Plan> {
+    let media = effective(page, BoxKind::Media)?;
+    let crop = effective(page, BoxKind::Crop)?;
+    let trim = effective(page, BoxKind::Trim)?;
+    let bleed = union(effective(page, BoxKind::Bleed)?, trim);
     let bleed_out = [trim[0] - bleed[0], trim[1] - bleed[1], bleed[2] - trim[2], bleed[3] - trim[3]].into_iter().fold(0.0f32, f32::max);
     let weight = spec.weight.unwrap_or(0.25);
     if !(weight.is_finite() && weight > 0.0 && weight <= 10.0) {
@@ -219,6 +228,45 @@ fn mark_page(doc: &mut PdfDocument, index: u32, spec: &MarksSpec, notes: &mut Ve
     let offset = spec.offset.unwrap_or(bleed_out + 6.0).max(bleed_out + 2.0);
     let lay = Layout { trim, bleed, offset, length };
     let slug = lay.slug();
+    let new_media = union(media, [trim[0] - slug, trim[1] - slug, trim[2] + slug, trim[3] + slug]);
+    Ok(Plan { crop, trim, weight, lay, new_media })
+}
+
+/// What the marks of `spec` look like on a page: the boxes they are laid out around, the media box
+/// afterwards and the content stream that would be added. The UI draws it before anything is written.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MarksPreview {
+    /// The media box after the marks, user space `[x0, y0, x1, y1]`, y up.
+    pub media: Box4,
+    pub trim: Box4,
+    /// The bleed box, never inside the trim box.
+    pub bleed: Box4,
+    /// Drawing operators only (`q Q w J j CS SCN m l c re S f k`), in the page's user space.
+    pub content: String,
+    pub notes: Vec<String>,
+}
+
+/// Lays out the marks of `spec` on page `page` (0-based) without changing the document.
+pub fn marks_preview(eng: &Engine, doc: DocId, page: u32, spec: &MarksSpec) -> Result<MarksPreview> {
+    if !(spec.marks.crop || spec.marks.bleed || spec.marks.registration || spec.marks.color_bars) {
+        return Err(bad("Pick at least one kind of mark"));
+    }
+    eng.read_custom(doc, |pdf| {
+        if page as i32 >= pdf.page_count()? {
+            return Err(crate::engine::EngineError::BadPage(page));
+        }
+        let p = pdf.find_page(page as i32)?;
+        let plan = plan(&p, spec)?;
+        let mut notes = Vec::new();
+        let content = plan.lay.content(spec.marks, plan.weight, "Reg", &mut notes);
+        Ok(MarksPreview { media: plan.new_media, trim: plan.lay.trim, bleed: plan.lay.bleed, content, notes })
+    })
+}
+
+fn mark_page(doc: &mut PdfDocument, index: u32, spec: &MarksSpec, notes: &mut Vec<String>) -> Result<()> {
+    let mut page = doc.find_page(index as i32)?;
+    let Plan { crop, trim, weight, lay, new_media } = plan(&page, spec)?;
 
     // The boxes must survive the enlarged media box: a box the page leaves to its default (the crop box,
     // which the media box then defaults) is written now, as it is before the change.
@@ -228,7 +276,6 @@ fn mark_page(doc: &mut PdfDocument, index: u32, spec: &MarksSpec, notes: &mut Ve
         }
     }
     let had_crop = stated(&page, BoxKind::Crop)?.is_some();
-    let new_media = union(media, [trim[0] - slug, trim[1] - slug, trim[2] + slug, trim[3] + slug]);
     write(doc, &mut page, BoxKind::Media, new_media)?;
     if had_crop {
         // a crop box inside the new media box would hide the marks
@@ -287,6 +334,7 @@ pub fn add_printer_marks(eng: &Engine, doc: DocId, spec: &MarksSpec, source: Edi
     }
     let mut notes = Vec::new();
     let state = eng.apply_custom(doc, "Add printer's marks".to_string(), source, false, |d| {
+        super::refuse_certified(d, "Adding printer's marks")?;
         let count = d.page_count()?.max(0) as u32;
         let pages: Vec<u32> = match &spec.pages {
             Some(p) => {
