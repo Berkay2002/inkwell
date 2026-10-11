@@ -91,8 +91,8 @@ DeviceCMYK. Annotation appearances, forms and patterns are filtered too.
   DeviceCMYK. Afterwards the report says which device spaces are still in use (`remaining`: gray, RGB, CMYK),
   asked of the PDF/X checker's survey (`preflight::device_colours`, so Default colour spaces count the same
   way). Images come out uncompressed (written Flate); run Compress to make them small again.
-- Not converted: colours inside Type 3 glyphs, soft-mask luminosity groups' own colours beyond what the filter
-  reaches, and the document's Default colour spaces and ICCBased CMYK spaces.
+- Left as they are: CMYK colours (ICCBased CMYK included), Default colour spaces, and whatever MuPDF's colour
+  filter does not reach (colours inside Type 3 glyph procedures).
 
 ## Boxes and printer's marks
 
@@ -115,7 +115,7 @@ come back for what was skipped (no bleed, a page too small for colour bars).
 
 - No UI: a plate/coverage panel, the inspector tool, and the dialogs for the three edits are for the UI branch.
 - No separate-plate output (one file per plate), no trapping, no ink-limit conversion (TAC is reported, not
-  reduced), no rich-black or overprint fixups, no pass over every page of an image's resolution.
+  reduced), no rich-black or overprint fixups.
 - Overprint preview needs MuPDF's rendering, which follows PDF 1.7 overprint (OPM, `All`, `None`); it does not
   simulate the press' dot gain or the paper white.
 - The document's output intent is not used when painting (MuPDF paints DeviceCMYK through its own CMYK
