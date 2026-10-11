@@ -1882,3 +1882,38 @@ fn a_form_whose_pages_carry_many_unshared_links_lists_every_field() {
     let form = list_all(&eng, id).unwrap();
     assert_eq!(form.fields.iter().map(|f| (f.page, f.name.as_str())).collect::<Vec<_>>(), vec![(150, "A"), (150, "B")]);
 }
+
+#[test]
+fn a_page_listed_many_times_in_kids_is_scanned_once_and_direct_entries_are_charged() {
+    // 2000 /Kids entries naming one page object whose direct /Annots holds 2000 inline widgets
+    let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (A) /Rect [72 100 200 120] /F 4 >>";
+    let kids = "3 0 R ".repeat(2000);
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count 2000 >>"),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{}] >>", vec![widget; 2000].join(" ")),
+    ];
+    // MuPDF refuses a /Count that is not below the number of objects
+    objs.extend((0..2000).map(|_| "null".to_string()));
+    let (eng, id, _) = open_bytes("scan-dup-kids", pdf_of(&objs));
+    let t = std::time::Instant::now();
+    let found = eng.read_custom(id, |d| Ok(scan(d)?.len())).unwrap();
+    let took = t.elapsed();
+    eprintln!("form scan, one page listed 2000 times with 2000 inline widgets: {took:?}");
+    assert_eq!(found, 2000);
+    assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+
+    // Inline entries on distinct pages are charged one each: past the budget the form is refused
+    let page = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{}] >>", "0 ".repeat(1001));
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count 2000 >>", (0..2000).map(|i| format!("{} 0 R ", 3 + i)).collect::<String>()),
+    ];
+    objs.extend((0..2000).map(|_| page.clone()));
+    let (eng, id, _) = open_bytes("scan-direct", pdf_of(&objs));
+    let err = match list_all(&eng, id) {
+        Err(e) => e.to_string(),
+        Ok(f) => panic!("{} fields listed", f.fields.len()),
+    };
+    assert!(err.contains("too large to edit safely"), "{err}");
+}

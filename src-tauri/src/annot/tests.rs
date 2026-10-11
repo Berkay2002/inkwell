@@ -475,11 +475,11 @@ fn repeated_entries_past_the_scan_budget_leave_pages_out_and_say_so() {
     let l = list_status(&eng, id).unwrap();
     assert_eq!(l.items.iter().map(|a| (a.page, a.xref)).collect::<Vec<_>>(), vec![(0, 4)]);
     assert!(l.incomplete);
-    // Walking the same page again meets 1001 repeats each time: the cap is reached within 2000 rounds.
+    // Walking every page meets 1001 repeats on each: the cap is passed on the last two.
     let mut walk = AnnotWalk::default();
     eng.read_custom(id, |d| {
-        for _ in 0..2100 {
-            let _ = walk.page(d, 1, Which::Comments)?;
+        for p in 0..2000 {
+            let _ = walk.page(d, p, Which::Comments)?;
         }
         Ok(())
     })
@@ -513,4 +513,36 @@ fn unshared_links_do_not_use_the_scan_budget_whatever_the_page_count() {
     let l = list_status(&eng, id).unwrap();
     assert_eq!(l.items.len(), pages);
     assert!(!l.incomplete);
+}
+
+#[test]
+fn a_page_listed_many_times_in_kids_is_walked_once() {
+    // 2000 /Kids entries naming one page object whose direct /Annots holds 2000 inline squares
+    let square = "<< /Type /Annot /Subtype /Square /Rect [40 40 90 90] /Contents (box) >>";
+    let kids = "3 0 R ".repeat(2000);
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count 2000 >>"),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{}] >>", vec![square; 2000].join(" ")),
+    ];
+    // MuPDF refuses a /Count that is not below the number of objects
+    objs.extend((0..2000).map(|_| "null".to_string()));
+    let (eng, id) = open_raw("dup-kids", pdf_of(&objs));
+    let t = std::time::Instant::now();
+    let l = list_status(&eng, id).unwrap();
+    let took = t.elapsed();
+    eprintln!("annot list, one page listed 2000 times with 2000 inline annotations: {took:?}");
+    assert_eq!(l.items.len(), 2000);
+    assert!(l.items.iter().all(|a| a.page == 0));
+    assert!(!l.incomplete);
+    assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+}
+
+#[test]
+fn direct_entries_are_charged_against_the_scan_budget() {
+    // 2000 pages, each with 1001 inline entries: nothing to share, so every one is charged
+    let (eng, id) = open_raw("direct", pages_and(2000, Vec::new(), |_| format!("/Annots [{}]", "0 ".repeat(1001))));
+    let l = list_status(&eng, id).unwrap();
+    assert!(l.items.is_empty());
+    assert!(l.incomplete);
 }

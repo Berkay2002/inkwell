@@ -283,8 +283,8 @@ fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
 /// Annotations loaded for one document by [`list`]: past this the rest of the pages are left out
 /// and the list says so (`incomplete`).
 const MAX_LOADED: usize = 50_000;
-/// Entries [`AnnotWalk`] meets again in one document (an object an earlier array listed too). The
-/// first sight of an object is not counted, so entries no other array lists never use the budget.
+/// Entries [`AnnotWalk`] charges in one document: an indirect object an earlier array listed too, and
+/// every direct entry. The first sight of an indirect object is not counted.
 const MAX_SCANNED: usize = 2_000_000;
 
 /// The comments of a document, and whether some were left out (past [`MAX_LOADED`] annotations or
@@ -327,6 +327,8 @@ pub(crate) struct Fresh {
 pub(crate) struct AnnotWalk {
     arrays: HashSet<i32>,
     seen: HashSet<i32>,
+    /// Page objects walked: a page listed several times in `/Kids` is one object, one walk.
+    pages: HashSet<i32>,
     /// What each indirect entry met so far is, so that meeting it again costs no dictionary read.
     class: HashMap<i32, Class>,
     /// What an owner page's array lists, read once per array (by object number when it is indirect).
@@ -381,7 +383,11 @@ impl AnnotWalk {
         if self.incomplete {
             return Ok(None);
         }
-        let Some(annots) = doc.find_page(p as i32)?.get_dict("Annots")? else { return Ok(None) };
+        let page = doc.find_page(p as i32)?;
+        if page.is_indirect()? && !self.pages.insert(page.as_indirect()?) {
+            return Ok(None);
+        }
+        let Some(annots) = page.get_dict("Annots")? else { return Ok(None) };
         if !annots.is_array()? {
             return Ok(None);
         }
@@ -393,13 +399,14 @@ impl AnnotWalk {
         for i in 0..annots.len()? {
             let Some(e) = annots.get_array(i as i32)? else { continue };
             let num = if e.is_indirect()? { Some(e.as_indirect()?) } else { None };
-            let class = match num.and_then(|n| self.class.get(&n).copied()) {
-                Some(c) => {
-                    if self.repeat() {
-                        return Ok(None);
-                    }
-                    c
-                }
+            let cached = num.and_then(|n| self.class.get(&n).copied());
+            // Only the first sight of an indirect object is free; a direct entry is never shared, but
+            // a page object listed twice (or many inline dictionaries) would still cost per page.
+            if (num.is_none() || cached.is_some()) && self.repeat() {
+                return Ok(None);
+            }
+            let class = match cached {
+                Some(c) => c,
                 None => {
                     let c = Class::of(&e)?;
                     if let Some(n) = num {

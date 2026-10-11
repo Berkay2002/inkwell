@@ -1301,7 +1301,7 @@ fn signatures_are_found_by_flag_certification_and_signed_field() {
 }
 
 #[test]
-fn a_file_whose_form_cannot_be_scanned_counts_as_signed() {
+fn a_file_whose_form_cannot_be_scanned_is_left_alone_as_possibly_signed() {
     // A signature field with a value, no SigFlags, no DocMDP, on 2000 pages that each repeat its
     // widget 1001 times: past the form scan budget, so the field list errors.
     let d = dir("signed-unscannable");
@@ -1315,7 +1315,7 @@ fn a_file_whose_form_cannot_be_scanned_counts_as_signed() {
     let f = put(&d, "big.pdf", &assemble(&objs, ""));
     let r = go(&action("n", vec![footer("<<1>>")]), &[f], None);
     assert_eq!(r.files[0].status, Status::Skipped, "{:?}", r.files[0].reason);
-    assert!(r.files[0].reason.as_deref().unwrap().starts_with("signed:"));
+    assert!(r.files[0].reason.as_deref().unwrap().starts_with("could not check whether the file is signed:"), "{:?}", r.files[0].reason);
 }
 
 #[test]
