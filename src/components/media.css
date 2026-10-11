@@ -1,0 +1,134 @@
+.media-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.media-area {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+}
+.media-badge {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  color: #fff;
+  background: rgba(20, 22, 26, 0.72);
+  border: 1.5px solid rgba(255, 255, 255, 0.85);
+  border-radius: 50%;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+.media-badge:hover:not(:disabled),
+.media-badge:focus-visible {
+  transform: scale(1.1);
+  background: var(--accent, #2a6df4);
+}
+.media-badge.off {
+  cursor: default;
+  background: rgba(70, 72, 78, 0.78);
+}
+.media-note,
+.media-tip {
+  max-width: 100%;
+  padding: 2px 8px;
+  overflow: hidden;
+  color: #fff;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(20, 22, 26, 0.78);
+  border-radius: 10px;
+}
+.media-tip {
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.media-area:hover .media-tip,
+.media-badge:focus-visible ~ .media-tip {
+  opacity: 1;
+}
+.media-player {
+  position: absolute;
+  background: #000;
+  pointer-events: auto;
+  object-fit: contain;
+}
+audio.media-player {
+  background: transparent;
+}
+
+/* sidebar panel */
+.media-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.media-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 8px 8px;
+  overflow-y: auto;
+  list-style: none;
+}
+.media-row {
+  margin-bottom: 6px;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.media-row.playing {
+  border-color: var(--accent);
+}
+.media-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-weight: 600;
+}
+.media-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.media-sub {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.media-acts {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.media-acts .btn {
+  height: 28px;
+  padding: 0 10px;
+}
+.media-assets {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.media-assets li {
+  overflow-wrap: anywhere;
+}
+.media-note-foot {
+  flex: none;
+  margin: 0;
+  padding: 8px 12px 12px;
+  font-size: 12px;
+}

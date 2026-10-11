@@ -111,6 +111,8 @@ export interface TileRef {
   ty: number;
   /** The document's edit generation; absent means 0 (never edited). */
   rev?: number;
+  /** A registered print-production view (`prepress_view`): the tile is drawn in its plates; absent is the page as it is. */
+  view?: number;
 }
 
 /**
@@ -143,7 +145,8 @@ export function tilesForRect(
   return out.sort((a, b) => dist(a) - dist(b));
 }
 
-export const tileKeyStr = (doc: number, t: TileRef) => `${doc}/${t.page}/${t.rot}/${t.scale}/${t.tx}/${t.ty}/${t.rev ?? 0}`;
+export const tileKeyStr = (doc: number, t: TileRef) =>
+  `${doc}/${t.page}/${t.rot}/${t.scale}/${t.tx}/${t.ty}/${t.rev ?? 0}${t.view ? `/v${t.view}` : ""}`;
 
 /** CSS transform mapping an unrotated page-space box (points) onto the rotated page at `zoom`. */
 export function pageSpaceTransform(size: Size, rot: Rot, zoom: number): string {

@@ -20,11 +20,11 @@ mod seps;
 #[cfg(test)]
 mod tests;
 
-pub use boxes::{BoxKind, BoxSpec, set_boxes};
-pub use convert::{ConvertReport, ConvertSpec, IntentSource, convert_colors};
-pub use ink::{InkReport, PlaneInk, doc_ink, ink_report};
+pub use boxes::{BoxKind, BoxSpec, PageBoxes, page_boxes, set_boxes};
+pub use convert::{ConvertReport, ConvertSpec, IntentSource, convert_colors, convert_colors_and_save};
+pub use ink::{InkAt, InkReport, PlaneInk, PlaneValue, doc_ink, ink_at, ink_report};
 pub use inspect::{Inspected, ObjectKind, inspect_at};
-pub use marks::{MarkSet, MarksSpec, add_printer_marks};
+pub use marks::{MarkSet, MarksPreview, MarksSpec, add_printer_marks, marks_preview};
 pub use render::{Mode, PROCESS, View, render_view_tile};
 pub use seps::{MAX_SPOT_PLANES, PageSeps, Spot, page_separations};
 
@@ -32,6 +32,15 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 
 pub(crate) fn bad(m: impl Into<String>) -> EngineError {
     EngineError::Invalid(m.into())
+}
+
+/// A certified document (a /DocMDP signature) is left as it is: any change would void the certification.
+/// A signed one is not refused; its edits here are never removing ones, so its save stays incremental.
+pub(crate) fn refuse_certified(d: &mupdf::pdf::PdfDocument, what: &str) -> Result<()> {
+    if crate::outline::certified(d)?.is_some() {
+        return Err(bad(format!("This document is certified. {what} would void the certification, so Inkwell leaves the document as it is.")));
+    }
+    Ok(())
 }
 
 /// The total area coverage above which a page is flagged, in percent.
