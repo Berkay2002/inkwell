@@ -295,8 +295,15 @@ export const commands: Command[] = [
     id: "a11y",
     title: "Check accessibility…",
     needsDoc: true,
-    run: () => (useA11y.getState().open ? useA11y.getState().setOpen(false) : openA11y()),
+    run: () => {
+      const a = useA11y.getState();
+      if (a.open && a.view === "check") a.setOpen(false);
+      else openA11y("check");
+    },
   },
+  { id: "a11y-order", title: "Reading order tool…", needsDoc: true, run: () => openA11y("order") },
+  { id: "a11y-tags", title: "Tags (tag tree)…", needsDoc: true, run: () => openA11y("tags") },
+  { id: "a11y-matterhorn", title: "Matterhorn results…", needsDoc: true, run: () => openA11y("matterhorn") },
   {
     id: "preflight",
     title: "Preflight (PDF/A, PDF/UA, PDF/X)…",
