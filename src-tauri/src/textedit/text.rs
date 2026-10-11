@@ -1225,7 +1225,29 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     } else {
         size * 1.2
     };
-    let mut block_ops = vec![Op::new("q", vec![])];
+    // The block's operators go, and anything drawn in the same area.
+    let member_rects: Vec<[f64; 4]> = members.iter().map(|l| l.rect).collect();
+    let mut drop = coincident_ops(&pc.lines, &member_rects);
+    drop.extend(members.iter().flat_map(|l| l.ops.iter().copied()));
+    // Text shown earlier in the same text object stays first: the block goes between two halves
+    // of the text object, keeping its place in reading order.
+    let start = first.ops.first().copied().unwrap_or(o.bt_op);
+    let split = pc
+        .ops
+        .get(o.bt_op..start)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .any(|(i, op)| matches!(op.op.as_slice(), b"Tj" | b"TJ" | b"'" | b"\"") && !drop.contains(&(o.bt_op + i)));
+    // An earlier edit's own text object whose text all goes, goes whole: its Tf, colour and
+    // moves too, so the fonts it named are no longer set anywhere.
+    let (whole, wrappers) = edited_objects(&pc.ops, &drop);
+    // The block was an earlier edit's, inside its own `q cm … Q`: it is set there again, and a
+    // move changes that `cm` instead of adding another (nesting stays the same however often
+    // it moves).
+    let wrapper = if split { None } else { wrappers.iter().find(|w| w.bt == o.bt_op) };
+    let mut block_ops = if wrapper.is_some() { Vec::new() } else { vec![Op::new("q", vec![])] };
+    let mut new_cm = None;
     if let Some([dx, dy]) = change.offset {
         if !(dx.is_finite() && dy.is_finite()) || dx.abs() > 1e5 || dy.abs() > 1e5 {
             return Err(invalid("the text can't be moved that far"));
@@ -1235,7 +1257,14 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
             .invert()
             .ok_or_else(|| invalid("the text is drawn in a space it can't be moved in"))?;
         let (ax, ay) = back.apply(dx, dy);
-        block_ops.push(Op::new("cm", vec![num(1.0), num(0.0), num(0.0), num(1.0), num(ax), num(ay)]));
+        let shift = Matrix([1.0, 0.0, 0.0, 1.0, ax, ay]);
+        match wrapper {
+            Some(w) => {
+                let old = pc.ops[w.cm].nums::<6>().map_or(Matrix::IDENTITY, Matrix);
+                new_cm = Some((w.cm, Op::new("cm", shift.then(&old).0.iter().map(|v| num(*v)).collect())));
+            }
+            None => block_ops.push(Op::new("cm", shift.0.iter().map(|v| num(*v)).collect())),
+        }
     }
     // Acrobat's marker for edited text.
     block_ops.push(Op::new("MP", vec![Obj::name("TouchUp_TextEdit")]));
@@ -1252,23 +1281,11 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     block_ops.extend(emit(&setter, &lines, &m, &placement));
     setter.finish()?;
     let fallbacks = std::mem::take(&mut setter.fallbacks);
-    drop(setter);
+    std::mem::drop(setter);
     block_ops.push(Op::new("ET", vec![]));
-    block_ops.push(Op::new("Q", vec![]));
-    // The block's operators go, and anything drawn in the same area.
-    let member_rects: Vec<[f64; 4]> = members.iter().map(|l| l.rect).collect();
-    let mut drop = coincident_ops(&pc.lines, &member_rects);
-    drop.extend(members.iter().flat_map(|l| l.ops.iter().copied()));
-    // Text shown earlier in the same text object stays first: the block goes between two halves
-    // of the text object, keeping its place in reading order.
-    let start = first.ops.first().copied().unwrap_or(o.bt_op);
-    let split = pc
-        .ops
-        .get(o.bt_op..start)
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-        .any(|(i, op)| matches!(op.op.as_slice(), b"Tj" | b"TJ" | b"'" | b"\"") && !drop.contains(&(o.bt_op + i)));
+    if wrapper.is_none() {
+        block_ops.push(Op::new("Q", vec![]));
+    }
     let after = if split { &o.state } else { &o.bt_state };
     if split {
         block_ops.insert(0, Op::new("ET", vec![]));
@@ -1291,11 +1308,11 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         }
     }
     let at = if split { start } else { o.bt_op };
-    // An earlier edit's own text object whose text all goes, goes whole: its Tf, colour and
-    // moves too, so the fonts it named are no longer set anywhere.
-    let whole = edited_objects(&pc.ops, &drop);
     let new_data = splice(&pc.pieces, &pc.ops, |i| {
         let mut insert = if i == at { std::mem::take(&mut block_ops) } else { Vec::new() };
+        if let Some((_, cm)) = new_cm.as_ref().filter(|(j, _)| *j == i) {
+            return (vec![cm.clone()], false);
+        }
         let keep = !drop.contains(&i) && !whole.contains(&i);
         if !keep && !whole.contains(&i) {
             insert.extend(stand_in(&pc, i));
@@ -1311,9 +1328,10 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
 /// [`rewrite_block`] and [`add_text`] write them) whose every show operator is in `drop`: the
 /// marker and the text object. A wrapper with a `cm` stays (`q cm Q`): the new block is set
 /// inside it, in the space the old one was drawn in (a move, an added box's placement); a bare
-/// `q … Q` goes too.
-fn edited_objects(ops: &[Op], drop: &HashSet<usize>) -> HashSet<usize> {
+/// `q … Q` goes too. Also returns the kept wrappers.
+fn edited_objects(ops: &[Op], drop: &HashSet<usize>) -> (HashSet<usize>, Vec<Wrapper>) {
     let mut out = HashSet::new();
+    let mut kept = Vec::new();
     for (i, op) in ops.iter().enumerate() {
         if !(op.is("MP") && op.name(0) == Some(b"TouchUp_TextEdit".as_slice()) && ops.get(i + 1).is_some_and(|o| o.is("BT"))) {
             continue;
@@ -1333,10 +1351,17 @@ fn edited_objects(ops: &[Op], drop: &HashSet<usize>) -> HashSet<usize> {
                 out.extend(q..=et + 1);
             } else {
                 out.extend(i..=et);
+                kept.push(Wrapper { cm: i - 1, bt: i + 1 });
             }
         }
     }
-    out
+    (out, kept)
+}
+
+/// A kept `q cm … Q` around an earlier edit's text object: its `cm` and `BT` operators.
+struct Wrapper {
+    cm: usize,
+    bt: usize,
 }
 
 /// New text for [`add_text`].
