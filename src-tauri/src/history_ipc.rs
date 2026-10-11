@@ -1113,4 +1113,46 @@ mod tests {
         h.never_keep(4, false).unwrap();
         assert_eq!(h.state(4).status, Status::Ready);
     }
+
+    /// The comparison report: made from a version and the file, written through a save token, reopens as a PDF with
+    /// the counts in it; a cancelled run writes nothing; the second comparison of the same bytes is the cached one.
+    #[test]
+    fn compare_report_round_trip() {
+        let dir = tmp("wire-report");
+        let (h, eng, doc, _) = opened(&dir, "edit-source.pdf");
+        rotate(&eng, doc, Default::default());
+        let s = eng.save_recorded(doc, None).unwrap().1.unwrap();
+        h.saved(doc, &s).unwrap();
+        let first = h.versions(doc).unwrap().into_iter().last().unwrap().id.to_string();
+        let (a, b) = (Source::Version { id: first }, Source::Current);
+        let no = AtomicBool::new(false);
+
+        let c1 = h.compare_job(Some(doc), &a, &b, &no, &mut |_| {}).unwrap();
+        let c2 = h.compare_job(Some(doc), &a, &b, &no, &mut |_| {}).unwrap();
+        assert!(Arc::ptr_eq(&c1, &c2), "same bytes, same comparison");
+        assert!(!c1.identical);
+
+        let reg = Paths::default();
+        let dest = dir.join("report.pdf").to_string_lossy().into_owned();
+        let t = reg.issue_save("main", dest.clone());
+        let to = reg.take_save("main", &t.token).unwrap();
+        let mut stages = Vec::new();
+        let bytes = h.report(Some(doc), &a, &b, ("before.pdf", "after.pdf"), "11 Oct 2026", &no, &mut |p| stages.push(p.stage)).unwrap();
+        write_replace(Path::new(&to), &bytes).unwrap();
+        let again = mupdf::pdf::PdfDocument::open(&dest).unwrap();
+        assert!(again.page_count().unwrap() >= 1);
+        let text = again.load_page(0).unwrap().to_text_page(mupdf::TextPageFlags::empty()).unwrap().to_text().unwrap();
+        assert!(text.contains("Comparison report") && text.contains("before.pdf") && text.contains("1 difference"), "{text}");
+
+        // cancelled: nothing is written
+        let flag = AtomicBool::new(true);
+        let h2 = History::with_root(dir.join("store2"));
+        let dest2 = dir.join("cancelled.pdf");
+        let (fa, fb) = (dir.join("a.pdf"), dir.join("b.pdf"));
+        std::fs::copy(sample("edit-source.pdf"), &fa).unwrap();
+        std::fs::copy(sample("edit-out-02-addtext.pdf"), &fb).unwrap();
+        let r = h2.report(None, &Source::File { path: fa }, &Source::File { path: fb }, ("a", "b"), "d", &flag, &mut |_| {});
+        assert!(r.unwrap_err().contains("cancelled"));
+        assert!(!dest2.exists());
+    }
 }
