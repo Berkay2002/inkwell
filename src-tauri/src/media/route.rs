@@ -26,7 +26,7 @@ pub fn parse(path: &str) -> Option<(DocId, String)> {
 }
 
 pub fn text(status: u16, message: &str) -> Reply {
-    Reply { status, headers: vec![("Content-Type", "text/plain; charset=utf-8".into()), ("Cache-Control", "no-store".into())], body: message.as_bytes().to_vec() }
+    Reply { status, headers: vec![("Content-Type", "text/plain; charset=utf-8".into()), ("Cache-Control", "no-store".into()), ("X-Content-Type-Options", "nosniff".into())], body: message.as_bytes().to_vec() }
 }
 
 /// What a `Range` header asks for, in bytes `start..=end` of `len`.
@@ -74,6 +74,8 @@ pub fn respond(data: &[u8], mime: &str, range: Option<&str>) -> Reply {
         ("X-Content-Type-Options", "nosniff".into()),
     ];
     match want(range, len) {
+        // shortcut: no Range, or several, copies the whole asset (up to the 256 MB decode cap), like Tauri's
+        // asset protocol; upgrade to a streaming body if a player ever asks without a Range.
         Want::All => {
             headers.push(("Content-Length", len.to_string()));
             Reply { status: 200, headers, body: data.to_vec() }

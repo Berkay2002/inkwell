@@ -401,3 +401,20 @@ fn pages_sharing_one_huge_annots_array_cost_one_budget() {
     assert_eq!(items.len(), 2);
     assert!(t.elapsed().as_secs() < 30, "{:?}", t.elapsed());
 }
+
+#[test]
+fn a_heif_or_avif_ftyp_is_not_an_mp4() {
+    for brand in [b"heic", b"avif", b"mif1"] {
+        let mut v = b"\0\0\0\x18ftyp".to_vec();
+        v.extend(brand);
+        v.extend(b"\0\0\0\0mif1heic");
+        assert!(!Format::sniff(&v).playable(), "{brand:?}");
+    }
+    let objs = vec![
+        (10, b"<< /Type /Annot /Subtype /Movie /Rect [0 0 50 50] /Movie << /F 11 0 R >> >>".to_vec()),
+        (11, spec("picture.mp4", 12)),
+        (12, stream("/Type /EmbeddedFile /Subtype /video#2Fmp4", b"\0\0\0\x18ftypavif\0\0\0\0mif1avif")),
+    ];
+    let (eng, id, _) = open("heif", pdf(&[10], &objs));
+    assert!(!list_all(&eng, id).unwrap()[0].playable);
+}

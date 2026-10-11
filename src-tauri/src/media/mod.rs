@@ -146,10 +146,12 @@ impl Format {
     fn sniff(h: &[u8]) -> Format {
         let at = |i: usize, s: &[u8]| h.len() >= i + s.len() && &h[i..i + s.len()] == s;
         if at(4, b"ftyp") {
+            // an allowlist of major brands: HEIF/AVIF images (heic, avif, mif1) also start with `ftyp`
             return match h.get(8..12) {
                 Some(b"M4A ") | Some(b"M4B ") | Some(b"M4P ") => Format::Mp4Audio,
                 Some(b"qt  ") => Format::Mov,
-                _ => Format::Mp4Video,
+                Some(b"isom" | b"iso2" | b"iso3" | b"iso4" | b"iso5" | b"iso6" | b"mp41" | b"mp42" | b"avc1" | b"M4V " | b"dash") => Format::Mp4Video,
+                _ => Format::Unknown,
             };
         }
         if [b"moov".as_slice(), b"mdat", b"wide", b"free", b"skip"].iter().any(|a| at(4, a)) {
