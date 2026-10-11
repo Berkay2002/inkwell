@@ -312,7 +312,16 @@ fn read_images(doc: &PdfDocument, page: u32) -> Result<PageImages> {
                 }
                 None => path_other = true,
             },
-            b"m" | b"l" | b"c" | b"v" | b"y" | b"h" => path_other = true,
+            // Straight edges count by their box (a turned crop is a parallelogram); curves clear it.
+            b"m" | b"l" => match op.nums::<2>() {
+                Some([x, y]) => {
+                    let (x, y) = ctm.apply(x, y);
+                    path = Some(path.map_or([x, y, x, y], |p| union(p, [x, y, x, y])));
+                }
+                None => path_other = true,
+            },
+            b"h" => {}
+            b"c" | b"v" | b"y" => path_other = true,
             b"W" | b"W*" => pending_clip = true,
             b"n" | b"f" | b"F" | b"f*" | b"S" | b"s" | b"B" | b"B*" | b"b" | b"b*" => {
                 if pending_clip && !path_other {
@@ -688,14 +697,26 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
                         Op::new("Q", vec![]),
                     ]
                 } else {
-                    vec![
-                        Op::new("q", vec![]),
-                        Op::new("re", vec![num(u[0]), num(u[1]), num(u[2] - u[0]), num(u[3] - u[1])]),
-                        Op::new("W", vec![]),
-                        Op::new("n", vec![]),
-                        original,
-                        Op::new("Q", vec![]),
-                    ]
+                    // The clip is the page-space rectangle itself: in the image's unit square it is
+                    // a rectangle when the image is upright or turned by quarter turns, and a
+                    // parallelogram (four straight edges) when it is turned or sheared otherwise.
+                    let to_unit = to_user.then(&inv);
+                    let corners = [(r[0], r[1]), (r[2], r[1]), (r[2], r[3]), (r[0], r[3])].map(|(x, y)| to_unit.apply(x, y));
+                    let upright = (0..4).all(|i| {
+                        let (a, b) = (corners[i], corners[(i + 1) % 4]);
+                        (a.0 - b.0).abs() < 1e-9 || (a.1 - b.1).abs() < 1e-9
+                    });
+                    let mut ops = vec![Op::new("q", vec![])];
+                    if upright {
+                        ops.push(Op::new("re", vec![num(u[0]), num(u[1]), num(u[2] - u[0]), num(u[3] - u[1])]));
+                    } else {
+                        for (i, (x, y)) in corners.iter().enumerate() {
+                            ops.push(Op::new(if i == 0 { "m" } else { "l" }, vec![num(*x), num(*y)]));
+                        }
+                        ops.push(Op::new("h", vec![]));
+                    }
+                    ops.extend([Op::new("W", vec![]), Op::new("n", vec![]), original, Op::new("Q", vec![])]);
+                    ops
                 }
             }
             _ => unreachable!("transforms are handled above"),
@@ -718,7 +739,7 @@ fn unit_of(ops: &[Op], op: usize) -> (usize, usize) {
             break;
         }
         let mut k = lo;
-        while k > 0 && matches!(ops[k - 1].op.as_slice(), b"cm" | b"re" | b"W" | b"W*" | b"n") {
+        while k > 0 && matches!(ops[k - 1].op.as_slice(), b"cm" | b"re" | b"m" | b"l" | b"h" | b"W" | b"W*" | b"n") {
             k -= 1;
         }
         if k == 0 || !ops[k - 1].is("q") {
@@ -814,6 +835,10 @@ fn components(img: &PdfObject) -> Option<u32> {
 /// The most pixels an image may have to be decoded here (a decompression bomb guard).
 const MAX_PIXELS: u64 = 100_000_000;
 
+/// The most bytes of decoded samples a pixel crop reads (32 components at 16 bits would otherwise
+/// let a 100-megapixel image ask for 6.4 GB): 512 MB, a 100-megapixel RGBA image and some.
+const MAX_SAMPLE_BYTES: u64 = 512 << 20;
+
 /// Bytes of decoded samples an image of `w × h` pixels, `n` components and `bpc` bits takes, and
 /// its row length; None when it is too large to decode.
 fn sample_size(w: u32, h: u32, n: u32, bpc: u32) -> Option<(usize, usize)> {
@@ -822,6 +847,9 @@ fn sample_size(w: u32, h: u32, n: u32, bpc: u32) -> Option<(usize, usize)> {
     }
     let row = u64::from(w).checked_mul(u64::from(n))?.checked_mul(u64::from(bpc))?.div_ceil(8);
     let total = row.checked_mul(u64::from(h))?;
+    if total > MAX_SAMPLE_BYTES {
+        return None;
+    }
     Some((usize::try_from(total).ok()?, usize::try_from(row).ok()?))
 }
 

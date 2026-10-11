@@ -38,7 +38,7 @@ splice and stream writer of [text editing](text-edit.md). MuPDF stays the only e
 ## Design
 
 1. **Reading.** The page's content streams are parsed joined (one stream in pieces). The interpreter tracks the CTM
-   (`q/Q/cm`), rectangular clips (`re … re W n`: the union of a path's rectangles, intersected with the clip in effect, in user space) and text objects, and records every `Do` of
+   (`q/Q/cm`), clips made of straight edges (`re … re W n`, or `m l … h W n`: the box of the path, intersected with the clip in effect, in user space; a path with curves is not tracked) and text objects, and records every `Do` of
    an image XObject and every inline image (`BI … EI`, its abbreviated keys expanded). Form XObjects are not
    entered: images inside them are not listed.
 2. **Transforms** (move, resize, rotate, flip) are page-space matrices `T`, taken to user space
@@ -51,12 +51,14 @@ splice and stream writer of [text editing](text-edit.md). MuPDF stays the only e
 3. **Delete** removes the operator. **Replace** loads the file with MuPDF and adds it with `pdf_add_image` (JPEG data
    is stored as it is, `DCTDecode`; a PNG's alpha becomes an `/SMask`), names it `IwImg<n>` and draws it with
    `q <fit> cm /IwImg<n> Do Q` in place of the old operator. **Crop** with a clip draws
-   `q u0 v0 du dv re W n <op> Q` (the rectangle in the image's unit square, the space its `Do` paints in); a pixel
+   `q u0 v0 du dv re W n <op> Q` (the rectangle in the image's unit square, the space its `Do` paints in); for an
+   image turned or sheared by other than quarter turns the page-space rectangle is a parallelogram there, drawn
+   as `m l l l h W n`, so exactly the requested rectangle shows. A pixel
    crop decodes the samples (`pdf_load_stream`: Flate, DCT, LZW, CCITT …; any bit depth 1-16), copies the rows and
    columns inside the crop (rounded out to whole pixels) into a new Flate image with the same colour space, decode
    and mask settings (an `/SMask` or stencil `/Mask` is cropped the same way, one level deep: a mask's own masks
    are dropped, so a mask that refers back to its image can't recurse), and draws it where those pixels were.
-   Before decoding, the declared size must stay under 100 megapixels (sizes computed with checked arithmetic,
+   Before decoding, the declared size must stay under 100 megapixels and 512 MB of samples (sizes computed with checked arithmetic,
    colour spaces with 1-32 components); plain Flate data is inflated here with that size as the limit.
 4. **Add** appends `q <placement> cm /IwImg<n> Do Q` as a new content stream. The page's content is always
    wrapped first, so whatever state it leaves (a `cm`, a clip, a colour, an unclosed `q`) can't reach the new
@@ -93,7 +95,10 @@ splice and stream writer of [text editing](text-edit.md). MuPDF stays the only e
 
 - Images inside form XObjects (and annotation appearances) are not listed; an image drawn inside a text object can
   only be deleted.
-- Only rectangular clips are tracked for `rect`; other clip paths are ignored (the box may show more than is visible).
+- Only straight-edged clips are tracked for `rect`, by their box; curved clip paths are ignored (the box may show more
+  than is visible).
+- A pixel crop of a turned or sheared image keeps the pixels of the crop's box in the image's own grid (a pixel crop is
+  always a rectangle of pixels); use a clip crop for an exact page-space rectangle.
 - A pixel crop of a JPEG stores the cropped pixels losslessly (Flate), so it can be larger than the JPEG; JPEG 2000
   and inline images can only be cropped with a clip. A cropped image keeps its `/Decode`, `/Intent` and other keys;
   a colour-key `/Mask` array stays as it is.

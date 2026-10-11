@@ -459,6 +459,8 @@ fn oversized_or_odd_images_are_refused_not_crashed() {
         ("/ColorSpace [/ICCBased << /N 2000000000 >>]", "colour space"),
         ("/ColorSpace [/ICCBased << /N -3 >>]", "colour space"),
         ("/ColorSpace /DeviceRGB /Width 2000000 /Height 2000000", "too large"),
+        // Under the pixel cap, but 32 components at 16 bits: 6.4 GB of samples.
+        ("/ColorSpace [/DeviceN [/C0 /C1 /C2 /C3 /C4 /C5 /C6 /C7 /C8 /C9 /C10 /C11 /C12 /C13 /C14 /C15 /C16 /C17 /C18 /C19 /C20 /C21 /C22 /C23 /C24 /C25 /C26 /C27 /C28 /C29 /C30 /C31] /DeviceGray null] /BitsPerComponent 16 /Width 10000 /Height 10000", "too large"),
     ]
     .iter()
     .enumerate()
@@ -521,4 +523,31 @@ fn a_clip_of_several_rectangles_is_their_union() {
     let (eng, id, _) = open(&d, &bytes);
     let b = list(&eng, id)[0].clone();
     assert!(near(b.rect, [100.0, 192.0, 280.0, 292.0]), "{b:?}");
+}
+
+#[test]
+fn a_crop_of_a_turned_image_keeps_its_shape() {
+    let d = dir("crop-turned");
+    let mut bytes = pdf(1, false);
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let mut c = doc.find_page(0).unwrap().get_dict("Contents").unwrap().unwrap();
+    // The image turned by 45 degrees about (300, 400) in user space.
+    c.write_stream_buffer(&Buffer::from_bytes(b"q 141.4214 141.4214 -70.7107 70.7107 300 400 cm /Im1 Do Q\n").unwrap()).unwrap();
+    bytes.clear();
+    doc.write_to(&mut bytes).unwrap();
+    let (eng, id, path) = open(&d, &bytes);
+    let crop = [300.0, 300.0, 400.0, 360.0];
+    let full = list(&eng, id)[0].full_rect;
+    assert!(full[0] < 300.0 && full[2] > 400.0 && full[1] < 300.0 && full[3] > 360.0, "{full:?}");
+    change(&eng, id, Some(0), ImageChange::Crop { rect: crop, pixels: false });
+    let b = list(&eng, id)[0].clone();
+    // Nothing outside the requested rectangle shows (a box in the image's own space would).
+    assert!(b.rect[0] >= 299.99 && b.rect[1] >= 299.99 && b.rect[2] <= 400.01 && b.rect[3] <= 360.01, "{b:?}");
+    assert!(near(b.rect, [300.0, 300.0, 400.0, 360.0]), "{b:?}");
+    eng.save(id, None).unwrap();
+    let content = String::from_utf8_lossy(&saved_content(&path, 0)).into_owned();
+    assert!(content.contains(" m\n") && content.contains(" l\n") && content.contains("h\nW\nn"), "{content}");
+    // And it still moves as one with its image.
+    change(&eng, id, Some(0), ImageChange::Move { dx: 10.0, dy: 0.0 });
+    assert!(near(list(&eng, id)[0].rect, [310.0, 300.0, 410.0, 360.0]));
 }
