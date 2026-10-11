@@ -155,9 +155,9 @@ contract (the provider only ever sees extracted text, never the file, so no user
 
 | step | result | usage in the `result` event |
 |---|---|---|
-| question "When must the supplier deliver?" | streamed, cited `[1]`, 3.0 s (first token 2.1 s) | 2 in / 146 out tokens, 2906 cache-creation, 1 turn |
-| tool call, Apply | card waited, ran, answer "added", 3.4 s | 4 in / 104 out, 5816 cache-read, 2 turns |
-| tool call, Reject | card waited, "no note was added" (the model saw the refusal), 4.0 s | 4 in / 165 out, 7023 cache-read, 2 turns |
+| question "When must the supplier deliver?" | streamed, cited `[1]`, 3.2 s (first token 2.4 s) | 2 in / 146 out tokens, 2906 cache-creation, 1 turn |
+| tool call, Apply | card waited, ran, answer "added", 3.3 s | 4 in / 99 out, 5816 cache-read + 831 cache-creation, 2 turns |
+| tool call, Reject | card waited, "no note was added" (the model saw the refusal), 4.0 s | 4 in / 172 out, 7018 cache-read + 412 cache-creation, 2 turns |
 | cancel after the first delta | `Cancelled`, the same child still alive for the next question | — |
 
 The CLI's own `initialize` answer listed 13 models (aliases `default`, `opus`, `fable`, `sonnet`,
