@@ -958,3 +958,40 @@ fn an_added_box_stays_put_when_edited() {
     }
     assert!(max <= 3, "q depth {max}");
 }
+
+#[test]
+fn moving_a_block_again_and_again_does_not_nest_deeper() {
+    let d = dir("many-moves");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let t = "The first line of the body and its second line.";
+    let start = rect_of(&eng, id, t);
+    for _ in 0..40 {
+        let ch = BlockChange { offset: Some([2.5, -3.0]), ..Default::default() };
+        edit(&eng, id, rev(&eng, id), 0, index_of(&eng, id, t), &ch, EditSource::User).unwrap();
+    }
+    // An added box moved too: its placement cm takes the moves.
+    add_box(&eng, id, "Box", [300.0, 300.0], None);
+    let boxed = rect_of(&eng, id, "Box");
+    for _ in 0..30 {
+        let ch = BlockChange { offset: Some([1.0, 1.0]), ..Default::default() };
+        edit(&eng, id, rev(&eng, id), 0, index_of(&eng, id, "Box"), &ch, EditSource::User).unwrap();
+    }
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let r = rect_of(&eng, id, t);
+    assert!((r[0] - start[0] - 100.0).abs() < 0.5 && (r[1] - start[1] + 120.0).abs() < 0.5, "{start:?} -> {r:?}");
+    let b = rect_of(&eng, id, "Box");
+    assert!((b[0] - boxed[0] - 30.0).abs() < 0.5 && (b[1] - boxed[1] - 30.0).abs() < 0.5, "{boxed:?} -> {b:?}");
+    let mut depth: i32 = 0;
+    let mut max = 0;
+    for o in &saved_ops(&path) {
+        if o.is("q") {
+            depth += 1;
+            max = max.max(depth);
+        } else if o.is("Q") {
+            depth -= 1;
+        }
+    }
+    assert!(max <= 3, "q depth {max}");
+}
