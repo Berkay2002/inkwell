@@ -188,6 +188,9 @@ pub enum Error {
     InvalidOptions(String),
     #[error("verification failed: {0}")]
     Verify(String),
+    /// The document is certified: a compressed copy of it would not be.
+    #[error("{0}")]
+    Refused(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -531,6 +534,8 @@ pub fn compress(
     let size_before = fs::metadata(input)?.len();
     let password = opts.password.as_deref();
     let mut doc = open_pdf(input, password)?;
+    // The copy is a rewrite of every object: a certification does not survive it (a signature only warns, below).
+    crate::outline::refuse_if_certified(&doc, "Compressing it").map_err(|e| Error::Refused(e.to_string()))?;
     let pages = doc.page_count()? as usize;
     run.lap("open");
 

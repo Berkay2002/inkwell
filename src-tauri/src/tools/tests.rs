@@ -25,11 +25,16 @@ fn files(d: &Path) -> Vec<String> {
 
 /// `n` pages without any content: no text, so OCR treats them as scans.
 fn blank_pdf(n: usize) -> Vec<u8> {
+    blank_pdf_with(n, "")
+}
+
+/// [`blank_pdf`] whose catalog also holds `catalog`.
+fn blank_pdf_with(n: usize, catalog: &str) -> Vec<u8> {
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut offs = Vec::new();
     let kids: String = (0..n).map(|i| format!("{} 0 R ", 3 + i)).collect();
     let mut objs = vec![
-        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>"),
         format!("<< /Type /Pages /Kids [{kids}] /Count {n} >>"),
     ];
     for _ in 0..n {
@@ -386,4 +391,36 @@ fn a_cancel_before_the_job_registers_is_not_lost() {
     assert!(g.cancel.load(Ordering::Relaxed));
     drop(g);
     assert!(!jobs.begin(7).cancel.load(Ordering::Relaxed));
+}
+
+// ---------------------------------------------------------------- certified documents
+
+#[test]
+fn a_certified_document_is_not_recognized_or_compressed_into_anything() {
+    let d = dir("certified");
+    let p = d.join("cert.pdf");
+    let pdf = blank_pdf_with(
+        2,
+        "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 2 >> >> ] >> >>",
+    );
+    std::fs::write(&p, &pdf).unwrap();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&p.to_string_lossy()).unwrap().doc;
+    let stub = Stub::new();
+    let cancel = AtomicBool::new(false);
+    // In place: no step, nothing dirty.
+    let e = run_ocr(&eng, &req(id), None, &stub, &|_| {}, &cancel).err().expect("refused").to_string();
+    assert!(e.contains("certified"), "{e}");
+    assert!(!eng.edit_state(id).unwrap().dirty && eng.edit_state(id).unwrap().undo.is_none());
+    // Into a new file: no file.
+    let out = d.join("cert (ocr).pdf");
+    let r = OcrRequest { save_to: Some("t".into()), ..req(id) };
+    let e = run_ocr(&eng, &r, Some(&out), &stub, &|_| {}, &cancel).err().expect("refused").to_string();
+    assert!(e.contains("certified"), "{e}");
+    assert!(!out.exists());
+    // Compress: no copy.
+    let e = run_compress(&eng, &creq(id), None, &cancel, &mut |_| {}).err().expect("refused").0;
+    assert!(e.contains("certified"), "{e}");
+    assert_eq!(files(&d), ["cert.pdf"]);
+    assert_eq!(std::fs::read(&p).unwrap(), pdf);
 }

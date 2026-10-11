@@ -49,10 +49,7 @@ pub async fn marks_add(window: Window, eng: Eng<'_>, reg: Reg<'_>, doc: DocId, m
     let replace = request.replace;
     blocking(move || {
         // An update leaves the old streams unreferenced: the save rewrites the file so they are gone.
-        let f = move |d: &mut mupdf::pdf::PdfDocument| {
-            crate::outline::refuse_if_certified(d, "Adding to its pages")?;
-            apply::add(d, &request)
-        };
+        let f = move |d: &mut mupdf::pdf::PdfDocument| apply::add(d, &request);
         if replace {
             eng.apply_removing(doc, label, EditSource::User, f)
         } else {
@@ -72,7 +69,6 @@ pub async fn marks_remove(eng: Eng<'_>, doc: DocId, kind: MarkKind, pages: Optio
             None => format!("Remove {}", kind.noun()),
         };
         eng.apply_removing(doc, label, EditSource::User, move |d| {
-            crate::outline::refuse_if_certified(d, "Removing from its pages")?;
             let all: Vec<u32> = (0..d.page_count()?.max(0) as u32).collect();
             let pages = pages.unwrap_or(all);
             // Only the pages that have the mark are listed as touched.

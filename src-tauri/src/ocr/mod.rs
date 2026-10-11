@@ -751,6 +751,8 @@ pub fn ocr_file_with(
     if output.exists() && !replace {
         return Err(OcrError::OutputExists(output.display().to_string()));
     }
+    // A recognized copy of a certified document would not be certified: refused before the pages are read.
+    crate::outline::refuse_if_certified(&Input::Path(input).open()?, "Recognizing its text").map_err(|e| OcrError::Pdf(e.to_string()))?;
     let rec = recognize(&Input::Path(input), backend, opts, progress, cancel)?;
     if rec.cancelled {
         return Err(OcrError::Cancelled);
