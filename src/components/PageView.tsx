@@ -10,10 +10,12 @@ import { usePagesDark } from "../lib/usePagesDark";
 import type { Rect4 } from "../store";
 import { AnnotLayer } from "./comments/AnnotLayer";
 import { MeasureLayer } from "./measure/MeasureLayer";
+import { OrderLayer } from "./a11y/OrderLayer";
 import { LinkLayer } from "./edit/LinkLayer";
 import { MarkPreview } from "./MarkPreview";
 import { ReadLinks } from "./ReadLinks";
 import { NaturalImage } from "./NaturalImage";
+import { ImageEditLayer } from "./edit/ImageEditLayer";
 import { TextEditLayer } from "./edit/TextEditLayer";
 import { FormLayer } from "./forms/FormLayer";
 import { TileCanvas } from "./TileCanvas";
@@ -143,8 +145,10 @@ export const PageView = memo(function PageView(p: Props) {
       <FormLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <AnnotLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <MeasureLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
+      <ImageEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <TextEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <LinkLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
+      <OrderLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       {armed && (
         <div
           className="rd-capture"

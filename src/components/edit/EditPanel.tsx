@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { TextAlign, TextBlock } from "../../lib/api";
+import { useImageEdit } from "../../lib/imageEdit";
 import { type EditSection, displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
 import { type DocState } from "../../store";
 import { Icon } from "../Icons";
 import { BookmarksPanel } from "./BookmarksPanel";
+import { AddImageButton, ImageSection } from "./ImagePanel";
 import { LinksPanel } from "./LinksPanel";
 import "./edit.css";
 
@@ -29,6 +31,7 @@ export function EditPanel({ doc }: { doc: DocState }) {
   const d = useTextEdit((s) => s.docs[doc.id]);
   const tool = useTextEdit((s) => s.tool);
   const section = useTextEdit((s) => s.section);
+  const picture = useImageEdit((s) => s.docs[doc.id]?.selected != null);
   const block = d?.selected ? (d.pages[d.selected.page]?.blocks[d.selected.index] ?? null) : null;
   const id = doc.id;
   const here = d?.pages[doc.currentPage]?.blocks.filter(isOffered) ?? [];
@@ -75,14 +78,12 @@ export function EditPanel({ doc }: { doc: DocState }) {
                 <Icon name="textT" size={16} />
                 Text
               </button>
-              <button className="te-btn" disabled title="Image editing is coming">
-                <Icon name="area" size={16} />
-                Image
-                <span className="te-soon">soon</span>
-              </button>
+              <AddImageButton id={id} />
             </div>
           </section>
 
+          {/* A selected picture has its own "Format image"; the text hint would sit above it for nothing. */}
+          {!picture && (
           <section className="te-sec">
             <h3 className="te-h3">Format text</h3>
             {block && (
@@ -101,6 +102,8 @@ export function EditPanel({ doc }: { doc: DocState }) {
               </p>
             )}
           </section>
+          )}
+          <ImageSection doc={doc} />
           {here.length > 0 && (
             <section className="te-sec">
               <h3 className="te-h3">

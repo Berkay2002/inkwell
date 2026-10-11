@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Tool, useAnnot } from "../../lib/annot";
 import {
-  type Annot, FILTERS, KIND_LABEL, STAMPS, groupByPage, quadsFromRects, repliesOf, rgbHex, roots, timeLabel,
+  type Annot, FILTERS, KIND_LABEL, STAMPS, emptyNote, groupByPage, quadsFromRects, repliesOf, rgbHex, roots, timeLabel,
 } from "../../lib/annotLogic";
 import { type DocState, useStore } from "../../store";
 import { Icon, type IconName } from "../Icons";
@@ -117,7 +117,7 @@ export function CommentTools({ doc }: { doc: DocState }) {
   );
 }
 
-const NO_DOC = { items: [] as Annot[], selected: null, editing: null, filter: "all" as const, query: "", error: null };
+const NO_DOC = { items: [] as Annot[], selected: null, editing: null, filter: "all" as const, query: "", error: null, incomplete: false };
 
 export function CommentsPanel({ doc }: { doc: DocState }) {
   const open = useAnnot((s) => s.open);
@@ -127,6 +127,7 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
   const defaultAuthor = useAnnot((s) => s.defaultAuthor);
   const groups = useMemo(() => groupByPage(d.items, d.filter, d.query), [d.items, d.filter, d.query]);
   const total = roots(d.items).length;
+  const note = emptyNote(total, groups.length, d.incomplete);
 
   useEffect(() => {
     if (open) void st().refresh(id);
@@ -165,9 +166,7 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
           </div>
         </div>
         <div className="cm-body">
-          {groups.length === 0 && (
-            <p className="dim cm-empty">{total === 0 ? "No comments yet. Pick a tool and mark up the page." : "Nothing matches."}</p>
-          )}
+          {note && <p className="dim cm-empty">{note}</p>}
           {groups.map((g) => (
             <section key={g.page} className="cm-group">
               <h3 className="cm-page">Page {g.page + 1}</h3>
@@ -176,6 +175,7 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
               ))}
             </section>
           ))}
+          {d.incomplete && <p className="dim">This document has too many annotations to list them all. Some are not shown.</p>}
           {d.error && (
             <p className="cm-error" role="alert">
               {d.error}

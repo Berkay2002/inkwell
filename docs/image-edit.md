@@ -1,9 +1,37 @@
 # Edit images in place
 
-Acrobat's "Edit text & images" for images (study: [study/02-edit.md](study/02-edit.md)). Engine only; the UI is
-not built yet. Code: `src-tauri/src/imageedit/`, adapted from pdfcraft `crates/edit/src/images.rs` and
-`crates/content` (b8ddf71, MIT OR Apache-2.0; see `third_party/pdfcraft/`). It shares the content-stream parser,
-splice and stream writer of [text editing](text-edit.md). MuPDF stays the only engine that owns the document.
+Acrobat's "Edit text & images" for images (study: [study/02-edit.md](study/02-edit.md)). Code:
+`src-tauri/src/imageedit/` (engine), `src/lib/imageEdit.ts` and `src/components/edit/Image*.tsx` (UI), adapted from
+pdfcraft `crates/edit/src/images.rs` and `crates/content` (b8ddf71, MIT OR Apache-2.0; see `third_party/pdfcraft/`).
+It shares the content-stream parser, splice and stream writer of [text editing](text-edit.md). MuPDF stays the only
+engine that owns the document.
+
+## In the app
+
+Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outlines, next to the text outlines
+(a text block wins a click where they overlap; selecting one lets go of the other).
+
+- **Select.** Click a picture (or its row under "Images on page N" in the rail). The frame has eight handles; the rail
+  shows "Format image": pixels, codec, colour space and effective ppi. A picture the engine can't edit (reason from
+  `ImageBlock.reason`) is outlined dashed and says why when clicked.
+- **Move / resize.** Drag the frame, or a handle: corners keep the proportions (hold Shift to stretch), sides move
+  one edge, the opposite side stays put, no side goes under 8 pt. Arrow keys nudge by 1 pt (10 with Shift), turned
+  along the screen when the view is rotated. The rail has typed width and height in points ("Keep proportions"; the top
+  left stays).
+- **Turn / flip.** Quarter turns left and right, flip left-right and top-bottom, about the centre.
+- **Crop.** "Crop" dims what is outside the rectangle you drag; Enter or "Apply crop" sends it, Esc leaves.
+  By default it is a clip (the picture stays whole in the file and the cut-off part is marked on the frame
+  afterwards); "Delete the cut-off pixels" makes a smaller image instead.
+- **Replace.** "Replace…" opens the picture chooser (`pick_source`, images); the new picture is fitted into the old
+  box. Cancelling the chooser sends nothing.
+- **Delete.** The Delete key or the rail's button.
+- **Add.** "Image" in Add content chooses a file first, then a click puts it on the page (a 180 pt box at the point,
+  kept inside the page) or a drag draws its box; the picture is fitted and centred keeping its proportions and
+  selected. Esc or Cancel puts the file back; picking the text tool does too.
+- Every change is one undo step ("Move image on p. 1" …), Save writes it, the history records it. A change the page
+  moved under (`stale`) is not applied: the selection is found again by position and the rail says so.
+- Checked by `scripts/image-edit-shots.mjs` against generated fixtures (`scripts/make-image-edit-sample.mjs`);
+  screens in `docs/screens/image-edit/`. Unit tests: `src/lib/imageEdit.test.ts`.
 
 ## Commands
 
@@ -111,3 +139,6 @@ splice and stream writer of [text editing](text-edit.md). MuPDF stays the only e
   predictor, CCITT …) are decoded by MuPDF after the declared-size check, and the result is refused if it is larger
   than declared.
 - New images are added through MuPDF's image loader: JPEG, PNG, GIF, BMP, TIFF (first page), JPEG 2000.
+- UI: one picture at a time (no multi-select, no copy and paste, no dragging a picture to another page), no turning
+  by a free angle, and the chooser offers only what `pick_source` allows (jpg, jpeg, png, tif, tiff, bmp, gif).
+  Resizing a clip-cropped picture scales the whole box, the visible part with it.

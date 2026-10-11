@@ -86,9 +86,61 @@ fn measure(path: &Path) -> Result<Audit, Error> {
     audit(&doc, std::fs::metadata(path)?.len())
 }
 
-/// `full` is the audit of the whole file. Unencrypted files only; the caller may fall back to nothing.
+/// The three presets. `full` is the audit of the whole file. Unencrypted files only; the caller may
+/// fall back to nothing.
 pub fn estimate(input: &Path, password: Option<&str>, full: &Audit, cancel: &AtomicBool) -> Result<Vec<Estimate>, Error> {
-    let presets = [Preset::Smallest, Preset::Balanced, Preset::HighQuality];
+    let variants: Vec<Options> = [Preset::Smallest, Preset::Balanced, Preset::HighQuality].map(Options::preset).into();
+    estimate_many(input, password, full, &variants, cancel)
+}
+
+/// One set of Advanced settings.
+pub fn estimate_custom(input: &Path, password: Option<&str>, full: &Audit, opts: &Options, cancel: &AtomicBool) -> Result<Estimate, Error> {
+    let mut v = estimate_many(input, password, full, std::slice::from_ref(opts), cancel)?;
+    let mut e = v.pop().ok_or_else(|| Error::Verify("no estimate".into()))?;
+    e.preset = Preset::Custom;
+    Ok(e)
+}
+
+/// What the full file's audit already says about a discard option: the bytes of the category that
+/// holds what it removes. Exact where the audit has a category for it; options without one (actions,
+/// alternate images, private data) are small and counted as nothing.
+fn discarded(full: &Audit, opts: &Options) -> u64 {
+    let s = &opts.strip;
+    let mut b = 0;
+    if s.thumbnails {
+        b += full.bytes(Category::Thumbnails);
+    }
+    if s.embedded_files {
+        b += full.bytes(Category::EmbeddedFiles);
+    }
+    if s.bookmarks {
+        b += full.bytes(Category::Bookmarks);
+    }
+    if s.metadata {
+        b += full.bytes(Category::Metadata);
+    }
+    if s.links {
+        b += full.bytes(Category::Links);
+    }
+    b
+}
+
+/// Bytes the unembed list takes out of the file's fonts (stored size of the files, exact).
+fn unembed_bytes(full: &Audit, opts: &Options) -> u64 {
+    full.font_list
+        .iter()
+        .filter(|f| f.can_unembed && (opts.unembed_all || opts.unembed_fonts.contains(&f.name)))
+        .map(|f| f.bytes)
+        .sum()
+}
+
+fn estimate_many(
+    input: &Path,
+    password: Option<&str>,
+    full: &Audit,
+    variants: &[Options],
+    cancel: &AtomicBool,
+) -> Result<Vec<Estimate>, Error> {
     let full_img = full.bytes(Category::Images);
     let full_font = full.bytes(Category::Fonts);
 
@@ -120,36 +172,47 @@ pub fn estimate(input: &Path, password: Option<&str>, full: &Audit, cancel: &Ato
         keep.push(i as usize);
         got += b;
     }
+    // No images at all: pages spread over the file stand in, so fonts and structure still get measured.
+    if keep.is_empty() && pages > 0 {
+        keep = super::visual::sample_pages(pages as usize, SAMPLE_PAGES);
+    }
+    // Pages that use transparency: a flatten run is not simulated (it is a rendering), its cost is a range.
+    let flatten_pages = if variants.iter().any(|o| o.transparency.flatten) {
+        super::flatten::pages_using_transparency(&doc)?.len() as u64
+    } else {
+        0
+    };
+    let (page_w, page_h) = doc.find_page(0).ok().and_then(|p| page_size(&p)).unwrap_or((612.0, 792.0));
+    let page_px = |ppi: u32| (page_w * ppi as f64 / 72.0) * (page_h * ppi as f64 / 72.0);
     check(cancel)?;
 
     let scratch = Scratch::new()?;
     let tmp_dir = scratch.0.clone();
     let base = TempFile::new(&tmp_dir.join("sample.pdf"))?;
-    let mut shrink = vec![(1.0, 1.0, 1.0); presets.len()];
+    let mut shrink = vec![(1.0, 1.0, 1.0); variants.len()];
     let mut sample_img = 0u64;
 
-    if !keep.is_empty() && full_img > 0 {
+    if !keep.is_empty() && (full_img > 0 || full_font > 0) {
         let mut s = doc;
         let others: Vec<usize> = (0..pages as usize).filter(|p| !keep.contains(p)).collect();
         if !others.is_empty() {
             s.delete_pages(others)?;
         }
-        // Written as the original was (no optimisation), so the presets' structural savings show too.
+        // Written as the original was (no optimisation), so the settings' structural savings show too.
         let mut plain = PdfWriteOptions::default();
         plain.set_garbage_level(1);
         s.save_with_options(&base.0.to_string_lossy(), plain)?;
         drop(s);
         check(cancel)?;
         let before = measure(&base.0)?;
-        sample_img = before.bytes(Category::Images);
+        sample_img = if full_img > 0 { before.bytes(Category::Images) } else { 0 };
         let b_font = before.bytes(Category::Fonts);
         let b_img = sample_img.max(1) as f64;
         let b_rest = before.total.saturating_sub(sample_img + b_font).max(1) as f64;
 
-        // 2. Each preset on the sample.
-        for (k, &preset) in presets.iter().enumerate() {
+        // 2. Each variant's image, font and write settings on the sample.
+        for (k, opts) in variants.iter().enumerate() {
             check(cancel)?;
-            let opts = Options::preset(preset);
             let mut d = open_pdf(&base.0, None)?;
             if let Some(io) = image_options(&opts.images) {
                 let mut cb = |_: u32, _: usize, _: usize| cancel.load(Ordering::Relaxed);
@@ -161,7 +224,7 @@ pub fn estimate(input: &Path, password: Option<&str>, full: &Audit, cancel: &Ato
                 d.subset_fonts()?;
             }
             let out = TempFile::new(&tmp_dir.join("out.pdf"))?;
-            d.save_with_options(&out.0.to_string_lossy(), write_options(&opts))?;
+            d.save_with_options(&out.0.to_string_lossy(), write_options(opts, opts.garbage))?;
             drop(d);
             let after = measure(&out.0)?;
             let r_img = (after.bytes(Category::Images) as f64 / b_img).min(1.0);
@@ -175,18 +238,35 @@ pub fn estimate(input: &Path, password: Option<&str>, full: &Audit, cancel: &Ato
     // 3. Extrapolate. What the sample did not see (the images it skipped) is the uncertainty: the
     // range is a share of the image output that grows with the unseen part, and is exact at full coverage.
     let coverage = if full_img == 0 { 1.0 } else { (sample_img as f64 / full_img as f64).min(1.0) };
-    let rest = full.total.saturating_sub(full_img + full_font) as f64;
     // One or two sampled pages say little about how the others differ: the range opens up.
     let spread = if keep.len() >= 4 { 0.4 } else { 1.0 };
-    Ok(presets
+    Ok(variants
         .iter()
         .zip(&shrink)
-        .map(|(&preset, &(r_img, r_font, r_rest))| {
+        .map(|(opts, &(r_img, r_font, r_rest))| {
+            let gone = discarded(full, opts).min(full.total) as f64;
+            let unembedded = unembed_bytes(full, opts).min(full_font) as f64;
+            let rest = full.total.saturating_sub(full_img + full_font) as f64 - gone.min(full.total.saturating_sub(full_img + full_font) as f64);
             let img_out = full_img as f64 * r_img;
-            let mid = img_out + full_font as f64 * r_font + rest * r_rest;
-            let u = spread * (1.0 - coverage) * img_out;
+            let font_out = (full_font as f64 - unembedded) * r_font;
+            let mut mid = img_out + font_out + rest.max(0.0) * r_rest;
+            let mut u = spread * (1.0 - coverage) * img_out;
+            // Each flattened page costs a picture: JPEG 2000 / JPEG of a text page runs 0.15 to 0.5 byte
+            // per pixel at the Balanced settings.
+            if opts.transparency.flatten && flatten_pages > 0 {
+                let px = page_px(opts.transparency.ppi) * flatten_pages as f64;
+                mid += px * 0.15;
+                u += px * 0.35;
+            }
             let clamp = |v: f64| v.clamp(1.0, full.total as f64) as u64;
-            Estimate { preset, bytes: clamp(mid), low: clamp(mid - 0.6 * u), high: clamp(mid + u) }
+            Estimate { preset: opts.preset, bytes: clamp(mid), low: clamp(mid - 0.6 * u), high: clamp(mid + u) }
         })
         .collect())
+}
+
+/// Width and height of a page's crop box (or media box) in points.
+fn page_size(page: &mupdf::pdf::PdfObject) -> Option<(f64, f64)> {
+    let b = page.get_dict_inheritable("CropBox").ok().flatten().or_else(|| page.get_dict_inheritable("MediaBox").ok().flatten())?;
+    let n = |i: i32| b.get_array(i).ok().flatten().and_then(|v| v.as_float().ok()).map(f64::from);
+    Some(((n(2)? - n(0)?).abs(), (n(3)? - n(1)?).abs()))
 }

@@ -31,7 +31,7 @@ export interface Patch extends Style {
 }
 
 export const annotApi = {
-  list: (doc: number) => invoke<Annot[]>("annot_list", { doc }),
+  list: (doc: number) => invoke<{ items: Annot[]; incomplete: boolean }>("annot_list", { doc }),
   add: (doc: number, page: number, what: NewAnnot, style: Style | null, author: string) =>
     invoke<{ state: EditState; xref: number }>("annot_add", { doc, page, what, style, author }),
   edit: (doc: number, page: number, xref: number, patch: Patch, author: string) =>
@@ -65,9 +65,11 @@ export interface DocAnnots {
   filter: Filter;
   query: string;
   error: string | null;
+  /** The document has more annotations than were read: the list leaves some out. */
+  incomplete: boolean;
 }
 
-const fresh = (): DocAnnots => ({ items: [], selected: null, editing: null, filter: "all", query: "", error: null });
+const fresh = (): DocAnnots => ({ items: [], selected: null, editing: null, filter: "all", query: "", error: null, incomplete: false });
 
 const AUTHOR_KEY = "inkwell.author";
 const loadAuthor = () => {
@@ -155,10 +157,10 @@ export const useAnnot = create<AnnotStore>((set, get) => {
     get: (doc) => get().docs[doc] ?? fresh(),
     refresh: async (doc) => {
       try {
-        const items = await annotApi.list(doc);
+        const { items, incomplete } = await annotApi.list(doc);
         const d = get().get(doc);
         const has = (r: Ref | null) => (r && items.some((a) => a.page === r.page && a.xref === r.xref) ? r : null);
-        patch(doc, { items, selected: has(d.selected), editing: has(d.editing) });
+        patch(doc, { items, incomplete, selected: has(d.selected), editing: has(d.editing) });
       } catch (e) {
         patch(doc, { error: msg(e) });
       }
