@@ -247,31 +247,46 @@ export function locate(tree: TagNode[], xref: number, parent: TagNode | null = n
 
 export type TagMove = "up" | "down" | "in" | "out";
 
+/** Where a tag goes: under `parent` (0: the top of the tree), beside its kid `anchor` (null: as the last kid). */
+export interface MoveTo {
+  parent: number;
+  anchor: number | null;
+  after: boolean;
+}
+
 /**
- * What `a11y_move_tag(xref, parent, index)` takes for a step, or null when the step goes nowhere. The index
- * counts the parent's kids after the node is taken out; `parent` 0 is the top of the tree, so a target that
- * can't be addressed (object number 0) is refused rather than turned into the top.
+ * What `a11y_move_tag(xref, parent, anchor, after)` takes for a step, or null when the step goes nowhere.
+ * The place is named by a sibling, not an index: the parent's /K also holds content items, which the tree
+ * does not list, and a page-scoped tree lists only some of the kids. A step that would have to be placed
+ * by a node with no object number is refused rather than turned into some other place.
  */
-export function moveTarget(tree: TagNode[], xref: number, how: TagMove): { parent: number; index: number } | null {
+export function moveTarget(tree: TagNode[], xref: number, how: TagMove): MoveTo | null {
   const at = locate(tree, xref);
   if (!at) return null;
   const node = at.siblings[at.index];
   if (!node.editable || xref === 0) return null;
+  const parent = at.parent?.xref ?? 0;
+  if (at.parent && parent <= 0) return null;
   switch (how) {
-    case "up":
-      return at.index > 0 ? { parent: at.parent?.xref ?? 0, index: at.index - 1 } : null;
-    case "down":
-      return at.index < at.siblings.length - 1 ? { parent: at.parent?.xref ?? 0, index: at.index + 1 } : null;
+    case "up": {
+      // Before the nearest sibling above that has an object number.
+      const above = at.siblings.slice(0, at.index).reverse().find((s) => s.xref > 0);
+      return above ? { parent, anchor: above.xref, after: false } : null;
+    }
+    case "down": {
+      const below = at.siblings.slice(at.index + 1).find((s) => s.xref > 0);
+      return below ? { parent, anchor: below.xref, after: true } : null;
+    }
     case "in": {
       // Into the sibling above, as its last kid.
       const above = at.siblings[at.index - 1];
-      return above && above.editable && above.xref > 0 ? { parent: above.xref, index: above.children.length } : null;
+      return above && above.editable && above.xref > 0 ? { parent: above.xref, anchor: null, after: false } : null;
     }
     case "out": {
       // Next to the parent, right after it.
       if (!at.parent || at.parent.xref <= 0) return null;
       const up = locate(tree, at.parent.xref);
-      return up ? { parent: up.parent?.xref ?? 0, index: up.index + 1 } : null;
+      return up ? { parent: up.parent?.xref ?? 0, anchor: at.parent.xref, after: true } : null;
     }
   }
 }
@@ -438,12 +453,13 @@ export const RULE_CHECKPOINT: Record<string, { cp: string; conditions: string[] 
   "tagged-pdf": { cp: "01", conditions: ["01-007"] },
   "content-marking": { cp: "01", conditions: ["01-003", "01-004", "01-005"] },
   "role-map": { cp: "02", conditions: ["02-001", "02-003", "02-004"] },
-  "color-contrast": { cp: "04", conditions: ["04-001"] },
+  // Contrast is always a manual check and reading order is judged by a heuristic: neither decides a condition.
+  "color-contrast": { cp: "04", conditions: [] },
   // The title rule reads /Title only, not dc:title (06-003, which `metadata` decides).
   title: { cp: "06", conditions: [] },
   metadata: { cp: "06", conditions: ["06-001", "06-002", "06-003"] },
   "display-doc-title": { cp: "07", conditions: ["07-001", "07-002"] },
-  "reading-order": { cp: "09", conditions: ["09-001"] },
+  "reading-order": { cp: "09", conditions: [] },
   "list-structure": { cp: "09", conditions: ["09-005"] },
   "table-structure": { cp: "09", conditions: ["09-004"] },
   "fonts-unicode": { cp: "10", conditions: ["10-001", "31-027"] },

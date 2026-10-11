@@ -1345,7 +1345,8 @@ pub fn edit_tag_doc(eng: &Engine, doc: DocId, xref: i32, patch: &tags::TagPatch,
     eng.apply_custom(doc, patch.label(), source, false, |d| tags::edit_tag(d, xref, patch))
 }
 
-/// Moves a node under `parent` (0: the top of the tree) at `index`, as one undo step.
-pub fn move_tag_doc(eng: &Engine, doc: DocId, xref: i32, parent: i32, index: usize, source: EditSource) -> Result<EditState> {
-    eng.apply_custom(doc, "Move tag".into(), source, false, |d| tags::move_node(d, xref, parent, index))
+/// Moves a node under `parent` (0: the top of the tree), before or after its kid `anchor` (last when
+/// there is none), as one undo step.
+pub fn move_tag_doc(eng: &Engine, doc: DocId, xref: i32, parent: i32, anchor: Option<i32>, after: bool, source: EditSource) -> Result<EditState> {
+    eng.apply_custom(doc, "Move tag".into(), source, false, |d| tags::move_node(d, xref, parent, anchor, after))
 }

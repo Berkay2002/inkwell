@@ -25,10 +25,11 @@ const st = () => useA11y.getState();
 
 function Layer({ docId, rot, rawSize, zoom, regions, selected }: Props & { regions: Region[]; selected: number[] }) {
   const [drag, setDrag] = useState<{ xref: number; n: number; over: number | null; moved: boolean; x: number; y: number } | null>(null);
-  // Larger boxes first, so a small region sits on top of the one that holds it and can be picked.
+  // In reading order in the DOM, so Tab follows it; a larger box sits lower, so a small region is on top of
+  // the one that holds it and can be picked.
   const area = (r: Region) => (r.bbox ? (r.bbox[2] - r.bbox[0]) * (r.bbox[3] - r.bbox[1]) : 0);
   const drawn = regions.map((r, i) => ({ r, n: i + 1 })).filter((e) => e.r.bbox && e.r.xref !== 0);
-  drawn.sort((a, b) => area(b.r) - area(a.r));
+  const layer = new Map([...drawn].sort((a, b) => area(b.r) - area(a.r)).map((e, k) => [e.r.xref, k + 1]));
 
   const select = (e: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }, xref: number) =>
     st().selectRegion(docId, xref, e.shiftKey ? "range" : e.metaKey || e.ctrlKey ? "toggle" : "one");
@@ -56,7 +57,7 @@ function Layer({ docId, rot, rawSize, zoom, regions, selected }: Props & { regio
             key={r.xref}
             data-region={r.xref}
             className={`a11y-ro-box${sel ? " selected" : ""}${target ? " target" : ""}${drag?.xref === r.xref ? " dragging" : ""}`}
-            style={{ left: x0, top: y0, width: x1 - x0, height: y1 - y0 }}
+            style={{ left: x0, top: y0, width: x1 - x0, height: y1 - y0, zIndex: layer.get(r.xref) }}
             onPointerDown={(e) => {
               if (e.button !== 0) return;
               e.stopPropagation();

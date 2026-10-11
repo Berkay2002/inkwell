@@ -261,7 +261,17 @@ function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tr
             ))}
           </select>
         </label>
-        <button type="button" className="a11y-btn" disabled={busy || !roleChanged} title="One undo step" onClick={() => void st().setRole(id, node.xref, d.role.trim())}>
+        <button
+          type="button"
+          className="a11y-btn"
+          disabled={busy || !roleChanged}
+          title={patch ? "Applies the other changes first, as a step of their own" : "One undo step"}
+          onClick={async () => {
+            // A reload after the type change would drop what is typed in the other fields: save it first.
+            if (patch && !(await st().editTag(id, node.xref, patch))) return;
+            void st().setRole(id, node.xref, d.role.trim());
+          }}
+        >
           Change type
         </button>
       </div>

@@ -466,7 +466,7 @@ fn a_node_moves_to_another_parent_and_the_tree_stays_consistent() {
     let path = file("move", &s);
     let (eng, id) = open(&path);
     let steps = eng.history(id).unwrap().len();
-    move_tag_doc(&eng, id, 102, 105, 0, EditSource::User).unwrap();
+    move_tag_doc(&eng, id, 102, 105, None, false, EditSource::User).unwrap();
     assert_eq!(eng.history(id).unwrap().len(), steps + 1);
     let t = tags_doc(&eng, id, None).unwrap();
     let kinds: Vec<(i32, usize)> = t[0].children.iter().map(|c| (c.xref, c.children.len())).collect();
@@ -474,10 +474,10 @@ fn a_node_moves_to_another_parent_and_the_tree_stays_consistent() {
     assert_eq!(t[0].children[2].children[0].xref, 102);
     assert_consistent(&eng, id);
     // Not into itself or its own kid.
-    assert!(move_tag_doc(&eng, id, 105, 102, 0, EditSource::User).is_err());
-    assert!(move_tag_doc(&eng, id, 105, 105, 0, EditSource::User).is_err());
+    assert!(move_tag_doc(&eng, id, 105, 102, None, false, EditSource::User).is_err());
+    assert!(move_tag_doc(&eng, id, 105, 105, None, false, EditSource::User).is_err());
     // To the top of the tree, first.
-    move_tag_doc(&eng, id, 104, 0, 0, EditSource::User).unwrap();
+    move_tag_doc(&eng, id, 104, 0, Some(101), false, EditSource::User).unwrap();
     assert_eq!(tags_doc(&eng, id, None).unwrap()[0].xref, 104);
     let (eng2, id2) = reload(&eng, id, &path);
     assert_consistent(&eng2, id2);
@@ -496,7 +496,7 @@ fn moving_a_node_keeps_its_page_when_it_relied_on_an_inherited_one() {
     let path = file("move-pg", &s);
     let (eng, id) = open(&path);
     assert_consistent(&eng, id);
-    move_tag_doc(&eng, id, 112, 101, 0, EditSource::User).unwrap();
+    move_tag_doc(&eng, id, 112, 101, Some(102), false, EditSource::User).unwrap();
     assert_consistent(&eng, id);
     let (_, _) = reload(&eng, id, &path);
     let order = walk(&path);
@@ -629,4 +629,60 @@ fn q_restores_the_text_state_for_the_next_region() {
     // 24 pt text is about twice as tall as 12 pt; the second region must be measured at 12 pt.
     assert!(h(0) > 1.7 * h(1), "{} vs {}", h(0), h(1));
     assert_eq!(r[1].text, "Small");
+}
+
+#[test]
+fn a_tag_moves_beside_a_sibling_in_a_parent_that_mixes_content_and_elements() {
+    // Document /K [mcid 0, A, mcid 2, B]: the raw array holds content items between the elements.
+    let content: String = (0..4).map(|m| marked("P", m, 700 - 50 * m)).collect();
+    let s = Spec {
+        cat: "/StructTreeRoot 100 0 R /MarkInfo <</Marked true>>".into(),
+        pages: vec![("/StructParents 0".into(), content)],
+        objs: vec![
+            (100, "<</Type/StructTreeRoot /K 101 0 R /ParentTree <</Nums [0 [101 0 R 102 0 R 101 0 R 103 0 R]]>> /ParentTreeNextKey 1>>".into()),
+            (101, "<</Type/StructElem /S/Document /P 100 0 R /Pg 10 0 R /K [0 102 0 R 2 103 0 R]>>".into()),
+            el(102, "P", 101, "1"),
+            el(103, "P", 101, "3"),
+        ],
+        ..Spec::default()
+    };
+    let path = file("move-mixed", &s);
+    let (eng, id) = open(&path);
+    assert_consistent(&eng, id);
+    let tree_order = |eng: &Engine, id: DocId| -> Vec<i32> {
+        eng.save(id, None).unwrap();
+        walk(&path).into_iter().map(|(_, m)| m).collect()
+    };
+    let mv = |xref, parent, anchor, after| move_tag_doc(&eng, id, xref, parent, anchor, after, EditSource::User);
+    // Down: A after B, past the content item between them.
+    mv(102, 101, Some(103), true).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 2, 3, 1]);
+    eng.undo(id).unwrap();
+    // Up: B before A, ahead of the content item that sits before A.
+    mv(103, 101, Some(102), false).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 3, 1, 2]);
+    eng.undo(id).unwrap();
+    // In: B as the last kid of A (A's /K is a single item).
+    mv(103, 102, None, false).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 1, 3, 2]);
+    let t = tags_doc(&eng, id, None).unwrap();
+    assert_eq!(t[0].children.iter().map(|c| c.xref).collect::<Vec<_>>(), [102]);
+    assert_eq!(t[0].children[0].children.iter().map(|c| c.xref).collect::<Vec<_>>(), [103]);
+    // Out: B back into the Document, right before A.
+    mv(103, 101, Some(102), false).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 3, 1, 2]);
+    assert_consistent(&eng, id);
+    eng.undo(id).unwrap();
+    eng.undo(id).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 1, 2, 3]);
+    // Nothing changes: last kid to the end, itself, an anchor that is not a kid. No step is recorded.
+    let steps = eng.history(id).unwrap().len();
+    assert!(mv(103, 101, None, false).is_err());
+    assert!(mv(102, 101, Some(102), true).is_err());
+    assert!(mv(102, 0, Some(103), false).is_err(), "103 is not a kid of the top");
+    assert_eq!(eng.history(id).unwrap().len(), steps);
+    assert_eq!(tree_order(&eng, id), [0, 1, 2, 3]);
+    // Past the content item in front of B is a real change.
+    mv(102, 101, Some(103), false).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 2, 1, 3]);
 }

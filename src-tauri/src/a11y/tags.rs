@@ -764,9 +764,11 @@ pub fn edit_tag(doc: &mut PdfDocument, xref: i32, patch: &TagPatch) -> Result<Ve
     Ok(touched)
 }
 
-/// Moves a node to be the `index`-th kid of `parent` (0: the top of the tree). The index counts the
-/// parent's kids after the node has been taken out of its old place.
-pub fn move_node(doc: &mut PdfDocument, xref: i32, parent: i32, index: usize) -> Result<Vec<u32>> {
+/// Moves a node under `parent` (0: the top of the tree), next to its kid `anchor`: before it, or after
+/// it with `after`. Without an anchor the node becomes the last kid. The place is found in the parent's
+/// raw /K, where content items sit between the elements, so the node lands exactly beside the anchor.
+/// A move that leaves the node where it is is refused.
+pub fn move_node(doc: &mut PdfDocument, xref: i32, parent: i32, anchor: Option<i32>, after: bool) -> Result<Vec<u32>> {
     let c = Ctx::load(doc)?;
     let i = c.find(xref)?;
     let target = if parent == 0 { ROOT } else { c.t.elems[c.find(parent)?].xref };
@@ -776,9 +778,26 @@ pub fn move_node(doc: &mut PdfDocument, xref: i32, parent: i32, index: usize) ->
             return Err(bad("an element can't be moved into itself"));
         }
     }
+    if anchor == Some(xref) {
+        return Err(bad("an element can't be placed next to itself"));
+    }
+    let old_parent = c.parent_xref(i);
+    let mut kids = kids_of(&obj_of(doc, target)?)?;
+    let is_node = |k: &Kid| matches!(k, Kid::Elem(_)) && k.xref() == xref;
+    let from = if old_parent == target { kids.iter().position(is_node) } else { None };
+    if let Some(f) = from {
+        kids.remove(f);
+    }
+    let at = match anchor {
+        None => kids.len(),
+        Some(a) => kids.iter().position(|k| matches!(k, Kid::Elem(_)) && k.xref() == a).ok_or_else(|| bad(format!("element {a} is not a kid of the new parent")))? + usize::from(after),
+    };
+    if from == Some(at) {
+        return Err(bad("the element is already there"));
+    }
     pin_pages(doc, &c, i)?;
-    detach(doc, c.parent_xref(i), xref)?;
-    attach(doc, target, xref, Some(index))?;
+    detach(doc, old_parent, xref)?;
+    attach(doc, target, xref, Some(at))?;
     Ok(c.t.elems[i].page.into_iter().collect())
 }
 

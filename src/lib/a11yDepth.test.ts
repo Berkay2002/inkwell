@@ -173,16 +173,24 @@ describe("tag tree", () => {
     expect(flatten(wide, {})).toHaveLength(1);
     expect(flatten(wide, { x1: true })).toHaveLength(50_001);
   });
-  it("turns a step into a parent and an index", () => {
-    expect(moveTarget(tree, 102, "up")).toEqual({ parent: 100, index: 0 });
+  it("names the place by a sibling, not an index", () => {
+    expect(moveTarget(tree, 102, "up")).toEqual({ parent: 100, anchor: 101, after: false });
     expect(moveTarget(tree, 101, "up")).toBeNull();
-    expect(moveTarget(tree, 101, "down")).toEqual({ parent: 100, index: 1 });
+    expect(moveTarget(tree, 101, "down")).toEqual({ parent: 100, anchor: 102, after: true });
     // into the one above, as its last kid
-    expect(moveTarget(tree, 102, "in")).toEqual({ parent: 101, index: 0 });
-    // out: next to the parent, at the top of the tree it is parent 0
-    expect(moveTarget(tree, 103, "out")).toEqual({ parent: 100, index: 2 });
+    expect(moveTarget(tree, 102, "in")).toEqual({ parent: 101, anchor: null, after: false });
+    // out: right after the parent; at the top of the tree it is parent 0
+    expect(moveTarget(tree, 103, "out")).toEqual({ parent: 100, anchor: 102, after: true });
     expect(moveTarget(tree, 100, "out")).toBeNull();
     expect(moveTarget(tree, 100, "down")).toBeNull();
+  });
+  it("steps over siblings that have no object number, and moves a top-level tag beside its sibling", () => {
+    const t = [node(1, "Document", [node(2, "P"), node(0, "Span", [], { editable: false }), node(3, "P")]), node(4, "Document")];
+    expect(moveTarget(t, 3, "up")).toEqual({ parent: 1, anchor: 2, after: false });
+    expect(moveTarget(t, 2, "down")).toEqual({ parent: 1, anchor: 3, after: true });
+    expect(moveTarget(t, 4, "up")).toEqual({ parent: 0, anchor: 1, after: false });
+    // only an unaddressable sibling below: there is nothing to place it by
+    expect(moveTarget([node(1, "Document", [node(2, "P"), node(0, "Span", [], { editable: false })])], 2, "down")).toBeNull();
   });
   it("never moves into, or out of, a node that has no object number", () => {
     const t = [node(1, "Document", [node(0, "L", [], { editable: false }), node(2, "P")])];
@@ -248,6 +256,14 @@ describe("Matterhorn checkpoints", () => {
     const other = g.find((x) => x.number === null)!;
     expect(other.rules.map((x) => x.rule)).toEqual(["bookmarks", "some-future-rule"]);
     expect(other.count).toBe(1);
+  });
+  it("quotes no condition for the rules that only guess or always ask for a manual check", () => {
+    const r: Report = { pages: 1, tagged: true, results: [rule({ rule: "color-contrast", status: "manual" }), rule({ rule: "reading-order", status: "passed" })] };
+    const groups = matterhornGroups(r);
+    expect(groups.map((x) => [x.number, x.status, x.conditions])).toEqual([
+      ["04", "manual", []],
+      ["09", "passed", []],
+    ]);
   });
   it("lists the checkpoints no rule decides", () => {
     const un = uncheckedCheckpoints(g);
@@ -350,6 +366,38 @@ describe("Reading order store", () => {
     expect(inv.mock.calls.filter((c) => c[0] === "a11y_reading_order")).toHaveLength(2);
   });
 
+  it("reads the page again before the document is given back, so key repeat plans from the new order", async () => {
+    let order = three;
+    reply({
+      a11y_reading_order: () => Promise.resolve(ro(order)),
+      a11y_reorder: (args: unknown) => {
+        order = (args as { order: number[] }).order.map((x) => three.find((r) => r.xref === x)!);
+        // what applyState does: the revision moves
+        useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: useStore.getState().docs[1].rev + 1 } } });
+        return Promise.resolve(state(4));
+      },
+    });
+    await a().loadOrder(1, 0);
+    expect(await a().moveRegion(1, 10, 1)).toBe(true);
+    expect(a().get(1).order.rev).toBe(useStore.getState().docs[1].rev);
+    expect(a().get(1).order.data?.regions.map((r) => r.xref)).toEqual([11, 10, 12]);
+    // the second step moves 10 after 12 (it is now at index 1), not after 11 again
+    expect(await a().moveRegion(1, 10, 1)).toBe(true);
+    expect(inv.mock.calls.filter((c) => c[0] === "a11y_reorder").map((c) => (c[1] as { order: number[] }).order)).toEqual([[11, 10, 12], [11, 12, 10]]);
+  });
+
+  it("refuses to plan from regions older than the document (undo came first) and reads the page again", async () => {
+    reply({ a11y_reading_order: ro(three), a11y_reorder: state(4) });
+    await a().loadOrder(1, 0);
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 4 } } });
+    // all asked before the page is read again
+    const asked = await Promise.all([a().moveRegion(1, 10, 1), a().dropRegion(1, 12, 10), a().splitRegion(1, 10, 1)]);
+    expect(asked).toEqual([false, false, false]);
+    expect(inv.mock.calls.some((c) => c[0] === "a11y_reorder" || c[0] === "a11y_split_region")).toBe(false);
+    await vi.waitFor(() => expect(a().get(1).order.rev).toBe(4));
+    expect(await a().moveRegion(1, 10, 1)).toBe(true);
+  });
+
   it("does not start an edit while a fix holds the document", async () => {
     reply({ a11y_reading_order: ro(three), a11y_reorder: state(4) });
     await a().loadOrder(1, 0);
@@ -400,9 +448,19 @@ describe("Tags store", () => {
     await a().editTag(1, 101, { alt: "Cover", lang: "en-US" });
     expect(inv).toHaveBeenCalledWith("a11y_edit_tag", { doc: 1, xref: 101, patch: { alt: "Cover", lang: "en-US" } });
     expect(await a().moveTag(1, 102, "up")).toBe(true);
-    expect(inv).toHaveBeenCalledWith("a11y_move_tag", { doc: 1, xref: 102, parent: 100, index: 0 });
+    expect(inv).toHaveBeenCalledWith("a11y_move_tag", { doc: 1, xref: 102, parent: 100, anchor: 101, after: false });
     // the first kid has nowhere to go up to
     expect(await a().moveTag(1, 101, "up")).toBe(false);
+  });
+
+  it("a move from a tree older than the document is refused, and the tree is read again", async () => {
+    reply({ a11y_tags: tree, a11y_tag_problems: [], a11y_move_tag: state(6) });
+    await a().loadTags(1);
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 9 } } });
+    expect(await a().moveTag(1, 102, "up")).toBe(false);
+    expect(inv.mock.calls.some((c) => c[0] === "a11y_move_tag")).toBe(false);
+    await vi.waitFor(() => expect(a().get(1).tags.rev).toBe(9));
+    expect(await a().moveTag(1, 102, "up")).toBe(true);
   });
 
   it("a refused edit says why and reads the tree again", async () => {

@@ -179,9 +179,10 @@ pub async fn a11y_edit_tag(eng: Eng<'_>, doc: DocId, xref: i32, patch: TagPatch)
     blocking(move || edit_tag_doc(&eng, doc, xref, &patch, EditSource::User)).await
 }
 
-/// Moves a tag under `parent` (0: the top of the tree) at `index` among its kids.
+/// Moves a tag under `parent` (0: the top of the tree), before its kid `anchor`, or after it with
+/// `after`; the last kid when there is no anchor. A move that changes nothing is refused.
 #[tauri::command]
-pub async fn a11y_move_tag(eng: Eng<'_>, doc: DocId, xref: i32, parent: i32, index: usize) -> Result<EditState> {
+pub async fn a11y_move_tag(eng: Eng<'_>, doc: DocId, xref: i32, parent: i32, anchor: Option<i32>, after: bool) -> Result<EditState> {
     let eng = eng.inner().clone();
-    blocking(move || move_tag_doc(&eng, doc, xref, parent, index, EditSource::User)).await
+    blocking(move || move_tag_doc(&eng, doc, xref, parent, anchor, after, EditSource::User)).await
 }

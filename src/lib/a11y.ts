@@ -48,7 +48,8 @@ export const a11yApi = {
   artifact: (doc: number, xref: number) => invoke<EditState>("a11y_artifact", { doc, xref }),
   setRole: (doc: number, xref: number, role: string) => invoke<EditState>("a11y_set_role", { doc, xref, role }),
   editTag: (doc: number, xref: number, patch: TagPatch) => invoke<EditState>("a11y_edit_tag", { doc, xref, patch }),
-  moveTag: (doc: number, xref: number, parent: number, index: number) => invoke<EditState>("a11y_move_tag", { doc, xref, parent, index }),
+  moveTag: (doc: number, xref: number, parent: number, anchor: number | null, after: boolean) =>
+    invoke<EditState>("a11y_move_tag", { doc, xref, parent, anchor, after }),
   exportReport: (job: number, doc: number, format: "html" | "pdf", date: string, to: string, onProgress: (p: Progress) => void) => {
     const ch = new Channel<Progress>();
     ch.onmessage = onProgress;
@@ -238,6 +239,9 @@ export const useA11y = create<A11yStore>((set, get) => {
     patch(doc, { phase: "fixing", progress: null, job: ++jobSeq });
     try {
       await run(doc, f);
+      // Read the view again before the document is given back, so the next edit is never planned from
+      // what this one changed.
+      await reload();
       patch(doc, { phase: "idle" });
       return true;
     } catch (e) {
@@ -248,6 +252,31 @@ export const useA11y = create<A11yStore>((set, get) => {
       return false;
     }
   }
+  /**
+   * Whether the cached regions are those of the document as it is now. An undo or a fix moves the
+   * revision before the view has read it again; a plan made from older regions would be stored as a step.
+   * When they are stale the page is read again and the caller does nothing.
+   */
+  const orderReady = (doc: number) => {
+    const d = st().docs[doc];
+    const o = get().get(doc).order;
+    if (!d || !o.data || o.page === null) return false;
+    if (o.loading || o.rev !== d.rev) {
+      if (!o.loading) void get().loadOrder(doc, o.page, true);
+      return false;
+    }
+    return true;
+  };
+  const tagsReady = (doc: number) => {
+    const d = st().docs[doc];
+    const t = get().get(doc).tags;
+    if (!d || !t.tree) return false;
+    if (t.loading || t.rev !== d.rev) {
+      if (!t.loading) void get().loadTags(doc, true);
+      return false;
+    }
+    return true;
+  };
   const editOrder = (doc: number, f: () => Promise<EditState>) =>
     edit(doc, f, (m) => patchOrder(doc, { error: m }), async () => {
       const p = get().get(doc).order.page;
@@ -448,16 +477,19 @@ export const useA11y = create<A11yStore>((set, get) => {
       return editOrder(doc, () => a11yApi.reorder(doc, page, next));
     },
     moveRegion: async (doc, xref, dir) => {
+      if (!orderReady(doc)) return false;
       const regions = get().get(doc).order.data?.regions ?? [];
       const next = moveStep(orderOf(regions), xref, dir);
       return next ? get().reorder(doc, next) : false;
     },
     dropRegion: async (doc, xref, target) => {
+      if (!orderReady(doc)) return false;
       const regions = get().get(doc).order.data?.regions ?? [];
       const next = dropOnto(orderOf(regions), xref, target);
       return next ? get().reorder(doc, next) : false;
     },
     mergeSelected: async (doc) => {
+      if (!orderReady(doc)) return false;
       const o = get().get(doc).order;
       const plan = mergeRun(o.data?.regions ?? [], o.selected);
       if (!plan) return false;
@@ -465,8 +497,9 @@ export const useA11y = create<A11yStore>((set, get) => {
       if (ok) patchOrder(doc, { selected: [plan.into], anchor: plan.into });
       return ok;
     },
-    splitRegion: (doc, xref, atMcid) => editOrder(doc, () => a11yApi.split(doc, xref, atMcid)),
+    splitRegion: async (doc, xref, atMcid) => orderReady(doc) && editOrder(doc, () => a11yApi.split(doc, xref, atMcid)),
     artifactRegion: async (doc, xref) => {
+      if (!orderReady(doc)) return false;
       const ok = await editOrder(doc, () => a11yApi.artifact(doc, xref));
       if (ok) patchOrder(doc, { selected: get().get(doc).order.selected.filter((x) => x !== xref) });
       return ok;
@@ -525,10 +558,11 @@ export const useA11y = create<A11yStore>((set, get) => {
     setRole: (doc, xref, role) => editTags(doc, () => a11yApi.setRole(doc, xref, role)),
     editTag: (doc, xref, p) => editTags(doc, () => a11yApi.editTag(doc, xref, p)),
     moveTag: async (doc, xref, how) => {
+      if (!tagsReady(doc)) return false;
       const tree = get().get(doc).tags.tree;
       const to = tree ? moveTarget(tree, xref, how) : null;
       if (!to) return false;
-      const ok = await editTags(doc, () => a11yApi.moveTag(doc, xref, to.parent, to.index));
+      const ok = await editTags(doc, () => a11yApi.moveTag(doc, xref, to.parent, to.anchor, to.after));
       // Into a closed tag: open it, so the moved tag is still in view.
       if (ok && to.parent > 0) patchTags(doc, { expanded: { ...get().get(doc).tags.expanded, [`x${to.parent}`]: true } });
       return ok;
