@@ -756,8 +756,22 @@ pub fn convert_to_file(
     let reread = PdfDocument::from_bytes(&bytes)?;
     let head = bytes[..bytes.len().min(512)].to_vec();
     let report = check(&reread, &head, profile, &mut |_| {}, cancel)?;
+    // A file that says it conforms must pass what was just checked: if it does not, nothing is written.
+    if applied.identified {
+        let open = unmet(&report, profile);
+        if !open.is_empty() {
+            let shown: Vec<&str> = open.iter().copied().take(3).collect();
+            return Err(bad(format!("The converted file does not pass its own check ({}), so it was not written", shown.join(", "))));
+        }
+    }
     crate::history_ipc::write_replace(std::path::Path::new(dest), &bytes).map_err(|e| EngineError::Io(e.to_string()))?;
     Ok(Converted { path: dest.to_string(), report, fixed: applied.log })
+}
+
+/// The rules a file that is to say it conforms must not have open: the failed ones, and in the PDF/A
+/// profiles the ones that need a person's check.
+pub(crate) fn unmet(report: &Report, profile: Profile) -> Vec<&'static str> {
+    report.results.iter().filter(|r| r.status == Status::Failed || (r.status == Status::Manual && profile.pdfa().is_some())).map(|r| r.name).collect()
 }
 
 /// The report as a file: HTML or a PDF. It checks again, so the file matches what is open now.

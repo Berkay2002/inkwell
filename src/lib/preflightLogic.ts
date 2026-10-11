@@ -235,9 +235,23 @@ export function ticked(plan: Plan, ticks: Ticks): FixGroup[] {
   return plan.groups.filter((g) => isTicked(g, ticks)).map((g) => g.id);
 }
 
-/** "Quarterly report (PDF-A-2b).pdf" */
-export function convertedName(stem: string, p: ProfileId): string {
-  return `${stem} (${profileInfo(p).label.replace("/", "-")}).pdf`;
+/**
+ * "Quarterly report (PDF-A-2b).pdf" for a file that will say it conforms, "Quarterly report (converted).pdf"
+ * for one that will not: the name must not claim what the file does not.
+ */
+export function convertedName(stem: string, p: ProfileId, identified = true): string {
+  return identified ? `${stem} (${profileInfo(p).label.replace("/", "-")}).pdf` : `${stem} (converted).pdf`;
+}
+
+/**
+ * Whether the conversion is expected to end with the file identified as the profile: nothing is left
+ * that it cannot fix, nothing is switched off, and (PDF/A) nothing waits for a person's check. The engine
+ * decides for real after its own check; this is what the name of the new file goes by.
+ */
+export function willIdentify(report: Report, ticks: Ticks, output: Output): boolean {
+  const o = outcome(report.plan, ticks, output);
+  if (o.left.length > 0 || o.skipped > 0) return false;
+  return !(report.profile.startsWith("pdfa") && report.results.some((x) => x.status === "manual"));
 }
 
 /** What "Show" and the per-rule Fix button need to decide. */

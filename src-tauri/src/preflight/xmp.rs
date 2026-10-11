@@ -219,13 +219,17 @@ pub fn fresh(info: &InfoProps, ids: &[Ident]) -> String {
 }
 
 /// `existing` with the identification and the mirrored properties set (what else it holds is kept);
-/// a packet that cannot be extended is replaced by a fresh one.
-pub fn merge(existing: &str, info: &InfoProps, ids: &[Ident]) -> String {
+/// a packet that cannot be extended is replaced by a fresh one. `clear` names further properties
+/// (`pdfaid:part`) to take out: an identification the file can no longer back.
+pub fn merge(existing: &str, info: &InfoProps, ids: &[Ident], clear: &[&str]) -> String {
     let Some(at) = existing.rfind("</rdf:RDF>") else { return fresh(info, ids) };
     if !existing.contains("<rdf:RDF") {
         return fresh(info, ids);
     }
     let mut x = existing.to_string();
+    for k in clear {
+        remove_prop(&mut x, k);
+    }
     for id in ids {
         for (k, _) in &id.props {
             remove_prop(&mut x, &format!("{}:{k}", id.prefix));
@@ -276,7 +280,7 @@ mod tests {
         let old = "<?xpacket begin=\"x\"?><x:xmpmeta><rdf:RDF><rdf:Description rdf:about=\"\" pdfaid:part=\"1\" pdfaid:conformance=\"B\" xmpMM:DocumentID=\"uuid:1\">\
 <dc:title><rdf:Alt><rdf:li xml:lang=\"x-default\">Old</rdf:li></rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end=\"w\"?>";
         let info = InfoProps { title: Some("New".into()), ..InfoProps::default() };
-        let m = merge(old, &info, &[Ident::pdfa(2, 'B')]);
+        let m = merge(old, &info, &[Ident::pdfa(2, 'B')], &[]);
         assert_eq!(pdfa_id(&m), Some((2, "B".into())));
         assert_eq!(value(&m, "dc:title").as_deref(), Some("New"));
         assert_eq!(value(&m, "xmpMM:DocumentID").as_deref(), Some("uuid:1"));
@@ -286,7 +290,7 @@ mod tests {
 
     #[test]
     fn a_packet_without_rdf_is_replaced() {
-        let m = merge("garbage", &InfoProps::default(), &[Ident::pdfua(1)]);
+        let m = merge("garbage", &InfoProps::default(), &[Ident::pdfua(1)], &[]);
         assert_eq!(value(&m, "pdfuaid:part").as_deref(), Some("1"));
     }
 }

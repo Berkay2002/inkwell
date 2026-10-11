@@ -47,6 +47,7 @@ import {
   ticked,
   verdict,
   verifiedText,
+  willIdentify,
 } from "./preflightLogic";
 
 const inv = vi.mocked(invoke);
@@ -104,6 +105,19 @@ const report = (results: RuleResult[], plan: Plan = PLAN, conforms = false): Rep
   conforms,
   results,
   plan,
+});
+
+describe("what the new file is named by", () => {
+  const clean: Plan = { total: 4, groups: [grp("colour", 3), grp("metadata", 1)], remaining: [], needsLang: false };
+  it("expects identification only when nothing is left, skipped or waiting for a person", () => {
+    expect(willIdentify(report([rule({ status: "failed" })], clean), {}, "newFile")).toBe(true);
+    expect(willIdentify(report([rule({ status: "failed" })], PLAN), {}, "newFile")).toBe(false);
+    expect(willIdentify(report([rule({ status: "failed" })], clean), { colour: false }, "newFile")).toBe(false);
+    expect(willIdentify(report([rule({ status: "failed" }), rule({ rule: "m", status: "manual" })], clean), {}, "newFile")).toBe(false);
+    // The other profiles are not held back by a manual check.
+    const ua = { ...report([rule({ status: "failed" }), rule({ rule: "m", status: "manual" })], clean), profile: "pdfua-1" as const };
+    expect(willIdentify(ua, {}, "newFile")).toBe(true);
+  });
 });
 
 describe("report logic", () => {
@@ -192,6 +206,8 @@ describe("rule fixes and wording", () => {
 
   it("names the new file and reads the progress", () => {
     expect(convertedName("Annual report", "pdfa-2b")).toBe("Annual report (PDF-A-2b).pdf");
+    // A file that will not say it conforms is not named as if it did.
+    expect(convertedName("Annual report", "pdfa-2b", false)).toBe("Annual report (converted).pdf");
     expect(progressText({ done: 4, pages: 8, stage: "check" }, "check")).toBe("Checking page 5 of 8");
     expect(progressText({ done: 0, pages: 8, stage: "survey" }, "check")).toBe("Reading page 1 of 8");
     expect(progressText({ done: 1, pages: 6, stage: "convert" }, "convert")).toBe("Applying step 2 of 6");
@@ -270,7 +286,8 @@ describe("preflight store", () => {
     reply({ preflight_convert: { path: "C:\\out.pdf", report: report([], PLAN, true), fixed: ["Embedded Arial"] } });
     p().setTick(1, "fonts", false);
     await p().convert(1);
-    expect(pickSave).toHaveBeenCalledWith("Annual report 2026 (PDF-A-2b).pdf", { doc: 1 }, "pdf");
+    // Fonts are switched off and two findings need fonts that are not installed: not named as PDF/A.
+    expect(pickSave).toHaveBeenCalledWith("Annual report 2026 (converted).pdf", { doc: 1 }, "pdf");
     const call = inv.mock.calls.find((c) => c[0] === "preflight_convert")!;
     expect(call[1]).toMatchObject({ doc: 1, profile: "pdfa-2b", to: "tok-1", convert: { groups: ["actions", "files", "colour", "metadata"] } });
     expect(applyState).not.toHaveBeenCalled();

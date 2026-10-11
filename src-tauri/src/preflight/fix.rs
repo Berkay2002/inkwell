@@ -19,6 +19,8 @@ pub(crate) struct Applied {
     /// Pages the conversion changed (empty when it only touched the document as a whole).
     pub pages: Vec<u32>,
     pub log: Vec<String>,
+    /// Whether the metadata step wrote the profile's identification (the file passed the other rules).
+    pub identified: bool,
 }
 
 /// The order groups run in: structure first, metadata last (it mirrors what the others set).
@@ -98,6 +100,7 @@ pub(crate) fn apply(doc: &mut PdfDocument, profile: Profile, c: &Convert, stem: 
     let fam = profile.family();
     let mut log: Vec<String> = Vec::new();
     let mut pages_changed = false;
+    let mut identified = false;
 
     let survey = if want(FixGroup::Fonts) || want(FixGroup::Images) || want(FixGroup::Appearance) || want(FixGroup::Colour) {
         Some(check::survey(doc, progress, cancel)?)
@@ -119,12 +122,12 @@ pub(crate) fn apply(doc: &mut PdfDocument, profile: Profile, c: &Convert, stem: 
             FixGroup::Fonts => pages_changed |= font_group(doc, fam, survey.as_ref().map(|s| &s.found.fonts[..]).unwrap_or(&[]), &mut log)?,
             FixGroup::Appearance => pages_changed |= appearance(doc, fam, survey.as_ref(), &mut log)?,
             FixGroup::Accessibility => pages_changed |= accessibility(doc, c, stem, progress, cancel, &mut log)?,
-            FixGroup::Metadata => metadata(doc, profile, new_file, head, cancel, &mut log)?,
+            FixGroup::Metadata => identified = metadata(doc, profile, new_file, head, cancel, &mut log)?,
         }
     }
     progress(Progress { done: steps.len() as u32, pages: steps.len() as u32, stage: "convert" });
     let pages = if pages_changed { (0..doc.page_count()?.max(0) as u32).collect() } else { Vec::new() };
-    Ok(Applied { pages, log })
+    Ok(Applied { pages, log, identified })
 }
 
 /// The bytes of a new file: no encryption, a classic cross-reference table, a header the standard
@@ -768,17 +771,45 @@ pub(crate) fn no_subsetting_reason(doc: &PdfDocument, ours: &std::collections::H
         return Ok(Some("the document has fonts of its own, which subsetting would cut down too".into()));
     }
     let cat = doc.catalog()?;
-    let fonts = dict_of(&cat, "AcroForm").and_then(|a| dict_of(&a, "DR")).and_then(|d| dict_of(&d, "Font"));
-    if let Some(fonts) = fonts {
-        for k in 0..fonts.dict_len()? as i32 {
-            let Some(v) = fonts.get_dict_val(k)? else { continue };
-            let has_file = v.is_dict()? && v.get_dict("FontDescriptor")?.is_some_and(|d| ["FontFile", "FontFile2", "FontFile3"].iter().any(|f| d.get_dict(*f).ok().flatten().is_some()));
-            if has_file || (v.is_indirect()? && ours.contains(&v.as_indirect()?)) {
-                return Ok(Some("the form's default resources use fonts that stay complete so fields can still be edited".into()));
+    let why = || Some("the form's default resources use fonts that stay complete so fields can still be edited".to_string());
+    if let Some(dr) = dict_of(&cat, "AcroForm").and_then(|a| dict_of(&a, "DR")) {
+        if dr_has_font_that_stays(&dr, ours)? {
+            return Ok(why());
+        }
+    }
+    // A field can carry default resources of its own (on the widget or on a parent field).
+    for page in pages_of(doc)? {
+        let Some(an) = page.get_dict("Annots")?.filter(|a| a.is_array().unwrap_or(false)) else { continue };
+        for a in an.array_iter()?.flatten() {
+            let mut cur = Some(a);
+            for _ in 0..8 {
+                let Some(w) = cur.take() else { break };
+                if !w.is_dict()? {
+                    break;
+                }
+                if let Some(dr) = dict_of(&w, "DR") {
+                    if dr_has_font_that_stays(&dr, ours)? {
+                        return Ok(why());
+                    }
+                }
+                cur = w.get_dict("Parent")?;
             }
         }
     }
     Ok(None)
+}
+
+/// Whether a default-resources dictionary names a font that has a program or is one the conversion embedded.
+fn dr_has_font_that_stays(dr: &PdfObject, ours: &std::collections::HashSet<i32>) -> Result<bool> {
+    let Some(fonts) = dict_of(dr, "Font") else { return Ok(false) };
+    for k in 0..fonts.dict_len()? as i32 {
+        let Some(v) = fonts.get_dict_val(k)? else { continue };
+        let has_file = v.is_dict()? && v.get_dict("FontDescriptor")?.is_some_and(|d| ["FontFile", "FontFile2", "FontFile3"].iter().any(|f| d.get_dict(*f).ok().flatten().is_some()));
+        if has_file || (v.is_indirect()? && ours.contains(&v.as_indirect()?)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // ---- appearance ----------------------------------------------------------------------------------
@@ -884,13 +915,16 @@ fn accessibility(doc: &mut PdfDocument, c: &Convert, stem: &str, progress: &mut 
 
 /// Whether the file would pass `profile` once the metadata is in place: every rule the other groups
 /// answer for, checked on the document as it is now. What only a new file's writing settles (header,
-/// encryption, object streams) counts as settled for a new file. `Err(names)` lists what still fails.
+/// encryption, object streams) counts as settled for a new file. In the PDF/A profiles a rule that
+/// needs a person's check (an embedded PDF's own conformance, a missing modification date) blocks the
+/// identification too: the file does not say it is PDF/A while a part of that is unchecked.
+/// `Err(names)` lists what still fails or is unchecked.
 fn conforms_but_for_metadata(doc: &PdfDocument, profile: Profile, new_file: bool, head: &[u8], cancel: &AtomicBool) -> Result<std::result::Result<(), Vec<&'static str>>> {
     let report = check::run(doc, head, profile, &mut |_| {}, cancel)?;
     let open: Vec<&'static str> = report
         .results
         .iter()
-        .filter(|r| r.status == Status::Failed)
+        .filter(|r| r.status == Status::Failed || (r.status == Status::Manual && profile.pdfa().is_some()))
         // The metadata step itself settles its own group.
         .filter(|r| r.fix != Some(FixGroup::Metadata))
         .filter(|r| !(new_file && !r.findings.is_empty() && r.findings.iter().all(|f| f.new_file)))
@@ -899,7 +933,7 @@ fn conforms_but_for_metadata(doc: &PdfDocument, profile: Profile, new_file: bool
     Ok(if open.is_empty() { Ok(()) } else { Err(open) })
 }
 
-fn metadata(doc: &mut PdfDocument, profile: Profile, new_file: bool, head: &[u8], cancel: &AtomicBool, log: &mut Vec<String>) -> Result<()> {
+fn metadata(doc: &mut PdfDocument, profile: Profile, new_file: bool, head: &[u8], cancel: &AtomicBool, log: &mut Vec<String>) -> Result<bool> {
     let mut cat = doc.catalog()?;
     let mut trailer = doc.trailer()?;
     let mut info = dict_of(&trailer, "Info");
@@ -938,7 +972,7 @@ fn metadata(doc: &mut PdfDocument, profile: Profile, new_file: bool, head: &[u8]
             log.push(format!(
                 "Did not identify the file as {}: {} ({}{more})",
                 profile.label(),
-                plural(names.len(), "rule still fails", "rules still fail"),
+                plural(names.len(), "rule still fails or needs a check", "rules still fail or need a check"),
                 shown.join(", ")
             ));
             false
@@ -954,7 +988,14 @@ fn metadata(doc: &mut PdfDocument, profile: Profile, new_file: bool, head: &[u8]
     let xml = match &meta {
         Some(m) => {
             let old = String::from_utf8_lossy(&m.read_stream().unwrap_or_default()).into_owned();
-            xmp::merge(&old, &props, &ids)
+            // A claim the check does not back is taken out, not kept: the file was changed here.
+            let clear: &[&str] = match (identified, profile.family()) {
+                (true, _) => &[],
+                (false, Family::A1 | Family::A23) => &["pdfaid:part", "pdfaid:conformance", "pdfaid:amd", "pdfaid:rev"],
+                (false, Family::Ua) => &["pdfuaid:part", "pdfuaid:rev"],
+                (false, Family::X) => &["pdfxid:GTS_PDFXVersion", "pdfxid:GTS_PDFXConformance"],
+            };
+            xmp::merge(&old, &props, &ids, clear)
         }
         None => xmp::fresh(&props, &ids),
     };
@@ -979,5 +1020,5 @@ fn metadata(doc: &mut PdfDocument, profile: Profile, new_file: bool, head: &[u8]
     } else {
         log.push("Wrote XMP metadata that matches the document information".into());
     }
-    Ok(())
+    Ok(identified)
 }

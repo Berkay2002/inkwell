@@ -431,9 +431,12 @@ pub fn embed(doc: &mut PdfDocument, f: &PdfObject, plan: &FontPlan, fam: Family)
                         && f.get_dict("Encoding")?.and_then(|e| name(&e, "BaseEncoding").ok().flatten()).as_deref() == Some("MacRomanEncoding");
                     let enc = if keep_mac { "MacRomanEncoding" } else { "WinAnsiEncoding" };
                     let had = f.get_dict("Encoding")?.is_some();
+                    let had_differences = f.get_dict("Encoding")?.is_some_and(|e| e.is_dict().unwrap_or(false) && e.get_dict("Differences").ok().flatten().is_some());
                     f.dict_put("Encoding", PdfObject::new_name(enc)?)?;
-                    if had {
-                        note = format!(" (its Encoding is now {enc}: PDF/A-1 allows no Differences array)");
+                    if had_differences {
+                        note = format!(" (its Encoding is now {enc}: PDF/A-1 allows no Differences array, so characters it remapped may draw as other glyphs)");
+                    } else if had {
+                        note = format!(" (its Encoding is now {enc}: PDF/A-1 allows no other)");
                     }
                 }
             } else if f.get_dict("Encoding")?.is_none() {

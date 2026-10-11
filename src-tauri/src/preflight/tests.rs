@@ -833,6 +833,7 @@ fn an_installed_truetype_font_gets_the_plain_winansi_name_in_pdfa1() {
     let enc = f.get_dict("Encoding").unwrap().unwrap();
     assert!(enc.is_name().unwrap(), "{:?}", a.log);
     assert_eq!(String::from_utf8_lossy(&enc.as_name().unwrap()), "WinAnsiEncoding");
+    assert!(a.log.iter().any(|l| l.contains("may draw as other glyphs")), "the dropped Differences are named: {:?}", a.log);
 }
 
 // ---- PDF/A-3 embedded files ----------------------------------------------------------------------
@@ -922,4 +923,92 @@ fn a_cancel_during_the_check_of_the_new_file_leaves_no_file() {
     .unwrap_err();
     assert!(e.to_string().contains("cancelled"), "{e}");
     assert!(!dest.exists(), "nothing is left at the destination");
+}
+
+// ---- what a person has to check, a claim that is not backed, a widget's own resources ---------------
+
+fn xmp_text(d: &PdfDocument) -> String {
+    let m = d.catalog().unwrap().get_dict("Metadata").unwrap().unwrap();
+    String::from_utf8_lossy(&m.read_stream().unwrap()).into_owned()
+}
+
+#[test]
+fn a_rule_that_needs_a_person_keeps_a_pdfa_file_unidentified() {
+    // A-3: an attachment without a modification date is left for a person, so the file is not identified.
+    let undated = a3_file("/Subtype/text#2Fxml");
+    let (d, a) = applied(&undated, Profile::Pdfa3b, &all_groups(Profile::Pdfa3b, &undated), false);
+    assert_eq!(says(&d), None, "{:?}", a.log);
+    assert!(not_identified(&a, "PDF/A-3b"), "{:?}", a.log);
+    assert!(!a.identified);
+    let dated = a3_file("/Subtype/text#2Fxml /Params <</ModDate (D:20260101000000Z)>>");
+    let (d, a) = applied(&dated, Profile::Pdfa3b, &all_groups(Profile::Pdfa3b, &dated), false);
+    assert_eq!(says(&d).as_deref(), Some("PDF/A-3b"), "{:?}", a.log);
+    assert!(a.identified);
+    // A-2: an embedded PDF is kept and its own conformance is left for a person.
+    let with_pdf = Spec {
+        cat: "/Names <</EmbeddedFiles <</Names [(a.pdf) 130 0 R]>>>>".into(),
+        objs: vec![
+            (130, s("<</Type/Filespec /F (a.pdf) /UF (a.pdf) /EF <</F 131 0 R>>>>")),
+            (131, stream("/Type/EmbeddedFile /Subtype/application#2Fpdf", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")),
+        ],
+        ..Spec::default()
+    };
+    let (d, a) = applied(&with_pdf, Profile::Pdfa2b, &all_groups(Profile::Pdfa2b, &with_pdf), false);
+    assert_eq!(says(&d), None, "{:?}", a.log);
+    assert!(not_identified(&a, "PDF/A-2b"), "{:?}", a.log);
+}
+
+#[test]
+fn a_claim_the_check_does_not_back_is_taken_out_of_the_xmp() {
+    // The file says PDF/A-2b, but a font the conversion cannot embed stays: the claim goes, the rest stays.
+    let sp = Spec { font: "<</Type/Font/Subtype/Type1/BaseFont/QuiteUnknownTypeface/Encoding/WinAnsiEncoding>>".into(), ..with_xmp(XMP_ID) };
+    assert_eq!(says(&PdfDocument::from_bytes(&build(&sp)).unwrap()).as_deref(), Some("PDF/A-2b"));
+    let (d, a) = applied(&sp, Profile::Pdfa2b, &[FixGroup::Fonts, FixGroup::Metadata], false);
+    assert_eq!(says(&d), None, "{:?}", a.log);
+    assert!(not_identified(&a, "PDF/A-2b"), "{:?}", a.log);
+    let xml = xmp_text(&d);
+    assert!(!xml.contains("pdfaid:part") && !xml.contains("pdfaid:conformance"), "{xml}");
+    // A file that does pass keeps it (written again, once).
+    let ok = with_xmp(XMP_ID);
+    let (d, a) = applied(&ok, Profile::Pdfa2b, &all_groups(Profile::Pdfa2b, &ok).into_iter().chain([FixGroup::Metadata]).collect::<Vec<_>>(), false);
+    assert!(a.identified, "{:?}", a.log);
+    assert_eq!(xmp_text(&d).matches("pdfaid:part").count(), 2, "one element, opened and closed");
+}
+
+#[test]
+fn only_a_file_that_passes_its_final_check_may_say_it_conforms() {
+    let failing = report_of(Profile::Pdfa2b, &messy());
+    assert!(!super::unmet(&failing, Profile::Pdfa2b).is_empty());
+    // After the Files group the undated attachment is the only thing left: a rule for a person.
+    let (d, _) = applied(&a3_file("/Subtype/text#2Fxml"), Profile::Pdfa3b, &[FixGroup::Files], false);
+    let r = check(&d, fix::NEW_FILE_HEAD, Profile::Pdfa3b, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    let ef = r.result("embedded-files").unwrap();
+    assert_eq!(ef.status, Status::Manual, "{:?}", ef.findings);
+    assert!(super::unmet(&r, Profile::Pdfa3b).contains(&ef.name), "a manual rule blocks the PDF/A identification");
+    assert!(!super::unmet(&r, Profile::Pdfua1).contains(&ef.name), "and is not counted for the other profiles");
+}
+
+#[test]
+fn a_widget_that_carries_its_own_default_resources_keeps_the_fonts_whole() {
+    let sp = Spec {
+        pages: vec![("/Annots [120 0 R]".into(), TEXT.into())],
+        objs: vec![(120, s("<</Type/Annot /Subtype/Widget /FT/Tx /Rect [10 10 100 30] /DR <</Font <</Helv 3 0 R>>>> /DA (/Helv 0 Tf)>>"))],
+        ..Spec::default()
+    };
+    let d = PdfDocument::from_bytes(&build(&sp)).unwrap();
+    let none = std::collections::HashSet::new();
+    let ours: std::collections::HashSet<i32> = [3].into_iter().collect();
+    assert!(fix::no_subsetting_reason(&d, &ours, 0, false).unwrap().unwrap().contains("default resources"));
+    assert_eq!(fix::no_subsetting_reason(&d, &none, 0, false).unwrap(), None);
+    // On a parent field, reached through the widget's /Parent.
+    let sp = Spec {
+        pages: vec![("/Annots [120 0 R]".into(), TEXT.into())],
+        objs: vec![
+            (120, s("<</Type/Annot /Subtype/Widget /Parent 121 0 R /Rect [10 10 100 30]>>")),
+            (121, s("<</FT/Tx /T (f) /DR <</Font <</Helv 3 0 R>>>> /Kids [120 0 R]>>")),
+        ],
+        ..Spec::default()
+    };
+    let d = PdfDocument::from_bytes(&build(&sp)).unwrap();
+    assert!(fix::no_subsetting_reason(&d, &ours, 0, false).unwrap().is_some());
 }

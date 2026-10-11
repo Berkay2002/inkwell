@@ -19,6 +19,7 @@ import {
   type Ticks,
   a11yFixOf,
   convertedName,
+  willIdentify,
   groupsFor,
   ticked,
 } from "./preflightLogic";
@@ -228,7 +229,7 @@ export const usePreflight = create<PreflightStore>((set, get) => {
       let to: string | null = null;
       if (cur.output === "newFile") {
         const stem = d.name.replace(/\.pdf$/i, "");
-        const f = await pickSave(convertedName(stem, profile), { doc }, "pdf");
+        const f = await pickSave(convertedName(stem, profile, willIdentify(report, cur.ticks, cur.output)), { doc }, "pdf");
         if (!f) return;
         to = f.token;
       }
