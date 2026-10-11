@@ -8,7 +8,16 @@ form) and `-2-sign` (a digital signature being made, then the Signatures panel w
 
 ## Verdict
 
-(pending)
+**a-strip**, with two pieces borrowed (picked by Berkay, 2026-10-11):
+- Fill & Sign tools on the floating strip at the left of the page, as in Comment mode; saved signature and initials
+  as tiles at the strip's foot. The right rail stays closed while filling.
+- Digital signing: draw a rectangle on the page (or click an empty signature field); the rail opens the "Digital
+  signature" sheet (ID, reason, lock, outcome line, Sign). **From c-ribbon:** the rectangle shows the live signature
+  appearance while the sheet is edited.
+- **From b-panel:** a slim banner above the page whenever the document has signatures ("Signed. All signatures are
+  valid." / "At least one signature has problems." / "Signature validity is unknown."), with Details opening the
+  Signatures rail.
+- Skipped: c-ribbon's pill over the page and anchored card; b-panel's always-open tools rail.
 
 ## How Acrobat Pro does it (study 06, docs/study/screens/06-certificates/, 07-forms/07-esign-panel.png)
 - **Fill & Sign** is the E-Sign tab's left panel: a row of tools **Aa** (text), **X**, **check**, **dot**, **rounded
