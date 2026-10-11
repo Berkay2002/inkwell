@@ -68,7 +68,9 @@ format we control and version.
   left out and counted (`done.stale`, a note under the results), so a catalog never answers from text that was
   saved over. A save that includes a redaction (`save_document`, `protect_and_save`) makes every catalog forget that
   file: row, stored text and postings are rewritten as a new generation (`forget`), and the file is "new" until the
-  next refresh. A catalog that is being built is left; the search check still hides the file.
+  next refresh. A catalog that is being built forgets it when the build ends (the search check hides it meanwhile); if
+  the postings cannot be rewritten the live index is deleted, so the catalog reads "needs a rebuild" and keeps no
+  words of the file. A Save as, and Redact's own save, that replace a listed file do the same.
 - Embedded index: `/Root/PieceInfo/Inkwell` (`/Private` stream) holds the records of that file. A build reads it only
   if the trailer `/ID`, the page count, the version and a fingerprint of page content and annotations all match,
   so a file changed by another tool is read normally. Embedding and removing are one undo step each

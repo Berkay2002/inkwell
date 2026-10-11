@@ -451,7 +451,13 @@ fn after_save(window: &Window, app: &tauri::AppHandle, hist: &Arc<History>, doc:
     }
     match saved {
         // Save as: the document is another file now, with a history of its own
-        Some(s) if s.moved => hist.spawn_open(app.clone(), doc, state.path.clone()),
+        Some(s) if s.moved => {
+            // It may have replaced a file a catalog lists.
+            if s.redacts {
+                search::catalog::app::forget_saved(app, &state.path);
+            }
+            hist.spawn_open(app.clone(), doc, state.path.clone());
+        }
         // history errors never fail a save
         Some(s) => {
             // Text that was redacted must not stay in a catalog's index (or in its results) until a refresh.

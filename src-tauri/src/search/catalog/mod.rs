@@ -1046,29 +1046,37 @@ pub fn forget(dir: &Path, path: &Path) -> Result<u32> {
     for fid in &gone {
         let _ = std::fs::remove_file(text_path(dir, *fid));
     }
-    // Without a trustworthy index there is nothing to rewrite: a refresh reads every file again.
-    let Some(old) = Index::load(dir, &meta) else { return Ok(gone.len() as u32) };
-    let keep: HashSet<u32> = table.files.iter().map(|r| r.fid).filter(|f| !gone.contains(f)).collect();
-    let mut postings = Postings::default();
-    postings.keep(&old, &keep);
-    let generation = meta.generation + 1;
-    let files: Vec<FileRec> = table.files.into_iter().filter(|r| !gone.contains(&r.fid)).collect();
-    let table = Table { version: VERSION, generation, next_fid: table.next_fid, files };
-    let index = postings.encode();
-    write_durable(&table_path(dir, generation), &serde_json::to_vec(&table).map_err(io)?)?;
-    write_durable(&index_path(dir, generation), &index)?;
-    let count = |s: Status| table.files.iter().filter(|r| r.status == s).count() as u32;
-    let mut meta = meta;
-    meta.generation = generation;
-    meta.files = table.files.len() as u32;
-    meta.indexed = count(Status::Indexed);
-    meta.damaged = count(Status::Damaged);
-    meta.password = count(Status::Password);
-    meta.pages = table.files.iter().map(|r| u64::from(r.pages)).sum();
-    meta.cut = table.files.iter().filter(|r| r.cut).count() as u32;
-    meta.index_len = index.len() as u64;
-    save_meta(dir, &meta)?;
-    clean(dir, &table);
+    // Fails closed: when the postings cannot be rewritten (or are not trusted, so cannot be filtered), the live
+    // index is deleted, which makes the catalog "needs a rebuild" rather than keep the words of the old file.
+    let rewrite = || -> Result<()> {
+        let old = Index::load(dir, &meta).ok_or_else(|| EngineError::Invalid("the index of this catalog is damaged".into()))?;
+        let keep: HashSet<u32> = table.files.iter().map(|r| r.fid).filter(|f| !gone.contains(f)).collect();
+        let mut postings = Postings::default();
+        postings.keep(&old, &keep);
+        let generation = meta.generation + 1;
+        let files: Vec<FileRec> = table.files.iter().filter(|r| !gone.contains(&r.fid)).cloned().collect();
+        let table = Table { version: VERSION, generation, next_fid: table.next_fid, files };
+        let index = postings.encode();
+        write_durable(&table_path(dir, generation), &serde_json::to_vec(&table).map_err(io)?)?;
+        write_durable(&index_path(dir, generation), &index)?;
+        let count = |s: Status| table.files.iter().filter(|r| r.status == s).count() as u32;
+        let mut meta = meta.clone();
+        meta.generation = generation;
+        meta.files = table.files.len() as u32;
+        meta.indexed = count(Status::Indexed);
+        meta.damaged = count(Status::Damaged);
+        meta.password = count(Status::Password);
+        meta.pages = table.files.iter().map(|r| u64::from(r.pages)).sum();
+        meta.cut = table.files.iter().filter(|r| r.cut).count() as u32;
+        meta.index_len = index.len() as u64;
+        save_meta(dir, &meta)?;
+        clean(dir, &table);
+        Ok(())
+    };
+    if let Err(e) = rewrite() {
+        let _ = std::fs::remove_file(index_path(dir, meta.generation));
+        return Err(e);
+    }
     Ok(gone.len() as u32)
 }
 

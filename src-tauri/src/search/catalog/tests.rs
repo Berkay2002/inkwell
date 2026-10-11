@@ -948,3 +948,44 @@ fn a_record_that_would_not_decode_is_never_written() {
     assert!(big.encode().is_none(), "what decode refuses is not encoded");
     assert!(index_text().encode().is_some_and(|b| FileText::decode(&b).is_some()));
 }
+
+#[test]
+fn a_file_saved_while_its_catalog_is_busy_is_forgotten_when_the_build_ends() {
+    let base = dir("catalog-forget-busy");
+    let folder = base.join("docs");
+    let p = write(&folder, "a.pdf", plain(&[vec!["the old words, secretive notice"]]));
+    write(&folder, "b.pdf", plain(&[vec!["another notice"]]));
+    let root = base.join("catalogs");
+    let (m, d) = make(&root, &folder);
+    build(&d, true, &AtomicBool::new(false), &no_progress()).unwrap();
+    let jobs = super::app::Jobs::default();
+    let r = jobs.guarded(&m.id, || {
+        assert_eq!(super::app::forget_all(&root, &jobs, &p), 0, "nothing runs against a catalog that is held");
+        Ok(())
+    });
+    assert!(r.is_ok());
+    assert_eq!(load_table(&d, 1).unwrap().files.len(), 2);
+    super::app::forget_deferred(&jobs, &m.id, &d);
+    assert_eq!(load_meta(&d).unwrap().files, 1);
+    assert_eq!(flat(&catalog_search(&d, "secretive", SearchOpts::default())).0.len(), 0);
+    // Nothing is left to do the second time.
+    super::app::forget_deferred(&jobs, &m.id, &d);
+    assert_eq!(load_meta(&d).unwrap().generation, 2);
+}
+
+#[test]
+fn a_catalog_that_cannot_be_rewritten_drops_its_index_rather_than_keep_a_forgotten_files_words() {
+    let (_, folder, d) = built("forget-closed");
+    let p = folder.join("f03.pdf");
+    let idx = index_path(&d, 1);
+    let mut b = std::fs::read(&idx).unwrap();
+    let k = b.len() / 2;
+    b[k] ^= 0xff;
+    std::fs::write(&idx, &b).unwrap();
+    assert!(forget(&d, &p).is_err());
+    assert!(!idx.exists(), "the postings are not left on disk");
+    assert!(check(&d, &AtomicBool::new(false)).unwrap().unusable);
+    let s = build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert!(!s.cancelled && s.extracted > 20);
+    assert!(!flat(&catalog_search(&d, "notice", SearchOpts::default())).0.is_empty());
+}

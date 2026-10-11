@@ -30,37 +30,64 @@ pub struct Jobs {
     next: AtomicU64,
     live: Mutex<HashMap<u64, (String, Arc<AtomicBool>)>>,
     busy: Mutex<HashSet<String>>,
+    /// Files to forget (`super::forget`) from a catalog that was busy when they were saved: done when it is free.
+    deferred: Mutex<Vec<(String, PathBuf)>>,
 }
 
 impl Jobs {
     /// Runs `f` with catalog `id` held, so a build and a delete (or two builds) of one catalog never overlap;
     /// refused when it is held. Released when `f` returns, whatever it returns.
     pub fn guarded<R>(&self, id: &str, f: impl FnOnce() -> Result<R>) -> Result<R> {
-        if !self.busy.lock().unwrap().insert(id.to_string()) {
-            return Err(EngineError::Invalid("this catalog is being built or removed; wait for that first".into()));
-        }
-        struct Release<'a>(&'a Jobs, String);
-        impl Drop for Release<'_> {
-            fn drop(&mut self) {
-                self.0.busy.lock().unwrap().remove(&self.1);
-            }
-        }
-        let _held = Release(self, id.to_string());
+        let _held = self.hold(id).ok_or_else(|| EngineError::Invalid("this catalog is being built or removed; wait for that first".into()))?;
         f()
+    }
+
+    fn hold(&self, id: &str) -> Option<Hold<'_>> {
+        self.busy.lock().unwrap().insert(id.to_string()).then(|| Hold(self, id.to_string()))
     }
 }
 
-/// Every catalog under `root` forgets the file at `path` (see [`super::forget`]); one that is being built or
-/// removed is left, and its results for that file stay hidden by the check a search makes against the file.
+/// A catalog held by [`Jobs::hold`], released when dropped.
+struct Hold<'a>(&'a Jobs, String);
+
+impl Drop for Hold<'_> {
+    fn drop(&mut self) {
+        self.0.busy.lock().unwrap().remove(&self.1);
+    }
+}
+
+/// Every catalog under `root` forgets the file at `path` (see [`super::forget`]). One that is being built or
+/// removed does it when it is free (`forget_deferred`); until then a search hides the file (it checks it against
+/// the disk). Returns the rows dropped now.
 pub fn forget_all(root: &std::path::Path, jobs: &Jobs, path: &std::path::Path) -> u32 {
     let mut n = 0;
     for m in super::list(root) {
-        match jobs.guarded(&m.id, || super::forget(&root.join(&m.id), path)) {
+        let Some(_held) = jobs.hold(&m.id) else {
+            jobs.deferred.lock().unwrap().push((m.id, path.to_path_buf()));
+            continue;
+        };
+        match super::forget(&root.join(&m.id), path) {
             Ok(k) => n += k,
             Err(e) => eprintln!("inkwell catalog {}: {e}", m.id),
         }
     }
     n
+}
+
+/// Catalog `id` (in `dir`) is free again: the files saved while it was busy are forgotten now.
+pub(super) fn forget_deferred(jobs: &Jobs, id: &str, dir: &std::path::Path) {
+    let mine: Vec<PathBuf> = {
+        let mut all = jobs.deferred.lock().unwrap();
+        let (mine, rest) = all.drain(..).partition(|(i, _)| i == id);
+        *all = rest;
+        mine.into_iter().map(|(_, p)| p).collect()
+    };
+    for p in mine {
+        let Some(_held) = jobs.hold(id) else { return };
+        if let Err(e) = super::forget(dir, &p) {
+            eprintln!("inkwell catalog {id}: {e}");
+        }
+    }
 }
 
 /// A document with redactions was saved over `path`: no catalog keeps its old text.
@@ -156,7 +183,7 @@ pub async fn catalog_build(window: Window, jobs: State<'_, Arc<Jobs>>, id: Strin
     let cancel = Arc::new(AtomicBool::new(false));
     jobs.live.lock().unwrap().insert(job, (window.label().to_string(), cancel.clone()));
     let _ = on_event.send(BuildEvent::Started { job });
-    let (j2, id2) = (jobs.clone(), id.clone());
+    let (j2, id2, dir2) = (jobs.clone(), id.clone(), dir.clone());
     let out = blocking(move || {
         let ev = on_event.clone();
         let r = super::build(&dir, full, &cancel, &move |done, total| {
@@ -172,6 +199,7 @@ pub async fn catalog_build(window: Window, jobs: State<'_, Arc<Jobs>>, id: Strin
     .await;
     j2.live.lock().unwrap().remove(&job);
     j2.busy.lock().unwrap().remove(&id2);
+    forget_deferred(&j2, &id2, &dir2);
     out
 }
 
