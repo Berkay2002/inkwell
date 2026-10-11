@@ -202,6 +202,8 @@ pub struct Progress {
     pub total: u32,
     /// The page that just finished (zero-based).
     pub page: u32,
+    /// The pages are being written into the document (the picture styles), after all were read.
+    pub writing: bool,
 }
 
 pub enum Input<'a> {
@@ -290,7 +292,7 @@ fn render(doc: &PdfDocument, index: u32, dpi: u32, max_dim: u32) -> Result<(Bitm
     Ok((Bitmap { w: w as u32, h: h as u32, pixels }, scale))
 }
 
-fn page_has_text(doc: &PdfDocument, index: u32) -> Result<bool, OcrError> {
+pub(crate) fn page_has_text(doc: &PdfDocument, index: u32) -> Result<bool, OcrError> {
     let page = doc.load_page(index as i32)?;
     let text = page.to_text_page(TextPageFlags::empty())?.to_text()?;
     Ok(text.chars().filter(|c| !c.is_whitespace()).count() >= MIN_TEXT_CHARS)
@@ -652,7 +654,7 @@ pub fn recognize(
                         ms: t.elapsed().as_millis() as u32,
                     });
                     let n = done.fetch_add(1, Ordering::Relaxed) as u32 + 1;
-                    progress(Progress { done: n, total, page });
+                    progress(Progress { done: n, total, page, writing: false });
                 }
             });
         }
@@ -681,26 +683,32 @@ pub struct ApplyReport {
 }
 
 /// Stage 2 for `opts.style`. `Cleaned` rewrites the picture of pages that need it and then lays the
-/// text over the straightened picture; `Searchable` is [`apply`]. Pages with a redaction mark and
-/// signed documents are not touched by the picture styles (the caller refuses the signed ones).
-pub fn apply_styled(doc: &mut PdfDocument, results: &[PageResult], opts: &Options) -> Result<ApplyReport, OcrError> {
+/// text over the straightened picture; `Searchable` is [`apply`]. Pages with a redaction mark are
+/// not touched by the picture styles, and signed documents are refused ([`check_signatures`]).
+/// `cancel` is looked at between pages and `progress` sees each page written (`writing`); a cancel
+/// returns `Err(Cancelled)` with `doc` half changed, so the caller works on a copy it can drop.
+pub fn apply_styled(
+    doc: &mut PdfDocument,
+    results: &[PageResult],
+    opts: &Options,
+    progress: &(dyn Fn(Progress) + Sync),
+    cancel: &AtomicBool,
+) -> Result<ApplyReport, OcrError> {
+    check_signatures(doc, opts.style)?;
     match opts.style {
         Style::Searchable => apply(doc, results, opts.force),
         Style::Cleaned => {
-            if is_signed(doc) {
-                return Err(OcrError::Pdf(SIGNED.into()));
-            }
             let mut results = results.to_vec();
-            let cleaned = clean::clean_pages(doc, &mut results)?;
+            let cleaned = clean::clean_pages(doc, &mut results, progress, cancel)?;
+            if cancel.load(Ordering::Relaxed) {
+                return Err(OcrError::Cancelled);
+            }
             let mut report = apply(doc, &results, opts.force)?;
             report.clean = Some(cleaned);
             Ok(report)
         }
         Style::Editable => {
-            if is_signed(doc) {
-                return Err(OcrError::Pdf(SIGNED.into()));
-            }
-            let done = editable::apply(doc, results, opts.font)?;
+            let done = editable::apply(doc, results, opts.font, progress, cancel)?;
             Ok(ApplyReport { pages_written: done.pages_written, words: done.words, layers_replaced: 0, clean: None, editable: Some(done.report) })
         }
     }
@@ -708,6 +716,23 @@ pub fn apply_styled(doc: &mut PdfDocument, results: &[PageResult], opts: &Option
 
 /// The error code for "this style does not change signed documents".
 pub const SIGNED: &str = "signed-document";
+/// The error code for "a certified document takes no change at all".
+pub const CERTIFIED: &str = "certified-document";
+
+/// What the document's signatures allow. A certified one (`/Perms /DocMDP`) takes nothing from OCR,
+/// whatever the style: even an incremental text layer breaks what the certifier allowed. Any other
+/// signed one (a signed field, `/SigFlags`, usage rights) takes only the searchable style's layer,
+/// appended after the signed bytes; the picture styles would rewrite what the signature covers.
+pub fn check_signatures(doc: &PdfDocument, style: Style) -> Result<(), OcrError> {
+    let certified = crate::outline::certified(doc).map_err(|e| OcrError::Pdf(e.to_string()))?;
+    if certified.is_some() {
+        return Err(OcrError::Pdf(CERTIFIED.into()));
+    }
+    if style != Style::Searchable && crate::outline::signed(doc) {
+        return Err(OcrError::Pdf(SIGNED.into()));
+    }
+    Ok(())
+}
 
 /// Stage 2. Adds the recognised text of every `Recognized` result to `doc`. With `replace`, a
 /// layer an earlier OCR run of ours left on the page is removed first (the user's own content is
@@ -823,10 +848,8 @@ pub fn ocr_file_with(
     if output.exists() && !replace {
         return Err(OcrError::OutputExists(output.display().to_string()));
     }
-    if opts.style != Style::Searchable && is_signed(&Input::Path(input).open()?) {
-        // Changing the pictures would break the signature: say so before anything is read.
-        return Err(OcrError::Pdf(SIGNED.into()));
-    }
+    // Certified, or signed and about to have its pictures changed: say so before anything is read.
+    check_signatures(&Input::Path(input).open()?, opts.style)?;
     let rec = recognize(&Input::Path(input), backend, opts, progress, cancel)?;
     if rec.cancelled {
         return Err(OcrError::Cancelled);
@@ -849,10 +872,10 @@ pub fn ocr_file_with(
         drop(dst);
         // The document must be closed before its file is linked or renamed (Windows).
         let mut doc = Input::Path(&tmp.0).open()?;
-        applied = apply_styled(&mut doc, &rec.pages, opts)?;
+        applied = apply_styled(&mut doc, &rec.pages, opts, progress, cancel)?;
         let removing = opts.style != Style::Searchable;
         if applied.pages_written > 0 {
-            let signed = is_signed(&doc);
+            let signed = crate::outline::signed(&doc);
             if doc.can_be_saved_incrementally() && !removing {
                 save(&doc, &tmp.0)?;
                 if signed {
@@ -901,9 +924,7 @@ pub fn preview(
     let mut o = opts.clone();
     o.pages = Some(vec![page]);
     let mut doc = input.open()?;
-    if opts.style != Style::Searchable && is_signed(&doc) {
-        return Err(OcrError::Pdf(SIGNED.into()));
-    }
+    check_signatures(&doc, opts.style)?;
     let rec = recognize(input, backend, &o, &|_| {}, cancel)?;
     if rec.cancelled {
         return Err(OcrError::Cancelled);
@@ -916,7 +937,7 @@ pub fn preview(
         PageStatus::Failed(m) => return Err(OcrError::Backend(m.clone())),
     }
     let before = render_png(&doc, page, max_px)?;
-    let applied = apply_styled(&mut doc, &rec.pages, &o)?;
+    let applied = apply_styled(&mut doc, &rec.pages, &o, &|_| {}, cancel)?;
     let after = render_png(&doc, page, max_px)?;
     Ok(Preview { before, after, applied })
 }
@@ -930,16 +951,6 @@ fn render_png(doc: &PdfDocument, index: u32, max_px: u32) -> Result<Vec<u8>, Ocr
     let mut out = Vec::new();
     pix.write_to(&mut out, mupdf::ImageFormat::PNG)?;
     Ok(out)
-}
-
-/// The document has a signature (AcroForm `SigFlags` & 1): saving after OCR no longer validates it.
-pub fn is_signed(doc: &PdfDocument) -> bool {
-    doc.catalog()
-        .ok()
-        .and_then(|c| c.get_dict("AcroForm").ok().flatten())
-        .and_then(|f| f.get_dict("SigFlags").ok().flatten())
-        .and_then(|f| f.as_int().ok())
-        .is_some_and(|f| f & 1 != 0)
 }
 
 /// The summary of a run: what [`ocr_file`] returns, also for an in-place run through the edit core.

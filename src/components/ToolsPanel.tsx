@@ -293,7 +293,7 @@ function OcrOptions({ sheet, doc }: { sheet: Sheet; doc: DocState }) {
             {sheet.languages.map((t) => (
               <button key={t} className="tl-chip" title={`Remove ${languageName(t)}`} onClick={() => st().toggleLanguage(t)}>
                 {languageName(t)}
-                <span aria-hidden="true">×</span>
+                <Icon name="close" size={12} />
               </button>
             ))}
           </div>

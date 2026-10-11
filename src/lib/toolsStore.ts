@@ -18,7 +18,7 @@ import type {
   OcrStyle,
   OcrUnsure,
 } from "./api";
-import { initialLanguages, previewPage, requestOptions, toggleLanguage } from "./ocrLogic";
+import { initialLanguages, ocrProgress, previewPage, requestOptions, toggleLanguage } from "./ocrLogic";
 import { parseRange } from "./pageRange";
 import * as edits from "./edit";
 import { forPreset, normalizeOptions, validateOptions } from "./optimizer";
@@ -189,6 +189,7 @@ export const FRIENDLY: Record<string, string> = {
   "language-unavailable": "No installed OCR engine reads that language. The language list says how to add it.",
   "tesseract-not-found": "Tesseract was not found. Choose its location in the OCR options.",
   "signed-document": "This document is signed. Straightening or replacing its pictures would break the signature, so it was left alone. The searchable image style adds its text layer without touching the pictures.",
+  "certified-document": "This document is certified: its author allows no changes to it, not even a text layer. It was left alone.",
   stale: "The document changed while it was being read. Run it again.",
 };
 
@@ -345,7 +346,10 @@ export const useTools = create<ToolsStore>((set, get) => {
       void refreshPlan(sheet.doc, languages);
       // What the document is written in decides the default, unless the user already chose.
       try {
-        const detection = await api.ocrDetect(sheet.doc);
+        // Its job id sits where the compress estimate's does: closing the sheet or starting the run stops it.
+        const job = ++jobSeq;
+        patch({ estimateJob: job });
+        const detection = await api.ocrDetect(job, sheet.doc);
         if (!ocrOpen(sheet.doc)) return;
         const cur = get().sheet!;
         if (cur.languagesTouched) {
@@ -600,9 +604,10 @@ export const useTools = create<ToolsStore>((set, get) => {
                   ? {
                       sheet: {
                         ...s.sheet,
-                        progress: p.total ? p.done / p.total : 0,
-                        status: `Reading page ${p.page + 1} (${p.done} of ${p.total})`,
-                        donePages: [...s.sheet.donePages, p.page],
+                        progress: ocrProgress(p, s.sheet.style),
+                        status: p.writing ? `Writing page ${p.done} of ${p.total}` : `Reading page ${p.page + 1} (${p.done} of ${p.total})`,
+                        // Pages show as done when they were read; writing them is the same pages again.
+                        donePages: p.writing ? s.sheet.donePages : [...s.sheet.donePages, p.page],
                       },
                     }
                   : s,

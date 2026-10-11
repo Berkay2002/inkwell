@@ -455,7 +455,7 @@ fn tree_size(p: &Path) -> u64 {
 /// A signature the file carries: the "signatures exist" flag, a certification (DocMDP), or a signature
 /// field that has a value.
 fn is_signed(doc: &mupdf::pdf::PdfDocument) -> bool {
-    if ocr::is_signed(doc) {
+    if crate::outline::signed(doc) {
         return true;
     }
     let certified = doc

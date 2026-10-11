@@ -37,7 +37,7 @@ import { useStore } from "../store";
 import * as api from "./api";
 import { useAi } from "./aiStore";
 import * as edits from "./edit";
-import { formatBytes, useTools } from "./toolsStore";
+import { formatBytes, friendly, useTools } from "./toolsStore";
 
 const audit = (outputExists = false) => ({
   audit: { total: 8_400_000, categories: [], images: 4, fonts: 2 },
@@ -405,6 +405,18 @@ describe("OCR sheet", () => {
     expect(useTools.getState().sheet?.detection?.source).toBe("text");
   });
 
+  it("stops the sample reads when the sheet closes", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    vi.mocked(api.ocrDetect).mockReturnValue(new Promise(() => {}) as never);
+    vi.mocked(api.toolCancel).mockResolvedValue(undefined as never);
+    useTools.getState().open("ocr");
+    await flush();
+    const job = vi.mocked(api.ocrDetect).mock.calls[0][0];
+    expect(job).toBeGreaterThan(0);
+    useTools.getState().close();
+    expect(api.toolCancel).toHaveBeenCalledWith(job);
+  });
+
   it("keeps the languages the user picked when the detection arrives late", async () => {
     vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
     let answer!: (v: unknown) => void;
@@ -522,6 +534,36 @@ describe("OCR sheet", () => {
     expect(edits.applyState).toHaveBeenCalledWith(1, outcome.state);
     expect(useTools.getState().sheet?.phase).toBe("done");
     expect(useTools.getState().settings.ocrLanguages).toEqual(["sv"]);
+  });
+
+  it("shows the writing pass of a picture style after the reading pass", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    useTools.getState().open("ocr");
+    await flush();
+    await flush();
+    const seen: { progress: number; status: string; done: number[] }[] = [];
+    vi.mocked(api.ocrStart).mockImplementation((_j, _r, onP) => {
+      const note = () => {
+        const s = useTools.getState().sheet!;
+        seen.push({ progress: s.progress, status: s.status, done: s.donePages });
+      };
+      onP({ done: 2, total: 2, page: 1 });
+      note();
+      onP({ done: 1, total: 2, page: 0, writing: true });
+      note();
+      return Promise.resolve(outcome as never);
+    });
+    useTools.getState().set({ style: "editable" });
+    await useTools.getState().start();
+    expect(seen[0].progress).toBeCloseTo(0.8);
+    expect(seen[1].progress).toBeCloseTo(0.9);
+    expect(seen[1].status).toBe("Writing page 1 of 2");
+    expect(seen[1].done).toEqual(seen[0].done);
+  });
+
+  it("explains a certified document", () => {
+    expect(friendly("certified-document")).toMatch(/certified/);
+    expect(friendly("signed-document")).toMatch(/signed/);
   });
 
   it("reads this page when asked, and undo reverts the single step", async () => {

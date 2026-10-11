@@ -444,13 +444,12 @@ pub fn run_ocr(
     cancel: &AtomicBool,
 ) -> Result<OcrOutcome, ToolError> {
     let opts = options_for(eng, req)?;
-    if opts.style != ocr::Style::Searchable && eng.read_custom(req.doc, |d| Ok(ocr::is_signed(d)))? {
-        // Changing the pictures of a signed document would break its signature; nothing is read or changed.
-        return Err(ToolError(ocr::SIGNED.into()));
-    }
+    // A certified document takes no change; a signed one no picture change. Nothing is read or changed.
+    eng.read_custom(req.doc, |d| Ok(ocr::check_signatures(d, opts.style)))??;
     let last = AtomicU32::new(0);
     let mono = |p: ocr::Progress| {
-        if last.fetch_max(p.done, Ordering::SeqCst) < p.done {
+        // The writing pass counts pages again from one: it is its own sequence.
+        if p.writing || last.fetch_max(p.done, Ordering::SeqCst) < p.done {
             progress(p);
         }
     };
@@ -506,10 +505,12 @@ pub fn run_ocr(
             if entry.generation() != rev {
                 return Err(EngineError::Stale);
             }
-            if ocr::is_signed(pdf) {
+            if crate::outline::signed(pdf) {
                 warnings.push("The document is signed; saving it makes the signature invalid.".to_string());
             }
-            applied = ocr::apply_styled(pdf, &rec.pages, &opts).map_err(|e| EngineError::Invalid(e.to_string()))?;
+            // Under the edit lock: a cancel stops the work between pages and the step is rolled back.
+            applied = ocr::apply_styled(pdf, &rec.pages, &opts, progress, cancel)
+                .map_err(|e| EngineError::Invalid(e.to_string()))?;
             Ok(rec.pages.iter().filter(|p| p.status == ocr::PageStatus::Recognized).map(|p| p.page).collect())
         };
         if opts.style == ocr::Style::Searchable {

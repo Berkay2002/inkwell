@@ -1158,6 +1158,11 @@ fn cleaned() -> Options {
     Options { style: Style::Cleaned, ..opts72() }
 }
 
+/// [`super::apply_styled`] with nobody watching and nothing cancelled.
+fn apply_styled(doc: &mut PdfDocument, results: &[PageResult], opts: &Options) -> Result<ApplyReport, OcrError> {
+    super::apply_styled(doc, results, opts, &no_progress, &AtomicBool::new(false))
+}
+
 /// The first page's `/Im0` in a written file: its filter, size and decoded samples.
 fn page_image(path: &std::path::Path, page: i32) -> (String, u32, u32, Vec<u8>) {
     let doc = PdfDocument::open(path.to_string_lossy().as_ref()).unwrap();
@@ -1700,4 +1705,139 @@ fn an_opaque_soft_mask_does_not_stop_the_picture_styles_but_a_real_one_does() {
             assert!(c.notes[0].contains("mask"), "{:?}", c.notes);
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Signatures, existing text, cancel (review fixes)
+// ---------------------------------------------------------------------------------------------
+
+/// A signature field with a value and no `/SigFlags`: only the field tree shows the file is signed.
+const SIGNED_FIELD: &str = "/AcroForm << /Fields [ << /FT /Sig /T (Sig1) /V << /Type /Sig /Filter /Adobe.PPKLite \
+     /SubFilter /adbe.pkcs7.detached /Contents <00> >> >> ] >>";
+/// A certification: no change is allowed, not even a layer of invisible text.
+const CERTIFIED_DOC: &str = "/Perms << /DocMDP << /Type /Sig /Filter /Adobe.PPKLite /Contents <00> \
+     /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 1 >> >> ] >> >>";
+
+#[test]
+fn a_signed_field_counts_as_signed_even_without_the_flag() {
+    let bmp = scan_bitmap(&TWELVE_LINES, 100);
+    let words = ink_words(&TWELVE_LINES, &bmp);
+    let dir = scratch("signed-field");
+    let input = dir.join("in.pdf");
+    std::fs::write(&input, build_ext(&[scan_page(&bmp)], SIGNED_FIELD, "")).unwrap();
+    let out = dir.join("out.pdf");
+    let cancel = AtomicBool::new(false);
+    for opts in [cleaned(), editable()] {
+        let err = ocr_file(&input, &out, &Stub::new(words.clone()), &opts, &no_progress, &cancel).unwrap_err();
+        assert_eq!(err.to_string(), SIGNED, "{:?}", opts.style);
+        assert!(!out.exists(), "nothing is written");
+    }
+    // The searchable style appends its layer after the signed bytes and says so.
+    let rep = ocr_file(&input, &out, &Stub::new(words), &opts72(), &no_progress, &cancel).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.contains("signed")), "{:?}", rep.warnings);
+    let bytes = std::fs::read(&out).unwrap();
+    let original = std::fs::read(&input).unwrap();
+    assert!(bytes.starts_with(&original), "the signed revision is untouched: the file only grew");
+}
+
+#[test]
+fn a_certified_document_takes_no_style_at_all() {
+    let bmp = scan_bitmap(&TWELVE_LINES, 100);
+    let words = ink_words(&TWELVE_LINES, &bmp);
+    let dir = scratch("certified");
+    let input = dir.join("in.pdf");
+    std::fs::write(&input, build_ext(&[scan_page(&bmp)], CERTIFIED_DOC, "")).unwrap();
+    let out = dir.join("out.pdf");
+    let cancel = AtomicBool::new(false);
+    for style in [Style::Searchable, Style::Cleaned, Style::Editable] {
+        let opts = Options { style, ..opts72() };
+        let err = ocr_file(&input, &out, &Stub::new(words.clone()), &opts, &no_progress, &cancel).unwrap_err();
+        assert_eq!(err.to_string(), CERTIFIED, "{style:?}");
+        assert!(!out.exists(), "{style:?}: nothing is written");
+        let err = preview(&Input::Path(&input), 0, &Stub::new(words.clone()), &opts, 400, &cancel).err().expect("refused");
+        assert_eq!(err.to_string(), CERTIFIED, "preview {style:?}");
+    }
+}
+
+#[test]
+fn cleaning_a_page_that_already_has_text_does_not_move_its_picture() {
+    // A scan that already carries a text layer, read again because "skip pages with text" is off:
+    // that layer was placed on the tilted picture, so straightening the picture would put it
+    // beside its words. The picture keeps its geometry.
+    let crooked = tilted(&scan_bitmap(&TWELVE_LINES, 100), 2.0);
+    let before = raster_of(&crooked);
+    let pages = [Pg::Scan { w: 612.0, h: 792.0, bmp: crooked, rotate: 0, sloppy_cm: false }];
+    let (first, _) = run_stub(&pages, &stub_with_angle(2.0), &opts72(), "clean-has-text-1");
+    let out = std::env::temp_dir().join("inkwell-ocr-tests").join("clean-has-text-2.pdf");
+    let _ = std::fs::remove_file(&out);
+    let again = Options { force: true, ..cleaned() };
+    let rep = ocr_file(&first, &out, &stub_with_angle(2.0), &again, &no_progress, &AtomicBool::new(false)).unwrap();
+    let c = rep.clean.as_ref().unwrap();
+    assert_eq!((c.pages_deskewed, c.pages_cleaned), (0, 0), "{c:?}");
+    assert_eq!(page_image(&out, 0).3, before.px, "the picture is the one it was");
+    // The same picture without a layer is straightened (see the skew test above).
+    let (_, plain) = run_stub(&pages, &stub_with_angle(2.0), &cleaned(), "clean-has-text-3");
+    assert_eq!(plain.clean.as_ref().unwrap().pages_deskewed, 1);
+}
+
+#[test]
+fn a_cancel_between_pages_stops_the_picture_styles_and_reports_each_page() {
+    let crooked = tilted(&scan_bitmap(&TWELVE_LINES, 100), 2.0);
+    let page = || Pg::Scan { w: 612.0, h: 792.0, bmp: Bitmap { w: crooked.w, h: crooked.h, pixels: crooked.pixels.clone() }, rotate: 0, sloppy_cm: false };
+    let image_of = |doc: &PdfDocument, p: i32| {
+        doc.load_pdf_page(p).unwrap().resources().unwrap().get_dict("XObject").unwrap().unwrap().get_dict("Im0").unwrap().unwrap().as_indirect().unwrap()
+    };
+    let results = [recognized_page(0, Some(2.0)), recognized_page(1, Some(2.0))];
+
+    // Cleaned: Cancel is pressed once the first page is written; the second is not touched.
+    let mut doc = PdfDocument::from_bytes(&build(&[page(), page()])).unwrap();
+    let second = image_of(&doc, 1);
+    let cancel = AtomicBool::new(false);
+    let seen = Mutex::new(Vec::new());
+    let on = |p: Progress| {
+        seen.lock().unwrap().push((p.done, p.total, p.writing));
+        cancel.store(true, Ordering::Relaxed);
+    };
+    let err = super::apply_styled(&mut doc, &results, &cleaned(), &on, &cancel).unwrap_err();
+    assert!(matches!(err, OcrError::Cancelled), "{err:?}");
+    assert_eq!(*seen.lock().unwrap(), vec![(1, 2, true)], "one page was written before the stop");
+    assert_eq!(image_of(&doc, 1), second, "the second picture is as it was");
+
+    // Editable: a run nobody cancels reports every page in order, one that is cancelled stops.
+    let bmp = scan_bitmap(&TWELVE_LINES, 100);
+    let words = ink_words(&TWELVE_LINES, &bmp);
+    let results = [word_results(&words, 0, None, None), word_results(&words, 1, None, None)];
+    let mut doc = PdfDocument::from_bytes(&build(&[scan_page(&bmp), scan_page(&bmp)])).unwrap();
+    let seen = Mutex::new(Vec::new());
+    let all = |p: Progress| seen.lock().unwrap().push((p.done, p.total, p.writing));
+    super::apply_styled(&mut doc, &results, &editable(), &all, &AtomicBool::new(false)).unwrap();
+    assert_eq!(*seen.lock().unwrap(), vec![(1, 2, true), (2, 2, true)]);
+
+    let mut doc = PdfDocument::from_bytes(&build(&[scan_page(&bmp), scan_page(&bmp)])).unwrap();
+    let cancel = AtomicBool::new(false);
+    let stop_after_first = |p: Progress| {
+        if p.done == 1 {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    };
+    let err = super::apply_styled(&mut doc, &results, &editable(), &stop_after_first, &cancel).unwrap_err();
+    assert!(matches!(err, OcrError::Cancelled), "{err:?}");
+}
+
+#[test]
+fn a_jpeg_is_written_back_at_about_the_quality_it_had() {
+    use image::{ExtendedColorType, ImageEncoder, codecs::jpeg::JpegEncoder};
+    let (w, h) = (64u32, 64u32);
+    let px: Vec<u8> = (0..w * h).map(|i| ((i * 7 + (i / w) * 13) % 251) as u8).collect();
+    let encode = |q: u8| {
+        let mut out = Vec::new();
+        JpegEncoder::new_with_quality(&mut out, q).write_image(&px, w, h, ExtendedColorType::L8).unwrap();
+        out
+    };
+    for q in [50u8, 60, 75, 85, 90, 95] {
+        let got = clean::jpeg_quality(&encode(q)).expect("a quality is read") as i32;
+        assert!((got - q as i32).abs() <= 3, "wrote {q}, read {got}");
+    }
+    assert_eq!(clean::jpeg_quality(b"not a jpeg"), None);
+    assert_eq!(clean::jpeg_quality(&encode(80)[..12]), None, "a cut stream has no table to read");
 }

@@ -876,6 +876,8 @@ export interface OcrProgress {
   done: number;
   total: number;
   page: number;
+  /** After every page was read: the pages are being written into the document (the picture styles). */
+  writing?: boolean;
 }
 
 /** The engine's report as it serializes (snake_case: the AI tools read the same shape). */
@@ -1031,7 +1033,7 @@ export const ocrChooseTesseract = () => invoke<string | null>("ocr_choose_tesser
 /** Which engine reads `languages` and what is missing for them. */
 export const ocrPlan = (languages: string[], backend: OcrBackend = "auto") => invoke<OcrPlan>("ocr_plan", { languages, backend });
 /** The language the document is probably in: its own text, else a quick sample read of its first scan. */
-export const ocrDetect = (doc: number) => invoke<OcrDetection>("ocr_detect", { doc });
+export const ocrDetect = (job: number, doc: number) => invoke<OcrDetection>("ocr_detect", { job, doc });
 /** Opens Windows' language settings, where an OCR language pack is added. A fixed address. */
 export const openLanguageSettings = () => invoke<void>("open_language_settings");
 export const ocrClearTesseract = () => invoke<void>("ocr_clear_tesseract");

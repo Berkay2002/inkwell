@@ -14,6 +14,7 @@ import {
   languageName,
   matchLanguages,
   missingMatch,
+  ocrProgress,
   primary,
   requestOptions,
   toggleLanguage,
@@ -42,6 +43,15 @@ describe("language names and engines", () => {
     expect(languageName("zzzz")).toBe("zzzz");
     expect(primary("en-US")).toBe("en");
     expect(primary("zh_Hans")).toBe("zh");
+  });
+
+  it("keeps a Tesseract data name with a script whole, and names it", () => {
+    expect(primary("chi_tra")).toBe("chi_tra");
+    expect(primary("srp_latn")).toBe("srp_latn");
+    expect(primary("JPN_vert")).toBe("jpn_vert");
+    expect(languageName("chi_tra")).toBe("Chinese (Traditional)");
+    expect(languageName("jpn_vert")).toBe("Japanese (vertical)");
+    expect(languageName("srp_latn")).toBe("Serbian (Latin)");
   });
 
   it("says which engine serves a language", () => {
@@ -146,6 +156,14 @@ describe("the preview and the review list", () => {
     expect(previewPage([2, 3, 4], 3)).toBe(3);
     expect(previewPage([5, 6], 1)).toBe(5);
     expect(previewPage([], 2)).toBe(2);
+  });
+
+  it("keeps the last fifth of the bar for writing the pages of a picture style", () => {
+    expect(ocrProgress({ done: 5, total: 10 }, "searchable")).toBe(0.5);
+    expect(ocrProgress({ done: 10, total: 10 }, "cleaned")).toBeCloseTo(0.8);
+    expect(ocrProgress({ done: 5, total: 10, writing: true }, "editable")).toBeCloseTo(0.9);
+    expect(ocrProgress({ done: 10, total: 10, writing: true }, "cleaned")).toBeCloseTo(1);
+    expect(ocrProgress({ done: 0, total: 0 }, "cleaned")).toBe(0);
   });
 
   it("offers a preview only for the styles that change the picture", () => {

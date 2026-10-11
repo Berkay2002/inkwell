@@ -17,13 +17,15 @@
 //!
 //! The fonts are subset once per document, after every page has been planned.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use mupdf::Font;
 use mupdf::pdf::PdfDocument;
 use serde::{Deserialize, Serialize};
 
 use super::clean;
 use super::raster::{self, Raster};
-use super::{OcrError, PageResult, PageStatus, layer};
+use super::{OcrError, PageResult, PageStatus, Progress, layer};
 use crate::textedit::bundled::{self, Subset};
 use crate::textedit::content::Matrix;
 
@@ -693,8 +695,18 @@ fn face_res(i: usize) -> String {
 
 /// Converts the recognised pages of `results` (see the module docs). Pages that do not qualify
 /// get the invisible layer instead and are counted in the report.
-pub(crate) fn apply(doc: &mut PdfDocument, results: &[PageResult], pref: FontPref) -> Result<Applied, OcrError> {
+/// `cancel` is looked at before each page's work (`Err(Cancelled)`: the caller drops the document)
+/// and `progress` sees each page converted or written. The writing pass counts as the second half.
+pub(crate) fn apply(
+    doc: &mut PdfDocument,
+    results: &[PageResult],
+    pref: FontPref,
+    progress: &(dyn Fn(Progress) + Sync),
+    cancel: &AtomicBool,
+) -> Result<Applied, OcrError> {
     let todo: Vec<&PageResult> = results.iter().filter(|r| r.status == PageStatus::Recognized).collect();
+    let total = todo.len() as u32;
+    let stop = || if cancel.load(Ordering::Relaxed) { Err(OcrError::Cancelled) } else { Ok(()) };
     let mut report = EditableReport::default();
     let mut out = Applied { pages_written: 0, words: 0, report: EditableReport::default() };
     if todo.is_empty() {
@@ -703,8 +715,11 @@ pub(crate) fn apply(doc: &mut PdfDocument, results: &[PageResult], pref: FontPre
     let mut kit = Kit::new();
     let mut plans: Vec<PagePlan> = Vec::new();
     let mut fallback: Vec<&PageResult> = Vec::new();
-    for r in todo {
-        match convert_page(doc, r, &mut kit, pref) {
+    for (n, r) in todo.into_iter().enumerate() {
+        stop()?;
+        let converted = convert_page(doc, r, &mut kit, pref);
+        progress(Progress { done: n as u32 + 1, total, page: r.page, writing: true });
+        match converted {
             Ok(c) => {
                 report.pages_converted += 1;
                 report.words_converted += c.words;
@@ -742,6 +757,7 @@ pub(crate) fn apply(doc: &mut PdfDocument, results: &[PageResult], pref: FontPre
     let ghost = if any_hidden { Some(layer::install_font(doc, &codes)?) } else { None };
 
     for plan in &plans {
+        stop()?;
         let mut page = doc.load_pdf_page(plan.page as i32)?;
         let user_from_page = page.ctm()?.invert().ok_or_else(|| OcrError::Pdf(format!("page {} has a singular transform", plan.page + 1)))?;
         let mut res: Vec<(String, mupdf::pdf::PdfObject)> = fonts.iter().map(|(i, o)| (face_res(*i), o.clone())).collect();
@@ -759,6 +775,7 @@ pub(crate) fn apply(doc: &mut PdfDocument, results: &[PageResult], pref: FontPre
         out.pages_written += 1;
     }
     for r in fallback {
+        stop()?;
         let Some(g) = &ghost else { break };
         let mut page = doc.load_pdf_page(r.page as i32)?;
         let user_from_page = page.ctm()?.invert().ok_or_else(|| OcrError::Pdf(format!("page {} has a singular transform", r.page + 1)))?;

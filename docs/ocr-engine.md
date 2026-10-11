@@ -79,7 +79,11 @@ inside an RTL line stay in position order (no full bidi split).
 the `.traineddata` files in Tesseract's `tessdata` (`tesseract --list-langs`, read once, never installed
 or downloaded). Each entry says which engines can read it, and the sheet shows one searchable multi-select
 over the union, each row labelled with its engine. Tags are normalised to the primary subtag (`sv-SE` ->
-`sv`; Tesseract's `swe`, `chi_sim` ... map back and forth in `tessdata_name`).
+`sv`; Tesseract's `swe`, `chi_sim` ... map back and forth in `tessdata_name`). A Tesseract data name that
+carries a script or orientation (`chi_tra`, `srp_latn`, `uzb_cyrl`, `jpn_vert`: three letters, `_`, the
+rest) is its own entry under its whole name and reaches `-l` unchanged; only region and script suffixes
+of Windows and POSIX tags (`en-US`, `zh_Hans`) fold to the language. The CJK and right-to-left marks
+follow the language the name belongs to (`jpn_vert` is Japanese).
 
 * **Engine pick** (`pick_engine`): Windows OCR reads one language per call, so a single language that
   Windows has goes to Windows (5-15x faster); two or more languages, or one Windows lacks, go to
@@ -119,8 +123,18 @@ A byte input is written once to a temp file that all workers open, not copied pe
 | Editable text | words are written as real text in a matching font and the recognised areas are removed from the picture | yes, only under recognised words |
 
 Common to all: remembered settings (languages, style, dpi 150/200/300, skip-pages-with-text, font), one
-undo step, cancel with progress, and a **signed document is left alone** (`SigFlags` & 1, explained in the
-sheet; the file-level `ocr_file` still copies it with a warning).
+undo step, and cancel with progress. The picture styles have a writing pass after the reading pass:
+`apply_styled` takes the cancel flag and a progress callback (`Progress.writing`, the last fifth of the
+bar), looks at the flag before every page, and a cancel returns `Cancelled` from inside the edit, which
+rolls the step back (nothing changed, no undo entry).
+
+Signatures (`check_signatures`, one place for the run, the preview, the save-as copy and the batch):
+* A **certified** document (`/Perms /DocMDP`, `outline::certified`) takes no style at all, not even the
+  invisible layer: error `certified-document`, nothing read or written.
+* Any other **signed** document (`outline::signed`: a signed `/Sig` field with a value, `/SigFlags` & 1,
+  `/Perms` usage rights) is refused by the two picture styles (`signed-document`); the searchable style
+  still appends its layer after the signed bytes (incremental) and warns that viewers may report the copy
+  as modified.
 
 ### Cleaned up (`clean.rs`, `raster.rs`)
 
@@ -131,11 +145,15 @@ is the engine's reported skew when it has one, else the angle whose row projecti
 (0.25..15 degrees, `raster::row_sharpness`); a tilt below 0.25 degrees is not worth the softening. Specks
 are connected components below a size and ink-density limit that are not near text (`raster::despeckle`);
 the fill is the page's paper colour (mode, not mean). The result is re-encoded **in the family of the
-original**: JPEG stays JPEG (quality 90), a 1-bit image becomes CCITT G4 again (vendored MuPDF
+original**: JPEG stays JPEG at about the quality it had (read from its first quantisation table against
+the standard one, kept within 60..95, 90 when it cannot be read), a 1-bit image becomes CCITT G4 again (vendored MuPDF
 `fz_compress_ccitt_fax_g4`), anything else Flate. The new image is a *new object* that only this page
 points at (`rebind` copies the page's Resources/XObject), so an image another page shares stays
 byte-identical. A page that was already straight and clean keeps its bytes (`pages_clean`). The sheet
-warns that the file is re-encoded (JPEG is lossy).
+warns that the file is re-encoded (JPEG is lossy). A page that **already had text** before the run (read
+anyway because skip-pages-with-text is off) is only despeckled, never deskewed: its existing layer was
+placed on the tilted picture, and moving the picture would put that text beside its words. (This also
+means a re-run over a file this tool made, with replace on, keeps the tilt on that page.)
 
 ### Editable text (`editable.rs`)
 
@@ -202,8 +220,8 @@ anything is applied.
 * Pages that already have >= 12 non-space characters of text are skipped unless `force`; `force` also
   replaces an earlier layer of ours.
 * Saved incrementally when the file allows it (every original byte stays where it was). A signed
-  document (AcroForm `SigFlags` & 1) is still copied, but `Report.warnings` says the signature no longer
-  validates; the caller decides whether to offer it.
+  document (see Signatures above) is still copied by the searchable style, and `Report.warnings` says the
+  signature no longer validates; a certified one is refused.
 
 ## Files and failure
 

@@ -13,8 +13,10 @@ use mupdf::pdf::{PdfDocument, PdfObject, PdfPage};
 use mupdf::Buffer;
 use serde::Serialize;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::raster::{self, Raster};
-use super::{OcrError, PageResult, PageStatus};
+use super::{OcrError, PageResult, PageStatus, Progress};
 use crate::imageedit;
 use crate::textedit::content::Matrix;
 
@@ -22,7 +24,11 @@ use crate::textedit::content::Matrix;
 const MIN_DESKEW: f32 = 0.25;
 /// A tilt larger than this is more likely a wrong reading than a crooked scan.
 const MAX_DESKEW: f32 = 15.0;
+/// A JPEG whose original quality cannot be read is written at this one.
 const JPEG_QUALITY: u8 = 90;
+/// A re-encoded JPEG keeps its original's quality within these bounds: not softer than a scan that
+/// was already soft (the artefacts would pile up), not larger than a picture this good needs.
+const JPEG_QUALITY_RANGE: (u8, u8) = (60, 95);
 /// The picture must cover this much of the page to count as "the scan".
 const MIN_COVER: f64 = 0.6;
 /// Notes kept in the report.
@@ -59,8 +65,8 @@ impl CleanReport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Family {
-    /// DCTDecode: re-encoded as JPEG.
-    Jpeg,
+    /// DCTDecode: re-encoded as JPEG, at about the quality the original had.
+    Jpeg(u8),
     /// One bit per pixel, whatever the filter: re-encoded as CCITT G4.
     Bilevel,
     /// Anything else with 8-bit gray or RGB samples: Flate.
@@ -74,11 +80,23 @@ enum Outcome {
 }
 
 /// Cleans the picture of every recognised page that qualifies. A deskewed page gets `skew_deg =
-/// None`, so its text layer follows the straightened picture.
-pub(crate) fn clean_pages(doc: &mut PdfDocument, results: &mut [PageResult]) -> Result<CleanReport, OcrError> {
+/// None`, so its text layer follows the straightened picture. `cancel` is looked at before each page
+/// (`Err(Cancelled)`: the caller drops the document), `progress` sees each page done.
+pub(crate) fn clean_pages(
+    doc: &mut PdfDocument,
+    results: &mut [PageResult],
+    progress: &(dyn Fn(Progress) + Sync),
+    cancel: &AtomicBool,
+) -> Result<CleanReport, OcrError> {
     let mut report = CleanReport::default();
-    for r in results.iter_mut().filter(|r| r.status == PageStatus::Recognized) {
-        match clean_page(doc, r) {
+    let total = results.iter().filter(|r| r.status == PageStatus::Recognized).count() as u32;
+    for (n, r) in results.iter_mut().filter(|r| r.status == PageStatus::Recognized).enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(OcrError::Cancelled);
+        }
+        let done = clean_page(doc, r);
+        progress(Progress { done: n as u32 + 1, total, page: r.page, writing: true });
+        match done {
             Ok(Outcome::Cleaned { deskewed, specks }) => {
                 report.pages_cleaned += 1;
                 report.pages_deskewed += u32::from(deskewed);
@@ -175,11 +193,65 @@ pub(crate) fn decode(obj: &PdfObject) -> Result<(Raster, Family), String> {
             for y in 0..h {
                 px.extend_from_slice(&s.data[y * s.row..y * s.row + w * n]);
             }
-            let family = if filters.last().is_some_and(|f| f == "DCTDecode") { Family::Jpeg } else { Family::Raw };
+            let family = if filters.last().is_some_and(|f| f == "DCTDecode") {
+                // Only a plain DCT stream can be read for its tables; behind another filter it is not JPEG yet.
+                let raw = if filters.len() == 1 { obj.read_raw_stream().ok() } else { None };
+                let q = raw.as_deref().and_then(jpeg_quality).unwrap_or(JPEG_QUALITY);
+                Family::Jpeg(q.clamp(JPEG_QUALITY_RANGE.0, JPEG_QUALITY_RANGE.1))
+            } else {
+                Family::Raw
+            };
             Ok((Raster { w, h, n, px }, family))
         }
         _ => Err(format!("its picture has {} bit(s) and {} component(s) per pixel", s.bpc, s.n)),
     }
+}
+
+/// The IJG quality (1..=100) the first quantisation table of a JPEG stands for, from the size of its
+/// entries against the standard luminance table. Rough for tables an encoder made its own way, which
+/// is enough to write the copy at a similar quality. `None` when no table is found before the scan.
+pub(crate) fn jpeg_quality(data: &[u8]) -> Option<u8> {
+    const STD: [u32; 64] = [
+        16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62, 18, 22, 37, 56, 68,
+        109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
+    ];
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2;
+    while i + 4 <= data.len() {
+        if data[i] != 0xFF {
+            return None;
+        }
+        let marker = data[i + 1];
+        if marker == 0xFF {
+            i += 1;
+            continue;
+        }
+        if marker == 0x01 || (0xD0..=0xD8).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        if marker == 0xDA || marker == 0xD9 {
+            return None;
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        if len < 2 || i + 2 + len > data.len() {
+            return None;
+        }
+        if marker == 0xDB {
+            let seg = &data[i + 4..i + 2 + len];
+            let wide = seg.first()? >> 4 != 0;
+            let step = if wide { 2 } else { 1 };
+            let table = seg.get(1..1 + 64 * step)?;
+            let sum: u32 = if wide { table.chunks(2).map(|p| u32::from(u16::from_be_bytes([p[0], p[1]]))).sum() } else { table.iter().map(|&v| u32::from(v)).sum() };
+            let scale = sum * 100 / STD.iter().sum::<u32>();
+            let q = if scale <= 100 { (200 - scale.min(200)).div_ceil(2) } else { 5000 / scale };
+            return Some(q.clamp(1, 100) as u8);
+        }
+        i += 2 + len;
+    }
+    None
 }
 
 fn flate(data: &[u8]) -> Vec<u8> {
@@ -200,11 +272,11 @@ pub(crate) fn encode(doc: &mut PdfDocument, orig: &PdfObject, family: Family, ra
     dict.dict_put("Width", int(ras.w)?).map_err(mupdf_err)?;
     dict.dict_put("Height", int(ras.h)?).map_err(mupdf_err)?;
     let data = match family {
-        Family::Jpeg => {
+        Family::Jpeg(quality) => {
             use image::{ExtendedColorType, ImageEncoder, codecs::jpeg::JpegEncoder};
             let mut out = Vec::new();
             let color = if ras.n == 1 { ExtendedColorType::L8 } else { ExtendedColorType::Rgb8 };
-            JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY)
+            JpegEncoder::new_with_quality(&mut out, quality)
                 .write_image(&ras.px, ras.w as u32, ras.h as u32, color)
                 .map_err(|e| OcrError::Pdf(e.to_string()))?;
             dict.dict_put("Filter", name("DCTDecode")?).map_err(mupdf_err)?;
@@ -344,9 +416,12 @@ fn clean_page(doc: &mut PdfDocument, r: &mut PageResult) -> Result<Outcome, OcrE
     let thr = raster::otsu(&l);
     let paper = raster::paper(&ras, &l, thr);
 
-    // Straighten, when the engine saw a tilt and the picture's own lines agree.
+    // Straighten, when the engine saw a tilt and the picture's own lines agree. A page that already had
+    // text (read anyway because "skip pages with text" was off) keeps its picture's geometry: that
+    // text is placed on the tilted picture, and straightening it would put it beside its words.
+    let had_text = super::page_has_text(doc, r.page).unwrap_or(true);
     let mut deskewed = false;
-    if let Some(deg) = r.skew_deg.filter(|d| (MIN_DESKEW..=MAX_DESKEW).contains(&d.abs()) && r.rotation == 0) {
+    if let Some(deg) = r.skew_deg.filter(|d| !had_text && (MIN_DESKEW..=MAX_DESKEW).contains(&d.abs()) && r.rotation == 0) {
         let better = raster::row_sharpness(&ras, deg) > raster::row_sharpness(&ras, 0.0) * 1.02;
         if better {
             let centre = (f64::from(r.page_size[0]) / 2.0, f64::from(r.page_size[1]) / 2.0);

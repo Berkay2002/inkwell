@@ -60,9 +60,25 @@ pub(crate) const ISO3: &[(&str, &str)] = &[
     ("is", "isl"),
 ];
 
-/// `en-US` -> `en`, `zh_Hans` -> `zh`.
+/// `en-US` -> `en`, `zh_Hans` -> `zh`. A Tesseract data name with a script or orientation (`chi_tra`,
+/// `srp_latn`, `uzb_cyrl`, `jpn_vert`: three letters, an underscore, the rest) is its own language, not a
+/// region of `chi`: it stays whole so it reaches Tesseract as the file it names.
 pub fn primary(tag: &str) -> String {
-    tag.split(['-', '_']).next().unwrap_or(tag).to_ascii_lowercase()
+    let lower = tag.to_ascii_lowercase();
+    if let Some((head, tail)) = lower.split_once('_') {
+        if head.len() == 3 && head.bytes().all(|b| b.is_ascii_lowercase()) && !tail.is_empty() && !lower.contains('-') {
+            return lower;
+        }
+    }
+    lower.split(['-', '_']).next().unwrap_or(&lower).to_string()
+}
+
+/// The language a tag belongs to: `jpn_vert` is Japanese (`ja`), `chi_tra` Chinese (`zh`).
+fn family(tag: &str) -> String {
+    match tag.split_once('_') {
+        Some((head, _)) => ISO3.iter().find(|(_, b)| b.split('_').next() == Some(head)).map_or_else(|| head.to_string(), |(a, _)| (*a).to_string()),
+        None => tag.to_string(),
+    }
 }
 
 /// The `tessdata` file (without extension) that serves `tag`.
@@ -114,8 +130,9 @@ impl Catalog {
                 l.tesseract |= tess;
                 return;
             }
-            let rtl = RTL.contains(&p.as_str());
-            let cjk = CJK.contains(&p.as_str());
+            let fam = family(&p);
+            let rtl = RTL.contains(&fam.as_str());
+            let cjk = CJK.contains(&fam.as_str());
             languages.push(LangInfo { tag: p, windows: win.map(str::to_string), tesseract: tess, rtl, cjk, experimental: rtl || cjk });
         };
         for w in windows {
@@ -464,6 +481,37 @@ mod tests {
     fn cat(win: &[&str], tess: Option<&[&str]>) -> Catalog {
         let t = tess.map(s);
         Catalog::build(&s(win), t.as_deref(), tess.map(|_| r"C:\Tesseract-OCR\tessdata".to_string()))
+    }
+
+    #[test]
+    fn tesseract_data_names_with_a_script_keep_their_whole_name() {
+        use crate::ocr::backend::TesseractCli;
+        for whole in ["chi_tra", "srp_latn", "aze_cyrl", "uzb_cyrl", "jpn_vert", "chi_sim_vert"] {
+            assert_eq!(primary(whole), whole);
+            assert_eq!(tessdata_name(whole), whole);
+        }
+        // Region and script suffixes of Windows and POSIX tags still fold to the language.
+        assert_eq!(primary("en-US"), "en");
+        assert_eq!(primary("zh_Hans"), "zh");
+        assert_eq!(primary("zh-Hant-TW"), "zh");
+        assert_eq!(primary("en_US"), "en");
+
+        let c = cat(&["en-US"], Some(&["en", "zh", "chi_tra", "jpn_vert", "srp_latn"]));
+        let tags: Vec<&str> = c.languages.iter().map(|l| l.tag.as_str()).collect();
+        assert_eq!(tags, ["chi_tra", "en", "jpn_vert", "srp_latn", "zh"]);
+        assert!(c.has("chi_tra") && c.get("chi_tra").unwrap().tesseract);
+        assert!(c.get("jpn_vert").unwrap().cjk, "a vertical Japanese model is still CJK");
+        assert!(c.get("chi_tra").unwrap().cjk);
+        assert!(!c.get("srp_latn").unwrap().cjk);
+
+        // Asked for, it goes to Tesseract as the file that is there, never as `chi`.
+        let p = pick_engine(&s(&["chi_tra", "en"]), &c, None);
+        assert_eq!((p.engine, p.languages.clone()), (Some(Engine::Tesseract), s(&["chi_tra", "en"])));
+        assert_eq!(TesseractCli::lang_arg(&p.languages), "chi_tra+eng");
+        assert_eq!(TesseractCli::lang_arg(&s(&["srp_latn", "sv-SE", "ja"])), "srp_latn+swe+jpn");
+        // A data file nobody has is reported under its own name.
+        let p = pick_engine(&s(&["uzb_cyrl"]), &c, None);
+        assert_eq!(p.missing[0].tessdata_file, "uzb_cyrl.traineddata");
     }
 
     #[test]

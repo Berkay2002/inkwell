@@ -487,6 +487,62 @@ fn editable_text_replaces_the_picture_in_the_file_and_undo_brings_it_back() {
 }
 
 #[test]
+fn a_signed_field_without_the_flag_and_a_certification_are_both_seen() {
+    let d = dir("signed-field");
+    // A signature field with a value but no /SigFlags: only the field tree shows the file is signed.
+    let field = "/AcroForm << /Fields [ << /FT /Sig /T (Sig1) /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /Contents <00> >> >> ] >>";
+    let (eng, id, _) = open_bytes(&d, "field.pdf", image_pdf(&MARKER, field));
+    for style in [ocr::Style::Editable, ocr::Style::Cleaned] {
+        let e = run_ocr(&eng, &OcrRequest { style, ..req(id) }, None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(e.0, ocr::SIGNED, "{style:?}");
+    }
+    assert!(eng.edit_state(id).unwrap().undo.is_none());
+    let out = run_ocr(&eng, &req(id), None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(out.report.warnings.iter().any(|w| w.contains("signed")), "{:?}", out.report.warnings);
+
+    // A certified one takes nothing, not even the searchable layer.
+    let cert = "/Perms << /DocMDP << /Type /Sig /Filter /Adobe.PPKLite /Contents <00>                 /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 1 >> >> ] >> >>";
+    let (eng, id, _) = open_bytes(&d, "cert.pdf", image_pdf(&MARKER, cert));
+    for style in [ocr::Style::Searchable, ocr::Style::Cleaned, ocr::Style::Editable] {
+        let e = run_ocr(&eng, &OcrRequest { style, ..req(id) }, None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(e.0, ocr::CERTIFIED, "{style:?}");
+        let e = ocr_preview(&eng, &OcrRequest { style, ..req(id) }, 0, 400, &Stub::new(), &AtomicBool::new(false)).err().expect("refused");
+        assert_eq!(e.0, ocr::CERTIFIED, "preview {style:?}");
+    }
+    let to = d.join("copy.pdf");
+    let e = run_ocr(&eng, &req(id), Some(&to), &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap_err();
+    assert_eq!(e.0, ocr::CERTIFIED, "a copy is refused too");
+    assert!(!to.exists());
+    let st = eng.edit_state(id).unwrap();
+    assert!(!st.dirty && st.undo.is_none());
+}
+
+#[test]
+fn a_cancel_while_the_pictures_are_written_leaves_the_document_as_it_was() {
+    for style in [ocr::Style::Editable, ocr::Style::Cleaned] {
+        let d = dir(&format!("cancel-apply-{style:?}"));
+        let (eng, id, path) = open_bytes(&d, "scan.pdf", image_pdf(&MARKER, ""));
+        let cancel = AtomicBool::new(false);
+        let writing = AtomicU32::new(0);
+        let on = |p: ocr::Progress| {
+            if p.writing {
+                // The first page is being written: the user presses Cancel.
+                writing.fetch_add(1, Ordering::SeqCst);
+                cancel.store(true, Ordering::SeqCst);
+            }
+        };
+        let e = run_ocr(&eng, &OcrRequest { style, ..req(id) }, None, &Stub::new(), &on, &cancel).unwrap_err();
+        assert_eq!(e.0, "cancelled", "{style:?}");
+        assert!(writing.load(Ordering::SeqCst) > 0, "the apply stage reports its pages ({style:?})");
+        let st = eng.edit_state(id).unwrap();
+        assert!(!st.dirty && st.undo.is_none(), "{style:?}: no step was made");
+        assert!(text_of(&eng, id, 0).is_empty(), "{style:?}: nothing was added");
+        eng.save(id, None).unwrap();
+        assert!(contains(&std::fs::read(&path).unwrap(), &MARKER), "{style:?}: the picture is still there");
+    }
+}
+
+#[test]
 fn a_signed_document_is_not_changed_by_the_picture_styles() {
     let d = dir("editable-signed");
     let (eng, id, _) = open_bytes(&d, "signed.pdf", image_pdf(&MARKER, "/AcroForm << /SigFlags 3 /Fields [] >>"));

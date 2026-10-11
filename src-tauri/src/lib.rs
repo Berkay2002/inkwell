@@ -656,11 +656,8 @@ async fn ocr_choose_tesseract(app: tauri::AppHandle, paths: Tess<'_>) -> Result<
 fn open_language_settings() -> Result<(), tools::ToolError> {
     #[cfg(windows)]
     {
-        std::process::Command::new("explorer.exe")
-            .arg("ms-settings:regionlanguage")
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| tools::ToolError(e.to_string()))
+        // Through the shell's own association for the address, not a program found by name on the path.
+        links::app::open_with_system(ocr::lang::WINDOWS_LANGUAGE_SETTINGS).map_err(|e| tools::ToolError(e.to_string()))
     }
     #[cfg(not(windows))]
     Err(tools::ToolError("only available on Windows".into()))
@@ -675,10 +672,12 @@ async fn ocr_plan(paths: Tess<'_>, languages: Vec<String>, backend: Option<tools
 
 /// The language `doc` is probably written in (its own text, else a quick sample read of its first scan).
 #[tauri::command]
-async fn ocr_detect(eng: Eng<'_>, paths: Tess<'_>, doc: DocId) -> Result<ocr::detect::Detection, tools::ToolError> {
+async fn ocr_detect(eng: Eng<'_>, jobs: JobState<'_>, paths: Tess<'_>, job: u64, doc: DocId) -> Result<ocr::detect::Detection, tools::ToolError> {
     let eng = eng.inner().clone();
+    // `tool_cancel(job)` stops the sample reads: the sheet closed, or the real run is about to start.
+    let guard = jobs.inner().begin(job);
     let configured = paths.tesseract();
-    tool_blocking(move || tools::ocr_detect(&eng, doc, configured.as_deref(), &std::sync::atomic::AtomicBool::new(false))).await
+    tool_blocking(move || tools::ocr_detect(&eng, doc, configured.as_deref(), &guard.cancel)).await
 }
 
 /// What `req.style` would do to one page (zero-based), as before/after pictures. Changes nothing.

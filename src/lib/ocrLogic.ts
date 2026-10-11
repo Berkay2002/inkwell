@@ -12,15 +12,52 @@ export const KNOWN_LANGUAGES = [
   "fa", "hi", "el", "uk", "hu", "ro", "bg", "th", "vi", "id", "ca", "hr", "sk", "sl", "lt", "lv", "et", "is",
 ];
 
-export const primary = (tag: string) => tag.split(/[-_]/)[0].toLowerCase();
+/**
+ * `en-US` is `en`. A Tesseract data name with a script or orientation (`chi_tra`, `srp_latn`, `jpn_vert`) is its
+ * own language and stays whole: it reaches Tesseract as the file it names (same rule as `lang::primary`).
+ */
+export function primary(tag: string): string {
+  const t = tag.toLowerCase();
+  return /^[a-z]{3}_[a-z_]+$/.test(t) ? t : t.split(/[-_]/)[0];
+}
+
+const TESS_SUFFIX: Record<string, string> = {
+  tra: "Traditional",
+  sim: "Simplified",
+  vert: "vertical",
+  latn: "Latin",
+  cyrl: "Cyrillic",
+  arab: "Arabic script",
+  deva: "Devanagari",
+};
+/** Tesseract's `chi` is the bibliographic code of Chinese; the rest of its names are ISO 639-3. */
+const TESS_HEAD: Record<string, string> = { chi: "zh" };
 
 export function languageName(tag: string): string {
   try {
-    const n = new Intl.DisplayNames(["en"], { type: "language" }).of(primary(tag));
+    const names = new Intl.DisplayNames(["en"], { type: "language" });
+    const p = primary(tag);
+    const [head, ...rest] = p.split("_");
+    if (rest.length > 0) {
+      const base = names.of(TESS_HEAD[head] ?? head);
+      if (!base || base === head) return tag;
+      return `${base} (${rest.map((s) => TESS_SUFFIX[s] ?? s).join(", ")})`;
+    }
+    const n = names.of(p);
     return n && n !== tag ? n : tag;
   } catch {
     return tag;
   }
+}
+
+/**
+ * The bar over a run. The picture styles have a second pass that writes the pages into the document (it
+ * holds the edit lock, and can be cancelled); it takes the last fifth, the reading the first four.
+ */
+export function ocrProgress(p: { done: number; total: number; writing?: boolean }, style: OcrStyle): number {
+  const f = p.total ? p.done / p.total : 0;
+  if (style === "searchable") return f;
+  return p.writing ? 0.8 + 0.2 * f : 0.8 * f;
 }
 
 /** "Windows", "Tesseract" or "Windows, Tesseract": who can read it. */

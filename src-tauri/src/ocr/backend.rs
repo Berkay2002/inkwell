@@ -262,18 +262,12 @@ impl TesseractCli {
         None
     }
 
-    fn lang_arg(languages: &[String]) -> String {
+    pub(crate) fn lang_arg(languages: &[String]) -> String {
         if languages.is_empty() {
             return "eng".into();
         }
-        let v: Vec<String> = languages
-            .iter()
-            .map(|l| {
-                let primary = l.split(['-', '_']).next().unwrap_or(l).to_ascii_lowercase();
-                ISO3.iter().find(|(a, _)| *a == primary).map(|(_, b)| b.to_string()).unwrap_or(primary)
-            })
-            .collect();
-        v.join("+")
+        // `sv` is `swe`; a data name (`chi_tra`, `srp_latn`) goes through unchanged.
+        languages.iter().map(|l| super::lang::tessdata_name(l)).collect::<Vec<_>>().join("+")
     }
 
     fn tessdata_dir(&self) -> Option<&Path> {
