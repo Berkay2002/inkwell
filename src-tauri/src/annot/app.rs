@@ -8,7 +8,7 @@ use serde::Serialize;
 type Result<T> = std::result::Result<T, EngineError>;
 type Eng<'a> = tauri::State<'a, std::sync::Arc<Engine>>;
 
-async fn blocking<R: Send + 'static>(f: impl FnOnce() -> Result<R> + Send + 'static) -> Result<R> {
+pub(crate) async fn blocking<R: Send + 'static>(f: impl FnOnce() -> Result<R> + Send + 'static) -> Result<R> {
     tauri::async_runtime::spawn_blocking(f).await.unwrap_or(Err(EngineError::Panic))
 }
 

@@ -185,7 +185,7 @@ fn default_color(kind: Kind) -> [f32; 3] {
     }
 }
 
-fn find(doc: &PdfDocument, page: u32, xref: i32) -> Result<(mupdf::pdf::PdfPage, PdfAnnotation)> {
+pub(crate) fn find(doc: &PdfDocument, page: u32, xref: i32) -> Result<(mupdf::pdf::PdfPage, PdfAnnotation)> {
     let p = doc.load_pdf_page(page as i32)?;
     let a = p
         .annotations()
@@ -227,7 +227,7 @@ fn is_comment(t: PdfAnnotationType) -> bool {
 
 // ---- reading -----------------------------------------------------------------------------------
 
-fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
+pub(crate) fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
     let o = a.object();
     let kind = kind_of(a)?;
     let r = a.rect()?;
@@ -311,7 +311,7 @@ pub fn os_user(var: impl Fn(&str) -> Option<String>) -> String {
     ["USERNAME", "USER"].iter().filter_map(|k| var(k)).map(|v| v.trim().to_owned()).find(|v| !v.is_empty()).unwrap_or_default()
 }
 
-fn meta(a: &mut PdfAnnotation, author: &str, created: bool) -> Result<()> {
+pub(crate) fn meta(a: &mut PdfAnnotation, author: &str, created: bool) -> Result<()> {
     if !author.is_empty() {
         a.set_author(author)?;
     }
