@@ -1,0 +1,170 @@
+//! Page boxes: setting TrimBox, BleedBox, ArtBox and CropBox, and reading the effective box of a kind.
+//! Boxes are in default user space, `[x0, y0, x1, y1]` with y up, as the file stores them.
+
+use super::{Result, bad};
+use crate::engine::edit::{EditSource, EditState};
+use crate::engine::{DocId, Engine};
+use mupdf::pdf::{PdfDocument, PdfObject};
+use serde::{Deserialize, Serialize};
+
+pub(crate) type Box4 = [f32; 4];
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BoxKind {
+    Media,
+    Crop,
+    Trim,
+    Bleed,
+    Art,
+}
+
+impl BoxKind {
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            BoxKind::Media => "MediaBox",
+            BoxKind::Crop => "CropBox",
+            BoxKind::Trim => "TrimBox",
+            BoxKind::Bleed => "BleedBox",
+            BoxKind::Art => "ArtBox",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            BoxKind::Media => "media box",
+            BoxKind::Crop => "crop box",
+            BoxKind::Trim => "trim box",
+            BoxKind::Bleed => "bleed box",
+            BoxKind::Art => "art box",
+        }
+    }
+}
+
+pub(crate) fn norm(b: Box4) -> Box4 {
+    [b[0].min(b[2]), b[1].min(b[3]), b[0].max(b[2]), b[1].max(b[3])]
+}
+
+fn read(o: &PdfObject) -> Result<Option<Box4>> {
+    if !o.is_array()? || o.len()? < 4 {
+        return Ok(None);
+    }
+    let mut b = [0f32; 4];
+    for (i, v) in b.iter_mut().enumerate() {
+        match o.get_array(i as i32)?.and_then(|n| n.as_float().ok()) {
+            Some(f) if f.is_finite() => *v = f,
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some(norm(b)))
+}
+
+/// The box as the page states it (MediaBox and CropBox are inherited down the page tree).
+pub(crate) fn stated(page: &PdfObject, kind: BoxKind) -> Result<Option<Box4>> {
+    let o = if matches!(kind, BoxKind::Media | BoxKind::Crop) { page.get_dict_inheritable(kind.key())? } else { page.get_dict(kind.key())? };
+    match o {
+        Some(o) => read(&o),
+        None => Ok(None),
+    }
+}
+
+/// The box that applies: the stated one, else the default the PDF specification gives (the crop box,
+/// which itself defaults to the media box).
+pub(crate) fn effective(page: &PdfObject, kind: BoxKind) -> Result<Box4> {
+    let media = stated(page, BoxKind::Media)?.unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let crop = stated(page, BoxKind::Crop)?.unwrap_or(media);
+    Ok(match kind {
+        BoxKind::Media => media,
+        BoxKind::Crop => crop,
+        _ => stated(page, kind)?.unwrap_or(crop),
+    })
+}
+
+pub(crate) fn write(doc: &PdfDocument, page: &mut PdfObject, kind: BoxKind, b: Box4) -> Result<()> {
+    let mut a = doc.new_array_with_capacity(4)?;
+    for v in b {
+        a.array_push(PdfObject::new_real(v)?)?;
+    }
+    page.dict_put(kind.key(), a)?;
+    Ok(())
+}
+
+pub(crate) fn contains(outer: Box4, inner: Box4) -> bool {
+    const TOL: f32 = 0.01;
+    inner[0] >= outer[0] - TOL && inner[1] >= outer[1] - TOL && inner[2] <= outer[2] + TOL && inner[3] <= outer[3] + TOL
+}
+
+pub(crate) fn union(a: Box4, b: Box4) -> Box4 {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+}
+
+/// Which box to set on which pages, and to what: an absolute `rect`, or the box `from` moved outward by
+/// `margin` (`[left, bottom, right, top]` in points; negative moves inward). A bleed box is typically
+/// the trim box with a margin of 9 points (3 mm is 8.5).
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BoxSpec {
+    /// 0-based; every page when absent.
+    pub pages: Option<Vec<u32>>,
+    pub kind: BoxKind,
+    pub rect: Option<[f32; 4]>,
+    pub from: Option<BoxKind>,
+    pub margin: Option<[f32; 4]>,
+}
+
+/// Sets a trim, bleed, art or crop box on pages, as one undo step. Refuses a result where the trim box
+/// is not inside the bleed box or the bleed box is not inside the media box.
+pub fn set_boxes(eng: &Engine, doc: DocId, spec: &BoxSpec, source: EditSource) -> Result<EditState> {
+    if spec.kind == BoxKind::Media {
+        return Err(bad("The media box is the paper size; it is changed by the page size tools"));
+    }
+    if spec.rect.is_none() && (spec.from.is_none() || spec.margin.is_none()) {
+        return Err(bad("Give the box as a rectangle, or as another box and a margin"));
+    }
+    let label = format!("Set {}", spec.kind.label());
+    eng.apply_custom(doc, label, source, false, |d| {
+        let count = d.page_count()?.max(0) as u32;
+        let pages: Vec<u32> = match &spec.pages {
+            Some(p) => {
+                if let Some(n) = p.iter().find(|&&n| n >= count) {
+                    return Err(crate::engine::EngineError::BadPage(*n));
+                }
+                p.clone()
+            }
+            None => (0..count).collect(),
+        };
+        for &p in &pages {
+            let mut page = d.find_page(p as i32)?;
+            let b = match (spec.rect, spec.from, spec.margin) {
+                (Some(r), _, _) => norm(r),
+                (None, Some(from), Some(m)) => {
+                    let f = effective(&page, from)?;
+                    norm([f[0] - m[0], f[1] - m[1], f[2] + m[2], f[3] + m[3]])
+                }
+                _ => unreachable!("checked above"),
+            };
+            if !b.iter().all(|v| v.is_finite()) || b[2] - b[0] < 1.0 || b[3] - b[1] < 1.0 {
+                return Err(bad(format!("Page {}: the {} would be empty", p + 1, spec.kind.label())));
+            }
+            let media = effective(&page, BoxKind::Media)?;
+            let (trim, bleed) = match spec.kind {
+                BoxKind::Trim => (b, effective(&page, BoxKind::Bleed)?),
+                BoxKind::Bleed => (effective(&page, BoxKind::Trim)?, b),
+                _ => (effective(&page, BoxKind::Trim)?, effective(&page, BoxKind::Bleed)?),
+            };
+            match spec.kind {
+                BoxKind::Bleed if !contains(media, b) => return Err(bad(format!("Page {}: the bleed box goes beyond the media box", p + 1))),
+                BoxKind::Trim | BoxKind::Bleed if !contains(bleed, trim) => {
+                    return Err(bad(format!("Page {}: the trim box must lie inside the bleed box", p + 1)));
+                }
+                BoxKind::Trim if !contains(media, b) => return Err(bad(format!("Page {}: the trim box goes beyond the media box", p + 1))),
+                BoxKind::Crop | BoxKind::Art if !contains(media, b) => {
+                    return Err(bad(format!("Page {}: the {} goes beyond the media box", p + 1, spec.kind.label())));
+                }
+                _ => {}
+            }
+            write(d, &mut page, spec.kind, b)?;
+        }
+        Ok(pages)
+    })
+}

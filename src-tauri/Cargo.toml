@@ -54,6 +54,11 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tiff = "0.11"
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# Form JavaScript (forms/js): QuickJS-ng with an interrupt handler and a heap cap (boa has neither, see docs/forms-js.md).
+# No `rust-alloc`/`allocator` (they turn set_memory_limit into a no-op) and no `parallel`. `std` stays on: without it a
+# panic in a host function is not caught at the C boundary and aborts the process (see the `a_panic_in_a_host_function` test).
+# Pinned: the interrupt and panic behaviour above is what was checked.
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 # Subsets the bundled fallback fonts (src-tauri/fonts) to the glyphs an edit uses.
 subsetter = { version = "0.2.6", default-features = false }
 

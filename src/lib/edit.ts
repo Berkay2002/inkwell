@@ -5,6 +5,7 @@ import * as api from "./api";
 import type { EditOp, EditState } from "./api";
 import { formatRange } from "./pageRange";
 import { useAnnot } from "./annot";
+import { useNav } from "./nav";
 import { useCombine } from "./combineStore";
 import { useRedact } from "./redact";
 import { dropCached } from "./tiles";
@@ -40,6 +41,8 @@ export function applyState(id: number, s: EditState) {
   if (revChanged && useRedact.getState().docs[id]) void useRedact.getState().refreshMarks(id);
   // ... and comments: undo, redo and restoring a version change them too.
   if (revChanged && useAnnot.getState().docs[id]) void useAnnot.getState().refresh(id);
+  // ... and bookmarks and links.
+  if (revChanged) useNav.getState().onRev(id);
   // Hits point at the old pages.
   if (revChanged && d.search.query) st().runSearch(id, d.search.query);
 }
@@ -139,6 +142,24 @@ export function editImage(id: number, rev: number, page: number, index: number |
     const r = await api.imageEdit(id, rev, page, index, change);
     applyState(id, r.state);
     return r.state;
+  });
+}
+
+/** Changes the bookmarks (src-tauri/src/outline). `rev`: the generation the tree was listed at. */
+export function editBookmarks(id: number, rev: number, op: api.BookmarkOp) {
+  return textResult(id, async () => {
+    const r = await api.bookmarksApply(id, rev, op);
+    applyState(id, r.state);
+    return r;
+  });
+}
+
+/** Changes the links (src-tauri/src/links). `rev`: the generation they were listed at. */
+export function editLinks(id: number, rev: number, op: api.LinkOp) {
+  return textResult(id, async () => {
+    const r = await api.linksApply(id, rev, op);
+    applyState(id, r.state);
+    return r;
   });
 }
 

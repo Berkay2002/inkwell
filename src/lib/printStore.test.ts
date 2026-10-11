@@ -20,6 +20,7 @@ vi.mock("./api", () => ({
   printPlan: vi.fn(),
   printPreview: vi.fn(),
   printStart: vi.fn(),
+  printSavePdf: vi.fn(),
   pickSave: vi.fn(),
   toolCancel: vi.fn(() => Promise.resolve()),
 }));
@@ -27,7 +28,7 @@ vi.mock("./api", () => ({
 import { useStore } from "../store";
 import * as api from "./api";
 import type { PaperInfo, PrinterCaps } from "./api";
-import { defaultOptions, loadRemembered, outcomeLine, pickPaper, toSettings, usePrint } from "./printStore";
+import { defaultOptions, loadRemembered, outcomeLine, paperList, pickPaper, toSettings, usePrint } from "./printStore";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 /** The sheet has planned and drawn its first preview. */
@@ -43,7 +44,7 @@ const caps = (over: Partial<PrinterCaps> = {}): PrinterCaps => ({
   maxCopies: 99,
   ...over,
 });
-const plan = { pages: 12, sheets: 3, papers: 6, sides: 6, faces: [{ width: 595, height: 842, pages: [1, 2] }], editRev: 0 };
+const plan = { pages: 12, sheets: 3, papers: 6, sides: 6, faces: [{ width: 595, height: 842, pages: [1, 2], tile: null }], editRev: 0 };
 const png = new Uint8Array([137, 80, 78, 71]).buffer;
 
 beforeEach(() => {
@@ -79,6 +80,7 @@ describe("toSettings", () => {
       kind: "booklet",
       sides: "frontOnly",
       binding: "right",
+      creep: 0,
     });
     expect(toSettings({ ...defaultOptions(), sizeMode: "custom", percent: 75 }, caps(), 0).layout).toEqual({ kind: "size", mode: "custom", percent: 75 });
   });
@@ -95,6 +97,21 @@ describe("toSettings", () => {
     expect(toSettings({ ...o, sides: "frontOnly" }, caps(), 0).duplex).toBe("off");
     expect(toSettings({ ...o, sides: "backOnly" }, caps(), 0).duplex).toBe("off");
     expect(toSettings({ ...defaultOptions(), duplex: "longEdge", sides: "frontOnly" }, caps(), 0).duplex).toBe("longEdge");
+  });
+
+  it("poster: tile scale in percent, overlap and creep in millimetres go out as points", () => {
+    const o = { ...defaultOptions(), printer: "P", mode: "poster" as const, tileScale: 200, overlapMm: 6, cutMarks: true, labels: true };
+    const l = toSettings(o, caps(), 0).layout;
+    expect(l).toMatchObject({ kind: "poster", scale: 200, cutMarks: true, labels: true });
+    expect((l as { overlap: number }).overlap).toBeCloseTo((6 / 25.4) * 72);
+    // typed values past the engine's limits are held at them, so the plan never errors on a keystroke
+    const big = toSettings({ ...o, tileScale: 99999, overlapMm: 80 }, caps(), 0).layout as { scale: number; overlap: number };
+    expect(big.scale).toBe(10000);
+    expect(big.overlap).toBeCloseTo((50 / 25.4) * 72);
+    const b = toSettings({ ...defaultOptions(), mode: "booklet", creepMm: 0.4 }, caps(), 0).layout as { creep: number };
+    expect(b.creep).toBeCloseTo((0.4 / 25.4) * 72);
+    expect((toSettings({ ...defaultOptions(), mode: "booklet", creepMm: 9 }, caps(), 0).layout as { creep: number }).creep).toBeCloseTo((3 / 25.4) * 72);
+    expect((toSettings({ ...defaultOptions(), mode: "booklet" }, caps(), 0).layout as { creep: number }).creep).toBe(0);
   });
 
   it("falls back to A4 when the printer's capabilities are unknown", () => {
@@ -115,6 +132,18 @@ describe("outcomeLine", () => {
   });
   it("leaves out both sides when the printer cannot, and names grayscale", () => {
     expect(outcomeLine(plan, { ...o, duplex: "longEdge", grayscale: true }, { ...a4caps, duplex: false })).toBe("6 sheets of A4, grayscale");
+  });
+  it("predicts a poster's tile grid and a booklet's pages and creep", () => {
+    const tile = { col: 0, row: 0, cols: 3, rows: 4 };
+    const faces = Array.from({ length: 12 }, () => ({ width: 595, height: 842, pages: [1], tile }));
+    expect(outcomeLine({ ...plan, papers: 12, faces }, { ...o, mode: "poster" }, a4caps)).toBe("12 sheets of A4, 3 × 4 tiles per page");
+    // pages with different grids say nothing about one
+    const mixed = [...faces.slice(0, 2), { ...faces[0], tile: { ...tile, cols: 2 } }];
+    expect(outcomeLine({ ...plan, papers: 3, faces: mixed }, { ...o, mode: "poster" }, a4caps)).toBe("3 sheets of A4");
+    const book = { ...o, mode: "booklet" as const, creepMm: 0.4 };
+    expect(outcomeLine({ ...plan, pages: 18, papers: 10 }, book, a4caps)).toBe("10 sheets of A4, 20 pages, 2 blank, creep up to 0.4 mm at the centre");
+    // one sheet of paper has nothing inside it to creep
+    expect(outcomeLine({ ...plan, pages: 4, papers: 2 }, book, a4caps)).toBe("2 sheets of A4, 4 pages");
   });
   it("is empty until there is a plan", () => {
     expect(outcomeLine(null, o, a4caps)).toBe("");
@@ -145,6 +174,18 @@ describe("remembered options", () => {
     expect(loadRemembered()).toMatchObject({ grayscale: true, content: "document" });
     expect(loadRemembered()).not.toHaveProperty("range");
     expect(loadRemembered()).not.toHaveProperty("copies");
+    usePrint.getState().close();
+  });
+
+  it("remembers the poster and creep choices", async () => {
+    vi.mocked(api.printPrinters).mockResolvedValue({ printers: [{ name: "P", isDefault: true, toFile: false }], fileDirSet: false });
+    vi.mocked(api.printCapabilities).mockResolvedValue(caps());
+    vi.mocked(api.printPlan).mockResolvedValue(plan);
+    vi.mocked(api.printPreview).mockResolvedValue(png);
+    usePrint.getState().open();
+    await flush();
+    usePrint.getState().set({ mode: "poster", tileScale: 300, overlapMm: 10, cutMarks: true, labels: true, creepMm: 1.5 });
+    expect(loadRemembered()).toMatchObject({ mode: "poster", tileScale: 300, overlapMm: 10, cutMarks: true, labels: true, creepMm: 1.5 });
     usePrint.getState().close();
   });
 
@@ -249,6 +290,86 @@ describe("sheet", () => {
     expect(usePrint.getState().sheet?.phase).toBe("error");
     usePrint.getState().back();
     expect(usePrint.getState().sheet?.phase).toBe("options");
+    usePrint.getState().close();
+  });
+});
+
+describe("save as PDF", () => {
+  const withPrinters = (printers: { name: string; isDefault: boolean; toFile: boolean }[]) => {
+    vi.mocked(api.printPrinters).mockResolvedValue({ printers, fileDirSet: false });
+    vi.mocked(api.printCapabilities).mockResolvedValue(printers.length ? caps() : null);
+    vi.mocked(api.printPlan).mockResolvedValue(plan);
+    vi.mocked(api.printPreview).mockResolvedValue(png);
+  };
+
+  it("opens, plans and previews with no printer installed, on a standard paper", async () => {
+    withPrinters([]);
+    usePrint.getState().open();
+    await ready();
+    const s = usePrint.getState().sheet!;
+    expect(s.printers).toEqual([]);
+    expect(s.options.printer).toBeNull();
+    expect(s.options.paperId).toBe(9);
+    expect(paperList(null, null).map((p) => p.id)).toContain(1);
+    expect(api.printCapabilities).not.toHaveBeenCalled();
+    expect(vi.mocked(api.printPlan).mock.calls[0][1].paper).toMatchObject({ width: 595.28, height: 841.89 });
+    usePrint.getState().close();
+  });
+
+  it("a driver that does not answer is not the same as no printer: no paper list is invented", () => {
+    expect(paperList(null, "Broken")).toEqual([]);
+    expect(paperList(caps({ papers: [LETTER] }), "P")).toEqual([LETTER]);
+  });
+
+  it("asks where, writes the plan, and offers the file in a new tab", async () => {
+    withPrinters([]);
+    vi.mocked(api.pickSave).mockResolvedValue({ token: "tok-pdf", path: "C:\\o\\a-poster.pdf" });
+    vi.mocked(api.printSavePdf).mockImplementation(async (_j, _d, _s, _t, onProgress) => {
+      onProgress({ done: 3, total: 9 });
+      return { file: { token: "open-tok", path: "C:\\o\\a-poster.pdf" }, pages: 1, sheets: 9 };
+    });
+    usePrint.getState().open();
+    await ready();
+    usePrint.getState().set({ mode: "poster", tileScale: 200 });
+    await vi.waitFor(() => expect(vi.mocked(api.printPlan).mock.calls[vi.mocked(api.printPlan).mock.calls.length - 1]?.[1].layout.kind).toBe("poster"));
+    await usePrint.getState().savePdf();
+    expect(api.pickSave).toHaveBeenCalledWith("a-poster.pdf", { doc: 1 }, "pdf");
+    expect(api.printSavePdf).toHaveBeenCalledWith(expect.any(Number), 1, expect.objectContaining({ layout: expect.objectContaining({ kind: "poster", scale: 200 }) }), "tok-pdf", expect.any(Function));
+    expect(api.printStart).not.toHaveBeenCalled();
+    expect(usePrint.getState().sheet).toMatchObject({ phase: "done", job: "pdf", saved: { sheets: 9 } });
+    const openPath = vi.fn(() => Promise.resolve());
+    useStore.setState({ openPath } as never);
+    await usePrint.getState().openSaved();
+    expect(openPath).toHaveBeenCalledWith("C:\\o\\a-poster.pdf", "open-tok");
+    expect(usePrint.getState().sheet).toBeNull();
+  });
+
+  it("stays on the options when the save dialog is dismissed, and on a cancelled job", async () => {
+    withPrinters([{ name: "P", isDefault: true, toFile: false }]);
+    usePrint.getState().open();
+    await ready();
+    vi.mocked(api.pickSave).mockResolvedValueOnce(null);
+    await usePrint.getState().savePdf();
+    expect(api.printSavePdf).not.toHaveBeenCalled();
+    expect(usePrint.getState().sheet?.phase).toBe("options");
+    vi.mocked(api.pickSave).mockResolvedValueOnce({ token: "t", path: "C:\\o\\x.pdf" });
+    vi.mocked(api.printSavePdf).mockRejectedValueOnce("cancelled");
+    await usePrint.getState().savePdf();
+    expect(usePrint.getState().sheet?.phase).toBe("options");
+    vi.mocked(api.pickSave).mockResolvedValueOnce({ token: "t", path: "C:\\o\\x.pdf" });
+    vi.mocked(api.printSavePdf).mockRejectedValueOnce("that file is open in Inkwell; close it first");
+    await usePrint.getState().savePdf();
+    expect(usePrint.getState().sheet).toMatchObject({ phase: "error", job: "pdf" });
+    usePrint.getState().close();
+  });
+
+  it("does nothing while the options make no plan", async () => {
+    withPrinters([]);
+    vi.mocked(api.printPlan).mockRejectedValue("no pages in that range");
+    usePrint.getState().open();
+    await vi.waitFor(() => expect(usePrint.getState().sheet?.planError).toBeTruthy());
+    await usePrint.getState().savePdf();
+    expect(api.pickSave).not.toHaveBeenCalled();
     usePrint.getState().close();
   });
 });
