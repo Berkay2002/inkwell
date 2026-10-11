@@ -760,7 +760,11 @@ fn index_file(sh: &Shared, job: &Job) -> Option<FileRec> {
     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Probe {
         let opened = match &bytes {
             Some(b) => PdfDocument::from_bytes(b),
-            None => PdfDocument::open(&*job.path),
+            // `Path` is not a MuPDF `FilePath` on Windows: open by its UTF-8 name.
+            None => match job.path.to_str() {
+                Some(p) => PdfDocument::open(p),
+                None => return Probe::Bad(Status::Damaged),
+            },
         };
         let Ok(doc) = opened else { return Probe::Bad(Status::Damaged) };
         if doc.needs_password().unwrap_or(true) {
