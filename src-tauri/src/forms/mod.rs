@@ -530,6 +530,7 @@ pub fn list(doc: &PdfDocument) -> Result<FormDto> {
 /// [`list`] with the format scripts of the fields run by `rt`.
 fn list_with(rt: &Rt) -> Result<FormDto> {
     let entries = rt.entries()?;
+    rt.remember_has_scripts(entries);
     let snapshot = rt.js_on().then(|| scripts::field_states(entries));
     let fields = entries.iter().map(|e| dto_of(rt, snapshot.as_deref(), e)).collect();
     Ok(FormDto { fields, calc_order: calc_order_of(rt.doc(), entries), xfa: rt.doc().has_xfa_form().unwrap_or(false) })
@@ -897,18 +898,32 @@ pub fn list_all(eng: &Engine, doc: DocId) -> Result<FormDto> {
 pub struct ScriptsState {
     pub has_scripts: bool,
     pub enabled: bool,
+    /// They can run now (not taken down by timeouts or a worker that stopped answering).
+    pub usable: bool,
+    /// They may be turned on again (not after the worker stopped answering: it is left abandoned for the session).
+    pub can_enable: bool,
     pub log: Vec<js::LogLine>,
 }
 
+/// The scripts of a document as the banner shows them. Does not wait for the edit lane once a listing has been
+/// made (a long step or listing holds the lane); the first call reads the document.
 pub fn scripts_state(eng: &Engine, doc: DocId) -> Result<ScriptsState> {
     let (scripts, _) = eng.doc_scripts(doc)?;
-    let has_scripts = eng.read_custom(doc, |d| Ok(scripts::has_scripts(d, &scan(d)?)))?;
-    Ok(ScriptsState { has_scripts, enabled: scripts.enabled(), log: scripts.log() })
+    let has_scripts = match scripts.has_scripts() {
+        Some(h) => h,
+        None => {
+            let h = eng.read_custom(doc, |d| Ok(scripts::has_scripts_with(None, d, &scan(d)?)))?;
+            scripts.set_has_scripts(h);
+            h
+        }
+    };
+    Ok(ScriptsState { has_scripts, enabled: scripts.enabled(), usable: scripts.usable(), can_enable: scripts.can_enable(), log: scripts.log() })
 }
 
 /// Turns the scripts of one open document on or off (kept in memory, not in the file).
 pub fn scripts_enable(eng: &Engine, doc: DocId, on: bool) -> Result<ScriptsState> {
     let (scripts, _) = eng.doc_scripts(doc)?;
+    // Refused after a worker stopped answering; the state says so and the log has the reason.
     scripts.set_enabled(on);
     scripts_state(eng, doc)
 }

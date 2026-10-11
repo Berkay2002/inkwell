@@ -8,6 +8,17 @@
   delete g.__h;
   // Test builds only: a host call that cannot be interrupted.
   if (H.sleep) g.__sleep = H.sleep;
+  if (H.boom) g.__boom = H.boom;
+  // `Atomics.wait` blocks the thread where no interrupt reaches, and nothing could wake it: no waiting at all.
+  if (g.Atomics) {
+    for (const k of ['wait', 'waitAsync']) {
+      try {
+        delete g.Atomics[k];
+      } catch (e) {
+        /* stays */
+      }
+    }
+  }
   const Str = String;
   const J = JSON.stringify.bind(JSON);
   const P = JSON.parse.bind(JSON);

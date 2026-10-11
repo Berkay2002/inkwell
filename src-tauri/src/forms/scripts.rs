@@ -8,8 +8,8 @@
 use super::af::{self, Calculate, Format, Validate};
 use super::author::{color_array, ensure_dict, set_flag};
 use super::js::{
-    Alert, DocInfo, DocScripts, Event, FieldState, FieldType, Job, LogLevel, Outcome, Request, Scripts, CALC_TIME, CASCADE_TIME, DISPLAY_HIDDEN, DISPLAY_NO_PRINT, DISPLAY_NO_VIEW,
-    DISPLAY_VISIBLE, EVENT_TIME, MAX_DOC_SCRIPT_BYTES,
+    Alert, DocInfo, DocScripts, Event, FieldChange, FieldState, FieldType, Job, LogLevel, Outcome, Prop, Request, Scripts, CALC_TIME, CASCADE_TIME, DISPLAY_HIDDEN, DISPLAY_NO_PRINT, DISPLAY_NO_VIEW,
+    DISPLAY_VISIBLE, EVENT_TIME, JS_BUDGET, MAX_ALERTS_PER_STEP, MAX_DOC_SCRIPT_BYTES,
 };
 use super::{
     Entry, FieldKind, FieldValue, Result, aa_js, da_of, field_ff, flag, get, geti, int_of, names_to_values, nums, on_state, options_of, parse_da, per_field, put_int, put_nums, put_str,
@@ -17,7 +17,7 @@ use super::{
 };
 use mupdf::pdf::{FieldFlags, PdfDocument, PdfObject};
 use serde::Serialize;
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::time::{Duration, Instant};
 
 /// What the scripts of a step raised, for the UI.
@@ -45,6 +45,11 @@ pub(crate) enum Plan<T> {
     Js(String),
 }
 
+/// The requests of one step that reach the UI.
+const MAX_REQUESTS_PER_STEP: usize = 64;
+/// A script slice shorter than this is not worth starting: the budget counts as used up.
+const MIN_SLICE: Duration = Duration::from_millis(10);
+
 pub(crate) struct Rt<'a> {
     doc: &'a PdfDocument,
     scripts: Option<&'a Scripts>,
@@ -53,6 +58,14 @@ pub(crate) struct Rt<'a> {
     entries: OnceCell<Vec<Entry>>,
     info: OnceCell<DocInfo>,
     pub report: RefCell<Report>,
+    /// Script time this step has used, and whether that used up [`JS_BUDGET`] (the rest of the step is native only).
+    spent: Cell<Duration>,
+    over: Cell<bool>,
+    /// Alerts held back past [`MAX_ALERTS_PER_STEP`], and how many the last script's run added to the report.
+    suppressed: Cell<usize>,
+    last_added: Cell<usize>,
+    /// What a keystroke script changed and is not written yet: the validate script that follows sees it.
+    pending: RefCell<Vec<FieldChange>>,
 }
 
 fn kind_type(k: FieldKind) -> FieldType {
@@ -203,7 +216,27 @@ impl<'a> Rt<'a> {
     pub(crate) fn new(doc: &'a PdfDocument, scripts: Option<&'a Scripts>, file_name: &str) -> Rt<'a> {
         let scripts = scripts.filter(|s| s.usable());
         let doc_js = scripts.map(|s| s.doc_scripts(|| load_doc_js(doc)));
-        Rt { doc, scripts, doc_js, file_name: file_name.to_string(), entries: OnceCell::new(), info: OnceCell::new(), report: RefCell::new(Report::default()) }
+        Rt {
+            doc,
+            scripts,
+            doc_js,
+            file_name: file_name.to_string(),
+            entries: OnceCell::new(),
+            info: OnceCell::new(),
+            report: RefCell::new(Report::default()),
+            spent: Cell::new(Duration::ZERO),
+            over: Cell::new(false),
+            suppressed: Cell::new(0),
+            last_added: Cell::new(0),
+            pending: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Whether the document has scripts the engine runs, for the banner (read with the listing, kept by the scripts).
+    pub(crate) fn remember_has_scripts(&self, entries: &[Entry]) {
+        if let Some(s) = self.scripts {
+            s.set_has_scripts(has_scripts_with(self.doc_js.as_deref(), self.doc, entries));
+        }
     }
 
     /// Native code only.
@@ -220,6 +253,11 @@ impl<'a> Rt<'a> {
             let _ = self.entries.set(super::scan(self.doc)?);
         }
         Ok(self.entries.get().map(Vec::as_slice).unwrap_or_default())
+    }
+
+    /// This step has used its script time: scripts are skipped for the rest of it.
+    pub(crate) fn budget_gone(&self) -> bool {
+        self.over.get()
     }
 
     /// Scripts may run now.
@@ -308,23 +346,57 @@ impl<'a> Rt<'a> {
     }
 
     /// Runs one event script of `e`. `fields` is what the script sees; `None` takes a snapshot now.
+    ///
+    /// The snapshot of a keystroke or validate takes the event's value as the field's own: the entry is not
+    /// stored yet, and `event.target.value` is what was typed.
     pub(crate) fn run(&self, fields: Option<&[FieldState]>, e: &Entry, event: Event, script: String, timeout: Duration) -> Outcome {
         let skipped = Outcome { rc: true, value: event.value.clone(), change: event.change.clone(), skipped: true, ..Default::default() };
         let Some(scripts) = self.scripts.filter(|s| s.usable()) else { return skipped };
+        // The step's script time is used up: the rest of it runs natively only.
+        let left = JS_BUDGET.saturating_sub(self.spent.get());
+        if self.over.get() || left < MIN_SLICE {
+            self.exhaust(scripts);
+            return skipped;
+        }
         let owned;
         let fields = match fields {
             Some(f) => f,
             None => {
                 let Ok(entries) = self.entries() else { return skipped };
-                owned = field_states(entries);
+                let mut states = field_states(entries);
+                lay_over(&mut states, &self.pending.borrow());
+                if matches!(event.name, "Keystroke" | "Validate") {
+                    if let Some(f) = states.iter_mut().find(|f| f.name == e.name && matches!(f.kind, FieldType::Text | FieldType::ComboBox)) {
+                        f.value = if event.value.is_empty() { Vec::new() } else { vec![event.value.clone()] };
+                    }
+                }
+                owned = states;
                 &owned
             }
         };
-        let out = scripts.run(Job { key: e.name.clone(), event, script, fields: fields.to_vec(), doc: self.info().clone(), timeout });
+        let started = Instant::now();
+        let out = scripts.run(Job { key: e.name.clone(), event, script, fields: fields.to_vec(), doc: self.info().clone(), timeout: timeout.min(left) });
+        self.spent.set(self.spent.get() + started.elapsed());
+        if self.spent.get() >= JS_BUDGET {
+            self.exhaust(scripts);
+        }
         let mut rep = self.report.borrow_mut();
-        rep.alerts.extend(out.alerts.iter().cloned());
-        rep.requests.extend(out.requests.iter().cloned());
+        // A script that raises alerts in a loop shows a few of them; the rest are counted in the log.
+        let room = MAX_ALERTS_PER_STEP.saturating_sub(rep.alerts.len());
+        let added = out.alerts.len().min(room);
+        rep.alerts.extend(out.alerts.iter().take(added).cloned());
+        self.suppressed.set(self.suppressed.get() + out.alerts.len() - added);
+        self.last_added.set(added);
+        let room = MAX_REQUESTS_PER_STEP.saturating_sub(rep.requests.len());
+        rep.requests.extend(out.requests.iter().take(room).cloned());
         out
+    }
+
+    /// The step has used up its script time: native only from here, and a strike toward taking the scripts down.
+    fn exhaust(&self, scripts: &Scripts) {
+        if !self.over.replace(true) {
+            scripts.over_budget();
+        }
     }
 
     /// What the field shows for the stored value `raw`.
@@ -344,19 +416,21 @@ impl<'a> Rt<'a> {
 
     /// The Keystroke event on commit: the value to store and the fields the script changed, or the
     /// message that rejects the entry.
-    pub(crate) fn keystroke(&self, e: &Entry, value: &str) -> std::result::Result<(String, Vec<FieldState>), String> {
+    pub(crate) fn keystroke(&self, e: &Entry, value: &str) -> std::result::Result<(String, Vec<FieldChange>), String> {
         match self.key_plan(e) {
             Plan::None => Ok((value.to_string(), Vec::new())),
             Plan::Fast(f) => af::keystroke(&f, &e.name, value).map(|v| (v, Vec::new())),
             Plan::Js(src) => {
                 let out = self.run(None, e, Event::new("Keystroke", &e.name, value), src, EVENT_TIME);
-                self.verdict(out, value, format!("The value entered does not match the format of the field [ {} ]", e.name))
+                let (kept, changed) = self.verdict(out, value, format!("The value entered does not match the format of the field [ {} ]", e.name))?;
+                self.pending.borrow_mut().extend(changed.iter().cloned());
+                Ok((kept, changed))
             }
         }
     }
 
     /// The Validate event: the fields the script changed, or the message that rejects the value.
-    pub(crate) fn validate(&self, e: &Entry, value: &str) -> std::result::Result<Vec<FieldState>, String> {
+    pub(crate) fn validate(&self, e: &Entry, value: &str) -> std::result::Result<Vec<FieldChange>, String> {
         match self.validate_plan(e) {
             Plan::None => Ok(Vec::new()),
             Plan::Fast(v) => af::validate(&v, value).map(|()| Vec::new()),
@@ -369,19 +443,38 @@ impl<'a> Rt<'a> {
 
     /// A key or validate script's result: `event.rc` false rejects with the alert text (or `default`);
     /// a failed or skipped script changes nothing.
-    fn verdict(&self, out: Outcome, value: &str, default: String) -> std::result::Result<(String, Vec<FieldState>), String> {
+    fn verdict(&self, out: Outcome, value: &str, default: String) -> std::result::Result<(String, Vec<FieldChange>), String> {
         if out.skipped || out.error.is_some() {
             return Ok((value.to_string(), Vec::new()));
         }
         if !out.rc {
             // The alert is the reason: the UI shows it as the error, not a second time as an alert.
             let mut rep = self.report.borrow_mut();
-            let keep = rep.alerts.len().saturating_sub(out.alerts.len());
-            let why: Vec<String> = rep.alerts.drain(keep..).map(|a| a.message).collect();
+            let keep = rep.alerts.len().saturating_sub(self.last_added.get());
+            rep.alerts.truncate(keep);
+            let why: Vec<String> = out.alerts.into_iter().map(|a| a.message).collect();
             let msg = why.join("\n");
             return Err(if msg.is_empty() { default } else { msg });
         }
         Ok((out.value, out.changed))
+    }
+}
+
+/// Lays what earlier scripts of the step set (and the document does not hold yet) over a snapshot, property by property.
+fn lay_over(states: &mut [FieldState], changes: &[FieldChange]) {
+    for c in changes {
+        let Some(s) = states.iter_mut().find(|s| s.name == c.state.name) else { continue };
+        for p in &c.props {
+            match p {
+                Prop::Value => s.value = c.state.value.clone(),
+                Prop::ReadOnly => s.readonly = c.state.readonly,
+                Prop::Required => s.required = c.state.required,
+                Prop::Display => s.display = c.state.display,
+                Prop::TextColor => s.text_color = c.state.text_color.clone(),
+                Prop::FillColor => s.fill_color = c.state.fill_color.clone(),
+                Prop::StrokeColor => s.stroke_color = c.state.stroke_color.clone(),
+            }
+        }
     }
 }
 
@@ -401,33 +494,110 @@ fn put_mk_colour(doc: &PdfDocument, widget: &mut PdfObject, key: &str, c: &Optio
     Ok(())
 }
 
-/// Applies the fields a script changed (`changed`, as the script left them) to the document: the value
-/// (without running its keystroke or validate, as in Acrobat), read-only, required, visibility and colours.
-/// Returns the pages touched.
-pub(crate) fn apply_changes(rt: &Rt, changed: &[FieldState]) -> Result<Vec<u32>> {
+/// What a signed document keeps scripts from changing: every field, or those a signature's `/Lock` names.
+enum Lock {
+    All,
+    Include(Vec<String>),
+    Exclude(Vec<String>),
+}
+
+/// The names in a `/Lock /Fields` array.
+fn lock_names(lock: &PdfObject) -> Vec<String> {
+    let Some(a) = get(lock, "Fields") else { return Vec::new() };
+    (0..a.len().unwrap_or(0).min(4096) as i32).filter_map(|i| a.get_array(i).ok().flatten().as_ref().and_then(text)).collect()
+}
+
+/// What a signature's `/Lock` dictionary covers.
+fn lock_of(l: &PdfObject) -> Lock {
+    match get(l, "Action").as_ref().and_then(text).as_deref() {
+        Some("Include") => Lock::Include(lock_names(l)),
+        Some("Exclude") => Lock::Exclude(lock_names(l)),
+        _ => Lock::All,
+    }
+}
+
+/// What the `/Reference` entries of a signature value lock: a FieldMDP method names its fields like `/Lock` does, a
+/// DocMDP with `/P 1` allows no change at all. An approval signature with neither locks nothing.
+fn reference_lock(v: &PdfObject) -> Option<Lock> {
+    let refs = get(v, "Reference")?;
+    for i in 0..refs.len().unwrap_or(0).min(16) as i32 {
+        let Some(r) = refs.get_array(i).ok().flatten() else { continue };
+        let Some(params) = get(&r, "TransformParams") else { continue };
+        match get(&r, "TransformMethod").as_ref().and_then(text).as_deref() {
+            Some("FieldMDP") => return Some(lock_of(&params)),
+            Some("DocMDP") if int_of(&params, "P") == Some(1) => return Some(Lock::All),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The locks of the signatures that carry a signature (`/V`): the field's `/Lock`, else what its `/Reference` says.
+/// A signature that names neither (a plain approval signature) leaves the form to be filled, as the specification has it.
+fn locks_of(entries: &[Entry]) -> Vec<Lock> {
+    per_field(entries)
+        .into_iter()
+        .filter(|e| e.kind == FieldKind::Signature)
+        .filter_map(|e| {
+            let v = geti(&e.field, "V").filter(|v| v.is_dict().unwrap_or(false))?;
+            match get(&e.field, "Lock").or_else(|| get(&e.obj, "Lock")) {
+                Some(l) => Some(lock_of(&l)),
+                None => reference_lock(&v),
+            }
+        })
+        .collect()
+}
+
+/// A script may not write to a signature widget, nor to a field a signature in the document covers.
+fn locked(locks: &[Lock], e: &Entry) -> bool {
+    let named = |names: &[String]| names.iter().any(|n| e.name == *n || e.name.starts_with(&format!("{n}.")));
+    e.kind == FieldKind::Signature
+        || locks.iter().any(|l| match l {
+            Lock::All => true,
+            Lock::Include(n) => named(n),
+            Lock::Exclude(n) => !named(n),
+        })
+}
+
+/// Applies what scripts wrote to fields to the document: the value (without running its keystroke or
+/// validate, as in Acrobat), read-only, required, visibility and colours. Only the properties a script set
+/// are written (a snapshot taken before the typed value was stored must not undo it), and nothing is written
+/// to a signature or to a field a signature in the document covers. Returns the pages touched.
+pub(crate) fn apply_changes(rt: &Rt, changed: &[FieldChange]) -> Result<Vec<u32>> {
+    rt.pending.borrow_mut().clear();
     let doc = rt.doc();
     let entries = rt.entries()?;
+    let locks = locks_of(entries);
     let mut pages = Vec::new();
-    for new in changed {
+    for ch in changed {
+        let (new, props) = (&ch.state, &ch.props);
         let Some(e) = entries.iter().find(|e| e.name == new.name) else { continue };
-        let cur = field_state(entries, e);
-        if cur == *new {
+        if locked(&locks, e) {
+            rt.note(LogLevel::Warn, Some(&new.name), format!("a script's change to [ {} ] was not written: the document is signed", new.name));
             continue;
         }
+        let cur = field_state(entries, e);
         let widgets: Vec<&Entry> = entries.iter().filter(|w| w.node == e.node).collect();
-        pages.extend(widgets.iter().map(|w| w.page));
+        let mut touched = false;
         let mut redraw = false;
-        if cur.value != new.value && !matches!(e.kind, FieldKind::Button | FieldKind::Signature) {
+        if props.contains(&Prop::Value) && cur.value != new.value && !matches!(e.kind, FieldKind::Button | FieldKind::Signature) {
             pages.extend(write_values(rt, e, &new.value)?);
+            touched = true;
         }
-        if cur.readonly != new.readonly || cur.required != new.required {
+        let (ro, req) = (props.contains(&Prop::ReadOnly), props.contains(&Prop::Required));
+        if (ro && cur.readonly != new.readonly) || (req && cur.required != new.required) {
             let mut ff = field_ff(e);
-            set_flag(&mut ff, FieldFlags::READ_ONLY, new.readonly);
-            set_flag(&mut ff, FieldFlags::REQUIRED, new.required);
+            if ro {
+                set_flag(&mut ff, FieldFlags::READ_ONLY, new.readonly);
+            }
+            if req {
+                set_flag(&mut ff, FieldFlags::REQUIRED, new.required);
+            }
             let mut field = e.field.clone();
             put_int(&mut field, "Ff", ff)?;
+            touched = true;
         }
-        if cur.display != new.display {
+        if props.contains(&Prop::Display) && cur.display != new.display {
             for w in &widgets {
                 let f = int_of(&w.obj, "F").unwrap_or(4);
                 let f = match new.display {
@@ -439,20 +609,24 @@ pub(crate) fn apply_changes(rt: &Rt, changed: &[FieldState]) -> Result<Vec<u32>>
                 let mut o = w.obj.clone();
                 put_int(&mut o, "F", f)?;
             }
+            touched = true;
         }
-        if cur.fill_color != new.fill_color || cur.stroke_color != new.stroke_color {
+        let fill = props.contains(&Prop::FillColor) && cur.fill_color != new.fill_color;
+        let stroke = props.contains(&Prop::StrokeColor) && cur.stroke_color != new.stroke_color;
+        if fill || stroke {
             for w in &widgets {
                 let mut o = w.obj.clone();
-                if cur.fill_color != new.fill_color {
+                if fill {
                     put_mk_colour(doc, &mut o, "BG", &new.fill_color)?;
                 }
-                if cur.stroke_color != new.stroke_color {
+                if stroke {
                     put_mk_colour(doc, &mut o, "BC", &new.stroke_color)?;
                 }
             }
             redraw = true;
+            touched = true;
         }
-        if cur.text_color != new.text_color {
+        if props.contains(&Prop::TextColor) && cur.text_color != new.text_color {
             if let Some(parts) = &new.text_color {
                 let v = parts_f32(parts);
                 let ops = match (parts.first().map(String::as_str), v.len()) {
@@ -468,6 +642,7 @@ pub(crate) fn apply_changes(rt: &Rt, changed: &[FieldState]) -> Result<Vec<u32>>
                         put_str(&mut o, "DA", &format!("/{font} {size} Tf {ops}"))?;
                     }
                     redraw = true;
+                    touched = true;
                 }
             }
         }
@@ -475,6 +650,9 @@ pub(crate) fn apply_changes(rt: &Rt, changed: &[FieldState]) -> Result<Vec<u32>>
             for w in &widgets {
                 refresh_with(rt, w)?;
             }
+        }
+        if touched {
+            pages.extend(widgets.iter().map(|w| w.page));
         }
     }
     Ok(pages)
@@ -503,6 +681,7 @@ pub(crate) fn cascade(rt: &Rt) -> Result<Vec<u32>> {
     calc.sort_by_key(|(e, _)| order.iter().position(|x| *x == e.node).unwrap_or(usize::MAX));
     let started = Instant::now();
     let mut values = names_to_values(entries);
+    let locks = locks_of(entries);
     let mut pages = Vec::new();
     'passes: for _ in 0..MAX_PASSES {
         let mut changed_any = false;
@@ -526,6 +705,9 @@ pub(crate) fn cascade(rt: &Rt) -> Result<Vec<u32>> {
                         rt.note(LogLevel::Error, None, format!("the calculations ran longer than {} s and were stopped", CASCADE_TIME.as_secs()));
                         break 'passes;
                     }
+                    if rt.budget_gone() {
+                        continue;
+                    }
                     let states = field_states(entries);
                     let out = rt.run(Some(&states), e, Event::new("Calculate", &e.name, &current), src.clone(), CALC_TIME.min(left));
                     if out.skipped || out.error.is_some() {
@@ -533,9 +715,12 @@ pub(crate) fn cascade(rt: &Rt) -> Result<Vec<u32>> {
                     }
                     // What the script did to other fields counts as a change.
                     if !out.changed.is_empty() {
-                        pages.extend(apply_changes(rt, &out.changed)?);
-                        values = names_to_values(entries);
-                        changed_any = true;
+                        let written = apply_changes(rt, &out.changed)?;
+                        if !written.is_empty() {
+                            pages.extend(written);
+                            values = names_to_values(entries);
+                            changed_any = true;
+                        }
                     }
                     if !out.rc {
                         continue;
@@ -544,6 +729,10 @@ pub(crate) fn cascade(rt: &Rt) -> Result<Vec<u32>> {
                 }
             };
             if new == current {
+                continue;
+            }
+            if locked(&locks, e) {
+                rt.note(LogLevel::Warn, Some(&e.name), format!("the result of [ {} ] was not written: the document is signed", e.name));
                 continue;
             }
             pages.extend(write_values(rt, e, std::slice::from_ref(&new))?);
@@ -557,9 +746,14 @@ pub(crate) fn cascade(rt: &Rt) -> Result<Vec<u32>> {
     Ok(pages)
 }
 
-/// Whether the document has scripts at all (document-level, or on any field), for the banner.
-pub(crate) fn has_scripts(doc: &PdfDocument, entries: &[Entry]) -> bool {
-    !load_doc_js(doc).scripts.is_empty() || entries.iter().any(|e| ["K", "F", "V", "C"].into_iter().any(|k| aa_js(e, k).is_some_and(|js| !is_plain_af(k, &js))))
+/// Whether the document has scripts at all (document-level, or on any field), for the banner. `doc_js` is the
+/// document-level list when it was read already.
+pub(crate) fn has_scripts_with(doc_js: Option<&DocScripts>, doc: &PdfDocument, entries: &[Entry]) -> bool {
+    let doc_level = match doc_js {
+        Some(d) => !d.scripts.is_empty(),
+        None => !load_doc_js(doc).scripts.is_empty(),
+    };
+    doc_level || entries.iter().any(|e| ["K", "F", "V", "C"].into_iter().any(|k| aa_js(e, k).is_some_and(|js| !is_plain_af(k, &js))))
 }
 
 /// A script that is exactly one AF call needs no engine.
@@ -577,5 +771,15 @@ pub(crate) fn as_field_value(v: &[String], kind: FieldKind) -> FieldValue {
     match kind {
         FieldKind::List if v.len() > 1 => FieldValue::Many(v.to_vec()),
         _ => FieldValue::Text(v.first().cloned().unwrap_or_default()),
+    }
+}
+
+/// The report a step leaves behind: what a script raised past the cap is said once in the log.
+impl Drop for Rt<'_> {
+    fn drop(&mut self) {
+        let n = self.suppressed.get();
+        if n > 0 {
+            self.note(LogLevel::Warn, None, format!("{n} more alert{} from scripts {} not shown (a step shows {MAX_ALERTS_PER_STEP})", if n == 1 { "" } else { "s" }, if n == 1 { "was" } else { "were" }));
+        }
     }
 }

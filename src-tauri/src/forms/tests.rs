@@ -1394,6 +1394,211 @@ fn the_form_javascript_sample_behaves_like_the_checklist() {
     assert_eq!(field(&eng2, id2, "Tax").value, "312.63", "the custom calculation did not run");
 }
 
+#[test]
+fn a_validate_script_that_recolours_its_own_field_keeps_the_typed_value() {
+    let (eng, id, path) = script_form("js-self-style", &["Amount"]);
+    script(&eng, id, "Amount", "V", "event.target.textColor = Number(event.value) < 0 ? color.red : color.black;");
+    fill(&eng, id, "Amount", text("-5")).unwrap();
+    let f = field(&eng, id, "Amount");
+    assert_eq!((f.value.as_str(), f.text_color), ("-5", [1.0, 0.0, 0.0]), "the entry stays and the script's colour is written");
+    fill(&eng, id, "Amount", text("7")).unwrap();
+    let f = field(&eng, id, "Amount");
+    assert_eq!((f.value.as_str(), f.text_color), ("7", [0.0, 0.0, 0.0]));
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(field(&eng2, id2, "Amount").value, "7");
+}
+
+#[test]
+fn keystroke_and_validate_scripts_that_both_style_the_same_field_keep_the_value_and_the_later_style() {
+    let (eng, id, _) = script_form("js-self-style-kv", &["Code"]);
+    script(&eng, id, "Code", "K", "event.target.fillColor = color.yellow; event.target.textColor = color.red;");
+    script(&eng, id, "Code", "V", "event.target.textColor = color.blue;");
+    fill(&eng, id, "Code", text("abc")).unwrap();
+    let f = field(&eng, id, "Code");
+    assert_eq!(f.value, "abc", "V does not put back the value K saw");
+    assert_eq!(f.fill_color, Some([1.0, 1.0, 0.0]), "K's fill stays");
+    assert_eq!(f.text_color, [0.0, 0.0, 1.0], "V's colour wins over K's");
+}
+
+#[test]
+fn a_keystroke_or_validate_script_sees_the_typed_value_as_its_target_value() {
+    let (eng, id, _) = script_form("js-target-value", &["Code"]);
+    script(&eng, id, "Code", "V", "if (String(event.target.value) !== event.value) { app.alert(\"stale\"); event.rc = false; }");
+    fill(&eng, id, "Code", text("abc")).unwrap();
+    assert_eq!(field(&eng, id, "Code").value, "abc");
+}
+
+/// Marks the signature field `Sig` as signed (a `/V` dictionary), with an optional `/Lock` of `(action, fields)` and an
+/// optional DocMDP `/P` in the signature's `/Reference`.
+fn sign(eng: &Engine, id: DocId, lock: Option<(&str, &[&str])>, docmdp: Option<i32>) {
+    eng.apply_custom(id, "Sign".into(), EditSource::User, false, |d| {
+        let entries = scan(d)?;
+        let e = entries.iter().find(|e| e.name == "Sig").expect("a signature field");
+        let mut f = e.field.clone();
+        let mut v = d.new_dict()?;
+        put_name(&mut v, "Type", "Sig")?;
+        if let Some(p) = docmdp {
+            let mut params = d.new_dict()?;
+            params.dict_put("P", PdfObject::new_int(p)?)?;
+            let mut r = d.new_dict()?;
+            put_name(&mut r, "TransformMethod", "DocMDP")?;
+            r.dict_put("TransformParams", params)?;
+            let mut a = d.new_array()?;
+            a.array_push(r)?;
+            v.dict_put("Reference", a)?;
+        }
+        f.dict_put("V", v)?;
+        if let Some((action, names)) = lock {
+            let mut l = d.new_dict()?;
+            put_name(&mut l, "Action", action)?;
+            let mut a = d.new_array()?;
+            for n in names {
+                a.array_push(PdfObject::new_string(n)?)?;
+            }
+            l.dict_put("Fields", a)?;
+            f.dict_put("Lock", l)?;
+        }
+        Ok(vec![e.page])
+    })
+    .unwrap();
+}
+
+#[test]
+fn scripts_write_nothing_to_a_signed_document_or_to_a_signature_widget() {
+    let (eng, id, _) = script_form("js-signed", &["Src", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+    script(&eng, id, "Src", "V", "var o = this.getField(\"Other\"); o.value = \"x\"; o.readonly = true; o.fillColor = color.red; this.getField(\"Sig\").readonly = true;");
+    // Not signed yet: the script writes, but never to the signature widget.
+    fill(&eng, id, "Src", text("a")).unwrap();
+    assert_eq!(field(&eng, id, "Other").value, "x");
+    assert!(!field(&eng, id, "Sig").read_only, "a signature widget is never written by a script");
+    eng.undo(id).unwrap();
+    assert_eq!(field(&eng, id, "Other").value, "");
+    // Signed: nothing else is written either, and the typed value still lands.
+    sign(&eng, id, Some(("All", &[])), None);
+    fill(&eng, id, "Src", text("b")).unwrap();
+    let o = field(&eng, id, "Other");
+    assert_eq!((o.value.as_str(), o.read_only, o.fill_color), ("", false, None));
+    assert_eq!(field(&eng, id, "Src").value, "b");
+    assert!(scripts_state(&eng, id).unwrap().log.iter().any(|l| l.message.contains("signed")));
+}
+
+#[test]
+fn a_signature_lock_covers_only_the_fields_it_lists() {
+    let (eng, id, _) = script_form("js-signed-lock", &["Src", "Locked", "Free"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+    sign(&eng, id, Some(("Include", &["Locked"])), None);
+    script(&eng, id, "Src", "V", "this.getField(\"Locked\").value = \"x\"; this.getField(\"Free\").value = \"y\";");
+    fill(&eng, id, "Src", text("a")).unwrap();
+    assert_eq!(field(&eng, id, "Locked").value, "");
+    assert_eq!(field(&eng, id, "Free").value, "y");
+}
+
+#[test]
+fn an_approval_signature_with_no_lock_leaves_the_form_to_be_filled_and_a_docmdp_one_does_not() {
+    let (eng, id, _) = script_form("js-signed-approval", &["Src", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+    script(&eng, id, "Src", "V", "this.getField(\"Other\").value = \"x\";");
+    sign(&eng, id, None, None);
+    fill(&eng, id, "Src", text("a")).unwrap();
+    assert_eq!(field(&eng, id, "Other").value, "x", "a plain approval signature locks no field");
+    eng.undo(id).unwrap();
+    sign(&eng, id, None, Some(1));
+    fill(&eng, id, "Src", text("b")).unwrap();
+    assert_eq!(field(&eng, id, "Other").value, "", "DocMDP 1 allows no change");
+}
+
+#[test]
+fn a_calculated_result_is_not_written_into_a_field_a_signature_locks() {
+    let (eng, id, _) = script_form("js-signed-calc", &["Rent", "Deposit", "Total"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+    script(&eng, id, "Total", "C", "event.value = 7;");
+    sign(&eng, id, Some(("Include", &["Total"])), None);
+    fill(&eng, id, "Rent", text("1")).unwrap();
+    assert_eq!(field(&eng, id, "Total").value, "", "Total is covered by the signature");
+}
+
+#[test]
+fn a_later_script_of_the_same_step_sees_what_an_earlier_one_wrote_and_a_no_op_write_does_not_undo_it() {
+    let (eng, id, _) = script_form("js-kv-chain", &["Code", "Other"]);
+    script(&eng, id, "Code", "K", "this.getField(\"Other\").value = \"x\";");
+    script(&eng, id, "Code", "V", "var o = this.getField(\"Other\"); o.value = o.value + \"!\"; this.getField(\"Code\").value = this.getField(\"Code\").value;");
+    fill(&eng, id, "Code", text("abc")).unwrap();
+    assert_eq!(field(&eng, id, "Other").value, "x!", "V sees K's write and builds on it");
+    assert_eq!(field(&eng, id, "Code").value, "abc");
+    // A write that changes nothing is not a change: it must not replay a stale snapshot.
+    script(&eng, id, "Code", "V", "var o = this.getField(\"Other\"); o.value = o.value;");
+    fill(&eng, id, "Code", text("abd")).unwrap();
+    assert_eq!(field(&eng, id, "Other").value, "x");
+}
+
+#[test]
+fn a_document_that_assigns_an_af_function_by_a_computed_name_gets_its_own() {
+    let (eng, id, _) = open("js-override-computed");
+    doc_scripts(&eng, id, &[("fixes", "this['AFNumber' + '_Format'] = function (d, s, n, c, cur, p) { event.value = 'custom:' + event.value; };")]);
+    add1(&eng, id, 0, nf(FieldKind::Text, "Price", [72.0, 60.0, 240.0, 80.0]));
+    script(&eng, id, "Price", "F", "AFNumber_Format(2, 0, 0, 0, \"$\", true);");
+    fill(&eng, id, "Price", text("5")).unwrap();
+    assert_eq!(field(&eng, id, "Price").shown, "custom:5");
+}
+
+#[test]
+fn a_script_that_floods_alerts_shows_five_and_says_how_many_it_held_back() {
+    let (eng, id, _) = script_form("js-flood", &["Note"]);
+    script(&eng, id, "Note", "K", "for (var i = 0; i < 30; i++) { app.alert('message ' + i); }");
+    let w = field(&eng, id, "Note");
+    let r = set_value_report(&eng, id, w.page, w.xref, &text("x"), EditSource::User).unwrap();
+    assert_eq!(r.report.alerts.len(), 5, "{:?}", r.report.alerts);
+    assert_eq!(r.report.alerts[0].message, "message 0");
+    let log = scripts_state(&eng, id).unwrap().log;
+    assert!(log.iter().any(|l| l.message.contains("more alerts from scripts were not shown")), "{log:?}");
+}
+
+#[test]
+fn a_step_stops_running_scripts_when_it_has_used_its_time_and_counts_a_strike() {
+    let names: Vec<String> = (0..16).map(|i| format!("F{i:02}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (eng, id, _) = script_form("js-budget", &refs);
+    for n in &names {
+        fill(&eng, id, n, text("v")).unwrap();
+    }
+    // Each Format script is slow, but well within its own limit: it is the step as a whole that runs long.
+    for n in &names {
+        script(&eng, id, n, "F", "var t = Date.now(); while (Date.now() - t < 200) {} event.value = '<' + event.value + '>';");
+    }
+    let t = std::time::Instant::now();
+    let shown = list_all(&eng, id).unwrap().fields.iter().filter(|f| f.shown.starts_with('<')).count();
+    let took = t.elapsed();
+    assert!(took < std::time::Duration::from_millis(3600), "{took:?}");
+    assert!((8..16).contains(&shown), "the first fields were formatted, the rest were left raw: {shown}");
+    let log = scripts_state(&eng, id).unwrap().log;
+    assert!(log.iter().any(|l| l.message.contains("of script time")), "{log:?}");
+    // It counted as one strike, not a timeout of any field: the scripts still run.
+    let st = scripts_state(&eng, id).unwrap();
+    assert!(st.usable && st.enabled);
+}
+
+#[test]
+fn the_scripts_banner_does_not_wait_for_a_step_that_holds_the_edit_lane() {
+    let (eng, id, _) = script_form("js-lane", &["Src"]);
+    script(&eng, id, "Src", "V", "event.rc = true;");
+    field(&eng, id, "Src");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut got = None;
+    eng.apply_custom(id, "Hold the lane".into(), EditSource::User, false, |_| {
+        // Asked from another thread while this step holds the lane; if it needed the lane it would wait for this to end.
+        let e2 = eng.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(scripts_state(&e2, id).map(|s| s.has_scripts));
+        });
+        got = Some(rx.recv_timeout(std::time::Duration::from_secs(3)));
+        Ok(vec![])
+    })
+    .unwrap();
+    assert!(matches!(got, Some(Ok(Ok(true)))), "scripts_state needed the lane: {got:?}");
+}
+
 /// Writes the sample for the runtime checks: `cargo test --lib write_the_form_javascript_sample -- --ignored`.
 #[test]
 #[ignore = "writes docs/study/samples/_gen/formsjs-sample.pdf"]

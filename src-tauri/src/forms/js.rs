@@ -17,7 +17,7 @@ mod util;
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, OnceLock};
@@ -40,6 +40,11 @@ pub const OPEN_TIME: Duration = Duration::from_secs(2);
 const GRACE: Duration = Duration::from_secs(2);
 /// Timeouts after which no script of the document runs.
 const MAX_STRIKES: u32 = 3;
+/// All the script time one step (a fill with its calculations, a reset) or one listing may use. After it the rest of
+/// the step runs natively only (the recognised calls), a strike is counted and the log says so.
+pub const JS_BUDGET: Duration = Duration::from_millis(2500);
+/// The alerts of one step that reach the UI; the rest are counted in the log.
+pub const MAX_ALERTS_PER_STEP: usize = 5;
 
 /// A script longer than this is refused. The document-level scripts together too, at four times as much.
 pub const MAX_SCRIPT_BYTES: usize = 256 << 10;
@@ -100,6 +105,25 @@ pub struct FieldState {
     pub text_color: Option<Vec<String>>,
     pub fill_color: Option<Vec<String>>,
     pub stroke_color: Option<Vec<String>>,
+}
+
+/// A field property a script can set. Only the properties a script touched are written back to the document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Prop {
+    Value,
+    ReadOnly,
+    Required,
+    Display,
+    TextColor,
+    FillColor,
+    StrokeColor,
+}
+
+/// A field a script wrote to: the field as the script left it and the properties it set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldChange {
+    pub state: FieldState,
+    pub props: BTreeSet<Prop>,
 }
 
 /// About the document, for `this.numPages`, `this.info` and the like.
@@ -216,8 +240,8 @@ pub struct Outcome {
     /// `event.value` after the script.
     pub value: String,
     pub change: String,
-    /// Fields the script changed, as they are now.
-    pub changed: Vec<FieldState>,
+    /// Fields the script wrote to, as they are now, with the properties it set.
+    pub changed: Vec<FieldChange>,
     pub alerts: Vec<Alert>,
     pub requests: Vec<Request>,
     pub log: Vec<LogLine>,
@@ -234,10 +258,22 @@ pub struct DocScripts {
     pub overrides_af: bool,
 }
 
+/// What may define or replace an `AF...` function: a declaration, an assignment or property named `AF...`, a string
+/// that starts with `AF` (a computed name), any assignment to a bracketed name, and the calls that define properties
+/// or evaluate text. Conservative on purpose: the engine path gives the same answers as the native one, only slower.
+const OVERRIDES_AF: &str = concat!(
+    r"\bfunction\s+AF\w+",
+    r"|\b(?:var|let|const)\s+AF\w+",
+    r"|\bAF[A-Za-z0-9_]+\s*(?:=[^=]|:)",
+    r"|\]\s*=[^=]",
+    r#"|["'`]\s*AF"#,
+    r"|\b(?:defineProperty|defineProperties|__defineGetter__|__defineSetter__|setPrototypeOf|assign|Reflect|Proxy|eval|Function|with)\b",
+);
+
 impl DocScripts {
     pub fn new(scripts: Vec<(String, String)>) -> DocScripts {
         static RE: OnceLock<regex::Regex> = OnceLock::new();
-        let re = RE.get_or_init(|| regex::Regex::new(r"\bfunction\s+AF\w+|\b(?:var|let|const)\s+AF\w+|\bAF[A-Za-z0-9_]+\s*=[^=]").expect("a valid pattern"));
+        let re = RE.get_or_init(|| regex::Regex::new(OVERRIDES_AF).expect("a valid pattern"));
         let overrides_af = scripts.iter().any(|(_, s)| re.is_match(s));
         DocScripts { scripts, overrides_af }
     }
@@ -251,6 +287,38 @@ enum Msg {
 
 struct Worker {
     tx: Sender<Msg>,
+    /// Kept to lower the priority of a worker that is given up on (it may be spinning where no interrupt reaches).
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Worker {
+    /// A worker that stopped answering is left to run on its own: at the lowest priority there is.
+    fn demote(&self) {
+        demote(&self.thread);
+    }
+}
+
+/// Lowers a worker thread to idle priority (Windows; elsewhere the OS decides).
+fn demote(thread: &std::thread::JoinHandle<()>) {
+    #[cfg(windows)]
+    // SAFETY: the handle belongs to a thread this process started and is open as long as the JoinHandle is.
+    unsafe {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Threading::{SetThreadPriority, THREAD_PRIORITY_IDLE};
+        SetThreadPriority(thread.as_raw_handle() as _, THREAD_PRIORITY_IDLE);
+    }
+    #[cfg(not(windows))]
+    let _ = thread;
+}
+
+/// The worker's own priority: a little below the UI's, so a script cannot take the machine from typing and drawing.
+fn be_polite() {
+    #[cfg(windows)]
+    // SAFETY: plain calls on the current thread's pseudo handle.
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
 }
 
 #[derive(Default)]
@@ -263,6 +331,9 @@ struct Meta {
     strikes: u32,
     /// Three timeouts, or a worker that stopped answering.
     all_off: bool,
+    /// A worker was given up on while it was running: its thread may still be spinning (a native call QuickJS cannot
+    /// interrupt). One is all a session gets: scripts are not turned on again for this file.
+    lost: bool,
 }
 
 /// The scripts of one open document: the on/off switch, the log and the runtime (started on first use).
@@ -271,6 +342,8 @@ pub struct Scripts {
     meta: Mutex<Meta>,
     worker: Mutex<Option<Worker>>,
     doc_js: Mutex<Option<Arc<DocScripts>>>,
+    /// Whether the document has scripts the engine runs (kept by the listing, so the banner needs no edit lane).
+    has_scripts: Mutex<Option<bool>>,
 }
 
 impl Scripts {
@@ -289,11 +362,38 @@ impl Scripts {
         !m.off && !m.all_off
     }
 
+    /// Scripts may be turned on (again): not once a worker was given up on while it ran.
+    pub fn can_enable(&self) -> bool {
+        !self.meta.lock().lost
+    }
+
+    /// Whether the document has scripts, as the last listing saw it (`None` before one).
+    pub fn has_scripts(&self) -> Option<bool> {
+        *self.has_scripts.lock()
+    }
+
+    pub fn set_has_scripts(&self, has: bool) {
+        *self.has_scripts.lock() = Some(has);
+    }
+
     /// The person turns scripts on or off for this file. Turning them on gives a runtime that was taken down
-    /// a fresh start: strikes and switched-off fields are forgotten, a worker given up on is replaced.
-    pub fn set_enabled(&self, on: bool) {
+    /// a fresh start: strikes and switched-off fields are forgotten, a worker given up on is replaced. Returns
+    /// false when they cannot be turned on (see [`Scripts::can_enable`]); they stay off.
+    pub fn set_enabled(&self, on: bool) -> bool {
         let rebuild = {
             let mut m = self.meta.lock();
+            if on && m.lost {
+                m.off = true;
+                push_log(
+                    &mut m.log,
+                    [LogLine {
+                        level: LogLevel::Error,
+                        field: None,
+                        message: "scripts cannot be turned on again in this file: the script engine stopped answering once and is left abandoned. Close the file and open it again".into(),
+                    }],
+                );
+                return false;
+            }
             m.off = !on;
             if on {
                 m.strikes = 0;
@@ -308,6 +408,7 @@ impl Scripts {
         if rebuild {
             *self.worker.lock() = None;
         }
+        true
     }
 
     pub fn log(&self) -> Vec<LogLine> {
@@ -323,6 +424,22 @@ impl Scripts {
     pub fn doc_scripts(&self, load: impl FnOnce() -> DocScripts) -> Arc<DocScripts> {
         let mut g = self.doc_js.lock();
         g.get_or_insert_with(|| Arc::new(load())).clone()
+    }
+
+    /// A step used up its script time ([`JS_BUDGET`]): that counts like a timeout toward taking the scripts down.
+    pub fn over_budget(&self) {
+        let mut m = self.meta.lock();
+        m.strikes += 1;
+        let mut lines = vec![LogLine {
+            level: LogLevel::Error,
+            field: None,
+            message: format!("a fill, reset or listing used more than {} ms of script time; the rest of it ran without scripts", JS_BUDGET.as_millis()),
+        }];
+        if m.strikes >= MAX_STRIKES {
+            m.all_off = true;
+            lines.push(LogLine { level: LogLevel::Error, field: None, message: STRIKES_OUT.into() });
+        }
+        push_log(&mut m.log, lines);
     }
 
     /// Runs `job`. Never blocks longer than the job's time limit plus two seconds, never panics, and leaves
@@ -349,8 +466,11 @@ impl Scripts {
                     push_log(&mut self.meta.lock().log, log);
                     *worker = Some(w);
                 }
-                Err(why) => {
+                Err((why, abandoned)) => {
                     self.take_down(&format!("the script engine could not start: {why}"));
+                    if abandoned {
+                        self.meta.lock().lost = true;
+                    }
                     return skipped(Some(ScriptError::Lost));
                 }
             }
@@ -363,9 +483,20 @@ impl Scripts {
             Ok(o) => o,
             Err(why) => {
                 // The worker is stuck or gone: give up on it, and on scripts, until the person turns them back on.
+                let stuck = matches!(why, RecvTimeoutError::Timeout);
+                if stuck {
+                    // Still running, where no interrupt reaches: at the lowest priority, and the only one this file gets.
+                    if let Some(w) = worker.as_ref() {
+                        w.demote();
+                    }
+                    self.meta.lock().lost = true;
+                }
                 *worker = None;
-                let what = if matches!(why, RecvTimeoutError::Timeout) { "stopped answering" } else { "stopped" };
-                self.take_down(&format!("the script engine {what}; scripts are off for this file until you turn them on again"));
+                if stuck {
+                    self.take_down("the script engine stopped answering; scripts are off for this file, and cannot be turned on again in this session (the stuck script is left running at the lowest priority until the file is closed)");
+                } else {
+                    self.take_down("the script engine stopped; scripts are off for this file until you turn them on again");
+                }
                 return Outcome { rc: true, value: value.clone(), change: change.clone(), error: Some(ScriptError::Lost), ..Default::default() };
             }
         };
@@ -383,7 +514,7 @@ impl Scripts {
                 });
                 if m.strikes >= MAX_STRIKES {
                     m.all_off = true;
-                    lines.push(LogLine { level: LogLevel::Error, field: None, message: "three scripts timed out: scripts are off for this file (the recognised calls still run natively)".into() });
+                    lines.push(LogLine { level: LogLevel::Error, field: None, message: STRIKES_OUT.into() });
                 }
             }
             Some(ScriptError::Memory) => lines.push(LogLine { level: LogLevel::Error, field: Some(key.clone()), message: "the script used more memory than it may and was stopped".into() }),
@@ -407,6 +538,8 @@ impl Scripts {
         self.log().into_iter().map(|l| l.message).collect()
     }
 }
+
+const STRIKES_OUT: &str = "three scripts timed out or used up their time: scripts are off for this file (the recognised calls still run natively)";
 
 fn push_log(log: &mut VecDeque<LogLine>, lines: impl IntoIterator<Item = LogLine>) {
     for l in lines {
@@ -450,23 +583,41 @@ fn build(doc_js: &DocScripts, fields: &[FieldState], doc: &DocInfo, log: &mut Ve
     Ok(js)
 }
 
-fn spawn(doc_js: Arc<DocScripts>, fields: &[FieldState], doc: &DocInfo) -> Result<(Worker, Vec<LogLine>), String> {
+/// A worker thread with its runtime built. `Err` has the reason and whether the thread was left running.
+fn spawn(doc_js: Arc<DocScripts>, fields: &[FieldState], doc: &DocInfo) -> Result<(Worker, Vec<LogLine>), (String, bool)> {
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = channel();
     let (itx, irx) = channel();
     let (fields, doc) = (fields.to_vec(), doc.clone());
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("forms-js".into())
         .stack_size(WORKER_STACK)
         .spawn(move || work(rx, itx, doc_js, fields, doc))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (e.to_string(), false))?;
     match irx.recv_timeout(OPEN_TIME + GRACE) {
-        Ok(Ok(log)) => Ok((Worker { tx }, log)),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err("it did not start in time".into()),
+        Ok(Ok(log)) => Ok((Worker { tx, thread }, log)),
+        Ok(Err(e)) => Err((e, false)),
+        Err(RecvTimeoutError::Timeout) => {
+            demote(&thread);
+            Err(("it did not start in time".into(), true))
+        }
+        Err(RecvTimeoutError::Disconnected) => Err(("it stopped while starting".into(), false)),
     }
 }
 
+/// The reply for a job whose runtime failed.
+fn panicked(job: &Job) -> Outcome {
+    Outcome { rc: true, value: job.event.value.clone(), change: job.event.change.clone(), error: Some(ScriptError::Panic), ..Default::default() }
+}
+
+/// A new runtime in place of one that panicked or was left with jobs it could not finish. Its globals are the
+/// document scripts' again. `None` when that fails too.
+fn rebuilt(doc_js: &DocScripts, job: &Job) -> Option<engine::Js> {
+    let mut ignore = Vec::new();
+    catch_unwind(AssertUnwindSafe(|| build(doc_js, &job.fields, &job.doc, &mut ignore))).ok().and_then(Result::ok)
+}
+
 fn work(rx: Receiver<Msg>, init: Sender<Result<Vec<LogLine>, String>>, doc_js: Arc<DocScripts>, fields: Vec<FieldState>, doc: DocInfo) {
+    be_polite();
     let mut log = Vec::new();
     let built = catch_unwind(AssertUnwindSafe(|| build(&doc_js, &fields, &doc, &mut log)));
     let mut js = match built {
@@ -488,18 +639,22 @@ fn work(rx: Receiver<Msg>, init: Sender<Result<Vec<LogLine>, String>>, doc_js: A
                     js.collect();
                 }
                 let _ = reply.send(out);
+                // Jobs a script queued and the deadline cut short (a promise callback that never ends) are not left for
+                // the next script to run: that runtime is dropped and another started.
+                if js.stale() {
+                    match rebuilt(&doc_js, &job) {
+                        Some(fresh) => js = fresh,
+                        None => return,
+                    }
+                }
             }
             Err(_) => {
                 // Drop the runtime that panicked and start another, with the document scripts again.
-                let mut ignore = Vec::new();
-                match catch_unwind(AssertUnwindSafe(|| build(&doc_js, &job.fields, &job.doc, &mut ignore))) {
-                    Ok(Ok(fresh)) => js = fresh,
-                    _ => {
-                        let _ = reply.send(Outcome { rc: true, value: job.event.value.clone(), change: job.event.change.clone(), error: Some(ScriptError::Panic), ..Default::default() });
-                        return;
-                    }
+                let _ = reply.send(panicked(&job));
+                match rebuilt(&doc_js, &job) {
+                    Some(fresh) => js = fresh,
+                    None => return,
                 }
-                let _ = reply.send(Outcome { rc: true, value: job.event.value.clone(), change: job.event.change.clone(), error: Some(ScriptError::Panic), ..Default::default() });
             }
         }
     }

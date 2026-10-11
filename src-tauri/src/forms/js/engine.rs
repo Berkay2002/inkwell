@@ -5,7 +5,7 @@
 
 use super::util::{self, PrintfArg};
 use super::{
-    Alert, Event, FieldState, FieldType, Job, LogLevel, LogLine, Outcome, Request, ScriptError, DISPLAY_HIDDEN, DISPLAY_VISIBLE, MAX_ALERTS_PER_JOB,
+    Alert, Event, FieldChange, FieldState, FieldType, Job, LogLevel, LogLine, Outcome, Prop, Request, ScriptError, DISPLAY_HIDDEN, DISPLAY_VISIBLE, MAX_ALERTS_PER_JOB,
     MAX_LOG_PER_JOB, MAX_SCRIPT_BYTES, MAX_TEXT_BYTES,
 };
 use crate::forms::af;
@@ -13,9 +13,9 @@ use rquickjs::context::EvalOptions;
 use rquickjs::{Context, Ctx, Function, Object, Runtime, Value};
 use serde_json::{json, Value as Json};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,7 +28,8 @@ const STACK_LIMIT: usize = 1 << 20;
 /// What the host functions read and write while a job runs.
 pub(super) struct Host {
     pub fields: Vec<FieldState>,
-    pub changed: BTreeSet<usize>,
+    /// The fields a script wrote to (index into `fields`) and the properties it set.
+    pub changed: BTreeMap<usize, BTreeSet<Prop>>,
     pub alerts: Vec<Alert>,
     pub requests: Vec<Request>,
     pub log: Vec<LogLine>,
@@ -47,8 +48,16 @@ pub(super) struct Js {
     host: Shared,
     /// Nanoseconds after `base` at which the running script is interrupted.
     deadline: Arc<AtomicU64>,
+    /// The interrupt handler cut the running script short (set by the handler itself, not guessed from the clock or
+    /// from a message a script can throw).
+    fired: Arc<AtomicBool>,
     base: Instant,
+    /// Jobs the scripts queued (promise callbacks) were left unfinished: this runtime is to be replaced.
+    stale: std::cell::Cell<bool>,
 }
+
+/// Jobs one script may leave to run after it, at most.
+const MAX_JOBS: usize = 10_000;
 
 /// A string cut at `max` bytes on a character boundary.
 pub(super) fn truncate(mut s: String, max: usize) -> String {
@@ -158,8 +167,8 @@ pub(super) fn field_get(f: &FieldState, prop: &str) -> Json {
     }
 }
 
-/// `field.<prop> = v`. Returns false when the property is not one that can be set.
-pub(super) fn field_set(f: &mut FieldState, prop: &str, v: &Json) -> bool {
+/// `field.<prop> = v`. Returns the property set, or `None` when it is not one that can be set.
+pub(super) fn field_set(f: &mut FieldState, prop: &str, v: &Json) -> Option<Prop> {
     let truthy = |v: &Json| match v {
         Json::Bool(b) => *b,
         Json::Number(n) => n.as_f64().is_some_and(|x| x != 0.0),
@@ -167,7 +176,7 @@ pub(super) fn field_set(f: &mut FieldState, prop: &str, v: &Json) -> bool {
         Json::Null => false,
         _ => true,
     };
-    match prop {
+    Some(match prop {
         "value" => {
             let vals: Vec<String> = texts_of(v).into_iter().map(|s| truncate(s, MAX_TEXT_BYTES)).collect();
             f.value = match f.kind {
@@ -175,34 +184,56 @@ pub(super) fn field_set(f: &mut FieldState, prop: &str, v: &Json) -> bool {
                 FieldType::ListBox => vals,
                 _ => vals.into_iter().take(1).collect(),
             };
+            Prop::Value
         }
-        "readonly" => f.readonly = truthy(v),
-        "required" => f.required = truthy(v),
-        "display" => f.display = v.as_f64().map_or(DISPLAY_VISIBLE, |n| (n as i32).clamp(0, 3)),
-        "hidden" => f.display = if truthy(v) { DISPLAY_HIDDEN } else { DISPLAY_VISIBLE },
+        "readonly" => {
+            f.readonly = truthy(v);
+            Prop::ReadOnly
+        }
+        "required" => {
+            f.required = truthy(v);
+            Prop::Required
+        }
+        "display" => {
+            f.display = v.as_f64().map_or(DISPLAY_VISIBLE, |n| (n as i32).clamp(0, 3));
+            Prop::Display
+        }
+        "hidden" => {
+            f.display = if truthy(v) { DISPLAY_HIDDEN } else { DISPLAY_VISIBLE };
+            Prop::Display
+        }
         "textColor" | "fillColor" | "strokeColor" => {
             let c = match v {
                 Json::Array(a) if !a.is_empty() => Some(a.iter().take(5).map(text_of).collect::<Vec<_>>()),
                 _ => None,
             };
             match prop {
-                "textColor" => f.text_color = c,
-                "fillColor" => f.fill_color = c,
-                _ => f.stroke_color = c,
+                "textColor" => {
+                    f.text_color = c;
+                    Prop::TextColor
+                }
+                "fillColor" => {
+                    f.fill_color = c;
+                    Prop::FillColor
+                }
+                _ => {
+                    f.stroke_color = c;
+                    Prop::StrokeColor
+                }
             }
         }
         "check" => {
-            let (Some(i), on) = (v.get(0).and_then(Json::as_f64), v.get(1).is_none_or(truthy)) else { return false };
-            let Some(export) = f.options.get(i.max(0.0) as usize).map(|o| o.0.clone()) else { return false };
+            let (Some(i), on) = (v.get(0).and_then(Json::as_f64), v.get(1).is_none_or(truthy)) else { return None };
+            let export = f.options.get(i.max(0.0) as usize).map(|o| o.0.clone())?;
             if on {
                 f.value = vec![export];
             } else if f.value.first() == Some(&export) {
                 f.value.clear();
             }
+            Prop::Value
         }
-        _ => return false,
-    }
-    true
+        _ => return None,
+    })
 }
 
 fn platform() -> &'static str {
@@ -213,6 +244,11 @@ fn platform() -> &'static str {
     } else {
         "UNIX"
     }
+}
+
+/// `s` without bidirectional controls (embeddings, overrides, isolates), which can show a link in an order it is not in.
+pub(super) fn strip_bidi(s: &str) -> String {
+    s.chars().filter(|c| !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')).collect()
 }
 
 /// Only these reach the UI as requests to open (the UI still asks first).
@@ -270,9 +306,15 @@ fn install(ctx: &Ctx<'_>, host: &Shared) -> rquickjs::Result<()> {
             let Some(i) = index_of(&host, &name) else { return };
             let v: Json = serde_json::from_str(&value).unwrap_or(Json::Null);
             let mut hb = host.borrow_mut();
+            // Only what the script sets is written back: a snapshot taken before the entry was stored must not
+            // undo the entry.
+            // A write that leaves the property as it was (`B.value = B.value`) is not a change either: it would
+            // carry a stale snapshot over what an earlier script wrote.
             let before = hb.fields[i].clone();
-            if field_set(&mut hb.fields[i], &prop, &v) && hb.fields[i] != before {
-                hb.changed.insert(i);
+            if let Some(p) = field_set(&mut hb.fields[i], &prop, &v) {
+                if hb.fields[i] != before {
+                    hb.changed.entry(i).or_default().insert(p);
+                }
             }
         });
     }
@@ -306,6 +348,7 @@ fn install(ctx: &Ctx<'_>, host: &Shared) -> rquickjs::Result<()> {
     {
         let host = host.clone();
         native!("req", move |kind: String, arg: String| {
+            let arg = if matches!(kind.as_str(), "launch" | "submit") { strip_bidi(&arg) } else { arg };
             let mut hb = host.borrow_mut();
             let warn = |hb: &mut Host, m: String| {
                 let field = hb.field.clone();
@@ -430,6 +473,11 @@ fn install(ctx: &Ctx<'_>, host: &Shared) -> rquickjs::Result<()> {
         // Not interruptible: stands in for a host call that does not return.
         std::thread::sleep(Duration::from_millis(ms.max(0.0) as u64));
     });
+    #[cfg(test)]
+    native!("boom", || -> () {
+        // A bug in a host function: the panic must not unwind through QuickJS's C frames.
+        panic!("a host function panicked");
+    });
     ctx.globals().set("__h", h)?;
     Ok(())
 }
@@ -467,12 +515,19 @@ impl Js {
         runtime.set_max_stack_size(STACK_LIMIT);
         let base = Instant::now();
         let deadline = Arc::new(AtomicU64::new(u64::MAX));
-        let d = deadline.clone();
-        runtime.set_interrupt_handler(Some(Box::new(move || base.elapsed().as_nanos() as u64 > d.load(Ordering::Relaxed))));
+        let fired = Arc::new(AtomicBool::new(false));
+        let (d, f) = (deadline.clone(), fired.clone());
+        runtime.set_interrupt_handler(Some(Box::new(move || {
+            let hit = base.elapsed().as_nanos() as u64 > d.load(Ordering::Relaxed);
+            if hit {
+                f.store(true, Ordering::Relaxed);
+            }
+            hit
+        })));
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;
         let host = Rc::new(RefCell::new(Host {
             fields: Vec::new(),
-            changed: BTreeSet::new(),
+            changed: BTreeMap::new(),
             alerts: Vec::new(),
             requests: Vec::new(),
             log: Vec::new(),
@@ -480,7 +535,7 @@ impl Js {
             field: None,
             seen: HashSet::new(),
         }));
-        let js = Js { runtime, context, host, deadline, base };
+        let js = Js { runtime, context, host, deadline, fired, base, stale: std::cell::Cell::new(false) };
         js.arm(Duration::from_secs(5));
         let loaded = js.context.with(|ctx| -> Result<(), String> {
             install(&ctx, &js.host).map_err(|e| describe(&ctx, e))?;
@@ -491,6 +546,7 @@ impl Js {
     }
 
     fn arm(&self, within: Duration) {
+        self.fired.store(false, Ordering::Relaxed);
         let at = self.base.elapsed() + within;
         self.deadline.store(at.as_nanos() as u64, Ordering::Relaxed);
     }
@@ -500,7 +556,15 @@ impl Js {
     pub(super) fn run_doc_script(&mut self, name: &str, source: &str, within: Duration) -> Result<(), ScriptError> {
         self.arm(within);
         let r = self.context.with(|ctx| ctx.eval::<(), _>(source.replace('\0', " ")).map_err(|e| describe(&ctx, e)));
+        if r.is_ok() {
+            self.drain_jobs();
+        }
+        let timed_out = self.fired.load(Ordering::Relaxed);
         self.disarm();
+        let r = match r {
+            Ok(()) if timed_out => Err("interrupted".to_string()),
+            other => other,
+        };
         r.map_err(|m| self.classify(m, name))
     }
 
@@ -525,7 +589,8 @@ impl Js {
     }
 
     fn classify(&self, message: String, _what: &str) -> ScriptError {
-        if Instant::now() >= self.base && self.base.elapsed().as_nanos() as u64 > self.deadline.load(Ordering::Relaxed).min(u64::MAX - 1) || message.contains("interrupted") {
+        // Only the interrupt handler's own cut is a timeout: a script that throws "interrupted" is just a script error.
+        if self.fired.load(Ordering::Relaxed) {
             ScriptError::Timeout
         } else if message.contains("out of memory") {
             ScriptError::Memory
@@ -556,21 +621,37 @@ impl Js {
         // A block, so that `let` and `const` of one field's script do not collide with another's;
         // `var` and function declarations still reach the global object, as in Acrobat.
         let source = format!("{{\n{}\n}}", job.script.replace('\0', " "));
-        let result = self.context.with(|ctx| -> Result<String, String> {
-            let g = ctx.globals();
-            let begin: Function = g.get("__begin").map_err(|e| describe(&ctx, e))?;
-            begin.call::<_, ()>((event,)).map_err(|e| describe(&ctx, e))?;
-            let mut o = EvalOptions::default();
-            o.strict = false;
-            ctx.eval_with_options::<Value, _>(source, o).map_err(|e| describe(&ctx, e))?;
-            let end: Function = g.get("__end").map_err(|e| describe(&ctx, e))?;
-            end.call::<_, String>(()).map_err(|e| describe(&ctx, e))
-        });
-        let timed_out = self.base.elapsed().as_nanos() as u64 > self.deadline.load(Ordering::Relaxed);
+        let result = self
+            .context
+            .with(|ctx| -> Result<(), String> {
+                let g = ctx.globals();
+                let begin: Function = g.get("__begin").map_err(|e| describe(&ctx, e))?;
+                begin.call::<_, ()>((event,)).map_err(|e| describe(&ctx, e))?;
+                let mut o = EvalOptions::default();
+                o.strict = false;
+                ctx.eval_with_options::<Value, _>(source, o).map_err(|e| describe(&ctx, e))?;
+                Ok(())
+            })
+            .and_then(|()| {
+                // Promise callbacks the script queued run now, inside its time limit, so none is left to run later.
+                self.drain_jobs();
+                if self.fired.load(Ordering::Relaxed) {
+                    return Err("interrupted".to_string());
+                }
+                self.context.with(|ctx| -> Result<String, String> {
+                    let end: Function = ctx.globals().get("__end").map_err(|e| describe(&ctx, e))?;
+                    end.call::<_, String>(()).map_err(|e| describe(&ctx, e))
+                })
+            });
+        let timed_out = self.fired.load(Ordering::Relaxed);
         self.disarm();
+        // Anything still queued (the limit cut it, or the script failed first) must never run in another script's time.
+        if self.runtime.is_job_pending() {
+            self.stale.set(true);
+        }
         let (log, alerts, requests, changed) = {
             let mut h = self.host.borrow_mut();
-            let changed: Vec<FieldState> = h.changed.iter().map(|i| h.fields[*i].clone()).collect();
+            let changed: Vec<FieldChange> = h.changed.iter().map(|(i, props)| FieldChange { state: h.fields[*i].clone(), props: props.clone() }).collect();
             (std::mem::take(&mut h.log), std::mem::take(&mut h.alerts), std::mem::take(&mut h.requests), changed)
         };
         match result {
@@ -589,7 +670,7 @@ impl Js {
                 }
             }
             Err(message) => {
-                let error = if timed_out || message.contains("interrupted") {
+                let error = if timed_out {
                     ScriptError::Timeout
                 } else if message.contains("out of memory") {
                     ScriptError::Memory
@@ -600,6 +681,36 @@ impl Js {
                 Outcome { log, ..unchanged(Some(error)) }
             }
         }
+    }
+
+    /// Runs the jobs the script queued, one by one, until none is left or the script's limit passes. A chain still
+    /// going after [`MAX_JOBS`] never ends: it counts as the limit passing. A job that throws is dropped.
+    fn drain_jobs(&self) {
+        for i in 0..=MAX_JOBS {
+            if i == MAX_JOBS {
+                self.fired.store(true, Ordering::Relaxed);
+            }
+            if self.fired.load(Ordering::Relaxed) {
+                return;
+            }
+            match self.runtime.execute_pending_job() {
+                Ok(true) => {}
+                Ok(false) => return,
+                // A job that threw: the exception is dropped, and the runtime is replaced afterwards. (A host function
+                // that panicked in it leaves its payload in the runtime, where only a new runtime clears it.)
+                Err(e) => {
+                    self.stale.set(true);
+                    e.0.with(|ctx| {
+                        let _ = ctx.catch();
+                    });
+                }
+            }
+        }
+    }
+
+    /// Jobs were left queued: replace this runtime before another script runs.
+    pub(super) fn stale(&self) -> bool {
+        self.stale.get()
     }
 
     /// Frees what the last scripts left (after a memory error).

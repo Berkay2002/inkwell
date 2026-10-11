@@ -118,11 +118,14 @@ fn a_script_writing_another_field_reports_it_as_changed() {
     let s = Scripts::new();
     let out = calc(&s, "this.getField(\"A\").value = \"9\"; this.getField(\"B\").readonly = true; this.getField(\"B\").fillColor = color.red;");
     assert_eq!(out.error, None, "{:?}", s.log_text());
-    let names: Vec<_> = out.changed.iter().map(|f| f.name.as_str()).collect();
+    let names: Vec<_> = out.changed.iter().map(|f| f.state.name.as_str()).collect();
     assert_eq!(names, ["A", "B"]);
-    assert_eq!(out.changed[0].value, ["9"]);
-    assert!(out.changed[1].readonly);
-    assert_eq!(out.changed[1].fill_color.as_deref().map(|c| c[0].as_str()), Some("RGB"));
+    assert_eq!(out.changed[0].state.value, ["9"]);
+    assert!(out.changed[1].state.readonly);
+    assert_eq!(out.changed[1].state.fill_color.as_deref().map(|c| c[0].as_str()), Some("RGB"));
+    // Only what the script set is reported as set.
+    assert_eq!(out.changed[0].props, BTreeSet::from([Prop::Value]));
+    assert_eq!(out.changed[1].props, BTreeSet::from([Prop::ReadOnly, Prop::FillColor]));
 }
 
 #[test]
@@ -319,7 +322,7 @@ fn a_syntax_error_is_logged_with_the_field_and_changes_nothing() {
 }
 
 #[test]
-fn a_worker_that_stops_answering_is_given_up_on_and_replaced_when_scripts_are_turned_on_again() {
+fn a_worker_that_stops_answering_is_given_up_on_and_scripts_cannot_be_turned_on_again_this_session() {
     let s = Scripts::new();
     let t = Instant::now();
     // A host call that does not come back: the interrupt cannot reach it.
@@ -327,9 +330,119 @@ fn a_worker_that_stops_answering_is_given_up_on_and_replaced_when_scripts_are_tu
     assert_eq!(out.error, Some(ScriptError::Lost));
     assert!(t.elapsed() < Duration::from_millis(3500), "{:?}", t.elapsed());
     assert!(!s.usable());
+    assert!(!s.can_enable(), "the stuck thread is the only one this file gets");
     assert!(s.log_text().iter().any(|m| m.contains("stopped answering")), "{:?}", s.log_text());
-    s.set_enabled(true);
-    assert_eq!(run(&s, "Format", "1", "event.value = \"fresh\";").value, "fresh");
+    // Turning them on again is refused, with a message, and nothing runs.
+    assert!(!s.set_enabled(true));
+    assert!(!s.usable());
+    assert!(s.log_text().iter().any(|m| m.contains("cannot be turned on again")), "{:?}", s.log_text());
+    assert!(run(&s, "Format", "1", "event.value = \"fresh\";").skipped);
+}
+
+#[test]
+fn a_panic_in_a_host_function_is_an_error_not_an_abort_and_the_runtime_is_replaced() {
+    let s = Scripts::new();
+    s.doc_scripts(|| DocScripts::new(vec![("lib".into(), "var fromDoc = 41;".into())]));
+    let out = run(&s, "Format", "1", "__boom(); event.value = \"unreachable\";");
+    assert_eq!(out.error, Some(ScriptError::Panic));
+    assert_eq!(out.value, "1", "the event result is as if no script ran");
+    assert!(s.log_text().iter().any(|m| m.contains("restarted")), "{:?}", s.log_text());
+    // A fresh runtime, with the document scripts run again.
+    let out = run(&s, "Format", "1", "event.value = String(fromDoc + 1);");
+    assert_eq!(out.error, None, "{:?}", s.log_text());
+    assert_eq!(out.value, "42");
+}
+
+#[test]
+fn a_script_that_throws_the_word_interrupted_is_an_error_not_a_timeout() {
+    let s = Scripts::new();
+    for _ in 0..4 {
+        let out = run(&s, "Format", "1", "throw new Error(\"interrupted\");");
+        assert!(matches!(out.error, Some(ScriptError::Script(_))), "{:?}", out.error);
+    }
+    // Four of them are not four strikes: nothing was taken down, and the field still runs.
+    assert!(s.usable());
+    assert_eq!(run(&s, "Format", "1", "event.value = \"ok\";").value, "ok");
+}
+
+#[test]
+fn a_regular_expression_that_backtracks_for_ever_stops_at_the_deadline() {
+    let s = Scripts::new();
+    let t = Instant::now();
+    let out = s.run(job(
+        Event::new("Format", "Target", "1"),
+        "var s = ''; for (var i = 0; i < 40; i++) s += 'a'; /^(a+)+$/.test(s + 'b');",
+        vec![field("Target", "1")],
+        Duration::from_millis(200),
+    ));
+    assert_eq!(out.error, Some(ScriptError::Timeout), "{:?}", s.log_text());
+    assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+}
+
+#[test]
+fn atomics_wait_cannot_block_the_worker() {
+    let s = Scripts::new();
+    let t = Instant::now();
+    let out = run(
+        &s,
+        "Format",
+        "1",
+        "try { Atomics.wait(new Int32Array(new SharedArrayBuffer(16)), 0, 0, 60000); event.value = 'waited'; } catch (e) { event.value = 'threw'; }",
+    );
+    assert_eq!(out.error, None, "{:?}", s.log_text());
+    assert_eq!(out.value, "threw");
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+}
+
+#[test]
+fn promise_callbacks_run_inside_the_script_that_queued_them_and_never_after_its_deadline() {
+    let s = Scripts::new();
+    // A callback runs within its own script's time.
+    let out = run(&s, "Format", "1", "Promise.resolve().then(function () { event.value = 'then'; });");
+    assert_eq!(out.value, "then");
+    // A chain that never ends is cut at the deadline ...
+    let t = Instant::now();
+    let out = s.run(job(
+        Event::new("Format", "Other", "1"),
+        "var n = 0; (function again() { n++; globalThis.leaked = n; Promise.resolve().then(again); })();",
+        vec![field("Other", "1")],
+        Duration::from_millis(200),
+    ));
+    assert_eq!(out.error, Some(ScriptError::Timeout), "{:?}", s.log_text());
+    assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+    // ... and none of it is left to run in the next script's time: that script starts on a fresh runtime.
+    let out = run(&s, "Format", "1", "var before = typeof leaked; var spin = 0; for (var i = 0; i < 2000; i++) spin++; event.value = before + ':' + (typeof leaked);");
+    assert_eq!(out.error, None, "{:?}", s.log_text());
+    assert_eq!(out.value, "undefined:undefined");
+}
+
+#[test]
+fn a_document_script_that_assigns_an_af_function_by_a_computed_name_gets_the_engine_path() {
+    for src in [
+        "this[\"AFNumber\" + \"_Format\"] = function () {};",
+        "globalThis['A' + 'FNumber_Format'] = function () {};",
+        "Object.defineProperty(this, 'AFNumber_Format', { value: function () {} });",
+        "Object.assign(this, { AFNumber_Format: function () {} });",
+        "var k = 'AFNumber_Format'; this[k] = function () {};",
+        "function AFNumber_Format() {}",
+        "this.AFNumber_Format = function () {};",
+        "const AFNumber_Format = () => {};",
+    ] {
+        assert!(DocScripts::new(vec![("s".into(), src.into())]).overrides_af, "{src}");
+    }
+    for src in ["var rate = 0.5; function vat(x) { return x * 1.25; }", "AFNumber_Format(2, 0, 0, 0, '$', true);"] {
+        assert!(!DocScripts::new(vec![("s".into(), src.into())]).overrides_af, "{src}");
+    }
+}
+
+#[test]
+fn bidi_controls_are_stripped_from_the_links_a_script_asks_for() {
+    let s = Scripts::new();
+    let out = run(&s, "Format", "1", "app.launchURL('https://example.com/\\u202Egpj.exe'); app.launchURL('mailto:a@b.se\\u2066');");
+    assert_eq!(
+        out.requests,
+        vec![Request::LaunchUrl { url: "https://example.com/gpj.exe".into() }, Request::LaunchUrl { url: "mailto:a@b.se".into() }]
+    );
 }
 
 #[test]
