@@ -56,11 +56,17 @@ numbers, rotated pages and pages with `/UserUnit` are left alone and listed as s
 Caveat: when the image pass runs (any image class that downsamples or re-encodes), MuPDF replaces the images and
 form XObjects it rewrites by new objects, which carry no `/Alternates` and no `/PieceInfo`. They are gone from such a
 copy whether or not the discard option is on; with every image class left as it is the pass does not run and the
-options remove exactly what they say.
+options remove exactly what they say. When the pass replaced anything and the file had image `/Alternates` or form
+`/PieceInfo` (counted after the discard step), the report carries the warning "Rewritten images lost their alternates
+and private data", and the sheet's hints for the two options say so.
 
 Unembedding keeps the font's description and widths; the subset tag (`ABCDEF+`) is dropped from the name. It is
 refused, with the reason in `unembedded.skipped` and a warning, for composite (Type0) fonts, symbolic fonts and
-fonts whose flags are missing, because a viewer cannot substitute those faithfully.
+fonts whose flags are missing, because a viewer cannot substitute those faithfully. The encoding has to be one a
+stand-in can follow: StandardEncoding, WinAnsiEncoding or MacRomanEncoding, alone or as the base of a `/Differences`
+list that names only Adobe Latin glyphs. A list naming `g12`, `glyph34` and the like, any other base encoding, and a
+Type 1 font with no `/Encoding` stay embedded (a TrueType font with no `/Encoding` is read as Standard). The text of a
+font that goes is drawn in a similar font: the sheet says so.
 
 ### Space usage
 
@@ -105,8 +111,14 @@ Reproduce: `cargo test --lib compress::tests::presets -- --nocapture --test-thre
   atomically (hard link, or exclusive create + copy on file systems without links), temp names are unique per job,
   so concurrent jobs on one input cannot corrupt each other; temp files are removed on any failure.
 - Cancel is polled per page and between stages; a cancelled job leaves no file behind.
-- The output is reopened, its page count checked, re-audited and render-compared (up to 8 pages, 96 ppi):
-  `visual.maxDiff`, `meanDiff`, `psnr`, per page.
+- The output is reopened, its page count checked, re-audited and render-compared (`visualPages` evenly spread pages,
+  at most 64, 0 skips the check; 96 ppi). Pages the run flattened and pages set in an unembedded font are always
+  added (at most 24 of them, spread over the list): `visual.maxDiff`, `meanDiff`, `psnr`, `worstPage`, per page.
+  The result screen says "Looks the same" up to a difference of 8 of 255, "Slightly different" up to 64, and
+  "Looks different, check page N" (red) above that or when the PSNR is under 30.
+- A named-destination tree that cannot be read skips the invalid-links pass (warning), it does not make every named
+  link look broken. A signed document is flagged in the audit reply (`signed`) so the sheet warns before Start.
+- The presets file is read up to 1 MB; an out-of-range `visualPages` in it is clamped to 64.
 - Text-only PDFs do not grow; text of every study sample is identical after every preset.
 - Encrypted input needs the password (`needs-password`) and the output stays encrypted.
 
