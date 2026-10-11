@@ -662,6 +662,8 @@ pub enum WarningCode {
     /// A later update names a second cross-reference table (/XRefStm), which readers may resolve
     /// differently.
     HybridXref,
+    /// MuPDF had to repair the file to read it: other readers may show it differently.
+    Damaged,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -725,13 +727,17 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
     }
     let mut infos: Vec<SignatureInfo> = fields.iter().map(|f| info(f, bytes, trust)).collect();
     // An intact signature must belong to its field in the bytes it signs (see `bound`) before it
-    // can vouch for anything below.
-    for (f, i) in fields.iter().zip(infos.iter_mut()) {
+    // can vouch for anything below. `signed_then[k]`: the widgets already signed in those bytes.
+    let mut signed_then: Vec<std::collections::HashSet<i32>> = vec![Default::default(); fields.len()];
+    for (k, (f, i)) in fields.iter().zip(infos.iter_mut()).enumerate() {
         if !i.intact {
             continue;
         }
         match bound(f, doc, bytes) {
-            Ok(certify) => i.certify = certify,
+            Ok((certify, then)) => {
+                i.certify = certify;
+                signed_then[k] = then;
+            }
             Err(why) => {
                 i.status = Status::Invalid;
                 i.intact = false;
@@ -744,6 +750,8 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
     // Where each intact signature's revision ends. A later revision counts as "only a
     // signature" when it ends at one of these AND adds nothing but what a signature adds.
     let intact_ends: Vec<usize> = fields.iter().zip(&infos).filter(|(_, i)| i.intact).filter_map(|(f, _)| covered(f)).collect();
+    // ... and their signature dictionaries: every signature a later revision adds must be one of them.
+    let intact_values: std::collections::HashSet<i32> = fields.iter().zip(&infos).filter(|(_, i)| i.intact).filter_map(|(f, _)| f.value.as_ref().and_then(ind)).collect();
     let mut verdicts: std::collections::HashMap<(usize, usize), bool> = std::collections::HashMap::new();
     for (f, i) in fields.iter().zip(infos.iter_mut()) {
         let Some(covered) = covered(f).filter(|_| i.intact) else { continue };
@@ -758,7 +766,7 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
         }
         // A hybrid file's second cross-reference table (/XRefStm) is read by some readers and not
         // others, so an update that names one may show them different files.
-        if bytes[covered.min(bytes.len())..].windows(8).any(|w| w == b"/XRefStm") {
+        if hybrid_after(doc, &bytes[covered.min(bytes.len())..]) {
             only_sigs = false;
             i.warnings.push(Warning::new(WarningCode::HybridXref, "A later update adds a second cross-reference table, which other PDF readers may read differently."));
         }
@@ -768,7 +776,7 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
                 break;
             }
             only_sigs = intact_ends.iter().any(|s| s.abs_diff(e) <= 2)
-                && *verdicts.entry((prev, e)).or_insert_with(|| signature_only_revision(&bytes[..prev], &bytes[..e]).unwrap_or(false));
+                && *verdicts.entry((prev, e)).or_insert_with(|| signature_only_revision(&bytes[..prev], &bytes[..e], &intact_values).unwrap_or(false));
             prev = e;
         }
         // Bytes after the last %%EOF are an update too (MuPDF loads one without %%EOF through its
@@ -778,13 +786,17 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
         }
         i.changes = if only_sigs { Changes::SignaturesOnly } else { Changes::Changed };
     }
-    // A later signature's visible box draws over the page this one signed (it can hide or
-    // "correct" what was signed), so every earlier signature says so.
+    // A signature box that wasn't signed yet in the bytes this one signs draws over its page (it
+    // can hide or "correct" what was signed), so this one says so, whether or not that later
+    // signature is valid.
     for k in 0..fields.len() {
-        let Some(mine) = covered(&fields[k]).filter(|_| infos[k].intact) else { continue };
+        if !infos[k].intact {
+            continue;
+        }
         let mut found = Vec::new();
-        for (g, j) in fields.iter().zip(&infos) {
-            if j.intact && !g.hidden && g.cover > 0.0 && covered(g).is_some_and(|e| e > mine) {
+        for g in &fields {
+            let later = ind(&g.widget).is_none_or(|w| !signed_then[k].contains(&w));
+            if g.value.is_some() && later && !g.hidden && g.cover > 0.0 {
                 let page = g.page + 1;
                 found.push(Warning::new(WarningCode::LaterBox, format!("A later signature added a visible box on page {page}.")));
                 if g.cover > 0.25 {
@@ -799,8 +811,11 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
         }
     }
     if repaired(doc) {
-        for i in infos.iter_mut().filter(|i| i.intact && i.changes != Changes::None) {
-            i.changes = Changes::Changed;
+        for i in infos.iter_mut().filter(|i| i.intact) {
+            if i.changes != Changes::None {
+                i.changes = Changes::Changed;
+            }
+            i.warnings.push(Warning::new(WarningCode::Damaged, "The file is damaged and was repaired to read it, so other PDF readers may show it differently."));
         }
     }
     for i in &mut infos {
@@ -814,8 +829,8 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
 /// dictionary as its value, and the dictionary must read the same there, nested objects
 /// included. Otherwise a field added later could show a copy of someone else's signature, or
 /// point at it. Returns the DocMDP level when that revision's catalog names this signature as
-/// its certification.
-fn bound(f: &SigField, doc: &PdfDocument, bytes: &[u8]) -> std::result::Result<Option<u8>, &'static str> {
+/// its certification, and the widgets already signed in that revision.
+fn bound(f: &SigField, doc: &PdfDocument, bytes: &[u8]) -> std::result::Result<(Option<u8>, std::collections::HashSet<i32>), &'static str> {
     const UNBOUND: &str = "it is not part of the revision it signs";
     let v = f.value.as_ref().ok_or(UNBOUND)?;
     let (Some(vn), Some(wn), Some(fnum), Some(end)) = (ind(v), ind(&f.widget), ind(&f.field), out_covered(v)) else { return Err(UNBOUND) };
@@ -840,7 +855,8 @@ fn bound(f: &SigField, doc: &PdfDocument, bytes: &[u8]) -> std::result::Result<O
         return Err("its signature dictionary was changed after signing");
     }
     let perms = then.catalog().ok().and_then(|c| c.get_dict("Perms").ok().flatten()).and_then(|p| p.get_dict("DocMDP").ok().flatten());
-    Ok(if perms.as_ref().and_then(ind) == Some(vn) { Some(docmdp_of(v).unwrap_or(2)) } else { None })
+    let certify = if perms.as_ref().and_then(ind) == Some(vn) { Some(docmdp_of(v).unwrap_or(2)) } else { None };
+    Ok((certify, fields.iter().filter(|g| g.value.is_some()).filter_map(|g| ind(&g.widget)).collect()))
 }
 
 /// Object `n` printed with every reference followed (each object once, streams by their raw
@@ -927,6 +943,136 @@ fn keys_within(o: &PdfObject, allowed: &[&str]) -> bool {
     })
 }
 
+/// Whether the file, or any update in `after` (the bytes after a signature), names a second
+/// cross-reference table: every trailer dictionary there is parsed, so an escaped name
+/// (`/XRef#53tm`) counts too. A "trailer" inside a stream only errs towards "changed".
+fn hybrid_after(doc: &PdfDocument, after: &[u8]) -> bool {
+    let named = |t: &PdfObject| t.get_dict("XRefStm").ok().flatten().is_some();
+    if doc.trailer().is_ok_and(|t| named(&t)) {
+        return true;
+    }
+    let mut i = 0;
+    while let Some(p) = after[i..].windows(7).position(|w| w == b"trailer") {
+        let start = i + p + 7;
+        let end = after[start..].windows(9).position(|w| w == b"startxref").map_or(after.len(), |q| start + q);
+        let text = String::from_utf8_lossy(&after[start..end]);
+        match doc.new_object_from_str(text.trim()) {
+            Ok(t) if t.is_dict().unwrap_or(false) => {
+                if named(&t) {
+                    return true;
+                }
+            }
+            // A trailer that doesn't parse: not judged harmless.
+            _ => return true,
+        }
+        i = start;
+    }
+    false
+}
+
+/// The cross-reference entries the last section of `next` lists (the update `next` ends with,
+/// which must start at or after `from`): `(number, type, field 2, field 3)`, types as in an
+/// xref stream (0 free, 1 at an offset, 2 in an object stream at an index). `None` if it can't
+/// be read.
+pub(super) fn update_entries(b: &PdfDocument, next: &[u8], from: usize) -> Option<Vec<(i32, u8, u64, u64)>> {
+    let at = next.windows(9).rposition(|w| w == b"startxref")? + 9;
+    let num = |s: &[u8]| -> Option<(u64, usize)> {
+        let skip = s.iter().take_while(|c| c.is_ascii_whitespace()).count();
+        let len = s[skip..].iter().take_while(|c| c.is_ascii_digit()).count();
+        Some((std::str::from_utf8(&s[skip..skip + len]).ok()?.parse().ok()?, skip + len))
+    };
+    let (off, _) = num(&next[at..])?;
+    let off = usize::try_from(off).ok().filter(|o| *o >= from && *o < next.len())?;
+    let mut out = Vec::new();
+    if next[off..].starts_with(b"xref") {
+        let mut i = off + 4;
+        loop {
+            let skip = next[i..].iter().take_while(|c| c.is_ascii_whitespace()).count();
+            i += skip;
+            if next[i..].starts_with(b"trailer") {
+                return Some(out);
+            }
+            let (start, l1) = num(&next[i..])?;
+            let (count, l2) = num(&next[i + l1..])?;
+            i += l1 + l2;
+            for k in 0..count {
+                i += next[i..].iter().take_while(|c| c.is_ascii_whitespace()).count();
+                let (o, l1) = num(&next[i..])?;
+                let (g, l2) = num(&next[i + l1..])?;
+                i += l1 + l2;
+                i += next[i..].iter().take_while(|c| c.is_ascii_whitespace()).count();
+                let kind = match next.get(i)? {
+                    b'n' => 1,
+                    b'f' => 0,
+                    _ => return None,
+                };
+                i += 1;
+                out.push((i32::try_from(start + k).ok()?, kind, o, g));
+                if out.len() > 10_000_000 {
+                    return None;
+                }
+            }
+        }
+    }
+    // An xref stream: its own object, read through MuPDF (filters decoded).
+    let (n, _) = num(&next[off..])?;
+    let xs = b.new_indirect(i32::try_from(n).ok()?, 0).ok()?;
+    let w: Vec<usize> = xs.get_dict("W").ok()??.array_iter().ok()?.map(|x| x.ok()?.as_int().ok().map(|v| v as usize)).collect::<Option<_>>()?;
+    let [w1, w2, w3] = w[..] else { return None };
+    if w1 > 8 || w2 > 8 || w3 > 8 {
+        return None;
+    }
+    let size = xs.get_dict("Size").ok()??.as_int().ok()? as i64;
+    let index: Vec<i64> = match xs.get_dict("Index").ok()? {
+        Some(ix) => ix.array_iter().ok()?.map(|x| x.ok()?.as_int().ok().map(i64::from)).collect::<Option<_>>()?,
+        None => vec![0, size],
+    };
+    let data = xs.read_stream().ok()?;
+    let field = |b: &[u8]| b.iter().fold(0u64, |acc, &x| (acc << 8) | x as u64);
+    let mut at = 0;
+    for pair in index.chunks(2) {
+        let [start, count] = pair[..] else { return None };
+        for k in 0..count {
+            let row = data.get(at..at + w1 + w2 + w3)?;
+            at += w1 + w2 + w3;
+            let kind = if w1 == 0 { 1 } else { field(&row[..w1]) };
+            out.push((i32::try_from(start + k).ok()?, u8::try_from(kind).ok()?, field(&row[w1..w1 + w2]), field(&row[w1 + w2..])));
+            if out.len() > 10_000_000 {
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The `n g obj` header at `offset` of `b`.
+fn obj_header(b: &[u8], offset: u64) -> Option<(i64, i64)> {
+    let s = b.get(usize::try_from(offset).ok()?..)?;
+    let head = String::from_utf8_lossy(&s[..s.len().min(48)]);
+    let mut t = head.split_ascii_whitespace();
+    let (n, g) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?);
+    t.next()?.starts_with("obj").then_some((n, g))
+}
+
+/// Whether object `n`, listed in object stream `stm` at `index`, is really the object at that
+/// index, and the stream lists no number twice. MuPDF finds an object in a stream by its number
+/// (the first copy) while other readers take the index: a stream with two copies of one object
+/// shows them different objects.
+fn in_objstm(b: &PdfDocument, n: i32, stm: u64, index: u64) -> Option<bool> {
+    let s = b.new_indirect(i32::try_from(stm).ok()?, 0).ok()?;
+    let count = s.get_dict("N").ok()??.as_int().ok()?;
+    let first = usize::try_from(s.get_dict("First").ok()??.as_int().ok()?).ok()?;
+    let data = s.read_stream().ok()?;
+    let head = std::str::from_utf8(data.get(..first)?).ok()?;
+    let nums: Vec<i64> = head.split_ascii_whitespace().map(|t| t.parse().ok()).collect::<Option<_>>()?;
+    if nums.len() != 2 * usize::try_from(count).ok()? {
+        return Some(false);
+    }
+    let objs: Vec<i64> = nums.iter().step_by(2).copied().collect();
+    let unique: std::collections::HashSet<i64> = objs.iter().copied().collect();
+    Some(unique.len() == objs.len() && objs.get(usize::try_from(index).ok()?) == Some(&i64::from(n)))
+}
+
 /// Adds the object numbers the printed object `s` refers to (`n g R`, whatever the generation:
 /// MuPDF ignores it). Digits inside a string may count too, which only errs towards "changed".
 fn refs(s: &str, out: &mut std::collections::HashSet<i32>) {
@@ -953,7 +1099,7 @@ const FIELD_KEYS: &[&str] = &["FT", "T", "TU", "V", "Kids", "Ff"];
 /// may sign an empty signature field in place (its value, appearance and flags only). Anything
 /// else (another catalog, a new annotation, changed page content, form settings) means the
 /// document was changed.
-pub(super) fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> {
+pub(super) fn signature_only_revision(prev: &[u8], next: &[u8], intact: &std::collections::HashSet<i32>) -> Result<bool> {
     use std::collections::{HashMap, HashSet};
     let a = PdfDocument::from_bytes(prev).map_err(pdf_err)?;
     let b = PdfDocument::from_bytes(next).map_err(pdf_err)?;
@@ -966,6 +1112,11 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> 
     let encrypt = |t: &PdfObject| t.get_dict("Encrypt").ok().flatten().map(|e| e.to_string());
     let Some(catalog_num) = root(&ta).filter(|r| root(&tb) == Some(*r)) else { return Ok(false) };
     if encrypt(&ta) != encrypt(&tb) {
+        return Ok(false);
+    }
+    // The rest of the trailer too (/Info, ...): only the links between sections change.
+    const SECTION: &[&str] = &["Prev", "Size", "ID", "XRefStm"];
+    if without(&ta, SECTION).is_none() || without(&ta, SECTION) != without(&tb, SECTION) {
         return Ok(false);
     }
     let get = |d: &PdfDocument, n: i32| d.xref_object(n).ok().flatten();
@@ -996,6 +1147,10 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> 
     for f in sig_fields(&b)?.into_iter().filter(|f| f.value.is_some() && !old.contains(&f.name)) {
         let v = f.value.as_ref().expect("filtered");
         let (Some(w), Some(p), Some(vn)) = (ind(&f.widget), ind(&f.field), ind(v)) else { return Ok(false) };
+        // Only signatures that verify: an invalid one vouches for nothing it adds.
+        if !intact.contains(&vn) {
+            return Ok(false);
+        }
         // Signed in this revision: it covers exactly up to the revision's end.
         let end = out_covered(v).unwrap_or(usize::MAX);
         if end > next.len() || !next[end..].iter().all(u8::is_ascii_whitespace) {
@@ -1086,6 +1241,23 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> 
         let stream = if is_stream(d, n) { d.new_indirect(n, 0).ok()?.read_raw_stream().ok()? } else { Vec::new() };
         Some((o.to_string(), stream))
     };
+    // What this update's cross-reference section lists. An object at an offset must be the object
+    // written there, number and generation (a reader that checks the generation would read a
+    // mismatch as null; MuPDF repairs a wrong number, caught above). An object placed in an object
+    // stream must be the one at that index, since MuPDF takes the first copy of a number there and
+    // other readers the index.
+    let Some(entries) = update_entries(&b, next, prev.len()) else { return Ok(false) };
+    for &(n, kind, f2, f3) in &entries {
+        let ok = match kind {
+            0 => true,
+            1 => n == 0 || obj_header(next, f2) == Some((i64::from(n), f3 as i64)),
+            2 => in_objstm(&b, n, f2, f3) == Some(true),
+            _ => false,
+        };
+        if !ok {
+            return Ok(false);
+        }
+    }
     let (count_a, count_b) = (a.xref_len().map_err(pdf_err)? as i32, b.xref_len().map_err(pdf_err)? as i32);
     // Every object takes some bytes: a table far larger than the file is only there to cost time.
     if count_b < count_a || count_b as usize > next.len() / 4 + 1024 {
@@ -1343,24 +1515,26 @@ fn hex_decode(h: &[u8]) -> Vec<u8> {
 }
 
 /// The final status of an intact signature once its later changes are known, and its summary.
-/// A certification is broken by any later revision at P=1, and at P=2 or 3 by anything but added
-/// signatures (form fill and comments aren't told apart from other edits, so they count too).
+/// A certification is broken by any later revision at P=1. At P=2 or 3 form filling (and at 3
+/// comments) are allowed, which Inkwell doesn't tell apart from other edits: a change after it is
+/// reported as a change, and the certification is not called broken.
 fn finish(s: &mut SignatureInfo) {
     if !matches!(s.status, Status::Valid | Status::UnknownSigner) {
         return;
     }
-    let broken = match s.certify {
-        Some(1) => s.changes != Changes::None,
-        Some(_) => s.changes == Changes::Changed,
-        None => false,
-    };
+    let broken = s.certify == Some(1) && s.changes != Changes::None;
     if broken {
         s.status = Status::Invalid;
         s.summary = "The signature is not valid: the document was changed after it was certified, which the certification does not allow.".into();
         return;
     }
     if s.changes == Changes::Changed {
-        s.warnings.insert(0, Warning::new(WarningCode::Changed, "The document was changed after it was signed."));
+        let text = match s.certify {
+            Some(2) => "The document was changed after it was certified. The certification allows filling in forms; Inkwell can't tell whether that is all that changed.",
+            Some(3) => "The document was changed after it was certified. The certification allows filling in forms and adding comments; Inkwell can't tell whether that is all that changed.",
+            _ => "The document was changed after it was signed.",
+        };
+        s.warnings.insert(0, Warning::new(WarningCode::Changed, text));
     }
     let trust = if s.trusted { format!("signed by {}", s.signer) } else { format!("but the signer is not trusted: {}", s.trust_note) };
     let only_sigs = if s.changes == Changes::SignaturesOnly { " Only signatures were added after it." } else { "" };
@@ -1379,4 +1553,11 @@ fn finish(s: &mut SignatureInfo) {
     } else {
         format!("The signature is intact, {trust}. {}", cautions.join(" "))
     };
+}
+
+/// Every signature dictionary in `bytes`, valid or not (tests judge one revision by hand).
+#[cfg(test)]
+pub(super) fn values(bytes: &[u8]) -> std::collections::HashSet<i32> {
+    let d = PdfDocument::from_bytes(bytes).unwrap();
+    sig_fields(&d).unwrap().iter().filter_map(|f| f.value.as_ref().and_then(ind)).collect()
 }

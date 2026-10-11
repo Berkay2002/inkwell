@@ -155,7 +155,7 @@ export function detailLines(name: string, d: Date, reason: string, location = ""
 }
 
 /** A caution about an intact signature: changed after signing, a SHA-1 hash, a later visible box. */
-export type WarningCode = "changed" | "sha1" | "laterBox" | "laterBoxLarge" | "hybridXref";
+export type WarningCode = "changed" | "sha1" | "laterBox" | "laterBoxLarge" | "hybridXref" | "damaged";
 export interface Warning {
   code: WarningCode;
   text: string;
@@ -385,7 +385,8 @@ export const useSign = create<SignStore>((set, get) => {
       try {
         const ids = await signApi.identities();
         const keep = ids.some((i) => idKey(i) === get().idChoice);
-        const first = ids.find((i) => !i.unusable);
+        // A Windows store ID is the user's own certificate: never picked for them.
+        const first = ids.find((i) => !i.unusable && i.source !== "store");
         set({ ids, idsLoaded: true, idChoice: keep ? get().idChoice : first ? idKey(first) : null });
       } catch {
         set({ idsLoaded: true });

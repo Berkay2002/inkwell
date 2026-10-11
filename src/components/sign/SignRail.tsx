@@ -306,7 +306,7 @@ function Card({ x, onOpen }: { x: SignatureInfo; onOpen: () => void }) {
           ))}
           {x.intact && !x.trusted && x.trustNote && <span className="dim">Signature intact · {x.trustNote}.</span>}
           <span className="dim">
-            Signed {pdfDate(x.time)} · page {x.page + 1}
+            Signed {pdfDate(x.time)} per the signer&apos;s clock · page {x.page + 1}
           </span>
           {x.reason && <span className="dim">Reason: {x.reason}</span>}
         </span>

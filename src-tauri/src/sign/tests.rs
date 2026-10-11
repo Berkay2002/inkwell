@@ -330,9 +330,11 @@ fn signed(test: &str, certify: Option<u8>) -> Vec<u8> {
 
 #[test]
 fn a_change_after_certifying_breaks_the_certification() {
-    for p in [1, 2] {
+    // P=1 allows nothing: broken. P=2 allows form filling, which isn't told apart from this comment:
+    // reported as a change after certifying, not as a broken certification.
+    for (p, status) in [(1, Status::Invalid), (2, Status::Warning)] {
         let s = &infos(&with_comment(&signed(&format!("certified-{p}"), Some(p))))[0];
-        assert_eq!((s.status, s.intact, s.changes, s.certify), (Status::Invalid, true, Changes::Changed, Some(p)), "P={p}: {s:?}");
+        assert_eq!((s.status, s.intact, s.changes, s.certify), (status, true, Changes::Changed, Some(p)), "P={p}: {s:?}");
         assert!(s.summary.contains("certified"), "{s:?}");
     }
 }
@@ -367,7 +369,8 @@ fn a_signature_only_revision_cannot_rewrite_existing_objects() {
     let prev = eng.current_bytes(id).unwrap();
     // A real second signature passes.
     sign_step(&eng, id, &ids().1, &req(0, [300.0, 600.0, 520.0, 680.0]), "B".into()).unwrap();
-    assert!(pdf::signature_only_revision(&prev, &eng.current_bytes(id).unwrap()).unwrap());
+    let next = eng.current_bytes(id).unwrap();
+    assert!(pdf::signature_only_revision(&prev, &next, &pdf::values(&next)).unwrap());
 
     let sig_value = |d: &mut PdfDocument| {
         let v = d.new_object_from_str("<</Type/Sig/Filter/Adobe.PPKLite/SubFilter/ETSI.CAdES.detached>>").unwrap();
@@ -384,7 +387,7 @@ fn a_signature_only_revision_cannot_rewrite_existing_objects() {
         contents.write_object(&w).unwrap();
         push_annot(d, page, contents);
     });
-    assert!(!pdf::signature_only_revision(&prev, &forged).unwrap());
+    assert!(!pdf::signature_only_revision(&prev, &forged, &pdf::values(&forged)).unwrap());
 
     // A new widget whose /Parent is the page: the page becomes the "field", and changes freely.
     let forged = append(&prev, |d| {
@@ -399,7 +402,7 @@ fn a_signature_only_revision_cannot_rewrite_existing_objects() {
         w.dict_put("P", page.clone()).unwrap();
         push_annot(d, page, w);
     });
-    assert!(!pdf::signature_only_revision(&prev, &forged).unwrap());
+    assert!(!pdf::signature_only_revision(&prev, &forged, &pdf::values(&forged)).unwrap());
 }
 
 #[test]
@@ -972,24 +975,149 @@ fn more_signatures_than_inkwell_checks_are_refused() {
 fn a_hybrid_cross_reference_update_is_a_change() {
     // The attacker's trailer names a second cross-reference table (/XRefStm, here the victim's
     // own): readers that take one or the other may see different files. MuPDF doesn't write the
-    // key, so it goes in by hand, and the signature's byte range grows to cover it.
+    // key, so it goes in by hand (also with an escaped name), and the byte range grows to cover it.
     let v = victim(&page1());
     let at = v.windows(9).rposition(|w| w == b"startxref").unwrap() + 9;
     let prev: String = v[at..].iter().skip_while(|c| c.is_ascii_whitespace()).take_while(|c| c.is_ascii_digit()).map(|&c| c as char).collect();
-    let out = attack(&v, &unseen(), |_, _| {});
-    let t = out.windows(7).rposition(|w| w == b"trailer").unwrap();
-    let open = t + out[t..].windows(2).position(|w| w == b"<<").unwrap() + 2;
-    let key = format!("/XRefStm {prev}");
-    let mut out = [&out[..open], key.as_bytes(), &out[open..]].concat();
+    let honest = attack(&v, &unseen(), |_, _| {});
+    for name in ["/XRefStm", "/XRef#53tm"] {
+        let t = honest.windows(7).rposition(|w| w == b"trailer").unwrap();
+        let open = t + honest[t..].windows(2).position(|w| w == b"<<").unwrap() + 2;
+        let key = format!("{name} {prev}");
+        let mut out = [&honest[..open], key.as_bytes(), &honest[open..]].concat();
+        fix_range(&mut out);
+        let (first, second) = verdicts(&resign(&out));
+        assert_eq!(second.status, Status::Valid, "{name}: {second:?}");
+        assert_eq!((first.status, first.changes), (Status::Warning, Changes::Changed), "{name}: {first:?}");
+        assert!(codes(&first).contains(&WarningCode::HybridXref), "{name}: {first:?}");
+    }
+}
+
+// ---- fourth review ---------------------------------------------------------------------------------
+
+/// The last signature's byte range stretched to the end of `out` (bytes were added after its value).
+fn fix_range(out: &mut [u8]) {
     let br = out.windows(11).rposition(|w| w == b"/ByteRange[").unwrap() + 11;
     let close = br + out[br..].iter().position(|&c| c == b']').unwrap();
     let n: Vec<usize> = std::str::from_utf8(&out[br..close]).unwrap().split_whitespace().map(|x| x.parse().unwrap()).collect();
-    let mut range = format!("0 {} {} {}", n[1], n[2], n[3] + key.len()).into_bytes();
+    let mut range = format!("0 {} {} {}", n[1], n[2], out.len() - n[2]).into_bytes();
     assert!(range.len() <= close - br);
     range.resize(close - br, b' ');
     out[br..close].copy_from_slice(&range);
-    let (first, second) = verdicts(&resign(&out));
+}
+
+/// The number after the last `startxref`.
+fn startxref(b: &[u8]) -> usize {
+    let at = b.windows(9).rposition(|w| w == b"startxref").unwrap() + 9;
+    let s: String = b[at..].iter().skip_while(|c| c.is_ascii_whitespace()).take_while(|c| c.is_ascii_digit()).map(|&c| c as char).collect();
+    s.parse().unwrap()
+}
+
+#[test]
+fn forged_an_invalid_signature_drawing_over_the_page() {
+    // Next to a real, invisible signature, the attacker's revision adds a second "signature" whose
+    // value is garbage and whose box covers the whole page. Its byte range copies the real one's,
+    // so it seems to end where a valid signature ends.
+    let v = victim(&page1());
+    let out = attack(&v, &unseen(), |d, _| {
+        let page = d.find_page(0).unwrap();
+        let sig = d.new_object_from_str("<</Type/Sig/Filter/Adobe.PPKLite/SubFilter/ETSI.CAdES.detached/ByteRange[0 4444444444 5555555555 6666666666]/Contents<00>>>").unwrap();
+        let sig = d.add_object(&sig).unwrap();
+        let form = d.new_object_from_str("<</Type/XObject/Subtype/Form/BBox[0 0 612 792]>>").unwrap();
+        let sheet = d.add_stream(&mupdf::Buffer::from_bytes(b"0 0 1 rg 0 0 612 792 re f").unwrap(), Some(&form), false).unwrap();
+        let mut w = d.new_object_from_str("<</Type/Annot/Subtype/Widget/FT/Sig/T(Seal)/F 4/Rect[0 0 612 792]>>").unwrap();
+        w.dict_put("V", sig).unwrap();
+        w.dict_put("P", page.clone()).unwrap();
+        let mut ap = d.new_dict().unwrap();
+        ap.dict_put("N", sheet).unwrap();
+        w.dict_put("AP", ap).unwrap();
+        let w = d.add_object(&w).unwrap();
+        push_annot(d, page, w.clone());
+        d.catalog().unwrap().get_dict("AcroForm").unwrap().unwrap().get_dict("Fields").unwrap().unwrap().array_push(w).unwrap();
+    });
+    // The garbage signature's byte range set to the real one's.
+    let fake = b"0 4444444444 5555555555 6666666666";
+    let at = out.windows(fake.len()).position(|w| w == fake).unwrap();
+    let real = out.windows(11).enumerate().filter(|(_, w)| *w == b"/ByteRange[").map(|(i, _)| i + 11).filter(|&i| i != at).last().unwrap();
+    let close = real + out[real..].iter().position(|&c| c == b']').unwrap();
+    let nums: Vec<String> = std::str::from_utf8(&out[real..close]).unwrap().split_whitespace().map(String::from).collect();
+    let mut range = nums.join(" ").into_bytes();
+    assert!(range.len() <= fake.len());
+    range.resize(fake.len(), b' ');
+    let mut out = out;
+    out[at..at + fake.len()].copy_from_slice(&range);
+    let forged = resign(&out);
+    let i = infos(&forged);
+    let seal = i.iter().find(|s| s.field == "Seal").unwrap_or_else(|| panic!("{i:?}"));
+    assert_eq!(seal.status, Status::Invalid, "{seal:?}");
+    let (first, second) = verdicts(&forged);
     assert_eq!(second.status, Status::Valid, "{second:?}");
     assert_eq!((first.status, first.changes), (Status::Warning, Changes::Changed), "{first:?}");
-    assert!(codes(&first).contains(&WarningCode::HybridXref), "{first:?}");
+    assert!(codes(&first).contains(&WarningCode::LaterBoxLarge), "{first:?}");
+}
+
+#[test]
+fn forged_a_second_copy_in_an_object_stream() {
+    // The attacker's revision ends in a cross-reference stream that puts the page tree node in an
+    // object stream at index 1. The stream holds the node twice: MuPDF reads the first copy (the
+    // real one, so nothing looks changed), a reader that follows the index gets the second (every
+    // page turned upside down).
+    let v = victim(&page1());
+    let pages = PdfDocument::from_bytes(&v).unwrap().catalog().unwrap().get_dict("Pages").unwrap().unwrap().as_indirect().unwrap();
+    let stm = std::cell::Cell::new(0);
+    let out = attack(&v, &unseen(), |d, _| {
+        let a = d.new_indirect(pages, 0).unwrap().resolve().unwrap().unwrap().to_string();
+        let b = format!("<</Rotate 180{}", &a[2..]);
+        let head = format!("{pages} 0 {pages} {} ", a.len() + 1);
+        let body = format!("{head}{a}\n{b}\n");
+        let dict = d.new_object_from_str(&format!("<</Type/ObjStn/N 2/First {}>>", head.len())).unwrap();
+        let s = d.add_stream(&mupdf::Buffer::from_bytes(body.as_bytes()).unwrap(), Some(&dict), false).unwrap();
+        stm.set(s.as_indirect().unwrap());
+    });
+    let mut out = out;
+    let at = v.len() + out[v.len()..].windows(6).position(|w| w == b"ObjStn").unwrap();
+    out[at..at + 6].copy_from_slice(b"ObjStm");
+    // The classic section becomes a cross-reference stream, with the page tree node moved.
+    let doc = PdfDocument::from_bytes(&out).unwrap();
+    let mut entries = pdf::update_entries(&doc, &out, v.len()).unwrap();
+    let x = startxref(&out);
+    assert!(out[x..].starts_with(b"xref"));
+    let t = out.windows(7).rposition(|w| w == b"trailer").unwrap();
+    let text = std::str::from_utf8(&out[t + 7..out.windows(9).rposition(|w| w == b"startxref").unwrap()]).unwrap().trim().to_string();
+    let mut xs = doc.new_object_from_str(&text).unwrap();
+    let size = xs.get_dict("Size").unwrap().unwrap().as_int().unwrap();
+    xs.dict_delete("Size").unwrap();
+    entries.retain(|e| e.0 != 0 && e.0 != pages);
+    entries.push((pages, 2, stm.get() as u64, 1));
+    entries.push((size, 1, x as u64, 0));
+    entries.sort();
+    let mut data = Vec::new();
+    for &(_, kind, f2, f3) in &entries {
+        data.push(kind);
+        data.extend_from_slice(&(f2 as u32).to_be_bytes());
+        data.extend_from_slice(&(f3 as u16).to_be_bytes());
+    }
+    let index: Vec<String> = entries.iter().map(|e| format!("{} 1", e.0)).collect();
+    let keep = xs.to_string();
+    let head = format!("{size} 0 obj\n<</Type/XRef/Size {}/W[1 4 2]/Index[{}]/Length {}{}\nstream\n", size + 1, index.join(" "), data.len(), &keep[2..]);
+    let tail = format!("\nendstream\nendobj\nstartxref\n{x}\n%%EOF\n");
+    let mut out = [&out[..x], head.as_bytes(), &data, tail.as_bytes()].concat();
+    fix_range(&mut out);
+    let forged = resign(&out);
+    let d = PdfDocument::from_bytes(&forged).unwrap();
+    assert!(d.new_indirect(pages, 0).unwrap().resolve().unwrap().unwrap().get_dict("Rotate").unwrap().is_none(), "MuPDF takes the first copy");
+    assert!(d.can_be_saved_incrementally(), "MuPDF reads it without repair");
+    assert_caught(&forged);
+}
+
+#[test]
+fn forged_the_info_dictionary_re_pointed() {
+    // The trailer's /Info re-pointed at another object: nothing else changes.
+    let v = victim(&page1());
+    let forged = attack(&v, &unseen(), |d, _| {
+        let pages = d.catalog().unwrap().get_dict("Pages").unwrap().unwrap();
+        d.trailer().unwrap().dict_put("Info", pages).unwrap();
+    });
+    assert!(forged[v.len()..].windows(5).any(|w| w == b"/Info"), "written");
+    assert_caught(&forged);
 }

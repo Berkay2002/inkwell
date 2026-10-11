@@ -199,10 +199,19 @@ pub(super) mod win {
 
     /// Build the chain for `cert`, helped by `extra` (may hold intermediates). Only the local
     /// caches are used for AIA and CRL URLs, so this never goes to the network; no revocation checks.
-    pub fn chain(cert: &Cert, extra: Option<&Store>, at: Option<SystemTime>) -> Result<Chain, SignError> {
+    /// With `signing`, every certificate in the chain must allow document signing or email
+    /// protection (a CA restricted to, say, server authentication doesn't vouch for a signature).
+    pub fn chain(cert: &Cert, extra: Option<&Store>, at: Option<SystemTime>, signing: bool) -> Result<Chain, SignError> {
         // SAFETY: zeroed CERT_CHAIN_PARA with cbSize set is the documented "no usage restriction" form.
         let mut para: CERT_CHAIN_PARA = unsafe { std::mem::zeroed() };
         para.cbSize = std::mem::size_of::<CERT_CHAIN_PARA>() as u32;
+        // Document signing, email protection: either will do. The strings outlive the call.
+        let mut usages = [c"1.3.6.1.4.1.311.10.3.12".as_ptr() as *mut u8, c"1.3.6.1.5.5.7.3.4".as_ptr() as *mut u8];
+        if signing {
+            para.RequestedUsage.dwType = USAGE_MATCH_TYPE_OR;
+            para.RequestedUsage.Usage.cUsageIdentifier = usages.len() as u32;
+            para.RequestedUsage.Usage.rgpszUsageIdentifier = usages.as_mut_ptr();
+        }
         let time = at.map(filetime);
         let mut out: *mut CERT_CHAIN_CONTEXT = null_mut();
         // SAFETY: all pointers are valid for the call; the chain context is returned to `out`.
@@ -229,7 +238,7 @@ pub(super) mod win {
             // A certificate Windows can't read only loses a possible intermediate.
             store.add_der(e.as_ref());
         }
-        let chain = chain(&signer, Some(&store), Some(at))?;
+        let chain = chain(&signer, Some(&store), Some(at), true)?;
         // SAFETY: zeroed policy structures with cbSize set, as the API documents.
         let (para, mut status) = unsafe {
             let mut para: CERT_CHAIN_POLICY_PARA = std::mem::zeroed();

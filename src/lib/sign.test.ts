@@ -133,6 +133,16 @@ describe("sign store", () => {
     expect(s().idChoice).toBe("s3");
   });
 
+  it("never picks a Windows store ID for the user", async () => {
+    useSign.setState({ idChoice: null });
+    reply({ sign_identities: [{ ...testId, handle: 7, source: "store" }] });
+    await s().loadIds();
+    expect(s().idChoice).toBeNull();
+    reply({ sign_identities: [{ ...testId, handle: 7, source: "store" }, testId] });
+    await s().loadIds();
+    expect(s().idChoice).toBe("s3");
+  });
+
   it("signs the draft with the sheet's options and shows the list after", async () => {
     useSign.setState({ ids: [testId], idChoice: "s3", reason: "Lease signed", lock: true, picture: true, saved: [saved("a", "signature")], pick: { signature: "a" } });
     s().setDraft(1, { page: 3, rect: [300, 600, 500, 680] });

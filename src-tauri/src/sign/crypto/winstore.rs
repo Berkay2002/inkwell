@@ -111,7 +111,7 @@ pub fn open_identity(fingerprint_hex: &str) -> Result<DigitalId, SignError> {
         .into_iter()
         .find(|c| fingerprint(c) == wanted)
         .ok_or_else(|| SignError::Crypto("that certificate is no longer in the Windows certificate store".into()))?;
-    let chain = super::trust::win::chain(&cert, None, None).map(|c: Chain| c.certs_der()).unwrap_or_default();
+    let chain = super::trust::win::chain(&cert, None, None, false).map(|c: Chain| c.certs_der()).unwrap_or_default();
     let others: Vec<Vec<u8>> = chain.into_iter().filter(|d| d != cert.der()).collect();
     identity(cert, others)
 }
