@@ -1318,6 +1318,23 @@ pub fn merge_doc(eng: &Engine, doc: DocId, into: i32, from: i32, source: EditSou
     eng.apply_custom(doc, "Merge regions".into(), source, false, |d| tags::merge(d, into, from))
 }
 
+/// Merges several regions into `into` (in the order given), as one undo step: a refusal part way leaves the
+/// document as it was.
+pub fn merge_many_doc(eng: &Engine, doc: DocId, into: i32, from: &[i32], source: EditSource) -> Result<EditState> {
+    if from.is_empty() || from.len() > 500 {
+        return Err(bad("choose between two and 500 regions to merge"));
+    }
+    eng.apply_custom(doc, "Merge regions".into(), source, false, |d| {
+        let mut pages = Vec::new();
+        for &f in from {
+            pages.extend(tags::merge(d, into, f)?);
+        }
+        pages.sort_unstable();
+        pages.dedup();
+        Ok(pages)
+    })
+}
+
 /// Splits a region before the content item with this MCID, as one undo step.
 pub fn split_doc(eng: &Engine, doc: DocId, xref: i32, at_mcid: i32, role: Option<&str>, source: EditSource) -> Result<EditState> {
     eng.apply_custom(doc, "Split region".into(), source, false, |d| tags::split(d, xref, at_mcid, role))

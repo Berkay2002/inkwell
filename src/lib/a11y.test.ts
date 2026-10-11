@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     onmessage: ((m: unknown) => void) | null = null;
   },
 }));
-vi.mock("./edit", () => ({ applyState: vi.fn() }));
+vi.mock("./edit", () => ({ applyState: vi.fn(), run: vi.fn() }));
 vi.mock("./api", () => ({ pickSave: vi.fn(), toolCancel: vi.fn(() => Promise.resolve()) }));
 
 import { invoke } from "@tauri-apps/api/core";

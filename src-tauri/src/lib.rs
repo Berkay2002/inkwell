@@ -1043,6 +1043,7 @@ pub fn run() {
             a11y::app::a11y_set_role,
             a11y::app::a11y_artifact,
             a11y::app::a11y_merge_regions,
+            a11y::app::a11y_merge_many,
             a11y::app::a11y_split_region,
             a11y::app::a11y_edit_tag,
             a11y::app::a11y_move_tag,

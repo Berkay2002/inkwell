@@ -17,7 +17,7 @@ export interface Finding {
   message: string;
 }
 
-export type FixKind = "title" | "displayDocTitle" | "language" | "tabOrder" | "fieldTooltips" | "figureAlt" | "autotag";
+export type FixKind = "title" | "displayDocTitle" | "language" | "tabOrder" | "fieldTooltips" | "figureAlt" | "autotag" | "metadata" | "parentTree";
 
 export interface RuleResult {
   rule: string;
@@ -59,6 +59,8 @@ export type Fix =
   | { fix: "fieldTooltips" }
   | { fix: "figureAlt"; xref: number; alt: string }
   | { fix: "autotag" }
+  | { fix: "metadata" }
+  | { fix: "parentTree" }
   | { fix: "many"; fixes: Fix[] };
 
 export const GROUPS = ["Document", "Page content", "Forms", "Alternate text", "Tables", "Lists", "Headings"] as const;
@@ -159,6 +161,10 @@ export function fixFor(x: RuleResult, lang: string): Fix | null {
       return { fix: "fieldTooltips" };
     case "autotag":
       return { fix: "autotag" };
+    case "metadata":
+      return { fix: "metadata" };
+    case "parentTree":
+      return { fix: "parentTree" };
     default:
       return null;
   }
@@ -177,6 +183,10 @@ export function fixEffect(x: RuleResult, file: string, lang: string): string | n
       return "Tabs through links and fields in structure order.";
     case "fieldTooltips":
       return "Gives each field a tooltip made from its name.";
+    case "metadata":
+      return "Adds the PDF/UA identification and the title to the XMP metadata.";
+    case "parentTree":
+      return "Rebuilds the links between the tags and the page content from the tag tree.";
     default:
       return null;
   }

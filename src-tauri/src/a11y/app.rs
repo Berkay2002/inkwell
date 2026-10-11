@@ -5,7 +5,7 @@ use super::autotag::Preview;
 use super::order::ReadingOrder;
 use super::tags::{TagNode, TagPatch};
 use super::{
-    Fix, Problem, Progress, Report, artifact_doc, check_doc, edit_tag_doc, fix_doc_with, merge_doc, move_tag_doc, preview_doc, reading_order_doc, reorder_doc,
+    Fix, Problem, Progress, Report, artifact_doc, check_doc, edit_tag_doc, fix_doc_with, merge_doc, merge_many_doc, move_tag_doc, preview_doc, reading_order_doc, reorder_doc,
     report_bytes, set_role_doc, split_doc, tag_problems_doc, tags_doc,
 };
 use crate::engine::edit::{EditSource, EditState};
@@ -154,6 +154,13 @@ pub async fn a11y_artifact(eng: Eng<'_>, doc: DocId, xref: i32) -> Result<EditSt
 pub async fn a11y_merge_regions(eng: Eng<'_>, doc: DocId, into: i32, from: i32) -> Result<EditState> {
     let eng = eng.inner().clone();
     blocking(move || merge_doc(&eng, doc, into, from, EditSource::User)).await
+}
+
+/// Merges the regions `from` into region `into`, in the order given, as one undo step.
+#[tauri::command]
+pub async fn a11y_merge_many(eng: Eng<'_>, doc: DocId, into: i32, from: Vec<i32>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || merge_many_doc(&eng, doc, into, &from, EditSource::User)).await
 }
 
 /// Splits a region before the content item with MCID `at_mcid`; the rest becomes a new region after it

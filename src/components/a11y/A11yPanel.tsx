@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MenuButton } from "../Menu";
-import { useA11y } from "../../lib/a11y";
+import { TREE_PAGES, type View, useA11y } from "../../lib/a11y";
+import { type MhGroup, matterhornGroups, uncheckedCheckpoints } from "../../lib/a11yDepthLogic";
 import {
   type Finding,
   type Group,
@@ -27,6 +28,8 @@ import { renderPage } from "../../lib/history";
 import { revealInFolder } from "../../recents";
 import type { DocState } from "../../store";
 import { Icon } from "../Icons";
+import { OrderTool } from "./OrderTool";
+import { TagsTree } from "./TagsTree";
 import "./a11y.css";
 
 const st = () => useA11y.getState();
@@ -36,6 +39,7 @@ const FIRST = 5;
 
 export function A11yPanel({ doc }: { doc: DocState }) {
   const open = useA11y((s) => s.open);
+  const view = useA11y((s) => s.view);
   const d = useA11y((s) => s.docs[doc.id]);
   const id = doc.id;
   const phase = d?.phase ?? "idle";
@@ -47,6 +51,16 @@ export function A11yPanel({ doc }: { doc: DocState }) {
     if (autoCheckDue(d, doc.rev)) void st().check(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, id, doc.rev, phase]);
+
+  // The Reading order tool follows the page in view; the tag tree is read again after every edit.
+  const tagScope = useA11y((s) => s.docs[doc.id]?.tags.scope);
+  const treeFollowsPage = (tagScope ?? (doc.pageCount > TREE_PAGES ? "page" : "doc")) === "page";
+  useEffect(() => {
+    if (open && view === "order") void st().loadOrder(id, doc.currentPage);
+  }, [open, view, id, doc.rev, doc.currentPage]);
+  useEffect(() => {
+    if (open && view === "tags") void st().loadTags(id);
+  }, [open, view, id, doc.rev, tagScope, treeFollowsPage ? doc.currentPage : -1]);
 
   if (!open) return null;
   const report = d?.report ?? null;
@@ -63,12 +77,61 @@ export function A11yPanel({ doc }: { doc: DocState }) {
             <Icon name="close" size={16} />
           </button>
         </div>
-        <div className="a11y-body">
-          {report ? <Body doc={doc} report={report} /> : <Waiting doc={doc} />}
+        <Tabs view={view} />
+        <div className="a11y-body" role="tabpanel" aria-label={VIEWS.find((v) => v.id === view)?.label}>
+          {view === "order" ? (
+            <OrderTool doc={doc} />
+          ) : view === "tags" ? (
+            <TagsTree doc={doc} />
+          ) : report ? (
+            view === "matterhorn" ? (
+              <MatterhornBody doc={doc} report={report} />
+            ) : (
+              <Body doc={doc} report={report} />
+            )
+          ) : (
+            <Waiting doc={doc} />
+          )}
         </div>
-        {report && <Foot doc={doc} report={report} />}
+        {report && (view === "check" || view === "matterhorn") && <Foot doc={doc} report={report} />}
       </section>
     </aside>
+  );
+}
+
+const VIEWS: { id: View; label: string }[] = [
+  { id: "check", label: "Check" },
+  { id: "matterhorn", label: "Matterhorn" },
+  { id: "order", label: "Reading order" },
+  { id: "tags", label: "Tags" },
+];
+
+function Tabs({ view }: { view: View }) {
+  const go = (e: React.KeyboardEvent, i: number) => {
+    const j = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : -1;
+    if (j < 0) return;
+    e.preventDefault();
+    const t = VIEWS[(j + VIEWS.length) % VIEWS.length];
+    st().setView(t.id);
+    requestAnimationFrame(() => document.getElementById(`a11y-tab-${t.id}`)?.focus());
+  };
+  return (
+    <div className="a11y-tabs" role="tablist" aria-label="Accessibility views">
+      {VIEWS.map((v, i) => (
+        <button
+          key={v.id}
+          id={`a11y-tab-${v.id}`}
+          role="tab"
+          aria-selected={view === v.id}
+          tabIndex={view === v.id ? 0 : -1}
+          className={view === v.id ? "a11y-tab on" : "a11y-tab"}
+          onClick={() => st().setView(v.id)}
+          onKeyDown={(e) => go(e, i)}
+        >
+          {v.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -171,6 +234,78 @@ function Body({ doc, report }: { doc: DocState; report: Report }) {
   );
 }
 
+/** The results by Matterhorn checkpoint: number, title, state and count; the failed ones open. */
+function MatterhornBody({ doc, report }: { doc: DocState; report: Report }) {
+  const d = useA11y((s) => s.docs[doc.id])!;
+  const groups = useMemo(() => matterhornGroups(report), [report]);
+  const unchecked = useMemo(() => uncheckedCheckpoints(groups), [groups]);
+  const stale = d.checkedRev !== doc.rev;
+  return (
+    <>
+      <Summary report={report} checking={d.phase === "checking"} />
+      {d.phase === "checking" && <Running doc={doc} what="check" />}
+      {stale && d.phase === "idle" && (
+        <p className="a11y-note">
+          The document changed since this check.{" "}
+          <button className="a11y-link" onClick={() => void st().check(doc.id)}>
+            Check again
+          </button>
+        </p>
+      )}
+      {d.error && (
+        <p className="a11y-error" role="alert">
+          {d.error}
+        </p>
+      )}
+      {groups.map((g) => (
+        <CheckpointView key={g.number ?? "other"} doc={doc} group={g} />
+      ))}
+      {unchecked.length > 0 && (
+        <details className="a11y-unchecked">
+          <summary>{unchecked.length} checkpoints have no automatic check</summary>
+          <ul>
+            {unchecked.map((c) => (
+              <li key={c.number}>
+                <span className="a11y-cp-n">{c.number}</span> {c.title}
+              </li>
+            ))}
+          </ul>
+          <p className="a11y-note">A person has to judge these (or Inkwell does not look at them yet).</p>
+        </details>
+      )}
+    </>
+  );
+}
+
+function CheckpointView({ doc, group }: { doc: DocState; group: MhGroup }) {
+  const key = `mh:${group.number ?? "other"}`;
+  const stored = useA11y((s) => s.docs[doc.id]?.collapsed[key]);
+  const open = stored === undefined ? group.status === "failed" : !stored;
+  const word = group.status === "failed" ? `${group.count} failed` : group.status === "manual" ? "to check" : group.status === "skipped" ? "skipped" : "passed";
+  return (
+    <section className={`a11y-group a11y-cp ${group.status}`}>
+      <button className="a11y-group-head" aria-expanded={open} onClick={() => st().setGroupClosed(doc.id, key, open)}>
+        <span className={open ? "chev open" : "chev"} aria-hidden="true">
+          <Icon name="right" size={12} />
+        </span>
+        {group.number && <span className="a11y-cp-n">{group.number}</span>}
+        <span className="a11y-cp-title">{group.title}</span>
+        <span className={`a11y-status ${group.status}`}>{word}</span>
+      </button>
+      {open && (
+        <>
+          {group.conditions.length > 0 && <p className="a11y-note a11y-cp-cond">Failure conditions: {group.conditions.join(", ")}</p>}
+          <ul className="a11y-rules">
+            {group.rules.map((x) => (
+              <Rule key={x.rule} doc={doc} x={x} />
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
 function Summary({ report, checking }: { report: Report; checking: boolean }) {
   const c = counts(report);
   const total = Math.max(1, report.results.length);
@@ -212,7 +347,7 @@ function GroupView({ doc, group }: { doc: DocState; group: Group }) {
 
 const GLYPH: Record<RuleResult["status"], string> = { passed: "✓", failed: "✕", manual: "!", skipped: "–" };
 
-function Rule({ doc, x }: { doc: DocState; x: RuleResult }) {
+export function Rule({ doc, x }: { doc: DocState; x: RuleResult }) {
   const lang = useA11y((s) => s.lang);
   const d = useA11y((s) => s.docs[doc.id])!;
   const [all, setAll] = useState(false);

@@ -328,6 +328,26 @@ fn merging_two_regions_joins_their_content_in_tree_order() {
 }
 
 #[test]
+fn merging_three_regions_is_one_undo_step() {
+    let path = file("merge-many", &doc3());
+    let (eng, id) = open(&path);
+    let steps = eng.history(id).unwrap().len();
+    merge_many_doc(&eng, id, 102, &[103, 104], EditSource::User).unwrap();
+    assert_eq!(eng.history(id).unwrap().len(), steps + 1);
+    let ro = reading_order_doc(&eng, id, 0).unwrap();
+    assert_eq!(ro.regions.iter().map(|r| (r.xref, r.mcids.clone())).collect::<Vec<_>>(), [(102, vec![0, 1, 2])]);
+    assert_consistent(&eng, id);
+    eng.undo(id).unwrap();
+    assert_eq!(region_xrefs(&eng, id, 0), [102, 103, 104]);
+    // A refusal part way (a missing region) leaves the document as it was and adds no step.
+    let steps = eng.history(id).unwrap().len();
+    assert!(merge_many_doc(&eng, id, 102, &[103, 999], EditSource::User).is_err());
+    assert_eq!(eng.history(id).unwrap().len(), steps);
+    assert_eq!(region_xrefs(&eng, id, 0), [102, 103, 104]);
+    assert!(merge_many_doc(&eng, id, 102, &[], EditSource::User).is_err());
+}
+
+#[test]
 fn splitting_a_region_makes_a_sibling_with_the_rest() {
     let mut s = doc3();
     s.pages[0].1 = "/P <</MCID 0>> BDC BT /F1 12 Tf 72 700 Td (One) Tj ET EMC /P <</MCID 1>> BDC BT /F1 12 Tf 72 680 Td (Two) Tj ET EMC /P <</MCID 2>> BDC BT /F1 12 Tf 72 660 Td (Three) Tj ET EMC".into();

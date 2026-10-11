@@ -440,3 +440,322 @@
     background: rgb(179 57 47 / 0.12);
   }
 }
+
+/* views: Check, Matterhorn, Reading order, Tags */
+.a11y-tabs {
+  display: flex;
+  gap: 2px;
+  flex: none;
+  padding: 0 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.a11y-tab {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 4px;
+  border-radius: 14px;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.a11y-tab:hover {
+  background: var(--accent-soft);
+}
+.a11y-tab.on {
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.a11y-tab:focus-visible,
+.a11y-ro-row:focus-visible,
+.a11y-tree:focus-visible,
+.a11y-ro-num:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Matterhorn checkpoints */
+.a11y-cp .a11y-group-head {
+  gap: 8px;
+}
+.a11y-cp-n {
+  flex: none;
+  min-width: 22px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.a11y-cp-title {
+  min-width: 0;
+  flex: 1;
+  font-weight: 600;
+}
+.a11y-cp .a11y-status {
+  margin-left: 0;
+}
+.a11y-cp-cond {
+  margin: 0 0 4px 30px;
+}
+.a11y-unchecked {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.a11y-unchecked summary {
+  cursor: pointer;
+  padding: 4px;
+}
+.a11y-unchecked ul {
+  margin: 4px 0;
+  padding: 0 0 0 4px;
+  list-style: none;
+}
+
+/* Reading order tool: the list */
+.a11y-order,
+.a11y-tags {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.a11y-order .a11y-btn,
+.a11y-tags .a11y-btn {
+  min-height: 28px;
+  padding: 0 12px;
+}
+.a11y-ro-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.a11y-ro-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 6px;
+  border-radius: 8px;
+  text-align: left;
+  line-height: 1.35;
+}
+.a11y-ro-row:hover {
+  background: var(--accent-soft);
+}
+.a11y-ro-row.selected {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.a11y-ro-n {
+  flex: none;
+  min-width: 22px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--accent);
+}
+.a11y-ro-role {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.a11y-ro-text {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.a11y-ro-lock {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border-strong);
+}
+.a11y-read {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.a11y-read summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.a11y-read-list {
+  margin: 8px 0 0;
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  line-height: 1.4;
+}
+.a11y-read-list li.selected {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ... and on the page */
+.a11y-ro-box {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: calc(2px / var(--z, 1));
+  outline: calc(1.5px / var(--z, 1)) solid color-mix(in srgb, var(--accent) 65%, transparent);
+  outline-offset: 0;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.a11y-ro-box:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.a11y-ro-box.selected {
+  outline-width: calc(2.5px / var(--z, 1));
+  outline-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.a11y-ro-box.target {
+  outline: calc(3px / var(--z, 1)) dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.a11y-ro-box.dragging {
+  opacity: 0.6;
+}
+.a11y-ro-num {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--accent-fg);
+  background: var(--accent);
+  box-shadow: 0 0 0 1.5px var(--surface);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.a11y-ro-box.dragging .a11y-ro-num {
+  cursor: grabbing;
+}
+
+/* Tags tree */
+.a11y-tree {
+  height: min(46vh, 360px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.a11y-tag {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  padding-right: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: default;
+}
+.a11y-tag:hover {
+  background: var(--accent-soft);
+}
+.a11y-tag.selected {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.a11y-tag-chev {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  color: var(--text-2);
+  transition: transform 120ms ease-out;
+}
+.a11y-tag-chev.none {
+  visibility: hidden;
+}
+.a11y-tag-chev.open {
+  transform: rotate(90deg);
+}
+.a11y-tag-role {
+  font-weight: 600;
+}
+.a11y-tag-map,
+.a11y-tag-n {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.a11y-tag-alt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-2);
+}
+.a11y-tag-bad {
+  flex: none;
+  margin-left: auto;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--surface);
+  background: var(--a11y-fail);
+}
+.a11y-tag-edit label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.a11y-tag-edit input[type="text"] {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 15px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+}
+.a11y-tag-edit input[type="text"]:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.a11y-tag-edit .a11y-select {
+  max-width: 100%;
+}
+.a11y-tag-edit fieldset {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px 10px;
+  max-height: 120px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.a11y-tag-edit .a11y-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
