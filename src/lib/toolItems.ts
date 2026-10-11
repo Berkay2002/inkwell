@@ -5,7 +5,9 @@ import { type DocState, useStore } from "../store";
 import { pickOpen } from "./api";
 import { keyOf } from "./recent";
 import { useConvert } from "./convertStore";
+import { useDocJs } from "./docJsStore";
 import { useMarks } from "./marksStore";
+import { createPortfolio, usePortfolio } from "./portfolioStore";
 import { useProtect } from "./protectStore";
 import { useSearch } from "./searchStore";
 import { type ToolItem } from "./toolsCatalog";
@@ -20,7 +22,7 @@ import { useTools } from "./toolsStore";
  * Preflight and the other optimize tools go in "optimize", form tools in their own group.
  * `doc` is the document the tool will run on; with null (the Home grid) only the metadata is used.
  */
-export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[] {
+export function toolItems(doc: Pick<DocState, "id" | "name"> | null, portfolio = false): ToolItem[] {
   const id = doc?.id;
   return [
     {
@@ -145,6 +147,17 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
       onSelect: () => useProtect.getState().open("security", id),
     },
     {
+      id: "doc-javascript",
+      group: "scripts",
+      icon: "code",
+      label: "Document JavaScript",
+      description: "See, edit or remove the scripts in this file",
+      detail: "Lists every script the file carries (document, page and open/save actions), shows which risky calls they mention, and lets you edit or remove them. Nothing runs while you look.",
+      keywords: "javascript script code action open save print launch url acrobat macro",
+      command: "doc-javascript",
+      onSelect: () => id !== undefined && useDocJs.getState().open(id),
+    },
+    {
       id: "export",
       group: "convert",
       icon: "share",
@@ -166,6 +179,32 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
       command: "create-pdf",
       onSelect: () => useConvert.getState().openCreate(),
     },
+    {
+      id: "create-portfolio",
+      group: "convert",
+      icon: "paperclip",
+      label: "Create PDF Portfolio",
+      description: "Bundle files of any kind into one PDF",
+      detail: "Pick any files (PDFs, Word, images, spreadsheets), and save them together as one PDF Portfolio that opens as a file list.",
+      keywords: "portfolio bundle package collection attach combine files folder",
+      command: "create-portfolio",
+      onSelect: () => void createPortfolio(),
+    },
+    // Only for a file that is a portfolio: the way back to its file list from the cover page.
+    ...(portfolio
+      ? [
+          {
+            id: "portfolio-files",
+            group: "convert",
+            icon: "paperclip",
+            label: "Portfolio files",
+            description: "Show the files inside this PDF Portfolio",
+            detail: "Switches from the cover page to the list of files in this portfolio, where each one can be opened or extracted.",
+            keywords: "portfolio files list cover attachments extract",
+            onSelect: () => id !== undefined && usePortfolio.getState().showCover(id, false),
+          } satisfies ToolItem,
+        ]
+      : []),
     {
       id: "compare",
       group: "check",
@@ -209,7 +248,7 @@ export function runTool(item: ToolItem) {
 }
 
 /** Tools that need no open document (Create starts from nothing). */
-const NO_DOC = new Set(["create"]);
+const NO_DOC = new Set(["create", "create-portfolio"]);
 
 /**
  * Home's grid: with a document open run the tool on it, otherwise ask for a file first (Create needs none),
