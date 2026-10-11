@@ -80,8 +80,14 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
 
 - Combine opens each file once for thumbnails (a second parse). The plan is asked for one at a time, 220 ms after the
   last change, and what it learned about a file (pages, bookmarks, first page size) is kept while the file's size and
-  time are the same, so editing a range does not parse the files again. A run opens every file, grafts it and closes
-  it before the next one. A file with no pages is left out ("has no pages").
+  time are the same, so editing a range does not parse the files again. A run reads each file's facts one at a time
+  (each is closed before the next), then opens a file only when its turn comes, grafts it and closes it, so the
+  files not reached yet are never held. A file with no pages is left out ("has no pages"), and so is any file that
+  fails at any step of reading (open, page count, outline, first page): only that file is marked Unreadable, never
+  the whole look. If a file changed between the plan and the run, the run stops with a message asking to add the
+  files again.
+- A capped read (an attachment unpacking past its limit) raises MuPDF's `FZ_ERROR_LIMIT`; callers match
+  `Error::is_limit()`, not the message text.
 - The form fields of every source bring their `/DR` resources (fonts) along, merged key by key; where two files name
   a font the same, the first one's is kept.
 - The sources' page labels are not carried into a combined file (the result has none until set in Page labels).

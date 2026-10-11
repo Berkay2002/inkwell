@@ -107,6 +107,14 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl Error {
+    /// A resource limit was hit (`FZ_ERROR_LIMIT`): a capped stream read past its cap, say. Match this
+    /// rather than the message text.
+    pub fn is_limit(&self) -> bool {
+        matches!(self, Error::MuPdf(e) if e.code == FZ_ERROR_LIMIT as i32)
+    }
+}
+
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Self::Io(err)

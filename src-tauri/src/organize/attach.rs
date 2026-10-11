@@ -222,7 +222,7 @@ pub fn read_data_capped(doc: &PdfDocument, id: &str, cap: usize) -> Result<(Stri
     }
     match stream.read_stream_capped(cap) {
         Ok(bytes) => Ok((meta.name, bytes)),
-        Err(e) if e.to_string().contains("larger than") => {
+        Err(e) if e.is_limit() => {
             Err(bad(format!("{} is over {} MB once unpacked, too large to open or save", meta.name, cap >> 20)))
         }
         Err(e) => Err(e.into()),

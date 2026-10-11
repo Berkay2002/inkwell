@@ -392,7 +392,7 @@ fz_buffer *mupdf_pdf_read_stream_capped(fz_context *ctx, pdf_obj *obj, size_t li
             if (n == 0)
                 break;
             if (n > limit - total)
-                fz_throw(ctx, FZ_ERROR_GENERIC, "stream is larger than %zu bytes", limit);
+                fz_throw(ctx, FZ_ERROR_LIMIT, "stream is larger than %zu bytes", limit);
             fz_append_data(ctx, buf, chunk, n);
             total += n;
         }
