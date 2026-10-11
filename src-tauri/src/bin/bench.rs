@@ -150,6 +150,7 @@ fn main() {
                 );
                 break;
             }
+            SearchEvent::Progress { .. } => {}
         }
     }
     println!("final RSS {:.0} MB", working_set_mb());

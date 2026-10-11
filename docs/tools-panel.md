@@ -67,7 +67,11 @@ subtitle and the card shows the shortcut. The panel, Home grid, pins and palette
   (`aria-pressed`, labelled "Pin X to the toolbar"). The hover card is `aria-hidden`: the same text is on the row.
 - Keyboard: focus starts in the search box; Up/Down move through the box and the rows, Home/End jump to the first/last
   (the box keeps Home/End for the caret), Enter runs, Esc closes and focus returns to the Tools button. A sidebar
-  toggled elsewhere (Ctrl+B, the toolbar's Pages and Outline buttons) hands the slot back and closes the panel.
+  toggled elsewhere (Ctrl+B, the toolbar's Pages and Outline buttons) hands the slot back and closes the panel; if
+  focus was inside the panel it moves to the Tools button (a layout cleanup in `AllToolsPanel`, so it holds for every
+  way of closing), and a rail or dialog that takes the focus afterwards keeps it.
+- Advanced search is not in `NO_DOC`: its rail (`SearchPanel`) and driver are only mounted with a document open, and
+  its box is bound to that document's search state, so it does nothing from Home.
 - `.ax-toggle` stays on the Tools button, so existing automation that clicks it still works.
 
 ## Checks

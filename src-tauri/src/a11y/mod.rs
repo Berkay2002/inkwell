@@ -416,7 +416,7 @@ fn opaque_glyph(n: &str) -> bool {
 
 /// Whether text in this font can be mapped to Unicode: a ToUnicode CMap, a standard encoding,
 /// or a predefined CJK collection.
-fn maps_to_unicode(f: &PdfObject) -> Result<bool> {
+pub(crate) fn maps_to_unicode(f: &PdfObject) -> Result<bool> {
     if f.get_dict("ToUnicode")?.is_some() {
         return Ok(true);
     }

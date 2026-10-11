@@ -107,6 +107,15 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl Error {
+    /// A capped stream read (`PdfObject::read_stream_capped`) passed its cap. This is the wrapper's own
+    /// code, so it is not confused with the other limits MuPDF raises as `FZ_ERROR_LIMIT`; match it
+    /// rather than the message text.
+    pub fn is_stream_cap(&self) -> bool {
+        matches!(self, Error::MuPdf(e) if e.code == mupdf_error_stream_cap as i32)
+    }
+}
+
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Self::Io(err)

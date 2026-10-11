@@ -93,11 +93,15 @@ pub struct Report {
     pub path: String,
 }
 
-/// A file that is going in.
+/// A file that is going in: opened only when its turn comes in `run`, so the files not reached yet are
+/// not held in memory.
 struct Source {
-    doc: PdfDocument,
+    path: String,
     pages: Vec<u32>,
     title: String,
+    /// The file's path, length and time as they were when the plan was made: a file that differs when its
+    /// turn comes is not the one that was planned.
+    key: Option<FactsKey>,
 }
 
 const TOC_SIZE: f32 = 12.0;
@@ -188,40 +192,63 @@ struct Facts {
     outline_nodes: u32,
     /// The first page's size in points.
     first_size: [f32; 2],
+    /// The answer depends on the file's bytes alone, so it may be kept while size and time are the same.
+    /// An open or read error may be a lock or a hiccup that passes: asked again, not remembered.
+    stable: bool,
 }
 
-/// An opened file the run grafts from.
-struct Opened {
-    doc: PdfDocument,
+/// A file that is left out for what it is (password, no copying, no pages).
+fn left_out(state: FileState, message: String) -> Facts {
+    Facts { state, message: Some(message), pages: 0, has_outline: false, has_fields: false, outline_nodes: 0, first_size: [0.0, 0.0], stable: true }
 }
 
-fn left_out(state: FileState, message: String) -> (Facts, Option<Opened>) {
-    (Facts { state, message: Some(message), pages: 0, has_outline: false, has_fields: false, outline_nodes: 0, first_size: [0.0, 0.0] }, None)
+/// A file that could not be read: left out now, asked again next time.
+fn failed(message: String) -> Facts {
+    Facts { stable: false, ..left_out(FileState::Unreadable, message) }
 }
 
-/// Opens `path` and reads what planning needs; the document comes back too when it can go in.
-fn facts_of(path: &str) -> Result<(Facts, Option<Opened>)> {
+/// Opens `path` to graft pages from. `Err` holds why the file cannot go in: its state and a reason that
+/// reads on after the file name.
+fn open_for_graft(path: &str) -> std::result::Result<PdfDocument, (FileState, String)> {
     let name = file_name(path);
     let src = match open_source(path, None) {
         Ok(d) => d,
-        Err(EngineError::NeedsPassword | EngineError::BadPassword) => {
-            return Ok(left_out(FileState::Encrypted, format!("{name} is password protected, so it is left out.")));
-        }
-        Err(e) => return Ok(left_out(FileState::Unreadable, format!("{name} could not be read ({e}), so it is left out."))),
+        Err(EngineError::NeedsPassword | EngineError::BadPassword) => return Err((FileState::Encrypted, format!("{name} is password protected"))),
+        Err(e) => return Err((FileState::Unreadable, format!("{name} could not be read ({e})"))),
     };
     if !crate::protect::Rights::from_p(src.permissions().bits() as i32).may_extract() {
-        return Ok(left_out(FileState::NoCopy, format!("{name} doesn't allow copying or page changes, so it is left out.")));
+        return Err((FileState::NoCopy, format!("{name} doesn't allow copying or page changes")));
     }
+    Ok(src)
+}
+
+/// What planning needs from an opened file; `None` when it has no pages.
+fn read_facts(src: &PdfDocument) -> Result<Option<Facts>> {
     let count = src.page_count()?.max(0) as u32;
     if count == 0 {
-        return Ok(left_out(FileState::Unreadable, format!("{name} has no pages, so it is left out.")));
+        return Ok(None);
     }
-    let outline = read_outline(&src)?;
+    let outline = read_outline(src)?;
     let has_outline = src.catalog()?.get_dict("Outlines")?.is_some_and(|o| !o.is_null().unwrap_or(true) && o.get_dict("First").ok().flatten().is_some());
     let has_fields = src.catalog()?.get_dict("AcroForm")?.and_then(|f| f.get_dict("Fields").ok().flatten()).is_some_and(|f| f.len().unwrap_or(0) > 0);
-    let first_size = page_size(&src, 0)?;
-    let facts = Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, outline_nodes: count_nodes(&outline), first_size };
-    Ok((facts, Some(Opened { doc: src })))
+    let first_size = page_size(src, 0)?;
+    Ok(Some(Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, outline_nodes: count_nodes(&outline), first_size, stable: true }))
+}
+
+/// Opens `path`, reads what planning needs and lets the document go again. A file that cannot be read
+/// (at any step) is left out on its own: it never fails the whole look.
+fn facts_of(path: &str) -> Facts {
+    let name = file_name(path);
+    let src = match open_for_graft(path) {
+        Ok(d) => d,
+        Err((FileState::Unreadable, why)) => return failed(format!("{why}, so it is left out.")),
+        Err((state, why)) => return left_out(state, format!("{why}, so it is left out.")),
+    };
+    match read_facts(&src) {
+        Ok(Some(f)) => f,
+        Ok(None) => left_out(FileState::Unreadable, format!("{name} has no pages, so it is left out.")),
+        Err(e) => failed(format!("{name} could not be read ({e}), so it is left out.")),
+    }
 }
 
 type FactsKey = (String, u64, Option<std::time::SystemTime>);
@@ -238,21 +265,24 @@ fn facts_key(path: &str) -> Option<FactsKey> {
 }
 
 /// The cached facts of `path`, or read now (and kept for the next look).
-fn facts_cached(path: &str) -> Result<Facts> {
+fn facts_cached(path: &str) -> Facts {
     let key = facts_key(path);
     if let Some(k) = &key {
         if let Some(f) = facts_cache().lock().ok().and_then(|c| c.get(k).cloned()) {
-            return Ok(f);
+            return f;
         }
     }
-    let (facts, _opened) = facts_of(path)?;
+    let facts = facts_of(path);
+    if !facts.stable {
+        return facts;
+    }
     if let (Some(k), Ok(mut c)) = (key, facts_cache().lock()) {
         if c.len() >= 256 {
             c.clear();
         }
         c.insert(k, facts.clone());
     }
-    Ok(facts)
+    facts
 }
 
 /// Decides what happens to every file, and what the result holds. `orders[i]` is the pages of file
@@ -327,31 +357,30 @@ fn plan_from(specs: &[SourceSpec], opt: CombineOptions, facts: &[Facts]) -> Resu
     Ok((Plan { files, pages, contents_pages: toc_pages, bookmarks, left_out, can_run, summary }, orders))
 }
 
-/// Opens every file for a run and decides what happens to it.
-fn prepare(specs: &[SourceSpec], opt: CombineOptions) -> Result<(Plan, Vec<Option<Source>>)> {
+/// Reads every file for a run, one at a time (each is let go before the next is opened), and decides what
+/// happens to it. The third part is the first page's size of the first file that goes in.
+fn prepare(specs: &[SourceSpec], opt: CombineOptions) -> Result<(Plan, Vec<Option<Source>>, Option<[f32; 2]>)> {
     if specs.is_empty() {
         return Err(bad("add at least one file to combine"));
     }
     let _ = mupdf::Context::get();
-    let mut facts = Vec::new();
-    let mut opened = Vec::new();
-    for s in specs {
-        let (f, o) = facts_of(&s.path)?;
-        facts.push(f);
-        opened.push(o);
-    }
+    // each key is taken before its file is read, so a change during the read shows up at the run
+    let seen: Vec<(Option<FactsKey>, Facts)> = specs.iter().map(|s| (facts_key(&s.path), facts_of(&s.path))).collect();
+    let facts: Vec<Facts> = seen.iter().map(|(_, f)| f.clone()).collect();
     let (plan, orders) = plan_from(specs, opt, &facts)?;
+    let mut first = None;
     let sources = specs
         .iter()
-        .zip(opened)
         .zip(orders)
         .zip(&plan.files)
-        .map(|(((_, o), order), f)| match (o, order) {
-            (Some(o), Some(pages)) => Some(Source { doc: o.doc, pages, title: f.title.clone() }),
-            _ => None,
+        .zip(seen)
+        .map(|(((s, order), f), (key, facts))| {
+            let pages = order?;
+            first.get_or_insert(facts.first_size);
+            Some(Source { path: s.path.clone(), pages, title: f.title.clone(), key })
         })
         .collect();
-    Ok((plan, sources))
+    Ok((plan, sources, first))
 }
 
 /// What a run would do, without writing anything. A file that has not changed since the last look
@@ -361,7 +390,7 @@ pub fn inspect(specs: &[SourceSpec], opt: CombineOptions) -> Result<Plan> {
         return Err(bad("add at least one file to combine"));
     }
     let _ = mupdf::Context::get();
-    let facts: Vec<Facts> = specs.iter().map(|s| facts_cached(&s.path)).collect::<Result<_>>()?;
+    let facts: Vec<Facts> = specs.iter().map(|s| facts_cached(&s.path)).collect();
     plan_from(specs, opt, &facts).map(|(p, _)| p)
 }
 
@@ -533,10 +562,52 @@ fn write_contents(doc: &mut PdfDocument, entries: &[(String, PdfObject, u32)], (
     Ok(made)
 }
 
+/// The new document with every source's pages in it.
+struct Grafted {
+    dst: PdfDocument,
+    /// The first page of each file that went in, in the new document.
+    tops: Vec<PdfObject>,
+    /// The outline each of them brought.
+    kept: Vec<Vec<OutNode>>,
+    /// (title, pages used) of every file that went in
+    done: Vec<(String, u32)>,
+}
+
+const CHANGED: &str = "Add the files again to see the new plan.";
+
+/// Grafts the planned sources into a new document, each opened when its turn comes and closed as soon as
+/// its pages are in, so big files are never all held at once. A file that is not the one that was planned
+/// (its length or time differ from when the plan was made, or its pages no longer fit) stops the run.
+fn graft_sources(sources: Vec<Option<Source>>, opt: CombineOptions) -> Result<Grafted> {
+    let mut dst = PdfDocument::new();
+    let mut tops: Vec<PdfObject> = Vec::new();
+    let mut kept: Vec<Vec<OutNode>> = Vec::new();
+    let mut done: Vec<(String, u32)> = Vec::new();
+    for s in sources.into_iter().flatten() {
+        let doc = open_for_graft(&s.path).map_err(|(_, why)| bad(format!("{why} now, so it can't be combined. {CHANGED}")))?;
+        // Checked right after the open: the handle is of the file this key was read from, or the key differs.
+        let changed = || bad(format!("{} has changed since it was added, so it can't be combined. {CHANGED}", file_name(&s.path)));
+        if facts_key(&s.path) != s.key {
+            return Err(changed());
+        }
+        // backstop: its pages must still be there
+        let count = doc.page_count()?.max(0) as u32;
+        if s.pages.iter().any(|&p| p >= count) {
+            return Err(changed());
+        }
+        let at = dst.page_count()?;
+        let g = graft_pages_ex(&mut dst, &doc, &s.pages, at, opt.keep_outlines)?;
+        tops.push(g.pages[0].clone());
+        kept.push(g.outline);
+        done.push((s.title, s.pages.len() as u32));
+    }
+    Ok(Grafted { dst, tops, kept, done })
+}
+
 /// Combines the files into a new PDF at `out` (replacing it) and reports what it holds.
 pub fn run(eng: &Engine, specs: &[SourceSpec], opt: CombineOptions, out: &str) -> Result<Report> {
     eng.check_not_open(out, None)?;
-    let (plan, sources) = prepare(specs, opt)?;
+    let (plan, sources, first) = prepare(specs, opt)?;
     if let Some(f) = plan.files.iter().find(|f| f.state == FileState::BadRange) {
         return Err(bad(f.message.clone().unwrap_or_else(|| "a page range does not fit its file".into())));
     }
@@ -546,25 +617,11 @@ pub fn run(eng: &Engine, specs: &[SourceSpec], opt: CombineOptions, out: &str) -
             _ => "Every file is left out (password protected, no copying allowed or unreadable), so there is nothing to combine.".into(),
         }));
     }
-    // The contents pages take the size of the first file's first page (as `inspect` assumed): read
-    // it before that file is let go.
-    let first = match sources.iter().flatten().next() {
-        Some(s) => page_size(&s.doc, 0)?,
-        None => return Err(bad("there is nothing to combine")),
+    // The contents pages take the size of the first file's first page, as `inspect` assumed.
+    let Some(first) = first else {
+        return Err(bad("there is nothing to combine"));
     };
-    let mut dst = PdfDocument::new();
-    let mut tops: Vec<PdfObject> = Vec::new();
-    let mut kept: Vec<Vec<OutNode>> = Vec::new();
-    // (title, pages used) of every file that went in
-    let mut done: Vec<(String, u32)> = Vec::new();
-    // Each source is closed as soon as its pages are in, so big files are not all held at once.
-    for s in sources.into_iter().flatten() {
-        let at = dst.page_count()?;
-        let g = graft_pages_ex(&mut dst, &s.doc, &s.pages, at, opt.keep_outlines)?;
-        tops.push(g.pages[0].clone());
-        kept.push(g.outline);
-        done.push((s.title, s.pages.len() as u32));
-    }
+    let Grafted { mut dst, tops, kept, done } = graft_sources(sources, opt)?;
     // Contents pages go in front; the page numbers they show count them.
     let mut toc_dest: Option<PdfObject> = None;
     if opt.contents_page {
@@ -596,7 +653,11 @@ pub fn run(eng: &Engine, specs: &[SourceSpec], opt: CombineOptions, out: &str) -
             top_nodes.insert(0, bookmark_node("Contents", Some(d), Vec::new()));
         }
     }
-    debug_assert_eq!(out_nodes(&top_nodes), plan.bookmarks);
+    // What the plan promised is what is written; a file changed under the run is stopped before this
+    // (`graft_sources`), so this is the backstop and never a panic.
+    if out_nodes(&top_nodes) != plan.bookmarks {
+        return Err(bad("a file changed while it was being combined. Add the files again to see the new plan."));
+    }
     write_outline(&mut dst, &top_nodes)?;
     // Adding the contents pages made MuPDF number the pages ("1", "1", "2" ...): the sources' own page
     // labels are not carried over, so the result has none until the person sets them.
@@ -612,6 +673,90 @@ pub fn run(eng: &Engine, specs: &[SourceSpec], opt: CombineOptions, out: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::fixture::{self, Fixture};
+    use std::time::{Duration, SystemTime};
+
+    const OPT: CombineOptions = CombineOptions { bookmarks: true, keep_outlines: true, contents_page: false };
+
+    fn scratch(test: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("inkwell-combine-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(d: &Path, name: &str, pages: usize, chapter_every: usize) -> String {
+        let p = d.join(name);
+        std::fs::write(&p, fixture::build(&Fixture { pages, chapter_every, ..Default::default() })).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    fn spec(path: &str) -> SourceSpec {
+        SourceSpec { path: path.into(), range: String::new(), title: None }
+    }
+
+    /// Plans `specs` and grafts at once, the way a run does, returning the message when it stops.
+    fn graft(specs: &[SourceSpec]) -> std::result::Result<u32, String> {
+        let (plan, sources, _) = prepare(specs, OPT).map_err(|e| e.to_string())?;
+        assert!(plan.can_run, "{:?}", plan.summary);
+        let g = graft_sources(sources, OPT).map_err(|e| e.to_string())?;
+        Ok(g.dst.page_count().unwrap().max(0) as u32)
+    }
+
+    #[test]
+    fn a_source_swapped_after_the_plan_is_not_combined() {
+        let d = scratch("swap");
+        let a = write(&d, "a.pdf", 2, 0);
+        let b = write(&d, "b.pdf", 3, 1);
+        let specs = [spec(&a), spec(&b)];
+
+        // untouched: all five pages go in
+        assert_eq!(graft(&specs), Ok(5));
+
+        // replaced by a file with the same pages and no bookmarks: the plan counted bookmarks that are
+        // not there any more (it used to be a debug assertion), so it stops
+        let (_, sources, _) = prepare(&specs, OPT).unwrap();
+        write(&d, "b.pdf", 3, 0);
+        let e = graft_sources(sources, OPT).err().expect("swapped file").to_string();
+        assert!(e.contains("b.pdf has changed"), "{e}");
+
+        // replaced by one with more pages
+        let (_, sources, _) = prepare(&specs, OPT).unwrap();
+        write(&d, "b.pdf", 6, 1);
+        let e = graft_sources(sources, OPT).err().expect("longer file").to_string();
+        assert!(e.contains("b.pdf has changed"), "{e}");
+
+        // the same bytes written again later: the time differs, so it is not the planned file either
+        write(&d, "b.pdf", 3, 1);
+        let (_, sources, _) = prepare(&specs, OPT).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&b).unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(30)).unwrap();
+        drop(f);
+        let e = graft_sources(sources, OPT).err().expect("touched file").to_string();
+        assert!(e.contains("b.pdf has changed"), "{e}");
+
+        // gone: says which file and that it can't be combined, no panic
+        let (_, sources, _) = prepare(&specs, OPT).unwrap();
+        std::fs::remove_file(&b).unwrap();
+        let e = graft_sources(sources, OPT).err().expect("deleted file").to_string();
+        assert!(e.contains("b.pdf") && e.contains("can't be combined"), "{e}");
+    }
+
+    #[test]
+    fn only_what_the_bytes_decide_is_remembered() {
+        let d = scratch("cache");
+        let good = write(&d, "good.pdf", 2, 0);
+        let junk = d.join("junk.pdf");
+        std::fs::write(&junk, b"not a pdf at all").unwrap();
+        let junk = junk.to_string_lossy().into_owned();
+        let remembered = |p: &str| facts_cache().lock().unwrap().contains_key(&facts_key(p).unwrap());
+
+        assert_eq!(facts_cached(&good).state, FileState::Ready);
+        assert!(remembered(&good));
+        // an open or read error may be a lock that passes: asked again next time
+        assert_eq!(facts_cached(&junk).state, FileState::Unreadable);
+        assert!(!remembered(&junk));
+    }
 
     #[test]
     fn ranges_keep_their_order_and_say_what_is_wrong() {

@@ -33,6 +33,7 @@ import { useStore } from "../store";
 import * as api from "./api";
 import type { MarkKindInfo } from "./api";
 import { useA11y } from "./a11y";
+import { usePreflight } from "./preflight";
 import { useConvert } from "./convertStore";
 import * as edits from "./edit";
 import { useForms } from "./forms";
@@ -251,11 +252,12 @@ describe("the sheet", () => {
     expect(useProtect.getState().sheet).toBeNull();
   });
 
-  it("takes the side from Forms, Edit, Accessibility and Search, and gives it up to them", () => {
+  it("takes the side from Forms, Edit, Accessibility, Preflight and Search, and gives it up to them", () => {
     const rails = [
       { set: (o: boolean) => useForms.setState({ open: o }), open: () => useForms.getState().open, toggle: () => useForms.getState().setOpen(true) },
       { set: (o: boolean) => useTextEdit.setState({ open: o }), open: () => useTextEdit.getState().open, toggle: () => useTextEdit.getState().setOpen(true) },
       { set: (o: boolean) => useA11y.setState({ open: o }), open: () => useA11y.getState().open, toggle: () => useA11y.getState().setOpen(true) },
+      { set: (o: boolean) => usePreflight.setState({ open: o }), open: () => usePreflight.getState().open, toggle: () => usePreflight.getState().setOpen(true) },
       { set: (o: boolean) => useSearch.setState({ open: o }), open: () => useSearch.getState().open, toggle: () => useSearch.getState().setOpen(true) },
     ];
     for (const rail of rails) {
