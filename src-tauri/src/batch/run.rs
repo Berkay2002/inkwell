@@ -167,6 +167,12 @@ pub fn run(
             match verdict {
                 Verdict::Done(d) => {
                     r.status = Status::Ok;
+                    // Now, not after the run: a cancel or an error later must not leave this file's words in a catalog.
+                    if let Some(saved) = &env.saved
+                        && action.steps.iter().any(|s| matches!(s, Step::Redact(_) | Step::Sanitize(_)))
+                    {
+                        d.outputs.iter().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))).for_each(|p| saved(p));
+                    }
                     r.size_after = d.size_after;
                     r.outputs = d.outputs.into_iter().map(|p| OutputFile { path: p.to_string_lossy().into_owned(), token: None }).collect();
                     r.notes = d.notes;
