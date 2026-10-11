@@ -1197,6 +1197,32 @@ fn the_visual_check_always_includes_the_pages_the_run_changed() {
     assert!(matches!(run(&input, &o), Err(Error::InvalidOptions(_))));
 }
 
+#[test]
+fn a_flattened_page_that_looks_the_same_does_not_come_back_as_different() {
+    let s = Scratch::new();
+    let input = s.path("transparent.pdf");
+    // both transparent pages declare a graphics state their content never uses: flattening changes no pixel
+    transparent_sink(&input, false);
+    let mut o = keep_images();
+    o.transparency.flatten = true;
+    o.transparency.ppi = 150;
+    o.visual_pages = 1;
+    o.output = Some(s.path("flat.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.flattened.pages, vec![1, 2], "{:?}", r.flattened);
+    let v = r.visual.as_ref().expect("visual check ran");
+    assert_eq!(v.per_page.iter().map(|p| p.page).collect::<Vec<_>>(), vec![0, 1]);
+    println!("flat, same resolution: psnr {:.1} max {} mean {:.3}", v.psnr, v.max_diff, v.mean_diff);
+    // "Looks the same" in the result screen: at most 8 of 255, nowhere near the red level
+    assert!(v.max_diff <= 8, "{v:?}");
+    assert!(v.psnr >= 40.0, "{v:?}");
+
+    // at the sheet's usual 96 ppi the same pair differs only by resampling: that is what the check avoids
+    let at_96 = diff(&input, &r.output, 1);
+    println!("flat, 96 ppi: psnr {:.1} max {}", at_96.psnr, at_96.max_diff);
+    assert!(v.per_page[0].psnr >= at_96.per_page[0].psnr, "{v:?} vs {at_96:?}");
+}
+
 /// A document whose form fields point at each other, with one parent listed many times.
 fn looping_form(path: &Path) {
     let mut doc = PdfDocument::from_bytes(&fixture::build(&fixture::Fixture { pages: 1, chapter_every: 0, needle_every: 0, lines: 4 })).unwrap();

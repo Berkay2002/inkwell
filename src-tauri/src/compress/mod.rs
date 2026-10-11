@@ -694,8 +694,10 @@ pub fn compress(
             let orig = open_pdf(input, password)?;
             let (cancel, progress) = (run.cancel, &mut *run.progress);
             // Always look at the pages this run turned into pictures or gave another font.
-            let mut must: Vec<usize> = restyled.clone();
-            must.extend(flattened.pages.iter().map(|&p| p as usize - 1));
+            // A flattened page is a picture at the resolution it was flattened at: both sides are drawn at it.
+            let flat_ppi = opts.transparency.ppi as f32;
+            let mut must: Vec<visual::Must> = restyled.iter().map(|&page| visual::Must { page, ppi: 0.0 }).collect();
+            must.extend(flattened.pages.iter().map(|&p| visual::Must { page: p as usize - 1, ppi: flat_ppi }));
             Some(visual::compare(&orig, &out_doc, opts.visual_pages as usize, &must, cancel, |k, n| {
                 progress(Progress { stage: Stage::Verify, fraction: 0.9 + 0.1 * k as f32 / n as f32, page: k as u32, pages: n as u32 });
             })?)

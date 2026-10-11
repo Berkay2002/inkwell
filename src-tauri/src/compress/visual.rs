@@ -49,6 +49,16 @@ pub(crate) fn sample_pages(total: usize, limit: usize) -> Vec<usize> {
     (0..limit).map(|i| i * (total - 1) / (limit - 1)).collect()
 }
 
+/// A page the check has to look at because the run changed it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Must {
+    /// Zero-based.
+    pub page: usize,
+    /// Resolution to render this page at on both sides; 0 for the usual 96 ppi. A flattened page is a
+    /// picture drawn at its own resolution: seen at any other, resampling alone would be reported as change.
+    pub ppi: f32,
+}
+
 /// Most pages added to the sample because the run changed them (flattened, or set in an unembedded font).
 const MUST_MAX: usize = 24;
 
@@ -67,9 +77,9 @@ pub(crate) fn picks_for(total: usize, limit: usize, must: &[usize]) -> Vec<usize
     picks
 }
 
-fn render(doc: &Document, page: usize) -> Result<mupdf::Pixmap, Error> {
+fn render(doc: &Document, page: usize, scale: f32) -> Result<mupdf::Pixmap, Error> {
     let p = doc.load_page(page as i32)?;
-    Ok(p.to_pixmap(&Matrix::new_scale(SCALE, SCALE), &Colorspace::device_rgb(), false, false)?)
+    Ok(p.to_pixmap(&Matrix::new_scale(scale, scale), &Colorspace::device_rgb(), false, false)?)
 }
 
 /// Compares `limit` evenly spread pages of two already-open documents, and the pages in `must` besides.
@@ -77,12 +87,18 @@ pub(crate) fn compare(
     a: &Document,
     b: &Document,
     limit: usize,
-    must: &[usize],
+    must: &[Must],
     cancel: &AtomicBool,
     mut tick: impl FnMut(usize, usize),
 ) -> Result<VisualCheck, Error> {
     let total = a.page_count()? as usize;
-    let picks = picks_for(total, limit, must);
+    let wanted: Vec<usize> = must.iter().map(|m| m.page).collect();
+    let picks = picks_for(total, limit, &wanted);
+    // The pages the run changed are compared at their own resolution (a flattened page at the one it was
+    // flattened at); a picked page that is in the list twice takes the first resolution that is set.
+    let scale_of = |page: usize| {
+        must.iter().find(|m| m.page == page && m.ppi > 0.0).map_or(SCALE, |m| m.ppi / 72.0)
+    };
     let (mut max_all, mut sum_abs, mut sum_sq, mut count) = (0u8, 0f64, 0f64, 0f64);
     let mut per_page = Vec::with_capacity(picks.len());
     let mut worst = (0usize, 0.0f64);
@@ -92,7 +108,8 @@ pub(crate) fn compare(
             return Err(Error::Cancelled);
         }
         tick(k, picks.len());
-        let (pa, pb) = (render(a, page)?, render(b, page)?);
+        let scale = scale_of(page);
+        let (pa, pb) = (render(a, page, scale)?, render(b, page, scale)?);
         let same_shape = pa.width() == pb.width() && pa.height() == pb.height() && pa.n() == pb.n();
         let (mut pmax, mut pabs, mut psq, mut pn) = (0u8, 0f64, 0f64, 0f64);
         if same_shape {
