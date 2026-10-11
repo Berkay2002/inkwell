@@ -993,6 +993,73 @@ export const attachmentsRemove = (doc: number, ids: string[]) => invoke<EditStat
 export const attachmentDescribe = (doc: number, id: string, text: string) =>
   invoke<EditState>("attachment_describe", { doc, id, text });
 
+// ---- PDF Portfolios (src-tauri/src/organize/portfolio) ----
+
+export interface PortfolioField {
+  key: string;
+  name: string;
+  /** The schema's subtype: S, D, N, F, Desc, Size, ModDate, CreationDate, CompressedSize. */
+  subtype: string;
+  kind: "text" | "number" | "date";
+  visible: boolean;
+}
+
+export interface PortfolioSortKey {
+  /** Index into `fields`. */
+  field: number;
+  ascending: boolean;
+}
+
+export interface PortfolioFolder {
+  id: number;
+  name: string;
+  parent: number | null;
+}
+
+export interface PortfolioFile {
+  /** The attachment id: what `attachmentOpen`, `attachmentSave` and the other attachment calls take. */
+  id: string;
+  name: string;
+  description: string;
+  size: number;
+  mime: string | null;
+  isPdf: boolean;
+  hasData: boolean;
+  folder: number | null;
+  /** What each field shows, in `fields` order. */
+  cells: string[];
+  /** The value's place among all files per field (equal values share one; null: none). Sorting is a sort of these. */
+  ranks: (number | null)[];
+}
+
+export interface PortfolioInfo {
+  /** The schema's fields in the author's column order. */
+  fields: PortfolioField[];
+  /** The collection's own sort: `files` come in this order. */
+  sort: PortfolioSortKey[];
+  view: "details" | "tile" | "hidden" | "custom";
+  /** The file that opens first (an attachment id). */
+  initial: string | null;
+  /** Parents before children, siblings by name. */
+  folders: PortfolioFolder[];
+  files: PortfolioFile[];
+}
+
+export interface PortfolioExtracted {
+  folder: string;
+  written: string[];
+  skipped: string[];
+}
+
+/** The portfolio view of a document; null for a plain PDF. Rejects when the collection is unusable (folders that loop). */
+export const portfolioInfo = (doc: number) => invoke<PortfolioInfo | null>("portfolio_info", { doc });
+/** Open dialog for the files of a new portfolio (any type). */
+export const pickPortfolioFiles = () => invoke<FileRef[]>("pick_portfolio_files");
+/** `out`: a save token from `pickSave`. Resolves to an open token for the new file. The sources are only read. */
+export const portfolioCreate = (files: string[], out: string) => invoke<FileRef>("portfolio_create", { files, out });
+/** `to`: a folder token from `pickFolder`. Never replaces a file there. */
+export const portfolioExtractAll = (doc: number, to: string) => invoke<PortfolioExtracted>("portfolio_extract_all", { doc, to });
+
 export type LabelStyle = "none" | "decimal" | "upperRoman" | "lowerRoman" | "upperAlpha" | "lowerAlpha";
 
 export interface LabelRange {

@@ -167,7 +167,7 @@ fn noise(n: usize, seed: u64) -> Vec<u8> {
 }
 
 fn file(name: &str, data: Vec<u8>, desc: &str) -> NewFile {
-    NewFile { name: name.into(), data, description: desc.into() }
+    NewFile { name: name.into(), data, description: desc.into(), modified: None }
 }
 
 #[test]

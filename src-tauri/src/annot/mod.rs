@@ -148,9 +148,13 @@ fn rgb_of(c: Option<AnnotationColor>) -> Option<[f32; 3]> {
     }
 }
 
-/// `D:YYYYMMDDHHmmSSZ` for the current time (civil date from days: Hinnant's algorithm).
+/// `D:YYYYMMDDHHmmSSZ` for the current time.
 pub fn pdf_now() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    pdf_date(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64))
+}
+
+/// `D:YYYYMMDDHHmmSSZ` for `secs` since the Unix epoch (civil date from days: Hinnant's algorithm).
+pub fn pdf_date(secs: i64) -> String {
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
