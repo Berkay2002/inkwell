@@ -2,7 +2,7 @@ import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef,
 import { type Msg, useAi } from "../../lib/aiStore";
 import { type DocState, useStore } from "../../store";
 import { Answer, CloseButton, Composer, Consent, Gate, Glyph, MoreMenu, usePop } from "./parts";
-import { type BarAt, surfaceLeft, surfaceMaxH, surfaceWidth, useBar } from "./barView";
+import { type BarAt, barStage, surfaceLeft, surfaceMaxH, surfaceWidth, useBar } from "./barView";
 
 // The command bar, after ChatGPT's companion composer: one rounded surface that is the composer at rest,
 // grows a header strip once there is a chat, and stretches upward into the whole conversation.
@@ -45,13 +45,18 @@ export function Bar({ doc }: { doc: DocState }) {
   const status = useAi((s) => s.status);
   const pending = useAi((s) => s.pending?.doc === doc.id);
   const count = useAi((s) => s.chats[doc.id]?.messages.length ?? 0);
+  const hasPast = useAi((s) => (s.past[doc.id]?.length ?? 0) > 0);
   const needsAnswer = useAi((s) => !!s.chats[doc.id]?.messages.some((m) => m.activity.some((a) => a.state === "waiting")));
   const view = useBar((s) => s.view);
   const at = useBar((s) => s.at);
   const dispatch = useBar((s) => s.dispatch);
   const wrap = useRef<HTMLDivElement>(null);
+  const fold = useRef<HTMLDivElement>(null);
   const ready = typeof status === "object" && status !== null && status.installed && status.loggedIn;
   const forced = pending || !ready;
+  const hasChat = count > 0;
+  const stage = barStage(view, { forced, hasChat, hasPast });
+  const open = stage === "open";
 
   // A message that was not there before is a send: the answer is made to be seen. Switching tabs is not one.
   const seen = useRef({ doc: doc.id, n: count });
@@ -83,7 +88,7 @@ export function Bar({ doc }: { doc: DocState }) {
       if (!(e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === "a")) return;
       if (wrap.current?.contains(document.activeElement)) return;
       const t = wrap.current?.querySelector<HTMLTextAreaElement>("textarea");
-      if (!t) return;
+      if (!t || t.disabled) return;
       e.preventDefault();
       e.stopPropagation();
       t.focus();
@@ -103,12 +108,16 @@ export function Bar({ doc }: { doc: DocState }) {
     wrap.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
   }, [ready, pending]);
 
+  // The chat folds away as inert: a focus inside it would be lost with it, so it moves to the composer first.
+  useLayoutEffect(() => {
+    if (open || !fold.current?.contains(document.activeElement)) return;
+    wrap.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+  }, [open]);
+
   if (!box) return null;
   const stageW = box.r - box.l;
   const w = surfaceWidth(stageW);
-  const hasChat = count > 0;
-  const open = forced || view === "open";
-  const header = forced || (hasChat && view !== "bar");
+  const header = stage !== "bar";
 
   return (
     <>
@@ -130,9 +139,9 @@ export function Bar({ doc }: { doc: DocState }) {
           if ((e.target as Element).closest(".ax-input")) dispatch("focus");
         }}
       >
-        <section className={`ax-bar-surface ${open ? "open" : view}`} aria-label="Assistant">
-          {header && (forced ? <PlainHeader /> : <BarHeader doc={doc} open={view === "open"} />)}
-          <div className="ax-bar-fold" data-open={open} inert={!open}>
+        <section className={`ax-bar-surface ${stage}`} aria-label="Assistant">
+          {header && (forced ? <PlainHeader /> : <BarHeader doc={doc} open={open} />)}
+          <div className="ax-bar-fold" ref={fold} data-open={open} inert={!open}>
             <div className="ax-bar-fold-in">{pending ? <Consent /> : !ready ? <Gate /> : <Thread doc={doc} open={open} />}</div>
           </div>
           {ready && !pending && <Composer doc={doc} variant="bar" trail={<MoreMenu doc={doc} up />} />}
@@ -308,7 +317,7 @@ function stamp(at: number): string {
 /** The whole conversation: a centred time, right-aligned question bubbles and plain answers. */
 function Thread({ doc, open }: { doc: DocState; open: boolean }) {
   const messages = useAi((s) => s.chats[doc.id]?.messages);
-  const restored = useAi((s) => !!s.chats[doc.id]?.restored);
+  const restored = useAi((s) => s.chats[doc.id]?.restored);
   const streaming = !!messages?.some((m) => m.state === "streaming");
   const el = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -321,7 +330,15 @@ function Thread({ doc, open }: { doc: DocState; open: boolean }) {
   const last = messages?.[messages.length - 1];
   let prevAt = 0;
   const rows: ReactNode[] = [];
-  for (const m of messages ?? []) {
+  // The assistant does not remember a chat that was brought back: a line marks where it starts afresh.
+  const note = (
+    <p key="restored" className="ax-restored">
+      End of an earlier chat. The assistant starts fresh from your next question.
+    </p>
+  );
+  const list = messages ?? [];
+  for (const [i, m] of list.entries()) {
+    if (i === restored) rows.push(note);
     if (m.at != null && m.at - prevAt > GAP_MS)
       rows.push(
         <div key={`t${m.id}`} className="ax-datesep">
@@ -329,8 +346,9 @@ function Thread({ doc, open }: { doc: DocState; open: boolean }) {
         </div>,
       );
     if (m.at != null) prevAt = m.at;
-    rows.push(m.role === "user" ? <Question key={m.id} m={m} /> : <Answer key={m.id} doc={doc} m={m} variant="bar" isLast={m === last} plain />);
+    rows.push(m.role === "user" ? <Question key={m.id} doc={doc.id} m={m} /> : <Answer key={m.id} doc={doc} m={m} variant="bar" isLast={m === last} plain />);
   }
+  if (restored != null && restored >= list.length) rows.push(note);
 
   return (
     <div
@@ -345,19 +363,21 @@ function Thread({ doc, open }: { doc: DocState; open: boolean }) {
         stick.current = t.scrollHeight - t.scrollTop - t.clientHeight < 48;
       }}
     >
-      {restored && <p className="ax-restored">An earlier chat. The assistant starts fresh from your next question.</p>}
       {rows}
     </div>
   );
 }
 
-function Question({ m }: { m: Msg }) {
+function Question({ doc, m }: { doc: number; m: Msg }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="ax-qrow">
       <div className="ax-q">{m.text}</div>
       <div className="ax-qmeta">
         {m.at != null && <time dateTime={new Date(m.at).toISOString()}>{clock(m.at)}</time>}
+        <button className="ax-icon small" title="Edit" aria-label="Edit the question" onClick={() => useAi.getState().setDraft(doc, m.text)}>
+          <Glyph name="edit" size={13} />
+        </button>
         <button
           className="ax-icon small"
           title={copied ? "Copied" : "Copy"}
@@ -388,7 +408,10 @@ function Connector() {
     }
     let raf = 0;
     const tick = () => {
-      const src = document.querySelector<HTMLElement>(`.ax-bar [data-source="${mark.n}"]`);
+      // source numbers repeat from answer to answer: the chip of the answer the mark came from
+      const src = document.querySelector<HTMLElement>(
+        mark.msg != null ? `.ax-bar [data-source="${mark.msg}:${mark.n}"]` : `.ax-bar [data-source$=":${mark.n}"]`,
+      );
       const badge = document.querySelector<HTMLElement>(".cite-badge");
       const stage = document.querySelector(".stage")?.getBoundingClientRect();
       let next = null;

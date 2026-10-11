@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Citation } from "../../lib/ai";
-import { type Mark, type Msg, readViewerSelection, useAi } from "../../lib/aiStore";
+import { type Msg, readViewerSelection, useAi } from "../../lib/aiStore";
 import type { DocState } from "../../store";
 import { isVerified } from "../../lib/activity";
 import { ActivityTrail } from "./ActivityTrail";
@@ -27,6 +27,7 @@ const PATHS = {
   copy: "M9 9h9.5v11H9zM6 15V4h9.5",
   plus: "M12 6v12M6 12h12",
   retry: "M5 12a7 7 0 1 0 2.1-5M5 4.5V9h4.5",
+  edit: "M5 19l.8-3.8L16.4 4.6a1.9 1.9 0 0 1 2.7 2.7L8.5 17.9zM14.5 6.5l3 3",
   docked: "M4 5.5h16v13H4zM14.5 5.5v13",
   floating: "M4 5.5h16v13H4zM12.5 8.5h5v7h-5z",
   bar: "M4 5.5h16v13H4zM8 14.5h8",
@@ -328,23 +329,9 @@ export function Messages({ doc, variant, lastOnly = false }: { doc: DocState; va
   );
 }
 
-// Hovering a page chip of the command bar lights its badge on the page without scrolling there; leaving
-// puts back the mark the user had (a click is a real jump and goes through showCitation).
-let heldMark: { prev: Mark | null } | null = null;
-function liftMark(docId: number, c: Citation) {
-  if (c.page == null) return;
-  heldMark ??= { prev: useAi.getState().mark };
-  useAi.setState({ mark: { doc: docId, page: c.page, rects: c.rects, n: c.n, nonce: Date.now() } });
-}
-function dropMark() {
-  if (!heldMark) return;
-  useAi.setState({ mark: heldMark.prev });
-  heldMark = null;
-}
-
 /** The sources an answer cites. `docked` rows, `floating` cards with a page sketch, `bar` page chips. */
 function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: Variant; active: number | null }) {
-  const show = (c: Citation) => useAi.getState().showCitation(doc.id, c);
+  const show = (c: Citation) => useAi.getState().showCitation(doc.id, c, m.id);
   if (variant === "bar")
     return (
       <ul className="ax-sources bar" aria-label="Sources">
@@ -352,16 +339,14 @@ function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: 
           <li key={c.n}>
             <button
               className={active === c.n ? "ax-pgchip on" : "ax-pgchip"}
-              data-source={c.n}
+              data-source={`${m.id}:${c.n}`}
               title={c.quote}
-              onPointerEnter={() => liftMark(doc.id, c)}
-              onPointerLeave={dropMark}
-              onFocus={() => liftMark(doc.id, c)}
-              onBlur={dropMark}
-              onClick={() => {
-                dropMark();
-                show(c);
-              }}
+              // hovering lights the badge on the page without scrolling there; a click is a real jump
+              onPointerEnter={() => useAi.getState().liftMark(doc.id, c, m.id)}
+              onPointerLeave={() => useAi.getState().dropMark()}
+              onFocus={() => useAi.getState().liftMark(doc.id, c, m.id)}
+              onBlur={() => useAi.getState().dropMark()}
+              onClick={() => show(c)}
             >
               <span className="ax-n">{c.n}</span>
               <span>p. {(c.page ?? 0) + 1}</span>
@@ -378,7 +363,7 @@ function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: 
         const cls = on ? "ax-source on" : "ax-source";
         return (
           <li key={c.n}>
-            <button className={cls} data-source={c.n} onClick={() => show(c)} title="Show in document">
+            <button className={cls} data-source={`${m.id}:${c.n}`} onClick={() => show(c)} title="Show in document">
               {variant === "floating" && <PageSketch doc={doc} c={c} />}
               {variant === "docked" && (
                 <span className="ax-doc-glyph">
@@ -442,7 +427,8 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
   const hide = useAi((s) => s.settings.hideSources);
   const cites = useMemo(() => new Map(m.citations.filter(isVerified).map((c) => [c.n, c])), [m.citations]);
   const known = useMemo(() => new Set(cites.keys()), [cites]);
-  const active = mark && mark.doc === doc.id ? mark.n : null;
+  // source numbers repeat from answer to answer: only the answer the mark came from lights its own
+  const active = mark && mark.doc === doc.id && (mark.msg == null || mark.msg === m.id) ? mark.n : null;
 
   if (m.state === "error")
     return (
@@ -465,7 +451,7 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
         <Markdown
           text={m.text}
           caret={m.state === "streaming"}
-          cites={{ known, active, onCite: (n) => cites.get(n) && useAi.getState().showCitation(doc.id, cites.get(n)!) }}
+          cites={{ known, active, onCite: (n) => cites.get(n) && useAi.getState().showCitation(doc.id, cites.get(n)!, m.id) }}
         />
       )}
       {m.state === "cancelled" && <p className="dim small">Stopped.</p>}
@@ -605,8 +591,21 @@ export function Composer({
   onSend?: () => void;
 }) {
   const [text, setText] = useState("");
+  const box = useRef<HTMLTextAreaElement>(null);
   const streaming = useAi((s) => !!s.chats[doc.id]?.messages.some((m) => m.state === "streaming"));
   const prep = useAi((s) => s.chats[doc.id]?.prep);
+  // "Edit" on an earlier question puts its words back here; sending them is a new turn.
+  const draft = useAi((s) => (s.draft?.doc === doc.id ? s.draft : null));
+  useEffect(() => {
+    if (!draft) return;
+    setText(draft.text);
+    useAi.getState().clearDraft();
+    const t = box.current;
+    if (t) {
+      t.focus();
+      t.setSelectionRange(draft.text.length, draft.text.length);
+    }
+  }, [draft]);
   const noText = typeof prep === "object" && prep !== null && !prep.enough;
   const st = useAi.getState;
 
@@ -624,6 +623,7 @@ export function Composer({
       <div className="ax-input">
         <AttachMenu doc={doc} />
         <textarea
+          ref={box}
           value={text}
           rows={1}
           aria-label="Ask about this document"

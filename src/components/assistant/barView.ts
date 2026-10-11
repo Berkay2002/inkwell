@@ -32,6 +32,15 @@ export function barReduce(v: BarView, e: BarEvent): BarView {
   }
 }
 
+/** What is on screen: the stage the user is in, unless there is nothing for it to show. Gate and consent are
+ *  always the open surface; an empty chat (after "New chat", or a tab without one) has nothing to stretch
+ *  into, so it is a header while there are earlier chats to go back to and the bare bar otherwise. */
+export function barStage(view: BarView, o: { forced: boolean; hasChat: boolean; hasPast: boolean }): BarView {
+  if (o.forced) return "open";
+  if (o.hasChat) return view;
+  return o.hasPast && view !== "bar" ? "header" : "bar";
+}
+
 /** The surface keeps one width in every stage so it never jumps: the document area's share, at most 640. */
 export function surfaceWidth(stageW: number): number {
   return Math.min(640, barWidth(stageW));

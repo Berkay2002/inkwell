@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type BarEvent, type BarView, barReduce, surfaceLeft, surfaceMaxH, surfaceWidth } from "./barView";
+import { type BarEvent, type BarView, barReduce, barStage, surfaceLeft, surfaceMaxH, surfaceWidth } from "./barView";
 
 const run = (start: BarView, ...events: BarEvent[]) => events.reduce(barReduce, start);
 
@@ -56,5 +56,25 @@ describe("surface geometry", () => {
     expect(surfaceLeft("center", 200, 1200, 640)).toBe(380);
     expect(surfaceLeft("left", 200, 1200, 640)).toBe(224);
     expect(surfaceLeft("right", 200, 1200, 640)).toBe(536);
+  });
+});
+
+describe("barStage", () => {
+  const o = (hasChat: boolean, hasPast: boolean, forced = false) => ({ forced, hasChat, hasPast });
+
+  it("shows the stage the user is in when there is a chat", () => {
+    for (const v of ["open", "header", "bar"] as const) expect(barStage(v, o(true, false))).toBe(v);
+  });
+
+  it("gate and consent are always the open surface", () => {
+    for (const v of ["open", "header", "bar"] as const) expect(barStage(v, o(false, false, true))).toBe("open");
+  });
+
+  it("an empty chat is the bare bar, or a header while earlier chats can be gone back to", () => {
+    expect(barStage("open", o(false, false))).toBe("bar");
+    expect(barStage("header", o(false, false))).toBe("bar");
+    expect(barStage("open", o(false, true))).toBe("header");
+    expect(barStage("header", o(false, true))).toBe("header");
+    expect(barStage("bar", o(false, true))).toBe("bar");
   });
 });

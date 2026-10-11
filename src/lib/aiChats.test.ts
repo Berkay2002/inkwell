@@ -84,6 +84,51 @@ describe("a document's chats (command bar)", () => {
     expect(useAi.getState().past[1][0].messages.every((m) => m.state !== "streaming")).toBe(true);
   });
 
+  it("a chat set aside in mid-turn settles its cards: reopening it does not ask again for a dead thread", () => {
+    ask("first");
+    emit({ kind: "activity", id: "c1", tool: "rotate_page", class: "edit", label: "Rotate page 4", state: "waiting", detail: null } as ChatEvent);
+    emit({ kind: "activity", id: "c2", tool: "search", class: "read", label: "Searched", state: "running", detail: null } as ChatEvent);
+    useAi.getState().newChat(1);
+    ask("second");
+    finish();
+    const id = useAi.getState().past[1][0].id;
+    useAi.getState().openChat(1, id);
+    const bot = useAi.getState().chats[1].messages[1];
+    expect(bot.state).toBe("cancelled");
+    expect(bot.activity.map((x) => [x.id, x.state])).toEqual([
+      ["c1", "rejected"],
+      ["c2", "failed"],
+    ]);
+  });
+
+  it("a question asked right after New chat waits until the old thread is closed and prepared again", async () => {
+    let release: () => void = () => {};
+    vi.mocked(ai.aiClose).mockImplementationOnce(() => new Promise<void>((r) => (release = r)));
+    ask("first");
+    finish();
+    useAi.getState().newChat(1);
+    vi.mocked(ai.aiAsk).mockClear();
+    ask("second");
+    expect(useAi.getState().chats[1].messages[0].text).toBe("second"); // on screen at once
+    await Promise.resolve();
+    expect(ai.aiAsk).not.toHaveBeenCalled();
+    release();
+    await vi.waitFor(() => expect(ai.aiAsk).toHaveBeenCalledTimes(1));
+    expect(ai.aiPrepare).toHaveBeenCalled();
+  });
+
+  it("a question that was cleared away while it waited is never asked", async () => {
+    let release: () => void = () => {};
+    vi.mocked(ai.aiClose).mockImplementationOnce(() => new Promise<void>((r) => (release = r)));
+    useAi.getState().newChat(1);
+    vi.mocked(ai.aiAsk).mockClear();
+    ask("late");
+    useAi.getState().clear(1);
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ai.aiAsk).not.toHaveBeenCalled();
+  });
+
   it("opening an earlier chat swaps it with the current one and marks it restored", () => {
     ask("first");
     finish();
@@ -94,7 +139,7 @@ describe("a document's chats (command bar)", () => {
     useAi.getState().openChat(1, id);
     const c = useAi.getState().chats[1];
     expect(c.messages[0].text).toBe("first");
-    expect(c.restored).toBe(true);
+    expect(c.restored).toBe(2); // the two messages brought back; the note sits after them
     expect(useAi.getState().past[1].map((p) => p.messages[0].text)).toEqual(["second"]);
   });
 
@@ -104,5 +149,51 @@ describe("a document's chats (command bar)", () => {
     useAi.getState().newChat(1);
     useAi.getState().closeChat(1);
     expect(useAi.getState().past[1]).toBeUndefined();
+  });
+});
+
+describe("source marks of the command bar", () => {
+  const cite = (n: number) => ({ n, page: 3, rects: [[0, 0, 1, 1]], quote: "q", doc: 1 }) as never;
+
+  it("a hover lights the badge and leaving puts back what was lit", () => {
+    const before = { doc: 1, page: 0, rects: [], n: 9, nonce: 1 };
+    useAi.setState({ mark: before });
+    useAi.getState().liftMark(1, cite(1), 7);
+    expect(useAi.getState().mark).toMatchObject({ page: 3, n: 1, msg: 7 });
+    expect(goTo).not.toHaveBeenCalled();
+    useAi.getState().dropMark();
+    expect(useAi.getState().mark).toBe(before);
+  });
+
+  it("a hover that outlives its chip is forgotten when the chat is cleared", () => {
+    useAi.setState({ mark: null });
+    useAi.getState().liftMark(1, cite(1), 7);
+    useAi.getState().clear(1);
+    expect(useAi.getState().mark).toBeNull();
+    useAi.getState().liftMark(1, cite(2), 8);
+    useAi.getState().dropMark();
+    expect(useAi.getState().mark).toBeNull(); // not the stale "prev" of the first hover
+  });
+
+  it("a click while hovering is a jump that keeps the mark, and the next click turns it off", () => {
+    const c = cite(2);
+    useAi.getState().liftMark(1, c, 7);
+    useAi.getState().showCitation(1, c, 7);
+    expect(goTo).toHaveBeenCalled();
+    expect(useAi.getState().mark).toMatchObject({ n: 2, msg: 7 });
+    useAi.getState().dropMark(); // the pointer leaves
+    expect(useAi.getState().mark).toMatchObject({ n: 2, msg: 7 });
+    useAi.getState().liftMark(1, c, 7);
+    useAi.getState().showCitation(1, c, 7);
+    expect(useAi.getState().mark).toBeNull();
+  });
+});
+
+describe("Edit on a question", () => {
+  it("hands the words back to that document's composer", () => {
+    useAi.getState().setDraft(1, "what is the cash runway?");
+    expect(useAi.getState().draft).toMatchObject({ doc: 1, text: "what is the cash runway?" });
+    useAi.getState().clearDraft();
+    expect(useAi.getState().draft).toBeNull();
   });
 });
