@@ -339,7 +339,8 @@ fn same(a: [f32; 4], b: [f32; 4]) -> bool {
 #[test]
 fn runs_after_an_edited_run_keep_their_place() {
     let d = dir("mixed");
-    let content = "BT /F1 12 Tf 72 700 Td (Hello ) Tj /F2 12 Tf (bold) Tj /F1 12 Tf ( world) Tj ET";
+    // Three blocks in one text object (far enough apart on the line not to be one block).
+    let content = "BT /F1 12 Tf 72 700 Td (Hello) Tj 80 0 Td /F2 12 Tf (bold) Tj 80 0 Td /F1 12 Tf (world) Tj ET";
     let (eng, id, _) = open(&d, &pdf(content, &[("F1", HELV), ("F2", HELV_BOLD)], &[]));
     let (bold, world) = (rect_of(&eng, id, "bold"), rect_of(&eng, id, "world"));
     assert!(bold[0] > 100.0, "{bold:?}");
@@ -506,8 +507,28 @@ fn an_added_box_wraps_to_its_width_and_takes_other_scripts() {
     // Greek needs more than WinAnsi: the standard face is embedded.
     add_box(&eng, id, "Ευχαριστώ", [72.0, 500.0], None);
     assert!(text(&eng, id).contains("Ευχαριστώ"), "{}", text(&eng, id));
-    assert!(add(&eng, id, rev(&eng, id), 0, &NewTextBox { text: "  ".into(), size: 12.0, color: [0.0; 3], at: [0.0, 0.0], width: None }, EditSource::User).is_err());
-    assert!(add(&eng, id, rev(&eng, id) + 1, 0, &NewTextBox { text: "x".into(), size: 12.0, color: [0.0; 3], at: [0.0, 0.0], width: None }, EditSource::User).is_err());
+    assert!(
+        add(
+            &eng,
+            id,
+            rev(&eng, id),
+            0,
+            &NewTextBox { text: "  ".into(), size: 12.0, color: [0.0; 3], at: [0.0, 0.0], width: None },
+            EditSource::User
+        )
+        .is_err()
+    );
+    assert!(
+        add(
+            &eng,
+            id,
+            rev(&eng, id) + 1,
+            0,
+            &NewTextBox { text: "x".into(), size: 12.0, color: [0.0; 3], at: [0.0, 0.0], width: None },
+            EditSource::User
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -529,7 +550,9 @@ fn adding_text_again_does_not_nest_another_wrapper() {
 #[test]
 fn text_added_to_a_rotated_page_reads_upright() {
     let d = dir("add-rotated");
-    let bytes = String::from_utf8(pdf(TWO_BLOCKS, &[("F1", HELV)], &[])).unwrap().replace("/MediaBox [0 0 612 792]", "/MediaBox [0 0 612 792] /Rotate 90");
+    let bytes = String::from_utf8(pdf(TWO_BLOCKS, &[("F1", HELV)], &[]))
+        .unwrap()
+        .replace("/MediaBox [0 0 612 792]", "/MediaBox [0 0 612 792] /Rotate 90");
     let (eng, id, _) = open(&d, bytes.as_bytes());
     // The page as shown is 792 wide and 612 tall.
     add_box(&eng, id, "Rotated note", [200.0, 100.0], None);

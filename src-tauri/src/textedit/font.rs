@@ -58,6 +58,8 @@ pub struct Metrics {
     pub has_to_unicode: bool,
     pub base_font: String,
     pub subset: bool,
+    /// The font program is in the file.
+    pub embedded: bool,
     pub bold: bool,
     pub italic: bool,
     pub limit: Option<Limit>,
@@ -149,6 +151,7 @@ impl Metrics {
             has_to_unicode: true,
             base_font: "Helvetica".into(),
             subset: false,
+            embedded: false,
             bold: false,
             italic: false,
             limit: None,
@@ -238,6 +241,7 @@ impl Metrics {
         if subtype != b"Type3" && !m.composite && m.widths.is_empty() {
             m.std14 = Font::new(std14_name(&base, m.bold, m.italic)).ok();
         }
+        m.embedded = descriptor.as_ref().is_some_and(|d| ["FontFile", "FontFile2", "FontFile3"].iter().any(|k| get(d, k).is_some()));
         m.subset = base.len() > 7 && base.as_bytes()[6] == b'+' && base[..6].bytes().all(|b| b.is_ascii_uppercase());
         if m.subset && !m.composite && subtype != b"Type3" {
             m.program = descriptor.as_ref().and_then(load_program);

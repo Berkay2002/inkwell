@@ -14,10 +14,11 @@
 //! `pdf_add_font` when the text needs more than WinAnsi).
 
 use super::content::{Matrix, Obj, Op, Pieces, num, serialize_ops};
-use super::font::{Limit, Metrics, STD14};
+use super::font::{Limit, Metrics};
+use super::layout::{Face, Measure, Placement, RunSpec, Setter, emit, family_of, restyled_face, wrap};
 use crate::engine::EngineError;
+use mupdf::Buffer;
 use mupdf::pdf::{PdfDocument, PdfObject};
-use mupdf::{Buffer, Font};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -122,15 +123,56 @@ struct Origin {
     bt_state: TextState,
 }
 
+/// One glyph as shown: its code, what it means, its advance (thousandths of the text-space
+/// unit at size 1, word spacing included for a space), and the TJ adjustment before it.
+#[derive(Clone, Debug)]
+pub(crate) struct Glyph {
+    /// Empty for a space read from a gap between operators (no code shows it).
+    pub bytes: Vec<u8>,
+    pub text: String,
+    pub w: f64,
+    pub kern: f64,
+    /// A single-byte code 32 (word spacing applies), or a gap read as a space.
+    pub space: bool,
+}
+
+impl Glyph {
+    pub(crate) fn gap() -> Self {
+        Glyph { bytes: Vec::new(), text: " ".into(), w: 250.0, kern: 0.0, space: true }
+    }
+}
+
+/// Consecutive glyphs of one font, size and colour on a line.
+#[derive(Clone, Debug)]
+pub struct Run {
+    /// Font resource name.
+    pub(crate) font: Vec<u8>,
+    pub base_font: String,
+    /// Size in user space, and the `Tf` size (text space).
+    pub size: f64,
+    pub(crate) tsize: f64,
+    pub color: [f64; 3],
+    pub(crate) fill: Vec<Op>,
+    pub bold: bool,
+    pub italic: bool,
+    pub text: String,
+    pub(crate) glyphs: Vec<Glyph>,
+}
+
+impl Run {
+    pub(crate) fn same_style(&self, o: &Run) -> bool {
+        self.font == o.font && (self.size - o.size).abs() < 0.01 && self.color == o.color
+    }
+}
+
 /// One line of existing text.
 #[derive(Clone, Debug)]
 pub struct Line {
     pub text: String,
     /// Box in user space.
     pub rect: [f64; 4],
-    font: Vec<u8>,
     pub base_font: String,
-    /// Size in user space.
+    /// Size in user space (the largest of its runs).
     pub size: f64,
     pub bold: bool,
     pub italic: bool,
@@ -145,6 +187,7 @@ pub struct Line {
     /// Baseline start and end in user space.
     start: (f64, f64),
     end: (f64, f64),
+    pub runs: Vec<Run>,
 }
 
 impl Line {
@@ -186,6 +229,9 @@ pub struct Block {
     pub issue: Option<Issue>,
     /// Indexes into the page's lines.
     pub lines: Vec<usize>,
+    /// The block's text as runs of one style, in reading order: a line break is a space (or
+    /// nothing after a hyphen, which goes), consecutive parts of one style are one run.
+    pub runs: Vec<Run>,
 }
 
 /// What the page holds that can't be edited, outside the blocks.
@@ -259,6 +305,7 @@ struct Shown {
     advance: f64,
     em: f64,
     hidden: bool,
+    glyphs: Vec<Glyph>,
 }
 
 /// How a show operator moves the text matrix, to keep that move when the operator is removed.
@@ -281,6 +328,18 @@ pub(crate) struct PageContent {
     pub areas: Vec<Area>,
     /// The page's crop box in user space.
     pub crop: [f64; 4],
+}
+
+impl PageContent {
+    /// A font resource as the font picker names it: `doc:<object>` for an indirect font,
+    /// `res:<name>` for one written into the resources directly.
+    pub(crate) fn font_id(&self, res: &[u8]) -> String {
+        let name = String::from_utf8_lossy(res).into_owned();
+        match self.fonts.as_ref().and_then(|f| get(f, &name)) {
+            Some(v) if v.is_indirect().unwrap_or(false) => v.as_indirect().map_or(format!("res:{name}"), |n| format!("doc:{n}")),
+            _ => format!("res:{name}"),
+        }
+    }
 }
 
 fn get(o: &PdfObject, key: &str) -> Option<PdfObject> {
@@ -591,17 +650,30 @@ fn interpret(
                 let mut text = String::new();
                 let mut decodable = m.has_to_unicode;
                 let mut x_text = 0.0;
+                let mut glyphs = Vec::new();
+                let mut kern = 0.0;
                 for p in &pieces {
                     match p {
                         Obj::Str(s) => {
+                            let mut at = 0;
                             for (code, len) in m.codes(s) {
-                                match m.text_of(code) {
+                                let t = m.text_of(code);
+                                match t {
                                     Some(t) => text.push_str(t),
                                     None => decodable = false,
                                 }
-                                let w =
-                                    m.width(code) * ts.size + ts.char_spacing + if m.is_space(code, len) { ts.word_spacing } else { 0.0 };
+                                let space = m.is_space(code, len);
+                                let w = m.width(code) * ts.size + ts.char_spacing + if space { ts.word_spacing } else { 0.0 };
                                 x_text += w * ts.scale;
+                                let ws = if space && ts.size.abs() > 1e-9 { ts.word_spacing * 1000.0 / ts.size } else { 0.0 };
+                                glyphs.push(Glyph {
+                                    bytes: s[at..(at + len).min(s.len())].to_vec(),
+                                    text: t.unwrap_or_default().to_string(),
+                                    w: m.width(code) * 1000.0 + ws,
+                                    kern: std::mem::take(&mut kern),
+                                    space: space || t == Some(" "),
+                                });
+                                at += len;
                             }
                         }
                         other => {
@@ -610,6 +682,11 @@ fn interpret(
                                 // A large gap inside TJ reads as a space.
                                 if dx > ts.size * 0.2 && !text.ends_with(' ') {
                                     text.push(' ');
+                                    glyphs.push(Glyph { kern: std::mem::take(&mut kern), ..Glyph::gap() });
+                                    // The gap shows as the space; what is left of it is kerning.
+                                    kern = n + 250.0;
+                                } else {
+                                    kern += n;
                                 }
                                 x_text += dx;
                             }
@@ -648,6 +725,7 @@ fn interpret(
                     advance: x_text,
                     em: ts.size * ts.scale,
                     hidden: marked.iter().any(|h| *h),
+                    glyphs,
                 });
             }
             _ => {}
@@ -657,10 +735,23 @@ fn interpret(
 }
 
 /// Adds `s` to the line it continues, or starts a new one. `last` is the previous run's
-/// (`bt`, end point, size).
+/// (`bt`, end point, size). A line holds runs of any font, size and colour; a new run starts where
+/// the style changes.
 fn add_shown(lines: &mut Vec<Line>, last: &mut Option<(usize, (f64, f64), f64)>, s: Shown, cache: &HashMap<Vec<u8>, Rc<Metrics>>) {
     let color = fill_color(&s.state.fill);
     let m = cache.get(&s.font).cloned().unwrap_or_else(|| Rc::new(Metrics::fallback()));
+    let run = Run {
+        font: s.font.clone(),
+        base_font: m.base_font.clone(),
+        size: s.size,
+        tsize: s.state.size,
+        color,
+        fill: s.state.fill.clone(),
+        bold: m.bold,
+        italic: m.italic,
+        text: s.text.clone(),
+        glyphs: s.glyphs.clone(),
+    };
     // Distance from the previous run's end, along and across the line (in its text direction).
     let along = |l: &Line, end: (f64, f64)| -> Option<(f64, f64)> {
         let inv = l.origin.tm.then(&l.origin.ctm).invert()?;
@@ -671,9 +762,6 @@ fn add_shown(lines: &mut Vec<Line>, last: &mut Option<(usize, (f64, f64), f64)>,
     let joins = last.is_some_and(|(bt, end, size)| {
         let Some(l) = lines.last() else { return false };
         bt == s.bt
-            && l.font == s.font
-            && (s.size - l.size).abs() < 0.01
-            && l.color == color
             && l.render_mode == s.state.render_mode
             && l.hidden == s.hidden
             && along(l, end).is_some_and(|(dx, dy)| dy.abs() < size * 0.3 && dx > -size && dx < size * 3.0)
@@ -682,20 +770,31 @@ fn add_shown(lines: &mut Vec<Line>, last: &mut Option<(usize, (f64, f64), f64)>,
         let (_, end, size) = last.expect("checked");
         let l = lines.last_mut().expect("checked");
         let gap = along(l, end).map_or(0.0, |d| d.0);
+        let mut run = run;
         if gap > size * 0.2 && !l.text.ends_with(' ') && !s.text.starts_with(' ') {
             l.text.push(' ');
+            run.text.insert(0, ' ');
+            run.glyphs.insert(0, Glyph::gap());
         }
         l.text.push_str(&s.text);
         l.rect = union(l.rect, s.rect);
         l.ops.push(s.op);
         l.decodable &= s.decodable;
         l.end = s.end;
+        l.size = l.size.max(s.size);
+        l.limit = l.limit.or(m.limit);
+        match l.runs.last_mut() {
+            Some(r) if r.same_style(&run) => {
+                r.text.push_str(&run.text);
+                r.glyphs.extend(run.glyphs);
+            }
+            _ => l.runs.push(run),
+        }
     } else {
         let trm = s.tm.then(&s.state.ctm);
         lines.push(Line {
             text: s.text.clone(),
             rect: s.rect,
-            font: s.font.clone(),
             base_font: m.base_font.clone(),
             size: s.size,
             bold: m.bold,
@@ -717,6 +816,7 @@ fn add_shown(lines: &mut Vec<Line>, last: &mut Option<(usize, (f64, f64), f64)>,
             },
             start: s.start,
             end: s.end,
+            runs: vec![run],
         });
     }
     *last = Some((s.bt, s.end, s.size.max(1.0)));
@@ -753,11 +853,12 @@ pub fn group_blocks(lines: &[Line]) -> Vec<Block> {
             let g = (py - ly) * first.origin.k;
             let tol = l.size.max(1.0) / first.origin.k.max(1e-6);
             let aligned = (px0 - lx0).abs() < tol || ((px0 + px1) / 2.0 - (lx0 + lx1) / 2.0).abs() < tol || (px1 - lx1).abs() < tol;
-            prev.font == l.font
-                && prev.color == l.color
-                && prev.render_mode == l.render_mode
+            // One paragraph may mix fonts and colours, but not very different sizes (a heading
+            // above its body text is a block of its own).
+            let ratio = prev.size.max(l.size) / prev.size.min(l.size).max(0.01);
+            prev.render_mode == l.render_mode
                 && prev.hidden == l.hidden
-                && (prev.size - l.size).abs() < 0.01
+                && ratio < 1.3
                 && aligned
                 && g > l.size * 0.8
                 && g < l.size * 2.5
@@ -789,16 +890,75 @@ pub fn group_blocks(lines: &[Line]) -> Vec<Block> {
                 align: Align::Left,
                 issue: l.issue(),
                 lines: vec![i],
+                runs: Vec::new(),
             });
         }
     }
     for b in &mut blocks {
+        b.runs = block_runs(lines, &b.lines);
+        if let Some(r) = b.runs.first() {
+            (b.base_font, b.size, b.bold, b.italic, b.color) = (r.base_font.clone(), r.size, r.bold, r.italic, r.color);
+        }
         b.align = detect_align(lines, &b.lines);
         if b.issue.is_none() {
             b.issue = b.lines.iter().find_map(|&i| lines[i].issue());
         }
     }
     blocks
+}
+
+/// The runs of a block's lines in reading order, joined across line breaks (see [`Block::runs`]).
+fn block_runs(lines: &[Line], members: &[usize]) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::new();
+    for (n, &li) in members.iter().enumerate() {
+        let line = &lines[li];
+        for (k, run) in line.runs.iter().enumerate() {
+            let mut run = run.clone();
+            if k == 0 {
+                // Leading spaces of a line go; a line after the first starts after a break.
+                while run.glyphs.first().is_some_and(|g| g.text.chars().all(paragraph_separator) && !g.text.is_empty()) {
+                    run.glyphs.remove(0);
+                }
+                run.text = run.text.trim_start_matches(paragraph_separator).to_string();
+                if n > 0 {
+                    if let Some(prev) = out.last_mut() {
+                        let hyphen = prev.text.trim_end_matches(paragraph_separator).ends_with('-');
+                        while prev.glyphs.last().is_some_and(|g| g.text.chars().all(paragraph_separator) && !g.text.is_empty()) {
+                            prev.glyphs.pop();
+                        }
+                        prev.text = prev.text.trim_end_matches(paragraph_separator).to_string();
+                        if hyphen {
+                            prev.text.pop();
+                            if prev.glyphs.last().is_some_and(|g| g.text == "-") {
+                                prev.glyphs.pop();
+                            }
+                        } else if prev.same_style(&run) {
+                            prev.text.push(' ');
+                            prev.glyphs.push(Glyph::gap());
+                        } else {
+                            run.text.insert(0, ' ');
+                            run.glyphs.insert(0, Glyph::gap());
+                        }
+                    }
+                }
+            }
+            match out.last_mut() {
+                Some(prev) if prev.same_style(&run) => {
+                    prev.text.push_str(&run.text);
+                    prev.glyphs.extend(run.glyphs);
+                }
+                _ => out.push(run),
+            }
+        }
+    }
+    if let Some(last) = out.last_mut() {
+        while last.glyphs.last().is_some_and(|g| g.text.chars().all(paragraph_separator) && !g.text.is_empty()) {
+            last.glyphs.pop();
+        }
+        last.text = last.text.trim_end_matches(paragraph_separator).to_string();
+    }
+    out.retain(|r| !r.text.is_empty());
+    out
 }
 
 fn detect_align(lines: &[Line], members: &[usize]) -> Align {
@@ -828,26 +988,6 @@ fn detect_align(lines: &[Line], members: &[usize]) -> Align {
     Align::Left
 }
 
-/// Greedy word wrapping to `width` with `advance` giving a string's width; `\n` breaks a line.
-/// Each line comes with whether it ends a paragraph.
-fn wrap(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<(String, bool)> {
-    let mut out = Vec::new();
-    for para in text.split('\n') {
-        let mut line = String::new();
-        for word in para.split(paragraph_separator).filter(|w| !w.is_empty()) {
-            let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-            if !line.is_empty() && advance(&candidate) > width {
-                out.push((std::mem::take(&mut line), false));
-                line = word.to_string();
-            } else {
-                line = candidate;
-            }
-        }
-        out.push((line, true));
-    }
-    out
-}
-
 /// A change to one block. Unset fields keep the block's own.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -865,8 +1005,28 @@ pub struct TextChange {
     pub width: Option<f64>,
     /// Distance between lines as a multiple of the font size.
     pub line_spacing: Option<f64>,
-    /// Bold and italic ask for the standard face of that style (the block's own font is replaced,
-    /// which is reported as a fallback).
+    /// Bold and italic for every run: a font of the same family and style on the page, else the
+    /// standard face of that style (reported as a fallback).
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    /// The block's new content as runs of their own style, in order (replaces `text`).
+    pub runs: Option<Vec<RunChange>>,
+}
+
+/// One run of a block's new content. Unset fields come from run `source` of the block (or its
+/// first run). A run with a `source`, no `text` (or its own text again) and no font or style
+/// change keeps its glyphs exactly, kerning included.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunChange {
+    pub text: Option<String>,
+    /// Index into the block's runs (`TextBlockDto::runs`).
+    pub source: Option<usize>,
+    /// A font picker id (`doc:<object>`, `res:<name>`, `std:<name>`, `bundled:<id>`).
+    pub font: Option<String>,
+    /// Points.
+    pub size: Option<f64>,
+    pub color: Option<[f64; 3]>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
 }
@@ -882,184 +1042,6 @@ pub struct Fallback {
     pub embedded: bool,
     /// Why: the original font and the first character it could not show.
     pub reason: String,
-}
-
-/// How new text is written.
-enum Face {
-    /// The block's own font.
-    Own { name: Vec<u8>, m: Rc<Metrics>, space: bool },
-    /// A standard 14 font in WinAnsiEncoding (not embedded).
-    Std { name: Vec<u8>, font: Font },
-    /// A standard face embedded as Type0/Identity-H (codes are glyph ids).
-    Embedded { name: Vec<u8>, font: Font },
-}
-
-/// WinAnsiEncoding code of `c`.
-fn win_ansi_byte(c: char) -> Option<u8> {
-    match c {
-        '\u{20}'..='\u{7e}' | '\u{a0}'..='\u{ff}' => u8::try_from(u32::from(c)).ok(),
-        _ => {
-            let high = &super::encodings::WIN_ANSI[0x80..0xa0];
-            let i = high.iter().position(|&u| u != 0 && u == u32::from(c))?;
-            u8::try_from(0x80 + i).ok()
-        }
-    }
-}
-
-impl Face {
-    fn name(&self) -> &[u8] {
-        match self {
-            Face::Own { name, .. } | Face::Std { name, .. } | Face::Embedded { name, .. } => name,
-        }
-    }
-
-    /// Whether a space is shown with a space code (else words are placed apart with TJ gaps).
-    fn has_space(&self) -> bool {
-        match self {
-            Face::Own { space, .. } => *space,
-            _ => true,
-        }
-    }
-
-    fn encode(&self, s: &str) -> Option<Vec<u8>> {
-        match self {
-            Face::Own { m, .. } => m.encode(s),
-            Face::Std { .. } => s.chars().map(win_ansi_byte).collect(),
-            Face::Embedded { font, .. } => {
-                let mut out = Vec::new();
-                for c in s.chars() {
-                    let g = font.encode_character(c as i32).ok().filter(|g| *g > 0 || c == ' ')?;
-                    out.extend_from_slice(&(g as u16).to_be_bytes());
-                }
-                Some(out)
-            }
-        }
-    }
-
-    /// Width of `s` (no spaces when `!has_space`) in text space before horizontal scaling.
-    fn advance(&self, s: &str, size: f64, cs: f64, ws: f64) -> f64 {
-        match self {
-            Face::Own { m, .. } => m
-                .encode(s)
-                .map(|b| m.codes(&b).iter().map(|(c, l)| m.width(*c) * size + cs + if m.is_space(*c, *l) { ws } else { 0.0 }).sum())
-                .unwrap_or(0.0),
-            Face::Std { font, .. } | Face::Embedded { font, .. } => s
-                .chars()
-                .map(|c| {
-                    let w = font.encode_character(c as i32).ok().and_then(|g| font.advance_glyph(g).ok()).map_or(0.5, f64::from);
-                    w * size + cs + if c == ' ' { ws } else { 0.0 }
-                })
-                .sum(),
-        }
-    }
-}
-
-/// A font resource name not yet in `fonts`.
-fn free_name(fonts: Option<&PdfObject>, base: &str) -> String {
-    (0..).map(|i| format!("{base}{i}")).find(|n| fonts.is_none_or(|f| get(f, n).is_none())).expect("a free name")
-}
-
-/// The page's /Resources /Font dict, created if missing (shared resources are extended in place:
-/// a new key is unused by every other page).
-fn font_dict(doc: &mut PdfDocument, page: &PdfObject) -> Result<PdfObject> {
-    let mut res = match page.get_dict_inheritable("Resources")? {
-        Some(r) if r.is_dict()? => r,
-        _ => {
-            let r = doc.new_dict()?;
-            page.clone().dict_put("Resources", r)?;
-            get(page, "Resources").ok_or_else(|| invalid("the page has no resources"))?
-        }
-    };
-    match get(&res, "Font") {
-        Some(f) if f.is_dict()? => Ok(f),
-        _ => {
-            res.dict_put("Font", doc.new_dict()?)?;
-            get(&res, "Font").ok_or_else(|| invalid("the page has no fonts"))
-        }
-    }
-}
-
-/// The standard 14 family closest to `base`: 0 Courier, 1 Times, 2 Helvetica.
-fn family_of(base: &str) -> usize {
-    let n = base.to_ascii_lowercase();
-    if ["courier", "mono", "consolas", "menlo", "monaco", "lucida console", "cmtt"].iter().any(|s| n.contains(s)) {
-        0
-    } else if !n.contains("sans")
-        && ["times", "serif", "roman", "mincho", "cambria", "georgia", "palatino", "garamond", "cmr", "minion", "book"]
-            .iter()
-            .any(|s| n.contains(s))
-    {
-        1
-    } else {
-        2
-    }
-}
-
-/// Chooses the face for `text`: the block's own font when it has every glyph (and no other style
-/// was asked for), else a standard font, else an embedded standard face. `style` is the
-/// requested (bold, italic); unset keeps the block's.
-fn choose_face(
-    doc: &mut PdfDocument,
-    pc: &PageContent,
-    first: &Line,
-    text: &str,
-    cache_font: Rc<Metrics>,
-    style: (Option<bool>, Option<bool>),
-) -> Result<(Face, Option<Fallback>)> {
-    let words: String = text.chars().filter(|c| *c != ' ' && *c != '\n').collect();
-    let (bold, italic) = (style.0.unwrap_or(first.bold), style.1.unwrap_or(first.italic));
-    let restyled = bold != first.bold || italic != first.italic;
-    if !restyled && cache_font.limit.is_none() && first.decodable && cache_font.encode(&words).is_some() {
-        let space = cache_font.encode(" ").is_some();
-        return Ok((Face::Own { name: first.font.clone(), m: cache_font, space }, None));
-    }
-    let missing = text.chars().find(|c| *c != '\n' && *c != ' ' && cache_font.encode(&c.to_string()).is_none());
-    let why = match (cache_font.limit, missing) {
-        _ if restyled => format!("{} is replaced by a standard face to set it {}", first.base_font, style_name(bold, italic)),
-        (Some(Limit::Type3), _) => format!("{} is a Type 3 font", first.base_font),
-        (_, Some(c)) if cache_font.subset => format!("the embedded subset of {} has no glyph for '{c}'", first.base_font),
-        (_, Some(c)) => format!("{} has no glyph for '{c}'", first.base_font),
-        _ => format!("{} can't show the new text", first.base_font),
-    };
-    let std = STD14[family_of(&first.base_font)][bold as usize + 2 * italic as usize];
-    let (face, fb) = std_face(doc, &pc.page, std, text, why)?;
-    Ok((face, Some(fb)))
-}
-
-fn style_name(bold: bool, italic: bool) -> &'static str {
-    match (bold, italic) {
-        (true, true) => "bold italic",
-        (true, false) => "bold",
-        (false, true) => "italic",
-        (false, false) => "regular",
-    }
-}
-
-/// The standard 14 font `std` as a new resource of `page`: WinAnsi Type1 when `text` allows,
-/// else the face embedded as Type0/Identity-H. `why` goes into the fallback.
-fn std_face(doc: &mut PdfDocument, page: &PdfObject, std: &str, text: &str, why: String) -> Result<(Face, Fallback)> {
-    let font = Font::new(std)?;
-    let fonts = font_dict(doc, page)?;
-    let name = free_name(Some(&fonts), "IwEd");
-    let mut fonts = fonts;
-    if text.chars().filter(|c| *c != '\n').all(|c| win_ansi_byte(c).is_some()) {
-        let mut f = doc.new_dict()?;
-        f.dict_put("Type", PdfObject::new_name("Font")?)?;
-        f.dict_put("Subtype", PdfObject::new_name("Type1")?)?;
-        f.dict_put("BaseFont", PdfObject::new_name(std)?)?;
-        f.dict_put("Encoding", PdfObject::new_name("WinAnsiEncoding")?)?;
-        let r = doc.add_object(&f)?;
-        fonts.dict_put(name.as_str(), r)?;
-        let fb = Fallback { font: std.into(), embedded: false, reason: why };
-        return Ok((Face::Std { name: name.into_bytes(), font }, fb));
-    }
-    if let Some(c) = text.chars().find(|c| *c != '\n' && *c != ' ' && font.encode_character(*c as i32).map_or(true, |g| g <= 0)) {
-        return Err(invalid(format!("no available font can show '{c}' (U+{:04X})", c as u32)));
-    }
-    let r = doc.add_font(&font)?;
-    fonts.dict_put(name.as_str(), r)?;
-    let fb = Fallback { font: std.into(), embedded: true, reason: why };
-    Ok((Face::Embedded { name: name.into_bytes(), font }, fb))
 }
 
 /// The operators of every line drawn in the same area as one of `rects` (fake bold, a second
@@ -1081,8 +1063,32 @@ fn coincident_ops(lines: &[Line], rects: &[[f64; 4]]) -> HashSet<usize> {
     drop
 }
 
-/// Rewrites block `index` of page `page` with `change`. Returns the fallback font used, if any.
-pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &TextChange) -> Result<Option<Fallback>> {
+/// Text with single spaces between words; hard breaks (`\n`) kept.
+fn normalize(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .split('\n')
+        .map(|p| p.split(paragraph_separator).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn fill_ops(color: Option<[f64; 3]>, own: &[Op]) -> Result<Vec<Op>> {
+    match color {
+        Some([r, g, b]) => {
+            if ![r, g, b].iter().all(|v| (0.0..=1.0).contains(v)) {
+                return Err(invalid("colour components must be between 0 and 1"));
+            }
+            Ok(vec![Op::new("rg", vec![num(r), num(g), num(b)])])
+        }
+        // A run that never set a colour is black (the runs before it in the new text object
+        // may have set another).
+        None if own.is_empty() => Ok(vec![Op::new("g", vec![num(0.0)])]),
+        None => Ok(own.to_vec()),
+    }
+}
+
+/// Rewrites block `index` of page `page` with `change`. Returns the fallback fonts used.
+pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &TextChange) -> Result<Vec<Fallback>> {
     let pc = read_page(doc, page)?;
     let blocks = group_blocks(&pc.lines);
     let b = blocks.get(index).cloned().ok_or_else(|| invalid(format!("page {} has no text block {}", page + 1, index + 1)))?;
@@ -1092,34 +1098,68 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     let members: Vec<&Line> = b.lines.iter().map(|&i| &pc.lines[i]).collect();
     let first = members[0];
     let o = &first.origin;
-    let (_, old_size) = o.state.font.clone().ok_or_else(|| invalid("the text has no font"))?;
+    let (_, old_tf) = o.state.font.clone().ok_or_else(|| invalid("the text has no font"))?;
     let k = o.k.max(1e-6);
-    let size = match change.size {
-        Some(pt) if pt.is_finite() && pt > 0.0 => (pt / k).max(0.1),
+    let first_run = b.runs.first().ok_or_else(|| invalid("the block has no text"))?;
+    let factor = match change.size {
+        Some(pt) if pt.is_finite() && pt > 0.0 => pt / first_run.size.max(1e-6),
         Some(_) => return Err(invalid("the font size must be a positive number")),
-        None => old_size,
+        None => 1.0,
     };
-    // The text: new, or the block's own (single spaces between words, hard breaks kept).
-    let raw = change.text.clone().unwrap_or_else(|| b.text.clone());
-    let text = raw
-        .replace("\r\n", "\n")
-        .split('\n')
-        .map(|p| p.split(paragraph_separator).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut cache = HashMap::new();
-    let metrics = metrics_for(pc.fonts.as_ref(), &first.font, &mut cache);
-    let (face, fallback) = choose_face(doc, &pc, first, &text, metrics, (change.bold, change.italic))?;
+    let specs: Vec<RunChange> = match (&change.runs, &change.text) {
+        (Some(r), _) => r.clone(),
+        (None, Some(t)) => vec![RunChange { text: Some(t.clone()), source: Some(0), ..Default::default() }],
+        (None, None) => (0..b.runs.len()).map(|i| RunChange { source: Some(i), ..Default::default() }).collect(),
+    };
+    if specs.is_empty() {
+        return Err(invalid("there is no text to set"));
+    }
     let st = &o.state;
-    let advance = |s: &str| -> f64 {
-        let t = if face.has_space() {
-            face.advance(s, size, st.char_spacing, st.word_spacing)
-        } else {
-            let spaces = s.matches(' ').count() as f64;
-            face.advance(&s.replace(' ', ""), size, st.char_spacing, 0.0) + spaces * size * 0.25
+    let mut setter = Setter::new(doc, pc.page.clone());
+    let mut items = Vec::new();
+    let mut first_size = None;
+    for rc in &specs {
+        let src = match rc.source {
+            Some(i) => Some(b.runs.get(i).ok_or_else(|| invalid(format!("the block has no run {}", i + 1)))?),
+            None => None,
         };
-        t * st.scale * k
-    };
+        let like = src.unwrap_or(first_run);
+        let bold = rc.bold.or(change.bold).unwrap_or(like.bold);
+        let italic = rc.italic.or(change.italic).unwrap_or(like.italic);
+        let (primary, own) = match &rc.font {
+            Some(id) => {
+                let f = setter.face_by_id(id)?;
+                (f, matches!(&setter.faces[f], Face::Doc { res, .. } if *res == like.font))
+            }
+            None => restyled_face(&mut setter, like, bold, italic)?,
+        };
+        // The run's text-space size per point (its own text matrix and CTM).
+        let per_pt = if like.size > 1e-9 { like.tsize / like.size } else { 1.0 / k };
+        let size = match rc.size {
+            Some(pt) if pt.is_finite() && pt > 0.0 => pt * per_pt,
+            Some(_) => return Err(invalid("the font size must be a positive number")),
+            None => like.tsize * factor,
+        };
+        first_size.get_or_insert(size);
+        let text = rc.text.as_deref().map(normalize).filter(|t| src.is_none_or(|s| *t != s.text));
+        if text.is_none() && src.is_none() {
+            continue;
+        }
+        let spec = RunSpec {
+            source: src,
+            text,
+            primary,
+            own_font: own && src.is_some(),
+            size,
+            fill: fill_ops(rc.color.or(change.color), &like.fill)?,
+            bold,
+            italic,
+            family: family_of(&like.base_font),
+        };
+        items.extend(setter.items(&spec)?);
+    }
+    let size = first_size.unwrap_or(old_tf);
+    let m = Measure { styles: &setter.styles, cs: st.char_spacing, scale: st.scale };
     // The block's extent along its first line, in that line's text space.
     let spans: Vec<(f64, f64, f64)> = members.iter().map(|l| span_in(first, l)).collect();
     let mut left = spans.iter().map(|s| s.0).fold(f64::MAX, f64::min);
@@ -1130,19 +1170,21 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         let t = o.tm.then(&o.ctm).0;
         t[1].abs() < 1e-6 && t[2].abs() < 1e-6 && t[0] > 0.0
     };
+    let grows = change.width.is_none() && members.len() == 1 && align == Align::Left && upright;
+    // Widths in user space (as on the page); the layout works in text space (÷ k).
     let mut width = match change.width {
         Some(w) if w.is_finite() && w > 0.0 => w.clamp(size * k, 14_400.0),
         Some(_) => return Err(invalid("the width must be a positive number")),
         // A single left-aligned line grows to the right, up to the page's margin.
-        None if members.len() == 1 && align == Align::Left && upright => own.max(pc.crop[2] - 36.0 - b.rect[0]),
+        None if grows => own.max(pc.crop[2] - 36.0 - b.rect[0]),
         None => own,
     };
-    let mut wrapped = wrap(&text, width + 0.5, advance);
-    if change.width.is_none() && members.len() == 1 && align == Align::Left && upright {
-        width = wrapped.iter().map(|l| advance(&l.0)).fold(own, f64::max).min(width);
+    let mut lines = wrap(items.clone(), (width + 0.5) / k, &m);
+    if grows {
+        width = lines.iter().map(|l| m.line(&l.items) * k).fold(own, f64::max).min(width);
     }
     // A word longer than the width widens the box, keeping the aligned edge.
-    let widest = wrapped.iter().map(|l| advance(&l.0)).fold(0.0, f64::max);
+    let widest = lines.iter().map(|l| m.line(&l.items) * k).fold(0.0, f64::max);
     if widest > width {
         let extra = widest - width;
         match align {
@@ -1151,17 +1193,17 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
             _ => {}
         }
         width = widest;
-        wrapped = wrap(&text, width + 0.5, advance);
+        lines = wrap(items, (width + 0.5) / k, &m);
     }
-    let lead = if let Some(m) = change.line_spacing {
-        if !(m.is_finite() && (0.5..=5.0).contains(&m)) {
+    let lead = if let Some(ls) = change.line_spacing {
+        if !(ls.is_finite() && (0.5..=5.0).contains(&ls)) {
             return Err(invalid("the line spacing must be between 0.5 and 5 times the font size"));
         }
-        m * size
+        ls * size
     } else if members.len() > 1 {
-        (spans[0].2 - spans[1].2) * size / old_size
+        (spans[0].2 - spans[1].2) * size / old_tf
     } else if st.leading > 0.0 {
-        st.leading * size / old_size
+        st.leading * size / old_tf
     } else {
         size * 1.2
     };
@@ -1182,69 +1224,17 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     block_ops.push(Op::new("BT", vec![]));
     let mut state = st.clone();
     state.word_spacing = 0.0;
-    state.font = Some((face.name().to_vec(), size));
-    if let Some([r, g, bl]) = change.color {
-        if ![r, g, bl].iter().all(|v| (0.0..=1.0).contains(v)) {
-            return Err(invalid("colour components must be between 0 and 1"));
-        }
-        state.fill = vec![Op::new("rg", vec![num(r), num(g), num(bl)])];
-    }
+    state.font = None;
+    state.fill = Vec::new();
     block_ops.extend(state.ops());
     let origin = Matrix::translate(left, 0.0).then(&o.tm);
     block_ops.push(Op::new("Tm", origin.0.iter().map(|v| num(*v)).collect()));
-    let mut x = 0.0;
-    let mut tw_set = 0.0;
-    for (i, (line, last_of_para)) in wrapped.iter().enumerate() {
-        let adv = advance(line);
-        let free = (width - adv).max(0.0) / k;
-        let dx = match align {
-            Align::Center => free / 2.0,
-            Align::Right => free,
-            _ => 0.0,
-        };
-        if i > 0 || dx != 0.0 {
-            block_ops.push(Op::new("Td", vec![num(dx - x), num(if i > 0 { -lead } else { 0.0 })]));
-        }
-        x = dx;
-        let spaces = line.matches(' ').count();
-        // Justified lines (all but a paragraph's last) spread the free width over their spaces.
-        let extra = if align == Align::Justify && !*last_of_para && spaces > 0 { free / spaces as f64 } else { 0.0 };
-        if line.is_empty() {
-            continue;
-        }
-        let single_byte_space = matches!(&face, Face::Own { m, .. } if !m.composite) || matches!(face, Face::Std { .. });
-        if face.has_space() && (extra == 0.0 || single_byte_space) {
-            // Word spacing (code 32) justifies; it is in unscaled text space.
-            let tw = extra / st.scale;
-            if tw != tw_set {
-                block_ops.push(Op::new("Tw", vec![num(tw)]));
-                tw_set = tw;
-            }
-            let bytes = face.encode(line).ok_or_else(|| invalid(format!("\"{line}\" can't be shown")))?;
-            block_ops.push(Op::new("Tj", vec![Obj::Str(bytes)]));
-        } else {
-            // Words placed apart: the font has no space glyph (TeX fonts), or justified
-            // two-byte text.
-            let mut arr = Vec::new();
-            for (w, word) in line.split(' ').enumerate() {
-                if w > 0 {
-                    // The gap after horizontal scaling: a quarter em for a missing space glyph,
-                    // plus the justification.
-                    if face.has_space() {
-                        arr.push(Obj::Str(face.encode(" ").unwrap_or_default()));
-                    }
-                    let gap = if face.has_space() { 0.0 } else { size * 0.25 * st.scale } + extra;
-                    if gap != 0.0 {
-                        arr.push(num(-gap * 1000.0 / (size * st.scale)));
-                    }
-                }
-                if !word.is_empty() {
-                    arr.push(Obj::Str(face.encode(word).ok_or_else(|| invalid(format!("\"{word}\" can't be shown")))?));
-                }
-            }
-            block_ops.push(Op::new("TJ", vec![Obj::Array(arr)]));
-        }
-    }
+    let tm_scale = (origin.0[0] * origin.0[3] - origin.0[1] * origin.0[2]).abs().sqrt();
+    let placement = Placement { align, width: width / k, lead, first_size: size, stroke: 0.03 * tm_scale, render_mode: st.render_mode };
+    block_ops.extend(emit(&setter, &lines, &m, &placement));
+    setter.finish()?;
+    let fallbacks = std::mem::take(&mut setter.fallbacks);
+    drop(setter);
     block_ops.push(Op::new("ET", vec![]));
     block_ops.push(Op::new("Q", vec![]));
     // The block's operators go, and anything drawn in the same area.
@@ -1292,7 +1282,7 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         (insert, keep)
     });
     write_contents(doc, &pc, new_data)?;
-    Ok(fallback)
+    Ok(fallbacks)
 }
 
 /// New text for [`add_text`].
@@ -1339,14 +1329,29 @@ pub fn add_text(doc: &mut PdfDocument, page: u32, new: &NewText) -> Result<()> {
         return Err(invalid("there is no text to add"));
     }
     let p = doc.find_page(page as i32)?;
-    let (face, _) = std_face(doc, &p, "Helvetica", &text, String::new())?;
     let size = new.size;
-    let advance = |s: &str| face.advance(s, size, 0.0, 0.0);
-    let lines: Vec<String> = match new.width {
-        Some(w) if w.is_finite() && w > 0.0 => wrap(&text, w.clamp(size, 14_400.0) + 0.5, advance).into_iter().map(|l| l.0).collect(),
-        Some(_) => return Err(invalid("the width must be a positive number")),
-        None => text.split('\n').map(str::to_string).collect(),
+    // Helvetica, with the usual fallbacks (standard faces, bundled Noto for anything else).
+    let mut setter = Setter::new(doc, p.clone());
+    let primary = setter.std_face("Helvetica")?;
+    let spec = RunSpec {
+        source: None,
+        text: Some(text),
+        primary,
+        own_font: false,
+        size,
+        fill: vec![Op::new("rg", vec![num(r), num(g), num(b)])],
+        bold: false,
+        italic: false,
+        family: 2,
     };
+    let items = setter.items(&spec)?;
+    let m = Measure { styles: &setter.styles, cs: 0.0, scale: 1.0 };
+    let width = match new.width {
+        Some(w) if w.is_finite() && w > 0.0 => w.clamp(size, 14_400.0) + 0.5,
+        Some(_) => return Err(invalid("the width must be a positive number")),
+        None => f64::MAX,
+    };
+    let lines = wrap(items, width, &m);
     // Text space: x along the line, y up as the page is shown. The first baseline sits under the
     // top of the box by about the font's ascent.
     let flip = Matrix([1.0, 0.0, 0.0, -1.0, 0.0, 0.0]);
@@ -1358,18 +1363,11 @@ pub fn add_text(doc: &mut PdfDocument, page: u32, new: &NewText) -> Result<()> {
         Op::new("cm", vec![num(upright.0[0]), num(upright.0[1]), num(upright.0[2]), num(upright.0[3]), num(ux), num(uy)]),
         Op::new("MP", vec![Obj::name("TouchUp_TextEdit")]),
         Op::new("BT", vec![]),
-        Op::new("rg", vec![num(r), num(g), num(b)]),
-        Op::new("Tf", vec![Obj::name(&String::from_utf8_lossy(face.name())), num(size)]),
     ];
-    for (i, line) in lines.iter().enumerate() {
-        if i > 0 {
-            ops.push(Op::new("Td", vec![num(0.0), num(-size * 1.2)]));
-        }
-        if !line.is_empty() {
-            let bytes = face.encode(line).ok_or_else(|| invalid(format!("\"{line}\" can't be shown")))?;
-            ops.push(Op::new("Tj", vec![Obj::Str(bytes)]));
-        }
-    }
+    let placement = Placement { align: Align::Left, width: 0.0, lead: size * 1.2, first_size: size, stroke: 0.03, render_mode: 0 };
+    ops.extend(emit(&setter, &lines, &m, &placement));
+    setter.finish()?;
+    drop(setter);
     ops.push(Op::new("ET", vec![]));
     ops.push(Op::new("Q", vec![]));
 
@@ -1399,10 +1397,15 @@ pub fn add_text(doc: &mut PdfDocument, page: u32, new: &NewText) -> Result<()> {
 const WRAP_OPEN: &[u8] = b"q\n";
 const WRAP_CLOSE: &[u8] = b"\nQ\n";
 
-fn flate_stream(doc: &mut PdfDocument, data: &[u8]) -> Result<PdfObject> {
+/// Flate (zlib) bytes of `data`.
+pub(crate) fn flate(data: &[u8]) -> Result<Vec<u8>> {
     let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     z.write_all(data).map_err(|e| EngineError::Io(e.to_string()))?;
-    let packed = z.finish().map_err(|e| EngineError::Io(e.to_string()))?;
+    z.finish().map_err(|e| EngineError::Io(e.to_string()))
+}
+
+fn flate_stream(doc: &mut PdfDocument, data: &[u8]) -> Result<PdfObject> {
+    let packed = flate(data)?;
     let mut dict = doc.new_dict()?;
     dict.dict_put("Filter", PdfObject::new_name("FlateDecode")?)?;
     Ok(doc.add_stream(&Buffer::from_bytes(&packed)?, Some(&dict), true)?)
@@ -1509,10 +1512,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wraps_and_keeps_hard_breaks() {
-        let w = |s: &str| s.chars().count() as f64;
-        let lines = |v: Vec<(String, bool)>| v.into_iter().map(|l| l.0).collect::<Vec<_>>();
-        assert_eq!(lines(wrap("aa bb cc", 5.0, w)), ["aa bb", "cc"]);
-        assert_eq!(wrap("aa\nbb cc", 10.0, w), [("aa".to_string(), true), ("bb cc".to_string(), true)]);
+    fn normalizes_spaces_and_keeps_breaks() {
+        assert_eq!(normalize("  a \t b\r\nc  "), "a b\nc");
     }
 }

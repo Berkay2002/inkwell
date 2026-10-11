@@ -845,6 +845,7 @@ pub fn run() {
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
+            textedit::app::text_fonts,
             imageedit::app::image_blocks,
             imageedit::app::image_edit,
             redact::app::redact_find,
