@@ -21,8 +21,10 @@ function useStageBox(): Box | null {
     const el = document.querySelector(".stage");
     if (!el) return;
     const f = () => {
+      // the part of the area that is on screen: a layout wider than the window must not push the bar out of it
       const b = el.getBoundingClientRect();
-      setBox((p) => (p && p.l === b.left && p.r === b.right && p.t === b.top && p.b === b.bottom ? p : { l: b.left, r: b.right, t: b.top, b: b.bottom }));
+      const n = { l: b.left, r: Math.min(b.right, window.innerWidth), t: b.top, b: Math.min(b.bottom, window.innerHeight) };
+      setBox((p) => (p && p.l === n.l && p.r === n.r && p.t === n.t && p.b === n.b ? p : n));
     };
     f();
     const ro = new ResizeObserver(f);
