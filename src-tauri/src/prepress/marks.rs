@@ -334,6 +334,7 @@ pub fn add_printer_marks(eng: &Engine, doc: DocId, spec: &MarksSpec, source: Edi
     }
     let mut notes = Vec::new();
     let state = eng.apply_custom(doc, "Add printer's marks".to_string(), source, false, |d| {
+        super::refuse_certified(d, "Adding printer's marks")?;
         let count = d.page_count()?.max(0) as u32;
         let pages: Vec<u32> = match &spec.pages {
             Some(p) => {

@@ -1169,7 +1169,7 @@ pub(crate) fn write_new(target: &Path, bytes: &[u8], pages: u32) -> Result<()> {
     })
 }
 
-fn same_path(a: &str, b: &str) -> bool {
+pub(crate) fn same_path(a: &str, b: &str) -> bool {
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p.to_lowercase()));
     a.eq_ignore_ascii_case(b) || canon(a) == canon(b)
 }

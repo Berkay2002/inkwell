@@ -82,11 +82,16 @@ fn dir(test: &str) -> PathBuf {
 }
 
 fn open(test: &str, bytes: &[u8]) -> (Arc<Engine>, DocId) {
+    let (eng, id, _) = open_at(test, bytes);
+    (eng, id)
+}
+
+fn open_at(test: &str, bytes: &[u8]) -> (Arc<Engine>, DocId, PathBuf) {
     let p = dir(test).join("doc.pdf");
     std::fs::write(&p, bytes).unwrap();
     let eng = Engine::new(2, 64 << 20);
     let id = eng.open(&p.to_string_lossy()).unwrap().doc;
-    (eng, id)
+    (eng, id, p)
 }
 
 fn key(eng: &Engine, doc: DocId) -> TileKey {
@@ -457,7 +462,7 @@ fn a_transparency_group_in_rgb_is_set_to_cmyk() {
 // ---- boxes ---------------------------------------------------------------------------------------
 
 fn box_spec(kind: BoxKind, from: BoxKind, margin: [f32; 4]) -> BoxSpec {
-    BoxSpec { pages: None, kind, rect: None, from: Some(from), margin: Some(margin) }
+    BoxSpec { pages: None, kind, rect: None, from: Some(from), margin: Some(margin), shown: false }
 }
 
 #[test]
@@ -473,13 +478,13 @@ fn trim_and_bleed_boxes_are_set_and_checked() {
     // a bleed beyond the media box, a trim outside the bleed, an empty box and the media box are refused
     assert!(set_boxes(&eng, doc, &box_spec(BoxKind::Bleed, BoxKind::Trim, [40.0; 4]), u.clone()).is_err());
     assert!(set_boxes(&eng, doc, &box_spec(BoxKind::Trim, BoxKind::Media, [-10.0; 4]), u.clone()).is_err());
-    assert!(set_boxes(&eng, doc, &BoxSpec { pages: None, kind: BoxKind::Art, rect: Some([10.0, 10.0, 10.0, 400.0]), from: None, margin: None }, u.clone()).is_err());
-    assert!(set_boxes(&eng, doc, &BoxSpec { pages: None, kind: BoxKind::Media, rect: Some([0.0, 0.0, 100.0, 100.0]), from: None, margin: None }, u.clone()).is_err());
-    assert!(set_boxes(&eng, doc, &BoxSpec { pages: Some(vec![4]), kind: BoxKind::Art, rect: Some([0.0, 0.0, 100.0, 100.0]), from: None, margin: None }, u.clone()).is_err());
-    assert!(set_boxes(&eng, doc, &BoxSpec { pages: None, kind: BoxKind::Art, rect: None, from: None, margin: None }, u.clone()).is_err());
+    assert!(set_boxes(&eng, doc, &BoxSpec { pages: None, kind: BoxKind::Art, rect: Some([10.0, 10.0, 10.0, 400.0]), from: None, margin: None, shown: false }, u.clone()).is_err());
+    assert!(set_boxes(&eng, doc, &BoxSpec { pages: None, kind: BoxKind::Media, rect: Some([0.0, 0.0, 100.0, 100.0]), from: None, margin: None, shown: false }, u.clone()).is_err());
+    assert!(set_boxes(&eng, doc, &BoxSpec { pages: Some(vec![4]), kind: BoxKind::Art, rect: Some([0.0, 0.0, 100.0, 100.0]), from: None, margin: None, shown: false }, u.clone()).is_err());
+    assert!(set_boxes(&eng, doc, &BoxSpec { pages: None, kind: BoxKind::Art, rect: None, from: None, margin: None, shown: false }, u.clone()).is_err());
     // what was refused changed nothing, and an absolute rectangle works
     assert_eq!(boxes(&eng, doc, 0, BoxKind::Trim), Some([36.0, 36.0, 576.0, 756.0]));
-    set_boxes(&eng, doc, &BoxSpec { pages: None, kind: BoxKind::Art, rect: Some([100.0, 100.0, 500.0, 700.0]), from: None, margin: None }, u).unwrap();
+    set_boxes(&eng, doc, &BoxSpec { pages: None, kind: BoxKind::Art, rect: Some([100.0, 100.0, 500.0, 700.0]), from: None, margin: None, shown: false }, u).unwrap();
     assert_eq!(boxes(&eng, doc, 0, BoxKind::Art), Some([100.0, 100.0, 500.0, 700.0]));
     // the PDF/X checker sees the trim box
     let report = crate::preflight::check_doc(&eng, doc, crate::preflight::Profile::Pdfx4, &mut no_progress(), &AtomicBool::new(false)).unwrap();
@@ -568,7 +573,7 @@ fn marks_on_a_page_without_boxes_trim_at_its_edge_and_report_what_they_skip() {
     assert!(pts.iter().all(|&(x, y)| !(x > 0.01 && x < 611.99 && y > 0.01 && y < 791.99)));
     // a page too small for colour bars says so
     let (eng, doc) = open("marks-small", &build("", &[("", "0 g 1 1 5 5 re f")], &[]));
-    set_boxes(&eng, doc, &BoxSpec { pages: None, kind: BoxKind::Trim, rect: Some([300.0, 300.0, 340.0, 340.0]), from: None, margin: None }, EditSource::User).unwrap();
+    set_boxes(&eng, doc, &BoxSpec { pages: None, kind: BoxKind::Trim, rect: Some([300.0, 300.0, 340.0, 340.0]), from: None, margin: None, shown: false }, EditSource::User).unwrap();
     let (_, notes) = add_printer_marks(&eng, doc, &MarksSpec { pages: None, marks: MarkSet { crop: false, bleed: false, registration: false, color_bars: true }, weight: None, offset: None, length: None }, EditSource::User).unwrap();
     assert!(notes.iter().any(|n| n.contains("too small")), "{notes:?}");
     // nothing picked, a bad weight and a bad page are refused
@@ -744,7 +749,7 @@ fn numbers_that_make_no_sense_are_refused() {
     assert!(ink_report(&eng, doc, 0, f32::NAN, 1600, false).is_err());
     assert!(ink_report(&eng, doc, 0, -5.0, 1600, false).is_err());
     // a crop or art box outside the media box
-    let beyond = |kind| BoxSpec { pages: None, kind, rect: Some([-10.0, 0.0, 600.0, 700.0]), from: None, margin: None };
+    let beyond = |kind| BoxSpec { pages: None, kind, rect: Some([-10.0, 0.0, 600.0, 700.0]), from: None, margin: None, shown: false };
     assert!(set_boxes(&eng, doc, &beyond(BoxKind::Crop), EditSource::User).is_err());
     assert!(set_boxes(&eng, doc, &beyond(BoxKind::Art), EditSource::User).is_err());
 }
@@ -915,4 +920,95 @@ fn a_view_in_use_is_not_the_one_that_goes_when_a_document_has_too_many() {
     }
     assert_eq!(pre.register(doc, View::default()), main, "the view that was in use stays");
     assert_ne!(pre.register(doc, extra(0)), first, "the one nobody asked for is gone");
+}
+
+// ---- review fixes --------------------------------------------------------------------------------
+
+const CERTIFIED: &str = "/Perms<</DocMDP<</Type/Sig/Reference[<</TransformMethod/DocMDP/TransformParams<</P 3>>>>]>>>>";
+const SIGNED: &str = "/AcroForm<</SigFlags 3/Fields[100 0 R]>>";
+
+fn signature() -> (usize, Vec<u8>) {
+    (100, b"<</FT/Sig/T(Signature1)/V<</Type/Sig/Filter/Adobe.PPKLite/SubFilter/adbe.pkcs7.detached/ByteRange[0 10 20 30]/Contents<00>>>>>".to_vec())
+}
+
+const RED: &str = "1 0 0 rg 50 50 100 100 re f";
+
+fn marks_spec() -> MarksSpec {
+    MarksSpec { pages: None, marks: MarkSet { crop: true, bleed: false, registration: false, color_bars: false }, weight: None, offset: None, length: None }
+}
+
+#[test]
+fn a_certified_document_is_left_as_it_is_by_all_three_edits() {
+    let (eng, doc) = open("certified", &build_with(CERTIFIED, "", &[("", RED)], &[]));
+    let before = contents(&eng, doc, 0);
+    let refused = |e: Result<()>| assert!(e.unwrap_err().to_string().contains("certified"));
+    refused(convert(&eng, doc, &spec(true, false, false), None).map(|_| ()));
+    refused(add_printer_marks(&eng, doc, &marks_spec(), EditSource::User).map(|_| ()));
+    refused(set_boxes(&eng, doc, &box_spec(BoxKind::Trim, BoxKind::Media, [-20.0; 4]), EditSource::User).map(|_| ()));
+    let state = eng.edit_state(doc).unwrap();
+    assert!(!state.dirty && state.undo.is_none(), "nothing was changed or recorded");
+    assert_eq!(contents(&eng, doc, 0), before);
+    assert_eq!(boxes(&eng, doc, 0, BoxKind::Trim), None);
+}
+
+#[test]
+fn a_signed_document_keeps_the_signed_bytes_through_all_three_edits() {
+    type Edit = Box<dyn Fn(&Engine, DocId)>;
+    let edits: Vec<(&str, Edit)> = vec![
+        ("convert", Box::new(|e, d| drop(convert(e, d, &spec(true, false, false), None).unwrap()))),
+        ("marks", Box::new(|e, d| drop(add_printer_marks(e, d, &marks_spec(), EditSource::User).unwrap()))),
+        ("boxes", Box::new(|e, d| drop(set_boxes(e, d, &box_spec(BoxKind::Trim, BoxKind::Media, [-20.0; 4]), EditSource::User).unwrap()))),
+    ];
+    for (name, edit) in edits {
+        let (eng, doc, path) = open_at(&format!("signed-{name}"), &build_with(SIGNED, "", &[("", RED)], &[signature()]));
+        assert!(eng.read_custom(doc, |d| Ok(crate::outline::signed(d))).unwrap());
+        let original = std::fs::read(&path).unwrap();
+        edit(&eng, doc);
+        eng.save(doc, None).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        assert!(saved.len() > original.len() && saved.starts_with(&original), "{name}: the file was rewritten, the signature would no longer verify");
+    }
+}
+
+#[test]
+fn margins_as_shown_follow_each_pages_own_turn() {
+    // page 0 upright, page 1 turned 90 degrees (a real number, as some writers give it)
+    let (eng, doc) = open("shown-margins", &build("", &[("", RED), ("/Rotate 90.0", RED)], &[]));
+    let shown = |kind, from, margin| BoxSpec { pages: None, kind, rect: None, from: Some(from), margin: Some(margin), shown: true };
+    set_boxes(&eng, doc, &shown(BoxKind::Trim, BoxKind::Media, [-20.0; 4]), EditSource::User).unwrap();
+    // 10 points outward on the left of what is shown
+    set_boxes(&eng, doc, &shown(BoxKind::Bleed, BoxKind::Trim, [10.0, 0.0, 0.0, 0.0]), EditSource::User).unwrap();
+    assert_eq!(boxes(&eng, doc, 0, BoxKind::Bleed), Some([10.0, 20.0, 592.0, 772.0]), "upright: the left is x0");
+    assert_eq!(boxes(&eng, doc, 1, BoxKind::Bleed), Some([20.0, 10.0, 592.0, 772.0]), "turned 90: the left is y0");
+    // a real /Rotate is read like MuPDF does: to the nearest quarter turn
+    let rotate = |p| eng.read_custom(doc, |d| super::boxes::rotate_of(&d.find_page(p)?)).unwrap();
+    assert_eq!((rotate(0), rotate(1)), (0, 90));
+}
+
+#[test]
+fn the_documents_own_file_is_refused_by_name_link_and_case() {
+    let (eng, doc, path) = open_at("own-file", &build("", &[("", RED)], &[]));
+    let p = path.to_string_lossy().to_string();
+    assert!(super::app::not_own_file(&eng, doc, &p).is_err());
+    assert!(super::app::not_own_file(&eng, doc, &p.replace("doc.pdf", "../prepress-own-file/doc.pdf")).is_err());
+    #[cfg(unix)]
+    {
+        let link = path.with_file_name("alias.pdf");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(super::app::not_own_file(&eng, doc, &link.to_string_lossy()).is_err(), "a link to the file is the file");
+    }
+    assert!(super::app::not_own_file(&eng, doc, &path.with_file_name("other.pdf").to_string_lossy()).is_ok());
+}
+
+#[test]
+fn a_profile_is_read_from_a_regular_file_within_the_cap() {
+    let d = dir("profile-read");
+    let small = d.join("small.icc");
+    std::fs::write(&small, [1u8, 2, 3]).unwrap();
+    assert_eq!(super::app::read_profile(&small.to_string_lossy()).unwrap(), vec![1, 2, 3]);
+    assert!(super::app::read_profile(&d.to_string_lossy()).is_err(), "a folder is not a profile");
+    let big = d.join("big.icc");
+    std::fs::File::create(&big).unwrap().set_len((64 << 20) + 1).unwrap();
+    assert!(super::app::read_profile(&big.to_string_lossy()).is_err());
+    assert!(super::app::read_profile(&d.join("missing.icc").to_string_lossy()).is_err());
 }

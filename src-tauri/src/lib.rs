@@ -1040,6 +1040,8 @@ pub fn run() {
             prepress::app::prepress_marks_preview,
             prepress::app::prepress_ink_at,
             prepress::app::prepress_pick_profile,
+            prepress::app::prepress_save_other,
+            prepress::app::prepress_protection,
             a11y::app::a11y_reading_order,
             a11y::app::a11y_tags,
             a11y::app::a11y_tag_problems,

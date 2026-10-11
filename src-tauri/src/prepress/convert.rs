@@ -211,6 +211,7 @@ pub fn convert_colors(
         IntentSource::Profile => format!("Convert colours to {}", spec.condition.as_deref().unwrap_or("CMYK")),
     };
     let state = eng.apply_custom(doc, label, source, false, |d| {
+        super::refuse_certified(d, "Converting its colours")?;
         let count = d.page_count()?.max(0) as u32;
         let pages: Vec<u32> = match &spec.pages {
             Some(p) => {

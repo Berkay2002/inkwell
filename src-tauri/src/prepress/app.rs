@@ -13,6 +13,7 @@ use crate::engine::cache::{Tile, TileKey};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::pool::class;
 use crate::engine::{DocId, Engine, EngineError, TileOutcome};
+use crate::history_ipc::History;
 use crate::paths::Paths;
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -295,50 +296,120 @@ pub async fn prepress_inspect(eng: Eng<'_>, doc: DocId, page: u32, x: f32, y: f3
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Converted {
+    /// The document after the conversion, and after the save when there was one and it worked.
     pub state: EditState,
     pub report: ConvertReport,
+    /// `save_to` was given and the file was written.
+    pub saved: bool,
+    /// `save_to` was given, the colours were converted in the open document, and writing the file failed.
+    pub save_error: Option<String>,
+}
+
+/// An ICC profile is a few hundred kilobytes; a file far beyond that is not one.
+const MAX_PROFILE: u64 = 64 << 20;
+
+/// Reads a profile: a regular file, at most `MAX_PROFILE` bytes. The read is bounded itself, so a file that
+/// grows (or is not a regular file) cannot make it read without end.
+pub(super) fn read_profile(path: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let io = |e: std::io::Error| EngineError::Io(e.to_string());
+    // a pipe or device would block the open
+    if !std::fs::metadata(path).map_err(io)?.is_file() {
+        return Err(EngineError::Invalid("That is not a profile file".into()));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).map_err(io)?.take(MAX_PROFILE + 1).read_to_end(&mut bytes).map_err(io)?;
+    if bytes.len() as u64 > MAX_PROFILE {
+        return Err(EngineError::Invalid("The file is too large for an ICC profile".into()));
+    }
+    Ok(bytes)
+}
+
+/// Refuses a target that is the document's own file (the same file by another name, a link or a different
+/// case included): "save as" must never be a plain save over the original.
+pub(super) fn not_own_file(eng: &Engine, doc: DocId, to: &str) -> Result<()> {
+    if crate::engine::edit::same_path(&eng.edit_state(doc)?.path, to) {
+        return Err(EngineError::Invalid("That is this document's own file. Choose another name, or convert in this document and Save.".into()));
+    }
+    Ok(())
+}
+
+/// Writes the document as another file (Save as) and does what a save does afterwards.
+fn save_elsewhere(window: &Window, app: &tauri::AppHandle, eng: &Engine, hist: &Arc<History>, doc: DocId, to: &str) -> Result<EditState> {
+    not_own_file(eng, doc, to)?;
+    let (state, saved) = eng.save_recorded(doc, Some(to))?;
+    crate::after_save(window, app, hist, doc, Some(to), &state, saved);
+    Ok(state)
 }
 
 /// Converts colours to CMYK as one undo step. `profile` is an open token (from `pick_open`) of a CMYK
-/// ICC profile, for `intent: "profile"`.
+/// ICC profile, for `intent: "profile"`. `save_to`: a save token; the converted document is then written
+/// there as Save as, in the same command (nothing can run between the two), after checking that it is not
+/// the document's own file. A failed write leaves the conversion in the open document and says so.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn prepress_convert(
     window: Window,
+    app: tauri::AppHandle,
     eng: Eng<'_>,
     reg: tauri::State<'_, Paths>,
+    hist: tauri::State<'_, Arc<History>>,
     jobs: Jobs<'_>,
     job: u64,
     doc: DocId,
     spec: ConvertSpec,
     profile: Option<String>,
+    save_to: Option<String>,
     on_progress: Channel<Progress>,
 ) -> Result<Converted> {
-    // the token is resolved here, where the window is known; the file is read off the UI thread
+    // the tokens are resolved here, where the window is known; the file is read off the UI thread
     let profile_path = match (spec.intent, profile) {
         (IntentSource::Profile, Some(token)) => Some(reg.open(window.label(), &token)?),
         _ => None,
     };
-    let eng = eng.inner().clone();
+    let target = save_to.map(|t| reg.take_save(window.label(), &t)).transpose()?;
+    let (eng, hist) = (eng.inner().clone(), hist.inner().clone());
     let guard = jobs.inner().begin(job);
     blocking(move || {
         let mut progress = |p: Progress| {
             let _ = on_progress.send(p);
         };
-        let bytes = match &profile_path {
-            Some(path) => {
-                // a profile is a few hundred kilobytes; a file far beyond that is not one
-                if std::fs::metadata(path).map_err(|e| EngineError::Io(e.to_string()))?.len() > 64 << 20 {
-                    return Err(EngineError::Invalid("The file is too large for an ICC profile".into()));
-                }
-                Some(std::fs::read(path).map_err(|e| EngineError::Io(e.to_string()))?)
-            }
-            None => None,
-        };
+        if let Some(to) = &target {
+            not_own_file(&eng, doc, to)?;
+        }
+        let bytes = profile_path.as_deref().map(read_profile).transpose()?;
         let (state, report) = convert_colors(&eng, doc, &spec, bytes.as_deref(), EditSource::User, &mut progress, &guard.cancel)?;
-        Ok(Converted { state, report })
+        let Some(to) = target else {
+            return Ok(Converted { state, report, saved: false, save_error: None });
+        };
+        Ok(match save_elsewhere(&window, &app, &eng, &hist, doc, &to) {
+            Ok(saved) => Converted { state: saved, report, saved: true, save_error: None },
+            Err(e) => Converted { state, report, saved: false, save_error: Some(e.to_string()) },
+        })
     })
     .await
+}
+
+/// Save as another file after a conversion whose write failed: the same check, no second conversion.
+#[tauri::command]
+pub async fn prepress_save_other(window: Window, app: tauri::AppHandle, eng: Eng<'_>, reg: tauri::State<'_, Paths>, hist: tauri::State<'_, Arc<History>>, doc: DocId, to: String) -> Result<EditState> {
+    let to = reg.take_save(window.label(), &to)?;
+    let (eng, hist) = (eng.inner().clone(), hist.inner().clone());
+    blocking(move || save_elsewhere(&window, &app, &eng, &hist, doc, &to)).await
+}
+
+/// Whether the document is certified (its edits are refused) or signed (they stay incremental).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Protection {
+    pub certified: bool,
+    pub signed: bool,
+}
+
+#[tauri::command]
+pub async fn prepress_protection(eng: Eng<'_>, doc: DocId) -> Result<Protection> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.read_custom(doc, |d| Ok(Protection { certified: crate::outline::certified(d)?.is_some(), signed: crate::outline::signed(d) }))).await
 }
 
 /// Sets a trim, bleed, art or crop box.

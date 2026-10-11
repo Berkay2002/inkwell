@@ -103,6 +103,13 @@ pub struct PageBoxes {
     pub stated: StatedBoxes,
 }
 
+/// The page's /Rotate (inherited) as 0, 90, 180 or 270: a real is accepted and the value is rounded to the
+/// nearest quarter turn, as MuPDF reads it.
+pub(crate) fn rotate_of(page: &PdfObject) -> Result<i32> {
+    let v = page.get_dict_inheritable("Rotate")?.and_then(|r| r.as_float().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
+    Ok(((v / 90.0).round() as i64 * 90).rem_euclid(360) as i32)
+}
+
 /// Reads the boxes of page `page` (0-based) of the document as it is now.
 pub fn page_boxes(eng: &Engine, doc: DocId, page: u32) -> Result<PageBoxes> {
     eng.read_custom(doc, |pdf| {
@@ -110,7 +117,7 @@ pub fn page_boxes(eng: &Engine, doc: DocId, page: u32) -> Result<PageBoxes> {
             return Err(crate::engine::EngineError::BadPage(page));
         }
         let p = pdf.find_page(page as i32)?;
-        let rotate = p.get_dict_inheritable("Rotate")?.and_then(|r| r.as_int().ok()).unwrap_or(0).rem_euclid(360) / 90 * 90;
+        let rotate = rotate_of(&p)?;
         let has = |k| stated(&p, k).map(|b| b.is_some());
         Ok(PageBoxes {
             rotate,
@@ -154,6 +161,26 @@ pub struct BoxSpec {
     pub rect: Option<[f32; 4]>,
     pub from: Option<BoxKind>,
     pub margin: Option<[f32; 4]>,
+    /// `margin` is `[left, bottom, right, top]` of the page as it is shown, outward positive: each page maps
+    /// it through its own /Rotate. Otherwise it is in the page's own space (`[x0, y0, x1, y1]`).
+    #[serde(default)]
+    pub shown: bool,
+}
+
+/// `m` (left, bottom, right, top of the page as shown) as `[x0, y0, x1, y1]` margins of a page turned by `rotate`.
+fn user_margins(m: [f32; 4], rotate: i32) -> [f32; 4] {
+    // the coordinate each shown side is: left, bottom, right, top
+    let at = match rotate {
+        90 => [1, 2, 3, 0],
+        180 => [2, 3, 0, 1],
+        270 => [3, 0, 1, 2],
+        _ => [0, 1, 2, 3],
+    };
+    let mut out = [0.0; 4];
+    for (side, &i) in at.iter().enumerate() {
+        out[i] = m[side];
+    }
+    out
 }
 
 /// Sets a trim, bleed, art or crop box on pages, as one undo step. Refuses a result where the trim box
@@ -167,6 +194,7 @@ pub fn set_boxes(eng: &Engine, doc: DocId, spec: &BoxSpec, source: EditSource) -
     }
     let label = format!("Set {}", spec.kind.label());
     eng.apply_custom(doc, label, source, false, |d| {
+        super::refuse_certified(d, "Changing its page boxes")?;
         let count = d.page_count()?.max(0) as u32;
         let pages: Vec<u32> = match &spec.pages {
             Some(p) => {
@@ -183,6 +211,7 @@ pub fn set_boxes(eng: &Engine, doc: DocId, spec: &BoxSpec, source: EditSource) -
                 (Some(r), _, _) => norm(r),
                 (None, Some(from), Some(m)) => {
                     let f = effective(&page, from)?;
+                    let m = if spec.shown { user_margins(m, rotate_of(&page)?) } else { m };
                     norm([f[0] - m[0], f[1] - m[1], f[2] + m[2], f[3] + m[3]])
                 }
                 _ => unreachable!("checked above"),
