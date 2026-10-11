@@ -14,6 +14,9 @@ the edit-core steps in `src-tauri/src/engine/edit/security.rs`, UI in `src/compo
 - **Remove security**: one undo step. A file with restrictions needs its permissions password (checked against a
   fresh copy of the document, so a wrong guess changes nothing); a file opened with that password, or one with no
   restrictions, doesn't ask.
+  The panel (design round protect-r1, variant A) keeps Acrobat's two independent toggles with the full
+  permission controls, a predicted-outcome sentence above the button and, when the action is the copy, the line
+  "Saves a copy named <name> (protected).pdf. The original is not changed."
 - **Other people's files**: a notice above the page says what the file restricts and that the owner's
   restrictions are kept on save; the tab shows a lock; the Security view lists the rights. Saving a protected file
   keeps its encryption and rights (MuPDF `KEEP`), never silently dropping them.

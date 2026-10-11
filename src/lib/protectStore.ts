@@ -73,6 +73,8 @@ interface ProtectStore {
 const st = () => useStore.getState();
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 const stem = (p: string) => baseName(p).replace(/\.pdf$/i, "");
+/** The name "Protect and save a copy" suggests for a file. */
+export const copyName = (p: string) => `${stem(p)} (protected).pdf`;
 
 const blank = (doc: number, view: View): ProtectSheet => ({
   doc,
@@ -298,7 +300,7 @@ export const useProtect = create<ProtectStore>((set, get) => {
         let to: string | undefined;
         if (output === "copy") {
           // Rust shows the dialog; a dismissed one leaves the document as it was.
-          const picked = await api.pickSave(`${stem(d.path)} (protected).pdf`, { doc: d.id });
+          const picked = await api.pickSave(copyName(d.path), { doc: d.id });
           if (!picked) return void patch({ phase: "options" });
           to = picked.token;
         }

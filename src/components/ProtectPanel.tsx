@@ -3,6 +3,7 @@ import type { Changes, Cipher, Printing, SecurityInfo } from "../lib/api";
 import * as edits from "../lib/edit";
 import {
   CHANGES_LABEL,
+  copyName,
   outcome,
   PRINTING_LABEL,
   type ProtectSheet,
@@ -203,6 +204,11 @@ function ProtectView({ sheet, info, doc }: { sheet: ProtectSheet; info: Security
             <span key={s + i}>{s} </span>
           ))}
         </p>
+        {!sheet.confirmInPlace && (
+          <p className="dim small pr-copyline">
+            Saves a copy named <span className="tl-mono">{copyName(doc.path)}</span>. The original is not changed.
+          </p>
+        )}
         {why && <p className="dim small">{why}</p>}
         {sheet.confirmInPlace ? (
           <>

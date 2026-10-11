@@ -29,7 +29,7 @@ import * as api from "./api";
 import type { Rights, SecurityInfo } from "./api";
 import { useConvert } from "./convertStore";
 import * as edits from "./edit";
-import { outcome, type ProtectSheet, protectError, readiness, restrictionNotice, securityRows, specOf, strength, useProtect } from "./protectStore";
+import { copyName, outcome, type ProtectSheet, protectError, readiness, restrictionNotice, securityRows, specOf, strength, useProtect } from "./protectStore";
 import { useTools } from "./toolsStore";
 
 const ALL: Rights = { printing: "high", modify: true, annotate: true, forms: true, assemble: true, copy: true, accessibility: true };
@@ -266,5 +266,13 @@ describe("the sheet", () => {
     expect(useProtect.getState().security[2]?.method).toBe("AES-128");
     useStore.setState({ docs: { 1: useStore.getState().docs[1] }, order: [1] });
     expect(useProtect.getState().security[2]).toBeUndefined();
+  });
+});
+
+describe("copyName", () => {
+  it("names the copy after the file without its extension", () => {
+    expect(copyName("C:\\docs\\Annual report.pdf")).toBe("Annual report (protected).pdf");
+    expect(copyName("/x/y/scan.PDF")).toBe("scan (protected).pdf");
+    expect(copyName("noext")).toBe("noext (protected).pdf");
   });
 });
