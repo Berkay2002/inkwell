@@ -7,7 +7,9 @@ import {
   type Group,
   type Report,
   type RuleResult,
+  CERTIFIED_WHY,
   LANGS,
+  SIGNED_NOTE,
   STATUS_WORD,
   autoCheckDue,
   autotagText,
@@ -78,6 +80,15 @@ export function A11yPanel({ doc }: { doc: DocState }) {
           </button>
         </div>
         <Tabs view={view} />
+        {report?.certified ? (
+          <p className="a11y-note a11y-protect" role="status">
+            {CERTIFIED_WHY}
+          </p>
+        ) : report?.signed ? (
+          <p className="a11y-note a11y-protect" role="status">
+            {SIGNED_NOTE}
+          </p>
+        ) : null}
         <div className="a11y-body" role="tabpanel" aria-label={VIEWS.find((v) => v.id === view)?.label}>
           {view === "order" ? (
             <OrderTool doc={doc} />
@@ -180,7 +191,7 @@ function Body({ doc, report }: { doc: DocState; report: Report }) {
   const offer = !report.tagged && d.preview?.untagged && !d.notNow;
   // A report that no longer matches the document (its check was cancelled or failed) is not acted on.
   const stale = d.checkedRev !== doc.rev;
-  const busy = d.phase !== "idle" || stale;
+  const busy = d.phase !== "idle" || stale || report.certified;
   return (
     <>
       {d.phase === "autotagging" ? (
@@ -351,7 +362,7 @@ export function Rule({ doc, x }: { doc: DocState; x: RuleResult }) {
   const lang = useA11y((s) => s.lang);
   const d = useA11y((s) => s.docs[doc.id])!;
   const [all, setAll] = useState(false);
-  const busy = d.phase !== "idle" || d.checkedRev !== doc.rev;
+  const busy = d.phase !== "idle" || d.checkedRev !== doc.rev || !!d.report?.certified;
   // A document-level finding of a rule with a one-click fix only restates the explanation above it.
   const noted = x.findings.filter((f) => !isOverflowNote(f) && !(f.page === null && x.fix && x.fix !== "autotag"));
   const overflow = x.findings.filter(isOverflowNote);
@@ -526,7 +537,7 @@ function Thumb({ doc, page, rect }: { doc: DocState; page: number; rect: [number
 function Foot({ doc, report }: { doc: DocState; report: Report }) {
   const phase = useA11y((s) => s.docs[doc.id]?.phase ?? "idle");
   const stale = useA11y((s) => s.docs[doc.id]?.checkedRev !== doc.rev);
-  const busy = phase !== "idle" || stale;
+  const busy = phase !== "idle" || stale || report.certified;
   const all = fixAllText(report);
   return (
     <div className="a11y-foot">
@@ -534,7 +545,7 @@ function Foot({ doc, report }: { doc: DocState; report: Report }) {
         className="a11y-btn primary wide"
         disabled={busy || !all}
         onClick={() => void st().fixAll(doc.id)}
-        title={all ? "One undo step" : "Nothing can be fixed automatically"}
+        title={report.certified ? CERTIFIED_WHY : all ? "One undo step" : "Nothing can be fixed automatically"}
       >
         <span>{all ? all.label : "Fix all safe issues"}</span>
         <small>{all ? all.outcome : "No safe fixes left"}</small>

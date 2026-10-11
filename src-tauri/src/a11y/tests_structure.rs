@@ -686,3 +686,91 @@ fn a_tag_moves_beside_a_sibling_in_a_parent_that_mixes_content_and_elements() {
     mv(102, 101, Some(103), false).unwrap();
     assert_eq!(tree_order(&eng, id), [0, 2, 1, 3]);
 }
+
+// ---- signed and certified documents --------------------------------------------------------------
+
+const SIGNATURE: &str = "<</FT/Sig /T(Signature1) /V <</Type/Sig /Filter/Adobe.PPKLite /SubFilter/adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00>>>>>";
+
+/// `doc3` signed (a signature field with a value), not certified.
+fn signed_doc() -> Spec {
+    let mut s = doc3();
+    s.cat.push_str(" /AcroForm <</SigFlags 3 /Fields [120 0 R]>>");
+    s.objs.push((120, SIGNATURE.into()));
+    s
+}
+
+/// `doc3` certified with DocMDP `/P` `p`.
+fn certified_doc(p: u8) -> Spec {
+    let mut s = signed_doc();
+    s.cat.push_str(&format!(" /Perms <</DocMDP <</Type/Sig /Reference [<</TransformMethod/DocMDP /TransformParams <</P {p}>>>>]>>>>"));
+    s
+}
+
+fn certified_refusal(r: Result<EditState>, what: &str) {
+    match r {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{what}: {m}"),
+        other => panic!("{what}: expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_certified_document_refuses_every_structure_edit_and_fix() {
+    for p in 1..=3 {
+        let path = file(&format!("certified-{p}"), &certified_doc(p));
+        let (eng, id) = open(&path);
+        let r = check_eng(&eng, id);
+        assert!(r.certified && r.signed, "P {p}");
+        let steps = eng.history(id).unwrap().len();
+        let u = || EditSource::User;
+        let alt = TagPatch { alt: Some("x".into()), ..TagPatch::default() };
+        certified_refusal(reorder_doc(&eng, id, 0, &[104, 102, 103], u()), "reorder");
+        certified_refusal(set_role_doc(&eng, id, 102, "H1", u()), "set role");
+        certified_refusal(artifact_doc(&eng, id, 102, u()), "artifact");
+        certified_refusal(merge_doc(&eng, id, 102, 103, u()), "merge");
+        certified_refusal(merge_many_doc(&eng, id, 102, &[103, 104], u()), "merge many");
+        certified_refusal(split_doc(&eng, id, 102, 1, None, u()), "split");
+        certified_refusal(edit_tag_doc(&eng, id, 102, &alt, u()), "edit tag");
+        certified_refusal(move_tag_doc(&eng, id, 104, 101, Some(102), false, u()), "move tag");
+        certified_refusal(fix_doc(&eng, id, &Fix::Title { title: Some("T".into()) }, u()), "title");
+        certified_refusal(fix_doc(&eng, id, &Fix::Autotag, u()), "autotag");
+        certified_refusal(fix_doc(&eng, id, &Fix::Many { fixes: vec![Fix::TabOrder] }, u()), "many");
+        assert_eq!(eng.history(id).unwrap().len(), steps, "P {p}: a refusal adds no step");
+        assert_eq!(region_xrefs(&eng, id, 0), [102, 103, 104]);
+    }
+}
+
+#[test]
+fn editing_a_signed_document_leaves_its_signed_bytes_alone() {
+    let path = file("signed-edit", &signed_doc());
+    let original = std::fs::read(&path).unwrap();
+    let (eng, id) = open(&path);
+    let r = check_eng(&eng, id);
+    assert!(r.signed && !r.certified, "signed, not certified");
+    reorder_doc(&eng, id, 0, &[104, 102, 103], EditSource::User).unwrap();
+    edit_tag_doc(&eng, id, 102, &TagPatch { alt: Some("A".into()), ..TagPatch::default() }, EditSource::User).unwrap();
+    fix_doc(&eng, id, &Fix::Title { title: Some("Signed title".into()) }, EditSource::User).unwrap();
+    let (eng2, id2) = reload(&eng, id, &path);
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "an incremental save: the signed bytes are the start of the file");
+    assert_eq!(region_xrefs(&eng2, id2, 0), [104, 102, 103], "the edit is in the saved file");
+    assert!(check_eng(&eng2, id2).signed);
+}
+
+#[test]
+fn a_merge_is_bounded_and_an_anchor_has_an_object_number() {
+    let path = file("bounds", &doc3());
+    let (eng, id) = open(&path);
+    let steps = eng.history(id).unwrap().len();
+    let many = vec![103; 100];
+    match merge_many_doc(&eng, id, 102, &many, EditSource::User) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("100"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    for anchor in [0, -1] {
+        match move_tag_doc(&eng, id, 104, 101, Some(anchor), false, EditSource::User) {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("object number"), "{m}"),
+            other => panic!("anchor {anchor}: {other:?}"),
+        }
+    }
+    assert_eq!(eng.history(id).unwrap().len(), steps);
+}

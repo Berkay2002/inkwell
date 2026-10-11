@@ -32,8 +32,16 @@ export interface RuleResult {
 export interface Report {
   pages: number;
   tagged: boolean;
+  /** A certification (/DocMDP): the engine refuses every edit. */
+  certified: boolean;
+  /** Signed: edits are saved after the signed bytes. */
+  signed: boolean;
   results: RuleResult[];
 }
+
+export const CERTIFIED_WHY = "This document is certified: changing its tags or reading order would void the certification, so Inkwell leaves them as they are.";
+export const SIGNED_NOTE =
+  "This document is signed. Edits are saved after the signed part, so the signature still covers the original; readers will show that the document changed after it was signed.";
 
 export interface Progress {
   done: number;

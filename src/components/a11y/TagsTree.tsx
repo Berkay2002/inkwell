@@ -15,7 +15,7 @@ import {
   roleOptions,
   tagPatch,
 } from "../../lib/a11yDepthLogic";
-import { plural } from "../../lib/a11yLogic";
+import { CERTIFIED_WHY, plural } from "../../lib/a11yLogic";
 import type { DocState } from "../../store";
 import { Icon } from "../Icons";
 
@@ -29,7 +29,8 @@ export function TagsTree({ doc }: { doc: DocState }) {
   const t = useA11y((s) => s.docs[doc.id]?.tags);
   const phase = useA11y((s) => s.docs[doc.id]?.phase ?? "idle");
   const id = doc.id;
-  const busy = phase !== "idle";
+  const certified = useA11y((s) => !!s.docs[doc.id]?.report?.certified);
+  const busy = phase !== "idle" || certified;
   const tree = t?.tree ?? null;
   const rows = useMemo(() => (tree ? flatten(tree, t?.expanded ?? {}) : []), [tree, t?.expanded]);
   const selected = t?.selected ?? null;
@@ -213,12 +214,12 @@ export function TagsTree({ doc }: { doc: DocState }) {
         </div>
       </div>
       <p className="a11y-note">Arrow keys move through the tree. Alt+Up and Alt+Down move a tag, Alt+Right puts it into the one above, Alt+Left takes it out.</p>
-      {node ? <TagEditor doc={doc} node={node} tree={tree} busy={busy} /> : <p className="a11y-note">Select a tag to edit it. Its content is outlined on the page.</p>}
+      {node ? <TagEditor doc={doc} node={node} tree={tree} busy={busy} certified={certified} pageScope={scope === "page"} /> : <p className="a11y-note">Select a tag to edit it. Its content is outlined on the page.</p>}
     </div>
   );
 }
 
-function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tree: TagNode[]; busy: boolean }) {
+function TagEditor({ doc, node, tree, busy, certified, pageScope }: { doc: DocState; node: TagNode; tree: TagNode[]; busy: boolean; certified: boolean; pageScope: boolean }) {
   const id = doc.id;
   const [d, setD] = useState<TagDraft>(() => draftOf(node));
   // A different tag, or the same one after an edit, starts from what the engine now says.
@@ -230,9 +231,11 @@ function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tr
   const roleChanged = d.role.trim() !== was.role;
   const locked = !node.editable || node.xref <= 0;
   const set = (p: Partial<TagDraft>) => setD((x) => ({ ...x, ...p }));
-  const moves: { how: TagMove; label: string }[] = [
-    { how: "up", label: "Move up" },
-    { how: "down", label: "Move down" },
+  // The page view lists only the tags with content on this page; a step goes past the others in between.
+  const SKIPS = "In this page view a step goes past the tags of other pages that sit in between.";
+  const moves: { how: TagMove; label: string; tip?: string }[] = [
+    { how: "up", label: "Move up", tip: pageScope ? SKIPS : undefined },
+    { how: "down", label: "Move down", tip: pageScope ? SKIPS : undefined },
     { how: "in", label: "Into the tag above" },
     { how: "out", label: "Out of its parent" },
   ];
@@ -253,7 +256,7 @@ function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tr
       <div className="a11y-tag-type">
         <label>
           <span>Type</span>
-          <select className="a11y-select" value={d.role} onChange={(e) => set({ role: e.target.value })}>
+          <select className="a11y-select" disabled={certified} value={d.role} onChange={(e) => set({ role: e.target.value })}>
             {roleOptions(was.role).map((r) => (
               <option key={r} value={r}>
                 {r === "Artifact" ? "Artifact (take out of the tree)" : r}
@@ -265,7 +268,7 @@ function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tr
           type="button"
           className="a11y-btn"
           disabled={busy || !roleChanged}
-          title={patch ? "Applies the other changes first, as a step of their own" : "One undo step"}
+          title={certified ? CERTIFIED_WHY : patch ? "Applies the other changes first, as a step of their own" : "One undo step"}
           onClick={async () => {
             // A reload after the type change would drop what is typed in the other fields: save it first.
             if (patch && !(await st().editTag(id, node.xref, patch))) return;
@@ -277,20 +280,20 @@ function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tr
       </div>
       <label>
         <span>Alternate text</span>
-        <input type="text" value={d.alt} onChange={(e) => set({ alt: e.target.value })} />
+        <input type="text" disabled={certified} value={d.alt} onChange={(e) => set({ alt: e.target.value })} />
       </label>
       <label>
         <span>Actual text</span>
-        <input type="text" value={d.actualText} onChange={(e) => set({ actualText: e.target.value })} />
+        <input type="text" disabled={certified} value={d.actualText} onChange={(e) => set({ actualText: e.target.value })} />
       </label>
       <label>
         <span>Language</span>
-        <input type="text" value={d.lang} placeholder="en-US" onChange={(e) => set({ lang: e.target.value })} />
+        <input type="text" disabled={certified} value={d.lang} placeholder="en-US" onChange={(e) => set({ lang: e.target.value })} />
       </label>
       {node.role === "TH" && (
         <label>
           <span>Scope</span>
-          <select className="a11y-select" value={d.scope} onChange={(e) => set({ scope: e.target.value })}>
+          <select className="a11y-select" disabled={certified} value={d.scope} onChange={(e) => set({ scope: e.target.value })}>
             <option value="">Not set</option>
             {SCOPES.map((s) => (
               <option key={s} value={s}>
@@ -307,6 +310,7 @@ function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tr
             <label key={c.xref} className="a11y-check">
               <input
                 type="checkbox"
+                disabled={certified}
                 checked={d.headers.includes(c.xref)}
                 onChange={(e) => set({ headers: e.target.checked ? [...d.headers, c.xref] : d.headers.filter((h) => h !== c.xref) })}
               />
@@ -316,7 +320,7 @@ function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tr
         </fieldset>
       )}
       <div className="a11y-actions">
-        <button type="submit" className="a11y-btn primary" disabled={busy || !patch} title="One undo step">
+        <button type="submit" className="a11y-btn primary" disabled={busy || !patch} title={certified ? CERTIFIED_WHY : "One undo step"}>
           Apply
         </button>
         <button type="button" className="a11y-quiet" disabled={!patch} onClick={() => setD(draftOf(node))}>
@@ -325,7 +329,13 @@ function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tr
       </div>
       <div className="a11y-actions" role="group" aria-label="Move the tag">
         {moves.map((m) => (
-          <button key={m.how} type="button" className="a11y-quiet" disabled={busy || !moveTarget(tree, node.xref, m.how)} onClick={() => void st().moveTag(id, node.xref, m.how)}>
+          <button
+            key={m.how}
+            type="button"
+            className="a11y-quiet"
+            disabled={busy || !moveTarget(tree, node.xref, m.how)}
+            title={certified ? CERTIFIED_WHY : m.tip}
+            onClick={() => void st().moveTag(id, node.xref, m.how)}>
             {m.label}
           </button>
         ))}

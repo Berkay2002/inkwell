@@ -202,6 +202,12 @@
   color: var(--text-2);
 }
 
+/* the signed or certified notice under the tabs */
+.a11y-protect {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
 /* groups and rules */
 .a11y-group {
   display: flex;
@@ -785,5 +791,5 @@
   font-variant-numeric: tabular-nums;
   color: var(--accent-fg);
   background: var(--accent);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 0.3), 0 0 0 2px var(--surface);
+  box-shadow: var(--shadow-2);
 }

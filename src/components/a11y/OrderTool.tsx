@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useA11y } from "../../lib/a11y";
 import { artifactBlocked, mergeRun, orderOf, readAloud, roleWord, splitBlocked } from "../../lib/a11yDepthLogic";
-import { plural } from "../../lib/a11yLogic";
+import { CERTIFIED_WHY, plural } from "../../lib/a11yLogic";
 import type { DocState } from "../../store";
 import { Icon } from "../Icons";
 
@@ -11,6 +11,7 @@ const st = () => useA11y.getState();
 export function OrderTool({ doc }: { doc: DocState }) {
   const o = useA11y((s) => s.docs[doc.id]?.order);
   const phase = useA11y((s) => s.docs[doc.id]?.phase ?? "idle");
+  const certified = useA11y((s) => !!s.docs[doc.id]?.report?.certified);
   const [at, setAt] = useState(1);
   const list = useRef<HTMLUListElement>(null);
   // The region whose row takes the focus once the list is read again after a move.
@@ -18,7 +19,7 @@ export function OrderTool({ doc }: { doc: DocState }) {
   const data = o?.data ?? null;
   const regions = data?.regions ?? [];
   const selected = o?.selected ?? [];
-  const busy = phase !== "idle";
+  const busy = phase !== "idle" || certified;
   const id = doc.id;
 
   useEffect(() => {
@@ -55,9 +56,15 @@ export function OrderTool({ doc }: { doc: DocState }) {
   const merge = mergeRun(regions, selected);
   const order = orderOf(regions);
   const pos = one ? order.indexOf(one.xref) : -1;
-  const splitWhy = one ? splitBlocked(one) : "Select one region to split it.";
-  const mergeWhy = merge ? null : selected.length < 2 ? "Select two or more regions next to each other in the list." : "The selected regions are not next to each other, or one can't be edited.";
-  const artifactWhy = one ? artifactBlocked(one) : "Select one region.";
+  const splitWhy = certified ? CERTIFIED_WHY : one ? splitBlocked(one) : "Select one region to split it.";
+  const mergeWhy = certified
+    ? CERTIFIED_WHY
+    : merge
+      ? null
+      : selected.length < 2
+        ? "Select two or more regions next to each other in the list."
+        : "The selected regions are not next to each other, or one can't be edited.";
+  const artifactWhy = certified ? CERTIFIED_WHY : one ? artifactBlocked(one) : "Select one region.";
   const said = readAloud(regions);
   const splitAt = one && !splitWhy ? Math.min(Math.max(at, 1), one.mcids.length - 1) : 1;
 
@@ -93,10 +100,10 @@ export function OrderTool({ doc }: { doc: DocState }) {
         Page {data.page + 1} · {plural(regions.length, "region")}. Drag a number on the page, or select a row and press Alt+Up or Alt+Down.
       </p>
       <div className="a11y-actions" role="toolbar" aria-label="Reading order actions">
-        <button className="a11y-btn" disabled={busy || !one || pos <= 0} onClick={() => one && void st().moveRegion(id, one.xref, -1)} title="Alt+Up">
+        <button className="a11y-btn" disabled={busy || !one || pos <= 0} onClick={() => one && void st().moveRegion(id, one.xref, -1)} title={certified ? CERTIFIED_WHY : "Alt+Up"}>
           <Icon name="up" size={12} /> Earlier
         </button>
-        <button className="a11y-btn" disabled={busy || !one || pos < 0 || pos >= order.length - 1} onClick={() => one && void st().moveRegion(id, one.xref, 1)} title="Alt+Down">
+        <button className="a11y-btn" disabled={busy || !one || pos < 0 || pos >= order.length - 1} onClick={() => one && void st().moveRegion(id, one.xref, 1)} title={certified ? CERTIFIED_WHY : "Alt+Down"}>
           <Icon name="down" size={12} /> Later
         </button>
         <button className="a11y-btn" disabled={busy || !merge} title={mergeWhy ?? "One undo step"} onClick={() => void st().mergeSelected(id)}>

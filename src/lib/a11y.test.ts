@@ -56,7 +56,7 @@ const rule = (over: Partial<RuleResult>): RuleResult => ({
   findings: [],
   ...over,
 });
-const report = (results: RuleResult[], tagged = true): Report => ({ pages: 12, tagged, results });
+const report = (results: RuleResult[], tagged = true): Report => ({ pages: 12, tagged, certified: false, signed: false, results });
 const sample = report([
   rule({ rule: "title", name: "Title", status: "failed", fix: "title", findings: [f({ page: null })] }),
   rule({ rule: "display-doc-title", name: "Title in title bar", status: "passed", fix: "displayDocTitle" }),

@@ -219,6 +219,8 @@ export const useA11y = create<A11yStore>((set, get) => {
   let seq = 0;
   const patchOrder = (doc: number, p: Partial<OrderState>) => patch(doc, { order: { ...get().get(doc).order, ...p } });
   const patchTags = (doc: number, p: Partial<TagsState>) => patch(doc, { tags: { ...get().get(doc).tags, ...p } });
+  /** A certified document takes no edit (the engine refuses them too); the rail says why. */
+  const certified = (doc: number) => !!get().get(doc).report?.certified;
   const busyPhase = (doc: number) => {
     const ph = get().get(doc).phase;
     return ph === "fixing" || ph === "autotagging" || ph === "exporting";
@@ -230,7 +232,7 @@ export const useA11y = create<A11yStore>((set, get) => {
    * refusal is shown where the person is and the view is read again, so the page snaps back.
    */
   async function edit(doc: number, f: () => Promise<EditState>, fail: (m: string) => void, reload: () => Promise<void>): Promise<boolean> {
-    if (!st().docs[doc] || busyPhase(doc)) return false;
+    if (!st().docs[doc] || busyPhase(doc) || certified(doc)) return false;
     const cur = get().get(doc);
     if (cur.phase === "checking") {
       latest.delete(doc);
@@ -342,7 +344,7 @@ export const useA11y = create<A11yStore>((set, get) => {
 
     fix: async (doc, fix) => {
       const cur = get().get(doc);
-      if (cur.phase === "fixing" || cur.phase === "autotagging" || cur.phase === "exporting") return false;
+      if (cur.phase === "fixing" || cur.phase === "autotagging" || cur.phase === "exporting" || cur.report?.certified) return false;
       // A check that is still running reads the document the fix is about to change.
       if (cur.phase === "checking") {
         latest.delete(doc);

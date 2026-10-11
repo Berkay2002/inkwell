@@ -781,6 +781,10 @@ pub fn move_node(doc: &mut PdfDocument, xref: i32, parent: i32, anchor: Option<i
     if anchor == Some(xref) {
         return Err(bad("an element can't be placed next to itself"));
     }
+    // An element written inside its parent has no object number (0): it can't be named as a place.
+    if anchor.is_some_and(|a| a <= 0) {
+        return Err(bad("the element to place it beside has no object number, so it can't be named"));
+    }
     let old_parent = c.parent_xref(i);
     let mut kids = kids_of(&obj_of(doc, target)?)?;
     let is_node = |k: &Kid| matches!(k, Kid::Elem(_)) && k.xref() == xref;

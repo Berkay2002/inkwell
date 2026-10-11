@@ -226,6 +226,8 @@ describe("Matterhorn checkpoints", () => {
   const report: Report = {
     pages: 3,
     tagged: true,
+    certified: false,
+    signed: false,
     results: [
       rule({ rule: "figure-alt-text", status: "failed", findings: [find("a"), find("b"), find("... and 5 more", null)] }),
       rule({ rule: "tab-order", status: "failed", fix: "tabOrder", findings: [find("Page 1")] }),
@@ -258,7 +260,7 @@ describe("Matterhorn checkpoints", () => {
     expect(other.count).toBe(1);
   });
   it("quotes no condition for the rules that only guess or always ask for a manual check", () => {
-    const r: Report = { pages: 1, tagged: true, results: [rule({ rule: "color-contrast", status: "manual" }), rule({ rule: "reading-order", status: "passed" })] };
+    const r: Report = { pages: 1, tagged: true, certified: false, signed: false, results: [rule({ rule: "color-contrast", status: "manual" }), rule({ rule: "reading-order", status: "passed" })] };
     const groups = matterhornGroups(r);
     expect(groups.map((x) => [x.number, x.status, x.conditions])).toEqual([
       ["04", "manual", []],
@@ -344,6 +346,21 @@ describe("Reading order store", () => {
     expect(await a().mergeSelected(1)).toBe(true);
     expect(inv).toHaveBeenCalledWith("a11y_merge_many", { doc: 1, into: 10, from: [11, 12] });
     expect(a().get(1).order.selected).toEqual([10]);
+  });
+
+  it("a certified document takes no edit: nothing is sent", async () => {
+    const certified: Report = { pages: 1, tagged: true, certified: true, signed: true, results: [] };
+    reply({ a11y_check: certified, a11y_reading_order: ro(three), a11y_reorder: state(4), a11y_merge_many: state(4), a11y_fix: state(4) });
+    await a().check(1);
+    await a().loadOrder(1, 0);
+    a().selectRegion(1, 10, "one");
+    a().selectRegion(1, 12, "range");
+    expect(await a().dropRegion(1, 12, 10)).toBe(false);
+    expect(await a().moveRegion(1, 11, -1)).toBe(false);
+    expect(await a().mergeSelected(1)).toBe(false);
+    expect(await a().fix(1, { fix: "tabOrder" })).toBe(false);
+    const sent = inv.mock.calls.map((c) => c[0]);
+    expect(sent.filter((c) => c === "a11y_reorder" || c === "a11y_merge_many" || c === "a11y_fix")).toEqual([]);
   });
 
   it("split and artifact are one command each", async () => {

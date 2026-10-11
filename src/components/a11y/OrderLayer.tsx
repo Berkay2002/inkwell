@@ -24,6 +24,8 @@ export const OrderLayer = memo(function OrderLayer(p: Props) {
 const st = () => useA11y.getState();
 
 function Layer({ docId, rot, rawSize, zoom, regions, selected }: Props & { regions: Region[]; selected: number[] }) {
+  // A certified document takes no edit: the numbers still select, but nothing is dragged.
+  const certified = useA11y((s) => !!s.docs[docId]?.report?.certified);
   const [drag, setDrag] = useState<{ xref: number; n: number; over: number | null; moved: boolean; x: number; y: number } | null>(null);
   // In reading order in the DOM, so Tab follows it; a larger box sits lower, so a small region is on top of
   // the one that holds it and can be picked.
@@ -75,6 +77,7 @@ function Layer({ docId, rot, rawSize, zoom, regions, selected }: Props & { regio
                 if (e.button !== 0) return;
                 e.stopPropagation();
                 select(e, r.xref);
+                if (certified) return;
                 e.currentTarget.setPointerCapture(e.pointerId);
                 setDrag({ xref: r.xref, n, over: null, moved: false, x: e.clientX, y: e.clientY });
               }}
