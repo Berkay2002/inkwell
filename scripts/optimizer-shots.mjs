@@ -109,7 +109,11 @@ await until(`!!window.__T.getState().sheet?.customEstimate`, "the new estimate",
 report.estimateChange = { before: est0, after: await ev(`window.__T.getState().sheet.customEstimate.bytes`), line: await text(".tl-est") };
 await ev(`document.querySelector(".tl-usage")?.scrollIntoView({ block: "start" })`);
 await shot("advanced-usage");
-await ev(`document.querySelector("details.tl-sec[open] .tl-check")?.scrollIntoView({ block: "center" })`);
+const reveal = (title) =>
+  ev(`(() => { const s = [...document.querySelectorAll("details.tl-sec")].find((d) => d.querySelector(".tl-sec-title")?.textContent === ${JSON.stringify(title)}); s?.scrollIntoView({ block: "start" }); return !!s })()`);
+await reveal("Fonts");
+await shot("advanced-fonts");
+await reveal("Discard objects");
 await shot("advanced-discard");
 
 // ---- save under a name, switch to a preset and back ----
