@@ -489,21 +489,24 @@ fn array_items(a: Option<PdfObject>, max: usize) -> Vec<PdfObject> {
     (0..a.len().unwrap_or(0).min(max) as i32).filter_map(|i| a.get_array(i).ok().flatten()).collect()
 }
 
-/// The `/V` of every signature field that has one, found in the AcroForm's field tree. Bounded (each field once per state,
-/// a cap on fields and on what is waiting), and a damaged node is skipped, never an error.
+/// The `/V` of every signature field that has one (its own, or the nearest of its ancestors in the walk), found in
+/// the AcroForm's field tree. Bounded (each field once per state, a cap on fields and on what is waiting), and a
+/// damaged node is skipped, never an error.
 fn signature_values(form: &PdfObject) -> Vec<PdfObject> {
     const CAP: usize = 20_000;
     let mut found = Vec::new();
-    let mut todo: Vec<(PdfObject, bool)> = array_items(form.get_dict("Fields").ok().flatten(), CAP).into_iter().map(|f| (f, false)).collect();
-    // Once per (field, inherited type): the same field reached from two parents is read in both states.
-    let mut seen: HashSet<(i32, bool)> = HashSet::new();
+    // (field, is a signature by inheritance, the /V inherited from above)
+    let mut todo: Vec<(PdfObject, bool, Option<PdfObject>)> =
+        array_items(form.get_dict("Fields").ok().flatten(), CAP).into_iter().map(|f| (f, false, None)).collect();
+    // Once per (field, inherited type, inherited value): the same field reached from two parents is read in each state.
+    let mut seen: HashSet<(i32, bool, bool)> = HashSet::new();
     let mut budget = CAP;
-    while let Some((field, inherited)) = todo.pop() {
+    while let Some((field, inherited, above)) = todo.pop() {
         budget -= 1;
         if budget == 0 {
             break;
         }
-        if field.is_indirect().unwrap_or(false) && !field.as_indirect().is_ok_and(|n| seen.insert((n, inherited))) {
+        if field.is_indirect().unwrap_or(false) && !field.as_indirect().is_ok_and(|n| seen.insert((n, inherited, above.is_some()))) {
             continue;
         }
         if !field.resolve().ok().flatten().is_some_and(|d| d.is_dict().unwrap_or(false)) {
@@ -511,11 +514,12 @@ fn signature_values(form: &PdfObject) -> Vec<PdfObject> {
         }
         let kind = name_of(field.get_dict("FT").ok().flatten());
         let is_sig = if kind.is_empty() { inherited } else { kind == "Sig" };
+        let value = field.get_dict("V").ok().flatten().or(above);
         if is_sig {
-            found.extend(field.get_dict_inheritable("V").ok().flatten());
+            found.extend(value.clone());
         }
         let room = CAP.saturating_sub(todo.len());
-        todo.extend(array_items(field.get_dict("Kids").ok().flatten(), room).into_iter().map(|k| (k, is_sig)));
+        todo.extend(array_items(field.get_dict("Kids").ok().flatten(), room).into_iter().map(|k| (k, is_sig, value.clone())));
     }
     found
 }
@@ -535,16 +539,18 @@ fn reference_p(sig: &PdfObject) -> Option<i32> {
 
 /// The document is certified (a `/DocMDP` signature): any change to it, even to its bookmarks, would
 /// void the certification. Its `/P`: 1 no changes, 2 forms and signing, 3 also annotations.
-/// The catalog's `/Perms /DocMDP` is where a certification is recorded and wins when it exists; failing that, a
-/// signature field whose `/V` has a `/DocMDP` `/Reference` certifies it too (the lowest `/P` of those).
+/// The catalog's `/Perms /DocMDP` is where a certification is recorded; a signature field whose `/V` has a `/DocMDP`
+/// `/Reference` certifies too. The strictest (lowest) `/P` of all of them counts, so a file that says 3 in one place and
+/// 1 in another is 1. Only fields of `/AcroForm /Fields` are read: a signature widget that no field tree lists is not a
+/// field to a reader either.
 pub(crate) fn certified(doc: &PdfDocument) -> Result<Option<i32>> {
     let cat = doc.catalog()?;
-    let perms = cat.get_dict("Perms")?.and_then(|p| p.get_dict("DocMDP").ok().flatten());
-    if let Some(sig) = perms.filter(|s| !s.is_null().unwrap_or(true)) {
-        return Ok(Some(reference_p(&sig).unwrap_or(2)));
-    }
-    let Some(form) = cat.get_dict("AcroForm").ok().flatten() else { return Ok(None) };
-    Ok(signature_values(&form).iter().filter_map(reference_p).min())
+    let from_catalog = match cat.get_dict("Perms")?.map(|p| p.get_dict("DocMDP")).transpose()?.flatten() {
+        Some(sig) if !sig.is_null().unwrap_or(true) => Some(reference_p(&sig).unwrap_or(2)),
+        _ => None,
+    };
+    let from_fields = cat.get_dict("AcroForm").ok().flatten().and_then(|form| signature_values(&form).iter().filter_map(reference_p).min());
+    Ok(from_catalog.into_iter().chain(from_fields).min())
 }
 
 /// The document is signed: `/AcroForm /SigFlags` bit 1, a certification (`/Perms`), or a signature

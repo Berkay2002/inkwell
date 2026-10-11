@@ -760,9 +760,13 @@ fn a_signature_field_that_certifies_the_document_is_seen_like_the_catalog_entry(
     // A reference that is not a DocMDP certifies nothing.
     let fmdp = field("<< /Type /SigRef /TransformMethod /FieldMDP /TransformParams << /Action /All >> >>");
     assert_eq!(certification_of("field-fieldmdp", form, &[&fmdp]), (None, true));
-    // The catalog wins when both exist.
+    // Both exist: the lower P counts.
     let both = format!("{form} {}", cat("/TransformParams << /P 1 >>"));
     assert_eq!(certification_of("both", &both, &[&p3]).0, Some(1));
+    // Strictest of the two, either way round: the catalog's 3 over a field's 1 is 1.
+    let p1 = field(&doc_mdp("/TransformParams << /P 1 >>"));
+    let both = format!("{form} {}", cat("/TransformParams << /P 3 >>"));
+    assert_eq!(certification_of("both-field-stricter", &both, &[&p1]).0, Some(1));
     // A signature with a value and no DocMDP is signed, not certified; an empty field is neither.
     let plain = format!("<< /FT /Sig /T (S) /V << /Type /Sig /ByteRange [0 10 20 30] /Contents <00> >> >>");
     assert_eq!(certification_of("plain", form, &[&plain]), (None, true));
@@ -776,6 +780,10 @@ fn the_signature_type_and_value_are_found_through_the_field_tree() {
     let objs = ["<< /FT /Sig /T (P) /Kids [8 0 R] >>".to_string(), "<< /Parent 7 0 R /Kids [9 0 R] >>".to_string(), format!("<< /Parent 8 0 R /T (K) {v} >>")];
     let objs: Vec<&str> = objs.iter().map(String::as_str).collect();
     assert_eq!(certification_of("tree", "/AcroForm << /Fields [7 0 R] >>", &objs), (Some(3), true));
+    // /V on the parent, /FT only on the kid: the kid is a signature with the parent's value.
+    let objs = [format!("<< /T (P) {v} /Kids [8 0 R] >>"), "<< /Parent 7 0 R /FT /Sig /T (K) >>".to_string()];
+    let objs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    assert_eq!(certification_of("inherited-value", "/AcroForm << /Fields [7 0 R] >>", &objs), (Some(3), true));
     // Not a signature field: a text field's /V is not looked at.
     let text = format!("<< /FT /Tx /T (T) {v} >>");
     assert_eq!(certification_of("text-field", "/AcroForm << /Fields [7 0 R] >>", &[&text]), (None, false));

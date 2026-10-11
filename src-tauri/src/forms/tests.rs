@@ -1630,20 +1630,44 @@ fn certify_catalog(eng: &Engine, id: DocId, p: i32) {
 }
 
 #[test]
-fn a_document_certified_in_the_catalog_takes_scripted_values_only_even_beside_a_looser_signature() {
-    // The catalog certifies with P 2 and no signature field has a value; then with P 1 over a field that says P 3.
-    for (name, catalog_p, field_p) in [("catalog-only", 2, None), ("catalog-over-field", 1, Some(3))] {
+fn a_document_certified_in_the_catalog_takes_scripted_values_only() {
+    // The catalog certifies with P 2 and no signature field has a value; then over a signature that says P 3.
+    for (name, field_p) in [("catalog-only", None), ("catalog-over-field", Some(3))] {
         let (eng, id, _) = script_form(&format!("js-certified-{name}"), &["Src", "Other"]);
         add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
         script(&eng, id, "Src", "V", "var o = this.getField(\"Other\"); o.value = \"x\"; o.readonly = true; o.required = true; o.display = display.hidden;");
         if let Some(p) = field_p {
             sign(&eng, id, None, Some(p));
         }
-        certify_catalog(&eng, id, catalog_p);
+        certify_catalog(&eng, id, 2);
         fill(&eng, id, "Src", text("a")).unwrap();
         let o = field(&eng, id, "Other");
+        assert_eq!(o.value, "x", "{name}: a value is what a certified form takes");
         assert!(!o.read_only && !o.required && !o.hidden, "{name}: {o:?}");
         assert!(scripts_state(&eng, id).unwrap().log.iter().any(|l| l.message.contains("certified")), "{name}");
+    }
+}
+
+#[test]
+fn a_catalog_certification_that_allows_no_change_refuses_typing_scripts_resets_and_calculations() {
+    // P 1 in the catalog alone, and over a signature field that says P 3.
+    for (name, field_p) in [("catalog-only", None), ("catalog-over-field", Some(3))] {
+        let (eng, id, _) = script_form(&format!("js-certified-p1-{name}"), &["Src", "Other", "Total"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+        fill(&eng, id, "Other", text("keep")).unwrap();
+        script(&eng, id, "Src", "V", "this.getField(\"Other\").value = \"x\";");
+        script(&eng, id, "Total", "C", "event.value = 7;");
+        if let Some(p) = field_p {
+            sign(&eng, id, None, Some(p));
+        }
+        certify_catalog(&eng, id, 1);
+        let err = fill(&eng, id, "Src", text("a")).unwrap_err().to_string();
+        assert!(err.contains("locked by a signature"), "{name}: {err}");
+        assert!(fill(&eng, id, "Other", text("typed")).is_err(), "{name}: typing into a field is refused");
+        reset_one(&eng, id, None, EditSource::User).unwrap();
+        for (f, want) in [("Src", ""), ("Other", "keep"), ("Total", "")] {
+            assert_eq!(field(&eng, id, f).value, want, "{name}: {f}");
+        }
     }
 }
 

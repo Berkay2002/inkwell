@@ -729,7 +729,7 @@ fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec
         return Err(bad(format!("The field [ {} ] is read-only", e.name)));
     }
     // Typing never silently breaks a signature: a field a signature covers (its /Lock, a FieldMDP or a DocMDP of 1) is refused.
-    if e.kind != FieldKind::Signature && scripts::locked(&scripts::locks_of(entries), e) {
+    if e.kind != FieldKind::Signature && scripts::locked(&scripts::locks_of(rt.doc(), entries), e) {
         return Err(bad(format!("The field [ {} ] is locked by a signature", e.name)));
     }
     let mut touched = vec![page];
@@ -825,7 +825,7 @@ pub fn reset(doc: &mut PdfDocument, which: Option<&[i32]>) -> Result<Vec<u32>> {
 
 fn reset_rt(rt: &Rt, which: Option<&[i32]>) -> Result<Vec<u32>> {
     let entries = rt.entries()?;
-    let locks = scripts::locks_of(entries);
+    let locks = scripts::locks_of(rt.doc(), entries);
     let mut done: Vec<i32> = Vec::new();
     let mut touched = Vec::new();
     for e in entries {
@@ -864,7 +864,7 @@ fn reset_rt(rt: &Rt, which: Option<&[i32]>) -> Result<Vec<u32>> {
 /// True when resetting `which` would change something (so an empty reset is not an undo step).
 fn reset_would_change(doc: &PdfDocument, which: Option<&[i32]>) -> Result<bool> {
     let entries = scan(doc)?;
-    let locks = scripts::locks_of(&entries);
+    let locks = scripts::locks_of(doc, &entries);
     Ok(entries.iter().any(|e| reset_differs(&entries, &locks, e, which)))
 }
 

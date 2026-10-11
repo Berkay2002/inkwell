@@ -536,8 +536,18 @@ fn reference_locks(v: &PdfObject) -> Vec<Lock> {
 
 /// The locks of the signatures that carry a signature (`/V`): the field's `/Lock` and every one its `/Reference`
 /// entries carry (Acrobat writes both when it certifies with locked fields, so a DocMDP `/P 1` anywhere locks
-/// everything). A signature that names neither (a plain approval signature) leaves the form to be filled.
-pub(crate) fn locks_of(entries: &[Entry]) -> Vec<Lock> {
+/// everything). A signature that names neither (a plain approval signature) leaves the form to be filled. A document
+/// certified with `/P 1` (also in the catalog only, which no field shows) locks every field; when that cannot be read,
+/// so does the doubt.
+pub(crate) fn locks_of(doc: &PdfDocument, entries: &[Entry]) -> Vec<Lock> {
+    let mut locks = locks_of_fields(entries);
+    if crate::outline::certified(doc).map_or(true, |c| c == Some(1)) {
+        locks.push(Lock::All);
+    }
+    locks
+}
+
+fn locks_of_fields(entries: &[Entry]) -> Vec<Lock> {
     per_field(entries)
         .into_iter()
         .filter(|e| e.kind == FieldKind::Signature)
@@ -569,9 +579,9 @@ pub(crate) fn apply_changes(rt: &Rt, changed: &[FieldChange]) -> Result<Vec<u32>
     rt.pending.borrow_mut().clear();
     let doc = rt.doc();
     let entries = rt.entries()?;
-    let locks = locks_of(entries);
-    // Certified (in the catalog or on a signature): form values may change, nothing else. A /P 1 also locks the fields
-    // that `reference_locks` finds, so there the properties are refused whole.
+    let locks = locks_of(doc, entries);
+    // Certified (in the catalog or on a signature): form values may change, nothing else. A /P 1 locks every field
+    // (`locks_of`), so there nothing is written at all.
     let values_only = crate::outline::certified(doc)?.is_some();
     let mut pages = Vec::new();
     for ch in changed {
@@ -691,7 +701,7 @@ pub(crate) fn cascade(rt: &Rt) -> Result<Vec<u32>> {
     calc.sort_by_key(|(e, _)| order.iter().position(|x| *x == e.node).unwrap_or(usize::MAX));
     let started = Instant::now();
     let mut values = names_to_values(entries);
-    let locks = locks_of(entries);
+    let locks = locks_of(rt.doc(), entries);
     let mut pages = Vec::new();
     'passes: for _ in 0..MAX_PASSES {
         let mut changed_any = false;
