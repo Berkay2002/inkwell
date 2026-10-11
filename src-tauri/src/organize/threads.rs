@@ -408,14 +408,13 @@ fn unlist(doc: &mut PdfDocument, keep: impl Fn(i32) -> bool) -> Result<()> {
 /// A thread of the document, found again by id, with its ring.
 struct Loaded {
     obj: PdfObject,
-    id: i32,
     ring: Ring,
 }
 
 fn load(doc: &PdfDocument, pages: &Pages, id: i32) -> Result<Loaded> {
     let (_, obj) = thread_objs(doc)?.into_iter().find(|(i, _)| *i == id).ok_or_else(|| bad("that article is no longer in the document"))?;
     let ring = walk(&obj.resolve()?.unwrap_or_else(|| obj.share()), id, pages)?;
-    Ok(Loaded { obj, id, ring })
+    Ok(Loaded { obj, ring })
 }
 
 impl Loaded {
