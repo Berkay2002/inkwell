@@ -1,3 +1,4 @@
+pub mod a11y;
 pub mod ai;
 pub mod annot;
 pub mod fillsign;
@@ -12,6 +13,7 @@ pub mod paths;
 pub mod recents;
 pub mod redact;
 pub mod sign;
+pub mod textedit;
 pub mod tools;
 
 use engine::cache::TileKey;
@@ -770,6 +772,8 @@ pub fn run() {
             export_start,
             create_start,
             discard_scratch,
+            a11y::app::a11y_check,
+            a11y::app::a11y_fix,
             annot::app::annot_default_author,
             annot::app::annot_list,
             annot::app::annot_add,
@@ -789,6 +793,8 @@ pub fn run() {
             sign::app::sign_create_test_id,
             sign::app::sign_document,
             sign::app::sign_list,
+            textedit::app::text_blocks,
+            textedit::app::text_edit,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,
