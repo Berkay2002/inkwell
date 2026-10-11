@@ -136,6 +136,15 @@ export function addText(id: number, rev: number, page: number, box: api.NewTextB
   });
 }
 
+/** Changes one image of a page, or adds one (`index` null): src-tauri/src/imageedit. */
+export function editImage(id: number, rev: number, page: number, index: number | null, change: api.ImageChange) {
+  return textResult(id, async () => {
+    const r = await api.imageEdit(id, rev, page, index, change);
+    applyState(id, r.state);
+    return r.state;
+  });
+}
+
 /** Changes the bookmarks (src-tauri/src/outline). `rev`: the generation the tree was listed at. */
 export function editBookmarks(id: number, rev: number, op: api.BookmarkOp) {
   return textResult(id, async () => {

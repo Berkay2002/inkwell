@@ -168,6 +168,8 @@ pub struct AuditReply {
     /// Where the compressed file would go, and whether that name is already taken.
     pub default_output: String,
     pub output_exists: bool,
+    /// The document carries signatures; the compressed copy invalidates them.
+    pub signed: bool,
 }
 
 /// Sample-based predicted sizes (see `compress::estimate`). Separate from the audit because it recompresses
@@ -179,12 +181,28 @@ pub fn estimate_for_ui(eng: &Engine, doc: DocId, cancel: &AtomicBool) -> Result<
     Ok(compress::estimate::estimate(&path, password.as_ref().map(|p| p.as_str()), &audit, cancel)?)
 }
 
+/// The same for a set of Advanced settings: one estimate, on the sample, with the settings applied.
+pub fn estimate_custom_for_ui(
+    eng: &Engine,
+    doc: DocId,
+    opts: &Options,
+    cancel: &AtomicBool,
+) -> Result<compress::estimate::Estimate, ToolError> {
+    let path = PathBuf::from(eng.doc_entry(doc)?.path());
+    let password = eng.file_password(doc)?;
+    let pw = password.as_ref().map(|p| p.as_str());
+    let audit = compress::audit_file(&path, pw)?;
+    let opts = Options { preset: Preset::Custom, password: None, output: None, ..opts.clone() };
+    Ok(compress::estimate::estimate_custom(&path, pw, &audit, &opts, cancel)?)
+}
+
 pub fn audit_for_ui(eng: &Engine, doc: DocId) -> Result<AuditReply, ToolError> {
     let path = PathBuf::from(eng.doc_entry(doc)?.path());
     let path = path.as_path();
-    let audit = compress::audit_file(path, eng.file_password(doc)?.as_ref().map(|p| p.as_str()))?;
+    let (audit, signed) = compress::audit_file_signed(path, eng.file_password(doc)?.as_ref().map(|p| p.as_str()))?;
     let out = compress::default_output(path);
     Ok(AuditReply {
+        signed,
         size: std::fs::metadata(path).map_err(|e| ToolError(e.to_string()))?.len(),
         default_output: out.to_string_lossy().into_owned(),
         output_exists: out.exists(),
