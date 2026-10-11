@@ -43,6 +43,11 @@ pub struct HitDto {
     pub page: u32,
     pub text: String,
     pub quads: Vec<QuadDto>,
+    /// Surrounding text for the snippet; display only (`mark_hits` ignores it).
+    #[serde(default)]
+    pub before: String,
+    #[serde(default)]
+    pub after: String,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -54,6 +59,8 @@ pub struct MarkDto {
     pub quads: Vec<QuadDto>,
     /// A "redact pages" mark (it reaches far past the page; draw it clipped to the page).
     pub whole_page: bool,
+    /// The marked text, for text marks.
+    pub label: Option<String>,
 }
 
 /// What Apply did. `Refused`: the engine found recoverable content and the document is as before.
@@ -78,7 +85,7 @@ pub fn find(eng: &Engine, doc: DocId, q: &FindQuery) -> Result<Vec<HitDto>> {
         FindQuery::Pattern { pattern } => Query::Pattern(pattern),
     };
     let hits = eng.read_custom(doc, |d| super::find(d, &q).map_err(err))?;
-    Ok(hits.iter().map(|h| HitDto { page: h.page as u32, text: h.text.clone(), quads: h.quads.iter().map(quad_dto).collect() }).collect())
+    Ok(hits.iter().map(|h| HitDto { page: h.page as u32, text: h.text.clone(), quads: h.quads.iter().map(quad_dto).collect(), before: h.before.clone(), after: h.after.clone() }).collect())
 }
 
 fn s(n: usize) -> &'static str {
@@ -89,7 +96,7 @@ fn s(n: usize) -> &'static str {
 pub fn mark_hits(eng: &Engine, doc: DocId, hits: &[HitDto], source: EditSource) -> Result<EditState> {
     let hits: Vec<Hit> = hits
         .iter()
-        .map(|h| Hit { page: h.page as i32, text: h.text.clone(), quads: h.quads.iter().map(quad_of).collect() })
+        .map(|h| Hit { page: h.page as i32, text: h.text.clone(), quads: h.quads.iter().map(quad_of).collect(), before: String::new(), after: String::new() })
         .collect();
     let mut pages: Vec<u32> = hits.iter().map(|h| h.page as u32).collect();
     pages.dedup();
@@ -144,6 +151,7 @@ pub fn list_marks(eng: &Engine, doc: DocId) -> Result<Vec<MarkDto>> {
                 xref: m.xref,
                 whole_page: m.quads.iter().any(|q| q.ul.x < -1.0e5),
                 quads: m.quads.iter().map(quad_dto).collect(),
+                label: m.label.clone(),
             })
             .collect())
     })

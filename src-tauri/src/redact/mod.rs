@@ -184,6 +184,29 @@ pub struct Hit {
     pub text: String,
     /// One quad per line the match covers, in page (fitz) space.
     pub quads: Vec<Quad>,
+    /// Up to ~60 chars of the same block before and after the match, cut at a word boundary. Display only.
+    pub before: String,
+    pub after: String,
+}
+
+/// The text around `r` in `text` (within its block: '\n' ends the context), at most `CTX` chars each way.
+fn context(text: &str, r: &std::ops::Range<usize>) -> (String, String) {
+    const CTX: usize = 60;
+    let head = &text[..r.start];
+    let head = head.rsplit('\n').next().unwrap_or("");
+    let start = head.char_indices().rev().nth(CTX - 1).map_or(0, |(i, _)| i);
+    let mut before = &head[start..];
+    if start > 0 && !head[..start].ends_with(' ') {
+        before = before.split_once(' ').map_or("", |x| x.1);
+    }
+    let tail = &text[r.end..];
+    let tail = tail.split('\n').next().unwrap_or("");
+    let end = tail.char_indices().nth(CTX).map_or(tail.len(), |(i, _)| i);
+    let mut after = &tail[..end];
+    if end < tail.len() && !tail[end..].starts_with(' ') {
+        after = after.rsplit_once(' ').map_or("", |x| x.0);
+    }
+    (before.trim_start().to_owned(), after.trim_end().to_owned())
 }
 
 /// `needle` as a regex: words matched literally, any whitespace (incl. line breaks) between them.
@@ -292,7 +315,8 @@ pub fn find(doc: &Document, query: &Query) -> Result<Vec<Hit>> {
                 }
                 let quads = pt.quads(&r);
                 if !quads.is_empty() {
-                    hits.push(Hit { page: p, text: pt.text[r].to_owned(), quads });
+                    let (before, after) = context(&pt.text, &r);
+                    hits.push(Hit { page: p, text: pt.text[r].to_owned(), quads, before, after });
                 }
             }
         }
@@ -324,10 +348,12 @@ pub struct Mark {
     pub xref: i32,
     pub quads: Vec<Quad>,
     pub style: MarkStyle,
+    /// The marked text (/Contents) for text marks; None for area and page marks.
+    pub label: Option<String>,
 }
 
 /// Adds one /Redact annotation covering `quads` (page space). Returns its object number.
-pub fn add_mark(doc: &mut PdfDocument, page: i32, quads: &[Quad], style: &MarkStyle) -> Result<i32> {
+pub fn add_mark(doc: &mut PdfDocument, page: i32, quads: &[Quad], style: &MarkStyle, label: Option<&str>) -> Result<i32> {
     let mut p = doc.load_pdf_page(page)?;
     let area = AnnotationArea::QuadPoints(AnnotationQuadPoints::new(quads.iter().cloned()));
     let mut a = p.add_redact_annotation(area)?;
@@ -339,12 +365,21 @@ pub fn add_mark(doc: &mut PdfDocument, page: i32, quads: &[Quad], style: &MarkSt
     if let Some(t) = &style.overlay_text {
         a.object().dict_put("OverlayText", PdfObject::new_string(t)?)?;
     }
+    if let Some(l) = label {
+        a.set_contents(l)?;
+    }
     a.update()?;
+    // MuPDF strokes the mark's outline with a fixed red in the appearance, whatever /C says: make it ink.
+    if let Some(mut n) = a.object().get_dict("AP")?.and_then(|ap| ap.get_dict("N").ok().flatten()) {
+        if let Ok(ap) = String::from_utf8(n.read_stream()?) {
+            n.write_stream_string(&ap.replace("1 0 0 RG", "0.102 0.11 0.125 RG"))?;
+        }
+    }
     Ok(a.xref()?)
 }
 
 pub fn add_area_mark(doc: &mut PdfDocument, page: i32, area: Rect, style: &MarkStyle) -> Result<i32> {
-    add_mark(doc, page, &[area.quad()], style)
+    add_mark(doc, page, &[area.quad()], style, None)
 }
 
 /// "Redact pages": one mark over the whole page and far beyond it, because content outside the
@@ -358,7 +393,7 @@ pub fn mark_page(doc: &mut PdfDocument, page: i32, style: &MarkStyle) -> Result<
 
 /// One mark per hit.
 pub fn mark_hits(doc: &mut PdfDocument, hits: &[Hit], style: &MarkStyle) -> Result<Vec<i32>> {
-    hits.iter().map(|h| add_mark(doc, h.page, &h.quads, style)).collect()
+    hits.iter().map(|h| add_mark(doc, h.page, &h.quads, style, Some(&h.text))).collect()
 }
 
 fn redact_annots(page: &PdfPage) -> Vec<mupdf::pdf::PdfAnnotation> {
@@ -374,7 +409,8 @@ pub fn list_marks(doc: &PdfDocument) -> Result<Vec<Mark>> {
             if quads.is_empty() {
                 quads.push(a.rect()?.quad());
             }
-            out.push(Mark { page: p, xref: a.xref()?, quads, style: style_of(&a.object())? });
+            let label = a.contents()?.filter(|c| !c.is_empty()).map(str::to_owned);
+            out.push(Mark { page: p, xref: a.xref()?, quads, style: style_of(&a.object())?, label });
         }
     }
     Ok(out)

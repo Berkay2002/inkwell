@@ -8,8 +8,8 @@ import { applyState } from "./edit";
 import { markLabel, SANITIZE_OFF, useRedact, type Hit, type Mark } from "./redact";
 
 const inv = vi.mocked(invoke);
-const hit = (page: number, text: string): Hit => ({ page, text, quads: [[0, 0, 1, 0, 0, 1, 1, 1]] });
-const mark = (page: number, xref: number): Mark => ({ page, xref, quads: [], wholePage: false });
+const hit = (page: number, text: string): Hit => ({ page, text, quads: [[0, 0, 1, 0, 0, 1, 1, 1]], before: "", after: "" });
+const mark = (page: number, xref: number): Mark => ({ page, xref, quads: [], wholePage: false, label: null });
 const state = { rev: 1, pageCount: 3, sizes: [], path: "C:\\a.pdf", dirty: true, undo: "Mark 1 item", redo: null };
 const options = { sanitize: { metadata: true, bookmarks: true }, preview: {}, saveName: "a_Redacted.pdf" };
 const r = () => useRedact.getState();
@@ -115,20 +115,17 @@ describe("redact store", () => {
     expect(inv).toHaveBeenLastCalledWith("redact_options", { doc: 1, sanitize: undefined });
   });
 
-  it("labels a mark with its text, or says area or page", async () => {
+  it("labels a mark with the engine's text, or says area or page", async () => {
     const q: Mark["quads"] = [[10, 10, 50, 10, 10, 20, 50, 20]];
-    const h = { page: 1, text: "alex@example.com", quads: q };
+    const h = { page: 1, text: "alex@example.com", quads: q, before: "Mail ", after: " now" };
     reply({ redact_find: [h] });
     await r().find(1, { kind: "pattern", pattern: "email" });
-    reply({ redact_mark: state, redact_list_marks: [{ page: 1, xref: 7, quads: q, wholePage: false }] });
+    reply({ redact_mark: state, redact_list_marks: [{ page: 1, xref: 7, quads: q, wholePage: false, label: h.text }] });
     await r().markChecked(1);
-    const m = r().get(1).marks[0];
-    expect(markLabel(m, r().get(1).labels)).toBe("alex@example.com");
+    expect(markLabel(r().get(1).marks[0])).toBe("alex@example.com");
 
-    const area = { page: 3, xref: 8, quads: q, wholePage: false };
-    reply({ redact_mark: state, redact_list_marks: [m, area] });
-    await r().mark(1, { kind: "area", page: 3, area: [0, 0, 5, 5] });
-    expect(markLabel(area, r().get(1).labels)).toBe("Area on page 4");
-    expect(markLabel({ ...area, page: 8, xref: 9, wholePage: true }, {})).toBe("Page 9");
+    const area = { page: 3, xref: 8, quads: q, wholePage: false, label: null };
+    expect(markLabel(area)).toBe("Area on page 4");
+    expect(markLabel({ ...area, page: 8, xref: 9, wholePage: true })).toBe("Page 9");
   });
 });
