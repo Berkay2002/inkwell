@@ -991,3 +991,26 @@ fn an_unsigned_document_is_still_rewritten_without_what_was_deleted() {
     let saved = std::fs::read(&path).unwrap();
     assert!(!String::from_utf8_lossy(&saved).contains("Secret title"), "a deleted bookmark's title does not stay in the file");
 }
+
+/// A signature whose `/Reference` is `refs`, as an object that the reads below can be made to fail on.
+fn sig_object(refs: &str) -> PdfObject {
+    let pdf = outline_pdf_with(&format!("/Perms << /DocMDP << /Type /Sig /Reference {refs} >> >>"), "<< /Type /Outlines /Count 0 >>", &[]);
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    doc.catalog().unwrap().get_dict("Perms").unwrap().unwrap().get_dict("DocMDP").unwrap().unwrap()
+}
+
+#[test]
+fn a_signature_reference_that_cannot_be_read_counts_as_certifying() {
+    // MuPDF repairs a damaged file on its own, so a file cannot make a read fail: the reads are made to.
+    let sig = sig_object("[ << /TransformMethod /DocMDP /TransformParams << /P 3 >> >> ]");
+    let ok = |o: &PdfObject, k: &str| o.get_dict(k);
+    assert_eq!(reference_p_with(&sig, &ok), Some(3));
+    for failing in ["Reference", "TransformMethod", "TransformParams", "P"] {
+        let get = |o: &PdfObject, k: &str| if k == failing { Err(mupdf::Error::InvalidPdfDocument) } else { o.get_dict(k) };
+        assert_eq!(reference_p_with(&sig, &get), Some(1), "{failing} unreadable");
+    }
+    // An entry that is not a DocMDP is not made strict by being unreadable elsewhere: only what is read counts.
+    let other = sig_object("[ << /TransformMethod /FieldMDP /TransformParams << /P 3 >> >> ]");
+    let get = |o: &PdfObject, k: &str| if k == "TransformParams" { Err(mupdf::Error::InvalidPdfDocument) } else { o.get_dict(k) };
+    assert_eq!(reference_p_with(&other, &get), None);
+}
