@@ -104,3 +104,7 @@ change.
 ## Tests
 
 `cargo test --lib outline -- --test-threads=1`, `cargo test --lib links -- --test-threads=1`, `src/lib/nav.test.ts`.
+
+CDP pass on a copy of `docs/study/samples/bookmarks-links-source.pdf`: `scripts/bookmarks-shots.mjs` (32 checks: add, rename,
+drag reorder and nest, undo and redo, set destination, style, collapse, sidebar menu, draw a link, gate refusal, open
+confirm, audit, save, reopen); screens, light and dark, in `docs/screens/bookmarks/`.

@@ -158,7 +158,7 @@ await key("Enter", "Enter", 13);
 await settle(async () => (await tree()).some((b) => b.title === "Appendix"), "bookmark added");
 let d = await doc();
 check("New adds a bookmark, named in place, as one undo step", /bookmark/i.test(d.undo ?? ""), d.undo);
-check("it was added at the top level, last", (await titles()).join() === "Chapter 1,Appendix", (await titles()).join());
+check("it was added at the top level, last", (await titles()).join() === "Chapter 1: Introduction,Appendix", (await titles()).join());
 report.addLabel = d.undo;
 
 // ---- reorder by drag: Appendix above Chapter 1 ----
@@ -185,18 +185,18 @@ async function drag(fromText, toText, zone) {
   await sleep(250);
   return true;
 }
-const dragged = await drag("Appendix", "Chapter 1", "before");
+const dragged = await drag("Appendix", "Chapter 1: Introduction", "before");
 check("the bookmark row can be dragged (real drag events)", dragged);
 if (!dragged) await ev(`${N}.getState().moveBookmark(${d.id}, ${(await tree()).find((b) => b.title === "Appendix").id}, null, 0)`);
 await settle(async () => (await titles())[0] === "Appendix", "reordered");
-check("dropping above Chapter 1 reorders the top level", (await titles()).join() === "Appendix,Chapter 1", (await titles()).join());
+check("dropping above Chapter 1 reorders the top level", (await titles()).join() === "Appendix,Chapter 1: Introduction", (await titles()).join());
 d = await doc();
 check("the move is one named undo step", /move/i.test(d.undo ?? ""), d.undo);
 
 // ---- nest by drag: Appendix inside Chapter 1 ----
-const nested = await drag("Appendix", "Chapter 1", "into");
+const nested = await drag("Appendix", "Chapter 1: Introduction", "into");
 check("dragging onto the middle of a row nests it", nested);
-if (!nested) await ev(`${N}.getState().moveBookmark(${d.id}, ${(await tree()).find((b) => b.title === "Appendix").id}, ${(await tree()).find((b) => b.title === "Chapter 1").id}, 0)`);
+if (!nested) await ev(`${N}.getState().moveBookmark(${d.id}, ${(await tree()).find((b) => b.title === "Appendix").id}, ${(await tree()).find((b) => b.title === "Chapter 1: Introduction").id}, 0)`);
 await settle(async () => (await nav()).bookmarks.items.length === 1, "nested");
 const ch1 = (await nav()).bookmarks.items[0];
 check("Appendix is now a child of Chapter 1", ch1.children.some((c) => c.title === "Appendix"), JSON.stringify(ch1.children.map((c) => c.title)));
@@ -205,10 +205,10 @@ await ev(`document.activeElement?.blur?.()`);
 await key("z", "KeyZ", 90, CTRL);
 await settle(async () => (await nav()).bookmarks.items.length === 2, "undo of nest");
 await key("z", "KeyZ", 90, CTRL);
-await settle(async () => (await titles()).join() === "Chapter 1,Appendix", "undo of reorder");
+await settle(async () => (await titles()).join() === "Chapter 1: Introduction,Appendix", "undo of reorder");
 check("undo steps back through the moves", true);
 await key("y", "KeyY", 89, CTRL);
-await settle(async () => (await titles()).join() === "Appendix,Chapter 1", "redo of reorder");
+await settle(async () => (await titles()).join() === "Appendix,Chapter 1: Introduction", "redo of reorder");
 check("redo brings the order back", true);
 await both("bookmarks-reordered");
 
@@ -227,7 +227,13 @@ check("double-click renames in place", true);
 await ev(`${S}.getState().goTo(${d.id}, 2)`);
 await sleep(500);
 await clickText(".te-dock .te-btn", "Set to current view");
-await settle(async () => (await tree()).find((b) => b.title === "Annexes")?.dest?.page === 2, "destination set");
+try {
+  await settle(async () => (await tree()).find((b) => b.title === "Annexes")?.dest?.page === 2, "destination set");
+} catch (e) {
+  const n = await nav();
+  console.log("DIAG", JSON.stringify((await tree()).find((b) => b.title === "Annexes")), "selected", n.selectedBm, "notice", n.notice, "summary", await ev(`document.querySelector(".te-dock .te-summary")?.textContent`), "cur", JSON.stringify(await doc()));
+  throw e;
+}
 check("Set to current view points the bookmark at the page in view", true);
 await clickSel(".te-dock .te-tog[aria-label='Bold']");
 await settle(async () => (await tree()).find((b) => b.title === "Annexes")?.bold === true, "bold");
@@ -238,11 +244,18 @@ await both("bookmarks-selected");
 
 // ---- collapse and expand: saved state, one undo step ----
 const before = await doc();
-await clickSel(".te-dock .bm-row .twisty");
-await settle(async () => (await tree()).find((b) => b.title === "Chapter 1")?.open === false, "collapsed");
+const tw = await ev(`(() => { const r = [...document.querySelectorAll(".te-dock .bm-row")].find((x) => x.querySelector(".bm-title")?.textContent === "Chapter 1: Introduction"); const e = r?.querySelector(".twisty"); if (!e) return null; const b = e.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
+await click(tw.x, tw.y);
+try {
+  await settle(async () => (await tree()).find((b) => b.title === "Chapter 1: Introduction")?.open === false, "collapsed");
+} catch (e) {
+  const c = await centre(".te-dock .bm-row .twisty");
+  console.log("DIAG", JSON.stringify((await tree()).map((b) => [b.title, b.open, b.children.length])), JSON.stringify(c), await ev(`(() => { const c = ${JSON.stringify(c)}; const e = document.elementFromPoint(c.x, c.y); return e ? e.tagName + "." + e.className + " | " + (e.closest(".bm-row")?.textContent ?? "") : null; })()`), JSON.stringify(await doc()));
+  throw e;
+}
 check("the twisty collapses a group and the state is part of the file", (await doc()).rev > before.rev);
 await key("z", "KeyZ", 90, CTRL);
-await settle(async () => (await tree()).find((b) => b.title === "Chapter 1")?.open === true, "expanded again by undo");
+await settle(async () => (await tree()).find((b) => b.title === "Chapter 1: Introduction")?.open === true, "expanded again by undo");
 
 // ---- the left sidebar outline is the same editor while Edit is open ----
 await ev(`${S}.getState().setSidebar("outline")`);
@@ -259,6 +272,8 @@ await sleep(200);
 await ev(`${S}.getState().setSidebar("none")`);
 
 // ---- Links tab: draw a link on page 1 ----
+await ev(`${S}.getState().goTo(${d.id}, 0)`);
+await sleep(600);
 await clickText(".te-tabs button", "Links");
 await settle(async () => (await centre(".lk")) != null, "links panel");
 await settle(async () => (await linksOf(0)).length > 0, "page 1 links listed");
