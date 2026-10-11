@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Citation } from "../../lib/ai";
-import { type Msg, readViewerSelection, useAi } from "../../lib/aiStore";
+import { type Mark, type Msg, readViewerSelection, useAi } from "../../lib/aiStore";
 import type { DocState } from "../../store";
 import { isVerified } from "../../lib/activity";
 import { ActivityTrail } from "./ActivityTrail";
@@ -26,6 +26,7 @@ const PATHS = {
   check: "M6 12.5l4 4 8-9",
   copy: "M9 9h9.5v11H9zM6 15V4h9.5",
   plus: "M12 6v12M6 12h12",
+  retry: "M5 12a7 7 0 1 0 2.1-5M5 4.5V9h4.5",
   docked: "M4 5.5h16v13H4zM14.5 5.5v13",
   floating: "M4 5.5h16v13H4zM12.5 8.5h5v7h-5z",
   bar: "M4 5.5h16v13H4zM8 14.5h8",
@@ -327,9 +328,48 @@ export function Messages({ doc, variant, lastOnly = false }: { doc: DocState; va
   );
 }
 
-/** The sources an answer cites. `docked` rows, `floating` cards with a page sketch, `bar` compact rows. */
+// Hovering a page chip of the command bar lights its badge on the page without scrolling there; leaving
+// puts back the mark the user had (a click is a real jump and goes through showCitation).
+let heldMark: { prev: Mark | null } | null = null;
+function liftMark(docId: number, c: Citation) {
+  if (c.page == null) return;
+  heldMark ??= { prev: useAi.getState().mark };
+  useAi.setState({ mark: { doc: docId, page: c.page, rects: c.rects, n: c.n, nonce: Date.now() } });
+}
+function dropMark() {
+  if (!heldMark) return;
+  useAi.setState({ mark: heldMark.prev });
+  heldMark = null;
+}
+
+/** The sources an answer cites. `docked` rows, `floating` cards with a page sketch, `bar` page chips. */
 function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: Variant; active: number | null }) {
   const show = (c: Citation) => useAi.getState().showCitation(doc.id, c);
+  if (variant === "bar")
+    return (
+      <ul className="ax-sources bar" aria-label="Sources">
+        {m.citations.filter(isVerified).map((c) => (
+          <li key={c.n}>
+            <button
+              className={active === c.n ? "ax-pgchip on" : "ax-pgchip"}
+              data-source={c.n}
+              title={c.quote}
+              onPointerEnter={() => liftMark(doc.id, c)}
+              onPointerLeave={dropMark}
+              onFocus={() => liftMark(doc.id, c)}
+              onBlur={dropMark}
+              onClick={() => {
+                dropMark();
+                show(c);
+              }}
+            >
+              <span className="ax-n">{c.n}</span>
+              <span>p. {(c.page ?? 0) + 1}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    );
   return (
     <ul className={`ax-sources ${variant}`}>
       {m.citations.filter(isVerified).map((c) => {
@@ -346,17 +386,12 @@ function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: 
                 </span>
               )}
               <span className="ax-src-main">
-                {variant !== "bar" && (
-                  <span className="ax-src-name">
-                    <span className="ax-n">{c.n}</span>
-                    {variant === "docked" && <span className="ax-src-file">{doc.name}</span>}
-                    {variant === "floating" && page && <span className="ax-pg">{page}</span>}
-                  </span>
-                )}
-                <span className="ax-src-q">
-                  {variant === "bar" && <span className="ax-n">{c.n}</span>}
-                  {c.quote}
+                <span className="ax-src-name">
+                  <span className="ax-n">{c.n}</span>
+                  {variant === "docked" && <span className="ax-src-file">{doc.name}</span>}
+                  {variant === "floating" && page && <span className="ax-pg">{page}</span>}
                 </span>
+                <span className="ax-src-q">{c.quote}</span>
               </span>
               {variant !== "floating" && page && <span className="ax-pg">{page}</span>}
             </button>
@@ -423,7 +458,7 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
 
   return (
     <div className="ax-a">
-      <ActivityTrail doc={doc.id} m={m} />
+      <ActivityTrail doc={doc.id} m={m} worked={variant === "bar"} />
       {m.text === "" && m.state === "streaming" ? (
         <p className="dim">{PHASES[m.phase ?? "reading"] ?? "Thinking…"}</p>
       ) : (
@@ -437,19 +472,53 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
       {m.state === "done" && (
         <>
           {!hide && m.citations.some(isVerified) && <Sources doc={doc} m={m} variant={variant} active={active} />}
-          <div className="ax-actions">
-            <button className="ax-link" onClick={() => void navigator.clipboard.writeText(m.text)}>
-              Copy
-            </button>
-            {m.timing && (
-              <span className="dim small" title={`prep ${m.timing.prepMs} ms`}>
-                {m.timing.firstTokenMs != null ? `${(m.timing.firstTokenMs / 1000).toFixed(1)} s to first word · ` : ""}
-                {(m.timing.totalMs / 1000).toFixed(1)} s
-              </span>
-            )}
-          </div>
-          {isLast && !plain && m.followups.length > 0 && <Followups doc={doc} m={m} variant={variant} />}
+          {variant === "bar" ? (
+            <BarActions doc={doc} m={m} isLast={isLast} />
+          ) : (
+            <div className="ax-actions">
+              <button className="ax-link" onClick={() => void navigator.clipboard.writeText(m.text)}>
+                Copy
+              </button>
+              {m.timing && (
+                <span className="dim small" title={`prep ${m.timing.prepMs} ms`}>
+                  {m.timing.firstTokenMs != null ? `${(m.timing.firstTokenMs / 1000).toFixed(1)} s to first word · ` : ""}
+                  {(m.timing.totalMs / 1000).toFixed(1)} s
+                </span>
+              )}
+            </div>
+          )}
+          {isLast && !plain && variant !== "bar" && m.followups.length > 0 && <Followups doc={doc} m={m} variant={variant} />}
         </>
+      )}
+    </div>
+  );
+}
+
+/** The icon row under a reply in the command bar: copy it, ask the same question again. */
+function BarActions({ doc, m, isLast }: { doc: DocState; m: Msg; isLast: boolean }) {
+  const asked = useAi((s) => {
+    const all = s.chats[doc.id]?.messages ?? [];
+    const i = all.findIndex((x) => x.id === m.id);
+    return i > 0 ? all[i - 1] : undefined;
+  });
+  const busy = useAi((s) => !!s.chats[doc.id]?.messages.some((x) => x.state === "streaming"));
+  return (
+    <div className="ax-iconrow">
+      <button className="ax-icon small" title="Copy" aria-label="Copy the answer" onClick={() => void navigator.clipboard.writeText(m.text)}>
+        <Glyph name="copy" size={14} />
+      </button>
+      {isLast && asked && (
+        <button
+          className="ax-icon small"
+          title="Ask again"
+          aria-label="Ask this again"
+          disabled={busy}
+          onClick={() =>
+            useAi.getState().ask(doc.id, asked.kind === "summarizeDocument" ? { kind: "summarizeDocument" } : { kind: "ask", question: asked.text })
+          }
+        >
+          <Glyph name="retry" size={14} />
+        </button>
       )}
     </div>
   );

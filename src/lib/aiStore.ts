@@ -29,11 +29,21 @@ export interface Msg {
   error?: string;
   hint?: string | null;
   timing?: { firstTokenMs: number | null; totalMs: number; prepMs: number };
+  /** When the message was made (ms since the epoch). */
+  at?: number;
 }
 
 export interface Chat {
   messages: Msg[];
   prep: Prepared | "loading" | "failed" | null;
+  /** Brought back from the document's earlier chats: the assistant itself no longer remembers it. */
+  restored?: boolean;
+}
+
+/** A chat set aside by "New chat", kept for the life of the tab so the command bar can list it. */
+export interface PastChat {
+  id: number;
+  messages: Msg[];
 }
 
 /** The outlined source of the citation the user clicked last. */
@@ -60,6 +70,8 @@ interface AiStore {
   mark: Mark | null;
   /** Command-bar layout: the answer sheet is showing. */
   sheet: boolean;
+  /** Earlier chats of each document, newest first. */
+  past: Record<number, PastChat[]>;
   /** A question asked before the user agreed to send text to OpenAI. */
   pending: { doc: number; task: Task; label: string } | null;
 
@@ -75,6 +87,10 @@ interface AiStore {
   /** Apply (true) or Reject (false) a change the assistant is waiting to make. */
   decide: (doc: number, callId: string, allow: boolean) => void;
   clear: (doc: number) => void;
+  /** Set the current chat aside (it stays listed in `past`) and start a fresh one. */
+  newChat: (doc: number) => void;
+  /** Bring an earlier chat back as the current one; the current chat is set aside. */
+  openChat: (doc: number, id: number) => void;
   closeChat: (doc: number) => void;
   grantConsent: () => void;
   declineConsent: () => void;
@@ -88,6 +104,13 @@ interface AiStore {
 let msgId = 0;
 let markNonce = 0;
 const EMPTY_CHAT: Chat = { messages: [], prep: null };
+let pastId = 0;
+
+/** A chat for the list of earlier ones: a turn that was still running is over. */
+const pastOf = (messages: Msg[]): PastChat => ({
+  id: ++pastId,
+  messages: messages.map((m) => (m.state === "streaming" ? { ...m, state: "cancelled" as const } : m)),
+});
 
 export const useAi = create<AiStore>((set, get) => {
   // Late events of a closed tab must not bring its chat back: only `create` starts a chat.
@@ -111,8 +134,9 @@ export const useAi = create<AiStore>((set, get) => {
     const st = get();
     const chat = st.chats[doc] ?? EMPTY_CHAT;
     if (chat.messages.some((m) => m.state === "streaming")) return;
-    const user: Msg = { id: ++msgId, role: "user", kind: task.kind, text: label, citations: [], followups: [], activity: [], state: "done" };
-    const bot: Msg = { id: ++msgId, role: "assistant", text: "", citations: [], followups: [], activity: [], state: "streaming", phase: "reading" };
+    const at = Date.now();
+    const user: Msg = { id: ++msgId, role: "user", kind: task.kind, text: label, citations: [], followups: [], activity: [], state: "done", at };
+    const bot: Msg = { id: ++msgId, role: "assistant", text: "", citations: [], followups: [], activity: [], state: "streaming", phase: "reading", at };
     patchChat(doc, (c) => ({ ...c, messages: [...c.messages, user, bot] }), true);
     set({ mark: null, sheet: true });
     const model = st.settings.model;
@@ -191,6 +215,7 @@ export const useAi = create<AiStore>((set, get) => {
     selection: null,
     mark: null,
     sheet: false,
+    past: {},
     pending: null,
 
     setOpen: (open) => {
@@ -269,12 +294,38 @@ export const useAi = create<AiStore>((set, get) => {
         .catch(() => {});
     },
 
+    newChat: (doc) => {
+      const cur = get().chats[doc]?.messages ?? [];
+      if (cur.length > 0) set((s) => ({ past: { ...s.past, [doc]: [pastOf(cur), ...(s.past[doc] ?? [])] } }));
+      get().clear(doc);
+    },
+
+    openChat: (doc, id) => {
+      const s = get();
+      const hit = s.past[doc]?.find((p) => p.id === id);
+      if (!hit) return;
+      const cur = s.chats[doc]?.messages ?? [];
+      const rest = (s.past[doc] ?? []).filter((p) => p.id !== id);
+      set({
+        past: { ...s.past, [doc]: cur.length > 0 ? [pastOf(cur), ...rest] : rest },
+        chats: { ...s.chats, [doc]: { messages: hit.messages, prep: s.chats[doc]?.prep ?? null, restored: true } },
+        mark: null,
+      });
+      // the model thread starts over, as for "New chat"
+      void ai
+        .aiClose(doc)
+        .then(() => ai.aiPrepare(doc))
+        .catch(() => {});
+    },
+
     closeChat: (doc) => {
       void ai.aiClose(doc);
       set((s) => {
         const chats = { ...s.chats };
         delete chats[doc];
-        return { chats, mark: s.mark?.doc === doc ? null : s.mark };
+        const past = { ...s.past };
+        delete past[doc];
+        return { chats, past, mark: s.mark?.doc === doc ? null : s.mark };
       });
     },
 
