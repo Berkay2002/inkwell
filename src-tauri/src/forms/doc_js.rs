@@ -144,6 +144,10 @@ pub struct DocJs {
     pub capabilities: Vec<Capability>,
     /// Something was left out of the list or the scan (too many items, too much script text).
     pub incomplete: bool,
+    /// The file is signed: an edit is saved as an update, and the signature will show the change.
+    pub signed: bool,
+    /// The file is certified (any `/P`): script edits are refused.
+    pub certified: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -186,6 +190,8 @@ pub struct Applied {
     pub state: EditState,
     /// The id of the script an `Add` made.
     pub id: Option<String>,
+    /// Set when the file is signed and the edit changed it.
+    pub warning: Option<String>,
 }
 
 // ---- reading ---------------------------------------------------------------------------------------
@@ -344,12 +350,16 @@ impl Scan {
     }
 }
 
-/// The action and what follows it by `/Next`, in the order they run. Each object once, at most [`MAX_STEPS`].
-fn chain(head: &PdfObject) -> Vec<PdfObject> {
-    let mut out = Vec::new();
+/// Where a step hangs: the index of the step whose `/Next` holds it, and its place in that `/Next` when it is an array.
+type At = Option<(usize, Option<i32>)>;
+
+/// The action and what follows it by `/Next`, in the order they run, each with where it hangs. Each object once, at
+/// most [`MAX_STEPS`].
+fn walk(head: &PdfObject) -> Vec<(PdfObject, At)> {
+    let mut out: Vec<(PdfObject, At)> = Vec::new();
     let mut seen = HashSet::new();
-    let mut stack = vec![head.clone()];
-    while let Some(a) = stack.pop() {
+    let mut stack: Vec<(PdfObject, At)> = vec![(head.clone(), None)];
+    while let Some((a, at)) = stack.pop() {
         if out.len() >= MAX_STEPS {
             break;
         }
@@ -360,22 +370,27 @@ fn chain(head: &PdfObject) -> Vec<PdfObject> {
         if !is_dict && !a.is_array().unwrap_or(false) {
             continue;
         }
+        let me = out.len();
         if is_dict {
             if let Some(next) = get(&a, "Next") {
                 if next.is_array().unwrap_or(false) {
                     for i in (0..next.len().unwrap_or(0).min(MAX_STEPS) as i32).rev() {
                         if let Some(n) = next.get_array(i).ok().flatten() {
-                            stack.push(n);
+                            stack.push((n, Some((me, Some(i)))));
                         }
                     }
                 } else {
-                    stack.push(next);
+                    stack.push((next, Some((me, None))));
                 }
             }
         }
-        out.push(a);
+        out.push((a, at));
     }
     out
+}
+
+fn chain(head: &PdfObject) -> Vec<PdfObject> {
+    walk(head).into_iter().map(|(a, _)| a).collect()
 }
 
 fn is_js(a: &PdfObject) -> bool {
@@ -555,7 +570,8 @@ pub fn list(doc: &PdfDocument) -> Result<DocJs> {
         .filter(|(_, (n, _))| *n > 0)
         .map(|(c, (count, places))| Capability { key: c.key.into(), label: c.label.into(), count, places })
         .collect();
-    Ok(DocJs { named, doc_actions, page_actions, counts: sc.counts, capabilities, incomplete: sc.incomplete || sc.budget.cut })
+    let (signed, certified) = (crate::outline::signed(doc), crate::outline::certified(doc)?.is_some());
+    Ok(DocJs { named, doc_actions, page_actions, counts: sc.counts, capabilities, incomplete: sc.incomplete || sc.budget.cut, signed, certified })
 }
 
 /// The text of the script `id` names (a named script, or a step of an action).
@@ -680,6 +696,12 @@ fn holder(doc: &mut PdfDocument, w: Where, create: bool) -> Result<Option<(PdfOb
     };
     let mut owner = owner;
     let aa = match get(&owner, "AA").filter(|a| a.is_dict().unwrap_or(false)) {
+        // An /AA object other pages may share is copied before it is changed, so they keep theirs.
+        Some(a) if a.is_indirect()? => {
+            let copy = doc.add_object(&a.copy_dict()?)?;
+            owner.dict_put("AA", copy.clone())?;
+            copy
+        }
         Some(a) => a,
         None if create => {
             let d = doc.new_dict()?;
@@ -694,15 +716,32 @@ fn holder(doc: &mut PdfDocument, w: Where, create: bool) -> Result<Option<(PdfOb
 
 fn set_step(doc: &mut PdfDocument, w: Where, index: usize, source: &str) -> Result<()> {
     let head = head_of(doc, w)?;
-    let steps = head.as_ref().map(chain).unwrap_or_default();
-    match steps.get(index) {
-        // A later step is edited where it is; the head is replaced below, so an action object the file shares
-        // (one /AA /O for many pages, or a link too) is not changed under the others.
-        // shortcut: a later step of a /Next chain that other actions share is changed for all of them, only the head is
-        // copied; copy the chain up to the edited step (new actions linked by /Next) if shared chains turn up.
+    let nodes = head.as_ref().map(walk).unwrap_or_default();
+    match nodes.get(index).map(|n| &n.0) {
+        // A later step is copied with every step before it, linked by /Next, and the copy of the head replaces the
+        // head: an action object or a chain the file shares (one /AA /O for many pages, or a link too) is not
+        // changed under the others.
         Some(step) if index > 0 && is_js(step) => {
-            let mut step = step.clone();
-            step.dict_put("JS", js_string(doc, source)?)?;
+            let mut new = step.copy_dict()?;
+            new.dict_put("JS", js_string(doc, source)?)?;
+            let mut at = nodes[index].1;
+            while let Some((p, slot)) = at {
+                let mut parent = nodes[p].0.copy_dict()?;
+                let child = doc.add_object(&new)?;
+                match slot {
+                    Some(i) => {
+                        let mut next = get(&parent, "Next").ok_or_else(|| bad("that step is no longer there"))?.copy_array()?;
+                        next.array_put(i, child)?;
+                        parent.dict_put("Next", next)?;
+                    }
+                    None => parent.dict_put("Next", child)?,
+                }
+                new = parent;
+                at = nodes[p].1;
+            }
+            let head = doc.add_object(&new)?;
+            let (mut h, key, _) = holder(doc, w, true)?.ok_or_else(|| bad("that action cannot be set here"))?;
+            h.dict_put(key, head)?;
         }
         Some(_) if index > 0 => return Err(bad("that step is not JavaScript: clear the action to replace it")),
         None if index > 0 => return Err(bad("that step is no longer there")),
@@ -848,20 +887,32 @@ pub fn source_of(eng: &Engine, doc: DocId, id: &str) -> Result<Source> {
 }
 
 /// One undo step. Replace, delete and clear are removing edits: a save rewrites the file, so the old text is not left
-/// in its bytes. An edit that changes nothing (the same text, the same name, an empty slot) is no step.
+/// in its bytes; except in a signed file, where a rewrite would void the signatures, so the save stays an update (the
+/// old text stays in the signed revision) and the result carries a warning. A certified file is refused at any `/P`.
+/// An edit that changes nothing (the same text, the same name, an empty slot) is no step.
 pub fn apply(eng: &Engine, doc: DocId, op: &Op, src: EditSource) -> Result<Applied> {
-    let removes = matches!(op, Op::SetSource { .. } | Op::Delete { .. });
+    let signed = eng.read_custom(doc, |d| Ok(crate::outline::signed(d)))?;
+    let removes = !signed && matches!(op, Op::SetSource { .. } | Op::Delete { .. });
     let mut created = None;
+    let mut changed = false;
     let state = eng.apply_custom_unless_noop(doc, label_for(op), src, removes, |d| {
+        if crate::outline::certified(d)?.is_some() {
+            return Err(bad(
+                "This document is certified. Changing its scripts would void the certification, so Inkwell leaves them as they are.",
+            ));
+        }
         // The same text again changes nothing.
         if let Op::SetSource { id, source: s } = op {
             if source(d, id).is_ok_and(|cur| cur.text == *s && !cur.too_large && (id.starts_with("n:") || head_is_js(d, id))) {
                 return Ok(None);
             }
         }
-        apply_op(d, op, &mut created)
+        let done = apply_op(d, op, &mut created)?;
+        changed = done.is_some();
+        Ok(done)
     })?;
-    Ok(Applied { state, id: created })
+    let warning = (signed && changed).then(|| "This document is signed. Its signature will show that the file was changed after it was signed.".to_string());
+    Ok(Applied { state, id: created, warning })
 }
 
 /// The step `id` names exists and is JavaScript (an empty or other action is not a no-op to replace).

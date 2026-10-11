@@ -36,6 +36,8 @@ const list = (names: string[] = ["Init"], extra: Partial<DocJsList> = {}): DocJs
   counts: { fields: 2, fieldScripts: 3, links: 0, bookmarks: 0 },
   capabilities: [],
   incomplete: false,
+  signed: false,
+  certified: false,
   ...extra,
 });
 const ok = { ok: true, message: null, line: null, column: null, tooLarge: false };
@@ -52,7 +54,7 @@ beforeEach(() => {
   vi.mocked(api.docJsList).mockResolvedValue(list());
   vi.mocked(api.docJsSource).mockImplementation(async (_d, id) => src(id, id === "n:Init" ? "var a = 1;" : "var b = 2;"));
   vi.mocked(api.docJsCheck).mockResolvedValue(ok);
-  vi.mocked(api.docJsApply).mockResolvedValue({ state: {} as never, id: null });
+  vi.mocked(api.docJsApply).mockResolvedValue({ state: {} as never, id: null, warning: null });
 });
 
 afterEach(() => {
@@ -159,7 +161,7 @@ describe("document JavaScript sheet", () => {
 
   it("adds, renames and deletes through the engine and selects what it made", async () => {
     await open();
-    vi.mocked(api.docJsApply).mockResolvedValueOnce({ state: {} as never, id: "n:Script 1" });
+    vi.mocked(api.docJsApply).mockResolvedValueOnce({ state: {} as never, id: "n:Script 1", warning: null });
     vi.mocked(api.docJsList).mockResolvedValue(list(["Init", "Script 1"]));
     useDocJs.getState().startAdd();
     await useDocJs.getState().commitAdd();
@@ -169,7 +171,7 @@ describe("document JavaScript sheet", () => {
     useDocJs.getState().startRename();
     expect(sheet().renaming).toBe("Script 1");
     useDocJs.getState().setRenaming("Later");
-    vi.mocked(api.docJsApply).mockResolvedValueOnce({ state: {} as never, id: "n:Later" });
+    vi.mocked(api.docJsApply).mockResolvedValueOnce({ state: {} as never, id: "n:Later", warning: null });
     vi.mocked(api.docJsList).mockResolvedValue(list(["Init", "Later"]));
     await useDocJs.getState().commitRename();
     expect(api.docJsApply).toHaveBeenLastCalledWith(7, { op: "rename", id: "n:Script 1", name: "Later" });
@@ -239,7 +241,7 @@ describe("document JavaScript sheet", () => {
     await open();
     useDocJs.getState().setText("typing");
     useDocJs.getState().startAdd();
-    vi.mocked(api.docJsApply).mockResolvedValueOnce({ state: {} as never, id: "n:Script 1" });
+    vi.mocked(api.docJsApply).mockResolvedValueOnce({ state: {} as never, id: "n:Script 1", warning: null });
     await useDocJs.getState().commitAdd();
     expect(api.docJsApply).not.toHaveBeenCalled();
     expect(sheet().confirmDiscard).toBe("add");

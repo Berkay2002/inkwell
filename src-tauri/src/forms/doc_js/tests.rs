@@ -467,3 +467,134 @@ fn a_listing_of_streams_that_fail_to_read_is_still_bounded() {
     assert!(l.incomplete);
     assert!(l.named.iter().any(|n| n.meta.unread), "{:?}", l.named.iter().map(|n| (n.meta.unread, n.meta.size)).collect::<Vec<_>>());
 }
+
+/// A one-page file with a named script and a page action, a signature field with a value, and `perms` in the catalog.
+fn signed_objs(perms: &str) -> Vec<String> {
+    vec![
+        format!("<< /Type /Catalog /Pages 2 0 R /Names << /JavaScript 5 0 R >> /AcroForm << /SigFlags 3 /Fields [6 0 R] >> {perms} >>"),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /AA << /O 7 0 R >> >>".into(),
+        "<< >>".into(),
+        "<< /Names [(alpha) 8 0 R] >>".into(),
+        "<< /FT /Sig /T (Signature1) /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> >> >>".into(),
+        "<< /S /JavaScript /JS (var open = 1;) >>".into(),
+        "<< /S /JavaScript /JS (var a = 1;) >>".into(),
+    ]
+}
+
+#[test]
+fn editing_a_signed_file_saves_an_update_and_warns() {
+    let (eng, id, path) = open("signed", &signed_objs(""));
+    let l = list_all(&eng, id).unwrap();
+    assert!(l.signed && !l.certified);
+    let original = std::fs::read(&path).unwrap();
+    let warned = |a: Applied| assert!(a.warning.is_some_and(|w| w.contains("signature")), "an edit of a signed file warns");
+    warned(apply(&eng, id, &Op::SetSource { id: "n:alpha".into(), source: "var b = 2;".into() }, USER).unwrap());
+    warned(apply(&eng, id, &Op::Delete { id: "p:0:O:0".into() }, USER).unwrap());
+    // the same text again is no edit and no warning
+    assert!(apply(&eng, id, &Op::SetSource { id: "n:alpha".into(), source: "var b = 2;".into() }, USER).unwrap().warning.is_none());
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the signed bytes are kept: the edit is an appended update");
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(text_of(&eng2, id2, "n:alpha"), "var b = 2;");
+    assert!(list_all(&eng2, id2).unwrap().page_actions.is_empty());
+}
+
+#[test]
+fn a_certified_file_takes_no_script_edit_at_any_level() {
+    for p in 1..=3 {
+        let perms = format!("/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P {p} >> >> ] >> >>");
+        let (eng, id, _) = open(&format!("certified-{p}"), &signed_objs(&perms));
+        assert!(list_all(&eng, id).unwrap().certified, "P {p}");
+        let steps = eng.history(id).unwrap().len();
+        for op in [
+            Op::Add { name: Some("new".into()), source: "var n;".into() },
+            Op::Rename { id: "n:alpha".into(), name: "other".into() },
+            Op::SetSource { id: "n:alpha".into(), source: "var z;".into() },
+            Op::SetSource { id: "p:0:O:0".into(), source: "var z;".into() },
+            Op::Delete { id: "n:alpha".into() },
+            Op::Delete { id: "p:0:O:0".into() },
+        ] {
+            let e = apply(&eng, id, &op, USER).unwrap_err();
+            assert!(format!("{e:?}").contains("certified"), "P {p}, {op:?}: {e:?}");
+        }
+        assert_eq!(eng.history(id).unwrap().len(), steps, "P {p}: no step was made");
+        assert_eq!(text_of(&eng, id, "n:alpha"), "var a = 1;");
+    }
+}
+
+#[test]
+fn an_aa_dictionary_shared_by_two_pages_is_not_changed_under_the_other() {
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /AA 5 0 R >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /AA 5 0 R >>".into(),
+        "<< /O 6 0 R /C 7 0 R >>".into(),
+        "<< /S /JavaScript /JS (var open = 1;) >>".into(),
+        "<< /S /JavaScript /JS (var close = 1;) >>".into(),
+    ];
+    let (eng, id, path) = open("shared-aa", &objs);
+    set(&eng, id, "p:0:O:0", "var mine = 2;");
+    assert_eq!(text_of(&eng, id, "p:0:O:0"), "var mine = 2;");
+    assert_eq!(text_of(&eng, id, "p:0:C:0"), "var close = 1;", "the page's other events came along");
+    assert_eq!(text_of(&eng, id, "p:1:O:0"), "var open = 1;");
+    apply(&eng, id, &Op::Delete { id: "p:0:C".into() }, USER).unwrap();
+    let l = list_all(&eng, id).unwrap();
+    assert!(l.page_actions.iter().all(|s| s.id != "p:0:C"));
+    assert_eq!(text_of(&eng, id, "p:1:C:0"), "var close = 1;");
+    assert_eq!(text_of(&eng, id, "p:1:O:0"), "var open = 1;");
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(text_of(&eng2, id2, "p:0:O:0"), "var mine = 2;");
+    assert_eq!(text_of(&eng2, id2, "p:1:C:0"), "var close = 1;");
+}
+
+#[test]
+fn a_next_chain_shared_by_two_actions_is_copied_up_to_the_edited_step() {
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /AA << /O 5 0 R >> >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /AA << /O 6 0 R >> >>".into(),
+        "<< /S /JavaScript /JS (var head0 = 1;) /Next 7 0 R >>".into(),
+        "<< /S /JavaScript /JS (var head1 = 1;) /Next 7 0 R >>".into(),
+        "<< /S /JavaScript /JS (var tail = 1;) /Next 8 0 R >>".into(),
+        "<< /S /JavaScript /JS (var end = 1;) >>".into(),
+    ];
+    let (eng, id, path) = open("shared-next", &objs);
+    let steps = eng.history(id).unwrap().len();
+    set(&eng, id, "p:0:O:1", "var tail2 = 2;");
+    let page = |p: u32| (0..3).filter_map(|i| source_of(&eng, id, &format!("p:{p}:O:{i}")).ok().map(|s| s.text)).collect::<Vec<_>>();
+    assert_eq!(page(0), ["var head0 = 1;", "var tail2 = 2;", "var end = 1;"]);
+    assert_eq!(page(1), ["var head1 = 1;", "var tail = 1;", "var end = 1;"]);
+    // a step further down: both links above it are copied
+    set(&eng, id, "p:1:O:2", "var end2 = 3;");
+    assert_eq!(page(1), ["var head1 = 1;", "var tail = 1;", "var end2 = 3;"]);
+    assert_eq!(page(0), ["var head0 = 1;", "var tail2 = 2;", "var end = 1;"]);
+    // one undo step each, and the copies survive a save
+    assert_eq!(eng.history(id).unwrap().len(), steps + 2);
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(text_of(&eng2, id2, "p:0:O:1"), "var tail2 = 2;");
+    assert_eq!(text_of(&eng2, id2, "p:1:O:2"), "var end2 = 3;");
+}
+
+#[test]
+fn a_step_in_a_next_array_is_edited_on_a_copy_of_the_head() {
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /AA << /O 5 0 R >> >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /AA << /O 5 0 R >> >>".into(),
+        "<< /S /JavaScript /JS (var h = 1;) /Next [6 0 R 7 0 R] >>".into(),
+        "<< /S /JavaScript /JS (var a = 1;) >>".into(),
+        "<< /S /JavaScript /JS (var b = 1;) >>".into(),
+    ];
+    let (eng, id, _) = open("next-array", &objs);
+    set(&eng, id, "p:0:O:2", "var b2 = 2;");
+    let texts = |p: u32| (0..3).map(|i| text_of(&eng, id, &format!("p:{p}:O:{i}"))).collect::<Vec<_>>();
+    assert_eq!(texts(0), ["var h = 1;", "var a = 1;", "var b2 = 2;"]);
+    assert_eq!(texts(1), ["var h = 1;", "var a = 1;", "var b = 1;"]);
+}

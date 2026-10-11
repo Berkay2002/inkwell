@@ -36,6 +36,16 @@ export function DocJsSheet() {
           </button>
         </header>
         <Capabilities list={sheet.list} />
+        {sheet.list?.certified ? (
+          <p className="dj-note" role="status">
+            This document is certified, so its scripts are shown but not changed here: any change would void the certification.
+          </p>
+        ) : sheet.list?.signed ? (
+          <p className="dj-note" role="status">
+            This document is signed. A change is saved as an update after the signature, which will show that the file was changed, and
+            replaced or deleted script text stays in the signed revision.
+          </p>
+        ) : null}
         <div className="dj-body">
           <ScriptList sheet={sheet} />
           <Editor sheet={sheet} />
@@ -90,6 +100,7 @@ function ScriptList({ sheet }: { sheet: SheetState }) {
   const [page, setPage] = useState("");
   const [event, setEvent] = useState<"O" | "C">("O");
   if (!l) return <nav className="dj-list" aria-label="Scripts" />;
+  const locked = l.certified;
   const pageSlots = l.pageActions;
   const row = (id: string, label: string, m: DocJsMeta | null, extra?: string) => {
     const warn = m && l ? riskNote(l, m) : "";
@@ -120,7 +131,7 @@ function ScriptList({ sheet }: { sheet: SheetState }) {
         <div className="dj-group-head">
           <span>Document scripts</span>
           <span className="grow" />
-          <button className="dj-mini" onClick={() => act().startAdd()} disabled={sheet.busy}>
+          <button className="dj-mini" onClick={() => act().startAdd()} disabled={sheet.busy || locked}>
             Add
           </button>
         </div>
@@ -166,7 +177,7 @@ function ScriptList({ sheet }: { sheet: SheetState }) {
             <option value="O">opens</option>
             <option value="C">closes</option>
           </select>
-          <button className="dj-mini" type="submit">
+          <button className="dj-mini" type="submit" disabled={sheet.busy || locked}>
             Set
           </button>
         </form>
@@ -199,6 +210,7 @@ function Editor({ sheet }: { sheet: SheetState }) {
   const sel = sheet.selected;
   if (!l || !sel) return <div className="dj-editor dj-empty">{l ? "Choose a script, or add one." : ""}</div>;
   const named = isNamed(sel);
+  const locked = l.certified;
   const step = l.docActions.concat(l.pageActions).flatMap((s) => s.steps).find((x) => x.id === sel);
   // A step that is not JavaScript: the first one may be replaced, a later one is left alone.
   const other = step && !step.javascript ? step : null;
@@ -249,12 +261,12 @@ function Editor({ sheet }: { sheet: SheetState }) {
         )}
         <span className="grow" />
         {named && sheet.renaming == null && (
-          <button className="dj-mini" onClick={() => act().startRename()} disabled={sheet.busy}>
+          <button className="dj-mini" onClick={() => act().startRename()} disabled={sheet.busy || locked}>
             Rename
           </button>
         )}
         {(named || step) && (
-          <button className="dj-mini" onClick={() => void act().remove()} disabled={sheet.busy}>
+          <button className="dj-mini" onClick={() => void act().remove()} disabled={sheet.busy || locked}>
             {named ? "Delete" : "Clear action"}
           </button>
         )}
@@ -294,7 +306,7 @@ function Editor({ sheet }: { sheet: SheetState }) {
           ref={ta}
           className="dj-text"
           value={sheet.tooLarge ? "" : sheet.text}
-          readOnly={sheet.tooLarge || later}
+          readOnly={sheet.tooLarge || later || locked}
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
@@ -315,7 +327,7 @@ function Editor({ sheet }: { sheet: SheetState }) {
         </span>
         <span className="grow" />
         {sheet.error && <span className="dj-error">{sheet.error}</span>}
-        <button className="btn primary" disabled={!isDirty || sheet.busy || later} onClick={() => void act().save()}>
+        <button className="btn primary" disabled={!isDirty || sheet.busy || later || locked} onClick={() => void act().save()}>
           Save script
         </button>
       </div>

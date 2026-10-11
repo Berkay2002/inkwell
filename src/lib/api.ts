@@ -1312,6 +1312,10 @@ export interface DocJsList {
   counts: DocJsCounts;
   capabilities: DocJsCapability[];
   incomplete: boolean;
+  /** Signed: an edit is saved as an update and the signature will show the change. */
+  signed: boolean;
+  /** Certified (any /P): script edits are refused. */
+  certified: boolean;
 }
 export interface DocJsSource {
   id: string;
@@ -1337,6 +1341,8 @@ export interface DocJsApplied {
   state: EditState;
   /** The id of the script an `add` made (and of a renamed one). */
   id: string | null;
+  /** Set when the file is signed and the edit changed it. */
+  warning: string | null;
 }
 
 export const docJsList = (doc: number) => invoke<DocJsList>("doc_js_list", { doc });
