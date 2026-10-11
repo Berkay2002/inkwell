@@ -5,7 +5,7 @@
 use super::*;
 use crate::engine::edit::{EditOp, EditSource};
 use crate::engine::fixture::{self, Fixture};
-use crate::engine::{DocId, Engine};
+use crate::engine::{DocId, Engine, EngineError};
 use crate::organize::{
     thread_add_bead, thread_create, thread_delete, thread_delete_bead, thread_move_bead, thread_reorder, thread_set_info, threads_get,
 };
@@ -756,4 +756,79 @@ fn a_scan_that_runs_out_of_budget_keeps_the_rest_of_a_pages_beads() {
         Ok(vec![])
     });
     assert_eq!(on_page0(&eng), [b1_id]);
+}
+
+/// Opens the fixture with `/Perms` and/or an `/AcroForm` added to the catalog (what a certified or signed file has).
+fn protected(test: &str, perms: Option<&str>, acroform: Option<&str>) -> (Arc<Engine>, DocId, PathBuf) {
+    let (eng, id, d) = open(test, 3);
+    tamper(&eng, id, |d| {
+        let mut cat = d.catalog()?;
+        if let Some(p) = perms {
+            cat.dict_put("Perms", d.new_object_from_str(p)?)?;
+        }
+        if let Some(a) = acroform {
+            cat.dict_put("AcroForm", d.new_object_from_str(a)?)?;
+        }
+        Ok(vec![])
+    });
+    (eng, id, d)
+}
+
+#[test]
+fn a_certified_document_takes_no_article_edit() {
+    for p in [1, 2, 3] {
+        let perms = format!("<< /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P {p} >> >> ] >> >>");
+        // the article exists before the document is certified, so every kind of edit has something to refuse
+        let (eng, id, _d) = open(&format!("certified{p}"), 3);
+        thread_create(&eng, id, "A", 0, R, USER).unwrap();
+        thread_create(&eng, id, "B", 1, R, USER).unwrap();
+        let (a, b) = (list(&eng, id)[0].id, list(&eng, id)[1].id);
+        let bead = list(&eng, id)[0].beads[0].id;
+        tamper(&eng, id, |d| {
+            let mut cat = d.catalog()?;
+            cat.dict_put("Perms", d.new_object_from_str(&perms)?)?;
+            Ok(vec![])
+        });
+        let before = (eng.edit_state(id).unwrap().undo, list(&eng, id).len());
+        let refused: Vec<(&str, Result<_>)> = vec![
+            ("create", thread_create(&eng, id, "C", 2, R, USER)),
+            ("add", thread_add_bead(&eng, id, a, None, 1, R, USER)),
+            ("move", thread_move_bead(&eng, id, a, bead, 0, [60.0, 70.0, 260.0, 310.0], USER)),
+            ("delete bead", thread_delete_bead(&eng, id, a, bead, USER)),
+            ("properties", thread_set_info(&eng, id, a, &Info { author: "X".into(), ..Info::default() }, USER)),
+            ("reorder", thread_reorder(&eng, id, b, 0, USER)),
+            ("delete", thread_delete(&eng, id, a, USER)),
+        ];
+        for (what, r) in refused {
+            match r {
+                Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "P {p} {what}: {m}"),
+                other => panic!("P {p} {what}: {:?}", other.map(|s| s.undo)),
+            }
+        }
+        assert_eq!((eng.edit_state(id).unwrap().undo, list(&eng, id).len()), before, "P {p}: no step recorded");
+        check(&eng, id);
+    }
+}
+
+#[test]
+fn a_signed_document_is_changed_after_its_signed_bytes() {
+    // a signature field with a value (the signed revision), not certified
+    let (eng, id, d) = protected("signed", None, Some("<< /SigFlags 3 >>"));
+    assert!(eng.read_custom(id, |d| Ok(crate::outline::signed(d))).unwrap());
+    assert!(eng.read_custom(id, |d| Ok(crate::outline::certified(d)?.is_none())).unwrap());
+    // save once so the file on disk is the signed revision, then edit and save again in place
+    let path = d.join("a.pdf");
+    eng.save(id, None).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    thread_create(&eng, id, "A", 0, R, USER).unwrap();
+    let a = list(&eng, id)[0].id;
+    thread_add_bead(&eng, id, a, None, 1, R, USER).unwrap();
+    thread_delete_bead(&eng, id, a, list(&eng, id)[0].beads[1].id, USER).unwrap();
+    thread_delete(&eng, id, a, USER).unwrap();
+    thread_create(&eng, id, "B", 2, R, USER).unwrap();
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "an update after the signed revision, not a rewrite");
+    let (eng2, id2) = reopen(&eng, id);
+    assert_eq!(list(&eng2, id2).len(), 1);
 }

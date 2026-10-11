@@ -508,8 +508,18 @@ pub fn same_rect(a: [f32; 4], b: [f32; 4]) -> bool {
     a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 0.01)
 }
 
+/// A certified document takes no article edit: any change, /Threads included, would void the certification. A signed
+/// one is written incrementally (the callers pass `false` for a rewrite), so its signed bytes stay as they were.
+fn writable(doc: &PdfDocument) -> Result<()> {
+    if crate::outline::certified(doc)?.is_some() {
+        return Err(bad("This document is certified. Changing its articles would void the certification, so Inkwell leaves them as they are."));
+    }
+    Ok(())
+}
+
 /// A new thread of one bead; the title may be empty.
 pub fn create(doc: &mut PdfDocument, title: &str, page: u32, rect: [f32; 4]) -> Result<Vec<u32>> {
+    writable(doc)?;
     let pages = Pages::of(doc)?;
     if thread_objs(doc)?.len() >= MAX_THREADS {
         return Err(bad(format!("a document can have at most {MAX_THREADS} articles")));
@@ -533,6 +543,7 @@ pub fn create(doc: &mut PdfDocument, title: &str, page: u32, rect: [f32; 4]) -> 
 
 /// A bead after `after` (the end of the article when none).
 pub fn add_bead(doc: &mut PdfDocument, thread: i32, after: Option<i32>, page: u32, rect: [f32; 4]) -> Result<Vec<u32>> {
+    writable(doc)?;
     let pages = Pages::of(doc)?;
     let l = load(doc, &pages, thread)?;
     let mut entries = l.entries()?;
@@ -550,6 +561,7 @@ pub fn add_bead(doc: &mut PdfDocument, thread: i32, after: Option<i32>, page: u3
 
 /// Moves or resizes a bead (and puts it on another page when `page` differs).
 pub fn move_bead(doc: &mut PdfDocument, thread: i32, bead: i32, page: u32, rect: [f32; 4]) -> Result<Vec<u32>> {
+    writable(doc)?;
     let pages = Pages::of(doc)?;
     let l = load(doc, &pages, thread)?;
     let mut entries = l.entries()?;
@@ -561,6 +573,7 @@ pub fn move_bead(doc: &mut PdfDocument, thread: i32, bead: i32, page: u32, rect:
 
 /// Takes a bead out; the last one takes the article with it.
 pub fn delete_bead(doc: &mut PdfDocument, thread: i32, bead: i32) -> Result<Vec<u32>> {
+    writable(doc)?;
     let pages = Pages::of(doc)?;
     let l = load(doc, &pages, thread)?;
     let mut entries = l.entries()?;
@@ -574,6 +587,7 @@ pub fn delete_bead(doc: &mut PdfDocument, thread: i32, bead: i32) -> Result<Vec<
 
 /// Removes the article, damaged or not, and its beads from the pages' /B.
 pub fn delete_thread(doc: &mut PdfDocument, thread: i32) -> Result<Vec<u32>> {
+    writable(doc)?;
     let pages = Pages::of(doc)?;
     let l = load(doc, &pages, thread)?;
     unlist(doc, |i| i == thread)?;
@@ -661,6 +675,7 @@ fn write_info(doc: &PdfDocument, thread: &mut PdfObject, info: &Info) -> Result<
 
 /// Title, subject, author and keywords.
 pub fn set_info(doc: &mut PdfDocument, thread: i32, info: &Info) -> Result<Vec<u32>> {
+    writable(doc)?;
     let pages = Pages::of(doc)?;
     let l = load(doc, &pages, thread)?;
     let mut t = l.obj.resolve()?.unwrap_or_else(|| l.obj.share());
@@ -671,6 +686,7 @@ pub fn set_info(doc: &mut PdfDocument, thread: i32, info: &Info) -> Result<Vec<u
 /// Moves the article to position `to` of the articles /Threads lists. The array is rewritten whole from its
 /// own entries, so those this code does not list (past the cap, not indirect) keep their places.
 pub fn reorder(doc: &mut PdfDocument, thread: i32, to: usize) -> Result<Vec<u32>> {
+    writable(doc)?;
     let mut cat = doc.catalog()?;
     let arr = get(&cat, "Threads").filter(|a| a.is_array().unwrap_or(false)).ok_or_else(|| bad("that article is no longer in the document"))?;
     // the listed entries, and every non-null entry of the array in order
