@@ -3,6 +3,7 @@ import * as api from "./lib/api";
 import type { OutlineItem } from "./lib/api";
 import { type Rot, type Size, clamp, ZOOM_MAX, ZOOM_MIN } from "./lib/layout";
 import { useFind } from "./lib/findStore";
+import { useMedia } from "./lib/media";
 import { PAGE_DARK_KEY, type PageDark, parsePageDark } from "./lib/pageDark";
 import { keyOf } from "./lib/recent";
 import { type Hit, hitY, mergeHits, pickCurrent } from "./lib/searchLogic";
@@ -12,7 +13,7 @@ import { useRecents } from "./recents";
 
 export type ZoomMode = "fitWidth" | "fitPage" | "custom";
 export type Theme = "system" | "light" | "dark";
-export type SidebarPanel = "none" | "thumbs" | "outline" | "attachments";
+export type SidebarPanel = "none" | "thumbs" | "outline" | "attachments" | "media";
 export type Rect4 = [number, number, number, number];
 export type { Hit };
 
@@ -235,6 +236,7 @@ export const useStore = create<Store>((set, get) => {
       // the engine releases the file first; the scratch file goes right after
       void Promise.resolve(api.closeDocument(id)).finally(() => scratch && void api.discardScratch(scratch).catch(() => {}));
       dropCached(`${id}:`);
+      useMedia.getState().forget(id);
       set((s) => {
         const order = s.order.filter((d) => d !== id);
         const docs = { ...s.docs };
