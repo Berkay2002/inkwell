@@ -576,7 +576,7 @@ fn signed_out_says_to_run_claude_login() {
 fn not_installed_is_reported_without_starting_anything() {
     let tools = Arc::new(RwLock::new(tools::builtin()));
     let find: FindCli = Box::new(|_| None);
-    let p = Arc::new(ClaudeProvider::build(tools, find, Box::new(Vec::new), Duration::from_secs(5)));
+    let p = Arc::new(ClaudeProvider::build(tools, find, Box::new(Vec::new), Vec::new(), Duration::from_secs(5)));
     let st = p.status();
     assert!(!st.installed && !st.logged_in, "{st:?}");
     assert!(st.error.as_deref().is_some_and(|e| e.contains("not installed")), "{st:?}");
