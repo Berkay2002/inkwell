@@ -129,15 +129,11 @@
 .ax-panel.docked {
   flex: 1;
 }
-.ax-panel.floating,
-.ax-bar-sheet {
+.ax-panel.floating {
   position: fixed;
   z-index: 30;
   border-radius: var(--ax-r-lg);
   box-shadow: var(--ax-shadow-lg);
-}
-.ax-bar-sheet {
-  min-height: 0;
 }
 .ax-panel .grow {
   flex: 1;
@@ -204,6 +200,13 @@
 }
 .ax-pill:hover {
   border-color: color-mix(in srgb, var(--ax-accent) 45%, var(--ax-border));
+}
+.ax-mark {
+  flex: none;
+}
+.ax-card-mark {
+  margin: 0 0 8px;
+  color: var(--ax-text);
 }
 .ax-pill-text {
   overflow: hidden;
@@ -593,15 +596,6 @@ button.ax-cite:hover {
   -webkit-line-clamp: 3;
   white-space: normal;
 }
-.ax-sources.bar .ax-source {
-  padding: 5px 8px;
-}
-.ax-sources.bar .ax-source:hover {
-  background: var(--ax-panel);
-}
-.ax-sources.bar .ax-source.on {
-  background: var(--ax-accent-soft);
-}
 .ax-sketch {
   position: relative;
   flex: none;
@@ -688,10 +682,6 @@ button.ax-cite:hover {
 .ax-followups.floating .ax-chip svg {
   flex: none;
   color: var(--ax-dim);
-}
-.ax-followups.bar {
-  flex-wrap: wrap;
-  gap: 6px;
 }
 
 /* ---- composer ---- */
@@ -800,33 +790,290 @@ button.ax-cite:hover {
 }
 
 /* ---- command bar ---- */
+/* One rounded surface anchored to the bottom of the document area: the composer at rest, a header strip over
+   it once there is a chat, and the whole conversation when the header is opened. The thread folds open with a
+   grid-row transition, so the surface grows by its content up to --ax-surface-max and then scrolls inside. */
 .ax-bar {
   position: fixed;
   z-index: 30;
-  transform: translateX(-50%);
   font-family: var(--ax-font);
+  font-size: 13px;
   color: var(--ax-text);
 }
-.ax-bar {
-  --ax-pill: var(--ax-surface);
+.ax-bar-surface {
+  display: flex;
+  flex-direction: column;
+  max-height: var(--ax-surface-max, 70vh);
+  background: var(--ax-surface);
+  border: 1px solid var(--ax-border);
+  border-radius: 24px;
+  box-shadow: var(--ax-shadow-lg);
 }
 .ax-bar .ax-compose {
   padding: 0;
 }
 .ax-bar .ax-input {
-  box-shadow: var(--ax-shadow-lg);
+  background: transparent;
+  box-shadow: none;
 }
-.ax-bar .ax-selstrip {
+.ax-bar-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 42px;
+  padding: 0 8px 0 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--ax-border);
+}
+.ax-bar-head button {
+  cursor: default;
+}
+.ax-bar-head .grow {
+  flex: 1;
+}
+.ax-bar-chats {
+  min-width: 0;
+}
+.ax-bar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ax-text);
+  border-radius: 14px;
+}
+.ax-bar-title:hover {
+  background: var(--ax-panel);
+}
+.ax-bar-title.static {
+  padding-left: 8px;
+}
+.ax-bar-title svg {
+  flex: none;
+  color: var(--ax-dim);
+}
+.ax-bar-title-text {
+  min-width: 0;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ax-pop.wide {
+  min-width: 260px;
+  max-width: 340px;
+}
+.ax-pop-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ax-pop button:disabled {
+  opacity: 0.45;
+}
+
+.ax-bar-fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  flex: 0 1 auto;
+  min-height: 0;
+  transition: grid-template-rows 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.ax-bar-fold[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+.ax-bar-fold-in {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.ax-bar-fold[data-open="true"] ~ .ax-compose {
+  border-top: 1px solid var(--ax-border);
+}
+.ax-bar-fold .ax-body {
+  padding-top: 8px;
+}
+.ax-bar-thread {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  padding: 10px 14px 14px 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+/* a slim bar without arrows, so nothing sits in the rounded corners */
+.ax-bar-thread::-webkit-scrollbar {
+  width: 10px;
+}
+.ax-bar-thread::-webkit-scrollbar-button {
+  display: none;
+}
+.ax-bar-thread::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ax-bar-thread::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ax-dim) 45%, transparent);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 5px;
+}
+.ax-bar-thread::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--ax-dim) 70%, transparent);
+  background-clip: padding-box;
+}
+.ax-datesep {
+  align-self: center;
+  font-size: 11.5px;
+  color: var(--ax-dim);
+}
+.ax-restored {
+  margin: 0;
+  font-size: 12px;
+  text-align: center;
+  color: var(--ax-dim);
+}
+.ax-qrow {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+/* time, Edit and Copy lie in the gap under the bubble: they take no room of their own */
+.ax-qmeta {
   position: absolute;
-  left: 0;
+  top: 100%;
   right: 0;
-  bottom: 100%;
-  background: var(--ax-surface);
-  box-shadow: var(--ax-shadow);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--ax-dim);
+  opacity: 0;
+  transition: opacity 120ms ease;
 }
-.ax-bar-sheet .ax-body {
-  padding-top: 0;
+.ax-qrow:hover .ax-qmeta,
+.ax-qrow:focus-within .ax-qmeta {
+  opacity: 1;
 }
+/* the reply starts about 14 px under the bubble (about 21 px of the screenshot at 150 %) */
+.ax-qrow + .ax-a {
+  margin-top: 0;
+}
+.ax-qmeta .ax-icon.small {
+  width: 20px;
+  height: 20px;
+}
+.ax-iconrow {
+  display: flex;
+  gap: 2px;
+  margin: 4px 0 0 -6px;
+}
+.ax-bar .ax-a {
+  font-size: 14px;
+}
+/* the "Worked for 22s" line: plain text with a chevron, not a bordered box */
+.ax-bar .ax-trail {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+.ax-bar .ax-trail-line {
+  padding: 0;
+}
+.ax-bar .ax-trail-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ax-trail-chev {
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+.ax-trail.open .ax-trail-chev {
+  transform: rotate(45deg);
+}
+
+/* the sources of an answer: page chips; hovering one draws its connector to the badge on the page */
+.ax-sources.bar {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 2px;
+  padding: 0;
+}
+.ax-pgchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px 0 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ax-accent);
+  background: var(--ax-accent-soft);
+  border-radius: 12px;
+}
+.ax-pgchip:hover,
+.ax-pgchip.on {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ax-accent) 45%, transparent);
+}
+
+/* what is selected in the page: a row along the top edge of the composer */
+.ax-bar .ax-selstrip {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px 8px 16px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--ax-border);
+  border-radius: 0;
+}
+.ax-bar .ax-selstrip .ax-selq {
+  flex: 1;
+  min-width: 0;
+}
+.ax-bar .ax-selstrip .ax-selq::before {
+  content: "Asking about ";
+  font-weight: 600;
+}
+.ax-bar .ax-selstrip .ax-row {
+  flex: none;
+  flex-wrap: nowrap;
+}
+.ax-bar .ax-body {
+  padding-inline: 16px;
+}
+.ax-bar .ax-card {
+  background: transparent;
+  border: 0;
+  padding: 4px 0 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ax-bar-fold,
+  .ax-qmeta,
+  .ax-trail-chev {
+    transition: none;
+  }
+}
+
 .ax-connector {
   position: fixed;
   inset: 0;

@@ -162,8 +162,9 @@ const DEFAULTS: AiSettings = {
   provider: "codex",
   model: null,
   effort: "low",
-  claudeModel: null,
-  claudeEffort: null,
+  // Claude starts on the small, quick model; a choice made in the picker is kept
+  claudeModel: "haiku",
+  claudeEffort: "medium",
   claudePath: null,
   consent: false,
   claudeConsent: false,
@@ -179,6 +180,9 @@ export function loadSettings(): AiSettings {
     const s: AiSettings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
     return {
       ...s,
+      // null was "never chosen" before the defaults existed: the picker only ever stores an id
+      claudeModel: s.claudeModel ?? DEFAULTS.claudeModel,
+      claudeEffort: s.claudeEffort ?? DEFAULTS.claudeEffort,
       provider: PROVIDERS.includes(s.provider) ? s.provider : "codex",
       mode: MODES.includes(s.mode) ? s.mode : "docked",
       permissions: PERMISSIONS.includes(s.permissions) ? s.permissions : "ask",

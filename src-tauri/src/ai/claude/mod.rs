@@ -41,6 +41,10 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(240);
 const MODELS_TTL: Duration = Duration::from_secs(600);
 /// Efforts Claude Code accepts; anything else (a Codex leftover such as "minimal") is not passed.
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// The window after which Claude Code compacts the conversation itself (`--autocompact`, which takes
+/// "auto" or 100k to 1M). Inkwell's questions are small; a long chat is cut down early instead of
+/// dragging its whole history into every turn.
+const AUTOCOMPACT: &str = "100k";
 
 /// How to start the CLI: the program, then these arguments, then Inkwell's. (A test starts `node`
 /// with a script here.)
@@ -167,6 +171,9 @@ pub struct ClaudeProvider {
     models: Mutex<Option<(Instant, Vec<ModelInfo>)>>,
     /// The user's own choice of executable (a setting); `None` = look for it.
     chosen: Mutex<Option<PathBuf>>,
+    /// Whether the executable last looked at knows `--autocompact` (an older CLI would refuse to
+    /// start with it), by program path.
+    autocompact: Mutex<Option<(PathBuf, bool)>>,
 }
 
 impl ClaudeProvider {
@@ -205,6 +212,7 @@ impl ClaudeProvider {
             sessions: Mutex::new(HashMap::new()),
             models: Mutex::new(None),
             chosen: Mutex::new(None),
+            autocompact: Mutex::new(None),
         }
     }
 
@@ -315,7 +323,26 @@ impl ClaudeProvider {
 
     // ---- the child --------------------------------------------------------------------------
 
-    fn args_for(&self, cfg: &Path, model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
+    /// Whether this CLI lists `--autocompact` in its own `--help` (asked once per executable).
+    fn knows_autocompact(&self, l: &Launch, env: &[(String, String)]) -> bool {
+        if let Some((p, ok)) = &*self.autocompact.lock().unwrap() {
+            if *p == l.program {
+                return *ok;
+            }
+        }
+        let ok = run_capture(l, &["--help"], env, Duration::from_secs(10)).is_ok_and(|h| h.contains("--autocompact"));
+        *self.autocompact.lock().unwrap() = Some((l.program.clone(), ok));
+        ok
+    }
+
+    fn args_for(
+        &self,
+        cfg: &Path,
+        model: Option<&str>,
+        effort: Option<&str>,
+        resume: Option<&str>,
+        autocompact: bool,
+    ) -> Vec<String> {
         let mut a: Vec<String> = [
             "-p",
             "--input-format",
@@ -358,6 +385,9 @@ impl ClaudeProvider {
         }
         if let Some(r) = resume {
             a.extend(["--resume".into(), r.to_string()]);
+        }
+        if autocompact {
+            a.extend(["--autocompact".into(), AUTOCOMPACT.to_string()]);
         }
         a
     }
@@ -453,8 +483,10 @@ impl ClaudeProvider {
             return Err(Failure::new(format!("Could not prepare Claude: {e}")));
         }
         let mut args = l.args.clone();
-        args.extend(self.args_for(&cfg, model, effort, st.session_id.as_deref()));
-        match Proc::spawn(&l.program, &args, &self.env_for_child(), &dir) {
+        let env = self.env_for_child();
+        let autocompact = self.knows_autocompact(&l, &env);
+        args.extend(self.args_for(&cfg, model, effort, st.session_id.as_deref(), autocompact));
+        match Proc::spawn(&l.program, &args, &env, &dir) {
             Ok((proc, rx)) => {
                 *session.rx.lock().unwrap() = Some(rx);
                 st.running = Some(Running {

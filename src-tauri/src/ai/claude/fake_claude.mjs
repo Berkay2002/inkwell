@@ -56,6 +56,8 @@ const say = (text, code) => {
   process.exit(code);
 };
 if (args[0] === "--version") say("9.9.9 (Fake Claude Code)", 0);
+// FAKE_CLAUDE_OLD=1: a CLI from before `--autocompact`
+if (args[0] === "--help") say(`Usage: claude [options]\n  --tools <tools>\n${process.env.FAKE_CLAUDE_OLD ? "" : "  --autocompact <auto|tokens>  Auto-compact window size\n"}`, 0);
 if (args[0] === "auth" && args[1] === "status") {
   if (mode === "loggedout") say(JSON.stringify({ loggedIn: false, authMethod: "none", apiProvider: "firstParty" }), 1);
   say(

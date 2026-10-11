@@ -429,6 +429,45 @@ fn combine_and_insert_keep_page_transitions() {
 }
 
 #[test]
+fn a_damaged_file_costs_only_its_own_place_in_the_plan() {
+    let d = dir("combine-damaged");
+    let a = write(&d, "a.pdf", 2, 0);
+    let b = write(&d, "b.pdf", 3, 0);
+    let bytes = std::fs::read(&b).unwrap();
+    // cut off in the middle, and with the middle overwritten: MuPDF may repair them or not, but the
+    // files around them must be planned either way
+    let cut = d.join("cut.pdf");
+    std::fs::write(&cut, &bytes[..bytes.len() * 6 / 10]).unwrap();
+    let holed = d.join("holed.pdf");
+    let mut h = bytes.clone();
+    let (from, to) = (h.len() / 4, h.len() * 3 / 4);
+    h[from..to].fill(0);
+    std::fs::write(&holed, &h).unwrap();
+    let (cut, holed) = (cut.to_string_lossy().into_owned(), holed.to_string_lossy().into_owned());
+    let opt = CombineOptions { bookmarks: true, keep_outlines: false, contents_page: false };
+    let specs = [src(&a, ""), src(&cut, ""), src(&holed, ""), src(&b, "")];
+    let plan = combine::inspect(&specs, opt).unwrap();
+    assert_eq!(plan.files.len(), 4);
+    for i in [0, 3] {
+        assert_eq!(plan.files[i].state, FileState::Ready, "{:?}", plan.files[i]);
+    }
+    assert_eq!((plan.files[0].pages, plan.files[3].pages), (2, 3));
+    for f in &plan.files[1..3] {
+        assert!(matches!(f.state, FileState::Ready | FileState::Unreadable), "{f:?}");
+        if f.state == FileState::Unreadable {
+            assert!(f.message.as_deref().unwrap().contains(&f.name), "{f:?}");
+        }
+    }
+    // and a run writes what the plan said
+    let (eng, _) = open(&a);
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    let r = combine::run(&eng, &specs, opt, &out).unwrap();
+    assert_eq!(r.plan, plan);
+    let (e2, i2) = open(&out);
+    assert_eq!(e2.edit_state(i2).unwrap().page_count, plan.pages);
+}
+
+#[test]
 fn a_file_without_pages_is_left_out_not_a_panic() {
     let d = dir("combine-empty");
     let a = write(&d, "a.pdf", 2, 0);

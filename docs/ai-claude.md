@@ -36,6 +36,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose --inc
        --tools "" --strict-mcp-config --mcp-config <dir>\mcp.json --allowedTools mcp__inkwell__*
        --setting-sources "" --disable-slash-commands --permission-prompts none
        --system-prompt <BASE_INSTRUCTIONS> [--model <id>] [--effort <level>] [--resume <session_id>]
+       [--autocompact 100k]
 ```
 
 * `--tools ""`: none of Claude Code's own tools (no shell, no file access). It can only call what
@@ -45,6 +46,12 @@ claude -p --input-format stream-json --output-format stream-json --verbose --inc
 * `--permission-prompts none`: a call that would still prompt is denied, never a wait nobody answers.
   (Present in 2.1.296's `--help`; `--permission-mode` is left at its default, because the value
   `default` is not among that version's documented choices.)
+* `--autocompact 100k`: the CLI's own switch for the window after which it compacts the conversation
+  itself (`claude --help`: "auto, or 100k–1M tokens"; 2.1.296 rejects anything else at parse time with
+  "It must be 'auto', or between 100k and 1M"). It is a flag on the child, so no settings file of the
+  user's is touched, and no environment variable is involved. It is only passed when the CLI's own
+  `--help` lists it (asked once per executable): an older CLI would refuse to start with an unknown
+  option. 100k is the smallest value the CLI accepts.
 * The child lives in a Job object with kill-on-close: it dies with Inkwell however Inkwell dies.
 * A turn is one `user` message on stdin; the `system/init` event at the start of every turn carries
   the `session_id` (kept for `--resume` if the child has to be restarted) and `apiKeySource`. If
@@ -109,6 +116,12 @@ Three states, all in the panel:
 * The model list and effort come from the provider (Claude's from the CLI's own `initialize`
   answer, with a fixed fallback); each provider keeps its own choice. A model id or effort from the
   other provider is never sent.
+* Claude starts on **Haiku, medium effort** (`claudeModel` "haiku", `claudeEffort` "medium") for new
+  installs and for settings saved while nothing had been chosen (stored `null`); a choice made in the
+  picker is kept. If the CLI's list does not offer the model, the CLI's own default is used.
+* The provider's mark (OpenAI for Codex, Claude for Claude Code; simple-icons, CC0, drawn in the text
+  colour, `providerMarks.tsx`, noted in `third_party/THIRD-PARTY-NOTICES.txt`) is on the toolbar toggle,
+  the picker, its menu rows and the sign-in / consent cards.
 * Consent is per provider: "Send this document to Anthropic?" for Claude, with the note
   "Uses your Claude Code login; usage counts against your Claude plan."
 

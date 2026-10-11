@@ -352,6 +352,25 @@ fn an_edited_document_keeps_the_conversation_and_says_the_document_changed() {
 // ---- what the child is given -------------------------------------------------------------------------
 
 #[test]
+fn the_conversation_is_compacted_by_the_cli_at_100k_when_it_knows_the_flag() {
+    let r = rig("ok");
+    done(&r.run(ask_req("hi?"), contract()));
+    let a = args_of(&r.chats()[0]);
+    assert_eq!(after(&a, "--autocompact").as_deref(), Some("100k"), "{a:?}");
+    // asked once per executable, not once per child
+    let helps = r.spawns().iter().filter(|s| s["args"][0] == "--help").count();
+    assert_eq!(helps, 1);
+}
+
+#[test]
+fn an_older_cli_without_the_flag_is_started_without_it() {
+    let r = rig_with("ok", Duration::from_secs(15), &[("FAKE_CLAUDE_OLD", "1")]);
+    done(&r.run(ask_req("hi?"), contract()));
+    let a = args_of(&r.chats()[0]);
+    assert!(!a.contains(&"--autocompact".to_string()), "{a:?}");
+}
+
+#[test]
 fn the_child_has_no_tools_of_its_own_no_settings_and_no_credentials_on_its_command_line() {
     let r = rig("ok");
     done(&r.run(ask_req("hi?"), contract()));
@@ -815,7 +834,7 @@ fn live_with_the_installed_claude() {
     let r = Rig { p: ClaudeProvider::new(tools), log: log_file("live") };
     let st = r.p.status();
     eprintln!("status: installed={} logged_in={} version={:?} plan={:?} error={:?}", st.installed, st.logged_in, st.version, st.plan, st.error);
-    eprintln!("models: {:?}", st.models.iter().map(|m| (&m.id, &m.efforts)).collect::<Vec<_>>());
+    eprintln!("models: {:?}", st.models.iter().map(|m| (&m.id, &m.name, &m.efforts)).collect::<Vec<_>>());
     assert!(st.installed && st.logged_in, "{st:?}");
 
     let summary = |what: &str, ev: &[ChatEvent]| match ev.last().unwrap() {

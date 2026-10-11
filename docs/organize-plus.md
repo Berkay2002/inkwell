@@ -80,8 +80,19 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
 
 - Combine opens each file once for thumbnails (a second parse). The plan is asked for one at a time, 220 ms after the
   last change, and what it learned about a file (pages, bookmarks, first page size) is kept while the file's size and
-  time are the same, so editing a range does not parse the files again. A run opens every file, grafts it and closes
-  it before the next one. A file with no pages is left out ("has no pages").
+  time are the same, so editing a range does not parse the files again. A run reads each file's facts one at a time
+  (each is closed before the next), then opens a file only when its turn comes, grafts it and closes it, so the
+  files not reached yet are never held. A file with no pages is left out ("has no pages"), and so is any file that
+  fails at any step of reading (open, page count, outline, first page): only that file is marked Unreadable, never
+  the whole look. An open or read error is not remembered between looks (it may be a lock that passes); a
+  password, a missing copy right or an empty file is. The plan records each file's path, length and time before
+  reading it; when its turn comes the run compares them right after opening, and a file that differs (replaced,
+  touched, deleted) stops the run with "X has changed since it was added" and asks to add the files again. The page
+  count is a second check, and the bookmarks the plan promised are checked against what is written (an error, not a
+  panic).
+- A capped read (an attachment unpacking past its limit) raises the wrapper's own code
+  `mupdf_error_stream_cap` (not `FZ_ERROR_LIMIT`, which MuPDF also uses for unrelated limits); callers match
+  `Error::is_stream_cap()`, not the message text.
 - The form fields of every source bring their `/DR` resources (fonts) along, merged key by key; where two files name
   a font the same, the first one's is kept.
 - The sources' page labels are not carried into a combined file (the result has none until set in Page labels).
