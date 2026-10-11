@@ -8,6 +8,7 @@ pub mod history;
 pub mod history_ipc;
 pub mod ocr;
 pub mod paths;
+pub mod print;
 pub mod recents;
 pub mod redact;
 pub mod tools;
@@ -775,6 +776,11 @@ pub fn run() {
             redact::app::redact_list_marks,
             redact::app::redact_options,
             redact::app::redact_apply,
+            print::app::print_printers,
+            print::app::print_capabilities,
+            print::app::print_plan,
+            print::app::print_preview,
+            print::app::print_start,
             recents::stat_files,
             recents::recents_load,
             recents::recents_save,
