@@ -267,6 +267,13 @@ await openPanel();
 await ev(`${S}.getState().toggleSidebar("thumbs")`);
 await sleep(150);
 check("toggling the sidebar with the panel open shows the sidebar rather than hiding it", !(await panelOpen()) && (await ev(`${S}.getState().sidebar`)) === "thumbs", null);
+// Ctrl+B and the palette close it the same way: focus was in the panel, so it goes to Tools, not the page body
+await openPanel();
+check("focus is in the panel's box before it is closed from elsewhere", (await ev(`document.activeElement.getAttribute("aria-label")`)) === "Find a tool", null);
+await ev(`${S}.getState().toggleSidebar("thumbs")`);
+await sleep(150);
+const refocus = await ev(`({ open: !!document.querySelector("nav.tools-panel"), focus: document.activeElement?.getAttribute("aria-label") })`);
+check("closing the panel from elsewhere moves focus to the Tools button", !refocus.open && refocus.focus === "Tools", refocus);
 
 // ---- a tool that is gone leaves no ghost pin --------------------------------------------------------
 await ev(`${P}.setState({ pinned: ["gone", "compress", "watermark"] })`);

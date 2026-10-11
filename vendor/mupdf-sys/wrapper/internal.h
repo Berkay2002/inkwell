@@ -24,6 +24,10 @@ typedef struct mupdf_error
     char *message;
 } mupdf_error_t;
 
+/* Error code of mupdf_pdf_read_stream_capped when the decoded data passes its limit. Its own value, not
+ * FZ_ERROR_LIMIT, which MuPDF also throws for unrelated limits (fax and predictor columns, exception stack). */
+#define mupdf_error_stream_cap 0x4D550001
+
 /* TRY_CATCH macro - execute call and save error on exception */
 #define TRY_CATCH(ty, init, call) \
 do { \
