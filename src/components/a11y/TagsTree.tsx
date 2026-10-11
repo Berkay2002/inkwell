@@ -23,6 +23,8 @@ const st = () => useA11y.getState();
 const ROW_H = 28;
 /** Rows drawn above and below the visible ones. */
 const OVERSCAN = 8;
+/** The page view lists only the tags with content on this page; a step goes past the others in between. */
+const SKIPS = "In this page view, moving up or down goes past the tags of other pages that sit in between.";
 
 /** The tag tree: collapsible and windowed, so a large tree draws only the rows in view. */
 export function TagsTree({ doc }: { doc: DocState }) {
@@ -185,6 +187,7 @@ export function TagsTree({ doc }: { doc: DocState }) {
                 aria-selected={r.key === selected}
                 aria-posinset={r.index + 1}
                 aria-setsize={r.siblings}
+                title={scope === "page" ? SKIPS : undefined}
                 className={`a11y-tag${r.key === selected ? " selected" : ""}`}
                 style={{ top: i * ROW_H, height: ROW_H, paddingLeft: 4 + r.depth * 14 }}
                 onClick={() => void st().selectTag(id, r.key)}
@@ -213,7 +216,11 @@ export function TagsTree({ doc }: { doc: DocState }) {
           })}
         </div>
       </div>
-      <p className="a11y-note">Arrow keys move through the tree. Alt+Up and Alt+Down move a tag, Alt+Right puts it into the one above, Alt+Left takes it out.</p>
+      <p className="a11y-note">
+        {certified
+          ? "Arrow keys move through the tree."
+          : `Arrow keys move through the tree. Alt+Up and Alt+Down move a tag, Alt+Right puts it into the one above, Alt+Left takes it out.${scope === "page" ? ` ${SKIPS}` : ""}`}
+      </p>
       {node ? <TagEditor doc={doc} node={node} tree={tree} busy={busy} certified={certified} pageScope={scope === "page"} /> : <p className="a11y-note">Select a tag to edit it. Its content is outlined on the page.</p>}
     </div>
   );
@@ -231,8 +238,6 @@ function TagEditor({ doc, node, tree, busy, certified, pageScope }: { doc: DocSt
   const roleChanged = d.role.trim() !== was.role;
   const locked = !node.editable || node.xref <= 0;
   const set = (p: Partial<TagDraft>) => setD((x) => ({ ...x, ...p }));
-  // The page view lists only the tags with content on this page; a step goes past the others in between.
-  const SKIPS = "In this page view a step goes past the tags of other pages that sit in between.";
   const moves: { how: TagMove; label: string; tip?: string }[] = [
     { how: "up", label: "Move up", tip: pageScope ? SKIPS : undefined },
     { how: "down", label: "Move down", tip: pageScope ? SKIPS : undefined },

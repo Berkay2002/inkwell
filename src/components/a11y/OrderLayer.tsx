@@ -71,7 +71,7 @@ function Layer({ docId, rot, rawSize, zoom, regions, selected }: Props & { regio
               role="button"
               tabIndex={0}
               aria-pressed={sel}
-              aria-label={`Region ${n} of ${regions.length}: ${roleWord(r.role)}${r.text ? `, ${r.text}` : ""}. Alt and arrow up or down moves it in the reading order.`}
+              aria-label={`Region ${n} of ${regions.length}: ${roleWord(r.role)}${r.text ? `, ${r.text}` : ""}.${certified ? "" : " Alt and arrow up or down moves it in the reading order."}`}
               style={{ transform: `rotate(${-rot * 90}deg) scale(${1 / zoom})` }}
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
