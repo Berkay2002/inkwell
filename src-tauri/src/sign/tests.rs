@@ -1056,40 +1056,28 @@ fn forged_an_invalid_signature_drawing_over_the_page() {
     assert!(codes(&first).contains(&WarningCode::LaterBoxLarge), "{first:?}");
 }
 
-#[test]
-fn forged_a_second_copy_in_an_object_stream() {
-    // The attacker's revision ends in a cross-reference stream that puts the page tree node in an
-    // object stream at index 1. The stream holds the node twice: MuPDF reads the first copy (the
-    // real one, so nothing looks changed), a reader that follows the index gets the second (every
-    // page turned upside down).
-    let v = victim(&page1());
-    let pages = PdfDocument::from_bytes(&v).unwrap().catalog().unwrap().get_dict("Pages").unwrap().unwrap().as_indirect().unwrap();
-    let stm = std::cell::Cell::new(0);
-    let out = attack(&v, &unseen(), |d, _| {
-        let a = d.new_indirect(pages, 0).unwrap().resolve().unwrap().unwrap().to_string();
-        let b = format!("<</Rotate 180{}", &a[2..]);
-        let head = format!("{pages} 0 {pages} {} ", a.len() + 1);
-        let body = format!("{head}{a}\n{b}\n");
-        let dict = d.new_object_from_str(&format!("<</Type/ObjStn/N 2/First {}>>", head.len())).unwrap();
-        let s = d.add_stream(&mupdf::Buffer::from_bytes(body.as_bytes()).unwrap(), Some(&dict), false).unwrap();
-        stm.set(s.as_indirect().unwrap());
-    });
-    let mut out = out;
-    let at = v.len() + out[v.len()..].windows(6).position(|w| w == b"ObjStn").unwrap();
-    out[at..at + 6].copy_from_slice(b"ObjStm");
-    // The classic section becomes a cross-reference stream, with the page tree node moved.
-    let doc = PdfDocument::from_bytes(&out).unwrap();
-    let mut entries = pdf::update_entries(&doc, &out, v.len()).unwrap();
-    let x = startxref(&out);
+/// `out` (ending in a classic section MuPDF wrote) with that section rewritten as a cross-reference
+/// stream: `objs` go first (at `startxref(out)`), then the stream, which lists `extra` in place
+/// of entries for the same numbers, drops `drop`, and gets `prev` as /Prev when given.
+fn as_xref_stream(out: &[u8], objs: &[u8], extra: &[(i32, u8, u64, u64)], drop: &[i32], prev: Option<u64>) -> Vec<u8> {
+    let x = startxref(out);
     assert!(out[x..].starts_with(b"xref"));
+    let doc = PdfDocument::from_bytes(out).unwrap();
+    let mut entries = pdf::update_entries(&doc, out, 0).unwrap();
     let t = out.windows(7).rposition(|w| w == b"trailer").unwrap();
     let text = std::str::from_utf8(&out[t + 7..out.windows(9).rposition(|w| w == b"startxref").unwrap()]).unwrap().trim().to_string();
     let mut xs = doc.new_object_from_str(&text).unwrap();
     let size = xs.get_dict("Size").unwrap().unwrap().as_int().unwrap();
     xs.dict_delete("Size").unwrap();
-    entries.retain(|e| e.0 != 0 && e.0 != pages);
-    entries.push((pages, 2, stm.get() as u64, 1));
-    entries.push((size, 1, x as u64, 0));
+    if let Some(p) = prev {
+        xs.dict_put("Prev", PdfObject::new_int(p as i32).unwrap()).unwrap();
+    }
+    // (One past that again when `objs` may hold an object of its own numbered `size`.)
+    let num = extra.iter().map(|e| e.0 + 1).fold(size, i32::max) + i32::from(!objs.is_empty());
+    let at = x + objs.len();
+    entries.retain(|e| e.0 != 0 && !drop.contains(&e.0) && !extra.iter().any(|f| f.0 == e.0));
+    entries.extend_from_slice(extra);
+    entries.push((num, 1, at as u64, 0));
     entries.sort();
     let mut data = Vec::new();
     for &(_, kind, f2, f3) in &entries {
@@ -1099,15 +1087,125 @@ fn forged_a_second_copy_in_an_object_stream() {
     }
     let index: Vec<String> = entries.iter().map(|e| format!("{} 1", e.0)).collect();
     let keep = xs.to_string();
-    let head = format!("{size} 0 obj\n<</Type/XRef/Size {}/W[1 4 2]/Index[{}]/Length {}{}\nstream\n", size + 1, index.join(" "), data.len(), &keep[2..]);
-    let tail = format!("\nendstream\nendobj\nstartxref\n{x}\n%%EOF\n");
-    let mut out = [&out[..x], head.as_bytes(), &data, tail.as_bytes()].concat();
-    fix_range(&mut out);
-    let forged = resign(&out);
-    let d = PdfDocument::from_bytes(&forged).unwrap();
+    let head = format!("{num} 0 obj\n<</Type/XRef/Size {}/W[1 4 2]/Index[{}]/Length {}{}\nstream\n", num + 1, index.join(" "), data.len(), &keep[2..]);
+    let tail = format!("\nendstream\nendobj\nstartxref\n{at}\n%%EOF\n");
+    [&out[..x], objs, head.as_bytes(), &data, tail.as_bytes()].concat()
+}
+
+/// The attacker's signature revision on the victim, with an object stream (named /ObjStm only
+/// after writing, so MuPDF writes it as a plain stream) holding the page tree node twice: the real
+/// one first, then one with every page turned upside down. Returns the bytes, the node's number
+/// and the stream's.
+fn with_two_page_trees(v: &[u8]) -> (Vec<u8>, i32, i32) {
+    let pages = PdfDocument::from_bytes(v).unwrap().catalog().unwrap().get_dict("Pages").unwrap().unwrap().as_indirect().unwrap();
+    let stm = std::cell::Cell::new(0);
+    let mut out = attack(v, &unseen(), |d, _| {
+        let a = d.new_indirect(pages, 0).unwrap().resolve().unwrap().unwrap().to_string();
+        let b = format!("<</Rotate 180{}", &a[2..]);
+        let head = format!("{pages} 0 {pages} {} ", a.len() + 1);
+        let body = format!("{head}{a}\n{b}\n");
+        let dict = d.new_object_from_str(&format!("<</Type/ObjStn/N 2/First {}>>", head.len())).unwrap();
+        let s = d.add_stream(&mupdf::Buffer::from_bytes(body.as_bytes()).unwrap(), Some(&dict), false).unwrap();
+        stm.set(s.as_indirect().unwrap());
+    });
+    let at = v.len() + out[v.len()..].windows(6).position(|w| w == b"ObjStn").unwrap();
+    out[at..at + 6].copy_from_slice(b"ObjStm");
+    (out, pages, stm.get())
+}
+
+/// MuPDF reads `forged` without repair and sees the real page tree node `pages`.
+fn mupdf_sees_the_first_copy(forged: &[u8], pages: i32) {
+    let d = PdfDocument::from_bytes(forged).unwrap();
     assert!(d.new_indirect(pages, 0).unwrap().resolve().unwrap().unwrap().get_dict("Rotate").unwrap().is_none(), "MuPDF takes the first copy");
     assert!(d.can_be_saved_incrementally(), "MuPDF reads it without repair");
+}
+
+#[test]
+fn forged_a_second_copy_in_an_object_stream() {
+    // The attacker's revision ends in a cross-reference stream that puts the page tree node in an
+    // object stream at index 1, its second copy: MuPDF reads the first (the real one, so nothing
+    // looks changed), a reader that follows the index the second.
+    let v = victim(&page1());
+    let (out, pages, stm) = with_two_page_trees(&v);
+    let mut out = as_xref_stream(&out, b"", &[(pages, 2, stm as u64, 1)], &[pages], None);
+    fix_range(&mut out);
+    let forged = resign(&out);
+    mupdf_sees_the_first_copy(&forged, pages);
     assert_caught(&forged);
+}
+
+#[test]
+fn forged_a_hidden_xref_stream_in_the_prev_chain() {
+    // The same object stream, but named by a second cross-reference section the last one's /Prev
+    // leads to: a check of the last section alone never sees it.
+    let v = victim(&page1());
+    let (out, pages, stm) = with_two_page_trees(&v);
+    let x = startxref(&out);
+    let doc = PdfDocument::from_bytes(&out).unwrap();
+    let size = doc.trailer().unwrap().get_dict("Size").unwrap().unwrap().as_int().unwrap();
+    let rows: Vec<u8> = [(2u8, stm as u32, 1u16), (1, x as u32, 0)].iter().flat_map(|&(k, f2, f3)| [vec![k], f2.to_be_bytes().to_vec(), f3.to_be_bytes().to_vec()].concat()).collect();
+    let hidden = [
+        format!("{size} 0 obj\n<</Type/XRef/Size {}/W[1 4 2]/Index[{pages} 1 {size} 1]/Prev {}/Length {}>>\nstream\n", size + 1, startxref(&v), rows.len()).into_bytes(),
+        rows,
+        b"\nendstream\nendobj\n".to_vec(),
+    ]
+    .concat();
+    let mut out = as_xref_stream(&out, &hidden, &[], &[pages], Some(x as u64));
+    fix_range(&mut out);
+    let forged = resign(&out);
+    mupdf_sees_the_first_copy(&forged, pages);
+    assert_caught(&forged);
+
+    // An update whose /Prev skips into the signed bytes (the file before the victim signed), its
+    // one section listing the victim's objects again: MuPDF shows the same file.
+    let base = page1();
+    let honest = attack(&v, &unseen(), |_, _| {});
+    let dv = PdfDocument::from_bytes(&v).unwrap();
+    let theirs = pdf::xref_section(&dv, &v, startxref(&v) as u64).unwrap().entries;
+    // The victim's entries, less the ones the attacker's revision lists anew.
+    let mine = pdf::update_entries(&PdfDocument::from_bytes(&honest).unwrap(), &honest, v.len()).unwrap();
+    let theirs: Vec<_> = theirs.into_iter().filter(|e| e.0 != 0 && !mine.iter().any(|m| m.0 == e.0)).collect();
+    let mut out = as_xref_stream(&honest, b"", &theirs, &[], Some(startxref(&base) as u64));
+    fix_range(&mut out);
+    let forged = resign(&out);
+    assert!(PdfDocument::from_bytes(&forged).unwrap().can_be_saved_incrementally());
+    assert_caught(&forged);
+}
+
+#[test]
+fn forged_an_object_listed_again_with_another_generation() {
+    // The attacker's revision lists the page's contents again as a byte-identical `n 1 obj`:
+    // MuPDF ignores generations and shows the same page, but the page names `n 0 R`, which
+    // another reader resolves to nothing (a white box planted over a clause disappears there).
+    let v = victim(&page1());
+    let honest = attack(&v, &unseen(), |_, _| {});
+    let d = PdfDocument::from_bytes(&v).unwrap();
+    let c = d.find_page(0).unwrap().get_dict("Contents").unwrap().unwrap().as_indirect().unwrap();
+    let head = format!("\n{c} 0 obj");
+    let from = v.windows(head.len()).rposition(|w| w == head.as_bytes()).unwrap() + 1;
+    let to = from + v[from..].windows(6).position(|w| w == b"endobj").unwrap() + 6;
+    let copy = [format!("{c} 1 obj").as_bytes(), &v[from + head.len() - 1..to], b"\n"].concat();
+    let x = startxref(&honest);
+    let mut out = as_xref_stream(&honest, &copy, &[(c, 1, x as u64, 1)], &[], None);
+    fix_range(&mut out);
+    let forged = resign(&out);
+    let f = PdfDocument::from_bytes(&forged).unwrap();
+    assert_eq!(page_contents(&f), page_contents(&d), "MuPDF shows the same page");
+    assert!(f.can_be_saved_incrementally());
+    assert_caught(&forged);
+}
+
+#[test]
+fn a_later_box_that_prints_but_is_not_viewed_is_flagged() {
+    // /F 36 is NoView + Print: hidden on screen, but it prints over the signed page.
+    let v = victim(&page1());
+    let forged = attack(&v, &req(0, [0.0, 0.0, 612.0, 792.0]), |_, w| {
+        w.dict_put("F", PdfObject::new_int(36).unwrap()).unwrap();
+    });
+    let (first, second) = verdicts(&forged);
+    assert_eq!(second.status, Status::Valid, "{second:?}");
+    assert_eq!(first.changes, Changes::SignaturesOnly, "{first:?}");
+    assert!(codes(&first).contains(&WarningCode::LaterBoxLarge), "{first:?}");
 }
 
 #[test]

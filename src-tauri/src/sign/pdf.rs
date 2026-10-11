@@ -503,7 +503,8 @@ fn sig_fields(doc: &PdfDocument) -> Result<Vec<SigField>> {
                 value,
                 rect: [r.x0, r.y0, r.x1, r.y1],
                 size: [r.width(), r.height()],
-                hidden: flags & (2 | 32) != 0,
+                // Hidden, or NoView without Print (NoView + Print still prints).
+                hidden: flags & 2 != 0 || (flags & 32 != 0 && flags & 4 == 0),
                 cover,
             });
         }
@@ -970,38 +971,66 @@ fn hybrid_after(doc: &PdfDocument, after: &[u8]) -> bool {
     false
 }
 
-/// The cross-reference entries the last section of `next` lists (the update `next` ends with,
-/// which must start at or after `from`): `(number, type, field 2, field 3)`, types as in an
-/// xref stream (0 free, 1 at an offset, 2 in an object stream at an index). `None` if it can't
-/// be read.
-pub(super) fn update_entries(b: &PdfDocument, next: &[u8], from: usize) -> Option<Vec<(i32, u8, u64, u64)>> {
-    let at = next.windows(9).rposition(|w| w == b"startxref")? + 9;
+/// One cross-reference section: its entries `(number, type, field 2, field 3)`, types as in an
+/// xref stream (0 free, 1 at an offset, 2 in an object stream at an index), and its trailer's
+/// /Prev.
+pub(super) struct Section {
+    pub entries: Vec<(i32, u8, u64, u64)>,
+    pub prev: Option<u64>,
+}
+
+/// The number after the last `startxref` in `b`.
+fn last_startxref(b: &[u8]) -> Option<u64> {
+    let at = b.windows(9).rposition(|w| w == b"startxref")? + 9;
+    let s = &b[at..];
+    let skip = s.iter().take_while(|c| c.is_ascii_whitespace()).count();
+    let len = s[skip..].iter().take_while(|c| c.is_ascii_digit()).count();
+    std::str::from_utf8(&s[skip..skip + len]).ok()?.parse().ok()
+}
+
+/// The section at `off` of `bytes` (`d` is the document read from them, which parses the
+/// dictionaries and decodes an xref stream). An xref stream must list itself at `off`, so the
+/// object read here is the one MuPDF read there. `None` if it can't be read, or lists a number
+/// twice (readers differ on which entry counts).
+pub(super) fn xref_section(d: &PdfDocument, bytes: &[u8], off: u64) -> Option<Section> {
+    let off = usize::try_from(off).ok().filter(|o| *o < bytes.len())?;
     let num = |s: &[u8]| -> Option<(u64, usize)> {
         let skip = s.iter().take_while(|c| c.is_ascii_whitespace()).count();
         let len = s[skip..].iter().take_while(|c| c.is_ascii_digit()).count();
         Some((std::str::from_utf8(&s[skip..skip + len]).ok()?.parse().ok()?, skip + len))
     };
-    let (off, _) = num(&next[at..])?;
-    let off = usize::try_from(off).ok().filter(|o| *o >= from && *o < next.len())?;
+    let prev_of = |t: &PdfObject| -> Option<Option<u64>> {
+        match t.get_dict("Prev").ok()? {
+            Some(p) => Some(Some(u64::try_from(p.as_int().ok()?).ok()?)),
+            None => Some(None),
+        }
+    };
     let mut out = Vec::new();
-    if next[off..].starts_with(b"xref") {
+    let prev;
+    if bytes[off..].starts_with(b"xref") {
         let mut i = off + 4;
         loop {
-            let skip = next[i..].iter().take_while(|c| c.is_ascii_whitespace()).count();
-            i += skip;
-            if next[i..].starts_with(b"trailer") {
-                return Some(out);
+            i += bytes.get(i..)?.iter().take_while(|c| c.is_ascii_whitespace()).count();
+            if bytes[i..].starts_with(b"trailer") {
+                let start = i + 7;
+                let end = bytes[start..].windows(9).position(|w| w == b"startxref").map_or(bytes.len(), |q| start + q);
+                let t = d.new_object_from_str(String::from_utf8_lossy(&bytes[start..end]).trim()).ok()?;
+                if !t.is_dict().ok()? {
+                    return None;
+                }
+                prev = prev_of(&t)?;
+                break;
             }
-            let (start, l1) = num(&next[i..])?;
-            let (count, l2) = num(&next[i + l1..])?;
+            let (start, l1) = num(&bytes[i..])?;
+            let (count, l2) = num(&bytes[i + l1..])?;
             i += l1 + l2;
             for k in 0..count {
-                i += next[i..].iter().take_while(|c| c.is_ascii_whitespace()).count();
-                let (o, l1) = num(&next[i..])?;
-                let (g, l2) = num(&next[i + l1..])?;
+                i += bytes.get(i..)?.iter().take_while(|c| c.is_ascii_whitespace()).count();
+                let (o, l1) = num(&bytes[i..])?;
+                let (g, l2) = num(&bytes[i + l1..])?;
                 i += l1 + l2;
-                i += next[i..].iter().take_while(|c| c.is_ascii_whitespace()).count();
-                let kind = match next.get(i)? {
+                i += bytes[i..].iter().take_while(|c| c.is_ascii_whitespace()).count();
+                let kind = match bytes.get(i)? {
                     b'n' => 1,
                     b'f' => 0,
                     _ => return None,
@@ -1013,36 +1042,72 @@ pub(super) fn update_entries(b: &PdfDocument, next: &[u8], from: usize) -> Optio
                 }
             }
         }
-    }
-    // An xref stream: its own object, read through MuPDF (filters decoded).
-    let (n, _) = num(&next[off..])?;
-    let xs = b.new_indirect(i32::try_from(n).ok()?, 0).ok()?;
-    let w: Vec<usize> = xs.get_dict("W").ok()??.array_iter().ok()?.map(|x| x.ok()?.as_int().ok().map(|v| v as usize)).collect::<Option<_>>()?;
-    let [w1, w2, w3] = w[..] else { return None };
-    if w1 > 8 || w2 > 8 || w3 > 8 {
-        return None;
-    }
-    let size = xs.get_dict("Size").ok()??.as_int().ok()? as i64;
-    let index: Vec<i64> = match xs.get_dict("Index").ok()? {
-        Some(ix) => ix.array_iter().ok()?.map(|x| x.ok()?.as_int().ok().map(i64::from)).collect::<Option<_>>()?,
-        None => vec![0, size],
-    };
-    let data = xs.read_stream().ok()?;
-    let field = |b: &[u8]| b.iter().fold(0u64, |acc, &x| (acc << 8) | x as u64);
-    let mut at = 0;
-    for pair in index.chunks(2) {
-        let [start, count] = pair[..] else { return None };
-        for k in 0..count {
-            let row = data.get(at..at + w1 + w2 + w3)?;
-            at += w1 + w2 + w3;
-            let kind = if w1 == 0 { 1 } else { field(&row[..w1]) };
-            out.push((i32::try_from(start + k).ok()?, u8::try_from(kind).ok()?, field(&row[w1..w1 + w2]), field(&row[w1 + w2..])));
-            if out.len() > 10_000_000 {
-                return None;
+    } else {
+        // An xref stream: its own object, read through MuPDF (filters decoded).
+        let (n, _) = num(&bytes[off..])?;
+        let n = i32::try_from(n).ok()?;
+        let xs = d.new_indirect(n, 0).ok()?;
+        let w: Vec<usize> = xs.get_dict("W").ok()??.array_iter().ok()?.map(|x| x.ok()?.as_int().ok().map(|v| v as usize)).collect::<Option<_>>()?;
+        let [w1, w2, w3] = w[..] else { return None };
+        if w1 > 8 || w2 > 8 || w3 > 8 {
+            return None;
+        }
+        let size = xs.get_dict("Size").ok()??.as_int().ok()? as i64;
+        let index: Vec<i64> = match xs.get_dict("Index").ok()? {
+            Some(ix) => ix.array_iter().ok()?.map(|x| x.ok()?.as_int().ok().map(i64::from)).collect::<Option<_>>()?,
+            None => vec![0, size],
+        };
+        let data = xs.read_stream().ok()?;
+        let field = |b: &[u8]| b.iter().fold(0u64, |acc, &x| (acc << 8) | x as u64);
+        let mut at = 0;
+        for pair in index.chunks(2) {
+            let [start, count] = pair[..] else { return None };
+            for k in 0..count {
+                let row = data.get(at..at + w1 + w2 + w3)?;
+                at += w1 + w2 + w3;
+                let kind = if w1 == 0 { 1 } else { field(&row[..w1]) };
+                out.push((i32::try_from(start + k).ok()?, u8::try_from(kind).ok()?, field(&row[w1..w1 + w2]), field(&row[w1 + w2..])));
+                if out.len() > 10_000_000 {
+                    return None;
+                }
             }
         }
+        if !out.iter().any(|e| e.0 == n && e.1 == 1 && e.2 == off as u64) {
+            return None;
+        }
+        prev = prev_of(&xs)?;
     }
-    Some(out)
+    let mut seen = std::collections::HashSet::new();
+    if !out.iter().all(|e| seen.insert(e.0)) {
+        return None;
+    }
+    Some(Section { entries: out, prev })
+}
+
+/// The entries of the section the last `startxref` of `next` names, which must start at or after
+/// `from`.
+pub(super) fn update_entries(b: &PdfDocument, next: &[u8], from: usize) -> Option<Vec<(i32, u8, u64, u64)>> {
+    let off = last_startxref(next).filter(|o| *o >= from as u64)?;
+    Some(xref_section(b, next, off)?.entries)
+}
+
+/// The generation each object number has in the file `bytes` (`d` read from them), from the
+/// newest section that lists it along the /Prev chain. `None` if the chain can't be read.
+fn generations(d: &PdfDocument, bytes: &[u8]) -> Option<std::collections::HashMap<i32, u64>> {
+    let mut gens = std::collections::HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut off = last_startxref(bytes);
+    while let Some(o) = off {
+        if !seen.insert(o) || seen.len() > 4096 {
+            return None;
+        }
+        let sec = xref_section(d, bytes, o)?;
+        for &(n, kind, _, f3) in &sec.entries {
+            gens.entry(n).or_insert(if kind == 2 { 0 } else { f3 });
+        }
+        off = sec.prev;
+    }
+    Some(gens)
 }
 
 /// The `n g obj` header at `offset` of `b`.
@@ -1241,13 +1306,25 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8], intact: &std::co
         let stream = if is_stream(d, n) { d.new_indirect(n, 0).ok()?.read_raw_stream().ok()? } else { Vec::new() };
         Some((o.to_string(), stream))
     };
-    // What this update's cross-reference section lists. An object at an offset must be the object
-    // written there, number and generation (a reader that checks the generation would read a
-    // mismatch as null; MuPDF repairs a wrong number, caught above). An object placed in an object
+    // The update is one cross-reference section, in its own bytes, whose /Prev is the signed
+    // revision's: MuPDF follows the whole /Prev chain, so a second section (or a /Prev into the
+    // signed bytes) could list objects no check here would see.
+    let (Some(start_a), Some(start_b)) = (last_startxref(prev), last_startxref(next)) else { return Ok(false) };
+    if start_b < prev.len() as u64 {
+        return Ok(false);
+    }
+    let Some(section) = xref_section(&b, next, start_b) else { return Ok(false) };
+    if section.prev != Some(start_a) {
+        return Ok(false);
+    }
+    // What it lists. An object at an offset must be the object written there, number and
+    // generation (MuPDF repairs a wrong number, caught above). An object placed in an object
     // stream must be the one at that index, since MuPDF takes the first copy of a number there and
-    // other readers the index.
-    let Some(entries) = update_entries(&b, next, prev.len()) else { return Ok(false) };
-    for &(n, kind, f2, f3) in &entries {
+    // other readers the index. And a number the signed revision used keeps its generation:
+    // MuPDF ignores generations, but other readers resolve the old `n g R` to null.
+    let Some(gens) = generations(&a, prev) else { return Ok(false) };
+    let count_a = a.xref_len().map_err(pdf_err)? as i32;
+    for &(n, kind, f2, f3) in &section.entries {
         let ok = match kind {
             0 => true,
             1 => n == 0 || obj_header(next, f2) == Some((i64::from(n), f3 as i64)),
@@ -1255,6 +1332,10 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8], intact: &std::co
             _ => false,
         };
         if !ok {
+            return Ok(false);
+        }
+        let used = n > 0 && n < count_a && get(&a, n).is_some_and(|x| x.to_string() != "null");
+        if used && kind != 0 && gens.get(&n).copied().unwrap_or(0) != if kind == 2 { 0 } else { f3 } {
             return Ok(false);
         }
     }
