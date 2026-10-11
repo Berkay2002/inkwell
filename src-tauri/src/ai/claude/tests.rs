@@ -502,7 +502,9 @@ fn claude_session_and_credential_variables_never_reach_the_child() {
         assert!(!env.iter().any(|k| k.eq_ignore_ascii_case(gone)), "{gone} leaked: {env:?}");
     }
     assert!(env.contains(&"CLAUDE_CONFIG_DIR".to_string()), "the user's own config dir is kept");
-    assert!(env.contains(&"UNRELATED".to_string()));
+    // the environment is an allowlist: a variable nobody named stays out, one the program needs stays in
+    assert!(!env.iter().any(|k| k.eq_ignore_ascii_case("UNRELATED")), "UNRELATED leaked: {env:?}");
+    assert!(env.iter().any(|k| k.eq_ignore_ascii_case("PATH")), "PATH is allowlisted: {env:?}");
     assert!(env.contains(&"MCP_TOOL_TIMEOUT".to_string()));
 }
 
