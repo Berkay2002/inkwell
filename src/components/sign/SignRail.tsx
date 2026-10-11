@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { pickSave, pickSource } from "../../lib/api";
 import {
-  CERTIFY_LABEL, type Identity, type SignatureInfo, SOURCE_LABEL, STATUS, changeNote, idKey, locked, outcome, pdfDate, picture,
+  CERTIFY_LABEL, type Identity, type SignatureInfo, SOURCE_LABEL, STATUS, changeNote, idKey, locked, otherWarnings, outcome, pdfDate, picture, statusWord,
   signApi, signed, useSign,
 } from "../../lib/sign";
 import { type DocState, useStore } from "../../store";
@@ -216,7 +216,7 @@ function CreateTestId({ onDone }: { onDone: () => void }) {
   const create = async () => {
     setBusy(true);
     try {
-      sg().addId(await signApi.createTestId(name, email, "", ""));
+      sg().addId(await signApi.createTestId(name, email, ""));
       onDone();
     } catch (e) {
       setErr(String(e));
@@ -296,10 +296,15 @@ function Card({ x, onOpen }: { x: SignatureInfo; onOpen: () => void }) {
         </span>
         <span className="sg-card-text">
           <b>{x.signer || "Unknown"}</b>
-          <span className={`sg-state ${st.tone}`}>{st.word}</span>
+          <span className={`sg-state ${st.tone}`}>{statusWord(x)}</span>
           {x.certify != null && <span className="dim">{CERTIFY_LABEL[x.certify]}</span>}
           <span className="dim">{changeNote(x)}</span>
-          {x.status === "unknownSigner" && x.trustNote && <span className="dim">Signature intact · {x.trustNote}.</span>}
+          {otherWarnings(x).map((w) => (
+            <span key={w} className="dim">
+              {w}
+            </span>
+          ))}
+          {x.intact && !x.trusted && x.trustNote && <span className="dim">Signature intact · {x.trustNote}.</span>}
           <span className="dim">
             Signed {pdfDate(x.time)} · page {x.page + 1}
           </span>

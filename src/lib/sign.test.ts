@@ -6,7 +6,7 @@ vi.mock("./edit", () => ({ applyState: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
 import { applyState } from "./edit";
 import {
-  type Identity, type Saved, type SignatureInfo, banner, changeNote, detailLines, imageRect, locked, outcome, pdfDate, sigBox, useSign,
+  type Identity, type Saved, type SignatureInfo, STATUS, banner, changeNote, detailLines, imageRect, locked, otherWarnings, outcome, pdfDate, sigBox, statusWord, useSign,
 } from "./sign";
 
 const inv = vi.mocked(invoke);
@@ -20,7 +20,7 @@ function reply(map: Record<string, unknown>) {
 const sig = (p: Partial<SignatureInfo>): SignatureInfo => ({
   field: "Signature1", page: 0, rect: [0, 0, 10, 10], status: "valid", summary: "", signer: "Maple Property", issuer: "Maple Property",
   time: "D:20261011143200+02'00'", reason: "", location: "", subFilter: "ETSI.CAdES.detached", digest: "SHA-256", certify: null,
-  intact: true, changes: "none", trusted: true, trustNote: "", certNotAfter: "2031-10-11", certFingerprint: "AA", ...p,
+  intact: true, changes: "none", trusted: true, trustNote: "", warnings: [], certNotAfter: "2031-10-11", certFingerprint: "AA", ...p,
 });
 const saved = (id: string, kind: Saved["kind"]): Saved => ({ id, kind, source: "drawn", font: null, created: 1, width: 300, height: 100, dataUrl: "data:image/png;base64,AAAA" });
 const testId: Identity = {
@@ -51,6 +51,21 @@ describe("helpers", () => {
     expect(banner([sig({}), sig({})])).toEqual({ tone: "valid", text: "Signed. All signatures are valid." });
     expect(banner([sig({}), sig({ status: "unknownSigner" })])?.tone).toBe("unknown");
     expect(banner([sig({ status: "unknownSigner" }), sig({ status: "invalid" })])).toEqual({ tone: "invalid", text: "At least one signature is invalid." });
+  });
+
+  it("warns when a signed document was changed after signing, or the hash is weak", () => {
+    const changed = sig({ status: "warning", changes: "changed", warnings: ["The document was changed after it was signed."] });
+    const weak = sig({ status: "warning", warnings: ["It uses SHA-1, a hash algorithm that is no longer safe."] });
+    expect(banner([changed])).toEqual({ tone: "unknown", text: "Signature valid, but the document was changed after signing." });
+    // Changed outranks an unknown signer and a weak hash; invalid outranks everything.
+    expect(banner([sig({ status: "unknownSigner" }), weak, changed])?.text).toBe("Signatures valid, but the document was changed after signing.");
+    expect(banner([weak])?.text).toBe("Signed, but the signature uses a weak hash algorithm.");
+    expect(banner([changed, sig({ status: "invalid" })])?.tone).toBe("invalid");
+    expect(statusWord(changed)).toBe("Valid, but changed after signing");
+    expect(statusWord(weak)).toBe("Valid, but weak");
+    expect(otherWarnings(changed)).toEqual([]);
+    expect(otherWarnings(weak)).toHaveLength(1);
+    expect(STATUS.warning.tone).toBe("unknown");
   });
 
   it("explains changes and what signing will do", () => {

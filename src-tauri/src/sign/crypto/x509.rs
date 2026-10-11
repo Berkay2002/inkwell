@@ -421,6 +421,13 @@ impl Certificate {
     /// file" makes. Valid from `from` for `years`; usable for signing (digital signature and
     /// non-repudiation).
     pub fn self_signed(name: &Name, key: &PrivateKey, from: Time, years: u32, serial: &[u8]) -> Result<Certificate, SignError> {
+        // extKeyUsage: emailProtection and Adobe's document signing (1.2.840.113583.1.1.5).
+        Certificate::self_signed_for(name, key, from, years, serial, &["1.3.6.1.5.5.7.3.4", "1.2.840.113583.1.1.5"])
+    }
+
+    /// [`Certificate::self_signed`] with the extended key usages `ekus` (tests make a TLS
+    /// server's certificate with it).
+    pub(crate) fn self_signed_for(name: &Name, key: &PrivateKey, from: Time, years: u32, serial: &[u8], ekus: &[&str]) -> Result<Certificate, SignError> {
         let alg = key.preferred_digest();
         let sig_alg = key.signature_algorithm(alg);
         let until = Time { year: from.year + years, ..from };
@@ -435,11 +442,12 @@ impl Certificate {
         };
         // keyUsage: digitalSignature (bit 0) and nonRepudiation (bit 1) → 0b1100_0000, 6 unused bits.
         let key_usage = der::tlv(tag::BIT_STRING, &[6, 0b1100_0000]);
+        let ekus: Vec<Vec<u8>> = ekus.iter().map(|o| der::oid(o)).collect();
+        let eku_refs: Vec<&[u8]> = ekus.iter().map(Vec::as_slice).collect();
         let extensions = der::seq(&[
             &ext("2.5.29.15", true, &key_usage),
             &ext("2.5.29.14", false, &der::octets(&ski)),
-            // extKeyUsage: emailProtection and Adobe's document signing (1.2.840.113583.1.1.5).
-            &ext("2.5.29.37", false, &der::seq(&[&der::oid("1.3.6.1.5.5.7.3.4"), &der::oid("1.2.840.113583.1.1.5")])),
+            &ext("2.5.29.37", false, &der::seq(&eku_refs)),
         ]);
         let tbs = der::seq(&[
             &der::explicit(0, &der::int(2)),

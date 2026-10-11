@@ -44,7 +44,7 @@ pub enum Source {
     Store,
     /// A .pfx / .p12 file the user opened.
     File,
-    /// A self-signed test ID Inkwell created in a temporary folder.
+    /// A self-signed test ID Inkwell created for this session (memory only).
     Test,
 }
 
@@ -152,6 +152,8 @@ fn store_identities() -> Result<Vec<Identity>> {
 #[tauri::command]
 pub async fn sign_open_id_file(window: Window, reg: State<'_, Paths>, ids: State<'_, Ids>, file: String, password: String) -> Result<Identity> {
     let path = reg.open(window.label(), &file)?;
+    // Wiped when the closure is done with it.
+    let password = zeroize::Zeroizing::new(password);
     let id = blocking(move || {
         let bytes = std::fs::read(&path).map_err(|e| EngineError::Io(e.to_string()))?;
         if bytes.len() > 1 << 20 {
@@ -163,36 +165,16 @@ pub async fn sign_open_id_file(window: Window, reg: State<'_, Paths>, ids: State
     Ok(ids.add(id, Source::File))
 }
 
-/// Creates a self-signed test ID (RSA 2048, 5 years) for this session. Its .pfx is written to a
-/// new folder under the temp dir, never into the certificate store or the user's folders.
+/// Creates a self-signed test ID (RSA 2048, 5 years) for this session. It lives in memory only:
+/// nothing is written to disk, the certificate store or the user's folders.
 #[tauri::command]
-pub async fn sign_create_test_id(ids: State<'_, Ids>, name: String, email: String, org: String, password: String) -> Result<Identity> {
+pub async fn sign_create_test_id(ids: State<'_, Ids>, name: String, email: String, org: String) -> Result<Identity> {
     let name = name.trim().to_string();
     if name.is_empty() || name.len() > 64 || email.trim().is_empty() || email.len() > 128 || org.len() > 64 {
         return Err(EngineError::Invalid("a test ID needs a name and an email".into()));
     }
-    let id = blocking(move || {
-        let id = DigitalId::create_self_signed(&name, email.trim(), org.trim(), 5).map_err(err)?;
-        let pfx = crypto::pkcs12::write(&id, &password).map_err(err)?;
-        write_test_pfx(&name, &pfx)?;
-        Ok(id)
-    })
-    .await?;
+    let id = blocking(move || DigitalId::create_self_signed(&name, email.trim(), org.trim(), 5).map_err(err)).await?;
     Ok(ids.add(id, Source::Test))
-}
-
-/// `<temp>/inkwell-test-ids/<random>/<name>.pfx`, created exclusively.
-fn write_test_pfx(name: &str, pfx: &[u8]) -> Result<std::path::PathBuf> {
-    let io = |e: std::io::Error| EngineError::Io(e.to_string());
-    let mut r = [0u8; 8];
-    getrandom::fill(&mut r).map_err(|e| EngineError::Io(e.to_string()))?;
-    let dir = std::env::temp_dir().join("inkwell-test-ids").join(r.iter().map(|b| format!("{b:02x}")).collect::<String>());
-    std::fs::create_dir_all(&dir).map_err(io)?;
-    let safe: String = name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
-    let path = dir.join(format!("{}.pfx", safe.trim()));
-    use std::io::Write;
-    std::fs::OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut f| f.write_all(pfx)).map_err(io)?;
-    Ok(path)
 }
 
 /// Signing options from the UI. `rect` is in page space (points, y down).

@@ -51,7 +51,8 @@ export interface Identity {
 
 export type IdRef = { kind: "store"; fingerprint: string } | { kind: "session"; handle: number };
 
-export type Status = "valid" | "unknownSigner" | "invalid" | "unsigned";
+/** `warning`: intact, but changed after signing or made with a weak hash (see `warnings`). */
+export type Status = "valid" | "unknownSigner" | "warning" | "invalid" | "unsigned";
 
 export interface SignatureInfo {
   field: string;
@@ -73,6 +74,8 @@ export interface SignatureInfo {
   changes: "none" | "signaturesOnly" | "changed";
   trusted: boolean;
   trustNote: string;
+  /** Cautions about an intact signature, one sentence each. */
+  warnings: string[];
   certNotAfter: string;
   certFingerprint: string;
 }
@@ -102,8 +105,7 @@ export const signApi = {
   forget: (id: string) => invoke<void>("fillsign_saved_remove", { id }),
   identities: () => invoke<Identity[]>("sign_identities"),
   openIdFile: (file: string, password: string) => invoke<Identity>("sign_open_id_file", { file, password }),
-  createTestId: (name: string, email: string, org: string, password: string) =>
-    invoke<Identity>("sign_create_test_id", { name, email, org, password }),
+  createTestId: (name: string, email: string, org: string) => invoke<Identity>("sign_create_test_id", { name, email, org }),
   sign: (doc: number, id: IdRef, options: SignOptions, to: string | null) => invoke<EditState>("sign_document", { doc, id, options, to }),
   list: (doc: number) => invoke<SignatureInfo[]>("sign_list", { doc }),
 };
@@ -157,8 +159,18 @@ export type Tone = "valid" | "unknown" | "invalid";
 export const STATUS: Record<Exclude<Status, "unsigned">, { tone: Tone; word: string }> = {
   valid: { tone: "valid", word: "Valid" },
   unknownSigner: { tone: "unknown", word: "Unknown signer" },
+  warning: { tone: "unknown", word: "Valid, with a warning" },
   invalid: { tone: "invalid", word: "Invalid" },
 };
+
+/** The status word on a signature's card. */
+export function statusWord(s: SignatureInfo): string {
+  if (s.status === "warning") return s.changes === "changed" ? "Valid, but changed after signing" : "Valid, but weak";
+  return STATUS[s.status as keyof typeof STATUS]?.word ?? "";
+}
+
+/** The warnings a card lists under the change note (which already says the document changed). */
+export const otherWarnings = (s: SignatureInfo) => s.warnings.filter((w) => !w.startsWith("The document was changed"));
 
 export const signed = (l: SignatureInfo[]) => l.filter((s) => s.status !== "unsigned");
 
@@ -169,6 +181,11 @@ export function banner(list: SignatureInfo[]): { tone: Tone; text: string } | nu
   const all = s.length === 1 ? "The signature is" : "All signatures are";
   if (s.some((x) => x.status === "invalid"))
     return { tone: "invalid", text: s.length === 1 ? "The signature is invalid." : "At least one signature is invalid." };
+  const one = s.length === 1;
+  if (s.some((x) => x.status === "warning" && x.changes === "changed"))
+    return { tone: "unknown", text: `${one ? "Signature" : "Signatures"} valid, but the document was changed after signing.` };
+  if (s.some((x) => x.status === "warning"))
+    return { tone: "unknown", text: `Signed, but ${one ? "the signature uses" : "a signature uses"} a weak hash algorithm.` };
   if (s.some((x) => x.status === "unknownSigner"))
     return { tone: "unknown", text: `Signed. ${s.length === 1 ? "The signature is intact, but its signer is" : "The signatures are intact, but a signer is"} not in your trusted list.` };
   return { tone: "valid", text: `Signed. ${all} valid.` };

@@ -7,6 +7,7 @@
 //! SHA-3 and RIPEMD-160.
 
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
+use zeroize::Zeroizing;
 
 use super::SignError;
 use super::der::{self, Tlv, tag};
@@ -442,8 +443,8 @@ pub trait ExternalKey: Send + Sync {
 pub struct PrivateKey {
     inner: Inner,
     public: PublicKey,
-    /// The PKCS#8 `PrivateKeyInfo` it came from (to write it back into a PKCS#12 file).
-    pkcs8: Vec<u8>,
+    /// The PKCS#8 `PrivateKeyInfo` it came from (to write it back into a PKCS#12 file). Wiped on drop.
+    pkcs8: Zeroizing<Vec<u8>>,
 }
 
 impl std::fmt::Debug for PrivateKey {
@@ -456,7 +457,7 @@ impl PrivateKey {
     /// A key held outside Inkwell's memory (its public half is `public`). It can't be
     /// exported to a PKCS #12 file.
     pub fn external(public: PublicKey, key: std::sync::Arc<dyn ExternalKey>) -> PrivateKey {
-        PrivateKey { inner: Inner::External(key), public, pkcs8: Vec::new() }
+        PrivateKey { inner: Inner::External(key), public, pkcs8: Zeroizing::new(Vec::new()) }
     }
 
     /// Whether the key lives outside the app (and so can't be exported).
@@ -479,7 +480,7 @@ impl PrivateKey {
                     _ => return Err(SignError::Malformed("RSAPrivateKey".into())),
                 };
                 let rsa = rsa::RsaPrivateKey::from_pkcs8_der(info).map_err(|e| SignError::Malformed(format!("RSA private key: {e}")))?;
-                Ok(PrivateKey { inner: Inner::Rsa(Box::new(rsa)), public: PublicKey::Rsa { n, e }, pkcs8: info.to_vec() })
+                Ok(PrivateKey { inner: Inner::Rsa(Box::new(rsa)), public: PublicKey::Rsa { n, e }, pkcs8: Zeroizing::new(info.to_vec()) })
             }
             oid::EC => {
                 // ECPrivateKey: version, privateKey OCTET STRING, [0] parameters, [1] publicKey.
@@ -498,12 +499,12 @@ impl PrivateKey {
                     oid::P256 => {
                         let k = p256::ecdsa::SigningKey::from_slice(d).map_err(|_| SignError::Malformed("P-256 key".into()))?;
                         let public = PublicKey::P256(k.verifying_key().to_sec1_point(false).as_bytes().to_vec());
-                        Ok(PrivateKey { inner: Inner::P256(k), public, pkcs8: info.to_vec() })
+                        Ok(PrivateKey { inner: Inner::P256(k), public, pkcs8: Zeroizing::new(info.to_vec()) })
                     }
                     oid::P384 => {
                         let k = p384::ecdsa::SigningKey::from_slice(d).map_err(|_| SignError::Malformed("P-384 key".into()))?;
                         let public = PublicKey::P384(k.verifying_key().to_sec1_point(false).as_bytes().to_vec());
-                        Ok(PrivateKey { inner: Inner::P384(k), public, pkcs8: info.to_vec() })
+                        Ok(PrivateKey { inner: Inner::P384(k), public, pkcs8: Zeroizing::new(info.to_vec()) })
                     }
                     other => Err(SignError::Unsupported(format!("elliptic curve {other}"))),
                 }
@@ -526,13 +527,13 @@ impl PrivateKey {
     /// A new P-256 key.
     pub fn generate_p256() -> Result<PrivateKey, SignError> {
         loop {
-            let mut d = [0u8; 32];
-            getrandom::fill(&mut d).map_err(|e| SignError::Crypto(format!("no randomness: {e}")))?;
-            if let Ok(k) = p256::ecdsa::SigningKey::from_slice(&d) {
+            let mut d = Zeroizing::new([0u8; 32]);
+            getrandom::fill(&mut *d).map_err(|e| SignError::Crypto(format!("no randomness: {e}")))?;
+            if let Ok(k) = p256::ecdsa::SigningKey::from_slice(&*d) {
                 let point = k.verifying_key().to_sec1_point(false).as_bytes().to_vec();
                 // PKCS#8 with an ECPrivateKey (RFC 5915) carrying the public key.
-                let ec = der::seq(&[&der::int(1), &der::octets(&d), &der::explicit(1, &der::bit_string(&point))]);
-                let info = der::seq(&[&der::int(0), &der::seq(&[&der::oid(oid::EC), &der::oid(oid::P256)]), &der::octets(&ec)]);
+                let ec = Zeroizing::new(der::seq(&[&der::int(1), &der::octets(&*d), &der::explicit(1, &der::bit_string(&point))]));
+                let info = Zeroizing::new(der::seq(&[&der::int(0), &der::seq(&[&der::oid(oid::EC), &der::oid(oid::P256)]), &der::octets(&ec)]));
                 return PrivateKey::from_pkcs8(&info);
             }
         }

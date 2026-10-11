@@ -229,6 +229,10 @@ pub fn set_redaction_hook(hook: impl Fn(DocId) + Send + Sync + 'static) {
 }
 
 /// `/AcroForm /SigFlags` has SignaturesExist (ISO 32000-1 12.7.2, table 219).
+/// Why a damaged signed file can't be changed.
+pub const DAMAGED_SIGNED: &str =
+    "this signed file is damaged, and changing it would break its signatures, so Inkwell leaves it as it is";
+
 fn has_signatures(doc: &PdfDocument) -> bool {
     let flags = || doc.catalog().ok()?.get_dict("AcroForm").ok()??.get_dict("SigFlags").ok()??.as_int().ok();
     flags().is_some_and(|f| f & 1 != 0)
@@ -296,7 +300,9 @@ impl Editor {
         let mut snap = Snap { len: bytes.len(), bytes: Arc::new(bytes) };
         let mut doc = open_snap(&snap, entry)?;
         // A file MuPDF had to repair takes no incremental updates: start from a clean copy of it.
-        if !doc.doc.can_be_saved_incrementally() {
+        // Not a signed one: the copy would silently break its signatures. It stays as it is, and
+        // edits are refused (see `snapshot`).
+        if !doc.doc.can_be_saved_incrementally() && !has_signatures(&doc.doc) {
             let out = write_doc(&doc.doc, PdfWriteOptions::default(), snap.len)?;
             snap = Snap { len: out.len(), bytes: Arc::new(out) };
             doc = open_snap(&snap, entry)?;
@@ -319,6 +325,9 @@ impl Editor {
 
     /// The edited document as an incremental update of the current step.
     fn snapshot(&self) -> Result<Snap> {
+        if !self.doc.doc.can_be_saved_incrementally() {
+            return Err(invalid(DAMAGED_SIGNED));
+        }
         let mut opts = PdfWriteOptions::default();
         opts.set_incremental(true);
         let out = write_doc(&self.doc.doc, opts, self.step().snap.len + (64 << 10))?;
@@ -1198,6 +1207,9 @@ impl Engine {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
+        if !ed.doc.doc.can_be_saved_incrementally() {
+            return Err(invalid(DAMAGED_SIGNED));
+        }
         let after = ed.steps[..=ed.cur].iter().rposition(|s| s.exact).map_or(0, |i| i + 1);
         let signed = ed.steps[..=ed.cur].iter().any(|s| s.signed);
         // Signs exactly what Save would write: with removed pages or redactions pending, the

@@ -99,8 +99,24 @@ impl Store {
             Ok(b) => Ok(Some(Keys::new(&*crypto::unprotect(&b).map_err(io)?))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
                 let key = zeroize::Zeroizing::new(crypto::random::<32>());
-                write_atomic(&self.key_path(), &crypto::protect(&key).map_err(io)?).map_err(io)?;
-                Ok(Some(Keys::new(&key)))
+                let sealed = crypto::protect(&key).map_err(io)?;
+                // Create-new, so two first saves at once can't each keep a different key: the
+                // key is written whole to a temp file and hard-linked into place (which fails if
+                // the file exists), and the loser reads the winner's.
+                std::fs::create_dir_all(&self.dir).map_err(io)?;
+                let tmp = self.dir.join(format!("key.{}.tmp", crypto::random::<8>().iter().map(|b| format!("{b:02x}")).collect::<String>()));
+                let written = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).and_then(|mut f| {
+                    use std::io::Write;
+                    f.write_all(&sealed)?;
+                    f.sync_all()
+                });
+                let linked = written.and_then(|()| std::fs::hard_link(&tmp, self.key_path()));
+                let _ = std::fs::remove_file(&tmp);
+                match linked {
+                    Ok(()) => Ok(Some(Keys::new(&key))),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => self.keys(false),
+                    Err(e) => Err(io(e)),
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(io(e)),

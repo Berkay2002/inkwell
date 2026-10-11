@@ -405,7 +405,15 @@ fn appearance(doc: &mut PdfDocument, size: [f32; 2], rotate: i32, name: &str, li
 /// its pixel size.
 fn add_image(doc: &mut PdfDocument, bytes: &[u8]) -> Result<(PdfObject, f32, f32)> {
     const MAX: u32 = 2400;
-    let img = image::load_from_memory(bytes).map_err(|e| SignError::Malformed(format!("signature picture: {e}")))?;
+    // Bounded before decoding: a small file can claim a huge canvas.
+    let picture = |e: image::ImageError| SignError::Malformed(format!("signature picture: {e}"));
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| SignError::Malformed(format!("signature picture: {e}")))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(96 << 20);
+    reader.limits(limits);
+    let img = reader.decode().map_err(picture)?;
     let img = if img.width() > MAX || img.height() > MAX { img.thumbnail(MAX, MAX) } else { img };
     let rgba = img.to_rgba8();
     let (iw, ih) = rgba.dimensions();
@@ -529,8 +537,11 @@ fn docmdp_of(sig: &PdfObject) -> Option<u8> {
 pub enum Status {
     /// Intact, and the signer chains to a root Windows trusts.
     Valid,
-    /// Intact, but the signer isn't trusted (self-signed, unknown issuer, expired).
+    /// Intact, but the signer isn't trusted (self-signed, unknown issuer, expired, not for signing).
     UnknownSigner,
+    /// Intact, but with a caution in `warnings`: the document was changed after signing, or the
+    /// signature uses a weak hash.
+    Warning,
     /// The signature doesn't match the bytes, or can't be read.
     Invalid,
     /// An empty signature field.
@@ -573,6 +584,8 @@ pub struct SignatureInfo {
     pub changes: Changes,
     pub trusted: bool,
     pub trust_note: String,
+    /// Cautions about an intact signature (changes after it, a weak hash), one sentence each.
+    pub warnings: Vec<String>,
     pub cert_not_after: String,
     pub cert_fingerprint: String,
 }
@@ -606,11 +619,15 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
             }
             prev = e;
         }
-        // A certification that allows no changes is broken by any later revision, signatures too.
-        i.changes = if only_sigs && i.certify != Some(1) { Changes::SignaturesOnly } else { Changes::Changed };
+        // Bytes after the last %%EOF are an update too (MuPDF loads one without %%EOF through its
+        // startxref), and so is junk after a later signature: none of it was examined.
+        if !bytes[prev.min(bytes.len())..].iter().all(u8::is_ascii_whitespace) {
+            only_sigs = false;
+        }
+        i.changes = if only_sigs { Changes::SignaturesOnly } else { Changes::Changed };
     }
     for i in &mut infos {
-        summarize(i);
+        finish(i);
     }
     Ok(infos)
 }
@@ -635,12 +652,15 @@ fn printed_elems(o: Option<PdfObject>) -> Option<Vec<String>> {
 /// dictionary, its appearance and the XObjects that names, the AcroForm's `/Fields` and
 /// `/SigFlags`, and `/Annots` arrays gaining only those widgets. Anything else (a new
 /// annotation, changed page content, another catalog entry) means the document was changed.
-fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> {
+pub(super) fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> {
     use std::collections::HashSet;
     let a = PdfDocument::from_bytes(prev).map_err(pdf_err)?;
     let b = PdfDocument::from_bytes(next).map_err(pdf_err)?;
     let ind = |o: &PdfObject| if o.is_indirect().unwrap_or(false) { o.as_indirect().ok() } else { None };
-    let old: HashSet<String> = sig_fields(&a)?.into_iter().filter(|f| f.value.is_some()).map(|f| f.name).collect();
+    let before_fields = sig_fields(&a)?;
+    let old: HashSet<String> = before_fields.iter().filter(|f| f.value.is_some()).map(|f| f.name.clone()).collect();
+    // The empty signature fields (and their widgets) that may be signed in place.
+    let empty: HashSet<i32> = before_fields.iter().filter(|f| f.value.is_none()).flat_map(|f| [ind(&f.widget), ind(&f.field)]).flatten().collect();
     // New objects allowed, and existing ones allowed to change.
     let mut parts: HashSet<i32> = HashSet::new();
     let mut widgets: HashSet<i32> = HashSet::new();
@@ -671,6 +691,7 @@ fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> {
     let catalog_num = b.trailer().map_err(pdf_err)?.get_dict("Root").map_err(pdf_err)?.as_ref().and_then(ind);
     let acroform_num = b.catalog().map_err(pdf_err)?.get_dict("AcroForm").map_err(pdf_err)?.as_ref().and_then(ind);
     let get = |d: &PdfDocument, n: i32| d.xref_object(n).ok().flatten();
+    let plain_dict = |d: &PdfDocument, n: i32| get(d, n).is_some_and(|o| o.is_dict().unwrap_or(false) && !o.is_stream().unwrap_or(true));
     let printed = |d: &PdfDocument, n: i32| -> Option<(String, Vec<u8>)> {
         let o = get(d, n)?;
         let stream = if o.is_stream().unwrap_or(false) { o.read_raw_stream().unwrap_or_default() } else { Vec::new() };
@@ -694,10 +715,13 @@ fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> {
             continue;
         }
         let ok = if before.is_none() {
-            parts.contains(&n) || widgets.contains(&n)
+            parts.contains(&n) || (widgets.contains(&n) && plain_dict(&b, n))
         } else if widgets.contains(&n) {
-            // An existing empty field being signed.
-            true
+            // An existing empty field being signed: it was one before, and only its value,
+            // appearance and flags change. (Not a page, a content stream, or any other object a
+            // forged widget's /Parent could name.)
+            const SIGNING: &[&str] = &["V", "AP", "F"];
+            empty.contains(&n) && plain_dict(&a, n) && plain_dict(&b, n) && without(&a, n, SIGNING) == without(&b, n, SIGNING)
         } else if let (Some(x), Some(y)) = (printed_elems(get(&a, n)), printed_elems(get(&b, n))) {
             // An indirect /Annots or /Fields array.
             gains_only(&x, &y, &widgets)
@@ -759,6 +783,7 @@ fn info(f: &SigField, bytes: &[u8], trust: &Trust) -> SignatureInfo {
         changes: Changes::None,
         trusted: false,
         trust_note: String::new(),
+        warnings: Vec::new(),
         cert_not_after: String::new(),
         cert_fingerprint: String::new(),
     };
@@ -827,15 +852,39 @@ fn check(v: &PdfObject, bytes: &[u8], out: &mut SignatureInfo, trust: &Trust) ->
     if sd.content.is_some() {
         return Err(SignError::Unsupported("signatures that embed their content aren't checked yet".into()));
     }
-    if sd.signer.signed_attrs.is_some() && sd.signer.message_digest.as_deref() != Some(&digest[..]) {
-        return Err(SignError::Crypto("the document was changed after it was signed, or the signature is damaged".into()));
+    let si = &sd.signer;
+    if si.signed_attrs.is_none() && sf == "ETSI.CAdES.detached" {
+        return Err(SignError::Malformed("a CAdES signature without signed attributes".into()));
+    }
+    if si.signed_attrs.is_some() {
+        if si.content_type.as_deref() != Some(cms::DATA) {
+            return Err(SignError::Malformed("the signed content type is not data".into()));
+        }
+        if si.message_digest.as_deref() != Some(&digest[..]) {
+            return Err(SignError::Crypto("the document was changed after it was signed, or the signature is damaged".into()));
+        }
+        // ESS signing-certificate(-v2) binds the signature to one certificate: it must be this one.
+        match &si.signing_cert_hash {
+            Some((h, value)) if h.digest(&[&cert.raw]) != *value => {
+                return Err(SignError::Malformed("the signature names a different certificate than the one it carries".into()));
+            }
+            None if sf == "ETSI.CAdES.detached" => return Err(SignError::Malformed("a CAdES signature that doesn't name its certificate".into())),
+            _ => {}
+        }
     }
     if !sd.verify_signature(&cert, &digest)? {
         return Err(SignError::Crypto("the document was changed after it was signed, or the signature is damaged".into()));
     }
     out.intact = true;
+    if [si.digest, si.scheme_digest.unwrap_or(si.digest)].contains(&DigestAlg::Sha1) {
+        out.warnings.push("It uses SHA-1, a hash algorithm that is no longer safe.".into());
+    }
     let others: Vec<Certificate> = sd.certificates.iter().filter(|x| x.raw != cert.raw).cloned().collect();
-    let (trusted, note) = trust(&cert, &others);
+    let (trusted, note) = match cert.signing_problem() {
+        // A certificate not meant for signing documents (a TLS server's, say) is never "valid".
+        Some(why) => (false, why.trim_end_matches('.').to_string()),
+        None => trust(&cert, &others),
+    };
     out.trusted = trusted;
     out.trust_note = note;
     out.status = if trusted { Status::Valid } else { Status::UnknownSigner };
@@ -851,16 +900,33 @@ fn hex_decode(h: &[u8]) -> Vec<u8> {
     h.chunks(2).map(|p| (v(p[0]) << 4) | p.get(1).map_or(0, |&x| v(x))).collect()
 }
 
-/// The summary sentence for a signature's state.
-fn summarize(s: &mut SignatureInfo) {
-    let changed = match s.changes {
-        Changes::None => "",
-        Changes::SignaturesOnly => " Only signatures were added after it.",
-        Changes::Changed => " The document was changed after it was signed.",
+/// The final status of an intact signature once its later changes are known, and its summary.
+/// A certification is broken by any later revision at P=1, and at P=2 or 3 by anything but added
+/// signatures (form fill and comments aren't told apart from other edits, so they count too).
+fn finish(s: &mut SignatureInfo) {
+    if !matches!(s.status, Status::Valid | Status::UnknownSigner) {
+        return;
+    }
+    let broken = match s.certify {
+        Some(1) => s.changes != Changes::None,
+        Some(_) => s.changes == Changes::Changed,
+        None => false,
     };
-    match s.status {
-        Status::Valid => s.summary = format!("The signature is valid, signed by {}.{changed}", s.signer),
-        Status::UnknownSigner => s.summary = format!("The signature is intact, but the signer is not trusted: {}.{changed}", s.trust_note),
-        _ => {}
+    if broken {
+        s.status = Status::Invalid;
+        s.summary = "The signature is not valid: the document was changed after it was certified, which the certification does not allow.".into();
+        return;
+    }
+    if s.changes == Changes::Changed {
+        s.warnings.insert(0, "The document was changed after it was signed.".into());
+    }
+    let trust = if s.trusted { format!("signed by {}", s.signer) } else { format!("but the signer is not trusted: {}", s.trust_note) };
+    let only_sigs = if s.changes == Changes::SignaturesOnly { " Only signatures were added after it." } else { "" };
+    if s.warnings.is_empty() {
+        s.status = if s.trusted { Status::Valid } else { Status::UnknownSigner };
+        s.summary = if s.trusted { format!("The signature is valid, {trust}.{only_sigs}") } else { format!("The signature is intact, {trust}.{only_sigs}") };
+    } else {
+        s.status = Status::Warning;
+        s.summary = format!("The signature is intact, {trust}. {}", s.warnings.join(" "));
     }
 }

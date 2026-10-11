@@ -200,3 +200,27 @@ fn pictures_are_normalized() {
     assert!(store::normalize(b"not an image", false, false).is_err());
     assert!(store::decode_png("data:image/png;base64,!!!").is_err());
 }
+
+#[test]
+fn two_first_saves_at_once_share_one_key() {
+    let png = store::normalize(&drawn_png(), true, false).unwrap();
+    for round in 0..8 {
+        let d = dir(&format!("race-{round}"));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let saves: Vec<_> = (0..2)
+            .map(|_| {
+                let (d, png, barrier) = (d.clone(), png.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Store::new(d).add(Kind::Signature, Source::Drawn, None, png).unwrap()
+                })
+            })
+            .collect();
+        for s in saves {
+            s.join().unwrap();
+        }
+        // Both records open with the one key on disk (a lost race would leave one unreadable).
+        assert_eq!(Store::new(d.clone()).list().unwrap().len(), 2, "round {round}");
+        assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")), "round {round}: temp key left");
+    }
+}

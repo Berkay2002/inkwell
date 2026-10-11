@@ -35,6 +35,8 @@ pub struct SignerInfo {
     pub signing_time: Option<Time>,
     /// ESS signing-certificate(-v2) present (CAdES).
     pub signing_certificate: bool,
+    /// The first certificate hash it names, with its algorithm (SHA-1 for v1, SHA-256 unless named for v2).
+    pub signing_cert_hash: Option<(DigestAlg, Vec<u8>)>,
     pub scheme: Scheme,
     /// The digest named by the signature algorithm, when it names one.
     pub scheme_digest: Option<DigestAlg>,
@@ -191,6 +193,7 @@ fn parse_signer(si: &Tlv<'_>) -> Result<SignerInfo, SignError> {
     let mut next = it.next().ok_or_else(|| bad("signatureAlgorithm"))?;
     let mut signed_attrs = None;
     let (mut message_digest, mut content_type, mut signing_time, mut signing_certificate) = (None, None, None, false);
+    let mut signing_cert_hash = None;
     if next.tag == tag::ctx(0) {
         // Signed over the DER SET OF, i.e. the same contents with the universal SET tag.
         // (An indefinite-length encoding is re-encoded with a definite length.)
@@ -206,7 +209,10 @@ fn parse_signer(si: &Tlv<'_>) -> Result<SignerInfo, SignError> {
                 (MESSAGE_DIGEST, Some(v)) => message_digest = Some(v.value.to_vec()),
                 (CONTENT_TYPE, Some(v)) => content_type = v.oid().ok(),
                 (SIGNING_TIME, Some(v)) => signing_time = v.time().ok(),
-                (SIGNING_CERT_V2 | SIGNING_CERT, _) => signing_certificate = true,
+                (SIGNING_CERT_V2 | SIGNING_CERT, v) => {
+                    signing_certificate = true;
+                    signing_cert_hash = v.map(|v| ess_cert_hash(&v, o == SIGNING_CERT_V2)).transpose()?;
+                }
                 _ => {}
             }
         }
@@ -238,12 +244,29 @@ fn parse_signer(si: &Tlv<'_>) -> Result<SignerInfo, SignError> {
         content_type,
         signing_time,
         signing_certificate,
+        signing_cert_hash,
         scheme,
         scheme_digest,
         signature,
         timestamp,
         timestamp_token,
     })
+}
+
+/// The first ESSCertID(v2)'s hash from a SigningCertificate(V2) value (RFC 2634, RFC 5035).
+fn ess_cert_hash(v: &Tlv<'_>, v2: bool) -> Result<(DigestAlg, Vec<u8>), SignError> {
+    let certs = v.children()?;
+    let first = certs.first().ok_or_else(|| bad("signing-certificate"))?.children()?;
+    let id = first.first().ok_or_else(|| bad("ESSCertID"))?.children()?;
+    let (alg, hash) = match id.as_slice() {
+        [alg, hash, ..] if v2 && alg.tag == tag::SEQUENCE => {
+            let o = alg.children()?.first().ok_or_else(|| bad("ESSCertIDv2 hashAlgorithm"))?.oid()?;
+            (DigestAlg::from_oid(&o).ok_or_else(|| SignError::Unsupported(format!("digest {o}")))?, hash)
+        }
+        [hash, ..] => (if v2 { DigestAlg::Sha256 } else { DigestAlg::Sha1 }, hash),
+        [] => return Err(bad("ESSCertID")),
+    };
+    Ok((alg, hash.octets("certHash")?.into_owned()))
 }
 
 fn attribute(o: &str, value: &[u8]) -> Vec<u8> {
@@ -260,12 +283,14 @@ pub fn sign_detached(
     alg: DigestAlg,
     content_digest: &[u8],
 ) -> Result<Vec<u8>, SignError> {
-    build(key, cert, chain, alg, DATA, None, content_digest)
+    build(key, cert, chain, alg, DATA, None, content_digest, cert)
 }
 
+/// The SignedData itself. `ess` is the certificate the signing-certificate-v2 attribute names
+/// (`cert`, except in tests of a signature that names another).
 // The parameters mirror the SignedData fields being assembled.
 #[allow(clippy::too_many_arguments)]
-fn build(
+pub(crate) fn build(
     key: &PrivateKey,
     cert: &Certificate,
     chain: &[Certificate],
@@ -273,10 +298,11 @@ fn build(
     content_type: &str,
     content: Option<&[u8]>,
     content_digest: &[u8],
+    ess: &Certificate,
 ) -> Result<Vec<u8>, SignError> {
-    let cert_hash = DigestAlg::Sha256.digest(&[&cert.raw]);
-    let general_names = der::seq(&[&der::explicit(4, &cert.issuer.raw)]);
-    let ess = der::seq(&[&der::seq(&[&der::seq(&[&der::octets(&cert_hash), &der::seq(&[&general_names, &der::uint(&cert.serial)])])])]);
+    let cert_hash = DigestAlg::Sha256.digest(&[&ess.raw]);
+    let general_names = der::seq(&[&der::explicit(4, &ess.issuer.raw)]);
+    let ess = der::seq(&[&der::seq(&[&der::seq(&[&der::octets(&cert_hash), &der::seq(&[&general_names, &der::uint(&ess.serial)])])])]);
     let attrs =
         [attribute(CONTENT_TYPE, &der::oid(content_type)), attribute(MESSAGE_DIGEST, &der::octets(content_digest)), attribute(SIGNING_CERT_V2, &ess)];
     let refs: Vec<&[u8]> = attrs.iter().map(Vec::as_slice).collect();
