@@ -2,6 +2,7 @@ import { type DocState, useStore } from "../store";
 import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
 import { openA11y, useA11y } from "./a11y";
+import { openPreflight, usePreflight } from "./preflight";
 import { useRedact } from "./redact";
 import { useSearch } from "./searchStore";
 import { useAnnot } from "./annot";
@@ -16,9 +17,10 @@ import { useConvert } from "./convertStore";
 import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
 import { usePrint } from "./printStore";
-import { useTextEdit } from "./textEdit";
+import { openEditSection, useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 import { useSheets } from "./organizePlus";
+import { createPortfolio } from "./portfolioStore";
 
 export interface Command {
   id: string;
@@ -62,6 +64,18 @@ export const commands: Command[] = [
       if (d.organize) st().patch(d.id, { organize: false });
       te.setOpen(!te.open || d.organize);
     }),
+  },
+  {
+    id: "edit-links",
+    title: "Edit links",
+    needsDoc: true,
+    run: withDoc((d) => openEditSection(d.id, "links")),
+  },
+  {
+    id: "edit-bookmarks",
+    title: "Edit bookmarks",
+    needsDoc: true,
+    run: withDoc((d) => openEditSection(d.id, "bookmarks")),
   },
   {
     id: "add-text",
@@ -114,6 +128,7 @@ export const commands: Command[] = [
   { id: "extract-page", title: "Extract this page…", needsDoc: true, run: withDoc((d) => void edits.extract(d.id, [d.currentPage])) },
   { id: "split", title: "Split into single pages", needsDoc: true, run: withDoc((d) => void edits.split(d.id, 1)) },
   { id: "merge", title: "Combine files…", run: () => edits.combineFiles() },
+  { id: "create-portfolio", title: "Create PDF Portfolio…", run: () => void createPortfolio() },
   {
     id: "page-labels",
     title: "Page labels…",
@@ -279,6 +294,12 @@ export const commands: Command[] = [
     title: "Check accessibility…",
     needsDoc: true,
     run: () => (useA11y.getState().open ? useA11y.getState().setOpen(false) : openA11y()),
+  },
+  {
+    id: "preflight",
+    title: "Preflight (PDF/A, PDF/UA, PDF/X)…",
+    needsDoc: true,
+    run: () => (usePreflight.getState().open ? usePreflight.getState().setOpen(false) : openPreflight()),
   },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },

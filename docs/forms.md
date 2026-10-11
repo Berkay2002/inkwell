@@ -18,10 +18,12 @@ tool strip while preparing a form.
   next/previous/first/last page work, alert shows its message, submit and links are shown and do nothing.
 - Calculated fields are read-only to the person filling and re-run after every change in `/CO` order.
 
-## Scripts (no JavaScript engine)
-MuPDF is built without JavaScript. Inkwell recognises the calls Acrobat writes from its Format, Validate and Calculate
-tabs and runs them natively; anything else is kept untouched in the file and never run (the field list marks it).
-No script can reach the network or a file.
+## Scripts
+MuPDF is built without JavaScript, so Inkwell has its own small engine (QuickJS, `forms/js.rs`; see
+[forms-js.md](forms-js.md) for the limits and what is unsupported). A field script that is exactly one of the calls Acrobat
+writes from its Format, Validate and Calculate tabs takes the native fast path below. Every other script runs in the
+engine, unless the person turned scripts off for the file: then it is kept untouched in the file and never run (the field
+list marks it, as before). No script can reach the network or a file.
 
 | Where | Calls |
 |---|---|
@@ -34,7 +36,7 @@ Forms rail, *Prepare form*: the strip over the page picks a field tool (text, ch
 button, signature); click for the default size or drag a rectangle. Select a field to move it, resize it from the eight
 handles, or change its properties in the rail: name, tooltip, required, read-only, hidden, default value, character
 limit, comb, multiple lines, password, choices, export value, button label and action, text size and colour, alignment,
-border and fill, number/percentage/date/time/special/pattern format, range validation, calculation. A radio button drawn
+border and fill, number/percentage/date/time/special/pattern/custom-script format (with a live sample), range or custom validation, calculation (sum, product, average, smallest, largest, simplified field notation or a custom script) and the calculation order (see [forms-js.md](forms-js.md)). A radio button drawn
 while another is selected joins its group. Delete removes the selection (the Delete key too).
 
 *Find fields on this page* runs auto-detection (underscore runs, rules under labels, empty boxes, small squares, boxes

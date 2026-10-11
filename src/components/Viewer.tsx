@@ -17,8 +17,10 @@ import {
   visibleRange,
 } from "../lib/layout";
 import { useA11y } from "../lib/a11y";
+import { usePreflight } from "../lib/preflight";
 import { type Mark, useRedact } from "../lib/redact";
 import { type Want, tileClient } from "../lib/tiles";
+import { setViewPos } from "../lib/viewPos";
 import { type DocState, type Rect4, useStore } from "../store";
 import { PageView } from "./PageView";
 
@@ -68,6 +70,11 @@ export function Viewer({ doc }: { doc: DocState }) {
     anchor.current = at(s.clientHeight / 2, s.clientWidth / 2);
     const top = at(0, 0);
     saved.current = { page: top.page, yPt: top.yPt };
+    // A jump to a page leaves the view PAD px above it, so the top of the view is still in the gap
+    // after the previous page: that is the page "in view", not the bottom of the one before.
+    const next = top.page + 1;
+    const inGap = next < L.tops.length - 1 && L.tops[next] - s.scrollTop <= PAD + 1;
+    setViewPos(cur.current.doc.id, inGap ? { page: next, yPt: 0 } : saved.current);
     return at;
   };
 
@@ -164,6 +171,8 @@ export function Viewer({ doc }: { doc: DocState }) {
   }, [doc.search.hits]);
   const a11yOpen = useA11y((s) => s.open);
   const a11yShown = useA11y((s) => s.docs[id]?.shown) ?? null;
+  const pfOpen = usePreflight((s) => s.open);
+  const pfShown = usePreflight((s) => s.docs[id]?.shown) ?? null;
   const redactMarks = useRedact((s) => s.docs[id]?.marks);
   const marksByPage = useMemo(() => {
     const m = new Map<number, Mark[]>();
@@ -235,7 +244,7 @@ export function Viewer({ doc }: { doc: DocState }) {
           hits={hitsByPage.get(i) ?? EMPTY}
           currentHit={currentHit}
           marks={marksByPage.get(i) ?? NO_MARKS}
-          a11y={a11yOpen && a11yShown?.page === i ? a11yShown : null}
+          a11y={a11yOpen && a11yShown?.page === i ? a11yShown : pfOpen && pfShown?.page === i ? pfShown : null}
         />,
       );
     }

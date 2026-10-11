@@ -392,7 +392,7 @@ fz_buffer *mupdf_pdf_read_stream_capped(fz_context *ctx, pdf_obj *obj, size_t li
             if (n == 0)
                 break;
             if (n > limit - total)
-                fz_throw(ctx, FZ_ERROR_GENERIC, "stream is larger than %zu bytes", limit);
+                fz_throw(ctx, mupdf_error_stream_cap, "stream is larger than %zu bytes", limit);
             fz_append_data(ctx, buf, chunk, n);
             total += n;
         }
@@ -413,6 +413,42 @@ fz_buffer *mupdf_pdf_read_stream_capped(fz_context *ctx, pdf_obj *obj, size_t li
 fz_buffer *mupdf_pdf_read_raw_stream(fz_context *ctx, pdf_obj *obj, mupdf_error_t **errptr)
 {
     TRY_CATCH(fz_buffer*, NULL, pdf_load_raw_stream(ctx, obj));
+}
+
+/* Inkwell patch: the first `limit` bytes of the decoded stream; the rest is never decoded. */
+fz_buffer *mupdf_pdf_read_stream_head(fz_context *ctx, pdf_obj *obj, size_t limit, mupdf_error_t **errptr)
+{
+    fz_buffer *buf = NULL;
+    fz_stream *stm = NULL;
+    unsigned char chunk[512];
+    fz_var(buf);
+    fz_var(stm);
+    fz_try(ctx)
+    {
+        size_t got = 0;
+        buf = fz_new_buffer(ctx, limit);
+        stm = pdf_open_stream(ctx, obj);
+        while (got < limit)
+        {
+            size_t want = limit - got < sizeof chunk ? limit - got : sizeof chunk;
+            size_t n = fz_read(ctx, stm, chunk, want);
+            if (n == 0)
+                break;
+            fz_append_data(ctx, buf, chunk, n);
+            got += n;
+        }
+    }
+    fz_always(ctx)
+    {
+        fz_drop_stream(ctx, stm);
+    }
+    fz_catch(ctx)
+    {
+        fz_drop_buffer(ctx, buf);
+        buf = NULL;
+        mupdf_save_error(ctx, errptr);
+    }
+    return buf;
 }
 
 void mupdf_pdf_write_object(fz_context *ctx, pdf_obj *self, pdf_obj *obj, mupdf_error_t **errptr)

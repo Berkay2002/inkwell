@@ -18,6 +18,7 @@ shadows), warm palette (window #F4F2ED, surfaces #FFFFFF, panel #FAF8F4, text #1
 | comments | approved/comments.png, comments-2.png | Comments rail (grouped by page, search, filter, replies) with the floating tool strip, and a selected annotation with handles and popover (comments-r1 a-rail) |
 | forms | approved/forms.png, forms-2.png | Forms rail: fill on the page with the field list and progress, and Prepare form with the floating field strip and the selected field's properties in the rail (forms-r1 a-rail) |
 | a11y | (none: image tool at its limit; built from rounds/a11y-r1/spec.md) | Accessibility rail: result line, rules under Acrobat's seven groups, Fix and Show, inline alt text with thumbnail, Fix all with predicted outcome, Autotag card (a11y-r1 a-rail) |
+| pdfa | (none: image tool at its limit; built from rounds/pdfa-r1/spec.md) | Preflight rail: profile select, verdict with segmented bar, outcome card (fix-group checklist, predicted outcome line, new file or in place), rules under their groups with clause chip, Show and Fix; claim badge in Document properties (pdfa-r1 a-rail + c-ticket checklist) |
 | print | approved/print.png | Print sheet: centred modal, preview left, one calm option column right, outcome line beside Print (print-r1 a-sheet) |
 
 2026-10-10, history-r1: the user asked for "the most standard way" of showing versions and diffs (Google Docs / Word
@@ -53,6 +54,31 @@ inkwell chose a-rail from the spec, with c-proof's one-line summary and block li
 Read | Edit | Organize pill plus the right rail (one rail at a time). Screens: docs/screens/edit/. Details in
 rounds/edit-r1/spec.md; build notes in docs/text-edit.md.
 
+
+2026-10-11, compare-r1: three ideas (a-stage Acrobat-like setup page then result, b-rail pdfcraft-like dialog and one shaded
+document, c-tape one sheet with a change tape); only a-stage rendered (image tool limit) and inkwell picked it: "Acrobat's
+standard layout: side by side, with the change list on the right". Our touches: dashed connectors between matching changes,
+chips that filter, linked page strips. The main navbar stays; the render's own top bar does not. The Compare modes are now
+Side by side / Slider / Overlay (history-2.png still shows the old labels). Details in rounds/compare-r1/spec.md.
+
+2026-10-11, a11y-r1: three ideas (a-rail Acrobat's categories in an Inkwell rail, b-todo sorted by what you can do, c-onpage
+problems outlined on the page). The image tool was at its usage limit, so nothing was rendered and inkwell picked from the
+spec text: a-rail, plus two things from b-todo: the predicted outcome on the "Fix all safe issues" button ("Fix 3 issues ·
+after this 12 of 15 pass") and, under a failed Figures alternate text finding, an inline alt-text field with the figure's
+thumbnail (no dialog). c-onpage dropped. No approved image exists; screens of the build are in docs/screens/a11y/.
+Details in rounds/a11y-r1/spec.md; build notes in docs/a11y.md.
+
+2026-10-11, pdfa-r1: the a-rail (Preflight as a right rail like Accessibility) was confirmed, with one touch from c-ticket: in
+the outcome card a checklist of the fix groups, each ticked by default with its own count, and unticking one updates the
+predicted outcome line live. Appearance (what changes how pages look) is the one group that starts unticked. No image
+was rendered (the image tool was at its limit); screens of the build are in docs/screens/pdfa/. Details in
+rounds/pdfa-r1/spec.md; build notes and the coverage list in docs/pdfa.md.
+
+2026-10-11, links-r1: three ideas (a-tabs Links and Bookmarks as tabs of the Edit rail, b-canvas a popover from the drawn
+link plus an editable sidebar outline, c-ledger an audit board with state dots). The image tool was at its usage limit, so no
+renders were made; inkwell chose a-tabs from the spec with two touches: the left sidebar outline is the same bookmark editor
+while Edit is open (b-canvas), and state dots plus a "Show problems" filter for broken and external destinations
+(c-ledger). Screens: docs/screens/bookmarks/. Details in rounds/links-r1/spec.md; build notes in docs/bookmarks-links.md.
 
 2026-10-11, compare-r1: three ideas (a-stage Acrobat-like setup page then result, b-rail pdfcraft-like dialog and one shaded
 document, c-tape one sheet with a change tape); only a-stage rendered (image tool limit) and inkwell picked it: "Acrobat's

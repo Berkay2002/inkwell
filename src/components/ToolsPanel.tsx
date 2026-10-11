@@ -21,9 +21,11 @@ import {
   unsureReason,
 } from "../lib/ocrLogic";
 import { parseRange } from "../lib/pageRange";
+import { validateOptions, visualVerdict } from "../lib/optimizer";
 import { fileName, formatBytes, type OcrScope, type Sheet, useTools } from "../lib/toolsStore";
 import type { DocState } from "../store";
 import { Icon } from "./Icons";
+import { Advanced, AdvancedEstimate, UsageChange } from "./OptimizerPanel";
 import "./tools.css";
 
 /**
@@ -76,10 +78,20 @@ function sizeText(e: CompressEstimate) {
 function CompressOptions({ sheet }: { sheet: Sheet }) {
   const a = sheet.audit;
   const bytes = (c: string) => a?.audit.categories.find((x) => x.category === c)?.bytes ?? 0;
+  const advanced = sheet.mode === "advanced";
+  const invalid = advanced && (sheet.advanced == null || validateOptions(sheet.advanced) != null);
   return (
     <>
       <div className="ax-body tl-body">
-        <div className="tl-presets" role="radiogroup" aria-label="Preset">
+        <div className="ax-seg tl-seg" role="radiogroup" aria-label="Compress mode">
+          {(["presets", "advanced"] as const).map((m) => (
+            <button key={m} role="radio" aria-checked={sheet.mode === m} className={sheet.mode === m ? "on" : ""} onClick={() => st().setMode(m)}>
+              {m === "presets" ? "Presets" : "Advanced"}
+            </button>
+          ))}
+        </div>
+        {advanced && <Advanced sheet={sheet} />}
+        {!advanced && <div className="tl-presets" role="radiogroup" aria-label="Preset">
           {PRESETS.map((p) => {
             const est = sheet.estimates?.find((x) => x.preset === p.id);
             return (
@@ -99,27 +111,57 @@ function CompressOptions({ sheet }: { sheet: Sheet }) {
               </button>
             );
           })}
-        </div>
-        <p className="dim tl-now">
-          {a ? (
-            <>
-              Now <b className="tl-mono">{formatBytes(a.size)}</b>: images {formatBytes(bytes("images"))}, fonts {formatBytes(bytes("fonts"))}
-            </>
-          ) : (
-            "Looking at what is in the file…"
-          )}
+        </div>}
+        {!advanced && (
+          <p className="dim tl-now">
+            {a ? (
+              <>
+                Now <b className="tl-mono">{formatBytes(a.size)}</b>: images {formatBytes(bytes("images"))}, fonts {formatBytes(bytes("fonts"))}
+              </>
+            ) : (
+              "Looking at what is in the file…"
+            )}
+          </p>
+        )}
+        <p className="dim small">
+          Sizes are estimates; the result shows the real size. The original is never changed
+          {advanced ? ", and the copy is checked page by page against it." : "."}
         </p>
-        <p className="dim small">Sizes are estimates; the result shows the real size. The original is never changed.</p>
         {sheet.needsSave && <p className="dim small">This document has unsaved changes. They are saved first.</p>}
         {a?.outputExists && <p className="dim small">The usual name is taken; you will be asked for another one.</p>}
+        {a?.signed && (
+          <p className="tl-warn small">This document is signed. The compressed copy is a new file: its signatures will not be valid.</p>
+        )}
       </div>
       <div className="tl-foot">
-        <button className="ax-btn primary tl-wide" disabled={!a} onClick={() => void st().start()}>
+        {advanced && <AdvancedEstimate sheet={sheet} />}
+        <button className="ax-btn primary tl-wide" disabled={!a || invalid} onClick={() => void st().start()}>
           Compress
         </button>
       </div>
     </>
   );
+}
+
+/** What the run took out, in words: only the options that were on and found something. */
+function changes(r: NonNullable<Sheet["compressed"]>): string[] {
+  const s = r.stripped;
+  const out: string[] = [];
+  if (!s) return out;
+  const n = (v: number, one: string, many: string) => v > 0 && out.push(`${v} ${v === 1 ? one : many}`);
+  if (s.metadata) out.push("Document information and metadata");
+  if (s.bookmarks) out.push("Bookmarks");
+  n(s.thumbnails, "page thumbnail", "page thumbnails");
+  n(s.embeddedFiles, "attachment", "attachments");
+  n(s.javascript, "JavaScript action", "JavaScript actions");
+  n(s.formActions, "form action", "form actions");
+  n(s.alternateImages, "alternate image list", "alternate image lists");
+  n(s.privateData, "private data entry", "private data entries");
+  n(s.links, "link", "links");
+  n(s.invalidLinks, "link that led nowhere", "links that led nowhere");
+  n(r.unembedded?.files ?? 0, "font file unembedded", "font files unembedded");
+  n(r.flattened?.pages.length ?? 0, "page flattened", "pages flattened");
+  return out;
 }
 
 function CompressDone({ sheet }: { sheet: Sheet }) {
@@ -144,13 +186,20 @@ function CompressDone({ sheet }: { sheet: Sheet }) {
         </div>
         <p className="tl-big">{r.keptOriginal ? "Could not be made smaller" : `Saved ${Math.round(r.savedPercent)}%`}</p>
         {r.keptOriginal && <p className="dim small">Every setting made this file bigger, so the copy is identical to the original.</p>}
-        <p className="dim">
-          {v == null
-            ? "The visual check was skipped."
-            : v.maxDiff <= 8
-              ? `Looks the same: largest difference ${Math.round(v.maxDiff)} of 255.`
-              : `Slightly different: largest difference ${Math.round(v.maxDiff)} of 255.`}
-        </p>
+        {changes(r).length > 0 && (
+          <p className="dim small" aria-label="Removed">
+            Removed or changed: {changes(r).join(", ")}.
+          </p>
+        )}
+        {r.before && r.after && <UsageChange before={r.before} after={r.after} />}
+        {v == null ? (
+          <p className="dim">The visual check was skipped.</p>
+        ) : (
+          (() => {
+            const verdict = visualVerdict(v);
+            return <p className={verdict.level === "different" ? "tl-bad" : "dim"}>{verdict.text}</p>;
+          })()
+        )}
         <p className="dim small tl-file" title={r.output}>
           {fileName(r.output)}
         </p>

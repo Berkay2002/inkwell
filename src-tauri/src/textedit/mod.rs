@@ -9,16 +9,16 @@
 pub mod app;
 pub(crate) mod bundled;
 pub(crate) mod content;
-mod encodings;
+pub(crate) mod encodings;
 mod font;
 mod layout;
 pub(crate) mod text;
 
 pub use text::{Align, Fallback, Issue, RunChange, TextChange};
+pub(crate) use content::Matrix;
 
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
-use content::Matrix;
 use mupdf::pdf::PdfDocument;
 use serde::{Deserialize, Serialize};
 

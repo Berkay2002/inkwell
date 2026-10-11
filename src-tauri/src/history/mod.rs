@@ -11,5 +11,6 @@ pub use retention::plan_retention;
 pub use store::{CDC, SessionGuard, Store, chunks, default_root};
 pub use types::*;
 
-#[cfg(test)]
+// DPAPI and NTFS: the store tests run on Windows only.
+#[cfg(all(test, windows))]
 mod tests;

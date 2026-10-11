@@ -36,7 +36,7 @@ scripts/marks-shots.mjs`). Study of Acrobat's marks: `docs/study/15-page-marks.m
   until the step runs). Nothing is drawn over a page whose file mark already equals the sheet.
 - **Outcome sentence** above the button: "Adds 'Lease agreement' to the top right and 'Page 1 of 12' to the bottom
   right of 12 pages." (`outcome()` in `marksStore.ts`).
-- Entry: Tools menu (Header & footer…, Watermark…, Background…, Bates numbering…) and the command palette
+- Entry: the All tools panel (Header & footer, Watermark, Background, Bates numbering) and the command palette
   ("Add header and footer…", "Add page numbers…", "Add watermark…", "Add background…", "Add Bates numbering…").
 
 ## How a mark is stored

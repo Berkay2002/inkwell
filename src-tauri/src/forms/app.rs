@@ -1,9 +1,10 @@
 //! Tauri commands for forms. The UI is the user; the assistant calls the functions in `super` with its turn.
 
 use super::{
-    Detected, FieldPatch, FieldValue, FormDto, NewField, add_many, add_one, arrange_one, delete_many, detect_one, edit_one, list_all, move_one, reset_one,
-    set_value_one, tab_order_one,
+    Detected, FieldPatch, FieldValue, FormDto, NewField, ScriptsState, Stepped, add_many, add_one, arrange_one, calc_order_one, delete_many, detect_one, edit_one, list_all,
+    move_one, reset_report, scripts_enable, scripts_state, set_value_report, tab_order_one,
 };
+use super::af::{self, Format};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use serde::Serialize;
@@ -29,18 +30,34 @@ pub async fn forms_list(eng: Eng<'_>, doc: DocId) -> Result<FormDto> {
     blocking(move || list_all(&eng, doc)).await
 }
 
-/// Fill a field. A value that fails the field's format or range is an error carrying Acrobat's message.
+/// Fill a field. A value that fails the field's format or range (or a script that rejects it) is an
+/// error carrying Acrobat's message. Returns the edit state with the `alerts` and `requests` the field
+/// scripts raised (a request is only ever acted on after the person agrees).
 #[tauri::command]
-pub async fn forms_set_value(eng: Eng<'_>, doc: DocId, page: u32, xref: i32, value: FieldValue) -> Result<EditState> {
+pub async fn forms_set_value(eng: Eng<'_>, doc: DocId, page: u32, xref: i32, value: FieldValue) -> Result<Stepped> {
     let eng = eng.inner().clone();
-    blocking(move || set_value_one(&eng, doc, page, xref, &value, EditSource::User)).await
+    blocking(move || set_value_report(&eng, doc, page, xref, &value, EditSource::User)).await
 }
 
 /// Reset the listed fields (widget xrefs), or the whole form when `fields` is absent ("Clear form").
 #[tauri::command]
-pub async fn forms_reset(eng: Eng<'_>, doc: DocId, fields: Option<Vec<i32>>) -> Result<EditState> {
+pub async fn forms_reset(eng: Eng<'_>, doc: DocId, fields: Option<Vec<i32>>) -> Result<Stepped> {
     let eng = eng.inner().clone();
-    blocking(move || reset_one(&eng, doc, fields, EditSource::User)).await
+    blocking(move || reset_report(&eng, doc, fields, EditSource::User)).await
+}
+
+/// Whether the file has scripts, whether they run, and the script log (`{level, field?, message}`).
+#[tauri::command]
+pub async fn forms_scripts(eng: Eng<'_>, doc: DocId) -> Result<ScriptsState> {
+    let eng = eng.inner().clone();
+    blocking(move || scripts_state(&eng, doc)).await
+}
+
+/// Turns the scripts of this open file on or off (kept in memory, on by default).
+#[tauri::command]
+pub async fn forms_scripts_enable(eng: Eng<'_>, doc: DocId, on: bool) -> Result<ScriptsState> {
+    let eng = eng.inner().clone();
+    blocking(move || scripts_enable(&eng, doc, on)).await
 }
 
 #[tauri::command]
@@ -77,6 +94,26 @@ pub async fn forms_edit(eng: Eng<'_>, doc: DocId, page: u32, xref: i32, patch: F
 pub async fn forms_delete(eng: Eng<'_>, doc: DocId, items: Vec<(u32, i32)>) -> Result<EditState> {
     let eng = eng.inner().clone();
     blocking(move || delete_many(&eng, doc, &items, EditSource::User)).await
+}
+
+/// Runs the calculated fields in this order (`nodes` are the `node` of each field; unlisted calculated fields follow).
+#[tauri::command]
+pub async fn forms_calc_order(eng: Eng<'_>, doc: DocId, nodes: Vec<i32>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || calc_order_one(&eng, doc, &nodes, EditSource::User)).await
+}
+
+/// What a format makes of a sample entry, for the live preview beside the Format pickers. An empty `sample` takes a default
+/// one. Null for no format and for a custom script.
+#[tauri::command]
+pub fn forms_format_preview(format: Format, sample: String) -> Option<FormatPreview> {
+    af::format_preview(&format, &sample).map(|(sample, shown)| FormatPreview { sample, shown })
+}
+
+#[derive(Serialize)]
+pub struct FormatPreview {
+    pub sample: String,
+    pub shown: String,
 }
 
 /// The page's widgets in this order (widget xrefs); others follow.

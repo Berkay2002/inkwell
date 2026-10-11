@@ -1,7 +1,8 @@
 import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
+import { commandFor } from "../../lib/commands";
 import { useForms } from "../../lib/forms";
 import {
-  type ButtonAction, type Field, type FieldValue, type Handle, type Rect4, HANDLES, KIND_LABEL, cssColor, dragged, fontSize,
+  type ButtonAction, type Field, type FieldValue, type Handle, type Rect4, HANDLES, KIND_LABEL, commitThenRun, cssColor, dragged, fontSize,
   isCalculated, move, onPage, resetTargets, resize,
 } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
@@ -193,7 +194,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
 
   if (f.kind === "checkbox" || f.kind === "radio") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <button
           className={cls}
           role={f.kind}
@@ -209,21 +210,21 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
   }
   if (f.kind === "button") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <button className={cls} aria-label={label} title={buttonTitle(f)} onClick={() => run(docId, f.action, all)} />
       </div>
     );
   }
   if (f.kind === "signature") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <div className={cls} role="img" aria-label={label} title={`${label} (signing is not available here)`} />
       </div>
     );
   }
   if (f.kind === "list") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <select
           className={cls}
           multiple
@@ -247,7 +248,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
   if (f.kind === "combo" && !f.editable) {
     const cur = f.values[0] ?? "";
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <select className={cls} aria-label={label} title={label} disabled={locked} value={cur} onChange={(e) => void commit(e.target.value)}>
           <option value="" />
           {cur && !f.options.some((o) => o.export === cur) && <option value={cur}>{cur}</option>}
@@ -260,7 +261,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
     );
   }
   return (
-    <div className="fm-cell" style={css}>
+    <div className="fm-cell" style={css} data-fm-xref={f.xref}>
       <TextEditor f={f} className={cls} label={label} locked={locked} onCommit={commit} onChange={() => setErr(null)} />
       {bubble}
     </div>
@@ -314,7 +315,12 @@ function TextEditor({ f, className, label, locked, onCommit, onChange }: {
   };
   const keys = (multi: boolean) => (e: React.KeyboardEvent) => {
     e.stopPropagation();
-    if (e.key === "Escape") {
+    // Save while typing: the typed value is committed first (it would only commit on blur), then the save runs.
+    const cmd = commandFor(e.nativeEvent);
+    if (cmd?.id === "save" || cmd?.id === "save-as") {
+      e.preventDefault();
+      void commitThenRun(live.current.v, f.value, onCommit, () => cmd.run());
+    } else if (e.key === "Escape") {
       show(f.value);
       onChange();
       (e.target as HTMLElement).blur();

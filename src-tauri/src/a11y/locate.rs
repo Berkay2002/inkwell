@@ -41,7 +41,7 @@ pub fn annot_box(page: &PdfObject, annot: &PdfObject) -> Result<Option<Box4>> {
     Ok(to_box(bbox_of(&page.page_ctm()?, r)))
 }
 
-fn mcid_of(op: &Op, res: Option<&PdfObject>) -> Result<Option<i32>> {
+pub(super) fn mcid_of(op: &Op, res: Option<&PdfObject>) -> Result<Option<i32>> {
     Ok(match op.operands.get(1) {
         Some(d @ Operand::Dict(_)) => d.get(b"MCID").map(|m| m.num() as i32),
         Some(Operand::Name(n)) => match res {
@@ -56,6 +56,43 @@ fn mcid_of(op: &Op, res: Option<&PdfObject>) -> Result<Option<i32>> {
         },
         _ => None,
     })
+}
+
+/// Where each marked-content id's text starts on the page: the origin of its first text-showing
+/// operator, in page space (top left, y down). Top-level content only; used to find the text of a
+/// tagged heading, since the bounds above know nothing of text.
+pub fn mcid_text_origins(page: &PdfObject) -> Result<HashMap<i32, [f32; 2]>> {
+    let page_ctm = page.page_ctm()?;
+    let res = page.get_dict_inheritable("Resources")?.filter(|r| r.is_dict().unwrap_or(false));
+    let ops = content::parse(&page_content(page)?);
+    let mut out: HashMap<i32, [f32; 2]> = HashMap::new();
+    let mut ctm = page_ctm.clone();
+    let mut stack: Vec<Matrix> = Vec::new();
+    let mut marks: Vec<Option<i32>> = Vec::new();
+    let mut pos = content::TextPos::default();
+    for op in &ops {
+        match op.name.as_slice() {
+            b"q" => stack.push(ctm.clone()),
+            b"Q" => ctm = stack.pop().unwrap_or_else(|| page_ctm.clone()),
+            b"cm" => ctm = content::matrix(op) * &ctm,
+            b"BMC" => marks.push(None),
+            b"BDC" => marks.push(mcid_of(op, res.as_ref())?),
+            b"EMC" => {
+                marks.pop();
+            }
+            _ => {}
+        }
+        pos.apply(op);
+        if content::shows(op) {
+            if let Some(m) = marks.iter().rev().find_map(|m| *m) {
+                out.entry(m).or_insert_with(|| {
+                    let (x, y) = (pos.tm.clone() * &ctm).transform_xy(0.0, 0.0);
+                    [x, y]
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The bounds of the painted marked content of one page, by MCID (top-level content only).
