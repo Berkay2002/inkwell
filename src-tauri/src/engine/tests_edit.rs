@@ -882,8 +882,8 @@ fn the_first_edit_lane_read_does_not_load_every_pages_annotations() {
     let count = eng.read_custom(id, |doc| Ok(doc.page_count()?)).unwrap();
     let first = t.elapsed();
     assert_eq!(count, pages as i32);
-    // ~55 s before the fix (debug); tens of milliseconds after. The bound is generous for a loaded CI box.
-    assert!(first.as_secs() < 5, "first read took {first:?}");
+    // 62 s before the fix (debug), milliseconds after. The bound is generous for a loaded CI box.
+    assert!(first < std::time::Duration::from_secs(5), "first read took {first:?}");
     eprintln!("first read_custom on {pages} pages x 20000 annotations: {first:?}");
 
     // A step on the opened base, undone back to it: the base step's sizes are the ones the open read.
