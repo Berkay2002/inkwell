@@ -122,6 +122,8 @@ Three states, all in the panel:
 * The provider's mark (OpenAI for Codex, Claude for Claude Code; simple-icons, CC0, drawn in the text
   colour, `providerMarks.tsx`, noted in `third_party/THIRD-PARTY-NOTICES.txt`) is on the toolbar toggle,
   the picker, its menu rows and the sign-in / consent cards.
+  Screens (`scripts/provider-shots.mjs`, the real status of the installed CLI):
+  `docs/screens/assistant/provider-claude-{light,dark}.png` and `provider-picker-claude-{light,dark}.png`.
 * Consent is per provider: "Send this document to Anthropic?" for Claude, with the note
   "Uses your Claude Code login; usage counts against your Claude plan."
 
@@ -159,4 +161,7 @@ contract (the provider only ever sees extracted text, never the file, so no user
 | cancel after the first delta | `Cancelled`, the same child still alive for the next question | — |
 
 The CLI's own `initialize` answer listed 13 models (aliases `default`, `opus`, `fable`, `sonnet`,
-`haiku`, plus pinned ids) with their effort levels; `claude-haiku-4-5-20251001` has none.
+`haiku`, plus pinned ids) with their effort levels; `claude-haiku-4-5-20251001` has none. The alias
+`haiku` is shown by the CLI as **"Haiku 5.5"** (efforts low to max), so the new default reads
+"Haiku 5.5 · Medium" in the picker. The child was started with `--autocompact 100k`: the CLI's
+`--help` listed the flag, it was accepted, and all four steps above ran with it.

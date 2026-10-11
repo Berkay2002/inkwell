@@ -278,7 +278,10 @@ describe("assistant store", () => {
       expect(useAi.getState().chats[1].messages).toEqual([]);
     });
 
-    it("asks for consent for each provider separately", () => {
+    // switching renews the model thread first: a question is sent once that is done
+    const settled = () => new Promise((r) => setTimeout(r, 0));
+
+    it("asks for consent for each provider separately", async () => {
       useAi.getState().setSettings({ consent: true });
       useAi.getState().setProvider(1, "claude");
       useAi.getState().ask(1, { kind: "ask", question: "q" });
@@ -286,19 +289,22 @@ describe("assistant store", () => {
       expect(useAi.getState().pending?.doc).toBe(1);
       useAi.getState().grantConsent();
       expect(useAi.getState().settings.claudeConsent).toBe(true);
+      await settled();
       expect(vi.mocked(ai.aiAsk).mock.calls[0][2]).toBe("claude");
     });
 
-    it("sends Claude only a model and effort its own list offers", () => {
+    it("sends Claude only a model and effort its own list offers", async () => {
       useAi.getState().setSettings({ consent: true, claudeConsent: true, model: "gpt-x", effort: "xhigh", claudeModel: "haiku", claudeEffort: "high" });
       useAi.setState({ statuses: { claude: claudeStatus } });
       useAi.getState().setProvider(1, "claude");
       useAi.getState().ask(1, { kind: "ask", question: "q" });
+      await settled();
       // haiku has no efforts: the effort is dropped, never the Codex one
       expect(vi.mocked(ai.aiAsk).mock.calls[0][1]).toMatchObject({ model: "haiku", effort: null });
       emit({ kind: "cancelled" });
       useAi.getState().setSettings({ claudeModel: "gpt-x" }); // an id from another provider
       useAi.getState().ask(1, { kind: "ask", question: "q2" });
+      await settled();
       expect(vi.mocked(ai.aiAsk).mock.calls[1][1]).toMatchObject({ model: null, effort: null });
     });
 

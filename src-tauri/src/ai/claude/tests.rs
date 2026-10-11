@@ -836,6 +836,11 @@ fn live_with_the_installed_claude() {
     eprintln!("status: installed={} logged_in={} version={:?} plan={:?} error={:?}", st.installed, st.logged_in, st.version, st.plan, st.error);
     eprintln!("models: {:?}", st.models.iter().map(|m| (&m.id, &m.name, &m.efforts)).collect::<Vec<_>>());
     assert!(st.installed && st.logged_in, "{st:?}");
+    // the installed CLI lists `--autocompact`, so every child below is started with `--autocompact 100k`
+    // (a CLI that did not accept it would exit at once and the turns would fail)
+    let l = r.p.launch().expect("claude found");
+    assert!(r.p.knows_autocompact(&l, &r.p.env_for_child()), "--autocompact not listed by this claude");
+    eprintln!("autocompact: listed by --help, passed as {AUTOCOMPACT}");
 
     let summary = |what: &str, ev: &[ChatEvent]| match ev.last().unwrap() {
         ChatEvent::Done { answer, usage, first_token_ms, total_ms, chunks_sent, .. } => eprintln!(
