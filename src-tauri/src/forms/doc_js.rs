@@ -698,6 +698,8 @@ fn set_step(doc: &mut PdfDocument, w: Where, index: usize, source: &str) -> Resu
     match steps.get(index) {
         // A later step is edited where it is; the head is replaced below, so an action object the file shares
         // (one /AA /O for many pages, or a link too) is not changed under the others.
+        // shortcut: a later step of a /Next chain that other actions share is changed for all of them, only the head is
+        // copied; copy the chain up to the edited step (new actions linked by /Next) if shared chains turn up.
         Some(step) if index > 0 && is_js(step) => {
             let mut step = step.clone();
             step.dict_put("JS", js_string(doc, source)?)?;

@@ -48,6 +48,9 @@ compiles the text in a throwaway engine without evaluating it.
   not JavaScript is shown by what it does and left alone, except a first step, which saving a script replaces.
 - A script over 1 MiB is shown as too large and is not read; over 256 KiB it is stored and listed but not syntax-checked,
   because the engine does not run one that long.
+- Replacing the first step of an action makes a new action, so a file that shares one action object between pages or
+  links is not changed under the others. A later step of a `/Next` chain is edited where it is: if other actions share
+  that chain they change too. The fix, if it matters, is to copy the chain up to the edited step.
 - A script with a syntax error can be saved after a confirm (Acrobat allows it); the status line gives line and column.
 - "What this file can do" is a word scan for `app.launchURL`, `submitForm`, `mailDoc`, `print`, `exportDataObject`,
   `importDataObject`, `getURL` and alert loops. A call built from pieces of text is not seen, so a clean header is not a
