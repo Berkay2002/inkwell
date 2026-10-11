@@ -31,7 +31,7 @@
 }
 .pp-note.bad,
 .pp-total b.bad {
-  color: var(--danger, #c0392b);
+  color: var(--danger);
 }
 .pp-plates {
   display: flex;
@@ -116,10 +116,10 @@
   cursor: pointer;
 }
 .pp-thumb:hover {
-  background: var(--hover, rgb(127 127 127 / 0.12));
+  background: var(--accent-soft);
 }
 .pp-thumb.on {
-  border-color: var(--accent, #3b82f6);
+  border-color: var(--accent);
 }
 .pp-thumb-page {
   display: block;
@@ -150,8 +150,8 @@
 .tac-region {
   position: absolute;
   box-sizing: border-box;
-  border: 2px solid #e5192e;
-  background: rgb(229 25 46 / 0.18);
+  border: 2px solid var(--pp-alert);
+  background: color-mix(in srgb, var(--pp-alert) 18%, transparent);
   pointer-events: none;
 }
 /* sheets */
@@ -189,7 +189,6 @@
   display: block;
   max-width: 100%;
   max-height: 100%;
-  background: var(--bg);
 }
 .pp-svg .pp-media,
 .pp-svg .pp-box {
@@ -198,33 +197,27 @@
   vector-effect: none;
 }
 .pp-svg .pp-media {
-  stroke: #8a8f98;
+  stroke: var(--pp-frame);
   stroke-dasharray: calc(4px * var(--k, 1));
 }
 .pp-svg .pp-bleed {
   fill: none;
-  stroke: #1f9d55;
+  stroke: var(--pp-bleed);
   stroke-width: calc(1px * var(--k, 1));
 }
 .pp-svg .pp-trim {
   fill: none;
-  stroke: #2563eb;
+  stroke: var(--pp-trim);
   stroke-width: calc(1px * var(--k, 1));
 }
 .pp-svg .pp-box.pp-crop {
-  stroke: #8a8f98;
+  stroke: var(--pp-frame);
 }
 .pp-svg .pp-box.pp-art {
-  stroke: #9333ea;
-}
-.pp-svg .pp-box.pp-trim {
-  stroke: #2563eb;
-}
-.pp-svg .pp-box.pp-bleed {
-  stroke: #1f9d55;
+  stroke: var(--pp-art);
 }
 .pp-svg .pp-box.pp-new {
-  stroke: #e5192e;
+  stroke: var(--pp-alert);
   stroke-width: calc(1.5px * var(--k, 1));
 }
 .pp-caption {
