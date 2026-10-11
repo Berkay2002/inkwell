@@ -1,3 +1,4 @@
+pub mod a11y;
 pub mod ai;
 pub mod annot;
 pub mod forms;
@@ -11,6 +12,7 @@ pub mod ocr;
 pub mod paths;
 pub mod recents;
 pub mod redact;
+pub mod textedit;
 pub mod tools;
 
 use engine::cache::TileKey;
@@ -763,6 +765,8 @@ pub fn run() {
             export_start,
             create_start,
             discard_scratch,
+            a11y::app::a11y_check,
+            a11y::app::a11y_fix,
             annot::app::annot_default_author,
             annot::app::annot_list,
             annot::app::annot_add,
@@ -781,6 +785,8 @@ pub fn run() {
             forms::app::forms_tab_order,
             forms::app::forms_arrange,
             forms::app::forms_detect,
+            textedit::app::text_blocks,
+            textedit::app::text_edit,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

@@ -6,3 +6,7 @@ Adapted files carry a header naming the pdfcraft path:
 - src-tauri/src/convert/create.rs <- crates/create/src/lib.rs   (text decoding and wrapping rules, TIFF page handling)
 - src-tauri/src/forms/af.rs       <- crates/forms/src/af.rs       (AcroForm JavaScript subset: format, keystroke, validate, calculate)
 - src-tauri/src/forms/detect.rs   <- crates/forms/src/detect.rs   (field auto-detection on flat forms)
+- src-tauri/src/textedit/content.rs   <- crates/content/src/lib.rs   (content stream parser, splice, matrices)
+- src-tauri/src/textedit/font.rs      <- crates/fonts/src/pdf.rs     (font metrics, ToUnicode, encode)
+- src-tauri/src/textedit/encodings.rs <- crates/fonts/src/encodings.rs (single-byte encodings, glyph names)
+- src-tauri/src/textedit/text.rs      <- crates/edit/src/text.rs     (text lines, blocks, block rewrite)

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
-import { requestClose } from "../lib/edit";
+import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { useConvert } from "../lib/convertStore";
 import { useTools } from "../lib/toolsStore";
@@ -98,6 +98,20 @@ export function Toolbar({ doc }: { doc: DocState }) {
   const zoomValue = doc.zoomMode === "custom" ? String(Math.round(doc.zoom * 100) / 100) : doc.zoomMode;
   const presets = ZOOM_STEPS.filter((z) => z >= 0.25 && z <= 8);
   const custom = doc.zoomMode === "custom" && !presets.some((z) => Math.abs(z - doc.zoom) < 0.005);
+
+  // Organize keeps the same toolbar; only the viewer's own controls give way to undo and redo.
+  if (doc.organize)
+    return (
+      <div className="toolbar">
+        <ModeSwitch doc={doc} />
+        <span className="sep" />
+        <Btn icon="undo" title={doc.undoLabel ? `Undo ${doc.undoLabel} (Ctrl+Z)` : "Undo (Ctrl+Z)"} disabled={!doc.undoLabel} onClick={() => void undo(id)} />
+        <Btn icon="redo" title={doc.redoLabel ? `Redo ${doc.redoLabel} (Ctrl+Y)` : "Redo (Ctrl+Y)"} disabled={!doc.redoLabel} onClick={() => void redo(id)} />
+        <span className="grow" />
+        <Btn icon={themeIcon[theme]} title={`Theme: ${theme}`} onClick={() => st().setTheme(nextTheme[theme])} />
+        <Btn icon="command" title={`Command palette${keys("palette")}`} onClick={() => st().setUi({ paletteOpen: true })} />
+      </div>
+    );
 
   return (
     <div className="toolbar">
