@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
-import { applyState, queued, undo } from "./edit";
+import { applyState, queued } from "./edit";
 import { usePlates } from "./platesView";
 import {
   type BoxKind,
@@ -557,13 +557,14 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       const s = sheet<ConvertSheet>("convert");
       const d = s && st().docs[s.doc];
       if (!s || !d || s.phase !== "unsaved") return;
-      // another step may have landed since (an undo, the assistant): then no conversion is on top to take back
-      if (d.rev === s.convertedRev) {
-        try {
-          await undo(s.doc);
-        } catch (e) {
-          return patchSheet<ConvertSheet>("convert", { error: msg(e) });
-        }
+      try {
+        // `queued` hands a failure back (the shared undo shows it on the error line and carries on). The check is
+        // made in the queue: another step may have landed since (an undo, the assistant), and then no conversion
+        // is on top to take back.
+        const after = await queued(s.doc, async () => (st().docs[s.doc]?.rev === s.convertedRev ? api.editUndo(s.doc) : null));
+        if (after) applyState(s.doc, after);
+      } catch (e) {
+        return patchSheet<ConvertSheet>("convert", { error: msg(e) });
       }
       if (sheet<ConvertSheet>("convert")?.phase === "unsaved") set({ sheet: null });
     },

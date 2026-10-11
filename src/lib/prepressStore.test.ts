@@ -12,11 +12,12 @@ vi.hoisted(() => {
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn(), message: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({}) }));
-vi.mock("./edit", () => ({ queued: vi.fn((_doc: number, f: () => unknown) => f()), applyState: vi.fn(), undo: vi.fn(() => Promise.resolve()) }));
+vi.mock("./edit", () => ({ queued: vi.fn((_doc: number, f: () => unknown) => f()), applyState: vi.fn() }));
 vi.mock("./api", () => ({
   pickSave: vi.fn(),
   saveDocument: vi.fn(),
   editState: vi.fn(),
+  editUndo: vi.fn(),
   toolCancel: vi.fn(() => Promise.resolve()),
   discardScratch: vi.fn(() => Promise.resolve(true)),
 }));
@@ -39,7 +40,7 @@ vi.mock("./prepressApi", () => ({
 
 import { useStore } from "../store";
 import * as api from "./api";
-import { applyState, undo } from "./edit";
+import { applyState } from "./edit";
 import { usePlates, viewFailed } from "./platesView";
 import { prepressApi, type PageBoxes } from "./prepressApi";
 import { toPt } from "./prepressLogic";
@@ -262,14 +263,16 @@ describe("Convert Colors", () => {
       expect(st().sheet).toMatchObject({ phase: "unsaved", closing: true });
       st().closeSheet();
       expect(st().sheet).toMatchObject({ phase: "unsaved", closing: false });
-      expect(undo).not.toHaveBeenCalled();
+      expect(api.editUndo).not.toHaveBeenCalled();
     });
 
     it("Undo takes the conversion back and closes", async () => {
       await unsaved();
+      vi.mocked(api.editUndo).mockResolvedValue(state(3));
       st().closeSheet();
       await st().undoConversion();
-      expect(undo).toHaveBeenCalledExactlyOnceWith(1);
+      expect(api.editUndo).toHaveBeenCalledExactlyOnceWith(1);
+      expect(applyState).toHaveBeenLastCalledWith(1, state(3));
       expect(st().sheet).toBeNull();
     });
 
@@ -277,7 +280,7 @@ describe("Convert Colors", () => {
       await unsaved();
       st().closeSheet();
       st().keepConversion();
-      expect(undo).not.toHaveBeenCalled();
+      expect(api.editUndo).not.toHaveBeenCalled();
       expect(st().sheet).toBeNull();
     });
 
@@ -286,13 +289,13 @@ describe("Convert Colors", () => {
       useStore.setState((s) => ({ docs: { ...s.docs, 1: { ...s.docs[1], rev: 5 } } }));
       st().closeSheet();
       await st().undoConversion();
-      expect(undo).not.toHaveBeenCalled();
+      expect(api.editUndo).not.toHaveBeenCalled();
       expect(st().sheet).toBeNull();
     });
 
     it("keeps the sheet and says so when the undo fails", async () => {
       await unsaved();
-      vi.mocked(undo).mockRejectedValueOnce("Nothing to undo");
+      vi.mocked(api.editUndo).mockRejectedValueOnce("Nothing to undo");
       st().closeSheet();
       await st().undoConversion();
       expect(st().sheet).toMatchObject({ phase: "unsaved", error: "Nothing to undo" });
