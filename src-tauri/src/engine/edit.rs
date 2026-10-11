@@ -1185,10 +1185,15 @@ impl Engine {
         let ed = self.lane(&entry, &mut lane)?;
         let after = ed.steps[..=ed.cur].iter().rposition(|s| s.exact).map_or(0, |i| i + 1);
         let signed = ed.steps[..=ed.cur].iter().any(|s| s.signed);
-        if ed.steps[after..=ed.cur].iter().any(|s| s.redacts || (s.drops && !signed)) {
-            return Err(invalid("save the document before signing it"));
-        }
-        let base = ed.bytes();
+        // Signs exactly what Save would write: with removed pages or redactions pending, the
+        // rewritten file, so nothing they took out survives in the signed bytes.
+        let full;
+        let base: &[u8] = if !ed.step().exact && ed.steps[after..=ed.cur].iter().any(|s| s.redacts || (s.drops && !signed)) {
+            full = write_doc(&open_snap(&ed.step().snap, &entry)?.doc, rewrite_opts(), ed.step().snap.len)?;
+            &full
+        } else {
+            ed.bytes()
+        };
         let out = catch_unwind(AssertUnwindSafe(|| f(base))).unwrap_or(Err(EngineError::Panic))?;
         if out.len() <= base.len() || out[..base.len()] != *base {
             return Err(invalid("the signed file does not extend the document"));

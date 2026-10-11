@@ -823,6 +823,13 @@ fn check(v: &PdfObject, bytes: &[u8], out: &mut SignatureInfo, trust: &Trust) ->
     out.cert_not_after = format!("{:?}", cert.not_after);
     out.cert_fingerprint = cert.fingerprint();
     let digest = alg.digest(&[&bytes[..b], &bytes[c..c + d]]);
+    // Detached: the signed attributes commit to the document through messageDigest.
+    if sd.content.is_some() {
+        return Err(SignError::Unsupported("signatures that embed their content aren't checked yet".into()));
+    }
+    if sd.signer.signed_attrs.is_some() && sd.signer.message_digest.as_deref() != Some(&digest[..]) {
+        return Err(SignError::Crypto("the document was changed after it was signed, or the signature is damaged".into()));
+    }
     if !sd.verify_signature(&cert, &digest)? {
         return Err(SignError::Crypto("the document was changed after it was signed, or the signature is damaged".into()));
     }
