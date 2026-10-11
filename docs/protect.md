@@ -32,6 +32,9 @@ the edit-core steps in `src-tauri/src/engine/edit/security.rs`, UI in `src/compo
 - Permission bits follow the PDF spec: print 3, modify 4, copy 5, annotate 6, forms 9, accessibility 10, assemble
   11, high-quality print 12. `Rights::from_p` / `permission()` map both ways; "Pages" = assemble, "Forms" =
   forms, "Comments" = annotate + forms, "All except extracting" = modify + annotate + forms + assemble.
+  Checked against Acrobat's own output (`docs/study/11-protect.md`): identical except that Acrobat leaves bit 11
+  clear for "All except extracting" (and still reports assembly allowed); we keep it set, which is the more
+  permissive and spec-correct choice for strict readers.
 - `SecurityInfo` (what the UI reads): method, revision, open password, the rights, `restricted`, `unlocked` (the
   session may change it without asking), `origin` (file / set here / removed here) and `unsaved`.
 - The vendored mupdf wrapper's `PdfDocument::permissions()` used to report *everything allowed* for every
@@ -52,4 +55,6 @@ Errors: `needs-permissions-password`, `bad-permissions-password` (from the engin
   decided from the rights the session received, not from the password's name.
 - Restoring an old encrypted version (`reloadInPlace`) can't ask for the password again.
 - No batch protect, no certificate (public-key) security, no "encrypt attachments only" / "all except metadata"
-  choices (Acrobat's classic dialog has them).
+  choices (Acrobat's classic dialog has them; it writes `/EncryptMetadata false` for the latter).
+- The strength meter is Weak / Fair / Strong over five segments; Acrobat's is Weak / Medium / Strong / Best over
+  four (thresholds in the study note). Left as designed.
