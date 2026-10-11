@@ -1285,6 +1285,14 @@ impl Engine {
         Ok(lane.as_ref().map_or_else(|| clean_state(&entry), |ed| ed.state(&entry)))
     }
 
+    /// The file as Save would write it now, with every step applied (signatures are validated
+    /// against these bytes). A rewrite pending from deleted pages or redactions is not applied.
+    pub fn current_bytes(&self, id: DocId) -> Result<Vec<u8>> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        Ok(self.lane(&entry, &mut lane)?.bytes().to_vec())
+    }
+
     /// What Save would write for the current content, `None` when there are no unsaved edits
     /// (for the version history's autosave before a restore discards them).
     pub fn unsaved_bytes(&self, id: DocId) -> Result<Option<Vec<u8>>> {

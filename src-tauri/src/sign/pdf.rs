@@ -111,8 +111,8 @@ pub fn sign(base: &[u8], id: &DigitalId, req: &SignRequest) -> Result<Vec<u8>> {
     }
     let date = req.date.clone().unwrap_or_else(|| SignDate::now(0));
     let alg = id.key.preferred_digest();
-    let reserve = 8192 + id.certificate.raw.len() + id.chain.iter().map(|c| c.raw.len()).sum::<usize>();
-    let name = id.certificate.display_name();
+    let reserve = 8192 + id.cert.raw.len() + id.chain.iter().map(|c| c.raw.len()).sum::<usize>();
+    let name = id.cert.display_name();
 
     // The signature dictionary.
     let mut v = format!(
@@ -246,7 +246,7 @@ pub fn sign(base: &[u8], id: &DigitalId, req: &SignRequest) -> Result<Vec<u8>> {
     br.resize(BR_MARK.len(), b' ');
     out[br_at..br_at + BR_MARK.len()].copy_from_slice(&br);
     let digest = alg.digest(&[&out[..start], &out[end..]]);
-    let cms = cms::sign_detached(&id.key, &id.certificate, &id.chain, alg, &digest)?;
+    let cms = cms::sign_detached(&id.key, &id.cert, &id.chain, alg, &digest)?;
     if cms.len() > reserve {
         return Err(refuse("the signature does not fit its placeholder"));
     }
