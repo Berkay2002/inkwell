@@ -123,6 +123,11 @@ opening any of those closes it (`src/lib/commentRail.ts`).
   or leaving Edit), so one undo step per block session. A format control sends the typed text together with its change.
   While nothing new was typed, Ctrl+Z / Ctrl+Y in the editor are the document's undo and redo; with typed text they
   are the field's own.
+- **Typed text is never dropped silently**: closing a tab or the window, switching tabs, opening Organize and
+  leaving Edit send it first (`setLeaveGuard` in `edit.ts`), so the document is dirty and the usual Save prompt
+  follows. A change the engine refuses (a character no font can show) keeps its draft and block with a notice; leaving
+  the block again drops it, and closing asks first. A refused new box stays the same way.
+- **Selection follows its block** across undo, redo and restored versions by position, or is dropped with its draft.
 - **Move and rewrap**: the grip above the frame moves the block, the side handles rewrap it to a new width.
 - **Rail**: Add content (Text tool; Image is a dimmed "soon" slot for the image engine in `cloud-image-edit`);
   Format text: a one-line summary of what is selected, the font shown honestly (read-only) with B / I (standard face),

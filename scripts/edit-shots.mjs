@@ -226,8 +226,19 @@ check("size and colour survive reopening", back && back.size > sizeBefore + 2 &&
 await both("edit-reopened");
 
 // ---- typed text is not lost on close: Ctrl+W sends it first, then asks about the unsaved edit ----
-// The native "Save changes?" dialog is stubbed at the page's invoke (answering Cancel): no OS-level input.
-await ev(`(() => { const i = window.__TAURI_INTERNALS__; window.__dlg = []; const o = i.invoke.bind(i); i.invoke = (cmd, args, opts) => cmd === "plugin:dialog|message" ? (window.__dlg.push(args), Promise.resolve("Cancel")) : o(cmd, args, opts); })()`);
+// The native "Save changes?" dialog is answered at the page's fetch (IPC goes through it; `invoke` itself is
+// read-only): Cancel, no OS-level input.
+await ev(`(() => {
+  window.__dlg = [];
+  const real = window.fetch.bind(window);
+  window.fetch = (url, opts) => {
+    if (!decodeURIComponent(String(url)).includes("plugin:dialog|message")) return real(url, opts);
+    const b = opts && opts.body;
+    const text = typeof b === "string" ? b : b ? new TextDecoder().decode(b) : "";
+    window.__dlg.push({ message: text });
+    return Promise.resolve(new Response(JSON.stringify("Cancel"), { headers: { "content-type": "application/json" } }));
+  };
+})()`);
 const before = withText(await blocks(), "revised");
 const [bx0, by0, bx1, by1] = before.rect;
 const pb = await ev(`(() => { const r = document.querySelector(".page[data-page='0']").getBoundingClientRect(); return { left: r.left, top: r.top, w: r.width }; })()`);
@@ -238,7 +249,7 @@ await typeOver(`${before.text} guarded`);
 check("the text is typed but not yet sent", (await edit()).draft?.text?.endsWith("guarded") === true);
 await key("w", "KeyW", 87, CTRL);
 await settle(async () => (await ev(`window.__dlg.length`)) > 0, "close prompt");
-const asked = await ev(`String(window.__dlg[0].message)`);
+const asked = await ev(`window.__dlg[0].message`);
 check("closing asks about the unsaved edit instead of dropping it", /Save the changes/.test(asked), asked);
 check("the typed text was sent first", (await blocks()).some((b) => b.text.endsWith("guarded")), JSON.stringify((await blocks()).map((b) => b.text)));
 check("Cancel keeps the tab open", (await ev(`${S}.getState().active != null`)) === true);
