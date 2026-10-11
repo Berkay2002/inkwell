@@ -483,23 +483,68 @@ pub fn list(eng: &Engine, doc: DocId) -> Result<Bookmarks> {
     eng.read_custom(doc, |d| read(d, entry.generation()))
 }
 
+/// The entries of an array object, at most `max` of them; nothing for anything else.
+fn array_items(a: Option<PdfObject>, max: usize) -> Vec<PdfObject> {
+    let Some(a) = a.filter(|a| a.is_array().unwrap_or(false)) else { return Vec::new() };
+    (0..a.len().unwrap_or(0).min(max) as i32).filter_map(|i| a.get_array(i).ok().flatten()).collect()
+}
+
+/// The `/V` of every signature field that has one, found in the AcroForm's field tree. Bounded (each field once per state,
+/// a cap on fields and on what is waiting), and a damaged node is skipped, never an error.
+fn signature_values(form: &PdfObject) -> Vec<PdfObject> {
+    const CAP: usize = 20_000;
+    let mut found = Vec::new();
+    let mut todo: Vec<(PdfObject, bool)> = array_items(form.get_dict("Fields").ok().flatten(), CAP).into_iter().map(|f| (f, false)).collect();
+    // Once per (field, inherited type): the same field reached from two parents is read in both states.
+    let mut seen: HashSet<(i32, bool)> = HashSet::new();
+    let mut budget = CAP;
+    while let Some((field, inherited)) = todo.pop() {
+        budget -= 1;
+        if budget == 0 {
+            break;
+        }
+        if field.is_indirect().unwrap_or(false) && !field.as_indirect().is_ok_and(|n| seen.insert((n, inherited))) {
+            continue;
+        }
+        if !field.resolve().ok().flatten().is_some_and(|d| d.is_dict().unwrap_or(false)) {
+            continue;
+        }
+        let kind = name_of(field.get_dict("FT").ok().flatten());
+        let is_sig = if kind.is_empty() { inherited } else { kind == "Sig" };
+        if is_sig {
+            found.extend(field.get_dict("V").ok().flatten());
+        }
+        let room = CAP.saturating_sub(todo.len());
+        todo.extend(array_items(field.get_dict("Kids").ok().flatten(), room).into_iter().map(|k| (k, is_sig)));
+    }
+    found
+}
+
+/// The `/P` of the `/DocMDP` transform in a signature's `/Reference` array (2 when it names none, or one outside
+/// 1..=3); `None` when the signature has no such transform. Several: the strictest, whatever the order.
+fn reference_p(sig: &PdfObject) -> Option<i32> {
+    array_items(sig.get_dict("Reference").ok().flatten(), 16)
+        .iter()
+        .filter(|r| name_of(r.get_dict("TransformMethod").ok().flatten()) == "DocMDP")
+        .map(|r| {
+            let p = r.get_dict("TransformParams").ok().flatten().and_then(|t| t.get_dict("P").ok().flatten());
+            number(&p).map(|v| v as i32).filter(|v| (1..=3).contains(v)).unwrap_or(2)
+        })
+        .min()
+}
+
 /// The document is certified (a `/DocMDP` signature): any change to it, even to its bookmarks, would
 /// void the certification. Its `/P`: 1 no changes, 2 forms and signing, 3 also annotations.
+/// The catalog's `/Perms /DocMDP` is where a certification is recorded and wins when it exists; failing that, a
+/// signature field whose `/V` has a `/DocMDP` `/Reference` certifies it too (the lowest `/P` of those).
 pub(crate) fn certified(doc: &PdfDocument) -> Result<Option<i32>> {
-    let Some(perms) = doc.catalog()?.get_dict("Perms")? else { return Ok(None) };
-    let Some(sig) = perms.get_dict("DocMDP")? else { return Ok(None) };
-    let mut p = 2;
-    if let Some(refs) = sig.get_dict("Reference")?.filter(|r| r.is_array().unwrap_or(false)) {
-        for i in 0..refs.len()?.min(16) as i32 {
-            let Some(r) = refs.get_array(i)? else { continue };
-            if name_of(r.get_dict("TransformMethod")?) == "DocMDP" {
-                if let Some(v) = number(&r.get_dict("TransformParams")?.and_then(|t| t.get_dict("P").ok().flatten())) {
-                    p = v as i32;
-                }
-            }
-        }
+    let cat = doc.catalog()?;
+    let perms = cat.get_dict("Perms")?.and_then(|p| p.get_dict("DocMDP").ok().flatten());
+    if let Some(sig) = perms.filter(|s| !s.is_null().unwrap_or(true)) {
+        return Ok(Some(reference_p(&sig).unwrap_or(2)));
     }
-    Ok(Some(p))
+    let Some(form) = cat.get_dict("AcroForm").ok().flatten() else { return Ok(None) };
+    Ok(signature_values(&form).iter().filter_map(reference_p).min())
 }
 
 /// The document is signed: `/AcroForm /SigFlags` bit 1, a certification (`/Perms`), or a signature
@@ -518,42 +563,7 @@ fn signed_inner(doc: &PdfDocument) -> Result<bool> {
     if number(&form.get_dict("SigFlags")?).is_some_and(|f| f as i32 & 1 != 0) {
         return Ok(true);
     }
-    // Any field with `/FT /Sig` and a `/V`, found in the field tree (bounded: each field once).
-    let mut todo: Vec<(PdfObject, bool)> = Vec::new();
-    if let Some(fields) = form.get_dict("Fields")?.filter(|f| f.is_array().unwrap_or(false)) {
-        for i in 0..fields.len()?.min(10_000) as i32 {
-            if let Some(f) = fields.get_array(i)? {
-                todo.push((f, false));
-            }
-        }
-    }
-    let mut seen: HashSet<i32> = HashSet::new();
-    let mut budget = 20_000;
-    while let Some((field, inherited)) = todo.pop() {
-        budget -= 1;
-        if budget < 0 {
-            break;
-        }
-        if field.is_indirect()? && !seen.insert(field.as_indirect()?) {
-            continue;
-        }
-        if !field.resolve().ok().flatten().is_some_and(|d| d.is_dict().unwrap_or(false)) {
-            continue;
-        }
-        let kind = name_of(field.get_dict("FT")?);
-        let is_sig = if kind.is_empty() { inherited } else { kind == "Sig" };
-        if is_sig && field.get_dict("V")?.is_some() {
-            return Ok(true);
-        }
-        if let Some(kids) = field.get_dict("Kids")?.filter(|k| k.is_array().unwrap_or(false)) {
-            for i in 0..kids.len()?.min(10_000) as i32 {
-                if let Some(k) = kids.get_array(i)? {
-                    todo.push((k, is_sig));
-                }
-            }
-        }
-    }
-    Ok(false)
+    Ok(!signature_values(&form).is_empty())
 }
 
 // ---- writing ----

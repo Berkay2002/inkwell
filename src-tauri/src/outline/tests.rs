@@ -719,6 +719,86 @@ fn a_certified_document_keeps_its_bookmarks() {
     assert_eq!(titles(&list(&eng, id).unwrap().items), ["A"]);
 }
 
+/// `certified` and `signed` of a file whose catalog carries `catalog` and whose objects 7, 8, ... are `objs`.
+fn certification_of(name: &str, catalog: &str, objs: &[&str]) -> (Option<i32>, bool) {
+    let d = dir("outline", name);
+    let items: Vec<String> = objs.iter().map(|o| o.to_string()).collect();
+    let pdf = outline_pdf_with(catalog, "<< /Type /Outlines /Count 0 >>", &items);
+    let (eng, id, _) = open_bytes(&d, "c.pdf", &pdf);
+    eng.read_custom(id, |doc| Ok((certified(doc)?, signed(doc)))).unwrap()
+}
+
+/// A signature value whose `/Reference` holds `refs` (raw dictionaries).
+fn sig_value(refs: &str) -> String {
+    format!("/V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> /Reference [ {refs} ] >>")
+}
+
+fn doc_mdp(params: &str) -> String {
+    format!("<< /Type /SigRef /TransformMethod /DocMDP {params} >>")
+}
+
+#[test]
+fn a_signature_field_that_certifies_the_document_is_seen_like_the_catalog_entry() {
+    let form = "/AcroForm << /SigFlags 3 /Fields [7 0 R] >>";
+    let field = |refs: &str| format!("<< /FT /Sig /T (S) {} >>", sig_value(refs));
+    // The catalog's entry: P read, default 2, one that makes no sense is 2 as well.
+    let cat = |p: &str| format!("/Perms << /DocMDP << /Type /Sig /Reference [ {} ] >> >>", doc_mdp(p));
+    assert_eq!(certification_of("cat-1", &cat("/TransformParams << /P 1 >>"), &[]), (Some(1), true));
+    assert_eq!(certification_of("cat-default", &cat(""), &[]), (Some(2), true));
+    assert_eq!(certification_of("cat-null", "/Perms << /DocMDP null >>", &[]).0, None);
+    // The field's own reference: P 3, no /P (2), a /P outside 1..=3 (2).
+    let p3 = field(&doc_mdp("/TransformParams << /P 3 >>"));
+    assert_eq!(certification_of("field-3", form, &[&p3]), (Some(3), true));
+    let none = field(&doc_mdp("/TransformParams << /Type /TransformParams >>"));
+    assert_eq!(certification_of("field-default", form, &[&none]).0, Some(2));
+    assert_eq!(certification_of("field-no-params", form, &[&field(&doc_mdp(""))]).0, Some(2));
+    let wild = field(&doc_mdp("/TransformParams << /P 99 >>"));
+    assert_eq!(certification_of("field-99", form, &[&wild]).0, Some(2));
+    // Several references: the strictest, in whatever order they come.
+    let two = field(&format!("{} {}", doc_mdp("/TransformParams << /P 3 >>"), doc_mdp("/TransformParams << /P 1 >>")));
+    assert_eq!(certification_of("field-two", form, &[&two]).0, Some(1));
+    // A reference that is not a DocMDP certifies nothing.
+    let fmdp = field("<< /Type /SigRef /TransformMethod /FieldMDP /TransformParams << /Action /All >> >>");
+    assert_eq!(certification_of("field-fieldmdp", form, &[&fmdp]), (None, true));
+    // The catalog wins when both exist.
+    let both = format!("{form} {}", cat("/TransformParams << /P 1 >>"));
+    assert_eq!(certification_of("both", &both, &[&p3]).0, Some(1));
+    // A signature with a value and no DocMDP is signed, not certified; an empty field is neither.
+    let plain = format!("<< /FT /Sig /T (S) /V << /Type /Sig /ByteRange [0 10 20 30] /Contents <00> >> >>");
+    assert_eq!(certification_of("plain", form, &[&plain]), (None, true));
+    assert_eq!(certification_of("empty", "/AcroForm << /Fields [7 0 R] >>", &["<< /FT /Sig /T (S) >>"]), (None, false));
+}
+
+#[test]
+fn the_signature_type_and_value_are_found_through_the_field_tree() {
+    // /FT on the parent, the value on a kid of a kid.
+    let v = sig_value(&doc_mdp("/TransformParams << /P 3 >>"));
+    let objs = ["<< /FT /Sig /T (P) /Kids [8 0 R] >>".to_string(), "<< /Parent 7 0 R /Kids [9 0 R] >>".to_string(), format!("<< /Parent 8 0 R /T (K) {v} >>")];
+    let objs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    assert_eq!(certification_of("tree", "/AcroForm << /Fields [7 0 R] >>", &objs), (Some(3), true));
+    // Not a signature field: a text field's /V is not looked at.
+    let text = format!("<< /FT /Tx /T (T) {v} >>");
+    assert_eq!(certification_of("text-field", "/AcroForm << /Fields [7 0 R] >>", &[&text]), (None, false));
+}
+
+#[test]
+fn a_hostile_field_tree_is_walked_once_and_reads_nothing_it_should_not() {
+    let v = sig_value(&doc_mdp("/TransformParams << /P 1 >>"));
+    // 7 -> 8 -> 7 -> ..., a field that is its own kid, a kid that is not a dictionary, and a valued signature after them.
+    let objs = [
+        "<< /FT /Sig /T (A) /Kids [8 0 R 7 0 R 42 0 R 5 /Name (str)] >>".to_string(),
+        "<< /Parent 7 0 R /Kids [7 0 R 8 0 R 9 0 R] >>".to_string(),
+        format!("<< /Parent 8 0 R /T (B) {v} >>"),
+    ];
+    let objs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    assert_eq!(certification_of("loop", "/AcroForm << /Fields [7 0 R 7 0 R 8 0 R] >>", &objs), (Some(1), true));
+    let looped = ["<< /FT /Sig /Kids [8 0 R] >>", "<< /Kids [7 0 R] >>"];
+    assert_eq!(certification_of("loop-only", "/AcroForm << /Fields [7 0 R] >>", &looped), (None, false));
+    // /Fields that is not an array, and an AcroForm that is not a dictionary.
+    assert_eq!(certification_of("fields-name", "/AcroForm << /Fields /Nope >>", &[]).0, None);
+    assert_eq!(certification_of("acroform-int", "/AcroForm 12", &[]).0, None);
+}
+
 #[test]
 fn bookmarks_follow_their_pages_through_insert_move_and_delete() {
     use crate::engine::edit::EditOp;

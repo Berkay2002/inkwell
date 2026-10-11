@@ -550,20 +550,6 @@ pub(crate) fn locks_of(entries: &[Entry]) -> Vec<Lock> {
         .collect()
 }
 
-/// Whether a signature in the document certifies it (DocMDP `/P` 2 or 3, 2 when absent). Such a document allows form
-/// values to change, and nothing else: read-only, required, display, colours and text size would break the certification.
-fn certified(entries: &[Entry]) -> bool {
-    per_field(entries).into_iter().filter(|e| e.kind == FieldKind::Signature).any(|e| {
-        let Some(v) = geti(&e.field, "V").filter(|v| v.is_dict().unwrap_or(false)) else { return false };
-        let Some(refs) = get(&v, "Reference") else { return false };
-        (0..refs.len().unwrap_or(0).min(16) as i32).any(|i| {
-            let Some(r) = refs.get_array(i).ok().flatten() else { return false };
-            get(&r, "TransformMethod").as_ref().and_then(text).as_deref() == Some("DocMDP")
-                && matches!(get(&r, "TransformParams").and_then(|p| int_of(&p, "P")).unwrap_or(2), 2 | 3)
-        })
-    })
-}
-
 /// A script may not write to a signature widget, nor to a field a signature in the document covers.
 pub(crate) fn locked(locks: &[Lock], e: &Entry) -> bool {
     let named = |names: &[String]| names.iter().any(|n| e.name == *n || e.name.starts_with(&format!("{n}.")));
@@ -584,7 +570,9 @@ pub(crate) fn apply_changes(rt: &Rt, changed: &[FieldChange]) -> Result<Vec<u32>
     let doc = rt.doc();
     let entries = rt.entries()?;
     let locks = locks_of(entries);
-    let values_only = certified(entries);
+    // Certified with /P 2 or 3 (a certification in the catalog or on a signature): form values may change, nothing else.
+    // /P 1 is `reference_locks`' business.
+    let values_only = matches!(crate::outline::certified(doc)?, Some(2 | 3));
     let mut pages = Vec::new();
     for ch in changed {
         let new = &ch.state;

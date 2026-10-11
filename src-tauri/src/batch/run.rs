@@ -458,12 +458,7 @@ fn is_signed(doc: &mupdf::pdf::PdfDocument) -> bool {
     if ocr::is_signed(doc) {
         return true;
     }
-    let certified = doc
-        .catalog()
-        .ok()
-        .and_then(|c| c.get_dict("Perms").ok().flatten())
-        .is_some_and(|p| p.get_dict("DocMDP").ok().flatten().is_some_and(|d| !d.is_null().unwrap_or(true)));
-    certified
+    crate::outline::certified(doc).ok().flatten().is_some()
         || crate::forms::list(doc).is_ok_and(|f| {
             f.fields.iter().any(|f| {
                 f.kind == crate::forms::FieldKind::Signature
