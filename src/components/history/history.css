@@ -1050,3 +1050,49 @@
   background: var(--surface);
   border-top: 1px solid var(--border);
 }
+
+/* ---- compare: summary strip, progress ---- */
+.hx-csum {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px 10px;
+}
+.hx-csum strong {
+  margin-right: 6px;
+  font-size: 15px;
+}
+.hx-csum .hx-chip.btn {
+  height: 26px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.hx-csum .hx-chip.btn.on {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.hx-cprog {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 40px auto;
+  max-width: 360px;
+}
+.hx-cprog progress {
+  width: 100%;
+  height: 6px;
+  accent-color: var(--accent);
+}
+.hx-cmsg {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.hx-swap {
+  flex: none;
+}

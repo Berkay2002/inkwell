@@ -215,7 +215,15 @@ export const commands: Command[] = [
       h.openCompare({ doc: d.id, a: { kind: "version", id: a }, b: { kind: "current" } });
     }),
   },
-  { id: "compare-files", title: "Compare files\u2026", run: () => void pickAndCompareFiles() },
+  {
+    id: "compare-files",
+    title: "Compare files\u2026",
+    run: () => {
+      const s = st();
+      const d = s.active != null ? s.docs[s.active] : null;
+      void pickAndCompareFiles(d ? { id: d.id, name: d.name } : undefined);
+    },
+  },
   { id: "palette", title: "Command palette", keys: ["Ctrl+K"], run: () => st().setUi({ paletteOpen: true }) },
   { id: "ai-toggle", title: "AI Assistant: show or hide", keys: ["Ctrl+Shift+A"], needsDoc: true, run: () => useAi.getState().toggle() },
   { id: "ai-layout-cycle", title: "Assistant: next layout", keys: ["Ctrl+Shift+L"], needsDoc: true, run: () => useAi.getState().cycleMode() },

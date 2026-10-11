@@ -1097,3 +1097,40 @@ fn five_hundred_pages_compare_report_and_cancel() {
     assert_eq!(r, Err(DiffError::Cancelled));
     assert!(t.elapsed() < t_cmp, "cancel took {:?} vs full {t_cmp:?}", t.elapsed());
 }
+
+/// `INKWELL_SEED_DIR=<dir> cargo test --lib seed_compare_screens -- --ignored`. Writes the pairs scripts/compare-shots.mjs
+/// compares: `Lease v1.pdf` / `Lease v2.pdf` (text, formatting, image, added page, annotation) and `Big v1.pdf` / `Big v2.pdf`
+/// (1200 pages, 48 edited) for progress and cancel.
+#[test]
+#[ignore]
+fn seed_compare_screens() {
+    let dir = std::path::PathBuf::from(std::env::var("INKWELL_SEED_DIR").expect("INKWELL_SEED_DIR"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut v1 = base(4);
+    v1.pages[1].lines = vec![
+        (72.0, 740.0, "2. PARTIES".into()),
+        (72.0, 700.0, "This Residential Lease Agreement is made on 1 October 2026 between Maple Property Management".into()),
+        (72.0, 684.0, "AB (the Landlord) and the Tenant named below.".into()),
+        (72.0, 640.0, "2.3 Rent".into()),
+        (72.0, 620.0, "The rent is 12 400 SEK per month, due on the 25th of each month.".into()),
+        (72.0, 580.0, "2.4 Notice".into()),
+        (72.0, 560.0, "Either party may end this agreement with three months written notice.".into()),
+    ];
+    v1.pages[1].styled = vec![(72.0, 500.0, "Payment terms".into(), 12.0, [0.0, 0.0, 0.0], "F1")];
+    v1.pages[2].image = Some(40);
+    let mut v2 = v1.clone();
+    v2.pages[1].lines[4].2 = "The rent is 12 900 SEK per month, due on the 1st of each month.".into();
+    v2.pages[1].lines[6].2 = "Either party may end this agreement with two months written notice.".into();
+    v2.pages[1].styled = vec![(72.0, 500.0, "Payment terms".into(), 14.0, [0.18, 0.29, 0.56], "F2")];
+    v2.pages[2].image = Some(200);
+    v2.pages.push(PageSpec { lines: vec![(72.0, 740.0, "Signature page".into()), (72.0, 700.0, "Signed by the Tenant and the Landlord.".into())], ..Default::default() });
+    std::fs::write(dir.join("Lease v1.pdf"), build(&v1)).unwrap();
+    std::fs::write(dir.join("Lease v2.pdf"), build(&v2)).unwrap();
+    let big1 = base(1200);
+    let mut big2 = big1.clone();
+    for k in (0..1200).step_by(25) {
+        big2.pages[k].lines[3].2 = format!("this line was rewritten on page {}", k + 1);
+    }
+    std::fs::write(dir.join("Big v1.pdf"), build(&big1)).unwrap();
+    std::fs::write(dir.join("Big v2.pdf"), build(&big2)).unwrap();
+}

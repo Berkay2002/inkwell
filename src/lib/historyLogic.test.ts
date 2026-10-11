@@ -3,6 +3,7 @@ import type { Change, Comparison, VersionInfo } from "./history";
 import {
   alignRows,
   categoryCounts,
+  categoryOf,
   dayLabel,
   flatOrder,
   groupChanges,
@@ -10,12 +11,16 @@ import {
   inlineRuns,
   marksFor,
   matchesFilter,
+  differencesWord,
   mergeLine,
   pageChips,
   pageSummary,
+  progressFraction,
+  progressLabel,
   parentOf,
   rowOf,
   stepIndex,
+  summaryChips,
   toneOf,
   trackDays,
   uncovered,
@@ -144,7 +149,7 @@ describe("change lists", () => {
   });
 
   it("counts by category", () => {
-    expect(categoryCounts(changes)).toEqual({ text: 1, images: 0, annotations: 1, pages: 1, forms: 1, metadata: 1 });
+    expect(categoryCounts(changes)).toEqual({ text: 1, formatting: 0, images: 0, annotations: 1, pages: 1, forms: 1, metadata: 1 });
   });
 
   it("stepper wraps and starts from either end", () => {
@@ -277,5 +282,32 @@ describe("version track", () => {
     const vs = [ver("c", at(2026, 10, 10, 9)), ver("a", at(2026, 10, 9, 8)), ver("b", at(2026, 10, 9, 16)), ver("d", at(2026, 10, 10, 14))];
     const days = trackDays(vs, NOW);
     expect(days.map((d) => [d.label, d.items.map((v) => v.id)])).toEqual([["Yesterday", ["a", "b"]], ["Today", ["c", "d"]]]);
+  });
+});
+
+describe("compare summary and progress", () => {
+  it("formatting is its own category", () => {
+    const f = chg("formatChanged", { aPage: 0, bPage: 0, detail: { type: "format", text: "x", props: [{ name: "font", old: "Helvetica", new: "Times-Roman" }] } });
+    expect(categoryOf(f)).toBe("formatting");
+    expect(toneOf(f)).toBe("chg");
+    expect(categoryCounts([f, f]).formatting).toBe(2);
+  });
+
+  it("summary chips list only the categories with differences", () => {
+    const counts = categoryCounts([chg("textChanged"), chg("textChanged"), chg("pageAdded", { bPage: 3 })]);
+    expect(summaryChips(counts).map((c) => [c.label, c.n])).toEqual([["Text", 2], ["Pages", 1]]);
+    expect(differencesWord(0)).toBe("No differences");
+    expect(differencesWord(1)).toBe("1 difference");
+    expect(differencesWord(12)).toBe("12 differences");
+  });
+
+  it("progress words and fraction follow the engine's stages", () => {
+    expect(progressLabel(null)).toBe("Starting\u2026");
+    expect(progressLabel({ stage: "second", done: 3, total: 10 })).toBe("Reading the second file, page 3 of 10");
+    expect(progressLabel({ stage: "pages", done: 0, total: 500 })).toBe("Comparing page 1 of 500");
+    expect(progressFraction(null)).toBe(0);
+    expect(progressFraction({ stage: "first", done: 5, total: 10 })).toBeCloseTo(0.2);
+    expect(progressFraction({ stage: "pages", done: 250, total: 500 })).toBeCloseTo(0.9);
+    expect(progressFraction({ stage: "document", done: 0, total: 0 })).toBe(1);
   });
 });

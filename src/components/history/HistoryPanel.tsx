@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { pickOpen } from "../../lib/api";
 import { type Change, type Comparison, type VersionInfo, pickCompareFiles } from "../../lib/history";
 import {
   FILTERS,
@@ -40,8 +41,20 @@ export function HistoryToggle() {
 
 const baseName = (p: string) => p.split(/[\\/]/).pop() || "document";
 
-export async function pickAndCompareFiles() {
+/** With a document: pick one file to compare it against (the file is Before, the document After). Without: two files. */
+export async function pickAndCompareFiles(doc?: { id: number; name: string }) {
   try {
+    if (doc) {
+      const f = (await pickOpen(false, "compare"))[0];
+      if (!f) return;
+      useHistory.getState().openCompare({
+        doc: doc.id,
+        a: { kind: "picked", token: f.token },
+        b: { kind: "current" },
+        names: [baseName(f.path), doc.name],
+      });
+      return;
+    }
     const sel = await pickCompareFiles();
     if (!sel) return;
     useHistory.getState().openCompare({
@@ -114,7 +127,7 @@ function Header({ doc }: { doc: DocState }) {
           className="ax-icon"
           label="More"
           items={[
-            { label: "Compare files…", onSelect: () => void pickAndCompareFiles() },
+            { label: "Compare files…", onSelect: () => void pickAndCompareFiles({ id: doc.id, name: doc.name }) },
             ...(ready
               ? [
                   "sep" as const,
