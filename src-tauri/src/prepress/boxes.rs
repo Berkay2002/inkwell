@@ -107,16 +107,17 @@ pub struct PageBoxes {
 /// rounds half up to an int, a negative turns into 360 - n % 360, then it snaps to the nearest quarter turn
 /// with halves rounding up), so the sheet and the renderer agree on which side is the left.
 pub(crate) fn rotate_of(page: &PdfObject) -> Result<i32> {
-    let v = page.get_dict_inheritable("Rotate")?.and_then(|r| r.as_float().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
-    let mut r = (v + 0.5).floor().clamp(i32::MIN as f32 + 1.0, i32::MAX as f32) as i32;
-    if r < 0 {
-        r = 360 - (-r) % 360;
-    }
-    if r >= 360 {
-        r %= 360;
-    }
-    r = 90 * ((r + 45) / 90);
-    Ok(if r >= 360 { 0 } else { r })
+    let v = page.get_dict_inheritable("Rotate")?.and_then(|r| r.as_float().ok()).unwrap_or(0.0);
+    Ok(quarter_turn(v))
+}
+
+/// A /Rotate value as 0, 90, 180 or 270 (see [`rotate_of`]). `as i32` saturates; the rest is i64, so no value
+/// overflows (negating i32::MIN did).
+pub(super) fn quarter_turn(v: f32) -> i32 {
+    let v = if v.is_finite() { v } else { 0.0 };
+    let r = i64::from((v + 0.5).floor() as i32);
+    let r = r.rem_euclid(360);
+    (90 * ((r + 45) / 90) % 360) as i32
 }
 
 /// Reads the boxes of page `page` (0-based) of the document as it is now.

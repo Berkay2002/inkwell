@@ -989,15 +989,17 @@ fn margins_as_shown_follow_each_pages_own_turn() {
 fn the_documents_own_file_is_refused_by_name_link_and_case() {
     let (eng, doc, path) = open_at("own-file", &build("", &[("", RED)], &[]));
     let p = path.to_string_lossy().to_string();
-    assert!(super::app::not_own_file(&eng, doc, &p).is_err());
-    assert!(super::app::not_own_file(&eng, doc, &p.replace("doc.pdf", "../prepress-own-file/doc.pdf")).is_err());
+    assert!(eng.save_as_other(doc, &p).is_err());
+    assert!(eng.save_as_other(doc, &p.replace("doc.pdf", "../prepress-own-file/doc.pdf")).is_err());
     #[cfg(unix)]
     {
         let link = path.with_file_name("alias.pdf");
         std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert!(super::app::not_own_file(&eng, doc, &link.to_string_lossy()).is_err(), "a link to the file is the file");
+        assert!(eng.save_as_other(doc, &link.to_string_lossy()).is_err(), "a link to the file is the file");
     }
-    assert!(super::app::not_own_file(&eng, doc, &path.with_file_name("other.pdf").to_string_lossy()).is_ok());
+    let other = path.with_file_name("other.pdf");
+    assert!(eng.save_as_other(doc, &other.to_string_lossy()).is_ok());
+    assert!(other.exists(), "another name is written");
 }
 
 #[test]
@@ -1024,6 +1026,15 @@ fn rotate_snaps_the_way_mupdf_does() {
         // the engine's own page size agrees: a quarter turn swaps width and height
         let size = eng.edit_state(doc).unwrap().sizes[0];
         assert_eq!(size[0] > size[1], want % 180 == 90, "/Rotate {value}: {size:?}");
+    }
+}
+
+#[test]
+fn rotate_never_overflows_on_a_huge_value() {
+    use super::boxes::quarter_turn;
+    // the clamp keeps MuPDF's int: 1e30 is i32::MAX (127 degrees, so 90), -1e30 is i32::MIN (232, so 270; negating it overflowed)
+    for (v, want) in [(-1e30, 270), (1e30, 90), (f32::NEG_INFINITY, 0), (f32::NAN, 0), (-1.0, 0), (-90.0, 270), (-450.0, 270), (-2147483648.0, 270), (2147483647.0, 90)] {
+        assert_eq!(quarter_turn(v), want, "/Rotate {v}");
     }
 }
 
