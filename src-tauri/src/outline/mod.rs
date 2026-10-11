@@ -481,8 +481,8 @@ fn delete_tree(doc: &mut PdfDocument, it: &PdfObject, depth: usize) -> Result<u3
 
 fn label(op: &BookmarkOp) -> String {
     match op {
-        BookmarkOp::Add { title, .. } => format!("Add bookmark \"{}\"", short(title)),
-        BookmarkOp::Rename { title, .. } => format!("Rename bookmark to \"{}\"", short(title)),
+        BookmarkOp::Add { title, .. } => format!("Add bookmark \"{}\"", short(&clean_title(title))),
+        BookmarkOp::Rename { title, .. } => format!("Rename bookmark to \"{}\"", short(&clean_title(title))),
         BookmarkOp::Delete { ids } if ids.len() == 1 => "Delete bookmark".into(),
         BookmarkOp::Delete { ids } => format!("Delete {} bookmarks", ids.len()),
         BookmarkOp::Move { .. } => "Move bookmark".into(),
@@ -556,11 +556,16 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<(Option<i32>
             let mut root = root(doc)?.ok_or(EngineError::Stale)?;
             // Nested picks go with their ancestor: take the topmost ones only.
             let items: Vec<PdfObject> = ids.iter().map(|id| item(doc, *id)).collect::<Result<_>>()?;
+            // Decided before anything is deleted: a deleted item has no `/Parent` left to ask.
+            let mut nested = Vec::with_capacity(items.len());
             for it in &items {
                 let mut gone = false;
                 if let Some(p) = it.get_dict("Parent")? {
                     gone = ids.iter().any(|a| under(&p, *a));
                 }
+                nested.push(gone);
+            }
+            for (it, gone) in items.iter().zip(nested) {
                 if gone {
                     continue;
                 }
