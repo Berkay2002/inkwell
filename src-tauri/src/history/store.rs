@@ -810,17 +810,17 @@ impl Store {
             }
             #[cfg(windows)]
             {
-            use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW};
-            let wide = |p: &Path| {
-                use std::os::windows::ffi::OsStrExt;
-                p.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>()
-            };
-            let flags = MOVEFILE_WRITE_THROUGH | if overwrite { MOVEFILE_REPLACE_EXISTING } else { 0 };
-            // SAFETY: both are NUL-terminated wide strings that outlive the call.
-            if unsafe { MoveFileExW(wide(&tmp).as_ptr(), wide(dest).as_ptr(), flags) } == 0 {
-                let e = std::io::Error::last_os_error();
-                return Err(if matches!(e.raw_os_error(), Some(80 | 183)) { HistoryError::Exists } else { e.into() });
-            }
+                use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW};
+                let wide = |p: &Path| {
+                    use std::os::windows::ffi::OsStrExt;
+                    p.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>()
+                };
+                let flags = MOVEFILE_WRITE_THROUGH | if overwrite { MOVEFILE_REPLACE_EXISTING } else { 0 };
+                // SAFETY: both are NUL-terminated wide strings that outlive the call.
+                if unsafe { MoveFileExW(wide(&tmp).as_ptr(), wide(dest).as_ptr(), flags) } == 0 {
+                    let e = std::io::Error::last_os_error();
+                    return Err(if matches!(e.raw_os_error(), Some(80 | 183)) { HistoryError::Exists } else { e.into() });
+                }
             }
             Ok(())
         })();

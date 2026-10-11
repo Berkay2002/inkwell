@@ -795,7 +795,8 @@ pub async fn history_visual_diff(
     off(move || h.visual_diff(doc, &a, a_page, &b, b_page, scale.clamp(0.25, 4.0), &hints)).await
 }
 
-#[cfg(test)]
+// The history store needs DPAPI: Windows only.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use crate::history::Kind;
