@@ -742,6 +742,19 @@ impl PdfAnnotation {
         }
     }
 
+    /// Makes the encoded image (PNG, JPEG) the appearance of this stamp annotation; it fills the annotation's rect.
+    pub fn set_stamp_image(&mut self, image: &[u8]) -> Result<(), Error> {
+        self.ensure_attached()?;
+        let buffer = crate::Buffer::from_bytes(image)?;
+        unsafe {
+            ffi_try!(mupdf_pdf_set_annot_stamp_image_from_buffer(
+                context(),
+                self.inner.as_ptr(),
+                buffer.inner
+            ))
+        }
+    }
+
     pub fn filter(&mut self, mut opt: PdfFilterOptions) -> Result<(), Error> {
         self.ensure_attached()?;
         unsafe {

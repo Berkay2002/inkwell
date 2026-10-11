@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod annot;
+pub mod fillsign;
 pub mod compress;
 pub mod convert;
 pub mod diff;
@@ -773,6 +774,13 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            fillsign::app::fillsign_list,
+            fillsign::app::fillsign_add,
+            fillsign::app::fillsign_flatten,
+            fillsign::app::fillsign_saved_list,
+            fillsign::app::fillsign_saved_add,
+            fillsign::app::fillsign_saved_add_file,
+            fillsign::app::fillsign_saved_remove,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,
