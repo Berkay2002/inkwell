@@ -11,6 +11,7 @@ import { useSearch } from "./searchStore";
 import { type ToolItem } from "./toolsCatalog";
 import { useToolPrefs } from "./toolPrefs";
 import { openEditSection } from "./textEdit";
+import { useThreads } from "./threads";
 import { useTools } from "./toolsStore";
 
 /**
@@ -44,6 +45,20 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
       keywords: "bookmark outline contents navigation headings table of contents",
       command: "edit-bookmarks",
       onSelect: () => id !== undefined && openEditSection(id, "bookmarks"),
+    },
+    {
+      id: "articles",
+      group: "edit",
+      icon: "article",
+      label: "Article threads",
+      description: "Mark the reading order of columns across pages",
+      detail: "Drag over a column to start an article, then over each continuation. Readers can follow the article from column to column with Enter.",
+      keywords: "article thread bead column reading order flow follow newspaper magazine",
+      command: "articles",
+      onSelect: () => {
+        useStore.getState().setSidebar("articles");
+        useThreads.getState().setTool(true);
+      },
     },
     {
       id: "compress",

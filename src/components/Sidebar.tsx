@@ -8,6 +8,7 @@ import { useTools } from "../lib/toolsStore";
 import { type DocState, pageLabel, useStore } from "../store";
 import { AllToolsPanel } from "./AllTools";
 import { AttachmentsPanel } from "./AttachmentsPanel";
+import { ArticlesPanel } from "./threads/ArticlesPanel";
 import { Icon, type IconName } from "./Icons";
 import { ContextMenu, pageActions } from "./PageMenu";
 import { TileCanvas } from "./TileCanvas";
@@ -27,11 +28,14 @@ export function Sidebar({ doc }: { doc: DocState }) {
         <PanelTab name="thumbs" label="Pages" />
         <PanelTab name="outline" label="Outline" />
         <PanelTab name="attachments" label="Attachments" icon="paperclip" />
+        <PanelTab name="articles" label="Articles" icon="article" />
       </div>
       {panel === "thumbs" ? (
         <Thumbnails key={doc.id} doc={doc} />
       ) : panel === "outline" ? (
         <Outline key={doc.id} doc={doc} />
+      ) : panel === "articles" ? (
+        <ArticlesPanel key={doc.id} doc={doc} />
       ) : (
         <AttachmentsPanel key={doc.id} doc={doc} />
       )}
@@ -39,7 +43,7 @@ export function Sidebar({ doc }: { doc: DocState }) {
   );
 }
 
-function PanelTab({ name, label, icon }: { name: "thumbs" | "outline" | "attachments"; label: string; icon?: IconName }) {
+function PanelTab({ name, label, icon }: { name: "thumbs" | "outline" | "attachments" | "articles"; label: string; icon?: IconName }) {
   const on = useStore((s) => s.sidebar === name);
   return (
     <button

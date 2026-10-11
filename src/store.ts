@@ -12,7 +12,7 @@ import { useRecents } from "./recents";
 
 export type ZoomMode = "fitWidth" | "fitPage" | "custom";
 export type Theme = "system" | "light" | "dark";
-export type SidebarPanel = "none" | "thumbs" | "outline" | "attachments";
+export type SidebarPanel = "none" | "thumbs" | "outline" | "attachments" | "articles";
 export type Rect4 = [number, number, number, number];
 export type { Hit };
 
@@ -35,6 +35,8 @@ export interface NavRequest {
   page: number;
   /** Optional y offset inside the page, in points (unrotated page space). */
   y?: number;
+  /** Optional x offset inside the page, in points: the left edge to bring into view (reading an article). */
+  x?: number;
   nonce: number;
 }
 
@@ -103,7 +105,7 @@ interface Store {
   setZoom: (id: number, zoom: number) => void;
   setZoomMode: (id: number, m: ZoomMode) => void;
   rotate: (id: number, dir: 1 | -1) => void;
-  goTo: (id: number, page: number, y?: number) => void;
+  goTo: (id: number, page: number, y?: number, x?: number) => void;
   setSidebar: (p: SidebarPanel) => void;
   toggleSidebar: (p: Exclude<SidebarPanel, "none">) => void;
   setTheme: (t: Theme) => void;
@@ -307,11 +309,11 @@ export const useStore = create<Store>((set, get) => {
       if (d) get().patch(id, { rot: ((d.rot + dir + 4) % 4) as Rot });
     },
 
-    goTo: (id, page, y) => {
+    goTo: (id, page, y, x) => {
       const d = get().docs[id];
       if (!d) return;
       const p = clamp(Math.round(page), 0, d.pageCount - 1);
-      get().patch(id, { nav: { page: p, y, nonce: ++navNonce }, currentPage: p });
+      get().patch(id, { nav: { page: p, y, ...(x !== undefined ? { x } : {}), nonce: ++navNonce }, currentPage: p });
     },
 
     // Choosing a sidebar panel by any route hands the slot back from the All tools panel, even to the panel

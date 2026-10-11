@@ -1100,6 +1100,47 @@ export interface PageTrans {
   autoAdvance: number | null;
 }
 
+// ---- article threads ----
+
+export interface ThreadInfo {
+  title: string;
+  subject: string;
+  author: string;
+  keywords: string;
+}
+
+export interface ThreadBead {
+  /** The bead's object number: valid for the generation it was listed at. */
+  id: number;
+  page: number;
+  /** x0, y0, x1, y1 in points on the page as shown (y down). */
+  rect: [number, number, number, number];
+}
+
+export interface ArticleThread {
+  id: number;
+  title: string;
+  info: ThreadInfo;
+  beads: ThreadBead[];
+  /** Why the article cannot be edited (only Delete and Properties are offered), or null. */
+  damaged: string | null;
+}
+
+export const threadsList = (doc: number) => invoke<ArticleThread[]>("threads_list", { doc });
+export const threadStart = (doc: number, title: string, page: number, rect: ThreadBead["rect"]) =>
+  invoke<EditState>("thread_start", { doc, title, page, rect });
+/** `after`: the bead to put the new one behind; null puts it at the end. */
+export const threadBeadAdd = (doc: number, thread: number, after: number | null, page: number, rect: ThreadBead["rect"]) =>
+  invoke<EditState>("thread_bead_add", { doc, thread, after, page, rect });
+export const threadBeadMove = (doc: number, thread: number, bead: number, page: number, rect: ThreadBead["rect"]) =>
+  invoke<EditState>("thread_bead_move", { doc, thread, bead, page, rect });
+export const threadBeadDelete = (doc: number, thread: number, bead: number) =>
+  invoke<EditState>("thread_bead_delete", { doc, thread, bead });
+export const threadRemove = (doc: number, thread: number) => invoke<EditState>("thread_remove", { doc, thread });
+export const threadDescribe = (doc: number, thread: number, info: ThreadInfo) =>
+  invoke<EditState>("thread_describe", { doc, thread, info });
+export const threadMove = (doc: number, thread: number, to: number) => invoke<EditState>("thread_move", { doc, thread, to });
+
 export const transitionsList = (doc: number) => invoke<PageTrans[]>("transitions_list", { doc });
 export const transitionsSet = (doc: number, pages: number[], change: PageTrans) =>
   invoke<EditState>("transitions_set", { doc, pages, change });

@@ -15,6 +15,7 @@ import { ReadLinks } from "./ReadLinks";
 import { NaturalImage } from "./NaturalImage";
 import { TextEditLayer } from "./edit/TextEditLayer";
 import { FormLayer } from "./forms/FormLayer";
+import { ThreadLayer } from "./threads/ThreadLayer";
 import { TileCanvas } from "./TileCanvas";
 
 interface Props {
@@ -143,6 +144,7 @@ export const PageView = memo(function PageView(p: Props) {
       <AnnotLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <TextEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <LinkLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
+      <ThreadLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       {armed && (
         <div
           className="rd-capture"

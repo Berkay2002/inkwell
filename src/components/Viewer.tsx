@@ -149,6 +149,8 @@ export function Viewer({ doc }: { doc: DocState }) {
     const y = n.y !== undefined && rot === 0 ? n.y * zoom : -PAD;
     const s = el.current!;
     s.scrollTop = layout.tops[n.page] + y;
+    // reading an article: the bead's left edge comes into view (an upright view only, like y)
+    if (n.x !== undefined && rot === 0) s.scrollLeft = (layout.contentWidth - layout.widths[n.page]) / 2 + n.x * zoom - 24;
     track();
   }, [doc.nav, layout, rot, zoom]);
 

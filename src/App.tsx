@@ -18,6 +18,7 @@ import { RedactPanel } from "./components/redact/RedactPanel";
 import { SearchDriver, SearchPanel } from "./components/search/SearchPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
+import { ThreadHost } from "./components/threads/Threads";
 import { ConvertPanel } from "./components/ConvertPanel";
 import { MarksPanel } from "./components/MarksPanel";
 import { ProtectPanel, SecurityNotice } from "./components/ProtectPanel";
@@ -174,6 +175,7 @@ export default function App() {
                 <SecurityNotice doc={doc} />
                 <CommentTools doc={doc} />
                 <FormTools />
+                <ThreadHost doc={doc} />
                 <FormsBanner doc={doc} />
               </div>
               <ToolsPanel doc={doc} />

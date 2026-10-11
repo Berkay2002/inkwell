@@ -7,6 +7,7 @@ import { useRedact } from "./redact";
 import { useSearch } from "./searchStore";
 import { useAnnot } from "./annot";
 import { useForms } from "./forms";
+import { useThreads } from "./threads";
 import { useHistory } from "./historyStore";
 import { openCompareSetup } from "../components/history/HistoryPanel";
 import { pickOpen } from "./api";
@@ -42,6 +43,12 @@ const withDoc = (f: (d: DocState) => void) => () => {
   const d = activeDoc();
   if (d) f(d);
 };
+
+/** Article threads: the panel, with the Article tool in the hand (Esc puts it down). */
+function openArticles() {
+  st().setSidebar("articles");
+  useThreads.getState().setTool(true);
+}
 
 export async function openDialog() {
   for (const f of await pickOpen(true)) await st().openPath(f.path, f.token);
@@ -157,6 +164,12 @@ export const commands: Command[] = [
     title: "Attachments",
     needsDoc: true,
     run: () => st().setSidebar("attachments"),
+  },
+  {
+    id: "articles",
+    title: "Article threads",
+    needsDoc: true,
+    run: openArticles,
   },
   { id: "compress", title: "Compress file…", needsDoc: true, run: () => useTools.getState().open("compress") },
   { id: "ocr", title: "Recognize text (OCR)…", needsDoc: true, run: () => useTools.getState().open("ocr") },
@@ -340,6 +353,9 @@ export const commands: Command[] = [
     needsDoc: true,
     notInText: true,
     run: withDoc((d) => {
+      // the Article tool: Delete removes the selected bead, nothing else
+      const th = useThreads.getState();
+      if (th.tool && th.selected?.doc === d.id) return void th.removeBead(d.id, th.selected.thread, th.selected.bead);
       const f = useForms.getState();
       const field = f.open && f.authoring ? f.get(d.id).selected : null;
       if (field) return void f.remove(d.id, [field]);
