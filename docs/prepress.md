@@ -168,7 +168,10 @@ are not assistant tools. State is `src/lib/prepressStore.ts` (logic in `prepress
   first; the engine converts the open document and saves it there in the same command, so nothing can land
   between the two, the tab moves to the new file and the original on disk is untouched) or one undo step in the
   open document, which Save writes. If the write fails the conversion stays in the open document and the sheet
-  offers only the save again ("Save as...", `prepress_save_other`), never a second conversion.
+  offers only the save again ("Save as...", `prepress_save_other`), never a second conversion. Closing the sheet
+  then asks "Undo conversion / Keep", because a later Save would write CMYK over the original; Undo only acts while
+  the conversion is still the document's newest step. `prepress_save_other` checks the own file under the edit lane
+  (`Engine::save_as_other`). The sheets take focus on open, keep Tab inside, and give focus back on close.
 - **Printer's Marks** is a sheet with a live preview: the page, the marks, the new media box and the trim and
   bleed boxes, drawn from `prepress_marks_preview` (the same geometry `prepress_marks` writes). Which marks,
   line weight, length, distance from the trim, units, and all pages / this page / a range. One undo step.
