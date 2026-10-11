@@ -109,6 +109,7 @@ impl Source {
         if !crate::protect::Rights::from_p(self.doc.permissions().bits() as i32).may_extract() {
             return Err(RenderError::NoCopy);
         }
+        self.isolate(pages)?;
         for &index in pages {
             let page = self.doc.load_pdf_page(index as i32)?;
             match self.content {
@@ -122,6 +123,37 @@ impl Source {
         }
         self.doc.bake(self.content == Content::DocumentAndMarkups, true)?;
         Ok(&self.doc)
+    }
+
+    /// Makes baking touch only the pages being exported. MuPDF's bake writes each annotation's
+    /// appearance into the page's Resources/XObject, which pages often share, so a used page would
+    /// carry (and the writer graft) the comments of every other page. Unused pages lose their
+    /// /Annots and used pages get a Resources dict, and an XObject dict, of their own.
+    fn isolate(&mut self, pages: &[u32]) -> Result<(), RenderError> {
+        let count = self.doc.page_count()?.max(0) as u32;
+        for index in 0..count {
+            let mut page = self.doc.find_page(index as i32)?;
+            if !pages.contains(&index) {
+                page.dict_delete("Annots")?;
+                continue;
+            }
+            let Some(res) = page.get_dict_inheritable("Resources")? else { continue };
+            let mut own = self.doc.new_dict()?;
+            for k in 0..res.dict_len()? {
+                let (Some(key), Some(val)) = (res.get_dict_key(k as i32)?, res.get_dict_val(k as i32)?) else { continue };
+                own.dict_put(key, val)?;
+            }
+            let mut xobjects = self.doc.new_dict()?;
+            if let Some(shared) = res.get_dict("XObject")? {
+                for k in 0..shared.dict_len()? {
+                    let (Some(key), Some(val)) = (shared.get_dict_key(k as i32)?, shared.get_dict_val(k as i32)?) else { continue };
+                    xobjects.dict_put(key, val)?;
+                }
+            }
+            own.dict_put("XObject", xobjects)?;
+            page.dict_put("Resources", own)?;
+        }
+        Ok(())
     }
 
     /// Forgets the display lists of every page not in `keep` (a long job holds one sheet's pages).

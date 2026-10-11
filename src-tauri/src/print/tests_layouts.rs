@@ -210,13 +210,79 @@ fn dir(test: &str) -> PathBuf {
     d
 }
 
-fn open_fixture(d: &Path, pages: usize) -> (std::sync::Arc<Engine>, u32, PathBuf) {
-    let p = d.join("sample.pdf");
-    std::fs::write(&p, build(&Fixture { pages, ..Default::default() })).unwrap();
+fn open_bytes(d: &Path, name: &str, bytes: &[u8]) -> (std::sync::Arc<Engine>, u32, PathBuf) {
+    let p = d.join(name);
+    std::fs::write(&p, bytes).unwrap();
     let eng = Engine::new(1, 1 << 20);
     let (doc, r) = eng.open_pending(&p.to_string_lossy());
     r.unwrap();
     (eng, doc, p)
+}
+
+fn open_fixture(d: &Path, pages: usize) -> (std::sync::Arc<Engine>, u32, PathBuf) {
+    open_bytes(d, "sample.pdf", &build(&Fixture { pages, ..Default::default() }))
+}
+
+/// A PDF from object bodies, `objs[i]` being object `i + 1` (the catalog is object 1), with a real xref.
+fn raw_pdf(objs: &[String]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{body}\nendobj\n", i + 1).bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).bytes());
+    for o in offsets {
+        out.extend(format!("{o:010} 00000 n \n").bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).bytes());
+    out
+}
+
+fn stream(dict: &str, content: &str) -> String {
+    format!("<< {dict} /Length {} >>\nstream\n{content}\nendstream", content.len())
+}
+
+const HELV: &str = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+
+/// A one-page Letter PDF with Helvetica as /F1 (object 4), the page's `content` (object 5) and
+/// `extra` objects from number 6 on. `page` and `resources` add entries to the page and its
+/// resources, `catalog` to the catalog.
+fn one_page(content: &str, page: &str, resources: &str, catalog: &str, extra: &[String]) -> Vec<u8> {
+    let mut objs = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>"),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> {resources} >> /Contents 5 0 R {page} >>"
+        ),
+        HELV.to_string(),
+        stream("", content),
+    ];
+    objs.extend_from_slice(extra);
+    raw_pdf(&objs)
+}
+
+/// Some stream of the file at `path` (decoded) holds `needle`.
+fn streams_mention(path: &Path, needle: &str) -> bool {
+    let d = PdfDocument::open(path.to_string_lossy().as_ref()).unwrap();
+    (1..d.count_objects().unwrap() as i32).any(|i| {
+        let Ok(o) = d.new_indirect(i, 0) else { return false };
+        o.is_stream().unwrap_or(false) && o.read_stream().is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle.as_bytes()))
+    })
+}
+
+/// The first form XObject drawn on page `i` of the file at `path`.
+fn first_form(p: &PdfDocument, i: i32) -> mupdf::pdf::PdfObject {
+    let res = p.find_page(i).unwrap().get_dict("Resources").unwrap().unwrap();
+    res.get_dict("XObject").unwrap().unwrap().get_dict_val(0).unwrap().unwrap()
+}
+
+/// The words of page 0 of `path` as (text, x0, y0).
+fn words(path: &Path) -> Vec<(String, f64, f64)> {
+    let d = mupdf::Document::open(path.to_string_lossy().as_ref()).unwrap();
+    let t = d.load_page(0).unwrap().to_text_page(mupdf::TextPageFlags::empty()).unwrap();
+    t.words().iter().map(|w| (w.text.clone(), f64::from(w.bounds.x0), f64::from(w.bounds.y0))).collect()
 }
 
 fn settings(layout: Layout) -> Settings {
@@ -424,4 +490,186 @@ fn the_open_file_cannot_be_the_target_and_cancel_writes_nothing() {
     let bad = Settings { range: Range::Pages { text: "9".into() }, ..s };
     assert!(save(&eng, doc, &bad, &d.join("bad.pdf")).is_err());
     assert!(!d.join("bad.pdf").exists());
+}
+
+// ------------------------------------------------------- review follow-ups
+
+#[test]
+fn pages_not_exported_leave_no_comments_in_a_shared_resources_dict() {
+    let d = dir("shared-annots");
+    // two pages sharing one Resources object; the comment is on page 2
+    let objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 >>".to_string(),
+        "<< /Font << /F1 6 0 R >> >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources 3 0 R /Contents 7 0 R >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources 3 0 R /Contents 8 0 R /Annots [9 0 R] >>".to_string(),
+        HELV.to_string(),
+        stream("", "BT /F1 24 Tf 72 700 Td (PAGEONE) Tj ET"),
+        stream("", "BT /F1 24 Tf 72 700 Td (PAGETWO) Tj ET"),
+        "<< /Type /Annot /Subtype /Square /Rect [100 100 300 300] /F 4 /C [1 0 0] /AP << /N 10 0 R >> >>".to_string(),
+        stream("/Type /XObject /Subtype /Form /BBox [0 0 200 200] /Resources << /Font << /F1 6 0 R >> >>", "BT /F1 18 Tf 10 100 Td (SECRETNOTE) Tj ET"),
+    ];
+    let (eng, doc, _) = open_bytes(&d, "shared.pdf", &raw_pdf(&objs));
+    let base = Settings { content: Content::DocumentAndMarkups, ..settings(Layout::default()) };
+    let export = |range: &str, name: &str| {
+        let out = d.join(name);
+        save(&eng, doc, &Settings { range: Range::Pages { text: range.into() }, ..base.clone() }, &out).unwrap();
+        out
+    };
+    // control: the comment is in the file when its page is exported
+    let two = export("2", "two.pdf");
+    assert!(streams_mention(&two, "SECRETNOTE"));
+    // page 1 alone: nothing of page 2's comment, in any object or in the page's forms
+    let one = export("1", "one.pdf");
+    assert!(streams_mention(&one, "PAGEONE"));
+    assert!(!streams_mention(&one, "SECRETNOTE"));
+    let p = PdfDocument::open(one.to_string_lossy().as_ref()).unwrap();
+    assert_eq!(p.page_count().unwrap(), 1);
+    let form = first_form(&p, 0);
+    if let Some(xo) = form.get_dict("Resources").unwrap().and_then(|r| r.get_dict("XObject").unwrap()) {
+        for k in 0..xo.dict_len().unwrap() {
+            let key = xo.get_dict_key(k as i32).unwrap().unwrap().as_name().unwrap();
+            assert!(!key.starts_with(b"Annot"), "{}", String::from_utf8_lossy(&key));
+        }
+    }
+}
+
+#[test]
+fn layers_that_are_off_stay_off_in_the_file() {
+    let d = dir("layers");
+    let bytes = one_page(
+        "/OC /L1 BDC 0 g 36 36 300 300 re f EMC /OC /L2 BDC 0 g 400 600 100 100 re f EMC",
+        "",
+        "/Properties << /L1 6 0 R /L2 7 0 R >>",
+        "/OCProperties << /OCGs [6 0 R 7 0 R] /D << /OFF [6 0 R] >> >>",
+        &["<< /Type /OCG /Name (Hidden) >>".to_string(), "<< /Type /OCG /Name (Shown) >>".to_string()],
+    );
+    let (eng, doc, _) = open_bytes(&d, "layers.pdf", &bytes);
+    let out = d.join("out.pdf");
+    let s = settings(Layout::Size { mode: SizeMode::Actual, percent: 100.0 });
+    save(&eng, doc, &s, &out).unwrap();
+    // only the 100 x 100 square of the layer that is on
+    let ink = dark(&out, 0);
+    assert!((9_000..11_000).contains(&ink), "{ink}");
+    // and the file carries the configuration, so another viewer agrees
+    let o = PdfDocument::open(out.to_string_lossy().as_ref()).unwrap();
+    let props = o.catalog().unwrap().get_dict("OCProperties").unwrap().expect("OCProperties");
+    assert_eq!(props.get_dict("D").unwrap().unwrap().get_dict("OFF").unwrap().unwrap().len().unwrap(), 1);
+}
+
+#[test]
+fn a_pages_transparency_group_comes_along_on_its_form() {
+    let d = dir("group");
+    let bytes = one_page("0.5 g 100 100 200 200 re f", "/Group << /S /Transparency /CS /DeviceRGB >>", "", "", &[]);
+    let (eng, doc, _) = open_bytes(&d, "group.pdf", &bytes);
+    let out = d.join("out.pdf");
+    save(&eng, doc, &settings(Layout::default()), &out).unwrap();
+    let o = PdfDocument::open(out.to_string_lossy().as_ref()).unwrap();
+    let group = first_form(&o, 0).get_dict("Group").unwrap().expect("the form keeps the page's /Group");
+    assert_eq!(group.get_dict("S").unwrap().unwrap().as_name().unwrap(), b"Transparency");
+}
+
+#[test]
+fn a_turned_page_with_an_offset_crop_box_lands_where_the_preview_puts_it() {
+    let d = dir("rotate-crop");
+    let text = "BT /F1 20 Tf 120 120 Td (ALPHA) Tj ET BT /F1 20 Tf 300 450 Td (OMEGA) Tj ET";
+    let page = "/Rotate 90 /CropBox [100 100 400 500]";
+    // the same page with a big black square outside the crop box (inside the media box)
+    let with = one_page(&format!("0 g 20 20 70 70 re f {text}"), page, "", "", &[]);
+    let without = one_page(text, page, "", "", &[]);
+    let (eng, doc, src) = open_bytes(&d, "with.pdf", &with);
+    let (eng2, doc2, _) = open_bytes(&d, "without.pdf", &without);
+    let s = settings(Layout::Size { mode: SizeMode::Actual, percent: 100.0 });
+    let (a, b) = (d.join("a.pdf"), d.join("b.pdf"));
+    save(&eng, doc, &s, &a).unwrap();
+    save(&eng2, doc2, &s, &b).unwrap();
+    // the crop box clips: outside it nothing is drawn
+    assert_eq!(dark(&a, 0), dark(&b, 0));
+    // both words moved by the same amount: the page was placed whole, at scale one, turned as shown
+    let from = words(&src);
+    let to = words(&a);
+    let shift = |t: &str| {
+        let f = from.iter().find(|w| w.0 == t).unwrap_or_else(|| panic!("{t} in the source: {from:?}"));
+        let o = to.iter().find(|w| w.0 == t).unwrap_or_else(|| panic!("{t} in the file: {to:?}"));
+        (o.1 - f.1, o.2 - f.2)
+    };
+    let (alpha, omega) = (shift("ALPHA"), shift("OMEGA"));
+    assert!((alpha.0 - omega.0).abs() < 0.5 && (alpha.1 - omega.1).abs() < 0.5, "{alpha:?} {omega:?}");
+    // a 400 x 300 page (300 x 400 crop, turned) centred on 612 x 792
+    assert!((alpha.0 - 106.0).abs() < 1.5 && (alpha.1 - 246.0).abs() < 1.5, "{alpha:?}");
+    // and it is what the preview draws
+    let png = preview_png(&eng, doc, &s, 0, 792).unwrap();
+    let img = image::load_from_memory(&png).unwrap().to_luma8();
+    let (w, h, px) = gray(&a, 0, 1.0);
+    let mut diff = 0u64;
+    for y in 0..h.min(img.height() as usize) {
+        for x in 0..w.min(img.width() as usize) {
+            diff += u64::from(px[y * w + x].abs_diff(img.get_pixel(x as u32, y as u32).0[0]));
+        }
+    }
+    assert!(diff as f64 / ((w * h) as f64) < 3.0);
+}
+
+#[test]
+fn form_fields_only_keeps_the_widgets_and_drops_page_and_markup() {
+    let d = dir("fields");
+    let bytes = one_page(
+        "BT /F1 24 Tf 72 700 Td (BODYTEXT) Tj ET",
+        "/Annots [6 0 R 7 0 R]",
+        "",
+        "/AcroForm << /Fields [6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >>",
+        &[
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /T (f1) /V (WIDGETVALUE) /DA (/Helv 12 Tf 0 g) /Rect [50 600 250 630] /F 4 /P 3 0 R /MK << /BC [0 0 0] >> >>"
+                .to_string(),
+            "<< /Type /Annot /Subtype /Square /Rect [200 300 400 500] /F 4 /C [0 0 0] /IC [0 0 0] /AP << /N 9 0 R >> >>".to_string(),
+            // object 8 is not used: the square's appearance is object 9
+            "<< >>".to_string(),
+            stream("/Type /XObject /Subtype /Form /BBox [0 0 200 200]", "0 g 0 0 200 200 re f"),
+        ],
+    );
+    let (eng, doc, _) = open_bytes(&d, "fields.pdf", &bytes);
+    let base = settings(Layout::Size { mode: SizeMode::Actual, percent: 100.0 });
+    let make = |content, name: &str| {
+        let out = d.join(name);
+        save(&eng, doc, &Settings { content, ..base.clone() }, &out).unwrap();
+        out
+    };
+    let forms = make(Content::FormFieldsOnly, "forms.pdf");
+    let all = make(Content::DocumentAndMarkups, "all.pdf");
+    let text = |p: &Path| words(p).into_iter().map(|w| w.0).collect::<Vec<_>>().join(" ");
+    assert!(text(&forms).contains("WIDGETVALUE"), "{}", text(&forms));
+    assert!(!text(&forms).contains("BODYTEXT"));
+    assert!(dark(&forms, 0) < 2_000, "the square is not in the form-only file: {}", dark(&forms, 0));
+    assert!(text(&all).contains("WIDGETVALUE") && text(&all).contains("BODYTEXT"));
+    assert!(dark(&all, 0) > 38_000);
+}
+
+#[test]
+fn a_document_that_forbids_copying_is_refused_before_a_file_is_made() {
+    use crate::engine::edit::EditSource;
+    use crate::protect::{Changes, Cipher, Printing, ProtectSpec};
+    let d = dir("no-copy");
+    let (eng, doc, _) = open_fixture(&d, 2);
+    let spec = ProtectSpec {
+        open_password: None,
+        permissions_password: Some("owner".into()),
+        printing: Printing::High,
+        changes: Changes::Comments,
+        copy: false,
+        accessibility: true,
+        cipher: Cipher::Aes256,
+    };
+    eng.protect(doc, spec, None, EditSource::User).unwrap();
+    let locked = d.join("locked.pdf");
+    eng.save_recorded(doc, Some(&locked.to_string_lossy())).unwrap();
+    // reopened from disk the way a user would: printing is allowed, copying is not
+    let eng2 = Engine::new(1, 1 << 20);
+    let doc2 = eng2.open(&locked.to_string_lossy()).unwrap().doc;
+    let out = d.join("out.pdf");
+    let err = save(&eng2, doc2, &settings(Layout::default()), &out).unwrap_err();
+    assert!(matches!(err, PrintError::Render(render::RenderError::NoCopy)), "{err}");
+    assert!(!out.exists());
+    // the printer path is not affected: the preview still draws
+    assert!(preview_png(&eng2, doc2, &settings(Layout::default()), 0, 400).is_ok());
 }

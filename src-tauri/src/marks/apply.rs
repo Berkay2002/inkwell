@@ -472,6 +472,10 @@ pub(crate) fn display_form(doc: &mut PdfDocument, map: &mut PdfGraftMap, src: &P
     if let Some(res) = obj.get_dict_inheritable("Resources")? {
         dict.dict_put("Resources", map.graft_object(&res)?)?;
     }
+    // the page's transparency group, so blending inside the page composes as it did on the page
+    if let Some(group) = obj.get_dict("Group")? {
+        dict.dict_put("Group", map.graft_object(&group)?)?;
+    }
     let buf = Buffer::from_bytes(&bytes)?;
     let form = doc.add_stream(&buf, Some(&dict), false)?;
     Ok((form, view.w, view.h))

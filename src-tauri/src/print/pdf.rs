@@ -24,6 +24,7 @@ use super::render::{RenderError, Source};
 use super::{plan, PrintError, Progress, Settings};
 use crate::engine::edit::{rewrite_opts, write_atomic, write_doc, Readback};
 use crate::engine::{DocId, Engine, EngineError};
+use crate::marks::n;
 
 /// What was written.
 #[derive(Debug, Clone, Serialize)]
@@ -47,12 +48,6 @@ fn mul(a: M, b: M) -> M {
         a[4] * b[0] + a[5] * b[2] + b[4],
         a[4] * b[1] + a[5] * b[3] + b[5],
     ]
-}
-
-fn n(v: f64) -> String {
-    let s = format!("{:.3}", if v.is_finite() && v.abs() >= 5e-4 { v } else { 0.0 });
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() || s == "-0" { "0".into() } else { s.into() }
 }
 
 /// A PDF literal string for text made of ASCII (labels are digits and fixed words).
@@ -189,6 +184,12 @@ pub fn save(eng: &Engine, doc: DocId, s: &Settings, out: &Path, cancel: &AtomicB
         let b = src_doc.load_pdf_page(page as i32).map_err(RenderError::from)?.bounds().map_err(RenderError::from)?;
         bounds.insert(page, [f64::from(b.x0), f64::from(b.y0), f64::from(b.x1), f64::from(b.y1)]);
         forms.insert(page, form);
+    }
+    // The forms keep their /OC references, so the layer configuration comes along: layers the file
+    // has switched off stay hidden, as in the preview and on paper.
+    if let Some(oc) = src_doc.catalog().and_then(|c| c.get_dict("OCProperties")).map_err(RenderError::from)? {
+        let grafted = map.graft_object(&oc).map_err(RenderError::from)?;
+        file.catalog().and_then(|mut c| c.dict_put("OCProperties", grafted)).map_err(RenderError::from)?;
     }
     let font = if p.sheets.iter().any(|f| !f.labels.is_empty()) { Some(helvetica(&mut file).map_err(RenderError::from)?) } else { None };
 

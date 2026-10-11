@@ -74,6 +74,9 @@ The same sheets as the preview and the printer, written as a vector file:
 - Comments and forms follow the content mode: the job runs on the same private copy the printer path parses
   (unsaved edits included); markups without the Print flag are hidden, then MuPDF bakes annotations and form fields
   into the page content (it synthesises missing appearances). "Form fields only" drops the page content first.
+- Pages not chosen lose their annotations and chosen pages get their own Resources before baking, so no comment of
+  an unused page can ride along in a shared Resources dict. Layers keep their on/off state (the catalog's
+  `/OCProperties` is grafted) and a page's transparency `/Group` stays on its form.
 - Borders, cut marks and labels are vector operators on the sheet page.
 - Copies and collation are ignored; two-sided padding is kept (a blank back is as large as the sheet before it), so
   a booklet printed double-sided from the file comes out right. Grayscale is ignored: the file keeps colour, and the
@@ -100,7 +103,9 @@ A document that forbids printing (`Permission::PRINT`) is refused with `not-perm
   page count and sheet sizes) are opt-in: `INKWELL_PRINT_TESTS=1`. They never touch a physical printer.
 - `print::tests_layouts`: poster tile count, overlap, cut-mark and label positions, the sheet cap; creep; band
   skipping of margin marks; Save as PDF on generated fixtures (page counts, text order, forms not images, one form
-  per page, markups by content mode, the open file untouched, the output equal to the preview page for page).
+  per page, markups by content mode, the open file untouched, the output equal to the preview page for page,
+  no comments of unused pages in shared resources, layers off, `/Group`, a turned page with an offset crop box,
+  form fields only, a no-copy document refused).
 - vitest: `src/lib/printStore.test.ts` (settings mapping, paper choice, remembered options, the sheet's
   open/plan/preview/start/cancel flow, poster and creep mapping, Save as PDF with and without a printer).
 - Runtime: `scripts/print-shots.mjs` drives the sheet through CDP and prints a copy of a generated sample to
@@ -121,4 +126,7 @@ A document that forbids printing (`Permission::PRINT`) is refused with `not-perm
 - Save as PDF: annotations without an appearance stream that MuPDF cannot synthesise are left out; the whole
   private copy is baked, so a very large document pays for pages it does not use. "Vector" means the layout is: images
   in the source stay images.
+- A Resources dict shared by many pages still brings every page's fonts and images when grafted (the same
+  `marks::display_form` is used by stamps and watermarks), so a file made from two pages of a shared-resources
+  document can be larger than two pages' worth.
 - Poster labels are Helvetica (WinAnsi), ASCII only; creep is applied to booklets only, not to Multiple.
