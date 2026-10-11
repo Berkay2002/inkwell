@@ -26,7 +26,7 @@ vi.mock("./api", () => ({ pickSave: vi.fn(), toolCancel: vi.fn(() => Promise.res
 
 import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../store";
-import { useA11y } from "./a11y";
+import { isLocked, useA11y } from "./a11y";
 import {
   type Region,
   type TagNode,
@@ -346,6 +346,22 @@ describe("Reading order store", () => {
     expect(await a().mergeSelected(1)).toBe(true);
     expect(inv).toHaveBeenCalledWith("a11y_merge_many", { doc: 1, into: 10, from: [11, 12] });
     expect(a().get(1).order.selected).toEqual([10]);
+  });
+
+  it("the edit controls know the document is certified before the first check has finished", async () => {
+    reply({ a11y_protection: { certified: true, signed: true }, a11y_reading_order: ro(three), a11y_reorder: state(4) });
+    await a().loadOrder(1, 0);
+    expect(a().get(1).report).toBeNull();
+    expect(await a().protection(1)).toEqual({ certified: true, signed: true });
+    expect(isLocked(a().get(1))).toBe(true);
+    expect(await a().dropRegion(1, 12, 10)).toBe(false);
+    expect(inv.mock.calls.some((c) => c[0] === "a11y_reorder")).toBe(false);
+  });
+
+  it("a merge of more than 100 regions is not offered", () => {
+    const many = Array.from({ length: 101 }, (_, i) => region(i + 1));
+    expect(mergeRun(many, many.map((r) => r.xref))).toBeNull();
+    expect(mergeRun(many, many.slice(0, 100).map((r) => r.xref))).not.toBeNull();
   });
 
   it("a certified document takes no edit: nothing is sent", async () => {

@@ -1285,6 +1285,19 @@ fn edit_doc(eng: &Engine, doc: DocId, label: String, source: EditSource, f: impl
     })
 }
 
+/// Whether the document is certified or signed, as it is now: what the edit controls are gated on, known
+/// without the check having run.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Protection {
+    pub certified: bool,
+    pub signed: bool,
+}
+
+pub fn protection_doc(eng: &Engine, doc: DocId) -> Result<Protection> {
+    eng.read_custom(doc, |d| Ok(Protection { certified: crate::outline::certified(d)?.is_some(), signed: crate::outline::signed(d) }))
+}
+
 /// Applies one fix as one undo step.
 pub fn fix_doc(eng: &Engine, doc: DocId, fix: &Fix, source: EditSource) -> Result<EditState> {
     fix_doc_with(eng, doc, fix, source, &mut |_| {}, &AtomicBool::new(false))

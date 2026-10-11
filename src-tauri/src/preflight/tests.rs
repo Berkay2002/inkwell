@@ -461,6 +461,34 @@ fn installed_windows_font_is_embedded_when_present() {
     assert!(t.contains("Hello preflight world"), "{t:?}");
 }
 
+/// `messy()` with a signature field that has a value, and optionally a DocMDP certification of `/P` `p`.
+fn protected(certify: Option<u8>) -> Spec {
+    let mut sp = messy();
+    sp.cat.push_str(" /AcroForm <</SigFlags 3 /Fields [130 0 R]>>");
+    if let Some(p) = certify {
+        sp.cat.push_str(&format!(" /Perms <</DocMDP <</Type/Sig /Reference [<</TransformMethod/DocMDP /TransformParams <</P {p}>>>>]>>>>"));
+    }
+    sp.objs.push((130, s("<</FT/Sig /T(Signature1) /V <</Type/Sig /Filter/Adobe.PPKLite /SubFilter/adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00>>>>>")));
+    sp
+}
+
+#[test]
+fn a_signed_or_certified_document_is_not_converted_in_place() {
+    for (name, certify, word) in [("signed", None, "signed"), ("certified-1", Some(1), "certified"), ("certified-3", Some(3), "certified")] {
+        let p = dir(name).join("Quarterly figures.pdf");
+        std::fs::write(&p, build(&protected(certify))).unwrap();
+        let original = std::fs::read(&p).unwrap();
+        let (eng, id) = open(p.to_str().unwrap());
+        let steps = eng.history(id).unwrap().len();
+        let c = Convert { groups: vec![FixGroup::Metadata], lang: None };
+        let e = convert_in_place(&eng, id, Profile::Pdfa2b, &c, EditSource::User, &mut |_| {}, &AtomicBool::new(false)).unwrap_err();
+        assert!(e.to_string().contains(word) && e.to_string().contains("new file"), "{name}: {e}");
+        assert_eq!(eng.history(id).unwrap().len(), steps, "{name}: a refusal adds no step");
+        let _ = eng.save(id, None);
+        assert_eq!(std::fs::read(&p).unwrap(), original, "{name}: the file is as it was");
+    }
+}
+
 #[test]
 fn encrypted_documents_convert_to_a_new_file_only() {
     let plain = build(&messy());

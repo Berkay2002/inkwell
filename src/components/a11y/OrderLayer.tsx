@@ -1,6 +1,6 @@
 import { memo, useState } from "react";
 import { createPortal } from "react-dom";
-import { useA11y } from "../../lib/a11y";
+import { isCertified, isLocked, useA11y } from "../../lib/a11y";
 import { type Region, roleWord } from "../../lib/a11yDepthLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 
@@ -25,7 +25,8 @@ const st = () => useA11y.getState();
 
 function Layer({ docId, rot, rawSize, zoom, regions, selected }: Props & { regions: Region[]; selected: number[] }) {
   // A certified document takes no edit: the numbers still select, but nothing is dragged.
-  const certified = useA11y((s) => !!s.docs[docId]?.report?.certified);
+  const certified = useA11y((s) => isCertified(s.docs[docId]));
+  const locked = useA11y((s) => isLocked(s.docs[docId]));
   const [drag, setDrag] = useState<{ xref: number; n: number; over: number | null; moved: boolean; x: number; y: number } | null>(null);
   // In reading order in the DOM, so Tab follows it; a larger box sits lower, so a small region is on top of
   // the one that holds it and can be picked.
@@ -77,7 +78,7 @@ function Layer({ docId, rot, rawSize, zoom, regions, selected }: Props & { regio
                 if (e.button !== 0) return;
                 e.stopPropagation();
                 select(e, r.xref);
-                if (certified) return;
+                if (locked) return;
                 e.currentTarget.setPointerCapture(e.pointerId);
                 setDrag({ xref: r.xref, n, over: null, moved: false, x: e.clientX, y: e.clientY });
               }}

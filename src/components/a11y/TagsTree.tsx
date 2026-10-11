@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { TREE_PAGES, useA11y } from "../../lib/a11y";
+import { TREE_PAGES, isCertified, isLocked, useA11y } from "../../lib/a11y";
 import {
   type Row,
   type TagDraft,
@@ -31,8 +31,9 @@ export function TagsTree({ doc }: { doc: DocState }) {
   const t = useA11y((s) => s.docs[doc.id]?.tags);
   const phase = useA11y((s) => s.docs[doc.id]?.phase ?? "idle");
   const id = doc.id;
-  const certified = useA11y((s) => !!s.docs[doc.id]?.report?.certified);
-  const busy = phase !== "idle" || certified;
+  const certified = useA11y((s) => isCertified(s.docs[doc.id]));
+  const locked = useA11y((s) => isLocked(s.docs[doc.id]));
+  const busy = phase !== "idle" || locked;
   const tree = t?.tree ?? null;
   const rows = useMemo(() => (tree ? flatten(tree, t?.expanded ?? {}) : []), [tree, t?.expanded]);
   const selected = t?.selected ?? null;
@@ -221,12 +222,12 @@ export function TagsTree({ doc }: { doc: DocState }) {
           ? "Arrow keys move through the tree."
           : `Arrow keys move through the tree. Alt+Up and Alt+Down move a tag, Alt+Right puts it into the one above, Alt+Left takes it out.${scope === "page" ? ` ${SKIPS}` : ""}`}
       </p>
-      {node ? <TagEditor doc={doc} node={node} tree={tree} busy={busy} certified={certified} pageScope={scope === "page"} /> : <p className="a11y-note">Select a tag to edit it. Its content is outlined on the page.</p>}
+      {node ? <TagEditor doc={doc} node={node} tree={tree} busy={busy} locked={locked} certified={certified} pageScope={scope === "page"} /> : <p className="a11y-note">Select a tag to edit it. Its content is outlined on the page.</p>}
     </div>
   );
 }
 
-function TagEditor({ doc, node, tree, busy, certified, pageScope }: { doc: DocState; node: TagNode; tree: TagNode[]; busy: boolean; certified: boolean; pageScope: boolean }) {
+function TagEditor({ doc, node, tree, busy, locked: off, certified, pageScope }: { doc: DocState; node: TagNode; tree: TagNode[]; busy: boolean; locked: boolean; certified: boolean; pageScope: boolean }) {
   const id = doc.id;
   const [d, setD] = useState<TagDraft>(() => draftOf(node));
   // A different tag, or the same one after an edit, starts from what the engine now says.
@@ -261,7 +262,7 @@ function TagEditor({ doc, node, tree, busy, certified, pageScope }: { doc: DocSt
       <div className="a11y-tag-type">
         <label>
           <span>Type</span>
-          <select className="a11y-select" disabled={certified} value={d.role} onChange={(e) => set({ role: e.target.value })}>
+          <select className="a11y-select" disabled={off} value={d.role} onChange={(e) => set({ role: e.target.value })}>
             {roleOptions(was.role).map((r) => (
               <option key={r} value={r}>
                 {r === "Artifact" ? "Artifact (take out of the tree)" : r}
@@ -285,20 +286,20 @@ function TagEditor({ doc, node, tree, busy, certified, pageScope }: { doc: DocSt
       </div>
       <label>
         <span>Alternate text</span>
-        <input type="text" disabled={certified} value={d.alt} onChange={(e) => set({ alt: e.target.value })} />
+        <input type="text" disabled={off} value={d.alt} onChange={(e) => set({ alt: e.target.value })} />
       </label>
       <label>
         <span>Actual text</span>
-        <input type="text" disabled={certified} value={d.actualText} onChange={(e) => set({ actualText: e.target.value })} />
+        <input type="text" disabled={off} value={d.actualText} onChange={(e) => set({ actualText: e.target.value })} />
       </label>
       <label>
         <span>Language</span>
-        <input type="text" disabled={certified} value={d.lang} placeholder="en-US" onChange={(e) => set({ lang: e.target.value })} />
+        <input type="text" disabled={off} value={d.lang} placeholder="en-US" onChange={(e) => set({ lang: e.target.value })} />
       </label>
       {node.role === "TH" && (
         <label>
           <span>Scope</span>
-          <select className="a11y-select" disabled={certified} value={d.scope} onChange={(e) => set({ scope: e.target.value })}>
+          <select className="a11y-select" disabled={off} value={d.scope} onChange={(e) => set({ scope: e.target.value })}>
             <option value="">Not set</option>
             {SCOPES.map((s) => (
               <option key={s} value={s}>
@@ -315,7 +316,7 @@ function TagEditor({ doc, node, tree, busy, certified, pageScope }: { doc: DocSt
             <label key={c.xref} className="a11y-check">
               <input
                 type="checkbox"
-                disabled={certified}
+                disabled={off}
                 checked={d.headers.includes(c.xref)}
                 onChange={(e) => set({ headers: e.target.checked ? [...d.headers, c.xref] : d.headers.filter((h) => h !== c.xref) })}
               />

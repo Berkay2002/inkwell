@@ -302,6 +302,8 @@ describe("a closed document", () => {
   it("a fix finishing after the tab closed leaves no entry either", async () => {
     reply({ a11y_check: sample, a11y_preview: { untagged: false } });
     await a().check(1);
+    // The first edit of a document reads its protection first; read it here so the next call is the fix.
+    await a().protection(1);
     let finish: (s: unknown) => void = () => {};
     inv.mockImplementationOnce(() => new Promise((res) => (finish = res)));
     const run = a().fix(1, { fix: "tabOrder" });

@@ -1036,6 +1036,7 @@ pub fn run() {
             prepress::app::prepress_convert,
             prepress::app::prepress_boxes,
             prepress::app::prepress_marks,
+            a11y::app::a11y_protection,
             a11y::app::a11y_reading_order,
             a11y::app::a11y_tags,
             a11y::app::a11y_tag_problems,

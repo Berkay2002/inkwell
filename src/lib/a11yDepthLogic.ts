@@ -63,9 +63,12 @@ export function dropOnto(order: number[], xref: number, target: number): number[
   return to < 0 || xref === target ? null : moveTo(order, xref, to);
 }
 
+/** Most regions one merge takes (the engine's cap). */
+export const MAX_MERGE = 100;
+
 /** The selected regions in list order, when they are next to each other in the list and can all be edited. */
 export function mergeRun(regions: Region[], selected: number[]): { into: number; from: number[] } | null {
-  if (selected.length < 2) return null;
+  if (selected.length < 2 || selected.length > MAX_MERGE) return null;
   const at = regions.map((r, i) => (selected.includes(r.xref) && r.xref !== 0 ? i : -1)).filter((i) => i >= 0);
   if (at.length !== selected.length) return null;
   if (at[at.length - 1] - at[0] !== at.length - 1) return null;

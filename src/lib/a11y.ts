@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { useEffect } from "react";
 import { create } from "zustand";
 import { useStore } from "../store";
 import { type EditState, pickSave, toolCancel } from "./api";
@@ -39,6 +40,7 @@ export const a11yApi = {
     return invoke<EditState>("a11y_fix", { job, doc, fix, onProgress: ch });
   },
   preview: (doc: number) => invoke<Preview>("a11y_preview", { doc }),
+  protection: (doc: number) => invoke<Protection>("a11y_protection", { doc }),
   readingOrder: (doc: number, page: number) => invoke<ReadingOrder>("a11y_reading_order", { doc, page }),
   tags: (doc: number, page: number | null) => invoke<TagNode[]>("a11y_tags", { doc, page }),
   tagProblems: (doc: number) => invoke<Problem[]>("a11y_tag_problems", { doc }),
@@ -56,6 +58,12 @@ export const a11yApi = {
     return invoke<string>("a11y_export_report", { job, doc, format, date, to, onProgress: ch });
   },
 };
+
+/** Whether the document is certified (no edit is made) or signed (edits are saved after the signed part). */
+export interface Protection {
+  certified: boolean;
+  signed: boolean;
+}
 
 export type Phase = "idle" | "checking" | "fixing" | "autotagging" | "exporting";
 
@@ -107,6 +115,8 @@ const freshTags = (): TagsState => ({ rev: null, page: null, scope: null, tree: 
 export const TREE_PAGES = 100;
 
 export interface DocA11y {
+  /** Read from the document itself, so the edit controls know before the first check has finished; null until read. */
+  protection: Protection | null;
   report: Report | null;
   /** The document generation the report was read from. */
   checkedRev: number | null;
@@ -132,6 +142,7 @@ export interface DocA11y {
 }
 
 const fresh = (): DocA11y => ({
+  protection: null,
   report: null,
   checkedRev: null,
   phase: "idle",
@@ -149,6 +160,16 @@ const fresh = (): DocA11y => ({
   tags: freshTags(),
 });
 
+/** Whether the edit controls are off: certified, or not known yet (the engine refuses a certified document either way). */
+export const isLocked = (d: DocA11y | undefined): boolean => (d?.protection ? d.protection.certified : (d?.report?.certified ?? true));
+/** Certified, as far as it is known: what the reason text says. */
+export const isCertified = (d: DocA11y | undefined): boolean => d?.protection?.certified ?? d?.report?.certified ?? false;
+/** The signed note shows for a document that is signed and not certified. */
+export const isSigned = (d: DocA11y | undefined): boolean => {
+  const p = d?.protection ?? d?.report ?? null;
+  return !!p && p.signed && !p.certified;
+};
+
 interface A11yStore {
   open: boolean;
   setOpen: (open: boolean) => void;
@@ -159,6 +180,8 @@ interface A11yStore {
   setLang: (lang: string) => void;
   docs: Record<number, DocA11y>;
   get: (doc: number) => DocA11y;
+  /** Reads (once) whether the document is certified or signed. */
+  protection: (doc: number) => Promise<Protection>;
   check: (doc: number) => Promise<void>;
   /** One fix, one undo step. */
   fix: (doc: number, fix: Fix) => Promise<boolean>;
@@ -219,8 +242,26 @@ export const useA11y = create<A11yStore>((set, get) => {
   let seq = 0;
   const patchOrder = (doc: number, p: Partial<OrderState>) => patch(doc, { order: { ...get().get(doc).order, ...p } });
   const patchTags = (doc: number, p: Partial<TagsState>) => patch(doc, { tags: { ...get().get(doc).tags, ...p } });
+  const reading = new Map<number, Promise<Protection>>();
   /** A certified document takes no edit (the engine refuses them too); the rail says why. */
-  const certified = (doc: number) => !!get().get(doc).report?.certified;
+  const protection = (doc: number): Promise<Protection> => {
+    const have = get().get(doc).protection;
+    if (have) return Promise.resolve(have);
+    let p = reading.get(doc);
+    if (!p) {
+      p = Promise.resolve()
+        .then(() => a11yApi.protection(doc))
+        // Unreadable: what the check says, if it has run (the engine refuses a certified document anyway).
+        .catch((): Protection => ({ certified: !!get().get(doc).report?.certified, signed: !!get().get(doc).report?.signed }))
+        .then((v) => {
+          reading.delete(doc);
+          patch(doc, { protection: v });
+          return v;
+        });
+      reading.set(doc, p);
+    }
+    return p;
+  };
   const busyPhase = (doc: number) => {
     const ph = get().get(doc).phase;
     return ph === "fixing" || ph === "autotagging" || ph === "exporting";
@@ -232,7 +273,9 @@ export const useA11y = create<A11yStore>((set, get) => {
    * refusal is shown where the person is and the view is read again, so the page snaps back.
    */
   async function edit(doc: number, f: () => Promise<EditState>, fail: (m: string) => void, reload: () => Promise<void>): Promise<boolean> {
-    if (!st().docs[doc] || busyPhase(doc) || certified(doc)) return false;
+    // Only the first edit of a document waits for it.
+    const prot = get().get(doc).protection ?? (await protection(doc));
+    if (!st().docs[doc] || busyPhase(doc) || prot.certified) return false;
     const cur = get().get(doc);
     if (cur.phase === "checking") {
       latest.delete(doc);
@@ -317,6 +360,7 @@ export const useA11y = create<A11yStore>((set, get) => {
     setLang: (lang) => set({ lang }),
     docs: {},
     get: (doc) => get().docs[doc] ?? fresh(),
+    protection,
 
     check: async (doc) => {
       const d = st().docs[doc];
@@ -343,8 +387,10 @@ export const useA11y = create<A11yStore>((set, get) => {
     },
 
     fix: async (doc, fix) => {
+      // Only the first edit of a document waits for it.
+      const prot = get().get(doc).protection ?? (await protection(doc));
       const cur = get().get(doc);
-      if (cur.phase === "fixing" || cur.phase === "autotagging" || cur.phase === "exporting" || cur.report?.certified) return false;
+      if (cur.phase === "fixing" || cur.phase === "autotagging" || cur.phase === "exporting" || prot.certified) return false;
       // A check that is still running reads the document the fix is about to change.
       if (cur.phase === "checking") {
         latest.delete(doc);
@@ -439,6 +485,7 @@ export const useA11y = create<A11yStore>((set, get) => {
         latest.delete(doc);
         latestOrder.delete(doc);
         latestTags.delete(doc);
+        reading.delete(doc);
         return { docs: rest };
       }),
 
@@ -571,6 +618,14 @@ export const useA11y = create<A11yStore>((set, get) => {
     },
   };
 });
+
+/** `protection` of the document, read when the component mounts; null until it is known. */
+export function useProtection(doc: number): Protection | null {
+  useEffect(() => {
+    void useA11y.getState().protection(doc);
+  }, [doc]);
+  return useA11y((s) => s.docs[doc]?.protection ?? null);
+}
 
 /** The All tools panel and palette entry: the rail opens and reads the active document. */
 export function openA11y(view?: View) {

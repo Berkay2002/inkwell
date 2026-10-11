@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MenuButton } from "../Menu";
-import { TREE_PAGES, type View, useA11y } from "../../lib/a11y";
+import { TREE_PAGES, type View, isCertified, isLocked, isSigned, useA11y } from "../../lib/a11y";
 import { type MhGroup, matterhornGroups, uncheckedCheckpoints } from "../../lib/a11yDepthLogic";
 import {
   type Finding,
@@ -54,6 +54,11 @@ export function A11yPanel({ doc }: { doc: DocState }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, id, doc.rev, phase]);
 
+  // Whether the document is certified or signed is read from the document, not from the check.
+  useEffect(() => {
+    if (open) void st().protection(id);
+  }, [open, id]);
+
   // The Reading order tool follows the page in view; the tag tree is read again after every edit.
   const tagScope = useA11y((s) => s.docs[doc.id]?.tags.scope);
   const treeFollowsPage = (tagScope ?? (doc.pageCount > TREE_PAGES ? "page" : "doc")) === "page";
@@ -80,11 +85,11 @@ export function A11yPanel({ doc }: { doc: DocState }) {
           </button>
         </div>
         <Tabs view={view} />
-        {report?.certified ? (
+        {isCertified(d) ? (
           <p className="a11y-note a11y-protect" role="status">
             {CERTIFIED_WHY}
           </p>
-        ) : report?.signed ? (
+        ) : isSigned(d) ? (
           <p className="a11y-note a11y-protect" role="status">
             {SIGNED_NOTE}
           </p>
@@ -191,7 +196,7 @@ function Body({ doc, report }: { doc: DocState; report: Report }) {
   const offer = !report.tagged && d.preview?.untagged && !d.notNow;
   // A report that no longer matches the document (its check was cancelled or failed) is not acted on.
   const stale = d.checkedRev !== doc.rev;
-  const busy = d.phase !== "idle" || stale || report.certified;
+  const busy = d.phase !== "idle" || stale || isLocked(d);
   return (
     <>
       {d.phase === "autotagging" ? (
@@ -362,7 +367,7 @@ export function Rule({ doc, x }: { doc: DocState; x: RuleResult }) {
   const lang = useA11y((s) => s.lang);
   const d = useA11y((s) => s.docs[doc.id])!;
   const [all, setAll] = useState(false);
-  const busy = d.phase !== "idle" || d.checkedRev !== doc.rev || !!d.report?.certified;
+  const busy = d.phase !== "idle" || d.checkedRev !== doc.rev || isLocked(d);
   // A document-level finding of a rule with a one-click fix only restates the explanation above it.
   const noted = x.findings.filter((f) => !isOverflowNote(f) && !(f.page === null && x.fix && x.fix !== "autotag"));
   const overflow = x.findings.filter(isOverflowNote);
@@ -537,7 +542,9 @@ function Thumb({ doc, page, rect }: { doc: DocState; page: number; rect: [number
 function Foot({ doc, report }: { doc: DocState; report: Report }) {
   const phase = useA11y((s) => s.docs[doc.id]?.phase ?? "idle");
   const stale = useA11y((s) => s.docs[doc.id]?.checkedRev !== doc.rev);
-  const busy = phase !== "idle" || stale || report.certified;
+  const locked = useA11y((s) => isLocked(s.docs[doc.id]));
+  const certified = useA11y((s) => isCertified(s.docs[doc.id]));
+  const busy = phase !== "idle" || stale || locked;
   const all = fixAllText(report);
   return (
     <div className="a11y-foot">
@@ -545,7 +552,7 @@ function Foot({ doc, report }: { doc: DocState; report: Report }) {
         className="a11y-btn primary wide"
         disabled={busy || !all}
         onClick={() => void st().fixAll(doc.id)}
-        title={report.certified ? CERTIFIED_WHY : all ? "One undo step" : "Nothing can be fixed automatically"}
+        title={certified ? CERTIFIED_WHY : all ? "One undo step" : "Nothing can be fixed automatically"}
       >
         <span>{all ? all.label : "Fix all safe issues"}</span>
         <small>{all ? all.outcome : "No safe fixes left"}</small>

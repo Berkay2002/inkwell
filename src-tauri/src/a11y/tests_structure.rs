@@ -757,6 +757,17 @@ fn editing_a_signed_document_leaves_its_signed_bytes_alone() {
 }
 
 #[test]
+fn protection_is_known_without_a_check() {
+    let get = |name: &str, s: &Spec| {
+        let (eng, id) = open(&file(name, s));
+        protection_doc(&eng, id).unwrap()
+    };
+    assert_eq!(get("prot-none", &doc3()), Protection { certified: false, signed: false });
+    assert_eq!(get("prot-signed", &signed_doc()), Protection { certified: false, signed: true });
+    assert_eq!(get("prot-cert", &certified_doc(2)), Protection { certified: true, signed: true });
+}
+
+#[test]
 fn a_merge_is_bounded_and_an_anchor_has_an_object_number() {
     let path = file("bounds", &doc3());
     let (eng, id) = open(&path);

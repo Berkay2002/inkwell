@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { useA11y } from "../../lib/a11y";
-import { artifactBlocked, mergeRun, orderOf, readAloud, roleWord, splitBlocked } from "../../lib/a11yDepthLogic";
+import { isCertified, isLocked, useA11y } from "../../lib/a11y";
+import { MAX_MERGE, artifactBlocked, mergeRun, orderOf, readAloud, roleWord, splitBlocked } from "../../lib/a11yDepthLogic";
 import { CERTIFIED_WHY, plural } from "../../lib/a11yLogic";
 import type { DocState } from "../../store";
 import { Icon } from "../Icons";
@@ -11,7 +11,8 @@ const st = () => useA11y.getState();
 export function OrderTool({ doc }: { doc: DocState }) {
   const o = useA11y((s) => s.docs[doc.id]?.order);
   const phase = useA11y((s) => s.docs[doc.id]?.phase ?? "idle");
-  const certified = useA11y((s) => !!s.docs[doc.id]?.report?.certified);
+  const certified = useA11y((s) => isCertified(s.docs[doc.id]));
+  const locked = useA11y((s) => isLocked(s.docs[doc.id]));
   const [at, setAt] = useState(1);
   const list = useRef<HTMLUListElement>(null);
   // The region whose row takes the focus once the list is read again after a move.
@@ -19,7 +20,7 @@ export function OrderTool({ doc }: { doc: DocState }) {
   const data = o?.data ?? null;
   const regions = data?.regions ?? [];
   const selected = o?.selected ?? [];
-  const busy = phase !== "idle" || certified;
+  const busy = phase !== "idle" || locked;
   const id = doc.id;
 
   useEffect(() => {
@@ -63,7 +64,9 @@ export function OrderTool({ doc }: { doc: DocState }) {
       ? null
       : selected.length < 2
         ? "Select two or more regions next to each other in the list."
-        : "The selected regions are not next to each other, or one can't be edited.";
+        : selected.length > MAX_MERGE
+          ? `Choose between two and ${MAX_MERGE} regions to merge.`
+          : "The selected regions are not next to each other, or one can't be edited.";
   const artifactWhy = certified ? CERTIFIED_WHY : one ? artifactBlocked(one) : "Select one region.";
   const said = readAloud(regions);
   const splitAt = one && !splitWhy ? Math.min(Math.max(at, 1), one.mcids.length - 1) : 1;
