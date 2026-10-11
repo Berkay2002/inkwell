@@ -5,15 +5,23 @@
 //! output afterwards. Everything runs on the calling thread (MuPDF contexts are per thread), so use
 //! [`spawn`] from the UI.
 //!
-//! Pipeline: open -> audit -> strip extras -> downsample/recompress images -> subset fonts -> write
-//! (garbage collect, dedupe, object streams, Flate) -> keep the original when nothing got smaller ->
-//! reopen, audit and render-compare the result.
+//! Pipeline: open -> audit -> discard objects -> unembed fonts -> flatten transparency ->
+//! downsample/recompress images -> subset fonts -> write (garbage collect, dedupe, object streams,
+//! Flate) -> keep the original when nothing got smaller -> reopen, audit and render-compare the result.
 //!
-//! Gaps against Acrobat, by design of the engine underneath: MuPDF cannot linearize ("Fast Web View"),
-//! has no JBIG2 encoder (monochrome images use CCITT G4 or Flate) and does not unembed fonts.
+//! `Options` is both the three presets and the "Advanced" settings of the sheet (Acrobat's Optimized
+//! PDF: images per class, fonts, transparency, discard objects, clean up); named presets are saved
+//! options (`presets`).
+//!
+//! Gaps against Acrobat, by design of the engine underneath: MuPDF cannot linearize ("Fast Web View")
+//! and has no JBIG2 encoder (monochrome images use CCITT G4 or Flate). Transparency is flattened by
+//! drawing the page (text and vectors on it become part of the picture).
 
 mod audit;
 pub mod estimate;
+mod flatten;
+mod fonts;
+pub mod presets;
 mod strip;
 #[cfg(test)]
 mod tests;
@@ -31,6 +39,8 @@ use mupdf::Document;
 use serde::{Deserialize, Serialize};
 
 pub use audit::{Audit, AuditItem, Category, CategoryUsage};
+pub use flatten::{FlattenReport, Transparency};
+pub use fonts::{FontUsage, Unembedded};
 pub use strip::{Strip, StripReport};
 pub use visual::{PageDiff, VisualCheck};
 
@@ -90,6 +100,15 @@ pub struct Options {
     pub images: Images,
     /// Subset embedded fonts to the glyphs used. Off unless asked for.
     pub subset_fonts: bool,
+    /// Fonts (by `/BaseFont`, as listed in the audit) whose embedded file is taken out. Only simple,
+    /// non-symbolic fonts qualify; the others are reported as skipped.
+    pub unembed_fonts: Vec<String>,
+    /// Unembed every font that may be (what a saved preset keeps instead of font names).
+    pub unembed_all: bool,
+    /// Draw pages that use transparency as one picture.
+    pub transparency: Transparency,
+    /// Deflate streams that are stored raw (content, uncompressed images, fonts).
+    pub compress_streams: bool,
     /// Pack objects and the xref into compressed streams (PDF 1.5).
     pub object_streams: bool,
     /// 0 none, 1 drop unused, 2 + renumber, 3 + merge identical objects, 4 + merge identical streams.
@@ -136,6 +155,10 @@ impl Options {
             preset: p,
             images: Images { color, gray: color, mono, only_if_smaller: true },
             subset_fonts,
+            unembed_fonts: Vec::new(),
+            unembed_all: false,
+            transparency: Transparency::default(),
+            compress_streams: true,
             object_streams: true,
             garbage: 4,
             strip,
@@ -190,6 +213,7 @@ impl Serialize for Error {
 pub enum Stage {
     Open,
     Scan,
+    Flatten,
     Images,
     Fonts,
     Write,
@@ -246,6 +270,8 @@ pub struct Report {
     pub after: Audit,
     pub images: ImageStats,
     pub stripped: StripReport,
+    pub unembedded: Unembedded,
+    pub flattened: FlattenReport,
     pub visual: Option<VisualCheck>,
     pub timings: Vec<Timing>,
     pub elapsed_ms: u64,
@@ -397,6 +423,12 @@ fn validate(opts: &Options) -> Result<(), Error> {
     if opts.garbage > 4 {
         return bad("garbage level must be 0 to 4".into());
     }
+    if opts.transparency.flatten && !flatten::PPI.contains(&opts.transparency.ppi) {
+        return bad(format!("flatten: ppi must be between {} and {}", flatten::PPI.start(), flatten::PPI.end()));
+    }
+    if opts.unembed_fonts.len() > 1000 || opts.unembed_fonts.iter().any(|n| n.is_empty() || n.len() > 256) {
+        return bad("font names to unembed are not valid".into());
+    }
     Ok(())
 }
 
@@ -442,12 +474,13 @@ fn image_options(img: &Images) -> Option<ImageRewriteOptions> {
     any.then_some(o)
 }
 
-fn write_options(opts: &Options) -> PdfWriteOptions {
+/// `garbage` is the level to use (a run that took objects out never writes with 0: the orphans would stay).
+fn write_options(opts: &Options, garbage: u8) -> PdfWriteOptions {
     let mut w = PdfWriteOptions::default();
-    w.set_garbage_level(opts.garbage as i32)
-        .set_compress(true)
-        .set_compress_images(true)
-        .set_compress_fonts(true)
+    w.set_garbage_level(garbage as i32)
+        .set_compress(opts.compress_streams)
+        .set_compress_images(opts.compress_streams)
+        .set_compress_fonts(opts.compress_streams)
         .set_use_objstms(opts.object_streams);
     w
 }
@@ -497,12 +530,53 @@ pub fn compress(
     run.lap("strip");
     run.check()?;
 
-    // 3. Images. A document without any image is left to the writer alone.
+    // 3. Fonts that are to be unembedded, before any pass that would copy them.
+    let unembedded = if opts.unembed_fonts.is_empty() && !opts.unembed_all {
+        Unembedded::default()
+    } else {
+        let u = fonts::unembed(&mut doc, &opts.unembed_fonts, opts.unembed_all)?;
+        for (name, why) in &u.skipped {
+            warnings.push(format!("{name} stays embedded: {why}."));
+        }
+        run.lap("unembed");
+        u
+    };
+    run.check()?;
+
+    // 4. Pages that use transparency become pictures, which the image pass below then treats like any other.
+    let mut flattened = FlattenReport::default();
+    if opts.transparency.flatten {
+        let pages_hit = flatten::pages_using_transparency(&doc)?;
+        if !pages_hit.is_empty() {
+            let (cancel, progress) = (run.cancel, &mut *run.progress);
+            let total = pages_hit.len();
+            flattened = flatten::flatten(&mut doc, &pages_hit, opts.transparency.ppi, cancel, &mut |k, n| {
+                progress(Progress {
+                    stage: Stage::Flatten,
+                    fraction: 0.04 + 0.12 * k as f32 / n.max(1) as f32,
+                    page: k as u32,
+                    pages: total as u32,
+                });
+            })?;
+            for (page, why) in &flattened.skipped {
+                warnings.push(format!("Page {page} uses transparency and was not flattened: {why}."));
+            }
+        }
+        run.lap("flatten");
+    }
+    run.check()?;
+    let flat = !flattened.pages.is_empty();
+
+    // 5. Images. A document without any image (or a flattened page) is left to the writer alone.
     let mut image_stats = ImageStats::default();
-    if before.images > 0 && let Some(io) = image_options(&opts.images) {
+    if (before.images > 0 || flat) && let Some(io) = image_options(&opts.images) {
         let (cancel, progress) = (run.cancel, &mut *run.progress);
         let mut cb = |pass: u32, page: usize, total: usize| {
-            let (base, span) = if pass == 0 { (0.06, 0.12) } else { (0.18, 0.5) };
+            let (base, span) = match (pass, flat) {
+                (0, false) => (0.06, 0.12),
+                (0, true) => (0.16, 0.02),
+                _ => (0.18, 0.5),
+            };
             progress(Progress {
                 stage: if pass == 0 { Stage::Scan } else { Stage::Images },
                 fraction: base + span * page as f32 / total.max(1) as f32,
@@ -520,15 +594,15 @@ pub fn compress(
     }
     run.check()?;
 
-    // 4. Fonts.
+    // 6. Fonts.
     run.emit(Stage::Fonts, 0.68, 0.0, 0, 0);
-    if opts.subset_fonts && before.fonts > 0 {
+    if opts.subset_fonts && before.fonts > unembedded.files {
         doc.subset_fonts()?;
         run.lap("fonts");
     }
     run.check()?;
 
-    // 5. Write. JPEG 2000 needs PDF 1.5 (the writer raises the version itself for object streams).
+    // 7. Write. JPEG 2000 needs PDF 1.5 (the writer raises the version itself for object streams).
     run.emit(Stage::Write, 0.72, 0.0, 0, 0);
     let jpx = [opts.images.color, opts.images.gray].iter().any(|c| c.codec == Codec::Jpx);
     if jpx && image_stats.replaced > 0 {
@@ -539,16 +613,19 @@ pub fn compress(
         }
     }
     let tmp = TempFile::new(&out_path)?;
-    doc.save_with_options(&tmp.0.to_string_lossy(), write_options(opts))?;
+    // What the user asked to take out or flatten is never undone by the size rule below.
+    let changed = stripped.any() || unembedded.files > 0 || flat;
+    let garbage = if changed { opts.garbage.max(1) } else { opts.garbage };
+    doc.save_with_options(&tmp.0.to_string_lossy(), write_options(opts, garbage))?;
     drop(doc);
     run.lap("write");
     run.check()?;
 
-    // 6. Never worse, except that dropping what the user asked to drop is never undone.
+    // 8. Never worse, except that dropping what the user asked to drop is never undone.
     let written = fs::metadata(&tmp.0)?.len();
-    let kept_original = written >= size_before && !stripped.any();
-    if written >= size_before && stripped.any() {
-        warnings.push("The copy is larger than the original because extras were removed.".into());
+    let kept_original = written >= size_before && !changed;
+    if written >= size_before && changed {
+        warnings.push("The copy is larger than the original because objects were removed or flattened.".into());
     }
     if kept_original {
         fs::copy(input, &tmp.0)?;
@@ -563,7 +640,7 @@ pub fn compress(
         e
     };
 
-    // 7. Reopen what was written: it must open, have the same pages, and look the same.
+    // 9. Reopen what was written: it must open, have the same pages, and look the same.
     run.emit(Stage::Verify, 0.9, 0.0, 0, 0);
     let mut verify = || -> Result<(Audit, Option<VisualCheck>), Error> {
         let out_doc = open_pdf(&out_path, password)?;
@@ -604,6 +681,8 @@ pub fn compress(
         after,
         images: image_stats,
         stripped,
+        unembedded,
+        flattened,
         visual,
         elapsed_ms: run.t0.elapsed().as_millis() as u64,
         timings: run.timings,

@@ -448,11 +448,84 @@ function stripKind<T extends { kind: string }>(m: T): Omit<T, "kind"> {
 
 export type CompressPreset = "smallest" | "balanced" | "highQuality";
 
+export type AuditCategory =
+  | "images"
+  | "fonts"
+  | "contentStreams"
+  | "forms"
+  | "comments"
+  | "links"
+  | "bookmarks"
+  | "thumbnails"
+  | "embeddedFiles"
+  | "metadata"
+  | "structure"
+  | "other";
+
+/** One font by name, as the audit lists it (what "Unembed" works on). */
+export interface FontUsage {
+  /** `/BaseFont` as written, subset tag included. */
+  name: string;
+  kind: string;
+  embedded: boolean;
+  subset: boolean;
+  /** Stored size of the font file(s). */
+  bytes: number;
+  canUnembed: boolean;
+  whyNot: string | null;
+}
+
 export interface CompressAudit {
   total: number;
-  categories: { category: "images" | "fonts" | "contentStreams" | "metadata" | "structure" | "other"; bytes: number; objects: number }[];
+  /** The categories add up to `total`; `percent` is the share of the file, 0..100. */
+  categories: { category: AuditCategory; bytes: number; objects: number; percent: number }[];
   images: number;
   fonts: number;
+  fontList: FontUsage[];
+}
+
+export type ImageCodec = "retain" | "jpeg" | "jpx" | "flate" | "fax";
+
+export interface ImageClassSettings {
+  /** Downsample images shown above this many ppi (0 = never). */
+  abovePpi: number;
+  toPpi: number;
+  codec: ImageCodec;
+  quality: number;
+}
+
+export interface DiscardSettings {
+  metadata: boolean;
+  thumbnails: boolean;
+  embeddedFiles: boolean;
+  javascript: boolean;
+  bookmarks: boolean;
+  formActions: boolean;
+  alternateImages: boolean;
+  privateData: boolean;
+  links: boolean;
+  invalidLinks: boolean;
+}
+
+/** The engine's `Options` as it serializes: the three presets and the Advanced settings are the same thing. */
+export interface CompressOptions {
+  preset: CompressPreset | "custom";
+  images: { color: ImageClassSettings; gray: ImageClassSettings; mono: ImageClassSettings; onlyIfSmaller: boolean };
+  subsetFonts: boolean;
+  unembedFonts: string[];
+  unembedAll: boolean;
+  transparency: { flatten: boolean; ppi: number };
+  compressStreams: boolean;
+  objectStreams: boolean;
+  /** 0 none, 1 unused, 2 + renumber, 3 + identical objects, 4 + identical streams. */
+  garbage: number;
+  strip: DiscardSettings;
+  visualPages: number;
+}
+
+export interface NamedCompressPreset {
+  name: string;
+  options: CompressOptions;
 }
 
 export interface CompressAuditReply {
@@ -464,7 +537,7 @@ export interface CompressAuditReply {
 
 /** Predicted size per preset, from recompressing a sample of the file's images. */
 export interface CompressEstimate {
-  preset: CompressPreset;
+  preset: CompressPreset | "custom";
   bytes: number;
   /** The range it should fall in; equal when the sample covered every image. */
   low: number;
@@ -472,7 +545,7 @@ export interface CompressEstimate {
 }
 
 export interface CompressProgress {
-  stage: "open" | "scan" | "images" | "fonts" | "write" | "verify";
+  stage: "open" | "scan" | "flatten" | "images" | "fonts" | "write" | "verify";
   /** 0..1 over the whole job, never decreasing. */
   fraction: number;
   page: number;
@@ -491,14 +564,32 @@ export interface CompressReport {
   /** Render comparison of before and after (8 pages at most); null when skipped. */
   visual: { maxDiff: number; meanDiff: number; psnr: number } | null;
   warnings: string[];
+  before: CompressAudit;
+  after: CompressAudit;
+  /** What the discard options took out, by option. */
+  stripped: {
+    metadata: boolean;
+    bookmarks: boolean;
+    thumbnails: number;
+    embeddedFiles: number;
+    javascript: number;
+    formActions: number;
+    alternateImages: number;
+    privateData: number;
+    links: number;
+    invalidLinks: number;
+  };
+  unembedded: { files: number; bytes: number; skipped: [string, string][] };
+  /** 1-based pages drawn as a picture, and the ones that use transparency and could not be. */
+  flattened: { pages: number[]; skipped: [number, string][] };
 }
 
 /** Documents are named by id; an output file by a save token from `pickSave`. */
 export interface CompressRequest {
   doc: number;
   preset: CompressPreset;
-  /** Full options from a Customize panel; wins over `preset`. */
-  custom?: unknown;
+  /** The Advanced settings; wins over `preset`. */
+  custom?: CompressOptions;
   /** Save token for the output instead of `<name> (compressed).pdf` (used when that name is taken). */
   saveTo?: string;
 }
@@ -550,6 +641,16 @@ export interface OcrOutcome {
 export const compressAudit = (doc: number) => invoke<CompressAuditReply>("compress_audit", { doc });
 /** Runs on its own thread; `toolCancel(job)` stops it. */
 export const compressEstimate = (job: number, doc: number) => invoke<CompressEstimate[]>("compress_estimate", { job, doc });
+
+/** The three presets as the engine defines them: the starting point of the Advanced settings. */
+export const compressPresetOptions = () => invoke<Record<CompressPreset, CompressOptions>>("compress_preset_options");
+/** One estimate for a set of Advanced settings (on the same sample). `toolCancel(job)` stops it. */
+export const compressEstimateCustom = (job: number, doc: number, options: CompressOptions) =>
+  invoke<CompressEstimate>("compress_estimate_custom", { job, doc, options });
+export const compressPresets = () => invoke<NamedCompressPreset[]>("compress_presets");
+export const compressPresetSave = (name: string, options: CompressOptions) =>
+  invoke<NamedCompressPreset[]>("compress_preset_save", { name, options });
+export const compressPresetDelete = (name: string) => invoke<NamedCompressPreset[]>("compress_preset_delete", { name });
 
 export function compressStart(job: number, req: CompressRequest, onProgress: (p: CompressProgress) => void) {
   const ch = new Channel<CompressProgress>();

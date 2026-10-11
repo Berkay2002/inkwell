@@ -549,6 +549,52 @@ async fn compress_estimate(
     tool_blocking(move || tools::estimate_for_ui(&eng, doc, &guard.cancel)).await
 }
 
+/// The three presets as `Options`: what the Advanced settings start from.
+#[tauri::command]
+fn compress_preset_options() -> std::collections::BTreeMap<&'static str, compress::Options> {
+    use compress::Preset;
+    [("smallest", Preset::Smallest), ("balanced", Preset::Balanced), ("highQuality", Preset::HighQuality)]
+        .into_iter()
+        .map(|(k, p)| (k, compress::Options::preset(p)))
+        .collect()
+}
+
+/// The Advanced settings' size, on the same sample. `job` as above.
+#[tauri::command]
+async fn compress_estimate_custom(
+    eng: Eng<'_>,
+    jobs: JobState<'_>,
+    job: u64,
+    doc: DocId,
+    options: compress::Options,
+) -> Result<compress::estimate::Estimate, tools::ToolError> {
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    tool_blocking(move || tools::estimate_custom_for_ui(&eng, doc, &options, &guard.cancel)).await
+}
+
+#[tauri::command]
+async fn compress_presets(app: tauri::AppHandle) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::load(&dir))).await
+}
+
+#[tauri::command]
+async fn compress_preset_save(
+    app: tauri::AppHandle,
+    name: String,
+    options: compress::Options,
+) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::save(&dir, &name, &options)?)).await
+}
+
+#[tauri::command]
+async fn compress_preset_delete(app: tauri::AppHandle, name: String) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::delete(&dir, &name)?)).await
+}
+
 /// `job`: an id the UI picks, for `tool_cancel`. `req.save_to`: a save token from `pick_save`.
 #[tauri::command]
 async fn compress_start(
@@ -918,6 +964,11 @@ pub fn run() {
             merge_files,
             compress_audit,
             compress_estimate,
+            compress_estimate_custom,
+            compress_preset_options,
+            compress_presets,
+            compress_preset_save,
+            compress_preset_delete,
             compress_start,
             protect::app::security_info,
             protect::app::protect_apply,

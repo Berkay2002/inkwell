@@ -17,6 +17,11 @@ vi.mock("./api", () => ({
   compressAudit: vi.fn(),
   compressEstimate: vi.fn(),
   compressStart: vi.fn(),
+  compressPresetOptions: vi.fn(),
+  compressEstimateCustom: vi.fn(),
+  compressPresets: vi.fn(),
+  compressPresetSave: vi.fn(),
+  compressPresetDelete: vi.fn(),
   pickSave: vi.fn(),
   toolCancel: vi.fn(() => Promise.resolve()),
   ocrLanguages: vi.fn(),
@@ -55,7 +60,10 @@ function doc(dirty = false) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.compressEstimate).mockResolvedValue(estimates as never);
-  useTools.setState({ sheet: null, settings: { ocrLanguage: null, ocrBackend: "windows", compressPreset: "balanced" } });
+  useTools.setState({
+    sheet: null,
+    settings: { ocrLanguage: null, ocrBackend: "windows", compressPreset: "balanced", compressMode: "presets", compressAdvanced: null },
+  });
   doc();
 });
 
@@ -174,6 +182,170 @@ describe("compress estimate", () => {
     void useTools.getState().start();
     await flush();
     expect(api.toolCancel).toHaveBeenCalledWith(job);
+  });
+});
+
+describe("compress Advanced mode", () => {
+  const cls = (abovePpi: number, toPpi: number, codec: string, quality: number) => ({ abovePpi, toPpi, codec, quality });
+  const base = (preset = "balanced") => ({
+    preset,
+    images: { color: cls(225, 150, "jpx", 75), gray: cls(225, 150, "jpx", 75), mono: cls(450, 300, "fax", 0), onlyIfSmaller: true },
+    subsetFonts: false,
+    unembedFonts: [] as string[],
+    unembedAll: false,
+    transparency: { flatten: false, ppi: 150 },
+    compressStreams: true,
+    objectStreams: true,
+    garbage: 4,
+    strip: {
+      metadata: false,
+      thumbnails: false,
+      embeddedFiles: false,
+      javascript: false,
+      bookmarks: false,
+      formActions: false,
+      alternateImages: false,
+      privateData: false,
+      links: false,
+      invalidLinks: false,
+    },
+    visualPages: 8,
+  });
+  const defaults = { smallest: base("smallest"), balanced: base(), highQuality: base("highQuality") };
+  const custom = { preset: "custom", bytes: 1_500_000, low: 1_300_000, high: 1_700_000 };
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  async function opened() {
+    vi.mocked(api.compressAudit).mockResolvedValue(audit() as never);
+    useTools.getState().open("compress");
+    for (let i = 0; i < 4; i++) await flush();
+  }
+
+  beforeEach(() => {
+    vi.mocked(api.compressPresetOptions).mockResolvedValue(defaults as never);
+    vi.mocked(api.compressPresets).mockResolvedValue([]);
+    vi.mocked(api.compressEstimateCustom).mockResolvedValue(custom as never);
+    vi.mocked(api.compressPresetSave).mockResolvedValue([]);
+    vi.mocked(api.compressPresetDelete).mockResolvedValue([]);
+  });
+
+  it("starts from the engine's preset for the chosen name and keeps the presets request unchanged", async () => {
+    await opened();
+    const s = useTools.getState().sheet!;
+    expect(s.mode).toBe("presets");
+    expect(s.advanced).toEqual({ ...defaults.balanced, preset: "custom" });
+    expect(api.compressEstimateCustom).not.toHaveBeenCalled();
+    vi.mocked(api.compressStart).mockResolvedValue(report as never);
+    await useTools.getState().start();
+    expect(vi.mocked(api.compressStart).mock.calls[0][1]).toEqual({ doc: 1, preset: "balanced" });
+  });
+
+  it("estimates the settings a moment after the last change, one request for a burst of changes", async () => {
+    await opened();
+    useTools.getState().setMode("advanced");
+    expect(useTools.getState().settings.compressMode).toBe("advanced");
+    await flush();
+    await flush();
+    expect(api.compressEstimateCustom).toHaveBeenCalledTimes(1);
+    expect(useTools.getState().sheet?.customEstimate).toEqual(custom);
+
+    vi.mocked(api.compressEstimateCustom).mockClear();
+    useTools.getState().setAdvanced((o) => ({ ...o, strip: { ...o.strip, links: true } }));
+    useTools.getState().setAdvanced((o) => ({ ...o, strip: { ...o.strip, metadata: true } }));
+    expect(useTools.getState().sheet?.customEstimate).toBeNull();
+    expect(api.compressEstimateCustom).not.toHaveBeenCalled();
+    await wait(750);
+    expect(api.compressEstimateCustom).toHaveBeenCalledTimes(1);
+    const sent = vi.mocked(api.compressEstimateCustom).mock.calls[0][2];
+    expect(sent.strip).toMatchObject({ links: true, metadata: true });
+    expect(sent.preset).toBe("custom");
+  });
+
+  it("does not ask for an estimate of settings the engine would refuse", async () => {
+    await opened();
+    useTools.getState().setMode("advanced");
+    await flush();
+    await flush();
+    vi.mocked(api.compressEstimateCustom).mockClear();
+    useTools.getState().setAdvanced((o) => ({ ...o, images: { ...o.images, color: { ...o.images.color, abovePpi: 10 } } }));
+    await wait(750);
+    expect(api.compressEstimateCustom).not.toHaveBeenCalled();
+    expect(useTools.getState().sheet?.customEstimate).toBeNull();
+  });
+
+  it("sends the whole set of settings as `custom` when Compress runs in Advanced mode", async () => {
+    await opened();
+    useTools.getState().setMode("advanced");
+    useTools.getState().setAdvanced((o) => ({ ...o, unembedAll: true, transparency: { flatten: true, ppi: 300 } }));
+    vi.mocked(api.compressStart).mockResolvedValue(report as never);
+    await useTools.getState().start();
+    const req = vi.mocked(api.compressStart).mock.calls[0][1] as unknown as { custom?: { unembedAll: boolean; transparency: unknown } };
+    expect(req.custom?.unembedAll).toBe(true);
+    expect(req.custom?.transparency).toEqual({ flatten: true, ppi: 300 });
+    expect(useTools.getState().sheet?.phase).toBe("done");
+  });
+
+  it("saves, loads and deletes named settings; fonts picked for this document stay on a load", async () => {
+    await opened();
+    useTools.getState().setMode("advanced");
+    useTools.getState().setAdvanced((o) => ({ ...o, strip: { ...o.strip, links: true }, unembedFonts: ["ABCDEF+Arial"] }));
+    const stored = { name: "Web", options: { ...base(), preset: "custom", strip: { ...base().strip, links: true } } };
+    vi.mocked(api.compressPresetSave).mockResolvedValue([stored] as never);
+    await useTools.getState().savePreset("  Web ");
+    // the fonts of one document are not part of a saved preset
+    expect(vi.mocked(api.compressPresetSave).mock.calls[0][1].unembedFonts).toEqual([]);
+    expect(useTools.getState().sheet?.saved).toHaveLength(1);
+    expect(useTools.getState().sheet?.savedName).toBe("Web");
+
+    useTools.getState().setAdvanced((o) => ({ ...o, strip: { ...o.strip, links: false }, unembedFonts: ["XYZ+Times"] }));
+    useTools.getState().loadPreset("Web");
+    const a = useTools.getState().sheet!.advanced!;
+    expect(a.strip.links).toBe(true);
+    expect(a.unembedFonts).toEqual(["XYZ+Times"]);
+
+    await useTools.getState().deletePreset("Web");
+    expect(api.compressPresetDelete).toHaveBeenCalledWith("Web");
+    expect(useTools.getState().sheet?.saved).toEqual([]);
+    expect(useTools.getState().sheet?.savedName).toBeNull();
+  });
+
+  it("shows the engine's refusal of a preset name instead of throwing", async () => {
+    await opened();
+    useTools.getState().setMode("advanced");
+    vi.mocked(api.compressPresetSave).mockRejectedValueOnce("invalid-options");
+    await useTools.getState().savePreset("");
+    expect(useTools.getState().sheet?.savedError).toBeTruthy();
+    expect(useTools.getState().sheet?.saved).toEqual([]);
+  });
+
+  it("opens a preset saved by an older build with today's defaults for what it lacked", async () => {
+    const old = { name: "Old", options: { preset: "custom", images: { color: cls(150, 100, "jpeg", 50) }, strip: { metadata: true } } };
+    vi.mocked(api.compressPresets).mockResolvedValue([old] as never);
+    await opened();
+    const s = useTools.getState().sheet!;
+    expect(s.saved[0].options.images.color).toEqual(cls(150, 100, "jpeg", 50));
+    expect(s.saved[0].options.images.mono).toEqual(base().images.mono);
+    expect(s.saved[0].options.strip.metadata).toBe(true);
+    expect(s.saved[0].options.strip.links).toBe(false);
+    expect(s.saved[0].options.transparency).toEqual({ flatten: false, ppi: 150 });
+  });
+
+  it("stops the estimate when the rail closes", async () => {
+    await opened();
+    useTools.getState().setMode("advanced");
+    await flush();
+    await flush();
+    let answer!: (v: unknown) => void;
+    vi.mocked(api.compressEstimateCustom).mockReset();
+    vi.mocked(api.compressEstimateCustom).mockReturnValue(new Promise((r) => (answer = r)) as never);
+    useTools.getState().setAdvanced((o) => ({ ...o, subsetFonts: true }));
+    await wait(750);
+    const job = vi.mocked(api.compressEstimateCustom).mock.calls[0][0];
+    useTools.getState().close();
+    expect(api.toolCancel).toHaveBeenCalledWith(job);
+    answer(custom);
+    await flush();
+    expect(useTools.getState().sheet).toBeNull();
   });
 });
 

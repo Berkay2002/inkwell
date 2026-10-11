@@ -163,6 +163,21 @@ pub fn estimate_for_ui(eng: &Engine, doc: DocId, cancel: &AtomicBool) -> Result<
     Ok(compress::estimate::estimate(&path, password.as_ref().map(|p| p.as_str()), &audit, cancel)?)
 }
 
+/// The same for a set of Advanced settings: one estimate, on the sample, with the settings applied.
+pub fn estimate_custom_for_ui(
+    eng: &Engine,
+    doc: DocId,
+    opts: &Options,
+    cancel: &AtomicBool,
+) -> Result<compress::estimate::Estimate, ToolError> {
+    let path = PathBuf::from(eng.doc_entry(doc)?.path());
+    let password = eng.file_password(doc)?;
+    let pw = password.as_ref().map(|p| p.as_str());
+    let audit = compress::audit_file(&path, pw)?;
+    let opts = Options { preset: Preset::Custom, password: None, output: None, ..opts.clone() };
+    Ok(compress::estimate::estimate_custom(&path, pw, &audit, &opts, cancel)?)
+}
+
 pub fn audit_for_ui(eng: &Engine, doc: DocId) -> Result<AuditReply, ToolError> {
     let path = PathBuf::from(eng.doc_entry(doc)?.path());
     let path = path.as_path();

@@ -514,7 +514,7 @@ fn stripping_is_not_undone_by_never_worse() {
         d.catalog().unwrap().dict_put("OpenAction", js).unwrap();
     });
     // already as tight as the writer makes it: objects packed, garbage collected
-    doc.save_with_options(packed.to_str().unwrap(), write_options(&Options::default())).unwrap();
+    doc.save_with_options(packed.to_str().unwrap(), write_options(&Options::default(), 4)).unwrap();
     assert!(has_entry(&packed, "OpenAction"));
 
     // writing it back loosely is bigger than the input, so without a strip the original is kept
@@ -553,7 +553,7 @@ fn signed_warning_only_when_the_copy_is_written() {
 
     // tight input: nothing to gain, the original stays and so do its signatures
     let tight = s.path("tight.pdf");
-    text_doc_with(sign).save_with_options(tight.to_str().unwrap(), write_options(&Options::default())).unwrap();
+    text_doc_with(sign).save_with_options(tight.to_str().unwrap(), write_options(&Options::default(), 4)).unwrap();
     let r = run(&tight, &Options::default()).unwrap();
     assert!(r.kept_original);
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
@@ -725,5 +725,637 @@ fn the_estimate_of_an_image_heavy_file_brackets_the_real_size() {
         println!("  {:?}: est {} [{}..{}] real {real} err {:+.1}%", e.preset, e.bytes, e.low, e.high, err * 100.0);
         assert!(err.abs() <= 0.30, "{:?}", e.preset);
         assert!(e.low <= real && real <= e.high, "{:?}: {real} outside {}..{}", e.preset, e.low, e.high);
+    }
+}
+
+// ---------------------------------------------------------------- optimizer (Advanced settings)
+
+use mupdf::pdf::PdfObject;
+
+fn add(doc: &mut PdfDocument, src: &str) -> PdfObject {
+    let o = doc.new_object_from_str(src).unwrap();
+    doc.add_object(&o).unwrap()
+}
+
+fn xref_of(o: &PdfObject) -> i32 {
+    o.as_indirect().unwrap()
+}
+
+fn page_ref(doc: &PdfDocument, i: i32) -> String {
+    format!("{} 0 R", xref_of(&doc.find_page(i).unwrap()))
+}
+
+fn put(doc: &PdfDocument, mut target: PdfObject, key: &str, src: &str) {
+    let v = doc.new_object_from_str(src).unwrap();
+    target.dict_put(key, v).unwrap();
+}
+
+/// A document with one of everything the discard options talk about (3 pages, bookmarks).
+fn kitchen_sink(path: &Path) {
+    let mut doc = PdfDocument::from_bytes(&fixture::build(&fixture::Fixture { pages: 3, chapter_every: 1, needle_every: 0, lines: 6 })).unwrap();
+    let (r1, r2, r3) = (page_ref(&doc, 0), page_ref(&doc, 1), page_ref(&doc, 2));
+
+    // document information and an XMP packet
+    let info = add(&mut doc, "<< /Title (Sink) /Author (Me) >>");
+    doc.trailer().unwrap().dict_put("Info", info).unwrap();
+    let xmp_dict = doc.new_object_from_str("<< /Type /Metadata /Subtype /XML >>").unwrap();
+    let xmp = doc.add_stream(&mupdf::Buffer::from_bytes(b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>").unwrap(), Some(&xmp_dict), false).unwrap();
+    doc.catalog().unwrap().dict_put("Metadata", xmp).unwrap();
+
+    // an attachment, a named destination, a script
+    doc.add_embedded_file("note.txt", b"attached", mupdf::pdf::EmbeddedFileOptions::new("note.txt")).unwrap();
+    let mut names = doc.catalog().unwrap().get_dict("Names").unwrap().unwrap();
+    let dests = doc.new_object_from_str(&format!("<< /Names [ (chap) [{r3} /Fit] ] >>")).unwrap();
+    names.dict_put("Dests", dests).unwrap();
+    let js = doc.new_object_from_str("<< /S /JavaScript /JS (app.alert\\(1\\)) >>").unwrap();
+    doc.catalog().unwrap().dict_put("OpenAction", js).unwrap();
+
+    // a page thumbnail, and an image with an alternate
+    let thumb_dict = doc
+        .new_object_from_str("<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 >>")
+        .unwrap();
+    let thumb = doc.add_stream(&mupdf::Buffer::from_bytes(&[0, 80, 160, 255]).unwrap(), Some(&thumb_dict), false).unwrap();
+    let mut p0 = doc.find_page(0).unwrap();
+    let thumb_ref = doc.new_indirect(xref_of(&thumb), 0).unwrap();
+    p0.dict_put("Thumb", thumb_ref).unwrap();
+    let mut page = doc.load_pdf_page(0).unwrap();
+    let placed = page
+        .insert_image(&mut doc, Rect::new(300.0, 300.0, 360.0, 345.0), PageImageSource::Pixmap(&photo(40, 30, true, 5)), InsertImageOptions::default())
+        .unwrap();
+    drop(page);
+    let img = doc.new_indirect(placed.xref, 0).unwrap();
+    put(&doc, img, "Alternates", &format!("[ << /Image {} 0 R /DefaultForPrinting true >> ]", xref_of(&thumb)));
+
+    // private data of other applications: catalog, two pages, a form XObject
+    let cat = doc.catalog().unwrap();
+    put(&doc, cat, "PieceInfo", "<< /App << /Data (x) >> >>");
+    put(&doc, doc.find_page(0).unwrap(), "PieceInfo", "<< /App << /Data (y) >> >>");
+    put(&doc, doc.find_page(2).unwrap(), "PieceInfo", "<< /App << /Data (z) >> >>");
+    let form_dict = doc.new_object_from_str("<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /PieceInfo << /App << /Data (f) >> >> >>").unwrap();
+    let form = doc.add_stream(&mupdf::Buffer::from_bytes(b"").unwrap(), Some(&form_dict), false).unwrap();
+    let mut res = doc.find_page(2).unwrap().get_dict("Resources").unwrap().unwrap();
+    let xo = doc.new_object_from_str("<< >>").unwrap();
+    res.dict_put("XObject", xo).unwrap();
+    res.get_dict("XObject").unwrap().unwrap().dict_put("Fm1", form).unwrap();
+
+    // form fields with actions: submit, reset, a reset under /AA next to a script, and a URI that stays
+    let mut w = |extra: &str| add(&mut doc, &format!("<< /Type /Annot /Subtype /Widget /Rect [10 10 80 30] {extra} >>"));
+    let w1 = w("/FT /Btn /T (submit) /A << /S /SubmitForm /F (http://x) >>");
+    let w2 = w("/FT /Btn /T (reset) /A << /S /ResetForm >>");
+    let w3 = w("/FT /Tx /T (name) /AA << /Fo << /S /JavaScript /JS (1) >> /K << /S /ResetForm >> >>");
+    let w4 = w("/FT /Tx /T (url) /A << /S /URI /URI (http://a) >>");
+    let fields: Vec<String> = [&w1, &w2, &w3, &w4].iter().map(|o| format!("{} 0 R", xref_of(o))).collect();
+    let acro = doc.new_object_from_str(&format!("<< /Fields [{}] >>", fields.join(" "))).unwrap();
+    doc.catalog().unwrap().dict_put("AcroForm", acro).unwrap();
+    put(&doc, doc.find_page(0).unwrap(), "Annots", &format!("[{}]", fields.join(" ")));
+
+    // links: three that work, three that lead nowhere
+    let mut l = |tag: &str, action: &str| add(&mut doc, &format!("<< /Type /Annot /Subtype /Link /Rect [10 100 80 120] /Contents ({tag}) {action} >>"));
+    let links = [
+        l("ok-page", &format!("/Dest [{r1} /Fit]")),
+        l("dead-name", "/Dest /NoSuchName"),
+        l("ok-uri", "/A << /S /URI /URI (http://b) >>"),
+        l("dead-none", ""),
+        l("ok-name", "/Dest (chap)"),
+        l("dead-goto", "/A << /S /GoTo /D (missing) >>"),
+    ];
+    let refs: Vec<String> = links.iter().map(|o| format!("{} 0 R", xref_of(o))).collect();
+    put(&doc, doc.find_page(1).unwrap(), "Annots", &format!("[{}]", refs.join(" ")));
+    let _ = r2;
+    doc.save(path.to_str().unwrap()).unwrap();
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Probe {
+    info: bool,
+    xmp: bool,
+    outlines: bool,
+    files: bool,
+    /// Script actions anywhere (open action, field and annotation actions).
+    js: u32,
+    thumbs: u32,
+    /// Submit-form, reset-form and import-data actions.
+    form_actions: u32,
+    /// Images that carry /Alternates.
+    alternates: u32,
+    /// PieceInfo on the catalog and the pages / on anything else.
+    piece_catalog_pages: u32,
+    piece_other: u32,
+    /// `/Contents` of every link annotation left, in page order.
+    links: Vec<String>,
+}
+
+fn probe(p: &Path) -> Probe {
+    let d = open_pdf(p, None).unwrap();
+    let cat = d.catalog().unwrap();
+    let mut pr = Probe {
+        info: d.trailer().unwrap().get_dict("Info").unwrap().is_some(),
+        xmp: cat.get_dict("Metadata").unwrap().is_some(),
+        outlines: cat.get_dict("Outlines").unwrap().is_some(),
+        files: !d.embedded_files().unwrap().is_empty(),
+        ..Probe::default()
+    };
+    let kind = |a: &PdfObject| a.get_dict("S").ok().flatten().and_then(|s| s.as_name().ok()).unwrap_or_default();
+    let count_action = |a: &PdfObject, pr: &mut Probe| match kind(a).as_slice() {
+        b"JavaScript" => pr.js += 1,
+        b"SubmitForm" | b"ResetForm" | b"ImportData" => pr.form_actions += 1,
+        _ => {}
+    };
+    if let Some(a) = cat.get_dict("OpenAction").unwrap() {
+        if a.is_dict().unwrap() {
+            count_action(&a, &mut pr);
+        }
+    }
+    for i in 0..d.page_count().unwrap() {
+        let page = d.find_page(i).unwrap();
+        pr.thumbs += page.get_dict("Thumb").unwrap().is_some() as u32;
+        if let Some(annots) = page.get_dict("Annots").unwrap() {
+            for a in annots.array_iter().unwrap().flatten() {
+                if a.get_dict("Subtype").unwrap().is_some_and(|s| s.as_name().unwrap() == b"Link") {
+                    pr.links.push(a.get_dict("Contents").unwrap().unwrap().as_string().unwrap());
+                }
+            }
+        }
+    }
+    for x in 1..d.xref_len().unwrap() as i32 {
+        let o = d.new_indirect(x, 0).unwrap();
+        if !matches!(o.resolve(), Ok(Some(v)) if v.is_dict().unwrap_or(false)) {
+            continue;
+        }
+        let ty = o.get_dict("Type").unwrap().and_then(|t| t.as_name().ok()).unwrap_or_default();
+        if o.get_dict("PieceInfo").unwrap().is_some() {
+            if ty == b"Catalog" || ty == b"Page" {
+                pr.piece_catalog_pages += 1;
+            } else {
+                pr.piece_other += 1;
+            }
+        }
+        if o.is_stream().unwrap() && o.get_dict("Alternates").unwrap().is_some() {
+            pr.alternates += 1;
+        }
+        if let Some(a) = o.get_dict("A").unwrap() {
+            if a.is_dict().unwrap() {
+                count_action(&a, &mut pr);
+            }
+        }
+        if let Some(aa) = o.get_dict("AA").unwrap().filter(|a| a.is_dict().unwrap_or(false)) {
+            for (_, v) in aa.dict_iter().unwrap().flatten() {
+                count_action(&v, &mut pr);
+            }
+        }
+    }
+    pr
+}
+
+#[test]
+fn each_discard_option_removes_exactly_what_it_says() {
+    let s = Scratch::new();
+    let input = s.path("sink.pdf");
+    kitchen_sink(&input);
+    let base = probe(&input);
+    // the fixture really has one of everything
+    assert!(base.info && base.xmp && base.outlines && base.files, "{base:?}");
+    assert_eq!((base.js, base.form_actions, base.thumbs, base.alternates), (2, 3, 1, 1), "{base:?}");
+    assert_eq!((base.piece_catalog_pages, base.piece_other), (3, 1), "{base:?}");
+    assert_eq!(base.links.len(), 6, "{base:?}");
+
+    type Effect = fn(&mut Probe);
+    let cases: Vec<(&str, Strip, Effect)> = vec![
+        ("metadata", Strip { metadata: true, ..Strip::default() }, |p| {
+            p.info = false;
+            p.xmp = false;
+            p.piece_catalog_pages = 0;
+        }),
+        ("thumbnails", Strip { thumbnails: true, ..Strip::default() }, |p| p.thumbs = 0),
+        ("embedded files", Strip { embedded_files: true, ..Strip::default() }, |p| p.files = false),
+        // The reset action next to the script in a field's /AA stays: it is not JavaScript.
+        ("javascript", Strip { javascript: true, ..Strip::default() }, |p| p.js = 0),
+        ("bookmarks", Strip { bookmarks: true, ..Strip::default() }, |p| p.outlines = false),
+        // The script next to the reset action stays: it is not a form action.
+        ("form actions", Strip { form_actions: true, ..Strip::default() }, |p| p.form_actions = 0),
+        ("alternate images", Strip { alternate_images: true, ..Strip::default() }, |p| p.alternates = 0),
+        ("private data", Strip { private_data: true, ..Strip::default() }, |p| {
+            p.piece_catalog_pages = 0;
+            p.piece_other = 0;
+        }),
+        ("all links", Strip { links: true, ..Strip::default() }, |p| p.links.clear()),
+        ("invalid links", Strip { invalid_links: true, ..Strip::default() }, |p| p.links.retain(|c| c.starts_with("ok-"))),
+    ];
+    // What the engine does to this file when nothing is asked: the yardstick for every option.
+    let mut o = Options::preset(Preset::Balanced);
+    o.output = Some(s.path("nothing.pdf"));
+    let plain = probe(&run(&input, &o).unwrap().output);
+    let mut failures = Vec::new();
+    if plain != base {
+        failures.push(format!("nothing asked changed the file:\n  was  {base:?}\n  is   {plain:?}"));
+    }
+    for (name, strip, effect) in cases {
+        let mut o = Options::preset(Preset::Balanced);
+        o.strip = strip;
+        o.output = Some(s.path(&format!("{}.pdf", name.replace(' ', "-"))));
+        let r = run(&input, &o).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let mut want = base.clone();
+        effect(&mut want);
+        let got = probe(&r.output);
+        if got != want {
+            failures.push(format!("{name}:\n  want {want:?}\n  got  {got:?}"));
+        }
+        if !(r.stripped.any() && !r.kept_original) {
+            failures.push(format!("{name}: not reported or kept the original: {:?}", r.stripped));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+    // the counts in the report
+    let mut o = Options::preset(Preset::Balanced);
+    o.strip = Strip { links: true, form_actions: true, alternate_images: true, private_data: true, ..Strip::default() };
+    o.output = Some(s.path("counted.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!((r.stripped.links, r.stripped.form_actions, r.stripped.alternate_images), (6, 3, 1));
+    assert_eq!(r.stripped.private_data, 4);
+}
+
+/// Fonts with a file of their own: one plain TrueType subset, one symbolic, one composite.
+fn font_sink(path: &Path) {
+    let mut doc = PdfDocument::from_bytes(&fixture::build(&fixture::Fixture { pages: 2, chapter_every: 0, needle_every: 0, lines: 6 })).unwrap();
+    let mut seed = 7u32;
+    let mut blob = |n: usize| -> PdfObject {
+        let bytes: Vec<u8> = (0..n).map(|_| lcg(&mut seed) as u8).collect();
+        let dict = doc.new_object_from_str("<< >>").unwrap();
+        doc.add_stream(&mupdf::Buffer::from_bytes(&bytes).unwrap(), Some(&dict), false).unwrap()
+    };
+    let file_a = blob(20_000);
+    let file_b = blob(9_000);
+    let file_c = blob(6_000);
+    let desc = |doc: &mut PdfDocument, name: &str, flags: u32, file: &PdfObject| {
+        add(
+            doc,
+            &format!(
+                "<< /Type /FontDescriptor /FontName /{name} /Flags {flags} /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 {} 0 R >>",
+                xref_of(file)
+            ),
+        )
+    };
+    let da = desc(&mut doc, "ABCDEF+TestSans", 32, &file_a);
+    let db = desc(&mut doc, "Dingbats", 4, &file_b);
+    let dc = desc(&mut doc, "GHIJKL+Composite", 32, &file_c);
+    let fa = add(&mut doc, &format!("<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+TestSans /Encoding /WinAnsiEncoding /FontDescriptor {} 0 R >>", xref_of(&da)));
+    let fb = add(&mut doc, &format!("<< /Type /Font /Subtype /TrueType /BaseFont /Dingbats /FontDescriptor {} 0 R >>", xref_of(&db)));
+    let cid = add(&mut doc, &format!("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /GHIJKL+Composite /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R >>", xref_of(&dc)));
+    let fc = add(&mut doc, &format!("<< /Type /Font /Subtype /Type0 /BaseFont /GHIJKL+Composite /Encoding /Identity-H /DescendantFonts [{} 0 R] >>", xref_of(&cid)));
+    let mut res = doc.find_page(0).unwrap().get_dict("Resources").unwrap().unwrap();
+    let mut fonts = res.get_dict("Font").unwrap().unwrap();
+    fonts.dict_put("FA", fa).unwrap();
+    fonts.dict_put("FB", fb).unwrap();
+    fonts.dict_put("FC", fc).unwrap();
+    let _ = &mut res;
+    doc.save(path.to_str().unwrap()).unwrap();
+}
+
+#[test]
+fn unembed_takes_out_only_the_fonts_that_can_go() {
+    let s = Scratch::new();
+    let input = s.path("fonts.pdf");
+    font_sink(&input);
+    let a = audit_file(&input, None).unwrap();
+    let row = |a: &Audit, n: &str| a.font_list.iter().find(|f| f.name == n).cloned().unwrap_or_else(|| panic!("no font {n}: {:?}", a.font_list));
+    let sans = row(&a, "ABCDEF+TestSans");
+    assert!(sans.embedded && sans.subset && sans.can_unembed && sans.bytes >= 20_000, "{sans:?}");
+    let dingbats = row(&a, "Dingbats");
+    assert!(dingbats.embedded && !dingbats.can_unembed, "{dingbats:?}");
+    assert!(dingbats.why_not.as_deref().unwrap().contains("symbolic"));
+    let comp = row(&a, "GHIJKL+Composite");
+    assert!(comp.embedded && !comp.can_unembed && comp.why_not.as_deref().unwrap().contains("composite"), "{comp:?}");
+    let before_text = text(&input);
+
+    // by name
+    let mut o = Options::preset(Preset::Balanced);
+    o.unembed_fonts = vec!["ABCDEF+TestSans".into(), "Dingbats".into()];
+    o.output = Some(s.path("by-name.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.unembedded.files, 1);
+    assert!(r.unembedded.bytes >= 20_000);
+    assert_eq!(r.unembedded.skipped.len(), 1);
+    assert_eq!(r.unembedded.skipped[0].0, "Dingbats");
+    assert!(r.warnings.iter().any(|w| w.contains("Dingbats stays embedded")), "{:?}", r.warnings);
+    let after = audit_file(&r.output, None).unwrap();
+    let sans = row(&after, "TestSans");
+    assert!(!sans.embedded && !sans.subset, "{sans:?}");
+    assert!(row(&after, "Dingbats").embedded && row(&after, "GHIJKL+Composite").embedded);
+    assert!(after.bytes(Category::Fonts) + 19_000 <= a.bytes(Category::Fonts), "{} -> {}", a.bytes(Category::Fonts), after.bytes(Category::Fonts));
+    assert_eq!(text(&r.output), before_text);
+    assert!(!r.kept_original);
+
+    // every font that may be: the others are left alone without a word
+    let mut o = Options::preset(Preset::Balanced);
+    o.unembed_all = true;
+    o.output = Some(s.path("all.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.unembedded.files, 1);
+    assert!(r.unembedded.skipped.is_empty() && r.warnings.is_empty(), "{:?}", r.warnings);
+    assert_eq!(audit_file(&r.output, None).unwrap().font_list.iter().filter(|f| f.embedded).count(), 2);
+
+    // a name that is not in the file is reported, not an error
+    let mut o = Options::preset(Preset::Balanced);
+    o.unembed_fonts = vec!["Nope".into()];
+    o.output = Some(s.path("nope.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.unembedded.files, 0);
+    assert!(r.unembedded.skipped[0].1.contains("No such font"));
+}
+
+/// A page whose graphics state is partly transparent, and one that is not.
+fn transparent_sink(path: &Path, rotate_second: bool) {
+    let doc = PdfDocument::from_bytes(&fixture::build(&fixture::Fixture { pages: 3, chapter_every: 0, needle_every: 0, lines: 8 })).unwrap();
+    let mut p0 = doc.find_page(0).unwrap();
+    let mut res = p0.get_dict("Resources").unwrap().unwrap();
+    let gs = doc.new_object_from_str("<< /G1 << /Type /ExtGState /ca 0.5 /CA 0.5 >> >>").unwrap();
+    res.dict_put("ExtGState", gs).unwrap();
+    // a soft-masked page: the second one
+    let mut p1 = doc.find_page(1).unwrap();
+    let mut res1 = p1.get_dict("Resources").unwrap().unwrap();
+    let gs1 = doc.new_object_from_str("<< /G2 << /Type /ExtGState /BM /Multiply >> >>").unwrap();
+    res1.dict_put("ExtGState", gs1).unwrap();
+    if rotate_second {
+        p1.dict_put("Rotate", mupdf::pdf::PdfObject::new_int(90).unwrap()).unwrap();
+    }
+    let _ = &mut p0;
+    doc.save(path.to_str().unwrap()).unwrap();
+}
+
+#[test]
+fn flatten_turns_a_transparent_page_into_one_picture_and_leaves_the_rest() {
+    let s = Scratch::new();
+    let input = s.path("transparent.pdf");
+    transparent_sink(&input, true);
+    let before = text(&input);
+    assert!(before.iter().all(|t| !t.trim().is_empty()));
+
+    // off: nothing happens
+    let mut o = Options::preset(Preset::Balanced);
+    o.output = Some(s.path("off.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert!(r.flattened.pages.is_empty());
+    assert_eq!(text(&r.output), before);
+
+    let mut o = Options::preset(Preset::Balanced);
+    o.transparency.flatten = true;
+    o.transparency.ppi = 150;
+    o.output = Some(s.path("flat.pdf"));
+    let r = run(&input, &o).unwrap();
+    // page 1 flattened; page 2 uses transparency too but is rotated; page 3 has none
+    assert_eq!(r.flattened.pages, vec![1], "{:?}", r.flattened);
+    assert_eq!(r.flattened.skipped.len(), 1);
+    assert_eq!(r.flattened.skipped[0].0, 2);
+    assert!(r.warnings.iter().any(|w| w.contains("Page 2") && w.contains("not flattened")), "{:?}", r.warnings);
+    let after = text(&r.output);
+    assert!(after[0].trim().is_empty(), "page 1 still has text: {:?}", after[0]);
+    assert_eq!(after[1], before[1]);
+    assert_eq!(after[2], before[2]);
+    // the picture is in the file and the page still looks like the original
+    assert!(r.after.images >= 1);
+    let v = r.visual.as_ref().expect("visual check ran");
+    assert_eq!(v.pages_total, 3);
+    println!("flatten: psnr {:.1} max {} mean {:.2}", v.psnr, v.max_diff, v.mean_diff);
+    assert!(v.psnr >= 18.0, "{v:?}");
+    // never worse does not undo a flatten the user asked for
+    assert!(!r.kept_original);
+
+    // the resolution is validated
+    let mut o = Options::preset(Preset::Balanced);
+    o.transparency.flatten = true;
+    o.transparency.ppi = 5;
+    assert!(matches!(run(&input, &o), Err(Error::InvalidOptions(_))));
+}
+
+#[test]
+fn audit_categories_add_up_to_the_file_size_within_one_percent() {
+    let s = Scratch::new();
+    let mut inputs: Vec<PathBuf> = Vec::new();
+    let mut names: Vec<String> = fs::read_dir(samples())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".pdf"))
+        .collect();
+    names.sort();
+    for n in names {
+        inputs.push(s.copy(&n));
+    }
+    let sink = s.path("sink.pdf");
+    kitchen_sink(&sink);
+    let fonts = s.path("fonts.pdf");
+    font_sink(&fonts);
+    inputs.extend([sink.clone(), fonts]);
+    for p in &inputs {
+        let a = match audit_file(p, None) {
+            Ok(a) => a,
+            // a study sample the engine cannot open on its own (needs a password): not what is tested here
+            Err(Error::NeedsPassword | Error::BadPassword) => continue,
+            Err(e) => panic!("{}: {e}", p.display()),
+        };
+        let size = fs::metadata(p).unwrap().len();
+        assert_eq!(a.total, size);
+        let sum: u64 = a.categories.iter().map(|c| c.bytes).sum();
+        let off = (sum as f64 - size as f64).abs() / size as f64;
+        assert!(off <= 0.01, "{}: categories sum to {sum}, file is {size}", p.display());
+        let pct: f64 = a.categories.iter().map(|c| c.percent).sum();
+        assert!((pct - 100.0).abs() <= 1.0, "{}: {pct}%", p.display());
+    }
+
+    // where the bytes of the kitchen sink are: every kind of object lands in its own category
+    let a = audit_file(&sink, None).unwrap();
+    for c in [Category::Forms, Category::Links, Category::Bookmarks, Category::Thumbnails, Category::EmbeddedFiles, Category::Metadata] {
+        assert!(a.bytes(c) > 0, "{c:?} is empty: {:?}", a.categories);
+    }
+    // and discarding them takes exactly those bytes out (the audit of the result agrees)
+    let mut o = Options::preset(Preset::Balanced);
+    o.strip = Strip { thumbnails: true, embedded_files: true, bookmarks: true, links: true, ..Strip::default() };
+    o.output = Some(s.path("slim.pdf"));
+    let r = run(&sink, &o).unwrap();
+    assert_eq!(r.after.bytes(Category::Thumbnails), 0);
+    assert_eq!(r.after.bytes(Category::EmbeddedFiles), 0);
+    assert_eq!(r.after.bytes(Category::Bookmarks), 0);
+    assert_eq!(r.after.bytes(Category::Links), 0);
+    assert!(r.after.bytes(Category::Forms) > 0, "fields were not asked to go");
+    let sum: u64 = r.after.categories.iter().map(|c| c.bytes).sum();
+    assert_eq!(sum, r.size_after);
+}
+
+#[test]
+fn a_named_preset_round_trips_through_the_file() {
+    let s = Scratch::new();
+    let dir = s.path("data");
+    assert!(presets::load(&dir).is_empty());
+
+    let mut o = Options::preset(Preset::Custom);
+    o.images.color = ImageClass { above_ppi: 200, to_ppi: 110, codec: Codec::Jpeg, quality: 42 };
+    o.images.gray = ImageClass { above_ppi: 0, to_ppi: 0, codec: Codec::Flate, quality: 0 };
+    o.images.mono = ImageClass { above_ppi: 600, to_ppi: 400, codec: Codec::Retain, quality: 0 };
+    o.images.only_if_smaller = false;
+    o.subset_fonts = true;
+    o.unembed_all = true;
+    o.transparency = Transparency { flatten: true, ppi: 300 };
+    o.compress_streams = false;
+    o.object_streams = false;
+    o.garbage = 2;
+    o.strip = Strip {
+        metadata: true,
+        thumbnails: true,
+        embedded_files: true,
+        javascript: true,
+        bookmarks: true,
+        form_actions: true,
+        alternate_images: true,
+        private_data: true,
+        links: true,
+        invalid_links: true,
+    };
+    o.visual_pages = 3;
+    // what is not part of the settings: never stored
+    o.password = Some("secret".into());
+    o.output = Some(s.path("somewhere.pdf"));
+    o.unembed_fonts = vec!["ABCDEF+Arial".into()];
+
+    let list = presets::save(&dir, "  Web, small  ", &o).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].name, "Web, small");
+    let text_on_disk = fs::read_to_string(dir.join(presets::FILE)).unwrap();
+    assert!(!text_on_disk.contains("secret") && !text_on_disk.contains("somewhere"), "{text_on_disk}");
+    assert!(!text_on_disk.contains("ABCDEF"), "fonts of one document are not part of a preset");
+
+    // a fresh read (another run of the app) gives the same settings back
+    let back = presets::load(&dir);
+    assert_eq!(back.len(), 1);
+    let mut expect = o.clone();
+    expect.password = None;
+    expect.output = None;
+    expect.unembed_fonts = Vec::new();
+    assert_eq!(back[0].options, expect);
+
+    // and they run: the loaded options are the ones that were saved
+    let input = s.path("heavy.pdf");
+    image_heavy(&input, 2);
+    let mut run_with = back[0].options.clone();
+    run_with.output = Some(s.path("out-loaded.pdf"));
+    let loaded_run = run(&input, &run_with).unwrap();
+    let mut direct = expect.clone();
+    direct.output = Some(s.path("out-direct.pdf"));
+    let direct_run = run(&input, &direct).unwrap();
+    assert_eq!(loaded_run.size_after, direct_run.size_after);
+
+    // saving under the same name in other capitals replaces; another name adds; delete removes
+    let mut o2 = Options::preset(Preset::Smallest);
+    o2.preset = Preset::Custom;
+    let list = presets::save(&dir, "WEB, SMALL", &o2).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].name, "WEB, SMALL");
+    assert_eq!(list[0].options.images.color.above_ppi, 108);
+    let list = presets::save(&dir, "Print", &Options::preset(Preset::HighQuality)).unwrap();
+    assert_eq!(list.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["WEB, SMALL", "Print"]);
+    let list = presets::delete(&dir, "web, small").unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(presets::load(&dir)[0].name, "Print");
+
+    // refused: empty names, settings the engine would refuse
+    assert!(matches!(presets::save(&dir, "   ", &o2), Err(Error::InvalidOptions(_))));
+    let mut bad = o2.clone();
+    bad.images.color.above_ppi = 10;
+    assert!(matches!(presets::save(&dir, "bad", &bad), Err(Error::InvalidOptions(_))));
+    assert_eq!(presets::load(&dir).len(), 1);
+}
+
+#[test]
+fn a_preset_saved_by_an_older_build_loads_with_todays_defaults() {
+    let s = Scratch::new();
+    let dir = s.path("data");
+    fs::create_dir_all(&dir).unwrap();
+    // no unembed, transparency, compressStreams or the newer discard options; and a field this build never had
+    let old = r#"{"version":1,"presets":[{"name":"Old","options":{"preset":"custom",
+        "images":{"color":{"abovePpi":150,"toPpi":100,"codec":"jpeg","quality":50},
+                  "gray":{"abovePpi":150,"toPpi":100,"codec":"jpeg","quality":50},
+                  "mono":{"abovePpi":300,"toPpi":200,"codec":"fax","quality":0},"onlyIfSmaller":true},
+        "subsetFonts":true,"objectStreams":true,"garbage":3,
+        "strip":{"metadata":true,"thumbnails":false,"embeddedFiles":false,"javascript":false,"bookmarks":false},
+        "visualPages":8,"someFutureSetting":{"x":1}}},
+        {"name":"Broken","options":{"garbage":9}}]}"#;
+    fs::write(dir.join(presets::FILE), old).unwrap();
+    let list = presets::load(&dir);
+    // the unusable one is left out, not fatal
+    assert_eq!(list.len(), 1);
+    let o = &list[0].options;
+    assert_eq!(o.images.color.quality, 50);
+    assert!(o.strip.metadata && !o.strip.links && !o.strip.invalid_links && !o.strip.form_actions);
+    assert!(o.compress_streams && !o.transparency.flatten && !o.unembed_all && o.unembed_fonts.is_empty());
+    assert_eq!(o.garbage, 3);
+    // a damaged file is an empty list, not a crash
+    fs::write(dir.join(presets::FILE), b"{ not json").unwrap();
+    assert!(presets::load(&dir).is_empty());
+}
+
+#[test]
+fn advanced_settings_keep_the_never_worse_rule_and_the_visual_check() {
+    let s = Scratch::new();
+    let input = s.path("heavy.pdf");
+    image_heavy(&input, 3);
+
+    let mut o = Options::preset(Preset::Custom);
+    o.images.color = ImageClass { above_ppi: 150, to_ppi: 100, codec: Codec::Jpeg, quality: 55 };
+    o.images.gray = ImageClass { above_ppi: 150, to_ppi: 100, codec: Codec::Jpeg, quality: 55 };
+    o.strip.thumbnails = true;
+    o.output = Some(s.path("custom.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert!(r.size_after < r.size_before && !r.kept_original);
+    let v = r.visual.as_ref().expect("the visual check runs for Advanced settings too");
+    assert!(v.psnr >= 25.0, "{v:?}");
+    assert_eq!(r.after.total, r.size_after);
+
+    // settings that cannot make the file smaller: the original bytes come back
+    let packed = s.path("packed.pdf");
+    fs::copy(&r.output, &packed).unwrap();
+    let mut o = Options::preset(Preset::Custom);
+    o.images.color = ImageClass { above_ppi: 0, to_ppi: 0, codec: Codec::Retain, quality: 0 };
+    o.images.gray = o.images.color;
+    o.images.mono = o.images.color;
+    o.object_streams = false;
+    o.compress_streams = false;
+    o.garbage = 0;
+    o.output = Some(s.path("again.pdf"));
+    let r = run(&packed, &o).unwrap();
+    assert!(r.kept_original, "{} -> {}", r.size_before, r.size_after);
+    assert_eq!(fs::read(&r.output).unwrap(), fs::read(&packed).unwrap());
+    assert!(r.visual.is_none());
+}
+
+#[test]
+fn the_estimate_for_advanced_settings_follows_what_they_discard_and_recompress() {
+    let s = Scratch::new();
+    let input = s.path("heavy.pdf");
+    let mut doc = PdfDocument::new();
+    for i in 0..20u32 {
+        let mut page = doc.new_page(Size::A4).unwrap();
+        let o = InsertImageOptions::default();
+        page.insert_image(&mut doc, Rect::new(36.0, 36.0, 400.0, 300.0), PageImageSource::Pixmap(&photo(1100, 800, true, i * 2 + 1)), o).unwrap();
+    }
+    doc.add_embedded_file("blob.bin", &vec![7u8; 400_000].iter().enumerate().map(|(i, b)| b.wrapping_mul(i as u8)).collect::<Vec<u8>>(), mupdf::pdf::EmbeddedFileOptions::new("blob.bin")).unwrap();
+    doc.save(input.to_str().unwrap()).unwrap();
+    let full = audit_file(&input, None).unwrap();
+    assert!(full.bytes(Category::EmbeddedFiles) > 0);
+
+    let cancel = AtomicBool::new(false);
+    let mut keep = Options::preset(Preset::Custom);
+    keep.images.color = ImageClass { above_ppi: 150, to_ppi: 100, codec: Codec::Jpeg, quality: 50 };
+    let mut drop = keep.clone();
+    drop.strip.embedded_files = true;
+    let e_keep = estimate::estimate_custom(&input, None, &full, &keep, &cancel).unwrap();
+    let e_drop = estimate::estimate_custom(&input, None, &full, &drop, &cancel).unwrap();
+    println!("keep {} [{}..{}]  drop {} [{}..{}]  attachment {}", e_keep.bytes, e_keep.low, e_keep.high, e_drop.bytes, e_drop.low, e_drop.high, full.bytes(Category::EmbeddedFiles));
+    assert!(e_drop.bytes < e_keep.bytes);
+    for (e, o) in [(e_keep, &keep), (e_drop, &drop)] {
+        let mut o = o.clone();
+        o.output = Some(s.path(&format!("real-{}.pdf", o.strip.embedded_files)));
+        let real = run(&input, &o).unwrap().size_after as f64;
+        let err = (e.bytes as f64 - real) / real;
+        println!("  est {} real {real} err {:+.1}%", e.bytes, err * 100.0);
+        assert!(err.abs() <= 0.30, "{} vs {real}", e.bytes);
     }
 }
