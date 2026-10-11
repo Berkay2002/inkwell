@@ -16,7 +16,7 @@ import { CommentsToggle } from "./comments/CommentsPanel";
 import { FormsToggle } from "./forms/FormsPanel";
 import { RedactToggle } from "./redact/RedactPanel";
 import { ModeSwitch } from "./Organize";
-import { ToolsMenu } from "./ToolsMenu";
+import { PinnedTools, ToolsButton } from "./AllTools";
 import { WindowControls } from "./WindowControls";
 
 const st = () => useStore.getState();
@@ -111,7 +111,8 @@ export function Toolbar({ doc }: { doc: DocState }) {
   return (
     <div className="toolbar">
       <ModeSwitch doc={doc} />
-      <ToolsMenu doc={doc} />
+      <ToolsButton doc={doc} />
+      <PinnedTools doc={doc} />
       <span className="sep" />
       {doc.organize ? (
         <>

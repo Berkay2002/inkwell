@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { commands, prettyKeys } from "../lib/commands";
+import { useToolPrefs } from "../lib/toolPrefs";
+import { toolItems } from "../lib/toolItems";
 import { useRecents } from "../recents";
 import { useStore } from "../store";
 
@@ -9,6 +11,10 @@ const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 interface Item {
   title: string;
   hint?: string;
+  /** What the command is for, one plain line (the same text the All tools panel shows). */
+  sub?: string;
+  /** Extra words the filter matches besides the title. */
+  words?: string;
   run: () => void;
 }
 
@@ -20,12 +26,30 @@ export function CommandPalette() {
   const list = useRef<HTMLDivElement>(null);
 
   const items = useMemo<Item[]>(() => {
+    const tools = toolItems(null);
     const cmds = commands
       .filter((c) => hasDoc || !c.needsDoc)
-      .map((c) => ({ title: c.title, hint: c.keys?.[0] && prettyKeys(c.keys[0]), run: c.run }));
-    const files = recent.map(({ path: p }) => ({ title: `Open ${fileName(p)}`, hint: p, run: () => void st().openPath(p) }));
+      .map((c): Item => {
+        const tool = tools.find((t) => t.command === c.id);
+        return {
+          title: c.title,
+          hint: c.keys?.[0] && prettyKeys(c.keys[0]),
+          sub: tool?.description,
+          words: tool && `${tool.label} ${tool.keywords ?? ""} ${tool.description}`,
+          run: tool
+            ? () => {
+                useToolPrefs.getState().used(tool.id);
+                c.run();
+              }
+            : c.run,
+        };
+      });
+    const files = recent.map(({ path: p }): Item => ({ title: `Open ${fileName(p)}`, hint: p, run: () => void st().openPath(p) }));
     const words = q.toLowerCase().split(/\s+/).filter(Boolean);
-    return [...cmds, ...files].filter((i) => words.every((w) => i.title.toLowerCase().includes(w)));
+    return [...cmds, ...files].filter((i) => {
+      const hay = `${i.title} ${i.words ?? ""}`.toLowerCase();
+      return words.every((w) => hay.includes(w));
+    });
   }, [q, recent, hasDoc]);
 
   useEffect(() => setSel(0), [q]);
@@ -61,7 +85,10 @@ export function CommandPalette() {
         <div className="palette-list" ref={list}>
           {items.map((i, n) => (
             <div key={i.title + n} className={n === sel ? "item on" : "item"} onMouseMove={() => setSel(n)} onClick={() => run(i)}>
-              <span className="item-title">{i.title}</span>
+              <span className="item-text">
+                <span className="item-title">{i.title}</span>
+                {i.sub && <span className="dim item-sub">{i.sub}</span>}
+              </span>
               {i.hint && <span className="dim item-hint">{i.hint}</span>}
             </div>
           ))}

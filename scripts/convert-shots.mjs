@@ -61,9 +61,9 @@ await sleep(900);
 // Tools menu with the new entries
 await click('button[aria-label="Tools"]');
 await sleep(200);
-report.menuItems = await ev(`[...document.querySelectorAll('.ink-menu [role=menuitem], .ink-menu [role=option]')].map((e) => e.textContent.trim())`);
+report.menuItems = await ev(`[...document.querySelectorAll('.tools-panel .tool-name')].map((e) => e.textContent.trim())`);
 await shot("tools-menu-light.png", 150);
-await click(".ink-menu [role=menuitem], .ink-menu [role=option]", "Export…");
+await click(".tools-panel .tool-name", "Export");
 await sleep(500);
 
 // export options, page images; then each other format
@@ -83,7 +83,8 @@ await sleep(200);
 
 // create options, on top of the open document
 await click('button[aria-label="Tools"]');
-await click(".ink-menu [role=menuitem], .ink-menu [role=option]", "Create PDF…");
+await sleep(200);
+await click(".tools-panel .tool-name", "Create PDF");
 await sleep(500);
 await ev(`${C}.setState((s) => ({ sheet: { ...s.sheet, from: "images", pageSize: "a4", margin: 24, files: [{ token: "a", path: "C:\\\\scans\\\\receipt-1.jpg" }, { token: "b", path: "C:\\\\scans\\\\receipt-2.jpg" }, { token: "c", path: "C:\\\\scans\\\\contract.tif" }] } }))`);
 await both("create-images");
