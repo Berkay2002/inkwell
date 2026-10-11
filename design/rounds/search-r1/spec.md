@@ -8,12 +8,15 @@ its options and the results) and `-2-files` (search across a folder: results gro
 
 ## Verdict
 
-2026-10-11: pending. The image tool was at its usage limit (render.mjs: "Image generation failed because the usage
-limit was reached", all six renders), so there are no renders and no sheet. Per the brief the worker builds the most
-standard variant meanwhile: **a-rail** (Acrobat's floating find box with its "..." options, Advanced search as the
-right rail in the shared dock, pdfcraft's context list). The rail and the find bar are separate components, so
-b-side (results as a left-sidebar tab) or c-bar (a popover under the bar) stay cheap to switch to if inkwell picks
-one of them from this text.
+2026-10-11: **a-rail, with one touch from b-side.** Picked by the orchestrator session (inkwell) in a cross-session
+message, quoted here: "search-r1 verdict: a-rail. One touch from b-side: show Match case and Whole words as small
+Aa / ab toggle chips right in the find box, and keep the rest under '...'." Recorded as the orchestrator's pick; the
+user's own confirmation is not in this record.
+The image tool was at its usage limit (render.mjs: "Image generation failed because the usage limit was reached", all
+six renders), so there are no renders and no sheet; the pick was made from this text. b-side and c-bar are dropped.
+Built: Acrobat's floating find box on the page with the Aa and ab chips, Ignore accents and the include options under
+"...", and Advanced search as the right rail "Search" in the shared dock (pdfcraft's context list). No
+`design/approved/search.png` exists (no render); the build's screens are in `docs/screens/search/`.
 
 ## How Acrobat Pro does it (study 09-viewer; docs/study/screens/09-viewer/11-find-ctrl-f.png, 12-find-results.png)
 - Ctrl+F opens a small floating find box on the page: the field, previous and next arrows, a "..." menu for options
