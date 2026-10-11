@@ -57,6 +57,12 @@ impl Op {
         Op { op: op.as_bytes().to_vec(), operands, span: 0..0 }
     }
 
+    /// An operator written back exactly as `bytes` (an original operator's source, e.g. an
+    /// inline image with its parameters and data, which the parsed form does not keep).
+    pub fn verbatim(bytes: &[u8]) -> Self {
+        Op { op: bytes.to_vec(), operands: Vec::new(), span: 0..0 }
+    }
+
     pub fn is(&self, op: &str) -> bool {
         self.op == op.as_bytes()
     }

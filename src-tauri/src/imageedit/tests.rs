@@ -364,3 +364,161 @@ fn stale_rev_and_bad_requests_are_refused() {
     // Nothing changed by the refusals.
     assert_eq!(eng.edit_state(id).unwrap().rev, rev);
 }
+
+/// The page's content (its streams decoded and joined) in a saved file.
+fn saved_content(path: &str, page: i32) -> Vec<u8> {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    let c = doc.find_page(page).unwrap().get_dict("Contents").unwrap().unwrap();
+    if c.is_array().unwrap() {
+        (0..c.len().unwrap() as i32)
+            .flat_map(|i| [c.get_array(i).unwrap().unwrap().read_stream().unwrap(), b"\n".to_vec()].concat())
+            .collect()
+    } else {
+        c.read_stream().unwrap()
+    }
+}
+
+const INLINE: &[u8] = b"BI /W 2 /H 2 /CS /G /BPC 8 ID \x10\x60\xa0\xf0 EI";
+
+#[test]
+fn inline_images_survive_every_operation() {
+    let d = dir("inline-ops");
+    let png = png_alpha(&d);
+    let ops = [
+        ImageChange::Move { dx: 10.0, dy: 5.0 },
+        ImageChange::Resize { rect: [400.0, 100.0, 500.0, 150.0], keep_aspect: false },
+        ImageChange::Rotate { quarter_turns: 1 },
+        ImageChange::Flip { horizontal: true },
+        ImageChange::Crop { rect: [400.0, 142.0, 425.0, 192.0], pixels: false },
+        ImageChange::Delete,
+        ImageChange::Replace { file: png },
+    ];
+    for (n, op) in ops.into_iter().enumerate() {
+        let d = d.join(n.to_string());
+        std::fs::create_dir_all(&d).unwrap();
+        let (eng, id, path) = open(&d, &pdf(1, false));
+        change(&eng, id, Some(1), op.clone());
+        eng.save(id, None).unwrap();
+        eng.close(id);
+        let content = saved_content(&path, 0);
+        let kept = !matches!(op, ImageChange::Delete | ImageChange::Replace { .. });
+        assert_eq!(content.windows(INLINE.len()).any(|w| w == INLINE), kept, "{op:?}: {}", String::from_utf8_lossy(&content));
+        // The rest of the page still parses: the text and the other image are there.
+        let eng = Engine::new(2, 64 << 20);
+        let id = eng.open(&path).unwrap().doc;
+        let text: String = eng.page_text(id, 0).unwrap().iter().map(|l| l.t.clone()).collect();
+        assert!(text.contains("Page 1"), "{op:?}: text lost");
+        let l = list(&eng, id);
+        assert!(near(l[0].rect, [100.0, 192.0, 300.0, 292.0]), "{op:?}: {l:?}");
+        match &op {
+            ImageChange::Delete => assert_eq!(l.len(), 1),
+            ImageChange::Replace { .. } => assert_eq!((l.len(), l[1].kind), (2, ImageKind::XObject)),
+            _ => assert_eq!((l.len(), l[1].kind, l[1].width), (2, ImageKind::Inline, 2), "{op:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_cropped_image_moves_with_its_crop() {
+    let d = dir("crop-move");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    // The right half, then moved: the visible part stays 100 wide and moves along.
+    change(&eng, id, Some(0), ImageChange::Crop { rect: [200.0, 192.0, 300.0, 292.0], pixels: false });
+    change(&eng, id, Some(0), ImageChange::Move { dx: 150.0, dy: 10.0 });
+    let b = list(&eng, id)[0].clone();
+    assert!(near(b.rect, [350.0, 202.0, 450.0, 302.0]) && near(b.full_rect, [250.0, 202.0, 450.0, 302.0]), "{b:?}");
+    // Cropped again (nested clips), then rotated: everything turns about the image's centre.
+    change(&eng, id, Some(0), ImageChange::Crop { rect: [350.0, 202.0, 450.0, 252.0], pixels: false });
+    let before = list(&eng, id)[0].clone();
+    assert!(near(before.rect, [350.0, 202.0, 450.0, 252.0]), "{before:?}");
+    change(&eng, id, Some(0), ImageChange::Rotate { quarter_turns: 2 });
+    let b = list(&eng, id)[0].clone();
+    // Half-turned about (350, 252): the visible top right quarter is now the bottom left one.
+    assert!(near(b.full_rect, before.full_rect) && near(b.rect, [250.0, 252.0, 350.0, 302.0]), "{b:?}");
+}
+
+#[test]
+fn a_mask_that_refers_to_itself_is_cropped_once() {
+    let d = dir("self-mask");
+    let mut bytes = pdf(1, false);
+    // Image 3 becomes its own soft mask.
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let mut img = doc.new_indirect(3, 0).unwrap().resolve().unwrap().unwrap();
+    img.dict_put("SMask", doc.new_indirect(3, 0).unwrap()).unwrap();
+    bytes.clear();
+    doc.write_to(&mut bytes).unwrap();
+    let (eng, id, _) = open(&d, &bytes);
+    change(&eng, id, Some(0), ImageChange::Crop { rect: [200.0, 192.0, 300.0, 242.0], pixels: true });
+    let b = list(&eng, id)[0].clone();
+    assert_eq!((b.width, b.height, b.masked), (2, 1, true));
+}
+
+#[test]
+fn oversized_or_odd_images_are_refused_not_crashed() {
+    for (n, (dict, why)) in [
+        ("/ColorSpace [/ICCBased << /N 2000000000 >>]", "colour space"),
+        ("/ColorSpace [/ICCBased << /N -3 >>]", "colour space"),
+        ("/ColorSpace /DeviceRGB /Width 2000000 /Height 2000000", "too large"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let d = dir(&format!("odd-{n}"));
+        let mut bytes = pdf(1, false);
+        let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+        let mut img = doc.new_indirect(3, 0).unwrap().resolve().unwrap().unwrap();
+        let extra = doc.new_object_from_str(&format!("<< {dict} >>")).unwrap();
+        for i in 0..extra.dict_len().unwrap() as i32 {
+            let k = extra.get_dict_key(i).unwrap().unwrap().as_name().unwrap();
+            img.dict_put(String::from_utf8_lossy(&k).as_ref(), extra.get_dict_val(i).unwrap().unwrap()).unwrap();
+        }
+        bytes.clear();
+        doc.write_to(&mut bytes).unwrap();
+        let (eng, id, _) = open(&d, &bytes);
+        let rev = eng.edit_state(id).unwrap().rev;
+        let e = edit(&eng, id, rev, 0, Some(0), &ImageChange::Crop { rect: [200.0, 192.0, 300.0, 242.0], pixels: true }, EditSource::User);
+        assert!(matches!(&e, Err(EngineError::Invalid(m)) if m.contains(why)), "{dict}: {e:?}");
+    }
+}
+
+#[test]
+fn an_added_image_ignores_state_the_content_leaves() {
+    // A clip left at depth 0, and a stray Q before anything.
+    for (n, extra) in [&b"0 0 10 10 re W n 0.5 g\n"[..], b"Q Q 0 0 10 10 re W n\n"].iter().enumerate() {
+        let d = dir(&format!("add-state-{n}"));
+        let file = png_alpha(&d);
+        let mut bytes = pdf(1, false);
+        let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+        let mut c = doc.find_page(0).unwrap().get_dict("Contents").unwrap().unwrap();
+        let mut data = c.read_stream().unwrap();
+        if n == 1 {
+            data.splice(0..0, extra.iter().copied());
+        } else {
+            data.extend_from_slice(extra);
+        }
+        c.write_stream_buffer(&Buffer::from_bytes(&data).unwrap()).unwrap();
+        bytes.clear();
+        doc.write_to(&mut bytes).unwrap();
+        let (eng, id, _) = open(&d, &bytes);
+        change(&eng, id, None, ImageChange::Add { file, rect: [300.0, 400.0, 400.0, 500.0], keep_aspect: true });
+        let l = list(&eng, id);
+        let added = l.last().unwrap();
+        assert!(near(added.rect, [300.0, 400.0, 400.0, 500.0]) && near(added.full_rect, added.rect), "case {n}: {added:?}");
+    }
+}
+
+#[test]
+fn a_clip_of_several_rectangles_is_their_union() {
+    let d = dir("two-rects");
+    let mut bytes = pdf(1, false);
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let mut c = doc.find_page(0).unwrap().get_dict("Contents").unwrap().unwrap();
+    let mut data = b"q 100 500 50 100 re 250 500 30 100 re W n ".to_vec();
+    data.extend_from_slice(b"200 0 0 100 100 500 cm /Im1 Do Q\n");
+    c.write_stream_buffer(&Buffer::from_bytes(&data).unwrap()).unwrap();
+    bytes.clear();
+    doc.write_to(&mut bytes).unwrap();
+    let (eng, id, _) = open(&d, &bytes);
+    let b = list(&eng, id)[0].clone();
+    assert!(near(b.rect, [100.0, 192.0, 280.0, 292.0]), "{b:?}");
+}

@@ -38,21 +38,31 @@ splice and stream writer of [text editing](text-edit.md). MuPDF stays the only e
 ## Design
 
 1. **Reading.** The page's content streams are parsed joined (one stream in pieces). The interpreter tracks the CTM
-   (`q/Q/cm`), rectangular clips (`re W n`, intersected, in user space) and text objects, and records every `Do` of
+   (`q/Q/cm`), rectangular clips (`re … re W n`: the union of a path's rectangles, intersected with the clip in effect, in user space) and text objects, and records every `Do` of
    an image XObject and every inline image (`BI … EI`, its abbreviated keys expanded). Form XObjects are not
    entered: images inside them are not listed.
 2. **Transforms** (move, resize, rotate, flip) are page-space matrices `T`, taken to user space
-   (`T_user = P·T·P⁻¹` with `P` user → page) and applied after the placement: the image's operator becomes
-   `q <D·T_user·D⁻¹> cm <op> Q` (`D` the CTM at the operator). Inline images work the same way.
+   (`T_user = P·T·P⁻¹` with `P` user → page) and applied after the placement. The image moves as a unit with
+   the wrappers around it: each enclosing `q … Q` that holds only `cm`s and a rectangular clip (a clip crop, an
+   earlier transform, the producer's own placement). A new `cm <C·T_user·C⁻¹>` goes right after the outermost
+   wrapper's `q` (`C` the CTM there), so a crop moves with its image; a bare operator becomes
+   `q <D·T_user·D⁻¹> cm <op> Q` (`D` the CTM at the operator). The image's operator is always written back
+   byte for byte from its source, so an inline image keeps its parameters and data. Inline images work the same way.
 3. **Delete** removes the operator. **Replace** loads the file with MuPDF and adds it with `pdf_add_image` (JPEG data
    is stored as it is, `DCTDecode`; a PNG's alpha becomes an `/SMask`), names it `IwImg<n>` and draws it with
    `q <fit> cm /IwImg<n> Do Q` in place of the old operator. **Crop** with a clip draws
    `q u0 v0 du dv re W n <op> Q` (the rectangle in the image's unit square, the space its `Do` paints in); a pixel
    crop decodes the samples (`pdf_load_stream`: Flate, DCT, LZW, CCITT …; any bit depth 1-16), copies the rows and
    columns inside the crop (rounded out to whole pixels) into a new Flate image with the same colour space, decode
-   and mask settings (an `/SMask` or stencil `/Mask` is cropped the same way), and draws it where those pixels were.
-4. **Add** appends `q <placement> cm /IwImg<n> Do Q` as a new content stream; if the page's content leaves a `q`
-   open or a `cm` outside any `q`, it is first wrapped in `q … Q` (two new pieces; the old streams stay as they are).
+   and mask settings (an `/SMask` or stencil `/Mask` is cropped the same way, one level deep: a mask's own masks
+   are dropped, so a mask that refers back to its image can't recurse), and draws it where those pixels were.
+   Before decoding, the declared size must stay under 100 megapixels (sizes computed with checked arithmetic,
+   colour spaces with 1-32 components); plain Flate data is inflated here with that size as the limit.
+4. **Add** appends `q <placement> cm /IwImg<n> Do Q` as a new content stream. The page's content is always
+   wrapped first, so whatever state it leaves (a `cm`, a clip, a colour, an unclosed `q`) can't reach the new
+   image: one `q` before it, plus one for each `Q` it has without a `q` (underflow), and after it as many `Q` as
+   that leaves open (two new pieces; the old streams stay as they are). Image files over 256 MB or 100
+   megapixels are refused before their pixels are decoded.
 5. **No orphans.** After a delete, replace or pixel crop, a name the page's content no longer draws is removed from
    the page's `/XObject` dict. The page's resources and `/XObject` dict are copied onto the page first (shallowly)
    when they are inherited or shared, so other pages keep theirs. The next save is a full rewrite without
@@ -70,7 +80,13 @@ splice and stream writer of [text editing](text-edit.md). MuPDF stays the only e
   deleting it afterwards leaves neither image nor mask.
 - Crop with a clip (XObject and inline) and with pixels (exact samples checked; a JPEG is decoded and stored as
   Flate); the uncropped image is gone from the saved file.
-- Add an image fitted into a rectangle, upright, unaffected by a `cm` the page's content leaves behind.
+- Add an image fitted into a rectangle, upright, unaffected by a `cm`, a clip or a stray `Q` the page's content
+  leaves behind.
+- Every operation on an inline image keeps its bytes (`BI … ID … EI`) and the rest of the page, checked in the saved
+  content after reopening.
+- A clip-cropped image moves, and turns, together with its crop (nested crops too).
+- A soft mask that refers to its own image is cropped once, without recursion; images with absurd sizes or
+  component counts are refused with a message.
 - Stale `rev`, a missing index and an index out of range are refused and change nothing.
 
 ## Limits
@@ -83,4 +99,10 @@ splice and stream writer of [text editing](text-edit.md). MuPDF stays the only e
   a colour-key `/Mask` array stays as it is.
 - Rotation is in quarter turns; replace fits the new image into the old box rather than keeping its pixel size.
 - A name is kept in the page's resources if a form XObject without its own `/Resources` could draw it (PDF 1.1).
+- Delete and Replace leave the page's tagged structure as it was: a `/Figure` structure element (and its `/Alt`
+  text) that pointed at the old image now points at nothing, or describes the wrong picture. Fix it in the
+  accessibility checker after replacing or deleting tagged images.
+- The decompression guard is complete for unfiltered and plain Flate images; other filters (DCT, LZW, Flate with a
+  predictor, CCITT …) are decoded by MuPDF after the declared-size check, and the result is refused if it is larger
+  than declared.
 - New images are added through MuPDF's image loader: JPEG, PNG, GIF, BMP, TIFF (first page), JPEG 2000.

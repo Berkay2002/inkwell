@@ -188,7 +188,13 @@ struct PageImages {
     streams: Vec<(PdfObject, Vec<u8>)>,
     pieces: Pieces,
     ops: Vec<Op>,
+    /// The CTM in effect before each operator.
+    ctms: Vec<Matrix>,
     found: Vec<Found>,
+}
+
+fn union(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
 }
 
 fn intersect(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
@@ -279,10 +285,14 @@ fn read_images(doc: &PdfDocument, page: u32) -> Result<PageImages> {
     let mut ctm = Matrix::IDENTITY;
     let mut clip: Option<[f64; 4]> = None;
     let mut stack = Vec::new();
+    // The current path's rectangles (their union, in user space), and whether it has other parts.
     let mut path: Option<[f64; 4]> = None;
+    let mut path_other = false;
     let mut pending_clip = false;
     let mut in_text = false;
+    let mut ctms = Vec::with_capacity(ops.len());
     for (i, op) in ops.iter().enumerate() {
+        ctms.push(ctm);
         match op.op.as_slice() {
             b"q" => stack.push((ctm, clip)),
             b"Q" => (ctm, clip) = stack.pop().unwrap_or((ctm, clip)),
@@ -293,20 +303,26 @@ fn read_images(doc: &PdfDocument, page: u32) -> Result<PageImages> {
             }
             b"BT" => in_text = true,
             b"ET" => in_text = false,
-            b"re" => {
-                // Only rectangles are tracked as clips: anything else clears the guess.
-                path = op.nums::<4>().map(|[x, y, w, h]| ctm.bbox([x.min(x + w), y.min(y + h), x.max(x + w), y.max(y + h)]));
-            }
-            b"m" | b"l" | b"c" | b"v" | b"y" | b"h" => path = None,
+            b"re" => match op.nums::<4>() {
+                // Only rectangles are tracked as clips (several: their union); anything else in
+                // the path clears the guess.
+                Some([x, y, w, h]) => {
+                    let r = ctm.bbox([x.min(x + w), y.min(y + h), x.max(x + w), y.max(y + h)]);
+                    path = Some(path.map_or(r, |p| union(p, r)));
+                }
+                None => path_other = true,
+            },
+            b"m" | b"l" | b"c" | b"v" | b"y" | b"h" => path_other = true,
             b"W" | b"W*" => pending_clip = true,
             b"n" | b"f" | b"F" | b"f*" | b"S" | b"s" | b"B" | b"B*" | b"b" | b"b*" => {
-                if pending_clip {
+                if pending_clip && !path_other {
                     if let Some(r) = path {
                         clip = Some(clip.map_or(r, |c| intersect(c, r)));
                     }
                 }
                 pending_clip = false;
                 path = None;
+                path_other = false;
             }
             b"Do" => {
                 let Some(name) = op.name(0) else { continue };
@@ -354,7 +370,7 @@ fn read_images(doc: &PdfDocument, page: u32) -> Result<PageImages> {
             _ => {}
         }
     }
-    Ok(PageImages { page: p, streams, pieces, ops, found })
+    Ok(PageImages { page: p, streams, pieces, ops, ctms, found })
 }
 
 const UNIT: [f64; 4] = [0.0, 0.0, 1.0, 1.0];
@@ -476,13 +492,25 @@ fn flate(data: &[u8]) -> Result<Vec<u8>> {
     z.finish().map_err(|e| EngineError::Io(e.to_string()))
 }
 
+/// The largest image file read for inserting.
+const MAX_FILE: u64 = 256 << 20;
+
 /// A new image XObject from an image file (JPEG kept as it is; alpha becomes an /SMask).
 fn load_image(doc: &mut PdfDocument, path: &str) -> Result<(PdfObject, u32, u32)> {
+    let size = std::fs::metadata(path).map_err(|e| EngineError::Io(e.to_string()))?.len();
+    if size > MAX_FILE {
+        return Err(invalid("the image file is too large"));
+    }
     let bytes = std::fs::read(path).map_err(|e| EngineError::Io(e.to_string()))?;
+    // MuPDF reads the header here; the pixels are decoded only when the image is added, and only
+    // after the size check below.
     let img = Image::from_bytes(&bytes).map_err(|_| invalid("that file is not an image Inkwell can read"))?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
         return Err(invalid("the image is empty"));
+    }
+    if u64::from(w) * u64::from(h) > MAX_PIXELS {
+        return Err(invalid("the image has too many pixels (more than 100 megapixels)"));
     }
     Ok((doc.add_image(&img)?, w, h))
 }
@@ -567,7 +595,8 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
     if f.in_text && !matches!(change, ImageChange::Delete) {
         return Err(invalid("this image is drawn inside a text object; it can only be deleted"));
     }
-    let original = pi.ops[f.op].clone();
+    // The image's operator exactly as written (an inline image keeps its parameters and data).
+    let original = Op::verbatim(&pi.pieces.data()[pi.ops[f.op].span.clone()]);
     // Page-space transform of the image's box, for move, resize, rotate and flip.
     let full = to_page.bbox(f.ctm.bbox(UNIT));
     let (cx, cy) = ((full[0] + full[2]) / 2.0, (full[1] + full[3]) / 2.0);
@@ -596,16 +625,29 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
         _ => None,
     };
     let mut gone = HashSet::new();
-    let replacement: Vec<Op> = if let Some(t) = page_t {
-        // New placement = P · T (T in user space); as a `cm` before the image: P · T · P⁻¹.
+    if let Some(t) = page_t {
+        // The image and the wrappers around it (its clip crop, earlier transforms) move as one:
+        // the new `cm` goes right after the outermost wrapper's `q`, or around the operator.
+        let (start, end) = unit_of(&pi.ops, f.op);
+        let c = pi.ctms[start];
+        // New placement = C · T (T in user space); as a `cm` there: C · T · C⁻¹.
         let t_user = to_page.then(&t).then(&to_user);
-        let inv = f.ctm.invert().ok_or_else(|| invalid("the image has no area"))?;
-        let m = f.ctm.then(&t_user).then(&inv);
+        let inv = c.invert().ok_or_else(|| invalid("the image has no area"))?;
+        let m = c.then(&t_user).then(&inv);
         if !m.0.iter().all(|v| v.is_finite() && v.abs() < 1e9) {
             return Err(invalid("the image can't be moved that far"));
         }
-        vec![Op::new("q", vec![]), Op::new("cm", m.0.iter().map(|v| num(*v)).collect()), original, Op::new("Q", vec![])]
-    } else {
+        let cm = Op::new("cm", m.0.iter().map(|v| num(*v)).collect());
+        let new = if start == end {
+            let mut wrapped = Some(vec![Op::new("q", vec![]), cm, original, Op::new("Q", vec![])]);
+            splice(&pi.pieces, &pi.ops, |i| if i == f.op { (wrapped.take().unwrap_or_default(), false) } else { (Vec::new(), true) })
+        } else {
+            let mut cm = Some(vec![cm]);
+            splice(&pi.pieces, &pi.ops, |i| if i == start + 1 { (cm.take().unwrap_or_default(), true) } else { (Vec::new(), true) })
+        };
+        return write_streams(d, &pi.page, &pi.streams, new);
+    }
+    let replacement: Vec<Op> = {
         match change {
             ImageChange::Delete => {
                 gone.extend(f.name.clone());
@@ -665,6 +707,28 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
     forget_unused(d, page, &gone)
 }
 
+/// The operators that draw image operator `op` as a unit: the operator itself, and around it each
+/// `q … Q` that holds nothing else but `cm`s and a rectangular clip (`re W n`): the wrappers a
+/// transform or a clip crop leave. Returns the first and last operator index (the same for a bare
+/// operator); a transform goes right after the first one's `q`, so the clip moves with the image.
+fn unit_of(ops: &[Op], op: usize) -> (usize, usize) {
+    let (mut lo, mut hi) = (op, op);
+    loop {
+        if !ops.get(hi + 1).is_some_and(|o| o.is("Q")) {
+            break;
+        }
+        let mut k = lo;
+        while k > 0 && matches!(ops[k - 1].op.as_slice(), b"cm" | b"re" | b"W" | b"W*" | b"n") {
+            k -= 1;
+        }
+        if k == 0 || !ops[k - 1].is("q") {
+            break;
+        }
+        (lo, hi) = (k - 1, hi + 1);
+    }
+    (lo, hi)
+}
+
 /// Draws a new image in page-space `rect`, after the page's content (in a clean graphics state).
 fn add(d: &mut PdfDocument, pi: &PageImages, to_user: &Matrix, file: &str, rect: [f64; 4], keep_aspect: bool) -> Result<()> {
     let r = ordered(rect)?;
@@ -683,43 +747,37 @@ fn add(d: &mut PdfDocument, pi: &PageImages, to_user: &Matrix, file: &str, rect:
     let place_page = Matrix([r[2] - r[0], 0.0, 0.0, -(r[3] - r[1]), r[0], r[3]]);
     let m = place_page.then(to_user);
     let name = add_resource(d, &pi.page, &img)?;
-    // Unbalanced q or a leftover cm in the page's content would move the new image: wrap the
-    // content in q … Q unless it already ends in a clean state.
-    let mut depth = 0i32;
-    let mut cm_outside = false;
+    // Whatever state the page's content leaves (a cm, a clip, a colour, q without Q or Q
+    // without q) must not reach the new image: the content goes inside q … Q, with as many
+    // extra q before it as it closes more than it opens, and as many Q after it as are left open.
+    let (mut depth, mut lowest) = (0i64, 0i64);
     for op in &pi.ops {
         match op.op.as_slice() {
             b"q" => depth += 1,
-            b"Q" => depth -= 1,
-            b"cm" if depth <= 0 => cm_outside = true,
+            b"Q" => {
+                depth -= 1;
+                lowest = lowest.min(depth);
+            }
             _ => {}
         }
     }
-    let mut ops: Vec<Op> = Vec::new();
-    let wrap = depth != 0 || cm_outside;
-    if wrap {
-        ops.push(Op::new("Q", vec![]));
-    }
-    ops.push(Op::new("q", vec![]));
-    ops.push(Op::new("cm", m.0.iter().map(|v| num(*v)).collect()));
-    ops.push(Op::new("Do", vec![Obj::Name(name)]));
-    ops.push(Op::new("Q", vec![]));
+    let opened = 1 + (-lowest) as usize;
+    let left_open = (opened as i64 + depth).max(0) as usize;
+    let ops = [
+        Op::new("q", vec![]),
+        Op::new("cm", m.0.iter().map(|v| num(*v)).collect()),
+        Op::new("Do", vec![Obj::Name(name)]),
+        Op::new("Q", vec![]),
+    ];
     let mut streams = pi.streams.clone();
     let mut new: Vec<Vec<u8>> = streams.iter().map(|(_, b)| b.clone()).collect();
-    let bytes = crate::textedit::content::serialize_ops(&ops);
-    if wrap {
-        // `q` before everything: a piece of its own, so the old streams stay as they are.
-        streams.insert(0, (PdfObject::new_null(), Vec::new()));
-        new.insert(0, b"q\n".to_vec());
-        // Extra `Q`s first for a content that leaves more `q`s open.
-        let mut tail = b"Q\n".repeat(depth.max(0) as usize);
-        tail.extend_from_slice(&bytes);
-        streams.push((PdfObject::new_null(), Vec::new()));
-        new.push(tail);
-    } else {
-        streams.push((PdfObject::new_null(), Vec::new()));
-        new.push(bytes);
-    }
+    // New pieces of their own before and after, so the old streams stay as they are.
+    streams.insert(0, (PdfObject::new_null(), Vec::new()));
+    new.insert(0, b"q\n".repeat(opened));
+    let mut tail = b"Q\n".repeat(left_open);
+    tail.extend_from_slice(&crate::textedit::content::serialize_ops(&ops));
+    streams.push((PdfObject::new_null(), Vec::new()));
+    new.push(tail);
     write_streams(d, &pi.page, &streams, new)
 }
 
@@ -740,13 +798,62 @@ fn components(img: &PdfObject) -> Option<u32> {
     if cs.is_array().ok()? {
         let head = cs.get_array(0).ok()??.as_name().ok()?;
         match head.as_slice() {
-            b"ICCBased" => cs.get_array(1).ok()?.and_then(|s| get(&s, "N")).and_then(|n| n.as_int().ok()).map(|n| n as u32),
-            b"DeviceN" => cs.get_array(1).ok()?.and_then(|a| a.len().ok()).map(|n| n as u32),
+            b"ICCBased" => {
+                cs.get_array(1).ok()?.and_then(|s| get(&s, "N")).and_then(|n| n.as_int().ok()).and_then(|n| u32::try_from(n).ok())
+            }
+            b"DeviceN" => cs.get_array(1).ok()?.and_then(|a| a.len().ok()).and_then(|n| u32::try_from(n).ok()),
             other => family(other),
         }
+        // A real colour space has at most 32 components (DeviceN's limit).
+        .filter(|n| (1..=32).contains(n))
     } else {
         family(&cs.as_name().ok()?)
     }
+}
+
+/// The most pixels an image may have to be decoded here (a decompression bomb guard).
+const MAX_PIXELS: u64 = 100_000_000;
+
+/// Bytes of decoded samples an image of `w × h` pixels, `n` components and `bpc` bits takes, and
+/// its row length; None when it is too large to decode.
+fn sample_size(w: u32, h: u32, n: u32, bpc: u32) -> Option<(usize, usize)> {
+    if u64::from(w).checked_mul(u64::from(h))? > MAX_PIXELS {
+        return None;
+    }
+    let row = u64::from(w).checked_mul(u64::from(n))?.checked_mul(u64::from(bpc))?.div_ceil(8);
+    let total = row.checked_mul(u64::from(h))?;
+    Some((usize::try_from(total).ok()?, usize::try_from(row).ok()?))
+}
+
+/// The decoded samples of `img`, at most `limit` bytes of them. Plain Flate is inflated here with
+/// that limit; other filters go through MuPDF, after a check that the raw data is not an extreme
+/// expansion of what was declared.
+fn samples(img: &PdfObject, limit: usize) -> Result<Vec<u8>> {
+    let too_big = || invalid("the image's data is larger than its declared size");
+    let filters = pdf_names(get(img, "Filter"));
+    let parms = get(img, "DecodeParms").is_some_and(|p| !p.is_null().unwrap_or(true));
+    if filters.iter().map(String::as_str).eq(["FlateDecode"]) && !parms {
+        use std::io::Read;
+        let raw = img.read_raw_stream()?;
+        let mut out = Vec::with_capacity(limit.min(raw.len().saturating_mul(4)));
+        flate2::read::ZlibDecoder::new(&raw[..])
+            .take(limit as u64 + 1)
+            .read_to_end(&mut out)
+            .map_err(|_| invalid("the image's data is damaged"))?;
+        if out.len() > limit {
+            return Err(too_big());
+        }
+        return Ok(out);
+    }
+    if filters.is_empty() {
+        let raw = img.read_raw_stream()?;
+        return if raw.len() > limit.saturating_add(4096) { Err(too_big()) } else { Ok(raw) };
+    }
+    let data = img.read_stream()?;
+    if data.len() > limit.saturating_add(4096) {
+        return Err(too_big());
+    }
+    Ok(data)
 }
 
 /// Copies the pixels of `img` inside unit-square box `u` into a new image XObject (its SMask or
@@ -768,12 +875,14 @@ fn pixel_crop(d: &mut PdfDocument, f: &Found, u: [f64; 4]) -> Result<(PdfObject,
         f64::from(x1) / f64::from(w),
         1.0 - f64::from(y0) / f64::from(h),
     ];
-    let made = crop_stream(d, obj, sub)?;
+    let made = crop_stream(d, obj, sub, true)?;
     Ok((made, sub))
 }
 
-/// A cropped copy of image stream `img` covering unit-square box `sub` of it.
-fn crop_stream(d: &mut PdfDocument, img: &PdfObject, sub: [f64; 4]) -> Result<PdfObject> {
+/// A cropped copy of image stream `img` covering unit-square box `sub` of it. With `masks`, its
+/// `/SMask` or stencil `/Mask` is cropped too (one level only: a mask's own masks are dropped, so a
+/// mask that refers back to its image can't recurse).
+fn crop_stream(d: &mut PdfDocument, img: &PdfObject, sub: [f64; 4], masks: bool) -> Result<PdfObject> {
     if pdf_names(get(img, "Filter")).iter().any(|f| f == "JPXDecode") {
         return Err(invalid("a JPEG 2000 image can only be cropped with a clip"));
     }
@@ -783,10 +892,9 @@ fn crop_stream(d: &mut PdfDocument, img: &PdfObject, sub: [f64; 4]) -> Result<Pd
     if w == 0 || h == 0 || !matches!(bpc, 1 | 2 | 4 | 8 | 16) {
         return Err(invalid("the image's pixel format can't be cropped"));
     }
-    let data = img.read_stream()?;
-    let bits = u64::from(w) * u64::from(n) * u64::from(bpc);
-    let row = bits.div_ceil(8) as usize;
-    if data.len() < row * h as usize {
+    let (size, row) = sample_size(w, h, n, bpc).ok_or_else(|| invalid("the image is too large to crop by pixels"))?;
+    let data = samples(img, size)?;
+    if data.len() < size {
         return Err(invalid("the image's data is shorter than its size"));
     }
     let x0 = ((sub[0] * f64::from(w)).round() as u32).min(w - 1);
@@ -824,8 +932,10 @@ fn crop_stream(d: &mut PdfDocument, img: &PdfObject, sub: [f64; 4]) -> Result<Pd
     for key in ["SMask", "Mask"] {
         match get(img, key) {
             Some(m) if m.is_stream()? => {
-                let cropped = crop_stream(d, &m, sub)?;
-                dict.dict_put(key, cropped)?;
+                if masks {
+                    let cropped = crop_stream(d, &m, sub, false)?;
+                    dict.dict_put(key, cropped)?;
+                }
             }
             Some(m) => dict.dict_put(key, m)?,
             None => {}
