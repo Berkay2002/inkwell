@@ -33,9 +33,11 @@ import {
   type RuleResult,
   a11yFixOf,
   autoCheckDue,
+  claimText,
   convertedName,
   counts,
   groupRules,
+  groupsFor,
   isTicked,
   outcome,
   progressFraction,
@@ -44,6 +46,7 @@ import {
   summaryLine,
   ticked,
   verdict,
+  verifiedText,
 } from "./preflightLogic";
 
 const inv = vi.mocked(invoke);
@@ -230,6 +233,23 @@ beforeEach(() => {
 });
 
 const failing = report([rule({ rule: "fonts-embedded", status: "failed", fix: "fonts", count: 1, findings: [fnd()] })]);
+
+describe("what the file says and what Inkwell checked", () => {
+  it("words the file's claim as a claim, and Verify's answer as no failures in these checks", () => {
+    expect(claimText({ label: "PDF/A-2b", profile: "pdfa-2b" })).toBe("Says it is PDF/A-2b");
+    expect(claimText({ label: "PDF/A-2b", profile: "pdfa-2b" })).not.toMatch(/conform/i);
+    expect(verifiedText("PDF/A-2b")).toBe("No failures in Inkwell's checks for PDF/A-2b (not a full validation).");
+  });
+
+  it("the identification fix runs the ticked groups, with Metadata among them; other fixes run their own group", () => {
+    const id = rule({ rule: "xmp-id", status: "failed", fix: "metadata", findings: [fnd()] });
+    expect(groupsFor(id, PLAN, {})).toEqual(["actions", "files", "colour", "fonts", "metadata"]);
+    // Metadata unticked: still part of the identification fix, once.
+    expect(groupsFor(id, PLAN, { metadata: false })).toEqual(["actions", "files", "colour", "fonts", "metadata"]);
+    expect(groupsFor(rule({ rule: "actions-forbidden", fix: "actions" }), PLAN, {})).toEqual(["actions"]);
+    expect(groupsFor(rule({ rule: "x", fix: null }), PLAN, {})).toEqual([]);
+  });
+});
 
 describe("preflight store", () => {
   it("checks against the chosen profile and keeps the revision it read", async () => {

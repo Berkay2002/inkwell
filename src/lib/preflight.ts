@@ -19,6 +19,7 @@ import {
   type Ticks,
   a11yFixOf,
   convertedName,
+  groupsFor,
   ticked,
 } from "./preflightLogic";
 
@@ -272,7 +273,7 @@ export const usePreflight = create<PreflightStore>((set, get) => {
         const a11y = x.a11yFix ? a11yFixOf(x.a11yFix, get().lang) : null;
         const state = a11y
           ? await a11yApi.fix(job, doc, a11y as never, (p) => patch(doc, { progress: p }))
-          : await preflightApi.fix(job, doc, report.profile, convertArg(x.fix ? [x.fix] : []), (p) => patch(doc, { progress: p }));
+          : await preflightApi.fix(job, doc, report.profile, convertArg(groupsFor(x, report.plan, get().get(doc).ticks)), (p) => patch(doc, { progress: p }));
         applyState(doc, state);
         patch(doc, { phase: "idle", progress: null });
         return true;

@@ -660,10 +660,9 @@ pub fn claimed_profile(label: &str) -> Option<Profile> {
     Profile::ALL.iter().copied().find(|p| p.label().eq_ignore_ascii_case(label))
 }
 
-/// The document as it is now (unsaved edits included), in a copy of its own, and the file's first bytes.
-fn open_copy(eng: &Engine, doc: DocId) -> Result<(PdfDocument, Vec<u8>)> {
-    let (_, source) = eng.doc_source(doc)?;
-    let head: Vec<u8> = match &source {
+/// The first bytes of a document's file.
+fn head_of(source: &DocSource) -> Vec<u8> {
+    match source {
         DocSource::Path(p) => {
             use std::io::Read as _;
             let mut buf = vec![0u8; 512];
@@ -672,7 +671,13 @@ fn open_copy(eng: &Engine, doc: DocId) -> Result<(PdfDocument, Vec<u8>)> {
             buf
         }
         DocSource::Bytes(b, n) => b[..(*n).min(512)].to_vec(),
-    };
+    }
+}
+
+/// The document as it is now (unsaved edits included), in a copy of its own, and the file's first bytes.
+fn open_copy(eng: &Engine, doc: DocId) -> Result<(PdfDocument, Vec<u8>)> {
+    let (_, source) = eng.doc_source(doc)?;
+    let head = head_of(&source);
     let mut d = match &source {
         DocSource::Path(p) => PdfDocument::open(p.as_str())?,
         DocSource::Bytes(b, n) => PdfDocument::from_bytes(&b[..*n])?,
@@ -712,8 +717,9 @@ pub fn convert_in_place(eng: &Engine, doc: DocId, profile: Profile, c: &Convert,
     let path = eng.doc_entry(doc)?.path();
     let stem = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let label = format!("Convert to {}", profile.label());
+    let head = head_of(&eng.doc_source(doc)?.1);
     // `apply_removing`: removed JavaScript, annotations and files are not left in the saved bytes.
-    eng.apply_removing(doc, label, source, |d| fix::apply(d, profile, c, &stem, false, progress, cancel).map(|a| a.pages))
+    eng.apply_removing(doc, label, source, |d| fix::apply(d, profile, c, &stem, false, &head, progress, cancel).map(|a| a.pages))
 }
 
 /// What a conversion wrote.
@@ -744,12 +750,13 @@ pub fn convert_to_file(
     let path = eng.doc_entry(doc)?.path();
     let stem = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let (mut d, _) = open_copy(eng, doc)?;
-    let applied = fix::apply(&mut d, profile, c, &stem, true, progress, cancel)?;
+    let applied = fix::apply(&mut d, profile, c, &stem, true, fix::NEW_FILE_HEAD, progress, cancel)?;
     let bytes = fix::write_new(&d, profile)?;
-    crate::history_ipc::write_replace(std::path::Path::new(dest), &bytes).map_err(|e| EngineError::Io(e.to_string()))?;
+    // The check of what was written runs before the file is put in place: a cancel leaves nothing behind.
     let reread = PdfDocument::from_bytes(&bytes)?;
     let head = bytes[..bytes.len().min(512)].to_vec();
     let report = check(&reread, &head, profile, &mut |_| {}, cancel)?;
+    crate::history_ipc::write_replace(std::path::Path::new(dest), &bytes).map_err(|e| EngineError::Io(e.to_string()))?;
     Ok(Converted { path: dest.to_string(), report, fixed: applied.log })
 }
 

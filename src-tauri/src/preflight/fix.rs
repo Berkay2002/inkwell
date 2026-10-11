@@ -3,10 +3,10 @@
 //! new file. Every group is idempotent (running it on a converted document finds nothing to do) and
 //! reads only what the checker reads, so the report after a conversion shows what is left.
 
-use super::check::{self, NAMED_OK, FORBIDDEN_ACTIONS, annotation_forbidden, dict_of, embedded_is_pdf, filters};
+use super::check::{self, NAMED_OK, FORBIDDEN_ACTIONS, annotation_forbidden, dict_of, embedded_is_pdf, embedded_stream, filters};
 use super::fonts::{self, FontPlan};
 use super::xmp::{self, Ident};
-use super::{Convert, Family, FixGroup, Profile, Result, bad};
+use super::{Convert, Family, FixGroup, Profile, Result, Status, bad};
 use crate::a11y::tree::{name, text, xref_of};
 use crate::a11y::{self, Fix, Progress};
 use crate::engine::EngineError;
@@ -82,7 +82,12 @@ fn action_forbidden(a: &PdfObject, depth: usize) -> Result<bool> {
 
 // ---- the run -------------------------------------------------------------------------------------
 
-pub(crate) fn apply(doc: &mut PdfDocument, profile: Profile, c: &Convert, stem: &str, new_file: bool, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Applied> {
+/// A header the standards accept: what a new file gets when it is written (`write_new`).
+pub(crate) const NEW_FILE_HEAD: &[u8] = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n";
+
+/// `head` is the first bytes of the file as it is now (a new file passes `NEW_FILE_HEAD`): the metadata step
+/// checks the result before it identifies the file.
+pub(crate) fn apply(doc: &mut PdfDocument, profile: Profile, c: &Convert, stem: &str, new_file: bool, head: &[u8], progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Applied> {
     if c.groups.is_empty() {
         return Err(bad("choose what to fix"));
     }
@@ -111,10 +116,10 @@ pub(crate) fn apply(doc: &mut PdfDocument, profile: Profile, c: &Convert, stem: 
             FixGroup::Images => pages_changed |= images(survey.as_ref().map(|s| &s.found.images[..]).unwrap_or(&[]), &mut log)?,
             FixGroup::Files => pages_changed |= files(doc, profile, &mut log)?,
             FixGroup::Colour => colour(doc, survey.as_ref().map(|s| s.device).unwrap_or([false; 3]), &mut log)?,
-            FixGroup::Fonts => pages_changed |= font_group(doc, survey.as_ref().map(|s| &s.found.fonts[..]).unwrap_or(&[]), &mut log)?,
+            FixGroup::Fonts => pages_changed |= font_group(doc, fam, survey.as_ref().map(|s| &s.found.fonts[..]).unwrap_or(&[]), &mut log)?,
             FixGroup::Appearance => pages_changed |= appearance(doc, fam, survey.as_ref(), &mut log)?,
             FixGroup::Accessibility => pages_changed |= accessibility(doc, c, stem, progress, cancel, &mut log)?,
-            FixGroup::Metadata => metadata(doc, profile, &mut log)?,
+            FixGroup::Metadata => metadata(doc, profile, new_file, head, cancel, &mut log)?,
         }
     }
     progress(Progress { done: steps.len() as u32, pages: steps.len() as u32, stage: "convert" });
@@ -509,6 +514,79 @@ fn relate(fs: &mut PdfObject, n: &mut usize) -> Result<()> {
     Ok(())
 }
 
+/// PDF/A-3: the media type of each embedded file (a MIME /Subtype on its stream, `application/octet-stream`
+/// when it has none) and the file's place in the catalog's /AF array.
+fn associate(doc: &mut PdfDocument, ef: &PdfObject, log: &mut Vec<String>) -> Result<()> {
+    let mut specs = Vec::new();
+    collect_specs(ef, 0, &mut specs)?;
+    let mut cat = doc.catalog()?;
+    let mut listed: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut af = cat.get_dict("AF")?.filter(|a| a.is_array().unwrap_or(false));
+    if let Some(a) = &af {
+        for e in a.array_iter()?.flatten() {
+            let n = xref_of(&e)?;
+            if n != 0 {
+                listed.insert(n);
+            }
+        }
+    }
+    let (mut typed, mut added) = (0usize, 0usize);
+    for fs in specs {
+        if !fs.is_dict()? || dict_of(&fs, "EF").is_none() {
+            continue;
+        }
+        if let Some(mut s) = embedded_stream(&fs) {
+            if name(&s, "Subtype")?.is_none() {
+                s.dict_put("Subtype", PdfObject::new_name("application/octet-stream")?)?;
+                typed += 1;
+            }
+        }
+        let x = xref_of(&fs)?;
+        if x != 0 && !listed.contains(&x) {
+            if af.is_none() {
+                let arr = doc.new_array()?;
+                cat.dict_put("AF", arr)?;
+                af = cat.get_dict("AF")?;
+            }
+            if let Some(a) = af.as_mut() {
+                a.array_push(fs.clone())?;
+                listed.insert(x);
+                added += 1;
+            }
+        }
+    }
+    if typed > 0 {
+        log.push(format!("Gave {} the media type application/octet-stream (its real type is not known)", plural(typed, "embedded file", "embedded files")));
+    }
+    if added > 0 {
+        log.push(format!("Listed {} in the document's /AF array", plural(added, "embedded file", "embedded files")));
+    }
+    Ok(())
+}
+
+/// The filespecs of a name tree node and its kids.
+fn collect_specs(node: &PdfObject, depth: usize, out: &mut Vec<PdfObject>) -> Result<()> {
+    if depth > 16 || !node.is_dict()? {
+        return Ok(());
+    }
+    if let Some(names) = node.get_dict("Names")?.filter(|a| a.is_array().unwrap_or(false)) {
+        let len = names.len()? as i32;
+        let mut i = 1;
+        while i < len {
+            if let Some(v) = names.get_array(i)? {
+                out.push(v);
+            }
+            i += 2;
+        }
+    }
+    if let Some(kids) = node.get_dict("Kids")?.filter(|a| a.is_array().unwrap_or(false)) {
+        for k in kids.array_iter()?.flatten().take(5000) {
+            collect_specs(&k, depth + 1, out)?;
+        }
+    }
+    Ok(())
+}
+
 fn files(doc: &mut PdfDocument, profile: Profile, log: &mut Vec<String>) -> Result<bool> {
     let cat = doc.catalog()?;
     let mut removed = 0usize;
@@ -517,6 +595,7 @@ fn files(doc: &mut PdfDocument, profile: Profile, log: &mut Vec<String>) -> Resu
     if profile == Profile::Pdfa3b {
         if let Some(ef) = &ef {
             relate_tree(ef, 0, &mut related)?;
+            associate(doc, ef, log)?;
         }
     } else if let Some(ef) = &ef {
         removed += prune_tree(ef, profile, 0)?;
@@ -557,10 +636,22 @@ fn files(doc: &mut PdfDocument, profile: Profile, log: &mut Vec<String>) -> Resu
 fn colour(doc: &mut PdfDocument, device: [bool; 3], log: &mut Vec<String>) -> Result<()> {
     let mut cat = doc.catalog()?;
     let existing = cat.get_dict("OutputIntents")?.filter(|o| o.is_array().unwrap_or(false));
+    // PDF/A allows one output profile in the file: the profile of an intent that is already there
+    // (a PDF/X one, say) is shared, never a second one written next to it.
+    let mut shared: Option<(PdfObject, i32)> = None;
     if let Some(arr) = &existing {
         for oi in arr.array_iter()?.flatten() {
-            if oi.is_dict()? && name(&oi, "S")?.as_deref() == Some("GTS_PDFA1") {
+            if !oi.is_dict()? {
+                continue;
+            }
+            if name(&oi, "S")?.as_deref() == Some("GTS_PDFA1") {
                 return Ok(());
+            }
+            if shared.is_none() {
+                if let Some(p) = oi.get_dict("DestOutputProfile")?.filter(|p| p.is_stream().unwrap_or(false)) {
+                    let n = p.get_dict("N")?.and_then(|v| v.as_int().ok()).unwrap_or(0);
+                    shared = Some((p, n));
+                }
             }
         }
     }
@@ -568,11 +659,22 @@ fn colour(doc: &mut PdfDocument, device: [bool; 3], log: &mut Vec<String>) -> Re
         log.push("Left the output intent alone: DeviceCMYK is used and needs a CMYK output condition you choose".into());
         return Ok(());
     }
-    let icc = super::icc::srgb();
-    let mut sd = doc.new_dict()?;
-    sd.dict_put("N", PdfObject::new_int(3)?)?;
-    sd.dict_put("Alternate", PdfObject::new_name("DeviceRGB")?)?;
-    let profile = doc.add_stream(&Buffer::from_bytes(&icc)?, Some(&sd), false)?;
+    let (profile, reused) = match shared {
+        Some((p, 3)) => (p, true),
+        Some((_, n)) => {
+            log.push(format!(
+                "Left the output intent alone: the file's output intent has a {n}-component profile, and PDF/A allows one output profile only, so an sRGB one can't be added next to it"
+            ));
+            return Ok(());
+        }
+        None => {
+            let icc = super::icc::srgb();
+            let mut sd = doc.new_dict()?;
+            sd.dict_put("N", PdfObject::new_int(3)?)?;
+            sd.dict_put("Alternate", PdfObject::new_name("DeviceRGB")?)?;
+            (doc.add_stream(&Buffer::from_bytes(&icc)?, Some(&sd), false)?, false)
+        }
+    };
     let mut oi = doc.new_object_from_str(
         "<</Type/OutputIntent/S/GTS_PDFA1/OutputConditionIdentifier(sRGB IEC61966-2.1)/RegistryName(http://www.color.org)/Info(sRGB IEC61966-2.1)>>",
     )?;
@@ -586,29 +688,44 @@ fn colour(doc: &mut PdfDocument, device: [bool; 3], log: &mut Vec<String>) -> Re
             cat.dict_put("OutputIntents", arr)?;
         }
     }
-    log.push("Added an sRGB output intent".into());
+    log.push(if reused { "Added a PDF/A output intent that shares the file's existing output profile".into() } else { "Added an sRGB output intent".into() });
     Ok(())
 }
 
 // ---- fonts ---------------------------------------------------------------------------------------
 
-fn font_group(doc: &mut PdfDocument, found: &[PdfObject], log: &mut Vec<String>) -> Result<bool> {
+fn font_group(doc: &mut PdfDocument, fam: Family, found: &[PdfObject], log: &mut Vec<String>) -> Result<bool> {
     let mut embedded = 0;
     let mut installed = 0;
     let mut cid = 0;
+    // Fonts that came with a program of their own, and those the conversion embedded.
+    let mut own = 0usize;
+    let mut ours: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut no_subset = false;
+    let mut a1_encoding = 0usize;
     for f in found {
         match fonts::classify(f)? {
             FontPlan::Embedded => {
+                if name(f, "Subtype")?.as_deref() != Some("Type3") {
+                    own += 1;
+                }
                 if fonts::set_identity_cid_to_gid(doc, f)? {
                     cid += 1;
                 }
+                if fam == Family::A1 && fonts::truetype_encoding_unfit(f)? {
+                    a1_encoding += 1;
+                }
             }
             plan @ FontPlan::Builtin { .. } => {
-                log.push(fonts::embed(doc, f, &plan)?);
+                log.push(fonts::embed(doc, f, &plan, fam)?.log);
+                ours.insert(xref_of(f)?);
                 embedded += 1;
             }
             plan @ FontPlan::Installed { .. } => {
-                log.push(fonts::embed(doc, f, &plan)?);
+                let e = fonts::embed(doc, f, &plan, fam)?;
+                log.push(e.log);
+                no_subset |= e.no_subset;
+                ours.insert(xref_of(f)?);
                 embedded += 1;
                 installed += 1;
             }
@@ -618,15 +735,50 @@ fn font_group(doc: &mut PdfDocument, found: &[PdfObject], log: &mut Vec<String>)
     if cid > 0 {
         log.push(format!("Added the CIDToGIDMap to {}", plural(cid, "font", "fonts")));
     }
-    // A full installed font is large: keep the glyphs the pages use.
+    if a1_encoding > 0 {
+        log.push(format!(
+            "Left {} as they are: PDF/A-1 wants WinAnsiEncoding or MacRomanEncoding without Differences on a TrueType font, and these have another Encoding",
+            plural(a1_encoding, "embedded TrueType font", "embedded TrueType fonts")
+        ));
+    }
+    // A full installed font is large: keep the glyphs the pages use. The subsetting works on the
+    // whole document, so it only runs when nothing else would be cut down with them.
     if installed > 0 {
-        if let Err(e) = doc.subset_fonts() {
-            log.push(format!("Fonts embedded in full (subsetting failed: {e})"));
-        } else {
-            log.push("Subset the embedded fonts to the glyphs the pages use".into());
+        match no_subsetting_reason(doc, &ours, own, no_subset)? {
+            Some(why) => log.push(format!("Embedded the fonts in full: {why}")),
+            None => {
+                if let Err(e) = doc.subset_fonts() {
+                    log.push(format!("Fonts embedded in full (subsetting failed: {e})"));
+                } else {
+                    log.push("Subset the embedded fonts to the glyphs the pages use".into());
+                }
+            }
         }
     }
     Ok(embedded + cid > 0)
+}
+
+/// Why the fonts must not be subset (`None` when they can): a font whose licence forbids it, fonts the
+/// document brought with it, or a form's default-resource fonts, which fields draw with later.
+pub(crate) fn no_subsetting_reason(doc: &PdfDocument, ours: &std::collections::HashSet<i32>, own: usize, forbidden: bool) -> Result<Option<String>> {
+    if forbidden {
+        return Ok(Some("a font's licence flags forbid subsetting it".into()));
+    }
+    if own > 0 {
+        return Ok(Some("the document has fonts of its own, which subsetting would cut down too".into()));
+    }
+    let cat = doc.catalog()?;
+    let fonts = dict_of(&cat, "AcroForm").and_then(|a| dict_of(&a, "DR")).and_then(|d| dict_of(&d, "Font"));
+    if let Some(fonts) = fonts {
+        for k in 0..fonts.dict_len()? as i32 {
+            let Some(v) = fonts.get_dict_val(k)? else { continue };
+            let has_file = v.is_dict()? && v.get_dict("FontDescriptor")?.is_some_and(|d| ["FontFile", "FontFile2", "FontFile3"].iter().any(|f| d.get_dict(*f).ok().flatten().is_some()));
+            if has_file || (v.is_indirect()? && ours.contains(&v.as_indirect()?)) {
+                return Ok(Some("the form's default resources use fonts that stay complete so fields can still be edited".into()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 // ---- appearance ----------------------------------------------------------------------------------
@@ -730,7 +882,24 @@ fn accessibility(doc: &mut PdfDocument, c: &Convert, stem: &str, progress: &mut 
 
 // ---- metadata ------------------------------------------------------------------------------------
 
-fn metadata(doc: &mut PdfDocument, profile: Profile, log: &mut Vec<String>) -> Result<()> {
+/// Whether the file would pass `profile` once the metadata is in place: every rule the other groups
+/// answer for, checked on the document as it is now. What only a new file's writing settles (header,
+/// encryption, object streams) counts as settled for a new file. `Err(names)` lists what still fails.
+fn conforms_but_for_metadata(doc: &PdfDocument, profile: Profile, new_file: bool, head: &[u8], cancel: &AtomicBool) -> Result<std::result::Result<(), Vec<&'static str>>> {
+    let report = check::run(doc, head, profile, &mut |_| {}, cancel)?;
+    let open: Vec<&'static str> = report
+        .results
+        .iter()
+        .filter(|r| r.status == Status::Failed)
+        // The metadata step itself settles its own group.
+        .filter(|r| r.fix != Some(FixGroup::Metadata))
+        .filter(|r| !(new_file && !r.findings.is_empty() && r.findings.iter().all(|f| f.new_file)))
+        .map(|r| r.name)
+        .collect();
+    Ok(if open.is_empty() { Ok(()) } else { Err(open) })
+}
+
+fn metadata(doc: &mut PdfDocument, profile: Profile, new_file: bool, head: &[u8], cancel: &AtomicBool, log: &mut Vec<String>) -> Result<()> {
     let mut cat = doc.catalog()?;
     let mut trailer = doc.trailer()?;
     let mut info = dict_of(&trailer, "Info");
@@ -759,10 +928,27 @@ fn metadata(doc: &mut PdfDocument, profile: Profile, log: &mut Vec<String>) -> R
         info = Some(i);
     }
     let props = check::info_props(info.as_ref());
-    let ids = match profile.pdfa() {
-        Some((part, conf)) => vec![Ident::pdfa(part, conf)],
-        None if profile == Profile::Pdfua1 => vec![Ident::pdfua(1)],
-        None => vec![Ident::pdfx("PDF/X-4")],
+    // The file says what it is only when it is: the identification is written after the file passes the
+    // profile's other rules. Otherwise the XMP is only synced with the document information.
+    let identified = match conforms_but_for_metadata(doc, profile, new_file, head, cancel)? {
+        Ok(()) => true,
+        Err(names) => {
+            let shown: Vec<&str> = names.iter().copied().take(3).collect();
+            let more = if names.len() > shown.len() { ", ..." } else { "" };
+            log.push(format!(
+                "Did not identify the file as {}: {} ({}{more})",
+                profile.label(),
+                plural(names.len(), "rule still fails", "rules still fail"),
+                shown.join(", ")
+            ));
+            false
+        }
+    };
+    let ids = match (identified, profile.pdfa()) {
+        (false, _) => Vec::new(),
+        (true, Some((part, conf))) => vec![Ident::pdfa(part, conf)],
+        (true, None) if profile == Profile::Pdfua1 => vec![Ident::pdfua(1)],
+        (true, None) => vec![Ident::pdfx("PDF/X-4")],
     };
     let meta = cat.get_dict("Metadata")?.filter(|m| m.is_stream().unwrap_or(false));
     let xml = match &meta {
@@ -788,6 +974,10 @@ fn metadata(doc: &mut PdfDocument, profile: Profile, log: &mut Vec<String>) -> R
             cat.dict_put("Metadata", m)?;
         }
     }
-    log.push(format!("Wrote XMP metadata that identifies the file as {} and matches the document information", profile.label()));
+    if identified {
+        log.push(format!("Wrote XMP metadata that identifies the file as {} and matches the document information", profile.label()));
+    } else {
+        log.push("Wrote XMP metadata that matches the document information".into());
+    }
     Ok(())
 }

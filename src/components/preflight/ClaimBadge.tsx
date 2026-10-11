@@ -1,11 +1,11 @@
 import { useEffect } from "react";
 import { usePreflight } from "../../lib/preflight";
-import { counts, claimText, profileInfo } from "../../lib/preflightLogic";
+import { counts, claimText, profileInfo, verifiedText } from "../../lib/preflightLogic";
 import type { DocState } from "../../store";
 import "./preflight.css";
 
 /**
- * "Conforms to PDF/A-2b" in Document properties, when the file's XMP says so. It is the file's own
+ * "Says it is PDF/A-2b" in Document properties, when the file's XMP says so. It is the file's own
  * claim, not a check: Verify runs the profile in the Preflight rail and reports what it finds.
  */
 export function ClaimBadge({ doc }: { doc: DocState }) {
@@ -23,15 +23,12 @@ export function ClaimBadge({ doc }: { doc: DocState }) {
   return (
     <div className="pf-claim" role="group" aria-label="Conformance claim">
       <span className="pf-claim-text">
-        <span className="pf-claim-glyph" aria-hidden="true">
-          ✓
-        </span>
         {claimText(claim)}
       </span>
       <span className="pf-claim-note">
         {verified
           ? verified.conforms
-            ? `Verified: no rule fails for ${profileInfo(verified.profile).label}.`
+            ? verifiedText(profileInfo(verified.profile).label)
             : `Not verified: ${failed} ${failed === 1 ? "rule fails" : "rules fail"}.`
           : "This is what the file says about itself."}
       </span>

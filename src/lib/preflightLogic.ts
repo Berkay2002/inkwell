@@ -144,7 +144,7 @@ export function verdict(r: Report): { ok: boolean; title: string; sub: string } 
     return {
       ok: true,
       title: `No rule fails for ${label}`,
-      sub: c.manual > 0 ? `${plural(c.manual, "check")} left for a person to look at.` : "Every rule that Inkwell checks passes.",
+      sub: c.manual > 0 ? `${plural(c.manual, "check")} left for a person to look at.` : "Every rule that Inkwell checks passes (this is not a full validation).",
     };
   }
   return { ok: false, title: `Doesn't meet ${label}`, sub: `${plural(c.failed, "rule")} failed.` };
@@ -300,7 +300,25 @@ export function autoCheckDue(s: CheckState | undefined, rev: number, profile: Pr
   return s.skipRev !== rev && s.errorRev !== rev;
 }
 
-/** The Document properties line for a file that says it conforms. */
+/** The Document properties line for a file that says it conforms: what the file says, not a result. */
 export function claimText(c: Claim): string {
-  return `Conforms to ${c.label}`;
+  return `Says it is ${c.label}`;
+}
+
+/** The note after Verify found no failing rule: Inkwell's checks are not a full validation. */
+export function verifiedText(label: string): string {
+  return `No failures in Inkwell's checks for ${label} (not a full validation).`;
+}
+
+/**
+ * The groups the per-rule Fix runs. A rule's own group, except "Standard identification": the file is
+ * only identified once the rest of the profile passes, so that fix runs what the Convert button would
+ * (the ticked groups) with Metadata among them.
+ */
+export function groupsFor(x: RuleResult, plan: Plan, ticks: Ticks): FixGroup[] {
+  if (x.rule === "xmp-id") {
+    const g = ticked(plan, ticks);
+    return g.includes("metadata") ? g : [...g, "metadata"];
+  }
+  return x.fix ? [x.fix] : [];
 }

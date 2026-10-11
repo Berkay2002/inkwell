@@ -75,12 +75,12 @@ idempotent: converting a converted document finds nothing to do.
 | annotations | removes sound, movie, screen, 3D and rich media annotations (file attachments in A-1); sets Print, clears Hidden, Invisible and NoView | |
 | forms | draws the field appearances into the file when `NeedAppearances` is set (which also gives those widgets the appearance they lacked) and removes XFA. A missing appearance on any other annotation is reported, not created | |
 | images | `Interpolate false`; removes `Alternates` and `OPI` | |
-| files | A-1: removes embedded files; A-2: removes the ones that are not PDF/A; A-3: gives each an `AFRelationship` | |
-| colour | adds a `GTS_PDFA1` output intent with a small sRGB ICC v2 profile (written in `icc.rs`) when the document has none and uses no DeviceCMYK. CMYK needs a print condition you choose, so a CMYK document is left alone and the log says so. Device colour is never converted | |
+| files | A-1: removes embedded files; A-2: removes the embedded files that are not PDFs (a PDF is kept, by its media type or its first kilobyte; whether it is itself PDF/A is left to a person); A-3: gives each an `AFRelationship`, a media type (`application/octet-stream` when it has none) and a place in the catalog `/AF` array | |
+| colour | adds a `GTS_PDFA1` output intent with a small sRGB ICC v2 profile (written in `icc.rs`) when the document has none and uses no DeviceCMYK. CMYK needs a print condition you choose, so a CMYK document is left alone and the log says so. PDF/A allows one output profile in the file: when an output intent (a PDF/X one, say) already has a 3-component profile the new intent shares that very profile object, and when it has another component count nothing is added and the log says why. Device colour is never converted | |
 | fonts | embeds the fonts that are missing (below); adds `/CIDToGIDMap /Identity` where absent | |
 | appearance | PDF/A-1: sets opacity to 1, removes soft masks and non-Normal blend modes, drops transparency groups. All PDF/A: removes transfer functions (`TR`, `TR2`). Both change how pages look | |
 | accessibility | PDF/UA only: the accessibility checker's safe fixes (title, language, tab order, display title, field tooltips) | |
-| metadata | writes or updates the XMP packet: the identification schema (`pdfaid`, `pdfuaid` or `pdfxid`) and title, author, subject, keywords, producer, creator and dates mirrored from the document information (properties of other schemas in an existing packet are kept); the stream is stored unfiltered. PDF/X also gets `CreationDate`, `ModDate` and `Trapped` in Info | |
+| metadata | writes or updates the XMP packet: the identification schema (`pdfaid`, `pdfuaid` or `pdfxid`) and title, author, subject, keywords, producer, creator and dates mirrored from the document information (properties of other schemas in an existing packet are kept); the stream is stored unfiltered. PDF/X also gets `CreationDate`, `ModDate` and `Trapped` in Info. **The identification is written only when the file passes the profile's other rules** (the step checks the document as the other groups left it; for a new file the header, encryption and object-stream rules count as settled because the write fixes them). Otherwise the XMP is only synced with Info and the log says "Did not identify the file as ...: N rules still fail". The per-rule Fix of "Standard identification" therefore runs the ticked groups, not Metadata alone | |
 
 **Appearance is not ticked by default.** It is the one group that changes how pages look, so the outcome card lists
 it unticked with its count and the person switches it on (the studio round pdfa-r1 verdict made every other group
@@ -98,7 +98,12 @@ Anything else is **blocked**, left as it is and named in the report and in the o
 aren't installed"): a subset whose font file is missing, a CID font with no file, Symbol and ZapfDingbats, a
 font that is not installed, one whose licence forbids embedding. The widths are rebuilt from the program, and the
 text keeps extracting. The built-in clones are embedded whole; installed fonts are subset to the glyphs the pages
-use afterwards (if subsetting fails they stay whole and the log says so). A blocked font does not stop the other
+use afterwards (if subsetting fails they stay whole and the log says so). MuPDF subsets every font of the document
+at once, so the subsetting runs only when nothing else would be cut down with them: it is skipped, and the fonts
+stay whole with a log line, when a font's `fsType` forbids subsetting (0x0100), when the document has embedded fonts
+of its own, or when a form's default resources (`AcroForm /DR`) use a font the conversion embedded. A TrueType font
+embedded from an installed file gets the plain name `WinAnsiEncoding` in PDF/A-1 (no Differences array, so the
+quote marks use WinAnsi) and WinAnsi with the few Differences StandardEncoding needs in the later parts. A blocked font does not stop the other
 groups: the file is converted as far as it can be and the report shows the rest.
 
 ## Rules
@@ -184,7 +189,14 @@ Honest list. A document can fail any of these and pass here.
 - Layers beyond the `/AS` rule: configuration `Name`, `Order`, `BaseState` and `OCG` usage are not checked.
   Named destinations and outline `Dest` validity are not checked either.
 - Embedded PDF files in A-2 are only checked for being a PDF, **not** for being PDF/A themselves (the report says
-  "must itself conform", status manual).
+  "must itself conform", status manual). Whether an attachment is a PDF is read from its media type and its first
+  kilobyte.
+- PDF/A-3 embedded files: the media type, `/AFRelationship` and the catalog `/AF` listing of files in the
+  `EmbeddedFiles` name tree are checked; the `/AF` association of file attachment annotations and the value of the
+  media type are not. A missing `/Params /ModDate` is shown as a manual check and never made up.
+- TrueType encodings: in PDF/A-1 a non-symbolic TrueType font needs `WinAnsiEncoding` or `MacRomanEncoding` and no
+  Differences. The conversion fixes the fonts it embeds itself; fonts that were already embedded with another
+  Encoding are left as they are and named in the log, and no rule reports them.
 - Digital signatures: not validated, and converting a signed file invalidates its signatures (the file is rewritten).
 
 **PDF/UA-1**: whatever the accessibility checker does not check (see `docs/a11y.md`): reading order is a
@@ -221,9 +233,10 @@ rest). It reuses the Accessibility rail's classes, so the two read the same:
   says so;
 - **Export report** (HTML or PDF) in the footer, like the accessibility report.
 
-Document properties (Tools > Security...) shows **"Conforms to PDF/A-2b"** when the XMP says so, with the note "This
-is what the file says about itself" and a **Verify** link that opens the rail on that profile; once the rail has
-checked this revision the note becomes "Verified: no rule fails for PDF/A-2b" or "Not verified: 3 rules fail".
+Document properties (Tools > Security...) shows **"Says it is PDF/A-2b"** (no tick: it is the file's own claim)
+when the XMP says so, with the note "This is what the file says about itself" and a **Verify** link that opens the
+rail on that profile; once the rail has checked this revision the note becomes "No failures in Inkwell's checks for
+PDF/A-2b (not a full validation)." or "Not verified: 3 rules fail".
 
 The report is read again after any change (a conversion, an undo, an edit), a cancelled or failed check waits for
 Check again, and a report that no longer matches the document disables Fix and Convert until it is read again.

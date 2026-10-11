@@ -213,6 +213,17 @@ impl PdfObject {
         Ok(output)
     }
 
+    /// Inkwell patch: the first `limit` bytes of the decoded stream; the rest is never decoded.
+    pub fn read_stream_head(&self, limit: usize) -> Result<Vec<u8>, Error> {
+        let inner = unsafe { ffi_try!(mupdf_pdf_read_stream_head(context(), self.inner, limit)) }?;
+        let buf = unsafe { Buffer::from_raw(inner) };
+        let buf_len = buf.len();
+        let mut reader = BufReader::new(buf);
+        let mut output = Vec::with_capacity(buf_len);
+        reader.read_to_end(&mut output)?;
+        Ok(output)
+    }
+
     pub fn write_object(&mut self, obj: &PdfObject) -> Result<(), Error> {
         unsafe { ffi_try!(mupdf_pdf_write_object(context(), self.inner, obj.inner)) }
     }

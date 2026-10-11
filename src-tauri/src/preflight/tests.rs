@@ -525,7 +525,7 @@ fn files_actions_and_annotations_are_removed_per_family() {
             (120, s("<</Type/Annot /Subtype/FileAttachment /Rect [10 10 20 20] /F 4 /FS 130 0 R /AP <</N 90 0 R>>>>")),
             (121, s("<</Type/Annot /Subtype/Sound /Rect [30 10 40 20] /F 4 /Popup 140 0 R>>")),
             (130, s("<</Type/Filespec /F (a.txt) /UF (a.txt) /EF <</F 131 0 R>>>>")),
-            (131, stream("/Type/EmbeddedFile", b"hello")),
+            (131, stream("/Type/EmbeddedFile /Params <</ModDate (D:20260101000000Z)>>", b"hello")),
             (140, s("<</Type/Annot /Subtype/Popup /Parent 121 0 R /Rect [0 0 10 10]>>")),
         ],
         cat: "/Names <</EmbeddedFiles <</Names [(a.txt) 130 0 R]>>>>".into(),
@@ -558,9 +558,10 @@ fn pdfua_conversion_sets_title_language_and_identification() {
     let after = run(&eng, id, Profile::Pdfua1);
     assert_eq!(after.status("title"), Some(Status::Passed));
     assert_eq!(after.status("primary-language"), Some(Status::Passed));
-    assert_eq!(after.status("xmp-id"), Some(Status::Passed));
     assert_eq!(after.status("tagged-pdf"), Some(Status::Failed), "tags are not made by a conversion");
-    assert_eq!(claim_doc(&eng, id).unwrap().unwrap().label, "PDF/UA-1");
+    // The file is not tagged, so it is not PDF/UA, and the XMP does not say it is.
+    assert_eq!(after.status("xmp-id"), Some(Status::Failed));
+    assert!(claim_doc(&eng, id).unwrap().is_none());
 }
 
 #[test]
@@ -575,8 +576,10 @@ fn pdfx4_metadata_and_boxes_are_fixed_the_output_intent_is_not() {
     let out = convert_to_file(&eng, id, Profile::Pdfx4, &ticked(&r), dest.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(out.report.status("page-boxes"), Some(Status::Passed));
     assert_eq!(out.report.status("trapped"), Some(Status::Passed));
-    assert_eq!(out.report.status("xmp-id"), Some(Status::Passed));
     assert_eq!(out.report.status("output-intent"), Some(Status::Failed), "a print condition is the person's choice");
+    // Without the output intent the file is not PDF/X-4, and the XMP does not say so (no GTS_PDFXVersion).
+    assert_eq!(out.report.status("xmp-id"), Some(Status::Failed));
+    assert!(out.fixed.iter().any(|l| l.contains("Did not identify the file as PDF/X-4")), "{:?}", out.fixed);
 }
 
 // ---- what the plan says --------------------------------------------------------------------------
@@ -659,4 +662,264 @@ fn a_thousand_pages_report_progress_and_cancel_between_pages() {
     }, &stop);
     assert!(e.is_err());
     assert!(n < 50, "stopped soon after cancel, saw {n} events");
+}
+
+// ---- the identification is written only for a file that conforms ----------------------------------
+
+/// `fix::apply` on a copy of `sp` held in memory; `new_file` as for a conversion to a new file.
+fn applied(sp: &Spec, p: Profile, groups: &[FixGroup], new_file: bool) -> (PdfDocument, fix::Applied) {
+    let bytes = build(sp);
+    let mut d = PdfDocument::from_bytes(&bytes).unwrap();
+    let head: &[u8] = if new_file { fix::NEW_FILE_HEAD } else { &bytes[..bytes.len().min(512)] };
+    let c = Convert { groups: groups.to_vec(), lang: None };
+    let a = fix::apply(&mut d, p, &c, "doc", new_file, head, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    (d, a)
+}
+
+fn says(d: &PdfDocument) -> Option<String> {
+    claim(d).unwrap().map(|c| c.label)
+}
+
+fn not_identified(a: &fix::Applied, label: &str) -> bool {
+    a.log.iter().any(|l| l.contains(&format!("Did not identify the file as {label}")))
+}
+
+fn all_groups(p: Profile, sp: &Spec) -> Vec<FixGroup> {
+    ticked(&report_of(p, sp)).groups
+}
+
+#[test]
+fn metadata_alone_syncs_the_xmp_and_does_not_identify_a_failing_file() {
+    // The per-rule Fix of "Standard identification" runs the Metadata group alone.
+    let (d, a) = applied(&messy(), Profile::Pdfa2b, &[FixGroup::Metadata], false);
+    assert_eq!(says(&d), None, "{:?}", a.log);
+    assert!(not_identified(&a, "PDF/A-2b"), "{:?}", a.log);
+    assert!(d.catalog().unwrap().get_dict("Metadata").unwrap().is_some(), "the XMP is still written and synced");
+    // With every group ticked the same file conforms and is identified.
+    let (d, a) = applied(&messy(), Profile::Pdfa2b, &all_groups(Profile::Pdfa2b, &messy()), false);
+    assert_eq!(says(&d).as_deref(), Some("PDF/A-2b"), "{:?}", a.log);
+    assert!(!not_identified(&a, "PDF/A-2b"));
+}
+
+#[test]
+fn a1_transparency_left_in_place_leaves_the_file_unidentified() {
+    let sp = Spec {
+        resources: "/ExtGState <</G1 <</ca 0.5 /CA 0.5>>>>".into(),
+        pages: vec![(String::new(), "/G1 gs 0 g BT /F1 12 Tf 72 700 Td (x) Tj ET 0 0 50 50 re f".into())],
+        ..Spec::default()
+    };
+    // Appearance is unticked by default, so the transparency stays.
+    let groups = all_groups(Profile::Pdfa1b, &sp);
+    assert!(!groups.contains(&FixGroup::Appearance));
+    let (d, a) = applied(&sp, Profile::Pdfa1b, &groups, false);
+    assert_eq!(says(&d), None, "{:?}", a.log);
+    assert!(not_identified(&a, "PDF/A-1b"), "{:?}", a.log);
+    let mut with = groups.clone();
+    with.push(FixGroup::Appearance);
+    let (d, a) = applied(&sp, Profile::Pdfa1b, &with, false);
+    assert_eq!(says(&d).as_deref(), Some("PDF/A-1b"), "{:?}", a.log);
+}
+
+#[test]
+fn a_blocked_font_leaves_the_file_unidentified() {
+    let sp = Spec { font: "<</Type/Font/Subtype/Type1/BaseFont/QuiteUnknownTypeface/Encoding/WinAnsiEncoding>>".into(), ..Spec::default() };
+    let mut groups = all_groups(Profile::Pdfa2b, &sp);
+    groups.push(FixGroup::Fonts);
+    let (d, a) = applied(&sp, Profile::Pdfa2b, &groups, false);
+    assert_eq!(says(&d), None, "{:?}", a.log);
+    assert!(not_identified(&a, "PDF/A-2b"), "{:?}", a.log);
+}
+
+#[test]
+fn a_skipped_new_file_only_fix_leaves_the_file_unidentified() {
+    // No binary comment line after the header: only a new file's writing can repair that.
+    let sp = Spec { header: b"%PDF-1.7\n".to_vec(), ..Spec::default() };
+    let groups = all_groups(Profile::Pdfa2b, &sp);
+    let (d, a) = applied(&sp, Profile::Pdfa2b, &groups, false);
+    assert_eq!(says(&d), None, "in place the header stays wrong: {:?}", a.log);
+    assert!(not_identified(&a, "PDF/A-2b"));
+    let (d, a) = applied(&sp, Profile::Pdfa2b, &groups, true);
+    assert_eq!(says(&d).as_deref(), Some("PDF/A-2b"), "a new file gets its header at the write: {:?}", a.log);
+}
+
+#[test]
+fn pdfx4_is_identified_only_with_its_output_intent() {
+    let intent = "/OutputIntents [<</Type/OutputIntent /S/GTS_PDFX /OutputConditionIdentifier (sRGB IEC61966-2.1) /RegistryName (http://www.color.org) /Info (sRGB) /DestOutputProfile 150 0 R>>]";
+    let without = Spec::default();
+    let (d, a) = applied(&without, Profile::Pdfx4, &all_groups(Profile::Pdfx4, &without), true);
+    assert_eq!(says(&d), None, "{:?}", a.log);
+    assert!(not_identified(&a, "PDF/X-4"));
+    let icc = super::icc::srgb();
+    let with = Spec { cat: intent.into(), objs: vec![(150, stream("/N 3 /Alternate/DeviceRGB", &icc))], ..Spec::default() };
+    let (d, a) = applied(&with, Profile::Pdfx4, &all_groups(Profile::Pdfx4, &with), true);
+    assert_eq!(says(&d).as_deref(), Some("PDF/X-4"), "{:?}", a.log);
+}
+
+// ---- the output profile is shared, not doubled ---------------------------------------------------
+
+fn profile_numbers(d: &PdfDocument) -> Vec<i32> {
+    let cat = d.catalog().unwrap();
+    let arr = cat.get_dict("OutputIntents").unwrap().unwrap();
+    arr.array_iter().unwrap().flatten().filter_map(|oi| oi.get_dict("DestOutputProfile").ok().flatten()).map(|p| p.as_indirect().unwrap_or(-1)).collect()
+}
+
+#[test]
+fn a_pdfa_output_intent_shares_the_profile_of_an_existing_pdfx_one() {
+    let icc = super::icc::srgb();
+    let sp = Spec {
+        cat: "/OutputIntents [<</Type/OutputIntent /S/GTS_PDFX /OutputConditionIdentifier (sRGB) /DestOutputProfile 150 0 R>>]".into(),
+        objs: vec![(150, stream("/N 3 /Alternate/DeviceRGB", &icc))],
+        ..Spec::default()
+    };
+    let (d, a) = applied(&sp, Profile::Pdfa2b, &[FixGroup::Colour], false);
+    let nums = profile_numbers(&d);
+    assert_eq!(nums.len(), 2, "{:?}", a.log);
+    assert_eq!(nums[0], nums[1], "one profile object, shared: {nums:?}");
+    assert_eq!(nums[0], 150);
+    assert!(a.log.iter().any(|l| l.contains("shares")), "{:?}", a.log);
+}
+
+#[test]
+fn a_cmyk_pdfx_output_intent_is_left_alone() {
+    let sp = Spec {
+        cat: "/OutputIntents [<</Type/OutputIntent /S/GTS_PDFX /OutputConditionIdentifier (CMYK) /DestOutputProfile 150 0 R>>]".into(),
+        objs: vec![(150, stream("/N 4 /Alternate/DeviceCMYK", b"not a real profile"))],
+        ..Spec::default()
+    };
+    let (d, a) = applied(&sp, Profile::Pdfa2b, &[FixGroup::Colour], false);
+    assert_eq!(profile_numbers(&d), vec![150], "no second profile is added next to it");
+    assert!(a.log.iter().any(|l| l.contains("one output profile only")), "{:?}", a.log);
+}
+
+// ---- fonts: subsetting scope and TrueType encodings ----------------------------------------------
+
+#[test]
+fn subsetting_is_skipped_for_forms_licences_and_fonts_the_document_brought() {
+    let none = std::collections::HashSet::new();
+    let plain = PdfDocument::from_bytes(&build(&Spec::default())).unwrap();
+    assert_eq!(fix::no_subsetting_reason(&plain, &none, 0, false).unwrap(), None);
+    assert!(fix::no_subsetting_reason(&plain, &none, 0, true).unwrap().unwrap().contains("licence"));
+    assert!(fix::no_subsetting_reason(&plain, &none, 2, false).unwrap().unwrap().contains("of its own"));
+    // A form's default resources hold the font the conversion embedded: fields draw with it later.
+    let form = Spec { cat: "/AcroForm <</Fields [] /DR <</Font <</Helv 3 0 R>>>>>>".into(), ..Spec::default() };
+    let d = PdfDocument::from_bytes(&build(&form)).unwrap();
+    let ours: std::collections::HashSet<i32> = [3].into_iter().collect();
+    assert!(fix::no_subsetting_reason(&d, &ours, 0, false).unwrap().unwrap().contains("default resources"));
+    assert_eq!(fix::no_subsetting_reason(&d, &none, 0, false).unwrap(), None, "a DR font the conversion did not touch is not in the way");
+}
+
+#[test]
+fn truetype_encodings_pdfa1_does_not_allow_are_recognised() {
+    let d = PdfDocument::from_bytes(&build(&Spec::default())).unwrap();
+    let font = |enc: &str, extra: &str| d.new_object_from_str(&format!("<</Type/Font/Subtype/TrueType/BaseFont/Arial {enc} {extra}>>")).unwrap();
+    assert!(!fonts::truetype_encoding_unfit(&font("/Encoding/WinAnsiEncoding", "")).unwrap());
+    assert!(!fonts::truetype_encoding_unfit(&font("/Encoding/MacRomanEncoding", "")).unwrap());
+    assert!(fonts::truetype_encoding_unfit(&font("/Encoding<</BaseEncoding/WinAnsiEncoding/Differences[39/quotesingle]>>", "")).unwrap());
+    assert!(fonts::truetype_encoding_unfit(&font("/Encoding/StandardEncoding", "")).unwrap());
+    assert!(fonts::truetype_encoding_unfit(&font("", "")).unwrap(), "no Encoding at all");
+    // A symbolic font is exempt.
+    assert!(!fonts::truetype_encoding_unfit(&font("", "/FontDescriptor<</Type/FontDescriptor/Flags 4>>")).unwrap());
+}
+
+#[test]
+fn an_installed_truetype_font_gets_the_plain_winansi_name_in_pdfa1() {
+    let Some(_) = crate::engine::fonts::installed_file("Arial") else { return };
+    let sp = Spec {
+        font: "<</Type/Font/Subtype/TrueType/BaseFont/Arial/Encoding<</Type/Encoding/BaseEncoding/WinAnsiEncoding/Differences[39/quotesingle]>>>>".into(),
+        ..Spec::default()
+    };
+    let (d, a) = applied(&sp, Profile::Pdfa1b, &[FixGroup::Fonts], true);
+    let f = d.new_indirect(3, 0).unwrap();
+    let enc = f.get_dict("Encoding").unwrap().unwrap();
+    assert!(enc.is_name().unwrap(), "{:?}", a.log);
+    assert_eq!(String::from_utf8_lossy(&enc.as_name().unwrap()), "WinAnsiEncoding");
+}
+
+// ---- PDF/A-3 embedded files ----------------------------------------------------------------------
+
+fn a3_file(params: &str) -> Spec {
+    Spec {
+        cat: "/Names <</EmbeddedFiles <</Names [(a.xml) 130 0 R]>>>>".into(),
+        objs: vec![
+            (130, s("<</Type/Filespec /F (a.xml) /UF (a.xml) /EF <</F 131 0 R>>>>")),
+            (131, stream(&format!("/Type/EmbeddedFile {params}"), b"<a/>")),
+        ],
+        ..Spec::default()
+    }
+}
+
+#[test]
+fn pdfa3_embedded_files_need_a_media_type_a_modification_date_and_a_place_in_af() {
+    let sp = a3_file("/Params <</ModDate (D:20260101000000Z)>>");
+    let r = report_of(Profile::Pdfa3b, &sp);
+    let ef = r.result("embedded-files").unwrap();
+    assert_eq!(ef.status, Status::Failed);
+    let msgs: Vec<&str> = ef.findings.iter().map(|f| f.message.as_str()).collect();
+    assert!(msgs.iter().any(|m| m.contains("no AFRelationship")), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m.contains("media type")), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m.contains("/AF")), "{msgs:?}");
+    // The Files group repairs all three.
+    let (d, a) = applied(&sp, Profile::Pdfa3b, &[FixGroup::Files], false);
+    let cat = d.catalog().unwrap();
+    assert_eq!(cat.get_dict("AF").unwrap().unwrap().len().unwrap(), 1, "{:?}", a.log);
+    let stream = d.new_indirect(131, 0).unwrap();
+    assert!(stream.get_dict("Subtype").unwrap().is_some());
+    let bytes = {
+        let mut out = Vec::new();
+        d.write_to_with_options(&mut out, mupdf::pdf::PdfWriteOptions::default()).unwrap();
+        out
+    };
+    let again = PdfDocument::from_bytes(&bytes).unwrap();
+    let r2 = check(&again, &bytes[..bytes.len().min(512)], Profile::Pdfa3b, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert_eq!(r2.status("embedded-files"), Some(Status::Passed), "{:?}", r2.result("embedded-files").unwrap().findings);
+}
+
+#[test]
+fn pdfa3_a_file_without_a_modification_date_is_left_for_a_person() {
+    let r = report_of(Profile::Pdfa3b, &a3_file("/Subtype/text#2Fxml"));
+    let ef = r.result("embedded-files").unwrap();
+    assert!(ef.findings.iter().any(|f| f.message.contains("modification date") && !f.fixable), "{:?}", ef.findings);
+    // The date is never made up: the Files group leaves it.
+    let (d, _) = applied(&a3_file("/Subtype/text#2Fxml"), Profile::Pdfa3b, &[FixGroup::Files], false);
+    assert!(d.new_indirect(131, 0).unwrap().get_dict("Params").unwrap().is_none());
+}
+
+#[test]
+fn an_attachment_is_told_apart_by_its_first_bytes_however_big_it_is() {
+    let mut big_pdf = b"%PDF-1.7\n".to_vec();
+    big_pdf.extend(std::iter::repeat_n(b'x', 3_000_000));
+    let mut big_other = b"PK".to_vec();
+    big_other.extend(std::iter::repeat_n(b'x', 3_000_000));
+    let pdf = PdfDocument::from_bytes(&build(&Spec {
+        objs: vec![
+            (130, s("<</Type/Filespec /F (a.pdf) /EF <</F 131 0 R>>>>")),
+            (131, stream("/Type/EmbeddedFile", &big_pdf)),
+            (132, s("<</Type/Filespec /F (a.zip) /EF <</F 133 0 R>>>>")),
+            (133, stream("/Type/EmbeddedFile", &big_other)),
+        ],
+        ..Spec::default()
+    }))
+    .unwrap();
+    assert!(check::embedded_is_pdf(&pdf.new_indirect(130, 0).unwrap()));
+    assert!(!check::embedded_is_pdf(&pdf.new_indirect(132, 0).unwrap()));
+}
+
+// ---- a cancel during the last check ---------------------------------------------------------------
+
+#[test]
+fn a_cancel_during_the_check_of_the_new_file_leaves_no_file() {
+    let path = file("cancel-late", &messy());
+    let (eng, id) = open(&path);
+    let r = run(&eng, id, Profile::Pdfa2b);
+    let stop = AtomicBool::new(false);
+    let dest = dir("cancel-late").join("out.pdf");
+    // The flag goes up when the conversion's own steps are done: the new file is only being checked.
+    let e = convert_to_file(&eng, id, Profile::Pdfa2b, &ticked(&r), dest.to_str().unwrap(), &mut |p| {
+        if p.stage == "convert" && p.done == p.pages {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }, &stop)
+    .unwrap_err();
+    assert!(e.to_string().contains("cancelled"), "{e}");
+    assert!(!dest.exists(), "nothing is left at the destination");
 }

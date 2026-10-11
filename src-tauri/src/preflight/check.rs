@@ -130,6 +130,8 @@ struct Ctx<'a> {
     default_cs: [bool; 3],
     /// Fonts that cannot be embedded.
     blocked: usize,
+    /// Object numbers the catalog's /AF array lists (PDF/A-3 associates embedded files there).
+    catalog_af: Option<HashSet<i32>>,
     /// Collect the fonts in use instead of judging them (the conversion's survey).
     collect: Option<Collected>,
 }
@@ -673,6 +675,25 @@ impl Ctx<'_> {
                 if af.is_none() {
                     self.add(Rule::EmbeddedFiles, base(format!("The embedded file {fname} has no AFRelationship"), true, None));
                 }
+                // The file's media type (a MIME /Subtype on its stream) and its modification date.
+                let stream = embedded_stream(fs);
+                if let Some(s) = &stream {
+                    if name(s, "Subtype")?.is_none() {
+                        self.add(Rule::EmbeddedFiles, base(format!("The embedded file {fname} has no media type (/Subtype on its stream)"), true, None));
+                    }
+                    let dated = dict_of(s, "Params").is_some_and(|p| p.get_dict("ModDate").ok().flatten().is_some());
+                    if !dated {
+                        self.add(Rule::EmbeddedFiles, base(format!("The embedded file {fname} has no modification date (/Params /ModDate)"), false, Some(NOTE_MANUAL)));
+                    }
+                }
+                // Listed in the catalog's /AF (document-level files; attachment annotations are not checked).
+                if page.is_none() && x != 0 {
+                    if let Some(listed) = &self.catalog_af {
+                        if !listed.contains(&x) {
+                            self.add(Rule::EmbeddedFiles, base(format!("The embedded file {fname} isn't listed in the document's /AF array"), true, None));
+                        }
+                    }
+                }
             }
             _ => {
                 if embedded_is_pdf(fs) {
@@ -859,6 +880,18 @@ impl Ctx<'_> {
             }
         }
         if self.on(Rule::EmbeddedFiles) {
+            if self.profile == Profile::Pdfa3b {
+                let mut listed = HashSet::new();
+                if let Some(af) = cat.get_dict("AF")?.filter(|a| a.is_array().unwrap_or(false)) {
+                    for e in af.array_iter()?.flatten() {
+                        let n = xref_of(&e)?;
+                        if n != 0 {
+                            listed.insert(n);
+                        }
+                    }
+                }
+                self.catalog_af = Some(listed);
+            }
             if let Some(ef) = names.as_ref().and_then(|n| dict_of(n, "EmbeddedFiles")) {
                 let mut specs = Vec::new();
                 self.name_tree(&ef, 0, &mut specs)?;
@@ -977,12 +1010,20 @@ pub(crate) fn annotation_forbidden(fam: Family, sub: &str) -> bool {
     }
 }
 
-/// An embedded file that is itself a PDF (by media type or by its first bytes).
+/// The stream of an embedded file's filespec (`/EF /F`, else `/UF`).
+pub(crate) fn embedded_stream(fs: &PdfObject) -> Option<PdfObject> {
+    dict_of(fs, "EF").and_then(|e| e.get_dict("F").ok().flatten().or_else(|| e.get_dict("UF").ok().flatten()))
+}
+
+/// How many bytes of an attachment are looked at to tell whether it is a PDF.
+const SNIFF_BYTES: usize = 1024;
+
+/// An embedded file that is itself a PDF (by media type or by its first bytes; only the first
+/// kilobyte is decoded, however big the attachment is).
 pub(crate) fn embedded_is_pdf(fs: &PdfObject) -> bool {
-    let stream = dict_of(fs, "EF").and_then(|e| e.get_dict("F").ok().flatten().or_else(|| e.get_dict("UF").ok().flatten()));
-    stream.is_some_and(|s| {
+    embedded_stream(fs).is_some_and(|s| {
         name(&s, "Subtype").ok().flatten().is_some_and(|m| m.eq_ignore_ascii_case("application#2Fpdf") || m.eq_ignore_ascii_case("application/pdf"))
-            || s.read_stream().map(|b| b.starts_with(b"%PDF")).unwrap_or(false)
+            || s.read_stream_head(SNIFF_BYTES).map(|b| b.starts_with(b"%PDF")).unwrap_or(false)
     })
 }
 
@@ -1071,6 +1112,7 @@ pub(crate) fn run(doc: &PdfDocument, head: &[u8], profile: Profile, progress: &m
         device: [None; 3],
         default_cs: [false; 3],
         blocked: 0,
+        catalog_af: None,
         collect: None,
     };
     let intents = c.catalog(head)?;
@@ -1205,6 +1247,7 @@ pub(crate) fn survey(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), canc
         device: [None; 3],
         default_cs: [false; 3],
         blocked: 0,
+        catalog_af: None,
         collect: Some(Collected::default()),
     };
     for p in 0..n {
@@ -1247,6 +1290,7 @@ fn run_ua(doc: &PdfDocument, head: &[u8], profile: Profile, pages: u32, claimed:
         device: [None; 3],
         default_cs: [false; 3],
         blocked: 0,
+        catalog_af: None,
         collect: None,
     };
     c.catalog(head)?;

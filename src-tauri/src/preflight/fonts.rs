@@ -3,7 +3,7 @@
 //! base-14 clone it is named after, or from the installed font file of the same name, or it is
 //! reported as blocked with the reason.
 
-use super::Result;
+use super::{Family, Result};
 use crate::a11y::tree::{name, xref_of};
 use crate::textedit::encodings::{MAC_ROMAN, NAMES, STANDARD, WIN_ANSI};
 use mupdf::pdf::{PdfDocument, PdfObject};
@@ -226,8 +226,9 @@ fn glyph_unicode(n: &str) -> u32 {
     if let Some((_, u)) = NAMES.iter().find(|(g, _)| *g == n) {
         return *u;
     }
-    if let Some(h) = n.strip_prefix("uni").filter(|h| h.len() >= 4) {
-        if let Ok(u) = u32::from_str_radix(&h[..4], 16) {
+    // `get` (not a slice): a glyph name can hold multibyte characters.
+    if let Some(h) = n.strip_prefix("uni").and_then(|h| h.get(..4)) {
+        if let Ok(u) = u32::from_str_radix(h, 16) {
             return u;
         }
     }
@@ -332,9 +333,45 @@ fn font_descriptor(doc: &mut PdfDocument, f: &mut PdfObject, font_name: &str, sp
     Ok(d)
 }
 
+/// What embedding a font did.
+pub struct Embedded {
+    /// A sentence for the log.
+    pub log: String,
+    /// The font's licence flags (fsType 0x0100) forbid subsetting it.
+    pub no_subset: bool,
+}
+
+/// Whether a simple TrueType font that is not symbolic has an Encoding PDF/A-1 doesn't allow (it must be
+/// WinAnsiEncoding or MacRomanEncoding, with no Differences array).
+pub fn truetype_encoding_unfit(f: &PdfObject) -> Result<bool> {
+    if name(f, "Subtype")?.as_deref() != Some("TrueType") {
+        return Ok(false);
+    }
+    let symbolic = f
+        .get_dict("FontDescriptor")?
+        .and_then(|d| d.get_dict("Flags").ok().flatten())
+        .and_then(|v| v.as_int().ok())
+        .is_some_and(|fl| fl & 4 != 0);
+    if symbolic {
+        return Ok(false);
+    }
+    Ok(!plain_encoding(f)?)
+}
+
+/// Encoding is the name WinAnsiEncoding or MacRomanEncoding, or a dictionary naming one of them with
+/// no Differences.
+fn plain_encoding(f: &PdfObject) -> Result<bool> {
+    let ok = |n: &str| matches!(n, "WinAnsiEncoding" | "MacRomanEncoding");
+    Ok(match f.get_dict("Encoding")? {
+        Some(e) if e.is_name()? => ok(&String::from_utf8_lossy(&e.as_name()?)),
+        Some(e) if e.is_dict()? => e.get_dict("Differences")?.is_none() && name(&e, "BaseEncoding")?.is_some_and(|n| ok(&n)),
+        _ => false,
+    })
+}
+
 /// Embeds the font program of `plan` into the font dictionary `f` (a Type1 or TrueType simple font).
-/// Returns a sentence for the log.
-pub fn embed(doc: &mut PdfDocument, f: &PdfObject, plan: &FontPlan) -> Result<String> {
+/// `fam` decides the Encoding a TrueType font gets (PDF/A-1 allows no Differences array).
+pub fn embed(doc: &mut PdfDocument, f: &PdfObject, plan: &FontPlan, fam: Family) -> Result<Embedded> {
     let mut f = f.share();
     let shown = name(&f, "BaseFont")?.unwrap_or_default();
     match plan {
@@ -354,7 +391,7 @@ pub fn embed(doc: &mut PdfDocument, f: &PdfObject, plan: &FontPlan) -> Result<St
             f.dict_put("Subtype", PdfObject::new_name("Type1")?)?;
             let clone = Font::new(program)?;
             put_widths(doc, &mut f, &clone)?;
-            Ok(format!("Embedded the built-in {program} for {shown}"))
+            Ok(Embedded { log: format!("Embedded the built-in {program} for {shown}"), no_subset: false })
         }
         FontPlan::Installed { path, ps_name } => {
             let data = std::fs::read(path).map_err(|e| super::bad(format!("can't read {}: {e}", path.display())))?;
@@ -384,16 +421,29 @@ pub fn embed(doc: &mut PdfDocument, f: &PdfObject, plan: &FontPlan) -> Result<St
             d.dict_put("FontFile2", file)?;
             f.dict_put("BaseFont", PdfObject::new_name(ps_name)?)?;
             f.dict_put("Subtype", PdfObject::new_name("TrueType")?)?;
-            // A TrueType font needs an Encoding a reader can map by name: WinAnsi, with the codes
-            // StandardEncoding would have drawn differently as Differences.
-            if f.get_dict("Encoding")?.is_none() {
+            // A TrueType font needs an Encoding a reader can map by name. PDF/A-1 wants the plain name
+            // WinAnsiEncoding (or MacRomanEncoding) and no Differences array; the later parts take
+            // WinAnsi with the codes StandardEncoding would have drawn differently as Differences.
+            let mut note = String::new();
+            if fam == Family::A1 {
+                if !plain_encoding(&f)? {
+                    let keep_mac = f.get_dict("Encoding")?.is_some_and(|e| e.is_dict().unwrap_or(false) && e.get_dict("Differences").ok().flatten().is_none())
+                        && f.get_dict("Encoding")?.and_then(|e| name(&e, "BaseEncoding").ok().flatten()).as_deref() == Some("MacRomanEncoding");
+                    let enc = if keep_mac { "MacRomanEncoding" } else { "WinAnsiEncoding" };
+                    let had = f.get_dict("Encoding")?.is_some();
+                    f.dict_put("Encoding", PdfObject::new_name(enc)?)?;
+                    if had {
+                        note = format!(" (its Encoding is now {enc}: PDF/A-1 allows no Differences array)");
+                    }
+                }
+            } else if f.get_dict("Encoding")?.is_none() {
                 let std_only = standard_differences();
                 let enc = doc.new_object_from_str(&format!("<</Type/Encoding/BaseEncoding/WinAnsiEncoding/Differences[{std_only}]>>"))?;
                 f.dict_put("Encoding", enc)?;
             }
             let program = Font::from_bytes_with_index(ps_name, 0, &data)?;
             put_widths(doc, &mut f, &program)?;
-            Ok(format!("Embedded the installed {ps_name} for {shown}"))
+            Ok(Embedded { log: format!("Embedded the installed {ps_name} for {shown}{note}"), no_subset: info.fs_type & 0x0100 != 0 })
         }
         FontPlan::Embedded | FontPlan::Blocked { .. } => Err(super::bad("nothing to embed")),
     }
@@ -441,6 +491,14 @@ mod tests {
         assert_eq!(base14("Courier-Bold"), Some("Courier-Bold"));
         assert_eq!(base14("Arial"), None);
         assert_eq!(base14("TimesNewRoman"), None);
+    }
+
+    #[test]
+    fn a_glyph_name_with_multibyte_characters_does_not_panic() {
+        assert_eq!(glyph_unicode("uni\u{20ac}\u{20ac}"), 0);
+        assert_eq!(glyph_unicode("uni\u{e9}"), 0);
+        assert_eq!(glyph_unicode("uni00E9"), 0xE9);
+        assert_eq!(glyph_unicode("uni"), 0);
     }
 
     #[test]
