@@ -95,6 +95,12 @@ impl Shapes {
 pub enum Kind {
     Text,
     CheckBox,
+    Signature,
+}
+
+/// Acrobat turns a blank labelled "Signature", "Sign" or "Signed" into a signature field.
+fn is_signature(label: &str) -> bool {
+    label.split_whitespace().any(|w| ["sign", "signed", "signature", "signatures"].contains(&w.to_lowercase().as_str()))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -177,6 +183,7 @@ pub fn detect(words: &[Word], shapes: &Shapes, existing: &[[f64; 4]], taken: &[S
         if existing.iter().chain(out.iter().map(|c| &c.rect)).any(|e| overlaps(*e, rect)) {
             return;
         }
+        let kind = if kind == Kind::Text && is_signature(&label) { Kind::Signature } else { kind };
         out.push(Candidate { kind, rect, name: label });
     };
     // Text that isn't underscores (labels), and underscore runs (blanks).
@@ -242,6 +249,7 @@ pub fn detect(words: &[Word], shapes: &Shapes, existing: &[[f64; 4]], taken: &[S
             match c.kind {
                 Kind::Text => "Text".to_string(),
                 Kind::CheckBox => "Check Box".to_string(),
+                Kind::Signature => "Signature".to_string(),
             }
         } else {
             c.name.clone()

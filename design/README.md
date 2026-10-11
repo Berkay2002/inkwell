@@ -15,6 +15,7 @@ shadows), warm palette (window #F4F2ED, surfaces #FFFFFF, panel #FAF8F4, text #1
 | history | approved/history-2.png | Compare mode, full window (history-r1 b-compare; modes 2-up / Swipe / Onion skin) |
 | redact | approved/redact-review.png, redact-result.png, redact-tools.png | Redact rail: find and hits, after-apply report, manual tools row (redact-r2 c-sweep + a-panel tools) |
 | comments | approved/comments.png, comments-2.png | Comments rail (grouped by page, search, filter, replies) with the floating tool strip, and a selected annotation with handles and popover (comments-r1 a-rail) |
+| forms | approved/forms.png, forms-2.png | Forms rail: fill on the page with the field list and progress, and Prepare form with the floating field strip and the selected field's properties in the rail (forms-r1 a-rail) |
 
 2026-10-10, history-r1: the user asked for "the most standard way" of showing versions and diffs (Google Docs / Word
 version history, Acrobat Compare Files, GitHub image diff). Diff marks may use green/red/amber (added/removed/changed)

@@ -350,7 +350,13 @@ fn flat_form() -> Vec<u8> {
                    0 G 48 600 12 12 re S\n\
                    BT /F1 12 Tf 66 602 Td (I agree to the terms) Tj ET\n\
                    BT /F1 12 Tf 48 548 Td (Notes) Tj ET\n\
-                   0 G 48 480 300 60 re S\n";
+                   0 G 48 480 300 60 re S\n\
+                   BT /F1 12 Tf 48 420 Td (Signature:) Tj ET\n\
+                   0 G 130 416 m 400 416 l S\n\
+                   BT /F1 12 Tf 48 380 Td (Signed) Tj ET\n\
+                   0 G 130 376 m 400 376 l S\n\
+                   BT /F1 12 Tf 48 340 Td (Design) Tj ET\n\
+                   0 G 130 336 m 400 336 l S\n";
     let objs = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
@@ -386,6 +392,12 @@ fn detect_fields_on_a_flat_form_then_add_them_in_one_step() {
     assert!(names.contains(&"Notes"), "{names:?}");
     let agree = found.iter().find(|d| d.name == "I agree to the terms").unwrap();
     assert_eq!(agree.kind, FieldKind::Checkbox);
+    // A blank labelled "Signature" or "Signed" is a signature field, as in Acrobat; "Design" is not one.
+    let kind_of = |n: &str| found.iter().find(|d| d.name == n).unwrap_or_else(|| panic!("{n} missing from {names:?}")).kind;
+    assert_eq!(kind_of("Signature"), FieldKind::Signature);
+    assert_eq!(kind_of("Signed"), FieldKind::Signature);
+    assert_eq!(kind_of("Design"), FieldKind::Text);
+    assert_eq!(kind_of("Full name"), FieldKind::Text);
     // Page space: the name field sits at the label's line (y 700 up = 92 down).
     let full = found.iter().find(|d| d.name == "Full name").unwrap();
     assert!(full.rect[0] > 120.0 && full.rect[1] > 70.0 && full.rect[1] < 110.0, "{:?}", full.rect);
@@ -398,7 +410,9 @@ fn detect_fields_on_a_flat_form_then_add_them_in_one_step() {
         .collect();
     add_many(&eng, id, 0, &items, EditSource::User).unwrap();
     assert_eq!(eng.history(id).unwrap().len(), before + 1, "all of them are one undo step");
-    assert_eq!(list_all(&eng, id).unwrap().fields.len(), found.len());
+    let listed = list_all(&eng, id).unwrap();
+    assert_eq!(listed.fields.len(), found.len());
+    assert_eq!(listed.fields.iter().filter(|f| f.kind == FieldKind::Signature).count(), 2);
     // Nothing more to find once they exist.
     assert!(detect_one(&eng, id, 0).unwrap().is_empty());
     eng.undo(id).unwrap();
@@ -424,6 +438,8 @@ fn detection_finds_what_acrobat_found_on_the_study_flat_form() {
         assert!(names.iter().any(|n| n == want), "{want} missing from {names:?}");
     }
     assert!(found.iter().filter(|d| d.kind == FieldKind::Checkbox).count() >= 2, "{names:?}");
+    // Its "Signature:" blank is a signature field, not a text field.
+    assert!(found.iter().any(|d| d.kind == FieldKind::Signature), "{names:?}");
 }
 
 /// The study sample that already has widgets: every field is listed, filled and read back after a save.

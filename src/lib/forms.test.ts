@@ -127,12 +127,15 @@ describe("forms logic", () => {
   });
 
   it("predicts what detection would add, before it does", () => {
-    const d = (kind: "text" | "checkbox") => ({ kind, name: "x", rect: [0, 0, 1, 1] as [number, number, number, number] });
+    const d = (kind: "text" | "checkbox" | "signature") => ({ kind, name: "x", rect: [0, 0, 1, 1] as [number, number, number, number] });
     expect(detectSummary([])).toBe("No more fields found on this page.");
     expect(detectSummary([...Array(6).fill(0).map(() => d("text")), d("checkbox"), d("checkbox")])).toBe(
       "Detect fields would add 6 text fields and 2 check boxes on this page.",
     );
     expect(detectSummary([d("checkbox")])).toBe("Detect fields would add 1 check box on this page.");
+    expect(detectSummary([d("text"), d("text"), d("signature")])).toBe(
+      "Detect fields would add 2 text fields and 1 signature field on this page.",
+    );
     expect(detectedToNew([d("text")])).toEqual([{ kind: "text", rect: [0, 0, 1, 1], name: "x" }]);
   });
 

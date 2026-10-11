@@ -794,7 +794,11 @@ pub fn detect_fields(doc: &PdfDocument, page: u32) -> Result<Vec<Detected>> {
     Ok(detect::detect(&words, &shapes, &existing, &taken)
         .into_iter()
         .map(|c| Detected {
-            kind: if c.kind == DetectKind::CheckBox { FieldKind::Checkbox } else { FieldKind::Text },
+            kind: match c.kind {
+                DetectKind::CheckBox => FieldKind::Checkbox,
+                DetectKind::Signature => FieldKind::Signature,
+                DetectKind::Text => FieldKind::Text,
+            },
             name: c.name,
             rect: [c.rect[0] as f32, (h - c.rect[3]) as f32, c.rect[2] as f32, (h - c.rect[1]) as f32],
         })

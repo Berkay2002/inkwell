@@ -39,7 +39,7 @@ while another is selected joins its group. Delete removes the selection (the Del
 
 *Find fields on this page* runs auto-detection (underscore runs, rules under labels, empty boxes, small squares, boxes
 drawn as four lines) and says what it would add before it adds anything; *Add them* is one undo step. Names come from the
-label next to the field. Tab order can be set by row or by column, or one step at a time.
+label next to the field; a blank labelled Signature, Sign or Signed becomes a signature field. Tab order can be set by row or by column, or one step at a time.
 
 Fields are built as plain AcroForm dictionaries (MuPDF only creates signature widgets): `/FT /Tx /Btn /Ch /Sig`, `/Ff`,
 `/MK`, `/DA` with the form's `/DR` Helvetica and ZapfDingbats, `/AP` from MuPDF.

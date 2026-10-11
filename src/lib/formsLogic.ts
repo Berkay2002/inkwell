@@ -195,8 +195,10 @@ export const fieldLabel = (f: Field): string => f.tooltip || f.name;
 export function detectSummary(found: Detected[]): string {
   if (found.length === 0) return "No more fields found on this page.";
   const n = (k: FieldKind) => found.filter((d) => d.kind === k).length;
-  const parts = (["text", "checkbox"] as FieldKind[]).filter((k) => n(k) > 0).map((k) => `${n(k)} ${n(k) === 1 ? KIND_LABEL[k].toLowerCase() : KIND_PLURAL[k]}`);
-  return `Detect fields would add ${parts.join(" and ")} on this page.`;
+  const one = (k: FieldKind) => (k === "signature" ? "signature field" : KIND_LABEL[k].toLowerCase());
+  const parts = (["text", "checkbox", "signature"] as FieldKind[]).filter((k) => n(k) > 0).map((k) => `${n(k)} ${n(k) === 1 ? one(k) : KIND_PLURAL[k]}`);
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
+  return `Detect fields would add ${list} on this page.`;
 }
 
 /** Fields found by detection, as what to create. */
