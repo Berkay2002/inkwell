@@ -15,6 +15,7 @@ pub mod combine;
 pub mod labels;
 #[cfg(test)]
 mod tests;
+pub mod threads;
 pub mod trans;
 
 pub(crate) use crate::forms::{bad, get, put_int, put_name, put_str};
@@ -22,6 +23,7 @@ pub(crate) type Result<T> = std::result::Result<T, crate::engine::EngineError>;
 
 use attach::{Attachment, NewFile};
 use labels::{LabelRange, LabelSpec};
+use threads::{Info, Thread};
 use trans::{PageTrans, TransChange};
 
 /// "p. 4", "pp. 2-3, 7" (1-based).
@@ -176,4 +178,69 @@ pub fn attach_describe(eng: &Engine, doc: DocId, id: &str, text: &str, source: E
         return eng.edit_state(doc);
     }
     eng.apply_custom(doc, format!("Describe attachment {name}"), source, false, |d| attach::describe(d, id, text))
+}
+
+// ---- article threads ----------------------------------------------------------------------------
+
+pub fn threads_get(eng: &Engine, doc: DocId) -> Result<Vec<Thread>> {
+    eng.read_custom(doc, |d| threads::read_all(d))
+}
+
+fn thread_of(eng: &Engine, doc: DocId, id: i32) -> Result<Thread> {
+    let found = eng.read_custom(doc, |d| Ok(threads::read_all(d)?.into_iter().find(|t| t.id == id)))?;
+    found.ok_or_else(|| bad("that article is no longer in the document"))
+}
+
+/// Starts an article with one bead (`page` 0-based, `rect` in points on the page as shown).
+pub fn thread_create(eng: &Engine, doc: DocId, title: &str, page: u32, rect: [f32; 4], source: EditSource) -> Result<EditState> {
+    let title = threads::clean(&Info { title: title.into(), ..Info::default() }).title;
+    let label = if title.is_empty() { "Start an article".to_string() } else { format!("Start article {title}") };
+    eng.apply_custom(doc, label, source, false, |d| threads::create(d, &title, page, rect))
+}
+
+/// A bead after bead `after` (the end of the article when None).
+pub fn thread_add_bead(eng: &Engine, doc: DocId, thread: i32, after: Option<i32>, page: u32, rect: [f32; 4], source: EditSource) -> Result<EditState> {
+    let t = thread_of(eng, doc, thread)?;
+    eng.apply_custom(doc, format!("Add a bead to {}", t.title), source, false, |d| threads::add_bead(d, thread, after, page, rect))
+}
+
+/// Moves or resizes a bead; the same place is no step.
+pub fn thread_move_bead(eng: &Engine, doc: DocId, thread: i32, bead: i32, page: u32, rect: [f32; 4], source: EditSource) -> Result<EditState> {
+    let t = thread_of(eng, doc, thread)?;
+    let at = t.beads.iter().position(|b| b.id == bead).ok_or_else(|| bad("that bead is no longer in the article"))?;
+    if t.beads[at].page == page && threads::same_rect(t.beads[at].rect, rect) {
+        return eng.edit_state(doc);
+    }
+    eng.apply_custom(doc, format!("Move bead {} of {}", at + 1, t.title), source, false, |d| threads::move_bead(d, thread, bead, page, rect))
+}
+
+pub fn thread_delete_bead(eng: &Engine, doc: DocId, thread: i32, bead: i32, source: EditSource) -> Result<EditState> {
+    let t = thread_of(eng, doc, thread)?;
+    let at = t.beads.iter().position(|b| b.id == bead).ok_or_else(|| bad("that bead is no longer in the article"))?;
+    let label = if t.beads.len() == 1 { format!("Delete article {}", t.title) } else { format!("Delete bead {} of {}", at + 1, t.title) };
+    eng.apply_custom(doc, label, source, false, |d| threads::delete_bead(d, thread, bead))
+}
+
+pub fn thread_delete(eng: &Engine, doc: DocId, thread: i32, source: EditSource) -> Result<EditState> {
+    let t = thread_of(eng, doc, thread)?;
+    eng.apply_custom(doc, format!("Delete article {}", t.title), source, false, |d| threads::delete_thread(d, thread))
+}
+
+/// Title, subject, author and keywords; what is there already is no step.
+pub fn thread_set_info(eng: &Engine, doc: DocId, thread: i32, info: &Info, source: EditSource) -> Result<EditState> {
+    let t = thread_of(eng, doc, thread)?;
+    if t.info == threads::clean(info) {
+        return eng.edit_state(doc);
+    }
+    eng.apply_custom(doc, format!("Properties of article {}", t.title), source, false, |d| threads::set_info(d, thread, info))
+}
+
+/// Moves the article to position `to` (0-based) in the list.
+pub fn thread_reorder(eng: &Engine, doc: DocId, thread: i32, to: u32, source: EditSource) -> Result<EditState> {
+    let all = threads_get(eng, doc)?;
+    let from = all.iter().position(|t| t.id == thread).ok_or_else(|| bad("that article is no longer in the document"))?;
+    if from == (to as usize).min(all.len().saturating_sub(1)) {
+        return eng.edit_state(doc);
+    }
+    eng.apply_custom(doc, format!("Move article {}", all[from].title), source, false, |d| threads::reorder(d, thread, to as usize))
 }
