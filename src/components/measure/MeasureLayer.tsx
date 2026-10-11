@@ -90,7 +90,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
 
   // The engine answers one snap at a time; the pointer keeps moving, so only the newest request's answer is used.
   const busy = useRef(false);
-  const want = useRef<{ raw: Pt; shift: boolean } | null>(null);
+  const want = useRef<{ raw: Pt; c: ReturnType<typeof context> } | null>(null);
   const context = () => {
     const last = pts.length ? pts[pts.length - 1] : null;
     const close = tool === "area" && pts.length >= 3 ? pts[0] : null;
@@ -104,7 +104,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     hoverRef.current = h;
     setHover(h);
     if (e.shiftKey || h.snap === "close") return void (want.current = null);
-    want.current = { raw, shift: false };
+    want.current = { raw, c };
     if (busy.current) return;
     const pump = () => {
       const w = want.current;
@@ -112,11 +112,11 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
       want.current = null;
       busy.current = true;
       void ms()
-        .snap(docId, page, w.raw, c.radius)
+        .snap(docId, page, w.raw, w.c.radius)
         .then((hit) => {
           busy.current = false;
           if (want.current) return pump(); // the pointer moved on: ask for where it is now
-          const next = place(w.raw, c.last, false, hit, c.close, c.radius);
+          const next = place(w.raw, w.c.last, false, hit, w.c.close, w.c.radius);
           hoverRef.current = next;
           setHover(next);
         });
