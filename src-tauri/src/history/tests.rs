@@ -311,6 +311,7 @@ fn redacted(id: &str) -> Vec<u8> {
     pdf(4, id).into_iter().chain(*b"% redacted\n").collect()
 }
 
+#[cfg(windows)]
 fn lock_for_read(p: &Path) -> fs::File {
     use std::os::windows::fs::OpenOptionsExt;
     // FILE_SHARE_READ only: others can copy it, nobody can delete it.
@@ -374,6 +375,7 @@ fn failed_redaction_purge_never_commits_into_a_keyless_doc() {
 }
 
 #[test]
+#[cfg(windows)]
 fn redaction_purge_reports_leftovers_and_can_be_retried() {
     let (_d, root, s, doc) = setup("redact-locked", &pdf(4, "0c"));
     s.name(doc, s.versions(doc).unwrap()[0].id, Some("x".into())).unwrap();
@@ -389,6 +391,7 @@ fn redaction_purge_reports_leftovers_and_can_be_retried() {
 }
 
 #[test]
+#[cfg(windows)]
 fn relocate_destroys_old_keys_and_reports_leftovers() {
     let (dir, root, s, doc) = setup("relocate-locked", &pdf(4, "0d"));
     let ddir = root.join("docs").join(doc.to_string());

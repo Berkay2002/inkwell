@@ -2,7 +2,12 @@
 //! functions in `super` with its turn.
 
 use super::autotag::Preview;
-use super::{Fix, Progress, Report, check_doc, fix_doc_with, preview_doc, report_bytes};
+use super::order::ReadingOrder;
+use super::tags::{TagNode, TagPatch};
+use super::{
+    Fix, Problem, Progress, Report, artifact_doc, check_doc, edit_tag_doc, fix_doc_with, merge_doc, move_tag_doc, preview_doc, reading_order_doc, reorder_doc,
+    report_bytes, set_role_doc, split_doc, tag_problems_doc, tags_doc,
+};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use crate::paths::Paths;
@@ -94,4 +99,82 @@ pub async fn a11y_export_report(
         Ok(dest)
     })
     .await
+}
+
+// ---- reading order and tags ----------------------------------------------------------------------
+
+/// The regions of a page in reading order: role, text preview, box, MCIDs and the elements that hold them,
+/// plus marked content no element points at. Reads the document as it is now, unsaved edits included.
+#[tauri::command]
+pub async fn a11y_reading_order(eng: Eng<'_>, doc: DocId, page: u32) -> Result<ReadingOrder> {
+    let eng = eng.inner().clone();
+    blocking(move || reading_order_doc(&eng, doc, page)).await
+}
+
+/// The tag tree, nested, with each node's role, alternate text, actual text, language, table scope and headers.
+/// With `page`, only the branches that hold content on that page.
+#[tauri::command]
+pub async fn a11y_tags(eng: Eng<'_>, doc: DocId, page: Option<u32>) -> Result<Vec<TagNode>> {
+    let eng = eng.inner().clone();
+    blocking(move || tags_doc(&eng, doc, page)).await
+}
+
+/// Where the ParentTree and the tags disagree, as `[{page, xref, message}]` (empty: they agree). The fix
+/// `{"fix": "parentTree"}` of `a11y_fix` rebuilds it.
+#[tauri::command]
+pub async fn a11y_tag_problems(eng: Eng<'_>, doc: DocId) -> Result<Vec<Problem>> {
+    let eng = eng.inner().clone();
+    blocking(move || tag_problems_doc(&eng, doc)).await
+}
+
+/// Puts the regions of a page in a new reading order (`order`: every region's object number, in the order to
+/// read them). One undo step.
+#[tauri::command]
+pub async fn a11y_reorder(eng: Eng<'_>, doc: DocId, page: u32, order: Vec<i32>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || reorder_doc(&eng, doc, page, &order, EditSource::User)).await
+}
+
+/// Changes an element's role (P, H1-H6, Figure, Table, L, LI, ...); `Artifact` marks its content as artifact.
+#[tauri::command]
+pub async fn a11y_set_role(eng: Eng<'_>, doc: DocId, xref: i32, role: String) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || set_role_doc(&eng, doc, xref, &role, EditSource::User)).await
+}
+
+/// Takes an element's content out of the reading order and marks it as artifact.
+#[tauri::command]
+pub async fn a11y_artifact(eng: Eng<'_>, doc: DocId, xref: i32) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || artifact_doc(&eng, doc, xref, EditSource::User)).await
+}
+
+/// Merges region `from` into region `into`.
+#[tauri::command]
+pub async fn a11y_merge_regions(eng: Eng<'_>, doc: DocId, into: i32, from: i32) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || merge_doc(&eng, doc, into, from, EditSource::User)).await
+}
+
+/// Splits a region before the content item with MCID `at_mcid`; the rest becomes a new region after it
+/// (with `role`, else the same role).
+#[tauri::command]
+pub async fn a11y_split_region(eng: Eng<'_>, doc: DocId, xref: i32, at_mcid: i32, role: Option<String>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || split_doc(&eng, doc, xref, at_mcid, role.as_deref(), EditSource::User)).await
+}
+
+/// Edits one tag: `{role?, alt?, actualText?, lang?, scope?, headers?}`; a field left out stays, an empty text
+/// removes it. `headers` lists the object numbers of the header cells (TH) a cell is read with.
+#[tauri::command]
+pub async fn a11y_edit_tag(eng: Eng<'_>, doc: DocId, xref: i32, patch: TagPatch) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || edit_tag_doc(&eng, doc, xref, &patch, EditSource::User)).await
+}
+
+/// Moves a tag under `parent` (0: the top of the tree) at `index` among its kids.
+#[tauri::command]
+pub async fn a11y_move_tag(eng: Eng<'_>, doc: DocId, xref: i32, parent: i32, index: usize) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || move_tag_doc(&eng, doc, xref, parent, index, EditSource::User)).await
 }

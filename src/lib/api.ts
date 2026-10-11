@@ -932,7 +932,10 @@ export type PrintRange = { kind: "all" } | { kind: "current"; page: number } | {
 export type PrintLayout =
   | { kind: "size"; mode: PrintSizeMode; percent: number }
   | { kind: "multiple"; perSheet: number; order: PrintPageOrder; border: boolean; autoRotate: boolean }
-  | { kind: "booklet"; sides: "both" | "frontOnly" | "backOnly"; binding: "left" | "right" };
+  /** `creep` in points: how much closer to the spine the innermost sheet's pages sit than the outermost's. */
+  | { kind: "booklet"; sides: "both" | "frontOnly" | "backOnly"; binding: "left" | "right"; creep: number }
+  /** `scale` in percent, `overlap` in points. */
+  | { kind: "poster"; scale: number; overlap: number; cutMarks: boolean; labels: boolean };
 
 export interface PrintSettings {
   printer: string | null;
@@ -955,6 +958,8 @@ export interface PrintFace {
   height: number;
   /** Source pages on this side (1-based), in the order drawn. */
   pages: number[];
+  /** Poster: which tile of its page this side is (0-based) in a `cols` x `rows` grid. */
+  tile: { col: number; row: number; cols: number; rows: number } | null;
 }
 
 export interface PrintPlan {
@@ -992,6 +997,22 @@ export function printStart(job: number, doc: number, settings: PrintSettings, sa
   const ch = new Channel<PrintProgress>();
   ch.onmessage = onProgress;
   return invoke<PrintReport>("print_start", { job, doc, settings, saveTo, onProgress: ch });
+}
+
+export interface PrintSavedPdf {
+  /** The new file, as an open token for a new tab. */
+  file: FileRef;
+  /** Source pages chosen. */
+  pages: number;
+  /** Pages of the new file. */
+  sheets: number;
+}
+
+/** Writes the plan as a new vector PDF at `saveTo` (a save token from `pickSave`). Needs no printer. */
+export function printSavePdf(job: number, doc: number, settings: PrintSettings, saveTo: string, onProgress: (p: PrintProgress) => void) {
+  const ch = new Channel<PrintProgress>();
+  ch.onmessage = onProgress;
+  return invoke<PrintSavedPdf>("print_save_pdf", { job, doc, settings, saveTo, onProgress: ch });
 }
 
 // ---- combine, attachments, page labels, transitions (src-tauri/src/organize) ----
@@ -1075,6 +1096,73 @@ export const attachmentOpen = (doc: number, id: string) => invoke<FileRef>("atta
 export const attachmentsRemove = (doc: number, ids: string[]) => invoke<EditState>("attachments_remove", { doc, ids });
 export const attachmentDescribe = (doc: number, id: string, text: string) =>
   invoke<EditState>("attachment_describe", { doc, id, text });
+
+// ---- PDF Portfolios (src-tauri/src/organize/portfolio) ----
+
+export interface PortfolioField {
+  key: string;
+  name: string;
+  /** The schema's subtype: S, D, N, F, Desc, Size, ModDate, CreationDate, CompressedSize. */
+  subtype: string;
+  kind: "text" | "number" | "date";
+  visible: boolean;
+}
+
+export interface PortfolioSortKey {
+  /** Index into `fields`. */
+  field: number;
+  ascending: boolean;
+}
+
+export interface PortfolioFolder {
+  id: number;
+  name: string;
+  parent: number | null;
+}
+
+export interface PortfolioFile {
+  /** The attachment id: what `attachmentOpen`, `attachmentSave` and the other attachment calls take. */
+  id: string;
+  name: string;
+  description: string;
+  size: number;
+  mime: string | null;
+  isPdf: boolean;
+  hasData: boolean;
+  folder: number | null;
+  /** What each field shows, in `fields` order. */
+  cells: string[];
+  /** The value's place among all files per field (equal values share one; null: none). Sorting is a sort of these. */
+  ranks: (number | null)[];
+}
+
+export interface PortfolioInfo {
+  /** The schema's fields in the author's column order. */
+  fields: PortfolioField[];
+  /** The collection's own sort: `files` come in this order. */
+  sort: PortfolioSortKey[];
+  view: "details" | "tile" | "hidden" | "custom";
+  /** The file that opens first (an attachment id). */
+  initial: string | null;
+  /** Parents before children, siblings by name. */
+  folders: PortfolioFolder[];
+  files: PortfolioFile[];
+}
+
+export interface PortfolioExtracted {
+  folder: string;
+  written: string[];
+  skipped: string[];
+}
+
+/** The portfolio view of a document; null for a plain PDF. Rejects when the collection is unusable (folders that loop). */
+export const portfolioInfo = (doc: number) => invoke<PortfolioInfo | null>("portfolio_info", { doc });
+/** Open dialog for the files of a new portfolio (any type). */
+export const pickPortfolioFiles = () => invoke<FileRef[]>("pick_portfolio_files");
+/** `out`: a save token from `pickSave`. Resolves to an open token for the new file. The sources are only read. */
+export const portfolioCreate = (files: string[], out: string) => invoke<FileRef>("portfolio_create", { files, out });
+/** `to`: a folder token from `pickFolder`. Never replaces a file there. */
+export const portfolioExtractAll = (doc: number, to: string) => invoke<PortfolioExtracted>("portfolio_extract_all", { doc, to });
 
 export type LabelStyle = "none" | "decimal" | "upperRoman" | "lowerRoman" | "upperAlpha" | "lowerAlpha";
 

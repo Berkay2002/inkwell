@@ -65,7 +65,7 @@ impl View {
 }
 
 /// A number as short as a content stream needs.
-pub(super) fn n(v: f64) -> String {
+pub(crate) fn n(v: f64) -> String {
     let v = if v.is_finite() { v } else { 0.0 };
     let s = format!("{:.3}", if v.abs() < 5e-4 { 0.0 } else { v });
     let s = s.trim_end_matches('0').trim_end_matches('.');
