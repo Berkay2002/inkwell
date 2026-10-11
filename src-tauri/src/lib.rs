@@ -14,6 +14,7 @@ pub mod ocr;
 pub mod organize;
 pub mod paths;
 pub mod preflight;
+pub mod prepress;
 pub mod print;
 pub mod protect;
 pub mod recents;
@@ -231,8 +232,9 @@ async fn authenticate(app: tauri::AppHandle, eng: Eng<'_>, hist: State<'_, Arc<H
 }
 
 #[tauri::command]
-fn close_document(eng: Eng<'_>, hist: State<'_, Arc<History>>, doc: DocId) {
+fn close_document(eng: Eng<'_>, hist: State<'_, Arc<History>>, pre: State<'_, Arc<prepress::app::Prepress>>, doc: DocId) {
     hist.forget(doc);
+    pre.drop_doc(doc);
     eng.close(doc);
 }
 
@@ -840,6 +842,8 @@ pub fn run() {
     // a saved redaction then replaces the versions from before it (history_ipc::History::saved)
     engine::edit::set_redaction_hook(move |doc| h.on_redactions_applied(doc));
     let autosave = (hist.clone(), engine.clone());
+    let prepress = Arc::new(prepress::app::Prepress::default());
+    let proto_prepress = prepress.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -849,12 +853,31 @@ pub fn run() {
         .manage(Arc::new(tools::Jobs::default()))
         .manage(Arc::new(search::files::FolderSearches::default()))
         .manage(hist)
+        .manage(prepress)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 on_drop(window, paths);
             }
         })
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
+            // `/p/...`: a page tile in a print production view (plates, coverage)
+            if let Some((key, view, epoch, rank)) = prepress::app::parse_tile_request(request.uri()) {
+                proto_prepress.request_tile(
+                    &proto_engine,
+                    key,
+                    view,
+                    epoch,
+                    rank,
+                    Box::new(move |outcome| {
+                        responder.respond(match outcome {
+                            TileOutcome::Ready(t) => reply(200, t.rgba.as_ref().clone(), Some((t.w, t.h))),
+                            TileOutcome::Stale => reply(410, Vec::new(), None),
+                            TileOutcome::Failed(e) => reply(500, e.into_bytes(), None),
+                        })
+                    }),
+                );
+                return;
+            }
             let Some((key, stream, epoch, rank)) = parse_tile_request(request.uri()) else {
                 return responder.respond(reply(404, Vec::new(), None));
             };
@@ -941,6 +964,13 @@ pub fn run() {
             a11y::app::a11y_fix,
             a11y::app::a11y_preview,
             a11y::app::a11y_export_report,
+            prepress::app::prepress_separations,
+            prepress::app::prepress_view,
+            prepress::app::prepress_ink,
+            prepress::app::prepress_inspect,
+            prepress::app::prepress_convert,
+            prepress::app::prepress_boxes,
+            prepress::app::prepress_marks,
             preflight::app::preflight_check,
             preflight::app::preflight_claim,
             preflight::app::preflight_fix,
