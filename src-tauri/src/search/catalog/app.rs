@@ -62,15 +62,20 @@ pub fn forget_all(root: &std::path::Path, jobs: &Jobs, path: &std::path::Path) -
     for m in super::list(root) {
         let Some(_held) = jobs.hold(&m.id) else {
             // Written into the catalog's folder: a quit before it is free does not lose it (`replay_pending`).
-            // When it cannot be kept, `defer_forget` has wiped the catalog's stored text instead.
+            // When the list cannot be kept it marks the catalog for a wipe, done by whoever frees it (never here:
+            // the holder would write the old words back).
             if let Err(e) = super::defer_forget(&root.join(&m.id), path) {
-                eprintln!("inkwell catalog {}: could not keep the file to forget, its stored text was removed: {e}", m.id);
+                eprintln!("inkwell catalog {}: could not keep the file to forget: {e}", m.id);
             }
             continue;
         };
         match super::forget(&root.join(&m.id), path) {
             Ok(k) => n += k,
-            Err(e) => eprintln!("inkwell catalog {}: {e}", m.id),
+            Err(e) => {
+                // Tried again at the next hold (the line below already does once).
+                eprintln!("inkwell catalog {}: {e}", m.id);
+                let _ = super::defer_forget(&root.join(&m.id), path);
+            }
         }
         drop(_held);
         // What was saved while it was held (a build, another forget) is done now, not at some later build.
@@ -83,10 +88,18 @@ pub fn forget_all(root: &std::path::Path, jobs: &Jobs, path: &std::path::Path) -
 pub(super) fn forget_deferred(jobs: &Jobs, id: &str, dir: &std::path::Path) {
     // Held first: when it is not free the list is left as it is, for whoever frees it.
     let Some(_held) = jobs.hold(id) else { return };
-    let mine = super::pending(dir);
-    if mine.is_empty() {
-        return;
-    }
+    let mine = match super::pending(dir) {
+        // A forget that could not be kept (list unreadable, unwritable or past its bound): nothing says which
+        // file, so nothing stays. Done here, under the hold, after whatever else held the catalog is finished.
+        super::Waiting::Wipe => {
+            if let Err(e) = super::wipe_pending(dir) {
+                eprintln!("inkwell catalog {id}: {e}");
+            }
+            return;
+        }
+        super::Waiting::Paths(p) if p.is_empty() => return,
+        super::Waiting::Paths(p) => p,
+    };
     // Only what was forgotten comes off the list: a failure is tried again at the next hold.
     let done: Vec<PathBuf> = mine
         .into_iter()
@@ -108,7 +121,7 @@ pub(super) fn forget_deferred(jobs: &Jobs, id: &str, dir: &std::path::Path) {
 pub fn replay_pending(root: &std::path::Path, jobs: &Jobs) {
     for m in super::list(root) {
         let dir = root.join(&m.id);
-        if dir.join("forget-pending.json").is_file() {
+        if dir.join("forget-pending.json").exists() || dir.join("forget-wipe").exists() {
             forget_deferred(jobs, &m.id, &dir);
         }
     }

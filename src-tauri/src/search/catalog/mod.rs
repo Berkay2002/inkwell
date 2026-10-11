@@ -1025,15 +1025,24 @@ fn canon(p: &Path) -> PathBuf {
 
 /// Deletes every stored text and every index of the catalog in `dir`: what is left is a list entry that a build
 /// fills again from the files (a kept row whose blob is gone is read again). The way to fail closed when a file
-/// that must be forgotten cannot be named.
-pub fn wipe_stored(dir: &Path) {
-    let _ = std::fs::remove_dir_all(text_dir(dir));
-    let _ = std::fs::create_dir_all(text_dir(dir));
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+/// that must be forgotten cannot be named. The caller holds the catalog (a build would write old words back), and
+/// keeps what asked for the wipe when this fails.
+fn wipe_stored(dir: &Path) -> Result<()> {
+    let gone_ok = |r: std::io::Result<()>| match r {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+        _ => Ok(()),
+    };
+    gone_ok(std::fs::remove_dir_all(text_dir(dir)))?;
+    std::fs::create_dir_all(text_dir(dir)).map_err(io)?;
+    let mut result = Ok(());
+    for e in std::fs::read_dir(dir).map_err(io)?.flatten() {
         if e.file_name().to_string_lossy().starts_with("index-") {
-            let _ = std::fs::remove_file(e.path());
+            // Every index is tried; the first failure is the answer.
+            let r = gone_ok(std::fs::remove_file(e.path()));
+            result = result.and(r);
         }
     }
+    result
 }
 
 /// Takes the file at `path` out of the catalog in `dir`: its row, its stored text and its postings, as a new
@@ -1044,11 +1053,11 @@ pub fn forget(dir: &Path, path: &Path) -> Result<u32> {
     // Nothing here says which blob is whose (no readable entry or table), and the next build reads every file
     // again anyway: none is kept, and no index with words in it.
     let Ok(meta) = load_meta(dir) else {
-        wipe_stored(dir);
+        wipe_stored(dir)?;
         return Ok(0);
     };
     let Some(table) = (meta.generation > 0).then(|| load_table(dir, meta.generation)).flatten() else {
-        wipe_stored(dir);
+        wipe_stored(dir)?;
         return Ok(0);
     };
     let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
@@ -1114,21 +1123,31 @@ fn pending_path(dir: &Path) -> PathBuf {
 
 /// One writer at a time: the list is read, changed and written back.
 static PENDING: Mutex<()> = Mutex::new(());
-/// More than this and the catalog's stored text is wiped instead (it is rebuilt anyway): a path is never dropped.
+/// More than this and the catalog is marked for a wipe instead (it is rebuilt anyway): a path is never dropped.
 const MAX_PENDING: usize = 1000;
+/// The catalogs marked for a wipe whose marker file could not be written (it is lost with a quit).
+static WIPE_MEM: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-/// The paths waiting for catalog `dir`. A list that cannot be read cannot be trusted to be empty: the stored
-/// text of the catalog is wiped and the file removed, so nothing it named is left.
-pub fn pending(dir: &Path) -> Vec<PathBuf> {
+/// Exists while a wipe is asked for: a list that could not be kept, so nothing says which file must go.
+fn wipe_marker(dir: &Path) -> PathBuf {
+    dir.join("forget-wipe")
+}
+
+/// What waits for catalog `dir` when it is free.
+#[derive(Debug, PartialEq)]
+pub enum Waiting {
+    /// Everything stored goes (`wipe_pending`): the list was unreadable, unwritable or past its bound.
+    Wipe,
+    Paths(Vec<PathBuf>),
+}
+
+/// What waits for catalog `dir`. A list that cannot be read cannot be trusted to be empty: it asks for a wipe.
+pub fn pending(dir: &Path) -> Waiting {
     let _g = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-    match read_pending(dir) {
-        Some(list) => list,
-        None => {
-            wipe_stored(dir);
-            let _ = write_pending(dir, &[]);
-            Vec::new()
-        }
+    if wipe_marker(dir).exists() || WIPE_MEM.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|p| p == dir) {
+        return Waiting::Wipe;
     }
+    read_pending(dir).map_or(Waiting::Wipe, Waiting::Paths)
 }
 
 /// `None`: the file is there and cannot be read or is not a list. No file is an empty list.
@@ -1153,38 +1172,55 @@ fn write_pending(dir: &Path, list: &[PathBuf]) -> Result<()> {
     write_durable(&pending_path(dir), &serde_json::to_vec(&names).map_err(io)?)
 }
 
+/// Asks for a wipe of catalog `dir` the next time it is free. Never wipes itself: the catalog is held by a build
+/// that would write its old postings and text back. Falls back to memory when the marker cannot be written.
+fn mark_wipe(dir: &Path) -> Result<()> {
+    write_durable(&wipe_marker(dir), b"wipe").inspect_err(|_| {
+        WIPE_MEM.lock().unwrap_or_else(|e| e.into_inner()).push(dir.to_path_buf());
+    })
+}
+
 /// Adds `path` to the list of catalog `dir`. Fails closed: when the list is unreadable, would pass
-/// `MAX_PENDING`, or cannot be written, the catalog's stored text and indexes are wiped instead (and the list
-/// emptied), so no file waiting to be forgotten is left behind or forgotten about.
+/// `MAX_PENDING`, or cannot be written, the catalog is marked for a wipe instead (`Waiting::Wipe`), so no file
+/// waiting to be forgotten is dropped or forgotten about. Errs only when not even the marker could be kept.
 pub fn defer_forget(dir: &Path, path: &Path) -> Result<()> {
     defer_forget_max(dir, path, MAX_PENDING)
 }
 
 fn defer_forget_max(dir: &Path, path: &Path, max: usize) -> Result<()> {
     let _g = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(mut list) = read_pending(dir) else {
-        wipe_stored(dir);
-        return write_pending(dir, &[]);
-    };
+    let Some(mut list) = read_pending(dir) else { return mark_wipe(dir) };
     if !list.iter().any(|p| p == path) {
         list.push(path.to_path_buf());
     }
     if list.len() > max {
-        wipe_stored(dir);
-        return write_pending(dir, &[]);
+        return mark_wipe(dir);
     }
-    write_pending(dir, &list).inspect_err(|_| wipe_stored(dir))
+    write_pending(dir, &list).or_else(|_| mark_wipe(dir))
 }
 
 /// Takes `done` off the list (what was added meanwhile stays).
 pub fn settle_pending(dir: &Path, done: &[PathBuf]) -> Result<()> {
     let _g = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(mut list) = read_pending(dir) else {
-        wipe_stored(dir);
-        return write_pending(dir, &[]);
-    };
+    let Some(mut list) = read_pending(dir) else { return mark_wipe(dir) };
     list.retain(|p| !done.contains(p));
     write_pending(dir, &list)
+}
+
+/// Does the wipe asked for: all stored text and indexes of catalog `dir` go, then the list and the marker. The
+/// caller holds the catalog. When the wipe fails both stay, for the next hold.
+pub fn wipe_pending(dir: &Path) -> Result<()> {
+    let _g = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    wipe_stored(dir)?;
+    for p in [pending_path(dir), wipe_marker(dir)] {
+        let r = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+        match r {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io(e)),
+            _ => {}
+        }
+    }
+    WIPE_MEM.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| p != dir);
+    Ok(())
 }
 
 // ---- is it out of date -------------------------------------------------------------------------------------

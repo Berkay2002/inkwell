@@ -1029,7 +1029,7 @@ fn a_forget_waiting_for_a_busy_catalog_survives_a_restart() {
     let jobs = super::app::Jobs::default();
     jobs.guarded(&m.id, || {
         assert_eq!(super::app::forget_all(&root, &jobs, &p), 0);
-        assert_eq!(pending(&d), vec![p.clone()], "the path is on disk, in the catalog's folder");
+        assert_eq!(pending(&d), Waiting::Paths(vec![p.clone()]), "the path is on disk, in the catalog's folder");
         Ok(())
     })
     .unwrap();
@@ -1037,13 +1037,13 @@ fn a_forget_waiting_for_a_busy_catalog_survives_a_restart() {
     drop(jobs);
     let again = super::app::Jobs::default();
     super::app::replay_pending(&root, &again);
-    assert!(pending(&d).is_empty());
+    assert_eq!(pending(&d), Waiting::Paths(vec![]));
     assert_eq!(load_meta(&d).unwrap().files, 1);
     assert_eq!(flat(&catalog_search(&d, "quokka", SearchOpts::default())).0.len(), 0);
     // A failed forget stays on the list for the next hold (the entry here is not a catalog's).
     defer_forget(&d, &base.join("c.pdf")).unwrap();
     settle_pending(&d, &[]).unwrap();
-    assert_eq!(pending(&d).len(), 1);
+    assert_eq!(pending(&d), Waiting::Paths(vec![base.join("c.pdf")]));
     settle_pending(&d, &[base.join("c.pdf")]).unwrap();
     assert!(!pending_path(&d).exists());
 }
@@ -1052,17 +1052,25 @@ fn blobs(d: &Path) -> usize {
     std::fs::read_dir(text_dir(d)).unwrap().count()
 }
 
+fn marker(d: &Path) -> PathBuf {
+    d.join("forget-wipe")
+}
+
 #[test]
-fn a_full_pending_list_wipes_the_stored_text_instead_of_dropping_a_path() {
+fn a_full_pending_list_asks_for_a_wipe_instead_of_dropping_a_path() {
     let (_, folder, d) = built("pending-full");
     assert!(blobs(&d) > 20);
     defer_forget_max(&d, &folder.join("a.pdf"), 2).unwrap();
     defer_forget_max(&d, &folder.join("b.pdf"), 2).unwrap();
-    assert_eq!(pending(&d).len(), 2);
-    assert!(blobs(&d) > 20, "within the bound nothing is wiped");
+    assert!(matches!(pending(&d), Waiting::Paths(l) if l.len() == 2));
     defer_forget_max(&d, &folder.join("c.pdf"), 2).unwrap();
-    assert_eq!((blobs(&d), pending(&d).len()), (0, 0));
-    assert!(!index_path(&d, 1).exists());
+    // Not wiped here: the catalog is held by someone, who would write it back.
+    assert_eq!(pending(&d), Waiting::Wipe);
+    assert!(blobs(&d) > 20 && index_path(&d, 1).exists());
+    // Whoever frees the catalog does it.
+    wipe_pending(&d).unwrap();
+    assert_eq!((blobs(&d), pending(&d)), (0, Waiting::Paths(vec![])));
+    assert!(!index_path(&d, 1).exists() && !marker(&d).exists() && !pending_path(&d).exists());
     // A refresh reads every file again (the rows' text is gone) and the catalog answers.
     let s = build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
     assert!(s.extracted > 20 && s.kept == 0, "{s:?}");
@@ -1071,52 +1079,90 @@ fn a_full_pending_list_wipes_the_stored_text_instead_of_dropping_a_path() {
 
 #[test]
 fn an_unreadable_pending_list_is_not_taken_for_an_empty_one() {
-    // Read: wiped and removed, nothing to replay.
-    let (_, _, d) = built("pending-corrupt-read");
+    // Read: it asks for a wipe, and nothing is wiped by the read.
+    let (_, folder, d) = built("pending-corrupt");
     std::fs::write(pending_path(&d), b"{ nope").unwrap();
-    assert!(pending(&d).is_empty());
-    assert_eq!(blobs(&d), 0);
-    assert!(!pending_path(&d).exists());
-
-    // Added to: the earlier entries it held are not overwritten with one.
-    let (_, folder, d) = built("pending-corrupt-add");
-    std::fs::write(pending_path(&d), b"[1, 2").unwrap();
+    assert_eq!(pending(&d), Waiting::Wipe);
+    assert!(blobs(&d) > 20);
+    // Added to or settled: the earlier entries it held are not overwritten, the wipe is asked for.
     defer_forget(&d, &folder.join("a.pdf")).unwrap();
-    assert_eq!(blobs(&d), 0);
-    assert!(pending(&d).is_empty());
-
-    // Settled: the same.
-    let (_, _, d) = built("pending-corrupt-settle");
-    std::fs::write(pending_path(&d), b"nope").unwrap();
     settle_pending(&d, &[]).unwrap();
-    assert_eq!(blobs(&d), 0);
+    assert!(marker(&d).exists() && blobs(&d) > 20);
+    wipe_pending(&d).unwrap();
+    assert_eq!((blobs(&d), pending(&d)), (0, Waiting::Paths(vec![])));
+    assert!(!pending_path(&d).exists() && !marker(&d).exists());
 
     // A missing file is simply empty.
     let (_, _, d) = built("pending-missing");
-    assert!(pending(&d).is_empty());
+    assert_eq!(pending(&d), Waiting::Paths(vec![]));
     assert!(blobs(&d) > 20);
 }
 
 #[test]
-fn a_pending_list_that_cannot_be_written_wipes_the_stored_text_and_says_so() {
+fn a_pending_list_that_cannot_be_written_asks_for_a_wipe() {
+    // The list's name is taken by a folder: it can be neither read nor written.
     let (_, folder, d) = built("pending-unwritable");
-    // The list's name is taken by a folder: nothing can be written there.
     std::fs::create_dir_all(pending_path(&d)).unwrap();
-    assert!(defer_forget(&d, &folder.join("a.pdf")).is_err());
-    assert_eq!(blobs(&d), 0);
-    assert!(!index_path(&d, 1).exists());
+    defer_forget(&d, &folder.join("a.pdf")).unwrap();
+    assert_eq!(pending(&d), Waiting::Wipe);
+    assert!(blobs(&d) > 20);
+    wipe_pending(&d).unwrap();
+    assert_eq!((blobs(&d), pending(&d)), (0, Waiting::Paths(vec![])));
+}
 
-    // Not through a busy catalog's forget_all alone: that also leaves the list empty and the catalog wiped.
-    let (root, folder, d) = built("pending-unwritable-all");
-    std::fs::create_dir_all(pending_path(&d)).unwrap();
+#[cfg(unix)]
+#[test]
+fn a_wipe_that_cannot_be_asked_for_on_disk_is_kept_in_memory_and_one_that_fails_stays_asked_for() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_, folder, d) = built("pending-readonly");
+    let mode = |m| std::fs::set_permissions(&d, std::fs::Permissions::from_mode(m)).unwrap();
+    // Nothing can be written in the catalog's folder: the marker is kept in memory and the error is reported.
+    mode(0o555);
+    let r = defer_forget(&d, &folder.join("a.pdf"));
+    // The same folder cannot be wiped either: the wipe fails, and what asked for it stays.
+    let w = wipe_pending(&d);
+    mode(0o755);
+    assert!(r.is_err(), "not even the marker could be written");
+    assert!(w.is_err(), "a wipe that failed is not done");
+    assert!(index_path(&d, 1).exists());
+    assert_eq!(pending(&d), Waiting::Wipe, "still asked for");
+    wipe_pending(&d).unwrap();
+    assert_eq!((blobs(&d), pending(&d)), (0, Waiting::Paths(vec![])));
+
+    // A catalog with no readable entry that cannot be wiped is an error, not "0 rows dropped".
+    let (_, folder, d) = built("forget-wipe-fails");
+    std::fs::write(meta_path(&d), b"{ nope").unwrap();
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let f = forget(&d, &folder.join("a.pdf"));
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(f.is_err());
+}
+
+#[test]
+fn a_wipe_asked_for_while_a_build_holds_the_catalog_runs_after_the_build() {
+    let (root, folder, d) = built("pending-wipe-after-build");
     let id = load_meta(&d).unwrap().id;
     let jobs = super::app::Jobs::default();
+    // A file that changes, so the build in the middle writes a generation with the kept files' words in it.
+    write(&folder, "f00.pdf", plain(&[vec!["a changed file, quokka"]]));
     jobs.guarded(&id, || {
-        assert_eq!(super::app::forget_all(&root, &jobs, &folder.join("a.pdf")), 0);
+        std::fs::write(pending_path(&d), b"{ nope").unwrap();
+        assert_eq!(super::app::forget_all(&root, &jobs, &folder.join("f01.pdf")), 0);
+        assert!(blobs(&d) > 20 && index_path(&d, 1).exists(), "nothing is wiped under someone else's hold");
+        let s = build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
+        assert!(s.kept > 20, "{s:?}");
         Ok(())
     })
     .unwrap();
+    assert!(index_path(&d, 2).exists(), "the build wrote the old words back");
+    assert!(marker(&d).exists(), "and the wipe is still asked for");
+    super::app::forget_deferred(&jobs, &id, &d);
     assert_eq!(blobs(&d), 0);
+    assert!(!index_path(&d, 2).exists() && !marker(&d).exists() && !pending_path(&d).exists());
+    assert!(check(&d, &AtomicBool::new(false)).unwrap().unusable);
+    let s = build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert!(s.extracted > 20, "{s:?}");
+    assert!(!flat(&catalog_search(&d, "quokka", SearchOpts::default())).0.is_empty());
 }
 
 #[test]

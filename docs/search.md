@@ -72,9 +72,11 @@ format we control and version.
   path waits in `forget-pending.json` in the catalog's folder, so a quit does not lose it, and is replayed at startup,
   when the catalogs are listed, and at the next hold. If the postings cannot be rewritten, or the entry or table is
   unreadable, the stored text and the live index are deleted: the catalog reads "needs a rebuild" and keeps no words
-  of the file. The same happens when the waiting list is unreadable (a missing file is an empty list), cannot be
-  written, or would pass 1000 paths: a path is never dropped, the catalog's stored text is wiped instead and the next
-  build reads every file again. A Save as, and Redact's own save, that replace a listed file do the same.
+  of the file. The same is asked for (`forget-wipe` marker in the catalog's folder, memory if it cannot be written)
+  when the waiting list is unreadable (a missing file is an empty list), cannot be written, or would pass 1000 paths:
+  a path is never dropped. The wipe is not done by whoever finds this out, because the catalog is held by a build that
+  would write its words back: it runs under the hold of whoever frees the catalog, after the build, and the marker
+  and list stay while it fails. The next build reads every file again. A Save as, and Redact's own save, that replace a listed file do the same.
 - Embedded index: `/Root/PieceInfo/Inkwell` (`/Private` stream) holds the records of that file. A build reads it only
   if the trailer `/ID`, the page count, the version and a fingerprint of page content and annotations all match,
   so a file changed by another tool is read normally. Embedding and removing are one undo step each
