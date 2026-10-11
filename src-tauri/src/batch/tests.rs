@@ -1336,6 +1336,23 @@ fn a_file_whose_form_cannot_be_scanned_is_left_alone_as_possibly_signed() {
 }
 
 #[test]
+fn a_file_whose_form_is_too_large_to_check_for_a_certification_is_left_alone_as_possibly_signed() {
+    // No SigFlags and no signature at all, but 20 001 entries in /Fields: past what the certification walk reads, so
+    // the answer is "could not check", not "not signed".
+    let d = dir("certification-unchecked");
+    let objs = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{}] >> >>", "3 0 R ".repeat(20_001)),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /FT /Tx /T (t) >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>".to_string(),
+    ];
+    let f = put(&d, "wide.pdf", &assemble(&objs, ""));
+    let r = go(&action("n", vec![footer("<<1>>")]), &[f], None);
+    assert_eq!(r.files[0].status, Status::Skipped, "{:?}", r.files[0].reason);
+    assert!(r.files[0].reason.as_deref().unwrap().starts_with("could not check whether the file is signed:"), "{:?}", r.files[0].reason);
+}
+
+#[test]
 fn an_imported_name_stays_within_the_limit() {
     let d = dir("long-name");
     let s = Store::new(d.join("actions"));

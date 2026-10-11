@@ -570,7 +570,7 @@ pub fn list(doc: &PdfDocument) -> Result<DocJs> {
         .filter(|(_, (n, _))| *n > 0)
         .map(|(c, (count, places))| Capability { key: c.key.into(), label: c.label.into(), count, places })
         .collect();
-    let (signed, certified) = (crate::outline::signed(doc), crate::outline::certified(doc)?.is_some());
+    let (signed, certified) = (crate::outline::signed(doc), crate::outline::certified(doc).map_or(true, |c| c.is_some()));
     Ok(DocJs { named, doc_actions, page_actions, counts: sc.counts, capabilities, incomplete: sc.incomplete || sc.budget.cut, signed, certified })
 }
 
