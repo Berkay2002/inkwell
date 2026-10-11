@@ -8,7 +8,7 @@ use mupdf::pdf::{AnnotationFlags, PdfDocument, Permission};
 use mupdf::{Colorspace, Device, DisplayList, IRect, Matrix, Pixmap, Rect};
 use serde::{Deserialize, Serialize};
 
-use super::layout::Sheet;
+use super::layout::{Label, Sheet, LABEL_PT};
 use crate::engine::{DocSource, Engine, DocId};
 
 /// Acrobat's Comments & Forms choices (Document and Stamps is left out: stamps are markups here).
@@ -32,6 +32,8 @@ pub enum RenderError {
     BadPassword,
     #[error("this document does not allow printing")]
     NotPermitted,
+    #[error("this document does not allow copying. Open it with its permissions password first.")]
+    NoCopy,
     #[error("{0}")]
     Mupdf(#[from] mupdf::Error),
     #[error("{0}")]
@@ -79,14 +81,7 @@ impl Source {
             let page = self.doc.load_pdf_page(index as i32)?;
             let bounds = page.bounds()?;
             if self.content == Content::DocumentAndMarkups {
-                // Annotations print only with their Print flag; MuPDF's view-time drawing would show
-                // all of them. The copy is private, so hiding them here changes nothing the user saves.
-                for mut a in page.annotations() {
-                    let f = a.flags()?;
-                    if !f.contains(AnnotationFlags::IS_PRINT) && !f.contains(AnnotationFlags::IS_HIDDEN) {
-                        a.set_flags(f | AnnotationFlags::IS_HIDDEN)?;
-                    }
-                }
+                hide_unprintable(&page)?;
             }
             let mut list = DisplayList::new(bounds)?;
             {
@@ -105,10 +100,46 @@ impl Source {
         Ok(&self.pages[&index])
     }
 
+    /// The private copy with what each page prints as drawn into its own content, for the PDF
+    /// writer: unprintable markups hidden, then annotations (markups mode) and form fields baked in
+    /// by MuPDF, which synthesises missing appearances and keeps the graphics state balanced. Forms
+    /// only drops the page content first.
+    pub(super) fn export_doc(&mut self, pages: &[u32]) -> Result<&PdfDocument, RenderError> {
+        // Vector output makes text and images copyable, which a printer never gave anyone.
+        if !crate::protect::Rights::from_p(self.doc.permissions().bits() as i32).may_extract() {
+            return Err(RenderError::NoCopy);
+        }
+        for &index in pages {
+            let page = self.doc.load_pdf_page(index as i32)?;
+            match self.content {
+                Content::DocumentAndMarkups => hide_unprintable(&page)?,
+                Content::FormFieldsOnly => {
+                    let empty = self.doc.add_stream(&mupdf::Buffer::from_bytes(b"")?, None, false)?;
+                    page.object().dict_put("Contents", empty)?;
+                }
+                Content::Document => {}
+            }
+        }
+        self.doc.bake(self.content == Content::DocumentAndMarkups, true)?;
+        Ok(&self.doc)
+    }
+
     /// Forgets the display lists of every page not in `keep` (a long job holds one sheet's pages).
     pub fn retain(&mut self, keep: &[u32]) {
         self.pages.retain(|p, _| keep.contains(p));
     }
+}
+
+/// Annotations print only with their Print flag; MuPDF's view-time drawing would show all of them.
+/// The copy is private, so hiding them here changes nothing the user saves.
+fn hide_unprintable(page: &mupdf::pdf::PdfPage) -> Result<(), RenderError> {
+    for mut a in page.annotations() {
+        let f = a.flags()?;
+        if !f.contains(AnnotationFlags::IS_PRINT) && !f.contains(AnnotationFlags::IS_HIDDEN) {
+            a.set_flags(f | AnnotationFlags::IS_HIDDEN)?;
+        }
+    }
+    Ok(())
 }
 
 /// The pixel rectangle `[x0, y0, x1, y1]` (points) covers at `scale` pixels per point.
@@ -125,7 +156,25 @@ pub fn sheet_px(sheet: &Sheet, scale: f64) -> (i32, i32) {
     ((sheet.w * scale).ceil() as i32, (sheet.h * scale).ceil() as i32)
 }
 
+/// A cut mark (an axis-aligned hairline) as pixels: at least one device pixel thick.
+fn line_px(l: [f64; 4], scale: f64) -> IRect {
+    let w = ((0.5 * scale).round() as i32).max(1);
+    let r = px(l, scale);
+    if l[0] == l[2] {
+        IRect { x1: r.x0 + w, ..r }
+    } else {
+        IRect { y1: r.y0 + w, ..r }
+    }
+}
+
+/// Where a label's text can land, with room for the font's width and descenders.
+fn label_px(l: &Label, scale: f64) -> IRect {
+    let w = l.text.len() as f64 * LABEL_PT * 0.6;
+    px([l.x, l.y - LABEL_PT, l.x + w, l.y + LABEL_PT * 0.3], scale)
+}
+
 /// Does anything of `sheet` land in `band` (pixel rows `y0..y1`)? An empty band stays paper-white.
+/// Cut marks and labels sit in the margin, outside every clip, so they count on their own.
 pub fn band_has_ink(sheet: &Sheet, scale: f64, y0: i32, y1: i32) -> bool {
     sheet.placed.iter().any(|p| {
         let c = px(p.clip, scale);
@@ -133,6 +182,12 @@ pub fn band_has_ink(sheet: &Sheet, scale: f64, y0: i32, y1: i32) -> bool {
     }) || sheet.borders.iter().any(|b| {
         let c = px(*b, scale);
         c.y0 - 1 < y1 && c.y1 + 1 > y0
+    }) || sheet.lines.iter().any(|l| {
+        let c = line_px(*l, scale);
+        c.y0 < y1 && c.y1 > y0
+    }) || sheet.labels.iter().any(|l| {
+        let c = label_px(l, scale);
+        c.y0 < y1 && c.y1 > y0
     })
 }
 
@@ -172,6 +227,24 @@ pub fn render(src: &mut Source, sheet: &Sheet, scale: f64, band: IRect, gray: bo
                 pix.set_rect(c, line(gray))?;
             }
         }
+    }
+    for l in &sheet.lines {
+        let c = meet(line_px(*l, scale), band);
+        if c.x0 < c.x1 && c.y0 < c.y1 {
+            pix.set_rect(c, line(gray))?;
+        }
+    }
+    // Labels are text: drawn from the same page content the PDF writer emits.
+    let in_band: Vec<&Label> = sheet.labels.iter().filter(|l| {
+        let c = label_px(l, scale);
+        c.y0 < band.y1 && c.y1 > band.y0 && c.x0 < band.x1 && c.x1 > band.x0
+    }).collect();
+    if !in_band.is_empty() {
+        let (doc, page) = super::pdf::labels_page(sheet.w, sheet.h, &in_band)?;
+        let ctm = Matrix { a: scale as f32, b: 0.0, c: 0.0, d: scale as f32, e: 0.0, f: 0.0 };
+        let dev = Device::from_pixmap_with_clip(&pix, band)?;
+        page.run_contents(&dev, &ctm)?;
+        drop(doc);
     }
     Ok(pix)
 }

@@ -28,6 +28,7 @@ mod text;
 mod tests;
 
 pub use apply::{Info, KindInfo, add, bates_files, info, remove};
+pub(crate) use apply::display_form;
 
 /// The kinds of marks; each has its own Update and Remove, as in Acrobat's menus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

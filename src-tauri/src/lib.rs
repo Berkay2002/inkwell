@@ -995,6 +995,7 @@ pub fn run() {
             print::app::print_plan,
             print::app::print_preview,
             print::app::print_start,
+            print::app::print_save_pdf,
             recents::stat_files,
             recents::recents_load,
             recents::recents_save,
