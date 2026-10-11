@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appIsDark, naturalRects, pagesAreDark, parsePageDark, togglePageDark } from "./pageDark";
+import { appIsDark, displayRect, naturalRects, pagesAreDark, parsePageDark, togglePageDark } from "./pageDark";
 
 describe("dark pages setting", () => {
   it("reads what was stored, anything else is follow", () => {
@@ -104,5 +104,30 @@ describe("photographs stay natural", () => {
     const rects = naturalRects(many, page);
     expect(rects).toHaveLength(24);
     expect(Math.min(...rects.map(area))).toBeGreaterThanOrEqual(900);
+  });
+});
+
+describe("where a picture sits on the rotated page", () => {
+  const raw: [number, number] = [600, 800];
+  const r: [number, number, number, number] = [100, 50, 300, 200];
+  it("is the same box when the page is not turned", () => {
+    expect(displayRect(r, raw, 0)).toEqual(r);
+  });
+  it("follows the page's quarter turns (clockwise)", () => {
+    // a quarter turn: the top edge becomes the right edge; the displayed page is 800 wide
+    expect(displayRect(r, raw, 1)).toEqual([600, 100, 750, 300]);
+    expect(displayRect(r, raw, 2)).toEqual([300, 600, 500, 750]);
+    expect(displayRect(r, raw, 3)).toEqual([50, 300, 200, 500]);
+  });
+  it("keeps the box's area and stays inside the displayed page", () => {
+    for (const rot of [1, 2, 3] as const) {
+      const [x0, y0, x1, y1] = displayRect(r, raw, rot);
+      expect((x1 - x0) * (y1 - y0)).toBe(200 * 150);
+      const [dw, dh] = rot === 2 ? raw : [raw[1], raw[0]];
+      expect(x0).toBeGreaterThanOrEqual(0);
+      expect(y0).toBeGreaterThanOrEqual(0);
+      expect(x1).toBeLessThanOrEqual(dw);
+      expect(y1).toBeLessThanOrEqual(dh);
+    }
   });
 });

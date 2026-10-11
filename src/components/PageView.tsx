@@ -4,12 +4,13 @@ import type { Shown } from "../lib/a11y";
 import { useAi } from "../lib/aiStore";
 import { type Rot, type Size, type TileRef, pageSpaceTransform, tileKeyStr } from "../lib/layout";
 import { type Mark, useRedact } from "../lib/redact";
-import { naturalRects } from "../lib/pageDark";
+import { displayRect, naturalRects } from "../lib/pageDark";
 import { cached } from "../lib/tiles";
 import { usePagesDark } from "../lib/usePagesDark";
 import type { Rect4 } from "../store";
 import { AnnotLayer } from "./comments/AnnotLayer";
 import { MarkPreview } from "./MarkPreview";
+import { NaturalImage } from "./NaturalImage";
 import { TextEditLayer } from "./edit/TextEditLayer";
 import { FormLayer } from "./forms/FormLayer";
 import { TileCanvas } from "./TileCanvas";
@@ -62,6 +63,11 @@ export const PageView = memo(function PageView(p: Props) {
   const lines = usePageText(docId, p.rev, page, p.wantText);
   // Dark pages: the pictures on the page stay in their own colours.
   const natural = useNaturalImages(docId, p.rev, page, rawSize);
+  // ... as boxes on the displayed page in CSS px, the space the tiles are drawn in
+  const naturalBoxes = useMemo(
+    () => natural.map((r) => displayRect(r, rawSize, rot).map((v) => v * zoom) as Rect4),
+    [natural, rawSize, rot, zoom],
+  );
   // The assistant's last clicked citation, highlighted on its page.
   const mark = useAi((s) => (s.mark && s.mark.doc === docId && s.mark.page === page ? s.mark : null));
 
@@ -85,14 +91,14 @@ export const PageView = memo(function PageView(p: Props) {
       {tiles.map((t) => (
         <TileCanvas key={tileKeyStr(docId, t)} docId={docId} tile={t} size={size} zoom={zoom} onDrawn={onDrawn} />
       ))}
+      {naturalBoxes.map((r, i) => (
+        <NaturalImage key={`n${i}`} rect={r} />
+      ))}
       <div
         ref={space}
         className="pagespace"
         style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom) }}
       >
-        {natural.map((r, i) => (
-          <div key={`n${i}`} className="nat-img" style={rectStyle(r)} />
-        ))}
         <MarkPreview docId={docId} page={page} size={rawSize} />
         {p.hits.map((r, i) => (
           <div key={i} className={r === p.currentHit ? "hit current" : "hit"} style={rectStyle(r)} />

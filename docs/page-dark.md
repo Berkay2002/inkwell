@@ -36,10 +36,13 @@ Save, the assistant's page images, OCR, compare and the redaction result always 
 
 ## Keep photos natural
 
-`PageView` asks `image_blocks` (the image-edit command) for the page's pictures while the pages are dark and lays an
-empty `.nat-img` box over each one. The box has `backdrop-filter: contrast(1.282) hue-rotate(180deg) invert(1)`, the
-page filter run backwards: it undoes the filtered page behind it, so the picture comes back in its own colours. It must
-stay the exact inverse of the page filter (`1.282 = 1 / 0.78`). Cached per document revision
+`PageView` asks `image_blocks` (the image-edit command) for the page's pictures while the pages are dark and lays a
+`NaturalImage` canvas (`.nat-img`) over each one. The CSS filter only changes how the tile canvases are shown, not
+their pixels, so the box copies its region straight out of the tiles (preview, previous scale, current tiles, in that
+order) and covers the filtered ones: the picture is the rendered one, pixel for pixel, with no second filter run over
+an already clamped 8-bit page (an earlier version inverted the filter with a `backdrop-filter`, which turned pure red
+into about 67/24/24 and banded). Tiles tell the boxes to repaint with a bubbling `tiledrawn` event; `displayRect`
+turns a page-space box into the rotated page's space. Cached per document revision
 (`cached("${doc}:${rev}:${page}:img")`, cleared with the document).
 
 Rules in `naturalRects` (`pageDark.ts`, tested):
@@ -56,8 +59,7 @@ Limits, on purpose:
 - `image_blocks` reads the page's own content only: a picture drawn inside a form XObject is not found, so it is
   inverted with the page.
 - Thumbnails and the Organize grid (and its drag ghost) are inverted whole: no photo restoration at that size.
-- The round trip is not exact for very saturated colours (the filter clamps), so a photo can differ by a few levels.
-  Plain colour fills (a red swatch) are filtered with the page: only pictures are restored.
+- Plain colour fills (a red swatch) are filtered with the page: only pictures are restored.
 
 ## Checked
 
@@ -67,6 +69,11 @@ added blue link line and colour swatches, plus a copy of `form-source.pdf`. Scre
 - `pages-normal-light-app.png`, `pages-dark-light-app.png`, `pages-dark-dark-app.png`, `pages-normal-dark-app.png`
 - `search-dark-pages.png`, `selection-dark-pages.png`, `comments-dark-pages.png` (+ `-light-app`),
   `form-dark-pages.png`, `thumbnails-dark-pages.png`, `organize-dark-pages.png`
+
+`photo-natural-dark-pages.png` is a picture of six flat colours on a dark page (`scripts/make-rgb-photo.mjs`); the
+script samples each block on normal and dark pages and asserts they match within 3 levels, also on a page turned a
+quarter. `pagebox-*-light/dark.png` show the page-number box at 1 / 1, 12 / 91 and 1234 / 1500
+(`scripts/make-blank-pages.mjs`); the box is `pageBoxCh(pageCount)` wide in `ch` (digits + 1, 3 to 6).
 
 The script asserts: the toggle works in the light and the dark app, Follow tracks the theme, the setting survives a
 reload, the page margin is white / dark grey and above the app's canvas, the app chrome pixels are unchanged, the photo's mean colour is the same with

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { openA11y } from "../lib/a11y";
 import { useConvert } from "../lib/convertStore";
@@ -40,14 +40,20 @@ export function ToolsMenu({ doc }: { doc: DocState }) {
   const field = useRef<HTMLInputElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const uid = useId();
 
   const items = useMemo(() => toolItems(doc), [doc.id, doc.name]);
   const sections = useMemo(() => filterTools(items, query), [items, query]);
+  const flat = useMemo(() => sections.flatMap((s) => s.items), [sections]);
+  const current = flat.length > 0 ? flat[Math.min(active, flat.length - 1)] : null;
+  const optionId = (it: ToolItem) => `${uid}-opt-${it.id}`;
   const open = pos != null;
 
   const close = (refocus = false) => {
     setPos(null);
     setQuery("");
+    setActive(0);
     if (refocus) btn.current?.focus();
   };
 
@@ -90,24 +96,26 @@ export function ToolsMenu({ doc }: { doc: DocState }) {
     it.onSelect();
   };
 
-  const rows = () => [...(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
+  // The box keeps focus; the arrows move the highlighted option (aria-activedescendant), Enter runs it.
   const onKey = (e: React.KeyboardEvent) => {
-    const all = rows();
-    const i = all.indexOf(document.activeElement as HTMLElement);
+    const n = flat.length;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      if (all.length === 0) return;
-      if (i < 0) all[e.key === "ArrowDown" ? 0 : all.length - 1].focus();
-      else if (e.key === "ArrowUp" && i === 0) field.current?.focus();
-      else all[(i + (e.key === "ArrowDown" ? 1 : -1) + all.length) % all.length].focus();
-    } else if (e.key === "Enter" && document.activeElement === field.current) {
+      if (n > 0) setActive((i) => (Math.min(i, n - 1) + (e.key === "ArrowDown" ? 1 : -1) + n) % n);
+    } else if (e.key === "Enter") {
       e.preventDefault();
-      all[0]?.click();
-    } else if (i >= 0 && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      // typing while a row has focus goes on in the filter box
-      field.current?.focus();
+      if (current) run(current);
+    } else if (e.key === "Tab") {
+      // leave the menu with Tab: focus goes back to the button, then moves on from there
+      close(true);
     }
   };
+
+  // keep the highlighted option in view
+  useEffect(() => {
+    if (open && current) document.getElementById(optionId(current))?.scrollIntoView({ block: "nearest" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, current?.id]);
 
   return (
     <>
@@ -116,7 +124,7 @@ export function ToolsMenu({ doc }: { doc: DocState }) {
         className="ax-toggle tools-btn"
         title="Tools"
         aria-label="Tools"
-        aria-haspopup="menu"
+        aria-haspopup="listbox"
         aria-expanded={open}
         onClick={(e) => {
           e.stopPropagation();
@@ -129,27 +137,65 @@ export function ToolsMenu({ doc }: { doc: DocState }) {
       </button>
       {pos &&
         createPortal(
-          <div ref={menu} className="ink-menu tools-menu" role="menu" style={pos} onClick={(e) => e.stopPropagation()} onKeyDown={onKey}>
+          <div
+            ref={menu}
+            className="ink-menu tools-menu"
+            style={pos}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={(e) => {
+              // focus left the menu (not to the Tools button, whose own click toggles): close it
+              const to = e.relatedTarget as Node | null;
+              if (!menu.current?.contains(to) && to !== btn.current) close();
+            }}
+          >
             <input
               ref={field}
               className="tools-filter"
+              role="combobox"
+              aria-expanded
+              aria-controls={`${uid}-list`}
+              aria-autocomplete="list"
+              aria-activedescendant={current ? optionId(current) : undefined}
               value={query}
               placeholder="Find a tool"
               aria-label="Find a tool"
               spellCheck={false}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setActive(0);
+              }}
+              onKeyDown={onKey}
             />
-            {sections.length === 0 && <div className="tools-none">No tool matches “{query.trim()}”</div>}
-            {sections.map((s) => (
-              <div key={s.id} role="group" aria-label={s.title}>
-                <div className="tools-head">{s.title}</div>
-                {s.items.map((it) => (
-                  <button key={it.id} role="menuitem" onClick={() => run(it)}>
-                    <span className="grow">{it.label}</span>
-                  </button>
-                ))}
+            {sections.length === 0 && (
+              <div className="tools-none" role="status">
+                No tool matches “{query.trim()}”
               </div>
-            ))}
+            )}
+            <div id={`${uid}-list`} role="listbox" aria-label="Tools">
+              {sections.map((s) => (
+                <div key={s.id} role="group" aria-labelledby={`${uid}-head-${s.id}`}>
+                  <div className="tools-head" id={`${uid}-head-${s.id}`}>
+                    {s.title}
+                  </div>
+                  {s.items.map((it) => (
+                    <button
+                      key={it.id}
+                      id={optionId(it)}
+                      role="option"
+                      tabIndex={-1}
+                      aria-selected={it === current}
+                      className={it === current ? "active" : undefined}
+                      // keep focus in the box while pointing at a row
+                      onMouseDown={(e) => e.preventDefault()}
+                      onMouseMove={() => setActive(flat.indexOf(it))}
+                      onClick={() => run(it)}
+                    >
+                      <span className="grow">{it.label}</span>
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
           </div>,
           document.body,
         )}

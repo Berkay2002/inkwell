@@ -11,11 +11,13 @@ a text button among the icon buttons on the right.
   a header of its own after the listed ones, so a worker can add a group without touching the menu code.
 - **Filter:** the box at the top has focus when the menu opens. Every word typed must appear in an item's label,
   keywords or group title (`filterTools`, covered by `toolsMenu.test.ts`); empty groups lose their header.
-- **Keyboard:** Down/Up move through the items (Up from the first goes back to the box), Enter in the box runs the
-  first match, typing while an item has focus goes on in the box, Escape closes and returns focus to the button.
-- **Hooks kept:** the button is `button.ax-toggle.tools-btn[aria-label="Tools"]`, the popup is `.ink-menu.tools-menu`
-  and every item is a `[role="menuitem"]` whose text is its label, so the shot scripts that click Tools → item still
-  work.
+- **Keyboard and ARIA:** the filter box is a combobox (`aria-controls` → a `role="listbox"` of grouped `role="option"`
+  rows, `aria-activedescendant` on the highlighted one) and keeps focus. Down/Up move the highlight (wrapping), Enter
+  runs it (the first match by default), Escape closes and returns focus to the button, Tab closes and moves on from
+  the button, and focus leaving the popup closes it.
+- **Hooks:** the button is `button.ax-toggle.tools-btn[aria-label="Tools"]`, the popup is `.ink-menu.tools-menu` and
+  every item is a `button[role="option"]` whose text is its label (they were `role="menuitem"`; the shot scripts that
+  click Tools → item match both).
 - **Organize:** choosing an item leaves Organize first (the tools' panels live in the reader), as the right-hand panel
   toggles do.
 

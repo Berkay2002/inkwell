@@ -1,5 +1,5 @@
 import type { Rect4 } from "../store";
-import type { Size } from "./layout";
+import type { Rot, Size } from "./layout";
 
 /** Dark pages: show the page image itself dark (a display filter, the file is never changed). */
 export type PageDark = "follow" | "on" | "off";
@@ -81,4 +81,17 @@ export function naturalRects(images: PageImage[], page: Size): Rect4[] {
   const total = out.reduce((s, r) => s + area(r), 0);
   if (pageArea > 0 && total >= PAGE_SHARE * pageArea) return [];
   return out.length > MAX_BOXES ? out.sort((a, b) => area(b) - area(a)).slice(0, MAX_BOXES) : out;
+}
+
+/**
+ * A box in page space (the unrotated page, y down) as it sits on the displayed, rotated page: the space the
+ * tile canvases are drawn in. Mirrors `pageSpaceTransform`.
+ */
+export function displayRect(r: Rect4, raw: Size, rot: Rot): Rect4 {
+  const [w, h] = raw;
+  const [x0, y0, x1, y1] = r;
+  if (rot === 1) return [h - y1, x0, h - y0, x1];
+  if (rot === 2) return [w - x1, h - y1, w - x0, h - y0];
+  if (rot === 3) return [y0, w - x1, y1, w - x0];
+  return r;
 }

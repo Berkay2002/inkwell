@@ -242,12 +242,15 @@ select {
 .pagebox {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 .pagebox input {
-  width: 48px;
+  /* the width is set inline in ch from the page count (pageBoxCh): a compact box like "1 / 91" */
+  width: 3ch;
   height: 28px;
+  padding: 0 2px;
   text-align: center;
+  font-variant-numeric: tabular-nums;
   background: var(--surface-2);
   border: 1px solid transparent;
   border-radius: 6px;
@@ -452,13 +455,12 @@ select {
 :root[data-pages="dark"] .org-page {
   box-shadow: 0 0 0 1px rgb(255 255 255 / 0.16);
 }
-/* A photo inside a dark page: the backdrop is the already filtered page, so the filter chain run backwards
-   (widen the range, turn the hue, invert) brings the original colours back. Keep it the exact inverse
-   of the filter above: contrast(1 / 0.78). The boxes never overlap (naturalRects). */
+/* A photo inside a dark page: a canvas laid over the filtered tiles that holds the same region copied from the
+   untouched tile pixels (NaturalImage), so the photo's colours are exactly the rendered ones. It carries no
+   filter itself. The boxes never overlap (naturalRects). */
 .nat-img {
   position: absolute;
   pointer-events: none;
-  backdrop-filter: contrast(1.282) hue-rotate(180deg) invert(1);
 }
 /* multiply is invisible on black: lay translucent colour over the page instead */
 :root[data-pages="dark"] .hit {
@@ -1561,8 +1563,11 @@ select {
   text-transform: uppercase;
   color: var(--text-2);
 }
-.tools-menu button[role="menuitem"] {
+.tools-menu button[role="option"] {
   padding-left: 10px;
+}
+.tools-menu button[role="option"].active {
+  background: var(--surface-2);
 }
 .tools-none {
   padding: 12px 10px;

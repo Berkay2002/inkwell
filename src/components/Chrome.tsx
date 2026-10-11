@@ -4,6 +4,7 @@ import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { useProtect } from "../lib/protectStore";
 import { pageOfLabel, useSheets } from "../lib/organizePlus";
+import { pageBoxCh } from "../lib/pageBox";
 import { type PageDark, togglePageDark } from "../lib/pageDark";
 import { usePagesDark, useSystemDark } from "../lib/usePagesDark";
 import { type DocState, pageLabel, type Theme, useStore } from "../store";
@@ -245,7 +246,7 @@ function PageBox({ doc }: { doc: DocState }) {
     <div className="pagebox">
       <input
         id="page-input"
-        style={labelled ? { width: 68 } : undefined}
+        style={{ width: `${pageBoxCh(doc.pageCount, labelled)}ch` }}
         value={text}
         inputMode="numeric"
         onFocus={() => (editing.current = true)}

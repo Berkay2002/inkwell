@@ -7,7 +7,9 @@
 //   vite --port 1433 --strictPort            (any free port; the debug exe is built for 1420, see PAGE_DARK_VITE below)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9247'
-//   inkwell.exe "$d\in\dark-sample.pdf" "$d\in\form-source.pdf"
+//   node scripts/make-rgb-photo.mjs $d\in\rgb-photo.pdf         (six flat colours for the exact-colour check)
+//   foreach ($n in 1,91,1500) { node scripts/make-blank-pages.mjs $d\in\pages-$n.pdf $n }   (page-number box sizes)
+//   inkwell.exe "$d\in\dark-sample.pdf" "$d\in\form-source.pdf" "$d\in\rgb-photo.pdf" "$d\in\pages-1.pdf" "$d\in\pages-91.pdf" "$d\in\pages-1500.pdf"
 //   node scripts/page-dark-shots.mjs docs/screens/page-dark 9247 1433
 // When another dev server already holds 1420 the page is redirected to ours with Fetch.continueRequest (same origin,
 // so the Tauri IPC keeps working): pass our vite port as the third argument.
@@ -205,7 +207,7 @@ const inner = { x: nat.x + nat.w * 0.1, y: nat.y + nat.h * 0.1, w: nat.w * 0.8, 
 const photoNormal = mean(normal, inner);
 const photoDark = mean(dark, inner);
 report.photo = { photoNormal, photoDark };
-check("the photo keeps its own colours", dist(photoNormal, photoDark) <= 28, { photoNormal, photoDark });
+check("the photo keeps its own colours", dist(photoNormal, photoDark) <= 8, { photoNormal, photoDark });
 check("the file is untouched", (await ev(`${S}.getState().docs[${sample.id}].rev`)) === rev0 && !(await ev(`${S}.getState().docs[${sample.id}].dirty`)), null);
 const filtered = await ev(`[...document.querySelectorAll("*")].filter((e) => getComputedStyle(e).filter !== "none").map((e) => e.className?.baseVal ?? e.className)`);
 report.filtered = [...new Set(filtered)];
@@ -263,7 +265,7 @@ report.toolsPlacement = before;
 check("Tools sits right after Read | Edit | Organize, not in the right-hand cluster", before.tools === before.pill + 1 && !before.rightTools, before);
 await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
 await until(`document.querySelector(".tools-menu .tools-filter")`, "the Tools menu");
-const menu1 = await ev(`({ heads: [...document.querySelectorAll(".tools-head")].map((e) => e.textContent), items: [...document.querySelectorAll('.tools-menu [role="menuitem"]')].map((e) => e.textContent.trim()), focus: document.activeElement.className })`);
+const menu1 = await ev(`({ heads: [...document.querySelectorAll(".tools-head")].map((e) => e.textContent), items: [...document.querySelectorAll('.tools-menu [role="option"]')].map((e) => e.textContent.trim()), focus: document.activeElement.className })`);
 report.toolsMenu = menu1;
 const want = ["Compress file…", "Recognize text…", "Header & footer…", "Watermark…", "Background…", "Bates numbering…", "Protect with a password…", "Security…", "Compare files…", "Check accessibility…", "Export…", "Create PDF…"];
 check("every Tools item is still there", want.every((w) => menu1.items.includes(w)), menu1.items);
@@ -274,22 +276,38 @@ await shot("tools-menu-light.png", 300);
 // typing narrows the list
 await ev(`(() => { const i = document.querySelector(".tools-filter"); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(i, "mark"); i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
 await sleep(250);
-const narrowed = await ev(`({ heads: [...document.querySelectorAll(".tools-head")].map((e) => e.textContent), items: [...document.querySelectorAll('.tools-menu [role="menuitem"]')].map((e) => e.textContent.trim()) })`);
+const narrowed = await ev(`({ heads: [...document.querySelectorAll(".tools-head")].map((e) => e.textContent), items: [...document.querySelectorAll('.tools-menu [role="option"]')].map((e) => e.textContent.trim()) })`);
 report.toolsFiltered = narrowed;
 check("typing 'mark' leaves the page marks", narrowed.heads.length === 1 && narrowed.heads[0] === "Page marks" && narrowed.items.length === 4, narrowed);
-// keyboard: down arrow moves into the list, up arrow back to the filter, escape closes and returns focus
+// keyboard: focus stays in the box (combobox + listbox); the arrows move the highlighted option, Escape closes
+const sel0 = await ev(`(() => { const i = document.querySelector(".tools-filter"); const o = document.getElementById(i.getAttribute("aria-activedescendant")); return { role: i.getAttribute("role"), expanded: i.getAttribute("aria-expanded"), list: document.getElementById(i.getAttribute("aria-controls"))?.getAttribute("role"), text: o?.textContent.trim(), selected: o?.getAttribute("aria-selected") } })()`);
+report.toolsCombobox = sel0;
+check("the filter is a combobox on a listbox, first match highlighted", sel0.role === "combobox" && sel0.expanded === "true" && sel0.list === "listbox" && sel0.selected === "true" && sel0.text === "Header & footer…", sel0);
 await ev(`document.querySelector(".tools-filter").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }))`);
-const onRow = await ev(`document.activeElement.getAttribute("role")`);
-check("arrow down moves focus into the list", onRow === "menuitem", onRow);
-await ev(`document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }))`);
-check("arrow up from the first row goes back to the filter", await ev(`document.activeElement.classList.contains("tools-filter")`), null);
+const sel1 = await ev(`(() => { const i = document.querySelector(".tools-filter"); return { text: document.getElementById(i.getAttribute("aria-activedescendant"))?.textContent.trim(), focus: document.activeElement === i } })()`);
+check("arrow down moves the highlight, focus stays in the box", sel1.text === "Watermark…" && sel1.focus, sel1);
+await ev(`document.querySelector(".tools-filter").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }))`);
+check("arrow up moves it back", (await ev(`(() => { const i = document.querySelector(".tools-filter"); return document.getElementById(i.getAttribute("aria-activedescendant"))?.textContent.trim() })()`)) === "Header & footer…", null);
 await ev(`document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
 await sleep(200);
 check("escape closes the menu", (await ev(`!!document.querySelector(".tools-menu")`)) === false, null);
+// Tab closes the menu and moves focus on from the Tools button
+await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
+await until(`document.querySelector(".tools-menu")`, "the menu for Tab");
+await ev(`document.querySelector(".tools-filter").dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }))`);
+await sleep(200);
+const afterTab = await ev(`({ open: !!document.querySelector(".tools-menu"), onTools: document.activeElement?.getAttribute("aria-label") })`);
+check("Tab closes the menu (focus goes back to Tools)", !afterTab.open && afterTab.onTools === "Tools", afterTab);
+// moving focus elsewhere closes it too
+await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
+await until(`document.querySelector(".tools-menu")`, "the menu for focus-out");
+await ev(`document.querySelector("#page-input").focus()`);
+await sleep(200);
+check("focus leaving the menu closes it", (await ev(`!!document.querySelector(".tools-menu")`)) === false, null);
 // an item opens its sheet
 await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
 await until(`document.querySelector(".tools-menu")`, "the menu again");
-await ev(`[...document.querySelectorAll('.tools-menu [role="menuitem"]')].find((b) => /Watermark/.test(b.textContent)).click()`);
+await ev(`[...document.querySelectorAll('.tools-menu [role="option"]')].find((b) => /Watermark/.test(b.textContent)).click()`);
 await sleep(700);
 check("an item runs and closes the menu", (await ev(`!!document.querySelector(".tools-menu")`)) === false, null);
 const sheetOpen = await ev(`window.__inkwell.useMarks.getState().kind ?? window.__inkwell.useMarks.getState().sheet ?? null`);
@@ -329,6 +347,85 @@ await sleep(500);
 const toNormal = { attr: await pagesAttr(), setting: await ev(`${S}.getState().pageDark`) };
 check("toggle in the dark app gives normal pages", toNormal.attr === null && toNormal.setting === "off", toNormal);
 await shot("pages-normal-dark-app.png", 700);
+
+// ---- a picture of flat colours comes back exactly -------------------------------------------------------
+// rgb-photo.pdf (scripts/make-rgb-photo.mjs) is one picture of 3 x 2 blocks: red green blue / cyan magenta yellow.
+const rgb = docs.find((d) => /rgb-photo/.test(d.name));
+if (rgb) {
+  const WANT = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [0, 255, 255], [255, 0, 255], [255, 255, 0]];
+  const tilesReady = `[...document.querySelectorAll(".page canvas.tile:not(.preview)")].length > 0 && [...document.querySelectorAll(".page canvas.tile:not(.preview)")].every((c) => c.dataset.ready)`;
+  const blocks = (png, box, cols, rows, index) => {
+    const got = [];
+    for (let r = 0; r < rows; r++)
+      for (let c = 0; c < cols; c++) {
+        const cx = box.x + (box.w * (c + 0.5)) / cols;
+        const cy = box.y + (box.h * (r + 0.5)) / rows;
+        got.push({ at: [c, r], rgb: mean(png, { x: cx - 6, y: cy - 6, w: 12, h: 12 }), want: WANT[index(c, r)] });
+      }
+    return got;
+  };
+  await setTheme("light");
+  await ev(`${S}.getState().activate(${rgb.id})`);
+  await ev(`${S}.getState().setZoomMode(${rgb.id}, "fitWidth")`);
+  await setPages("off");
+  await until(tilesReady, "the picture's sharp tiles", 200);
+  const plainShot = await shot("_rgb-normal.png", 700);
+  await setPages("on");
+  await until(`document.querySelector(".nat-img")`, "the picture box", 100);
+  const darkShot = await shot("photo-natural-dark-pages.png", 900);
+  fs.rmSync(path.join(out, "_rgb-normal.png"), { force: true });
+  const rbox = dev(await rectOf(".nat-img"));
+  const idx = (c, r) => 3 * r + c;
+  const plainBlocks = blocks(plainShot, rbox, 3, 2, idx);
+  const darkBlocks = blocks(darkShot, rbox, 3, 2, idx);
+  report.rgbPhoto = { plain: plainBlocks.map((b) => b.rgb), dark: darkBlocks.map((b) => b.rgb) };
+  check("pure red, green, blue, cyan, magenta, yellow render exactly with normal pages", plainBlocks.every((b) => dist(b.rgb, b.want) <= 3), plainBlocks);
+  check("the same colours on dark pages, within 3 levels of normal", darkBlocks.every((b, i) => dist(b.rgb, plainBlocks[i].rgb) <= 3), { plainBlocks, darkBlocks });
+  // a page turned a quarter: the picture box must follow the turn (3 x 2 blocks become 2 x 3)
+  await ev(`${S}.getState().rotate(${rgb.id}, 1)`);
+  await sleep(1200);
+  await until(tilesReady, "tiles after the turn", 200);
+  await sleep(700);
+  const turned = await shot("_rgb-turned.png", 300);
+  fs.rmSync(path.join(out, "_rgb-turned.png"), { force: true });
+  const tbox = dev(await rectOf(".nat-img"));
+  const turnedBlocks = blocks(turned, tbox, 2, 3, (c, r) => 3 * (1 - c) + r);
+  report.rgbTurned = turnedBlocks.map((b) => b.rgb);
+  check("a turned page keeps the picture's colours in place", turnedBlocks.every((b) => dist(b.rgb, b.want) <= 3), turnedBlocks);
+  await ev(`${S}.getState().rotate(${rgb.id}, -1)`);
+  await sleep(600);
+  await setPages("follow");
+  await ev(`${S}.getState().activate(${sample.id})`);
+  await sleep(400);
+}
+
+// ---- the page-number box is sized to the page count ---------------------------------------------------------
+// pages-1 / pages-91 / pages-1500.pdf (scripts/make-blank-pages.mjs): "1 / 1", "12 / 91", "1234 / 1500"
+const counts = [[1, 1], [91, 12], [1500, 1234]];
+const boxes = [];
+for (const [n, at] of counts) {
+  const d = docs.find((x) => new RegExp(`pages-${n}\\b`).test(x.name));
+  if (!d) continue;
+  await ev(`${S}.getState().activate(${d.id})`);
+  await ev(`${S}.getState().goTo(${d.id}, ${at - 1})`);
+  await until(`document.querySelector("#page-input")?.value === "${at}"`, `the box to show ${at}`, 100);
+  for (const theme of ["light", "dark"]) {
+    await setTheme(theme);
+    await sleep(350);
+    const box = await ev(`(() => { const i = document.querySelector("#page-input"); const r = i.getBoundingClientRect(); const cs = getComputedStyle(i); const fit = i.scrollWidth <= i.clientWidth; const n = i.nextElementSibling.getBoundingClientRect(); return { w: r.width, text: i.value, after: i.nextElementSibling.textContent, gap: n.left - r.right, tab: cs.fontVariantNumeric, align: cs.textAlign, fit } })()`);
+    if (theme === "light") boxes.push({ n, at, ...box });
+    await clip(`pagebox-${at}-of-${n}-${theme}.png`, ".toolbar");
+  }
+}
+report.pageBox = boxes;
+if (boxes.length === 3) {
+  check("the box is compact: '1 / 1' is narrower than 44px", boxes[0].w < 44, boxes[0]);
+  check("it grows with the page count", boxes[0].w <= boxes[1].w && boxes[1].w < boxes[2].w, boxes.map((b) => b.w));
+  check("the number fits its box and the total sits close by", boxes.every((b) => b.fit && b.gap <= 8 && /tabular-nums/.test(b.tab) && b.align === "center"), boxes);
+}
+await setTheme("light");
+await ev(`${S}.getState().activate(${sample.id})`);
+await sleep(300);
 
 // ---- persistence ---------------------------------------------------------------------------------
 await setPages("on");
