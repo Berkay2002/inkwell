@@ -5,10 +5,11 @@ import { type Want, tileClient } from "../lib/tiles";
 import { useTextEdit } from "../lib/textEdit";
 import { useToolPrefs } from "../lib/toolPrefs";
 import { useTools } from "../lib/toolsStore";
-import { type DocState, pageLabel, useStore } from "../store";
+import { type DocState, pageLabel, type SidebarPanel, useStore } from "../store";
 import { AllToolsPanel } from "./AllTools";
 import { AttachmentsPanel } from "./AttachmentsPanel";
 import { ArticlesPanel } from "./threads/ArticlesPanel";
+import { MediaPanel } from "./MediaPanel";
 import { Icon, type IconName } from "./Icons";
 import { ContextMenu, pageActions } from "./PageMenu";
 import { TileCanvas } from "./TileCanvas";
@@ -29,6 +30,7 @@ export function Sidebar({ doc }: { doc: DocState }) {
         <PanelTab name="outline" label="Outline" />
         <PanelTab name="attachments" label="Attachments" icon="paperclip" />
         <PanelTab name="articles" label="Articles" icon="article" />
+        <PanelTab name="media" label="Media" icon="play" />
       </div>
       {panel === "thumbs" ? (
         <Thumbnails key={doc.id} doc={doc} />
@@ -36,14 +38,16 @@ export function Sidebar({ doc }: { doc: DocState }) {
         <Outline key={doc.id} doc={doc} />
       ) : panel === "articles" ? (
         <ArticlesPanel key={doc.id} doc={doc} />
-      ) : (
+      ) : panel === "attachments" ? (
         <AttachmentsPanel key={doc.id} doc={doc} />
+      ) : (
+        <MediaPanel key={doc.id} doc={doc} />
       )}
     </aside>
   );
 }
 
-function PanelTab({ name, label, icon }: { name: "thumbs" | "outline" | "attachments" | "articles"; label: string; icon?: IconName }) {
+function PanelTab({ name, label, icon }: { name: Exclude<SidebarPanel, "none">; label: string; icon?: IconName }) {
   const on = useStore((s) => s.sidebar === name);
   return (
     <button

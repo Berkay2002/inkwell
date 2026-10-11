@@ -411,7 +411,7 @@ pub struct Protection {
 #[tauri::command]
 pub async fn prepress_protection(eng: Eng<'_>, doc: DocId) -> Result<Protection> {
     let eng = eng.inner().clone();
-    blocking(move || eng.read_custom(doc, |d| Ok(Protection { certified: crate::outline::certified(d)?.is_some(), signed: crate::outline::signed(d) }))).await
+    blocking(move || eng.read_custom(doc, |d| Ok(Protection { certified: crate::outline::certified(d).map_or(true, |c| c.is_some()), signed: crate::outline::signed(d) }))).await
 }
 
 /// Sets a trim, bleed, art or crop box.

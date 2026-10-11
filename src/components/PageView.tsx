@@ -13,6 +13,7 @@ import { OrderLayer } from "./a11y/OrderLayer";
 import { LinkLayer } from "./edit/LinkLayer";
 import { usePrepress } from "../lib/prepressStore";
 import { MarkPreview } from "./MarkPreview";
+import { MediaLayer } from "./MediaLayer";
 import { TacRegions } from "./prepress/TacRegions";
 import { ReadLinks } from "./ReadLinks";
 import { NaturalImage } from "./NaturalImage";
@@ -157,6 +158,7 @@ export const PageView = memo(function PageView(p: Props) {
       <ReadLinks docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <FormLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <AnnotLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
+      <MediaLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} />
       <ImageEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <TextEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <LinkLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />

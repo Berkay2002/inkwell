@@ -12,6 +12,7 @@ pub mod history_ipc;
 pub mod imageedit;
 pub mod links;
 pub mod marks;
+pub mod media;
 pub mod measure;
 pub mod ocr;
 pub mod organize;
@@ -894,6 +895,8 @@ pub fn run() {
     let autosave = (hist.clone(), engine.clone());
     let prepress = Arc::new(prepress::app::Prepress::default());
     let proto_prepress = prepress.clone();
+    let media = Arc::new(media::Cache::default());
+    let proto_media = media.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -905,12 +908,27 @@ pub fn run() {
         .manage(Arc::new(search::files::FolderSearches::default()))
         .manage(hist)
         .manage(prepress)
+        .manage(media)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 on_drop(window, paths);
             }
         })
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
+            // `/m/<doc>/<token>/<asset>`: an embedded video or sound of an open document, with byte ranges
+            if let Some((doc, token, id)) = media::route::parse(request.uri().path()) {
+                let (eng, cache) = (proto_engine.clone(), proto_media.clone());
+                let range = request.headers().get("range").and_then(|v| v.to_str().ok()).map(str::to_owned);
+                tauri::async_runtime::spawn_blocking(move || {
+                    let r = media::serve(&eng, &cache, doc, &token, &id, range.as_deref());
+                    let mut b = tauri::http::Response::builder().status(r.status);
+                    for (k, v) in r.headers {
+                        b = b.header(k, v);
+                    }
+                    responder.respond(b.body(std::borrow::Cow::Owned(r.body)).unwrap());
+                });
+                return;
+            }
             // `/p/...`: a page tile in a print production view (plates, coverage)
             if let Some((key, view, stream, epoch, rank)) = prepress::app::parse_tile_request(request.uri()) {
                 proto_prepress.request_tile(
@@ -1095,6 +1113,9 @@ pub fn run() {
             organize::app::combine_run,
             organize::app::pick_attachments,
             organize::app::attachments_list,
+            media::app::media_list,
+            media::app::media_play,
+            media::app::media_release,
             organize::app::attachments_add,
             organize::app::attachment_save,
             organize::app::attachment_open,

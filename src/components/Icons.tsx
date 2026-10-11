@@ -80,6 +80,8 @@ const PATHS = {
   pageDark: "M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM12 9a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 9v8",
   // two linked columns: an article continuing from one box into the next
   article: "M4 5h6v14H4ZM14 5h6v14h-6ZM10 12h4",
+  play: "M7 4.5v15l12-7.5Z",
+  playOff: "M7 4.5v15l12-7.5ZM4 4l16 16",
   paperclip: "m21 11-9 9a5.5 5.5 0 0 1-7.8-7.8l9-9a3.7 3.7 0 0 1 5.2 5.2l-9 9a1.8 1.8 0 0 1-2.6-2.6l8.2-8.2",
   present: "M4 4h16v11H4ZM12 15v5M8 20h8M10.5 7.5l4 2-4 2Z",
   download: "M12 4v11M7 10.5l5 5 5-5M5 20h14",
