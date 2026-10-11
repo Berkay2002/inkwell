@@ -740,6 +740,7 @@ pub async fn history_compare_run(
 pub async fn history_compare_report(
     window: Window,
     h: Hist<'_>,
+    eng: State<'_, Arc<Engine>>,
     reg: State<'_, Paths>,
     jobs: State<'_, Arc<crate::tools::Jobs>>,
     job: u64,
@@ -753,6 +754,8 @@ pub async fn history_compare_report(
 ) -> Result<String, String> {
     let (a, b) = (a.resolve(&reg, window.label())?, b.resolve(&reg, window.label())?);
     let dest = reg.take_save(window.label(), &to).map_err(err)?;
+    // The report replaces what is at `dest`: never a document that is open (a later save would corrupt it).
+    eng.check_not_open(&dest, None).map_err(err)?;
     let h = h.inner().clone();
     let guard = jobs.inner().begin(job);
     off(move || {
