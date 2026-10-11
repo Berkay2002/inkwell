@@ -426,3 +426,38 @@ fn a_p_that_names_a_page_sharing_the_array_does_not_drop_the_annotation() {
     let got: Vec<_> = list_all(&eng, id).unwrap().iter().map(|a| (a.page, a.xref)).collect();
     assert_eq!(got, vec![(0, 3)]);
 }
+
+#[test]
+fn a_reversed_document_whose_annotations_keep_their_old_p_lists_everything_fast() {
+    // 100 pages of 250 squares, every /P naming the page at the mirrored position: a later page that does
+    // not list it for the first half. Asking that page for its array per annotation went past the scan cap.
+    let (pages, per) = (100usize, 250usize);
+    let first = 3 + pages * per;
+    let square = |i: usize| format!("<< /Type /Annot /Subtype /Square /Rect [40 40 90 90] /P {} 0 R >>", first + pages - 1 - i);
+    let rest: Vec<String> = (0..pages).flat_map(|i| (0..per).map(move |_| i)).map(square).collect();
+    let bytes = pages_and(pages, rest, |i| {
+        format!("/Annots [{}]", (0..per).map(|j| format!("{} 0 R ", 3 + i * per + j)).collect::<String>())
+    });
+    let (eng, id) = open_raw("stale-p", bytes);
+    let t = std::time::Instant::now();
+    let l = list_status(&eng, id).unwrap();
+    let took = t.elapsed();
+    eprintln!("annot list, {pages} pages x {per} annotations with stale /P: {took:?}");
+    assert_eq!(l.items.len(), pages * per);
+    assert!(l.items.iter().enumerate().all(|(n, a)| a.page == (n / per) as u32));
+    assert!(!l.incomplete);
+    assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+}
+
+#[test]
+fn links_do_not_count_against_the_annotation_budget() {
+    // One page whose array holds 50 001 links and one note: only the note is loaded as an annotation.
+    let link = "<< /Type /Annot /Subtype /Link /Rect [0 0 20 20] >>";
+    let n = 50_001;
+    // 3 note, 4 link, 5 the array
+    let list: String = (0..n).map(|_| "4 0 R ").collect();
+    let (eng, id) = open_raw("links", pages_and(1, vec![NOTE.into(), link.into(), format!("[3 0 R {list}]")], |_| "/Annots 5 0 R".into()));
+    let l = list_status(&eng, id).unwrap();
+    assert_eq!(l.items.len(), 1);
+    assert!(!l.incomplete);
+}

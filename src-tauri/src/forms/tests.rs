@@ -1806,3 +1806,35 @@ fn a_widget_whose_p_names_a_page_sharing_the_array_is_still_listed() {
     );
     assert_eq!(list_all(&eng, id).unwrap().fields.iter().map(|f| (f.page, f.name.as_str())).collect::<Vec<_>>(), vec![(0, "A")]);
 }
+
+#[test]
+fn a_reversed_form_whose_widgets_keep_their_old_p_lists_every_field_fast() {
+    // 100 pages of 250 widgets each, every /P naming the page at the mirrored position (a later page that
+    // does not list it for the first half): asking that page for its array per widget used to cost
+    // widgets x array length and went past the scan cap.
+    let (pages, per) = (100usize, 250usize);
+    let first = 3 + pages * per;
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count {pages} >>", (0..pages).map(|i| format!("{} 0 R ", first + i)).collect::<String>()),
+    ];
+    for i in 0..pages {
+        for j in 0..per {
+            objs.push(format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (f{i}_{j}) /Rect [72 100 200 120] /F 4 /P {} 0 R >>", first + pages - 1 - i));
+        }
+    }
+    for i in 0..pages {
+        let list: String = (0..per).map(|j| format!("{} 0 R ", 3 + i * per + j)).collect();
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{list}] >>"));
+    }
+    let (eng, id, _) = open_bytes("scan-stale-p", pdf_of(&objs));
+    let t = std::time::Instant::now();
+    let found = eng.read_custom(id, |d| Ok(scan(d)?.len())).unwrap();
+    let took = t.elapsed();
+    eprintln!("form scan, {pages} pages x {per} widgets with stale /P: {took:?}");
+    assert_eq!(found, pages * per);
+    assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    let form = list_all(&eng, id).unwrap();
+    assert_eq!(form.fields.len(), pages * per);
+    assert!(form.fields.iter().enumerate().all(|(n, f)| f.page == (n / per) as u32));
+}

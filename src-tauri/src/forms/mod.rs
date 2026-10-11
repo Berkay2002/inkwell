@@ -277,7 +277,9 @@ fn full_name(w: &PdfObject) -> String {
 }
 
 /// Every widget of the document, page by page. Only pages that have widgets no earlier page had are
-/// loaded (see [`AnnotWalk`]): a widget that several pages list is returned once, for the first.
+/// loaded (see [`AnnotWalk`]): a widget that several pages list is returned once, for the first
+/// (or the page its `/P` names); one listed through different arrays with no `/P` stays with the first
+/// page and is not fillable on the later one.
 pub(crate) fn scan(doc: &PdfDocument) -> Result<Vec<Entry>> {
     let mut out = Vec::new();
     let mut walk = AnnotWalk::default();

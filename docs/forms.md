@@ -17,6 +17,10 @@ tool strip while preparing a form.
   undo step and puts every field back to its default value; push buttons: reset works (named fields or the whole form),
   next/previous/first/last page work, alert shows its message, submit and links are shown and do nothing.
 - Calculated fields are read-only to the person filling and re-run after every change in `/CO` order.
+- The field list walks the pages' `/Annots` like the comment list ([comments.md](comments.md)): shared arrays are read once and
+  a widget two pages list through different arrays (no `/P` naming the later one) belongs to the first page only. A file
+  with more than 2 000 000 array entries is refused ("this file's form is too large to edit safely") rather than shown with
+  fields missing.
 
 ## Scripts
 MuPDF is built without JavaScript, so Inkwell has its own small engine (QuickJS, `forms/js.rs`; see

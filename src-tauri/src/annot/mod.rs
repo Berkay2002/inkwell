@@ -17,7 +17,7 @@ use mupdf::color::AnnotationColor;
 use mupdf::pdf::{AnnotationFlags, LineEndingStyle, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject};
 use mupdf::{Point, Quad, Rect};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub mod app;
 #[cfg(test)]
@@ -309,8 +309,8 @@ pub(crate) struct Fresh {
     pub nums: HashSet<i32>,
     /// The page has annotation dictionaries written inline (object number 0), which are never shared.
     pub direct: bool,
-    /// Entries in the page's `/Annots`: what loading the page costs.
-    pub len: usize,
+    /// Annotations loading the page makes (every dictionary in `/Annots` but links and popups).
+    pub loaded: usize,
 }
 
 /// Which pages have annotations that still need listing, read from the page dictionaries alone.
@@ -318,13 +318,26 @@ pub(crate) struct Fresh {
 /// share one array (or list the same objects) costs pages x annotations if every page is loaded.
 /// An object is assigned to the first page that has it, or to the page its `/P` names when that
 /// page has it too. Pages that bring nothing new are not loaded.
+///
+/// Known limit: a dictionary that two pages list through different arrays, with no `/P` naming the
+/// later one, belongs to the first page only. The later page still draws it, but it is not listed
+/// or selectable there (and a widget is not fillable there).
 #[derive(Default)]
 pub(crate) struct AnnotWalk {
     arrays: HashSet<i32>,
     seen: HashSet<i32>,
+    /// Pages asked about as a `/P` owner: what each lists, read (and charged) once.
+    listed: HashMap<i32, Listed>,
     scanned: usize,
     /// The scan cap was hit: pages from then on are left out.
     pub incomplete: bool,
+}
+
+/// The objects a page lists in `/Annots`, and that array's number when it is an indirect one.
+#[derive(Default)]
+struct Listed {
+    array: Option<i32>,
+    nums: HashSet<i32>,
 }
 
 impl AnnotWalk {
@@ -350,13 +363,16 @@ impl AnnotWalk {
         if self.charge(len) {
             return Ok(None);
         }
-        let mut fresh = Fresh { nums: HashSet::new(), direct: false, len };
+        let mut fresh = Fresh { nums: HashSet::new(), direct: false, loaded: 0 };
         for i in 0..len {
             let Some(e) = annots.get_array(i as i32)? else { continue };
             if !e.is_dict()? {
                 continue;
             }
             let sub = e.get_dict("Subtype")?.and_then(|s| s.as_name().ok());
+            if !matches!(sub.as_deref(), Some(b"Link" | b"Popup")) {
+                fresh.loaded += 1;
+            }
             let widget = sub.as_deref() == Some(b"Widget");
             let wanted = match which {
                 Which::Widgets => widget,
@@ -386,28 +402,35 @@ impl AnnotWalk {
         if q <= p as i32 || q >= doc.page_count()? {
             return Ok(false);
         }
-        let Some(list) = doc.find_page(q)?.get_dict("Annots")?.filter(|a| a.is_array().unwrap_or(false)) else { return Ok(false) };
+        if !self.listed.contains_key(&q) {
+            let mut l = Listed::default();
+            if let Some(list) = doc.find_page(q)?.get_dict("Annots")?.filter(|a| a.is_array().unwrap_or(false)) {
+                let len = list.len()?;
+                if self.charge(len) {
+                    return Ok(false);
+                }
+                if list.is_indirect()? {
+                    l.array = Some(list.as_indirect()?);
+                }
+                for i in 0..len {
+                    if let Some(x) = list.get_array(i as i32)?.filter(|x| x.is_indirect().unwrap_or(false)) {
+                        l.nums.insert(x.as_indirect()?);
+                    }
+                }
+            }
+            self.listed.insert(q, l);
+        }
         // That page's array is the one being walked or was walked: it will not be visited again, so
         // the annotation stays with the first page that has it.
-        if list.is_indirect()? && self.arrays.contains(&list.as_indirect()?) {
-            return Ok(false);
-        }
-        let len = list.len()?;
-        if self.charge(len) {
-            return Ok(false);
-        }
-        for i in 0..len {
-            if list.get_array(i as i32)?.is_some_and(|x| x.is_indirect().unwrap_or(false) && x.as_indirect().is_ok_and(|n| n == num)) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let l = &self.listed[&q];
+        Ok(l.nums.contains(&num) && !l.array.is_some_and(|a| self.arrays.contains(&a)))
     }
 }
 
 /// Every comment of the document in page order. A review-state reply is folded into its parent's
 /// `state`/`resolved` (the latest wins) and not listed on its own. An annotation object that
-/// several pages list (a shared `/Annots`) is listed once; see [`AnnotWalk`].
+/// several pages list (a shared `/Annots`) is listed once, on one page; see [`AnnotWalk`] for
+/// which page and for the case that is left to the first.
 pub fn list(doc: &PdfDocument) -> Result<AnnotList> {
     let mut all = Vec::new();
     let mut walk = AnnotWalk::default();
@@ -415,11 +438,11 @@ pub fn list(doc: &PdfDocument) -> Result<AnnotList> {
     let mut left_out = false;
     for p in 0..doc.page_count()?.max(0) as u32 {
         let Some(fresh) = walk.page(doc, p, Which::Comments)? else { continue };
-        if loaded + fresh.len > MAX_LOADED {
+        if loaded + fresh.loaded > MAX_LOADED {
             left_out = true;
             continue;
         }
-        loaded += fresh.len;
+        loaded += fresh.loaded;
         let mut pending = fresh.nums;
         let page = doc.load_pdf_page(p as i32)?;
         for a in page.annotations() {
