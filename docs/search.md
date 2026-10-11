@@ -69,9 +69,13 @@ format we control and version.
 - An embedded index is untrusted input, like hidden text in the PDF itself: it can claim words that are not
   visible, and bookmarks on pages the file does not have are dropped. A build checks the dict (`/DocID`, `/Pages`)
   before decoding the blob, inflates it under a bound, and compares a fingerprint of the page content (page
-  streams, Form XObjects and patterns under the resources to depth 8, font `/Encoding` and `/ToUnicode` maps, comment and field values as
-  the records read them, bookmarks) read under a per-stream and a per-file budget. The second `/ID` string is not
-  part of the match: MuPDF writes a new one on every save, Inkwell's own included.
+  streams, Form XObjects and patterns under the resources to depth 8, fonts (`/ToUnicode` and `/Encoding`; the whole
+  font with its CMaps, descendant fonts and font programs when there is no `/ToUnicode`), marked-content property
+  lists, the layers' defaults, comment and field values as the records read them, bookmarks) read under a
+  per-stream and a per-file budget; every entry walked costs budget, and a `Resources` shared by pages is walked once.
+  The second `/ID` string is not part of the match: MuPDF writes a new one on every save, Inkwell's own included.
+  The fingerprint detects honest edits, not a forger: a crafted file can always carry an index that is "current"
+  but says other words, the same as invisible text in the PDF itself.
 - What is removed with the text: redaction and sanitize always drop the embedded index (it is a compressed copy of
   the page text, which the byte check cannot see inside); deleting pages, editing text, removing attachments or
   annotations, PDF/A conversion to a new file, Bates numbering with replace, and Compress "strip" drop it unless it

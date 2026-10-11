@@ -522,6 +522,119 @@ fn comment_and_field_text_is_charged_to_the_fingerprint_budget() {
     assert!(embed::fingerprint_with(&doc, 1 << 20, 1000).is_none(), "a long comment is not free");
 }
 
+/// One page drawing "words" with font /F1 (object 3 = `font`); `extra` objects follow from number 6.
+fn font_pdf(font: &str, page_res: &str, catalog: &str, extra: Vec<String>) -> Vec<u8> {
+    let mut o = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>"),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        font.to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 3 0 R >> {page_res} >> >>"),
+        stream_obj("", "BT /F1 12 Tf 72 700 Td (words) Tj ET"),
+    ];
+    o.extend(extra);
+    crate::search::tests::pdf_of(&o)
+}
+
+/// Embeds an index in `bytes`, applies `change`, saves, and says whether the index is still current.
+fn current_after(name: &str, bytes: Vec<u8>, change: impl FnOnce(&PdfDocument)) -> bool {
+    let base = dir(&format!("catalog-fp-{name}"));
+    let p = write(&base, "a.pdf", bytes);
+    embed_and_save(&p);
+    assert!(current(&p), "{name}: the index is current before the change");
+    let doc = PdfDocument::open(&*p).unwrap();
+    change(&doc);
+    let b = base.join("b.pdf");
+    doc.save(&b.to_string_lossy()).unwrap();
+    current(&b)
+}
+
+fn font_of(doc: &PdfDocument) -> PdfObject {
+    doc.find_page(0).unwrap().get_dict("Resources").unwrap().unwrap().get_dict("Font").unwrap().unwrap().get_dict("F1").unwrap().unwrap()
+}
+
+#[test]
+fn what_decides_how_codes_read_is_part_of_the_fingerprint() {
+    let name = |s: &str| PdfObject::new_name(s).unwrap();
+
+    // An encoding kept in its own object (and its /Differences through another).
+    let enc = font_pdf(
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding 6 0 R >>",
+        "",
+        "",
+        vec!["<< /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences 7 0 R >>".into(), "[65 /B /C]".into()],
+    );
+    assert!(!current_after("enc-ref", enc.clone(), |d| font_of(d).get_dict("Encoding").unwrap().unwrap().dict_put("BaseEncoding", name("MacRomanEncoding")).unwrap()));
+    assert!(!current_after("enc-diff", enc, |d| {
+        let mut diff = font_of(d).get_dict("Encoding").unwrap().unwrap().get_dict("Differences").unwrap().unwrap();
+        diff.array_put(1, name("Z")).unwrap();
+    }));
+
+    // No /ToUnicode: the font program and a descendant font's CIDSystemInfo decide.
+    let prog = font_pdf(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /X /FirstChar 32 /LastChar 32 /Widths [500] /FontDescriptor 6 0 R >>",
+        "",
+        "",
+        vec!["<< /Type /FontDescriptor /FontName /X /Flags 32 /FontFile2 7 0 R >>".into(), stream_obj("", "font program bytes")],
+    );
+    assert!(!current_after("fontfile", prog, |d| {
+        let mut ff = font_of(d).get_dict("FontDescriptor").unwrap().unwrap().get_dict("FontFile2").unwrap().unwrap();
+        ff.write_stream_string("other font program bytes").unwrap();
+    }));
+    let cid = font_pdf(
+        "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [6 0 R] >>",
+        "",
+        "",
+        vec!["<< /Type /Font /Subtype /CIDFontType2 /BaseFont /X /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> >>".into()],
+    );
+    assert!(!current_after("cid", cid, |d| {
+        let mut sys = font_of(d).get_dict("DescendantFonts").unwrap().unwrap().get_array(0).unwrap().unwrap().get_dict("CIDSystemInfo").unwrap().unwrap();
+        sys.dict_put("Ordering", PdfObject::new_string("Japan1").unwrap()).unwrap();
+    }));
+
+    // Marked content property lists (/ActualText) and the layers' default visibility.
+    let props = font_pdf(
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        "/Properties << /P1 6 0 R >>",
+        "",
+        vec!["<< /ActualText (what it says) >>".into()],
+    );
+    assert!(!current_after("properties", props, |d| {
+        let mut p = d.find_page(0).unwrap().get_dict("Resources").unwrap().unwrap().get_dict("Properties").unwrap().unwrap().get_dict("P1").unwrap().unwrap();
+        p.dict_put("ActualText", PdfObject::new_string("what it now says").unwrap()).unwrap();
+    }));
+    let layers = font_pdf(
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        "",
+        "/OCProperties << /OCGs [6 0 R] /D << /Order [6 0 R] /BaseState /ON >> >>",
+        vec!["<< /Type /OCG /Name (Notes) >>".into()],
+    );
+    assert!(!current_after("layers", layers, |d| {
+        let mut dflt = d.catalog().unwrap().get_dict("OCProperties").unwrap().unwrap().get_dict("D").unwrap().unwrap();
+        dflt.dict_put("BaseState", name("OFF")).unwrap();
+    }));
+}
+
+#[test]
+fn a_resources_dict_shared_by_many_pages_is_walked_once_and_a_huge_one_runs_the_budget_out() {
+    // 3000 pages share one Resources (object 3) holding 20000 bare font entries.
+    let pages = 3000;
+    let kids: String = (0..pages).map(|i| format!("{} 0 R ", 4 + i)).collect();
+    let fonts: String = (0..20_000).map(|i| format!("/F{i} << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> ")).collect();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {pages} >>"),
+        format!("<< /Font << {fonts} >> >>"),
+    ];
+    objs.extend((0..pages).map(|_| "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources 3 0 R >>".to_string()));
+    let base = dir("catalog-fp-shared");
+    let p = write(&base, "a.pdf", crate::search::tests::pdf_of(&objs));
+    let doc = PdfDocument::open(&*p).unwrap();
+    let t = std::time::Instant::now();
+    assert!(embed::fingerprint_with(&doc, 1 << 20, 64 << 20).is_some(), "walked once, well inside the budget");
+    assert!(embed::fingerprint_with(&doc, 1 << 20, 1 << 20).is_none(), "20000 entries are not free: the budget runs out");
+    assert!(t.elapsed().as_secs() < 60, "{:?}", t.elapsed());
+}
+
 #[test]
 fn a_damaged_or_old_catalog_entry_is_listed_and_can_be_rebuilt_or_deleted() {
     let (root, folder) = corpus("meta");

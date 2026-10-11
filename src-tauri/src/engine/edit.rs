@@ -1377,10 +1377,13 @@ impl Engine {
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
         let len = ed.step().snap.len;
+        let page_count = ed.step().sizes.len();
         let ran = catch_unwind(AssertUnwindSafe(|| {
             let out = f(&mut ed.doc.doc)?;
-            // An edit that takes content out must not leave it in the embedded search index.
-            if (removes || redaction) && !unchanged.is_some_and(std::cell::Cell::get) {
+            // An edit that takes content out (pages included, as `drops` below sees them) must not leave it
+            // in the embedded search index.
+            let fewer = ed.doc.doc.page_count().is_ok_and(|n| (n.max(0) as usize) < page_count);
+            if (removes || redaction || fewer) && !unchanged.is_some_and(std::cell::Cell::get) {
                 crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
             }
             Ok(out)

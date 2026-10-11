@@ -73,7 +73,19 @@ pub fn read(doc: &PdfDocument, pages: u32, id: &str) -> Option<FileText> {
     Some(t)
 }
 
-/// Hashes decoded streams under a size budget.
+/// What every object or dictionary entry costs against the budget, whatever it holds: the budget bounds the
+/// walk as well as the bytes, so entries that carry nothing cannot be walked for free.
+const NODE: usize = 32;
+
+/// First visit of an indirect object (by number); a direct object is always new.
+fn fresh(o: &PdfObject, seen: &mut HashSet<i32>) -> bool {
+    match o.as_indirect() {
+        Ok(n) if n > 0 => seen.insert(n),
+        _ => true,
+    }
+}
+
+/// Hashes decoded streams and what decides how they read, under a budget.
 struct Feed {
     h: blake3::Hasher,
     left: usize,
@@ -81,6 +93,11 @@ struct Feed {
 }
 
 impl Feed {
+    fn charge(&mut self, n: usize) -> Option<()> {
+        self.left = self.left.checked_sub(n)?;
+        Some(())
+    }
+
     fn stream(&mut self, s: &PdfObject) -> Option<()> {
         let b = s.read_stream_capped(self.per.min(self.left)).ok()?;
         self.left -= b.len();
@@ -91,7 +108,7 @@ impl Feed {
 
     /// Hashes one record's text and rectangle, charged to the same budget as the streams.
     fn text(&mut self, tag: u8, t: &str, r: &[f32; 4]) -> Option<()> {
-        self.left = self.left.checked_sub(t.len())?;
+        self.charge(t.len())?;
         self.h.update(&[tag]);
         self.h.update(&(t.len() as u64).to_le_bytes());
         self.h.update(t.as_bytes());
@@ -101,39 +118,122 @@ impl Feed {
         Some(())
     }
 
-    /// The Form XObjects and tiling patterns under `res` (they can show text) and the fonts' `/Encoding` and
-    /// `/ToUnicode` (they decide what a glyph reads as). `None`: too deep or over the budget, so the file is not vouched for.
+    /// An object by value, references followed: names, numbers and strings, dictionaries in key order, arrays,
+    /// and streams by their decoded bytes (not `/Length`, `/Filter`: a recompressing save keeps the hash).
+    /// `None`: nested too deep or over the budget.
+    fn obj(&mut self, o: &PdfObject, depth: u32) -> Option<()> {
+        self.charge(NODE)?;
+        if depth > DEPTH {
+            return None;
+        }
+        let is = |r: std::result::Result<bool, mupdf::Error>| r.unwrap_or(false);
+        let stream = is(o.is_stream());
+        if stream {
+            self.h.update(b"s");
+            self.stream(o)?;
+        }
+        if is(o.is_dict()) {
+            let n = o.dict_len().ok()?;
+            self.charge(n.saturating_mul(NODE))?;
+            let mut keys: Vec<(Vec<u8>, i32)> = Vec::new();
+            for i in 0..n as i32 {
+                if let Some(k) = o.get_dict_key(i).ok().flatten().and_then(|k| k.as_name().ok()) {
+                    keys.push((k, i));
+                }
+            }
+            keys.sort();
+            self.h.update(b"d");
+            for (k, i) in keys {
+                // /Parent only leads back up the tree.
+                if k == b"Parent" || (stream && matches!(k.as_slice(), b"Length" | b"Filter" | b"DecodeParms")) {
+                    continue;
+                }
+                self.h.update(&k);
+                match o.get_dict_val(i).ok().flatten() {
+                    Some(v) => self.obj(&v, depth + 1)?,
+                    None => {
+                        self.h.update(b"-");
+                    }
+                }
+            }
+        } else if is(o.is_array()) {
+            let n = o.len().ok()?;
+            self.charge(n.saturating_mul(NODE))?;
+            self.h.update(b"a");
+            for i in 0..n as i32 {
+                match o.get_array(i).ok().flatten() {
+                    Some(v) => self.obj(&v, depth + 1)?,
+                    None => {
+                        self.h.update(b"-");
+                    }
+                }
+            }
+        } else if is(o.is_name()) {
+            self.h.update(b"n");
+            self.h.update(&o.as_name().ok()?);
+        } else if is(o.is_int()) {
+            self.h.update(b"i");
+            self.h.update(&o.as_int().ok()?.to_le_bytes());
+        } else if is(o.is_real()) {
+            self.h.update(b"r");
+            self.h.update(&o.as_float().ok()?.to_le_bytes());
+        } else if is(o.is_string()) {
+            let b = o.as_bytes().ok()?;
+            self.charge(b.len())?;
+            self.h.update(b"t");
+            self.h.update(&(b.len() as u64).to_le_bytes());
+            self.h.update(&b);
+        } else if is(o.is_bool()) {
+            self.h.update(if o.as_bool().ok()? { b"T" } else { b"F" });
+        }
+        Some(())
+    }
+
+    /// What decides how a font's codes read. With a `/ToUnicode` map that and the encoding; without one the
+    /// whole font (glyph names, CMaps, descendant fonts, font programs).
+    fn font(&mut self, o: &PdfObject, seen: &mut HashSet<i32>) -> Option<()> {
+        let to_unicode = o.get_dict("ToUnicode").ok().flatten().filter(|s| s.is_stream().unwrap_or(false));
+        let Some(tu) = to_unicode else {
+            return if fresh(o, seen) { self.obj(o, 0) } else { Some(()) };
+        };
+        if !fresh(o, seen) {
+            return Some(());
+        }
+        if let Some(e) = o.get_dict("Encoding").ok().flatten() {
+            self.obj(&e, 0)?;
+        }
+        if fresh(&tu, seen) { self.stream(&tu) } else { Some(()) }
+    }
+
+    /// The Form XObjects and tiling patterns under `res` (they can show text), the fonts, and the property lists
+    /// marked content points to (`/ActualText`, layers). Everything is visited once by object number and every
+    /// entry costs budget, so a `Resources` shared by many pages is walked once and a huge one runs the budget out.
+    /// `None`: too deep or over the budget, so the file is not vouched for.
     fn resources(&mut self, res: &PdfObject, depth: u32, seen: &mut HashSet<i32>) -> Option<()> {
         if depth > DEPTH {
             return None;
         }
-        for cat in ["Font", "XObject", "Pattern"] {
+        if !fresh(res, seen) {
+            return Some(());
+        }
+        for cat in ["Font", "XObject", "Pattern", "Properties"] {
             let Some(d) = res.get_dict(cat).ok().flatten().filter(|d| d.is_dict().unwrap_or(false)) else { continue };
             for i in 0..d.dict_len().ok()? as i32 {
+                self.charge(NODE)?;
                 let Some(o) = d.get_dict_val(i).ok().flatten() else { continue };
-                let (stream, nested) = if cat == "Font" {
-                    // The encoding (a name, or a dict with /Differences) decides what a code reads as.
-                    if let Some(e) = o.get_dict("Encoding").ok().flatten().and_then(|e| e.resolve().ok().flatten()) {
-                        let e = e.to_string();
-                        if e.len() > self.per.min(self.left) {
-                            return None;
+                match cat {
+                    "Font" => self.font(&o, seen)?,
+                    "Properties" => self.obj(&o, 0)?,
+                    _ => {
+                        let form = cat == "Pattern" || o.get_dict("Subtype").ok().flatten().and_then(|n| n.as_name().ok().map(|n| n == b"Form")) == Some(true);
+                        if !form || !o.is_stream().unwrap_or(false) || !fresh(&o, seen) {
+                            continue;
                         }
-                        self.left -= e.len();
-                        self.h.update(e.as_bytes());
+                        self.stream(&o)?;
+                        if let Some(r) = o.get_dict("Resources").ok().flatten() {
+                            self.resources(&r, depth + 1, seen)?;
+                        }
                     }
-                    (o.get_dict("ToUnicode").ok().flatten(), false)
-                } else {
-                    let form = cat == "Pattern" || o.get_dict("Subtype").ok().flatten().and_then(|n| n.as_name().ok().map(|n| n == b"Form")) == Some(true);
-                    (Some(o).filter(|_| form), true)
-                };
-                let Some(s) = stream.filter(|s| s.is_stream().unwrap_or(false)) else { continue };
-                // A stream drawn from many pages is hashed once; a cycle ends here.
-                if !s.as_indirect().is_ok_and(|n| seen.insert(n)) {
-                    continue;
-                }
-                self.stream(&s)?;
-                if nested && let Some(r) = s.get_dict("Resources").ok().flatten() {
-                    self.resources(&r, depth + 1, seen)?;
                 }
             }
         }
@@ -152,6 +252,11 @@ pub fn fingerprint(doc: &PdfDocument) -> Option<String> {
 pub(super) fn fingerprint_with(doc: &PdfDocument, per_stream: usize, total: usize) -> Option<String> {
     let mut f = Feed { h: blake3::Hasher::new(), left: total, per: per_stream };
     let mut seen = HashSet::new();
+    // Layer defaults: what is switched off is not visible text.
+    if let Some(oc) = doc.catalog().ok().and_then(|c| get(&c, "OCProperties")) {
+        f.h.update(b"oc");
+        f.obj(&oc, 0)?;
+    }
     let n = doc.page_count().ok()?.max(0);
     for p in 0..n {
         f.h.update(&p.to_le_bytes());
