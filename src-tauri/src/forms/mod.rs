@@ -115,6 +115,9 @@ pub struct FieldDto {
 #[serde(rename_all = "camelCase")]
 pub struct FormDto {
     pub fields: Vec<FieldDto>,
+    /// The fields that calculate (`node` of each), in the order they run: the `/AcroForm /CO` array first, then the others in
+    /// listing order. What the Calculation order dialog lists.
+    pub calc_order: Vec<i32>,
     /// The document is an XFA form: only its AcroForm fallback is shown.
     pub xfa: bool,
 }
@@ -374,10 +377,6 @@ fn format_of(e: &Entry) -> Format {
     aa_js(e, "F").and_then(|js| af::parse_format(&js)).or_else(|| aa_js(e, "K").and_then(|js| af::parse_keystroke(&js))).unwrap_or_default()
 }
 
-fn validate_of(e: &Entry) -> Validate {
-    aa_js(e, "V").and_then(|js| af::parse_validate(&js)).unwrap_or_default()
-}
-
 fn calculate_of(e: &Entry) -> Calculate {
     aa_js(e, "C").and_then(|js| af::parse_calculate(&js)).unwrap_or_default()
 }
@@ -390,6 +389,19 @@ fn has_unknown_script(e: &Entry) -> bool {
         || unknown("K", &|js| af::parse_keystroke(js).is_some())
         || unknown("V", &|js| af::parse_validate(js).is_some())
         || unknown("C", &|js| af::parse_calculate(js).is_some())
+}
+
+/// The Format tab as the editor shows it (a custom script when the scripts are not Acrobat's own calls).
+fn format_for_edit(e: &Entry) -> Format {
+    af::format_for_editor(aa_js(e, "F").as_deref(), aa_js(e, "K").as_deref())
+}
+
+fn validate_for_edit(e: &Entry) -> Validate {
+    af::validate_for_editor(aa_js(e, "V").as_deref())
+}
+
+fn calculate_for_edit(e: &Entry) -> Calculate {
+    af::calculate_for_editor(aa_js(e, "C").as_deref())
 }
 
 fn action_of(e: &Entry) -> Option<ButtonAction> {
@@ -466,7 +478,7 @@ fn dto_of(rt: &Rt, snapshot: Option<&[js::FieldState]>, e: &Entry) -> FieldDto {
             Some(s) => s != "Off",
             None => !value.is_empty() && value != "Off" && (export.is_empty() || value == export),
         };
-    let format = format_of(e);
+    let format = format_for_edit(e);
     let shown = if matches!(e.kind, FieldKind::Text | FieldKind::Combo) { rt.shown(snapshot, e, &value) } else { value.clone() };
     let border_width = get(o, "BS").and_then(|b| get(&b, "W")).and_then(|w| w.as_float().ok()).unwrap_or(1.0);
     FieldDto {
@@ -499,8 +511,8 @@ fn dto_of(rt: &Rt, snapshot: Option<&[js::FieldState]>, e: &Entry) -> FieldDto {
         border_color: mk_color("BC"),
         fill_color: mk_color("BG"),
         border_width,
-        validate: validate_of(e),
-        calculate: calculate_of(e),
+        validate: validate_for_edit(e),
+        calculate: calculate_for_edit(e),
         shown,
         format,
         caption: mk.as_ref().and_then(|m| get(m, "CA")).as_ref().and_then(text).unwrap_or_default(),
@@ -520,7 +532,7 @@ fn list_with(rt: &Rt) -> Result<FormDto> {
     let entries = rt.entries()?;
     let snapshot = rt.js_on().then(|| scripts::field_states(entries));
     let fields = entries.iter().map(|e| dto_of(rt, snapshot.as_deref(), e)).collect();
-    Ok(FormDto { fields, xfa: rt.doc().has_xfa_form().unwrap_or(false) })
+    Ok(FormDto { fields, calc_order: calc_order_of(rt.doc(), entries), xfa: rt.doc().has_xfa_form().unwrap_or(false) })
 }
 
 // ---- appearance --------------------------------------------------------------------------------
@@ -597,6 +609,24 @@ pub enum FieldValue {
 fn per_field(entries: &[Entry]) -> Vec<&Entry> {
     let mut seen: Vec<i32> = Vec::new();
     entries.iter().filter(|e| if seen.contains(&e.node) { false } else { seen.push(e.node); true }).collect()
+}
+
+/// The `/AcroForm /CO` array: field object numbers, in the order the calculations run.
+pub(crate) fn written_calc_order(doc: &PdfDocument) -> Vec<i32> {
+    doc.catalog()
+        .ok()
+        .and_then(|c| get(&c, "AcroForm"))
+        .and_then(|f| get(&f, "CO"))
+        .map(|a| (0..a.len().unwrap_or(0).min(4096) as i32).filter_map(|i| a.get_array(i).ok().flatten()?.as_indirect().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Every field with a calculate script (`node`), in running order: those in `/CO` first, in its order, then the rest as listed.
+fn calc_order_of(doc: &PdfDocument, entries: &[Entry]) -> Vec<i32> {
+    let mut calc: Vec<i32> = per_field(entries).into_iter().filter(|e| aa_js(e, "C").is_some()).map(|e| e.node).collect();
+    let order = written_calc_order(doc);
+    calc.sort_by_key(|n| order.iter().position(|x| x == n).unwrap_or(usize::MAX));
+    calc
 }
 
 fn names_to_values(entries: &[Entry]) -> HashMap<String, String> {

@@ -1107,3 +1107,155 @@ fn a_script_with_non_ascii_text_is_read_whatever_way_it_is_encoded() {
     fill(&eng2, id2, "Src", text("go")).unwrap();
     assert_eq!(field(&eng2, id2, "Other").value, "\u{e5}\u{e4}\u{f6} \u{20ac}");
 }
+
+// ---- authoring custom scripts, calculation order, format preview ------------------------------------
+
+fn patch_field(eng: &Engine, id: DocId, name: &str, p: FieldPatch) -> usize {
+    let before = steps(eng, id);
+    let w = field(eng, id, name);
+    edit_one(eng, id, w.page, w.xref, &p, EditSource::User).unwrap();
+    steps(eng, id) - before
+}
+
+#[test]
+fn custom_format_validate_and_calculate_scripts_are_written_read_back_and_run() {
+    let (eng, id, path) = script_form("custom-round-trip", &["Rent", "Code", "Age", "Total"]);
+    let fmt = Format::Custom { format: "if (event.value !== \"\") { event.value = \"<\" + event.value + \">\"; }".into(), keystroke: "event.value = event.value.toUpperCase();".into() };
+    let val = Validate::Custom { source: "if (event.value !== \"\" && Number(event.value) < 18) { app.alert(\"You must be at least 18.\"); event.rc = false; }".into() };
+    let calc = Calculate::Custom("event.value = Number(this.getField(\"Rent\").value || 0) * 2;".into());
+
+    assert_eq!(patch_field(&eng, id, "Code", FieldPatch { format: Some(fmt.clone()), ..Default::default() }), 1, "one undo step");
+    assert_eq!(patch_field(&eng, id, "Age", FieldPatch { validate: Some(val.clone()), ..Default::default() }), 1);
+    assert_eq!(patch_field(&eng, id, "Total", FieldPatch { calculate: Some(calc.clone()), ..Default::default() }), 1);
+
+    // Read back as the same custom settings (an unrecognised script parses as Custom for the editor).
+    assert_eq!(field(&eng, id, "Code").format, fmt);
+    assert_eq!(field(&eng, id, "Age").validate, val);
+    assert_eq!(field(&eng, id, "Total").calculate, calc);
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, vec![field(&eng, id, "Total").node], "a custom calculation is in the order");
+    assert!(scripts_state(&eng, id).unwrap().has_scripts);
+
+    // And the scripts run.
+    fill(&eng, id, "Code", text("ab")).unwrap();
+    let c = field(&eng, id, "Code");
+    assert_eq!((c.value.as_str(), c.shown.as_str()), ("AB", "<AB>"));
+    assert!(fill(&eng, id, "Age", text("9")).unwrap_err().to_string().contains("at least 18"));
+    fill(&eng, id, "Rent", text("21")).unwrap();
+    assert_eq!(field(&eng, id, "Total").value, "42");
+
+    // Saved and reopened.
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(field(&eng2, id2, "Code").format, fmt);
+    assert_eq!(field(&eng2, id2, "Age").validate, val);
+    assert_eq!(field(&eng2, id2, "Total").calculate, calc);
+    assert_eq!(field(&eng2, id2, "Total").value, "42");
+
+    // A format with only a keystroke script writes no format script; emptying every box removes the scripts.
+    let keys = Format::Custom { format: String::new(), keystroke: "event.rc = true;".into() };
+    patch_field(&eng, id, "Code", FieldPatch { format: Some(keys.clone()), ..Default::default() });
+    assert_eq!(field(&eng, id, "Code").format, keys);
+    assert_eq!(patch_field(&eng, id, "Code", FieldPatch { format: Some(Format::Custom { format: " ".into(), keystroke: String::new() }), ..Default::default() }), 1);
+    assert_eq!(field(&eng, id, "Code").format, Format::None);
+    patch_field(&eng, id, "Age", FieldPatch { validate: Some(Validate::Custom { source: String::new() }), ..Default::default() });
+    assert_eq!(field(&eng, id, "Age").validate, Validate::None);
+    patch_field(&eng, id, "Total", FieldPatch { calculate: Some(Calculate::Custom(String::new())), ..Default::default() });
+    assert_eq!(field(&eng, id, "Total").calculate, Calculate::None);
+    assert!(list_all(&eng, id).unwrap().calc_order.is_empty());
+    assert_eq!(calc_order_len(&eng, id), 0, "the field left the calculation order");
+
+    // Undo brings the custom script back.
+    eng.undo(id).unwrap();
+    assert!(matches!(field(&eng, id, "Total").calculate, Calculate::Custom(_)));
+    assert_eq!(calc_order_len(&eng, id), 1);
+}
+
+#[test]
+fn acrobat_calls_still_read_as_their_tab_and_a_mixed_pair_reads_as_custom() {
+    let (eng, id, _) = script_form("custom-or-not", &["A", "B", "C"]);
+    script(&eng, id, "A", "F", "AFNumber_Format(2, 0, 0, 0, \"$\", true);");
+    script(&eng, id, "A", "K", "AFNumber_Keystroke(2, 0, 0, 0, \"$\", true);");
+    assert!(matches!(field(&eng, id, "A").format, Format::Number { decimals: 2, .. }));
+    // A format call next to a keystroke script of the author's own is not a tab setting: the editor shows both scripts.
+    script(&eng, id, "B", "F", "AFNumber_Format(2, 0, 0, 0, \"$\", true);");
+    script(&eng, id, "B", "K", "event.rc = event.value !== \"x\";");
+    assert!(matches!(field(&eng, id, "B").format, Format::Custom { .. }));
+    script(&eng, id, "C", "V", "AFRange_Validate(true, 1, true, 9);");
+    assert_eq!(field(&eng, id, "C").validate, Validate::Range { min: Some(1.0), max: Some(9.0) });
+}
+
+#[test]
+fn the_calculation_order_is_one_undo_step_and_survives_save_and_reopen() {
+    let (eng, id, path) = script_form("calc-order", &["In", "A", "B", "C"]);
+    for (n, src) in [("A", "event.value = 1;"), ("B", "event.value = 2;"), ("C", "event.value = 3;")] {
+        patch_field(&eng, id, n, FieldPatch { calculate: Some(Calculate::Custom(src.into())), ..Default::default() });
+    }
+    let node = |n: &str| field(&eng, id, n).node;
+    let (a, b, c) = (node("A"), node("B"), node("C"));
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, vec![a, b, c], "the order they were authored in");
+
+    let before = steps(&eng, id);
+    calc_order_one(&eng, id, &[c, a, b], EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), before + 1, "one undo step");
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, vec![c, a, b]);
+    assert_eq!(calc_order_len(&eng, id), 3);
+
+    // The same order again is not a step; a field left out follows the listed ones.
+    calc_order_one(&eng, id, &[c, a, b], EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), before + 1);
+    calc_order_one(&eng, id, &[b], EditSource::User).unwrap();
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, vec![b, c, a]);
+
+    // Bad lists change nothing.
+    let n = steps(&eng, id);
+    assert!(calc_order_one(&eng, id, &[a, a], EditSource::User).is_err(), "listed twice");
+    assert!(calc_order_one(&eng, id, &[node("In")], EditSource::User).is_err(), "a field that does not calculate");
+    assert!(calc_order_one(&eng, id, &[9999], EditSource::User).is_err(), "no such field");
+    assert_eq!(steps(&eng, id), n);
+
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    let node2 = |n: &str| field(&eng2, id2, n).node;
+    assert_eq!(list_all(&eng2, id2).unwrap().calc_order, vec![node2("B"), node2("C"), node2("A")]);
+
+    eng.undo(id).unwrap();
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, vec![c, a, b]);
+}
+
+#[test]
+fn calculations_that_read_each_other_settle_whatever_the_order() {
+    let (eng, id, _) = script_form("calc-order-runs", &["In", "Double", "Plus"]);
+    // Plus reads Double; the passes settle it even when Plus runs first.
+    patch_field(&eng, id, "Plus", FieldPatch { calculate: Some(Calculate::Custom("event.value = Number(this.getField(\"Double\").value || 0) + 1;".into())), ..Default::default() });
+    patch_field(&eng, id, "Double", FieldPatch { calculate: Some(Calculate::Custom("event.value = Number(this.getField(\"In\").value || 0) * 2;".into())), ..Default::default() });
+    fill(&eng, id, "In", text("5")).unwrap();
+    assert_eq!(field(&eng, id, "Plus").value, "11");
+    assert_eq!(list_all(&eng, id).unwrap().calc_order.len(), 2);
+}
+
+#[test]
+fn the_format_preview_shows_what_a_format_makes_of_a_sample() {
+    use super::af::format_preview;
+    let num = Format::Number { decimals: 2, sep: 0, neg: 0, currency: "$".into(), prepend: true };
+    assert_eq!(format_preview(&num, ""), Some(("1234.5".into(), "$1,234.50".into())));
+    assert_eq!(format_preview(&num, " 99 "), Some(("99".into(), "$99.00".into())));
+    assert_eq!(format_preview(&Format::Percent { decimals: 1, sep: 0 }, ""), Some(("0.256".into(), "25.6%".into())));
+    let (entry, shown) = format_preview(&Format::Date("dd/mm/yyyy".into()), "").unwrap();
+    assert_eq!((entry.as_str(), shown.as_str()), ("11/10/2026", "11/10/2026"));
+    let (_, shown) = format_preview(&Format::Date("mmmm d, yyyy".into()), "").unwrap();
+    assert_eq!(shown, "October 11, 2026");
+    let (_, shown) = format_preview(&Format::Time("h:MM tt".into()), "").unwrap();
+    assert_eq!(shown, "2:05 pm");
+    assert_eq!(format_preview(&Format::Special(2), "").unwrap().1, "(555) 123-4567");
+    assert_eq!(format_preview(&Format::Special(3), "").unwrap().1, "123-45-6789");
+    assert!(format_preview(&Format::Mask("99-AA".into()), "").is_some());
+    assert_eq!(format_preview(&Format::None, ""), None);
+    assert_eq!(format_preview(&Format::Custom { format: "x".into(), keystroke: String::new() }, ""), None, "a script is not previewed");
+    // The wire shape of the new variants, as the UI sends them.
+    let f: Format = serde_json::from_str(r#"{"kind":"custom","value":{"format":"a","keystroke":"b"}}"#).unwrap();
+    assert_eq!(f, Format::Custom { format: "a".into(), keystroke: "b".into() });
+    let v: Validate = serde_json::from_str(r#"{"kind":"custom","source":"s"}"#).unwrap();
+    assert_eq!(v, Validate::Custom { source: "s".into() });
+    let c: Calculate = serde_json::from_str(r#"{"kind":"custom","value":"s"}"#).unwrap();
+    assert_eq!(c, Calculate::Custom("s".into()));
+}

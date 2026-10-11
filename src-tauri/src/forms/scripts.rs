@@ -499,14 +499,7 @@ pub(crate) fn cascade(rt: &Rt) -> Result<Vec<u32>> {
     if calc.is_empty() {
         return Ok(Vec::new());
     }
-    let order: Vec<i32> = rt
-        .doc()
-        .catalog()
-        .ok()
-        .and_then(|c| get(&c, "AcroForm"))
-        .and_then(|f| get(&f, "CO"))
-        .map(|a| (0..a.len().unwrap_or(0).min(4096) as i32).filter_map(|i| a.get_array(i).ok().flatten()?.as_indirect().ok()).collect())
-        .unwrap_or_default();
+    let order = super::written_calc_order(rt.doc());
     calc.sort_by_key(|(e, _)| order.iter().position(|x| *x == e.node).unwrap_or(usize::MAX));
     let started = Instant::now();
     let mut values = names_to_values(entries);

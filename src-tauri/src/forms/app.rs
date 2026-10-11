@@ -1,9 +1,10 @@
 //! Tauri commands for forms. The UI is the user; the assistant calls the functions in `super` with its turn.
 
 use super::{
-    Detected, FieldPatch, FieldValue, FormDto, NewField, ScriptsState, Stepped, add_many, add_one, arrange_one, delete_many, detect_one, edit_one, list_all, move_one, reset_report,
-    scripts_enable, scripts_state, set_value_report, tab_order_one,
+    Detected, FieldPatch, FieldValue, FormDto, NewField, ScriptsState, Stepped, add_many, add_one, arrange_one, calc_order_one, delete_many, detect_one, edit_one, list_all,
+    move_one, reset_report, scripts_enable, scripts_state, set_value_report, tab_order_one,
 };
+use super::af::{self, Format};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use serde::Serialize;
@@ -93,6 +94,26 @@ pub async fn forms_edit(eng: Eng<'_>, doc: DocId, page: u32, xref: i32, patch: F
 pub async fn forms_delete(eng: Eng<'_>, doc: DocId, items: Vec<(u32, i32)>) -> Result<EditState> {
     let eng = eng.inner().clone();
     blocking(move || delete_many(&eng, doc, &items, EditSource::User)).await
+}
+
+/// Runs the calculated fields in this order (`nodes` are the `node` of each field; unlisted calculated fields follow).
+#[tauri::command]
+pub async fn forms_calc_order(eng: Eng<'_>, doc: DocId, nodes: Vec<i32>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || calc_order_one(&eng, doc, &nodes, EditSource::User)).await
+}
+
+/// What a format makes of a sample entry, for the live preview beside the Format pickers. An empty `sample` takes a default
+/// one. Null for no format and for a custom script.
+#[tauri::command]
+pub fn forms_format_preview(format: Format, sample: String) -> Option<FormatPreview> {
+    af::format_preview(&format, &sample).map(|(sample, shown)| FormatPreview { sample, shown })
+}
+
+#[derive(Serialize)]
+pub struct FormatPreview {
+    pub sample: String,
+    pub shown: String,
 }
 
 /// The page's widgets in this order (widget xrefs); others follow.

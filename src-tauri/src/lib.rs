@@ -841,6 +841,8 @@ pub fn run() {
             forms::app::forms_move,
             forms::app::forms_edit,
             forms::app::forms_delete,
+            forms::app::forms_calc_order,
+            forms::app::forms_format_preview,
             forms::app::forms_tab_order,
             forms::app::forms_arrange,
             forms::app::forms_detect,

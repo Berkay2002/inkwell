@@ -34,6 +34,9 @@ pub enum Format {
     Special(u8),
     /// `AFSpecial_KeystrokeEx(cMask)`: 9 digit, A letter, O letter or digit, X any.
     Mask(String),
+    /// "Custom" in Acrobat's Format tab: a format script (`/AA /F`) and a keystroke script (`/AA /K`), either may be empty.
+    /// Only the editor sees this (the fast path never produces it): the script engine runs the scripts.
+    Custom { format: String, keystroke: String },
 }
 
 /// The Validate tab.
@@ -44,6 +47,8 @@ pub enum Validate {
     None,
     /// `AFRange_Validate(bGreater, nGreater, bLess, nLess)`.
     Range { min: Option<f64>, max: Option<f64> },
+    /// "Run custom validation script": the script engine runs it.
+    Custom { source: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +95,8 @@ pub enum Calculate {
     Simple { op: CalcOp, fields: Vec<String> },
     /// Simplified field notation, e.g. `Price * Quantity`.
     Notation(String),
+    /// "Custom calculation script": the script engine runs it.
+    Custom(String),
 }
 
 // ── parsing scripts ─────────────────────────────────────────────────────────────────────────
@@ -378,6 +385,39 @@ pub fn parse_calculate(js: &str) -> Option<Calculate> {
     Some(Calculate::Simple { op, fields })
 }
 
+// ── what the editor shows ───────────────────────────────────────────────────────────────────
+
+/// The Format tab for the field-properties editor, from its format (`/AA /F`) and keystroke (`/AA /K`) scripts:
+/// the setting Acrobat would have written when both are its own calls, otherwise a custom script.
+pub fn format_for_editor(format: Option<&str>, keystroke: Option<&str>) -> Format {
+    if format.is_none() && keystroke.is_none() {
+        return Format::None;
+    }
+    let f_ok = format.is_none_or(|s| parse_format(s).is_some());
+    let k_ok = keystroke.is_none_or(|s| parse_keystroke(s).is_some());
+    let native = format.and_then(parse_format).or_else(|| keystroke.and_then(parse_keystroke));
+    match native {
+        Some(n) if f_ok && k_ok => n,
+        _ => Format::Custom { format: format.unwrap_or_default().to_string(), keystroke: keystroke.unwrap_or_default().to_string() },
+    }
+}
+
+/// The Validate tab for the editor: the range Acrobat writes, otherwise a custom script.
+pub fn validate_for_editor(js: Option<&str>) -> Validate {
+    match js {
+        None => Validate::None,
+        Some(s) => parse_validate(s).unwrap_or_else(|| Validate::Custom { source: s.to_string() }),
+    }
+}
+
+/// The Calculate tab for the editor: a simple calculation or field notation, otherwise a custom script.
+pub fn calculate_for_editor(js: Option<&str>) -> Calculate {
+    match js {
+        None => Calculate::None,
+        Some(s) => parse_calculate(s).unwrap_or_else(|| Calculate::Custom(s.to_string())),
+    }
+}
+
 // ── writing scripts (what Acrobat's tabs generate) ─────────────────────────────────────────
 
 fn js_str(s: &str) -> String {
@@ -417,6 +457,13 @@ pub fn format_js(f: &Format) -> Option<(String, String)> {
         Format::Time(f) => (format!("AFTime_FormatEx({});", js_str(f)), format!("AFTime_KeystrokeEx({});", js_str(f))),
         Format::Special(n) => (format!("AFSpecial_Format({n});"), format!("AFSpecial_Keystroke({n});")),
         Format::Mask(m) => (String::new(), format!("AFSpecial_KeystrokeEx({});", js_str(m))),
+        // Either script may be empty (then it is not written); both empty is no format.
+        Format::Custom { format, keystroke } => {
+            if format.trim().is_empty() && keystroke.trim().is_empty() {
+                return None;
+            }
+            (format.clone(), keystroke.clone())
+        }
     })
 }
 
@@ -426,6 +473,7 @@ pub fn validate_js(v: &Validate) -> Option<String> {
         Validate::Range { min, max } => {
             Some(format!("AFRange_Validate({}, {}, {}, {});", min.is_some(), min.unwrap_or(0.0), max.is_some(), max.unwrap_or(0.0)))
         }
+        Validate::Custom { source } => (!source.trim().is_empty()).then(|| source.clone()),
     }
 }
 
@@ -438,6 +486,7 @@ pub fn calculate_js(c: &Calculate) -> Option<String> {
             fields.iter().map(|f| js_str(f)).collect::<Vec<_>>().join(", ")
         )),
         Calculate::Notation(expr) => Some(format!("/** BVCALC {expr} EVCALC **/ event.value = AFMakeNumber(0);")),
+        Calculate::Custom(source) => (!source.trim().is_empty()).then(|| source.clone()),
     }
 }
 
@@ -789,7 +838,28 @@ pub fn format_value(f: &Format, value: &str) -> String {
         Format::Date(fmt) | Format::Time(fmt) => parse_date(value, fmt).map_or_else(|| value.to_string(), |dt| format_date(dt, fmt)),
         Format::Special(n) => apply_mask(SPECIAL_MASKS[(*n).min(3) as usize], value).unwrap_or_else(|| value.to_string()),
         Format::Mask(m) => apply_mask(m, value).unwrap_or_else(|| value.to_string()),
+        // A script decides what is shown (the engine, not this function).
+        Format::Custom { .. } => value.to_string(),
     }
+}
+
+/// A sample for the live preview next to the Format pickers: what `format` makes of a typical entry, as
+/// `(the entry, what the field shows)`. An empty `sample` takes a default one for the format. `None` for no format
+/// and for a custom script (the engine, not this code, decides what it shows).
+pub fn format_preview(f: &Format, sample: &str) -> Option<(String, String)> {
+    let sample = sample.trim();
+    let entry = match (f, sample.is_empty()) {
+        (Format::None | Format::Custom { .. }, _) => return None,
+        (_, false) => sample.to_string(),
+        (Format::Number { .. }, true) => "1234.5".to_string(),
+        (Format::Percent { .. }, true) => "0.256".to_string(),
+        // A fixed moment, shown in the format's own order so the entry parses back.
+        (Format::Date(fmt) | Format::Time(fmt), true) => format_date(DateTime { y: 2026, m: 10, d: 11, hh: 14, mm: 5, ss: 9 }, fmt),
+        (Format::Special(n), true) => ["12345", "123456789", "5551234567", "123456789"][(*n).min(3) as usize].to_string(),
+        (Format::Mask(m), true) => m.chars().filter(|c| matches!(c, '9' | 'A' | 'O' | 'X')).enumerate().map(|(i, c)| if c == '9' { char::from(b'1' + (i % 9) as u8) } else { char::from(b'a' + (i % 26) as u8) }).collect(),
+    };
+    let shown = format_value(f, &entry);
+    Some((entry, shown))
 }
 
 /// The Keystroke event on commit: does the value fit the format? Returns the value to store
@@ -815,6 +885,7 @@ pub fn keystroke(f: &Format, field: &str, value: &str) -> Result<String, String>
             apply_mask(m, value).filter(|s| mask_fits(m, s)).map(|_| value.trim().to_string()).ok_or_else(bad)
         }
         Format::Mask(m) => apply_mask(m, value).map(|_| value.trim().to_string()).ok_or_else(bad),
+        Format::Custom { .. } => Ok(value.to_string()),
     }
 }
 
@@ -838,6 +909,7 @@ pub fn partial_ok(f: &Format, text: &str) -> bool {
         Format::Date(_) | Format::Time(_) => text.chars().all(|c| c.is_alphanumeric() || c.is_whitespace() || "/-.:,".contains(c)),
         Format::Special(n) => prefix_fits(SPECIAL_MASKS[(*n).min(3) as usize]),
         Format::Mask(m) => prefix_fits(m),
+        Format::Custom { .. } => true,
     }
 }
 
@@ -948,7 +1020,7 @@ fn eval_notation(src: &str, value_of: &dyn Fn(&str) -> f64) -> Option<f64> {
 pub fn calculate(c: &Calculate, values: &dyn Fn(&str) -> Vec<String>) -> Option<String> {
     let num = |s: &String| make_number(s).unwrap_or(0.0);
     match c {
-        Calculate::None => None,
+        Calculate::None | Calculate::Custom(_) => None,
         Calculate::Simple { op, fields } => {
             let xs: Vec<f64> = fields.iter().flat_map(|f| values(f)).map(|v| num(&v)).collect();
             let v = match op {
