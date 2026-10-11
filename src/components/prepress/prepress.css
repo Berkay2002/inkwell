@@ -1,0 +1,237 @@
+/* Output Preview rail, its filmstrip and the three print production sheets. */
+.pp-panel .a11y-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pp-seg {
+  display: flex;
+  width: 100%;
+}
+.pp-seg button {
+  flex: 1 1 0;
+}
+.pp-h {
+  margin: 12px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+}
+.pp-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+.pp-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.pp-note.bad,
+.pp-total b.bad {
+  color: var(--danger, #c0392b);
+}
+.pp-plates {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pp-plate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+.pp-plate.off .pp-plate-name {
+  opacity: 0.55;
+}
+.pp-plate-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.pp-plate-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pp-plate-ink {
+  min-width: 4ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.pp-swatch {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.25);
+}
+.pp-total {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.pp-total b {
+  font-variant-numeric: tabular-nums;
+}
+.pp-hint {
+  font-size: 12px;
+}
+.pp-actions {
+  display: flex;
+  gap: 8px;
+}
+.pp-limit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pp-limit .tl-field {
+  width: 7ch;
+}
+.pp-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 10px;
+}
+.pp-thumb {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px;
+  color: var(--text);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.pp-thumb:hover {
+  background: var(--hover, rgb(127 127 127 / 0.12));
+}
+.pp-thumb.on {
+  border-color: var(--accent, #3b82f6);
+}
+.pp-thumb-page {
+  display: block;
+  width: 100%;
+  max-height: 140px;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.18);
+}
+.pp-thumb-page img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.pp-thumb-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.pp-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* the areas above the limit, in page points, over the page */
+.tac-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #e5192e;
+  background: rgb(229 25 46 / 0.18);
+  pointer-events: none;
+}
+/* sheets */
+.pp-sheet {
+  width: min(560px, 94vw);
+  height: auto;
+  max-height: 90vh;
+}
+/* a native fieldset turns every control inside it off; it is only that, not a visible group */
+.pp-lock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.pp-sheet-body {
+  min-height: 220px;
+}
+.pp-lead {
+  margin: 0;
+  font-weight: 600;
+}
+.pp-summary {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+.pp-progress {
+  width: 100%;
+}
+.pp-svg {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  background: var(--bg);
+}
+.pp-svg .pp-media,
+.pp-svg .pp-box {
+  fill: none;
+  stroke-width: calc(1px * var(--k, 1));
+  vector-effect: none;
+}
+.pp-svg .pp-media {
+  stroke: #8a8f98;
+  stroke-dasharray: calc(4px * var(--k, 1));
+}
+.pp-svg .pp-bleed {
+  fill: none;
+  stroke: #1f9d55;
+  stroke-width: calc(1px * var(--k, 1));
+}
+.pp-svg .pp-trim {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: calc(1px * var(--k, 1));
+}
+.pp-svg .pp-box.pp-crop {
+  stroke: #8a8f98;
+}
+.pp-svg .pp-box.pp-art {
+  stroke: #9333ea;
+}
+.pp-svg .pp-box.pp-trim {
+  stroke: #2563eb;
+}
+.pp-svg .pp-box.pp-bleed {
+  stroke: #1f9d55;
+}
+.pp-svg .pp-box.pp-new {
+  stroke: #e5192e;
+  stroke-width: calc(1.5px * var(--k, 1));
+}
+.pp-caption {
+  font-size: 12.5px;
+}
+.pp-margins {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+}

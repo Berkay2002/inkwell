@@ -210,8 +210,11 @@ export async function fetchTile(
   rank: number,
   stream: number,
   rev: number,
+  /** A registered print-production view: the tile comes from the `p` route in its plates. */
+  view?: number,
 ): Promise<TileData | null> {
-  const url = `${TILE_ORIGIN}/t/${doc}/${page}/${rot}/${scale}/${tx}/${ty}?e=${epoch}&r=${rank}&s=${stream}&g=${rev}`;
+  const route = view ? "p" : "t";
+  const url = `${TILE_ORIGIN}/${route}/${doc}/${page}/${rot}/${scale}/${tx}/${ty}?e=${epoch}&r=${rank}&s=${stream}&g=${rev}${view ? `&v=${view}` : ""}`;
   const res = await fetch(url);
   if (res.status === 410) return null;
   if (!res.ok) throw new Error(`tile ${res.status}`);
