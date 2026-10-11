@@ -12,10 +12,11 @@
 //! which a test keeps in step with the app's tool list.
 
 use super::actions::{Touch, data_block, err, guard, landed, lane, plural, str_arg};
-use super::tools::{Class, Ctx, Lane, Output, Tool, UiAction, clip, int, page_list_label, pages_requested, tool};
+use super::tools::{Class, Ctx, Lane, Output, Tool, UiAction, clip, int, page_list_label, page_of, pages_requested, tool};
 use crate::a11y::{self, Fix};
 use crate::marks::{AddRequest, Background, Bates, Date, HeaderFooter, Mark, MarkKind, Style, Watermark};
 use crate::redact::Sanitize;
+use crate::textedit::{self, BlockChange, RunChange};
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -79,6 +80,19 @@ pub fn tools() -> Vec<Arc<Tool>> {
             set_document_properties,
         )
         .checked(|c, _| guard_content(c)),
+        tool(
+            "edit_text",
+            "Replaces a piece of existing text on a page, keeping its font, size and colour: find is the exact text as get_text shows it (it must appear once on that page; make it longer when it does not), replace is the new text (an empty string deletes it). Only text that is really in the page (not a scanned picture: run ocr_document first for that) and whose font can be edited. A long replacement reflows within the block. One undo step.",
+            json!({ "type": "object", "additionalProperties": false, "required": ["page", "find", "replace"], "properties": {
+                "page": { "type": "integer", "minimum": 1 },
+                "find": { "type": "string", "description": "the exact text to replace (up to 500 characters)" },
+                "replace": { "type": "string", "description": "the new text; empty deletes" },
+            } }),
+            Class::Edit,
+            edit_text_label,
+            edit_text,
+        )
+        .checked(edit_text_check),
         tool(
             "sanitize_document",
             "Removes hidden information from the document: metadata (author, creation tool, XMP), hidden layers, scripts and \
@@ -180,7 +194,7 @@ const OPEN_TOOLS: [&str; 15] = [
 
 // ---- shared -----------------------------------------------------------------------------------
 
-fn engine<'a>(c: &'a Ctx) -> Result<Lane<'a>, String> {
+pub(super) fn engine<'a>(c: &'a Ctx) -> Result<Lane<'a>, String> {
     c.host.lane().ok_or_else(|| "This document is not available to the assistant's tools from here.".to_string())
 }
 
@@ -189,7 +203,7 @@ fn live_pages(l: &Lane) -> Result<u32, String> {
 }
 
 /// The pre-approval check of a tool that only needs the signature guard (content change).
-fn guard_content(c: &Ctx) -> Result<Option<String>, String> {
+pub(super) fn guard_content(c: &Ctx) -> Result<Option<String>, String> {
     match c.host.lane() {
         Some(l) => guard(&l, Touch::Content, &[]).map(|()| None),
         None => Ok(None),
@@ -209,7 +223,7 @@ fn pages_text(pages: &[u32], count: u32) -> String {
     }
 }
 
-fn text_arg(a: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
+pub(super) fn text_arg(a: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
     match a.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => {
@@ -247,7 +261,7 @@ fn color_arg(a: &Value, key: &str) -> Result<Option<[f64; 3]>, String> {
     Ok(Some([v(0), v(2), v(4)]))
 }
 
-fn unknown_keys(a: &Value, known: &[&str], what: &str) -> Result<(), String> {
+pub(super) fn unknown_keys(a: &Value, known: &[&str], what: &str) -> Result<(), String> {
     if let Some(o) = a.as_object() {
         if let Some(k) = o.keys().find(|k| !known.contains(&k.as_str())) {
             return Err(format!("{what} has no option \"{k}\". The options are: {}.", known.join(", ")));
@@ -579,6 +593,121 @@ fn set_document_properties(c: &Ctx, a: &Value) -> Result<Output, String> {
     Ok(landed(&l, st, format!("{words}.")))
 }
 
+// ---- editing text ---------------------------------------------------------------------------------
+
+fn edit_text_label(a: &Value) -> String {
+    let page = int(a, "page").map(|p| format!(" on p. {p}")).unwrap_or_default();
+    match (a.get("find").and_then(Value::as_str), a.get("replace").and_then(Value::as_str)) {
+        (Some(f), Some("")) => format!("Delete “{}”{page}", clip(f, 50)),
+        (Some(f), Some(r)) => format!("Replace “{}” with “{}”{page}", clip(f, 40), clip(r, 40)),
+        _ => format!("Edit text{page}"),
+    }
+}
+
+struct TextPlan {
+    page: u32,
+    rev: u32,
+    index: u32,
+    change: BlockChange,
+    find: String,
+    replace: String,
+}
+
+fn collapse(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn plan_text(l: &Lane, a: &Value) -> Result<TextPlan, String> {
+    unknown_keys(a, &["page", "find", "replace"], "edit_text")?;
+    let page = page_of(a, "page", live_pages(l)?)?;
+    let find = a.get("find").and_then(Value::as_str).filter(|f| !f.trim().is_empty()).ok_or("\"find\" is required: the exact text to replace.")?;
+    if find.chars().count() > 500 {
+        return Err("\"find\" is too long (at most 500 characters).".into());
+    }
+    let replace = a.get("replace").and_then(Value::as_str).ok_or("\"replace\" is required (an empty string deletes the text).")?;
+    if replace.chars().count() > 2000 {
+        return Err("\"replace\" is too long (at most 2000 characters).".into());
+    }
+    if find == replace {
+        return Err("\"find\" and \"replace\" are the same. Nothing was changed.".into());
+    }
+    let blocks = textedit::blocks(l.eng, l.doc, page).map_err(err)?;
+    let count = |text: &str, what: &str| text.matches(what).count();
+    let mut normalized = false;
+    let mut needle = find.to_string();
+    let mut hits: Vec<(usize, usize)> =
+        blocks.blocks.iter().enumerate().map(|(i, b)| (i, count(&b.text, &needle))).filter(|(_, n)| *n > 0).collect();
+    if hits.is_empty() {
+        // the line breaks of a block are the page's, not the reader's
+        needle = collapse(find);
+        hits = blocks.blocks.iter().enumerate().map(|(i, b)| (i, count(&collapse(&b.text), &needle))).filter(|(_, n)| *n > 0).collect();
+        normalized = !hits.is_empty();
+    }
+    let total: usize = hits.iter().map(|(_, n)| n).sum();
+    if total == 0 {
+        let hint = match blocks.areas.first() {
+            Some(area) => format!(" The page also has text that cannot be edited: {}.", area.reason),
+            None => String::new(),
+        };
+        return Err(format!(
+            "“{}” is not in the editable text of p. {}. Check the spelling against get_text; text in a scanned picture needs ocr_document first.{hint}",
+            clip(find, 80),
+            page + 1
+        ));
+    }
+    if total > 1 {
+        return Err(format!(
+            "“{}” appears {total} times on p. {}. Give a longer \"find\" that appears once (a few more words around it).",
+            clip(find, 80),
+            page + 1
+        ));
+    }
+    let b = &blocks.blocks[hits[0].0];
+    if !b.editable {
+        return Err(format!("That text cannot be edited: {}. Tell the user.", b.reason.as_deref().unwrap_or("its font does not allow it")));
+    }
+    let uniform = b
+        .runs
+        .windows(2)
+        .all(|w| w[0].font == w[1].font && w[0].size == w[1].size && w[0].color == w[1].color && w[0].bold == w[1].bold && w[0].italic == w[1].italic);
+    let change = if !normalized && !uniform {
+        // the replaced text has to sit inside one run, so every run keeps its own style
+        let k = b.runs.iter().position(|r| r.text.contains(&needle)).ok_or(
+            "That text spans parts of the block that are formatted differently. Replace a shorter piece that sits in one style, or tell the user to edit it by hand.",
+        )?;
+        let runs = b
+            .runs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| RunChange { source: Some(i), text: (i == k).then(|| r.text.replacen(&needle, replace, 1)), ..Default::default() })
+            .collect();
+        BlockChange { runs: Some(runs), ..Default::default() }
+    } else {
+        let base = if normalized { collapse(&b.text) } else { b.text.clone() };
+        BlockChange { text: Some(base.replacen(&needle, replace, 1)), ..Default::default() }
+    };
+    Ok(TextPlan { page, rev: blocks.rev, index: b.index, change, find: find.to_string(), replace: replace.to_string() })
+}
+
+fn edit_text_check(c: &Ctx, a: &Value) -> Result<Option<String>, String> {
+    let Some(l) = c.host.lane() else { return Ok(None) };
+    guard(&l, Touch::Content, &[])?;
+    let p = plan_text(&l, a)?;
+    Ok(Some(format!("p. {}: “{}” → “{}”", p.page + 1, clip(&p.find, 80), clip(&p.replace, 80))))
+}
+
+fn edit_text(c: &Ctx, a: &Value) -> Result<Output, String> {
+    let l = lane(c)?;
+    guard(&l, Touch::Content, &[])?;
+    let p = plan_text(&l, a)?;
+    let done = textedit::edit(l.eng, l.doc, p.rev, p.page, p.index, &p.change, l.source.clone()).map_err(err)?;
+    let mut said = format!("Replaced “{}” with “{}” on p. {}.", clip(&p.find, 60), clip(&p.replace, 60), p.page + 1);
+    if let Some(f) = done.fallbacks.first() {
+        let _ = write!(said, " The block's font could not show the new text, so {} was used ({}). Tell the user.", f.font, f.reason);
+    }
+    Ok(landed(&l, done.state, said))
+}
+
 // ---- sanitize -----------------------------------------------------------------------------------
 
 fn sanitize_opts(a: &Value) -> Result<Sanitize, String> {
@@ -814,7 +943,7 @@ fn fix_accessibility(c: &Ctx, a: &Value) -> Result<Output, String> {
 
 // ---- preflight --------------------------------------------------------------------------------------
 
-fn profile_arg(a: &Value) -> Result<crate::preflight::Profile, String> {
+pub(super) fn profile_arg(a: &Value) -> Result<crate::preflight::Profile, String> {
     let name = str_arg(a, "profile").ok_or("\"profile\" is required: pdfa-1b, pdfa-2b, pdfa-3b, pdfa-2u, pdfua-1 or pdfx-4.")?;
     serde_json::from_value(json!(name)).map_err(|_| format!("Unknown profile \"{name}\". Use pdfa-1b, pdfa-2b, pdfa-3b, pdfa-2u, pdfua-1 or pdfx-4."))
 }

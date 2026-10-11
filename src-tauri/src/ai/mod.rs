@@ -5,6 +5,7 @@
 pub mod actions;
 pub mod chat;
 pub mod codex;
+pub mod jobs;
 pub mod rpc;
 pub mod text;
 pub mod toolbox;
@@ -16,7 +17,7 @@ pub use chat::Assistant;
 use chat::{AskRequest, ChatEvent, Prepared, Status};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tauri::State;
+use tauri::{Manager, State};
 use tauri::ipc::Channel;
 use text::DocText;
 
@@ -51,13 +52,16 @@ struct ActingHost {
     inner: EngineHost,
     turn: String,
     edited: AtomicBool,
+    /// The window the question came from: files the assistant makes are offered to it as open tokens.
+    app: tauri::AppHandle,
+    window: String,
 }
 
 impl ActingHost {
-    fn new(eng: Arc<Engine>, doc: DocId) -> Self {
+    fn new(eng: Arc<Engine>, doc: DocId, app: tauri::AppHandle, window: String) -> Self {
         static TURNS: AtomicU64 = AtomicU64::new(1);
         let n = TURNS.fetch_add(1, Ordering::Relaxed);
-        ActingHost { inner: EngineHost { eng, doc }, turn: format!("assistant-{n}"), edited: AtomicBool::new(false) }
+        ActingHost { inner: EngineHost { eng, doc }, turn: format!("assistant-{n}"), edited: AtomicBool::new(false), app, window }
     }
 }
 
@@ -86,6 +90,15 @@ impl tools::DocHost for ActingHost {
             source: EditSource::Assistant { turn: self.turn.clone() },
             edited: &self.edited,
         })
+    }
+
+    fn offer_file(&self, path: &str) -> Option<String> {
+        let paths = self.app.try_state::<crate::paths::Paths>()?;
+        Some(paths.issue_open(&self.window, path.to_string()).token)
+    }
+
+    fn tesseract(&self) -> Option<std::path::PathBuf> {
+        self.app.try_state::<Arc<crate::tools::paths::ToolPaths>>()?.tesseract()
     }
 }
 
@@ -126,9 +139,16 @@ pub async fn ai_prepare(eng: Eng<'_>, ai: Ai<'_>, doc: DocId) -> Result<Prepared
 
 /// Starts a question; the answer streams through `on_event`. Returns once the turn is queued.
 #[tauri::command]
-pub fn ai_ask(eng: Eng<'_>, ai: Ai<'_>, doc: DocId, req: AskRequest, on_event: Channel<ChatEvent>) -> Result<(), String> {
+pub fn ai_ask(
+    window: tauri::Window,
+    eng: Eng<'_>,
+    ai: Ai<'_>,
+    doc: DocId,
+    req: AskRequest,
+    on_event: Channel<ChatEvent>,
+) -> Result<(), String> {
     let (eng, ai) = (eng.inner().clone(), ai.inner().clone());
-    let host = Arc::new(ActingHost::new(eng.clone(), doc));
+    let host = Arc::new(ActingHost::new(eng.clone(), doc, window.app_handle().clone(), window.label().to_string()));
     let loader = {
         let ai = ai.clone();
         move || text_for(&eng, &ai, doc)

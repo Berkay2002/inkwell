@@ -243,7 +243,7 @@ function Summary({ doc }: { doc: DocState }) {
   if (bot)
     return (
       <div className="ax-body">
-        <Answer doc={doc} m={bot} variant="floating" />
+        <Answer doc={doc} m={bot} variant="floating" isLast={false} />
       </div>
     );
   if (typeof prep === "object" && prep !== null && !prep.enough)

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { touchedRedaction, trailSummary, waiting } from "../../lib/activity";
 import type { Msg } from "../../lib/aiStore";
 import { useRedact } from "../../lib/redact";
+import { useStore } from "../../store";
 import { ApprovalCard } from "./ApprovalCard";
 import "./activity.css";
 
@@ -49,6 +50,20 @@ export function ActivityTrail({ doc, m, worked = false }: { doc: number; m: Msg;
           <button className="ax-btn" onClick={() => reviewInRedact(doc)}>
             Review in Redact
           </button>
+        </div>
+      )}
+      {(m.files?.length ?? 0) > 0 && (
+        <div className="ax-row ax-files">
+          {m.files?.map((f) => (
+            <button
+              key={f.path}
+              className="ax-btn ax-file"
+              title={`Open ${f.name}`}
+              onClick={() => void useStore.getState().openPath(f.path, f.token)}
+            >
+              Open {f.name}
+            </button>
+          ))}
         </div>
       )}
       {cards.map((a) => (

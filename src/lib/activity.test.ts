@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isVerified, touchedRedaction, trailSummary, waiting } from "./activity";
+import { addOffer, isVerified, touchedRedaction, trailSummary, waiting } from "./activity";
 import type { Activity, Citation } from "./ai";
 
 const act = (label: string, state: Activity["state"] = "done", id = label): Activity => ({
@@ -23,6 +23,22 @@ describe("activity trail", () => {
     expect(trailSummary([act("x", "failed")])).toBe("x (failed)");
     const many = Array.from({ length: 9 }, (_, i) => act(`Read p. ${i}`));
     expect(trailSummary(many).endsWith("· +3 more")).toBe(true);
+  });
+
+  it("says how far a long job is while it runs", () => {
+    const run = (detail: string | null): Activity => ({ ...act("Make a compressed copy (smallest)", "running"), detail });
+    expect(trailSummary([run("Compressing: 40%")])).toBe("Make a compressed copy (smallest) (Compressing: 40%)");
+    expect(trailSummary([run(null)])).toBe("Make a compressed copy (smallest)");
+    // done: the last progress line is not repeated
+    expect(trailSummary([{ ...run("Compressing: 100%"), state: "done" }])).toBe("Make a compressed copy (smallest)");
+  });
+
+  it("offers each made file once", () => {
+    const f = { name: "a (compressed).pdf", path: "C:/x/a (compressed).pdf", token: "t1" };
+    const one = addOffer(undefined, f);
+    expect(one).toEqual([f]);
+    expect(addOffer(one, { ...f, token: "t2" })).toBe(one);
+    expect(addOffer(one, { name: "a.txt", path: "C:/x/a.txt", token: "t3" })).toHaveLength(2);
   });
 
   it("lists only the calls that wait for the user", () => {

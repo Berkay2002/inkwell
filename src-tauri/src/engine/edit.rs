@@ -1299,7 +1299,7 @@ impl Engine {
         redaction: bool,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, redaction, false, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, redaction, false, false, |d| Ok((f(d)?, None)))
     }
 
     /// [`Engine::apply_custom`] for an edit that takes content out of the page (editing existing
@@ -1312,7 +1312,21 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, false, true, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, false, true, false, |d| Ok((f(d)?, None)))
+    }
+
+    /// [`Engine::apply_removing`] for an edit that takes document-level information out (the
+    /// metadata, `/Info`, the XMP): the step's snapshot is a full garbage-collected rewrite, since an
+    /// incremental update of the file still shows what the new trailer no longer names. It is not a
+    /// redaction: nothing is verified and the document is not marked redacted.
+    pub fn apply_sanitizing(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
+    ) -> Result<EditState> {
+        self.custom(id, label, source, false, true, true, |d| Ok((f(d)?, None)))
     }
 
     /// A redaction whose result is a finished file: `f` changes the document and returns the
@@ -1326,7 +1340,7 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Vec<u8>)>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, true, false, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
+        self.custom(id, label, source, true, false, false, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
     }
 
     /// Runs `f` on the authoritative document (marks included) without changing it. `f` must not
@@ -1345,6 +1359,7 @@ impl Engine {
         source: EditSource,
         redaction: bool,
         removes: bool,
+        full: bool,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
     ) -> Result<EditState> {
         let entry = self.entry(id)?;
@@ -1356,7 +1371,7 @@ impl Engine {
             let exact = bytes.is_some();
             let snap = if let Some(b) = bytes {
                 Snap { len: b.len(), bytes: Arc::new(b) }
-            } else if redaction {
+            } else if redaction || full {
                 let out = write_doc(&ed.doc.doc, rewrite_opts(), len)?;
                 Snap { len: out.len(), bytes: Arc::new(out) }
             } else {

@@ -477,7 +477,8 @@ fn certify(h: &Host, p: Option<i32>, lock: Option<&str>) {
             let mut form = match d.catalog()?.get_dict("AcroForm")? {
                 Some(f) => f,
                 None => {
-                    let f = d.new_object_from_str("<< /Fields [] >>")?;
+                    // an indirect object, as in a real file, so adding to its array is a change of it
+                    let f = d.add_object(&d.new_object_from_str("<< /Fields [] >>")?)?;
                     d.catalog()?.dict_put("AcroForm", f.clone())?;
                     f
                 }
@@ -648,4 +649,27 @@ fn the_comment_card_says_how_many_matches_and_what_the_note_says() {
     assert_eq!((t.label)(&json!({ "kind": "reply", "parent": "p1#2", "text": "Agreed" })), "Reply to a comment: “Agreed”");
     let org = tools().into_iter().find(|t| t.name == "organize_pages").unwrap();
     assert_eq!((org.label)(&json!({ "action": "insert_blank" })), "Insert a blank page at the end");
+}
+
+// ---- the coverage contract ----------------------------------------------------------------------
+
+/// `src/lib/aiCoverage.json`: which of the app's tools the assistant covers. The same file is
+/// checked against the app's tool ids by `aiCoverage.test.ts`.
+#[test]
+fn the_coverage_file_lists_exactly_the_registry_and_maps_to_real_tools() {
+    let file: Value = serde_json::from_str(include_str!("../../../../src/lib/aiCoverage.json")).unwrap();
+    let all = crate::ai::tools::builtin();
+    let mut registry: Vec<String> = all.iter().map(|t| t.name.clone()).collect();
+    registry.sort_unstable();
+    let mut listed: Vec<String> = file["registry"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    listed.sort_unstable();
+    assert_eq!(listed, registry, "src/lib/aiCoverage.json `registry` must list exactly the tools in ai::tools::builtin()");
+    assert!(registry.len() <= 40, "{} tools: keep the list coarse", registry.len());
+    for (id, name) in file["tools"].as_object().unwrap() {
+        assert!(registry.iter().any(|n| n == name.as_str().unwrap()), "{id} maps to {name}, which is not a tool");
+    }
+    for (id, why) in file["excluded"].as_object().unwrap() {
+        assert!(why.as_str().unwrap().trim().len() > 10, "{id} needs a reason");
+        assert!(file["tools"].get(id).is_none(), "{id} is both covered and excluded");
+    }
 }

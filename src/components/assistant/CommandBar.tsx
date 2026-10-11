@@ -346,7 +346,7 @@ function Thread({ doc, open }: { doc: DocState; open: boolean }) {
         </div>,
       );
     if (m.at != null) prevAt = m.at;
-    rows.push(m.role === "user" ? <Question key={m.id} doc={doc.id} m={m} /> : <Answer key={m.id} doc={doc} m={m} variant="bar" isLast={m === last} plain />);
+    rows.push(m.role === "user" ? <Question key={m.id} doc={doc.id} m={m} /> : <Answer key={m.id} doc={doc} m={m} variant="bar" isLast={m === last} />);
   }
   if (restored != null && restored >= list.length) rows.push(note);
 

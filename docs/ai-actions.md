@@ -30,7 +30,7 @@ match, shows them in the Redact rail for review, and applies on the user's word.
 | `destructive` | yes | yes | no | delete pages |
 | `permanent` | yes | yes | **yes** | `redact_apply`: cannot be taken back from the saved file |
 
-## The tools (phase 1 and 2)
+## The tools (phases 1 and 2)
 
 | Tool | Class | What it does |
 |---|---|---|
@@ -48,6 +48,39 @@ match, shows them in the Redact rail for review, and applies on the user's word.
 
 The system prompt (`ai/text.rs::BASE_INSTRUCTIONS`) tells the model it can do these with approval, to mark first
 and let the user review, and to call `redact_apply` only when asked.
+
+## Phase 3: the rest of the app
+
+The assistant covers most of the All tools list with coarse tools (34 in all, kept under 40): one tool per job, not
+one per button. `src/lib/aiCoverage.json` is the contract: every tool id of `toolItems.ts` and `ToolId` is mapped to
+the assistant tool that does it, or excluded with a reason; `aiCoverage.test.ts` (ids) and a Rust test
+(`registry` == `ai::tools::builtin()`) fail when a tool is added to the app and not to the file.
+Source: `ai/toolbox.rs` (changes and checks that stay in the document), `ai/jobs.rs` (tools that take time or make
+files).
+
+| Tool | Class | What it does |
+|---|---|---|
+| `page_marks` | edit | `kind` header_footer (six places, `<<1 of n>>` tokens), watermark, background, bates; `action` add / update / remove; `pages`. Add on a page that has the kind is an `Err` (use update). Picture marks need a file the user picks: not offered. |
+| `set_document_properties` | edit | title, author, subject, keywords; a no-op is an `Err` |
+| `edit_text` | edit | replace one piece of text (`find` must appear once on the page) keeping font, size and colour; text in a scan or in a font that cannot be edited is an `Err` that says so |
+| `sanitize_document` | destructive | metadata, hidden layers, scripts and actions, attached files (on) / hidden text, ALL comments, bookmarks (off); a full-rewrite snapshot, so the removed data is gone from the saved file |
+| `check_accessibility` / `fix_accessibility` | read / edit | the a11y checker's list; safe fixes (title, language, tab order, tooltips, figure alt, autotag) as one step |
+| `check_preflight` | read | PDF/A, PDF/UA, PDF/X check: failing rules and what a conversion could settle |
+| `open_tool` | read | opens protect, security, merge, search-advanced (and the tools it can also run) for the user |
+| `list_open_documents` / `compare_documents` | read | ids and names; changes between this document and the saved file or another open one |
+| `compress_document` | edit | a smaller copy next to the document; wants the saved file (unsaved changes are an `Err`) |
+| `ocr_document` | edit | invisible text layer, one undo step; pages that have text are skipped; Windows or Tesseract engine |
+| `export_document` | edit | text, HTML, Word, images, extract_images into a new file or folder next to the document |
+| `convert_to_standard` | edit | a converted copy for PDF/A, PDF/UA or PDF/X plus a recheck; the original stays |
+| `create_blank_pdf` | edit | a new blank PDF (1-500 pages) offered as a separate document |
+
+Rules for the job tools: output is always a new file next to the document under a free name (`unique_stem`:
+`a (compressed).pdf`, `a (compressed) (2).pdf`), never over a file; progress goes to the activity trail line while
+it runs; the panel's Stop ends the job and leaves nothing half-written; a made file is offered under the answer as
+**Open `<name>`** (`UiAction::File`, opened with its token); `open_tool` runs the tool as the All tools list would
+(`UiAction::OpenTool`, `aiOpenTool.ts`). Excluded for good (reasons in `aiCoverage.json`): digital signing and
+certifying, passwords and permissions, printing, overwriting the original, opening links, and anything that needs a
+file the user must pick (picture marks, insert image, merge).
 
 ## Rules every action tool follows
 
@@ -74,6 +107,8 @@ and let the user review, and to call `redact_apply` only when asked.
   (`touchedRedaction`): opens the rail on the marks, or on the verification of a redaction just applied.
 - A redaction the assistant applied opens the Redact rail on its verify view, unless the assistant is docked
   (the rail would replace it; the button is there instead).
+- A long job shows its progress in the one-line trail (`Make a compressed copy (smallest) (Compressing: 40%)`).
+- A file the assistant made is an **Open `<name>`** button under the answer (`Msg.files`, once per path).
 
 ## Known limits
 
@@ -81,3 +116,6 @@ and let the user review, and to call `redact_apply` only when asked.
   as it was; action results say so. Page images are current.
 - Nothing is saved by the assistant. "Redacted" means redacted in the open document and checked; Save writes it.
 - Regex uses Rust syntax and a 1 MB compiled-size limit.
+- `compress_document`, `compare_documents` (with the saved file) and `export_document` work on the saved file or
+  the live document as stated in their descriptions; the assistant cannot save, so it asks the user to.
+- `convert_to_standard` applies only the safe fixes; what still fails is reported, never hidden.

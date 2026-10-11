@@ -325,6 +325,19 @@ pub fn run_ocr(
     progress: &(dyn Fn(ocr::Progress) + Sync),
     cancel: &AtomicBool,
 ) -> Result<OcrOutcome, ToolError> {
+    run_ocr_as(eng, req, save_as, backend, progress, cancel, EditSource::User)
+}
+
+/// [`run_ocr`] with the edit made under `source` (the assistant's turn, so it undoes with it).
+pub fn run_ocr_as(
+    eng: &Engine,
+    req: &OcrRequest,
+    save_as: Option<&Path>,
+    backend: &dyn Recognizer,
+    progress: &(dyn Fn(ocr::Progress) + Sync),
+    cancel: &AtomicBool,
+    source: EditSource,
+) -> Result<OcrOutcome, ToolError> {
     let opts = options_for(eng, req)?;
     let last = AtomicU32::new(0);
     let mono = |p: ocr::Progress| {
@@ -332,7 +345,7 @@ pub fn run_ocr(
             progress(p);
         }
     };
-    let (rev, source) = eng.doc_source(req.doc)?;
+    let (rev, doc_source) = eng.doc_source(req.doc)?;
 
     if let Some(out) = save_as {
         // The dialog may confirm replacing a file, but never the document's own (the source may be
@@ -341,7 +354,7 @@ pub fn run_ocr(
             return Err(OcrError::Io("output must be a different file than the input".into()).into());
         }
         // A new file is made from what the document shows now: pending edits included.
-        return Ok(match &source {
+        return Ok(match &doc_source {
             DocSource::Path(p) => ocr_to_file(Path::new(p), out, backend, &opts, &mono, cancel)?,
             DocSource::Bytes(b, n) => {
                 let tmp = std::env::temp_dir().join(format!("inkwell-ocr-src-{}-{}.pdf", std::process::id(), req.doc));
@@ -353,7 +366,7 @@ pub fn run_ocr(
         });
     }
 
-    let rec = match &source {
+    let rec = match &doc_source {
         DocSource::Path(p) => ocr::recognize(&Input::Path(Path::new(p)), backend, &opts, &mono, cancel)?,
         DocSource::Bytes(b, n) => ocr::recognize(&Input::Bytes(&b[..*n]), backend, &opts, &mono, cancel)?,
     };
@@ -375,7 +388,7 @@ pub fn run_ocr(
         eng.apply_custom(
             req.doc,
             format!("Recognize text ({to_write} page{})", if to_write == 1 { "" } else { "s" }),
-            EditSource::User,
+            source,
             false,
             |pdf| {
                 // Page indices belong to the generation the pages were read from: an edit that

@@ -108,6 +108,15 @@ pub trait DocHost: Send + Sync {
     fn lane(&self) -> Option<Lane<'_>> {
         None
     }
+    /// An open token for a file the assistant just made, so the UI can offer to open it (no path is
+    /// ever sent back to the backend). `None` where there is no window behind the host.
+    fn offer_file(&self, _path: &str) -> Option<String> {
+        None
+    }
+    /// The Tesseract the user configured, for the recognize-text tool.
+    fn tesseract(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// The engine side an action tool works through: every change is one step of the document's own
@@ -290,6 +299,7 @@ pub fn builtin() -> Vec<Arc<Tool>> {
     let mut all = read_tools();
     all.extend(super::actions::tools());
     all.extend(super::toolbox::tools());
+    all.extend(super::jobs::tools());
     all
 }
 

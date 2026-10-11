@@ -40,8 +40,10 @@ vi.mock("./ai", () => ({
 
 vi.mock("./history", () => ({ historyCheckpoint: vi.fn(() => Promise.resolve(null)) }));
 vi.mock("./edit", () => ({ applyState: vi.fn() }));
+vi.mock("./aiOpenTool", () => ({ openAppTool: vi.fn(() => Promise.resolve(true)) }));
 
 import * as ai from "./ai";
+import { openAppTool } from "./aiOpenTool";
 import { applyState } from "./edit";
 import { historyCheckpoint } from "./history";
 import { useRedact } from "./redact";
@@ -258,6 +260,26 @@ describe("assistant store", () => {
       emit({ kind: "ui", action: { type: "show", page: 3, rects: [[10, 300, 50, 320]], quote: "q" } });
       expect(goTo).toHaveBeenLastCalledWith(1, 3, 210);
       expect(useAi.getState().mark).toMatchObject({ doc: 1, page: 3, n: 0 });
+    });
+
+    it("offers a file the assistant made once, and moves nothing", () => {
+      start();
+      const file = { type: "file", name: "a (compressed).pdf", path: "C:/x/a (compressed).pdf", token: "t1" };
+      emit({ kind: "ui", action: file } as ChatEvent);
+      emit({ kind: "ui", action: { ...file, token: "t2" } } as ChatEvent);
+      emit({ kind: "ui", action: { type: "file", name: "a.txt", path: "C:/x/a.txt", token: "t3" } } as ChatEvent);
+      expect(bot().files).toEqual([
+        { name: "a (compressed).pdf", path: "C:/x/a (compressed).pdf", token: "t1" },
+        { name: "a.txt", path: "C:/x/a.txt", token: "t3" },
+      ]);
+      expect(goTo).not.toHaveBeenCalled();
+    });
+
+    it("opens the tool the assistant asks for with the document it is working on", () => {
+      start();
+      emit({ kind: "ui", action: { type: "openTool", tool: "protect" } } as ChatEvent);
+      expect(openAppTool).toHaveBeenCalledWith("protect", expect.objectContaining({ id: 1, name: "a.pdf" }));
+      expect(goTo).not.toHaveBeenCalled();
     });
   });
 

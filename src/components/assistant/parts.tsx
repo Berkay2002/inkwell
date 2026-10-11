@@ -300,6 +300,7 @@ export function Messages({ doc, variant, lastOnly = false }: { doc: DocState; va
   }, [all, lastOnly]);
   const el = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  const last = messages[messages.length - 1];
 
   useLayoutEffect(() => {
     const e = el.current;
@@ -321,7 +322,7 @@ export function Messages({ doc, variant, lastOnly = false }: { doc: DocState; va
             {m.text}
           </div>
         ) : (
-          <Answer key={m.id} doc={doc} m={m} variant={variant} />
+          <Answer key={m.id} doc={doc} m={m} variant={variant} isLast={m === last} />
         ),
       )}
     </div>
@@ -407,7 +408,7 @@ function PageSketch({ doc, c }: { doc: DocState; c: Citation }) {
   );
 }
 
-export function Answer({ doc, m, variant }: { doc: DocState; m: Msg; variant: Variant }) {
+export function Answer({ doc, m, variant, isLast }: { doc: DocState; m: Msg; variant: Variant; isLast: boolean }) {
   const mark = useAi((s) => s.mark);
   const hide = useAi((s) => s.settings.hideSources);
   const cites = useMemo(() => new Map(m.citations.filter(isVerified).map((c) => [c.n, c])), [m.citations]);

@@ -53,9 +53,9 @@ pub(super) fn state(l: &Lane) -> Result<EditState, String> {
     l.eng.edit_state(l.doc).map_err(err)
 }
 
-const REWRITE: &str = "This document is digitally signed and could not be read cleanly (Inkwell had to repair it), so \
-                        saving any change would rewrite the file and destroy the signature. Tell the user; they can \
-                        save a copy of the file and make the change there.";
+const REWRITE: &str = "This document is digitally signed and saving it would have to rewrite the whole file (Inkwell had \
+                        to repair it when opening it, or it was redacted in this session), which destroys the \
+                        signature. Tell the user; they can save a copy of the file and make the change there.";
 
 /// What a tool does to a signed file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +76,8 @@ pub(super) fn guard(l: &Lane, touch: Touch, fields: &[String]) -> Result<(), Str
     if !s.signed {
         return Ok(());
     }
-    if s.rewrite {
+    // repaired on open, or redacted in this session: either way every save is a full rewrite
+    if s.rewrite || l.eng.edit_state(l.doc).map_err(err)?.redacted {
         return Err(REWRITE.into());
     }
     match touch {

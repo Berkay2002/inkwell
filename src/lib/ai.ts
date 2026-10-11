@@ -83,7 +83,19 @@ export type UiAction =
   | { type: "goTo"; page: number }
   | { type: "show"; page: number; rects: Rect4[]; quote: string }
   /** The assistant changed the document: this is its new generation (pages, undo label, marks). */
-  | { type: "edited"; state: EditState; redacted: RedactReport | null };
+  | { type: "edited"; state: EditState; redacted: RedactReport | null }
+  /** The assistant made a new file next to the document (compress, export, convert, create): the message offers
+   *  to open it. `token` is the open token the backend minted for `path`. */
+  | ({ type: "file" } & FileOffer)
+  /** Open one of the app's tools (`toolItems` ids) for what the assistant may not do itself. */
+  | { type: "openTool"; tool: string };
+
+/** A file the assistant made, offered under its answer as "Open <name>". */
+export interface FileOffer {
+  name: string;
+  path: string;
+  token: string;
+}
 
 export type ChatEvent =
   | { kind: "status"; phase: "reading" | "connecting" | "thinking" }

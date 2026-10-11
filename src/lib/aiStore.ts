@@ -1,5 +1,7 @@
 import { create } from "zustand";
+import { addOffer } from "./activity";
 import * as ai from "./ai";
+import { openAppTool } from "./aiOpenTool";
 import { applyState } from "./edit";
 import { useForms } from "./forms";
 import { historyCheckpoint } from "./history";
@@ -31,6 +33,8 @@ export interface Msg {
   error?: string;
   hint?: string | null;
   timing?: { firstTokenMs: number | null; totalMs: number; prepMs: number };
+  /** Files the assistant made this turn (compress, export, convert, create): the message offers to open each. */
+  files?: ai.FileOffer[];
   /** When the message was made (ms since the epoch). */
   at?: number;
 }
@@ -212,6 +216,8 @@ export const useAi = create<AiStore>((set, get) => {
             case "ui": {
               const a = e.action;
               if (a.type === "edited") adopt(doc, a);
+              else if (a.type === "file") patchMsg(doc, bot.id, (m) => ({ ...m, files: addOffer(m.files, { name: a.name, path: a.path, token: a.token }) }));
+              else if (a.type === "openTool") void openAppTool(a.tool, useStore.getState().docs[doc] ?? null);
               else reveal(doc, a.page, a.type === "show" ? a.rects : [], 0);
               break;
             }

@@ -381,11 +381,11 @@ pub async fn redact_apply(app: tauri::AppHandle, eng: Eng<'_>, doc: DocId, optio
 }
 
 /// Sanitize without a redaction (the assistant's "remove hidden information"): one undo step that
-/// removes what `o` names. `apply_removing`, so a save rewrites the file and what was removed is not
-/// left in the saved bytes.
+/// removes what `o` names. `apply_sanitizing`: the step is a full rewrite, so what was removed (the
+/// trailer's /Info included) is not left in the document or in the saved bytes.
 pub fn sanitize_doc(eng: &Engine, doc: DocId, o: Sanitize, source: EditSource) -> Result<(EditState, SanitizeReport)> {
     let mut report = SanitizeReport::default();
-    let state = eng.apply_removing(doc, "Remove hidden information".into(), source, |d| {
+    let state = eng.apply_sanitizing(doc, "Remove hidden information".into(), source, |d| {
         report = super::sanitize(d, &o, &[]).map_err(err)?;
         let r = &report;
         let removed = r.metadata + r.hidden_layer_blocks + r.hidden_text_pages + r.scripts_actions + r.embedded_files + r.annotations + r.form_fields + r.bookmarks;

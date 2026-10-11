@@ -74,3 +74,14 @@
 .ax-approve .ax-row {
   margin-top: 9px;
 }
+
+/* files the assistant made: one "Open <name>" button each */
+.ax-files {
+  flex-wrap: wrap;
+}
+.ax-file {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

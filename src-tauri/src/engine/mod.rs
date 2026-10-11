@@ -825,6 +825,11 @@ impl Engine {
         self.entry(id)
     }
 
+    /// The open documents, in no particular order.
+    pub fn open_docs(&self) -> Vec<Arc<DocEntry>> {
+        self.docs.read().values().cloned().collect()
+    }
+
     /// What the document currently shows, with the generation it belongs to (read together, so a
     /// page index taken from it is valid for that `rev`): the snapshot after an edit, the file
     /// on disk before the first one.

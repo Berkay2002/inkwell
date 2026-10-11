@@ -256,3 +256,48 @@ fn the_toolbox_classes_are_honest() {
         assert!(!t.description.is_empty() && t.description.len() < 1500, "{}", t.name);
     }
 }
+
+// ---- editing text -------------------------------------------------------------------------------------
+
+#[test]
+fn editing_text_replaces_one_place_in_one_step_and_says_when_it_cannot() {
+    let h = fixture_doc("tb-edit-text");
+    let s = steps(&h);
+    let t = tool_named("edit_text");
+    assert_eq!((t.label)(&json!({ "page": 1, "find": "fixture", "replace": "sample" })), "Replace “fixture” with “sample” on p. 1");
+    assert_eq!((t.label)(&json!({ "page": 2, "find": "dog", "replace": "" })), "Delete “dog” on p. 2");
+    let c = card(&h, "edit_text", json!({ "page": 1, "find": "fixture", "replace": "sample" })).unwrap().unwrap();
+    assert!(c.contains("p. 1") && c.contains("fixture") && c.contains("sample"), "{c}");
+    let o = ok(&h, "edit_text", json!({ "page": 1, "find": "fixture", "replace": "sample" }));
+    assert!(o.text.contains("Replaced"), "{}", o.text);
+    assert!(matches!(o.ui, Some(UiAction::Edited { .. })));
+    assert_eq!(steps(&h), s + 1);
+    let b = textedit::blocks(&h.eng, h.doc, 0).unwrap();
+    assert!(b.blocks.iter().any(|b| b.text.contains("Inkwell sample page 1")), "{:?}", b.blocks.iter().map(|b| &b.text).collect::<Vec<_>>());
+    // not there, ambiguous, the same, or off the document: an error and no step
+    let s = steps(&h);
+    for (args, said) in [
+        (json!({ "page": 1, "find": "no such words", "replace": "x" }), "not in the editable text"),
+        (json!({ "page": 1, "find": "line", "replace": "row" }), "times"),
+        (json!({ "page": 1, "find": "sample", "replace": "sample" }), "same"),
+        (json!({ "page": 7, "find": "sample", "replace": "x" }), "does not exist"),
+        (json!({ "page": 1, "find": "sample" }), "\"replace\" is required"),
+        (json!({ "page": 1, "find": "sample", "replace": "x", "bold": true }), "no option"),
+    ] {
+        let e = err_of(&h, "edit_text", args.clone());
+        assert!(e.contains(said), "{args}: {e}");
+    }
+    assert_eq!(steps(&h), s);
+}
+
+#[test]
+fn editing_text_in_a_signed_document_is_refused_before_the_card() {
+    let h = fixture_doc("tb-edit-text-signed");
+    sign(&h);
+    let (r, s) = (rev(&h), steps(&h));
+    let args = json!({ "page": 1, "find": "fixture", "replace": "x" });
+    let e = card(&h, "edit_text", args.clone()).unwrap_err();
+    assert!(e.contains("digitally signed"), "{e}");
+    assert!(err_of(&h, "edit_text", args).contains("digitally signed"));
+    assert_eq!((rev(&h), steps(&h)), (r, s));
+}
