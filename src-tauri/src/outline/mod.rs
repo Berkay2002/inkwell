@@ -512,7 +512,7 @@ fn signature_values(form: &PdfObject) -> Vec<PdfObject> {
         let kind = name_of(field.get_dict("FT").ok().flatten());
         let is_sig = if kind.is_empty() { inherited } else { kind == "Sig" };
         if is_sig {
-            found.extend(field.get_dict("V").ok().flatten());
+            found.extend(field.get_dict_inheritable("V").ok().flatten());
         }
         let room = CAP.saturating_sub(todo.len());
         todo.extend(array_items(field.get_dict("Kids").ok().flatten(), room).into_iter().map(|k| (k, is_sig)));

@@ -570,9 +570,9 @@ pub(crate) fn apply_changes(rt: &Rt, changed: &[FieldChange]) -> Result<Vec<u32>
     let doc = rt.doc();
     let entries = rt.entries()?;
     let locks = locks_of(entries);
-    // Certified with /P 2 or 3 (a certification in the catalog or on a signature): form values may change, nothing else.
-    // /P 1 is `reference_locks`' business.
-    let values_only = matches!(crate::outline::certified(doc)?, Some(2 | 3));
+    // Certified (in the catalog or on a signature): form values may change, nothing else. A /P 1 also locks the fields
+    // that `reference_locks` finds, so there the properties are refused whole.
+    let values_only = crate::outline::certified(doc)?.is_some();
     let mut pages = Vec::new();
     for ch in changed {
         let new = &ch.state;

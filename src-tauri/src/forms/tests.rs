@@ -1608,6 +1608,45 @@ fn a_certified_document_takes_scripted_values_but_not_other_properties() {
     }
 }
 
+/// Records a DocMDP certification of `/P` `p` in the catalog's `/Perms` (the field tree is left as it is).
+fn certify_catalog(eng: &Engine, id: DocId, p: i32) {
+    eng.apply_custom(id, "Certify".into(), EditSource::User, false, |d| {
+        let mut params = d.new_dict()?;
+        params.dict_put("P", PdfObject::new_int(p)?)?;
+        let mut r = d.new_dict()?;
+        put_name(&mut r, "TransformMethod", "DocMDP")?;
+        r.dict_put("TransformParams", params)?;
+        let mut refs = d.new_array()?;
+        refs.array_push(r)?;
+        let mut sig = d.new_dict()?;
+        put_name(&mut sig, "Type", "Sig")?;
+        sig.dict_put("Reference", refs)?;
+        let mut perms = d.new_dict()?;
+        perms.dict_put("DocMDP", sig)?;
+        d.catalog()?.dict_put("Perms", perms)?;
+        Ok(vec![0])
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_document_certified_in_the_catalog_takes_scripted_values_only_even_beside_a_looser_signature() {
+    // The catalog certifies with P 2 and no signature field has a value; then with P 1 over a field that says P 3.
+    for (name, catalog_p, field_p) in [("catalog-only", 2, None), ("catalog-over-field", 1, Some(3))] {
+        let (eng, id, _) = script_form(&format!("js-certified-{name}"), &["Src", "Other"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+        script(&eng, id, "Src", "V", "var o = this.getField(\"Other\"); o.value = \"x\"; o.readonly = true; o.required = true; o.display = display.hidden;");
+        if let Some(p) = field_p {
+            sign(&eng, id, None, Some(p));
+        }
+        certify_catalog(&eng, id, catalog_p);
+        fill(&eng, id, "Src", text("a")).unwrap();
+        let o = field(&eng, id, "Other");
+        assert!(!o.read_only && !o.required && !o.hidden, "{name}: {o:?}");
+        assert!(scripts_state(&eng, id).unwrap().log.iter().any(|l| l.message.contains("certified")), "{name}");
+    }
+}
+
 #[test]
 fn a_calculated_result_is_not_written_into_a_field_a_signature_locks() {
     let (eng, id, _) = script_form("js-signed-calc", &["Rent", "Deposit", "Total"]);

@@ -786,7 +786,7 @@ fn a_hostile_field_tree_is_walked_once_and_reads_nothing_it_should_not() {
     let v = sig_value(&doc_mdp("/TransformParams << /P 1 >>"));
     // 7 -> 8 -> 7 -> ..., a field that is its own kid, a kid that is not a dictionary, and a valued signature after them.
     let objs = [
-        "<< /FT /Sig /T (A) /Kids [8 0 R 7 0 R 42 0 R 5 /Name (str)] >>".to_string(),
+        "<< /FT /Sig /T (A) /Parent 8 0 R /Kids [8 0 R 7 0 R 42 0 R 5 /Name (str)] >>".to_string(),
         "<< /Parent 7 0 R /Kids [7 0 R 8 0 R 9 0 R] >>".to_string(),
         format!("<< /Parent 8 0 R /T (B) {v} >>"),
     ];
