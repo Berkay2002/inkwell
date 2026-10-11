@@ -759,3 +759,31 @@
   gap: 8px;
   color: var(--text);
 }
+.a11y-tag-type {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.a11y-tag-type label {
+  flex: 1;
+  min-width: 0;
+}
+/* the number that follows the pointer while a region is dragged */
+.a11y-ro-float {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  transform: translate(-50%, -130%);
+  display: grid;
+  place-items: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 7px;
+  border-radius: 13px;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-fg);
+  background: var(--accent);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.3), 0 0 0 2px var(--surface);
+}

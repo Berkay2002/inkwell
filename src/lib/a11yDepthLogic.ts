@@ -435,11 +435,12 @@ export const OTHER = "other";
 
 /** Rule id -> checkpoint number, and the failure conditions of that checkpoint the rule decides (docs/a11y.md). */
 export const RULE_CHECKPOINT: Record<string, { cp: string; conditions: string[] }> = {
-  "tagged-pdf": { cp: "01", conditions: ["01-005", "01-007"] },
+  "tagged-pdf": { cp: "01", conditions: ["01-007"] },
   "content-marking": { cp: "01", conditions: ["01-003", "01-004", "01-005"] },
   "role-map": { cp: "02", conditions: ["02-001", "02-003", "02-004"] },
   "color-contrast": { cp: "04", conditions: ["04-001"] },
-  title: { cp: "06", conditions: ["06-003"] },
+  // The title rule reads /Title only, not dc:title (06-003, which `metadata` decides).
+  title: { cp: "06", conditions: [] },
   metadata: { cp: "06", conditions: ["06-001", "06-002", "06-003"] },
   "display-doc-title": { cp: "07", conditions: ["07-001", "07-002"] },
   "reading-order": { cp: "09", conditions: ["09-001"] },

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useA11y } from "../../lib/a11y";
 import { artifactBlocked, mergeRun, orderOf, readAloud, roleWord, splitBlocked } from "../../lib/a11yDepthLogic";
 import { plural } from "../../lib/a11yLogic";
@@ -13,11 +13,19 @@ export function OrderTool({ doc }: { doc: DocState }) {
   const phase = useA11y((s) => s.docs[doc.id]?.phase ?? "idle");
   const [at, setAt] = useState(1);
   const list = useRef<HTMLUListElement>(null);
+  // The region whose row takes the focus once the list is read again after a move.
+  const want = useRef<number | null>(null);
   const data = o?.data ?? null;
   const regions = data?.regions ?? [];
   const selected = o?.selected ?? [];
   const busy = phase !== "idle";
   const id = doc.id;
+
+  useEffect(() => {
+    if (want.current === null) return;
+    list.current?.querySelector<HTMLElement>(`[data-xref="${want.current}"]`)?.focus();
+    want.current = null;
+  }, [data]);
 
   if (o?.error && !data) {
     return (
@@ -60,7 +68,11 @@ export function OrderTool({ doc }: { doc: DocState }) {
       e.preventDefault();
       const dir = e.key === "ArrowDown" ? 1 : -1;
       if (e.altKey) {
-        if (r.xref !== 0 && !busy) void st().moveRegion(id, r.xref, dir).then(() => requestAnimationFrame(() => focusRow(i + dir)));
+        if (r.xref === 0 || busy) return;
+        want.current = r.xref;
+        void st().moveRegion(id, r.xref, dir).then((ok) => {
+          if (!ok) want.current = null;
+        });
         return;
       }
       const j = Math.min(Math.max(i + dir, 0), regions.length - 1);
@@ -132,9 +144,10 @@ export function OrderTool({ doc }: { doc: DocState }) {
           {regions.map((r, i) => {
             const sel = selected.includes(r.xref) && r.xref !== 0;
             return (
-              <li key={`${r.xref}.${i}`} role="option" aria-selected={sel}>
+              <li key={r.xref !== 0 ? `x${r.xref}` : `i${i}`} role="option" aria-selected={sel}>
                 <button
                   data-row
+                  data-xref={r.xref}
                   className={`a11y-ro-row${sel ? " selected" : ""}`}
                   tabIndex={i === 0 || sel ? 0 : -1}
                   style={{ paddingLeft: 6 + Math.min(r.depth, 6) * 8 }}

@@ -528,7 +528,10 @@ export const useA11y = create<A11yStore>((set, get) => {
       const tree = get().get(doc).tags.tree;
       const to = tree ? moveTarget(tree, xref, how) : null;
       if (!to) return false;
-      return editTags(doc, () => a11yApi.moveTag(doc, xref, to.parent, to.index));
+      const ok = await editTags(doc, () => a11yApi.moveTag(doc, xref, to.parent, to.index));
+      // Into a closed tag: open it, so the moved tag is still in view.
+      if (ok && to.parent > 0) patchTags(doc, { expanded: { ...get().get(doc).tags.expanded, [`x${to.parent}`]: true } });
+      return ok;
     },
   };
 });

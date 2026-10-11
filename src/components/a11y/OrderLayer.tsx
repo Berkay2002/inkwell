@@ -1,4 +1,5 @@
 import { memo, useState } from "react";
+import { createPortal } from "react-dom";
 import { useA11y } from "../../lib/a11y";
 import { type Region, roleWord } from "../../lib/a11yDepthLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
@@ -23,7 +24,7 @@ export const OrderLayer = memo(function OrderLayer(p: Props) {
 const st = () => useA11y.getState();
 
 function Layer({ docId, rot, rawSize, zoom, regions, selected }: Props & { regions: Region[]; selected: number[] }) {
-  const [drag, setDrag] = useState<{ xref: number; over: number | null; moved: boolean } | null>(null);
+  const [drag, setDrag] = useState<{ xref: number; n: number; over: number | null; moved: boolean; x: number; y: number } | null>(null);
   // Larger boxes first, so a small region sits on top of the one that holds it and can be picked.
   const area = (r: Region) => (r.bbox ? (r.bbox[2] - r.bbox[0]) * (r.bbox[3] - r.bbox[1]) : 0);
   const drawn = regions.map((r, i) => ({ r, n: i + 1 })).filter((e) => e.r.bbox && e.r.xref !== 0);
@@ -74,9 +75,9 @@ function Layer({ docId, rot, rawSize, zoom, regions, selected }: Props & { regio
                 e.stopPropagation();
                 select(e, r.xref);
                 e.currentTarget.setPointerCapture(e.pointerId);
-                setDrag({ xref: r.xref, over: null, moved: false });
+                setDrag({ xref: r.xref, n, over: null, moved: false, x: e.clientX, y: e.clientY });
               }}
-              onPointerMove={(e) => drag && setDrag({ ...drag, moved: true, over: over(e, drag.xref) })}
+              onPointerMove={(e) => drag && setDrag({ ...drag, moved: true, over: over(e, drag.xref), x: e.clientX, y: e.clientY })}
               onPointerUp={() => {
                 const d = drag;
                 setDrag(null);
@@ -101,6 +102,13 @@ function Layer({ docId, rot, rawSize, zoom, regions, selected }: Props & { regio
           </div>
         );
       })}
+      {drag?.moved &&
+        createPortal(
+          <div className="a11y-ro-float" style={{ left: drag.x, top: drag.y }} aria-hidden="true">
+            {drag.n}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

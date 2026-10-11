@@ -224,7 +224,10 @@ function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tr
   // A different tag, or the same one after an edit, starts from what the engine now says.
   useEffect(() => setD(draftOf(node)), [node]);
   const cells = useMemo(() => (node.role === "TD" || node.role === "TH" ? headerCandidates(tree, node.xref) : []), [tree, node]);
-  const patch = tagPatch(node, d);
+  // The type is its own step (Change type); Apply is for the properties.
+  const was = draftOf(node);
+  const patch = tagPatch(node, { ...d, role: was.role });
+  const roleChanged = d.role.trim() !== was.role;
   const locked = !node.editable || node.xref <= 0;
   const set = (p: Partial<TagDraft>) => setD((x) => ({ ...x, ...p }));
   const moves: { how: TagMove; label: string }[] = [
@@ -247,16 +250,21 @@ function TagEditor({ doc, node, tree, busy }: { doc: DocState; node: TagNode; tr
       }}
     >
       <b>{nodeLabel(node)}</b>
-      <label>
-        <span>Type</span>
-        <select className="a11y-select" value={d.role} onChange={(e) => set({ role: e.target.value })}>
-          {roleOptions(d.role).map((r) => (
-            <option key={r} value={r}>
-              {r}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="a11y-tag-type">
+        <label>
+          <span>Type</span>
+          <select className="a11y-select" value={d.role} onChange={(e) => set({ role: e.target.value })}>
+            {roleOptions(was.role).map((r) => (
+              <option key={r} value={r}>
+                {r === "Artifact" ? "Artifact (take out of the tree)" : r}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="button" className="a11y-btn" disabled={busy || !roleChanged} title="One undo step" onClick={() => void st().setRole(id, node.xref, d.role.trim())}>
+          Change type
+        </button>
+      </div>
       <label>
         <span>Alternate text</span>
         <input type="text" value={d.alt} onChange={(e) => set({ alt: e.target.value })} />
