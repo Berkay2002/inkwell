@@ -161,9 +161,98 @@ pub fn scan(data: &[u8]) -> Scan {
     s
 }
 
+/// Hash of what a stream paints besides text: everything outside `BT .. ET`, minus the text-state operators that may sit
+/// outside it (`Tf Tc Tw Tz TL Tr Ts` and the showing and positioning ones). With `skip_colour` the colour operators go too, for comparing two pages whose
+/// text was recoloured (the colour is often set just before the `BT`).
+pub fn graphics_hash(data: &[u8], skip_colour: bool) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    let n = data.len();
+    let (mut i, mut start) = (0, 0);
+    let mut in_text = false;
+    while i < n {
+        let c = data[i];
+        if is_ws(c) {
+            i += 1;
+        } else if c == b'%' {
+            while i < n && data[i] != b'\n' && data[i] != b'\r' {
+                i += 1;
+            }
+        } else if c == b'(' {
+            let mut depth = 1;
+            i += 1;
+            while i < n && depth > 0 {
+                match data[i] {
+                    b'\\' => i += 1,
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+        } else if c == b'<' {
+            if i + 1 < n && data[i + 1] == b'<' {
+                i += 2;
+            } else {
+                while i < n && data[i] != b'>' {
+                    i += 1;
+                }
+                i += 1;
+            }
+        } else if c == b'/' {
+            i += 1;
+            while i < n && !is_ws(data[i]) && !is_delim(data[i]) {
+                i += 1;
+            }
+        } else if is_delim(c) {
+            i += 1;
+        } else {
+            let st = i;
+            while i < n && !is_ws(data[i]) && !is_delim(data[i]) {
+                i += 1;
+            }
+            let tok = &data[st..i];
+            if tok.first().is_some_and(|b| b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.')) {
+                continue; // an operand
+            }
+            if tok == b"BI" {
+                while i < n {
+                    if data[i] == b'E' && i + 1 < n && data[i + 1] == b'I' && i > 0 && is_ws(data[i - 1]) && (i + 2 >= n || is_ws(data[i + 2])) {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            let text_state = matches!(tok, b"Tf" | b"Tc" | b"Tw" | b"Tz" | b"TL" | b"Tr" | b"Ts" | b"Tj" | b"TJ" | b"Td" | b"TD" | b"Tm" | b"T*" | b"'" | b"\"");
+            let colour = matches!(tok, b"g" | b"G" | b"rg" | b"RG" | b"k" | b"K" | b"cs" | b"CS" | b"sc" | b"scn" | b"SC" | b"SCN");
+            match tok {
+                b"BT" => in_text = true,
+                b"ET" => in_text = false,
+                _ if in_text || text_state || (skip_colour && colour) => {}
+                _ => {
+                    h.update(&data[start..i]);
+                    h.update(b"\n");
+                }
+            }
+            start = i;
+        }
+    }
+    *h.finalize().as_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graphics_hash_ignores_text_and_optionally_colour() {
+        let a = b"0 g 10 10 50 50 re f 1 0 0 rg BT /F1 12 Tf 72 700 Td (Hello) Tj ET 0 g";
+        let b = b"0 g 10 10 50 50 re f 0 0 1 rg BT /F2 16 Tf 80 650 Td (World there) Tj ET 0 g";
+        assert_ne!(graphics_hash(a, false), graphics_hash(b, false), "a colour set outside BT is graphics state");
+        assert_eq!(graphics_hash(a, true), graphics_hash(b, true));
+        let c = b"0 g 10 10 60 50 re f 1 0 0 rg BT /F1 12 Tf 72 700 Td (Hello) Tj ET 0 g";
+        assert_ne!(graphics_hash(a, true), graphics_hash(c, true), "a moved rectangle is a graphics change");
+    }
 
     #[test]
     fn finds_resources_and_invisible_text() {

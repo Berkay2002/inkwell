@@ -9,6 +9,7 @@ use mupdf::{Matrix, Rect, TextPageFlags};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 pub type Hash = [u8; 32];
 
@@ -46,15 +47,52 @@ pub struct WidgetInfo {
     pub rect: Rect4,
 }
 
+/// How a word is set: font family (subset prefix and weight/slant suffix kept as the file names it),
+/// size rounded to half a point, fill colour as 0xRRGGBB.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Style {
+    /// One allocation per distinct font on a page, shared by its words.
+    pub font: Arc<str>,
+    /// Twice the size in points, so halves compare exactly.
+    pub size2: i32,
+    pub rgb: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Word {
     pub text: String,
     pub rect: Rect4,
+    pub style: Style,
+}
+
+/// "ABCDEF+Helvetica-Bold" -> "Helvetica-Bold".
+fn font_label(name: &str) -> String {
+    match name.split_once('+') {
+        Some((tag, rest)) if tag.len() == 6 && tag.bytes().all(|b| b.is_ascii_uppercase()) => rest.to_string(),
+        _ => name.to_string(),
+    }
+}
+
+/// The graphics-only fingerprints of a page, filled while its content is painted (forms included).
+#[derive(Default)]
+struct Gfx {
+    plain: blake3::Hasher,
+    no_colour: blake3::Hasher,
+}
+
+impl Gfx {
+    fn feed(&mut self, b: &[u8]) {
+        self.plain.update(b);
+        self.no_colour.update(b);
+    }
 }
 
 pub struct PageSnap {
     /// Everything the page paints: its content streams plus the resources they actually use.
     pub fp: Hash,
+    /// What the page paints besides text (see `content::graphics_hash`), and the same without colour operators.
+    pub gfx: Hash,
+    pub gfx_nc: Hash,
     pub images: Vec<ImageRef>,
     /// Invisible text (render mode 3): an OCR layer.
     pub ocr: bool,
@@ -132,7 +170,8 @@ fn to_page_space(v: &[f32], ctm: &Matrix) -> Rect4 {
 }
 
 impl Snap {
-    pub fn open(bytes: &[u8], side: Side, password: Option<&str>) -> Result<Snap> {
+    /// `step(done, total)` is called after each page; it returns false to stop (the open is cancelled).
+    pub fn open(bytes: &[u8], side: Side, password: Option<&str>, step: &mut dyn FnMut(u32, u32) -> bool) -> Result<Snap> {
         let doc = open_doc(bytes, side, password)?;
         let n = doc.page_count()?.max(0) as usize;
         let mut snap = Snap {
@@ -146,6 +185,9 @@ impl Snap {
         for i in 0..n {
             let p = snap.read_page(i)?;
             snap.pages.push(p);
+            if !step(i as u32 + 1, n as u32) {
+                return Err(DiffError::Cancelled);
+            }
         }
         Ok(snap)
     }
@@ -157,7 +199,9 @@ impl Snap {
         let mut images = Vec::new();
         let mut ocr = false;
         let content = self.page_content(&page);
-        let fp = self.paint(&content, res.as_ref(), 0, "", &mut images, &mut ocr);
+        let mut gfx = Gfx::default();
+        let fp = self.paint(&content, res.as_ref(), 0, "", &mut images, &mut ocr, &mut gfx);
+        let (gfx, gfx_nc) = (*gfx.plain.finalize().as_bytes(), *gfx.no_colour.finalize().as_bytes());
         let rotation = gdi(&page, "Rotate").and_then(|r| r.as_int().ok()).map(|r| r.rem_euclid(360)).unwrap_or(0);
         let boxes = ["MediaBox", "CropBox", "TrimBox", "BleedBox", "ArtBox"]
             .into_iter()
@@ -165,7 +209,7 @@ impl Snap {
             .collect();
         let ctm = page.page_ctm().unwrap_or_else(|_| Matrix::new_scale(1.0, 1.0));
         let (annots, widgets) = self.read_annots(&page, &ctm);
-        Ok(PageSnap { fp, images, ocr, rotation, boxes, annots, widgets })
+        Ok(PageSnap { fp, gfx, gfx_nc, images, ocr, rotation, boxes, annots, widgets })
     }
 
     fn page_content(&self, page: &PdfObject) -> Vec<u8> {
@@ -194,9 +238,12 @@ impl Snap {
         prefix: &str,
         images: &mut Vec<ImageRef>,
         ocr: &mut bool,
+        gfx: &mut Gfx,
     ) -> Hash {
         let scan = content::scan(content);
         *ocr |= scan.invisible_text;
+        gfx.plain.update(&content::graphics_hash(content, false));
+        gfx.no_colour.update(&content::graphics_hash(content, true));
         let mut h = blake3::Hasher::new();
         h.update(content);
         for (cat, name) in &scan.used {
@@ -208,6 +255,10 @@ impl Snap {
             };
             h.update(&[*cat as u8]);
             h.update(name);
+            if *cat != ResCat::Font {
+                gfx.feed(&[*cat as u8]);
+                gfx.feed(name);
+            }
             // Not resolved: a stream is only a stream through its indirect reference.
             let subtype = gd(&entry, "Subtype").and_then(|s| name_of(&s));
             if *cat == ResCat::XObject && subtype.as_deref() == Some("Form") && depth < MAX_FORM_DEPTH && self.take_form() {
@@ -216,7 +267,7 @@ impl Snap {
                 let form_res = form_res.as_ref().or(res);
                 let fname = format!("{prefix}{}/", String::from_utf8_lossy(name));
                 let c = stream_bytes(s, true);
-                h.update(&self.paint(&c, form_res, depth + 1, &fname, images, ocr));
+                h.update(&self.paint(&c, form_res, depth + 1, &fname, images, ocr, gfx));
             } else if *cat == ResCat::XObject && subtype.as_deref() == Some("Image") {
                 let ih = self.obj_hash(&entry, 0);
                 let s = &entry;
@@ -228,8 +279,13 @@ impl Snap {
                     height: dim("Height"),
                 });
                 h.update(&ih);
+                gfx.feed(&ih);
             } else {
-                h.update(&self.obj_hash(&entry, 0));
+                let oh = self.obj_hash(&entry, 0);
+                h.update(&oh);
+                if *cat != ResCat::Font {
+                    gfx.feed(&oh);
+                }
             }
         }
         *h.finalize().as_bytes()
@@ -363,7 +419,7 @@ impl Snap {
         let w: Vec<Word> = (|| -> Result<Vec<Word>> {
             let list = self.doc.load_page(i as i32)?.to_display_list(false)?;
             let tp = list.to_text_page(TextPageFlags::empty())?;
-            Ok(tp.words().into_iter().map(|w| Word { text: w.text, rect: rect4(w.bounds) }).collect())
+            Ok(page_words(&tp))
         })()
         .unwrap_or_default();
         let w = Rc::new(w);
@@ -396,6 +452,53 @@ impl Snap {
         })()
         .unwrap_or_default()
     }
+}
+
+/// The words of a text page with their boxes and style (the first character's), in reading order.
+/// Splits like `TextPage::words`: on whitespace, within a line.
+fn page_words(tp: &mupdf::TextPage) -> Vec<Word> {
+    use mupdf::text_page::TextBlockType;
+    let mut out = Vec::new();
+    let mut fonts: HashMap<String, Arc<str>> = HashMap::new();
+    for block in tp.blocks().filter(|b| b.r#type() == TextBlockType::Text) {
+        for line in block.lines() {
+            let mut cur = String::new();
+            let mut bounds: Option<Rect> = None;
+            let mut style: Option<Style> = None;
+            let flush = |cur: &mut String, bounds: &mut Option<Rect>, style: &mut Option<Style>, out: &mut Vec<Word>| {
+                if let (false, Some(b), Some(s)) = (cur.is_empty(), bounds.take(), style.take()) {
+                    out.push(Word { text: std::mem::take(cur), rect: rect4(b), style: s });
+                }
+                cur.clear();
+            };
+            for ch in line.chars() {
+                let Some(c) = ch.char() else { continue };
+                if c.is_whitespace() {
+                    flush(&mut cur, &mut bounds, &mut style, &mut out);
+                    continue;
+                }
+                let q = Rect::from(ch.quad());
+                bounds = Some(match bounds {
+                    Some(b) => b.r#union(&q),
+                    None => q,
+                });
+                if style.is_none() {
+                    let name = ch
+                        .font()
+                        .and_then(|f| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| font_label(f.name()))).ok())
+                        .unwrap_or_default();
+                    let font = match fonts.get(&name) {
+                        Some(f) => f.clone(),
+                        None => fonts.entry(name.clone()).or_insert_with(|| Arc::from(name.as_str())).clone(),
+                    };
+                    style = Some(Style { font, size2: (ch.size() * 2.0).round() as i32, rgb: ch.argb() & 0x00FF_FFFF });
+                }
+                cur.push(c);
+            }
+            flush(&mut cur, &mut bounds, &mut style, &mut out);
+        }
+    }
+    out
 }
 
 pub fn open_doc(bytes: &[u8], side: Side, password: Option<&str>) -> Result<PdfDocument> {

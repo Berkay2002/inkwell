@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
-import { type FileRef, pickOpen, pickSave } from "./api";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { type FileRef, pickOpen, pickSave, toolCancel } from "./api";
 
 export type Rect4 = [number, number, number, number];
 
@@ -53,6 +53,7 @@ export type ChangeKind =
   | "pageRotated"
   | "pageBoxChanged"
   | "textChanged"
+  | "formatChanged"
   | "imageReplaced"
   | "ocrLayerAdded"
   | "redactionApplied"
@@ -72,6 +73,12 @@ export interface TextRun {
   boxesB: Rect4[];
 }
 
+export interface FormatProp {
+  name: "font" | "size" | "colour";
+  old: string;
+  new: string;
+}
+
 export interface MetadataField {
   source: "info" | "xmp";
   field: string;
@@ -83,6 +90,7 @@ export type Detail =
   | { type: "pageMoved"; from: number; to: number }
   | { type: "text"; runs: TextRun[] }
   | { type: "metadata"; fields: MetadataField[] }
+  | { type: "format"; text: string; props: FormatProp[] }
   | { type: string };
 
 export interface Change {
@@ -149,6 +157,40 @@ export async function pickCompareFiles(): Promise<FileRef[] | null> {
   if (files.length !== 2) throw new Error("Pick exactly 2 PDF files to compare.");
   return files;
 }
+export type CompareStage = "first" | "second" | "pages" | "document";
+export interface CompareProgress {
+  stage: CompareStage;
+  done: number;
+  total: number;
+}
+
+/** As `historyCompare`, on its own thread: progress through `onProgress`, `toolCancel(job)` stops it. */
+export function historyCompareRun(job: number, doc: number | null, a: Source, b: Source, onProgress: (p: CompareProgress) => void) {
+  const ch = new Channel<CompareProgress>();
+  ch.onmessage = onProgress;
+  return invoke<Comparison>("history_compare_run", { job, doc, a, b, onProgress: ch });
+}
+
+/** Save dialog (in Rust), then writes the report PDF there; null = cancelled. Returns the path. */
+export async function historyCompareReport(
+  job: number,
+  doc: number | null,
+  a: Source,
+  b: Source,
+  names: [string, string],
+  suggested: string,
+  onProgress: (p: CompareProgress) => void,
+): Promise<string | null> {
+  const to = await pickSave(suggested, doc == null ? undefined : { doc });
+  if (!to) return null;
+  const ch = new Channel<CompareProgress>();
+  ch.onmessage = onProgress;
+  const date = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  return invoke<string>("history_compare_report", { job, doc, a, b, names, date, to: to.token, onProgress: ch });
+}
+
+export const compareCancel = (job: number) => toolCancel(job);
+
 export const historyVisualDiff = (doc: number | null, a: Source, aPage: number, b: Source, bPage: number, scale: number, hints: Rect4[] = []) =>
   invoke<VisualDiff>("history_visual_diff", { doc, a, aPage, b, bPage, scale, hints });
 
