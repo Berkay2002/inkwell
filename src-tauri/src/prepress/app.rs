@@ -5,7 +5,7 @@
 use super::boxes::BoxSpec;
 use super::ink::{DEFAULT_LIMIT, DEFAULT_MAX_PX, doc_ink};
 use super::{
-    ConvertReport, ConvertSpec, InkAt, InkReport, Inspected, IntentSource, MarksPreview, MarksSpec, PageBoxes, PageSeps, Result, View, add_printer_marks, convert_colors, ink_at,
+    ConvertReport, ConvertSpec, InkAt, InkReport, Inspected, IntentSource, MarksPreview, MarksSpec, PageBoxes, PageSeps, Result, View, add_printer_marks, convert_colors, convert_colors_and_save, ink_at,
     inspect_at, marks_preview, page_boxes, page_separations, render_view_tile, set_boxes,
 };
 use crate::a11y::Progress;
@@ -329,7 +329,7 @@ pub(super) fn read_profile(path: &str) -> Result<Vec<u8>> {
 /// case included): "save as" must never be a plain save over the original.
 pub(super) fn not_own_file(eng: &Engine, doc: DocId, to: &str) -> Result<()> {
     if crate::engine::edit::same_path(&eng.edit_state(doc)?.path, to) {
-        return Err(EngineError::Invalid("That is this document's own file. Choose another name, or convert in this document and Save.".into()));
+        return Err(EngineError::Invalid(crate::engine::edit::OWN_FILE.into()));
     }
     Ok(())
 }
@@ -374,16 +374,18 @@ pub async fn prepress_convert(
         let mut progress = |p: Progress| {
             let _ = on_progress.send(p);
         };
-        if let Some(to) = &target {
-            not_own_file(&eng, doc, to)?;
-        }
         let bytes = profile_path.as_deref().map(read_profile).transpose()?;
-        let (state, report) = convert_colors(&eng, doc, &spec, bytes.as_deref(), EditSource::User, &mut progress, &guard.cancel)?;
         let Some(to) = target else {
+            let (state, report) = convert_colors(&eng, doc, &spec, bytes.as_deref(), EditSource::User, &mut progress, &guard.cancel)?;
             return Ok(Converted { state, report, saved: false, save_error: None });
         };
-        Ok(match save_elsewhere(&window, &app, &eng, &hist, doc, &to) {
-            Ok(saved) => Converted { state: saved, report, saved: true, save_error: None },
+        // the conversion and the write share one edit guard; the own file is refused under it before converting
+        let (state, report, saved) = convert_colors_and_save(&eng, doc, &spec, bytes.as_deref(), EditSource::User, &mut progress, &guard.cancel, &to)?;
+        Ok(match saved {
+            Ok((state, recorded)) => {
+                crate::after_save(&window, &app, &hist, doc, Some(&to), &state, recorded);
+                Converted { state, report, saved: true, save_error: None }
+            }
             Err(e) => Converted { state, report, saved: false, save_error: Some(e.to_string()) },
         })
     })

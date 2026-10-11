@@ -21,7 +21,7 @@ mod seps;
 mod tests;
 
 pub use boxes::{BoxKind, BoxSpec, PageBoxes, page_boxes, set_boxes};
-pub use convert::{ConvertReport, ConvertSpec, IntentSource, convert_colors};
+pub use convert::{ConvertReport, ConvertSpec, IntentSource, convert_colors, convert_colors_and_save};
 pub use ink::{InkAt, InkReport, PlaneInk, PlaneValue, doc_ink, ink_at, ink_report};
 pub use inspect::{Inspected, ObjectKind, inspect_at};
 pub use marks::{MarkSet, MarksPreview, MarksSpec, add_printer_marks, marks_preview};

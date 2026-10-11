@@ -114,8 +114,9 @@ DeviceCMYK. Annotation appearances, forms and patterns are filtered too.
 `[x0, y0, x1, y1]` in default user space (y up); crop and art boxes must also lie in the media box; `from` + `margin` `[left, bottom, right, top]` moves another
 box outward (negative inward), e.g. bleed = trim with 9. With `shown: true` the margin is of the page as it is
 shown (left, bottom, right, top) and each page maps it through its own `/Rotate`; the sheet uses this, so one
-request over pages turned differently is right on every page. `/Rotate` is read like MuPDF does (a real is
-accepted and rounded to the nearest quarter turn). The result must keep the trim box inside the bleed box
+request over pages turned differently is right on every page. `/Rotate` is read exactly like MuPDF's
+`pdf_to_int` + page loader does (a real rounds half up, a negative value wraps, then it snaps to the nearest quarter
+turn: -45 is 0, -135 is 270, 45 is 90). The result must keep the trim box inside the bleed box
 and the bleed box inside the media box, or nothing changes. The media box is the paper size and is not set here.
 
 `MarksSpec { pages?, marks: { crop, bleed, registration, colorBars }, weight?, offset?, length? }`. Marks are
@@ -136,7 +137,14 @@ Convert Colors, Printer's Marks and Page Boxes refuse a certified document (a `/
 level): the command returns "This document is certified ..." before changing anything, and the sheets turn their
 controls off and show the reason. A signed document (signature field with a value, `/SigFlags`) is edited
 through the same custom edit, which never asks for a removing rewrite, so its save appends and the signed bytes
-stay a prefix of the file; the sheets warn that the file shows as changed after signing.
+stay a prefix of the file; the sheets warn that the file shows as changed after signing. The sheets read this
+once per document generation (`rev`), so a signature or certification that appears later in the session turns the
+controls off or the warning on.
+
+Convert + Save as another file is one engine step (`Engine::apply_custom_and_save`): the conversion and the
+write run under one edit guard, so no other edit or undo can land between them, and the document's own file is
+refused under the same guard. If the write fails the conversion stands in the open document and the command
+reports `saveError`; the sheet retries the save only.
 
 ## The UI
 
@@ -221,3 +229,14 @@ turned page in one request (and a real `/Rotate`), the document's own file refus
 and the bounded profile read; vitest for the single convert + save command and the retry of a failed write,
 certified and signed documents, resync of a sheet under undo, the probe dropped after leave or rev change,
 stale inks, and the view asked for again after failed tiles.
+
+The follow-up round added Rust tests for: `/Rotate` snapping like MuPDF (90, 90.0, 44, 45, -90, -45, -135, 450,
+359), a conversion saved as another file as one guarded step (an undo started inside it lands after the
+save; the document's own file is refused with nothing converted), and a failed write leaving the conversion in the
+open document; vitest for the protection being read again when the document's generation moves.
+
+Known fault, not from this code: `prepress::` run in one process with `--test-threads=1` aborts with SIGTRAP in
+about a third of runs, always inside MuPDF's allocator (`fz_calloc` -> libmalloc lock trap) on a test that edits
+a two-page document after the colour-conversion tests have run. It moves between tests and reproduces with the
+earlier engine code, so it looks like a heap corruption left by a conversion test rather than by the edit it
+trips on. Each test passes alone; the margins test is a single edit so it does not depend on the order.

@@ -1169,6 +1169,9 @@ pub(crate) fn write_new(target: &Path, bytes: &[u8], pages: u32) -> Result<()> {
     })
 }
 
+/// Why a "Save as" that would be a plain save is refused.
+pub(crate) const OWN_FILE: &str = "That is this document's own file. Choose another name, or convert in this document and Save.";
+
 pub(crate) fn same_path(a: &str, b: &str) -> bool {
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p.to_lowercase()));
     a.eq_ignore_ascii_case(b) || canon(a) == canon(b)
@@ -1350,6 +1353,28 @@ impl Engine {
         self.custom(id, label, source, true, false, None, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
     }
 
+    /// [`Engine::apply_custom`] and then a save as `to`, under one guard: no other edit, undo or save (an
+    /// assistant turn included) can land between the step and the file. The target must not be the document's
+    /// own file (checked under the guard). The step stands when the save fails: the second result is the
+    /// save's, and the first is the document as it is after the step.
+    pub fn apply_custom_and_save(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        to: &str,
+        f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
+    ) -> Result<(EditState, Result<(EditState, Option<Saved>)>)> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        if same_path(to, &entry.path()) {
+            return Err(EngineError::Invalid(OWN_FILE.into()));
+        }
+        let state = self.custom_locked(&entry, &mut lane, label, source, false, false, None, |d| Ok((f(d)?, None)))?;
+        let saved = self.save_locked(id, &entry, &mut lane, Some(to));
+        Ok((state, saved))
+    }
+
     /// Runs `f` on the authoritative document (marks included) without changing it. `f` must not
     /// change the document or keep page handles.
     pub fn read_custom<R>(&self, id: DocId, f: impl FnOnce(&PdfDocument) -> Result<R>) -> Result<R> {
@@ -1371,11 +1396,34 @@ impl Engine {
     ) -> Result<EditState> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
-        let ed = self.lane(&entry, &mut lane)?;
+        let state = self.custom_locked(&entry, &mut lane, label, source, redaction, removes, unchanged, f)?;
+        drop(lane);
+        if redaction {
+            if let Some(hook) = REDACTION_HOOK.lock().clone() {
+                hook(id);
+            }
+        }
+        Ok(state)
+    }
+
+    /// [`Engine::custom`] with the edit lane held by the caller (the redaction hook is the caller's to run).
+    #[allow(clippy::too_many_arguments)]
+    fn custom_locked(
+        &self,
+        entry: &DocEntry,
+        lane: &mut Option<Editor>,
+        label: String,
+        source: EditSource,
+        redaction: bool,
+        removes: bool,
+        unchanged: Option<&std::cell::Cell<bool>>,
+        f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
+    ) -> Result<EditState> {
+        let ed = self.lane(entry, lane)?;
         let len = ed.step().snap.len;
         let ran = catch_unwind(AssertUnwindSafe(|| f(&mut ed.doc.doc))).unwrap_or(Err(EngineError::Panic));
         if ran.is_ok() && unchanged.is_some_and(std::cell::Cell::get) {
-            return Ok(ed.state(&entry));
+            return Ok(ed.state(entry));
         }
         let changed = ran.and_then(|(pages, bytes)| {
             let exact = bytes.is_some();
@@ -1387,7 +1435,7 @@ impl Engine {
             } else {
                 ed.snapshot()?
             };
-            let doc = open_snap(&snap, &entry)?;
+            let doc = open_snap(&snap, entry)?;
             let sizes = Arc::new(page_sizes(&doc.doc)?);
             let drops = removes || sizes.len() < ed.step().sizes.len();
             Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, sizes }, doc))
@@ -1396,17 +1444,10 @@ impl Engine {
             Ok((step, doc)) => {
                 ed.push(step);
                 ed.doc = doc;
-                let state = self.publish(&entry, ed);
-                drop(lane);
-                if redaction {
-                    if let Some(hook) = REDACTION_HOOK.lock().clone() {
-                        hook(id);
-                    }
-                }
-                Ok(state)
+                Ok(self.publish(entry, ed))
             }
             Err(e) => {
-                ed.doc = open_snap(&ed.step().snap, &entry)?;
+                ed.doc = open_snap(&ed.step().snap, entry)?;
                 Err(e)
             }
         }

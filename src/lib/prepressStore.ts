@@ -78,8 +78,8 @@ export interface OutputDoc {
   showAreas: boolean;
   /** The ink at the last point the pointer was over, for the page and generation it was read on. */
   probe: { page: number; rev: number; at: InkAt } | null;
-  /** Certified (edits refused) or signed (edits stay incremental); read once per document. */
-  protection: Protection | null;
+  /** Certified (edits refused) or signed (edits stay incremental), as of document generation `rev`. */
+  protection: (Protection & { rev: number }) | null;
   error: string | null;
 }
 
@@ -319,11 +319,16 @@ export const usePrepress = create<PrepressStore>((set, get) => {
 
   // ---- sheets ----
 
-  /** Whether the document is certified or signed; the engine refuses a certified one itself, this is for the screens. */
+  /**
+   * Whether the document is certified or signed, read again when its generation moved (it may have been signed or
+   * certified since). The engine refuses a certified one itself; this is for the screens.
+   */
   async function loadProtection(doc: number) {
-    if (get().docs[doc]?.protection || !st().docs[doc]) return;
+    const rev = st().docs[doc]?.rev;
+    if (rev === undefined || get().docs[doc]?.protection?.rev === rev) return;
     try {
-      patchDoc(doc, { protection: await prepressApi.protection(doc) });
+      const protection = await prepressApi.protection(doc);
+      patchDoc(doc, { protection: { ...protection, rev } });
     } catch {
       // unknown: the sheets stay usable and the engine says no where it must
     }
@@ -698,6 +703,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       const s = get().sheet;
       const d = s && st().docs[s.doc];
       if (!s || s.kind === "convert" || !d) return;
+      void loadProtection(s.doc);
       // an undo took the sheet's page away
       if (s.page >= d.pageCount) return set({ sheet: null });
       if (s.kind === "marks") {

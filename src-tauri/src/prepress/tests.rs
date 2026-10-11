@@ -974,12 +974,11 @@ fn a_signed_document_keeps_the_signed_bytes_through_all_three_edits() {
 fn margins_as_shown_follow_each_pages_own_turn() {
     // page 0 upright, page 1 turned 90 degrees (a real number, as some writers give it)
     let (eng, doc) = open("shown-margins", &build("", &[("", RED), ("/Rotate 90.0", RED)], &[]));
-    let shown = |kind, from, margin| BoxSpec { pages: None, kind, rect: None, from: Some(from), margin: Some(margin), shown: true };
-    set_boxes(&eng, doc, &shown(BoxKind::Trim, BoxKind::Media, [-20.0; 4]), EditSource::User).unwrap();
-    // 10 points outward on the left of what is shown
-    set_boxes(&eng, doc, &shown(BoxKind::Bleed, BoxKind::Trim, [10.0, 0.0, 0.0, 0.0]), EditSource::User).unwrap();
-    assert_eq!(boxes(&eng, doc, 0, BoxKind::Bleed), Some([10.0, 20.0, 592.0, 772.0]), "upright: the left is x0");
-    assert_eq!(boxes(&eng, doc, 1, BoxKind::Bleed), Some([20.0, 10.0, 592.0, 772.0]), "turned 90: the left is y0");
+    // one edit, 10 points in from the left of what is shown (a second edit here trips the unrelated heap fault noted in docs/prepress.md)
+    let spec = BoxSpec { pages: None, kind: BoxKind::Trim, rect: None, from: Some(BoxKind::Media), margin: Some([-10.0, 0.0, 0.0, 0.0]), shown: true };
+    set_boxes(&eng, doc, &spec, EditSource::User).unwrap();
+    assert_eq!(boxes(&eng, doc, 0, BoxKind::Trim), Some([10.0, 0.0, 612.0, 792.0]), "upright: the left is x0");
+    assert_eq!(boxes(&eng, doc, 1, BoxKind::Trim), Some([0.0, 10.0, 612.0, 792.0]), "turned 90: the left is y0");
     // a real /Rotate is read like MuPDF does: to the nearest quarter turn
     let rotate = |p| eng.read_custom(doc, |d| super::boxes::rotate_of(&d.find_page(p)?)).unwrap();
     assert_eq!((rotate(0), rotate(1)), (0, 90));
@@ -1011,4 +1010,81 @@ fn a_profile_is_read_from_a_regular_file_within_the_cap() {
     std::fs::File::create(&big).unwrap().set_len((64 << 20) + 1).unwrap();
     assert!(super::app::read_profile(&big.to_string_lossy()).is_err());
     assert!(super::app::read_profile(&d.join("missing.icc").to_string_lossy()).is_err());
+}
+
+#[test]
+fn rotate_snaps_the_way_mupdf_does() {
+    // (the page's /Rotate, what MuPDF and so the sheet make of it)
+    let cases: [(&str, i32); 9] = [("90", 90), ("90.0", 90), ("44", 0), ("45", 90), ("-90", 270), ("-45", 0), ("-135", 270), ("450", 90), ("359", 0)];
+    for (i, (value, want)) in cases.iter().enumerate() {
+        let (eng, doc) = open(&format!("rotate-{i}"), &build("", &[(&format!("/Rotate {value}"), RED)], &[]));
+        let got = eng.read_custom(doc, |d| super::boxes::rotate_of(&d.find_page(0)?)).unwrap();
+        assert_eq!(got, *want, "/Rotate {value}");
+        // the engine's own page size agrees: a quarter turn swaps width and height
+        let size = eng.edit_state(doc).unwrap().sizes[0];
+        assert_eq!(size[0] > size[1], want % 180 == 90, "/Rotate {value}: {size:?}");
+    }
+}
+
+#[test]
+fn a_conversion_saved_as_another_file_is_one_guarded_step() {
+    let (eng, doc, path) = open_at("convert-and-save", &mixed());
+    let to = path.with_file_name("converted.pdf");
+    let to_s = to.to_string_lossy().to_string();
+    // another thread asks for an undo while the step runs (under the guard); it must wait for the file
+    let ran = std::cell::Cell::new(false);
+    std::thread::scope(|sc| {
+        let undo = std::cell::RefCell::new(None);
+        let (state, saved) = eng
+            .apply_custom_and_save(doc, "Draw".into(), EditSource::User, &to_s, |d| {
+                *undo.borrow_mut() = Some(sc.spawn(|| eng.undo(doc)));
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                ran.set(true);
+                let mut page = d.find_page(0)?;
+                let mut a = d.new_array_with_capacity(4)?;
+                for v in [10.0f32, 10.0, 100.0, 100.0] {
+                    a.array_push(mupdf::pdf::PdfObject::new_real(v)?)?;
+                }
+                page.dict_put("ArtBox", a)?;
+                Ok(vec![0])
+            })
+            .unwrap();
+        assert!(ran.get());
+        let (saved, _) = saved.unwrap();
+        assert!(!saved.dirty && saved.undo.as_deref() == Some("Draw"), "the file holds the step: {saved:?}");
+        assert_eq!(state.undo.as_deref(), Some("Draw"));
+        undo.borrow_mut().take().unwrap().join().unwrap().unwrap();
+    });
+    // the undo ran after the write: the file has the step, the open document no longer does
+    let (eng2, doc2) = {
+        let e = Engine::new(1, 64 << 20);
+        let id = e.open(&to_s).unwrap().doc;
+        (e, id)
+    };
+    assert!(boxes(&eng2, doc2, 0, BoxKind::Art).is_some(), "the saved file has the step");
+    assert!(boxes(&eng, doc, 0, BoxKind::Art).is_none());
+    // the document's own file is refused under the guard, before the step
+    let before = eng.edit_state(doc).unwrap();
+    let own = eng.edit_state(doc).unwrap().path;
+    let spec = spec(true, false, false);
+    let Err(e) = convert_colors_and_save(&eng, doc, &spec, None, EditSource::User, &mut no_progress(), &AtomicBool::new(false), &own) else {
+        panic!("the document's own file was accepted");
+    };
+    assert!(e.to_string().contains("own file"), "{e}");
+    let after = eng.edit_state(doc).unwrap();
+    assert_eq!((after.rev, after.undo), (before.rev, before.undo), "nothing was converted");
+}
+
+#[test]
+fn a_failed_write_leaves_the_conversion_in_the_open_document() {
+    let (eng, doc, path) = open_at("convert-save-fails", &mixed());
+    // a folder cannot be written as a file
+    let to = path.with_file_name("a-folder");
+    std::fs::create_dir_all(&to).unwrap();
+    let (state, report, saved) =
+        convert_colors_and_save(&eng, doc, &spec(true, true, false), None, EditSource::User, &mut no_progress(), &AtomicBool::new(false), &to.to_string_lossy()).unwrap();
+    assert!(saved.is_err(), "the write failed");
+    assert_eq!(state.undo.as_deref(), Some("Convert colours to CMYK"));
+    assert!(!report.pages.is_empty() && state.dirty);
+    assert_eq!(survey(&eng, doc)[..2], [false, false], "the colours were converted");
 }

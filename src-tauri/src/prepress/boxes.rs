@@ -103,11 +103,20 @@ pub struct PageBoxes {
     pub stated: StatedBoxes,
 }
 
-/// The page's /Rotate (inherited) as 0, 90, 180 or 270: a real is accepted and the value is rounded to the
-/// nearest quarter turn, as MuPDF reads it.
+/// The page's /Rotate (inherited) as 0, 90, 180 or 270, step for step as MuPDF reads it (pdf-page.c: a real
+/// rounds half up to an int, a negative turns into 360 - n % 360, then it snaps to the nearest quarter turn
+/// with halves rounding up), so the sheet and the renderer agree on which side is the left.
 pub(crate) fn rotate_of(page: &PdfObject) -> Result<i32> {
     let v = page.get_dict_inheritable("Rotate")?.and_then(|r| r.as_float().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
-    Ok(((v / 90.0).round() as i64 * 90).rem_euclid(360) as i32)
+    let mut r = (v + 0.5).floor().clamp(i32::MIN as f32 + 1.0, i32::MAX as f32) as i32;
+    if r < 0 {
+        r = 360 - (-r) % 360;
+    }
+    if r >= 360 {
+        r %= 360;
+    }
+    r = 90 * ((r + 45) / 90);
+    Ok(if r >= 360 { 0 } else { r })
 }
 
 /// Reads the boxes of page `page` (0-based) of the document as it is now.

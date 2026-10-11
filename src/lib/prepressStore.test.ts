@@ -408,7 +408,7 @@ describe("certified and signed documents", () => {
     vi.mocked(prepressApi.protection).mockResolvedValue({ certified: true, signed: true });
     st().openMarks();
     await flush();
-    expect(st().get(1).protection).toEqual({ certified: true, signed: true });
+    expect(st().get(1).protection).toMatchObject({ certified: true, signed: true });
     await st().applyMarks();
     expect(st().sheet).toMatchObject({ error: expect.stringMatching(/certified/) });
     st().openBoxes();
@@ -430,7 +430,22 @@ describe("certified and signed documents", () => {
     await flush();
     await st().applyMarks();
     expect(prepressApi.marks).toHaveBeenCalledTimes(1);
-    expect(st().get(1).protection).toEqual({ certified: false, signed: true });
+    expect(st().get(1).protection).toMatchObject({ certified: false, signed: true });
+  });
+
+  it("reads the protection again when the document moves on, so a later signature shows", async () => {
+    st().openMarks();
+    await flush();
+    expect(st().get(1).protection).toMatchObject({ certified: false, rev: 3 });
+    vi.mocked(prepressApi.protection).mockResolvedValue({ certified: true, signed: true });
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 4 } as never } });
+    await flush();
+    expect(prepressApi.protection).toHaveBeenCalledTimes(2);
+    expect(st().get(1).protection).toMatchObject({ certified: true, rev: 4 });
+    // the same generation is not asked twice
+    st().openMarks();
+    await flush();
+    expect(prepressApi.protection).toHaveBeenCalledTimes(2);
   });
 });
 
