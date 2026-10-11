@@ -79,6 +79,10 @@ const PATHS = {
   download: "M12 4v11M7 10.5l5 5 5-5M5 20h14",
   grip: "M9 5.5v.01M15 5.5v.01M9 12v.01M15 12v.01M9 18.5v.01M15 18.5v.01",
   hash: "M5 9h14M5 15h14M10 4 8 20M16 4l-2 16",
+  headerFooter: "M5 3h14a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM4 8h16M4 16h16",
+  background: "M5 3h14a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM8 8h8v8H8Z",
+  shield: "M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6Z",
+  access: "M12 3.5a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6ZM5 9.5l7 1.5 7-1.5M12 11v4.5M8.5 20.5 12 15.5l3.5 5",
 };
 
 export type IconName = keyof typeof PATHS;

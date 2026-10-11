@@ -7,6 +7,7 @@ import { PAGE_DARK_KEY, type PageDark, parsePageDark } from "./lib/pageDark";
 import { keyOf } from "./lib/recent";
 import { type Hit, hitY, mergeHits, pickCurrent } from "./lib/searchLogic";
 import { dropCached } from "./lib/tiles";
+import { useToolPrefs } from "./lib/toolPrefs";
 import { useRecents } from "./recents";
 
 export type ZoomMode = "fitWidth" | "fitPage" | "custom";
@@ -313,8 +314,18 @@ export const useStore = create<Store>((set, get) => {
       get().patch(id, { nav: { page: p, y, nonce: ++navNonce }, currentPage: p });
     },
 
-    setSidebar: (sidebar) => set({ sidebar }),
-    toggleSidebar: (p) => set((s) => ({ sidebar: s.sidebar === p ? "none" : p })),
+    // Choosing a sidebar panel by any route hands the slot back from the All tools panel, even to the panel
+    // that was already selected underneath it.
+    setSidebar: (sidebar) => {
+      useToolPrefs.getState().setPanel(false);
+      set({ sidebar });
+    },
+    toggleSidebar: (p) => {
+      const covered = useToolPrefs.getState().panelOpen;
+      if (covered) useToolPrefs.getState().setPanel(false);
+      // with the tools panel on top, the button shows the panel instead of hiding the sidebar
+      set((s) => ({ sidebar: s.sidebar === p && !covered ? "none" : p }));
+    },
     setTheme: (theme) => {
       localStorage.setItem("inkwell.theme", theme);
       set({ theme });
