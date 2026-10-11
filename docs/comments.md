@@ -15,7 +15,7 @@ that bring annotations no earlier page had, so pages that share one array cost n
 page that lists it, or to the page its `/P` names when that page lists it too. Known limit: a dictionary two pages list
 through different arrays, with no `/P` naming the later one, shows on the first page only; the later page still draws it
 but it cannot be selected there. Past 50 000 loaded annotations (links and popups not counted) or 2 000 000 repeated array entries
-(an object an earlier array listed; first sights and links are free) the remaining pages are left out and `incomplete` is true; the panel says so.
+(an object an earlier array listed; an object's first sight is free) the remaining pages are left out and `incomplete` is true; the panel says so.
 
 ## Later
 

@@ -284,7 +284,7 @@ fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
 /// and the list says so (`incomplete`).
 const MAX_LOADED: usize = 50_000;
 /// Entries [`AnnotWalk`] meets again in one document (an object an earlier array listed too). The
-/// first sight of an object is not counted, so a file's size does not use the budget up.
+/// first sight of an object is not counted, so entries no other array lists never use the budget.
 const MAX_SCANNED: usize = 2_000_000;
 
 /// The comments of a document, and whether some were left out (past [`MAX_LOADED`] annotations or

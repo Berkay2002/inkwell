@@ -475,16 +475,16 @@ fn repeated_entries_past_the_scan_budget_leave_pages_out_and_say_so() {
     let l = list_status(&eng, id).unwrap();
     assert_eq!(l.items.iter().map(|a| (a.page, a.xref)).collect::<Vec<_>>(), vec![(0, 4)]);
     assert!(l.incomplete);
-    // The walk itself stops: pages after the cap are not looked at.
+    // Walking the same page again meets 1001 repeats each time: the cap is reached within 2000 rounds.
     let mut walk = AnnotWalk::default();
     eng.read_custom(id, |d| {
-        while !walk.incomplete {
+        for _ in 0..2100 {
             let _ = walk.page(d, 1, Which::Comments)?;
         }
         Ok(())
     })
     .unwrap();
-    assert!(walk.scanned > MAX_SCANNED);
+    assert!(walk.incomplete && walk.scanned > MAX_SCANNED);
 }
 
 #[test]
