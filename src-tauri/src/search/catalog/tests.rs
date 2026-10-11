@@ -29,6 +29,17 @@ pub(super) fn while_held(_dir: &Path) {
     }
 }
 
+/// Replaces the file with other bytes just before the build opens it (a file that grew after it was listed).
+static BEFORE_OPEN: Mutex<Option<(PathBuf, Vec<u8>)>> = Mutex::new(None);
+
+pub(super) fn before_open(path: &Path) {
+    let mut g = BEFORE_OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if g.as_ref().is_some_and(|(p, _)| p == path) {
+        let (p, bytes) = g.take().unwrap();
+        std::fs::write(p, bytes).unwrap();
+    }
+}
+
 fn no_progress() -> impl Fn(u32, u32) + Sync {
     |_, _| {}
 }
@@ -1089,6 +1100,26 @@ fn a_forget_waiting_for_a_busy_catalog_survives_a_restart() {
     assert_eq!(pending(&d), Waiting::Paths(vec![base.join("c.pdf")]));
     settle_pending(&d, &[base.join("c.pdf")]).unwrap();
     assert!(!pending_path(&d).exists());
+}
+
+#[test]
+fn a_file_that_grew_after_it_was_listed_is_checked_against_the_limit_by_what_is_read() {
+    let base = dir("catalog-grew");
+    let folder = base.join("docs");
+    let small = plain(&[vec!["a small notice"]]);
+    let limit = small.len() as u64 + 10;
+    let grown = doc_with(
+        &[vec!["a grown notice"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    let p = write(&folder, "a.pdf", small);
+    write(&folder, "b.pdf", plain(&[vec!["another notice"]]));
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    *BEFORE_OPEN.lock().unwrap() = Some((p.clone(), grown));
+    let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), MAX_READ, limit).unwrap();
+    assert!(BEFORE_OPEN.lock().unwrap().is_none(), "the file was replaced after the listing");
+    assert_eq!((s.files, s.extracted, s.too_large, s.damaged), (2, 1, 1, 0), "{s:?}");
+    assert_eq!(flat(&catalog_search(&d, "grown", SearchOpts::default())).0.len(), 0);
 }
 
 #[test]

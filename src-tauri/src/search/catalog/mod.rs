@@ -750,19 +750,36 @@ fn index_file(sh: &Shared, job: &Job) -> Option<FileRec> {
         status: Status::Damaged,
         cut: false,
     };
-    if job.size > sh.max_file {
+    #[cfg(test)]
+    tests::before_open(&job.path);
+    // Read whole, so no handle stays on the file while it is indexed (a Save-over, delete or rename of the PDF
+    // must not wait for a build) and a long path is no problem; the sample is hashed from the same bytes.
+    // The size is the file's now, not the listing's: it may have grown since, and what is read is capped by it.
+    let Ok(mut file) = std::fs::File::open(&job.path) else {
+        rec.head_tail = head_tail(&job.path, job.size);
+        return Some(rec);
+    };
+    let len = file.metadata().map_or(job.size, |m| m.len());
+    let mut too_large = len > sh.max_file;
+    // A big file is read alone, so the copies in memory stay few.
+    let _alone = (!too_large && len > sh.max_read).then(|| sh.big.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut bytes = Vec::new();
+    if !too_large {
+        match (&mut file).take(sh.max_file.saturating_add(1)).read_to_end(&mut bytes) {
+            Ok(n) => too_large = n as u64 > sh.max_file,
+            Err(_) => bytes.clear(),
+        }
+    }
+    drop(file);
+    if too_large {
         rec.status = Status::TooLarge;
         rec.head_tail = head_tail(&job.path, job.size);
         return Some(rec);
     }
-    // Read whole, so no handle stays on the file while it is indexed (a Save-over, delete or rename of the PDF
-    // must not wait for a build) and a long path is no problem; the sample is hashed from the same bytes.
-    // A big file is read alone, so the copies in memory stay few.
-    let _alone = (job.size > sh.max_read).then(|| sh.big.lock().unwrap_or_else(|e| e.into_inner()));
-    let Ok(bytes) = std::fs::read(&job.path) else {
+    if bytes.is_empty() {
         rec.head_tail = head_tail(&job.path, job.size);
         return Some(rec);
-    };
+    }
     rec.head_tail = sample_of(&mut std::io::Cursor::new(&bytes), job.size);
     // A file that makes MuPDF panic is skipped like a damaged one.
     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Probe {
