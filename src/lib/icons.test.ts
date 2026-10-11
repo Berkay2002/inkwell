@@ -125,6 +125,9 @@ describe("icon set", () => {
     expect(unknownNames('<Icon name="nope" />', known, glyphs)).toEqual(["Icon nope"]);
     expect(unknownNames('<Icon name={on ? "close" : "alsoNope"} />', known, glyphs)).toEqual(["Icon alsoNope"]);
     expect(unknownNames('<Glyph name="search" />', known, glyphs)).toEqual(["Glyph search"]);
+    // a compared literal is a condition, only the branches are names
+    expect(unknownNames('<Icon name={k === "folder" ? "search" : "close"} />', known, glyphs)).toEqual([]);
+    expect(unknownNames('<Icon name={k !== "folder" ? "nope" : "close"} />', known, glyphs)).toEqual(["Icon nope"]);
   });
 });
 
@@ -143,7 +146,9 @@ function inlinePaths(src: string): string[] {
 function unknownNames(src: string, icons: Set<string>, glyphs: Set<string>): string[] {
   const out: string[] = [];
   for (const m of src.matchAll(/<(Icon|Glyph)\s+name=(?:"([A-Za-z0-9]+)"|\{([^}]*)\})/g)) {
-    const names = m[2] ? [m[2]] : [...(m[3] ?? "").matchAll(/"([A-Za-z0-9]+)"/g)].map((x) => x[1]);
+    // in an expression, a literal compared with ===, !==, == or != is a condition, not a name
+    const expr = (m[3] ?? "").replace(/[!=]==?\s*"[^"]*"/g, "");
+    const names = m[2] ? [m[2]] : [...expr.matchAll(/"([A-Za-z0-9]+)"/g)].map((x) => x[1]);
     for (const n of names) if (!(m[1] === "Icon" ? icons : glyphs).has(n)) out.push(`${m[1]} ${n}`);
   }
   return out;
