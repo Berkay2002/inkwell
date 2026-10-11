@@ -207,6 +207,7 @@ export interface CatalogMeta {
   pages: number;
   damaged: number;
   password: number;
+  tooLarge: number;
   cloudOnly: number;
   cut: number;
   capped: boolean;
@@ -223,6 +224,7 @@ export interface CatalogSummary {
   removed: number;
   damaged: number;
   password: number;
+  tooLarge: number;
   cloudOnly: number;
   pages: number;
   cut: number;
