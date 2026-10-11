@@ -8,6 +8,7 @@ pub mod history;
 pub mod history_ipc;
 pub mod ocr;
 pub mod paths;
+pub mod protect;
 pub mod recents;
 pub mod redact;
 pub mod tools;
@@ -752,6 +753,9 @@ pub fn run() {
             compress_audit,
             compress_estimate,
             compress_start,
+            protect::app::security_info,
+            protect::app::protect_apply,
+            protect::app::remove_security,
             tool_cancel,
             ocr_languages,
             ocr_choose_tesseract,

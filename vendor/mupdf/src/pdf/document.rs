@@ -846,7 +846,9 @@ impl PdfDocument {
 
     pub fn permissions(&self) -> Permission {
         let bits = unsafe { pdf_document_permissions(context(), self.inner) };
-        Permission::from_bits(bits as u32).unwrap_or_else(Permission::all)
+        // The P value of an encrypted file always has its reserved high bits set: `from_bits` would
+        // reject every such value and report all permissions granted.
+        Permission::from_bits_truncate(bits as u32)
     }
 
     pub fn save(&self, filename: &str) -> Result<(), Error> {

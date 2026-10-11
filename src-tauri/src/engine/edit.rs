@@ -14,6 +14,7 @@
 //! [`Engine::save`], [`Engine::extract`], [`Engine::split`] and [`Engine::merge`].
 
 use super::{DocEntry, DocId, Engine, EngineError, Result, Snap, authenticate, check_pdf};
+use crate::protect::{self, SecurityChange};
 use mupdf::pdf::{PdfDocument, PdfGraftMap, PdfObject, PdfWriteOptions};
 use mupdf::{Document, Size};
 use serde::{Deserialize, Serialize};
@@ -177,6 +178,9 @@ struct Step {
     drops: bool,
     /// A redaction step: its snapshot is a full rewrite, and so is every save that includes it.
     redacts: bool,
+    /// Set or removed password security: the snapshot is the step before it, and every save that
+    /// includes it writes the file again with (or without) encryption.
+    security: Option<SecurityChange>,
     /// The snapshot is the file exactly as a save must write it (the redaction engine's verified
     /// bytes): saving this step writes them as they are, not a rewrite of them.
     exact: bool,
@@ -292,7 +296,18 @@ impl Editor {
             doc = open_snap(&snap, entry)?;
         }
         let sizes = Arc::new(page_sizes(&doc.doc)?);
-        let base = Step { snap, label: "Opened".into(), source: EditSource::User, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, exact: false, sizes };
+        let base = Step {
+            snap,
+            label: "Opened".into(),
+            source: EditSource::User,
+            at_ms: now_ms(),
+            pages: vec![],
+            drops: false,
+            redacts: false,
+            security: None,
+            exact: false,
+            sizes,
+        };
         Ok(Editor { doc, steps: vec![base], cur: 0, saved: Some(0) })
     }
 
@@ -380,10 +395,24 @@ impl Editor {
 
     /// The current content as Save writes it: rewritten once anything was removed, else the snapshot.
     fn content(&self, entry: &DocEntry) -> Result<Vec<u8>> {
-        if self.steps[..=self.cur].iter().any(|s| s.drops || s.redacts) {
-            return write_doc(&open_snap(&self.step().snap, entry)?.doc, rewrite_opts(), self.step().snap.len);
+        if self.steps[..=self.cur].iter().any(|s| s.drops || s.redacts) || self.security().is_some() {
+            return write_doc(&open_snap(&self.step().snap, entry)?.doc, self.save_opts(), self.step().snap.len);
         }
         Ok(self.bytes().to_vec())
+    }
+
+    /// The password security the document is to be saved with: the latest security step up to the
+    /// current one. `None`: the file keeps whatever encryption it was opened with.
+    fn security(&self) -> Option<&SecurityChange> {
+        self.steps[..=self.cur].iter().rev().find_map(|s| s.security.as_ref())
+    }
+
+    /// The write options of a full-rewrite save.
+    fn save_opts(&self) -> PdfWriteOptions {
+        match self.security() {
+            Some(c) => protect::write_options(rewrite_opts(), c),
+            None => rewrite_opts(),
+        }
     }
 
     fn state(&self, entry: &DocEntry) -> EditState {
@@ -1030,8 +1059,18 @@ impl Engine {
                 let snap = ed.snapshot()?;
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
-                let step =
-                    Step { snap, label: op.label(), source, at_ms: now_ms(), pages, drops, redacts: false, exact: false, sizes: Arc::new(after) };
+                let step = Step {
+                    snap,
+                    label: op.label(),
+                    source,
+                    at_ms: now_ms(),
+                    pages,
+                    drops,
+                    redacts: false,
+                    security: None,
+                    exact: false,
+                    sizes: Arc::new(after),
+                };
                 Ok(Some((step, doc)))
             }
         });
@@ -1133,7 +1172,7 @@ impl Engine {
             let doc = open_snap(&snap, &entry)?;
             let sizes = Arc::new(page_sizes(&doc.doc)?);
             let drops = sizes.len() < ed.step().sizes.len();
-            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, exact, sizes }, doc))
+            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, sizes }, doc))
         });
         match changed {
             Ok((step, doc)) => {
@@ -1165,9 +1204,13 @@ impl Engine {
         let cur = ed.cur;
         // The kept steps' bytes may still hold what dropped steps removed: saves keep rewriting.
         let (drops, redacts) = (ed.steps[..=cur].iter().any(|s| s.drops), ed.steps[..=cur].iter().any(|s| s.redacts));
+        let security = ed.security().cloned();
         ed.steps.drain(..cur);
         ed.steps[0].drops |= drops;
         ed.steps[0].redacts |= redacts;
+        if ed.steps[0].security.is_none() {
+            ed.steps[0].security = security;
+        }
         ed.saved = ed.saved.and_then(|s| s.checked_sub(cur));
         ed.cur = 0;
         Ok(ed.state(&entry))
@@ -1296,22 +1339,32 @@ impl Engine {
             self.check_not_open(&target, Some(id))?;
         }
         let ed = self.lane(&entry, &mut lane)?;
-        let rewrite = ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
+        let secured = ed.security().is_some();
+        let rewrite = secured || ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
         let full;
-        let bytes: &[u8] = if ed.step().exact {
+        // Security wins over a redaction's exact bytes: they could not carry the new encryption, and
+        // a rewrite of verified-clean content only ever drops objects, it adds none.
+        let bytes: &[u8] = if ed.step().exact && !secured {
             // The redaction engine's verified file: any other write of it is unverified.
             ed.bytes()
         } else if rewrite {
             // From a throwaway copy: a garbage-collecting write leaves its document unable to take
             // incremental updates, which every later edit needs.
-            full = write_doc(&open_snap(&ed.step().snap, &entry)?.doc, rewrite_opts(), ed.step().snap.len)?;
+            full = write_doc(&open_snap(&ed.step().snap, &entry)?.doc, ed.save_opts(), ed.step().snap.len)?;
             &full
         } else {
             ed.bytes()
         };
         let pages = ed.step().sizes.len() as u32;
-        let password = entry.password.lock().clone();
-        if same {
+        // What reads the written file back: its new open password when security was set or removed.
+        let password = match ed.security() {
+            Some(SecurityChange::Set(s)) => s.open().map(str::to_string),
+            Some(SecurityChange::Remove) => None,
+            None => entry.password.lock().clone(),
+        };
+        // A new encryption makes the file on disk unreadable with the password the replicas know:
+        // from here on they read memory, never the path (Save as would point them at the new file).
+        if same || secured {
             // Replicas must read from memory before the file goes away under them.
             if entry.layout.read().snap.is_none() {
                 self.publish(&entry, ed);
@@ -1420,6 +1473,8 @@ impl Engine {
         Ok(total)
     }
 }
+
+mod security;
 
 #[cfg(test)]
 #[path = "tests_edit.rs"]
