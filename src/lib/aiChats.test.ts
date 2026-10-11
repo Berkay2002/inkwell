@@ -117,6 +117,34 @@ describe("a document's chats (command bar)", () => {
     expect(ai.aiPrepare).toHaveBeenCalled();
   });
 
+  it("Stop on an answer that waits for the thread reset cancels it here and it is never sent", async () => {
+    let release: () => void = () => {};
+    vi.mocked(ai.aiClose).mockImplementationOnce(() => new Promise<void>((r) => (release = r)));
+    ask("first");
+    finish();
+    useAi.getState().newChat(1);
+    vi.mocked(ai.aiAsk).mockClear();
+    vi.mocked(ai.aiCancel).mockClear();
+    ask("second");
+    expect(useAi.getState().chats[1].messages[1].state).toBe("streaming");
+    useAi.getState().cancel(1);
+    const [, bot] = useAi.getState().chats[1].messages;
+    expect(bot.state).toBe("cancelled");
+    expect(ai.aiCancel).not.toHaveBeenCalled(); // nothing is running on the other side
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ai.aiAsk).not.toHaveBeenCalled();
+    // and the chat takes the next question
+    ask("third");
+    await vi.waitFor(() => expect(ai.aiAsk).toHaveBeenCalledTimes(1));
+  });
+
+  it("Stop on a running answer still reaches the engine", () => {
+    ask("first");
+    useAi.getState().cancel(1);
+    expect(ai.aiCancel).toHaveBeenCalledWith(1);
+  });
+
   it("a question that was cleared away while it waited is never asked", async () => {
     let release: () => void = () => {};
     vi.mocked(ai.aiClose).mockImplementationOnce(() => new Promise<void>((r) => (release = r)));

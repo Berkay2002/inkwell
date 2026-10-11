@@ -121,6 +121,8 @@ let draftNonce = 0;
 let held: { prev: Mark | null } | null = null;
 /** Documents whose model thread is being closed and prepared again: a question waits for it. */
 const resets = new Map<number, Promise<void>>();
+/** Documents whose newest answer is waiting for `resets`: it has not been sent yet (doc -> answer id). */
+const unsent = new Map<number, number>();
 
 /** The turn is over: a card nobody answered did not run. */
 const settle = (acts: Activity[]): Activity[] =>
@@ -171,6 +173,7 @@ export const useAi = create<AiStore>((set, get) => {
     set({ mark: null, sheet: true });
     const model = st.settings.model;
     const start = () => {
+      if (unsent.get(doc) === bot.id) unsent.delete(doc);
       // the chat was cleared, switched or stopped while the model thread was being renewed: nothing to ask
       if (!get().chats[doc]?.messages.some((m) => m.id === bot.id && m.state === "streaming")) return Promise.resolve();
       return ai.aiAsk(
@@ -233,6 +236,7 @@ export const useAi = create<AiStore>((set, get) => {
     };
     // after "New chat" or a switch the old thread is still being closed: asking now would be closed with it
     const gate = resets.get(doc);
+    if (gate) unsent.set(doc, bot.id);
     (gate ? gate.then(start) : start()).catch((err) =>
       patchMsg(doc, bot.id, (m) => ({ ...m, activity: settle(m.activity), state: "error", error: String(err), hint: null })),
     );
@@ -310,7 +314,14 @@ export const useAi = create<AiStore>((set, get) => {
       run(doc, task, text);
     },
 
-    cancel: (doc) => void ai.aiCancel(doc),
+    cancel: (doc) => {
+      // Stop on an answer that is still waiting for the thread reset: nothing is running to stop, so the
+      // answer is closed here and `start` finds it so and never sends it
+      const waiting = unsent.get(doc);
+      if (waiting == null) return void ai.aiCancel(doc);
+      unsent.delete(doc);
+      patchMsg(doc, waiting, (m) => ({ ...m, activity: settle(m.activity), state: "cancelled" }));
+    },
 
     decide: (doc, callId, allow) => {
       // the card answers at once; the activity events that follow confirm or correct it
@@ -330,6 +341,7 @@ export const useAi = create<AiStore>((set, get) => {
     clear: (doc) => {
       // a fresh thread: the model forgets the conversation (a turn in flight is interrupted)
       held = null;
+      unsent.delete(doc);
       set((s) => ({ chats: { ...s.chats, [doc]: { messages: [], prep: s.chats[doc]?.prep ?? null } }, mark: null }));
       restart(doc);
     },
@@ -347,6 +359,7 @@ export const useAi = create<AiStore>((set, get) => {
       const cur = s.chats[doc]?.messages ?? [];
       const rest = (s.past[doc] ?? []).filter((p) => p.id !== id);
       held = null;
+      unsent.delete(doc);
       set({
         past: { ...s.past, [doc]: cur.length > 0 ? [pastOf(cur), ...rest] : rest },
         chats: { ...s.chats, [doc]: { messages: hit.messages, prep: s.chats[doc]?.prep ?? null, restored: hit.messages.length } },
@@ -359,6 +372,7 @@ export const useAi = create<AiStore>((set, get) => {
     closeChat: (doc) => {
       held = null;
       resets.delete(doc);
+      unsent.delete(doc);
       void ai.aiClose(doc);
       set((s) => {
         const chats = { ...s.chats };
