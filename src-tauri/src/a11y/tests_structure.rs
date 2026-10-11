@@ -328,6 +328,26 @@ fn merging_two_regions_joins_their_content_in_tree_order() {
 }
 
 #[test]
+fn merging_three_regions_is_one_undo_step() {
+    let path = file("merge-many", &doc3());
+    let (eng, id) = open(&path);
+    let steps = eng.history(id).unwrap().len();
+    merge_many_doc(&eng, id, 102, &[103, 104], EditSource::User).unwrap();
+    assert_eq!(eng.history(id).unwrap().len(), steps + 1);
+    let ro = reading_order_doc(&eng, id, 0).unwrap();
+    assert_eq!(ro.regions.iter().map(|r| (r.xref, r.mcids.clone())).collect::<Vec<_>>(), [(102, vec![0, 1, 2])]);
+    assert_consistent(&eng, id);
+    eng.undo(id).unwrap();
+    assert_eq!(region_xrefs(&eng, id, 0), [102, 103, 104]);
+    // A refusal part way (a missing region) leaves the document as it was and adds no step.
+    let steps = eng.history(id).unwrap().len();
+    assert!(merge_many_doc(&eng, id, 102, &[103, 999], EditSource::User).is_err());
+    assert_eq!(eng.history(id).unwrap().len(), steps);
+    assert_eq!(region_xrefs(&eng, id, 0), [102, 103, 104]);
+    assert!(merge_many_doc(&eng, id, 102, &[], EditSource::User).is_err());
+}
+
+#[test]
 fn splitting_a_region_makes_a_sibling_with_the_rest() {
     let mut s = doc3();
     s.pages[0].1 = "/P <</MCID 0>> BDC BT /F1 12 Tf 72 700 Td (One) Tj ET EMC /P <</MCID 1>> BDC BT /F1 12 Tf 72 680 Td (Two) Tj ET EMC /P <</MCID 2>> BDC BT /F1 12 Tf 72 660 Td (Three) Tj ET EMC".into();
@@ -446,7 +466,7 @@ fn a_node_moves_to_another_parent_and_the_tree_stays_consistent() {
     let path = file("move", &s);
     let (eng, id) = open(&path);
     let steps = eng.history(id).unwrap().len();
-    move_tag_doc(&eng, id, 102, 105, 0, EditSource::User).unwrap();
+    move_tag_doc(&eng, id, 102, 105, None, false, EditSource::User).unwrap();
     assert_eq!(eng.history(id).unwrap().len(), steps + 1);
     let t = tags_doc(&eng, id, None).unwrap();
     let kinds: Vec<(i32, usize)> = t[0].children.iter().map(|c| (c.xref, c.children.len())).collect();
@@ -454,10 +474,10 @@ fn a_node_moves_to_another_parent_and_the_tree_stays_consistent() {
     assert_eq!(t[0].children[2].children[0].xref, 102);
     assert_consistent(&eng, id);
     // Not into itself or its own kid.
-    assert!(move_tag_doc(&eng, id, 105, 102, 0, EditSource::User).is_err());
-    assert!(move_tag_doc(&eng, id, 105, 105, 0, EditSource::User).is_err());
+    assert!(move_tag_doc(&eng, id, 105, 102, None, false, EditSource::User).is_err());
+    assert!(move_tag_doc(&eng, id, 105, 105, None, false, EditSource::User).is_err());
     // To the top of the tree, first.
-    move_tag_doc(&eng, id, 104, 0, 0, EditSource::User).unwrap();
+    move_tag_doc(&eng, id, 104, 0, Some(101), false, EditSource::User).unwrap();
     assert_eq!(tags_doc(&eng, id, None).unwrap()[0].xref, 104);
     let (eng2, id2) = reload(&eng, id, &path);
     assert_consistent(&eng2, id2);
@@ -476,7 +496,7 @@ fn moving_a_node_keeps_its_page_when_it_relied_on_an_inherited_one() {
     let path = file("move-pg", &s);
     let (eng, id) = open(&path);
     assert_consistent(&eng, id);
-    move_tag_doc(&eng, id, 112, 101, 0, EditSource::User).unwrap();
+    move_tag_doc(&eng, id, 112, 101, Some(102), false, EditSource::User).unwrap();
     assert_consistent(&eng, id);
     let (_, _) = reload(&eng, id, &path);
     let order = walk(&path);
@@ -609,4 +629,159 @@ fn q_restores_the_text_state_for_the_next_region() {
     // 24 pt text is about twice as tall as 12 pt; the second region must be measured at 12 pt.
     assert!(h(0) > 1.7 * h(1), "{} vs {}", h(0), h(1));
     assert_eq!(r[1].text, "Small");
+}
+
+#[test]
+fn a_tag_moves_beside_a_sibling_in_a_parent_that_mixes_content_and_elements() {
+    // Document /K [mcid 0, A, mcid 2, B]: the raw array holds content items between the elements.
+    let content: String = (0..4).map(|m| marked("P", m, 700 - 50 * m)).collect();
+    let s = Spec {
+        cat: "/StructTreeRoot 100 0 R /MarkInfo <</Marked true>>".into(),
+        pages: vec![("/StructParents 0".into(), content)],
+        objs: vec![
+            (100, "<</Type/StructTreeRoot /K 101 0 R /ParentTree <</Nums [0 [101 0 R 102 0 R 101 0 R 103 0 R]]>> /ParentTreeNextKey 1>>".into()),
+            (101, "<</Type/StructElem /S/Document /P 100 0 R /Pg 10 0 R /K [0 102 0 R 2 103 0 R]>>".into()),
+            el(102, "P", 101, "1"),
+            el(103, "P", 101, "3"),
+        ],
+        ..Spec::default()
+    };
+    let path = file("move-mixed", &s);
+    let (eng, id) = open(&path);
+    assert_consistent(&eng, id);
+    let tree_order = |eng: &Engine, id: DocId| -> Vec<i32> {
+        eng.save(id, None).unwrap();
+        walk(&path).into_iter().map(|(_, m)| m).collect()
+    };
+    let mv = |xref, parent, anchor, after| move_tag_doc(&eng, id, xref, parent, anchor, after, EditSource::User);
+    // Down: A after B, past the content item between them.
+    mv(102, 101, Some(103), true).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 2, 3, 1]);
+    eng.undo(id).unwrap();
+    // Up: B before A, ahead of the content item that sits before A.
+    mv(103, 101, Some(102), false).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 3, 1, 2]);
+    eng.undo(id).unwrap();
+    // In: B as the last kid of A (A's /K is a single item).
+    mv(103, 102, None, false).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 1, 3, 2]);
+    let t = tags_doc(&eng, id, None).unwrap();
+    assert_eq!(t[0].children.iter().map(|c| c.xref).collect::<Vec<_>>(), [102]);
+    assert_eq!(t[0].children[0].children.iter().map(|c| c.xref).collect::<Vec<_>>(), [103]);
+    // Out: B back into the Document, right before A.
+    mv(103, 101, Some(102), false).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 3, 1, 2]);
+    assert_consistent(&eng, id);
+    eng.undo(id).unwrap();
+    eng.undo(id).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 1, 2, 3]);
+    // Nothing changes: last kid to the end, itself, an anchor that is not a kid. No step is recorded.
+    let steps = eng.history(id).unwrap().len();
+    assert!(mv(103, 101, None, false).is_err());
+    assert!(mv(102, 101, Some(102), true).is_err());
+    assert!(mv(102, 0, Some(103), false).is_err(), "103 is not a kid of the top");
+    assert_eq!(eng.history(id).unwrap().len(), steps);
+    assert_eq!(tree_order(&eng, id), [0, 1, 2, 3]);
+    // Past the content item in front of B is a real change.
+    mv(102, 101, Some(103), false).unwrap();
+    assert_eq!(tree_order(&eng, id), [0, 2, 1, 3]);
+}
+
+// ---- signed and certified documents --------------------------------------------------------------
+
+const SIGNATURE: &str = "<</FT/Sig /T(Signature1) /V <</Type/Sig /Filter/Adobe.PPKLite /SubFilter/adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00>>>>>";
+
+/// `doc3` signed (a signature field with a value), not certified.
+fn signed_doc() -> Spec {
+    let mut s = doc3();
+    s.cat.push_str(" /AcroForm <</SigFlags 3 /Fields [120 0 R]>>");
+    s.objs.push((120, SIGNATURE.into()));
+    s
+}
+
+/// `doc3` certified with DocMDP `/P` `p`.
+fn certified_doc(p: u8) -> Spec {
+    let mut s = signed_doc();
+    s.cat.push_str(&format!(" /Perms <</DocMDP <</Type/Sig /Reference [<</TransformMethod/DocMDP /TransformParams <</P {p}>>>>]>>>>"));
+    s
+}
+
+fn certified_refusal(r: Result<EditState>, what: &str) {
+    match r {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{what}: {m}"),
+        other => panic!("{what}: expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_certified_document_refuses_every_structure_edit_and_fix() {
+    for p in 1..=3 {
+        let path = file(&format!("certified-{p}"), &certified_doc(p));
+        let (eng, id) = open(&path);
+        let r = check_eng(&eng, id);
+        assert!(r.certified && r.signed, "P {p}");
+        let steps = eng.history(id).unwrap().len();
+        let u = || EditSource::User;
+        let alt = TagPatch { alt: Some("x".into()), ..TagPatch::default() };
+        certified_refusal(reorder_doc(&eng, id, 0, &[104, 102, 103], u()), "reorder");
+        certified_refusal(set_role_doc(&eng, id, 102, "H1", u()), "set role");
+        certified_refusal(artifact_doc(&eng, id, 102, u()), "artifact");
+        certified_refusal(merge_doc(&eng, id, 102, 103, u()), "merge");
+        certified_refusal(merge_many_doc(&eng, id, 102, &[103, 104], u()), "merge many");
+        certified_refusal(split_doc(&eng, id, 102, 1, None, u()), "split");
+        certified_refusal(edit_tag_doc(&eng, id, 102, &alt, u()), "edit tag");
+        certified_refusal(move_tag_doc(&eng, id, 104, 101, Some(102), false, u()), "move tag");
+        certified_refusal(fix_doc(&eng, id, &Fix::Title { title: Some("T".into()) }, u()), "title");
+        certified_refusal(fix_doc(&eng, id, &Fix::Autotag, u()), "autotag");
+        certified_refusal(fix_doc(&eng, id, &Fix::Many { fixes: vec![Fix::TabOrder] }, u()), "many");
+        assert_eq!(eng.history(id).unwrap().len(), steps, "P {p}: a refusal adds no step");
+        assert_eq!(region_xrefs(&eng, id, 0), [102, 103, 104]);
+    }
+}
+
+#[test]
+fn editing_a_signed_document_leaves_its_signed_bytes_alone() {
+    let path = file("signed-edit", &signed_doc());
+    let original = std::fs::read(&path).unwrap();
+    let (eng, id) = open(&path);
+    let r = check_eng(&eng, id);
+    assert!(r.signed && !r.certified, "signed, not certified");
+    reorder_doc(&eng, id, 0, &[104, 102, 103], EditSource::User).unwrap();
+    edit_tag_doc(&eng, id, 102, &TagPatch { alt: Some("A".into()), ..TagPatch::default() }, EditSource::User).unwrap();
+    fix_doc(&eng, id, &Fix::Title { title: Some("Signed title".into()) }, EditSource::User).unwrap();
+    let (eng2, id2) = reload(&eng, id, &path);
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "an incremental save: the signed bytes are the start of the file");
+    assert_eq!(region_xrefs(&eng2, id2, 0), [104, 102, 103], "the edit is in the saved file");
+    assert!(check_eng(&eng2, id2).signed);
+}
+
+#[test]
+fn protection_is_known_without_a_check() {
+    let get = |name: &str, s: &Spec| {
+        let (eng, id) = open(&file(name, s));
+        protection_doc(&eng, id).unwrap()
+    };
+    assert_eq!(get("prot-none", &doc3()), Protection { certified: false, signed: false });
+    assert_eq!(get("prot-signed", &signed_doc()), Protection { certified: false, signed: true });
+    assert_eq!(get("prot-cert", &certified_doc(2)), Protection { certified: true, signed: true });
+}
+
+#[test]
+fn a_merge_is_bounded_and_an_anchor_has_an_object_number() {
+    let path = file("bounds", &doc3());
+    let (eng, id) = open(&path);
+    let steps = eng.history(id).unwrap().len();
+    let many = vec![103; 100];
+    match merge_many_doc(&eng, id, 102, &many, EditSource::User) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("100"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    for anchor in [0, -1] {
+        match move_tag_doc(&eng, id, 104, 101, Some(anchor), false, EditSource::User) {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("object number"), "{m}"),
+            other => panic!("anchor {anchor}: {other:?}"),
+        }
+    }
+    assert_eq!(eng.history(id).unwrap().len(), steps);
 }

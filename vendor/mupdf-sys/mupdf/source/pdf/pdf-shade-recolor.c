@@ -1032,5 +1032,7 @@ pdf_recolor_shade(fz_context *ctx, pdf_obj *shade, pdf_shade_recolorer *reshade,
 		fz_rethrow(ctx);
 	}
 
-	return rewritten ? rewritten : shade;
+	/* Inkwell patch: the callers drop what they get back, so the unchanged shading needs its own reference
+	 * (it was a borrowed pointer: a shade_rewrite that returns NULL freed the page's shading object). */
+	return rewritten ? rewritten : pdf_keep_obj(ctx, shade);
 }

@@ -5,7 +5,7 @@ use super::autotag::Preview;
 use super::order::ReadingOrder;
 use super::tags::{TagNode, TagPatch};
 use super::{
-    Fix, Problem, Progress, Report, artifact_doc, check_doc, edit_tag_doc, fix_doc_with, merge_doc, move_tag_doc, preview_doc, reading_order_doc, reorder_doc,
+    Fix, Problem, Progress, Protection, Report, artifact_doc, check_doc, edit_tag_doc, fix_doc_with, merge_doc, merge_many_doc, move_tag_doc, preview_doc, protection_doc, reading_order_doc, reorder_doc,
     report_bytes, set_role_doc, split_doc, tag_problems_doc, tags_doc,
 };
 use crate::engine::edit::{EditSource, EditState};
@@ -101,6 +101,14 @@ pub async fn a11y_export_report(
     .await
 }
 
+/// Whether the document is certified or signed (cheap, no check needed): the rail disables its edit
+/// controls on this.
+#[tauri::command]
+pub async fn a11y_protection(eng: Eng<'_>, doc: DocId) -> Result<Protection> {
+    let eng = eng.inner().clone();
+    blocking(move || protection_doc(&eng, doc)).await
+}
+
 // ---- reading order and tags ----------------------------------------------------------------------
 
 /// The regions of a page in reading order: role, text preview, box, MCIDs and the elements that hold them,
@@ -156,6 +164,13 @@ pub async fn a11y_merge_regions(eng: Eng<'_>, doc: DocId, into: i32, from: i32) 
     blocking(move || merge_doc(&eng, doc, into, from, EditSource::User)).await
 }
 
+/// Merges the regions `from` into region `into`, in the order given, as one undo step.
+#[tauri::command]
+pub async fn a11y_merge_many(eng: Eng<'_>, doc: DocId, into: i32, from: Vec<i32>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || merge_many_doc(&eng, doc, into, &from, EditSource::User)).await
+}
+
 /// Splits a region before the content item with MCID `at_mcid`; the rest becomes a new region after it
 /// (with `role`, else the same role).
 #[tauri::command]
@@ -172,9 +187,10 @@ pub async fn a11y_edit_tag(eng: Eng<'_>, doc: DocId, xref: i32, patch: TagPatch)
     blocking(move || edit_tag_doc(&eng, doc, xref, &patch, EditSource::User)).await
 }
 
-/// Moves a tag under `parent` (0: the top of the tree) at `index` among its kids.
+/// Moves a tag under `parent` (0: the top of the tree), before its kid `anchor`, or after it with
+/// `after`; the last kid when there is no anchor. A move that changes nothing is refused.
 #[tauri::command]
-pub async fn a11y_move_tag(eng: Eng<'_>, doc: DocId, xref: i32, parent: i32, index: usize) -> Result<EditState> {
+pub async fn a11y_move_tag(eng: Eng<'_>, doc: DocId, xref: i32, parent: i32, anchor: Option<i32>, after: bool) -> Result<EditState> {
     let eng = eng.inner().clone();
-    blocking(move || move_tag_doc(&eng, doc, xref, parent, index, EditSource::User)).await
+    blocking(move || move_tag_doc(&eng, doc, xref, parent, anchor, after, EditSource::User)).await
 }
