@@ -499,15 +499,10 @@ pub fn audit_file(path: &Path, password: Option<&str>) -> Result<Audit, Error> {
     audit::audit(&doc, fs::metadata(path)?.len())
 }
 
-/// The document has signatures (AcroForm /SigFlags bit 1): a rewritten copy invalidates them.
+/// The document is signed or certified (signature fields with a value count too, not only `/SigFlags`): a rewritten
+/// copy invalidates them.
 fn is_signed(doc: &mupdf::pdf::PdfDocument) -> bool {
-    let flags = doc
-        .catalog()
-        .ok()
-        .and_then(|c| c.get_dict("AcroForm").ok().flatten())
-        .and_then(|f| f.get_dict("SigFlags").ok().flatten())
-        .and_then(|f| f.as_int().ok());
-    flags.is_some_and(|f| f & 1 != 0)
+    crate::outline::signed(doc)
 }
 
 /// [`audit_file`], and whether the document is signed (the sheet warns before Start).

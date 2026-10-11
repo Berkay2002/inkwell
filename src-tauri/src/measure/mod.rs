@@ -45,6 +45,7 @@ pub fn scale_get(eng: &Engine, doc: DocId, page: u32) -> Result<PageScale> {
 pub fn scale_set(eng: &Engine, doc: DocId, page: u32, scale: &Scale, source: EditSource) -> Result<EditState> {
     scale.validate().map_err(EngineError::Invalid)?;
     eng.apply_custom(doc, format!("Set measurement scale on p. {} to {}", page + 1, scale.label()), source, false, |d| {
+        crate::outline::refuse_if_certified(d, "Setting a measurement scale")?;
         write::set_page_scale(d, page, scale)?;
         Ok(vec![page])
     })
@@ -65,6 +66,7 @@ pub fn add_one(
 ) -> Result<(EditState, i32, Quantity)> {
     let mut made = None;
     let state = eng.apply_custom(doc, format!("Add {} measurement on p. {}", kind.noun(), page + 1), source, false, |d| {
+        crate::outline::refuse_unless_annotating_allowed(d, "Adding a measurement")?;
         made = Some(write::add(d, page, kind, points, scale, author)?);
         Ok(vec![page])
     })?;

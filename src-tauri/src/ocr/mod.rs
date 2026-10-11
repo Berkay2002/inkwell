@@ -775,7 +775,7 @@ pub fn ocr_file_with(
         let mut doc = Input::Path(&tmp.0).open()?;
         applied = apply(&mut doc, &rec.pages, opts.force)?;
         if applied.pages_written > 0 {
-            let signed = is_signed(&doc);
+            let signed = crate::outline::signed(&doc);
             if doc.can_be_saved_incrementally() {
                 save(&doc, &tmp.0)?;
                 if signed {

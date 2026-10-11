@@ -621,6 +621,27 @@ pub(crate) fn signed(doc: &PdfDocument) -> bool {
     signed_inner(doc).unwrap_or(true)
 }
 
+/// A certified document is left as it is, at any `/P`: `what` names the change ("Changing its page labels"). Every edit
+/// step of a feature that writes the document calls this first inside its closure, so nothing is recorded.
+pub(crate) fn refuse_if_certified(doc: &PdfDocument, what: &str) -> Result<()> {
+    refuse_below(doc, what, i32::MAX)
+}
+
+/// [`refuse_if_certified`] for comments, markup and the like (annotations): a `/P` 3 certification allows them,
+/// 1 and 2 do not.
+pub(crate) fn refuse_unless_annotating_allowed(doc: &PdfDocument, what: &str) -> Result<()> {
+    refuse_below(doc, what, 3)
+}
+
+fn refuse_below(doc: &PdfDocument, what: &str, allowed_from: i32) -> Result<()> {
+    if certified(doc)?.is_some_and(|p| p < allowed_from) {
+        return Err(EngineError::Invalid(format!(
+            "This document is certified. {what} would void the certification, so Inkwell leaves the document as it is."
+        )));
+    }
+    Ok(())
+}
+
 fn signed_inner(doc: &PdfDocument) -> Result<bool> {
     let cat = doc.catalog()?;
     if cat.get_dict("Perms")?.is_some_and(|p| p.get_dict("DocMDP").ok().flatten().is_some() || p.get_dict("UR3").ok().flatten().is_some()) {

@@ -417,7 +417,8 @@ pub fn run_ocr(
                 if entry.generation() != rev {
                     return Err(EngineError::Stale);
                 }
-                if ocr::is_signed(pdf) {
+                crate::outline::refuse_if_certified(pdf, "Adding recognized text")?;
+                if crate::outline::signed(pdf) {
                     warnings.push("The document is signed; saving it makes the signature invalid.".to_string());
                 }
                 applied = ocr::apply(pdf, &rec.pages, req.force).map_err(|e| EngineError::Invalid(e.to_string()))?;
