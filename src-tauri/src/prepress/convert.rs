@@ -8,7 +8,7 @@
 
 use super::{Result, bad};
 use crate::a11y::Progress;
-use crate::engine::edit::{EditSource, EditState};
+use crate::engine::edit::{EditSource, EditState, Saved};
 use crate::engine::{DocId, Engine};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::{Buffer, ConvertColors, IccColorspace, IccKind};
@@ -198,6 +198,38 @@ pub fn convert_colors(
     progress: &mut dyn FnMut(Progress),
     cancel: &AtomicBool,
 ) -> Result<(EditState, ConvertReport)> {
+    convert(eng, doc, spec, profile, source, progress, cancel, None).map(|(state, report, _)| (state, report))
+}
+
+/// [`convert_colors`] and then a Save as `to` under the same edit guard, so that nothing (an undo, another
+/// edit) can land between the conversion and the file. The conversion stands when the write fails: the third
+/// value is the save's own result. The document's own file is refused before anything is converted.
+#[allow(clippy::too_many_arguments)]
+pub fn convert_colors_and_save(
+    eng: &Engine,
+    doc: DocId,
+    spec: &ConvertSpec,
+    profile: Option<&[u8]>,
+    source: EditSource,
+    progress: &mut dyn FnMut(Progress),
+    cancel: &AtomicBool,
+    to: &str,
+) -> Result<(EditState, ConvertReport, Result<(EditState, Option<Saved>)>)> {
+    let (state, report, saved) = convert(eng, doc, spec, profile, source, progress, cancel, Some(to))?;
+    Ok((state, report, saved.expect("a save was asked for")))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert(
+    eng: &Engine,
+    doc: DocId,
+    spec: &ConvertSpec,
+    profile: Option<&[u8]>,
+    source: EditSource,
+    progress: &mut dyn FnMut(Progress),
+    cancel: &AtomicBool,
+    to: Option<&str>,
+) -> Result<(EditState, ConvertReport, Option<Result<(EditState, Option<Saved>)>>)> {
     if !(spec.gray || spec.rgb || spec.spot) {
         return Err(bad("Pick the colours to convert: RGB, gray or spot colours"));
     }
@@ -210,7 +242,8 @@ pub fn convert_colors(
         IntentSource::Document => "Convert colours to the output intent".to_string(),
         IntentSource::Profile => format!("Convert colours to {}", spec.condition.as_deref().unwrap_or("CMYK")),
     };
-    let state = eng.apply_custom(doc, label, source, false, |d| {
+    let step = |d: &mut PdfDocument| -> Result<Vec<u32>> {
+        super::refuse_certified(d, "Converting its colours")?;
         let count = d.page_count()?.max(0) as u32;
         let pages: Vec<u32> = match &spec.pages {
             Some(p) => {
@@ -256,6 +289,13 @@ pub fn convert_colors(
         let remaining = crate::preflight::device_colours(d, &mut |_| {}, cancel)?;
         report = Some(ConvertReport { pages: pages.clone(), remaining, used_profile: icc.is_some(), notes });
         Ok(pages)
-    })?;
-    Ok((state, report.expect("set by the step")))
+    };
+    let (state, saved) = match to {
+        None => (eng.apply_custom(doc, label, source, false, step)?, None),
+        Some(to) => {
+            let (state, saved) = eng.apply_custom_and_save(doc, label, source, to, step)?;
+            (state, Some(saved))
+        }
+    };
+    Ok((state, report.expect("set by the step"), saved))
 }

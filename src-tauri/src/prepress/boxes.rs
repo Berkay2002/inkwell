@@ -80,6 +80,66 @@ pub(crate) fn effective(page: &PdfObject, kind: BoxKind) -> Result<Box4> {
     })
 }
 
+/// Which boxes the page states itself; the others are the defaults of `effective`.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatedBoxes {
+    pub crop: bool,
+    pub trim: bool,
+    pub bleed: bool,
+    pub art: bool,
+}
+
+/// The boxes of one page, as the UI shows them: user space, `[x0, y0, x1, y1]`, y up.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PageBoxes {
+    /// `/Rotate`, 0, 90, 180 or 270.
+    pub rotate: i32,
+    pub media: Box4,
+    pub crop: Box4,
+    pub trim: Box4,
+    pub bleed: Box4,
+    pub art: Box4,
+    pub stated: StatedBoxes,
+}
+
+/// The page's /Rotate (inherited) as 0, 90, 180 or 270, step for step as MuPDF reads it (pdf-page.c: a real
+/// rounds half up to an int, a negative turns into 360 - n % 360, then it snaps to the nearest quarter turn
+/// with halves rounding up), so the sheet and the renderer agree on which side is the left.
+pub(crate) fn rotate_of(page: &PdfObject) -> Result<i32> {
+    let v = page.get_dict_inheritable("Rotate")?.and_then(|r| r.as_float().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
+    let mut r = (v + 0.5).floor().clamp(i32::MIN as f32 + 1.0, i32::MAX as f32) as i32;
+    if r < 0 {
+        r = 360 - (-r) % 360;
+    }
+    if r >= 360 {
+        r %= 360;
+    }
+    r = 90 * ((r + 45) / 90);
+    Ok(if r >= 360 { 0 } else { r })
+}
+
+/// Reads the boxes of page `page` (0-based) of the document as it is now.
+pub fn page_boxes(eng: &Engine, doc: DocId, page: u32) -> Result<PageBoxes> {
+    eng.read_custom(doc, |pdf| {
+        if page as i32 >= pdf.page_count()? {
+            return Err(crate::engine::EngineError::BadPage(page));
+        }
+        let p = pdf.find_page(page as i32)?;
+        let rotate = rotate_of(&p)?;
+        let has = |k| stated(&p, k).map(|b| b.is_some());
+        Ok(PageBoxes {
+            rotate,
+            media: effective(&p, BoxKind::Media)?,
+            crop: effective(&p, BoxKind::Crop)?,
+            trim: effective(&p, BoxKind::Trim)?,
+            bleed: effective(&p, BoxKind::Bleed)?,
+            art: effective(&p, BoxKind::Art)?,
+            stated: StatedBoxes { crop: has(BoxKind::Crop)?, trim: has(BoxKind::Trim)?, bleed: has(BoxKind::Bleed)?, art: has(BoxKind::Art)? },
+        })
+    })
+}
+
 pub(crate) fn write(doc: &PdfDocument, page: &mut PdfObject, kind: BoxKind, b: Box4) -> Result<()> {
     let mut a = doc.new_array_with_capacity(4)?;
     for v in b {
@@ -110,6 +170,26 @@ pub struct BoxSpec {
     pub rect: Option<[f32; 4]>,
     pub from: Option<BoxKind>,
     pub margin: Option<[f32; 4]>,
+    /// `margin` is `[left, bottom, right, top]` of the page as it is shown, outward positive: each page maps
+    /// it through its own /Rotate. Otherwise it is in the page's own space (`[x0, y0, x1, y1]`).
+    #[serde(default)]
+    pub shown: bool,
+}
+
+/// `m` (left, bottom, right, top of the page as shown) as `[x0, y0, x1, y1]` margins of a page turned by `rotate`.
+fn user_margins(m: [f32; 4], rotate: i32) -> [f32; 4] {
+    // the coordinate each shown side is: left, bottom, right, top
+    let at = match rotate {
+        90 => [1, 2, 3, 0],
+        180 => [2, 3, 0, 1],
+        270 => [3, 0, 1, 2],
+        _ => [0, 1, 2, 3],
+    };
+    let mut out = [0.0; 4];
+    for (side, &i) in at.iter().enumerate() {
+        out[i] = m[side];
+    }
+    out
 }
 
 /// Sets a trim, bleed, art or crop box on pages, as one undo step. Refuses a result where the trim box
@@ -123,6 +203,7 @@ pub fn set_boxes(eng: &Engine, doc: DocId, spec: &BoxSpec, source: EditSource) -
     }
     let label = format!("Set {}", spec.kind.label());
     eng.apply_custom(doc, label, source, false, |d| {
+        super::refuse_certified(d, "Changing its page boxes")?;
         let count = d.page_count()?.max(0) as u32;
         let pages: Vec<u32> = match &spec.pages {
             Some(p) => {
@@ -139,6 +220,7 @@ pub fn set_boxes(eng: &Engine, doc: DocId, spec: &BoxSpec, source: EditSource) -
                 (Some(r), _, _) => norm(r),
                 (None, Some(from), Some(m)) => {
                     let f = effective(&page, from)?;
+                    let m = if spec.shown { user_margins(m, rotate_of(&page)?) } else { m };
                     norm([f[0] - m[0], f[1] - m[1], f[2] + m[2], f[3] + m[3]])
                 }
                 _ => unreachable!("checked above"),

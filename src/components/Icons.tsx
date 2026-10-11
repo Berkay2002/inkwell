@@ -86,6 +86,10 @@ const PATHS = {
   headerFooter: "M5 3h14a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM4 8h16M4 16h16",
   background: "M5 3h14a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM8 8h8v8H8Z",
   shield: "M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6Z",
+  // three overlapping plates (the inks), a block of swatches, a box inside a page
+  plates: "M9 4a5 5 0 1 0 0 10 5 5 0 0 0 0-10ZM15 4a5 5 0 1 0 0 10 5 5 0 0 0 0-10ZM12 10a5 5 0 1 0 0 10 5 5 0 0 0 0-10Z",
+  swatches: "M4 4h7v7H4ZM13 4h7v7h-7ZM4 13h7v7H4ZM13 13h7v7h-7Z",
+  pagebox: "M4 3h16v18H4ZM8 7h8v10H8Z",
   access: "M12 3.5a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6ZM5 9.5l7 1.5 7-1.5M12 11v4.5M8.5 20.5 12 15.5l3.5 5",
 };
 
