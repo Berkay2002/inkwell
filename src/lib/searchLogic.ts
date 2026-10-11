@@ -229,3 +229,47 @@ export function filesLine(matched: number, hits: number, scanned: number, total:
   const head = `${plural(hits, "result", "results")} in ${plural(matched, "file", "files")}`;
   return cancelled ? `${head} (stopped at ${scanned.toLocaleString("en-US")} of ${total.toLocaleString("en-US")})` : head;
 }
+
+// ---- catalogs ---------------------------------------------------------------------------------------
+
+const MB = 1024 * 1024;
+
+/** "~40 MB", "~3 KB": the rough size the build will write. */
+export const approxSize = (bytes: number) => (bytes >= MB ? `~${Math.max(1, Math.round(bytes / MB))} MB` : `~${Math.max(1, Math.round(bytes / 1024))} KB`);
+
+/** "about 2 minutes", "under a minute": a time as people say it, rounded up. */
+export function approxTime(secs: number): string {
+  if (secs < 45) return "under a minute";
+  const m = Math.round(secs / 60);
+  if (m < 60) return `about ${plural(m, "minute", "minutes")}`;
+  const h = Math.round((secs / 3600) * 2) / 2;
+  return `about ${h === 1 ? "an hour" : `${h} hours`}`;
+}
+
+/** The sheet's line before a build: "~1 800 files, about 2 minutes, ~40 MB". */
+export function estimateLine(e: { files: number; secs: number; indexBytes: number }): string {
+  if (e.files === 0) return "No PDFs in this folder";
+  return `~${e.files.toLocaleString("en-US").replace(/,/g, " ")} ${e.files === 1 ? "file" : "files"}, ${approxTime(e.secs)}, ${approxSize(e.indexBytes)}`;
+}
+
+/** The badge beside a catalog: what a refresh would change, or "" when nothing. */
+export function staleLine(s: { added: number; changed: number; removed: number; unusable: boolean } | undefined, built: number): string {
+  if (!s) return "";
+  if (s.unusable) return built === 0 ? "Not built yet" : "Needs a rebuild";
+  const parts: string[] = [];
+  if (s.changed) parts.push(`${s.changed} changed`);
+  if (s.added) parts.push(`${s.added} new`);
+  if (s.removed) parts.push(`${s.removed} gone`);
+  return parts.join(", ");
+}
+
+/** What a finished build says: "1 804 files, 12 new, 3 changed; 2 could not be read". */
+export function buildLine(b: { files: number; added: number; changed: number; removed: number; damaged: number; password: number; cancelled: boolean }): string {
+  if (b.cancelled) return "Stopped. The previous index is still in use.";
+  const head = [`${plural(b.files, "file", "files")}`];
+  if (b.added) head.push(`${b.added} new`);
+  if (b.changed) head.push(`${b.changed} changed`);
+  if (b.removed) head.push(`${b.removed} removed`);
+  const bad = b.damaged + b.password;
+  return head.join(", ") + (bad ? `; ${bad} could not be read` : "");
+}

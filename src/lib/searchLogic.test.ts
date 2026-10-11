@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_OPTS, type FileGroup, type Hit, byPosition, changedOptions, filesLine, folderName, groupByPage, insertFile, optsKey, parseHistory,
+  DEFAULT_OPTS, type FileGroup, type Hit, approxTime, buildLine, byPosition, estimateLine, staleLine, changedOptions, filesLine, folderName, groupByPage, insertFile, optsKey, parseHistory,
   mergeHits, parseOpts, pickCurrent, pushHistory, resultsLine, shortDir, visibleRows,
 } from "./searchLogic";
 
@@ -154,5 +154,29 @@ describe("merging hits as pages report", () => {
     let list: Hit[] = [];
     for (let i = 0; i < all.length; i += 13) list = mergeHits(list, all.slice(i, i + 13), null).hits;
     expect(list.map((h) => [h.page, h.rects[0][1]])).toEqual(sorted.map((h) => [h.page, h.rects[0][1]]));
+  });
+});
+
+describe("catalog lines", () => {
+  it("says what building would take", () => {
+    expect(estimateLine({ files: 1800, secs: 120, indexBytes: 40 * 1024 * 1024 })).toBe("~1 800 files, about 2 minutes, ~40 MB");
+    expect(estimateLine({ files: 1, secs: 3, indexBytes: 5000 })).toBe("~1 file, under a minute, ~5 KB");
+    expect(estimateLine({ files: 0, secs: 0, indexBytes: 0 })).toBe("No PDFs in this folder");
+    expect(approxTime(5400)).toBe("about 1.5 hours");
+    expect(approxTime(3600)).toBe("about an hour");
+  });
+
+  it("badges only what a refresh would change", () => {
+    expect(staleLine(undefined, 5)).toBe("");
+    expect(staleLine({ added: 0, changed: 0, removed: 0, unusable: false }, 5)).toBe("");
+    expect(staleLine({ added: 2, changed: 1, removed: 3, unusable: false }, 5)).toBe("1 changed, 2 new, 3 gone");
+    expect(staleLine({ added: 0, changed: 0, removed: 0, unusable: true }, 0)).toBe("Not built yet");
+    expect(staleLine({ added: 0, changed: 0, removed: 0, unusable: true }, 9)).toBe("Needs a rebuild");
+  });
+
+  it("summarises a build, and a stopped one keeps the old index", () => {
+    const b = { files: 30, added: 0, changed: 2, removed: 0, damaged: 1, password: 1, cancelled: false };
+    expect(buildLine(b)).toBe("30 files, 2 changed; 2 could not be read");
+    expect(buildLine({ ...b, cancelled: true })).toMatch(/previous index/);
   });
 });

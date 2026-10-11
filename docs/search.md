@@ -44,6 +44,38 @@ across files) and `store.ts` (`runSearch`, `stepHit`, `selectHit`, `stopSearch`)
 - History: the last ten queries (Enter, or clicking a result, or running a folder search records one), newest first,
   from the clock in the rail's field; "Clear recent searches" empties it. Stored only in this app's local storage.
 
+## Catalog
+A catalog is a saved full-text index over a folder: build it once, search it in milliseconds, refresh it when files
+change. Own index, not tantivy, for three reasons: (1) the index only narrows which pages to look at, and the same
+matcher as the folder search decides every hit, so results are identical for every option combination (a test
+compares 16 option sets over 23 queries); (2) tantivy brings about 60 crates and a long build for ranking and
+analysers a verbatim finder does not use; (3) the index must also fit inside a PDF (below), which needs a small
+format we control and version.
+
+- Storage: `<app data>/catalogs/<id>/`: `catalog.json` (list entry, written last by rename, so it is the commit),
+  `table-<gen>.json` (files: size, mtime, head/tail hash, pages), `index-<gen>.bin` (magic, version, blake3, varint
+  postings of space-delimited words in the widest fold), `text/<fid>.zst` (the per-page records the matcher reads).
+  A damaged or foreign-version index is never trusted: `check` reports it `unusable` and a build recreates it.
+- Candidate rule: one word must be a substring of a term; several words are first=suffix, middle=exact, last=prefix;
+  a query of marks only verifies every page. Hits carry the line's box, not exact character rectangles.
+- Refresh: a file with the same size and mtime is kept without being opened; a moved file is kept by size, mtime and
+  head/tail hash; a changed mtime is re-indexed. Damaged and password-protected files are skipped and counted. Cancel
+  leaves the previous generation live.
+- Embedded index: `/Root/PieceInfo/Inkwell` (`/Private` stream) holds the records of that file. A build reads it only
+  if the trailer `/ID`, the page count, the version and a fingerprint of page content and annotations all match,
+  so a file changed by another tool is read normally. Embedding and removing are one undo step each
+  (`index_embed`, `index_unembed`; `index_embedded` reports present/current).
+- Bounds: 20 MB of text per file (cut and counted), 100 000 pages, 50 000 bookmarks, 96 MB of inflated index.
+- Estimate (before the first build, from a listing): about 25 MB/s on two threads plus 20 ms per file, and an index of
+  about 3 % of the PDF bytes plus 2 KB per file. A guess to set expectations, not a promise.
+- Commands: `catalog_estimate`, `catalog_create`, `catalog_list`, `catalog_delete`, `catalog_stale`,
+  `catalog_build(id, full, onEvent)` (`started`, `progress`, `done`), `catalog_cancel(job)`,
+  `catalog_search(id, query, opts, onEvent)` (the folder search's events; results open through `search_file_token`).
+  Not exposed to the AI assistant.
+- Rail: Folder scope lists "Catalog: <name>" with Refresh and Delete and a badge ("2 new, 1 changed"); "New
+  catalog…" picks a folder, names it and shows the estimate ("~1 800 files, about 2 minutes, ~40 MB") before
+  building with progress and Cancel. "Embed search index" / "Remove embedded index" sit above the file results.
+
 ## Commands (Tauri)
 `search(doc, query, opts, onEvent)` streams `hits` (per page, each with rects and snippet), `progress` and `done`;
 `cancel_search(doc)`; `pick_search_folder()` returns an open token for a folder (paths.rs: the webview never names a
@@ -54,5 +86,6 @@ every file in the list; only the latest search's files can be opened).
 
 ## Checked
 `cargo test --lib search::` (matcher options, snippets, comments/fields/bookmarks, engine events, folder listing,
-caps, skip, cancel, save and reopen), `src/lib/searchLogic.test.ts`, `src/lib/search.test.ts`, and
+caps, skip, cancel, save and reopen; `search::catalog`: parity with the folder search, refresh reads only changed
+files, damaged/encrypted skipped, cancel keeps the old index, corrupt index rebuilt, embedded index and its undo), `src/lib/searchLogic.test.ts`, `src/lib/search.test.ts`, and
 `scripts/search-shots.mjs` (CDP on generated copies; screens in `docs/screens/search/`).
