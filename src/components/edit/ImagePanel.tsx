@@ -7,18 +7,6 @@ import "./imageEdit.css";
 
 const ie = () => useImageEdit.getState();
 
-/** Shapes the icon set does not have, drawn like it: 24 px grid, round strokes. */
-function Glyph({ d }: { d: string }) {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d={d} />
-    </svg>
-  );
-}
-const CROP = "M7 2v15h15M2 7h15v15";
-const FLIP_H = "M12 3v18M8 7 3 12l5 5V7ZM16 7l5 5-5 5V7Z";
-const FLIP_V = "M3 12h18M7 8l5-5 5 5H7ZM7 16l5 5 5-5H7Z";
-
 /** "Image" in Add content: choose a picture, then put it on a page by clicking or dragging a box. */
 export function AddImageButton({ id }: { id: number }) {
   const placing = useImageEdit((s) => s.docs[id]?.placing ?? null);
@@ -195,10 +183,10 @@ function Format({ id, image, cropping }: { id: number; image: ImageBlock; croppi
             <span className="te-label">Flip</span>
             <span className="ie-tools">
               <button className="te-btn ie-icon" title="Flip left to right" aria-label="Flip horizontally" onClick={() => void ie().flip(id, true)}>
-                <Glyph d={FLIP_H} />
+                <Icon name="flipH" size={16} />
               </button>
               <button className="te-btn ie-icon" title="Flip top to bottom" aria-label="Flip vertically" onClick={() => void ie().flip(id, false)}>
-                <Glyph d={FLIP_V} />
+                <Icon name="flipV" size={16} />
               </button>
             </span>
           </div>
@@ -238,7 +226,7 @@ function Format({ id, image, cropping }: { id: number; image: ImageBlock; croppi
               Replace…
             </button>
             <button className="te-btn" title="Show only part of the picture" onClick={() => ie().startCrop(id)}>
-              <Glyph d={CROP} />
+              <Icon name="crop" size={16} />
               Crop
             </button>
             <button className="te-btn" title="Delete the picture (Del)" onClick={() => void ie().remove(id)}>

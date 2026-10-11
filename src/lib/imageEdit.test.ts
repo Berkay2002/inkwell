@@ -176,7 +176,7 @@ describe("store", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    useTextEdit.setState({ open: true, tool: "select", docs: {} });
+    useTextEdit.setState({ open: true, tool: "select", section: "text", docs: {} });
     useImageEdit.setState({ docs: {} });
     useStore.setState({
       docs: { 1: { id: 1, path: "C:\\d\\a.pdf", name: "a.pdf", dirty: false, currentPage: 0, pageCount: 2, rev: 1, sizes: [[612, 792]] } as never },
@@ -360,6 +360,74 @@ describe("store", () => {
     useTextEdit.getState().setOpen(false);
     expect(st().selected).toBeNull();
     expect(st().placing).toBeNull();
+  });
+
+  it("lets go of everything when Edit moves to Links or Bookmarks", async () => {
+    vi.mocked(api.imageBlocks).mockResolvedValue(list([image()]));
+    vi.mocked(api.pickSource).mockResolvedValue([{ token: "tok", path: "C:\\p\\photo.jpg" }]);
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.select(1, { page: 0, index: 0 });
+    ie.startCrop(1);
+    expect(st().crop).not.toBeNull();
+    useTextEdit.getState().setSection("links");
+    expect(st().selected).toBeNull();
+    expect(st().crop).toBeNull();
+
+    useTextEdit.getState().setSection("text");
+    await ie.startPlacing(1);
+    expect(st().placing).not.toBeNull();
+    useTextEdit.getState().setSection("bookmarks");
+    expect(st().placing).toBeNull();
+    useTextEdit.getState().setSection("text");
+  });
+
+  it("keeps the selection on the image a change moved, when the listing it triggered lands last", async () => {
+    // The moved image jumps to where a neighbour was, and the neighbour takes its old place.
+    const moved = image({ index: 0, fullRect: [100, 600, 300, 700], rect: [100, 600, 300, 700] });
+    const neighbour = image({ index: 1, fullRect: [100, 100, 300, 200], rect: [100, 100, 300, 200] });
+    vi.mocked(api.imageBlocks).mockResolvedValueOnce(list([image({ index: 0 }), image({ index: 1, fullRect: [100, 500, 300, 600], rect: [100, 500, 300, 600] })]));
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.select(1, { page: 0, index: 0 });
+
+    // The document's generation bumps with the change; the page asks for the list again (the layer's
+    // effect), and that answer is the slow one.
+    let slow!: (v: ReturnType<typeof list>) => void;
+    let reloading: Promise<void> = Promise.resolve();
+    vi.mocked(editImage).mockImplementation(async () => {
+      bump(2);
+      vi.mocked(api.imageBlocks).mockImplementationOnce(() => new Promise((res) => (slow = res)));
+      reloading = useImageEdit.getState().load(1, 0);
+      vi.mocked(api.imageBlocks).mockResolvedValueOnce(list([moved, neighbour], 2));
+      return ok();
+    });
+    expect(await ie.move(1, [0, 500])).toBe(true);
+    expect(st().selected).toEqual({ page: 0, index: 0 });
+    slow(list([moved, neighbour], 2));
+    await reloading;
+    expect(st().selected).toEqual({ page: 0, index: 0 });
+  });
+
+  it("lets go of the text block when a picture is taken from the rail's list", async () => {
+    vi.mocked(api.imageBlocks).mockResolvedValue(list([image()]));
+    await useImageEdit.getState().load(1, 0);
+    const original = useTextEdit.getState().select;
+    const spy = vi.fn().mockResolvedValue(undefined);
+    useTextEdit.setState({
+      select: spy,
+      docs: { 1: { pages: {}, selected: { page: 0, index: 2 }, draft: null, adding: null, notice: null, failed: false } as never },
+    });
+    try {
+      useImageEdit.getState().select(1, { page: 0, index: 0 });
+      expect(spy).toHaveBeenCalledWith(1, null);
+      // Letting go of the picture does not touch the text.
+      spy.mockClear();
+      useImageEdit.getState().select(1, null);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      useTextEdit.setState({ select: original });
+    }
   });
 
   it("forgets a closed tab", async () => {

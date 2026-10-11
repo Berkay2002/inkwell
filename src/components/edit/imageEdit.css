@@ -59,13 +59,13 @@
 .ie-h.w { left: 0; top: 50%; cursor: ew-resize; }
 .ie-dim {
   position: absolute;
-  background: rgb(0 0 0 / 0.45);
+  background: var(--crop-dim);
   pointer-events: none;
 }
 .ie-crop {
   position: absolute;
   box-sizing: border-box;
-  outline: calc(1.5px / var(--z, 1)) solid #fff;
+  outline: calc(1.5px / var(--z, 1)) solid var(--crop-line);
   box-shadow: 0 0 0 calc(3px / var(--z, 1)) var(--accent);
   cursor: move;
   pointer-events: auto;

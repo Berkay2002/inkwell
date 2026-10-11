@@ -283,9 +283,17 @@ function queued<T>(doc: number, f: () => Promise<T>): Promise<T> {
 
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
+/**
+ * Per document: counts every decision about which image is selected (a click, a settled change). A listing
+ * that was started before the latest decision must not remap the selection from the box it was started at.
+ */
+const choices = new Map<number, number>();
+
 export const useImageEdit = create<Store>((set, get) => {
-  const patchDoc = (doc: number, p: Partial<DocImageEdit>) =>
+  const patchDoc = (doc: number, p: Partial<DocImageEdit>) => {
+    if ("selected" in p) choices.set(doc, (choices.get(doc) ?? 0) + 1);
     set((s) => ({ docs: { ...s.docs, [doc]: { ...(s.docs[doc] ?? empty()), ...p } } }));
+  };
   const of = (doc: number): DocImageEdit => get().docs[doc] ?? empty();
   const docRev = (doc: number) => useStore.getState().docs[doc]?.rev ?? 0;
   const selectedImage = (doc: number): ImageBlock | null => {
@@ -309,8 +317,11 @@ export const useImageEdit = create<Store>((set, get) => {
     const before = of(doc);
     const sel = before.selected;
     const was = sel && sel.page === page ? (before.pages[page]?.images[sel.index] ?? null) : null;
+    const choice = choices.get(doc) ?? 0;
     const r = await fetchPage(doc, page);
-    if (sel && was && !applying.has(doc)) {
+    // Only a selection nobody touched while this listing was on its way is remapped: a change of ours that
+    // settled meanwhile (or a click) already chose the image, and `was` is the box from before it.
+    if (sel && was && !applying.has(doc) && (choices.get(doc) ?? 0) === choice) {
       const now = of(doc);
       if (now.selected?.page === page && now.selected.index === sel.index) {
         const same = closestImage(was.fullRect, r.images);
@@ -380,6 +391,11 @@ export const useImageEdit = create<Store>((set, get) => {
       const cur = of(doc).selected;
       if (cur && ref && cur.page === ref.page && cur.index === ref.index) return;
       patchDoc(doc, { selected: ref, crop: null, notice: null });
+      // One thing is selected at a time: a picture taken from the rail's list lets go of the text block.
+      if (ref) {
+        const te = useTextEdit.getState();
+        if (te.docs[doc]?.selected) void te.select(doc, null);
+      }
     },
 
     setNotice: (doc, notice) => patchDoc(doc, { notice }),
@@ -468,11 +484,15 @@ useTextEdit.subscribe((s, prev) => {
   if (s.tool === "text" && prev.tool !== "text") {
     for (const k of Object.keys(ie.docs)) if (ie.docs[Number(k)]?.placing) ie.cancelPlacing(Number(k));
   }
-  // Leaving Edit drops the selection, the crop and a file waiting for its place.
-  if (prev.open && !s.open) {
+  // Leaving Edit, or its Text section (Links and Bookmarks have their own keys on the page), drops the
+  // selection, the crop and a file waiting for its place.
+  if ((prev.open && !s.open) || (prev.section === "text" && s.section !== "text")) {
     useImageEdit.setState((t) => {
       const docs: Record<number, DocImageEdit> = {};
-      for (const k of Object.keys(t.docs)) docs[Number(k)] = { ...t.docs[Number(k)], selected: null, crop: null, placing: null, notice: null };
+      for (const k of Object.keys(t.docs)) {
+        choices.set(Number(k), (choices.get(Number(k)) ?? 0) + 1);
+        docs[Number(k)] = { ...t.docs[Number(k)], selected: null, crop: null, placing: null, notice: null };
+      }
       return { docs };
     });
   }

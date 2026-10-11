@@ -33,8 +33,9 @@ const LABEL: Record<Handle, string> = {
 
 /** Edit mode's layer of images on one page: outlines, the frame of the selected one, crop and "place here". */
 export const ImageEditLayer = memo(function ImageEditLayer(p: Props) {
-  const open = useTextEdit((s) => s.open);
-  return open ? <Layer {...p} /> : null;
+  // Links and Bookmarks have their own layers and keys: the pictures are only live in the Text section.
+  const live = useTextEdit((s) => s.open && s.section === "text");
+  return live ? <Layer {...p} /> : null;
 });
 
 /** What is being dragged: the whole image, one of its handles, or the crop rectangle (and its handles). */
@@ -80,7 +81,11 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
         e.preventDefault();
         if (cropping) ie().cancelCrop(docId);
         else ie().select(docId, null);
-      } else if (e.key === "Enter" && cropping) {
+        return;
+      }
+      // Keys in the Edit rail or a bookmark list belong to what has the focus there (Enter presses a button).
+      if (t?.closest?.(".bm-list, .te-dock")) return;
+      if (e.key === "Enter" && cropping) {
         e.preventDefault();
         void ie().applyCrop(docId);
       } else if ((e.key === "Delete" || e.key === "Backspace") && !cropping) {
@@ -99,9 +104,16 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [mine, docId, rot]);
 
+  /** Pointer events on the page are default-prevented, so a rail button would keep the focus (and the keys). */
+  const leaveRail = () => {
+    const a = document.activeElement as HTMLElement | null;
+    if (a?.closest?.(".te-dock, .bm-list")) a.blur();
+  };
+
   const down = (e: React.PointerEvent, b: ImageBlock) => {
     e.stopPropagation();
     e.preventDefault();
+    leaveRail();
     if (!b.editable) {
       ie().select(docId, null);
       ie().setNotice(docId, b.reason ? `This image can't be edited here: ${b.reason}.` : "This image can't be edited here.");
@@ -114,6 +126,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
   const startDrag = (e: React.PointerEvent, what: Drag["what"], cropping: boolean) => {
     e.stopPropagation();
     e.preventDefault();
+    leaveRail();
     e.currentTarget.setPointerCapture(e.pointerId);
     setDrag({ what, crop: cropping, start: toPage(e), d: [0, 0], free: e.shiftKey });
   };
@@ -126,6 +139,8 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
   /** The rectangle a drag makes of `r`: moved, or with the handle's sides moved. */
   const dragged = (r: Rect4, g: Drag): Rect4 =>
     g.what === "move" ? moveRect(r, g.d) : dragHandle(r, g.what, g.d, g.free || g.crop);
+  /** A drag the system took away (a lost capture, a cancelled touch) is dropped: nothing is sent. */
+  const dragCancel = () => setDrag(null);
   const dragEnd = () => {
     const g = dragRef.current;
     setDrag(null);
@@ -138,6 +153,8 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
       void ie().resizeTo(docId, dragged(mine.fullRect, g), isCorner(g.what) && !g.free);
     }
   };
+
+  const dragEvents = { onPointerMove: dragTo, onPointerUp: dragEnd, onPointerCancel: dragCancel, onLostPointerCapture: dragCancel };
 
   // ---- "place here" for an image file chosen with Image ----
   const laidRect = laid ? placement(laid.a, laid.b, rawSize) : null;
@@ -156,6 +173,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
           className="te-bg"
           onPointerDown={(e) => {
             e.stopPropagation();
+            leaveRail();
             ie().select(docId, null);
           }}
         />
@@ -203,8 +221,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
             role="group"
             aria-label="Selected image"
             onPointerDown={(e) => !crop && startDrag(e, "move", false)}
-            onPointerMove={dragTo}
-            onPointerUp={dragEnd}
+            {...dragEvents}
           >
             {!crop &&
               HANDLES.map((h) => (
@@ -213,8 +230,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
                   className={`ie-h ${h}`}
                   title={`${LABEL[h]}${isCorner(h) ? " (hold Shift to stretch)" : ""}`}
                   onPointerDown={(e) => startDrag(e, h, false)}
-                  onPointerMove={dragTo}
-                  onPointerUp={dragEnd}
+                  {...dragEvents}
                 />
               ))}
           </div>
@@ -231,8 +247,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
             style={boxStyle(cropRect)}
             title="Drag to move the part that stays"
             onPointerDown={(e) => startDrag(e, "move", true)}
-            onPointerMove={dragTo}
-            onPointerUp={dragEnd}
+            {...dragEvents}
           >
             {HANDLES.map((h) => (
               <span
@@ -240,8 +255,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
                 className={`ie-h ${h}`}
                 title={LABEL[h].replace("Resize", "Crop")}
                 onPointerDown={(e) => startDrag(e, h, true)}
-                onPointerMove={dragTo}
-                onPointerUp={dragEnd}
+                {...dragEvents}
               />
             ))}
           </div>
