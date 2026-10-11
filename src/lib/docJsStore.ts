@@ -95,6 +95,7 @@ function exists(l: DocJsList, id: string): boolean {
 }
 
 let loads = 0;
+let refreshes = 0;
 let checks = 0;
 let checkTimer: ReturnType<typeof setTimeout> | undefined;
 let unsubscribe: (() => void) | undefined;
@@ -143,9 +144,11 @@ export const useDocJs = create<DocJsStore>((set, get) => {
   const refresh = async (keepText: boolean, select?: string | null) => {
     const d = doc();
     if (d == null) return;
+    // Only the newest read counts: the file's own change event and an edit's can both ask.
+    const seq = ++refreshes;
     try {
       const list = await api.docJsList(d);
-      if (doc() !== d) return;
+      if (doc() !== d || seq !== refreshes) return;
       patch({ list, error: null });
       const cur = select ?? get().sheet?.selected ?? null;
       const next = cur && exists(list, cur) ? cur : firstScript(list);
@@ -208,7 +211,7 @@ export const useDocJs = create<DocJsStore>((set, get) => {
     close: () => {
       const s = get().sheet;
       if (!s) return;
-      if (dirty(s) && s.confirmDiscard !== "close") {
+      if (dirty(s)) {
         patch({ confirmDiscard: "close" });
         return;
       }

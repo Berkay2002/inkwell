@@ -209,6 +209,8 @@ function Editor({ sheet }: { sheet: SheetState }) {
   const title = named ? (l.named.find((n) => n.id === sel)?.name ?? sel) : titleOf(l, sel);
 
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // the text owns its keys (undo, select all, save): the app's shortcuts must not also act on the document
+    e.stopPropagation();
     if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       const t = e.currentTarget;

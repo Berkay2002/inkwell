@@ -56,7 +56,9 @@ export function PinnedTools({ doc }: { doc: DocState }) {
   const items = pick(all, pinned);
   // ids that are not tools any more (renamed, removed) go, so they cannot hold a pin slot
   const recent = useToolPrefs((s) => s.recent);
-  useEffect(() => useToolPrefs.getState().prune(all.map((i) => i.id)), [all, pinned, recent]);
+  // every tool counts as known, the portfolio ones too: a pin on one must survive a plain PDF being active
+  const known = useMemo(() => toolItems(doc, true).map((i) => i.id), [doc.id, doc.name]);
+  useEffect(() => useToolPrefs.getState().prune(known), [known, pinned, recent]);
   if (items.length === 0) return null;
   return (
     <span className="tb-cluster pinned-tools" role="group" aria-label="Pinned tools">
@@ -244,7 +246,7 @@ export function AllToolsPanel({ doc }: { doc: DocState }) {
                         onClick={() =>
                           useToolPrefs.getState().togglePin(
                             it.id,
-                            items.map((i) => i.id),
+                            toolItems(doc, true).map((i) => i.id),
                           )
                         }
                       >

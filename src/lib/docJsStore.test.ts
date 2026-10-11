@@ -126,6 +126,9 @@ describe("document JavaScript sheet", () => {
     expect(sheet().text).toBe("changed");
     useDocJs.getState().close();
     expect(sheet().confirmDiscard).toBe("close");
+    // a second Esc is not a yes
+    useDocJs.getState().close();
+    expect(useDocJs.getState().sheet).not.toBeNull();
     useDocJs.getState().answerDiscard(true);
     expect(useDocJs.getState().sheet).toBeNull();
   });
