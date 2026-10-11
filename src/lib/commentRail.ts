@@ -1,5 +1,6 @@
 import { useAi } from "./aiStore";
 import { useAnnot } from "./annot";
+import { useForms } from "./forms";
 import { useHistory } from "./historyStore";
 import { useRedact } from "./redact";
 import { useTools } from "./toolsStore";
@@ -15,6 +16,18 @@ export function wireCommentRail() {
   useAnnot.subscribe((s, prev) => {
     if (!s.open || prev.open) return;
     if (useTools.getState().sheet?.phase === "running") return void useAnnot.setState({ open: false });
+    useForms.getState().setOpen(false);
+    useHistory.getState().setOpen(false);
+    useRedact.getState().setOpen(false);
+    useTools.setState({ sheet: null });
+    const ai = useAi.getState();
+    if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
+  });
+  // Forms is a rail of the same kind: the two close each other and every other rail.
+  useForms.subscribe((s, prev) => {
+    if (!s.open || prev.open) return;
+    if (useTools.getState().sheet?.phase === "running") return void useForms.setState({ open: false });
+    useAnnot.getState().setOpen(false);
     useHistory.getState().setOpen(false);
     useRedact.getState().setOpen(false);
     useTools.setState({ sheet: null });
@@ -23,6 +36,7 @@ export function wireCommentRail() {
   });
   const close = () => {
     if (useAnnot.getState().open) useAnnot.getState().setOpen(false);
+    if (useForms.getState().open) useForms.getState().setOpen(false);
   };
   useAi.subscribe((s, prev) => s.open && !prev.open && s.settings.mode === "docked" && close());
   useHistory.subscribe((s, prev) => s.open && !prev.open && close());

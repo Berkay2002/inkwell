@@ -253,3 +253,67 @@ export const DEFAULT_SIZE: Record<FieldKind, [number, number]> = {
 
 /** A comb field needs a character limit to draw its cells. */
 export const needsMaxLen = (f: Field): boolean => f.kind === "text" && f.comb && f.maxLen === 0;
+
+export const HANDLES: Handle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+
+/** Calculated fields are filled by the form, not by the person. */
+export const isCalculated = (f: Field): boolean => f.calculate.kind !== "none";
+
+/** The widgets a reset button names (all of a field's widgets, and the fields below a parent name); null is the whole form. */
+export function resetTargets(all: Field[], names: string[]): number[] | null {
+  if (names.length === 0) return null;
+  return all.filter((f) => names.some((n) => f.name === n || f.name.startsWith(`${n}.`))).map((f) => f.xref);
+}
+
+/** The text size a field is drawn at on the page: its own, or about 70% of its height (a line of text) when automatic. */
+export function fontSize(f: Field): number {
+  if (f.fontSize > 0) return f.fontSize;
+  const h = f.rect[3] - f.rect[1];
+  return f.multiline || f.kind === "list" ? 12 : Math.max(6, Math.min(12, h * 0.7));
+}
+
+/** The css colour of an RGB triple in 0..1, or the fallback. */
+export function cssColor(c: RGB | null, fallback: string): string {
+  return c ? `rgb(${c.map((v) => Math.round(v * 255)).join(" ")})` : fallback;
+}
+
+export const FIELD_ICON: Record<FieldKind, "textField" | "checkSquare" | "radio" | "dropdown" | "listBox" | "pushButton" | "signature"> = {
+  text: "textField",
+  checkbox: "checkSquare",
+  radio: "radio",
+  combo: "dropdown",
+  list: "listBox",
+  button: "pushButton",
+  signature: "signature",
+};
+
+/** A name for the field list: the label people gave it, or its name. */
+export const SHORT = (s: string, n = 28): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+// ---- choices for the format, validate and calculate settings (src-tauri/src/forms/af.rs) ------------
+
+export const DATE_FORMATS = ["m/d/yy", "mm/dd/yyyy", "mm/dd/yy", "yyyy-mm-dd", "yy-mm-dd", "dd-mmm-yyyy", "d-mmm-yy", "mmm d, yyyy", "mmmm d, yyyy", "mm/yy", "m/d", "m/d/yy h:MM tt", "m/d/yy HH:MM"];
+export const TIME_FORMATS = ["HH:MM", "h:MM tt", "HH:MM:ss", "h:MM:ss tt"];
+export const SPECIAL_FORMATS = ["Zip code", "Zip code + 4", "Phone number", "Social security number"];
+export const SEPARATORS = ["1,234.56", "1234.56", "1.234,56", "1234,56", "1'234.56"];
+export const NEGATIVES = ["-1234 (minus)", "-1234 (red minus)", "(1234)", "(1234) in red"];
+export const CALC_OPS: { op: CalcOp; label: string }[] = [
+  { op: "sum", label: "Sum of" },
+  { op: "product", label: "Product of" },
+  { op: "average", label: "Average of" },
+  { op: "minimum", label: "Smallest of" },
+  { op: "maximum", label: "Largest of" },
+];
+export const FONT_SIZES = [0, 8, 9, 10, 11, 12, 14, 16, 18, 24];
+
+/** `#rrggbb` of an RGB triple in 0..1. */
+export const toHex = (c: RGB | null, fallback = "#000000"): string =>
+  c ? `#${c.map((v) => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, "0")).join("")}` : fallback;
+
+/** An RGB triple in 0..1 from `#rrggbb`. */
+export const fromHex = (h: string): RGB => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255) as RGB;
+
+/** The text fields a calculation can read (not itself), by name. */
+export const calcSources = (all: Field[], self: Field): string[] => [
+  ...new Set(all.filter((f) => f.kind === "text" && f.node !== self.node).map((f) => f.name)),
+];

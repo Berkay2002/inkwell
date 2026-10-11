@@ -61,6 +61,14 @@ const PATHS = {
   polygon: "m12 3 8 6-3 11H7L4 9Z",
   stamp: "M9 14V9a3 3 0 1 1 6 0v5M5 14h14v4H5ZM5 21h14",
   reply: "M10 8 4 13l6 5M4 13h9a7 7 0 0 1 7 7",
+  textField: "M3 7h18v10H3ZM7 10v4",
+  checkSquare: "M4 4h16v16H4ZM8 12l3 3 5-6",
+  radio: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
+  dropdown: "M3 6h18v12H3ZM15 11l2 2 2-2",
+  listBox: "M4 4h16v16H4ZM8 9h8M8 13h8M8 17h5",
+  pushButton: "M3 8h18v8H3ZM8 12h8",
+  signature: "M3 16c3-6 4-9 6-9s0 8 2 8 3-4 5-4 2 2 4 2M3 21h18",
+  wand: "M15 4v3M13.5 5.5h3M19 11v2M18 12h2M5 20 15 10l-2-2L3 18ZM9 5v2M8 6h2",
 };
 
 export type IconName = keyof typeof PATHS;

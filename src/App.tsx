@@ -9,6 +9,7 @@ import { VersionView } from "./components/history/VersionView";
 import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
+import { FormTools, FormsPanel } from "./components/forms/FormsPanel";
 import { RedactPanel } from "./components/redact/RedactPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
@@ -114,6 +115,7 @@ export default function App() {
                 {searchOpen && !viewing && <SearchBar key={doc.id} doc={doc} />}
                 <HistoryBanner doc={doc} />
                 <CommentTools doc={doc} />
+                <FormTools />
               </div>
               <ToolsPanel doc={doc} />
               <ConvertPanel doc={doc} />
@@ -121,6 +123,7 @@ export default function App() {
               <HistoryPanel doc={doc} />
               <RedactPanel doc={doc} />
               <CommentsPanel doc={doc} />
+              <FormsPanel doc={doc} />
             </div>
           )}
         </>
