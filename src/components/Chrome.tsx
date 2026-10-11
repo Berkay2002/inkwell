@@ -2,14 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
+import { openA11y } from "../lib/a11y";
 import { useConvert } from "../lib/convertStore";
+import { useProtect } from "../lib/protectStore";
 import { useTools } from "../lib/toolsStore";
 import { type DocState, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
-import { HistoryToggle } from "./history/HistoryPanel";
+import { HistoryToggle, openCompareSetup } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
 import { MenuButton } from "./Menu";
 import { CommentsToggle } from "./comments/CommentsPanel";
+import { FormsToggle } from "./forms/FormsPanel";
 import { RedactToggle } from "./redact/RedactPanel";
 import { ModeSwitch } from "./Organize";
 import { WindowControls } from "./WindowControls";
@@ -20,6 +23,7 @@ export function TabBar() {
   const order = useStore((s) => s.order);
   const docs = useStore((s) => s.docs);
   const active = useStore((s) => s.active);
+  const security = useProtect((s) => s.security);
   return (
     <div className="tabbar" role="tablist" data-tauri-drag-region>
       <span className="brand" data-tauri-drag-region>
@@ -52,6 +56,11 @@ export function TabBar() {
           }}
         >
           <Icon name="file" size={14} />
+          {security[id]?.encrypted && (
+            <span className="tab-lock" title={security[id].openPassword ? "Opens with a password" : "Has password restrictions"}>
+              <Icon name="lock" size={12} />
+            </span>
+          )}
           <span className="tab-name">{docs[id].name}</span>
           {docs[id].dirty && <span className="tab-dirty" title="Unsaved changes" />}
           <button
@@ -85,7 +94,6 @@ const themeIcon: Record<Theme, IconName> = { system: "system", light: "sun", dar
 const nextTheme: Record<Theme, Theme> = { system: "light", light: "dark", dark: "system" };
 
 export function Toolbar({ doc }: { doc: DocState }) {
-  const sidebar = useStore((s) => s.sidebar);
   const theme = useStore((s) => s.theme);
   const searchOpen = useStore((s) => s.searchOpen);
   const { id } = doc;
@@ -94,28 +102,62 @@ export function Toolbar({ doc }: { doc: DocState }) {
     return k ? ` (${prettyKeys(k)})` : "";
   };
 
-  const zoomValue = doc.zoomMode === "custom" ? String(Math.round(doc.zoom * 100) / 100) : doc.zoomMode;
-  const presets = ZOOM_STEPS.filter((z) => z >= 0.25 && z <= 8);
-  const custom = doc.zoomMode === "custom" && !presets.some((z) => Math.abs(z - doc.zoom) < 0.005);
-
-  // Organize keeps the same toolbar; only the viewer's own controls give way to undo and redo.
-  if (doc.organize)
-    return (
-      <div className="toolbar">
-        <ModeSwitch doc={doc} />
-        <span className="sep" />
-        <Btn icon="undo" title={doc.undoLabel ? `Undo ${doc.undoLabel} (Ctrl+Z)` : "Undo (Ctrl+Z)"} disabled={!doc.undoLabel} onClick={() => void undo(id)} />
-        <Btn icon="redo" title={doc.redoLabel ? `Redo ${doc.redoLabel} (Ctrl+Y)` : "Redo (Ctrl+Y)"} disabled={!doc.redoLabel} onClick={() => void redo(id)} />
-        <span className="grow" />
-        <Btn icon={themeIcon[theme]} title={`Theme: ${theme}`} onClick={() => st().setTheme(nextTheme[theme])} />
-        <Btn icon="command" title={`Command palette${keys("palette")}`} onClick={() => st().setUi({ paletteOpen: true })} />
-      </div>
-    );
+  // Organize keeps the same toolbar: only the viewer's own controls on the left give way to undo and redo.
+  // The right-hand cluster stays put; its panels live in the reader, so using one leaves Organize first.
+  const leaveOrganize = doc.organize ? () => st().patch(id, { organize: false }) : undefined;
 
   return (
     <div className="toolbar">
       <ModeSwitch doc={doc} />
       <span className="sep" />
+      {doc.organize ? (
+        <>
+          <Btn icon="undo" title={doc.undoLabel ? `Undo ${doc.undoLabel} (Ctrl+Z)` : "Undo (Ctrl+Z)"} disabled={!doc.undoLabel} onClick={() => void undo(id)} />
+          <Btn icon="redo" title={doc.redoLabel ? `Redo ${doc.redoLabel} (Ctrl+Y)` : "Redo (Ctrl+Y)"} disabled={!doc.redoLabel} onClick={() => void redo(id)} />
+        </>
+      ) : (
+        <ViewerControls doc={doc} keys={keys} />
+      )}
+      <span className="grow" />
+      <span className="tb-cluster" onClickCapture={leaveOrganize}>
+        <Btn icon="search" title={`Find${keys("find")}`} on={searchOpen && !doc.organize} onClick={() => st().setUi({ searchOpen: doc.organize ? true : !searchOpen })} />
+        <MenuButton
+          className="ax-toggle"
+          label="Tools"
+          items={[
+            { label: "Compress file…", onSelect: () => useTools.getState().open("compress", id) },
+            { label: "Recognize text…", onSelect: () => useTools.getState().open("ocr", id) },
+            { label: "Protect with a password…", onSelect: () => useProtect.getState().open("protect", id) },
+            { label: "Security…", onSelect: () => useProtect.getState().open("security", id) },
+            { label: "Compare files…", onSelect: () => void openCompareSetup({ id, name: doc.name }) },
+            { label: "Check accessibility…", onSelect: openA11y },
+            { label: "Export…", onSelect: () => useConvert.getState().openExport(id) },
+            { label: "Create PDF…", onSelect: () => useConvert.getState().openCreate() },
+          ]}
+        >
+          Tools
+        </MenuButton>
+        <CommentsToggle />
+        <FormsToggle />
+        <RedactToggle />
+        <HistoryToggle />
+        <AssistantToggle />
+      </span>
+      <Btn icon={themeIcon[theme]} title={`Theme: ${theme}`} onClick={() => st().setTheme(nextTheme[theme])} />
+      <Btn icon="command" title={`Command palette${keys("palette")}`} onClick={() => st().setUi({ paletteOpen: true })} />
+    </div>
+  );
+}
+
+function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => string }) {
+  const sidebar = useStore((s) => s.sidebar);
+  const { id } = doc;
+  const zoomValue = doc.zoomMode === "custom" ? String(Math.round(doc.zoom * 100) / 100) : doc.zoomMode;
+  const presets = ZOOM_STEPS.filter((z) => z >= 0.25 && z <= 8);
+  const custom = doc.zoomMode === "custom" && !presets.some((z) => Math.abs(z - doc.zoom) < 0.005);
+
+  return (
+    <>
       <Btn icon="sidebar" title={`Toggle sidebar${keys("sidebar")}`} on={sidebar !== "none"} onClick={() => st().toggleSidebar("thumbs")} />
       <Btn icon="outline" title="Outline" on={sidebar === "outline"} onClick={() => st().toggleSidebar("outline")} />
       <span className="sep" />
@@ -144,27 +186,7 @@ export function Toolbar({ doc }: { doc: DocState }) {
       </select>
       <Btn icon="plus" title={`Zoom in${keys("zoom-in")}`} onClick={() => st().setZoom(id, stepZoom(doc.zoom, 1))} />
       <Btn icon="rotate" title={`Rotate${keys("rotate-cw")}`} onClick={() => st().rotate(id, 1)} />
-      <span className="grow" />
-      <Btn icon="search" title={`Find${keys("find")}`} on={searchOpen} onClick={() => st().setUi({ searchOpen: !searchOpen })} />
-      <MenuButton
-        className="ax-toggle"
-        label="Tools"
-        items={[
-          { label: "Compress file…", onSelect: () => useTools.getState().open("compress", id) },
-          { label: "Recognize text…", onSelect: () => useTools.getState().open("ocr", id) },
-          { label: "Export…", onSelect: () => useConvert.getState().openExport(id) },
-          { label: "Create PDF…", onSelect: () => useConvert.getState().openCreate() },
-        ]}
-      >
-        Tools
-      </MenuButton>
-      <CommentsToggle />
-      <RedactToggle />
-      <HistoryToggle />
-      <AssistantToggle />
-      <Btn icon={themeIcon[theme]} title={`Theme: ${theme}`} onClick={() => st().setTheme(nextTheme[theme])} />
-      <Btn icon="command" title={`Command palette${keys("palette")}`} onClick={() => st().setUi({ paletteOpen: true })} />
-    </div>
+    </>
   );
 }
 

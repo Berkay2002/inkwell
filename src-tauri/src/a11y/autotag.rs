@@ -13,12 +13,14 @@
 
 use super::content::{self, Op, TextPos};
 use super::tree::name;
-use super::{Result, annots, bad, page_content};
+use super::{Progress, Result, annots, bad, page_content};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::text_page::{TextBlockType, TextPageFlags};
 use mupdf::{Buffer, Matrix, Rect};
 use std::collections::HashMap;
+use serde::Serialize;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A heading is at least this much larger than the body text.
 const HEADING_RATIO: f32 = 1.15;
@@ -98,7 +100,7 @@ struct Run {
     target: Target,
 }
 
-fn bbox_of(m: &Matrix, r: Rect) -> Rect {
+pub(super) fn bbox_of(m: &Matrix, r: Rect) -> Rect {
     let pts = [m.transform_xy(r.x0, r.y0), m.transform_xy(r.x1, r.y0), m.transform_xy(r.x0, r.y1), m.transform_xy(r.x1, r.y1)];
     let mut b = Rect { x0: f32::MAX, y0: f32::MAX, x1: f32::MIN, y1: f32::MIN };
     for (x, y) in pts {
@@ -110,7 +112,7 @@ fn bbox_of(m: &Matrix, r: Rect) -> Rect {
     b
 }
 
-const UNIT: Rect = Rect { x0: 0.0, y0: 0.0, x1: 1.0, y1: 1.0 };
+pub(super) const UNIT: Rect = Rect { x0: 0.0, y0: 0.0, x1: 1.0, y1: 1.0 };
 
 /// The line a point (page space) falls on: inside a line's box (1 pt slack), else the nearest
 /// one within 12 pt.
@@ -228,6 +230,20 @@ fn runs(ops: &[Op], res: Option<&PdfObject>, page_ctm: Matrix, lines: &[Line]) -
     Ok(out)
 }
 
+/// The runs that can be marked: in content order, each starting at or after the end of the one
+/// before, within the stream. Invalid content (a path left open across a text object, say) can
+/// make a run start before an earlier one ends; such a run is left unmarked.
+fn in_order(runs: Vec<Run>, len: usize) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::with_capacity(runs.len());
+    for r in runs {
+        let after = out.last().map_or(0, |l| l.end);
+        if r.start >= after && r.end >= r.start && r.end <= len {
+            out.push(r);
+        }
+    }
+    out
+}
+
 /// A structure element being built.
 struct El {
     ty: String,
@@ -263,8 +279,69 @@ fn place(top: &mut Vec<(usize, f32)>, el: usize, y0: f32) {
     top.insert(at, (el, y0));
 }
 
-/// Tags the document. Returns the pages whose content was marked.
-pub fn run(doc: &mut PdfDocument) -> Result<Vec<u32>> {
+/// What Autotag would add to an untagged document, counted from the file without running it
+/// (the layout analysis itself is the slow part): enough to say what a run does before it runs.
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Preview {
+    /// The document has no tag tree, so Autotag can run.
+    pub untagged: bool,
+    pub pages: u32,
+    /// Images that become Figure elements without alternate text.
+    pub figures: u32,
+    pub links: u32,
+    pub fields: u32,
+}
+
+pub fn preview(doc: &PdfDocument) -> Result<Preview> {
+    let untagged = doc.catalog()?.get_dict("StructTreeRoot")?.is_none();
+    let n = doc.page_count()?.max(0);
+    let (mut figures, mut links, mut fields) = (0, 0, 0);
+    for p in 0..n {
+        let page = doc.find_page(p)?;
+        let res = page.get_dict_inheritable("Resources")?.filter(|r| r.is_dict().unwrap_or(false));
+        let mut depth = 0usize;
+        for op in content::parse(&page_content(&page)?) {
+            match op.name.as_slice() {
+                b"BMC" | b"BDC" => depth += 1,
+                b"EMC" => depth = depth.saturating_sub(1),
+                b"BI" if depth == 0 => figures += 1,
+                b"Do" if depth == 0 => {
+                    let x = match (&res, op.operands.first().and_then(|o| o.name())) {
+                        (Some(r), Some(n)) => match r.get_dict("XObject")? {
+                            Some(d) => d.get_dict(String::from_utf8_lossy(n).into_owned())?,
+                            None => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(x) = x
+                        && name(&x, "Subtype")?.as_deref() == Some("Image")
+                    {
+                        figures += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (_, a) in annots(&page)? {
+            match name(&a, "Subtype")?.as_deref() {
+                Some("Link") => links += 1,
+                Some("Widget") => fields += 1,
+                _ => {}
+            }
+        }
+    }
+    Ok(Preview { untagged, pages: n as u32, figures, links, fields })
+}
+
+fn stop() -> super::EngineError {
+    bad("cancelled")
+}
+
+/// Tags the document. Returns the pages whose content was marked. `progress` gets a `read` event
+/// per page, then a `tag` event per page; `cancel` is polled before each page and ends the run
+/// with "cancelled" (the caller's edit step then changes nothing).
+pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Vec<u32>> {
     let mut cat = doc.catalog()?;
     if cat.get_dict("StructTreeRoot")?.is_some() {
         return Err(bad("the document is already tagged; autotag only tags untagged documents"));
@@ -274,7 +351,11 @@ pub fn run(doc: &mut PdfDocument) -> Result<Vec<u32>> {
     // Body size: the size most characters are set in.
     let mut chars_at: HashMap<i32, usize> = HashMap::new();
     for p in 0..n {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(stop());
+        }
         let t = page_text(doc, p)?;
+        progress(Progress { done: p as u32 + 1, pages: n as u32, stage: "read" });
         for l in &t.lines {
             *chars_at.entry(half(l.size)).or_default() += l.text.chars().count();
         }
@@ -303,13 +384,16 @@ pub fn run(doc: &mut PdfDocument) -> Result<Vec<u32>> {
     let mut built: Vec<(i32, Page)> = Vec::new();
     let mut touched = Vec::new();
     for p in 0..n {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(stop());
+        }
         let t = &texts[p as usize];
         let mut page_obj = doc.find_page(p)?;
         let page_ctm = page_obj.page_ctm()?;
         let res = page_obj.get_dict_inheritable("Resources")?.filter(|r| r.is_dict().unwrap_or(false));
         let data = page_content(&page_obj)?;
         let ops = content::parse(&data);
-        let runs = runs(&ops, res.as_ref(), page_ctm.clone(), &t.lines)?;
+        let runs = in_order(runs(&ops, res.as_ref(), page_ctm.clone(), &t.lines)?, data.len());
 
         // Blocks to elements.
         let mut pg = Page { els: Vec::new(), top: Vec::new(), owner: Vec::new() };
@@ -401,6 +485,10 @@ pub fn run(doc: &mut PdfDocument) -> Result<Vec<u32>> {
             let mut out = Vec::with_capacity(data.len() + marks.len() * 24);
             let mut at = 0;
             for (s, e, prefix) in &marks {
+                // `in_order` already dropped overlapping runs; never slice backwards.
+                if *s < at || *e < *s || *e > data.len() {
+                    continue;
+                }
                 out.extend_from_slice(&data[at..*s]);
                 out.extend_from_slice(prefix.as_bytes());
                 out.extend_from_slice(&data[*s..*e]);
@@ -413,6 +501,10 @@ pub fn run(doc: &mut PdfDocument) -> Result<Vec<u32>> {
             touched.push(p as u32);
         }
         built.push((p, pg));
+        progress(Progress { done: p as u32 + 1, pages: n as u32, stage: "tag" });
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(stop());
     }
 
     // The tree.

@@ -14,6 +14,7 @@
 //! [`Engine::save`], [`Engine::extract`], [`Engine::split`] and [`Engine::merge`].
 
 use super::{DocEntry, DocId, Engine, EngineError, Result, Snap, authenticate, check_pdf};
+use crate::protect::{self, SecurityChange};
 use mupdf::pdf::{PdfDocument, PdfGraftMap, PdfObject, PdfWriteOptions};
 use mupdf::{Document, Size};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 /// One edit, and one undo step. Page numbers are 0-based indices into the current generation.
 ///
@@ -178,6 +180,9 @@ struct Step {
     drops: bool,
     /// A redaction step: its snapshot is a full rewrite, and so is every save that includes it.
     redacts: bool,
+    /// Set or removed password security: the snapshot is the step before it, and every save that
+    /// includes it writes the file again with (or without) encryption.
+    security: Option<SecurityChange>,
     /// The snapshot is the file exactly as a save must write it (the redaction engine's verified
     /// bytes): saving this step writes them as they are, not a rewrite of them.
     exact: bool,
@@ -245,9 +250,12 @@ fn open_snap(s: &Snap, entry: &DocEntry) -> Result<AuthDoc> {
     Ok(AuthDoc { doc: PdfDocument::try_from(d)?, _bytes: s.bytes.clone() })
 }
 
-fn write_doc(doc: &PdfDocument, opts: PdfWriteOptions, capacity: usize) -> Result<Vec<u8>> {
+fn write_doc(doc: &PdfDocument, mut opts: PdfWriteOptions, capacity: usize) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(capacity);
-    doc.write_to_with_options(&mut out, opts)?;
+    let written = doc.write_to_with_options(&mut out, opts);
+    // The options carry the new passwords: do not leave them behind on the stack.
+    opts.wipe_passwords();
+    written?;
     Ok(out)
 }
 
@@ -293,7 +301,18 @@ impl Editor {
             doc = open_snap(&snap, entry)?;
         }
         let sizes = Arc::new(page_sizes(&doc.doc)?);
-        let base = Step { snap, label: "Opened".into(), source: EditSource::User, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, exact: false, sizes };
+        let base = Step {
+            snap,
+            label: "Opened".into(),
+            source: EditSource::User,
+            at_ms: now_ms(),
+            pages: vec![],
+            drops: false,
+            redacts: false,
+            security: None,
+            exact: false,
+            sizes,
+        };
         Ok(Editor { doc, steps: vec![base], cur: 0, saved: Some(0) })
     }
 
@@ -381,10 +400,24 @@ impl Editor {
 
     /// The current content as Save writes it: rewritten once anything was removed, else the snapshot.
     fn content(&self, entry: &DocEntry) -> Result<Vec<u8>> {
-        if self.steps[..=self.cur].iter().any(|s| s.drops || s.redacts) {
-            return write_doc(&open_snap(&self.step().snap, entry)?.doc, rewrite_opts(), self.step().snap.len);
+        if self.steps[..=self.cur].iter().any(|s| s.drops || s.redacts) || self.security().is_some() {
+            return write_doc(&open_snap(&self.step().snap, entry)?.doc, self.save_opts(), self.step().snap.len);
         }
         Ok(self.bytes().to_vec())
+    }
+
+    /// The password security the document is to be saved with: the latest security step up to the
+    /// current one. `None`: the file keeps whatever encryption it was opened with.
+    fn security(&self) -> Option<&SecurityChange> {
+        self.steps[..=self.cur].iter().rev().find_map(|s| s.security.as_ref())
+    }
+
+    /// The write options of a full-rewrite save.
+    fn save_opts(&self) -> PdfWriteOptions {
+        match self.security() {
+            Some(c) => protect::write_options(rewrite_opts(), c),
+            None => rewrite_opts(),
+        }
     }
 
     fn state(&self, entry: &DocEntry) -> EditState {
@@ -792,18 +825,36 @@ fn new_pdf(parts: &[(&PdfDocument, &[u32])]) -> Result<Vec<u8>> {
     write_doc(&out, rewrite_opts(), 1 << 20)
 }
 
-/// Opens the written file again and checks it has `pages` pages, first and last loadable.
-fn verify(path: &Path, pages: u32, password: Option<&str>) -> Result<()> {
+/// What a written file must give back when it is opened again.
+#[derive(Clone, Copy, Default)]
+struct Readback<'a> {
+    /// The open password it was written with.
+    password: Option<&'a str>,
+    /// `Some(true)`: it must carry an /Encrypt dictionary (security was set); `Some(false)`: it must
+    /// not (security was removed); `None`: whatever the file had.
+    encrypted: Option<bool>,
+}
+
+/// Opens the written file again and checks it has `pages` pages, first and last loadable, and the
+/// encryption it was meant to get.
+fn verify(path: &Path, pages: u32, read: Readback) -> Result<()> {
     let bad = || EngineError::Io("the written file did not read back correctly".into());
     let mut d = Document::open(path.to_string_lossy().as_ref()).map_err(|_| bad())?;
-    if d.needs_password()? && !password.is_some_and(|pw| d.authenticate(pw).unwrap_or(false)) {
+    if d.needs_password()? && !read.password.is_some_and(|pw| d.authenticate(pw).unwrap_or(false)) {
         return Err(bad());
     }
-    if d.page_count()? != pages as i32 {
+    let pdf = PdfDocument::try_from(d).map_err(|_| bad())?;
+    if let Some(want) = read.encrypted {
+        let has = pdf.trailer()?.get_dict("Encrypt")?.is_some_and(|e| !e.is_null().unwrap_or(true));
+        if has != want {
+            return Err(bad());
+        }
+    }
+    if pdf.page_count()? != pages as i32 {
         return Err(bad());
     }
-    d.load_page(0)?.bounds()?;
-    d.load_page(pages as i32 - 1)?.bounds()?;
+    pdf.load_page(0)?.bounds()?;
+    pdf.load_page(pages as i32 - 1)?.bounds()?;
     Ok(())
 }
 
@@ -828,21 +879,21 @@ fn write_synced(path: &Path, bytes: &[u8], create_new: bool) -> std::io::Result<
 /// When no file can be created in the target's folder (but the file itself is writable), the
 /// bytes are verified in %TEMP% and copied over the target, with a backup copy restored if that
 /// fails.
-fn write_atomic(target: &Path, bytes: &[u8], pages: u32, password: Option<&str>) -> Result<()> {
+fn write_atomic(target: &Path, bytes: &[u8], pages: u32, read: Readback) -> Result<()> {
     let target = &resolve_link(target);
     let tmp = temp_for(target);
     match write_synced(&tmp, bytes, true) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && target.exists() => {
             let _ = std::fs::remove_file(&tmp);
-            return copy_over(target, bytes, pages, password);
+            return copy_over(target, bytes, pages, read);
         }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             return Err(io(e));
         }
     }
-    let r = verify(&tmp, pages, password).and_then(|()| {
+    let r = verify(&tmp, pages, read).and_then(|()| {
         // A virus scanner or the search indexer may hold a new file for a moment (up to 2 s).
         let mut tries = 0;
         loop {
@@ -914,18 +965,22 @@ fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
 
 /// The fallback of [`write_atomic`] for a folder that takes no new files: verify in %TEMP%, keep a
 /// copy of the target there, write the target in place, restore the copy if that fails.
-fn copy_over(target: &Path, bytes: &[u8], pages: u32, password: Option<&str>) -> Result<()> {
+fn copy_over(target: &Path, bytes: &[u8], pages: u32, read: Readback) -> Result<()> {
     let dir = std::env::temp_dir();
     let tmp = temp_for(&dir.join(target.file_name().unwrap_or_default()));
     let backup = tmp.with_extension("inkwell-bak");
     let r = (|| {
         write_synced(&tmp, bytes, true).map_err(io)?;
-        verify(&tmp, pages, password)?;
+        verify(&tmp, pages, read)?;
         std::fs::copy(target, &backup).map_err(io)?;
-        let written = write_synced(target, bytes, false).map_err(io).and_then(|()| verify(target, pages, password));
+        let written = write_synced(target, bytes, false).map_err(io).and_then(|()| verify(target, pages, read));
         if written.is_err() {
+            let why = written.as_ref().err().map(ToString::to_string).unwrap_or_default();
             std::fs::copy(&backup, target).map_err(|e| {
-                EngineError::Io(format!("the file could not be written, and restoring it failed too ({e}); the original is at {}", backup.display()))
+                EngineError::Io(format!(
+                    "the file could not be written ({why}), and restoring it failed too ({e}): the file may be damaged, the original is at {}",
+                    backup.display()
+                ))
             })?;
         }
         written
@@ -957,7 +1012,7 @@ pub(super) fn clean_stale_temps(path: &Path) {
 /// Writes a file that must not exist yet. Removed again if it does not read back.
 fn write_new(target: &Path, bytes: &[u8], pages: u32) -> Result<()> {
     write_synced(target, bytes, true).map_err(io)?;
-    verify(target, pages, None).inspect_err(|_| {
+    verify(target, pages, Readback::default()).inspect_err(|_| {
         let _ = std::fs::remove_file(target);
     })
 }
@@ -1031,8 +1086,18 @@ impl Engine {
                 let snap = ed.snapshot()?;
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
-                let step =
-                    Step { snap, label: op.label(), source, at_ms: now_ms(), pages, drops, redacts: false, exact: false, sizes: Arc::new(after) };
+                let step = Step {
+                    snap,
+                    label: op.label(),
+                    source,
+                    at_ms: now_ms(),
+                    pages,
+                    drops,
+                    redacts: false,
+                    security: None,
+                    exact: false,
+                    sizes: Arc::new(after),
+                };
                 Ok(Some((step, doc)))
             }
         });
@@ -1148,7 +1213,7 @@ impl Engine {
             let doc = open_snap(&snap, &entry)?;
             let sizes = Arc::new(page_sizes(&doc.doc)?);
             let drops = removes || sizes.len() < ed.step().sizes.len();
-            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, exact, sizes }, doc))
+            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, sizes }, doc))
         });
         match changed {
             Ok((step, doc)) => {
@@ -1180,9 +1245,13 @@ impl Engine {
         let cur = ed.cur;
         // The kept steps' bytes may still hold what dropped steps removed: saves keep rewriting.
         let (drops, redacts) = (ed.steps[..=cur].iter().any(|s| s.drops), ed.steps[..=cur].iter().any(|s| s.redacts));
+        let security = ed.security().cloned();
         ed.steps.drain(..cur);
         ed.steps[0].drops |= drops;
         ed.steps[0].redacts |= redacts;
+        if ed.steps[0].security.is_none() {
+            ed.steps[0].security = security;
+        }
         ed.saved = ed.saved.and_then(|s| s.checked_sub(cur));
         ed.cur = 0;
         Ok(ed.state(&entry))
@@ -1279,7 +1348,7 @@ impl Engine {
     }
 
     /// An error if `path` is open in Inkwell (other than as `except`).
-    fn check_not_open(&self, path: &str, except: Option<DocId>) -> Result<()> {
+    pub(crate) fn check_not_open(&self, path: &str, except: Option<DocId>) -> Result<()> {
         let open = self.docs.read().values().any(|e| Some(e.id) != except && same_path(&e.path(), path));
         if open {
             Err(invalid("that file is open in Inkwell; close it first"))
@@ -1302,38 +1371,61 @@ impl Engine {
     pub fn save_recorded(&self, id: DocId, to: Option<&str>) -> Result<(EditState, Option<Saved>)> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
+        self.save_locked(id, &entry, &mut lane, to)
+    }
+
+    /// [`Engine::save_recorded`] with the edit lane already held, so that a caller can do something
+    /// else under the same guard (Protect applies its step and saves without anything in between).
+    pub(super) fn save_locked(
+        &self,
+        id: DocId,
+        entry: &DocEntry,
+        lane: &mut Option<Editor>,
+        to: Option<&str>,
+    ) -> Result<(EditState, Option<Saved>)> {
         let target = to.map(str::to_string).unwrap_or_else(|| entry.path());
         let same = same_path(&target, &entry.path());
         if same && lane.as_ref().is_none_or(|ed| ed.saved == Some(ed.cur)) {
-            return Ok((lane.as_ref().map_or_else(|| clean_state(&entry), |ed| ed.state(&entry)), None));
+            return Ok((lane.as_ref().map_or_else(|| clean_state(entry), |ed| ed.state(entry)), None));
         }
         if !same {
             self.check_not_open(&target, Some(id))?;
         }
-        let ed = self.lane(&entry, &mut lane)?;
-        let rewrite = ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
+        let ed = self.lane(entry, lane)?;
+        let secured = ed.security().is_some();
+        let rewrite = secured || ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
         let full;
-        let bytes: &[u8] = if ed.step().exact {
+        // Security wins over a redaction's exact bytes: they could not carry the new encryption, and
+        // a rewrite of verified-clean content only ever drops objects, it adds none.
+        let bytes: &[u8] = if ed.step().exact && !secured {
             // The redaction engine's verified file: any other write of it is unverified.
             ed.bytes()
         } else if rewrite {
             // From a throwaway copy: a garbage-collecting write leaves its document unable to take
             // incremental updates, which every later edit needs.
-            full = write_doc(&open_snap(&ed.step().snap, &entry)?.doc, rewrite_opts(), ed.step().snap.len)?;
+            full = write_doc(&open_snap(&ed.step().snap, entry)?.doc, ed.save_opts(), ed.step().snap.len)?;
             &full
         } else {
             ed.bytes()
         };
         let pages = ed.step().sizes.len() as u32;
-        let password = entry.password.lock().clone();
-        if same {
+        // What reads the written file back: its new open password when security was set or removed.
+        let password = match ed.security() {
+            Some(SecurityChange::Set(s)) => s.open().map(|p| Zeroizing::new(p.to_string())),
+            Some(SecurityChange::Remove) => None,
+            None => entry.password.lock().clone(),
+        };
+        let encrypted = ed.security().map(|c| matches!(c, SecurityChange::Set(_)));
+        // A new encryption makes the file on disk unreadable with the password the replicas know:
+        // from here on they read memory, never the path (Save as would point them at the new file).
+        if same || secured {
             // Replicas must read from memory before the file goes away under them.
             if entry.layout.read().snap.is_none() {
-                self.publish(&entry, ed);
+                self.publish(entry, ed);
             }
-            self.release_file(&entry);
+            self.release_file(entry);
         }
-        write_atomic(Path::new(&target), bytes, pages, password.as_deref())?;
+        write_atomic(Path::new(&target), bytes, pages, Readback { password: password.as_deref().map(String::as_str), encrypted })?;
         // the steps since the last save (all of them when the file holds none of the current ones)
         let from = ed.saved.filter(|&s| s < ed.cur).map_or(1, |s| s + 1);
         let (summary, pages) = ed.changes(from, ed.cur);
@@ -1343,7 +1435,12 @@ impl Engine {
             *entry.path.write() = target;
         }
         ed.saved = Some(ed.cur);
-        Ok((ed.state(&entry), Some(saved)))
+        *entry.file_password.lock() = match ed.security() {
+            Some(SecurityChange::Set(s)) => Some(s.open().map(|p| Zeroizing::new(p.to_string()))),
+            Some(SecurityChange::Remove) => Some(None),
+            None => None,
+        };
+        Ok((ed.state(entry), Some(saved)))
     }
 
     /// Drops every replica that has the file on disk open (rule 5). Waits for busy ones.
@@ -1363,9 +1460,10 @@ impl Engine {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
+        ed.ensure_extractable(&entry)?;
         let pages = check_pages(pages, ed.step().sizes.len())?;
         let bytes = new_pdf(&[(&ed.doc.doc, &pages)])?;
-        write_atomic(Path::new(out), &bytes, pages.len() as u32, None)?;
+        write_atomic(Path::new(out), &bytes, pages.len() as u32, Readback::default())?;
         if delete_after {
             self.apply_locked(&entry, ed, &EditOp::Delete { pages }, EditSource::User)
         } else {
@@ -1382,6 +1480,7 @@ impl Engine {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
+        ed.ensure_extractable(&entry)?;
         let n = ed.step().sizes.len() as u32;
         let chunks: Vec<Vec<u32>> =
             (0..n).step_by(every as usize).map(|s| (s..(s + every).min(n)).collect()).collect();
@@ -1424,6 +1523,15 @@ impl Engine {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        // The result is a plain file: a source whose owner allows no copying or page changes stays out.
+        for (p, s) in paths.iter().zip(&srcs) {
+            if !crate::protect::Rights::from_p(s.permissions().bits() as i32).may_extract() {
+                return Err(invalid(format!(
+                    "{} doesn't allow copying or page changes. Open it with its permissions password and remove its security first.",
+                    Path::new(p).file_name().unwrap_or_default().to_string_lossy()
+                )));
+            }
+        }
         let pages: Vec<Vec<u32>> =
             srcs.iter().map(|s| Ok((0..s.page_count()?.max(0) as u32).collect())).collect::<Result<_>>()?;
         let parts: Vec<(&PdfDocument, &[u32])> = srcs.iter().zip(&pages).map(|(s, p)| (s, p.as_slice())).collect();
@@ -1431,10 +1539,12 @@ impl Engine {
         let total = pages.iter().map(Vec::len).sum::<usize>() as u32;
         drop(parts);
         drop(srcs);
-        write_atomic(Path::new(out), &bytes, total, None)?;
+        write_atomic(Path::new(out), &bytes, total, Readback::default())?;
         Ok(total)
     }
 }
+
+mod security;
 
 #[cfg(test)]
 #[path = "tests_edit.rs"]

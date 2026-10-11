@@ -102,6 +102,7 @@ export const PageImg = memo(function PageImg({ doc, source, page, ratio, marks, 
             <span
               key={`${i}:${cur ? flash : 0}`}
               className={`hx-mark ${m.tone}${cur ? " cur" : ""}${r ? "" : " whole"}`}
+              data-change={m.change}
               style={r ? { left: pct(r[0], pt[0]), top: pct(r[1], pt[1]), width: pct(r[2] - r[0], pt[0]), height: pct(r[3] - r[1], pt[1]) } : undefined}
               title={TONE_WORD[m.tone]}
               onClick={() => onMark?.(m.change)}
