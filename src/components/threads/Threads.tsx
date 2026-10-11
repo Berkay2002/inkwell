@@ -38,7 +38,10 @@ export function ThreadHost({ doc }: { doc: DocState }) {
   }, [wantList, id, doc.rev]);
 
   // One page tool at a time: arming the Article tool puts the others down, and arming another puts it down.
-  const other = useRedact((s) => s.tool) || useAnnot((s) => s.tool) !== "select" || useForms((s) => s.tool) !== "select";
+  const redacting = useRedact((s) => s.tool);
+  const annotating = useAnnot((s) => s.tool) !== "select";
+  const preparing = useForms((s) => s.tool) !== "select";
+  const other = redacting || annotating || preparing;
   useEffect(() => {
     if (!tool) return;
     useRedact.getState().setTool(false);
@@ -58,20 +61,22 @@ export function ThreadHost({ doc }: { doc: DocState }) {
   );
 
   // Reading: the bead comes into view at the width of the view; the zoom the person had comes back when it ends.
-  const before = useRef<{ zoom: number; zoomMode: ZoomMode } | null>(null);
+  const before = useRef<{ doc: number; zoom: number; zoomMode: ZoomMode } | null>(null);
   useEffect(() => {
     const s = useStore.getState();
-    const d = s.docs[id];
-    if (!d) return;
     if (!follow) {
-      if (before.current) s.patch(id, before.current);
+      // the zoom goes back to the document it was taken from (a tab switch ends reading, and this id is the new tab's)
+      const b = before.current;
       before.current = null;
+      if (b && s.docs[b.doc]) s.patch(b.doc, { zoom: b.zoom, zoomMode: b.zoomMode });
       return;
     }
+    const d = s.docs[id];
+    if (!d) return;
     const b = threadOf(th().get(id), follow.thread)?.beads.find((x) => x.id === follow.bead);
     const view = document.querySelector<HTMLElement>(".viewer");
     if (!b || !view) return;
-    before.current ??= { zoom: d.zoom, zoomMode: d.zoomMode };
+    before.current ??= { doc: id, zoom: d.zoom, zoomMode: d.zoomMode };
     const z = beadZoom(b.rect, d.rot, view.clientWidth);
     s.patch(id, { zoom: z, zoomMode: "custom" });
     s.goTo(id, b.page, Math.max(0, b.rect[1] - 8 / z), b.rect[0]);

@@ -84,6 +84,8 @@ Mark text or area, the comment tools and the form tools (arming one puts the oth
 - Not done: moving a bead to another page by drag; reading backwards lands on the top of a bead, not its end;
   article properties beyond the four `/I` entries; threads in PDF Portfolios' embedded files.
 - A view turned with Rotate is read at the bead's width, but the scroll goes to the page, not the bead.
+- While "Show beads" is on or an article is being read, the beads take the pointer: text under them cannot be
+  selected and links under them do not answer. Turn the toggle off (or Esc) to get them back.
 - pdfcraft is not used.
-- Windows is the reference platform; this was written and tested (cargo, vitest) on macOS and has not been looked
-  at on screen yet.
+- Windows is the reference platform; this was written and tested (cargo, vitest, tsc) on macOS and the UI has not
+  been run on screen yet.
