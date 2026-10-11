@@ -1,9 +1,11 @@
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ocrChooseTesseract, ocrClearTesseract, ocrLanguages } from "../lib/api";
 import { useTools } from "../lib/toolsStore";
 import { openDialog } from "../lib/commands";
 import { type Recent, baseName, dirName, formatSize, greeting, keyOf, ordered, relTime, shortDir, whenLabel } from "../lib/recent";
 import { launchTool, quickTools } from "../lib/tools";
+import { launchToolFromHome, toolItems } from "../lib/toolItems";
+import { groupTools } from "../lib/toolsCatalog";
 import { revealInFolder, useRecents } from "../recents";
 import type { CompressPreset } from "../lib/api";
 import type { PageDark } from "../lib/pageDark";
@@ -12,6 +14,7 @@ import { FileMenu, NavItem, SearchPill, Thumb, useDropOver, useNow, usePreviewSr
 import { Icon } from "./Icons";
 import { Library, type Scope } from "./Library";
 import { MenuButton, type MenuEntry } from "./Menu";
+import "./allTools.css";
 
 const open = (path: string) => void useStore.getState().openPath(path);
 const CONTINUE = 3;
@@ -54,6 +57,7 @@ function Landing({ over, onSeeAll }: { over: boolean; onSeeAll: () => void }) {
   const theme = useStore((s) => s.theme);
   const pageDark = useStore((s) => s.pageDark);
   const now = useNow();
+  const toolGroups = useMemo(() => groupTools(toolItems(null)), []);
   const [sel, setSel] = useState<string | null>(null);
   const table = useRef<HTMLUListElement>(null);
 
@@ -225,6 +229,32 @@ function Landing({ over, onSeeAll }: { over: boolean; onSeeAll: () => void }) {
           <HomePreview r={selected} missing={missing(selected)} now={now} />
         </div>
       )}
+
+      <section aria-label="All tools">
+        <div className="sec-head">
+          <h2>All tools</h2>
+        </div>
+        {toolGroups.map((g) => (
+          <div key={g.id}>
+            <h3 className="tools-group">{g.title}</h3>
+            <ul className="tools-grid">
+              {g.items.map((it) => (
+                <li key={it.id}>
+                  <button className="tool-card-btn" data-tool={it.id} onClick={() => void launchToolFromHome(it.id)}>
+                    <span className="tool-icon" data-group={it.group}>
+                      <Icon name={it.icon} size={20} />
+                    </span>
+                    <span className="tool-text">
+                      <span className="tool-name">{it.label}</span>
+                      <span className="tool-desc">{it.description}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </section>
 
       <div className="drop-hint-wrap">
         <div className="drop-hint" role="note">

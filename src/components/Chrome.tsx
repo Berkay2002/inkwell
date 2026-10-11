@@ -6,6 +6,7 @@ import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { useProtect } from "../lib/protectStore";
 import { pageOfLabel, useSheets } from "../lib/organizePlus";
 import { pageBoxCh } from "../lib/pageBox";
+import { useToolPrefs } from "../lib/toolPrefs";
 import { type PageDark, togglePageDark } from "../lib/pageDark";
 import { usePagesDark, useSystemDark } from "../lib/usePagesDark";
 import { type DocState, pageLabel, type Theme, useStore } from "../store";
@@ -18,7 +19,7 @@ import { OptionChips, OptionsMenu } from "./search/FindOptions";
 import { FormsToggle } from "./forms/FormsPanel";
 import { RedactToggle } from "./redact/RedactPanel";
 import { ModeSwitch } from "./Organize";
-import { ToolsMenu } from "./ToolsMenu";
+import { PinnedTools, ToolsButton } from "./AllTools";
 import { WindowControls } from "./WindowControls";
 
 const st = () => useStore.getState();
@@ -113,7 +114,8 @@ export function Toolbar({ doc }: { doc: DocState }) {
   return (
     <div className="toolbar">
       <ModeSwitch doc={doc} />
-      <ToolsMenu doc={doc} />
+      <ToolsButton doc={doc} />
+      <PinnedTools doc={doc} />
       <span className="sep" />
       {doc.organize ? (
         <>
@@ -139,7 +141,9 @@ export function Toolbar({ doc }: { doc: DocState }) {
 }
 
 function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => string }) {
-  const sidebar = useStore((s) => s.sidebar);
+  // the All tools panel covers the sidebar while it is open: nothing in it is "on" then
+  const covered = useToolPrefs((s) => s.panelOpen);
+  const sidebar = useStore((s) => (covered ? "none" : s.sidebar));
   const { id } = doc;
   const zoomValue = doc.zoomMode === "custom" ? String(Math.round(doc.zoom * 100) / 100) : doc.zoomMode;
   const presets = ZOOM_STEPS.filter((z) => z >= 0.25 && z <= 8);

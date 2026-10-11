@@ -31,6 +31,7 @@ import { useCombine } from "./lib/combineStore";
 import { startHistoryEvents, useHistory } from "./lib/historyStore";
 import { guardWindowClose } from "./lib/edit";
 import { usePagesDark } from "./lib/usePagesDark";
+import { useToolPrefs } from "./lib/toolPrefs";
 import { Organize } from "./components/Organize";
 import { useActiveDoc, useStore } from "./store";
 
@@ -57,6 +58,14 @@ export default function App() {
     if (pagesDark) document.documentElement.dataset.pages = "dark";
     else document.documentElement.removeAttribute("data-pages");
   }, [pagesDark]);
+
+  // The All tools panel belongs to the reader: Home, a comparison and Organize leave it closed, so coming
+  // back neither shows it unasked nor moves focus into it.
+  const noDoc = doc == null;
+  const organizing = doc?.organize ?? false;
+  useEffect(() => {
+    if (noDoc || showCompare || organizing) useToolPrefs.getState().setPanel(false);
+  }, [noDoc, showCompare, organizing]);
 
   useEffect(() => startHistoryEvents(), []);
   useEffect(() => wireCommentRail(), []);

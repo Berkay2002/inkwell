@@ -258,73 +258,23 @@ await ev(`[...document.querySelectorAll(".ink-menu button")].find((b) => /Follow
 await sleep(300);
 check("right-click menu sets follow", (await ev(`${S}.getState().pageDark`)) === "follow", await ev(`${S}.getState().pageDark`));
 
-// ---- Tools menu: beside the mode pill, grouped, filterable -------------------------------------------
+// ---- Tools button: beside the mode pill, opens the All tools panel (tools-panel-shots.mjs covers the panel) --
 await setPages("follow");
 const before = await ev(`(() => { const t = document.querySelector(".toolbar"); const all = [...t.children]; const pill = all.findIndex((e) => e.classList.contains("mode-pill")); const tools = all.findIndex((e) => e.matches('button[aria-label="Tools"]')); const sep = all.findIndex((e, i) => i > tools && e.classList.contains("sep")); return { pill, tools, sep, rightTools: !!t.querySelector(".tb-cluster > button[aria-label='Tools']") } })()`);
 report.toolsPlacement = before;
 check("Tools sits right after Read | Edit | Organize, not in the right-hand cluster", before.tools === before.pill + 1 && !before.rightTools, before);
 await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
-await until(`document.querySelector(".tools-menu .tools-filter")`, "the Tools menu");
-const menu1 = await ev(`({ heads: [...document.querySelectorAll(".tools-head")].map((e) => e.textContent), items: [...document.querySelectorAll('.tools-menu [role="option"]')].map((e) => e.textContent.trim()), focus: document.activeElement.className })`);
-report.toolsMenu = menu1;
-const want = ["Compress file…", "Recognize text…", "Header & footer…", "Watermark…", "Background…", "Bates numbering…", "Protect with a password…", "Security…", "Compare files…", "Check accessibility…", "Export…", "Create PDF…"];
-check("every Tools item is still there", want.every((w) => menu1.items.includes(w)), menu1.items);
-check("items sit under Optimize, Page marks, Protect, Convert & create headers", ["Optimize", "Page marks", "Protect", "Convert & create"].every((h) => menu1.heads.includes(h)), menu1.heads);
-check("the filter box has focus on open", /tools-filter/.test(menu1.focus), menu1.focus);
+await until(`document.querySelector("nav.tools-panel")`, "the All tools panel");
+const panel1 = await ev(`({ expanded: document.querySelector('button[aria-label="Tools"]').getAttribute("aria-expanded"), rows: document.querySelectorAll(".tools-panel .tool-main").length, focus: document.activeElement.getAttribute("aria-label") })`);
+report.toolsPanel = panel1;
+check("the Tools button opens the panel and focuses its search box", panel1.expanded === "true" && panel1.rows >= 12 && panel1.focus === "Find a tool", panel1);
 await clip("tools-button-light.png", ".toolbar");
-await shot("tools-menu-light.png", 300);
-// typing narrows the list
-await ev(`(() => { const i = document.querySelector(".tools-filter"); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(i, "mark"); i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
-await sleep(250);
-const narrowed = await ev(`({ heads: [...document.querySelectorAll(".tools-head")].map((e) => e.textContent), items: [...document.querySelectorAll('.tools-menu [role="option"]')].map((e) => e.textContent.trim()) })`);
-report.toolsFiltered = narrowed;
-check("typing 'mark' leaves the page marks", narrowed.heads.length === 1 && narrowed.heads[0] === "Page marks" && narrowed.items.length === 4, narrowed);
-// keyboard: focus stays in the box (combobox + listbox); the arrows move the highlighted option, Escape closes
-const sel0 = await ev(`(() => { const i = document.querySelector(".tools-filter"); const o = document.getElementById(i.getAttribute("aria-activedescendant")); return { role: i.getAttribute("role"), expanded: i.getAttribute("aria-expanded"), list: document.getElementById(i.getAttribute("aria-controls"))?.getAttribute("role"), text: o?.textContent.trim(), selected: o?.getAttribute("aria-selected") } })()`);
-report.toolsCombobox = sel0;
-check("the filter is a combobox on a listbox, first match highlighted", sel0.role === "combobox" && sel0.expanded === "true" && sel0.list === "listbox" && sel0.selected === "true" && sel0.text === "Header & footer…", sel0);
-await ev(`document.querySelector(".tools-filter").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }))`);
-const sel1 = await ev(`(() => { const i = document.querySelector(".tools-filter"); return { text: document.getElementById(i.getAttribute("aria-activedescendant"))?.textContent.trim(), focus: document.activeElement === i } })()`);
-check("arrow down moves the highlight, focus stays in the box", sel1.text === "Watermark…" && sel1.focus, sel1);
-await ev(`document.querySelector(".tools-filter").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }))`);
-check("arrow up moves it back", (await ev(`(() => { const i = document.querySelector(".tools-filter"); return document.getElementById(i.getAttribute("aria-activedescendant"))?.textContent.trim() })()`)) === "Header & footer…", null);
 await ev(`document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
 await sleep(200);
-check("escape closes the menu", (await ev(`!!document.querySelector(".tools-menu")`)) === false, null);
-// Tab closes the menu and moves focus on from the Tools button
-await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
-await until(`document.querySelector(".tools-menu")`, "the menu for Tab");
-await ev(`document.querySelector(".tools-filter").dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }))`);
-await sleep(200);
-const afterTab = await ev(`({ open: !!document.querySelector(".tools-menu"), onTools: document.activeElement?.getAttribute("aria-label") })`);
-check("Tab closes the menu (focus goes back to Tools)", !afterTab.open && afterTab.onTools === "Tools", afterTab);
-// moving focus elsewhere closes it too
-await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
-await until(`document.querySelector(".tools-menu")`, "the menu for focus-out");
-await ev(`document.querySelector("#page-input").focus()`);
-await sleep(200);
-check("focus leaving the menu closes it", (await ev(`!!document.querySelector(".tools-menu")`)) === false, null);
-// an item opens its sheet
-await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
-await until(`document.querySelector(".tools-menu")`, "the menu again");
-await ev(`[...document.querySelectorAll('.tools-menu [role="option"]')].find((b) => /Watermark/.test(b.textContent)).click()`);
-await sleep(700);
-check("an item runs and closes the menu", (await ev(`!!document.querySelector(".tools-menu")`)) === false, null);
-const sheetOpen = await ev(`window.__inkwell.useMarks.getState().kind ?? window.__inkwell.useMarks.getState().sheet ?? null`);
-report.sheetAfterItem = sheetOpen == null ? null : "open";
-await ev(`window.__inkwell.useMarks.getState().close()`);
-await sleep(300);
+check("escape closes the panel", (await ev(`!!document.querySelector("nav.tools-panel")`)) === false, null);
 await ev(`${S}.getState().setTheme("dark")`);
 await sleep(400);
 await clip("tools-button-dark.png", ".toolbar");
-await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
-await until(`document.querySelector(".tools-menu")`, "the menu in the dark app");
-await shot("tools-menu-dark.png", 300);
-await ev(`document.querySelector(".tools-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
-await ev(`document.querySelector(".tools-filter")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
-await sleep(200);
-await ev(`window.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))`);
-await sleep(200);
 await setTheme("light");
 await sleep(300);
 

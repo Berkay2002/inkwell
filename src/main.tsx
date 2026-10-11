@@ -19,13 +19,14 @@ import { useSheets } from "./lib/organizePlus";
 import { usePrint } from "./lib/printStore";
 import { useProtect } from "./lib/protectStore";
 import { useTextEdit } from "./lib/textEdit";
+import { useToolPrefs } from "./lib/toolPrefs";
 import { useTools } from "./lib/toolsStore";
 import { redactApi, useRedact } from "./lib/redact";
 import { useStore } from "./store";
 import "./styles.css";
 
 // Handle for automated checks (benchmarks, screenshots); harmless in normal use.
-(window as unknown as { __inkwell: unknown }).__inkwell = { useStore, useAi, useHistory, useTools, useConvert, useRedact, redactApi, useAnnot, useForms, useFind, useSearch, usePrint, useProtect, useMarks, useTextEdit, useA11y, useCombine, useSheets, edits, api, useNav };
+(window as unknown as { __inkwell: unknown }).__inkwell = { useStore, useAi, useHistory, useTools, useConvert, useRedact, redactApi, useAnnot, useForms, useFind, useSearch, usePrint, useProtect, useMarks, useTextEdit, useA11y, useCombine, useSheets, useToolPrefs, edits, api, useNav };
 trackReadingPosition(useStore);
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
