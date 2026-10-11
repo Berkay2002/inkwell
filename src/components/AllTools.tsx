@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { commands, prettyKeys } from "../lib/commands";
 import { useToolPrefs } from "../lib/toolPrefs";
 import { toolItems, runTool } from "../lib/toolItems";
@@ -105,11 +105,19 @@ export function AllToolsPanel({ doc }: { doc: DocState }) {
     return () => clearTimeout(timer.current);
   }, []);
 
+  // Whatever closes the panel (Esc, Ctrl+B, a palette command, a picked tool) while focus is inside it: the
+  // focus goes back to the Tools button instead of the page body. A rail or dialog that takes the focus
+  // after this commit still wins. The layout cleanup runs before the panel's DOM is removed.
+  useLayoutEffect(() => {
+    const el = root.current;
+    return () => {
+      if (el?.contains(document.activeElement)) document.querySelector<HTMLElement>('button[aria-label="Tools"]')?.focus();
+    };
+  }, []);
+
   const close = () => {
     clearTimeout(timer.current);
     useToolPrefs.getState().setPanel(false);
-    // back to the button that opened it
-    requestAnimationFrame(() => document.querySelector<HTMLElement>('button[aria-label="Tools"]')?.focus());
   };
   const run = (it: ToolItem) => {
     clearTimeout(timer.current);
