@@ -231,13 +231,21 @@ pub fn list_picked(paths: Vec<PathBuf>) -> Listing {
     out
 }
 
-/// The searches that are running, so one can be cancelled by id, and the files with hits of the latest one, so a
-/// result can be opened (its open token is issued then, not for every file in the list).
+/// The searches that are running, so one can be cancelled by id, and the files with hits of each window's latest
+/// one, so a result can be opened (its open token is issued then, not for every file in the list). A window has
+/// one search at a time, and can only reach its own.
 #[derive(Default)]
 pub struct FolderSearches {
     next: AtomicU64,
-    live: Mutex<HashMap<u64, Arc<AtomicBool>>>,
-    found: Mutex<(u64, HashMap<u32, PathBuf>)>,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    /// Searches that have not ended: the window they belong to and their cancel flag.
+    live: HashMap<u64, (String, Arc<AtomicBool>)>,
+    /// Per window: its latest search and the files of it that had hits (index to path).
+    found: HashMap<String, (u64, HashMap<u32, PathBuf>)>,
 }
 
 struct Run {
@@ -257,28 +265,36 @@ struct Run {
     capped: bool,
     sink: Arc<dyn Fn(FilesEvent) + Send + Sync>,
     owner: Arc<FolderSearches>,
+    window: String,
 }
 
 impl FolderSearches {
-    /// A new search id, cancellable from now on (before the files are listed). Forgets the previous search's files.
-    pub fn begin(&self) -> (u64, Arc<AtomicBool>) {
+    /// A new search id for `window`, cancellable from now on (before the files are listed). The window's previous
+    /// search is cancelled and its files forgotten.
+    pub fn begin(&self, window: &str) -> (u64, Arc<AtomicBool>) {
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         let cancel = Arc::new(AtomicBool::new(false));
-        self.live.lock().unwrap().insert(id, cancel.clone());
-        *self.found.lock().unwrap() = (id, HashMap::new());
+        let mut s = self.state.lock().unwrap();
+        let previous = s.found.get(window).map(|f| f.0);
+        if let Some((_, c)) = previous.and_then(|p| s.live.get(&p)) {
+            c.store(true, Ordering::SeqCst);
+        }
+        s.live.insert(id, (window.to_owned(), cancel.clone()));
+        s.found.insert(window.to_owned(), (id, HashMap::new()));
         (id, cancel)
     }
 
     /// `begin` and `run` in one step, for a list of files that is already known.
     pub fn start(
         self: &Arc<Self>,
+        window: &str,
         files: Vec<PathBuf>,
         capped: bool,
         query: &str,
         opts: SearchOpts,
         sink: Arc<dyn Fn(FilesEvent) + Send + Sync>,
     ) -> u64 {
-        let (id, cancel) = self.begin();
+        let (id, cancel) = self.begin(window);
         self.run(id, cancel, files, capped, 0, query, opts, sink);
         id
     }
@@ -299,11 +315,12 @@ impl FolderSearches {
         let total = files.len() as u32;
         let cancelled = cancel.load(Ordering::SeqCst);
         let Some(q) = Query::new(query, opts).filter(|_| total > 0 && !cancelled) else {
-            self.live.lock().unwrap().remove(&id);
+            self.state.lock().unwrap().live.remove(&id);
             sink(FilesEvent::Done { search: id, files: total, matched: 0, hits: 0, skipped: 0, cloud_only, cancelled, capped });
             return;
         };
         let threads = PARALLEL.min(total as usize);
+        let window = self.state.lock().unwrap().live.get(&id).map(|l| l.0.clone()).unwrap_or_default();
         let run = Arc::new(Run {
             id,
             q,
@@ -320,6 +337,7 @@ impl FolderSearches {
             capped,
             sink,
             owner: self.clone(),
+            window,
         });
         for k in 0..threads {
             let r = run.clone();
@@ -331,21 +349,32 @@ impl FolderSearches {
         }
     }
 
-    /// Ends search `id` between two pages (or in the middle of listing a folder); its `Done` event says it was
-    /// cancelled.
-    pub fn cancel(&self, id: u64) {
-        if let Some(c) = self.live.lock().unwrap().get(&id) {
-            c.store(true, Ordering::SeqCst);
+    /// Ends search `id` of `window` between two pages (or in the middle of listing a folder); its `Done` event
+    /// says it was cancelled. Another window's search is not touched.
+    pub fn cancel(&self, window: &str, id: u64) {
+        if let Some((w, c)) = self.state.lock().unwrap().live.get(&id) {
+            if w == window {
+                c.store(true, Ordering::SeqCst);
+            }
         }
     }
 
-    /// The path of file `index` of search `id`, if that search is the latest and listed the file.
-    pub fn path_of(&self, id: u64, index: u32) -> Option<PathBuf> {
-        let f = self.found.lock().unwrap();
-        if f.0 == id {
-            f.1.get(&index).cloned()
-        } else {
-            None
+    /// Notes that file `index` of search `id` had hits. Ignored unless `id` is still `window`'s latest search: a
+    /// cancelled search finishing its last file must not write into the next one's list.
+    pub fn record(&self, window: &str, id: u64, index: u32, path: PathBuf) {
+        if let Some((latest, files)) = self.state.lock().unwrap().found.get_mut(window) {
+            if *latest == id {
+                files.insert(index, path);
+            }
+        }
+    }
+
+    /// The path of file `index` of search `id`, if that search is `window`'s latest and listed the file.
+    pub fn path_of(&self, window: &str, id: u64, index: u32) -> Option<PathBuf> {
+        let s = self.state.lock().unwrap();
+        match s.found.get(window) {
+            Some((latest, files)) if *latest == id => files.get(&index).cloned(),
+            _ => None,
         }
     }
 }
@@ -364,7 +393,7 @@ fn be_polite() {
 fn leave(run: &Arc<Run>) {
     if run.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
         let cancelled = run.cancel.load(Ordering::SeqCst);
-        run.owner.live.lock().unwrap().remove(&run.id);
+        run.owner.state.lock().unwrap().live.remove(&run.id);
         (run.sink)(FilesEvent::Done {
             search: run.id,
             files: run.total,
@@ -419,7 +448,7 @@ fn worker(run: Arc<Run>) {
                     }
                     run.matched.fetch_add(1, Ordering::Relaxed);
                     run.hits.fetch_add(r.hits, Ordering::Relaxed);
-                    run.owner.found.lock().unwrap().1.insert(index, path.clone());
+                    run.owner.record(&run.window, run.id, index, path.clone());
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     (run.sink)(FilesEvent::File {
                         search: run.id,

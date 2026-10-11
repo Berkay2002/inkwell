@@ -334,12 +334,15 @@ fn the_engine_search_of_bookmarks_reports_the_page_they_go_to() {
 
 // ---- search across files -------------------------------------------------------------------------
 
+/// The window label the folder searches in these tests belong to.
+const WIN: &str = "main";
+
 /// Runs a folder search to its `Done` and returns every event.
 fn run_files(files: Vec<PathBuf>, query: &str, o: SearchOpts) -> Vec<FilesEvent> {
     let searches = Arc::new(FolderSearches::default());
     let (tx, rx) = mpsc::channel();
     let tx = std::sync::Mutex::new(tx);
-    searches.start(files, false, query, o, Arc::new(move |e| {
+    searches.start(WIN, files, false, query, o, Arc::new(move |e| {
         let _ = tx.lock().unwrap().send(e);
     }));
     let mut out = Vec::new();
@@ -453,7 +456,7 @@ fn cancel_stops_a_folder_search_between_pages() {
     let searches = Arc::new(FolderSearches::default());
     let (tx, rx) = mpsc::channel();
     let tx = std::sync::Mutex::new(tx);
-    let id = searches.start(files, false, "needle", opts(), Arc::new(move |e| {
+    let id = searches.start(WIN, files, false, "needle", opts(), Arc::new(move |e| {
         let _ = tx.lock().unwrap().send(e);
     }));
     // Wait for the first file, then cancel.
@@ -462,7 +465,7 @@ fn cancel_stops_a_folder_search_between_pages() {
             break;
         }
     }
-    searches.cancel(id);
+    searches.cancel(WIN, id);
     loop {
         match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
             FilesEvent::Done { cancelled, matched, files, .. } => {
@@ -638,7 +641,7 @@ fn an_in_document_search_finishes_while_a_long_folder_search_runs() {
     let searches = Arc::new(FolderSearches::default());
     let folder_done = Arc::new(AtomicBool::new(false));
     let fd = folder_done.clone();
-    let folder = searches.start(files, false, "needle", opts(), Arc::new(move |e| {
+    let folder = searches.start(WIN, files, false, "needle", opts(), Arc::new(move |e| {
         if matches!(e, FilesEvent::Done { .. }) {
             fd.store(true, Ordering::SeqCst);
         }
@@ -651,7 +654,7 @@ fn an_in_document_search_finishes_while_a_long_folder_search_runs() {
     assert_eq!((listed, hits), (2, 2));
     assert!(!folder_done.load(Ordering::SeqCst), "the folder search was already over ({took:?}): make it longer");
     assert!(took < Duration::from_secs(5), "took {took:?}");
-    searches.cancel(folder);
+    searches.cancel(WIN, folder);
 }
 
 #[test]
@@ -704,7 +707,7 @@ fn a_result_is_opened_through_its_search_and_only_the_latest_search_answers() {
     let searches = Arc::new(FolderSearches::default());
     let (tx, rx) = mpsc::channel();
     let tx = std::sync::Mutex::new(tx);
-    let first = searches.start(files.clone(), false, "notice", opts(), Arc::new(move |e| {
+    let first = searches.start(WIN, files.clone(), false, "notice", opts(), Arc::new(move |e| {
         let _ = tx.lock().unwrap().send(e);
     }));
     let mut found = Vec::new();
@@ -717,11 +720,60 @@ fn a_result_is_opened_through_its_search_and_only_the_latest_search_answers() {
     }
     assert!(!found.is_empty());
     for (index, path) in &found {
-        assert_eq!(searches.path_of(first, *index).unwrap().to_string_lossy(), *path);
+        assert_eq!(searches.path_of(WIN, first, *index).unwrap().to_string_lossy(), *path);
     }
-    assert!(searches.path_of(first, 999).is_none());
+    assert!(searches.path_of(WIN, first, 999).is_none());
     // A newer search forgets the older one's files.
-    let second = searches.start(files, false, "zzz-nothing", opts(), Arc::new(|_| {}));
-    assert!(searches.path_of(first, found[0].0).is_none());
-    assert!(searches.path_of(second, found[0].0).is_none());
+    let second = searches.start(WIN, files, false, "zzz-nothing", opts(), Arc::new(|_| {}));
+    assert!(searches.path_of(WIN, first, found[0].0).is_none());
+    assert!(searches.path_of(WIN, second, found[0].0).is_none());
+}
+
+#[test]
+fn a_result_is_only_reachable_from_the_window_that_searched() {
+    let d = tree("window");
+    let files = list_pdfs(&d, true, &AtomicBool::new(false)).files;
+    let searches = Arc::new(FolderSearches::default());
+    let (tx, rx) = mpsc::channel();
+    let tx = std::sync::Mutex::new(tx);
+    let id = searches.start(WIN, files, false, "notice", opts(), Arc::new(move |e| {
+        let _ = tx.lock().unwrap().send(e);
+    }));
+    let mut index = None;
+    loop {
+        match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+            FilesEvent::File { index: i, .. } => index = Some(i),
+            FilesEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+    let index = index.expect("a file with hits");
+    assert!(searches.path_of(WIN, id, index).is_some());
+    assert!(searches.path_of("other", id, index).is_none(), "another window cannot open it");
+    // ...nor cancel it.
+    let (second, flag) = searches.begin(WIN);
+    let (_third, other_flag) = searches.begin("other");
+    searches.cancel("other", second);
+    assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!other_flag.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn starting_a_search_ends_the_windows_previous_one_and_its_late_files_are_not_listed() {
+    let d = tree("supersede");
+    let files = list_pdfs(&d, true, &AtomicBool::new(false)).files;
+    let searches = Arc::new(FolderSearches::default());
+    let (first, first_flag) = searches.begin(WIN);
+    let (_elsewhere, elsewhere_flag) = searches.begin("other");
+    assert!(!first_flag.load(std::sync::atomic::Ordering::SeqCst));
+    let (second, second_flag) = searches.begin(WIN);
+    assert!(first_flag.load(std::sync::atomic::Ordering::SeqCst), "the window's previous search is cancelled");
+    assert!(!second_flag.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!elsewhere_flag.load(std::sync::atomic::Ordering::SeqCst), "another window's search keeps going");
+    // The old search finishing a file after the new one began must not write into the new one's list.
+    searches.record(WIN, first, 0, files[0].clone());
+    assert!(searches.path_of(WIN, second, 0).is_none());
+    assert!(searches.path_of(WIN, first, 0).is_none());
+    searches.record(WIN, second, 0, files[0].clone());
+    assert_eq!(searches.path_of(WIN, second, 0), Some(files[0].clone()));
 }

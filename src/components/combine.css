@@ -1,0 +1,317 @@
+/* The Combine files sheet: one centred sheet like Print, the outcome sentence beside the Combine button. */
+.scrim.cb-scrim {
+  align-items: center;
+  padding: 0;
+  z-index: 20;
+}
+.cb-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 94vw);
+  height: min(660px, 88vh);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+}
+.cb-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  height: 48px;
+  padding: 0 14px 0 18px;
+  border-bottom: 1px solid var(--border);
+}
+.cb-title {
+  font-weight: 600;
+}
+.cb-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--window);
+}
+.cb-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 1;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-2);
+}
+.cb-empty p {
+  margin: 0;
+  max-width: 42ch;
+}
+.cb-empty .btn {
+  margin-top: 8px;
+}
+.cb-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.cb-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 12px 14px 4px;
+  list-style: none;
+  overflow-y: auto;
+}
+.cb-row {
+  position: relative;
+  margin-bottom: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.cb-row.lifted {
+  opacity: 0.55;
+}
+.cb-row.left-out {
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
+}
+.cb-row.drop-before::before,
+.cb-row.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.cb-row.drop-before::before {
+  top: -6px;
+}
+.cb-row.drop-after::after {
+  bottom: -6px;
+}
+.cb-list.dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+.cb-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 4px;
+}
+.cb-grip {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 40px;
+  color: var(--text-2);
+  border-radius: 6px;
+  cursor: grab;
+  touch-action: none;
+}
+.cb-grip:hover {
+  background: var(--surface-2);
+}
+.cb-thumb {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 52px;
+  overflow: hidden;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.cb-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #fff;
+}
+.cb-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.cb-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cb-sub {
+  overflow: hidden;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cb-sub.bad,
+.cb-outcome.bad,
+.cb-outcome-sub.bad {
+  color: var(--danger);
+}
+.cb-range {
+  flex: none;
+  width: 150px;
+}
+.cb-range .tl-field {
+  width: 100%;
+  box-sizing: border-box;
+}
+.cb-pages {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  border-radius: 15px;
+}
+.cb-pages:hover:not(:disabled),
+.cb-pages.on {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.cb-pages:disabled {
+  opacity: 0.4;
+}
+.cb-pages svg {
+  transition: transform 0.12s;
+}
+.cb-pages.on svg {
+  transform: rotate(180deg);
+}
+.cb-expanded {
+  padding: 4px 14px 14px 40px;
+  border-top: 1px solid var(--border);
+}
+.cb-title-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 320px;
+  margin-top: 10px;
+}
+.cb-label {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.cb-hint {
+  margin: 8px 0;
+  font-size: 12.5px;
+}
+.cb-pagegrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(68px, 1fr));
+  gap: 10px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.cb-pg {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
+  opacity: 0.5;
+}
+.cb-pg.on {
+  opacity: 1;
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.cb-pg-img {
+  display: block;
+  width: 100%;
+  max-height: 96px;
+  background: #fff;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.cb-pg-img img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.cb-pg-num {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+.cb-pg-check {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-radius: 8px;
+}
+.cb-add {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+  padding: 6px 14px 12px;
+}
+.cb-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  flex: none;
+  padding: 10px 18px;
+  border-top: 1px solid var(--border);
+}
+.cb-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+.cb-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 12px 18px 14px;
+  border-top: 1px solid var(--border);
+}
+.cb-outcome {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.cb-outcome-sub {
+  font-size: 13px;
+  font-weight: 400;
+}
+.cb-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
