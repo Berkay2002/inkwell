@@ -124,6 +124,14 @@ export const infoKey = (doc: number, xref: number) => `${doc}:${xref}`;
 
 /** The latest click or stop: a click whose arming comes back after a newer one (or a stop) is dropped. */
 let clicks = 0;
+/** A click's arming is out: nothing is mounted for it yet. */
+let pending = false;
+
+/**
+ * True between a click and the route being armed for it. The player that was playing gets 404s then
+ * (the route serves the new asset only): its errors are not a failure and must not stop the click.
+ */
+export const clickPending = () => pending;
 
 export const useMedia = create<MediaState>((set, get) => ({
   docs: {},
@@ -155,21 +163,31 @@ export const useMedia = create<MediaState>((set, get) => ({
     if (!item.play) return;
     const want = { doc, xref: item.xref, asset: item.play };
     const mine = ++clicks;
+    pending = true;
     // the element is mounted once the route will serve it
     mediaApi.arm(doc, want.asset).then(
-      () => mine === clicks && set({ playing: want }),
-      // not in the newest listing (an edit took it away): the list refresh removes the badge
-      () => {},
+      () => {
+        if (mine !== clicks) return;
+        pending = false;
+        set({ playing: want });
+      },
+      () => {
+        // not in the newest listing (an edit took it away): the list refresh removes the badge
+        if (mine === clicks) pending = false;
+      },
     );
   },
   stop: () => {
     clicks++;
-    if (!get().playing) return;
+    // a click still arming has armed the route already: it is released like a player
+    const had = get().playing !== null || pending;
+    pending = false;
+    if (!had) return;
     set({ playing: null });
     void mediaApi.release().catch(() => {});
   },
   key: (key) => {
-    if (key !== "Escape" || !get().playing) return false;
+    if (key !== "Escape" || (!get().playing && !pending)) return false;
     get().stop();
     return true;
   },

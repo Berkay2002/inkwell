@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(() => Promise.resolve()) }));
 
 import { invoke } from "@tauri-apps/api/core";
-import { type MediaItem, badgeText, durationText, formatLabel, infoKey, mediaUrl, useMedia } from "./media";
+import { type MediaItem, badgeText, clickPending, durationText, formatLabel, infoKey, mediaUrl, useMedia } from "./media";
 
 const inv = vi.mocked(invoke);
 const TOKEN = "0123456789abcdef0123456789abcdef";
@@ -66,6 +66,34 @@ describe("media store", () => {
     useMedia.getState().play(1, item(12));
     await flush();
     expect(useMedia.getState().playing).toBeNull();
+  });
+
+  it("a click replacing a player is pending until the route is armed, and a stop then releases it", async () => {
+    await playNow(1, item(10));
+    expect(clickPending()).toBe(false);
+    let arm: () => void = () => {};
+    inv.mockImplementation((cmd) => (cmd === "media_play" ? new Promise<void>((r) => (arm = r)) : Promise.resolve()));
+    useMedia.getState().play(1, item(11));
+    // the first player's requests are refused from here: its error must be ignored (MediaLayer checks this)
+    expect(clickPending()).toBe(true);
+    expect(useMedia.getState().playing?.asset).toBe("10.0");
+    inv.mockClear();
+    useMedia.getState().stop();
+    expect(inv).toHaveBeenCalledWith("media_release");
+    expect(clickPending()).toBe(false);
+    arm();
+    await flush();
+    expect(useMedia.getState().playing).toBeNull();
+    // nothing playing, a click still arming: Esc takes it back and releases the route
+    inv.mockClear();
+    useMedia.getState().play(1, item(12));
+    expect(useMedia.getState().key("Escape")).toBe(true);
+    expect(inv).toHaveBeenCalledWith("media_release");
+    // an armed click is no longer pending
+    inv.mockImplementation(() => Promise.resolve());
+    await playNow(1, item(10));
+    expect(clickPending()).toBe(false);
+    expect(useMedia.getState().playing?.asset).toBe("10.0");
   });
 
   it("does not play an item that cannot play", async () => {

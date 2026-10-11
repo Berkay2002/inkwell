@@ -705,7 +705,7 @@ fn a_request_older_than_a_release_is_refused_and_a_decode_finished_after_one_is_
     // began before the release, waited on the gate: refused without decoding
     let began = c.epoch.load(Ordering::SeqCst);
     c.clear();
-    assert!(c.get_since(&eng, id, &play, began).is_err());
+    assert!(matches!(c.get_since(&eng, id, &play, began), Err(EngineError::Invalid(m)) if m == "released"));
     assert!(c.slot.lock().is_none());
 
     // a decode in flight: it holds the document's editor lock until the release has happened
@@ -730,6 +730,38 @@ fn a_request_older_than_a_release_is_refused_and_a_decode_finished_after_one_is_
         holder.join().unwrap();
         decode.join().unwrap()
     });
-    assert!(result.is_err(), "a decode that finished after the release is not served");
+    assert!(matches!(result, Err(EngineError::Invalid(ref m)) if m == "released"), "a decode that finished after the release is not served");
     assert!(c.slot.lock().is_none(), "nor kept");
+}
+
+#[test]
+fn a_spent_budget_cuts_a_name_tree_to_a_prefix_of_the_full_list() {
+    // K1 lists one empty leaf 40 times (repeats cost nothing), then L1; K2 follows: [a, x] in full
+    let kids: String = (0..40).map(|_| "13 0 R ").collect::<String>() + "14 0 R";
+    let objs = vec![
+        (10, b"<< /Type /Annot /Subtype /RichMedia /Rect [0 0 50 50] /RichMediaContent << /Assets 11 0 R >> >>".to_vec()),
+        (11, b"<< /Kids [12 0 R 15 0 R] >>".to_vec()),
+        (12, format!("<< /Kids [{kids}] >>").into_bytes()),
+        (13, b"<< /Names [] >>".to_vec()),
+        (14, b"<< /Names [(a.mp3) 16 0 R] >>".to_vec()),
+        (15, b"<< /Names [(x.mp3) 17 0 R] >>".to_vec()),
+        (16, spec("a.mp3", 24)),
+        (17, spec("x.mp3", 24)),
+        (24, stream("/Type /EmbeddedFile", &mp3())),
+    ];
+    let (eng, id, _) = open("prefix", pdf(&[10], &objs));
+    let names = |walk: usize| -> Vec<String> {
+        eng.read_custom(id, |d| {
+            let annot = d.new_indirect(10, 0)?.resolve()?.unwrap();
+            let (raws, ..) = collect(&annot, Kind::RichMedia, &mut Budget { walk, classify: usize::MAX });
+            Ok(raws.into_iter().map(|r| r.name).collect())
+        })
+        .unwrap()
+    };
+    let full = names(usize::MAX);
+    assert_eq!(full, ["a.mp3", "x.mp3"]);
+    for walk in 0..80 {
+        let cut = names(walk);
+        assert!(full.starts_with(&cut), "budget {walk}: {cut:?} is not a prefix of {full:?}");
+    }
 }

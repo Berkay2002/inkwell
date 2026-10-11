@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef } from "react";
 import { rectToScreen } from "../lib/annotLogic";
 import type { Rot, Size } from "../lib/layout";
-import { type MediaItem, badgeText, infoKey, mediaUrl, useMedia } from "../lib/media";
+import { type MediaItem, badgeText, clickPending, infoKey, mediaUrl, useMedia } from "../lib/media";
 import { useStore } from "../store";
 import { Icon } from "./Icons";
 import "./media.css";
@@ -132,6 +132,8 @@ function Player({ docId, token, item, box, asset }: { docId: number; token: stri
     onLoadedMetadata: () => el.current && useMedia.getState().setInfo(docId, item.xref, el.current.duration),
     onVolumeChange: () => el.current && useMedia.getState().setMuted(el.current.muted),
     onError: () => {
+      // a click on another item has armed the route for it: this player's requests are refused now
+      if (clickPending()) return;
       useMedia.getState().stop();
       useStore.getState().setUi({ error: `${item.title || a.name} could not be played` });
     },

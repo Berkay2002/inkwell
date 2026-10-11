@@ -374,11 +374,14 @@ fn from_spec(spec: &PdfObject, fallback: &str, declared: Option<String>, out: &m
 }
 
 /// The leaves of a name tree (name, value). A node is read once; the walk is bounded by `walk`.
+/// What is queued depends on the tree alone, never on what `walk` has left: running out only ends
+/// the walk, so what is found is a prefix of what an unspent budget finds.
 fn name_tree(root: PdfObject, cap: usize, walk: &mut Walk) -> Vec<(String, PdfObject)> {
     let mut out = Vec::new();
     let mut stack = vec![(root, 0usize)];
+    let mut nodes = 0usize;
     while let Some((n, depth)) = stack.pop() {
-        if out.len() >= cap || walk.left == 0 {
+        if out.len() >= cap || nodes >= MAX_TREE_NODES || walk.left == 0 {
             walk.cut |= walk.left == 0;
             break;
         }
@@ -386,6 +389,7 @@ fn name_tree(root: PdfObject, cap: usize, walk: &mut Walk) -> Vec<(String, PdfOb
             continue;
         }
         let Some(n) = dict_of(&n) else { continue };
+        nodes += 1;
         if let Some(names) = get(&n, "Names") {
             let len = names.len().unwrap_or(0);
             let mut i = 0;
@@ -400,8 +404,8 @@ fn name_tree(root: PdfObject, cap: usize, walk: &mut Walk) -> Vec<(String, PdfOb
         if depth < 8 {
             if let Some(kids) = get(&n, "Kids") {
                 let len = kids.len().unwrap_or(0).min(MAX_TREE_NODES);
-                // what is queued counts against the budget, or a wide node fans out without end
-                let room = walk.left.saturating_sub(stack.len());
+                // what is queued counts against the tree's own limit, or a wide node fans out without end
+                let room = MAX_TREE_NODES.saturating_sub(nodes + stack.len());
                 let kids: Vec<PdfObject> = (0..len).filter_map(|i| kids.get_array(i as i32).ok().flatten()).take(room).collect();
                 // popped in order
                 stack.extend(kids.into_iter().rev().map(|k| (k, depth + 1)));
