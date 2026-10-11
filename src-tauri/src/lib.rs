@@ -1,3 +1,4 @@
+pub mod a11y;
 pub mod ai;
 pub mod annot;
 pub mod compress;
@@ -762,6 +763,8 @@ pub fn run() {
             export_start,
             create_start,
             discard_scratch,
+            a11y::app::a11y_check,
+            a11y::app::a11y_fix,
             annot::app::annot_default_author,
             annot::app::annot_list,
             annot::app::annot_add,
