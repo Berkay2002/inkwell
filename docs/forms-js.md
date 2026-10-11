@@ -116,6 +116,9 @@ scripts, and the K/V scripts of check boxes and list boxes (only text and combo 
 Authoring (`forms_edit`, `forms_add`) redraws a field with the native formatter only; the `/F` script of a field being
 authored is shown after the next fill or listing.
 
+Known follow-up: in a file that sets `/NeedAppearances`, the first fill redraws every field and clears the flag, so that
+step also rewrites appearances of fields the user never touched.
+
 ## In the window
 - **Banner.** A file with scripts (document-level, or a field script that is not exactly one Acrobat call) shows "This form
   runs scripts." over the page with a **Run scripts** switch. The choice is per open file and in memory (default on, as in

@@ -1539,6 +1539,54 @@ fn typing_into_a_field_a_signature_covers_is_refused_with_a_message() {
 }
 
 #[test]
+fn a_docmdp_one_listed_after_a_fieldmdp_with_a_lock_still_locks_every_field() {
+    // What Acrobat writes when you certify with locked fields: a /Lock, and a /Reference of FieldMDP then DocMDP P=1.
+    let (eng, id, _) = script_form("js-signed-fieldmdp-docmdp", &["Src", "Locked", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+    script(&eng, id, "Src", "V", "this.getField(\"Other\").value = \"x\";");
+    fill(&eng, id, "Locked", text("keep")).unwrap();
+    eng.apply_custom(id, "Sign".into(), EditSource::User, false, |d| {
+        let entries = scan(d)?;
+        let e = entries.iter().find(|e| e.name == "Sig").expect("a signature field");
+        let mut f = e.field.clone();
+        let include = |d: &mupdf::pdf::PdfDocument| -> Result<PdfObject> {
+            let mut l = d.new_dict()?;
+            put_name(&mut l, "Action", "Include")?;
+            let mut a = d.new_array()?;
+            a.array_push(PdfObject::new_string("Src")?)?;
+            l.dict_put("Fields", a)?;
+            Ok(l)
+        };
+        let mut field_mdp = d.new_dict()?;
+        put_name(&mut field_mdp, "TransformMethod", "FieldMDP")?;
+        field_mdp.dict_put("TransformParams", include(d)?)?;
+        let mut params = d.new_dict()?;
+        params.dict_put("P", PdfObject::new_int(1)?)?;
+        let mut doc_mdp = d.new_dict()?;
+        put_name(&mut doc_mdp, "TransformMethod", "DocMDP")?;
+        doc_mdp.dict_put("TransformParams", params)?;
+        let mut refs = d.new_array()?;
+        refs.array_push(field_mdp)?;
+        refs.array_push(doc_mdp)?;
+        let mut v = d.new_dict()?;
+        put_name(&mut v, "Type", "Sig")?;
+        v.dict_put("Reference", refs)?;
+        f.dict_put("V", v)?;
+        f.dict_put("Lock", include(d)?)?;
+        Ok(vec![e.page])
+    })
+    .unwrap();
+    for name in ["Src", "Locked", "Other"] {
+        assert!(fill(&eng, id, name, text("y")).is_err(), "{name}: DocMDP 1 refuses typing");
+    }
+    assert_eq!(field(&eng, id, "Other").value, "", "no script ran to write it");
+    let before = steps(&eng, id);
+    reset_one(&eng, id, None, EditSource::User).unwrap();
+    assert_eq!(field(&eng, id, "Locked").value, "keep", "DocMDP 1 refuses the reset");
+    assert_eq!(steps(&eng, id), before);
+}
+
+#[test]
 fn a_certified_document_takes_scripted_values_but_not_other_properties() {
     for p in [2, 3] {
         let (eng, id, _) = script_form(&format!("js-certified-{p}"), &["Src", "Other"]);

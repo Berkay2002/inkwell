@@ -517,34 +517,35 @@ fn lock_of(l: &PdfObject) -> Lock {
     }
 }
 
-/// What the `/Reference` entries of a signature value lock: a FieldMDP method names its fields like `/Lock` does, a
-/// DocMDP with `/P 1` allows no change at all. An approval signature with neither locks nothing.
-fn reference_lock(v: &PdfObject) -> Option<Lock> {
-    let refs = get(v, "Reference")?;
-    for i in 0..refs.len().unwrap_or(0).min(16) as i32 {
-        let Some(r) = refs.get_array(i).ok().flatten() else { continue };
-        let Some(params) = get(&r, "TransformParams") else { continue };
-        match get(&r, "TransformMethod").as_ref().and_then(text).as_deref() {
-            Some("FieldMDP") => return Some(lock_of(&params)),
-            Some("DocMDP") if int_of(&params, "P") == Some(1) => return Some(Lock::All),
-            _ => {}
-        }
-    }
-    None
+/// Every lock the `/Reference` entries of a signature value carry: each FieldMDP method names its fields like `/Lock`
+/// does, a DocMDP with `/P 1` allows no change at all. An approval signature with neither locks nothing.
+fn reference_locks(v: &PdfObject) -> Vec<Lock> {
+    let Some(refs) = get(v, "Reference") else { return Vec::new() };
+    (0..refs.len().unwrap_or(0).min(16) as i32)
+        .filter_map(|i| {
+            let r = refs.get_array(i).ok().flatten()?;
+            let params = get(&r, "TransformParams")?;
+            match get(&r, "TransformMethod").as_ref().and_then(text).as_deref() {
+                Some("FieldMDP") => Some(lock_of(&params)),
+                Some("DocMDP") if int_of(&params, "P") == Some(1) => Some(Lock::All),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
-/// The locks of the signatures that carry a signature (`/V`): the field's `/Lock`, else what its `/Reference` says.
-/// A signature that names neither (a plain approval signature) leaves the form to be filled, as the specification has it.
+/// The locks of the signatures that carry a signature (`/V`): the field's `/Lock` and every one its `/Reference`
+/// entries carry (Acrobat writes both when it certifies with locked fields, so a DocMDP `/P 1` anywhere locks
+/// everything). A signature that names neither (a plain approval signature) leaves the form to be filled.
 pub(crate) fn locks_of(entries: &[Entry]) -> Vec<Lock> {
     per_field(entries)
         .into_iter()
         .filter(|e| e.kind == FieldKind::Signature)
-        .filter_map(|e| {
-            let v = geti(&e.field, "V").filter(|v| v.is_dict().unwrap_or(false))?;
-            match get(&e.field, "Lock").or_else(|| get(&e.obj, "Lock")) {
-                Some(l) => Some(lock_of(&l)),
-                None => reference_lock(&v),
-            }
+        .flat_map(|e| {
+            let Some(v) = geti(&e.field, "V").filter(|v| v.is_dict().unwrap_or(false)) else { return Vec::new() };
+            let mut locks = reference_locks(&v);
+            locks.extend(get(&e.field, "Lock").or_else(|| get(&e.obj, "Lock")).map(|l| lock_of(&l)));
+            locks
         })
         .collect()
 }
