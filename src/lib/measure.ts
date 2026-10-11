@@ -198,7 +198,7 @@ export const useMeasure = create<MeasureStore>((set, get) => {
       const d = useStore.getState().docs[doc];
       if (!d) return;
       try {
-        const to = await pickSave(`${stem(d.name)} measurements.csv`, { doc }, "any");
+        const to = await pickSave(`${stem(d.name)} measurements.csv`, { doc }, "csv");
         if (!to) return;
         const path = await measureApi.exportCsv(doc, to.token);
         patch(doc, { exported: path, error: null });

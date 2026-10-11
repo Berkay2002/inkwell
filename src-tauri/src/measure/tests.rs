@@ -1024,3 +1024,15 @@ fn csv_has_value_and_unit_apart_and_is_safe_in_a_spreadsheet() {
     assert_eq!(lines[2], "1,area,100,sq ft,100.00 sq ft,1 in = 10 ft,\"'=HYPERLINK(\"\"x\"\"),\"\"Bo\"\"\"");
     assert_eq!(csv_of(&[]), "\u{feff}Page,Type,Value,Unit,Label,Scale,Author\r\n");
 }
+
+#[test]
+fn an_export_replaces_a_file_the_user_confirmed_over() {
+    // The save dialog lets the user pick an existing file; the write goes through a temporary file and a rename that
+    // replaces the destination (MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows), never a failure.
+    let to = dir("overwrite").join("m.csv");
+    std::fs::write(&to, "old,contents that are longer than the new ones\r\n").unwrap();
+    crate::organize::app::write_plain(&to, csv_of(&[]).as_bytes()).unwrap();
+    assert_eq!(std::fs::read_to_string(&to).unwrap(), csv_of(&[]));
+    let left: Vec<_> = std::fs::read_dir(to.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left.len(), 1, "no temporary file is left behind: {left:?}");
+}

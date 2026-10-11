@@ -83,7 +83,7 @@ describe("measure store", () => {
     );
     useMeasure.getState().startCalib(1, { page: 0, a: [0, 0], b: [144, 0] });
     expect(await useMeasure.getState().finishCalib(1, 20, "ft")).toBe(true);
-    expect(calls("measure_scale_set")[0][1]).toEqual({ doc: 1, page: 0, scale: { paper: 2, paperUnit: "in", real: 20, realUnit: "ft" } });
+    expect(calls("measure_scale_set")[0][1]).toEqual({ doc: 1, page: 0, scale: { paper: 1, paperUnit: "in", real: 10, realUnit: "ft" } });
     expect(useMeasure.getState().get(1).calib).toBeNull();
     expect(useMeasure.getState().get(1).scales[0].label).toBe("2 in = 20 ft");
     // a bad length leaves the line waiting
@@ -111,7 +111,7 @@ describe("measure store", () => {
     vi.mocked(api.pickSave).mockResolvedValueOnce({ token: "tok", path: "C:\\out\\plan measurements.csv" });
     invoke.mockResolvedValue("C:\\out\\plan measurements.csv");
     await useMeasure.getState().exportCsv(1);
-    expect(api.pickSave).toHaveBeenLastCalledWith("plan measurements.csv", { doc: 1 }, "any");
+    expect(api.pickSave).toHaveBeenLastCalledWith("plan measurements.csv", { doc: 1 }, "csv");
     expect(calls("measure_export_csv")[0][1]).toEqual({ doc: 1, to: "tok" });
     expect(useMeasure.getState().get(1).exported).toBe("C:\\out\\plan measurements.csv");
   });

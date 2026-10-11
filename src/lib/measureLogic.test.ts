@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  type Measure, type Scale, UNSCALED, calibrate, constrain45, inUnit, numText, parseScale, parseUnit, pathLength,
+  type Measure, type Scale, UNSCALED, calibrate, clickAt, latestOnly, constrain45, inUnit, numText, parseScale, parseUnit, pathLength,
   place, polygonArea, quantityOf, realPerPt, scaleLabel, totals, trimNum,
 } from "./measureLogic";
 
@@ -91,11 +91,36 @@ describe("placing a point", () => {
   });
 });
 
+describe("Shift and stale snap answers", () => {
+  it("a click with Shift is constrained even when the hover holds an older snap", () => {
+    const stale = { at: [50, 50] as [number, number], snap: "endpoint" as const };
+    const r = clickAt(stale, [100, 8], [0, 0], true);
+    expect(r.snap).toBeNull();
+    close(r.at[1], 0);
+    expect(clickAt(stale, [100, 8], [0, 0], false)).toBe(stale);
+    expect(clickAt(null, [3, 4], null, false)).toEqual({ at: [3, 4], snap: null });
+    // no last point: Shift has nothing to hold to
+    expect(clickAt(stale, [100, 8], null, true)).toBe(stale);
+  });
+  it("only the newest request's answer counts", () => {
+    const g = latestOnly();
+    const a = g.start();
+    const b = g.start();
+    expect(g.current(a)).toBe(false);
+    expect(g.current(b)).toBe(true);
+    g.cancel(); // the pointer left, Shift went down, the tool changed
+    expect(g.current(b)).toBe(false);
+  });
+});
+
 describe("calibrating and totals", () => {
   it("makes the scale from a printed dimension", () => {
     // 144 pt (2 in) drawn over a dimension that reads 20 ft
     const s = calibrate([0, 0], [144, 0], 20, "ft")!;
-    expect(s).toEqual({ paper: 2, paperUnit: "in", real: 20, realUnit: "ft" });
+    expect(s).toEqual({ paper: 1, paperUnit: "in", real: 10, realUnit: "ft" });
+    expect(scaleLabel(s)).toBe("1 in = 10 ft");
+    // an awkward length reads as 1 in = n, never "2.345679 in = 10 ft"
+    expect(scaleLabel(calibrate([0, 0], [168.888, 0], 10, "ft")!)).toBe("1 in = 4.26318 ft");
     expect(quantityOf("distance", [[0, 0], [72, 0]], s).text).toBe("10.00 ft");
     expect(calibrate([5, 5], [5, 5], 20, "ft")).toBeNull();
     expect(calibrate([0, 0], [10, 0], 0, "ft")).toBeNull();

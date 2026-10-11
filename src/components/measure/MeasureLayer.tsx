@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { scaleOf, useMeasure } from "../../lib/measure";
 import {
-  type Measure, type MeasureKind, type Pt, type SnapKind, MIN_POINTS, numText, place, quantityOf, UNSCALED,
+  type Hover, type Measure, type MeasureKind, type Pt, MIN_POINTS, clickAt, latestOnly, numText, place, quantityOf, UNSCALED,
 } from "../../lib/measureLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 
@@ -18,8 +18,7 @@ const EMPTY: Measure[] = [];
 const ms = () => useMeasure.getState();
 /** Pointer reach of a snap, in screen px (the engine takes it in points: divided by the zoom). */
 const REACH = 9;
-const SNAP_NAME: Record<SnapKind | "close", string> = { endpoint: "End point", midpoint: "Midpoint", intersection: "Intersection", line: "On line", close: "Close" };
-type Hover = { at: Pt; snap: SnapKind | "close" | null };
+const SNAP_NAME: Record<NonNullable<Hover["snap"]>, string> = { endpoint: "End point", midpoint: "Midpoint", intersection: "Intersection", line: "On line", close: "Close" };
 
 /** Measure mode's layer on one page: drawing capture, live label, snap marker, and the hit lines of what is measured. */
 export const MeasureLayer = memo(function MeasureLayer(p: Props) {
@@ -48,8 +47,13 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     if (!hasScale) void ms().ensureScale(docId, page);
   }, [docId, page, hasScale]);
 
+  // The engine answers snaps one at a time while the pointer keeps moving: an answer counts only if nothing has
+  // happened since it was asked (a move, Shift, the pointer leaving, a tool change).
+  const asked = useRef(latestOnly()).current;
+
   // A tool change abandons what is half drawn.
   useEffect(() => {
+    asked.cancel();
     setPts([]);
     setHover(null);
     hoverRef.current = null;
@@ -70,7 +74,6 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
       if (typing(e)) return;
       if (e.key === "Escape") {
         setPts([]);
-        e.stopPropagation();
       } else if (e.key === "Enter") finish(pts);
       else if (e.key === "Backspace") {
         e.preventDefault();
@@ -88,9 +91,8 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     return [Math.min(Math.max(q.x, 0), rawSize[0]), Math.min(Math.max(q.y, 0), rawSize[1])];
   };
 
-  // The engine answers one snap at a time; the pointer keeps moving, so only the newest request's answer is used.
   const busy = useRef(false);
-  const want = useRef<{ raw: Pt; c: ReturnType<typeof context> } | null>(null);
+  const want = useRef<{ raw: Pt; c: ReturnType<typeof context>; t: number } | null>(null);
   const context = () => {
     const last = pts.length ? pts[pts.length - 1] : null;
     const close = tool === "area" && pts.length >= 3 ? pts[0] : null;
@@ -100,11 +102,12 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     if (!kind) return;
     const raw = toPage(e);
     const c = context();
+    const t = asked.start();
     const h = place(raw, c.last, e.shiftKey, null, c.close, c.radius);
     hoverRef.current = h;
     setHover(h);
     if (e.shiftKey || h.snap === "close") return void (want.current = null);
-    want.current = { raw, c };
+    want.current = { raw, c, t };
     if (busy.current) return;
     const pump = () => {
       const w = want.current;
@@ -116,6 +119,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
         .then((hit) => {
           busy.current = false;
           if (want.current) return pump(); // the pointer moved on: ask for where it is now
+          if (!asked.current(w.t)) return; // something happened since (Shift, leaving, a new tool)
           const next = place(w.raw, w.c.last, false, hit, w.c.close, w.c.radius);
           hoverRef.current = next;
           setHover(next);
@@ -123,12 +127,17 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     };
     pump();
   };
+  const leave = () => {
+    asked.cancel();
+    want.current = null;
+    hoverRef.current = null;
+    setHover(null);
+  };
   const down = (e: React.PointerEvent) => {
     if (!kind || e.button !== 0) return;
-    const at = hoverRef.current?.at ?? place(toPage(e), pts.length ? pts[pts.length - 1] : null, e.shiftKey, null, null, 0).at;
-    const closing = hoverRef.current?.snap === "close";
+    const { at, snap } = clickAt(hoverRef.current, toPage(e), pts.length ? pts[pts.length - 1] : null, e.shiftKey);
     if (kind === "distance") return pts.length === 0 ? setPts([at]) : finish([pts[0], at]);
-    if (closing) return finish(pts);
+    if (snap === "close") return finish(pts);
     setPts([...pts, at]);
   };
 
@@ -155,10 +164,11 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
             const on = selected?.xref === m.xref;
             const Shape = m.kind === "area" ? "polygon" : "polyline";
             return (
+              <g key={m.xref}>
+              {on && <Shape points={path(m.points)} className={`ms-sel${m.kind === "area" ? " area" : ""}`} />}
               <Shape
-                key={m.xref}
                 points={path(m.points)}
-                className={`ms-hit${on ? " on" : ""}${m.kind === "area" ? " area" : ""}`}
+                className="ms-hit"
                 style={{ pointerEvents: tool === "select" ? "stroke" : "none" }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
@@ -167,6 +177,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
               >
                 <title>{`${m.contents || m.quantity.text} (${m.kind})`}</title>
               </Shape>
+              </g>
             );
           })}
           {calib && <line className="ms-calib" x1={calib.a[0]} y1={calib.a[1]} x2={calib.b[0]} y2={calib.b[1]} />}
@@ -200,7 +211,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
           </div>
         )}
       </div>
-      {kind && !calib && <div className="an-capture ms-capture" onPointerDown={down} onPointerMove={move} onPointerLeave={() => setHover(null)} onDoubleClick={() => finish(pts)} />}
+      {kind && !calib && <div className="an-capture ms-capture" onPointerDown={down} onPointerMove={move} onPointerLeave={leave} onDoubleClick={() => finish(pts)} />}
     </>
   );
 }

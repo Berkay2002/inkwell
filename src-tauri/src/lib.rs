@@ -78,6 +78,7 @@ enum SaveKind {
     Html,
     Xhtml,
     Word,
+    Csv,
     /// No filter: print-to-file output whose format the printer driver decides.
     Any,
 }
@@ -144,6 +145,7 @@ async fn pick_save(
             SaveKind::Html => d.add_filter("HTML", &["html", "htm"]),
             SaveKind::Xhtml => d.add_filter("XHTML", &["xhtml"]),
             SaveKind::Word => d.add_filter("Word document", &["docx"]),
+            SaveKind::Csv => d.add_filter("CSV (spreadsheet)", &["csv"]),
             SaveKind::Any => d,
         };
         if let Some(dir) = near.as_deref().and_then(|p| std::path::Path::new(p).parent()) {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { scaleOf, type MeasureTool, useMeasure } from "../../lib/measure";
 import { type Scale, type Snaps, type Unit, UNITS, inUnit, numText, parseScale, scaleLabel } from "../../lib/measureLogic";
-import type { DocState } from "../../store";
+import { type DocState, useStore } from "../../store";
 import { Icon, type IconName } from "../Icons";
 import "./measure.css";
 
@@ -33,6 +33,8 @@ export function MeasureBar({ doc }: { doc: DocState }) {
   const ps = d?.scales[page];
   const scale = scaleOf(d, page);
   const [edit, setEdit] = useState(false);
+  // The find bar (Ctrl+F) sits at the same top edge: the measure bar steps down under it while it is open.
+  const finding = useStore((s) => s.searchOpen);
 
   useEffect(() => {
     if (open) void ms().ensureScale(doc.id, page);
@@ -42,7 +44,7 @@ export function MeasureBar({ doc }: { doc: DocState }) {
   if (!open) return null;
   const calib = d?.calib ?? null;
   return (
-    <div className="ms-bar-wrap" onMouseDown={(e) => e.target instanceof HTMLSelectElement || e.target instanceof HTMLInputElement || e.preventDefault()}>
+    <div className={finding ? "ms-bar-wrap below-find" : "ms-bar-wrap"} onMouseDown={(e) => e.target instanceof HTMLSelectElement || e.target instanceof HTMLInputElement || e.preventDefault()}>
       {calib ? (
         <CalibForm doc={doc.id} unit={scale.realUnit} lengthIn={Math.hypot(calib.b[0] - calib.a[0], calib.b[1] - calib.a[1]) / 72} />
       ) : (

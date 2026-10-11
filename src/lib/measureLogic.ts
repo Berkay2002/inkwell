@@ -178,11 +178,36 @@ export function place(raw: Pt, last: Pt | null, shift: boolean, hit: SnapHit | n
   return { at: raw, snap: null };
 }
 
-/** The scale that makes the line from `a` to `b` on the page `real` of `unit` long (calibrating from a printed dimension). */
+/** A point as the pointer left it: where it lands and which snap (or closing) put it there. */
+export interface Hover {
+  at: Pt;
+  snap: SnapKind | "close" | null;
+}
+
+/**
+ * The point a click places. Shift constrains from the last point whatever the hover says: the hover may hold a snap
+ * that was answered before Shift went down.
+ */
+export function clickAt(hover: Hover | null, raw: Pt, last: Pt | null, shift: boolean): Hover {
+  if (shift && last) return { at: constrain45(last, raw), snap: null };
+  return hover ?? { at: raw, snap: null };
+}
+
+/** Stamps requests so that only the newest answer is used: `start()` for each request, `cancel()` when the pointer moves on. */
+export function latestOnly() {
+  let n = 0;
+  return {
+    start: () => ++n,
+    cancel: () => void ++n,
+    current: (t: number) => t === n,
+  };
+}
+
+/** The scale that makes the line from `a` to `b` on the page `real` of `unit` long, written "1 in = n unit". */
 export function calibrate(a: Pt, b: Pt, real: number, unit: Unit): Scale | null {
   const pt = Math.hypot(b[0] - a[0], b[1] - a[1]);
   if (!(pt > 0) || !Number.isFinite(real) || real <= 0) return null;
-  return { paper: pt / 72, paperUnit: "in", real, realUnit: unit };
+  return { paper: 1, paperUnit: "in", real: (real * 72) / pt, realUnit: unit };
 }
 
 export interface Total {

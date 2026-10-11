@@ -90,7 +90,7 @@ export interface FileRef {
 /** Open dialog (run by Rust). */
 export const pickOpen = (multiple: boolean, title?: "locate" | "compare" | "search") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
 /** What a save dialog filters for; PDF unless told otherwise. */
-export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "any";
+export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "csv" | "any";
 /** Save dialog (run by Rust) in the folder of document `doc` or of open token `near`, with file name `name`. */
 export const pickSave = (name: string, at: { doc?: number; near?: string } = {}, kind?: SaveKind) =>
   invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null, kind: kind ?? null });

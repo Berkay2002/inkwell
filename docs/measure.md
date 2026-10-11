@@ -102,7 +102,7 @@ Comments does (opening one closes the other) and shows a floating bar over the p
 - **Bar:** Select, Distance, Perimeter, Area; the scale chip ("1 in = 10 ft", the page's `/VP` scale when it has one;
   click to type another, or "Calibrate from a known length"); a units menu (the same ratio in another unit: 1 in = 10 ft
   is 1 in = 3.048 m; this sets the page's scale, so it is an undo step and writes a `/VP`, replacing the `/D` and `/A`
-  formats of a page that came from Acrobat with ours); snap toggles Ends / Mid / Cross / Path; Done.
+  formats of a page that came from Acrobat with ours); snap toggles Ends / Mid / Cross / Path; Done. The bar steps down under the find bar (Ctrl+F) while that is open.
 - **Drawing:** distance is click, click. Perimeter and area take a click per corner and finish with a double-click or
   Enter; Backspace takes the last corner back and Esc drops the whole thing. A click on the first corner of an area
   (shown as a filled marker) closes it. Shift holds the line to 45 degrees from the last corner and turns snapping off.
@@ -115,7 +115,7 @@ Comments does (opening one closes the other) and shows a floating bar over the p
 - **Rail:** the selected measurement, or the last value made; the cumulative value per kind and unit (never summed across
   units); the list by page (click to jump to it); Export to CSV.
 - **Calibrate:** pick it from the scale chip, draw over a dimension printed on the drawing, type its real length and
-  unit: the page scale becomes "(line length in inches) in = (length) unit".
+  unit: the page scale becomes "1 in = n unit" (n = real length x 72 / the line's length in points).
 - **Shortcuts taken:** the live label is worked out in the UI from the page's scale (it does not apply a file's own `/D`
   or `/A` multipliers or a detail viewport under the pointer: the label written by the engine is the exact one). The
   crossings are found among the 64 segments nearest the pointer, and curves cross as their 12 pieces.
