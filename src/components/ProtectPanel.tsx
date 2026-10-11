@@ -1,4 +1,5 @@
 import { useAi } from "../lib/aiStore";
+import { useHistory } from "../lib/historyStore";
 import type { Changes, Cipher, Printing, SecurityInfo } from "../lib/api";
 import * as edits from "../lib/edit";
 import {
@@ -104,6 +105,8 @@ function ProtectView({ sheet, info, doc }: { sheet: ProtectSheet; info: Security
   const why = readiness(sheet);
   const needsOwner = !!info?.encrypted && !info.unlocked;
   const sentence = outcome(sheet);
+  // Only a file whose history is up keeps the earlier version.
+  const history = useHistory((s) => s.docs[doc.id]?.state?.status === "ready");
   const mismatch = sheet.openConfirm !== "" && sheet.openConfirm !== sheet.openPassword;
   const pmismatch = sheet.permissionsConfirm !== "" && sheet.permissionsConfirm !== sheet.permissionsPassword;
   const ready = why == null && (!needsOwner || sheet.currentPassword !== "");
@@ -213,7 +216,8 @@ function ProtectView({ sheet, info, doc }: { sheet: ProtectSheet; info: Security
         {sheet.confirmInPlace ? (
           <>
             <p className="small">
-              Replace <span className="tl-mono">{doc.name}</span> with the protected file? The earlier version stays in the version history.
+              Replace <span className="tl-mono">{doc.name}</span> with the protected file?{" "}
+              {history ? "The earlier version stays in the version history." : "No earlier version is kept: the original is overwritten."}
             </p>
             <button className="ax-btn primary tl-wide" disabled={!ready} onClick={() => void st().run("inPlace")}>
               Protect and replace this file

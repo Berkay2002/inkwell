@@ -223,6 +223,13 @@ impl PdfWriteOptions {
         c_pwd.to_str().unwrap()
     }
 
+    /// Overwrites both password buffers with zeros. The options are `Copy`: this wipes this value
+    /// only, so call it on the value that was handed to the write.
+    pub fn wipe_passwords(&mut self) {
+        self.inner.upwd_utf8.fill(0);
+        self.inner.opwd_utf8.fill(0);
+    }
+
     pub fn set_user_password(&mut self, pwd: &str) -> &mut Self {
         assert!(pwd.len() < self.inner.upwd_utf8.len());
         unsafe {
@@ -842,6 +849,19 @@ impl PdfDocument {
             }
         }
         Ok(false)
+    }
+
+    /// Authenticates again with `password` and returns MuPDF's access flags: 2 = the user password,
+    /// 4 = the owner password (6 = both), 0 = refused, 1 = the file has no encryption. MuPDF refuses
+    /// an empty owner password when there is a user password (Acrobat does the same), so an empty
+    /// `password` never gives 4 for a file that needs an open password.
+    ///
+    /// The document keeps the result: call it with the password the document was opened with, which
+    /// is what `Document::authenticate` already did.
+    pub fn authenticate_access(&self, password: &str) -> Result<i32, Error> {
+        let c_pass = CString::new(password)?;
+        // `pdf_authenticate_password` only derives keys and compares hashes: it does not throw.
+        Ok(unsafe { pdf_authenticate_password(context(), self.inner, c_pass.as_ptr()) })
     }
 
     pub fn permissions(&self) -> Permission {

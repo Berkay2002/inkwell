@@ -419,3 +419,198 @@ fn the_file_on_disk_is_read_with_its_new_password_by_the_tools() {
     assert_eq!(eng.file_password(id).unwrap(), None);
     assert!(crate::compress::audit_file(Path::new(&src), None).is_ok());
 }
+
+/// What a fresh MuPDF document of `path` grants for `password` (2 user, 4 owner, 6 both, 0 neither).
+fn access_of(path: &str, password: &str) -> i32 {
+    mupdf::pdf::PdfDocument::open(path).unwrap().authenticate_access(password).unwrap()
+}
+
+/// An open password and nothing else must leave the file's owner password equal to it, as Acrobat does:
+/// with an empty owner password MuPDF hashes "" into /O, and qpdf, pikepdf and pypdf accept "" as the
+/// owner password, so anyone could lift the restrictions of a file that was never meant to have any.
+#[test]
+fn open_only_protection_makes_the_open_password_the_owner_password() {
+    for cipher in [Cipher::Aes256, Cipher::Aes128] {
+        let d = dir(&format!("owner-eq-{}", if cipher == Cipher::Aes256 { 256 } else { 128 }));
+        let src = fixture_at(&d, "a.pdf", 2);
+        let out = d.join("locked.pdf").to_string_lossy().into_owned();
+        let eng = Engine::new(2, 64 << 20);
+        let id = open(&eng, &src);
+        let open_only = tweak(|s| {
+            (s.permissions_password, s.printing, s.changes, s.copy, s.accessibility, s.cipher) =
+                (None, Printing::High, Changes::AllButExtract, true, true, cipher);
+        });
+        eng.protect(id, open_only, None, EditSource::User).unwrap();
+        eng.save(id, Some(&out)).unwrap();
+
+        // /O is the hash of the open password: MuPDF's owner check, run with a non-empty guess, says so
+        // (before the fix it was 2: the open password was only the user password).
+        assert_eq!(access_of(&out, "open sesame"), 6);
+        assert_eq!(access_of(&out, "") & 4, 0);
+        assert_eq!(access_of(&out, "not it") & 4, 0);
+
+        // and the session that opened it with that password may change the security, as the owner
+        let eng2 = Engine::new(2, 64 << 20);
+        let id2 = open_with(&eng2, &out, "open sesame");
+        let info = eng2.security_info(id2).unwrap();
+        assert!(info.encrypted && info.unlocked && !info.restricted, "{info:?}");
+        eng2.remove_security(id2, None, EditSource::User).unwrap();
+    }
+}
+
+/// With both passwords the open password is the user password only.
+#[test]
+fn the_open_password_is_not_the_owner_when_a_permissions_password_is_set() {
+    let d = dir("owner-neq");
+    let src = fixture_at(&d, "a.pdf", 1);
+    let out = d.join("locked.pdf").to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &src);
+    eng.protect(id, spec(), None, EditSource::User).unwrap();
+    eng.save(id, Some(&out)).unwrap();
+    assert_eq!(access_of(&out, "open sesame"), 2);
+    assert_eq!(access_of(&out, "owner-secret") & 4, 4);
+}
+
+/// A file with its own owner password stays the owner's even when it restricts nothing (P = everything):
+/// the rights alone must not decide who may change or remove the security.
+#[test]
+fn an_owner_password_with_every_right_allowed_still_guards_the_security() {
+    let d = dir("owner-all");
+    let src = fixture_at(&d, "a.pdf", 2);
+    let locked = d.join("locked.pdf").to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &src);
+    let all_allowed = tweak(|s| {
+        (s.open_password, s.printing, s.changes, s.copy, s.accessibility) =
+            (None, Printing::High, Changes::AllButExtract, true, true);
+    });
+    eng.protect(id, all_allowed, None, EditSource::User).unwrap();
+    eng.save(id, Some(&locked)).unwrap();
+    drop(eng);
+
+    // opens without a prompt, restricts nothing, and is not the session's to change
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &locked);
+    let info = eng.security_info(id).unwrap();
+    assert!(info.encrypted && !info.restricted && !info.unlocked, "{info:?}");
+    assert_eq!(invalid_code(eng.remove_security(id, None, EditSource::User)), "needs-permissions-password");
+    assert_eq!(invalid_code(eng.remove_security(id, Some(""), EditSource::User)), "needs-permissions-password");
+    assert_eq!(invalid_code(eng.remove_security(id, Some("guess"), EditSource::User)), "bad-permissions-password");
+    let changed = tweak(|s| s.open_password = Some("new open".into()));
+    assert_eq!(invalid_code(eng.protect(id, changed, None, EditSource::User)), "needs-permissions-password");
+    assert!(!eng.edit_state(id).unwrap().dirty);
+    eng.remove_security(id, Some("owner-secret"), EditSource::User).unwrap();
+}
+
+/// A failed save takes the protect step back: nothing stays pending, a later plain Save does not encrypt
+/// the file, and a retry is one step.
+#[test]
+fn a_failed_protect_and_save_leaves_nothing_pending() {
+    let d = dir("rollback");
+    let src = fixture_at(&d, "a.pdf", 2);
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &src);
+
+    let nowhere = d.join("no-such-folder").join("x.pdf").to_string_lossy().into_owned();
+    assert!(eng.protect_and_save(id, spec(), None, Some(&nowhere)).is_err());
+    let st = eng.edit_state(id).unwrap();
+    assert!(!st.dirty && st.undo.is_none(), "{st:?}");
+    assert_eq!(eng.security_info(id).unwrap(), SecurityInfo::plain());
+
+    // Ctrl+S afterwards writes the document as it is: no protection nobody asked for
+    eng.save(id, None).unwrap();
+    assert!(mupdf::pdf::PdfDocument::open(&src).unwrap().trailer().unwrap().get_dict("Encrypt").unwrap().is_none());
+    assert_eq!(eng.file_password(id).unwrap(), None);
+
+    // the retry is one step, and undoing it goes back to the plain file
+    let out = d.join("locked.pdf").to_string_lossy().into_owned();
+    let (st, saved) = eng.protect_and_save(id, spec(), None, Some(&out)).unwrap();
+    assert!(!st.dirty && saved.is_some());
+    assert_eq!(st.undo.as_deref(), Some("Protect with a password (AES-256)"));
+    assert_eq!(access_of(&out, "open sesame"), 2);
+    eng.undo(id).unwrap();
+    assert_eq!(eng.security_info(id).unwrap(), SecurityInfo::plain());
+}
+
+/// Pages and content may not leave a restricted file as an unprotected one without its permissions password.
+#[test]
+fn extract_split_and_merge_respect_the_restrictions() {
+    let d = dir("extract");
+    let src = fixture_at(&d, "a.pdf", 3);
+    // permissions password only (opens without a prompt), no copying, no page changes
+    let locked = d.join("locked.pdf").to_string_lossy().into_owned();
+    // both passwords, same rights, to open as the owner
+    let locked2 = d.join("locked2.pdf").to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &src);
+    eng.protect(id, tweak(|s| s.open_password = None), None, EditSource::User).unwrap();
+    eng.save(id, Some(&locked)).unwrap();
+    eng.undo(id).unwrap();
+    eng.protect(id, spec(), None, EditSource::User).unwrap();
+    eng.save(id, Some(&locked2)).unwrap();
+    drop(eng);
+
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &locked);
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    assert_eq!(invalid_code(eng.ensure_extractable(id).map(|_| 0)), "needs-permissions-password");
+    assert_eq!(invalid_code(eng.extract(id, &[0], &out, false)), "needs-permissions-password");
+    assert_eq!(invalid_code(eng.split(id, 1).map(|_| 0)), "needs-permissions-password");
+    assert!(!Path::new(&out).exists());
+    match eng.merge(std::slice::from_ref(&locked), &out) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("doesn't allow copying"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(!Path::new(&out).exists());
+    // taking the security off (staged, with the permissions password) frees the pages to leave
+    eng.remove_security(id, Some("owner-secret"), EditSource::User).unwrap();
+    eng.ensure_extractable(id).unwrap();
+    eng.extract(id, &[0], &out, false).unwrap();
+    assert_eq!(Document::open(&out).unwrap().page_count().unwrap(), 1);
+
+    // the session that holds the permissions password is the owner's
+    let eng = Engine::new(2, 64 << 20);
+    let id = open_with(&eng, &locked2, "owner-secret");
+    eng.ensure_extractable(id).unwrap();
+    let out2 = d.join("out2.pdf").to_string_lossy().into_owned();
+    eng.extract(id, &[1, 2], &out2, false).unwrap();
+    assert_eq!(Document::open(&out2).unwrap().page_count().unwrap(), 2);
+    // while the open password alone is not enough
+    let eng = Engine::new(2, 64 << 20);
+    let id = open_with(&eng, &locked2, "open sesame");
+    assert_eq!(invalid_code(eng.extract(id, &[0], &out, false)), "needs-permissions-password");
+}
+
+/// Passwords are put in NFKC before they are written, and control characters (a NUL cuts a C string
+/// short) are refused.
+#[test]
+fn passwords_are_normalised_and_control_characters_refused() {
+    let mut s = tweak(|s| {
+        s.open_password = Some("cafe\u{301}-pass".into());
+        s.permissions_password = Some("\u{ff21}\u{ff22}\u{ff23}-owner".into());
+    });
+    s.normalize();
+    assert_eq!(s.open(), Some("caf\u{e9}-pass"));
+    assert_eq!(s.owner(), Some("ABC-owner"));
+    s.validate().unwrap();
+
+    for bad in ["a\0b-secret", "tab\there", "del\u{7f}x", "c1\u{85}x"] {
+        let s = tweak(|s| s.open_password = Some(bad.into()));
+        assert_eq!(s.validate().unwrap_err().code(), "control-character", "{bad:?}");
+    }
+
+    // end to end: typed decomposed, opens with the composed form (what Acrobat's field produces)
+    let d = dir("nfkc");
+    let src = fixture_at(&d, "a.pdf", 1);
+    let out = d.join("locked.pdf").to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &src);
+    let typed = tweak(|s| {
+        (s.open_password, s.permissions_password, s.changes, s.copy) =
+            (Some("cafe\u{301}-pass".into()), None, Changes::AllButExtract, true);
+    });
+    eng.protect(id, typed, None, EditSource::User).unwrap();
+    eng.save(id, Some(&out)).unwrap();
+    assert_ne!(access_of(&out, "caf\u{e9}-pass") & 2, 0);
+}

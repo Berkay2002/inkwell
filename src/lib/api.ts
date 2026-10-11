@@ -202,6 +202,9 @@ export const securityInfo = (doc: number) => invoke<SecurityInfo>("security_info
 /** One undo step; Save or Save as writes it. `permissionsPassword`: only when the file already has restrictions. */
 export const protectApply = (doc: number, spec: ProtectSpec, permissionsPassword?: string | null) =>
   invoke<EditState>("protect_apply", { doc, spec, permissionsPassword: permissionsPassword ?? null });
+/** Protects and saves in one step (over the file, or to a `pick_save` token); a failed save takes the protection back. */
+export const protectAndSave = (doc: number, spec: ProtectSpec, permissionsPassword?: string | null, to?: string) =>
+  invoke<EditState>("protect_and_save", { doc, spec, permissionsPassword: permissionsPassword ?? null, to: to ?? null });
 export const removeSecurity = (doc: number, permissionsPassword?: string | null) =>
   invoke<EditState>("remove_security", { doc, permissionsPassword: permissionsPassword ?? null });
 

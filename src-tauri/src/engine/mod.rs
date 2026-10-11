@@ -29,6 +29,7 @@ use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 pub type DocId = u32;
 /// Tile edge in device pixels.
@@ -175,7 +176,7 @@ pub struct DocEntry {
     password: Mutex<Option<String>>,
     /// The open password of the file on disk after a save that set or removed security (`None` until
     /// then: the file is as it was opened and `password` unlocks it).
-    file_password: Mutex<Option<Option<String>>>,
+    file_password: Mutex<Option<Option<Zeroizing<String>>>>,
     epochs: [AtomicU64; STREAMS],
     search_gen: AtomicU64,
     layout: RwLock<Layout>,
@@ -842,7 +843,10 @@ impl Engine {
     pub(crate) fn file_password(&self, id: DocId) -> Result<Option<String>> {
         let entry = self.entry(id)?;
         let over = entry.file_password.lock().clone();
-        Ok(over.unwrap_or_else(|| entry.password.lock().clone()))
+        Ok(match over {
+            Some(p) => p.map(|p| (*p).clone()),
+            None => entry.password.lock().clone(),
+        })
     }
 
     pub fn set_cache_budget(&self, bytes: usize) {

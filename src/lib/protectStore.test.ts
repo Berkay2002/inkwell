@@ -18,6 +18,7 @@ vi.mock("./api", () => ({
   pickSave: vi.fn(),
   securityInfo: vi.fn(),
   protectApply: vi.fn(),
+  protectAndSave: vi.fn(),
   removeSecurity: vi.fn(),
   saveDocument: vi.fn(),
   closeDocument: vi.fn(() => Promise.resolve()),
@@ -108,6 +109,15 @@ describe("readiness", () => {
     expect(readiness({ ...ok, cipher: "aes128", openPassword: "löv", openConfirm: "löv" })).toMatch(/AES-256/);
     expect(readiness({ ...ok, openPassword: "löv", openConfirm: "löv" })).toBeNull();
   });
+  it("refuses control characters, NUL included", () => {
+    const ok = { ...sheet(), requireOpen: true, openPassword: "Lantern7fish!", openConfirm: "Lantern7fish!" };
+    const c = (n: number) => String.fromCharCode(n);
+    for (const bad of ["a" + c(0) + "b-secret", "tab" + c(9) + "here-1", "del" + c(127) + "here-1", "c1" + c(0x85) + "here-1"]) {
+      expect(readiness({ ...ok, openPassword: bad, openConfirm: bad })).toMatch(/control characters/);
+    }
+    const p = { ...ok, restrict: true, permissionsPassword: "ctl" + c(1) + "-pass", permissionsConfirm: "ctl" + c(1) + "-pass" };
+    expect(readiness(p)).toMatch(/control characters/);
+  });
 });
 
 describe("request and outcome", () => {
@@ -189,16 +199,16 @@ describe("the sheet", () => {
     expect(useProtect.getState().sheet).toBeNull();
   });
 
-  it("protects a copy: file picked first, then the step, then Save as", async () => {
+  it("protects a copy: file picked first, then one protect-and-save", async () => {
     sheet({ openPassword: "Lantern7fish!", openConfirm: "Lantern7fish!" });
     vi.mocked(api.pickSave).mockResolvedValue({ token: "save-1", path: "C:\\d\\Lease agreement (protected).pdf" });
-    vi.mocked(api.protectApply).mockResolvedValue(state("C:\\d\\Lease agreement.pdf") as never);
-    vi.mocked(api.saveDocument).mockResolvedValue(state("C:\\d\\Lease agreement (protected).pdf") as never);
+    vi.mocked(api.protectAndSave).mockResolvedValue(state("C:\\d\\Lease agreement (protected).pdf") as never);
     await useProtect.getState().run("copy");
     expect(api.pickSave).toHaveBeenCalledWith("Lease agreement (protected).pdf", { doc: 1 });
-    expect(api.protectApply).toHaveBeenCalledWith(1, expect.objectContaining({ openPassword: "Lantern7fish!", cipher: "aes256" }), null);
-    expect(api.saveDocument).toHaveBeenCalledWith(1, "save-1");
-    expect(edits.applyState).toHaveBeenCalledTimes(2);
+    expect(api.protectAndSave).toHaveBeenCalledWith(1, expect.objectContaining({ openPassword: "Lantern7fish!", cipher: "aes256" }), null, "save-1");
+    expect(api.protectApply).not.toHaveBeenCalled();
+    expect(api.saveDocument).not.toHaveBeenCalled();
+    expect(edits.applyState).toHaveBeenCalledTimes(1);
     const s = useProtect.getState().sheet!;
     expect(s.phase).toBe("done");
     expect(s.result).toEqual({ output: "copy", name: "Lease agreement (protected).pdf" });
@@ -211,28 +221,40 @@ describe("the sheet", () => {
     sheet({ openPassword: "Lantern7fish!", openConfirm: "Lantern7fish!" });
     vi.mocked(api.pickSave).mockResolvedValue(null);
     await useProtect.getState().run("copy");
-    expect(api.protectApply).not.toHaveBeenCalled();
+    expect(api.protectAndSave).not.toHaveBeenCalled();
     expect(useProtect.getState().sheet?.phase).toBe("options");
   });
 
-  it("protects this file in place with a plain Save", async () => {
+  it("protects this file in place with one protect-and-save over the file", async () => {
     sheet({ openPassword: "Lantern7fish!", openConfirm: "Lantern7fish!" });
-    vi.mocked(api.protectApply).mockResolvedValue(state("C:\\d\\Lease agreement.pdf") as never);
-    vi.mocked(api.saveDocument).mockResolvedValue(state("C:\\d\\Lease agreement.pdf") as never);
+    vi.mocked(api.protectAndSave).mockResolvedValue(state("C:\\d\\Lease agreement.pdf") as never);
     await useProtect.getState().run("inPlace");
     expect(api.pickSave).not.toHaveBeenCalled();
-    expect(api.saveDocument).toHaveBeenCalledWith(1, undefined);
+    expect(api.protectAndSave).toHaveBeenCalledWith(1, expect.anything(), null, undefined);
     expect(useProtect.getState().sheet?.result?.output).toBe("inPlace");
+  });
+
+  it("a failed save leaves the sheet on the error with nothing applied here", async () => {
+    sheet({ openPassword: "Lantern7fish!", openConfirm: "Lantern7fish!" });
+    vi.mocked(api.pickSave).mockResolvedValue({ token: "save-1", path: "C:\\d\\x.pdf" });
+    vi.mocked(api.protectAndSave).mockRejectedValue("The file could not be written: disk full");
+    await useProtect.getState().run("copy");
+    expect(edits.applyState).not.toHaveBeenCalled();
+    expect(useProtect.getState().sheet).toMatchObject({ phase: "error", error: "The file could not be written: disk full" });
+    // a retry is one call again, never a second step
+    vi.mocked(api.protectAndSave).mockResolvedValue(state("C:\\d\\x.pdf") as never);
+    await useProtect.getState().run("copy");
+    expect(api.protectAndSave).toHaveBeenCalledTimes(2);
+    expect(api.protectApply).not.toHaveBeenCalled();
   });
 
   it("sends the permissions password of a restricted file, and shows the engine's refusal", async () => {
     useProtect.setState({ security: { 1: info({ encrypted: true, restricted: true, unlocked: false, method: "AES-256" }) } });
     sheet({ openPassword: "Lantern7fish!", openConfirm: "Lantern7fish!", currentPassword: "wrong" });
     vi.mocked(api.pickSave).mockResolvedValue({ token: "save-1", path: "C:\\d\\x.pdf" });
-    vi.mocked(api.protectApply).mockRejectedValue("bad-permissions-password");
+    vi.mocked(api.protectAndSave).mockRejectedValue("bad-permissions-password");
     await useProtect.getState().run("copy");
-    expect(api.protectApply).toHaveBeenCalledWith(1, expect.anything(), "wrong");
-    expect(api.saveDocument).not.toHaveBeenCalled();
+    expect(api.protectAndSave).toHaveBeenCalledWith(1, expect.anything(), "wrong", "save-1");
     expect(useProtect.getState().sheet).toMatchObject({ phase: "error", error: "That is not the permissions password of this file." });
   });
 

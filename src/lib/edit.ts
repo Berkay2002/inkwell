@@ -47,7 +47,14 @@ export function applyState(id: number, s: EditState) {
 const queues = new Map<number, Promise<unknown>>();
 function serial<T>(id: number, f: () => Promise<T>): Promise<T | undefined> {
   const run = (queues.get(id) ?? Promise.resolve()).then(f).catch((e) => {
-    st().setUi({ error: String(e) });
+    if (String(e) === "needs-permissions-password") {
+      // Pages of a file that restricts copying or page changes leave only with its permissions
+      // password: the Security view is where it is typed (and the restrictions removed).
+      st().setUi({ error: "This file doesn't allow copying or page changes. Type its permissions password in Security to continue." });
+      void import("./protectStore").then((m) => m.useProtect.getState().open("security", id));
+    } else {
+      st().setUi({ error: String(e) });
+    }
     return undefined;
   });
   queues.set(id, run);

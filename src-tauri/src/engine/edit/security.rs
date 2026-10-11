@@ -4,9 +4,9 @@
 //! `Step::security` and `Editor::save_opts`. It is one undo step, listed in the history, and
 //! saved by the normal Save (or Save as, which is how the original is left untouched).
 
-use super::{Document, EditSource, EditState, Editor, PdfDocument, Step, invalid, now_ms};
+use super::{Document, EditSource, EditState, Editor, PdfDocument, Saved, Step, invalid, now_ms};
 use crate::engine::{DocEntry, DocId, Engine, Result, authenticate};
-use crate::protect::{self, ProtectSpec, Rights, SecurityChange, SecurityInfo};
+use crate::protect::{self, ProtectSpec, SecurityChange, SecurityInfo};
 use std::sync::Arc;
 
 /// The UI matches on these messages (`FRIENDLY` in the stores).
@@ -21,10 +21,10 @@ impl Editor {
             let written = self.saved.is_some_and(|w| w >= i);
             return Ok(SecurityInfo::of_change(s.security.as_ref().expect("found by security"), !written));
         }
-        protect::read_security(&self.doc.doc, entry.password.lock().is_some())
+        protect::read_security(&self.doc.doc, entry.password.lock().as_deref())
     }
 
-    /// The session may change the security: no restrictions, the permissions password was given to
+    /// The session may change the security: the file has none, the permissions password was given to
     /// open it, or `password` is the permissions password.
     fn ensure_unlocked(&self, entry: &DocEntry, password: Option<&str>) -> Result<()> {
         if self.security_info(entry)?.unlocked {
@@ -34,17 +34,22 @@ impl Editor {
         // A fresh copy of the snapshot, so the failed attempts leave the authoritative document alone.
         let snap = self.step().snap.clone();
         // SAFETY: snapshots are never mutated, and `snap` outlives the document below.
-        let mut d = unsafe { Document::from_shared_bytes(&snap.bytes[..snap.len], "application/pdf")? };
-        if !d.authenticate(pw)? {
-            return Err(invalid(BAD_OWNER));
-        }
+        let d = unsafe { Document::from_shared_bytes(&snap.bytes[..snap.len], "application/pdf")? };
         let pdf = PdfDocument::try_from(d)?;
-        if Rights::from_p(pdf.permissions().bits() as i32).unrestricted() {
-            Ok(())
-        } else {
-            // Authenticated, but as the open password: the restrictions still hold.
-            Err(invalid(BAD_OWNER))
+        // 4 is the owner password; the open password alone (2) leaves the restrictions in force, and
+        // so does it for a file that restricts nothing: the owner password is still the owner's.
+        if pdf.authenticate_access(pw)? & 4 != 0 { Ok(()) } else { Err(invalid(BAD_OWNER)) }
+    }
+
+    /// Pages or content may leave this document as an unprotected file only when its owner allows
+    /// copying and page changes, or this session holds the permissions password: extract, split
+    /// and export write plain files, which would otherwise lift the restrictions silently.
+    pub(super) fn ensure_extractable(&self, entry: &DocEntry) -> Result<()> {
+        let info = self.security_info(entry)?;
+        if info.encrypted && !info.unlocked && !info.rights.may_extract() {
+            return Err(invalid(NEEDS_OWNER));
         }
+        Ok(())
     }
 
     fn push_security(&mut self, label: String, source: EditSource, change: SecurityChange) {
@@ -65,7 +70,7 @@ impl Engine {
         let _ = mupdf::Context::get();
         let mut d = Document::open(entry.path().as_str())?;
         authenticate(&mut d, &entry)?;
-        protect::read_security(&PdfDocument::try_from(d)?, entry.password.lock().is_some())
+        protect::read_security(&PdfDocument::try_from(d)?, entry.password.lock().as_deref())
     }
 
     /// Protects the document with `spec` (one undo step; the next save writes it). Changing the
@@ -77,6 +82,8 @@ impl Engine {
         permissions_password: Option<&str>,
         source: EditSource,
     ) -> Result<EditState> {
+        let mut spec = spec;
+        spec.normalize();
         spec.validate().map_err(|e| invalid(e.code()))?;
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
@@ -90,6 +97,43 @@ impl Engine {
         let label = if had { format!("Change password security ({cipher})") } else { format!("Protect with a password ({cipher})") };
         ed.push_security(label, source, SecurityChange::Set(Arc::new(spec)));
         Ok(ed.state(&entry))
+    }
+
+    /// [`Editor::ensure_extractable`] for a document that is not being edited right now.
+    pub fn ensure_extractable(&self, id: DocId) -> Result<()> {
+        let info = self.security_info(id)?;
+        if info.encrypted && !info.unlocked && !info.rights.may_extract() {
+            return Err(invalid(NEEDS_OWNER));
+        }
+        Ok(())
+    }
+
+    /// [`Engine::protect`] and a save (over the file, or to `to`) as one operation: when the save
+    /// fails the protect step is taken back, so a later Save cannot write the protection nobody
+    /// asked for (in place, without the confirm) and a retry does not stack a second step.
+    pub fn protect_and_save(
+        &self,
+        id: DocId,
+        spec: ProtectSpec,
+        permissions_password: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<(EditState, Option<Saved>)> {
+        self.protect(id, spec, permissions_password, EditSource::User)?;
+        self.save_recorded(id, to).inspect_err(|_| self.drop_last_security_step(id))
+    }
+
+    /// Takes back the newest step when it is a security step (nothing can redo it).
+    fn drop_last_security_step(&self, id: DocId) {
+        let Ok(entry) = self.entry(id) else { return };
+        let mut lane = entry.editor.lock();
+        let Some(ed) = lane.as_mut() else { return };
+        if ed.cur + 1 == ed.steps.len() && ed.cur > 0 && ed.steps[ed.cur].security.is_some() {
+            ed.steps.pop();
+            ed.cur -= 1;
+            if ed.saved.is_some_and(|s| s > ed.cur) {
+                ed.saved = None;
+            }
+        }
     }
 
     /// Removes password security (one undo step). A document with restrictions needs its

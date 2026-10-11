@@ -120,6 +120,12 @@ export function strength(pw: string): { segments: 0 | 1 | 2 | 3 | 4 | 5; label: 
 }
 
 const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
+/** C0 and C1 control characters, NUL included: never part of a password the file can be opened with by hand. */
+const hasControl = (s: string) =>
+  [...s].some((c) => {
+    const n = c.codePointAt(0) ?? 0;
+    return n < 32 || (n >= 127 && n < 160);
+  });
 /** AES-128 documents only carry Latin-1 passwords reliably; AES-256 takes any text. */
 const plainText = (s: string) => /^[ -~]*$/.test(s);
 
@@ -130,12 +136,14 @@ export function readiness(s: ProtectSheet): string | null {
     if (s.openPassword === "") return "Type the password to open the file.";
     if (s.openPassword !== s.openConfirm) return "The two passwords to open the file don't match.";
     if (utf8Bytes(s.openPassword) > MAX_PASSWORD_BYTES) return "That password is too long (127 bytes at most).";
+    if (hasControl(s.openPassword)) return "A password can't contain control characters.";
     if (s.cipher === "aes128" && !plainText(s.openPassword)) return "AES-128 files only take letters, digits and symbols from the keyboard. Use AES-256, or change the password.";
   }
   if (s.restrict) {
     if (s.permissionsPassword === "") return "Type a permissions password: it is what stops others lifting the restrictions.";
     if (s.permissionsPassword !== s.permissionsConfirm) return "The two permissions passwords don't match.";
     if (utf8Bytes(s.permissionsPassword) > MAX_PASSWORD_BYTES) return "That permissions password is too long (127 bytes at most).";
+    if (hasControl(s.permissionsPassword)) return "A password can't contain control characters.";
     if (s.cipher === "aes128" && !plainText(s.permissionsPassword)) return "AES-128 files only take letters, digits and symbols from the keyboard. Use AES-256, or change the password.";
     if (s.requireOpen && s.openPassword === s.permissionsPassword) return "The two passwords have to be different, or the open password would also lift the restrictions.";
   }
@@ -230,6 +238,7 @@ export function protectError(e: unknown): string {
     "same-password": "The two passwords have to be different.",
     "password-too-long": "That password is too long (127 bytes at most).",
     "plain-text-only": "AES-128 files only take letters, digits and symbols from the keyboard.",
+    "control-character": "A password can't contain control characters.",
     "output-exists": "A file with that name already exists. Pick another name.",
   };
   return table[s] ?? s;
@@ -304,9 +313,9 @@ export const useProtect = create<ProtectStore>((set, get) => {
           if (!picked) return void patch({ phase: "options" });
           to = picked.token;
         }
-        const after = await api.protectApply(d.id, specOf(sheet), needsOwner ? sheet.currentPassword : null);
-        applyState(d.id, after);
-        const saved = await api.saveDocument(d.id, to);
+        // One command: when the save fails the engine takes the protection back, so nothing stays
+        // pending on the original (a later Save would write it without asking) and a retry doesn't stack.
+        const saved = await api.protectAndSave(d.id, specOf(sheet), needsOwner ? sheet.currentPassword : null, to);
         applyState(d.id, saved);
         void get().refresh(d.id);
         patch({

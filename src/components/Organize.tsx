@@ -28,16 +28,16 @@ const LABEL_H = 40;
 const SPIN_MS = 200;
 const LEAVE_MS = 180;
 
-export function ModeSwitch({ doc, big = false }: { doc: DocState; big?: boolean }) {
+export function ModeSwitch({ doc }: { doc: DocState }) {
   const set = (organize: boolean) => st().patch(doc.id, { organize });
   return (
-    <div className={big ? "mode-pill big" : "mode-pill"} role="tablist" aria-label="View">
+    <div className="mode-pill" role="tablist" aria-label="View">
       <button role="tab" aria-selected={!doc.organize} className={doc.organize ? "" : "on"} onClick={() => set(false)}>
-        <Icon name="book" size={big ? 18 : 15} />
+        <Icon name="book" size={15} />
         Read
       </button>
       <button role="tab" aria-selected={doc.organize} className={doc.organize ? "on" : ""} onClick={() => set(true)}>
-        <Icon name="grid" size={big ? 18 : 15} />
+        <Icon name="grid" size={15} />
         Organize
       </button>
     </div>
@@ -149,21 +149,6 @@ export function Organize({ doc }: { doc: DocState }) {
 
   return (
     <div className="org">
-      <div className="org-toolbar">
-        <span className="org-toolbar-side" />
-        <ModeSwitch doc={doc} big />
-        <span className="org-toolbar-side end">
-          <button className="org-icon" title={doc.undoLabel ? `Undo ${doc.undoLabel} (Ctrl+Z)` : "Undo (Ctrl+Z)"} aria-label="Undo" disabled={!doc.undoLabel} onClick={() => void edits.undo(id)}>
-            <Icon name="undo" size={20} />
-          </button>
-          <button className="org-icon" title={doc.redoLabel ? `Redo ${doc.redoLabel} (Ctrl+Y)` : "Redo (Ctrl+Y)"} aria-label="Redo" disabled={!doc.redoLabel} onClick={() => void edits.redo(id)}>
-            <Icon name="redo" size={20} />
-          </button>
-          <button className="org-done" onClick={() => st().patch(id, { organize: false })}>
-            Done
-          </button>
-        </span>
-      </div>
         <aside className="org-panel">
           <SelectionField count={pageCount} selected={selected} onChange={(p) => setSel(new Set(p))} />
           <div className="org-actions">

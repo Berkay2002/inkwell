@@ -612,11 +612,46 @@ fn copying_over_in_place_when_the_folder_takes_no_new_files() {
     let d = dir("copyover");
     let path = fixture_at(&d, "a.pdf", &pages(3));
     let new = fixture::build(&pages(2));
-    copy_over(Path::new(&path), &new, 2, None).unwrap();
+    copy_over(Path::new(&path), &new, 2, Readback::default()).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), new);
     // Bytes that do not read back are never copied over the file.
-    assert!(copy_over(Path::new(&path), b"%PDF-1.7 junk", 2, None).is_err());
+    assert!(copy_over(Path::new(&path), b"%PDF-1.7 junk", 2, Readback::default()).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), new);
+}
+
+#[test]
+fn verify_checks_the_encryption_the_write_was_meant_to_give() {
+    use crate::protect::{Changes, Cipher, Printing, ProtectSpec};
+    let d = dir("verify-enc");
+    let plain = fixture_at(&d, "a.pdf", &pages(2));
+    let locked = d.join("locked.pdf").to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&plain).unwrap().doc;
+    let spec = ProtectSpec {
+        open_password: Some("open sesame".into()),
+        permissions_password: None,
+        printing: Printing::High,
+        changes: Changes::AllButExtract,
+        copy: true,
+        accessibility: true,
+        cipher: Cipher::Aes256,
+    };
+    eng.protect(id, spec, None, EditSource::User).unwrap();
+    eng.save(id, Some(&locked)).unwrap();
+
+    let p = Path::new(&plain);
+    let l = Path::new(&locked);
+    let rb = |password, encrypted| Readback { password, encrypted };
+    // a plain file: fine when nothing or "plain" is expected, a failure when security was to be set
+    verify(p, 2, rb(None, None)).unwrap();
+    verify(p, 2, rb(None, Some(false))).unwrap();
+    assert!(verify(p, 2, rb(None, Some(true))).is_err());
+    // an encrypted one: needs its password, and is a failure when security was to be removed
+    verify(l, 2, rb(Some("open sesame"), Some(true))).unwrap();
+    verify(l, 2, rb(Some("open sesame"), None)).unwrap();
+    assert!(verify(l, 2, rb(Some("open sesame"), Some(false))).is_err());
+    assert!(verify(l, 2, rb(None, Some(true))).is_err());
+    assert!(verify(l, 2, rb(Some("wrong"), Some(true))).is_err());
 }
 
 #[test]

@@ -112,6 +112,7 @@ pub enum SpecError {
     TooLong,
     NeedsPermissionsPassword,
     PlainTextOnly,
+    ControlCharacter,
 }
 
 impl SpecError {
@@ -122,6 +123,7 @@ impl SpecError {
             SpecError::TooLong => "password-too-long",
             SpecError::NeedsPermissionsPassword => "needs-permissions-password",
             SpecError::PlainTextOnly => "plain-text-only",
+            SpecError::ControlCharacter => "control-character",
         }
     }
 
@@ -132,6 +134,7 @@ impl SpecError {
             SpecError::TooLong => "A password can be at most 127 bytes long.",
             SpecError::NeedsPermissionsPassword => "Restrictions need a permissions password: without one anyone could lift them.",
             SpecError::PlainTextOnly => "AES-128 passwords can only use plain letters, digits and punctuation. Use AES-256 for other characters.",
+            SpecError::ControlCharacter => "A password can't contain control characters.",
         }
     }
 }
@@ -177,6 +180,20 @@ impl ProtectSpec {
         r
     }
 
+    /// Puts both passwords in Unicode NFKC, the form SASLprep (the PDF 2.0 password rule) starts from:
+    /// MuPDF hashes the bytes it is given, so a decomposed or compatibility form would not open in
+    /// Acrobat or qpdf after the person types the composed one there. Call before [`Self::validate`].
+    pub fn normalize(&mut self) {
+        let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
+        for p in [&mut self.open_password, &mut self.permissions_password] {
+            if let Some(s) = p.as_mut().filter(|s| !nfkc.is_normalized(s)) {
+                let mut n = nfkc.normalize(s).into_owned();
+                std::mem::swap(s, &mut n);
+                n.zeroize();
+            }
+        }
+    }
+
     pub fn validate(&self) -> Result<(), SpecError> {
         let (open, owner) = (self.open(), self.owner());
         if open.is_none() && owner.is_none() {
@@ -187,6 +204,9 @@ impl ProtectSpec {
         }
         if [open, owner].into_iter().flatten().any(|p| p.len() > MAX_PASSWORD_BYTES) {
             return Err(SpecError::TooLong);
+        }
+        if [open, owner].into_iter().flatten().any(|p| p.chars().any(char::is_control)) {
+            return Err(SpecError::ControlCharacter);
         }
         if self.cipher == Cipher::Aes128 && [open, owner].into_iter().flatten().any(|p| p.chars().any(|c| !(' '..='~').contains(&c))) {
             return Err(SpecError::PlainTextOnly);
@@ -243,6 +263,12 @@ impl Rights {
         *self == Rights::ALL
     }
 
+    /// The owner lets content and pages leave the file: copying, and page changes (Acrobat counts
+    /// editing as page changes too).
+    pub fn may_extract(&self) -> bool {
+        self.copy && (self.assemble || self.modify)
+    }
+
     /// The bits MuPDF writes for these rights.
     pub fn permission(&self) -> Permission {
         let mut p = Permission::empty();
@@ -297,7 +323,10 @@ pub fn write_options(mut base: PdfWriteOptions, change: &SecurityChange) -> PdfW
                 Cipher::Aes128 => Encryption::Aes128,
             });
             base.set_user_password(s.open().unwrap_or(""));
-            base.set_owner_password(s.owner().unwrap_or(""));
+            // Without a permissions password the owner password is the open password (the spec's
+            // default, and what Acrobat writes). An empty one would be hashed as such: qpdf, pikepdf
+            // and pypdf then accept "" as the owner password and skip the open password altogether.
+            base.set_owner_password(s.owner().or(s.open()).unwrap_or(""));
             base.set_permissions(s.rights().permission());
         }
     }
@@ -330,8 +359,8 @@ pub struct SecurityInfo {
     pub rights: Rights,
     /// `rights` is not everything: someone set a permissions password.
     pub restricted: bool,
-    /// This session may change the security without a further password: the file is not restricted,
-    /// or it was opened with its permissions password, or this session set the security.
+    /// This session may change the security without a further password: the file has none, it was
+    /// opened with its permissions (owner) password, or this session set the security.
     pub unlocked: bool,
     pub origin: Origin,
     /// `origin` is an edit that no save has written yet.
@@ -384,10 +413,11 @@ impl SecurityInfo {
     }
 }
 
-/// The security a document carries, from its `Encrypt` dictionary. `needed_password`: the file
-/// asked for a password to open (the user gave one). `effective` are the permissions this session
-/// holds (`PdfDocument::permissions`): all of them when it was unlocked with the permissions password.
-pub fn read_security(doc: &PdfDocument, needed_password: bool) -> crate::engine::Result<SecurityInfo> {
+/// The security a document carries, from its `Encrypt` dictionary. `password`: what the document was
+/// opened with (`None`: it asked for none). This session is `unlocked` only when that password is the
+/// file's owner (permissions) password: a file with an owner password of its own keeps it for the
+/// security even when its P value allows everything.
+pub fn read_security(doc: &PdfDocument, password: Option<&str>) -> crate::engine::Result<SecurityInfo> {
     let Some(enc) = doc.trailer()?.get_dict("Encrypt")? else {
         return Ok(SecurityInfo::plain());
     };
@@ -425,16 +455,17 @@ pub fn read_security(doc: &PdfDocument, needed_password: bool) -> crate::engine:
     let p = int("P")?.unwrap_or(-1);
     let rights = Rights::from_p(p);
     let restricted = !rights.unrestricted();
-    // Opened with the permissions password: MuPDF then reports every permission granted.
-    let held = Rights::from_p(doc.permissions().bits() as i32);
+    // The access MuPDF granted this session: 4 is the owner password (an empty one only counts when
+    // the file needs no open password, as in Acrobat).
+    let owner = doc.authenticate_access(password.unwrap_or(""))? & 4 != 0;
     Ok(SecurityInfo {
         encrypted: true,
         method: Some(method.into()),
         revision: r,
-        open_password: needed_password,
+        open_password: password.is_some(),
         rights,
         restricted,
-        unlocked: !restricted || held.unrestricted(),
+        unlocked: owner,
         origin: Origin::File,
         unsaved: false,
     })
