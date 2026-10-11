@@ -21,6 +21,8 @@ struct PageSpec {
     invisible: Option<String>,
     /// Filled gray rectangles [x, y, w, h], gray.
     boxes: Vec<([f32; 4], f32)>,
+    /// Styled lines: (x, y, text, font size, rgb, font resource F1 Helvetica or F2 Times).
+    styled: Vec<(f32, f32, String, f32, [f32; 3], &'static str)>,
 }
 
 #[derive(Clone, Default)]
@@ -106,12 +108,15 @@ fn build(d: &DocSpec) -> Vec<u8> {
         for (x, y, t) in &p.lines {
             c += &format!("BT /F1 12 Tf {x} {y} Td ({}) Tj ET\n", esc(t));
         }
+        for (x, y, t, size, rgb, font) in &p.styled {
+            c += &format!("{} {} {} rg BT /{font} {size} Tf {x} {y} Td ({}) Tj ET 0 g\n", rgb[0], rgb[1], rgb[2], esc(t));
+        }
         if let Some(t) = &p.invisible {
             c += &format!("BT 3 Tr /F1 12 Tf 50 50 Td ({}) Tj ET\n", esc(t));
         }
         objs[content - 1] = format!("<< /Length {} >>\nstream\n{c}\nendstream", c.len() + 1).into_bytes();
 
-        let mut res = String::from("/Font << /F1 3 0 R >>");
+        let mut res = String::from("/Font << /F1 3 0 R /F2 << /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >> >>");
         if let Some(seed) = p.image {
             let im = alloc(&mut objs);
             let data: Vec<u8> = (0..8usize * 8 * 3).map(|i| (seed as usize * 37 + i * 11 + (i / 24) * 5) as u8).collect();
@@ -883,4 +888,288 @@ endobj
     let c = compare(&pdf, &pdf, &CompareOptions::default()).unwrap();
     assert!(c.identical);
     assert!(t.elapsed().as_secs_f32() < 3.0, "took {:?}", t.elapsed());
+}
+
+// ---- formatting, cancel, progress, report ---------------------------------------------------------
+
+fn styled(text: &str, size: f32, rgb: [f32; 3], font: &'static str) -> PageSpec {
+    PageSpec { styled: vec![(72.0, 600.0, text.into(), size, rgb, font)], ..Default::default() }
+}
+
+#[test]
+fn format_change_size_and_colour_is_one_change() {
+    let a = DocSpec { pages: vec![styled("The rent is 12400 SEK per month", 12.0, [0.0; 3], "F1")], ..Default::default() };
+    let b = DocSpec { pages: vec![styled("The rent is 12400 SEK per month", 16.0, [1.0, 0.0, 0.0], "F1")], ..Default::default() };
+    let c = cmp(&a, &b);
+    assert_eq!(kinds(&c), vec![ChangeKind::FormatChanged], "{:?}", labels(&c));
+    let ch = &c.changes[0];
+    let Detail::Format { text, props } = &ch.detail else { panic!("{:?}", ch.detail) };
+    assert_eq!(text, "The rent is 12400 SEK per month");
+    let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["size", "colour"]);
+    assert_eq!((props[0].old.as_str(), props[0].new.as_str()), ("12", "16"));
+    assert_eq!((props[1].old.as_str(), props[1].new.as_str()), ("#000000", "#ff0000"));
+    assert!(ch.rect_a.is_some() && ch.rect_b.is_some());
+    assert!(ch.label.starts_with("Formatting changed on p. 1"), "{}", ch.label);
+}
+
+#[test]
+fn format_change_font() {
+    let a = DocSpec { pages: vec![styled("Either party may end this agreement", 12.0, [0.0; 3], "F1")], ..Default::default() };
+    let b = DocSpec { pages: vec![styled("Either party may end this agreement", 12.0, [0.0; 3], "F2")], ..Default::default() };
+    let c = cmp(&a, &b);
+    assert_eq!(kinds(&c), vec![ChangeKind::FormatChanged], "{:?}", labels(&c));
+    let Detail::Format { props, .. } = &c.changes[0].detail else { panic!() };
+    assert_eq!(props.len(), 1);
+    assert_eq!(props[0].name, "font");
+    assert_ne!(props[0].old, props[0].new);
+}
+
+#[test]
+fn text_edit_and_format_change_are_separate_changes() {
+    let mut a = DocSpec { pages: vec![styled("Header stays the same here", 12.0, [0.0; 3], "F1")], ..Default::default() };
+    a.pages[0].lines = vec![(72.0, 500.0, "Signed by: blank on the last day".into())];
+    let mut b = DocSpec { pages: vec![styled("Header stays the same here", 18.0, [0.0; 3], "F1")], ..Default::default() };
+    b.pages[0].lines = vec![(72.0, 500.0, "Signed by: A. Novak on the last day".into())];
+    let c = cmp(&a, &b);
+    let mut k = kinds(&c);
+    k.sort();
+    assert_eq!(k, vec![ChangeKind::TextChanged, ChangeKind::FormatChanged], "{:?}", labels(&c));
+}
+
+#[test]
+fn a_font_tweak_does_not_hide_a_graphics_edit() {
+    let a = DocSpec { pages: vec![styled("Either party may end this agreement", 12.0, [0.0; 3], "F1")], ..Default::default() };
+    let mut b = DocSpec { pages: vec![styled("Either party may end this agreement", 12.0, [0.0; 3], "F2")], ..Default::default() };
+    // the font change alone is just the formatting change
+    assert_eq!(kinds(&cmp(&a, &b)), vec![ChangeKind::FormatChanged]);
+    // but a box added next to it is a change of its own
+    b.pages[0].boxes = vec![([10.0, 10.0, 50.0, 50.0], 0.5)];
+    let mut k = kinds(&cmp(&a, &b));
+    k.sort();
+    assert_eq!(k, vec![ChangeKind::FormatChanged, ChangeKind::PageContentChanged]);
+}
+
+#[test]
+fn a_recolour_with_the_colour_set_outside_the_text_object_is_only_formatting() {
+    // `boxes` paint with a grey level set before the text: the same box in both files, text recoloured in B
+    let mut a = DocSpec { pages: vec![styled("Payment terms apply", 12.0, [0.0; 3], "F1")], ..Default::default() };
+    a.pages[0].boxes = vec![([10.0, 10.0, 50.0, 50.0], 0.5)];
+    let mut b = DocSpec { pages: vec![styled("Payment terms apply", 12.0, [0.8, 0.0, 0.0], "F1")], ..Default::default() };
+    b.pages[0].boxes = a.pages[0].boxes.clone();
+    assert_eq!(kinds(&cmp(&a, &b)), vec![ChangeKind::FormatChanged]);
+    // a moved box is still a graphics edit
+    b.pages[0].boxes = vec![([10.0, 10.0, 80.0, 50.0], 0.5)];
+    let mut k = kinds(&cmp(&a, &b));
+    k.sort();
+    assert!(k.contains(&ChangeKind::PageContentChanged), "{k:?}");
+}
+
+#[test]
+fn font_names_that_spell_one_face_differently_are_not_a_format_change() {
+    use super::semantic::font_key;
+    assert_eq!(font_key("Arial,Bold"), font_key("Arial-BoldMT"));
+    assert_eq!(font_key("ArialMT"), font_key("Arial"));
+    assert_eq!(font_key("Times New Roman,Italic"), font_key("TimesNewRomanPS-ItalicMT"));
+    assert_eq!(font_key("Helvetica-Oblique"), font_key("Helvetica-Italic"));
+    assert_ne!(font_key("Arial-Bold"), font_key("Arial"));
+    assert_ne!(font_key("Arial"), font_key("Calibri"));
+}
+
+#[test]
+fn same_style_is_no_format_change() {
+    let a = DocSpec { pages: vec![styled("Quiet page", 12.0, [0.2, 0.2, 0.2], "F1")], ..Default::default() };
+    let c = cmp(&a, &a.clone());
+    assert!(c.identical);
+}
+
+#[test]
+fn cancelled_comparison_stops_with_a_clear_error() {
+    let mut d = base(5);
+    d.pages[2].lines[1].2 = "changed here".into();
+    let (a, b) = (build(&base(5)), build(&d));
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    assert_eq!(compare_with(&a, &b, &CompareOptions::default(), &stop, &mut |_| {}), Err(DiffError::Cancelled));
+    // cancelled from the progress callback, mid-run
+    let flag = std::sync::atomic::AtomicBool::new(false);
+    let r = compare_with(&a, &b, &CompareOptions::default(), &flag, &mut |p| {
+        if p.stage == Stage::Second {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    assert_eq!(r, Err(DiffError::Cancelled));
+}
+
+#[test]
+fn progress_walks_the_stages_in_order() {
+    let a = build(&base(4));
+    let mut d = base(4);
+    d.pages[1].lines[2].2 = "an edited line of text".into();
+    let b = build(&d);
+    let mut seen: Vec<Progress> = Vec::new();
+    let c = compare_with(&a, &b, &CompareOptions::default(), &std::sync::atomic::AtomicBool::new(false), &mut |p| seen.push(p)).unwrap();
+    assert_eq!(c.changes.len(), 1);
+    let order = |s: Stage| match s {
+        Stage::First => 0,
+        Stage::Second => 1,
+        Stage::Pages => 2,
+        Stage::Document => 3,
+    };
+    assert!(seen.windows(2).all(|w| order(w[0].stage) <= order(w[1].stage)), "{seen:?}");
+    let first: Vec<&Progress> = seen.iter().filter(|p| p.stage == Stage::First).collect();
+    assert_eq!(first.len(), 4);
+    assert_eq!((first.last().unwrap().done, first.last().unwrap().total), (4, 4));
+    assert!(seen.iter().any(|p| p.stage == Stage::Document));
+}
+
+fn pdf_text(bytes: &[u8]) -> (usize, String) {
+    let doc = PdfDocument::from_bytes(bytes).unwrap();
+    let n = doc.page_count().unwrap() as usize;
+    let mut text = String::new();
+    for i in 0..n {
+        let tp = doc.load_page(i as i32).unwrap().to_text_page(mupdf::TextPageFlags::empty()).unwrap();
+        text += &tp.to_text().unwrap();
+    }
+    (n, text)
+}
+
+fn report_of(a: &DocSpec, b: &DocSpec) -> (Comparison, Vec<u8>) {
+    let (ba, bb) = (build(a), build(b));
+    let c = compare(&ba, &bb, &CompareOptions::default()).unwrap();
+    let input = report::ReportInput { a: &ba, b: &bb, a_name: "lease-v1.pdf", b_name: "lease-v2.pdf", date: "11 Oct 2026, 14:32" };
+    let out = report::build(&input, &c, &std::sync::atomic::AtomicBool::new(false), &mut |_| {}).unwrap();
+    if let Ok(dir) = std::env::var("DUMP_REPORT") {
+        std::fs::write(format!("{dir}/report-{}.pdf", c.changes.len()), &out).unwrap();
+        for pg in 0..3 {
+            if let Ok(r) = render_page(BytesId::of(&out), &out, pg, 1.3) {
+                std::fs::write(format!("{dir}/report-{}-p{pg}.png", c.changes.len()), r.to_png().unwrap()).unwrap();
+            }
+        }
+    }
+    (c, out)
+}
+
+#[test]
+fn report_lists_the_changes_and_shows_the_pages() {
+    let mut a = base(3);
+    a.pages[1].lines.push((72.0, 500.0, "Signed by: blank on the last day".into()));
+    let mut b = a.clone();
+    b.pages[1].lines.last_mut().unwrap().2 = "Signed by: A. Novak on the last day".into();
+    b.pages.push(PageSpec { lines: vec![(72.0, 700.0, "An appendix about saffron".into())], ..Default::default() });
+    let (c, out) = report_of(&a, &b);
+    assert_eq!(c.changes.len(), 2);
+    let (n, text) = pdf_text(&out);
+    // summary + list on page 1, then one picture page per changed page (2 and the appendix)
+    assert_eq!(n, 3, "{text}");
+    for want in ["Comparison report", "lease-v1.pdf", "lease-v2.pdf", "11 Oct 2026", "2 differences found", "Text", "Pages", "A. Novak", "Page 4 added"] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+    assert!(text.contains("Before") && text.contains("After"));
+    // the report is itself a document that opens and renders
+    let again = compare(&out, &out.clone(), &CompareOptions::default()).unwrap();
+    assert!(again.identical);
+    let r = render_page(BytesId::of(&out), &out, 2, 1.0).unwrap();
+    assert!(r.rgba.chunks_exact(4).any(|p| p[0] < 200), "the picture page has content");
+}
+
+#[test]
+fn report_of_identical_files_says_so() {
+    let a = base(2);
+    let (c, out) = report_of(&a, &a.clone());
+    assert!(c.identical);
+    let (n, text) = pdf_text(&out);
+    assert_eq!(n, 1);
+    assert!(text.contains("No differences"), "{text}");
+}
+
+#[test]
+fn report_with_many_changes_paginates_and_caps_pictures() {
+    let a = base(120);
+    let mut b = a.clone();
+    for p in b.pages.iter_mut() {
+        p.lines[2].2 = "completely different words on this line of text".into();
+    }
+    let (c, out) = report_of(&a, &b);
+    assert_eq!(c.changes.len(), 120);
+    let (n, text) = pdf_text(&out);
+    assert!(n > 60 && n < 130, "{n} pages");
+    assert!(text.contains(&format!("first {} of 120 changed pages", report::MAX_PICTURE_PAGES)), "cap note missing");
+}
+
+#[test]
+fn report_can_be_cancelled() {
+    let (ba, bb) = (build(&base(2)), build(&base(3)));
+    let c = compare(&ba, &bb, &CompareOptions::default()).unwrap();
+    let input = report::ReportInput { a: &ba, b: &bb, a_name: "a.pdf", b_name: "b.pdf", date: "today" };
+    let r = report::build(&input, &c, &std::sync::atomic::AtomicBool::new(true), &mut |_| {});
+    assert_eq!(r, Err(DiffError::Cancelled));
+}
+
+#[test]
+fn five_hundred_pages_compare_report_and_cancel() {
+    let a = base(500);
+    let mut b = a.clone();
+    for k in (0..500).step_by(25) {
+        b.pages[k].lines[3].2 = format!("this line was rewritten on page {k}");
+    }
+    b.pages.insert(250, PageSpec { lines: vec![(72.0, 700.0, "An inserted page about saffron".into())], ..Default::default() });
+    let (ba, bb) = (build(&a), build(&b));
+    let t = Instant::now();
+    let mut ticks = 0u32;
+    let c = compare_with(&ba, &bb, &CompareOptions::default(), &std::sync::atomic::AtomicBool::new(false), &mut |_| ticks += 1).unwrap();
+    let t_cmp = t.elapsed();
+    assert_eq!(c.changes.len(), 20 + 1, "{:?}", labels(&c));
+    assert!(ticks >= 1000, "progress is reported per page ({ticks})");
+    let t = Instant::now();
+    let input = report::ReportInput { a: &ba, b: &bb, a_name: "a.pdf", b_name: "b.pdf", date: "today" };
+    let out = report::build(&input, &c, &std::sync::atomic::AtomicBool::new(false), &mut |_| {}).unwrap();
+    let png = render_page(BytesId::of(&ba), &ba, 0, 1.0).unwrap().to_png().unwrap().len();
+    println!("TIMING 500 pages: compare={t_cmp:?} report={:?} ({} KB, one png {png} B)", t.elapsed(), out.len() / 1024);
+    // a cancel raised while the first file is read stops the run well before it would have finished
+    let flag = std::sync::atomic::AtomicBool::new(false);
+    let t = Instant::now();
+    let r = compare_with(&ba, &bb, &CompareOptions::default(), &flag, &mut |p| {
+        if p.stage == Stage::First && p.done == 10 {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    assert_eq!(r, Err(DiffError::Cancelled));
+    assert!(t.elapsed() < t_cmp, "cancel took {:?} vs full {t_cmp:?}", t.elapsed());
+}
+
+/// `INKWELL_SEED_DIR=<dir> cargo test --lib seed_compare_screens -- --ignored`. Writes the pairs scripts/compare-shots.mjs
+/// compares: `Lease v1.pdf` / `Lease v2.pdf` (text, formatting, image, added page, annotation) and `Big v1.pdf` / `Big v2.pdf`
+/// (1200 pages, 48 edited) for progress and cancel.
+#[test]
+#[ignore]
+fn seed_compare_screens() {
+    let dir = std::path::PathBuf::from(std::env::var("INKWELL_SEED_DIR").expect("INKWELL_SEED_DIR"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut v1 = base(4);
+    v1.pages[1].lines = vec![
+        (72.0, 740.0, "2. PARTIES".into()),
+        (72.0, 700.0, "This Residential Lease Agreement is made on 1 October 2026 between Maple Property Management".into()),
+        (72.0, 684.0, "AB (the Landlord) and the Tenant named below.".into()),
+        (72.0, 640.0, "2.3 Rent".into()),
+        (72.0, 620.0, "The rent is 12 400 SEK per month, due on the 25th of each month.".into()),
+        (72.0, 580.0, "2.4 Notice".into()),
+        (72.0, 560.0, "Either party may end this agreement with three months written notice.".into()),
+    ];
+    v1.pages[1].styled = vec![(72.0, 500.0, "Payment terms".into(), 12.0, [0.0, 0.0, 0.0], "F1")];
+    v1.pages[2].image = Some(40);
+    let mut v2 = v1.clone();
+    v2.pages[1].lines[4].2 = "The rent is 12 900 SEK per month, due on the 1st of each month.".into();
+    v2.pages[1].lines[6].2 = "Either party may end this agreement with two months written notice.".into();
+    v2.pages[1].styled = vec![(72.0, 500.0, "Payment terms".into(), 14.0, [0.18, 0.29, 0.56], "F2")];
+    v2.pages[2].image = Some(200);
+    v2.pages.push(PageSpec { lines: vec![(72.0, 740.0, "Signature page".into()), (72.0, 700.0, "Signed by the Tenant and the Landlord.".into())], ..Default::default() });
+    std::fs::write(dir.join("Lease v1.pdf"), build(&v1)).unwrap();
+    std::fs::write(dir.join("Lease v2.pdf"), build(&v2)).unwrap();
+    let big1 = base(1200);
+    let mut big2 = big1.clone();
+    for k in (0..1200).step_by(25) {
+        big2.pages[k].lines[3].2 = format!("this line was rewritten on page {}", k + 1);
+    }
+    std::fs::write(dir.join("Big v1.pdf"), build(&big1)).unwrap();
+    std::fs::write(dir.join("Big v2.pdf"), build(&big2)).unwrap();
 }

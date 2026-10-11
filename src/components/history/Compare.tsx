@@ -1,72 +1,121 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { type Comparison, type Rect4, type Source, type VersionInfo, historyCompare, historyVisualDiff, sourceKey } from "../../lib/history";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { pickOpen } from "../../lib/api";
+import {
+  type CompareProgress,
+  type Comparison,
+  type Rect4,
+  type Source,
+  type VersionInfo,
+  compareCancel,
+  historyCompareReport,
+  historyCompareRun,
+  historyVisualDiff,
+  sourceKey,
+} from "../../lib/history";
 import {
   CATEGORIES,
   type Category,
   type Mark,
   alignRows,
   categoryCounts,
-  clock,
+  differencesWord,
   flatOrder,
   groupChanges,
   marksFor,
   pageSummary,
+  progressFraction,
+  progressLabel,
   rowOf,
   stepIndex,
-  trackDays,
+  summaryChips,
   uncovered,
   versionTitle,
   when,
 } from "../../lib/historyLogic";
 import { type CompareReq, useHistory } from "../../lib/historyStore";
+import { useStore } from "../../store";
 import { Icon } from "../Icons";
+import { CompareSetup } from "./CompareSetup";
 import { PageImg, SCALE, clearPageCache } from "./PageImg";
+import { PageStrips, clearThumbs } from "./PageStrip";
 import { RevRow } from "./RevRow";
 
 type Mode = "twoup" | "swipe" | "onion";
 const MODES: { id: Mode; label: string }[] = [
-  { id: "twoup", label: "2-up" },
-  { id: "swipe", label: "Swipe" },
-  { id: "onion", label: "Onion skin" },
+  { id: "twoup", label: "Side by side" },
+  { id: "swipe", label: "Slider" },
+  { id: "onion", label: "Overlay" },
 ];
 
 const EMPTY_VERSIONS: VersionInfo[] = [];
+/** Job ids of this view; far from the tools' counters so `tool_cancel` never meets another job. */
+let jobSeq = 2_000_000_000;
+const FILE = "__file";
+const toast = (error: string) => useStore.getState().setUi({ error });
+const baseName = (p: string) => p.split(/[\/]/).pop() || "file";
 const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-/** Compare mode: the whole window, two sources, their differences on the pages and in a list. */
+/** Compare mode: the whole window. First the setup page when asked for, then the comparison. */
 export function CompareView() {
+  const setup = useHistory((s) => s.compare?.stage === "setup");
+  return setup ? <CompareSetup /> : <CompareResult />;
+}
+
+/** Two sources, their differences on the pages and in a list. */
+function CompareResult() {
   const req = useHistory((s) => s.compare)!;
   const versions = useHistory((s) => (req.doc != null ? (s.docs[req.doc]?.versions ?? EMPTY_VERSIONS) : EMPTY_VERSIONS));
   const h = useHistory.getState();
   const [mode, setMode] = useState<Mode>("twoup");
   const [diffs, setDiffs] = useState(true);
   const [cmp, setCmp] = useState<Comparison | "loading" | { error: string }>("loading");
+  const [progress, setProgress] = useState<CompareProgress | null>(null);
+  const [job, setJob] = useState(0);
+  const [report, setReport] = useState<{ job: number; progress: CompareProgress | null } | null>(null);
+  const [run, setRun] = useState(0);
   const [cur, setCur] = useState<number | null>(null);
   const [flash, setFlash] = useState(0);
-  const [cats, setCats] = useState<Set<Category> | null>(null);
+  const [cats, setCats] = useState<Set<Category> | null>(() => (req.show ? new Set(req.show) : null));
+  const [active, setActive] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const aKey = sourceKey(req.a);
   const bKey = sourceKey(req.b);
 
-  useEffect(() => () => clearPageCache(), []);
+  useEffect(
+    () => () => {
+      clearPageCache();
+      clearThumbs();
+    },
+    [],
+  );
 
   useEffect(() => {
     let live = true;
+    let finished = false;
+    const id = ++jobSeq;
     setCmp("loading");
     setCur(null);
-    historyCompare(req.doc, req.a, req.b).then(
+    setProgress(null);
+    setJob(id);
+    historyCompareRun(id, req.doc, req.a, req.b, (p) => live && setProgress(p)).then(
       (c) => {
+        finished = true;
         if (!live) return;
         setCmp(c);
         setCur(c.changes.length ? 0 : null);
       },
-      (e) => live && setCmp({ error: String(e) }),
+      (e) => {
+        finished = true;
+        if (live) setCmp({ error: String(e) });
+      },
     );
     return () => {
       live = false;
+      // a job that already finished has nothing to stop
+      if (!finished) void compareCancel(id).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [req.doc, aKey, bKey]);
+  }, [req.doc, aKey, bKey, run]);
 
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
@@ -108,6 +157,45 @@ export function CompareView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cur, flash, done]);
 
+  const changedPages = useMemo<[Set<number>, Set<number>]>(() => {
+    const a = new Set<number>();
+    const b = new Set<number>();
+    for (const c of done?.changes ?? []) {
+      if (c.aPage !== null) a.add(c.aPage);
+      if (c.bPage !== null) b.add(c.bPage);
+    }
+    return [a, b];
+  }, [done]);
+
+  const scrollToRow = (r: number) => {
+    const row = scroller.current?.querySelector<HTMLElement>(`[data-row="${r}"]`);
+    if (!row || !scroller.current) return;
+    setActive(r);
+    scroller.current.scrollTo({ top: Math.max(0, row.offsetTop - 12), behavior: reduced() ? "auto" : "smooth" });
+  };
+
+  // The row at the top of the panes lights its pages in the strips; one frame at most per scroll burst.
+  const frame = useRef(0);
+  const onScroll = () => {
+    if (frame.current) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      const s = scroller.current;
+      if (!s) return;
+      const rowsEl = s.querySelectorAll<HTMLElement>(".hx-crow");
+      let lo = 0;
+      let hi = rowsEl.length - 1;
+      const line = s.scrollTop + s.clientHeight * 0.5;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (rowsEl[mid].offsetTop <= line) lo = mid;
+        else hi = mid - 1;
+      }
+      setActive(lo);
+    });
+  };
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
+
   const step = (d: 1 | -1) => {
     const pos = cur === null ? -1 : order.indexOf(cur);
     const n = stepIndex(pos, d, order.length);
@@ -123,11 +211,40 @@ export function CompareView() {
     setVar("--onion", slider);
   }, [slider, mode, done]);
 
-  const pick = (side: "a" | "b", value: string) => {
-    const src: Source = value === "current" ? { kind: "current" } : { kind: "version", id: value };
-    h.setCompare(side === "a" ? { a: src } : { b: src });
-  };
   const names = labelsOf(req, versions);
+  const chooseFile = async (side: "a" | "b") => {
+    try {
+      const f = (await pickOpen(false, "compare"))[0];
+      if (!f) return;
+      const next: [string, string] = side === "a" ? [baseName(f.path), names[1]] : [names[0], baseName(f.path)];
+      h.setCompare({ [side]: { kind: "picked", token: f.token }, names: next });
+    } catch (e) {
+      toast(`Could not pick the file: ${String(e)}`);
+    }
+  };
+  const pick = (side: "a" | "b", value: string) => {
+    if (value === FILE) return void chooseFile(side);
+    const src: Source = value === "current" ? { kind: "current" } : { kind: "version", id: value };
+    // a picked file's name does not describe the document or version that replaces it
+    const next: [string, string] = side === "a" ? ["", names[1]] : [names[0], ""];
+    h.setCompare(side === "a" ? { a: src, names: next } : { b: src, names: next });
+  };
+  const swap = () => h.setCompare({ a: req.b, b: req.a, names: [names[1], names[0]] });
+  const exportReport = async () => {
+    const id = ++jobSeq;
+    const stem = (names[1] || "comparison").replace(/\.pdf$/i, "");
+    setReport({ job: id, progress: null });
+    try {
+      const dest = await historyCompareReport(id, req.doc, req.a, req.b, names, `${stem} comparison report.pdf`, (progress) =>
+        setReport((r) => (r && r.job === id ? { job: id, progress } : r)),
+      );
+      if (dest) toast(`Saved the comparison report as ${baseName(dest)}`);
+    } catch (e) {
+      if (!/cancelled/.test(String(e))) toast(`Could not write the report: ${String(e)}`);
+    } finally {
+      setReport(null);
+    }
+  };
 
   return (
     <div className="hx-compare">
@@ -147,17 +264,17 @@ export function CompareView() {
         </label>
         {mode !== "twoup" && (
           <label className="hx-slider">
-            <span className="dim">{mode === "swipe" ? "Position" : "Before"}</span>
+            <span className="dim">{mode === "swipe" ? "Position" : "Old"}</span>
             <input
               type="range"
               min={0}
               max={1}
               step={0.01}
               value={slider}
-              aria-label={mode === "swipe" ? "Swipe position" : "Onion skin opacity"}
+              aria-label={mode === "swipe" ? "Slider position" : "Overlay: old to new"}
               onChange={(e) => setSlider(Number(e.target.value))}
             />
-            {mode === "onion" && <span className="dim">After</span>}
+            {mode === "onion" && <span className="dim">New</span>}
           </label>
         )}
         <span className="grow" />
@@ -174,15 +291,65 @@ export function CompareView() {
           Done
         </button>
       </div>
+      {done && (
+        <div className="hx-csum" aria-label="Summary">
+          <strong>{differencesWord(done.changes.length)}</strong>
+          {counts &&
+            summaryChips(counts).map((c) => {
+              const on = !!cats && cats.size === 1 && cats.has(c.id);
+              return (
+                <button key={c.id} className={`hx-chip btn${on ? " on" : ""}`} aria-pressed={on} onClick={() => setCats(on ? null : new Set([c.id]))}>
+                  {c.n} {c.label}
+                </button>
+              );
+            })}
+          <span className="grow" />
+          {report ? (
+            <>
+              <span className="dim">{progressLabel(report.progress)}</span>
+              <button className="hx-btn" onClick={() => void compareCancel(report.job)}>
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button className="hx-btn" disabled={done.changes.length === 0 && done.identical} onClick={() => void exportReport()}>
+              Export report
+            </button>
+          )}
+        </div>
+      )}
       <div className="hx-cbody">
         <div className="hx-cview">
           <div className={`hx-tags${mode === "twoup" ? "" : " one"}`}>
-            <Picker side="a" label="Before" req={req} versions={versions} name={names[0]} onPick={pick} />
-            <Picker side="b" label="After" req={req} versions={versions} name={names[1]} onPick={pick} />
+            <Picker side="a" label="Old" req={req} versions={versions} name={names[0]} onPick={pick} />
+            <Picker side="b" label="New" req={req} versions={versions} name={names[1]} onPick={pick} swap={swap} />
           </div>
-          <div className="hx-cscroll" ref={scroller} data-mode={mode} onPointerMove={(e) => mode === "swipe" && swipeTo(e, scroller.current!)}>
-            {cmp === "loading" && <p className="hx-cmsg dim">Comparing{"…"}</p>}
-            {typeof cmp === "object" && "error" in cmp && <p className="hx-cmsg">{cmp.error}</p>}
+          <div
+            className="hx-cscroll"
+            ref={scroller}
+            data-mode={mode}
+            onScroll={onScroll}
+            onPointerMove={(e) => mode === "swipe" && swipeTo(e, scroller.current!)}
+          >
+            {cmp === "loading" && (
+              <div className="hx-cprog" role="status">
+                <progress max={1} value={progressFraction(progress)} aria-label="Comparison progress" />
+                <span className="dim">{progressLabel(progress)}</span>
+                <button className="hx-btn" onClick={() => void compareCancel(job)}>
+                  Cancel
+                </button>
+              </div>
+            )}
+            {typeof cmp === "object" && "error" in cmp && (
+              <div className="hx-cmsg">
+                <p>{/cancelled/.test(cmp.error) ? "The comparison was cancelled." : cmp.error}</p>
+                {/cancelled/.test(cmp.error) && (
+                  <button className="hx-btn" onClick={() => setRun((n) => n + 1)}>
+                    Compare again
+                  </button>
+                )}
+              </div>
+            )}
             {done &&
               rows.map((row, i) => (
                 <CompareRow
@@ -250,67 +417,19 @@ export function CompareView() {
           )}
         </aside>
       </div>
-      {req.doc !== null && versions.length > 0 && <VersionTrack req={req} versions={versions} onSet={pick} />}
-    </div>
-  );
-}
-
-/** The versions along the bottom, oldest first by day. Click sets After; Alt/Shift-click or the toggle sets Before. */
-function VersionTrack({ req, versions, onSet }: { req: CompareReq; versions: VersionInfo[]; onSet: (side: "a" | "b", value: string) => void }) {
-  const [target, setTarget] = useState<"a" | "b">("b");
-  const days = useMemo(() => trackDays(versions, Date.now()), [versions]);
-  const strip = useRef<HTMLDivElement>(null);
-  const is = (src: Source, id: string) => (id === "current" ? src.kind === "current" : src.kind === "version" && src.id === id);
-  const move = (e: React.KeyboardEvent) => {
-    const dir = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
-    if (!dir) return;
-    const all = [...(strip.current?.querySelectorAll<HTMLButtonElement>("button.hx-node") ?? [])];
-    const i = all.indexOf(document.activeElement as HTMLButtonElement);
-    all[Math.min(all.length - 1, Math.max(0, i + dir))]?.focus();
-    e.preventDefault();
-  };
-  const node = (id: string, title: string, time: string) => {
-    const a = is(req.a, id);
-    const b = is(req.b, id);
-    return (
-      <button
-        key={id}
-        className={`hx-node${a ? " is-a" : ""}${b ? " is-b" : ""}`}
-        aria-pressed={a || b}
-        aria-label={`${title}, ${time}${a ? ", Before" : ""}${b ? ", After" : ""}`}
-        title={`${title} · click: After, Alt-click: Before`}
-        onClick={(e) => onSet(e.altKey || e.shiftKey || target === "a" ? "a" : "b", id)}
-      >
-        {a && <i className="hx-handle-a" aria-hidden>Before</i>}
-        {b && <i className="hx-handle-b" aria-hidden>After</i>}
-        <span className="hx-dot" aria-hidden />
-        <span className="hx-node-time">{time}</span>
-      </button>
-    );
-  };
-  return (
-    <div className="hx-track" aria-label="Versions">
-      <strong className="hx-track-title">Versions</strong>
-      <div className="hx-seg inline" role="group" aria-label="A click sets">
-        <button className={target === "a" ? "on" : ""} aria-pressed={target === "a"} onClick={() => setTarget("a")}>
-          Before
-        </button>
-        <button className={target === "b" ? "on" : ""} aria-pressed={target === "b"} onClick={() => setTarget("b")}>
-          After
-        </button>
-      </div>
-      <div className="hx-strip" ref={strip} onKeyDown={move}>
-        {days.map((d) => (
-          <div key={d.key} className="hx-track-day">
-            <span className="hx-track-label">{d.label}</span>
-            <div className="hx-track-items">{d.items.map((v) => node(v.id, versionTitle(v), clock(v.created)))}</div>
-          </div>
-        ))}
-        <div className="hx-track-day">
-          <span className="hx-track-label">Now</span>
-          <div className="hx-track-items">{node("current", "Current file", "file")}</div>
-        </div>
-      </div>
+      {done && (
+        <PageStrips
+          doc={req.doc}
+          a={req.a}
+          b={req.b}
+          names={names}
+          pages={[done.pages.aPages, done.pages.bPages]}
+          rows={rows}
+          active={active}
+          changed={changedPages}
+          onGo={scrollToRow}
+        />
+      )}
     </div>
   );
 }
@@ -323,13 +442,13 @@ function swipeTo(e: React.PointerEvent, scroller: HTMLElement) {
 }
 
 function labelsOf(req: CompareReq, versions: VersionInfo[]): [string, string] {
-  if (req.names) return req.names;
-  const one = (s: Source) => {
-    if (s.kind === "current") return "Current file";
+  const one = (s: Source, i: number) => {
+    if (s.kind === "picked") return req.names?.[i] || "File";
+    if (s.kind === "current") return req.names?.[i] || "Current file";
     const v = versions.find((x) => x.id === (s.kind === "version" ? s.id : ""));
     return v ? `${versionTitle(v)} · ${when(v.created, Date.now())}` : "Version";
   };
-  return [one(req.a), one(req.b)];
+  return [one(req.a, 0), one(req.b, 1)];
 }
 
 function Picker({
@@ -339,6 +458,7 @@ function Picker({
   versions,
   name,
   onPick,
+  swap,
 }: {
   side: "a" | "b";
   label: string;
@@ -346,31 +466,53 @@ function Picker({
   versions: VersionInfo[];
   name: string;
   onPick: (side: "a" | "b", v: string) => void;
+  swap?: () => void;
 }) {
   const src = side === "a" ? req.a : req.b;
-  const value = src.kind === "version" ? src.id : "current";
+  const value = src.kind === "version" ? src.id : src.kind === "picked" ? FILE : "current";
   return (
     <div className="hx-tag">
       <span className="hx-tag-label">{label}</span>
-      {req.doc !== null && versions.length > 0 ? (
-        <select value={value} aria-label={`${label} version`} onChange={(e) => onPick(side, e.target.value)}>
+      {req.doc !== null ? (
+        <select value={value} aria-label={`${label} file or version`} onChange={(e) => onPick(side, e.target.value)}>
           <option value="current">Current file</option>
           {versions.map((v) => (
             <option key={v.id} value={v.id}>
               {versionTitle(v)} {"·"} {when(v.created, Date.now())}
             </option>
           ))}
+          <option value={FILE}>{src.kind === "picked" ? name : "Another file\u2026"}</option>
         </select>
       ) : (
-        <span className="hx-tag-name" title={name}>
-          {name}
-        </span>
+        <>
+          <span className="hx-tag-name" title={name}>
+            {name}
+          </span>
+          <button className="hx-btn" onClick={() => onPick(side, FILE)}>
+            Change{"…"}
+          </button>
+        </>
+      )}
+      {swap && (
+        <button className="icon-btn hx-swap" title="Swap before and after" aria-label="Swap before and after" onClick={swap}>
+          <Icon name="swap" size={14} />
+        </button>
       )}
     </div>
   );
 }
 
 let lastRatio = 1.294;
+
+interface Link {
+  change: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+const sameLinks = (a: Link[], b: Link[]) =>
+  a.length === b.length && a.every((l, i) => l.change === b[i].change && l.x1 === b[i].x1 && l.y1 === b[i].y1 && l.x2 === b[i].x2 && l.y2 === b[i].y2);
 
 function CompareRow({
   index,
@@ -430,6 +572,61 @@ function CompareRow({
   }, [diffs, seen, row.a, row.b, sourceKey(req.a), sourceKey(req.b), ma, mb]);
 
   const vboxes = useMemo(() => (diffs ? uncovered(vb, [...(ma ?? []), ...(mb ?? [])]) : undefined), [diffs, vb, ma, mb]);
+
+  // Dashed connectors: a change that has a box on both pages is tied across the gap, along the foot of its boxes (so the line
+  // never reads as a strike-through), measured from the boxes themselves.
+  const [links, setLinks] = useState<Link[]>([]);
+  useLayoutEffect(() => {
+    const row = el.current;
+    if (!row || mode !== "twoup" || !diffs) return setLinks((l) => (l.length ? [] : l));
+    let raf = 0;
+    const measure = () => {
+      raf = 0;
+      const cells = row.querySelectorAll<HTMLElement>(":scope > .hx-cell");
+      if (cells.length !== 2) return;
+      const at = row.getBoundingClientRect();
+      const boxes = (cell: HTMLElement) => {
+        const m = new Map<number, DOMRect[]>();
+        for (const n of cell.querySelectorAll<HTMLElement>(".hx-mark:not(.whole)")) {
+          const k = Number(n.dataset.change);
+          const l = m.get(k) ?? [];
+          l.push(n.getBoundingClientRect());
+          m.set(k, l);
+        }
+        return m;
+      };
+      const A = boxes(cells[0]);
+      const B = boxes(cells[1]);
+      const out: Link[] = [];
+      for (const [change, ra] of A) {
+        const rb = B.get(change);
+        if (!rb) continue;
+        for (let i = 0; i < Math.min(ra.length, rb.length); i++) {
+          out.push({
+            change,
+            x1: Math.round(ra[i].right - at.left),
+            y1: Math.round(ra[i].bottom - at.top),
+            x2: Math.round(rb[i].left - at.left),
+            y2: Math.round(rb[i].bottom - at.top),
+          });
+        }
+      }
+      setLinks((prev) => (sameLinks(prev, out) ? prev : out));
+    };
+    const sched = () => {
+      if (!raf) raf = requestAnimationFrame(measure);
+    };
+    const mo = new MutationObserver(sched);
+    mo.observe(row, { childList: true, subtree: true });
+    const ro = new ResizeObserver(sched);
+    ro.observe(row);
+    sched();
+    return () => {
+      mo.disconnect();
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, [mode, diffs]);
   const cell = (side: "a" | "b") => {
     const page = side === "a" ? row.a : row.b;
     if (page === null)
@@ -457,6 +654,13 @@ function CompareRow({
 
   return (
     <div ref={el} className="hx-crow" data-row={index}>
+      {mode === "twoup" && links.length > 0 && (
+        <svg className="hx-links" aria-hidden>
+          {links.map((l, i) => (
+            <line key={i} className={l.change === cur ? "cur" : undefined} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} />
+          ))}
+        </svg>
+      )}
       {mode === "twoup" ? (
         <>
           <div className="hx-cell">{cell("a")}</div>
