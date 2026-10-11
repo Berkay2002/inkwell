@@ -146,6 +146,88 @@ export interface EditState {
 export const editApply = (doc: number, op: EditOp) => invoke<EditState>("edit_apply", { doc, op });
 export const editUndo = (doc: number) => invoke<EditState>("edit_undo", { doc });
 export const editRedo = (doc: number) => invoke<EditState>("edit_redo", { doc });
+export const editState = (doc: number) => invoke<EditState>("edit_state", { doc });
+
+// ---- editing existing text (src-tauri/src/textedit, docs/text-edit.md) ----
+
+export type TextAlign = "left" | "center" | "right" | "justify";
+/** Why a block can't be edited. `hidden` text is not offered at all. */
+export type TextIssue = "type3" | "noUnicode" | "vertical" | "encoding" | "clip" | "invisible" | "hidden";
+
+export interface TextBlock {
+  /** Pass to `textEdit` with the `rev` of the list it came from. */
+  index: number;
+  text: string;
+  /** x0, y0, x1, y1 in page space (the page as shown, y down). */
+  rect: [number, number, number, number];
+  lines: [number, number, number, number][];
+  /** `/BaseFont`, the subset prefix kept. */
+  font: string;
+  size: number;
+  bold: boolean;
+  italic: boolean;
+  /** RGB 0..1. */
+  color: [number, number, number];
+  align: TextAlign;
+  /** Distance between lines over the font size; null for a single line. */
+  lineSpacing: number | null;
+  editable: boolean;
+  issue: TextIssue | null;
+  reason: string | null;
+}
+
+export interface TextArea {
+  rect: [number, number, number, number];
+  issue: "inForm" | "outlines";
+  reason: string;
+}
+
+export interface TextBlocks {
+  rev: number;
+  blocks: TextBlock[];
+  areas: TextArea[];
+}
+
+/** Unset fields keep the block's own. `offset` and `width` are in page space. */
+export interface BlockChange {
+  text?: string;
+  size?: number;
+  color?: [number, number, number];
+  align?: TextAlign;
+  offset?: [number, number];
+  width?: number;
+  lineSpacing?: number;
+  bold?: boolean;
+  italic?: boolean;
+}
+
+/** Set when the block's font could not show the text and another one was used. */
+export interface TextFallback {
+  font: string;
+  embedded: boolean;
+  reason: string;
+}
+
+export interface TextEdited {
+  state: EditState;
+  fallback: TextFallback | null;
+}
+
+export interface NewTextBox {
+  text: string;
+  size: number;
+  color: [number, number, number];
+  /** Top left of the box in page space. */
+  at: [number, number];
+  /** Wrap to this width; unset keeps the lines as typed. */
+  width?: number;
+}
+
+export const textBlocks = (doc: number, page: number) => invoke<TextBlocks>("text_blocks", { doc, page });
+export const textEdit = (doc: number, rev: number, page: number, index: number, change: BlockChange) =>
+  invoke<TextEdited>("text_edit", { doc, rev, page, index, change });
+export const textAdd = (doc: number, rev: number, page: number, newText: NewTextBox) =>
+  invoke<EditState>("text_add", { doc, rev, page, new: newText });
 /** `to`: a save token (Save as). */
 export const saveDocument = (doc: number, to?: string) => invoke<EditState>("save_document", { doc, to: to ?? null });
 /** `out`: a save token. */
@@ -154,6 +236,59 @@ export const extractPages = (doc: number, pages: number[], out: string, deleteAf
 export const splitDocument = (doc: number, every: number) => invoke<{ files: string[] }>("split_document", { doc, every });
 /** `files`: open tokens; `out`: a save token. Returns the result to open. */
 export const mergeFiles = (files: string[], out: string) => invoke<FileRef>("merge_files", { files, out });
+
+// ---- password security (src-tauri/src/protect) ----
+
+export type Printing = "none" | "low" | "high";
+export type Changes = "none" | "pages" | "forms" | "comments" | "allButExtract";
+export type Cipher = "aes256" | "aes128";
+
+/** What to set. Passwords stay in this object only until the command returns. */
+export interface ProtectSpec {
+  openPassword: string | null;
+  permissionsPassword: string | null;
+  printing: Printing;
+  changes: Changes;
+  copy: boolean;
+  accessibility: boolean;
+  cipher: Cipher;
+}
+
+export interface Rights {
+  printing: Printing;
+  modify: boolean;
+  annotate: boolean;
+  forms: boolean;
+  assemble: boolean;
+  copy: boolean;
+  accessibility: boolean;
+}
+
+export interface SecurityInfo {
+  encrypted: boolean;
+  /** "AES-256", "AES-128", "RC4 128-bit" ... */
+  method: string | null;
+  revision: number | null;
+  openPassword: boolean;
+  rights: Rights;
+  restricted: boolean;
+  /** This session may change or remove the security without a permissions password. */
+  unlocked: boolean;
+  /** Where it comes from: the file as opened, set in this session, or removed in this session. */
+  origin: "file" | "set" | "removed";
+  /** Set or removed here and not saved yet. */
+  unsaved: boolean;
+}
+
+export const securityInfo = (doc: number) => invoke<SecurityInfo>("security_info", { doc });
+/** One undo step; Save or Save as writes it. `permissionsPassword`: only when the file already has restrictions. */
+export const protectApply = (doc: number, spec: ProtectSpec, permissionsPassword?: string | null) =>
+  invoke<EditState>("protect_apply", { doc, spec, permissionsPassword: permissionsPassword ?? null });
+/** Protects and saves in one step (over the file, or to a `pick_save` token); a failed save takes the protection back. */
+export const protectAndSave = (doc: number, spec: ProtectSpec, permissionsPassword?: string | null, to?: string) =>
+  invoke<EditState>("protect_and_save", { doc, spec, permissionsPassword: permissionsPassword ?? null, to: to ?? null });
+export const removeSecurity = (doc: number, permissionsPassword?: string | null) =>
+  invoke<EditState>("remove_security", { doc, permissionsPassword: permissionsPassword ?? null });
 
 // ---- compress and OCR (src-tauri/src/tools/mod.rs) ----
 

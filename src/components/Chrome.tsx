@@ -4,6 +4,7 @@ import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { openA11y } from "../lib/a11y";
 import { useConvert } from "../lib/convertStore";
+import { useProtect } from "../lib/protectStore";
 import { useTools } from "../lib/toolsStore";
 import { type DocState, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
@@ -11,6 +12,7 @@ import { HistoryToggle, openCompareSetup } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
 import { MenuButton } from "./Menu";
 import { CommentsToggle } from "./comments/CommentsPanel";
+import { FormsToggle } from "./forms/FormsPanel";
 import { RedactToggle } from "./redact/RedactPanel";
 import { ModeSwitch } from "./Organize";
 import { WindowControls } from "./WindowControls";
@@ -21,6 +23,7 @@ export function TabBar() {
   const order = useStore((s) => s.order);
   const docs = useStore((s) => s.docs);
   const active = useStore((s) => s.active);
+  const security = useProtect((s) => s.security);
   return (
     <div className="tabbar" role="tablist" data-tauri-drag-region>
       <span className="brand" data-tauri-drag-region>
@@ -53,6 +56,11 @@ export function TabBar() {
           }}
         >
           <Icon name="file" size={14} />
+          {security[id]?.encrypted && (
+            <span className="tab-lock" title={security[id].openPassword ? "Opens with a password" : "Has password restrictions"}>
+              <Icon name="lock" size={12} />
+            </span>
+          )}
           <span className="tab-name">{docs[id].name}</span>
           {docs[id].dirty && <span className="tab-dirty" title="Unsaved changes" />}
           <button
@@ -119,6 +127,8 @@ export function Toolbar({ doc }: { doc: DocState }) {
           items={[
             { label: "Compress file…", onSelect: () => useTools.getState().open("compress", id) },
             { label: "Recognize text…", onSelect: () => useTools.getState().open("ocr", id) },
+            { label: "Protect with a password…", onSelect: () => useProtect.getState().open("protect", id) },
+            { label: "Security…", onSelect: () => useProtect.getState().open("security", id) },
             { label: "Compare files…", onSelect: () => void openCompareSetup({ id, name: doc.name }) },
             { label: "Check accessibility…", onSelect: openA11y },
             { label: "Export…", onSelect: () => useConvert.getState().openExport(id) },
@@ -128,6 +138,7 @@ export function Toolbar({ doc }: { doc: DocState }) {
           Tools
         </MenuButton>
         <CommentsToggle />
+        <FormsToggle />
         <RedactToggle />
         <HistoryToggle />
         <AssistantToggle />

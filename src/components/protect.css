@@ -1,0 +1,128 @@
+/* Protect and Security rail, and the restricted-file notice. The rail chrome is assistant.css and
+   tools.css; this adds the groups, the strength meter and the rows. Tokens: the app's own. */
+.pr .ax-body {
+  gap: 8px;
+}
+.pr-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 12px;
+  border-bottom: 1px solid var(--ax-border);
+}
+.pr-group .tl-switch {
+  margin-top: 0;
+}
+.pr-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pr-field .tl-label {
+  margin-top: 0;
+}
+.pr-note {
+  margin: 0;
+}
+.pr-meter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 16px;
+}
+.pr-segs {
+  display: flex;
+  gap: 3px;
+  flex: none;
+}
+.pr-segs span {
+  width: 22px;
+  height: 4px;
+  background: var(--ax-border);
+  border-radius: 2px;
+  transition: background-color 80ms linear;
+}
+.pr-segs span.on {
+  background: var(--ax-accent);
+}
+.pr-strength {
+  font-size: 12px;
+  color: var(--ax-dim);
+}
+.pr-warn {
+  margin: 4px 0 0;
+}
+.pr-outcome {
+  margin: 4px 0 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ax-text);
+}
+.pr-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ax-dim);
+}
+.pr-quiet:hover:not(:disabled) {
+  color: var(--ax-text);
+  background: var(--ax-surface);
+}
+.pr-rows {
+  display: flex;
+  flex-direction: column;
+  margin: 4px 0 0;
+}
+.pr-rows > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ax-border);
+}
+.pr-file {
+  margin-top: 0;
+}
+.pr-rows dt {
+  color: var(--ax-dim);
+}
+.pr-rows dd {
+  margin: 0;
+  text-align: right;
+}
+
+/* over the page, like the history banner */
+.pr-notice {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  max-width: min(720px, calc(100% - 32px));
+  padding: 8px 8px 8px 14px;
+  font-size: 13px;
+  color: var(--text);
+  transform: translateX(-50%);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  box-shadow: var(--shadow-1);
+}
+.pr-notice svg {
+  flex: none;
+  color: var(--text-2);
+}
+.pr-notice .ax-icon {
+  flex: none;
+}
+.tab-lock {
+  flex: none;
+  color: var(--text-2);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pr-segs span {
+    transition: none;
+  }
+}

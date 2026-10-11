@@ -1,0 +1,101 @@
+//! Tauri commands for forms. The UI is the user; the assistant calls the functions in `super` with its turn.
+
+use super::{
+    Detected, FieldPatch, FieldValue, FormDto, NewField, add_many, add_one, arrange_one, delete_many, detect_one, edit_one, list_all, move_one, reset_one,
+    set_value_one, tab_order_one,
+};
+use crate::engine::edit::{EditSource, EditState};
+use crate::engine::{DocId, Engine, EngineError};
+use serde::Serialize;
+
+type Result<T> = std::result::Result<T, EngineError>;
+type Eng<'a> = tauri::State<'a, std::sync::Arc<Engine>>;
+
+async fn blocking<R: Send + 'static>(f: impl FnOnce() -> Result<R> + Send + 'static) -> Result<R> {
+    tauri::async_runtime::spawn_blocking(f).await.unwrap_or(Err(EngineError::Panic))
+}
+
+/// The edit state after a change, and the xref of what it created (0 when nothing was created).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Changed {
+    pub state: EditState,
+    pub xref: i32,
+}
+
+#[tauri::command]
+pub async fn forms_list(eng: Eng<'_>, doc: DocId) -> Result<FormDto> {
+    let eng = eng.inner().clone();
+    blocking(move || list_all(&eng, doc)).await
+}
+
+/// Fill a field. A value that fails the field's format or range is an error carrying Acrobat's message.
+#[tauri::command]
+pub async fn forms_set_value(eng: Eng<'_>, doc: DocId, page: u32, xref: i32, value: FieldValue) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || set_value_one(&eng, doc, page, xref, &value, EditSource::User)).await
+}
+
+/// Reset the listed fields (widget xrefs), or the whole form when `fields` is absent ("Clear form").
+#[tauri::command]
+pub async fn forms_reset(eng: Eng<'_>, doc: DocId, fields: Option<Vec<i32>>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || reset_one(&eng, doc, fields, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn forms_add(eng: Eng<'_>, doc: DocId, page: u32, what: NewField) -> Result<Changed> {
+    let eng = eng.inner().clone();
+    blocking(move || {
+        let (state, xref) = add_one(&eng, doc, page, &what, EditSource::User)?;
+        Ok(Changed { state, xref })
+    })
+    .await
+}
+
+/// Add several fields in one undo step (what "Detect fields" found).
+#[tauri::command]
+pub async fn forms_add_many(eng: Eng<'_>, doc: DocId, page: u32, items: Vec<NewField>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || add_many(&eng, doc, page, &items, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn forms_move(eng: Eng<'_>, doc: DocId, page: u32, xref: i32, rect: [f32; 4]) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || move_one(&eng, doc, page, xref, rect, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn forms_edit(eng: Eng<'_>, doc: DocId, page: u32, xref: i32, patch: FieldPatch) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || edit_one(&eng, doc, page, xref, &patch, EditSource::User)).await
+}
+
+/// `items`: `(page, xref)` pairs.
+#[tauri::command]
+pub async fn forms_delete(eng: Eng<'_>, doc: DocId, items: Vec<(u32, i32)>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || delete_many(&eng, doc, &items, EditSource::User)).await
+}
+
+/// The page's widgets in this order (widget xrefs); others follow.
+#[tauri::command]
+pub async fn forms_tab_order(eng: Eng<'_>, doc: DocId, page: u32, order: Vec<i32>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || tab_order_one(&eng, doc, page, &order, EditSource::User)).await
+}
+
+/// `by`: "row" or "column".
+#[tauri::command]
+pub async fn forms_arrange(eng: Eng<'_>, doc: DocId, page: u32, by: String) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || arrange_one(&eng, doc, page, by != "column", EditSource::User)).await
+}
+
+/// Where the page expects answers (nothing is changed).
+#[tauri::command]
+pub async fn forms_detect(eng: Eng<'_>, doc: DocId, page: u32) -> Result<Vec<Detected>> {
+    let eng = eng.inner().clone();
+    blocking(move || detect_one(&eng, doc, page)).await
+}

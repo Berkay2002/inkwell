@@ -1,6 +1,7 @@
 pub mod a11y;
 pub mod ai;
 pub mod annot;
+pub mod forms;
 pub mod compress;
 pub mod convert;
 pub mod diff;
@@ -10,6 +11,7 @@ pub mod history_ipc;
 pub mod ocr;
 pub mod paths;
 pub mod print;
+pub mod protect;
 pub mod recents;
 pub mod redact;
 pub mod textedit;
@@ -294,6 +296,13 @@ async fn edit_redo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
     blocking(move || eng.redo(doc)).await
 }
 
+/// The current state, changing nothing: what the UI asks for after a command that failed half way.
+#[tauri::command]
+async fn edit_state(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.edit_state(doc)).await
+}
+
 /// `to`: a save token (Save as); omitted: save over the document's own file.
 #[tauri::command]
 async fn save_document(
@@ -309,19 +318,49 @@ async fn save_document(
     let (eng, hist) = (eng.inner().clone(), hist.inner().clone());
     blocking(move || {
         let (state, saved) = eng.save_recorded(doc, to.as_deref())?;
-        if let Some(to) = &to {
-            window.state::<Paths>().learn(to);
-        }
-        match saved {
-            // Save as: the document is another file now, with a history of its own
-            Some(s) if s.moved => hist.spawn_open(app, doc, state.path.clone()),
-            // history errors never fail a save
-            Some(s) => match hist.saved(doc, &s) {
-                Ok(_) => drop(app.emit("history-changed", doc)),
-                Err(e) => eprintln!("inkwell history: {e}"),
-            },
-            None => {}
-        }
+        after_save(&window, &app, &hist, doc, to.as_deref(), &state, saved);
+        Ok(state)
+    })
+    .await
+}
+
+/// What follows a save: the folder is remembered, and the version history records what was written.
+fn after_save(window: &Window, app: &tauri::AppHandle, hist: &Arc<History>, doc: DocId, to: Option<&str>, state: &EditState, saved: Option<engine::edit::Saved>) {
+    if let Some(to) = to {
+        window.state::<Paths>().learn(to);
+    }
+    match saved {
+        // Save as: the document is another file now, with a history of its own
+        Some(s) if s.moved => hist.spawn_open(app.clone(), doc, state.path.clone()),
+        // history errors never fail a save
+        Some(s) => match hist.saved(doc, &s) {
+            Ok(_) => drop(app.emit("history-changed", doc)),
+            Err(e) => eprintln!("inkwell history: {e}"),
+        },
+        None => {}
+    }
+}
+
+/// Protects the document and saves it (over its file, or to `to`, a save token) as one operation:
+/// when the save fails the protection is taken back, so nothing is left pending on the original.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn protect_and_save(
+    window: Window,
+    app: tauri::AppHandle,
+    eng: Eng<'_>,
+    reg: Reg<'_>,
+    hist: State<'_, Arc<History>>,
+    doc: DocId,
+    spec: protect::ProtectSpec,
+    permissions_password: Option<String>,
+    to: Option<String>,
+) -> Result<EditState, EngineError> {
+    let to = to.map(|t| reg.take_save(window.label(), &t)).transpose()?;
+    let (eng, hist) = (eng.inner().clone(), hist.inner().clone());
+    blocking(move || {
+        let (state, saved) = eng.protect_and_save(doc, spec, permissions_password.as_deref(), to.as_deref())?;
+        after_save(&window, &app, &hist, doc, to.as_deref(), &state, saved);
         Ok(state)
     })
     .await
@@ -736,6 +775,7 @@ pub fn run() {
             tile_raw,
             edit_apply,
             edit_undo,
+            edit_state,
             edit_redo,
             history_ipc::history_state,
             history_ipc::history_versions,
@@ -760,6 +800,10 @@ pub fn run() {
             compress_audit,
             compress_estimate,
             compress_start,
+            protect::app::security_info,
+            protect::app::protect_apply,
+            protect_and_save,
+            protect::app::remove_security,
             tool_cancel,
             ocr_languages,
             ocr_choose_tesseract,
@@ -781,8 +825,20 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            forms::app::forms_list,
+            forms::app::forms_set_value,
+            forms::app::forms_reset,
+            forms::app::forms_add,
+            forms::app::forms_add_many,
+            forms::app::forms_move,
+            forms::app::forms_edit,
+            forms::app::forms_delete,
+            forms::app::forms_tab_order,
+            forms::app::forms_arrange,
+            forms::app::forms_detect,
             textedit::app::text_blocks,
             textedit::app::text_edit,
+            textedit::app::text_add,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

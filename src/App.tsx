@@ -10,10 +10,13 @@ import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
 import { A11yPanel } from "./components/a11y/A11yPanel";
+import { EditPanel } from "./components/edit/EditPanel";
+import { FormTools, FormsPanel } from "./components/forms/FormsPanel";
 import { RedactPanel } from "./components/redact/RedactPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
 import { ConvertPanel } from "./components/ConvertPanel";
+import { ProtectPanel, SecurityNotice } from "./components/ProtectPanel";
 import { PrintSheet } from "./components/PrintSheet";
 import { ToolsPanel } from "./components/ToolsPanel";
 import { Viewer } from "./components/Viewer";
@@ -118,15 +121,20 @@ export default function App() {
                 {viewing ? <VersionView key={`${doc.id}:${viewing}`} doc={doc} versionId={viewing} /> : <Viewer key={doc.id} doc={doc} />}
                 {searchOpen && !viewing && <SearchBar key={doc.id} doc={doc} />}
                 <HistoryBanner doc={doc} />
+                <SecurityNotice doc={doc} />
                 <CommentTools doc={doc} />
+                <FormTools />
               </div>
               <ToolsPanel doc={doc} />
               <ConvertPanel doc={doc} />
+              <ProtectPanel doc={doc} />
               <AssistantPanel doc={doc} />
               <HistoryPanel doc={doc} />
               <RedactPanel doc={doc} />
               <A11yPanel doc={doc} />
               <CommentsPanel doc={doc} />
+              <EditPanel doc={doc} />
+              <FormsPanel doc={doc} />
             </div>
           )}
         </>
