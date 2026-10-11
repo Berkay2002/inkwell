@@ -71,6 +71,7 @@ const PATHS = {
   pushButton: "M3 8h18v8H3ZM8 12h8",
   signature: "M3 16c3-6 4-9 6-9s0 8 2 8 3-4 5-4 2 2 4 2M3 21h18",
   wand: "M15 4v3M13.5 5.5h3M19 11v2M18 12h2M5 20 15 10l-2-2L3 18ZM9 5v2M8 6h2",
+  code: "m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16",
   tools: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76Z",
   // a page with a half-filled circle on it (not the app theme's moon)
   pageDark: "M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM12 9a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 9v8",

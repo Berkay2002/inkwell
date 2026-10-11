@@ -13,6 +13,7 @@ pub mod app;
 pub mod attach;
 pub mod combine;
 pub mod labels;
+pub mod portfolio;
 #[cfg(test)]
 mod tests;
 pub mod threads;
@@ -22,6 +23,7 @@ pub(crate) use crate::forms::{bad, get, put_int, put_name, put_str};
 pub(crate) type Result<T> = std::result::Result<T, crate::engine::EngineError>;
 
 use attach::{Attachment, NewFile};
+use portfolio::{Extracted, PortfolioInfo};
 use labels::{LabelRange, LabelSpec};
 use threads::{Info, Thread};
 use trans::{PageTrans, TransChange};
@@ -148,7 +150,13 @@ pub fn attach_add(eng: &Engine, doc: DocId, files: Vec<NewFile>, source: EditSou
         [one] => format!("Attach {}", attach::clean_name(&one.name)),
         many => format!("Attach {} files", many.len()),
     };
-    eng.apply_custom(doc, label, source, false, |d| attach::add(d, &files))
+    eng.apply_custom(doc, label, source, false, |d| {
+        let before: std::collections::HashSet<String> = attach::tree(d)?.into_iter().map(|e| e.key).collect();
+        let pages = attach::add(d, &files)?;
+        // In a portfolio each new file also gets its collection item.
+        portfolio::after_add(d, &before)?;
+        Ok(pages)
+    })
 }
 
 /// Deleting runs as a removing edit: a save rewrites the file, so the bytes are really gone.
@@ -163,7 +171,11 @@ pub fn attach_remove(eng: &Engine, doc: DocId, ids: &[String], source: EditSourc
         [one] => format!("Delete attachment {one}"),
         many => format!("Delete {} attachments", many.len()),
     };
-    eng.apply_removing(doc, label, source, |d| attach::remove(d, ids))
+    eng.apply_removing(doc, label, source, |d| {
+        let pages = attach::remove(d, ids)?;
+        portfolio::after_remove(d)?;
+        Ok(pages)
+    })
 }
 
 pub fn attach_describe(eng: &Engine, doc: DocId, id: &str, text: &str, source: EditSource) -> Result<EditState> {
@@ -177,7 +189,23 @@ pub fn attach_describe(eng: &Engine, doc: DocId, id: &str, text: &str, source: E
     if same {
         return eng.edit_state(doc);
     }
-    eng.apply_custom(doc, format!("Describe attachment {name}"), source, false, |d| attach::describe(d, id, text))
+    eng.apply_custom(doc, format!("Describe attachment {name}"), source, false, |d| {
+        let pages = attach::describe(d, id, text)?;
+        portfolio::after_describe(d, id, text)?;
+        Ok(pages)
+    })
+}
+
+// ---- portfolios ---------------------------------------------------------------------------------
+
+/// The portfolio view of the document, none when it is not a portfolio (no /Collection).
+pub fn portfolio_info(eng: &Engine, doc: DocId) -> Result<Option<PortfolioInfo>> {
+    eng.read_custom(doc, |d| portfolio::read(d))
+}
+
+/// Writes every file of the portfolio into `dir`, never replacing one. The document is not changed.
+pub fn portfolio_extract_all(eng: &Engine, doc: DocId, dir: &std::path::Path, written: &mut dyn FnMut(&std::path::Path)) -> Result<Extracted> {
+    eng.read_custom(doc, |d| portfolio::extract_all(d, dir, written))
 }
 
 // ---- article threads ----------------------------------------------------------------------------

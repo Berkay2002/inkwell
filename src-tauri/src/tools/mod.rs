@@ -117,7 +117,23 @@ impl Drop for JobGuard {
 
 impl Jobs {
     pub fn begin(self: &Arc<Self>, id: u64) -> JobGuard {
-        let cancel = self.flags.lock().entry(id).or_default().clone();
+        self.begin_inner(id, false).expect("a shared id always begins")
+    }
+
+    /// [`begin`](Self::begin) for an id nothing is running under: `None` when a job already has it
+    /// (two jobs under one id would share a cancel flag).
+    pub fn try_begin(self: &Arc<Self>, id: u64) -> Option<JobGuard> {
+        self.begin_inner(id, true)
+    }
+
+    fn begin_inner(self: &Arc<Self>, id: u64, exclusive: bool) -> Option<JobGuard> {
+        let cancel = {
+            let mut flags = self.flags.lock();
+            if exclusive && flags.contains_key(&id) {
+                return None;
+            }
+            flags.entry(id).or_default().clone()
+        };
         let mut r = self.rings.lock();
         r.ended.retain(|x| *x != id);
         if let Some(i) = r.early.iter().position(|x| *x == id) {
@@ -125,7 +141,7 @@ impl Jobs {
             cancel.store(true, Ordering::Relaxed);
         }
         drop(r);
-        JobGuard { jobs: self.clone(), id, cancel }
+        Some(JobGuard { jobs: self.clone(), id, cancel })
     }
 
     /// Stops a running job. A cancel for an id that has already finished is ignored; one for an id nobody began yet

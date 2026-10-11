@@ -8,13 +8,36 @@ use mupdf::pdf::{PdfDocument, PdfObject};
 use std::collections::{HashMap, HashSet};
 
 /// Standard structure types (PDF 1.7 and 2.0); anything else goes through the role map.
-const STANDARD: &[&str] = &[
+pub const STANDARD: &[&str] = &[
     "Document", "DocumentFragment", "Part", "Art", "Sect", "Div", "BlockQuote", "Caption", "TOC", "TOCI", "Index",
     "NonStruct", "Private", "Aside", "Title", "FENote", "P", "H", "H1", "H2", "H3", "H4", "H5", "H6", "L", "LI", "Lbl",
     "LBody", "Table", "TR", "TH", "TD", "THead", "TBody", "TFoot", "Span", "Quote", "Note", "Reference", "BibEntry",
     "Code", "Link", "Annot", "Ruby", "RB", "RT", "RP", "Warichu", "WT", "WP", "Figure", "Formula", "Form", "Sub", "Em",
     "Strong", "Artifact",
 ];
+
+pub fn is_standard(ty: &str) -> bool {
+    STANDARD.contains(&ty)
+}
+
+/// The standard structure types of PDF 1.7, the set PDF/UA-1 allows without a role map entry.
+pub const STANDARD_17: &[&str] = &[
+    "Document", "Part", "Art", "Sect", "Div", "BlockQuote", "Caption", "TOC", "TOCI", "Index", "NonStruct", "Private", "P", "H", "H1", "H2", "H3",
+    "H4", "H5", "H6", "L", "LI", "Lbl", "LBody", "Table", "TR", "TH", "TD", "THead", "TBody", "TFoot", "Span", "Quote", "Note", "Reference",
+    "BibEntry", "Code", "Link", "Annot", "Ruby", "RB", "RT", "RP", "Warichu", "WT", "WP", "Figure", "Formula", "Form",
+];
+
+pub fn is_standard_17(ty: &str) -> bool {
+    STANDARD_17.contains(&ty)
+}
+
+/// The highest marked-content id the editor accepts. Real pages have a few thousand at most; a file
+/// that names a larger one (`/K 2147483646`) would make a ParentTree array of that length.
+pub const MAX_MCID: i32 = 1_000_000;
+
+pub fn valid_mcid(m: i32) -> bool {
+    (0..=MAX_MCID).contains(&m)
+}
 
 /// Elements beyond this are not read (a guard against absurd trees).
 const MAX_ELEMENTS: usize = 500_000;
@@ -24,16 +47,31 @@ const MAX_DEPTH: usize = 256;
 pub struct Elem {
     /// The standard type after the role map (or the type as written if it maps to nothing).
     pub ty: String,
+    /// The type as written in /S.
+    pub raw: String,
     /// Object number (0 for a direct element).
     pub xref: i32,
     pub parent: Option<usize>,
     pub children: Vec<usize>,
     /// Has non-empty /Alt or /ActualText.
     pub alt: bool,
+    pub alt_text: Option<String>,
+    pub actual_text: Option<String>,
     /// Marked content or an object reference directly under it.
     pub content: bool,
     /// Marked-content ids it holds directly (on its page; references into form XObjects left out).
     pub mcids: Vec<i32>,
+    /// Every marked-content reference it holds directly as `(page, mcid)`, with the page each one
+    /// belongs to (its own /Pg, the element's, or inherited).
+    pub refs: Vec<(u32, i32)>,
+    /// `/Lang`, as written.
+    pub lang: Option<String>,
+    /// `/ID`, as written.
+    pub id: Option<String>,
+    /// The `/Headers` ids of its table attributes.
+    pub headers: Vec<String>,
+    /// References into form XObjects: `(stream object number, MCID)`.
+    pub stm: Vec<(i32, i32)>,
     /// Object numbers of the annotations it references (OBJR).
     pub annots: Vec<i32>,
     /// 0-based page (its own /Pg or inherited).
@@ -54,6 +92,12 @@ pub struct Tree {
     pub order: Vec<(u32, i32)>,
     /// Object numbers of every annotation an OBJR points at, with the referencing element.
     pub annot_owner: HashMap<i32, usize>,
+    /// The /RoleMap as written.
+    pub role_map: HashMap<String, String>,
+    /// Something was left out while reading: the tree is deeper or larger than the guards allow,
+    /// an element or kid is reachable twice, a marked-content id is out of range, or a reference
+    /// has no page. Edits and repairs refuse such a tree (they would write what they didn't read).
+    pub incomplete: bool,
 }
 
 pub fn xref_of(o: &PdfObject) -> Result<i32> {
@@ -102,6 +146,7 @@ impl Tree {
                 }
             }
         }
+        t.role_map = role_map.clone();
         let mut r = Reader { pages, role_map, seen: HashSet::new() };
         if let Some(k) = root.get_dict("K")? {
             let mut roots = Vec::new();
@@ -178,9 +223,11 @@ impl Reader<'_> {
 
     fn kids(&mut self, t: &mut Tree, k: &PdfObject, parent: Option<usize>, page: Option<u32>, out: &mut Vec<usize>, depth: usize) -> Result<()> {
         if depth > MAX_DEPTH || t.elems.len() >= MAX_ELEMENTS {
+            t.incomplete = true;
             return Ok(());
         }
         if k.is_indirect()? && !self.seen.insert(k.as_indirect()?) {
+            t.incomplete = true;
             return Ok(());
         }
         if k.is_array()? {
@@ -190,9 +237,14 @@ impl Reader<'_> {
         } else if k.is_int()? {
             if let Some(p) = parent {
                 t.elems[p].content = true;
-                if let Some(pg) = page {
-                    t.order.push((pg, k.as_int()?));
-                    t.elems[p].mcids.push(k.as_int()?);
+                let m = k.as_int()?;
+                match page {
+                    Some(pg) if valid_mcid(m) => {
+                        t.order.push((pg, m));
+                        t.elems[p].mcids.push(m);
+                        t.elems[p].refs.push((pg, m));
+                    }
+                    _ => t.incomplete = true,
                 }
             }
         } else if k.is_dict()? {
@@ -207,9 +259,16 @@ impl Reader<'_> {
                 if let Some(p) = parent {
                     t.elems[p].content = true;
                     let pg = self.page_of(d)?.or(page);
-                    if let (Some(pg), Some(m), None) = (pg, d.get_dict("MCID")?, d.get_dict("Stm")?) {
-                        t.order.push((pg, m.as_int()?));
-                        t.elems[p].mcids.push(m.as_int()?);
+                    let mcid = d.get_dict("MCID")?.and_then(|m| m.as_int().ok()).filter(|m| valid_mcid(*m));
+                    match (d.get_dict("Stm")?, mcid) {
+                        (Some(stm), Some(m)) if stm.is_indirect()? => t.elems[p].stm.push((stm.as_indirect()?, m)),
+                        (None, Some(m)) if pg.is_some() => {
+                            let pg = pg.unwrap_or_default();
+                            t.order.push((pg, m));
+                            t.elems[p].mcids.push(m);
+                            t.elems[p].refs.push((pg, m));
+                        }
+                        _ => t.incomplete = true,
                     }
                 }
                 return Ok(());
@@ -233,19 +292,30 @@ impl Reader<'_> {
         let Some(s) = name(d, "S")? else { return Ok(()) };
         let page = self.page_of(d)?.or(page);
         let mut attrs = HashMap::new();
+        let mut headers = Vec::new();
         if let Some(a) = d.get_dict("A")? {
             let list: Vec<PdfObject> = if a.is_array()? { a.array_iter()?.collect::<std::result::Result<_, _>>()? } else { vec![a] };
             for x in list.into_iter().filter(|x| x.is_dict().unwrap_or(false)) {
                 for kv in x.dict_iter()? {
                     let (k, v) = kv?;
+                    if k.as_name()?.as_slice() == b"Headers" && v.is_array()? {
+                        for h in v.array_iter()? {
+                            let h = h?;
+                            if h.is_string()? {
+                                headers.push(h.as_string().unwrap_or_default());
+                            }
+                        }
+                    }
                     let val = if v.is_string()? { v.as_string().unwrap_or_default() } else { v.to_string() };
                     attrs.insert(String::from_utf8_lossy(&k.as_name()?).into_owned(), val);
                 }
             }
         }
         let i = t.elems.len();
-        let alt = text(d, "Alt")?.is_some() || text(d, "ActualText")?.is_some();
-        t.elems.push(Elem { ty: self.standard(&s), xref: xref_of(d)?, parent, alt, page, attrs, ..Elem::default() });
+        let (alt_text, actual_text) = (text(d, "Alt")?, text(d, "ActualText")?);
+        let alt = alt_text.is_some() || actual_text.is_some();
+        let (lang, id) = (text(d, "Lang")?, text(d, "ID")?);
+        t.elems.push(Elem { ty: self.standard(&s), raw: s, xref: xref_of(d)?, parent, alt, alt_text, actual_text, page, attrs, lang, id, headers, ..Elem::default() });
         if let Some(p) = parent {
             t.elems[p].children.push(i);
         }

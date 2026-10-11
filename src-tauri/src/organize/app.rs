@@ -4,6 +4,7 @@
 use super::attach::{Attachment, MAX_ATTACH, NewFile, clean_name};
 use super::combine::{self, CombineOptions, Plan, SourceSpec};
 use super::labels::{LabelSpec, LabelStyle};
+use super::portfolio::{self, PortfolioInfo, Source};
 use super::threads::{Info, Thread};
 use super::trans::{PageTrans, TransChange};
 use super::{LabelsDto, attach_add, attach_data, attach_describe, attach_list, attach_remove, labels_apply, labels_clear, labels_get, thread_add_bead, thread_create, thread_delete, thread_delete_bead, thread_move_bead, thread_reorder, thread_set_info, threads_get, trans_get, trans_set};
@@ -73,11 +74,10 @@ pub async fn combine_run(window: Window, eng: Eng<'_>, reg: Reg<'_>, files: Vec<
 
 // ---- attachments --------------------------------------------------------------------------------
 
-/// Open dialog for any files to attach; open tokens come back.
-#[tauri::command]
-pub async fn pick_attachments(window: Window) -> Result<Vec<FileRef>> {
+/// Open dialog for any files, with a title Rust owns; open tokens come back.
+async fn pick_any(window: Window, title: &'static str) -> Result<Vec<FileRef>> {
     blocking(move || {
-        let d = window.dialog().file().set_parent(&window).set_title("Attach files");
+        let d = window.dialog().file().set_parent(&window).set_title(title);
         let reg = window.state::<Paths>();
         Ok(d.blocking_pick_files()
             .unwrap_or_default()
@@ -87,6 +87,12 @@ pub async fn pick_attachments(window: Window) -> Result<Vec<FileRef>> {
             .collect())
     })
     .await
+}
+
+/// Open dialog for any files to attach; open tokens come back.
+#[tauri::command]
+pub async fn pick_attachments(window: Window) -> Result<Vec<FileRef>> {
+    pick_any(window, "Attach files").await
 }
 
 #[tauri::command]
@@ -111,7 +117,8 @@ pub async fn attachments_add(window: Window, eng: Eng<'_>, reg: Reg<'_>, doc: Do
                 return Err(EngineError::Invalid(format!("{} is over 512 MB, too large to attach", file_name_of(p))));
             }
             let data = std::fs::read(p).map_err(|e| EngineError::Io(format!("{p}: {e}")))?;
-            new.push(NewFile { name: file_name_of(p), data, description: description.clone().unwrap_or_default() });
+            let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+            new.push(NewFile { name: file_name_of(p), data, description: description.clone().unwrap_or_default(), modified });
         }
         attach_add(&eng, doc, new, EditSource::User)
     })
@@ -286,4 +293,60 @@ pub async fn thread_describe(eng: Eng<'_>, doc: DocId, thread: i32, info: Info) 
 pub async fn thread_move(eng: Eng<'_>, doc: DocId, thread: i32, to: u32) -> Result<EditState> {
     let eng = eng.inner().clone();
     blocking(move || thread_reorder(&eng, doc, thread, to, EditSource::User)).await
+}
+
+// ---- portfolios ---------------------------------------------------------------------------------
+
+/// The portfolio view of a document, none for a plain PDF. A collection the engine refuses (folders that
+/// loop) is an error: the document stays a plain one.
+#[tauri::command]
+pub async fn portfolio_info(eng: Eng<'_>, doc: DocId) -> Result<Option<PortfolioInfo>> {
+    let eng = eng.inner().clone();
+    blocking(move || super::portfolio_info(&eng, doc)).await
+}
+
+/// Open dialog for the files of a new portfolio (any type); open tokens come back.
+#[tauri::command]
+pub async fn pick_portfolio_files(window: Window) -> Result<Vec<FileRef>> {
+    pick_any(window, "Choose files for the portfolio").await
+}
+
+/// A new portfolio from the files the tokens name, written to the file a save token names; an open token
+/// for it comes back. The files are only read.
+#[tauri::command]
+pub async fn portfolio_create(window: Window, eng: Eng<'_>, reg: Reg<'_>, files: Vec<String>, out: String) -> Result<FileRef> {
+    let sources: Vec<Source> = files
+        .iter()
+        .map(|t| reg.open(window.label(), t).map(|path| Source { name: file_name_of(&path), path }))
+        .collect::<Result<_>>()?;
+    let out = reg.take_save(window.label(), &out)?;
+    let eng = eng.inner().clone();
+    blocking(move || {
+        let made = portfolio::create(&eng, &sources, &out)?;
+        Ok(window.state::<Paths>().issue_open(window.label(), made.path))
+    })
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractReport {
+    pub folder: String,
+    pub written: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// Writes every file of the portfolio into the folder a save token names (from `pick_folder`), never
+/// replacing a file there: a name that is taken gets " (2)". Files are only written, never run.
+#[tauri::command]
+pub async fn portfolio_extract_all(window: Window, eng: Eng<'_>, reg: Reg<'_>, doc: DocId, to: String) -> Result<ExtractReport> {
+    let folder = reg.take_save(window.label(), &to)?;
+    let eng = eng.inner().clone();
+    blocking(move || {
+        // Each file is marked as soon as it is written, so a run that stops half way leaves none unmarked.
+        let r = super::portfolio_extract_all(&eng, doc, std::path::Path::new(&folder), &mut |p| mark_from_internet(&p.to_string_lossy()))?;
+        window.state::<Paths>().learn(&folder);
+        Ok(ExtractReport { folder, written: r.written, skipped: r.skipped })
+    })
+    .await
 }
