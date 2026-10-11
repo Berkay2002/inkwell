@@ -134,6 +134,9 @@ await shot("redact-marks-rail-light.png");
 await theme("dark");
 await shot("redact-marks-rail-dark.png");
 await theme("light");
+// docked, the rail replaced the assistant: bring the assistant back for the next turn
+await ev(`window.__R.getState().setOpen(false); window.__ai.getState().setOpen(true)`);
+await sleep(600);
 
 m = await turn("redact-apply", "Apply the redactions now.");
 keep("redact-apply", m);
@@ -143,6 +146,15 @@ await shot("redact-applied-light.png");
 await theme("dark");
 await shot("redact-applied-dark.png");
 await theme("light");
+// the verification of what was applied is one click away
+await click(".ax-activity .ax-btn", "Review in Redact");
+await sleep(1200);
+await shot("redact-verify-rail-light.png");
+await theme("dark");
+await shot("redact-verify-rail-dark.png");
+await theme("light");
+await ev(`window.__R.getState().setOpen(false); window.__ai.getState().setOpen(true)`);
+await sleep(600);
 
 // ---- a tool for the user ----
 m = await turn("open-tool", "Open the password protection tool for me.");

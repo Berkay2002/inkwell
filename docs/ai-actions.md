@@ -119,3 +119,15 @@ file the user must pick (picture marks, insert image, merge).
 - `compress_document`, `compare_documents` (with the saved file) and `export_document` work on the saved file or
   the live document as stated in their descriptions; the assistant cannot save, so it asks the user to.
 - `convert_to_standard` applies only the safe fixes; what still fails is reported, never hidden.
+
+## Verification (2026-10-11)
+
+- `cargo test --lib ai::` 118 passed; `pnpm tsc --noEmit`, `pnpm vitest run` (413) clean.
+- Live through the real app (debug exe, scratch data dir, a copy of `docs/study/samples/redact-source.pdf`,
+  `scripts/ai-actions-shots.mjs`, screens in `docs/screens/ai-actions/`): compress and export (cards, files made
+  next to the copy, "Open report (compressed).pdf" opens it), highlight, compare with the saved file, mark SSNs,
+  Review in Redact, apply (permanent card, "5 marks redacted, none of the marked text is left in the file"), and
+  `open_tool`. The model was **not** the real Codex: the account was at its usage limit until 2026-10-12 00:06, so
+  a scripted stand-in (the tests' `fake_codex.mjs` speaking the same app-server protocol, calling the tools a model
+  would call for each question) drove the turns. The tools, cards, engine and UI are the real ones; whether a
+  model picks these tools for these questions is still to be checked with Codex.
