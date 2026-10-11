@@ -541,7 +541,7 @@ fn the_route_serves_only_what_the_listing_returned_under_its_token() {
 }
 
 #[test]
-fn concurrent_requests_decode_an_asset_once_and_release_does_not_wait() {
+fn concurrent_requests_decode_once_and_a_decode_does_not_block_release_or_cached_seeks() {
     let (eng, id, _) = open("concurrent", sample());
     let c = Arc::new(Cache::default());
     let l = c.list(&eng, id).unwrap();
@@ -551,6 +551,17 @@ fn concurrent_requests_decode_an_asset_once_and_release_does_not_wait() {
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     assert!(got.iter().all(|g| Arc::ptr_eq(g, &got[0])), "one decode");
-    c.clear();
+    // a decode holds the gate: a cached seek and a release (a sync command) go on regardless
+    let gate = c.gate.lock();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (c2, eng2, play2) = (c.clone(), eng.clone(), play.clone());
+    std::thread::spawn(move || {
+        let hit = c2.get(&eng2, id, &play2).unwrap();
+        c2.clear();
+        let _ = tx.send(hit);
+    });
+    let hit = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("a cached seek and a release do not wait for a decode");
+    assert!(Arc::ptr_eq(&hit, &got[0]));
+    drop(gate);
     assert!(c.slot.lock().is_none());
 }
