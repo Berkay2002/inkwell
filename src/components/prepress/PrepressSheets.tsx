@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../../store";
 import type { Size } from "../../lib/layout";
 import { pageThumb } from "../../lib/plateThumbs";
@@ -27,6 +27,7 @@ import {
   SIGNED_WARNING,
   showLength,
   svgPath,
+  tabTarget,
   visibleBox,
 } from "../../lib/prepressLogic";
 import { Icon } from "../Icons";
@@ -35,24 +36,46 @@ import "./prepress.css";
 
 const act = () => usePrepress.getState();
 
+const FOCUSABLE = 'button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
 /** The three print production sheets, over the viewer. */
 export function PrepressSheets() {
   const sheet = usePrepress((s) => s.sheet);
+  const scrim = useRef<HTMLDivElement>(null);
   const busy = sheet != null && (sheet.kind === "convert" ? sheet.phase === "running" : sheet.kind === "marks" || sheet.kind === "boxes" ? sheet.busy : false);
+  const panel = () => scrim.current?.querySelector<HTMLElement>(".pr-sheet") ?? null;
   useEffect(() => {
     if (!sheet) return;
+    // focus goes into the sheet, stays there, and goes back to where it was when the sheet closes
+    const from = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    panel()?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
         act().closeSheet();
+      } else if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const root = panel();
+        if (!root) return;
+        const items = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => !el.matches(":disabled") && el.offsetParent !== null);
+        const to = tabTarget(items.length, items.indexOf(document.activeElement as HTMLElement), e.shiftKey);
+        e.preventDefault();
+        if (to !== null) items[to].focus();
       }
     };
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      if (from?.isConnected) from.focus();
+    };
   }, [sheet != null]);
+  // a step of the sheet replaced the control that had focus (Review, Convert, a busy sheet): back to the sheet
+  useEffect(() => {
+    const root = panel();
+    if (root && !root.contains(document.activeElement)) root.focus();
+  });
   if (!sheet) return null;
   return (
-    <div className="scrim pr-scrim" onMouseDown={() => !busy && act().closeSheet()}>
+    <div ref={scrim} className="scrim pr-scrim" onMouseDown={() => !busy && act().closeSheet()}>
       {sheet.kind === "convert" ? <ConvertView sheet={sheet} /> : sheet.kind === "marks" ? <MarksView sheet={sheet} /> : <BoxesView sheet={sheet} />}
     </div>
   );
@@ -225,7 +248,7 @@ function ConvertView({ sheet }: { sheet: ConvertSheet }) {
   const locked = useLocked(sheet.doc)?.certified === true;
   const problem = convertProblem(o, d.pageCount, d.currentPage);
   return (
-    <section className="pr-sheet pp-sheet" role="dialog" aria-label="Convert Colors" onMouseDown={(e) => e.stopPropagation()}>
+    <section className="pr-sheet pp-sheet" role="dialog" aria-modal="true" tabIndex={-1} aria-label="Convert Colors" onMouseDown={(e) => e.stopPropagation()}>
       <Head icon="swatches" title="Convert Colors" doc={d.name} />
       <div className="pr-body pp-sheet-body">
         {sheet.phase === "options" && (
@@ -395,7 +418,7 @@ function MarksView({ sheet }: { sheet: MarksSheet }) {
   const nothing = !Object.values(f.marks).some(Boolean);
   const offsetPt = f.offset ?? 9;
   return (
-    <section className="pr-sheet" role="dialog" aria-label="Printer's Marks" onMouseDown={(e) => e.stopPropagation()}>
+    <section className="pr-sheet" role="dialog" aria-modal="true" tabIndex={-1} aria-label="Printer's Marks" onMouseDown={(e) => e.stopPropagation()}>
       <Head icon="crop" title="Printer's Marks" doc={d.name} />
       <div className="pr-main">
         <PagePreview doc={sheet.doc} page={sheet.page} size={size} rev={d.rev} extent={media} caption={p && b ? marksCaption(p, b.media, f.units) : nothing ? "No marks chosen." : "Drawing the marks…"}>
@@ -491,7 +514,7 @@ function BoxesView({ sheet }: { sheet: BoxesSheet }) {
   const touched = !!b && sheet.margins && (["left", "bottom", "right", "top"] as const).some((s) => Math.abs(sheet.margins[s]) > 1e-6);
   const extent = box && crop ? shown(box) : ([0, 0, size[0], size[1]] as Rect4);
   return (
-    <section className="pr-sheet" role="dialog" aria-label="Page Boxes" onMouseDown={(e) => e.stopPropagation()}>
+    <section className="pr-sheet" role="dialog" aria-modal="true" tabIndex={-1} aria-label="Page Boxes" onMouseDown={(e) => e.stopPropagation()}>
       <Head icon="pagebox" title="Page Boxes" doc={d.name} />
       <div className="pr-main">
         <PagePreview

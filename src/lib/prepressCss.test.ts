@@ -1,11 +1,14 @@
+// @ts-expect-error the app has no node types; vitest runs in node, and ?raw gives "" for css here
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
+const read = (p: string): string => readFileSync(new URL(p, import.meta.url), "utf8");
 const css = read("../components/prepress/prepress.css");
 const tokens = read("../styles.css");
 
 describe("prepress.css", () => {
+  it("is read", () => expect([css.length, tokens.length].every((n) => n > 500)).toBe(true));
+
   it("uses only tokens that exist and no colour of its own", () => {
     const defined = new Set([...tokens.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]));
     const used = [...css.matchAll(/var\((--[\w-]+)/g)].map((m) => m[1]);

@@ -23,6 +23,7 @@ import {
   plateList,
   rectShown,
   scopePages,
+  tabTarget,
   showInk,
   showLength,
   toPt,
@@ -219,5 +220,18 @@ describe("convert colours", () => {
   it("names the new file after the document and the profile", () => {
     expect(convertedFileName("Brochure", DEFAULT_CONVERT)).toBe("Brochure (CMYK).pdf");
     expect(convertedFileName("Brochure", { ...DEFAULT_CONVERT, intent: "profile", profile: { token: "t", name: "ISOcoated.icc" } })).toBe("Brochure (CMYK ISOcoated).pdf");
+  });
+});
+
+describe("tab order inside a sheet", () => {
+  it("wraps at both ends and starts at an end when focus is on the sheet", () => {
+    expect(tabTarget(4, 3, false)).toBe(0);
+    expect(tabTarget(4, 0, true)).toBe(3);
+    expect(tabTarget(4, 1, false)).toBe(2);
+    expect(tabTarget(4, 1, true)).toBe(0);
+    expect(tabTarget(4, -1, false)).toBe(0);
+    expect(tabTarget(4, -1, true)).toBe(3);
+    expect(tabTarget(1, 0, false)).toBe(0);
+    expect(tabTarget(0, -1, false)).toBeNull();
   });
 });

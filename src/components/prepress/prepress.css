@@ -155,6 +155,9 @@
   pointer-events: none;
 }
 /* sheets */
+.pr-scrim .pr-sheet:focus {
+  outline: none;
+}
 .pp-sheet {
   width: min(560px, 94vw);
   height: auto;
