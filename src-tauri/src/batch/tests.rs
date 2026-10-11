@@ -127,7 +127,7 @@ impl Recognizer for Stub {
         }
         let words = [("Invoice", [72.0, 100.0, 120.0, 114.0]), ("Total", [126.0, 100.0, 166.0, 114.0])];
         Ok(RawPage {
-            lines: vec![RawLine { words: words.iter().map(|(t, r)| RawWord { text: t.to_string(), rect: *r }).collect() }],
+            lines: vec![RawLine { words: words.iter().map(|(t, r)| RawWord { text: t.to_string(), rect: *r, conf: None }).collect() }],
             angle_deg: None,
         })
     }

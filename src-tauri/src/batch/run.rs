@@ -20,7 +20,6 @@ use super::steps::{Cx, Env, Outcome, Product, StepError};
 use crate::convert::Staging;
 use crate::engine::edit::open_source;
 use crate::engine::EngineError;
-use crate::ocr;
 use crate::protect;
 
 #[derive(Debug, thiserror::Error)]
