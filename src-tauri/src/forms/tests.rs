@@ -841,3 +841,269 @@ fn a_formatted_value_is_still_shown_after_save_and_reopen_when_the_form_asks_for
     let f = field(&eng2, id2, "Price");
     assert_eq!((f.value.as_str(), f.shown.as_str()), ("1234.5", "$1,234.50"));
 }
+
+// ---- form JavaScript (js.rs, scripts.rs) ----------------------------------------------------------
+
+/// Gives the field a script under `/AA /<key>` (what Acrobat's Actions tab writes), as one history step.
+fn script(eng: &Engine, id: DocId, name: &str, key: &str, js: &str) {
+    eng.apply_custom(id, "Add script".into(), EditSource::User, false, |d| {
+        let entries = scan(d)?;
+        let e = entries.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no field {name}"));
+        let mut f = e.field.clone();
+        author::put_js(d, &mut f, key, Some(js.to_string()))?;
+        Ok(vec![e.page])
+    })
+    .unwrap();
+}
+
+/// Document-level scripts (`/Names /JavaScript`). Call before the form is first listed: they are read once.
+fn doc_scripts(eng: &Engine, id: DocId, list: &[(&str, &str)]) {
+    eng.apply_custom(id, "Add document scripts".into(), EditSource::User, false, |d| {
+        let mut arr = d.new_array()?;
+        for (name, src) in list {
+            arr.array_push(PdfObject::new_string(name)?)?;
+            let mut a = d.new_dict()?;
+            put_name(&mut a, "S", "JavaScript")?;
+            put_str(&mut a, "JS", src)?;
+            arr.array_push(a)?;
+        }
+        let mut js = d.new_dict()?;
+        js.dict_put("Names", arr)?;
+        let mut names = d.new_dict()?;
+        names.dict_put("JavaScript", js)?;
+        d.catalog()?.dict_put("Names", names)?;
+        Ok(vec![])
+    })
+    .unwrap();
+}
+
+fn steps(eng: &Engine, id: DocId) -> usize {
+    eng.history(id).unwrap().len()
+}
+
+fn script_form(test: &str, names: &[&str]) -> (Arc<Engine>, DocId, String) {
+    let (eng, id, path) = open(test);
+    for (i, n) in names.iter().enumerate() {
+        add1(&eng, id, 0, nf(FieldKind::Text, n, [72.0, 60.0 + 30.0 * i as f32, 240.0, 80.0 + 30.0 * i as f32]));
+    }
+    (eng, id, path)
+}
+
+#[test]
+fn a_calculate_script_that_is_not_an_af_call_updates_its_total_after_a_fill() {
+    let (eng, id, path) = script_form("js-sum", &["Rent", "Deposit", "Total"]);
+    script(&eng, id, "Total", "C", "var r = this.getField(\"Rent\").value, d = this.getField(\"Deposit\").value; event.value = (r || 0) + (d || 0);");
+    assert!(!field(&eng, id, "Total").script, "scripts run, so the field is not marked as unrun");
+    fill(&eng, id, "Rent", text("1200")).unwrap();
+    assert_eq!(field(&eng, id, "Total").value, "1200");
+    let before = steps(&eng, id);
+    fill(&eng, id, "Deposit", text("300")).unwrap();
+    assert_eq!(steps(&eng, id), before + 1, "the fill and the recalculation are one step");
+    assert_eq!(field(&eng, id, "Total").value, "1500");
+    eng.undo(id).unwrap();
+    assert_eq!(field(&eng, id, "Total").value, "1200");
+    eng.redo(id).unwrap();
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(field(&eng2, id2, "Total").value, "1500", "saved and reopened");
+}
+
+#[test]
+fn a_script_writing_other_fields_is_one_undo_step_and_saves() {
+    let (eng, id, path) = script_form("js-write", &["Src", "Other", "Third"]);
+    script(&eng, id, "Src", "V", "this.getField(\"Other\").value = event.value + \"!\"; this.getField(\"Third\").readonly = true;");
+    let before = steps(&eng, id);
+    fill(&eng, id, "Src", text("hello")).unwrap();
+    assert_eq!(steps(&eng, id), before + 1, "one undo step");
+    assert_eq!(field(&eng, id, "Other").value, "hello!");
+    assert!(field(&eng, id, "Third").read_only);
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(field(&eng2, id2, "Other").value, "hello!");
+    assert!(field(&eng2, id2, "Third").read_only);
+    assert!(ap_text(&path, "Other", None).contains("hello!"));
+    eng.undo(id).unwrap();
+    assert_eq!(field(&eng, id, "Src").value, "");
+    assert_eq!(field(&eng, id, "Other").value, "");
+    assert!(!field(&eng, id, "Third").read_only);
+}
+
+#[test]
+fn a_validate_script_rejects_with_its_alert_text_and_a_keystroke_script_changes_the_value() {
+    let (eng, id, _) = script_form("js-reject", &["Age", "Code"]);
+    script(&eng, id, "Age", "V", "if (event.value !== \"\" && Number(event.value) < 18) { app.alert(\"You must be at least 18.\"); event.rc = false; }");
+    script(&eng, id, "Code", "K", "if (event.willCommit) { event.value = event.value.toUpperCase(); }");
+    let steps_before = steps(&eng, id);
+    let e = fill(&eng, id, "Age", text("12")).unwrap_err().to_string();
+    assert!(e.contains("You must be at least 18."), "{e}");
+    assert_eq!(steps(&eng, id), steps_before, "a rejected value changes nothing");
+    assert_eq!(field(&eng, id, "Age").value, "");
+    fill(&eng, id, "Age", text("30")).unwrap();
+    fill(&eng, id, "Code", text("ab-12")).unwrap();
+    assert_eq!(field(&eng, id, "Code").value, "AB-12");
+    // A rejection without a reason uses a default message.
+    script(&eng, id, "Age", "V", "event.rc = false;");
+    let e = fill(&eng, id, "Age", text("44")).unwrap_err().to_string();
+    assert!(e.contains("Invalid value entered for the field [ Age ]"), "{e}");
+}
+
+#[test]
+fn alerts_and_requests_of_a_fill_come_back_to_the_ui() {
+    let (eng, id, _) = script_form("js-alerts", &["Note"]);
+    script(&eng, id, "Note", "K", "app.alert(\"Saved a note\"); app.launchURL(\"https://example.com/\"); app.launchURL(\"file:///etc/passwd\");");
+    let w = field(&eng, id, "Note");
+    let r = set_value_report(&eng, id, w.page, w.xref, &text("x"), EditSource::User).unwrap();
+    assert_eq!(r.report.alerts.len(), 1);
+    assert_eq!(r.report.alerts[0].message, "Saved a note");
+    assert_eq!(r.report.requests, vec![js::Request::LaunchUrl { url: "https://example.com/".into() }]);
+    let json = serde_json::to_value(&r).unwrap();
+    assert!(json["alerts"].is_array() && json["requests"].is_array() && json["rev"].is_number(), "{json}");
+}
+
+#[test]
+fn a_format_script_that_is_not_an_af_call_decides_what_is_shown() {
+    let (eng, id, path) = script_form("js-format", &["Code"]);
+    script(&eng, id, "Code", "F", "if (event.value !== \"\") { event.value = \"<\" + event.value + \">\"; }");
+    fill(&eng, id, "Code", text("ab")).unwrap();
+    let f = field(&eng, id, "Code");
+    assert_eq!((f.value.as_str(), f.shown.as_str()), ("ab", "<ab>"));
+    eng.save(id, None).unwrap();
+    assert!(ap_text(&path, "Code", None).contains("<ab>"), "{}", ap_text(&path, "Code", None));
+}
+
+#[test]
+fn scripts_turned_off_are_kept_and_not_run() {
+    let (eng, id, path) = script_form("js-off", &["Src", "Other"]);
+    script(&eng, id, "Src", "V", "this.getField(\"Other\").value = \"ran\";");
+    let st = scripts_state(&eng, id).unwrap();
+    assert!(st.has_scripts && st.enabled);
+    assert!(!field(&eng, id, "Src").script);
+    scripts_enable(&eng, id, false).unwrap();
+    assert!(field(&eng, id, "Src").script, "off: the script is reported as one that is not run");
+    fill(&eng, id, "Src", text("a")).unwrap();
+    assert_eq!(field(&eng, id, "Other").value, "", "not run");
+    scripts_enable(&eng, id, true).unwrap();
+    fill(&eng, id, "Src", text("b")).unwrap();
+    assert_eq!(field(&eng, id, "Other").value, "ran");
+    // The script stayed in the file all along.
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert!(scripts_state(&eng2, id2).unwrap().has_scripts);
+    assert!(scripts_state(&eng2, id2).unwrap().enabled, "on by default for every file");
+}
+
+#[test]
+fn a_plain_af_call_takes_no_script_engine_and_a_form_without_scripts_has_none() {
+    let (eng, id, _) = script_form("js-fast", &["Price", "Plain"]);
+    let st = scripts_state(&eng, id).unwrap();
+    assert!(!st.has_scripts);
+    script(&eng, id, "Price", "F", "AFNumber_Format(2, 0, 0, 0, \"$\", true);");
+    script(&eng, id, "Price", "K", "AFNumber_Keystroke(2, 0, 0, 0, \"$\", true);");
+    assert!(!scripts_state(&eng, id).unwrap().has_scripts, "an AF call alone is not a script that needs the engine");
+    // Turned off, the fast path still formats and checks, exactly as before.
+    scripts_enable(&eng, id, false).unwrap();
+    fill(&eng, id, "Price", text("$1,234.5")).unwrap();
+    let f = field(&eng, id, "Price");
+    assert_eq!((f.value.as_str(), f.shown.as_str()), ("1234.5", "$1,234.50"));
+    assert!(fill(&eng, id, "Price", text("abc")).is_err());
+    // On, the result is the same.
+    scripts_enable(&eng, id, true).unwrap();
+    fill(&eng, id, "Price", text("$99")).unwrap();
+    let f = field(&eng, id, "Price");
+    assert_eq!((f.value.as_str(), f.shown.as_str()), ("99", "$99.00"));
+}
+
+#[test]
+fn a_document_that_redefines_an_af_function_gets_its_own_instead_of_the_fast_path() {
+    let (eng, id, _) = open("js-override");
+    doc_scripts(&eng, id, &[("fixes", "function AFNumber_Format(d, s, n, c, cur, p) { event.value = \"custom:\" + event.value; }")]);
+    add1(&eng, id, 0, nf(FieldKind::Text, "Price", [72.0, 60.0, 240.0, 80.0]));
+    script(&eng, id, "Price", "F", "AFNumber_Format(2, 0, 0, 0, \"$\", true);");
+    fill(&eng, id, "Price", text("5")).unwrap();
+    assert_eq!(field(&eng, id, "Price").shown, "custom:5");
+    scripts_enable(&eng, id, false).unwrap();
+    assert_eq!(field(&eng, id, "Price").shown, "$5.00", "scripts off: today's behaviour");
+}
+
+#[test]
+fn a_document_level_function_serves_a_field_script_and_a_global_persists_between_fills() {
+    let (eng, id, _) = open("js-doclevel");
+    doc_scripts(&eng, id, &[("b second", "var fills = 0;"), ("a first", "function vat(x) { return Math.round(x * 125) / 100; }")]);
+    add1(&eng, id, 0, nf(FieldKind::Text, "Net", [72.0, 60.0, 240.0, 80.0]));
+    add1(&eng, id, 0, nf(FieldKind::Text, "Gross", [72.0, 90.0, 240.0, 110.0]));
+    add1(&eng, id, 0, nf(FieldKind::Text, "Count", [72.0, 120.0, 240.0, 140.0]));
+    script(&eng, id, "Gross", "C", "event.value = vat(this.getField(\"Net\").value);");
+    script(&eng, id, "Count", "C", "event.value = String(++fills);");
+    fill(&eng, id, "Net", text("200")).unwrap();
+    assert_eq!(field(&eng, id, "Gross").value, "250");
+    let first: u32 = field(&eng, id, "Count").value.parse().unwrap();
+    fill(&eng, id, "Net", text("100")).unwrap();
+    let second: u32 = field(&eng, id, "Count").value.parse().unwrap();
+    assert!(second > first, "the global kept counting: {first} then {second}");
+    assert_eq!(field(&eng, id, "Gross").value, "125");
+}
+
+#[test]
+fn calculations_in_a_chain_settle_in_a_few_passes_and_a_runaway_one_stops() {
+    let (eng, id, _) = script_form("js-chain", &["A", "B", "C", "Runaway"]);
+    // Document order is the wrong order: C reads B reads A.
+    script(&eng, id, "C", "C", "event.value = String(Number(this.getField(\"B\").value || 0) + 1);");
+    script(&eng, id, "B", "C", "event.value = String(Number(this.getField(\"A\").value || 0) * 2);");
+    script(&eng, id, "Runaway", "C", "event.value = String(Number(event.value || 0) + 1);");
+    fill(&eng, id, "A", text("5")).unwrap();
+    assert_eq!(field(&eng, id, "B").value, "10");
+    assert_eq!(field(&eng, id, "C").value, "11");
+    let n: u32 = field(&eng, id, "Runaway").value.parse().unwrap();
+    assert!((1..=8).contains(&n), "at most eight passes: {n}");
+}
+
+#[test]
+fn a_calculation_that_never_ends_times_out_and_the_fill_still_lands() {
+    let (eng, id, _) = script_form("js-loop", &["In", "Hang", "Fine"]);
+    script(&eng, id, "Hang", "C", "while (true) {}");
+    script(&eng, id, "Fine", "C", "event.value = \"fine:\" + this.getField(\"In\").value;");
+    let t = std::time::Instant::now();
+    fill(&eng, id, "In", text("x")).unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_millis(2500), "{:?}", t.elapsed());
+    assert_eq!(field(&eng, id, "In").value, "x");
+    assert_eq!(field(&eng, id, "Hang").value, "", "the field with the runaway script is unchanged");
+    assert_eq!(field(&eng, id, "Fine").value, "fine:x", "the other calculations still run");
+    let log = scripts_state(&eng, id).unwrap().log;
+    assert!(log.iter().any(|l| l.field.as_deref() == Some("Hang") && l.message.contains("stopped")), "{log:?}");
+    // The next fill does not wait for it again.
+    let t = std::time::Instant::now();
+    fill(&eng, id, "In", text("y")).unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
+}
+
+#[test]
+fn a_script_that_changes_a_field_colour_or_visibility_is_written_to_the_file() {
+    let (eng, id, path) = script_form("js-look", &["Flag", "Target"]);
+    script(
+        &eng,
+        id,
+        "Flag",
+        "V",
+        "var t = this.getField(\"Target\"); t.fillColor = color.yellow; t.textColor = color.red; t.display = event.value === \"hide\" ? display.hidden : display.visible;",
+    );
+    fill(&eng, id, "Flag", text("hide")).unwrap();
+    let t = field(&eng, id, "Target");
+    assert_eq!(t.fill_color, Some([1.0, 1.0, 0.0]));
+    assert_eq!(t.text_color, [1.0, 0.0, 0.0]);
+    assert!(t.hidden);
+    fill(&eng, id, "Flag", text("show")).unwrap();
+    assert!(!field(&eng, id, "Target").hidden);
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(field(&eng2, id2, "Target").fill_color, Some([1.0, 1.0, 0.0]));
+}
+
+#[test]
+fn a_script_with_non_ascii_text_is_read_whatever_way_it_is_encoded() {
+    let (eng, id, path) = script_form("js-utf16", &["Src", "Other"]);
+    script(&eng, id, "Src", "V", "this.getField(\"Other\").value = \"\u{e5}\u{e4}\u{f6} \u{20ac}\";");
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    fill(&eng2, id2, "Src", text("go")).unwrap();
+    assert_eq!(field(&eng2, id2, "Other").value, "\u{e5}\u{e4}\u{f6} \u{20ac}");
+}

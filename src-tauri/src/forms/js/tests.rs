@@ -343,3 +343,80 @@ fn the_runtime_has_no_way_to_reach_files_the_network_or_the_process() {
     assert_eq!(out.error, None, "{:?}", s.log_text());
     assert_eq!(out.value, "undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,function");
 }
+
+#[test]
+fn the_fast_path_and_the_script_engine_agree_on_acrobat_generated_scripts() {
+    let s = Scripts::new();
+    // Prefixing a statement takes the script off the fast path, so it runs in the engine.
+    let in_engine = |src: &str| format!("var viaEngine = true;\n{src}");
+
+    let formats: [(&str, &[&str]); 10] = [
+        ("AFNumber_Format(2, 0, 0, 0, \"\", true);", &["1234.5", "-3", "0", "", "1e3", "abc"]),
+        ("AFNumber_Format(0, 1, 1, 0, \"\u{20ac}\", false);", &["1234567.891", "-42"]),
+        ("AFNumber_Format(2, 2, 2, 0, \"$\", true)", &["-1234.5", "0.005"]),
+        ("AFPercent_Format(2, 0);", &["0.256", "1", "-0.5"]),
+        ("AFDate_FormatEx(\"dd/mm/yyyy\");", &["2020-04-05", "04/05/2020", "nonsense"]),
+        ("AFDate_Format(3);", &["2020-04-05", "12/31/1999"]),
+        ("AFTime_FormatEx(\"HH:MM\");", &["13:45:10", "1:05 pm"]),
+        ("AFSpecial_Format(0);", &["12345", "1234"]),
+        ("AFSpecial_Format(2);", &["5551234567", "555123"]),
+        ("AFSpecial_Format(3);", &["123456789"]),
+    ];
+    for (src, values) in formats {
+        let f = af::parse_format(src).unwrap_or_else(|| panic!("not a format: {src}"));
+        for v in values {
+            let out = run(&s, "Format", v, &in_engine(src));
+            assert_eq!(out.error, None, "{src} {v}: {:?}", s.log_text());
+            assert_eq!(out.value, af::format_value(&f, v), "{src} on {v:?}");
+        }
+    }
+
+    let keystrokes: [(&str, &[&str]); 7] = [
+        ("AFNumber_Keystroke(2, 0, 0, 0, \"\", true);", &["12.5", "abc", "1,000", ""]),
+        ("AFNumber_Keystroke(0, 0, 0, 0, \"$\", true);", &["$1,000", "1000"]),
+        ("AFPercent_Keystroke(2, 0);", &["25", "x"]),
+        ("AFDate_KeystrokeEx(\"mm/dd/yyyy\");", &["12/31/2020", "13/45/2020", ""]),
+        ("AFTime_KeystrokeEx(\"HH:MM\");", &["13:45", "25:99"]),
+        ("AFSpecial_Keystroke(0);", &["12345", "1234", "abcde"]),
+        ("AFSpecial_KeystrokeEx(\"999-99\");", &["123-45", "12345", "abc-de"]),
+    ];
+    for (src, values) in keystrokes {
+        let f = af::parse_keystroke(src).unwrap_or_else(|| panic!("not a keystroke: {src}"));
+        for v in values {
+            let out = run(&s, "Keystroke", v, &in_engine(src));
+            match af::keystroke(&f, "Target", v) {
+                Ok(stored) => assert!(out.rc && out.value == stored, "{src} on {v:?}: native stores {stored:?}, engine rc={} value={:?} {:?}", out.rc, out.value, out.alerts),
+                Err(msg) => assert!(!out.rc && out.alerts.iter().any(|a| a.message == msg), "{src} on {v:?}: native rejects with {msg:?}, engine rc={} {:?}", out.rc, out.alerts),
+            }
+        }
+    }
+
+    let validates: [(&str, &[&str]); 3] = [
+        ("AFRange_Validate(true, 1, true, 10);", &["5", "0", "11", "", "abc"]),
+        ("AFRange_Validate(true, 0, false, 0);", &["-1", "1"]),
+        ("AFRange_Validate(false, 0, true, 99.5);", &["99.5", "99.6"]),
+    ];
+    for (src, values) in validates {
+        let v = af::parse_validate(src).unwrap_or_else(|| panic!("not a validate: {src}"));
+        for value in values {
+            let out = run(&s, "Validate", value, &in_engine(src));
+            match af::validate(&v, value) {
+                Ok(()) => assert!(out.rc, "{src} on {value:?}: {:?}", out.alerts),
+                Err(msg) => assert!(!out.rc && out.alerts.iter().any(|a| a.message == msg), "{src} on {value:?}: native {msg:?}, engine {:?}", out.alerts),
+            }
+        }
+    }
+
+    // Calculations: the engine reads the same field values the native code does.
+    for op in ["SUM", "PRD", "AVG", "MIN", "MAX"] {
+        let src = format!("AFSimple_Calculate(\"{op}\", new Array(\"A\", \"B\"));");
+        let c = af::parse_calculate(&src).unwrap();
+        let lookup = |n: &str| match n {
+            "A" => vec!["5".to_string()],
+            "B" => vec!["7".to_string()],
+            _ => Vec::new(),
+        };
+        let native = af::calculate(&c, &lookup).unwrap();
+        assert_eq!(calc(&s, &in_engine(&src)).value, native, "{op}");
+    }
+}
