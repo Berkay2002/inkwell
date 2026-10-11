@@ -897,3 +897,22 @@ fn the_marks_preview_is_the_marks_that_get_added() {
     assert!(marks_preview(&eng, doc, 4, &spec).is_err());
     assert!(marks_preview(&eng, doc, 0, &MarksSpec { weight: Some(0.0), ..spec }).is_err());
 }
+
+#[test]
+fn a_view_in_use_is_not_the_one_that_goes_when_a_document_has_too_many() {
+    let (_eng, doc) = open("view-limit", &build("", &[("", "")], &[]));
+    let pre = Prepress::default();
+    let extra = |i: u32| View { tac_limit: 100.0 + i as f32, ..View::default() };
+    let main = pre.register(doc, View::default());
+    let first = pre.register(doc, extra(0));
+    for i in 1..63 {
+        pre.register(doc, extra(i));
+    }
+    // 64 views; the page's own view is asked for again, then 3 more arrive
+    assert_eq!(pre.register(doc, View::default()), main);
+    for i in 63..66 {
+        pre.register(doc, extra(i));
+    }
+    assert_eq!(pre.register(doc, View::default()), main, "the view that was in use stays");
+    assert_ne!(pre.register(doc, extra(0)), first, "the one nobody asked for is gone");
+}

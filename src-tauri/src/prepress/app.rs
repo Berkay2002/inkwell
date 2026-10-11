@@ -63,12 +63,14 @@ struct Waiter {
     respond: Responder,
 }
 
-/// Views a document may have registered at once; the oldest go first.
+/// Views a document may have registered at once; the one asked for longest ago goes first.
 const MAX_VIEWS_PER_DOC: usize = 64;
 
 struct Views {
     next: u32,
-    by_id: HashMap<u32, (DocId, View)>,
+    /// Counts up with every use of a view: the value each view was last registered or looked up at.
+    clock: u64,
+    by_id: HashMap<u32, (DocId, View, u64)>,
 }
 
 /// The registered views and what is cached for them.
@@ -82,7 +84,7 @@ pub struct Prepress {
 impl Default for Prepress {
     fn default() -> Self {
         Prepress {
-            views: Mutex::new(Views { next: 1, by_id: HashMap::new() }),
+            views: Mutex::new(Views { next: 1, clock: 0, by_id: HashMap::new() }),
             inflight: Mutex::new(HashMap::new()),
             seps: Mutex::new(HashMap::new()),
             tiles: Mutex::new(TileCache { map: LruCache::unbounded(), bytes: 0 }),
@@ -94,28 +96,36 @@ impl Prepress {
     /// An id for `view` of `doc`, to put in tile URLs. The same view gets the same id.
     pub fn register(&self, doc: DocId, view: View) -> u32 {
         let mut v = self.views.lock();
-        if let Some((id, _)) = v.by_id.iter().find(|(_, (d, w))| *d == doc && *w == view) {
+        v.clock += 1;
+        let now = v.clock;
+        if let Some((id, entry)) = v.by_id.iter_mut().find(|(_, (d, w, _))| *d == doc && *w == view) {
+            entry.2 = now;
             return *id;
         }
         let id = v.next;
         v.next += 1;
-        let mine: Vec<u32> = v.by_id.iter().filter(|(_, (d, _))| *d == doc).map(|(id, _)| *id).collect();
+        let mine: Vec<(u64, u32)> = v.by_id.iter().filter(|(_, (d, _, _))| *d == doc).map(|(id, (_, _, at))| (*at, *id)).collect();
         if mine.len() >= MAX_VIEWS_PER_DOC {
-            if let Some(oldest) = mine.into_iter().min() {
-                v.by_id.remove(&oldest);
+            if let Some((_, stale)) = mine.into_iter().min() {
+                v.by_id.remove(&stale);
             }
         }
-        v.by_id.insert(id, (doc, view));
+        v.by_id.insert(id, (doc, view, now));
         id
     }
 
     fn view(&self, id: u32, doc: DocId) -> Option<View> {
-        self.views.lock().by_id.get(&id).filter(|(d, _)| *d == doc).map(|(_, v)| v.clone())
+        let mut v = self.views.lock();
+        v.clock += 1;
+        let now = v.clock;
+        let (_, view, at) = v.by_id.get_mut(&id).filter(|(d, _, _)| *d == doc)?;
+        *at = now;
+        Some(view.clone())
     }
 
     /// Forgets a closed document's views and tiles.
     pub fn drop_doc(&self, doc: DocId) {
-        self.views.lock().by_id.retain(|_, (d, _)| *d != doc);
+        self.views.lock().by_id.retain(|_, (d, _, _)| *d != doc);
         self.seps.lock().retain(|k, _| k.0 != doc);
         let mut t = self.tiles.lock();
         let keys: Vec<_> = t.map.iter().filter(|(k, _)| k.0.doc == doc).map(|(k, _)| *k).collect();

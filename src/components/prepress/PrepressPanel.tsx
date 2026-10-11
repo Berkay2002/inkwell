@@ -69,7 +69,7 @@ export function PrepressPanel({ doc }: { doc: DocState }) {
           <div className="pp-total" aria-live="polite">
             <span>Total ink</span>
             <b className={at && at.total > s.tacLimit ? "bad" : ""}>{at ? showInk(at.total) : "–"}</b>
-            {!at && <span className="dim pp-hint">Move the pointer over the page.</span>}
+            {!at && <span className="dim pp-hint">Move the pointer over {doc.pageCount > 1 ? `page ${doc.currentPage + 1}` : "the page"}.</span>}
           </div>
           <div className="pp-actions">
             <button className="a11y-quiet" disabled={allOn} onClick={() => st().showAll(id)}>
@@ -139,7 +139,12 @@ function PlateRow({ plate, value, solo, doc }: { plate: Plate; value: number | n
         <span className="pp-plate-name">{plate.name}</span>
       </label>
       <span className="pp-plate-ink">{value === null ? "" : showInk(value)}</span>
-      <button className={solo ? "a11y-quiet on" : "a11y-quiet"} disabled={plate.locked} onClick={() => st().solo(doc, plate.key)}>
+      <button
+        className={solo ? "a11y-quiet on" : "a11y-quiet"}
+        disabled={plate.locked}
+        aria-label={solo ? `Show all plates again` : `Show ${plate.name} alone`}
+        onClick={() => st().solo(doc, plate.key)}
+      >
         {solo ? "All" : "Only"}
       </button>
     </li>

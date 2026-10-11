@@ -52,7 +52,7 @@ from `prepress_view`; tiles are the same 512-pixel RGBA tiles with `x-tile-w` / 
 generation `g` is stale, 500 with a message on failure. `s` (stream) and `e` (epoch) work as on `/t/`: a tile whose
 every requester has moved on is answered 410 without being painted, and requests for one tile join one render.
 They are scheduled on the engine's pool with the page tiles (`Engine::spawn`) and cached per view (48 MB,
-`Prepress::tiles`). A document keeps at most 64 views (the oldest go); `close_document` forgets them all.
+`Prepress::tiles`). A document keeps at most 64 views (the one registered or used longest ago goes); `close_document` forgets them all.
 
 ## Ink coverage and TAC
 

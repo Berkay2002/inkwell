@@ -18,6 +18,7 @@ vi.mock("./api", () => ({
   saveDocument: vi.fn(),
   editState: vi.fn(),
   toolCancel: vi.fn(() => Promise.resolve()),
+  discardScratch: vi.fn(() => Promise.resolve(true)),
 }));
 vi.mock("./prepressApi", () => ({
   prepressApi: {
@@ -175,6 +176,26 @@ describe("Convert Colors", () => {
     expect(api.saveDocument).toHaveBeenCalledWith(1, "tok-new");
     expect(applyState).toHaveBeenCalledTimes(2);
     expect(st().sheet).toMatchObject({ phase: "done", result: { path: "C:\\d\\new.pdf" } });
+  });
+
+  it("never writes over the original file or one that is open in another tab", async () => {
+    useStore.setState({
+      docs: {
+        ...useStore.getState().docs,
+        2: { id: 2, path: "C:\\d\\other.pdf", name: "other.pdf", dirty: false, currentPage: 0, pageCount: 1, rev: 0, sizes: [[612, 792]] } as never,
+      },
+    });
+    st().openConvert(1);
+    st().review();
+    vi.mocked(api.pickSave).mockResolvedValue({ token: "tok-same", path: "c:/D/A.pdf" });
+    await st().runConvert();
+    expect(prepressApi.convert).not.toHaveBeenCalled();
+    expect(st().sheet).toMatchObject({ phase: "confirm", error: expect.stringMatching(/own file/) });
+    vi.mocked(api.pickSave).mockResolvedValue({ token: "tok-other", path: "C:\\d\\other.pdf" });
+    await st().runConvert();
+    expect(prepressApi.convert).not.toHaveBeenCalled();
+    expect(st().sheet).toMatchObject({ error: expect.stringMatching(/open in another tab/) });
+    expect(api.saveDocument).not.toHaveBeenCalled();
   });
 
   it("a dismissed file dialog changes nothing", async () => {

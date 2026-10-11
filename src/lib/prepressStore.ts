@@ -59,6 +59,7 @@ const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.
 const cancelled = (e: unknown) => /cancel/i.test(msg(e));
 const stem = (name: string) => name.replace(/\.pdf$/i, "");
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
+const samePath = (a: string, b: string) => a.replace(/\\/g, "/").toLowerCase() === b.replace(/\\/g, "/").toLowerCase();
 
 let jobSeq = 1_850_000_000;
 
@@ -409,6 +410,10 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       if (s.opts.output === "newFile") {
         const f = await api.pickSave(convertedFileName(stem(d.name), s.opts), { doc }, "pdf");
         if (!f) return;
+        // the confirmation promises the original is not touched
+        const back = (error: string) => patchSheet<ConvertSheet>("convert", { error });
+        if (samePath(f.path, d.path)) return back("That is this document's own file. Choose another name, or convert in this document and Save.");
+        if (Object.values(st().docs).some((o) => o.id !== doc && samePath(o.path, f.path))) return back("That file is open in another tab. Choose another name.");
         to = f.token;
       }
       // the dialog was open a while
@@ -432,6 +437,12 @@ export const usePrepress = create<PrepressStore>((set, get) => {
           const saved = await queued(doc, () => api.saveDocument(doc, to));
           applyState(doc, saved);
           path = saved.path;
+          // a created file nobody had saved has a scratch copy; it is not needed once there is a file
+          const scratch = st().docs[doc]?.scratch;
+          if (scratch) {
+            st().patch(doc, { scratch: null });
+            void api.discardScratch(scratch).catch(() => {});
+          }
         }
         patchSheet<ConvertSheet>("convert", { phase: "done", progress: 1, result: { report: out.report, path } });
         void get().refresh(doc);

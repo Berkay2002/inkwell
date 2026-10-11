@@ -29,7 +29,8 @@ function once(key: string, make: () => Promise<string | null>): Promise<string |
   let p = flying.get(key);
   if (!p) {
     p = make()
-      .then((url) => (remember(key, url), url))
+      // a request that was superseded (null) is asked again next time
+      .then((url) => (url && remember(key, url), url))
       .catch(() => null)
       .finally(() => flying.delete(key));
     flying.set(key, p);
