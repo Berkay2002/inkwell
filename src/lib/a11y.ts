@@ -46,6 +46,10 @@ export interface DocA11y {
   phase: Phase;
   progress: Progress | null;
   job: number;
+  /** The revision whose check was cancelled: it is not started again by itself (Check again does). */
+  skipRev: number | null;
+  /** The revision a check failed on, so a failing check is not retried in a loop; an edit moves on. */
+  errorRev: number | null;
   /** What Autotag would do; read when the report says the document is untagged. */
   preview: Preview | null;
   /** The person dismissed the Autotag offer for now. */
@@ -64,6 +68,8 @@ const fresh = (): DocA11y => ({
   phase: "idle",
   progress: null,
   job: 0,
+  skipRev: null,
+  errorRev: null,
   preview: null,
   notNow: false,
   error: null,
@@ -103,8 +109,11 @@ let nonce = 0;
 const st = () => useStore.getState();
 
 export const useA11y = create<A11yStore>((set, get) => {
-  const patch = (doc: number, p: Partial<DocA11y>) =>
+  // A progress or completion that arrives after the tab closed must not bring its entry back.
+  const patch = (doc: number, p: Partial<DocA11y>) => {
+    if (!st().docs[doc]) return;
     set((s) => ({ docs: { ...s.docs, [doc]: { ...(s.docs[doc] ?? fresh()), ...p } } }));
+  };
   /** The check each document is waiting for; an older answer is dropped. */
   const latest = new Map<number, number>();
 
@@ -121,8 +130,14 @@ export const useA11y = create<A11yStore>((set, get) => {
   return {
     open: false,
     setOpen: (open) => {
-      set({ open });
-      if (!open) {
+      // Opening the rail is asking for a check again, so a cancel from before is forgotten.
+      if (open) {
+        set((s) => ({
+          open,
+          docs: Object.fromEntries(Object.entries(s.docs).map(([id, d]) => [id, d.skipRev === null ? d : { ...d, skipRev: null }])),
+        }));
+      } else {
+        set({ open });
         for (const [id, d] of Object.entries(get().docs)) if (d.phase === "checking") get().cancel(Number(id));
       }
     },
@@ -141,15 +156,17 @@ export const useA11y = create<A11yStore>((set, get) => {
       const job = ++jobSeq;
       latest.set(doc, job);
       const rev = d.rev;
-      patch(doc, { phase: "checking", progress: null, job, error: null });
+      patch(doc, { phase: "checking", progress: null, job, error: null, skipRev: null, errorRev: null });
+      // Only a check that still owns the phase gives it back (an export may have taken it meanwhile).
+      const done = () => (get().get(doc).phase === "checking" ? ({ phase: "idle", progress: null } as const) : {});
       try {
         const report = await a11yApi.check(job, doc, (p) => latest.get(doc) === job && patch(doc, { progress: p }));
         if (latest.get(doc) !== job) return;
-        patch(doc, { report, checkedRev: rev, phase: "idle", progress: null, shown: null });
+        patch(doc, { report, checkedRev: rev, shown: null, ...done() });
         await loadPreview(doc, report);
       } catch (e) {
         if (latest.get(doc) !== job) return;
-        patch(doc, { phase: "idle", progress: null, ...(msg(e) === CANCELLED ? {} : { error: msg(e) }) });
+        patch(doc, { ...done(), ...(msg(e) === CANCELLED ? {} : { error: msg(e), errorRev: rev }) });
       }
     },
 
@@ -197,7 +214,7 @@ export const useA11y = create<A11yStore>((set, get) => {
       // A cancelled check says so itself; the others come back with "cancelled".
       if (d.phase === "checking") {
         latest.delete(doc);
-        patch(doc, { phase: "idle", progress: null });
+        patch(doc, { phase: "idle", progress: null, skipRev: st().docs[doc]?.rev ?? null });
       }
     },
 
@@ -209,6 +226,17 @@ export const useA11y = create<A11yStore>((set, get) => {
       try {
         const to = await pickSave(`${stem(d.name)} Accessibility Report.${format}`, { doc }, format === "pdf" ? "pdf" : "html");
         if (!to) return;
+        // The dialog was open a while: a check may have started, or a fix. The export reads the document
+        // itself, so a check gives way; a fix does not.
+        const now = get().get(doc);
+        if (!st().docs[doc]) return;
+        if (now.phase === "fixing" || now.phase === "autotagging" || now.phase === "exporting") {
+          return patch(doc, { error: "Wait for the current step to finish, then export the report again." });
+        }
+        if (now.phase === "checking") {
+          latest.delete(doc);
+          void toolCancel(now.job).catch(() => {});
+        }
         const job = ++jobSeq;
         patch(doc, { phase: "exporting", progress: null, job, error: null, exported: null });
         const date = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });

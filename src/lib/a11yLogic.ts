@@ -242,3 +242,24 @@ export function takesAlt(x: RuleResult, f: Finding): f is Finding & { xref: numb
 
 /** "p. 5" or "Document". */
 export const whereText = (f: Finding) => (f.page === null ? "Document" : `p. ${f.page + 1}`);
+
+/** What the rail needs to decide whether the open document is to be read again by itself. */
+export interface CheckState {
+  phase: string;
+  checkedRev: number | null;
+  /** The revision whose check was cancelled. */
+  skipRev: number | null;
+  /** The revision a check failed on. */
+  errorRev: number | null;
+}
+
+/**
+ * True when the report is out of date for revision `rev` and nothing stands in the way: idle, and the
+ * check for this very revision was not cancelled or did not fail (Check again, or an edit, lifts that).
+ * An error from a fix or an export does not hold back a check after an edit.
+ */
+export function autoCheckDue(s: CheckState | undefined, rev: number): boolean {
+  if (!s) return true;
+  return s.phase === "idle" && s.checkedRev !== rev && s.skipRev !== rev && s.errorRev !== rev;
+}
+

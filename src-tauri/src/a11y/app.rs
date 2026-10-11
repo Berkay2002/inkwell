@@ -80,6 +80,8 @@ pub async fn a11y_export_report(
     on_progress: Channel<Progress>,
 ) -> Result<String> {
     let dest = reg.take_save(window.label(), &to)?;
+    // The report replaces what is at `dest`: never a document that is open (a later save would corrupt it).
+    eng.check_not_open(&dest, None)?;
     let eng = eng.inner().clone();
     let guard = jobs.inner().begin(job);
     blocking(move || {

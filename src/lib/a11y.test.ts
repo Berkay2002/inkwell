@@ -29,6 +29,7 @@ import {
   type Report,
   type RuleResult,
   afterFixAll,
+  autoCheckDue,
   autotagText,
   counts,
   fixAllText,
@@ -219,5 +220,114 @@ describe("a11y store", () => {
     await first;
     // the stale answer did not replace the newer report
     expect(a().get(1).report).toEqual(sample);
+  });
+});
+
+describe("when the report is read again by itself", () => {
+  const idle = { phase: "idle", checkedRev: 2, skipRev: null, errorRev: null };
+
+  it("is due after an edit, not when the report is current", () => {
+    expect(autoCheckDue(idle, 2)).toBe(false);
+    expect(autoCheckDue(idle, 3)).toBe(true);
+    expect(autoCheckDue(undefined, 0)).toBe(true);
+    expect(autoCheckDue({ ...idle, phase: "checking" }, 3)).toBe(false);
+  });
+
+  it("a cancelled check stays cancelled until Check again, the rail opening, or an edit", async () => {
+    inv.mockImplementationOnce(() => new Promise(() => {}));
+    void a().check(1);
+    expect(a().get(1).phase).toBe("checking");
+    a().cancel(1);
+    expect(a().get(1)).toMatchObject({ phase: "idle", skipRev: 3 });
+    // the effect would run now: the revision is the cancelled one, so nothing restarts
+    expect(autoCheckDue(a().get(1), 3)).toBe(false);
+    // an edit moves on
+    expect(autoCheckDue(a().get(1), 4)).toBe(true);
+    // opening the rail asks again
+    a().setOpen(true);
+    expect(a().get(1).skipRev).toBeNull();
+    expect(autoCheckDue(a().get(1), 3)).toBe(true);
+    // and so does Check again
+    a().cancel(1);
+    reply({ a11y_check: sample, a11y_preview: { untagged: false } });
+    await a().check(1);
+    expect(a().get(1)).toMatchObject({ phase: "idle", skipRev: null, checkedRev: 3 });
+  });
+
+  it("closing the rail cancels the check and does not start it again at once", () => {
+    inv.mockImplementationOnce(() => new Promise(() => {}));
+    void a().check(1);
+    a().setOpen(false);
+    expect(toolCancel).toHaveBeenCalled();
+    expect(a().get(1).skipRev).toBe(3);
+  });
+
+  it("an error from a fix or an export does not stop the check after the next edit", async () => {
+    reply({ a11y_check: sample, a11y_preview: { untagged: false }, a11y_fix: () => Promise.reject("the file is read-only") });
+    await a().check(1);
+    await a().fix(1, { fix: "tabOrder" });
+    expect(a().get(1).error).toBe("the file is read-only");
+    expect(a().get(1).errorRev).toBeNull();
+    expect(autoCheckDue(a().get(1), 4)).toBe(true);
+  });
+
+  it("a check that failed holds back only its own revision", async () => {
+    reply({ a11y_check: () => Promise.reject("could not read the file") });
+    await a().check(1);
+    expect(a().get(1)).toMatchObject({ error: "could not read the file", errorRev: 3 });
+    expect(autoCheckDue(a().get(1), 3)).toBe(false);
+    expect(autoCheckDue(a().get(1), 4)).toBe(true);
+  });
+});
+
+describe("a closed document", () => {
+  it("is not brought back by a late progress or completion", async () => {
+    let finish: (r: Report) => void = () => {};
+    let progress: ((p: unknown) => void) | undefined;
+    inv.mockImplementationOnce((_cmd: string, args?: unknown) => {
+      progress = (args as { onProgress: { onmessage: (p: unknown) => void } }).onProgress.onmessage;
+      return new Promise((res) => (finish = res as never));
+    });
+    const run = a().check(1);
+    expect(a().docs[1]).toBeDefined();
+    // the tab closes: its entry goes with it
+    useStore.setState({ docs: {}, order: [], active: null as never });
+    a().forget(1);
+    progress?.({ done: 3, pages: 12, stage: "check" });
+    finish(sample);
+    await run;
+    expect(a().docs[1]).toBeUndefined();
+  });
+
+  it("a fix finishing after the tab closed leaves no entry either", async () => {
+    reply({ a11y_check: sample, a11y_preview: { untagged: false } });
+    await a().check(1);
+    let finish: (s: unknown) => void = () => {};
+    inv.mockImplementationOnce(() => new Promise((res) => (finish = res)));
+    const run = a().fix(1, { fix: "tabOrder" });
+    useStore.setState({ docs: {}, order: [], active: null as never });
+    a().forget(1);
+    finish(state(4));
+    await run;
+    expect(a().docs[1]).toBeUndefined();
+  });
+});
+
+describe("a report export", () => {
+  it("takes the phase from a check that started while the Save dialog was open", async () => {
+    reply({ a11y_check: sample, a11y_preview: { untagged: false } });
+    await a().check(1);
+    let pick: (v: unknown) => void = () => {};
+    vi.mocked(pickSave).mockImplementationOnce(() => new Promise((res) => (pick = res)) as never);
+    const exporting = a().exportReport(1, "html");
+    // an edit starts a check behind the dialog
+    inv.mockImplementationOnce(() => new Promise(() => {}));
+    void a().check(1);
+    expect(a().get(1).phase).toBe("checking");
+    reply({ a11y_export_report: "C:\\r.html" });
+    pick({ token: "tok", path: "C:\\r.html" });
+    await exporting;
+    expect(toolCancel).toHaveBeenCalled();
+    expect(a().get(1)).toMatchObject({ phase: "idle", exported: "C:\\r.html" });
   });
 });

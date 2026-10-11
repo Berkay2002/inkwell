@@ -731,3 +731,21 @@ fn the_report_is_written_as_html_and_as_a_pdf() {
     assert!(String::from_utf8(bytes).unwrap().contains("Quarterly figures.pdf"));
     assert!(report_bytes(&eng, id, true, "today", &mut |_| {}, &AtomicBool::new(true)).is_err());
 }
+
+#[test]
+fn a_report_never_replaces_a_document_that_is_open() {
+    let path = file("report-target", &untagged_article());
+    let (eng, _id) = open(&path);
+    // the guard both report exports call before they write
+    assert!(eng.check_not_open(&path, None).is_err(), "the open document's own file is refused");
+    let elsewhere = file("report-elsewhere", &untagged_article());
+    assert!(eng.check_not_open(&elsewhere, None).is_ok(), "a file that is not open is fine");
+    // and the commands do call it, ahead of the write
+    for (name, src) in [("a11y_export_report", include_str!("app.rs")), ("history_compare_report", include_str!("../history_ipc.rs"))] {
+        let at = src.find(&format!("fn {name}")).unwrap();
+        let body = &src[at..];
+        let guard = body.find("check_not_open").unwrap_or(usize::MAX);
+        let write = body.find("write_replace").or_else(|| body.find("report_to(")).unwrap();
+        assert!(guard < write, "{name} checks the target before writing");
+    }
+}

@@ -8,6 +8,7 @@ import {
   type RuleResult,
   LANGS,
   STATUS_WORD,
+  autoCheckDue,
   autotagText,
   counts,
   fixAllText,
@@ -42,7 +43,8 @@ export function A11yPanel({ doc }: { doc: DocState }) {
   // Read when the rail opens and again whenever the document changes (a fix, undo, an edit).
   useEffect(() => {
     if (!open) return;
-    if (phase === "idle" && !d?.error && d?.checkedRev !== doc.rev) void st().check(id);
+    // A cancelled check or one that failed at this revision waits for Check again or the next edit.
+    if (autoCheckDue(d, doc.rev)) void st().check(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, id, doc.rev, phase]);
 
@@ -73,6 +75,19 @@ export function A11yPanel({ doc }: { doc: DocState }) {
 function Waiting({ doc }: { doc: DocState }) {
   const d = useA11y((s) => s.docs[doc.id]);
   if (d?.error) return <p className="a11y-error" role="alert">{d.error}</p>;
+  // Idle without a report: the check was cancelled, and waits for the person.
+  if ((d?.phase ?? "idle") === "idle") {
+    return (
+      <div className="a11y-card">
+        <p>The check was cancelled.</p>
+        <div className="a11y-actions">
+          <button className="a11y-btn primary" onClick={() => void st().check(doc.id)}>
+            Check accessibility
+          </button>
+        </div>
+      </div>
+    );
+  }
   return <Running doc={doc} what="check" />;
 }
 
@@ -100,7 +115,9 @@ function Body({ doc, report }: { doc: DocState; report: Report }) {
   const d = useA11y((s) => s.docs[doc.id])!;
   const groups = useMemo(() => groupRules(report), [report]);
   const offer = !report.tagged && d.preview?.untagged && !d.notNow;
-  const busy = d.phase !== "idle";
+  // A report that no longer matches the document (its check was cancelled or failed) is not acted on.
+  const stale = d.checkedRev !== doc.rev;
+  const busy = d.phase !== "idle" || stale;
   return (
     <>
       {d.phase === "autotagging" ? (
@@ -125,6 +142,14 @@ function Body({ doc, report }: { doc: DocState; report: Report }) {
         <Summary report={report} checking={d.phase === "checking"} />
       )}
       {d.phase === "checking" && <Running doc={doc} what="check" />}
+      {stale && d.phase === "idle" && (
+        <p className="a11y-note">
+          The document changed since this check.{" "}
+          <button className="a11y-link" onClick={() => void st().check(doc.id)}>
+            Check again
+          </button>
+        </p>
+      )}
       {d.phase === "exporting" && <Running doc={doc} what="export" />}
       {d.error && (
         <p className="a11y-error" role="alert">
@@ -191,7 +216,7 @@ function Rule({ doc, x }: { doc: DocState; x: RuleResult }) {
   const lang = useA11y((s) => s.lang);
   const d = useA11y((s) => s.docs[doc.id])!;
   const [all, setAll] = useState(false);
-  const busy = d.phase !== "idle";
+  const busy = d.phase !== "idle" || d.checkedRev !== doc.rev;
   // A document-level finding of a rule with a one-click fix only restates the explanation above it.
   const noted = x.findings.filter((f) => !isOverflowNote(f) && !(f.page === null && x.fix && x.fix !== "autotag"));
   const overflow = x.findings.filter(isOverflowNote);
@@ -365,7 +390,8 @@ function Thumb({ doc, page, rect }: { doc: DocState; page: number; rect: [number
 
 function Foot({ doc, report }: { doc: DocState; report: Report }) {
   const phase = useA11y((s) => s.docs[doc.id]?.phase ?? "idle");
-  const busy = phase !== "idle";
+  const stale = useA11y((s) => s.docs[doc.id]?.checkedRev !== doc.rev);
+  const busy = phase !== "idle" || stale;
   const all = fixAllText(report);
   return (
     <div className="a11y-foot">
