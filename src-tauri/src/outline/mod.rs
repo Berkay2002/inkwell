@@ -495,28 +495,37 @@ fn array_items(a: Option<PdfObject>, max: usize) -> Vec<PdfObject> {
 fn signature_values(form: &PdfObject) -> Vec<PdfObject> {
     const CAP: usize = 20_000;
     let mut found = Vec::new();
-    // (field, is a signature by inheritance, the /V inherited from above)
-    let mut todo: Vec<(PdfObject, bool, Option<PdfObject>)> =
+    // (field, is a signature by inheritance, the /V inherited from above and who it is: its object number, or its
+    // holder's when it is direct, -1 when neither has one)
+    let mut todo: Vec<(PdfObject, bool, Option<(PdfObject, i32)>)> =
         array_items(form.get_dict("Fields").ok().flatten(), CAP).into_iter().map(|f| (f, false, None)).collect();
     // Once per (field, inherited type, inherited value): the same field reached from two parents is read in each state.
-    let mut seen: HashSet<(i32, bool, bool)> = HashSet::new();
+    let mut seen: HashSet<(i32, bool, i32)> = HashSet::new();
     let mut budget = CAP;
+    let number_of = |o: &PdfObject| o.is_indirect().unwrap_or(false).then(|| o.as_indirect().ok()).flatten();
     while let Some((field, inherited, above)) = todo.pop() {
         budget -= 1;
         if budget == 0 {
             break;
         }
-        if field.is_indirect().unwrap_or(false) && !field.as_indirect().is_ok_and(|n| seen.insert((n, inherited, above.is_some()))) {
-            continue;
+        let num = number_of(&field);
+        if let Some(n) = num {
+            if !seen.insert((n, inherited, above.as_ref().map_or(i32::MIN, |a| a.1))) {
+                continue;
+            }
         }
         if !field.resolve().ok().flatten().is_some_and(|d| d.is_dict().unwrap_or(false)) {
             continue;
         }
         let kind = name_of(field.get_dict("FT").ok().flatten());
         let is_sig = if kind.is_empty() { inherited } else { kind == "Sig" };
-        let value = field.get_dict("V").ok().flatten().or(above);
+        let value = field.get_dict("V").ok().flatten().map(|v| {
+            let id = number_of(&v).or(num).unwrap_or(-1);
+            (v, id)
+        });
+        let value = value.or(above);
         if is_sig {
-            found.extend(value.clone());
+            found.extend(value.as_ref().map(|v| v.0.clone()));
         }
         let room = CAP.saturating_sub(todo.len());
         todo.extend(array_items(field.get_dict("Kids").ok().flatten(), room).into_iter().map(|k| (k, is_sig, value.clone())));

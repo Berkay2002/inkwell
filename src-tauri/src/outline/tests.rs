@@ -784,6 +784,19 @@ fn the_signature_type_and_value_are_found_through_the_field_tree() {
     let objs = [format!("<< /T (P) {v} /Kids [8 0 R] >>"), "<< /Parent 7 0 R /FT /Sig /T (K) >>".to_string()];
     let objs: Vec<&str> = objs.iter().map(String::as_str).collect();
     assert_eq!(certification_of("inherited-value", "/AcroForm << /Fields [7 0 R] >>", &objs), (Some(3), true));
+    // A kid with no value of its own under two parents that each carry one: the DocMDP of the second is not missed,
+    // whichever parent is read first.
+    let approval = "/V << /Type /Sig /ByteRange [0 10 20 30] /Contents <00> >>";
+    let certifying = sig_value(&doc_mdp("/TransformParams << /P 1 >>"));
+    for (name, fields) in [("two-parents-a", "[7 0 R 8 0 R]"), ("two-parents-b", "[8 0 R 7 0 R]")] {
+        let objs = [
+            format!("<< /T (A) {approval} /Kids [9 0 R] >>"),
+            format!("<< /T (B) {certifying} /Kids [9 0 R] >>"),
+            "<< /FT /Sig /T (K) >>".to_string(),
+        ];
+        let objs: Vec<&str> = objs.iter().map(String::as_str).collect();
+        assert_eq!(certification_of(name, &format!("/AcroForm << /Fields {fields} >>"), &objs), (Some(1), true), "{name}");
+    }
     // Not a signature field: a text field's /V is not looked at.
     let text = format!("<< /FT /Tx /T (T) {v} >>");
     assert_eq!(certification_of("text-field", "/AcroForm << /Fields [7 0 R] >>", &[&text]), (None, false));

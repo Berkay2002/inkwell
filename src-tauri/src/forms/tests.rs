@@ -1672,6 +1672,62 @@ fn a_catalog_certification_that_allows_no_change_refuses_typing_scripts_resets_a
 }
 
 #[test]
+fn a_certified_document_refuses_every_authoring_step_and_leaves_no_history() {
+    // Certified in the catalog (P 3, the loosest), and on a signature field (P 2).
+    for (name, catalog_p, field_p) in [("catalog", Some(3), None), ("signature", None, Some(2))] {
+        let (eng, id, _) = script_form(&format!("author-certified-{name}"), &["A", "B"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+        script(&eng, id, "A", "C", "event.value = 1;");
+        script(&eng, id, "B", "C", "event.value = 2;");
+        let (a, b) = (field(&eng, id, "A").xref, field(&eng, id, "B").xref);
+        let nodes = eng.read_custom(id, |d| Ok(scan(d)?.iter().filter(|e| e.name == "A" || e.name == "B").map(|e| e.node).collect::<Vec<_>>())).unwrap();
+        if let Some(p) = field_p {
+            sign(&eng, id, None, Some(p));
+        }
+        if let Some(p) = catalog_p {
+            certify_catalog(&eng, id, p);
+        }
+        let before = (steps(&eng, id), list_all(&eng, id).unwrap().fields.into_iter().map(|w| (w.name, w.xref)).collect::<Vec<_>>());
+        let refused = [
+            ("add", add_one(&eng, id, 0, &nf(FieldKind::Text, "New", [72.0, 300.0, 200.0, 320.0]), EditSource::User).map(|_| ())),
+            ("add many", add_many(&eng, id, 0, &[nf(FieldKind::Text, "N1", [72.0, 300.0, 200.0, 320.0])], EditSource::User).map(|_| ())),
+            ("move", move_one(&eng, id, 0, a, [100.0, 300.0, 260.0, 330.0], EditSource::User).map(|_| ())),
+            ("edit", edit_one(&eng, id, 0, a, &FieldPatch { tooltip: Some("t".into()), ..Default::default() }, EditSource::User).map(|_| ())),
+            ("delete", delete_many(&eng, id, &[(0, b)], EditSource::User).map(|_| ())),
+            ("calc order", calc_order_one(&eng, id, &[nodes[1], nodes[0]], EditSource::User).map(|_| ())),
+            ("tab order", tab_order_one(&eng, id, 0, &[b, a], EditSource::User).map(|_| ())),
+            ("arrange", arrange_one(&eng, id, 0, false, EditSource::User).map(|_| ())),
+        ];
+        for (what, r) in refused {
+            let e = r.expect_err(&format!("{name}: {what} must be refused")).to_string();
+            assert!(e.contains("certified"), "{name}: {what}: {e}");
+        }
+        let after = (steps(&eng, id), list_all(&eng, id).unwrap().fields.into_iter().map(|w| (w.name, w.xref)).collect::<Vec<_>>());
+        assert_eq!(before, after, "{name}: nothing changed and no step was made");
+    }
+}
+
+#[test]
+fn authoring_in_a_signed_document_is_saved_after_the_signed_bytes() {
+    let (eng, id, path) = script_form("author-signed", &["A"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+    sign(&eng, id, None, None);
+    eng.save(id, None).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert!(eng2.read_custom(id2, |d| Ok(crate::outline::signed(d))).unwrap(), "the signature is seen");
+    add1(&eng2, id2, 0, nf(FieldKind::Text, "B", [72.0, 300.0, 200.0, 320.0]));
+    let a = field(&eng2, id2, "A").xref;
+    delete_many(&eng2, id2, &[(0, a)], EditSource::User).unwrap();
+    eng2.save(id2, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the file was rewritten: the signature would no longer verify");
+    let (eng3, id3) = reopen(&path);
+    let names: Vec<String> = list_all(&eng3, id3).unwrap().fields.into_iter().map(|w| w.name).collect();
+    assert!(names.contains(&"B".to_string()) && !names.contains(&"A".to_string()), "{names:?}");
+}
+
+#[test]
 fn a_calculated_result_is_not_written_into_a_field_a_signature_locks() {
     let (eng, id, _) = script_form("js-signed-calc", &["Rent", "Deposit", "Total"]);
     add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
