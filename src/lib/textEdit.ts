@@ -16,6 +16,15 @@ export type EditTool = "select" | "text";
 /** What the Edit rail is for: the page's text, its links, or the document's bookmarks. */
 export type EditSection = "text" | "links" | "bookmarks";
 
+/** Opens Edit mode on a section of its rail (from the tools panel, the palette): Organize is left first. */
+export function openEditSection(doc: number, section: EditSection) {
+  const st = useStore.getState();
+  if (st.docs[doc]?.organize) st.patch(doc, { organize: false });
+  const te = useTextEdit.getState();
+  te.setOpen(true);
+  te.setSection(section);
+}
+
 export interface BlockRef {
   page: number;
   index: number;

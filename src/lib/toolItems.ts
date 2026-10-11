@@ -9,6 +9,7 @@ import { useProtect } from "./protectStore";
 import { useSearch } from "./searchStore";
 import { type ToolItem } from "./toolsCatalog";
 import { useToolPrefs } from "./toolPrefs";
+import { openEditSection } from "./textEdit";
 import { useTools } from "./toolsStore";
 
 /**
@@ -21,6 +22,28 @@ import { useTools } from "./toolsStore";
 export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[] {
   const id = doc?.id;
   return [
+    {
+      id: "links",
+      group: "edit",
+      icon: "link",
+      label: "Links",
+      description: "Add, change or remove links to pages and web addresses",
+      detail: "Draw a link, choose where it goes (a page, a web address or a file), see which links are broken, and make links from web addresses in the text.",
+      keywords: "link hyperlink url web address button jump broken",
+      command: "edit-links",
+      onSelect: () => id !== undefined && openEditSection(id, "links"),
+    },
+    {
+      id: "bookmarks",
+      group: "edit",
+      icon: "book",
+      label: "Bookmarks",
+      description: "Add, rename, reorder or remove the outline of the file",
+      detail: "Edit the outline in the side panel: add bookmarks, drag to reorder or nest, set where each one goes, or make them from headings.",
+      keywords: "bookmark outline contents navigation headings table of contents",
+      command: "edit-bookmarks",
+      onSelect: () => id !== undefined && openEditSection(id, "bookmarks"),
+    },
     {
       id: "compress",
       group: "optimize",
