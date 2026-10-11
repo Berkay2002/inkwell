@@ -9,9 +9,11 @@ pub mod engine;
 pub mod history;
 pub mod history_ipc;
 pub mod imageedit;
+pub mod links;
 pub mod marks;
 pub mod ocr;
 pub mod organize;
+pub mod outline;
 pub mod paths;
 pub mod preflight;
 pub mod print;
@@ -1032,6 +1034,18 @@ pub fn run() {
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
+            outline::app::bookmarks_list,
+            outline::app::bookmarks_apply,
+            outline::app::bookmarks_headings,
+            links::app::links_list,
+            links::app::links_apply,
+            links::app::links_urls,
+            links::app::links_audit,
+            links::app::link_check_url,
+            links::app::link_pick_file,
+            links::app::link_open_url,
+            links::app::link_file_path,
+            links::app::link_file_ref,
             textedit::app::text_fonts,
             imageedit::app::image_blocks,
             imageedit::app::image_edit,
