@@ -57,6 +57,8 @@ import {
  */
 
 const st = () => useStore.getState();
+/** Undo conversion found the document past the conversion: nothing is undone and the sheet stays. */
+const MOVED_ON = "The document changed since the conversion; nothing was undone. Undo it from History, or Keep.";
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 const cancelled = (e: unknown) => /cancel/i.test(msg(e));
 const stem = (name: string) => name.replace(/\.pdf$/i, "");
@@ -104,6 +106,9 @@ export interface ConvertSheet {
   job: number;
   /** After a run: what the engine says it did and where the new file went. */
   result: { report: ConvertReport; path: string | null } | null;
+  /** `unsaved` only: the document's generation right after the conversion, and whether closing was asked about. */
+  convertedRev: number | null;
+  closing: boolean;
 }
 
 export interface MarksSheet {
@@ -174,6 +179,9 @@ interface PrepressStore {
   /** After a failed write: choose a file again and save the converted document there. */
   saveConverted: () => Promise<void>;
   cancelConvert: () => void;
+  /** After a failed write, closing asks first: the open document holds the conversion, and a Save would write it. */
+  undoConversion: () => Promise<void>;
+  keepConversion: () => void;
 
   openMarks: (doc?: number) => void;
   setMarks: (p: Partial<MarksForm>) => void;
@@ -441,7 +449,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
     openConvert: (docId) => {
       const d = docOf(docId);
       if (!d || sheet<ConvertSheet>("convert")?.phase === "running") return;
-      set({ sheet: { kind: "convert", doc: d.id, phase: "options", opts: DEFAULT_CONVERT, progress: 0, error: null, job: 0, result: null } });
+      set({ sheet: { kind: "convert", doc: d.id, phase: "options", opts: DEFAULT_CONVERT, progress: 0, error: null, job: 0, result: null, convertedRev: null, closing: false } });
       void loadProtection(d.id);
     },
 
@@ -508,6 +516,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
             phase: "unsaved",
             progress: 1,
             result: { report: out.report, path: null },
+            convertedRev: out.state.rev,
             error: `The colours were converted in the open document, but saving the new file failed: ${out.saveError ?? "unknown error"} Undo takes the conversion back.`,
           });
         }
@@ -544,6 +553,27 @@ export const usePrepress = create<PrepressStore>((set, get) => {
     cancelConvert: () => {
       const s = sheet<ConvertSheet>("convert");
       if (s?.phase === "running") void api.toolCancel(s.job).catch(() => {});
+    },
+
+    undoConversion: async () => {
+      const s = sheet<ConvertSheet>("convert");
+      const d = s && st().docs[s.doc];
+      if (!s || !d || s.phase !== "unsaved") return;
+      try {
+        // `queued` hands a failure back (the shared undo shows it on the error line and carries on). The check is
+        // made in the queue: another step may have landed since (an undo and redo, the assistant), and then the
+        // conversion is not what an undo would take back.
+        const after = await queued(s.doc, async () => (st().docs[s.doc]?.rev === s.convertedRev ? api.editUndo(s.doc) : null));
+        if (!after) return patchSheet<ConvertSheet>("convert", { error: MOVED_ON });
+        applyState(s.doc, after);
+      } catch (e) {
+        return patchSheet<ConvertSheet>("convert", { error: msg(e) });
+      }
+      if (sheet<ConvertSheet>("convert")?.phase === "unsaved") set({ sheet: null });
+    },
+
+    keepConversion: () => {
+      if (sheet<ConvertSheet>("convert")?.phase === "unsaved") set({ sheet: null });
     },
 
     // ---- Printer's marks ----
@@ -583,7 +613,10 @@ export const usePrepress = create<PrepressStore>((set, get) => {
         if (!now || marksKey(now.page, st().docs[now.doc]?.rev ?? -1, now.form) !== key) return;
         patchSheet<MarksSheet>("marks", { preview: { key, data }, error: null });
       } catch (e) {
-        if (sheet<MarksSheet>("marks")) patchSheet<MarksSheet>("marks", { preview: null, error: msg(e) });
+        const now = sheet<MarksSheet>("marks");
+        // an older failure must not replace a newer answer either
+        if (!now || marksKey(now.page, st().docs[now.doc]?.rev ?? -1, now.form) !== key) return;
+        patchSheet<MarksSheet>("marks", { preview: null, error: msg(e) });
       }
     },
 
@@ -716,6 +749,8 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       const s = get().sheet;
       if (!s) return;
       if (s.kind === "convert" && s.phase === "running") return;
+      // the open document holds the conversion; closing is Undo or Keep, a second Escape goes back to the sheet
+      if (s.kind === "convert" && s.phase === "unsaved") return patchSheet<ConvertSheet>("convert", { closing: !s.closing });
       if ((s.kind === "marks" || s.kind === "boxes") && s.busy) return;
       set({ sheet: null });
     },
