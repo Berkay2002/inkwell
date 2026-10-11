@@ -80,6 +80,50 @@ pub(crate) fn effective(page: &PdfObject, kind: BoxKind) -> Result<Box4> {
     })
 }
 
+/// Which boxes the page states itself; the others are the defaults of `effective`.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatedBoxes {
+    pub crop: bool,
+    pub trim: bool,
+    pub bleed: bool,
+    pub art: bool,
+}
+
+/// The boxes of one page, as the UI shows them: user space, `[x0, y0, x1, y1]`, y up.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PageBoxes {
+    /// `/Rotate`, 0, 90, 180 or 270.
+    pub rotate: i32,
+    pub media: Box4,
+    pub crop: Box4,
+    pub trim: Box4,
+    pub bleed: Box4,
+    pub art: Box4,
+    pub stated: StatedBoxes,
+}
+
+/// Reads the boxes of page `page` (0-based) of the document as it is now.
+pub fn page_boxes(eng: &Engine, doc: DocId, page: u32) -> Result<PageBoxes> {
+    eng.read_custom(doc, |pdf| {
+        if page as i32 >= pdf.page_count()? {
+            return Err(crate::engine::EngineError::BadPage(page));
+        }
+        let p = pdf.find_page(page as i32)?;
+        let rotate = p.get_dict_inheritable("Rotate")?.and_then(|r| r.as_int().ok()).unwrap_or(0).rem_euclid(360) / 90 * 90;
+        let has = |k| stated(&p, k).map(|b| b.is_some());
+        Ok(PageBoxes {
+            rotate,
+            media: effective(&p, BoxKind::Media)?,
+            crop: effective(&p, BoxKind::Crop)?,
+            trim: effective(&p, BoxKind::Trim)?,
+            bleed: effective(&p, BoxKind::Bleed)?,
+            art: effective(&p, BoxKind::Art)?,
+            stated: StatedBoxes { crop: has(BoxKind::Crop)?, trim: has(BoxKind::Trim)?, bleed: has(BoxKind::Bleed)?, art: has(BoxKind::Art)? },
+        })
+    })
+}
+
 pub(crate) fn write(doc: &PdfDocument, page: &mut PdfObject, kind: BoxKind, b: Box4) -> Result<()> {
     let mut a = doc.new_array_with_capacity(4)?;
     for v in b {

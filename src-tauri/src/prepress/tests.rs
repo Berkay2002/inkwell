@@ -821,3 +821,79 @@ fn black_image_pixels_stay_k_only_through_a_profile() {
     assert!(rich[0] as u32 + rich[1] as u32 + rich[2] as u32 > 60, "the profile mixes black from several inks: {rich:?}");
     assert_eq!(samples(true), [0, 0, 0, 255, 0, 0, 0, 255], "black is K alone");
 }
+
+// ---- glue for the UI -----------------------------------------------------------------------------
+
+#[test]
+fn page_boxes_say_which_boxes_the_page_states_and_how_it_is_turned() {
+    let (eng, doc) = open("page-boxes", &build("", &[("/Rotate -90/TrimBox[20 30 592 762]", "0 g 40 40 10 10 re f"), ("/Rotate 90", ""), ("", "")], &[]));
+    let b = page_boxes(&eng, doc, 0).unwrap();
+    assert_eq!(b.rotate, 270);
+    assert_eq!(b.media, [0.0, 0.0, 612.0, 792.0]);
+    assert_eq!(b.trim, [20.0, 30.0, 592.0, 762.0]);
+    // a box the page does not state is the crop box, which is the media box
+    assert_eq!((b.crop, b.bleed, b.art), (b.media, b.media, b.media));
+    assert_eq!((b.stated.trim, b.stated.crop, b.stated.bleed, b.stated.art), (true, false, false, false));
+    assert_eq!(page_boxes(&eng, doc, 1).unwrap().rotate, 90);
+    assert_eq!(page_boxes(&eng, doc, 2).unwrap().rotate, 0);
+    assert!(page_boxes(&eng, doc, 3).is_err());
+    // reading it again after setting a bleed box reports it as stated
+    let spec = BoxSpec { pages: Some(vec![0]), ..box_spec(BoxKind::Bleed, BoxKind::Trim, [9.0; 4]) };
+    set_boxes(&eng, doc, &spec, EditSource::User).unwrap();
+    let b = page_boxes(&eng, doc, 0).unwrap();
+    assert_eq!(b.bleed, [11.0, 21.0, 601.0, 771.0]);
+    assert!(b.stated.bleed);
+}
+
+#[test]
+fn the_ink_at_a_point_is_what_prints_there() {
+    let (eng, doc) = open("ink-at", &build(SPOT, &[("", SPOT_PAGE), ("", "1 1 1 1 k 100 500 100 100 re f\n")], &[]));
+    let at = |page: u32, x: f32, y: f32| {
+        let seps = page_separations(&eng, doc, page).unwrap();
+        ink_at(&eng, &seps, doc, page, x, y).unwrap()
+    };
+    let value = |r: &InkAt, name: &str| r.planes.iter().find(|p| p.name == name).unwrap().value;
+    // the spot patch (50..200 x 500..650; from the top y 142..292): the spot plane only
+    let spot = at(0, 100.0, 217.0);
+    assert_eq!(spot.planes.len(), 5);
+    assert!((value(&spot, "PANTONE 123") - 100.0).abs() < 0.5 && value(&spot, "Cyan") < 0.5, "{spot:?}");
+    assert!((spot.total - 100.0).abs() < 0.5);
+    // black overprinting cyan (overprint mode 1): both plates keep their ink
+    let both = at(0, 310.0, 242.0);
+    assert!((value(&both, "Cyan") - 100.0).abs() < 0.5 && (value(&both, "Black") - 100.0).abs() < 0.5, "{both:?}");
+    assert!((both.total - 200.0).abs() < 1.0);
+    // paper
+    assert!(at(0, 10.0, 10.0).total < 0.5);
+    // four full inks read 400 in total, and a point off the page is clamped, not an error
+    let rich = at(1, 150.0, 242.0);
+    assert!((rich.total - 400.0).abs() < 1.0 && rich.planes.iter().take(4).all(|p| (p.value - 100.0).abs() < 0.5), "{rich:?}");
+    assert!(at(1, -50.0, 5000.0).total < 0.5);
+    assert!(ink_at(&eng, &page_separations(&eng, doc, 0).unwrap(), doc, 0, f32::NAN, 0.0).is_err());
+}
+
+#[test]
+fn the_marks_preview_is_the_marks_that_get_added() {
+    let (eng, doc) = open("marks-preview", &build("", &[("", "0.5 0.5 0.5 0.5 k 100 100 400 600 re f")], &[]));
+    let u = EditSource::User;
+    set_boxes(&eng, doc, &box_spec(BoxKind::Trim, BoxKind::Media, [-20.0; 4]), u.clone()).unwrap();
+    set_boxes(&eng, doc, &box_spec(BoxKind::Bleed, BoxKind::Trim, [9.0; 4]), u.clone()).unwrap();
+    let spec = MarksSpec { pages: None, marks: MarkSet::default(), weight: Some(1.0), offset: Some(12.0), length: Some(20.0) };
+    let before = contents(&eng, doc, 0);
+    let p = marks_preview(&eng, doc, 0, &spec).unwrap();
+    // asking changes nothing
+    assert_eq!(contents(&eng, doc, 0), before);
+    assert_eq!(boxes(&eng, doc, 0, BoxKind::Media), Some([0.0, 0.0, 612.0, 792.0]));
+    assert_eq!(p.trim, [20.0, 20.0, 592.0, 772.0]);
+    assert_eq!(p.bleed, [11.0, 11.0, 601.0, 781.0]);
+    assert!(p.media[0] < 0.0 && p.media[2] > 612.0);
+    // adding them writes the same boxes and the same drawing (under the name the page's own space got)
+    let (_, notes) = add_printer_marks(&eng, doc, &spec, u).unwrap();
+    assert_eq!(boxes(&eng, doc, 0, BoxKind::Media), Some(p.media));
+    assert_eq!(p.notes, notes);
+    assert!(contents(&eng, doc, 0).contains(&p.content.replace("/Reg CS", "/IwReg CS")));
+    // no mark kind picked is refused, and so is a page that is not there
+    let none = MarksSpec { marks: MarkSet { crop: false, bleed: false, registration: false, color_bars: false }, ..spec.clone() };
+    assert!(marks_preview(&eng, doc, 0, &none).is_err());
+    assert!(marks_preview(&eng, doc, 4, &spec).is_err());
+    assert!(marks_preview(&eng, doc, 0, &MarksSpec { weight: Some(0.0), ..spec }).is_err());
+}

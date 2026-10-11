@@ -20,11 +20,11 @@ mod seps;
 #[cfg(test)]
 mod tests;
 
-pub use boxes::{BoxKind, BoxSpec, set_boxes};
+pub use boxes::{BoxKind, BoxSpec, PageBoxes, page_boxes, set_boxes};
 pub use convert::{ConvertReport, ConvertSpec, IntentSource, convert_colors};
-pub use ink::{InkReport, PlaneInk, doc_ink, ink_report};
+pub use ink::{InkAt, InkReport, PlaneInk, PlaneValue, doc_ink, ink_at, ink_report};
 pub use inspect::{Inspected, ObjectKind, inspect_at};
-pub use marks::{MarkSet, MarksSpec, add_printer_marks};
+pub use marks::{MarkSet, MarksPreview, MarksSpec, add_printer_marks, marks_preview};
 pub use render::{Mode, PROCESS, View, render_view_tile};
 pub use seps::{MAX_SPOT_PLANES, PageSeps, Spot, page_separations};
 

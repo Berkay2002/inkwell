@@ -17,6 +17,9 @@ import { ScriptPrompts } from "./components/forms/ScriptPrompts";
 import { RedactPanel } from "./components/redact/RedactPanel";
 import { SearchDriver, SearchPanel } from "./components/search/SearchPanel";
 import { wireCommentRail } from "./lib/commentRail";
+import { wirePrepressRail } from "./lib/prepressRail";
+import { PrepressPanel } from "./components/prepress/PrepressPanel";
+import { PrepressSheets } from "./components/prepress/PrepressSheets";
 import { Sidebar } from "./components/Sidebar";
 import { ConvertPanel } from "./components/ConvertPanel";
 import { MarksPanel } from "./components/MarksPanel";
@@ -74,6 +77,7 @@ export default function App() {
 
   useEffect(() => startHistoryEvents(), []);
   useEffect(() => wireCommentRail(), []);
+  useEffect(() => wirePrepressRail(), []);
 
   // Every open document's history state (recovery and "same document?" prompts show over the page).
   useEffect(() => {
@@ -185,6 +189,7 @@ export default function App() {
               <RedactPanel doc={doc} />
               <A11yPanel doc={doc} />
               <PreflightPanel doc={doc} />
+              <PrepressPanel doc={doc} />
               <CommentsPanel doc={doc} />
               <EditPanel doc={doc} />
               <FormsPanel doc={doc} />
@@ -203,6 +208,7 @@ export default function App() {
         </div>
       )}
       <PrintSheet />
+      <PrepressSheets />
       <CombineSheet />
       <LabelsSheet />
       <TransitionsSheet />

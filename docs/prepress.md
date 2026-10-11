@@ -2,8 +2,8 @@
 
 Engine: `src-tauri/src/prepress/`. It does what Acrobat Pro's "Print production" tools do: Output Preview
 (separations, overprint preview), ink coverage and total area coverage (TAC), the object inspector, Convert
-Colors, and printer's marks with trim and bleed boxes. pdfcraft has none of it. There is no UI yet; the
-commands and the tile route below are what the UI will call. The PDF/X checks stay in `src/preflight/`.
+Colors, and printer's marks with trim and bleed boxes. pdfcraft has none of it. The UI is described under
+"The UI" below; the commands and the tile route are what it calls. The PDF/X checks stay in `src/preflight/`.
 
 ## How a page is painted
 
@@ -41,6 +41,10 @@ through their alternates and cannot be switched on their own.
 | `prepress_convert(job, doc, spec, profile?, onProgress)` | Convert Colors, one undo step |
 | `prepress_boxes(doc, spec)` | sets TrimBox, BleedBox, ArtBox or CropBox, one undo step |
 | `prepress_marks(doc, spec)` | adds printer's marks, one undo step |
+| `prepress_page_boxes(doc, page)` | the page's media, crop, trim, bleed and art boxes, `/Rotate`, and which of them the page states itself |
+| `prepress_marks_preview(doc, page, spec)` | the marks `prepress_marks` would add to one page (drawing operators, new media, trim and bleed box, notes) without touching the document |
+| `prepress_ink_at(doc, page, x, y)` | the ink per plate and the total at one point (page points from the top-left as shown), painted with overprint |
+| `prepress_pick_profile()` | opens a file dialog for a CMYK ICC profile and returns an open token for `prepress_convert` |
 
 Tiles use the existing `inkwell://` protocol with a second route, `p`:
 `/p/{doc}/{page}/{rot}/{scale}/{tx}/{ty}?v={view}&g={rev}&e={epoch}&r={rank}`. It is `/t/...` plus the view id
@@ -121,9 +125,41 @@ finds the same boxes and grows nothing. Marks use a Separation `All` colour spac
 the colour bar uses process colours. The page's own contents are wrapped in a balanced `q ... Q` first. Notes
 come back for what was skipped (no bleed, a page too small for colour bars).
 
+## The UI
+
+Print production tools are the "Print production" group of the tools list and of the command palette. They
+are not assistant tools. State is `src/lib/prepressStore.ts` (logic in `prepressLogic.ts`, wire types in
+`prepressApi.ts`, rail wiring in `prepressRail.ts`); the screens are `src/components/prepress/`.
+
+- **Output Preview** is a right-hand rail (one rail at a time, like Preflight). It switches between the plates
+  view and the ink coverage view, lists the page's plates (the four inks and the spots) with a switch and
+  an "Only" button each, shows the ink per plate and the total under the pointer (`prepress_ink_at`, one
+  question in flight, the newest point wins), and takes a total-ink limit (300% by default, any 0 to 1000%).
+  The areas above the limit are drawn on the page and the sentence under the field says how high the ink goes.
+  "Simulate overprint" off folds the spots into CMYK, so only the four inks can be switched. While the rail is
+  open the page's tiles come from the `p` route with the view id of the current settings, the "pages dark"
+  inversion is off, and the view is registered again whenever a setting changes. A strip of small pictures of
+  the current page's plates (one per plate, drawn when scrolled into view and kept per document generation,
+  tile streams 2 and 3) shows one plate alone on click.
+- **Convert Colors** is a sheet with options (RGB, gray, spot; gray to black only; keep pure black; standard
+  conversion, the file's output intent or a CMYK profile file; pages; result), a confirmation that lists what
+  will change in plain sentences, and then runs with progress and Cancel. The result is a new file (asks where
+  first; the engine converts the open document and the document is then saved there, so the tab moves to the new
+  file and the original on disk is untouched) or one undo step in the open document, which Save writes.
+- **Printer's Marks** is a sheet with a live preview: the page, the marks, the new media box and the trim and
+  bleed boxes, drawn from `prepress_marks_preview` (the same geometry `prepress_marks` writes). Which marks,
+  line weight, length, distance from the trim, units, and all pages / this page / a range. One undo step.
+- **Page Boxes** is a sheet with a live preview of the box that will be written: which box, which box it is
+  measured from, margins for each side as the page is shown (turned pages are handled), units, all sides the
+  same, a 3 mm bleed preset, and pages. The sheet refuses what the engine would refuse before asking it. The
+  engine takes margins from each page's own reference box, so a range applies the same margins to every page.
+  One box kind per apply; one undo step.
+
 ## Not here
 
-- No UI: a plate/coverage panel, the inspector tool, and the dialogs for the three edits are for the UI branch.
+- Output Preview works on one page at a time: there is no document-wide list of spot colours, and the object
+  inspector has no UI yet.
+- Convert Colors to a new file saves the open document there (Save As), because the engine converts in place.
 - No separate-plate output (one file per plate), no trapping, no ink-limit conversion (TAC is reported, not
   reduced), no rich-black or overprint fixups.
 - Overprint preview needs MuPDF's rendering, which follows PDF 1.7 overprint (OPM, `All`, `None`); it does not
@@ -149,3 +185,11 @@ the trim is unchanged (`trimOnly`).
 The review round added tests for: an Indexed RGB and an Indexed CMYK image, a form field's appearance, 30 spots
 (27 planes, 3 folded), a spot space set without a colour and `Separation /None`, marks run twice, refused
 offsets, limits and boxes, and three requests for one tile joining one render.
+
+The UI round added Rust tests for `prepress_page_boxes` (which boxes a page states, `/Rotate` as a number),
+`prepress_ink_at` (a spot patch reads on its plane only, overprint keeps both plates, four inks read 400, a
+point off the page is clamped) and `prepress_marks_preview` (it changes nothing and matches what the marks
+write), and vitest suites for the logic (`prepressLogic.test.ts`: plates, solo, limit, margins for every
+rotation, box rules, marks parsing, convert summary and request) and the store (`prepressStore.test.ts`: view
+sync, plate toggles and solo, limit, single-flight probe, convert confirmation and the new-file flow, marks and
+boxes forms and apply).

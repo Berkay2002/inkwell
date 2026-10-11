@@ -6,6 +6,7 @@ import { pickOpen } from "./api";
 import { keyOf } from "./recent";
 import { useConvert } from "./convertStore";
 import { useMarks } from "./marksStore";
+import { openConvertColors, openOutputPreview, openPageBoxes, openPrinterMarks } from "./prepressStore";
 import { useProtect } from "./protectStore";
 import { useSearch } from "./searchStore";
 import { type ToolItem } from "./toolsCatalog";
@@ -77,6 +78,50 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
       keywords: "PDF/A archive preflight PDF/X PDF/UA conform standard validate",
       command: "preflight",
       onSelect: openPreflight,
+    },
+    {
+      id: "output-preview",
+      group: "print",
+      icon: "plates",
+      label: "Output Preview",
+      description: "See the inks on each page and where there is too much",
+      detail: "Switch the plates (cyan, magenta, yellow, black and spot colours) on and off, read the ink under the pointer, and mark the areas above a total-ink limit such as 300%.",
+      keywords: "separations plates ink coverage tac total area overprint cmyk spot print production prepress",
+      command: "output-preview",
+      onSelect: openOutputPreview,
+    },
+    {
+      id: "convert-colors",
+      group: "print",
+      icon: "swatches",
+      label: "Convert Colors",
+      description: "Turn RGB and gray into CMYK for print",
+      detail: "Converts text, lines, fills and pictures to CMYK, with a summary to confirm before anything changes. The result is a new file or one undo step in this document.",
+      keywords: "cmyk rgb gray grayscale convert colour color profile icc output intent print production prepress",
+      command: "convert-colors",
+      onSelect: openConvertColors,
+    },
+    {
+      id: "printer-marks",
+      group: "print",
+      icon: "crop",
+      label: "Printer's marks",
+      description: "Add crop marks, bleed marks, registration marks and colour bars",
+      detail: "Draws the marks outside the trim box with a live preview, and grows the page to make room for them.",
+      keywords: "crop trim bleed marks registration colour bar color bar print production prepress",
+      command: "printer-marks",
+      onSelect: openPrinterMarks,
+    },
+    {
+      id: "page-boxes",
+      group: "print",
+      icon: "pagebox",
+      label: "Page boxes",
+      description: "Set the trim, bleed, art and crop boxes",
+      detail: "Set a box from another box and margins in points, millimetres or inches, with a live preview, on all pages or a range.",
+      keywords: "trim bleed art crop media box margin print production prepress",
+      command: "page-boxes",
+      onSelect: openPageBoxes,
     },
     {
       id: "header-footer",

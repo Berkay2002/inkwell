@@ -4,7 +4,10 @@
 
 use super::boxes::BoxSpec;
 use super::ink::{DEFAULT_LIMIT, DEFAULT_MAX_PX, doc_ink};
-use super::{ConvertReport, ConvertSpec, InkReport, Inspected, IntentSource, MarksSpec, PageSeps, Result, View, add_printer_marks, convert_colors, inspect_at, page_separations, render_view_tile, set_boxes};
+use super::{
+    ConvertReport, ConvertSpec, InkAt, InkReport, Inspected, IntentSource, MarksPreview, MarksSpec, PageBoxes, PageSeps, Result, View, add_printer_marks, convert_colors, ink_at,
+    inspect_at, marks_preview, page_boxes, page_separations, render_view_tile, set_boxes,
+};
 use crate::a11y::Progress;
 use crate::engine::cache::{Tile, TileKey};
 use crate::engine::edit::{EditSource, EditState};
@@ -18,7 +21,8 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use tauri::ipc::Channel;
-use tauri::Window;
+use tauri::{Manager, Window};
+use tauri_plugin_dialog::DialogExt;
 
 type Eng<'a> = tauri::State<'a, Arc<Engine>>;
 type Jobs<'a> = tauri::State<'a, Arc<crate::tools::Jobs>>;
@@ -348,6 +352,43 @@ pub async fn prepress_marks(eng: Eng<'_>, doc: DocId, spec: MarksSpec) -> Result
     blocking(move || {
         let (state, notes) = add_printer_marks(&eng, doc, &spec, EditSource::User)?;
         Ok(Marked { state, notes })
+    })
+    .await
+}
+
+/// The boxes of a page, for the Set Page Boxes and Printer Marks previews.
+#[tauri::command]
+pub async fn prepress_page_boxes(eng: Eng<'_>, doc: DocId, page: u32) -> Result<PageBoxes> {
+    let eng = eng.inner().clone();
+    blocking(move || page_boxes(&eng, doc, page)).await
+}
+
+/// Where the marks of `spec` would go on a page, without adding them.
+#[tauri::command]
+pub async fn prepress_marks_preview(eng: Eng<'_>, doc: DocId, page: u32, spec: MarksSpec) -> Result<MarksPreview> {
+    let eng = eng.inner().clone();
+    blocking(move || marks_preview(&eng, doc, page, &spec)).await
+}
+
+/// The ink of every plane at a point (page points from the top-left of the page as shown).
+#[tauri::command]
+pub async fn prepress_ink_at(pre: Pre<'_>, eng: Eng<'_>, doc: DocId, page: u32, x: f32, y: f32) -> Result<InkAt> {
+    let (eng, pre) = (eng.inner().clone(), pre.inner().clone());
+    blocking(move || {
+        let key = TileKey { doc, rev: eng.doc_entry(doc)?.generation(), page, rot: 0, scale: 0, tx: 0, ty: 0 };
+        let seps = pre.page_seps(&eng, &key)?;
+        ink_at(&eng, &seps, doc, page, x, y)
+    })
+    .await
+}
+
+/// Open dialog for a CMYK ICC profile; the open token goes to `prepress_convert`.
+#[tauri::command]
+pub async fn prepress_pick_profile(window: Window) -> Result<Option<crate::paths::FileRef>> {
+    blocking(move || {
+        let picked = window.dialog().file().set_parent(&window).set_title("Choose a CMYK ICC profile").add_filter("ICC profiles", &["icc", "icm"]).blocking_pick_file();
+        let reg = window.state::<Paths>();
+        Ok(picked.and_then(|f| f.into_path().ok()).map(|p| reg.issue_open(window.label(), p.to_string_lossy().into_owned())))
     })
     .await
 }
