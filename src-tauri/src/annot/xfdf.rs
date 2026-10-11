@@ -825,6 +825,9 @@ fn stamp(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment) -> Result<()>
     if !c.author.is_empty() {
         a.set_author(&c.author)?;
     }
+    if !c.contents.is_empty() {
+        a.set_contents(&c.contents)?;
+    }
     for (k, v) in [("Subj", &c.subject), ("CreationDate", &c.created), ("M", &c.modified)] {
         if !v.is_empty() {
             put_str(&a, k, v)?;
