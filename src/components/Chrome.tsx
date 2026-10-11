@@ -3,6 +3,7 @@ import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { useConvert } from "../lib/convertStore";
+import { useMarks } from "../lib/marksStore";
 import { useProtect } from "../lib/protectStore";
 import { useTools } from "../lib/toolsStore";
 import { type DocState, type Theme, useStore } from "../store";
@@ -125,6 +126,10 @@ export function Toolbar({ doc }: { doc: DocState }) {
           items={[
             { label: "Compress file…", onSelect: () => useTools.getState().open("compress", id) },
             { label: "Recognize text…", onSelect: () => useTools.getState().open("ocr", id) },
+            { label: "Header & footer…", onSelect: () => useMarks.getState().open("headerFooter", id) },
+            { label: "Watermark…", onSelect: () => useMarks.getState().open("watermark", id) },
+            { label: "Background…", onSelect: () => useMarks.getState().open("background", id) },
+            { label: "Bates numbering…", onSelect: () => useMarks.getState().open("bates", id) },
             { label: "Protect with a password…", onSelect: () => useProtect.getState().open("protect", id) },
             { label: "Security…", onSelect: () => useProtect.getState().open("security", id) },
             { label: "Compare files…", onSelect: () => void openCompareSetup({ id, name: doc.name }) },

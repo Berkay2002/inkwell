@@ -9,6 +9,7 @@ import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
 import { useConvert } from "./convertStore";
+import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
 import { usePrint } from "./printStore";
 import { useTools } from "./toolsStore";
@@ -93,6 +94,11 @@ export const commands: Command[] = [
     needsDoc: true,
     run: () => useTools.getState().open("ocr", undefined, { scope: "page" }),
   },
+  { id: "header-footer", title: "Add header and footer…", needsDoc: true, run: () => useMarks.getState().open("headerFooter") },
+  { id: "page-numbers", title: "Add page numbers…", needsDoc: true, run: () => useMarks.getState().open("headerFooter") },
+  { id: "watermark", title: "Add watermark…", needsDoc: true, run: () => useMarks.getState().open("watermark") },
+  { id: "background", title: "Add background…", needsDoc: true, run: () => useMarks.getState().open("background") },
+  { id: "bates", title: "Add Bates numbering…", needsDoc: true, run: () => useMarks.getState().open("bates") },
   { id: "protect", title: "Protect with a password…", needsDoc: true, run: () => useProtect.getState().open("protect") },
   { id: "security", title: "Document properties and security…", needsDoc: true, run: () => useProtect.getState().open("security") },
   { id: "export", title: "Export pages, text or images…", needsDoc: true, run: () => useConvert.getState().openExport() },
