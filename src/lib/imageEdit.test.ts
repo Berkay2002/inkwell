@@ -409,6 +409,36 @@ describe("store", () => {
     expect(st().selected).toEqual({ page: 0, index: 0 });
   });
 
+  it("applies a typed size to the picture it was typed for, though another is selected by then", async () => {
+    const a = image({ index: 0 });
+    const b = image({ index: 1, fullRect: [100, 500, 300, 600], rect: [100, 500, 300, 600] });
+    vi.mocked(api.imageBlocks).mockResolvedValueOnce(list([a, b]));
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.select(1, { page: 0, index: 0 });
+    vi.mocked(editImage).mockResolvedValue(ok());
+    vi.mocked(api.imageBlocks).mockResolvedValue(list([image({ index: 0, fullRect: [100, 100, 400, 250], rect: [100, 100, 400, 250] }), b], 2));
+    // The field commits on blur: the click that blurs it has selected the other picture already.
+    ie.select(1, { page: 0, index: 1 });
+    const sent = ie.resizeTo(1, [100, 100, 400, 250], false, { page: 0, index: 0 });
+    expect(await sent).toBe(true);
+    expect(editImage).toHaveBeenCalledTimes(1);
+    expect(editImage).toHaveBeenCalledWith(1, 1, 0, 0, { op: "resize", rect: [100, 100, 400, 250], keepAspect: false });
+    // The picture that was clicked keeps the selection, and is not touched.
+    expect(st().selected).toEqual({ page: 0, index: 1 });
+  });
+
+  it("does not select a picture again when the click that committed its size cleared the selection", async () => {
+    vi.mocked(api.imageBlocks).mockResolvedValue(list([image()]));
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.select(1, { page: 0, index: 0 });
+    vi.mocked(editImage).mockResolvedValue(ok());
+    ie.select(1, null);
+    expect(await ie.resizeTo(1, [100, 100, 400, 250], false, { page: 0, index: 0 })).toBe(true);
+    expect(st().selected).toBeNull();
+  });
+
   it("lets go of the text block when a picture is taken from the rail's list", async () => {
     vi.mocked(api.imageBlocks).mockResolvedValue(list([image()]));
     await useImageEdit.getState().load(1, 0);

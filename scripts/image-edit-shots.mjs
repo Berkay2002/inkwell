@@ -226,6 +226,29 @@ const aBefore = await selectedImage();
   check("a typed width sets the width, the height follows", near(rh(b.fullRect), (rh(a.fullRect) * 100) / rw(a.fullRect), 0.6), JSON.stringify([a.fullRect, b.fullRect]));
 }
 
+// ---- a size typed but not committed: the click that selects another picture commits it for its own ----
+{
+  const isB = (b) => near(b.fullRect[0], 372, 1) && near(b.fullRect[1], 400, 1);
+  const bBefore = (await images()).find(isB);
+  const aBefore = (await images()).find((b) => !isB(b));
+  await clickSel(".ie-num[aria-label='Width in points']");
+  await typeOver("110");
+  const [x, y] = await toScreen((bBefore.fullRect[0] + bBefore.fullRect[2]) / 2, (bBefore.fullRect[1] + bBefore.fullRect[3]) / 2);
+  await click(x, y);
+  await settle(async () => {
+    const a = (await images()).find((b) => !isB(b));
+    return a && near(rw(a.fullRect), 110, 0.6);
+  }, "typed width committed for the first picture");
+  const a = (await images()).find((b) => !isB(b));
+  const b = (await images()).find(isB);
+  check("the typed size went to the picture it was typed for", near(rw(a.fullRect), 110, 0.6) && near(a.fullRect[0], aBefore.fullRect[0], 0.6), JSON.stringify([aBefore.fullRect, a.fullRect]));
+  check("the picture clicked is untouched and selected", b.fullRect.every((v, i) => near(v, bBefore.fullRect[i], 0.1)) && (await selection()).selected?.index === b.index, JSON.stringify([bBefore.fullRect, b.fullRect, await selection()]));
+  // back to the first picture for the steps that follow
+  const [ax, ay] = await toScreen((a.fullRect[0] + a.fullRect[2]) / 2, (a.fullRect[1] + a.fullRect[3]) / 2);
+  await click(ax, ay);
+  await settle(async () => (await selectedImage())?.index === a.index, "selected the first picture again");
+}
+
 // ---- crop: a clip, then the rest still there ----
 {
   const a = await selectedImage();

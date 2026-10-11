@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ImageBlock } from "../../lib/api";
-import { codecName, colorName, imageLabel, ppi, rectH, rectW, useImageEdit } from "../../lib/imageEdit";
+import { type ImageRef, codecName, colorName, imageLabel, ppi, rectH, rectW, useImageEdit } from "../../lib/imageEdit";
 import { type DocState } from "../../store";
 import { Icon } from "../Icons";
 import "./imageEdit.css";
@@ -62,7 +62,7 @@ export function ImageSection({ doc }: { doc: DocState }) {
           </div>
         </>
       )}
-      {!placing && selected && <Format key={`${d?.selected?.page}:${selected.index}`} id={id} image={selected} cropping={d?.crop != null} />}
+      {!placing && selected && d?.selected && <Format key={`${d.selected.page}:${selected.index}`} id={id} target={d.selected} image={selected} cropping={d.crop != null} />}
       {!placing && !selected && here.length > 0 && (
         <>
           <ul className="te-list">
@@ -98,7 +98,7 @@ export function ImageSection({ doc }: { doc: DocState }) {
 
 const round1 = (v: number) => Math.round(v * 10) / 10;
 
-function Format({ id, image, cropping }: { id: number; image: ImageBlock; cropping: boolean }) {
+function Format({ id, target, image, cropping }: { id: number; target: ImageRef; image: ImageBlock; cropping: boolean }) {
   const w = rectW(image.fullRect);
   const h = rectH(image.fullRect);
   const [width, setWidth] = useState(String(round1(w)));
@@ -125,7 +125,9 @@ function Format({ id, image, cropping }: { id: number; image: ImageBlock; croppi
       return;
     }
     const [x, y] = image.fullRect;
-    void ie().resizeTo(id, [x, y, x + nw, y + nh], false);
+    // A field commits as it loses focus, which is also when a click elsewhere selects another image: the
+    // change is for the image this section shows.
+    void ie().resizeTo(id, [x, y, x + nw, y + nh], false, target);
   };
 
   const crop = useImageEdit((s) => s.docs[id]?.crop ?? null);

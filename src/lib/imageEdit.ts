@@ -249,10 +249,14 @@ interface Store {
   select: (doc: number, ref: ImageRef | null) => void;
   setNotice: (doc: number, notice: string | null) => void;
 
-  /** Sends `change` for the selected image as one undo step. True when it was applied. */
-  apply: (doc: number, change: ImageChange) => Promise<boolean>;
+  /**
+   * Sends `change` for the selected image as one undo step. True when it was applied. `target`: the image the
+   * caller means (a typed size is committed as a field loses focus, when another image may be selected already):
+   * that image is changed, and the selection stays where it is.
+   */
+  apply: (doc: number, change: ImageChange, target?: ImageRef) => Promise<boolean>;
   move: (doc: number, d: [number, number]) => Promise<boolean>;
-  resizeTo: (doc: number, rect: Rect4, keepAspect: boolean) => Promise<boolean>;
+  resizeTo: (doc: number, rect: Rect4, keepAspect: boolean, target?: ImageRef) => Promise<boolean>;
   rotate: (doc: number, quarterTurns: number) => Promise<boolean>;
   flip: (doc: number, horizontal: boolean) => Promise<boolean>;
   remove: (doc: number) => Promise<boolean>;
@@ -332,11 +336,11 @@ export const useImageEdit = create<Store>((set, get) => {
     return r;
   };
 
-  const applyNow = async (doc: number, change: ImageChange): Promise<boolean> => {
+  const applyNow = async (doc: number, change: ImageChange, target?: ImageRef): Promise<boolean> => {
     const d = of(doc);
-    const ref = d.selected;
-    const image = selectedImage(doc);
+    const ref = target ?? d.selected;
     const page = ref ? d.pages[ref.page] : undefined;
+    const image = ref ? (page?.images[ref.index] ?? null) : null;
     if (!ref || !image || !page) return false;
     applying.add(doc);
     try {
@@ -346,6 +350,18 @@ export const useImageEdit = create<Store>((set, get) => {
         return false;
       }
       const fresh = await fetchPage(doc, ref.page);
+      // Another image was selected (or none) meanwhile: that choice stands; it is found again by position in
+      // the new list.
+      const cur = of(doc).selected;
+      if (!cur || !(cur.page === ref.page && cur.index === ref.index)) {
+        const was = cur && cur.page === ref.page ? (d.pages[cur.page]?.images[cur.index] ?? null) : null;
+        if (cur && was) {
+          const m = closestImage(was.fullRect, fresh.images);
+          patchDoc(doc, { selected: m ? { page: cur.page, index: m.index } : null });
+        }
+        if (r.kind === "stale") patchDoc(doc, { notice: "The page changed under that change, so it was not applied. Try it again." });
+        return r.kind === "ok";
+      }
       if (r.kind === "stale") {
         const same = closestImage(image.fullRect, fresh.images);
         patchDoc(doc, {
@@ -400,9 +416,9 @@ export const useImageEdit = create<Store>((set, get) => {
 
     setNotice: (doc, notice) => patchDoc(doc, { notice }),
 
-    apply: (doc, change) => queued(doc, () => applyNow(doc, change)),
+    apply: (doc, change, target) => queued(doc, () => applyNow(doc, change, target)),
     move: (doc, d) => get().apply(doc, { op: "move", dx: d[0], dy: d[1] }),
-    resizeTo: (doc, rect, keepAspect) => get().apply(doc, { op: "resize", rect, keepAspect }),
+    resizeTo: (doc, rect, keepAspect, target) => get().apply(doc, { op: "resize", rect, keepAspect }, target),
     rotate: (doc, quarterTurns) => get().apply(doc, { op: "rotate", quarterTurns }),
     flip: (doc, horizontal) => get().apply(doc, { op: "flip", horizontal }),
     remove: (doc) => get().apply(doc, { op: "delete" }),
