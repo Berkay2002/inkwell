@@ -23,6 +23,10 @@ const item = (xref: number, over: Partial<MediaItem> = {}): MediaItem => ({
 });
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
+const playNow = async (doc: number, it: MediaItem) => {
+  useMedia.getState().play(doc, it);
+  await flush();
+};
 
 beforeEach(() => {
   inv.mockReset();
@@ -31,21 +35,46 @@ beforeEach(() => {
 });
 
 describe("media store", () => {
-  it("plays nothing until a click, and one player at a time", () => {
+  it("plays nothing until a click, and one player at a time", async () => {
     expect(useMedia.getState().playing).toBeNull();
     useMedia.getState().play(1, item(10));
+    await flush();
     expect(useMedia.getState().playing).toEqual({ doc: 1, xref: 10, asset: "10.0" });
     useMedia.getState().play(1, item(11));
+    await flush();
     expect(useMedia.getState().playing).toEqual({ doc: 1, xref: 11, asset: "11.0" });
   });
 
-  it("does not play an item that cannot play", () => {
-    useMedia.getState().play(1, item(10, { playable: false, play: null, reason: "3D content is not supported" }));
+  it("arms the asset with the route before the player is mounted, and a stop in between wins", async () => {
+    let arm: () => void = () => {};
+    inv.mockImplementation((cmd) => (cmd === "media_play" ? new Promise<void>((r) => (arm = r)) : Promise.resolve()));
+    useMedia.getState().play(1, item(10));
+    expect(inv).toHaveBeenCalledWith("media_play", { doc: 1, asset: "10.0" });
+    expect(useMedia.getState().playing).toBeNull();
+    arm();
+    await flush();
+    expect(useMedia.getState().playing?.asset).toBe("10.0");
+    // a click, then Esc/scroll-away before the route answers: no player
+    useMedia.getState().stop();
+    useMedia.getState().play(1, item(11));
+    useMedia.getState().stop();
+    arm();
+    await flush();
+    expect(useMedia.getState().playing).toBeNull();
+    // a failed arming (the asset left the listing) plays nothing
+    inv.mockImplementation((cmd) => (cmd === "media_play" ? Promise.reject(new Error("unknown media")) : Promise.resolve()));
+    useMedia.getState().play(1, item(12));
+    await flush();
     expect(useMedia.getState().playing).toBeNull();
   });
 
-  it("Esc removes the player, other keys do not", () => {
-    useMedia.getState().play(1, item(10));
+  it("does not play an item that cannot play", async () => {
+    await playNow(1, item(10, { playable: false, play: null, reason: "3D content is not supported" }));
+    expect(useMedia.getState().playing).toBeNull();
+  });
+
+  it("Esc removes the player, other keys do not", async () => {
+    await playNow(1, item(10));
     expect(useMedia.getState().key("a")).toBe(false);
     expect(useMedia.getState().playing).not.toBeNull();
     expect(useMedia.getState().key("Escape")).toBe(true);
@@ -55,9 +84,9 @@ describe("media store", () => {
     expect(inv).toHaveBeenCalledWith("media_release");
   });
 
-  it("remembers muted for the session", () => {
+  it("remembers muted for the session", async () => {
     useMedia.getState().setMuted(true);
-    useMedia.getState().play(1, item(10));
+    await playNow(1, item(10));
     useMedia.getState().stop();
     expect(useMedia.getState().muted).toBe(true);
   });
@@ -84,7 +113,7 @@ describe("media store", () => {
     const url = () => mediaUrl(1, useMedia.getState().docs[1].token, "10.0");
     const before = url();
     expect(before).toMatch(/\/m\/1\/0123456789abcdef0123456789abcdef\/10\.0$/);
-    useMedia.getState().play(1, item(10));
+    await playNow(1, item(10));
     useMedia.getState().ensure(1, 1);
     await flush();
     expect(url()).toBe(before);
@@ -93,16 +122,16 @@ describe("media store", () => {
 
   it("stops what played when an edit takes it away", async () => {
     useMedia.setState({ docs: { 1: { rev: 0, token: TOKEN, items: [item(10)] } } });
-    useMedia.getState().play(1, item(10));
+    await playNow(1, item(10));
     inv.mockResolvedValue({ token: TOKEN, items: [] });
     useMedia.getState().ensure(1, 1);
     await flush();
     expect(useMedia.getState().playing).toBeNull();
   });
 
-  it("forgets a closed document and stops its player", () => {
+  it("forgets a closed document and stops its player", async () => {
     useMedia.setState({ docs: { 1: { rev: 0, token: TOKEN, items: [item(10)] }, 2: { rev: 0, token: TOKEN, items: [] } } });
-    useMedia.getState().play(1, item(10));
+    await playNow(1, item(10));
     useMedia.getState().forget(1);
     expect(useMedia.getState().playing).toBeNull();
     expect(Object.keys(useMedia.getState().docs)).toEqual(["2"]);

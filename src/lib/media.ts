@@ -43,6 +43,8 @@ export interface MediaListing {
 
 export const mediaApi = {
   list: (doc: number) => invoke<MediaListing>("media_list", { doc }),
+  /** The route serves this asset, and only it, until `release`. */
+  arm: (doc: number, asset: string) => invoke<void>("media_play", { doc, asset }),
   release: () => invoke<void>("media_release"),
 };
 
@@ -120,6 +122,9 @@ interface MediaState {
 
 export const infoKey = (doc: number, xref: number) => `${doc}:${xref}`;
 
+/** The latest click or stop: a click whose arming comes back after a newer one (or a stop) is dropped. */
+let clicks = 0;
+
 export const useMedia = create<MediaState>((set, get) => ({
   docs: {},
   loading: {},
@@ -148,9 +153,17 @@ export const useMedia = create<MediaState>((set, get) => ({
   },
   play: (doc, item) => {
     if (!item.play) return;
-    set({ playing: { doc, xref: item.xref, asset: item.play } });
+    const want = { doc, xref: item.xref, asset: item.play };
+    const mine = ++clicks;
+    // the element is mounted once the route will serve it
+    mediaApi.arm(doc, want.asset).then(
+      () => mine === clicks && set({ playing: want }),
+      // not in the newest listing (an edit took it away): the list refresh removes the badge
+      () => {},
+    );
   },
   stop: () => {
+    clicks++;
     if (!get().playing) return;
     set({ playing: null });
     void mediaApi.release().catch(() => {});

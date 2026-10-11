@@ -55,10 +55,14 @@ rest of the asset tree). The rendition's own play parameters (autoplay, repeat, 
 path takes only these: a decimal document id, a 32-character lowercase hex token and an id of two decimal numbers.
 `media_list` returns the token with the items; it is minted with the document's first listing, kept while the document
 is open (an edit that keeps the asset keeps the player's address) and unknown to any other run of the app. Each listing
-replaces the set of playable asset ids the route may serve. A request is answered only when the token is the
-document's and the id is in that set; the handler then reads the asset with the same rules as the list and checks the
-bytes again. A wrong token, an id the listing did not return (past its caps, or not playable), an unknown document or
-a closed one answer 404.
+replaces the set of playable asset ids the route may serve (one made at an older document generation than the
+recorded set is dropped, so two listings finishing out of order keep the newer). A click calls `media_play(doc,
+asset)`, which arms that one asset (one player at a time); the element is mounted after it returns. A request is
+answered only when the token is the document's, the id is in the set and it is the armed asset; the handler then
+reads the asset with the same rules as the list and checks the bytes again. A wrong token, an id the listing did not
+return (past its caps, or not playable), an asset that is not armed, an unknown document or a closed one answer 404.
+`media_release` (the player was removed) disarms it: the late range requests of the removed element are refused and
+neither decode nor refill the slot, and neither does a decode that was already waiting or running when it came.
 
 - Byte ranges: `a-b`, `a-` and `-n` answer 206 with `Content-Range`; past the end 416. A ranged answer is cut to
   1000 KB (as Tauri's asset protocol), and the player asks again. With no usable Range (none, several ranges, bad
@@ -67,8 +71,11 @@ a closed one answer 404.
 - The decoded asset is kept in one slot (doc, id, document generation) so a seek does not decode again; `media_release`
   empties it when the player is removed. Decoding is capped at 256 MB (a compressed stream cannot inflate past it) and
   happens outside the slot's lock, one at a time, so a release or a cached seek never waits for it.
-- A Screen's renditions are walked with one budget per annotation (2000 selectors and clips, each object once), however
-  many actions name them.
+- A listing's work is bounded twice. Per annotation: 2000 name-tree nodes and entries, selectors and clips (each object
+  once, however many actions name them). Per document: 200 000 of those, and 20 000 assets whose bytes are looked at,
+  summed over the annotations (they may share one tree). Past a budget the rest of that annotation, and the annotations
+  after it, are listed without assets and with "too much media to list in full". A cut keeps a prefix of what no
+  budget would give, so an asset's index, and the route's read of it, do not change.
 - CSP: `media-src http://inkwell.localhost/m/ inkwell://localhost/m/` in `csp` and `devCsp`, nothing else new.
 
 ## The UI

@@ -35,8 +35,15 @@ const MAX_DOC_SCANNED: usize = 500_000;
 /// array behind every page would load it again for each.
 const MAX_DOC_LOADED: usize = 50_000;
 const MAX_ASSETS: usize = 500;
-/// Name-tree nodes looked at per annotation (kids may repeat or loop).
+/// Name-tree nodes and entries, and selector and clip objects, looked at per annotation (kids may
+/// repeat or loop).
 const MAX_TREE_NODES: usize = 2_000;
+/// The same, for the whole listing: annotations may share one big tree, and each would walk it again.
+const MAX_DOC_WALK: usize = 200_000;
+/// Assets whose bytes are looked at (a stream head is read) in one listing.
+const MAX_DOC_CLASSIFIED: usize = 20_000;
+/// Why an item shows less than the file holds.
+const INCOMPLETE: &str = "too much media to list in full";
 const MAX_ACTIONS: usize = 32;
 const MAX_TITLE: usize = 160;
 /// Bytes read to recognise a format: enough for every signature below.
@@ -366,27 +373,23 @@ fn from_spec(spec: &PdfObject, fallback: &str, declared: Option<String>, out: &m
     out.push(raw);
 }
 
-/// The leaves of a name tree (name, value). A node is read once; the walk is bounded.
-fn name_tree(root: PdfObject, cap: usize) -> Vec<(String, PdfObject)> {
+/// The leaves of a name tree (name, value). A node is read once; the walk is bounded by `walk`.
+fn name_tree(root: PdfObject, cap: usize, walk: &mut Walk) -> Vec<(String, PdfObject)> {
     let mut out = Vec::new();
-    let mut seen = HashSet::new();
     let mut stack = vec![(root, 0usize)];
-    let mut nodes = 0usize;
     while let Some((n, depth)) = stack.pop() {
-        if nodes >= MAX_TREE_NODES || out.len() >= cap {
+        if out.len() >= cap || walk.left == 0 {
+            walk.cut |= walk.left == 0;
             break;
         }
-        if let Some(num) = obj_num(&n) {
-            if !seen.insert(num) {
-                continue;
-            }
+        if !walk.visit(&n) {
+            continue;
         }
         let Some(n) = dict_of(&n) else { continue };
-        nodes += 1;
         if let Some(names) = get(&n, "Names") {
             let len = names.len().unwrap_or(0);
             let mut i = 0;
-            while i + 1 < len && out.len() < cap {
+            while i + 1 < len && out.len() < cap && walk.spend() {
                 let key = names.get_array(i as i32).ok().flatten().and_then(|k| k.as_string().ok());
                 if let (Some(key), Some(v)) = (key, names.get_array(i as i32 + 1).ok().flatten()) {
                     out.push((key, v));
@@ -398,7 +401,7 @@ fn name_tree(root: PdfObject, cap: usize) -> Vec<(String, PdfObject)> {
             if let Some(kids) = get(&n, "Kids") {
                 let len = kids.len().unwrap_or(0).min(MAX_TREE_NODES);
                 // what is queued counts against the budget, or a wide node fans out without end
-                let room = MAX_TREE_NODES.saturating_sub(nodes + stack.len());
+                let room = walk.left.saturating_sub(stack.len());
                 let kids: Vec<PdfObject> = (0..len).filter_map(|i| kids.get_array(i as i32).ok().flatten()).take(room).collect();
                 // popped in order
                 stack.extend(kids.into_iter().rev().map(|k| (k, depth + 1)));
@@ -451,21 +454,34 @@ fn is_script_action(a: &PdfObject) -> bool {
     name_of(a, "S").as_deref() == Some("JavaScript") || get(a, "JS").is_some()
 }
 
-/// What one annotation's rendition walk may still visit: the objects seen and a node budget (a
-/// selector may list itself, or fan out wide and deep).
+/// What one annotation's walk may still visit: the objects seen and a node budget (a selector may
+/// list itself, or fan out wide and deep; a name tree may be huge).
 struct Walk {
     seen: HashSet<i32>,
     left: usize,
+    /// The budget ran out: the assets are not all listed.
+    cut: bool,
 }
 
 impl Walk {
-    fn new() -> Walk {
-        Walk { seen: HashSet::new(), left: MAX_TREE_NODES }
+    fn new(left: usize) -> Walk {
+        Walk { seen: HashSet::new(), left, cut: false }
+    }
+
+    /// One unit of work; false when the budget is spent.
+    fn spend(&mut self) -> bool {
+        if self.left == 0 {
+            self.cut = true;
+            return false;
+        }
+        self.left -= 1;
+        true
     }
 
     /// Counts a visit to `o`; false when the budget is spent or the object was visited already.
     fn visit(&mut self, o: &PdfObject) -> bool {
         if self.left == 0 {
+            self.cut = true;
             return false;
         }
         if let Some(n) = obj_num(o) {
@@ -475,6 +491,24 @@ impl Walk {
         }
         self.left -= 1;
         true
+    }
+}
+
+/// What is left of one listing's work. Annotations may repeat the same selectors and asset trees, and
+/// each walk is bounded alone; this bounds the sum, while the editor lock is held.
+struct Budget {
+    walk: usize,
+    classify: usize,
+}
+
+impl Budget {
+    fn document() -> Budget {
+        Budget { walk: MAX_DOC_WALK, classify: MAX_DOC_CLASSIFIED }
+    }
+
+    /// One asset's own caps: what [`read`] works with.
+    fn one() -> Budget {
+        Budget { walk: usize::MAX, classify: usize::MAX }
     }
 }
 
@@ -534,9 +568,11 @@ fn rendition(r: &PdfObject, depth: usize, walk: &mut Walk, out: &mut Vec<Raw>) {
     }
 }
 
-/// The annotation's assets in a fixed order (the media route recomputes it), and whether scripts
-/// are attached.
-fn collect(annot: &PdfObject, kind: Kind) -> (Vec<Raw>, bool) {
+/// The annotation's assets in a fixed order, whether scripts are attached, and whether `budget` cut
+/// the list short. A cut keeps a prefix of what no budget would give, so an asset keeps its index.
+fn collect(annot: &PdfObject, kind: Kind, budget: &mut Budget) -> (Vec<Raw>, bool, bool) {
+    let allow = budget.walk.min(MAX_TREE_NODES);
+    let mut walk = Walk::new(allow);
     let mut out: Vec<Raw> = Vec::new();
     let mut scripts = actions(annot).iter().any(is_script_action);
     match kind {
@@ -547,9 +583,15 @@ fn collect(annot: &PdfObject, kind: Kind) -> (Vec<Raw>, bool) {
                 let mut three_d: Vec<usize> = Vec::new();
                 if let Some(configs) = get(c, "Configurations").filter(|v| v.is_array().unwrap_or(false)) {
                     for i in 0..configs.len().unwrap_or(0).min(MAX_ACTIONS) {
+                        if !walk.spend() {
+                            break;
+                        }
                         let Some(cfg) = configs.get_array(i as i32).ok().flatten().and_then(|v| dict_of(&v)) else { continue };
                         let Some(inst) = get(&cfg, "Instances").filter(|v| v.is_array().unwrap_or(false)) else { continue };
                         for j in 0..inst.len().unwrap_or(0).min(MAX_ACTIONS) {
+                            if !walk.spend() {
+                                break;
+                            }
                             let Some(ins) = inst.get_array(j as i32).ok().flatten().and_then(|v| dict_of(&v)) else { continue };
                             let Some(asset) = get(&ins, "Asset") else { continue };
                             let before = out.len();
@@ -564,7 +606,7 @@ fn collect(annot: &PdfObject, kind: Kind) -> (Vec<Raw>, bool) {
                     out[i].forced = Some("3D content is not supported");
                 }
                 if let Some(root) = get(c, "Assets") {
-                    for (key, spec) in name_tree(root, MAX_ASSETS) {
+                    for (key, spec) in name_tree(root, MAX_ASSETS, &mut walk) {
                         from_spec(&spec, &key, None, &mut out);
                     }
                 }
@@ -572,7 +614,6 @@ fn collect(annot: &PdfObject, kind: Kind) -> (Vec<Raw>, bool) {
         }
         Kind::Screen => {
             // one budget for all the actions: each may name the same selector
-            let mut walk = Walk::new();
             for a in actions(annot) {
                 if name_of(&a, "S").as_deref() == Some("Rendition") {
                     if let Some(r) = get(&a, "R") {
@@ -606,8 +647,15 @@ fn collect(annot: &PdfObject, kind: Kind) -> (Vec<Raw>, bool) {
             }
         }
     }
+    budget.walk = budget.walk.saturating_sub(allow - walk.left);
+    let mut cut = walk.cut;
+    if out.len() > budget.classify {
+        out.truncate(budget.classify);
+        cut = true;
+    }
+    budget.classify -= out.len();
     scripts |= out.iter().any(|r| r.declared.iter().any(|d| Format::declared(d) == Some(Format::Script)));
-    (out, scripts)
+    (out, scripts, cut)
 }
 
 // ---- classifying -------------------------------------------------------------------------------
@@ -677,13 +725,14 @@ fn title_of(o: &PdfObject, assets: &[Asset]) -> String {
     t.trim().chars().take(MAX_TITLE).collect()
 }
 
-fn item_of(page: u32, xref: i32, kind: Kind, rect: [f32; 4], o: &PdfObject) -> MediaItem {
-    let (raws, scripts) = collect(o, kind);
+fn item_of(page: u32, xref: i32, kind: Kind, rect: [f32; 4], o: &PdfObject, budget: &mut Budget) -> MediaItem {
+    let (raws, scripts, cut) = collect(o, kind, budget);
     let assets: Vec<Asset> = raws.iter().enumerate().map(|(i, r)| asset_of(xref, i, r)).collect();
     let play = assets.iter().find(|a| a.playable).map(|a| a.id.clone());
     let reason = match (&play, kind, assets.first()) {
         (Some(_), ..) => None,
         (None, Kind::ThreeD, _) => Some("3D content is not supported".to_string()),
+        (None, _, _) if cut => Some(INCOMPLETE.to_string()),
         (None, _, Some(a)) => a.reason.clone(),
         (None, ..) => Some("no media in this annotation".to_string()),
     };
@@ -719,6 +768,7 @@ pub fn list(doc: &PdfDocument) -> Result<Vec<MediaItem>> {
     let mut out = Vec::new();
     let mut scan = MAX_DOC_SCANNED;
     let mut load = MAX_DOC_LOADED;
+    let mut budget = Budget::document();
     for p in 0..doc.page_count()?.max(0) {
         if out.len() >= MAX_DOC_ITEMS || scan == 0 {
             break;
@@ -737,7 +787,7 @@ pub fn list(doc: &PdfDocument) -> Result<Vec<MediaItem>> {
             }
             here += 1;
             let (Ok(r), Ok(xref)) = (a.rect(), a.xref()) else { continue };
-            out.push(item_of(p as u32, xref, kind, [r.x0, r.y0, r.x1, r.y1], &a.object()));
+            out.push(item_of(p as u32, xref, kind, [r.x0, r.y0, r.x1, r.y1], &a.object(), &mut budget));
         }
     }
     Ok(out)
@@ -761,7 +811,7 @@ fn read(doc: &PdfDocument, id: &str) -> Result<Loaded> {
         .ok_or_else(|| bad("unknown media"))?;
     let annot = doc.new_indirect(xref, 0)?.resolve()?.filter(|a| a.is_dict().unwrap_or(false)).ok_or_else(|| bad("unknown media"))?;
     let kind = name_of(&annot, "Subtype").and_then(|s| Kind::of_subtype(s.as_bytes())).ok_or_else(|| bad("unknown media"))?;
-    let (raws, _) = collect(&annot, kind);
+    let (raws, ..) = collect(&annot, kind, &mut Budget::one());
     let raw = raws.get(index).ok_or_else(|| bad("unknown media"))?;
     // The same verdict the list gave: what is not playable is never read out.
     let a = asset_of(xref, index, raw);
@@ -787,24 +837,30 @@ pub struct Listing {
     pub items: Vec<MediaItem>,
 }
 
-/// What the route may serve of one document: the playable assets its last listing returned.
+/// What the route may serve of one document: the playable assets its newest listing returned.
 struct Listed {
     /// Minted with the document's first listing and kept, so an edit that keeps the asset does not
     /// change the player's address (the player would start over).
     token: String,
     playable: HashSet<String>,
+    /// The document generation the set was listed at: an older listing finishing late does not
+    /// replace a newer one.
+    generation: u32,
 }
 
-/// The listings the route serves from, and the one asset kept decoded, so the player's many range
-/// requests decode it once.
+/// The listings the route serves from, the one asset armed to play, and the one asset kept decoded,
+/// so the player's many range requests decode it once.
 #[derive(Default)]
 pub struct Cache {
     slot: Mutex<Option<Slot>>,
-    /// One decode at a time. Not `slot`: `clear` (a sync command) and cache hits never wait for one.
+    /// One decode at a time. Not `slot`: `clear` (a sync command) and cached seeks never wait for one.
     gate: Mutex<()>,
-    /// Bumped by `clear`: a decode that finished after it is not kept.
+    /// Bumped by `clear`: a request that began before it, or a decode that finished after it, is dropped.
     epoch: AtomicU64,
     listed: Mutex<HashMap<DocId, Listed>>,
+    /// The asset a click is playing (one player at a time): what the route serves. `clear` takes it
+    /// away, so a request of the element that was removed is refused until the next click.
+    armed: Mutex<Option<(DocId, String)>>,
 }
 
 struct Slot {
@@ -822,32 +878,62 @@ fn fresh_token() -> String {
 }
 
 impl Cache {
+    /// The player was removed: its asset is let go and its late requests are refused.
     pub fn clear(&self) {
         self.epoch.fetch_add(1, Ordering::SeqCst);
+        *self.armed.lock() = None;
         *self.slot.lock() = None;
     }
 
     /// The document's media, and the playable assets the route may serve from now on (the editor
     /// lock is let go before the listing is recorded).
     pub fn list(&self, eng: &Engine, doc: DocId) -> Result<Listing> {
+        // read before the walk: an edit during it makes the set older, never newer, than it claims
+        let generation = eng.doc_entry(doc)?.generation();
         let items = list_all(eng, doc)?;
-        let playable = items.iter().flat_map(|i| &i.assets).filter(|a| a.playable).map(|a| a.id.clone()).collect();
-        let mut listed = self.listed.lock();
-        let l = listed.entry(doc).or_insert_with(|| Listed { token: fresh_token(), playable: HashSet::new() });
-        l.playable = playable;
-        let token = l.token.clone();
+        let token = self.store(doc, generation, &items);
         // closed documents are let go
-        listed.retain(|d, _| eng.doc_entry(*d).is_ok());
+        self.listed.lock().retain(|d, _| eng.doc_entry(*d).is_ok());
         Ok(Listing { token, items })
     }
 
-    fn is_listed(&self, doc: DocId, token: &str, id: &str) -> bool {
-        self.listed.lock().get(&doc).is_some_and(|l| l.token == token && l.playable.contains(id))
+    /// Records a listing made at `generation`; an older one than what is recorded is dropped.
+    fn store(&self, doc: DocId, generation: u32, items: &[MediaItem]) -> String {
+        let playable: HashSet<String> = items.iter().flat_map(|i| &i.assets).filter(|a| a.playable).map(|a| a.id.clone()).collect();
+        let mut listed = self.listed.lock();
+        let l = listed.entry(doc).or_insert_with(|| Listed { token: fresh_token(), playable: HashSet::new(), generation });
+        if generation >= l.generation {
+            l.playable = playable;
+            l.generation = generation;
+        }
+        l.token.clone()
+    }
+
+    /// A click on a playable asset of the last listing: the route serves it from now on, and nothing
+    /// else, until `clear`.
+    pub fn arm(&self, doc: DocId, id: &str) -> Result<()> {
+        let listed = self.listed.lock().get(&doc).is_some_and(|l| l.playable.contains(id));
+        if !listed {
+            return Err(bad("unknown media"));
+        }
+        *self.armed.lock() = Some((doc, id.to_owned()));
+        Ok(())
+    }
+
+    fn allowed(&self, doc: DocId, token: &str, id: &str) -> bool {
+        let listed = self.listed.lock().get(&doc).is_some_and(|l| l.token == token && l.playable.contains(id));
+        listed && self.armed.lock().as_ref().is_some_and(|(d, a)| *d == doc && a == id)
     }
 
     /// The asset's bytes: from the slot, or read from the document. Concurrent requests for it wait
     /// on the gate and find it in the slot.
     pub fn get(&self, eng: &Engine, doc: DocId, id: &str) -> Result<Arc<Loaded>> {
+        self.get_since(eng, doc, id, self.epoch.load(Ordering::SeqCst))
+    }
+
+    /// [`get`] for a request that began at `epoch`: one that a `clear` came after is refused.
+    fn get_since(&self, eng: &Engine, doc: DocId, id: &str, epoch: u64) -> Result<Arc<Loaded>> {
+        let released = || bad("released");
         let generation = eng.doc_entry(doc)?.generation();
         let hit = || self.slot.lock().as_ref().filter(|s| s.doc == doc && s.id == id && s.generation == generation).map(|s| s.loaded.clone());
         if let Some(l) = hit() {
@@ -857,25 +943,30 @@ impl Cache {
         if let Some(l) = hit() {
             return Ok(l);
         }
-        let epoch = self.epoch.load(Ordering::SeqCst);
+        if self.epoch.load(Ordering::SeqCst) != epoch {
+            return Err(released());
+        }
         // the old asset goes before the new one is decoded
         *self.slot.lock() = None;
         let loaded = Arc::new(eng.read_custom(doc, |d| read(d, id))?);
         let mut slot = self.slot.lock();
-        if self.epoch.load(Ordering::SeqCst) == epoch {
-            *slot = Some(Slot { doc, id: id.to_owned(), generation, loaded: loaded.clone() });
+        if self.epoch.load(Ordering::SeqCst) != epoch {
+            return Err(released());
         }
+        *slot = Some(Slot { doc, id: id.to_owned(), generation, loaded: loaded.clone() });
         Ok(loaded)
     }
 }
 
 /// Answers one request of the media route (`/m/<doc>/<token>/<id>`): the bytes with the range asked
-/// for. Only a playable asset of the document's last listing, with its token, is ever served.
+/// for. Only the armed, playable asset of the document's newest listing, with its token, is served.
 pub fn serve(eng: &Engine, cache: &Cache, doc: DocId, token: &str, id: &str, range: Option<&str>) -> route::Reply {
-    if !cache.is_listed(doc, token, id) {
+    // before the check: a release after it refuses this request too
+    let epoch = cache.epoch.load(Ordering::SeqCst);
+    if !cache.allowed(doc, token, id) {
         return route::text(404, "unknown media");
     }
-    match cache.get(eng, doc, id) {
+    match cache.get_since(eng, doc, id, epoch) {
         Ok(l) => route::respond(&l.bytes, l.mime, range),
         Err(EngineError::Invalid(m)) => route::text(404, &m),
         Err(EngineError::NoDoc) => route::text(404, "document is not open"),

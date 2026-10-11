@@ -1108,6 +1108,7 @@ pub fn run() {
             organize::app::pick_attachments,
             organize::app::attachments_list,
             media::app::media_list,
+            media::app::media_play,
             media::app::media_release,
             organize::app::attachments_add,
             organize::app::attachment_save,
