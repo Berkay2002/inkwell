@@ -180,6 +180,9 @@ struct Step {
     /// The snapshot is the file exactly as a save must write it (the redaction engine's verified
     /// bytes): saving this step writes them as they are, not a rewrite of them.
     exact: bool,
+    /// The bytes hold a digital signature: later saves append to them (a page deletion no longer
+    /// forces a rewrite, which would break every signature).
+    signed: bool,
     sizes: Arc<Vec<[f32; 2]>>,
 }
 
@@ -222,6 +225,12 @@ static REDACTION_HOOK: parking_lot::Mutex<Option<RedactionHook>> = parking_lot::
 /// store can purge what it kept from before it.
 pub fn set_redaction_hook(hook: impl Fn(DocId) + Send + Sync + 'static) {
     *REDACTION_HOOK.lock() = Some(Arc::new(hook));
+}
+
+/// `/AcroForm /SigFlags` has SignaturesExist (ISO 32000-1 12.7.2, table 219).
+fn has_signatures(doc: &PdfDocument) -> bool {
+    let flags = || doc.catalog().ok()?.get_dict("AcroForm").ok()??.get_dict("SigFlags").ok()??.as_int().ok();
+    flags().is_some_and(|f| f & 1 != 0)
 }
 
 fn now_ms() -> u64 {
@@ -292,7 +301,8 @@ impl Editor {
             doc = open_snap(&snap, entry)?;
         }
         let sizes = Arc::new(page_sizes(&doc.doc)?);
-        let base = Step { snap, label: "Opened".into(), source: EditSource::User, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, exact: false, sizes };
+        let signed = has_signatures(&doc.doc);
+        let base = Step { snap, label: "Opened".into(), source: EditSource::User, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, exact: false, signed, sizes };
         Ok(Editor { doc, steps: vec![base], cur: 0, saved: Some(0) })
     }
 
@@ -1031,7 +1041,7 @@ impl Engine {
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
                 let step =
-                    Step { snap, label: op.label(), source, at_ms: now_ms(), pages, drops, redacts: false, exact: false, sizes: Arc::new(after) };
+                    Step { snap, label: op.label(), source, at_ms: now_ms(), pages, drops, redacts: false, exact: false, signed: false, sizes: Arc::new(after) };
                 Ok(Some((step, doc)))
             }
         });
@@ -1107,6 +1117,16 @@ impl Engine {
         catch_unwind(AssertUnwindSafe(|| f(&ed.doc.doc))).unwrap_or(Err(EngineError::Panic))
     }
 
+    /// [`Engine::read_custom`] with the bytes of the current state as well (what Save would
+    /// write, unless a rewrite is due): signature validation reads both.
+    pub fn read_with_bytes<R>(&self, id: DocId, f: impl FnOnce(&PdfDocument, &[u8]) -> Result<R>) -> Result<R> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        let bytes = ed.bytes();
+        catch_unwind(AssertUnwindSafe(|| f(&ed.doc.doc, bytes))).unwrap_or(Err(EngineError::Panic))
+    }
+
     fn custom(
         &self,
         id: DocId,
@@ -1133,7 +1153,7 @@ impl Engine {
             let doc = open_snap(&snap, &entry)?;
             let sizes = Arc::new(page_sizes(&doc.doc)?);
             let drops = sizes.len() < ed.step().sizes.len();
-            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, exact, sizes }, doc))
+            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, exact, signed: false, sizes }, doc))
         });
         match changed {
             Ok((step, doc)) => {
@@ -1153,6 +1173,32 @@ impl Engine {
                 Err(e)
             }
         }
+    }
+
+    /// A digital signature: `f` gets the bytes Save would write now and returns them with a
+    /// signed incremental update appended. That file becomes one undo step that a save writes
+    /// exactly (earlier signatures stay valid). Refused while an unsaved step would make Save
+    /// rewrite the file (deleted pages, redactions): those must be saved first.
+    pub fn apply_signature(&self, id: DocId, label: String, f: impl FnOnce(&[u8]) -> Result<Vec<u8>>) -> Result<EditState> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        let after = ed.steps[..=ed.cur].iter().rposition(|s| s.exact).map_or(0, |i| i + 1);
+        let signed = ed.steps[..=ed.cur].iter().any(|s| s.signed);
+        if ed.steps[after..=ed.cur].iter().any(|s| s.redacts || (s.drops && !signed)) {
+            return Err(invalid("save the document before signing it"));
+        }
+        let base = ed.bytes();
+        let out = catch_unwind(AssertUnwindSafe(|| f(base))).unwrap_or(Err(EngineError::Panic))?;
+        if out.len() <= base.len() || out[..base.len()] != *base {
+            return Err(invalid("the signed file does not extend the document"));
+        }
+        let snap = Snap { len: out.len(), bytes: Arc::new(out) };
+        let doc = open_snap(&snap, &entry)?;
+        let sizes = Arc::new(page_sizes(&doc.doc)?);
+        ed.push(Step { snap, label, source: EditSource::User, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, exact: true, signed: true, sizes });
+        ed.doc = doc;
+        Ok(self.publish(&entry, ed))
     }
 
     /// Drops every history entry before the current one (e.g. the versions from before a
@@ -1296,7 +1342,11 @@ impl Engine {
             self.check_not_open(&target, Some(id))?;
         }
         let ed = self.lane(&entry, &mut lane)?;
-        let rewrite = ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
+        // An exact step's bytes already hold everything before it; once signed, only a redaction
+        // rewrites (and so invalidates the signatures).
+        let after = ed.steps[..=ed.cur].iter().rposition(|s| s.exact).map_or(0, |i| i + 1);
+        let signed = ed.steps[..=ed.cur].iter().any(|s| s.signed);
+        let rewrite = ed.steps[after..=ed.cur].iter().any(|s| s.redacts || (s.drops && !signed));
         let full;
         let bytes: &[u8] = if ed.step().exact {
             // The redaction engine's verified file: any other write of it is unverified.

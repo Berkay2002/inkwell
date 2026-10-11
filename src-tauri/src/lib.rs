@@ -301,24 +301,27 @@ async fn save_document(
 ) -> Result<EditState, EngineError> {
     let to = to.map(|t| reg.take_save(window.label(), &t)).transpose()?;
     let (eng, hist) = (eng.inner().clone(), hist.inner().clone());
-    blocking(move || {
-        let (state, saved) = eng.save_recorded(doc, to.as_deref())?;
-        if let Some(to) = &to {
-            window.state::<Paths>().learn(to);
-        }
-        match saved {
-            // Save as: the document is another file now, with a history of its own
-            Some(s) if s.moved => hist.spawn_open(app, doc, state.path.clone()),
-            // history errors never fail a save
-            Some(s) => match hist.saved(doc, &s) {
-                Ok(_) => drop(app.emit("history-changed", doc)),
-                Err(e) => eprintln!("inkwell history: {e}"),
-            },
-            None => {}
-        }
-        Ok(state)
-    })
-    .await
+    blocking(move || save_and_record(&window, app, &eng, &hist, doc, to)).await
+}
+
+/// Save (to `to`, a path from a spent save token, or over the file) and record the version.
+/// Blocking.
+pub(crate) fn save_and_record(window: &Window, app: tauri::AppHandle, eng: &Engine, hist: &Arc<History>, doc: DocId, to: Option<String>) -> Result<EditState, EngineError> {
+    let (state, saved) = eng.save_recorded(doc, to.as_deref())?;
+    if let Some(to) = &to {
+        window.state::<Paths>().learn(to);
+    }
+    match saved {
+        // Save as: the document is another file now, with a history of its own
+        Some(s) if s.moved => hist.spawn_open(app, doc, state.path.clone()),
+        // history errors never fail a save
+        Some(s) => match hist.saved(doc, &s) {
+            Ok(_) => drop(app.emit("history-changed", doc)),
+            Err(e) => eprintln!("inkwell history: {e}"),
+        },
+        None => {}
+    }
+    Ok(state)
 }
 
 /// `out`: a save token.
