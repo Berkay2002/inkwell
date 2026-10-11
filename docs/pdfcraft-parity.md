@@ -1,6 +1,6 @@
 # Inkwell vs pdfcraft: Acrobat parity (2026-10-11)
 
-Sources: pdfcraft ROADMAP.md (area breadth/ready %), parity/acrobat-features.toml ids and status, README crate table, all read at b8ddf71 (read-only, nothing built or run). Inkwell side: main at f3b2ab5, from the code paths and docs cited in each row. pdfcraft's figures are its own self-assessment and have not moved since the last version of this file.
+Sources: pdfcraft ROADMAP.md (area breadth/ready %), parity/acrobat-features.toml ids and status, README crate table, all read at b8ddf71 (read-only, nothing built or run). Inkwell side: main at 07a6b83, from the code paths and docs cited in each row; the in-flight table was re-read from `origin` on the same day (commit subjects and each branch's own docs, nothing built or run). pdfcraft's figures are its own self-assessment and have not moved since the last version of this file.
 
 Status key for the Inkwell column ("ahead" means pdfcraft has the matching TOML ids planned):
 - **Shipped**: engine and UI are on main (a Tauri command is called from `src/`).
@@ -8,15 +8,25 @@ Status key for the Inkwell column ("ahead" means pdfcraft has the matching TOML 
 - **Partial**: some of the area is shipped, the gap column says what is not.
 - **Not started**: no code found (grep over `src/` and `src-tauri/src/`).
 
-## In flight (open PRs, not counted as shipped below)
+## In flight (branches on origin, not merged; not counted as shipped below)
 
-| PR | What | Area it will change |
-|---|---|---|
-| #15 | Measuring tools UI: bar, drawing, rail, calibrate, CSV | Measure goes from engine only to shipped |
-| #16 | Action Wizard UI: actions, editor, run with preview | Action Wizard goes from engine only to shipped |
-| #17 | Article threads: read, follow, create and edit | New row (pdfcraft has `view.articles-panel` and `edit.action-thread` planned) |
+Commit counts are against main at 07a6b83. "Limits" are the branch's own docs, quoted by area, not tested here.
 
-Also coming, by name only (no PR open yet): catalog, rich media, and document JavaScript events (OpenAction, page and document events, button mouse-up; document-level scripts already run at open).
+| Branch (PR) | Commits | What | Area it will change | Limits it states |
+|---|---|---|---|---|
+| `vdi-measure-ui` (#15) | 3 | Measuring tools UI: bar, drawing layer, rail, calibrate, CSV, snapping that asks the engine for the kinds that are on | Measure goes from engine only to shipped | Engine limits stay (`docs/measure.md`: `/Measure` written from memory, not checked against an Acrobat file; 10,000 points per measurement) |
+| `vdi-batch-ui` (#16) | 1 | Action Wizard UI: actions list, editor, run with preview, import and export | Action Wizard goes from engine only to shipped | Not read in detail |
+| `mac-threads` (#17) | 7 | Article threads: read, follow, author, edit, reorder, delete (`docs/threads.md`) | New row (pdfcraft has `view.articles-panel` and `edit.action-thread` planned) | Caps of 1,000 articles, 10,000 beads per article; a damaged article accepts only Properties; extract, split, graft and combine drop beads |
+| `worktree-sign` | 27 | Fill and Sign, PAdES B-B signing, certification, validation, Windows certificate store, Signatures rail (`docs/sign.md`) | Fill and sign and Digital signatures go from not started to shipped | No RFC 3161 timestamp (time is `/M`); no CRL or OCSP check; form fill and comments not told apart; Adobe's DSS and DR additions read as changed |
+| `mac-catalog` | 10 | Full-text index over a folder: build, refresh, search, fingerprint embedded in the file (`search/catalog/`) | Find gains an index scope (Acrobat's catalogue) | No doc of its own yet |
+| `mac-doc-js` | 10 | Document JavaScript: list, read, check and edit named scripts (`forms/doc_js.rs`, `DocJsSheet.tsx`) | Forms fill: the document-level scripts gap | No doc of its own yet |
+| `mac-rich-media` | 5 | Lists RichMedia, Screen, Movie, Sound and 3D annotations and plays on click through the `inkwell://` media route (`docs/media.md`) | New row: Rich media and 3D | Read-only: no undo step, not an assistant tool; Flash, 3D, executables, .mov and raw-sample sound shown as not playable |
+| `worktree-convert-plus` | 9 | Export to Excel and PowerPoint; create from clipboard, scanner (WIA) and web page | Export and Create PDF | Study doc 16 is marked "NOT OBSERVED": Acrobat's behaviour is unverified |
+| `worktree-ai-actions` | 5 | The assistant covers most of the app's tools: redact, comment, fill forms, organize pages, with approval cards and one undo step per change (`docs/ai-actions.md`) | AI assistant goes from read-only tools to Edit tools | Edit and permanent classes need approval; `redact_apply` stays in memory until the user saves and cannot be taken back from the saved file |
+| `worktree-claude-provider` | 5 | Claude (Claude Code) as a second assistant provider next to Codex, through the user's own CLI login (`docs/ai-claude.md`) | AI assistant: a second hosted provider (the "local providers" gap stays) | Refused when the environment forces an API key, Bedrock, Vertex or Foundry; tested only with Claude Code 2.1.296 on Windows 11 |
+| `cloud-a11y-4` | 6 | Depth for PDF/UA: Matterhorn-oriented checks, reading order and tag tree code, ParentTree validation, hostile-input tests (`a11y/matterhorn.rs`, `order.rs`, `tags.rs`) | Accessibility: checker depth; still no UI for the Reading order tool and Tags panel | No doc of its own yet |
+
+Also on origin, no new area: `cloud-measure` and `cloud-batch` (5 follow-up commits each on the measure and batch engines already on main, mostly hardening and docs) and `cloud-a11y-2` (one merge commit, nothing of its own).
 
 ## Parity table
 
@@ -52,6 +62,10 @@ Also coming, by name only (no PR open yet): catalog, rich media, and document Ja
 | Accessibility | M 63.1/30; checker, alt text, title shipped; `a11y.autotag`, `a11y.reading-order-tool`, `a11y.tags-panel` planned | Partial | Checker, fixes, alt text and Autotag are shipped: `src-tauri/src/a11y/`, `src/components/a11y/A11yPanel.tsx`, `docs/a11y.md`. Reading order and tag editing (`a11y_reading_order`, `a11y_tags`, `a11y_reorder`, `a11y_edit_tag` and others) are engine only: nothing in `src/` calls them | UI for the Reading order tool and Tags panel; Autotag has no tables, TOC or captions; some manual checks not offered |
 | Measure | `comment.measure-perimeter`, `-area`, `-snap`, `-info-panel`, `-export` shipped; `-distance`, `-scale` partial | Engine only | `src-tauri/src/measure/`, `docs/measure.md`; UI is #15 | The UI; `/Measure` reading is not checked against a file from Acrobat |
 | Action Wizard and batch | `misc.action-wizard-run`, `-create` shipped; `misc.batch-processing` partial | Engine only | `src-tauri/src/batch/`, `docs/batch.md`: compress, OCR, header and footer, watermark, Bates, protect, sanitize, redact, flatten forms, export, set properties; UI is #16 | The UI; no scheduling or watch folders; protected sources are skipped |
+| Article threads | `view.articles-panel`, `edit.action-thread` planned | Not started on main | No code for `/Threads` or `/B` beads under `src/` or `src-tauri/src/`; in flight as #17 (`mac-threads`) | Whole area: read, follow, author |
+| Rich media and 3D | No matching id read in pdfcraft's TOML | Not started on main | No code for RichMedia, Screen, Movie, Sound or 3D annotations on main; in flight as `mac-rich-media`. Not audited: what is drawn for such an annotation today | Whole area: list and play on click, authoring |
+| Full-text index (catalogue) | No matching id read in pdfcraft's TOML | Not started on main | Search across a folder or picked files reads every file each time (`src-tauri/src/search/`, `docs/search.md`); in flight as `mac-catalog` | No index file, no catalogue; searches rescan |
+| Cloud features | Out of pdfcraft's scope | Out of scope (local only) | Send for signature, shared review, shared links and Document Cloud storage are not built and not planned: the file and its history stay on the machine, and nothing leaves it except an explicit assistant request | Not applicable |
 | Command palette | `view.command-palette`, `misc.command-registry` shipped | Shipped | `src/components/Overlays.tsx` (CommandPalette), `src/lib/commands.ts` | Command set parity not measured |
 | All tools | Acrobat's All tools view: search, groups, favourites | Shipped | `src/components/ToolsPanel.tsx`, `AllTools.tsx`, `src/lib/toolsCatalog.ts`, `docs/tools-panel.md`: synonym search, recent chips, three pinned toolbar buttons, hover cards, Home grid | Per-document recommendations |
 | AI assistant | N 30.0/35; MCP, 141 tools; AI providers planned | Partial (read-only tools) | `src-tauri/src/ai/` (codex.rs, chat.rs, tools.rs), `src/components/assistant/`: eight built-in tools, all `Class::Read` (`get_document_info`, `get_outline`, `get_text`, `search`, `get_selection`, `get_page_image`, `go_to_page`, `show_source`); the Edit and Destructive classes and the ask/auto/full modes exist in `tools.rs`, but no edit tool is registered on main, so the assistant cannot sign, set passwords, print, save over the original or open links | Edit tools; local providers; the Codex app-server is the only provider found |
@@ -89,4 +103,5 @@ Crates main already adapts (from `third_party/pdfcraft/INKWELL-NOTICE.txt`):
 - "Not started" rows come from grep over `src/` and `src-tauri/src/`; "Shipped" means a command is called from `src/`, not that it was exercised in a build.
 - Behaviour was read from code and docs, not run; the UI could not be screenshotted on macOS.
 - pdfcraft figures are its own self-assessment (ROADMAP: about 49% ready for full Acrobat Pro, stage alpha; 141 of 423 shipped features cite one test). TOML ids and statuses are quoted by name; per-area counts are not republished.
+- The in-flight table comes from commit subjects, the files each branch adds and its own docs, read from `origin` without building or running anything; counts and heads move daily.
 - Crate verdicts come from Cargo.toml and lib.rs headers only; no build or test was run.
