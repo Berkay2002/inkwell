@@ -5,13 +5,13 @@ One icon system for the whole app, in two folders of plain SVG files.
 | | Where | What |
 |---|---|---|
 | Fluent UI System Icons | `src/assets/icons/fluent/` | Microsoft's icon family (MIT), vendored. Filled outlines on a 16, 20 or 24 px grid, a Regular and a Filled drawing each. |
-| Inkwell icons | `src/assets/icons/inkwell/` | Our own, for PDF-specific tools Fluent has no glyph for. Strokes on the 20 px grid; rules in that folder's README. |
+| Inkwell icons | `src/assets/icons/inkwell/` | Our own, for PDF-specific tools Fluent has no glyph for. Generated in the Fluent style from Fluent references with Codex's image tool and traced to one filled path on the 20 px grid; rules and pipeline in that folder's README. |
 | Manifest | `src/assets/icons/manifest.json` | `fluent`: our icon name -> Fluent glyph. `inkwell`: our own names, each with a line saying what it is. |
 
 Why: the old icons were one hand-drawn Lucide-style set, "really generic". Microsoft (Office, Windows 11) uses one
 family with Regular for chrome and Filled for the selected state; Adobe (Acrobat 2023+) colour-codes every tool so it
 is recognised by colour and shape. Inkwell does both: Fluent for chrome, coloured tiles for tools, our own glyphs
-where Fluent has nothing good.
+where Fluent has nothing good (made to look like Fluent, not drawn by hand).
 
 ## Where the icons show up
 
@@ -54,8 +54,9 @@ A tool only picks a glyph: `icon` in `toolItems.ts` names an entry of the manife
    `@fluentui/svg-icons` without size and style), add `"myName": "fluent_name"` to `fluent` in `manifest.json`, run
    `node scripts/vendor-fluent-icons.mjs` (it runs `npm pack` for the pinned version, or takes `--from <icons dir>`)
    and commit the new SVGs.
-2. Fluent does not: draw `<name>.svg` and `<name>-filled.svg` in `src/assets/icons/inkwell/` by the README there and
-   add `"myName": "what it is"` to `inkwell` in the manifest.
+2. Fluent does not: add the concept to `scripts/icons-gen/generate.mjs`, run it and `trace.cjs` (steps in
+   `src/assets/icons/inkwell/README.md`), and add `"myName": "what it is"` to `inkwell` in the manifest. The images
+   come from `codex exec` with the Fluent reference sheet attached; the traced SVGs are what is committed.
 3. Use it: `<Icon name="myName" />`, or `icon: "myName"` on a tool. `IconName` comes from the manifest, so a typo is
    a type error. `src/lib/icons.test.ts` checks that every name has both drawings, every vendored file is asked for
    and every tool names a glyph that exists.

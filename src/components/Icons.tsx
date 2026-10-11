@@ -4,54 +4,27 @@ import manifest from "../assets/icons/manifest.json";
  * Every icon in the app comes from two folders of SVG files (docs/icons.md):
  * - src/assets/icons/fluent/    Fluent UI System Icons (MIT), vendored by scripts/vendor-fluent-icons.mjs. Filled
  *                               shapes on a 16, 20 or 24 px grid, a Regular and a Filled drawing for each.
- * - src/assets/icons/inkwell/   our own, for the PDF-specific tools Fluent has no good glyph for, drawn on the 20 px
- *                               grid with a 1.5 px rounded stroke (Regular) and a heavier / solid drawing (Filled).
+ * - src/assets/icons/inkwell/   our own, for the PDF-specific tools Fluent has no good glyph for: generated in the
+ *                               Fluent style (scripts/icons-gen) and traced to one filled path on the 20 px grid.
  * The app mark (ink drop, Chrome.tsx) and the assistant's provider mark are brand marks and stay outside this set.
  * `name` is ours; src/assets/icons/manifest.json says which glyph it is.
  */
 export type IconName = keyof typeof manifest.fluent | keyof typeof manifest.inkwell;
 
-/** One drawn path of a glyph. */
-interface Shape {
-  d: string;
-  evenodd?: boolean;
-  /** Custom glyphs only: paint the inside (`fill="currentColor"` in the file). */
-  fill?: boolean;
-  /** Custom glyphs only: `stroke="none"` in the file. */
-  noStroke?: boolean;
-  /** Custom glyphs only: a path-level stroke width, in grid units. */
-  stroke?: number;
-  transform?: string;
-}
-
+/** A glyph: filled paths on a square grid (Fluent's and the traced Inkwell ones alike). */
 interface Drawing {
   grid: number;
-  /** Fluent glyphs are filled outlines; ours are strokes (plus solid parts). */
-  kind: "fill" | "stroke";
-  /** Stroke width in grid units, for `kind: "stroke"`. */
-  stroke: number;
-  shapes: Shape[];
+  shapes: { d: string; evenodd: boolean }[];
 }
 
 type Variant = "regular" | "filled";
 
-const attr = (tag: string, name: string) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
-
 function parse(svg: string, grid: number): Drawing {
-  const root = /<svg\b[^>]*>/.exec(svg)?.[0] ?? "";
-  const stroked = attr(root, "stroke") === "currentColor";
-  const shapes = [...svg.matchAll(/<path\b[^>]*>/g)].map(([tag]): Shape => {
-    const stroke = attr(tag, "stroke-width");
-    return {
-      d: attr(tag, "d") ?? "",
-      evenodd: attr(tag, "fill-rule") === "evenodd",
-      fill: attr(tag, "fill") === "currentColor",
-      noStroke: attr(tag, "stroke") === "none",
-      stroke: stroke ? Number(stroke) : undefined,
-      transform: attr(tag, "transform"),
-    };
-  });
-  return { grid, kind: stroked ? "stroke" : "fill", stroke: Number(attr(root, "stroke-width") ?? 1.5), shapes };
+  const shapes = [...svg.matchAll(/<path\b[^>]*>/g)].map(([tag]) => ({
+    d: /\sd="([^"]*)"/.exec(tag)?.[1] ?? "",
+    evenodd: /\sfill-rule="evenodd"/.test(tag),
+  }));
+  return { grid, shapes };
 }
 
 const fluentFiles = import.meta.glob<string>("../assets/icons/fluent/*.svg", { query: "?raw", import: "default", eager: true });
@@ -115,40 +88,10 @@ export function hasFilled(name: IconName): boolean {
 export function Icon({ name, size = 16, filled = false }: { name: IconName; size?: number; filled?: boolean }) {
   const d = drawingOf(name, filled ? "filled" : "regular", size);
   if (!d) return null;
-  if (d.kind === "fill") {
-    return (
-      <svg width={size} height={size} viewBox={`0 0 ${d.grid} ${d.grid}`} fill="currentColor" aria-hidden focusable="false">
-        {d.shapes.map((s, i) => (
-          <path key={i} d={s.d} fillRule={s.evenodd ? "evenodd" : undefined} />
-        ))}
-      </svg>
-    );
-  }
-  // the line keeps its width in screen px (1.5 for Regular) whatever the size the grid is drawn at
-  const px = d.grid / size;
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox={`0 0 ${d.grid} ${d.grid}`}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={d.stroke * px}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-      focusable="false"
-    >
+    <svg width={size} height={size} viewBox={`0 0 ${d.grid} ${d.grid}`} fill="currentColor" aria-hidden focusable="false">
       {d.shapes.map((s, i) => (
-        <path
-          key={i}
-          d={s.d}
-          transform={s.transform}
-          fill={s.fill ? "currentColor" : undefined}
-          fillRule={s.evenodd ? "evenodd" : undefined}
-          stroke={s.noStroke ? "none" : undefined}
-          strokeWidth={s.stroke ? s.stroke * px : undefined}
-        />
+        <path key={i} d={s.d} fillRule={s.evenodd ? "evenodd" : undefined} />
       ))}
     </svg>
   );

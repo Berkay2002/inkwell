@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import tilesCss from "../components/allTools.css?raw";
-import { drawingOf, gridFor, hasFilled, missingIcons } from "../components/Icons";
+import { drawingOf, gridFor, hasFilled, missingIcons, type IconName } from "../components/Icons";
 import manifest from "../assets/icons/manifest.json";
 import { TOOL_GROUPS, TOOL_HUES } from "./toolsCatalog";
 import { quickTools } from "./tools";
@@ -46,11 +46,16 @@ describe("icon set", () => {
     expect(drawingOf("close", "regular", 16)?.grid).toBe(16);
   });
 
-  it("our own glyphs are strokes on the 20 px grid, Fluent's are filled outlines", () => {
-    const ours = drawingOf("redact", "regular", 20)!;
-    expect(ours.kind).toBe("stroke");
-    expect(ours.grid).toBe(20);
-    expect(drawingOf("search", "regular", 20)!.kind).toBe("fill");
+  it("our own glyphs are filled outlines on the 20 px grid, like Fluent's, with one path each", () => {
+    for (const name of Object.keys(manifest.inkwell) as IconName[]) {
+      for (const variant of ["regular", "filled"] as const) {
+        const d = drawingOf(name, variant, 20)!;
+        expect(d.grid, `${name} ${variant}`).toBe(20);
+        expect(d.shapes, `${name} ${variant}`).toHaveLength(1);
+        expect(d.shapes[0].d.length, `${name} ${variant}`).toBeGreaterThan(40);
+      }
+    }
+    expect(drawingOf("search", "regular", 20)!.grid).toBe(20);
   });
 
   it("no component carries its own table of icon paths (the app and provider marks aside)", () => {
