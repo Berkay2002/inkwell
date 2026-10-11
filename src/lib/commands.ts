@@ -2,6 +2,7 @@ import { type DocState, useStore } from "../store";
 import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
 import { openA11y, useA11y } from "./a11y";
+import { openPreflight, usePreflight } from "./preflight";
 import { useRedact } from "./redact";
 import { useAnnot } from "./annot";
 import { useForms } from "./forms";
@@ -206,6 +207,12 @@ export const commands: Command[] = [
     title: "Check accessibility…",
     needsDoc: true,
     run: () => (useA11y.getState().open ? useA11y.getState().setOpen(false) : openA11y()),
+  },
+  {
+    id: "preflight",
+    title: "Preflight (PDF/A, PDF/UA, PDF/X)…",
+    needsDoc: true,
+    run: () => (usePreflight.getState().open ? usePreflight.getState().setOpen(false) : openPreflight()),
   },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },

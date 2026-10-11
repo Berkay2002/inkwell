@@ -4,6 +4,7 @@ import { useAnnot } from "./annot";
 import { useConvert } from "./convertStore";
 import { useForms } from "./forms";
 import { useHistory } from "./historyStore";
+import { usePreflight } from "./preflight";
 import { useProtect } from "./protectStore";
 import { useRedact } from "./redact";
 import { useTextEdit } from "./textEdit";
@@ -78,6 +79,7 @@ export function wireCommentRail() {
     useTextEdit.getState().setOpen(false);
     useHistory.getState().setOpen(false);
     useRedact.getState().setOpen(false);
+    usePreflight.getState().setOpen(false);
     useTools.setState({ sheet: null });
     useConvert.setState({ sheet: null });
     const ai = useAi.getState();
@@ -86,6 +88,30 @@ export function wireCommentRail() {
   const closeA11y = () => {
     if (useA11y.getState().open) useA11y.getState().setOpen(false);
   };
+  // Preflight is the same kind of rail: it takes the side, and any of them opening closes it.
+  usePreflight.subscribe((s, prev) => {
+    if (!s.open || prev.open) return;
+    if (useTools.getState().sheet?.phase === "running" || useConvert.getState().sheet?.phase === "running") {
+      return void usePreflight.setState({ open: false });
+    }
+    const protect = useProtect.getState();
+    if (protect.sheet?.phase === "working") return void usePreflight.setState({ open: false });
+    if (protect.sheet) useProtect.setState({ sheet: null });
+    useA11y.getState().setOpen(false);
+    useAnnot.getState().setOpen(false);
+    useForms.getState().setOpen(false);
+    useTextEdit.getState().setOpen(false);
+    useHistory.getState().setOpen(false);
+    useRedact.getState().setOpen(false);
+    useTools.setState({ sheet: null });
+    useConvert.setState({ sheet: null });
+    const ai = useAi.getState();
+    if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
+  });
+  const closePreflight = () => {
+    if (usePreflight.getState().open) usePreflight.getState().setOpen(false);
+  };
+  useA11y.subscribe((s, prev) => s.open && !prev.open && closePreflight());
   useAi.subscribe((s, prev) => s.open && !prev.open && s.settings.mode === "docked" && closeA11y());
   useHistory.subscribe((s, prev) => s.open && !prev.open && closeA11y());
   useRedact.subscribe((s, prev) => s.open && !prev.open && closeA11y());
@@ -95,4 +121,13 @@ export function wireCommentRail() {
   useTools.subscribe((s, prev) => s.sheet && !prev.sheet && closeA11y());
   useConvert.subscribe((s, prev) => s.sheet && !prev.sheet && closeA11y());
   useProtect.subscribe((s, prev) => s.sheet && !prev.sheet && closeA11y());
+  useAi.subscribe((s, prev) => s.open && !prev.open && s.settings.mode === "docked" && closePreflight());
+  useHistory.subscribe((s, prev) => s.open && !prev.open && closePreflight());
+  useRedact.subscribe((s, prev) => s.open && !prev.open && closePreflight());
+  useAnnot.subscribe((s, prev) => s.open && !prev.open && closePreflight());
+  useForms.subscribe((s, prev) => s.open && !prev.open && closePreflight());
+  useTextEdit.subscribe((s, prev) => s.open && !prev.open && closePreflight());
+  useTools.subscribe((s, prev) => s.sheet && !prev.sheet && closePreflight());
+  useConvert.subscribe((s, prev) => s.sheet && !prev.sheet && closePreflight());
+  useProtect.subscribe((s, prev) => s.sheet && !prev.sheet && closePreflight());
 }

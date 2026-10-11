@@ -1,3 +1,4 @@
+import { ClaimBadge } from "./preflight/ClaimBadge";
 import { useAi } from "../lib/aiStore";
 import { useHistory } from "../lib/historyStore";
 import type { Changes, Cipher, Printing, SecurityInfo } from "../lib/api";
@@ -265,6 +266,7 @@ function SecurityView({ sheet, info, doc }: { sheet: ProtectSheet; info: Securit
             <dd>{doc.pageCount}</dd>
           </div>
         </dl>
+        <ClaimBadge doc={doc} />
         <label className="tl-label">Security</label>
         {!info.encrypted ? (
           <>

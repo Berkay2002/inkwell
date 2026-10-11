@@ -3,6 +3,7 @@ import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { openA11y } from "../lib/a11y";
+import { openPreflight } from "../lib/preflight";
 import { useConvert } from "../lib/convertStore";
 import { useProtect } from "../lib/protectStore";
 import { useTools } from "../lib/toolsStore";
@@ -131,6 +132,7 @@ export function Toolbar({ doc }: { doc: DocState }) {
             { label: "Security…", onSelect: () => useProtect.getState().open("security", id) },
             { label: "Compare files…", onSelect: () => void openCompareSetup({ id, name: doc.name }) },
             { label: "Check accessibility…", onSelect: openA11y },
+            { label: "Preflight…", onSelect: openPreflight },
             { label: "Export…", onSelect: () => useConvert.getState().openExport(id) },
             { label: "Create PDF…", onSelect: () => useConvert.getState().openCreate() },
           ]}
