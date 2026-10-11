@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { linkCheckUrl, linkPickFile, type LinkTarget, type NewLinkTarget, type PageLink } from "../../lib/api";
-import { confirmOpen, rgbToHex, targetLabel, useNav } from "../../lib/nav";
+import { confirmOpen, isProblem, linkState, rgbToHex, stateLabel, targetLabel, useNav } from "../../lib/nav";
 import { getViewPos } from "../../lib/viewPos";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
@@ -23,11 +23,18 @@ export function LinksPanel({ doc }: { doc: DocState }) {
   const tool = useNav((s) => s.linkTool);
   const d = useNav((s) => s.docs[id]);
   const pending = d?.pending ?? null;
-  const here = d?.links[doc.currentPage]?.links ?? [];
+  const showProblems = useNav((s) => s.showProblems);
+  const audit = d?.audit ?? null;
+  const all = d?.links[doc.currentPage]?.links ?? [];
+  const here = showProblems ? all.filter((k) => isProblem(linkState(k.target))) : all;
   const sel: PageLink | null = d?.selectedLink ? (d.links[d.selectedLink.page]?.links.find((k) => k.id === d.selectedLink!.id) ?? null) : null;
 
   // Leaving the section stops drawing.
   useEffect(() => () => nav().setLinkTool("select"), []);
+  // "Show problems" checks every page once per document generation.
+  useEffect(() => {
+    if (showProblems && !audit) void nav().askAudit(id);
+  }, [showProblems, audit, id]);
 
   return (
     <div className="lk">
@@ -65,6 +72,51 @@ export function LinksPanel({ doc }: { doc: DocState }) {
       {sel && !pending && <Selected key={`${d?.selectedLink?.page}:${sel.id}`} doc={doc} page={d!.selectedLink!.page} link={sel} />}
 
       <section className="te-sec">
+        <h3 className="te-h3">Check</h3>
+        <button
+          className={showProblems ? "te-btn on" : "te-btn"}
+          aria-pressed={showProblems}
+          title="List the links whose destination is missing, across the whole document"
+          onClick={() => nav().setShowProblems(!showProblems)}
+        >
+          <Icon name="check" size={16} />
+          Show problems
+        </button>
+        {showProblems && !audit && <p className="dim te-hint">Checking the links…</p>}
+        {showProblems && audit && (
+          <>
+            <p className="te-summary">
+              <b>{audit.broken === 0 ? "No broken links" : `${audit.broken} broken ${audit.broken === 1 ? "link" : "links"}`}</b>
+              <br />
+              <span className="dim">
+                {audit.total} {audit.total === 1 ? "link" : "links"}, {audit.external} to web addresses
+              </span>
+            </p>
+            {audit.rows.length > 0 && (
+              <ul className="te-list">
+                {audit.rows.map((r) => (
+                  <li key={`${r.page}:${r.id}`}>
+                    <button
+                      className={sel?.id === r.id ? "te-item on" : "te-item"}
+                      onClick={() => {
+                        useStore.getState().goTo(id, r.page);
+                        nav().selectLink(id, { page: r.page, id: r.id });
+                      }}
+                    >
+                      <span className="st-dot broken" aria-hidden />
+                      <span className="te-excerpt">
+                        Page {r.page + 1} · {r.what}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </section>
+
+      <section className="te-sec">
         <h3 className="te-h3">From the document</h3>
         <Urls doc={doc} />
       </section>
@@ -81,6 +133,12 @@ export function LinksPanel({ doc }: { doc: DocState }) {
                   className={sel?.id === k.id ? "te-item on" : "te-item"}
                   onClick={() => nav().selectLink(id, { page: doc.currentPage, id: k.id })}
                 >
+                  <span
+                    className={`st-dot ${linkState(k.target)}`}
+                    role="img"
+                    aria-label={stateLabel(linkState(k.target), k.target.kind === "broken" ? k.target.what : undefined)}
+                    title={stateLabel(linkState(k.target), k.target.kind === "broken" ? k.target.what : undefined)}
+                  />
                   <span className="te-excerpt">{targetLabel(k.target)}</span>
                   {k.target.kind === "other" && <span className="te-tag">kept</span>}
                 </button>
@@ -114,7 +172,9 @@ function Selected({ doc, page, link }: { doc: DocState; page: number; link: Page
       <p className="te-summary">
         <b>{targetLabel(t)}</b>
         <br />
-        <span className="dim">{describe(t)}</span>
+        <span className="dim">
+          <span className={`st-dot ${linkState(t)}`} aria-hidden /> {t.kind === "broken" ? stateLabel("broken", t.what) : describe(t)}
+        </span>
       </p>
       <div className="te-row">
         {t.kind === "page" && (
@@ -426,6 +486,8 @@ function describe(t: LinkTarget): string {
       return "Opens a web address, after asking";
     case "file":
       return "Opens another file";
+    case "broken":
+      return "Its destination is missing";
     default:
       return "An action this editor keeps as it is";
   }

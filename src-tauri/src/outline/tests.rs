@@ -347,3 +347,20 @@ fn text_decoding_follows_the_pdf_encodings() {
     // PDFDocEncoding: bullet and the euro sign, Latin-1 for the rest.
     assert_eq!(decode_text(&[0x80, 0xA0, 0xE9]), "•€é");
 }
+
+#[test]
+fn a_bookmark_to_a_missing_named_destination_is_broken() {
+    let d = dir("outline", "broken");
+    let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 2, chapter_every: 1, ..Default::default() });
+    let first = list(&eng, id).unwrap().items[0].id;
+    eng.apply_custom(id, "Break bookmark".into(), EditSource::User, false, |d| {
+        let mut it = item(d, first)?;
+        it.dict_put("Dest", d.new_object_from_str("(gone)")?)?;
+        Ok(Vec::new())
+    })
+    .unwrap();
+    match &list(&eng, id).unwrap().items[0].dest {
+        Dest::Broken { what } => assert!(what.contains("gone"), "{what}"),
+        other => panic!("{other:?}"),
+    }
+}

@@ -8,7 +8,18 @@ One app window per image at 1536x1024. Each variant has one image (`-1-links`); 
 
 ## Verdict
 
-(pending: the orchestrator picks; see "Render notes" below.)
+2026-10-11: **a-tabs, with two touches.** The user delegated design picks to the orchestrator; the pick below is the
+orchestrator's ("inkwell [7da248]"), adopted by the user through that delegation, not the user's own. In its words:
+"a-tabs. Keep building it, with two touches. 1. From b-canvas: Acrobat keeps bookmarks in the left navigation pane, so
+make the left sidebar outline editable as well. Rename in place, drag to reorder or nest, and a right-click menu for
+Add, Delete and Set destination. Both views share the nav store and each change is one undo step. 2. From c-ledger:
+in the Links tab, give each link a state dot: ok, broken destination (missing page or named destination), or external
+URL. Do the same for bookmarks with a dead destination, and add a "Show problems" filter."
+b-canvas and c-ledger are dropped. Built as the Links and Bookmarks tabs of the Edit rail (`src/components/edit/`),
+the editable outline in the left sidebar while Edit is open (`BookmarkTree`, one component for both), state dots
+(a muted dot: goes somewhere; a ring: web address; a diamond: broken; a dashed ring: goes nowhere), a "Problems"
+filter on the bookmark tree and a document-wide "Show problems" check in the Links tab (`links_audit`). Build notes in
+docs/bookmarks-links.md.
 
 Render notes: written 2026-10-11 by the worker building the surface. Nothing was rendered: the image tool reported its
 usage limit on all three first images (2026-10-11), so there is no sheet. The spec stands as text and the most

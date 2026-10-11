@@ -2,7 +2,7 @@
 //! Nothing here opens a web address by itself: `link_open_url` is what the UI calls after the
 //! person said yes in its confirmation, and it still passes the address gate.
 
-use super::{LinkEdited, LinkOp, PageLinks, UrlPreview};
+use super::{LinkAudit, LinkEdited, LinkOp, PageLinks, UrlPreview};
 use crate::engine::edit::EditSource;
 use crate::engine::{DocId, Engine, EngineError};
 use crate::paths::{FileRef, Paths};
@@ -38,6 +38,13 @@ pub async fn links_apply(window: Window, eng: Eng<'_>, doc: DocId, rev: u32, mut
 pub async fn links_urls(eng: Eng<'_>, doc: DocId) -> Result<UrlPreview> {
     let eng = eng.inner().clone();
     blocking(move || super::preview_urls(&eng, doc)).await
+}
+
+/// Every link of the document counted, and the broken ones listed.
+#[tauri::command]
+pub async fn links_audit(eng: Eng<'_>, doc: DocId) -> Result<LinkAudit> {
+    let eng = eng.inner().clone();
+    blocking(move || super::audit(&eng, doc)).await
 }
 
 /// An address as it would be linked, or why it can't be.

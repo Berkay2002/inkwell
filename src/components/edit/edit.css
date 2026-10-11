@@ -617,3 +617,41 @@
   bottom: calc(var(--s) / -2);
   cursor: nwse-resize;
 }
+
+/* state dots: where a bookmark or link goes. Shape carries the state too (a ring, a diamond), not only colour. */
+.st-dot {
+  flex: none;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin: 0 6px 0 2px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-2) 55%, transparent);
+  vertical-align: middle;
+}
+.st-dot.external {
+  background: transparent;
+  border: 1.5px solid var(--accent);
+}
+.st-dot.broken {
+  border-radius: 1px;
+  transform: rotate(45deg);
+  background: #b7791f;
+}
+.st-dot.empty {
+  background: transparent;
+  border: 1.5px dashed #b7791f;
+}
+.bm-bar {
+  flex-wrap: wrap;
+}
+.bm-problems {
+  height: 30px;
+  padding: 0 10px;
+}
+.outline-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px;
+}

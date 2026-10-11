@@ -27,7 +27,23 @@ import { message } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import type { Bookmark, Bookmarks } from "./api";
 import { editBookmarks, editLinks } from "./edit";
-import { confirmOpen, dragRect, findBookmark, hexToRgb, isUnder, locate, rgbToHex, targetLabel, titleFromText, useNav, visibleRows } from "./nav";
+import {
+  bookmarkState,
+  confirmOpen,
+  countProblems,
+  dragRect,
+  findBookmark,
+  hexToRgb,
+  isUnder,
+  linkState,
+  locate,
+  onlyProblems,
+  rgbToHex,
+  targetLabel,
+  titleFromText,
+  useNav,
+  visibleRows,
+} from "./nav";
 
 const bm = (id: number, title: string, children: Bookmark[] = [], over: Partial<Bookmark> = {}): Bookmark => ({
   id,
@@ -101,6 +117,39 @@ describe("small helpers", () => {
     expect(targetLabel({ kind: "file", name: "annex.pdf", page: 2 })).toBe("annex.pdf, page 3");
     expect(targetLabel({ kind: "file", name: "annex.pdf", page: null })).toBe("annex.pdf");
     expect(targetLabel({ kind: "other", what: "JavaScript" })).toBe("Action: JavaScript");
+  });
+});
+
+describe("state dots and problems", () => {
+  const broken = { kind: "broken" as const, what: 'the named destination "x" is not in the document' };
+
+  it("tells where a bookmark or link goes", () => {
+    expect(bookmarkState(bm(1, "a"))).toBe("ok");
+    expect(bookmarkState(bm(1, "a", [], { dest: { kind: "uri", uri: "https://example.com/" } }))).toBe("external");
+    expect(bookmarkState(bm(1, "a", [], { dest: broken }))).toBe("broken");
+    expect(bookmarkState(bm(1, "a", [], { dest: { kind: "none" } }))).toBe("empty");
+    // A group heading that goes nowhere is fine.
+    expect(bookmarkState(bm(1, "a", [bm(2, "b")], { dest: { kind: "none" } }))).toBe("ok");
+    expect(linkState({ kind: "page", page: 1, at: null })).toBe("ok");
+    expect(linkState({ kind: "uri", uri: "https://example.com/" })).toBe("external");
+    expect(linkState(broken)).toBe("broken");
+    expect(targetLabel(broken)).toBe("Missing destination");
+  });
+
+  it("keeps the problems with the parents they sit under", () => {
+    const items = [
+      bm(1, "Chapter 1", [bm(2, "fine"), bm(3, "lost", [], { dest: broken })], { open: false }),
+      bm(4, "Chapter 2", [bm(5, "fine")]),
+      bm(6, "empty leaf", [], { dest: { kind: "none" } }),
+    ];
+    expect(countProblems(items)).toBe(2);
+    const only = onlyProblems(items);
+    expect(only.map((b) => b.id)).toEqual([1, 6]);
+    expect(only[0].children.map((b) => b.id)).toEqual([3]);
+    expect(only[0].open).toBe(true);
+    // The tree it came from is not changed.
+    expect(items[0].children).toHaveLength(2);
+    expect(items[0].open).toBe(false);
   });
 });
 

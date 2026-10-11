@@ -2,7 +2,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
-import type { Bookmark, BookmarkOp, BorderSpec, HeadingPreview, LinkOp, NewLinkTarget, PageLink, PageLinks, UrlPreview } from "./api";
+import type { Bookmark, BookmarkOp, BorderSpec, HeadingPreview, LinkAudit, LinkOp, NewLinkTarget, PageLink, PageLinks, UrlPreview } from "./api";
 import { editBookmarks, editLinks } from "./edit";
 import { dropViewPos, getViewPos } from "./viewPos";
 
@@ -26,6 +26,8 @@ export interface DocNav {
   headings: HeadingPreview | null;
   /** What "Create links from web addresses" would make; null until asked. */
   urls: UrlPreview | null;
+  /** Every link of the document counted, broken ones listed; null until asked. */
+  audit: LinkAudit | null;
   links: Record<number, { rev: number; links: PageLink[] }>;
   selectedLink: { page: number; id: number } | null;
   /** A rectangle just drawn: the link is made when its target is chosen in the rail. */
@@ -40,6 +42,7 @@ const empty = (): DocNav => ({
   renaming: null,
   headings: null,
   urls: null,
+  audit: null,
   links: {},
   selectedLink: null,
   pending: null,
@@ -109,6 +112,54 @@ export function dragRect(a: [number, number], b: [number, number], min = 4): Rec
   return r[2] - r[0] < min || r[3] - r[1] < min ? null : r;
 }
 
+/** What a state dot shows: where a bookmark or link goes, or that it goes nowhere that works. */
+export type DotState = "ok" | "external" | "broken" | "empty";
+
+export function bookmarkState(b: Bookmark): DotState {
+  switch (b.dest.kind) {
+    case "broken":
+      return "broken";
+    case "uri":
+      return "external";
+    case "none":
+      return b.children.length === 0 ? "empty" : "ok";
+    default:
+      return "ok";
+  }
+}
+
+export const linkState = (t: api.LinkTarget): DotState => (t.kind === "broken" ? "broken" : t.kind === "uri" ? "external" : "ok");
+
+/** The words for a state dot (the dot alone is never the only signal). */
+export function stateLabel(s: DotState, what?: string): string {
+  switch (s) {
+    case "broken":
+      return what ? `Broken: ${what}` : "Broken destination";
+    case "external":
+      return "Goes to a web address";
+    case "empty":
+      return "Goes nowhere";
+    default:
+      return "Destination found";
+  }
+}
+
+export const isProblem = (s: DotState) => s === "broken" || s === "empty";
+
+/** The bookmarks that are a problem, each under the parents it has (opened), for "Show problems". */
+export function onlyProblems(items: Bookmark[]): Bookmark[] {
+  const out: Bookmark[] = [];
+  for (const b of items) {
+    const kids = onlyProblems(b.children);
+    if (isProblem(bookmarkState(b)) || kids.length > 0) out.push({ ...b, children: kids, open: kids.length > 0 ? true : b.open });
+  }
+  return out;
+}
+
+export function countProblems(items: Bookmark[]): number {
+  return items.reduce((n, b) => n + (isProblem(bookmarkState(b)) ? 1 : 0) + countProblems(b.children), 0);
+}
+
 /** A short line for a link's target, for lists. */
 export function targetLabel(t: api.LinkTarget): string {
   switch (t.kind) {
@@ -118,6 +169,8 @@ export function targetLabel(t: api.LinkTarget): string {
       return t.uri;
     case "file":
       return t.page != null ? `${t.name}, page ${t.page + 1}` : t.name;
+    case "broken":
+      return "Missing destination";
     default:
       return t.what ? `Action: ${t.what}` : "No target";
   }
@@ -164,7 +217,7 @@ interface Store {
   selectBookmark: (doc: number, id: number | null) => void;
   setRenaming: (doc: number, id: number | null) => void;
   /** A new bookmark after the selected one: named from the selected text, at the text or the current view. */
-  addBookmark: (doc: number) => Promise<void>;
+  addBookmark: (doc: number, opts?: { inside?: boolean }) => Promise<void>;
   rename: (doc: number, id: number, title: string) => Promise<void>;
   remove: (doc: number, ids: number[]) => Promise<void>;
   moveBookmark: (doc: number, id: number, parent: number | null, index: number) => Promise<void>;
@@ -184,6 +237,10 @@ interface Store {
   setLinkBorder: (doc: number, page: number, id: number, border: BorderSpec) => Promise<void>;
   removeLinks: (doc: number, page: number, ids: number[]) => Promise<void>;
   askUrls: (doc: number) => Promise<void>;
+  askAudit: (doc: number) => Promise<void>;
+  /** Only broken bookmarks and links are listed. */
+  showProblems: boolean;
+  setShowProblems: (on: boolean) => void;
   makeFromUrls: (doc: number) => Promise<void>;
 
   /** The document moved on (an edit, undo, redo): lists are listed again. */
@@ -277,7 +334,7 @@ export const useNav = create<Store>((set, get) => {
     selectBookmark: (doc, id) => patch(doc, { selectedBm: id, notice: null }),
     setRenaming: (doc, id) => patch(doc, { renaming: id, ...(id != null ? { selectedBm: id } : {}) }),
 
-    addBookmark: async (doc) => {
+    addBookmark: async (doc, opts) => {
       if (!of(doc).bookmarks) await reloadBookmarks(doc);
       const d = of(doc);
       const tree = d.bookmarks?.items ?? [];
@@ -287,10 +344,11 @@ export const useNav = create<Store>((set, get) => {
       const page = spot?.page ?? view?.page ?? st?.currentPage ?? 0;
       const at: [number, number] | null = spot ? spot.at : view && view.page === page ? [0, Math.max(0, view.yPt)] : null;
       const after = d.selectedBm != null ? locate(tree, d.selectedBm) : null;
+      const inside = !!opts?.inside && after != null && d.selectedBm != null;
       const r = await bm(doc, {
         op: "add",
-        parent: after?.parent ?? null,
-        index: after ? after.index + 1 : null,
+        parent: inside ? d.selectedBm : (after?.parent ?? null),
+        index: inside ? null : after ? after.index + 1 : null,
         title: spot?.text ?? "Untitled",
         page,
         at,
@@ -405,6 +463,16 @@ export const useNav = create<Store>((set, get) => {
       }
     },
 
+    askAudit: async (doc) => {
+      try {
+        patch(doc, { audit: await api.linksAudit(doc) });
+      } catch {
+        patch(doc, { audit: null });
+      }
+    },
+    showProblems: false,
+    setShowProblems: (showProblems) => set({ showProblems }),
+
     makeFromUrls: async (doc) => {
       const page = useStore.getState().docs[doc]?.currentPage ?? 0;
       const r = await lk(doc, page, { op: "fromUrls" });
@@ -414,7 +482,7 @@ export const useNav = create<Store>((set, get) => {
     onRev: (doc) => {
       const d = get().docs[doc];
       if (!d) return;
-      patch(doc, { headings: null, urls: null });
+      patch(doc, { headings: null, urls: null, audit: null });
       if (d.bookmarks) void reloadBookmarks(doc);
       for (const k of Object.keys(d.links)) void reloadLinks(doc, Number(k));
     },

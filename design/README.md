@@ -53,6 +53,12 @@ Read | Edit | Organize pill plus the right rail (one rail at a time). Screens: d
 rounds/edit-r1/spec.md; build notes in docs/text-edit.md.
 
 
+2026-10-11, links-r1: three ideas (a-tabs Links and Bookmarks as tabs of the Edit rail, b-canvas a popover from the drawn
+link plus an editable sidebar outline, c-ledger an audit board with state dots). The image tool was at its usage limit, so no
+renders were made; inkwell chose a-tabs from the spec with two touches: the left sidebar outline is the same bookmark editor
+while Edit is open (b-canvas), and state dots plus a "Show problems" filter for broken and external destinations
+(c-ledger). Screens: docs/screens/bookmarks/. Details in rounds/links-r1/spec.md; build notes in docs/bookmarks-links.md.
+
 2026-10-11, compare-r1: three ideas (a-stage Acrobat-like setup page then result, b-rail pdfcraft-like dialog and one shaded
 document, c-tape one sheet with a change tape); only a-stage rendered (image tool limit) and inkwell picked it: "Acrobat's
 standard layout: side by side, with the change list on the right". Our touches: dashed connectors between matching changes,

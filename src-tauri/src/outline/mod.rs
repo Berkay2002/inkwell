@@ -42,6 +42,9 @@ pub enum Dest {
     Uri { uri: String },
     /// Another kind of action (a file, JavaScript, a named action), kept as it is.
     Other { what: String },
+    /// A destination that can't be followed: a named destination that is not in the document, or a
+    /// page that is. `what` says which, as a short phrase.
+    Broken { what: String },
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -245,7 +248,20 @@ fn dest_of(doc: &PdfDocument, item: &PdfObject, spaces: &mut HashMap<u32, Option
     let Some(t) = target else { return Dest::None };
     match dest_array(doc, &t).and_then(|arr| page_dest(doc, spaces, &arr)) {
         Some((page, at)) => Dest::Page { page, at },
-        None => Dest::Other { what: "Dest".into() },
+        None => Dest::Broken { what: broken_reason(&t) },
+    }
+}
+
+/// Why a destination can't be followed, as a short phrase.
+pub(crate) fn broken_reason(t: &PdfObject) -> String {
+    let t = t.resolve().ok().flatten().unwrap_or_else(|| t.clone());
+    if t.is_name().unwrap_or(false) || t.is_string().unwrap_or(false) {
+        let n: String = string_of(Some(t)).chars().take(60).collect();
+        format!("the named destination \"{n}\" is not in the document")
+    } else if t.is_array().unwrap_or(false) {
+        "its page is not in the document".into()
+    } else {
+        "the destination is not valid".into()
     }
 }
 

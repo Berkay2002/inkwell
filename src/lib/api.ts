@@ -230,7 +230,9 @@ export type BookmarkDest =
   /** `at`: the point shown at the top left of the view, page space. */
   | { kind: "page"; page: number; at: [number, number] | null }
   | { kind: "uri"; uri: string }
-  | { kind: "other"; what: string };
+  | { kind: "other"; what: string }
+  /** A destination that can't be followed (a missing named destination or page); `what` says which. */
+  | { kind: "broken"; what: string };
 
 export interface Bookmark {
   /** The item's object number: stable across undo. */
@@ -278,7 +280,8 @@ export type LinkTarget =
   | { kind: "page"; page: number; at: [number, number] | null }
   | { kind: "uri"; uri: string }
   | { kind: "file"; name: string; page: number | null }
-  | { kind: "other"; what: string };
+  | { kind: "other"; what: string }
+  | { kind: "broken"; what: string };
 
 export interface LinkBorder {
   visible: boolean;
@@ -326,6 +329,14 @@ export interface LinkEdited {
   count: number;
 }
 
+export interface LinkAudit {
+  total: number;
+  external: number;
+  broken: number;
+  /** The first broken ones. */
+  rows: { page: number; id: number; what: string }[];
+}
+
 export interface UrlPreview {
   count: number;
   pages: number;
@@ -338,6 +349,7 @@ export const bookmarksHeadings = (doc: number) => invoke<HeadingPreview>("bookma
 export const linksList = (doc: number, page: number) => invoke<PageLinks>("links_list", { doc, page });
 export const linksApply = (doc: number, rev: number, op: LinkOp) => invoke<LinkEdited>("links_apply", { doc, rev, op });
 export const linksUrls = (doc: number) => invoke<UrlPreview>("links_urls", { doc });
+export const linksAudit = (doc: number) => invoke<LinkAudit>("links_audit", { doc });
 /** An address as it would be linked (gate: https, http, mailto), or an error saying why not. */
 export const linkCheckUrl = (url: string) => invoke<string>("link_check_url", { url });
 /** Any file, as an open token. */

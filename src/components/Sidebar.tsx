@@ -2,11 +2,13 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import type { OutlineItem } from "../lib/api";
 import { computeLayout, previewScaleKey, rotated, type Size, visibleRange } from "../lib/layout";
 import { type Want, tileClient } from "../lib/tiles";
+import { useTextEdit } from "../lib/textEdit";
 import { useTools } from "../lib/toolsStore";
 import { type DocState, useStore } from "../store";
 import { Icon } from "./Icons";
 import { ContextMenu, pageActions } from "./PageMenu";
 import { TileCanvas } from "./TileCanvas";
+import { BookmarkBar, BookmarkTree } from "./edit/BookmarkTree";
 
 const THUMB_W = 150;
 
@@ -120,7 +122,24 @@ function Thumbnails({ doc }: { doc: DocState }) {
   );
 }
 
+/** In Edit mode the outline is the bookmark editor (same store as the Edit rail's Bookmarks tab). */
+function EditableOutline({ doc }: { doc: DocState }) {
+  return (
+    <div className="outline outline-edit">
+      <BookmarkBar doc={doc.id} />
+      <BookmarkTree doc={doc.id} />
+      <p className="dim te-hint">Double-click to rename, drag to reorder or nest, right-click for more.</p>
+    </div>
+  );
+}
+
 function Outline({ doc }: { doc: DocState }) {
+  const editing = useTextEdit((s) => s.open) && !doc.organize;
+  if (editing) return <EditableOutline doc={doc} />;
+  return <ReadOutline doc={doc} />;
+}
+
+function ReadOutline({ doc }: { doc: DocState }) {
   useEffect(() => useStore.getState().loadOutline(doc.id), [doc.id, doc.rev]);
   if (!doc.outline) return <div className="empty">Loading…</div>;
   if (doc.outline.length === 0) return <div className="empty">This document has no outline.</div>;

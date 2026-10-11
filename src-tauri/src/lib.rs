@@ -845,6 +845,7 @@ pub fn run() {
             links::app::links_list,
             links::app::links_apply,
             links::app::links_urls,
+            links::app::links_audit,
             links::app::link_check_url,
             links::app::link_pick_file,
             links::app::link_open_url,

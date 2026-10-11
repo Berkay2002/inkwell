@@ -16,7 +16,7 @@ pub use urls::UrlPreview;
 
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
-use crate::outline::{dest_array, page_dest, text_object};
+use crate::outline::{broken_reason, dest_array, page_dest, text_object};
 use crate::textedit::{Matrix, page_space};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,9 @@ pub enum Target {
     File { name: String, page: Option<u32> },
     /// Another kind of action, kept as it is (JavaScript, a named action), or nowhere.
     Other { what: String },
+    /// A destination that can't be followed: a named destination that is not in the document, or a
+    /// page that is. `what` says which, as a short phrase.
+    Broken { what: String },
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -232,8 +235,12 @@ fn border_of(a: &PdfObject) -> Border {
     } else if let Some(b) = a.get_dict("Border").ok().flatten() {
         width = nums(&b, 3).map_or(1.0, |v| v[2]);
     }
-    let color = a.get_dict("C").ok().flatten().and_then(|c| nums(&c, 3)).map_or([0.0, 0.0, 0.0], |v| [v[0], v[1], v[2]]);
-    Border { visible: width > 0.0, width: width.max(0.0), color }
+    let c = a.get_dict("C").ok().flatten();
+    let color = c.as_ref().and_then(|c| nums(c, 3)).map_or([0.0, 0.0, 0.0], |v| [v[0], v[1], v[2]].map(|x| x.clamp(0.0, 1.0)));
+    // Acrobat draws nothing for width 0, an empty `/C []` or the hidden flag.
+    let no_colour = c.as_ref().is_some_and(|c| c.is_array().unwrap_or(false) && c.len().unwrap_or(1) == 0);
+    let hidden = a.get_dict("F").ok().flatten().is_some_and(|f| f.as_int().unwrap_or(0) & 2 != 0);
+    Border { visible: width > 0.0 && !no_colour && !hidden, width: width.max(0.0), color }
 }
 
 fn target_of(doc: &PdfDocument, a: &PdfObject, spaces: &mut HashMap<u32, Option<Matrix>>) -> Target {
@@ -272,7 +279,7 @@ fn target_of(doc: &PdfDocument, a: &PdfObject, spaces: &mut HashMap<u32, Option<
     let Some(d) = dest else { return Target::Other { what: String::new() } };
     match dest_array(doc, &d).and_then(|arr| page_dest(doc, spaces, &arr)) {
         Some((page, at)) => Target::Page { page, at },
-        None => Target::Other { what: "Dest".into() },
+        None => Target::Broken { what: broken_reason(&d) },
     }
 }
 
@@ -322,6 +329,56 @@ pub fn list(eng: &Engine, doc: DocId, page: u32) -> Result<PageLinks> {
             return Err(EngineError::BadPage(page));
         }
         read_page(d, page, entry.generation())
+    })
+}
+
+// ---- audit ----
+
+/// Rows of an audit that are listed one by one.
+const AUDIT_ROWS: usize = 200;
+
+/// A link whose destination can't be followed.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditRow {
+    /// 0-based.
+    pub page: u32,
+    pub id: i32,
+    /// Why, as a short phrase.
+    pub what: String,
+}
+
+/// What the links of the whole document are: how many, how many go to the web, and the ones that
+/// are broken.
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkAudit {
+    pub total: u32,
+    pub external: u32,
+    pub broken: u32,
+    /// The first of the broken ones.
+    pub rows: Vec<AuditRow>,
+}
+
+pub fn audit(eng: &Engine, doc: DocId) -> Result<LinkAudit> {
+    eng.read_custom(doc, |d| {
+        let mut out = LinkAudit::default();
+        for page in 0..d.page_count()?.max(0) as u32 {
+            for l in read_page(d, page, 0)?.links {
+                out.total += 1;
+                match l.target {
+                    Target::Uri { .. } => out.external += 1,
+                    Target::Broken { what } => {
+                        out.broken += 1;
+                        if out.rows.len() < AUDIT_ROWS {
+                            out.rows.push(AuditRow { page, id: l.id, what });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(out)
     })
 }
 

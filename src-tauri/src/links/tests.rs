@@ -211,3 +211,57 @@ fn links_from_addresses_are_predicted_then_made_once() {
     eng.undo(id).unwrap();
     assert!(list(&eng, id, 0).unwrap().links.is_empty());
 }
+
+#[test]
+fn a_destination_that_is_not_there_is_broken_and_the_audit_counts_it() {
+    let (eng, id, _path, _d) = fixture_doc("broken", 3);
+    go(&eng, id, LinkOp::Add { page: 0, rect: [50.0, 50.0, 150.0, 80.0], target: NewTarget::Page { page: 2, at: None }, border: None });
+    go(&eng, id, LinkOp::Add { page: 1, rect: [50.0, 50.0, 150.0, 80.0], target: NewTarget::Uri { uri: "https://example.com/".into() }, border: None });
+    let ok = audit(&eng, id).unwrap();
+    assert_eq!((ok.total, ok.external, ok.broken), (2, 1, 0));
+
+    // Point the first link at a named destination the document does not have.
+    eng.apply_custom(id, "Break link".into(), EditSource::User, false, |d| {
+        let page = d.find_page(0)?;
+        let annots = page.get_dict("Annots")?.unwrap();
+        let mut a = annots.get_array(0)?.unwrap();
+        a.dict_put("Dest", d.new_object_from_str("(nowhere)")?)?;
+        Ok(vec![0])
+    })
+    .unwrap();
+    let l = list(&eng, id, 0).unwrap();
+    match &l.links[0].target {
+        Target::Broken { what } => assert!(what.contains("nowhere"), "{what}"),
+        other => panic!("{other:?}"),
+    }
+    let a = audit(&eng, id).unwrap();
+    assert_eq!((a.total, a.external, a.broken), (2, 1, 1));
+    assert_eq!(a.rows.len(), 1);
+    assert_eq!((a.rows[0].page, a.rows[0].id), (0, l.links[0].id));
+}
+
+#[test]
+fn a_hidden_or_colourless_border_is_not_visible() {
+    let (eng, id, _path, _d) = fixture_doc("hidden", 1);
+    let e = go(
+        &eng,
+        id,
+        LinkOp::Add {
+            page: 0,
+            rect: [50.0, 50.0, 150.0, 80.0],
+            target: NewTarget::Uri { uri: "https://example.com/".into() },
+            border: Some(BorderSpec { visible: true, width: Some(2.0), color: None }),
+        },
+    );
+    assert!(list(&eng, id, 0).unwrap().links[0].border.visible);
+    eng.apply_custom(id, "Hide link".into(), EditSource::User, false, |d| {
+        let page = d.find_page(0)?;
+        let annots = page.get_dict("Annots")?.unwrap();
+        let mut a = annots.get_array(0)?.unwrap();
+        a.dict_put("C", d.new_array()?)?;
+        Ok(vec![0])
+    })
+    .unwrap();
+    assert!(!list(&eng, id, 0).unwrap().links[0].border.visible, "/C [] draws nothing");
+    assert_eq!(list(&eng, id, 0).unwrap().links[0].id, e.id.unwrap());
+}
