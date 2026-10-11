@@ -6,6 +6,16 @@ at a time, same width and chrome as the assistant rail). One app window per imag
 variant: `-1-review` (a document with comments, the Comments panel) and `-2-select` (one annotation selected, with
 handles and the small property popover). The sheet is `--cols 2`: one row per variant.
 
+## Verdict
+
+2026-10-11: a-rail. The user did not pick between the variants; they handed the design call to the orchestrator
+(inkwell) in these words: "choose what is both standard and what pdfcraft and acrobat has, but also some hint of
+uniqueness". The pick, a-rail, is **inkwell's, adopted by the user** by that delegation, not the user's own. It takes
+Acrobat's rail (search, filter, composer, grouped by page, replies) and pdfcraft's floating vertical tool strip, with
+the pale-blue selection frame and small property popover as its own touch. b-bar and c-margin are dropped.
+Approved: `design/approved/comments.png` (a-rail-1-review), `comments-2.png` (a-rail-2-select).
+Built as the Comments rail in the same dock as assistant, Tools, Redact and History; the strip floats at the left of
+the page area. Screens of the build: `docs/screens/comments/`.
 ## How Acrobat Pro does it (study 08-comments, docs/study/screens/08-comments/01-comments-panel.png)
 - Right rail, speech-bubble icon, opens a **Comments** panel titled with the count ("Comment 1").
 - Panel header: close, search (magnifier), filter (funnel), "..." menu. Under it a composer ("Add a comment",
