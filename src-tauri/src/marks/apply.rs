@@ -862,18 +862,27 @@ pub struct BatesFile {
 }
 
 /// The name of the numbered copy of `input` in `dir`: `<name> - Bates.pdf`, then `(2)`… so an
-/// earlier run, or a file of the same name, is never overwritten.
-fn output_name(dir: &Path, input: &Path) -> PathBuf {
+/// earlier run, a file of the same name, or the copy of an earlier input of this run (`taken`) is
+/// never overwritten.
+fn output_name(dir: &Path, input: &Path, taken: &[PathBuf]) -> PathBuf {
     let stem = input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Document".into());
     (1..)
         .map(|k| if k == 1 { dir.join(format!("{stem} - Bates.pdf")) } else { dir.join(format!("{stem} - Bates ({k}).pdf")) })
-        .find(|p| !p.exists())
+        .find(|p| !p.exists() && !taken.contains(p))
         .expect("a free name")
 }
 
 /// Numbers the files in order, continuing the count from one to the next, and writes each as a
-/// copy in `dir`. Nothing is written when any file cannot be opened or the numbers run out.
-pub fn bates_files(inputs: &[String], bates: &Bates, date: Date, dir: &Path) -> Result<Vec<BatesFile>> {
+/// copy in `dir`. Nothing is written when any file cannot be opened, the numbers run out, or
+/// `not_open` refuses one of the output files (the caller checks that it is not a document that
+/// is open in the app).
+pub fn bates_files(
+    inputs: &[String],
+    bates: &Bates,
+    date: Date,
+    dir: &Path,
+    not_open: &dyn Fn(&Path) -> Result<()>,
+) -> Result<Vec<BatesFile>> {
     if inputs.is_empty() {
         return Err(invalid("Add at least one file."));
     }
@@ -902,15 +911,21 @@ pub fn bates_files(inputs: &[String], bates: &Bates, date: Date, dir: &Path) -> 
     if !bates_fits(bates.digits, bates.start, total) {
         return Err(invalid(format!("{total} pages starting at {} need more than {} digits.", bates.start, bates.digits)));
     }
+    // Every output name is fixed and checked before the first byte is written.
+    let mut outs: Vec<PathBuf> = Vec::new();
+    for p in inputs {
+        let out = output_name(dir, Path::new(p), &outs);
+        not_open(&out)?;
+        outs.push(out);
+    }
     let mut next = bates.start;
     let mut done: Vec<BatesFile> = Vec::new();
-    for (p, mut d) in inputs.iter().zip(docs) {
+    for ((p, out), mut d) in inputs.iter().zip(outs).zip(docs) {
         let pages = d.page_count()?.max(0) as u32;
         let b = Bates { start: next, ..bates.clone() };
         let req = AddRequest { mark: Mark::Bates(b), pages: (0..pages).collect(), replace: true, date };
         add(&mut d, &req)?;
         let bytes = write_doc(&d, rewrite_opts(), 1 << 20)?;
-        let out = output_name(dir, Path::new(p));
         let r = write_new(&out, &bytes, pages);
         if let Err(e) = r {
             let written: Vec<_> = done.iter().map(|f| f.output.clone()).collect();

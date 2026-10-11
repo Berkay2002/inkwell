@@ -32,6 +32,8 @@ pub struct Elem {
     pub alt: bool,
     /// Marked content or an object reference directly under it.
     pub content: bool,
+    /// Marked-content ids it holds directly (on its page; references into form XObjects left out).
+    pub mcids: Vec<i32>,
     /// Object numbers of the annotations it references (OBJR).
     pub annots: Vec<i32>,
     /// 0-based page (its own /Pg or inherited).
@@ -190,6 +192,7 @@ impl Reader<'_> {
                 t.elems[p].content = true;
                 if let Some(pg) = page {
                     t.order.push((pg, k.as_int()?));
+                    t.elems[p].mcids.push(k.as_int()?);
                 }
             }
         } else if k.is_dict()? {
@@ -206,6 +209,7 @@ impl Reader<'_> {
                     let pg = self.page_of(d)?.or(page);
                     if let (Some(pg), Some(m), None) = (pg, d.get_dict("MCID")?, d.get_dict("Stm")?) {
                         t.order.push((pg, m.as_int()?));
+                        t.elems[p].mcids.push(m.as_int()?);
                     }
                 }
                 return Ok(());

@@ -1,6 +1,7 @@
 pub mod a11y;
 pub mod ai;
 pub mod annot;
+pub mod forms;
 pub mod compress;
 pub mod convert;
 pub mod diff;
@@ -820,6 +821,8 @@ pub fn run() {
             discard_scratch,
             a11y::app::a11y_check,
             a11y::app::a11y_fix,
+            a11y::app::a11y_preview,
+            a11y::app::a11y_export_report,
             annot::app::annot_default_author,
             annot::app::annot_list,
             annot::app::annot_add,
@@ -827,8 +830,20 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            forms::app::forms_list,
+            forms::app::forms_set_value,
+            forms::app::forms_reset,
+            forms::app::forms_add,
+            forms::app::forms_add_many,
+            forms::app::forms_move,
+            forms::app::forms_edit,
+            forms::app::forms_delete,
+            forms::app::forms_tab_order,
+            forms::app::forms_arrange,
+            forms::app::forms_detect,
             textedit::app::text_blocks,
             textedit::app::text_edit,
+            textedit::app::text_add,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

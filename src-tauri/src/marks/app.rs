@@ -99,12 +99,16 @@ pub struct BatesRequest {
 
 /// Numbers the files and writes a copy of each into the folder. The originals are not changed.
 #[tauri::command]
-pub async fn marks_bates_files(window: Window, reg: Reg<'_>, request: BatesRequest) -> Result<Vec<BatesFile>> {
+pub async fn marks_bates_files(window: Window, eng: Eng<'_>, reg: Reg<'_>, request: BatesRequest) -> Result<Vec<BatesFile>> {
     let label = window.label().to_string();
+    let eng = eng.inner().clone();
     let files = request.files.iter().map(|t| reg.open(&label, t)).collect::<Result<Vec<_>>>()?;
     let folder = reg.take_save(&label, &request.folder)?;
     blocking(move || {
-        let out = apply::bates_files(&files, &request.bates, request.date, std::path::Path::new(&folder))?;
+        let out = apply::bates_files(&files, &request.bates, request.date, std::path::Path::new(&folder), &|out| {
+            // A numbered copy never lands on a document that is open (a later save would corrupt it).
+            eng.check_not_open(&out.to_string_lossy(), None)
+        })?;
         let reg = window.state::<Paths>();
         reg.learn(&folder);
         for f in &out {

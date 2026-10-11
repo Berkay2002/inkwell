@@ -1348,7 +1348,7 @@ impl Engine {
     }
 
     /// An error if `path` is open in Inkwell (other than as `except`).
-    fn check_not_open(&self, path: &str, except: Option<DocId>) -> Result<()> {
+    pub(crate) fn check_not_open(&self, path: &str, except: Option<DocId>) -> Result<()> {
         let open = self.docs.read().values().any(|e| Some(e.id) != except && same_path(&e.path(), path));
         if open {
             Err(invalid("that file is open in Inkwell; close it first"))

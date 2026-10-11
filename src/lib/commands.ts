@@ -1,8 +1,10 @@
 import { type DocState, useStore } from "../store";
 import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
+import { openA11y, useA11y } from "./a11y";
 import { useRedact } from "./redact";
 import { useAnnot } from "./annot";
+import { useForms } from "./forms";
 import { useHistory } from "./historyStore";
 import { openCompareSetup } from "../components/history/HistoryPanel";
 import { pickOpen } from "./api";
@@ -12,6 +14,7 @@ import { useConvert } from "./convertStore";
 import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
 import { usePrint } from "./printStore";
+import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 
 export interface Command {
@@ -46,10 +49,32 @@ export const focusPageInput = () => {
 };
 
 export const commands: Command[] = [
+  {
+    id: "edit",
+    title: "Edit text & images",
+    keys: ["Ctrl+E"],
+    needsDoc: true,
+    run: withDoc((d) => {
+      const te = useTextEdit.getState();
+      if (d.organize) st().patch(d.id, { organize: false });
+      te.setOpen(!te.open || d.organize);
+    }),
+  },
+  {
+    id: "add-text",
+    title: "Add text box",
+    needsDoc: true,
+    run: withDoc((d) => {
+      const te = useTextEdit.getState();
+      if (d.organize) st().patch(d.id, { organize: false });
+      te.setOpen(true);
+      te.setTool("text");
+    }),
+  },
   { id: "open", title: "Open file…", keys: ["Ctrl+O"], run: () => void openDialog() },
   { id: "close", title: "Close tab", keys: ["Ctrl+W"], needsDoc: true, run: withDoc((d) => void edits.requestClose(d.id)) },
-  { id: "save", title: "Save", keys: ["Ctrl+S"], needsDoc: true, run: withDoc((d) => void edits.save(d.id)) },
-  { id: "save-as", title: "Save as…", keys: ["Ctrl+Shift+S"], needsDoc: true, run: withDoc((d) => void edits.saveAs(d.id)) },
+  { id: "save", title: "Save", keys: ["Ctrl+S"], needsDoc: true, run: withDoc((d) => void useTextEdit.getState().commit(d.id).then(() => edits.save(d.id))) },
+  { id: "save-as", title: "Save as…", keys: ["Ctrl+Shift+S"], needsDoc: true, run: withDoc((d) => void useTextEdit.getState().commit(d.id).then(() => edits.saveAs(d.id))) },
   { id: "undo", title: "Undo", keys: ["Ctrl+Z"], needsDoc: true, notInText: true, run: withDoc((d) => void edits.undo(d.id)) },
   { id: "redo", title: "Redo", keys: ["Ctrl+Y", "Ctrl+Shift+Z"], needsDoc: true, notInText: true, run: withDoc((d) => void edits.redo(d.id)) },
   {
@@ -182,8 +207,27 @@ export const commands: Command[] = [
       useHistory.getState().toggle();
     },
   },
+  {
+    id: "a11y",
+    title: "Check accessibility…",
+    needsDoc: true,
+    run: () => (useA11y.getState().open ? useA11y.getState().setOpen(false) : openA11y()),
+  },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },
+  { id: "forms", title: "Forms", keys: ["Ctrl+Alt+F"], needsDoc: true, run: () => useForms.getState().setOpen(!useForms.getState().open) },
+  {
+    id: "forms-prepare",
+    title: "Forms: prepare a form",
+    needsDoc: true,
+    run: () => useForms.getState().setAuthoring(!useForms.getState().authoring),
+  },
+  {
+    id: "forms-clear",
+    title: "Forms: clear the form",
+    needsDoc: true,
+    run: withDoc((d) => void useForms.getState().clear(d.id)),
+  },
   ...(
     [
       ["v", "select", "Select"], ["h", "highlight", "Highlight"], ["u", "underline", "Underline"], ["s", "strikeOut", "Strikethrough"],
@@ -208,6 +252,9 @@ export const commands: Command[] = [
     needsDoc: true,
     notInText: true,
     run: withDoc((d) => {
+      const f = useForms.getState();
+      const field = f.open && f.authoring ? f.get(d.id).selected : null;
+      if (field) return void f.remove(d.id, [field]);
       const a = useAnnot.getState();
       const sel = a.open ? a.get(d.id).selected : null;
       if (sel) void a.remove(d.id, [sel]);

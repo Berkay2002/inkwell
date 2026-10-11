@@ -13,7 +13,7 @@ vi.hoisted(() => {
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn(), message: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(() => Promise.resolve()), Channel: class {} }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({}) }));
-vi.mock("./edit", () => ({ save: vi.fn(), undo: vi.fn(), applyState: vi.fn(), queued: vi.fn((_id: number, f: () => Promise<unknown>) => f()) }));
+vi.mock("./edit", () => ({ setLeaveGuard: vi.fn(), save: vi.fn(), undo: vi.fn(), applyState: vi.fn(), queued: vi.fn((_id: number, f: () => Promise<unknown>) => f()) }));
 vi.mock("./api", () => ({
   marksInfo: vi.fn(),
   marksAdd: vi.fn(),
@@ -32,8 +32,10 @@ vi.mock("./api", () => ({
 import { useStore } from "../store";
 import * as api from "./api";
 import type { MarkKindInfo } from "./api";
+import { useA11y } from "./a11y";
 import { useConvert } from "./convertStore";
 import * as edits from "./edit";
+import { useForms } from "./forms";
 import {
   batesText,
   expand,
@@ -52,6 +54,7 @@ import {
   useMarks,
 } from "./marksStore";
 import { useProtect } from "./protectStore";
+import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 
 const DATE = { year: 2026, month: 10, day: 11 };
@@ -245,6 +248,23 @@ describe("the sheet", () => {
     useMarks.getState().open("watermark", 1);
     expect(useMarks.getState().sheet?.kind).toBe("watermark");
     expect(useProtect.getState().sheet).toBeNull();
+  });
+
+  it("takes the side from Forms, Edit and Accessibility, and gives it up to them", () => {
+    const rails = [
+      { set: (o: boolean) => useForms.setState({ open: o }), open: () => useForms.getState().open, toggle: () => useForms.getState().setOpen(true) },
+      { set: (o: boolean) => useTextEdit.setState({ open: o }), open: () => useTextEdit.getState().open, toggle: () => useTextEdit.getState().setOpen(true) },
+      { set: (o: boolean) => useA11y.setState({ open: o }), open: () => useA11y.getState().open, toggle: () => useA11y.getState().setOpen(true) },
+    ];
+    for (const rail of rails) {
+      rail.set(true);
+      useMarks.getState().open("watermark", 1);
+      expect(rail.open()).toBe(false);
+      expect(useMarks.getState().sheet?.kind).toBe("watermark");
+      rail.toggle();
+      expect(useMarks.getState().sheet).toBeNull();
+      rail.set(false);
+    }
   });
 
   it("starts an Update from the settings the file was made with", async () => {

@@ -415,7 +415,7 @@ fn bates_runs_across_files_and_never_overwrites() {
     std::fs::create_dir_all(&out).unwrap();
     let bates = Bates { prefix: "CASE-".into(), digits: 6, start: 98, ..Bates::default() };
     let files = vec![a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()];
-    let done = bates_files(&files, &bates, DATE, &out).unwrap();
+    let done = bates_files(&files, &bates, DATE, &out, &|_| Ok(())).unwrap();
     assert_eq!(done.len(), 2);
     assert_eq!((done[0].first, done[0].last, done[0].pages), (98, 100, 3));
     assert_eq!((done[1].first, done[1].last, done[1].pages), (101, 102, 2));
@@ -426,12 +426,41 @@ fn bates_runs_across_files_and_never_overwrites() {
     // the originals are untouched
     assert_eq!(info(&PdfDocument::open(a.to_str().unwrap()).unwrap()).unwrap(), Info::default());
     // a second run writes new names
-    let again = bates_files(&files, &bates, DATE, &out).unwrap();
+    let again = bates_files(&files, &bates, DATE, &out, &|_| Ok(())).unwrap();
     assert_ne!(again[0].output, done[0].output);
     assert!(Path::new(&done[0].output).exists());
     // running out of digits writes nothing
     let few = Bates { digits: 3, start: 998, ..bates };
     let before = std::fs::read_dir(&out).unwrap().count();
-    assert!(matches!(bates_files(&files, &few, DATE, &out), Err(EngineError::Invalid(_))));
+    assert!(matches!(bates_files(&files, &few, DATE, &out, &|_| Ok(())), Err(EngineError::Invalid(_))));
     assert_eq!(std::fs::read_dir(&out).unwrap().count(), before);
+}
+
+#[test]
+fn bates_refuses_an_output_that_is_open_before_writing_anything() {
+    let d = dir("bates-open");
+    let one = d.join("one");
+    let two = d.join("two");
+    std::fs::create_dir_all(&one).unwrap();
+    std::fs::create_dir_all(&two).unwrap();
+    // two inputs with the same file name, from different folders
+    let a = one.join("same.pdf");
+    let b = two.join("same.pdf");
+    std::fs::write(&a, fixture::build(&Fixture { pages: 1, lines: 2, ..Default::default() })).unwrap();
+    std::fs::write(&b, fixture::build(&Fixture { pages: 1, lines: 2, ..Default::default() })).unwrap();
+    let out = d.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let files = vec![a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()];
+    let bates = Bates::default();
+    // the second copy is "open": the run stops before the first is written
+    let second = out.join("same - Bates (2).pdf");
+    let refuse = |p: &Path| {
+        if p == second { Err(EngineError::Invalid("that file is open in Inkwell; close it first".into())) } else { Ok(()) }
+    };
+    assert!(matches!(bates_files(&files, &bates, DATE, &out, &refuse), Err(EngineError::Invalid(_))));
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "nothing written");
+    // without the refusal, same-named inputs get distinct copies within one run
+    let done = bates_files(&files, &bates, DATE, &out, &|_| Ok(())).unwrap();
+    assert_ne!(done[0].output, done[1].output);
+    assert!(second.exists());
 }
