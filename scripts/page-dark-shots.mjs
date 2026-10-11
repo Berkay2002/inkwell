@@ -194,7 +194,10 @@ const natN = await ev(`document.querySelectorAll(".nat-img").length`);
 report.photoOverlays = natN;
 const dark = await shot("pages-dark-light-app.png", 700);
 const darkCorner = mean(dark, corner);
-check("dark page margin is black", darkCorner.every((v) => v < 25), darkCorner);
+// paper becomes a dark grey (about #1c1c1c), not pure black, and sits above the viewer's canvas (#0e0f11)
+check("dark page margin is a dark grey", darkCorner.every((v) => v >= 22 && v <= 40), darkCorner);
+const pressed = await ev(`document.querySelector(${JSON.stringify(TOGGLE)}).getAttribute("aria-pressed")`);
+check("toggle exposes aria-pressed", pressed === "true", pressed);
 const darkTab = mean(dark, tabbar);
 check("app chrome is not inverted", dist(lightTab, darkTab) <= 3, { lightTab, darkTab });
 const nat = dev(await rectOf(".nat-img"));
@@ -212,11 +215,100 @@ await clickToggle();
 await sleep(300);
 const back = { attr: await pagesAttr(), setting: await ev(`${S}.getState().pageDark`), stored: await stored() };
 check("toggling again returns to follow in the light app", back.attr === null && back.setting === "follow", back);
-await ev(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "d", code: "KeyD", ctrlKey: true, altKey: true, bubbles: true, cancelable: true }))`);
+await ev(`document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "d", code: "KeyD", ctrlKey: true, altKey: true, bubbles: true, cancelable: true }))`);
 await sleep(300);
 check("Ctrl+Alt+D toggles dark pages", (await pagesAttr()) === "dark", await pagesAttr());
-await ev(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "d", code: "KeyD", ctrlKey: true, altKey: true, bubbles: true, cancelable: true }))`);
+await ev(`document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "d", code: "KeyD", ctrlKey: true, altKey: true, bubbles: true, cancelable: true }))`);
 await sleep(200);
+
+// ---- placement and the choice menu -----------------------------------------------------------------
+// page box | zoom out, Fit width, zoom in, rotate | dark pages
+const order = await ev(`(() => { const t = document.querySelector(".toolbar"); const all = [...t.querySelectorAll("button, select, #page-input, .dp-split")]; const idx = (s) => all.indexOf(t.querySelector(s)); return { page: idx("#page-input"), zoom: idx(".zoom-select"), rotate: all.findIndex((b) => /^Rotate/.test(b.getAttribute?.("aria-label") ?? "")), dark: idx(".dp-split") } })()`);
+report.toolbarOrder = order;
+check("dark pages sits after rotate, after the zoom group", order.page < order.zoom && order.zoom < order.rotate && order.rotate < order.dark, order);
+const clip = async (name, selector) => {
+  const r = await rectOf(selector);
+  const res = await send("Page.captureScreenshot", { format: "png", clip: { x: r.x, y: r.y, width: r.w, height: r.h, scale: 1 } });
+  fs.writeFileSync(path.join(out, name), Buffer.from(res.data, "base64"));
+  console.log("screenshot", name);
+};
+await setPages("off");
+await sleep(300);
+await clip("toolbar-normal-light-app.png", ".toolbar");
+await setPages("on");
+await sleep(300);
+await clip("toolbar-dark-light-app.png", ".toolbar");
+// the chevron opens the choice
+await ev(`document.querySelector(".dp-chev").click()`);
+await until(`document.querySelector(".ink-menu")`, "the page colours menu");
+const items = await ev(`[...document.querySelectorAll(".ink-menu button")].map((b) => ({ t: b.textContent.trim(), c: !!b.querySelector("svg") }))`);
+report.menu = items;
+check("menu offers follow, dark, normal and marks the current one", items.length === 3 && items[1].c && !items[0].c && !items[2].c, items);
+await shot("_probe.png");
+fs.rmSync(path.join(out, "_probe.png"), { force: true });
+await ev(`[...document.querySelectorAll(".ink-menu button")].find((b) => /Always normal/.test(b.textContent)).click()`);
+await sleep(300);
+check("the menu sets always normal", (await ev(`${S}.getState().pageDark`)) === "off" && (await pagesAttr()) === null, await ev(`${S}.getState().pageDark`));
+// right-click on the button opens the same menu
+await ev(`document.querySelector(".dp-split button").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))`);
+await until(`document.querySelector(".ink-menu")`, "the menu on right-click");
+await ev(`[...document.querySelectorAll(".ink-menu button")].find((b) => /Follow/.test(b.textContent)).click()`);
+await sleep(300);
+check("right-click menu sets follow", (await ev(`${S}.getState().pageDark`)) === "follow", await ev(`${S}.getState().pageDark`));
+
+// ---- Tools menu: beside the mode pill, grouped, filterable -------------------------------------------
+await setPages("follow");
+const before = await ev(`(() => { const t = document.querySelector(".toolbar"); const all = [...t.children]; const pill = all.findIndex((e) => e.classList.contains("mode-pill")); const tools = all.findIndex((e) => e.matches('button[aria-label="Tools"]')); const sep = all.findIndex((e, i) => i > tools && e.classList.contains("sep")); return { pill, tools, sep, rightTools: !!t.querySelector(".tb-cluster > button[aria-label='Tools']") } })()`);
+report.toolsPlacement = before;
+check("Tools sits right after Read | Edit | Organize, not in the right-hand cluster", before.tools === before.pill + 1 && !before.rightTools, before);
+await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
+await until(`document.querySelector(".tools-menu .tools-filter")`, "the Tools menu");
+const menu1 = await ev(`({ heads: [...document.querySelectorAll(".tools-head")].map((e) => e.textContent), items: [...document.querySelectorAll('.tools-menu [role="menuitem"]')].map((e) => e.textContent.trim()), focus: document.activeElement.className })`);
+report.toolsMenu = menu1;
+const want = ["Compress file…", "Recognize text…", "Header & footer…", "Watermark…", "Background…", "Bates numbering…", "Protect with a password…", "Security…", "Compare files…", "Check accessibility…", "Export…", "Create PDF…"];
+check("every Tools item is still there", want.every((w) => menu1.items.includes(w)), menu1.items);
+check("items sit under Optimize, Page marks, Protect, Convert & create headers", ["Optimize", "Page marks", "Protect", "Convert & create"].every((h) => menu1.heads.includes(h)), menu1.heads);
+check("the filter box has focus on open", /tools-filter/.test(menu1.focus), menu1.focus);
+await clip("tools-button-light.png", ".toolbar");
+await shot("tools-menu-light.png", 300);
+// typing narrows the list
+await ev(`(() => { const i = document.querySelector(".tools-filter"); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(i, "mark"); i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+await sleep(250);
+const narrowed = await ev(`({ heads: [...document.querySelectorAll(".tools-head")].map((e) => e.textContent), items: [...document.querySelectorAll('.tools-menu [role="menuitem"]')].map((e) => e.textContent.trim()) })`);
+report.toolsFiltered = narrowed;
+check("typing 'mark' leaves the page marks", narrowed.heads.length === 1 && narrowed.heads[0] === "Page marks" && narrowed.items.length === 4, narrowed);
+// keyboard: down arrow moves into the list, up arrow back to the filter, escape closes and returns focus
+await ev(`document.querySelector(".tools-filter").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }))`);
+const onRow = await ev(`document.activeElement.getAttribute("role")`);
+check("arrow down moves focus into the list", onRow === "menuitem", onRow);
+await ev(`document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }))`);
+check("arrow up from the first row goes back to the filter", await ev(`document.activeElement.classList.contains("tools-filter")`), null);
+await ev(`document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+await sleep(200);
+check("escape closes the menu", (await ev(`!!document.querySelector(".tools-menu")`)) === false, null);
+// an item opens its sheet
+await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
+await until(`document.querySelector(".tools-menu")`, "the menu again");
+await ev(`[...document.querySelectorAll('.tools-menu [role="menuitem"]')].find((b) => /Watermark/.test(b.textContent)).click()`);
+await sleep(700);
+check("an item runs and closes the menu", (await ev(`!!document.querySelector(".tools-menu")`)) === false, null);
+const sheetOpen = await ev(`window.__inkwell.useMarks.getState().kind ?? window.__inkwell.useMarks.getState().sheet ?? null`);
+report.sheetAfterItem = sheetOpen == null ? null : "open";
+await ev(`window.__inkwell.useMarks.getState().close()`);
+await sleep(300);
+await ev(`${S}.getState().setTheme("dark")`);
+await sleep(400);
+await clip("tools-button-dark.png", ".toolbar");
+await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
+await until(`document.querySelector(".tools-menu")`, "the menu in the dark app");
+await shot("tools-menu-dark.png", 300);
+await ev(`document.querySelector(".tools-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+await ev(`document.querySelector(".tools-filter")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+await sleep(200);
+await ev(`window.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))`);
+await sleep(200);
+await setTheme("light");
+await sleep(300);
 
 // ---- follow the app theme -----------------------------------------------------------------------
 await setTheme("dark");
@@ -225,7 +317,13 @@ check("follow + dark app: pages dark", (await pagesAttr()) === "dark", await pag
 check("setting is still follow", (await ev(`${S}.getState().pageDark`)) === "follow", null);
 const followDark = await toggleLabel();
 check("toolbar says Normal pages under follow in the dark app", followDark?.label === "Normal pages", followDark);
-await shot("pages-dark-dark-app.png", 700);
+const darkApp = await shot("pages-dark-dark-app.png", 700);
+// the viewer's canvas is the strip between the sidebar and the page; the page must sit just above it
+const pb2 = dev(await rectOf(".page"));
+const canvasPx = mean(darkApp, { x: pb2.x - 12, y: pb2.y + 300, w: 8, h: 8 });
+const pagePx = mean(darkApp, { x: pb2.x + 6, y: pb2.y + 6, w: 24, h: 24 });
+report.darkGreys = { canvasPx, pagePx };
+check("the page sits just above the app's canvas", pagePx[0] > canvasPx[0] && pagePx[0] - canvasPx[0] < 40, report.darkGreys);
 await clickToggle();
 await sleep(500);
 const toNormal = { attr: await pagesAttr(), setting: await ev(`${S}.getState().pageDark`) };

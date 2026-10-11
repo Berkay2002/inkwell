@@ -202,6 +202,8 @@ export const commands: Command[] = [
     id: "toggle-dark-pages",
     title: "Toggle dark pages",
     keys: ["Ctrl+Alt+D"],
+    // AltGr layouts send Ctrl+Alt: leave it to a text or form field
+    notInText: true,
     run: () => {
       const s = st();
       s.setPageDark(togglePageDark(s.pageDark, s.theme, window.matchMedia("(prefers-color-scheme: dark)").matches));
