@@ -401,6 +401,9 @@ fn resolve_output(input: &Path, opts: &Options) -> Result<PathBuf, Error> {
     Ok(out)
 }
 
+/// Pages the visual check may look at (0 skips it).
+pub const VISUAL_PAGES_MAX: u32 = 64;
+
 /// Resolution bounds for a downsampling class: 36 ppi is already unreadable, 2400 is above any scanner.
 const PPI: std::ops::RangeInclusive<u32> = 36..=2400;
 
@@ -425,6 +428,9 @@ fn validate(opts: &Options) -> Result<(), Error> {
     }
     if opts.transparency.flatten && !flatten::PPI.contains(&opts.transparency.ppi) {
         return bad(format!("flatten: ppi must be between {} and {}", flatten::PPI.start(), flatten::PPI.end()));
+    }
+    if opts.visual_pages > VISUAL_PAGES_MAX {
+        return bad(format!("the visual check covers 0 to {VISUAL_PAGES_MAX} pages"));
     }
     if opts.unembed_fonts.len() > 1000 || opts.unembed_fonts.iter().any(|n| n.is_empty() || n.len() > 256) {
         return bad("font names to unembed are not valid".into());
@@ -493,6 +499,24 @@ pub fn audit_file(path: &Path, password: Option<&str>) -> Result<Audit, Error> {
     audit::audit(&doc, fs::metadata(path)?.len())
 }
 
+/// The document has signatures (AcroForm /SigFlags bit 1): a rewritten copy invalidates them.
+fn is_signed(doc: &mupdf::pdf::PdfDocument) -> bool {
+    let flags = doc
+        .catalog()
+        .ok()
+        .and_then(|c| c.get_dict("AcroForm").ok().flatten())
+        .and_then(|f| f.get_dict("SigFlags").ok().flatten())
+        .and_then(|f| f.as_int().ok());
+    flags.is_some_and(|f| f & 1 != 0)
+}
+
+/// [`audit_file`], and whether the document is signed (the sheet warns before Start).
+pub fn audit_file_signed(path: &Path, password: Option<&str>) -> Result<(Audit, bool), Error> {
+    let doc = open_pdf(path, password)?;
+    let signed = is_signed(&doc);
+    Ok((audit::audit(&doc, fs::metadata(path)?.len())?, signed))
+}
+
 /// Runs the whole job on the calling thread. `cancel` is polled between pages and stages; `progress`
 /// is called often enough for a progress bar (per page while images are rewritten).
 pub fn compress(
@@ -521,13 +545,14 @@ pub fn compress(
     run.check()?;
     run.emit(Stage::Scan, 0.04, 0.0, 0, 0);
 
-    let signed = doc.catalog()?.get_dict("AcroForm")?.and_then(|f| f.get_dict("SigFlags").ok().flatten())
-        .and_then(|f| f.as_int().ok())
-        .is_some_and(|f| f & 1 != 0);
+    let signed = is_signed(&doc);
 
     // 2. Extras the user asked to drop.
     let stripped = strip::strip(&mut doc, &opts.strip, pages)?;
     run.lap("strip");
+    if stripped.links_unchecked {
+        warnings.push("The named destinations could not be read, so links were not checked.".into());
+    }
     run.check()?;
 
     // 3. Fonts that are to be unembedded, before any pass that would copy them.
@@ -541,6 +566,8 @@ pub fn compress(
         run.lap("unembed");
         u
     };
+    // The pages those fonts are used on, found before anything rewrites the page resources.
+    let restyled = fonts::pages_using(&doc, &unembedded.font_objects)?;
     run.check()?;
 
     // 4. Pages that use transparency become pictures, which the image pass below then treats like any other.
@@ -568,6 +595,7 @@ pub fn compress(
     let flat = !flattened.pages.is_empty();
 
     // 5. Images. A document without any image (or a flattened page) is left to the writer alone.
+    let (alternates, private) = strip::rewrite_losses(&doc)?;
     let mut image_stats = ImageStats::default();
     if (before.images > 0 || flat) && let Some(io) = image_options(&opts.images) {
         let (cancel, progress) = (run.cancel, &mut *run.progress);
@@ -591,6 +619,17 @@ pub fn compress(
             Err(e) => return Err(e.into()),
         }
         run.lap("images");
+    }
+    // The pass writes new objects for what it rewrites: alternates and a form's private data stay behind.
+    if image_stats.replaced > 0 && alternates + private > 0 {
+        let mut what = Vec::new();
+        if alternates > 0 {
+            what.push(format!("{alternates} image{} with alternates", if alternates == 1 { "" } else { "s" }));
+        }
+        if private > 0 {
+            what.push(format!("{private} form{} with private data", if private == 1 { "" } else { "s" }));
+        }
+        warnings.push(format!("Rewritten images lost their alternates and private data ({}).", what.join(", ")));
     }
     run.check()?;
 
@@ -654,7 +693,10 @@ pub fn compress(
         } else {
             let orig = open_pdf(input, password)?;
             let (cancel, progress) = (run.cancel, &mut *run.progress);
-            Some(visual::compare(&orig, &out_doc, opts.visual_pages as usize, cancel, |k, n| {
+            // Always look at the pages this run turned into pictures or gave another font.
+            let mut must: Vec<usize> = restyled.clone();
+            must.extend(flattened.pages.iter().map(|&p| p as usize - 1));
+            Some(visual::compare(&orig, &out_doc, opts.visual_pages as usize, &must, cancel, |k, n| {
                 progress(Progress { stage: Stage::Verify, fraction: 0.9 + 0.1 * k as f32 / n as f32, page: k as u32, pages: n as u32 });
             })?)
         };

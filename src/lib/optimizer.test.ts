@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CompressAudit, CompressOptions } from "./api";
-import { discardCount, forPreset, normalizeOptions, sameOptions, summarize, usageRows, validateOptions } from "./optimizer";
+import { discardCount, forPreset, normalizeOptions, sameOptions, summarize, usageRows, validateOptions, visualVerdict } from "./optimizer";
 
 const cls = (abovePpi: number, toPpi: number, codec: CompressOptions["images"]["color"]["codec"], quality: number) => ({
   abovePpi,
@@ -154,5 +154,24 @@ describe("helpers", () => {
     expect(rows[0].label).toBe("Images");
     expect(rows.reduce((n, r) => n + r.percent, 0)).toBe(100);
     expect(rows.reduce((n, r) => n + r.bytes, 0)).toBe(a.total);
+  });
+});
+
+describe("visualVerdict", () => {
+  it("calls a small difference the same and a middling one slight", () => {
+    expect(visualVerdict({ maxDiff: 3, psnr: 60, worstPage: 0 })).toEqual({
+      level: "same",
+      text: "Looks the same: largest difference 3 of 255.",
+    });
+    expect(visualVerdict({ maxDiff: 40, psnr: 38, worstPage: 2 }).level).toBe("slight");
+  });
+
+  it("flags a large difference, or a low PSNR, with the worst page (1-based)", () => {
+    const v = visualVerdict({ maxDiff: 255, psnr: 45, worstPage: 6 });
+    expect(v.level).toBe("different");
+    expect(v.text).toBe("Looks different, check page 7: largest difference 255 of 255.");
+    // a small peak difference over a whole page still counts when the average is poor
+    expect(visualVerdict({ maxDiff: 50, psnr: 24, worstPage: 0 }).text).toContain("check page 1");
+    expect(visualVerdict({ maxDiff: 64, psnr: 30, worstPage: 0 }).level).toBe("slight");
   });
 });

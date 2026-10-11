@@ -6,6 +6,11 @@
 //! glyph each code is. A composite (Type 0) font addresses glyphs by index in the embedded file, so
 //! without the file the text would come out as other characters. A symbolic font has no encoding a
 //! stand-in could follow.
+//!
+//! The encoding has to be one a stand-in can follow too: Standard, WinAnsi or MacRoman, alone or as the
+//! base of a /Differences list that names only standard glyphs. A list that says `g12` or `glyph34`
+//! (what a producer writes for a font it subsetted itself), and a Type 1 font with no /Encoding at all
+//! (its codes mean what its own file says), stay embedded.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -17,6 +22,67 @@ use super::Error;
 const FILES: [&str; 3] = ["FontFile", "FontFile2", "FontFile3"];
 /// FontDescriptor /Flags: bit 3 (value 4) is "symbolic".
 const SYMBOLIC: i32 = 4;
+
+/// The Adobe Latin glyph names (PDF 32000-1 Annex D.2): the glyphs every stand-in font has.
+const LATIN_GLYPHS: &str = "A AE Aacute Acircumflex Adieresis Agrave Aring Atilde B C Ccedilla D E Eacute \
+Ecircumflex Edieresis Egrave Eth Euro F G H I Iacute Icircumflex Idieresis Igrave J K L Lslash M N Ntilde O \
+OE Oacute Ocircumflex Odieresis Ograve Oslash Otilde P Q R S Scaron T Thorn U Uacute Ucircumflex Udieresis \
+Ugrave V W X Y Yacute Ydieresis Z Zcaron a aacute acircumflex acute adieresis ae agrave ampersand aring \
+asciicircum asciitilde asterisk at atilde b backslash bar braceleft braceright bracketleft bracketright \
+breve brokenbar bullet c caron ccedilla cedilla cent circumflex colon comma copyright currency d dagger \
+daggerdbl degree dieresis divide dollar dotaccent dotlessi e eacute ecircumflex edieresis egrave eight \
+ellipsis emdash endash equal eth exclam exclamdown f fi five fl florin four fraction g germandbls grave \
+greater guillemotleft guillemotright guilsinglleft guilsinglright h hungarumlaut hyphen i iacute \
+icircumflex idieresis igrave j k l less logicalnot lslash m macron minus mu multiply n nine ntilde \
+numbersign o oacute ocircumflex odieresis oe ogonek ograve one onehalf onequarter onesuperior \
+ordfeminine ordmasculine oslash otilde p paragraph parenleft parenright percent period periodcentered \
+perthousand plus plusminus q question questiondown quotedbl quotedblbase quotedblleft quotedblright \
+quoteleft quoteright quotesinglbase quotesingle r registered ring s scaron section semicolon seven six \
+slash space sterling t thorn three threequarters threesuperior tilde trademark two twosuperior u uacute \
+ucircumflex udieresis ugrave underscore v w x y yacute ydieresis yen z zcaron zero .notdef";
+
+const STANDARD_ENCODINGS: [&str; 3] = ["StandardEncoding", "WinAnsiEncoding", "MacRomanEncoding"];
+
+/// Why a replacement font could not follow this font's codes; None when it can.
+fn encoding_problem(font: &PdfObject, kind: &str) -> Option<String> {
+    let enc = font.get_dict("Encoding").ok().flatten();
+    let Some(enc) = enc else {
+        // A TrueType font with no /Encoding and no symbolic flag is read as Standard; a Type 1 font's
+        // codes mean whatever its own file's built-in encoding says.
+        return (kind != "TrueType").then(|| "It has no /Encoding: its codes mean what its own file says".to_string());
+    };
+    let standard = |n: &PdfObject| n.as_name().ok().and_then(|b| String::from_utf8(b).ok()).is_some_and(|s| STANDARD_ENCODINGS.contains(&s.as_str()));
+    if enc.is_name().unwrap_or(false) {
+        return (!standard(&enc)).then(|| "Its encoding is not Standard, WinAnsi or MacRoman".to_string());
+    }
+    if !enc.is_dict().unwrap_or(false) {
+        return Some("Its encoding could not be read".to_string());
+    }
+    if let Ok(Some(base)) = enc.get_dict("BaseEncoding")
+        && !standard(&base)
+    {
+        return Some("Its base encoding is not Standard, WinAnsi or MacRoman".to_string());
+    }
+    let Ok(Some(diffs)) = enc.get_dict("Differences") else { return None };
+    if !diffs.is_array().unwrap_or(false) {
+        return Some("Its /Differences list could not be read".to_string());
+    }
+    let latin: HashSet<&str> = LATIN_GLYPHS.split_whitespace().collect();
+    for i in 0..diffs.len().unwrap_or(0) as i32 {
+        let Ok(Some(item)) = diffs.get_array(i) else { continue };
+        if !item.is_name().unwrap_or(false) {
+            continue;
+        }
+        let name = item.as_name().ok().and_then(|b| String::from_utf8(b).ok());
+        if name.as_deref().is_none_or(|n| !latin.contains(n)) {
+            return Some(format!(
+                "Its encoding names glyph \"{}\", which a replacement font may not have",
+                name.unwrap_or_default()
+            ));
+        }
+    }
+    None
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,6 +190,8 @@ pub fn list(doc: &PdfDocument) -> Result<Vec<FontUsage>, Error> {
             (false, Some("A composite font addresses glyphs by position in its file".to_string()))
         } else if flags.is_none_or(|fl| fl & SYMBOLIC != 0) {
             (false, Some("A symbolic font has no encoding a replacement could follow".to_string()))
+        } else if let Some(why) = encoding_problem(&f.font, &f.kind) {
+            (false, Some(why))
         } else {
             (true, None)
         };
@@ -166,6 +234,9 @@ pub struct Unembedded {
     pub bytes: u64,
     /// Requested names that were skipped, with the reason.
     pub skipped: Vec<(String, String)>,
+    /// Object numbers of the font dictionaries that lost their file (to find the pages that show them).
+    #[serde(skip)]
+    pub font_objects: Vec<i32>,
 }
 
 /// Drops the embedded file of every listed font that may lose it, and the subset tag from its name
@@ -198,6 +269,11 @@ pub fn unembed(doc: &mut PdfDocument, names: &[String], all: bool) -> Result<Une
             continue;
         }
         let mut font = f.font;
+        if let Ok(n) = font.as_indirect()
+            && n > 0
+        {
+            done.font_objects.push(n);
+        }
         if let Some(mut d) = f.desc {
             let first_time = d.as_indirect().ok().filter(|&n| n > 0).is_none_or(|n| seen.insert(n));
             if first_time {
@@ -220,4 +296,59 @@ pub fn unembed(doc: &mut PdfDocument, names: &[String], all: bool) -> Result<Une
         }
     }
     Ok(done)
+}
+
+fn shows(res: &PdfObject, want: &HashSet<i32>, seen: &mut HashSet<i32>, depth: usize) -> bool {
+    if depth > 8 || !res.is_dict().unwrap_or(false) {
+        return false;
+    }
+    if let Ok(Some(fonts)) = res.get_dict("Font")
+        && fonts.is_dict().unwrap_or(false)
+    {
+        for i in 0..fonts.dict_len().unwrap_or(0) as i32 {
+            if let Ok(Some(v)) = fonts.get_dict_val(i)
+                && v.as_indirect().is_ok_and(|n| want.contains(&n))
+            {
+                return true;
+            }
+        }
+    }
+    let mut nested: Vec<PdfObject> = Vec::new();
+    for key in ["XObject", "Pattern"] {
+        let Ok(Some(d)) = res.get_dict(key) else { continue };
+        if !d.is_dict().unwrap_or(false) {
+            continue;
+        }
+        for i in 0..d.dict_len().unwrap_or(0) as i32 {
+            let Ok(Some(v)) = d.get_dict_val(i) else { continue };
+            if let Ok(n) = v.as_indirect()
+                && n > 0
+                && !seen.insert(n)
+            {
+                continue;
+            }
+            if let Ok(Some(r)) = v.get_dict("Resources") {
+                nested.push(r);
+            }
+        }
+    }
+    nested.iter().any(|r| shows(r, want, seen, depth + 1))
+}
+
+/// Zero-based indexes of the pages whose text is set in one of the given font dictionaries (directly or
+/// through a form or pattern): what a stand-in font changes, so the visual check always looks at them.
+pub fn pages_using(doc: &PdfDocument, font_objects: &[i32]) -> Result<Vec<usize>, Error> {
+    if font_objects.is_empty() {
+        return Ok(Vec::new());
+    }
+    let want: HashSet<i32> = font_objects.iter().copied().collect();
+    let mut out = Vec::new();
+    for i in 0..doc.page_count()? {
+        let page = doc.find_page(i)?;
+        let Ok(Some(res)) = page.get_dict_inheritable("Resources") else { continue };
+        if shows(&res, &want, &mut HashSet::new(), 0) {
+            out.push(i as usize);
+        }
+    }
+    Ok(out)
 }

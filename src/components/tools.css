@@ -149,6 +149,14 @@
   background: var(--ax-bubble);
   border-radius: var(--ax-r-sm);
 }
+/* the visual check found a page that no longer matches */
+.tl-bad {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--ax-r-sm);
+}
 
 /* fields */
 .tl-seg {

@@ -2,7 +2,7 @@ import { useAi } from "../lib/aiStore";
 import type { CompressEstimate, CompressPreset } from "../lib/api";
 import * as edits from "../lib/edit";
 import { parseRange } from "../lib/pageRange";
-import { validateOptions } from "../lib/optimizer";
+import { validateOptions, visualVerdict } from "../lib/optimizer";
 import { fileName, formatBytes, type OcrScope, type Sheet, useTools } from "../lib/toolsStore";
 import type { DocState } from "../store";
 import { Icon } from "./Icons";
@@ -110,6 +110,9 @@ function CompressOptions({ sheet }: { sheet: Sheet }) {
         </p>
         {sheet.needsSave && <p className="dim small">This document has unsaved changes. They are saved first.</p>}
         {a?.outputExists && <p className="dim small">The usual name is taken; you will be asked for another one.</p>}
+        {a?.signed && (
+          <p className="tl-warn small">This document is signed. The compressed copy is a new file: its signatures will not be valid.</p>
+        )}
       </div>
       <div className="tl-foot">
         {advanced && <AdvancedEstimate sheet={sheet} />}
@@ -170,13 +173,14 @@ function CompressDone({ sheet }: { sheet: Sheet }) {
           </p>
         )}
         {r.before && r.after && <UsageChange before={r.before} after={r.after} />}
-        <p className="dim">
-          {v == null
-            ? "The visual check was skipped."
-            : v.maxDiff <= 8
-              ? `Looks the same: largest difference ${Math.round(v.maxDiff)} of 255.`
-              : `Slightly different: largest difference ${Math.round(v.maxDiff)} of 255.`}
-        </p>
+        {v == null ? (
+          <p className="dim">The visual check was skipped.</p>
+        ) : (
+          (() => {
+            const verdict = visualVerdict(v);
+            return <p className={verdict.level === "different" ? "tl-bad" : "dim"}>{verdict.text}</p>;
+          })()
+        )}
         <p className="dim small tl-file" title={r.output}>
           {fileName(r.output)}
         </p>

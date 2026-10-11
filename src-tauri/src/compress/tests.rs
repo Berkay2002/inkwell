@@ -57,7 +57,7 @@ fn open(p: &Path) -> Document {
 }
 
 fn diff(a: &Path, b: &Path, pages: usize) -> VisualCheck {
-    visual::compare(&open(a), &open(b), pages, &AtomicBool::new(false), |_, _| {}).unwrap()
+    visual::compare(&open(a), &open(b), pages, &[], &AtomicBool::new(false), |_, _| {}).unwrap()
 }
 
 fn text(p: &Path) -> Vec<String> {
@@ -1085,6 +1085,208 @@ fn unembed_takes_out_only_the_fonts_that_can_go() {
     let r = run(&input, &o).unwrap();
     assert_eq!(r.unembedded.files, 0);
     assert!(r.unembedded.skipped[0].1.contains("No such font"));
+}
+
+/// Fonts that differ only in their /Encoding: three a replacement can follow, three it cannot.
+fn encoding_sink(path: &Path) {
+    let mut doc = PdfDocument::from_bytes(&fixture::build(&fixture::Fixture { pages: 1, chapter_every: 0, needle_every: 0, lines: 4 })).unwrap();
+    let mut seed = 11u32;
+    let mut font = |doc: &mut PdfDocument, name: &str, subtype: &str, encoding: &str| -> PdfObject {
+        let bytes: Vec<u8> = (0..3_000).map(|_| lcg(&mut seed) as u8).collect();
+        let dict = doc.new_object_from_str("<< >>").unwrap();
+        let file = doc.add_stream(&mupdf::Buffer::from_bytes(&bytes).unwrap(), Some(&dict), false).unwrap();
+        let desc = add(
+            doc,
+            &format!(
+                "<< /Type /FontDescriptor /FontName /{name} /Flags 32 /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 {} 0 R >>",
+                xref_of(&file)
+            ),
+        );
+        add(doc, &format!("<< /Type /Font /Subtype /{subtype} /BaseFont /{name} {encoding} /FontDescriptor {} 0 R >>", xref_of(&desc)))
+    };
+    let list = [
+        ("FineDiffs", "Type1", "/Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [ 65 /eacute /Euro 70 /space ] >>"),
+        ("FineMac", "Type1", "/Encoding /MacRomanEncoding"),
+        ("FineBare", "TrueType", ""),
+        ("OddGlyphs", "TrueType", "/Encoding << /Type /Encoding /Differences [ 1 /g12 /glyph34 ] >>"),
+        ("OddBare", "Type1", ""),
+        ("OddExpert", "Type1", "/Encoding /MacExpertEncoding"),
+    ];
+    let mut objs = Vec::new();
+    for (name, subtype, enc) in list {
+        objs.push((name, font(&mut doc, name, subtype, enc)));
+    }
+    let res = doc.find_page(0).unwrap().get_dict("Resources").unwrap().unwrap();
+    let mut fonts = res.get_dict("Font").unwrap().unwrap();
+    for (name, o) in objs {
+        fonts.dict_put(name, o).unwrap();
+    }
+    doc.save(path.to_str().unwrap()).unwrap();
+}
+
+#[test]
+fn unembed_leaves_fonts_whose_encoding_a_replacement_cannot_follow() {
+    let s = Scratch::new();
+    let input = s.path("encodings.pdf");
+    encoding_sink(&input);
+    let a = audit_file(&input, None).unwrap();
+    let row = |n: &str| a.font_list.iter().find(|f| f.name == n).cloned().unwrap_or_else(|| panic!("no font {n}: {:?}", a.font_list));
+    for n in ["FineDiffs", "FineMac", "FineBare"] {
+        let f = row(n);
+        assert!(f.embedded && f.can_unembed, "{f:?}");
+    }
+    let why = |n: &str| {
+        let f = row(n);
+        assert!(f.embedded && !f.can_unembed, "{f:?}");
+        f.why_not.unwrap()
+    };
+    assert!(why("OddGlyphs").contains("g12"), "{}", why("OddGlyphs"));
+    assert!(why("OddBare").contains("no /Encoding"), "{}", why("OddBare"));
+    assert!(why("OddExpert").contains("not Standard, WinAnsi or MacRoman"), "{}", why("OddExpert"));
+
+    // "every font that can be" takes exactly the three, and the page that shows them is listed
+    let mut o = Options::preset(Preset::Balanced);
+    o.unembed_all = true;
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.unembedded.files, 3, "{:?}", r.unembedded);
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    assert_eq!(r.unembedded.font_objects.len(), 3);
+    let doc = open_pdf(&input, None).unwrap();
+    assert_eq!(fonts::pages_using(&doc, &r.unembedded.font_objects).unwrap(), vec![0]);
+    assert!(fonts::pages_using(&doc, &[]).unwrap().is_empty());
+    let after = audit_file(&r.output, None).unwrap();
+    assert_eq!(after.font_list.iter().filter(|f| f.embedded).count(), 3);
+
+    // naming one of the others says why it stayed
+    let mut o = Options::preset(Preset::Balanced);
+    o.unembed_fonts = vec!["OddGlyphs".into()];
+    o.output = Some(s.path("named.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.unembedded.files, 0);
+    assert!(r.warnings.iter().any(|w| w.contains("OddGlyphs stays embedded") && w.contains("g12")), "{:?}", r.warnings);
+}
+
+#[test]
+fn the_visual_check_always_includes_the_pages_the_run_changed() {
+    // the sample spreads over the document; flattened pages and pages in a changed font are added to it
+    assert_eq!(visual::picks_for(100, 3, &[]), vec![0, 49, 99]);
+    assert_eq!(visual::picks_for(100, 3, &[10, 10, 55, 200]), vec![0, 10, 49, 55, 99]);
+    // a run that changed hundreds of pages does not render hundreds of them
+    let many: Vec<usize> = (0..400).collect();
+    let picks = visual::picks_for(400, 8, &many);
+    assert!(picks.len() <= 8 + 24, "{}", picks.len());
+    assert!(picks.windows(2).all(|w| w[0] < w[1]));
+
+    // end to end: a one-page sample still looks at both pages that were flattened
+    let s = Scratch::new();
+    let input = s.path("transparent.pdf");
+    transparent_sink(&input, false);
+    let mut o = Options::preset(Preset::Balanced);
+    o.transparency.flatten = true;
+    o.visual_pages = 1;
+    o.output = Some(s.path("flat.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.flattened.pages, vec![1, 2], "{:?}", r.flattened);
+    let v = r.visual.expect("visual check ran");
+    assert_eq!(v.per_page.iter().map(|p| p.page).collect::<Vec<_>>(), vec![0, 1]);
+
+    // the number of pages the check may cover is bounded
+    let mut o = Options::preset(Preset::Balanced);
+    o.visual_pages = 65;
+    assert!(matches!(run(&input, &o), Err(Error::InvalidOptions(_))));
+}
+
+/// A document whose form fields point at each other, with one parent listed many times.
+fn looping_form(path: &Path) {
+    let mut doc = PdfDocument::from_bytes(&fixture::build(&fixture::Fixture { pages: 1, chapter_every: 0, needle_every: 0, lines: 4 })).unwrap();
+    let a = add(&mut doc, "<< /FT /Tx /T (a) >>");
+    let b = add(&mut doc, &format!("<< /T (b) /Parent {} 0 R >>", xref_of(&a)));
+    let (xa, xb) = (xref_of(&a), xref_of(&b));
+    let wide: Vec<String> = (0..300).map(|_| format!("{xa} 0 R")).collect();
+    put(&doc, b, "Kids", &format!("[{}]", wide.join(" ")));
+    put(&doc, a, "Kids", &format!("[{xb} 0 R {xa} 0 R]"));
+    let acro = doc.new_object_from_str(&format!("<< /Fields [{xa} 0 R {xa} 0 R] >>")).unwrap();
+    doc.catalog().unwrap().dict_put("AcroForm", acro).unwrap();
+    doc.save(path.to_str().unwrap()).unwrap();
+}
+
+#[test]
+fn the_audit_walks_a_looping_field_tree_once() {
+    let s = Scratch::new();
+    let input = s.path("loop.pdf");
+    looping_form(&input);
+    let t = Instant::now();
+    let a = audit_file(&input, None).unwrap();
+    assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+    let size = fs::metadata(&input).unwrap().len();
+    assert_eq!(a.categories.iter().map(|c| c.bytes).sum::<u64>(), size);
+    assert!(a.bytes(Category::Forms) > 0);
+}
+
+#[test]
+fn rewritten_images_say_when_they_lost_their_alternates() {
+    let s = Scratch::new();
+    let sink = s.path("sink.pdf");
+    kitchen_sink(&sink);
+
+    // images left as they are: the image pass does not run, nothing is lost, nothing is said
+    let mut o = keep_images();
+    o.output = Some(s.path("kept.pdf"));
+    let r = run(&sink, &o).unwrap();
+    assert_eq!(r.images.replaced, 0);
+    assert!(!r.warnings.iter().any(|w| w.contains("alternates")), "{:?}", r.warnings);
+
+    // the pass runs: whatever it replaced took the alternates and the form's private data with it
+    let mut o = Options::preset(Preset::Balanced);
+    o.images.color = ImageClass { above_ppi: 36, to_ppi: 36, codec: Codec::Jpeg, quality: 50 };
+    o.images.only_if_smaller = false;
+    o.output = Some(s.path("rewritten.pdf"));
+    let r = run(&sink, &o).unwrap();
+    println!("images: {:?}; warnings {:?}", r.images, r.warnings);
+    assert!(r.images.replaced > 0, "{:?}", r.images);
+    assert!(
+        r.warnings.iter().any(|w| w.starts_with("Rewritten images lost their alternates and private data")),
+        "{:?}",
+        r.warnings
+    );
+
+    // what the user already asked to drop is not reported as lost
+    let mut o2 = o.clone();
+    o2.strip.alternate_images = true;
+    o2.strip.private_data = true;
+    o2.output = Some(s.path("dropped.pdf"));
+    let r = run(&sink, &o2).unwrap();
+    assert!(!r.warnings.iter().any(|w| w.contains("alternates")), "{:?}", r.warnings);
+}
+
+#[test]
+fn a_preset_file_is_read_with_care() {
+    let s = Scratch::new();
+    let dir = s.path("data");
+    fs::create_dir_all(&dir).unwrap();
+
+    // more than 1 MB is not one of ours
+    fs::write(dir.join(presets::FILE), vec![b' '; 2 << 20]).unwrap();
+    assert!(presets::load(&dir).is_empty());
+
+    // a check count out of range comes back clamped, not lost
+    let _ = fs::remove_file(dir.join(presets::FILE));
+    let mut o = Options::preset(Preset::Custom);
+    o.visual_pages = 5;
+    presets::save(&dir, "Few", &o).unwrap();
+    let text = fs::read_to_string(dir.join(presets::FILE)).unwrap().replace("\"visualPages\": 5", "\"visualPages\": 5000");
+    assert!(text.contains("5000"), "{text}");
+    fs::write(dir.join(presets::FILE), text).unwrap();
+    let back = presets::load(&dir);
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].options.visual_pages, VISUAL_PAGES_MAX);
+
+    // saving never leaves a temporary file beside it
+    presets::save(&dir, "Second", &Options::preset(Preset::Custom)).unwrap();
+    let mut left: Vec<String> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    left.sort();
+    assert_eq!(left, vec![presets::FILE.to_string()]);
 }
 
 /// A page whose graphics state is partly transparent, and one that is not.

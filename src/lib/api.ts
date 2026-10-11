@@ -533,6 +533,8 @@ export interface CompressAuditReply {
   size: number;
   defaultOutput: string;
   outputExists: boolean;
+  /** The document carries signatures; the compressed copy invalidates them. */
+  signed: boolean;
 }
 
 /** Predicted size per preset, from recompressing a sample of the file's images. */
@@ -561,8 +563,9 @@ export interface CompressReport {
   savedPercent: number;
   keptOriginal: boolean;
   pages: number;
-  /** Render comparison of before and after (8 pages at most); null when skipped. */
-  visual: { maxDiff: number; meanDiff: number; psnr: number } | null;
+  /** Render comparison of before and after (the sampled pages, plus every page the run flattened or gave
+   *  another font); null when skipped. `worstPage` is zero-based. */
+  visual: { maxDiff: number; meanDiff: number; psnr: number; worstPage: number; pagesChecked: number; pagesTotal: number } | null;
   warnings: string[];
   before: CompressAudit;
   after: CompressAudit;

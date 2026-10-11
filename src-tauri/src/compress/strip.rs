@@ -43,6 +43,8 @@ pub struct StripReport {
     pub private_data: u32,
     pub links: u32,
     pub invalid_links: u32,
+    /// Invalid links were asked for but the named destinations could not be read, so none were judged.
+    pub links_unchecked: bool,
 }
 
 impl StripReport {
@@ -144,7 +146,9 @@ pub(crate) fn strip(doc: &mut PdfDocument, s: &Strip, pages: usize) -> Result<St
         }
     }
 
-    let named = if s.invalid_links { Some(Dests::load(doc)?) } else { None };
+    // A name tree that cannot be read is not an empty one: every named link would look broken.
+    let named = if s.invalid_links { Dests::load(doc)? } else { None };
+    r.links_unchecked = s.invalid_links && named.is_none();
     if s.metadata || s.thumbnails || s.javascript || s.embedded_files || s.links || s.invalid_links || s.private_data {
         for i in 0..pages {
             let mut page = doc.find_page(i as i32)?;
@@ -202,6 +206,26 @@ pub(crate) fn strip(doc: &mut PdfDocument, s: &Strip, pages: usize) -> Result<St
     Ok(r)
 }
 
+/// What MuPDF's image pass is about to lose: image XObjects that carry `/Alternates` and form XObjects
+/// that carry `/PieceInfo` (the pass writes new objects for the images and forms it rewrites). Counted
+/// after the strip step, so what the user asked to drop is not reported again.
+pub(crate) fn rewrite_losses(doc: &PdfDocument) -> Result<(u32, u32), Error> {
+    let (mut alternates, mut private) = (0u32, 0u32);
+    for x in 1..doc.xref_len()? {
+        let Ok(o) = doc.new_indirect(x as i32, 0) else { continue };
+        if !matches!(o.resolve(), Ok(Some(v)) if v.is_dict().unwrap_or(false)) || !o.is_stream().unwrap_or(false) {
+            continue;
+        }
+        if is_name(&o, "Subtype", b"Image") && o.get_dict("Alternates").ok().flatten().is_some() {
+            alternates += 1;
+        }
+        if is_name(&o, "Subtype", b"Form") && o.get_dict("PieceInfo").ok().flatten().is_some() {
+            private += 1;
+        }
+    }
+    Ok((alternates, private))
+}
+
 /// The three action types that talk to a form.
 fn is_form_action(a: &PdfObject) -> bool {
     a.is_dict().unwrap_or(false)
@@ -239,12 +263,20 @@ struct Dests {
 }
 
 impl Dests {
-    fn load(doc: &PdfDocument) -> Result<Self, Error> {
+    /// None when the `/Names` tree is there but cannot be read.
+    fn load(doc: &PdfDocument) -> Result<Option<Self>, Error> {
         let catalog = doc.catalog()?;
         let old = catalog.get_dict("Dests")?.filter(|d| d.is_dict().unwrap_or(false));
         let has_tree = catalog.get_dict("Names")?.and_then(|n| n.get_dict("Dests").ok().flatten()).is_some();
-        let tree = if has_tree { doc.load_name_tree(PdfObject::new_name("Dests")?).ok() } else { None };
-        Ok(Self { old, tree })
+        let tree = if has_tree {
+            match doc.load_name_tree(PdfObject::new_name("Dests")?) {
+                Ok(t) => Some(t),
+                Err(_) => return Ok(None),
+            }
+        } else {
+            None
+        };
+        Ok(Some(Self { old, tree }))
     }
 
     /// The destination a name or string stands for, if the document defines it.

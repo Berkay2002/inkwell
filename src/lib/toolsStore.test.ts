@@ -40,6 +40,7 @@ const audit = (outputExists = false) => ({
   size: 8_400_000,
   defaultOutput: "C:\\d\\a (compressed).pdf",
   outputExists,
+  signed: false,
 });
 const estimates = [
   { preset: "smallest", bytes: 900_000, low: 800_000, high: 1_200_000 },

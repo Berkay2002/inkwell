@@ -152,7 +152,36 @@ export const DISCARD: { key: keyof CompressOptions["strip"]; label: string; hint
   { key: "javascript", label: "JavaScript actions", hint: "Document, page and field scripts" },
   { key: "bookmarks", label: "Bookmarks", hint: "The outline tree" },
   { key: "formActions", label: "Form submit, reset and import actions", hint: "Fields keep their values" },
-  { key: "alternateImages", label: "Alternate images", hint: "Print and web variants kept next to an image" },
-  { key: "privateData", label: "Private data of other applications", hint: "What authoring tools left behind" },
+  {
+    key: "alternateImages",
+    label: "Alternate images",
+    hint: "Print and web variants kept next to an image. Images that are rewritten lose theirs anyway",
+  },
+  {
+    key: "privateData",
+    label: "Private data of other applications",
+    hint: "What authoring tools left behind. Forms that are rewritten with their images lose theirs anyway",
+  },
   { key: "links", label: "All links", hint: "Every link annotation" },
 ];
+
+/** How the result compares with the original after the render check. */
+export type VisualLevel = "same" | "slight" | "different";
+
+/** Largest per-channel difference up to which a page counts as unchanged (of 255). */
+export const VISUAL_SAME_MAX = 8;
+/** Above this difference, or below [`VISUAL_PSNR_MIN`], the copy is flagged for a look. */
+export const VISUAL_DIFFERENT_MAX = 64;
+export const VISUAL_PSNR_MIN = 30;
+
+export function visualVerdict(v: { maxDiff: number; psnr: number; worstPage?: number }): { level: VisualLevel; text: string } {
+  const diff = Math.round(v.maxDiff);
+  if (v.maxDiff > VISUAL_DIFFERENT_MAX || v.psnr < VISUAL_PSNR_MIN) {
+    return {
+      level: "different",
+      text: `Looks different, check page ${(v.worstPage ?? 0) + 1}: largest difference ${diff} of 255.`,
+    };
+  }
+  if (v.maxDiff > VISUAL_SAME_MAX) return { level: "slight", text: `Slightly different: largest difference ${diff} of 255.` };
+  return { level: "same", text: `Looks the same: largest difference ${diff} of 255.` };
+}

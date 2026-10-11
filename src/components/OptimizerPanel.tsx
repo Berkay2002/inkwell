@@ -51,7 +51,7 @@ export function Advanced({ sheet }: { sheet: Sheet }) {
           checked={o.unembedAll}
           onChange={(v) => set((x) => ({ ...x, unembedAll: v }))}
           label="Unembed every font that can be"
-          hint="Viewers draw such text with a similar font they have"
+          hint="Such text is replaced by a similar font the viewer has; its look and line widths can change"
         />
         <FontList sheet={sheet} o={o} />
       </Section>
@@ -61,7 +61,7 @@ export function Advanced({ sheet }: { sheet: Sheet }) {
           checked={o.transparency.flatten}
           onChange={(v) => set((x) => ({ ...x, transparency: { ...x.transparency, flatten: v } }))}
           label="Flatten pages that use transparency"
-          hint="Each such page becomes one picture: its text can no longer be selected"
+          hint="Each such page becomes one picture: its text can no longer be selected, and layers and tags on those pages are lost"
         />
         {o.transparency.flatten && (
           <label className="tl-inline">

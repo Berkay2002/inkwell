@@ -49,21 +49,40 @@ pub(crate) fn sample_pages(total: usize, limit: usize) -> Vec<usize> {
     (0..limit).map(|i| i * (total - 1) / (limit - 1)).collect()
 }
 
+/// Most pages added to the sample because the run changed them (flattened, or set in an unembedded font).
+const MUST_MAX: usize = 24;
+
+/// The evenly spread sample plus `must` (zero-based; spread down to [`MUST_MAX`] when there are more).
+pub(crate) fn picks_for(total: usize, limit: usize, must: &[usize]) -> Vec<usize> {
+    let mut picks = sample_pages(total, limit);
+    let mut m: Vec<usize> = must.iter().copied().filter(|&p| p < total).collect();
+    m.sort_unstable();
+    m.dedup();
+    if m.len() > MUST_MAX {
+        m = (0..MUST_MAX).map(|i| m[i * (m.len() - 1) / (MUST_MAX - 1)]).collect();
+    }
+    picks.extend(m);
+    picks.sort_unstable();
+    picks.dedup();
+    picks
+}
+
 fn render(doc: &Document, page: usize) -> Result<mupdf::Pixmap, Error> {
     let p = doc.load_page(page as i32)?;
     Ok(p.to_pixmap(&Matrix::new_scale(SCALE, SCALE), &Colorspace::device_rgb(), false, false)?)
 }
 
-/// Compares `limit` evenly spread pages of two already-open documents.
+/// Compares `limit` evenly spread pages of two already-open documents, and the pages in `must` besides.
 pub(crate) fn compare(
     a: &Document,
     b: &Document,
     limit: usize,
+    must: &[usize],
     cancel: &AtomicBool,
     mut tick: impl FnMut(usize, usize),
 ) -> Result<VisualCheck, Error> {
     let total = a.page_count()? as usize;
-    let picks = sample_pages(total, limit);
+    let picks = picks_for(total, limit, must);
     let (mut max_all, mut sum_abs, mut sum_sq, mut count) = (0u8, 0f64, 0f64, 0f64);
     let mut per_page = Vec::with_capacity(picks.len());
     let mut worst = (0usize, 0.0f64);

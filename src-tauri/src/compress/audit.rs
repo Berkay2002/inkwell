@@ -181,10 +181,16 @@ pub(crate) fn audit(doc: &PdfDocument, file_size: u64) -> Result<Audit, Error> {
         if let Ok(Some(form)) = catalog.get_dict("AcroForm") {
             mark(&mut cat, indirect_num(&form), Category::Forms);
             let mut stack: Vec<PdfObject> = Vec::new();
+            // A field reachable twice (a /Kids loop, or one parent listed many times) is walked once.
+            let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
             if let Ok(Some(fields)) = form.get_dict("Fields") {
                 mark(&mut cat, indirect_num(&fields), Category::Forms);
                 if fields.is_array().unwrap_or(false) {
-                    stack.extend(fields.array_iter()?.flatten());
+                    for f in fields.array_iter()?.flatten() {
+                        if indirect_num(&f).is_none_or(|x| seen.insert(x)) {
+                            stack.push(f);
+                        }
+                    }
                 }
             }
             let mut visited = 0usize;
@@ -200,7 +206,11 @@ pub(crate) fn audit(doc: &PdfDocument, file_size: u64) -> Result<Audit, Error> {
                 }
                 if let Ok(Some(kids)) = f.get_dict("Kids") {
                     if kids.is_array().unwrap_or(false) {
-                        stack.extend(kids.array_iter()?.flatten());
+                        for k in kids.array_iter()?.flatten() {
+                            if indirect_num(&k).is_none_or(|x| seen.insert(x)) {
+                                stack.push(k);
+                            }
+                        }
                     }
                 }
             }
