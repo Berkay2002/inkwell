@@ -17,6 +17,7 @@ use mupdf::color::AnnotationColor;
 use mupdf::pdf::{AnnotationFlags, LineEndingStyle, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject};
 use mupdf::{Point, Quad, Rect};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 pub mod app;
 #[cfg(test)]
@@ -279,33 +280,234 @@ fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
     })
 }
 
+/// Annotations loaded for one document by [`list`]: past this the rest of the pages are left out
+/// and the list says so (`incomplete`).
+const MAX_LOADED: usize = 50_000;
+/// Entries [`AnnotWalk`] charges in one document: an indirect object an earlier array listed too, and
+/// every direct entry. The first sight of an indirect object is not counted.
+const MAX_SCANNED: usize = 2_000_000;
+
+/// The comments of a document, and whether some were left out (past [`MAX_LOADED`] annotations or
+/// [`MAX_SCANNED`] repeated array entries).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotList {
+    pub items: Vec<AnnotDto>,
+    pub incomplete: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Which {
+    /// Everything MuPDF puts in `page.annotations()`: not links, popups or widgets.
+    Comments,
+    /// What `page.widgets()` returns.
+    Widgets,
+}
+
+/// The annotations a page brings that no earlier page had.
+pub(crate) struct Fresh {
+    /// Their object numbers.
+    pub nums: HashSet<i32>,
+    /// The page has annotation dictionaries written inline (object number 0), which are never shared.
+    pub direct: bool,
+    /// Annotations loading the page makes (every dictionary in `/Annots` but links and popups).
+    pub loaded: usize,
+}
+
+/// Which pages have annotations that still need listing, read from the page dictionaries alone.
+/// Loading a page makes MuPDF create every annotation in its `/Annots`, so a document whose pages
+/// share one array (or list the same objects) costs pages x annotations if every page is loaded.
+/// An object is assigned to the first page that has it, or to the page its `/P` names when that
+/// page has it too. Pages that bring nothing new are not loaded.
+///
+/// Known limit: a dictionary that two pages list through different arrays, with no `/P` naming the
+/// later one, belongs to the first page only. The later page still draws it, but it is not listed
+/// or selectable there (and a widget is not fillable there).
+#[derive(Default)]
+pub(crate) struct AnnotWalk {
+    arrays: HashSet<i32>,
+    seen: HashSet<i32>,
+    /// Page objects walked: a page listed several times in `/Kids` is one object, one walk.
+    pages: HashSet<i32>,
+    /// What each indirect entry met so far is, so that meeting it again costs no dictionary read.
+    class: HashMap<i32, Class>,
+    /// What an owner page's array lists, read once per array (by object number when it is indirect).
+    listed: HashMap<ListKey, HashSet<i32>>,
+    scanned: usize,
+    /// The scan cap was hit: pages from then on are left out.
+    pub incomplete: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+    NotDict,
+    /// Loading the page makes no annotation of it.
+    Link,
+    Widget,
+    Other,
+}
+
+impl Class {
+    fn of(e: &PdfObject) -> Result<Class> {
+        if !e.is_dict()? {
+            return Ok(Class::NotDict);
+        }
+        Ok(match e.get_dict("Subtype")?.and_then(|s| s.as_name().ok()).as_deref() {
+            Some(b"Link" | b"Popup") => Class::Link,
+            Some(b"Widget") => Class::Widget,
+            _ => Class::Other,
+        })
+    }
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum ListKey {
+    /// An indirect `/Annots` array, by object number.
+    Array(i32),
+    /// A direct one, by the page that has it.
+    Page(i32),
+}
+
+impl AnnotWalk {
+    /// Counts one repeated entry; true once the budget is gone.
+    fn repeat(&mut self) -> bool {
+        self.scanned += 1;
+        if self.scanned > MAX_SCANNED {
+            self.incomplete = true;
+        }
+        self.incomplete
+    }
+
+    /// `None` when loading page `p` would add nothing (no annotations, or all assigned already).
+    pub fn page(&mut self, doc: &PdfDocument, p: u32, which: Which) -> Result<Option<Fresh>> {
+        if self.incomplete {
+            return Ok(None);
+        }
+        let page = doc.find_page(p as i32)?;
+        if page.is_indirect()? && !self.pages.insert(page.as_indirect()?) {
+            return Ok(None);
+        }
+        let Some(annots) = page.get_dict("Annots")? else { return Ok(None) };
+        if !annots.is_array()? {
+            return Ok(None);
+        }
+        // One array shared by pages (an indirect /Annots): its objects went to the first of them.
+        if annots.is_indirect()? && !self.arrays.insert(annots.as_indirect()?) {
+            return Ok(None);
+        }
+        let mut fresh = Fresh { nums: HashSet::new(), direct: false, loaded: 0 };
+        for i in 0..annots.len()? {
+            let Some(e) = annots.get_array(i as i32)? else { continue };
+            let num = if e.is_indirect()? { Some(e.as_indirect()?) } else { None };
+            let cached = num.and_then(|n| self.class.get(&n).copied());
+            // Only the first sight of an indirect object is free; a direct entry is never shared, but
+            // a page object listed twice (or many inline dictionaries) would still cost per page.
+            if (num.is_none() || cached.is_some()) && self.repeat() {
+                return Ok(None);
+            }
+            let class = match cached {
+                Some(c) => c,
+                None => {
+                    let c = Class::of(&e)?;
+                    if let Some(n) = num {
+                        self.class.insert(n, c);
+                    }
+                    c
+                }
+            };
+            if matches!(class, Class::Other | Class::Widget) {
+                fresh.loaded += 1;
+            }
+            let wanted = match which {
+                Which::Widgets => class == Class::Widget,
+                Which::Comments => class == Class::Other,
+            };
+            if !wanted {
+                continue;
+            }
+            let Some(num) = num else {
+                fresh.direct = true;
+                continue;
+            };
+            if self.seen.contains(&num) || self.belongs_later(doc, &e, p, num)? {
+                continue;
+            }
+            self.seen.insert(num);
+            fresh.nums.insert(num);
+        }
+        Ok((fresh.direct || !fresh.nums.is_empty()).then_some(fresh))
+    }
+
+    /// The annotation names a later page in its `/P` and that page lists it too.
+    fn belongs_later(&mut self, doc: &PdfDocument, e: &PdfObject, p: u32, num: i32) -> Result<bool> {
+        let Some(owner) = e.get_dict("P")?.filter(|o| o.is_dict().unwrap_or(false)) else { return Ok(false) };
+        let q = doc.lookup_page_number(&owner).unwrap_or(-1);
+        if q <= p as i32 || q >= doc.page_count()? {
+            return Ok(false);
+        }
+        let Some(list) = doc.find_page(q)?.get_dict("Annots")?.filter(|a| a.is_array().unwrap_or(false)) else { return Ok(false) };
+        let key = if list.is_indirect()? { ListKey::Array(list.as_indirect()?) } else { ListKey::Page(q) };
+        // That page's array is the one being walked or was walked: it will not be visited again, so
+        // the annotation stays with the first page that has it.
+        if matches!(key, ListKey::Array(a) if self.arrays.contains(&a)) {
+            return Ok(false);
+        }
+        if let Some(nums) = self.listed.get(&key) {
+            return Ok(nums.contains(&num));
+        }
+        let mut nums = HashSet::new();
+        for i in 0..list.len()? {
+            if let Some(x) = list.get_array(i as i32)?.filter(|x| x.is_indirect().unwrap_or(false)) {
+                nums.insert(x.as_indirect()?);
+            }
+        }
+        let found = nums.contains(&num);
+        self.listed.insert(key, nums);
+        Ok(found)
+    }
+}
+
 /// Every comment of the document in page order. A review-state reply is folded into its parent's
-/// `state`/`resolved` (the latest wins) and not listed on its own.
-pub fn list(doc: &PdfDocument) -> Result<Vec<AnnotDto>> {
+/// `state`/`resolved` (the latest wins) and not listed on its own. An annotation object that
+/// several pages list (a shared `/Annots`) is listed once, on one page; see [`AnnotWalk`] for
+/// which page and for the case that is left to the first.
+pub fn list(doc: &PdfDocument) -> Result<AnnotList> {
     let mut all = Vec::new();
-    for p in 0..doc.page_count()? as u32 {
+    let mut walk = AnnotWalk::default();
+    let mut loaded = 0usize;
+    let mut left_out = false;
+    for p in 0..doc.page_count()?.max(0) as u32 {
+        let Some(fresh) = walk.page(doc, p, Which::Comments)? else { continue };
+        if loaded + fresh.loaded > MAX_LOADED {
+            left_out = true;
+            continue;
+        }
+        loaded += fresh.loaded;
+        let mut pending = fresh.nums;
         let page = doc.load_pdf_page(p as i32)?;
         for a in page.annotations() {
-            if a.r#type().is_ok_and(is_comment) {
+            let x = a.xref()?;
+            let ours = if x == 0 { fresh.direct } else { pending.remove(&x) };
+            if ours && a.r#type().is_ok_and(is_comment) {
                 all.push(dto(p, &a)?);
             }
         }
     }
-    let mut out: Vec<AnnotDto> = Vec::new();
+    let mut items: Vec<AnnotDto> = Vec::new();
     let mut states: Vec<(i32, String)> = Vec::new();
     for d in all {
         match (&d.state, d.parent) {
             (Some(s), Some(parent)) => states.push((parent, s.clone())),
-            _ => out.push(d),
+            _ => items.push(d),
         }
     }
     for (parent, s) in states {
-        if let Some(d) = out.iter_mut().find(|d| d.xref == parent) {
+        if let Some(d) = items.iter_mut().find(|d| d.xref == parent) {
             d.resolved = s == "Completed";
             d.state = Some(s);
         }
     }
-    Ok(out)
+    Ok(AnnotList { items, incomplete: left_out || walk.incomplete })
 }
 
 // ---- writing -----------------------------------------------------------------------------------
@@ -630,5 +832,10 @@ pub fn state_one(eng: &Engine, doc: DocId, page: u32, parent: i32, state: &str, 
 }
 
 pub fn list_all(eng: &Engine, doc: DocId) -> Result<Vec<AnnotDto>> {
+    list_status(eng, doc).map(|l| l.items)
+}
+
+/// [`list_all`] with whether some annotations were left out.
+pub fn list_status(eng: &Engine, doc: DocId) -> Result<AnnotList> {
     eng.read_custom(doc, |d| list(d))
 }

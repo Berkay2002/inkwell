@@ -272,8 +272,10 @@ fn page_sizes(doc: &PdfDocument) -> Result<Vec<[f32; 2]>> {
     (0..n).map(|p| page_size(doc, p as u32)).collect()
 }
 
+/// From the page dictionary: `load_page` also loads the page's annotations and links, which is
+/// what made a document with many of them slow to size page by page.
 pub(crate) fn page_size(doc: &PdfDocument, p: u32) -> Result<[f32; 2]> {
-    let b = doc.load_page(p as i32)?.bounds()?;
+    let b = doc.pdf_page_bounds(p as i32)?;
     Ok([b.width(), b.height()])
 }
 
