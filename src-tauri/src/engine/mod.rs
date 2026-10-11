@@ -195,6 +195,16 @@ pub struct DocEntry {
 }
 
 impl DocEntry {
+    /// Records that the view of `stream` has reached `epoch` (tiles of older epochs are then stale).
+    pub(crate) fn note_epoch(&self, stream: usize, epoch: u64) {
+        self.epochs[stream.min(STREAMS - 1)].fetch_max(epoch, Ordering::SeqCst);
+    }
+
+    /// Whether the view of `stream` has moved past `epoch`.
+    pub(crate) fn epoch_passed(&self, stream: usize, epoch: u64) -> bool {
+        epoch < self.epochs[stream.min(STREAMS - 1)].load(Ordering::SeqCst)
+    }
+
     pub fn page_count(&self) -> u32 {
         self.layout.read().page_count
     }
@@ -488,9 +498,16 @@ impl Engine {
         rx.recv().map_err(|_| EngineError::Panic)?
     }
 
+    /// Queues `f` on a pool worker without waiting for it (print production's tiles, which are
+    /// not plain page tiles but are scheduled with them).
+    pub(crate) fn spawn(self: &Arc<Self>, class: u8, epoch: u64, rank: u32, f: impl FnOnce(&Engine) + Send + 'static) {
+        let eng = self.clone();
+        self.pool.submit(Job { prio: Prio::new(class, epoch, rank), run: Box::new(move || f(&eng)) });
+    }
+
     // ---- pages ----------------------------------------------------------------------------
 
-    fn page_list(&self, entry: &DocEntry, rev: u32, page: u32) -> Result<Arc<DisplayList>> {
+    pub(crate) fn page_list(&self, entry: &DocEntry, rev: u32, page: u32) -> Result<Arc<DisplayList>> {
         {
             let l = entry.layout.read();
             if l.rev != rev {
