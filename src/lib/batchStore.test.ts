@@ -22,6 +22,13 @@ vi.mock("./api", () => ({
 import * as api from "./api";
 import { applyEvent, useBatch } from "./batchStore";
 
+/** A promise the test settles by hand, to hold an await open while something else happens. */
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
 const ref = (n: string) => ({ token: `tok-${n}`, path: `C:\\d\\${n}.pdf` });
 const action = (over: Partial<BatchAction> = {}): BatchAction => ({
   id: "mine",
@@ -221,7 +228,7 @@ describe("run state machine", () => {
     await st().addFolder();
     expect(api.batchFolderFiles).toHaveBeenCalledWith("dir", true);
     expect(st().run!.files.map((f) => f.token)).toEqual(["tok-a", "tok-b", "tok-c"]);
-    expect(st().run!.capped).toBe(true);
+    expect(st().run!.cappedFolders).toEqual(["d"]);
   });
 
   it("previews before anything is written: validate, then the dry run, files as tokens", async () => {
@@ -338,5 +345,82 @@ describe("run state machine", () => {
     await running;
     expect(st().run!.phase).toBe("done");
     expect(st().run!.error).toContain("already running");
+  });
+
+  it("locks the run from the moment Run is pressed: a second press starts nothing, Back and Close do nothing", async () => {
+    st().startRun(action());
+    vi.mocked(api.pickOpen).mockResolvedValue([ref("a")]);
+    await st().addFiles();
+    const check = deferred<[]>();
+    vi.mocked(api.batchValidate).mockReturnValue(check.promise);
+    vi.mocked(api.batchRun).mockResolvedValue({ action: "Mine", files: [], ok: 0, skipped: 0, errors: 0, cancelled: false, stopped: false });
+    const first = st().runNow();
+    expect(st().run!.phase).toBe("starting");
+    void st().runNow();
+    st().backToList();
+    st().close();
+    expect(st().view).toBe("run");
+    expect(st().open).toBe(true);
+    check.resolve([]);
+    await first;
+    expect(api.batchValidate).toHaveBeenCalledTimes(1);
+    expect(api.batchRun).toHaveBeenCalledTimes(1);
+    expect(st().run!.phase).toBe("done");
+  });
+
+  it("drops the answer of a run that was left: another action's run is not started by it", async () => {
+    st().startRun(protectAction());
+    vi.mocked(api.pickOpen).mockResolvedValue([ref("a")]);
+    await st().addFiles();
+    st().setPassword("open", "open-pw-123");
+    const check = deferred<[]>();
+    vi.mocked(api.batchValidate).mockReturnValue(check.promise);
+    const old = st().runNow();
+    // however it got there: the run on screen is another one now
+    st().startRun(action({ id: "other", name: "Other" }));
+    check.resolve([]);
+    await old;
+    expect(api.batchRun).not.toHaveBeenCalled();
+    expect(st().run!.action.id).toBe("other");
+    expect(st().run!.phase).toBe("setup");
+  });
+
+  it("holds Run, Preview, Back and Close while a folder is being listed, and drops a listing for a run that was left", async () => {
+    st().startRun(action());
+    vi.mocked(api.pickSearchFolder).mockResolvedValue({ token: "dir", path: "C:\\d\\Inbox" });
+    const listing = deferred<{ files: ReturnType<typeof ref>[]; capped: boolean }>();
+    vi.mocked(api.batchFolderFiles).mockReturnValue(listing.promise);
+    const scan = st().addFolder();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(st().run!.scanning).toBe(true);
+    st().backToList();
+    st().close();
+    await st().runNow();
+    await st().preview();
+    expect(st().view).toBe("run");
+    expect(st().open).toBe(true);
+    expect(api.batchValidate).not.toHaveBeenCalled();
+
+    st().startRun(action({ id: "other" }));
+    listing.resolve({ files: [ref("x")], capped: true });
+    await scan;
+    expect(st().run!.files).toEqual([]);
+    expect(st().run!.cappedFolders).toEqual([]);
+    expect(st().run!.scanning).toBe(false);
+  });
+
+  it("names each folder that was cut, not a count that mixed picks would make wrong", async () => {
+    st().startRun(action());
+    vi.mocked(api.pickOpen).mockResolvedValue([ref("a")]);
+    await st().addFiles();
+    vi.mocked(api.pickSearchFolder).mockResolvedValueOnce({ token: "d1", path: "C:\\d\\Big" });
+    vi.mocked(api.batchFolderFiles).mockResolvedValueOnce({ files: [ref("b")], capped: true });
+    await st().addFolder();
+    vi.mocked(api.pickSearchFolder).mockResolvedValueOnce({ token: "d2", path: "C:\\d\\Small" });
+    vi.mocked(api.batchFolderFiles).mockResolvedValueOnce({ files: [ref("c")], capped: false });
+    await st().addFolder();
+    expect(st().run!.cappedFolders).toEqual(["Big"]);
+    expect(st().run!.files).toHaveLength(3);
   });
 });

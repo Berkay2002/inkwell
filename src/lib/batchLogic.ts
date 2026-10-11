@@ -138,6 +138,13 @@ export function move<T>(arr: T[], from: number, to: number): T[] {
   return next;
 }
 
+/** Where a step goes when ArrowUp/ArrowDown is pressed on its grip, or null (another key, or already at the end). */
+export function keyMoveTarget(key: string, i: number, n: number): number | null {
+  if (key === "ArrowUp" && i > 0) return i - 1;
+  if (key === "ArrowDown" && i < n - 1) return i + 1;
+  return null;
+}
+
 /** One line for a card or a row: the step's name and its main setting. */
 export function stepLabel(s: BatchStep): string {
   switch (s.kind) {

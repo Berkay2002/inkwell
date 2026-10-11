@@ -384,8 +384,14 @@ fn gate(action: &Action, env: &Env, src: &Path) -> Result<(), Verdict> {
             return Err(Verdict::Skip("its owner does not allow changes to the content".into()));
         }
     }
-    if signed && let Some(step) = action.first_signature_breaker() {
-        return Err(Verdict::Skip(format!("signed: \"{}\" would invalidate the signature", step.label())));
+    if let Some(step) = action.first_signature_breaker() {
+        match signed {
+            Some(false) => {}
+            Some(true) => return Err(Verdict::Skip(format!("signed: \"{}\" would invalidate the signature", step.label()))),
+            None => {
+                return Err(Verdict::Skip(format!("could not check whether the file is signed: \"{}\" might invalidate a signature", step.label())));
+            }
+        }
     }
     Ok(())
 }
@@ -588,28 +594,30 @@ fn tree_size(p: &Path) -> u64 {
 // ---------------------------------------------------------------- signatures
 
 /// A signature the file carries: the "signatures exist" flag, a certification (DocMDP), or a signature
-/// field that has a value.
-fn is_signed(doc: &mupdf::pdf::PdfDocument) -> bool {
+/// field that has a value. `None` when the form cannot be listed (too large to scan): the caller
+/// treats that as signed.
+fn is_signed(doc: &mupdf::pdf::PdfDocument) -> Option<bool> {
     if ocr::is_signed(doc) {
-        return true;
+        return Some(true);
     }
     let certified = doc
         .catalog()
         .ok()
         .and_then(|c| c.get_dict("Perms").ok().flatten())
         .is_some_and(|p| p.get_dict("DocMDP").ok().flatten().is_some_and(|d| !d.is_null().unwrap_or(true)));
-    certified
-        || crate::forms::list(doc).is_ok_and(|f| {
-            f.fields.iter().any(|f| {
-                f.kind == crate::forms::FieldKind::Signature
-                    && doc
-                        .xref_object(f.xref)
-                        .ok()
-                        .flatten()
-                        .and_then(|w| w.get_dict_inheritable("V").ok().flatten())
-                        .is_some_and(|v| !v.is_null().unwrap_or(true))
-            })
-        })
+    if certified {
+        return Some(true);
+    }
+    let form = crate::forms::list(doc).ok()?;
+    Some(form.fields.iter().any(|f| {
+        f.kind == crate::forms::FieldKind::Signature
+            && doc
+                .xref_object(f.xref)
+                .ok()
+                .flatten()
+                .and_then(|w| w.get_dict_inheritable("V").ok().flatten())
+                .is_some_and(|v| !v.is_null().unwrap_or(true))
+    }))
 }
 
 // ---------------------------------------------------------------- what a crash leaves behind

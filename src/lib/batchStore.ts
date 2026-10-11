@@ -12,7 +12,8 @@ import { copyOf, emptyAction, exportName, hasProtect, MAX_STEPS, move, newStep, 
  */
 
 export type BatchView = "list" | "edit" | "run";
-export type RunPhase = "setup" | "previewing" | "running" | "done";
+/** `starting`: Run was pressed and the engine is being asked (validation, folder pick) before the job exists. */
+export type RunPhase = "setup" | "previewing" | "starting" | "running" | "done";
 export type RowState = "waiting" | "running" | "ok" | "skipped" | "error";
 
 export interface RunRow {
@@ -35,10 +36,14 @@ export interface Editor {
 }
 
 export interface Run {
+  /** Which run this is: an answer that arrives after the person left it is dropped. */
+  rid: number;
   action: BatchAction;
   files: FileRef[];
-  /** The folder listing was cut at the engine's limit. */
-  capped: boolean;
+  /** Names of the folders whose listing was cut at the engine's limit. */
+  cappedFolders: string[];
+  /** A file or folder pick, or a folder listing, is in progress: nothing else may change the run meanwhile. */
+  scanning: boolean;
   recursive: boolean;
   openPassword: string;
   permissionsPassword: string;
@@ -100,6 +105,7 @@ interface BatchStore {
 }
 
 let jobSeq = 1_970_000_000;
+let runSeq = 0;
 let validateSeq = 0;
 let validateTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -107,6 +113,9 @@ let validateTimer: ReturnType<typeof setTimeout> | undefined;
 const PREVIEW_PASSWORDS = ["preview-only-open-1", "preview-only-owner-2"] as const;
 
 const errText = (e: unknown) => String(e).replace(/^Error: /, "");
+
+/** Nothing may leave the run (Back, Close) or start another while this is true. */
+export const runLocked = (r: Run | null) => !!r && (r.scanning || r.phase === "running" || r.phase === "previewing" || r.phase === "starting");
 
 const blankRow = (): RunRow => ({ state: "waiting", step: 0, steps: 0, label: "", report: null });
 
@@ -171,7 +180,7 @@ export const useBatch = create<BatchStore>((set, get) => {
     },
 
     close: () => {
-      if (get().run?.phase === "running" || get().run?.phase === "previewing") return;
+      if (runLocked(get().run)) return;
       clearTimeout(validateTimer);
       validateSeq++;
       set({ open: false, editor: null, run: null, listError: null, confirmDelete: null });
@@ -250,7 +259,7 @@ export const useBatch = create<BatchStore>((set, get) => {
 
     backToList: () => {
       const r = get().run;
-      if (r && (r.phase === "running" || r.phase === "previewing")) return;
+      if (runLocked(r)) return;
       clearTimeout(validateTimer);
       validateSeq++;
       set({ view: "list", editor: null, run: null, confirmDelete: null });
@@ -319,9 +328,11 @@ export const useBatch = create<BatchStore>((set, get) => {
         view: "run",
         editor: null,
         run: {
+          rid: ++runSeq,
           action: structuredClone(a),
           files: [],
-          capped: false,
+          cappedFolders: [],
+          scanning: false,
           recursive: false,
           openPassword: "",
           permissionsPassword: "",
@@ -339,34 +350,47 @@ export const useBatch = create<BatchStore>((set, get) => {
 
     addFiles: async () => {
       const r = get().run;
-      if (!r || r.phase !== "setup") return;
+      if (!r || r.phase !== "setup" || r.scanning) return;
+      const mine = () => get().run?.rid === r.rid;
+      patchRun({ scanning: true });
       try {
         const picked = await api.pickOpen(true);
+        if (!mine()) return;
         const have = new Set(get().run?.files.map((f) => f.token));
         const fresh = picked.filter((f) => !have.has(f.token));
-        if (fresh.length) patchRun({ files: [...(get().run?.files ?? []), ...fresh], stale: true, error: null });
+        patchRun({ scanning: false, ...(fresh.length ? { files: [...(get().run?.files ?? []), ...fresh], stale: true, error: null } : {}) });
       } catch (e) {
-        patchRun({ error: errText(e) });
+        if (mine()) patchRun({ scanning: false, error: errText(e) });
       }
     },
 
     addFolder: async () => {
       const r = get().run;
-      if (!r || r.phase !== "setup") return;
+      if (!r || r.phase !== "setup" || r.scanning) return;
+      const mine = () => get().run?.rid === r.rid;
+      patchRun({ scanning: true });
       try {
         const dir = await api.pickSearchFolder();
-        if (!dir) return;
+        if (!mine()) return;
+        if (!dir) {
+          patchRun({ scanning: false });
+          return;
+        }
         const listed = await api.batchFolderFiles(dir.token, get().run?.recursive ?? false);
-        const have = new Set(get().run?.files.map((f) => f.token));
+        if (!mine()) return;
+        const cur = get().run;
+        const have = new Set(cur?.files.map((f) => f.token));
         const fresh = listed.files.filter((f) => !have.has(f.token));
+        const folderName = dir.path.split(/[\\/]/).filter(Boolean).pop() ?? dir.path;
         patchRun({
-          files: [...(get().run?.files ?? []), ...fresh],
-          capped: listed.capped,
+          scanning: false,
+          files: [...(cur?.files ?? []), ...fresh],
+          cappedFolders: listed.capped ? [...(cur?.cappedFolders ?? []), folderName] : cur?.cappedFolders ?? [],
           stale: true,
           error: listed.files.length === 0 ? "That folder has no PDF files in it." : null,
         });
       } catch (e) {
-        patchRun({ error: errText(e) });
+        if (mine()) patchRun({ scanning: false, error: errText(e) });
       }
     },
 
@@ -387,35 +411,42 @@ export const useBatch = create<BatchStore>((set, get) => {
 
     preview: async () => {
       const r = get().run;
-      if (!r || r.phase !== "setup" || r.files.length === 0) return;
+      if (!r || r.phase !== "setup" || r.scanning || r.files.length === 0) return;
+      const mine = () => get().run?.rid === r.rid;
       patchRun({ phase: "previewing", error: null, issues: [] });
       try {
         const typed = !!(r.openPassword || r.permissionsPassword);
         const [o, p] = typed ? [r.openPassword, r.permissionsPassword] : PREVIEW_PASSWORDS;
         const action = withPasswords(r.action, hasProtect(r.action) ? o : "", hasProtect(r.action) ? p : "");
         const issues = await api.batchValidate(action);
+        if (!mine()) return;
         if (issues.length) {
           patchRun({ phase: "setup", issues });
           return;
         }
         const preview = await api.batchPreview(action, r.files.map((f) => f.token));
-        patchRun({ phase: "setup", preview, stale: false });
+        if (mine()) patchRun({ phase: "setup", preview, stale: false });
       } catch (e) {
-        patchRun({ phase: "setup", error: errText(e) });
+        if (mine()) patchRun({ phase: "setup", error: errText(e) });
       }
     },
 
     runNow: async () => {
       const r = get().run;
-      if (!r || r.phase !== "setup" || r.files.length === 0) return;
+      if (!r || r.phase !== "setup" || r.scanning || r.files.length === 0) return;
+      const mine = () => get().run?.rid === r.rid;
       const typed = !!(r.openPassword || r.permissionsPassword);
       const action = withPasswords(r.action, r.openPassword, r.permissionsPassword);
+      // Before the first await: a second press, Back or Close while the engine is asked finds the run locked.
+      patchRun({ phase: "starting", error: null });
       try {
         // What would stop the run is said before anything is asked of the person, and before a folder token is spent.
         const issues = await api.batchValidate(action);
+        if (!mine()) return;
         const { blocking, passwordFor } = splitIssues(r.action, issues, typed);
         if (blocking.length || passwordFor.length) {
           patchRun({
+            phase: "setup",
             issues,
             error: passwordFor.length && !blocking.length ? "Type the password for the Protect step first." : null,
           });
@@ -424,7 +455,11 @@ export const useBatch = create<BatchStore>((set, get) => {
         let folder: string | null = null;
         if (r.action.output.kind === "folder") {
           const f = await api.pickFolder();
-          if (!f) return;
+          if (!mine()) return;
+          if (!f) {
+            patchRun({ phase: "setup" });
+            return;
+          }
           folder = f.token;
         }
         const job = ++jobSeq;
@@ -437,9 +472,9 @@ export const useBatch = create<BatchStore>((set, get) => {
           (ev) => set((s) => (s.run && s.run.job === job ? { run: { ...s.run, rows: applyEvent(s.run.rows, ev) } } : s)),
         );
         // Passwords are done with: nothing keeps them past the run that used them.
-        patchRun({ phase: "done", report, openPassword: "", permissionsPassword: "", job: null });
+        if (mine()) patchRun({ phase: "done", report, openPassword: "", permissionsPassword: "", job: null });
       } catch (e) {
-        patchRun({ phase: get().run?.phase === "running" ? "done" : "setup", error: errText(e), openPassword: "", permissionsPassword: "", job: null });
+        if (mine()) patchRun({ phase: get().run?.phase === "running" ? "done" : "setup", error: errText(e), openPassword: "", permissionsPassword: "", job: null });
       }
     },
 

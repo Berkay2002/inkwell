@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { MenuButton } from "../Menu";
 import { usePreflight } from "../../lib/preflight";
+import { type Protection, useProtection } from "../../lib/a11y";
 import { LANGS, langLabel } from "../../lib/a11yLogic";
 import {
   type Finding,
@@ -29,6 +30,17 @@ import "../a11y/a11y.css";
 import "./preflight.css";
 
 const st = () => usePreflight.getState();
+
+/**
+ * Why a conversion can't be done in this document, or null. A certified document takes no change; a signed one
+ * would be rewritten (the engine refuses both). The accessibility checker's own fixes are incremental, so they
+ * stay possible on a signed document (`a11yFix`).
+ */
+function inPlaceWhy(p: Protection | null, a11yFix = false): string | null {
+  if (p?.certified) return "This document is certified, so changing it here would void the certification. Save the conversion as a new file.";
+  if (p?.signed && !a11yFix) return "This document is signed, and converting it here would break its signature. Save the conversion as a new file.";
+  return null;
+}
 
 /** How many findings of a rule show before "Show all". */
 const FIRST = 5;
@@ -210,9 +222,12 @@ function OutcomeCard({ doc, report, busy }: { doc: DocState; report: Report; bus
   const lang = usePreflight((s) => s.lang);
   const plan: Plan = report.plan;
   const info = profileInfo(report.profile);
-  const out = outcome(plan, d.ticks, d.output);
   const anyTicked = plan.groups.some((g) => isTicked(g, d.ticks));
-  const inPlace = d.output === "inPlace";
+  const prot = useProtection(doc.id);
+  const why = inPlaceWhy(prot);
+  // Until it is known whether the document is signed, the new file is the only offer.
+  const inPlace = d.output === "inPlace" && !why && prot !== null;
+  const out = outcome(plan, d.ticks, inPlace ? "inPlace" : "newFile");
   return (
     <div className="a11y-card pf-outcome">
       <b>{info.convert}</b>
@@ -240,17 +255,30 @@ function OutcomeCard({ doc, report, busy }: { doc: DocState; report: Report; bus
         <button role="radio" aria-checked={!inPlace} className={inPlace ? "" : "on"} onClick={() => st().setOutput(doc.id, "newFile")}>
           New file
         </button>
-        <button role="radio" aria-checked={inPlace} className={inPlace ? "on" : ""} onClick={() => st().setOutput(doc.id, "inPlace")}>
+        <button
+          role="radio"
+          aria-checked={inPlace}
+          className={inPlace ? "on" : ""}
+          disabled={!!why || prot === null}
+          title={why ?? undefined}
+          onClick={() => st().setOutput(doc.id, "inPlace")}
+        >
           This document
         </button>
       </div>
       <p className="a11y-note">
-        {inPlace
-          ? "Changes this document as one undo step; Save writes it."
-          : `Writes a copy; ${doc.name} stays as it is.`}
+        {why ?? (inPlace ? "Changes this document as one undo step; Save writes it." : `Writes a copy; ${doc.name} stays as it is.`)}
       </p>
       <div className="a11y-actions">
-        <button className="a11y-btn primary" disabled={busy || !anyTicked} onClick={() => void st().convert(doc.id)}>
+        <button
+          className="a11y-btn primary"
+          disabled={busy || !anyTicked}
+          onClick={() => {
+            // The choice may be stored as "this document" from before: a protected document gets the new file.
+            if (d.output === "inPlace" && !inPlace) st().setOutput(doc.id, "newFile");
+            void st().convert(doc.id);
+          }}
+        >
           {inPlace ? "Convert in this document" : "Save as new file…"}
         </button>
       </div>
@@ -344,6 +372,7 @@ function Rule({ doc, x, plan, busy }: { doc: DocState; x: RuleResult; plan: Plan
   const more = Math.max(x.count, x.findings.length) - x.findings.length;
   const first = x.findings.find((f) => f.page !== null);
   const fix = ruleFix(x, plan);
+  const fixWhy = inPlaceWhy(useProtection(doc.id), x.a11yFix !== null);
   return (
     <li className={`a11y-rule ${x.status === "info" ? "passed" : x.status}`}>
       <div className="a11y-rule-head">
@@ -387,7 +416,7 @@ function Rule({ doc, x, plan, busy }: { doc: DocState; x: RuleResult; plan: Plan
           {more > 0 && all && <p className="a11y-note">… and {more} more</p>}
           <div className="a11y-actions">
             {fix && !fix.needsNewFile && (
-              <button className="a11y-btn" disabled={busy} onClick={() => void st().fixRule(doc.id, x)}>
+              <button className="a11y-btn" disabled={busy || !!fixWhy} title={fixWhy ?? undefined} onClick={() => void st().fixRule(doc.id, x)}>
                 Fix
               </button>
             )}

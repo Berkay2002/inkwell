@@ -163,7 +163,7 @@
   font-size: 13px;
 }
 .aw-card-actions .btn.danger {
-  color: #fff;
+  color: var(--accent-fg);
   background: var(--danger);
 }
 

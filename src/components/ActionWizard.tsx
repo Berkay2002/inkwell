@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import type { BatchAction, BatchFilePreview, BatchIssue } from "../lib/api";
 import { filesWord, hasProtect, saveBlock, splitIssues, stepLabel } from "../lib/batchLogic";
-import { type Editor, type Run, type RunRow, useBatch } from "../lib/batchStore";
+import { type Editor, type Run, type RunRow, runLocked, useBatch } from "../lib/batchStore";
 import { formatBytes } from "../lib/toolsStore";
 import { revealInFolder } from "../recents";
 import { ActionEditor } from "./ActionEditor";
@@ -9,6 +9,9 @@ import { Icon } from "./Icons";
 import "./actionWizard.css";
 
 const act = () => useBatch.getState();
+
+/** `reveal_in_folder` is Explorer: off Windows it only fails, so the button is not offered. */
+const CAN_REVEAL = navigator.userAgent.includes("Windows");
 
 /**
  * The Action Wizard: one centred sheet, like Combine. The list of actions, the editor (step library beside the
@@ -19,7 +22,7 @@ export function ActionWizard() {
   const view = useBatch((s) => s.view);
   const editor = useBatch((s) => s.editor);
   const run = useBatch((s) => s.run);
-  const busy = run?.phase === "running" || run?.phase === "previewing";
+  const busy = runLocked(run);
 
   useEffect(() => {
     if (!open) return;
@@ -254,7 +257,9 @@ function RunView({ run }: { run: Run }) {
 
 function Setup({ run }: { run: Run }) {
   const { action, files, phase } = run;
+  // Previewing, asking the engine to start, or a pick/listing in progress: nothing may change under it.
   const previewing = phase === "previewing";
+  const locked = runLocked(run);
   const protect = hasProtect(action);
   const typed = !!(run.openPassword || run.permissionsPassword);
   const { blocking } = splitIssues(action, run.issues, typed);
@@ -267,11 +272,11 @@ function Setup({ run }: { run: Run }) {
           <div className="aw-files-head">
             <h3 className="aw-col-title aw-flat">Files</h3>
             <span className="grow" />
-            <button className="btn ghost" disabled={previewing} onClick={() => void act().addFiles()}>
+            <button className="btn ghost" disabled={locked} onClick={() => void act().addFiles()}>
               <Icon name="filePlus" size={14} />
               Add files…
             </button>
-            <button className="btn ghost" disabled={previewing} onClick={() => void act().addFolder()}>
+            <button className="btn ghost" disabled={locked} onClick={() => void act().addFolder()}>
               <Icon name="open" size={14} />
               Add folder…
             </button>
@@ -297,7 +302,7 @@ function Setup({ run }: { run: Run }) {
                       </span>
                       {pv && !run.stale && <PreviewLine pv={pv} />}
                     </span>
-                    <button className="ax-icon" aria-label={`Remove ${f.path.split(/[\\/]/).pop()}`} title="Remove" disabled={previewing} onClick={() => act().removeFile(i)}>
+                    <button className="ax-icon" aria-label={`Remove ${f.path.split(/[\\/]/).pop()}`} title="Remove" disabled={locked} onClick={() => act().removeFile(i)}>
                       <Icon name="close" size={14} />
                     </button>
                   </li>
@@ -305,7 +310,12 @@ function Setup({ run }: { run: Run }) {
               })}
             </ul>
           )}
-          {run.capped && <p className="aw-banner">The folder has more PDFs than a batch takes: the first {files.length} are listed.</p>}
+          {run.cappedFolders.length > 0 && (
+            <p className="aw-banner">
+              {run.cappedFolders.length === 1 ? `"${run.cappedFolders[0]}" has` : `${run.cappedFolders.map((n) => `"${n}"`).join(", ")} have`} more PDFs than a batch
+              takes: only the first 500 of {run.cappedFolders.length === 1 ? "it are" : "each are"} listed.
+            </p>
+          )}
         </section>
         <section className="aw-plan" aria-label="What it does">
           <h3 className="aw-col-title aw-flat">What it does</h3>
@@ -327,7 +337,7 @@ function Setup({ run }: { run: Run }) {
                   type="password"
                   autoComplete="new-password"
                   value={run.openPassword}
-                  disabled={previewing}
+                  disabled={locked}
                   onChange={(e) => act().setPassword("open", e.target.value)}
                 />
               </label>
@@ -338,7 +348,7 @@ function Setup({ run }: { run: Run }) {
                   type="password"
                   autoComplete="new-password"
                   value={run.permissionsPassword}
-                  disabled={previewing}
+                  disabled={locked}
                   onChange={(e) => act().setPassword("permissions", e.target.value)}
                 />
               </label>
@@ -346,7 +356,7 @@ function Setup({ run }: { run: Run }) {
             </fieldset>
           )}
           <div className="aw-preview-bar">
-            <button className="btn" disabled={previewing || files.length === 0} onClick={() => void act().preview()}>
+            <button className="btn" disabled={locked || files.length === 0} onClick={() => void act().preview()}>
               {previewing ? "Checking…" : p && !run.stale ? "Check again" : "Preview"}
             </button>
             <span className="dim aw-hint">Shows, for each file, what would run or be skipped and under which name, without writing anything.</span>
@@ -366,11 +376,11 @@ function Setup({ run }: { run: Run }) {
         <span className={run.error || blocking.length ? "aw-outcome bad" : "aw-outcome"} aria-live="polite">
           <Outcome run={run} blocking={blocking} />
         </span>
-        <button className="btn ghost" disabled={previewing} onClick={() => act().backToList()}>
+        <button className="btn ghost" disabled={locked} onClick={() => act().backToList()}>
           Cancel
         </button>
-        <button className="btn primary" disabled={previewing || files.length === 0} onClick={() => void act().runNow()}>
-          {files.length === 0 ? "Run" : `Run on ${filesWord(files.length)}`}
+        <button className="btn primary" disabled={locked || files.length === 0} onClick={() => void act().runNow()}>
+          {run.phase === "starting" ? "Starting…" : files.length === 0 ? "Run" : `Run on ${filesWord(files.length)}`}
         </button>
       </footer>
     </>
@@ -472,7 +482,7 @@ function ResultRow({ name, row, total }: { name: string; row: RunRow | undefined
         {state === "ok" && r && r.notes.length > 0 && <span className="aw-result-sub dim">{r.notes.join(" · ")}</span>}
       </span>
       <span className={`aw-state ${state}`}>{STATE_TEXT[state]}</span>
-      {out && (
+      {out && CAN_REVEAL && (
         <button className="btn ghost aw-reveal" onClick={() => void revealInFolder(out)} title={out}>
           Show in folder
         </button>

@@ -539,3 +539,54 @@ fn saving_an_attachment_never_writes_over_an_open_file() {
     let guard = body.find("check_not_open").expect("attachment_save checks the target is not open");
     assert!(guard < body.find("write_plain").unwrap(), "the check comes before the write");
 }
+
+/// Raw key bytes of the /Names /EmbeddedFiles array of the file at `path`.
+fn raw_attachment_keys(path: &str) -> Vec<Vec<u8>> {
+    let d = mupdf::pdf::PdfDocument::open(path).unwrap();
+    let names = d.catalog().unwrap().get_dict("Names").unwrap().unwrap();
+    let arr = names.get_dict("EmbeddedFiles").unwrap().unwrap().get_dict("Names").unwrap().unwrap();
+    (0..arr.len().unwrap()).step_by(2).map(|i| arr.get_array(i as i32).unwrap().unwrap().as_bytes().unwrap()).collect()
+}
+
+#[test]
+fn attachment_keys_are_sorted_by_the_bytes_the_file_stores() {
+    let d = dir("attach-order");
+    let path = write(&d, "a.pdf", 1, 0);
+    let (eng, id) = open(&path);
+    // "räkning" sorts before "summary" as text, but is stored as UTF-16BE (FE FF ...), which sorts after it
+    attach_add(&eng, id, vec![file("summary.pdf", b"s".to_vec(), ""), file("räkning.pdf", b"r".to_vec(), ""), file("alpha.txt", b"a".to_vec(), "")], user()).unwrap();
+    let (e2, i2, saved) = save_reopen(&eng, id);
+    let keys = raw_attachment_keys(&saved);
+    assert_eq!(keys.len(), 3);
+    assert!(keys.windows(2).all(|w| w[0] < w[1]), "keys not ascending by stored bytes: {keys:?}");
+    assert!(keys[2].starts_with(&[0xFE, 0xFF]));
+    // and both are found by name after the reopen
+    assert_eq!(attach_data(&e2, i2, "n:räkning.pdf").unwrap().1, b"r");
+    assert_eq!(attach_data(&e2, i2, "n:summary.pdf").unwrap().1, b"s");
+}
+
+#[test]
+fn a_name_tree_cut_short_by_a_cap_is_never_written_back_flat() {
+    use crate::outline::tests::{open_bytes, raw_pdf};
+    // 11 nested /Kids nodes: the walk stops at depth 8, so entries below were never seen
+    let mut objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles 5 0 R >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".into(),
+        "<< >>".into(),
+    ];
+    let depth = 11;
+    for i in 0..depth {
+        let kids = if i + 1 < depth { format!("/Kids [{} 0 R]", 6 + i) } else { String::new() };
+        objs.push(format!("<< {kids} /Names [(k{i:02}) {} 0 R] >>", 5 + depth + i));
+    }
+    objs.extend((0..depth).map(|i| format!("<< /Type /Filespec /F (k{i:02}) /UF (k{i:02}) >>")));
+    let d = dir("attach-cut");
+    let (eng, id, _) = open_bytes(&d, "a.pdf", &raw_pdf(&objs));
+    let before = attach_list(&eng, id).unwrap().len();
+    assert!(before < depth, "{before}");
+    let r = attach_add(&eng, id, vec![file("new.txt", b"n".to_vec(), "")], user());
+    assert!(r.is_err(), "an edit of a tree that was cut short must be refused");
+    assert_eq!(attach_list(&eng, id).unwrap().len(), before);
+    assert!(attach_remove(&eng, id, &["n:k00".to_string()], user()).is_err());
+}

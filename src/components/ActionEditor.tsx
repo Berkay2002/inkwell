@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { BatchAction, BatchBates, BatchIssue, BatchPattern, BatchQuery, BatchSanitize, BatchStep, MarkStyle } from "../lib/api";
-import { STEP_GROUPS, STEP_INFO, stepLabel } from "../lib/batchLogic";
+import { keyMoveTarget, STEP_GROUPS, STEP_INFO, stepLabel } from "../lib/batchLogic";
 import { useBatch } from "../lib/batchStore";
 import { Icon } from "./Icons";
 
@@ -67,6 +67,13 @@ function Sequence({ action, issues, selected, soft }: { action: BatchAction; iss
   const { steps } = action;
   const [drag, setDrag] = useState<{ from: number; to: number } | null>(null);
   const list = useRef<HTMLOListElement>(null);
+  // Rows are keyed by position, so focus stays on the old index when a step moves: put it on the grip of its new one.
+  const refocus = useRef<number | null>(null);
+  useEffect(() => {
+    if (refocus.current == null) return;
+    list.current?.querySelectorAll<HTMLElement>(".aw-grip")[refocus.current]?.focus();
+    refocus.current = null;
+  }, [steps]);
 
   const startDrag = (from: number, e: React.PointerEvent) => {
     if (e.button !== 0 || steps.length < 2) return;
@@ -130,13 +137,11 @@ function Sequence({ action, issues, selected, soft }: { action: BatchAction; iss
                   title="Drag to reorder, or use the up and down arrow keys"
                   onPointerDown={(e) => startDrag(i, e)}
                   onKeyDown={(e) => {
-                    if (e.key === "ArrowUp" && i > 0) {
-                      e.preventDefault();
-                      act().moveStep(i, i - 1);
-                    } else if (e.key === "ArrowDown" && i < steps.length - 1) {
-                      e.preventDefault();
-                      act().moveStep(i, i + 1);
-                    }
+                    const to = keyMoveTarget(e.key, i, steps.length);
+                    if (to == null) return;
+                    e.preventDefault();
+                    refocus.current = to;
+                    act().moveStep(i, to);
                   }}
                 >
                   <Icon name="grip" size={14} />

@@ -471,7 +471,7 @@ export const usePrint = create<PrintStore>((set, get) => {
       const ref = await api.pickSave(`${stem(s.name)}-${tag}.pdf`, { doc: s.doc }, "pdf");
       if (!ref || get().sheet?.doc !== s.doc) return;
       const job = (curJob = ++jobSeq);
-      patch({ phase: "running", job: "pdf", error: null, progress: { done: 0, total: s.plan.sheets }, report: null, saved: null });
+      patch({ phase: "running", job: "pdf", error: null, progress: { done: 0, total: s.plan.pdfSides }, report: null, saved: null });
       try {
         const saved = await api.printSavePdf(job, s.doc, settingsOf(s), ref.token, (p) => {
           if (get().sheet?.doc === s.doc) patch({ progress: p });

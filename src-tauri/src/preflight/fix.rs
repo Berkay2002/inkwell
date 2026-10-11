@@ -96,6 +96,16 @@ pub(crate) fn apply(doc: &mut PdfDocument, profile: Profile, c: &Convert, stem: 
     if !new_file && doc.trailer()?.get_dict("Encrypt")?.is_some() {
         return Err(bad("This document is encrypted, and PDF/A allows no encryption: save the conversion as a new file"));
     }
+    // An in-place conversion removes content, so its save is a full rewrite: it would void a certification and
+    // break a signature. Converting into a new file leaves the open document as it is.
+    if !new_file {
+        if crate::outline::certified(doc)?.is_some() {
+            return Err(bad("This document is certified, so converting it in place would void the certification: save the conversion as a new file"));
+        }
+        if crate::outline::signed(doc) {
+            return Err(bad("This document is signed, and converting it in place would break its signature: save the conversion as a new file"));
+        }
+    }
     let want = |g: FixGroup| c.groups.contains(&g);
     let fam = profile.family();
     let mut log: Vec<String> = Vec::new();
