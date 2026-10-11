@@ -13,6 +13,8 @@ import { addText, editText, setLeaveGuard } from "./edit";
 export type Rect4 = [number, number, number, number];
 export type Rgb = [number, number, number];
 export type EditTool = "select" | "text";
+/** What the Edit rail is for: the page's text, its links, or the document's bookmarks. */
+export type EditSection = "text" | "links" | "bookmarks";
 
 export interface BlockRef {
   page: number;
@@ -139,6 +141,9 @@ interface Store {
   setOpen: (open: boolean) => void;
   tool: EditTool;
   setTool: (t: EditTool) => void;
+  section: EditSection;
+  /** Leaving the text section sends what was typed first. */
+  setSection: (s: EditSection) => void;
   docs: Record<number, DocTextEdit>;
 
   /** Lists the page's blocks for the document's current generation (cached; one call per page and generation). */
@@ -281,6 +286,14 @@ export const useTextEdit = create<Store>((set, get) => {
     },
     tool: "select",
     setTool: (tool) => set({ tool }),
+    section: "text",
+    setSection: (section) => {
+      if (section === get().section) return;
+      const ids = Object.keys(get().docs).map(Number);
+      set({ section, tool: "select" });
+      // Typed text is sent (one undo step) when its layer goes away.
+      if (section !== "text") void Promise.all(ids.map((id) => get().commit(id)));
+    },
     docs: {},
 
     load: (doc, page) => {

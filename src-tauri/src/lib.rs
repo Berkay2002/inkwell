@@ -7,7 +7,9 @@ pub mod diff;
 pub mod engine;
 pub mod history;
 pub mod history_ipc;
+pub mod links;
 pub mod ocr;
+pub mod outline;
 pub mod paths;
 pub mod print;
 pub mod protect;
@@ -825,6 +827,15 @@ pub fn run() {
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
+            outline::app::bookmarks_list,
+            outline::app::bookmarks_apply,
+            outline::app::bookmarks_headings,
+            links::app::links_list,
+            links::app::links_apply,
+            links::app::links_urls,
+            links::app::link_check_url,
+            links::app::link_pick_file,
+            links::app::link_open_url,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

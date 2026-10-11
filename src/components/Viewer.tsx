@@ -18,6 +18,7 @@ import {
 } from "../lib/layout";
 import { type Mark, useRedact } from "../lib/redact";
 import { type Want, tileClient } from "../lib/tiles";
+import { setViewPos } from "../lib/viewPos";
 import { type DocState, type Rect4, useStore } from "../store";
 import { PageView } from "./PageView";
 
@@ -67,6 +68,7 @@ export function Viewer({ doc }: { doc: DocState }) {
     anchor.current = at(s.clientHeight / 2, s.clientWidth / 2);
     const top = at(0, 0);
     saved.current = { page: top.page, yPt: top.yPt };
+    setViewPos(cur.current.doc.id, saved.current);
     return at;
   };
 

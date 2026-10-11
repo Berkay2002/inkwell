@@ -223,6 +223,128 @@ export interface NewTextBox {
   width?: number;
 }
 
+// ---- bookmarks and links (src-tauri/src/outline, src-tauri/src/links) ----
+
+export type BookmarkDest =
+  | { kind: "none" }
+  /** `at`: the point shown at the top left of the view, page space. */
+  | { kind: "page"; page: number; at: [number, number] | null }
+  | { kind: "uri"; uri: string }
+  | { kind: "other"; what: string };
+
+export interface Bookmark {
+  /** The item's object number: stable across undo. */
+  id: number;
+  title: string;
+  dest: BookmarkDest;
+  open: boolean;
+  bold: boolean;
+  italic: boolean;
+  color: [number, number, number] | null;
+  children: Bookmark[];
+}
+
+export interface Bookmarks {
+  rev: number;
+  items: Bookmark[];
+  count: number;
+  /** More items than are read: the rest is left as it is and can't be edited. */
+  truncated: boolean;
+}
+
+export type BookmarkOp =
+  | { op: "add"; parent: number | null; index: number | null; title: string; page: number; at: [number, number] | null }
+  | { op: "rename"; id: number; title: string }
+  | { op: "delete"; ids: number[] }
+  | { op: "move"; id: number; parent: number | null; index: number }
+  | { op: "setDest"; id: number; page: number; at: [number, number] | null }
+  | { op: "setOpen"; id: number; open: boolean }
+  | { op: "setStyle"; id: number; bold?: boolean; italic?: boolean; color?: [number, number, number]; resetColor?: boolean }
+  | { op: "fromHeadings"; replace: boolean };
+
+export interface BookmarkEdited {
+  state: EditState;
+  id: number | null;
+  count: number;
+}
+
+export interface HeadingPreview {
+  count: number;
+  levels: number;
+  rows: { title: string; page: number; level: number }[];
+}
+
+export type LinkTarget =
+  | { kind: "page"; page: number; at: [number, number] | null }
+  | { kind: "uri"; uri: string }
+  | { kind: "file"; name: string; page: number | null }
+  | { kind: "other"; what: string };
+
+export interface LinkBorder {
+  visible: boolean;
+  width: number;
+  color: [number, number, number];
+}
+
+export interface PageLink {
+  /** The annotation's object number. */
+  id: number;
+  /** x0, y0, x1, y1 in page space. */
+  rect: [number, number, number, number];
+  target: LinkTarget;
+  border: LinkBorder;
+}
+
+export interface PageLinks {
+  rev: number;
+  links: PageLink[];
+}
+
+export type NewLinkTarget =
+  | { kind: "page"; page: number; at: [number, number] | null }
+  | { kind: "uri"; uri: string }
+  /** `file`: an open token from `linkPickFile`. */
+  | { kind: "file"; file: string; page: number | null };
+
+export interface BorderSpec {
+  visible: boolean;
+  width?: number;
+  color?: [number, number, number];
+}
+
+export type LinkOp =
+  | { op: "add"; page: number; rect: [number, number, number, number]; target: NewLinkTarget; border?: BorderSpec }
+  | { op: "setTarget"; page: number; id: number; target: NewLinkTarget }
+  | { op: "setRect"; page: number; id: number; rect: [number, number, number, number] }
+  | { op: "setBorder"; page: number; id: number; border: BorderSpec }
+  | { op: "delete"; page: number; ids: number[] }
+  | { op: "fromUrls" };
+
+export interface LinkEdited {
+  state: EditState;
+  id: number | null;
+  count: number;
+}
+
+export interface UrlPreview {
+  count: number;
+  pages: number;
+  rows: { page: number; url: string }[];
+}
+
+export const bookmarksList = (doc: number) => invoke<Bookmarks>("bookmarks_list", { doc });
+export const bookmarksApply = (doc: number, rev: number, op: BookmarkOp) => invoke<BookmarkEdited>("bookmarks_apply", { doc, rev, op });
+export const bookmarksHeadings = (doc: number) => invoke<HeadingPreview>("bookmarks_headings", { doc });
+export const linksList = (doc: number, page: number) => invoke<PageLinks>("links_list", { doc, page });
+export const linksApply = (doc: number, rev: number, op: LinkOp) => invoke<LinkEdited>("links_apply", { doc, rev, op });
+export const linksUrls = (doc: number) => invoke<UrlPreview>("links_urls", { doc });
+/** An address as it would be linked (gate: https, http, mailto), or an error saying why not. */
+export const linkCheckUrl = (url: string) => invoke<string>("link_check_url", { url });
+/** Any file, as an open token. */
+export const linkPickFile = () => invoke<FileRef | null>("link_pick_file");
+/** Only after the person confirmed. */
+export const linkOpenUrl = (url: string) => invoke<void>("link_open_url", { url });
+
 export const textBlocks = (doc: number, page: number) => invoke<TextBlocks>("text_blocks", { doc, page });
 export const textEdit = (doc: number, rev: number, page: number, index: number, change: BlockChange) =>
   invoke<TextEdited>("text_edit", { doc, rev, page, index, change });

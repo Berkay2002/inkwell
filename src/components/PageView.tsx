@@ -6,6 +6,7 @@ import { type Mark, useRedact } from "../lib/redact";
 import { cached } from "../lib/tiles";
 import type { Rect4 } from "../store";
 import { AnnotLayer } from "./comments/AnnotLayer";
+import { LinkLayer } from "./edit/LinkLayer";
 import { TextEditLayer } from "./edit/TextEditLayer";
 import { TileCanvas } from "./TileCanvas";
 
@@ -111,6 +112,7 @@ export const PageView = memo(function PageView(p: Props) {
       </div>
       <AnnotLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <TextEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
+      <LinkLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       {armed && (
         <div
           className="rd-capture"
