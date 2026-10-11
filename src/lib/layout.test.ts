@@ -13,6 +13,7 @@ import {
   stepZoom,
   tilesForRect,
   typicalSize,
+  unrotatePoint,
   visibleRange,
   type Size,
 } from "./layout";
@@ -108,6 +109,15 @@ describe("page space transform", () => {
     expect(pageSpaceTransform(letter, 1, 1)).toContain("translate(792px,0px) rotate(90deg)");
     expect(pageSpaceTransform(letter, 2, 1)).toContain("translate(612px,792px) rotate(180deg)");
     expect(pageSpaceTransform(letter, 3, 1)).toContain("translate(0px,612px) rotate(270deg)");
+  });
+
+  it("turns a point of the displayed page back into the page's own space", () => {
+    // The page's own point (100, 50): shown at (h - y, x) turned a quarter, (w - x, h - y) turned half, (y, w - x) turned three.
+    const [w, h] = letter;
+    expect(unrotatePoint(letter, 0, 100, 50)).toEqual([100, 50]);
+    expect(unrotatePoint(letter, 1, h - 50, 100)).toEqual([100, 50]);
+    expect(unrotatePoint(letter, 2, w - 100, h - 50)).toEqual([100, 50]);
+    expect(unrotatePoint(letter, 3, 50, w - 100)).toEqual([100, 50]);
   });
 });
 

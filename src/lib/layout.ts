@@ -152,6 +152,23 @@ export function pageSpaceTransform(size: Size, rot: Rot, zoom: number): string {
   return `${t} rotate(${rot * 90}deg) scale(${zoom})`;
 }
 
+/**
+ * A point of the displayed page (view rotation `rot` applied, origin top left) as the same point in the
+ * page's own space, whose size is `raw`: what a bookmark or a link stores, whatever way the view is turned.
+ */
+export function unrotatePoint(raw: Size, rot: Rot, x: number, y: number): [number, number] {
+  switch (rot) {
+    case 1:
+      return [y, raw[1] - x];
+    case 2:
+      return [raw[0] - x, raw[1] - y];
+    case 3:
+      return [raw[0] - y, x];
+    default:
+      return [x, y];
+  }
+}
+
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 export const ZOOM_MIN = 0.1;
 export const ZOOM_MAX = 16;
