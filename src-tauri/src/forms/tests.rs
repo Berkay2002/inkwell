@@ -408,3 +408,40 @@ fn detect_fields_on_a_flat_form_then_add_them_in_one_step() {
     let (eng2, id2) = reopen(&path);
     assert_eq!(list_all(&eng2, id2).unwrap().fields.len(), found.len());
 }
+
+fn study_sample(name: &str) -> Option<Vec<u8>> {
+    std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples").join(name)).ok()
+}
+
+/// The study sample Acrobat's auto-detection was recorded on: the labels it found are found here too.
+#[test]
+fn detection_finds_what_acrobat_found_on_the_study_flat_form() {
+    let Some(bytes) = study_sample("flatform-source.pdf") else { return };
+    let (eng, id, _) = open_bytes("study-flat", bytes);
+    let found = detect_one(&eng, id, 0).unwrap();
+    let names: Vec<String> = found.iter().map(|d| d.name.clone()).collect();
+    for want in ["Full name", "Email", "Date of birth", "I agree to the terms", "Send me updates"] {
+        assert!(names.iter().any(|n| n == want), "{want} missing from {names:?}");
+    }
+    assert!(found.iter().filter(|d| d.kind == FieldKind::Checkbox).count() >= 2, "{names:?}");
+}
+
+/// The study sample that already has widgets: every field is listed, filled and read back after a save.
+#[test]
+fn the_study_form_lists_fills_and_round_trips() {
+    let Some(bytes) = study_sample("form-source.pdf") else { return };
+    let (eng, id, path) = open_bytes("study-form", bytes);
+    let before = list_all(&eng, id).unwrap();
+    assert!(!before.fields.is_empty());
+    let mut filled = 0;
+    for f in before.fields.iter().filter(|f| f.kind == FieldKind::Text && !f.read_only) {
+        set_value_one(&eng, id, f.page, f.xref, &text("Alex"), EditSource::User).unwrap();
+        filled += 1;
+    }
+    assert!(filled > 0);
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    let after = list_all(&eng2, id2).unwrap();
+    assert_eq!(after.fields.len(), before.fields.len());
+    assert!(after.fields.iter().filter(|f| f.kind == FieldKind::Text && !f.read_only).all(|f| f.value == "Alex"));
+}

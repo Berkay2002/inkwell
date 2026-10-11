@@ -22,6 +22,8 @@ pub struct Word {
 pub struct Shapes {
     pub boxes: Vec<[f64; 4]>,
     pub rules: Vec<[f64; 4]>,
+    /// Vertical segments `[x, y0, y1]`, kept to close boxes drawn as four lines (see `close_boxes`).
+    verticals: Vec<[f64; 3]>,
 }
 
 impl Shapes {
@@ -35,11 +37,55 @@ impl Shapes {
         }
     }
 
-    /// A stroked segment; only horizontal ones count.
+    /// A stroked segment: horizontal ones are rules, vertical ones only help close boxes.
     pub fn add_segment(&mut self, a: [f64; 2], b: [f64; 2]) {
         if (a[1] - b[1]).abs() < 0.5 && (a[0] - b[0]).abs() > 1.0 {
             self.rules.push([a[0].min(b[0]), a[1], a[0].max(b[0]), a[1]]);
+        } else if (a[0] - b[0]).abs() < 0.5 && (a[1] - b[1]).abs() > 1.0 {
+            self.verticals.push([(a[0] + b[0]) / 2.0, a[1].min(b[1]), a[1].max(b[1])]);
         }
+    }
+
+    /// Boxes drawn as four separate lines (LaTeX `box`, many word processors) become boxes; their
+    /// top and bottom edges stop being rules.
+    pub fn close_boxes(&mut self) {
+        const TOL: f64 = 1.5;
+        if self.rules.len() > 1500 || self.verticals.is_empty() {
+            return;
+        }
+        let mut order: Vec<usize> = (0..self.rules.len()).collect();
+        order.sort_by(|a, b| self.rules[*a][0].total_cmp(&self.rules[*b][0]));
+        let spans = |x: f64, lo: f64, hi: f64, v: &[[f64; 3]]| v.iter().any(|s| (s[0] - x).abs() < TOL && s[1] <= lo + TOL && s[2] >= hi - TOL);
+        let mut used = vec![false; self.rules.len()];
+        let mut found = Vec::new();
+        for (oi, &i) in order.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
+            let top = self.rules[i];
+            for &j in &order[oi + 1..] {
+                let bot = self.rules[j];
+                if bot[0] - top[0] > TOL {
+                    break;
+                }
+                if used[j] || (bot[2] - top[2]).abs() > TOL || (bot[1] - top[1]).abs() < 3.0 || (bot[1] - top[1]).abs() > 400.0 {
+                    continue;
+                }
+                let (lo, hi) = (top[1].min(bot[1]), top[1].max(bot[1]));
+                if spans(top[0], lo, hi, &self.verticals) && spans(top[2], lo, hi, &self.verticals) {
+                    found.push([top[0], lo, top[2], hi]);
+                    used[i] = true;
+                    used[j] = true;
+                    break;
+                }
+            }
+        }
+        let mut k = 0;
+        self.rules.retain(|_| {
+            k += 1;
+            !used[k - 1]
+        });
+        self.boxes.extend(found);
     }
 }
 

@@ -773,6 +773,7 @@ fn shapes_of(p: &PdfPage, h: f64) -> Result<detect::Shapes> {
             }
         }
     }
+    s.close_boxes();
     Ok(s)
 }
 
