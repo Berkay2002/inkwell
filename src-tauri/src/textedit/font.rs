@@ -58,6 +58,8 @@ pub struct Metrics {
     pub has_to_unicode: bool,
     pub base_font: String,
     pub subset: bool,
+    /// The font program is in the file.
+    pub embedded: bool,
     pub bold: bool,
     pub italic: bool,
     pub limit: Option<Limit>,
@@ -128,6 +130,16 @@ pub const STD14: [[&str; 4]; 3] = [
     ["Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique"],
 ];
 
+/// See [`Metrics::summary`].
+pub struct Summary {
+    pub base_font: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub embedded: bool,
+    pub subset: bool,
+    pub usable: bool,
+}
+
 impl Metrics {
     /// Metrics for text without a usable font (Helvetica-like).
     pub fn fallback() -> Self {
@@ -149,10 +161,49 @@ impl Metrics {
             has_to_unicode: true,
             base_font: "Helvetica".into(),
             subset: false,
+            embedded: false,
             bold: false,
             italic: false,
             limit: None,
             code_len: 1,
+        }
+    }
+
+    /// What a font list shows of a font, from its dicts alone: no font program, CMap or
+    /// ToUnicode stream is read. `usable` is what [`Metrics::from_dict`] would allow for writing
+    /// (a CMap stream counts as horizontal unless it says `/WMode 1`).
+    pub fn summary(font: &PdfObject) -> Summary {
+        let subtype = name_of(&get(font, "Subtype")).unwrap_or_else(|| b"Type1".to_vec());
+        let composite = subtype == b"Type0";
+        let descendant = if composite { get(font, "DescendantFonts").and_then(|a| a.get_array(0).ok().flatten()) } else { None };
+        let descriptor = get(descendant.as_ref().unwrap_or(font), "FontDescriptor");
+        let base = name_of(&get(font, "BaseFont"))
+            .or_else(|| descriptor.as_ref().and_then(|d| name_of(&get(d, "FontName"))))
+            .map_or_else(|| String::from_utf8_lossy(&subtype).into_owned(), |n| String::from_utf8_lossy(&n).into_owned());
+        let (mut bold, mut italic) = style_from_name(&base);
+        if let Some(d) = &descriptor {
+            let flags = num(&get(d, "Flags")).unwrap_or(0.0) as i64;
+            italic |= flags & 64 != 0 || num(&get(d, "ItalicAngle")).unwrap_or(0.0).abs() > 0.1;
+            bold |= flags & 262_144 != 0 || num(&get(d, "FontWeight")).unwrap_or(0.0) >= 600.0;
+        }
+        let writable = if subtype == b"Type3" {
+            false
+        } else if composite {
+            match get(font, "Encoding") {
+                Some(e) if e.is_stream().unwrap_or(false) => num(&get(&e, "WMode")) != Some(1.0),
+                e => name_of(&e).as_deref() == Some(b"Identity-H"),
+            }
+        } else {
+            true
+        };
+        let to_unicode = get(font, "ToUnicode").is_some_and(|t| t.is_stream().unwrap_or(false));
+        Summary {
+            embedded: descriptor.as_ref().is_some_and(|d| ["FontFile", "FontFile2", "FontFile3"].iter().any(|k| get(d, k).is_some())),
+            subset: base.len() > 7 && base.as_bytes()[6] == b'+' && base[..6].bytes().all(|b| b.is_ascii_uppercase()),
+            usable: writable && (!composite || to_unicode),
+            base_font: base,
+            bold,
+            italic,
         }
     }
 
@@ -238,6 +289,7 @@ impl Metrics {
         if subtype != b"Type3" && !m.composite && m.widths.is_empty() {
             m.std14 = Font::new(std14_name(&base, m.bold, m.italic)).ok();
         }
+        m.embedded = descriptor.as_ref().is_some_and(|d| ["FontFile", "FontFile2", "FontFile3"].iter().any(|k| get(d, k).is_some()));
         m.subset = base.len() > 7 && base.as_bytes()[6] == b'+' && base[..6].bytes().all(|b| b.is_ascii_uppercase());
         if m.subset && !m.composite && subtype != b"Type3" {
             m.program = descriptor.as_ref().and_then(load_program);

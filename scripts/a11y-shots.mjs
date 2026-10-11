@@ -95,7 +95,7 @@ const big = await docByName("Big v1.pdf");
 await activate(comp.id);
 await until(`!!document.querySelector(".ax-toggle")`, "the Tools button");
 await click(".ax-toggle", "Tools");
-await until(`[...document.querySelectorAll("[role=menuitem], .menu button, button")].some((b) => b.textContent.includes("Check accessibility"))`, "the menu item");
+await until(`[...document.querySelectorAll("[role=menuitem], [role=option], .menu button, button")].some((b) => b.textContent.includes("Check accessibility"))`, "the menu item");
 report.menuItem = await click("button", "Check accessibility");
 await until(`!!document.querySelector(".a11y-panel")`, "the rail");
 await waitChecked(comp.id, "the first report");

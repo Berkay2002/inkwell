@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef } from "react";
 import { TILE, type Size, type TileRef, tileKeyStr } from "../lib/layout";
 import { type Stream, tileClient } from "../lib/tiles";
+import { TILE_DRAWN } from "./NaturalImage";
 
 interface Props {
   docId: number;
@@ -38,6 +39,8 @@ export const TileCanvas = memo(function TileCanvas({ docId, tile, size, zoom, st
         ctx.putImageData(new ImageData(d.rgba as Uint8ClampedArray<ArrayBuffer>, d.w, d.h), 0, 0);
         sub.drawn = true;
         canvas.dataset.ready = "1";
+        // pictures kept natural on dark pages copy from the page's tiles
+        canvas.dispatchEvent(new Event(TILE_DRAWN, { bubbles: true }));
         onDrawnRef.current?.(key);
       },
     };

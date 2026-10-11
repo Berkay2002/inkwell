@@ -372,6 +372,44 @@ fz_buffer *mupdf_pdf_read_stream(fz_context *ctx, pdf_obj *obj, mupdf_error_t **
     TRY_CATCH(fz_buffer*, NULL, pdf_load_stream(ctx, obj));
 }
 
+/* Like mupdf_pdf_read_stream, but fails once the decoded data would pass `limit` bytes: a small
+ * compressed stream that inflates to gigabytes (a decompression bomb) never fills memory. */
+fz_buffer *mupdf_pdf_read_stream_capped(fz_context *ctx, pdf_obj *obj, size_t limit, mupdf_error_t **errptr)
+{
+    fz_buffer *buf = NULL;
+    fz_stream *stm = NULL;
+    fz_var(buf);
+    fz_var(stm);
+    fz_try(ctx)
+    {
+        unsigned char chunk[65536];
+        size_t total = 0;
+        stm = pdf_open_stream(ctx, obj);
+        buf = fz_new_buffer(ctx, 4096);
+        for (;;)
+        {
+            size_t n = fz_read(ctx, stm, chunk, sizeof chunk);
+            if (n == 0)
+                break;
+            if (n > limit - total)
+                fz_throw(ctx, FZ_ERROR_GENERIC, "stream is larger than %zu bytes", limit);
+            fz_append_data(ctx, buf, chunk, n);
+            total += n;
+        }
+    }
+    fz_always(ctx)
+    {
+        fz_drop_stream(ctx, stm);
+    }
+    fz_catch(ctx)
+    {
+        fz_drop_buffer(ctx, buf);
+        buf = NULL;
+        mupdf_save_error(ctx, errptr);
+    }
+    return buf;
+}
+
 fz_buffer *mupdf_pdf_read_raw_stream(fz_context *ctx, pdf_obj *obj, mupdf_error_t **errptr)
 {
     TRY_CATCH(fz_buffer*, NULL, pdf_load_raw_stream(ctx, obj));

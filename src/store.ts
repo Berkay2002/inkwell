@@ -2,13 +2,14 @@ import { create } from "zustand";
 import * as api from "./lib/api";
 import type { OutlineItem } from "./lib/api";
 import { type Rot, type Size, clamp, ZOOM_MAX, ZOOM_MIN } from "./lib/layout";
+import { PAGE_DARK_KEY, type PageDark, parsePageDark } from "./lib/pageDark";
 import { keyOf } from "./lib/recent";
 import { dropCached } from "./lib/tiles";
 import { useRecents } from "./recents";
 
 export type ZoomMode = "fitWidth" | "fitPage" | "custom";
 export type Theme = "system" | "light" | "dark";
-export type SidebarPanel = "none" | "thumbs" | "outline";
+export type SidebarPanel = "none" | "thumbs" | "outline" | "attachments";
 export type Rect4 = [number, number, number, number];
 
 export interface Hit {
@@ -58,6 +59,8 @@ export interface DocState {
   /** Where the viewer was when the tab was last left. */
   scroll: { page: number; yPt: number };
   outline: OutlineItem[] | null;
+  /** One page label per page ("iii", "A-2") when the document has page labels, else empty. */
+  labels: string[];
   search: SearchState;
   nav: NavRequest | null;
 }
@@ -67,6 +70,7 @@ const emptySearch = (): SearchState => ({ query: "", id: null, hits: [], current
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
 const loadTheme = (): Theme => (localStorage.getItem("inkwell.theme") as Theme | null) ?? "system";
+const loadPageDark = (): PageDark => parsePageDark(localStorage.getItem(PAGE_DARK_KEY));
 
 interface Store {
   docs: Record<number, DocState>;
@@ -74,6 +78,8 @@ interface Store {
   active: number | null;
   sidebar: SidebarPanel;
   theme: Theme;
+  /** Dark pages: off, on, or follow the app theme (the default). A display filter, never the file. */
+  pageDark: PageDark;
   paletteOpen: boolean;
   searchOpen: boolean;
   password: { doc: number; path: string; error?: string } | null;
@@ -97,10 +103,13 @@ interface Store {
   setSidebar: (p: SidebarPanel) => void;
   toggleSidebar: (p: Exclude<SidebarPanel, "none">) => void;
   setTheme: (t: Theme) => void;
+  setPageDark: (p: PageDark) => void;
   setUi: (p: Partial<Pick<Store, "paletteOpen" | "searchOpen" | "error">>) => void;
   runSearch: (id: number, query: string) => void;
   stepHit: (id: number, dir: 1 | -1) => void;
   loadOutline: (id: number) => void;
+  /** Reads the page labels again (after an edit: one is shown in the page box and under every thumbnail). */
+  loadLabels: (id: number) => void;
 }
 
 let navNonce = 0;
@@ -130,6 +139,7 @@ export const useStore = create<Store>((set, get) => {
       organize: false,
       scroll: { page: 0, yPt: 0 },
       outline: null,
+      labels: [],
       search: emptySearch(),
       nav: null,
     };
@@ -152,6 +162,7 @@ export const useStore = create<Store>((set, get) => {
     active: null,
     sidebar: "thumbs",
     theme: loadTheme(),
+    pageDark: loadPageDark(),
     paletteOpen: false,
     searchOpen: false,
     password: null,
@@ -300,6 +311,10 @@ export const useStore = create<Store>((set, get) => {
       localStorage.setItem("inkwell.theme", theme);
       set({ theme });
     },
+    setPageDark: (pageDark) => {
+      localStorage.setItem(PAGE_DARK_KEY, pageDark);
+      set({ pageDark });
+    },
     setUi: (p) => set(p),
 
     runSearch: (id, query) => {
@@ -381,7 +396,23 @@ export const useStore = create<Store>((set, get) => {
         .then((o) => get().patch(id, { outline: o }))
         .catch(() => get().patch(id, { outline: [] }));
     },
+
+    loadLabels: (id) => {
+      const rev = get().docs[id]?.rev;
+      if (rev == null) return;
+      api
+        .labelsList(id)
+        .then((d) => {
+          const cur = get().docs[id];
+          // a later edit asks again; this answer is for a generation that is gone
+          if (cur && cur.rev === rev) get().patch(id, { labels: d.labels });
+        })
+        .catch(() => {});
+    },
   };
 });
+
+/** What page `i` (0-based) is called: its page label, or its number when the document has none. */
+export const pageLabel = (d: Pick<DocState, "labels">, i: number) => d.labels[i] ?? String(i + 1);
 
 export const useActiveDoc = () => useStore((s) => (s.active != null ? s.docs[s.active] : undefined));
