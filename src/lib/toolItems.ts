@@ -8,6 +8,7 @@ import { useConvert } from "./convertStore";
 import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
 import { useSearch } from "./searchStore";
+import { useSign } from "./sign";
 import { type ToolItem } from "./toolsCatalog";
 import { useToolPrefs } from "./toolPrefs";
 import { useTools } from "./toolsStore";
@@ -120,6 +121,40 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
       keywords: "permissions restrictions encryption properties",
       command: "security",
       onSelect: () => useProtect.getState().open("security", id),
+    },
+    {
+      id: "fill-sign",
+      group: "sign",
+      icon: "signature",
+      label: "Fill & Sign",
+      description: "Type on the page, tick boxes and add your signature",
+      detail: "Add text, ticks, the date and a saved signature or initials anywhere on a page, form or not.",
+      keywords: "fill sign signature initials type text checkmark checkbox tick date form handwritten esign",
+      onSelect: () => useSign.getState().setOpen(true),
+    },
+    {
+      id: "sign-digital",
+      group: "sign",
+      icon: "nib",
+      label: "Sign with a digital ID",
+      description: "Add a certificate signature that shows any later change",
+      detail: "Draw a box and sign with a digital ID from Windows or a .pfx file, or certify the document. Changes made after signing show in the signature.",
+      keywords: "digital signature certificate id certify pades pfx p12 secure esign",
+      onSelect: () => {
+        const sg = useSign.getState();
+        sg.setOpen(true);
+        sg.setTool("digital");
+      },
+    },
+    {
+      id: "signatures",
+      group: "sign",
+      icon: "check",
+      label: "Check signatures",
+      description: "See who signed and whether the file changed since",
+      detail: "Lists every signature with its signer, time and status, and says whether the document changed after each one.",
+      keywords: "signatures validate verify signed signer certificate trust valid",
+      onSelect: () => useSign.getState().setRail("list"),
     },
     {
       id: "export",
