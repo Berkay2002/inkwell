@@ -631,7 +631,7 @@ pub fn check(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &Ato
         }
         results.push(RuleResult { rule, name: rule.name(), group: rule.group(), status, hint: rule.hint(), fix: rule.fix(), findings });
     }
-    Ok(Report { pages: n, tagged: tree.exists, certified: crate::outline::certified(doc)?.is_some(), signed: crate::outline::signed(doc), results })
+    Ok(Report { pages: n, tagged: tree.exists, certified: crate::outline::certified(doc).map_or(true, |c| c.is_some()), signed: crate::outline::signed(doc), results })
 }
 
 fn elem_finding(t: &Tree, loc: &Locator, i: usize, what: &str) -> Finding {
@@ -1295,7 +1295,7 @@ pub struct Protection {
 }
 
 pub fn protection_doc(eng: &Engine, doc: DocId) -> Result<Protection> {
-    eng.read_custom(doc, |d| Ok(Protection { certified: crate::outline::certified(d)?.is_some(), signed: crate::outline::signed(d) }))
+    eng.read_custom(doc, |d| Ok(Protection { certified: crate::outline::certified(d).map_or(true, |c| c.is_some()), signed: crate::outline::signed(d) }))
 }
 
 /// Applies one fix as one undo step.

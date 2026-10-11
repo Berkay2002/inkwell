@@ -169,8 +169,19 @@ fn default_size(kind: FieldKind, r: &Rect) -> f32 {
     }
 }
 
+/// Authoring (adding, moving, deleting or changing a field, and the tab and calculation order) changes the structure
+/// of the form, which no certification allows: `/P` names what may change after it, and this is none of those. A
+/// document whose certification cannot be read is refused too.
+fn refuse_if_certified(doc: &PdfDocument) -> Result<()> {
+    if crate::outline::certified(doc).map_or(true, |c| c.is_some()) {
+        return Err(bad("This document is certified, and certification does not allow changes to its form fields. Inkwell leaves them as they are."));
+    }
+    Ok(())
+}
+
 /// Creates one field on `page`; returns the xref of its (first) widget.
 pub fn add(doc: &mut PdfDocument, page: u32, what: &NewField) -> Result<i32> {
+    refuse_if_certified(doc)?;
     let entries = scan(doc)?;
     let taken: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
     let rect = user_rect(doc, page, what.rect)?;
@@ -320,6 +331,7 @@ fn scan_page(doc: &PdfDocument, page: u32) -> Result<Vec<Entry>> {
 
 /// Moves and resizes a widget (`rect` in page space).
 pub fn move_to(doc: &mut PdfDocument, page: u32, xref: i32, rect: [f32; 4]) -> Result<()> {
+    refuse_if_certified(doc)?;
     let r = rect_of(rect);
     if r.x1 - r.x0 < 2.0 || r.y1 - r.y0 < 2.0 {
         return Err(bad("a field needs a rectangle of at least 2 x 2 points"));
@@ -336,6 +348,7 @@ pub fn move_to(doc: &mut PdfDocument, page: u32, xref: i32, rect: [f32; 4]) -> R
 /// Removes fields (every widget of a field named by a listed widget when `whole`, else just the
 /// listed widgets; a radio group that loses its last button goes too).
 pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
+    refuse_if_certified(doc)?;
     let entries = scan(doc)?;
     for x in xrefs {
         if !entries.iter().any(|e| e.page == page && e.xref == *x) {
@@ -428,6 +441,7 @@ pub(crate) fn put_js(doc: &PdfDocument, field: &mut PdfObject, key: &str, js: Op
 }
 
 pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> Result<()> {
+    refuse_if_certified(doc)?;
     let entries = scan(doc)?;
     let e = entries.iter().find(|e| e.page == page && e.xref == xref).ok_or_else(|| bad(format!("no field {xref} on page {}", page + 1)))?;
     let mut field = e.field.clone();
@@ -713,6 +727,7 @@ fn af_js_string(s: &str) -> String {
 /// already hold in `/Annots`. `tabs` writes the page's `/Tabs` (`R`ow, `C`olumn, `S`tructure) or
 /// removes it so the array order rules.
 pub fn set_tab_order(doc: &mut PdfDocument, page: u32, order: &[i32], tabs: Option<&str>) -> Result<()> {
+    refuse_if_certified(doc)?;
     let entries = scan_page(doc, page)?;
     let mut seen: Vec<i32> = Vec::with_capacity(order.len());
     for x in order {
@@ -751,6 +766,7 @@ pub fn set_tab_order(doc: &mut PdfDocument, page: u32, order: &[i32], tabs: Opti
 /// Row order (top to bottom, left to right within a row) or column order (left to right,
 /// top to bottom within a column) of the page's widgets, by their rectangles.
 pub fn arrange(doc: &mut PdfDocument, page: u32, by_row: bool) -> Result<()> {
+    refuse_if_certified(doc)?;
     let entries = scan_page(doc, page)?;
     let mut items: Vec<(i32, [f32; 4])> = entries.iter().map(|e| (e.xref, e.rect)).collect();
     let mid = |r: &[f32; 4]| ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0);
@@ -929,6 +945,7 @@ pub fn delete_many(eng: &Engine, doc: DocId, items: &[(u32, i32)], source: EditS
 /// Writes `/AcroForm /CO`: the calculated fields (`node` of each) in the order they run. Every field with a calculate script
 /// that is not listed follows, in its current order. Returns false when this is the order already written.
 pub fn set_calc_order(doc: &mut PdfDocument, nodes: &[i32]) -> Result<bool> {
+    refuse_if_certified(doc)?;
     let entries = scan(doc)?;
     let current = calc_order_of(doc, &entries);
     let mut seen: Vec<i32> = Vec::with_capacity(nodes.len());
