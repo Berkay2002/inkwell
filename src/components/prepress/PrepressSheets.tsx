@@ -9,6 +9,7 @@ import {
   type Units,
   BOX_KINDS,
   BOX_LABEL,
+  CERTIFIED_REASON,
   INTENT_LABEL,
   UNITS,
   WEIGHTS,
@@ -23,6 +24,7 @@ import {
   rectShown,
   refsFor,
   remainingText,
+  SIGNED_WARNING,
   showLength,
   svgPath,
   visibleBox,
@@ -82,6 +84,18 @@ function Seg<T extends string>({ label, value, items, onChange, disabled }: { la
       ))}
     </div>
   );
+}
+
+/** What the document's signatures mean for these sheets: certified is refused (the controls are off), signed is a warning. */
+function useLocked(doc: number) {
+  return usePrepress((s) => s.docs[doc]?.protection ?? null);
+}
+
+function Protect({ doc }: { doc: number }) {
+  const p = useLocked(doc);
+  if (p?.certified) return <p className="pr-note bad">{CERTIFIED_REASON}</p>;
+  if (p?.signed) return <p className="pr-note dim">{SIGNED_WARNING}</p>;
+  return null;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -208,13 +222,14 @@ function ConvertView({ sheet }: { sheet: ConvertSheet }) {
   const o = sheet.opts;
   const set = act().setConvert;
   const running = sheet.phase === "running";
+  const locked = useLocked(sheet.doc)?.certified === true;
   const problem = convertProblem(o, d.pageCount, d.currentPage);
   return (
     <section className="pr-sheet pp-sheet" role="dialog" aria-label="Convert Colors" onMouseDown={(e) => e.stopPropagation()}>
       <Head icon="swatches" title="Convert Colors" doc={d.name} />
       <div className="pr-body pp-sheet-body">
         {sheet.phase === "options" && (
-          <>
+          <fieldset className="pp-lock" disabled={locked}>
             <Field label="Convert to CMYK">
               <Check label="RGB colours and pictures" checked={o.rgb} onChange={(rgb) => set({ rgb })} />
               <Check label="Gray" checked={o.gray} onChange={(gray) => set({ gray })} />
@@ -256,7 +271,7 @@ function ConvertView({ sheet }: { sheet: ConvertSheet }) {
                 onChange={(output) => set({ output })}
               />
             </Field>
-          </>
+          </fieldset>
         )}
         {sheet.phase === "confirm" && (
           <>
@@ -289,6 +304,13 @@ function ConvertView({ sheet }: { sheet: ConvertSheet }) {
             ))}
           </div>
         )}
+        {sheet.phase === "unsaved" && sheet.result && (
+          <div className="pr-state">
+            <p className="pp-lead">Converted, but not saved as a new file.</p>
+            <p>{remainingText(sheet.result.report)}</p>
+          </div>
+        )}
+        {sheet.phase !== "running" && <Protect doc={sheet.doc} />}
         {sheet.error && <p className="pr-note bad">{sheet.error}</p>}
       </div>
       <footer className="pr-foot">
@@ -298,7 +320,7 @@ function ConvertView({ sheet }: { sheet: ConvertSheet }) {
             <button className="btn ghost" onClick={() => act().closeSheet()}>
               Cancel
             </button>
-            <button className="btn primary" disabled={!!problem} onClick={() => act().review()}>
+            <button className="btn primary" disabled={!!problem || locked} title={locked ? CERTIFIED_REASON : undefined} onClick={() => act().review()}>
               Review…
             </button>
           </>
@@ -308,7 +330,7 @@ function ConvertView({ sheet }: { sheet: ConvertSheet }) {
             <button className="btn ghost" onClick={() => act().backToOptions()}>
               Back
             </button>
-            <button className="btn primary" onClick={() => void act().runConvert()}>
+            <button className="btn primary" disabled={locked} onClick={() => void act().runConvert()}>
               {o.output === "newFile" ? "Convert and save as…" : "Convert"}
             </button>
           </>
@@ -317,6 +339,16 @@ function ConvertView({ sheet }: { sheet: ConvertSheet }) {
           <button className="btn ghost" onClick={() => act().cancelConvert()}>
             Cancel
           </button>
+        )}
+        {sheet.phase === "unsaved" && (
+          <>
+            <button className="btn ghost" onClick={() => act().closeSheet()}>
+              Close
+            </button>
+            <button className="btn primary" onClick={() => void act().saveConverted()}>
+              Save as…
+            </button>
+          </>
         )}
         {sheet.phase === "done" && (
           <button className="btn primary" onClick={() => act().closeSheet()}>
@@ -334,8 +366,10 @@ function MarksView({ sheet }: { sheet: MarksSheet }) {
   const d = useStore((s) => s.docs[sheet.doc]);
   const f = sheet.form;
   const paths = useMemo<MarkPath[]>(() => (sheet.preview ? parseMarks(sheet.preview.data.content) : []), [sheet.preview]);
-  if (!d) return null;
-  const size = d.sizes[sheet.page];
+  const locked = useLocked(sheet.doc)?.certified === true;
+  const size = d?.sizes[sheet.page];
+  // an undo took the page away; the sheet is closed in a moment
+  if (!d || !size) return null;
   const b = sheet.boxes;
   const crop = b ? visibleBox(b) : null;
   const rot = b?.rotate ?? 0;
@@ -371,6 +405,7 @@ function MarksView({ sheet }: { sheet: MarksSheet }) {
         </PagePreview>
         <div className="pr-side">
           <div className="pr-body">
+            <fieldset className="pp-lock" disabled={locked}>
             <Field label="Marks">
               {kinds.map((k) => (
                 <Check key={k.id} label={k.label} checked={f.marks[k.id]} disabled={sheet.busy} onChange={(on) => act().setMarkKind(k.id, on)} />
@@ -398,6 +433,8 @@ function MarksView({ sheet }: { sheet: MarksSheet }) {
               )}
             </div>
             <Scope scope={f.scope} range={f.range} count={d.pageCount} page={sheet.page} disabled={sheet.busy} set={(v) => act().setMarks(v)} />
+            </fieldset>
+            <Protect doc={sheet.doc} />
             {sheet.preview === null && !nothing && !sheet.error && <p className="pr-note dim">Reading the page…</p>}
             {sheet.error && <p className="pr-note bad">{sheet.error}</p>}
             {sheet.done && <p className="pr-note">{sheet.done}</p>}
@@ -407,7 +444,7 @@ function MarksView({ sheet }: { sheet: MarksSheet }) {
             <button className="btn ghost" disabled={sheet.busy} onClick={() => act().closeSheet()}>
               {sheet.done ? "Close" : "Cancel"}
             </button>
-            <button className="btn primary" disabled={sheet.busy || nothing} onClick={() => void act().applyMarks()}>
+            <button className="btn primary" disabled={sheet.busy || nothing || locked} title={locked ? CERTIFIED_REASON : undefined} onClick={() => void act().applyMarks()}>
               Add marks
             </button>
           </footer>
@@ -423,9 +460,11 @@ const Outline = ({ r, cls }: { r: Rect4; cls: string }) => <rect className={cls}
 
 function BoxesView({ sheet }: { sheet: BoxesSheet }) {
   const d = useStore((s) => s.docs[sheet.doc]);
-  if (!d) return null;
+  const locked = useLocked(sheet.doc)?.certified === true;
+  const size = d?.sizes[sheet.page];
+  // an undo took the page away; the sheet is closed in a moment
+  if (!d || !size) return null;
   const b = sheet.boxes;
-  const size = d.sizes[sheet.page];
   const crop = b ? visibleBox(b) : null;
   const rot = b?.rotate ?? 0;
   const box = newBox(sheet);
@@ -465,6 +504,7 @@ function BoxesView({ sheet }: { sheet: BoxesSheet }) {
         </PagePreview>
         <div className="pr-side">
           <div className="pr-body">
+            <fieldset className="pp-lock" disabled={locked}>
             <Field label="Set the">
               <select className="tl-field" aria-label="Box to set" value={sheet.box} disabled={sheet.busy} onChange={(e) => act().setBox(e.target.value as BoxKind)}>
                 {BOX_KINDS.map((k) => (
@@ -503,6 +543,8 @@ function BoxesView({ sheet }: { sheet: BoxesSheet }) {
               </button>
             </div>
             <Scope scope={sheet.scope} range={sheet.range} count={d.pageCount} page={sheet.page} disabled={sheet.busy} set={(v) => act().setBoxes(v)} />
+            </fieldset>
+            <Protect doc={sheet.doc} />
             {problem && <p className="pr-note bad">{problem}</p>}
             {sheet.error && <p className="pr-note bad">{sheet.error}</p>}
             {sheet.done && <p className="pr-note">{sheet.done}</p>}
@@ -513,7 +555,7 @@ function BoxesView({ sheet }: { sheet: BoxesSheet }) {
             <button className="btn ghost" disabled={sheet.busy} onClick={() => act().closeSheet()}>
               {sheet.done ? "Close" : "Cancel"}
             </button>
-            <button className="btn primary" disabled={sheet.busy || !b || !!problem} onClick={() => void act().applyBoxes()}>
+            <button className="btn primary" disabled={sheet.busy || !b || !!problem || locked} title={locked ? CERTIFIED_REASON : undefined} onClick={() => void act().applyBoxes()}>
               Set {BOX_LABEL[sheet.box].toLowerCase()}
             </button>
           </footer>

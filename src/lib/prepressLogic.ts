@@ -233,15 +233,17 @@ export function applyMargins(ref: Rect4, rot: number, m: Margins, outward: boole
 }
 
 /**
- * The same margins as the engine reads them: `[left, bottom, right, top]` of the page's own (unrotated) space,
- * outward positive. Each page then measures them from its own reference box.
+ * The margins as the engine reads them with `shown: true`: `[left, bottom, right, top]` of the page as it is
+ * shown, outward positive. Each page maps them through its own /Rotate and measures them from its own box.
  */
-export function userMargins(rot: number, m: Margins, outward: boolean): Rect4 {
-  const edges = EDGE_OF[rot] ?? EDGE_OF[0];
-  const out: Rect4 = [0, 0, 0, 0];
-  for (const side of SIDES) out[edges[side]] = outward ? m[side] : -m[side];
-  return out;
+export function shownMargins(m: Margins, outward: boolean): Rect4 {
+  return SIDES.map((side) => (outward ? m[side] : -m[side])) as Rect4;
 }
+
+/** Why the sheets do nothing on a certified document, and what a signed one gets instead of a rewrite. */
+export const CERTIFIED_REASON = "This document is certified. Any change would void the certification, so Inkwell leaves it as it is.";
+export const SIGNED_WARNING =
+  "This document is signed. Changes are added to the end of the file, so the signatures keep verifying the original, but the file shows as changed after signing.";
 
 /** The margins that take `ref` to `box`: `applyMargins` backwards. */
 export function marginsBetween(ref: Rect4, box: Rect4, rot: number, outward: boolean): Margins {

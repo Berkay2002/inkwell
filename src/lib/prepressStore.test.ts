@@ -27,6 +27,8 @@ vi.mock("./prepressApi", () => ({
     ink: vi.fn(),
     inkAt: vi.fn(),
     convert: vi.fn(),
+    saveOther: vi.fn(),
+    protection: vi.fn(),
     boxes: vi.fn(),
     marks: vi.fn(),
     pageBoxes: vi.fn(),
@@ -38,10 +40,10 @@ vi.mock("./prepressApi", () => ({
 import { useStore } from "../store";
 import * as api from "./api";
 import { applyState } from "./edit";
-import { usePlates } from "./platesView";
+import { usePlates, viewFailed } from "./platesView";
 import { prepressApi, type PageBoxes } from "./prepressApi";
 import { toPt } from "./prepressLogic";
-import { newBox, usePrepress } from "./prepressStore";
+import { currentSeps, newBox, usePrepress } from "./prepressStore";
 
 const flush = async () => {
   for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
@@ -79,7 +81,8 @@ beforeEach(() => {
   vi.mocked(prepressApi.marksPreview).mockResolvedValue({ media: [-10, -10, 622, 802], trim: [20, 20, 592, 772], bleed: [11, 11, 601, 781], content: "0.25 w 0 0 m 5 0 l S", notes: [] });
   vi.mocked(prepressApi.marks).mockResolvedValue({ state: state(4), notes: [] });
   vi.mocked(prepressApi.boxes).mockResolvedValue(state(4));
-  vi.mocked(prepressApi.convert).mockResolvedValue({ state: state(4), report });
+  vi.mocked(prepressApi.convert).mockResolvedValue({ state: state(4), report, saved: false, saveError: null });
+  vi.mocked(prepressApi.protection).mockResolvedValue({ certified: false, signed: false });
   vi.mocked(api.saveDocument).mockResolvedValue(state(5));
 });
 
@@ -145,6 +148,51 @@ describe("Output Preview", () => {
     st().clearProbe(1);
     expect(st().get(1).probe).toBeNull();
   });
+
+  it("drops an answer that was asked before the pointer left or the document changed", async () => {
+    st().setOpen(true);
+    await flush();
+    const answers: ((v: unknown) => void)[] = [];
+    vi.mocked(prepressApi.inkAt).mockImplementation(() => new Promise((r) => answers.push(r)) as never);
+    st().probe(1, 2, 10, 10);
+    st().clearProbe(1);
+    answers[0]({ page: 2, planes: [], total: 100 });
+    await flush();
+    expect(st().get(1).probe).toBeNull();
+    st().probe(1, 2, 20, 20);
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 4 } } });
+    answers[1]({ page: 2, planes: [], total: 120 });
+    await flush();
+    expect(st().get(1).probe).toBeNull();
+    // the next answer is for the new generation and is kept with it
+    st().probe(1, 2, 30, 30);
+    answers[2]({ page: 2, planes: [], total: 130 });
+    await flush();
+    expect(st().get(1).probe).toMatchObject({ page: 2, rev: 4, at: { total: 130 } });
+  });
+
+  it("names plates from the inks of the page and generation on screen only", async () => {
+    st().setOpen(true);
+    await flush();
+    const o = st().get(1);
+    const d = useStore.getState().docs[1];
+    expect(currentSeps(o, d)).toEqual(seps);
+    expect(currentSeps(o, { ...d, currentPage: 3 })).toBeNull();
+    expect(currentSeps(o, { ...d, rev: 9 })).toBeNull();
+  });
+
+  it("asks for the view again when its tiles fail", async () => {
+    st().setOpen(true);
+    await flush();
+    expect(usePlates.getState().view).toBe(1);
+    viewFailed(7); // a view that is no longer the one in use does not count
+    await flush();
+    expect(prepressApi.view).toHaveBeenCalledTimes(1);
+    viewFailed(1);
+    await flush();
+    expect(prepressApi.view).toHaveBeenCalledTimes(2);
+    expect(usePlates.getState().view).toBe(2);
+  });
 });
 
 describe("Convert Colors", () => {
@@ -165,17 +213,36 @@ describe("Convert Colors", () => {
     st().openConvert();
     st().review();
     vi.mocked(api.pickSave).mockResolvedValue({ token: "tok-new", path: "C:\\d\\new.pdf" });
+    vi.mocked(prepressApi.convert).mockResolvedValue({ state: state(5), report, saved: true, saveError: null });
     await st().runConvert();
     expect(api.pickSave).toHaveBeenCalledWith("a (CMYK).pdf", { doc: 1 }, "pdf");
+    // one command does both, so nothing can land between the conversion and the save
     expect(prepressApi.convert).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(prepressApi.convert).mock.calls[0].slice(1, 4)).toEqual([
+    expect(vi.mocked(prepressApi.convert).mock.calls[0].slice(1, 5)).toEqual([
       1,
       { gray: true, rgb: true, spot: false, grayToK: true, preserveBlack: true, intent: "device" },
       null,
+      "tok-new",
     ]);
-    expect(api.saveDocument).toHaveBeenCalledWith(1, "tok-new");
-    expect(applyState).toHaveBeenCalledTimes(2);
+    expect(api.saveDocument).not.toHaveBeenCalled();
+    expect(applyState).toHaveBeenCalledTimes(1);
     expect(st().sheet).toMatchObject({ phase: "done", result: { path: "C:\\d\\new.pdf" } });
+  });
+
+  it("a failed write keeps the conversion and offers the save again, never a second conversion", async () => {
+    st().openConvert();
+    st().review();
+    vi.mocked(api.pickSave).mockResolvedValue({ token: "tok-1", path: "C:\\d\\new.pdf" });
+    vi.mocked(prepressApi.convert).mockResolvedValue({ state: state(4), report, saved: false, saveError: "Access is denied." });
+    await st().runConvert();
+    expect(applyState).toHaveBeenCalledTimes(1);
+    expect(st().sheet).toMatchObject({ phase: "unsaved", error: expect.stringMatching(/converted in the open document.*Access is denied/) });
+    vi.mocked(api.pickSave).mockResolvedValue({ token: "tok-2", path: "C:\\d\\other-name.pdf" });
+    vi.mocked(prepressApi.saveOther).mockResolvedValue({ rev: 4, path: "C:\\d\\other-name.pdf" } as never);
+    await st().saveConverted();
+    expect(prepressApi.saveOther).toHaveBeenCalledWith(1, "tok-2");
+    expect(prepressApi.convert).toHaveBeenCalledTimes(1);
+    expect(st().sheet).toMatchObject({ phase: "done", error: null, result: { path: "C:\\d\\other-name.pdf" } });
   });
 
   it("never writes over the original file or one that is open in another tab", async () => {
@@ -215,6 +282,7 @@ describe("Convert Colors", () => {
     expect(api.pickSave).not.toHaveBeenCalled();
     expect(api.saveDocument).not.toHaveBeenCalled();
     expect(vi.mocked(prepressApi.convert).mock.calls[0][2]).toMatchObject({ pages: [2] });
+    expect(vi.mocked(prepressApi.convert).mock.calls[0][4]).toBeNull();
     expect(applyState).toHaveBeenCalledTimes(1);
     expect(st().sheet).toMatchObject({ phase: "done", result: { path: null } });
   });
@@ -306,7 +374,8 @@ describe("Page boxes", () => {
     expect(newBox(sheet)?.map((v) => +v.toFixed(3))).toEqual([20 - mm, 20 - mm, 592 + mm, 772 + mm].map((v) => +v.toFixed(3)));
     await st().applyBoxes();
     expect(prepressApi.boxes).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(prepressApi.boxes).mock.calls[0][1]).toEqual({ kind: "bleed", from: "trim", margin: [mm, mm, mm, mm] });
+    // as shown: each page maps the margins by its own /Rotate in the engine
+    expect(vi.mocked(prepressApi.boxes).mock.calls[0][1]).toEqual({ kind: "bleed", from: "trim", margin: [mm, mm, mm, mm], shown: true });
     expect(applyState).toHaveBeenCalledTimes(1);
     expect(st().sheet).toMatchObject({ busy: false, done: "Set the bleed box on 12 pages." });
   });
@@ -331,6 +400,68 @@ describe("Page boxes", () => {
     st().setBoxes({ scope: "range", range: "1, 3-4" });
     await st().applyBoxes();
     expect(vi.mocked(prepressApi.boxes).mock.calls[1][1]).toMatchObject({ pages: [0, 2, 3] });
+  });
+});
+
+describe("certified and signed documents", () => {
+  it("refuses all three edits on a certified document and says why", async () => {
+    vi.mocked(prepressApi.protection).mockResolvedValue({ certified: true, signed: true });
+    st().openMarks();
+    await flush();
+    expect(st().get(1).protection).toEqual({ certified: true, signed: true });
+    await st().applyMarks();
+    expect(st().sheet).toMatchObject({ error: expect.stringMatching(/certified/) });
+    st().openBoxes();
+    await flush();
+    await st().applyBoxes();
+    expect(st().sheet).toMatchObject({ error: expect.stringMatching(/certified/) });
+    st().openConvert();
+    st().review();
+    await st().runConvert();
+    expect(st().sheet).toMatchObject({ error: expect.stringMatching(/certified/) });
+    expect(prepressApi.marks).not.toHaveBeenCalled();
+    expect(prepressApi.boxes).not.toHaveBeenCalled();
+    expect(prepressApi.convert).not.toHaveBeenCalled();
+  });
+
+  it("lets a signed document through: the engine keeps its save incremental", async () => {
+    vi.mocked(prepressApi.protection).mockResolvedValue({ certified: false, signed: true });
+    st().openMarks();
+    await flush();
+    await st().applyMarks();
+    expect(prepressApi.marks).toHaveBeenCalledTimes(1);
+    expect(st().get(1).protection).toEqual({ certified: false, signed: true });
+  });
+});
+
+describe("a sheet while the document changes under it", () => {
+  const docWith = (p: object) => useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], ...p } as never } });
+
+  it("is closed when an undo takes its page away", async () => {
+    st().openBoxes();
+    await flush();
+    docWith({ pageCount: 2, rev: 4 });
+    expect(st().sheet).toBeNull();
+  });
+
+  it("reads the page again, and the margins from what the page has, when the generation moves", async () => {
+    st().openBoxes();
+    await flush();
+    st().setMargin("left", 50);
+    vi.mocked(prepressApi.pageBoxes).mockResolvedValue({ ...boxes, trim: [30, 30, 582, 762], bleed: [21, 21, 591, 771] });
+    docWith({ rev: 4 });
+    await flush();
+    expect(prepressApi.pageBoxes).toHaveBeenCalledTimes(2);
+    expect(st().sheet).toMatchObject({ boxes: { trim: [30, 30, 582, 762] }, margins: { left: 9, bottom: 9, right: 9, top: 9 } });
+  });
+
+  it("draws the marks of the new generation", async () => {
+    st().openMarks();
+    await flush();
+    expect(prepressApi.marksPreview).toHaveBeenCalledTimes(1);
+    docWith({ rev: 4 });
+    await flush();
+    expect(prepressApi.marksPreview).toHaveBeenCalledTimes(2);
   });
 });
 

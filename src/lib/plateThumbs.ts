@@ -54,7 +54,8 @@ export const pageThumb = (doc: number, page: number, size: Size, rev: number) =>
 
 /** One plate of the page on its own (the plate's `key` as in `plateList`). */
 export const plateThumb = (doc: number, page: number, size: Size, rev: number, key: string, seps: PageSeps | null, overprint: boolean) =>
-  once(`${doc}/${rev}/${page}/${key}/${overprint ? "o" : "k"}`, async () => {
+  // the spots are part of the picture: the same plate of the same page is drawn again when they differ
+  once(`${doc}/${rev}/${page}/${key}/${overprint ? "o" : "k"}/${seps?.spots.map((s) => s.name).join("|") ?? ""}`, async () => {
     // always the same limit and no other hidden names: switching plates or the limit does not redraw the strip
     const view = plateOnly({ ...DEFAULT_OUTPUT, overprint }, key, seps);
     return draw(doc, page, size, rev, PLATE_STREAM, await prepressApi.view(doc, view));

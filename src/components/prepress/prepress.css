@@ -160,6 +160,16 @@
   height: auto;
   max-height: 90vh;
 }
+/* a native fieldset turns every control inside it off; it is only that, not a visible group */
+.pp-lock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
 .pp-sheet-body {
   min-height: 220px;
 }

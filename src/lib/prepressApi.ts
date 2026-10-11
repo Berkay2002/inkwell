@@ -78,13 +78,18 @@ export interface PageBoxes {
   stated: Record<BoxKind, boolean>;
 }
 
-/** The box as `rect`, or as the box `from` moved outward by `margin` `[left, bottom, right, top]` (user space, negative inward). */
+/**
+ * The box as `rect`, or as the box `from` moved outward by `margin` `[left, bottom, right, top]` (negative inward).
+ * With `shown` the margin is of the page as it is shown and each page maps it through its own /Rotate; otherwise
+ * it is in the page's own space.
+ */
 export interface BoxSpec {
   pages?: number[] | null;
   kind: BoxKind;
   rect?: Rect4;
   from?: BoxKind | "media";
   margin?: Rect4;
+  shown?: boolean;
 }
 
 export interface MarkSet {
@@ -133,6 +138,23 @@ export interface ConvertReport {
   notes: string[];
 }
 
+/** The result of a conversion that was also saved as another file (`saveTo`). */
+export interface Converted {
+  state: EditState;
+  report: ConvertReport;
+  /** The file was written. */
+  saved: boolean;
+  /** The colours were converted in the open document and writing the file failed. */
+  saveError: string | null;
+}
+
+export interface Protection {
+  /** A /DocMDP signature: the engine refuses every edit. */
+  certified: boolean;
+  /** Signed: edits stay incremental, the signatures keep verifying. */
+  signed: boolean;
+}
+
 export interface Progress {
   done: number;
   pages: number;
@@ -152,9 +174,15 @@ export const prepressApi = {
   ink: (job: number, doc: number, pages: number[] | null, limit: number, trimOnly: boolean, onProgress?: (p: Progress) => void) =>
     invoke<InkReport[]>("prepress_ink", { job, doc, pages, limit, trimOnly, onProgress: channel(onProgress) }),
   inkAt: (doc: number, page: number, x: number, y: number) => invoke<InkAt>("prepress_ink_at", { doc, page, x, y }),
-  /** `profile`: an open token of a CMYK ICC profile, for `intent: "profile"`. */
-  convert: (job: number, doc: number, spec: ConvertSpec, profile: string | null, onProgress?: (p: Progress) => void) =>
-    invoke<{ state: EditState; report: ConvertReport }>("prepress_convert", { job, doc, spec, profile, onProgress: channel(onProgress) }),
+  /**
+   * `profile`: an open token of a CMYK ICC profile, for `intent: "profile"`. `saveTo`: a save token; the engine
+   * then also writes the result there as Save as, in the same command, and refuses the document's own file.
+   */
+  convert: (job: number, doc: number, spec: ConvertSpec, profile: string | null, saveTo: string | null, onProgress?: (p: Progress) => void) =>
+    invoke<Converted>("prepress_convert", { job, doc, spec, profile, saveTo, onProgress: channel(onProgress) }),
+  /** Save as after a conversion whose write failed: no second conversion. */
+  saveOther: (doc: number, to: string) => invoke<EditState>("prepress_save_other", { doc, to }),
+  protection: (doc: number) => invoke<Protection>("prepress_protection", { doc }),
   boxes: (doc: number, spec: BoxSpec) => invoke<EditState>("prepress_boxes", { doc, spec }),
   marks: (doc: number, spec: MarksSpec) => invoke<{ state: EditState; notes: string[] }>("prepress_marks", { doc, spec }),
   pageBoxes: (doc: number, page: number) => invoke<PageBoxes>("prepress_page_boxes", { doc, page }),

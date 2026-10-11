@@ -27,7 +27,7 @@ import {
   showLength,
   toPt,
   togglePlate,
-  userMargins,
+  shownMargins,
 } from "./prepressLogic";
 
 const seps: PageSeps = {
@@ -139,11 +139,9 @@ describe("margins", () => {
     }
   });
 
-  it("sends the engine outward-positive margins in the page's own space", () => {
-    expect(userMargins(0, m, true)).toEqual([1, 2, 3, 4]);
-    expect(userMargins(0, m, false)).toEqual([-1, -2, -3, -4]);
-    // shown left = user bottom (index 1), shown top = user left (index 0)
-    expect(userMargins(90, { left: 1, bottom: 2, right: 3, top: 4 }, true)).toEqual([4, 1, 2, 3]);
+  it("sends the engine the margins as shown, outward positive; each page maps them by its own turn", () => {
+    expect(shownMargins(m, true)).toEqual([1, 2, 3, 4]);
+    expect(shownMargins(m, false)).toEqual([-1, -2, -3, -4]);
   });
 
   it("puts a user-space box on the page as shown", () => {

@@ -34,7 +34,7 @@ export function PlateThumb(p: {
     return () => {
       live = false;
     };
-  }, [seen, p.doc, p.page, p.rev, p.plate.key, p.overprint]);
+  }, [seen, p.doc, p.page, p.rev, p.plate.key, p.overprint, p.seps]);
   const [w, h] = p.size;
   return (
     <button ref={box} className={p.solo ? "pp-thumb on" : "pp-thumb"} aria-pressed={p.solo} title={p.solo ? "Show all plates again" : `Show ${p.plate.name} alone`} onClick={p.onClick}>

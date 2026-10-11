@@ -10,10 +10,12 @@ import {
   type MarksPreview,
   type PageBoxes,
   type PageSeps,
+  type Protection,
   type ConvertReport,
   prepressApi,
 } from "./prepressApi";
 import {
+  CERTIFIED_REASON,
   type ConvertOptions,
   type MarksForm,
   type Margins,
@@ -41,9 +43,9 @@ import {
   onlyPlate,
   parseLimit,
   scopePages,
+  shownMargins,
   toPt,
   togglePlate,
-  userMargins,
   wireView,
 } from "./prepressLogic";
 
@@ -74,14 +76,23 @@ export interface OutputDoc {
   reporting: boolean;
   /** Draw the areas above the limit on the page. */
   showAreas: boolean;
-  /** The ink at the last point the pointer was over. */
-  probe: { page: number; at: InkAt } | null;
+  /** The ink at the last point the pointer was over, for the page and generation it was read on. */
+  probe: { page: number; rev: number; at: InkAt } | null;
+  /** Certified (edits refused) or signed (edits stay incremental); read once per document. */
+  protection: Protection | null;
   error: string | null;
 }
 
-const freshDoc = (): OutputDoc => ({ settings: DEFAULT_OUTPUT, seps: null, report: null, reporting: false, showAreas: true, probe: null, error: null });
+const freshDoc = (): OutputDoc => ({ settings: DEFAULT_OUTPUT, seps: null, report: null, reporting: false, showAreas: true, probe: null, protection: null, error: null });
 
-export type Phase = "options" | "confirm" | "running" | "done";
+/** The inks of the page the document shows now: what was read for another page or generation is not them. */
+export function currentSeps(o: OutputDoc | undefined, d: { currentPage: number; rev: number } | undefined): PageSeps | null {
+  const s = o?.seps;
+  return s && d && s.page === d.currentPage && s.rev === d.rev ? s.data : null;
+}
+
+/** `unsaved`: converted in the open document, writing the new file failed; only the save can be tried again. */
+export type Phase = "options" | "confirm" | "running" | "unsaved" | "done";
 
 export interface ConvertSheet {
   kind: "convert";
@@ -151,12 +162,17 @@ interface PrepressStore {
   probe: (doc: number, page: number, x: number, y: number) => void;
   clearProbe: (doc: number) => void;
 
+  /** The sheet's page or the document's pages changed under it (undo, an assistant edit): read it again or close. */
+  resync: () => void;
+
   openConvert: (doc?: number) => void;
   setConvert: (p: Partial<ConvertOptions>) => void;
   review: () => void;
   backToOptions: () => void;
   pickProfile: () => Promise<void>;
   runConvert: () => Promise<void>;
+  /** After a failed write: choose a file again and save the converted document there. */
+  saveConverted: () => Promise<void>;
   cancelConvert: () => void;
 
   openMarks: (doc?: number) => void;
@@ -268,6 +284,8 @@ export const usePrepress = create<PrepressStore>((set, get) => {
   /** The probe asks one at a time and only for the newest point: a moving pointer never queues. */
   const waiting = new Map<number, { page: number; x: number; y: number }>();
   const asking = new Set<number>();
+  /** Counts the times the pointer left a document's page: an answer asked before is dropped. */
+  const left = new Map<number, number>();
   async function pump(doc: number) {
     if (asking.has(doc)) return;
     asking.add(doc);
@@ -275,10 +293,14 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       for (let q = waiting.get(doc); q; q = waiting.get(doc)) {
         waiting.delete(doc);
         if (!get().open || !st().docs[doc]) break;
+        const gone = left.get(doc) ?? 0;
+        const rev = st().docs[doc]?.rev;
         try {
           const at = await prepressApi.inkAt(doc, q.page, q.x, q.y);
-          // the pointer may have left while this was asked
-          if (get().open && get().docs[doc]) patchDoc(doc, { probe: { page: q.page, at } });
+          // the pointer may have left, or the document changed, while this was asked
+          if (get().open && get().docs[doc] && (left.get(doc) ?? 0) === gone && st().docs[doc]?.rev === rev && rev !== undefined) {
+            patchDoc(doc, { probe: { page: q.page, rev, at } });
+          }
         } catch {
           // a point that cannot be read just keeps the last answer
         }
@@ -297,13 +319,58 @@ export const usePrepress = create<PrepressStore>((set, get) => {
 
   // ---- sheets ----
 
+  /** Whether the document is certified or signed; the engine refuses a certified one itself, this is for the screens. */
+  async function loadProtection(doc: number) {
+    if (get().docs[doc]?.protection || !st().docs[doc]) return;
+    try {
+      patchDoc(doc, { protection: await prepressApi.protection(doc) });
+    } catch {
+      // unknown: the sheets stay usable and the engine says no where it must
+    }
+  }
+
+  const certified = (doc: number) => get().docs[doc]?.protection?.certified === true;
+
   async function marksBoxes(doc: number, page: number) {
+    const rev = st().docs[doc]?.rev;
     try {
       const boxes = await prepressApi.pageBoxes(doc, page);
-      patchSheet<MarksSheet>("marks", { boxes });
+      // a newer generation asks again
+      if (st().docs[doc]?.rev === rev) patchSheet<MarksSheet>("marks", { boxes });
     } catch (e) {
       patchSheet<MarksSheet>("marks", { error: msg(e) });
     }
+  }
+
+  /** The boxes of the sheet's page, and the margins back to what the page has. */
+  async function boxesOf(doc: number, page: number) {
+    const rev = st().docs[doc]?.rev;
+    try {
+      const boxes = await prepressApi.pageBoxes(doc, page);
+      const s = sheet<BoxesSheet>("boxes");
+      if (s && s.doc === doc && s.page === page && st().docs[doc]?.rev === rev) patchSheet<BoxesSheet>("boxes", { boxes, margins: currentMargins(boxes, s.box, s.ref) });
+    } catch (e) {
+      patchSheet<BoxesSheet>("boxes", { error: msg(e) });
+    }
+  }
+
+  /** The file to convert into, as a save token. Null: cancelled, or refused with the reason on the sheet. */
+  async function convertTarget(d: { id: number; name: string; path: string }, opts: ConvertOptions): Promise<string | null> {
+    const f = await api.pickSave(convertedFileName(stem(d.name), opts), { doc: d.id }, "pdf");
+    if (!f) return null;
+    // the confirmation promises the original is not touched (the engine checks again, by file identity)
+    const back = (error: string) => (patchSheet<ConvertSheet>("convert", { error }), null);
+    if (samePath(f.path, d.path)) return back("That is this document's own file. Choose another name, or convert in this document and Save.");
+    if (Object.values(st().docs).some((o) => o.id !== d.id && samePath(o.path, f.path))) return back("That file is open in another tab. Choose another name.");
+    return f.token;
+  }
+
+  /** A created file nobody had saved has a scratch copy; it is not needed once there is a file. */
+  function dropScratch(doc: number) {
+    const scratch = st().docs[doc]?.scratch;
+    if (!scratch) return;
+    st().patch(doc, { scratch: null });
+    void api.discardScratch(scratch).catch(() => {});
   }
 
   return {
@@ -331,6 +398,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
     refresh: async (doc) => {
       if (!get().open || !st().docs[doc]) return;
       if (!get().docs[doc]) set((s) => ({ docs: { ...s.docs, [doc]: freshDoc() } }));
+      void loadProtection(doc);
       await syncView(doc);
       await Promise.all([loadSeps(doc), loadReport(doc)]);
     },
@@ -338,7 +406,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
     setMode: (doc, mode) => changeSettings(doc, (o) => ({ ...o, mode })),
     setOverprint: (doc, overprint) => changeSettings(doc, (o) => ({ ...o, overprint })),
     toggle: (doc, key) => changeSettings(doc, (o) => togglePlate(o, key)),
-    solo: (doc, key) => changeSettings(doc, (o) => clickSolo(o, key, get().docs[doc]?.seps?.data ?? null)),
+    solo: (doc, key) => changeSettings(doc, (o) => clickSolo(o, key, currentSeps(get().docs[doc], st().docs[doc]))),
     showAll: (doc) => changeSettings(doc, allPlates),
 
     setLimit: (doc, text) => {
@@ -359,6 +427,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
     },
     clearProbe: (doc) => {
       waiting.delete(doc);
+      left.set(doc, (left.get(doc) ?? 0) + 1);
       patchDoc(doc, { probe: null });
     },
 
@@ -368,6 +437,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       const d = docOf(docId);
       if (!d || sheet<ConvertSheet>("convert")?.phase === "running") return;
       set({ sheet: { kind: "convert", doc: d.id, phase: "options", opts: DEFAULT_CONVERT, progress: 0, error: null, job: 0, result: null } });
+      void loadProtection(d.id);
     },
 
     setConvert: (p) => {
@@ -403,57 +473,66 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       const s = sheet<ConvertSheet>("convert");
       const d = s && st().docs[s.doc];
       if (!s || !d || s.phase !== "confirm") return;
+      if (certified(d.id)) return patchSheet<ConvertSheet>("convert", { error: CERTIFIED_REASON });
       const problem = convertProblem(s.opts, d.pageCount, d.currentPage);
       if (problem) return patchSheet<ConvertSheet>("convert", { phase: "options", error: problem });
       const doc = d.id;
       let to: string | null = null;
       if (s.opts.output === "newFile") {
-        const f = await api.pickSave(convertedFileName(stem(d.name), s.opts), { doc }, "pdf");
-        if (!f) return;
-        // the confirmation promises the original is not touched
-        const back = (error: string) => patchSheet<ConvertSheet>("convert", { error });
-        if (samePath(f.path, d.path)) return back("That is this document's own file. Choose another name, or convert in this document and Save.");
-        if (Object.values(st().docs).some((o) => o.id !== doc && samePath(o.path, f.path))) return back("That file is open in another tab. Choose another name.");
-        to = f.token;
+        to = await convertTarget(d, s.opts);
+        if (to === null) return;
       }
       // the dialog was open a while
       const now = sheet<ConvertSheet>("convert");
       if (!now || now.phase !== "confirm" || !st().docs[doc]) return;
       const job = ++jobSeq;
       patchSheet<ConvertSheet>("convert", { phase: "running", progress: 0, error: null, job });
-      let report: ConvertReport | null = null;
       try {
         const spec = convertSpec(s.opts, d.pageCount, d.currentPage);
+        const profile = s.opts.intent === "profile" ? (s.opts.profile?.token ?? null) : null;
+        // one command: the conversion and the Save as cannot be parted by another edit (an undo, the assistant)
         const out = await queued(doc, () =>
-          prepressApi.convert(job, doc, spec, s.opts.intent === "profile" ? (s.opts.profile?.token ?? null) : null, (p) => {
+          prepressApi.convert(job, doc, spec, profile, to, (p) => {
             if (p.pages > 0) patchSheet<ConvertSheet>("convert", { progress: p.done / p.pages });
           }),
         );
-        report = out.report;
         applyState(doc, out.state);
-        let path: string | null = null;
-        if (to !== null) {
-          // Save as: the document then lives in the new file and the original stays as it was
-          const saved = await queued(doc, () => api.saveDocument(doc, to));
-          applyState(doc, saved);
-          path = saved.path;
-          // a created file nobody had saved has a scratch copy; it is not needed once there is a file
-          const scratch = st().docs[doc]?.scratch;
-          if (scratch) {
-            st().patch(doc, { scratch: null });
-            void api.discardScratch(scratch).catch(() => {});
-          }
+        if (to !== null && !out.saved) {
+          // converted in the open document; only the write is tried again, never a second conversion
+          return patchSheet<ConvertSheet>("convert", {
+            phase: "unsaved",
+            progress: 1,
+            result: { report: out.report, path: null },
+            error: `The colours were converted in the open document, but saving the new file failed: ${out.saveError ?? "unknown error"} Undo takes the conversion back.`,
+          });
         }
-        patchSheet<ConvertSheet>("convert", { phase: "done", progress: 1, result: { report: out.report, path } });
+        if (out.saved) dropScratch(doc);
+        patchSheet<ConvertSheet>("convert", { phase: "done", progress: 1, result: { report: out.report, path: out.saved ? out.state.path : null } });
         void get().refresh(doc);
       } catch (e) {
-        const text = cancelled(e)
-          ? "Cancelled. Nothing was changed."
-          : report
-            ? `The colours were converted in the open document, but saving the new file failed: ${msg(e)} Undo takes the conversion back.`
-            : msg(e);
-        patchSheet<ConvertSheet>("convert", { phase: "confirm", progress: 0, error: text });
+        // the engine rolls a failed or cancelled conversion back
+        patchSheet<ConvertSheet>("convert", { phase: "confirm", progress: 0, error: cancelled(e) ? "Cancelled. Nothing was changed." : msg(e) });
         void api.editState(doc).then((state) => applyState(doc, state), () => {});
+      }
+    },
+
+    saveConverted: async () => {
+      const s = sheet<ConvertSheet>("convert");
+      const d = s && st().docs[s.doc];
+      if (!s || !d || s.phase !== "unsaved" || !s.result) return;
+      const doc = d.id;
+      const to = await convertTarget(d, s.opts);
+      if (to === null) return;
+      const report = s.result.report;
+      patchSheet<ConvertSheet>("convert", { error: null });
+      try {
+        const state = await queued(doc, () => prepressApi.saveOther(doc, to));
+        applyState(doc, state);
+        dropScratch(doc);
+        patchSheet<ConvertSheet>("convert", { phase: "done", result: { report, path: state.path }, error: null });
+        void get().refresh(doc);
+      } catch (e) {
+        patchSheet<ConvertSheet>("convert", { error: `Saving the new file failed: ${msg(e)}` });
       }
     },
 
@@ -468,6 +547,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       const d = docOf(docId);
       if (!d) return;
       set({ sheet: { kind: "marks", doc: d.id, page: d.currentPage, form: DEFAULT_MARKS, boxes: null, preview: null, busy: false, error: null, done: null } });
+      void loadProtection(d.id);
       void marksBoxes(d.id, d.currentPage);
       void get().loadMarksPreview();
     },
@@ -506,6 +586,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       const s = sheet<MarksSheet>("marks");
       const d = s && st().docs[s.doc];
       if (!s || !d || s.busy) return;
+      if (certified(d.id)) return patchSheet<MarksSheet>("marks", { error: CERTIFIED_REASON });
       if (!anyMark(s.form.marks)) return patchSheet<MarksSheet>("marks", { error: "Choose at least one kind of mark." });
       const pages = scopePages(s.form.scope, s.form.range, d.pageCount, s.page);
       if (pages === null) return patchSheet<MarksSheet>("marks", { error: "The page range is not valid." });
@@ -535,15 +616,8 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       set({
         sheet: { kind: "boxes", doc: d.id, page, boxes: null, box, ref, margins: ZERO, linked: false, units: "pt", scope: "all", range: "", busy: false, error: null, done: null },
       });
-      void (async () => {
-        try {
-          const boxes = await prepressApi.pageBoxes(d.id, page);
-          const s = sheet<BoxesSheet>("boxes");
-          if (s && s.doc === d.id) patchSheet<BoxesSheet>("boxes", { boxes, margins: currentMargins(boxes, s.box, s.ref) });
-        } catch (e) {
-          patchSheet<BoxesSheet>("boxes", { error: msg(e) });
-        }
-      })();
+      void loadProtection(d.id);
+      void boxesOf(d.id, page);
     },
 
     setBox: (box) => {
@@ -590,6 +664,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       const s = sheet<BoxesSheet>("boxes");
       const d = s && st().docs[s.doc];
       if (!s || !d || !s.boxes || s.busy) return;
+      if (certified(d.id)) return patchSheet<BoxesSheet>("boxes", { error: CERTIFIED_REASON });
       const rect = newBox(s);
       const problem = rect && boxProblem(s.box, rect, s.boxes);
       if (problem) return patchSheet<BoxesSheet>("boxes", { error: problem });
@@ -597,12 +672,13 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       if (pages === null) return patchSheet<BoxesSheet>("boxes", { error: "The page range is not valid." });
       patchSheet<BoxesSheet>("boxes", { busy: true, error: null, done: null });
       try {
-        // each page measures the margins from its own reference box
+        // each page measures the margins, as shown, from its own reference box and maps them by its own turn
         const spec = {
           ...(pages ? { pages } : {}),
           kind: s.box,
           from: s.ref,
-          margin: userMargins(s.boxes.rotate, s.margins, isOutward(s.box, s.ref)),
+          margin: shownMargins(s.margins, isOutward(s.box, s.ref)),
+          shown: true,
         };
         const state = await queued(d.id, () => prepressApi.boxes(d.id, spec));
         applyState(d.id, state);
@@ -618,6 +694,18 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       }
     },
 
+    resync: () => {
+      const s = get().sheet;
+      const d = s && st().docs[s.doc];
+      if (!s || s.kind === "convert" || !d) return;
+      // an undo took the sheet's page away
+      if (s.page >= d.pageCount) return set({ sheet: null });
+      if (s.kind === "marks") {
+        void marksBoxes(s.doc, s.page);
+        void get().loadMarksPreview();
+      } else void boxesOf(s.doc, s.page);
+    },
+
     closeSheet: () => {
       const s = get().sheet;
       if (!s) return;
@@ -628,6 +716,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
 
     forget: (doc) => {
       waiting.delete(doc);
+      left.delete(doc);
       if (usePlates.getState().doc === doc) usePlates.setState({ doc: null, view: null });
       set((s) => {
         const { [doc]: _gone, ...rest } = s.docs;
@@ -643,7 +732,15 @@ useStore.subscribe((s, prev) => {
   if (s.docs === prev.docs) return;
   for (const id of Object.keys(usePrepress.getState().docs)) if (!s.docs[Number(id)]) usePrepress.getState().forget(Number(id));
   const sh = usePrepress.getState().sheet;
-  if (sh && !s.docs[sh.doc]) usePrepress.getState().forget(sh.doc);
+  if (sh && !s.docs[sh.doc]) return usePrepress.getState().forget(sh.doc);
+  // an undo, redo or an assistant edit moved the document under an open sheet
+  const [now, before] = sh ? [s.docs[sh.doc], prev.docs[sh.doc]] : [];
+  if (sh && now && before && (now.rev !== before.rev || now.pageCount !== before.pageCount)) usePrepress.getState().resync();
+});
+
+// A tile of the view in use failed: the engine may have dropped the view (it keeps a bounded number), so ask for it again.
+usePlates.subscribe((s, prev) => {
+  if (s.lost !== prev.lost && s.doc !== null && s.view === prev.view) void usePrepress.getState().refresh(s.doc);
 });
 
 /** Opens a tool on the active document (the tools list and the palette). */

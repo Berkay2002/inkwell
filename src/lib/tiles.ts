@@ -1,5 +1,6 @@
 import { fetchTile, type TileData } from "./api";
 import { type TileRef, tileKeyStr } from "./layout";
+import { viewFailed } from "./platesView";
 
 /** Streams keep independent staleness counters in the engine: 0 = main view, 1 = thumbnails. */
 export type Stream = 0 | 1;
@@ -75,6 +76,7 @@ class TileClient {
           // a failed tile stays blank; the preview underneath remains
           this.pending.delete(key);
           this.failed.add(key);
+          if (t.view) viewFailed(t.view);
           this.refill();
         },
       );

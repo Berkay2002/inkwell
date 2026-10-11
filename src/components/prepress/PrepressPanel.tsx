@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { type DocState } from "../../store";
-import { usePrepress } from "../../lib/prepressStore";
-import { type Plate, coverageText, isSolo, plateList, readout, showInk } from "../../lib/prepressLogic";
+import { currentSeps, usePrepress } from "../../lib/prepressStore";
+import { CERTIFIED_REASON, type Plate, coverageText, isSolo, plateList, readout, showInk } from "../../lib/prepressLogic";
 import { Icon } from "../Icons";
 import { PlateThumb } from "./PlateThumb";
 import "../a11y/a11y.css";
@@ -23,12 +23,14 @@ export function PrepressPanel({ doc }: { doc: DocState }) {
   if (!open) return null;
   const s = d?.settings;
   if (!d || !s) return null;
-  const plates = plateList(d.seps?.data ?? null, s);
-  const seps = d.seps?.data ?? null;
+  // the inks of this page and generation only: what was read for another page would name the wrong spots
+  const seps = currentSeps(d, doc);
+  const plates = plateList(seps, s);
   const report = d.report && d.report.page === doc.currentPage && d.report.rev === doc.rev ? d.report.data : null;
-  const at = d.probe && d.probe.page === doc.currentPage ? d.probe.at : null;
+  const at = d.probe && d.probe.page === doc.currentPage && d.probe.rev === doc.rev ? d.probe.at : null;
   const rows = readout(at, plates);
   const allOn = plates.every((p) => p.on);
+  const certified = d.protection?.certified === true;
   const size = doc.sizes[doc.currentPage];
   return (
     <aside className="ax-dock a11y-dock" style={{ width: "min(360px, 45vw)" }} aria-label="Output Preview">
@@ -60,9 +62,9 @@ export function PrepressPanel({ doc }: { doc: DocState }) {
               <PlateRow key={plate.key} plate={plate} value={at ? value : null} solo={isSolo(s, plate.key, seps)} doc={id} />
             ))}
           </ul>
-          {d.seps && d.seps.data.folded > 0 && (
+          {seps && seps.folded > 0 && (
             <p className="pp-note dim">
-              {d.seps.data.folded} more spot {d.seps.data.folded === 1 ? "colour is" : "colours are"} painted into CMYK and cannot be switched.
+              {seps.folded} more spot {seps.folded === 1 ? "colour is" : "colours are"} painted into CMYK and cannot be switched.
             </p>
           )}
           {!s.overprint && plates.some((p) => !p.process) && <p className="pp-note dim">Spot colours are mixed into CMYK. Simulate overprint to switch them.</p>}
@@ -92,7 +94,7 @@ export function PrepressPanel({ doc }: { doc: DocState }) {
           </label>
           {d.error && <p className="pp-note bad">{d.error}</p>}
 
-          {size && plates.length > 1 && (
+          {size && seps && plates.length > 1 && (
             <>
               <h3 className="pp-h">Plates of this page</h3>
               <div className="pp-strip">
@@ -115,13 +117,13 @@ export function PrepressPanel({ doc }: { doc: DocState }) {
           )}
         </div>
         <footer className="a11y-foot pp-foot">
-          <button className="btn ghost" onClick={() => st().openConvert(id)}>
+          <button className="btn ghost" disabled={certified} title={certified ? CERTIFIED_REASON : undefined} onClick={() => st().openConvert(id)}>
             Convert Colors…
           </button>
-          <button className="btn ghost" onClick={() => st().openMarks(id)}>
+          <button className="btn ghost" disabled={certified} title={certified ? CERTIFIED_REASON : undefined} onClick={() => st().openMarks(id)}>
             Printer's Marks…
           </button>
-          <button className="btn ghost" onClick={() => st().openBoxes(id)}>
+          <button className="btn ghost" disabled={certified} title={certified ? CERTIFIED_REASON : undefined} onClick={() => st().openBoxes(id)}>
             Page Boxes…
           </button>
         </footer>
