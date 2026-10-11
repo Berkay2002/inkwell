@@ -5,6 +5,7 @@ import { type DocState, useStore } from "../store";
 import { pickOpen } from "./api";
 import { keyOf } from "./recent";
 import { useConvert } from "./convertStore";
+import { useDocJs } from "./docJsStore";
 import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
 import { useSearch } from "./searchStore";
@@ -143,6 +144,17 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
       keywords: "permissions restrictions encryption properties",
       command: "security",
       onSelect: () => useProtect.getState().open("security", id),
+    },
+    {
+      id: "doc-javascript",
+      group: "scripts",
+      icon: "code",
+      label: "Document JavaScript",
+      description: "See, edit or remove the scripts in this file",
+      detail: "Lists every script the file carries (document, page and open/save actions), shows which risky calls they mention, and lets you edit or remove them. Nothing runs while you look.",
+      keywords: "javascript script code action open save print launch url acrobat macro",
+      command: "doc-javascript",
+      onSelect: () => id !== undefined && useDocJs.getState().open(id),
     },
     {
       id: "export",
