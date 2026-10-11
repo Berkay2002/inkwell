@@ -12,7 +12,8 @@ import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel
 import { A11yPanel } from "./components/a11y/A11yPanel";
 import { PreflightPanel } from "./components/preflight/PreflightPanel";
 import { EditPanel } from "./components/edit/EditPanel";
-import { FormTools, FormsPanel } from "./components/forms/FormsPanel";
+import { FormTools, FormsBanner, FormsPanel } from "./components/forms/FormsPanel";
+import { ScriptPrompts } from "./components/forms/ScriptPrompts";
 import { RedactPanel } from "./components/redact/RedactPanel";
 import { SearchDriver, SearchPanel } from "./components/search/SearchPanel";
 import { wireCommentRail } from "./lib/commentRail";
@@ -158,6 +159,7 @@ export default function App() {
                 <SecurityNotice doc={doc} />
                 <CommentTools doc={doc} />
                 <FormTools />
+                <FormsBanner doc={doc} />
               </div>
               <ToolsPanel doc={doc} />
               <ConvertPanel doc={doc} />
@@ -192,6 +194,7 @@ export default function App() {
       <Presentation />
       {paletteOpen && <CommandPalette />}
       {hasPassword && <PasswordDialog />}
+      <ScriptPrompts />
       <Toast />
     </div>
   );
