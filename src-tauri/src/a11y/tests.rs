@@ -11,13 +11,14 @@ use std::sync::Arc;
 // Object numbers: 1 catalog, 2 pages, 3 font /F1, 4 info, then page i at 10 + 2i with its content
 // at 11 + 2i; tests number their own objects from 100.
 
-struct Spec {
-    cat: String,
-    info: Option<String>,
-    font: String,
+#[derive(Clone)]
+pub(super) struct Spec {
+    pub(super) cat: String,
+    pub(super) info: Option<String>,
+    pub(super) font: String,
     /// `(extra page entries, content)` per page.
-    pages: Vec<(String, String)>,
-    objs: Vec<(usize, String)>,
+    pub(super) pages: Vec<(String, String)>,
+    pub(super) objs: Vec<(usize, String)>,
 }
 
 const TEXT: &str = "BT /F1 12 Tf 72 700 Td (Hello accessible world) Tj ET";
@@ -34,15 +35,15 @@ impl Default for Spec {
     }
 }
 
-fn stream(dict: &str, data: &str) -> String {
+pub(super) fn stream(dict: &str, data: &str) -> String {
     format!("<<{dict} /Length {}>>\nstream\n{data}\nendstream", data.len())
 }
 
-fn page_ref(i: usize) -> usize {
+pub(super) fn page_ref(i: usize) -> usize {
     10 + 2 * i
 }
 
-fn build(s: &Spec) -> Vec<u8> {
+pub(super) fn build(s: &Spec) -> Vec<u8> {
     let mut objs: Vec<(usize, String)> = vec![(1, format!("<</Type/Catalog /Pages 2 0 R {}>>", s.cat))];
     let kids: String = (0..s.pages.len()).map(|i| format!("{} 0 R ", page_ref(i))).collect();
     objs.push((2, format!("<</Type/Pages /Kids [{kids}] /Count {}>>", s.pages.len())));
@@ -85,13 +86,13 @@ fn build(s: &Spec) -> Vec<u8> {
     out.into_bytes()
 }
 
-fn report(s: &Spec) -> Report {
+pub(super) fn report(s: &Spec) -> Report {
     let doc = PdfDocument::from_bytes(&build(s)).unwrap();
     check(&doc, &mut |_| {}, &AtomicBool::new(false)).unwrap()
 }
 
 /// A tagged document: Document (101) with `kids`; elements from 102 on are the caller's.
-fn tagged(kids: &str, objs: Vec<(usize, String)>, content: &str) -> Spec {
+pub(super) fn tagged(kids: &str, objs: Vec<(usize, String)>, content: &str) -> Spec {
     let mut all = vec![
         (100, "<</Type/StructTreeRoot /K 101 0 R>>".to_string()),
         (101, format!("<</Type/StructElem /S/Document /P 100 0 R /K [{kids}]>>")),
@@ -105,15 +106,15 @@ fn tagged(kids: &str, objs: Vec<(usize, String)>, content: &str) -> Spec {
     }
 }
 
-fn el(n: usize, s: &str, parent: usize, k: &str) -> (usize, String) {
+pub(super) fn el(n: usize, s: &str, parent: usize, k: &str) -> (usize, String) {
     (n, format!("<</Type/StructElem /S/{s} /P {parent} 0 R /Pg 10 0 R /K {k}>>"))
 }
 
-fn marked(tag: &str, mcid: i32, y: i32) -> String {
+pub(super) fn marked(tag: &str, mcid: i32, y: i32) -> String {
     format!("/{tag} <</MCID {mcid}>> BDC BT /F1 12 Tf 72 {y} Td (Item {mcid}) Tj ET EMC\n")
 }
 
-fn status(s: &Spec, rule: Rule) -> Status {
+pub(super) fn status(s: &Spec, rule: Rule) -> Status {
     report(s).status(rule)
 }
 
@@ -360,7 +361,7 @@ fn tooltips_from_names() {
 
 // ---- fixes through the edit lane -----------------------------------------------------------------
 
-fn file(test: &str, s: &Spec) -> String {
+pub(super) fn file(test: &str, s: &Spec) -> String {
     let d = std::env::temp_dir().join("inkwell-tests").join(format!("a11y-{test}"));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -369,18 +370,18 @@ fn file(test: &str, s: &Spec) -> String {
     p.to_string_lossy().into_owned()
 }
 
-fn open(path: &str) -> (Arc<Engine>, DocId) {
+pub(super) fn open(path: &str) -> (Arc<Engine>, DocId) {
     let eng = Engine::new(2, 64 << 20);
     let id = eng.open(path).unwrap().doc;
     (eng, id)
 }
 
-fn check_eng(eng: &Engine, id: DocId) -> Report {
+pub(super) fn check_eng(eng: &Engine, id: DocId) -> Report {
     check_doc(eng, id, &mut |_| {}, &AtomicBool::new(false)).unwrap()
 }
 
 /// Applies `fix` as one undo step, checks `rule` passes, then saves, reopens and checks again.
-fn fixes(test: &str, s: &Spec, fix: Fix, rule: Rule) -> Report {
+pub(super) fn fixes(test: &str, s: &Spec, fix: Fix, rule: Rule) -> Report {
     let path = file(test, s);
     let (eng, id) = open(&path);
     assert_eq!(check_eng(&eng, id).status(rule), Status::Failed, "{rule:?} fails before");
@@ -413,6 +414,10 @@ fn fix_title_given_and_from_file_name() {
     let s = Spec { info: Some("<</Author (Kim)>>".into()), ..Spec::default() };
     fixes("title-stem", &s, Fix::Title { title: None }, Rule::Title);
     assert_eq!(info_title(&file_path("title-stem")), "Quarterly figures");
+}
+
+pub(super) fn file_path_for(test: &str) -> String {
+    file_path(test)
 }
 
 fn file_path(test: &str) -> String {
@@ -486,6 +491,10 @@ fn fix_figure_alt() {
 }
 
 // ---- autotag -------------------------------------------------------------------------------------
+
+pub(super) fn untagged_article_for_structure() -> Spec {
+    untagged_article()
+}
 
 fn untagged_article() -> Spec {
     let mut c = String::new();

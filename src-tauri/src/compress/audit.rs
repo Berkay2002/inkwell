@@ -9,6 +9,7 @@ use mupdf::pdf::PdfDocument;
 use mupdf::pdf::PdfObject;
 use serde::Serialize;
 
+use super::fonts::{self, FontUsage};
 use super::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -17,15 +18,30 @@ pub enum Category {
     Images,
     Fonts,
     ContentStreams,
+    /// Form fields (widgets, their appearances, the AcroForm dictionary).
+    Forms,
+    /// Annotations other than links and form fields, with their appearances.
+    Comments,
+    Links,
+    Bookmarks,
+    Thumbnails,
+    EmbeddedFiles,
     Metadata,
+    /// Page tree, resources, the cross-reference table, everything that holds the file together.
     Structure,
     Other,
 }
 
-const CATEGORIES: [Category; 6] = [
+const CATEGORIES: [Category; 12] = [
     Category::Images,
     Category::Fonts,
     Category::ContentStreams,
+    Category::Forms,
+    Category::Comments,
+    Category::Links,
+    Category::Bookmarks,
+    Category::Thumbnails,
+    Category::EmbeddedFiles,
     Category::Metadata,
     Category::Structure,
     Category::Other,
@@ -37,6 +53,8 @@ pub struct CategoryUsage {
     pub category: Category,
     pub bytes: u64,
     pub objects: u32,
+    /// Share of the file, 0..=100.
+    pub percent: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -57,6 +75,8 @@ pub struct Audit {
     pub fonts: u32,
     /// The largest streams, biggest first.
     pub largest: Vec<AuditItem>,
+    /// Every font by name, largest first (what the fonts setting works on).
+    pub font_list: Vec<FontUsage>,
 }
 
 impl Audit {
@@ -79,14 +99,16 @@ fn ref_of(o: &PdfObject, key: &str) -> Option<usize> {
     indirect_num(&o.get_dict(key).ok()??)
 }
 
+/// Gives object `xref` a category (an index outside the xref is ignored).
+fn mark(cat: &mut [Category], xref: Option<usize>, c: Category) {
+    if let Some(x) = xref.filter(|&x| x < cat.len()) {
+        cat[x] = c;
+    }
+}
+
 pub(crate) fn audit(doc: &PdfDocument, file_size: u64) -> Result<Audit, Error> {
     let n = doc.xref_len()?;
     let mut cat = vec![Category::Structure; n];
-    let mut set = |xref: Option<usize>, c: Category| {
-        if let Some(x) = xref.filter(|&x| x < n) {
-            cat[x] = c;
-        }
-    };
 
     // Streams that are only recognisable from who points at them.
     let pages = doc.page_count()?;
@@ -96,15 +118,106 @@ pub(crate) fn audit(doc: &PdfDocument, file_size: u64) -> Result<Audit, Error> {
         if contents.is_array().unwrap_or(false) {
             for part in contents.array_iter()? {
                 if let Ok(part) = part {
-                    set(indirect_num(&part), Category::ContentStreams);
+                    mark(&mut cat, indirect_num(&part), Category::ContentStreams);
                 }
             }
         } else {
-            set(ref_of(&page, "Contents"), Category::ContentStreams);
+            mark(&mut cat, ref_of(&page, "Contents"), Category::ContentStreams);
+        }
+    }
+    for i in 0..pages {
+        let Ok(page) = doc.find_page(i) else { continue };
+        mark(&mut cat, ref_of(&page, "Thumb"), Category::Thumbnails);
+        let Ok(Some(annots)) = page.get_dict("Annots") else { continue };
+        if !annots.is_array().unwrap_or(false) {
+            continue;
+        }
+        for a in annots.array_iter()?.flatten() {
+            let c = match name_of(&a, "Subtype").as_deref() {
+                Some("Widget") => Category::Forms,
+                Some("Link") => Category::Links,
+                Some(_) => Category::Comments,
+                None => continue,
+            };
+            mark(&mut cat, indirect_num(&a), c);
+            // The appearance streams belong to the same annotation.
+            let Ok(Some(ap)) = a.get_dict("AP") else { continue };
+            for key in ["N", "R", "D"] {
+                let Ok(Some(st)) = ap.get_dict(key) else { continue };
+                if st.is_stream().unwrap_or(false) {
+                    mark(&mut cat, indirect_num(&st), c);
+                } else if st.is_dict().unwrap_or(false) {
+                    for k in 0..st.dict_len().unwrap_or(0) as i32 {
+                        if let Ok(Some(v)) = st.get_dict_val(k) {
+                            mark(&mut cat, indirect_num(&v), c);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(catalog) = doc.catalog() {
+        // Bookmarks: the outline root and every item reachable through First/Next.
+        if let Ok(Some(root)) = catalog.get_dict("Outlines") {
+            mark(&mut cat, indirect_num(&root), Category::Bookmarks);
+            let mut stack = vec![root];
+            let mut visited = 0usize;
+            while let Some(o) = stack.pop() {
+                visited += 1;
+                if visited > 100_000 {
+                    break;
+                }
+                for key in ["First", "Next"] {
+                    if let Ok(Some(c)) = o.get_dict(key) {
+                        if let Some(x) = indirect_num(&c).filter(|&x| x < n && cat[x] != Category::Bookmarks) {
+                            cat[x] = Category::Bookmarks;
+                            stack.push(c);
+                        }
+                    }
+                }
+            }
+        }
+        // Form fields: the AcroForm dictionary and the field tree (widgets were found above).
+        if let Ok(Some(form)) = catalog.get_dict("AcroForm") {
+            mark(&mut cat, indirect_num(&form), Category::Forms);
+            let mut stack: Vec<PdfObject> = Vec::new();
+            // A field reachable twice (a /Kids loop, or one parent listed many times) is walked once.
+            let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            if let Ok(Some(fields)) = form.get_dict("Fields") {
+                mark(&mut cat, indirect_num(&fields), Category::Forms);
+                if fields.is_array().unwrap_or(false) {
+                    for f in fields.array_iter()?.flatten() {
+                        if indirect_num(&f).is_none_or(|x| seen.insert(x)) {
+                            stack.push(f);
+                        }
+                    }
+                }
+            }
+            let mut visited = 0usize;
+            while let Some(f) = stack.pop() {
+                visited += 1;
+                if visited > 100_000 {
+                    break;
+                }
+                if let Some(x) = indirect_num(&f).filter(|&x| x < n) {
+                    if cat[x] == Category::Structure {
+                        cat[x] = Category::Forms;
+                    }
+                }
+                if let Ok(Some(kids)) = f.get_dict("Kids") {
+                    if kids.is_array().unwrap_or(false) {
+                        for k in kids.array_iter()?.flatten() {
+                            if indirect_num(&k).is_none_or(|x| seen.insert(x)) {
+                                stack.push(k);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     if let Ok(trailer) = doc.trailer() {
-        set(ref_of(&trailer, "Info"), Category::Metadata);
+        mark(&mut cat, ref_of(&trailer, "Info"), Category::Metadata);
     }
     let mut objects = Vec::with_capacity(n);
     for x in 1..n {
@@ -117,18 +230,26 @@ pub(crate) fn audit(doc: &PdfDocument, file_size: u64) -> Result<Audit, Error> {
         if o.is_dict().unwrap_or(false) || o.is_stream().unwrap_or(false) {
             match name_of(&o, "Type").as_deref() {
                 Some("FontDescriptor") => {
-                    set(Some(x), Category::Fonts);
+                    mark(&mut cat, Some(x), Category::Fonts);
                     for key in ["FontFile", "FontFile2", "FontFile3"] {
-                        set(ref_of(&o, key), Category::Fonts);
+                        mark(&mut cat, ref_of(&o, key), Category::Fonts);
                     }
                 }
                 Some("Font") => {
-                    set(Some(x), Category::Fonts);
+                    mark(&mut cat, Some(x), Category::Fonts);
                     for key in ["ToUnicode", "CIDToGIDMap"] {
-                        set(ref_of(&o, key), Category::Fonts);
+                        mark(&mut cat, ref_of(&o, key), Category::Fonts);
                     }
                 }
-                Some("Metadata") => set(Some(x), Category::Metadata),
+                Some("Metadata") => mark(&mut cat, Some(x), Category::Metadata),
+                Some("Filespec") => {
+                    mark(&mut cat, Some(x), Category::EmbeddedFiles);
+                    if let Some(ef) = o.get_dict("EF").ok().flatten() {
+                        for key in ["F", "UF"] {
+                            mark(&mut cat, ref_of(&ef, key), Category::EmbeddedFiles);
+                        }
+                    }
+                }
                 _ => {}
             }
             // A dictionary that has no /Type but is a font file's parent.
@@ -137,7 +258,7 @@ pub(crate) fn audit(doc: &PdfDocument, file_size: u64) -> Result<Audit, Error> {
                 || o.get_dict("FontFile3").ok().flatten().is_some()
             {
                 for key in ["FontFile", "FontFile2", "FontFile3"] {
-                    set(ref_of(&o, key), Category::Fonts);
+                    mark(&mut cat, ref_of(&o, key), Category::Fonts);
                 }
             }
         }
@@ -145,7 +266,7 @@ pub(crate) fn audit(doc: &PdfDocument, file_size: u64) -> Result<Audit, Error> {
     }
 
     let mut usage: Vec<CategoryUsage> =
-        CATEGORIES.iter().map(|&category| CategoryUsage { category, bytes: 0, objects: 0 }).collect();
+        CATEGORIES.iter().map(|&category| CategoryUsage { category, bytes: 0, objects: 0, percent: 0.0 }).collect();
     let mut largest: Vec<AuditItem> = Vec::new();
     let (mut images, mut fonts) = (0u32, 0u32);
     let mut stream_bytes = 0u64;
@@ -160,19 +281,23 @@ pub(crate) fn audit(doc: &PdfDocument, file_size: u64) -> Result<Audit, Error> {
             let subtype = name_of(o, "Subtype");
             let ty = name_of(o, "Type");
             let mut what = String::new();
+            // What the pointing side already found (an annotation's appearance, a thumbnail) wins.
+            let pinned = c != Category::Structure && c != Category::Other;
             match (subtype.as_deref(), ty.as_deref()) {
                 (Some("Image"), _) => {
-                    c = Category::Images;
+                    if !pinned {
+                        c = Category::Images;
+                    }
                     images += 1;
                     let dim = |k: &str| o.get_dict(k).ok().flatten().and_then(|v| v.as_int().ok()).unwrap_or(0);
                     let filter = o.get_dict("Filter").ok().flatten().map(|f| f.to_string()).unwrap_or_default();
                     what = format!("Image {}x{} {}", dim("Width"), dim("Height"), filter.trim_start_matches('/'));
                 }
-                (Some("Form"), _) => c = Category::ContentStreams,
+                (Some("Form"), _) if !pinned => c = Category::ContentStreams,
                 (_, Some("ObjStm" | "XRef")) => c = Category::Structure,
                 (_, Some("Metadata")) => c = Category::Metadata,
                 (_, Some("EmbeddedFile")) => {
-                    c = Category::Other;
+                    c = Category::EmbeddedFiles;
                     what = "Embedded file".into();
                 }
                 _ if c == Category::Structure => c = Category::Other,
@@ -215,6 +340,9 @@ pub(crate) fn audit(doc: &PdfDocument, file_size: u64) -> Result<Audit, Error> {
     let structure = CATEGORIES.iter().position(|&k| k == Category::Structure).unwrap();
     usage[structure].bytes += budget.saturating_sub(assigned);
 
+    for u in &mut usage {
+        u.percent = if file_size == 0 { 0.0 } else { u.bytes as f64 * 100.0 / file_size as f64 };
+    }
     largest.sort_by(|a, b| b.bytes.cmp(&a.bytes));
     largest.truncate(16);
     Ok(Audit {
@@ -223,5 +351,6 @@ pub(crate) fn audit(doc: &PdfDocument, file_size: u64) -> Result<Audit, Error> {
         images,
         fonts,
         largest,
+        font_list: fonts::list(doc)?,
     })
 }

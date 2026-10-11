@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { TextAlign, TextBlock } from "../../lib/api";
-import { displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
+import { useImageEdit } from "../../lib/imageEdit";
+import { type EditSection, displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
 import { type DocState } from "../../store";
 import { Icon } from "../Icons";
+import { BookmarksPanel } from "./BookmarksPanel";
+import { AddImageButton, ImageSection } from "./ImagePanel";
+import { LinksPanel } from "./LinksPanel";
 import "./edit.css";
 
 const te = () => useTextEdit.getState();
@@ -15,12 +19,19 @@ const ALIGNS: { id: TextAlign; label: string; path: string }[] = [
   { id: "justify", label: "Justify", path: "M4 6h16M4 10h16M4 14h16M4 18h16" },
 ];
 const SPACINGS = [1, 1.15, 1.2, 1.5, 2];
+const SECTIONS: { id: EditSection; label: string }[] = [
+  { id: "text", label: "Text" },
+  { id: "links", label: "Links" },
+  { id: "bookmarks", label: "Bookmarks" },
+];
 
 /** The toolbar-less entry point is the Edit segment of the mode pill (Organize.tsx); this is its rail. */
 export function EditPanel({ doc }: { doc: DocState }) {
   const open = useTextEdit((s) => s.open);
   const d = useTextEdit((s) => s.docs[doc.id]);
   const tool = useTextEdit((s) => s.tool);
+  const section = useTextEdit((s) => s.section);
+  const picture = useImageEdit((s) => s.docs[doc.id]?.selected != null);
   const block = d?.selected ? (d.pages[d.selected.page]?.blocks[d.selected.index] ?? null) : null;
   const id = doc.id;
   const here = d?.pages[doc.currentPage]?.blocks.filter(isOffered) ?? [];
@@ -36,6 +47,24 @@ export function EditPanel({ doc }: { doc: DocState }) {
             <Icon name="close" size={16} />
           </button>
         </div>
+        <div className="te-tabs" role="tablist" aria-label="Edit sections">
+          {SECTIONS.map((t) => (
+            <button key={t.id} role="tab" aria-selected={section === t.id} className={section === t.id ? "on" : ""} onClick={() => te().setSection(t.id)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {section === "links" && (
+          <div className="te-body">
+            <LinksPanel doc={doc} />
+          </div>
+        )}
+        {section === "bookmarks" && (
+          <div className="te-body">
+            <BookmarksPanel doc={doc} />
+          </div>
+        )}
+        {section === "text" && (
         <div className="te-body">
           <section className="te-sec">
             <h3 className="te-h3">Add content</h3>
@@ -49,14 +78,12 @@ export function EditPanel({ doc }: { doc: DocState }) {
                 <Icon name="textT" size={16} />
                 Text
               </button>
-              <button className="te-btn" disabled title="Image editing is coming">
-                <Icon name="area" size={16} />
-                Image
-                <span className="te-soon">soon</span>
-              </button>
+              <AddImageButton id={id} />
             </div>
           </section>
 
+          {/* A selected picture has its own "Format image"; the text hint would sit above it for nothing. */}
+          {!picture && (
           <section className="te-sec">
             <h3 className="te-h3">Format text</h3>
             {block && (
@@ -75,6 +102,8 @@ export function EditPanel({ doc }: { doc: DocState }) {
               </p>
             )}
           </section>
+          )}
+          <ImageSection doc={doc} />
           {here.length > 0 && (
             <section className="te-sec">
               <h3 className="te-h3">
@@ -101,7 +130,10 @@ export function EditPanel({ doc }: { doc: DocState }) {
             </section>
           )}
         </div>
-        <div className="te-foot dim">Changes apply when you click away. Undo with Ctrl+Z.</div>
+        )}
+        <div className="te-foot dim">
+          {section === "text" ? "Changes apply when you click away. Undo with Ctrl+Z." : "Each change is one step. Undo with Ctrl+Z."}
+        </div>
       </section>
     </aside>
   );

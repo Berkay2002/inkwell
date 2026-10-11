@@ -73,6 +73,22 @@ impl Colorspace {
         unsafe { fz_colorspace_is_lab(context(), self.inner) > 0 }
     }
 
+    /// Whether the colour space is an ICC profile.
+    pub fn is_icc(&self) -> bool {
+        unsafe { fz_colorspace_is_icc(context(), self.inner) > 0 }
+    }
+
+    /// Whether the colour space is a Separation or DeviceN one (spot colours).
+    pub fn is_separation(&self) -> bool {
+        unsafe { fz_colorspace_is_device_n(context(), self.inner) > 0 }
+    }
+
+    /// The name of colorant `i` (Cyan, a spot's name, ...), where the colour space has names.
+    pub fn colorant(&self, i: u32) -> Option<String> {
+        let p = unsafe { fz_colorspace_colorant(context(), self.inner, i as i32) };
+        (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    }
+
     pub fn is_lab_icc(&self) -> bool {
         unsafe { fz_colorspace_is_lab_icc(context(), self.inner) > 0 }
     }

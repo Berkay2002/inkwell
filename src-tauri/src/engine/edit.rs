@@ -1321,7 +1321,28 @@ impl Engine {
         redaction: bool,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, redaction, false, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, redaction, false, None, |d| Ok((f(d)?, None)))
+    }
+
+    /// [`Engine::apply_custom`] for an edit that may turn out to change nothing: `f` returns the pages
+    /// it touched, or `None` (having changed nothing) and then no step is made and the state is
+    /// returned as it was. `removes`: as [`Engine::apply_removing`].
+    pub fn apply_custom_unless_noop(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        removes: bool,
+        f: impl FnOnce(&mut PdfDocument) -> Result<Option<Vec<u32>>>,
+    ) -> Result<EditState> {
+        let unchanged = std::cell::Cell::new(false);
+        self.custom(id, label, source, false, removes, Some(&unchanged), |d| match f(d)? {
+            Some(pages) => Ok((pages, None)),
+            None => {
+                unchanged.set(true);
+                Ok((Vec::new(), None))
+            }
+        })
     }
 
     /// [`Engine::apply_custom`] for an edit that takes content out of the page (editing existing
@@ -1334,7 +1355,7 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, false, true, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, false, true, None, |d| Ok((f(d)?, None)))
     }
 
     /// A redaction whose result is a finished file: `f` changes the document and returns the
@@ -1348,7 +1369,7 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Vec<u8>)>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, true, false, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
+        self.custom(id, label, source, true, false, None, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
     }
 
     /// Runs `f` on the authoritative document (marks included) without changing it. `f` must not
@@ -1377,6 +1398,7 @@ impl Engine {
         source: EditSource,
         redaction: bool,
         removes: bool,
+        unchanged: Option<&std::cell::Cell<bool>>,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
     ) -> Result<EditState> {
         let entry = self.entry(id)?;
@@ -1384,6 +1406,9 @@ impl Engine {
         let ed = self.lane(&entry, &mut lane)?;
         let len = ed.step().snap.len;
         let ran = catch_unwind(AssertUnwindSafe(|| f(&mut ed.doc.doc))).unwrap_or(Err(EngineError::Panic));
+        if ran.is_ok() && unchanged.is_some_and(std::cell::Cell::get) {
+            return Ok(ed.state(&entry));
+        }
         let changed = ran.and_then(|(pages, bytes)| {
             let exact = bytes.is_some();
             let snap = if let Some(b) = bytes {

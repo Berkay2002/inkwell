@@ -165,8 +165,24 @@ pub fn export(
 ) -> Result<ExportOutput, Error> {
     validate(&req.kind)?;
     let (doc, stem) = open_source(eng, req.doc)?;
+    export_document(&doc, &stem, &req.kind, req.pages.as_deref(), target, cancel, progress)
+}
+
+/// [`export`] over a document the caller opened (the batch runner exports files that no tab has open).
+/// `stem` names the files; `pages` is a one-based range like `1-3, 5`.
+pub fn export_document(
+    doc: &Document,
+    stem: &str,
+    kind: &ExportKind,
+    pages: Option<&str>,
+    target: Target,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<ExportOutput, Error> {
+    validate(kind)?;
+    let stem = safe_stem(stem);
     let count = doc.page_count()?.max(0) as u32;
-    let pages = pages_from(req.pages.as_deref(), count)?;
+    let pages = pages_from(pages, count)?;
     let mut run = Run { cancel, progress, total: pages.len() as u32 };
     run.check()?;
     run.step(0);
@@ -178,17 +194,16 @@ pub fn export(
     let staging = Staging::new(&dest_dir)?;
     let mut warnings = Vec::new();
     // (staged name, name suffix after the stem)
-    let staged: Vec<String> = match &req.kind {
+    let staged: Vec<String> = match kind {
         ExportKind::Images { format, dpi, gray, quality } => {
-            images(&doc, &pages, count, &stem, *format, *dpi, *gray, *quality, &staging, &mut run)?
+            images(doc, &pages, count, &stem, *format, *dpi, *gray, *quality, &staging, &mut run)?
         }
-        ExportKind::ExtractImages { min_side } => extract_images(&doc, &pages, count, &stem, *min_side, &staging, &mut run, &mut warnings)?,
-        ExportKind::Text { layout } => single(&staging, &mut run, |out, run| text(&doc, &pages, *layout, out, run))?,
-        ExportKind::Html { xhtml } => single(&staging, &mut run, |out, run| html(&doc, &pages, *xhtml, &stem, out, run))?,
-        ExportKind::Word => single(&staging, &mut run, |out, run| word(&doc, &pages, &stem, out, run))?,
+        ExportKind::ExtractImages { min_side } => extract_images(doc, &pages, count, &stem, *min_side, &staging, &mut run, &mut warnings)?,
+        ExportKind::Text { layout } => single(&staging, &mut run, |out, run| text(doc, &pages, *layout, out, run))?,
+        ExportKind::Html { xhtml } => single(&staging, &mut run, |out, run| html(doc, &pages, *xhtml, &stem, out, run))?,
+        ExportKind::Word => single(&staging, &mut run, |out, run| word(doc, &pages, &stem, out, run))?,
     };
     run.check()?;
-    drop(doc);
 
     // Move into place. A folder export picks a name that does not clash with files already there.
     let (finals, folder): (Vec<(String, PathBuf)>, PathBuf) = match target {

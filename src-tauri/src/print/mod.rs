@@ -12,18 +12,40 @@
 
 pub mod app;
 pub mod layout;
+pub mod pdf;
 pub mod render;
 #[cfg(windows)]
 pub mod win;
+/// Non-Windows builds (engine tests on macOS/Linux): no printers.
+#[cfg(not(windows))]
+pub mod win {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Printer {
+        pub name: String,
+        pub is_default: bool,
+        pub to_file: bool,
+    }
+    #[derive(serde::Serialize)]
+    pub struct Capabilities;
+    pub fn printers() -> Vec<Printer> {
+        Vec::new()
+    }
+    pub fn capabilities(_printer: &str) -> Option<Capabilities> {
+        None
+    }
+}
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_layouts;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-pub use layout::{Layout, Orientation, Range, Sheet, Subset};
+pub use layout::{Layout, Orientation, Range, Sheet, Subset, Tile};
 pub use render::Content;
 
 use crate::engine::{DocId, Engine};
@@ -249,12 +271,14 @@ pub struct Face {
     pub width: f64,
     pub height: f64,
     pub pages: Vec<u32>,
+    /// Poster: which tile of its page this side is.
+    pub tile: Option<Tile>,
 }
 
 pub fn plan_info(eng: &Engine, doc: DocId, s: &Settings) -> Result<PlanInfo, PrintError> {
     let p = plan(eng, doc, s)?;
     let faces: Vec<Face> =
-        p.sheets.iter().map(|f| Face { width: f.w, height: f.h, pages: f.placed.iter().map(|x| x.page + 1).collect() }).collect();
+        p.sheets.iter().map(|f| Face { width: f.w, height: f.h, pages: f.placed.iter().map(|x| x.page + 1).collect(), tile: f.tile }).collect();
     let n = faces.len();
     let sent = layout::sequence(n, s.copies.clamp(1, 999), s.collate, s.two_sided()).len();
     Ok(PlanInfo {
