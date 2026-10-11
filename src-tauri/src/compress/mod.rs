@@ -13,6 +13,7 @@
 //! has no JBIG2 encoder (monochrome images use CCITT G4 or Flate) and does not unembed fonts.
 
 mod audit;
+pub mod estimate;
 mod strip;
 #[cfg(test)]
 mod tests;

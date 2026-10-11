@@ -307,6 +307,19 @@ async fn compress_audit(eng: Eng<'_>, doc: DocId) -> Result<tools::AuditReply, t
     tool_blocking(move || tools::audit_for_ui(&eng, doc)).await
 }
 
+/// `job`: an id the UI picks, for `tool_cancel`.
+#[tauri::command]
+async fn compress_estimate(
+    eng: Eng<'_>,
+    jobs: JobState<'_>,
+    job: u64,
+    doc: DocId,
+) -> Result<Vec<compress::estimate::Estimate>, tools::ToolError> {
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    tool_blocking(move || tools::estimate_for_ui(&eng, doc, &guard.cancel)).await
+}
+
 /// `job`: an id the UI picks, for `tool_cancel`. `req.save_to`: a save token from `pick_save`.
 #[tauri::command]
 async fn compress_start(
@@ -595,6 +608,7 @@ pub fn run() {
             split_document,
             merge_files,
             compress_audit,
+            compress_estimate,
             compress_start,
             tool_cancel,
             ocr_languages,

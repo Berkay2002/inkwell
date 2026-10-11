@@ -1,5 +1,5 @@
 import { useAi } from "../lib/aiStore";
-import type { CompressPreset } from "../lib/api";
+import type { CompressEstimate, CompressPreset } from "../lib/api";
 import * as edits from "../lib/edit";
 import { parseRange } from "../lib/pageRange";
 import { fileName, formatBytes, type OcrScope, type Sheet, useTools } from "../lib/toolsStore";
@@ -46,6 +46,14 @@ const PRESETS: { id: CompressPreset; name: string; desc: string }[] = [
   { id: "highQuality", name: "High quality", desc: "Keeps images sharp" },
 ];
 
+/** "~2.1 MB", or "~1.8–2.6 MB" when the sample could not see every image. */
+function sizeText(e: CompressEstimate) {
+  if (e.high - e.low < e.bytes * 0.1) return `~${formatBytes(e.bytes)}`;
+  const [lo, hi] = [formatBytes(e.low), formatBytes(e.high)];
+  const unit = (t: string) => t.split(" ")[1];
+  return `~${unit(lo) === unit(hi) ? lo.split(" ")[0] : lo}–${hi}`;
+}
+
 function CompressOptions({ sheet }: { sheet: Sheet }) {
   const a = sheet.audit;
   const bytes = (c: string) => a?.audit.categories.find((x) => x.category === c)?.bytes ?? 0;
@@ -54,7 +62,7 @@ function CompressOptions({ sheet }: { sheet: Sheet }) {
       <div className="ax-body tl-body">
         <div className="tl-presets" role="radiogroup" aria-label="Preset">
           {PRESETS.map((p) => {
-            const predicted = a?.predictions.find((x) => x.preset === p.id)?.bytes;
+            const est = sheet.estimates?.find((x) => x.preset === p.id);
             return (
               <button
                 key={p.id}
@@ -68,7 +76,7 @@ function CompressOptions({ sheet }: { sheet: Sheet }) {
                   <span className="tl-preset-name">{p.name}</span>
                   <span className="dim small">{p.desc}</span>
                 </span>
-                <span className="tl-mono">{predicted != null ? `~${formatBytes(predicted)}` : "…"}</span>
+                <span className="tl-mono">{est ? sizeText(est) : "…"}</span>
               </button>
             );
           })}
