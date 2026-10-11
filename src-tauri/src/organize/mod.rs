@@ -267,6 +267,9 @@ pub fn thread_set_info(eng: &Engine, doc: DocId, thread: i32, info: &Info, sourc
 pub fn thread_reorder(eng: &Engine, doc: DocId, thread: i32, to: u32, source: EditSource) -> Result<EditState> {
     let all = threads_get(eng, doc)?;
     let from = all.iter().position(|t| t.id == thread).ok_or_else(|| bad("that article is no longer in the document"))?;
+    if all[from].damaged.is_some() {
+        return Err(bad("this article is damaged: delete it to start again"));
+    }
     if from == (to as usize).min(all.len().saturating_sub(1)) {
         return eng.edit_state(doc);
     }

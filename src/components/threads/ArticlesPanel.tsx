@@ -32,8 +32,9 @@ export function ArticlesPanel({ doc }: { doc: DocState }) {
     { label: "Read from the first bead", onSelect: () => read(t) },
     { label: "Properties…", onSelect: () => th().openProps(id, t.id) },
     "sep",
-    ...(i > 0 ? [{ label: "Move up", onSelect: () => void th().reorder(id, t.id, i - 1) }] : []),
-    ...(i < threads.length - 1 ? [{ label: "Move down", onSelect: () => void th().reorder(id, t.id, i + 1) }] : []),
+    // a damaged article is only Properties and Delete (the engine refuses the rest)
+    ...(!t.damaged && i > 0 ? [{ label: "Move up", onSelect: () => void th().reorder(id, t.id, i - 1) }] : []),
+    ...(!t.damaged && i < threads.length - 1 ? [{ label: "Move down", onSelect: () => void th().reorder(id, t.id, i + 1) }] : []),
     ...(threads.length > 1 ? (["sep"] as MenuEntry[]) : []),
     { label: "Delete article", danger: true, onSelect: () => void th().removeThread(id, t.id) },
   ];

@@ -67,7 +67,7 @@
   transform-origin: 0 0;
   padding: 1px 5px;
   font: 600 11px/1.3 var(--font);
-  color: #fff;
+  color: var(--accent-fg);
   background: var(--accent);
   border-radius: 0 0 4px 0;
   pointer-events: none;
@@ -100,12 +100,15 @@
   margin: calc(6px / var(--z, 1)) 0 0 calc(6px / var(--z, 1));
   display: grid;
   place-items: center;
-  font: 700 calc(15px / var(--z, 1)) / 1 var(--font);
-  color: #fff;
+  color: var(--accent-fg);
   background: var(--accent);
   border-radius: 50%;
   cursor: crosshair;
   touch-action: none;
+}
+.th-plus svg {
+  width: calc(14px / var(--z, 1));
+  height: calc(14px / var(--z, 1));
 }
 .th-draft {
   position: absolute;

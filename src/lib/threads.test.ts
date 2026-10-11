@@ -6,7 +6,7 @@ vi.mock("../store", () => ({ useStore: { getState: () => ({ setUi: vi.fn() }) } 
 
 import { invoke } from "@tauri-apps/api/core";
 import type { ArticleThread } from "./api";
-import { beadNumber, beadPointer, beadZoom, nextTitle, otherToolHeld, propsDraft, readsKeys, reconcile, sameInfo, stepBead, useThreads } from "./threads";
+import { beadNumber, beadPointer, beadZoom, nextTitle, otherToolHeld, propsChange, propsDraft, readsKeys, reconcile, sameInfo, stepBead, useThreads } from "./threads";
 
 const inv = vi.mocked(invoke);
 const bead = (id: number, page: number, w = 200) => ({ id, page, rect: [50, 100, 50 + w, 400] as [number, number, number, number] });
@@ -129,6 +129,25 @@ describe("authoring", () => {
     expect(useThreads.getState().selected).toBeNull();
   });
 
+  it("the new bead is selected even when an edit's own read was overtaken by the one the revision change starts", async () => {
+    const created = thread(30, "Article 3", [bead(31, 2)]);
+    const answers: ((v: ArticleThread[]) => void)[] = [];
+    inv.mockImplementation((cmd: string) =>
+      cmd === "threads_list" ? new Promise<ArticleThread[]>((r) => answers.push(r)) : Promise.resolve({ rev: 2 }),
+    );
+    const started = useThreads.getState().start(1, 2, [50, 100, 250, 400]);
+    await vi.waitFor(() => expect(answers).toHaveLength(1));
+    // doc.rev changed: the host asks again while the edit's own read is still out
+    void useThreads.getState().load(1);
+    await vi.waitFor(() => expect(answers).toHaveLength(2));
+    // the overtaken read lands first and finds the list stale; the edit must wait for the newer one
+    answers[0](LIST);
+    await new Promise((r) => setTimeout(r, 0));
+    answers[1]([...LIST, created]);
+    await started;
+    expect(useThreads.getState().selected).toEqual({ doc: 1, thread: 30, bead: 31 });
+  });
+
   it("finishing opens the Properties of the article that was being drawn", () => {
     useThreads.setState({ tool: true, selected: { doc: 1, thread: 10, bead: 12 } });
     useThreads.getState().finish();
@@ -212,5 +231,22 @@ describe("article properties", () => {
     expect(sameInfo(open, propsDraft(t))).toBe(true);
     expect(sameInfo({ ...open, author: "A" }, open)).toBe(false);
     expect(sameInfo({ ...open, title: "Story" }, open)).toBe(false);
+  });
+
+  it("an untitled article stays untitled when only another field is edited", () => {
+    const t = thread(10, "Article 2", [bead(11, 0)]);
+    t.info.title = "";
+    const open = propsDraft(t);
+    expect(propsChange(t, open)).toBeNull();
+    expect(propsChange(t, { ...open, author: "A" })).toEqual({ title: "", subject: "", author: "A", keywords: "" });
+    expect(propsChange(t, { ...open, title: "Story" })?.title).toBe("Story");
+  });
+
+  it("a titled article is sent as edited, and clearing its title is an edit", () => {
+    const t = thread(10, "Story", [bead(11, 0)]);
+    const open = propsDraft(t);
+    expect(propsChange(t, open)).toBeNull();
+    expect(propsChange(t, { ...open, keywords: "k" })).toEqual({ title: "Story", subject: "", author: "", keywords: "k" });
+    expect(propsChange(t, { ...open, title: "" })?.title).toBe("");
   });
 });

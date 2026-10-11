@@ -95,6 +95,15 @@ export const propsDraft = (t: ArticleThread): ThreadInfo => ({ ...t.info, title:
 export const sameInfo = (a: ThreadInfo, b: ThreadInfo): boolean =>
   a.title === b.title && a.subject === b.subject && a.author === b.author && a.keywords === b.keywords;
 
+/**
+ * What Apply sends for the form opened on `t`: null when nothing was edited. An untitled article whose listed name
+ * was left in the title field stays untitled (the name is not written back as a /Title, so it keeps following order).
+ */
+export function propsChange(t: ArticleThread, form: ThreadInfo): ThreadInfo | null {
+  const info = !t.info.title && form.title === t.title ? { ...form, title: "" } : form;
+  return sameInfo(info, t.info) ? null : info;
+}
+
 // ---- the store -----------------------------------------------------------------------------
 
 interface Threads {
@@ -136,6 +145,8 @@ interface Threads {
 
 const fail = (e: unknown) => useStore.getState().setUi({ error: String(e) });
 const seq = new Map<number, number>();
+/** The newest read of each document's list: a read that was overtaken is finished when this one is. */
+const inflight = new Map<number, Promise<void>>();
 
 export const useThreads = create<Threads>((set, get) => {
   /** One engine call, then the list again (the generation changed); false when it failed (the error is shown). */
@@ -180,20 +191,30 @@ export const useThreads = create<Threads>((set, get) => {
 
     get: (doc) => get().docs[doc] ?? EMPTY,
 
-    load: async (doc) => {
+    load: (doc) => {
       const n = (seq.get(doc) ?? 0) + 1;
       seq.set(doc, n);
       // where each bead of the old list stood, so a deleted bead's selection moves to its neighbour
       const hints = new Map<string, number>();
       for (const t of get().get(doc)) t.beads.forEach((b, i) => hints.set(`${t.id}:${b.id}`, i));
-      try {
-        const list = await api.threadsList(doc);
-        if (seq.get(doc) !== n) return;
-        set((s) => ({ docs: { ...s.docs, [doc]: list } }));
-        settle(doc, hints);
-      } catch (e) {
-        if (seq.get(doc) === n) fail(e);
-      }
+      const read = (async () => {
+        try {
+          const list = await api.threadsList(doc);
+          if (seq.get(doc) !== n) return;
+          set((s) => ({ docs: { ...s.docs, [doc]: list } }));
+          settle(doc, hints);
+        } catch (e) {
+          if (seq.get(doc) === n) fail(e);
+        }
+      })();
+      inflight.set(doc, read);
+      // An overtaken read waits for the newest, so its caller (an edit selecting its new bead) sees the list that landed.
+      return (async () => {
+        for (let p = inflight.get(doc); p; p = inflight.get(doc)) {
+          await p;
+          if (inflight.get(doc) === p) return;
+        }
+      })();
     },
 
     setShow: (show) => set({ show }),

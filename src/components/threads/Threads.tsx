@@ -6,7 +6,7 @@ import { computeLayout } from "../../lib/layout";
 import { useNav } from "../../lib/nav";
 import { useRedact } from "../../lib/redact";
 import { useTextEdit } from "../../lib/textEdit";
-import { beadZoom, propsDraft, readsKeys, sameInfo, threadOf, useThreads } from "../../lib/threads";
+import { beadZoom, propsChange, propsDraft, readsKeys, threadOf, useThreads } from "../../lib/threads";
 import { type DocState, type ZoomMode, useStore } from "../../store";
 import { Icon } from "../Icons";
 import { Shell, useEscape } from "../OrganizePlus";
@@ -201,14 +201,16 @@ function advance(id: number, dir: 1 | -1) {
 
 function PropsSheet({ doc, thread }: { doc: number; thread: ArticleThread }) {
   const close = () => th().closeProps();
-  const [initial] = useState(() => propsDraft(thread));
+  const [opened] = useState(thread);
+  const [initial] = useState(() => propsDraft(opened));
   const [info, setInfo] = useState<ThreadInfo>(initial);
   const set = (k: keyof ThreadInfo) => (e: React.ChangeEvent<HTMLInputElement>) => setInfo({ ...info, [k]: e.target.value });
   useEscape(true, close);
   const apply = () => {
     close();
     // what the form opened with is not an edit: the fallback title is not written back as a /Title
-    if (!sameInfo(info, initial)) void th().describe(doc, thread.id, info);
+    const change = propsChange(opened, info);
+    if (change) void th().describe(doc, thread.id, change);
   };
   const field = (k: keyof ThreadInfo, label: string, first = false) => (
     <label className="op-field">

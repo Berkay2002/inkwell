@@ -313,6 +313,7 @@ fn damaged_threads_are_reported_without_a_panic() {
             assert!(thread_move_bead(&eng, id, a, f, 0, R, USER).is_err());
             assert!(thread_delete_bead(&eng, id, a, f, USER).is_err());
         }
+        assert!(thread_reorder(&eng, id, a, 1, USER).is_err(), "{what}: a damaged article is not moved");
         thread_set_info(&eng, id, a, &Info { title: "Kept".into(), ..Info::default() }, USER).unwrap();
         assert_eq!(list(&eng, id)[0].title, "Kept");
         thread_delete(&eng, id, a, USER).unwrap();
@@ -708,6 +709,12 @@ fn properties_applied_unchanged_are_no_step() {
     // nothing; the same info through the engine is no step either
     thread_set_info(&eng, id, t.id, &t.info, USER).unwrap();
     assert_eq!(eng.edit_state(id).unwrap().undo, before);
+    // only the author edited, the title field left empty (what the UI sends for an untitled article): the article
+    // gets an author and no /Title, so it is still listed by position
+    let author = Info { author: "Berkay".into(), ..Info::default() };
+    thread_set_info(&eng, id, t.id, &author, USER).unwrap();
+    let t = list(&eng, id).remove(0);
+    assert_eq!((t.info.title.as_str(), t.info.author.as_str(), t.title.as_str()), ("", "Berkay", "Article 1"));
 }
 
 #[test]

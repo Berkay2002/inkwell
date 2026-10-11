@@ -3,6 +3,7 @@ import type { ArticleThread, ThreadBead } from "../../lib/api";
 import { type Handle, type Rect4, HANDLES, move, resize } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 import { beadNumber, beadPointer, stepBead, useThreads } from "../../lib/threads";
+import { Icon } from "../Icons";
 import { useOtherToolHeld } from "./held";
 import "./threads.css";
 
@@ -169,7 +170,7 @@ function Layer({ docId, page, rot, rawSize, zoom, list, show, tool, follow, foll
                 onPointerUp={() => create()}
                 onPointerCancel={() => setDraft(null)}
               >
-                +
+                <Icon name="plus" size={14} />
               </span>
             )}
           </div>
