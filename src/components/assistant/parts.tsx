@@ -28,6 +28,8 @@ const GLYPHS = {
   check: "check",
   copy: "copy",
   plus: "plus",
+  retry: "retry",
+  edit: "edit",
   docked: "panelRight",
   floating: "windowFloating",
   bar: "panelBottom",
@@ -323,9 +325,32 @@ export function Messages({ doc, variant, lastOnly = false }: { doc: DocState; va
   );
 }
 
-/** The sources an answer cites. `docked` rows, `floating` cards with a page sketch, `bar` compact rows. */
+/** The sources an answer cites. `docked` rows, `floating` cards with a page sketch, `bar` page chips. */
 function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: Variant; active: number | null }) {
-  const show = (c: Citation) => useAi.getState().showCitation(doc.id, c);
+  const show = (c: Citation) => useAi.getState().showCitation(doc.id, c, m.id);
+  if (variant === "bar")
+    return (
+      <ul className="ax-sources bar" aria-label="Sources">
+        {m.citations.filter(isVerified).map((c) => (
+          <li key={c.n}>
+            <button
+              className={active === c.n ? "ax-pgchip on" : "ax-pgchip"}
+              data-source={`${m.id}:${c.n}`}
+              title={c.quote}
+              // hovering lights the badge on the page without scrolling there; a click is a real jump
+              onPointerEnter={() => useAi.getState().liftMark(doc.id, c, m.id)}
+              onPointerLeave={() => useAi.getState().dropMark()}
+              onFocus={() => useAi.getState().liftMark(doc.id, c, m.id)}
+              onBlur={() => useAi.getState().dropMark()}
+              onClick={() => show(c)}
+            >
+              <span className="ax-n">{c.n}</span>
+              <span>p. {(c.page ?? 0) + 1}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    );
   return (
     <ul className={`ax-sources ${variant}`}>
       {m.citations.filter(isVerified).map((c) => {
@@ -334,7 +359,7 @@ function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: 
         const cls = on ? "ax-source on" : "ax-source";
         return (
           <li key={c.n}>
-            <button className={cls} data-source={c.n} onClick={() => show(c)} title="Show in document">
+            <button className={cls} data-source={`${m.id}:${c.n}`} onClick={() => show(c)} title="Show in document">
               {variant === "floating" && <PageSketch doc={doc} c={c} />}
               {variant === "docked" && (
                 <span className="ax-doc-glyph">
@@ -342,17 +367,12 @@ function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: 
                 </span>
               )}
               <span className="ax-src-main">
-                {variant !== "bar" && (
-                  <span className="ax-src-name">
-                    <span className="ax-n">{c.n}</span>
-                    {variant === "docked" && <span className="ax-src-file">{doc.name}</span>}
-                    {variant === "floating" && page && <span className="ax-pg">{page}</span>}
-                  </span>
-                )}
-                <span className="ax-src-q">
-                  {variant === "bar" && <span className="ax-n">{c.n}</span>}
-                  {c.quote}
+                <span className="ax-src-name">
+                  <span className="ax-n">{c.n}</span>
+                  {variant === "docked" && <span className="ax-src-file">{doc.name}</span>}
+                  {variant === "floating" && page && <span className="ax-pg">{page}</span>}
                 </span>
+                <span className="ax-src-q">{c.quote}</span>
               </span>
               {variant !== "floating" && page && <span className="ax-pg">{page}</span>}
             </button>
@@ -403,7 +423,8 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
   const hide = useAi((s) => s.settings.hideSources);
   const cites = useMemo(() => new Map(m.citations.filter(isVerified).map((c) => [c.n, c])), [m.citations]);
   const known = useMemo(() => new Set(cites.keys()), [cites]);
-  const active = mark && mark.doc === doc.id ? mark.n : null;
+  // source numbers repeat from answer to answer: only the answer the mark came from lights its own
+  const active = mark && mark.doc === doc.id && (mark.msg == null || mark.msg === m.id) ? mark.n : null;
 
   if (m.state === "error")
     return (
@@ -419,33 +440,67 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
 
   return (
     <div className="ax-a">
-      <ActivityTrail doc={doc.id} m={m} />
+      <ActivityTrail doc={doc.id} m={m} worked={variant === "bar"} />
       {m.text === "" && m.state === "streaming" ? (
         <p className="dim">{PHASES[m.phase ?? "reading"] ?? "Thinking…"}</p>
       ) : (
         <Markdown
           text={m.text}
           caret={m.state === "streaming"}
-          cites={{ known, active, onCite: (n) => cites.get(n) && useAi.getState().showCitation(doc.id, cites.get(n)!) }}
+          cites={{ known, active, onCite: (n) => cites.get(n) && useAi.getState().showCitation(doc.id, cites.get(n)!, m.id) }}
         />
       )}
       {m.state === "cancelled" && <p className="dim small">Stopped.</p>}
       {m.state === "done" && (
         <>
           {!hide && m.citations.some(isVerified) && <Sources doc={doc} m={m} variant={variant} active={active} />}
-          <div className="ax-actions">
-            <button className="ax-link" onClick={() => void navigator.clipboard.writeText(m.text)}>
-              Copy
-            </button>
-            {m.timing && (
-              <span className="dim small" title={`prep ${m.timing.prepMs} ms`}>
-                {m.timing.firstTokenMs != null ? `${(m.timing.firstTokenMs / 1000).toFixed(1)} s to first word · ` : ""}
-                {(m.timing.totalMs / 1000).toFixed(1)} s
-              </span>
-            )}
-          </div>
-          {isLast && !plain && m.followups.length > 0 && <Followups doc={doc} m={m} variant={variant} />}
+          {variant === "bar" ? (
+            <BarActions doc={doc} m={m} isLast={isLast} />
+          ) : (
+            <div className="ax-actions">
+              <button className="ax-link" onClick={() => void navigator.clipboard.writeText(m.text)}>
+                Copy
+              </button>
+              {m.timing && (
+                <span className="dim small" title={`prep ${m.timing.prepMs} ms`}>
+                  {m.timing.firstTokenMs != null ? `${(m.timing.firstTokenMs / 1000).toFixed(1)} s to first word · ` : ""}
+                  {(m.timing.totalMs / 1000).toFixed(1)} s
+                </span>
+              )}
+            </div>
+          )}
+          {isLast && !plain && variant !== "bar" && m.followups.length > 0 && <Followups doc={doc} m={m} variant={variant} />}
         </>
+      )}
+    </div>
+  );
+}
+
+/** The icon row under a reply in the command bar: copy it, ask the same question again. */
+function BarActions({ doc, m, isLast }: { doc: DocState; m: Msg; isLast: boolean }) {
+  const asked = useAi((s) => {
+    const all = s.chats[doc.id]?.messages ?? [];
+    const i = all.findIndex((x) => x.id === m.id);
+    return i > 0 ? all[i - 1] : undefined;
+  });
+  const busy = useAi((s) => !!s.chats[doc.id]?.messages.some((x) => x.state === "streaming"));
+  return (
+    <div className="ax-iconrow">
+      <button className="ax-icon small" title="Copy" aria-label="Copy the answer" onClick={() => void navigator.clipboard.writeText(m.text)}>
+        <Glyph name="copy" size={14} />
+      </button>
+      {isLast && asked && (
+        <button
+          className="ax-icon small"
+          title="Ask again"
+          aria-label="Ask this again"
+          disabled={busy}
+          onClick={() =>
+            useAi.getState().ask(doc.id, asked.kind === "summarizeDocument" ? { kind: "summarizeDocument" } : { kind: "ask", question: asked.text })
+          }
+        >
+          <Glyph name="retry" size={14} />
+        </button>
       )}
     </div>
   );
@@ -532,8 +587,34 @@ export function Composer({
   onSend?: () => void;
 }) {
   const [text, setText] = useState("");
+  const box = useRef<HTMLTextAreaElement>(null);
   const streaming = useAi((s) => !!s.chats[doc.id]?.messages.some((m) => m.state === "streaming"));
   const prep = useAi((s) => s.chats[doc.id]?.prep);
+  // "Edit" on an earlier question puts its words back here; sending them is a new turn. A draft the user was
+  // writing is not thrown away: it stays below the edited question.
+  const draft = useAi((s) => (s.draft?.doc === doc.id ? s.draft : null));
+  const caret = useRef<number | null>(null);
+  useEffect(() => {
+    if (!draft) return;
+    useAi.getState().clearDraft();
+    // (pressing Edit again on the same question finds it already first: nothing to add)
+    const next = text.startsWith(draft.text) ? text : draft.text + (text.trim() ? `\n\n${text.trim()}` : "");
+    caret.current = draft.text.length;
+    setText(next);
+    box.current?.focus();
+    if (next === text) {
+      // nothing will re-render: put the caret now
+      box.current?.setSelectionRange(draft.text.length, draft.text.length);
+      caret.current = null;
+    }
+  }, [draft]);
+  // the caret goes to the end of the question, once the textarea holds the new text
+  useLayoutEffect(() => {
+    const t = box.current;
+    if (caret.current == null || !t) return;
+    t.setSelectionRange(caret.current, caret.current);
+    caret.current = null;
+  }, [text]);
   const noText = typeof prep === "object" && prep !== null && !prep.enough;
   const st = useAi.getState;
 
@@ -551,10 +632,11 @@ export function Composer({
       <div className="ax-input">
         <AttachMenu doc={doc} />
         <textarea
+          ref={box}
           value={text}
           rows={1}
           aria-label="Ask about this document"
-          placeholder={noText ? "This PDF has no readable text" : "Ask about this document"}
+          placeholder={noText ? "This PDF has no readable text" : variant === "bar" ? "Ask about this PDF" : "Ask about this document"}
           disabled={noText}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {

@@ -26,6 +26,7 @@ const tilesCss: string = readFileSync(new URL("../components/allTools.css", impo
 
 const sources = import.meta.glob<string>("../**/*.{ts,tsx}", { query: "?raw", import: "default", eager: true });
 const fluentFiles = Object.keys(import.meta.glob("../assets/icons/fluent/*.svg", { query: "?raw", eager: true }));
+const inkwellFiles = Object.keys(import.meta.glob("../assets/icons/inkwell/*.svg", { query: "?raw", eager: true }));
 
 describe("icon set", () => {
   it("every named icon has a Regular and a Filled drawing", () => {
@@ -73,10 +74,17 @@ describe("icon set", () => {
   });
 
   it("no component carries its own table of icon paths (the app and provider marks aside)", () => {
-    const hits = Object.entries(sources)
-      .filter(([f, src]) => !f.endsWith(".test.ts") && /const PATHS/.test(src))
-      .map(([f]) => f);
-    expect(hits).toEqual([]);
+    const hits = Object.entries(sources).flatMap(([f, src]) => inlinePaths(src).map((h) => `${f}: ${h}`));
+    // the ink-drop app mark (Chrome.tsx) and the assistant provider's mark (AssistantPanel.tsx) are brand marks
+    expect(hits.filter((h) => !/\/(Chrome|AssistantPanel)\.tsx: /.test(h))).toEqual([]);
+  });
+
+  it("the inline-path check catches path constants and literal <path d>, and skips computed paths", () => {
+    expect(inlinePaths('const GRIP = "M9.5 6h.01M14.5 6h.01";')).toHaveLength(1);
+    expect(inlinePaths('const MINUS = "M6 12h12";')).toHaveLength(1);
+    expect(inlinePaths('<path d="M1 2h3" />')).toHaveLength(1);
+    expect(inlinePaths("<path d={`M${x} ${y}L${x2} ${y2}`} />")).toHaveLength(0);
+    expect(inlinePaths('const msg = "Make the file smaller";')).toHaveLength(0);
   });
 
   it("every vendored Fluent file is one that the manifest asks for, and every manifest glyph is vendored", () => {
@@ -86,17 +94,60 @@ describe("icon set", () => {
     expect([...want].filter((n) => !have.has(n))).toEqual([]);
   });
 
-  it("every icon name used in a component is in the manifest", () => {
-    const known = new Set<string>([...Object.keys(manifest.fluent), ...Object.keys(manifest.inkwell)]);
-    const used = new Set<string>();
-    for (const [f, src] of Object.entries(sources)) {
-      if (!f.endsWith(".tsx")) continue;
-      for (const m of src.matchAll(/<(?:Icon|Glyph)s+name="([A-Za-z]+)"/g)) used.add(m[1]);
+  it("manifest keys are plain names, one per key, sorted, and every custom file is <name>.svg or <name>-filled.svg", () => {
+    for (const set of [manifest.fluent, manifest.inkwell]) {
+      const keys = Object.keys(set);
+      expect(keys.filter((k) => !/^[A-Za-z0-9]+$/.test(k))).toEqual([]);
+      expect(keys).toEqual([...keys].sort((a, b) => a.localeCompare(b, "en")));
     }
-    const glyphMapped = new Set(["doc", "chev", "docked", "floating", "bar", "brain"]); // assistant Glyph names
-    expect([...used].filter((n) => !known.has(n) && !glyphMapped.has(n))).toEqual([]);
+    const both = new Set([...Object.keys(manifest.fluent), ...Object.keys(manifest.inkwell)]);
+    expect(both.size).toBe(Object.keys(manifest.fluent).length + Object.keys(manifest.inkwell).length);
+    const stray = inkwellFiles.map((f) => f.split("/").pop()!).filter((f) => !/^[A-Za-z0-9]+(-filled)?\.svg$/.test(f));
+    expect(stray).toEqual([]);
+    const named = new Set(inkwellFiles.map((f) => f.split("/").pop()!.replace(/(-filled)?\.svg$/, "")));
+    expect([...named].sort()).toEqual(Object.keys(manifest.inkwell).sort());
+  });
+
+  it("every icon name used in a component is in the manifest, and every Glyph name is one the assistant maps", () => {
+    const known = new Set<string>([...Object.keys(manifest.fluent), ...Object.keys(manifest.inkwell)]);
+    const parts = Object.entries(sources).find(([f]) => f.endsWith("/assistant/parts.tsx"))![1];
+    const glyphKeys = new Set([...parts.matchAll(/^ {2}([a-z]+): "([A-Za-z]+)",$/gm)].map((m) => m[1]));
+    const glyphValues = [...parts.matchAll(/^ {2}([a-z]+): "([A-Za-z]+)",$/gm)].map((m) => m[2]);
+    expect(glyphValues.filter((n) => !known.has(n))).toEqual([]);
+    const used = Object.entries(sources).flatMap(([f, src]) => (f.endsWith(".tsx") ? unknownNames(src, known, glyphKeys) : []));
+    expect(used).toEqual([]);
+  });
+
+  it("the name check fails on a bogus name (it is not vacuous)", () => {
+    const known = new Set(["search", "close"]);
+    const glyphs = new Set(["doc"]);
+    expect(unknownNames('<Icon name="search" size={16} /><Glyph name="doc" />', known, glyphs)).toEqual([]);
+    expect(unknownNames('<Icon name="nope" />', known, glyphs)).toEqual(["Icon nope"]);
+    expect(unknownNames('<Icon name={on ? "close" : "alsoNope"} />', known, glyphs)).toEqual(["Icon alsoNope"]);
+    expect(unknownNames('<Glyph name="search" />', known, glyphs)).toEqual(["Glyph search"]);
   });
 });
+
+/** Path data written into a component: a string constant that is SVG path data, or a literal <path d="…">. */
+function inlinePaths(src: string): string[] {
+  const hits: string[] = [];
+  for (const line of src.split(/\r?\n/)) {
+    const literalPath = /<path\b[^>]*\sd="[^"{]/.test(line);
+    const pathConstant = /["'`][Mm]\s?-?\d[\d.\s,-]*[A-Za-z][^"'`]*["'`]/.test(line) && /^\s*(export\s+)?(const|let)\s|:\s*["'`]/.test(line);
+    if (literalPath || pathConstant) hits.push(line.trim().slice(0, 80));
+  }
+  return hits;
+}
+
+/** `<Icon name="x">` / `<Glyph name={a ? "x" : "y"}>` whose name is not known (Icon: the manifest; Glyph: the assistant's keys). */
+function unknownNames(src: string, icons: Set<string>, glyphs: Set<string>): string[] {
+  const out: string[] = [];
+  for (const m of src.matchAll(/<(Icon|Glyph)\s+name=(?:"([A-Za-z0-9]+)"|\{([^}]*)\})/g)) {
+    const names = m[2] ? [m[2]] : [...(m[3] ?? "").matchAll(/"([A-Za-z0-9]+)"/g)].map((x) => x[1]);
+    for (const n of names) if (!(m[1] === "Icon" ? icons : glyphs).has(n)) out.push(`${m[1]} ${n}`);
+  }
+  return out;
+}
 
 // ---- tile colours ---------------------------------------------------------------------------------------
 const lin = (c: number) => ((c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);

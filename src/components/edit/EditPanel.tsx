@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { TextAlign, TextBlock } from "../../lib/api";
-import { displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
+import { type EditSection, displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
 import { type DocState } from "../../store";
 import { Icon, type IconName } from "../Icons";
+import { BookmarksPanel } from "./BookmarksPanel";
+import { LinksPanel } from "./LinksPanel";
 import "./edit.css";
 
 const te = () => useTextEdit.getState();
@@ -15,12 +17,18 @@ const ALIGNS: { id: TextAlign; label: string; icon: IconName }[] = [
   { id: "justify", label: "Justify", icon: "alignJustify" },
 ];
 const SPACINGS = [1, 1.15, 1.2, 1.5, 2];
+const SECTIONS: { id: EditSection; label: string }[] = [
+  { id: "text", label: "Text" },
+  { id: "links", label: "Links" },
+  { id: "bookmarks", label: "Bookmarks" },
+];
 
 /** The toolbar-less entry point is the Edit segment of the mode pill (Organize.tsx); this is its rail. */
 export function EditPanel({ doc }: { doc: DocState }) {
   const open = useTextEdit((s) => s.open);
   const d = useTextEdit((s) => s.docs[doc.id]);
   const tool = useTextEdit((s) => s.tool);
+  const section = useTextEdit((s) => s.section);
   const block = d?.selected ? (d.pages[d.selected.page]?.blocks[d.selected.index] ?? null) : null;
   const id = doc.id;
   const here = d?.pages[doc.currentPage]?.blocks.filter(isOffered) ?? [];
@@ -36,6 +44,24 @@ export function EditPanel({ doc }: { doc: DocState }) {
             <Icon name="close" size={16} />
           </button>
         </div>
+        <div className="te-tabs" role="tablist" aria-label="Edit sections">
+          {SECTIONS.map((t) => (
+            <button key={t.id} role="tab" aria-selected={section === t.id} className={section === t.id ? "on" : ""} onClick={() => te().setSection(t.id)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {section === "links" && (
+          <div className="te-body">
+            <LinksPanel doc={doc} />
+          </div>
+        )}
+        {section === "bookmarks" && (
+          <div className="te-body">
+            <BookmarksPanel doc={doc} />
+          </div>
+        )}
+        {section === "text" && (
         <div className="te-body">
           <section className="te-sec">
             <h3 className="te-h3">Add content</h3>
@@ -101,7 +127,10 @@ export function EditPanel({ doc }: { doc: DocState }) {
             </section>
           )}
         </div>
-        <div className="te-foot dim">Changes apply when you click away. Undo with Ctrl+Z.</div>
+        )}
+        <div className="te-foot dim">
+          {section === "text" ? "Changes apply when you click away. Undo with Ctrl+Z." : "Each change is one step. Undo with Ctrl+Z."}
+        </div>
       </section>
     </aside>
   );

@@ -106,6 +106,10 @@ const measure = () =>
       toolbar: { top: +tb.top.toFixed(2), height: +tb.height.toFixed(2) },
       pill: h(".mode-pill"), pillItems: h(".mode-pill button"), tools: h(".tools-btn"),
       assistantGroup: h(".ax-toggle-group"), assistant: h(".ax-toggle:not(.tools-btn)"), layouts: h(".ax-layouts button"), iconBtn: h(".toolbar .icon-btn").slice(0, 3),
+      // every visible button / select / input in the toolbar, its outer height and top: the distinct heights are what the token governs
+      controls: [...document.querySelectorAll(".toolbar button, .toolbar select, .toolbar input")]
+        .filter((e) => e.getBoundingClientRect().height > 0 && !e.closest(".ax-toggle-group, .ax-layouts"))
+        .map((e) => { const r = e.getBoundingClientRect(); return { cls: (e.className || e.tagName).toString().slice(0, 28), label: e.getAttribute("aria-label") || e.title || "", top: +r.top.toFixed(2), height: +r.height.toFixed(2) } }),
     };
   })()`);
 

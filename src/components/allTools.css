@@ -1,7 +1,7 @@
 /* All tools: the left-slot panel, the hover card, the toolbar pins, the Home grid and the palette rows.
    A tool's icon is a tile (ToolTile.tsx): a rounded square in the colour of its group with the Filled glyph on it,
    the way Acrobat colour-codes its tools. One pair of tokens per group, light and dark, in this one block:
-   --tile-bg is the square, --tile-fg the glyph. Every pair keeps 4.5:1 or more (toolsCatalog.test.ts computes it).
+   --tile-bg is the square, --tile-fg the glyph. Every pair keeps 4.5:1 or more (icons.test.ts computes it).
    Groups other branches add fall back to the accent; give them a pair here and add their id to TOOL_HUES. */
 [data-group] {
   --tile-bg: var(--accent);

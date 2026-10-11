@@ -60,6 +60,18 @@ A tool only picks a glyph: `icon` in `toolItems.ts` names an entry of the manife
 3. Use it: `<Icon name="myName" />`, or `icon: "myName"` on a tool. `IconName` comes from the manifest, so a typo is
    a type error. `src/lib/icons.test.ts` checks that every name has both drawings, every vendored file is asked for
    and every tool names a glyph that exists.
+4. A new tool group needs a colour: a `[data-group="id"]` block with `--tile-bg` and `--tile-fg` (light, dark) in
+   `allTools.css`, and its id in `TOOL_HUES` (`lib/toolsCatalog.ts`). The test fails without both.
+
+Rules the tests enforce:
+- Manifest keys are alphanumeric only (`[A-Za-z0-9]+`, no hyphen, underscore or space), one per line, sorted
+  alphabetically within `fluent` and within `inkwell`, and no name is in both. The loader reads file names with the
+  same rule and ignores anything else (a hyphenated file name used to register under its last segment).
+- A custom glyph needs both `<name>.svg` and `<name>-filled.svg` in `src/assets/icons/inkwell/`, and a key in
+  `inkwell`; a stray file or a key without files fails.
+- No component carries path data: no `const X = "M6 12h12"` and no literal `<path d="…">`, except the two brand marks
+  (`Chrome.tsx`, `AssistantPanel.tsx`). Use `<Icon name="…" />`; the assistant's own names are mapped in
+  `assistant/parts.tsx` (`GLYPHS`).
 
 `node scripts/icons-sheet.mjs <outDir> <cdpPort> <vitePort> [custom|all]` draws a contact sheet of the set inside the
 running app (Regular and Filled at 16, 20 and 24, and a tile in three colours, light and dark) for a look before

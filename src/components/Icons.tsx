@@ -45,7 +45,9 @@ for (const [file, svg] of Object.entries(fluentFiles)) {
   if (m) slot(fluent, m[1])[m[3] as Variant].set(Number(m[2]), parse(svg, Number(m[2])));
 }
 for (const [file, svg] of Object.entries(inkwellFiles)) {
-  const m = /([A-Za-z0-9]+?)(-filled)?\.svg$/.exec(file.split("/").pop() ?? "");
+  // <name>.svg and <name>-filled.svg with an alphanumeric name; anything else (a hyphenated name would have
+  // registered under its last segment) is left out, and the icon test fails on such a file
+  const m = /^([A-Za-z0-9]+)(-filled)?\.svg$/.exec(file.split("/").pop() ?? "");
   if (m) slot(inkwell, m[1])[m[2] ? "filled" : "regular"].set(20, parse(svg, 20));
 }
 

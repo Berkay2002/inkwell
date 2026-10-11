@@ -221,6 +221,11 @@ select {
   border-radius: 6px;
   color: var(--text-2);
 }
+/* every toolbar control is one height (the assistant group's), so tops and bottoms line up */
+.toolbar .icon-btn {
+  width: var(--tb-control-h);
+  height: var(--tb-control-h);
+}
 .icon-btn:hover:not(:disabled) {
   background: var(--surface-2);
   color: var(--text);

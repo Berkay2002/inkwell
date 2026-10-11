@@ -64,7 +64,7 @@ const mode = async (m) => {
   const live = await ev(`({
     docked: document.querySelectorAll(".ax-dock").length,
     floating: document.querySelectorAll(".ax-panel.floating").length,
-    bar: document.querySelectorAll(".ax-bar, .ax-bar-sheet").length > 0 ? 1 : 0,
+    bar: document.querySelectorAll(".ax-bar-surface").length > 0 ? 1 : 0,
   })`);
   const shown = Object.keys(live).filter((k) => live[k] > 0);
   if (shown.length !== 1 || shown[0] !== m) throw new Error(`layout ${m} requested, on screen: ${JSON.stringify(live)}`);
@@ -140,20 +140,20 @@ const resized = await ev(`window.__ai.getState().settings.float`);
 report.floatGeometry = { start: h, moved, resized, stored: await ev(`localStorage.getItem("inkwell.ai")`) };
 await shot("floating-moved-light.png");
 
-// ---- command bar ----
+// ---- command bar (the staged states are in scripts/command-bar-shots.mjs) ----
 await ev(`window.__ai.getState().setSettings({ float: null })`);
 await mode("bar");
 await ev(`window.__ai.getState().clearMark()`);
-await click(".ax-source");
+await click(".ax-pgchip");
 await sleep(900);
-await shot("bar-light.png");
+await shot("bar-live-light.png");
 await theme("dark");
-await shot("bar-dark.png");
+await shot("bar-live-dark.png");
 await ev(`window.__ai.getState().clearMark(); window.__ai.getState().clear(window.__doc())`);
 await sleep(600);
-await shot("bar-empty-dark.png");
+await shot("bar-live-empty-dark.png");
 await theme("light");
-await shot("bar-empty-light.png");
+await shot("bar-live-empty-light.png");
 
 // ---- narrow window, docked ----
 await mode("docked");
@@ -162,7 +162,7 @@ await sleep(800);
 await shot("docked-narrow-light.png");
 await mode("bar");
 await sleep(500);
-await shot("bar-narrow-light.png");
+await shot("bar-live-narrow-light.png");
 await send("Emulation.clearDeviceMetricsOverride");
 await mode("docked");
 
