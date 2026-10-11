@@ -325,19 +325,10 @@ pub(super) fn read_profile(path: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Refuses a target that is the document's own file (the same file by another name, a link or a different
-/// case included): "save as" must never be a plain save over the original.
-pub(super) fn not_own_file(eng: &Engine, doc: DocId, to: &str) -> Result<()> {
-    if crate::engine::edit::same_path(&eng.edit_state(doc)?.path, to) {
-        return Err(EngineError::Invalid(crate::engine::edit::OWN_FILE.into()));
-    }
-    Ok(())
-}
-
-/// Writes the document as another file (Save as) and does what a save does afterwards.
+/// Writes the document as another file (Save as) and does what a save does afterwards. The own file is refused
+/// under the edit guard (same_path: another name, a link or a different case included).
 fn save_elsewhere(window: &Window, app: &tauri::AppHandle, eng: &Engine, hist: &Arc<History>, doc: DocId, to: &str) -> Result<EditState> {
-    not_own_file(eng, doc, to)?;
-    let (state, saved) = eng.save_recorded(doc, Some(to))?;
+    let (state, saved) = eng.save_as_other(doc, to)?;
     crate::after_save(window, app, hist, doc, Some(to), &state, saved);
     Ok(state)
 }

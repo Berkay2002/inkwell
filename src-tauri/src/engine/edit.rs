@@ -1377,6 +1377,17 @@ impl Engine {
         Ok((state, saved))
     }
 
+    /// Save as another file: [`Engine::save_recorded`] with the own-file check made under the same guard, so the
+    /// target cannot become the document's own file between the check and the write.
+    pub fn save_as_other(&self, id: DocId, to: &str) -> Result<(EditState, Option<Saved>)> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        if same_path(to, &entry.path()) {
+            return Err(EngineError::Invalid(OWN_FILE.into()));
+        }
+        self.save_locked(id, &entry, &mut lane, Some(to))
+    }
+
     /// Runs `f` on the authoritative document (marks included) without changing it. `f` must not
     /// change the document or keep page handles.
     pub fn read_custom<R>(&self, id: DocId, f: impl FnOnce(&PdfDocument) -> Result<R>) -> Result<R> {
