@@ -901,7 +901,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
-        .manage(ai::Assistant::new())
+        .manage(ai::Hub::new())
         .manage(Paths::default())
         .manage(Arc::new(tools::Jobs::default()))
         .manage(Arc::new(measure::SnapCache::default()))
@@ -1170,6 +1170,9 @@ pub fn run() {
             ai::ai_cancel,
             ai::ai_tool_decision,
             ai::ai_set_permissions,
+            ai::ai_pick_claude_path,
+            ai::ai_claude_path,
+            ai::ai_clear_claude_path,
             ai::ai_close,
         ])
         .setup(move |app| {
@@ -1180,6 +1183,7 @@ pub fn run() {
                 app.state::<Paths>().learn_recents(&json);
             }
             app.manage(Arc::new(tools::paths::ToolPaths::load(app.handle())));
+            ai::restore_claude_path(app.handle(), &app.state::<Arc<ai::Hub>>());
             batch::app::sweep_at_startup(app.handle());
             Ok(())
         })
