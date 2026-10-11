@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod annot;
 pub mod compress;
 pub mod convert;
 pub mod diff;
@@ -761,6 +762,13 @@ pub fn run() {
             export_start,
             create_start,
             discard_scratch,
+            annot::app::annot_default_author,
+            annot::app::annot_list,
+            annot::app::annot_add,
+            annot::app::annot_edit,
+            annot::app::annot_delete,
+            annot::app::annot_reply,
+            annot::app::annot_state,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

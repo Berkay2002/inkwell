@@ -4,6 +4,7 @@ import { useStore } from "../store";
 import * as api from "./api";
 import type { EditOp, EditState } from "./api";
 import { formatRange } from "./pageRange";
+import { useAnnot } from "./annot";
 import { useRedact } from "./redact";
 import { dropCached } from "./tiles";
 
@@ -36,6 +37,8 @@ export function applyState(id: number, s: EditState) {
   });
   // Undo and redo add and remove redaction marks.
   if (revChanged && useRedact.getState().docs[id]) void useRedact.getState().refreshMarks(id);
+  // ... and comments: undo, redo and restoring a version change them too.
+  if (revChanged && useAnnot.getState().docs[id]) void useAnnot.getState().refresh(id);
   // Hits point at the old pages.
   if (revChanged && d.search.query) st().runSearch(id, d.search.query);
 }

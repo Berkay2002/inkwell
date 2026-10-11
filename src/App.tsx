@@ -8,7 +8,9 @@ import { HistoryBanner, HistoryPanel } from "./components/history/HistoryPanel";
 import { VersionView } from "./components/history/VersionView";
 import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
+import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
 import { RedactPanel } from "./components/redact/RedactPanel";
+import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
 import { ConvertPanel } from "./components/ConvertPanel";
 import { ToolsPanel } from "./components/ToolsPanel";
@@ -38,6 +40,7 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => startHistoryEvents(), []);
+  useEffect(() => wireCommentRail(), []);
 
   // Every open document's history state (recovery and "same document?" prompts show over the page).
   useEffect(() => {
@@ -110,12 +113,14 @@ export default function App() {
                 {viewing ? <VersionView key={`${doc.id}:${viewing}`} doc={doc} versionId={viewing} /> : <Viewer key={doc.id} doc={doc} />}
                 {searchOpen && !viewing && <SearchBar key={doc.id} doc={doc} />}
                 <HistoryBanner doc={doc} />
+                <CommentTools doc={doc} />
               </div>
               <ToolsPanel doc={doc} />
               <ConvertPanel doc={doc} />
               <AssistantPanel doc={doc} />
               <HistoryPanel doc={doc} />
               <RedactPanel doc={doc} />
+              <CommentsPanel doc={doc} />
             </div>
           )}
         </>

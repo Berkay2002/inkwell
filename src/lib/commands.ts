@@ -2,6 +2,7 @@ import { type DocState, useStore } from "../store";
 import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
 import { useRedact } from "./redact";
+import { useAnnot } from "./annot";
 import { useHistory } from "./historyStore";
 import { pickAndCompareFiles } from "../components/history/HistoryPanel";
 import { pickOpen } from "./api";
@@ -171,6 +172,36 @@ export const commands: Command[] = [
     },
   },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
+  { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },
+  ...(
+    [
+      ["v", "select", "Select"], ["h", "highlight", "Highlight"], ["u", "underline", "Underline"], ["s", "strikeOut", "Strikethrough"],
+      ["n", "note", "Note"], ["t", "freeText", "Text box"], ["p", "pen", "Pen"], ["r", "rectangle", "Rectangle"],
+      ["o", "ellipse", "Ellipse"], ["l", "line", "Line"], ["a", "arrow", "Arrow"], ["m", "stamp", "Stamp"],
+    ] as const
+  ).map(([key, tool, name]) => ({
+    id: `comment-tool-${tool}`,
+    title: `Comments: ${name} tool`,
+    keys: [key.toUpperCase()],
+    needsDoc: true,
+    notInText: true,
+    run: () => {
+      const a = useAnnot.getState();
+      if (a.open) a.setTool(tool);
+    },
+  })),
+  {
+    id: "comment-delete",
+    title: "Comments: delete selected",
+    keys: ["Delete"],
+    needsDoc: true,
+    notInText: true,
+    run: withDoc((d) => {
+      const a = useAnnot.getState();
+      const sel = a.open ? a.get(d.id).selected : null;
+      if (sel) void a.remove(d.id, [sel]);
+    }),
+  },
   {
     id: "history-compare",
     title: "Compare with\u2026",
