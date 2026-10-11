@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 
 /// The Format tab.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Format {
     #[default]
     None,
@@ -81,7 +81,7 @@ impl CalcOp {
 
 /// The Calculate tab.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Calculate {
     #[default]
     None,
