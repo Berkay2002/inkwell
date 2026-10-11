@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join("inkwell-history-tests").join(name);
+    // Per process: concurrent test runs (worktrees, CI) must not share a store.
+    let d = std::env::temp_dir().join(format!("inkwell-history-tests-{}", std::process::id())).join(name);
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     d

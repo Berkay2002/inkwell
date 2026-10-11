@@ -4,12 +4,13 @@ import { readViewerSelection, useAi } from "./aiStore";
 import { useRedact } from "./redact";
 import { useAnnot } from "./annot";
 import { useHistory } from "./historyStore";
-import { pickAndCompareFiles } from "../components/history/HistoryPanel";
+import { openCompareSetup } from "../components/history/HistoryPanel";
 import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
 import { useConvert } from "./convertStore";
 import { useProtect } from "./protectStore";
+import { usePrint } from "./printStore";
 import { useTools } from "./toolsStore";
 
 export interface Command {
@@ -96,6 +97,7 @@ export const commands: Command[] = [
   { id: "security", title: "Document properties and security…", needsDoc: true, run: () => useProtect.getState().open("security") },
   { id: "export", title: "Export pages, text or images…", needsDoc: true, run: () => useConvert.getState().openExport() },
   { id: "export-word", title: "Export to Word…", needsDoc: true, run: () => useConvert.getState().openExport(undefined, "word") },
+  { id: "print", title: "Print…", keys: ["Ctrl+P"], needsDoc: true, run: () => usePrint.getState().open() },
   { id: "create-pdf", title: "Create PDF…", run: () => useConvert.getState().openCreate() },
   { id: "create-clipboard", title: "Create PDF from the clipboard image", run: () => useConvert.getState().openCreate("clipboard") },
   { id: "create-blank", title: "Create a blank PDF…", run: () => useConvert.getState().openCreate("blank") },
@@ -218,7 +220,15 @@ export const commands: Command[] = [
       h.openCompare({ doc: d.id, a: { kind: "version", id: a }, b: { kind: "current" } });
     }),
   },
-  { id: "compare-files", title: "Compare files\u2026", run: () => void pickAndCompareFiles() },
+  {
+    id: "compare-files",
+    title: "Compare files\u2026",
+    run: () => {
+      const s = st();
+      const d = s.active != null ? s.docs[s.active] : null;
+      void openCompareSetup(d ? { id: d.id, name: d.name } : undefined);
+    },
+  },
   { id: "palette", title: "Command palette", keys: ["Ctrl+K"], run: () => st().setUi({ paletteOpen: true }) },
   { id: "ai-toggle", title: "AI Assistant: show or hide", keys: ["Ctrl+Shift+A"], needsDoc: true, run: () => useAi.getState().toggle() },
   { id: "ai-layout-cycle", title: "Assistant: next layout", keys: ["Ctrl+Shift+L"], needsDoc: true, run: () => useAi.getState().cycleMode() },
