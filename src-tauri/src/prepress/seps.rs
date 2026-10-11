@@ -25,12 +25,19 @@ pub struct PageSeps {
     pub spots: Vec<Spot>,
     /// The page paints with overprint (so the overprint preview can differ from the plain one).
     pub overprint: bool,
+    /// Spots past the first `MAX_SPOT_PLANES`: a pixmap holds 32 components, so these are painted into
+    /// CMYK through their alternates and cannot be switched on their own.
+    pub folded: usize,
 }
+
+/// Spot colours that get a plane of their own: MuPDF holds 32 components in a pixmap, and a group's
+/// alpha takes one, so 32 less the four process inks less one.
+pub const MAX_SPOT_PLANES: usize = 27;
 
 impl PageSeps {
     /// The plane index of a spot, counted after the four process planes.
     pub fn plane_of(&self, name: &str) -> Option<usize> {
-        self.spots.iter().position(|s| s.name == name).map(|i| 4 + i)
+        self.spots.iter().position(|s| s.name == name).filter(|&i| i < MAX_SPOT_PLANES).map(|i| 4 + i)
     }
 }
 
@@ -63,6 +70,7 @@ pub fn page_separations(eng: &Engine, doc: DocId, page: u32) -> Result<PageSeps>
                 cmyk: if c.len() == 4 { [pct(c[0]), pct(c[1]), pct(c[2]), pct(c[3])] } else { [0, 0, 0, 100] },
             });
         }
-        Ok(PageSeps { process: PROCESS, spots, overprint })
+        let folded = spots.len().saturating_sub(MAX_SPOT_PLANES);
+        Ok(PageSeps { process: PROCESS, spots, overprint, folded })
     })
 }

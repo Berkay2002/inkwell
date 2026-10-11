@@ -861,11 +861,12 @@ pub fn run() {
         })
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
             // `/p/...`: a page tile in a print production view (plates, coverage)
-            if let Some((key, view, epoch, rank)) = prepress::app::parse_tile_request(request.uri()) {
+            if let Some((key, view, stream, epoch, rank)) = prepress::app::parse_tile_request(request.uri()) {
                 proto_prepress.request_tile(
                     &proto_engine,
                     key,
                     view,
+                    stream,
                     epoch,
                     rank,
                     Box::new(move |outcome| {

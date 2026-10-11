@@ -30,7 +30,7 @@ pub struct Inspected {
     pub kind: ObjectKind,
     /// `DeviceCMYK`, `ICCBased`, `Separation / DeviceN`, ... as MuPDF names the space.
     pub color_space: String,
-    /// `gray`, `rgb`, `cmyk`, `lab`, `indexed`, `spot`.
+    /// `gray`, `rgb`, `cmyk`, `lab`, `indexed`, `spot`, or `shading` (a shading's colours are not read).
     pub model: &'static str,
     /// Names of the colorants of a spot space.
     pub colorants: Vec<String>,
@@ -219,7 +219,7 @@ impl NativeDevice for Recorder {
         self.push(true, || Inspected {
             kind: ObjectKind::Shading,
             color_space: "Shading".into(),
-            model: "rgb",
+            model: "shading",
             colorants: vec![],
             values: vec![],
             cmyk: None,

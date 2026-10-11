@@ -1,6 +1,7 @@
 //! A page painted into CMYK planes (one more per spot colour, overprint simulated) and the views
 //! composed from them: the plates the person switched on, or a heat map of ink coverage.
 
+use super::seps::MAX_SPOT_PLANES;
 use super::{DEFAULT_TAC_LIMIT, PageSeps, Result, bad};
 use crate::engine::cache::{Tile, TileKey};
 use crate::engine::{Engine, TILE, view_matrix};
@@ -71,13 +72,15 @@ fn cmyk32(c: [u8; 4]) -> u32 {
 /// Paints the part `rect` (device pixels) of `list` under `m`.
 pub(crate) fn paint_planes(list: &DisplayList, seps: &PageSeps, overprint: bool, m: &Matrix, rect: IRect) -> Result<Planes> {
     let cs = Colorspace::device_cmyk();
-    let spots = if overprint { seps.spots.len() } else { 0 };
+    let spots = if overprint { seps.spots.len().min(MAX_SPOT_PLANES) } else { 0 };
     let mut pix = if overprint {
         let mut set = Separations::new()?;
-        for s in &seps.spots {
+        // only the spots that get a plane are named: MuPDF turns every other one it knows into a plane of an
+        // internal pixmap, which would be too wide; an unnamed spot is painted through its alternate
+        for s in seps.spots.iter().take(spots) {
             set.add(&s.name, rgba(s.rgb), cmyk32(s.cmyk))?;
         }
-        for i in 0..seps.spots.len() {
+        for i in 0..spots {
             set.set_behavior(i, SeparationBehavior::Spot)?;
         }
         Pixmap::new_with_separations(&cs, rect, &set, false)?

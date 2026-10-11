@@ -26,7 +26,9 @@ simulation cannot be switched off there.
 
 Spot colours are the page's Separation and DeviceN colorants (`page_separations`, read from the authoritative
 document, MuPDF's `fz_page_separations`). The process names and `All` / `None` are not spots. `All` (the
-registration colour) paints every plane.
+registration colour) paints every plane. A pixmap holds 32 components and a transparency group's alpha takes one,
+so at most `MAX_SPOT_PLANES` = 27 spots get a plane; the others (`folded` in the listing) are painted into CMYK
+through their alternates and cannot be switched on their own.
 
 ## Commands
 
@@ -43,8 +45,10 @@ registration colour) paints every plane.
 Tiles use the existing `inkwell://` protocol with a second route, `p`:
 `/p/{doc}/{page}/{rot}/{scale}/{tx}/{ty}?v={view}&g={rev}&e={epoch}&r={rank}`. It is `/t/...` plus the view id
 from `prepress_view`; tiles are the same 512-pixel RGBA tiles with `x-tile-w` / `x-tile-h`, 410 when the
-generation `g` is stale, 500 with a message on failure. They are scheduled on the engine's pool with the page
-tiles (`Engine::spawn`) and cached per view (48 MB, `Prepress::tiles`). `close_document` forgets the views.
+generation `g` is stale, 500 with a message on failure. `s` (stream) and `e` (epoch) work as on `/t/`: a tile whose
+every requester has moved on is answered 410 without being painted, and requests for one tile join one render.
+They are scheduled on the engine's pool with the page tiles (`Engine::spawn`) and cached per view (48 MB,
+`Prepress::tiles`). A document keeps at most 64 views (the oldest go); `close_document` forgets them all.
 
 ## Ink coverage and TAC
 
@@ -54,7 +58,8 @@ default, at most twice natural size) and reports, over the planes that are inked
 - `maxTac` per cent (four full inks read 400), `maxAt` in page points from the top-left, `overLimit`,
   `overLimitArea` (share of the measured area) and up to 64 `regions` `[x0, y0, x1, y1]` around the areas above
   the limit (a 32 x 32 grid, runs merged);
-- per plane `max` and `mean`, spots after CMYK. Spots count in the total.
+- `regionsTruncated` when more than 64 regions were found;
+- per plane `max` and `mean`, spots after CMYK. Spots count in the total. The limit must be 0 to 1000.
 
 A hairline thinner than a pixel is averaged with its paper; raise `maxPx` to look closer. With `trimOnly`
 (the default in the command) the measure stops at the TrimBox when the page has one, so printer's marks in the
@@ -69,8 +74,8 @@ geometry). Each hit has the kind (fill, stroke, text, stroked text, image, image
 space (`DeviceRGB`, `ICCBased (...)`, `Separation / DeviceN`, ...), its model, the colorants of a spot space,
 the values as written, the CMYK equivalent and its ink in per cent, `overprint` and `overprintMode`, alpha,
 bounds, the font of a text run and the size of an image. Clips are honoured when the clip is a path; a text,
-stroke or image-mask clip counts as inside. A shading is reported wherever no path clip excludes it, without
-its colours. Tiling-pattern cells and soft-mask content are not page content and are skipped.
+stroke or image-mask clip counts as inside. A shading is reported (model `shading`) wherever no path clip
+excludes it, without its colours. Tiling-pattern cells and soft-mask content are not page content and are skipped.
 
 ## Convert colours
 
@@ -79,8 +84,10 @@ rewritten by MuPDF's colour filter (`vendor/mupdf-sys/wrapper/prepress.c`, shape
 which only goes to device spaces): fills, strokes, text, shadings and images of the picked kinds become
 DeviceCMYK. Annotation appearances, forms and patterns are filtered too.
 
-- RGB and gray (CalRGB, Lab, ICC RGB/gray and Indexed spaces count) and spot colours (Separation, DeviceN,
-  through their alternate and tint transform). CMYK is left alone.
+- RGB and gray (CalRGB, Lab, ICC RGB/gray) and spot colours (Separation, DeviceN, through their alternate and
+  tint transform). An Indexed space counts as the space its indices decode into (Indexed CMYK stays). CMYK is
+  left alone, and so is `Separation /None`. A spot space set without a colour starts at full tint, as in the
+  file. Form fields' appearances are converted with the page's annotations.
 - `grayToK`: gray becomes K alone (K = 1 - gray). `preserveBlack`: RGB 0 0 0 becomes K = 1, however the profile
   would mix it.
 - `intent`: `device` (MuPDF's conversion), `document` (the CMYK profile of the output intent already in the
@@ -97,7 +104,7 @@ DeviceCMYK. Annotation appearances, forms and patterns are filtered too.
 ## Boxes and printer's marks
 
 `BoxSpec { pages?, kind, rect? | from + margin }`: `kind` is trim, bleed, art or crop; `rect` is
-`[x0, y0, x1, y1]` in default user space (y up); `from` + `margin` `[left, bottom, right, top]` moves another
+`[x0, y0, x1, y1]` in default user space (y up); crop and art boxes must also lie in the media box; `from` + `margin` `[left, bottom, right, top]` moves another
 box outward (negative inward), e.g. bleed = trim with 9. The result must keep the trim box inside the bleed box
 and the bleed box inside the media box, or nothing changes. The media box is the paper size and is not set here.
 
@@ -105,9 +112,11 @@ and the bleed box inside the media box, or nothing changes. The media box is the
 laid out around the effective TrimBox (a page without one is trimmed at its edge: the TrimBox is written) and
 start beyond the BleedBox: crop marks `offset` from the trim edge (never less than the bleed + 2, default
 bleed + 6) and `length` long (18), bleed marks 2 points beyond the bleed corners, registration targets on the
-middle of each side, a colour bar (C, M, Y, K, overprints, tints) on the bottom edge when it fits. The media
-box is enlarged only as far as the marks need (a page that already has a slug is not touched); a CropBox is
-enlarged with it. Marks use a Separation `All` colour space (every plate, spots included), 0.25 pt by default;
+middle of each side, a colour bar (C, M, Y, K, overprints, tints) on the bottom edge when it fits. `offset` is
+0 to 144. The media box is enlarged only as far as the marks need (a page that already has a slug is not
+touched); a CropBox is enlarged with it. A TrimBox, BleedBox or ArtBox the page leaves to its default (its crop
+box) is written with that value first, so they do not follow the media box outward and a second run of marks
+finds the same boxes and grows nothing. Marks use a Separation `All` colour space (every plate, spots included), 0.25 pt by default;
 the colour bar uses process colours. The page's own contents are wrapped in a balanced `q ... Q` first. Notes
 come back for what was skipped (no bleed, a page too small for colour bars).
 
@@ -133,3 +142,7 @@ groups, and by the PDF/X survey), undoes as one step, survives a save, and goes 
 (MuPDF's own `ps_cmyk`, which gives other values than its default) that also becomes the output intent; boxes
 are validated; marks fall outside the trim and the bleed box, the media box grows around them, and ink inside
 the trim is unchanged (`trimOnly`).
+
+The review round added tests for: an Indexed RGB and an Indexed CMYK image, a form field's appearance, 30 spots
+(27 planes, 3 folded), a spot space set without a colour and `Separation /None`, marks run twice, refused
+offsets, limits and boxes, and three requests for one tile joining one render.

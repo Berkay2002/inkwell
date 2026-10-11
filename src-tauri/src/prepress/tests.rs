@@ -17,8 +17,12 @@ use std::sync::atomic::AtomicBool;
 
 /// Object numbers: 1 catalog, 2 pages, 3 Helvetica, page i at 10 + 2i with its content at 11 + 2i; extras from 100.
 fn build(resources: &str, pages: &[(&str, &str)], extra: &[(usize, Vec<u8>)]) -> Vec<u8> {
+    build_with("", resources, pages, extra)
+}
+
+fn build_with(catalog: &str, resources: &str, pages: &[(&str, &str)], extra: &[(usize, Vec<u8>)]) -> Vec<u8> {
     let mut objs: Vec<(usize, Vec<u8>)> = vec![
-        (1, b"<</Type/Catalog/Pages 2 0 R>>".to_vec()),
+        (1, format!("<</Type/Catalog/Pages 2 0 R {catalog}>>").into_bytes()),
         (3, b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_vec()),
     ];
     let kids: String = (0..pages.len()).map(|i| format!("{} 0 R ", 10 + 2 * i)).collect();
@@ -578,7 +582,7 @@ fn marks_on_a_page_without_boxes_trim_at_its_edge_and_report_what_they_skip() {
 
 fn wait(eng: &Arc<Engine>, pre: &Arc<Prepress>, key: TileKey, view: u32) -> TileOutcome {
     let (tx, rx) = std::sync::mpsc::channel();
-    pre.request_tile(eng, key, view, 1, 0, Box::new(move |o| {
+    pre.request_tile(eng, key, view, 0, 1, 0, Box::new(move |o| {
         let _ = tx.send(o);
     }));
     rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap()
@@ -616,10 +620,150 @@ fn views_are_registered_once_and_tiles_follow_the_engine_generation() {
 #[test]
 fn the_tile_route_parses() {
     use super::app::parse_tile_request;
-    let uri: tauri::http::Uri = "inkwell://localhost/p/3/7/1/1500/2/4?v=9&g=5&e=11&r=2".parse().unwrap();
-    let (key, view, epoch, rank) = parse_tile_request(&uri).unwrap();
+    let uri: tauri::http::Uri = "inkwell://localhost/p/3/7/1/1500/2/4?v=9&g=5&s=2&e=11&r=2".parse().unwrap();
+    let (key, view, stream, epoch, rank) = parse_tile_request(&uri).unwrap();
     assert_eq!((key.doc, key.page, key.rot, key.scale, key.tx, key.ty, key.rev), (3, 7, 1, 1500, 2, 4, 5));
-    assert_eq!((view, epoch, rank), (9, 11, 2));
+    assert_eq!((view, stream, epoch, rank), (9, 2, 11, 2));
     let plain: tauri::http::Uri = "inkwell://localhost/t/3/7/1/1500/2/4".parse().unwrap();
     assert!(parse_tile_request(&plain).is_none());
+}
+
+// ---- review: indexed images, form fields, many spots, marks run twice, bad numbers ----------------------
+
+#[test]
+fn indexed_images_are_judged_by_their_base_space() {
+    let res = "/XObject<</ImRgb 102 0 R/ImCmyk 103 0 R>>";
+    let page = "q 50 0 0 50 100 600 cm /ImRgb Do Q\nq 50 0 0 50 200 600 cm /ImCmyk Do Q\n";
+    let rgb = stream("/Type/XObject/Subtype/Image/Width 2/Height 2/BitsPerComponent 8/ColorSpace[/Indexed/DeviceRGB 1<FF00000000FF>]", &[0, 1, 1, 0]);
+    let cmyk = stream("/Type/XObject/Subtype/Image/Width 2/Height 2/BitsPerComponent 8/ColorSpace[/Indexed/DeviceCMYK 1<FF000000 00FF0000>]", &[0, 1, 1, 0]);
+    let (eng, doc) = open("indexed", &build(res, &[("", page)], &[(102, rgb), (103, cmyk)]));
+    let (_, r) = convert(&eng, doc, &spec(true, true, true), None).unwrap();
+    assert_eq!(r.remaining, [false, false, true], "the RGB image is CMYK now, the CMYK one was never RGB");
+    // the CMYK image keeps its indexed space; the RGB one lost it
+    let kinds = eng
+        .read_custom(doc, |pdf| {
+            let xo = pdf.find_page(0)?.get_dict("Resources")?.unwrap().get_dict("XObject")?.unwrap();
+            let mut v = Vec::new();
+            for i in 0..xo.dict_len()? {
+                let cs = xo.get_dict_val(i as i32)?.unwrap().get_dict("ColorSpace")?.unwrap();
+                v.push(if cs.is_array()? { "array" } else { "name" });
+            }
+            v.sort_unstable();
+            Ok(v)
+        })
+        .unwrap();
+    assert_eq!(kinds, ["array", "name"], "one image still indexed (CMYK), one converted");
+}
+
+#[test]
+fn a_form_fields_appearance_is_converted_too() {
+    let widget = b"<</Type/Annot/Subtype/Widget/FT/Tx/T(f)/Rect[50 700 150 730]/F 4/AP<</N 105 0 R>>>>".to_vec();
+    let ap = stream("/Type/XObject/Subtype/Form/BBox[0 0 100 30]", b"1 0 0 rg 0 0 100 30 re f");
+    let bytes = build_with("/AcroForm<</Fields[104 0 R]>>", "", &[("/Annots[104 0 R]", "0 g 10 10 5 5 re f")], &[(104, widget), (105, ap)]);
+    let (eng, doc) = open("widget", &bytes);
+    let appearance = |eng: &Engine| {
+        eng.read_custom(doc, |pdf| {
+            let annot = pdf.find_page(0)?.get_dict("Annots")?.unwrap().get_array(0)?.unwrap();
+            Ok(String::from_utf8_lossy(&annot.get_dict("AP")?.unwrap().get_dict("N")?.unwrap().read_stream()?).into_owned())
+        })
+        .unwrap()
+    };
+    assert!(appearance(&eng).contains(" rg"));
+    convert(&eng, doc, &spec(true, true, true), None).unwrap();
+    let after = appearance(&eng);
+    assert!(!after.contains(" rg") && after.contains(" k"), "{after}");
+}
+
+#[test]
+fn more_than_27_spots_render_and_the_rest_are_folded_into_cmyk() {
+    let mut cs = String::new();
+    let mut content = String::new();
+    for i in 0..30 {
+        let _ = write!(cs, "/SP{i}[/Separation/Spot{i:02}/DeviceCMYK<</FunctionType 2/Domain[0 1]/C0[0 0 0 0]/C1[0 1 1 0]/N 1>>]");
+        let _ = writeln!(content, "/SP{i} cs 1 scn {} 700 15 15 re f", 10 + i * 16);
+    }
+    let (eng, doc) = open("many-spots", &build(&format!("/ColorSpace<<{cs}>>"), &[("", &content)], &[]));
+    let s = page_separations(&eng, doc, 0).unwrap();
+    assert_eq!((s.spots.len(), s.folded), (30, 3));
+    assert_eq!(s.plane_of("Spot00"), Some(4));
+    assert_eq!(s.plane_of("Spot26"), Some(30));
+    assert_eq!(s.plane_of("Spot27"), None, "no plane of its own");
+    let patch = |i: usize| (10 + i * 16 + 7, 792 - 700 - 8);
+    let at = |view: &View, i: usize| pixel(&eng, doc, view, patch(i).0, patch(i).1);
+    let all = View::default();
+    assert_ne!(at(&all, 0), [255, 255, 255]);
+    assert_ne!(at(&all, 29), [255, 255, 255], "a folded spot is still painted");
+    // a plane switches off, a folded spot does not
+    let hide = |n: &str| View { hidden_spots: vec![n.into()], ..View::default() };
+    assert_eq!(at(&hide("Spot00"), 0), [255, 255, 255]);
+    assert_ne!(at(&hide("Spot29"), 29), [255, 255, 255]);
+    // and the page can be measured
+    let r = ink_report(&eng, doc, 0, 300.0, 1600, false).unwrap();
+    assert_eq!(r.planes.len(), 4 + MAX_SPOT_PLANES);
+}
+
+#[test]
+fn spot_conversion_starts_at_full_tint_and_leaves_none_alone() {
+    let res = "/ColorSpace<</CS0[/Separation/Gold/DeviceCMYK<</FunctionType 2/Domain[0 1]/C0[0 0 0 0]/C1[0 0.5 1 0]/N 1>>]\
+ /CSN[/Separation/None/DeviceCMYK<</FunctionType 2/Domain[0 1]/C0[0 0 0 0]/C1[0 0 0 1]/N 1>>]>>";
+    // a space set without a colour starts at full tint; /None is set with one
+    let page = "/CS0 cs 50 500 100 100 re f\n/CSN cs 1 scn 200 500 100 100 re f\n";
+    let (eng, doc) = open("full-tint", &build(res, &[("", page)], &[]));
+    let before = inspect_at(&eng, doc, 0, 100.0, 242.0, 8).unwrap();
+    assert_eq!(before[0].model, "spot");
+    convert(&eng, doc, &spec(false, false, true), None).unwrap();
+    let after = inspect_at(&eng, doc, 0, 100.0, 242.0, 8).unwrap();
+    assert_eq!(after[0].model, "cmyk");
+    let c = after[0].cmyk.unwrap();
+    assert!(c[0] < 10.0 && (35.0..65.0).contains(&c[1]) && c[2] > 85.0 && c[3] < 10.0, "full tint of the alternate, not the initial black: {c:?}");
+    let none = inspect_at(&eng, doc, 0, 250.0, 242.0, 8).unwrap();
+    assert_eq!(none[0].model, "spot", "Separation /None is not converted");
+}
+
+#[test]
+fn marks_run_twice_do_not_grow_and_keep_the_bleed_they_found() {
+    let (eng, doc) = open("marks-twice", &build("", &[("", "0 g 100 100 50 50 re f")], &[]));
+    let spec = MarksSpec { pages: None, marks: MarkSet::default(), weight: None, offset: None, length: None };
+    add_printer_marks(&eng, doc, &spec, EditSource::User).unwrap();
+    let (media, trim, bleed, art) = (boxes(&eng, doc, 0, BoxKind::Media), boxes(&eng, doc, 0, BoxKind::Trim), boxes(&eng, doc, 0, BoxKind::Bleed), boxes(&eng, doc, 0, BoxKind::Art));
+    let page = Some([0.0, 0.0, 612.0, 792.0]);
+    assert_eq!((trim, bleed, art), (page, page, page), "the boxes before the marks were written down");
+    add_printer_marks(&eng, doc, &spec, EditSource::User).unwrap();
+    assert_eq!(boxes(&eng, doc, 0, BoxKind::Media), media, "the media box did not grow again");
+    assert_eq!((boxes(&eng, doc, 0, BoxKind::Trim), boxes(&eng, doc, 0, BoxKind::Bleed)), (trim, bleed));
+}
+
+#[test]
+fn numbers_that_make_no_sense_are_refused() {
+    let (eng, doc) = open("bad-numbers", &build("", &[("", "0 g 100 100 50 50 re f")], &[]));
+    for offset in [-1.0, f32::NAN, f32::INFINITY, 500.0] {
+        let spec = MarksSpec { pages: None, marks: MarkSet::default(), weight: None, offset: Some(offset), length: None };
+        assert!(add_printer_marks(&eng, doc, &spec, EditSource::User).is_err(), "offset {offset}");
+    }
+    assert_eq!(boxes(&eng, doc, 0, BoxKind::Media), Some([0.0, 0.0, 612.0, 792.0]), "nothing changed");
+    assert!(ink_report(&eng, doc, 0, f32::NAN, 1600, false).is_err());
+    assert!(ink_report(&eng, doc, 0, -5.0, 1600, false).is_err());
+    // a crop or art box outside the media box
+    let beyond = |kind| BoxSpec { pages: None, kind, rect: Some([-10.0, 0.0, 600.0, 700.0]), from: None, margin: None };
+    assert!(set_boxes(&eng, doc, &beyond(BoxKind::Crop), EditSource::User).is_err());
+    assert!(set_boxes(&eng, doc, &beyond(BoxKind::Art), EditSource::User).is_err());
+}
+
+#[test]
+fn requests_for_one_tile_join_one_render() {
+    let (eng, doc) = open("join", &build(SPOT, &[("", SPOT_PAGE)], &[]));
+    let pre = Arc::new(Prepress::default());
+    let view = pre.register(doc, View::default());
+    let k = key(&eng, doc);
+    let (tx, rx) = std::sync::mpsc::channel();
+    for stream in [0, 0, 1] {
+        let tx = tx.clone();
+        pre.request_tile(&eng, k, view, stream, 1, 0, Box::new(move |o| {
+            let _ = tx.send(o);
+        }));
+    }
+    let got: Vec<_> = (0..3).map(|_| rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap()).collect();
+    let tiles: Vec<_> = got.iter().filter_map(|o| if let TileOutcome::Ready(t) = o { Some(t.rgba.clone()) } else { None }).collect();
+    assert_eq!(tiles.len(), 3, "everyone gets the tile");
+    assert!(tiles.windows(2).all(|w| w[0] == w[1]));
 }

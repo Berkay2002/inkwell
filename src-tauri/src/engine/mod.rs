@@ -195,6 +195,16 @@ pub struct DocEntry {
 }
 
 impl DocEntry {
+    /// Records that the view of `stream` has reached `epoch` (tiles of older epochs are then stale).
+    pub(crate) fn note_epoch(&self, stream: usize, epoch: u64) {
+        self.epochs[stream.min(STREAMS - 1)].fetch_max(epoch, Ordering::SeqCst);
+    }
+
+    /// Whether the view of `stream` has moved past `epoch`.
+    pub(crate) fn epoch_passed(&self, stream: usize, epoch: u64) -> bool {
+        epoch < self.epochs[stream.min(STREAMS - 1)].load(Ordering::SeqCst)
+    }
+
     pub fn page_count(&self) -> u32 {
         self.layout.read().page_count
     }

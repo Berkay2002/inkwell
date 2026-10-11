@@ -26,7 +26,7 @@ pub use ink::{InkReport, PlaneInk, doc_ink, ink_report};
 pub use inspect::{Inspected, ObjectKind, inspect_at};
 pub use marks::{MarkSet, MarksSpec, add_printer_marks};
 pub use render::{Mode, PROCESS, View, render_view_tile};
-pub use seps::{PageSeps, Spot, page_separations};
+pub use seps::{MAX_SPOT_PLANES, PageSeps, Spot, page_separations};
 
 pub type Result<T> = std::result::Result<T, EngineError>;
 

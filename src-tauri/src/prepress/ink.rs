@@ -38,6 +38,8 @@ pub struct InkReport {
     /// Boxes `[x0, y0, x1, y1]` (page points, top-left origin) around the areas above the limit,
     /// at most 64.
     pub regions: Vec<[f32; 4]>,
+    /// There were more than 64 regions; the rest are not listed.
+    pub regions_truncated: bool,
     pub spots: Vec<String>,
 }
 
@@ -50,6 +52,9 @@ const MAX_REGIONS: usize = 64;
 /// its paper. With `trim_only` the measure stops at the TrimBox (when the page has one), so printer's
 /// marks in the slug do not count.
 pub fn ink_report(eng: &Engine, doc: DocId, page: u32, limit: f32, max_px: u32, trim_only: bool) -> Result<InkReport> {
+    if !(limit.is_finite() && (0.0..=1000.0).contains(&limit)) {
+        return Err(bad("The ink limit must be between 0 and 1000 per cent"));
+    }
     let seps = page_separations(eng, doc, page)?;
     let entry = eng.doc_entry(doc)?;
     let rev = entry.generation();
@@ -131,6 +136,7 @@ fn measure(p: &Planes, seps: &PageSeps, page: u32, limit: f32, scale: f32, clip:
             }
         }
     }
+    let regions_truncated = regions.len() > MAX_REGIONS;
     regions.truncate(MAX_REGIONS);
     let max_tac = max_tac as f32 * 100.0 / 255.0;
     InkReport {
@@ -142,6 +148,7 @@ fn measure(p: &Planes, seps: &PageSeps, page: u32, limit: f32, scale: f32, clip:
         over_limit: max_tac > limit,
         over_limit_area: over as f32 / px_count as f32,
         regions,
+        regions_truncated,
         spots: seps.spots.iter().map(|s| s.name.clone()).collect(),
     }
 }

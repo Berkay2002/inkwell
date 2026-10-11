@@ -92,28 +92,37 @@ typedef struct
     int gray, rgb, spot, gray_to_k, preserve_black;
 } convert_data;
 
-/* 0: leave it; 1: gray; 2: rgb; 3: spot. */
+/* 0: leave it; 1: gray; 2: rgb; 3: spot. An Indexed space is judged by the space its indices decode into. */
 static int kind_of(fz_context *ctx, convert_data *cd, fz_colorspace *cs)
 {
+    fz_colorspace *base;
     if (cs == NULL)
         return 0;
-    if (fz_colorspace_is_cmyk(ctx, cs))
+    base = fz_base_colorspace(ctx, cs);
+    if (base == NULL || fz_colorspace_is_cmyk(ctx, base))
         return 0;
-    if (fz_colorspace_is_device_n(ctx, cs))
+    if (fz_colorspace_is_device_n(ctx, base))
+    {
+        /* /Separation /None paints nothing: it stays as it is */
+        if (fz_colorspace_n(ctx, base) == 1)
+        {
+            const char *name = fz_colorspace_colorant(ctx, base, 0);
+            if (name && !strcmp(name, "None"))
+                return 0;
+        }
         return cd->spot ? 3 : 0;
-    if (fz_colorspace_is_gray(ctx, cs))
+    }
+    if (fz_colorspace_is_gray(ctx, base))
         return cd->gray ? 1 : 0;
-    if (fz_colorspace_is_rgb(ctx, cs) || fz_colorspace_is_lab(ctx, cs))
+    if (fz_colorspace_is_rgb(ctx, base) || fz_colorspace_is_lab(ctx, base))
         return cd->rgb ? 2 : 0;
-    if (fz_colorspace_is_indexed(ctx, cs))
-        return (cd->rgb || cd->gray) ? 2 : 0;
     return 0;
 }
 
 static void convert_one(fz_context *ctx, convert_data *cd, int kind, fz_colorspace *cs, const float *src, float *out)
 {
     int i, black = 1;
-    if (kind == 1 && cd->gray_to_k)
+    if (kind == 1 && cd->gray_to_k && !fz_colorspace_is_indexed(ctx, cs))
     {
         out[0] = out[1] = out[2] = 0;
         out[3] = 1 - src[0];
@@ -150,7 +159,17 @@ static void color_rewrite(fz_context *ctx, void *opaque, pdf_obj **cs_obj, int *
     fz_try(ctx)
     {
         kind = kind_of(ctx, cd, cs);
-        if (kind != 0 && *n != 0)
+        if (kind == 3 && *n == 0)
+        {
+            /* a spot space that is set without a colour starts at full tint */
+            float full[FZ_MAX_COLORS];
+            int i;
+            for (i = 0; i < FZ_MAX_COLORS; i++)
+                full[i] = 1;
+            convert_one(ctx, cd, kind, cs, full, cols);
+            *n = 4;
+        }
+        else if (kind != 0 && *n != 0)
             convert_one(ctx, cd, kind, cs, color, cols);
     }
     fz_always(ctx)
@@ -293,6 +312,9 @@ void mupdf_pdf_convert_colors(fz_context *ctx, pdf_document *doc, int pagenum, c
         page = pdf_load_page(ctx, doc, pagenum);
         pdf_filter_page_contents(ctx, doc, page, &options);
         for (annot = pdf_first_annot(ctx, page); annot != NULL; annot = pdf_next_annot(ctx, annot))
+            pdf_filter_annot_contents(ctx, doc, annot, &options);
+        /* form fields are not annotations to MuPDF's iterator */
+        for (annot = pdf_first_widget(ctx, page); annot != NULL; annot = pdf_next_widget(ctx, annot))
             pdf_filter_annot_contents(ctx, doc, annot, &options);
     }
     fz_always(ctx)

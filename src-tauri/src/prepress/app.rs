@@ -50,6 +50,18 @@ impl TileCache {
     }
 }
 
+type Responder = Box<dyn FnOnce(TileOutcome) + Send>;
+
+/// Someone waiting for a tile: the stream (main view, thumbnails) and epoch it asked at.
+struct Waiter {
+    stream: usize,
+    epoch: u64,
+    respond: Responder,
+}
+
+/// Views a document may have registered at once; the oldest go first.
+const MAX_VIEWS_PER_DOC: usize = 64;
+
 struct Views {
     next: u32,
     by_id: HashMap<u32, (DocId, View)>,
@@ -58,6 +70,7 @@ struct Views {
 /// The registered views and what is cached for them.
 pub struct Prepress {
     views: Mutex<Views>,
+    inflight: Mutex<HashMap<(TileKey, u32), Vec<Waiter>>>,
     seps: Mutex<HashMap<(DocId, u32, u32), Arc<PageSeps>>>,
     tiles: Mutex<TileCache>,
 }
@@ -66,6 +79,7 @@ impl Default for Prepress {
     fn default() -> Self {
         Prepress {
             views: Mutex::new(Views { next: 1, by_id: HashMap::new() }),
+            inflight: Mutex::new(HashMap::new()),
             seps: Mutex::new(HashMap::new()),
             tiles: Mutex::new(TileCache { map: LruCache::unbounded(), bytes: 0 }),
         }
@@ -81,6 +95,12 @@ impl Prepress {
         }
         let id = v.next;
         v.next += 1;
+        let mine: Vec<u32> = v.by_id.iter().filter(|(_, (d, _))| *d == doc).map(|(id, _)| *id).collect();
+        if mine.len() >= MAX_VIEWS_PER_DOC {
+            if let Some(oldest) = mine.into_iter().min() {
+                v.by_id.remove(&oldest);
+            }
+        }
         v.by_id.insert(id, (doc, view));
         id
     }
@@ -128,8 +148,10 @@ impl Prepress {
         Ok(tile)
     }
 
-    /// Serves one tile; the same contract as `Engine::request_tile` (stale when the document moved on).
-    pub fn request_tile(self: &Arc<Self>, eng: &Arc<Engine>, key: TileKey, view_id: u32, epoch: u64, rank: u32, respond: Box<dyn FnOnce(TileOutcome) + Send>) {
+    /// Serves one tile; the same contract as `Engine::request_tile`: stale when the document moved on or the
+    /// view of `stream` went past `epoch` before a worker got to it, one render for requests that join.
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_tile(self: &Arc<Self>, eng: &Arc<Engine>, key: TileKey, view_id: u32, stream: usize, epoch: u64, rank: u32, respond: Responder) {
         let entry = match eng.doc_entry(key.doc) {
             Ok(e) => e,
             Err(e) => return respond(TileOutcome::Failed(e.to_string())),
@@ -137,43 +159,75 @@ impl Prepress {
         if key.rev != entry.generation() {
             return respond(TileOutcome::Stale);
         }
+        let stream = stream.min(crate::engine::STREAMS - 1);
+        entry.note_epoch(stream, epoch);
         let Some(view) = self.view(view_id, key.doc) else { return respond(TileOutcome::Failed("unknown view".into())) };
         if let Some(t) = self.tiles.lock().map.get(&(key, view_id)) {
             return respond(TileOutcome::Ready(t.clone()));
         }
+        let slot = (key, view_id);
+        {
+            let mut inflight = self.inflight.lock();
+            if let Some(waiters) = inflight.get_mut(&slot) {
+                waiters.push(Waiter { stream, epoch, respond });
+                return;
+            }
+            inflight.insert(slot, vec![Waiter { stream, epoch, respond }]);
+        }
         let me = self.clone();
         eng.spawn(class::VISIBLE, epoch, rank, move |eng| {
-            let out = match catch_unwind(AssertUnwindSafe(|| me.render(eng, &key, view_id, &view))) {
-                Ok(Ok(t)) => TileOutcome::Ready(t),
-                Ok(Err(EngineError::Stale)) => TileOutcome::Stale,
-                Ok(Err(e)) => TileOutcome::Failed(e.to_string()),
-                Err(_) => TileOutcome::Failed(EngineError::Panic.to_string()),
+            let outcome = |waiters: Vec<Waiter>, make: &dyn Fn() -> TileOutcome| {
+                for w in waiters {
+                    (w.respond)(make());
+                }
             };
-            respond(out)
+            // stale once every one that wanted it has moved on
+            let all_stale = {
+                let mut inflight = me.inflight.lock();
+                let stale = inflight.get(&slot).is_some_and(|ws| ws.iter().all(|w| entry.epoch_passed(w.stream, w.epoch)));
+                if stale { inflight.remove(&slot) } else { None }
+            };
+            if let Some(waiters) = all_stale {
+                return outcome(waiters, &|| TileOutcome::Stale);
+            }
+            let result = match catch_unwind(AssertUnwindSafe(|| me.render(eng, &key, view_id, &view))) {
+                Ok(r) => r,
+                Err(_) => Err(EngineError::Panic),
+            };
+            let waiters = me.inflight.lock().remove(&slot).unwrap_or_default();
+            match result {
+                Ok(t) => outcome(waiters, &|| TileOutcome::Ready(t.clone())),
+                Err(EngineError::Stale) => outcome(waiters, &|| TileOutcome::Stale),
+                Err(e) => {
+                    let msg = e.to_string();
+                    outcome(waiters, &|| TileOutcome::Failed(msg.clone()))
+                }
+            }
         });
     }
 }
 
-/// `/p/{doc}/{page}/{rot}/{scale}/{tx}/{ty}?v={view}&g={rev}&e={epoch}&r={rank}` -> the tile key, the
-/// view id, the epoch and the rank.
-pub fn parse_tile_request(uri: &tauri::http::Uri) -> Option<(TileKey, u32, u64, u32)> {
+/// `/p/{doc}/{page}/{rot}/{scale}/{tx}/{ty}?v={view}&g={rev}&s={stream}&e={epoch}&r={rank}` -> the tile key,
+/// the view id, the stream, the epoch and the rank.
+pub fn parse_tile_request(uri: &tauri::http::Uri) -> Option<(TileKey, u32, usize, u64, u32)> {
     let mut parts = uri.path().trim_start_matches('/').split('/');
     if parts.next()? != "p" {
         return None;
     }
     let mut n = || parts.next()?.parse::<u32>().ok();
     let mut key = TileKey { doc: n()?, rev: 0, page: n()?, rot: n()? as u8, scale: n()?, tx: n()? as u16, ty: n()? as u16 };
-    let (mut view, mut epoch, mut rank) = (0u32, 0u64, 0u32);
+    let (mut view, mut stream, mut epoch, mut rank) = (0u32, 0usize, 0u64, 0u32);
     for kv in uri.query().unwrap_or("").split('&') {
         match kv.split_once('=') {
             Some(("v", v)) => view = v.parse().unwrap_or(0),
+            Some(("s", v)) => stream = v.parse().unwrap_or(0),
             Some(("e", v)) => epoch = v.parse().unwrap_or(0),
             Some(("r", v)) => rank = v.parse().unwrap_or(0),
             Some(("g", v)) => key.rev = v.parse().unwrap_or(0),
             _ => {}
         }
     }
-    Some((key, view, epoch, rank))
+    Some((key, view, stream, epoch, rank))
 }
 
 /// The inks of a page.
@@ -187,6 +241,9 @@ pub async fn prepress_separations(eng: Eng<'_>, doc: DocId, page: u32) -> Result
 #[tauri::command]
 pub fn prepress_view(pre: Pre<'_>, eng: Eng<'_>, doc: DocId, view: View) -> Result<u32> {
     eng.doc_entry(doc)?;
+    if !(view.tac_limit.is_finite() && (0.0..=1000.0).contains(&view.tac_limit)) {
+        return Err(EngineError::Invalid("The ink limit must be between 0 and 1000 per cent".into()));
+    }
     Ok(pre.register(doc, view))
 }
 
@@ -243,15 +300,9 @@ pub async fn prepress_convert(
     profile: Option<String>,
     on_progress: Channel<Progress>,
 ) -> Result<Converted> {
-    let bytes = match (spec.intent, profile) {
-        (IntentSource::Profile, Some(token)) => {
-            let path = reg.open(window.label(), &token)?;
-            // a profile is a few hundred kilobytes; a file far beyond that is not one
-            if std::fs::metadata(&path).map_err(|e| EngineError::Io(e.to_string()))?.len() > 64 << 20 {
-                return Err(EngineError::Invalid("The file is too large for an ICC profile".into()));
-            }
-            Some(std::fs::read(&path).map_err(|e| EngineError::Io(e.to_string()))?)
-        }
+    // the token is resolved here, where the window is known; the file is read off the UI thread
+    let profile_path = match (spec.intent, profile) {
+        (IntentSource::Profile, Some(token)) => Some(reg.open(window.label(), &token)?),
         _ => None,
     };
     let eng = eng.inner().clone();
@@ -259,6 +310,16 @@ pub async fn prepress_convert(
     blocking(move || {
         let mut progress = |p: Progress| {
             let _ = on_progress.send(p);
+        };
+        let bytes = match &profile_path {
+            Some(path) => {
+                // a profile is a few hundred kilobytes; a file far beyond that is not one
+                if std::fs::metadata(path).map_err(|e| EngineError::Io(e.to_string()))?.len() > 64 << 20 {
+                    return Err(EngineError::Invalid("The file is too large for an ICC profile".into()));
+                }
+                Some(std::fs::read(path).map_err(|e| EngineError::Io(e.to_string()))?)
+            }
+            None => None,
         };
         let (state, report) = convert_colors(&eng, doc, &spec, bytes.as_deref(), EditSource::User, &mut progress, &guard.cancel)?;
         Ok(Converted { state, report })

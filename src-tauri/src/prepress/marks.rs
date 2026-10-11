@@ -210,13 +210,21 @@ fn mark_page(doc: &mut PdfDocument, index: u32, spec: &MarksSpec, notes: &mut Ve
     if !(length.is_finite() && (3.0..=144.0).contains(&length)) {
         return Err(bad("The crop mark length must be between 3 and 144 points"));
     }
+    if let Some(o) = spec.offset {
+        if !(o.is_finite() && (0.0..=144.0).contains(&o)) {
+            return Err(bad("The offset must be between 0 and 144 points"));
+        }
+    }
     let offset = spec.offset.unwrap_or(bleed_out + 6.0).max(bleed_out + 2.0);
     let lay = Layout { trim, bleed, offset, length };
     let slug = lay.slug();
 
-    // The trim must survive the enlarged media box: a page without a TrimBox gets one now.
-    if stated(&page, BoxKind::Trim)?.is_none() {
-        write(doc, &mut page, BoxKind::Trim, trim)?;
+    // The boxes must survive the enlarged media box: a box the page leaves to its default (the crop box,
+    // which the media box then defaults) is written now, as it is before the change.
+    for (kind, value) in [(BoxKind::Trim, trim), (BoxKind::Bleed, effective(&page, BoxKind::Bleed)?), (BoxKind::Art, effective(&page, BoxKind::Art)?)] {
+        if stated(&page, kind)?.is_none() {
+            write(doc, &mut page, kind, value)?;
+        }
     }
     let had_crop = stated(&page, BoxKind::Crop)?.is_some();
     let new_media = union(media, [trim[0] - slug, trim[1] - slug, trim[2] + slug, trim[3] + slug]);

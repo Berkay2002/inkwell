@@ -158,6 +158,9 @@ pub fn set_boxes(eng: &Engine, doc: DocId, spec: &BoxSpec, source: EditSource) -
                     return Err(bad(format!("Page {}: the trim box must lie inside the bleed box", p + 1)));
                 }
                 BoxKind::Trim if !contains(media, b) => return Err(bad(format!("Page {}: the trim box goes beyond the media box", p + 1))),
+                BoxKind::Crop | BoxKind::Art if !contains(media, b) => {
+                    return Err(bad(format!("Page {}: the {} goes beyond the media box", p + 1, spec.kind.label())));
+                }
                 _ => {}
             }
             write(d, &mut page, spec.kind, b)?;
