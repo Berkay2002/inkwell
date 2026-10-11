@@ -834,3 +834,162 @@ fn a_signed_field_without_sigflags_still_counts_as_signed() {
     let (eng, id, _) = open_bytes("noflags", &bytes);
     assert_eq!(eng.current_bytes(id).unwrap(), bytes, "opened as it is, not rewritten");
 }
+
+// ---- third review: references planted in advance, lazy repair, deep chains, limits --------------
+
+/// A small box, drawn hidden by the attacker so no "later box" warning shows.
+fn hidden_box() -> SignRequest {
+    req(0, [300.0, 100.0, 320.0, 110.0])
+}
+
+/// Names `x` in the resources of the widget's appearance, as an image would be.
+fn name_in_ap(d: &mut PdfDocument, w: &PdfObject, x: PdfObject) {
+    let mut n = w.get_dict("AP").unwrap().unwrap().get_dict("N").unwrap().unwrap();
+    let mut xo = d.new_dict().unwrap();
+    xo.dict_put("Z", x).unwrap();
+    match n.get_dict("Resources").unwrap() {
+        Some(mut r) => r.dict_put("XObject", xo).unwrap(),
+        None => {
+            let mut r = d.new_dict().unwrap();
+            r.dict_put("XObject", xo).unwrap();
+            n.dict_put("Resources", r).unwrap();
+        }
+    }
+}
+
+/// A blue sheet over the page, as a new stream object; returns it.
+fn blue_sheet(d: &mut PdfDocument) -> PdfObject {
+    d.add_stream(&mupdf::Buffer::from_bytes(b"0 0 1 rg 0 0 612 792 re f").unwrap(), None, false).unwrap()
+}
+
+/// The second test ID's signature redone over `bytes` (edited after signing).
+fn resign(bytes: &[u8]) -> Vec<u8> {
+    recms(bytes, |data| {
+        let b = &ids().1;
+        let alg = DigestAlg::Sha256;
+        cms::build(&b.key, &b.cert, &[], alg, cms::DATA, None, &alg.digest(&[data]), &b.cert).unwrap()
+    })
+}
+
+fn page_contents(d: &PdfDocument) -> Vec<u8> {
+    let c = d.find_page(0).unwrap().get_dict("Contents").unwrap().unwrap();
+    let c = if c.is_array().unwrap() { c.get_array(c.len().unwrap() as i32 - 1).unwrap().unwrap() } else { c };
+    c.read_stream().unwrap_or_default()
+}
+
+#[test]
+fn forged_a_reference_planted_before_signing() {
+    // The page's contents name an object that doesn't exist when the victim signs; the attacker's
+    // signature revision defines it (hidden, reached through its appearance's resources).
+    let num = std::cell::Cell::new(0);
+    let mut tamper = |d: &mut PdfDocument, w: &mut PdfObject| {
+        let s = blue_sheet(d);
+        num.set(s.as_indirect().unwrap());
+        w.dict_put("F", PdfObject::new_int(2).unwrap()).unwrap();
+        name_in_ap(d, w, s);
+    };
+    // A dry run tells which number the attacker's object will get.
+    attack(&victim(&page1()), &hidden_box(), &mut tamper);
+    let n = num.get();
+    let base = append(&page1(), |d| {
+        let mut page = d.find_page(0).unwrap();
+        let c = page.get_dict("Contents").unwrap().unwrap().as_indirect().unwrap();
+        page.dict_put("Contents", d.new_object_from_str(&format!("[{c} 0 R {n} 0 R]")).unwrap()).unwrap();
+    });
+    let v = victim(&base);
+    assert!(page_contents(&PdfDocument::from_bytes(&v).unwrap()).is_empty(), "signed with nothing there");
+    let forged = attack(&v, &hidden_box(), &mut tamper);
+    assert_eq!(num.get(), n);
+    assert!(page_contents(&PdfDocument::from_bytes(&forged).unwrap()).starts_with(b"0 0 1 rg"), "the forged file draws the sheet");
+    assert_caught(&forged);
+}
+
+#[test]
+fn forged_an_object_shown_only_after_mupdf_repairs_the_file() {
+    // The attacker's new object (an image's soft mask, which nothing reads before the comparison)
+    // is renamed to the page content's number: its cross-reference entry then points at the wrong
+    // object, MuPDF rebuilds the table when it first reads it, and the rebuilt table takes this
+    // later copy as the page content, after the real one was compared.
+    let v = victim(&page1());
+    let c = PdfDocument::from_bytes(&v).unwrap().find_page(0).unwrap().get_dict("Contents").unwrap().unwrap().as_indirect().unwrap();
+    let num = std::cell::Cell::new(0);
+    let mut out = attack(&v, &hidden_box(), |d, w| {
+        let s = blue_sheet(d);
+        num.set(s.as_indirect().unwrap());
+        let mut img = d.new_object_from_str("<</Type/XObject/Subtype/Image/Width 1/Height 1/ColorSpace/DeviceRGB/BitsPerComponent 8>>").unwrap();
+        img.dict_put("SMask", s).unwrap();
+        let img = d.add_stream(&mupdf::Buffer::from_bytes(&[0, 0, 0]).unwrap(), Some(&img), false).unwrap();
+        w.dict_put("F", PdfObject::new_int(2).unwrap()).unwrap();
+        name_in_ap(d, w, img);
+    });
+    let n = num.get();
+    assert!(n > c);
+    let head = format!("
+{n} 0 obj");
+    let at = v.len() + out[v.len()..].windows(head.len()).position(|w| w == head.as_bytes()).unwrap();
+    let renamed = format!("
+{c:>w$} 0 obj", w = n.to_string().len());
+    out[at..at + head.len()].copy_from_slice(renamed.as_bytes());
+    let forged = resign(&out);
+    let d = PdfDocument::from_bytes(&forged).unwrap();
+    let _ = d.new_indirect(n, 0).unwrap().resolve();
+    assert!(page_contents(&d).starts_with(b"0 0 1 rg"), "once repaired, the forged file draws the sheet");
+    let (victim, _) = verdicts(&forged);
+    assert!(victim.status != Status::Valid && (victim.changes == Changes::Changed || victim.status == Status::Invalid), "victim: {victim:?}");
+}
+
+#[test]
+fn a_deep_chain_in_a_signature_does_not_crash() {
+    // 6 000 dictionaries, each naming the next, in the signature dictionary: checked on a 2 MB
+    // stack (as the app's blocking pool runs it) without overflowing.
+    let bytes = attack(&page1(), &unseen(), |d, w| {
+        let mut next = PdfObject::new_null();
+        for _ in 0..6000 {
+            let mut o = d.new_dict().unwrap();
+            o.dict_put("X", next).unwrap();
+            next = d.add_object(&o).unwrap();
+        }
+        let field = if w.get_dict("V").unwrap().is_some() { w.clone() } else { w.get_dict("Parent").unwrap().unwrap() };
+        field.get_dict("V").unwrap().unwrap().dict_put("X", next).unwrap();
+    });
+    let i = std::thread::Builder::new().stack_size(2 << 20).spawn(move || infos(&bytes)).unwrap().join().unwrap();
+    assert_eq!(i.len(), 1);
+    assert_eq!(i[0].status, Status::Invalid, "{:?}", i[0]);
+}
+
+#[test]
+fn more_signatures_than_inkwell_checks_are_refused() {
+    let mut b = page1();
+    for _ in 0..65 {
+        b = pdf::sign(&b, &ids().1, &unseen()).unwrap();
+    }
+    let d = PdfDocument::from_bytes(&b).unwrap();
+    let e = pdf::list(&d, &b, &trust_tests).unwrap_err();
+    assert!(e.to_string().contains("more than 64 signatures"), "{e}");
+}
+
+#[test]
+fn a_hybrid_cross_reference_update_is_a_change() {
+    // The attacker's trailer names a second cross-reference table (/XRefStm, here the victim's
+    // own): readers that take one or the other may see different files. MuPDF doesn't write the
+    // key, so it goes in by hand, and the signature's byte range grows to cover it.
+    let v = victim(&page1());
+    let at = v.windows(9).rposition(|w| w == b"startxref").unwrap() + 9;
+    let prev: String = v[at..].iter().skip_while(|c| c.is_ascii_whitespace()).take_while(|c| c.is_ascii_digit()).map(|&c| c as char).collect();
+    let out = attack(&v, &unseen(), |_, _| {});
+    let t = out.windows(7).rposition(|w| w == b"trailer").unwrap();
+    let open = t + out[t..].windows(2).position(|w| w == b"<<").unwrap() + 2;
+    let key = format!("/XRefStm {prev}");
+    let mut out = [&out[..open], key.as_bytes(), &out[open..]].concat();
+    let br = out.windows(11).rposition(|w| w == b"/ByteRange[").unwrap() + 11;
+    let close = br + out[br..].iter().position(|&c| c == b']').unwrap();
+    let n: Vec<usize> = std::str::from_utf8(&out[br..close]).unwrap().split_whitespace().map(|x| x.parse().unwrap()).collect();
+    let mut range = format!("0 {} {} {}", n[1], n[2], n[3] + key.len()).into_bytes();
+    assert!(range.len() <= close - br);
+    range.resize(close - br, b' ');
+    out[br..close].copy_from_slice(&range);
+    let (first, second) = verdicts(&resign(&out));
+    assert_eq!(second.status, Status::Valid, "{second:?}");
+    assert_eq!((first.status, first.changes), (Status::Warning, Changes::Changed), "{first:?}");
+    assert!(codes(&first).contains(&WarningCode::HybridXref), "{first:?}");
+}

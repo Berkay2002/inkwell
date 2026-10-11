@@ -155,7 +155,7 @@ export function detailLines(name: string, d: Date, reason: string, location = ""
 }
 
 /** A caution about an intact signature: changed after signing, a SHA-1 hash, a later visible box. */
-export type WarningCode = "changed" | "sha1" | "laterBox" | "laterBoxLarge";
+export type WarningCode = "changed" | "sha1" | "laterBox" | "laterBoxLarge" | "hybridXref";
 export interface Warning {
   code: WarningCode;
   text: string;

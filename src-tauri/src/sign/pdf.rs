@@ -659,6 +659,9 @@ pub enum WarningCode {
     LaterBox,
     /// ... and that box covers more than a quarter of its page.
     LaterBoxLarge,
+    /// A later update names a second cross-reference table (/XRefStm), which readers may resolve
+    /// differently.
+    HybridXref,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -710,17 +713,24 @@ pub struct SignatureInfo {
 /// Judges a signer's certificate given the others its signature carries: (trusted, why not).
 pub type Trust = dyn Fn(&Certificate, &[Certificate]) -> (bool, String);
 
+/// At most this many signatures are checked in a file, and at most this many revisions after one.
+const MAX_SIGNATURES: usize = 64;
+const MAX_REVISIONS: usize = 64;
+
 pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<SignatureInfo>> {
     let fields = sig_fields(doc)?;
+    // Each signature hashes the file and parses the revision it signs: a bound on the work.
+    if fields.iter().filter(|f| f.value.is_some()).count() > MAX_SIGNATURES {
+        return Err(refuse(format!("this document has more than {MAX_SIGNATURES} signatures, more than Inkwell checks")));
+    }
     let mut infos: Vec<SignatureInfo> = fields.iter().map(|f| info(f, bytes, trust)).collect();
     // An intact signature must belong to its field in the bytes it signs (see `bound`) before it
     // can vouch for anything below.
-    let mut prefixes = std::collections::HashMap::new();
     for (f, i) in fields.iter().zip(infos.iter_mut()) {
         if !i.intact {
             continue;
         }
-        match bound(f, doc, bytes, &mut prefixes) {
+        match bound(f, doc, bytes) {
             Ok(certify) => i.certify = certify,
             Err(why) => {
                 i.status = Status::Invalid;
@@ -742,8 +752,18 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
         }
         // A file MuPDF rebuilt may not read the same anywhere else: its updates aren't judged.
         let mut only_sigs = !repaired(doc);
+        let ends = revision_ends(bytes, covered);
+        if ends.len() > MAX_REVISIONS {
+            only_sigs = false;
+        }
+        // A hybrid file's second cross-reference table (/XRefStm) is read by some readers and not
+        // others, so an update that names one may show them different files.
+        if bytes[covered.min(bytes.len())..].windows(8).any(|w| w == b"/XRefStm") {
+            only_sigs = false;
+            i.warnings.push(Warning::new(WarningCode::HybridXref, "A later update adds a second cross-reference table, which other PDF readers may read differently."));
+        }
         let mut prev = covered;
-        for e in revision_ends(bytes, covered) {
+        for e in ends {
             if !only_sigs {
                 break;
             }
@@ -778,6 +798,11 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
             }
         }
     }
+    if repaired(doc) {
+        for i in infos.iter_mut().filter(|i| i.intact && i.changes != Changes::None) {
+            i.changes = Changes::Changed;
+        }
+    }
     for i in &mut infos {
         finish(i);
     }
@@ -790,17 +815,13 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
 /// included. Otherwise a field added later could show a copy of someone else's signature, or
 /// point at it. Returns the DocMDP level when that revision's catalog names this signature as
 /// its certification.
-fn bound(
-    f: &SigField,
-    doc: &PdfDocument,
-    bytes: &[u8],
-    prefixes: &mut std::collections::HashMap<usize, Option<PdfDocument>>,
-) -> std::result::Result<Option<u8>, &'static str> {
+fn bound(f: &SigField, doc: &PdfDocument, bytes: &[u8]) -> std::result::Result<Option<u8>, &'static str> {
     const UNBOUND: &str = "it is not part of the revision it signs";
     let v = f.value.as_ref().ok_or(UNBOUND)?;
     let (Some(vn), Some(wn), Some(fnum), Some(end)) = (ind(v), ind(&f.widget), ind(&f.field), out_covered(v)) else { return Err(UNBOUND) };
-    let then = prefixes.entry(end).or_insert_with(|| PdfDocument::from_bytes(&bytes[..end.min(bytes.len())]).ok().filter(|d| !repaired(d)));
-    let then = then.as_ref().ok_or("the revision it signs is damaged")?;
+    const DAMAGED: &str = "the revision it signs is damaged";
+    let then = PdfDocument::from_bytes(&bytes[..end.min(bytes.len())]).ok().filter(|d| !repaired(d)).ok_or(DAMAGED)?;
+    let then = &then;
     let fields = sig_fields(then).map_err(|_| UNBOUND)?;
     let same = |g: &SigField| {
         ind(&g.widget) == Some(wn) && ind(&g.field) == Some(fnum) && g.name == f.name && g.value.as_ref().and_then(ind) == Some(vn)
@@ -808,8 +829,14 @@ fn bound(
     if !fields.iter().any(same) {
         return Err(UNBOUND);
     }
-    let now = deep(doc, vn);
-    if now.is_none() || now != deep(then, vn) {
+    let (now, was) = (deep(doc, vn), deep(then, vn));
+    if repaired(then) {
+        return Err(DAMAGED);
+    }
+    if now.is_none() || was.is_none() {
+        return Err("its signature dictionary is nested too deeply to check");
+    }
+    if now != was {
         return Err("its signature dictionary was changed after signing");
     }
     let perms = then.catalog().ok().and_then(|c| c.get_dict("Perms").ok().flatten()).and_then(|p| p.get_dict("DocMDP").ok().flatten());
@@ -817,17 +844,21 @@ fn bound(
 }
 
 /// Object `n` printed with every reference followed (each object once, streams by their raw
-/// bytes' hash), to compare it across revisions. `None` past 10 000 nodes.
+/// bytes' hash), to compare it across revisions. `None` past 10 000 nodes or 64 levels (the app
+/// checks on a small stack).
 fn deep(d: &PdfDocument, n: i32) -> Option<String> {
     use std::fmt::Write;
-    fn walk(o: &PdfObject, seen: &mut std::collections::HashSet<i32>, out: &mut String, budget: &mut u32) -> Option<()> {
+    fn walk(o: &PdfObject, seen: &mut std::collections::HashSet<i32>, out: &mut String, budget: &mut u32, depth: u32) -> Option<()> {
         *budget = budget.checked_sub(1)?;
+        if depth > 64 {
+            return None;
+        }
         if let Some(n) = ind(o) {
             let _ = write!(out, "{n}R");
             if seen.insert(n) {
                 out.push('=');
                 match o.resolve().ok()? {
-                    Some(r) if !r.is_indirect().ok()? => walk(&r, seen, out, budget)?,
+                    Some(r) if !r.is_indirect().ok()? => walk(&r, seen, out, budget, depth + 1)?,
                     _ => out.push_str("null"),
                 }
                 // (Only the reference knows its stream: MuPDF finds it through the xref.)
@@ -840,13 +871,13 @@ fn deep(d: &PdfDocument, n: i32) -> Option<String> {
             out.push_str("<<");
             for i in 0..o.dict_len().ok()? as i32 {
                 out.push_str(&o.get_dict_key(i).ok()??.to_string());
-                walk(&o.get_dict_val(i).ok()??, seen, out, budget)?;
+                walk(&o.get_dict_val(i).ok()??, seen, out, budget, depth + 1)?;
             }
             out.push_str(">>");
         } else if o.is_array().ok()? {
             out.push('[');
             for x in o.array_iter().ok()? {
-                walk(&x.ok()?, seen, out, budget)?;
+                walk(&x.ok()?, seen, out, budget, depth + 1)?;
             }
             out.push(']');
         } else {
@@ -856,7 +887,7 @@ fn deep(d: &PdfDocument, n: i32) -> Option<String> {
         Some(())
     }
     let mut out = String::new();
-    walk(&d.new_indirect(n, 0).ok()?, &mut Default::default(), &mut out, &mut 10_000)?;
+    walk(&d.new_indirect(n, 0).ok()?, &mut Default::default(), &mut out, &mut 10_000, 0)?;
     Some(out)
 }
 
@@ -896,10 +927,18 @@ fn keys_within(o: &PdfObject, allowed: &[&str]) -> bool {
     })
 }
 
-/// Whether the printed object `s` refers to object `n`.
-fn refers_to(s: &str, n: i32) -> bool {
-    let pat = format!("{n} 0 R");
-    s.match_indices(&pat).any(|(i, _)| !s[..i].ends_with(|c: char| c.is_ascii_digit() || c == '.'))
+/// Adds the object numbers the printed object `s` refers to (`n g R`, whatever the generation:
+/// MuPDF ignores it). Digits inside a string may count too, which only errs towards "changed".
+fn refs(s: &str, out: &mut std::collections::HashSet<i32>) {
+    let spaced = s.replace('/', " /");
+    let toks: Vec<&str> = spaced.split(|c: char| c.is_ascii_whitespace() || "[]<>(){}".contains(c)).filter(|t| !t.is_empty()).collect();
+    for w in toks.windows(3) {
+        if w[2] == "R" && !w[1].is_empty() && w[1].bytes().all(|c| c.is_ascii_digit()) && w[0].bytes().all(|c| c.is_ascii_digit()) {
+            if let Ok(n) = w[0].parse::<i32>() {
+                out.insert(n);
+            }
+        }
+    }
 }
 
 /// What a signature's widget may carry. Not /A or /AA (actions), /OC, /Kids, /Type /Page ...
@@ -1048,20 +1087,34 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> 
         Some((o.to_string(), stream))
     };
     let (count_a, count_b) = (a.xref_len().map_err(pdf_err)? as i32, b.xref_len().map_err(pdf_err)? as i32);
-    if count_b < count_a {
+    // Every object takes some bytes: a table far larger than the file is only there to cost time.
+    if count_b < count_a || count_b as usize > next.len() / 4 + 1024 {
         return Ok(false);
     }
     let mut structural = Vec::new();
-    // Every object as printed, to find references to the structural ones (an earlier revision may
-    // have planted a dangling one).
-    let mut all = vec![tb.to_string()];
+    // Objects new in this revision, and the numbers the signed revision already named (a dangling
+    // reference planted before signing, or one to a null, would let a "new" object change what
+    // the signed pages show) and the ones this revision names (nothing may use a structural one).
+    let mut fresh = Vec::new();
+    let (mut named_a, mut named_b) = (HashSet::new(), HashSet::new());
+    refs(&ta.to_string(), &mut named_a);
+    refs(&tb.to_string(), &mut named_b);
     for n in 1..count_b {
+        let was = if n < count_a { printed(&a, n) } else { None };
+        if let Some((s, _)) = &was {
+            refs(s, &mut named_a);
+        }
         // A free entry reads as null: the number was unused.
-        let before = if n < count_a { printed(&a, n).filter(|(s, _)| s != "null") } else { None };
-        let after = printed(&b, n);
-        all.extend(after.as_ref().map(|(s, _)| s.clone()));
+        let before = was.filter(|(s, _)| s != "null");
+        // An entry that doesn't load is never taken as harmless.
+        let Some(after) = printed(&b, n) else { return Ok(false) };
+        refs(&after.0, &mut named_b);
+        let after = Some(after);
         if before == after {
             continue;
+        }
+        if before.is_none() {
+            fresh.push(n);
         }
         let Some(o) = get(&b, n) else { return Ok(false) };
         let ok = if before.is_none() {
@@ -1126,7 +1179,12 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> 
         }
     }
     // An object or cross-reference stream is only structure: nothing may draw it or name it.
-    if structural.iter().any(|&m| all.iter().any(|s| refers_to(s, m))) {
+    if structural.iter().any(|m| named_b.contains(m)) || fresh.iter().any(|m| named_a.contains(m)) {
+        return Ok(false);
+    }
+    // Reading every object may have made MuPDF rebuild the table (an entry pointing at the wrong
+    // object): then what was compared is not what is shown.
+    if repaired(&a) || repaired(&b) || b.trailer().ok().and_then(|t| t.get_dict("XRefStm").ok().flatten()).is_some() {
         return Ok(false);
     }
     Ok(true)
