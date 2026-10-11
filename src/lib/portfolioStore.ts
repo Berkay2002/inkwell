@@ -31,12 +31,17 @@ interface Store {
   showCover: (doc: number, on: boolean) => void;
 }
 
+/** The newest read asked for of each document: an older answer that arrives late is dropped. */
+const asked = new Map<number, number>();
+
 const patch = (set: (f: (s: Store) => Partial<Store>) => void, doc: number, p: Partial<PortfolioDoc>) =>
   set((s) => (s.docs[doc] ? { docs: { ...s.docs, [doc]: { ...s.docs[doc], ...p } } } : {}));
 
 export const usePortfolio = create<Store>((set, get) => ({
   docs: {},
   load: async (doc) => {
+    const seq = (asked.get(doc) ?? 0) + 1;
+    asked.set(doc, seq);
     let info: PortfolioInfo | null = null;
     let error: string | null = null;
     try {
@@ -44,7 +49,11 @@ export const usePortfolio = create<Store>((set, get) => ({
     } catch (e) {
       error = String(e);
     }
-    if (!st().docs[doc]) return;
+    if (asked.get(doc) !== seq) return;
+    if (!st().docs[doc]) {
+      asked.delete(doc);
+      return;
+    }
     const had = get().docs[doc];
     set((s) => {
       // Documents that are gone take their state with them.

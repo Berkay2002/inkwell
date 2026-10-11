@@ -62,9 +62,19 @@ fn names_root(doc: &PdfDocument) -> Result<Option<PdfObject>> {
 
 /// The tree's entries, flattened (a /Kids tree too), in key order.
 pub(super) fn tree(doc: &PdfDocument) -> Result<Vec<Entry>> {
-    fn walk(node: &PdfObject, depth: usize, out: &mut Vec<Entry>) -> Result<()> {
+    /// Nodes looked at in all: /Kids may point at each other or at one node many times over.
+    const MAX_NODES: usize = 100_000;
+    fn walk(node: &PdfObject, depth: usize, out: &mut Vec<Entry>, seen: &mut HashSet<i32>, nodes: &mut usize) -> Result<()> {
+        if depth > 8 || *nodes >= MAX_NODES {
+            return Ok(());
+        }
+        // A node reached twice is read once (a loop or a repeat in /Kids).
+        if node.is_indirect()? && !seen.insert(node.as_indirect()?) {
+            return Ok(());
+        }
+        *nodes += 1;
         let Some(node) = node.resolve()? else { return Ok(()) };
-        if depth > 8 || !node.is_dict()? {
+        if !node.is_dict()? {
             return Ok(());
         }
         if let Some(names) = get(&node, "Names") {
@@ -80,8 +90,11 @@ pub(super) fn tree(doc: &PdfDocument) -> Result<Vec<Entry>> {
         }
         if let Some(kids) = get(&node, "Kids") {
             for i in 0..kids.len().unwrap_or(0).min(MAX_ENTRIES) {
+                if out.len() >= MAX_ENTRIES || *nodes >= MAX_NODES {
+                    break;
+                }
                 if let Some(k) = kids.get_array(i as i32)? {
-                    walk(&k, depth + 1, out)?;
+                    walk(&k, depth + 1, out, seen, nodes)?;
                 }
             }
         }
@@ -89,9 +102,29 @@ pub(super) fn tree(doc: &PdfDocument) -> Result<Vec<Entry>> {
     }
     let mut out = Vec::new();
     if let Some(root) = names_root(doc)? {
-        walk(&root, 0, &mut out)?;
+        walk(&root, 0, &mut out, &mut HashSet::new(), &mut 0)?;
     }
     Ok(out)
+}
+
+/// The id of each entry (`n:<key>`); the second and later entries with one key get the index after a
+/// separator, so every id names one entry.
+pub(super) fn entry_ids(entries: &[Entry]) -> Vec<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    entries.iter().enumerate().map(|(i, e)| if seen.insert(&e.key) { format!("n:{}", e.key) } else { format!("n:{}{ID_SEP}{i}", e.key) }).collect()
+}
+
+const ID_SEP: char = '\u{1f}';
+
+/// The index of the entry an `n:` id names (the first one with that key, or the one an [`entry_ids`] suffix says).
+pub(super) fn find_entry(entries: &[Entry], id: &str) -> Option<usize> {
+    let key = id.strip_prefix("n:")?;
+    if let Some(i) = entries.iter().position(|e| e.key == key) {
+        return Some(i);
+    }
+    let (base, at) = key.rsplit_once(ID_SEP)?;
+    let i: usize = at.parse().ok()?;
+    entries.get(i).filter(|e| e.key == base).map(|_| i)
 }
 
 /// Writes `entries` as one flat, sorted name tree (none: the entry is removed).
@@ -139,12 +172,67 @@ pub(super) fn stream_of(spec: &PdfObject) -> Option<PdfObject> {
         .find(|s| s.is_stream().unwrap_or(false))
 }
 
+/// The longest text taken from one string of the file: a string can be megabytes, and a hostile file
+/// can point any number of fields at it.
+const TEXT_MAX: usize = 2048;
+
+/// The string `o` as text, cut to [`TEXT_MAX`] bytes.
+pub(super) fn capped_string(o: &PdfObject) -> Option<String> {
+    let mut s = o.as_string().ok()?;
+    if s.len() > TEXT_MAX {
+        let mut n = TEXT_MAX;
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
+        s.truncate(n);
+    }
+    Some(s)
+}
+
+/// [`capped_string`] remembered by object number, so a string many fields point at is read once.
+#[derive(Default)]
+pub(super) struct Texts {
+    seen: std::collections::HashMap<i32, Option<String>>,
+}
+
+impl Texts {
+    pub(super) fn get(&mut self, o: &PdfObject) -> Option<String> {
+        let num = if o.is_indirect().unwrap_or(false) { o.as_indirect().ok() } else { None };
+        if let Some(t) = num.and_then(|n| self.seen.get(&n)) {
+            return t.clone();
+        }
+        let t = capped_string(o);
+        if let Some(n) = num.filter(|_| self.seen.len() < 100_000) {
+            self.seen.insert(n, t.clone());
+        }
+        t
+    }
+}
+
+/// The longest name kept of an attachment (no file system takes more).
+const NAME_MAX: usize = 255;
+
 pub(super) fn info(spec: &PdfObject, fallback: &str, id: String, kind: AttachKind, page: Option<u32>, note: Option<String>) -> Attachment {
+    info_with(&mut Texts::default(), spec, fallback, id, kind, page, note)
+}
+
+pub(super) fn info_with(texts: &mut Texts, spec: &PdfObject, fallback: &str, id: String, kind: AttachKind, page: Option<u32>, note: Option<String>) -> Attachment {
     let resolved = spec.resolve().ok().flatten().filter(|s| s.is_dict().unwrap_or(false));
-    let text = |k: &str| resolved.as_ref().and_then(|s| get(s, k)).and_then(|v| v.as_string().ok()).filter(|s| !s.is_empty());
+    let mut text = |k: &str| resolved.as_ref().and_then(|s| get(s, k)).and_then(|v| texts.get(&v)).filter(|s| !s.is_empty());
     // The name comes from the file: no folder, nothing that reorders or hides text, nothing a file
     // system refuses (it becomes the save dialog's default and a scratch file's name).
     let name = clean_name(&text("UF").or_else(|| text("F")).unwrap_or_else(|| fallback.to_string()));
+    let name = if name.chars().count() > NAME_MAX {
+        // Cut the stem, so the extension (what says the kind) stays.
+        let (stem, ext) = match name.rfind('.') {
+            Some(i) if i > 0 && name[i..].chars().count() <= 20 => name.split_at(i),
+            _ => (name.as_str(), ""),
+        };
+        format!("{}{ext}", stem.chars().take(NAME_MAX - ext.chars().count()).collect::<String>())
+    } else {
+        name
+    };
+    let description = strip_invisible(&text("Desc").or(note).unwrap_or_default());
     let stream = stream_of(spec);
     let size = stream
         .as_ref()
@@ -156,7 +244,7 @@ pub(super) fn info(spec: &PdfObject, fallback: &str, id: String, kind: AttachKin
     let is_pdf = name.to_lowercase().ends_with(".pdf") || mime.as_deref() == Some("application/pdf");
     Attachment {
         id,
-        description: strip_invisible(&text("Desc").or(note).unwrap_or_default()),
+        description,
         name,
         size,
         mime,
@@ -170,9 +258,12 @@ pub(super) fn info(spec: &PdfObject, fallback: &str, id: String, kind: AttachKin
 /// Every attachment of the document: embedded files first (by name), then the pages' file
 /// attachments in page order.
 pub fn list(doc: &PdfDocument) -> Result<Vec<Attachment>> {
-    let mut out: Vec<Attachment> = tree(doc)?
+    let entries = tree(doc)?;
+    let mut texts = Texts::default();
+    let mut out: Vec<Attachment> = entries
         .iter()
-        .map(|e| info(&e.spec, &e.key, format!("n:{}", e.key), AttachKind::File, None, None))
+        .zip(entry_ids(&entries))
+        .map(|(e, id)| info_with(&mut texts, &e.spec, &e.key, id, AttachKind::File, None, None))
         .collect();
     let pages = doc.page_count()?.max(0);
     for p in 0..pages {
@@ -187,7 +278,7 @@ pub fn list(doc: &PdfDocument) -> Result<Vec<Attachment>> {
             }
             let Some(fs) = get(&a, "FS") else { continue };
             let note = get(&a, "Contents").and_then(|c| c.as_string().ok()).filter(|c| !c.is_empty());
-            out.push(info(&fs, "attachment", format!("a:{num}"), AttachKind::Annotation, Some(p as u32), note));
+            out.push(info_with(&mut texts, &fs, "attachment", format!("a:{num}"), AttachKind::Annotation, Some(p as u32), note));
         }
     }
     Ok(out)
@@ -195,8 +286,9 @@ pub fn list(doc: &PdfDocument) -> Result<Vec<Attachment>> {
 
 /// Where an attachment's file specification is.
 pub(super) fn locate(doc: &PdfDocument, id: &str) -> Result<PdfObject> {
-    if let Some(key) = id.strip_prefix("n:") {
-        return tree(doc)?.into_iter().find(|e| e.key == key).map(|e| e.spec).ok_or_else(|| bad("that attachment is no longer in the document"));
+    if id.starts_with("n:") {
+        let mut entries = tree(doc)?;
+        return find_entry(&entries, id).map(|i| entries.swap_remove(i).spec).ok_or_else(|| bad("that attachment is no longer in the document"));
     }
     if let Some(n) = id.strip_prefix("a:").and_then(|n| n.parse::<i32>().ok()) {
         let a = doc.new_indirect(n, 0)?.resolve()?.filter(|a| a.is_dict().unwrap_or(false));
@@ -214,7 +306,7 @@ pub fn read_data(doc: &PdfDocument, id: &str) -> Result<(String, Vec<u8>)> {
 /// stream declares about itself, so a small compressed stream cannot inflate past it.
 pub fn read_data_capped(doc: &PdfDocument, id: &str, cap: usize) -> Result<(String, Vec<u8>)> {
     let spec = locate(doc, id)?;
-    let key = id.strip_prefix("n:").unwrap_or("attachment");
+    let key = id.strip_prefix("n:").map_or("attachment", |k| k.split(ID_SEP).next().unwrap_or(k));
     let meta = info(&spec, key, id.to_string(), AttachKind::File, None, None);
     let Some(stream) = stream_of(&spec) else {
         return Err(bad("this attachment links to a file outside the document, it has no bytes to save"));
@@ -259,15 +351,29 @@ pub(super) fn strip_invisible(s: &str) -> String {
 /// Names Windows keeps for devices, with or without an extension.
 fn is_reserved(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).trim_end().to_ascii_uppercase();
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit() && stem.as_bytes()[3] != b'0')
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+        return true;
+    }
+    // COM1-9 and LPT1-9, and with superscript digits (devices on current Windows too).
+    let mut c = stem.chars();
+    let head: String = c.by_ref().take(3).collect();
+    matches!(head.as_str(), "COM" | "LPT") && matches!(c.next(), Some('1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}')) && c.next().is_none()
 }
 
 /// The file name without any folder, and nothing a file system or a viewer would trip on.
 pub fn clean_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let s: String = base.chars().filter(|&c| !c.is_control() && !is_invisible(c) && !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*')).collect();
-    let s = s.trim().trim_matches('.').trim().to_string();
+    // Windows drops trailing dots and spaces: trim until nothing is left to drop ("a. ." is "a").
+    let mut s = s.as_str();
+    loop {
+        let t = s.trim().trim_matches('.');
+        if t.len() == s.len() {
+            break;
+        }
+        s = t;
+    }
+    let s = s.to_string();
     if s.is_empty() {
         "attachment".into()
     } else if is_reserved(&s) {
@@ -338,18 +444,22 @@ pub fn remove(doc: &mut PdfDocument, ids: &[String]) -> Result<Vec<u32>> {
     let mut entries = tree(doc)?;
     let before = entries.len();
     let mut annots: Vec<i32> = Vec::new();
+    let mut gone: Vec<usize> = Vec::new();
     for id in ids {
-        if let Some(key) = id.strip_prefix("n:") {
-            if let Some(i) = entries.iter().position(|e| e.key == key) {
-                let e = entries.remove(i);
-                if e.spec.is_indirect().unwrap_or(false) {
-                    gone_specs.push(e.spec.as_indirect()?);
-                }
-            }
+        if id.starts_with("n:") {
+            gone.extend(find_entry(&entries, id));
         } else if let Some(n) = id.strip_prefix("a:").and_then(|n| n.parse::<i32>().ok()) {
             annots.push(n);
         } else {
             return Err(bad("unknown attachment"));
+        }
+    }
+    gone.sort_unstable();
+    gone.dedup();
+    for &i in gone.iter().rev() {
+        let e = entries.remove(i);
+        if e.spec.is_indirect().unwrap_or(false) {
+            gone_specs.push(e.spec.as_indirect()?);
         }
     }
     if entries.len() != before {
@@ -426,6 +536,20 @@ mod tests {
         assert_eq!(clean_name("C:\\x\\y\\report?.pdf"), "report.pdf");
         assert_eq!(clean_name("../.."), "attachment");
         assert_eq!(mime_for("a.PDF"), "application/pdf");
+    }
+
+    #[test]
+    fn windows_device_names_and_trailing_dots_do_not_get_through() {
+        for n in ["CONIN$", "conout$.txt", "COM\u{b9}", "lpt\u{b2}.log", "COM\u{b3}.txt", "COM9", "nul.tar.gz"] {
+            assert!(clean_name(n).starts_with('_'), "{n} -> {}", clean_name(n));
+        }
+        for n in ["COM10", "COMX", "console.txt", "COM\u{2074}"] {
+            assert_eq!(clean_name(n), n);
+        }
+        // Windows drops trailing dots and spaces, so a name must not rely on them
+        assert_eq!(clean_name("a. ."), "a");
+        assert_eq!(clean_name(" . a . . "), "a");
+        assert_eq!(clean_name(". ."), "attachment");
     }
 
     #[test]

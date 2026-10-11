@@ -202,6 +202,6 @@ pub fn portfolio_info(eng: &Engine, doc: DocId) -> Result<Option<PortfolioInfo>>
 }
 
 /// Writes every file of the portfolio into `dir`, never replacing one. The document is not changed.
-pub fn portfolio_extract_all(eng: &Engine, doc: DocId, dir: &std::path::Path) -> Result<Extracted> {
-    eng.read_custom(doc, |d| portfolio::extract_all(d, dir))
+pub fn portfolio_extract_all(eng: &Engine, doc: DocId, dir: &std::path::Path, written: &mut dyn FnMut(&std::path::Path)) -> Result<Extracted> {
+    eng.read_custom(doc, |d| portfolio::extract_all(d, dir, written))
 }

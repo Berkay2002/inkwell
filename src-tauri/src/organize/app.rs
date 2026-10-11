@@ -291,10 +291,8 @@ pub async fn portfolio_extract_all(window: Window, eng: Eng<'_>, reg: Reg<'_>, d
     let folder = reg.take_save(window.label(), &to)?;
     let eng = eng.inner().clone();
     blocking(move || {
-        let r = super::portfolio_extract_all(&eng, doc, std::path::Path::new(&folder))?;
-        for name in &r.written {
-            mark_from_internet(&std::path::Path::new(&folder).join(name).to_string_lossy());
-        }
+        // Each file is marked as soon as it is written, so a run that stops half way leaves none unmarked.
+        let r = super::portfolio_extract_all(&eng, doc, std::path::Path::new(&folder), &mut |p| mark_from_internet(&p.to_string_lossy()))?;
         window.state::<Paths>().learn(&folder);
         Ok(ExtractReport { folder, written: r.written, skipped: r.skipped })
     })

@@ -240,10 +240,20 @@ fn without_a_ci_the_files_own_facts_fill_the_columns() {
     set_collection(&mut doc, &fields, &[], None, None);
     let info = read(&doc).unwrap().unwrap();
     assert_eq!(info.files[0].cells, ["q3.pdf", "2.0 KB", "2023-11-14 22:13", "Quarterly"]);
-    // and a /CI that has the word wins
+    // the file's own description, size and date win over a /CI that says otherwise (ISO 32000, as Acrobat reads it) ...
     set_ci(&mut doc, "q3.pdf", &[("D", "Final"), ("M", "D:20240102030405Z")], &[("S", 5)]);
     let info = read(&doc).unwrap().unwrap();
-    assert_eq!(info.files[0].cells, ["q3.pdf", "5 B", "2024-01-02 03:04", "Final"]);
+    assert_eq!(info.files[0].cells, ["q3.pdf", "2.0 KB", "2023-11-14 22:13", "Quarterly"]);
+    // ... and /CI stands in for a fact the file does not give
+    let mut doc = PdfDocument::new();
+    attach::add_one(&mut doc, &file("n.txt", b"x")).unwrap();
+    let mut stream = stream_of(&spec_of(&doc, "n.txt")).unwrap().resolve().unwrap().unwrap();
+    stream.dict_delete("Params").unwrap();
+    set_collection(&mut doc, &fields, &[], None, None);
+    set_ci(&mut doc, "n.txt", &[("D", "Only in CI"), ("M", "D:20240102030405Z")], &[("S", 5)]);
+    let info = read(&doc).unwrap().unwrap();
+    assert_eq!(info.files[0].cells[2], "2024-01-02 03:04");
+    assert_eq!(info.files[0].cells[3], "Only in CI");
 }
 
 #[test]
@@ -431,7 +441,7 @@ fn hostile_names_are_cleaned_and_nothing_is_overwritten() {
     std::fs::write(out.join("x.exe"), "mine").unwrap();
     let doc = hostile();
 
-    let r = extract_all(&doc, &out).unwrap();
+    let r = extract_all(&doc, &out, &mut |_| {}).unwrap();
     assert!(r.skipped.is_empty(), "{:?}", r.skipped);
     let long = format!("{}.pdf", "n".repeat(196));
     assert_eq!(r.written, ["x (2).exe", "_CON", "ab.txt", long.as_str(), "x (3).exe"]);
@@ -444,12 +454,12 @@ fn hostile_names_are_cleaned_and_nothing_is_overwritten() {
     assert_eq!(std::fs::read_dir(&out).unwrap().count(), 6);
 
     // and again: every file gets another number, none is replaced
-    let again = extract_all(&doc, &out).unwrap();
+    let again = extract_all(&doc, &out, &mut |_| {}).unwrap();
     assert_eq!(again.written.len(), 5);
     assert!(again.written.iter().all(|n| !r.written.contains(n)), "{:?}", again.written);
     assert_eq!(std::fs::read_dir(&out).unwrap().count(), 11);
     assert_eq!(std::fs::read(out.join("x (2).exe")).unwrap(), b"data0");
-    assert!(extract_all(&doc, &d.join("nope")).is_err());
+    assert!(extract_all(&doc, &d.join("nope"), &mut |_| {}).is_err());
 }
 
 #[test]
@@ -463,11 +473,162 @@ fn extract_leaves_the_document_as_it_was() {
     let (e2, id) = open(&made);
     let out = d.join("files");
     std::fs::create_dir_all(&out).unwrap();
-    let r = e2.read_custom(id, |doc| extract_all(doc, &out)).unwrap();
+    let r = e2.read_custom(id, |doc| extract_all(doc, &out, &mut |_| {})).unwrap();
     assert_eq!(r.written, ["a.pdf"]);
     assert_eq!(std::fs::read(out.join("a.pdf")).unwrap(), std::fs::read(&a).unwrap());
     assert_eq!(std::fs::read(&made).unwrap(), before);
     assert!(!e2.edit_state(id).unwrap().dirty);
+}
+
+#[test]
+fn extract_names_fit_every_file_system_and_each_file_is_reported_as_it_lands() {
+    // 300 astral characters are 600 UTF-16 units; 200 CJK characters are 600 UTF-8 bytes
+    let astral = format!("{}.pdf", "\u{1D538}".repeat(300));
+    let cjk = format!("{}.pdf", "\u{6587}".repeat(200));
+    for n in [&astral, &cjk] {
+        let name = extract_name(n);
+        assert!(name.ends_with(".pdf"), "{name}");
+        assert!(name.encode_utf16().count() <= 255 && name.len() <= 255, "{} units, {} bytes", name.encode_utf16().count(), name.len());
+    }
+    // a clash on such a name still gets its own, in the limit
+    let d = dir("extract-long");
+    let mut next = HashMap::new();
+    let a = super::make::write_new_for_test(&d, &extract_name(&cjk), b"1", &mut next);
+    let b = super::make::write_new_for_test(&d, &extract_name(&cjk), b"2", &mut next);
+    assert_ne!(a, b);
+    assert!(b.len() <= 255 && b.ends_with(" (2).pdf"), "{b}");
+
+    let mut doc = PdfDocument::new();
+    for (i, n) in [&astral, &cjk, &"p.txt".to_string()].iter().enumerate() {
+        attach::add_one(&mut doc, &file(&format!("f{i}.bin"), b"x")).unwrap();
+        put_str(&mut spec_of(&doc, &format!("f{i}.bin")), "UF", n).unwrap();
+    }
+    // two names for one stream: it is decoded once, the second is said to be left out
+    let tree_now = tree(&doc).unwrap();
+    let shared = tree_now[0].spec.clone();
+    let mut entries = vec![Entry { key: "one.txt".into(), spec: shared.clone() }, Entry { key: "two.txt".into(), spec: shared }];
+    entries.extend(tree_now.into_iter().skip(1));
+    attach::write_tree(&mut doc, entries).unwrap();
+    let out = d.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let mut seen = Vec::new();
+    let r = extract_all(&doc, &out, &mut |p| seen.push(p.to_path_buf())).unwrap();
+    assert_eq!(r.written.len(), 3, "{r:?}");
+    assert_eq!(r.skipped.len(), 1);
+    assert!(r.skipped[0].contains("same data"), "{:?}", r.skipped);
+    assert_eq!(seen.len(), 3);
+    assert!(seen.iter().all(|p| p.exists()));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_that_refuses_a_file_leaves_it_out_and_does_not_stop_the_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = dir("extract-readonly");
+    let out = d.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = std::fs::write(out.join("probe"), b"");
+    let mut doc = PdfDocument::new();
+    attach::add_one(&mut doc, &file("a.txt", b"x")).unwrap();
+    attach::add_one(&mut doc, &file("b.txt", b"y")).unwrap();
+    let mut seen = 0;
+    let r = extract_all(&doc, &out, &mut |_| seen += 1);
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if probe.is_ok() {
+        return; // running as a user the permission bits do not stop (root)
+    }
+    let r = r.unwrap();
+    assert!(r.written.is_empty() && seen == 0);
+    assert_eq!(r.skipped.len(), 2, "{:?}", r.skipped);
+}
+
+// ---- hostile structure -------------------------------------------------------------------------------
+
+/// A name tree whose /Kids point back at the node itself, many times over: nine levels of that is
+/// K^9 visits unless a node is read once.
+#[test]
+fn a_name_tree_whose_kids_loop_is_read_once() {
+    let mut doc = PdfDocument::new();
+    attach::add_one(&mut doc, &file("a.txt", b"x")).unwrap();
+    let mut root = doc.new_dict().unwrap();
+    let root_ref = doc.add_object(&root).unwrap();
+    let mut kids = doc.new_array().unwrap();
+    for _ in 0..40 {
+        kids.array_push(root_ref.clone()).unwrap();
+    }
+    let mut r = resolved(&root_ref);
+    r.dict_put("Kids", kids).unwrap();
+    let mut names = doc.new_dict().unwrap();
+    names.dict_put("EmbeddedFiles", root_ref).unwrap();
+    doc.catalog().unwrap().dict_put("Names", names).unwrap();
+    let _ = &mut root;
+    let t = std::time::Instant::now();
+    assert!(tree(&doc).unwrap().is_empty());
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+    assert!(attach::list(&doc).unwrap().is_empty());
+    set_collection(&mut doc, &[], &[], None, None);
+    assert!(read(&doc).unwrap().unwrap().files.is_empty());
+}
+
+/// Thousands of names for one file specification whose 64 fields and description are one huge string.
+#[test]
+fn one_huge_string_shared_by_many_fields_and_files_is_read_once_and_cut() {
+    let mut doc = PdfDocument::new();
+    attach::add_one(&mut doc, &file("a.txt", b"x")).unwrap();
+    let big = doc.add_object(&PdfObject::new_string(&"abc 123 ".repeat(1 << 19)).unwrap()).unwrap();
+    let mut spec = spec_of(&doc, "a.txt");
+    spec.dict_put("Desc", big.clone()).unwrap();
+    let mut ci = dict(&mut doc, "CollectionItem");
+    let keys: Vec<String> = (0..64).map(|i| format!("f{i}")).collect();
+    for k in &keys {
+        ci.dict_put(k.as_str(), big.clone()).unwrap();
+    }
+    spec.dict_put("CI", ci).unwrap();
+    let mut fields: Vec<FieldSpec> = vec![("Name", "F", "Name", 0, true)];
+    let leaked: Vec<&'static str> = keys.iter().map(|k| &*Box::leak(k.clone().into_boxed_str())).collect();
+    fields.extend(leaked.iter().take(63).enumerate().map(|(i, k)| (*k, "S", *k, i as i32 + 1, true)));
+    set_collection(&mut doc, &fields, &[("f0", true)], None, None);
+    let shared = tree(&doc).unwrap().remove(0).spec;
+    let entries: Vec<Entry> = (0..3000).map(|i| Entry { key: format!("n{i:05}.txt"), spec: shared.clone() }).collect();
+    attach::write_tree(&mut doc, entries).unwrap();
+
+    let t = std::time::Instant::now();
+    let info = read(&doc).unwrap().unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+    assert_eq!(info.files.len(), 3000);
+    assert!(info.files[0].cells.iter().all(|c| c.chars().count() <= 500));
+    assert!(info.files[0].description.chars().count() <= 500);
+    // and the listing of the attachments is as bounded
+    let t = std::time::Instant::now();
+    let all = attach::list(&doc).unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+    assert!(all[0].description.len() <= 2048);
+}
+
+#[test]
+fn two_entries_with_one_key_have_two_ids() {
+    let mut doc = PdfDocument::new();
+    attach::add_one(&mut doc, &file("a.txt", b"first")).unwrap();
+    attach::add_one(&mut doc, &file("b.txt", b"second")).unwrap();
+    rename_keys(&mut doc, &[("a.txt", "dup.txt"), ("b.txt", "dup.txt")]);
+    set_collection(&mut doc, &[], &[], None, None);
+    let ids: Vec<String> = attach::list(&doc).unwrap().into_iter().map(|a| a.id).collect();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(ids[0], "n:dup.txt");
+    let got: Vec<Vec<u8>> = ids.iter().map(|i| attach::read_data(&doc, i).unwrap().1).collect();
+    assert_eq!(got, [b"first".to_vec(), b"second".to_vec()]);
+    let info = read(&doc).unwrap().unwrap();
+    let mut from_view: Vec<String> = info.files.iter().map(|f| f.id.clone()).collect();
+    from_view.sort();
+    let mut want = ids.clone();
+    want.sort();
+    assert_eq!(from_view, want);
+    // removing the second takes only the second
+    attach::remove(&mut doc, &[ids[1].clone()]).unwrap();
+    assert_eq!(attach::list(&doc).unwrap().len(), 1);
+    assert_eq!(attach::read_data(&doc, "n:dup.txt").unwrap().1, b"first");
 }
 
 // ---- editing a portfolio ---------------------------------------------------------------------------
@@ -482,14 +643,18 @@ fn adding_describing_and_removing_keep_the_collection_in_step() {
     let (e2, id) = open(&made);
     let user = || EditSource::User;
 
+    let table = |e: &Engine| crate::organize::portfolio_info(e, id).unwrap().unwrap().files.iter().map(|f| f.cells.clone()).collect::<Vec<_>>();
+    let start = table(&e2);
     crate::organize::attach_add(&e2, id, vec![NewFile { name: "extra.txt".into(), data: b"hello".to_vec(), description: String::new(), modified: Some(1_700_000_000) }], user()).unwrap();
     let info = crate::organize::portfolio_info(&e2, id).unwrap().unwrap();
     let extra = info.files.iter().find(|f| f.name == "extra.txt").unwrap();
     assert_eq!(extra.cells, ["extra.txt", "", "5 B", "2023-11-14 22:13"]);
+    let added = table(&e2);
 
     crate::organize::attach_describe(&e2, id, "n:extra.txt", "Hello file", user()).unwrap();
     let info = crate::organize::portfolio_info(&e2, id).unwrap().unwrap();
     assert_eq!(info.files.iter().find(|f| f.name == "extra.txt").unwrap().cells[1], "Hello file");
+    let described = table(&e2);
 
     // the initial document goes: /D no longer names a file that is not there
     crate::organize::attach_remove(&e2, id, &["n:a.pdf".to_string()], user()).unwrap();
@@ -502,4 +667,14 @@ fn adding_describing_and_removing_keep_the_collection_in_step() {
     let (e3, i3) = open(&saved);
     let again = crate::organize::portfolio_info(&e3, i3).unwrap().unwrap();
     assert_eq!(again.files.iter().map(|f| f.cells.clone()).collect::<Vec<_>>(), info.files.iter().map(|f| f.cells.clone()).collect::<Vec<_>>());
+
+    // each edit is one undo step: undoing takes back that edit and only that one
+    e2.undo(id).unwrap();
+    let back = crate::organize::portfolio_info(&e2, id).unwrap().unwrap();
+    assert_eq!(table(&e2), described);
+    assert_eq!(back.initial.as_deref(), Some("n:a.pdf"), "the initial document is back with the file");
+    e2.undo(id).unwrap();
+    assert_eq!(table(&e2), added);
+    e2.undo(id).unwrap();
+    assert_eq!(table(&e2), start);
 }

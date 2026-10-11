@@ -8,7 +8,7 @@
 //! Everything read from the file is untrusted: counts are capped, folder loops are refused and every
 //! string that is shown has its invisible and control characters taken out.
 
-use crate::organize::attach::{self, AttachKind, Attachment, stream_of, strip_invisible, tree};
+use crate::organize::attach::{self, AttachKind, Attachment, Texts, capped_string, entry_ids, find_entry, stream_of, strip_invisible, tree};
 use crate::organize::{Result, bad, get, put_int, put_name, put_str};
 use crate::search::fold_text;
 use mupdf::pdf::{PdfDocument, PdfObject};
@@ -22,6 +22,8 @@ pub use make::{Created, Extracted, Source, create, extract_all, extract_name};
 const MAX_FIELDS: usize = 64;
 const MAX_DEPTH: usize = 32;
 const MAX_FOLDERS: usize = 10_000;
+/// Bytes of cell text and descriptions one read keeps in all.
+const CELL_BUDGET: usize = 32 << 20;
 
 // ---- what the file says -------------------------------------------------------------------------
 
@@ -180,7 +182,7 @@ fn read_schema(coll: &PdfObject) -> Result<Vec<Field>> {
             break;
         }
         let sub = get(&f, "Subtype").and_then(|s| name_of(&s)).map_or(Sub::Text, |s| Sub::parse(&s));
-        let name = get(&f, "N").and_then(|n| n.as_string().ok()).map(|n| shown(&n, 100)).filter(|n| !n.is_empty()).unwrap_or_else(|| shown(&key, 100));
+        let name = get(&f, "N").and_then(|n| capped_string(&n)).map(|n| shown(&n, 100)).filter(|n| !n.is_empty()).unwrap_or_else(|| shown(&key, 100));
         let visible = get(&f, "V").and_then(|v| v.as_bool().ok()).unwrap_or(true);
         let order = get(&f, "O").and_then(|o| o.as_int().ok()).map_or(i64::MAX, i64::from);
         out.push((order, Field { key, name, sub, visible }));
@@ -234,6 +236,7 @@ enum Key {
     Date(i64),
 }
 
+#[derive(Clone)]
 struct Cell {
     text: String,
     key: Key,
@@ -312,61 +315,70 @@ pub(super) fn parse_pdf_date(s: &str) -> Option<(i64, String)> {
 }
 
 /// A string, name or number the file gives as a value.
-fn plain(o: &PdfObject) -> Option<(Option<f64>, String)> {
+fn plain(o: &PdfObject, texts: &mut Texts) -> Option<(Option<f64>, String)> {
     if o.is_number().unwrap_or(false) {
         let n = if o.is_int().unwrap_or(false) { f64::from(o.as_int().ok()?) } else { f64::from(o.as_float().ok()?) };
         return n.is_finite().then(|| (Some(n), number_text(n)));
     }
     if o.is_string().unwrap_or(false) {
-        return o.as_string().ok().map(|s| (None, s));
+        return texts.get(o).map(|s| (None, s));
     }
     name_of(o).map(|s| (None, s))
 }
 
 /// The /CI value of `key`: its text with the sub-item's prefix (/P) in front, and the number it is when it is one.
-fn ci_value(ci: &PdfObject, key: &str) -> Option<(Option<f64>, String, String)> {
-    let v = get(ci, key)?.resolve().ok().flatten()?;
+fn ci_value(ci: &PdfObject, key: &str, texts: &mut Texts) -> Option<(Option<f64>, String, String)> {
+    // The value as written (a reference stays one, so a string shared by many fields is read once).
+    let raw = get(ci, key)?;
+    let v = if raw.is_string().unwrap_or(false) { raw } else { raw.resolve().ok().flatten()? };
     if v.is_dict().unwrap_or(false) {
-        let (n, t) = plain(&get(&v, "D")?.resolve().ok().flatten()?)?;
-        let prefix = get(&v, "P").and_then(|p| p.as_string().ok()).unwrap_or_default();
+        let d = get(&v, "D")?;
+        let d = if d.is_string().unwrap_or(false) { d } else { d.resolve().ok().flatten()? };
+        let (n, t) = plain(&d, texts)?;
+        let prefix = get(&v, "P").and_then(|p| texts.get(&p)).unwrap_or_default();
         return Some((n, t, prefix));
     }
-    plain(&v).map(|(n, t)| (n, t, String::new()))
+    plain(&v, texts).map(|(n, t)| (n, t, String::new()))
 }
 
-/// The cell of one file for one field. /CI has the word for text, number and date fields; the
-/// file's own facts (name, description, size, dates) come from it too when it has them, and from the
-/// file specification and the stream's /Params when it does not.
-fn cell(f: &Field, ci: Option<&PdfObject>, spec: &PdfObject, stream: Option<&PdfObject>, meta: &Attachment) -> Cell {
-    let from_ci = ci.and_then(|ci| ci_value(ci, &f.key));
-    let params = |k: &str| {
+/// The cell of one file for one field. What the file says of itself (its name, description, size and
+/// dates: the file specification and the stream's /Params) comes first for the fields of those
+/// subtypes, as ISO 32000 has it; /CI has the value of text, number and date fields, and stands in
+/// for a fact the file does not give.
+fn cell(f: &Field, ci: Option<&PdfObject>, spec: &PdfObject, stream: Option<&PdfObject>, meta: &Attachment, texts: &mut Texts) -> Cell {
+    let from_ci = ci.and_then(|ci| ci_value(ci, &f.key, texts));
+    let params = |k: &str, texts: &mut Texts| {
         let p = resolved_dict(stream.and_then(|s| get(s, "Params")))?;
-        get(&p, k).and_then(|v| plain(&v.resolve().ok().flatten()?)).map(|(_, t)| t)
-    };
-    let number_or = |fallback: Option<u64>| match &from_ci {
-        Some((Some(n), _, _)) if *n >= 0.0 => Some(*n as u64),
-        _ => fallback,
+        get(&p, k).and_then(|v| plain(&v, texts)).map(|(_, t)| t)
     };
     let as_size = |n: u64| Cell::number(n as f64, size_text(n));
+    let ci_number = || match &from_ci {
+        Some((Some(n), _, _)) if *n >= 0.0 => Some(*n as u64),
+        _ => None,
+    };
     match f.sub {
         Sub::File => Cell::text(&meta.name),
-        Sub::Desc => match &from_ci {
-            Some((_, t, p)) => Cell::text(&format!("{p}{t}")),
-            None => Cell::text(&get(spec, "Desc").and_then(|d| d.as_string().ok()).unwrap_or_default()),
-        },
-        Sub::Size => number_or(meta.has_data.then_some(meta.size)).map_or_else(Cell::none, as_size),
-        Sub::CompressedSize => {
-            let len = stream.and_then(|s| get(s, "Length")).and_then(|v| v.as_int().ok()).and_then(|n| u64::try_from(n).ok());
-            number_or(len).map_or_else(Cell::none, as_size)
-        }
-        Sub::ModDate | Sub::CreationDate | Sub::Date => {
-            let key = if f.sub == Sub::CreationDate { "CreationDate" } else { "ModDate" };
-            match (&from_ci, f.sub) {
-                (Some((_, t, _)), _) => Cell::date(t),
-                (None, Sub::Date) => Cell::none(),
-                (None, _) => params(key).map_or_else(Cell::none, |t| Cell::date(&t)),
+        Sub::Desc => {
+            let own = get(spec, "Desc").and_then(|d| texts.get(&d)).filter(|d| !d.is_empty());
+            match (own, &from_ci) {
+                (Some(d), _) => Cell::text(&d),
+                (None, Some((_, t, p))) => Cell::text(&format!("{p}{t}")),
+                (None, None) => Cell::none(),
             }
         }
+        Sub::Size => meta.has_data.then_some(meta.size).or_else(ci_number).map_or_else(Cell::none, as_size),
+        Sub::CompressedSize => {
+            let len = stream.and_then(|s| get(s, "Length")).and_then(|v| v.as_int().ok()).and_then(|n| u64::try_from(n).ok());
+            len.or_else(ci_number).map_or_else(Cell::none, as_size)
+        }
+        Sub::ModDate | Sub::CreationDate => {
+            let key = if f.sub == Sub::CreationDate { "CreationDate" } else { "ModDate" };
+            match params(key, texts) {
+                Some(t) => Cell::date(&t),
+                None => from_ci.map_or_else(Cell::none, |(_, t, _)| Cell::date(&t)),
+            }
+        }
+        Sub::Date => from_ci.map_or_else(Cell::none, |(_, t, _)| Cell::date(&t)),
         Sub::Number => match from_ci {
             Some((Some(n), t, p)) => Cell::number(n, format!("{p}{}", shown(&t, 100))),
             Some((None, t, p)) => match t.trim().parse::<f64>().ok().filter(|n| n.is_finite()) {
@@ -434,17 +446,37 @@ fn cmp_key(a: &Key, b: &Key) -> Ordering {
 
 /// The rank of every value in one column: equal values share a rank, a missing value has none.
 fn ranks(keys: &[&Key]) -> Vec<Option<u32>> {
-    let mut at: Vec<usize> = (0..keys.len()).filter(|&i| !matches!(keys[i], Key::Missing)).collect();
+    // Equal texts are compared once: one value repeated in many files costs one entry.
+    let mut first_text: HashMap<&str, usize> = HashMap::new();
+    let mut rep = vec![usize::MAX; keys.len()];
+    let mut at: Vec<usize> = Vec::new();
+    for (i, k) in keys.iter().enumerate() {
+        match k {
+            Key::Missing => {}
+            Key::Text(t) => match first_text.get(t.as_str()) {
+                Some(&r) => rep[i] = r,
+                None => {
+                    first_text.insert(t, i);
+                    rep[i] = i;
+                    at.push(i);
+                }
+            },
+            _ => {
+                rep[i] = i;
+                at.push(i);
+            }
+        }
+    }
     at.sort_by(|&a, &b| cmp_key(keys[a], keys[b]));
-    let mut out = vec![None; keys.len()];
+    let mut rank_of = vec![None; keys.len()];
     let mut rank = 0u32;
     for (n, &i) in at.iter().enumerate() {
         if n > 0 && cmp_key(keys[at[n - 1]], keys[i]) != Ordering::Equal {
             rank += 1;
         }
-        out[i] = Some(rank);
+        rank_of[i] = Some(rank);
     }
-    out
+    rep.iter().map(|&r| if r == usize::MAX { None } else { rank_of[r] }).collect()
 }
 
 // ---- folders ------------------------------------------------------------------------------------
@@ -548,14 +580,20 @@ pub fn read(doc: &PdfDocument) -> Result<Option<PortfolioInfo>> {
     let initial_key = get(&coll, "D").and_then(|d| crate::forms::text(&d));
 
     let entries = tree(doc)?;
+    let ids = entry_ids(&entries);
     let mut files: Vec<PortfolioFile> = Vec::with_capacity(entries.len());
     let mut cells: Vec<Vec<Cell>> = Vec::with_capacity(entries.len());
     let mut initial = None;
-    for e in &entries {
+    let mut texts = Texts::default();
+    // Text a file may put in the cells in all; a hostile file can repeat one big value in every cell.
+    let mut budget = CELL_BUDGET;
+    // File specification object number -> the row it first made: the same one again is not read again.
+    let mut rows_by_spec: HashMap<i32, usize> = HashMap::new();
+    for (e, id) in entries.iter().zip(ids) {
         let (prefix, plain_key) = split_prefix(&e.key);
-        let id = format!("n:{}", e.key);
-        let meta = attach::info(&e.spec, plain_key, id.clone(), AttachKind::File, None, None);
+        let meta = attach::info_with(&mut texts, &e.spec, plain_key, id.clone(), AttachKind::File, None, None);
         let spec = resolved_dict(Some(e.spec.clone()));
+        let spec_num = if e.spec.is_indirect().unwrap_or(false) { e.spec.as_indirect().ok() } else { None };
         let ci = spec.as_ref().and_then(|s| resolved_dict(get(s, "CI")));
         let stream = stream_of(&e.spec);
         let stream_dict = stream.as_ref().and_then(|s| s.resolve().ok().flatten());
@@ -566,17 +604,34 @@ pub fn read(doc: &PdfDocument) -> Result<Option<PortfolioInfo>> {
             .and_then(|v| u32::try_from(v).ok())
             .or(prefix)
             .filter(|f| known.contains(f));
-        let row: Vec<Cell> = match &spec {
-            Some(spec) => fields.iter().map(|f| cell(f, ci.as_ref(), spec, stream_dict.as_ref(), &meta)).collect(),
-            None => fields.iter().map(|_| Cell::none()).collect(),
+        let mut row: Vec<Cell> = match (&spec, spec_num.and_then(|n| rows_by_spec.get(&n))) {
+            // The same specification again: its cells are the ones already made (the name column aside).
+            (_, Some(&first)) => cells[first].clone(),
+            (Some(spec), None) => fields.iter().map(|f| cell(f, ci.as_ref(), spec, stream_dict.as_ref(), &meta, &mut texts)).collect(),
+            (None, None) => fields.iter().map(|_| Cell::none()).collect(),
         };
-        if initial_key.as_deref() == Some(e.key.as_str()) {
+        if let Some(n) = spec_num {
+            rows_by_spec.entry(n).or_insert(cells.len());
+        }
+        for (f, c) in fields.iter().zip(&mut row) {
+            if f.sub == Sub::File {
+                *c = Cell::text(&meta.name);
+            } else if c.text.len() > budget {
+                *c = Cell::none();
+            } else {
+                budget -= c.text.len();
+            }
+        }
+        let description: String = meta.description.chars().take(500).collect();
+        let description = if description.len() > budget { String::new() } else { description };
+        budget -= description.len();
+        if initial.is_none() && initial_key.as_deref() == Some(e.key.as_str()) {
             initial = Some(id.clone());
         }
         files.push(PortfolioFile {
             id,
             name: meta.name,
-            description: meta.description,
+            description,
             size: meta.size,
             mime: meta.mime,
             is_pdf: meta.is_pdf,
@@ -625,13 +680,14 @@ pub fn read(doc: &PdfDocument) -> Result<Option<PortfolioInfo>> {
 pub(super) fn fill_ci(doc: &mut PdfDocument, keys: &[String]) -> Result<()> {
     let Some(coll) = collection(doc)? else { return Ok(()) };
     let fields = read_schema(&coll)?;
-    for e in tree(doc)?.into_iter().filter(|e| keys.contains(&e.key)) {
+    let wanted: HashSet<&str> = keys.iter().map(String::as_str).collect();
+    for e in tree(doc)?.into_iter().filter(|e| wanted.contains(e.key.as_str())) {
         let Some(mut spec) = resolved_dict(Some(e.spec.clone())) else { continue };
         let meta = attach::info(&e.spec, split_prefix(&e.key).1, format!("n:{}", e.key), AttachKind::File, None, None);
         let stream = stream_of(&e.spec).and_then(|s| s.resolve().ok().flatten());
         let params = |k: &str| {
             let p = resolved_dict(stream.as_ref().and_then(|s| get(s, "Params")))?;
-            get(&p, k).and_then(|v| v.as_string().ok())
+            get(&p, k).and_then(|v| capped_string(&v))
         };
         let mut ci = doc.new_dict()?;
         ci.dict_put("Type", PdfObject::new_name("CollectionItem")?)?;
@@ -679,8 +735,8 @@ pub(super) fn after_remove(doc: &mut PdfDocument) -> Result<()> {
 /// After a description was set: /CI wins over /Desc when a portfolio's column is read, so it follows.
 pub(super) fn after_describe(doc: &PdfDocument, id: &str, text: &str) -> Result<()> {
     let Some(coll) = collection(doc)? else { return Ok(()) };
-    let Some(key) = id.strip_prefix("n:") else { return Ok(()) };
-    let Some(e) = tree(doc)?.into_iter().find(|e| e.key == key) else { return Ok(()) };
+    let mut entries = tree(doc)?;
+    let Some(e) = find_entry(&entries, id).map(|i| entries.swap_remove(i)) else { return Ok(()) };
     let Some(mut ci) = resolved_dict(resolved_dict(Some(e.spec)).and_then(|s| get(&s, "CI"))) else { return Ok(()) };
     for f in read_schema(&coll)?.iter().filter(|f| f.sub == Sub::Desc) {
         if get(&ci, &f.key).is_some() {

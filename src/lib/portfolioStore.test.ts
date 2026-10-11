@@ -106,6 +106,21 @@ describe("portfolio order", () => {
   });
 });
 
+describe("reads that finish out of order", () => {
+  it("an older answer arriving after a newer one is dropped", async () => {
+    const answers: Array<(i: PortfolioInfo) => void> = [];
+    vi.mocked(api.portfolioInfo).mockImplementation(() => new Promise<PortfolioInfo>((r) => answers.push(r)));
+    const first = usePortfolio.getState().load(DOC);
+    const second = usePortfolio.getState().load(DOC);
+    // the newer read finishes first, the older one afterwards with what was true before the edit
+    answers[1](info({ files: [file("new.pdf")] }));
+    await second;
+    answers[0](info({ files: [file("old.pdf")] }));
+    await first;
+    expect(usePortfolio.getState().docs[DOC].info?.files.map((f) => f.name)).toEqual(["new.pdf"]);
+  });
+});
+
 describe("folders", () => {
   it("expand and collapse show the contents under the folder", () => {
     const i = info();

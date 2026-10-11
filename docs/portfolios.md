@@ -15,9 +15,11 @@ about them. There is one embedded-file reader.
 
 - **Schema** (`/Schema`): one field per key with `/Subtype` (S text, D date, N number, F file name, Desc, Size,
   ModDate, CreationDate, CompressedSize), `/N` name, `/O` column order, `/V` visible. At most 64 fields.
-- **Values** of a file: its `/CI` collection item first (a plain value, or a `/CollectionSubitem` with `/D` and a
-  `/P` prefix shown in front), then the file's own facts when `/CI` has none: the file specification's name and
-  `/Desc`, the stream's `/Params` Size, ModDate, CreationDate, and `/Length` for CompressedSize.
+- **Values** of a file, as ISO 32000 and Acrobat have it: the fields of subtype F, Desc, Size, ModDate,
+  CreationDate and CompressedSize show the file's own facts (the file specification's name and `/Desc`, the stream's
+  `/Params` Size, ModDate, CreationDate, and `/Length` for CompressedSize), and `/CI` only when the file gives none.
+  Fields of subtype S, D and N come from `/CI` (a plain value, or a `/CollectionSubitem` with `/D` and a `/P` prefix
+  shown in front).
 - **Sort** (`/Sort`): `/S` a key or an array of keys, `/A` a bool or an array (a missing one is ascending). Strings
   compare folded like a search folds them (case-insensitive, accents kept) and with digit runs in number order
   ("file2" before "file10"; any run length, nothing is parsed to an integer); numbers as numbers; dates as dates
@@ -29,6 +31,11 @@ about them. There is one embedded-file reader.
   at 10 000, files at 50 000 (as attachments). A loop through `/Child` or `/Next` (or one folder reached twice) is
   refused: `portfolio_info` returns an error, the UI says so once and shows the document as a plain PDF.
 - Every string shown (field and folder names, `/CI` text, file names) loses control, bidi and zero-width characters.
+- **Hostile structure is bounded.** The name tree is read with a visited set and a 100 000 node budget (a `/Kids`
+  that loops or repeats is read once). A string is cut to 2 KB when read and remembered by object number, so one
+  huge string that many fields point at is read once; a file specification reached again by another name reuses its
+  cells; cell text and descriptions are kept up to 32 MB in all (the rest are blank); equal values are ranked once.
+- Two name-tree entries with one key get two ids (the second carries its index), so each row is one file.
 
 The engine returns the files in the collection's own sort order, the values as display text, and for each file its
 **rank per field**. A click on a header sorts by those ranks in the UI, so there is one collation (the engine's)
@@ -51,7 +58,7 @@ asked for no portfolio view) starts on the cover page instead.
   with the file's name and type and then shows the Save dialog. No thumbnails or previews of non-PDF files.
 - The attachments panel keeps working on the same files. A file added there to a portfolio gets its `/CI` filled from
   the document's own schema (name, description, size, modified, by subtype, whatever the keys are called);
-  describing a file also updates the `/CI` description (it wins over `/Desc` when read); deleting the initial
+  describing a file also updates the `/CI` description (the file's own `/Desc` is what is read first); deleting the initial
   document drops `/D`. All through the attach edit steps: one undo step each.
 
 ## Extract
@@ -60,10 +67,14 @@ asked for no portfolio view) starts on the cover page instead.
   Windows, never over a file that is open in a tab).
 - All: `portfolio_extract_all(doc, folderToken)` writes flat into the picked folder. Each name goes through
   `clean_name` (no path or `..`, no control or bidi characters, no `< > : " | ? *`, `CON`/`NUL`/`COMn`/`LPTn` get a
-  `_`) and is cut to 200 characters keeping the extension. A name that is taken (in the folder, or earlier in the
+  `_`; so do `CONIN$`, `CONOUT$` and `COM`/`LPT` with superscript digits) and is cut to 200 characters, 250
+  UTF-16 units and 250 UTF-8 bytes, keeping the extension. A name that is taken (in the folder, or earlier in the
   same run, on a case-insensitive disk too) becomes `name (2).ext`: files are opened with create-new, nothing is
-  replaced. Limits: 512 MB per file as decoded, 4 GB per run; a file over a limit, or one that links to a file outside
-  the document, is left out and listed. One file's bytes are held at a time. The document is only read (not dirty).
+  replaced. Limits: 512 MB per file as decoded, 4 GB of decoded bytes per run (a file that turns out too big counts
+  the work it cost); a file over a limit, one that links to a file outside the document, one that shares its stream
+  with an earlier name, or one that cannot be written is left out and listed (200 lines, then a count) and the run
+  goes on. Each file is marked as from the Internet (Windows) the moment it is written. One file's bytes are held at
+  a time. The document is only read (not dirty).
 
 ## Create PDF Portfolio…
 

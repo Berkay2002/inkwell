@@ -2,18 +2,20 @@
 
 use super::{fill_ci, resolved_dict, size_text};
 use crate::engine::edit::{Readback, rewrite_opts, write_atomic, write_doc};
-use crate::engine::{Engine, EngineError};
-use crate::organize::attach::{self, AttachKind, MAX_ATTACH, NewFile, clean_name, stream_of, tree, unique};
+use crate::engine::Engine;
+use crate::organize::attach::{self, AttachKind, MAX_ATTACH, NewFile, Texts, clean_name, entry_ids, stream_of, tree, unique};
 use crate::organize::combine::Face;
 use crate::organize::{Result, bad, put_int, put_name, put_str};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::{Font, Size};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// Longest file name written by Extract.
+/// Longest file name written by Extract, in characters; and in UTF-16 units and UTF-8 bytes, which
+/// no file system takes more than 255 of (a little room is left for what a clean-up may put in front).
 const MAX_NAME: usize = 200;
+const MAX_UNITS: usize = 250;
 /// Most files, and most bytes, a new portfolio takes.
 pub const CREATE_MAX_FILES: usize = 500;
 pub const CREATE_MAX_BYTES: u64 = 2 << 30;
@@ -169,7 +171,17 @@ pub fn create(eng: &Engine, sources: &[Source], out: &str) -> Result<Created> {
 
     let mut keys = Vec::with_capacity(sources.len());
     for s in sources {
-        let data = std::fs::read(&s.path).map_err(|e| bad(format!("{}: {e}", s.name)))?;
+        // Read at most one byte past the limit: a file that grew since it was measured is refused, not slurped.
+        let data = (|| {
+            use std::io::Read;
+            let mut data = Vec::new();
+            std::fs::File::open(&s.path)?.take(MAX_ATTACH + 1).read_to_end(&mut data)?;
+            std::io::Result::Ok(data)
+        })()
+        .map_err(|e| bad(format!("{}: {e}", s.name)))?;
+        if data.len() as u64 > MAX_ATTACH {
+            return Err(bad(format!("{} is over {} MB, too large for a portfolio", s.name, MAX_ATTACH >> 20)));
+        }
         let modified = std::fs::metadata(&s.path)
             .ok()
             .and_then(|m| m.modified().ok())
@@ -195,43 +207,54 @@ pub fn create(eng: &Engine, sources: &[Source], out: &str) -> Result<Created> {
 
 // ---- extract ------------------------------------------------------------------------------------
 
-/// `name` cut to [`MAX_NAME`] characters, its extension kept.
-fn capped(name: &str) -> String {
-    if name.chars().count() <= MAX_NAME {
-        return name.to_string();
+/// `stem` cut so that stem, `suffix` and `ext` together are within [`MAX_NAME`] characters and
+/// [`MAX_UNITS`] UTF-16 units and UTF-8 bytes; the three joined.
+fn fit(stem: &str, suffix: &str, ext: &str) -> String {
+    let (mut chars, mut u16s, mut bytes) = (0, 0, 0);
+    for c in suffix.chars().chain(ext.chars()) {
+        chars += 1;
+        u16s += c.len_utf16();
+        bytes += c.len_utf8();
     }
-    let (stem, ext) = match name.rfind('.') {
-        Some(i) if i > 0 && name[i..].chars().count() <= 20 => name.split_at(i),
-        _ => (name, ""),
-    };
-    let room = MAX_NAME - ext.chars().count();
-    let cut: String = stem.chars().take(room).collect();
-    format!("{}{ext}", cut.trim_end())
+    let mut cut = String::new();
+    for c in stem.chars() {
+        if chars + 1 > MAX_NAME || u16s + c.len_utf16() > MAX_UNITS || bytes + c.len_utf8() > MAX_UNITS {
+            break;
+        }
+        chars += 1;
+        u16s += c.len_utf16();
+        bytes += c.len_utf8();
+        cut.push(c);
+    }
+    format!("{}{suffix}{ext}", if cut.len() < stem.len() { cut.trim_end() } else { &cut })
 }
 
-/// A name for a file taken out of a document: from [`clean_name`], and no longer than [`MAX_NAME`].
+/// The stem and extension of `name` (an extension of up to 20 characters counts as one).
+fn split_ext(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(i) if i > 0 && name[i..].chars().count() <= 20 => name.split_at(i),
+        _ => (name, ""),
+    }
+}
+
+/// A name for a file taken out of a document: from [`clean_name`], and short enough for any file
+/// system (its extension kept).
 pub fn extract_name(name: &str) -> String {
-    clean_name(&capped(&clean_name(name)))
+    let name = clean_name(name);
+    let (stem, ext) = split_ext(&name);
+    clean_name(&fit(stem, "", ext))
 }
 
 /// Writes `bytes` as a new file in `dir` named `name`, or `name (2)` and so on when that exists: a file
-/// is never replaced. Returns the name it got.
-fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<String> {
+/// is never replaced. `next` remembers, for each name, the number to try first, so a run of files with
+/// one name does not start over every time. Returns the name it got.
+fn write_new(dir: &Path, name: &str, bytes: &[u8], next: &mut HashMap<String, u32>) -> std::io::Result<String> {
     use std::io::Write;
-    let (stem, ext) = match name.rfind('.') {
-        Some(i) if i > 0 => name.split_at(i),
-        _ => (name, ""),
-    };
-    for n in 1..10_000 {
-        let candidate = if n == 1 {
-            name.to_string()
-        } else {
-            // The number goes in before the cut, so a name at the length limit still gets a different name.
-            let suffix = format!(" ({n})");
-            let room = MAX_NAME.saturating_sub(ext.chars().count() + suffix.chars().count());
-            let cut: String = stem.chars().take(room).collect();
-            format!("{}{suffix}{ext}", cut.trim_end())
-        };
+    let (stem, ext) = split_ext(name);
+    let start = next.get(&name.to_lowercase()).copied().unwrap_or(1);
+    for n in start..start + 10_000 {
+        // The number goes in before the cut, so a name at the length limit still gets a different name.
+        let candidate = if n == 1 { fit(stem, "", ext) } else { fit(stem, &format!(" ({n})"), ext) };
         let path = dir.join(&candidate);
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut f) => {
@@ -241,6 +264,7 @@ fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<String> {
                     let _ = std::fs::remove_file(&path);
                     return Err(e);
                 }
+                next.insert(name.to_lowercase(), n + 1);
                 return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -259,48 +283,85 @@ pub struct Extracted {
     pub skipped: Vec<String>,
 }
 
+/// Lines of `skipped` kept; the rest are counted.
+const MAX_SKIPPED: usize = 200;
+
 /// Writes every file of the portfolio into `dir` (a folder that exists), flat, never replacing a file.
-/// The document is only read. One file's bytes are held at a time.
-pub fn extract_all(doc: &PdfDocument, dir: &Path) -> Result<Extracted> {
+/// The document is only read. One file's bytes are held at a time; `written` hears of each file as
+/// soon as it is on disk. A file that cannot be written is left out and the rest go on.
+pub fn extract_all(doc: &PdfDocument, dir: &Path, written: &mut dyn FnMut(&Path)) -> Result<Extracted> {
     if !dir.is_dir() {
         return Err(bad("the folder to extract into is not there"));
     }
     let mut out = Extracted::default();
+    let mut left_out = 0usize;
+    let mut skip = |out: &mut Extracted, line: String| {
+        if out.skipped.len() < MAX_SKIPPED {
+            out.skipped.push(line);
+        } else {
+            left_out += 1;
+        }
+    };
+    // Decoded bytes in all, including those of a file that turned out too big: that is the work done.
     let mut total = 0u64;
-    for e in tree(doc)? {
-        let meta = attach::info(&e.spec, super::split_prefix(&e.key).1, format!("n:{}", e.key), AttachKind::File, None, None);
+    let mut streams: HashSet<i32> = HashSet::new();
+    let mut texts = Texts::default();
+    let mut next: HashMap<String, u32> = HashMap::new();
+    let entries = tree(doc)?;
+    for (e, id) in entries.iter().zip(entry_ids(&entries)) {
+        let meta = attach::info_with(&mut texts, &e.spec, super::split_prefix(&e.key).1, id, AttachKind::File, None, None);
         let name = extract_name(&meta.name);
         let Some(stream) = stream_of(&e.spec) else {
-            out.skipped.push(format!("{name}: it links to a file outside the document"));
+            skip(&mut out, format!("{name}: it links to a file outside the document"));
             continue;
         };
         if meta.size > MAX_ATTACH {
-            out.skipped.push(format!("{name}: over {} MB", MAX_ATTACH >> 20));
+            skip(&mut out, format!("{name}: over {} MB", MAX_ATTACH >> 20));
             continue;
         }
-        let bytes = match stream.read_stream_capped(MAX_ATTACH as usize) {
+        // One stream is decoded once, whatever number of names point at it.
+        if stream.is_indirect().unwrap_or(false) && stream.as_indirect().is_ok_and(|n| !streams.insert(n)) {
+            skip(&mut out, format!("{name}: the same data as a file before it"));
+            continue;
+        }
+        let room = EXTRACT_MAX_BYTES.saturating_sub(total);
+        if room == 0 {
+            skip(&mut out, format!("{name}: the folder would pass {} GB", EXTRACT_MAX_BYTES >> 30));
+            continue;
+        }
+        let cap = room.min(MAX_ATTACH);
+        let bytes = match stream.read_stream_capped(cap as usize) {
             Ok(b) => b,
             Err(err) if err.is_stream_cap() => {
-                out.skipped.push(format!("{name}: over {} MB once unpacked", MAX_ATTACH >> 20));
+                total += cap;
+                if cap == MAX_ATTACH {
+                    skip(&mut out, format!("{name}: over {} MB once unpacked", MAX_ATTACH >> 20));
+                } else {
+                    skip(&mut out, format!("{name}: the folder would pass {} GB", EXTRACT_MAX_BYTES >> 30));
+                }
                 continue;
             }
             Err(err) => {
-                out.skipped.push(format!("{name}: {err}"));
+                skip(&mut out, format!("{name}: {err}"));
                 continue;
             }
         };
-        if total + bytes.len() as u64 > EXTRACT_MAX_BYTES {
-            out.skipped.push(format!("{name}: the folder would pass {} GB", EXTRACT_MAX_BYTES >> 30));
-            continue;
-        }
-        match write_new(dir, &name, &bytes) {
-            Ok(written) => {
-                total += bytes.len() as u64;
-                out.written.push(written);
+        total += bytes.len() as u64;
+        match write_new(dir, &name, &bytes, &mut next) {
+            Ok(file) => {
+                written(&dir.join(&file));
+                out.written.push(file);
             }
-            Err(err) => return Err(EngineError::Io(format!("{name}: {err}"))),
+            Err(err) => skip(&mut out, format!("{name}: {err}")),
         }
+    }
+    if left_out > 0 {
+        out.skipped.push(format!("and {left_out} more files left out"));
     }
     Ok(out)
 }
 
+#[cfg(test)]
+pub(super) fn write_new_for_test(dir: &Path, name: &str, bytes: &[u8], next: &mut HashMap<String, u32>) -> String {
+    write_new(dir, name, bytes, next).unwrap()
+}
