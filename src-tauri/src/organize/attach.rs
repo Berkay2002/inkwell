@@ -159,7 +159,7 @@ pub(super) fn write_tree(doc: &mut PdfDocument, mut entries: Vec<Entry>) -> Resu
 }
 
 /// The embedded file's stream of a file specification.
-pub(super) fn stream_of(spec: &PdfObject) -> Option<PdfObject> {
+pub(crate) fn stream_of(spec: &PdfObject) -> Option<PdfObject> {
     let spec = spec.resolve().ok().flatten()?;
     if !spec.is_dict().ok()? {
         return None;
@@ -344,7 +344,7 @@ fn is_invisible(c: char) -> bool {
 }
 
 /// `s` without control characters (a line break stays) and without the invisible ones.
-pub(super) fn strip_invisible(s: &str) -> String {
+pub(crate) fn strip_invisible(s: &str) -> String {
     s.chars().filter(|&c| (!c.is_control() || c == '\n') && !is_invisible(c)).collect()
 }
 
