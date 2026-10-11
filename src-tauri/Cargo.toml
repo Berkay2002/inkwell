@@ -40,6 +40,8 @@ regex = "1"
 flate2 = "1"
 # Reads the user's codex config.toml (MCP server names). Already in the tree through tauri's build deps.
 toml = "0.8"
+# Reads XFDF (comments and form data exchange, src/exchange.rs). Already in the tree through tauri (plist); no DTD or entity expansion.
+quick-xml = "0.42"
 # Version history store (history/) and compare (diff/).
 fastcdc = "3"
 blake3 = "1"

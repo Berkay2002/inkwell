@@ -9,7 +9,7 @@
 //! reply with `/StateModel /Review` and `/State` (the latest one wins; "Completed" is resolved).
 //! Replies and state replies are hidden on the page (they are only listed in the panel).
 //! The review-state convention follows pdfcraft's `crates/annot` (ideas only, no code taken).
-//! XFDF import and export is not built yet (see docs/comments.md).
+//! XFDF and FDF export and import of comments is `xfdf.rs` (see docs/comments.md).
 
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 pub mod app;
 #[cfg(test)]
 mod tests;
+pub mod xfdf;
 
 type Result<T> = std::result::Result<T, EngineError>;
 
@@ -472,6 +473,27 @@ impl AnnotWalk {
 /// several pages list (a shared `/Annots`) is listed once, on one page; see [`AnnotWalk`] for
 /// which page and for the case that is left to the first.
 pub fn list(doc: &PdfDocument) -> Result<AnnotList> {
+    let (all, incomplete) = each(doc, |p, a| dto(p, a))?;
+    let mut items: Vec<AnnotDto> = Vec::new();
+    let mut states: Vec<(i32, String)> = Vec::new();
+    for d in all {
+        match (&d.state, d.parent) {
+            (Some(s), Some(parent)) => states.push((parent, s.clone())),
+            _ => items.push(d),
+        }
+    }
+    for (parent, s) in states {
+        if let Some(d) = items.iter_mut().find(|d| d.xref == parent) {
+            d.resolved = s == "Completed";
+            d.state = Some(s);
+        }
+    }
+    Ok(AnnotList { items, incomplete })
+}
+
+/// `f` for every comment annotation (everything [`is_comment`]) in page order, once each; and whether
+/// some pages were left out (see [`AnnotWalk`] for which page an object belongs to and the caps).
+pub(crate) fn each<T>(doc: &PdfDocument, mut f: impl FnMut(u32, &PdfAnnotation) -> Result<T>) -> Result<(Vec<T>, bool)> {
     let mut all = Vec::new();
     let mut walk = AnnotWalk::default();
     let mut loaded = 0usize;
@@ -489,25 +511,11 @@ pub fn list(doc: &PdfDocument) -> Result<AnnotList> {
             let x = a.xref()?;
             let ours = if x == 0 { fresh.direct } else { pending.remove(&x) };
             if ours && a.r#type().is_ok_and(is_comment) {
-                all.push(dto(p, &a)?);
+                all.push(f(p, &a)?);
             }
         }
     }
-    let mut items: Vec<AnnotDto> = Vec::new();
-    let mut states: Vec<(i32, String)> = Vec::new();
-    for d in all {
-        match (&d.state, d.parent) {
-            (Some(s), Some(parent)) => states.push((parent, s.clone())),
-            _ => items.push(d),
-        }
-    }
-    for (parent, s) in states {
-        if let Some(d) = items.iter_mut().find(|d| d.xref == parent) {
-            d.resolved = s == "Completed";
-            d.state = Some(s);
-        }
-    }
-    Ok(AnnotList { items, incomplete: left_out || walk.incomplete })
+    Ok((all, left_out || walk.incomplete))
 }
 
 // ---- writing -----------------------------------------------------------------------------------
@@ -525,8 +533,20 @@ fn meta(a: &mut PdfAnnotation, author: &str, created: bool) -> Result<()> {
     put_str(a, "M", &now)?;
     if created {
         put_str(a, "CreationDate", &now)?;
+        // The name XFDF and FDF files match a comment by (an import updates the comment with the same one).
+        put_str(a, "NM", &new_name())?;
     }
     Ok(())
+}
+
+/// A random 128-bit name in UUID text form, for `/NM`.
+fn new_name() -> String {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("system random source");
+    b[6] = b[6] & 0x0F | 0x40;
+    b[8] = b[8] & 0x3F | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
 fn style(a: &mut PdfAnnotation, kind: Kind, s: &Style) -> Result<()> {

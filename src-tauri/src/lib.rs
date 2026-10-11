@@ -7,6 +7,7 @@ pub mod compress;
 pub mod convert;
 pub mod diff;
 pub mod engine;
+pub mod exchange;
 pub mod history;
 pub mod history_ipc;
 pub mod imageedit;
@@ -79,6 +80,10 @@ enum SaveKind {
     Html,
     Xhtml,
     Word,
+    /// Comments: XFDF or FDF.
+    Comments,
+    /// Form data: XFDF, FDF or JSON.
+    FormData,
     /// No filter: print-to-file output whose format the printer driver decides.
     Any,
 }
@@ -145,6 +150,8 @@ async fn pick_save(
             SaveKind::Html => d.add_filter("HTML", &["html", "htm"]),
             SaveKind::Xhtml => d.add_filter("XHTML", &["xhtml"]),
             SaveKind::Word => d.add_filter("Word document", &["docx"]),
+            SaveKind::Comments => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]),
+            SaveKind::FormData => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]).add_filter("JSON", &["json"]),
             SaveKind::Any => d,
         };
         if let Some(dir) = near.as_deref().and_then(|p| std::path::Path::new(p).parent()) {
@@ -179,6 +186,21 @@ async fn pick_source(window: Window, kind: SourceKind, multiple: bool) -> Result
             .filter_map(|f| f.into_path().ok())
             .map(|p| reg.issue_open(window.label(), p.to_string_lossy().into_owned()))
             .collect())
+    })
+    .await
+}
+
+/// Open dialog for an XFDF, FDF or JSON data file of open document `doc`; an open token comes back.
+#[tauri::command]
+async fn pick_data_file(window: Window, eng: Eng<'_>, doc: DocId) -> Result<Option<FileRef>, EngineError> {
+    let near = eng.doc_entry(doc)?.path();
+    blocking(move || {
+        let mut d = window.dialog().file().set_parent(&window).set_title("Choose a data file").add_filter("XFDF, FDF or JSON", &["xfdf", "fdf", "json", "xml"]);
+        if let Some(dir) = std::path::Path::new(&near).parent() {
+            d = d.set_directory(dir);
+        }
+        let picked = d.blocking_pick_file().and_then(|f| f.into_path().ok());
+        Ok(picked.map(|p| window.state::<Paths>().issue_open(window.label(), p.to_string_lossy().into_owned())))
     })
     .await
 }
@@ -1065,6 +1087,7 @@ pub fn run() {
             ocr_start,
             pick_source,
             pick_folder,
+            pick_data_file,
             export_start,
             create_start,
             discard_scratch,
@@ -1109,6 +1132,8 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            annot::app::annot_export,
+            annot::app::annot_import,
             measure::app::measure_scale_get,
             measure::app::measure_scale_set,
             measure::app::measure_add,
@@ -1116,6 +1141,8 @@ pub fn run() {
             measure::app::measure_list,
             measure::app::measure_snap,
             forms::app::forms_list,
+            forms::app::forms_export,
+            forms::app::forms_import,
             forms::app::forms_set_value,
             forms::app::forms_reset,
             forms::app::forms_scripts,
