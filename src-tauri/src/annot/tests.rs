@@ -123,6 +123,23 @@ fn appearances_draw_on_the_page() {
 }
 
 #[test]
+fn a_text_box_is_not_filled_with_its_text_colour() {
+    let (eng, id, _) = open("freetext");
+    add1(&eng, id, 0, NewAnnot::FreeText { rect: [300.0, 500.0, 480.0, 560.0], text: "Initial each page".into(), font_size: Some(12.0) });
+    let a = list_all(&eng, id).unwrap().pop().unwrap();
+    assert!(a.color.is_some_and(|c| c[0] < 0.2), "the dto carries the text colour: {:?}", a.color);
+    let bytes = eng.unsaved_bytes(id).unwrap().expect("an edit is pending");
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let pix = doc.load_page(0).unwrap().to_pixmap(&mupdf::Matrix::IDENTITY, &mupdf::Colorspace::device_rgb(), false, true).unwrap();
+    let (w, n) = (pix.width() as usize, pix.n() as usize);
+    let dark = (500..560)
+        .flat_map(|y| (300..480).map(move |x| (x, y)))
+        .filter(|&(x, y)| pix.samples()[(y * w + x) * n] < 100)
+        .count();
+    assert!(dark < 180 * 60 / 4, "the box is not a dark block ({dark} dark px)");
+}
+
+#[test]
 fn named_and_date_stamps_draw() {
     for (i, name) in ["Draft", "Confidential", "11 Oct 2026"].iter().enumerate() {
         let (eng, id, _) = open(&format!("stamp{i}"));

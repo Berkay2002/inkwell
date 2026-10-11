@@ -254,7 +254,12 @@ fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
         contents: get_str(&o, "Contents"),
         created: get_str(&o, "CreationDate"),
         modified: get_str(&o, "M"),
-        color: rgb_of(a.color().ok().flatten()),
+        // A free text's /C is its background; its colour is the text colour in the default appearance.
+        color: rgb_of(if kind == Kind::FreeText {
+            a.default_appearance().ok().flatten().and_then(|d| d.color)
+        } else {
+            a.color().ok().flatten()
+        }),
         fill: rgb_of(a.interior_color().ok().flatten()),
         opacity: a.opacity().unwrap_or(1.0),
         width: a.border_width().unwrap_or(1.0),
@@ -314,7 +319,9 @@ fn meta(a: &mut PdfAnnotation, author: &str, created: bool) -> Result<()> {
 }
 
 fn style(a: &mut PdfAnnotation, kind: Kind, s: &Style) -> Result<()> {
-    a.set_color(rgb(s.color.unwrap_or_else(|| default_color(kind))))?;
+    if kind != Kind::FreeText {
+        a.set_color(rgb(s.color.unwrap_or_else(|| default_color(kind))))?;
+    }
     if let Some(f) = s.fill {
         a.set_interior_color(rgb(f))?;
     }
@@ -455,9 +462,10 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: 
     let kind = kind_of(&a)?;
     let s = &patch.style;
     if let Some(c) = s.color {
-        a.set_color(rgb(c))?;
-        // A free text's colour is its text colour.
-        if kind == Kind::FreeText {
+        // A free text's colour is its text colour (its /C would fill the box).
+        if kind != Kind::FreeText {
+            a.set_color(rgb(c))?;
+        } else {
             let size = a.default_appearance()?.map_or(12.0, |d| d.size);
             a.set_default_appearance("Helv", size, Some(rgb(c)))?;
         }
