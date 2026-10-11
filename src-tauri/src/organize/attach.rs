@@ -222,7 +222,7 @@ pub fn read_data_capped(doc: &PdfDocument, id: &str, cap: usize) -> Result<(Stri
     }
     match stream.read_stream_capped(cap) {
         Ok(bytes) => Ok((meta.name, bytes)),
-        Err(e) if e.is_limit() => {
+        Err(e) if e.is_stream_cap() => {
             Err(bad(format!("{} is over {} MB once unpacked, too large to open or save", meta.name, cap >> 20)))
         }
         Err(e) => Err(e.into()),
@@ -440,5 +440,34 @@ mod tests {
         assert_eq!((name.as_str(), bytes.len()), ("zeros.bin", 3 << 20));
         let e = read_data_capped(&doc, "n:zeros.bin", 1 << 20).unwrap_err().to_string();
         assert!(e.contains("too large"), "{e}");
+    }
+
+    /// The size a stream declares is not trusted: with no /Params /Size, and a /Length that is the few
+    /// kilobytes of Flate data, only the capped read can notice that it inflates past the cap.
+    #[test]
+    fn a_small_flate_stream_that_inflates_past_the_cap_is_stopped_by_the_read() {
+        use flate2::{Compression, write::ZlibEncoder};
+        use std::io::Write;
+        let mut doc = PdfDocument::new();
+        let file = NewFile { name: "bomb.bin".into(), data: vec![1u8; 16], description: String::new() };
+        add(&mut doc, &[file]).unwrap();
+        let spec = locate(&doc, "n:bomb.bin").unwrap();
+        let mut stream = stream_of(&spec).unwrap();
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::best());
+        z.write_all(&vec![0u8; 8 << 20]).unwrap();
+        let packed = z.finish().unwrap();
+        assert!(packed.len() < 64 << 10, "{}", packed.len());
+        stream.write_raw_stream_buffer(&mupdf::Buffer::from_bytes(&packed).unwrap()).unwrap();
+        stream.dict_put("Filter", PdfObject::new_name("FlateDecode").unwrap()).unwrap();
+        stream.dict_delete("Params").unwrap();
+        stream.dict_delete("DecodeParms").ok();
+        // what the pre-check sees is the packed length, well under the cap
+        let declared = info(&spec, "bomb.bin", "n:bomb.bin".into(), AttachKind::File, None, None).size;
+        assert!(declared > 0 && declared < 1 << 20, "declared {declared}");
+        let e = read_data_capped(&doc, "n:bomb.bin", 1 << 20).unwrap_err().to_string();
+        assert!(e.contains("once unpacked"), "{e}");
+        // a cap above the real size reads all of it
+        let (_, bytes) = read_data_capped(&doc, "n:bomb.bin", 16 << 20).unwrap();
+        assert_eq!(bytes.len(), 8 << 20);
     }
 }
