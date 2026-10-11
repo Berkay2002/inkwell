@@ -411,6 +411,13 @@ async fn edit_undo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
     blocking(move || eng.undo(doc)).await
 }
 
+/// Undo, but only while the document is still at generation `rev` (see `Engine::undo_if`); "stale" otherwise.
+#[tauri::command]
+async fn edit_undo_if(eng: Eng<'_>, doc: DocId, rev: u32) -> Result<EditState, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.undo_if(doc, rev)).await
+}
+
 #[tauri::command]
 async fn edit_redo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
     let eng = eng.inner().clone();
@@ -1012,6 +1019,7 @@ pub fn run() {
             tile_raw,
             edit_apply,
             edit_undo,
+            edit_undo_if,
             edit_state,
             edit_redo,
             history_ipc::history_state,

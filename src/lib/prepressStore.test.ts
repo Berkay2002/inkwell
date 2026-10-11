@@ -18,6 +18,7 @@ vi.mock("./api", () => ({
   saveDocument: vi.fn(),
   editState: vi.fn(),
   editUndo: vi.fn(),
+  editUndoIf: vi.fn(),
   toolCancel: vi.fn(() => Promise.resolve()),
   discardScratch: vi.fn(() => Promise.resolve(true)),
 }));
@@ -268,10 +269,12 @@ describe("Convert Colors", () => {
 
     it("Undo takes the conversion back and closes", async () => {
       await unsaved();
-      vi.mocked(api.editUndo).mockResolvedValue(state(3));
+      vi.mocked(api.editUndoIf).mockResolvedValue(state(3));
       st().closeSheet();
       await st().undoConversion();
-      expect(api.editUndo).toHaveBeenCalledExactlyOnceWith(1);
+      // asked for the generation the conversion made: the engine compares it under its edit lock
+      expect(api.editUndoIf).toHaveBeenCalledExactlyOnceWith(1, 4);
+      expect(api.editUndo).not.toHaveBeenCalled();
       expect(applyState).toHaveBeenLastCalledWith(1, state(3));
       expect(st().sheet).toBeNull();
     });
@@ -280,17 +283,18 @@ describe("Convert Colors", () => {
       await unsaved();
       st().closeSheet();
       st().keepConversion();
-      expect(api.editUndo).not.toHaveBeenCalled();
+      expect(api.editUndoIf).not.toHaveBeenCalled();
       expect(st().sheet).toBeNull();
     });
 
     it("does not undo a step that is not the conversion, and says so instead of closing", async () => {
       await unsaved();
-      // an undo and a redo while the sheet was open: the document is at a newer generation
-      useStore.setState((s) => ({ docs: { ...s.docs, 1: { ...s.docs[1], rev: 5 } } }));
+      // an assistant step landed while the sheet was open: the engine refuses the undo
+      vi.mocked(api.editUndoIf).mockRejectedValueOnce("stale");
       st().closeSheet();
       await st().undoConversion();
       expect(api.editUndo).not.toHaveBeenCalled();
+      expect(applyState).not.toHaveBeenCalledWith(1, state(3));
       expect(st().sheet).toMatchObject({ phase: "unsaved", closing: true, error: expect.stringMatching(/changed since the conversion; nothing was undone/) });
       // Keep still closes it
       st().keepConversion();
@@ -299,7 +303,7 @@ describe("Convert Colors", () => {
 
     it("keeps the sheet and says so when the undo fails", async () => {
       await unsaved();
-      vi.mocked(api.editUndo).mockRejectedValueOnce("Nothing to undo");
+      vi.mocked(api.editUndoIf).mockRejectedValueOnce("Nothing to undo");
       st().closeSheet();
       await st().undoConversion();
       expect(st().sheet).toMatchObject({ phase: "unsaved", error: "Nothing to undo" });

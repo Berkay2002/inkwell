@@ -347,6 +347,8 @@ export interface EditState {
 
 export const editApply = (doc: number, op: EditOp) => invoke<EditState>("edit_apply", { doc, op });
 export const editUndo = (doc: number) => invoke<EditState>("edit_undo", { doc });
+/** Undo only while the document is still at generation `rev`; rejects with "stale" when a step landed since. */
+export const editUndoIf = (doc: number, rev: number) => invoke<EditState>("edit_undo_if", { doc, rev });
 export const editRedo = (doc: number) => invoke<EditState>("edit_redo", { doc });
 export const editState = (doc: number) => invoke<EditState>("edit_state", { doc });
 

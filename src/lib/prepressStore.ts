@@ -560,14 +560,13 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       const d = s && st().docs[s.doc];
       if (!s || !d || s.phase !== "unsaved") return;
       try {
-        // `queued` hands a failure back (the shared undo shows it on the error line and carries on). The check is
-        // made in the queue: another step may have landed since (an undo and redo, the assistant), and then the
-        // conversion is not what an undo would take back.
-        const after = await queued(s.doc, async () => (st().docs[s.doc]?.rev === s.convertedRev ? api.editUndo(s.doc) : null));
+        // The engine compares the generation under its edit lock: a step that landed since (an undo and redo, the
+        // assistant, which does not go through this queue) is not what an undo would take back.
+        const after = s.convertedRev == null ? null : await queued(s.doc, () => api.editUndoIf(s.doc, s.convertedRev as number));
         if (!after) return patchSheet<ConvertSheet>("convert", { error: MOVED_ON });
         applyState(s.doc, after);
       } catch (e) {
-        return patchSheet<ConvertSheet>("convert", { error: msg(e) });
+        return patchSheet<ConvertSheet>("convert", { error: String(e) === "stale" ? MOVED_ON : msg(e) });
       }
       if (sheet<ConvertSheet>("convert")?.phase === "unsaved") set({ sheet: null });
     },
