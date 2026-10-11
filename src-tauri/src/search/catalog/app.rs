@@ -32,6 +32,24 @@ pub struct Jobs {
     busy: Mutex<HashSet<String>>,
 }
 
+impl Jobs {
+    /// Runs `f` with catalog `id` held, so a build and a delete (or two builds) of one catalog never overlap;
+    /// refused when it is held. Released when `f` returns, whatever it returns.
+    pub fn guarded<R>(&self, id: &str, f: impl FnOnce() -> Result<R>) -> Result<R> {
+        if !self.busy.lock().unwrap().insert(id.to_string()) {
+            return Err(EngineError::Invalid("this catalog is being built or removed; wait for that first".into()));
+        }
+        struct Release<'a>(&'a Jobs, String);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.busy.lock().unwrap().remove(&self.1);
+            }
+        }
+        let _held = Release(self, id.to_string());
+        f()
+    }
+}
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum BuildEvent {
@@ -94,10 +112,9 @@ pub async fn catalog_list(window: Window) -> Result<Vec<Meta>> {
 #[tauri::command]
 pub async fn catalog_delete(window: Window, jobs: State<'_, Arc<Jobs>>, id: String) -> Result<()> {
     let root = root(&window)?;
-    if jobs.busy.lock().unwrap().contains(&id) {
-        return Err(EngineError::Invalid("this catalog is being built; cancel that first".into()));
-    }
-    blocking(move || super::delete(&root, &id)).await
+    // The id is held for the whole delete, so a build cannot start on a folder that is being removed.
+    let jobs = jobs.inner().clone();
+    blocking(move || jobs.guarded(&id, || super::delete(&root, &id))).await
 }
 
 /// Whether a refresh would change anything (counts and modified times; no file is opened).

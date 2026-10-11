@@ -483,10 +483,21 @@ pub fn extract_record(doc: &Document, page: u32, extras: bool) -> Result<PageRec
     if !extras {
         return Ok(rec);
     }
-    let origin = p.bounds()?;
     // Not every document is a PDF with annotations; the text hits stand either way.
-    let Ok(pp) = PdfPage::try_from(p) else { return Ok(rec) };
+    if let Ok((comments, fields)) = extras_of(p) {
+        rec.comments = comments;
+        rec.fields = fields;
+    }
+    Ok(rec)
+}
+
+/// The comments (text and box) and the form-field values (text and box) of a PDF page, in page space.
+/// The one place both are read: the embedded index's fingerprint hashes exactly what is stored here.
+pub(crate) fn extras_of(p: mupdf::Page) -> Result<(Vec<(String, [f32; 4])>, Vec<(String, [f32; 4])>)> {
+    let origin = p.bounds()?;
+    let pp = PdfPage::try_from(p)?;
     let rect = |r: mupdf::Rect| [r.x0 - origin.x0, r.y0 - origin.y0, r.x1 - origin.x0, r.y1 - origin.y0];
+    let (mut comments, mut fields) = (Vec::new(), Vec::new());
     for a in pp.annotations() {
         let Ok(t) = a.r#type() else { continue };
         if matches!(t, PdfAnnotationType::Link | PdfAnnotationType::Widget | PdfAnnotationType::Popup | PdfAnnotationType::Redact) {
@@ -494,14 +505,14 @@ pub fn extract_record(doc: &Document, page: u32, extras: bool) -> Result<PageRec
         }
         let Ok(Some(c)) = a.contents() else { continue };
         let Ok(b) = a.bounds() else { continue };
-        rec.comments.push((c.to_string(), rect(b)));
+        comments.push((c.to_string(), rect(b)));
     }
     for w in pp.widgets() {
         let Ok(Some(v)) = w.value() else { continue };
         let Ok(b) = w.annotation().bounds() else { continue };
-        rec.fields.push((v, rect(b)));
+        fields.push((v, rect(b)));
     }
-    Ok(rec)
+    Ok((comments, fields))
 }
 
 impl PageRec {

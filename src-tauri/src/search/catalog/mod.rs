@@ -211,6 +211,43 @@ pub fn load_meta(dir: &Path) -> Result<Meta> {
     Ok(m)
 }
 
+/// What can be read of a catalog whose `catalog.json` is damaged or from another version: a catalog with no
+/// live generation, so it is listed, can be built again (which rewrites the entry) or deleted. `None` when the
+/// folder is not a catalog at all.
+fn unusable_meta(dir: &Path) -> Option<Meta> {
+    let id = dir.file_name()?.to_string_lossy().into_owned();
+    if !valid_id(&id) || !meta_path(dir).is_file() {
+        return None;
+    }
+    let v: serde_json::Value = std::fs::read(meta_path(dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let name: String = text("name").trim().chars().take(80).collect();
+    Some(Meta {
+        version: VERSION,
+        id,
+        name: if name.is_empty() { "Catalog".to_string() } else { name },
+        folder: text("folder"),
+        recursive: v.get("recursive").and_then(|x| x.as_bool()).unwrap_or(true),
+        created: v.get("created").and_then(|x| x.as_u64()).unwrap_or(0),
+        built: 0,
+        generation: 0,
+        files: 0,
+        indexed: 0,
+        pages: 0,
+        damaged: 0,
+        password: 0,
+        cloud_only: 0,
+        cut: 0,
+        capped: false,
+        index_len: 0,
+    })
+}
+
+/// [`load_meta`], or the entry of a catalog that has to be built again.
+fn load_meta_or_unusable(dir: &Path) -> Result<Meta> {
+    load_meta(dir).or_else(|e| unusable_meta(dir).ok_or(e))
+}
+
 fn save_meta(dir: &Path, m: &Meta) -> Result<()> {
     write_atomic(&meta_path(dir), &serde_json::to_vec_pretty(m).map_err(io)?)
 }
@@ -245,14 +282,18 @@ pub fn create(root: &Path, name: &str, folder: &str, recursive: bool) -> Result<
     Ok(m)
 }
 
-/// Every catalog under `root`, oldest first. A folder that is not a catalog is left alone.
+/// Every catalog under `root`, oldest first; one whose entry is unreadable is listed as not built. A folder
+/// that is not a catalog is left alone.
 pub fn list(root: &Path) -> Vec<Meta> {
     let mut out: Vec<Meta> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .filter_map(|e| load_meta(&e.path()).ok().filter(|m| e.file_name().to_string_lossy() == m.id))
+        .filter_map(|e| {
+            let dir = e.path();
+            load_meta(&dir).ok().filter(|m| e.file_name().to_string_lossy() == m.id).or_else(|| unusable_meta(&dir))
+        })
         .collect();
     out.sort_by_key(|m| (m.created, m.id.clone()));
     out
@@ -379,6 +420,13 @@ pub struct Index {
     chunks: Vec<Vec<u8>>,
 }
 
+/// The index file of `generation` when its magic, version and checksum are right (whole file, header first).
+fn checked_index(dir: &Path, generation: u32) -> Option<Vec<u8>> {
+    let b = std::fs::read(index_path(dir, generation)).ok()?;
+    let ok = b.len() >= 44 && &b[..8] == MAGIC && b[8..12] == VERSION.to_le_bytes() && blake3::hash(&b[44..]).as_bytes() == &b[12..44];
+    ok.then_some(b)
+}
+
 fn load_table(dir: &Path, generation: u32) -> Option<Table> {
     let t: Table = serde_json::from_slice(&std::fs::read(table_path(dir, generation)).ok()?).ok()?;
     (t.version == VERSION && t.generation == generation).then_some(t)
@@ -391,14 +439,8 @@ impl Index {
             return None;
         }
         let table = load_table(dir, meta.generation)?;
-        let b = std::fs::read(index_path(dir, meta.generation)).ok()?;
-        if b.len() < 44 || &b[..8] != MAGIC || b[8..12] != VERSION.to_le_bytes() {
-            return None;
-        }
+        let b = checked_index(dir, meta.generation)?;
         let payload = &b[44..];
-        if blake3::hash(payload).as_bytes() != &b[12..44] {
-            return None;
-        }
         let mut pos = 0;
         let n = get_var(payload, &mut pos)? as usize;
         if n > payload.len() {
@@ -508,7 +550,9 @@ fn file_terms(t: &FileText) -> BTreeMap<String, Vec<u32>> {
 
 // ---- reading one file --------------------------------------------------------------------------------------
 
-/// The `/ID` of a document as hex of its first string; empty when it has none.
+/// The `/ID` of a document as hex of its first string; empty when it has none. The second string is left out
+/// on purpose: MuPDF writes a new one on every save, Inkwell's own snapshots included, so an index matched on it
+/// would never be current. What changed is the fingerprint's job (`embed::fingerprint`).
 pub fn pdf_id(doc: &PdfDocument) -> String {
     let first = doc
         .trailer()
@@ -545,7 +589,7 @@ pub fn read_pages(doc: &PdfDocument, cancel: &AtomicBool) -> std::result::Result
     Ok(t)
 }
 
-fn bookmarks_of(doc: &PdfDocument) -> Vec<(u32, String)> {
+pub(super) fn bookmarks_of(doc: &PdfDocument) -> Vec<(u32, String)> {
     fn walk(items: &[mupdf::Outline], out: &mut Vec<(u32, String)>) {
         for o in items {
             if out.len() >= MAX_BOOKMARKS {
@@ -696,6 +740,10 @@ fn worker(sh: &Shared) {
             return;
         }
         let Some(job) = sh.queue.lock().unwrap().pop_front() else { return };
+        #[cfg(test)]
+        if tests::worker_dies_on(&job.path) {
+            panic!("test: the worker dies on this file");
+        }
         let Some(rec) = index_file(sh, &job) else { return };
         sh.done.lock().unwrap()[job.slot] = Some(rec);
         let n = sh.finished.fetch_add(1, Ordering::SeqCst) + 1;
@@ -708,7 +756,7 @@ fn worker(sh: &Shared) {
 /// time and sample, the rest is read again. `progress(done, total)` is called per file, from the build's threads.
 /// Cancelling leaves the live generation as it was.
 pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32, u32) + Sync)) -> Result<Summary> {
-    let mut meta = load_meta(dir)?;
+    let mut meta = load_meta_or_unusable(dir)?;
     let folder = PathBuf::from(&meta.folder);
     if !folder.is_dir() {
         return Err(EngineError::Io(format!("{} is not a folder", folder.display())));
@@ -745,6 +793,8 @@ pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32
     let mut slots: Vec<Option<FileRec>> = Vec::with_capacity(listing.files.len());
     let mut jobs: VecDeque<Job> = VecDeque::new();
     let mut kept_fids: HashSet<u32> = HashSet::new();
+    // Every file that is to be read, to find the ones no worker came back from.
+    let mut planned: Vec<(usize, u32, PathBuf, u64, u64)> = Vec::new();
     for (slot, path) in listing.files.iter().enumerate() {
         let p = path.to_string_lossy().into_owned();
         let Ok(m) = std::fs::metadata(path) else {
@@ -770,6 +820,7 @@ pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32
             } else {
                 sum.added += 1;
             }
+            planned.push((slot, next_fid, path.clone(), size, mtime));
             jobs.push_back(Job { slot, fid: next_fid, path: path.clone(), size, mtime });
             next_fid += 1;
             slots.push(None);
@@ -797,14 +848,14 @@ pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32
         for k in 0..PARALLEL.min(to_read as usize) {
             let sh = &sh;
             let _ = std::thread::Builder::new().name(format!("inkwell-catalog-{k}")).spawn_scoped(s, move || {
-                // A panic in one worker leaves its file without a row; the check below reports it.
+                // A panic in one worker leaves its file without a row; it is given one (damaged) below.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| worker(sh)));
             });
         }
     });
     sum.extracted = sh.extracted.load(Ordering::Relaxed);
     sum.from_embedded = sh.embedded.load(Ordering::Relaxed);
-    let rows = sh.done.into_inner().unwrap();
+    let mut rows = sh.done.into_inner().unwrap();
     let written = sh.written.into_inner().unwrap();
     // A cancelled run commits nothing and leaves no new blobs behind. (A file that vanished while listing has no
     // row; it is simply not in the new table.)
@@ -814,6 +865,22 @@ pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32
         }
         sum.cancelled = true;
         return Ok(sum);
+    }
+    // A file that was to be read and has no row (its worker died) is counted as damaged, not dropped silently.
+    for (slot, fid, path, size, mtime) in planned {
+        if rows[slot].is_none() {
+            rows[slot] = Some(FileRec {
+                fid,
+                path: path.to_string_lossy().into_owned(),
+                size,
+                mtime,
+                head_tail: head_tail(&path, size),
+                pdf_id: String::new(),
+                pages: 0,
+                status: Status::Damaged,
+                cut: false,
+            });
+        }
     }
     let files: Vec<FileRec> = rows.into_iter().flatten().collect();
     let mut postings = sh.postings.into_inner().unwrap();
@@ -885,8 +952,10 @@ impl Stale {
 }
 
 pub fn check(dir: &Path, cancel: &AtomicBool) -> Result<Stale> {
-    let meta = load_meta(dir)?;
-    let Some(table) = load_table(dir, meta.generation).filter(|_| meta.generation > 0) else { return Ok(Stale { unusable: true, ..Default::default() }) };
+    let meta = load_meta_or_unusable(dir)?;
+    // The live generation must be all there and pass its checksum, or a refresh would trust a damaged index.
+    let table = load_table(dir, meta.generation).filter(|_| meta.generation > 0 && checked_index(dir, meta.generation).is_some());
+    let Some(table) = table else { return Ok(Stale { unusable: true, ..Default::default() }) };
     let folder = PathBuf::from(&meta.folder);
     if !folder.is_dir() {
         return Err(EngineError::Io(format!("{} is not a folder", folder.display())));

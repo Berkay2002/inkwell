@@ -55,7 +55,8 @@ format we control and version.
 - Storage: `<app data>/catalogs/<id>/`: `catalog.json` (list entry, written last by rename, so it is the commit),
   `table-<gen>.json` (files: size, mtime, head/tail hash, pages), `index-<gen>.bin` (magic, version, blake3, varint
   postings of space-delimited words in the widest fold), `text/<fid>.zst` (the per-page records the matcher reads).
-  A damaged or foreign-version index is never trusted: `check` reports it `unusable` and a build recreates it.
+  A damaged or foreign-version index (or `catalog.json`) is never trusted: the catalog is listed as not built,
+  `check` reports it `unusable` and a build recreates it. A file whose worker died counts as damaged.
 - Candidate rule: one word must be a substring of a term; several words are first=suffix, middle=exact, last=prefix;
   a query of marks only verifies every page. Hits carry the line's box, not exact character rectangles.
 - Refresh: a file with the same size and mtime is kept without being opened; a moved file is kept by size, mtime and
@@ -65,6 +66,16 @@ format we control and version.
   if the trailer `/ID`, the page count, the version and a fingerprint of page content and annotations all match,
   so a file changed by another tool is read normally. Embedding and removing are one undo step each
   (`index_embed`, `index_unembed`; `index_embedded` reports present/current).
+- An embedded index is untrusted input, like hidden text in the PDF itself: it can claim words that are not
+  visible, and bookmarks on pages the file does not have are dropped. A build checks the dict (`/DocID`, `/Pages`)
+  before decoding the blob, inflates it under a bound, and compares a fingerprint of the page content (page
+  streams, Form XObjects and patterns under the resources to depth 8, `/ToUnicode` maps, comment and field values as
+  the records read them, bookmarks) read under a per-stream and a per-file budget. The second `/ID` string is not
+  part of the match: MuPDF writes a new one on every save, Inkwell's own included.
+- What is removed with the text: redaction and sanitize always drop the embedded index (it is a compressed copy of
+  the page text, which the byte check cannot see inside); deleting pages, editing text, removing attachments or
+  annotations, PDF/A conversion to a new file, Bates numbering with replace, and Compress "strip" drop it unless it
+  still matches the file. Extract, split and combine build new files and carry none.
 - Bounds: 20 MB of text per file (cut and counted), 100 000 pages, 50 000 bookmarks, 96 MB of inflated index.
 - Estimate (before the first build, from a listing): about 25 MB/s on two threads plus 20 ms per file, and an index of
   about 3 % of the PDF bytes plus 2 KB per file. A guess to set expectations, not a promise.

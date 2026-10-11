@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::engine::edit::EditSource;
-use crate::engine::Engine;
+use crate::engine::{Engine, EngineError};
 use crate::search::files::FolderSearches;
 use crate::search::tests::{dir, doc_with, plain, write, Extra};
 use std::sync::atomic::AtomicBool;
@@ -11,6 +11,12 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 const WIN: &str = "main";
+
+/// A worker that is handed this file dies (a panic outside the guarded read), as a failed spawn or an
+/// allocation failure would: the build must count the file, not lose it.
+pub(super) fn worker_dies_on(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == "worker-dies.pdf")
+}
 
 fn no_progress() -> impl Fn(u32, u32) + Sync {
     |_, _| {}
@@ -389,4 +395,184 @@ fn an_embedded_index_of_pages_that_changed_afterwards_is_not_used() {
     assert!(embed::status(&after).present);
     assert!(!embed::status(&after).current);
     assert!(embed::read(&after, n, &id_before).is_none());
+}
+
+
+// ---- review findings -------------------------------------------------------------------------------------
+
+use mupdf::pdf::{PdfDocument, PdfObject};
+
+fn stream_obj(dict: &str, body: &str) -> String {
+    format!("<< {dict} /Length {} >>\nstream\n{body}\nendstream", body.len())
+}
+
+/// A one-page file whose only text is drawn by a Form XObject (`/Fm0 Do`).
+fn form_text_pdf(words: &str) -> Vec<u8> {
+    crate::search::tests::pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /XObject << /Fm0 6 0 R >> >> >>".into(),
+        stream_obj("", "/Fm0 Do"),
+        stream_obj(
+            "/Type /XObject /Subtype /Form /BBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >>",
+            &format!("BT /F1 12 Tf 72 700 Td ({words}) Tj ET"),
+        ),
+    ])
+}
+
+/// Embeds an index in the file at `p` through the engine and saves it.
+fn embed_and_save(p: &Path) {
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&p.to_string_lossy()).unwrap().doc;
+    embed::embed(&eng, id, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+}
+
+fn current(p: &Path) -> bool {
+    embed::status(&PdfDocument::open(p).unwrap()).current
+}
+
+#[test]
+fn text_only_in_a_form_xobject_is_part_of_the_fingerprint() {
+    let base = dir("catalog-fp-form");
+    let p = write(&base, "a.pdf", form_text_pdf("the form words"));
+    embed_and_save(&p);
+    assert!(current(&p));
+    let doc = PdfDocument::open(&*p).unwrap();
+    let t = embed::read(&doc, 1, &pdf_id(&doc)).unwrap();
+    assert!(t.pages[0].text.text.contains("the form words"), "the form's text is in the index");
+    let mut fm = doc.find_page(0).unwrap().get_dict("Resources").unwrap().unwrap().get_dict("XObject").unwrap().unwrap().get_dict("Fm0").unwrap().unwrap();
+    fm.write_stream_string("BT /F1 12 Tf 72 700 Td (the CHANGED words) Tj ET").unwrap();
+    let b = base.join("b.pdf");
+    doc.save(&b.to_string_lossy()).unwrap();
+    assert!(!current(&b), "a change that only the form's stream shows is seen");
+    assert!(embed::read(&PdfDocument::open(&*b).unwrap(), 1, &pdf_id(&doc)).is_none());
+}
+
+#[test]
+fn a_field_value_kept_on_the_parent_is_part_of_the_fingerprint() {
+    let base = dir("catalog-fp-parent");
+    let extra = Extra {
+        catalog: "/AcroForm << /Fields [7 0 R] /DA (/Helv 0 Tf 0 g) >>".into(),
+        annots: "6 0 R".into(),
+        objs: vec![
+            "<< /Type /Annot /Subtype /Widget /Parent 7 0 R /Rect [72 400 300 420] /F 4 /DA (/Helv 12 Tf 0 g) >>".into(),
+            "<< /FT /Tx /T (Clause) /V (original value) /Kids [6 0 R] >>".into(),
+        ],
+    };
+    let p = write(&base, "a.pdf", doc_with(&[vec!["body"]], extra));
+    embed_and_save(&p);
+    let doc = PdfDocument::open(&*p).unwrap();
+    let t = embed::read(&doc, 1, &pdf_id(&doc)).unwrap();
+    assert_eq!(t.pages[0].fields.first().map(|f| f.0.as_str()), Some("original value"));
+    let mut parent = doc.catalog().unwrap().get_dict("AcroForm").unwrap().unwrap().get_dict("Fields").unwrap().unwrap().get_array(0).unwrap().unwrap();
+    parent.dict_put("V", PdfObject::new_string("changed value").unwrap()).unwrap();
+    let b = base.join("b.pdf");
+    doc.save(&b.to_string_lossy()).unwrap();
+    assert!(!current(&b), "a /V changed on the parent field is seen");
+}
+
+#[test]
+fn fingerprinting_is_bounded_and_the_dict_is_checked_before_the_blob() {
+    let base = dir("catalog-fp-bound");
+    let p = write(&base, "a.pdf", form_text_pdf("some words"));
+    let doc = PdfDocument::open(&*p).unwrap();
+    assert!(embed::fingerprint_with(&doc, 1 << 20, 1 << 20).is_some());
+    assert!(embed::fingerprint_with(&doc, 8, 1 << 20).is_none(), "a stream over its cap is not vouched for");
+    assert!(embed::fingerprint_with(&doc, 1 << 20, 40).is_none(), "nor are streams over the file's budget");
+    // A claim for another page count is "out of date" from the dict alone: the blob is garbage here and never read.
+    embed_and_save(&p);
+    let doc = PdfDocument::open(&*p).unwrap();
+    let mut s = doc.catalog().unwrap().get_dict("PieceInfo").unwrap().unwrap().get_dict("Inkwell").unwrap().unwrap().get_dict("Private").unwrap().unwrap();
+    s.dict_put("Pages", PdfObject::new_int(99).unwrap()).unwrap();
+    s.write_stream_string("not an index at all").unwrap();
+    let e = embed::status(&doc);
+    assert_eq!((e.present, e.current, e.pages), (true, false, 99));
+    assert!(embed::read(&doc, 1, &pdf_id(&doc)).is_none());
+}
+
+#[test]
+fn a_damaged_or_old_catalog_entry_is_listed_and_can_be_rebuilt_or_deleted() {
+    let (root, folder) = corpus("meta");
+    let (m, d) = make(&root, &folder);
+    build(&d, true, &AtomicBool::new(false), &no_progress()).unwrap();
+    // Another version: the folder and name survive, the catalog is "not built" and a build brings it back.
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(meta_path(&d)).unwrap()).unwrap();
+    v["version"] = 99.into();
+    std::fs::write(meta_path(&d), serde_json::to_vec(&v).unwrap()).unwrap();
+    let listed = list(&root);
+    assert_eq!(listed.len(), 1);
+    assert_eq!((listed[0].id.as_str(), listed[0].name.as_str(), listed[0].built), (m.id.as_str(), "Test", 0));
+    assert!(check(&d, &AtomicBool::new(false)).unwrap().unusable);
+    let s = build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert!(!s.cancelled && s.files > 20);
+    assert!(load_meta(&d).unwrap().built > 0);
+    assert!(!check(&d, &AtomicBool::new(false)).unwrap().any());
+    // Not JSON at all: still listed (so it can be deleted), nothing to build from.
+    std::fs::write(meta_path(&d), b"{ nope").unwrap();
+    let listed = list(&root);
+    assert_eq!((listed.len(), listed[0].id.as_str()), (1, m.id.as_str()));
+    delete(&root, &m.id).unwrap();
+    assert!(list(&root).is_empty());
+}
+
+#[test]
+fn a_busy_catalog_cannot_be_deleted_and_stays_held_while_it_is() {
+    use super::app::Jobs;
+    let jobs = Jobs::default();
+    let r: crate::engine::Result<()> = jobs.guarded("abc", || {
+        // A build (or another delete) of the same catalog is refused while this one runs.
+        assert!(jobs.guarded("abc", || Ok(())).is_err());
+        assert!(jobs.guarded("other", || Ok(())).is_ok());
+        Ok(())
+    });
+    assert!(r.is_ok());
+    // Released afterwards, also when the work failed.
+    assert!(jobs.guarded("abc", || Err::<(), _>(EngineError::Panic)).is_err());
+    assert!(jobs.guarded("abc", || Ok(())).is_ok());
+}
+
+#[test]
+fn a_worker_that_dies_does_not_lose_its_file() {
+    let base = dir("catalog-worker-dies");
+    let folder = base.join("docs");
+    write(&folder, "a.pdf", plain(&[vec!["alpha notice"]]));
+    write(&folder, "worker-dies.pdf", plain(&[vec!["beta notice"]]));
+    write(&folder, "c.pdf", plain(&[vec!["gamma notice"]]));
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    let s = build(&d, true, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert!(!s.cancelled);
+    assert_eq!((s.files, s.damaged, s.extracted), (3, 1, 2), "{s:?}");
+    let t = load_table(&d, 1).unwrap();
+    let died = t.files.iter().find(|r| r.path.ends_with("worker-dies.pdf")).expect("a row for the file");
+    assert_eq!(died.status, Status::Damaged);
+}
+
+#[test]
+fn a_corrupt_index_shows_as_unusable_before_a_refresh_trusts_it() {
+    let (_, _, d) = built("check-corrupt");
+    assert!(!check(&d, &AtomicBool::new(false)).unwrap().any());
+    let p = index_path(&d, 1);
+    let mut b = std::fs::read(&p).unwrap();
+    let k = b.len() / 2;
+    b[k] ^= 0xff;
+    std::fs::write(&p, &b).unwrap();
+    let st = check(&d, &AtomicBool::new(false)).unwrap();
+    assert!(st.unusable && st.any(), "{st:?}");
+}
+
+#[test]
+fn embedded_bookmarks_that_name_missing_pages_are_dropped() {
+    let base = dir("catalog-bookmark-range");
+    let p = write(&base, "a.pdf", plain(&[vec!["only page"]]));
+    let mut doc = PdfDocument::open(&*p).unwrap();
+    // (A file without /ID gets one when it is embedded; the index is matched by it.)
+    embed::add(&mut doc).unwrap();
+    let mut t = read_pages(&doc, &AtomicBool::new(false)).unwrap();
+    t.bookmarks = vec![(0, "real".into()), (7, "ghost".into()), (u32::MAX, "worse".into())];
+    t.sig = embed::fingerprint(&doc).unwrap();
+    embed::install_for_test(&mut doc, &t);
+    let got = embed::read(&doc, 1, &pdf_id(&doc)).unwrap();
+    assert_eq!(got.bookmarks, vec![(0, "real".to_string())]);
 }

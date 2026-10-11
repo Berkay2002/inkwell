@@ -751,6 +751,8 @@ pub fn convert_to_file(
     let stem = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let (mut d, _) = open_copy(eng, doc)?;
     let applied = fix::apply(&mut d, profile, c, &stem, true, fix::NEW_FILE_HEAD, progress, cancel)?;
+    // What the fixes removed (annotations, files, JavaScript) must not stay in an embedded search index.
+    crate::search::catalog::embed::drop_if_stale(&d).map_err(|e| EngineError::Io(e.to_string()))?;
     let bytes = fix::write_new(&d, profile)?;
     // The check of what was written runs before the file is put in place: a cancel leaves nothing behind.
     let reread = PdfDocument::from_bytes(&bytes)?;

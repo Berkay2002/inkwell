@@ -153,7 +153,7 @@ export interface CatalogMeta {
   folder: string;
   recursive: boolean;
   created: number;
-  /** Unix seconds the live index was built; 0 when it never was. */
+  /** Unix milliseconds the live index was built; 0 when it never was. */
   built: number;
   generation: number;
   files: number;

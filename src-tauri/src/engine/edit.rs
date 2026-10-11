@@ -1235,6 +1235,10 @@ impl Engine {
         let changed = ran.and_then(|c| match c {
             None => Ok(None),
             Some((after, drops)) => {
+                // Deleted pages are not left in the embedded search index either.
+                if drops {
+                    crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
+                }
                 let snap = ed.snapshot()?;
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
@@ -1351,7 +1355,15 @@ impl Engine {
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
         let len = ed.step().snap.len;
-        let ran = catch_unwind(AssertUnwindSafe(|| f(&mut ed.doc.doc))).unwrap_or(Err(EngineError::Panic));
+        let ran = catch_unwind(AssertUnwindSafe(|| {
+            let out = f(&mut ed.doc.doc)?;
+            // An edit that takes content out must not leave it in the embedded search index.
+            if removes || redaction {
+                crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
+            }
+            Ok(out)
+        }))
+        .unwrap_or(Err(EngineError::Panic));
         let changed = ran.and_then(|(pages, bytes)| {
             let exact = bytes.is_some();
             let snap = if let Some(b) = bytes {

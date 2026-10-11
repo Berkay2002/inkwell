@@ -127,5 +127,7 @@ pub(crate) fn strip(doc: &mut PdfDocument, s: &Strip, pages: usize) -> Result<St
             }
         }
     }
+    // Bookmarks, attachments and the like also live in an embedded search index: it goes unless it still matches.
+    crate::search::catalog::embed::drop_if_stale(doc)?;
     Ok(r)
 }

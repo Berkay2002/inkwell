@@ -1,3 +1,4 @@
+import { message } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useFind } from "../../lib/findStore";
 import * as api from "../../lib/api";
@@ -267,6 +268,16 @@ function FolderResults({ query }: { query: string }) {
 
 /** The saved catalogs of the Folder scope: pick one to search it, refresh or delete it, or make a new one. */
 function Catalogs({ disabled }: { disabled: boolean }) {
+  /** Asks first, naming the catalog and how many files its index holds (the PDFs themselves are never touched). */
+  const remove = async (c: api.CatalogMeta) => {
+    const files = `${c.files.toLocaleString("en-US")} ${c.files === 1 ? "file" : "files"}`;
+    const ok = await message(`Delete the catalog “${c.name}”? Its search index of ${files} is removed. The PDFs are not touched.`, {
+      title: "Inkwell",
+      kind: "warning",
+      buttons: { ok: "Delete", cancel: "Cancel" },
+    });
+    if (ok === "Ok" || ok === "Delete") void sr().removeCatalog(c.id);
+  };
   const catalogs = useSearch((s) => s.catalogs);
   const stale = useSearch((s) => s.stale);
   const target = useSearch((s) => s.target);
@@ -291,7 +302,7 @@ function Catalogs({ disabled }: { disabled: boolean }) {
             <button className="ax-icon" title="Refresh" aria-label={`Refresh ${c.name}`} disabled={busy || disabled} onClick={() => void sr().buildCatalog(c.id)}>
               <Icon name="rotate" size={14} />
             </button>
-            <button className="ax-icon" title="Delete" aria-label={`Delete ${c.name}`} disabled={busy || disabled} onClick={() => void sr().removeCatalog(c.id)}>
+            <button className="ax-icon" title="Delete" aria-label={`Delete ${c.name}`} disabled={busy || disabled} onClick={() => void remove(c)}>
               <Icon name="trash" size={14} />
             </button>
           </div>
