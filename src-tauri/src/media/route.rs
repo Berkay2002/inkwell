@@ -13,16 +13,21 @@ pub struct Reply {
     pub body: Vec<u8>,
 }
 
-/// `/m/<doc>/<annotation>.<index>` -> the document and the asset id.
-pub fn parse(path: &str) -> Option<(DocId, String)> {
+/// `/m/<doc>/<token>/<annotation>.<index>` -> the document, the listing token and the asset id.
+pub fn parse(path: &str) -> Option<(DocId, String, String)> {
     let mut parts = path.trim_start_matches('/').split('/');
     if parts.next()? != "m" {
         return None;
     }
     let doc = parts.next()?.parse::<DocId>().ok()?;
+    let token = parts.next()?;
+    // 16 random bytes as lowercase hex
+    if token.len() != 32 || !token.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
+        return None;
+    }
     let id = parts.next()?;
     let ok = id.split_once('.').is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && a.bytes().chain(b.bytes()).all(|c| c.is_ascii_digit()));
-    (ok && parts.next().is_none()).then(|| (doc, id.to_owned()))
+    (ok && parts.next().is_none()).then(|| (doc, token.to_owned(), id.to_owned()))
 }
 
 pub fn text(status: u16, message: &str) -> Reply {
@@ -63,7 +68,8 @@ fn want(header: Option<&str>, len: usize) -> Want {
     Want::Span(start, end.min(len - 1))
 }
 
-/// The response for a request over `data`: 200 whole, 206 for a range (cut to [`CHUNK`]), 416 past the end.
+/// The response for a request over `data`: 200 whole (up to one [`CHUNK`]), 206 for a range or
+/// the first chunk (cut to [`CHUNK`]), 416 past the end.
 pub fn respond(data: &[u8], mime: &str, range: Option<&str>) -> Reply {
     let len = data.len();
     let mut headers = vec![
@@ -74,8 +80,13 @@ pub fn respond(data: &[u8], mime: &str, range: Option<&str>) -> Reply {
         ("X-Content-Type-Options", "nosniff".into()),
     ];
     match want(range, len) {
-        // shortcut: no Range, or several, copies the whole asset (up to the 256 MB decode cap), like Tauri's
-        // asset protocol; upgrade to a streaming body if a player ever asks without a Range.
+        // no usable Range on more than a chunk: the first chunk as a partial reply, never a copy of the
+        // whole asset (Tauri's responder takes a whole body); a media element goes on with ranges
+        Want::All if len > CHUNK => {
+            headers.push(("Content-Range", format!("bytes 0-{}/{len}", CHUNK - 1)));
+            headers.push(("Content-Length", CHUNK.to_string()));
+            Reply { status: 206, headers, body: data[..CHUNK].to_vec() }
+        }
         Want::All => {
             headers.push(("Content-Length", len.to_string()));
             Reply { status: 200, headers, body: data.to_vec() }

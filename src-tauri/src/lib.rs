@@ -915,12 +915,12 @@ pub fn run() {
             }
         })
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
-            // `/m/<doc>/<asset>`: an embedded video or sound of an open document, with byte ranges
-            if let Some((doc, id)) = media::route::parse(request.uri().path()) {
+            // `/m/<doc>/<token>/<asset>`: an embedded video or sound of an open document, with byte ranges
+            if let Some((doc, token, id)) = media::route::parse(request.uri().path()) {
                 let (eng, cache) = (proto_engine.clone(), proto_media.clone());
                 let range = request.headers().get("range").and_then(|v| v.to_str().ok()).map(str::to_owned);
                 tauri::async_runtime::spawn_blocking(move || {
-                    let r = media::serve(&eng, &cache, doc, &id, range.as_deref());
+                    let r = media::serve(&eng, &cache, doc, &token, &id, range.as_deref());
                     let mut b = tauri::http::Response::builder().status(r.status);
                     for (k, v) in r.headers {
                         b = b.header(k, v);

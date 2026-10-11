@@ -3,9 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(() => Promise.resolve()) }));
 
 import { invoke } from "@tauri-apps/api/core";
-import { type MediaItem, badgeText, durationText, formatLabel, infoKey, useMedia } from "./media";
+import { type MediaItem, badgeText, durationText, formatLabel, infoKey, mediaUrl, useMedia } from "./media";
 
 const inv = vi.mocked(invoke);
+const TOKEN = "0123456789abcdef0123456789abcdef";
 
 const item = (xref: number, over: Partial<MediaItem> = {}): MediaItem => ({
   page: 0,
@@ -62,7 +63,7 @@ describe("media store", () => {
   });
 
   it("reads the list once per revision however many pages ask", async () => {
-    inv.mockResolvedValue([item(10)]);
+    inv.mockResolvedValue({ token: TOKEN, items: [item(10)] });
     useMedia.getState().ensure(1, 0);
     useMedia.getState().ensure(1, 0);
     useMedia.getState().ensure(1, 0);
@@ -76,17 +77,31 @@ describe("media store", () => {
     expect(inv.mock.calls.filter((c) => c[0] === "media_list")).toHaveLength(2);
   });
 
-  it("stops what played when an edit takes it away", async () => {
-    useMedia.setState({ docs: { 1: { rev: 0, items: [item(10)] } } });
+  it("keeps the player's address through an edit that keeps the asset", async () => {
+    inv.mockResolvedValue({ token: TOKEN, items: [item(10)] });
+    useMedia.getState().ensure(1, 0);
+    await flush();
+    const url = () => mediaUrl(1, useMedia.getState().docs[1].token, "10.0");
+    const before = url();
+    expect(before).toMatch(/\/m\/1\/0123456789abcdef0123456789abcdef\/10\.0$/);
     useMedia.getState().play(1, item(10));
-    inv.mockResolvedValue([]);
+    useMedia.getState().ensure(1, 1);
+    await flush();
+    expect(url()).toBe(before);
+    expect(useMedia.getState().playing).not.toBeNull();
+  });
+
+  it("stops what played when an edit takes it away", async () => {
+    useMedia.setState({ docs: { 1: { rev: 0, token: TOKEN, items: [item(10)] } } });
+    useMedia.getState().play(1, item(10));
+    inv.mockResolvedValue({ token: TOKEN, items: [] });
     useMedia.getState().ensure(1, 1);
     await flush();
     expect(useMedia.getState().playing).toBeNull();
   });
 
   it("forgets a closed document and stops its player", () => {
-    useMedia.setState({ docs: { 1: { rev: 0, items: [item(10)] }, 2: { rev: 0, items: [] } } });
+    useMedia.setState({ docs: { 1: { rev: 0, token: TOKEN, items: [item(10)] }, 2: { rev: 0, token: TOKEN, items: [] } } });
     useMedia.getState().play(1, item(10));
     useMedia.getState().forget(1);
     expect(useMedia.getState().playing).toBeNull();

@@ -51,15 +51,24 @@ rest of the asset tree). The rendition's own play parameters (autoplay, repeat, 
 
 ## The route
 
-`inkwell://localhost/m/<doc>/<annotation object>.<index>` (`http://inkwell.localhost/m/...` on Windows). The path
-takes only these ids; the handler resolves the annotation in the open document, recomputes its assets and serves the
-one at `<index>` only when it is playable by the same rules as the list. Unknown document, object, index or an asset
-that is not playable answer 404; there is no path or token in the URL.
+`inkwell://localhost/m/<doc>/<token>/<annotation object>.<index>` (`http://inkwell.localhost/m/...` on Windows). The
+path takes only these: a decimal document id, a 32-character lowercase hex token and an id of two decimal numbers.
+`media_list` returns the token with the items; it is minted with the document's first listing, kept while the document
+is open (an edit that keeps the asset keeps the player's address) and unknown to any other run of the app. Each listing
+replaces the set of playable asset ids the route may serve. A request is answered only when the token is the
+document's and the id is in that set; the handler then reads the asset with the same rules as the list and checks the
+bytes again. A wrong token, an id the listing did not return (past its caps, or not playable), an unknown document or
+a closed one answer 404.
 
-- Byte ranges: `a-b`, `a-` and `-n` answer 206 with `Content-Range`; past the end 416; several ranges or bad syntax get
-  the whole body. A ranged answer is cut to 1000 KB (as Tauri's asset protocol), and the player asks again.
+- Byte ranges: `a-b`, `a-` and `-n` answer 206 with `Content-Range`; past the end 416. A ranged answer is cut to
+  1000 KB (as Tauri's asset protocol), and the player asks again. With no usable Range (none, several ranges, bad
+  syntax) a body over 1000 KB gets the first 1000 KB as a 206 (the responder takes a whole body, so a copy of up to
+  256 MB is never made); a smaller one is a 200.
 - The decoded asset is kept in one slot (doc, id, document generation) so a seek does not decode again; `media_release`
-  empties it when the player is removed. Decoding is capped at 256 MB (a compressed stream cannot inflate past it).
+  empties it when the player is removed. Decoding is capped at 256 MB (a compressed stream cannot inflate past it) and
+  happens outside the slot's lock, one at a time, so a release or a cached seek never waits for it.
+- A Screen's renditions are walked with one budget per annotation (2000 selectors and clips, each object once), however
+  many actions name them.
 - CSP: `media-src http://inkwell.localhost/m/ inkwell://localhost/m/` in `csp` and `devCsp`, nothing else new.
 
 ## The UI

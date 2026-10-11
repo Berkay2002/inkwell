@@ -30,6 +30,7 @@ const UNSEEN_MS = 2000;
 export const MediaLayer = memo(function MediaLayer({ docId, page, rev, rot, rawSize, zoom }: Props) {
   useEffect(() => useMedia.getState().ensure(docId, rev), [docId, rev]);
   const items = useMedia((s) => s.docs[docId]?.items ?? EMPTY);
+  const token = useMedia((s) => s.docs[docId]?.token ?? "");
   // an annotation with nothing in it (a LaTeX animation frame, a bare Screen) is listed in the panel only
   const mine = useMemo(() => items.filter((i) => i.page === page && i.assets.length > 0), [items, page]);
   const playing = useMedia((s) => s.playing);
@@ -40,7 +41,7 @@ export const MediaLayer = memo(function MediaLayer({ docId, page, rev, rot, rawS
         const [x0, y0, x1, y1] = rectToScreen(item.rect, rawSize, rot, zoom);
         const live = playing?.doc === docId && playing.xref === item.xref;
         return live ? (
-          <Player key={item.xref} docId={docId} item={item} box={[x0, y0, x1, y1]} asset={playing.asset} />
+          <Player key={item.xref} docId={docId} token={token} item={item} box={[x0, y0, x1, y1]} asset={playing.asset} />
         ) : (
           <Badge key={item.xref} docId={docId} item={item} box={[x0, y0, x1, y1]} />
         );
@@ -73,7 +74,7 @@ function Badge({ docId, item, box }: { docId: number; item: MediaItem; box: Box 
 }
 
 /** The element over the annotation's rect: native controls, no autoplay of its own, no loop. */
-function Player({ docId, item, box, asset }: { docId: number; item: MediaItem; box: Box; asset: string }) {
+function Player({ docId, token, item, box, asset }: { docId: number; token: string; item: MediaItem; box: Box; asset: string }) {
   const a = item.assets.find((x) => x.id === asset);
   const el = useRef<HTMLVideoElement & HTMLAudioElement>(null);
   const audio = a?.element === "audio";
@@ -121,7 +122,7 @@ function Player({ docId, item, box, asset }: { docId: number; item: MediaItem; b
   if (!a) return null;
   const common = {
     ref: el,
-    src: mediaUrl(docId, a.id),
+    src: mediaUrl(docId, token, a.id),
     controls: true,
     preload: "none" as const,
     controlsList: "nodownload",

@@ -35,13 +35,19 @@ export interface MediaItem {
   assets: MediaAsset[];
 }
 
+/** The items, and the token every asset URL of the document carries (kept while the document is open). */
+export interface MediaListing {
+  token: string;
+  items: MediaItem[];
+}
+
 export const mediaApi = {
-  list: (doc: number) => invoke<MediaItem[]>("media_list", { doc }),
+  list: (doc: number) => invoke<MediaListing>("media_list", { doc }),
   release: () => invoke<void>("media_release"),
 };
 
-/** The only address a player is given: an asset of an open document, by id. */
-export const mediaUrl = (doc: number, asset: string) => `${TILE_ORIGIN}/m/${doc}/${asset}`;
+/** The only address a player is given: an asset the last listing of an open document returned, by id. */
+export const mediaUrl = (doc: number, token: string, asset: string) => `${TILE_ORIGIN}/m/${doc}/${token}/${asset}`;
 
 export const KIND_LABEL: Record<MediaKind, string> = {
   richMedia: "Rich media",
@@ -87,6 +93,7 @@ export interface Playing {
 
 interface DocMedia {
   rev: number;
+  token: string;
   items: MediaItem[];
 }
 
@@ -124,10 +131,10 @@ export const useMedia = create<MediaState>((set, get) => ({
     if (s.docs[doc]?.rev === rev || s.loading[doc] === rev) return;
     set({ loading: { ...s.loading, [doc]: rev } });
     mediaApi.list(doc).then(
-      (items) => {
+      ({ token, items }) => {
         if (get().loading[doc] !== rev) return;
         const { [doc]: _, ...loading } = get().loading;
-        set({ docs: { ...get().docs, [doc]: { rev, items } }, loading });
+        set({ docs: { ...get().docs, [doc]: { rev, token, items } }, loading });
         // what is playing went away with an edit (a redaction, a removed page)
         const p = get().playing;
         if (p && p.doc === doc && !items.some((i) => i.xref === p.xref && i.assets.some((a) => a.id === p.asset && a.playable))) get().stop();
@@ -135,7 +142,7 @@ export const useMedia = create<MediaState>((set, get) => ({
       () => {
         if (get().loading[doc] !== rev) return;
         const { [doc]: _, ...loading } = get().loading;
-        set({ loading, docs: { ...get().docs, [doc]: { rev, items: [] } } });
+        set({ loading, docs: { ...get().docs, [doc]: { rev, token: "", items: [] } } });
       },
     );
   },

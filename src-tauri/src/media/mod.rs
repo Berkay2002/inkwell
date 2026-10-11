@@ -11,8 +11,9 @@ use crate::organize::attach::{clean_name, stream_of, strip_invisible};
 use mupdf::pdf::{PdfAnnotationType, PdfDocument, PdfObject};
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod app;
 pub mod route;
@@ -450,14 +451,44 @@ fn is_script_action(a: &PdfObject) -> bool {
     name_of(a, "S").as_deref() == Some("JavaScript") || get(a, "JS").is_some()
 }
 
+/// What one annotation's rendition walk may still visit: the objects seen and a node budget (a
+/// selector may list itself, or fan out wide and deep).
+struct Walk {
+    seen: HashSet<i32>,
+    left: usize,
+}
+
+impl Walk {
+    fn new() -> Walk {
+        Walk { seen: HashSet::new(), left: MAX_TREE_NODES }
+    }
+
+    /// Counts a visit to `o`; false when the budget is spent or the object was visited already.
+    fn visit(&mut self, o: &PdfObject) -> bool {
+        if self.left == 0 {
+            return false;
+        }
+        if let Some(n) = obj_num(o) {
+            if !self.seen.insert(n) {
+                return false;
+            }
+        }
+        self.left -= 1;
+        true
+    }
+}
+
 /// A media clip's data (`/D`): a file specification, a URL, or the media bytes as a stream.
-fn clip(c: &PdfObject, depth: usize, out: &mut Vec<Raw>) {
+fn clip(c: &PdfObject, depth: usize, walk: &mut Walk, out: &mut Vec<Raw>) {
+    if !walk.visit(c) {
+        return;
+    }
     let Some(c) = dict_of(c) else { return };
     let Some(d) = get(&c, "D") else { return };
     // a clip section points at the clip it is cut from
     if name_of(&c, "S").as_deref() == Some("MCS") {
         if depth < 4 {
-            clip(&d, depth + 1, out);
+            clip(&d, depth + 1, walk, out);
         }
         return;
     }
@@ -475,28 +506,28 @@ fn clip(c: &PdfObject, depth: usize, out: &mut Vec<Raw>) {
 }
 
 /// A rendition: a media rendition's clip (best-effort and must-honor too), or a selector's list.
-fn rendition(r: &PdfObject, depth: usize, out: &mut Vec<Raw>) {
-    let Some(r) = dict_of(r) else { return };
-    if depth > 4 {
+fn rendition(r: &PdfObject, depth: usize, walk: &mut Walk, out: &mut Vec<Raw>) {
+    if depth > 4 || !walk.visit(r) {
         return;
     }
+    let Some(r) = dict_of(r) else { return };
     match name_of(&r, "S").as_deref() {
         Some("SR") => {
             if let Some(list) = get(&r, "R").filter(|l| l.is_array().unwrap_or(false)) {
                 for i in 0..list.len().unwrap_or(0).min(MAX_ACTIONS) {
                     if let Some(x) = list.get_array(i as i32).ok().flatten() {
-                        rendition(&x, depth + 1, out);
+                        rendition(&x, depth + 1, walk, out);
                     }
                 }
             }
         }
         _ => {
             if let Some(c) = get(&r, "C") {
-                clip(&c, 0, out);
+                clip(&c, 0, walk, out);
             }
             for k in ["MH", "BE"] {
                 if let Some(c) = get(&r, k).and_then(|v| dict_of(&v)).and_then(|v| get(&v, "C")) {
-                    clip(&c, 0, out);
+                    clip(&c, 0, walk, out);
                 }
             }
         }
@@ -540,10 +571,12 @@ fn collect(annot: &PdfObject, kind: Kind) -> (Vec<Raw>, bool) {
             }
         }
         Kind::Screen => {
+            // one budget for all the actions: each may name the same selector
+            let mut walk = Walk::new();
             for a in actions(annot) {
                 if name_of(&a, "S").as_deref() == Some("Rendition") {
                     if let Some(r) = get(&a, "R") {
-                        rendition(&r, 0, &mut out);
+                        rendition(&r, 0, &mut walk, &mut out);
                     }
                 }
             }
@@ -746,9 +779,33 @@ fn read(doc: &PdfDocument, id: &str) -> Result<Loaded> {
     Ok(Loaded { mime, bytes: Arc::new(bytes) })
 }
 
-/// The one asset kept decoded, so the player's many range requests decode it once.
+/// What [`Cache::list`] answers: the items, and the token the media route wants in every URL.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Listing {
+    pub token: String,
+    pub items: Vec<MediaItem>,
+}
+
+/// What the route may serve of one document: the playable assets its last listing returned.
+struct Listed {
+    /// Minted with the document's first listing and kept, so an edit that keeps the asset does not
+    /// change the player's address (the player would start over).
+    token: String,
+    playable: HashSet<String>,
+}
+
+/// The listings the route serves from, and the one asset kept decoded, so the player's many range
+/// requests decode it once.
 #[derive(Default)]
-pub struct Cache(Mutex<Option<Slot>>);
+pub struct Cache {
+    slot: Mutex<Option<Slot>>,
+    /// One decode at a time. Not `slot`: `clear` (a sync command) and cache hits never wait for one.
+    gate: Mutex<()>,
+    /// Bumped by `clear`: a decode that finished after it is not kept.
+    epoch: AtomicU64,
+    listed: Mutex<HashMap<DocId, Listed>>,
+}
 
 struct Slot {
     doc: DocId,
@@ -758,31 +815,66 @@ struct Slot {
     loaded: Arc<Loaded>,
 }
 
+fn fresh_token() -> String {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("system random source");
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 impl Cache {
     pub fn clear(&self) {
-        *self.0.lock() = None;
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        *self.slot.lock() = None;
     }
 
-    /// The asset's bytes: from the slot, or read from the document (the lock is held while it is
-    /// read, so concurrent range requests do not decode it twice).
+    /// The document's media, and the playable assets the route may serve from now on (the editor
+    /// lock is let go before the listing is recorded).
+    pub fn list(&self, eng: &Engine, doc: DocId) -> Result<Listing> {
+        let items = list_all(eng, doc)?;
+        let playable = items.iter().flat_map(|i| &i.assets).filter(|a| a.playable).map(|a| a.id.clone()).collect();
+        let mut listed = self.listed.lock();
+        let l = listed.entry(doc).or_insert_with(|| Listed { token: fresh_token(), playable: HashSet::new() });
+        l.playable = playable;
+        let token = l.token.clone();
+        // closed documents are let go
+        listed.retain(|d, _| eng.doc_entry(*d).is_ok());
+        Ok(Listing { token, items })
+    }
+
+    fn is_listed(&self, doc: DocId, token: &str, id: &str) -> bool {
+        self.listed.lock().get(&doc).is_some_and(|l| l.token == token && l.playable.contains(id))
+    }
+
+    /// The asset's bytes: from the slot, or read from the document. Concurrent requests for it wait
+    /// on the gate and find it in the slot.
     pub fn get(&self, eng: &Engine, doc: DocId, id: &str) -> Result<Arc<Loaded>> {
         let generation = eng.doc_entry(doc)?.generation();
-        let mut slot = self.0.lock();
-        if let Some(s) = slot.as_ref() {
-            if s.doc == doc && s.id == id && s.generation == generation {
-                return Ok(s.loaded.clone());
-            }
+        let hit = || self.slot.lock().as_ref().filter(|s| s.doc == doc && s.id == id && s.generation == generation).map(|s| s.loaded.clone());
+        if let Some(l) = hit() {
+            return Ok(l);
         }
-        *slot = None;
+        let _gate = self.gate.lock();
+        if let Some(l) = hit() {
+            return Ok(l);
+        }
+        let epoch = self.epoch.load(Ordering::SeqCst);
+        // the old asset goes before the new one is decoded
+        *self.slot.lock() = None;
         let loaded = Arc::new(eng.read_custom(doc, |d| read(d, id))?);
-        *slot = Some(Slot { doc, id: id.to_owned(), generation, loaded: loaded.clone() });
+        let mut slot = self.slot.lock();
+        if self.epoch.load(Ordering::SeqCst) == epoch {
+            *slot = Some(Slot { doc, id: id.to_owned(), generation, loaded: loaded.clone() });
+        }
         Ok(loaded)
     }
 }
 
-/// Answers one request of the media route (`/m/<doc>/<id>`): the bytes with the range asked for.
-/// Only an asset of an open document that [`list`] calls playable is ever served.
-pub fn serve(eng: &Engine, cache: &Cache, doc: DocId, id: &str, range: Option<&str>) -> route::Reply {
+/// Answers one request of the media route (`/m/<doc>/<token>/<id>`): the bytes with the range asked
+/// for. Only a playable asset of the document's last listing, with its token, is ever served.
+pub fn serve(eng: &Engine, cache: &Cache, doc: DocId, token: &str, id: &str, range: Option<&str>) -> route::Reply {
+    if !cache.is_listed(doc, token, id) {
+        return route::text(404, "unknown media");
+    }
     match cache.get(eng, doc, id) {
         Ok(l) => route::respond(&l.bytes, l.mime, range),
         Err(EngineError::Invalid(m)) => route::text(404, &m),

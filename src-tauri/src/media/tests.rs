@@ -196,7 +196,8 @@ fn a_declared_mp4_that_is_a_program_is_not_playable() {
     assert!(e.assets[0].mime.is_none());
     // and the route refuses it by id
     let c = Cache::default();
-    assert_eq!(serve(&eng, &c, id, &e.assets[0].id, None).status, 404);
+    let tok = c.list(&eng, id).unwrap().token;
+    assert_eq!(serve(&eng, &c, id, &tok, &e.assets[0].id, None).status, 404);
 }
 
 #[test]
@@ -228,39 +229,40 @@ fn the_route_serves_byte_ranges_and_refuses_unknown_ids() {
     let items = list_all(&eng, id).unwrap();
     let play = by_kind(&items, Kind::RichMedia).play.clone().unwrap();
     let c = Cache::default();
+    let tok = c.list(&eng, id).unwrap().token;
     let want = {
         let Loaded { bytes, .. } = eng.read_custom(id, |d| read(d, &play)).unwrap();
         bytes
     };
     let header = |r: &route::Reply, k: &str| r.headers.iter().find(|h| h.0 == k).map(|h| h.1.clone());
 
-    let r = serve(&eng, &c, id, &play, None);
+    let r = serve(&eng, &c, id, &tok, &play, None);
     assert_eq!((r.status, header(&r, "Content-Type").as_deref()), (200, Some("video/mp4")));
     assert_eq!(r.body, *want);
     assert_eq!(header(&r, "X-Content-Type-Options").as_deref(), Some("nosniff"));
     assert_eq!(header(&r, "Accept-Ranges").as_deref(), Some("bytes"));
 
-    let r = serve(&eng, &c, id, &play, Some("bytes=10-19"));
+    let r = serve(&eng, &c, id, &tok, &play, Some("bytes=10-19"));
     assert_eq!(r.status, 206);
     assert_eq!(header(&r, "Content-Range"), Some(format!("bytes 10-19/{}", want.len())));
     assert_eq!(r.body, want[10..20]);
 
-    let r = serve(&eng, &c, id, &play, Some("bytes=-8"));
+    let r = serve(&eng, &c, id, &tok, &play, Some("bytes=-8"));
     assert_eq!((r.status, r.body), (206, want[want.len() - 8..].to_vec()));
 
-    let r = serve(&eng, &c, id, &play, Some("bytes=3000-"));
+    let r = serve(&eng, &c, id, &tok, &play, Some("bytes=3000-"));
     assert_eq!(r.status, 206);
     assert_eq!(r.body, want[3000..]);
 
-    let r = serve(&eng, &c, id, &play, Some(&format!("bytes={}-", want.len())));
+    let r = serve(&eng, &c, id, &tok, &play, Some(&format!("bytes={}-", want.len())));
     assert_eq!(r.status, 416);
     assert_eq!(header(&r, "Content-Range"), Some(format!("bytes */{}", want.len())));
 
     // not an asset, not a media object, not playable, not an open document
     for bad in ["999.0", "10.9", "10.1", "10.2", "3.0", "x.y", "0.0", "-5.0"] {
-        assert_eq!(serve(&eng, &c, id, bad, None).status, 404, "{bad}");
+        assert_eq!(serve(&eng, &c, id, &tok, bad, None).status, 404, "{bad}");
     }
-    assert_eq!(serve(&eng, &c, id + 100, &play, None).status, 404);
+    assert_eq!(serve(&eng, &c, id + 100, &tok, &play, None).status, 404);
 }
 
 #[test]
@@ -277,19 +279,33 @@ fn open_ended_ranges_are_cut_to_a_chunk_and_cover_the_file_piece_by_piece() {
         got.extend(r.body);
     }
     assert_eq!(got, data);
-    // several ranges or bad syntax: the whole body
-    assert_eq!(route::respond(&data, "video/mp4", Some("bytes=0-1,5-6")).status, 200);
-    assert_eq!(route::respond(&data, "video/mp4", Some("bytes=9-3")).status, 200);
+    // several ranges, bad syntax or none, on more than a chunk: the first chunk, not a copy of the whole
+    for h in [Some("bytes=0-1,5-6"), Some("bytes=9-3"), None] {
+        let r = route::respond(&data, "video/mp4", h);
+        assert_eq!((r.status, r.body.len()), (206, CHUNK), "{h:?}");
+        assert!(r.headers.iter().any(|(k, v)| *k == "Content-Range" && *v == format!("bytes 0-{}/{}", CHUNK - 1, data.len())));
+    }
+    // within a chunk the whole body is one cheap reply
+    let small = route::respond(&data[..1000], "video/mp4", None);
+    assert_eq!((small.status, small.body.len()), (200, 1000));
     assert_eq!(route::respond(&data, "video/mp4", Some("bytes=-0")).status, 416);
     assert_eq!(route::respond(&[], "video/mp4", Some("bytes=0-")).status, 416);
 }
 
 #[test]
 fn the_route_path_takes_only_ids() {
-    assert_eq!(route::parse("/m/3/10.0"), Some((3, "10.0".into())));
-    for p in ["/t/3/10.0", "/m/3", "/m/3/10", "/m/3/10.0/x", "/m/a/10.0", "/m/3/../10.0", "/m/3/C:/x.mp4", "/m/3/10.0%2e", "/m//10.0", "/m/3/.0"] {
-        assert_eq!(route::parse(p), None, "{p}");
+    let t = "0123456789abcdef0123456789abcdef";
+    assert_eq!(route::parse(&format!("/m/3/{t}/10.0")), Some((3, t.into(), "10.0".into())));
+    let upper = t.to_uppercase();
+    let paths = [
+        "/t/3/T/10.0", "/m/3", "/m/3/T", "/m/3/T/10", "/m/3/T/10.0/x", "/m/a/T/10.0", "/m/3/T/../10.0", "/m/3/T/C:/x.mp4", "/m/3/T/10.0%2e", "/m//T/10.0",
+        "/m/3/T/.0", "/m/3/10.0", "/m/3/short/10.0", "/m/3/0123456789abcdef0123456789abcde/10.0", "/m/3/0123456789abcdef0123456789abcdeg/10.0",
+        "/m/3/0123456789abcdef0123456789abcdef0/10.0",
+    ];
+    for p in paths {
+        assert_eq!(route::parse(&p.replace("/T", &format!("/{t}"))), None, "{p}");
     }
+    assert_eq!(route::parse(&format!("/m/3/{upper}/10.0")), None, "lowercase hex only");
 }
 
 #[test]
@@ -336,8 +352,9 @@ fn listing_and_serving_leave_the_document_alone() {
     let before = (std::fs::read(&path).unwrap(), eng.edit_state(id).unwrap().rev, eng.history(id).unwrap().len());
     let items = list_all(&eng, id).unwrap();
     let c = Cache::default();
+    let tok = c.list(&eng, id).unwrap().token;
     for a in items.iter().flat_map(|i| i.assets.iter()) {
-        let _ = serve(&eng, &c, id, &a.id, Some("bytes=0-99"));
+        let _ = serve(&eng, &c, id, &tok, &a.id, Some("bytes=0-99"));
     }
     let after = (std::fs::read(&path).unwrap(), eng.edit_state(id).unwrap().rev, eng.history(id).unwrap().len());
     assert!(before == after, "file, revision and history are unchanged");
@@ -363,7 +380,8 @@ fn the_sample_file_lists_what_the_windows_check_expects() {
     assert!(!by_kind(&items, Kind::Movie).playable);
     // the route plays the whole mp4: ranges stitch back to the stream
     let cache = Cache::default();
-    let r = serve(&eng, &cache, id, &video.play.clone().unwrap(), Some("bytes=0-"));
+    let tok = cache.list(&eng, id).unwrap().token;
+    let r = serve(&eng, &cache, id, &tok, &video.play.clone().unwrap(), Some("bytes=0-"));
     assert_eq!(r.status, 206);
     assert_eq!(&r.body[4..8], b"ftyp");
 }
@@ -417,4 +435,122 @@ fn a_heif_or_avif_ftyp_is_not_an_mp4() {
     ];
     let (eng, id, _) = open("heif", pdf(&[10], &objs));
     assert!(!list_all(&eng, id).unwrap()[0].playable);
+}
+
+/// A media rendition for the mp3 behind file spec `spec_obj`.
+fn mr(spec_obj: u32) -> Vec<u8> {
+    format!("<< /S /MR /C << /S /MCD /CT (audio/mpeg) /D {spec_obj} 0 R >> >>").into_bytes()
+}
+
+#[test]
+fn a_selector_that_lists_itself_is_walked_once_and_keeps_the_real_rendition() {
+    // 31 self references and one real rendition, named by 32 actions chained with /Next
+    let list: String = (0..31).map(|_| "11 0 R ").collect::<String>() + "15 0 R";
+    let next: String = (0..31).map(|_| "<< /S /Rendition /OP 0 /R 11 0 R >> ").collect();
+    let objs = vec![
+        (10, format!("<< /Type /Annot /Subtype /Screen /Rect [0 0 50 50] /A << /S /Rendition /OP 0 /R 11 0 R /Next [{next}] >> >>").into_bytes()),
+        (11, format!("<< /S /SR /R [{list}] >>").into_bytes()),
+        (15, mr(16)),
+        (16, spec("voice.mp3", 24)),
+        (24, stream("/Type /EmbeddedFile", &mp3())),
+    ];
+    let (eng, id, _) = open("selector-self", pdf(&[10], &objs));
+    let t = std::time::Instant::now();
+    let items = list_all(&eng, id).unwrap();
+    assert!(t.elapsed().as_secs() < 5, "bounded work: {:?}", t.elapsed());
+    assert_eq!(items.len(), 1);
+    assert!(items[0].playable, "{:?}", items[0]);
+    assert_eq!(items[0].assets.len(), 1);
+    // and the route reads the same asset
+    let c = Cache::default();
+    let play = items[0].play.clone().unwrap();
+    let l = c.list(&eng, id).unwrap();
+    assert_eq!(serve(&eng, &c, id, &l.token, &play, Some("bytes=0-9")).status, 206);
+}
+
+#[test]
+fn a_wide_deep_selector_tree_stops_at_the_node_budget() {
+    // 32 x 32 x 32 distinct selectors; the first leaf holds one mp3 rendition, the very last another
+    fn build(level: usize, objs: &mut Vec<(u32, Vec<u8>)>, next: &mut u32, first: &mut bool, last_at: u32) -> u32 {
+        let me = *next;
+        *next += 1;
+        if level == 3 {
+            let body = if *first {
+                *first = false;
+                mr(12)
+            } else if me == last_at {
+                mr(13)
+            } else {
+                b"<< /S /SR /R [] >>".to_vec()
+            };
+            objs.push((me, body));
+            return me;
+        }
+        let kids: Vec<u32> = (0..32).map(|_| build(level + 1, objs, next, first, last_at)).collect();
+        let list: String = kids.iter().map(|k| format!("{k} 0 R ")).collect();
+        objs.push((me, format!("<< /S /SR /R [{list}] >>").into_bytes()));
+        me
+    }
+    let mut objs = Vec::new();
+    // numbered depth first from 100, the root first: the last object is the last leaf
+    let total = 1 + 32 + 32 * 32 + 32 * 32 * 32;
+    let (mut next, mut first) = (100u32, true);
+    let root = build(0, &mut objs, &mut next, &mut first, 100 + total as u32 - 1);
+    assert_eq!(next, 100 + total as u32);
+    objs.push((10, format!("<< /Type /Annot /Subtype /Screen /Rect [0 0 50 50] /A << /S /Rendition /OP 0 /R {root} 0 R >> >>").into_bytes()));
+    objs.push((12, spec("first.mp3", 24)));
+    objs.push((13, spec("last.mp3", 25)));
+    objs.push((24, stream("/Type /EmbeddedFile", &mp3())));
+    objs.push((25, stream("/Type /EmbeddedFile", &mp3())));
+    let (eng, id, _) = open("selector-wide", pdf(&[10], &objs));
+    let t = std::time::Instant::now();
+    let items = list_all(&eng, id).unwrap();
+    assert!(t.elapsed().as_secs() < 10, "bounded work: {:?}", t.elapsed());
+    let names: Vec<&str> = items[0].assets.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["first.mp3"], "the budget ends the walk before the last leaf");
+}
+
+#[test]
+fn the_route_serves_only_what_the_listing_returned_under_its_token() {
+    // MAX_PAGE_ITEMS + 1 movies sharing one file: the last is past the listing's cap, though its bytes would play
+    let n = MAX_PAGE_ITEMS as u32 + 1;
+    let annots: Vec<u32> = (0..n).map(|i| 100 + i).collect();
+    let mut objs: Vec<(u32, Vec<u8>)> = annots.iter().map(|&a| (a, b"<< /Type /Annot /Subtype /Movie /Rect [0 0 20 20] /Movie << /F 11 0 R >> >>".to_vec())).collect();
+    objs.push((11, spec("clip.mp4", 12)));
+    objs.push((12, stream("/Type /EmbeddedFile", &mp4(300))));
+    let (eng, id, _) = open("listed", pdf(&annots, &objs));
+    let c = Cache::default();
+    let l = c.list(&eng, id).unwrap();
+    assert_eq!(l.items.len(), MAX_PAGE_ITEMS);
+    // the first annotation plays; the file spec is listed once, so only the first item has the asset
+    let first = format!("{}.0", l.items[0].xref);
+    assert!(l.items[0].playable);
+    assert_eq!(serve(&eng, &c, id, &l.token, &first, Some("bytes=0-3")).status, 206);
+    // not listed: read() alone would accept it, the listing did not return it
+    let unlisted = format!("{}.0", annots[MAX_PAGE_ITEMS]);
+    assert_eq!(eng.read_custom(id, |d| read(d, &unlisted)).unwrap().mime, "video/mp4");
+    assert_eq!(serve(&eng, &c, id, &l.token, &unlisted, None).status, 404);
+    // a wrong token, none, another document's
+    assert_eq!(serve(&eng, &c, id, "00000000000000000000000000000000", &first, None).status, 404);
+    assert_eq!(serve(&eng, &c, id + 1, &l.token, &first, None).status, 404);
+    // a new listing keeps the token (a player keeps its address through an edit)
+    assert_eq!(c.list(&eng, id).unwrap().token, l.token);
+    assert_eq!(serve(&eng, &c, id, &l.token, &first, Some("bytes=0-3")).status, 206);
+    // another cache (another run of the app) does not know the token
+    assert_eq!(serve(&eng, &Cache::default(), id, &l.token, &first, None).status, 404);
+}
+
+#[test]
+fn concurrent_requests_decode_an_asset_once_and_release_does_not_wait() {
+    let (eng, id, _) = open("concurrent", sample());
+    let c = Arc::new(Cache::default());
+    let l = c.list(&eng, id).unwrap();
+    let play = by_kind(&l.items, Kind::RichMedia).play.clone().unwrap();
+    let got: Vec<Arc<Loaded>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..4).map(|_| s.spawn(|| c.get(&eng, id, &play).unwrap())).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(got.iter().all(|g| Arc::ptr_eq(g, &got[0])), "one decode");
+    c.clear();
+    assert!(c.slot.lock().is_none());
 }
