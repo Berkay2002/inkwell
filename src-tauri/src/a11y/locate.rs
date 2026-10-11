@@ -41,7 +41,7 @@ pub fn annot_box(page: &PdfObject, annot: &PdfObject) -> Result<Option<Box4>> {
     Ok(to_box(bbox_of(&page.page_ctm()?, r)))
 }
 
-fn mcid_of(op: &Op, res: Option<&PdfObject>) -> Result<Option<i32>> {
+pub(super) fn mcid_of(op: &Op, res: Option<&PdfObject>) -> Result<Option<i32>> {
     Ok(match op.operands.get(1) {
         Some(d @ Operand::Dict(_)) => d.get(b"MCID").map(|m| m.num() as i32),
         Some(Operand::Name(n)) => match res {
