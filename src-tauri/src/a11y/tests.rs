@@ -567,6 +567,42 @@ fn autotag_refuses_a_tagged_document_and_undoes_in_one_step() {
 }
 
 #[test]
+fn autotag_leaves_overlapping_runs_unmarked() {
+    // Invalid content: a path is left open across a text object, so the path's artifact run would
+    // start before the text run ends. It is skipped; the text is still tagged.
+    let mut s = Spec::default();
+    s.pages[0].1 = "0 G 72 650 m BT /F1 12 Tf 72 700 Td (Hello accessible world) Tj ET 300 650 l S".into();
+    let path = file("autotag-overlap", &s);
+    let (eng, id) = open(&path);
+    let before = texts(&eng, id);
+    fix_doc(&eng, id, &Fix::Autotag, EditSource::User).unwrap();
+    assert_eq!(texts(&eng, id), before);
+    let r = check_eng(&eng, id);
+    assert_eq!(r.status(Rule::TaggedPdf), Status::Passed);
+    assert_eq!(r.status(Rule::ReadingOrder), Status::Passed, "{:?}", r.result(Rule::ReadingOrder).findings);
+}
+
+#[test]
+fn check_is_cancellable_and_does_not_hold_the_edit_lane() {
+    let s = Spec { pages: (0..3).map(|_| (String::new(), TEXT.to_string())).collect(), ..Spec::default() };
+    let path = file("check-lane", &s);
+    let (eng, id) = open(&path);
+    let e = check_doc(&eng, id, &mut |_| {}, &AtomicBool::new(true)).unwrap_err();
+    assert_eq!(e.to_string(), "cancelled");
+    // Unsaved edits are checked (the published snapshot).
+    fix_doc(&eng, id, &Fix::Language { lang: "de".into() }, EditSource::User).unwrap();
+    assert_eq!(check_eng(&eng, id).status(Rule::PrimaryLanguage), Status::Passed);
+    // A check runs while an edit holds the lane (it would deadlock if it needed the lane).
+    let mut inside = None;
+    let r = eng.apply_custom(id, "probe".into(), EditSource::User, false, |_| {
+        inside = Some(check_eng(&eng, id));
+        Err(EngineError::Invalid("probe only".into()))
+    });
+    assert!(r.is_err());
+    assert_eq!(inside.unwrap().pages, 3);
+}
+
+#[test]
 fn check_reports_progress_per_page() {
     let s = Spec { pages: (0..5).map(|_| (String::new(), TEXT.to_string())).collect(), ..Spec::default() };
     let doc = PdfDocument::from_bytes(&build(&s)).unwrap();

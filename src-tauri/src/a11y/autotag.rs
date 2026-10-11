@@ -228,6 +228,20 @@ fn runs(ops: &[Op], res: Option<&PdfObject>, page_ctm: Matrix, lines: &[Line]) -
     Ok(out)
 }
 
+/// The runs that can be marked: in content order, each starting at or after the end of the one
+/// before, within the stream. Invalid content (a path left open across a text object, say) can
+/// make a run start before an earlier one ends; such a run is left unmarked.
+fn in_order(runs: Vec<Run>, len: usize) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::with_capacity(runs.len());
+    for r in runs {
+        let after = out.last().map_or(0, |l| l.end);
+        if r.start >= after && r.end >= r.start && r.end <= len {
+            out.push(r);
+        }
+    }
+    out
+}
+
 /// A structure element being built.
 struct El {
     ty: String,
@@ -309,7 +323,7 @@ pub fn run(doc: &mut PdfDocument) -> Result<Vec<u32>> {
         let res = page_obj.get_dict_inheritable("Resources")?.filter(|r| r.is_dict().unwrap_or(false));
         let data = page_content(&page_obj)?;
         let ops = content::parse(&data);
-        let runs = runs(&ops, res.as_ref(), page_ctm.clone(), &t.lines)?;
+        let runs = in_order(runs(&ops, res.as_ref(), page_ctm.clone(), &t.lines)?, data.len());
 
         // Blocks to elements.
         let mut pg = Page { els: Vec::new(), top: Vec::new(), owner: Vec::new() };
@@ -401,6 +415,10 @@ pub fn run(doc: &mut PdfDocument) -> Result<Vec<u32>> {
             let mut out = Vec::with_capacity(data.len() + marks.len() * 24);
             let mut at = 0;
             for (s, e, prefix) in &marks {
+                // `in_order` already dropped overlapping runs; never slice backwards.
+                if *s < at || *e < *s || *e > data.len() {
+                    continue;
+                }
                 out.extend_from_slice(&data[at..*s]);
                 out.extend_from_slice(prefix.as_bytes());
                 out.extend_from_slice(&data[*s..*e]);
