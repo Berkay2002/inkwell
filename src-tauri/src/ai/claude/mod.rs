@@ -12,6 +12,7 @@
 
 mod exe;
 mod mcp;
+mod private;
 mod proc;
 #[cfg(test)]
 mod tests;
@@ -105,10 +106,6 @@ struct ActiveTurn {
     /// Tool calls running or waiting for the user: the idle timer pauses while there are any.
     pending: AtomicUsize,
 }
-
-/// Private folder names are unique per process, not per provider: two providers (tests, or a
-/// second window) must never share or delete each other's folder.
-static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 
 struct Running {
     proc: Arc<Proc>,
@@ -552,15 +549,14 @@ impl ClaudeProvider {
         if let Some(why) = self.forced() {
             return Err(Failure::hinted(why, "env"));
         }
-        let dir = std::env::temp_dir().join(format!(
-            "inkwell-claude-{}-{}",
-            std::process::id(),
-            NEXT_DIR.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).map_err(|e| Failure::new(format!("Could not prepare Claude: {e}")))?;
+        // a new folder with a random name that only the owner can enter (see `private.rs`)
+        let dir = private::private_dir_in(&std::env::temp_dir())
+            .map_err(|e| Failure::new(format!("Could not prepare Claude: {e}")))?;
         let handler = self.handler(session);
-        let mcp = McpServer::start(self.tools.clone(), handler)
-            .map_err(|e| Failure::new(format!("Could not start Inkwell's tool server: {e}")))?;
+        let mcp = McpServer::start(self.tools.clone(), handler).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&dir);
+            Failure::new(format!("Could not start Inkwell's tool server: {e}"))
+        })?;
         // the token goes to the child through this file, never through a command line
         let cfg = dir.join("mcp.json");
         let body = json!({ "mcpServers": { "inkwell": {
@@ -568,7 +564,7 @@ impl ClaudeProvider {
             "url": mcp.url(),
             "headers": { "Authorization": format!("Bearer {}", mcp.token) },
         } } });
-        if let Err(e) = std::fs::write(&cfg, serde_json::to_vec(&body).expect("serializable")) {
+        if let Err(e) = private::write_new_private(&cfg, &serde_json::to_vec(&body).expect("serializable")) {
             mcp.stop();
             let _ = std::fs::remove_dir_all(&dir);
             return Err(Failure::new(format!("Could not prepare Claude: {e}")));
