@@ -71,6 +71,11 @@ const PATHS = {
   pushButton: "M3 8h18v8H3ZM8 12h8",
   signature: "M3 16c3-6 4-9 6-9s0 8 2 8 3-4 5-4 2 2 4 2M3 21h18",
   wand: "M15 4v3M13.5 5.5h3M19 11v2M18 12h2M5 20 15 10l-2-2L3 18ZM9 5v2M8 6h2",
+  paperclip: "m21 11-9 9a5.5 5.5 0 0 1-7.8-7.8l9-9a3.7 3.7 0 0 1 5.2 5.2l-9 9a1.8 1.8 0 0 1-2.6-2.6l8.2-8.2",
+  present: "M4 4h16v11H4ZM12 15v5M8 20h8M10.5 7.5l4 2-4 2Z",
+  download: "M12 4v11M7 10.5l5 5 5-5M5 20h14",
+  grip: "M9 5.5v.01M15 5.5v.01M9 12v.01M15 12v.01M9 18.5v.01M15 18.5v.01",
+  hash: "M5 9h14M5 15h14M10 4 8 20M16 4l-2 16",
 };
 
 export type IconName = keyof typeof PATHS;

@@ -688,3 +688,129 @@ export function printStart(job: number, doc: number, settings: PrintSettings, sa
   ch.onmessage = onProgress;
   return invoke<PrintReport>("print_start", { job, doc, settings, saveTo, onProgress: ch });
 }
+
+// ---- combine, attachments, page labels, transitions (src-tauri/src/organize) ----
+
+export interface CombineFile {
+  /** Open token of the PDF. */
+  file: string;
+  /** "1-3, 6, 9-7": in the order written; empty = every page. */
+  range: string;
+  /** Bookmark title; null = the file's name. */
+  title: string | null;
+}
+
+export interface CombineOptions {
+  /** One bookmark per file. */
+  bookmarks: boolean;
+  /** Each file's own bookmarks, kept under its bookmark. */
+  keepOutlines: boolean;
+  /** A contents page in front. */
+  contentsPage: boolean;
+}
+
+export type CombineFileState = "ready" | "encrypted" | "noCopy" | "unreadable" | "badRange";
+
+export interface CombineFilePlan {
+  name: string;
+  title: string;
+  state: { state: CombineFileState };
+  message: string | null;
+  pages: number;
+  used: number;
+  hasOutline: boolean;
+  hasFields: boolean;
+}
+
+export interface CombinePlan {
+  files: CombineFilePlan[];
+  pages: number;
+  contentsPages: number;
+  bookmarks: number;
+  leftOut: number;
+  canRun: boolean;
+  /** "Combines 4 files, 37 pages, 4 bookmarks". */
+  summary: string;
+}
+
+export interface Combined {
+  file: FileRef;
+  plan: CombinePlan;
+}
+
+export const combineInspect = (files: CombineFile[], options: CombineOptions) =>
+  invoke<CombinePlan>("combine_inspect", { files, options });
+/** `out`: a save token from `pickSave`. */
+export const combineRun = (files: CombineFile[], options: CombineOptions, out: string) =>
+  invoke<Combined>("combine_run", { files, options, out });
+
+export interface Attachment {
+  /** `n:<name>` for a document-level file, `a:<object>` for a page annotation. */
+  id: string;
+  name: string;
+  description: string;
+  size: number;
+  mime: string | null;
+  kind: "file" | "annotation";
+  /** 0-based page of an annotation. */
+  page: number | null;
+  hasData: boolean;
+  isPdf: boolean;
+}
+
+/** Open dialog for any files to attach. */
+export const pickAttachments = () => invoke<FileRef[]>("pick_attachments");
+export const attachmentsList = (doc: number) => invoke<Attachment[]>("attachments_list", { doc });
+export const attachmentsAdd = (doc: number, files: string[], description?: string) =>
+  invoke<EditState>("attachments_add", { doc, files, description: description ?? null });
+/** `to`: a save token (`pickSave` with kind "any"). Writes the bytes, never runs the file. Resolves to the path. */
+export const attachmentSave = (doc: number, id: string, to: string) => invoke<string>("attachment_save", { doc, id, to });
+/** A PDF attachment as an open token (scratch copy); open it with `store.openPath(path, token, true)`. */
+export const attachmentOpen = (doc: number, id: string) => invoke<FileRef>("attachment_open", { doc, id });
+export const attachmentsRemove = (doc: number, ids: string[]) => invoke<EditState>("attachments_remove", { doc, ids });
+export const attachmentDescribe = (doc: number, id: string, text: string) =>
+  invoke<EditState>("attachment_describe", { doc, id, text });
+
+export type LabelStyle = "none" | "decimal" | "upperRoman" | "lowerRoman" | "upperAlpha" | "lowerAlpha";
+
+export interface LabelRange {
+  /** 0-based first page of the section. */
+  page: number;
+  style: LabelStyle;
+  prefix: string;
+  start: number;
+}
+
+export interface LabelsDto {
+  ranges: LabelRange[];
+  /** One label per page; empty when the document has no page labels. */
+  labels: string[];
+}
+
+export const labelsList = (doc: number) => invoke<LabelsDto>("labels_list", { doc });
+/** Labels pages `from..=to` (0-based). `extend`: carry on the numbering of the section before. */
+export const labelsSet = (doc: number, from: number, to: number, style: LabelStyle, prefix: string, start: number, extend: boolean) =>
+  invoke<EditState>("labels_set", { doc, from, to, style, prefix, start, extend });
+export const labelsRemove = (doc: number) => invoke<EditState>("labels_remove", { doc });
+
+export type TransStyle = "split" | "blinds" | "box" | "wipe" | "dissolve" | "glitter" | "r" | "fly" | "push" | "cover" | "uncover" | "fade";
+
+export interface Transition {
+  style: TransStyle;
+  /** Seconds the effect takes. */
+  duration: number;
+  dimension: "H" | "V" | null;
+  motion: "I" | "O" | null;
+  /** 0, 90, 180, 270 or 315. */
+  direction: number | null;
+}
+
+export interface PageTrans {
+  transition: Transition | null;
+  /** Seconds before full screen moves on by itself. */
+  autoAdvance: number | null;
+}
+
+export const transitionsList = (doc: number) => invoke<PageTrans[]>("transitions_list", { doc });
+export const transitionsSet = (doc: number, pages: number[], change: PageTrans) =>
+  invoke<EditState>("transitions_set", { doc, pages, change });

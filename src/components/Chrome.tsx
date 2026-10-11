@@ -7,7 +7,8 @@ import { useConvert } from "../lib/convertStore";
 import { useMarks } from "../lib/marksStore";
 import { useProtect } from "../lib/protectStore";
 import { useTools } from "../lib/toolsStore";
-import { type DocState, type Theme, useStore } from "../store";
+import { pageOfLabel, useSheets } from "../lib/organizePlus";
+import { type DocState, pageLabel, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
 import { HistoryToggle, openCompareSetup } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
@@ -165,6 +166,7 @@ function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => s
     <>
       <Btn icon="sidebar" title={`Toggle sidebar${keys("sidebar")}`} on={sidebar !== "none"} onClick={() => st().toggleSidebar("thumbs")} />
       <Btn icon="outline" title="Outline" on={sidebar === "outline"} onClick={() => st().toggleSidebar("outline")} />
+      <Btn icon="paperclip" title="Attachments" on={sidebar === "attachments"} onClick={() => st().toggleSidebar("attachments")} />
       <span className="sep" />
       <PageBox doc={doc} />
       <span className="sep" />
@@ -191,32 +193,37 @@ function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => s
       </select>
       <Btn icon="plus" title={`Zoom in${keys("zoom-in")}`} onClick={() => st().setZoom(id, stepZoom(doc.zoom, 1))} />
       <Btn icon="rotate" title={`Rotate${keys("rotate-cw")}`} onClick={() => st().rotate(id, 1)} />
+      <Btn icon="present" title={`Full screen${keys("present")}`} onClick={() => useSheets.getState().openPresent(id, doc.currentPage)} />
     </>
   );
 }
 
 function PageBox({ doc }: { doc: DocState }) {
-  const [text, setText] = useState(String(doc.currentPage + 1));
+  // With page labels the box shows and takes the label ("iii"); without them, the page number.
+  const labelled = doc.labels.length > 0;
+  const [text, setText] = useState(pageLabel(doc, doc.currentPage));
   const editing = useRef(false);
   useEffect(() => {
-    if (!editing.current) setText(String(doc.currentPage + 1));
-  }, [doc.currentPage, doc.id]);
+    if (!editing.current) setText(pageLabel(doc, doc.currentPage));
+  }, [doc.currentPage, doc.id, doc.labels]);
   const go = () => {
-    const n = parseInt(text, 10);
+    const byLabel = pageOfLabel(doc.labels, text);
+    const n = byLabel != null ? byLabel + 1 : parseInt(text, 10);
     if (Number.isFinite(n)) st().goTo(doc.id, n - 1);
     editing.current = false;
-    setText(String(Math.min(Math.max(n || 1, 1), doc.pageCount)));
+    setText(pageLabel(doc, Math.min(Math.max(n || 1, 1), doc.pageCount) - 1));
   };
   return (
     <div className="pagebox">
       <input
         id="page-input"
+        style={labelled ? { width: 68 } : undefined}
         value={text}
         inputMode="numeric"
         onFocus={() => (editing.current = true)}
         onBlur={() => {
           editing.current = false;
-          setText(String(doc.currentPage + 1));
+          setText(pageLabel(doc, doc.currentPage));
         }}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
@@ -226,7 +233,7 @@ function PageBox({ doc }: { doc: DocState }) {
           } else if (e.key === "Escape") (e.target as HTMLInputElement).blur();
         }}
       />
-      <span className="dim">/ {doc.pageCount}</span>
+      <span className="dim">{labelled ? `(${doc.currentPage + 1} of ${doc.pageCount})` : `/ ${doc.pageCount}`}</span>
     </div>
   );
 }

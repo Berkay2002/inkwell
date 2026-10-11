@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import * as edits from "../lib/edit";
+import { useSheets } from "../lib/organizePlus";
 import { formatRange } from "../lib/pageRange";
 import { useTools } from "../lib/toolsStore";
 import type { DocState } from "../store";
@@ -25,6 +26,11 @@ export function pageActions(
     {
       label: pages.length > 1 ? `Recognize text on pages ${formatRange(pages)}…` : "Recognize text on this page…",
       onSelect: () => useTools.getState().open("ocr", id, { scope: "range", range: formatRange(pages) }),
+    },
+    { label: "Page labels…", onSelect: () => useSheets.getState().openLabels(id, pages[0], last) },
+    {
+      label: pages.length > 1 ? `Transitions for pages ${formatRange(pages)}…` : "Page transition…",
+      onSelect: () => useSheets.getState().openTrans(id, pages),
     },
     "sep",
     {

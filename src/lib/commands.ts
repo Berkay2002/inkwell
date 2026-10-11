@@ -16,6 +16,7 @@ import { useProtect } from "./protectStore";
 import { usePrint } from "./printStore";
 import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
+import { useSheets } from "./organizePlus";
 
 export interface Command {
   id: string;
@@ -110,7 +111,36 @@ export const commands: Command[] = [
   },
   { id: "extract-page", title: "Extract this page…", needsDoc: true, run: withDoc((d) => void edits.extract(d.id, [d.currentPage])) },
   { id: "split", title: "Split into single pages", needsDoc: true, run: withDoc((d) => void edits.split(d.id, 1)) },
-  { id: "merge", title: "Merge files…", run: () => void edits.mergeFiles() },
+  { id: "merge", title: "Combine files…", run: () => edits.combineFiles() },
+  {
+    id: "page-labels",
+    title: "Page labels…",
+    needsDoc: true,
+    run: withDoc((d) => useSheets.getState().openLabels(d.id, d.currentPage, d.currentPage)),
+  },
+  {
+    id: "page-transitions",
+    title: "Page transitions…",
+    needsDoc: true,
+    run: withDoc((d) => useSheets.getState().openTrans(d.id, [d.currentPage])),
+  },
+  {
+    id: "present",
+    title: "Full screen",
+    keys: ["Ctrl+L"],
+    needsDoc: true,
+    run: withDoc((d) => {
+      const s = useSheets.getState();
+      if (s.present) s.closePresent();
+      else s.openPresent(d.id, d.currentPage);
+    }),
+  },
+  {
+    id: "attachments",
+    title: "Attachments",
+    needsDoc: true,
+    run: () => st().setSidebar("attachments"),
+  },
   { id: "compress", title: "Compress file…", needsDoc: true, run: () => useTools.getState().open("compress") },
   { id: "ocr", title: "Recognize text (OCR)…", needsDoc: true, run: () => useTools.getState().open("ocr") },
   {

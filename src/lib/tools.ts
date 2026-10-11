@@ -1,6 +1,7 @@
 import type { IconName } from "../components/Icons";
 import { useStore } from "../store";
 import { type FileRef, pickOpen } from "./api";
+import { useCombine } from "./combineStore";
 import { useConvert } from "./convertStore";
 import { useProtect } from "./protectStore";
 import { useTools } from "./toolsStore";
@@ -16,7 +17,7 @@ export const quickTools: { id: ToolId; label: string; icon: IconName }[] = [
   { id: "ocr", label: "OCR", icon: "ocr" },
   { id: "compress", label: "Compress", icon: "compress" },
   { id: "protect", label: "Protect", icon: "lock" },
-  { id: "merge", label: "Merge", icon: "merge" },
+  { id: "merge", label: "Combine", icon: "merge" },
   { id: "export", label: "Export", icon: "share" },
   { id: "create", label: "Create PDF", icon: "filePlus" },
 ];
@@ -46,6 +47,8 @@ toolHandlers.export = async (f) => {
 export async function launchTool(id: ToolId) {
   // Create needs no document: its rail opens on Home.
   if (id === "create") return useConvert.getState().openCreate();
+  // Combine picks its own files, in its own sheet.
+  if (id === "merge") return useCombine.getState().open();
   const [f] = await pickOpen(false);
   if (!f) return;
   await (toolHandlers[id] ?? ((f: FileRef) => useStore.getState().openPath(f.path, f.token)))(f);
