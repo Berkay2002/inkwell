@@ -9,6 +9,7 @@ pub mod engine;
 pub mod history;
 pub mod history_ipc;
 pub mod ocr;
+pub mod organize;
 pub mod paths;
 pub mod print;
 pub mod protect;
@@ -836,6 +837,20 @@ pub fn run() {
             forms::app::forms_tab_order,
             forms::app::forms_arrange,
             forms::app::forms_detect,
+            organize::app::combine_inspect,
+            organize::app::combine_run,
+            organize::app::pick_attachments,
+            organize::app::attachments_list,
+            organize::app::attachments_add,
+            organize::app::attachment_save,
+            organize::app::attachment_open,
+            organize::app::attachments_remove,
+            organize::app::attachment_describe,
+            organize::app::labels_list,
+            organize::app::labels_set,
+            organize::app::labels_remove,
+            organize::app::transitions_list,
+            organize::app::transitions_set,
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,

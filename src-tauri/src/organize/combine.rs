@@ -1,0 +1,524 @@
+//! Combine files: PDFs (each with its own page range) become one new PDF, with a bookmark per file,
+//! each file's own outline kept under it, an optional contents page, and form fields kept (a field
+//! whose name is taken is renamed "name (2)" as Acrobat does).
+//!
+//! [`inspect`] and [`run`] share one preparation, so what the sheet predicts ("Combines 4 files,
+//! 37 pages, 4 bookmarks") is what the run writes. Files that cannot be taken (password protected,
+//! no copying allowed, unreadable) are left out with a reason; they never stop the others.
+//!
+//! The result is written to a new file; no open document is touched.
+
+use super::{Result, bad};
+use crate::engine::edit::{OutNode, RawOut, Readback, graft_pages_ex, open_source, page_size, read_outline, rewrite_opts, write_atomic, write_doc};
+use crate::engine::{Engine, EngineError};
+use mupdf::pdf::{PdfDocument, PdfObject};
+use mupdf::{Font, Size};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// One file of the combination, in the order it comes. `path` is resolved from a token by the caller.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSpec {
+    pub path: String,
+    /// "1-3, 6, 9-7" (1-based, in the order written); none or empty: every page.
+    #[serde(default)]
+    pub range: String,
+    /// The bookmark's title; none: the file's name without .pdf.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CombineOptions {
+    /// One bookmark per file, at its first page.
+    pub bookmarks: bool,
+    /// Each file's own bookmarks, kept (under its bookmark when there is one).
+    pub keep_outlines: bool,
+    /// A contents page in front, one line per file with its page number and a link.
+    pub contents_page: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum FileState {
+    /// Goes into the result.
+    Ready,
+    /// Needs a password: left out.
+    Encrypted,
+    /// The owner allows no copying or page changes: left out.
+    NoCopy,
+    /// Not a readable PDF: left out.
+    Unreadable,
+    /// The range does not fit the file: the run is refused until it is fixed.
+    BadRange,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePlan {
+    pub name: String,
+    pub title: String,
+    pub state: FileState,
+    /// Why it is not Ready.
+    pub message: Option<String>,
+    /// Pages of the file.
+    pub pages: u32,
+    /// Pages that go into the result.
+    pub used: u32,
+    pub has_outline: bool,
+    pub has_fields: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Plan {
+    pub files: Vec<FilePlan>,
+    /// Pages of the result (the contents pages included).
+    pub pages: u32,
+    pub contents_pages: u32,
+    pub bookmarks: u32,
+    pub left_out: u32,
+    pub can_run: bool,
+    /// "Combines 4 files, 37 pages, 4 bookmarks".
+    pub summary: String,
+}
+
+/// What a run wrote.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Report {
+    pub plan: Plan,
+    pub path: String,
+}
+
+/// A file that is going in.
+struct Source {
+    doc: PdfDocument,
+    pages: Vec<u32>,
+    title: String,
+    outline: Vec<RawOut>,
+}
+
+const TOC_SIZE: f32 = 12.0;
+const TOC_LEADING: f32 = 22.0;
+const TOC_MARGIN: f32 = 72.0;
+const TOC_HEAD: f32 = 56.0;
+
+fn plural(n: u32, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+fn count_nodes(n: &[RawOut]) -> u32 {
+    n.iter().map(|o| 1 + count_nodes(&o.children)).sum()
+}
+
+fn out_nodes(n: &[OutNode]) -> u32 {
+    n.iter().map(|o| 1 + out_nodes(&o.children)).sum()
+}
+
+fn file_name(p: &str) -> String {
+    Path::new(p).file_name().map_or_else(|| p.to_string(), |f| f.to_string_lossy().into_owned())
+}
+
+fn stem(p: &str) -> String {
+    let n = file_name(p);
+    n.strip_suffix(".pdf").or_else(|| n.strip_suffix(".PDF")).map_or(n.clone(), str::to_string)
+}
+
+/// "1-3, 6, 9-7": 1-based, in the order written, a backwards range reads backwards, "5-" runs to the
+/// end. Empty: every page.
+pub fn parse_order(text: &str, count: u32, name: &str) -> Result<Vec<u32>> {
+    if text.trim().is_empty() || text.trim().eq_ignore_ascii_case("all") {
+        return Ok((0..count).collect());
+    }
+    let out_of = |p: u32| bad(format!("Page {p} is not in {name}, which has {}", plural(count, "page", "pages")));
+    let mut out = Vec::new();
+    for part in text.split([',', ';']) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let num = |s: &str| s.trim().parse::<u32>().map_err(|_| bad(format!("“{part}” is not a page range. Write it like 1-3, 6, 9-7.")));
+        let (a, b) = match part.split_once('-') {
+            Some((a, b)) if b.trim().is_empty() => (num(a)?, count),
+            Some((a, b)) => (num(a)?, num(b)?),
+            None => {
+                let n = num(part)?;
+                (n, n)
+            }
+        };
+        for p in [a, b] {
+            if p < 1 || p > count {
+                return Err(out_of(p));
+            }
+        }
+        if a <= b {
+            out.extend((a - 1)..b);
+        } else {
+            out.extend(((b - 1)..a).rev());
+        }
+    }
+    if out.is_empty() {
+        return Err(bad("the page range is empty"));
+    }
+    Ok(out)
+}
+
+/// Lines of a contents page of height `h`.
+fn toc_per_page(h: f32) -> usize {
+    (((h - 2.0 * TOC_MARGIN - TOC_HEAD) / TOC_LEADING).floor() as usize).max(1)
+}
+
+/// The page size of the contents pages: the first page's, unless that is too small to hold a list.
+fn toc_size(first: [f32; 2]) -> (f32, f32) {
+    if first[0] >= 300.0 && first[1] >= 400.0 { (first[0], first[1]) } else { (612.0, 792.0) }
+}
+
+/// Opens every file and decides what happens to it.
+fn prepare(specs: &[SourceSpec], opt: CombineOptions) -> Result<(Plan, Vec<Option<Source>>)> {
+    if specs.is_empty() {
+        return Err(bad("add at least one file to combine"));
+    }
+    let _ = mupdf::Context::get();
+    let mut files = Vec::new();
+    let mut sources: Vec<Option<Source>> = Vec::new();
+    for s in specs {
+        let name = file_name(&s.path);
+        let title = s.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| stem(&s.path));
+        let mut plan = FilePlan { name: name.clone(), title: title.clone(), state: FileState::Ready, message: None, pages: 0, used: 0, has_outline: false, has_fields: false };
+        let opened = open_source(&s.path, None);
+        let src = match opened {
+            Ok(d) => d,
+            Err(e) => {
+                let (state, message) = match e {
+                    EngineError::NeedsPassword | EngineError::BadPassword => {
+                        (FileState::Encrypted, format!("{name} is password protected, so it is left out."))
+                    }
+                    e => (FileState::Unreadable, format!("{name} could not be read ({e}), so it is left out.")),
+                };
+                plan.state = state;
+                plan.message = Some(message);
+                files.push(plan);
+                sources.push(None);
+                continue;
+            }
+        };
+        if !crate::protect::Rights::from_p(src.permissions().bits() as i32).may_extract() {
+            plan.state = FileState::NoCopy;
+            plan.message = Some(format!("{name} doesn't allow copying or page changes, so it is left out."));
+            files.push(plan);
+            sources.push(None);
+            continue;
+        }
+        let count = src.page_count()?.max(0) as u32;
+        plan.pages = count;
+        let outline = if opt.bookmarks || opt.keep_outlines { read_outline(&src)? } else { Vec::new() };
+        plan.has_outline = src.catalog()?.get_dict("Outlines")?.is_some_and(|o| !o.is_null().unwrap_or(true) && o.get_dict("First").ok().flatten().is_some());
+        plan.has_fields = src.catalog()?.get_dict("AcroForm")?.and_then(|f| f.get_dict("Fields").ok().flatten()).is_some_and(|f| f.len().unwrap_or(0) > 0);
+        match parse_order(&s.range, count, &name) {
+            Ok(pages) => {
+                plan.used = pages.len() as u32;
+                files.push(plan);
+                sources.push(Some(Source { doc: src, pages, title, outline }));
+            }
+            Err(e) => {
+                plan.state = FileState::BadRange;
+                plan.message = Some(e.to_string());
+                files.push(plan);
+                sources.push(None);
+            }
+        }
+    }
+
+    let ready: Vec<&Source> = sources.iter().flatten().collect();
+    let body: u32 = ready.iter().map(|s| s.pages.len() as u32).sum();
+    let toc_pages = match (opt.contents_page, ready.first()) {
+        (true, Some(first)) => {
+            let sz = page_size(&first.doc, first.pages[0])?;
+            ready.len().div_ceil(toc_per_page(toc_size(sz).1)) as u32
+        }
+        _ => 0,
+    };
+    let nested: u32 = if opt.keep_outlines { ready.iter().map(|s| count_nodes(&s.outline)).sum() } else { 0 };
+    let per_file = if opt.bookmarks { ready.len() as u32 } else { 0 };
+    // A "Contents" bookmark leads the list when there are bookmarks and a contents page.
+    let lead = u32::from(toc_pages > 0 && per_file + nested > 0);
+    let bookmarks = per_file + nested + lead;
+    let left_out = files.iter().filter(|f| matches!(f.state, FileState::Encrypted | FileState::NoCopy | FileState::Unreadable)).count() as u32;
+    let bad_range = files.iter().any(|f| f.state == FileState::BadRange);
+    let can_run = !ready.is_empty() && !bad_range;
+    let pages = body + toc_pages;
+    let mut summary = format!("Combines {}, {}", plural(ready.len() as u32, "file", "files"), plural(pages, "page", "pages"));
+    if bookmarks > 0 {
+        summary.push_str(&format!(", {}", plural(bookmarks, "bookmark", "bookmarks")));
+    }
+    if toc_pages > 0 {
+        summary.push_str(&format!(", {}", if toc_pages == 1 { "a contents page".to_string() } else { format!("{toc_pages} contents pages") }));
+    }
+    if left_out > 0 {
+        summary.push_str(&format!(". {} left out", plural(left_out, "file is", "files are")));
+    }
+    if ready.is_empty() {
+        summary = "Nothing to combine: every file is left out".into();
+    }
+    Ok((Plan { files, pages, contents_pages: toc_pages, bookmarks, left_out, can_run, summary }, sources))
+}
+
+/// What a run would do, without writing anything.
+pub fn inspect(specs: &[SourceSpec], opt: CombineOptions) -> Result<Plan> {
+    prepare(specs, opt).map(|(p, _)| p)
+}
+
+// ---- writing the result ------------------------------------------------------------------------
+
+/// A destination at the top of `page`, zoom left as it is.
+fn page_dest(doc: &PdfDocument, page: &PdfObject) -> Result<PdfObject> {
+    let mut d = doc.new_array()?;
+    d.array_push(page.clone())?;
+    d.array_push(PdfObject::new_name("XYZ")?)?;
+    for _ in 0..3 {
+        d.array_push(PdfObject::new_null())?;
+    }
+    Ok(d)
+}
+
+fn bookmark_node(title: &str, dest: Option<PdfObject>, children: Vec<OutNode>) -> OutNode {
+    OutNode { title: title.to_string(), dest, uri: None, open: false, children }
+}
+
+/// Writes `nodes` as the document's /Outlines; returns the number of items.
+fn write_outline(doc: &mut PdfDocument, nodes: &[OutNode]) -> Result<()> {
+    if nodes.is_empty() {
+        return Ok(());
+    }
+    let root = doc.new_dict()?;
+    let mut root = doc.add_object(&root)?;
+    root.dict_put("Type", PdfObject::new_name("Outlines")?)?;
+    if let Some((first, last, count)) = outline_level(doc, &root, nodes)? {
+        root.dict_put("First", first)?;
+        root.dict_put("Last", last)?;
+        root.dict_put("Count", PdfObject::new_int(count)?)?;
+    }
+    let mut catalog = doc.catalog()?;
+    catalog.dict_put("Outlines", root)?;
+    catalog.dict_put("PageMode", PdfObject::new_name("UseOutlines")?)?;
+    Ok(())
+}
+
+/// One level of items under `parent`: first, last, and how many are visible.
+fn outline_level(doc: &mut PdfDocument, parent: &PdfObject, nodes: &[OutNode]) -> Result<Option<(PdfObject, PdfObject, i32)>> {
+    let mut refs: Vec<PdfObject> = Vec::new();
+    let mut visible = 0i32;
+    for n in nodes {
+        let mut d = doc.new_dict()?;
+        d.dict_put("Title", PdfObject::new_string(&n.title)?)?;
+        d.dict_put("Parent", parent.clone())?;
+        if let Some(dest) = &n.dest {
+            d.dict_put("Dest", dest.clone())?;
+        } else if let Some(u) = &n.uri {
+            let mut a = doc.new_dict()?;
+            a.dict_put("S", PdfObject::new_name("URI")?)?;
+            a.dict_put("URI", PdfObject::new_string(u)?)?;
+            d.dict_put("A", a)?;
+        }
+        let mut item = doc.add_object(&d)?;
+        visible += 1;
+        if let Some((first, last, count)) = outline_level(doc, &item, &n.children)? {
+            item.dict_put("First", first)?;
+            item.dict_put("Last", last)?;
+            item.dict_put("Count", PdfObject::new_int(if n.open { count } else { -count })?)?;
+            if n.open {
+                visible += count;
+            }
+        }
+        refs.push(item);
+    }
+    for i in 0..refs.len() {
+        if i > 0 {
+            let prev = refs[i - 1].clone();
+            refs[i].dict_put("Prev", prev)?;
+        }
+        if i + 1 < refs.len() {
+            let next = refs[i + 1].clone();
+            refs[i].dict_put("Next", next)?;
+        }
+    }
+    Ok(match (refs.first(), refs.last()) {
+        (Some(f), Some(l)) => Some((f.clone(), l.clone(), visible)),
+        _ => None,
+    })
+}
+
+/// Helvetica as an embedded font, for the contents pages: every character it has.
+struct Face {
+    font: Font,
+}
+
+impl Face {
+    fn gid(&self, c: char) -> u16 {
+        let g = self.font.encode_character(c as i32).unwrap_or(0);
+        if g > 0 { g as u16 } else { self.font.encode_character('?' as i32).unwrap_or(0).max(0) as u16 }
+    }
+
+    fn width(&self, s: &str, size: f32) -> f32 {
+        s.chars().map(|c| self.font.advance_glyph(self.gid(c) as i32).unwrap_or(0.5)).sum::<f32>() * size
+    }
+
+    fn hex(&self, s: &str) -> String {
+        s.chars().filter(|c| !c.is_control()).map(|c| format!("{:04x}", self.gid(c))).collect()
+    }
+
+    /// `s` cut with an ellipsis to fit `max` points.
+    fn fit(&self, s: &str, size: f32, max: f32) -> String {
+        if self.width(s, size) <= max {
+            return s.to_string();
+        }
+        let mut t: String = s.chars().collect();
+        while !t.is_empty() && self.width(&format!("{t}…"), size) > max {
+            t.pop();
+        }
+        format!("{t}…")
+    }
+}
+
+/// Contents pages in front of the document: one line per `(title, destination page, number)`.
+fn write_contents(doc: &mut PdfDocument, entries: &[(String, PdfObject, u32)], (w, h): (f32, f32)) -> Result<u32> {
+    let face = Face { font: Font::new("Helvetica")? };
+    let font_obj = doc.add_font(&face.font)?;
+    let per = toc_per_page(h);
+    let mut made = 0u32;
+    for (n, chunk) in entries.chunks(per).enumerate() {
+        let mut c = String::new();
+        if n == 0 {
+            c.push_str(&format!("BT /F1 20 Tf {TOC_MARGIN} {:.2} Td <{}> Tj ET\n", h - TOC_MARGIN - 20.0, face.hex("Contents")));
+        }
+        let mut links = doc.new_array()?;
+        let mut y = h - TOC_MARGIN - TOC_HEAD;
+        for (title, dest, number) in chunk {
+            let num = number.to_string();
+            let numw = face.width(&num, TOC_SIZE);
+            let room = w - 2.0 * TOC_MARGIN - numw - 24.0;
+            let shown = face.fit(title, TOC_SIZE, room);
+            let tw = face.width(&shown, TOC_SIZE);
+            c.push_str(&format!("BT /F1 {TOC_SIZE} Tf {TOC_MARGIN} {y:.2} Td <{}> Tj ET\n", face.hex(&shown)));
+            c.push_str(&format!("BT /F1 {TOC_SIZE} Tf {:.2} {y:.2} Td <{}> Tj ET\n", w - TOC_MARGIN - numw, face.hex(&num)));
+            let (x0, x1) = (TOC_MARGIN + tw + 8.0, w - TOC_MARGIN - numw - 8.0);
+            if x1 > x0 {
+                c.push_str(&format!("q 0.6 G 0.8 w 1 J [0.1 4] 0 d {x0:.2} {:.2} m {x1:.2} {:.2} l S Q\n", y + 2.0, y + 2.0));
+            }
+            let mut link = doc.new_dict()?;
+            link.dict_put("Type", PdfObject::new_name("Annot")?)?;
+            link.dict_put("Subtype", PdfObject::new_name("Link")?)?;
+            let mut rect = doc.new_array()?;
+            for v in [TOC_MARGIN, y - 5.0, w - TOC_MARGIN, y + TOC_SIZE + 3.0] {
+                rect.array_push(PdfObject::new_real(v)?)?;
+            }
+            link.dict_put("Rect", rect)?;
+            let mut border = doc.new_array()?;
+            for _ in 0..3 {
+                border.array_push(PdfObject::new_int(0)?)?;
+            }
+            link.dict_put("Border", border)?;
+            link.dict_put("Dest", page_dest(doc, dest)?)?;
+            links.array_push(doc.add_object(&link)?)?;
+            y -= TOC_LEADING;
+        }
+        let mut page = doc.new_page_at(n as i32, Size::new(w, h))?;
+        let mut fonts = doc.new_dict()?;
+        fonts.dict_put("F1", font_obj.clone())?;
+        let mut res = doc.new_dict()?;
+        res.dict_put("Font", fonts)?;
+        let mut obj = page.object();
+        obj.dict_put("Resources", res)?;
+        obj.dict_put("Annots", links)?;
+        page.insert_contents(doc, c.as_bytes(), true)?;
+        made += 1;
+    }
+    Ok(made)
+}
+
+/// Combines the files into a new PDF at `out` (replacing it) and reports what it holds.
+pub fn run(eng: &Engine, specs: &[SourceSpec], opt: CombineOptions, out: &str) -> Result<Report> {
+    eng.check_not_open(out, None)?;
+    let (plan, sources) = prepare(specs, opt)?;
+    if let Some(f) = plan.files.iter().find(|f| f.state == FileState::BadRange) {
+        return Err(bad(f.message.clone().unwrap_or_else(|| "a page range does not fit its file".into())));
+    }
+    if !plan.can_run {
+        return Err(bad(match plan.files.iter().find_map(|f| f.message.clone()) {
+            Some(m) if plan.files.len() == 1 => m,
+            _ => "Every file is left out (password protected, no copying allowed or unreadable), so there is nothing to combine.".into(),
+        }));
+    }
+    let ready: Vec<&Source> = sources.iter().flatten().collect();
+    let mut dst = PdfDocument::new();
+    let mut tops: Vec<PdfObject> = Vec::new();
+    let mut kept: Vec<Vec<OutNode>> = Vec::new();
+    for s in &ready {
+        let at = dst.page_count()?;
+        let g = graft_pages_ex(&mut dst, &s.doc, &s.pages, at, opt.keep_outlines)?;
+        tops.push(g.pages[0].clone());
+        kept.push(g.outline);
+    }
+    // Contents pages go in front; the page numbers they show count them.
+    let first = page_size(&ready[0].doc, ready[0].pages[0])?;
+    let mut toc_dest: Option<PdfObject> = None;
+    if opt.contents_page {
+        let toc_pages = plan.contents_pages;
+        let mut entries = Vec::new();
+        let mut at = toc_pages;
+        for (s, top) in ready.iter().zip(&tops) {
+            entries.push((s.title.clone(), top.clone(), at + 1));
+            at += s.pages.len() as u32;
+        }
+        let made = write_contents(&mut dst, &entries, toc_size(first))?;
+        debug_assert_eq!(made, toc_pages);
+        if made > 0 {
+            toc_dest = Some(page_dest(&dst, &dst.find_page(0)?)?);
+        }
+    }
+    // Bookmarks.
+    let mut top_nodes: Vec<OutNode> = Vec::new();
+    for ((s, top), nested) in ready.iter().zip(&tops).zip(kept) {
+        let nested = if opt.keep_outlines { nested } else { Vec::new() };
+        if opt.bookmarks {
+            top_nodes.push(bookmark_node(&s.title, Some(page_dest(&dst, top)?), nested));
+        } else {
+            top_nodes.extend(nested);
+        }
+    }
+    if !top_nodes.is_empty() {
+        if let Some(d) = toc_dest {
+            top_nodes.insert(0, bookmark_node("Contents", Some(d), Vec::new()));
+        }
+    }
+    debug_assert_eq!(out_nodes(&top_nodes), plan.bookmarks);
+    write_outline(&mut dst, &top_nodes)?;
+
+    let total = dst.page_count()?.max(0) as u32;
+    let bytes = write_doc(&dst, rewrite_opts(), 1 << 20)?;
+    drop(dst);
+    drop(sources);
+    write_atomic(Path::new(out), &bytes, total, Readback::default())?;
+    Ok(Report { plan, path: out.to_string() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranges_keep_their_order_and_say_what_is_wrong() {
+        assert_eq!(parse_order("", 4, "a.pdf").unwrap(), [0, 1, 2, 3]);
+        assert_eq!(parse_order("1-2, 4", 4, "a.pdf").unwrap(), [0, 1, 3]);
+        assert_eq!(parse_order("3-1, 4", 4, "a.pdf").unwrap(), [2, 1, 0, 3]);
+        assert_eq!(parse_order("3-", 5, "a.pdf").unwrap(), [2, 3, 4]);
+        assert_eq!(parse_order("2, 2", 5, "a.pdf").unwrap(), [1, 1]);
+        let e = parse_order("1, 9", 4, "a.pdf").unwrap_err().to_string();
+        assert!(e.contains("Page 9") && e.contains("a.pdf") && e.contains("4 pages"), "{e}");
+        assert!(parse_order("x", 4, "a.pdf").is_err());
+        assert!(parse_order("0", 4, "a.pdf").is_err());
+    }
+}

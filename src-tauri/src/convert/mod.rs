@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::Serialize;
 
-pub use create::{create, discard_scratch, CreateOutput, CreateRequest, CreateSource, ImageInput, PageSize, TextInput};
+pub use create::{create, discard_scratch, write_scratch_bytes, CreateOutput, CreateRequest, CreateSource, ImageInput, PageSize, TextInput};
 pub use export::{export, ExportKind, ExportOutput, ExportRequest, ImageFormat, Target};
 
 // ---------------------------------------------------------------- errors, progress
