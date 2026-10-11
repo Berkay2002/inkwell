@@ -129,6 +129,7 @@ export function FieldProps({ doc, f, all }: { doc: number; f: Field; all: Field[
         </button>
       </h3>
 
+      {f.script && <p className="dim small">This field has a script Inkwell keeps but does not run.</p>}
       <Text label={f.kind === "radio" ? "Group name" : "Name"} value={f.name} onCommit={(name) => set({ name })} />
       <Text label="Tooltip" value={f.tooltip} onCommit={(tooltip) => set({ tooltip })} />
       {tick && <Text label={f.kind === "radio" ? "Choice value" : "Export value"} value={f.export} onCommit={(v) => set({ export: v })} />}

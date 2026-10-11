@@ -179,7 +179,7 @@ export function FormsPanel({ doc }: { doc: DocState }) {
             <section key={page}>
               <h3 className="fm-page">Page {page + 1}</h3>
               {items.map((f) => (
-                <Row key={f.xref} f={f} all={fields} active={d?.selected?.page === f.page && d.selected.xref === f.xref} onOpen={() => go(f)} />
+                <Row key={f.xref} f={f} all={fields} follow={!authoring} active={d?.selected?.page === f.page && d.selected.xref === f.xref} onOpen={() => go(f)} />
               ))}
             </section>
           ))}
@@ -189,11 +189,12 @@ export function FormsPanel({ doc }: { doc: DocState }) {
   );
 }
 
-function Row({ f, all, active, onOpen }: { f: Field; all: Field[]; active: boolean; onOpen: () => void }) {
+function Row({ f, all, active, follow, onOpen }: { f: Field; all: Field[]; active: boolean; follow: boolean; onOpen: () => void }) {
   const ref = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    if (active) ref.current?.scrollIntoView({ block: "nearest" });
-  }, [active]);
+    // While preparing, the properties above the list stay in view; only the fill list follows the page.
+    if (active && follow) ref.current?.scrollIntoView({ block: "nearest" });
+  }, [active, follow]);
   const val = summary(f, all);
   return (
     <button ref={ref} className={`fm-row${active ? " on" : ""}`} onClick={onOpen} title={KIND_LABEL[f.kind]}>

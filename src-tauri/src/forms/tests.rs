@@ -433,15 +433,43 @@ fn the_study_form_lists_fills_and_round_trips() {
     let (eng, id, path) = open_bytes("study-form", bytes);
     let before = list_all(&eng, id).unwrap();
     assert!(!before.fields.is_empty());
+    let steps = eng.history(id).unwrap().len();
     let mut filled = 0;
     for f in before.fields.iter().filter(|f| f.kind == FieldKind::Text && !f.read_only) {
         set_value_one(&eng, id, f.page, f.xref, &text("Alex"), EditSource::User).unwrap();
         filled += 1;
     }
     assert!(filled > 0);
+    let combo = before.fields.iter().find(|f| f.kind == FieldKind::Combo).expect("a drop-down");
+    let choice = combo.options.last().unwrap().export.clone();
+    set_value_one(&eng, id, combo.page, combo.xref, &text(&choice), EditSource::User).unwrap();
+    let boxed = before.fields.iter().find(|f| f.kind == FieldKind::Checkbox).expect("a check box");
+    set_value_one(&eng, id, boxed.page, boxed.xref, &FieldValue::Checked(true), EditSource::User).unwrap();
+    let radios: Vec<&FieldDto> = before.fields.iter().filter(|f| f.kind == FieldKind::Radio).collect();
+    set_value_one(&eng, id, radios[1].page, radios[1].xref, &FieldValue::Checked(true), EditSource::User).unwrap();
+    assert_eq!(eng.history(id).unwrap().len(), steps + filled + 3, "one step per fill");
+
+    // Radio export values are decoded for display (pdfTeX writes them as escaped UTF-16).
+    assert!(radios.iter().all(|r| !r.export.contains('\u{5c}')), "{:?}", radios.iter().map(|r| &r.export).collect::<Vec<_>>());
+
     eng.save(id, None).unwrap();
     let (eng2, id2) = reopen(&path);
     let after = list_all(&eng2, id2).unwrap();
     assert_eq!(after.fields.len(), before.fields.len());
     assert!(after.fields.iter().filter(|f| f.kind == FieldKind::Text && !f.read_only).all(|f| f.value == "Alex"));
+    assert_eq!(after.fields.iter().find(|f| f.kind == FieldKind::Combo).unwrap().values, vec![choice]);
+    assert!(after.fields.iter().find(|f| f.kind == FieldKind::Checkbox).unwrap().checked);
+    let r: Vec<bool> = after.fields.iter().filter(|f| f.kind == FieldKind::Radio).map(|f| f.checked).collect();
+    assert_eq!(r, vec![false, true]);
+}
+
+#[test]
+fn pdftex_export_names_are_shown_decoded() {
+    let bs = '\u{5c}';
+    let name = |tail: &str| format!("{bs}376{bs}377{tail}");
+    assert_eq!(shown_name(&name(&format!("{bs}000e"))), "e");
+    assert_eq!(shown_name(&name(&format!("{bs}000P{bs}000r{bs}000o"))), "Pro");
+    assert_eq!(shown_name("Yes"), "Yes");
+    let odd = name(&format!("{bs}000"));
+    assert_eq!(shown_name(&odd), odd);
 }

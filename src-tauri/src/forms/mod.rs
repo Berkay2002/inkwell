@@ -306,6 +306,34 @@ fn options_of(o: &PdfObject) -> Vec<Opt> {
         .collect()
 }
 
+/// An on-state name as shown. pdfTeX writes non-ASCII export values as the literal characters
+/// backslash, 376, backslash, 377, backslash, 000, "e" ... (an escaped UTF-16BE string, backslashes
+/// included) inside the name.
+pub(crate) fn shown_name(n: &str) -> String {
+    const BS: char = '\u{5c}';
+    let Some(rest) = n.strip_prefix(&format!("{BS}376{BS}377")) else { return n.to_string() };
+    let mut bytes = Vec::new();
+    let mut it = rest.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == BS {
+            let oct: String = (0..3).filter_map(|_| it.next_if(|d| ('0'..='7').contains(d))).collect();
+            match u8::from_str_radix(&oct, 8) {
+                Ok(b) => bytes.push(b),
+                Err(_) => return n.to_string(),
+            }
+        } else if c.is_ascii() {
+            bytes.push(c as u8);
+        } else {
+            return n.to_string();
+        }
+    }
+    if bytes.len() % 2 != 0 {
+        return n.to_string();
+    }
+    let units: Vec<u16> = bytes.chunks(2).map(|p| u16::from_be_bytes([p[0], p[1]])).collect();
+    String::from_utf16(&units).unwrap_or_else(|_| n.to_string())
+}
+
 /// The state name a check box or radio button turns on to: the `/AP /N` key that is not `Off`.
 pub(crate) fn on_state(w: &PdfObject) -> Option<String> {
     let n = w.get_dict("AP").ok().flatten()?.get_dict("N").ok().flatten()?;
@@ -425,7 +453,7 @@ fn dto_of(e: &Entry) -> FieldDto {
         values,
         default_value: values_of(geti(&e.field, "DV")).into_iter().next().unwrap_or_default(),
         checked,
-        export,
+        export: shown_name(&export),
         options: options_of(o),
         read_only: flag(ff, FieldFlags::READ_ONLY),
         required: flag(ff, FieldFlags::REQUIRED),

@@ -153,6 +153,12 @@ select.fm-w option {
 .fm-h.s { left: 50%; top: 100%; cursor: ns-resize; }
 .fm-h.sw { left: 0; top: 100%; cursor: nesw-resize; }
 .fm-h.w { left: 0; top: 50%; cursor: ew-resize; }
+.fm-pred {
+  position: absolute;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--diff-add) 14%, transparent);
+  outline: calc(1.5px / var(--z, 1)) dashed var(--diff-add);
+}
 .fm-draft {
   position: absolute;
   background: color-mix(in srgb, var(--accent) 16%, transparent);

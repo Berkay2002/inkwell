@@ -40,6 +40,7 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
   const highlight = useForms((s) => s.highlight);
   const tool = useForms((s) => s.tool);
   const selected = useForms((s) => s.docs[docId]?.selected ?? null);
+  const predicted = useForms((s) => (s.docs[docId]?.detectPage === page ? s.docs[docId]?.detected : null));
   const space = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [draft, setDraft] = useState<{ a: Pt; b: Pt } | null>(null);
@@ -107,6 +108,9 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
           {tool === "select" && (
             <div className="fm-bg" style={{ width: rawSize[0], height: rawSize[1] }} onPointerDown={() => fm().select(docId, null)} />
           )}
+          {predicted?.map((d, i) => (
+            <div key={`p${i}`} className={`fm-pred k-${d.kind}`} style={style(d.rect)} title={`Would add: ${d.name}`} />
+          ))}
           {mine.map((f) => {
             const on = selected?.page === f.page && selected.xref === f.xref;
             const r = drag && drag.xref === f.xref ? drag.rect : f.rect;
@@ -281,8 +285,12 @@ function TextEditor({ f, className, label, locked, onCommit, onChange }: {
     maxLength: f.maxLen > 0 ? f.maxLen : undefined,
     style: comb,
     onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      setV(e.target.value);
+      const typed = e.target.value;
+      setV(typed);
       onChange();
+      // Picking an entry from the list commits at once; typing waits for the field to lose focus.
+      const pick = f.kind === "combo" ? f.options.find((o) => o.export === typed || o.label === typed) : undefined;
+      if (pick && pick.export !== f.value) void onCommit(pick.export);
     },
     onBlur: () => {
       if (v !== f.value) void onCommit(v);
