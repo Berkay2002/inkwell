@@ -123,6 +123,12 @@ export function cleanIds(v: unknown, max: number): string[] {
   return [...new Set(v.filter((x): x is string => typeof x === "string"))].slice(0, max);
 }
 
+/** `ids` without the ones that are not in `known` (a tool another build renamed or removed): no ghost pins or chips. */
+export function pruneIds(ids: string[], known: Iterable<string>): string[] {
+  const ok = new Set(known);
+  return ids.filter((id) => ok.has(id));
+}
+
 /** The items for ids, in that order; ids that are not tools (a tool another branch removed) are skipped. */
 export function pick(items: ToolItem[], ids: string[]): ToolItem[] {
   return ids.flatMap((id) => items.find((i) => i.id === id) ?? []);

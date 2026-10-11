@@ -72,7 +72,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
    it is reopened at the removed operator's line and position. Everything else in the stream is copied byte for
    byte. An earlier edit's own object (`q [cm] /TouchUp_TextEdit MP BT … ET Q`) whose text all goes is removed,
    its `Tf` and colour included; a wrapper with a `cm` (a move, an added box's placement) stays and the new block is
-   set inside it, so the block keeps its place and `q` nesting does not grow with each edit. Changed streams become new Flate streams (a content stream may be shared with another page); the page's
+   set inside it, so the block keeps its place and `q` nesting does not grow with each edit. Moving such a block
+   again changes that wrapper's `cm` (the move folded into it) instead of adding another `q cm`. Changed streams become new Flate streams (a content stream may be shared with another page); the page's
    `/Contents` points at them.
 4. **Fonts.** A run's font is kept for every character it has a code (reverse ToUnicode/encoding) and a glyph for:
    a code with a zero width is missing, and for a subset simple font the embedded program (loaded by MuPDF) must have
@@ -130,6 +131,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
   at the box's edge; a `TJ` gap read as a space keeps its exact width (the saved `TJ` numbers add up to the source's).
 - CJK-only text is reported and embedded as the CJK face alone (no empty Noto Sans subset). Characters sharing a
   glyph (〜 and ～, Ω and Ω) read back as typed after save/reopen. Korean without spaces wraps into the width.
+- A block moved 40 times and an added box moved 30 times end where the moves add up to, with `q` nesting of at
+  most 3 in the saved content.
 - A moved block and an added text box keep their position when edited again (also after save/reopen); 12 pt text
   under a 48 pt run clears it.
 - Editing a block again and again leaves only the fonts its content uses: one `IwEd`, one `IwNoto`, one CJK subset in

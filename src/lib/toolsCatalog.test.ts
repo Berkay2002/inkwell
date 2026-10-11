@@ -8,6 +8,7 @@ import {
   filterTools,
   groupTools,
   pick,
+  pruneIds,
   pushRecent,
   searchTools,
   togglePin,
@@ -34,7 +35,7 @@ const items: ToolItem[] = [
   mk("bates", "Bates numbering", "marks", "Number pages for legal filings", "legal numbers page numbers court prefix"),
   mk("protect", "Protect with a password", "protect", "Require a password to open the file", "encrypt lock secure password open"),
   mk("export", "Export", "convert", "Save as Word, images, text and more", "save as word docx image jpg png text html convert"),
-  mk("compare", "Compare files", "check", "Highlight the differences between two PDFs", "diff differences changes versions side by side"),
+  mk("compare", "Compare files", "check", "Compare this file with another file or an earlier version", "diff differences changes versions side by side"),
 ];
 const ids = (r: ToolItem[]) => r.map((i) => i.id);
 
@@ -124,6 +125,10 @@ describe("recent and pinned lists", () => {
     expect(cleanIds(["a", 3, "a", "b", null, "c", "d"], 3)).toEqual(["a", "b", "c"]);
     expect(cleanIds("nope", 3)).toEqual([]);
     expect(cleanIds(undefined, 3)).toEqual([]);
+  });
+  it("prunes ids that are not tools any more", () => {
+    expect(pruneIds(["gone", "bates", "compress", "old"], items.map((i) => i.id))).toEqual(["bates", "compress"]);
+    expect(pruneIds([], ["a"])).toEqual([]);
   });
   it("picks items in id order and skips ids that are not tools", () => {
     expect(ids(pick(items, ["bates", "gone", "compress"]))).toEqual(["bates", "compress"]);

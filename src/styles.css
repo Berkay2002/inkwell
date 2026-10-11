@@ -241,8 +241,11 @@ select {
 }
 .pagebox {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 4px;
+  /* "/ 91" stays on the line when the toolbar is squeezed */
+  white-space: nowrap;
 }
 .pagebox input {
   /* the width is set inline in ch from the page count (pageBoxCh): a compact box like "1 / 91" */

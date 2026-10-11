@@ -2,9 +2,11 @@ import { openA11y } from "./a11y";
 import { openCompareSetup } from "../components/history/HistoryPanel";
 import { type DocState, useStore } from "../store";
 import { pickOpen } from "./api";
+import { keyOf } from "./recent";
 import { useConvert } from "./convertStore";
 import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
+import { useSearch } from "./searchStore";
 import { type ToolItem } from "./toolsCatalog";
 import { useToolPrefs } from "./toolPrefs";
 import { useTools } from "./toolsStore";
@@ -134,8 +136,8 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
       group: "check",
       icon: "swap",
       label: "Compare files",
-      description: "Highlight the differences between two PDFs",
-      detail: "Pick two files and see what was added, removed or changed between them.",
+      description: "Compare this file with another file or an earlier version",
+      detail: "Compare this file with another file or with one of its earlier versions, and see what was added, removed or changed.",
       keywords: "diff differences changes versions side by side",
       command: "compare-files",
       onSelect: () => void openCompareSetup(doc ?? undefined),
@@ -150,6 +152,17 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
       keywords: "accessible tagged ada wcag screen reader pdf/ua alt text",
       command: "a11y",
       onSelect: openA11y,
+    },
+    {
+      id: "search-advanced",
+      group: "check",
+      icon: "search",
+      label: "Advanced search",
+      description: "Find words across this file or a whole folder",
+      detail: "Search with options in this file, or across a whole folder or PDFs you pick, and jump to each hit.",
+      keywords: "find search options folder files history across",
+      command: "search-advanced",
+      onSelect: () => useSearch.getState().setOpen(true),
     },
   ];
 }
@@ -173,11 +186,40 @@ export async function launchToolFromHome(toolId: string) {
   if (!doc && !NO_DOC.has(toolId)) {
     const [f] = await pickOpen(false);
     if (!f) return;
+    const before = new Set(Object.keys(s.docs));
     await s.openPath(f.path, f.token);
-    const now = useStore.getState();
-    doc = now.active != null ? now.docs[now.active] : undefined;
-    if (!doc) return; // a password prompt or an error is showing instead
+    doc = await openedDoc(f.path, before);
+    if (!doc) return; // cancelled, or the open error / password prompt is showing instead
   }
   const item = toolItems(doc ?? null).find((i) => i.id === toolId);
   if (item) runTool(item);
+}
+
+/**
+ * The document `openPath` made for `path` (or already had open), not whatever happens to be active. A locked
+ * file shows the password dialog: wait for it, and run on the file once it opens. Cancelling gives undefined.
+ */
+async function openedDoc(path: string, before: Set<string>): Promise<DocState | undefined> {
+  const key = keyOf(path);
+  const find = () => {
+    const docs = Object.values(useStore.getState().docs);
+    // Rust may spell the path differently: a document that was not there before counts as the one just opened
+    return docs.find((d) => keyOf(d.path) === key) ?? docs.find((d) => !before.has(String(d.id)));
+  };
+  const now = find();
+  if (now) return now;
+  if (!useStore.getState().password) {
+    // the open failed: say so rather than doing nothing (openPath sets its own error for a thrown one)
+    if (!useStore.getState().error) useStore.setState({ error: `Could not open ${path.split(/[\\/]/).pop() ?? path}` });
+    return undefined;
+  }
+  return new Promise((resolve) => {
+    const off = useStore.subscribe((st) => {
+      const d = find();
+      if (d || !st.password) {
+        off();
+        resolve(d);
+      }
+    });
+  });
 }

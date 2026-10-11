@@ -193,6 +193,15 @@
   color: var(--text-2);
 }
 
+/* The toolbar does not wrap and the window can be as narrow as 720px. Three pins add about 100px to a row that is
+   already about 1130px wide, so below this the pins would only push the right-hand buttons off screen; every pinned
+   tool is still in the panel. Two classes: .tb-cluster (display: contents) comes later in styles.css. */
+@media (max-width: 1240px) {
+  .tb-cluster.pinned-tools {
+    display: none;
+  }
+}
+
 /* Office-style card after hovering or focusing a row for a moment */
 .tool-card {
   position: fixed;

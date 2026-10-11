@@ -256,6 +256,66 @@ await sleep(200);
 check("choosing Outline elsewhere closes the panel", !(await panelOpen()), null);
 await ev(`${S}.getState().setSidebar("thumbs")`);
 
+// ---- the panel and the sidebar ---------------------------------------------------------------------
+await openPanel();
+const barOn = () => ev(`document.querySelector('.toolbar button[title^="Toggle sidebar"]').classList.contains("on")`);
+check("the sidebar toggle is not pressed while the panel covers the sidebar", (await barOn()) === false, null);
+await ev(`${S}.getState().setSidebar(${S}.getState().sidebar)`);
+await sleep(150);
+check("choosing the sidebar panel that is already selected still closes the panel", !(await panelOpen()) && (await barOn()) === true, null);
+await openPanel();
+await ev(`${S}.getState().toggleSidebar("thumbs")`);
+await sleep(150);
+check("toggling the sidebar with the panel open shows the sidebar rather than hiding it", !(await panelOpen()) && (await ev(`${S}.getState().sidebar`)) === "thumbs", null);
+
+// ---- a tool that is gone leaves no ghost pin --------------------------------------------------------
+await ev(`${P}.setState({ pinned: ["gone", "compress", "watermark"] })`);
+await sleep(300);
+const ghost = await ev(`({ stored: ${P}.getState().pinned, bar: [...document.querySelectorAll(".pinned-tools button")].map((b) => b.dataset.tool) })`);
+check("an unknown pinned id is dropped on load", JSON.stringify(ghost.stored) === JSON.stringify(["compress", "watermark"]), ghost);
+await openPanel();
+const ghostFull = await ev(`document.querySelectorAll(".tools-panel .tool-pin:disabled").length`);
+check("the limit counts what the toolbar shows: two pins leave the other stars usable", ghostFull === 0, ghostFull);
+await ev(`${P}.setState({ pinned: [] })`);
+await ev(`${S}.getState().setSidebar("thumbs")`);
+
+// ---- Organize, Home and the panel --------------------------------------------------------------------
+await openPanel();
+await ev(`${S}.getState().patch(${docs[0].id}, { organize: true })`);
+await sleep(400);
+const org = await ev(`({ stored: ${P}.getState().panelOpen, expanded: document.querySelector('button[aria-label="Tools"]').getAttribute("aria-expanded"), panel: !!document.querySelector("nav.tools-panel") })`);
+check("entering Organize closes the panel", org.stored === false && org.expanded === "false" && !org.panel, org);
+await ev(`document.querySelector('button[aria-label="Tools"]').click()`);
+await sleep(400);
+const orgOpen = await ev(`({ organize: ${S}.getState().docs[${docs[0].id}].organize, panel: !!document.querySelector("nav.tools-panel"), expanded: document.querySelector('button[aria-label="Tools"]').getAttribute("aria-expanded") })`);
+check("the Tools button in Organize opens the panel in the reader", orgOpen.organize === false && orgOpen.panel && orgOpen.expanded === "true", orgOpen);
+await ev(`${S}.setState({ active: null })`);
+await sleep(300);
+check("Home leaves the panel closed", (await ev(`${P}.getState().panelOpen`)) === false, null);
+await ev(`${S}.getState().activate(${docs[0].id})`);
+await sleep(500);
+const back = await ev(`({ panel: !!document.querySelector("nav.tools-panel"), focus: document.activeElement?.getAttribute("aria-label") })`);
+check("coming back neither shows the panel nor moves focus into its box", !back.panel && back.focus !== "Find a tool", back);
+
+// ---- narrow window: the pins give way -----------------------------------------------------------------
+await ev(`${P}.setState({ pinned: ["compress", "watermark", "export"] })`);
+await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 700, deviceScaleFactor: 1, mobile: false });
+await sleep(500);
+const wide = await ev(`(() => { const t = document.querySelector(".toolbar"); return { shown: [...document.querySelectorAll(".pinned-tools button")].filter((b) => b.offsetParent).length, over: t.scrollWidth > t.clientWidth } })()`);
+check("at 1280px the three pins show and the toolbar fits", wide.shown === 3 && !wide.over, wide);
+await send("Emulation.setDeviceMetricsOverride", { width: 720, height: 700, deviceScaleFactor: 1, mobile: false });
+await sleep(500);
+const narrow = await ev(`({ shown: [...document.querySelectorAll(".pinned-tools button")].filter((b) => b.offsetParent).length, pageBox: document.querySelector(".pagebox").getBoundingClientRect().height })`);
+check("at the 720px minimum the pins are hidden (they stay in the panel)", narrow.shown === 0, narrow);
+check("the page box stays on one line", narrow.pageBox < 40, narrow);
+await shot("narrow-720-light.png", 200);
+await openPanel();
+await shot("narrow-720-panel-light.png", 200);
+await ev(`${P}.getState().setPanel(false)`);
+await send("Emulation.clearDeviceMetricsOverride");
+await ev(`${P}.setState({ pinned: ["compress", "export"] })`);
+await sleep(300);
+
 // ---- palette subtitles ----------------------------------------------------------------------------
 await ev(`${S}.getState().setUi({ paletteOpen: true })`);
 await until(`document.querySelector(".palette input")`, "the palette");

@@ -13,7 +13,8 @@ Replaces the Tools dropdown (`ToolsMenu.tsx`, `toolsMenu.ts` and their tests, re
   "page numbers" finds Header & footer and Bates numbering. Every word must match; a name match ranks above a synonym,
   a synonym above a description. Enter runs the first match. A search shows one ranked "Results" list.
 - **Recent**: the last four tools used, as icon chips (not shown while searching).
-- **Groups**: Optimize, Page marks, Protect, Convert & create, Check & compare. Each row has a coloured 28px icon chip
+- **Groups**: Optimize, Page marks, Protect, Convert & create, Check & compare (which also holds Advanced search).
+  Each row has a coloured 28px icon chip
   (hue per group), the name and a one-line plain description.
 - **Pin** star on each row: puts the tool in the toolbar as an icon button after Tools. At most three; a fourth is
   refused (the other stars are disabled and say why) rather than silently dropping an older pin.
@@ -22,10 +23,22 @@ Replaces the Tools dropdown (`ToolsMenu.tsx`, `toolsMenu.ts` and their tests, re
 
 Running a tool from the panel closes the panel (the tool's own rail takes the space) and records it as recent.
 
+The panel belongs to the reader. Home, a comparison and Organize leave it closed (the Tools button in Organize switches
+to the reader and opens it), so coming back never shows it unasked or moves focus into it. Any `setSidebar` or
+`toggleSidebar` call closes it, even when the choice does not change; with the panel open the sidebar toggle is not
+shown as pressed and shows the sidebar underneath instead of hiding it.
+
+Pins and recents are checked against the catalog: an id that is not a tool any more (renamed, removed) is dropped on
+load, and the pin limit counts what the toolbar shows, so a leftover id cannot fill a slot.
+
+Below 1240px the toolbar's pinned buttons are hidden (three pins add about 100px to a toolbar that is already about
+1130px wide, and the window can be 720px): every tool is still in the panel.
+
 ## Where else the same list shows up
 
 - **Home**: an "All tools" grid under the recent files, three or four cards wide. With no document open a click asks
-  for a file first, then runs the tool on it (Create PDF needs no file).
+  for a file first, then runs the tool on the document that file became (looked up by its path, not "whatever is
+  active"); a locked file waits for the password and then runs, a failed open shows its error. Create PDF needs no file.
 - **Command palette**: entries that map to a tool show its description as a second line and also match on its synonyms.
 - **Toolbar**: the pinned tools, with the description as their tooltip.
 

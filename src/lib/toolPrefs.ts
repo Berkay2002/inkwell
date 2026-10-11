@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { MAX_PINNED, MAX_RECENT, cleanIds, pushRecent, togglePin } from "./toolsCatalog";
+import { MAX_PINNED, MAX_RECENT, cleanIds, pruneIds, pushRecent, togglePin } from "./toolsCatalog";
 
 const KEY = "inkwell.toolPrefs";
 
@@ -11,8 +11,13 @@ interface ToolPrefs {
   /** The All tools panel in the left slot; per session, not stored. */
   panelOpen: boolean;
   used: (id: string) => void;
-  /** Returns false when three tools are already pinned. */
-  togglePin: (id: string) => boolean;
+  /**
+   * Returns false when three tools are already pinned. `known` (the catalog's ids) drops ids that are not tools
+   * any more first, so a leftover id can never fill a slot the toolbar does not show.
+   */
+  togglePin: (id: string, known?: string[]) => boolean;
+  /** Forgets recent and pinned ids that are not in `known`. */
+  prune: (known: string[]) => void;
   setPanel: (open: boolean) => void;
 }
 
@@ -41,7 +46,16 @@ export const useToolPrefs = create<ToolPrefs>((set, get) => ({
     set({ recent });
     save({ recent, pinned: get().pinned });
   },
-  togglePin: (id) => {
+  prune: (known) => {
+    const { recent, pinned } = get();
+    const r = pruneIds(recent, known);
+    const p = pruneIds(pinned, known);
+    if (r.length === recent.length && p.length === pinned.length) return;
+    set({ recent: r, pinned: p });
+    save({ recent: r, pinned: p });
+  },
+  togglePin: (id, known) => {
+    if (known) get().prune(known);
     const r = togglePin(get().pinned, id);
     if (r.full) return false;
     set({ pinned: r.pinned });

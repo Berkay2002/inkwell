@@ -24,7 +24,8 @@ const shortcutOf = (it: ToolItem): string | null => {
 
 /** "Tools" in the mode group, after Read | Edit | Organize: opens and closes the All tools panel. */
 export function ToolsButton({ doc }: { doc: DocState }) {
-  const open = useToolPrefs((s) => s.panelOpen);
+  // the panel lives in the reader, so in Organize it is closed whatever was left in the store
+  const open = useToolPrefs((s) => s.panelOpen) && !doc.organize;
   return (
     <button
       className="ax-toggle tools-btn"
@@ -33,7 +34,7 @@ export function ToolsButton({ doc }: { doc: DocState }) {
       aria-expanded={open}
       aria-controls={PANEL_ID}
       onClick={() => {
-        // the panel lives in the reader: leave Organize first, as the right-hand toggles do
+        // from Organize the button opens the panel in the reader, as the right-hand toggles do
         if (doc.organize) useStore.getState().patch(doc.id, { organize: false });
         useToolPrefs.getState().setPanel(!open);
       }}
@@ -50,6 +51,9 @@ export function PinnedTools({ doc }: { doc: DocState }) {
   const pinned = useToolPrefs((s) => s.pinned);
   const all = useToolItems(doc);
   const items = pick(all, pinned);
+  // ids that are not tools any more (renamed, removed) go, so they cannot hold a pin slot
+  const recent = useToolPrefs((s) => s.recent);
+  useEffect(() => useToolPrefs.getState().prune(all.map((i) => i.id)), [all, pinned, recent]);
   if (items.length === 0) return null;
   return (
     <span className="tb-cluster pinned-tools" role="group" aria-label="Pinned tools">
@@ -80,7 +84,9 @@ export function PinnedTools({ doc }: { doc: DocState }) {
 export function AllToolsPanel({ doc }: { doc: DocState }) {
   const items = useToolItems(doc);
   const recent = useToolPrefs((s) => s.recent);
-  const pinned = useToolPrefs((s) => s.pinned);
+  const stored = useToolPrefs((s) => s.pinned);
+  // what the toolbar shows: the limit and the stars go by these, not by ids that are no longer tools
+  const pinned = useMemo(() => pick(items, stored).map((i) => i.id), [items, stored]);
   const [query, setQuery] = useState("");
   const [card, setCard] = useState<{ item: ToolItem; top: number; left: number } | null>(null);
   const root = useRef<HTMLElement>(null);
@@ -92,19 +98,11 @@ export function AllToolsPanel({ doc }: { doc: DocState }) {
   const searching = query.trim() !== "";
   const recents = useMemo(() => pick(items, recent), [items, recent]);
 
+  // Picking a sidebar panel elsewhere (a toolbar button, Ctrl+B, the palette) hands the slot back: that is done
+  // in the store's setSidebar / toggleSidebar, so it holds even when the choice does not change.
   useEffect(() => {
     field.current?.focus();
-    // Pages / Outline / Attachments picked elsewhere (a toolbar button, Ctrl+B) hands the slot back; a toggle
-    // that would hide the sidebar shows what the panel was covering instead.
-    const off = useStore.subscribe((s, prev) => {
-      if (s.sidebar === prev.sidebar) return;
-      useToolPrefs.getState().setPanel(false);
-      if (s.sidebar === "none") useStore.setState({ sidebar: prev.sidebar });
-    });
-    return () => {
-      off();
-      clearTimeout(timer.current);
-    };
+    return () => clearTimeout(timer.current);
   }, []);
 
   const close = () => {
@@ -232,7 +230,12 @@ export function AllToolsPanel({ doc }: { doc: DocState }) {
                         aria-label={`Pin ${it.label} to the toolbar`}
                         title={on ? "Unpin from the toolbar" : full ? `${MAX_PINNED} tools are pinned: unpin one first` : "Pin to the toolbar"}
                         disabled={full}
-                        onClick={() => useToolPrefs.getState().togglePin(it.id)}
+                        onClick={() =>
+                          useToolPrefs.getState().togglePin(
+                            it.id,
+                            items.map((i) => i.id),
+                          )
+                        }
                       >
                         <Icon name="pin" size={14} />
                       </button>
