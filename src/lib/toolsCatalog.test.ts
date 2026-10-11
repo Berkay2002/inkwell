@@ -95,7 +95,7 @@ describe("groupTools / filterTools", () => {
     expect(sec.map((s) => s.title)).toEqual(["Optimize", "forms"]);
   });
   it("shows the groups for an empty box and one ranked Results section for a query", () => {
-    expect(filterTools(items, "").map((s) => s.id)).toEqual(["optimize", "marks", "protect", "convert", "check"]);
+    expect(filterTools(items, "").map((s) => s.id)).toEqual(["optimize", "marks", "protect", "scripts", "convert", "check"]);
     const r = filterTools(items, "smaller");
     expect(r).toHaveLength(1);
     expect(r[0].id).toBe(RESULTS);
