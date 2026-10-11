@@ -3,6 +3,7 @@ import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
 import { useRedact } from "./redact";
 import { useAnnot } from "./annot";
+import { useForms } from "./forms";
 import { useHistory } from "./historyStore";
 import { openCompareSetup } from "../components/history/HistoryPanel";
 import { pickOpen } from "./api";
@@ -201,6 +202,19 @@ export const commands: Command[] = [
   },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },
+  { id: "forms", title: "Forms", keys: ["Ctrl+Alt+F"], needsDoc: true, run: () => useForms.getState().setOpen(!useForms.getState().open) },
+  {
+    id: "forms-prepare",
+    title: "Forms: prepare a form",
+    needsDoc: true,
+    run: () => useForms.getState().setAuthoring(!useForms.getState().authoring),
+  },
+  {
+    id: "forms-clear",
+    title: "Forms: clear the form",
+    needsDoc: true,
+    run: withDoc((d) => void useForms.getState().clear(d.id)),
+  },
   ...(
     [
       ["v", "select", "Select"], ["h", "highlight", "Highlight"], ["u", "underline", "Underline"], ["s", "strikeOut", "Strikethrough"],
@@ -225,6 +239,9 @@ export const commands: Command[] = [
     needsDoc: true,
     notInText: true,
     run: withDoc((d) => {
+      const f = useForms.getState();
+      const field = f.open && f.authoring ? f.get(d.id).selected : null;
+      if (field) return void f.remove(d.id, [field]);
       const a = useAnnot.getState();
       const sel = a.open ? a.get(d.id).selected : null;
       if (sel) void a.remove(d.id, [sel]);

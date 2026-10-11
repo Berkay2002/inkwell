@@ -107,6 +107,15 @@ impl PdfWidget {
         .map(|updated| updated != 0)
     }
 
+    /// Marks the appearance stream stale so the next [`update`](Self::update) rebuilds it into the
+    /// document (`pdf_annot_request_resynthesis`). Inkwell patch: editing a field's dictionary
+    /// directly does not set this.
+    pub fn request_resynthesis(&mut self) -> Result<(), Error> {
+        self.annot.ensure_attached()?;
+        unsafe { pdf_annot_request_resynthesis(context(), self.annot.inner.as_ptr()) };
+        Ok(())
+    }
+
     pub fn is_signed(&self) -> Result<bool, Error> {
         self.annot.ensure_attached()?;
         unsafe {

@@ -10,6 +10,7 @@ import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
 import { EditPanel } from "./components/edit/EditPanel";
+import { FormTools, FormsPanel } from "./components/forms/FormsPanel";
 import { RedactPanel } from "./components/redact/RedactPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
@@ -121,6 +122,7 @@ export default function App() {
                 <HistoryBanner doc={doc} />
                 <SecurityNotice doc={doc} />
                 <CommentTools doc={doc} />
+                <FormTools />
               </div>
               <ToolsPanel doc={doc} />
               <ConvertPanel doc={doc} />
@@ -130,6 +132,7 @@ export default function App() {
               <RedactPanel doc={doc} />
               <CommentsPanel doc={doc} />
               <EditPanel doc={doc} />
+              <FormsPanel doc={doc} />
             </div>
           )}
         </>
