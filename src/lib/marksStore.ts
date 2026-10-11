@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { useStore } from "../store";
 import { useA11y } from "./a11y";
+import { usePreflight } from "./preflight";
 import * as api from "./api";
 import type { BatesFileResult, FontFamily, MarkDate, MarkKind, MarkKindInfo, MarkPicture, MarkStyle, PageMark, Rgb, SixTexts } from "./api";
 import { useAi } from "./aiStore";
@@ -459,6 +460,7 @@ export const useMarks = create<MarksStore>((set, get) => {
     useForms.getState().setOpen(false);
     useTextEdit.getState().setOpen(false);
     useA11y.getState().setOpen(false);
+    usePreflight.getState().setOpen(false);
     const ai = useAi.getState();
     if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
     return true;
@@ -649,6 +651,7 @@ useAnnot.subscribe((s, prev) => s.open && !prev.open && yield_(() => useAnnot.ge
 useForms.subscribe((s, prev) => s.open && !prev.open && yield_(() => useForms.getState().setOpen(false)));
 useTextEdit.subscribe((s, prev) => s.open && !prev.open && yield_(() => useTextEdit.getState().setOpen(false)));
 useA11y.subscribe((s, prev) => s.open && !prev.open && yield_(() => useA11y.getState().setOpen(false)));
+usePreflight.subscribe((s, prev) => s.open && !prev.open && yield_(() => usePreflight.getState().setOpen(false)));
 useAi.subscribe((s, prev) => s.open && !prev.open && s.settings.mode === "docked" && yield_(() => useAi.getState().setOpen(false)));
 
 // ---- the preview on the page ----
