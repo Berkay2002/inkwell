@@ -974,11 +974,12 @@ fn a_signed_document_keeps_the_signed_bytes_through_all_three_edits() {
 fn margins_as_shown_follow_each_pages_own_turn() {
     // page 0 upright, page 1 turned 90 degrees (a real number, as some writers give it)
     let (eng, doc) = open("shown-margins", &build("", &[("", RED), ("/Rotate 90.0", RED)], &[]));
-    // one edit, 10 points in from the left of what is shown (a second edit here trips the unrelated heap fault noted in docs/prepress.md)
-    let spec = BoxSpec { pages: None, kind: BoxKind::Trim, rect: None, from: Some(BoxKind::Media), margin: Some([-10.0, 0.0, 0.0, 0.0]), shown: true };
-    set_boxes(&eng, doc, &spec, EditSource::User).unwrap();
-    assert_eq!(boxes(&eng, doc, 0, BoxKind::Trim), Some([10.0, 0.0, 612.0, 792.0]), "upright: the left is x0");
-    assert_eq!(boxes(&eng, doc, 1, BoxKind::Trim), Some([0.0, 10.0, 612.0, 792.0]), "turned 90: the left is y0");
+    let shown = |kind, from, margin| BoxSpec { pages: None, kind, rect: None, from: Some(from), margin: Some(margin), shown: true };
+    set_boxes(&eng, doc, &shown(BoxKind::Trim, BoxKind::Media, [-20.0; 4]), EditSource::User).unwrap();
+    // 10 points outward on the left of what is shown
+    set_boxes(&eng, doc, &shown(BoxKind::Bleed, BoxKind::Trim, [10.0, 0.0, 0.0, 0.0]), EditSource::User).unwrap();
+    assert_eq!(boxes(&eng, doc, 0, BoxKind::Bleed), Some([10.0, 20.0, 592.0, 772.0]), "upright: the left is x0");
+    assert_eq!(boxes(&eng, doc, 1, BoxKind::Bleed), Some([20.0, 10.0, 592.0, 772.0]), "turned 90: the left is y0");
     // a real /Rotate is read like MuPDF does: to the nearest quarter turn
     let rotate = |p| eng.read_custom(doc, |d| super::boxes::rotate_of(&d.find_page(p)?)).unwrap();
     assert_eq!((rotate(0), rotate(1)), (0, 90));

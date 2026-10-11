@@ -234,9 +234,3 @@ The follow-up round added Rust tests for: `/Rotate` snapping like MuPDF (90, 90.
 359), a conversion saved as another file as one guarded step (an undo started inside it lands after the
 save; the document's own file is refused with nothing converted), and a failed write leaving the conversion in the
 open document; vitest for the protection being read again when the document's generation moves.
-
-Known fault, not from this code: `prepress::` run in one process with `--test-threads=1` aborts with SIGTRAP in
-about a third of runs, always inside MuPDF's allocator (`fz_calloc` -> libmalloc lock trap) on a test that edits
-a two-page document after the colour-conversion tests have run. It moves between tests and reproduces with the
-earlier engine code, so it looks like a heap corruption left by a conversion test rather than by the edit it
-trips on. Each test passes alone; the margins test is a single edit so it does not depend on the order.
