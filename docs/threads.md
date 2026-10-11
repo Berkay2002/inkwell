@@ -72,7 +72,7 @@ and shows the reason in the Articles panel.
 ## Articles panel and Properties
 
 The sidebar's fourth tab. Rows: title, bead count (or the damage). Click goes to the first bead, double click reads
-from it; right click offers Read, Properties, Move up/down, Delete. "New article" arms the Article tool. "Show beads"
+from it; right click offers Read, Properties, Move up/down (not on a damaged article), Delete. "New article" arms the Article tool. "Show beads"
 draws every bead with its number: "1-3" is the third bead of the first article. Properties edits title, subject,
 author and keywords (one undo step).
 
