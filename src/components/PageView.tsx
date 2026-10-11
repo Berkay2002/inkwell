@@ -29,7 +29,8 @@ interface Props {
   preview: TileRef;
   wantText: boolean;
   hits: Rect4[];
-  currentHit: Rect4 | null;
+  /** The rectangles of the current hit (a match over two lines has two). */
+  currentHit: Rect4[];
   /** Redaction marks on this page. */
   marks: Mark[];
 }
@@ -83,7 +84,7 @@ export const PageView = memo(function PageView(p: Props) {
         style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom) }}
       >
         {p.hits.map((r, i) => (
-          <div key={i} className={r === p.currentHit ? "hit current" : "hit"} style={rectStyle(r)} />
+          <div key={i} className={p.currentHit.includes(r) ? "hit current" : "hit"} style={rectStyle(r)} />
         ))}
         {p.marks.map((m) => (
           <div key={m.xref} className={m.wholePage ? "rd-mark page-wide" : "rd-mark"} style={{ ...rectStyle(markRect(m, rawSize)), "--z": zoom } as React.CSSProperties} />

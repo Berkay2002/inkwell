@@ -14,6 +14,7 @@ pub mod print;
 pub mod protect;
 pub mod recents;
 pub mod redact;
+pub mod search;
 pub mod textedit;
 pub mod tools;
 
@@ -22,6 +23,7 @@ use engine::edit::{EditOp, EditState, SplitResult};
 use engine::{DocId, Engine, EngineError, EngineStats, OpenInfo, OutlineItem, SearchEvent, TextLine, TileOutcome};
 use history_ipc::History;
 use paths::{FileRef, Paths};
+use search::SearchOpts;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Response};
@@ -54,6 +56,7 @@ const PDF: &[&str] = &["pdf"];
 enum PickTitle {
     Locate,
     Compare,
+    Search,
 }
 
 /// What the save dialog filters for (the UI never names a pattern).
@@ -86,6 +89,7 @@ async fn pick_open(window: Window, multiple: bool, title: Option<PickTitle>) -> 
         match title {
             Some(PickTitle::Locate) => d = d.set_title("Locate the moved file"),
             Some(PickTitle::Compare) => d = d.set_title("Choose two PDFs to compare"),
+            Some(PickTitle::Search) => d = d.set_title("Choose PDFs to search"),
             None => {}
         }
         let picked = if multiple { d.blocking_pick_files() } else { d.blocking_pick_file().map(|f| vec![f]) };
@@ -252,14 +256,93 @@ async fn page_text(eng: Eng<'_>, doc: DocId, page: u32) -> Result<Vec<TextLine>,
 }
 
 #[tauri::command]
-fn search(eng: Eng<'_>, doc: DocId, query: String, on_event: Channel<SearchEvent>) -> Result<u64, EngineError> {
-    eng.inner().search(
+fn search(eng: Eng<'_>, doc: DocId, query: String, opts: Option<SearchOpts>, on_event: Channel<SearchEvent>) -> Result<u64, EngineError> {
+    eng.inner().search_with(
         doc,
         query,
+        opts.unwrap_or_default(),
         Arc::new(move |e| {
             let _ = on_event.send(e);
         }),
     )
+}
+
+/// Where a search across files looks: a folder (open token from `pick_search_folder`) or picked files.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum SearchScope {
+    #[serde(rename_all = "camelCase")]
+    Folder { token: String, recursive: bool },
+    Files { tokens: Vec<String> },
+}
+
+/// Folder dialog for search across files; the folder comes back as an open token (Rust lists its PDFs).
+#[tauri::command]
+async fn pick_search_folder(window: Window) -> Result<Option<FileRef>, EngineError> {
+    blocking(move || {
+        let d = window.dialog().file().set_parent(&window).set_title("Choose a folder to search");
+        let picked = d.blocking_pick_folder().and_then(|f| f.into_path().ok());
+        Ok(picked.map(|p| window.state::<Paths>().issue_open(window.label(), p.to_string_lossy().into_owned())))
+    })
+    .await
+}
+
+/// Searches several PDFs for `query` in the background; events (one per file with hits, progress, done) go to
+/// `on_event`, each hit file with an open token. Returns the search id for `cancel_search_files`.
+#[tauri::command]
+async fn search_files(
+    window: Window,
+    eng: Eng<'_>,
+    searches: State<'_, Arc<search::files::FolderSearches>>,
+    scope: SearchScope,
+    query: String,
+    opts: Option<SearchOpts>,
+    on_event: Channel<search::files::FilesEvent>,
+) -> Result<u64, EngineError> {
+    use search::files::{list_pdfs, FilesEvent};
+    let eng = eng.inner().clone();
+    let searches = searches.inner().clone();
+    blocking(move || {
+        let reg = window.state::<Paths>();
+        let (files, capped) = match scope {
+            SearchScope::Folder { token, recursive } => {
+                let dir = std::path::PathBuf::from(reg.open(window.label(), &token)?);
+                if !dir.is_dir() {
+                    return Err(EngineError::Io(format!("{} is not a folder", dir.display())));
+                }
+                list_pdfs(&dir, recursive)
+            }
+            SearchScope::Files { tokens } => {
+                let mut files = Vec::new();
+                for t in &tokens {
+                    files.push(std::path::PathBuf::from(reg.open(window.label(), t)?));
+                }
+                let capped = files.len() > search::files::MAX_FILES;
+                files.truncate(search::files::MAX_FILES);
+                (files, capped)
+            }
+        };
+        let w = window.clone();
+        Ok(searches.start(
+            &eng,
+            files,
+            capped,
+            &query,
+            opts.unwrap_or_default(),
+            Arc::new(move |mut e| {
+                if let FilesEvent::File { path, token, .. } = &mut e {
+                    *token = w.state::<Paths>().issue_open(w.label(), path.clone()).token;
+                }
+                let _ = on_event.send(e);
+            }),
+        ))
+    })
+    .await
+}
+
+#[tauri::command]
+fn cancel_search_files(searches: State<'_, Arc<search::files::FolderSearches>>, search: u64) {
+    searches.cancel(search);
 }
 
 #[tauri::command]
@@ -733,6 +816,7 @@ pub fn run() {
         .manage(ai::Assistant::new())
         .manage(Paths::default())
         .manage(Arc::new(tools::Jobs::default()))
+        .manage(Arc::new(search::files::FolderSearches::default()))
         .manage(hist)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
@@ -769,6 +853,9 @@ pub fn run() {
             page_text,
             search,
             cancel_search,
+            pick_search_folder,
+            search_files,
+            cancel_search_files,
             engine_stats,
             set_cache_budget,
             initial_files,

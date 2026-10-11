@@ -2,7 +2,9 @@ import { create } from "zustand";
 import * as api from "./lib/api";
 import type { OutlineItem } from "./lib/api";
 import { type Rot, type Size, clamp, ZOOM_MAX, ZOOM_MIN } from "./lib/layout";
+import { useFind } from "./lib/findStore";
 import { keyOf } from "./lib/recent";
+import { type Hit, byPosition, hitY, pickCurrent } from "./lib/searchLogic";
 import { dropCached } from "./lib/tiles";
 import { useRecents } from "./recents";
 
@@ -10,11 +12,7 @@ export type ZoomMode = "fitWidth" | "fitPage" | "custom";
 export type Theme = "system" | "light" | "dark";
 export type SidebarPanel = "none" | "thumbs" | "outline";
 export type Rect4 = [number, number, number, number];
-
-export interface Hit {
-  page: number;
-  rect: Rect4;
-}
+export type { Hit };
 
 export interface SearchState {
   query: string;
@@ -24,6 +22,9 @@ export interface SearchState {
   /** Index into `hits`, -1 when nothing is selected yet. */
   current: number;
   done: boolean;
+  /** Pages read so far and the page count, while the search runs. */
+  scanned: number;
+  total: number;
 }
 
 export interface NavRequest {
@@ -62,7 +63,7 @@ export interface DocState {
   nav: NavRequest | null;
 }
 
-const emptySearch = (): SearchState => ({ query: "", id: null, hits: [], current: -1, done: true });
+const emptySearch = (): SearchState => ({ query: "", id: null, hits: [], current: -1, done: true, scanned: 0, total: 0 });
 
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
@@ -98,8 +99,13 @@ interface Store {
   toggleSidebar: (p: Exclude<SidebarPanel, "none">) => void;
   setTheme: (t: Theme) => void;
   setUi: (p: Partial<Pick<Store, "paletteOpen" | "searchOpen" | "error">>) => void;
-  runSearch: (id: number, query: string) => void;
+  /** Searches document `id`; with `focus` the hit at that spot (a page and y) is the current one. */
+  runSearch: (id: number, query: string, focus?: { page: number; y: number }) => void;
   stepHit: (id: number, dir: 1 | -1) => void;
+  /** Makes hit `index` the current one and scrolls to it. */
+  selectHit: (id: number, index: number) => void;
+  /** Stops the search of document `id` (the hits found so far stay). */
+  stopSearch: (id: number) => void;
   loadOutline: (id: number) => void;
 }
 
@@ -302,7 +308,7 @@ export const useStore = create<Store>((set, get) => {
     },
     setUi: (p) => set(p),
 
-    runSearch: (id, query) => {
+    runSearch: (id, query, focus) => {
       const d = get().docs[id];
       if (!d) return;
       const q = query.trim();
@@ -313,23 +319,35 @@ export const useStore = create<Store>((set, get) => {
       }
       const seq = ++searchSeq;
       latestSearch.set(id, seq);
-      const mine = { ...emptySearch(), query, done: false };
+      const mine = { ...emptySearch(), query, done: false, total: d.pageCount };
       get().patch(id, { search: mine });
 
       let buffer: Hit[] = [];
       let queued = false;
       let searchId: number | null = null;
+      let focused = false;
       const flush = () => {
         queued = false;
         const cur = get().docs[id];
         if (!cur || cur.search.id !== searchId) return;
-        const hits = cur.search.hits.concat(buffer);
-        buffer = [];
-        hits.sort((a, b) => a.page - b.page || a.rect[1] - b.rect[1] || a.rect[0] - b.rect[0]);
+        let hits = cur.search.hits;
         let current = cur.search.current;
+        if (buffer.length > 0) {
+          // The sorted list grows as pages report; the current hit keeps pointing at the same one.
+          const keep = current >= 0 ? hits[current] : null;
+          hits = hits.concat(buffer).sort(byPosition);
+          buffer = [];
+          if (keep) current = hits.indexOf(keep);
+        }
         if (current === -1 && hits.length > 0) {
-          current = Math.max(0, hits.findIndex((h) => h.page >= cur.currentPage));
-          get().goTo(id, hits[current].page, Math.max(0, hits[current].rect[1] - 80));
+          // With a focus the start waits for the page that has it (hits stream in page by page).
+          const at = pickCurrent(hits, cur.currentPage, focused ? undefined : focus);
+          const onFocus = !focus || focused || hits[at]?.page === focus.page;
+          if (onFocus || cur.search.done) {
+            current = at;
+            focused = true;
+            get().goTo(id, hits[current].page, hitY(hits[current]));
+          }
         }
         get().patch(id, { search: { ...cur.search, hits, current } });
       };
@@ -338,22 +356,25 @@ export const useStore = create<Store>((set, get) => {
       const handle = (e: api.SearchEvent) => {
         if (e.search !== searchId) return;
         if (e.kind === "hits") {
-          for (const r of e.rects) buffer.push({ page: e.page, rect: r });
+          for (const h of e.hits) buffer.push({ ...h, page: e.page });
           if (!queued) {
             queued = true;
             requestAnimationFrame(flush);
           }
+        } else if (e.kind === "progress") {
+          const cur = get().docs[id];
+          if (cur && cur.search.id === searchId) get().patch(id, { search: { ...cur.search, scanned: e.scanned, total: e.total } });
         } else {
           requestAnimationFrame(() => {
+            const cur0 = get().docs[id];
+            if (cur0 && cur0.search.id === searchId) get().patch(id, { search: { ...cur0.search, done: true, scanned: cur0.search.total } });
             flush();
-            const cur = get().docs[id];
-            if (cur && cur.search.id === searchId) get().patch(id, { search: { ...cur.search, done: true } });
           });
         }
       };
 
       api
-        .search(id, q, (e) => (searchId == null ? pending.push(e) : handle(e)))
+        .search(id, q, useFind.getState().opts, (e) => (searchId == null ? pending.push(e) : handle(e)))
         .then((sid) => {
           if (latestSearch.get(id) !== seq || !get().docs[id]) return;
           searchId = sid;
@@ -366,11 +387,24 @@ export const useStore = create<Store>((set, get) => {
     stepHit: (id, dir) => {
       const d = get().docs[id];
       if (!d || d.search.hits.length === 0) return;
-      const n = d.search.hits.length;
-      const current = (d.search.current + dir + n) % n;
-      get().patch(id, { search: { ...d.search, current } });
-      const h = d.search.hits[current];
-      get().goTo(id, h.page, Math.max(0, h.rect[1] - 80));
+      get().selectHit(id, (d.search.current + dir + d.search.hits.length) % d.search.hits.length);
+    },
+
+    selectHit: (id, index) => {
+      const d = get().docs[id];
+      const h = d?.search.hits[index];
+      if (!d || !h) return;
+      get().patch(id, { search: { ...d.search, current: index } });
+      get().goTo(id, h.page, hitY(h));
+    },
+
+    stopSearch: (id) => {
+      const d = get().docs[id];
+      if (!d || d.search.done) return;
+      // Engine events of the cancelled search are ignored from here on; what was found stays.
+      latestSearch.delete(id);
+      void api.cancelSearch(id);
+      get().patch(id, { search: { ...d.search, done: true } });
     },
 
     loadOutline: (id) => {

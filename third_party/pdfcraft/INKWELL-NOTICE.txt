@@ -11,3 +11,4 @@ Adapted files carry a header naming the pdfcraft path:
 - src-tauri/src/textedit/font.rs      <- crates/fonts/src/pdf.rs     (font metrics, ToUnicode, encode)
 - src-tauri/src/textedit/encodings.rs <- crates/fonts/src/encodings.rs (single-byte encodings, glyph names)
 - src-tauri/src/textedit/text.rs      <- crates/edit/src/text.rs     (text lines, blocks, block rewrite)
+- src-tauri/src/search/mod.rs      <- crates/render/src/text.rs   (find_opts: case folding, white space collapse, whole-word check)

@@ -12,6 +12,7 @@ import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel
 import { EditPanel } from "./components/edit/EditPanel";
 import { FormTools, FormsPanel } from "./components/forms/FormsPanel";
 import { RedactPanel } from "./components/redact/RedactPanel";
+import { SearchDriver, SearchPanel } from "./components/search/SearchPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
 import { ConvertPanel } from "./components/ConvertPanel";
@@ -109,6 +110,7 @@ export default function App() {
       ) : doc ? (
         <>
           <Toolbar doc={doc} />
+          <SearchDriver key={doc.id} doc={doc} />
           {showCompare ? (
             <div className="main">
               <CompareView />
@@ -133,6 +135,7 @@ export default function App() {
               <CommentsPanel doc={doc} />
               <EditPanel doc={doc} />
               <FormsPanel doc={doc} />
+              <SearchPanel doc={doc} />
             </div>
           )}
         </>

@@ -156,8 +156,8 @@ export function Viewer({ doc }: { doc: DocState }) {
     const m = new Map<number, Rect4[]>();
     for (const h of doc.search.hits) {
       const l = m.get(h.page);
-      if (l) l.push(h.rect);
-      else m.set(h.page, [h.rect]);
+      if (l) l.push(...h.rects);
+      else m.set(h.page, [...h.rects]);
     }
     return m;
   }, [doc.search.hits]);
@@ -167,7 +167,7 @@ export function Viewer({ doc }: { doc: DocState }) {
     for (const k of redactMarks ?? []) m.set(k.page, [...(m.get(k.page) ?? []), k]);
     return m;
   }, [redactMarks]);
-  const currentHit = doc.search.hits[doc.search.current]?.rect ?? null;
+  const currentHit = doc.search.hits[doc.search.current]?.rects ?? EMPTY;
 
   const stable = useRef(new Map<number, { sig: string; tiles: TileRef[] }>());
   const keepSame = (page: number, tiles: TileRef[]) => {

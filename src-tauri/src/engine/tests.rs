@@ -97,17 +97,25 @@ fn search_streams_hits_per_page_and_finishes() {
         .unwrap();
 
     let mut pages = vec![];
+    let mut scanned = 0;
     loop {
         match rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap() {
-            SearchEvent::Hits { search: s, page, rects } => {
+            SearchEvent::Hits { search: s, page, hits } => {
                 assert_eq!(s, search);
-                assert_eq!(rects.len(), 1);
-                let r = rects[0];
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].rects.len(), 1);
+                let r = hits[0].rects[0];
                 assert!(r[2] > r[0] && r[3] > r[1] && r[2] <= PAGE_W);
+                assert_eq!(hits[0].text, "needle");
                 pages.push(page);
+            }
+            SearchEvent::Progress { scanned: s, total, .. } => {
+                assert!(s <= total && total == 40);
+                scanned = scanned.max(s);
             }
             SearchEvent::Done { hits, pages: n, .. } => {
                 assert_eq!((hits, n), (6, 40));
+                assert_eq!(scanned, 40, "progress reaches the last page before Done");
                 break;
             }
         }

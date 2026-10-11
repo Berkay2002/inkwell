@@ -1,0 +1,123 @@
+import { describe, expect, it } from "vitest";
+import {
+  DEFAULT_OPTS, type FileGroup, type Hit, byPosition, changedOptions, filesLine, folderName, groupByPage, insertFile, optsKey, parseHistory,
+  parseOpts, pickCurrent, pushHistory, resultsLine, shortDir, visibleRows,
+} from "./searchLogic";
+
+const hit = (page: number, y: number | null, text = "notice"): Hit => ({
+  page,
+  rects: y == null ? [] : [[10, y, 50, y + 10]],
+  before: "a ",
+  text,
+  after: " b",
+  source: y == null ? "bookmark" : "text",
+});
+const file = (index: number, hits = 1, items = 1): FileGroup => ({
+  index, path: `C:\\Docs\\Housing\\f${index}.pdf`, token: `t${index}`, name: `f${index}.pdf`, pageCount: 3, hits, pages: 1, truncated: false,
+  items: Array.from({ length: items }, (_, i) => hit(i, 5)),
+});
+
+describe("find options", () => {
+  it("fall back to the defaults for anything missing or of the wrong type", () => {
+    expect(parseOpts(null)).toEqual(DEFAULT_OPTS);
+    expect(parseOpts("not json")).toEqual(DEFAULT_OPTS);
+    expect(parseOpts(JSON.stringify({ caseSensitive: true, wholeWords: "yes", extra: 1 }))).toEqual({ ...DEFAULT_OPTS, caseSensitive: true });
+  });
+
+  it("count what differs and make a key that changes with any option", () => {
+    expect(changedOptions(DEFAULT_OPTS)).toBe(0);
+    const o = { ...DEFAULT_OPTS, comments: true, ignoreAccents: true };
+    expect(changedOptions(o)).toBe(2);
+    expect(optsKey(o)).not.toBe(optsKey(DEFAULT_OPTS));
+    expect(optsKey(o)).toBe(optsKey({ ...o }));
+  });
+});
+
+describe("search history", () => {
+  it("keeps the newest first, tidies white space and ignores blanks", () => {
+    let h: string[] = [];
+    h = pushHistory(h, "  notice   period ");
+    h = pushHistory(h, "   ");
+    h = pushHistory(h, "deposit");
+    expect(h).toEqual(["deposit", "notice period"]);
+  });
+
+  it("moves a repeated query to the front instead of listing it twice", () => {
+    expect(pushHistory(["b", "a", "c"], "a")).toEqual(["a", "b", "c"]);
+  });
+
+  it("holds the last ten", () => {
+    let h: string[] = [];
+    for (let i = 1; i <= 14; i++) h = pushHistory(h, `q${i}`);
+    expect(h).toHaveLength(10);
+    expect(h[0]).toBe("q14");
+    expect(h[9]).toBe("q5");
+  });
+
+  it("reads a saved list defensively", () => {
+    expect(parseHistory(null)).toEqual([]);
+    expect(parseHistory("{}")).toEqual([]);
+    expect(parseHistory(JSON.stringify(["a", 3, "a", " b ", "", null]))).toEqual(["a", "b"]);
+    expect(parseHistory(JSON.stringify(Array.from({ length: 25 }, (_, i) => `q${i}`)))).toHaveLength(10);
+  });
+});
+
+describe("results list", () => {
+  it("groups sorted hits under their page and keeps each one's index", () => {
+    const g = groupByPage([hit(1, 10), hit(1, 40), hit(4, 5)]);
+    expect(g.map((x) => [x.page, x.items.map((i) => i.index)])).toEqual([[1, [0, 1]], [4, [2]]]);
+  });
+
+  it("orders by page, then top to bottom, with a bookmark ahead of the page text", () => {
+    const list = [hit(2, 80), hit(1, 20), hit(2, null), hit(2, 30)].sort(byPosition);
+    expect(list.map((h) => [h.page, h.rects[0]?.[1] ?? null])).toEqual([[1, 20], [2, null], [2, 30], [2, 80]]);
+  });
+
+  it("says what it has found, and whether it is still looking", () => {
+    expect(resultsLine(0, 0, false)).toBe("Searching…");
+    expect(resultsLine(0, 0, true)).toBe("No results");
+    expect(resultsLine(1, 1, true)).toBe("1 result on 1 page");
+    expect(resultsLine(12, 5, true)).toBe("12 results on 5 pages");
+    expect(resultsLine(1200, 80, false)).toBe("1,200 results on 80 pages so far");
+  });
+
+  it("starts at the first hit from the page in view, or at the one asked for", () => {
+    const hits = [hit(0, 10), hit(2, 100), hit(2, 300), hit(5, 10)];
+    expect(pickCurrent([], 0)).toBe(-1);
+    expect(pickCurrent(hits, 0)).toBe(0);
+    expect(pickCurrent(hits, 1)).toBe(1);
+    expect(pickCurrent(hits, 9)).toBe(0);
+    expect(pickCurrent(hits, 0, { page: 2, y: 290 })).toBe(2);
+    // the page asked for has not reported yet: fall back to the page in view
+    expect(pickCurrent(hits, 1, { page: 7, y: 0 })).toBe(1);
+  });
+});
+
+describe("across files", () => {
+  it("keeps files in listing order whichever worker finishes first", () => {
+    let list: FileGroup[] = [];
+    for (const i of [3, 0, 2, 1]) list = insertFile(list, file(i));
+    expect(list.map((f) => f.index)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("shows the folder a file is in, short", () => {
+    expect(shortDir("C:\\Docs\\Housing\\Lease.pdf")).toBe("Docs\\Housing");
+    expect(shortDir("C:\\Lease.pdf")).toBe("C:");
+    expect(shortDir("Lease.pdf")).toBe("");
+    expect(folderName("C:\\Docs\\Housing\\")).toBe("Housing");
+  });
+
+  it("walks the rows that are showing: two per file until asked for more", () => {
+    const files = [file(0, 5, 5), file(1, 1, 1)];
+    expect(visibleRows(files, {})).toEqual([{ file: 0, item: 0 }, { file: 0, item: 1 }, { file: 1, item: 0 }]);
+    expect(visibleRows(files, { 0: 4 }).filter((r) => r.file === 0)).toHaveLength(4);
+    expect(visibleRows(files, { 0: 50 }).filter((r) => r.file === 0)).toHaveLength(5);
+  });
+
+  it("words the progress and the outcome", () => {
+    expect(filesLine(0, 0, 38, 64, false, false)).toBe("Searching 38 of 64 files");
+    expect(filesLine(3, 18, 64, 64, true, false)).toBe("18 results in 3 files");
+    expect(filesLine(0, 0, 64, 64, true, false)).toBe("No results in 64 files");
+    expect(filesLine(1, 2, 10, 64, true, true)).toBe("2 results in 1 file (stopped at 10 of 64)");
+  });
+});
