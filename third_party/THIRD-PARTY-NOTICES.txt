@@ -1,0 +1,20 @@
+Third-party material in Inkwell
+
+This file and the licence files it names are installed with the app, in its resource folder under
+licenses/ (see "resources" in src-tauri/tauri.conf.json).
+
+Noto Sans, Noto Sans Mono
+  Copyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)
+  Licensed under the SIL Open Font License, Version 1.1: licenses/OFL-NotoSans.txt
+  Subsets of NotoSans-Regular/Bold/Italic/BoldItalic and NotoSansMono-Regular/Bold are compiled into the
+  app as fallback faces for editing text (sources and ranges: third_party/fonts/README.md in the source).
+
+Noto Sans CJK
+  Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+  Licensed under the SIL Open Font License, Version 1.1: licenses/OFL-NotoSansCJK.txt
+  A subset of NotoSansCJKsc-Regular is compiled into the app as the fallback face for CJK text.
+
+pdfcraft
+  Parts of Inkwell's source are adapted from pdfcraft, licensed MIT OR Apache-2.0:
+  licenses/pdfcraft/LICENSE-MIT, licenses/pdfcraft/LICENSE-APACHE and licenses/pdfcraft/NOTICE.
+  The adapted files are listed in third_party/pdfcraft/INKWELL-NOTICE.txt in the source.
