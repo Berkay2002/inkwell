@@ -16,7 +16,7 @@ function reviewInRedact(doc: number) {
 
 /** What the assistant did to answer, as one quiet line that opens into the full list, plus a card
  *  for every change that waits for the user. Nothing is drawn for a turn with no tool calls. */
-export function ActivityTrail({ doc, m }: { doc: number; m: Msg }) {
+export function ActivityTrail({ doc, m, worked = false }: { doc: number; m: Msg; worked?: boolean }) {
   const [open, setOpen] = useState(false);
   const cards = waiting(m.activity);
   const rest = m.activity.filter((a) => a.state !== "waiting");
@@ -26,7 +26,10 @@ export function ActivityTrail({ doc, m }: { doc: number; m: Msg }) {
       {rest.length > 0 && (
         <div className={open ? "ax-trail open" : "ax-trail"}>
           <button className="ax-trail-line" aria-expanded={open} onClick={() => setOpen(!open)} title={open ? "Hide" : "Show what was done"}>
-            <span className="ax-trail-text">{trailSummary(rest)}</span>
+            <span className="ax-trail-text">
+              {worked && m.timing ? `Worked for ${Math.max(1, Math.round(m.timing.totalMs / 1000))}s` : trailSummary(rest)}
+              {worked && <span className="ax-trail-chev" aria-hidden />}
+            </span>
           </button>
           {open && (
             <ul className="ax-trail-list">
