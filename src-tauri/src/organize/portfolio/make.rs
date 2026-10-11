@@ -42,7 +42,7 @@ const HEAD: f32 = 120.0;
 const SIZE: f32 = 11.0;
 
 /// Cover pages: what is inside, for readers that ignore /Collection. Returns how many pages it made.
-fn write_cover(doc: &mut PdfDocument, rows: &[(String, u64)], total: u64) -> Result<u32> {
+pub(super) fn write_cover(doc: &mut PdfDocument, rows: &[(String, u64)], total: u64) -> Result<u32> {
     let (w, h) = COVER;
     let face = Face { font: Font::new("Helvetica")? };
     let font_obj = doc.add_font(&face.font)?;
@@ -128,9 +128,10 @@ pub fn create(eng: &Engine, sources: &[Source], out: &str) -> Result<Created> {
     }
     eng.check_not_open(out, None)?;
     // Sizes first: nothing is read until the whole set is known to fit.
+    // An existing target by its real spelling (a case-insensitive disk names "A.pdf" and "a.pdf" one file).
     let out_at = {
         let o = Path::new(out);
-        o.parent().and_then(|p| std::fs::canonicalize(p).ok()).zip(o.file_name()).map(|(p, n)| p.join(n))
+        std::fs::canonicalize(o).ok().or_else(|| o.parent().and_then(|p| std::fs::canonicalize(p).ok()).zip(o.file_name()).map(|(p, n)| p.join(n)))
     };
     let mut sizes = Vec::with_capacity(sources.len());
     let mut total = 0u64;

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PortfolioInfo } from "../lib/api";
-import { openAction, rows } from "../lib/portfolioLogic";
+import { openAction, rowKey, rows } from "../lib/portfolioLogic";
 import { activate, extractAll, extractFile, usePortfolio } from "../lib/portfolioStore";
 import type { DocState } from "../store";
 import { Icon } from "./Icons";
@@ -36,8 +36,9 @@ export function PortfolioView({ doc, info }: { doc: DocState; info: PortfolioInf
   const cols = useMemo(() => info.fields.map((f, i) => ({ f, i })).filter((c) => c.f.visible), [info.fields]);
   const list = useMemo(() => rows(info, sort, new Set(open)), [info, sort, open]);
   const template = cols.length === 0 ? "1fr" : cols.map((_, n) => (n === 0 ? "minmax(200px, 2fr)" : "minmax(80px, 1fr)")).join(" ");
-  const sel = list.findIndex((r) => r.kind === "file" && r.file.id === selected);
-  const selFile = sel >= 0 && list[sel].kind === "file" ? list[sel].file : null;
+  const sel = selected == null ? -1 : list.findIndex((r) => rowKey(r) === selected);
+  const row = sel >= 0 ? list[sel] : undefined;
+  const selFile = row?.kind === "file" ? row.file : null;
   const custom = state?.sort != null;
   const first = Math.max(0, Math.floor(top / ROW) - 6);
   const last = Math.min(list.length, Math.ceil((top + height) / ROW) + 6);
@@ -46,7 +47,7 @@ export function PortfolioView({ doc, info }: { doc: DocState; info: PortfolioInf
     const i = Math.max(0, Math.min(list.length - 1, to));
     const r = list[i];
     if (!r) return;
-    if (r.kind === "file") store().select(id, r.file.id);
+    store().select(id, rowKey(r));
     const s = el.current;
     if (s) {
       if (i * ROW < s.scrollTop) s.scrollTop = i * ROW;
@@ -55,10 +56,11 @@ export function PortfolioView({ doc, info }: { doc: DocState; info: PortfolioInf
   };
 
   const onKey = (e: React.KeyboardEvent) => {
-    const r = sel >= 0 ? list[sel] : undefined;
+    const r = row;
     if (e.key === "ArrowDown") move(sel + 1);
     else if (e.key === "ArrowUp") move(sel - 1);
     else if (e.key === "Enter" && selFile) void activate(id, selFile);
+    else if (e.key === "Enter" && r?.kind === "folder") store().toggleFolder(id, r.folder.id);
     else if (e.key === "ArrowRight" && r?.kind === "folder" && !r.open) store().toggleFolder(id, r.folder.id);
     else if (e.key === "ArrowLeft" && r?.kind === "folder" && r.open) store().toggleFolder(id, r.folder.id);
     else return;
@@ -138,8 +140,12 @@ export function PortfolioView({ doc, info }: { doc: DocState; info: PortfolioInf
                     role="row"
                     aria-level={r.depth + 1}
                     aria-expanded={r.open}
+                    aria-selected={rowKey(r) === selected}
                     style={style}
-                    onClick={() => store().toggleFolder(id, r.folder.id)}
+                    onClick={() => {
+                      store().select(id, rowKey(r));
+                      store().toggleFolder(id, r.folder.id);
+                    }}
                   >
                     <div className="pf-name" role="gridcell" style={pad}>
                       <span className={`pf-twist${r.open ? " open" : ""}`}>

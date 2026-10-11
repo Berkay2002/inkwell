@@ -14,6 +14,7 @@ export interface PortfolioDoc {
   /** The reader's own sort; null shows the collection's. */
   sort: PortfolioSortKey[] | null;
   open: number[];
+  /** A file's id, or `d:<id>` for a folder row (`rowKey`). */
   selected: string | null;
   /** The cover page (the normal page view) is showing instead of the file list. */
   cover: boolean;
@@ -26,7 +27,7 @@ interface Store {
   toggleSort: (doc: number, field: number) => void;
   resetSort: (doc: number) => void;
   toggleFolder: (doc: number, folder: number) => void;
-  select: (doc: number, file: string | null) => void;
+  select: (doc: number, key: string | null) => void;
   showCover: (doc: number, on: boolean) => void;
 }
 
@@ -50,11 +51,19 @@ export const usePortfolio = create<Store>((set, get) => ({
       const docs: Record<number, PortfolioDoc> = {};
       for (const [k, v] of Object.entries(s.docs)) if (st().docs[Number(k)]) docs[Number(k)] = v;
       const keep = had?.info && info ? had : null;
+      const has = (key: string | null) => !!key && !!info && (info.files.some((f) => f.id === key) || info.folders.some((f) => `d:${f.id}` === key));
+      // The first look selects the author's initial document, with the folders around it open.
+      const first = !keep && info?.initial ? info.files.find((f) => f.id === info.initial) : undefined;
+      const open = [...(keep?.open ?? [])];
+      for (let p = first?.folder ?? null, n = 0; p != null && n < 33; n++) {
+        if (!open.includes(p)) open.push(p);
+        p = info?.folders.find((f) => f.id === p)?.parent ?? null;
+      }
       docs[doc] = {
         info,
         sort: keep?.sort ?? null,
-        open: keep?.open ?? [],
-        selected: keep && info?.files.some((f) => f.id === keep.selected) ? keep.selected : null,
+        open,
+        selected: keep ? (has(keep.selected) ? keep.selected : null) : (first?.id ?? null),
         // The first look shows the files, unless the author asked for no portfolio view.
         cover: keep ? keep.cover : info?.view === "hidden",
       };
@@ -73,7 +82,7 @@ export const usePortfolio = create<Store>((set, get) => ({
     const d = get().docs[doc];
     if (d) patch(set, doc, { open: d.open.includes(folder) ? d.open.filter((f) => f !== folder) : [...d.open, folder] });
   },
-  select: (doc, file) => patch(set, doc, { selected: file }),
+  select: (doc, key) => patch(set, doc, { selected: key }),
   showCover: (doc, on) => patch(set, doc, { cover: on }),
 }));
 

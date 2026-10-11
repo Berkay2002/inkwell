@@ -75,3 +75,6 @@ export function typeLabel(file: Pick<PortfolioFile, "name" | "mime">): string {
   if (ext && mime) return `${ext} (${mime})`;
   return ext ?? mime ?? "unknown type";
 }
+
+/** What the store's `selected` holds for a row: a file's id, or `d:<id>` for a folder. */
+export const rowKey = (r: Row) => (r.kind === "file" ? r.file.id : `d:${r.folder.id}`);

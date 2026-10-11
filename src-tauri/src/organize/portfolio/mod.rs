@@ -527,7 +527,15 @@ fn read_folders(coll: &PdfObject) -> Result<Vec<PortfolioFolder>> {
 /// loop is an error (the caller shows the document as a plain one).
 pub fn read(doc: &PdfDocument) -> Result<Option<PortfolioInfo>> {
     let Some(coll) = collection(doc)? else { return Ok(None) };
-    let fields = read_schema(&coll)?;
+    let mut fields = read_schema(&coll)?;
+    // /Schema is optional: the file's own facts are the columns then. A schema with no visible file name
+    // gets one in front, so a row always says which file it is.
+    if fields.is_empty() {
+        let own = [("Name", Sub::File), ("Description", Sub::Desc), ("Size", Sub::Size), ("Modified", Sub::ModDate)];
+        fields = own.iter().map(|(k, sub)| Field { key: (*k).into(), name: (*k).into(), sub: *sub, visible: true }).collect();
+    } else if !fields.iter().any(|f| f.sub == Sub::File && f.visible) {
+        fields.insert(0, Field { key: "$name".into(), name: "Name".into(), sub: Sub::File, visible: true });
+    }
     let sort = read_sort(&coll, &fields);
     let view = match get(&coll, "View").and_then(|v| name_of(&v)).as_deref() {
         Some("T") => "tile",

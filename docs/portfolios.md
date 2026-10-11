@@ -83,6 +83,7 @@ Command palette. Pick files (any type), then a Save dialog; the result opens in 
 - The view always lays out as Details; `/View T` and `C` are read but not drawn as tiles or a custom layout.
 - Folders are shown as folders but Extract all writes flat (clashes get " (2)"), not into sub-folders.
 - Creating a portfolio makes no folders; a `/CI` field of subtype S, D or N is only read, never filled for new files.
+- There is no preview pane (Acrobat's layout has one beside the list); a PDF is looked at by opening it in a tab.
 - The page-view tools (zoom, find) act on the cover page, so they do nothing visible while the list shows.
 - The `<id>` folder prefix is read as a decimal number; this is the form the brief describes, not verified against
   a file made by Acrobat here.

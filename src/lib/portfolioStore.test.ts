@@ -27,7 +27,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
 import * as api from "./api";
 import type { PortfolioFile, PortfolioInfo } from "./api";
-import { nextSort, openAction, rows, sortFiles, typeLabel } from "./portfolioLogic";
+import { nextSort, openAction, rowKey, rows, sortFiles, typeLabel } from "./portfolioLogic";
 import { activate, createPortfolio, extractAll, usePortfolio } from "./portfolioStore";
 
 const file = (name: string, o: Partial<PortfolioFile> = {}): PortfolioFile => ({
@@ -128,6 +128,16 @@ describe("folders", () => {
     expect(usePortfolio.getState().docs[DOC]).toMatchObject({ open: [1], selected: "n:a.pdf" });
     usePortfolio.getState().toggleFolder(DOC, 1);
     expect(usePortfolio.getState().docs[DOC].open).toEqual([]);
+  });
+
+  it("the first look selects the initial document with its folders open; a folder row can be selected too", async () => {
+    vi.mocked(api.portfolioInfo).mockResolvedValue(info({ initial: "n:c.pdf" }));
+    await usePortfolio.getState().load(DOC);
+    expect(usePortfolio.getState().docs[DOC]).toMatchObject({ selected: "n:c.pdf", open: [2, 1] });
+    usePortfolio.getState().select(DOC, rowKey({ kind: "folder", folder: info().folders[0], depth: 0, open: false, count: 0 }));
+    expect(usePortfolio.getState().docs[DOC].selected).toBe("d:1");
+    await usePortfolio.getState().load(DOC);
+    expect(usePortfolio.getState().docs[DOC].selected).toBe("d:1");
   });
 });
 

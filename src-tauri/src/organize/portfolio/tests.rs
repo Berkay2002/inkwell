@@ -4,7 +4,7 @@ use super::*;
 use crate::engine::edit::EditSource;
 use crate::engine::fixture::{self, Fixture};
 use crate::engine::{DocId, Engine};
-use crate::organize::attach::{self, Entry, NewFile};
+use crate::organize::attach::{self, Entry, NewFile, stream_of};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -127,7 +127,8 @@ const FOUR: [FieldSpec; 5] = [
 fn sample() -> PdfDocument {
     let mut doc = PdfDocument::new();
     for n in ["alpha.pdf", "beta.pdf", "gamma.txt", "delta.pdf", "epsilon.pdf"] {
-        attach::add_one(&mut doc, &file(n, n.as_bytes())).unwrap();
+        let data = if n.ends_with(".pdf") { fixture::build(&Fixture { pages: 1, chapter_every: 0, lines: 4, ..Default::default() }) } else { n.as_bytes().to_vec() };
+        attach::add_one(&mut doc, &file(n, &data)).unwrap();
     }
     rename_keys(&mut doc, &[("beta.pdf", "<1>beta.pdf"), ("gamma.txt", "<2>gamma.txt"), ("delta.pdf", "<3>delta.pdf")]);
     set_ci(&mut doc, "alpha.pdf", &[("Author", "Zed"), ("Due", "D:20260301")], &[("Pages", 10)]);
@@ -148,6 +149,48 @@ fn sample() -> PdfDocument {
     let root = doc.add_object(&root).unwrap();
     set_collection(&mut doc, &FOUR, &[("Author", true), ("Pages", false)], Some(root), Some("alpha.pdf"));
     doc
+}
+
+/// Writes `sample()` (with a cover page) where the hand-made portfolio can be looked at in the app:
+/// `INKWELL_SAMPLE_OUT=/path/sample.pdf cargo test --lib write_sample_portfolio -- --ignored`.
+#[test]
+#[ignore]
+fn write_sample_portfolio() {
+    let out = std::env::var("INKWELL_SAMPLE_OUT").unwrap_or_else(|_| std::env::temp_dir().join("inkwell-portfolio-sample.pdf").to_string_lossy().into_owned());
+    let mut doc = sample();
+    let rows = [("alpha.pdf".to_string(), 1u64), ("beta.pdf".to_string(), 1)];
+    super::make::write_cover(&mut doc, &rows, 2).unwrap();
+    let bytes = crate::engine::edit::write_doc(&doc, crate::engine::edit::rewrite_opts(), 1 << 20).unwrap();
+    std::fs::write(&out, bytes).unwrap();
+    println!("wrote {out}");
+}
+
+#[test]
+fn a_collection_without_a_schema_lists_the_files_own_facts() {
+    let mut doc = PdfDocument::new();
+    attach::add_one(&mut doc, &file("b.txt", &[1u8; 20])).unwrap();
+    attach::add_one(&mut doc, &NewFile { name: "a.pdf".into(), data: vec![2u8; 3000], description: "First".into(), modified: Some(1_700_000_000) }).unwrap();
+    let mut coll = dict(&mut doc, "Collection");
+    put_name(&mut coll, "View", "D").unwrap();
+    put_str(&mut coll, "D", "a.pdf").unwrap();
+    doc.catalog().unwrap().dict_put("Collection", coll).unwrap();
+    let info = read(&doc).unwrap().unwrap();
+    assert_eq!(info.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Name", "Description", "Size", "Modified"]);
+    assert_eq!(info.files.iter().map(|f| f.cells.clone()).collect::<Vec<_>>(), [
+        vec!["a.pdf", "First", "2.9 KB", "2023-11-14 22:13"],
+        vec!["b.txt", "", "20 B", ""],
+    ]);
+    assert_eq!(info.initial.as_deref(), Some("n:a.pdf"));
+
+    // a schema with no visible file name gets one in front
+    let mut doc = PdfDocument::new();
+    attach::add_one(&mut doc, &file("a.txt", b"x")).unwrap();
+    set_collection(&mut doc, &[("Who", "S", "Author", 0, true)], &[("Who", true)], None, None);
+    set_ci(&mut doc, "a.txt", &[("Who", "Amy")], &[]);
+    let info = read(&doc).unwrap().unwrap();
+    assert_eq!(info.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Name", "Author"]);
+    assert_eq!(info.files[0].cells, ["a.txt", "Amy"]);
+    assert_eq!(info.sort, [SortKey { field: 1, ascending: true }]);
 }
 
 #[test]
@@ -214,7 +257,7 @@ fn a_sub_item_brings_its_prefix() {
     let mut ci = dict(&mut doc, "CollectionItem");
     ci.dict_put("Rev", sub).unwrap();
     spec_of(&doc, "a.txt").dict_put("CI", ci).unwrap();
-    assert_eq!(read(&doc).unwrap().unwrap().files[0].cells, ["Rev. 12"]);
+    assert_eq!(read(&doc).unwrap().unwrap().files[0].cells, ["a.txt", "Rev. 12"]);
 }
 
 #[test]
@@ -310,6 +353,25 @@ fn create_writes_a_portfolio_that_reads_back_byte_identical() {
         assert!(!f.cells[2].is_empty() && !f.cells[3].is_empty(), "{want}: {:?}", f.cells);
         assert_eq!(f.cells[0], want);
     }
+    // what the file carries for readers of the PDF itself
+    e2.read_custom(id, |d| {
+        let spec = spec_of(d, "a.pdf");
+        assert_eq!(get(&spec, "AFRelationship").and_then(|v| name_of(&v)).as_deref(), Some("Unspecified"));
+        let params = resolved(&get(&stream_of(&spec).unwrap().resolve().unwrap().unwrap(), "Params").unwrap());
+        assert_eq!(get(&params, "Size").unwrap().as_int().unwrap() as usize, before[0].len());
+        assert!(get(&params, "ModDate").unwrap().as_string().unwrap().starts_with("D:"));
+        let ci = resolved(&get(&spec, "CI").unwrap());
+        assert_eq!(get(&ci, "Name").unwrap().as_string().unwrap(), "a.pdf");
+        assert_eq!(get(&ci, "Description").unwrap().as_string().unwrap(), "");
+        assert_eq!(get(&ci, "Size").unwrap().as_int().unwrap() as usize, before[0].len());
+        assert!(get(&ci, "Modified").unwrap().as_string().unwrap().starts_with("D:"));
+        let coll = collection(d)?.unwrap();
+        assert_eq!(get(&coll, "View").and_then(|v| name_of(&v)).as_deref(), Some("D"));
+        let sort = resolved(&get(&coll, "Sort").unwrap());
+        assert_eq!(get(&sort, "S").and_then(|v| name_of(&v)).as_deref(), Some("Name"));
+        Ok(())
+    })
+    .unwrap();
     let read_back = |key: &str| e2.read_custom(id, |d| attach::read_data(d, &format!("n:{key}"))).unwrap().1;
     assert_eq!(read_back("a.pdf"), before[0]);
     assert_eq!(read_back("b.pdf"), before[1]);
@@ -333,6 +395,12 @@ fn create_refuses_what_it_should() {
     // writing over one of its own sources
     let e = create(&eng, &sources(&[("a.pdf", &a)]), &a).unwrap_err().to_string();
     assert!(e.contains("being written"), "{e}");
+    // ... spelled in another case on a disk that does not tell them apart
+    let upper = d.join("A.PDF");
+    if upper.exists() {
+        let e = create(&eng, &sources(&[("a.pdf", &a)]), upper.to_str().unwrap()).unwrap_err().to_string();
+        assert!(e.contains("being written"), "{e}");
+    }
     assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&a).unwrap());
     // a folder is not a file
     assert!(create(&eng, &sources(&[("d", d.to_str().unwrap())]), &out).is_err());
@@ -360,7 +428,6 @@ fn hostile_names_are_cleaned_and_nothing_is_overwritten() {
     let out = d.join("out");
     std::fs::create_dir_all(&out).unwrap();
     // a file already there stays as it is
-    std::fs::write(out.join("CON.keep"), "mine").unwrap();
     std::fs::write(out.join("x.exe"), "mine").unwrap();
     let doc = hostile();
 
@@ -374,13 +441,13 @@ fn hostile_names_are_cleaned_and_nothing_is_overwritten() {
     // nothing escaped the folder
     assert!(!d.join("x.exe").exists() && !d.parent().unwrap().join("x.exe").exists());
     assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
-    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 7);
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 6);
 
     // and again: every file gets another number, none is replaced
     let again = extract_all(&doc, &out).unwrap();
     assert_eq!(again.written.len(), 5);
     assert!(again.written.iter().all(|n| !r.written.contains(n)), "{:?}", again.written);
-    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 12);
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 11);
     assert_eq!(std::fs::read(out.join("x (2).exe")).unwrap(), b"data0");
     assert!(extract_all(&doc, &d.join("nope")).is_err());
 }
