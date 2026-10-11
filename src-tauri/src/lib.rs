@@ -11,6 +11,7 @@ pub mod ocr;
 pub mod paths;
 pub mod recents;
 pub mod redact;
+pub mod textedit;
 pub mod tools;
 
 use engine::cache::TileKey;
@@ -772,6 +773,8 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            textedit::app::text_blocks,
+            textedit::app::text_edit,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,
