@@ -1,0 +1,233 @@
+/* page layer (shares .an-space and .an-capture with comments) */
+.ms-svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.ms-svg * {
+  vector-effect: non-scaling-stroke;
+}
+.ms-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  cursor: pointer;
+}
+.ms-hit:hover {
+  stroke: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.ms-hit.on {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.ms-hit.on.area {
+  fill: var(--accent-soft);
+}
+.ms-draft {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 5 3;
+}
+.ms-draft.area {
+  fill: var(--accent-soft);
+}
+.ms-vertex {
+  fill: var(--surface);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  vector-effect: none;
+}
+.ms-calib {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 2 3;
+}
+.ms-snap * {
+  fill: var(--surface);
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.ms-snap.close * {
+  fill: var(--accent);
+}
+.ms-capture {
+  cursor: crosshair;
+}
+.ms-label {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 8px;
+  white-space: nowrap;
+  transform-origin: 0 0;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
+  font-size: 12px;
+  pointer-events: none;
+}
+.ms-label span {
+  font-size: 10px;
+  color: var(--text-2);
+}
+
+/* floating bar */
+.ms-bar-wrap {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+}
+.ms-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+}
+.ms-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.ms-chip:hover {
+  color: var(--text);
+}
+.ms-chip.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ms-units {
+  height: 28px;
+  padding: 0 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+}
+.ms-done {
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 14px;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.ms-calib-bar {
+  gap: 8px;
+  padding: 8px 12px;
+}
+.ms-num {
+  width: 90px;
+  padding: 4px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+}
+.ms-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 280px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+.ms-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ms-hint {
+  margin: 0;
+  font-size: 12px;
+}
+.ms-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ms-error {
+  margin: 0;
+  padding: 6px 10px;
+  background: var(--surface);
+  border: 1px solid var(--danger, #b3261e);
+  border-radius: 8px;
+  color: var(--danger, #b3261e);
+}
+
+/* rail */
+.ms-body {
+  padding-top: 4px;
+}
+.ms-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ms-big {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.ms-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 0;
+}
+.ms-facts dt {
+  color: var(--text-2);
+}
+.ms-facts dd {
+  margin: 0;
+}
+.ms-total,
+.ms-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.ms-item {
+  width: 100%;
+  border: 1px solid var(--border);
+  margin-bottom: 6px;
+  background: var(--surface);
+}
+.ms-item:hover {
+  border-color: var(--accent);
+}
+.ms-item.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.ms-export {
+  align-self: flex-start;
+}

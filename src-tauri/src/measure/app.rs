@@ -1,9 +1,11 @@
 //! Tauri commands for measuring. The UI is the user; the assistant calls the functions in `super` with its turn.
 
-use super::{Kind, MeasureDto, PageScale, Quantity, Scale, SnapCache, SnapHit, add_one, list_all, scale_get, scale_set, snap_at, value_of};
+use super::{Kind, MeasureDto, PageScale, Quantity, Scale, SnapCache, SnapHit, add_one, csv_of, list_all, rescale, scale_get, scale_set, snap_at, value_of};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
+use crate::paths::Paths;
 use serde::Serialize;
+use tauri::{Manager, Window};
 
 type Result<T> = std::result::Result<T, EngineError>;
 type Eng<'a> = tauri::State<'a, std::sync::Arc<Engine>>;
@@ -59,6 +61,33 @@ pub async fn measure_value(eng: Eng<'_>, doc: DocId, page: u32, kind: Kind, poin
 pub async fn measure_list(eng: Eng<'_>, doc: DocId) -> Result<Vec<MeasureDto>> {
     let eng = eng.inner().clone();
     blocking(move || list_all(&eng, doc)).await
+}
+
+/// Gives the measurement `xref` another scale; one undo step. The annotation is replaced, so `xref` changes.
+#[tauri::command]
+pub async fn measure_rescale(eng: Eng<'_>, doc: DocId, page: u32, xref: i32, scale: Scale) -> Result<Added> {
+    let eng = eng.inner().clone();
+    blocking(move || {
+        let (state, xref, quantity) = rescale(&eng, doc, page, xref, &scale, EditSource::User)?;
+        Ok(Added { state, xref, quantity })
+    })
+    .await
+}
+
+/// Writes every measurement of the document as CSV to the file a save token names. Resolves to the path.
+#[tauri::command]
+pub async fn measure_export_csv(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Paths>, doc: DocId, to: String) -> Result<String> {
+    let to = reg.take_save(window.label(), &to)?;
+    let eng = eng.inner().clone();
+    blocking(move || {
+        // Never over a file a tab has open.
+        eng.check_not_open(&to, None)?;
+        let csv = csv_of(&list_all(&eng, doc)?);
+        crate::organize::app::write_plain(std::path::Path::new(&to), csv.as_bytes())?;
+        window.state::<Paths>().learn(&to);
+        Ok(to)
+    })
+    .await
 }
 
 /// The nearest end point, midpoint or line of the page's vector paths within `radius` points of `(x, y)` (page space).

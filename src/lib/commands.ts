@@ -6,6 +6,7 @@ import { openPreflight, usePreflight } from "./preflight";
 import { useRedact } from "./redact";
 import { useSearch } from "./searchStore";
 import { useAnnot } from "./annot";
+import { useMeasure } from "./measure";
 import { useForms } from "./forms";
 import { useHistory } from "./historyStore";
 import { openCompareSetup } from "../components/history/HistoryPanel";
@@ -303,6 +304,7 @@ export const commands: Command[] = [
   },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },
+  { id: "measure", title: "Measure", needsDoc: true, run: () => useMeasure.getState().setOpen(!useMeasure.getState().open) },
   { id: "forms", title: "Forms", keys: ["Ctrl+Alt+F"], needsDoc: true, run: () => useForms.getState().setOpen(!useForms.getState().open) },
   {
     id: "forms-prepare",
@@ -335,7 +337,7 @@ export const commands: Command[] = [
   })),
   {
     id: "comment-delete",
-    title: "Comments: delete selected",
+    title: "Comments: delete selected (or the selected measurement)",
     keys: ["Delete"],
     needsDoc: true,
     notInText: true,
@@ -343,6 +345,9 @@ export const commands: Command[] = [
       const f = useForms.getState();
       const field = f.open && f.authoring ? f.get(d.id).selected : null;
       if (field) return void f.remove(d.id, [field]);
+      const m = useMeasure.getState();
+      const measured = m.open ? m.get(d.id).selected : null;
+      if (measured) return void m.remove(d.id, measured);
       const a = useAnnot.getState();
       const sel = a.open ? a.get(d.id).selected : null;
       if (sel) void a.remove(d.id, [sel]);

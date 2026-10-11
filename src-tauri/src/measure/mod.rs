@@ -72,6 +72,24 @@ pub fn add_one(
     Ok((state, xref, quantity))
 }
 
+/// Gives the measurement `xref` another scale and values it again: the annotation is replaced by one with the same
+/// kind, points and author (one undo step; the xref changes).
+pub fn rescale(eng: &Engine, doc: DocId, page: u32, xref: i32, scale: &Scale, source: EditSource) -> Result<(EditState, i32, Quantity)> {
+    scale.validate().map_err(EngineError::Invalid)?;
+    let mut made = None;
+    let state = eng.apply_custom(doc, format!("Change the scale of a measurement on p. {} to {}", page + 1, scale.label()), source, false, |d| {
+        let old = write::list(d)?
+            .into_iter()
+            .find(|m| m.page == page && m.xref == xref)
+            .ok_or_else(|| EngineError::Invalid("that measurement is no longer in the file".into()))?;
+        crate::annot::delete(d, page, &[xref])?;
+        made = Some(write::add(d, page, old.kind, &old.points, Some(scale), &old.author)?);
+        Ok(vec![page])
+    })?;
+    let (xref, quantity) = made.ok_or(EngineError::Panic)?;
+    Ok((state, xref, quantity))
+}
+
 /// The value the points would measure, without making anything.
 pub fn value_of(eng: &Engine, doc: DocId, page: u32, kind: Kind, points: &[[f32; 2]], scale: Option<&Scale>) -> Result<Quantity> {
     eng.read_custom(doc, |d| write::value(d, page, kind, points, scale))
@@ -79,6 +97,32 @@ pub fn value_of(eng: &Engine, doc: DocId, page: u32, kind: Kind, points: &[[f32;
 
 pub fn list_all(eng: &Engine, doc: DocId) -> Result<Vec<MeasureDto>> {
     eng.read_custom(doc, write::list)
+}
+
+/// The measurements as CSV (UTF-8 with a byte order mark and CRLF lines, as spreadsheets expect): page, type, the
+/// number and its unit apart, the label, the scale and the author. Text that a spreadsheet would run as a formula
+/// gets a leading apostrophe.
+pub fn csv_of(items: &[MeasureDto]) -> String {
+    fn cell(s: &str) -> String {
+        let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_owned() };
+        if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s }
+    }
+    let mut out = String::from("\u{feff}Page,Type,Value,Unit,Label,Scale,Author\r\n");
+    for m in items {
+        let scale = m.scale.as_ref().map(Scale::label).unwrap_or_default();
+        let row = [
+            (m.page + 1).to_string(),
+            m.kind.noun().to_owned(),
+            calc::trim_num((m.quantity.value * 1e4).round() / 1e4), // f32 page points leave a rounding tail
+            cell(&m.quantity.unit),
+            cell(&m.quantity.text),
+            cell(&scale),
+            cell(&m.author),
+        ];
+        out.push_str(&row.join(","));
+        out.push_str("\r\n");
+    }
+    out
 }
 
 /// The snap for one point, from the page's cached index.

@@ -933,3 +933,62 @@ fn a_viewport_that_encloses_the_crop_box_is_the_page_scale() {
     eng.undo(id).unwrap();
     assert_eq!(scale_get(&eng, id, 0).unwrap().scale, Scale { real: 1.0, ..FT10 });
 }
+
+// ---- the UI's calls: change a scale, export ------------------------------------------------------------------
+
+#[test]
+fn rescale_replaces_the_measurement_in_one_undo_step() {
+    let (eng, id, path) = open("rescale", &Spec::default());
+    let (xref, q) = add(&eng, id, Kind::Distance, &[[100.0, 100.0], [300.0, 100.0]], Some(&FT10));
+    assert_eq!(q.text, "27.78 ft");
+    let base = eng.history(id).unwrap().len();
+
+    // 1 in = 1 m: the same 200 pt line is now 2.78 m.
+    let m = Scale { paper: 1.0, paper_unit: Unit::In, real: 1.0, real_unit: Unit::M };
+    let (st, new, q2) = rescale(&eng, id, 0, xref, &m, EditSource::User).unwrap();
+    assert!(st.dirty);
+    assert_eq!(q2.text, "2.78 m");
+    let h = eng.history(id).unwrap();
+    assert_eq!(h.len(), base + 1, "one step");
+    assert!(h.last().unwrap().label.starts_with("Change the scale of a measurement on p. 1"));
+    let all = list_all(&eng, id).unwrap();
+    assert_eq!(all.len(), 1, "replaced, not added");
+    assert_eq!(all[0].xref, new);
+    assert_eq!(all[0].points, vec![[100.0, 100.0], [300.0, 100.0]]);
+    assert_eq!(all[0].author, "Alex Johnson");
+    assert_eq!(all[0].scale, Some(m));
+
+    // Undo brings the first one back whole; a stale xref and a bad scale are refused and leave no step.
+    eng.undo(id).unwrap();
+    let back = list_all(&eng, id).unwrap();
+    assert_eq!((back.len(), back[0].quantity.text.as_str()), (1, "27.78 ft"));
+    let n = eng.history(id).unwrap().len();
+    assert!(rescale(&eng, id, 0, 99_999, &m, EditSource::User).is_err());
+    let zero = Scale { paper: 0.0, ..m };
+    assert!(rescale(&eng, id, 0, back[0].xref, &zero, EditSource::User).is_err());
+    assert_eq!(eng.history(id).unwrap().len(), n);
+
+    // Saved and reopened it is the new one.
+    rescale(&eng, id, 0, back[0].xref, &m, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    let m2 = list_all(&eng2, id2).unwrap();
+    assert_eq!((m2.len(), m2[0].quantity.text.as_str()), (1, "2.78 m"));
+}
+
+#[test]
+fn csv_has_value_and_unit_apart_and_is_safe_in_a_spreadsheet() {
+    let (eng, id, _) = open("csv", &Spec::default());
+    add(&eng, id, Kind::Distance, &[[0.0, 0.0], [720.0, 0.0]], Some(&FT10));
+    add(&eng, id, Kind::Area, &[[0.0, 0.0], [72.0, 0.0], [72.0, 72.0], [0.0, 72.0]], Some(&FT10));
+    let mut items = list_all(&eng, id).unwrap();
+    items[1].author = "=HYPERLINK(\"x\"),\"Bo\"".into();
+    let csv = csv_of(&items);
+    let lines: Vec<&str> = csv.trim_end().split("\r\n").collect();
+    assert_eq!(lines[0], "\u{feff}Page,Type,Value,Unit,Label,Scale,Author");
+    assert_eq!(lines[1], "1,distance,100,ft,100.00 ft,1 in = 10 ft,Alex Johnson");
+    // 1 sq in at 10 ft per inch is 100 sq ft; the formula-looking author is quoted and defused.
+    assert_eq!(lines[2], "1,area,100,sq ft,100.00 sq ft,1 in = 10 ft,\"'=HYPERLINK(\"\"x\"\"),\"\"Bo\"\"\"");
+    assert_eq!(csv_of(&[]), "\u{feff}Page,Type,Value,Unit,Label,Scale,Author\r\n");
+}

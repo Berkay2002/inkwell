@@ -9,6 +9,7 @@ import { cached } from "../lib/tiles";
 import { usePagesDark } from "../lib/usePagesDark";
 import type { Rect4 } from "../store";
 import { AnnotLayer } from "./comments/AnnotLayer";
+import { MeasureLayer } from "./measure/MeasureLayer";
 import { LinkLayer } from "./edit/LinkLayer";
 import { MarkPreview } from "./MarkPreview";
 import { ReadLinks } from "./ReadLinks";
@@ -141,6 +142,7 @@ export const PageView = memo(function PageView(p: Props) {
       <ReadLinks docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <FormLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <AnnotLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
+      <MeasureLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <TextEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <LinkLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       {armed && (
