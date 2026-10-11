@@ -508,6 +508,21 @@ fn fingerprinting_is_bounded_and_the_dict_is_checked_before_the_blob() {
 }
 
 #[test]
+fn comment_and_field_text_is_charged_to_the_fingerprint_budget() {
+    let base = dir("catalog-fp-text-budget");
+    let long = "x".repeat(4000);
+    let extra = Extra {
+        catalog: String::new(),
+        annots: "6 0 R".into(),
+        objs: vec![format!("<< /Type /Annot /Subtype /Text /Rect [72 400 90 420] /Contents ({long}) >>")],
+    };
+    let p = write(&base, "a.pdf", doc_with(&[vec!["body"]], extra));
+    let doc = PdfDocument::open(&*p).unwrap();
+    assert!(embed::fingerprint_with(&doc, 1 << 20, 1 << 20).is_some());
+    assert!(embed::fingerprint_with(&doc, 1 << 20, 1000).is_none(), "a long comment is not free");
+}
+
+#[test]
 fn a_damaged_or_old_catalog_entry_is_listed_and_can_be_rebuilt_or_deleted() {
     let (root, folder) = corpus("meta");
     let (m, d) = make(&root, &folder);

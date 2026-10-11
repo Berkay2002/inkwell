@@ -89,13 +89,16 @@ impl Feed {
         Some(())
     }
 
-    fn text(&mut self, tag: u8, t: &str, r: &[f32; 4]) {
+    /// Hashes one record's text and rectangle, charged to the same budget as the streams.
+    fn text(&mut self, tag: u8, t: &str, r: &[f32; 4]) -> Option<()> {
+        self.left = self.left.checked_sub(t.len())?;
         self.h.update(&[tag]);
         self.h.update(&(t.len() as u64).to_le_bytes());
         self.h.update(t.as_bytes());
         r.iter().for_each(|v| {
             self.h.update(&v.to_le_bytes());
         });
+        Some(())
     }
 
     /// The Form XObjects and tiling patterns under `res` (they can show text) and the fonts' `/Encoding` and
@@ -111,7 +114,12 @@ impl Feed {
                 let (stream, nested) = if cat == "Font" {
                     // The encoding (a name, or a dict with /Differences) decides what a code reads as.
                     if let Some(e) = o.get_dict("Encoding").ok().flatten().and_then(|e| e.resolve().ok().flatten()) {
-                        self.h.update(e.to_string().as_bytes());
+                        let e = e.to_string();
+                        if e.len() > self.per.min(self.left) {
+                            return None;
+                        }
+                        self.left -= e.len();
+                        self.h.update(e.as_bytes());
                     }
                     (o.get_dict("ToUnicode").ok().flatten(), false)
                 } else {
@@ -163,12 +171,16 @@ pub(super) fn fingerprint_with(doc: &PdfDocument, per_stream: usize, total: usiz
         }
         // The same read as the stored records: comments, and field values wherever the field keeps them.
         if let Ok((comments, fields)) = doc.load_page(p).map_err(|_| ()).and_then(|pg| extras_of(pg).map_err(|_| ())) {
-            comments.iter().for_each(|(t, r)| f.text(1, t, r));
-            fields.iter().for_each(|(t, r)| f.text(2, t, r));
+            for (t, r) in &comments {
+                f.text(1, t, r)?;
+            }
+            for (t, r) in &fields {
+                f.text(2, t, r)?;
+            }
         }
     }
     for (p, title) in bookmarks_of(doc) {
-        f.text(3, &title, &[p as f32, 0.0, 0.0, 0.0]);
+        f.text(3, &title, &[p as f32, 0.0, 0.0, 0.0])?;
     }
     Some(f.h.finalize().to_hex().to_string())
 }
@@ -185,7 +197,8 @@ pub struct Embedded {
 
 pub fn status(doc: &PdfDocument) -> Embedded {
     let Some(s) = private(doc) else { return Embedded::default() };
-    let raw = s.read_raw_stream().map(|b| b.len() as u64).unwrap_or(0);
+    // The stored size from the dict: the raw bytes are not read just to count them.
+    let raw = s.get_dict("Length").ok().flatten().and_then(|l| l.as_int().ok()).unwrap_or(0).max(0) as u64;
     let n = doc.page_count().unwrap_or(0).max(0) as usize;
     let id = pdf_id(doc);
     // The dict says which file and how many pages: a mismatch is "out of date" without reading the blob.
