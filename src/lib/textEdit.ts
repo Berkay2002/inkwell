@@ -69,7 +69,7 @@ export function cssFamily(font: string): string {
 /** `ABCDEF+Arial-BoldMT` as a person would say it: `Arial`. */
 export function displayFont(base: string): string {
   const name = base.replace(/^[A-Z]{6}\+/, "");
-  const stripped = name.replace(/[-,](Bold|Italic|Oblique|Regular|BoldItalic|BoldOblique|Roman|Medium|Light|Semibold)+(MT|PS)?$/i, "").replace(/(MT|PS)$/, "");
+  const stripped = name.replace(/[-,](Bold|Italic|Oblique|Regular|BoldItalic|BoldOblique|Roman|Medium|Light|Semibold)+(MT|PS)?$/i, "").replace(/(PSMT|MT|PS)$/, "");
   return (stripped || name).replace(/([a-z])([A-Z])/g, "$1 $2");
 }
 
@@ -178,7 +178,15 @@ export const useTextEdit = create<Store>((set, get) => {
 
   return {
     open: false,
-    setOpen: (open) => set(open ? { open } : { open, tool: "select" }),
+    setOpen: (open) => {
+      if (open) return set({ open });
+      // Leaving Edit sends what was typed (one undo step) and clears the selection.
+      const ids = Object.keys(get().docs).map(Number);
+      set({ open, tool: "select" });
+      void Promise.all(ids.map((id) => get().commit(id))).then(() => {
+        if (!get().open) for (const id of ids) patchDoc(id, { selected: null, draft: null, adding: null, notice: null });
+      });
+    },
     tool: "select",
     setTool: (tool) => set({ tool }),
     docs: {},

@@ -1,7 +1,7 @@
 # Edit existing text in place
 
-Acrobat's "Edit text & images" for text (study: [study/02-edit.md](study/02-edit.md)). Engine only; the UI is not
-built yet. Code: `src-tauri/src/textedit/`, adapted from pdfcraft `crates/edit/src/text.rs`, `crates/content` and
+Acrobat's "Edit text & images" for text (study: [study/02-edit.md](study/02-edit.md)). Engine and UI (see "The UI" below).
+Code: `src-tauri/src/textedit/`, adapted from pdfcraft `crates/edit/src/text.rs`, `crates/content` and
 `crates/fonts` (b8ddf71, MIT OR Apache-2.0; see `third_party/pdfcraft/`). MuPDF stays the only engine that owns the
 document: pages, resources, fonts and streams are read and written as MuPDF objects, pdfcraft's own COS layer is not used.
 
@@ -11,12 +11,14 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 |---|---|---|
 | `text_blocks` | `doc, page` | `{ rev, blocks: TextBlock[], areas: Area[] }` |
 | `text_edit` | `doc, rev, page, index, change` | `{ state: EditState, fallback: Fallback \| null }` |
+| `text_add` | `doc, rev, page, new` | `EditState` |
 
 - Coordinates are page space as the viewer shows it (points, origin top left, `/Rotate` applied): the space of
   `page_text`. Offsets and widths in `change` are in that space too.
-- `TextBlock = { index, text, rect, lines: rect[], font, size, bold, italic, color, align, editable, issue, reason }`.
+- `TextBlock = { index, text, rect, lines: rect[], font, size, bold, italic, color, align, lineSpacing, editable, issue, reason }`.
+  `lineSpacing` is the distance between lines over the font size (null for one line).
   `font` is the `/BaseFont` (subset prefix kept), `size` in points, `align` one of `left|center|right|justify`.
-- `change = { text?, size?, color?, align?, offset?: [dx, dy], width? }`; unset fields keep the block's own. `text`
+- `change = { text?, size?, color?, align?, offset?: [dx, dy], width?, lineSpacing?, bold?, italic? }`; unset fields keep the block's own. `text`
   may contain `\n` for hard line breaks; everything else reflows to the block's width.
 - `index` belongs to the `rev` of the list it came from; a `text_edit` against an older `rev` is `Stale` (list again).
 - Each `text_edit` is one edit-core step (`Engine::apply_removing`): one undo step labelled "Edit text on p. N",
@@ -82,7 +84,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 ## Limits
 
 - One font per block: a block is one font, size and colour (mixed-style lines are separate blocks), and a rewrite sets
-  the whole block in one style; per-character formatting, bold/italic toggles and font choice are not offered.
+  the whole block in one style; per-character formatting and font choice are not offered. Bold and italic set the
+  whole block in the matching standard face (reported as a fallback), because an embedded subset has no bold.
 - Text inside form XObjects is reported, not edited (it may be shared by several pages).
 - Fallback fonts are the standard 14 faces only (no system fonts, no CJK: CJK text that the original font lacks is
   refused with a message). The embedded face is the whole font, not a subset.
@@ -95,3 +98,38 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - Glyph coverage of composite (Type0) subset fonts is judged from `/W` and ToUnicode, not the font program.
 - The "outlines" check is a heuristic for pages with no text at all.
 - Rewritten streams are Flate-compressed new objects; untouched streams and the rest of the page are byte-identical.
+
+## Adding text
+
+`text_add(doc, rev, page, { text, size, color, at: [x, y], width? })` puts a new text box with its top left at `at`
+(page space; 12 pt black by default). It is set in Helvetica (a standard face; other scripts take the embedded
+fallback face), wrapped to `width` when given, upright on rotated pages, in a new Flate stream appended to the
+page's contents with its own `q ... Q` and a `/TouchUp_TextEdit` marked-content tag. One undo step, "Add text on
+p. N"; unlike a rewrite it saves incrementally. The new box is listed as a block straight away and edited like any
+other.
+
+## The UI
+
+Entry: the **Edit** segment of the `Read | Edit | Organize` pill (also Ctrl+E, "Edit text & images" in the palette,
+and "Add text box"). Edit is a mode of the viewer, not a tab: Read and Organize stay in the pill. The rail is the
+dock the other tools use; opening it closes Comments, Redact, History, a Tools sheet and a docked assistant, and
+opening any of those closes it (`src/lib/commentRail.ts`).
+
+- **Pages**: `TextEditLayer` (per page, inside `PageView`) draws dotted outlines for blocks. Click a line to edit it in
+  place; the overlay editor is a textarea in the block's font family, size, colour, alignment and line height.
+  Locked blocks (Type 3, no ToUnicode, vertical, clipped, text in forms, outlines) are dashed grey; clicking one says
+  why. Hidden-layer text is not offered at all.
+- **Commit**: typed text is one `text_edit` when the block is left (click away, Esc, Ctrl+Enter, another block, Save
+  or leaving Edit), so one undo step per block session. A format control sends the typed text together with its change.
+  While nothing new was typed, Ctrl+Z / Ctrl+Y in the editor are the document's undo and redo; with typed text they
+  are the field's own.
+- **Move and rewrap**: the grip above the frame moves the block, the side handles rewrap it to a new width.
+- **Rail**: Add content (Text tool; Image is a dimmed "soon" slot for the image engine in `cloud-image-edit`);
+  Format text: a one-line summary of what is selected, the font shown honestly (read-only) with B / I (standard face),
+  size stepper, colour (presets and the system picker), alignment, line spacing; a quiet notice when a font was
+  replaced; the page's block list. Footer: "Changes apply when you click away. Undo with Ctrl+Z."
+- **Cost**: one `text_blocks` call per page that is near the viewport, cached per page and document generation
+  (`src/lib/textEdit.ts`); edits list the one page again.
+- **Tests**: `src/lib/textEdit.test.ts` (helpers and store flows), `scripts/edit-shots.mjs` (runtime: edit a line,
+  size, colour, add a text box, undo/redo, save, reopen, on a copy of `docs/study/samples/edit-source.pdf`; screens in
+  `docs/screens/edit/`).

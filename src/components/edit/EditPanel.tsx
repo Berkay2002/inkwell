@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { TextAlign, TextBlock } from "../../lib/api";
-import { displayFont, hexOf, rgbOf, useTextEdit } from "../../lib/textEdit";
+import { displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
 import { type DocState } from "../../store";
 import { Icon } from "../Icons";
 import "./edit.css";
@@ -23,6 +23,7 @@ export function EditPanel({ doc }: { doc: DocState }) {
   const tool = useTextEdit((s) => s.tool);
   const block = d?.selected ? (d.pages[d.selected.page]?.blocks[d.selected.index] ?? null) : null;
   const id = doc.id;
+  const here = d?.pages[doc.currentPage]?.blocks.filter(isOffered) ?? [];
 
   if (!open || doc.organize) return null;
   return (
@@ -49,7 +50,7 @@ export function EditPanel({ doc }: { doc: DocState }) {
                 Text
               </button>
               <button className="te-btn" disabled title="Image editing is coming">
-                <Icon name="image" size={16} />
+                <Icon name="area" size={16} />
                 Image
                 <span className="te-soon">soon</span>
               </button>
@@ -58,6 +59,15 @@ export function EditPanel({ doc }: { doc: DocState }) {
 
           <section className="te-sec">
             <h3 className="te-h3">Format text</h3>
+            {block && (
+              <p className="te-summary">
+                <b>Editing “{excerpt(block.text, 36)}”</b>
+                <br />
+                <span className="dim">
+                  {displayFont(block.font)} · {block.lines.length === 1 ? "1 line" : `${block.lines.length} lines`}
+                </span>
+              </p>
+            )}
             {block ? <Format key={`${d?.selected?.page}:${block.index}`} id={id} block={block} /> : <Hint empty={!d?.notice} />}
             {d?.notice && (
               <p className="te-note" role="status">
@@ -65,6 +75,30 @@ export function EditPanel({ doc }: { doc: DocState }) {
               </p>
             )}
           </section>
+          {here.length > 0 && (
+            <section className="te-sec">
+              <h3 className="te-h3">
+                On page {doc.currentPage + 1} · {here.length} {here.length === 1 ? "block" : "blocks"}
+              </h3>
+              <ul className="te-list">
+                {here.map((b) => (
+                  <li key={b.index}>
+                    <button
+                      className={d?.selected?.page === doc.currentPage && d.selected.index === b.index ? "te-item on" : "te-item"}
+                      onClick={() =>
+                        b.editable
+                          ? void te().select(id, { page: doc.currentPage, index: b.index })
+                          : te().setNotice(id, b.reason ? `This text can't be edited here: ${b.reason}.` : "This text can't be edited here.")
+                      }
+                    >
+                      <span className="te-excerpt">{excerpt(b.text, 44) || "Symbols"}</span>
+                      {!b.editable && <span className="te-tag">locked</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
         </div>
         <div className="te-foot dim">Changes apply when you click away. Undo with Ctrl+Z.</div>
       </section>
@@ -171,7 +205,7 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
               onClick={() => rgbOf(c) && apply({ color: rgbOf(c)! })}
             />
           ))}
-          <label className="te-sw custom" title="Other colour…" style={{ background: hex }}>
+          <label className={SWATCHES.includes(hex) ? "te-sw custom" : "te-sw custom on"} title="Other colour…" style={{ background: hex }}>
             <input ref={color} type="color" className="te-keep" value={hex} onChange={() => {}} aria-label="Other colour" />
           </label>
         </span>
@@ -217,5 +251,9 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
   );
 }
 
+const excerpt = (t: string, n: number) => {
+  const s = t.replace(/\s+/g, " ").trim();
+  return s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s;
+};
 const round1 = (v: number) => Math.round(v * 10) / 10;
 const nearest = (v: number) => SPACINGS.reduce((a, b) => (Math.abs(b - v) < Math.abs(a - v) ? b : a));

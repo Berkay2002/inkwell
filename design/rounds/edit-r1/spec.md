@@ -7,8 +7,11 @@ round is only how a person reaches it. One app window per image at 1536x1024, on
 
 ## Verdict
 
-(pending: inkwell picks; the user delegated design picks to the orchestrator, 2026-10-11. The most standard variant,
-a-rail, is built while the round is out.)
+a-rail, chosen by inkwell [e3c2c6] from this spec alone on 2026-10-11 (the image tool was at its usage limit, so no
+renders exist): Acrobat's standard flow in our right rail. Taken from c-proof: the one-line summary of what is being
+edited at the top of the format section ("Editing "Sans-serif line…" · CMSS12 · 1 line"), and the "On page N" block list
+(cheap: it is the page's block list, with locked blocks tagged). b-bar was not built. Built screens (light and dark):
+docs/screens/edit/. Build notes: docs/text-edit.md "The UI".
 
 ## How Acrobat Pro does it (study 02-edit: docs/study/02-edit.md, screens in docs/study/screens/02-edit/)
 - A top tab **Edit** opens a left panel; the page's text blocks and images get dotted outlines at once

@@ -1,5 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { TextBlock } from "../../lib/api";
+import { redo, undo } from "../../lib/edit";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 import { NEW_TEXT, type Rect4, caretFor, cssColor, cssFamily, isOffered, useTextEdit } from "../../lib/textEdit";
 
@@ -147,6 +148,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
           onChange={(t) => te().setDraft(docId, t)}
           onDone={() => void te().select(docId, null)}
           onCommit={() => void te().commit(docId)}
+          onHistory={(again) => void (again ? redo(docId) : undo(docId))}
           grips={{ down: startDrag, move: dragTo, up: dragEnd }}
         />
       )}
@@ -174,6 +176,8 @@ interface EditorProps {
   onDone: () => void;
   /** Ctrl+Enter or focus leaving: send what was typed. */
   onCommit: () => void;
+  /** Ctrl+Z / Ctrl+Y with nothing typed since the last send: the document's undo, not the field's. */
+  onHistory: (redo: boolean) => void;
   grips: {
     down: (e: React.PointerEvent, mode: "move" | "l" | "r") => void;
     move: (e: React.PointerEvent) => void;
@@ -182,7 +186,7 @@ interface EditorProps {
 }
 
 /** The block, drawn over the page in its own font, size and colour: white underneath to cover the original text. */
-function Editor({ block, value, rect, caret, onChange, onDone, onCommit, grips }: EditorProps) {
+function Editor({ block, value, rect, caret, onChange, onDone, onCommit, onHistory, grips }: EditorProps) {
   const ta = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
     const el = ta.current;
@@ -203,7 +207,8 @@ function Editor({ block, value, rect, caret, onChange, onDone, onCommit, grips }
   const style: React.CSSProperties = {
     left: rect[0],
     top: rect[1],
-    width: rect[2] - rect[0],
+    // The browser's face is a little wider or narrower than the PDF's: slack so a line that fits there does not wrap here.
+    width: (rect[2] - rect[0]) * 1.12,
     fontFamily: cssFamily(block.font),
     fontSize: block.size,
     lineHeight: `${lead}px`,
@@ -233,6 +238,10 @@ function Editor({ block, value, rect, caret, onChange, onDone, onCommit, grips }
           } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
             onCommit();
+          } else if ((e.ctrlKey || e.metaKey) && value === block.text && ["z", "y"].includes(e.key.toLowerCase())) {
+            e.preventDefault();
+            e.stopPropagation();
+            onHistory(e.key.toLowerCase() === "y" || e.shiftKey);
           }
         }}
       />

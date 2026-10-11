@@ -2,6 +2,7 @@ import { useAi } from "./aiStore";
 import { useAnnot } from "./annot";
 import { useHistory } from "./historyStore";
 import { useRedact } from "./redact";
+import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 
 /**
@@ -17,13 +18,26 @@ export function wireCommentRail() {
     if (useTools.getState().sheet?.phase === "running") return void useAnnot.setState({ open: false });
     useHistory.getState().setOpen(false);
     useRedact.getState().setOpen(false);
+    useTextEdit.getState().setOpen(false);
     useTools.setState({ sheet: null });
     const ai = useAi.getState();
     if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
   });
   const close = () => {
     if (useAnnot.getState().open) useAnnot.getState().setOpen(false);
+    if (useTextEdit.getState().open) useTextEdit.getState().setOpen(false);
   };
+  // Edit takes the rail like Comments does.
+  useTextEdit.subscribe((s, prev) => {
+    if (!s.open || prev.open) return;
+    if (useTools.getState().sheet?.phase === "running") return void useTextEdit.setState({ open: false });
+    useAnnot.getState().setOpen(false);
+    useHistory.getState().setOpen(false);
+    useRedact.getState().setOpen(false);
+    useTools.setState({ sheet: null });
+    const ai = useAi.getState();
+    if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
+  });
   useAi.subscribe((s, prev) => s.open && !prev.open && s.settings.mode === "docked" && close());
   useHistory.subscribe((s, prev) => s.open && !prev.open && close());
   useRedact.subscribe((s, prev) => s.open && !prev.open && close());

@@ -43,3 +43,9 @@ preview, c-ticket compact panel with the outcome first). The user delegated desi
 c-ticket: the outcome line ("6 sheets of A4, both sides, 2 copies") is the prominent summary beside Print and updates live.
 Approved: approved/print.png (a-sheet-1-options). a-sheet-2-booklet skipped (never rendered). Details in
 rounds/print-r1/spec.md; build notes in docs/print.md.
+
+2026-10-11, edit-r1: three ideas (a-rail Acrobat's Add content / Format text in our right rail, b-bar floating strip and
+format bar, c-proof rail with an outcome card and block list). The image tool was at its usage limit, so no renders were made;
+inkwell chose a-rail from the spec, with c-proof's one-line summary and block list. Built as the Edit segment of the
+Read | Edit | Organize pill plus the right rail (one rail at a time). Screens: docs/screens/edit/. Details in
+rounds/edit-r1/spec.md; build notes in docs/text-edit.md.

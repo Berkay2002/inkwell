@@ -10,6 +10,7 @@ import * as edits from "./edit";
 import { stepZoom } from "./layout";
 import { useConvert } from "./convertStore";
 import { usePrint } from "./printStore";
+import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 
 export interface Command {
@@ -44,10 +45,32 @@ export const focusPageInput = () => {
 };
 
 export const commands: Command[] = [
+  {
+    id: "edit",
+    title: "Edit text & images",
+    keys: ["Ctrl+E"],
+    needsDoc: true,
+    run: withDoc((d) => {
+      const te = useTextEdit.getState();
+      if (d.organize) st().patch(d.id, { organize: false });
+      te.setOpen(!te.open || d.organize);
+    }),
+  },
+  {
+    id: "add-text",
+    title: "Add text box",
+    needsDoc: true,
+    run: withDoc((d) => {
+      const te = useTextEdit.getState();
+      if (d.organize) st().patch(d.id, { organize: false });
+      te.setOpen(true);
+      te.setTool("text");
+    }),
+  },
   { id: "open", title: "Open file…", keys: ["Ctrl+O"], run: () => void openDialog() },
   { id: "close", title: "Close tab", keys: ["Ctrl+W"], needsDoc: true, run: withDoc((d) => void edits.requestClose(d.id)) },
-  { id: "save", title: "Save", keys: ["Ctrl+S"], needsDoc: true, run: withDoc((d) => void edits.save(d.id)) },
-  { id: "save-as", title: "Save as…", keys: ["Ctrl+Shift+S"], needsDoc: true, run: withDoc((d) => void edits.saveAs(d.id)) },
+  { id: "save", title: "Save", keys: ["Ctrl+S"], needsDoc: true, run: withDoc((d) => void useTextEdit.getState().commit(d.id).then(() => edits.save(d.id))) },
+  { id: "save-as", title: "Save as…", keys: ["Ctrl+Shift+S"], needsDoc: true, run: withDoc((d) => void useTextEdit.getState().commit(d.id).then(() => edits.saveAs(d.id))) },
   { id: "undo", title: "Undo", keys: ["Ctrl+Z"], needsDoc: true, notInText: true, run: withDoc((d) => void edits.undo(d.id)) },
   { id: "redo", title: "Redo", keys: ["Ctrl+Y", "Ctrl+Shift+Z"], needsDoc: true, notInText: true, run: withDoc((d) => void edits.redo(d.id)) },
   {
