@@ -5,7 +5,8 @@ import { clamp, previewScaleKey, type Size, type TileRef } from "../lib/layout";
 import { formatRange, movedIndices, parseRange } from "../lib/pageRange";
 import { useTextEdit } from "../lib/textEdit";
 import { tileClient, type Want } from "../lib/tiles";
-import { type DocState, useStore } from "../store";
+import { useSheets } from "../lib/organizePlus";
+import { type DocState, pageLabel, useStore } from "../store";
 import { Icon, type IconName } from "./Icons";
 import { MenuButton } from "./Menu";
 import { ContextMenu, pageActions } from "./PageMenu";
@@ -191,12 +192,32 @@ export function Organize({ doc }: { doc: DocState }) {
               Split
             </MenuButton>
             <button className="org-row" title="Add the pages of other PDFs at the end" onClick={() => void mergeInto(id)}>
+              <Icon name="filePlus" size={20} />
+              Append files
+            </button>
+            <button className="org-row" title="Choose, order and trim several PDFs into a new file" onClick={() => edits.combineFiles()}>
               <Icon name="merge" size={20} />
-              Merge files
+              Combine files…
             </button>
             <button className="org-row" title="Replace the selected pages with the pages of another PDF" disabled={!selected.length} onClick={() => void replace()}>
               <Icon name="swap" size={20} />
               Replace
+            </button>
+            <button
+              className="org-row"
+              title="Number the pages i, ii, iii or A-1, A-2 (shown in the page box and under every thumbnail)"
+              onClick={() => useSheets.getState().openLabels(id, selected[0] ?? doc.currentPage, selected[selected.length - 1] ?? doc.currentPage)}
+            >
+              <Icon name="hash" size={20} />
+              Page labels…
+            </button>
+            <button
+              className="org-row"
+              title="How full screen moves to these pages, and how long it stays"
+              onClick={() => useSheets.getState().openTrans(id, selected.length ? selected : [doc.currentPage])}
+            >
+              <Icon name="present" size={20} />
+              Transitions…
             </button>
           </div>
           <span className="grow" />
@@ -590,7 +611,9 @@ function PageGrid({ doc, sizes, rev, sel, setSel, anchor, spin, clearSpin, leavi
               )}
             </div>
           </div>
-          <span className="org-num">{i + 1}</span>
+          <span className="org-num" title={doc.labels[i] ? `Page ${i + 1}` : undefined}>
+            {pageLabel(doc, i)}
+          </span>
         </div>,
       );
     }

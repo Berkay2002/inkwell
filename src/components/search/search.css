@@ -1,0 +1,356 @@
+/* Find options (chips, "..." menu) and the Search rail. Amber is a document overlay, not a UI hue. */
+.sr-chips {
+  display: inline-flex;
+  gap: 2px;
+  flex: none;
+}
+.sr-chip {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-2);
+  background: none;
+  cursor: default;
+}
+.sr-chip u {
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 2px;
+}
+.sr-chip:hover {
+  background: var(--surface-2);
+}
+.sr-chip.on {
+  color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.sr-more {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.sr-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.searchbar .sr-chips {
+  margin-left: 2px;
+}
+
+/* the rail */
+.sr-panel {
+  --sr-wash: light-dark(#fbefc8, #4b3f1f);
+  --sr-cur-bg: light-dark(#eef2fa, #232c45);
+}
+.sr-fieldrow {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 14px 10px;
+}
+.sr-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 4px 0 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+}
+.sr-field:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.sr-field input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  background: none;
+  outline: none;
+}
+.sr-history {
+  position: absolute;
+  z-index: 5;
+  top: 38px;
+  left: 0;
+  right: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-3);
+}
+.sr-history hr {
+  margin: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+.sr-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  text-align: left;
+  color: var(--text);
+  background: none;
+}
+.sr-h:hover,
+.sr-h:focus-visible {
+  background: var(--surface-2);
+}
+.sr-h .sr-hq {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sr-h.clear {
+  color: var(--text-2);
+}
+.sr-seg {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  margin: 0 14px 10px;
+  padding: 3px;
+  background: var(--surface-2);
+  border-radius: 10px;
+}
+.sr-seg button {
+  flex: 1;
+  padding: 5px 8px;
+  border-radius: 8px;
+  color: var(--text-2);
+}
+.sr-seg button.on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-1);
+}
+.sr-folder {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 14px 10px;
+}
+.sr-folderrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.sr-fname {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.sr-pickrow {
+  display: flex;
+  gap: 6px;
+}
+.sr-pickrow .sr-pick {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+}
+.sr-pick:disabled {
+  opacity: 0.5;
+}
+.sr-pick,
+.sr-go {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+.sr-go {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+.sr-go:disabled {
+  opacity: 0.45;
+}
+.sr-link {
+  padding: 2px 4px;
+  border-radius: 6px;
+  color: var(--accent);
+  background: none;
+}
+.sr-link:hover {
+  background: var(--accent-soft);
+}
+.sr-link:disabled {
+  color: var(--text-2);
+}
+.sr-link.more {
+  align-self: flex-start;
+  margin: 2px 0 0 10px;
+}
+.sr-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+}
+.sr-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sr-status {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 6px;
+  color: var(--text-2);
+}
+.sr-progress {
+  flex: none;
+  height: 2px;
+  margin: 0 14px 8px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.sr-progress i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 120ms ease;
+}
+.sr-note {
+  margin: 0 14px 8px;
+  color: var(--text-2);
+}
+.sr-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 8px 12px;
+  outline: none;
+}
+.sr-group {
+  padding-top: 6px;
+}
+.sr-group h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.sr-page,
+.sr-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  color: var(--text);
+  font-weight: 600;
+}
+.sr-file {
+  flex: 1;
+  justify-content: flex-start;
+  text-align: left;
+  font-size: 13px;
+}
+.sr-group.file h4 {
+  padding-bottom: 0;
+}
+.sr-dir {
+  padding: 0 6px 4px 26px;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sr-row {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 6px 8px 6px 10px;
+  border-radius: 8px;
+  text-align: left;
+  color: var(--text-2);
+  background: none;
+  line-height: 1.4;
+}
+.sr-row:hover {
+  background: var(--surface-2);
+}
+.sr-row.cur {
+  background: var(--sr-cur-bg);
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text);
+}
+.sr-snip {
+  overflow-wrap: anywhere;
+}
+.sr-snip mark {
+  padding: 0 1px;
+  border-radius: 3px;
+  background: var(--sr-wash);
+  color: var(--text);
+  font-weight: 700;
+}
+.sr-pg {
+  display: block;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.sr-src {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--surface-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sr-progress i {
+    transition: none;
+  }
+}

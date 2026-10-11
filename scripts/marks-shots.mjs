@@ -90,9 +90,9 @@ report.bodyBefore = (await lines(0)).slice(0, 3);
 // The Tools menu with the new entries, then Header & footer.
 await click('button[aria-label="Tools"]');
 await sleep(200);
-report.menuItems = await ev(`[...document.querySelectorAll('.ink-menu [role=menuitem]')].map((e) => e.textContent.trim())`);
+report.menuItems = await ev(`[...document.querySelectorAll('.tools-panel .tool-name')].map((e) => e.textContent.trim())`);
 await shot("tools-menu-light.png", 150);
-await click(".ink-menu [role=menuitem]", "Header & footer…");
+await click(".tools-panel .tool-name", "Header & footer");
 await sleep(500);
 report.opened = await ev(`${M}.getState().sheet?.kind`);
 await both("headerfooter-empty");

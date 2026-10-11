@@ -3,6 +3,7 @@ import { MODES, MODE_NAMES, type Task } from "./ai";
 import { readViewerSelection, useAi } from "./aiStore";
 import { openA11y, useA11y } from "./a11y";
 import { useRedact } from "./redact";
+import { useSearch } from "./searchStore";
 import { useAnnot } from "./annot";
 import { useForms } from "./forms";
 import { useHistory } from "./historyStore";
@@ -10,12 +11,14 @@ import { openCompareSetup } from "../components/history/HistoryPanel";
 import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
+import { togglePageDark } from "./pageDark";
 import { useConvert } from "./convertStore";
 import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
 import { usePrint } from "./printStore";
 import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
+import { useSheets } from "./organizePlus";
 
 export interface Command {
   id: string;
@@ -110,7 +113,36 @@ export const commands: Command[] = [
   },
   { id: "extract-page", title: "Extract this page…", needsDoc: true, run: withDoc((d) => void edits.extract(d.id, [d.currentPage])) },
   { id: "split", title: "Split into single pages", needsDoc: true, run: withDoc((d) => void edits.split(d.id, 1)) },
-  { id: "merge", title: "Merge files…", run: () => void edits.mergeFiles() },
+  { id: "merge", title: "Combine files…", run: () => edits.combineFiles() },
+  {
+    id: "page-labels",
+    title: "Page labels…",
+    needsDoc: true,
+    run: withDoc((d) => useSheets.getState().openLabels(d.id, d.currentPage, d.currentPage)),
+  },
+  {
+    id: "page-transitions",
+    title: "Page transitions…",
+    needsDoc: true,
+    run: withDoc((d) => useSheets.getState().openTrans(d.id, [d.currentPage])),
+  },
+  {
+    id: "present",
+    title: "Full screen",
+    keys: ["Ctrl+L"],
+    needsDoc: true,
+    run: withDoc((d) => {
+      const s = useSheets.getState();
+      if (s.present) s.closePresent();
+      else s.openPresent(d.id, d.currentPage);
+    }),
+  },
+  {
+    id: "attachments",
+    title: "Attachments",
+    needsDoc: true,
+    run: () => st().setSidebar("attachments"),
+  },
   { id: "compress", title: "Compress file…", needsDoc: true, run: () => useTools.getState().open("compress") },
   { id: "ocr", title: "Recognize text (OCR)…", needsDoc: true, run: () => useTools.getState().open("ocr") },
   {
@@ -148,6 +180,27 @@ export const commands: Command[] = [
     keys: ["Shift+F3"],
     needsDoc: true,
     run: withDoc((d) => st().stepHit(d.id, -1)),
+  },
+  {
+    id: "search-advanced",
+    title: "Advanced search",
+    keys: ["Ctrl+Shift+F"],
+    needsDoc: true,
+    run: () => {
+      const s = useSearch.getState();
+      s.setOpen(true);
+      document.querySelector<HTMLInputElement>('.sr-field input')?.focus();
+    },
+  },
+  {
+    id: "search-folder",
+    title: "Search in a folder…",
+    needsDoc: true,
+    run: () => {
+      const s = useSearch.getState();
+      s.setScope("folder");
+      s.setOpen(true);
+    },
   },
   { id: "goto", title: "Go to page…", keys: ["Ctrl+G"], needsDoc: true, run: focusPageInput },
   {
@@ -197,6 +250,20 @@ export const commands: Command[] = [
   { id: "theme-system", title: "Theme: match system", run: () => st().setTheme("system") },
   { id: "theme-light", title: "Theme: light", run: () => st().setTheme("light") },
   { id: "theme-dark", title: "Theme: dark", run: () => st().setTheme("dark") },
+  {
+    id: "toggle-dark-pages",
+    title: "Toggle dark pages",
+    keys: ["Ctrl+Alt+D"],
+    // AltGr layouts send Ctrl+Alt: leave it to a text or form field
+    notInText: true,
+    run: () => {
+      const s = st();
+      s.setPageDark(togglePageDark(s.pageDark, s.theme, window.matchMedia("(prefers-color-scheme: dark)").matches));
+    },
+  },
+  { id: "pages-follow", title: "Pages: follow app theme", run: () => st().setPageDark("follow") },
+  { id: "pages-dark", title: "Pages: always dark", run: () => st().setPageDark("on") },
+  { id: "pages-normal", title: "Pages: always normal", run: () => st().setPageDark("off") },
   {
     id: "history",
     title: "Version history",

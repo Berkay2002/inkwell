@@ -67,6 +67,9 @@ cbc = { version = "0.2", features = ["alloc", "block-padding"] }
 des = "0.9"
 rc2 = "0.9"
 
+# Subsets the bundled fallback fonts (src-tauri/fonts) to the glyphs an edit uses.
+subsetter = { version = "0.2.6", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_Graphics_Gdi", "Win32_Graphics_Printing", "Win32_Storage_Xps"] }
 # Same versions tauri already pulls in; used to switch off WebView2's browser shortcuts.

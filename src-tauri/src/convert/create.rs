@@ -204,6 +204,25 @@ fn write_scratch(doc: &PdfDocument, name: &str) -> Result<PathBuf, Error> {
     result
 }
 
+/// Writes `bytes` to `<temp>/inkwell-new/<nonce>/<name>` (a file an attachment held, opened as an
+/// unsaved tab) and returns the path. Same folders, sweep and discard as a created file.
+pub fn write_scratch_bytes(name: &str, bytes: &[u8]) -> Result<PathBuf, Error> {
+    use std::hash::{BuildHasher, Hasher};
+    let root = scratch_root();
+    fs::create_dir_all(&root)?;
+    sweep(&root);
+    let nonce = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let dir = root.join(format!("{}-{nonce:08x}", std::process::id()));
+    fs::create_dir(&dir)?;
+    let name = Path::new(name).file_name().map_or_else(|| "attachment.pdf".to_string(), |n| n.to_string_lossy().into_owned());
+    let out = dir.join(name);
+    if let Err(e) = fs::write(&out, bytes) {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(e.into());
+    }
+    Ok(out)
+}
+
 fn sweep(root: &Path) {
     let old = std::time::Duration::from_secs(2 * 24 * 3600);
     let Ok(rd) = fs::read_dir(root) else { return };

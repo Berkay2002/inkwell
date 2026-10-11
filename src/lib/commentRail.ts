@@ -7,6 +7,7 @@ import { useHistory } from "./historyStore";
 import { useProtect } from "./protectStore";
 import { useRedact } from "./redact";
 import { useSign } from "./sign";
+import { useSearch } from "./searchStore";
 import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 
@@ -27,6 +28,7 @@ export function wireCommentRail() {
     useTextEdit.getState().setOpen(false);
     useHistory.getState().setOpen(false);
     useRedact.getState().setOpen(false);
+    useSearch.getState().setOpen(false);
     useTools.setState({ sheet: null });
     useSign.getState().setOpen(false);
     useSign.getState().setRail(null);
@@ -54,6 +56,7 @@ export function wireCommentRail() {
     useHistory.getState().setOpen(false);
     useRedact.getState().setOpen(false);
     useTextEdit.getState().setOpen(false);
+    useSearch.getState().setOpen(false);
     useTools.setState({ sheet: null });
     const ai = useAi.getState();
     if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
@@ -62,6 +65,7 @@ export function wireCommentRail() {
     if (useAnnot.getState().open) useAnnot.getState().setOpen(false);
     if (useTextEdit.getState().open) useTextEdit.getState().setOpen(false);
     if (useForms.getState().open) useForms.getState().setOpen(false);
+    if (useSearch.getState().open) useSearch.getState().setOpen(false);
   };
   // Edit takes the rail like Comments does.
   useTextEdit.subscribe((s, prev) => {
@@ -71,6 +75,23 @@ export function wireCommentRail() {
     useForms.getState().setOpen(false);
     useHistory.getState().setOpen(false);
     useRedact.getState().setOpen(false);
+    useSearch.getState().setOpen(false);
+    useTools.setState({ sheet: null });
+    useSign.getState().setOpen(false);
+    useSign.getState().setRail(null);
+    const ai = useAi.getState();
+    if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
+  });
+  // Search is a rail of the same kind: it takes the side, and any other rail opening closes it.
+  useSearch.subscribe((s, prev) => {
+    if (!s.open || prev.open) return;
+    if (useTools.getState().sheet?.phase === "running") return void useSearch.setState({ open: false });
+    useAnnot.getState().setOpen(false);
+    useForms.getState().setOpen(false);
+    useTextEdit.getState().setOpen(false);
+    useHistory.getState().setOpen(false);
+    useRedact.getState().setOpen(false);
+    useA11y.getState().setOpen(false);
     useTools.setState({ sheet: null });
     useSign.getState().setOpen(false);
     useSign.getState().setRail(null);
@@ -103,6 +124,7 @@ export function wireCommentRail() {
     useAnnot.getState().setOpen(false);
     useForms.getState().setOpen(false);
     useTextEdit.getState().setOpen(false);
+    useSearch.getState().setOpen(false);
     useHistory.getState().setOpen(false);
     useRedact.getState().setOpen(false);
     useTools.setState({ sheet: null });
@@ -120,6 +142,7 @@ export function wireCommentRail() {
   useAnnot.subscribe((s, prev) => s.open && !prev.open && closeA11y());
   useForms.subscribe((s, prev) => s.open && !prev.open && closeA11y());
   useTextEdit.subscribe((s, prev) => s.open && !prev.open && closeA11y());
+  useSearch.subscribe((s, prev) => s.open && !prev.open && closeA11y());
   useTools.subscribe((s, prev) => s.sheet && !prev.sheet && closeA11y());
   useConvert.subscribe((s, prev) => s.sheet && !prev.sheet && closeA11y());
   useProtect.subscribe((s, prev) => s.sheet && !prev.sheet && closeA11y());

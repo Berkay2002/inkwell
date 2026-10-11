@@ -32,6 +32,14 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../third_party/THIRD-PARTY-NOTICES.txt": "licenses/THIRD-PARTY-NOTICES.txt",
+      "../third_party/fonts/OFL-NotoSans.txt": "licenses/OFL-NotoSans.txt",
+      "../third_party/fonts/OFL-NotoSansCJK.txt": "licenses/OFL-NotoSansCJK.txt",
+      "../third_party/pdfcraft/LICENSE-MIT": "licenses/pdfcraft/LICENSE-MIT",
+      "../third_party/pdfcraft/LICENSE-APACHE": "licenses/pdfcraft/LICENSE-APACHE",
+      "../third_party/pdfcraft/NOTICE": "licenses/pdfcraft/NOTICE"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

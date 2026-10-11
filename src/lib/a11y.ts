@@ -269,7 +269,7 @@ export const useA11y = create<A11yStore>((set, get) => {
   };
 });
 
-/** The Tools menu and palette entry: the rail opens and reads the active document. */
+/** The All tools panel and palette entry: the rail opens and reads the active document. */
 export function openA11y() {
   if (st().active != null) useA11y.getState().setOpen(true);
 }

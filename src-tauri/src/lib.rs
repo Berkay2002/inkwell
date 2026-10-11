@@ -12,12 +12,14 @@ pub mod history_ipc;
 pub mod imageedit;
 pub mod marks;
 pub mod ocr;
+pub mod organize;
 pub mod paths;
 pub mod print;
 pub mod protect;
 pub mod recents;
 pub mod redact;
 pub mod sign;
+pub mod search;
 pub mod textedit;
 pub mod tools;
 
@@ -26,6 +28,7 @@ use engine::edit::{EditOp, EditState, SplitResult};
 use engine::{DocId, Engine, EngineError, EngineStats, OpenInfo, OutlineItem, SearchEvent, TextLine, TileOutcome};
 use history_ipc::History;
 use paths::{FileRef, Paths};
+use search::SearchOpts;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Response};
@@ -58,6 +61,7 @@ const PDF: &[&str] = &["pdf"];
 enum PickTitle {
     Locate,
     Compare,
+    Search,
 }
 
 /// What the save dialog filters for (the UI never names a pattern).
@@ -91,6 +95,7 @@ async fn pick_open(window: Window, multiple: bool, title: Option<PickTitle>) -> 
         match title {
             Some(PickTitle::Locate) => d = d.set_title("Locate the moved file"),
             Some(PickTitle::Compare) => d = d.set_title("Choose two PDFs to compare"),
+            Some(PickTitle::Search) => d = d.set_title("Choose PDFs to search"),
             None => {}
         }
         let picked = if multiple { d.blocking_pick_files() } else { d.blocking_pick_file().map(|f| vec![f]) };
@@ -123,6 +128,12 @@ async fn pick_save(
     };
     blocking(move || {
         let name = std::path::Path::new(&name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // Automation (debug builds only, like INKWELL_PRINT_DIR): every save dialog answers `<dir>/<file name>`.
+        #[cfg(debug_assertions)]
+        if let Some(dir) = std::env::var_os("INKWELL_SAVE_DIR").filter(|d| !d.is_empty()).filter(|_| !name.is_empty()) {
+            let p = std::path::Path::new(&dir).join(&name);
+            return Ok(Some(window.state::<Paths>().issue_save(window.label(), p.to_string_lossy().into_owned())));
+        }
         let d = window.dialog().file().set_parent(&window).set_file_name(name);
         let mut d = match kind.unwrap_or_default() {
             SaveKind::Pdf => d.add_filter("PDF documents", PDF),
@@ -258,14 +269,114 @@ async fn page_text(eng: Eng<'_>, doc: DocId, page: u32) -> Result<Vec<TextLine>,
 }
 
 #[tauri::command]
-fn search(eng: Eng<'_>, doc: DocId, query: String, on_event: Channel<SearchEvent>) -> Result<u64, EngineError> {
-    eng.inner().search(
+fn search(eng: Eng<'_>, doc: DocId, query: String, opts: Option<SearchOpts>, on_event: Channel<SearchEvent>) -> Result<u64, EngineError> {
+    eng.inner().search_with(
         doc,
         query,
+        opts.unwrap_or_default(),
         Arc::new(move |e| {
             let _ = on_event.send(e);
         }),
     )
+}
+
+/// Where a search across files looks: a folder (open token from `pick_search_folder`) or picked files.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum SearchScope {
+    #[serde(rename_all = "camelCase")]
+    Folder { token: String, recursive: bool },
+    Files { tokens: Vec<String> },
+}
+
+/// Folder dialog for search across files; the folder comes back as an open token (Rust lists its PDFs).
+#[tauri::command]
+async fn pick_search_folder(window: Window) -> Result<Option<FileRef>, EngineError> {
+    blocking(move || {
+        let d = window.dialog().file().set_parent(&window).set_title("Choose a folder to search");
+        let picked = d.blocking_pick_folder().and_then(|f| f.into_path().ok());
+        Ok(picked.map(|p| window.state::<Paths>().issue_open(window.label(), p.to_string_lossy().into_owned())))
+    })
+    .await
+}
+
+/// Searches several PDFs for `query` in the background; events (`started` first, then one per file with hits,
+/// progress, done) go to `on_event`. Returns the search id (also in `started`, which comes before the folder is
+/// listed) for `cancel_search_files`. A result's open token comes from `search_file_token` when it is opened.
+#[tauri::command]
+async fn search_files(
+    window: Window,
+    searches: State<'_, Arc<search::files::FolderSearches>>,
+    scope: SearchScope,
+    query: String,
+    opts: Option<SearchOpts>,
+    on_event: Channel<search::files::FilesEvent>,
+) -> Result<u64, EngineError> {
+    use search::files::{list_pdfs, list_picked, FilesEvent, Listing};
+    let searches = searches.inner().clone();
+    // The id exists before the (possibly long) walk, so Cancel reaches it.
+    let (id, cancel) = searches.begin(window.label());
+    let _ = on_event.send(FilesEvent::Started { search: id });
+    blocking(move || {
+        let listed: Result<Listing, EngineError> = (|| {
+            let reg = window.state::<Paths>();
+            match scope {
+                SearchScope::Folder { token, recursive } => {
+                    let dir = std::path::PathBuf::from(reg.open(window.label(), &token)?);
+                    if !dir.is_dir() {
+                        return Err(EngineError::Io(format!("{} is not a folder", dir.display())));
+                    }
+                    Ok(list_pdfs(&dir, recursive, &cancel))
+                }
+                SearchScope::Files { tokens } => {
+                    let mut files = Vec::new();
+                    for t in &tokens {
+                        files.push(std::path::PathBuf::from(reg.open(window.label(), t)?));
+                    }
+                    Ok(list_picked(files))
+                }
+            }
+        })();
+        let listing = match listed {
+            Ok(l) => l,
+            Err(e) => {
+                // Say it ended, so nothing waits for it.
+                searches.cancel(window.label(), id);
+                searches.run(id, cancel, Vec::new(), false, 0, "", SearchOpts::default(), Arc::new(move |e| {
+                    let _ = on_event.send(e);
+                }));
+                return Err(e);
+            }
+        };
+        searches.run(
+            id,
+            cancel,
+            listing.files,
+            listing.capped,
+            listing.cloud_only,
+            &query,
+            opts.unwrap_or_default(),
+            Arc::new(move |e| {
+                let _ = on_event.send(e);
+            }),
+        );
+        Ok(id)
+    })
+    .await
+}
+
+/// An open token for file `index` of search `search` (a result the user opens), issued now.
+#[tauri::command]
+fn search_file_token(window: Window, searches: State<'_, Arc<search::files::FolderSearches>>, search: u64, index: u32) -> Result<FileRef, EngineError> {
+    let path = searches
+        .path_of(window.label(), search, index)
+        .ok_or_else(|| EngineError::Io("that search result is no longer available".into()))?;
+    Ok(window.state::<Paths>().issue_open(window.label(), path.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn cancel_search_files(window: Window, searches: State<'_, Arc<search::files::FolderSearches>>, search: u64) {
+    searches.cancel(window.label(), search);
 }
 
 #[tauri::command]
@@ -742,6 +853,7 @@ pub fn run() {
         .manage(ai::Assistant::new())
         .manage(Paths::default())
         .manage(Arc::new(tools::Jobs::default()))
+        .manage(Arc::new(search::files::FolderSearches::default()))
         .manage(hist)
         .manage(sign::app::Ids::default())
         .on_window_event(|window, event| {
@@ -779,6 +891,10 @@ pub fn run() {
             page_text,
             search,
             cancel_search,
+            pick_search_folder,
+            search_files,
+            cancel_search_files,
+            search_file_token,
             engine_stats,
             set_cache_budget,
             initial_files,
@@ -862,9 +978,24 @@ pub fn run() {
             forms::app::forms_tab_order,
             forms::app::forms_arrange,
             forms::app::forms_detect,
+            organize::app::combine_inspect,
+            organize::app::combine_run,
+            organize::app::pick_attachments,
+            organize::app::attachments_list,
+            organize::app::attachments_add,
+            organize::app::attachment_save,
+            organize::app::attachment_open,
+            organize::app::attachments_remove,
+            organize::app::attachment_describe,
+            organize::app::labels_list,
+            organize::app::labels_set,
+            organize::app::labels_remove,
+            organize::app::transitions_list,
+            organize::app::transitions_set,
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
+            textedit::app::text_fonts,
             imageedit::app::image_blocks,
             imageedit::app::image_edit,
             redact::app::redact_find,
