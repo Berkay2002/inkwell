@@ -15,18 +15,24 @@ booklet state is described above and is built from the engine's own preview. `c-
 switch rows instead of chips; the idea (outcome first, a few toggles, "More options") is intact. Text in renders is
 not authoritative (the build sets the copy).
 
-## How Acrobat Pro does it (study 12-print, docs/study/screens/12-print/, docs/study/12-print.md)
-- Ctrl+P opens one **modal dialog**, about 830 x 590 px, over the document. Two columns.
-- Left column, top to bottom: Printer (drop-down) with **Properties** and **Advanced** buttons; Copies (spin) with
-  **Print in grayscale** and **Save ink/toner**; **Pages to Print** (All, Current page, Pages with a range field, and a
-  "More Options" fold with odd/even and reverse); **Page Sizing & Handling** (tabs: Size, Poster, Multiple, Booklet; Size
-  has Fit, Actual size, Shrink oversized pages, Custom scale; Multiple has pages per sheet, order, border); an
-  Orientation row (Auto, Portrait, Landscape); **Comments & Forms** (Document / Document and Markups / ...).
-- Right column: a **Preview** of the sheet with "Page 1 of 4" and a pager, the paper size under it ("8.27 x 11.69
-  Inches"), and the sheet's own scaling note. Footer: **Page Setup...**, **Print**, **Cancel**.
-- Everything is on one screen at once, in small 11 px type. The preview does show hardware margins and the scaling.
-- (The first-hand screenshots and exact wording are in the study; this section is from the dialog as known and is
-  checked against `docs/study/12-print.md` before the sheet goes to inkwell.)
+## How Acrobat Pro does it (study 12-print: docs/study/12-print.md, screens in docs/study/screens/12-print/)
+- Ctrl+P (toolbar printer icon) opens one **modal Win32 dialog**, about 959 x 697 px at 125 % display scaling, which grows
+  downward when More Options or Multiple/Booklet add rows. Controls on the left, preview on the right
+  (`01-print-dialog-defaults.png`).
+- Top band: Printer combo with **Properties** (the driver's own dialog) and **Advanced** (Advanced Print Setup: output,
+  marks and bleeds, PostScript, colour management, Print As Image with a dpi); Copies with **Collate** (only shown above 1),
+  **Print in grayscale**, **Save ink/toner**.
+- **Pages to Print**: All, Current, Pages (range text), and a "More Options" fold: Current view, Reverse pages, Odd or
+  Even Pages. **Page Sizing & Handling** is four tabs: Size (Fit, Shrink oversized pages (default), Actual size, Custom
+  scale %, "Choose paper source by PDF page size"), Poster (tile scale, overlap, cut marks, labels), Multiple (2, 4, 6, 9,
+  16 or n by m; four page orders; page border; auto-rotate), Booklet (both sides / front / back, binding left or right,
+  sheet range). Orientation: Auto, Portrait, Landscape. **Comments & Forms**: Document, Document and Markups (default),
+  Document and Stamps, Form fields only, with a **Summarize Comments** button that opens a modal Yes/No with no cancel.
+- Right: the preview with "Scale: 97%" or "Document: 8.5 x 11.0in", the paper size ("8.27 x 11.69 Inches"), a pager and
+  slider with "Page i of N (document page)". It updates live for every option. **Page Setup...**, **Print**, **Cancel**.
+- Two-sided is not in Acrobat's own dialog: it is in the driver's Properties, and shown only for duplex printers.
+- Everything is on one screen at once, in small type; the dialog is dense and the options that matter most (how many
+  sheets, which side) are never stated in words.
 
 ## How pdfcraft does it (E:\Dev\pdfcraft\crates\ui-egui\src\print_ui.rs)
 - The same shape as Acrobat in egui: one window, left options, right preview with "‹ sheet ›" paging.
