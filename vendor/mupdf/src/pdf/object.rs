@@ -50,6 +50,12 @@ impl PdfObject {
         }
     }
 
+    /// Another handle on the same object (`Clone` is a deep copy: a copy of a direct dictionary
+    /// is detached from the document, so editing it changes nothing).
+    pub fn share(&self) -> Self {
+        unsafe { Self::from_raw_keep_ref(self.inner) }
+    }
+
     pub fn try_clone(&self) -> Result<Self, Error> {
         unsafe { ffi_try!(mupdf_pdf_clone_obj(context(), self.inner)) }.map(|inner| Self { inner })
     }

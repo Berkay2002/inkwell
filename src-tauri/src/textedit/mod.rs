@@ -8,7 +8,7 @@
 
 pub mod app;
 mod content;
-mod encodings;
+pub(crate) mod encodings;
 mod font;
 mod text;
 

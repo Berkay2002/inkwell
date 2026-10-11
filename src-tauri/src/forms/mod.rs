@@ -507,7 +507,7 @@ pub(crate) fn refresh(doc: &PdfDocument, e: &Entry) -> Result<()> {
 /// editor writes appearances the flag is cleared, after the other fields that draw from a value get
 /// theirs too (many such forms carry no box or button appearances at all), so what the file shows is
 /// what was written.
-fn settle_need_appearances(doc: &PdfDocument, except: i32) -> Result<()> {
+pub(crate) fn settle_need_appearances(doc: &PdfDocument, except: i32) -> Result<()> {
     let Some(mut acro) = doc.catalog().ok().and_then(|c| get(&c, "AcroForm")) else { return Ok(()) };
     if !get(&acro, "NeedAppearances").and_then(|n| n.as_bool().ok()).unwrap_or(false) {
         return Ok(());

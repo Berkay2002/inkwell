@@ -10,6 +10,7 @@ pub mod history;
 pub mod history_ipc;
 pub mod ocr;
 pub mod paths;
+pub mod preflight;
 pub mod print;
 pub mod protect;
 pub mod recents;
@@ -818,6 +819,11 @@ pub fn run() {
             a11y::app::a11y_fix,
             a11y::app::a11y_preview,
             a11y::app::a11y_export_report,
+            preflight::app::preflight_check,
+            preflight::app::preflight_claim,
+            preflight::app::preflight_fix,
+            preflight::app::preflight_convert,
+            preflight::app::preflight_export_report,
             annot::app::annot_default_author,
             annot::app::annot_list,
             annot::app::annot_add,
