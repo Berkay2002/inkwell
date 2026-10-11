@@ -29,6 +29,9 @@ pub enum Limit {
     Type3,
     /// A vertical writing mode (`-V` CMap).
     Vertical,
+    /// A predefined CMap other than Identity (`90ms-RKSJ-H`, `UniGB-UCS2-H`, …): its code lengths
+    /// and code → CID mapping are not read, so its strings can't be split or written.
+    Encoding,
 }
 
 pub struct Metrics {
@@ -176,11 +179,12 @@ impl Metrics {
                         }
                     }
                 }
-                e => {
-                    if name_of(&e).is_some_and(|n| n.ends_with(b"-V")) {
-                        m.limit = Some(Limit::Vertical);
-                    }
-                }
+                e => match name_of(&e).as_deref() {
+                    Some(b"Identity-H") => {}
+                    Some(b"Identity-V") => m.limit = Some(Limit::Vertical),
+                    Some(n) if n.ends_with(b"-V") => m.limit = Some(Limit::Vertical),
+                    _ => m.limit = Some(Limit::Encoding),
+                },
             }
             let desc = get(font, "DescendantFonts").and_then(|a| a.get_array(0).ok().flatten());
             if let Some(desc) = &desc {
@@ -353,10 +357,27 @@ impl Metrics {
         let mut out = Vec::with_capacity(text.len() * self.code_len);
         for ch in text.chars() {
             let code = *reverse.get(&ch)?;
-            let bytes = code.to_be_bytes();
-            out.extend_from_slice(&bytes[4 - self.code_len.clamp(1, 4)..]);
+            let len = self.len_of(code)?;
+            out.extend_from_slice(&code.to_be_bytes()[4 - len..]);
         }
         Some(out)
+    }
+
+    /// How many bytes `code` takes: its codespace range's length (CMaps may mix one- and
+    /// two-byte codes). None when no range holds it.
+    fn len_of(&self, code: u32) -> Option<usize> {
+        match &self.codes {
+            Codes::One => (code < 0x100).then_some(1),
+            Codes::Two => (code < 0x1_0000).then_some(2),
+            Codes::Ranges(r) => r.iter().find_map(|(len, lo, hi)| {
+                let len = (*len).clamp(1, 4);
+                if len < 4 && code >= 1u32 << (8 * len) {
+                    return None;
+                }
+                let bytes = &code.to_be_bytes()[4 - len..];
+                bytes.iter().zip(lo.iter().zip(hi)).all(|(x, (l, h))| x >= l && x <= h).then_some(len)
+            }),
+        }
     }
 }
 
@@ -704,6 +725,38 @@ mod tests {
         assert_eq!(m.get(&0x24).map(String::as_str), Some("A"));
         assert_eq!(m.get(&0x46).map(String::as_str), Some("c"));
         assert_eq!(m.get(&0x51).map(String::as_str), Some("ö"));
+    }
+
+    #[test]
+    fn mixed_length_codes_keep_their_length() {
+        let mut doc = mupdf::pdf::PdfDocument::new();
+        let cmap = b"/WMode 0 def 2 begincodespacerange <00> <80> <8140> <9FFC> endcodespacerange";
+        let enc = doc.add_stream(&mupdf::Buffer::from_bytes(cmap).unwrap(), None, false).unwrap();
+        let tu = b"2 beginbfchar <41> <0041> <8140> <3042> endbfchar";
+        let tu = doc.add_stream(&mupdf::Buffer::from_bytes(tu).unwrap(), None, false).unwrap();
+        let mut font = doc
+            .new_object_from_str("<< /Type /Font /Subtype /Type0 /BaseFont /Mixed /DescendantFonts [<< /Subtype /CIDFontType0 >>] >>")
+            .unwrap();
+        font.dict_put("Encoding", enc).unwrap();
+        font.dict_put("ToUnicode", tu).unwrap();
+        let m = Metrics::from_dict(&font);
+        assert_eq!(m.limit, None);
+        assert_eq!(m.encode("Aあ"), Some(vec![0x41, 0x81, 0x40]));
+        assert_eq!(m.codes(&[0x41, 0x81, 0x40]), vec![(0x41, 1), (0x8140, 2)]);
+    }
+
+    #[test]
+    fn predefined_cmaps_other_than_identity_are_not_written() {
+        let doc = mupdf::pdf::PdfDocument::new();
+        let font = |enc: &str| {
+            let src =
+                format!("<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /{enc} /DescendantFonts [<< /Subtype /CIDFontType0 >>] >>");
+            Metrics::from_dict(&doc.new_object_from_str(&src).unwrap())
+        };
+        assert_eq!(font("Identity-H").limit, None);
+        assert_eq!(font("90ms-RKSJ-H").limit, Some(Limit::Encoding));
+        assert_eq!(font("UniJIS-UCS2-V").limit, Some(Limit::Vertical));
+        assert_eq!(font("90ms-RKSJ-H").encode("a"), None);
     }
 
     #[test]

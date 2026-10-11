@@ -260,6 +260,25 @@ fn centred_text_stays_centred() {
 }
 
 #[test]
+fn a_block_after_other_text_in_its_object_reopens_it_first() {
+    let d = dir("split");
+    let content = "BT /F1 12 Tf 72 700 Td (Keep this) Tj 0 -60 Td (Edit me) Tj ET";
+    let (eng, id, path) = open(&d, &pdf(content, &[("F1", HELV)], &[]));
+    assert_eq!(blocks(&eng, id, 0).unwrap().blocks.len(), 2);
+    set_text(&eng, id, 1, "Edited");
+    assert_eq!(text(&eng, id), "Keep this Edited");
+    eng.save(id, None).unwrap();
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+    let data = doc.find_page(0).unwrap().get_dict("Contents").unwrap().unwrap().read_stream().unwrap();
+    let ops = content::parse(&data);
+    let names: Vec<&[u8]> = ops.iter().map(|o| o.op.as_slice()).collect();
+    // After the inserted block: ET … Q, then BT before any text state operator.
+    let q = names.iter().rposition(|n| *n == b"Q").unwrap();
+    let bt = q + names[q..].iter().position(|n| *n == b"BT").unwrap();
+    assert!(names[q..bt].iter().all(|n| !matches!(*n, b"Tf" | b"Tc" | b"Tw" | b"Tz" | b"TL" | b"Ts" | b"Tr")), "{names:?}");
+}
+
+#[test]
 fn stale_rev_is_refused() {
     let d = dir("stale");
     let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));

@@ -51,6 +51,8 @@ pub enum Issue {
     NoUnicode,
     /// Vertical writing.
     Vertical,
+    /// A predefined CJK encoding (CMap) that isn't read.
+    Encoding,
     /// The text is used as a clipping path.
     Clip,
     /// Invisible text (render mode 3), usually an OCR layer under a scan.
@@ -146,6 +148,7 @@ impl Line {
         match self.limit {
             Some(Limit::Type3) => return Some(Issue::Type3),
             Some(Limit::Vertical) => return Some(Issue::Vertical),
+            Some(Limit::Encoding) => return Some(Issue::Encoding),
             None => {}
         }
         if self.render_mode >= 4 {
@@ -1133,8 +1136,9 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     let after = if split { &o.state } else { &o.bt_state };
     if split {
         block_ops.insert(0, Op::new("ET", vec![]));
-        block_ops.extend(after.ops().into_iter().filter(|op| !op.is("Tf") || after.font.is_some()));
+        // Text state operators belong inside the reopened text object.
         block_ops.push(Op::new("BT", vec![]));
+        block_ops.extend(after.ops().into_iter().filter(|op| !op.is("Tf") || after.font.is_some()));
         block_ops.push(Op::new("Tm", o.tlm.0.iter().map(|v| num(*v)).collect()));
     }
     let at = if split { start } else { o.bt_op };
@@ -1203,6 +1207,7 @@ pub fn issue_text(i: Issue) -> &'static str {
         Issue::Type3 => "it is set in a Type 3 font, whose letters are drawings",
         Issue::NoUnicode => "its font doesn't say which characters it shows (no ToUnicode map)",
         Issue::Vertical => "it is vertical text",
+        Issue::Encoding => "its font uses a predefined CJK encoding that can't be rewritten",
         Issue::Clip => "it is used as a clipping path",
         Issue::Invisible => "it is invisible text (an OCR layer)",
         Issue::InForm => "it is drawn by a shared form object (a stamp or template)",

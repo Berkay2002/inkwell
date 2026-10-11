@@ -56,7 +56,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
    (the block is read back from the content like any other).
 6. **What can't be edited** is still listed, with `editable: false`, `issue` and a sentence in `reason`:
    `type3` (glyphs are drawings), `noUnicode` (Identity-H and similar without ToUnicode: the text can't be read),
-   `vertical`, `clip` (render modes 4-7), `invisible` (render mode 3, OCR layers). `areas` lists what has no block:
+   `vertical`, `encoding` (a predefined CMap other than Identity, e.g. `90ms-RKSJ-H`: its code lengths and CIDs
+   are not read), `clip` (render modes 4-7), `invisible` (render mode 3, OCR layers). `areas` lists what has no block:
    `inForm` (text inside a form XObject: stamps, templates) and `outlines` (no text but ≥ 100 glyph-sized filled curves:
    text converted to paths).
 
@@ -83,6 +84,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
   and render mode are kept.
 - Line/paragraph grouping is heuristic (pdfcraft's rules): tables and tightly packed columns may group differently
   from Acrobat. Lines in one text object across columns can join if they share a baseline within 3 em.
+- Type0 fonts with predefined non-Identity CMaps are listed but not editable (embedded CMaps, including mixed
+  one-/two-byte code spaces, are read and written with each code's own length).
 - Glyph coverage of composite (Type0) subset fonts is judged from `/W` and ToUnicode, not the font program.
 - The "outlines" check is a heuristic for pages with no text at all.
 - Rewritten streams are Flate-compressed new objects; untouched streams and the rest of the page are byte-identical.
