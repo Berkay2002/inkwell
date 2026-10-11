@@ -627,7 +627,7 @@ export function Composer({
           value={text}
           rows={1}
           aria-label="Ask about this document"
-          placeholder={noText ? "This PDF has no readable text" : "Ask about this document"}
+          placeholder={noText ? "This PDF has no readable text" : variant === "bar" ? "Ask about this PDF" : "Ask about this document"}
           disabled={noText}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {

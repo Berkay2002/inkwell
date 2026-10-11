@@ -248,6 +248,72 @@ for (const scale of [1, 1.5]) {
   }
 }
 
+// ---- real presses: CDP mouse and key events on the live page, the stage read back after each ----
+await view(full.w, full.h, 1);
+await theme("light");
+const center = (sel, nth = 0) =>
+  ev(`(() => { const r = document.querySelectorAll(${JSON.stringify(sel)})[${nth}]?.getBoundingClientRect(); return r ? { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height, left: r.x } : null })()`);
+const pressAt = async (x, y) => {
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 });
+  await sleep(350);
+};
+const pressOn = async (sel, nth = 0) => {
+  const c = await center(sel, nth);
+  if (!c) throw new Error(`nothing to press: ${sel}`);
+  await pressAt(c.x, c.y);
+};
+const presses = {};
+const check = async (name, expected, act) => {
+  await act();
+  const got = await stageOf();
+  presses[name] = { expected, got, ok: got === expected };
+};
+await stage(TURN1);
+await setView("open");
+await sleep(300);
+await check("press a page chip", "open", () => pressOn(".ax-bar .ax-pgchip"));
+await check("press the Worked-for line", "open", () => pressOn(".ax-bar .ax-trail-line"));
+await check("press the page", "header", () => pressAt(800, 200));
+await check("press the header background", "open", async () => {
+  const c = await center(".ax-bar-head");
+  await pressAt(c.left + c.w * 0.62, c.y);
+});
+await check("press the header background again", "header", async () => {
+  const c = await center(".ax-bar-head");
+  await pressAt(c.left + c.w * 0.62, c.y);
+});
+await setView("bar");
+await sleep(250);
+await check("press the composer from the bar alone", "header", () => pressOn(".ax-bar .ax-input textarea"));
+await setView("open");
+await sleep(250);
+await check("Esc with the composer focused", "header", async () => {
+  await pressOn(".ax-bar .ax-input textarea");
+  await key("Escape");
+  await sleep(250);
+});
+await stage([
+  q(1, "Delete page 4"),
+  a(2, "I can remove page 4 for you.", {
+    state: "streaming",
+    activity: [{ id: "w1", tool: "delete_pages", class: "destructive", label: "Delete page 4", state: "waiting", detail: "northwind-report.pdf, page 4 of 6" }],
+    timing: undefined,
+  }),
+]);
+await check("press Apply", "open", () => pressOn(".ax-approve .ax-btn.primary"));
+// Ctrl+Shift+A from the page: focuses the open bar and leaves the assistant open
+await ev(`document.activeElement?.blur?.()`);
+await send("Input.dispatchKeyEvent", { type: "rawKeyDown", modifiers: 10, key: "A", code: "KeyA", windowsVirtualKeyCode: 65 });
+await send("Input.dispatchKeyEvent", { type: "keyUp", modifiers: 10, key: "A", code: "KeyA", windowsVirtualKeyCode: 65 });
+await sleep(250);
+presses["Ctrl+Shift+A focuses the open bar"] = await ev(`({ open: window.__ai.getState().open, inBar: !!document.activeElement?.closest(".ax-bar") })`);
+presses["Ctrl+Shift+A focuses the open bar"].ok = presses["Ctrl+Shift+A focuses the open bar"].open && presses["Ctrl+Shift+A focuses the open bar"].inBar;
+report.presses = presses;
+console.log(JSON.stringify(presses, null, 1));
+await ev(`window.__ai.setState({ chats: {} })`);
+
 // a narrow window (about 900 px), 100 %
 await view(900, full.h, 1);
 for (const th of ["light", "dark"]) {

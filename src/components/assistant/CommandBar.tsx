@@ -78,9 +78,21 @@ export function Bar({ doc }: { doc: DocState }) {
     const down = (e: PointerEvent) => {
       if ((e.target as Element | null)?.closest(".viewer")) dispatch("outside");
     };
+    // The shortcut that toggles the assistant focuses an open bar that does not have the focus yet.
+    const focusBar = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === "a")) return;
+      if (wrap.current?.contains(document.activeElement)) return;
+      const t = wrap.current?.querySelector<HTMLTextAreaElement>("textarea");
+      if (!t) return;
+      e.preventDefault();
+      e.stopPropagation();
+      t.focus();
+    };
+    window.addEventListener("keydown", focusBar, true);
     window.addEventListener("keydown", key, true);
     document.addEventListener("pointerdown", down, true);
     return () => {
+      window.removeEventListener("keydown", focusBar, true);
       window.removeEventListener("keydown", key, true);
       document.removeEventListener("pointerdown", down, true);
     };
