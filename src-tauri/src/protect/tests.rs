@@ -607,8 +607,8 @@ fn passwords_are_normalised_and_control_characters_refused() {
     let eng = Engine::new(2, 64 << 20);
     let id = open(&eng, &src);
     let typed = tweak(|s| {
-        (s.open_password, s.permissions_password, s.changes, s.copy) =
-            (Some("cafe\u{301}-pass".into()), None, Changes::AllButExtract, true);
+        (s.open_password, s.permissions_password, s.printing, s.changes, s.copy) =
+            (Some("cafe\u{301}-pass".into()), None, Printing::High, Changes::AllButExtract, true);
     });
     eng.protect(id, typed, None, EditSource::User).unwrap();
     eng.save(id, Some(&out)).unwrap();
