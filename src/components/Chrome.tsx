@@ -6,7 +6,7 @@ import { useConvert } from "../lib/convertStore";
 import { useTools } from "../lib/toolsStore";
 import { type DocState, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
-import { HistoryToggle, pickAndCompareFiles } from "./history/HistoryPanel";
+import { HistoryToggle, openCompareSetup } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
 import { MenuButton } from "./Menu";
 import { CommentsToggle } from "./comments/CommentsPanel";
@@ -138,7 +138,7 @@ export function Toolbar({ doc }: { doc: DocState }) {
         items={[
           { label: "Compress file…", onSelect: () => useTools.getState().open("compress", id) },
           { label: "Recognize text…", onSelect: () => useTools.getState().open("ocr", id) },
-          { label: "Compare files…", onSelect: () => void pickAndCompareFiles({ id, name: doc.name }) },
+          { label: "Compare files…", onSelect: () => void openCompareSetup({ id, name: doc.name }) },
           { label: "Export…", onSelect: () => useConvert.getState().openExport(id) },
           { label: "Create PDF…", onSelect: () => useConvert.getState().openCreate() },
         ]}

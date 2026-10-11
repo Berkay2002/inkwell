@@ -13,6 +13,7 @@ shadows), warm palette (window #F4F2ED, surfaces #FFFFFF, panel #FAF8F4, text #1
 | tools | approved/tools-compress.png, tools-ocr.png | Compress and Recognize-text right rail (tools-r2 b-rail: options, progress) |
 | history | approved/history.png | Version history panel (history-r1 a-timeline) |
 | history | approved/history-2.png | Compare mode, full window (history-r1 b-compare; modes 2-up / Swipe / Onion skin) |
+| compare | approved/compare.png, compare-2.png | Compare files: setup page (old and new file slots, content switches) and result (side by side, summary chips as filters, change list, connectors, linked page strips) (compare-r1 a-stage) |
 | redact | approved/redact-review.png, redact-result.png, redact-tools.png | Redact rail: find and hits, after-apply report, manual tools row (redact-r2 c-sweep + a-panel tools) |
 | comments | approved/comments.png, comments-2.png | Comments rail (grouped by page, search, filter, replies) with the floating tool strip, and a selected annotation with handles and popover (comments-r1 a-rail) |
 
@@ -35,3 +36,9 @@ assistant and Tools rails; sanitize is inline in the rail, not a modal. Details 
 c-margin leader lines). The user delegated the pick ("choose what is both standard and what pdfcraft and acrobat has, but also some
 hint of uniqueness"); inkwell chose a-rail. Approved: approved/comments.png, comments-2.png. Same dock as the other rails; one
 right-side panel at a time. Details in rounds/comments-r1/spec.md.
+
+2026-10-11, compare-r1: three ideas (a-stage Acrobat-like setup page then result, b-rail pdfcraft-like dialog and one shaded
+document, c-tape one sheet with a change tape); only a-stage rendered (image tool limit) and inkwell picked it: "Acrobat's
+standard layout: side by side, with the change list on the right". Our touches: dashed connectors between matching changes,
+chips that filter, linked page strips. The main navbar stays; the render's own top bar does not. The Compare modes are now
+Side by side / Slider / Overlay (history-2.png still shows the old labels). Details in rounds/compare-r1/spec.md.

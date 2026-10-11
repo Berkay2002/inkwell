@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { pickOpen } from "../../lib/api";
-import { type Change, type Comparison, type VersionInfo, pickCompareFiles } from "../../lib/history";
+import type { Change, Comparison, VersionInfo } from "../../lib/history";
 import {
   FILTERS,
   WHO_WORD,
@@ -39,33 +38,20 @@ export function HistoryToggle() {
   );
 }
 
-const baseName = (p: string) => p.split(/[\\/]/).pop() || "document";
-
-/** With a document: pick one file to compare it against (the file is Before, the document After). Without: two files. */
-export async function pickAndCompareFiles(doc?: { id: number; name: string }) {
-  try {
-    if (doc) {
-      const f = (await pickOpen(false, "compare"))[0];
-      if (!f) return;
-      useHistory.getState().openCompare({
-        doc: doc.id,
-        a: { kind: "picked", token: f.token },
-        b: { kind: "current" },
-        names: [baseName(f.path), doc.name],
-      });
-      return;
-    }
-    const sel = await pickCompareFiles();
-    if (!sel) return;
-    useHistory.getState().openCompare({
-      doc: null,
-      a: { kind: "picked", token: sel[0].token },
-      b: { kind: "picked", token: sel[1].token },
-      names: [baseName(sel[0].path), baseName(sel[1].path)],
-    });
-  } catch (e) {
-    useStore.getState().setUi({ error: String(e) });
-  }
+/** Opens Compare on its setup page. With a document: it is the new side and the version before the newest the old one. */
+export async function openCompareSetup(doc?: { id: number; name: string }) {
+  const h = useHistory.getState();
+  if (!doc) return h.openCompare({ doc: null, a: { kind: "current" }, b: { kind: "current" }, names: ["", ""], stage: "setup" });
+  if (!h.docs[doc.id]?.versions.length) await h.refresh(doc.id).catch(() => {});
+  const vs = useHistory.getState().docs[doc.id]?.versions ?? [];
+  const old = vs[1] ?? vs[0];
+  h.openCompare({
+    doc: doc.id,
+    a: old ? { kind: "version", id: old.id } : { kind: "current" },
+    b: { kind: "current" },
+    names: ["", doc.name],
+    stage: "setup",
+  });
 }
 
 /** Over the page: "Recover unsaved changes" after a crash, or "same document?" when the file could be an old one. */
@@ -127,7 +113,7 @@ function Header({ doc }: { doc: DocState }) {
           className="ax-icon"
           label="More"
           items={[
-            { label: "Compare files…", onSelect: () => void pickAndCompareFiles({ id: doc.id, name: doc.name }) },
+            { label: "Compare files…", onSelect: () => void openCompareSetup({ id: doc.id, name: doc.name }) },
             ...(ready
               ? [
                   "sep" as const,

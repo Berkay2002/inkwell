@@ -418,3 +418,20 @@ export function trackDays(all: VersionInfo[], now: number): TrackDay[] {
   }
   return days;
 }
+
+/** The "Compare content" switches of the setup page. */
+export interface SetupContent {
+  text: boolean;
+  formatting: boolean;
+  images: boolean;
+}
+
+/** The categories the result starts with: everything, unless a switch is off (then undefined = all). */
+export function setupShow(on: SetupContent): Category[] | undefined {
+  if (on.text && on.formatting && on.images) return undefined;
+  const off = new Set<Category>();
+  if (!on.text) off.add("text");
+  if (!on.formatting) off.add("formatting");
+  if (!on.images) off.add("images");
+  return CATEGORIES.map((c) => c.id).filter((id) => !off.has(id));
+}

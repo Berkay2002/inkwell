@@ -81,9 +81,19 @@ const f = (r) => known(r.path);
 await ev(`window.__S.getState().activate(${l2.id})`);
 const t1 = await f(l1);
 await ev(
-  `window.__H.getState().openCompare({ doc: ${l2.id}, a: { kind: "picked", token: ${JSON.stringify(t1.token)} }, b: { kind: "current" }, names: ["Lease v1.pdf", "Lease v2.pdf"] })`,
+  `window.__H.getState().openCompare({ doc: ${l2.id}, a: { kind: "picked", token: ${JSON.stringify(t1.token)} }, b: { kind: "current" }, names: ["Lease v1.pdf", "Lease v2.pdf"], stage: "setup" })`,
 );
+await until(`!!document.querySelector(".hx-setup") && document.querySelectorAll(".hx-slot .hx-thumb img").length === 2`, "the setup page");
+report.setup = await ev(`document.querySelector(".hx-setup").innerText.replace(/\\s+/g, " ")`);
+await shot("compare-setup");
+if (!(await click(".hx-go"))) throw new Error("no Compare button on the setup page");
 await until(`document.querySelectorAll(".hx-rev").length > 0 && !!document.querySelector(".hx-csum")`, "the comparison");
+// the pages load when they scroll into view: take the first text change, which scrolls both panes to it
+await click(".hx-rev[data-cat=text] .hx-rev-main");
+await until(`document.querySelectorAll(".hx-links line").length > 0`, "the connectors", 10000);
+report.connectors = await ev(`document.querySelectorAll(".hx-links line").length`);
+await until(`document.querySelectorAll(".hx-pthumb .hx-thumb img").length > 0`, "the page strips", 10000);
+report.strips = await ev(`[...document.querySelectorAll(".hx-pstrip")].map((s) => s.querySelector(".hx-pstrip-head").innerText.replace(/\\s+/g, " ") + " / " + s.querySelectorAll(".hx-pthumb").length + " thumbs, active " + (s.querySelector(".hx-pthumb.on")?.dataset.p ?? "none"))`);
 report.summary = await ev(`document.querySelector(".hx-csum").innerText.replace(/\\s+/g, " ")`);
 report.rows = await ev(`[...document.querySelectorAll(".hx-rev")].map((e) => e.innerText.replace(/\\s+/g, " "))`);
 report.formatRows = await ev(`[...document.querySelectorAll(".hx-rev[data-cat=formatting]")].map((e) => e.innerText.replace(/\\s+/g, " "))`);

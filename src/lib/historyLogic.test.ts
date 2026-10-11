@@ -20,6 +20,7 @@ import {
   parentOf,
   rowOf,
   stepIndex,
+  setupShow,
   summaryChips,
   toneOf,
   trackDays,
@@ -309,5 +310,11 @@ describe("compare summary and progress", () => {
     expect(progressFraction({ stage: "first", done: 5, total: 10 })).toBeCloseTo(0.2);
     expect(progressFraction({ stage: "pages", done: 250, total: 500 })).toBeCloseTo(0.9);
     expect(progressFraction({ stage: "document", done: 0, total: 0 })).toBe(1);
+  });
+
+  it("the setup switches say which categories the result starts with", () => {
+    expect(setupShow({ text: true, formatting: true, images: true })).toBeUndefined();
+    expect(setupShow({ text: true, formatting: false, images: true })).toEqual(["text", "images", "annotations", "pages", "forms", "metadata"]);
+    expect(setupShow({ text: false, formatting: false, images: false })).toEqual(["annotations", "pages", "forms", "metadata"]);
   });
 });

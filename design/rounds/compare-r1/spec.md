@@ -15,7 +15,18 @@ waits for everything); it opens from the Tools menu and the command palette.
 
 ## Verdict
 
-(pending: inkwell picks, then the pick is recorded here and in design/README.md)
+2026-10-11, inkwell: **a-stage.** "It is Acrobat's standard layout: side by side, with the change list on the right." b-rail and
+c-tape were never rendered (codex image limit) and are dropped. Kept as our touches: the dashed connector lines between
+matching changes, the kind chips that work as filters, and the linked page-thumbnail strips. Two rules: (1) Inkwell's real
+navbar (Read / Organize and the rest) stays on screen; the render's Acrobat-style top bar (View / Annotate / Edit / Fill &
+Sign) is not ours. (2) The setup screen is built from a-stage-1. Approved: approved/compare.png (a-stage-1-setup),
+approved/compare-2.png (a-stage-2-result).
+
+Built as: the setup page (Old file / New file slots with first-page thumbnail, "This document | Past version | Another
+file..." under each, swap, "Compare content" switches Text / Formatting / Images, Cancel, Compare) and the result (modes
+Side by side / Slider / Overlay, summary strip with chips as filters, change list at the right, connectors, linked strips).
+Not built: "Page ranges" (the engine compares whole files) and a page count for past versions and picked files (no
+engine call for it); the content switches set which kinds the result starts with, the engine still compares everything.
 
 ## How Acrobat Pro does it (study 13-compare, docs/study/screens/13-compare/)
 
@@ -44,19 +55,13 @@ and structure, not observed behaviour.
   differences are **shaded on the new document's pages** (one view, not two panes); there are actions to write the
   report as a new PDF and to put the differences on the document as annotations.
 
-## Where the variants go
+## Where the variants went
 
-- **a-stage** follows Acrobat: a deliberate setup page (two file slots, swap, options, Compare), then summary + two panes
-  + change list. It departs from Acrobat by being the Inkwell Compare view (flat rows, the version strip, light and
-  rounded), by offering "this document" and "a past version" as first-class choices next to "Another file…", and by
-  keeping the summary as a slim strip of counts above the panes rather than a page of its own.
-- **b-rail** follows pdfcraft: a small dialog, then **one document view with the differences shaded on it** and a right
-  rail. It departs from pdfcraft by using Inkwell's rail (the same dock as Comments, Redact, History), a three-way
-  "Changes | Old | New" peek instead of a second document, and a summary of counts as the rail header.
-- **c-tape** departs from both: setup and result on **one sheet**, no dialog, no page of its own. Two slim file lines at the
-  top (Old, New) with the same pick menu, an overlay of the two documents in the middle, and a **change tape**, a thin
-  vertical strip beside the page where every page is a tick and every difference a small mark, so a 500-page comparison is
-  read at a glance and jumped through; the list is a quiet text index beside it, not cards.
+- **a-stage** (picked) follows Acrobat: a deliberate setup page (two file slots, swap, options, Compare), then summary + two
+  panes + change list. It departs from Acrobat by being the Inkwell Compare view (flat rows, light and rounded), by offering
+  "this document" and "a past version" as first-class choices next to "Another file...", and by keeping the summary as a
+  slim strip of counts above the panes rather than a page of its own.
+- b-rail (pdfcraft's one-document view with a right rail) and c-tape (one sheet with a change tape) were dropped unrendered.
 
 Idea: you are looking at two things that should be one; the surface says in one glance how different they are, where, and
 of what kind. For: a person comparing a contract draft with the signed version, or a paper with its revision, alone.
@@ -125,48 +130,3 @@ at the far right a rounded button "Export report" and a pill button "Done". Two 
 changed words marked (amber boxes) with a thin leader line between them; the Changes rail at the right lists the nine
 rows from Shared, the first one selected with the ink-blue edge. The version strip at the bottom shows "Lease agreement
 v1" and "v2" selected as a connected pair.
-
-## Shared b-rail
-Idea: pdfcraft's view in Inkwell's look: one document, differences shaded on it, a right rail. The page is large in the
-centre, the new version (v2) page 2, with the changed words shaded amber and the added clause green. The right rail is
-about 360 px wide on the panel colour, titled "Compare" with "12" beside it, a pill "Old: Lease agreement v1.pdf" with a
-small chevron (the old file is chosen here), a row of five filter chips "All 12", "Text 6", "Formatting 2", "Images 1",
-"Pages 2", then the change list grouped by page ("Page 2 · 5"), and at the bottom a quiet "Export report…" button and a
-text link "Show old file".
-
-## b-rail-1-setup
-ref: ../../approved/history-2.png
-The new document open normally (v2, page 2 centred, Read mode toolbar of the reference). In the centre of the window a small
-rounded dialog with a soft shadow titled "Compare files": the label "Compare with", a dropdown field open showing three
-options "Lease agreement v1.pdf · open document" (selected), "Past version · Signed by tenant · 2 Oct", "Another file…",
-a quiet note "Text, formatting and images are compared; the differences are shown on this file.", a primary ink-blue pill
-"Compare" and a text button "Cancel".
-
-## b-rail-2-result
-ref: ../../approved/history-2.png
-The result as described. One row in the rail is selected (ink-blue left edge, very light blue tint): "~ Rent changed · p. 2".
-A small floating pill at the top of the page: "Showing differences on the new file", with a toggle "Old | New".
-
-## Shared c-tape
-Idea: one sheet, and a tape. No setup page, no dialog. Under the toolbar, two slim lines instead of a form: "Old  Lease
-agreement v1.pdf · 2 Oct 2026 · 4 pages" and "New  Lease agreement v2.pdf · today 14:32 · 5 pages", each with a quiet
-"Change ▾" menu, and between them a small swap icon. At the right of these lines: the count "12 differences" in large
-semibold with, in one quiet line of small text, "6 text · 2 formatting · 1 image · 2 pages · 1 annotation". The page
-area shows the overlay of the two versions of page 2: unchanged text in ink grey, removed words in red with a strikethrough,
-added words in green, changed formatting in amber, on one page. Left of the page, a **change tape**: a thin vertical strip
-about 28 px wide running the full height of the page area, where each of the 5 pages is a small tick row with its number
-and the differences are small coloured marks (red, green, amber) at their positions; page 2 is highlighted. Right of the
-page, a quiet text index (no cards): the nine rows from Shared as plain lines with the glyph, grouped by page, the active
-line in ink blue.
-
-## c-tape-1-setup
-ref: ../../approved/history-2.png
-The sheet before anything is compared: the two lines at the top, the "New" line filled with Lease agreement v2.pdf and the
-"Old" line showing an empty slot "Choose the file to compare against" with a small menu open beneath it: "This document's
-past versions", "Another file…", "Recent". Below, the page area shows only page 2 of v2, calm, no marks, no tape; a
-primary ink-blue pill "Compare" sits at the right of the two lines.
-
-## c-tape-2-result
-ref: ../../approved/history-2.png
-The compared sheet as described, with the tape and the text index. A thin ink-blue progress line is not shown (finished).
-At the bottom right a rounded button "Export report".
