@@ -547,6 +547,9 @@ select.fm-w option {
   margin: 0;
   padding: 1px 6px;
 }
+.fm-prompt .dialog-actions {
+  flex-wrap: wrap;
+}
 .fm-more {
   margin-right: auto;
   align-self: center;

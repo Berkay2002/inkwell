@@ -2,7 +2,7 @@ import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import { commandFor } from "../../lib/commands";
 import { useForms } from "../../lib/forms";
 import {
-  type ButtonAction, type Field, type FieldValue, type Handle, type Rect4, HANDLES, KIND_LABEL, cssColor, dragged, fontSize,
+  type ButtonAction, type Field, type FieldValue, type Handle, type Rect4, HANDLES, KIND_LABEL, commitThenRun, cssColor, dragged, fontSize,
   isCalculated, move, onPage, resetTargets, resize,
 } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
@@ -319,8 +319,7 @@ function TextEditor({ f, className, label, locked, onCommit, onChange }: {
     const cmd = commandFor(e.nativeEvent);
     if (cmd?.id === "save" || cmd?.id === "save-as") {
       e.preventDefault();
-      const typed = live.current.v;
-      void (typed !== f.value ? onCommit(typed) : Promise.resolve(null)).then(() => cmd.run());
+      void commitThenRun(live.current.v, f.value, onCommit, () => cmd.run());
     } else if (e.key === "Escape") {
       show(f.value);
       onChange();

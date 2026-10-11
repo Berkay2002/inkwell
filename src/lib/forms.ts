@@ -4,7 +4,7 @@ import type { EditState } from "./api";
 import { applyState } from "./edit";
 import { useStore } from "../store";
 import type { Detected, Field, FieldKind, FieldPatch, FieldValue, Form, Format, NewField, Rect4, ScriptAction, ScriptPrompt } from "./formsLogic";
-import { detectedToNew, effectsOf, resetTargets } from "./formsLogic";
+import { capPrompts, detectedToNew, effectsOf, resetTargets } from "./formsLogic";
 import { usePrint } from "./printStore";
 
 /**
@@ -43,6 +43,10 @@ export interface ScriptLogLine {
 export interface ScriptsState {
   hasScripts: boolean;
   enabled: boolean;
+  /** They can run now (not taken down by timeouts or a script engine that stopped answering). */
+  usable: boolean;
+  /** They may be turned on again (not after the script engine stopped answering: it is left abandoned for the session). */
+  canEnable: boolean;
   log: ScriptLogLine[];
 }
 
@@ -120,6 +124,10 @@ interface FormsStore {
   /** Messages, links and submits that scripts raised, waiting for the person (the first is showing). */
   prompts: (ScriptPrompt & { id: number; doc: number })[];
   dismissPrompt: (id: number) => void;
+  /** Drops every waiting prompt (of one document, or of all). */
+  dismissAll: (doc?: number) => void;
+  /** "Stop scripts in this file": scripts off for the document, and its waiting prompts dropped. */
+  stopScripts: (doc: number) => Promise<void>;
   /** Turns the file's scripts on or off. */
   runScripts: (doc: number, on: boolean) => Promise<void>;
   dismissBanner: (doc: number) => void;
@@ -168,7 +176,9 @@ export const useForms = create<FormsStore>((set, get) => {
   /** Alerts show in a dialog; resets, page changes, focus and print happen now; links and submits wait for the person. */
   const react = (doc: number, r: Stepped, quiet = false) => {
     const { prompts, actions } = effectsOf(r.alerts ?? [], r.requests ?? []);
-    if (prompts.length) set((s) => ({ prompts: [...s.prompts, ...prompts.map((p) => ({ ...p, id: ++promptId, doc }))] }));
+    if (prompts.length) {
+      set((s) => ({ prompts: capPrompts(s.prompts, prompts.map((p) => ({ ...p, id: ++promptId, doc }))).queue }));
+    }
     // A reset a script asked for does not act on what that reset's own scripts ask for (no loop).
     if (!quiet) for (const a of actions) void act(doc, a);
   };
@@ -224,6 +234,11 @@ export const useForms = create<FormsStore>((set, get) => {
 
     prompts: [],
     dismissPrompt: (id) => set((s) => ({ prompts: s.prompts.filter((p) => p.id !== id) })),
+    dismissAll: (doc) => set((s) => ({ prompts: doc === undefined ? [] : s.prompts.filter((p) => p.doc !== doc) })),
+    stopScripts: async (doc) => {
+      get().dismissAll(doc);
+      await get().runScripts(doc, false);
+    },
     runScripts: async (doc, on) => {
       try {
         patch(doc, { scripts: await formsApi.scriptsEnable(doc, on), error: null });
@@ -240,12 +255,23 @@ export const useForms = create<FormsStore>((set, get) => {
     docs: {},
     get: (doc) => get().docs[doc] ?? fresh(),
     refresh: async (doc) => {
+      // The scripts state does not wait for the field list (listing runs the Format scripts), so the banner and the
+      // switch show at once. It is read again after the list, which may have logged something.
+      const readScripts = () =>
+        formsApi.scripts(doc).then(
+          (scripts) => patch(doc, { scripts }),
+          () => undefined,
+        );
+      const early = readScripts();
       try {
-        const [form, scripts] = await Promise.all([formsApi.list(doc), formsApi.scripts(doc)]);
+        const form = await formsApi.list(doc);
         const d = get().get(doc);
         const has = (r: Ref | null) => (r && form.fields.some((f) => f.page === r.page && f.xref === r.xref) ? r : null);
-        patch(doc, { fields: form.fields, calcOrder: form.calcOrder ?? [], xfa: form.xfa, scripts, selected: has(d.selected) });
+        patch(doc, { fields: form.fields, calcOrder: form.calcOrder ?? [], xfa: form.xfa, selected: has(d.selected) });
+        await early;
+        await readScripts();
       } catch (e) {
+        await early;
         patch(doc, { error: msg(e) });
       }
     },

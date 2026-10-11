@@ -86,6 +86,16 @@ export function ScriptPrompts() {
         {body}
         <div className="dialog-actions">
           {more > 0 && <span className="dim small fm-more">{more} more</span>}
+          {more > 0 && (
+            <button className="btn" onClick={() => useForms.getState().dismissAll()}>
+              Dismiss all
+            </button>
+          )}
+          {prompt.kind === "alert" && (
+            <button className="btn" title="Turns the scripts of this file off until you turn them on again" onClick={() => void useForms.getState().stopScripts(prompt.doc)}>
+              Stop scripts in this file
+            </button>
+          )}
           {actions}
         </div>
       </div>

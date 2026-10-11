@@ -10,7 +10,10 @@ import { applyState } from "./edit";
 import { useForms } from "./forms";
 import {
   type Field,
+  MAX_PROMPTS,
   calcFields,
+  capPrompts,
+  commitThenRun,
   effectsOf,
   logCount,
   moved,
@@ -25,6 +28,7 @@ import {
   resetTargets,
   resize,
   rows,
+  stripBidi,
   summary,
 } from "./formsLogic";
 
@@ -165,7 +169,14 @@ describe("forms logic", () => {
 });
 
 describe("form scripts in the store", () => {
-  const scripts = (p: Partial<{ hasScripts: boolean; enabled: boolean; log: unknown[] }> = {}) => ({ hasScripts: true, enabled: true, log: [], ...p });
+  const scripts = (p: Partial<{ hasScripts: boolean; enabled: boolean; usable: boolean; canEnable: boolean; log: unknown[] }> = {}) => ({
+    hasScripts: true,
+    enabled: true,
+    usable: true,
+    canEnable: true,
+    log: [],
+    ...p,
+  });
   const listed = { fields: [f({ xref: 3, node: 3, name: "Total" })], calcOrder: [3], xfa: false };
   const answer = (over: Record<string, unknown> = {}) => (cmd: string) => {
     if (cmd in over) return Promise.resolve(over[cmd]);
@@ -246,6 +257,38 @@ describe("form scripts in the store", () => {
     expect(inv).toHaveBeenCalledWith("forms_reset", { doc: 1, fields: [3] });
   });
 
+  it("reads the scripts state without waiting for the field list", async () => {
+    let release: (v: unknown) => void = () => undefined;
+    inv.mockImplementation((cmd: string) => (cmd === "forms_list" ? new Promise((r) => (release = r)) : answer()(cmd)));
+    const done = useForms.getState().refresh(1);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(useForms.getState().get(1).scripts?.hasScripts, "banner and switch are there while the list is still being read").toBe(true);
+    expect(useForms.getState().get(1).fields).toHaveLength(0);
+    release(listed);
+    await done;
+    expect(useForms.getState().get(1).fields).toHaveLength(1);
+  });
+
+  it("a script that floods alerts leaves at most MAX_PROMPTS waiting, and Dismiss all clears them", async () => {
+    inv.mockImplementation(answer({ forms_set_value: { ...state, alerts: Array.from({ length: 60 }, (_, i) => ({ message: `m${i}` })), requests: [] } }));
+    await useForms.getState().setValue(1, 0, 3, "x");
+    await useForms.getState().setValue(1, 0, 3, "y");
+    expect(useForms.getState().prompts).toHaveLength(MAX_PROMPTS);
+    expect(useForms.getState().prompts[0]).toMatchObject({ message: "m0" });
+    useForms.getState().dismissAll();
+    expect(useForms.getState().prompts).toHaveLength(0);
+  });
+
+  it("Stop scripts in this file turns them off and drops that file's waiting prompts only", async () => {
+    // The refresh after the switch reads the state again: the engine now says off.
+    inv.mockImplementation(answer({ forms_scripts_enable: scripts({ enabled: false }), forms_scripts: scripts({ enabled: false }) }));
+    useForms.setState({ prompts: [{ kind: "alert", title: "t", message: "a", id: 1, doc: 1 }, { kind: "alert", title: "t", message: "b", id: 2, doc: 2 }] });
+    await useForms.getState().stopScripts(1);
+    expect(inv).toHaveBeenCalledWith("forms_scripts_enable", { doc: 1, on: false });
+    expect(useForms.getState().prompts.map((p) => p.id)).toEqual([2]);
+    expect(useForms.getState().get(1).scripts?.enabled).toBe(false);
+  });
+
   it("the calculation order is one command", async () => {
     inv.mockImplementation(answer());
     await useForms.getState().calcOrder(1, [5, 3]);
@@ -262,6 +305,39 @@ describe("script helpers", () => {
     for (const bad of ["", "javascript:alert(1)", "file:///C:/x", "ftp://x.se", "data:text/html,<b>", "not a url", "https://user:pw@example.com/", "\\\\server\\share", "x".repeat(5000)]) {
       expect(safeLink(bad), bad).toBeNull();
     }
+  });
+
+  it("strips bidirectional controls from a link and from what an alert says", () => {
+    expect(stripBidi("a\u202Eb\u2066c\u2069d\u202Ae")).toBe("abcde");
+    expect(safeLink("https://example.com/\u202Egpj.exe")).toBe("https://example.com/gpj.exe");
+    expect(safeLink("https://exa\u202Emple.com/")).toBe("https://example.com/");
+    const e = effectsOf([{ message: "see \u202Eevil", title: "\u2067T" }], []);
+    expect(e.prompts[0]).toMatchObject({ message: "see evil", title: "T" });
+  });
+
+  it("caps a queue of prompts and counts what did not fit", () => {
+    expect(capPrompts([1, 2], [3, 4, 5], 4)).toEqual({ queue: [1, 2, 3, 4], dropped: 1 });
+    expect(capPrompts([1, 2, 3, 4], [5], 4)).toEqual({ queue: [1, 2, 3, 4], dropped: 1 });
+    expect(capPrompts<number>([], [], 4)).toEqual({ queue: [], dropped: 0 });
+  });
+
+  it("Ctrl+S in a field commits the typed value first and saves after it; an unchanged value is not committed", async () => {
+    const order: string[] = [];
+    const commit = vi.fn(async (v: string) => {
+      await Promise.resolve();
+      order.push(`commit:${v}`);
+      return null;
+    });
+    await commitThenRun("typed", "saved", commit, () => order.push("save"));
+    expect(order).toEqual(["commit:typed", "save"]);
+    order.length = 0;
+    await commitThenRun("same", "same", commit, () => order.push("save"));
+    expect(order).toEqual(["save"]);
+    expect(commit).toHaveBeenCalledTimes(1);
+    // A value the engine refused (the commit resolves to its message) still lets the save run.
+    order.length = 0;
+    await commitThenRun("bad", "saved", async () => "Invalid value", () => order.push("save"));
+    expect(order).toEqual(["save"]);
   });
 
   it("sorts what a fill raised into questions and things to do", () => {

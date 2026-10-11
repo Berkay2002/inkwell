@@ -334,12 +334,18 @@ export const calcSources = (all: Field[], self: Field): string[] => [
 
 // ---- scripts: links, prompts, calculation order -----------------------------------------------------
 
+/** Bidirectional controls (embeddings, overrides, isolates): text that uses them can show a link in an order it is not in. */
+const BIDI = /[\u202A-\u202E\u2066-\u2069]/g;
+
+/** `text` without bidirectional controls (shown in dialogs where a script's text must not reorder what follows). */
+export const stripBidi = (text: string): string => text.replace(BIDI, "");
+
 /**
  * A link a script asked to open, or null when it may not be offered: only http, https and mailto, with no
  * credentials in the address. Returned in its normalised form.
  */
 export function safeLink(url: string): string | null {
-  const t = url.trim();
+  const t = stripBidi(url).trim();
   if (t === "" || t.length > 4096) return null;
   let u: URL;
   try {
@@ -350,6 +356,24 @@ export function safeLink(url: string): string | null {
   if (!["http:", "https:", "mailto:"].includes(u.protocol)) return null;
   if (u.username || u.password) return null;
   return u.href;
+}
+
+/** The most prompts that wait for the person at once; a script that raises more than this is flooding. */
+export const MAX_PROMPTS = 20;
+
+/** `queue` with `incoming` after it, without going past [`MAX_PROMPTS`]; `dropped` is how many did not fit. */
+export function capPrompts<T>(queue: T[], incoming: T[], max = MAX_PROMPTS): { queue: T[]; dropped: number } {
+  const room = Math.max(0, max - queue.length);
+  return { queue: [...queue, ...incoming.slice(0, room)], dropped: Math.max(0, incoming.length - room) };
+}
+
+/**
+ * Save from inside a field: the typed value is committed first (it would only commit when the field loses focus),
+ * then `run` starts (the save). A value that is unchanged is not committed again; a refused one still lets the save run.
+ */
+export async function commitThenRun(typed: string, saved: string, commit: (v: string) => Promise<unknown>, run: () => void): Promise<void> {
+  if (typed !== saved) await commit(typed);
+  run();
 }
 
 /** What the UI asks the person about: a script's message, or a link or a submit it wants. Never acted on without them. */
@@ -386,7 +410,7 @@ type RawRequest =
 
 /** Sorts the alerts and requests of one fill: alerts first (in order), then links and submits to ask about, and the rest to do. */
 export function effectsOf(alerts: RawAlert[], requests: RawRequest[]): ScriptEffects {
-  const prompts: ScriptPrompt[] = alerts.map((a) => ({ kind: "alert", title: a.title?.trim() || "Inkwell", message: a.message, field: a.field }));
+  const prompts: ScriptPrompt[] = alerts.map((a) => ({ kind: "alert", title: stripBidi(a.title ?? "").trim() || "Inkwell", message: stripBidi(a.message), field: a.field }));
   const actions: ScriptAction[] = [];
   for (const r of requests) {
     switch (r.kind) {

@@ -59,20 +59,28 @@ export function FormTools() {
   );
 }
 
+const NO_RESTART = "The script engine stopped answering. Scripts stay off until the file is closed and opened again.";
+
+/** What the banner says about the scripts of the file. */
+function scriptsLine(s: ScriptsState): string {
+  if (!s.enabled) return "Scripts are off for this file.";
+  return s.usable ? "This form runs scripts." : "Scripts stopped in this file.";
+}
+
 /** Over the page: "This form runs scripts", with the per-file switch (Acrobat runs them; so does Inkwell, unless told not to). */
 export function FormsBanner({ doc }: { doc: DocState }) {
   const scripts = useForms((s) => s.docs[doc.id]?.scripts);
   const gone = useForms((s) => s.docs[doc.id]?.bannerGone);
-  if (!scripts?.hasScripts || (scripts.enabled && gone)) return null;
+  if (!scripts?.hasScripts || (scripts.enabled && scripts.usable && gone)) return null;
   return (
     <div className="fm-banner" role="status">
       <Icon name="code" size={14} />
-      <span>{scripts.enabled ? "This form runs scripts." : "Scripts are off for this file."}</span>
+      <span>{scriptsLine(scripts)}</span>
       <label className="fm-check">
-        <input type="checkbox" checked={scripts.enabled} onChange={(e) => void fm().runScripts(doc.id, e.target.checked)} />
+        <input type="checkbox" checked={scripts.enabled} disabled={!scripts.enabled && !scripts.canEnable} title={scripts.canEnable ? undefined : NO_RESTART} onChange={(e) => void fm().runScripts(doc.id, e.target.checked)} />
         <span>Run scripts</span>
       </label>
-      {scripts.enabled && (
+      {scripts.enabled && scripts.usable && (
         <button className="ax-icon" title="Dismiss" aria-label="Dismiss" onClick={() => fm().dismissBanner(doc.id)}>
           <Icon name="close" size={12} />
         </button>
@@ -90,10 +98,10 @@ function ScriptsNote({ doc, scripts }: { doc: number; scripts: ScriptsState }) {
         <span>Scripts</span>
         {n > 0 && <span className="fm-badge" aria-label={`${n} warnings or errors`}>{n}</span>}
         <span className="grow" />
-        <span className="dim small">{scripts.enabled ? "running" : "off"}</span>
+        <span className="dim small">{!scripts.enabled ? "off" : scripts.usable ? "running" : "stopped"}</span>
       </summary>
       <label className="fm-check">
-        <input type="checkbox" checked={scripts.enabled} onChange={(e) => void fm().runScripts(doc, e.target.checked)} />
+        <input type="checkbox" checked={scripts.enabled} disabled={!scripts.enabled && !scripts.canEnable} title={scripts.canEnable ? undefined : NO_RESTART} onChange={(e) => void fm().runScripts(doc, e.target.checked)} />
         <span>Run scripts in this file</span>
       </label>
       {scripts.log.length === 0 ? (
