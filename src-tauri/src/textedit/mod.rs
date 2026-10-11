@@ -1,7 +1,7 @@
 //! Edit existing text in place (Acrobat "Edit text & images" for text): list a page's text
 //! blocks, and replace a block's text, change its size, colour and alignment, move it or resize it.
 //!
-//! Every change is one `Engine::apply_custom` step on the authoritative document: one undo step,
+//! Every change is one `Engine::apply_removing` step on the authoritative document: one undo step,
 //! kept by Save, recorded in history. Coordinates in and out are the viewer's page space (points,
 //! origin at the top left of the page as shown, `/Rotate` applied: the space of `page_text`).
 //! See docs/text-edit.md.
@@ -160,7 +160,7 @@ pub fn edit(eng: &Engine, doc: DocId, rev: u32, page: u32, index: u32, change: &
         return Err(EngineError::Invalid("nothing to change".into()));
     }
     let mut fallback = None;
-    let state = eng.apply_custom(doc, label(change, page), source, false, |d| {
+    let state = eng.apply_removing(doc, label(change, page), source, |d| {
         if entry.generation() != rev {
             return Err(EngineError::Stale);
         }

@@ -319,3 +319,107 @@ fn reports_what_cannot_be_edited() {
     assert!(tb.blocks.is_empty());
     assert_eq!(tb.areas.iter().map(|a| a.issue).collect::<Vec<_>>(), vec![Issue::Outlines]);
 }
+
+const HELV_BOLD: &str = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>";
+
+/// The rect of the first block whose text is `t`.
+fn rect_of(eng: &Engine, id: DocId, t: &str) -> [f32; 4] {
+    let tb = blocks(eng, id, 0).unwrap();
+    tb.blocks.iter().find(|b| b.text == t).unwrap_or_else(|| panic!("no block {t:?} in {:?}", tb.blocks)).rect
+}
+
+fn index_of(eng: &Engine, id: DocId, t: &str) -> u32 {
+    blocks(eng, id, 0).unwrap().blocks.iter().find(|b| b.text == t).unwrap().index
+}
+
+fn same(a: [f32; 4], b: [f32; 4]) -> bool {
+    a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.01)
+}
+
+#[test]
+fn runs_after_an_edited_run_keep_their_place() {
+    let d = dir("mixed");
+    let content = "BT /F1 12 Tf 72 700 Td (Hello ) Tj /F2 12 Tf (bold) Tj /F1 12 Tf ( world) Tj ET";
+    let (eng, id, _) = open(&d, &pdf(content, &[("F1", HELV), ("F2", HELV_BOLD)], &[]));
+    let (bold, world) = (rect_of(&eng, id, "bold"), rect_of(&eng, id, "world"));
+    assert!(bold[0] > 100.0, "{bold:?}");
+    set_text(&eng, id, index_of(&eng, id, "Hello"), "Hi");
+    assert!(same(rect_of(&eng, id, "bold"), bold), "bold moved: {:?} -> {:?}", bold, rect_of(&eng, id, "bold"));
+    assert!(same(rect_of(&eng, id, "world"), world));
+    // Edited after text in its object (the object is split there): the rest stays too.
+    set_text(&eng, id, index_of(&eng, id, "bold"), "BOLD");
+    assert!(same(rect_of(&eng, id, "world"), world), "world moved: {:?} -> {:?}", world, rect_of(&eng, id, "world"));
+    assert!((rect_of(&eng, id, "BOLD")[0] - bold[0]).abs() < 0.01);
+}
+
+#[test]
+fn removed_quote_operators_keep_their_line_moves() {
+    let d = dir("quotes");
+    let fonts = [("F1", HELV), ("F2", HELV_BOLD)];
+    // ' as the first operator of its object, then in the middle (the object is split), then ".
+    let cases = [
+        "BT /F1 12 Tf 30 TL 72 730 Td /F2 12 Tf (edit me) ' /F1 12 Tf (keep two) ' ET",
+        "BT /F1 12 Tf 30 TL 72 700 Td (keep one) Tj /F2 12 Tf (edit me) ' /F1 12 Tf (keep two) ' ET",
+        "BT /F1 12 Tf 30 TL 72 700 Td (keep one) Tj /F2 12 Tf 3 1 (edit me) \" /F1 12 Tf (keep two) ' ET",
+    ];
+    for (n, content) in cases.iter().enumerate() {
+        let d = d.join(n.to_string());
+        std::fs::create_dir_all(&d).unwrap();
+        let (eng, id, _) = open(&d, &pdf(content, &fonts, &[]));
+        let keep = rect_of(&eng, id, "keep two");
+        let edit = rect_of(&eng, id, "edit me");
+        set_text(&eng, id, index_of(&eng, id, "edit me"), "edited");
+        assert!(same(rect_of(&eng, id, "keep two"), keep), "case {n}: {:?} -> {:?}", keep, rect_of(&eng, id, "keep two"));
+        assert!((rect_of(&eng, id, "edited")[1] - edit[1]).abs() < 0.5, "case {n}: the edited line stays on its line");
+    }
+}
+
+#[test]
+fn saved_file_has_no_trace_of_the_old_text() {
+    let d = dir("gone");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let before = std::fs::read(&path).unwrap();
+    assert!(before.windows(16).any(|w| w == b"Quarterly report"));
+    set_text(&eng, id, 0, "Annual summary");
+    eng.save(id, None).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(!bytes.windows(9).any(|w| w == b"Quarterly"), "the old text is still in the saved bytes");
+    // A full rewrite, not the original plus an update.
+    assert_eq!(bytes.windows(9).filter(|w| *w == b"startxref").count(), 1);
+    assert!(text(&eng, id).starts_with("Annual summary"));
+}
+
+#[test]
+fn text_on_a_hidden_layer_is_not_editable() {
+    let d = dir("hidden");
+    let content = "BT /F1 12 Tf 72 700 Td (Visible) Tj ET\n/OC /L1 BDC BT /F1 12 Tf 72 600 Td (Secret) Tj ET EMC\n\
+                   /OC /L2 BDC BT /F1 12 Tf 72 500 Td (Shown layer) Tj ET EMC";
+    let mut bytes = pdf(content, &[("F1", HELV)], &["<< /Type /OCG /Name (Hidden) >>", "<< /Type /OCG /Name (Shown) >>"]);
+    // Wire the layers in: page /Properties and the catalog's /OCProperties (L1 off).
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let mut res = doc.find_page(0).unwrap().get_dict("Resources").unwrap().unwrap();
+    res.dict_put("Properties", doc.new_object_from_str("<< /L1 6 0 R /L2 7 0 R >>").unwrap()).unwrap();
+    doc.catalog()
+        .unwrap()
+        .dict_put("OCProperties", doc.new_object_from_str("<< /OCGs [6 0 R 7 0 R] /D << /OFF [6 0 R] >> >>").unwrap())
+        .unwrap();
+    bytes.clear();
+    doc.write_to(&mut bytes).unwrap();
+    let (eng, id, _) = open(&d, &bytes);
+    let tb = blocks(&eng, id, 0).unwrap();
+    let issue = |t: &str| tb.blocks.iter().find(|b| b.text == t).map(|b| (b.editable, b.issue));
+    assert_eq!(issue("Visible"), Some((true, None)));
+    assert_eq!(issue("Secret"), Some((false, Some(Issue::Hidden))));
+    assert_eq!(issue("Shown layer"), Some((true, None)));
+}
+
+#[test]
+fn study_sample_hidden_layer_is_flagged() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples/redact-source.pdf");
+    let d = dir("hidden-sample");
+    let (eng, id, _) = open(&d, &std::fs::read(src).unwrap());
+    let tb = blocks(&eng, id, 0).unwrap();
+    let secret = tb.blocks.iter().find(|b| b.text.contains("HIDDEN-LAYER-SECRET")).expect("the hidden layer's text is listed");
+    assert_eq!((secret.editable, secret.issue), (false, Some(Issue::Hidden)));
+    assert!(tb.blocks.iter().any(|b| b.editable), "the visible text stays editable");
+}

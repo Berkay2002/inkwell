@@ -19,8 +19,10 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - `change = { text?, size?, color?, align?, offset?: [dx, dy], width? }`; unset fields keep the block's own. `text`
   may contain `\n` for hard line breaks; everything else reflows to the block's width.
 - `index` belongs to the `rev` of the list it came from; a `text_edit` against an older `rev` is `Stale` (list again).
-- Each `text_edit` is one edit-core step (`Engine::apply_custom`): one undo step labelled "Edit text on p. N",
-  "Format text …", "Move text …" or "Resize text box …", kept by Save (incremental update), recorded in history.
+- Each `text_edit` is one edit-core step (`Engine::apply_removing`): one undo step labelled "Edit text on p. N",
+  "Format text …", "Move text …" or "Resize text box …", kept by Save, recorded in history. A document with text
+  edits is saved as a full, garbage-collected rewrite (not an incremental update), so the old text is not left in the
+  file's bytes.
 - `fallback = { font, embedded, reason }` when the block's font could not show the new text (the UI's yellow `!`):
   `reason` names the original font and the first character it lacks.
 
@@ -41,7 +43,10 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
    inserted in its own graphics state: `q [cm] /TouchUp_TextEdit MP BT <state> Tm … ET Q` (Acrobat's marker). If the
    same `BT` showed text before the block, the object is split there (`ET … BT Tm`) to keep reading order. Lines are
    positioned with `Td` from the block's left edge in its text space; `center/right` offset each line; `justify`
-   spreads the free width with `Tw` (single-byte fonts) or `TJ` gaps. Everything else in the stream is copied byte for
+   spreads the free width with `Tw` (single-byte fonts) or `TJ` gaps. Each removed show operator is replaced by a stand-in with
+   the same moves and no painting: a numeric-only `TJ` advancing the text matrix by the removed text's width, after
+   `T*` for a `'` (and `Tw Tc T*` for a `"`), so text after it in the same object stays put. When the object is split,
+   it is reopened at the removed operator's line and position. Everything else in the stream is copied byte for
    byte. Changed streams become new Flate streams (a content stream may be shared with another page); the page's
    `/Contents` points at them.
 4. **Fonts.** The block's own font is kept when every character has a code (reverse ToUnicode/encoding) and a glyph:
@@ -57,7 +62,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 6. **What can't be edited** is still listed, with `editable: false`, `issue` and a sentence in `reason`:
    `type3` (glyphs are drawings), `noUnicode` (Identity-H and similar without ToUnicode: the text can't be read),
    `vertical`, `encoding` (a predefined CMap other than Identity, e.g. `90ms-RKSJ-H`: its code lengths and CIDs
-   are not read), `clip` (render modes 4-7), `invisible` (render mode 3, OCR layers). `areas` lists what has no block:
+   are not read), `clip` (render modes 4-7), `invisible` (render mode 3, OCR layers), `hidden` (inside `/OC … BDC` marked content whose optional content group
+   is off in the default configuration, including membership dictionaries and their policy). `areas` lists what has no block:
    `inForm` (text inside a form XObject: stamps, templates) and `outlines` (no text but ≥ 100 glyph-sized filled curves:
    text converted to paths).
 

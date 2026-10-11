@@ -57,6 +57,8 @@ pub enum Issue {
     Clip,
     /// Invisible text (render mode 3), usually an OCR layer under a scan.
     Invisible,
+    /// On an optional content layer that is hidden.
+    Hidden,
     /// The text is drawn by a form XObject (shared content, e.g. a stamp or a template).
     InForm,
     /// The page shows glyph-like shapes but no text: text converted to outlines.
@@ -136,6 +138,8 @@ pub struct Line {
     pub decodable: bool,
     limit: Option<Limit>,
     render_mode: i64,
+    /// Inside optional content that is hidden.
+    hidden: bool,
     ops: Vec<usize>,
     origin: Origin,
     /// Baseline start and end in user space.
@@ -150,6 +154,9 @@ impl Line {
             Some(Limit::Vertical) => return Some(Issue::Vertical),
             Some(Limit::Encoding) => return Some(Issue::Encoding),
             None => {}
+        }
+        if self.hidden {
+            return Some(Issue::Hidden);
         }
         if self.render_mode >= 4 {
             return Some(Issue::Clip);
@@ -247,6 +254,18 @@ struct Shown {
     font: Vec<u8>,
     size: f64,
     decodable: bool,
+    /// How far it moves the text matrix (text space, after horizontal scaling), and the font
+    /// size × horizontal scale it was shown with.
+    advance: f64,
+    em: f64,
+    hidden: bool,
+}
+
+/// How a show operator moves the text matrix, to keep that move when the operator is removed.
+#[derive(Clone, Copy, Debug)]
+struct Advance {
+    x: f64,
+    em: f64,
 }
 
 /// The page as read: its content split into the streams' operators, and what it shows.
@@ -256,6 +275,8 @@ pub(crate) struct PageContent {
     pieces: Pieces,
     ops: Vec<Op>,
     fonts: Option<PdfObject>,
+    /// Every show operator's move, by operator index.
+    advances: HashMap<usize, Advance>,
     pub lines: Vec<Line>,
     pub areas: Vec<Area>,
     /// The page's crop box in user space.
@@ -303,7 +324,9 @@ pub(crate) fn read_page(doc: &PdfDocument, page: u32) -> Result<PageContent> {
     let ops = pieces.parse();
     let mut cache = HashMap::new();
     let mut extra = Extra::default();
-    let shown = interpret(&ops, fonts.as_ref(), xobjects.as_ref(), &mut cache, &mut extra);
+    let layers = Layers::of(doc, res.as_ref());
+    let shown = interpret(&ops, fonts.as_ref(), xobjects.as_ref(), &layers, &mut cache, &mut extra);
+    let advances = shown.iter().map(|s| (s.op, Advance { x: s.advance, em: s.em })).collect();
     let mut lines: Vec<Line> = Vec::new();
     let mut last = None;
     for s in shown {
@@ -320,7 +343,7 @@ pub(crate) fn read_page(doc: &PdfDocument, page: u32) -> Result<PageContent> {
     if lines.is_empty() && extra.glyphlike >= 100 {
         areas.push(Area { rect: extra.glyph_box, issue: Issue::Outlines });
     }
-    Ok(PageContent { page: p, streams, pieces, ops, fonts, lines, areas, crop })
+    Ok(PageContent { page: p, streams, pieces, ops, fonts, advances, lines, areas, crop })
 }
 
 /// What the interpreter notices besides text.
@@ -331,6 +354,65 @@ struct Extra {
     /// Filled paths the size of glyphs, with curves, and their union.
     glyphlike: usize,
     glyph_box: [f64; 4],
+}
+
+/// Which optional content groups are hidden in the default configuration (/OCProperties /D).
+pub(crate) struct Layers {
+    properties: Option<PdfObject>,
+    /// Object numbers listed in /OFF, or with /BaseState /OFF the ones listed in /ON.
+    listed: HashSet<i32>,
+    base_off: bool,
+}
+
+fn ref_numbers(a: Option<PdfObject>) -> HashSet<i32> {
+    let Some(a) = a.filter(|a| a.is_array().unwrap_or(false)) else { return HashSet::new() };
+    (0..a.len().unwrap_or(0) as i32)
+        .filter_map(|i| a.get_array(i).ok().flatten())
+        .filter(|o| o.is_indirect().unwrap_or(false))
+        .filter_map(|o| o.as_indirect().ok())
+        .collect()
+}
+
+impl Layers {
+    fn of(doc: &PdfDocument, res: Option<&PdfObject>) -> Layers {
+        let d = doc.catalog().ok().and_then(|c| get(&c, "OCProperties")).and_then(|p| get(&p, "D"));
+        let base_off = d.as_ref().and_then(|d| get(d, "BaseState")).and_then(|b| b.as_name().ok()).as_deref() == Some(b"OFF");
+        let listed = ref_numbers(d.as_ref().and_then(|d| get(d, if base_off { "ON" } else { "OFF" })));
+        Layers { properties: res.and_then(|r| get(r, "Properties")), listed, base_off }
+    }
+
+    fn off(&self, ocg: &PdfObject) -> bool {
+        let Some(n) = ocg.is_indirect().ok().filter(|i| *i).and_then(|_| ocg.as_indirect().ok()) else { return false };
+        self.listed.contains(&n) != self.base_off
+    }
+
+    /// Whether the `/OC` property `operand` of a `BDC` names hidden content: an OCG that is
+    /// off, or a membership dictionary whose policy (/P, AnyOn by default) leaves it off.
+    fn hidden(&self, operand: Option<&Obj>) -> bool {
+        let Some(Obj::Name(n)) = operand else { return false };
+        let Some(r) = self.properties.as_ref().and_then(|p| get(p, &String::from_utf8_lossy(n))) else { return false };
+        let kind = get(&r, "Type").and_then(|t| t.as_name().ok());
+        if kind.as_deref() != Some(b"OCMD") {
+            return self.off(&r);
+        }
+        let groups: Vec<PdfObject> = match get(&r, "OCGs") {
+            Some(g) if g.is_array().unwrap_or(false) => {
+                (0..g.len().unwrap_or(0) as i32).filter_map(|i| g.get_array(i).ok().flatten()).collect()
+            }
+            Some(g) => vec![g],
+            None => return false,
+        };
+        if groups.is_empty() {
+            return false;
+        }
+        let off: Vec<bool> = groups.iter().map(|g| self.off(g)).collect();
+        match get(&r, "P").and_then(|p| p.as_name().ok()).as_deref() {
+            Some(b"AllOn") => off.iter().any(|o| *o),
+            Some(b"AnyOff") => !off.iter().any(|o| *o),
+            Some(b"AllOff") => !off.iter().all(|o| *o),
+            _ => off.iter().all(|o| *o),
+        }
+    }
 }
 
 fn metrics_for(fonts: Option<&PdfObject>, name: &[u8], cache: &mut HashMap<Vec<u8>, Rc<Metrics>>) -> Rc<Metrics> {
@@ -367,10 +449,13 @@ fn interpret(
     ops: &[Op],
     fonts: Option<&PdfObject>,
     xobjects: Option<&PdfObject>,
+    layers: &Layers,
     cache: &mut HashMap<Vec<u8>, Rc<Metrics>>,
     extra: &mut Extra,
 ) -> Vec<Shown> {
     let mut out = Vec::new();
+    // Marked content: whether each open sequence is hidden optional content.
+    let mut marked: Vec<bool> = Vec::new();
     let mut ts = Ts::new();
     let mut at_bt = (0usize, ts.clone());
     let mut stack: Vec<Ts> = Vec::new();
@@ -381,6 +466,11 @@ fn interpret(
     extra.glyph_box = EMPTY;
     for (i, op) in ops.iter().enumerate() {
         match op.op.as_slice() {
+            b"BMC" => marked.push(false),
+            b"BDC" => marked.push(op.name(0) == Some(b"OC") && layers.hidden(op.operands.get(1))),
+            b"EMC" => {
+                marked.pop();
+            }
             b"q" => stack.push(ts.clone()),
             b"Q" => {
                 if let Some(s) = stack.pop() {
@@ -555,6 +645,9 @@ fn interpret(
                     font: name,
                     size: if size_user > 0.0 { size_user } else { ts.size },
                     decodable,
+                    advance: x_text,
+                    em: ts.size * ts.scale,
+                    hidden: marked.iter().any(|h| *h),
                 });
             }
             _ => {}
@@ -582,6 +675,7 @@ fn add_shown(lines: &mut Vec<Line>, last: &mut Option<(usize, (f64, f64), f64)>,
             && (s.size - l.size).abs() < 0.01
             && l.color == color
             && l.render_mode == s.state.render_mode
+            && l.hidden == s.hidden
             && along(l, end).is_some_and(|(dx, dy)| dy.abs() < size * 0.3 && dx > -size && dx < size * 3.0)
     });
     if joins {
@@ -610,6 +704,7 @@ fn add_shown(lines: &mut Vec<Line>, last: &mut Option<(usize, (f64, f64), f64)>,
             decodable: s.decodable,
             limit: m.limit,
             render_mode: s.state.render_mode,
+            hidden: s.hidden,
             ops: vec![s.op],
             origin: Origin {
                 tm: s.tm,
@@ -661,6 +756,7 @@ pub fn group_blocks(lines: &[Line]) -> Vec<Block> {
             prev.font == l.font
                 && prev.color == l.color
                 && prev.render_mode == l.render_mode
+                && prev.hidden == l.hidden
                 && (prev.size - l.size).abs() < 0.01
                 && aligned
                 && g > l.size * 0.8
@@ -1139,15 +1235,56 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         // Text state operators belong inside the reopened text object.
         block_ops.push(Op::new("BT", vec![]));
         block_ops.extend(after.ops().into_iter().filter(|op| !op.is("Tf") || after.font.is_some()));
-        block_ops.push(Op::new("Tm", o.tlm.0.iter().map(|v| num(*v)).collect()));
+        // Back where the removed operator started. A ' or " moves to the next line itself (its
+        // stand-in below does): start from the line before it.
+        if matches!(pc.ops.get(start).map(|op| op.op.as_slice()), Some(b"'" | b"\"")) {
+            let before = Matrix::translate(0.0, o.state.leading).then(&o.tlm);
+            block_ops.push(Op::new("Tm", before.0.iter().map(|v| num(*v)).collect()));
+        } else {
+            block_ops.push(Op::new("Tm", o.tlm.0.iter().map(|v| num(*v)).collect()));
+            // The text already shown on this line moved the text matrix past the line start.
+            let em = o.state.font.as_ref().map_or(0.0, |f| f.1) * o.state.scale;
+            let dx = o.tlm.invert().map_or(0.0, |inv| inv.apply(o.tm.0[4], o.tm.0[5]).0);
+            if dx.abs() > 1e-9 && em.abs() > 1e-9 {
+                block_ops.push(Op::new("TJ", vec![Obj::Array(vec![num(-dx * 1000.0 / em)])]));
+            }
+        }
     }
     let at = if split { start } else { o.bt_op };
     let new_data = splice(&pc.pieces, &pc.ops, |i| {
-        let insert = if i == at { std::mem::take(&mut block_ops) } else { Vec::new() };
-        (insert, !drop.contains(&i))
+        let mut insert = if i == at { std::mem::take(&mut block_ops) } else { Vec::new() };
+        let keep = !drop.contains(&i);
+        if !keep {
+            insert.extend(stand_in(&pc, i));
+        }
+        (insert, keep)
     });
     write_contents(doc, &pc, new_data)?;
     Ok(fallback)
+}
+
+/// What replaces removed show operator `i`: the same moves without painting. A ' or " still
+/// goes to the next line (" still sets its word and character spacing), and the text matrix
+/// still advances by the text's width (a numeric-only TJ), so text after it in the same text
+/// object stays where it was.
+fn stand_in(pc: &PageContent, i: usize) -> Vec<Op> {
+    let Some(op) = pc.ops.get(i) else { return Vec::new() };
+    let mut v = Vec::new();
+    match op.op.as_slice() {
+        b"'" => v.push(Op::new("T*", vec![])),
+        b"\"" => {
+            v.push(Op::new("Tw", vec![op.operands.first().cloned().unwrap_or(Obj::Int(0))]));
+            v.push(Op::new("Tc", vec![op.operands.get(1).cloned().unwrap_or(Obj::Int(0))]));
+            v.push(Op::new("T*", vec![]));
+        }
+        _ => {}
+    }
+    if let Some(a) = pc.advances.get(&i) {
+        if a.x.abs() > 1e-9 && a.em.abs() > 1e-9 {
+            v.push(Op::new("TJ", vec![Obj::Array(vec![num(-a.x * 1000.0 / a.em)])]));
+        }
+    }
+    v
 }
 
 /// Rewrites the page's content: `edit(i)` gives the operators to insert before operator `i`
@@ -1210,6 +1347,7 @@ pub fn issue_text(i: Issue) -> &'static str {
         Issue::Encoding => "its font uses a predefined CJK encoding that can't be rewritten",
         Issue::Clip => "it is used as a clipping path",
         Issue::Invisible => "it is invisible text (an OCR layer)",
+        Issue::Hidden => "it is on a hidden layer",
         Issue::InForm => "it is drawn by a shared form object (a stamp or template)",
         Issue::Outlines => "the text was converted to shapes (outlines)",
     }
