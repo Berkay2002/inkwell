@@ -53,6 +53,18 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tiff = "0.11"
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# Digital signatures (sign/crypto, adapted from pdfcraft): X.509, CMS, PKCS #12, RSA/ECDSA. RustCrypto, same versions pdfcraft pins.
+sha1 = "0.11"
+sha2 = "0.11"
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
+p384 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
+rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["std", "hazmat", "encoding"] }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+hmac = "0.13"
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc", "block-padding"] }
+des = "0.9"
+rc2 = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory"] }
@@ -67,6 +79,14 @@ codegen-units = 1
 lto = "thin"
 opt-level = 3
 strip = true
+
+# Debug-build speed for RSA key generation and signing (tests, `cargo run`).
+[profile.dev.package.rsa]
+opt-level = 3
+[profile.dev.package.crypto-primes]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
+opt-level = 3
 
 [patch.crates-io]
 # Local patch: `max_align_t` is not emitted by bindgen on MSVC, which breaks mupdf 0.8.0's native-device assert.

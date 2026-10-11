@@ -10,6 +10,7 @@ pub mod ocr;
 pub mod paths;
 pub mod recents;
 pub mod redact;
+pub mod sign;
 pub mod tools;
 
 use engine::cache::TileKey;
