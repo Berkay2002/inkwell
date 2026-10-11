@@ -40,7 +40,7 @@ match, shows them in the Redact rail for review, and applies on the user's word.
 | `redact_unmark` | edit | `marks` ids or `all` (not both) |
 | `redact_apply` | permanent | applies every mark with the Sanitize options (default all on; unknown option names are an `Err`), in memory: the file on disk is untouched until the user saves. Takes `expected_marks`, `pages` and `marks_digest` exactly as `redact_list_marks` gave them; the digest is checked before the card is shown and again inside the edit lane's lock, so the user approves exactly the marks that get applied. The card lists the first marked texts, every sanitize option that is on ("delete ALL comments and markup", "strip metadata and all hidden data") and the ones kept. Verification report goes to the Redact rail. An engine refusal (recoverable content) is an `Err` that leaves the marks. |
 | `list_comments` | read | ids, kind, author, text, reply parent |
-| `add_comment` | edit | `kind`: highlight / underline / strikeout / squiggly on every match of `find` (one step), `note` at text or a page point, `reply` to a comment id |
+| `add_comment` | edit | `kind`: highlight / underline / strikeout / squiggly on every match of `find`, or of a `pattern` / `regex` (such as every date) in one step, `note` at text or a page point, `reply` to a comment id |
 | `list_form_fields` | read | ids (`p2#17`), name, type, value, choices, read-only, required |
 | `fill_form_fields` | edit | `{ field: name or id, value }[]` in one all-or-nothing step; a no-op is an `Err` |
 | `organize_pages` | edit | `rotate`, `move`, `insert_blank` |
@@ -121,6 +121,12 @@ file the user must pick (picture marks, insert image, merge).
 - `convert_to_standard` applies only the safe fixes; what still fails is reported, never hidden.
 
 ## Verification (2026-10-11)
+
+Open: the brief's prompts ("redact my name", "highlight every date") have not run against a real model; the
+scripted stand-in used other questions (SSNs, a literal phrase). "Highlight every date" needs `regex` (or one
+literal `find` per date, one card each): `every_date_is_highlighted_in_one_step_by_regex...` covers the regex path
+on the sample, where `2026-01-15` wraps over two lines and is matched across the break.
+
 
 - `cargo test --lib ai::` 118 passed; `pnpm tsc --noEmit`, `pnpm vitest run` (413) clean.
 - Live through the real app (debug exe, scratch data dir, a copy of `docs/study/samples/redact-source.pdf`,

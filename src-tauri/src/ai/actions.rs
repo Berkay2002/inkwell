@@ -207,7 +207,13 @@ fn pattern_arg(name: &str) -> Result<Pattern, String> {
 
 /// What the query of a redaction or markup tool asks for (exactly one of text, pattern, regex).
 fn query_arg(a: &Value) -> Result<(FindQuery, String), String> {
-    let (text, pattern, regex) = (str_arg(a, "text"), str_arg(a, "pattern"), str_arg(a, "regex"));
+    query_with(a, "text")
+}
+
+/// The same, where the literal text is called `key` (add_comment's own "text" is the comment's words, so its
+/// literal is "find").
+fn query_with(a: &Value, key: &str) -> Result<(FindQuery, String), String> {
+    let (text, pattern, regex) = (str_arg(a, key), str_arg(a, "pattern"), str_arg(a, "regex"));
     let case_sensitive = bool_arg(a, "case_sensitive", false);
     match (text, pattern, regex) {
         (Some(t), None, None) => Ok((
@@ -223,8 +229,8 @@ fn query_arg(a: &Value) -> Result<(FindQuery, String), String> {
             regex::RegexBuilder::new(r).size_limit(limit).dfa_size_limit(limit).build().map_err(|e| format!("The regex does not compile: {e}"))?;
             Ok((FindQuery::Regex { pattern: r.to_string(), case_sensitive }, format!("/{}/", one_line(r, 40))))
         }
-        (None, None, None) => Err("Give one of \"text\", \"pattern\" or \"regex\".".into()),
-        _ => Err("Give only one of \"text\", \"pattern\" and \"regex\".".into()),
+        (None, None, None) => Err(format!("Give one of \"{key}\", \"pattern\" or \"regex\".")),
+        _ => Err(format!("Give only one of \"{key}\", \"pattern\" and \"regex\".")),
     }
 }
 
@@ -385,13 +391,17 @@ pub fn tools() -> Vec<Arc<Tool>> {
         tool(
             "add_comment",
             "Adds a comment. \"kind\" is highlight, underline, strikeout or squiggly (marks every match of \"find\" \
-             on \"pages\", or just the first with \"first_only\"; \"text\" is an optional note attached to it), note \
+             on \"pages\", or of a \"pattern\" or \"regex\" given instead, such as every date, all in one step; or \
+             just the first with \"first_only\"; \"text\" is an optional note attached to it), note \
              (a sticky note with \"text\" at \"find\" or at \"page\" with \"x\" and \"y\" as fractions of the page) or \
              reply (\"text\" answers the comment \"parent\" from list_comments). Changes the document (the user \
              approves it).",
             json!({ "type": "object", "additionalProperties": false, "required": ["kind"], "properties": {
                 "kind": { "type": "string", "enum": ["highlight", "underline", "strikeout", "squiggly", "note", "reply"] },
                 "find": { "type": "string", "description": "the text to mark (or to put a note next to)" },
+                "pattern": { "type": "string", "enum": ["email", "phone", "personnummer", "ssn", "iban", "card"],
+                             "description": "markup instead of find: a validated pattern" },
+                "regex": { "type": "string", "description": "markup instead of find: Rust regex syntax, for anything else (dates, reference numbers)" },
                 "pages": pages.clone(),
                 "first_only": { "type": "boolean", "description": "mark only the first match" },
                 "case_sensitive": { "type": "boolean" },
@@ -409,11 +419,13 @@ pub fn tools() -> Vec<Arc<Tool>> {
                     ("note", Some(f)) => format!("Add a note next to “{}”{said}", one_line(f, 40)),
                     ("note", None) => format!("Add a note on p. {}{said}", int(a, "page").unwrap_or(0)),
                     ("reply", _) => format!("Reply to a comment{said}"),
-                    (k, Some(f)) => {
-                        let which = if bool_arg(a, "first_only", false) { "the first match of" } else { "every match of" };
-                        format!("{} {which} “{}”{}", cap(k), one_line(f, 40), said.replacen(": ", " with the note ", 1))
-                    }
-                    (k, None) => format!("Add a {k}"),
+                    (k, _) => match query_with(a, "find") {
+                        Ok((_, what)) => {
+                            let which = if bool_arg(a, "first_only", false) { "the first match of" } else { "every match of" };
+                            format!("{} {which} {what}{}", cap(k), said.replacen(": ", " with the note ", 1))
+                        }
+                        Err(_) => format!("Add a {k}"),
+                    },
                 }
             },
             add_comment,
@@ -834,15 +846,14 @@ fn comment_check(c: &Ctx, a: &Value) -> Result<Option<String>, String> {
     if !matches!(kind, "highlight" | "underline" | "strikeout" | "squiggly") {
         return Ok(None);
     }
-    let Some(f) = str_arg(a, "find") else { return Ok(None) };
-    let q = FindQuery::Text { needle: f.to_string(), case_sensitive: bool_arg(a, "case_sensitive", false), whole_word: false };
+    let (q, what) = query_with(a, "find")?;
     let st = state(&l)?;
     let mut hits = find_hits(&l, &q, &pages_arg(a, st.page_count)?)?;
     if bool_arg(a, "first_only", false) {
         hits.truncate(1);
     }
     if hits.is_empty() {
-        return Err(format!("“{}” does not appear in the document text. Nothing was changed.", one_line(f, 40)));
+        return Err(format!("{what} does not appear in the document text. Nothing was changed."));
     }
     let mut pages: Vec<u32> = hits.iter().map(|h| h.page).collect();
     pages.sort_unstable();
@@ -894,11 +905,10 @@ fn add_comment(c: &Ctx, a: &Value) -> Result<Output, String> {
                 "strikeout" => Kind::StrikeOut,
                 _ => Kind::Squiggly,
             };
-            let f = str_arg(a, "find").ok_or("\"find\" is required: the text to mark, copied from the document.")?;
-            let q = FindQuery::Text { needle: f.to_string(), case_sensitive: bool_arg(a, "case_sensitive", false), whole_word: false };
+            let (q, what) = query_with(a, "find").map_err(|e| format!("{e} \"find\" is the text to mark, copied from the document."))?;
             let mut hits = find_hits(&l, &q, &pages_arg(a, st.page_count)?)?;
             if hits.is_empty() {
-                return Err(format!("“{}” does not appear in the document text{}. Nothing was changed.", one_line(f, 40),
+                return Err(format!("{what} does not appear in the document text{}. Nothing was changed.",
                     if pages_requested(a).is_empty() { "" } else { " on those pages" }));
             }
             if bool_arg(a, "first_only", false) {

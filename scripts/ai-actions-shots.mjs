@@ -123,7 +123,8 @@ keep("compare", m);
 await shot("compare-done-light.png");
 
 // ---- redaction: mark first, review in the rail, then apply (permanent, asks in every mode) ----
-m = await turn("redact-mark", "Redact every social security number in this document.");
+// AI_LIVE=1 (a real model): the brief's own question, with the name of the person in the sample
+m = await turn("redact-mark", process.env.AI_LIVE ? "Redact my name, Jane Q. Tester, everywhere in this document." : "Redact every social security number in this document.");
 keep("redact-mark", m);
 await shot("redact-marked-light.png");
 // the "Review in Redact" link under the answer opens the rail on the marks

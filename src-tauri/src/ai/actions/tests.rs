@@ -673,3 +673,28 @@ fn the_coverage_file_lists_exactly_the_registry_and_maps_to_real_tools() {
         assert!(file["tools"].get(id).is_none(), "{id} is both covered and excluded");
     }
 }
+
+// ---- markup by pattern or regex -----------------------------------------------------------------
+
+#[test]
+fn every_date_is_highlighted_in_one_step_by_regex_and_a_literal_date_works_too() {
+    let h = open_bytes("highlight-dates", SAMPLE.to_vec());
+    let t = tools().into_iter().find(|t| t.name == "add_comment").unwrap();
+    let dates = json!({ "kind": "highlight", "regex": r"\d{4}-\d{2}-\d{2}" });
+    assert_eq!((t.label)(&dates), r"Highlight every match of /\d{4}-\d{2}-\d{2}/");
+    let c = card(&h, "add_comment", dates.clone()).unwrap().unwrap();
+    assert!(c.starts_with("2 matches on"), "{c}");
+    let s = steps(&h);
+    let o = ok(&h, "add_comment", dates);
+    assert!(o.text.contains("2 highlights"), "{}", o.text);
+    assert_eq!(steps(&h), s + 1, "all of them are one undo step");
+    assert_edited(&o);
+    // one date by its text (the sample wraps it over two lines) and a validated pattern
+    ok(&h, "add_comment", json!({ "kind": "underline", "find": "2026-01-15" }));
+    assert!(ok(&h, "add_comment", json!({ "kind": "squiggly", "pattern": "ssn" })).text.contains("5 matches"));
+    // exactly one way to say what to mark
+    assert!(err_of(&h, "add_comment", json!({ "kind": "highlight" })).contains("Give one of"));
+    assert!(err_of(&h, "add_comment", json!({ "kind": "highlight", "find": "a", "regex": "b" })).contains("only one"));
+    assert!(err_of(&h, "add_comment", json!({ "kind": "highlight", "regex": "(" })).contains("compile"));
+    assert!(err_of(&h, "add_comment", json!({ "kind": "highlight", "regex": "zebra-[0-9]+" })).contains("does not appear"));
+}
