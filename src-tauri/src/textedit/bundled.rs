@@ -169,6 +169,12 @@ impl Subset {
         self.remapper.get(g).unwrap_or(0).to_be_bytes().to_vec()
     }
 
+    /// Whether glyph `g` can stand for `text` here: unused, or used for the same text (a code
+    /// has one ToUnicode entry, so two characters drawn with one glyph need two subsets).
+    pub fn fits(&self, g: u16, text: &str) -> bool {
+        self.text.get(&g).is_none_or(|t| t == text)
+    }
+
     /// Whether no glyph was used.
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()

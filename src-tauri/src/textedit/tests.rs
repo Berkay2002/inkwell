@@ -864,3 +864,97 @@ fn edits_again_leave_no_unused_fonts_behind() {
     let (eng, id) = reopen(&path);
     assert_eq!(text(&eng, id), "再见 two");
 }
+
+#[test]
+fn characters_sharing_a_glyph_keep_their_own_text() {
+    let d = dir("shared-glyph");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    // U+301C WAVE DASH and U+FF5E FULLWIDTH TILDE are one glyph in the CJK face; U+03A9 and
+    // U+2126 (ohm) one in Noto Sans.
+    set_text(&eng, id, 0, "〜～ ΩΩ");
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert!(text(&eng, id).starts_with("〜～ ΩΩ"), "{}", text(&eng, id));
+    assert_eq!(blocks(&eng, id, 0).unwrap().blocks[0].text, "〜～ ΩΩ");
+}
+
+#[test]
+fn korean_without_spaces_wraps_between_syllables() {
+    let d = dir("hangul");
+    let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let ko = "대한민국의수도는서울특별시입니다그리고부산은항구도시입니다";
+    let ch = BlockChange { text: Some(ko.into()), width: Some(120.0), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 1, &ch, EditSource::User).unwrap();
+    let b = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    assert!(b.lines.len() >= 3, "{:?}", b.lines);
+    assert!(b.lines.iter().all(|l| l[2] - l[0] <= 120.5), "{:?}", b.lines);
+    assert_eq!(b.text.replace(' ', ""), ko);
+}
+
+#[test]
+fn a_line_under_larger_text_clears_it() {
+    let d = dir("big-run");
+    let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let runs = vec![
+        RunChange { text: Some("small ".into()), source: Some(0), size: Some(12.0), ..Default::default() },
+        RunChange { text: Some("BIG\n".into()), source: Some(0), size: Some(48.0), ..Default::default() },
+        RunChange { text: Some("body text".into()), source: Some(0), size: Some(12.0), ..Default::default() },
+    ];
+    edit(&eng, id, rev(&eng, id), 0, 0, &BlockChange { runs: Some(runs), ..Default::default() }, EditSource::User).unwrap();
+    let lines = eng.page_text(id, 0).unwrap();
+    let big = lines.iter().find(|l| l.t.contains("BIG")).unwrap_or_else(|| panic!("{lines:?}"));
+    let body = lines.iter().find(|l| l.t.contains("body")).unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(body.b[1] >= big.b[3] - 0.5, "the body line overlaps the big text: {big:?} {body:?}");
+}
+
+#[test]
+fn a_moved_block_stays_put_when_edited_again() {
+    let d = dir("move-then-edit");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let ch = BlockChange { offset: Some([50.0, 100.0]), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 1, &ch, EditSource::User).unwrap();
+    let moved = rect_of(&eng, id, "The first line of the body and its second line.");
+    set_text(&eng, id, index_of(&eng, id, "The first line of the body and its second line."), "Edited after the move");
+    let r = rect_of(&eng, id, "Edited after the move");
+    assert!((r[0] - moved[0]).abs() < 0.5 && (r[1] - moved[1]).abs() < 0.5, "{moved:?} -> {r:?}");
+    // And again, with a colour change, then through save and reopen.
+    let ch = BlockChange { color: Some([0.0, 0.5, 0.0]), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, index_of(&eng, id, "Edited after the move"), &ch, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let r = rect_of(&eng, id, "Edited after the move");
+    assert!((r[0] - moved[0]).abs() < 0.5 && (r[1] - moved[1]).abs() < 0.5, "{moved:?} -> {r:?}");
+}
+
+#[test]
+fn an_added_box_stays_put_when_edited() {
+    let d = dir("add-then-edit");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    add_box(&eng, id, "Added note", [300.0, 400.0], None);
+    let added = rect_of(&eng, id, "Added note");
+    assert!((added[0] - 300.0).abs() < 1.0 && (added[1] - 400.0).abs() < 4.0, "{added:?}");
+    set_text(&eng, id, index_of(&eng, id, "Added note"), "Added note, edited");
+    let r = rect_of(&eng, id, "Added note, edited");
+    assert!((r[0] - added[0]).abs() < 0.5 && (r[1] - added[1]).abs() < 0.5, "{added:?} -> {r:?}");
+    set_text(&eng, id, index_of(&eng, id, "Added note, edited"), "Edited twice");
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let r = rect_of(&eng, id, "Edited twice");
+    assert!((r[0] - added[0]).abs() < 0.5 && (r[1] - added[1]).abs() < 0.5, "{added:?} -> {r:?}");
+    // The q/Q nesting does not grow with each edit.
+    let ops = saved_ops(&path);
+    let mut depth: i32 = 0;
+    let mut max = 0;
+    for o in &ops {
+        if o.is("q") {
+            depth += 1;
+            max = max.max(depth);
+        } else if o.is("Q") {
+            depth -= 1;
+        }
+    }
+    assert!(max <= 3, "q depth {max}");
+}

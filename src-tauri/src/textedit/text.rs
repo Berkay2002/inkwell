@@ -1291,8 +1291,8 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         }
     }
     let at = if split { start } else { o.bt_op };
-    // An earlier edit's own `q … MP BT … ET Q` whose text all goes, goes whole: its Tf, colour
-    // and moves too, so the fonts it named are no longer set anywhere.
+    // An earlier edit's own text object whose text all goes, goes whole: its Tf, colour and
+    // moves too, so the fonts it named are no longer set anywhere.
     let whole = edited_objects(&pc.ops, &drop);
     let new_data = splice(&pc.pieces, &pc.ops, |i| {
         let mut insert = if i == at { std::mem::take(&mut block_ops) } else { Vec::new() };
@@ -1308,7 +1308,10 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
 }
 
 /// The operators of the edited text objects (`q [cm] /TouchUp_TextEdit MP BT … ET Q`, as
-/// [`rewrite_block`] and [`add_text`] write them) whose every show operator is in `drop`.
+/// [`rewrite_block`] and [`add_text`] write them) whose every show operator is in `drop`: the
+/// marker and the text object. A wrapper with a `cm` stays (`q cm Q`): the new block is set
+/// inside it, in the space the old one was drawn in (a move, an added box's placement); a bare
+/// `q … Q` goes too.
 fn edited_objects(ops: &[Op], drop: &HashSet<usize>) -> HashSet<usize> {
     let mut out = HashSet::new();
     for (i, op) in ops.iter().enumerate() {
@@ -1326,7 +1329,11 @@ fn edited_objects(ops: &[Op], drop: &HashSet<usize>) -> HashSet<usize> {
         }
         let shows = (i + 2..et).filter(|&j| matches!(ops[j].op.as_slice(), b"Tj" | b"TJ" | b"'" | b"\""));
         if shows.clone().count() > 0 && shows.into_iter().all(|j| drop.contains(&j)) {
-            out.extend(q..=et + 1);
+            if q == i - 1 {
+                out.extend(q..=et + 1);
+            } else {
+                out.extend(i..=et);
+            }
         }
     }
     out

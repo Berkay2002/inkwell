@@ -42,9 +42,22 @@ pub(crate) fn win_ansi_byte(c: char) -> Option<u8> {
     }
 }
 
-/// Han ideographs, kana and CJK punctuation: text that may break between any two characters.
+/// Han ideographs, kana, Hangul and CJK punctuation: text that may break between any two
+/// characters (Korean text between syllables too, as browsers do by default).
 fn breaks_anywhere(c: char) -> bool {
-    matches!(c as u32, 0x2E80..=0x2FFF | 0x3000..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0xFF00..=0xFF60)
+    matches!(
+        c as u32,
+        0x1100..=0x11FF
+            | 0x2E80..=0x2FFF
+            | 0x3000..=0x30FF
+            | 0x3130..=0x318F
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7FF
+            | 0xF900..=0xFAFF
+            | 0xFF00..=0xFF60
+    )
 }
 
 /// The standard 14 family closest to `base`: 0 Courier, 1 Times, 2 Helvetica.
@@ -341,36 +354,55 @@ impl<'a> Setter<'a> {
         self.styles.len() - 1
     }
 
-    /// The advance of `c` in face `f`, in thousandths, and its item kind; None if it has no glyph.
-    fn glyph(&mut self, f: usize, c: char) -> Option<(Kind, f64)> {
-        match &mut self.faces[f] {
+    /// The face `c` is set in (`f`, or for a bundled face a twin of it), its item kind and its
+    /// advance in thousandths; None if `f` has no glyph for it.
+    fn glyph(&mut self, f: usize, c: char) -> Result<Option<(usize, Kind, f64)>> {
+        let t = c.to_string();
+        let (idx, g, w) = match &self.faces[f] {
             Face::Doc { m, .. } => {
-                let bytes = m.encode(&c.to_string())?;
+                let Some(bytes) = m.encode(&t) else { return Ok(None) };
                 let w = m.codes(&bytes).iter().map(|(code, _)| m.width(*code) * 1000.0).sum();
-                Some((Kind::Code(bytes), w))
+                return Ok(Some((f, Kind::Code(bytes), w)));
             }
             Face::Std { font, .. } => {
-                let b = win_ansi_byte(c)?;
+                let Some(b) = win_ansi_byte(c) else { return Ok(None) };
                 let w =
                     font.encode_character(c as i32).ok().and_then(|g| font.advance_glyph(g).ok()).map_or(500.0, |a| f64::from(a) * 1000.0);
-                Some((Kind::Code(vec![b]), w))
+                return Ok(Some((f, Kind::Code(vec![b]), w)));
             }
-            Face::Bundled { subset, font, .. } => {
-                let g = bundled::glyph(font, c)?;
-                subset.use_glyph(g, &c.to_string());
-                Some((Kind::Gid(g), bundled::advance(font, g)))
+            Face::Bundled { idx, font, .. } => {
+                let Some(g) = bundled::glyph(font, c) else { return Ok(None) };
+                (*idx, g, bundled::advance(font, g))
             }
+        };
+        // A glyph already standing for another character (U+301C and U+FF5E share one) goes to
+        // another subset of the same face, so each code keeps its own ToUnicode text.
+        let twin = (f..self.faces.len())
+            .find(|&j| matches!(&self.faces[j], Face::Bundled { idx: x, subset, .. } if *x == idx && subset.fits(g, &t)));
+        let j = match twin {
+            Some(j) => j,
+            None => {
+                let res = self.free_name("IwNoto")?;
+                self.faces.push(Face::Bundled { idx, res, subset: Subset::default(), font: bundled::load(idx)? });
+                self.faces.len() - 1
+            }
+        };
+        if let Face::Bundled { subset, .. } = &mut self.faces[j] {
+            subset.use_glyph(g, &t);
         }
+        Ok(Some((j, Kind::Gid(g), w)))
     }
 
-    /// The space item of face `f` (a TJ gap of a quarter em when it has no space glyph).
-    fn space(&mut self, f: usize, style: usize) -> Item {
-        let (kind, w) = match self.glyph(f, ' ') {
-            Some((Kind::Code(b), w)) => (Kind::Space(Some(b)), w),
-            Some((Kind::Gid(g), w)) => (Kind::Space(Some(self.gid_code(f, g))), w),
-            _ => (Kind::Space(None), 250.0),
+    /// The space item of face `f` in style `style` (a TJ gap of a quarter em when it has no
+    /// space glyph).
+    fn space(&mut self, f: usize, style: Style) -> Result<Item> {
+        let (face, kind, w) = match self.glyph(f, ' ')? {
+            Some((j, Kind::Code(b), w)) => (j, Kind::Space(Some(b)), w),
+            Some((j, Kind::Gid(g), w)) => (j, Kind::Space(Some(self.gid_code(j, g))), w),
+            _ => (f, Kind::Space(None), 250.0),
         };
-        Item { style, kind, w, kern: 0.0, text: " ".into() }
+        let style = self.style(Style { face, ..style });
+        Ok(Item { style, kind, w, kern: 0.0, text: " ".into() })
     }
 
     fn gid_code(&self, f: usize, g: u16) -> Vec<u8> {
@@ -432,16 +464,13 @@ impl<'a> Setter<'a> {
                 ' ' => {
                     // In the face of the text before it, else the run's own face.
                     let face = if self.faces[last_face].has(' ') { last_face } else { spec.primary };
-                    let st = self.style(Style { face, ..base.clone() });
-                    out.push(self.space(face, st));
+                    out.push(self.space(face, base.clone())?);
                 }
                 _ => {
-                    let mut face = spec.primary;
-                    let mut got = self.glyph(face, c);
+                    let mut got = self.glyph(spec.primary, c)?;
                     if got.is_none() {
                         if let Some(fb) = fallback {
-                            face = fb;
-                            got = self.glyph(face, c);
+                            got = self.glyph(fb, c)?;
                         }
                     }
                     if got.is_none() {
@@ -458,11 +487,10 @@ impl<'a> Setter<'a> {
                                 f
                             }
                         };
-                        face = f;
-                        got = self.glyph(face, c);
+                        got = self.glyph(f, c)?;
                     }
-                    let (kind, w) = got.ok_or_else(|| invalid(format!("no available font can show '{c}' (U+{:04X})", c as u32)))?;
-                    let synth_bold = spec.bold && Some(face) == cjk;
+                    let (face, kind, w) = got.ok_or_else(|| invalid(format!("no available font can show '{c}' (U+{:04X})", c as u32)))?;
+                    let synth_bold = spec.bold && matches!(self.faces[face], Face::Bundled { idx, .. } if idx == bundled::cjk());
                     let st = self.style(Style { face, synth_bold, ..base.clone() });
                     last_face = face;
                     out.push(Item { style: st, kind, w, kern: 0.0, text: c.to_string() });
@@ -669,6 +697,7 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
     let mut cur_fill: Option<Vec<Op>> = None;
     let mut bold_on = false;
     let mut x = 0.0;
+    let mut prev_biggest = p.first_size;
     for (li, line) in lines.iter().enumerate() {
         let items = &line.items;
         let used = m.line(items);
@@ -679,7 +708,10 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
             _ => 0.0,
         };
         let biggest = items.iter().map(|i| setter.styles[i.style].size).fold(p.first_size, f64::max);
-        let down = if li == 0 { 0.0 } else { p.lead * biggest / p.first_size.max(1e-9) };
+        // A line is set lower for its own largest text, and for half of the line above's (whose
+        // descenders reach down), so smaller text under large text doesn't run into it.
+        let down = if li == 0 { 0.0 } else { p.lead * biggest.max((biggest + prev_biggest) / 2.0) / p.first_size.max(1e-9) };
+        prev_biggest = biggest;
         if li > 0 || dx != 0.0 {
             ops.push(Op::new("Td", vec![num(dx - x), num(-down)]));
         }

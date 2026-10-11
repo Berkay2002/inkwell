@@ -64,13 +64,15 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
    laid out as glyph items (`layout.rs`): an unchanged run's own codes and kerning, new text encoded per character.
    The new object sets `Tw 0`: a kept space has its glyph's own width (the source's word spacing is not added to it),
    and a `TJ` gap that read as a space stays a gap of the same total width (¼ em plus the rest as kerning).
-   Words wrap at spaces, CJK text between any two characters, `\n` breaks a paragraph; a line with a larger run sits
-   lower in proportion. Each style change writes `Tf` and the fill colour; each stretch of one style is one `TJ`. Each removed show operator is replaced by a stand-in with
+   Words wrap at spaces, CJK text (Han, kana, Hangul) between any two characters, `\n` breaks a paragraph; a line
+   with a larger run sits lower in proportion, and a line under one with a larger run is set lower by half the
+   difference. Each style change writes `Tf` and the fill colour; each stretch of one style is one `TJ`. Each removed show operator is replaced by a stand-in with
    the same moves and no painting: a numeric-only `TJ` advancing the text matrix by the removed text's width, after
    `T*` for a `'` (and `Tw Tc T*` for a `"`), so text after it in the same object stays put. When the object is split,
    it is reopened at the removed operator's line and position. Everything else in the stream is copied byte for
-   byte. An earlier edit's own object (`q … /TouchUp_TextEdit MP BT … ET Q`) whose text all goes is removed whole,
-   its `Tf` and colour included. Changed streams become new Flate streams (a content stream may be shared with another page); the page's
+   byte. An earlier edit's own object (`q [cm] /TouchUp_TextEdit MP BT … ET Q`) whose text all goes is removed,
+   its `Tf` and colour included; a wrapper with a `cm` (a move, an added box's placement) stays and the new block is
+   set inside it, so the block keeps its place and `q` nesting does not grow with each edit. Changed streams become new Flate streams (a content stream may be shared with another page); the page's
    `/Contents` points at them.
 4. **Fonts.** A run's font is kept for every character it has a code (reverse ToUnicode/encoding) and a glyph for:
    a code with a zero width is missing, and for a subset simple font the embedded program (loaded by MuPDF) must have
@@ -78,7 +80,9 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
    lacks go to one fallback for the run: the matching standard 14 font (Courier/Times/Helvetica by the base name, with
    bold/italic) as a non-embedded WinAnsi Type1 when WinAnsi can show them all, else the bundled Noto Sans (or Noto
    Sans Mono for monospaced runs, in the run's style) if it has any of them, and, for what that lacks, Noto Sans CJK
-   (CJK-only text goes straight to the CJK face, and only the faces something was set in are embedded and reported). Bold or italic without a
+   (CJK-only text goes straight to the CJK face, and only the faces something was set in are embedded and reported).
+   Two characters drawn with one bundled glyph (U+301C and U+FF5E, Ω and the ohm sign) go to two subsets of the
+   face, since a code has one ToUnicode text. Bold or italic without a
    font asks first for a font of the same family and style already on the page, then the standard face. Bundled faces
    are embedded per rewrite with only the glyphs used (`bundled.rs`: a runtime subset with the `subsetter` crate,
    Type0/Identity-H, CIDFontType2 + `/FontFile2` for TrueType, CIDFontType0 + `/FontFile3 /CIDFontType0C` for the
@@ -124,7 +128,10 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - Font without a space glyph: words placed apart, text extracts with spaces.
 - A `Tw`-justified source re-set without `Tw` spreads its lines to the full width again, and right-aligned lines end
   at the box's edge; a `TJ` gap read as a space keeps its exact width (the saved `TJ` numbers add up to the source's).
-- CJK-only text is reported and embedded as the CJK face alone (no empty Noto Sans subset).
+- CJK-only text is reported and embedded as the CJK face alone (no empty Noto Sans subset). Characters sharing a
+  glyph (〜 and ～, Ω and Ω) read back as typed after save/reopen. Korean without spaces wraps into the width.
+- A moved block and an added text box keep their position when edited again (also after save/reopen); 12 pt text
+  under a 48 pt run clears it.
 - Editing a block again and again leaves only the fonts its content uses: one `IwEd`, one `IwNoto`, one CJK subset in
   the saved file after five edits.
 - Multi-line reflow keeps the block's left edge, width and line spacing; hard breaks with `\n`.
