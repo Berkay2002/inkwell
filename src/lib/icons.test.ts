@@ -1,14 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
-import tilesCss from "../components/allTools.css?raw";
 import { drawingOf, gridFor, hasFilled, missingIcons, type IconName } from "../components/Icons";
 import manifest from "../assets/icons/manifest.json";
 import { TOOL_GROUPS, TOOL_HUES } from "./toolsCatalog";
 import { quickTools } from "./tools";
 
-// toolItems.ts pulls in the stores; none of them is touched until a tool runs
+// toolItems.ts pulls in the stores; none of them is touched until a tool runs. store.ts reads localStorage at import
+// time and vitest runs in node.
+vi.hoisted(() => {
+  const m = new Map<string, string>();
+  (globalThis as { localStorage?: unknown }).localStorage = {
+    getItem: (k: string) => m.get(k) ?? null,
+    setItem: (k: string, v: string) => void m.set(k, String(v)),
+    removeItem: (k: string) => void m.delete(k),
+  };
+});
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), Channel: class {} }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn(), message: vi.fn() }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({}) }));
 const { toolItems } = await import("./toolItems");
+
+// vitest blanks every .css module (also with ?raw), so the tile tokens are read from the file itself
+// @ts-expect-error no @types/node in this project
+const { readFileSync } = await import("node:fs");
+const tilesCss: string = readFileSync(new URL("../components/allTools.css", import.meta.url), "utf8");
 
 const sources = import.meta.glob<string>("../**/*.{ts,tsx}", { query: "?raw", import: "default", eager: true });
 const fluentFiles = Object.keys(import.meta.glob("../assets/icons/fluent/*.svg", { query: "?raw", eager: true }));
@@ -100,7 +114,7 @@ function tileTokens() {
   const css = tilesCss;
   const out: Record<string, { bg: string[]; fg: string[] }> = {};
   for (const m of css.matchAll(/\[data-group="([a-z]+)"\]\s*\{([^}]*)\}/g)) {
-    const pick = (name: string) => new RegExp(`--tile-${name}:\s*light-dark\((#[0-9a-f]{6}),\s*(#[0-9a-f]{6})\)`).exec(m[2])?.slice(1, 3) ?? [];
+    const pick = (name: string) => new RegExp(String.raw`--tile-${name}:\s*light-dark\((#[0-9a-f]{6}),\s*(#[0-9a-f]{6})\)`).exec(m[2])?.slice(1, 3) ?? [];
     out[m[1]] = { bg: pick("bg"), fg: pick("fg") };
   }
   return out;
