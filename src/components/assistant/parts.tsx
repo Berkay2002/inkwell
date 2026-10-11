@@ -594,18 +594,31 @@ export function Composer({
   const box = useRef<HTMLTextAreaElement>(null);
   const streaming = useAi((s) => !!s.chats[doc.id]?.messages.some((m) => m.state === "streaming"));
   const prep = useAi((s) => s.chats[doc.id]?.prep);
-  // "Edit" on an earlier question puts its words back here; sending them is a new turn.
+  // "Edit" on an earlier question puts its words back here; sending them is a new turn. A draft the user was
+  // writing is not thrown away: it stays below the edited question.
   const draft = useAi((s) => (s.draft?.doc === doc.id ? s.draft : null));
+  const caret = useRef<number | null>(null);
   useEffect(() => {
     if (!draft) return;
-    setText(draft.text);
     useAi.getState().clearDraft();
-    const t = box.current;
-    if (t) {
-      t.focus();
-      t.setSelectionRange(draft.text.length, draft.text.length);
+    // (pressing Edit again on the same question finds it already first: nothing to add)
+    const next = text.startsWith(draft.text) ? text : draft.text + (text.trim() ? `\n\n${text.trim()}` : "");
+    caret.current = draft.text.length;
+    setText(next);
+    box.current?.focus();
+    if (next === text) {
+      // nothing will re-render: put the caret now
+      box.current?.setSelectionRange(draft.text.length, draft.text.length);
+      caret.current = null;
     }
   }, [draft]);
+  // the caret goes to the end of the question, once the textarea holds the new text
+  useLayoutEffect(() => {
+    const t = box.current;
+    if (caret.current == null || !t) return;
+    t.setSelectionRange(caret.current, caret.current);
+    caret.current = null;
+  }, [text]);
   const noText = typeof prep === "object" && prep !== null && !prep.enough;
   const st = useAi.getState;
 

@@ -927,8 +927,13 @@ button.ax-cite:hover {
 .ax-qrow:focus-within .ax-qmeta {
   opacity: 1;
 }
+/* the reply starts about 14 px under the bubble (about 21 px of the screenshot at 150 %) */
 .ax-qrow + .ax-a {
-  margin-top: 10px;
+  margin-top: 0;
+}
+.ax-qmeta .ax-icon.small {
+  width: 20px;
+  height: 20px;
 }
 .ax-iconrow {
   display: flex;
