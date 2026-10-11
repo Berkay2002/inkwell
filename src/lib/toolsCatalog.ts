@@ -26,6 +26,8 @@ export const TOOL_GROUPS: { id: string; title: string }[] = [
   { id: "optimize", title: "Optimize" },
   { id: "marks", title: "Page marks" },
   { id: "protect", title: "Protect" },
+  { id: "print", title: "Print production" },
+  { id: "scripts", title: "Scripts" },
   { id: "convert", title: "Convert & create" },
   { id: "check", title: "Check & compare" },
 ];

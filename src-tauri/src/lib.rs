@@ -555,6 +555,52 @@ async fn compress_estimate(
     tool_blocking(move || tools::estimate_for_ui(&eng, doc, &guard.cancel)).await
 }
 
+/// The three presets as `Options`: what the Advanced settings start from.
+#[tauri::command]
+fn compress_preset_options() -> std::collections::BTreeMap<&'static str, compress::Options> {
+    use compress::Preset;
+    [("smallest", Preset::Smallest), ("balanced", Preset::Balanced), ("highQuality", Preset::HighQuality)]
+        .into_iter()
+        .map(|(k, p)| (k, compress::Options::preset(p)))
+        .collect()
+}
+
+/// The Advanced settings' size, on the same sample. `job` as above.
+#[tauri::command]
+async fn compress_estimate_custom(
+    eng: Eng<'_>,
+    jobs: JobState<'_>,
+    job: u64,
+    doc: DocId,
+    options: compress::Options,
+) -> Result<compress::estimate::Estimate, tools::ToolError> {
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    tool_blocking(move || tools::estimate_custom_for_ui(&eng, doc, &options, &guard.cancel)).await
+}
+
+#[tauri::command]
+async fn compress_presets(app: tauri::AppHandle) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::load(&dir))).await
+}
+
+#[tauri::command]
+async fn compress_preset_save(
+    app: tauri::AppHandle,
+    name: String,
+    options: compress::Options,
+) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::save(&dir, &name, &options)?)).await
+}
+
+#[tauri::command]
+async fn compress_preset_delete(app: tauri::AppHandle, name: String) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::delete(&dir, &name)?)).await
+}
+
 /// `job`: an id the UI picks, for `tool_cancel`. `req.save_to`: a save token from `pick_save`.
 #[tauri::command]
 async fn compress_start(
@@ -947,6 +993,11 @@ pub fn run() {
             merge_files,
             compress_audit,
             compress_estimate,
+            compress_estimate_custom,
+            compress_preset_options,
+            compress_presets,
+            compress_preset_save,
+            compress_preset_delete,
             compress_start,
             protect::app::security_info,
             protect::app::protect_apply,
@@ -985,6 +1036,13 @@ pub fn run() {
             prepress::app::prepress_convert,
             prepress::app::prepress_boxes,
             prepress::app::prepress_marks,
+            prepress::app::prepress_page_boxes,
+            prepress::app::prepress_marks_preview,
+            prepress::app::prepress_ink_at,
+            prepress::app::prepress_pick_profile,
+            prepress::app::prepress_save_other,
+            prepress::app::prepress_protection,
+            a11y::app::a11y_protection,
             a11y::app::a11y_reading_order,
             a11y::app::a11y_tags,
             a11y::app::a11y_tag_problems,
@@ -992,6 +1050,7 @@ pub fn run() {
             a11y::app::a11y_set_role,
             a11y::app::a11y_artifact,
             a11y::app::a11y_merge_regions,
+            a11y::app::a11y_merge_many,
             a11y::app::a11y_split_region,
             a11y::app::a11y_edit_tag,
             a11y::app::a11y_move_tag,
@@ -1018,6 +1077,10 @@ pub fn run() {
             forms::app::forms_reset,
             forms::app::forms_scripts,
             forms::app::forms_scripts_enable,
+            forms::app::doc_js_list,
+            forms::app::doc_js_source,
+            forms::app::doc_js_check,
+            forms::app::doc_js_apply,
             forms::app::forms_add,
             forms::app::forms_add_many,
             forms::app::forms_move,

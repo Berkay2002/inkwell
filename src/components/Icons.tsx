@@ -42,6 +42,9 @@ const PATHS = {
   filePlus: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8ZM14 3v5h5M12 11v6M9 14h6",
   scissors: "M6 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM8.1 8.1 20 20M14.5 9.5 20 4M8.1 15.9l3.4-3.4",
   swap: "M4 8h15M15 4l4 4-4 4M20 16H5M9 12l-4 4 4 4",
+  crop: "M7 2v15h15M2 7h15v15",
+  flipH: "M12 3v18M8 7 3 12l5 5V7ZM16 7l5 5-5 5V7Z",
+  flipV: "M3 12h18M7 8l5-5 5 5H7ZM7 16l5 5 5-5H7Z",
   link: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7",
   book: "M3 5.5C5.5 4 9 4 12 6c3-2 6.5-2 9-.5V19c-2.5-1.5-6-1.5-9 .5-3-2-6.5-2-9-.5ZM12 6v13.5",
   undo: "M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
@@ -85,6 +88,10 @@ const PATHS = {
   headerFooter: "M5 3h14a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM4 8h16M4 16h16",
   background: "M5 3h14a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM8 8h8v8H8Z",
   shield: "M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6Z",
+  // three overlapping plates (the inks), a block of swatches, a box inside a page
+  plates: "M9 4a5 5 0 1 0 0 10 5 5 0 0 0 0-10ZM15 4a5 5 0 1 0 0 10 5 5 0 0 0 0-10ZM12 10a5 5 0 1 0 0 10 5 5 0 0 0 0-10Z",
+  swatches: "M4 4h7v7H4ZM13 4h7v7h-7ZM4 13h7v7H4ZM13 13h7v7h-7Z",
+  pagebox: "M4 3h16v18H4ZM8 7h8v10H8Z",
   access: "M12 3.5a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6ZM5 9.5l7 1.5 7-1.5M12 11v4.5M8.5 20.5 12 15.5l3.5 5",
 };
 

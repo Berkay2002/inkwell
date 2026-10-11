@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     onmessage: ((m: unknown) => void) | null = null;
   },
 }));
-vi.mock("./edit", () => ({ applyState: vi.fn() }));
+vi.mock("./edit", () => ({ applyState: vi.fn(), run: vi.fn() }));
 vi.mock("./api", () => ({ pickSave: vi.fn(), toolCancel: vi.fn(() => Promise.resolve()) }));
 
 import { invoke } from "@tauri-apps/api/core";
@@ -56,7 +56,7 @@ const rule = (over: Partial<RuleResult>): RuleResult => ({
   findings: [],
   ...over,
 });
-const report = (results: RuleResult[], tagged = true): Report => ({ pages: 12, tagged, results });
+const report = (results: RuleResult[], tagged = true): Report => ({ pages: 12, tagged, certified: false, signed: false, results });
 const sample = report([
   rule({ rule: "title", name: "Title", status: "failed", fix: "title", findings: [f({ page: null })] }),
   rule({ rule: "display-doc-title", name: "Title in title bar", status: "passed", fix: "displayDocTitle" }),
@@ -302,6 +302,8 @@ describe("a closed document", () => {
   it("a fix finishing after the tab closed leaves no entry either", async () => {
     reply({ a11y_check: sample, a11y_preview: { untagged: false } });
     await a().check(1);
+    // The first edit of a document reads its protection first; read it here so the next call is the fix.
+    await a().protection(1);
     let finish: (s: unknown) => void = () => {};
     inv.mockImplementationOnce(() => new Promise((res) => (finish = res)));
     const run = a().fix(1, { fix: "tabOrder" });
