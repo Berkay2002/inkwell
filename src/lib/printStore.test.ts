@@ -43,7 +43,7 @@ const caps = (over: Partial<PrinterCaps> = {}): PrinterCaps => ({
   maxCopies: 99,
   ...over,
 });
-const plan = { pages: 12, sheets: 3, papers: 6, faces: [{ width: 595, height: 842, pages: [1, 2] }], editRev: 0 };
+const plan = { pages: 12, sheets: 3, papers: 6, sides: 6, faces: [{ width: 595, height: 842, pages: [1, 2] }], editRev: 0 };
 const png = new Uint8Array([137, 80, 78, 71]).buffer;
 
 beforeEach(() => {
@@ -87,6 +87,14 @@ describe("toSettings", () => {
     const s = toSettings({ ...defaultOptions(), duplex: "longEdge", copies: 500 }, caps({ duplex: false, maxCopies: 20 }), 0);
     expect(s.duplex).toBe("off");
     expect(s.copies).toBe(20);
+  });
+
+  it("sends a front-only or back-only booklet one side at a time", () => {
+    const o = { ...defaultOptions(), duplex: "longEdge" as const, mode: "booklet" as const };
+    expect(toSettings({ ...o, sides: "both" }, caps(), 0).duplex).toBe("longEdge");
+    expect(toSettings({ ...o, sides: "frontOnly" }, caps(), 0).duplex).toBe("off");
+    expect(toSettings({ ...o, sides: "backOnly" }, caps(), 0).duplex).toBe("off");
+    expect(toSettings({ ...defaultOptions(), duplex: "longEdge", sides: "frontOnly" }, caps(), 0).duplex).toBe("longEdge");
   });
 
   it("falls back to A4 when the printer's capabilities are unknown", () => {
@@ -206,6 +214,23 @@ describe("sheet", () => {
     expect(api.pickSave).toHaveBeenCalledWith("a.pdf", { doc: 1 }, "pdf");
     expect(api.printStart).toHaveBeenCalledWith(expect.any(Number), 1, expect.anything(), "tok-out", expect.any(Function));
     expect(usePrint.getState().sheet).toMatchObject({ phase: "done", savedAs: "C:\\o\\a.pdf", report: { sides: 6 } });
+    usePrint.getState().close();
+  });
+
+  it("starts the progress at the sides to be sent, not the papers", async () => {
+    vi.mocked(api.printPrinters).mockResolvedValue({ printers: [{ name: "P", isDefault: true, toFile: false }], fileDirSet: false });
+    vi.mocked(api.printCapabilities).mockResolvedValue(caps());
+    vi.mocked(api.printPlan).mockResolvedValue({ ...plan, papers: 4, sides: 8 });
+    vi.mocked(api.printPreview).mockResolvedValue(png);
+    let first: unknown = null;
+    vi.mocked(api.printStart).mockImplementation(async () => {
+      first = usePrint.getState().sheet?.progress;
+      return { printer: "P", pages: 12, sides: 8 };
+    });
+    usePrint.getState().open();
+    await ready();
+    await usePrint.getState().start();
+    expect(first).toEqual({ done: 0, total: 8 });
     usePrint.getState().close();
   });
 

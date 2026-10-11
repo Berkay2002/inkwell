@@ -115,7 +115,8 @@ export function toSettings(o: PrintOptions, caps: PrinterCaps | null, current: n
     reverse: o.reverse,
     copies: Math.max(1, Math.min(caps?.maxCopies && caps.maxCopies > 1 ? caps.maxCopies : 999, Math.round(o.copies) || 1)),
     collate: o.collate,
-    duplex: caps && !caps.duplex ? "off" : o.duplex,
+    // A booklet of only the fronts or only the backs goes through the printer a side at a time.
+    duplex: (caps && !caps.duplex) || (o.mode === "booklet" && o.sides !== "both") ? "off" : o.duplex,
     grayscale: o.grayscale,
     layout,
     content: o.content,
@@ -375,7 +376,7 @@ export const usePrint = create<PrintStore>((set, get) => {
         patch({ savedAs: ref.path });
       }
       const job = (curJob = ++jobSeq);
-      patch({ phase: "running", error: null, progress: { done: 0, total: s.plan.papers }, report: null });
+      patch({ phase: "running", error: null, progress: { done: 0, total: s.plan.sides }, report: null });
       try {
         const report = await api.printStart(job, s.doc, settingsOf(s), saveTo, (p) => {
           if (get().sheet?.doc === s.doc) patch({ progress: p });

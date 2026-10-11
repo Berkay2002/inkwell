@@ -169,14 +169,20 @@ impl Default for Settings {
 impl Settings {
     /// Is the job printed on both sides? A booklet's back sides make no sense without it, but only the
     /// user can say the printer does it, so Booklet follows the Duplex setting like everything else.
+    /// A booklet of only the fronts or only the backs is run through the printer a side at a time.
     fn two_sided(&self) -> bool {
-        self.duplex != Duplex::Off
+        self.duplex != Duplex::Off && !self.booklet_one_side()
+    }
+
+    fn booklet_one_side(&self) -> bool {
+        matches!(self.layout, Layout::Booklet { sides, .. } if sides != layout::BookletSides::Both)
     }
 
     /// The edge two-sided sheets flip on: a booklet folds on the short edge whatever was asked.
     #[cfg(windows)]
     fn edge(&self) -> win::Edge {
         match (self.duplex, &self.layout) {
+            _ if !self.two_sided() => win::Edge::None,
             (Duplex::Off, _) => win::Edge::None,
             (_, Layout::Booklet { .. }) => win::Edge::Short,
             (Duplex::LongEdge, _) => win::Edge::Long,
@@ -230,6 +236,8 @@ pub struct PlanInfo {
     pub sheets: u32,
     /// Physical sheets of paper for all copies.
     pub papers: u32,
+    /// Sides sent to the printer for all copies (blank backs included): the total a job's progress counts to.
+    pub sides: u32,
     /// For each side: its size in points and the source pages on it (1-based), in the order drawn.
     pub faces: Vec<Face>,
     pub edit_rev: u32,
@@ -248,11 +256,12 @@ pub fn plan_info(eng: &Engine, doc: DocId, s: &Settings) -> Result<PlanInfo, Pri
     let faces: Vec<Face> =
         p.sheets.iter().map(|f| Face { width: f.w, height: f.h, pages: f.placed.iter().map(|x| x.page + 1).collect() }).collect();
     let n = faces.len();
-    let sent = layout::sequence(n, s.copies, s.collate, s.two_sided()).len();
+    let sent = layout::sequence(n, s.copies.clamp(1, 999), s.collate, s.two_sided()).len();
     Ok(PlanInfo {
         pages: p.selected.len() as u32,
         sheets: n as u32,
         papers: if s.two_sided() { sent.div_ceil(2) } else { sent } as u32,
+        sides: sent as u32,
         faces,
         edit_rev: p.rev,
     })
@@ -311,14 +320,6 @@ pub fn run(
         None => win::default_printer().ok_or(PrintError::NoPrinter)?,
     };
     let (copies, two_sided) = (s.copies.clamp(1, 999), s.two_sided());
-    let p = plan(eng, doc, s)?;
-    let (mut src, rev) = Source::open(eng, doc, s.content)?;
-    if rev != p.rev {
-        return Err(PrintError::Engine(crate::engine::EngineError::Stale));
-    }
-    let order = layout::sequence(p.sheets.len(), copies, s.collate, two_sided);
-    let total = order.len() as u32;
-    let _ = copies;
     let check = || if cancel.load(Ordering::Relaxed) { Err(PrintError::Cancelled) } else { Ok(()) };
     check()?;
     let mut job = win::Job::start(win::JobOptions {
@@ -330,6 +331,33 @@ pub fn run(
         duplex: s.edge(),
         gray: s.grayscale,
     })?;
+    // With no paper chosen the layout used a default (A4); a printer loaded with something else is
+    // laid out on what it has, so nothing is cut off or left off-centre.
+    let settings = match device_paper(&s.paper, job.paper_points()) {
+        Some(paper) => Settings { paper, ..s.clone() },
+        None => s.clone(),
+    };
+    let s = &settings;
+    let p = match plan(eng, doc, s) {
+        Ok(p) => p,
+        Err(e) => {
+            job.abort();
+            return Err(e);
+        }
+    };
+    let (mut src, rev) = match Source::open(eng, doc, s.content) {
+        Ok(x) => x,
+        Err(e) => {
+            job.abort();
+            return Err(e.into());
+        }
+    };
+    if rev != p.rev {
+        job.abort();
+        return Err(PrintError::Engine(crate::engine::EngineError::Stale));
+    }
+    let order = layout::sequence(p.sheets.len(), copies, s.collate, two_sided);
+    let total = order.len() as u32;
     progress(Progress { done: 0, total });
     let result = (|| -> Result<(), PrintError> {
         let mut landscape = p.sheets.first().is_some_and(|f| f.landscape());
@@ -357,6 +385,22 @@ pub fn run(
             job.abort();
             Err(e)
         }
+    }
+}
+
+/// The paper to lay out on instead of `asked`, when none was chosen (`id` is none) and the device
+/// context's own paper (in points, either orientation) differs from it by more than a point.
+#[cfg(windows)]
+fn device_paper(asked: &Paper, device: (f64, f64)) -> Option<Paper> {
+    if asked.id.is_some() || !(device.0 >= 72.0 && device.1 >= 72.0) {
+        return None;
+    }
+    let (aw, ah) = (asked.width.min(asked.height), asked.width.max(asked.height));
+    let (dw, dh) = (device.0.min(device.1), device.0.max(device.1));
+    if (aw - dw).abs() > 1.0 || (ah - dh).abs() > 1.0 {
+        Some(Paper { id: None, width: dw, height: dh })
+    } else {
+        None
     }
 }
 

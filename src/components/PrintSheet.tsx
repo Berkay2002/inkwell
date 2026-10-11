@@ -404,7 +404,7 @@ function Running({ sheet }: { sheet: PrintSheetState }) {
         <span style={{ width: `${total ? (100 * done) / total : 0}%` }} />
       </div>
       <p className="dim">
-        Sheet {Math.min(done + 1, total)} of {total}
+        Side {Math.min(done + 1, total)} of {total}
       </p>
       <div className="pr-actions">
         <button className="btn ghost" onClick={() => act().cancel()}>

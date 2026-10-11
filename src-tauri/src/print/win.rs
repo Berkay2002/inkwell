@@ -83,9 +83,22 @@ pub fn printers() -> Vec<Printer> {
         if need == 0 {
             return Vec::new();
         }
-        // 8-byte aligned storage for the PRINTER_INFO_5W array.
-        let mut buf = vec![0u64; (need as usize).div_ceil(8)];
-        if EnumPrintersW(flags, null(), 5, buf.as_mut_ptr().cast(), need, &mut need, &mut count) == 0 {
+        // 8-byte aligned storage for the PRINTER_INFO_5W array. A printer may be added between the
+        // two calls, so the buffer is asked for again (a few times) when it was too small.
+        let mut buf = Vec::new();
+        let mut listed = false;
+        for _ in 0..3 {
+            buf = vec![0u64; (need as usize).div_ceil(8)];
+            let size = need;
+            if EnumPrintersW(flags, null(), 5, buf.as_mut_ptr().cast(), size, &mut need, &mut count) != 0 {
+                listed = true;
+                break;
+            }
+            if need <= size {
+                break;
+            }
+        }
+        if !listed {
             return Vec::new();
         }
         let infos = std::slice::from_raw_parts(buf.as_ptr().cast::<PRINTER_INFO_5W>(), count as usize);
@@ -239,6 +252,17 @@ impl Drop for Job {
     }
 }
 
+/// DEVMODE `dmDuplex` for a binding edge. The documented values are absolute: DMDUP_VERTICAL is
+/// long-edge binding and DMDUP_HORIZONTAL short-edge, whatever the orientation (a PrintTicket
+/// TwoSidedLongEdge maps to VERTICAL). The orientation is not mixed in.
+fn duplex_value(e: Edge) -> i16 {
+    match e {
+        Edge::None => DMDUP_SIMPLEX as i16,
+        Edge::Long => DMDUP_VERTICAL as i16,
+        Edge::Short => DMDUP_HORIZONTAL as i16,
+    }
+}
+
 fn devmode_ptr(buf: &mut [u64]) -> *mut DEVMODEW {
     buf.as_mut_ptr().cast()
 }
@@ -279,13 +303,7 @@ fn make_devmode(o: &JobOptions, landscape: bool) -> Result<Vec<u64>> {
         fields |= DM_COPIES;
         dm.dmColor = if o.gray { DMCOLOR_MONOCHROME } else { DMCOLOR_COLOR };
         fields |= DM_COLOR;
-        // The driver's flags are relative to the page as drawn: "vertical" binds the left edge of a
-        // portrait page, so the long edge of landscape paper is the top ("horizontal").
-        dm.dmDuplex = match (o.duplex, landscape) {
-            (Edge::None, _) => DMDUP_SIMPLEX,
-            (Edge::Long, false) | (Edge::Short, true) => DMDUP_VERTICAL,
-            (Edge::Long, true) | (Edge::Short, false) => DMDUP_HORIZONTAL,
-        };
+        dm.dmDuplex = duplex_value(o.duplex);
         fields |= DM_DUPLEX;
         dm.dmFields = fields;
         // Let the driver merge and validate what was set (private driver data stays consistent).
@@ -408,14 +426,22 @@ impl Job {
     }
 
     pub fn finish(mut self) -> Result<()> {
-        self.in_doc = false;
         if self.in_page {
             unsafe { EndPage(self.dc) };
+            self.in_page = false;
         }
+        // `in_doc` stays set until EndDoc succeeds, so a failure still reaches AbortDoc in drop.
         if unsafe { EndDoc(self.dc) } <= 0 {
             return Err(WinError::Printer("the printer did not finish the job".into()));
         }
+        self.in_doc = false;
         Ok(())
+    }
+
+    /// The paper the device context has now, in points (portrait after `start`).
+    pub fn paper_points(&self) -> (f64, f64) {
+        let g = self.geometry;
+        (g.width as f64 * 72.0 / g.dpi_x.max(1) as f64, g.height as f64 * 72.0 / g.dpi_y.max(1) as f64)
     }
 
     /// Throws the job away (the spooler removes what it already has).
@@ -424,5 +450,17 @@ impl Job {
             unsafe { AbortDoc(self.dc) };
             self.in_doc = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplex_flags_are_absolute() {
+        assert_eq!(duplex_value(Edge::None), DMDUP_SIMPLEX as i16);
+        assert_eq!(duplex_value(Edge::Long), DMDUP_VERTICAL as i16);
+        assert_eq!(duplex_value(Edge::Short), DMDUP_HORIZONTAL as i16);
     }
 }

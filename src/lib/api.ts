@@ -427,6 +427,8 @@ export interface PrintPlan {
   sheets: number;
   /** Physical sheets for all copies. */
   papers: number;
+  /** Sides sent to the printer for all copies, blank backs included: what a job's progress counts to. */
+  sides: number;
   faces: PrintFace[];
   editRev: number;
 }

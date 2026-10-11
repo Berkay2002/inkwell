@@ -31,9 +31,9 @@ driver, swapped when the sheet is landscape). A fixed 18 pt margin keeps content
 | Copies, collate | up to the driver's maximum; copies are sent explicitly (collated or not), so the result does not depend on the driver's own collation |
 | Scaling (one per sheet) | fit, shrink oversized pages only, actual size, custom percent |
 | Several per sheet | 2, 4, 6, 9, 16 or any grid up to 100; order across/down, optional border, turn pages to fit |
-| Booklet | saddle-stitch imposition, both sides / front only / back only, binding left or right; forces short-edge two-sided |
+| Booklet | saddle-stitch imposition, both sides / front only / back only, binding left or right; both-sides booklets go out short-edge two-sided, a front-only or back-only booklet goes out one side at a time (simplex) |
 | Orientation | automatic (per sheet, by the page), portrait, landscape |
-| Two-sided | off, long edge, short edge (only when the printer reports duplex) |
+| Two-sided | off, long edge, short edge (only when the printer reports duplex). The DEVMODE flag follows the documented absolute meaning: long edge is `DMDUP_VERTICAL`, short edge `DMDUP_HORIZONTAL`, whatever the orientation (a booklet is landscape and short-edge). |
 | Grayscale | drawn as grey in the same pass |
 | Comments and forms | document (no markup), document and markups, form fields only. Annotations without the PDF Print flag are not printed. |
 
@@ -60,6 +60,10 @@ A document that forbids printing (`Permission::PRINT`) is refused with `not-perm
 - The margin is a fixed 18 pt, not the printer's hardware margins (the preview shows the same margin, so it still
   matches what the sheet does, but a driver that clips more will clip more).
 - Output through GDI is raster at the printer's resolution (capped at `win::MAX_DPI`), not vector.
-- Two-sided flags were checked against the driver's capability call and by the plan, not on duplex hardware.
+- Two-sided flags follow the documented absolute DEVMODE semantics (unit-tested as a mapping) and were not
+  checked on duplex hardware: only the plan and the capability call were.
+- Paper is capped at 14400 pt (the PDF page limit); a larger size is refused. When no paper was chosen and the
+  printer's own paper differs from the A4 the preview assumed, the job is laid out again on the printer's paper.
+- Progress counts sides sent (copies and padded blank backs included), shown as "Side n of total".
 - Not built: Poster (tiling), page labels in range text, "Document and stamps", the driver's own Properties
   dialog, Save ink/toner.

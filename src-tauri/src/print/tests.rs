@@ -160,6 +160,55 @@ fn sequence_applies_copies_collation_and_two_sided() {
     assert_eq!(sequence(1, 5000, true, false).len(), 999);
 }
 
+#[test]
+fn paper_beyond_the_pdf_page_limit_is_rejected() {
+    let l = Layout::default();
+    assert!(layout(&[LETTER], &[0], (1e7, 1e7), Orientation::Auto, &l).is_err());
+    assert!(layout(&[LETTER], &[0], (612.0, 14401.0), Orientation::Auto, &l).is_err());
+    assert!(layout(&[LETTER], &[0], (f64::NAN, 792.0), Orientation::Auto, &l).is_err());
+    assert!(layout(&[LETTER], &[0], (14400.0, 14400.0), Orientation::Auto, &l).is_ok());
+}
+
+#[test]
+fn a_booklet_of_one_side_is_not_printed_two_sided() {
+    let booklet = |sides| Layout::Booklet { sides, binding: Binding::Left };
+    let both = Settings { duplex: Duplex::LongEdge, layout: booklet(BookletSides::Both), ..Settings::default() };
+    assert!(both.two_sided());
+    for sides in [BookletSides::FrontOnly, BookletSides::BackOnly] {
+        let one = Settings { layout: booklet(sides), ..both.clone() };
+        assert!(!one.two_sided(), "{sides:?}");
+    }
+    // the same settings with an ordinary layout stay two-sided
+    assert!(Settings { layout: Layout::default(), ..both }.two_sided());
+}
+
+#[test]
+fn plan_info_counts_the_sides_sent() {
+    let d = dir("sides");
+    let (eng, doc) = open_fixture(&d, 3);
+    let s = Settings { copies: 2, duplex: Duplex::LongEdge, ..Settings::default() };
+    let info = plan_info(&eng, doc, &s).unwrap();
+    // 3 sides make 2 papers with a blank back, twice
+    assert_eq!((info.sheets, info.sides, info.papers), (3, 8, 4));
+    let simplex = Settings { duplex: Duplex::Off, ..s };
+    let info = plan_info(&eng, doc, &simplex).unwrap();
+    assert_eq!((info.sides, info.papers), (6, 6));
+}
+
+#[cfg(windows)]
+#[test]
+fn the_devices_paper_replaces_an_unchosen_one_only_when_it_differs() {
+    let a4 = Paper { id: None, width: A4.0, height: A4.1 };
+    assert_eq!(device_paper(&a4, (595.0, 842.0)), None);
+    // either orientation of the same paper is the same paper
+    assert_eq!(device_paper(&a4, (842.0, 595.0)), None);
+    let d = device_paper(&a4, (612.0, 792.0)).unwrap();
+    assert_eq!((d.id, d.width, d.height), (None, 612.0, 792.0));
+    // a chosen paper (a driver id) is never replaced; nor is nonsense from the device
+    assert_eq!(device_paper(&Paper { id: Some(9), ..a4 }, (612.0, 792.0)), None);
+    assert_eq!(device_paper(&a4, (0.0, 0.0)), None);
+}
+
 // ---------------------------------------------------------------- engine and printer
 
 fn dir(test: &str) -> PathBuf {

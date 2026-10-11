@@ -205,7 +205,8 @@ pub fn layout(sizes: &[(f64, f64)], pages: &[u32], paper: (f64, f64), orientatio
     if pages.is_empty() {
         return Err(LayoutError::NoPages);
     }
-    if !(paper.0 >= 72.0 && paper.1 >= 72.0 && paper.0.is_finite() && paper.1.is_finite()) {
+    // 14400 points (200 in) is the PDF limit for a page; anything larger is a mistake, not paper.
+    if !(paper.0 >= 72.0 && paper.1 >= 72.0 && paper.0 <= 14400.0 && paper.1 <= 14400.0) {
         return Err(LayoutError::Invalid("invalid paper size".into()));
     }
     let size_of = |p: u32| -> Result<(f64, f64), LayoutError> {
