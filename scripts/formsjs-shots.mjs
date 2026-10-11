@@ -36,6 +36,8 @@ const ev = async (expression) => {
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? "eval failed");
   return r.result.value;
 };
+/** Runs a store action and returns nothing (some actions return a large object CDP cannot serialise). */
+const act = (expression) => ev(`(async () => { await (${expression}); return true })()`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const until = async (expr, what, limit = 15000) => {
   const t0 = Date.now();
@@ -69,6 +71,7 @@ const click = (sel, text) =>
 /** Sets a controlled input, textarea or select the way React hears it, then blurs it (which commits). */
 const setControl = (sel, value) =>
   ev(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false;
+    if (e.tagName !== "SELECT") e.focus();
     const proto = e.tagName === "SELECT" ? HTMLSelectElement.prototype : e.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto, "value").set.call(e, ${JSON.stringify(value)});
     e.dispatchEvent(new Event(e.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
@@ -90,12 +93,12 @@ const field = async (name, d = id) => (await fields(d)).find((f) => f.name === n
 const scripts = (d = id) => ev(`JSON.parse(JSON.stringify(${F}.docs[${d}]?.scripts ?? null))`);
 const calcOrder = (d = id) => ev(`JSON.parse(JSON.stringify(${F}.docs[${d}]?.calcOrder ?? []))`);
 
-await ev(`${S}.activate(${id})`);
-await ev(`${S}.patch(${id}, { organize: false })`);
-await ev(`${S}.setSidebar("none")`);
+await act(`${S}.activate(${id})`);
+await act(`${S}.patch(${id}, { organize: false })`);
+await act(`${S}.setSidebar("none")`);
 await until(`document.querySelectorAll(".viewer .page").length > 0 && ${S}.docs[${id}].sizes.length > 0`, "the pages");
-await ev(`${S}.setZoom(${id}, 1)`);
-await ev(`${S}.goTo(${id}, 0)`);
+await act(`${S}.setZoom(${id}, 1)`);
+await act(`${S}.goTo(${id}, 0)`);
 await until(`(${F}.docs[${id}]?.fields?.length ?? 0) === 12`, "the 12 fields");
 await sleep(600);
 
@@ -138,10 +141,10 @@ check("number format shows $1,234.50 and keeps 1234.5", price.shown === "$1,234.
 const sc1 = await scripts();
 check("the runaway script is in the Scripts log", sc1.log.some((l) => l.field === "Spin" || /longer|timed out|limit/i.test(l.message)), JSON.stringify(sc1.log));
 
-await ev(`${F}.setOpen(true)`);
+await act(`${F}.setOpen(true)`);
 await until(`!!document.querySelector(".fm-scripts")`, "the Scripts note");
 const noteClosed = await ev(`document.querySelector(".fm-scripts").open`);
-check("the Scripts note is collapsed by default, with a count badge", noteClosed === false && !!(await ev(`document.querySelector(".fm-scripts .fm-badge")`)), "");
+check("the Scripts note is collapsed by default, with a count badge", noteClosed === false && (await ev(`!!document.querySelector(".fm-scripts .fm-badge")`)), "");
 await ev(`document.querySelector(".fm-scripts > summary").click()`);
 await sleep(300);
 await shot("scripts-note");
@@ -196,12 +199,19 @@ check("a custom keystroke script upper-cases and the format script decorates", c
 await shot("filled");
 
 // ---- save and reopen ---------------------------------------------------------------------------------------------
+await ev(`(() => { document.activeElement?.blur?.(); return true })()`);
 await key("s", "KeyS", 83, 2);
-await until(`!${S}.docs[${id}].dirty`, "the save", 20000);
+try {
+  await until(`!${S}.docs[${id}].dirty`, "the save", 12000);
+} catch (e) {
+  const d = await ev(`(() => { const d = ${S}.docs[${id}]; return JSON.stringify({ dirty: d.dirty, scratch: d.scratch ?? null, path: d.path, active: ${S}.active, focus: document.activeElement?.tagName, text: document.body.innerText.slice(0, 600) }) })()`);
+  console.log("save did not finish:", d);
+  throw e;
+}
 const filePath = await ev(`${S}.docs[${id}].path`);
-await ev(`${S}.closeDoc(${id})`);
+await act(`${S}.closeDoc(${id})`);
 await sleep(600);
-await ev(`${S}.openPath(${JSON.stringify(filePath)})`);
+await act(`${S}.openPath(${JSON.stringify(filePath)})`);
 const re = await until(`(() => { const d = Object.values(${S}.docs).find((d) => d.name === "formsjs-sample.pdf"); return d ? d.id : null })()`, "the reopened file");
 await until(`(${F}.docs[${re}]?.fields?.length ?? 0) === 12`, "the reopened fields");
 const back = Object.fromEntries((await fields(re)).map((f) => [f.name, [f.value, f.shown]]));
@@ -210,12 +220,12 @@ check(
   back.Price?.[0] === "1234.5" && back.Price?.[1] === "$1,234.50" && back.Born?.[0] === "18/04/1991" && back.Total?.[0] === "1250.5" && back.Code?.[1] === "#AB1" && back.Name?.[0] === "Ada",
   JSON.stringify(back),
 );
-await ev(`${S}.activate(${re})`);
-await ev(`${S}.patch(${re}, { organize: false })`);
-await ev(`${S}.setZoom(${re}, 1)`);
-await ev(`${S}.goTo(${re}, 0)`);
+await act(`${S}.activate(${re})`);
+await act(`${S}.patch(${re}, { organize: false })`);
+await act(`${S}.setZoom(${re}, 1)`);
+await act(`${S}.goTo(${re}, 0)`);
 await sleep(700);
-await ev(`${F}.setOpen(true)`);
+await act(`${F}.setOpen(true)`);
 
 // ---- the banner switch ---------------------------------------------------------------------------------------------
 const rent = await field("Rent", re);
@@ -228,11 +238,11 @@ check("with scripts off, a custom calculation no longer runs (Tax unchanged)", e
 await shot("scripts-off");
 await click(".fm-banner input[type=checkbox]");
 await until(`${F}.docs[${re}]?.scripts?.enabled === true`, "scripts on");
-await ev(`${F}.setValue(${re}, ${rent.page}, ${rent.xref}, "1000")`);
+await act(`${F}.setValue(${re}, ${rent.page}, ${rent.xref}, "1000")`);
 check("turned back on, the calculation runs again", (await field("Tax", re)).value === "312.63" && (await field("Total", re)).value === "1250.5", `${(await field("Total", re)).value}`);
 
 // ---- authoring: Format tab with live sample, Custom script boxes, Calculation order --------------------------------
-await ev(`${F}.setAuthoring(true)`);
+await act(`${F}.setAuthoring(true)`);
 await until(`!!document.querySelector(".fm-strip")`, "Prepare form");
 const select = async (name) => {
   const f = await field(name, re);
@@ -266,7 +276,7 @@ await setControl("textarea[aria-label='Custom format script']", 'if (event.value
 await sleep(500);
 const other = await field("Other", re);
 check("Custom script writes a custom format (one edit)", other.format.kind === "custom" && /<" \+ event\.value/.test(other.format.value.format), JSON.stringify(other.format));
-await ev(`${F}.setValue(${re}, ${other.page}, ${other.xref}, "7")`);
+await act(`${F}.setValue(${re}, ${other.page}, ${other.xref}, "7")`);
 check("and it runs", (await field("Other", re)).shown === "<7>", (await field("Other", re)).shown);
 void labelBefore;
 
