@@ -1,17 +1,17 @@
 // Adapted from pdfcraft (MIT OR Apache-2.0), crates/edit/src/text.rs @ b8ddf71
 //! Edit text in place: the text blocks already on a page, and rewriting a block with new text,
-//! size, colour, alignment, position or width.
+//! runs of other fonts, sizes and colours, alignment, position or width.
 //!
-//! A *line* is a run of text-showing operators inside one `BT … ET` on one baseline; a *block*
-//! is consecutive lines with the same font, size and colour, aligned and regularly spaced (a
-//! paragraph). Rewriting a block removes its show operators and inserts, where it started, one new
-//! text object in its own graphics state (`q … Q`) with the text reflowed to the block's width.
-//! Every other operator is copied byte for byte; content streams whose bytes changed become new
-//! stream objects (a stream may be shared with another page).
+//! A *line* is a run of text-showing operators inside one `BT … ET` on one baseline, made of
+//! *runs* of one font, size and colour; a *block* is consecutive lines of similar size, aligned
+//! and regularly spaced (a paragraph). Rewriting a block removes its show operators and inserts,
+//! where it started, one new text object in its own graphics state (`q … Q`) with the text
+//! reflowed to the block's width (see layout.rs). Every other operator is copied byte for byte;
+//! content streams whose bytes changed become new stream objects (a stream may be shared with
+//! another page).
 //!
 //! pdfcraft does this on its own COS document; here the page, its resources and its streams are
-//! MuPDF objects, and fallback fonts are MuPDF's built-in standard faces (embedded through
-//! `pdf_add_font` when the text needs more than WinAnsi).
+//! MuPDF objects, and fallback fonts are the standard 14 and the bundled Noto faces (bundled.rs).
 
 use super::content::{Matrix, Obj, Op, Pieces, num, serialize_ops};
 use super::font::{Limit, Metrics};
@@ -1072,6 +1072,21 @@ fn normalize(text: &str) -> String {
         .join("\n")
 }
 
+/// Text with each stretch of spaces as one space, hard breaks (`\n`) kept, the ends left as they are.
+fn collapse(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.replace("\r\n", "\n").chars() {
+        if c != '\n' && paragraph_separator(c) {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn fill_ops(color: Option<[f64; 3]>, own: &[Op]) -> Result<Vec<Op>> {
     match color {
         Some([r, g, b]) => {
@@ -1141,7 +1156,9 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
             None => like.tsize * factor,
         };
         first_size.get_or_insert(size);
-        let text = rc.text.as_deref().map(normalize).filter(|t| src.is_none_or(|s| *t != s.text));
+        // A whole-block text loses outer spaces; a run keeps its own (they join it to the next).
+        let norm = if change.runs.is_some() { collapse } else { normalize };
+        let text = rc.text.as_deref().map(norm).filter(|t| src.is_none_or(|s| *t != s.text));
         if text.is_none() && src.is_none() {
             continue;
         }
@@ -1514,5 +1531,6 @@ mod tests {
     #[test]
     fn normalizes_spaces_and_keeps_breaks() {
         assert_eq!(normalize("  a \t b\r\nc  "), "a b\nc");
+        assert_eq!(collapse(" a \t b\r\nc  "), " a b\nc ");
     }
 }

@@ -390,8 +390,10 @@ impl<'a> Setter<'a> {
             match c {
                 '\n' => out.push(Item { style: base_style, kind: Kind::Break, w: 0.0, kern: 0.0, text: "\n".into() }),
                 ' ' => {
-                    let st = self.style(Style { face: last_face, ..base.clone() });
-                    out.push(self.space(last_face, st));
+                    // In the face of the text before it, else the run's own face.
+                    let face = if self.faces[last_face].has(' ') { last_face } else { spec.primary };
+                    let st = self.style(Style { face, ..base.clone() });
+                    out.push(self.space(face, st));
                 }
                 _ => {
                     let mut face = spec.primary;

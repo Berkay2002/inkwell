@@ -19,7 +19,7 @@ The files are subsets made at build time (by a developer, committed) with `scrip
   About 135 KB each, 820 KB together.
 - Noto Sans CJK (SC glyph forms): every character of GB 2312, JIS X 0208 and KS X 1001 (9,788 Han ideographs,
   2,350 Hangul syllables, kana, CJK punctuation and symbols; the list is `scripts/fonts/cjk-chars.txt`), plus
-  CJK symbols, kana, Bopomofo, Hangul compatibility jamo and half/full-width forms. 2.8 MB.
+  the space, CJK symbols, kana, Bopomofo, Hangul compatibility jamo and half/full-width forms. 2.8 MB.
 
 Total: 3.5 MB in the executable. Text outside these sets (rare Han ideographs, other scripts) is refused with a
 message naming the first character no bundled face has.

@@ -10,23 +10,34 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 | Command | Arguments | Returns |
 |---|---|---|
 | `text_blocks` | `doc, page` | `{ rev, blocks: TextBlock[], areas: Area[] }` |
-| `text_edit` | `doc, rev, page, index, change` | `{ state: EditState, fallback: Fallback \| null }` |
+| `text_edit` | `doc, rev, page, index, change` | `{ state: EditState, fallback: Fallback \| null, fallbacks: Fallback[] }` |
 | `text_add` | `doc, rev, page, new` | `EditState` |
+| `text_fonts` | `doc` | `FontInfo[]` |
 
 - Coordinates are page space as the viewer shows it (points, origin top left, `/Rotate` applied): the space of
   `page_text`. Offsets and widths in `change` are in that space too.
-- `TextBlock = { index, text, rect, lines: rect[], font, size, bold, italic, color, align, lineSpacing, editable, issue, reason }`.
+- `TextBlock = { index, text, rect, lines: rect[], font, size, bold, italic, color, align, lineSpacing, runs, editable, issue, reason }`.
+  `runs: { index, text, font, fontId, size, color, bold, italic }[]` is the text in runs of one font, size and colour
+  (line breaks read as spaces); the block-level font, size, colour, bold and italic are its first run's.
   `lineSpacing` is the distance between lines over the font size (null for one line).
   `font` is the `/BaseFont` (subset prefix kept), `size` in points, `align` one of `left|center|right|justify`.
-- `change = { text?, size?, color?, align?, offset?: [dx, dy], width?, lineSpacing?, bold?, italic? }`; unset fields keep the block's own. `text`
-  may contain `\n` for hard line breaks; everything else reflows to the block's width.
+- `change = { text?, runs?, size?, color?, align?, offset?: [dx, dy], width?, lineSpacing?, bold?, italic? }`; unset fields keep
+  the block's own. `text` (one run, in the first run's style) may contain `\n` for hard line breaks; everything
+  reflows to the block's width. `runs: { text?, source?, font?, size?, color?, bold?, italic? }[]` is the new content run
+  by run: unset fields come from run `source` (or the first run); `font` is a `text_fonts` id. A run with a `source`,
+  no new text and no font or style change keeps its glyphs exactly, kerning included. Block-level `size` scales every
+  run (the first run gets that size); `color`, `bold` and `italic` apply to every run without its own.
+- `FontInfo = { id, name, family, bold, italic, kind: document|standard|bundled, embedded, subset, usable, pages }`.
+  Ids: `doc:<object>` (a document font, named on the page when first used there), `res:<name>` (a font written into
+  a page's resources directly), `std:<name>` (standard 14), `bundled:<id>` (Noto faces). `usable` is false for Type 3,
+  predefined-CMap and unreadable fonts; `subset` warns that typed text may fall back.
 - `index` belongs to the `rev` of the list it came from; a `text_edit` against an older `rev` is `Stale` (list again).
 - Each `text_edit` is one edit-core step (`Engine::apply_removing`): one undo step labelled "Edit text on p. N",
   "Format text …", "Move text …" or "Resize text box …", kept by Save, recorded in history. A document with text
   edits is saved as a full, garbage-collected rewrite (not an incremental update), so the old text is not left in the
   file's bytes.
-- `fallback = { font, embedded, reason }` when the block's font could not show the new text (the UI's yellow `!`):
-  `reason` names the original font and the first character it lacks.
+- `fallbacks: { font, embedded, reason }[]` when a run's font could not show its text (the UI's yellow `!`), one per
+  font used instead; `reason` names the original font and the first character it lacks. `fallback` is the first.
 
 ## Design
 
@@ -36,27 +47,41 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
    every `Tj/TJ/'/"` into a run: text (ToUnicode, else the encoding with `/Differences`), box (font ascent/descent),
    baseline start/end, user-space size. Widths come from `/Widths`, `/W`/`/DW`, or for standard 14 fonts without
    widths from MuPDF's built-in faces (`font.rs`).
-2. **Lines and blocks.** Runs in one text object, same font/size/colour/render mode and on one baseline (measured in
-   the run's own text direction, so rotated text works) form a line. Consecutive lines with the same style, a shared
-   left edge, centre or right edge and a regular gap (0.8-2.5 × size, ±20 %) form a block. Alignment is detected from
-   the lines' edges (`justify` when every line but the last fills the width).
+2. **Lines, runs and blocks.** Show operators in one text object, same render mode and on one baseline (measured in
+   the run's own text direction, so rotated text works) form a line; a line holds runs of one font, size and colour,
+   each with its glyphs (code, meaning, advance and the TJ adjustment before it). Consecutive lines of similar size
+   (largest run within 1.3×), a shared left edge, centre or right edge and a regular gap (0.8-2.5 × size, ±20 %) form
+   a block, whatever their fonts and colours (as in Acrobat). Alignment is detected from the lines' edges (`justify`
+   when every line but the last fills the width).
 3. **Rewriting** (`rewrite_block`). The block's show operators are removed, and so is any other text drawn over the
    same area (fake bold, a duplicate copy), except invisible text. Where the block started, one new text object is
    inserted in its own graphics state: `q [cm] /TouchUp_TextEdit MP BT <state> Tm … ET Q` (Acrobat's marker). If the
    same `BT` showed text before the block, the object is split there (`ET … BT Tm`) to keep reading order. Lines are
    positioned with `Td` from the block's left edge in its text space; `center/right` offset each line; `justify`
-   spreads the free width with `Tw` (single-byte fonts) or `TJ` gaps. Each removed show operator is replaced by a stand-in with
+   spreads the free width over the line's spaces with `TJ` adjustments (any font, one- or two-byte). The content is
+   laid out as glyph items (`layout.rs`): an unchanged run's own codes and kerning, new text encoded per character.
+   Words wrap at spaces, CJK text between any two characters, `\n` breaks a paragraph; a line with a larger run sits
+   lower in proportion. Each style change writes `Tf` and the fill colour; each stretch of one style is one `TJ`. Each removed show operator is replaced by a stand-in with
    the same moves and no painting: a numeric-only `TJ` advancing the text matrix by the removed text's width, after
    `T*` for a `'` (and `Tw Tc T*` for a `"`), so text after it in the same object stays put. When the object is split,
    it is reopened at the removed operator's line and position. Everything else in the stream is copied byte for
    byte. Changed streams become new Flate streams (a content stream may be shared with another page); the page's
    `/Contents` points at them.
-4. **Fonts.** The block's own font is kept when every character has a code (reverse ToUnicode/encoding) and a glyph:
+4. **Fonts.** A run's font is kept for every character it has a code (reverse ToUnicode/encoding) and a glyph for:
    a code with a zero width is missing, and for a subset simple font the embedded program (loaded by MuPDF) must have
-   the glyph. A font without a space code (TeX) keeps its glyphs and places words apart with `TJ` gaps of ¼ em.
-   Otherwise the text is set in the matching standard 14 font (Courier/Times/Helvetica by the base name, with
-   bold/italic) as a non-embedded WinAnsi Type1, or, when the text needs more than WinAnsi (Greek, Cyrillic …), that
-   face embedded as Type0/Identity-H through `pdf_add_font`. New font resources are named `IwEd<n>`.
+   the glyph. A font without a space code (TeX) places words apart with `TJ` gaps of ¼ em. The characters a run's font
+   lacks go to one fallback for the run: the matching standard 14 font (Courier/Times/Helvetica by the base name, with
+   bold/italic) as a non-embedded WinAnsi Type1 when WinAnsi can show them all, else the bundled Noto Sans (or Noto
+   Sans Mono for monospaced runs, in the run's style) and, for what that lacks, Noto Sans CJK. Bold or italic without a
+   font asks first for a font of the same family and style already on the page, then the standard face. Bundled faces
+   are embedded per rewrite with only the glyphs used (`bundled.rs`: a runtime subset with the `subsetter` crate,
+   Type0/Identity-H, CIDFontType2 + `/FontFile2` for TrueType, CIDFontType0 + `/FontFile3 /CIDFontType0C` for the
+   CFF CJK face, `/W` widths and a ToUnicode map); bold CJK text is drawn by also stroking the outline (`2 Tr`), since
+   the CJK face has one weight. New font resources are named `IwEd<n>` (standard), `IwNoto<n>` (bundled), `IwDoc<n>`
+   (a document font picked for a page that did not name it).
+   The bundled faces (`src-tauri/fonts`, 3.5 MB in the executable) are subset at build time by a developer
+   (`scripts/fonts/subset_fonts.py`): Latin, Greek and Cyrillic for Noto Sans/Mono, GB 2312 + JIS X 0208 + KS X 1001
+   for the CJK face; see `third_party/fonts/README.md` (OFL 1.1).
 5. **Size, colour, move, resize.** Size scales the text-space font size (and the line spacing with it); colour
    replaces the fill with `rg`; a move is a `cm` translation inside the block's `q … Q`, taken back through the CTM
    into the space the block is drawn in; a width change rewraps. Moving or resizing an edited block works the same way
@@ -74,7 +99,17 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - Listing blocks with font, size, colour, alignment and line boxes; headings and paragraphs separate.
 - Replace → save → reopen: the extracted text equals the new text, and the old string is gone from the content bytes.
 - Subset font: letters the subset has stay in it; a missing letter falls back to Helvetica (reported); Greek and
-  Cyrillic fall back to an embedded face and survive save/reopen.
+  Cyrillic fall back to a Noto Sans subset and survive save/reopen.
+- Runs: a block of three runs (regular, bold, regular) keeps its runs; changing one run keeps the others' glyphs and
+  their TJ kerning (checked in the saved bytes after reopening). Runs with their own size and colour, a document font
+  picked by id, a bundled mono face and a restyled italic run read back with those fonts after save/reopen.
+- CJK (Chinese, Korean, Japanese) and Greek text in a block or a new text box: set in embedded subsets that stay small
+  (Noto Sans subset < 12 KB, CJK subset < 24 KB for a handful of characters), extracted unchanged after reopening,
+  editable again; bold CJK uses synthetic bold.
+- The font list offers the document's fonts (with their pages), the 12 standard faces and the 7 bundled faces; a
+  picked face is accepted by a rewrite, an unknown id is refused.
+- A justified paragraph re-wraps into its width with both edges aligned (all lines but the last) and stays justified
+  after another text change and after save/reopen.
 - Font without a space glyph: words placed apart, text extracts with spaces.
 - Multi-line reflow keeps the block's left edge, width and line spacing; hard breaks with `\n`.
 - Size, colour, move, resize and right/centre alignment; a centred block stays centred after a text change.
@@ -83,14 +118,18 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 
 ## Limits
 
-- One font per block: a block is one font, size and colour (mixed-style lines are separate blocks), and a rewrite sets
-  the whole block in one style; per-character formatting and font choice are not offered. Bold and italic set the
-  whole block in the matching standard face (reported as a fallback), because an embedded subset has no bold.
+- Styles are per run: a change of style inside a word makes two runs. Underline, strikeout, super/subscript, character
+  spacing and horizontal scale per run are not offered (the block's `Tc`, `Tz` and `Ts` are kept for all runs).
+- Bold or italic in a font the document lacks uses a standard face (or Noto Sans for other scripts); there is no
+  synthetic italic, and synthetic bold is used only for CJK.
+- A run whose text changed loses the original kerning (it uses the font's advances); unchanged runs keep theirs. Word
+  spacing (`Tw`) of kept runs is folded into their space widths.
 - Text inside form XObjects is reported, not edited (it may be shared by several pages).
-- Fallback fonts are the standard 14 faces only (no system fonts, no CJK: CJK text that the original font lacks is
-  refused with a message). The embedded face is the whole font, not a subset.
-- Kerning inside the original runs is not kept for rewritten text (it uses the font's advances); `Tc`, `Tz`, `Ts`
-  and render mode are kept.
+- Fallback fonts are the standard 14 and the bundled faces (no system fonts). Characters outside the bundled sets
+  (rare Han ideographs, other scripts such as Arabic, Devanagari or Thai) are refused with a message naming the first
+  one. CJK text is set in its Simplified Chinese glyph forms; there is no complex shaping (no ligatures, no
+  right-to-left or contextual forms).
+- Line breaking is greedy, at spaces and between CJK characters; no hyphenation, no kinsoku rules.
 - Line/paragraph grouping is heuristic (pdfcraft's rules): tables and tightly packed columns may group differently
   from Acrobat. Lines in one text object across columns can join if they share a baseline within 3 em.
 - Type0 fonts with predefined non-Identity CMaps are listed but not editable (embedded CMaps, including mixed
@@ -102,8 +141,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 ## Adding text
 
 `text_add(doc, rev, page, { text, size, color, at: [x, y], width? })` puts a new text box with its top left at `at`
-(page space; 12 pt black by default). It is set in Helvetica (a standard face; other scripts take the embedded
-fallback face), wrapped to `width` when given, upright on rotated pages, in a new Flate stream appended to the
+(page space; 12 pt black by default). It is set in Helvetica (a standard face; other scripts take the bundled
+Noto subsets, CJK included), wrapped to `width` when given, upright on rotated pages, in a new Flate stream appended to the
 page's contents with its own `q ... Q` and a `/TouchUp_TextEdit` marked-content tag. One undo step, "Add text on
 p. N"; unlike a rewrite it saves incrementally. The new box is listed as a block straight away and edited like any
 other.
