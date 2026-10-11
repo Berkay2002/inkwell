@@ -750,6 +750,16 @@ fn put(doc: &PdfDocument, mut target: PdfObject, key: &str, src: &str) {
     target.dict_put(key, v).unwrap();
 }
 
+/// Balanced settings with every image class left as it is: MuPDF's image pass does not run at all, so
+/// what the discard options do is not mixed up with what it does (images and forms it rewrites are new
+/// objects that carry no /Alternates and no /PieceInfo).
+fn keep_images() -> Options {
+    let mut o = Options::preset(Preset::Balanced);
+    let keep = ImageClass { above_ppi: 0, to_ppi: 0, codec: Codec::Retain, quality: 0 };
+    o.images = Images { color: keep, gray: keep, mono: keep, only_if_smaller: true };
+    o
+}
+
 /// A document with one of everything the discard options talk about (3 pages, bookmarks).
 fn kitchen_sink(path: &Path) {
     let mut doc = PdfDocument::from_bytes(&fixture::build(&fixture::Fixture { pages: 3, chapter_every: 1, needle_every: 0, lines: 6 })).unwrap();
@@ -797,6 +807,19 @@ fn kitchen_sink(path: &Path) {
     let xo = doc.new_object_from_str("<< >>").unwrap();
     res.dict_put("XObject", xo).unwrap();
     res.get_dict("XObject").unwrap().unwrap().dict_put("Fm1", form).unwrap();
+    let draw = doc.add_stream(&mupdf::Buffer::from_bytes(b"q /Fm1 Do Q\n").unwrap(), None, false).unwrap();
+    let mut p2 = doc.find_page(2).unwrap();
+    let old = p2.get_dict("Contents").unwrap().unwrap();
+    let mut parts = doc.new_array().unwrap();
+    if old.is_array().unwrap() {
+        for part in old.array_iter().unwrap().flatten() {
+            parts.array_push(part).unwrap();
+        }
+    } else {
+        parts.array_push(old).unwrap();
+    }
+    parts.array_push(draw).unwrap();
+    p2.dict_put("Contents", parts).unwrap();
 
     // form fields with actions: submit, reset, a reset under /AA next to a script, and a URI that stays
     let mut w = |extra: &str| add(&mut doc, &format!("<< /Type /Annot /Subtype /Widget /Rect [10 10 80 30] {extra} >>"));
@@ -942,7 +965,7 @@ fn each_discard_option_removes_exactly_what_it_says() {
         ("invalid links", Strip { invalid_links: true, ..Strip::default() }, |p| p.links.retain(|c| c.starts_with("ok-"))),
     ];
     // What the engine does to this file when nothing is asked: the yardstick for every option.
-    let mut o = Options::preset(Preset::Balanced);
+    let mut o = keep_images();
     o.output = Some(s.path("nothing.pdf"));
     let plain = probe(&run(&input, &o).unwrap().output);
     let mut failures = Vec::new();
@@ -950,7 +973,7 @@ fn each_discard_option_removes_exactly_what_it_says() {
         failures.push(format!("nothing asked changed the file:\n  was  {base:?}\n  is   {plain:?}"));
     }
     for (name, strip, effect) in cases {
-        let mut o = Options::preset(Preset::Balanced);
+        let mut o = keep_images();
         o.strip = strip;
         o.output = Some(s.path(&format!("{}.pdf", name.replace(' ', "-"))));
         let r = run(&input, &o).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -967,7 +990,7 @@ fn each_discard_option_removes_exactly_what_it_says() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 
     // the counts in the report
-    let mut o = Options::preset(Preset::Balanced);
+    let mut o = keep_images();
     o.strip = Strip { links: true, form_actions: true, alternate_images: true, private_data: true, ..Strip::default() };
     o.output = Some(s.path("counted.pdf"));
     let r = run(&input, &o).unwrap();

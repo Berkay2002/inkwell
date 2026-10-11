@@ -53,6 +53,11 @@ Not in MuPDF, so not here: linearization, JBIG2, invalid-bookmark removal (bookm
 transparency flattening (a flattened page becomes a picture: its text is no longer text; the report lists the page
 numbers, rotated pages and pages with `/UserUnit` are left alone and listed as skipped).
 
+Caveat: when the image pass runs (any image class that downsamples or re-encodes), MuPDF replaces the images and
+form XObjects it rewrites by new objects, which carry no `/Alternates` and no `/PieceInfo`. They are gone from such a
+copy whether or not the discard option is on; with every image class left as it is the pass does not run and the
+options remove exactly what they say.
+
 Unembedding keeps the font's description and widths; the subset tag (`ABCDEF+`) is dropped from the name. It is
 refused, with the reason in `unembedded.skipped` and a warning, for composite (Type0) fonts, symbolic fonts and
 fonts whose flags are missing, because a viewer cannot substitute those faithfully.
