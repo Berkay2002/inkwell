@@ -50,6 +50,25 @@ impl Jobs {
     }
 }
 
+/// Every catalog under `root` forgets the file at `path` (see [`super::forget`]); one that is being built or
+/// removed is left, and its results for that file stay hidden by the check a search makes against the file.
+pub fn forget_all(root: &std::path::Path, jobs: &Jobs, path: &std::path::Path) -> u32 {
+    let mut n = 0;
+    for m in super::list(root) {
+        match jobs.guarded(&m.id, || super::forget(&root.join(&m.id), path)) {
+            Ok(k) => n += k,
+            Err(e) => eprintln!("inkwell catalog {}: {e}", m.id),
+        }
+    }
+    n
+}
+
+/// A document with redactions was saved over `path`: no catalog keeps its old text.
+pub fn forget_saved(app: &tauri::AppHandle, path: &str) {
+    let Ok((data, _)) = crate::recents::data_dir(app) else { return };
+    forget_all(&data.join("catalogs"), &app.state::<Arc<Jobs>>(), std::path::Path::new(path));
+}
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum BuildEvent {

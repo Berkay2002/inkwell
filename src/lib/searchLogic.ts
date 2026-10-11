@@ -263,6 +263,11 @@ export function staleLine(s: { added: number; changed: number; removed: number; 
   return parts.join(", ");
 }
 
+/** The note under catalog results when files changed after they were indexed: they are left out, not answered from old text. */
+export function staleResultsLine(n: number): string {
+  return `${plural(n, "file", "files")} changed since this catalog was built, so ${n === 1 ? "its" : "their"} results are left out. Refresh the catalog to search ${n === 1 ? "it" : "them"} again.`;
+}
+
 /** What a finished build says: "1 804 files, 12 new, 3 changed; 2 could not be read". */
 export function buildLine(b: { files: number; added: number; changed: number; removed: number; damaged: number; password: number; cancelled: boolean }, hadIndex = true): string {
   if (b.cancelled) return hadIndex ? "Stopped. The previous index is still in use." : "Stopped. Build it again to search this catalog.";

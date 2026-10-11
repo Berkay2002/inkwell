@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_OPTS, type FileGroup, type Hit, approxTime, buildLine, byPosition, estimateLine, staleLine, changedOptions, filesLine, folderName, groupByPage, insertFile, optsKey, parseHistory,
+  DEFAULT_OPTS, type FileGroup, type Hit, approxTime, buildLine, byPosition, estimateLine, staleLine, staleResultsLine, changedOptions, filesLine, folderName, groupByPage, insertFile, optsKey, parseHistory,
   mergeHits, parseOpts, pickCurrent, pushHistory, resultsLine, shortDir, visibleRows,
 } from "./searchLogic";
 
@@ -172,6 +172,11 @@ describe("catalog lines", () => {
     expect(staleLine({ added: 2, changed: 1, removed: 3, unusable: false }, 5)).toBe("1 changed, 2 new, 3 gone");
     expect(staleLine({ added: 0, changed: 0, removed: 0, unusable: true }, 0)).toBe("Not built yet");
     expect(staleLine({ added: 0, changed: 0, removed: 0, unusable: true }, 9)).toBe("Needs a rebuild");
+  });
+
+  it("says which results a catalog search left out because the files changed", () => {
+    expect(staleResultsLine(1)).toBe("1 file changed since this catalog was built, so its results are left out. Refresh the catalog to search it again.");
+    expect(staleResultsLine(3)).toMatch(/^3 files changed .* their results are left out/);
   });
 
   it("summarises a build, and a stopped one keeps the old index", () => {

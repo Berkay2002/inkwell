@@ -63,6 +63,8 @@ export type FilesEvent =
       cloudOnly: number;
       cancelled: boolean;
       capped: boolean;
+      /** Catalog searches: files whose stored text is of another version than the file on disk (left out). */
+      stale: number;
     };
 
 export type SearchScope = { kind: "folder"; token: string; recursive: boolean } | { kind: "files"; tokens: string[] };
@@ -256,6 +258,8 @@ export interface Embedded {
   current: boolean;
   pages: number;
   bytes: number;
+  /** Why the index cannot be written, updated or removed (certified, signed document); null when it can. */
+  blocked: string | null;
 }
 
 export const catalogEstimate = (folder: string, recursive: boolean) => invoke<CatalogEstimate>("catalog_estimate", { folder, recursive });

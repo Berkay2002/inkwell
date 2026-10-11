@@ -35,10 +35,15 @@ use std::sync::Mutex;
 
 /// Format version of every file of a catalog; another one is rebuilt.
 pub const VERSION: u32 = 1;
-/// Characters of text, comments and field values kept for one file; later pages are left out and the file says so.
+/// Bytes of stored page records (text, comments and field values, as the JSON a blob holds) kept for one file;
+/// later pages are left out and the file says so. Bookmark titles get a quarter of it again, so a blob of our
+/// own always inflates to well under `MAX_BLOB` and is never refused by `FileText::decode`.
 pub const MAX_TEXT: usize = 20 << 20;
 /// What one file's stored records may inflate to (the embedded index of a PDF is untrusted input).
 const MAX_BLOB: u64 = 96 << 20;
+/// A PDF up to this size is read into memory and opened from there, so no handle is left on the file (a build
+/// must not block the user's Save-over, delete or rename of it).
+const MAX_READ: u64 = 128 << 20;
 /// Pages of one file that are indexed, and bookmarks kept.
 const MAX_PAGES: usize = 100_000;
 const MAX_BOOKMARKS: usize = 50_000;
@@ -144,8 +149,13 @@ pub struct FileText {
 }
 
 impl FileText {
-    pub fn encode(&self) -> Vec<u8> {
-        zstd::encode_all(serde_json::to_vec(self).unwrap_or_default().as_slice(), 3).unwrap_or_default()
+    /// `None` when the records inflate to more than `MAX_BLOB`: what `decode` would refuse is never written.
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        let raw = serde_json::to_vec(self).ok()?;
+        if raw.len() as u64 > MAX_BLOB {
+            return None;
+        }
+        zstd::encode_all(raw.as_slice(), 3).ok().filter(|b| !b.is_empty())
     }
 
     /// `None` for anything that is not a current, sane record: wrong version, too big once inflated, or broken.
@@ -189,8 +199,24 @@ fn io(e: impl std::fmt::Display) -> EngineError {
 
 /// Writes to a temp file and renames over the target: a crash never leaves half a file.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_tmp_rename(path, bytes, false)
+}
+
+/// [`write_atomic`] with the bytes flushed to disk before the rename: for what a commit stands on (a rename can
+/// reach the disk before the data it names). The per-file blobs do not pay for it; a torn one fails to decode.
+fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_tmp_rename(path, bytes, true)
+}
+
+fn write_tmp_rename(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
+    use std::io::Write;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).map_err(io)?;
+    let mut f = std::fs::File::create(&tmp).map_err(io)?;
+    f.write_all(bytes).map_err(io)?;
+    if sync {
+        f.sync_all().map_err(io)?;
+    }
+    drop(f);
     std::fs::rename(&tmp, path).map_err(io)
 }
 
@@ -249,7 +275,7 @@ fn load_meta_or_unusable(dir: &Path) -> Result<Meta> {
 }
 
 fn save_meta(dir: &Path, m: &Meta) -> Result<()> {
-    write_atomic(&meta_path(dir), &serde_json::to_vec_pretty(m).map_err(io)?)
+    write_durable(&meta_path(dir), &serde_json::to_vec_pretty(m).map_err(io)?)
 }
 
 /// A new, empty catalog for `folder` under `root`.
@@ -572,7 +598,7 @@ pub fn read_pages(doc: &PdfDocument, cancel: &AtomicBool) -> std::result::Result
         if cancel.load(Ordering::Relaxed) {
             return Err(Skip::Cancelled);
         }
-        if used > MAX_TEXT {
+        if used >= MAX_TEXT {
             t.cut = true;
             t.pages.push(StoredPage::default());
             continue;
@@ -582,10 +608,26 @@ pub fn read_pages(doc: &PdfDocument, cancel: &AtomicBool) -> std::result::Result
             continue;
         };
         let page = StoredPage { text: rec.text.to_stored(), comments: rec.comments, fields: rec.fields };
-        used += page.text.text.len() + page.comments.iter().chain(&page.fields).map(|c| c.0.len()).sum::<usize>();
+        // What it takes in the blob, so the cap and what `decode` accepts are the same measure. A page that does
+        // not fit is left out, however big: one page cannot take the file past the cap.
+        let size = serde_json::to_vec(&page).map_or(usize::MAX, |b| b.len());
+        if size > MAX_TEXT - used {
+            used = MAX_TEXT;
+            t.cut = true;
+            t.pages.push(StoredPage::default());
+            continue;
+        }
+        used += size;
         t.pages.push(page);
     }
-    t.bookmarks = bookmarks_of(doc);
+    let mut room = MAX_TEXT / 4;
+    t.bookmarks = bookmarks_of(doc)
+        .into_iter()
+        .take_while(|(_, title)| {
+            room = room.saturating_sub(title.len() + 16);
+            room > 0
+        })
+        .collect();
     Ok(t)
 }
 
@@ -606,20 +648,26 @@ pub(super) fn bookmarks_of(doc: &PdfDocument) -> Vec<(u32, String)> {
     out
 }
 
-fn head_tail(path: &Path, size: u64) -> String {
-    use std::io::{Seek, SeekFrom};
+/// The hash of the first and last `SAMPLE` bytes of something `size` bytes long (a file, or the bytes of one).
+fn sample_of<R: Read + std::io::Seek>(r: &mut R, size: u64) -> String {
+    use std::io::SeekFrom;
     let mut h = blake3::Hasher::new();
-    if let Ok(mut f) = std::fs::File::open(path) {
-        let mut b = Vec::new();
-        let _ = (&mut f).take(SAMPLE).read_to_end(&mut b);
+    let mut b = Vec::new();
+    let _ = (&mut *r).take(SAMPLE).read_to_end(&mut b);
+    h.update(&b);
+    if size > 2 * SAMPLE && r.seek(SeekFrom::Start(size - SAMPLE)).is_ok() {
+        b.clear();
+        let _ = (&mut *r).take(SAMPLE).read_to_end(&mut b);
         h.update(&b);
-        if size > 2 * SAMPLE && f.seek(SeekFrom::Start(size - SAMPLE)).is_ok() {
-            b.clear();
-            let _ = (&mut f).take(SAMPLE).read_to_end(&mut b);
-            h.update(&b);
-        }
     }
     h.finalize().to_hex().to_string()
+}
+
+fn head_tail(path: &Path, size: u64) -> String {
+    match std::fs::File::open(path) {
+        Ok(mut f) => sample_of(&mut f, size),
+        Err(_) => blake3::Hasher::new().finalize().to_hex().to_string(),
+    }
 }
 
 // ---- build and refresh -------------------------------------------------------------------------------------
@@ -664,6 +712,8 @@ struct Shared<'a> {
     finished: AtomicU32,
     total: u32,
     progress: &'a (dyn Fn(u32, u32) + Sync),
+    /// Files up to this size are read into memory before they are opened (`MAX_READ`).
+    max_read: u64,
     /// Blobs written by this run (removed again when it is cancelled).
     written: Mutex<Vec<u32>>,
 }
@@ -681,15 +731,38 @@ fn index_file(sh: &Shared, job: &Job) -> Option<FileRec> {
         path: job.path.to_string_lossy().into_owned(),
         size: job.size,
         mtime: job.mtime,
-        head_tail: head_tail(&job.path, job.size),
+        head_tail: String::new(),
         pdf_id: String::new(),
         pages: 0,
         status: Status::Damaged,
         cut: false,
     };
+    // Read whole, so no handle stays on the file while it is indexed (a Save-over, delete or rename of the PDF
+    // must not wait for a build) and a long path is no problem; the sample is hashed from the same bytes.
+    // shortcut: a file over `max_read` is opened by path (and so held while it is read), because a copy of it in
+    // memory per thread is too much; upgrade by reading it in chunks into a memory-backed stream.
+    let bytes = if job.size <= sh.max_read {
+        match std::fs::read(&job.path) {
+            Ok(b) => Some(b),
+            Err(_) => {
+                rec.head_tail = head_tail(&job.path, job.size);
+                return Some(rec);
+            }
+        }
+    } else {
+        None
+    };
+    rec.head_tail = match &bytes {
+        Some(b) => sample_of(&mut std::io::Cursor::new(b), job.size),
+        None => head_tail(&job.path, job.size),
+    };
     // A file that makes MuPDF panic is skipped like a damaged one.
     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Probe {
-        let Ok(doc) = PdfDocument::open(&*job.path) else { return Probe::Bad(Status::Damaged) };
+        let opened = match &bytes {
+            Some(b) => PdfDocument::from_bytes(b),
+            None => PdfDocument::open(&*job.path),
+        };
+        let Ok(doc) = opened else { return Probe::Bad(Status::Damaged) };
         if doc.needs_password().unwrap_or(true) {
             return Probe::Bad(Status::Password);
         }
@@ -718,8 +791,8 @@ fn index_file(sh: &Shared, job: &Job) -> Option<FileRec> {
             } else {
                 sh.extracted.fetch_add(1, Ordering::Relaxed);
             }
-            let blob = t.encode();
-            if write_atomic(&text_path(sh.dir, job.fid), &blob).is_err() {
+            let written = t.encode().map(|blob| write_atomic(&text_path(sh.dir, job.fid), &blob));
+            if !matches!(written, Some(Ok(()))) {
                 rec.status = Status::Damaged;
                 rec.pages = 0;
                 return Some(rec);
@@ -756,6 +829,11 @@ fn worker(sh: &Shared) {
 /// time and sample, the rest is read again. `progress(done, total)` is called per file, from the build's threads.
 /// Cancelling leaves the live generation as it was.
 pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32, u32) + Sync)) -> Result<Summary> {
+    build_with(dir, full, cancel, progress, MAX_READ)
+}
+
+/// [`build`] with the size up to which a file is read into memory given (tests use a small one).
+pub(super) fn build_with(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32, u32) + Sync), max_read: u64) -> Result<Summary> {
     let mut meta = load_meta_or_unusable(dir)?;
     let folder = PathBuf::from(&meta.folder);
     if !folder.is_dir() {
@@ -773,9 +851,10 @@ pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32
     let old = if full { None } else { Index::load(dir, &meta) };
     let old_recs: HashMap<&str, &FileRec> = old.iter().flat_map(|i| i.table.files.iter()).map(|r| (r.path.as_str(), r)).collect();
     let listed: HashSet<String> = listing.files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    // Old rows whose path is gone: a moved file may match one of them.
+    // Old rows whose path is gone: a moved file may match one of them. (Only an indexed row is kept: a file that
+    // failed is read again, whatever its size and time say: it may have been locked, or half copied.)
     let mut gone: HashMap<(u64, u64), Vec<&FileRec>> = HashMap::new();
-    for r in old.iter().flat_map(|i| i.table.files.iter()).filter(|r| !listed.contains(&r.path)) {
+    for r in old.iter().flat_map(|i| i.table.files.iter()).filter(|r| r.status == Status::Indexed && !listed.contains(&r.path)) {
         gone.entry((r.size, r.mtime)).or_default().push(r);
     }
     let mut taken: HashSet<u32> = HashSet::new();
@@ -802,7 +881,7 @@ pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32
             continue;
         };
         let (size, mtime) = (m.len(), stamp(&m));
-        let same = old_recs.get(p.as_str()).filter(|r| r.size == size && r.mtime == mtime);
+        let same = old_recs.get(p.as_str()).filter(|r| r.status == Status::Indexed && r.size == size && r.mtime == mtime);
         let moved = || {
             let c = gone.get(&(size, mtime))?;
             let h = head_tail(path, size);
@@ -815,10 +894,11 @@ pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32
             sum.kept += 1;
             slots.push(Some(FileRec { path: p, ..r.clone() }));
         } else {
-            if old_recs.contains_key(p.as_str()) {
-                sum.changed += 1;
-            } else {
-                sum.added += 1;
+            match old_recs.get(p.as_str()) {
+                // A failure tried again is neither new nor changed.
+                Some(r) if r.status != Status::Indexed && r.size == size && r.mtime == mtime => {}
+                Some(_) => sum.changed += 1,
+                None => sum.added += 1,
             }
             planned.push((slot, next_fid, path.clone(), size, mtime));
             jobs.push_back(Job { slot, fid: next_fid, path: path.clone(), size, mtime });
@@ -841,6 +921,7 @@ pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32
         finished: AtomicU32::new(total - to_read),
         total,
         progress,
+        max_read,
         written: Mutex::new(Vec::new()),
     };
     std::fs::create_dir_all(text_dir(dir)).map_err(io)?;
@@ -890,8 +971,8 @@ pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32
     let generation = meta.generation + 1;
     let table = Table { version: VERSION, generation, next_fid, files };
     let index = postings.encode();
-    write_atomic(&table_path(dir, generation), &serde_json::to_vec(&table).map_err(io)?)?;
-    write_atomic(&index_path(dir, generation), &index)?;
+    write_durable(&table_path(dir, generation), &serde_json::to_vec(&table).map_err(io)?)?;
+    write_durable(&index_path(dir, generation), &index)?;
     sum.files = table.files.len() as u32;
     sum.damaged = table.files.iter().filter(|r| r.status == Status::Damaged).count() as u32;
     sum.password = table.files.iter().filter(|r| r.status == Status::Password).count() as u32;
@@ -930,6 +1011,65 @@ fn clean(dir: &Path, table: &Table) {
             let _ = std::fs::remove_file(p);
         }
     }
+}
+
+// ---- forgetting a file -------------------------------------------------------------------------------------
+
+/// `p` as the file system names it, for comparing a saved file with the paths of a listing.
+fn canon(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Takes the file at `path` out of the catalog in `dir`: its row, its stored text and its postings, as a new
+/// generation. Used when the file was replaced by a version with content taken out of it (a saved redaction):
+/// the catalog must not keep, or show, what was removed. The file is listed as new until the next refresh reads
+/// it again. Returns how many rows went. Nothing runs against a build of the same catalog: the caller holds it.
+pub fn forget(dir: &Path, path: &Path) -> Result<u32> {
+    let meta = load_meta(dir)?;
+    let Some(table) = (meta.generation > 0).then(|| load_table(dir, meta.generation)).flatten() else { return Ok(0) };
+    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    let want = canon(path);
+    // The name is compared first: only a row that could be the file is looked up on disk.
+    let gone: HashSet<u32> = table
+        .files
+        .iter()
+        .filter(|r| {
+            let p = Path::new(&r.path);
+            p.file_name().map(|n| n.to_string_lossy().to_lowercase()) == name && (canon(p) == want || p == path)
+        })
+        .map(|r| r.fid)
+        .collect();
+    if gone.is_empty() {
+        return Ok(0);
+    }
+    // The text goes first: whatever happens next, it is not on disk.
+    for fid in &gone {
+        let _ = std::fs::remove_file(text_path(dir, *fid));
+    }
+    // Without a trustworthy index there is nothing to rewrite: a refresh reads every file again.
+    let Some(old) = Index::load(dir, &meta) else { return Ok(gone.len() as u32) };
+    let keep: HashSet<u32> = table.files.iter().map(|r| r.fid).filter(|f| !gone.contains(f)).collect();
+    let mut postings = Postings::default();
+    postings.keep(&old, &keep);
+    let generation = meta.generation + 1;
+    let files: Vec<FileRec> = table.files.into_iter().filter(|r| !gone.contains(&r.fid)).collect();
+    let table = Table { version: VERSION, generation, next_fid: table.next_fid, files };
+    let index = postings.encode();
+    write_durable(&table_path(dir, generation), &serde_json::to_vec(&table).map_err(io)?)?;
+    write_durable(&index_path(dir, generation), &index)?;
+    let count = |s: Status| table.files.iter().filter(|r| r.status == s).count() as u32;
+    let mut meta = meta;
+    meta.generation = generation;
+    meta.files = table.files.len() as u32;
+    meta.indexed = count(Status::Indexed);
+    meta.damaged = count(Status::Damaged);
+    meta.password = count(Status::Password);
+    meta.pages = table.files.iter().map(|r| u64::from(r.pages)).sum();
+    meta.cut = table.files.iter().filter(|r| r.cut).count() as u32;
+    meta.index_len = index.len() as u64;
+    save_meta(dir, &meta)?;
+    clean(dir, &table);
+    Ok(gone.len() as u32)
 }
 
 // ---- is it out of date -------------------------------------------------------------------------------------
@@ -1023,25 +1163,25 @@ fn read_text(dir: &Path, fid: u32) -> Option<FileText> {
 pub fn search(dir: &Path, query: &str, opts: SearchOpts, searches: &FolderSearches, window: &str, sink: &dyn Fn(FilesEvent)) -> Result<u64> {
     let (id, cancel) = searches.begin(window);
     sink(FilesEvent::Started { search: id });
-    let end = |matched, hits, skipped, files, cloud_only, cancelled, capped| {
+    let end = |matched, hits, skipped, files, cloud_only, cancelled, capped, stale| {
         searches.finish(id);
-        sink(FilesEvent::Done { search: id, files, matched, hits, skipped, cloud_only, cancelled, capped });
+        sink(FilesEvent::Done { search: id, files, matched, hits, skipped, cloud_only, cancelled, capped, stale });
     };
     let loaded = load_meta(dir).ok().and_then(|m| Index::load(dir, &m).map(|i| (m, i)));
     let Some((meta, idx)) = loaded else {
-        end(0, 0, 0, 0, 0, false, false);
+        end(0, 0, 0, 0, 0, false, false, 0);
         return Err(EngineError::Invalid("this catalog is damaged or was never built. Build it again.".into()));
     };
     let total = idx.table.files.len() as u32;
     let skipped = idx.table.files.iter().filter(|r| r.status != Status::Indexed).count() as u32;
     let Some(q) = Query::new(query, opts) else {
         // Nothing to look for: nothing is read, so nothing is skipped (as in a folder search).
-        end(0, 0, 0, total, meta.cloud_only, false, meta.capped);
+        end(0, 0, 0, total, meta.cloud_only, false, meta.capped, 0);
         return Ok(id);
     };
     let cands = idx.candidates(&query_words(query));
     let root = PathBuf::from(&meta.folder);
-    let (mut matched, mut hits_total, mut listed, mut unreadable) = (0u32, 0u32, 0usize, 0u32);
+    let (mut matched, mut hits_total, mut listed, mut unreadable, mut stale) = (0u32, 0u32, 0usize, 0u32, 0u32);
     let mut cancelled = false;
     for (i, rec) in idx.table.files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
@@ -1053,10 +1193,18 @@ pub fn search(dir: &Path, query: &str, opts: SearchOpts, searches: &FolderSearch
                 None => Some((0..rec.pages).collect()),
                 Some(c) => c.get(&rec.fid).cloned(),
             };
+            // The stored text is what the file said when it was indexed. A file that is not the one that was read
+            // (saved, redacted, replaced) is left out and counted, never answered from old text; a path that is not
+            // under the folder is not looked at.
+            let on_disk = || {
+                let p = Path::new(&rec.path);
+                under(&root, p).then(|| std::fs::metadata(p).ok()).flatten().is_some_and(|m| m.len() == rec.size && stamp(&m) == rec.mtime)
+            };
             if let Some(pages) = pages {
-                match read_text(dir, rec.fid) {
-                    None => unreadable += 1,
-                    Some(text) => {
+                match if on_disk() { Some(read_text(dir, rec.fid)) } else { None } {
+                    None => stale += 1,
+                    Some(None) => unreadable += 1,
+                    Some(Some(text)) => {
                         let want_marks = q.opts().bookmarks;
                         let room = TOTAL.saturating_sub(listed);
                         let page_set: HashSet<u32> = pages.iter().copied().collect();
@@ -1111,6 +1259,6 @@ pub fn search(dir: &Path, query: &str, opts: SearchOpts, searches: &FolderSearch
         }
         sink(FilesEvent::Progress { search: id, scanned: i as u32 + 1, total });
     }
-    end(matched, hits_total, skipped + unreadable, total, meta.cloud_only, cancelled, meta.capped);
+    end(matched, hits_total, skipped + unreadable, total, meta.cloud_only, cancelled, meta.capped, stale);
     Ok(id)
 }

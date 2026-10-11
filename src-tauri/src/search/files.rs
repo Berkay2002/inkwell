@@ -71,6 +71,9 @@ pub enum FilesEvent {
         cloud_only: u32,
         cancelled: bool,
         capped: bool,
+        /// Catalog searches only: files whose stored text is of another version of the file than the one on
+        /// disk. They are left out of the results; refreshing the catalog reads them again.
+        stale: u32,
     },
 }
 
@@ -329,7 +332,7 @@ impl FolderSearches {
         let cancelled = cancel.load(Ordering::SeqCst);
         let Some(q) = Query::new(query, opts).filter(|_| total > 0 && !cancelled) else {
             self.state.lock().unwrap().live.remove(&id);
-            sink(FilesEvent::Done { search: id, files: total, matched: 0, hits: 0, skipped: 0, cloud_only, cancelled, capped });
+            sink(FilesEvent::Done { search: id, files: total, matched: 0, hits: 0, skipped: 0, cloud_only, cancelled, capped, stale: 0 });
             return;
         };
         let threads = PARALLEL.min(total as usize);
@@ -421,6 +424,7 @@ fn leave(run: &Arc<Run>) {
             cloud_only: run.cloud_only,
             cancelled,
             capped: run.capped,
+            stale: 0,
         });
     }
 }

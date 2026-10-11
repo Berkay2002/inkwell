@@ -23,6 +23,8 @@ export interface FolderRun {
   /** The folder held more PDFs than a search looks at. */
   capped: boolean;
   cancelled: boolean;
+  /** Catalog search: files that changed since the catalog read them, left out of the results. */
+  stale: number;
 }
 
 /** A catalog being built or refreshed. */
@@ -96,7 +98,7 @@ export type Target =
   | { kind: "catalog"; id: string; name: string };
 
 const emptyRun = (query: string): FolderRun => ({
-  id: null, query, running: true, scanned: 0, total: 0, files: [], matched: 0, hits: 0, skipped: 0, cloudOnly: 0, capped: false, cancelled: false,
+  id: null, query, running: true, scanned: 0, total: 0, files: [], matched: 0, hits: 0, skipped: 0, cloudOnly: 0, capped: false, cancelled: false, stale: 0,
 });
 
 let runSeq = 0;
@@ -194,7 +196,7 @@ export const useSearch = create<Rail>((set, get) => ({
       } else if (e.kind === "progress") {
         apply({ scanned: e.scanned, total: e.total });
       } else {
-        apply({ files, running: false, scanned: e.cancelled ? get().run?.scanned ?? 0 : e.files, total: e.files, matched: e.matched, hits: e.hits, skipped: e.skipped, cloudOnly: e.cloudOnly, capped: e.capped, cancelled: e.cancelled });
+        apply({ files, running: false, scanned: e.cancelled ? get().run?.scanned ?? 0 : e.files, total: e.files, matched: e.matched, hits: e.hits, skipped: e.skipped, cloudOnly: e.cloudOnly, capped: e.capped, cancelled: e.cancelled, stale: e.stale });
       }
     };
 

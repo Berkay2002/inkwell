@@ -14,7 +14,7 @@
 
 use super::{bookmarks_of, pdf_id, read_pages, FileText, MAX_BLOB, VERSION};
 use crate::engine::edit::{EditSource, EditState};
-use crate::engine::{DocId, Engine, Result};
+use crate::engine::{DocId, Engine, EngineError, Result};
 use crate::forms::{bad, get, put_int, put_name, put_str};
 use crate::search::extras_of;
 use mupdf::pdf::{PdfDocument, PdfObject};
@@ -317,6 +317,28 @@ pub struct Embedded {
     pub current: bool,
     pub pages: u32,
     pub bytes: u64,
+    /// Why the index of this document cannot be written, updated or removed (certified, signed); `None` when it can.
+    pub blocked: Option<String>,
+}
+
+/// Why the search index of `doc` is left as it is, if it is. Embedding, updating and removing it change the
+/// catalog dictionary of the file, and an update or removal rewrites the file, which no signature survives; a
+/// certification allows none of it. (A document that has an index when it is signed keeps it.)
+fn blocked(doc: &PdfDocument) -> Option<String> {
+    if crate::outline::certified(doc).is_ok_and(|c| c.is_some()) {
+        Some("This document is certified. Changing its search index would void the certification, so Inkwell leaves it as it is.".into())
+    } else if crate::outline::signed(doc) {
+        Some("This document is signed. Inkwell does not change the search index of a signed document, so its signatures stay valid.".into())
+    } else {
+        None
+    }
+}
+
+fn guard(doc: &PdfDocument) -> Result<()> {
+    match blocked(doc) {
+        Some(why) => Err(EngineError::Invalid(why)),
+        None => Ok(()),
+    }
 }
 
 pub fn status(doc: &PdfDocument) -> Embedded {
@@ -326,8 +348,8 @@ pub fn status(doc: &PdfDocument) -> Embedded {
     let n = doc.page_count().unwrap_or(0).max(0) as usize;
     let id = pdf_id(doc);
     // The dict says which file and how many pages: a mismatch is "out of date" without reading the blob.
-    let Some((hid, hp)) = header(&s) else { return Embedded { present: true, current: false, pages: 0, bytes: raw } };
-    let mut e = Embedded { present: true, current: false, pages: hp, bytes: raw };
+    let Some((hid, hp)) = header(&s) else { return Embedded { present: true, current: false, pages: 0, bytes: raw, blocked: None } };
+    let mut e = Embedded { present: true, current: false, pages: hp, bytes: raw, blocked: None };
     if id.is_empty() || hid != id || hp as usize != n {
         return e;
     }
@@ -342,6 +364,7 @@ pub fn status(doc: &PdfDocument) -> Embedded {
 /// Writes (or replaces) the index of the document as it is now. A document without `/ID` gets one first: the
 /// index is matched by it.
 pub fn add(doc: &mut PdfDocument) -> Result<Vec<u32>> {
+    guard(doc)?;
     if pdf_id(doc).is_empty() {
         let mut b = [0u8; 16];
         getrandom::fill(&mut b).map_err(|e| bad(e.to_string()))?;
@@ -363,10 +386,10 @@ pub(super) fn install_for_test(doc: &mut PdfDocument, text: &FileText) {
 
 /// Puts `text` in the document as its index (replacing one that is there).
 fn install(doc: &mut PdfDocument, text: &FileText) -> Result<Vec<u32>> {
-    let bytes = text.encode();
-    if bytes.is_empty() || bytes.len() as u64 > MAX_BLOB {
+    // The size that counts is what it inflates to: that is what a reader (`decode`, `read_stream_capped`) caps.
+    let Some(bytes) = text.encode() else {
         return Err(bad("the search index of this document is too large to embed"));
-    }
+    };
     let mut head = doc.new_dict()?;
     put_name(&mut head, "Type", "InkwellSearchIndex")?;
     put_int(&mut head, "Version", VERSION as i32)?;
@@ -413,18 +436,19 @@ pub fn drop_if_stale(doc: &PdfDocument) -> std::result::Result<bool, mupdf::Erro
 
 /// Takes the index out (one edit step).
 pub fn remove(doc: &mut PdfDocument) -> Result<Vec<u32>> {
+    guard(doc)?;
     drop_index(doc)?;
     Ok(Vec::new())
 }
 
 pub fn embedded(eng: &Engine, doc: DocId) -> Result<Embedded> {
-    eng.read_custom(doc, |d| Ok(status(d)))
+    eng.read_custom(doc, |d| Ok(Embedded { blocked: blocked(d), ..status(d) }))
 }
 
 /// One undo step; saved by Save. Replacing an index runs as a removing edit, so a save rewrites the file and
 /// the old records are really gone.
 pub fn embed(eng: &Engine, doc: DocId, source: EditSource) -> Result<EditState> {
-    let had = eng.read_custom(doc, |d| Ok(private(d).is_some()))?;
+    let had = eng.read_custom(doc, |d| guard(d).map(|()| private(d).is_some()))?;
     let label = if had { "Update embedded search index" } else { "Embed search index" }.to_string();
     if had {
         eng.apply_removing(doc, label, source, add)
@@ -435,7 +459,7 @@ pub fn embed(eng: &Engine, doc: DocId, source: EditSource) -> Result<EditState> 
 
 /// One undo step; the bytes are gone from the file once saved.
 pub fn unembed(eng: &Engine, doc: DocId, source: EditSource) -> Result<EditState> {
-    if !eng.read_custom(doc, |d| Ok(private(d).is_some()))? {
+    if !eng.read_custom(doc, |d| guard(d).map(|()| private(d).is_some()))? {
         return eng.edit_state(doc);
     }
     eng.apply_removing(doc, "Remove embedded search index".to_string(), source, remove)

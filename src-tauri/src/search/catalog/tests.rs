@@ -171,9 +171,11 @@ fn a_build_reports_what_it_found_and_skips_what_it_cannot_read() {
 fn a_refresh_reads_only_the_files_that_changed() {
     let (root, folder, d) = built("refresh");
     let _ = root;
-    let n = load_meta(&d).unwrap().files;
+    // The damaged file is not kept: it is tried again at every refresh (and counted as neither new nor changed).
+    let n = load_meta(&d).unwrap().indexed;
+    assert_eq!(load_meta(&d).unwrap().damaged, 1);
 
-    // Nothing changed: nothing is opened.
+    // Nothing changed: no indexed file is opened.
     assert_eq!(check(&d, &AtomicBool::new(false)).unwrap(), Stale::default());
     let s = build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
     assert_eq!((s.extracted, s.kept, s.added, s.changed, s.removed), (0, n, 0, 0, 0));
@@ -220,7 +222,12 @@ fn a_cancelled_build_leaves_the_old_index_usable() {
     .unwrap();
     assert!(s.cancelled);
     assert_eq!(load_meta(&d).unwrap().generation, 1, "the live generation did not move");
-    assert_eq!(flat(&catalog_search(&d, "notice", SearchOpts::default())), before);
+    // The old index is what answers, for every file that is still the one it read; the rewritten ones (on disk
+    // already) are left out and counted, not answered from old text.
+    let ev = catalog_search(&d, "notice", SearchOpts::default());
+    let (now, _) = flat(&ev);
+    assert!(done_of(&ev).2 > 0 && now.len() < before.0.len());
+    assert!(now.iter().all(|(k, v)| before.0.get(k) == Some(v)));
     // No blob of the cancelled run is left (every file id of the live generation is below its next_fid).
     let table = load_table(&d, 1).unwrap();
     let stray = std::fs::read_dir(text_dir(&d)).unwrap().flatten().filter(|e| {
@@ -344,7 +351,7 @@ fn an_embedded_index_is_read_by_a_build_and_removing_it_is_one_undo_step() {
 fn a_stale_or_hostile_embedded_index_is_not_used() {
     // Wrong page count and wrong id: read() refuses both.
     let text = FileText { version: VERSION, id: "abcd".into(), pages: vec![StoredPage::default(); 2], bookmarks: vec![], cut: false, sig: String::new() };
-    let bytes = text.encode();
+    let bytes = text.encode().unwrap();
     assert_eq!(FileText::decode(&bytes).unwrap(), text);
     assert!(FileText::decode(&bytes[..bytes.len() / 2]).is_none());
     assert!(FileText::decode(b"not zstd").is_none());
@@ -740,4 +747,204 @@ fn embedded_bookmarks_that_name_missing_pages_are_dropped() {
     embed::install_for_test(&mut doc, &t);
     let got = embed::read(&doc, 1, &pdf_id(&doc)).unwrap();
     assert_eq!(got.bookmarks, vec![(0, "real".to_string())]);
+}
+
+// ---- fix round: signatures, redaction, retries, reading, caps ----------------------------------------------
+
+fn done_of(events: &[FilesEvent]) -> (u32, u32, u32) {
+    match events.iter().rev().find(|e| matches!(e, FilesEvent::Done { .. })) {
+        Some(FilesEvent::Done { matched, skipped, stale, .. }) => (*matched, *skipped, *stale),
+        _ => panic!("no Done"),
+    }
+}
+
+const CERTIFIED: &str = "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 2 >> >> ] >> >>";
+const SIGNED: &str = "/AcroForm << /SigFlags 3 /Fields [] >>";
+
+fn with_catalog(catalog: &str) -> Vec<u8> {
+    doc_with(&[vec!["A signed page about notice"]], Extra { catalog: catalog.into(), annots: String::new(), objs: vec![] })
+}
+
+fn index_text() -> FileText {
+    FileText { version: VERSION, id: "abcd".into(), pages: vec![StoredPage::default()], bookmarks: vec![], cut: false, sig: "x".into() }
+}
+
+#[test]
+fn a_certified_or_signed_document_gets_no_index_written_updated_or_removed() {
+    for (name, catalog, word) in [("certified", CERTIFIED, "certified"), ("signed", SIGNED, "signed")] {
+        let base = dir(&format!("catalog-guard-{name}"));
+        // Without an index: Embed is refused and nothing is left to save.
+        let p = write(&base, "a.pdf", with_catalog(catalog));
+        let eng = Engine::new(2, 64 << 20);
+        let id = eng.open(&p.to_string_lossy()).unwrap().doc;
+        let e = embed::embedded(&eng, id).unwrap();
+        assert!(!e.present && e.blocked.as_deref().is_some_and(|w| w.contains(word)), "{name}: {e:?}");
+        let err = embed::embed(&eng, id, EditSource::User).unwrap_err().to_string();
+        assert!(err.contains(word), "{name}: {err}");
+        assert!(eng.edit_state(id).unwrap().undo.is_none(), "{name}: a refusal is not an undo step");
+        let before = std::fs::read(&p).unwrap();
+        assert!(eng.save(id, None).is_ok());
+        assert_eq!(std::fs::read(&p).unwrap(), before, "{name}: the file is as it was");
+
+        // With one (made before it was signed): Update and Remove are refused, the index stays, no step is made.
+        let mut doc = PdfDocument::open(&*p).unwrap();
+        embed::install_for_test(&mut doc, &index_text());
+        let q = base.join("b.pdf");
+        doc.save(&q.to_string_lossy()).unwrap();
+        let eng = Engine::new(2, 64 << 20);
+        let id = eng.open(&q.to_string_lossy()).unwrap().doc;
+        let e = embed::embedded(&eng, id).unwrap();
+        assert!(e.present && e.blocked.is_some(), "{name}: {e:?}");
+        assert!(embed::embed(&eng, id, EditSource::User).unwrap_err().to_string().contains(word));
+        assert!(embed::unembed(&eng, id, EditSource::User).unwrap_err().to_string().contains(word));
+        assert!(embed::embedded(&eng, id).unwrap().present);
+        assert!(eng.edit_state(id).unwrap().undo.is_none(), "{name}: no undo step");
+    }
+    // A document that is neither is not blocked.
+    let base = dir("catalog-guard-open");
+    let p = write(&base, "a.pdf", plain(&[vec!["plain"]]));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&p.to_string_lossy()).unwrap().doc;
+    assert_eq!(embed::embedded(&eng, id).unwrap().blocked, None);
+}
+
+#[test]
+fn a_saved_redaction_is_gone_from_the_catalog_and_its_results() {
+    use crate::redact::app::{apply, find, mark_hits, ApplyOutcome, FindQuery};
+    use crate::redact::Sanitize;
+    let base = dir("catalog-redact");
+    let folder = base.join("docs");
+    let secret = write(&folder, "secret.pdf", plain(&[vec!["The code ZEBRAXYZ is private", "and a line about notice"]]));
+    write(&folder, "other.pdf", plain(&[vec!["ZEBRAXYZ is also named in this other file, notice"]]));
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    build(&d, true, &AtomicBool::new(false), &no_progress()).unwrap();
+    let found = |q: &str| flat(&catalog_search(&d, q, SearchOpts::default())).0.values().map(|f| f.0.clone()).collect::<Vec<_>>();
+    assert_eq!(found("zebraxyz").len(), 2);
+    let contains = |needle: &[u8]| {
+        let mut all = std::fs::read(index_path(&d, load_meta(&d).unwrap().generation)).unwrap();
+        for e in std::fs::read_dir(text_dir(&d)).unwrap().flatten() {
+            // The blobs are compressed: look at what they hold.
+            if let Some(t) = FileText::decode(&std::fs::read(e.path()).unwrap()) {
+                all.extend(t.pages.iter().flat_map(|p| p.text.text.bytes()));
+            }
+        }
+        all.windows(needle.len()).any(|w| w == needle)
+    };
+    assert!(contains(b"zebraxyz") || contains(b"ZEBRAXYZ"), "the fixture is indexed");
+
+    // The document is opened by its canonical path and the catalog lists it by the folder's own spelling.
+    let eng = Engine::new(2, 64 << 20);
+    let real = std::fs::canonicalize(&secret).unwrap();
+    let id = eng.open(&real.to_string_lossy()).unwrap().doc;
+    let hits = find(&eng, id, &FindQuery::Text { needle: "ZEBRAXYZ".into(), case_sensitive: true, whole_word: false }).unwrap();
+    assert_eq!(hits.len(), 1);
+    mark_hits(&eng, id, &hits, EditSource::User).unwrap();
+    let out = apply(&eng, id, Sanitize::default(), None, EditSource::User).unwrap();
+    assert!(matches!(out, ApplyOutcome::Applied { .. }), "{out:?}");
+    let (state, saved) = eng.save_recorded(id, None).unwrap();
+    assert!(saved.unwrap().redacts);
+
+    // Until the catalog is told, a search still must not show the old text: the file is not the one that was read.
+    let ev = catalog_search(&d, "zebraxyz", SearchOpts::default());
+    assert_eq!(found("zebraxyz"), vec!["other.pdf".to_string()]);
+    assert_eq!(done_of(&ev), (1, 0, 1), "one file left out as changed");
+
+    // The save path forgets it: row, text and postings.
+    let jobs = super::app::Jobs::default();
+    assert_eq!(super::app::forget_all(&base.join("catalogs"), &jobs, Path::new(&state.path)), 1);
+    assert!(!contains(b"The code"), "the old text of the file is not kept");
+    let ev = catalog_search(&d, "zebraxyz", SearchOpts::default());
+    assert_eq!(done_of(&ev), (1, 0, 0));
+    assert_eq!(found("notice"), vec!["other.pdf".to_string()]);
+    let meta = load_meta(&d).unwrap();
+    assert_eq!((meta.files, meta.generation), (1, 2));
+    // It comes back, redacted, with the next refresh.
+    assert_eq!(check(&d, &AtomicBool::new(false)).unwrap().added, 1);
+    let s = build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert_eq!((s.added, s.extracted), (1, 1));
+    assert_eq!(found("zebraxyz"), vec!["other.pdf".to_string()]);
+    assert_eq!(found("notice").len(), 2);
+    // Forgetting a file no catalog lists, or one that is being built, is harmless.
+    assert_eq!(super::app::forget_all(&base.join("catalogs"), &jobs, &base.join("nothing.pdf")), 0);
+}
+
+#[test]
+fn a_changed_file_is_left_out_of_a_catalog_search_and_counted() {
+    let (_, folder, d) = built("stale-search");
+    let (before, bd) = flat(&catalog_search(&d, "notice", SearchOpts::default()));
+    assert!(before.values().any(|f| f.0 == "f00.pdf") && before.values().any(|f| f.0 == "f01.pdf"));
+    assert_eq!(done_of(&catalog_search(&d, "notice", SearchOpts::default())).2, 0);
+    // Replaced (another size), and touched (same bytes, another time): neither is answered from old text.
+    write(&folder, "f00.pdf", plain(&[vec!["rewritten without the word, and a longer line to differ in size"]]));
+    let p = folder.join("f01.pdf");
+    let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+    f.set_modified(std::time::SystemTime::now() + Duration::from_secs(3600)).unwrap();
+    drop(f);
+    let ev = catalog_search(&d, "notice", SearchOpts::default());
+    let (now, nd) = flat(&ev);
+    let stale = done_of(&ev).2;
+    assert!(stale >= 1, "{stale}");
+    assert!(nd.1 < bd.1 && now.len() < before.len());
+    let names: Vec<_> = now.values().map(|f| f.0.as_str()).collect();
+    assert!(!names.contains(&"f00.pdf") && !names.contains(&"f01.pdf"), "{names:?}");
+    // A refresh brings them back to date.
+    build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert_eq!(done_of(&catalog_search(&d, "notice", SearchOpts::default())).2, 0);
+}
+
+#[test]
+fn a_file_that_failed_is_read_again_by_a_refresh_even_when_it_looks_unchanged() {
+    let base = dir("catalog-retry");
+    let folder = base.join("docs");
+    let good = plain(&[vec!["recovered notice text"]]);
+    let p = write(&folder, "a.pdf", vec![b'x'; good.len()]);
+    write(&folder, "b.pdf", plain(&[vec!["steady notice"]]));
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    let s = build(&d, true, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert_eq!((s.files, s.damaged, s.extracted), (2, 1, 1));
+    // Same size, same modified time (a copy that finished, a lock that let go): only its status can say.
+    let t = std::fs::metadata(&p).unwrap().modified().unwrap();
+    std::fs::write(&p, &good).unwrap();
+    std::fs::OpenOptions::new().write(true).open(&p).unwrap().set_modified(t).unwrap();
+    let s = build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert_eq!((s.extracted, s.kept, s.damaged, s.added, s.changed), (1, 1, 0, 0, 0), "{s:?}");
+    let (found, _) = flat(&catalog_search(&d, "recovered", SearchOpts::default()));
+    assert_eq!(found.len(), 1);
+}
+
+#[test]
+fn a_file_is_indexed_the_same_read_whole_or_opened_by_path() {
+    let base = dir("catalog-read");
+    let folder = base.join("docs");
+    // Over 128 KB, so the sample has a head and a tail.
+    let big = doc_with(
+        &[vec!["a big file with notice in it"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    write(&folder, "big.pdf", big);
+    write(&folder, "small.pdf", plain(&[vec!["a small notice"]]));
+    write(&folder, "bad.pdf", b"nope".to_vec());
+    let rows = |max: u64, name: &str| {
+        let (_, d) = make(&base.join(name), &folder);
+        let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), max).unwrap();
+        assert_eq!((s.files, s.extracted, s.damaged), (3, 2, 1), "{s:?}");
+        let t = load_table(&d, 1).unwrap();
+        (t.files.iter().map(|r| (r.path.clone(), r.size, r.head_tail.clone(), r.pages, r.status)).collect::<Vec<_>>(), flat(&catalog_search(&d, "notice", SearchOpts::default())).0)
+    };
+    let whole = rows(MAX_READ, "c1");
+    let by_path = rows(0, "c2");
+    assert_eq!(whole, by_path);
+    assert_eq!(whole.1.len(), 2);
+}
+
+#[test]
+fn a_record_that_would_not_decode_is_never_written() {
+    let big = FileText {
+        version: VERSION,
+        id: "ab".into(),
+        pages: vec![StoredPage { text: StoredText { text: "a".repeat(MAX_BLOB as usize), ..Default::default() }, ..Default::default() }],
+        ..Default::default()
+    };
+    assert!(big.encode().is_none(), "what decode refuses is not encoded");
+    assert!(index_text().encode().is_some_and(|b| FileText::decode(&b).is_some()));
 }

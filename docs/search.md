@@ -60,12 +60,21 @@ format we control and version.
 - Candidate rule: one word must be a substring of a term; several words are first=suffix, middle=exact, last=prefix;
   a query of marks only verifies every page. Hits carry the line's box, not exact character rectangles.
 - Refresh: a file with the same size and mtime is kept without being opened; a moved file is kept by size, mtime and
-  head/tail hash; a changed mtime is re-indexed. Damaged and password-protected files are skipped and counted. Cancel
-  leaves the previous generation live.
+  head/tail hash; a changed mtime is re-indexed. Damaged and password-protected files are skipped and counted, and
+  tried again at every refresh (only an indexed row is kept). A build reads each PDF into memory (up to 128 MB; a
+  larger one is opened by path) so no handle stays on it, and `catalog.json`, table and index are fsynced before the
+  rename. Cancel leaves the previous generation live.
+- A search checks every candidate file against the disk (size, mtime). A file that is not the one that was indexed is
+  left out and counted (`done.stale`, a note under the results), so a catalog never answers from text that was
+  saved over. A save that includes a redaction (`save_document`, `protect_and_save`) makes every catalog forget that
+  file: row, stored text and postings are rewritten as a new generation (`forget`), and the file is "new" until the
+  next refresh. A catalog that is being built is left; the search check still hides the file.
 - Embedded index: `/Root/PieceInfo/Inkwell` (`/Private` stream) holds the records of that file. A build reads it only
   if the trailer `/ID`, the page count, the version and a fingerprint of page content and annotations all match,
   so a file changed by another tool is read normally. Embedding and removing are one undo step each
-  (`index_embed`, `index_unembed`; `index_embedded` reports present/current).
+  (`index_embed`, `index_unembed`; `index_embedded` reports present/current and `blocked`). A certified or signed
+  document gets no index written, updated or removed (refused with the reason; the buttons are disabled): an update
+  or removal rewrites the file, which voids signatures, and a certification allows none of it.
 - An embedded index is untrusted input, like hidden text in the PDF itself: it can claim words that are not
   visible, and bookmarks on pages the file does not have are dropped. A build checks the dict (`/DocID`, `/Pages`)
   before decoding the blob, inflates it under a bound, and compares a fingerprint of the page content (page
@@ -83,7 +92,9 @@ format we control and version.
   annotations, PDF/A conversion to a new file, Bates numbering with replace, and a Compress or batch run (dropped
   extras, flattened pages, unembedded fonts) drop it unless it still matches the file; the metadata and private-data
   options remove it with the rest of `/PieceInfo`. Extract, split and combine build new files and carry none.
-- Bounds: 20 MB of text per file (cut and counted), 100 000 pages, 50 000 bookmarks, 96 MB of inflated index.
+- Bounds: 20 MB of stored page records per file, measured as the JSON that is written (a page that does not fit is
+  left out, the file is marked cut and counted), bookmark titles 5 MB on top, 100 000 pages, 50 000 bookmarks, 96 MB
+  of inflated index (a record that would inflate past it is not written).
 - Estimate (before the first build, from a listing): about 25 MB/s on two threads plus 20 ms per file, and an index of
   about 3 % of the PDF bytes plus 2 KB per file. A guess to set expectations, not a promise.
 - Commands: `catalog_estimate`, `catalog_create`, `catalog_list`, `catalog_delete`, `catalog_stale`,
@@ -105,5 +116,6 @@ every file in the list; only the latest search's files can be opened).
 ## Checked
 `cargo test --lib search::` (matcher options, snippets, comments/fields/bookmarks, engine events, folder listing,
 caps, skip, cancel, save and reopen; `search::catalog`: parity with the folder search, refresh reads only changed
-files, damaged/encrypted skipped, cancel keeps the old index, corrupt index rebuilt, embedded index and its undo), `src/lib/searchLogic.test.ts`, `src/lib/search.test.ts`, and
+files, damaged/encrypted skipped and retried, cancel keeps the old index, corrupt index rebuilt, embedded index and
+its undo, signed/certified refused, a saved redaction gone from index and results, changed files left out), `src/lib/searchLogic.test.ts`, `src/lib/search.test.ts`, and
 `scripts/search-shots.mjs` (CDP on generated copies; screens in `docs/screens/search/`).

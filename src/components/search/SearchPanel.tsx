@@ -5,7 +5,7 @@ import * as api from "../../lib/api";
 import { run as editRun } from "../../lib/edit";
 import {
   type FileGroup, FIRST_ITEMS, MORE_ITEMS, type Hit, SOURCE_LABEL, estimateLine, filesLine, folderName, groupByPage, optsKey, resultsLine, shortDir,
-  staleLine, visibleRows,
+  staleLine, staleResultsLine, visibleRows,
 } from "../../lib/searchLogic";
 import { useSearch } from "../../lib/searchStore";
 import { type DocState, useStore } from "../../store";
@@ -189,6 +189,7 @@ function FolderResults({ query }: { query: string }) {
           {run.skipped} {run.skipped === 1 ? "file" : "files"} could not be read (damaged, or protected with a password).
         </p>
       )}
+      {!run.running && run.stale > 0 && <p className="sr-note">{staleResultsLine(run.stale)}</p>}
       {!run.running && run.cloudOnly > 0 && (
         <p className="sr-note">
           {run.cloudOnly} cloud-only {run.cloudOnly === 1 ? "file" : "files"} skipped (not downloaded to this PC, so not read).
@@ -387,16 +388,18 @@ function EmbeddedIndex({ doc }: { doc: DocState }) {
       setBusy(false);
     }
   };
-  const note = !info.present ? "No search index in this file." : info.current ? "This file carries a search index." : "The index in this file is out of date.";
+  const note =
+    info.blocked ?? (!info.present ? "No search index in this file." : info.current ? "This file carries a search index." : "The index in this file is out of date.");
+  const off = busy || info.blocked !== null;
   return (
     <div className="sr-embed">
       <span className="dim">{note}</span>
       <span className="grow" />
-      <button className="sr-link" disabled={busy} onClick={() => void change(() => api.indexEmbed(doc.id))}>
+      <button className="sr-link" disabled={off} title={info.blocked ?? undefined} onClick={() => void change(() => api.indexEmbed(doc.id))}>
         {info.present ? "Update" : "Embed search index"}
       </button>
       {info.present && (
-        <button className="sr-link" disabled={busy} onClick={() => void change(() => api.indexUnembed(doc.id))}>
+        <button className="sr-link" disabled={off} title={info.blocked ?? undefined} onClick={() => void change(() => api.indexUnembed(doc.id))}>
           Remove embedded index
         </button>
       )}
