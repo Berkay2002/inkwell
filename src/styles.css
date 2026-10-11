@@ -1434,3 +1434,8 @@ select {
     transform: none;
   }
 }
+
+/* Groups the right-hand panel toggles without changing the toolbar layout. */
+.tb-cluster {
+  display: contents;
+}
