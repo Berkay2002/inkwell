@@ -17,6 +17,7 @@ const TOOLS: { tool: MeasureTool; icon: IconName; label: string }[] = [
 const SNAPS: { id: keyof Snaps; label: string; tip: string }[] = [
   { id: "endpoint", label: "Ends", tip: "Snap to the end points and corners of lines" },
   { id: "midpoint", label: "Mid", tip: "Snap to the middle of a line" },
+  { id: "intersection", label: "Cross", tip: "Snap to where two lines cross" },
   { id: "line", label: "Path", tip: "Snap to the nearest point on a line" },
 ];
 

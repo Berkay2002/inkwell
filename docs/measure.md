@@ -58,8 +58,12 @@ and its own `/Measure`, so a file from Acrobat shows Acrobat's scale.
 ## Snapping (`snap.rs`)
 `SnapIndex::build(doc, page)` runs the page's contents (not its annotations) through a MuPDF device and keeps the line
 segments (curves as 12 pieces) with their end points and midpoints (a curve's t = 0.5 point). `snap(x, y, radius)`:
-an end point or midpoint within the radius wins, the nearer (an end point on a tie); with none, the nearest point on any
-segment within the radius; else `None`. Result `{kind: endpoint|midpoint|line, x, y, distance}` in page space.
+an end point, midpoint or crossing of two segments within the radius wins, the nearest (end point, then crossing, then
+midpoint on a tie); with none, the nearest point on any segment within the radius; else `None`. Result
+`{kind: endpoint|midpoint|intersection|line, x, y, distance}` in page space. Kinds can be switched off per request
+(`kinds`, all on when absent): an off kind is never the answer, the next one is (midpoints off still snaps to the line).
+Crossings are strictly inside both segments (a shared or touching end point is an end point) and are looked for
+among the 64 segments nearest the pointer.
 `SnapCache` (managed state) keeps the last four indexes by (doc, `rev`, page), so a mouse move reads the page once per
 revision; the first read runs on the edit lane, and requests that arrived together share it (they look again once they
 hold the lane). A page is read with limits: 100,000 segments (a curve is 12) and 1.5 s. The time limit is a watchdog
@@ -72,7 +76,7 @@ in the path callbacks; the index keeps what it has read (`truncated`).
   ("Add distance measurement on p. 2"). `scale` absent: the page's.
 - `measure_value(doc, page, kind, points, scale?) -> quantity` (live readout, changes nothing).
 - `measure_list(doc) -> [{page, xref, kind, points, contents, author, quantity, scale}]`.
-- `measure_snap(doc, page, x, y, radius) -> hit | null` (needs `Arc<SnapCache>` in managed state: done in `lib.rs`).
+- `measure_snap(doc, page, x, y, radius, kinds?) -> hit | null` (needs `Arc<SnapCache>` in managed state: done in `lib.rs`).
 - `measure_rescale(doc, page, xref, scale) -> {state, xref, quantity}`: the annotation is replaced by one with the same
   kind, points and author at `scale`, as one undo step ("Change the scale of a measurement on p. 2 to 1 in = 1 m"); the
   xref changes. A gone xref or a scale with a zero side is refused and leaves no step.
@@ -97,7 +101,8 @@ Entry: Tools -> Comment & measure -> **Measure**, or the command palette ("Measu
 Comments does (opening one closes the other) and shows a floating bar over the page area and a Measure rail.
 - **Bar:** Select, Distance, Perimeter, Area; the scale chip ("1 in = 10 ft", the page's `/VP` scale when it has one;
   click to type another, or "Calibrate from a known length"); a units menu (the same ratio in another unit: 1 in = 10 ft
-  is 1 in = 3.048 m); snap toggles Ends / Mid / Path; Done.
+  is 1 in = 3.048 m; this sets the page's scale, so it is an undo step and writes a `/VP`, replacing the `/D` and `/A`
+  formats of a page that came from Acrobat with ours); snap toggles Ends / Mid / Cross / Path; Done.
 - **Drawing:** distance is click, click. Perimeter and area take a click per corner and finish with a double-click or
   Enter; Backspace takes the last corner back and Esc drops the whole thing. A click on the first corner of an area
   (shown as a filled marker) closes it. Shift holds the line to 45 degrees from the last corner and turns snapping off.
@@ -105,14 +110,15 @@ Comments does (opening one closes the other) and shows a floating bar over the p
 - **Result:** one `measure_add` (one undo step, saved by Save, in history). The page then draws the engine's own
   appearance with its label. With Select, a click on a measurement selects it: the rail shows its value, units and
   scale. Its scale (or unit) can be changed and Apply re-measures it (`measure_rescale`); Delete (key or button) removes
-  it (`annot_delete`, one undo step). Undo, redo and a restored version re-read the list and the page scales.
+  it (`annot_delete`, one undo step). Re-measuring replaces the annotation, so replies to it go too and the new one is last
+  in `/Annots` (undo brings them back). Undo, redo and a restored version re-read the list and the page scales.
 - **Rail:** the selected measurement, or the last value made; the cumulative value per kind and unit (never summed across
   units); the list by page (click to jump to it); Export to CSV.
 - **Calibrate:** pick it from the scale chip, draw over a dimension printed on the drawing, type its real length and
   unit: the page scale becomes "(line length in inches) in = (length) unit".
 - **Shortcuts taken:** the live label is worked out in the UI from the page's scale (it does not apply a file's own `/D`
   or `/A` multipliers or a detail viewport under the pointer: the label written by the engine is the exact one). The
-  snap kinds are the engine's (end points, midpoints, nearest point on a line); there is no intersection snap.
+  crossings are found among the 64 segments nearest the pointer, and curves cross as their 12 pieces.
   Editing a measurement means changing its scale or unit; its points are not dragged (delete and draw again).
 
 ## Not done

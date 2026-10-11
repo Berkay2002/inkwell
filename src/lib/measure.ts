@@ -6,7 +6,7 @@ import { type EditState, pickSave } from "./api";
 import { applyState } from "./edit";
 import {
   type Measure, type MeasureKind, type PageScale, type Pt, type Quantity, type Scale, type SnapHit, type Snaps, UNSCALED,
-  allowSnap, calibrate, type Unit, validScale,
+  calibrate, type Unit, validScale,
 } from "./measureLogic";
 
 /**
@@ -22,8 +22,8 @@ export const measureApi = {
     invoke<{ state: EditState; xref: number; quantity: Quantity }>("measure_add", { doc, page, kind, points, scale, author }),
   rescale: (doc: number, page: number, xref: number, scale: Scale) =>
     invoke<{ state: EditState; xref: number; quantity: Quantity }>("measure_rescale", { doc, page, xref, scale }),
-  snap: (doc: number, page: number, x: number, y: number, radius: number) =>
-    invoke<SnapHit | null>("measure_snap", { doc, page, x, y, radius }),
+  snap: (doc: number, page: number, x: number, y: number, radius: number, kinds: Snaps) =>
+    invoke<SnapHit | null>("measure_snap", { doc, page, x, y, radius, kinds }),
   exportCsv: (doc: number, to: string) => invoke<string>("measure_export_csv", { doc, to }),
 };
 
@@ -90,7 +90,7 @@ interface MeasureStore {
   cancelCalib: (doc: number) => void;
   finishCalib: (doc: number, real: number, unit: Unit) => Promise<boolean>;
   exportCsv: (doc: number) => Promise<void>;
-  /** The engine's snap for a point, filtered by the switched-on kinds; null when none is on. */
+  /** The engine's snap for a point among the switched-on kinds; null when none is on. */
   snap: (doc: number, page: number, p: Pt, radius: number) => Promise<SnapHit | null>;
 }
 
@@ -123,7 +123,7 @@ export const useMeasure = create<MeasureStore>((set, get) => {
     setOpen: (open) => set(open ? { open, tool: "distance" } : { open, tool: "select" }),
     tool: "distance",
     setTool: (tool) => set({ tool }),
-    snaps: { endpoint: true, midpoint: true, line: true },
+    snaps: { endpoint: true, midpoint: true, intersection: true, line: true },
     toggleSnap: (k) => set((s) => ({ snaps: { ...s.snaps, [k]: !s.snaps[k] } })),
 
     docs: {},
@@ -209,9 +209,9 @@ export const useMeasure = create<MeasureStore>((set, get) => {
 
     snap: async (doc, page, p, radius) => {
       const on = get().snaps;
-      if (!on.endpoint && !on.midpoint && !on.line) return null;
+      if (!Object.values(on).some(Boolean)) return null;
       try {
-        return allowSnap(await measureApi.snap(doc, page, p[0], p[1], radius), on);
+        return await measureApi.snap(doc, page, p[0], p[1], radius, on);
       } catch {
         return null; // a page that cannot be read just has nothing to snap to
       }

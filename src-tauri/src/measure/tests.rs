@@ -471,6 +471,38 @@ fn curves_snap_by_end_points_midpoint_and_line() {
     assert_eq!(h.kind, SnapKind::Line);
 }
 
+#[test]
+fn a_crossing_snaps_and_a_kind_that_is_off_falls_back() {
+    // Two strokes crossing at user (200, 200) = display (200, 592), away from their middles and ends.
+    let content: &'static str = "0 0 0 RG 100 100 m 400 400 l S 100 300 m 250 150 l S";
+    let (eng, id, _) = open("snap-cross", &Spec { content, ..Default::default() });
+    let ask = |x: f32, y: f32, r: f32, on: SnapKinds| snap_at_kinds(&eng, &SnapCache::default(), id, 0, x, y, r, &on).unwrap();
+    let all = SnapKinds::default();
+
+    let h = ask(203.0, 590.0, 6.0, all).expect("the crossing");
+    assert_eq!(h.kind, SnapKind::Intersection);
+    assert!((h.x - 200.0).abs() < 1e-3 && (h.y - 592.0).abs() < 1e-3);
+    // The same pointer with crossings off is a point on a line; with every kind off, nothing.
+    let h = ask(203.0, 590.0, 6.0, SnapKinds { intersection: false, ..all }).expect("line");
+    assert_eq!(h.kind, SnapKind::Line);
+    assert_eq!(ask(203.0, 590.0, 6.0, SnapKinds { endpoint: false, midpoint: false, intersection: false, line: false }), None);
+    // Two lines that do not meet inside their lengths cross nowhere.
+    let (eng2, id2, _) = open("snap-nocross", &Spec { content: "0 0 0 RG 100 100 m 150 150 l S 100 300 m 250 150 l S", ..Default::default() });
+    let h = snap_at_kinds(&eng2, &SnapCache::default(), id2, 0, 200.0, 592.0, 6.0, &all).unwrap().expect("line");
+    assert_eq!(h.kind, SnapKind::Line);
+
+    // An end point and a midpoint that are off give way to the line under the pointer, not to nothing.
+    let (eng, id, _) = open("snap-off", &Spec { content: PATHS, ..Default::default() });
+    let ask = |x: f32, y: f32, on: SnapKinds| snap_at_kinds(&eng, &SnapCache::default(), id, 0, x, y, 6.0, &on).unwrap();
+    let h = ask(303.0, 692.0, SnapKinds { endpoint: false, ..all }).expect("line near the corner");
+    assert_eq!(h.kind, SnapKind::Line);
+    let h = ask(201.0, 692.0, SnapKinds { midpoint: false, ..all }).expect("line near the midpoint");
+    assert_eq!((h.kind, h.x, h.y), (SnapKind::Line, 201.0, 692.0));
+    // Ends off at a corner that is also near a midpoint gives the midpoint.
+    let h = ask(299.0, 645.0, SnapKinds { endpoint: false, ..all }).unwrap();
+    assert_eq!(h.kind, SnapKind::Midpoint);
+}
+
 // ---- the edit path -------------------------------------------------------------------------------------------
 
 #[test]

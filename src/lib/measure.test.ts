@@ -116,15 +116,19 @@ describe("measure store", () => {
     expect(useMeasure.getState().get(1).exported).toBe("C:\\out\\plan measurements.csv");
   });
 
-  it("snaps through the engine only when a kind is on, filtered by kind", async () => {
-    invoke.mockResolvedValue({ kind: "midpoint", x: 5, y: 6, distance: 1 });
-    const s = useMeasure.getState();
-    expect(await s.snap(1, 0, [5, 5], 8)).toMatchObject({ kind: "midpoint" });
-    s.toggleSnap("midpoint");
-    expect(await useMeasure.getState().snap(1, 0, [5, 5], 8)).toBeNull();
+  it("asks the engine with the kinds that are on, and not at all when none is", async () => {
+    invoke.mockResolvedValue({ kind: "line", x: 5, y: 6, distance: 1 });
+    expect(await useMeasure.getState().snap(1, 0, [5, 5], 8)).toMatchObject({ kind: "line" });
+    expect(calls("measure_snap")[0][1]).toEqual({
+      doc: 1, page: 0, x: 5, y: 5, radius: 8, kinds: { endpoint: true, midpoint: true, intersection: true, line: true },
+    });
+    useMeasure.getState().toggleSnap("midpoint");
+    await useMeasure.getState().snap(1, 0, [5, 5], 8);
+    expect(calls("measure_snap")[1][1].kinds).toMatchObject({ midpoint: false, line: true });
     invoke.mockClear();
-    useMeasure.getState().toggleSnap("endpoint");
-    useMeasure.getState().toggleSnap("line");
+    for (const k of ["endpoint", "midpoint", "intersection", "line"] as const) {
+      if (useMeasure.getState().snaps[k]) useMeasure.getState().toggleSnap(k);
+    }
     expect(await useMeasure.getState().snap(1, 0, [5, 5], 8)).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
   });

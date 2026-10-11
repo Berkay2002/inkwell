@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  type Measure, type Scale, UNSCALED, allowSnap, calibrate, constrain45, inUnit, numText, parseScale, parseUnit, pathLength,
+  type Measure, type Scale, UNSCALED, calibrate, constrain45, inUnit, numText, parseScale, parseUnit, pathLength,
   place, polygonArea, quantityOf, realPerPt, scaleLabel, totals, trimNum,
 } from "./measureLogic";
 
@@ -72,12 +72,6 @@ describe("placing a point", () => {
     const d = constrain45([10, 10], [50, 60]); // nearest ray is 45 degrees
     close(d[0] - 10, d[1] - 10);
     expect(constrain45([5, 5], [5, 5])).toEqual([5, 5]);
-  });
-  it("snaps only the kinds that are switched on", () => {
-    const hit = { kind: "midpoint" as const, x: 10, y: 20, distance: 2 };
-    expect(allowSnap(hit, { endpoint: true, midpoint: false, line: true })).toBeNull();
-    expect(allowSnap(hit, { endpoint: false, midpoint: true, line: false })).toBe(hit);
-    expect(allowSnap(null, { endpoint: true, midpoint: true, line: true })).toBeNull();
   });
   it("prefers closing a path, then the snap, and lets Shift beat both", () => {
     const hit = { kind: "endpoint" as const, x: 50, y: 50, distance: 1 };

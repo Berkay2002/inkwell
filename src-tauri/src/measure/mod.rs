@@ -20,7 +20,7 @@ mod tests;
 pub mod write;
 
 pub use calc::{Kind, Quantity, Scale, Unit};
-pub use snap::{SnapCache, SnapHit, SnapIndex, SnapKind};
+pub use snap::{SnapCache, SnapHit, SnapIndex, SnapKind, SnapKinds};
 pub use write::MeasureDto;
 
 type Result<T> = std::result::Result<T, EngineError>;
@@ -127,5 +127,11 @@ pub fn csv_of(items: &[MeasureDto]) -> String {
 
 /// The snap for one point, from the page's cached index.
 pub fn snap_at(eng: &Engine, cache: &SnapCache, doc: DocId, page: u32, x: f32, y: f32, radius: f32) -> Result<Option<SnapHit>> {
-    Ok(cache.index(eng, doc, page)?.snap(x, y, radius))
+    snap_at_kinds(eng, cache, doc, page, x, y, radius, &SnapKinds::default())
+}
+
+/// The snap for one point among the kinds that are on.
+#[allow(clippy::too_many_arguments)]
+pub fn snap_at_kinds(eng: &Engine, cache: &SnapCache, doc: DocId, page: u32, x: f32, y: f32, radius: f32, on: &SnapKinds) -> Result<Option<SnapHit>> {
+    Ok(cache.index(eng, doc, page)?.snap_with(x, y, radius, on))
 }

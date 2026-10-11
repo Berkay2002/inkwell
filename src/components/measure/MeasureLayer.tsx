@@ -18,7 +18,7 @@ const EMPTY: Measure[] = [];
 const ms = () => useMeasure.getState();
 /** Pointer reach of a snap, in screen px (the engine takes it in points: divided by the zoom). */
 const REACH = 9;
-const SNAP_NAME: Record<SnapKind | "close", string> = { endpoint: "End point", midpoint: "Midpoint", line: "On line", close: "Close" };
+const SNAP_NAME: Record<SnapKind | "close", string> = { endpoint: "End point", midpoint: "Midpoint", intersection: "Intersection", line: "On line", close: "Close" };
 type Hover = { at: Pt; snap: SnapKind | "close" | null };
 
 /** Measure mode's layer on one page: drawing capture, live label, snap marker, and the hit lines of what is measured. */
@@ -179,6 +179,8 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
             <g className={`ms-snap ${hover.snap}`} transform={`translate(${hover.at[0]} ${hover.at[1]})`}>
               {hover.snap === "midpoint" ? (
                 <polygon points={`0,${-sz * 1.3} ${sz * 1.2},${sz} ${-sz * 1.2},${sz}`} />
+              ) : hover.snap === "intersection" ? (
+                <path d={`M${-sz} ${-sz}L${sz} ${sz}M${sz} ${-sz}L${-sz} ${sz}`} />
               ) : hover.snap === "line" ? (
                 <path d={`M${-sz} 0H${sz}M0 ${-sz}V${sz}`} />
               ) : (

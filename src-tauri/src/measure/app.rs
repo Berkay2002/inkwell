@@ -1,6 +1,6 @@
 //! Tauri commands for measuring. The UI is the user; the assistant calls the functions in `super` with its turn.
 
-use super::{Kind, MeasureDto, PageScale, Quantity, Scale, SnapCache, SnapHit, add_one, csv_of, list_all, rescale, scale_get, scale_set, snap_at, value_of};
+use super::{Kind, MeasureDto, PageScale, Quantity, Scale, SnapCache, SnapHit, SnapKinds, add_one, csv_of, list_all, rescale, scale_get, scale_set, snap_at_kinds, value_of};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use crate::paths::Paths;
@@ -90,10 +90,21 @@ pub async fn measure_export_csv(window: Window, eng: Eng<'_>, reg: tauri::State<
     .await
 }
 
-/// The nearest end point, midpoint or line of the page's vector paths within `radius` points of `(x, y)` (page space).
+/// The nearest end point, midpoint, crossing or line of the page's vector paths within `radius` points of `(x, y)`
+/// (page space), among the `kinds` that are on (all of them when absent).
 #[tauri::command]
-pub async fn measure_snap(eng: Eng<'_>, cache: tauri::State<'_, std::sync::Arc<SnapCache>>, doc: DocId, page: u32, x: f32, y: f32, radius: f32) -> Result<Option<SnapHit>> {
+#[allow(clippy::too_many_arguments)]
+pub async fn measure_snap(
+    eng: Eng<'_>,
+    cache: tauri::State<'_, std::sync::Arc<SnapCache>>,
+    doc: DocId,
+    page: u32,
+    x: f32,
+    y: f32,
+    radius: f32,
+    kinds: Option<SnapKinds>,
+) -> Result<Option<SnapHit>> {
     let eng = eng.inner().clone();
     let cache = cache.inner().clone();
-    blocking(move || snap_at(&eng, &cache, doc, page, x, y, radius)).await
+    blocking(move || snap_at_kinds(&eng, &cache, doc, page, x, y, radius, &kinds.unwrap_or_default())).await
 }

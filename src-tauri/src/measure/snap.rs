@@ -3,9 +3,12 @@
 //! The paths come from running the page's contents (not its annotations, so a measurement does not snap to
 //! itself) through a MuPDF device. Everything is in page space, as the viewer shows the page.
 //!
-//! The rule: an end point (a corner or path end) or a midpoint of a segment within the radius wins, the nearer of the
-//! two (an end point on a tie); with none, the nearest point on any segment within the radius ("line"). Curves count
-//! by their end points, their t = 0.5 point as the midpoint, and twelve straight pieces for "line".
+//! The rule: an end point (a corner or path end), a midpoint of a segment or a crossing of two segments within the
+//! radius wins, the nearest of them (an end point, then a crossing, then a midpoint on a tie); with none, the nearest
+//! point on any segment within the radius ("line"). Curves count by their end points, their t = 0.5 point as the
+//! midpoint, and twelve straight pieces for "line". Kinds can be switched off ([`SnapKinds`]); a kind that is off is
+//! never an answer, so the next one takes its place (with midpoints off, a point on a line still snaps to the line).
+//! Crossings are looked for among the 64 segments nearest the pointer, so a dense drawing costs a bounded amount.
 //!
 //! A page is read once per revision ([`SnapCache`]; concurrent first requests share one read) and never without
 //! limits: at most [`MAX_SEGMENTS`] segments and [`TIME_LIMIT`] of reading, the second enforced by a watchdog thread that
@@ -20,7 +23,7 @@ use mupdf::pdf::PdfDocument;
 use mupdf::{ColorParams, Colorspace, StrokeState};
 use mupdf::{Cookie, Device, Matrix, NativeDevice, Path, PathWalker};
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -40,8 +43,28 @@ type Result<T> = std::result::Result<T, EngineError>;
 pub enum SnapKind {
     Endpoint,
     Midpoint,
+    Intersection,
     Line,
 }
+
+/// Which kinds of snap are switched on; a field left out of the request is on.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SnapKinds {
+    pub endpoint: bool,
+    pub midpoint: bool,
+    pub intersection: bool,
+    pub line: bool,
+}
+
+impl Default for SnapKinds {
+    fn default() -> Self {
+        SnapKinds { endpoint: true, midpoint: true, intersection: true, line: true }
+    }
+}
+
+/// Segments looked at for crossings (the nearest to the pointer).
+const MAX_CROSSING_SEGMENTS: usize = 64;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -101,28 +124,75 @@ impl SnapIndex {
         Ok(index)
     }
 
-    /// The best snap within `radius` of `(x, y)`, or `None`.
+    /// The best snap within `radius` of `(x, y)` with every kind on, or `None`.
     pub fn snap(&self, x: f32, y: f32, radius: f32) -> Option<SnapHit> {
+        self.snap_with(x, y, radius, &SnapKinds::default())
+    }
+
+    /// The best snap within `radius` of `(x, y)` among the kinds that are on, or `None`.
+    pub fn snap_with(&self, x: f32, y: f32, radius: f32, on: &SnapKinds) -> Option<SnapHit> {
         let at = [f64::from(x), f64::from(y)];
         let r = f64::from(radius);
-        let nearest = |pts: &[P2]| pts.iter().map(|p| (dist(at, *p), *p)).filter(|(d, _)| *d <= r).min_by(|a, b| a.0.total_cmp(&b.0));
-        let hit = |kind, d: f64, p: P2| SnapHit { kind, x: p[0] as f32, y: p[1] as f32, distance: d as f32 };
-        match (nearest(&self.ends), nearest(&self.mids)) {
-            (Some((de, pe)), Some((dm, pm))) => return Some(if dm < de { hit(SnapKind::Midpoint, dm, pm) } else { hit(SnapKind::Endpoint, de, pe) }),
-            (Some((d, p)), None) => return Some(hit(SnapKind::Endpoint, d, p)),
-            (None, Some((d, p))) => return Some(hit(SnapKind::Midpoint, d, p)),
-            (None, None) => {}
+        // (distance, rank on a tie, kind, point): the smallest wins.
+        let mut best: Option<(f64, u8, SnapKind, P2)> = None;
+        let mut offer = |d: f64, rank: u8, kind: SnapKind, p: P2| {
+            if d <= r && best.is_none_or(|b| d < b.0 || (d == b.0 && rank < b.1)) {
+                best = Some((d, rank, kind, p));
+            }
+        };
+        if on.endpoint {
+            self.ends.iter().for_each(|&p| offer(dist(at, p), 0, SnapKind::Endpoint, p));
         }
-        self.segments
-            .iter()
-            .map(|&(a, b)| {
-                let q = closest(a, b, at);
-                (dist(at, q), q)
-            })
-            .filter(|(d, _)| *d <= r)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(d, p)| hit(SnapKind::Line, d, p))
+        if on.midpoint {
+            self.mids.iter().for_each(|&p| offer(dist(at, p), 2, SnapKind::Midpoint, p));
+        }
+        // The segments the pointer is within reach of: both of two that cross at a point within reach are among them.
+        let mut near: Vec<(f64, P2, P2, P2)> = Vec::new();
+        if on.line || on.intersection {
+            near = self
+                .segments
+                .iter()
+                .filter_map(|&(a, b)| {
+                    let q = closest(a, b, at);
+                    let d = dist(at, q);
+                    (d <= r).then_some((d, q, a, b))
+                })
+                .collect();
+            near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        if on.intersection {
+            let few = &near[..near.len().min(MAX_CROSSING_SEGMENTS)];
+            for (i, s) in few.iter().enumerate() {
+                for t in &few[i + 1..] {
+                    if let Some(p) = crossing(s.2, s.3, t.2, t.3) {
+                        offer(dist(at, p), 1, SnapKind::Intersection, p);
+                    }
+                }
+            }
+        }
+        if best.is_none() && on.line {
+            if let Some(&(d, q, _, _)) = near.first() {
+                best = Some((d, 3, SnapKind::Line, q));
+            }
+        }
+        best.map(|(d, _, kind, p)| SnapHit { kind, x: p[0] as f32, y: p[1] as f32, distance: d as f32 })
     }
+}
+
+/// Where the segments `a`-`b` and `c`-`d` cross strictly inside both (parallel and collinear ones never, and a shared or
+/// touching end point is an end point, not a crossing: neighbours along a path or a curve would all be one).
+fn crossing(a: P2, b: P2, c: P2, d: P2) -> Option<P2> {
+    let (r, s) = ([b[0] - a[0], b[1] - a[1]], [d[0] - c[0], d[1] - c[1]]);
+    let den = r[0] * s[1] - r[1] * s[0];
+    if den.abs() < 1e-9 {
+        return None;
+    }
+    let q = [c[0] - a[0], c[1] - a[1]];
+    let t = (q[0] * s[1] - q[1] * s[0]) / den;
+    let u = (q[0] * r[1] - q[1] * r[0]) / den;
+    const E: f64 = 1e-9;
+    let inside = |v: f64| v > E && v < 1.0 - E;
+    (inside(t) && inside(u)).then(|| [a[0] + t * r[0], a[1] + t * r[1]])
 }
 
 /// The point of the segment `a`-`b` nearest to `p`.

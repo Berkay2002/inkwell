@@ -40,7 +40,7 @@ export interface PageScale {
   label: string;
 }
 
-export type SnapKind = "endpoint" | "midpoint" | "line";
+export type SnapKind = "endpoint" | "midpoint" | "intersection" | "line";
 export interface SnapHit {
   kind: SnapKind;
   x: number;
@@ -51,6 +51,7 @@ export interface SnapHit {
 export interface Snaps {
   endpoint: boolean;
   midpoint: boolean;
+  intersection: boolean;
   line: boolean;
 }
 
@@ -164,9 +165,6 @@ export function constrain45(from: Pt, to: Pt): Pt {
   const a = (Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * Math.PI) / 4;
   return [from[0] + r * Math.cos(a), from[1] + r * Math.sin(a)];
 }
-
-/** The engine's hit when its kind is switched on, else null. */
-export const allowSnap = (hit: SnapHit | null, on: Snaps): SnapHit | null => (hit && on[hit.kind] ? hit : null);
 
 /**
  * Where a point lands: the first point of a path being closed when within `radius`, else the engine's snap `hit`
