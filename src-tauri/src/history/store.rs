@@ -170,6 +170,14 @@ fn is_temp(p: &Path) -> bool {
 }
 
 /// Best effort: NTFS journals renames, but ask for the directory to be flushed anyway.
+#[cfg(not(windows))]
+fn sync_dir(dir: &Path) {
+    if let Ok(f) = File::open(dir) {
+        let _ = f.sync_all();
+    }
+}
+
+#[cfg(windows)]
 fn sync_dir(dir: &Path) {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
@@ -246,6 +254,14 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>> {
     }
 }
 
+/// Non-Windows builds (engine tests on macOS/Linux): no share-mode lock.
+#[cfg(not(windows))]
+fn lock_root(root: &Path) -> Result<File> {
+    fs::create_dir_all(root)?;
+    Ok(OpenOptions::new().read(true).write(true).create(true).truncate(false).open(root.join("lock"))?)
+}
+
+#[cfg(windows)]
 fn lock_root(root: &Path) -> Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     fs::create_dir_all(root)?;
@@ -777,7 +793,6 @@ impl Store {
 
     /// Writes `v` to `dest` atomically. Refuses to replace an existing file unless `overwrite`.
     pub fn save_copy(&self, doc: DocId, v: VersionId, dest: &Path, overwrite: bool) -> Result<()> {
-        use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW};
         let bytes = self.read(doc, v)?;
         let dir = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
         let tmp = dir.join(format!(".{}.tmp-{}", dest.file_name().unwrap_or_default().to_string_lossy(), hex8()));
@@ -786,6 +801,16 @@ impl Store {
             f.write_all(&bytes)?;
             f.sync_all()?;
             drop(f);
+            #[cfg(not(windows))]
+            {
+                if !overwrite && dest.exists() {
+                    return Err(HistoryError::Exists);
+                }
+                fs::rename(&tmp, dest)?;
+            }
+            #[cfg(windows)]
+            {
+            use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW};
             let wide = |p: &Path| {
                 use std::os::windows::ffi::OsStrExt;
                 p.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>()
@@ -795,6 +820,7 @@ impl Store {
             if unsafe { MoveFileExW(wide(&tmp).as_ptr(), wide(dest).as_ptr(), flags) } == 0 {
                 let e = std::io::Error::last_os_error();
                 return Err(if matches!(e.raw_os_error(), Some(80 | 183)) { HistoryError::Exists } else { e.into() });
+            }
             }
             Ok(())
         })();

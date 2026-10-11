@@ -15,6 +15,25 @@ pub mod layout;
 pub mod render;
 #[cfg(windows)]
 pub mod win;
+/// Non-Windows builds (engine tests on macOS/Linux): no printers.
+#[cfg(not(windows))]
+pub mod win {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Printer {
+        pub name: String,
+        pub is_default: bool,
+        pub to_file: bool,
+    }
+    #[derive(serde::Serialize)]
+    pub struct Capabilities;
+    pub fn printers() -> Vec<Printer> {
+        Vec::new()
+    }
+    pub fn capabilities(_printer: &str) -> Option<Capabilities> {
+        None
+    }
+}
 #[cfg(test)]
 mod tests;
 
