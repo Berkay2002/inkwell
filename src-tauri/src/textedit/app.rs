@@ -1,9 +1,9 @@
 //! Tauri commands for editing existing text. The UI is the user; the assistant calls the
 //! functions in `super` with its turn.
 
-use super::{BlockChange, NewTextBox, TextBlocks, TextEdited};
-use crate::engine::edit::EditState;
+use super::{BlockChange, FontInfo, NewTextBox, TextBlocks, TextEdited};
 use crate::engine::edit::EditSource;
+use crate::engine::edit::EditState;
 use crate::engine::{DocId, Engine, EngineError};
 
 type Result<T> = std::result::Result<T, EngineError>;
@@ -32,4 +32,11 @@ pub async fn text_edit(eng: Eng<'_>, doc: DocId, rev: u32, page: u32, index: u32
 pub async fn text_add(eng: Eng<'_>, doc: DocId, rev: u32, page: u32, new: NewTextBox) -> Result<EditState> {
     let eng = eng.inner().clone();
     blocking(move || super::add(&eng, doc, rev, page, &new, EditSource::User)).await
+}
+
+/// The fonts to offer for text: the document's, the standard 14 and the bundled faces.
+#[tauri::command]
+pub async fn text_fonts(eng: Eng<'_>, doc: DocId) -> Result<Vec<FontInfo>> {
+    let eng = eng.inner().clone();
+    blocking(move || super::fonts(&eng, doc)).await
 }

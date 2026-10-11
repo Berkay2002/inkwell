@@ -6,8 +6,8 @@ Sources: pdfcraft ROADMAP.md (area breadth/ready %), acrobat-features.toml ids, 
 |---|---|---|---|
 | Viewer | B 62.5/55; pages drawn by vendored hayro | Viewer.tsx, TileCanvas.tsx; search, outline, page_text commands (lib.rs); dark pages: toolbar toggle, Off/On/Follow app theme, photos stay natural (docs/page-dark.md) | Renderer decision |
 | Find | view.find shipped; advanced search partial | search, cancel_search commands; no options UI found | Find options, results panel |
-| Organize | D 61.2/70; organize.* shipped | Organize.tsx; extract_pages, split_document; graft keeps links and widgets (docs/insert-links-widgets.md) | Transitions, portfolios |
-| Combine/split | organize.combine-files, split-* shipped; combine-options partial | merge_files, split_document commands | Combine options |
+| Organize | D 61.2/70; organize.* shipped | Organize.tsx; extract_pages, split_document; graft keeps links and widgets (docs/insert-links-widgets.md); page labels, page transitions and full screen (docs/organize-plus.md) | Portfolios |
+| Combine/split | organize.combine-files, split-* shipped; combine-options partial | Combine sheet (per-file ranges, reorder, bookmark per file, outlines kept, contents page, form fields renamed on clash, locked files left out); attachments panel; split_document command (docs/organize-plus.md) | Per-file password prompt |
 | Comments | E 77.7/70; every markup type, replies, stamps | No annotation creation found; annotations read-only in diff/snap.rs | Whole area |
 | Forms fill | F 78.5/65; every AcroForm type, JavaScript (boa) | Widgets copied on graft (engine/edit.rs:621); no set-value or appearance code found | Fill, JS, appearances |
 | Forms author | F; form.add-signature-field shipped | None found | Whole area |

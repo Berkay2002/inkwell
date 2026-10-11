@@ -339,7 +339,8 @@ fn same(a: [f32; 4], b: [f32; 4]) -> bool {
 #[test]
 fn runs_after_an_edited_run_keep_their_place() {
     let d = dir("mixed");
-    let content = "BT /F1 12 Tf 72 700 Td (Hello ) Tj /F2 12 Tf (bold) Tj /F1 12 Tf ( world) Tj ET";
+    // Three blocks in one text object (far enough apart on the line not to be one block).
+    let content = "BT /F1 12 Tf 72 700 Td (Hello) Tj 80 0 Td /F2 12 Tf (bold) Tj 80 0 Td /F1 12 Tf (world) Tj ET";
     let (eng, id, _) = open(&d, &pdf(content, &[("F1", HELV), ("F2", HELV_BOLD)], &[]));
     let (bold, world) = (rect_of(&eng, id, "bold"), rect_of(&eng, id, "world"));
     assert!(bold[0] > 100.0, "{bold:?}");
@@ -506,8 +507,28 @@ fn an_added_box_wraps_to_its_width_and_takes_other_scripts() {
     // Greek needs more than WinAnsi: the standard face is embedded.
     add_box(&eng, id, "Ευχαριστώ", [72.0, 500.0], None);
     assert!(text(&eng, id).contains("Ευχαριστώ"), "{}", text(&eng, id));
-    assert!(add(&eng, id, rev(&eng, id), 0, &NewTextBox { text: "  ".into(), size: 12.0, color: [0.0; 3], at: [0.0, 0.0], width: None }, EditSource::User).is_err());
-    assert!(add(&eng, id, rev(&eng, id) + 1, 0, &NewTextBox { text: "x".into(), size: 12.0, color: [0.0; 3], at: [0.0, 0.0], width: None }, EditSource::User).is_err());
+    assert!(
+        add(
+            &eng,
+            id,
+            rev(&eng, id),
+            0,
+            &NewTextBox { text: "  ".into(), size: 12.0, color: [0.0; 3], at: [0.0, 0.0], width: None },
+            EditSource::User
+        )
+        .is_err()
+    );
+    assert!(
+        add(
+            &eng,
+            id,
+            rev(&eng, id) + 1,
+            0,
+            &NewTextBox { text: "x".into(), size: 12.0, color: [0.0; 3], at: [0.0, 0.0], width: None },
+            EditSource::User
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -529,11 +550,411 @@ fn adding_text_again_does_not_nest_another_wrapper() {
 #[test]
 fn text_added_to_a_rotated_page_reads_upright() {
     let d = dir("add-rotated");
-    let bytes = String::from_utf8(pdf(TWO_BLOCKS, &[("F1", HELV)], &[])).unwrap().replace("/MediaBox [0 0 612 792]", "/MediaBox [0 0 612 792] /Rotate 90");
+    let bytes = String::from_utf8(pdf(TWO_BLOCKS, &[("F1", HELV)], &[]))
+        .unwrap()
+        .replace("/MediaBox [0 0 612 792]", "/MediaBox [0 0 612 792] /Rotate 90");
     let (eng, id, _) = open(&d, bytes.as_bytes());
     // The page as shown is 792 wide and 612 tall.
     add_box(&eng, id, "Rotated note", [200.0, 100.0], None);
     let b = blocks(&eng, id, 0).unwrap().blocks.into_iter().find(|b| b.text == "Rotated note").expect("listed");
     assert!(b.rect[2] - b.rect[0] > b.rect[3] - b.rect[1], "a horizontal line in page space: {:?}", b.rect);
     assert!((b.rect[0] - 200.0).abs() < 1.5 && (b.rect[1] - 100.0).abs() < 4.0, "{:?}", b.rect);
+}
+
+// ---- runs, bundled faces, font list, reflow ----------------------------------------------------
+
+fn reopen(path: &str) -> (Arc<Engine>, DocId) {
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(path).unwrap().doc;
+    (eng, id)
+}
+
+/// The operators of page 1's content in a saved file.
+fn saved_ops(path: &str) -> Vec<content::Op> {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    let c = doc.find_page(0).unwrap().get_dict("Contents").unwrap().unwrap();
+    let data: Vec<u8> = if c.is_array().unwrap() {
+        (0..c.len().unwrap() as i32)
+            .flat_map(|i| [c.get_array(i).unwrap().unwrap().read_stream().unwrap(), b"\n".to_vec()].concat())
+            .collect()
+    } else {
+        c.read_stream().unwrap()
+    };
+    content::parse(&data)
+}
+
+/// Every font in a saved file: (/BaseFont, font program length, /FontFile key).
+fn saved_fonts(path: &str) -> Vec<(String, usize, String)> {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    let mut out = Vec::new();
+    for i in 1..doc.count_objects().unwrap() as i32 {
+        let Ok(Some(o)) = doc.new_indirect(i, 0).unwrap().resolve() else { continue };
+        if !o.is_dict().unwrap_or(false)
+            || o.get_dict("Type").ok().flatten().and_then(|t| t.as_name().ok()).as_deref() != Some(b"FontDescriptor")
+        {
+            continue;
+        }
+        let name = String::from_utf8_lossy(&o.get_dict("FontName").unwrap().unwrap().as_name().unwrap()).into_owned();
+        for key in ["FontFile", "FontFile2", "FontFile3"] {
+            if let Some(f) = o.get_dict(key).unwrap() {
+                out.push((name.clone(), f.read_stream().unwrap().len(), key.to_string()));
+            }
+        }
+    }
+    out
+}
+
+const MIXED: &str = "BT /F1 12 Tf 72 700 Td [(W) 120 (orld) -40 (s)] TJ ( and ) Tj /F2 12 Tf (bold) Tj /F1 12 Tf ( words) Tj ET";
+
+fn run_change(text: Option<&str>, source: Option<usize>) -> RunChange {
+    RunChange { text: text.map(str::to_string), source, ..Default::default() }
+}
+
+#[test]
+fn a_block_holds_runs_and_keeps_kerning_of_unchanged_ones() {
+    let d = dir("runs");
+    let (eng, id, path) = open(&d, &pdf(MIXED, &[("F1", HELV), ("F2", HELV_BOLD)], &[]));
+    let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(b.text, "Worlds and bold words");
+    let runs: Vec<(&str, &str)> = b.runs.iter().map(|r| (r.text.as_str(), r.font.as_str())).collect();
+    assert_eq!(runs, [("Worlds and ", "Helvetica"), ("bold", "Helvetica-Bold"), (" words", "Helvetica")]);
+    // Only the bold run changes.
+    let change = BlockChange {
+        runs: Some(vec![run_change(None, Some(0)), run_change(Some("strong"), Some(1)), run_change(None, Some(2))]),
+        ..Default::default()
+    };
+    let r = edit(&eng, id, rev(&eng, id), 0, 0, &change, EditSource::User).unwrap();
+    assert!(r.fallback.is_none(), "{:?}", r.fallbacks);
+    assert_eq!(r.state.undo.as_deref(), Some("Edit text on p. 1"));
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert_eq!(text(&eng, id), "Worlds and strong words");
+    let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    let runs: Vec<(&str, &str)> = b.runs.iter().map(|r| (r.text.as_str(), r.font.as_str())).collect();
+    assert_eq!(runs, [("Worlds and ", "Helvetica"), ("strong", "Helvetica-Bold"), (" words", "Helvetica")]);
+    // The unchanged run's kerning is in the saved bytes: TJ [(W) 120 (orld) -40 (s …)].
+    let ops = saved_ops(&path);
+    let kerned = ops.iter().any(|o| {
+        o.is("TJ") && matches!(o.operands.first(), Some(content::Obj::Array(a)) if a.contains(&content::Obj::Int(120)) && a.contains(&content::Obj::Int(-40)))
+    });
+    assert!(kerned, "{:?}", ops.iter().filter(|o| o.is("TJ")).collect::<Vec<_>>());
+}
+
+#[test]
+fn runs_take_their_own_size_colour_and_font() {
+    let d = dir("run-styles");
+    let (eng, id, path) = open(&d, &pdf(MIXED, &[("F1", HELV), ("F2", HELV_BOLD)], &[]));
+    let fonts = fonts(&eng, id).unwrap();
+    let mono = fonts.iter().find(|f| f.id == "bundled:NotoSansMono-Regular").expect("the bundled mono face is offered");
+    let bold_doc = fonts.iter().find(|f| f.kind == "document" && f.name == "Helvetica-Bold").expect("the document's bold font is offered");
+    let runs = vec![
+        RunChange { text: Some("Big ".into()), source: Some(0), size: Some(18.0), color: Some([1.0, 0.0, 0.0]), ..Default::default() },
+        RunChange { text: Some("plain ".into()), source: Some(0), font: Some(bold_doc.id.clone()), ..Default::default() },
+        RunChange { text: Some("code".into()), source: Some(0), font: Some(mono.id.clone()), ..Default::default() },
+        RunChange { text: Some(" italic".into()), source: Some(0), italic: Some(true), ..Default::default() },
+    ];
+    let r = edit(&eng, id, rev(&eng, id), 0, 0, &BlockChange { runs: Some(runs), ..Default::default() }, EditSource::User).unwrap();
+    // Italic Helvetica is not in the document: the standard face, reported.
+    assert!(r.fallbacks.iter().any(|f| f.font == "Helvetica-Oblique"), "{:?}", r.fallbacks);
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert_eq!(text(&eng, id), "Big plain code italic");
+    let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    let got: Vec<(String, f32, [f32; 3], bool, bool)> =
+        b.runs.iter().map(|r| (r.font.clone(), r.size.round(), r.color, r.bold, r.italic)).collect();
+    assert_eq!(got[0], ("Helvetica".to_string(), 18.0, [1.0, 0.0, 0.0], false, false));
+    assert_eq!((got[1].0.as_str(), got[1].3), ("Helvetica-Bold", true));
+    assert!(got[2].0.ends_with("+NotoSansMono-Regular"), "{got:?}");
+    assert_eq!((got[3].0.as_str(), got[3].4), ("Helvetica-Oblique", true));
+    // The embedded mono subset holds four glyphs and .notdef: a few kilobytes.
+    let mono = saved_fonts(&path).into_iter().find(|f| f.0.ends_with("NotoSansMono-Regular")).expect("embedded");
+    assert!(mono.1 < 8 << 10 && mono.2 == "FontFile2", "{mono:?}");
+}
+
+#[test]
+fn cjk_and_greek_text_is_set_in_bundled_subsets() {
+    let d = dir("cjk");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let r = set_text(&eng, id, 0, "你好，世界。안녕하세요 Ωμέγα");
+    let fonts: Vec<(&str, bool)> = r.fallbacks.iter().map(|f| (f.font.as_str(), f.embedded)).collect();
+    assert!(fonts.contains(&("NotoSans-Regular", true)) && fonts.contains(&("NotoSansCJKsc-Regular", true)), "{fonts:?}");
+    // Bold CJK is drawn by stroking the outlines (the bundled CJK face has one weight).
+    let runs = vec![RunChange { text: Some("太字".into()), source: Some(0), bold: Some(true), ..Default::default() }];
+    edit(&eng, id, rev(&eng, id), 0, 1, &BlockChange { runs: Some(runs), ..Default::default() }, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let t = text(&eng, id);
+    assert!(t.starts_with("你好，世界。안녕하세요 Ωμέγα"), "{t}");
+    assert!(t.contains("太字"), "{t}");
+    let embedded = saved_fonts(&path);
+    let cjk: Vec<_> = embedded.iter().filter(|f| f.0.ends_with("+NotoSansCJKsc-Regular")).collect();
+    let latin = embedded.iter().find(|f| f.0.ends_with("+NotoSans-Regular")).expect("Noto Sans subset");
+    assert!(!cjk.is_empty() && cjk.iter().all(|f| f.2 == "FontFile3" && f.1 < 24 << 10), "{cjk:?}");
+    assert!(latin.2 == "FontFile2" && latin.1 < 12 << 10, "{latin:?}");
+    assert!(saved_ops(&path).iter().any(|o| o.is("Tr") && o.num(0) == Some(2.0)), "synthetic bold");
+    // The new blocks can be edited again (their embedded subsets read back).
+    let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert!(b.editable, "{b:?}");
+}
+
+#[test]
+fn an_added_box_takes_cjk_text() {
+    let d = dir("add-cjk");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    add_box(&eng, id, "受付番号 1234", [72.0, 500.0], None);
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert!(text(&eng, id).contains("受付番号 1234"), "{}", text(&eng, id));
+}
+
+#[test]
+fn the_font_list_offers_document_standard_and_bundled_faces() {
+    let d = dir("font-list");
+    let (eng, id, _) = open(&d, &pdf(MIXED, &[("F1", HELV), ("F2", HELV_BOLD)], &[]));
+    let list = fonts(&eng, id).unwrap();
+    let doc: Vec<&str> = list.iter().filter(|f| f.kind == "document").map(|f| f.name.as_str()).collect();
+    assert_eq!(doc, ["Helvetica", "Helvetica-Bold"]);
+    assert!(list.iter().filter(|f| f.kind == "document").all(|f| f.id.starts_with("doc:") && f.usable && f.pages == [0]));
+    assert_eq!(list.iter().filter(|f| f.kind == "standard").count(), 12);
+    let bundled: Vec<&str> = list.iter().filter(|f| f.kind == "bundled").map(|f| f.id.as_str()).collect();
+    assert_eq!(bundled.len(), 7);
+    assert!(bundled.contains(&"bundled:NotoSansCJK-Regular"));
+    // Every bundled id is accepted by a rewrite.
+    let runs =
+        vec![RunChange { text: Some("x".into()), source: Some(0), font: Some("bundled:NotoSans-BoldItalic".into()), ..Default::default() }];
+    assert!(edit(&eng, id, rev(&eng, id), 0, 0, &BlockChange { runs: Some(runs), ..Default::default() }, EditSource::User).is_ok());
+    let bad = vec![RunChange { text: Some("x".into()), font: Some("bundled:Nope".into()), ..Default::default() }];
+    assert!(edit(&eng, id, rev(&eng, id), 0, 0, &BlockChange { runs: Some(bad), ..Default::default() }, EditSource::User).is_err());
+}
+
+#[test]
+fn justified_paragraphs_rewrap_and_stay_justified() {
+    let d = dir("justify");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let long = "Justified text spreads the free width of every line but the last over its spaces, so both edges line up.";
+    let change = BlockChange { text: Some(long.into()), align: Some(Align::Justify), width: Some(160.0), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 1, &change, EditSource::User).unwrap();
+    let check = |b: &TextBlockDto| {
+        assert_eq!(b.align, Align::Justify, "{b:?}");
+        let n = b.lines.len();
+        assert!(n >= 4, "{n} lines");
+        let right = b.lines[0][2];
+        assert!(b.lines[..n - 1].iter().all(|l| (l[2] - right).abs() < 0.6 && (l[0] - b.lines[0][0]).abs() < 0.01), "{:?}", b.lines);
+        assert!(b.lines[n - 1][2] < right - 5.0, "the last line is not stretched");
+    };
+    let b = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    check(&b);
+    // Another text change keeps the justification and the width, and re-wraps.
+    let longer = format!("{long} A second sentence makes the paragraph longer still.");
+    set_text(&eng, id, 1, &longer);
+    let b2 = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    check(&b2);
+    assert!(b2.lines.len() > b.lines.len());
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let b3 = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    check(&b3);
+    let t = text(&eng, id);
+    assert!(t.replace(' ', "").contains(&longer.replace(' ', "")), "{t}");
+}
+
+/// The names in page 1's /Font dict of a saved file.
+fn saved_font_names(path: &str) -> Vec<String> {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    let fonts = doc.find_page(0).unwrap().get_dict_inheritable("Resources").unwrap().unwrap().get_dict("Font").unwrap().unwrap();
+    (0..fonts.dict_len().unwrap() as i32)
+        .map(|i| String::from_utf8_lossy(&fonts.get_dict_key(i).unwrap().unwrap().as_name().unwrap()).into_owned())
+        .collect()
+}
+
+#[test]
+fn word_spacing_of_the_source_is_not_counted_twice() {
+    let d = dir("tw");
+    // Two lines justified with Tw: both 100 pt wide (each 64.704 pt of glyphs and two spaces).
+    let content = "BT /F1 12 Tf 17.648 Tw 14 TL 72 700 Td (aaa bbb ccc) Tj T* (ccc bbb aaa) Tj ET";
+    let (eng, id, path) = open(&d, &pdf(content, &[("F1", HELV)], &[]));
+    let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(b.align, Align::Justify, "{b:?}");
+    assert!(b.lines.iter().all(|l| (l[2] - l[0] - 100.0).abs() < 0.1), "{:?}", b.lines);
+    // A colour change re-sets the kept runs with Tw 0: the free width goes back over the spaces.
+    let ch = BlockChange { color: Some([0.0, 0.0, 1.0]), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &ch, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert_eq!(text(&eng, id), "aaa bbb ccc ccc bbb aaa");
+    let a = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    // Without Tw the first line takes four words, spread to the full 100 pt.
+    assert_eq!(a.lines.len(), 2, "{:?}", a.lines);
+    assert!((a.lines[0][0] - 72.0).abs() < 0.1 && (a.lines[0][2] - 172.0).abs() < 0.6, "{:?}", a.lines);
+    // Right-aligned, the lines end at the box's right edge.
+    let ch = BlockChange { align: Some(Align::Right), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &ch, EditSource::User).unwrap();
+    let r = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert!(r.lines.iter().all(|l| (l[2] - 172.0).abs() < 0.6), "{:?}", r.lines);
+}
+
+#[test]
+fn a_gap_read_as_a_space_keeps_its_width() {
+    let d = dir("gap");
+    let content = "BT /F1 12 Tf 72 700 Td [(Hello) -600 (world)] TJ ET";
+    let (eng, id, path) = open(&d, &pdf(content, &[("F1", HELV)], &[]));
+    let before = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(before.text, "Hello world");
+    let ch = BlockChange { color: Some([1.0, 0.0, 0.0]), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &ch, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let after = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(after.text, "Hello world");
+    assert!((after.rect[2] - before.rect[2]).abs() < 0.01, "{:?} -> {:?}", before.rect, after.rect);
+    // Still a gap, not Helvetica's space: -250 for the space and -350 left of it.
+    let shows =
+        |o: &content::Op| matches!(o.operands.first(), Some(content::Obj::Array(a)) if a.iter().any(|x| matches!(x, content::Obj::Str(_))));
+    let tj: Vec<_> = saved_ops(&path).into_iter().filter(|o| o.is("TJ") && shows(o)).collect();
+    let nums: f64 = tj
+        .iter()
+        .flat_map(|o| match o.operands.first() {
+            Some(content::Obj::Array(a)) => a.iter().filter_map(content::Obj::as_f64).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .sum();
+    assert!((nums + 600.0).abs() < 0.01, "{tj:?}");
+}
+
+#[test]
+fn cjk_only_text_falls_back_to_the_cjk_face_alone() {
+    let d = dir("cjk-only");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let r = set_text(&eng, id, 0, "你好 世界");
+    let fonts: Vec<&str> = r.fallbacks.iter().map(|f| f.font.as_str()).collect();
+    assert_eq!(fonts, ["NotoSansCJKsc-Regular"]);
+    assert!(r.fallbacks[0].reason.contains("Helvetica"), "{:?}", r.fallbacks);
+    eng.save(id, None).unwrap();
+    let embedded = saved_fonts(&path);
+    assert!(embedded.iter().all(|f| !f.0.contains("+NotoSans-")), "no empty Noto Sans subset: {embedded:?}");
+    assert_eq!(embedded.len(), 1, "{embedded:?}");
+}
+
+#[test]
+fn edits_again_leave_no_unused_fonts_behind() {
+    let d = dir("no-orphan-fonts");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    for t in ["你好", "世界 Ωμέγα", "再见"] {
+        set_text(&eng, id, 0, t);
+    }
+    // Italic Helvetica is not on the page: a standard face, added once and reused.
+    for t in ["one", "two"] {
+        let runs = vec![RunChange { text: Some(t.into()), source: Some(0), italic: Some(true), ..Default::default() }];
+        edit(&eng, id, rev(&eng, id), 0, 1, &BlockChange { runs: Some(runs), ..Default::default() }, EditSource::User).unwrap();
+    }
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let mut names = saved_font_names(&path);
+    names.sort();
+    assert_eq!(names, ["F1", "IwEd0", "IwNoto0"], "only what the content sets");
+    let embedded = saved_fonts(&path);
+    assert_eq!(embedded.len(), 1, "one CJK subset, the last one: {embedded:?}");
+    let (eng, id) = reopen(&path);
+    assert_eq!(text(&eng, id), "再见 two");
+}
+
+#[test]
+fn characters_sharing_a_glyph_keep_their_own_text() {
+    let d = dir("shared-glyph");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    // U+301C WAVE DASH and U+FF5E FULLWIDTH TILDE are one glyph in the CJK face; U+03A9 and
+    // U+2126 (ohm) one in Noto Sans.
+    set_text(&eng, id, 0, "〜～ ΩΩ");
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert!(text(&eng, id).starts_with("〜～ ΩΩ"), "{}", text(&eng, id));
+    assert_eq!(blocks(&eng, id, 0).unwrap().blocks[0].text, "〜～ ΩΩ");
+}
+
+#[test]
+fn korean_without_spaces_wraps_between_syllables() {
+    let d = dir("hangul");
+    let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let ko = "대한민국의수도는서울특별시입니다그리고부산은항구도시입니다";
+    let ch = BlockChange { text: Some(ko.into()), width: Some(120.0), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 1, &ch, EditSource::User).unwrap();
+    let b = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    assert!(b.lines.len() >= 3, "{:?}", b.lines);
+    assert!(b.lines.iter().all(|l| l[2] - l[0] <= 120.5), "{:?}", b.lines);
+    assert_eq!(b.text.replace(' ', ""), ko);
+}
+
+#[test]
+fn a_line_under_larger_text_clears_it() {
+    let d = dir("big-run");
+    let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let runs = vec![
+        RunChange { text: Some("small ".into()), source: Some(0), size: Some(12.0), ..Default::default() },
+        RunChange { text: Some("BIG\n".into()), source: Some(0), size: Some(48.0), ..Default::default() },
+        RunChange { text: Some("body text".into()), source: Some(0), size: Some(12.0), ..Default::default() },
+    ];
+    edit(&eng, id, rev(&eng, id), 0, 0, &BlockChange { runs: Some(runs), ..Default::default() }, EditSource::User).unwrap();
+    let lines = eng.page_text(id, 0).unwrap();
+    let big = lines.iter().find(|l| l.t.contains("BIG")).unwrap_or_else(|| panic!("{lines:?}"));
+    let body = lines.iter().find(|l| l.t.contains("body")).unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(body.b[1] >= big.b[3] - 0.5, "the body line overlaps the big text: {big:?} {body:?}");
+}
+
+#[test]
+fn a_moved_block_stays_put_when_edited_again() {
+    let d = dir("move-then-edit");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let ch = BlockChange { offset: Some([50.0, 100.0]), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 1, &ch, EditSource::User).unwrap();
+    let moved = rect_of(&eng, id, "The first line of the body and its second line.");
+    set_text(&eng, id, index_of(&eng, id, "The first line of the body and its second line."), "Edited after the move");
+    let r = rect_of(&eng, id, "Edited after the move");
+    assert!((r[0] - moved[0]).abs() < 0.5 && (r[1] - moved[1]).abs() < 0.5, "{moved:?} -> {r:?}");
+    // And again, with a colour change, then through save and reopen.
+    let ch = BlockChange { color: Some([0.0, 0.5, 0.0]), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, index_of(&eng, id, "Edited after the move"), &ch, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let r = rect_of(&eng, id, "Edited after the move");
+    assert!((r[0] - moved[0]).abs() < 0.5 && (r[1] - moved[1]).abs() < 0.5, "{moved:?} -> {r:?}");
+}
+
+#[test]
+fn an_added_box_stays_put_when_edited() {
+    let d = dir("add-then-edit");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    add_box(&eng, id, "Added note", [300.0, 400.0], None);
+    let added = rect_of(&eng, id, "Added note");
+    assert!((added[0] - 300.0).abs() < 1.0 && (added[1] - 400.0).abs() < 4.0, "{added:?}");
+    set_text(&eng, id, index_of(&eng, id, "Added note"), "Added note, edited");
+    let r = rect_of(&eng, id, "Added note, edited");
+    assert!((r[0] - added[0]).abs() < 0.5 && (r[1] - added[1]).abs() < 0.5, "{added:?} -> {r:?}");
+    set_text(&eng, id, index_of(&eng, id, "Added note, edited"), "Edited twice");
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let r = rect_of(&eng, id, "Edited twice");
+    assert!((r[0] - added[0]).abs() < 0.5 && (r[1] - added[1]).abs() < 0.5, "{added:?} -> {r:?}");
+    // The q/Q nesting does not grow with each edit.
+    let ops = saved_ops(&path);
+    let mut depth: i32 = 0;
+    let mut max = 0;
+    for o in &ops {
+        if o.is("q") {
+            depth += 1;
+            max = max.max(depth);
+        } else if o.is("Q") {
+            depth -= 1;
+        }
+    }
+    assert!(max <= 3, "q depth {max}");
 }

@@ -11,6 +11,7 @@ pub mod history_ipc;
 pub mod imageedit;
 pub mod marks;
 pub mod ocr;
+pub mod organize;
 pub mod paths;
 pub mod print;
 pub mod protect;
@@ -120,6 +121,12 @@ async fn pick_save(
     };
     blocking(move || {
         let name = std::path::Path::new(&name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // Automation (debug builds only, like INKWELL_PRINT_DIR): every save dialog answers `<dir>/<file name>`.
+        #[cfg(debug_assertions)]
+        if let Some(dir) = std::env::var_os("INKWELL_SAVE_DIR").filter(|d| !d.is_empty()).filter(|_| !name.is_empty()) {
+            let p = std::path::Path::new(&dir).join(&name);
+            return Ok(Some(window.state::<Paths>().issue_save(window.label(), p.to_string_lossy().into_owned())));
+        }
         let d = window.dialog().file().set_parent(&window).set_file_name(name);
         let mut d = match kind.unwrap_or_default() {
             SaveKind::Pdf => d.add_filter("PDF documents", PDF),
@@ -842,9 +849,24 @@ pub fn run() {
             forms::app::forms_tab_order,
             forms::app::forms_arrange,
             forms::app::forms_detect,
+            organize::app::combine_inspect,
+            organize::app::combine_run,
+            organize::app::pick_attachments,
+            organize::app::attachments_list,
+            organize::app::attachments_add,
+            organize::app::attachment_save,
+            organize::app::attachment_open,
+            organize::app::attachments_remove,
+            organize::app::attachment_describe,
+            organize::app::labels_list,
+            organize::app::labels_set,
+            organize::app::labels_remove,
+            organize::app::transitions_list,
+            organize::app::transitions_set,
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
+            textedit::app::text_fonts,
             imageedit::app::image_blocks,
             imageedit::app::image_edit,
             redact::app::redact_find,

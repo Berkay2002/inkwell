@@ -9,7 +9,7 @@ import { useRecents } from "./recents";
 
 export type ZoomMode = "fitWidth" | "fitPage" | "custom";
 export type Theme = "system" | "light" | "dark";
-export type SidebarPanel = "none" | "thumbs" | "outline";
+export type SidebarPanel = "none" | "thumbs" | "outline" | "attachments";
 export type Rect4 = [number, number, number, number];
 
 export interface Hit {
@@ -59,6 +59,8 @@ export interface DocState {
   /** Where the viewer was when the tab was last left. */
   scroll: { page: number; yPt: number };
   outline: OutlineItem[] | null;
+  /** One page label per page ("iii", "A-2") when the document has page labels, else empty. */
+  labels: string[];
   search: SearchState;
   nav: NavRequest | null;
 }
@@ -106,6 +108,8 @@ interface Store {
   runSearch: (id: number, query: string) => void;
   stepHit: (id: number, dir: 1 | -1) => void;
   loadOutline: (id: number) => void;
+  /** Reads the page labels again (after an edit: one is shown in the page box and under every thumbnail). */
+  loadLabels: (id: number) => void;
 }
 
 let navNonce = 0;
@@ -135,6 +139,7 @@ export const useStore = create<Store>((set, get) => {
       organize: false,
       scroll: { page: 0, yPt: 0 },
       outline: null,
+      labels: [],
       search: emptySearch(),
       nav: null,
     };
@@ -391,7 +396,23 @@ export const useStore = create<Store>((set, get) => {
         .then((o) => get().patch(id, { outline: o }))
         .catch(() => get().patch(id, { outline: [] }));
     },
+
+    loadLabels: (id) => {
+      const rev = get().docs[id]?.rev;
+      if (rev == null) return;
+      api
+        .labelsList(id)
+        .then((d) => {
+          const cur = get().docs[id];
+          // a later edit asks again; this answer is for a generation that is gone
+          if (cur && cur.rev === rev) get().patch(id, { labels: d.labels });
+        })
+        .catch(() => {});
+    },
   };
 });
+
+/** What page `i` (0-based) is called: its page label, or its number when the document has none. */
+export const pageLabel = (d: Pick<DocState, "labels">, i: number) => d.labels[i] ?? String(i + 1);
 
 export const useActiveDoc = () => useStore((s) => (s.active != null ? s.docs[s.active] : undefined));
