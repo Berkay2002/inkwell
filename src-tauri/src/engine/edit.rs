@@ -474,12 +474,15 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
             }
             // MuPDF shifts page label sections on its own: read them first, then write the rule
             // of organize::labels over what it did.
-            let labels = crate::organize::labels::read(doc).unwrap_or_default();
+            // (A rule that could not be read is left as MuPDF shifted it, not written over as empty.)
+            let labels = crate::organize::labels::read(doc).ok();
             for &p in pages.iter().rev() {
                 doc.delete_page(p as i32)?;
             }
             // Page labels follow the pages left (a failure here never undoes the delete).
-            let _ = crate::organize::labels::after_delete(doc, &labels, &pages, n as u32);
+            if let Some(labels) = &labels {
+                let _ = crate::organize::labels::after_delete(doc, labels, &pages, n as u32);
+            }
             let out = (0..n as u32).filter(|p| pages.binary_search(p).is_err()).map(|p| sizes[p as usize]).collect();
             Ok(Some((out, true)))
         }
@@ -500,7 +503,7 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
             let objs = pages.iter().map(|&p| doc.find_page(p as i32)).collect::<std::result::Result<Vec<_>, _>>()?;
             // Page label sections stay where they are when pages move; MuPDF shifts them with every
             // delete and insert below, so they are put back after.
-            let labels = crate::organize::labels::read(doc).unwrap_or_default();
+            let labels = crate::organize::labels::read(doc).ok();
             for &p in pages.iter().rev() {
                 doc.delete_page(p as i32)?;
             }
@@ -508,7 +511,9 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
             for (i, obj) in objs.iter().enumerate() {
                 doc.insert_page(at + i as i32, obj)?;
             }
-            let _ = crate::organize::labels::restore(doc, &labels);
+            if let Some(labels) = &labels {
+                let _ = crate::organize::labels::restore(doc, labels);
+            }
             Ok(Some((order.iter().map(|&p| sizes[p as usize]).collect(), false)))
         }
         EditOp::InsertBlank { at, like } => {
@@ -523,13 +528,15 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
             let mb = reference.media_box()?;
             let boxed = reference.object().get_dict_inheritable("MediaBox")?;
             drop(reference);
-            let labels = crate::organize::labels::read(doc).unwrap_or_default();
+            let labels = crate::organize::labels::read(doc).ok();
             let page = doc.new_page_at(*at as i32, Size { width: mb.width(), height: mb.height() })?;
             if let Some(b) = boxed {
                 page.object().dict_put("MediaBox", b.copy_array()?)?;
             }
             drop(page);
-            let _ = crate::organize::labels::after_insert(doc, &labels, *at, 1);
+            if let Some(labels) = &labels {
+                let _ = crate::organize::labels::after_insert(doc, labels, *at, 1);
+            }
             let mut out = sizes.to_vec();
             out.insert(*at as usize, page_size(doc, *at)?);
             Ok(Some((out, false)))
@@ -544,9 +551,11 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
                 Some(p) => check_pages(p, count)?,
                 None => (0..count as u32).collect(),
             };
-            let labels = crate::organize::labels::read(doc).unwrap_or_default();
+            let labels = crate::organize::labels::read(doc).ok();
             graft_pages(doc, &src, &pages, *at as i32)?;
-            let _ = crate::organize::labels::after_insert(doc, &labels, *at, pages.len() as u32);
+            if let Some(labels) = &labels {
+                let _ = crate::organize::labels::after_insert(doc, labels, *at, pages.len() as u32);
+            }
             let mut out = sizes.to_vec();
             for i in 0..pages.len() as u32 {
                 out.insert((at + i) as usize, page_size(doc, at + i)?);
@@ -676,7 +685,7 @@ pub(crate) fn graft_pages_ex(dst: &mut PdfDocument, src: &PdfDocument, pages: &[
         made.push((from, page));
     }
     // Pass 2: their annotations.
-    let mut g = Graft { src, pages, made: &made, fields: Default::default(), names: None };
+    let mut g = Graft { src, pages, made: &made, fields: Default::default(), names: None, defaults_done: false };
     for (from, page) in &made {
         if let Some(annots) = from.get_dict("Annots")? {
             let copied = g.annots(dst, &mut map, &annots, page)?;
@@ -699,6 +708,8 @@ struct Graft<'a> {
     fields: std::collections::HashMap<i32, PdfObject>,
     /// Names of `dst`'s root fields, loaded with the first field copied.
     names: Option<std::collections::HashSet<String>>,
+    /// The source form's /DA and /DR were carried over already.
+    defaults_done: bool,
 }
 
 /// Keys never grafted as they are: they point back into the source's page or field tree.
@@ -878,12 +889,39 @@ impl Graft<'_> {
                 form.get_dict("Fields")?.unwrap()
             }
         };
-        // The source form's defaults (fonts, appearance) where `dst` has none.
-        if let Some(sf) = self.src.catalog()?.get_dict("AcroForm")? {
-            for key in ["DR", "DA"] {
-                if form.get_dict(key)?.is_none() {
-                    if let Some(v) = sf.get_dict(key)? {
-                        form.dict_put(key, map.graft_object(&v)?)?;
+        // The source form's defaults: its /DA where `dst` has none, and its /DR merged key by key
+        // (/Font and the other resource dictionaries), so a field from a later file keeps its font
+        // and a name `dst` already has stays `dst`'s.
+        if !self.defaults_done {
+            self.defaults_done = true;
+            if let Some(sf) = self.src.catalog()?.get_dict("AcroForm")? {
+                if form.get_dict("DA")?.is_none() {
+                    if let Some(v) = sf.get_dict("DA")? {
+                        form.dict_put("DA", map.graft_object(&v)?)?;
+                    }
+                }
+                if let Some(sdr) = sf.get_dict("DR")?.filter(|d| d.is_dict().unwrap_or(false)) {
+                    match form.get_dict("DR")?.filter(|d| d.is_dict().unwrap_or(false)) {
+                        None => form.dict_put("DR", map.graft_object(&sdr)?)?,
+                        Some(mut dr) => {
+                            for entry in sdr.dict_iter()? {
+                                let (k, v) = entry?;
+                                let key = String::from_utf8_lossy(&k.as_name()?).into_owned();
+                                match dr.get_dict(key.as_str())? {
+                                    None => dr.dict_put(key.as_str(), map.graft_object(&v)?)?,
+                                    Some(mut have) if have.is_dict()? && v.is_dict()? => {
+                                        for e in v.dict_iter()? {
+                                            let (k2, v2) = e?;
+                                            let sub = String::from_utf8_lossy(&k2.as_name()?).into_owned();
+                                            if have.get_dict(sub.as_str())?.is_none() {
+                                                have.dict_put(sub.as_str(), map.graft_object(&v2)?)?;
+                                            }
+                                        }
+                                    }
+                                    Some(_) => {}
+                                }
+                            }
+                        }
                     }
                 }
             }

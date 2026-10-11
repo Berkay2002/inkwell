@@ -42,6 +42,13 @@ only, as an unsaved scratch document), Edit description, Delete. "Attach files" 
 - One undo step per change (several files attached together are one step). Delete removes the stream, so after a save
   the bytes are not in the file (tested with 64 KB of incompressible data).
 - A second file of the same name is stored as "name (2).ext", never replaced.
+- **Names** are cleaned wherever they are shown or used (the list, the Save dialog's default, the scratch file of
+  "Open in a new tab"): no folder, no control or bidi/zero-width characters (U+202E and the like), no `< > : " | ? *`,
+  device names such as `CON` or `NUL.txt` get a `_` in front.
+- **Size**: reading an attachment out stops at 512 MB of decoded data whatever the stream declares (a small compressed
+  stream cannot inflate past it; `mupdf_pdf_read_stream_capped`).
+- **Save** never writes over a file that is open in a tab, and marks the written file as from the Internet zone
+  (`Zone.Identifier`, ZoneId=3) on Windows so the shell warns before it is run.
 
 ## Page labels
 
@@ -71,8 +78,12 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
 
 ## Known limits
 
-- Combine opens each file once for thumbnails (a second parse) and once for the plan; very large lists replan after a
-  220 ms pause rather than per keystroke.
+- Combine opens each file once for thumbnails (a second parse). The plan is asked for one at a time, 220 ms after the
+  last change, and what it learned about a file (pages, bookmarks, first page size) is kept while the file's size and
+  time are the same, so editing a range does not parse the files again. A run opens every file, grafts it and closes
+  it before the next one. A file with no pages is left out ("has no pages").
+- The form fields of every source bring their `/DR` resources (fonts) along, merged key by key; where two files name
+  a font the same, the first one's is kept.
 - The sources' page labels are not carried into a combined file (the result has none until set in Page labels).
 - The attachments list does not show portfolio (collection) structure.
 - Transitions are not previewed in the sheet itself, only in full screen.

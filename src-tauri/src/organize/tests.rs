@@ -427,3 +427,76 @@ fn combine_and_insert_keep_page_transitions() {
     assert_eq!(t[2].transition.unwrap().style, TransStyle::Wipe);
     assert_eq!(t[0], trans::PageTrans::default());
 }
+
+#[test]
+fn a_file_without_pages_is_left_out_not_a_panic() {
+    let d = dir("combine-empty");
+    let a = write(&d, "a.pdf", 2, 0);
+    let empty = d.join("empty.pdf").to_string_lossy().into_owned();
+    mupdf::pdf::PdfDocument::new().save(&empty).unwrap();
+    let (eng, _) = open(&a);
+    let opt = all_options();
+    let specs = [src(&empty, ""), src(&a, "")];
+    let plan = combine::inspect(&specs, opt).unwrap();
+    assert_eq!(plan.files[0].state, FileState::Unreadable);
+    assert!(plan.files[0].message.as_deref().unwrap().contains("empty.pdf"));
+    // one contents page for the one file that goes in
+    assert_eq!((plan.pages, plan.contents_pages, plan.left_out, plan.can_run), (3, 1, 1, true));
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    let r = combine::run(&eng, &specs, opt, &out).unwrap();
+    assert_eq!(r.plan, plan);
+    let (e2, i2) = open(&out);
+    assert_eq!(e2.edit_state(i2).unwrap().page_count, 3);
+    // only the empty file: nothing to combine, and no panic
+    let only = [src(&empty, "")];
+    assert!(!combine::inspect(&only, opt).unwrap().can_run);
+    assert!(combine::run(&eng, &only, opt, &out).is_err());
+}
+
+#[test]
+fn combine_merges_the_default_resources_of_every_form() {
+    use crate::forms::{FieldKind, NewField, add_one};
+    use mupdf::pdf::PdfDocument;
+    let d = dir("combine-dr");
+    let mut paths = Vec::new();
+    for n in ["f1.pdf", "f2.pdf"] {
+        let p = write(&d, n, 1, 0);
+        let (eng, id) = open(&p);
+        let what = NewField { kind: FieldKind::Text, rect: [72.0, 100.0, 272.0, 120.0], name: Some(format!("Field {n}")), group: None, export: None, caption: None, options: None };
+        add_one(&eng, id, 0, &what, user()).unwrap();
+        eng.save(id, None).unwrap();
+        paths.push(p);
+    }
+    // the second form has a font the first one does not
+    let second = d.join("f2-fonts.pdf").to_string_lossy().into_owned();
+    {
+        let doc = PdfDocument::open(&paths[1]).unwrap();
+        let form = doc.catalog().unwrap().get_dict("AcroForm").unwrap().unwrap();
+        let mut dr = form.get_dict("DR").unwrap().expect("a form made by Inkwell has /DR");
+        if dr.get_dict("Font").unwrap().is_none() {
+            let fonts = doc.new_dict().unwrap();
+            dr.dict_put("Font", fonts).unwrap();
+        }
+        let mut fonts = dr.get_dict("Font").unwrap().unwrap();
+        let extra = doc.new_dict().unwrap();
+        fonts.dict_put("InkwellOnlyHere", extra).unwrap();
+        doc.save(&second).unwrap();
+    }
+    let (eng, _) = open(&paths[0]);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false };
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    combine::run(&eng, &[src(&paths[0], ""), src(&second, "")], opt, &out).unwrap();
+    let doc = PdfDocument::open(&out).unwrap();
+    let form = doc.catalog().unwrap().get_dict("AcroForm").unwrap().unwrap();
+    let fonts = form.get_dict("DR").unwrap().unwrap().get_dict("Font").unwrap().unwrap();
+    assert!(fonts.get_dict("InkwellOnlyHere").unwrap().is_some(), "the later file's font is in the merged /DR");
+}
+
+#[test]
+fn saving_an_attachment_never_writes_over_an_open_file() {
+    let source = include_str!("app.rs");
+    let from = source.find("pub async fn attachment_save").unwrap();
+    let body = &source[from..from + source[from..].find("pub async fn attachment_open").unwrap()];
+    let guard = body.find("check_not_open").expect("attachment_save checks the target is not open");
+    assert!(guard < body.find("write_plain").unwrap(), "the check comes before the write");
+}

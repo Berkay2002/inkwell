@@ -1,7 +1,7 @@
 //! Tauri commands for combine, attachments, page labels and transitions. The UI is the user; the
 //! assistant calls the functions in `super` with its turn. Files are named by token only.
 
-use super::attach::{Attachment, NewFile};
+use super::attach::{Attachment, MAX_ATTACH, NewFile, clean_name};
 use super::combine::{self, CombineOptions, Plan, SourceSpec};
 use super::labels::{LabelSpec, LabelStyle};
 use super::trans::{PageTrans, TransChange};
@@ -21,8 +21,6 @@ async fn blocking<R: Send + 'static>(f: impl FnOnce() -> Result<R> + Send + 'sta
     tauri::async_runtime::spawn_blocking(f).await.unwrap_or(Err(EngineError::Panic))
 }
 
-/// The largest file attached in one go.
-const MAX_ATTACH: u64 = 512 << 20;
 
 // ---- combine ------------------------------------------------------------------------------------
 
@@ -125,8 +123,11 @@ pub async fn attachment_save(window: Window, eng: Eng<'_>, reg: Reg<'_>, doc: Do
     let to = reg.take_save(window.label(), &to)?;
     let eng = eng.inner().clone();
     blocking(move || {
+        // Never over a file a tab has open: it would fail on Windows or swap the file under the engine.
+        eng.check_not_open(&to, None)?;
         let (_, bytes) = attach_data(&eng, doc, &id)?;
         write_plain(std::path::Path::new(&to), &bytes)?;
+        mark_from_internet(&to);
         window.state::<Paths>().learn(&to);
         Ok(to)
     })
@@ -143,6 +144,7 @@ pub async fn attachment_open(window: Window, eng: Eng<'_>, doc: DocId, id: Strin
         if !bytes[..bytes.len().min(1024)].windows(5).any(|w| w == b"%PDF-") {
             return Err(EngineError::Invalid(format!("{name} is not a PDF. Save it to a folder to use it.")));
         }
+        let name = clean_name(&name);
         let name = if name.to_lowercase().ends_with(".pdf") { name } else { format!("{name}.pdf") };
         let path = crate::convert::write_scratch_bytes(&name, &bytes).map_err(|e| EngineError::Io(e.to_string()))?;
         // Not a file the user chose: an open token, but not a "known" path for the recent list.
@@ -166,6 +168,16 @@ pub async fn attachment_describe(eng: Eng<'_>, doc: DocId, id: String, text: Str
 fn file_name_of(p: &str) -> String {
     std::path::Path::new(p).file_name().map_or_else(|| p.to_string(), |n| n.to_string_lossy().into_owned())
 }
+
+/// Marks a file taken out of a document as coming from the Internet zone (Zone.Identifier, ZoneId=3),
+/// so Windows warns before it is run. Best effort: a file system without streams just goes without.
+#[cfg(windows)]
+fn mark_from_internet(path: &str) {
+    let _ = std::fs::write(format!("{path}:Zone.Identifier"), b"[ZoneTransfer]\r\nZoneId=3\r\n");
+}
+
+#[cfg(not(windows))]
+fn mark_from_internet(_path: &str) {}
 
 /// Bytes to `path` through a temporary file next to it; an existing file is replaced as a whole.
 fn write_plain(path: &std::path::Path, bytes: &[u8]) -> Result<()> {

@@ -44,6 +44,9 @@ pub struct NewFile {
 
 const MAX_ENTRIES: usize = 50_000;
 
+/// The largest attachment taken in or read out.
+pub const MAX_ATTACH: u64 = 512 << 20;
+
 /// One entry of the embedded-files name tree.
 struct Entry {
     key: String,
@@ -137,8 +140,9 @@ fn stream_of(spec: &PdfObject) -> Option<PdfObject> {
 fn info(spec: &PdfObject, fallback: &str, id: String, kind: AttachKind, page: Option<u32>, note: Option<String>) -> Attachment {
     let resolved = spec.resolve().ok().flatten().filter(|s| s.is_dict().unwrap_or(false));
     let text = |k: &str| resolved.as_ref().and_then(|s| get(s, k)).and_then(|v| v.as_string().ok()).filter(|s| !s.is_empty());
-    let name = text("UF").or_else(|| text("F")).unwrap_or_else(|| fallback.to_string());
-    let name = name.rsplit(['/', '\\']).next().unwrap_or(&name).to_string();
+    // The name comes from the file: no folder, nothing that reorders or hides text, nothing a file
+    // system refuses (it becomes the save dialog's default and a scratch file's name).
+    let name = clean_name(&text("UF").or_else(|| text("F")).unwrap_or_else(|| fallback.to_string()));
     let stream = stream_of(spec);
     let size = stream
         .as_ref()
@@ -150,7 +154,7 @@ fn info(spec: &PdfObject, fallback: &str, id: String, kind: AttachKind, page: Op
     let is_pdf = name.to_lowercase().ends_with(".pdf") || mime.as_deref() == Some("application/pdf");
     Attachment {
         id,
-        description: text("Desc").or(note).unwrap_or_default(),
+        description: strip_invisible(&text("Desc").or(note).unwrap_or_default()),
         name,
         size,
         mime,
@@ -199,15 +203,30 @@ fn locate(doc: &PdfDocument, id: &str) -> Result<PdfObject> {
     Err(bad("unknown attachment"))
 }
 
-/// The file's name and its bytes.
+/// The file's name and its bytes (refused over [`MAX_ATTACH`] once decoded).
 pub fn read_data(doc: &PdfDocument, id: &str) -> Result<(String, Vec<u8>)> {
+    read_data_capped(doc, id, MAX_ATTACH as usize)
+}
+
+/// [`read_data`] with the size limit given. The limit holds for the decoded bytes, whatever the
+/// stream declares about itself, so a small compressed stream cannot inflate past it.
+pub fn read_data_capped(doc: &PdfDocument, id: &str, cap: usize) -> Result<(String, Vec<u8>)> {
     let spec = locate(doc, id)?;
     let key = id.strip_prefix("n:").unwrap_or("attachment");
     let meta = info(&spec, key, id.to_string(), AttachKind::File, None, None);
     let Some(stream) = stream_of(&spec) else {
         return Err(bad("this attachment links to a file outside the document, it has no bytes to save"));
     };
-    Ok((meta.name, stream.read_stream()?))
+    if meta.size > cap as u64 {
+        return Err(bad(format!("{} is over {} MB, too large to open or save", meta.name, cap >> 20)));
+    }
+    match stream.read_stream_capped(cap) {
+        Ok(bytes) => Ok((meta.name, bytes)),
+        Err(e) if e.to_string().contains("larger than") => {
+            Err(bad(format!("{} is over {} MB once unpacked, too large to open or save", meta.name, cap >> 20)))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// A name no other entry of the tree has: `x.txt`, then `x (2).txt`, `x (3).txt` …
@@ -225,12 +244,35 @@ fn unique(taken: &HashSet<String>, name: &str) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
+/// Characters that reorder or hide text (bidi overrides and isolates, marks, zero-width, BOM).
+fn is_invisible(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}')
+}
+
+/// `s` without control characters (a line break stays) and without the invisible ones.
+fn strip_invisible(s: &str) -> String {
+    s.chars().filter(|&c| (!c.is_control() || c == '\n') && !is_invisible(c)).collect()
+}
+
+/// Names Windows keeps for devices, with or without an extension.
+fn is_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end().to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit() && stem.as_bytes()[3] != b'0')
+}
+
 /// The file name without any folder, and nothing a file system or a viewer would trip on.
 pub fn clean_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    let s: String = base.chars().filter(|c| !c.is_control() && !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*')).collect();
+    let s: String = base.chars().filter(|&c| !c.is_control() && !is_invisible(c) && !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*')).collect();
     let s = s.trim().trim_matches('.').trim().to_string();
-    if s.is_empty() { "attachment".into() } else { s }
+    if s.is_empty() {
+        "attachment".into()
+    } else if is_reserved(&s) {
+        format!("_{s}")
+    } else {
+        s
+    }
 }
 
 fn mime_for(name: &str) -> &'static str {
@@ -375,5 +417,28 @@ mod tests {
         assert_eq!(clean_name("C:\\x\\y\\report?.pdf"), "report.pdf");
         assert_eq!(clean_name("../.."), "attachment");
         assert_eq!(mime_for("a.PDF"), "application/pdf");
+    }
+
+    #[test]
+    fn names_lose_bidi_tricks_and_device_names() {
+        assert_eq!(clean_name("evil\u{202E}fdp.exe"), "evilfdp.exe");
+        assert_eq!(clean_name("CON"), "_CON");
+        assert_eq!(clean_name("nul.txt"), "_nul.txt");
+        assert_eq!(clean_name("COM1.log"), "_COM1.log");
+        assert_eq!(clean_name("COM0.log"), "COM0.log");
+        assert_eq!(clean_name("a:b.txt"), "ab.txt");
+        assert_eq!(clean_name("\u{200B}\u{FEFF}"), "attachment");
+        assert_eq!(strip_invisible("a\u{202E}b\nc\u{7}"), "ab\nc");
+    }
+
+    #[test]
+    fn a_stream_over_the_cap_is_refused() {
+        let mut doc = PdfDocument::new();
+        let file = NewFile { name: "zeros.bin".into(), data: vec![0u8; 3 << 20], description: String::new() };
+        add(&mut doc, &[file]).unwrap();
+        let (name, bytes) = read_data_capped(&doc, "n:zeros.bin", 4 << 20).unwrap();
+        assert_eq!((name.as_str(), bytes.len()), ("zeros.bin", 3 << 20));
+        let e = read_data_capped(&doc, "n:zeros.bin", 1 << 20).unwrap_err().to_string();
+        assert!(e.contains("too large"), "{e}");
     }
 }

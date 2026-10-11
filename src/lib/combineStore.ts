@@ -76,6 +76,9 @@ const stem = (p: string) => baseName(p).replace(/\.pdf$/i, "");
 let keys = 0;
 let planSeq = 0;
 let planTimer: ReturnType<typeof setTimeout> | undefined;
+/** A `combine_inspect` is running, and whether the list changed since it started. */
+let inFlight = false;
+let again = false;
 /** Tokens of the pages a drawn thumbnail was made for (doc:page): a thumbnail is drawn once. */
 const drawn = new Map<string, string>();
 
@@ -102,11 +105,24 @@ export const useCombine = create<CombineStore>((set, get) => {
     planTimer = setTimeout(() => {
       const cur = get().sheet;
       if (!cur) return;
+      // One look at a time: a change made meanwhile is planned right after this one ends.
+      if (inFlight) {
+        again = true;
+        return;
+      }
+      inFlight = true;
       const seq = ++planSeq;
       api
         .combineInspect(cur.entries.map(request), cur.options)
-        .then((plan) => seq === planSeq && patchSheet({ plan, planning: false, planError: null }))
-        .catch((e) => seq === planSeq && patchSheet({ plan: null, planning: false, planError: String(e) }));
+        .then((plan) => seq === planSeq && patchSheet({ plan, planning: again, planError: null }))
+        .catch((e) => seq === planSeq && patchSheet({ plan: null, planning: again, planError: String(e) }))
+        .finally(() => {
+          inFlight = false;
+          if (again) {
+            again = false;
+            if (get().sheet) schedulePlan();
+          }
+        });
     }, 220);
   };
 
@@ -182,6 +198,7 @@ export const useCombine = create<CombineStore>((set, get) => {
       if (!s || s.phase === "running") return;
       clearTimeout(planTimer);
       planSeq++;
+      again = false;
       release(s.entries);
       set({ sheet: null });
     },
