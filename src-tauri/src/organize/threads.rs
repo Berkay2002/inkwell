@@ -410,7 +410,8 @@ fn commit<'a>(
         let page = doc.find_page(p as i32)?;
         let mut b = doc.new_array()?;
         if let Some(cur) = get(&page, "B").filter(|c| c.is_array().unwrap_or(false)) {
-            for i in 0..cur.len()?.min(MAX_BEADS * 2) {
+            // (all of it: an entry past some cut would be dropped from the rewritten array)
+            for i in 0..cur.len()? {
                 let Some(item) = cur.get_array(i as i32)? else { continue };
                 if indirect_num(&item).is_some_and(|x| mine.contains(&x)) {
                     continue;
@@ -581,36 +582,44 @@ pub fn delete_thread(doc: &mut PdfDocument, thread: i32) -> Result<Vec<u32>> {
     let mut touched = commit(doc, &pages, &l.obj, l.ring.own().filter(|b| !claimed.contains(&b.id)), Vec::new())?;
     if l.ring.damage().is_some() {
         // Beads past the break are not in the ring but may still be on a page's /B.
-        let mut budget = MAX_TOTAL_BEADS;
-        for p in 0..pages.nums.len() as u32 {
-            let mut page = doc.find_page(p as i32)?;
-            let Some(cur) = get(&page, "B").filter(|c| c.is_array().unwrap_or(false)) else { continue };
-            let mut keep = doc.new_array()?;
-            let mut dropped = false;
-            for i in 0..cur.len()?.min(MAX_BEADS * 2) {
-                if budget == 0 {
-                    break;
-                }
-                budget -= 1;
-                let Some(item) = cur.get_array(i as i32)? else { continue };
-                let ours = item.resolve()?.and_then(|b| get(&b, "T")).is_some_and(|t| indirect_num(&t) == Some(thread));
-                if ours {
-                    dropped = true;
-                } else {
-                    keep.array_push(item.share())?;
-                }
-            }
-            if dropped {
-                if keep.len()? == 0 {
-                    page.dict_delete("B")?;
-                } else {
-                    page.dict_put("B", keep)?;
-                }
-                touched.push(p);
-            }
-        }
+        touched.extend(strip_listed(doc, &pages, thread, &mut MAX_TOTAL_BEADS.clone())?);
         touched.sort_unstable();
         touched.dedup();
+    }
+    Ok(touched)
+}
+
+/// Takes out of every page's /B the beads whose /T names `thread`; returns the pages changed. `budget` bounds
+/// the beads looked at: what it leaves unlooked-at stays in the array exactly as it was.
+fn strip_listed(doc: &mut PdfDocument, pages: &Pages, thread: i32, budget: &mut usize) -> Result<Vec<u32>> {
+    let mut touched = Vec::new();
+    for p in 0..pages.nums.len() as u32 {
+        let mut page = doc.find_page(p as i32)?;
+        let Some(cur) = get(&page, "B").filter(|c| c.is_array().unwrap_or(false)) else { continue };
+        let mut keep = doc.new_array()?;
+        let mut dropped = false;
+        for i in 0..cur.len()? {
+            let Some(item) = cur.get_array(i as i32)? else { continue };
+            if *budget == 0 {
+                keep.array_push(item.share())?;
+                continue;
+            }
+            *budget -= 1;
+            let ours = item.resolve()?.and_then(|b| get(&b, "T")).is_some_and(|t| indirect_num(&t) == Some(thread));
+            if ours {
+                dropped = true;
+            } else {
+                keep.array_push(item.share())?;
+            }
+        }
+        if dropped {
+            if keep.len()? == 0 {
+                page.dict_delete("B")?;
+            } else {
+                page.dict_put("B", keep)?;
+            }
+            touched.push(p);
+        }
     }
     Ok(touched)
 }

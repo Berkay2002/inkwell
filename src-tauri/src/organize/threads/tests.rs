@@ -709,3 +709,44 @@ fn properties_applied_unchanged_are_no_step() {
     thread_set_info(&eng, id, t.id, &t.info, USER).unwrap();
     assert_eq!(eng.edit_state(id).unwrap().undo, before);
 }
+
+#[test]
+fn a_scan_that_runs_out_of_budget_keeps_the_rest_of_a_pages_beads() {
+    let (eng, id, _d) = open("strip-budget", 4);
+    let (a, b) = two_threads(&eng, id);
+    let b1 = first_bead(&eng, id, b);
+    let b1_id = indirect_num(&b1).unwrap();
+    // page 0 lists A's two beads and then B's first one
+    let on_page0 = |eng: &Engine| -> Vec<i32> {
+        let mut out = Vec::new();
+        eng.read_custom(id, |d| {
+            out = b_ids(&d.find_page(0)?);
+            Ok(())
+        })
+        .unwrap();
+        out
+    };
+    tamper(&eng, id, |d| {
+        let mut arr = get(&d.find_page(0)?, "B").unwrap();
+        arr.array_push(b1.share())?;
+        Ok(vec![])
+    });
+    let before = on_page0(&eng);
+    assert_eq!(before.len(), 3);
+    assert_eq!(before[2], b1_id);
+    // a budget of one: the first entry is looked at (it is A's, so it goes), the others are not looked at
+    tamper(&eng, id, |d| {
+        let pages = Pages::of(d)?;
+        let touched = strip_listed(d, &pages, a, &mut 1)?;
+        assert_eq!(touched, [0]);
+        Ok(vec![])
+    });
+    assert_eq!(on_page0(&eng), before[1..], "everything after the budget is kept");
+    // and with room for all of them every bead of A goes and B's stays
+    tamper(&eng, id, |d| {
+        let pages = Pages::of(d)?;
+        strip_listed(d, &pages, a, &mut 100)?;
+        Ok(vec![])
+    });
+    assert_eq!(on_page0(&eng), [b1_id]);
+}
