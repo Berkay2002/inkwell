@@ -54,6 +54,7 @@ import {
   useMarks,
 } from "./marksStore";
 import { useProtect } from "./protectStore";
+import { useSearch } from "./searchStore";
 import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 
@@ -250,11 +251,12 @@ describe("the sheet", () => {
     expect(useProtect.getState().sheet).toBeNull();
   });
 
-  it("takes the side from Forms, Edit and Accessibility, and gives it up to them", () => {
+  it("takes the side from Forms, Edit, Accessibility and Search, and gives it up to them", () => {
     const rails = [
       { set: (o: boolean) => useForms.setState({ open: o }), open: () => useForms.getState().open, toggle: () => useForms.getState().setOpen(true) },
       { set: (o: boolean) => useTextEdit.setState({ open: o }), open: () => useTextEdit.getState().open, toggle: () => useTextEdit.getState().setOpen(true) },
       { set: (o: boolean) => useA11y.setState({ open: o }), open: () => useA11y.getState().open, toggle: () => useA11y.getState().setOpen(true) },
+      { set: (o: boolean) => useSearch.setState({ open: o }), open: () => useSearch.getState().open, toggle: () => useSearch.getState().setOpen(true) },
     ];
     for (const rail of rails) {
       rail.set(true);

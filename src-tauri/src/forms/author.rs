@@ -94,9 +94,9 @@ pub(crate) fn ensure_dict(doc: &PdfDocument, parent: &mut PdfObject, key: &str) 
     if let Some(d) = get(parent, key).filter(|d| d.is_dict().unwrap_or(false)) {
         return Ok(d);
     }
-    let d = doc.new_dict()?;
-    parent.dict_put(key, d.clone())?;
-    Ok(d)
+    // `PdfObject::clone` is a deep copy: edits must land in the dictionary the parent holds.
+    parent.dict_put(key, doc.new_dict()?)?;
+    get(parent, key).ok_or_else(|| bad("could not create the dictionary"))
 }
 
 /// The AcroForm dictionary, created with the default appearance and resources if missing.

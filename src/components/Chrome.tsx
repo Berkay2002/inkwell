@@ -1,21 +1,25 @@
 import { useEffect, useRef, useState } from "react";
+import { useFind } from "../lib/findStore";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
-import { openA11y } from "../lib/a11y";
-import { useConvert } from "../lib/convertStore";
-import { useMarks } from "../lib/marksStore";
 import { useProtect } from "../lib/protectStore";
-import { useTools } from "../lib/toolsStore";
-import { type DocState, type Theme, useStore } from "../store";
+import { pageOfLabel, useSheets } from "../lib/organizePlus";
+import { pageBoxCh } from "../lib/pageBox";
+import { useToolPrefs } from "../lib/toolPrefs";
+import { type PageDark, togglePageDark } from "../lib/pageDark";
+import { usePagesDark, useSystemDark } from "../lib/usePagesDark";
+import { type DocState, pageLabel, type Theme, useStore } from "../store";
 import { AssistantToggle } from "./assistant/AssistantPanel";
-import { HistoryToggle, openCompareSetup } from "./history/HistoryPanel";
+import { HistoryToggle } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
 import { MenuButton } from "./Menu";
 import { CommentsToggle } from "./comments/CommentsPanel";
+import { OptionChips, OptionsMenu } from "./search/FindOptions";
 import { FormsToggle } from "./forms/FormsPanel";
 import { RedactToggle } from "./redact/RedactPanel";
 import { ModeSwitch } from "./Organize";
+import { PinnedTools, ToolsButton } from "./AllTools";
 import { WindowControls } from "./WindowControls";
 
 const st = () => useStore.getState();
@@ -85,7 +89,7 @@ export function TabBar() {
 
 function Btn({ icon, title, on, onClick, disabled }: { icon: IconName; title: string; on?: boolean; onClick: () => void; disabled?: boolean }) {
   return (
-    <button className={on ? "icon-btn on" : "icon-btn"} title={title} aria-label={title} onClick={onClick} disabled={disabled}>
+    <button className={on ? "icon-btn on" : "icon-btn"} title={title} aria-label={title} aria-pressed={on} onClick={onClick} disabled={disabled}>
       <Icon name={icon} />
     </button>
   );
@@ -110,6 +114,8 @@ export function Toolbar({ doc }: { doc: DocState }) {
   return (
     <div className="toolbar">
       <ModeSwitch doc={doc} />
+      <ToolsButton doc={doc} />
+      <PinnedTools doc={doc} />
       <span className="sep" />
       {doc.organize ? (
         <>
@@ -122,26 +128,6 @@ export function Toolbar({ doc }: { doc: DocState }) {
       <span className="grow" />
       <span className="tb-cluster" onClickCapture={leaveOrganize}>
         <Btn icon="search" title={`Find${keys("find")}`} on={searchOpen && !doc.organize} onClick={() => st().setUi({ searchOpen: doc.organize ? true : !searchOpen })} />
-        <MenuButton
-          className="ax-toggle"
-          label="Tools"
-          items={[
-            { label: "Compress file…", onSelect: () => useTools.getState().open("compress", id) },
-            { label: "Recognize text…", onSelect: () => useTools.getState().open("ocr", id) },
-            { label: "Header & footer…", onSelect: () => useMarks.getState().open("headerFooter", id) },
-            { label: "Watermark…", onSelect: () => useMarks.getState().open("watermark", id) },
-            { label: "Background…", onSelect: () => useMarks.getState().open("background", id) },
-            { label: "Bates numbering…", onSelect: () => useMarks.getState().open("bates", id) },
-            { label: "Protect with a password…", onSelect: () => useProtect.getState().open("protect", id) },
-            { label: "Security…", onSelect: () => useProtect.getState().open("security", id) },
-            { label: "Compare files…", onSelect: () => void openCompareSetup({ id, name: doc.name }) },
-            { label: "Check accessibility…", onSelect: openA11y },
-            { label: "Export…", onSelect: () => useConvert.getState().openExport(id) },
-            { label: "Create PDF…", onSelect: () => useConvert.getState().openCreate() },
-          ]}
-        >
-          Tools
-        </MenuButton>
         <CommentsToggle />
         <FormsToggle />
         <RedactToggle />
@@ -155,7 +141,9 @@ export function Toolbar({ doc }: { doc: DocState }) {
 }
 
 function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => string }) {
-  const sidebar = useStore((s) => s.sidebar);
+  // the All tools panel covers the sidebar while it is open: nothing in it is "on" then
+  const covered = useToolPrefs((s) => s.panelOpen);
+  const sidebar = useStore((s) => (covered ? "none" : s.sidebar));
   const { id } = doc;
   const zoomValue = doc.zoomMode === "custom" ? String(Math.round(doc.zoom * 100) / 100) : doc.zoomMode;
   const presets = ZOOM_STEPS.filter((z) => z >= 0.25 && z <= 8);
@@ -165,6 +153,7 @@ function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => s
     <>
       <Btn icon="sidebar" title={`Toggle sidebar${keys("sidebar")}`} on={sidebar !== "none"} onClick={() => st().toggleSidebar("thumbs")} />
       <Btn icon="outline" title="Outline" on={sidebar === "outline"} onClick={() => st().toggleSidebar("outline")} />
+      <Btn icon="paperclip" title="Attachments" on={sidebar === "attachments"} onClick={() => st().toggleSidebar("attachments")} />
       <span className="sep" />
       <PageBox doc={doc} />
       <span className="sep" />
@@ -191,32 +180,85 @@ function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => s
       </select>
       <Btn icon="plus" title={`Zoom in${keys("zoom-in")}`} onClick={() => st().setZoom(id, stepZoom(doc.zoom, 1))} />
       <Btn icon="rotate" title={`Rotate${keys("rotate-cw")}`} onClick={() => st().rotate(id, 1)} />
+      <Btn icon="present" title={`Full screen${keys("present")}`} onClick={() => useSheets.getState().openPresent(id, doc.currentPage)} />
+      <span className="sep" />
+      <DarkPagesButton />
     </>
   );
 }
 
+const pageModes: [PageDark, string][] = [
+  ["follow", "Follow app theme"],
+  ["on", "Always dark"],
+  ["off", "Always normal"],
+];
+
+/**
+ * Shows the pages dark or normal, whatever the app's own theme (the file is never changed). A page-view
+ * setting like zoom and rotate: the button flips it, the chevron (or a right-click) chooses Follow / dark / normal.
+ */
+function DarkPagesButton() {
+  const dark = usePagesDark();
+  const systemDark = useSystemDark();
+  const setting = useStore((s) => s.pageDark);
+  const group = useRef<HTMLSpanElement>(null);
+  const keys = commands.find((c) => c.id === "toggle-dark-pages")?.keys?.[0];
+  const title = `${dark ? "Normal pages" : "Dark pages"}${keys ? ` (${prettyKeys(keys)})` : ""}`;
+  return (
+    <span
+      ref={group}
+      className="dp-split"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        group.current?.querySelector<HTMLButtonElement>(".dp-chev")?.click();
+      }}
+    >
+      <Btn
+        icon="pageDark"
+        title={title}
+        on={dark}
+        onClick={() => {
+          const s = st();
+          s.setPageDark(togglePageDark(s.pageDark, s.theme, systemDark));
+        }}
+      />
+      <MenuButton
+        className="icon-btn dp-chev"
+        label="Page colours"
+        items={pageModes.map(([m, label]) => ({ label, checked: setting === m, onSelect: () => st().setPageDark(m) }))}
+      >
+        <Icon name="down" size={10} />
+      </MenuButton>
+    </span>
+  );
+}
+
 function PageBox({ doc }: { doc: DocState }) {
-  const [text, setText] = useState(String(doc.currentPage + 1));
+  // With page labels the box shows and takes the label ("iii"); without them, the page number.
+  const labelled = doc.labels.length > 0;
+  const [text, setText] = useState(pageLabel(doc, doc.currentPage));
   const editing = useRef(false);
   useEffect(() => {
-    if (!editing.current) setText(String(doc.currentPage + 1));
-  }, [doc.currentPage, doc.id]);
+    if (!editing.current) setText(pageLabel(doc, doc.currentPage));
+  }, [doc.currentPage, doc.id, doc.labels]);
   const go = () => {
-    const n = parseInt(text, 10);
+    const byLabel = pageOfLabel(doc.labels, text);
+    const n = byLabel != null ? byLabel + 1 : parseInt(text, 10);
     if (Number.isFinite(n)) st().goTo(doc.id, n - 1);
     editing.current = false;
-    setText(String(Math.min(Math.max(n || 1, 1), doc.pageCount)));
+    setText(pageLabel(doc, Math.min(Math.max(n || 1, 1), doc.pageCount) - 1));
   };
   return (
     <div className="pagebox">
       <input
         id="page-input"
+        style={{ width: `${pageBoxCh(doc.pageCount, labelled)}ch` }}
         value={text}
         inputMode="numeric"
         onFocus={() => (editing.current = true)}
         onBlur={() => {
           editing.current = false;
-          setText(String(doc.currentPage + 1));
+          setText(pageLabel(doc, doc.currentPage));
         }}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
@@ -226,28 +268,22 @@ function PageBox({ doc }: { doc: DocState }) {
           } else if (e.key === "Escape") (e.target as HTMLInputElement).blur();
         }}
       />
-      <span className="dim">/ {doc.pageCount}</span>
+      <span className="dim">{labelled ? `(${doc.currentPage + 1} of ${doc.pageCount})` : `/ ${doc.pageCount}`}</span>
     </div>
   );
 }
 
 export function SearchBar({ doc }: { doc: DocState }) {
   const input = useRef<HTMLInputElement>(null);
-  const [q, setQ] = useState(doc.search.query);
   const { id, search } = doc;
+  // The text is shared with the Search rail; SearchDriver runs the live search as it changes.
+  const q = useFind((s) => s.drafts[id] ?? doc.search.query);
+  const setQ = (t: string) => useFind.getState().setDraft(id, t);
 
   useEffect(() => {
     input.current?.focus();
     input.current?.select();
   }, []);
-
-  // Debounced live search; an empty box clears the highlights.
-  useEffect(() => {
-    if (q.trim() === search.query.trim()) return;
-    const t = setTimeout(() => st().runSearch(id, q), 220);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, id]);
 
   const n = search.hits.length;
   const status = !search.query ? "" : n === 0 ? (search.done ? "No results" : "Searching…") : `${search.current + 1} / ${n}${search.done ? "" : "…"}`;
@@ -267,14 +303,17 @@ export function SearchBar({ doc }: { doc: DocState }) {
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
+            useFind.getState().remember(q);
             if (q.trim() !== search.query.trim()) st().runSearch(id, q);
             else st().stepHit(id, e.shiftKey ? -1 : 1);
           } else if (e.key === "Escape") close();
         }}
       />
+      <OptionChips />
       <span className="dim count">{status}</span>
       <Btn icon="up" title="Previous (Shift+Enter)" onClick={() => st().stepHit(id, -1)} disabled={n === 0} />
       <Btn icon="down" title="Next (Enter)" onClick={() => st().stepHit(id, 1)} disabled={n === 0} />
+      <OptionsMenu />
       <Btn icon="close" title="Close (Esc)" onClick={close} />
     </div>
   );

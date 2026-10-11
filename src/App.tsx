@@ -14,18 +14,25 @@ import { EditPanel } from "./components/edit/EditPanel";
 import { FormTools, FormsBanner, FormsPanel } from "./components/forms/FormsPanel";
 import { ScriptPrompts } from "./components/forms/ScriptPrompts";
 import { RedactPanel } from "./components/redact/RedactPanel";
+import { SearchDriver, SearchPanel } from "./components/search/SearchPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
 import { ConvertPanel } from "./components/ConvertPanel";
 import { MarksPanel } from "./components/MarksPanel";
 import { ProtectPanel, SecurityNotice } from "./components/ProtectPanel";
 import { PrintSheet } from "./components/PrintSheet";
+import { CombineSheet } from "./components/CombineSheet";
+import { LabelsSheet, TransitionsSheet } from "./components/OrganizePlus";
+import { Presentation } from "./components/Presentation";
 import { ToolsPanel } from "./components/ToolsPanel";
 import { Viewer } from "./components/Viewer";
 import { type FileRef, initialFiles } from "./lib/api";
 import { commandFor } from "./lib/commands";
+import { useCombine } from "./lib/combineStore";
 import { startHistoryEvents, useHistory } from "./lib/historyStore";
 import { guardWindowClose } from "./lib/edit";
+import { usePagesDark } from "./lib/usePagesDark";
+import { useToolPrefs } from "./lib/toolPrefs";
 import { Organize } from "./components/Organize";
 import { useActiveDoc, useStore } from "./store";
 
@@ -46,6 +53,21 @@ export default function App() {
     else document.documentElement.dataset.theme = theme;
   }, [theme]);
 
+  // The pages' own colours: styles.css inverts the page images under data-pages="dark".
+  const pagesDark = usePagesDark();
+  useEffect(() => {
+    if (pagesDark) document.documentElement.dataset.pages = "dark";
+    else document.documentElement.removeAttribute("data-pages");
+  }, [pagesDark]);
+
+  // The All tools panel belongs to the reader: Home, a comparison and Organize leave it closed, so coming
+  // back neither shows it unasked nor moves focus into it.
+  const noDoc = doc == null;
+  const organizing = doc?.organize ?? false;
+  useEffect(() => {
+    if (noDoc || showCompare || organizing) useToolPrefs.getState().setPanel(false);
+  }, [noDoc, showCompare, organizing]);
+
   useEffect(() => startHistoryEvents(), []);
   useEffect(() => wireCommentRail(), []);
 
@@ -53,6 +75,11 @@ export default function App() {
   useEffect(() => {
     if (doc) void useHistory.getState().refresh(doc.id);
   }, [doc?.id]);
+
+  // Page labels show in the page box and under every thumbnail: read again with every generation.
+  useEffect(() => {
+    if (doc) useStore.getState().loadLabels(doc.id);
+  }, [doc?.id, doc?.rev]);
 
   useEffect(() => {
     getCurrentWindow()
@@ -73,7 +100,11 @@ export default function App() {
     let cancelled = false;
     // Rust turns PDFs dropped from Explorer into file tokens (src-tauri/src/paths.rs).
     getCurrentWebviewWindow()
-      .listen<FileRef[]>("files-dropped", (e) => e.payload.forEach((f) => void st.openPath(f.path, f.token)))
+      .listen<FileRef[]>("files-dropped", (e) => {
+        // The Combine sheet takes the files dropped on it; anywhere else they open in tabs.
+        if (useCombine.getState().sheet) useCombine.getState().add(e.payload);
+        else e.payload.forEach((f) => void st.openPath(f.path, f.token));
+      })
       .then((u) => (cancelled ? u() : (off = u)))
       .catch(() => {});
 
@@ -112,6 +143,7 @@ export default function App() {
       ) : doc ? (
         <>
           <Toolbar doc={doc} />
+          <SearchDriver key={doc.id} doc={doc} />
           {showCompare ? (
             <div className="main">
               <CompareView />
@@ -139,6 +171,7 @@ export default function App() {
               <CommentsPanel doc={doc} />
               <EditPanel doc={doc} />
               <FormsPanel doc={doc} />
+              <SearchPanel doc={doc} />
             </div>
           )}
         </>
@@ -153,6 +186,10 @@ export default function App() {
         </div>
       )}
       <PrintSheet />
+      <CombineSheet />
+      <LabelsSheet />
+      <TransitionsSheet />
+      <Presentation />
       {paletteOpen && <CommandPalette />}
       {hasPassword && <PasswordDialog />}
       <ScriptPrompts />
