@@ -57,6 +57,8 @@ import {
  */
 
 const st = () => useStore.getState();
+/** Undo conversion found the document past the conversion: nothing is undone and the sheet stays. */
+const MOVED_ON = "The document changed since the conversion; nothing was undone. Undo it from History, or Keep.";
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 const cancelled = (e: unknown) => /cancel/i.test(msg(e));
 const stem = (name: string) => name.replace(/\.pdf$/i, "");
@@ -559,10 +561,11 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       if (!s || !d || s.phase !== "unsaved") return;
       try {
         // `queued` hands a failure back (the shared undo shows it on the error line and carries on). The check is
-        // made in the queue: another step may have landed since (an undo, the assistant), and then no conversion
-        // is on top to take back.
+        // made in the queue: another step may have landed since (an undo and redo, the assistant), and then the
+        // conversion is not what an undo would take back.
         const after = await queued(s.doc, async () => (st().docs[s.doc]?.rev === s.convertedRev ? api.editUndo(s.doc) : null));
-        if (after) applyState(s.doc, after);
+        if (!after) return patchSheet<ConvertSheet>("convert", { error: MOVED_ON });
+        applyState(s.doc, after);
       } catch (e) {
         return patchSheet<ConvertSheet>("convert", { error: msg(e) });
       }

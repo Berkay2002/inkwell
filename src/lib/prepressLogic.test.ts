@@ -22,6 +22,7 @@ import {
   parseMarks,
   plateList,
   rectShown,
+  holdsSave,
   scopePages,
   tabTarget,
   showInk,
@@ -233,5 +234,17 @@ describe("tab order inside a sheet", () => {
     expect(tabTarget(4, -1, true)).toBe(3);
     expect(tabTarget(1, 0, false)).toBe(0);
     expect(tabTarget(0, -1, false)).toBeNull();
+  });
+});
+
+describe("Save while a conversion is not saved", () => {
+  const key = (k: string, m: Partial<{ ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }> = {}) => ({ key: k, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...m });
+  it("holds back Ctrl+S and Cmd+S only in that phase", () => {
+    expect(holdsSave(key("s", { ctrlKey: true }), true)).toBe(true);
+    expect(holdsSave(key("S", { metaKey: true }), true)).toBe(true);
+    expect(holdsSave(key("s", { ctrlKey: true }), false)).toBe(false);
+    expect(holdsSave(key("s"), true)).toBe(false);
+    expect(holdsSave(key("s", { ctrlKey: true, shiftKey: true }), true)).toBe(false);
+    expect(holdsSave(key("z", { ctrlKey: true }), true)).toBe(false);
   });
 });

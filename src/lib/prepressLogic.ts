@@ -575,3 +575,8 @@ export function tabTarget(count: number, at: number, back: boolean): number | nu
   if (at < 0) return back ? count - 1 : 0;
   return (at + (back ? -1 : 1) + count) % count;
 }
+
+/** Ctrl/Cmd+S (not Save as) is held back while Convert Colors waits to save: a Save would write the conversion over the original. */
+export function holdsSave(e: { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }, unsaved: boolean): boolean {
+  return unsaved && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s";
+}

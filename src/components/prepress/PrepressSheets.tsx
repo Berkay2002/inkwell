@@ -26,6 +26,7 @@ import {
   remainingText,
   SIGNED_WARNING,
   showLength,
+  holdsSave,
   svgPath,
   tabTarget,
   visibleBox,
@@ -49,10 +50,18 @@ export function PrepressSheets() {
     // focus goes into the sheet, stays there, and goes back to where it was when the sheet closes
     const from = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     panel()?.focus();
+    const unsaved = () => {
+      const s = act().sheet;
+      return s?.kind === "convert" && s.phase === "unsaved";
+    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
         act().closeSheet();
+      } else if (holdsSave(e, unsaved())) {
+        // the document holds the conversion; a Save would write it over the original before the sheet is answered
+        e.preventDefault();
+        e.stopPropagation();
       } else if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const root = panel();
         if (!root) return;

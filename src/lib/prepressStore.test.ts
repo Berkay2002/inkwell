@@ -284,12 +284,16 @@ describe("Convert Colors", () => {
       expect(st().sheet).toBeNull();
     });
 
-    it("does not undo a step that is not the conversion", async () => {
+    it("does not undo a step that is not the conversion, and says so instead of closing", async () => {
       await unsaved();
+      // an undo and a redo while the sheet was open: the document is at a newer generation
       useStore.setState((s) => ({ docs: { ...s.docs, 1: { ...s.docs[1], rev: 5 } } }));
       st().closeSheet();
       await st().undoConversion();
       expect(api.editUndo).not.toHaveBeenCalled();
+      expect(st().sheet).toMatchObject({ phase: "unsaved", closing: true, error: expect.stringMatching(/changed since the conversion; nothing was undone/) });
+      // Keep still closes it
+      st().keepConversion();
       expect(st().sheet).toBeNull();
     });
 
