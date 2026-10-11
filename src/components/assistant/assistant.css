@@ -23,38 +23,53 @@
 }
 
 /* ---- toolbar switch ---- */
-.ax-toggle {
-  height: 28px;
-  padding: 0 13px;
-  border-radius: 14px;
-  color: var(--text-2);
-}
-.ax-toggle:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-.ax-toggle.on {
-  background: var(--ax-accent-soft);
-  color: var(--ax-accent);
-  font-weight: 600;
-}
-/* Assistant button + its three layouts, side by side in the toolbar: one click to switch. */
+/* One pill: the ChatGPT mark, and while the assistant is open the three layouts slide out of it to the right. */
 .ax-toggle-group {
   display: flex;
   align-items: center;
-  gap: 2px;
+  height: 28px;
+  padding: 2px;
+  border-radius: 14px;
+  transition: background 160ms ease;
+}
+.ax-toggle-group:hover,
+.ax-toggle-group.on {
+  background: var(--surface-2);
+}
+.ax-toggle {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 24px;
+  border-radius: 12px;
+  color: var(--text-2);
+}
+.ax-toggle:hover {
+  color: var(--text);
+}
+.ax-toggle-group.on .ax-toggle {
+  color: var(--ax-accent);
 }
 .ax-layouts {
   display: flex;
   gap: 2px;
-  padding: 2px;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateX(-8px);
+  transition: max-width 220ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 160ms ease, transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    margin-left 220ms ease;
+}
+.ax-toggle-group.on .ax-layouts {
+  max-width: 96px;
   margin-left: 2px;
-  background: var(--surface-2);
-  border-radius: 14px;
+  opacity: 1;
+  transform: none;
 }
 .ax-layouts button {
   display: grid;
   place-items: center;
+  flex: none;
   width: 28px;
   height: 24px;
   border-radius: 12px;
@@ -67,6 +82,12 @@
   background: var(--surface);
   color: var(--ax-accent);
   box-shadow: var(--shadow-1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ax-toggle-group,
+  .ax-layouts {
+    transition: none;
+  }
 }
 
 /* ---- shells ---- */
