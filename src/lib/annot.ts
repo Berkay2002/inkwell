@@ -39,6 +39,7 @@ export const annotApi = {
   remove: (doc: number, items: [number, number][]) => invoke<EditState>("annot_delete", { doc, items }),
   reply: (doc: number, page: number, parent: number, text: string, author: string) =>
     invoke<{ state: EditState; xref: number }>("annot_reply", { doc, page, parent, text, author }),
+  defaultAuthor: () => invoke<string>("annot_default_author"),
   state: (doc: number, page: number, parent: number, state: string, author: string) =>
     invoke<EditState>("annot_state", { doc, page, parent, state, author }),
 };
@@ -92,6 +93,8 @@ interface AnnotStore {
   /** From settings; every comment is written with it. */
   author: string;
   setAuthor: (a: string) => void;
+  /** The OS login name, used while `author` is empty (Rust: annot_default_author). */
+  defaultAuthor: string;
 
   docs: Record<number, DocAnnots>;
   get: (doc: number) => DocAnnots;
@@ -110,6 +113,8 @@ interface AnnotStore {
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 
 export const useAnnot = create<AnnotStore>((set, get) => {
+  /** The name comments are written under: the user's own, else the login name. */
+  const who = () => get().author.trim() || get().defaultAuthor;
   const patch = (doc: number, p: Partial<DocAnnots>) =>
     set((s) => ({ docs: { ...s.docs, [doc]: { ...(s.docs[doc] ?? fresh()), ...p } } }));
   /** Runs one engine call, shows its new state, and re-reads the list. */
@@ -136,6 +141,7 @@ export const useAnnot = create<AnnotStore>((set, get) => {
     style: {},
     setStyle: (style) => set({ style }),
     author: loadAuthor(),
+    defaultAuthor: "",
     setAuthor: (author) => {
       try {
         localStorage.setItem(AUTHOR_KEY, author);
@@ -163,14 +169,14 @@ export const useAnnot = create<AnnotStore>((set, get) => {
     setQuery: (doc, query) => patch(doc, { query }),
 
     add: async (doc, page, what, style) => {
-      const { author } = get();
+      const author = who();
       const r = await run(doc, () => annotApi.add(doc, page, what, style ?? (Object.keys(get().style).length ? get().style : null), author), (x) => x.state);
       if (!r) return null;
       patch(doc, { selected: { page, xref: r.xref } });
       return r.xref;
     },
     edit: async (doc, page, xref, p) => {
-      await run(doc, () => annotApi.edit(doc, page, xref, p, get().author), (s) => s);
+      await run(doc, () => annotApi.edit(doc, page, xref, p, who()), (s) => s);
     },
     remove: async (doc, refs) => {
       if (refs.length === 0) return;
@@ -179,10 +185,13 @@ export const useAnnot = create<AnnotStore>((set, get) => {
     },
     reply: async (doc, page, parent, text) => {
       if (!text.trim()) return;
-      await run(doc, () => annotApi.reply(doc, page, parent, text.trim(), get().author), (x) => x.state);
+      await run(doc, () => annotApi.reply(doc, page, parent, text.trim(), who()), (x) => x.state);
     },
     setResolved: async (doc, page, parent, resolved) => {
-      await run(doc, () => annotApi.state(doc, page, parent, resolved ? "Completed" : "None", get().author), (s) => s);
+      await run(doc, () => annotApi.state(doc, page, parent, resolved ? "Completed" : "None", who()), (s) => s);
     },
   };
 });
+
+// Resolved once at startup; a failure leaves it empty (comments are then written without an author).
+void Promise.resolve(annotApi.defaultAuthor()).then((a) => typeof a === "string" && useAnnot.setState({ defaultAuthor: a }), () => {});

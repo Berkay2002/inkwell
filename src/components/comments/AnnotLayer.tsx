@@ -1,8 +1,8 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAnnot, type Ref } from "../../lib/annot";
 import {
   type Annot, type Handle, type Pt, type Rect4, COLORS, HANDLES, KIND_LABEL, clampRect, hitTest, isBoxed, moveRect,
-  normRect, rectToScreen, resizeRect, rgbHex, roots, stampSize, dateStampName,
+  normRect, placePopover, rectToScreen, resizeRect, rgbHex, roots, stampSize, dateStampName,
 } from "../../lib/annotLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 import { Icon } from "../Icons";
@@ -275,11 +275,28 @@ function Popover({ doc, a, anchor }: { doc: number; a: Annot; anchor: Rect4 }) {
   const hasText = a.kind === "note" || a.kind === "freeText";
   const hasWidth = ["ink", "rectangle", "ellipse", "line", "arrow", "polygon"].includes(a.kind);
   const colored = a.kind !== "stamp";
-  const below = anchor[1] < 150;
+  // Placed in viewport px against the viewer's box, then converted to the page's own coordinates.
+  const el = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<[number, number] | null>(null);
+  useLayoutEffect(() => {
+    const me = el.current;
+    const page = me?.parentElement;
+    const viewer = page?.closest(".viewer");
+    if (!me || !page || !viewer) return;
+    const p = page.getBoundingClientRect();
+    const v = viewer.getBoundingClientRect();
+    const [l, t] = placePopover(
+      [p.left + anchor[0], p.top + anchor[1], p.left + anchor[2], p.top + anchor[3]],
+      [me.offsetWidth, me.offsetHeight],
+      [v.left, v.top, v.right, v.bottom],
+    );
+    setPos((o) => (o && Math.abs(o[0] - (l - p.left)) < 0.5 && Math.abs(o[1] - (t - p.top)) < 0.5 ? o : [l - p.left, t - p.top]));
+  });
   return (
     <div
+      ref={el}
       className="an-pop"
-      style={{ left: (anchor[0] + anchor[2]) / 2, top: below ? anchor[3] + 10 : anchor[1] - 10, transform: `translate(-50%, ${below ? "0" : "-100%"})` }}
+      style={{ left: pos?.[0] ?? 0, top: pos?.[1] ?? 0, visibility: pos ? "visible" : "hidden" }}
       onPointerDown={(e) => e.stopPropagation()}
     >
       {hasText && (

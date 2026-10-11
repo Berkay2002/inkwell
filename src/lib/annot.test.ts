@@ -5,7 +5,7 @@ vi.mock("./edit", () => ({ applyState: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
 import { useAnnot } from "./annot";
-import { type Annot, groupByPage, hitTest, quadsFromRects, resizeRect, timeLabel, toScreen } from "./annotLogic";
+import { type Annot, groupByPage, hitTest, placePopover, quadsFromRects, resizeRect, timeLabel, toScreen } from "./annotLogic";
 import { applyState } from "./edit";
 
 const inv = vi.mocked(invoke);
@@ -85,5 +85,19 @@ describe("annot logic", () => {
     const now = new Date(2026, 9, 11, 15, 0);
     expect(timeLabel("nope", now)).toBe("");
     expect(timeLabel("D:20200102030405Z", now)).toMatch(/^\d{1,2} \w{3} \d\d:\d\d$/);
+  });
+});
+
+describe("popover placement", () => {
+  const bounds: [number, number, number, number] = [0, 100, 1000, 700];
+  it("goes above the selection, centred, when it fits", () => {
+    expect(placePopover([400, 300, 500, 320], [200, 100], bounds)).toEqual([350, 190]);
+  });
+  it("flips below at the top edge and clamps at the sides", () => {
+    expect(placePopover([10, 110, 30, 130], [200, 100], bounds)).toEqual([4, 140]);
+    expect(placePopover([960, 400, 990, 420], [200, 100], bounds)[0]).toBe(796);
+  });
+  it("pins inside the bounds when neither side fits", () => {
+    expect(placePopover([400, 200, 500, 680], [200, 300], bounds)[1]).toBe(396);
   });
 });

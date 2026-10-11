@@ -20,6 +20,12 @@ pub struct Changed {
     pub xref: i32,
 }
 
+/// The login name comments are written under until the user sets another one.
+#[tauri::command]
+pub fn annot_default_author() -> String {
+    super::os_user(|k| std::env::var(k).ok())
+}
+
 #[tauri::command]
 pub async fn annot_list(eng: Eng<'_>, doc: DocId) -> Result<Vec<AnnotDto>> {
     let eng = eng.inner().clone();

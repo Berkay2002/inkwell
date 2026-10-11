@@ -615,6 +615,7 @@ pub fn run() {
             ocr_choose_tesseract,
             ocr_clear_tesseract,
             ocr_start,
+            annot::app::annot_default_author,
             annot::app::annot_list,
             annot::app::annot_add,
             annot::app::annot_edit,

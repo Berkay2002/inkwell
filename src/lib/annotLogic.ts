@@ -213,3 +213,20 @@ export const COLORS: { name: string; rgb: RGB }[] = [
   { name: "Grey", rgb: [0.42, 0.404, 0.373] },
   { name: "Ink", rgb: [0.102, 0.11, 0.125] },
 ];
+
+/**
+ * Where a popover of `size` goes (viewport px) around `anchor`: above it when that fits inside `bounds`,
+ * else below, else pinned inside; centred on the anchor and clamped horizontally. Returns its top-left.
+ */
+export function placePopover(anchor: Rect4, size: [number, number], bounds: Rect4, gap = 10, pad = 4): Pt {
+  const [w, h] = size;
+  let top = anchor[1] - gap - h;
+  if (top < bounds[1] + pad) {
+    top = anchor[3] + gap;
+    // Neither side fits: pin it inside the bounds (it may cover the selection).
+    if (top + h > bounds[3] - pad) top = Math.max(bounds[1] + pad, bounds[3] - pad - h);
+  }
+  const mid = (anchor[0] + anchor[2]) / 2;
+  const left = Math.min(Math.max(mid - w / 2, bounds[0] + pad), Math.max(bounds[0] + pad, bounds[2] - pad - w));
+  return [left, top];
+}

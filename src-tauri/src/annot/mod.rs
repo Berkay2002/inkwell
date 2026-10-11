@@ -306,6 +306,11 @@ pub fn list(doc: &PdfDocument) -> Result<Vec<AnnotDto>> {
 
 // ---- writing -----------------------------------------------------------------------------------
 
+/// The OS login name (Windows `USERNAME`, else `USER`), trimmed; empty when neither is set.
+pub fn os_user(var: impl Fn(&str) -> Option<String>) -> String {
+    ["USERNAME", "USER"].iter().filter_map(|k| var(k)).map(|v| v.trim().to_owned()).find(|v| !v.is_empty()).unwrap_or_default()
+}
+
 fn meta(a: &mut PdfAnnotation, author: &str, created: bool) -> Result<()> {
     if !author.is_empty() {
         a.set_author(author)?;

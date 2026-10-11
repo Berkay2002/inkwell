@@ -154,6 +154,7 @@ await tool("Stamp");
 await tap(at(430, 700));
 await waitCount(8, "the stamp");
 report.created = await kinds();
+report.author = { default: await ev(`${A}.defaultAuthor`), onComments: await ev(`[...new Set(${A}.docs[${doc}].items.map((a) => a.author))]`) };
 
 // ---- select, move, resize, recolour ----
 await tool("Select");

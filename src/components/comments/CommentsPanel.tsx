@@ -124,6 +124,7 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
   const id = doc.id;
   const d = useAnnot((s) => s.docs[id]) ?? NO_DOC;
   const author = useAnnot((s) => s.author);
+  const defaultAuthor = useAnnot((s) => s.defaultAuthor);
   const groups = useMemo(() => groupByPage(d.items, d.filter, d.query), [d.items, d.filter, d.query]);
   const total = roots(d.items).length;
 
@@ -185,7 +186,7 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
           <label className="dim" htmlFor="cm-author">
             Your name
           </label>
-          <input id="cm-author" className="cm-input" value={author} placeholder="Shown on your comments" onChange={(e) => st().setAuthor(e.target.value)} />
+          <input id="cm-author" className="cm-input" value={author} placeholder={defaultAuthor || "Shown on your comments"} onChange={(e) => st().setAuthor(e.target.value)} />
         </div>
       </section>
     </aside>
