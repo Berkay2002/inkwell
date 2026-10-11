@@ -1,6 +1,6 @@
 //! Tauri commands for comments. The UI is the user; the assistant calls the functions in `super` with its turn.
 
-use super::{AnnotDto, NewAnnot, Patch, Style, add_one, delete_many, edit_one, list_all, reply_one, state_one};
+use super::{AnnotList, NewAnnot, Patch, Style, add_one, delete_many, edit_one, list_status, reply_one, state_one};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use serde::Serialize;
@@ -27,9 +27,9 @@ pub fn annot_default_author() -> String {
 }
 
 #[tauri::command]
-pub async fn annot_list(eng: Eng<'_>, doc: DocId) -> Result<Vec<AnnotDto>> {
+pub async fn annot_list(eng: Eng<'_>, doc: DocId) -> Result<AnnotList> {
     let eng = eng.inner().clone();
-    blocking(move || list_all(&eng, doc)).await
+    blocking(move || list_status(&eng, doc)).await
 }
 
 #[tauri::command]
