@@ -485,6 +485,10 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
             if let Some(labels) = &labels {
                 let _ = crate::organize::labels::after_delete(doc, labels, &pages, n as u32);
             }
+            // Article beads on the deleted pages are unlinked in the same step. As with the labels, a failure
+            // here never undoes the delete: the beads then point at a page that is gone, and the article is
+            // listed as damaged (Delete and Properties still work on it).
+            let _ = crate::organize::threads::after_delete(doc);
             let out = (0..n as u32).filter(|p| pages.binary_search(p).is_err()).map(|p| sizes[p as usize]).collect();
             Ok(Some((out, true)))
         }

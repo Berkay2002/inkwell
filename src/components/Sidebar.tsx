@@ -8,6 +8,7 @@ import { useTools } from "../lib/toolsStore";
 import { type DocState, pageLabel, type SidebarPanel, useStore } from "../store";
 import { AllToolsPanel } from "./AllTools";
 import { AttachmentsPanel } from "./AttachmentsPanel";
+import { ArticlesPanel } from "./threads/ArticlesPanel";
 import { MediaPanel } from "./MediaPanel";
 import { Icon, type IconName } from "./Icons";
 import { ContextMenu, pageActions } from "./PageMenu";
@@ -28,12 +29,15 @@ export function Sidebar({ doc }: { doc: DocState }) {
         <PanelTab name="thumbs" label="Pages" />
         <PanelTab name="outline" label="Outline" />
         <PanelTab name="attachments" label="Attachments" icon="paperclip" />
+        <PanelTab name="articles" label="Articles" icon="article" />
         <PanelTab name="media" label="Media" icon="play" />
       </div>
       {panel === "thumbs" ? (
         <Thumbnails key={doc.id} doc={doc} />
       ) : panel === "outline" ? (
         <Outline key={doc.id} doc={doc} />
+      ) : panel === "articles" ? (
+        <ArticlesPanel key={doc.id} doc={doc} />
       ) : panel === "attachments" ? (
         <AttachmentsPanel key={doc.id} doc={doc} />
       ) : (
