@@ -19,15 +19,22 @@ waits for everything); it opens from the Tools menu and the command palette.
 
 ## How Acrobat Pro does it (study 13-compare, docs/study/screens/13-compare/)
 
-- Tools → **Compare a file**. The landing is a full-page two-slot form: "Old file" and "New file", each a big drop target
-  with "Select file", a small page-range per file, and a swap arrow; under it a **Settings** link ("Text", "Images",
-  "Annotations", "Headers and footers", "Background"... options) and a **Compare** button.
-- The result opens a **summary** first (total number of differences, one line per kind: Replaced, Inserted, Deleted,
-  Moved, Style, Image), then two panes side by side with synced scroll, a **changes list** at the left of the panes
-  filtered by kind, and "Share / Save report" at the top right. Differences are marked on the pages with coloured boxes
-  (replaced blue, inserted green, deleted red).
-- (Details above are from Acrobat's documentation and the earlier study; the screenshots and exact wording are filled in
-  from `docs/study/13-compare.md` when the study lands.)
+Source: `docs/study/13-compare.md`, partly seen (landing screen, `screens/13-compare/01-landing.png`) and partly read from
+Acrobat's shipped resources (result screen, report). Its result screen could not be driven, so the second half is wording
+and structure, not observed behaviour.
+
+- All tools → **Compare files**. The landing is a full-page form "Select Files to Compare": **Old File** and **New File**
+  as two large first-page thumbnails with the file name, **swap** arrows between them, **Change File** and a "…" menu per
+  file, a **Compare text only** checkbox, **Settings** and a blue **Compare** button.
+- Settings: page range per file, document type (Auto / text flows / page to page / image only) and what to include
+  (Text, Images, Headers/footers, Annotations, Formatting, Background) with Reset.
+- Result: a **summary** page (total changes, Replacements / Insertions / Deletions, Styling and Annotations, "Go to first
+  change") and two layouts: **side by side** with previous / next change, an include-changes filter and a change list
+  panel, and an **overlay** with an old / new slider. Colours per kind (insert, delete, replace, move) with an opacity
+  choice.
+- Wording to borrow: `Font "A" changed to "B"`, size, colour, "Page inserted / deleted", a plain message for identical
+  files, and a warning before a long comparison that offers page range or text only.
+- Not seen: progress and cancel, the saved report, timings.
 
 ## How pdfcraft does it (E:\Dev\pdfcraft: crates/compare, crates/ui-egui/src/compare_ui.rs)
 
