@@ -91,6 +91,7 @@ function CompareResult() {
 
   useEffect(() => {
     let live = true;
+    let finished = false;
     const id = ++jobSeq;
     setCmp("loading");
     setCur(null);
@@ -98,15 +99,20 @@ function CompareResult() {
     setJob(id);
     historyCompareRun(id, req.doc, req.a, req.b, (p) => live && setProgress(p)).then(
       (c) => {
+        finished = true;
         if (!live) return;
         setCmp(c);
         setCur(c.changes.length ? 0 : null);
       },
-      (e) => live && setCmp({ error: String(e) }),
+      (e) => {
+        finished = true;
+        if (live) setCmp({ error: String(e) });
+      },
     );
     return () => {
       live = false;
-      void compareCancel(id).catch(() => {});
+      // a job that already finished has nothing to stop
+      if (!finished) void compareCancel(id).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req.doc, aKey, bKey, run]);

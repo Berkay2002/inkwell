@@ -938,6 +938,45 @@ fn text_edit_and_format_change_are_separate_changes() {
 }
 
 #[test]
+fn a_font_tweak_does_not_hide_a_graphics_edit() {
+    let a = DocSpec { pages: vec![styled("Either party may end this agreement", 12.0, [0.0; 3], "F1")], ..Default::default() };
+    let mut b = DocSpec { pages: vec![styled("Either party may end this agreement", 12.0, [0.0; 3], "F2")], ..Default::default() };
+    // the font change alone is just the formatting change
+    assert_eq!(kinds(&cmp(&a, &b)), vec![ChangeKind::FormatChanged]);
+    // but a box added next to it is a change of its own
+    b.pages[0].boxes = vec![([10.0, 10.0, 50.0, 50.0], 0.5)];
+    let mut k = kinds(&cmp(&a, &b));
+    k.sort();
+    assert_eq!(k, vec![ChangeKind::FormatChanged, ChangeKind::PageContentChanged]);
+}
+
+#[test]
+fn a_recolour_with_the_colour_set_outside_the_text_object_is_only_formatting() {
+    // `boxes` paint with a grey level set before the text: the same box in both files, text recoloured in B
+    let mut a = DocSpec { pages: vec![styled("Payment terms apply", 12.0, [0.0; 3], "F1")], ..Default::default() };
+    a.pages[0].boxes = vec![([10.0, 10.0, 50.0, 50.0], 0.5)];
+    let mut b = DocSpec { pages: vec![styled("Payment terms apply", 12.0, [0.8, 0.0, 0.0], "F1")], ..Default::default() };
+    b.pages[0].boxes = a.pages[0].boxes.clone();
+    assert_eq!(kinds(&cmp(&a, &b)), vec![ChangeKind::FormatChanged]);
+    // a moved box is still a graphics edit
+    b.pages[0].boxes = vec![([10.0, 10.0, 80.0, 50.0], 0.5)];
+    let mut k = kinds(&cmp(&a, &b));
+    k.sort();
+    assert!(k.contains(&ChangeKind::PageContentChanged), "{k:?}");
+}
+
+#[test]
+fn font_names_that_spell_one_face_differently_are_not_a_format_change() {
+    use super::semantic::font_key;
+    assert_eq!(font_key("Arial,Bold"), font_key("Arial-BoldMT"));
+    assert_eq!(font_key("ArialMT"), font_key("Arial"));
+    assert_eq!(font_key("Times New Roman,Italic"), font_key("TimesNewRomanPS-ItalicMT"));
+    assert_eq!(font_key("Helvetica-Oblique"), font_key("Helvetica-Italic"));
+    assert_ne!(font_key("Arial-Bold"), font_key("Arial"));
+    assert_ne!(font_key("Arial"), font_key("Calibri"));
+}
+
+#[test]
 fn same_style_is_no_format_change() {
     let a = DocSpec { pages: vec![styled("Quiet page", 12.0, [0.2, 0.2, 0.2], "F1")], ..Default::default() };
     let c = cmp(&a, &a.clone());

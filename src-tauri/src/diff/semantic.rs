@@ -417,7 +417,16 @@ fn content_changes(sa: &Snap, sb: &Snap, ia: usize, ib: usize, vanished: &[Rect4
     if !ocr_added {
         let before = ch.len();
         text_changes(sa, sb, ia, ib, &wa, &wb, ch);
-        explained |= ch.len() > before;
+        let new = &ch[before..];
+        let only_format = !new.is_empty() && new.iter().all(|c| c.kind == ChangeKind::FormatChanged);
+        if only_format {
+            // A restyled word explains the page only when nothing else it paints moved: otherwise a font tweak
+            // would hide a graphics edit. A recoloured word often has its colour set outside the text object.
+            let recoloured = new.iter().any(|c| matches!(&c.detail, Detail::Format { props, .. } if props.iter().any(|p| p.name == "colour")));
+            explained |= if recoloured { pa.gfx_nc == pb.gfx_nc } else { pa.gfx == pb.gfx };
+        } else {
+            explained |= !new.is_empty();
+        }
     }
 
     if !explained {
@@ -589,6 +598,25 @@ fn text_changes(sa: &Snap, sb: &Snap, ia: usize, ib: usize, wa: &[Word], wb: &[W
     }
 }
 
+/// What two spellings of a font name must share to be the same font: "Arial,Bold", "Arial-BoldMT" and "ArialMT-Bold"
+/// are one face. Lower case, "," and "-" alike, and the "MT" / "PS" / "PSMT" foundry suffixes dropped from each part.
+pub(super) fn font_key(name: &str) -> String {
+    let lower = name.to_ascii_lowercase().replace(' ', "");
+    let mut parts: Vec<String> = Vec::new();
+    for part in lower.split([',', '-']).filter(|p| !p.is_empty()) {
+        let mut p = part;
+        loop {
+            let q = ["psmt", "mt", "ps"].iter().find_map(|s| p.strip_suffix(s).filter(|r| !r.is_empty()));
+            match q {
+                Some(r) => p = r,
+                None => break,
+            }
+        }
+        parts.push(p.replace("oblique", "italic"));
+    }
+    parts.join("-")
+}
+
 type FormatRun<'a> = (Vec<FormatProp>, Vec<&'a Word>, Vec<&'a Word>);
 
 /// Same words, set differently: consecutive equal words whose font, size or colour changed the same way
@@ -598,8 +626,8 @@ fn format_changes(ia: usize, ib: usize, wa: &[Word], wb: &[Word], atoms: &[(RunO
     let props = |x: &Word, y: &Word| -> Vec<FormatProp> {
         let (sx, sy) = (&x.style, &y.style);
         let mut v = Vec::new();
-        if !sx.font.eq_ignore_ascii_case(&sy.font) {
-            v.push(FormatProp { name: "font".into(), old: sx.font.clone(), new: sy.font.clone() });
+        if sx.font != sy.font && font_key(&sx.font) != font_key(&sy.font) {
+            v.push(FormatProp { name: "font".into(), old: sx.font.to_string(), new: sy.font.to_string() });
         }
         if sx.size2 != sy.size2 {
             let pt = |s: i32| if s % 2 == 0 { format!("{}", s / 2) } else { format!("{}.5", s / 2) };

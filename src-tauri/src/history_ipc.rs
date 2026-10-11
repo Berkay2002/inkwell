@@ -116,6 +116,13 @@ struct Marks {
     autosaved_rev: u32,
 }
 
+/// A finished comparison with the bytes it read: whoever draws on the result must use these very bytes.
+pub struct Compared {
+    pub cmp: Arc<Comparison>,
+    pub a: Arc<(BytesId, Vec<u8>)>,
+    pub b: Arc<(BytesId, Vec<u8>)>,
+}
+
 pub struct History {
     root: PathBuf,
     store: Mutex<Option<Arc<Store>>>,
@@ -507,30 +514,44 @@ impl History {
     }
 
     pub fn compare(&self, doc: Option<EngDoc>, a: &Source, b: &Source) -> Result<Comparison, String> {
-        self.compare_job(doc, a, b, &AtomicBool::new(false), &mut |_| {}).map(|c| (*c).clone())
+        self.compare_job(doc, a, b, &AtomicBool::new(false), &mut |_| {}).map(|j| (*j.cmp).clone())
     }
 
     /// The comparison of two sources, from the cache when these exact bytes were compared a moment ago
-    /// (the report and the view ask for the same one). `cancel` is polled between pages.
-    pub fn compare_job(&self, doc: Option<EngDoc>, a: &Source, b: &Source, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<Arc<Comparison>, String> {
+    /// (the report and the view ask for the same one). `cancel` is polled between pages. The bytes come back with
+    /// it: whoever draws on the result (the report) must use the very bytes that were compared.
+    pub fn compare_job(&self, doc: Option<EngDoc>, a: &Source, b: &Source, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<Compared, String> {
         let (a, b) = (self.load(doc, a)?, self.load(doc, b)?);
         let key = (a.0, b.0);
         if let Some(c) = self.compared.lock().get(&key) {
-            return Ok(c.clone());
+            return Ok(Compared { cmp: c.clone(), a, b });
         }
         let _g = self.diff_lock.lock();
+        // another job may have finished this very comparison while this one waited for the lock
+        if let Some(c) = self.compared.lock().get(&key) {
+            return Ok(Compared { cmp: c.clone(), a, b });
+        }
         let c = Arc::new(diff::compare_with(&a.1, &b.1, &CompareOptions::default(), cancel, on).map_err(err)?);
         self.compared.lock().put(key, c.clone());
-        Ok(c)
+        Ok(Compared { cmp: c, a, b })
     }
 
-    /// The comparison of two sources as a PDF report. Returns its bytes; the caller writes them.
+    /// The comparison of two sources as a PDF report. Returns its bytes; the caller writes them. The report draws
+    /// the pages from the same bytes the comparison read, even if a file changed on disk in between.
     pub fn report(&self, doc: Option<EngDoc>, a: &Source, b: &Source, names: (&str, &str), date: &str, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<Vec<u8>, String> {
-        let cmp = self.compare_job(doc, a, b, cancel, on)?;
-        let (a, b) = (self.load(doc, a)?, self.load(doc, b)?);
+        let job = self.compare_job(doc, a, b, cancel, on)?;
         let _g = self.diff_lock.lock();
-        let input = diff::report::ReportInput { a: &a.1, b: &b.1, a_name: names.0, b_name: names.1, date };
-        diff::report::build(&input, &cmp, cancel, on).map_err(err)
+        let input = diff::report::ReportInput { a: &job.a.1, b: &job.b.1, a_name: names.0, b_name: names.1, date };
+        diff::report::build(&input, &job.cmp, cancel, on).map_err(err)
+    }
+
+    /// The report, written to `dest`. A job cancelled any time before the file is replaced leaves `dest` as it was.
+    pub fn report_to(&self, doc: Option<EngDoc>, a: &Source, b: &Source, names: (&str, &str), date: &str, dest: &Path, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<(), String> {
+        let bytes = self.report(doc, a, b, names, date, cancel, on)?;
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(err(diff::DiffError::Cancelled));
+        }
+        write_replace(dest, &bytes).map_err(|e| format!("could not write {}: {e}", dest.display()))
     }
 
     pub fn render(&self, doc: Option<EngDoc>, src: &Source, page: u32, scale: f32) -> Result<Vec<u8>, String> {
@@ -708,7 +729,7 @@ pub async fn history_compare_run(
         h.compare_job(doc, &a, &b, &guard.cancel, &mut |p| {
             let _ = on_progress.send(p);
         })
-        .map(|c| (*c).clone())
+        .map(|j| (*j.cmp).clone())
     })
     .await
 }
@@ -735,10 +756,9 @@ pub async fn history_compare_report(
     let h = h.inner().clone();
     let guard = jobs.inner().begin(job);
     off(move || {
-        let bytes = h.report(doc, &a, &b, (&names.0, &names.1), &date, &guard.cancel, &mut |p| {
+        h.report_to(doc, &a, &b, (&names.0, &names.1), &date, Path::new(&dest), &guard.cancel, &mut |p| {
             let _ = on_progress.send(p);
         })?;
-        write_replace(Path::new(&dest), &bytes).map_err(|e| format!("could not write {dest}: {e}"))?;
         window.state::<Paths>().learn(&dest);
         Ok(dest)
     })
@@ -1129,8 +1149,9 @@ mod tests {
 
         let c1 = h.compare_job(Some(doc), &a, &b, &no, &mut |_| {}).unwrap();
         let c2 = h.compare_job(Some(doc), &a, &b, &no, &mut |_| {}).unwrap();
-        assert!(Arc::ptr_eq(&c1, &c2), "same bytes, same comparison");
-        assert!(!c1.identical);
+        assert!(Arc::ptr_eq(&c1.cmp, &c2.cmp), "same bytes, same comparison");
+        assert!(Arc::ptr_eq(&c1.a, &c2.a) && Arc::ptr_eq(&c1.b, &c2.b), "and the same bytes come back with it");
+        assert!(!c1.cmp.identical);
 
         let reg = Paths::default();
         let dest = dir.join("report.pdf").to_string_lossy().into_owned();
@@ -1151,8 +1172,42 @@ mod tests {
         let (fa, fb) = (dir.join("a.pdf"), dir.join("b.pdf"));
         std::fs::copy(sample("edit-source.pdf"), &fa).unwrap();
         std::fs::copy(sample("edit-out-02-addtext.pdf"), &fb).unwrap();
-        let r = h2.report(None, &Source::File { path: fa }, &Source::File { path: fb }, ("a", "b"), "d", &flag, &mut |_| {});
+        let r = h2.report_to(None, &Source::File { path: fa.clone() }, &Source::File { path: fb.clone() }, ("a", "b"), "d", &dest2, &flag, &mut |_| {});
         assert!(r.unwrap_err().contains("cancelled"));
         assert!(!dest2.exists());
+
+        // cancelled while the report was being made (here: at its very last progress report, right before the file
+        // is serialised and written): nothing is written either, and an old file at the destination is left alone
+        let old = dir.join("existing.pdf");
+        std::fs::write(&old, b"old contents").unwrap();
+        let late = AtomicBool::new(false);
+        // (the comparison itself is cached by now, so only the report's own progress reaches the callback)
+        h2.compare_job(None, &Source::File { path: fa.clone() }, &Source::File { path: fb.clone() }, &no, &mut |_| {}).unwrap();
+        let r = h2.report_to(None, &Source::File { path: fa }, &Source::File { path: fb }, ("a", "b"), "d", &old, &late, &mut |p| {
+            if p.stage == diff::Stage::Pages && p.done == p.total {
+                late.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        assert!(r.unwrap_err().contains("cancelled"));
+        assert_eq!(std::fs::read(&old).unwrap(), b"old contents");
+    }
+
+    #[test]
+    fn a_cancel_of_a_finished_job_is_dropped_and_early_ones_are_bounded() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let jobs = Arc::new(crate::tools::Jobs::default());
+        // a cancel that beat its job is held for it; one that comes after the job finished is not
+        jobs.cancel(41);
+        let g = jobs.begin(41);
+        assert!(g.cancel.load(Relaxed));
+        drop(g);
+        jobs.cancel(41);
+        assert!(!jobs.begin(41).cancel.load(Relaxed), "a finished job's cancel must not reach a later job with the same id");
+        // ids nobody ever began cannot pile up
+        for id in 1000..1500 {
+            jobs.cancel(id);
+        }
+        assert!(!jobs.begin(1000).cancel.load(Relaxed), "only the last few early cancels are kept");
+        assert!(jobs.begin(1499).cancel.load(Relaxed));
     }
 }

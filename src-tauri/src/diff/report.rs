@@ -248,7 +248,9 @@ fn plural(n: u32, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// Builds the report. `cancel` is polled per page written; `on` gets (written, total) as `Stage::Pages`.
+/// Builds the report. `cancel` is polled every few changes of the list, per picture page and once more before the
+/// file is serialised; `on` gets (units done, units in all) as `Stage::Pages`, a unit being one change in the list or one
+/// picture page.
 pub fn build(input: &ReportInput, cmp: &Comparison, cancel: &AtomicBool, on: &mut dyn FnMut(Progress)) -> Result<Vec<u8>> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_inner(input, cmp, cancel, on))).unwrap_or(Err(DiffError::Panic))
 }
@@ -257,13 +259,30 @@ fn build_inner(input: &ReportInput, cmp: &Comparison, cancel: &AtomicBool, on: &
     let _ = mupdf::Context::get();
     let mut w = Writer::new()?;
     let width = PAGE_W - 2.0 * MARGIN;
-    let check = |w: &mut Writer, on: &mut dyn FnMut(Progress), total: u32| -> Result<()> {
+    // The pictures are the pages that have a changed page on them, capped; they are known before the list is written,
+    // so the whole run has a real total: one unit per change in the list, one per picture page.
+    let mut pairs: Vec<(Option<u32>, Option<u32>)> = Vec::new();
+    {
+        let mut seen = std::collections::HashSet::new();
+        for c in &cmp.changes {
+            if page_of(c).is_some() && seen.insert((c.a_page, c.b_page)) {
+                pairs.push((c.a_page, c.b_page));
+            }
+        }
+    }
+    pairs.sort_by_key(|&(a, b)| b.or(a).unwrap_or(u32::MAX));
+    let shown = pairs.len().min(MAX_PICTURE_PAGES);
+    let units = (cmp.changes.len() + shown).max(1) as u32;
+    let mut done = 0u32;
+    let mut tick = |on: &mut dyn FnMut(Progress), n: u32| -> Result<()> {
+        done += n;
         if cancel.load(Ordering::Relaxed) {
             return Err(DiffError::Cancelled);
         }
-        on(Progress { stage: Stage::Pages, done: w.pages, total });
+        on(Progress { stage: Stage::Pages, done, total: units });
         Ok(())
     };
+    tick(on, 0)?;
 
     // ---- summary
     w.page()?;
@@ -301,15 +320,11 @@ fn build_inner(input: &ReportInput, cmp: &Comparison, cancel: &AtomicBool, on: &
     }
 
     // ---- the list
-    let mut groups: Vec<(Option<u32>, Vec<&Change>)> = Vec::new();
+    let mut by_page: std::collections::BTreeMap<u32, Vec<&Change>> = std::collections::BTreeMap::new();
     for c in &cmp.changes {
-        let p = page_of(c);
-        match groups.iter_mut().find(|g| g.0 == p) {
-            Some(g) => g.1.push(c),
-            None => groups.push((p, vec![c])),
-        }
+        by_page.entry(page_of(c).unwrap_or(u32::MAX)).or_default().push(c);
     }
-    groups.sort_by_key(|g| g.0.unwrap_or(u32::MAX));
+    let groups: Vec<(Option<u32>, Vec<&Change>)> = by_page.into_iter().map(|(p, v)| ((p != u32::MAX).then_some(p), v)).collect();
     if !groups.is_empty() {
         w.y -= 22.0;
         w.room(60.0)?;
@@ -326,7 +341,10 @@ fn build_inner(input: &ReportInput, cmp: &Comparison, cancel: &AtomicBool, on: &
         w.text(MARGIN, w.y, 11.0, true, DIM, &title);
         w.fill([MARGIN, w.y - 5.0, MARGIN + width, w.y - 4.5], RULE);
         w.y -= 6.0;
-        for c in items {
+        for (k, c) in items.iter().enumerate() {
+            if k > 0 && k % 16 == 0 {
+                tick(on, 16)?;
+            }
             w.room(30.0)?;
             let (colour, glyph) = tone_of(c);
             w.y -= 3.0;
@@ -362,27 +380,14 @@ fn build_inner(input: &ReportInput, cmp: &Comparison, cancel: &AtomicBool, on: &
             }
             w.y -= 2.0;
         }
-        check(&mut w, on, 0)?;
+        tick(on, (items.len() % 16) as u32)?;
     }
 
     // ---- the pages, side by side
-    let mut pairs: Vec<(Option<u32>, Option<u32>)> = Vec::new();
-    for c in &cmp.changes {
-        if page_of(c).is_none() {
-            continue;
-        }
-        let key = (c.a_page, c.b_page);
-        if !pairs.contains(&key) {
-            pairs.push(key);
-        }
-    }
-    pairs.sort_by_key(|&(a, b)| b.or(a).unwrap_or(u32::MAX));
-    let shown = pairs.len().min(MAX_PICTURE_PAGES);
     let (ia, ib) = (BytesId::of(input.a), BytesId::of(input.b));
     let col = (width - 16.0) / 2.0;
-    for (n, &(pa, pb)) in pairs.iter().take(shown).enumerate() {
-        let total = (w.pages + (shown - n) as u32).max(1);
-        check(&mut w, on, total)?;
+    for &(pa, pb) in pairs.iter().take(shown) {
+        tick(on, 1)?;
         w.page()?;
         w.y -= 16.0;
         let head = match (pa, pb) {
@@ -428,7 +433,11 @@ fn build_inner(input: &ReportInput, cmp: &Comparison, cancel: &AtomicBool, on: &
     }
 
     w.flush()?;
-    on(Progress { stage: Stage::Pages, done: w.pages, total: w.pages });
+    // the last chance to stop before the file is serialised: after this the caller writes it
+    if cancel.load(Ordering::Relaxed) {
+        return Err(DiffError::Cancelled);
+    }
+    on(Progress { stage: Stage::Pages, done: units, total: units });
     let mut out = Vec::new();
     let mut opts = PdfWriteOptions::default();
     opts.set_compress(true).set_compress_images(true).set_compress_fonts(true).set_garbage_level(2);
