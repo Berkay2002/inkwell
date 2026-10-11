@@ -18,6 +18,7 @@ use super::{
 use mupdf::pdf::{FieldFlags, PdfDocument, PdfObject};
 use serde::Serialize;
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 /// What the scripts of a step raised, for the UI.
@@ -495,7 +496,7 @@ fn put_mk_colour(doc: &PdfDocument, widget: &mut PdfObject, key: &str, c: &Optio
 }
 
 /// What a signed document keeps scripts from changing: every field, or those a signature's `/Lock` names.
-enum Lock {
+pub(crate) enum Lock {
     All,
     Include(Vec<String>),
     Exclude(Vec<String>),
@@ -534,7 +535,7 @@ fn reference_lock(v: &PdfObject) -> Option<Lock> {
 
 /// The locks of the signatures that carry a signature (`/V`): the field's `/Lock`, else what its `/Reference` says.
 /// A signature that names neither (a plain approval signature) leaves the form to be filled, as the specification has it.
-fn locks_of(entries: &[Entry]) -> Vec<Lock> {
+pub(crate) fn locks_of(entries: &[Entry]) -> Vec<Lock> {
     per_field(entries)
         .into_iter()
         .filter(|e| e.kind == FieldKind::Signature)
@@ -548,8 +549,22 @@ fn locks_of(entries: &[Entry]) -> Vec<Lock> {
         .collect()
 }
 
+/// Whether a signature in the document certifies it (DocMDP `/P` 2 or 3, 2 when absent). Such a document allows form
+/// values to change, and nothing else: read-only, required, display, colours and text size would break the certification.
+fn certified(entries: &[Entry]) -> bool {
+    per_field(entries).into_iter().filter(|e| e.kind == FieldKind::Signature).any(|e| {
+        let Some(v) = geti(&e.field, "V").filter(|v| v.is_dict().unwrap_or(false)) else { return false };
+        let Some(refs) = get(&v, "Reference") else { return false };
+        (0..refs.len().unwrap_or(0).min(16) as i32).any(|i| {
+            let Some(r) = refs.get_array(i).ok().flatten() else { return false };
+            get(&r, "TransformMethod").as_ref().and_then(text).as_deref() == Some("DocMDP")
+                && matches!(get(&r, "TransformParams").and_then(|p| int_of(&p, "P")).unwrap_or(2), 2 | 3)
+        })
+    })
+}
+
 /// A script may not write to a signature widget, nor to a field a signature in the document covers.
-fn locked(locks: &[Lock], e: &Entry) -> bool {
+pub(crate) fn locked(locks: &[Lock], e: &Entry) -> bool {
     let named = |names: &[String]| names.iter().any(|n| e.name == *n || e.name.starts_with(&format!("{n}.")));
     e.kind == FieldKind::Signature
         || locks.iter().any(|l| match l {
@@ -568,13 +583,19 @@ pub(crate) fn apply_changes(rt: &Rt, changed: &[FieldChange]) -> Result<Vec<u32>
     let doc = rt.doc();
     let entries = rt.entries()?;
     let locks = locks_of(entries);
+    let values_only = certified(entries);
     let mut pages = Vec::new();
     for ch in changed {
-        let (new, props) = (&ch.state, &ch.props);
+        let new = &ch.state;
         let Some(e) = entries.iter().find(|e| e.name == new.name) else { continue };
         if locked(&locks, e) {
             rt.note(LogLevel::Warn, Some(&new.name), format!("a script's change to [ {} ] was not written: the document is signed", new.name));
             continue;
+        }
+        // A certified document takes values only: the other properties would break the certification.
+        let props: BTreeSet<Prop> = if values_only { ch.props.iter().copied().filter(|p| *p == Prop::Value).collect() } else { ch.props.clone() };
+        if props.len() < ch.props.len() {
+            rt.note(LogLevel::Warn, Some(&new.name), format!("a script's change to the properties of [ {} ] was not written: the document is certified, so scripts may change values only", new.name));
         }
         let cur = field_state(entries, e);
         let widgets: Vec<&Entry> = entries.iter().filter(|w| w.node == e.node).collect();

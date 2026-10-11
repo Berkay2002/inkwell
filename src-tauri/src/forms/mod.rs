@@ -728,6 +728,10 @@ fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec
     if flag(ff, FieldFlags::READ_ONLY) {
         return Err(bad(format!("The field [ {} ] is read-only", e.name)));
     }
+    // Typing never silently breaks a signature: a field a signature covers (its /Lock, a FieldMDP or a DocMDP of 1) is refused.
+    if e.kind != FieldKind::Signature && scripts::locked(&scripts::locks_of(entries), e) {
+        return Err(bad(format!("The field [ {} ] is locked by a signature", e.name)));
+    }
     let mut touched = vec![page];
     let mut changed = Vec::new();
     let value = match e.kind {
@@ -821,11 +825,12 @@ pub fn reset(doc: &mut PdfDocument, which: Option<&[i32]>) -> Result<Vec<u32>> {
 
 fn reset_rt(rt: &Rt, which: Option<&[i32]>) -> Result<Vec<u32>> {
     let entries = rt.entries()?;
+    let locks = scripts::locks_of(entries);
     let mut done: Vec<i32> = Vec::new();
     let mut touched = Vec::new();
     for e in entries {
         // Only fields that hold something other than their default are touched.
-        if done.contains(&e.node) || !reset_differs(entries, e, which) {
+        if done.contains(&e.node) || !reset_differs(entries, &locks, e, which) {
             continue;
         }
         done.push(e.node);
@@ -859,16 +864,18 @@ fn reset_rt(rt: &Rt, which: Option<&[i32]>) -> Result<Vec<u32>> {
 /// True when resetting `which` would change something (so an empty reset is not an undo step).
 fn reset_would_change(doc: &PdfDocument, which: Option<&[i32]>) -> Result<bool> {
     let entries = scan(doc)?;
-    Ok(entries.iter().any(|e| reset_differs(&entries, e, which)))
+    let locks = scripts::locks_of(&entries);
+    Ok(entries.iter().any(|e| reset_differs(&entries, &locks, e, which)))
 }
 
-/// Whether `e` is one of the fields being reset and holds something other than its default.
-fn reset_differs(entries: &[Entry], e: &Entry, which: Option<&[i32]>) -> bool {
+/// Whether `e` is one of the fields being reset and holds something other than its default. A field a signature
+/// covers is left as it is.
+fn reset_differs(entries: &[Entry], locks: &[scripts::Lock], e: &Entry, which: Option<&[i32]>) -> bool {
     let pick = match which {
         None => true,
         Some(w) => w.contains(&e.xref) || w.contains(&e.node),
     };
-    if !pick || matches!(e.kind, FieldKind::Button | FieldKind::Signature) || flag(field_ff(e), FieldFlags::READ_ONLY) {
+    if !pick || matches!(e.kind, FieldKind::Button | FieldKind::Signature) || flag(field_ff(e), FieldFlags::READ_ONLY) || scripts::locked(locks, e) {
         return false;
     }
     let is_button = matches!(e.kind, FieldKind::Checkbox | FieldKind::Radio);
@@ -905,7 +912,7 @@ pub struct ScriptsState {
     pub enabled: bool,
     /// They can run now (not taken down by timeouts or a worker that stopped answering).
     pub usable: bool,
-    /// They may be turned on again (not after the worker stopped answering: it is left abandoned for the session).
+    /// They may be turned on again (not after the worker stopped answering: it is left abandoned until the app exits).
     pub can_enable: bool,
     pub log: Vec<js::LogLine>,
 }

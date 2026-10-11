@@ -1475,8 +1475,8 @@ fn scripts_write_nothing_to_a_signed_document_or_to_a_signature_widget() {
     assert!(!field(&eng, id, "Sig").read_only, "a signature widget is never written by a script");
     eng.undo(id).unwrap();
     assert_eq!(field(&eng, id, "Other").value, "");
-    // Signed: nothing else is written either, and the typed value still lands.
-    sign(&eng, id, Some(("All", &[])), None);
+    // Signed (covering Other): nothing is written to it either, and the typed value still lands.
+    sign(&eng, id, Some(("Include", &["Other"])), None);
     fill(&eng, id, "Src", text("b")).unwrap();
     let o = field(&eng, id, "Other");
     assert_eq!((o.value.as_str(), o.read_only, o.fill_color), ("", false, None));
@@ -1505,8 +1505,59 @@ fn an_approval_signature_with_no_lock_leaves_the_form_to_be_filled_and_a_docmdp_
     assert_eq!(field(&eng, id, "Other").value, "x", "a plain approval signature locks no field");
     eng.undo(id).unwrap();
     sign(&eng, id, None, Some(1));
-    fill(&eng, id, "Src", text("b")).unwrap();
+    assert!(fill(&eng, id, "Src", text("b")).is_err(), "DocMDP 1 allows no change, not even typing");
     assert_eq!(field(&eng, id, "Other").value, "", "DocMDP 1 allows no change");
+}
+
+#[test]
+fn a_reset_leaves_a_field_a_signature_covers_alone() {
+    let (eng, id, _) = script_form("js-signed-reset", &["Locked", "Free"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+    fill(&eng, id, "Locked", text("keep")).unwrap();
+    fill(&eng, id, "Free", text("drop")).unwrap();
+    sign(&eng, id, Some(("Include", &["Locked"])), None);
+    // What `this.resetForm()` asks for is this reset, of every field.
+    reset_one(&eng, id, None, EditSource::User).unwrap();
+    assert_eq!(field(&eng, id, "Locked").value, "keep", "the signature covers it");
+    assert_eq!(field(&eng, id, "Free").value, "");
+    // With nothing but covered fields left to reset, there is no step to take.
+    let before = steps(&eng, id);
+    reset_one(&eng, id, None, EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), before);
+}
+
+#[test]
+fn typing_into_a_field_a_signature_covers_is_refused_with_a_message() {
+    let (eng, id, _) = script_form("js-signed-typing", &["Locked", "Free"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+    sign(&eng, id, Some(("Include", &["Locked"])), None);
+    let err = fill(&eng, id, "Locked", text("x")).unwrap_err().to_string();
+    assert!(err.contains("locked by a signature") && err.contains("Locked"), "{err}");
+    assert_eq!(field(&eng, id, "Locked").value, "");
+    fill(&eng, id, "Free", text("y")).unwrap();
+    assert_eq!(field(&eng, id, "Free").value, "y");
+}
+
+#[test]
+fn a_certified_document_takes_scripted_values_but_not_other_properties() {
+    for p in [2, 3] {
+        let (eng, id, _) = script_form(&format!("js-certified-{p}"), &["Src", "Other"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+        script(
+            &eng,
+            id,
+            "Src",
+            "V",
+            "var o = this.getField(\"Other\"); o.value = \"x\"; o.readonly = true; o.required = true; o.fillColor = color.red; o.textColor = color.blue; o.display = display.hidden;",
+        );
+        sign(&eng, id, None, Some(p));
+        fill(&eng, id, "Src", text("a")).unwrap();
+        let o = field(&eng, id, "Other");
+        assert_eq!(o.value, "x", "P {p}: a value is what a certified form takes");
+        assert!(!o.read_only && !o.required && !o.hidden, "P {p}: {o:?}");
+        assert_eq!((o.fill_color, o.text_color), (None, [0.0, 0.0, 0.0]), "P {p}");
+        assert!(scripts_state(&eng, id).unwrap().log.iter().any(|l| l.message.contains("certified")), "P {p}");
+    }
 }
 
 #[test]
