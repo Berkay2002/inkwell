@@ -36,10 +36,18 @@ struct Scratch(std::path::PathBuf);
 
 impl Scratch {
     fn new() -> Result<Self, Error> {
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("inkwell-estimate-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-        std::fs::create_dir_all(&dir)?;
-        Ok(Self(dir))
+        use std::hash::{BuildHasher, Hasher};
+        // Unpredictable name, and `create_dir` (not `create_dir_all`) fails on anything already there,
+        // so a pre-planted folder or link in the shared temp dir is never used.
+        loop {
+            let nonce = std::collections::hash_map::RandomState::new().build_hasher().finish();
+            let dir = std::env::temp_dir().join(format!("inkwell-estimate-{}-{nonce:016x}", std::process::id()));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Ok(Self(dir)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 }
 
