@@ -22,6 +22,7 @@ use mupdf::{
     text_page::{TextBlockType, TextPageFlags},
 };
 use parking_lot::{Mutex, RwLock};
+use crate::search::SearchOpts;
 use pool::{Job, Pool, Prio, class};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -112,9 +113,13 @@ pub struct TextLine {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SearchEvent {
     #[serde(rename_all = "camelCase")]
-    Hits { search: u64, page: u32, rects: Vec<[f32; 4]> },
+    Hits { search: u64, page: u32, hits: Vec<crate::search::Hit> },
+    /// After each chunk of pages: how many of the `total` have been read.
     #[serde(rename_all = "camelCase")]
-    Done { search: u64, hits: u32, pages: u32 },
+    Progress { search: u64, scanned: u32, total: u32 },
+    /// `capped`: the search stopped at `search::DOC_CAP` hits; the ones listed are the first.
+    #[serde(rename_all = "camelCase")]
+    Done { search: u64, hits: u32, pages: u32, capped: bool },
 }
 
 pub enum TileOutcome {
@@ -870,29 +875,50 @@ impl Engine {
 
     // ---- search ---------------------------------------------------------------------------
 
-    /// Starts a search over every page. Supersedes any search already running on the document.
-    /// Returns the search id carried by every event.
+    /// Starts a search over every page with the default options. See [`Engine::search_with`].
     pub fn search(
         self: &Arc<Self>,
         id: DocId,
         query: String,
         sink: Arc<dyn Fn(SearchEvent) + Send + Sync>,
     ) -> Result<u64> {
+        self.search_with(id, query, SearchOpts::default(), sink)
+    }
+
+    /// Starts a search over every page. Supersedes any search already running on the document.
+    /// Returns the search id carried by every event.
+    pub fn search_with(
+        self: &Arc<Self>,
+        id: DocId,
+        query: String,
+        opts: SearchOpts,
+        sink: Arc<dyn Fn(SearchEvent) + Send + Sync>,
+    ) -> Result<u64> {
         let entry = self.entry(id)?;
         let sid = entry.search_gen.fetch_add(1, Ordering::SeqCst) + 1;
-        let query = query.trim().to_string();
         let (rev, n) = {
             let l = entry.layout.read();
             (l.rev, l.page_count)
         };
-        if query.is_empty() {
-            sink(SearchEvent::Done { search: sid, hits: 0, pages: n });
+        let Some(query) = crate::search::Query::new(&query, opts) else {
+            sink(SearchEvent::Done { search: sid, hits: 0, pages: n, capped: false });
             return Ok(sid);
-        }
+        };
+        let query = Arc::new(query);
         const CHUNK: u32 = 16;
-        let chunks = n.div_ceil(CHUNK) as usize;
+        let page_chunks = n.div_ceil(CHUNK) as usize;
+        // One more job for the bookmarks, which belong to no page.
+        let chunks = page_chunks + opts.bookmarks as usize;
         let remaining = Arc::new(AtomicUsize::new(chunks));
         let total_hits = Arc::new(AtomicU32::new(0));
+        let capped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let scanned = Arc::new(AtomicU32::new(0));
+        /// Takes up to `n` of the document-wide listing room; fewer (or none) means the cap was reached.
+        fn reserve(total: &AtomicU32, n: usize) -> usize {
+            let cap = crate::search::DOC_CAP as u32;
+            let before = total.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| Some(c + (n as u32).min(cap.saturating_sub(c)))).unwrap_or(cap);
+            (n as u32).min(cap.saturating_sub(before)) as usize
+        }
         for ci in 0..chunks {
             let eng = self.clone();
             let entry = entry.clone();
@@ -900,30 +926,71 @@ impl Engine {
             let query = query.clone();
             let remaining = remaining.clone();
             let total_hits = total_hits.clone();
+            let capped = capped.clone();
+            let scanned = scanned.clone();
             self.pool.submit(Job {
                 prio: Prio::new(class::BACKGROUND, 0, ci as u32),
                 run: Box::new(move || {
-                    let start = ci as u32 * CHUNK;
-                    let end = (start + CHUNK).min(n);
-                    for p in start..end {
-                        if entry.search_gen.load(Ordering::SeqCst) != sid {
-                            return;
-                        }
+                    if ci >= page_chunks {
                         // Page numbers belong to `rev`: an edit ends the search (the UI searches again).
-                        let rects = match eng.search_page_at(&entry, Some(rev), p, &query) {
-                            Err(EngineError::Stale) => break,
-                            r => r.unwrap_or_default(),
-                        };
-                        if !rects.is_empty() {
-                            total_hits.fetch_add(rects.len() as u32, Ordering::Relaxed);
-                            sink(SearchEvent::Hits { search: sid, page: p, rects });
+                        if entry.search_gen.load(Ordering::SeqCst) == sid {
+                            let marks = eng.with_doc_rev(&entry, |doc, held| {
+                                if held != rev {
+                                    return Err(EngineError::Stale);
+                                }
+                                crate::search::bookmark_hits(doc, &query)
+                            });
+                            let mut by_page: std::collections::BTreeMap<u32, Vec<crate::search::Hit>> = Default::default();
+                            for (p, h) in marks.unwrap_or_default() {
+                                if p < n {
+                                    by_page.entry(p).or_default().push(h);
+                                }
+                            }
+                            for (page, mut hits) in by_page {
+                                let kept = reserve(&total_hits, hits.len());
+                                if kept < hits.len() {
+                                    hits.truncate(kept);
+                                    capped.store(true, Ordering::Relaxed);
+                                }
+                                if !hits.is_empty() {
+                                    sink(SearchEvent::Hits { search: sid, page, hits });
+                                }
+                            }
                         }
+                    } else {
+                        let start = ci as u32 * CHUNK;
+                        let end = (start + CHUNK).min(n);
+                        for p in start..end {
+                            if entry.search_gen.load(Ordering::SeqCst) != sid {
+                                return;
+                            }
+                            if total_hits.load(Ordering::Relaxed) as usize >= crate::search::DOC_CAP {
+                                capped.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            // Page numbers belong to `rev`: an edit ends the search (the UI searches again).
+                            let mut hits = match eng.search_hits_at(&entry, Some(rev), p, &query) {
+                                Err(EngineError::Stale) => break,
+                                r => r.unwrap_or_default(),
+                            };
+                            let kept = reserve(&total_hits, hits.len());
+                            if kept < hits.len() {
+                                hits.truncate(kept);
+                                capped.store(true, Ordering::Relaxed);
+                            }
+                            if !hits.is_empty() {
+                                sink(SearchEvent::Hits { search: sid, page: p, hits });
+                            }
+                        }
+                        let done = scanned.fetch_add(end - start, Ordering::SeqCst) + (end - start);
+                        sink(SearchEvent::Progress { search: sid, scanned: done, total: n });
                     }
-                    if remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    if remaining.fetch_sub(1, Ordering::SeqCst) == 1 && entry.search_gen.load(Ordering::SeqCst) == sid {
                         sink(SearchEvent::Done {
                             search: sid,
                             hits: total_hits.load(Ordering::Relaxed),
                             pages: n,
+                            capped: capped.load(Ordering::Relaxed),
                         });
                     }
                 }),
@@ -944,23 +1011,17 @@ impl Engine {
 
     /// `search_page` on generation `rev` (any if None): `Stale` once an edit has landed since.
     fn search_page_at(&self, entry: &DocEntry, rev: Option<u32>, page: u32, needle: &str) -> Result<Vec<[f32; 4]>> {
+        let Some(q) = crate::search::Query::new(needle, SearchOpts::default()) else { return Ok(Vec::new()) };
+        Ok(self.search_hits_at(entry, rev, page, &q)?.into_iter().flat_map(|h| h.rects).collect())
+    }
+
+    /// Every hit of `q` on `page` (text, and what the options add), on generation `rev` (any if None).
+    fn search_hits_at(&self, entry: &DocEntry, rev: Option<u32>, page: u32, q: &crate::search::Query) -> Result<Vec<crate::search::Hit>> {
         self.with_doc_rev(entry, |doc, held| {
             if rev.is_some_and(|r| r != held) {
                 return Err(EngineError::Stale);
             }
-            let p = doc.load_page(page as i32)?;
-            let origin = p.bounds()?;
-            let quads = p.search(needle, 512)?;
-            Ok(quads
-                .iter()
-                .map(|q| {
-                    let xs = [q.ul.x, q.ur.x, q.ll.x, q.lr.x];
-                    let ys = [q.ul.y, q.ur.y, q.ll.y, q.lr.y];
-                    let min = |a: [f32; 4]| a.into_iter().fold(f32::INFINITY, f32::min);
-                    let max = |a: [f32; 4]| a.into_iter().fold(f32::NEG_INFINITY, f32::max);
-                    [min(xs) - origin.x0, min(ys) - origin.y0, max(xs) - origin.x0, max(ys) - origin.y0]
-                })
-                .collect())
+            crate::search::find_in_page(doc, page, q)
         })
     }
 }

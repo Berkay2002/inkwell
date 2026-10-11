@@ -6,6 +6,7 @@ import { type Recent, baseName, dirName, formatSize, greeting, keyOf, ordered, r
 import { launchTool, quickTools } from "../lib/tools";
 import { revealInFolder, useRecents } from "../recents";
 import type { CompressPreset } from "../lib/api";
+import type { PageDark } from "../lib/pageDark";
 import { type Theme, useStore } from "../store";
 import { FileMenu, NavItem, SearchPill, Thumb, useDropOver, useNow, usePreviewSrc, useRecentsSync } from "./FileParts";
 import { Icon } from "./Icons";
@@ -40,11 +41,18 @@ const themes: [Theme, string][] = [
   ["dark", "Dark"],
 ];
 
+const pageModes: [PageDark, string][] = [
+  ["follow", "follow app theme"],
+  ["on", "always dark"],
+  ["off", "always normal"],
+];
+
 function Landing({ over, onSeeAll }: { over: boolean; onSeeAll: () => void }) {
   const items = useRecents((s) => s.items);
   const exists = useRecents((s) => s.exists);
   const ready = useRecents((s) => s.ready);
   const theme = useStore((s) => s.theme);
+  const pageDark = useStore((s) => s.pageDark);
   const now = useNow();
   const [sel, setSel] = useState<string | null>(null);
   const table = useRef<HTMLUListElement>(null);
@@ -69,6 +77,8 @@ function Landing({ over, onSeeAll }: { over: boolean; onSeeAll: () => void }) {
 
   const settings: MenuEntry[] = [
     ...themes.map(([t, label]): MenuEntry => ({ label: `Theme: ${label}`, checked: theme === t, onSelect: () => useStore.getState().setTheme(t) })),
+    "sep",
+    ...pageModes.map(([m, label]): MenuEntry => ({ label: `Pages: ${label}`, checked: pageDark === m, onSelect: () => useStore.getState().setPageDark(m) })),
     "sep",
     ...presets.map(([p, label]): MenuEntry => ({ label: `Compress preset: ${label}`, checked: tools.compressPreset === p, onSelect: () => set({ compressPreset: p }) })),
     ...langs.map((l): MenuEntry => ({ label: `OCR language: ${l}`, checked: tools.ocrLanguage === l, onSelect: () => set({ ocrLanguage: l }) })),

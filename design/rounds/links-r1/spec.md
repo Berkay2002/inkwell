@@ -26,7 +26,7 @@ usage limit on all three first images (2026-10-11), so there is no sheet. The sp
 standard variant (a-tabs) is built; b-canvas and c-ledger are described only. Text in renders is not authoritative
 (the build sets the copy).
 
-## How Acrobat Pro does it (study 14-bookmarks-links: docs/study/14-bookmarks-links.md, screens in docs/study/screens/14-bookmarks-links/)
+## How Acrobat Pro does it (study 16-bookmarks-links: docs/study/16-bookmarks-links.md, screens in docs/study/screens/16-bookmarks-links/)
 Only part of it could be observed (Acrobat's editing controls are not reachable without input); the rest is read from
 its resources and marked as such in the study.
 - **Bookmarks** live in the left navigation pane ("Bookmarks": a tree with chevrons, a New-bookmark icon, a

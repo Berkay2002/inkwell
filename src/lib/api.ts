@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Size } from "./layout";
+import type { FindOpts, Found } from "./searchLogic";
 
 export interface OpenInfo {
   doc: number;
@@ -29,8 +30,42 @@ export interface TextLine {
 }
 
 export type SearchEvent =
-  | { kind: "hits"; search: number; page: number; rects: [number, number, number, number][] }
-  | { kind: "done"; search: number; hits: number; pages: number };
+  | { kind: "hits"; search: number; page: number; hits: Found[] }
+  | { kind: "progress"; search: number; scanned: number; total: number }
+  /** `capped`: the search stopped at 5000 hits; the ones listed are the first. */
+  | { kind: "done"; search: number; hits: number; pages: number; capped: boolean };
+
+/** What a search across files reports (src-tauri/src/search/files.rs). */
+export type FilesEvent =
+  /** The search exists: this id cancels it, even while the folder is still being listed. */
+  | { kind: "started"; search: number }
+  | {
+      kind: "file";
+      search: number;
+      index: number;
+      path: string;
+      name: string;
+      pageCount: number;
+      hits: number;
+      pages: number;
+      truncated: boolean;
+      items: (Found & { page: number })[];
+    }
+  | { kind: "progress"; search: number; scanned: number; total: number }
+  | {
+      kind: "done";
+      search: number;
+      files: number;
+      matched: number;
+      hits: number;
+      skipped: number;
+      /** PDFs left unread because they are only in the cloud (OneDrive placeholders). */
+      cloudOnly: number;
+      cancelled: boolean;
+      capped: boolean;
+    };
+
+export type SearchScope = { kind: "folder"; token: string; recursive: boolean } | { kind: "files"; tokens: string[] };
 
 export interface EngineStats {
   cacheBytes: number;
@@ -53,7 +88,7 @@ export interface FileRef {
 }
 
 /** Open dialog (run by Rust). */
-export const pickOpen = (multiple: boolean, title?: "locate" | "compare") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
+export const pickOpen = (multiple: boolean, title?: "locate" | "compare" | "search") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
 /** What a save dialog filters for; PDF unless told otherwise. */
 export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "any";
 /** Save dialog (run by Rust) in the folder of document `doc` or of open token `near`, with file name `name`. */
@@ -71,6 +106,16 @@ export const authenticate = (doc: number, password: string) => invoke<OpenInfo>(
 export const closeDocument = (doc: number) => invoke<void>("close_document", { doc });
 export const outline = (doc: number) => invoke<OutlineItem[]>("outline", { doc });
 export const pageText = (doc: number, page: number) => invoke<TextLine[]>("page_text", { doc, page });
+/** An image a page draws: `rect` is what shows of it, in page space (points, origin top left). */
+export interface PageImageBlock {
+  rect: [number, number, number, number];
+  colorSpace: string;
+  /** Has a soft mask or a stencil mask: its shape is not the box. */
+  masked: boolean;
+}
+/** The images page `page` draws (dark pages keep the photographs in their own colours). */
+export const pageImages = (doc: number, page: number) =>
+  invoke<{ rev: number; images: PageImageBlock[] }>("image_blocks", { doc, page }).then((b) => b.images);
 export const cancelSearch = (doc: number) => invoke<void>("cancel_search", { doc });
 export const engineStats = () => invoke<EngineStats>("engine_stats");
 export const initialFiles = () => invoke<FileRef[]>("initial_files");
@@ -81,11 +126,24 @@ export function pageSizes(doc: number, onChunk: (start: number, sizes: Size[]) =
   return invoke<void>("page_sizes", { doc, onChunk: ch });
 }
 
-export function search(doc: number, query: string, onEvent: (e: SearchEvent) => void) {
+export function search(doc: number, query: string, opts: FindOpts, onEvent: (e: SearchEvent) => void) {
   const ch = new Channel<SearchEvent>();
   ch.onmessage = onEvent;
-  return invoke<number>("search", { doc, query, onEvent: ch });
+  return invoke<number>("search", { doc, query, opts, onEvent: ch });
 }
+
+/** Folder dialog (run by Rust) for search across files; the token names the folder to read. */
+export const pickSearchFolder = () => invoke<FileRef | null>("pick_search_folder");
+
+/** Starts a search of several files; resolves with the search id once it is running. */
+export function searchFiles(scope: SearchScope, query: string, opts: FindOpts, onEvent: (e: FilesEvent) => void) {
+  const ch = new Channel<FilesEvent>();
+  ch.onmessage = onEvent;
+  return invoke<number>("search_files", { scope, query, opts, onEvent: ch });
+}
+export const cancelSearchFiles = (search: number) => invoke<void>("cancel_search_files", { search });
+/** An open token for file `index` of search `search` (a result being opened); the path never reaches the page. */
+export const searchFileToken = (search: number, index: number) => invoke<FileRef>("search_file_token", { search, index });
 
 /** Origin of the tile protocol: WebView2 serves custom schemes as http://<scheme>.localhost. */
 export const TILE_ORIGIN = navigator.userAgent.includes("Windows") ? "http://inkwell.localhost" : "inkwell://localhost";
@@ -424,6 +482,102 @@ export const protectAndSave = (doc: number, spec: ProtectSpec, permissionsPasswo
 export const removeSecurity = (doc: number, permissionsPassword?: string | null) =>
   invoke<EditState>("remove_security", { doc, permissionsPassword: permissionsPassword ?? null });
 
+// ---- page marks (src-tauri/src/marks) ----
+
+export type MarkKind = "headerFooter" | "watermark" | "background" | "bates";
+export type FontFamily = "helvetica" | "times" | "courier";
+export type Rgb = [number, number, number];
+
+export interface MarkStyle {
+  family: FontFamily;
+  bold: boolean;
+  italic: boolean;
+  size: number;
+  color: Rgb;
+  underline: boolean;
+}
+
+/** A watermark or background picture: `file` is an open token (`pickOpen`); `page` is 0-based, for a PDF. */
+export interface MarkPicture {
+  file: string;
+  page: number;
+  password?: string | null;
+}
+
+/** Top left, top centre, top right, bottom left, bottom centre, bottom right. */
+export type SixTexts = [string, string, string, string, string, string];
+
+export type PageMark =
+  | { kind: "headerFooter"; text: SixTexts; style: MarkStyle; margins: [number, number, number, number]; startNumber: number }
+  | {
+      kind: "watermark";
+      text: string;
+      picture: MarkPicture | null;
+      style: MarkStyle;
+      scale: number;
+      opacity: number;
+      rotation: number;
+      behind: boolean;
+      offset: [number, number];
+      showOnScreen: boolean;
+      showInPrint: boolean;
+    }
+  | { kind: "background"; color: Rgb; opacity: number; picture: MarkPicture | null; scale: number }
+  | {
+      kind: "bates";
+      prefix: string;
+      suffix: string;
+      digits: number;
+      start: number;
+      slot: number;
+      style: MarkStyle;
+      margins: [number, number, number, number];
+    };
+
+export interface MarkDate {
+  year: number;
+  month: number;
+  day: number;
+}
+
+export interface MarkRequest {
+  mark: PageMark;
+  /** 0-based. */
+  pages: number[];
+  replace: boolean;
+  date: MarkDate;
+}
+
+export interface MarkKindInfo {
+  kind: MarkKind;
+  pages: number[];
+  /** The settings it was made with, when this app made it. */
+  mark: PageMark | null;
+}
+
+export interface BatesFileResult {
+  input: string;
+  output: string;
+  pages: number;
+  first: number;
+  last: number;
+}
+
+export const marksInfo = (doc: number) => invoke<{ kinds: MarkKindInfo[] }>("marks_info", { doc });
+/** One undo step: Add, or Update when `replace`. */
+export const marksAdd = (doc: number, request: MarkRequest) => invoke<EditState>("marks_add", { doc, request });
+/** One undo step; all pages when `pages` is omitted. */
+export const marksRemove = (doc: number, kind: MarkKind, pages?: number[]) =>
+  invoke<EditState>("marks_remove", { doc, kind, pages: pages ?? null });
+/** Writes numbered copies of the files (open tokens) into a folder (`pickFolder` token); the originals stay as they are. */
+export const marksBatesFiles = (request: { files: string[]; bates: Extract<PageMark, { kind: "bates" }>; date: MarkDate; folder: string }) =>
+  invoke<BatesFileResult[]>("marks_bates_files", { request: { ...request, bates: stripKind(request.bates) } });
+
+function stripKind<T extends { kind: string }>(m: T): Omit<T, "kind"> {
+  const { kind: _kind, ...rest } = m;
+  return rest;
+}
+
 // ---- compress and OCR (src-tauri/src/tools/mod.rs) ----
 
 export type CompressPreset = "smallest" | "balanced" | "highQuality";
@@ -726,3 +880,129 @@ export function printStart(job: number, doc: number, settings: PrintSettings, sa
   ch.onmessage = onProgress;
   return invoke<PrintReport>("print_start", { job, doc, settings, saveTo, onProgress: ch });
 }
+
+// ---- combine, attachments, page labels, transitions (src-tauri/src/organize) ----
+
+export interface CombineFile {
+  /** Open token of the PDF. */
+  file: string;
+  /** "1-3, 6, 9-7": in the order written; empty = every page. */
+  range: string;
+  /** Bookmark title; null = the file's name. */
+  title: string | null;
+}
+
+export interface CombineOptions {
+  /** One bookmark per file. */
+  bookmarks: boolean;
+  /** Each file's own bookmarks, kept under its bookmark. */
+  keepOutlines: boolean;
+  /** A contents page in front. */
+  contentsPage: boolean;
+}
+
+export type CombineFileState = "ready" | "encrypted" | "noCopy" | "unreadable" | "badRange";
+
+export interface CombineFilePlan {
+  name: string;
+  title: string;
+  state: { state: CombineFileState };
+  message: string | null;
+  pages: number;
+  used: number;
+  hasOutline: boolean;
+  hasFields: boolean;
+}
+
+export interface CombinePlan {
+  files: CombineFilePlan[];
+  pages: number;
+  contentsPages: number;
+  bookmarks: number;
+  leftOut: number;
+  canRun: boolean;
+  /** "Combines 4 files, 37 pages, 4 bookmarks". */
+  summary: string;
+}
+
+export interface Combined {
+  file: FileRef;
+  plan: CombinePlan;
+}
+
+export const combineInspect = (files: CombineFile[], options: CombineOptions) =>
+  invoke<CombinePlan>("combine_inspect", { files, options });
+/** `out`: a save token from `pickSave`. */
+export const combineRun = (files: CombineFile[], options: CombineOptions, out: string) =>
+  invoke<Combined>("combine_run", { files, options, out });
+
+export interface Attachment {
+  /** `n:<name>` for a document-level file, `a:<object>` for a page annotation. */
+  id: string;
+  name: string;
+  description: string;
+  size: number;
+  mime: string | null;
+  kind: "file" | "annotation";
+  /** 0-based page of an annotation. */
+  page: number | null;
+  hasData: boolean;
+  isPdf: boolean;
+}
+
+/** Open dialog for any files to attach. */
+export const pickAttachments = () => invoke<FileRef[]>("pick_attachments");
+export const attachmentsList = (doc: number) => invoke<Attachment[]>("attachments_list", { doc });
+export const attachmentsAdd = (doc: number, files: string[], description?: string) =>
+  invoke<EditState>("attachments_add", { doc, files, description: description ?? null });
+/** `to`: a save token (`pickSave` with kind "any"). Writes the bytes, never runs the file. Resolves to the path. */
+export const attachmentSave = (doc: number, id: string, to: string) => invoke<string>("attachment_save", { doc, id, to });
+/** A PDF attachment as an open token (scratch copy); open it with `store.openPath(path, token, true)`. */
+export const attachmentOpen = (doc: number, id: string) => invoke<FileRef>("attachment_open", { doc, id });
+export const attachmentsRemove = (doc: number, ids: string[]) => invoke<EditState>("attachments_remove", { doc, ids });
+export const attachmentDescribe = (doc: number, id: string, text: string) =>
+  invoke<EditState>("attachment_describe", { doc, id, text });
+
+export type LabelStyle = "none" | "decimal" | "upperRoman" | "lowerRoman" | "upperAlpha" | "lowerAlpha";
+
+export interface LabelRange {
+  /** 0-based first page of the section. */
+  page: number;
+  style: LabelStyle;
+  prefix: string;
+  start: number;
+}
+
+export interface LabelsDto {
+  ranges: LabelRange[];
+  /** One label per page; empty when the document has no page labels. */
+  labels: string[];
+}
+
+export const labelsList = (doc: number) => invoke<LabelsDto>("labels_list", { doc });
+/** Labels pages `from..=to` (0-based). `extend`: carry on the numbering of the section before. */
+export const labelsSet = (doc: number, from: number, to: number, style: LabelStyle, prefix: string, start: number, extend: boolean) =>
+  invoke<EditState>("labels_set", { doc, from, to, style, prefix, start, extend });
+export const labelsRemove = (doc: number) => invoke<EditState>("labels_remove", { doc });
+
+export type TransStyle = "split" | "blinds" | "box" | "wipe" | "dissolve" | "glitter" | "r" | "fly" | "push" | "cover" | "uncover" | "fade";
+
+export interface Transition {
+  style: TransStyle;
+  /** Seconds the effect takes. */
+  duration: number;
+  dimension: "H" | "V" | null;
+  motion: "I" | "O" | null;
+  /** 0, 90, 180, 270 or 315. */
+  direction: number | null;
+}
+
+export interface PageTrans {
+  transition: Transition | null;
+  /** Seconds before full screen moves on by itself. */
+  autoAdvance: number | null;
+}
+
+export const transitionsList = (doc: number) => invoke<PageTrans[]>("transitions_list", { doc });
+export const transitionsSet = (doc: number, pages: number[], change: PageTrans) =>
+  invoke<EditState>("transitions_set", { doc, pages, change });

@@ -1,6 +1,6 @@
 # Edit bookmarks and links
 
-Acrobat's Bookmarks panel and Link tool (study: [study/14-bookmarks-links.md](study/14-bookmarks-links.md), partial:
+Acrobat's Bookmarks panel and Link tool (study: [study/16-bookmarks-links.md](study/16-bookmarks-links.md), partial:
 the editing UI is not UIA-reachable, rendering behaviour was observed). Code: `src-tauri/src/outline/` (bookmarks)
 and `src-tauri/src/links/`; UI in `src/components/edit/` (`BookmarksPanel`, `LinksPanel`, `LinkLayer`) and the store
 `src/lib/nav.ts`. Design: `design/rounds/links-r1/spec.md` (a-tabs built; not rendered, image tool at its limit).

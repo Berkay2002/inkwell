@@ -7,12 +7,14 @@
 //! See docs/text-edit.md.
 
 pub mod app;
-mod content;
+pub(crate) mod bundled;
+pub(crate) mod content;
 mod encodings;
 mod font;
-mod text;
+mod layout;
+pub(crate) mod text;
 
-pub use text::{Align, Fallback, Issue, TextChange};
+pub use text::{Align, Fallback, Issue, RunChange, TextChange};
 pub(crate) use content::Matrix;
 
 use crate::engine::edit::{EditSource, EditState};
@@ -43,11 +45,30 @@ pub struct TextBlockDto {
     pub align: Align,
     /// Distance between lines as a multiple of the font size; none for a single line.
     pub line_spacing: Option<f32>,
+    /// The text as runs of one font, size and colour (pass their indexes as `source` in
+    /// `BlockChange::runs`).
+    pub runs: Vec<RunDto>,
     pub editable: bool,
     /// Why it can't be edited.
     pub issue: Option<Issue>,
     /// The reason as a sentence for the UI.
     pub reason: Option<String>,
+}
+
+/// One run of a block.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunDto {
+    pub index: u32,
+    pub text: String,
+    /// `/BaseFont`.
+    pub font: String,
+    /// The font as the font picker names it (`doc:<object>` or `res:<name>`).
+    pub font_id: String,
+    pub size: f32,
+    pub color: [f32; 3],
+    pub bold: bool,
+    pub italic: bool,
 }
 
 /// An area that shows text that can't be edited here (outside any block).
@@ -85,17 +106,23 @@ pub struct BlockChange {
     pub width: Option<f32>,
     /// Distance between lines as a multiple of the font size (0.5 to 5).
     pub line_spacing: Option<f32>,
-    /// Set the block in the standard face of this style (the block's own font is replaced).
+    /// Bold or italic for every run: a font of the same family and style in the document, else
+    /// the standard face of that style.
     pub bold: Option<bool>,
     pub italic: Option<bool>,
+    /// The new content as runs, each with its own font, size, colour, bold and italic (replaces
+    /// `text`; see `RunChange`).
+    pub runs: Option<Vec<RunChange>>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TextEdited {
     pub state: EditState,
-    /// Set when the block's font could not show the text and another one was used.
+    /// Set when the block's font could not show the text and another one was used (the first of
+    /// `fallbacks`).
     pub fallback: Option<Fallback>,
+    pub fallbacks: Vec<Fallback>,
 }
 
 /// User space → page space, and the page's origin there.
@@ -133,6 +160,21 @@ pub fn blocks(eng: &Engine, doc: DocId, page: u32) -> Result<TextBlocks> {
                 color: b.color.map(|v| v as f32),
                 align: b.align,
                 line_spacing: line_spacing(&b, &pc.lines, &m),
+                runs: b
+                    .runs
+                    .iter()
+                    .enumerate()
+                    .map(|(k, r)| RunDto {
+                        index: k as u32,
+                        text: r.text.clone(),
+                        font: r.base_font.clone(),
+                        font_id: pc.font_id(&r.font),
+                        size: r.size as f32,
+                        color: r.color.map(|v| v as f32),
+                        bold: r.bold,
+                        italic: r.italic,
+                    })
+                    .collect(),
                 editable: b.issue.is_none(),
                 issue: b.issue,
                 reason: b.issue.map(|i| text::issue_text(i).to_string()),
@@ -155,7 +197,7 @@ fn line_spacing(b: &text::Block, lines: &[text::Line], m: &Matrix) -> Option<f32
 }
 
 fn label(c: &BlockChange, page: u32) -> String {
-    let what = if c.text.is_some() {
+    let what = if c.text.is_some() || c.runs.is_some() {
         "Edit text"
     } else if c.offset.is_some()
         && c.size.is_none()
@@ -189,7 +231,7 @@ pub fn edit(eng: &Engine, doc: DocId, rev: u32, page: u32, index: u32, change: &
     if *change == BlockChange::default() {
         return Err(EngineError::Invalid("nothing to change".into()));
     }
-    let mut fallback = None;
+    let mut fallbacks = Vec::new();
     let state = eng.apply_removing(doc, label(change, page), source, |d| {
         if entry.generation() != rev {
             return Err(EngineError::Stale);
@@ -214,11 +256,12 @@ pub fn edit(eng: &Engine, doc: DocId, rev: u32, page: u32, index: u32, change: &
             line_spacing: change.line_spacing.map(f64::from),
             bold: change.bold,
             italic: change.italic,
+            runs: change.runs.clone(),
         };
-        fallback = text::rewrite_block(d, page, index as usize, &c)?;
+        fallbacks = text::rewrite_block(d, page, index as usize, &c)?;
         Ok(vec![page])
     })?;
-    Ok(TextEdited { state, fallback })
+    Ok(TextEdited { state, fallback: fallbacks.first().cloned(), fallbacks })
 }
 
 /// New text to put on a page.
@@ -254,6 +297,105 @@ pub fn add(eng: &Engine, doc: DocId, rev: u32, page: u32, new: &NewTextBox, sour
         };
         text::add_text(d, page, &n)?;
         Ok(vec![page])
+    })
+}
+
+/// A font the UI can offer for new or restyled text.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FontInfo {
+    /// Pass as `RunChange::font`.
+    pub id: String,
+    /// What to show: the font's name without its subset tag.
+    pub name: String,
+    pub family: String,
+    pub bold: bool,
+    pub italic: bool,
+    /// `document`, `standard` or `bundled`.
+    pub kind: &'static str,
+    /// The font program is in the PDF (document fonts; bundled faces are embedded as subsets).
+    pub embedded: bool,
+    /// Only the glyphs the document used are in it: typed text may fall back to another font.
+    pub subset: bool,
+    /// New text can be written in it (not Type 3, not a predefined CJK encoding, with a Unicode map).
+    pub usable: bool,
+    /// Pages (0-based) whose resources name it (document fonts).
+    pub pages: Vec<u32>,
+}
+
+/// The fonts the font picker offers: the document's own (in page order), the standard 14 faces
+/// and the bundled faces.
+pub fn fonts(eng: &Engine, doc: DocId) -> Result<Vec<FontInfo>> {
+    eng.read_custom(doc, |d| {
+        let mut out: Vec<FontInfo> = Vec::new();
+        let n = d.page_count()?.max(0);
+        for p in 0..n {
+            let page = d.find_page(p)?;
+            let Some(fonts) = page.get_dict_inheritable("Resources")?.and_then(|r| r.get_dict("Font").ok().flatten()) else { continue };
+            for i in 0..fonts.dict_len()? as i32 {
+                let (Some(k), Some(v)) = (fonts.get_dict_key(i)?, fonts.get_dict_val(i)?) else { continue };
+                // A font object is one entry for all pages; a direct dict is named on its page only.
+                let id = match v.is_indirect()? {
+                    true => format!("doc:{}", v.as_indirect()?),
+                    false => format!("res:{}", String::from_utf8_lossy(&k.as_name()?)),
+                };
+                if let Some(f) = out.iter_mut().find(|f| f.id == id && (id.starts_with("doc:") || f.pages == [p as u32])) {
+                    if !f.pages.contains(&(p as u32)) {
+                        f.pages.push(p as u32);
+                    }
+                    continue;
+                }
+                let Some(dict) = v.resolve()?.filter(|o| o.is_dict().unwrap_or(false)) else { continue };
+                let m = font::Metrics::summary(&dict);
+                let name = match m.base_font.split_once('+') {
+                    Some((t, rest)) if t.len() == 6 => rest.to_string(),
+                    _ => m.base_font.clone(),
+                };
+                out.push(FontInfo {
+                    id,
+                    family: layout::family_key(&m.base_font),
+                    name,
+                    bold: m.bold,
+                    italic: m.italic,
+                    kind: "document",
+                    embedded: m.embedded,
+                    subset: m.subset,
+                    usable: m.usable,
+                    pages: vec![p as u32],
+                });
+            }
+        }
+        for row in font::STD14 {
+            for (k, name) in row.iter().enumerate() {
+                out.push(FontInfo {
+                    id: format!("std:{name}"),
+                    name: (*name).to_string(),
+                    family: name.split('-').next().unwrap_or(name).to_string(),
+                    bold: k % 2 == 1,
+                    italic: k >= 2,
+                    kind: "standard",
+                    embedded: false,
+                    subset: false,
+                    usable: true,
+                    pages: Vec::new(),
+                });
+            }
+        }
+        for f in &bundled::FACES {
+            out.push(FontInfo {
+                id: format!("bundled:{}", f.id),
+                name: f.ps_name.to_string(),
+                family: f.family.to_string(),
+                bold: f.bold,
+                italic: f.italic,
+                kind: "bundled",
+                embedded: true,
+                subset: true,
+                usable: true,
+                pages: Vec::new(),
+            });
+        }
+        Ok(out)
     })
 }
 

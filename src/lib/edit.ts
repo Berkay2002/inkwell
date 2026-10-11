@@ -6,6 +6,7 @@ import type { EditOp, EditState } from "./api";
 import { formatRange } from "./pageRange";
 import { useAnnot } from "./annot";
 import { useNav } from "./nav";
+import { useCombine } from "./combineStore";
 import { useRedact } from "./redact";
 import { dropCached } from "./tiles";
 
@@ -76,6 +77,18 @@ export function queued<T>(id: number, f: () => Promise<T>): Promise<T> {
 
 function withState(id: number, f: () => Promise<EditState>) {
   return serial(id, async () => {
+    const s = await f();
+    applyState(id, s);
+    return s;
+  });
+}
+
+/**
+ * An organize-plus command (page labels, transitions, attachments) as one edit step in the document's
+ * order; a sheet that shows its own errors gets the failure back.
+ */
+export function run(id: number, f: () => Promise<EditState>): Promise<EditState> {
+  return queued(id, async () => {
     const s = await f();
     applyState(id, s);
     return s;
@@ -210,21 +223,9 @@ export async function insertFile(id: number, at: number) {
   if (f) return edit(id, { op: "insertFile", at, file: f.token });
 }
 
-/** Asks for PDFs and an output file, merges them in the order picked and opens the result. */
-export async function mergeFiles() {
-  try {
-    const files = await api.pickOpen(true);
-    if (files.length < 2) return;
-    const out = await api.pickSave(`${stem(files[0].path)} (merged).pdf`, { near: files[0].token });
-    if (!out) return;
-    const merged = await api.mergeFiles(
-      files.map((f) => f.token),
-      out.token,
-    );
-    await st().openPath(merged.path, merged.token);
-  } catch (e) {
-    st().setUi({ error: String(e) });
-  }
+/** Opens the Combine files sheet (src/components/CombineSheet.tsx); the result opens in a tab of its own. */
+export function combineFiles(files?: api.FileRef[]) {
+  useCombine.getState().open(files);
 }
 
 /** Save / Don't save / Cancel for a document with unsaved edits. True when it may close. */

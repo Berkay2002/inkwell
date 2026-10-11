@@ -74,8 +74,8 @@ await sleep(900);
 await click('button[aria-label="Tools"]');
 await sleep(200);
 await shot("tools-menu-light.png", 150);
-report.menuItems = await ev(`[...document.querySelectorAll('.ink-menu [role=menuitem]')].map((e) => e.textContent.trim())`);
-await click(".ink-menu [role=menuitem]", "Compress file…");
+report.menuItems = await ev(`[...document.querySelectorAll('.ink-menu [role=menuitem], .ink-menu [role=option]')].map((e) => e.textContent.trim())`);
+await click(".ink-menu [role=menuitem], .ink-menu [role=option]", "Compress file…");
 await sleep(1500);
 report.compressOptions = await sheet();
 await shot("compress-options-light.png", 300);
@@ -102,7 +102,7 @@ const th = await ev(`(() => { const r = document.querySelector(".thumb").getBoun
 await send("Input.dispatchMouseEvent", { type: "mousePressed", x: th.x, y: th.y, button: "right", buttons: 2, clickCount: 1 });
 await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: th.x, y: th.y, button: "right", buttons: 0, clickCount: 1 });
 await shot("page-menu-light.png", 400);
-await click(".ink-menu [role=menuitem]", "Recognize text on this page…");
+await click(".ink-menu [role=menuitem], .ink-menu [role=option]", "Recognize text on this page…");
 await sleep(800);
 // the whole document, not just the page the menu was opened on
 await click(".tl .tl-seg button", "All pages");

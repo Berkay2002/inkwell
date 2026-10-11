@@ -86,7 +86,7 @@ impl EditOp {
 }
 
 /// "p. 4", "pp. 2-3, 7" (1-based).
-fn page_ranges(pages: &[u32]) -> String {
+pub(crate) fn page_ranges(pages: &[u32]) -> String {
     let set: BTreeSet<u32> = pages.iter().copied().collect();
     let mut runs: Vec<(u32, u32)> = Vec::new();
     for p in set {
@@ -250,7 +250,7 @@ fn open_snap(s: &Snap, entry: &DocEntry) -> Result<AuthDoc> {
     Ok(AuthDoc { doc: PdfDocument::try_from(d)?, _bytes: s.bytes.clone() })
 }
 
-fn write_doc(doc: &PdfDocument, mut opts: PdfWriteOptions, capacity: usize) -> Result<Vec<u8>> {
+pub(crate) fn write_doc(doc: &PdfDocument, mut opts: PdfWriteOptions, capacity: usize) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(capacity);
     let written = doc.write_to_with_options(&mut out, opts);
     // The options carry the new passwords: do not leave them behind on the stack.
@@ -261,7 +261,7 @@ fn write_doc(doc: &PdfDocument, mut opts: PdfWriteOptions, capacity: usize) -> R
 
 /// A complete file without anything unreferenced or duplicated (deleted pages and redacted
 /// content are really gone).
-fn rewrite_opts() -> PdfWriteOptions {
+pub(crate) fn rewrite_opts() -> PdfWriteOptions {
     let mut o = PdfWriteOptions::default();
     o.set_garbage_level(3).set_compress(true);
     o
@@ -272,7 +272,7 @@ fn page_sizes(doc: &PdfDocument) -> Result<Vec<[f32; 2]>> {
     (0..n).map(|p| page_size(doc, p as u32)).collect()
 }
 
-fn page_size(doc: &PdfDocument, p: u32) -> Result<[f32; 2]> {
+pub(crate) fn page_size(doc: &PdfDocument, p: u32) -> Result<[f32; 2]> {
     let b = doc.load_page(p as i32)?.bounds()?;
     Ok([b.width(), b.height()])
 }
@@ -472,8 +472,16 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
             if pages.len() == n {
                 return Err(invalid("a document needs at least one page"));
             }
+            // MuPDF shifts page label sections on its own: read them first, then write the rule
+            // of organize::labels over what it did.
+            // (A rule that could not be read is left as MuPDF shifted it, not written over as empty.)
+            let labels = crate::organize::labels::read(doc).ok();
             for &p in pages.iter().rev() {
                 doc.delete_page(p as i32)?;
+            }
+            // Page labels follow the pages left (a failure here never undoes the delete).
+            if let Some(labels) = &labels {
+                let _ = crate::organize::labels::after_delete(doc, labels, &pages, n as u32);
             }
             let out = (0..n as u32).filter(|p| pages.binary_search(p).is_err()).map(|p| sizes[p as usize]).collect();
             Ok(Some((out, true)))
@@ -493,12 +501,18 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
                 return Ok(None);
             }
             let objs = pages.iter().map(|&p| doc.find_page(p as i32)).collect::<std::result::Result<Vec<_>, _>>()?;
+            // Page label sections stay where they are when pages move; MuPDF shifts them with every
+            // delete and insert below, so they are put back after.
+            let labels = crate::organize::labels::read(doc).ok();
             for &p in pages.iter().rev() {
                 doc.delete_page(p as i32)?;
             }
             let at = (0..*to).filter(|p| !sel(p)).count() as i32;
             for (i, obj) in objs.iter().enumerate() {
                 doc.insert_page(at + i as i32, obj)?;
+            }
+            if let Some(labels) = &labels {
+                let _ = crate::organize::labels::restore(doc, labels);
             }
             Ok(Some((order.iter().map(|&p| sizes[p as usize]).collect(), false)))
         }
@@ -514,11 +528,15 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
             let mb = reference.media_box()?;
             let boxed = reference.object().get_dict_inheritable("MediaBox")?;
             drop(reference);
+            let labels = crate::organize::labels::read(doc).ok();
             let page = doc.new_page_at(*at as i32, Size { width: mb.width(), height: mb.height() })?;
             if let Some(b) = boxed {
                 page.object().dict_put("MediaBox", b.copy_array()?)?;
             }
             drop(page);
+            if let Some(labels) = &labels {
+                let _ = crate::organize::labels::after_insert(doc, labels, *at, 1);
+            }
             let mut out = sizes.to_vec();
             out.insert(*at as usize, page_size(doc, *at)?);
             Ok(Some((out, false)))
@@ -533,7 +551,11 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
                 Some(p) => check_pages(p, count)?,
                 None => (0..count as u32).collect(),
             };
+            let labels = crate::organize::labels::read(doc).ok();
             graft_pages(doc, &src, &pages, *at as i32)?;
+            if let Some(labels) = &labels {
+                let _ = crate::organize::labels::after_insert(doc, labels, *at, pages.len() as u32);
+            }
             let mut out = sizes.to_vec();
             for i in 0..pages.len() as u32 {
                 out.insert((at + i) as usize, page_size(doc, at + i)?);
@@ -544,7 +566,7 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
 }
 
 /// Another PDF to take pages from.
-fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocument> {
+pub(crate) fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocument> {
     check_pdf(path)?;
     let mut d = Document::open(path)?;
     if d.needs_password()? {
@@ -558,14 +580,94 @@ fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocument> {
 }
 
 /// Page keys copied into a grafted page (MuPDF's list): nothing that points at other pages.
-const PAGE_KEYS: [&str; 9] =
-    ["Contents", "Resources", "MediaBox", "CropBox", "BleedBox", "TrimBox", "ArtBox", "Rotate", "UserUnit"];
+/// `Trans` and `Dur` (page transition, auto-advance) point nowhere either, so they travel too.
+const PAGE_KEYS: [&str; 11] = [
+    "Contents", "Resources", "MediaBox", "CropBox", "BleedBox", "TrimBox", "ArtBox", "Rotate", "UserUnit", "Trans", "Dur",
+];
 
 /// Copies `pages` of `src` into `dst` at index `at`, sharing one graft map so resources used by
 /// several pages (fonts, images) are copied once. Unlike MuPDF's own page graft, the annotations
 /// come along: comments, web links, links between the copied pages (pointed at the copies) and
 /// form fields (their field tree rebuilt in `dst`'s form). See docs/insert-links-widgets.md.
 fn graft_pages(dst: &mut PdfDocument, src: &PdfDocument, pages: &[u32], at: i32) -> Result<()> {
+    graft_pages_ex(dst, src, pages, at, false).map(|_| ())
+}
+
+/// A bookmark of a source document, its destination already pointing at the copied page in `dst`
+/// (or at nothing, when that page was not copied: the title stays, the jump is gone).
+pub(crate) struct OutNode {
+    pub title: String,
+    pub dest: Option<PdfObject>,
+    pub uri: Option<String>,
+    /// Shown expanded (a positive /Count in the source).
+    pub open: bool,
+    pub children: Vec<OutNode>,
+}
+
+/// A bookmark as the source has it: `target` is the explicit, named or `<< /D … >>` destination.
+pub(crate) struct RawOut {
+    pub title: String,
+    pub target: Option<PdfObject>,
+    pub uri: Option<String>,
+    pub open: bool,
+    pub children: Vec<RawOut>,
+}
+
+const OUTLINE_DEPTH: usize = 16;
+const OUTLINE_NODES: usize = 20_000;
+
+/// The source's bookmarks, loop-safe and bounded (a broken file ends the walk, it never hangs it).
+pub(crate) fn read_outline(src: &PdfDocument) -> Result<Vec<RawOut>> {
+    let Some(root) = src.catalog()?.get_dict("Outlines")?.filter(|o| !o.is_null().unwrap_or(true)) else {
+        return Ok(Vec::new());
+    };
+    let mut budget = OUTLINE_NODES;
+    let mut seen = std::collections::HashSet::new();
+    level(root.get_dict("First")?, 0, &mut budget, &mut seen)
+}
+
+fn level(first: Option<PdfObject>, depth: usize, budget: &mut usize, seen: &mut std::collections::HashSet<i32>) -> Result<Vec<RawOut>> {
+    let mut out = Vec::new();
+    let mut cur = first.filter(|o| !o.is_null().unwrap_or(true));
+    while let Some(item) = cur {
+        if *budget == 0 || depth >= OUTLINE_DEPTH {
+            break;
+        }
+        if item.is_indirect()? && !seen.insert(item.as_indirect()?) {
+            break;
+        }
+        let Some(node) = item.resolve()? else { break };
+        if !node.is_dict()? {
+            break;
+        }
+        *budget -= 1;
+        let title = node.get_dict("Title")?.and_then(|t| t.as_string().ok()).unwrap_or_default();
+        let action = node.get_dict("A")?.filter(|a| !a.is_null().unwrap_or(true));
+        let kind = action.as_ref().map(|a| name_of(a.get_dict("S").ok().flatten())).unwrap_or_default();
+        let target = match node.get_dict("Dest")?.filter(|d| !d.is_null().unwrap_or(true)) {
+            Some(d) => Some(d),
+            None if kind == b"GoTo" => action.as_ref().and_then(|a| a.get_dict("D").ok().flatten()),
+            None => None,
+        };
+        let uri = if kind == b"URI" { action.as_ref().and_then(|a| a.get_dict("URI").ok().flatten()).and_then(|u| u.as_string().ok()) } else { None };
+        let open = node.get_dict("Count")?.and_then(|c| c.as_int().ok()).is_some_and(|c| c > 0);
+        let children = level(node.get_dict("First")?, depth + 1, budget, seen)?;
+        out.push(RawOut { title, target, uri, open, children });
+        cur = node.get_dict("Next")?.filter(|o| !o.is_null().unwrap_or(true));
+    }
+    Ok(out)
+}
+
+/// What [`graft_pages_ex`] made.
+pub(crate) struct Grafted {
+    /// The new page objects, in `pages` order.
+    pub pages: Vec<PdfObject>,
+    /// The source's bookmarks retargeted at them (only when asked for).
+    pub outline: Vec<OutNode>,
+}
+
+/// [`graft_pages`] that also hands back the new pages, and the source's outline pointing at them.
+pub(crate) fn graft_pages_ex(dst: &mut PdfDocument, src: &PdfDocument, pages: &[u32], at: i32, outline: bool) -> Result<Grafted> {
     let mut map = dst.new_graft_map()?;
     // Pass 1: the pages themselves, so links in pass 2 can point at any of them.
     let mut made = Vec::with_capacity(pages.len());
@@ -583,7 +685,7 @@ fn graft_pages(dst: &mut PdfDocument, src: &PdfDocument, pages: &[u32], at: i32)
         made.push((from, page));
     }
     // Pass 2: their annotations.
-    let mut g = Graft { src, pages, made: &made, fields: Default::default(), names: None };
+    let mut g = Graft { src, pages, made: &made, fields: Default::default(), names: None, defaults_done: false };
     for (from, page) in &made {
         if let Some(annots) = from.get_dict("Annots")? {
             let copied = g.annots(dst, &mut map, &annots, page)?;
@@ -592,7 +694,8 @@ fn graft_pages(dst: &mut PdfDocument, src: &PdfDocument, pages: &[u32], at: i32)
             }
         }
     }
-    Ok(())
+    let outline = if outline { g.retarget(dst, &mut map, &read_outline(src)?)? } else { Vec::new() };
+    Ok(Grafted { pages: made.iter().map(|(_, p)| p.clone()).collect(), outline })
 }
 
 /// State of one [`graft_pages`] call's annotation pass.
@@ -605,12 +708,34 @@ struct Graft<'a> {
     fields: std::collections::HashMap<i32, PdfObject>,
     /// Names of `dst`'s root fields, loaded with the first field copied.
     names: Option<std::collections::HashSet<String>>,
+    /// The source form's /DA and /DR were carried over already.
+    defaults_done: bool,
 }
 
 /// Keys never grafted as they are: they point back into the source's page or field tree.
 const BACK_REFS: [&str; 7] = ["P", "Popup", "Parent", "IRT", "Kids", "A", "AA"];
 
 impl Graft<'_> {
+    /// `nodes` with their destinations made explicit in `dst` where the page was copied.
+    fn retarget(&self, dst: &PdfDocument, map: &mut PdfGraftMap, nodes: &[RawOut]) -> Result<Vec<OutNode>> {
+        nodes
+            .iter()
+            .map(|n| {
+                let dest = match &n.target {
+                    Some(t) => self.dest(dst, map, t)?,
+                    None => None,
+                };
+                Ok(OutNode {
+                    title: n.title.clone(),
+                    dest,
+                    uri: n.uri.clone(),
+                    open: n.open,
+                    children: self.retarget(dst, map, &n.children)?,
+                })
+            })
+            .collect()
+    }
+
     /// The annotations of one page, ready for `page`: popups are rebuilt by viewers and left
     /// out, and so is a link whose target page was not copied.
     fn annots(&mut self, dst: &mut PdfDocument, map: &mut PdfGraftMap, annots: &PdfObject, page: &PdfObject) -> Result<PdfObject> {
@@ -764,12 +889,39 @@ impl Graft<'_> {
                 form.get_dict("Fields")?.unwrap()
             }
         };
-        // The source form's defaults (fonts, appearance) where `dst` has none.
-        if let Some(sf) = self.src.catalog()?.get_dict("AcroForm")? {
-            for key in ["DR", "DA"] {
-                if form.get_dict(key)?.is_none() {
-                    if let Some(v) = sf.get_dict(key)? {
-                        form.dict_put(key, map.graft_object(&v)?)?;
+        // The source form's defaults: its /DA where `dst` has none, and its /DR merged key by key
+        // (/Font and the other resource dictionaries), so a field from a later file keeps its font
+        // and a name `dst` already has stays `dst`'s.
+        if !self.defaults_done {
+            self.defaults_done = true;
+            if let Some(sf) = self.src.catalog()?.get_dict("AcroForm")? {
+                if form.get_dict("DA")?.is_none() {
+                    if let Some(v) = sf.get_dict("DA")? {
+                        form.dict_put("DA", map.graft_object(&v)?)?;
+                    }
+                }
+                if let Some(sdr) = sf.get_dict("DR")?.filter(|d| d.is_dict().unwrap_or(false)) {
+                    match form.get_dict("DR")?.filter(|d| d.is_dict().unwrap_or(false)) {
+                        None => form.dict_put("DR", map.graft_object(&sdr)?)?,
+                        Some(mut dr) => {
+                            for entry in sdr.dict_iter()? {
+                                let (k, v) = entry?;
+                                let key = String::from_utf8_lossy(&k.as_name()?).into_owned();
+                                match dr.get_dict(key.as_str())? {
+                                    None => dr.dict_put(key.as_str(), map.graft_object(&v)?)?,
+                                    Some(mut have) if have.is_dict()? && v.is_dict()? => {
+                                        for e in v.dict_iter()? {
+                                            let (k2, v2) = e?;
+                                            let sub = String::from_utf8_lossy(&k2.as_name()?).into_owned();
+                                            if have.get_dict(sub.as_str())?.is_none() {
+                                                have.dict_put(sub.as_str(), map.graft_object(&v2)?)?;
+                                            }
+                                        }
+                                    }
+                                    Some(_) => {}
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -827,7 +979,7 @@ fn new_pdf(parts: &[(&PdfDocument, &[u32])]) -> Result<Vec<u8>> {
 
 /// What a written file must give back when it is opened again.
 #[derive(Clone, Copy, Default)]
-struct Readback<'a> {
+pub(crate) struct Readback<'a> {
     /// The open password it was written with.
     password: Option<&'a str>,
     /// `Some(true)`: it must carry an /Encrypt dictionary (security was set); `Some(false)`: it must
@@ -879,7 +1031,7 @@ fn write_synced(path: &Path, bytes: &[u8], create_new: bool) -> std::io::Result<
 /// When no file can be created in the target's folder (but the file itself is writable), the
 /// bytes are verified in %TEMP% and copied over the target, with a backup copy restored if that
 /// fails.
-fn write_atomic(target: &Path, bytes: &[u8], pages: u32, read: Readback) -> Result<()> {
+pub(crate) fn write_atomic(target: &Path, bytes: &[u8], pages: u32, read: Readback) -> Result<()> {
     let target = &resolve_link(target);
     let tmp = temp_for(target);
     match write_synced(&tmp, bytes, true) {
@@ -1010,7 +1162,7 @@ pub(super) fn clean_stale_temps(path: &Path) {
 }
 
 /// Writes a file that must not exist yet. Removed again if it does not read back.
-fn write_new(target: &Path, bytes: &[u8], pages: u32) -> Result<()> {
+pub(crate) fn write_new(target: &Path, bytes: &[u8], pages: u32) -> Result<()> {
     write_synced(target, bytes, true).map_err(io)?;
     verify(target, pages, Readback::default()).inspect_err(|_| {
         let _ = std::fs::remove_file(target);

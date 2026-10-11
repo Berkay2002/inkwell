@@ -4,8 +4,9 @@ import { computeLayout, previewScaleKey, rotated, type Size, visibleRange } from
 import { type Want, tileClient } from "../lib/tiles";
 import { useTextEdit } from "../lib/textEdit";
 import { useTools } from "../lib/toolsStore";
-import { type DocState, useStore } from "../store";
-import { Icon } from "./Icons";
+import { type DocState, pageLabel, useStore } from "../store";
+import { AttachmentsPanel } from "./AttachmentsPanel";
+import { Icon, type IconName } from "./Icons";
 import { ContextMenu, pageActions } from "./PageMenu";
 import { TileCanvas } from "./TileCanvas";
 import { BookmarkBar, BookmarkTree } from "./edit/BookmarkTree";
@@ -20,17 +21,30 @@ export function Sidebar({ doc }: { doc: DocState }) {
       <div className="sidebar-tabs">
         <PanelTab name="thumbs" label="Pages" />
         <PanelTab name="outline" label="Outline" />
+        <PanelTab name="attachments" label="Attachments" icon="paperclip" />
       </div>
-      {panel === "thumbs" ? <Thumbnails key={doc.id} doc={doc} /> : <Outline key={doc.id} doc={doc} />}
+      {panel === "thumbs" ? (
+        <Thumbnails key={doc.id} doc={doc} />
+      ) : panel === "outline" ? (
+        <Outline key={doc.id} doc={doc} />
+      ) : (
+        <AttachmentsPanel key={doc.id} doc={doc} />
+      )}
     </aside>
   );
 }
 
-function PanelTab({ name, label }: { name: "thumbs" | "outline"; label: string }) {
+function PanelTab({ name, label, icon }: { name: "thumbs" | "outline" | "attachments"; label: string; icon?: IconName }) {
   const on = useStore((s) => s.sidebar === name);
   return (
-    <button className={on ? "seg on" : "seg"} onClick={() => useStore.getState().setSidebar(name)}>
-      {label}
+    <button
+      className={on ? "seg on" : "seg"}
+      style={icon ? { flex: "0 0 38px" } : undefined}
+      title={icon ? label : undefined}
+      aria-label={icon ? label : undefined}
+      onClick={() => useStore.getState().setSidebar(name)}
+    >
+      {icon ? <Icon name={icon} size={15} /> : label}
     </button>
   );
 }
@@ -91,10 +105,10 @@ function Thumbnails({ doc }: { doc: DocState }) {
           e.preventDefault();
           setMenu({ x: e.clientX, y: e.clientY, page: i });
         }}
-        title={`Page ${i + 1}`}
+        title={doc.labels[i] ? `Page ${i + 1} (${doc.labels[i]})` : `Page ${i + 1}`}
       >
         <TileCanvas docId={id} tile={tile} size={size} zoom={THUMB_W / size[0]} stream={1} cover />
-        <span className="thumb-num">{i + 1}</span>
+        <span className="thumb-num">{pageLabel(doc, i)}</span>
         {ticked?.has(i) && (
           <span className="thumb-tick" aria-label="Recognized">
             <Icon name="check" size={12} />

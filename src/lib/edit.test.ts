@@ -47,7 +47,7 @@ describe("applyState", () => {
     applyState(1, state(0));
     expect(api.search).not.toHaveBeenCalled();
     applyState(1, state(1));
-    expect(api.search).toHaveBeenCalledWith(1, "rent", expect.any(Function));
+    expect(api.search).toHaveBeenCalledWith(1, "rent", expect.objectContaining({ caseSensitive: false }), expect.any(Function));
     const d = useStore.getState().docs[1];
     expect(d.search.hits).toEqual([]);
     expect([d.rev, d.pageCount, d.currentPage, d.dirty]).toEqual([1, 2, 1, true]);
