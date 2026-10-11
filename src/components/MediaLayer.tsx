@@ -30,7 +30,8 @@ const UNSEEN_MS = 2000;
 export const MediaLayer = memo(function MediaLayer({ docId, page, rev, rot, rawSize, zoom }: Props) {
   useEffect(() => useMedia.getState().ensure(docId, rev), [docId, rev]);
   const items = useMedia((s) => s.docs[docId]?.items ?? EMPTY);
-  const mine = useMemo(() => items.filter((i) => i.page === page), [items, page]);
+  // an annotation with nothing in it (a LaTeX animation frame, a bare Screen) is listed in the panel only
+  const mine = useMemo(() => items.filter((i) => i.page === page && i.assets.length > 0), [items, page]);
   const playing = useMedia((s) => s.playing);
   if (mine.length === 0) return null;
   return (
@@ -55,7 +56,7 @@ function Badge({ docId, item, box }: { docId: number; item: MediaItem; box: Box 
   const text = badgeText(item, info);
   const label = `${item.title || "Media"}: ${item.playable ? "play" : text}`;
   return (
-    <div className="media-area" style={{ left: box[0], top: box[1], width: box[2] - box[0], height: box[3] - box[1] }}>
+    <div className="media-area" onPointerDown={(e) => e.stopPropagation()} style={{ left: box[0], top: box[1], width: box[2] - box[0], height: box[3] - box[1] }}>
       <button
         className={item.playable ? "media-badge" : "media-badge off"}
         title={item.playable ? `Play ${item.title || "media"}${text ? ` (${text})` : ""}` : text}
@@ -125,6 +126,7 @@ function Player({ docId, item, box, asset }: { docId: number; item: MediaItem; b
     preload: "none" as const,
     controlsList: "nodownload",
     className: "media-player",
+    onPointerDown: (e: React.PointerEvent) => e.stopPropagation(),
     style: { left: box[0], top: box[1], width: w, height: h },
     onLoadedMetadata: () => el.current && useMedia.getState().setInfo(docId, item.xref, el.current.duration),
     onVolumeChange: () => el.current && useMedia.getState().setMuted(el.current.muted),

@@ -367,3 +367,37 @@ fn the_sample_file_lists_what_the_windows_check_expects() {
     assert_eq!(r.status, 206);
     assert_eq!(&r.body[4..8], b"ftyp");
 }
+
+#[test]
+fn pages_sharing_one_huge_annots_array_cost_one_budget() {
+    let pages = 100;
+    let entries = 20_000;
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offs = vec![0usize; pages + 6];
+    let mut obj = |out: &mut Vec<u8>, n: usize, body: String| {
+        offs[n] = out.len();
+        out.extend(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+    };
+    obj(&mut out, 1, "<< /Type /Catalog /Pages 2 0 R >>".into());
+    let kids: String = (0..pages).map(|i| format!("{} 0 R ", 6 + i)).collect();
+    obj(&mut out, 2, format!("<< /Type /Pages /Kids [{kids}] /Count {pages} >>"));
+    obj(&mut out, 3, "<< /Type /Annot /Subtype /Screen /Rect [0 0 10 10] >>".into());
+    obj(&mut out, 4, "<< /Type /Annot /Subtype /Square /Rect [0 0 10 10] >>".into());
+    let list: String = std::iter::once("3 0 R ".to_string()).chain((0..entries).map(|_| "4 0 R ".to_string())).collect();
+    obj(&mut out, 5, format!("[{list}]"));
+    for i in 0..pages {
+        obj(&mut out, 6 + i, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Annots 5 0 R >>".into());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", pages + 6).as_bytes());
+    for n in 1..pages + 6 {
+        out.extend(format!("{:010} 00000 n \n", offs[n]).as_bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", pages + 6).as_bytes());
+    let (eng, id, _) = open("shared-annots", out);
+    let t = std::time::Instant::now();
+    let items = list_all(&eng, id).unwrap();
+    // 50 000 loaded annotations / 20 001 per page: two pages are loaded, the rest are left out
+    assert_eq!(items.len(), 2);
+    assert!(t.elapsed().as_secs() < 30, "{:?}", t.elapsed());
+}

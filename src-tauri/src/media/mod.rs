@@ -28,6 +28,11 @@ const MAX_PAGE_ITEMS: usize = 1_000;
 const MAX_DOC_ITEMS: usize = 10_000;
 /// Entries of one page's /Annots looked at.
 const MAX_SCANNED: usize = 100_000;
+/// /Annots entries screened in the whole document: pages may share one huge array.
+const MAX_DOC_SCANNED: usize = 500_000;
+/// Annotations of the pages that are loaded (MuPDF builds each one, about 100 us): the same shared
+/// array behind every page would load it again for each.
+const MAX_DOC_LOADED: usize = 50_000;
 const MAX_ASSETS: usize = 500;
 /// Name-tree nodes looked at per annotation (kids may repeat or loop).
 const MAX_TREE_NODES: usize = 2_000;
@@ -652,10 +657,17 @@ fn item_of(page: u32, xref: i32, kind: Kind, rect: [f32; 4], o: &PdfObject) -> M
 
 // ---- listing and reading -----------------------------------------------------------------------
 
-/// Whether a page's raw /Annots holds a media annotation: only those pages are loaded.
-fn has_media(page: &PdfObject) -> bool {
-    let Some(annots) = get(page, "Annots").and_then(|a| a.resolve().ok().flatten()) else { return false };
-    (0..annots.len().unwrap_or(0).min(MAX_SCANNED)).any(|i| {
+/// The length of the page's raw /Annots when it holds a media annotation: only those pages are loaded.
+/// The length is taken off `budget`; a page that does not fit is not looked at.
+fn media_annots(page: &PdfObject, budget: &mut usize) -> Option<usize> {
+    let annots = get(page, "Annots").and_then(|a| a.resolve().ok().flatten())?;
+    let len = annots.len().unwrap_or(0).min(MAX_SCANNED);
+    if len > *budget {
+        *budget = 0;
+        return None;
+    }
+    *budget -= len;
+    let any = (0..len).any(|i| {
         annots
             .get_array(i as i32)
             .ok()
@@ -663,19 +675,24 @@ fn has_media(page: &PdfObject) -> bool {
             .and_then(|a| dict_of(&a))
             .and_then(|a| name_of(&a, "Subtype"))
             .is_some_and(|s| Kind::of_subtype(s.as_bytes()).is_some())
-    })
+    });
+    any.then_some(len)
 }
 
 /// Every media annotation of the document, in page order.
 pub fn list(doc: &PdfDocument) -> Result<Vec<MediaItem>> {
     let mut out = Vec::new();
+    let mut scan = MAX_DOC_SCANNED;
+    let mut load = MAX_DOC_LOADED;
     for p in 0..doc.page_count()?.max(0) {
-        if out.len() >= MAX_DOC_ITEMS {
+        if out.len() >= MAX_DOC_ITEMS || scan == 0 {
             break;
         }
-        if !has_media(&doc.find_page(p)?) {
+        let Some(len) = media_annots(&doc.find_page(p)?, &mut scan) else { continue };
+        if len > load {
             continue;
         }
+        load -= len;
         let page = doc.load_pdf_page(p)?;
         let mut here = 0;
         for a in page.annotations() {

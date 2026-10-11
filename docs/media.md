@@ -65,7 +65,7 @@ that is not playable answer 404; there is no path or token in the URL.
 ## The UI
 
 - A round badge (play triangle, or slashed for not supported with the reason underneath) sits in the middle of the
-  annotation's area. Hover shows the format and, once the element has read it, the duration (`MP4 · 1:15`).
+  annotation's area; an item with no asset at all stays in the panel and gets no badge. Hover shows the format and, once the element has read it, the duration (`MP4 · 1:15`).
 - Click: a `<video>` or `<audio>` element replaces the badge over the annotation's rect (audio and tiny rects get a
   minimum size), native controls, `preload="none"`, no `loop`, no autoplay attribute (the click is the play). It is
   placed in page CSS px outside the scaled page space, so the controls stay upright and the same size at any zoom or
@@ -79,8 +79,10 @@ that is not playable answer 404; there is no path or token in the URL.
 
 ## Caps
 
-1 000 media annotations per page, 10 000 per document, 100 000 `/Annots` entries screened per page, 500 assets and
-2 000 name-tree nodes per annotation (a visited set stops a node that lists itself), 32 actions, nesting depth 8.
+1 000 media annotations per page, 10 000 per document, 100 000 `/Annots` entries screened per page and 500 000 per
+document, 50 000 annotations built (MuPDF) per document, 500 assets and 2 000 name-tree nodes per annotation (a visited
+set stops a node that lists itself), 32 actions, nesting depth 8. The two document budgets matter because many pages can
+share one huge indirect `/Annots` array: each page is charged the array's length, so the listing stops after a few pages.
 
 ## Acrobat compatibility
 
