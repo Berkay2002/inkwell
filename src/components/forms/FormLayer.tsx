@@ -1,4 +1,5 @@
 import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
+import { commandFor } from "../../lib/commands";
 import { useForms } from "../../lib/forms";
 import {
   type ButtonAction, type Field, type FieldValue, type Handle, type Rect4, HANDLES, KIND_LABEL, cssColor, dragged, fontSize,
@@ -314,7 +315,13 @@ function TextEditor({ f, className, label, locked, onCommit, onChange }: {
   };
   const keys = (multi: boolean) => (e: React.KeyboardEvent) => {
     e.stopPropagation();
-    if (e.key === "Escape") {
+    // Save while typing: the typed value is committed first (it would only commit on blur), then the save runs.
+    const cmd = commandFor(e.nativeEvent);
+    if (cmd?.id === "save" || cmd?.id === "save-as") {
+      e.preventDefault();
+      const typed = live.current.v;
+      void (typed !== f.value ? onCommit(typed) : Promise.resolve(null)).then(() => cmd.run());
+    } else if (e.key === "Escape") {
       show(f.value);
       onChange();
       (e.target as HTMLElement).blur();
