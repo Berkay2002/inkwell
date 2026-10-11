@@ -866,6 +866,8 @@ export interface PrintPlan {
   papers: number;
   /** Sides sent to the printer for all copies, blank backs included: what a job's progress counts to. */
   sides: number;
+  /** Pages Save as PDF writes, two-sided padding included: what its progress counts to. */
+  pdfSides: number;
   faces: PrintFace[];
   editRev: number;
 }

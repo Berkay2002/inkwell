@@ -1,5 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { commands, prettyKeys } from "../lib/commands";
+import { usePortfolio } from "../lib/portfolioStore";
 import { useToolPrefs } from "../lib/toolPrefs";
 import { toolItems, runTool } from "../lib/toolItems";
 import { type ToolItem, MAX_PINNED, filterTools, pick } from "../lib/toolsCatalog";
@@ -14,7 +15,9 @@ const CARD_DELAY = 600;
 
 /** The tools for `doc`, rebuilt only when the document changes. */
 export function useToolItems(doc: Pick<DocState, "id" | "name">): ToolItem[] {
-  return useMemo(() => toolItems(doc), [doc.id, doc.name]);
+  // a PDF Portfolio also gets its "Portfolio files" tool
+  const portfolio = usePortfolio((s) => s.docs[doc.id]?.info != null);
+  return useMemo(() => toolItems(doc, portfolio), [doc.id, doc.name, portfolio]);
 }
 
 const shortcutOf = (it: ToolItem): string | null => {

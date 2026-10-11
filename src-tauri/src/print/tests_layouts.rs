@@ -639,6 +639,47 @@ fn a_turned_page_with_an_offset_crop_box_lands_where_the_preview_puts_it() {
     assert!(diff as f64 / ((w * h) as f64) < 3.0);
 }
 
+/// One page, `media` points wide and high, with the given page entries and a 200 x 200 square (user units) at 100, 100.
+fn sized_page(media: (u32, u32), page: &str, content: &str) -> Vec<u8> {
+    raw_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R {page} >>", media.0, media.1),
+        stream("", content),
+    ])
+}
+
+#[test]
+fn a_page_with_a_user_unit_prints_at_its_real_size() {
+    let d = dir("user-unit");
+    // /UserUnit 2: a 612 x 792 box in user units is a 1224 x 1584 pt page, and the square is 400 pt across
+    let unit = sized_page((612, 792), "/UserUnit 2", "0 g 100 100 200 200 re f");
+    // the same page written in points
+    let plain = sized_page((1224, 1584), "", "2 0 0 2 0 0 cm 0 g 100 100 200 200 re f");
+    let (eng, doc, _) = open_bytes(&d, "unit.pdf", &unit);
+    let (eng2, doc2, _) = open_bytes(&d, "plain.pdf", &plain);
+    let s = settings(Layout::default());
+    let (a, b) = (d.join("a.pdf"), d.join("b.pdf"));
+    save(&eng, doc, &s, &a).unwrap();
+    save(&eng2, doc2, &s, &b).unwrap();
+    let (ink_a, ink_b) = (dark(&a, 0), dark(&b, 0));
+    assert!(ink_b > 1_000 && ink_a.abs_diff(ink_b) * 100 <= ink_b, "{ink_a} vs {ink_b}");
+    // the sheet is the paper, and the page was fitted whole: the square covers the same share of it as in the twin
+    let o = mupdf::Document::open(a.to_string_lossy().as_ref()).unwrap();
+    assert!(near(f64::from(o.load_page(0).unwrap().bounds().unwrap().width()), 612.0));
+    // and it is what the preview draws
+    let png = preview_png(&eng, doc, &s, 0, 792).unwrap();
+    let img = image::load_from_memory(&png).unwrap().to_luma8();
+    let (w, h, px) = gray(&a, 0, 1.0);
+    let mut diff = 0u64;
+    for y in 0..h.min(img.height() as usize) {
+        for x in 0..w.min(img.width() as usize) {
+            diff += u64::from(px[y * w + x].abs_diff(img.get_pixel(x as u32, y as u32).0[0]));
+        }
+    }
+    assert!(diff as f64 / ((w * h) as f64) < 3.0);
+}
+
 #[test]
 fn form_fields_only_keeps_the_widgets_and_drops_page_and_markup() {
     let d = dir("fields");
