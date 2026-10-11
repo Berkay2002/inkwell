@@ -195,3 +195,39 @@ fn sanitize_preview_leaves_the_document() {
     assert_eq!(eng.edit_state(id).unwrap().rev, s.rev);
     assert_eq!(list_marks(&eng, id).unwrap().len(), hits.len());
 }
+
+#[test]
+fn text_marks_keep_their_label() {
+    let (d, path, eng, id) = open("labels");
+    let hits = find(&eng, id, &needle()).unwrap();
+    assert!(!hits.is_empty());
+    assert!(hits.iter().all(|h| !h.before.is_empty() || !h.after.is_empty()), "hits carry context: {hits:?}");
+    mark_hits(&eng, id, &hits, EditSource::User).unwrap();
+    mark_area(&eng, id, 1, [10.0, 10.0, 50.0, 50.0], EditSource::User).unwrap();
+    let labels = |e: &Engine, i| { let mut l: Vec<_> = list_marks(e, i).unwrap().into_iter().map(|m| m.label).collect(); l.sort(); l };
+    let mut want: Vec<Option<String>> = hits.iter().map(|h| Some(h.text.clone())).chain([None]).collect();
+    want.sort();
+    assert_eq!(labels(&eng, id), want);
+
+    eng.undo(id).unwrap();
+    assert_eq!(labels(&eng, id), want[1..]);
+    eng.redo(id).unwrap();
+    assert_eq!(labels(&eng, id), want);
+
+    // Save and reopen: the label is in the file.
+    let saved = d.join("saved.pdf").to_string_lossy().into_owned();
+    eng.save(id, Some(&saved)).unwrap();
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&saved).unwrap().doc;
+    assert_eq!(labels(&eng2, id2), want);
+
+    // Security: after Apply the label (the redacted text) is nowhere in the output.
+    let out = redacted_path(&path);
+    let r = apply(&eng, id, Sanitize::default(), Some(out.clone()), EditSource::User).unwrap();
+    let ApplyOutcome::Applied { verify, .. } = r else { panic!("refused: {r:?}") };
+    assert!(verify.is_clean());
+    let bytes = std::fs::read(&out).unwrap();
+    for h in &hits {
+        assert!(!bytes.windows(h.text.len()).any(|w| w == h.text.as_bytes()), "label {:?} left in the output", h.text);
+    }
+}

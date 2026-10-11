@@ -109,7 +109,7 @@ await ev(`(() => { const i = document.querySelector(".rd-pages input"); i.focus(
 await send("Input.insertText", { text: "9" });
 await click(".rd-pages .rd-btn", "Mark");
 await until(`window.__R.getState().docs[${doc}].marks.length >= 6`, "the page mark");
-report.marks = await ev(`window.__R.getState().docs[${doc}].marks.map((m) => ({ page: m.page, wholePage: m.wholePage, label: window.__R.getState().docs[${doc}].labels[m.page + ":" + m.xref] }))`);
+report.marks = await ev(`window.__R.getState().docs[${doc}].marks.map((m) => ({ page: m.page, wholePage: m.wholePage, label: m.label }))`);
 await click(".rd-tool", "Mark pages"); // closes the page field
 await ev(`window.__S.getState().goTo(${doc}, 1)`);
 await ev(`document.querySelector(".rd-body").scrollTop = 0`);

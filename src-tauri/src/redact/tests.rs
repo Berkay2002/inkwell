@@ -1051,3 +1051,18 @@ fn name_tree_with_shared_kids_fails_closed() {
         r => panic!("expected a refusal, got {r:?}"),
     }
 }
+
+#[test]
+fn hit_context_is_the_surrounding_line() {
+    let t = "Intro line\nThe quick brown fox mentions SECRET-1 before lunch and long after that, with many more words to cut somewhere near sixty chars out.";
+    let s = t.find("SECRET-1").unwrap();
+    let (b, a) = context(t, &(s..s + 8));
+    assert_eq!(b, "The quick brown fox mentions ");
+    assert!(a.trim_start().starts_with("before lunch") && a.len() <= 60 && !a.ends_with(' '), "{a:?}");
+    let long = format!("{} SECRET-1", "word ".repeat(30));
+    let (b, a) = context(&long, &(long.len() - 8..long.len()));
+    assert!(b.len() <= 60 && b.starts_with("word") && a.is_empty(), "{b:?}");
+    let doc = sample();
+    let hits = find(&doc, &Query::Pattern(Pattern::Email)).unwrap();
+    assert!(hits.iter().all(|h| !(h.before.is_empty() && h.after.is_empty())));
+}

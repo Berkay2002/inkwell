@@ -209,7 +209,11 @@ function Find({ doc }: { doc: DocState }) {
                       title="Show on the page"
                       onClick={() => useStore.getState().goTo(id, hit.page, Math.max(0, Math.min(...hit.quads.map((x) => x[1])) - 80))}
                     >
-                      {hit.text}
+                      <span className="rd-ctx before">
+                        <bdi dir="ltr">{hit.before.replace(/ $/, "\u00a0")}</bdi>
+                      </span>
+                      <mark>{hit.text}</mark>
+                      <span className="rd-ctx">{hit.after.replace(/^ /, "\u00a0")}</span>
                     </button>
                     <span className="rd-chip">p. {hit.page + 1}</span>
                   </div>
@@ -226,14 +230,13 @@ function Find({ doc }: { doc: DocState }) {
 function Marks({ doc }: { doc: DocState }) {
   const d = useRedact((s) => s.docs[doc.id]);
   const marks = d?.marks ?? [];
-  const labels = d?.labels ?? {};
   if (marks.length === 0) return <p className="rd-none dim">Nothing is marked yet. Marked text stays in the file until you apply the marks.</p>;
   return (
     <div className="rd-marks">
       <h4>{plural(marks.length, "mark")}</h4>
       <ul>
         {marks.map((m) => (
-          <MarkRow key={`${m.page}:${m.xref}`} doc={doc.id} m={m} label={markLabel(m, labels)} />
+          <MarkRow key={`${m.page}:${m.xref}`} doc={doc.id} m={m} label={markLabel(m)} />
         ))}
       </ul>
     </div>

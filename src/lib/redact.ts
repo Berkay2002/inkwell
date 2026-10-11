@@ -14,8 +14,8 @@ export type FindQuery =
   | { kind: "pattern"; pattern: Pattern };
 /** `[ulx, uly, urx, ury, llx, lly, lrx, lry]`, page space, y down. */
 export type Quad = [number, number, number, number, number, number, number, number];
-export interface Hit { page: number; text: string; quads: Quad[] }
-export interface Mark { page: number; xref: number; quads: Quad[]; wholePage: boolean }
+export interface Hit { page: number; text: string; quads: Quad[]; before: string; after: string }
+export interface Mark { page: number; xref: number; quads: Quad[]; wholePage: boolean; label: string | null }
 export interface Sanitize {
   metadata: boolean; hiddenLayers: boolean; hiddenText: boolean; scriptsActions: boolean;
   embeddedFiles: boolean; annotations: boolean; formFieldsUnderMarks: boolean; bookmarks: boolean;
@@ -56,29 +56,10 @@ export const SANITIZE_OFF: Sanitize = {
   embeddedFiles: false, annotations: false, formFieldsUnderMarks: false, bookmarks: false,
 };
 
-const keyOf = (m: Mark) => `${m.page}:${m.xref}`;
-const near = (a: Quad, b: Quad) => a.every((v, i) => Math.abs(v - b[i]) < 1);
-
-/** What the new marks are, for the marks list: a hit's text, "" for an area. (The file only knows quads.) */
-function learn(labels: Record<string, string>, before: Mark[], after: Mark[], what: MarkWhat): Record<string, string> {
-  const had = new Set(before.map(keyOf));
-  const fresh = after.filter((m) => !had.has(keyOf(m)));
-  const out = { ...labels };
-  if (what.kind === "area") fresh.forEach((m) => (out[keyOf(m)] = ""));
-  if (what.kind === "hits")
-    for (const h of what.hits) {
-      const i = fresh.findIndex((m) => m.page === h.page && m.quads[0] && h.quads[0] && near(m.quads[0], h.quads[0]));
-      if (i >= 0) out[keyOf(fresh.splice(i, 1)[0])] = h.text;
-    }
-  return out;
-}
-
-/** The marks list's text for a mark: the marked text, "Area on page N" or "Page N". */
-export function markLabel(m: Mark, labels: Record<string, string>): string {
-  const l = labels[keyOf(m)];
+/** The marks list's text for a mark: the marked text (kept in the file), "Area on page N" or "Page N". */
+export function markLabel(m: Mark): string {
   if (m.wholePage) return `Page ${m.page + 1}`;
-  if (l) return l;
-  return l === "" ? `Area on page ${m.page + 1}` : `Mark on page ${m.page + 1}`;
+  return m.label || `Area on page ${m.page + 1}`;
 }
 
 export type Phase = "marking" | "confirm" | "applying" | "report" | "refused";
@@ -89,8 +70,6 @@ export interface DocRedact {
   /** Hits per pattern, filled when the rail opens. */
   counts: Partial<Record<Pattern, number>>;
   hits: Hit[];
-  /** `page:xref` -> the marked text ("" for an area), learned when a mark is made in this session. */
-  labels: Record<string, string>;
   /** Indexes into `hits` that "Mark n" will mark. */
   checked: number[];
   marks: Mark[];
@@ -100,7 +79,7 @@ export interface DocRedact {
   error: string | null;
 }
 
-const fresh = (): DocRedact => ({ query: null, counts: {}, labels: {}, hits: [], checked: [], marks: [], phase: "marking", options: null, outcome: null, error: null });
+const fresh = (): DocRedact => ({ query: null, counts: {}, hits: [], checked: [], marks: [], phase: "marking", options: null, outcome: null, error: null });
 
 interface RedactStore {
   /** The right rail is showing, and the area tool (drag on a page) is armed. */
@@ -140,12 +119,9 @@ export const useRedact = create<RedactStore>((set, get) => {
       patch(doc, { error: msg(e) });
     }
   };
-  const edited = async (doc: number, s: EditState, what?: MarkWhat) => {
-    const before = get().get(doc).marks;
+  const edited = async (doc: number, s: EditState) => {
     applyState(doc, s);
     await get().refreshMarks(doc);
-    const d = get().get(doc);
-    if (what) patch(doc, { labels: learn(d.labels, before, d.marks, what) });
   };
 
   return {
@@ -183,10 +159,10 @@ export const useRedact = create<RedactStore>((set, get) => {
         const hits = d.checked.map((i) => d.hits[i]);
         if (!hits.length) return;
         const what: MarkWhat = { kind: "hits", hits };
-        await edited(doc, await redactApi.mark(doc, what), what);
+        await edited(doc, await redactApi.mark(doc, what));
         patch(doc, { hits: [], checked: [], query: null });
       }),
-    mark: (doc, what) => run(doc, async () => edited(doc, await redactApi.mark(doc, what), what)),
+    mark: (doc, what) => run(doc, async () => edited(doc, await redactApi.mark(doc, what))),
     unmark: (doc, marks) =>
       run(doc, async () => edited(doc, await redactApi.unmark(doc, marks.map((m) => [m.page, m.xref])))),
     refreshMarks: (doc) => run(doc, async () => patch(doc, { marks: await redactApi.listMarks(doc) })),
