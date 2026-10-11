@@ -22,7 +22,7 @@ const LIST = [thread(10, "Article 1", [bead(11, 0), bead(12, 0), bead(13, 1), be
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useThreads.setState({ docs: { 1: LIST }, show: false, tool: false, selected: null, follow: null, props: null });
+  useThreads.setState({ docs: { 1: LIST }, locks: {}, show: false, tool: false, selected: null, follow: null, props: null });
 });
 
 describe("follow navigation", () => {
@@ -190,7 +190,7 @@ describe("helpers", () => {
 });
 
 describe("beads and the other page tools", () => {
-  const idle = { redact: false, annot: "select", forms: "select", text: "select", link: "select" };
+  const idle = { redact: false, annot: "select", forms: "select", text: "select", link: "select", order: false, placing: false };
 
   it("outlines never take the pointer: Show beads gives only the number tag, reading the whole bead", () => {
     expect(beadPointer({ tool: false, follow: false, show: true, other: false })).toBe("tag");
@@ -213,12 +213,29 @@ describe("beads and the other page tools", () => {
     expect(otherToolHeld({ ...idle, forms: "text" })).toBe(true);
     expect(otherToolHeld({ ...idle, text: "text" })).toBe(true);
     expect(otherToolHeld({ ...idle, link: "draw" })).toBe(true);
+    // the Reading order view and an image waiting for its place hold the page too
+    expect(otherToolHeld({ ...idle, order: true })).toBe(true);
+    expect(otherToolHeld({ ...idle, placing: true })).toBe(true);
   });
 
   it("the reading keys belong to the page, not to a focused button or list", () => {
     expect(readsKeys({ body: true, inViewer: false })).toBe(true);
     expect(readsKeys({ body: false, inViewer: true })).toBe(true);
     expect(readsKeys({ body: false, inViewer: false })).toBe(false);
+  });
+});
+
+describe("certified and signed documents", () => {
+  it("reads once whether the document is certified or signed, and keeps unreadable as unknown", async () => {
+    inv.mockResolvedValueOnce({ certified: true, signed: true });
+    await useThreads.getState().readLocks(1);
+    expect(inv).toHaveBeenCalledWith("a11y_protection", { doc: 1 });
+    expect(useThreads.getState().locks[1]).toEqual({ certified: true, signed: true });
+    await useThreads.getState().readLocks(1);
+    expect(inv).toHaveBeenCalledTimes(1);
+    inv.mockRejectedValueOnce("no");
+    await useThreads.getState().readLocks(2);
+    expect(useThreads.getState().locks[2]).toBeUndefined();
   });
 });
 

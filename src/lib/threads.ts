@@ -69,10 +69,18 @@ export interface ToolsHeld {
   /** Edit mode's text tool, and the link tool. */
   text: string;
   link: string;
+  /** The Reading order view of the accessibility rail is open, or an image waits for its place. */
+  order: boolean;
+  placing: boolean;
 }
 
 export const otherToolHeld = (t: ToolsHeld): boolean =>
-  t.redact || t.annot !== "select" || t.forms !== "select" || t.text !== "select" || t.link !== "select";
+  t.redact || t.annot !== "select" || t.forms !== "select" || t.text !== "select" || t.link !== "select" || t.order || t.placing;
+
+/** Why the controls of a certified document are off, and what a signed one is told. */
+export const CERTIFIED_REASON = "This document is certified, so its articles can be read but not changed.";
+export const SIGNED_NOTE =
+  "This document is signed. A change to its articles is saved as an update after the signature, which will show that the file was changed.";
 
 /**
  * What the beads on a page take of the pointer. Outlines alone never do ("Show beads" must not get between the
@@ -108,6 +116,8 @@ export function propsChange(t: ArticleThread, form: ThreadInfo): ThreadInfo | nu
 
 interface Threads {
   docs: Record<number, ArticleThread[]>;
+  /** Certified or signed, per document, once read (not known yet reads as neither: the engine refuses anyway). */
+  locks: Record<number, api.DocProtection>;
   /** "Show beads": outlines with numbers on every page. */
   show: boolean;
   /** The Article tool is armed: a drag on a page makes a bead. */
@@ -121,6 +131,7 @@ interface Threads {
 
   get: (doc: number) => ArticleThread[];
   load: (doc: number) => Promise<void>;
+  readLocks: (doc: number) => Promise<void>;
   setShow: (on: boolean) => void;
   setTool: (on: boolean) => void;
   select: (ref: BeadRef | null) => void;
@@ -183,6 +194,7 @@ export const useThreads = create<Threads>((set, get) => {
 
   return {
     docs: {},
+    locks: {},
     show: false,
     tool: false,
     selected: null,
@@ -215,6 +227,16 @@ export const useThreads = create<Threads>((set, get) => {
           if (inflight.get(doc) === p) return;
         }
       })();
+    },
+
+    readLocks: async (doc) => {
+      if (get().locks[doc]) return;
+      try {
+        const p = await api.docProtection(doc);
+        set((s) => ({ locks: { ...s.locks, [doc]: p } }));
+      } catch {
+        // unreadable: the engine refuses a certified document's edits itself
+      }
     },
 
     setShow: (show) => set({ show }),

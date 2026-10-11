@@ -776,8 +776,17 @@ fn protected(test: &str, perms: Option<&str>, acroform: Option<&str>) -> (Arc<En
 
 #[test]
 fn a_certified_document_takes_no_article_edit() {
-    for p in [1, 2, 3] {
-        let perms = format!("<< /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P {p} >> >> ] >> >>");
+    // the certification as the catalog's /Perms has it (any /P), and as a signature field's /V has it
+    let reference = |p: i32| format!("[ << /TransformMethod /DocMDP /TransformParams << /P {p} >> >> ]");
+    let mut cases: Vec<(String, &str, String)> = [1, 2, 3]
+        .map(|p| (format!("perms{p}"), "Perms", format!("<< /DocMDP << /Type /Sig /Reference {} >> >>", reference(p))))
+        .into();
+    cases.push((
+        "field".into(),
+        "AcroForm",
+        format!("<< /Fields [ << /FT /Sig /T (Sig) /V << /Type /Sig /Reference {} >> >> ] >>", reference(1)),
+    ));
+    for (p, key, value) in cases {
         // the article exists before the document is certified, so every kind of edit has something to refuse
         let (eng, id, _d) = open(&format!("certified{p}"), 3);
         thread_create(&eng, id, "A", 0, R, USER).unwrap();
@@ -786,7 +795,7 @@ fn a_certified_document_takes_no_article_edit() {
         let bead = list(&eng, id)[0].beads[0].id;
         tamper(&eng, id, |d| {
             let mut cat = d.catalog()?;
-            cat.dict_put("Perms", d.new_object_from_str(&perms)?)?;
+            cat.dict_put(key, d.new_object_from_str(&value)?)?;
             Ok(vec![])
         });
         let before = (eng.edit_state(id).unwrap().undo, list(&eng, id).len());

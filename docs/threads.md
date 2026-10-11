@@ -40,6 +40,14 @@ Delete**; every other step returns an error and changes nothing. Deleting one re
 that another article's ring runs through (even without a /T) stays on its page. The UI draws its beads dashed in the danger colour
 and shows the reason in the Articles panel.
 
+## Certified and signed documents
+
+- **Certified** (`outline::certified`, any /P): no article step is made. Every write refuses inside its edit step
+  ("This document is certified..."), so no history entry is recorded. The Article tool stays down, and the panel's
+  New article, Properties and Delete and the Properties sheet are off with the reason. Reading is unaffected.
+- **Signed**: steps are written as an update after the signed revision (never a rewrite), and the panel says so.
+- Deleting pages (`after_delete`) is a page edit, not an article edit, and is left as it was.
+
 ## Pages and other edits
 
 - **Delete pages** unlinks the beads on them (the article closes up; one that loses all its beads goes). This runs

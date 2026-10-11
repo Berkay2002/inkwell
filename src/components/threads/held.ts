@@ -1,5 +1,7 @@
+import { useA11y } from "../../lib/a11y";
 import { useAnnot } from "../../lib/annot";
 import { useForms } from "../../lib/forms";
+import { useImageEdit } from "../../lib/imageEdit";
 import { useNav } from "../../lib/nav";
 import { useRedact } from "../../lib/redact";
 import { useTextEdit } from "../../lib/textEdit";
@@ -12,5 +14,7 @@ export function useOtherToolHeld(): boolean {
   const forms = useForms((s) => s.tool);
   const text = useTextEdit((s) => s.tool);
   const link = useNav((s) => s.linkTool);
-  return otherToolHeld({ redact, annot, forms, text, link });
+  const order = useA11y((s) => s.open && s.view === "order");
+  const placing = useImageEdit((s) => Object.values(s.docs).some((d) => d.placing !== null));
+  return otherToolHeld({ redact, annot, forms, text, link, order, placing });
 }

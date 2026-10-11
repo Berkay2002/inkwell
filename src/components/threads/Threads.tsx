@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { ArticleThread, ThreadInfo } from "../../lib/api";
+import { useA11y } from "../../lib/a11y";
 import { useAnnot } from "../../lib/annot";
 import { useForms } from "../../lib/forms";
+import { useImageEdit } from "../../lib/imageEdit";
 import { computeLayout } from "../../lib/layout";
 import { useNav } from "../../lib/nav";
 import { useRedact } from "../../lib/redact";
 import { useTextEdit } from "../../lib/textEdit";
-import { beadZoom, propsChange, propsDraft, readsKeys, threadOf, useThreads } from "../../lib/threads";
+import { CERTIFIED_REASON, beadZoom, propsChange, propsDraft, readsKeys, threadOf, useThreads } from "../../lib/threads";
 import { type DocState, type ZoomMode, useStore } from "../../store";
 import { Icon } from "../Icons";
 import { Shell, useEscape } from "../OrganizePlus";
@@ -39,6 +41,14 @@ export function ThreadHost({ doc }: { doc: DocState }) {
   useEffect(() => {
     if (wantList) void th().load(id);
   }, [wantList, id, doc.rev]);
+  // A certified document takes no edit: the Article tool stays down and the sheet's fields are off.
+  const certified = useThreads((s) => s.locks[id]?.certified === true);
+  useEffect(() => {
+    if (wantList) void th().readLocks(id);
+  }, [wantList, id]);
+  useEffect(() => {
+    if (certified && tool) th().setTool(false);
+  }, [certified, tool]);
 
   // One page tool at a time: arming the Article tool puts the others down, and arming another puts it down.
   const other = useOtherToolHeld();
@@ -49,6 +59,8 @@ export function ThreadHost({ doc }: { doc: DocState }) {
     useForms.getState().setTool("select");
     useTextEdit.getState().setTool("select");
     useNav.getState().setLinkTool("select");
+    if (useA11y.getState().view === "order") useA11y.getState().setView("check");
+    for (const [d, e] of Object.entries(useImageEdit.getState().docs)) if (e.placing) useImageEdit.getState().cancelPlacing(Number(d));
   }, [tool]);
   useEffect(() => {
     if (other) th().setTool(false);
@@ -164,7 +176,7 @@ export function ThreadHost({ doc }: { doc: DocState }) {
           </button>
         </div>
       )}
-      {propsThread && <PropsSheet key={propsThread.id} doc={id} thread={propsThread} />}
+      {propsThread && <PropsSheet key={propsThread.id} doc={id} thread={propsThread} locked={certified} />}
     </>
   );
 }
@@ -199,7 +211,7 @@ function advance(id: number, dir: 1 | -1) {
   th().step(dir);
 }
 
-function PropsSheet({ doc, thread }: { doc: number; thread: ArticleThread }) {
+function PropsSheet({ doc, thread, locked }: { doc: number; thread: ArticleThread; locked: boolean }) {
   const close = () => th().closeProps();
   const [opened] = useState(thread);
   const [initial] = useState(() => propsDraft(opened));
@@ -208,6 +220,7 @@ function PropsSheet({ doc, thread }: { doc: number; thread: ArticleThread }) {
   useEscape(true, close);
   const apply = () => {
     close();
+    if (locked) return;
     // what the form opened with is not an edit: the fallback title is not written back as a /Title
     const change = propsChange(opened, info);
     if (change) void th().describe(doc, thread.id, change);
@@ -219,6 +232,7 @@ function PropsSheet({ doc, thread }: { doc: number; thread: ArticleThread }) {
         className="tl-field"
         value={info[k]}
         autoFocus={first}
+        disabled={locked}
         spellCheck={false}
         onChange={set(k)}
         onKeyDown={(e) => e.key === "Enter" && apply()}
@@ -232,6 +246,7 @@ function PropsSheet({ doc, thread }: { doc: number; thread: ArticleThread }) {
         {field("subject", "Subject")}
         {field("author", "Author")}
         {field("keywords", "Keywords")}
+        {locked && <p className="th-note dim">{CERTIFIED_REASON}</p>}
         {thread.damaged && (
           <p className="op-error" role="alert">
             {thread.damaged}
@@ -243,7 +258,7 @@ function PropsSheet({ doc, thread }: { doc: number; thread: ArticleThread }) {
         <button className="btn ghost" onClick={close}>
           Cancel
         </button>
-        <button className="btn primary" onClick={apply}>
+        <button className="btn primary" disabled={locked} title={locked ? CERTIFIED_REASON : undefined} onClick={apply}>
           Apply
         </button>
       </footer>

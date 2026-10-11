@@ -1288,6 +1288,12 @@ export interface ArticleThread {
   damaged: string | null;
 }
 
+/** Whether the document is certified (no edit is made) or signed (an edit is saved as an update after the signature). */
+export interface DocProtection {
+  certified: boolean;
+  signed: boolean;
+}
+export const docProtection = (doc: number) => invoke<DocProtection>("a11y_protection", { doc });
 export const threadsList = (doc: number) => invoke<ArticleThread[]>("threads_list", { doc });
 export const threadStart = (doc: number, title: string, page: number, rect: ThreadBead["rect"]) =>
   invoke<EditState>("thread_start", { doc, title, page, rect });
