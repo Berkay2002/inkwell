@@ -102,9 +102,10 @@ export function pageChips(pages: number[], max = 3): string[] {
 
 // ---- change lists -----------------------------------------------------------------------------------
 
-export type Category = "text" | "images" | "annotations" | "pages" | "forms" | "metadata";
+export type Category = "text" | "formatting" | "images" | "annotations" | "pages" | "forms" | "metadata";
 export const CATEGORIES: { id: Category; label: string }[] = [
   { id: "text", label: "Text" },
+  { id: "formatting", label: "Formatting" },
   { id: "images", label: "Images" },
   { id: "annotations", label: "Annotations" },
   { id: "pages", label: "Pages" },
@@ -120,6 +121,7 @@ const CATEGORY: Record<ChangeKind, Category> = {
   pageRotated: "pages",
   pageBoxChanged: "pages",
   textChanged: "text",
+  formatChanged: "formatting",
   ocrLayerAdded: "text",
   redactionApplied: "text",
   // painted content that no specific kind explains (vector art, colours) is listed with the images
@@ -190,9 +192,49 @@ export const flatOrder = (groups: PageGroup[]): number[] => groups.flatMap((g) =
 
 /** Counts per category (for the filter chips). */
 export function categoryCounts(changes: Change[]): Record<Category, number> {
-  const n: Record<Category, number> = { text: 0, images: 0, annotations: 0, pages: 0, forms: 0, metadata: 0 };
+  const n: Record<Category, number> = { text: 0, formatting: 0, images: 0, annotations: 0, pages: 0, forms: 0, metadata: 0 };
   for (const c of changes) n[categoryOf(c)]++;
   return n;
+}
+
+/** What the summary strip shows: one entry per category that has differences. */
+export function summaryChips(counts: Record<Category, number>): { id: Category; label: string; n: number }[] {
+  return CATEGORIES.filter((c) => counts[c.id] > 0).map((c) => ({ ...c, n: counts[c.id] }));
+}
+
+/** "12 differences" / "1 difference" / "No differences". */
+export const differencesWord = (n: number) => (n === 0 ? "No differences" : n === 1 ? "1 difference" : `${n} differences`);
+
+/** The words next to the progress bar. Stages come from the engine: first file, second file, pages, document. */
+export function progressLabel(p: { stage: "first" | "second" | "pages" | "document"; done: number; total: number } | null): string {
+  if (!p) return "Starting\u2026";
+  const of = p.total > 0 ? ` ${p.done} of ${p.total}` : "";
+  switch (p.stage) {
+    case "first":
+      return `Reading the first file, page${of || "s"}`;
+    case "second":
+      return `Reading the second file, page${of || "s"}`;
+    case "pages":
+      return p.total > 0 ? `Comparing page ${Math.min(p.done + 1, p.total)} of ${p.total}` : "Matching pages";
+    default:
+      return "Checking document properties";
+  }
+}
+
+/** 0..1 for the progress bar: the two reads take 40 % each, the page comparison 20 %. */
+export function progressFraction(p: { stage: "first" | "second" | "pages" | "document"; done: number; total: number } | null): number {
+  if (!p) return 0;
+  const f = p.total > 0 ? Math.min(1, p.done / p.total) : 0;
+  switch (p.stage) {
+    case "first":
+      return 0.4 * f;
+    case "second":
+      return 0.4 + 0.4 * f;
+    case "pages":
+      return 0.8 + 0.2 * f;
+    default:
+      return 1;
+  }
 }
 
 /** Previous / next with wrap-around; from "nothing selected" (-1) next goes to the first, previous to the last. */
@@ -375,4 +417,21 @@ export function trackDays(all: VersionInfo[], now: number): TrackDay[] {
     else days.push({ key: `${label}:${v.id}`, label, items: [v] });
   }
   return days;
+}
+
+/** The "Compare content" switches of the setup page. */
+export interface SetupContent {
+  text: boolean;
+  formatting: boolean;
+  images: boolean;
+}
+
+/** The categories the result starts with: everything, unless a switch is off (then undefined = all). */
+export function setupShow(on: SetupContent): Category[] | undefined {
+  if (on.text && on.formatting && on.images) return undefined;
+  const off = new Set<Category>();
+  if (!on.text) off.add("text");
+  if (!on.formatting) off.add("formatting");
+  if (!on.images) off.add("images");
+  return CATEGORIES.map((c) => c.id).filter((id) => !off.has(id));
 }

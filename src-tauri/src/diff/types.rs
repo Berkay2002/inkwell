@@ -40,6 +40,8 @@ pub enum DiffError {
     BadPage { page: u32 },
     #[error("comparison failed unexpectedly")]
     Panic,
+    #[error("cancelled")]
+    Cancelled,
 }
 
 impl From<mupdf::Error> for DiffError {
@@ -56,6 +58,28 @@ pub struct CompareOptions {
     pub password_b: Option<String>,
     /// Report Producer / ModDate / XMP modify-date style fields too (they change on every save).
     pub include_volatile_metadata: bool,
+}
+
+/// Where a comparison is, for a progress bar: `done` of `total` units of the current stage.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Progress {
+    pub stage: Stage,
+    pub done: u32,
+    pub total: u32,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Stage {
+    /// Reading the first file's pages.
+    First,
+    /// Reading the second file's pages.
+    Second,
+    /// Matching pages and comparing each pair.
+    Pages,
+    /// Metadata, bookmarks, attachments.
+    Document,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -104,6 +128,8 @@ pub enum ChangeKind {
     PageRotated,
     PageBoxChanged,
     TextChanged,
+    /// The same words in a different font, size or colour.
+    FormatChanged,
     ImageReplaced,
     OcrLayerAdded,
     RedactionApplied,
@@ -150,6 +176,8 @@ pub enum Detail {
     #[serde(rename_all = "camelCase")]
     Image { old: Option<ImageInfo>, new: Option<ImageInfo> },
     #[serde(rename_all = "camelCase")]
+    Format { text: String, props: Vec<FormatProp> },
+    #[serde(rename_all = "camelCase")]
     Ocr { words: u32 },
     #[serde(rename_all = "camelCase")]
     Redaction { via: RedactionVia, rects: Vec<Rect4>, words_removed: u32 },
@@ -171,6 +199,15 @@ pub struct AnnotInfo {
     /// The /C array (1, 3 or 4 components, 0..1).
     pub colour: Option<Vec<f32>>,
     pub rect: Rect4,
+}
+
+/// One property of a formatting change: `font`, `size` (points) or `colour` (#rrggbb).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatProp {
+    pub name: String,
+    pub old: String,
+    pub new: String,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]

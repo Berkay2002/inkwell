@@ -6,7 +6,7 @@ import { useAi } from "./aiStore";
 import { useRedact } from "./redact";
 import * as api from "./history";
 import type { Comparison, HistoryState, Source, VersionInfo } from "./history";
-import { type Filter, parentOf, versionTitle, when } from "./historyLogic";
+import { type Category, type Filter, parentOf, versionTitle, when } from "./historyLogic";
 
 export interface DocHistory {
   state: HistoryState | null;
@@ -19,6 +19,10 @@ export interface CompareReq {
   a: Source;
   b: Source;
   names?: [string, string];
+  /** "setup" shows the choose-what-to-compare page first; the Compare button clears it. */
+  stage?: "setup";
+  /** The categories the result starts with (the setup page's content switches); unset = all. */
+  show?: Category[];
 }
 
 type Changes = Comparison | "loading" | { error: string };

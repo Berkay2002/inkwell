@@ -15,6 +15,7 @@ import { SignBanner, SignCreator, SignStrip } from "./components/sign/SignTools"
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
 import { ConvertPanel } from "./components/ConvertPanel";
+import { PrintSheet } from "./components/PrintSheet";
 import { ToolsPanel } from "./components/ToolsPanel";
 import { Viewer } from "./components/Viewer";
 import { type FileRef, initialFiles } from "./lib/api";
@@ -142,6 +143,7 @@ export default function App() {
           <ConvertPanel doc={null} />
         </div>
       )}
+      <PrintSheet />
       {paletteOpen && <CommandPalette />}
       {hasPassword && <PasswordDialog />}
       <SignCreator />
