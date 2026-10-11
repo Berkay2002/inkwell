@@ -62,6 +62,7 @@ const PATHS = {
   polygon: "m12 3 8 6-3 11H7L4 9Z",
   stamp: "M9 14V9a3 3 0 1 1 6 0v5M5 14h14v4H5ZM5 21h14",
   reply: "M10 8 4 13l6 5M4 13h9a7 7 0 0 1 7 7",
+  print: "M7 9V3h10v6M7 17H5a1 1 0 0 1-1-1v-5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v5a1 1 0 0 1-1 1h-2M7 14h10v7H7Z",
 };
 
 export type IconName = keyof typeof PATHS;

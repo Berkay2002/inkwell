@@ -16,6 +16,7 @@ shadows), warm palette (window #F4F2ED, surfaces #FFFFFF, panel #FAF8F4, text #1
 | compare | approved/compare.png, compare-2.png | Compare files: setup page (old and new file slots, content switches) and result (side by side, summary chips as filters, change list, connectors, linked page strips) (compare-r1 a-stage) |
 | redact | approved/redact-review.png, redact-result.png, redact-tools.png | Redact rail: find and hits, after-apply report, manual tools row (redact-r2 c-sweep + a-panel tools) |
 | comments | approved/comments.png, comments-2.png | Comments rail (grouped by page, search, filter, replies) with the floating tool strip, and a selected annotation with handles and popover (comments-r1 a-rail) |
+| print | approved/print.png | Print sheet: centred modal, preview left, one calm option column right, outcome line beside Print (print-r1 a-sheet) |
 
 2026-10-10, history-r1: the user asked for "the most standard way" of showing versions and diffs (Google Docs / Word
 version history, Acrobat Compare Files, GitHub image diff). Diff marks may use green/red/amber (added/removed/changed)
@@ -36,6 +37,13 @@ assistant and Tools rails; sanitize is inline in the rail, not a modal. Details 
 c-margin leader lines). The user delegated the pick ("choose what is both standard and what pdfcraft and acrobat has, but also some
 hint of uniqueness"); inkwell chose a-rail. Approved: approved/comments.png, comments-2.png. Same dock as the other rails; one
 right-side panel at a time. Details in rounds/comments-r1/spec.md.
+
+2026-10-11, print-r1: three ideas, one window per image (a-sheet centred modal, b-rail right rail with the page area as the
+preview, c-ticket compact panel with the outcome first). The user delegated design picks to the orchestrator; berka-43
+(orchestrator) chose a-sheet "as built": Acrobat's standard modal with the preview on the left. One thing taken from
+c-ticket: the outcome line ("6 sheets of A4, both sides, 2 copies") is the prominent summary beside Print and updates live.
+Approved: approved/print.png (a-sheet-1-options). a-sheet-2-booklet skipped (never rendered). Details in
+rounds/print-r1/spec.md; build notes in docs/print.md.
 
 2026-10-11, compare-r1: three ideas (a-stage Acrobat-like setup page then result, b-rail pdfcraft-like dialog and one shaded
 document, c-tape one sheet with a change tape); only a-stage rendered (image tool limit) and inkwell picked it: "Acrobat's

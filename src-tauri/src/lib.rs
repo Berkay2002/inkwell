@@ -1,3 +1,4 @@
+pub mod a11y;
 pub mod ai;
 pub mod annot;
 pub mod compress;
@@ -8,8 +9,10 @@ pub mod history;
 pub mod history_ipc;
 pub mod ocr;
 pub mod paths;
+pub mod print;
 pub mod recents;
 pub mod redact;
+pub mod textedit;
 pub mod tools;
 
 use engine::cache::TileKey;
@@ -61,6 +64,8 @@ enum SaveKind {
     Html,
     Xhtml,
     Word,
+    /// No filter: print-to-file output whose format the printer driver decides.
+    Any,
 }
 
 /// What an open dialog for Create filters for.
@@ -118,6 +123,7 @@ async fn pick_save(
             SaveKind::Html => d.add_filter("HTML", &["html", "htm"]),
             SaveKind::Xhtml => d.add_filter("XHTML", &["xhtml"]),
             SaveKind::Word => d.add_filter("Word document", &["docx"]),
+            SaveKind::Any => d,
         };
         if let Some(dir) = near.as_deref().and_then(|p| std::path::Path::new(p).parent()) {
             d = d.set_directory(dir);
@@ -764,6 +770,8 @@ pub fn run() {
             export_start,
             create_start,
             discard_scratch,
+            a11y::app::a11y_check,
+            a11y::app::a11y_fix,
             annot::app::annot_default_author,
             annot::app::annot_list,
             annot::app::annot_add,
@@ -771,12 +779,19 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            textedit::app::text_blocks,
+            textedit::app::text_edit,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,
             redact::app::redact_list_marks,
             redact::app::redact_options,
             redact::app::redact_apply,
+            print::app::print_printers,
+            print::app::print_capabilities,
+            print::app::print_plan,
+            print::app::print_preview,
+            print::app::print_start,
             recents::stat_files,
             recents::recents_load,
             recents::recents_save,

@@ -13,6 +13,7 @@ import { RedactPanel } from "./components/redact/RedactPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
 import { ConvertPanel } from "./components/ConvertPanel";
+import { PrintSheet } from "./components/PrintSheet";
 import { ToolsPanel } from "./components/ToolsPanel";
 import { Viewer } from "./components/Viewer";
 import { type FileRef, initialFiles } from "./lib/api";
@@ -98,7 +99,10 @@ export default function App() {
     <div className="app">
       <TabBar />
       {doc?.organize ? (
-        <Organize key={doc.id} doc={doc} />
+        <>
+          <Toolbar doc={doc} />
+          <Organize key={doc.id} doc={doc} />
+        </>
       ) : doc ? (
         <>
           <Toolbar doc={doc} />
@@ -134,6 +138,7 @@ export default function App() {
           <ConvertPanel doc={null} />
         </div>
       )}
+      <PrintSheet />
       {paletteOpen && <CommandPalette />}
       {hasPassword && <PasswordDialog />}
       <Toast />
