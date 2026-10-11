@@ -119,6 +119,12 @@ async fn pick_save(
     };
     blocking(move || {
         let name = std::path::Path::new(&name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // Automation (debug builds only, like INKWELL_PRINT_DIR): every save dialog answers `<dir>/<file name>`.
+        #[cfg(debug_assertions)]
+        if let Some(dir) = std::env::var_os("INKWELL_SAVE_DIR").filter(|d| !d.is_empty()).filter(|_| !name.is_empty()) {
+            let p = std::path::Path::new(&dir).join(&name);
+            return Ok(Some(window.state::<Paths>().issue_save(window.label(), p.to_string_lossy().into_owned())));
+        }
         let d = window.dialog().file().set_parent(&window).set_file_name(name);
         let mut d = match kind.unwrap_or_default() {
             SaveKind::Pdf => d.add_filter("PDF documents", PDF),

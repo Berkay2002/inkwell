@@ -53,7 +53,7 @@ function Body({ sheet }: { sheet: SheetState }) {
     if (e.button !== 0 || entries.length < 2) return;
     e.preventDefault();
     const at = (y: number) => {
-      const rows = [...(list.current?.querySelectorAll<HTMLElement>("[data-row]") ?? [])];
+      const rows = Array.from(list.current?.querySelectorAll<HTMLElement>("[data-row]") ?? []);
       let to = rows.length - 1;
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i].getBoundingClientRect();
@@ -187,7 +187,7 @@ function Row({
           <input
             className={state === "badRange" ? "tl-field bad" : "tl-field"}
             value={range}
-            placeholder={pages != null ? `All ${pages} pages` : "All pages"}
+            placeholder={pages == null ? "All pages" : pages === 1 ? "The page" : `All ${pages} pages`}
             spellCheck={false}
             aria-invalid={state === "badRange"}
             disabled={state === "encrypted" || state === "unreadable" || state === "noCopy"}

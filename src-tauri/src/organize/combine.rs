@@ -496,6 +496,9 @@ pub fn run(eng: &Engine, specs: &[SourceSpec], opt: CombineOptions, out: &str) -
     }
     debug_assert_eq!(out_nodes(&top_nodes), plan.bookmarks);
     write_outline(&mut dst, &top_nodes)?;
+    // Adding the contents pages made MuPDF number the pages ("1", "1", "2" ...): the sources' own page
+    // labels are not carried over, so the result has none until the person sets them.
+    super::labels::write(&mut dst, &[])?;
 
     let total = dst.page_count()?.max(0) as u32;
     let bytes = write_doc(&dst, rewrite_opts(), 1 << 20)?;

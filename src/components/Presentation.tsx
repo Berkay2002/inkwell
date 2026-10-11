@@ -29,7 +29,7 @@ function Show({ doc, start }: { doc: number; start: number }) {
   const cache = useRef(new Map<number, Promise<HTMLCanvasElement>>());
   const shown = useRef<number | null>(null);
   const layers = useRef<{ el: HTMLElement; anim: Animation[] }[]>([]);
-  const hudTimer = useRef<ReturnType<typeof setTimeout>>();
+  const hudTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const exiting = useRef(false);
 
   const close = useCallback(() => {

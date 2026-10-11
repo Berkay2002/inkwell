@@ -308,6 +308,7 @@ fn combine_writes_what_the_plan_said() {
     let toc = doc.load_pdf_page(0).unwrap();
     assert_eq!(toc.links().unwrap().count(), 3, "one link per file");
     assert!(e2.page_png(i2, 0, 0, 200).is_ok(), "the contents page renders");
+    assert!(labels(&e2, i2).is_empty(), "no page labels leak into the combined file");
     let text = toc.to_text_page(mupdf::TextPageFlags::empty()).unwrap().to_text().unwrap();
     assert!(text.contains("Contents") && text.contains("a") && text.contains('6'), "{text}");
 }
