@@ -334,6 +334,27 @@ describe("Printer's marks", () => {
     expect(prepressApi.marksPreview).toHaveBeenCalledTimes(5);
   });
 
+  it("an older preview that fails does not replace a newer one", async () => {
+    const asked: { ok: (v: never) => void; fail: (e: unknown) => void }[] = [];
+    vi.mocked(prepressApi.marksPreview).mockImplementation(() => new Promise((ok, fail) => asked.push({ ok: ok as never, fail })));
+    st().openMarks();
+    await flush();
+    st().setMarks({ weight: 0.5 });
+    await flush();
+    expect(asked).toHaveLength(2);
+    asked[1].ok({ media: [-10, -10, 622, 802], trim: [20, 20, 592, 772], bleed: [11, 11, 601, 781], content: "", notes: [] } as never);
+    await flush();
+    asked[0].fail("The first layout could not be drawn.");
+    await flush();
+    expect(st().sheet).toMatchObject({ error: null, preview: { data: { notes: [] } } });
+    // the newest one failing is still shown
+    st().setMarks({ weight: 1 });
+    await flush();
+    asked[2].fail("Could not draw the marks.");
+    await flush();
+    expect(st().sheet).toMatchObject({ preview: null, error: "Could not draw the marks." });
+  });
+
   it("adds the marks to the chosen pages as one step", async () => {
     st().openMarks();
     await flush();

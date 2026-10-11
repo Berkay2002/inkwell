@@ -583,7 +583,10 @@ export const usePrepress = create<PrepressStore>((set, get) => {
         if (!now || marksKey(now.page, st().docs[now.doc]?.rev ?? -1, now.form) !== key) return;
         patchSheet<MarksSheet>("marks", { preview: { key, data }, error: null });
       } catch (e) {
-        if (sheet<MarksSheet>("marks")) patchSheet<MarksSheet>("marks", { preview: null, error: msg(e) });
+        const now = sheet<MarksSheet>("marks");
+        // an older failure must not replace a newer answer either
+        if (!now || marksKey(now.page, st().docs[now.doc]?.rev ?? -1, now.form) !== key) return;
+        patchSheet<MarksSheet>("marks", { preview: null, error: msg(e) });
       }
     },
 
