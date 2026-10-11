@@ -11,6 +11,7 @@ pub mod history_ipc;
 pub mod imageedit;
 pub mod links;
 pub mod marks;
+pub mod measure;
 pub mod ocr;
 pub mod organize;
 pub mod outline;
@@ -853,6 +854,7 @@ pub fn run() {
         .manage(ai::Assistant::new())
         .manage(Paths::default())
         .manage(Arc::new(tools::Jobs::default()))
+        .manage(Arc::new(measure::SnapCache::default()))
         .manage(Arc::new(search::files::FolderSearches::default()))
         .manage(hist)
         .manage(prepress)
@@ -986,6 +988,12 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            measure::app::measure_scale_get,
+            measure::app::measure_scale_set,
+            measure::app::measure_add,
+            measure::app::measure_value,
+            measure::app::measure_list,
+            measure::app::measure_snap,
             forms::app::forms_list,
             forms::app::forms_set_value,
             forms::app::forms_reset,
