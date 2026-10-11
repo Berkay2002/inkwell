@@ -399,6 +399,7 @@ fn two_thousand_pages_sharing_twenty_thousand_annotations_list_fast() {
     eprintln!("annot list, 2000 pages x 20 000 shared annotations: {took:?}");
     assert_eq!(l.items.len(), 2);
     assert!(!l.incomplete);
+    assert!(took < std::time::Duration::from_secs(30), "{took:?}");
 }
 
 #[test]
@@ -445,6 +446,7 @@ fn a_reversed_document_whose_annotations_keep_their_old_p_lists_everything_fast(
     assert_eq!(l.items.len(), pages * per);
     assert!(l.items.iter().enumerate().all(|(n, a)| a.page == (n / per) as u32));
     assert!(!l.incomplete);
+    assert!(took < std::time::Duration::from_secs(30), "{took:?}");
 }
 
 #[test]
@@ -533,6 +535,7 @@ fn a_page_listed_many_times_in_kids_is_walked_once() {
     assert_eq!(l.items.len(), 2000);
     assert!(l.items.iter().all(|a| a.page == 0));
     assert!(!l.incomplete);
+    assert!(took < std::time::Duration::from_secs(30), "{took:?}");
 }
 
 #[test]
