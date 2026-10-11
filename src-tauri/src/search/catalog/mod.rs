@@ -1026,7 +1026,13 @@ fn canon(p: &Path) -> PathBuf {
 /// it again. Returns how many rows went. Nothing runs against a build of the same catalog: the caller holds it.
 pub fn forget(dir: &Path, path: &Path) -> Result<u32> {
     let meta = load_meta(dir)?;
-    let Some(table) = (meta.generation > 0).then(|| load_table(dir, meta.generation)).flatten() else { return Ok(0) };
+    let Some(table) = (meta.generation > 0).then(|| load_table(dir, meta.generation)).flatten() else {
+        // Nothing here says which blob is whose, and the next build reads every file again anyway: none is kept.
+        let _ = std::fs::remove_dir_all(text_dir(dir));
+        let _ = std::fs::create_dir_all(text_dir(dir));
+        let _ = std::fs::remove_file(index_path(dir, meta.generation));
+        return Ok(0);
+    };
     let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
     let want = canon(path);
     // The name is compared first: only a row that could be the file is looked up on disk.

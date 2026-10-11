@@ -70,12 +70,17 @@ pub fn forget_all(root: &std::path::Path, jobs: &Jobs, path: &std::path::Path) -
             Ok(k) => n += k,
             Err(e) => eprintln!("inkwell catalog {}: {e}", m.id),
         }
+        drop(_held);
+        // What was saved while it was held (a build, another forget) is done now, not at some later build.
+        forget_deferred(jobs, &m.id, &root.join(&m.id));
     }
     n
 }
 
 /// Catalog `id` (in `dir`) is free again: the files saved while it was busy are forgotten now.
 pub(super) fn forget_deferred(jobs: &Jobs, id: &str, dir: &std::path::Path) {
+    // Held first: when it is not free the queue is left as it is, for whoever frees it.
+    let Some(_held) = jobs.hold(id) else { return };
     let mine: Vec<PathBuf> = {
         let mut all = jobs.deferred.lock().unwrap();
         let (mine, rest) = all.drain(..).partition(|(i, _)| i == id);
@@ -83,7 +88,6 @@ pub(super) fn forget_deferred(jobs: &Jobs, id: &str, dir: &std::path::Path) {
         mine.into_iter().map(|(_, p)| p).collect()
     };
     for p in mine {
-        let Some(_held) = jobs.hold(id) else { return };
         if let Err(e) = super::forget(dir, &p) {
             eprintln!("inkwell catalog {id}: {e}");
         }
@@ -160,7 +164,12 @@ pub async fn catalog_delete(window: Window, jobs: State<'_, Arc<Jobs>>, id: Stri
     let root = root(&window)?;
     // The id is held for the whole delete, so a build cannot start on a folder that is being removed.
     let jobs = jobs.inner().clone();
-    blocking(move || jobs.guarded(&id, || super::delete(&root, &id))).await
+    blocking(move || {
+        let r = jobs.guarded(&id, || super::delete(&root, &id));
+        jobs.deferred.lock().unwrap().retain(|(i, _)| *i != id);
+        r
+    })
+    .await
 }
 
 /// Whether a refresh would change anything (counts and modified times; no file is opened).

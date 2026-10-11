@@ -831,6 +831,7 @@ fn a_saved_redaction_is_gone_from_the_catalog_and_its_results() {
         all.windows(needle.len()).any(|w| w == needle)
     };
     assert!(contains(b"zebraxyz") || contains(b"ZEBRAXYZ"), "the fixture is indexed");
+    assert!(contains(b"private"), "a word only secret.pdf has is in the postings");
 
     // The document is opened by its canonical path and the catalog lists it by the folder's own spelling.
     let eng = Engine::new(2, 64 << 20);
@@ -853,6 +854,7 @@ fn a_saved_redaction_is_gone_from_the_catalog_and_its_results() {
     let jobs = super::app::Jobs::default();
     assert_eq!(super::app::forget_all(&base.join("catalogs"), &jobs, Path::new(&state.path)), 1);
     assert!(!contains(b"The code"), "the old text of the file is not kept");
+    assert!(!contains(b"private"), "its words are not left in the postings (only secret.pdf has them)");
     let ev = catalog_search(&d, "zebraxyz", SearchOpts::default());
     assert_eq!(done_of(&ev), (1, 0, 0));
     assert_eq!(found("notice"), vec!["other.pdf".to_string()]);
@@ -971,6 +973,18 @@ fn a_file_saved_while_its_catalog_is_busy_is_forgotten_when_the_build_ends() {
     // Nothing is left to do the second time.
     super::app::forget_deferred(&jobs, &m.id, &d);
     assert_eq!(load_meta(&d).unwrap().generation, 2);
+
+    // A save that lands while another is being handled is done by that one's forget_all, not left for a build.
+    let c = write(&folder, "c.pdf", plain(&[vec!["a third file with a rare word: quokka"]]));
+    build(&d, false, &AtomicBool::new(false), &no_progress()).unwrap();
+    let r = jobs.guarded(&m.id, || {
+        assert_eq!(super::app::forget_all(&root, &jobs, &c), 0);
+        Ok(())
+    });
+    assert!(r.is_ok());
+    assert_eq!(flat(&catalog_search(&d, "quokka", SearchOpts::default())).0.len(), 1);
+    assert_eq!(super::app::forget_all(&root, &jobs, &base.join("nothing.pdf")), 0, "nothing of its own to drop");
+    assert_eq!(flat(&catalog_search(&d, "quokka", SearchOpts::default())).0.len(), 0, "the deferred one ran with the next forget");
 }
 
 #[test]
