@@ -354,6 +354,50 @@ fn a_panic_in_a_host_function_is_an_error_not_an_abort_and_the_runtime_is_replac
 }
 
 #[test]
+fn three_engine_panics_take_the_scripts_down_like_three_timeouts() {
+    let s = Scripts::new();
+    for _ in 0..3 {
+        assert!(s.usable());
+        assert_eq!(run(&s, "Format", "1", "__boom();").error, Some(ScriptError::Panic));
+    }
+    assert!(!s.usable(), "{:?}", s.log_text());
+    assert!(run(&s, "Format", "1", "event.value = \"x\";").skipped);
+}
+
+#[test]
+fn a_file_whose_worker_was_lost_stays_refused_when_it_is_opened_again() {
+    let path = "forms-js-test-lost-file-A.pdf";
+    let s = Scripts::for_path(path);
+    let out = s.run(job(Event::new("Format", "Target", "1"), "__sleep(6000);", vec![field("Target", "1")], Duration::from_millis(100)));
+    assert_eq!(out.error, Some(ScriptError::Lost));
+    // The same path again, with the first closed: no worker is started for it.
+    drop(s);
+    let again = Scripts::for_path(path);
+    assert!(!again.usable() && !again.can_enable());
+    assert!(!again.set_enabled(true));
+    assert!(run(&again, "Format", "1", "event.value = \"fresh\";").skipped);
+    assert!(again.log_text().iter().any(|m| m.contains("until the app exits")), "{:?}", again.log_text());
+    // Another file is not affected.
+    let other = Scripts::for_path("forms-js-test-lost-file-B.pdf");
+    assert_eq!(run(&other, "Format", "1", "event.value = \"ok\";").value, "ok");
+}
+
+#[test]
+fn a_slow_rebuild_after_a_panic_is_not_taken_for_a_lost_worker() {
+    let s = Scripts::new();
+    // Document scripts that take a while to run again, so the rebuild after a panic is slow.
+    s.doc_scripts(|| DocScripts::new(vec![("slow".into(), "var t = Date.now(); while (Date.now() - t < 700) {}".into())]));
+    let out = run(&s, "Format", "1", "__boom();");
+    assert_eq!(out.error, Some(ScriptError::Panic));
+    // The worker is still rebuilding (~0.7 s) when this job arrives: the wait for it counts from the rebuild's end, so
+    // the 100 ms limit is not spent on it (the allowance is OPEN_TIME + GRACE on top, set while the flag is up).
+    let out = s.run(job(Event::new("Format", "Target", "1"), "event.value = \"after\";", vec![field("Target", "1")], Duration::from_millis(100)));
+    assert_eq!(out.error, None, "{:?}", s.log_text());
+    assert_eq!(out.value, "after");
+    assert!(s.can_enable() && s.usable());
+}
+
+#[test]
 fn a_script_that_throws_the_word_interrupted_is_an_error_not_a_timeout() {
     let s = Scripts::new();
     for _ in 0..4 {

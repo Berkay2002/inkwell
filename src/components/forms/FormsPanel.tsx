@@ -59,7 +59,7 @@ export function FormTools() {
   );
 }
 
-const NO_RESTART = "The script engine stopped answering. Scripts stay off until the file is closed and opened again.";
+const NO_RESTART = "The script engine stopped answering. Scripts stay off until the app is restarted.";
 
 /** What the banner says about the scripts of the file. */
 function scriptsLine(s: ScriptsState): string {

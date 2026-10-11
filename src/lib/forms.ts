@@ -45,7 +45,7 @@ export interface ScriptsState {
   enabled: boolean;
   /** They can run now (not taken down by timeouts or a script engine that stopped answering). */
   usable: boolean;
-  /** They may be turned on again (not after the script engine stopped answering: it is left abandoned for the session). */
+  /** They may be turned on again (not after the script engine stopped answering: it is left abandoned until the app exits). */
   canEnable: boolean;
   log: ScriptLogLine[];
 }

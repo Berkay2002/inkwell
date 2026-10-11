@@ -20,6 +20,7 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -287,6 +288,8 @@ enum Msg {
 
 struct Worker {
     tx: Sender<Msg>,
+    /// Set by the worker while it builds a new runtime after a panic or a stale queue: the next job gets that time on top.
+    rebuilding: Arc<AtomicBool>,
     /// Kept to lower the priority of a worker that is given up on (it may be spinning where no interrupt reaches).
     thread: std::thread::JoinHandle<()>,
 }
@@ -332,8 +335,19 @@ struct Meta {
     /// Three timeouts, or a worker that stopped answering.
     all_off: bool,
     /// A worker was given up on while it was running: its thread may still be spinning (a native call QuickJS cannot
-    /// interrupt). One is all a session gets: scripts are not turned on again for this file.
+    /// interrupt). One is all the app gets per file: scripts are not turned on again for it until the app exits
+    /// (see [`LOST_FILES`]).
     lost: bool,
+}
+
+/// The files (by path) a worker was given up on while it ran, for the life of the app: opening one again must not
+/// start another thread that may spin.
+static LOST_FILES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// The key of a file in [`LOST_FILES`]: its canonical path where there is one (lower case on Windows).
+fn lost_key(path: &str) -> String {
+    let p = std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string());
+    if cfg!(windows) { p.to_lowercase() } else { p }
 }
 
 /// The scripts of one open document: the on/off switch, the log and the runtime (started on first use).
@@ -344,11 +358,39 @@ pub struct Scripts {
     doc_js: Mutex<Option<Arc<DocScripts>>>,
     /// Whether the document has scripts the engine runs (kept by the listing, so the banner needs no edit lane).
     has_scripts: Mutex<Option<bool>>,
+    /// The file's key in [`LOST_FILES`] (empty: not tracked).
+    lost_key: String,
 }
 
 impl Scripts {
     pub fn new() -> Scripts {
         Scripts::default()
+    }
+
+    /// The scripts of the document at `path`. A file whose worker was given up on earlier in this app's life starts
+    /// with scripts off and refused: no second thread is started for it.
+    pub fn for_path(path: &str) -> Scripts {
+        let key = lost_key(path);
+        let was_lost = LOST_FILES.lock().as_ref().is_some_and(|s| s.contains(&key));
+        let s = Scripts { lost_key: key, ..Scripts::default() };
+        if was_lost {
+            {
+                let mut m = s.meta.lock();
+                m.lost = true;
+                m.off = true;
+                m.all_off = true;
+            }
+            s.note(LogLevel::Error, None, "scripts are off for this file: its script engine stopped answering earlier, and cannot be started again until the app exits");
+        }
+        s
+    }
+
+    /// Remembers for the life of the app that this file's worker was given up on.
+    fn mark_lost(&self) {
+        self.meta.lock().lost = true;
+        if !self.lost_key.is_empty() {
+            LOST_FILES.lock().get_or_insert_with(HashSet::new).insert(self.lost_key.clone());
+        }
     }
 
     /// Scripts run for this document (the person has not turned them off, and none has taken them all down).
@@ -389,7 +431,7 @@ impl Scripts {
                     [LogLine {
                         level: LogLevel::Error,
                         field: None,
-                        message: "scripts cannot be turned on again in this file: the script engine stopped answering once and is left abandoned. Close the file and open it again".into(),
+                        message: "scripts cannot be turned on again in this file: the script engine stopped answering once and is left abandoned until the app exits".into(),
                     }],
                 );
                 return false;
@@ -469,7 +511,7 @@ impl Scripts {
                 Err((why, abandoned)) => {
                     self.take_down(&format!("the script engine could not start: {why}"));
                     if abandoned {
-                        self.meta.lock().lost = true;
+                        self.mark_lost();
                     }
                     return skipped(Some(ScriptError::Lost));
                 }
@@ -478,7 +520,10 @@ impl Scripts {
         let (rtx, rrx) = channel();
         let timeout = job.timeout;
         let sent = worker.as_ref().is_some_and(|w| w.tx.send(Msg::Run(Box::new(job), rtx)).is_ok());
-        let answer = if sent { rrx.recv_timeout(timeout + GRACE) } else { Err(RecvTimeoutError::Disconnected) };
+        // A worker still building its new runtime (after a panic, or a queue it had to drop) has not begun this job:
+        // that time is not the script's, and a slow rebuild is not a lost worker.
+        let rebuild = if worker.as_ref().is_some_and(|w| w.rebuilding.load(Ordering::SeqCst)) { OPEN_TIME + GRACE } else { Duration::ZERO };
+        let answer = if sent { rrx.recv_timeout(timeout + GRACE + rebuild) } else { Err(RecvTimeoutError::Disconnected) };
         let mut out = match answer {
             Ok(o) => o,
             Err(why) => {
@@ -489,11 +534,11 @@ impl Scripts {
                     if let Some(w) = worker.as_ref() {
                         w.demote();
                     }
-                    self.meta.lock().lost = true;
+                    self.mark_lost();
                 }
                 *worker = None;
                 if stuck {
-                    self.take_down("the script engine stopped answering; scripts are off for this file, and cannot be turned on again in this session (the stuck script is left running at the lowest priority until the file is closed)");
+                    self.take_down("the script engine stopped answering; scripts are off for this file, and cannot be turned on again in this session (the stuck script is left running at the lowest priority until the app exits)");
                 } else {
                     self.take_down("the script engine stopped; scripts are off for this file until you turn them on again");
                 }
@@ -519,7 +564,15 @@ impl Scripts {
             }
             Some(ScriptError::Memory) => lines.push(LogLine { level: LogLevel::Error, field: Some(key.clone()), message: "the script used more memory than it may and was stopped".into() }),
             Some(ScriptError::Script(msg)) => lines.push(LogLine { level: LogLevel::Error, field: Some(key.clone()), message: msg.clone() }),
-            Some(ScriptError::Panic) => lines.push(LogLine { level: LogLevel::Error, field: Some(key.clone()), message: "the script engine failed and was restarted".into() }),
+            Some(ScriptError::Panic) => {
+                // A runtime that keeps failing is no better than one that keeps timing out.
+                m.strikes += 1;
+                lines.push(LogLine { level: LogLevel::Error, field: Some(key.clone()), message: "the script engine failed and was restarted".into() });
+                if m.strikes >= MAX_STRIKES {
+                    m.all_off = true;
+                    lines.push(LogLine { level: LogLevel::Error, field: None, message: STRIKES_OUT.into() });
+                }
+            }
             _ => {}
         }
         push_log(&mut m.log, lines);
@@ -539,7 +592,7 @@ impl Scripts {
     }
 }
 
-const STRIKES_OUT: &str = "three scripts timed out or used up their time: scripts are off for this file (the recognised calls still run natively)";
+const STRIKES_OUT: &str = "three scripts timed out, used up their time or crashed the engine: scripts are off for this file (the recognised calls still run natively)";
 
 fn push_log(log: &mut VecDeque<LogLine>, lines: impl IntoIterator<Item = LogLine>) {
     for l in lines {
@@ -587,14 +640,16 @@ fn build(doc_js: &DocScripts, fields: &[FieldState], doc: &DocInfo, log: &mut Ve
 fn spawn(doc_js: Arc<DocScripts>, fields: &[FieldState], doc: &DocInfo) -> Result<(Worker, Vec<LogLine>), (String, bool)> {
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = channel();
     let (itx, irx) = channel();
+    let rebuilding = Arc::new(AtomicBool::new(false));
+    let flag = rebuilding.clone();
     let (fields, doc) = (fields.to_vec(), doc.clone());
     let thread = std::thread::Builder::new()
         .name("forms-js".into())
         .stack_size(WORKER_STACK)
-        .spawn(move || work(rx, itx, doc_js, fields, doc))
+        .spawn(move || work(rx, itx, doc_js, fields, doc, flag))
         .map_err(|e| (e.to_string(), false))?;
     match irx.recv_timeout(OPEN_TIME + GRACE) {
-        Ok(Ok(log)) => Ok((Worker { tx, thread }, log)),
+        Ok(Ok(log)) => Ok((Worker { tx, thread, rebuilding }, log)),
         Ok(Err(e)) => Err((e, false)),
         Err(RecvTimeoutError::Timeout) => {
             demote(&thread);
@@ -616,7 +671,7 @@ fn rebuilt(doc_js: &DocScripts, job: &Job) -> Option<engine::Js> {
     catch_unwind(AssertUnwindSafe(|| build(doc_js, &job.fields, &job.doc, &mut ignore))).ok().and_then(Result::ok)
 }
 
-fn work(rx: Receiver<Msg>, init: Sender<Result<Vec<LogLine>, String>>, doc_js: Arc<DocScripts>, fields: Vec<FieldState>, doc: DocInfo) {
+fn work(rx: Receiver<Msg>, init: Sender<Result<Vec<LogLine>, String>>, doc_js: Arc<DocScripts>, fields: Vec<FieldState>, doc: DocInfo, rebuilding: Arc<AtomicBool>) {
     be_polite();
     let mut log = Vec::new();
     let built = catch_unwind(AssertUnwindSafe(|| build(&doc_js, &fields, &doc, &mut log)));
@@ -638,11 +693,18 @@ fn work(rx: Receiver<Msg>, init: Sender<Result<Vec<LogLine>, String>>, doc_js: A
                 if matches!(out.error, Some(ScriptError::Memory)) {
                     js.collect();
                 }
-                let _ = reply.send(out);
                 // Jobs a script queued and the deadline cut short (a promise callback that never ends) are not left for
-                // the next script to run: that runtime is dropped and another started.
-                if js.stale() {
-                    match rebuilt(&doc_js, &job) {
+                // the next script to run: that runtime is dropped and another started. The flag is up before the reply
+                // goes, so the next job's wait cannot miss it.
+                let stale = js.stale();
+                if stale {
+                    rebuilding.store(true, Ordering::SeqCst);
+                }
+                let _ = reply.send(out);
+                if stale {
+                    let fresh = rebuilt(&doc_js, &job);
+                    rebuilding.store(false, Ordering::SeqCst);
+                    match fresh {
                         Some(fresh) => js = fresh,
                         None => return,
                     }
@@ -650,8 +712,11 @@ fn work(rx: Receiver<Msg>, init: Sender<Result<Vec<LogLine>, String>>, doc_js: A
             }
             Err(_) => {
                 // Drop the runtime that panicked and start another, with the document scripts again.
+                rebuilding.store(true, Ordering::SeqCst);
                 let _ = reply.send(panicked(&job));
-                match rebuilt(&doc_js, &job) {
+                let fresh = rebuilt(&doc_js, &job);
+                rebuilding.store(false, Ordering::SeqCst);
+                match fresh {
                     Some(fresh) => js = fresh,
                     None => return,
                 }

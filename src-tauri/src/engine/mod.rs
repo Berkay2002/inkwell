@@ -342,7 +342,7 @@ impl Engine {
             slots: Default::default(),
             next_slot: AtomicUsize::new(0),
             editor: Mutex::new(None),
-            scripts: Arc::new(crate::forms::js::Scripts::new()),
+            scripts: Arc::new(crate::forms::js::Scripts::for_path(path)),
         });
         self.docs.write().insert(id, entry.clone());
         entry
