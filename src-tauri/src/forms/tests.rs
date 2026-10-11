@@ -802,13 +802,16 @@ fn a_default_appearance_never_carries_nan_or_an_absurd_size() {
 /// money format on the field.
 fn need_appearances_form() -> Vec<u8> {
     pdf_of(&[
-        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /NeedAppearances true /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R] /NeedAppearances true /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
         "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /Helv 3 0 R >> >> /Annots [5 0 R] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /Helv 3 0 R >> >> /Annots [5 0 R 6 0 R] >>".to_string(),
         "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Price) /Rect [72 600 200 620] /F 4 /DA (/Helv 12 Tf 0 g) \
          /AA << /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, \"$\", true);) >> \
          /K << /S /JavaScript /JS (AFNumber_Keystroke(2, 0, 0, 0, \"$\", true);) >> >> >>"
+            .to_string(),
+        // A check box that is on and has no appearance at all: the form relied on the flag.
+        "<< /Type /Annot /Subtype /Widget /FT /Btn /T (Agree) /Rect [72 560 86 574] /F 4 /V /Yes /AS /Yes          /MK << /CA (4) >> /DA (/ZaDb 0 Tf 0 g) >>"
             .to_string(),
     ])
 }
@@ -831,6 +834,8 @@ fn a_formatted_value_is_still_shown_after_save_and_reopen_when_the_form_asks_for
     // The formatted appearance is in the file, and nothing asks for it to be redrawn from /V.
     assert!(ap_text(&path, "Price", None).contains("$1,234.50"), "saved appearance: {}", ap_text(&path, "Price", None));
     assert!(!needs_appearances(&path), "/NeedAppearances is cleared once appearances are written");
+    // The fields the form never gave an appearance get one, or they would draw nothing.
+    assert!(!ap_text(&path, "Agree", Some("Yes")).trim().is_empty(), "the check box got no appearance");
     // And in a fresh engine too, the value is the raw one and the display the formatted one.
     let (eng2, id2) = reopen(&path);
     let f = field(&eng2, id2, "Price");

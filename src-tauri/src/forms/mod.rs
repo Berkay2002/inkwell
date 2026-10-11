@@ -504,8 +504,9 @@ pub(crate) fn refresh(doc: &PdfDocument, e: &Entry) -> Result<()> {
 
 /// A form that says `/NeedAppearances true` makes MuPDF redraw every field from its raw `/V` when
 /// a page loads, so a formatted display (`$1,234.50`) would come back as `1234.5`. Once this
-/// editor writes appearances the flag is cleared, after the other text fields get theirs too, so
-/// what the file shows is what was written.
+/// editor writes appearances the flag is cleared, after the other fields that draw from a value get
+/// theirs too (many such forms carry no box or button appearances at all), so what the file shows is
+/// what was written.
 fn settle_need_appearances(doc: &PdfDocument, except: i32) -> Result<()> {
     let Some(mut acro) = doc.catalog().ok().and_then(|c| get(&c, "AcroForm")) else { return Ok(()) };
     if !get(&acro, "NeedAppearances").and_then(|n| n.as_bool().ok()).unwrap_or(false) {
@@ -513,7 +514,7 @@ fn settle_need_appearances(doc: &PdfDocument, except: i32) -> Result<()> {
     }
     acro.dict_put("NeedAppearances", PdfObject::new_bool(false))?;
     for o in scan(doc)? {
-        if o.xref != except && matches!(o.kind, FieldKind::Text | FieldKind::Combo | FieldKind::List) {
+        if o.xref != except && matches!(o.kind, FieldKind::Text | FieldKind::Combo | FieldKind::List | FieldKind::Checkbox | FieldKind::Radio) {
             refresh_one(doc, &o)?;
         }
     }
