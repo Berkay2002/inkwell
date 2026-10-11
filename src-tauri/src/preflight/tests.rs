@@ -310,6 +310,11 @@ fn dir(test: &str) -> PathBuf {
     d
 }
 
+/// Where a conversion writes its new file: never the directory the source was written to (`dir` clears it).
+fn out_dir(test: &str) -> PathBuf {
+    dir(&format!("{test}-out"))
+}
+
 fn file(test: &str, sp: &Spec) -> String {
     let p = dir(test).join("Quarterly figures.pdf");
     std::fs::write(&p, build(sp)).unwrap();
@@ -378,7 +383,7 @@ fn convert_to_a_new_file_leaves_the_source_alone() {
     let before = std::fs::read(&path).unwrap();
     let (eng, id) = open(&path);
     let r = run(&eng, id, Profile::Pdfa2b);
-    let dest = dir("new-file").join("Quarterly figures (PDF-A).pdf");
+    let dest = out_dir("new-file").join("Quarterly figures (PDF-A).pdf");
     let out = convert_to_file(&eng, id, Profile::Pdfa2b, &ticked(&r), dest.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert!(out.report.conforms, "{:?}", out.report.results.iter().filter(|r| r.status == Status::Failed).map(|r| r.rule).collect::<Vec<_>>());
     assert!(!out.fixed.is_empty());
@@ -413,7 +418,7 @@ fn a_font_that_is_not_installed_is_left_and_reported() {
     let r = run(&eng, id, Profile::Pdfa2b);
     let mut c = ticked(&r);
     c.groups.push(FixGroup::Fonts);
-    let dest = dir("blocked").join("out.pdf");
+    let dest = out_dir("blocked").join("out.pdf");
     let out = convert_to_file(&eng, id, Profile::Pdfa2b, &c, dest.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     let f = out.report.result("fonts-embedded").unwrap();
     assert_eq!(f.status, Status::Failed, "the font is still not embedded");
@@ -429,7 +434,7 @@ fn builtin_and_installed_fonts_are_embedded() {
     let path = file("fonts", &Spec::default());
     let (eng, id) = open(&path);
     let r = run(&eng, id, Profile::Pdfa2b);
-    let dest = dir("fonts").join("out.pdf");
+    let dest = out_dir("fonts").join("out.pdf");
     let out = convert_to_file(&eng, id, Profile::Pdfa2b, &ticked(&r), dest.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(out.report.status("fonts-embedded"), Some(Status::Passed));
     // The text still draws and extracts.
@@ -453,7 +458,7 @@ fn installed_windows_font_is_embedded_when_present() {
     let r = run(&eng, id, Profile::Pdfa2b);
     let f = r.result("fonts-embedded").unwrap();
     assert!(f.findings[0].fixable, "{:?}", f.findings);
-    let dest = dir("arial").join("out.pdf");
+    let dest = out_dir("arial").join("out.pdf");
     let out = convert_to_file(&eng, id, Profile::Pdfa2b, &ticked(&r), dest.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(out.report.status("fonts-embedded"), Some(Status::Passed), "{:?}", out.fixed);
     let doc = PdfDocument::open(dest.to_str().unwrap()).unwrap();
@@ -504,7 +509,7 @@ fn encrypted_documents_convert_to_a_new_file_only() {
     assert_eq!(r.status("encryption"), Some(Status::Failed));
     let e = convert_in_place(&eng, id, Profile::Pdfa2b, &ticked(&r), EditSource::User, &mut |_| {}, &AtomicBool::new(false)).unwrap_err();
     assert!(e.to_string().contains("encrypted"), "{e}");
-    let dest = dir("encrypted").join("out.pdf");
+    let dest = out_dir("encrypted").join("out.pdf");
     let out = convert_to_file(&eng, id, Profile::Pdfa2b, &ticked(&r), dest.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(out.report.status("encryption"), Some(Status::Passed));
     assert!(!PdfDocument::open(dest.to_str().unwrap()).unwrap().needs_password().unwrap());
@@ -524,12 +529,12 @@ fn pdfa1_removes_transparency_only_when_the_appearance_group_is_ticked() {
     assert!(!ap.default_on, "what changes how pages look is not ticked by default");
     let c = ticked(&r);
     assert!(!c.groups.contains(&FixGroup::Appearance));
-    let dest = dir("a1").join("out.pdf");
+    let dest = out_dir("a1").join("out.pdf");
     let out = convert_to_file(&eng, id, Profile::Pdfa1b, &c, dest.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(out.report.status("transparency"), Some(Status::Failed), "left alone unless asked");
     let mut c2 = c.clone();
     c2.groups.push(FixGroup::Appearance);
-    let dest2 = dir("a1").join("out2.pdf");
+    let dest2 = out_dir("a1").join("out2.pdf");
     let out2 = convert_to_file(&eng, id, Profile::Pdfa1b, &c2, dest2.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     let left: Vec<_> = out2.report.result("transparency").unwrap().findings.iter().map(|f| f.message.clone()).collect();
     assert_eq!(out2.report.status("transparency"), Some(Status::Passed), "{left:?} {:?}", out2.fixed);
@@ -562,14 +567,14 @@ fn files_actions_and_annotations_are_removed_per_family() {
     let path = file("files", &sp);
     let (eng, id) = open(&path);
     let r = run(&eng, id, Profile::Pdfa2b);
-    let dest = dir("files").join("out.pdf");
+    let dest = out_dir("files").join("out.pdf");
     let out = convert_to_file(&eng, id, Profile::Pdfa2b, &ticked(&r), dest.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(out.report.status("embedded-files"), Some(Status::Passed));
     assert_eq!(out.report.status("annotation-types"), Some(Status::Passed));
     assert!(!has_stream(dest.to_str().unwrap(), b"hello"), "the attached file's content is gone from the file");
     // PDF/A-3 keeps the file and marks its relationship instead.
     let r3 = run(&eng, id, Profile::Pdfa3b);
-    let dest3 = dir("files").join("out3.pdf");
+    let dest3 = out_dir("files").join("out3.pdf");
     let out3 = convert_to_file(&eng, id, Profile::Pdfa3b, &ticked(&r3), dest3.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(out3.report.status("embedded-files"), Some(Status::Passed), "{:?}", out3.fixed);
     assert!(has_stream(dest3.to_str().unwrap(), b"hello"), "PDF/A-3 keeps the file");
@@ -600,7 +605,7 @@ fn pdfx4_metadata_and_boxes_are_fixed_the_output_intent_is_not() {
     assert_eq!(r.status("page-boxes"), Some(Status::Failed));
     assert_eq!(r.status("trapped"), Some(Status::Failed));
     assert!(r.plan.remaining.iter().any(|x| x.text.contains("print condition")));
-    let dest = dir("x4").join("out.pdf");
+    let dest = out_dir("x4").join("out.pdf");
     let out = convert_to_file(&eng, id, Profile::Pdfx4, &ticked(&r), dest.to_str().unwrap(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(out.report.status("page-boxes"), Some(Status::Passed));
     assert_eq!(out.report.status("trapped"), Some(Status::Passed));
@@ -941,7 +946,7 @@ fn a_cancel_during_the_check_of_the_new_file_leaves_no_file() {
     let (eng, id) = open(&path);
     let r = run(&eng, id, Profile::Pdfa2b);
     let stop = AtomicBool::new(false);
-    let dest = dir("cancel-late").join("out.pdf");
+    let dest = out_dir("cancel-late").join("out.pdf");
     // The flag goes up when the conversion's own steps are done: the new file is only being checked.
     let e = convert_to_file(&eng, id, Profile::Pdfa2b, &ticked(&r), dest.to_str().unwrap(), &mut |p| {
         if p.stage == "convert" && p.done == p.pages {
