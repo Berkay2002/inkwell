@@ -9,7 +9,7 @@
 use crate::ai::rpc::job;
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const CLOSED: &str = "__closed__";
+
+/// The longest line the child may write (a page picture inside a tool result is a few MB of base64
+/// at most). A longer one ends the child instead of growing a buffer without bound.
+const MAX_LINE: usize = 16 * 1024 * 1024;
 
 pub struct Proc {
     pub pid: u32,
@@ -50,9 +54,12 @@ impl Proc {
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", program.display()))?;
+        // fail closed: a child that cannot be tied to Inkwell's lifetime does not run
         let job = job::Job::new();
-        if let Some(j) = &job {
-            j.adopt(&child);
+        if !job.as_ref().is_some_and(|j| j.adopt(&child)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("could not confine {} to Inkwell's process group", program.display()));
         }
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
@@ -77,9 +84,16 @@ impl Proc {
                 let mut buf = Vec::new();
                 loop {
                     buf.clear();
-                    match r.read_until(b'\n', &mut buf) {
+                    match (&mut r).take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(_) => {}
+                    }
+                    if buf.len() > MAX_LINE {
+                        if let Some(p) = weak.upgrade() {
+                            p.note_stderr("Claude Code wrote a line over 16 MB; it was stopped.");
+                            p.kill();
+                        }
+                        break;
                     }
                     let line = String::from_utf8_lossy(&buf);
                     let line = line.trim();
@@ -148,6 +162,14 @@ impl Proc {
             j.terminate();
         }
         let _ = self.child.lock().unwrap().kill();
+    }
+
+    fn note_stderr(&self, line: &str) {
+        let mut t = self.stderr_tail.lock().unwrap();
+        t.push_back(line.to_string());
+        if t.len() > 40 {
+            t.pop_front();
+        }
     }
 
     /// Last lines the child wrote to stderr.

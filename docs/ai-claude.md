@@ -16,15 +16,32 @@ Hard line, enforced in `ai/claude/exe.rs` and covered by tests:
   where `claude login` put it; only the CLI touches it);
 * never sets `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` or
   `CLAUDE_CODE_OAUTH_TOKEN` for the child;
-* the child's environment is rebuilt: every `CLAUDE*` / `ANTHROPIC*` variable is dropped (an Inkwell
-  started from a Claude Code terminal would pass on that session's ids and message socket) except
-  `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_GIT_BASH_PATH`;
+* the child's environment is an **allowlist**, not a filter: only the variables a Windows program
+  needs (PATH, PATHEXT, SystemRoot, TEMP/TMP, USERPROFILE/HOME, APPDATA/LOCALAPPDATA, ProgramData,
+  the ProgramFiles family, LANG/LC_ALL, the proxy and CA-bundle variables) plus `CLAUDE_CONFIG_DIR`
+  and `CLAUDE_CODE_GIT_BASH_PATH` reach it. Every other variable of Inkwell's process, including any
+  `CLAUDE*` / `ANTHROPIC*` one (an Inkwell started from a Claude Code terminal would pass on that
+  session's ids and message socket) and every unrelated secret, stays out;
 * when the user's own environment sets one of the variables above (or switches to Bedrock / Vertex /
   Foundry), Claude is **refused** with a message naming the variable (never its value): the answer
   would not be billed to their Claude plan. Codex is unaffected;
 * never uses `--bare`, never modifies or bundles the binary. The executable is found, not shipped:
-  Settings path, then `INKWELL_CLAUDE`, `PATH`, `%USERPROFILE%\.local\bin`, the npm global folder.
-  An npm `claude.cmd` shim is resolved to the real `claude.exe` it starts; batch files are never run.
+  the file the user picked, then `INKWELL_CLAUDE`, `PATH`, `%USERPROFILE%\.local\bin`, the npm global
+  folder. An npm `claude.cmd` shim is resolved to the real `claude.exe` it starts; batch files are
+  never run.
+* the picked file never comes from the webview. "Choose claude.exe…" opens the native file dialog
+  from Rust (`ai_pick_claude_path`); Rust checks that it is an absolute local path (no `\\server\share`
+  or device path), named `claude.exe` / `claude` (or the npm `claude.cmd` shim), and that
+  `--version` answers `… (Claude Code)`, then keeps it in `claude.json` in the app config folder and
+  restores it, vetted again, at startup. `ai_claude_path` reads it back, `ai_clear_claude_path` forgets
+  it. Nothing about it is in `localStorage` (a path saved there by an earlier build is ignored);
+* Claude Code writes its usual local session transcripts for a chat (under `~/.claude/projects`),
+  as it does for any `claude -p` run, and Inkwell resumes a conversation from that id. Inkwell itself
+  persists nothing of the chat; only the path of a picked `claude` is stored;
+* every value on the child's command line is attached to its flag (`--model=<id>`, `--effort=<level>`,
+  `--resume=<uuid>`), the model id has to be one of the CLI's own list or plain letters, digits and
+  `. _ - [ ]` that does not begin with a dash, and a conversation id has to be a UUID: the webview
+  cannot turn a value into another option (`--model --bare`).
 
 ## The child
 
@@ -35,7 +52,7 @@ holding an `mcp.json`), started with `env_clear` plus the filtered environment:
 claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages
        --tools "" --strict-mcp-config --mcp-config <dir>\mcp.json --allowedTools mcp__inkwell__*
        --setting-sources "" --disable-slash-commands --permission-prompts none
-       --system-prompt <BASE_INSTRUCTIONS> [--model <id>] [--effort <level>] [--resume <session_id>]
+       --system-prompt <BASE_INSTRUCTIONS> [--model=<id>] [--effort=<level>] [--resume=<session_id>]
        [--autocompact 100k]
 ```
 
@@ -102,7 +119,8 @@ something else) and the next question is prefixed with `text::CHANGED_NOTE`:
 list with the `initialize` control request of a short-lived, tool-less child (cached for 10 min).
 Three states, all in the panel:
 
-* not installed: an install link (copyable) and a field for the path to `claude.exe`;
+* not installed: an install link (copyable) and "Choose claude.exe…" (the native file dialog; the
+  chosen file is shown with a "Forget" button);
 * not signed in: "Run `claude login` in a terminal" with a copy button; Inkwell never opens a login
   flow, never sees the password or token;
 * signed in: the plan type (`max`, `pro`, …) next to the provider name in the picker.
@@ -133,15 +151,19 @@ Three states, all in the panel:
 above): event mapping, streaming of the cited answer, a tool call through the MCP server with
 approve and deny, the missing bearer token, cancel (interrupt and the kill after an ignored
 interrupt), `--resume` with the id, a child that dies once, a hung child, credential variables
-stripped, a forced API key refused (`ANTHROPIC_API_KEY`, and `apiKeySource` reported by the CLI),
-not installed, not logged in, usage limit. The Codex tests are unchanged except the replaced
+stripped (and only the allowlist passed), a forced API key refused (`ANTHROPIC_API_KEY`, and
+`apiKeySource` reported by the CLI), not installed, not logged in, usage limit, a model id that
+looks like an option refused before a child starts, a non-UUID conversation id not resumed, a file
+that is not Claude Code (or not named like it, relative, or a network path) never chosen. The Codex tests are unchanged except the replaced
 "edited document gets a new thread" (see above). Frontend: `src/lib/aiStore.test.ts`.
 
 ## Deviations from the brief, for the record
 
 * `ChatEvent::Reset` is new (see the table).
 * `Status` gained `version`; `ai_status`, `ai_prepare` and `ai_ask` take an optional `provider`
-  (default Codex), `ai_set_claude_path` is new; the managed state is `ai::Hub`, not `Assistant`.
+  (default Codex); `ai_pick_claude_path`, `ai_claude_path` and `ai_clear_claude_path` are new (the
+  first draft had a webview-supplied `ai_set_claude_path`, removed after the security review); the
+  managed state is `ai::Hub`, not `Assistant`.
 * Editing keeps the Codex thread too (see above).
 * No production Edit or Destructive tool exists on main yet, so the approval path is exercised with
   tools registered by the tests and the live check.

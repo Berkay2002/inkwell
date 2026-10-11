@@ -1019,7 +1019,9 @@ pub fn run() {
             ai::ai_cancel,
             ai::ai_tool_decision,
             ai::ai_set_permissions,
-            ai::ai_set_claude_path,
+            ai::ai_pick_claude_path,
+            ai::ai_claude_path,
+            ai::ai_clear_claude_path,
             ai::ai_close,
         ])
         .setup(move |app| {
@@ -1030,6 +1032,7 @@ pub fn run() {
                 app.state::<Paths>().learn_recents(&json);
             }
             app.manage(Arc::new(tools::paths::ToolPaths::load(app.handle())));
+            ai::restore_claude_path(app.handle(), &app.state::<Arc<ai::Hub>>());
             Ok(())
         })
         .run(tauri::generate_context!())

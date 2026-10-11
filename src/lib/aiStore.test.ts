@@ -23,14 +23,15 @@ vi.mock("./ai", () => ({
   aiClose: vi.fn(() => Promise.resolve()),
   aiToolDecision: vi.fn(() => Promise.resolve()),
   aiSetPermissions: vi.fn(() => Promise.resolve()),
-  aiSetClaudePath: vi.fn(() => Promise.resolve()),
+  aiPickClaudePath: vi.fn((): Promise<string | null> => Promise.resolve("C:\\tools\\claude.exe")),
+  aiClaudePath: vi.fn((): Promise<string | null> => Promise.resolve(null)),
+  aiClearClaudePath: vi.fn(() => Promise.resolve()),
   loadSettings: () => ({
     provider: "codex",
     model: null,
     effort: "low",
     claudeModel: null,
     claudeEffort: null,
-    claudePath: null,
     consent: false,
     claudeConsent: false,
     hideSources: false,
@@ -66,6 +67,7 @@ beforeEach(() => {
     pending: null,
     mark: null,
     statuses: {},
+    claudePath: null,
     settings: { ...useAi.getState().settings, consent: false, claudeConsent: false, provider: "codex" },
   });
 });
@@ -314,14 +316,35 @@ describe("assistant store", () => {
       await new Promise((r) => setTimeout(r, 0));
       expect(ai.aiStatus).toHaveBeenCalledWith("codex");
       expect(ai.aiStatus).toHaveBeenCalledWith("claude");
-      expect(ai.aiSetClaudePath).toHaveBeenCalledTimes(1);
       expect(Object.keys(useAi.getState().statuses).sort()).toEqual(["claude", "codex"]);
     });
 
-    it("a path to claude is applied and the check repeated", async () => {
-      useAi.getState().setSettings({ claudePath: "C:\\tools\\claude.exe" });
+    it("a picked claude is kept by Rust; the store only shows it and looks again", async () => {
+      // Rust answers the re-check with the file it kept
+      vi.mocked(ai.aiClaudePath).mockResolvedValueOnce("C:\\tools\\claude.exe");
+      const err = await useAi.getState().pickClaudePath();
       await new Promise((r) => setTimeout(r, 0));
-      expect(ai.aiSetClaudePath).toHaveBeenCalledWith("C:\\tools\\claude.exe");
+      expect(err).toBeNull();
+      expect(ai.aiPickClaudePath).toHaveBeenCalledWith();
+      expect(useAi.getState().claudePath).toBe("C:\\tools\\claude.exe");
+      expect(ai.aiStatus).toHaveBeenCalledWith("claude");
+      // nothing about the path goes to localStorage
+      expect(JSON.stringify(vi.mocked(ai.saveSettings).mock.calls)).not.toContain("claude.exe");
+    });
+
+    it("a refused file comes back as the reason, and nothing is chosen", async () => {
+      vi.mocked(ai.aiPickClaudePath).mockRejectedValueOnce("That file is not Claude Code.");
+      const err = await useAi.getState().pickClaudePath();
+      expect(err).toContain("not Claude Code");
+      expect(useAi.getState().claudePath).toBeNull();
+    });
+
+    it("forgetting the file asks Rust to clear it and checks again", async () => {
+      useAi.setState({ claudePath: "C:\\tools\\claude.exe" });
+      useAi.getState().clearClaudePath();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ai.aiClearClaudePath).toHaveBeenCalledTimes(1);
+      expect(useAi.getState().claudePath).toBeNull();
       expect(ai.aiStatus).toHaveBeenCalledWith("claude");
     });
 

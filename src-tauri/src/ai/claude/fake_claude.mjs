@@ -38,7 +38,10 @@ for (const ev of ["uncaughtException", "unhandledRejection"]) {
   });
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// `--flag value` and `--flag=value` (Inkwell sends the second, so a value is never read as a flag)
 const arg = (name) => {
+  const eq = args.find((a) => a.startsWith(name + "="));
+  if (eq !== undefined) return eq.slice(name.length + 1);
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
 };
@@ -66,7 +69,7 @@ if (args[0] === "auth" && args[1] === "status") {
   );
 }
 
-const sessionId = arg("--resume") ?? "fake-session-1";
+const sessionId = arg("--resume") ?? "fa4e0001-0000-4000-8000-000000000001";
 const model = arg("--model") ?? "default";
 const effort = arg("--effort") ?? "-";
 let interrupted = false;

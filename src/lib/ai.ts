@@ -104,8 +104,11 @@ export type ChatEvent =
 
 export const aiStatus = (provider: ProviderId) => invoke<AiStatus>("ai_status", { provider });
 export const aiPrepare = (doc: number, provider: ProviderId) => invoke<Prepared>("ai_prepare", { doc, provider });
-/** The user's own path to `claude` (empty = look for it). */
-export const aiSetClaudePath = (path: string | null) => invoke<void>("ai_set_claude_path", { path });
+/** Native file dialog for `claude`; Rust vets the file and keeps it. Resolves to the path, or null when closed. */
+export const aiPickClaudePath = () => invoke<string | null>("ai_pick_claude_path");
+/** The file picked earlier (null: Inkwell finds `claude` itself). */
+export const aiClaudePath = () => invoke<string | null>("ai_claude_path");
+export const aiClearClaudePath = () => invoke<void>("ai_clear_claude_path");
 export const aiCancel = (doc: number) => invoke<void>("ai_cancel", { doc });
 export const aiClose = (doc: number) => invoke<void>("ai_close", { doc });
 /** The mode changed while a turn runs: its very next tool call is checked against it. */
@@ -142,8 +145,6 @@ export interface AiSettings {
   effort: string;
   claudeModel: string | null;
   claudeEffort: string | null;
-  /** The user's own path to claude(.exe), when it is not on PATH. */
-  claudePath: string | null;
   /** Agreed to send document text to OpenAI (Codex) / to Anthropic (Claude): each is asked once. */
   consent: boolean;
   claudeConsent: boolean;
@@ -165,7 +166,6 @@ const DEFAULTS: AiSettings = {
   // Claude starts on the small, quick model; a choice made in the picker is kept
   claudeModel: "haiku",
   claudeEffort: "medium",
-  claudePath: null,
   consent: false,
   claudeConsent: false,
   hideSources: false,
@@ -177,7 +177,9 @@ const DEFAULTS: AiSettings = {
 
 export function loadSettings(): AiSettings {
   try {
-    const s: AiSettings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    const s: AiSettings & { claudePath?: unknown } = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    // a path to claude used to live here; Rust keeps the picked file now and never reads this
+    delete s.claudePath;
     return {
       ...s,
       // null was "never chosen" before the defaults existed: the picker only ever stores an id

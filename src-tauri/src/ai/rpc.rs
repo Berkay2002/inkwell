@@ -329,9 +329,9 @@ pub(super) mod job {
             }
         }
 
-        pub fn adopt(&self, child: &std::process::Child) {
+        pub fn adopt(&self, child: &std::process::Child) -> bool {
             unsafe {
-                AssignProcessToJobObject(self.0 as HANDLE, child.as_raw_handle() as HANDLE);
+                AssignProcessToJobObject(self.0 as HANDLE, child.as_raw_handle() as HANDLE) != 0
             }
         }
 
@@ -358,7 +358,9 @@ pub(super) mod job {
         pub fn new() -> Option<Job> {
             Some(Job)
         }
-        pub fn adopt(&self, _: &std::process::Child) {}
+        pub fn adopt(&self, _: &std::process::Child) -> bool {
+            true
+        }
         pub fn terminate(&self) {}
     }
 }

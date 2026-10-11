@@ -259,7 +259,7 @@ export function CloseButton({ onClick }: { onClick?: () => void }) {
 export function Gate({ doc }: { doc: number }) {
   const provider = useAi((s) => providerOf(s, doc));
   const status = useAi((s) => s.statuses[provider] ?? null);
-  const claudePath = useAi((s) => s.settings.claudePath);
+  const claudePath = useAi((s) => s.claudePath);
   const name = PROVIDER_NAMES[provider];
   const other = PROVIDERS.find((p) => p !== provider)!;
   if (status === null || status === "loading")
@@ -348,24 +348,39 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   );
 }
 
-/** Where `claude` lives when it is not on PATH (the setting behind "not installed"). */
+/** Where `claude` lives when it is not on PATH: picked in a file dialog, checked and kept by Rust. */
 function ClaudePath({ value }: { value: string | null }) {
-  const [text, setText] = useState(value ?? "");
+  const [why, setWhy] = useState<string | null>(null);
   return (
-    <div className="ax-path">
-      <input
-        value={text}
-        placeholder="Already installed? Path to claude.exe"
-        aria-label="Path to claude"
-        spellCheck={false}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") useAi.getState().setSettings({ claudePath: text.trim() || null });
+    <div className="ax-path" style={{ flexWrap: "wrap", alignItems: "center" }}>
+      <button
+        className="ax-btn small"
+        onClick={() => {
+          setWhy(null);
+          void useAi.getState().pickClaudePath().then(setWhy);
         }}
-      />
-      <button className="ax-btn small" onClick={() => useAi.getState().setSettings({ claudePath: text.trim() || null })}>
-        Use
+      >
+        Already installed? Choose claude.exe…
       </button>
+      {value && (
+        <>
+          <span
+            className="dim small"
+            title={value}
+            style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {value}
+          </span>
+          <button className="ax-btn small" onClick={() => useAi.getState().clearClaudePath()}>
+            Forget
+          </button>
+        </>
+      )}
+      {why && (
+        <p className="dim small" style={{ flexBasis: "100%", margin: 0 }}>
+          {why}
+        </p>
+      )}
     </div>
   );
 }

@@ -1,7 +1,9 @@
 //! The AI assistant: chat, summaries and cited answers about an open document, powered by the
 //! user's own subscription through the locally logged-in CLI of their choice: Codex (ChatGPT,
-//! `codex app-server`) or Claude Code (`claude`, see `claude/`). No API keys, nothing persisted;
-//! text leaves the machine only on an explicit user action.
+//! `codex app-server`) or Claude Code (`claude`, see `claude/`). No API keys; Inkwell itself keeps
+//! only the path of a `claude` the user picked (Claude Code keeps its usual local session
+//! transcripts of a chat, as it does for any run). Text leaves the machine only on an explicit user
+//! action.
 
 pub mod chat;
 pub mod claude;
@@ -16,10 +18,11 @@ use crate::engine::{DocId, Engine, OutlineItem, pool::class};
 pub use chat::Assistant;
 use chat::{AskRequest, ChatEvent, Prepared, Status};
 pub use provider::{Hub, Provider, ProviderId};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::State;
 use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager, State, Window};
+use tauri_plugin_dialog::DialogExt;
 use text::DocText;
 
 /// The engine side of one open document, for the tools. A tab that closed meanwhile makes every
@@ -127,10 +130,78 @@ pub fn ai_set_permissions(ai: Ai<'_>, doc: DocId, mode: tools::Mode) {
     ai.set_permissions(doc, mode);
 }
 
-/// The user's own path to `claude` (a setting); an empty string goes back to looking for it.
+const CLAUDE_FILE: &str = "claude.json";
+
+fn claude_file(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join(CLAUDE_FILE))
+}
+
+fn save_claude_path(app: &AppHandle, path: Option<&Path>) {
+    let Some(file) = claude_file(app) else { return };
+    match path {
+        Some(p) => {
+            if let Some(d) = file.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let body = serde_json::json!({ "path": p.to_string_lossy() });
+            let tmp = file.with_extension("json.tmp");
+            if std::fs::write(&tmp, body.to_string()).is_ok() {
+                let _ = std::fs::rename(&tmp, &file);
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+}
+
+/// Picks up the file the user chose in an earlier run (called once at startup). The file is vetted
+/// again, not started; one that is gone or no longer qualifies is dropped.
+pub fn restore_claude_path(app: &AppHandle, hub: &Hub) {
+    let Some(file) = claude_file(app) else { return };
+    let saved = std::fs::read(&file)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("path").and_then(|p| p.as_str().map(PathBuf::from)));
+    if let Some(p) = saved {
+        if !hub.claude().restore_executable(&p) {
+            save_claude_path(app, None);
+        }
+    }
+}
+
+/// Shows the file dialog for `claude`. A file that is not Claude Code is an error with a message;
+/// closing the dialog is `None`. The webview never supplies a path: the choice is made, checked and
+/// kept here.
 #[tauri::command]
-pub fn ai_set_claude_path(ai: Ai<'_>, path: Option<String>) {
-    ai.claude().set_executable(path.map(PathBuf::from));
+pub async fn ai_pick_claude_path(app: AppHandle, window: Window, ai: Ai<'_>) -> Result<Option<String>, String> {
+    let ai = ai.inner().clone();
+    off_thread(move || -> Result<Option<String>, String> {
+        let mut d = window.dialog().file().set_parent(&window).set_title("Choose the Claude Code program");
+        if cfg!(windows) {
+            d = d.add_filter("Claude Code", &["exe", "cmd"]);
+        }
+        let Some(picked) = d.blocking_pick_file().and_then(|f| f.into_path().ok()) else {
+            return Ok(None);
+        };
+        let chosen = ai.claude().choose_executable(&picked)?;
+        save_claude_path(&app, Some(&chosen));
+        Ok(Some(chosen.to_string_lossy().into_owned()))
+    })
+    .await?
+}
+
+/// The file the user chose, or `None` while Inkwell looks for `claude` itself.
+#[tauri::command]
+pub fn ai_claude_path(ai: Ai<'_>) -> Option<String> {
+    ai.claude().executable().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Forgets the chosen file: Inkwell looks for `claude` itself again.
+#[tauri::command]
+pub fn ai_clear_claude_path(app: AppHandle, ai: Ai<'_>) {
+    ai.claude().clear_executable();
+    save_claude_path(&app, None);
 }
 
 /// The document was closed: drop its chats and cached text.

@@ -46,6 +46,32 @@ const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// dragging its whole history into every turn.
 const AUTOCOMPACT: &str = "100k";
 
+/// A model id that may reach the command line: the empty string and "default" mean the CLI's own
+/// choice (`Ok(None)`); anything else must be an id of the CLI's own list, or plain letters, digits
+/// and `. _ - [ ]` that does not start with a dash. The id comes from the webview, so it is never
+/// trusted to be a value rather than an option (`--model --bare` would be both).
+fn accepted_model(m: &str, known: &[ModelInfo]) -> Result<Option<String>, String> {
+    if m.is_empty() || m == "default" {
+        return Ok(None);
+    }
+    let plain = m.len() <= 100
+        && m.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && m.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '[' | ']'));
+    let listed = !m.starts_with('-') && !m.chars().any(|c| c.is_whitespace() || c.is_control()) && known.iter().any(|k| k.id == m);
+    if plain || listed {
+        Ok(Some(m.to_string()))
+    } else {
+        Err("That model name is not one Claude Code offers. Pick a model from the list.".into())
+    }
+}
+
+/// Claude Code's conversation ids are UUIDs.
+fn is_session_id(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && [8, 4, 4, 4, 12].iter().zip(&parts).all(|(n, p)| p.len() == *n && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// How to start the CLI: the program, then these arguments, then Inkwell's. (A test starts `node`
 /// with a script here.)
 #[derive(Debug, Clone)]
@@ -162,6 +188,8 @@ type FindCli = Box<dyn Fn(Option<&Path>) -> Option<Launch> + Send + Sync>;
 pub struct ClaudeProvider {
     find: FindCli,
     environment: Box<dyn Fn() -> Vec<(String, String)> + Send + Sync>,
+    /// Tests only: added to the child's environment after the filter.
+    extra_env: Vec<(String, String)>,
     tools: Arc<RwLock<Vec<Arc<Tool>>>>,
     approval_ms: Arc<AtomicU64>,
     inline_max: AtomicUsize,
@@ -172,8 +200,27 @@ pub struct ClaudeProvider {
     /// The user's own choice of executable (a setting); `None` = look for it.
     chosen: Mutex<Option<PathBuf>>,
     /// Whether the executable last looked at knows `--autocompact` (an older CLI would refuse to
-    /// start with it), by program path.
-    autocompact: Mutex<Option<(PathBuf, bool)>>,
+    /// start with it), by program path, size and modification time (an update asks again).
+    autocompact: Mutex<Option<(ExeKey, bool)>>,
+}
+
+/// Which build of an executable a cached answer is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExeKey {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl ExeKey {
+    fn of(path: &Path) -> Self {
+        let meta = std::fs::metadata(path).ok();
+        Self {
+            path: path.to_path_buf(),
+            len: meta.as_ref().map_or(0, |m| m.len()),
+            modified: meta.and_then(|m| m.modified().ok()),
+        }
+    }
 }
 
 impl ClaudeProvider {
@@ -181,10 +228,11 @@ impl ClaudeProvider {
     pub fn new(tools: Arc<RwLock<Vec<Arc<Tool>>>>) -> Arc<Self> {
         let find: FindCli =
             Box::new(|chosen| exe::resolve(chosen).map(|program| Launch { program, args: Vec::new() }));
-        Arc::new(Self::build(tools, find, Box::new(real_environment), IDLE_TIMEOUT))
+        Arc::new(Self::build(tools, find, Box::new(real_environment), Vec::new(), IDLE_TIMEOUT))
     }
 
-    /// For tests: starts `launch` instead of the real CLI, with exactly `environment`.
+    /// For tests: starts `launch` instead of the real CLI, with `environment` as the user's. The
+    /// `FAKE_CLAUDE*` entries are the fake's own settings and go to the child past the filter.
     pub fn with_launch(
         tools: Arc<RwLock<Vec<Arc<Tool>>>>,
         launch: Launch,
@@ -192,18 +240,21 @@ impl ClaudeProvider {
         idle_timeout: Duration,
     ) -> Arc<Self> {
         let find: FindCli = Box::new(move |_| Some(launch.clone()));
-        Arc::new(Self::build(tools, find, Box::new(move || environment.clone()), idle_timeout))
+        let (extra, user): (Vec<_>, Vec<_>) = environment.into_iter().partition(|(k, _)| k.starts_with("FAKE_CLAUDE"));
+        Arc::new(Self::build(tools, find, Box::new(move || user.clone()), extra, idle_timeout))
     }
 
     fn build(
         tools: Arc<RwLock<Vec<Arc<Tool>>>>,
         find: FindCli,
         environment: Box<dyn Fn() -> Vec<(String, String)> + Send + Sync>,
+        extra_env: Vec<(String, String)>,
         idle_timeout: Duration,
     ) -> Self {
         Self {
             find,
             environment,
+            extra_env,
             tools,
             approval_ms: Arc::new(AtomicU64::new(APPROVAL_TIMEOUT.as_millis() as u64)),
             inline_max: AtomicUsize::new(text::INLINE_CHARS),
@@ -216,10 +267,46 @@ impl ClaudeProvider {
         }
     }
 
-    /// The user's own path to `claude` (the setting); an empty path clears it.
-    pub fn set_executable(&self, path: Option<PathBuf>) {
-        *self.chosen.lock().unwrap() = path.filter(|p| !p.as_os_str().is_empty());
+    /// The `claude` the user picked, if any. `None` means Inkwell looks for it itself.
+    pub fn executable(&self) -> Option<PathBuf> {
+        self.chosen.lock().unwrap().clone()
+    }
+
+    /// Makes a file the user picked in the file dialog the `claude` to run, once it is vetted: a
+    /// local file named `claude`, which answers `--version` as Claude Code. Nothing the webview
+    /// sends reaches this; the pick and the check both happen in Rust.
+    pub fn choose_executable(&self, picked: &Path) -> Result<PathBuf, String> {
+        let program = exe::vet_choice(picked)?;
+        let l = Launch { program: program.clone(), args: Vec::new() };
+        let out = run_capture(&l, &["--version"], &self.env_for_child(), Duration::from_secs(10))
+            .map_err(|_| "That file did not start.".to_string())?;
+        if !exe::is_claude_version(&out) {
+            return Err("That file is not Claude Code: it does not answer --version as Claude Code.".into());
+        }
+        self.set_chosen(Some(program.clone()));
+        Ok(program)
+    }
+
+    /// Goes back to looking for `claude` on the PATH and in its usual folders.
+    pub fn clear_executable(&self) {
+        self.set_chosen(None);
+    }
+
+    /// Restores a path saved by an earlier run. It is vetted again but not started.
+    pub fn restore_executable(&self, saved: &Path) -> bool {
+        match exe::vet_choice(saved) {
+            Ok(p) => {
+                self.set_chosen(Some(p));
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn set_chosen(&self, path: Option<PathBuf>) {
+        *self.chosen.lock().unwrap() = path;
         *self.models.lock().unwrap() = None;
+        *self.autocompact.lock().unwrap() = None;
     }
 
     pub fn set_approval_timeout(&self, d: Duration) {
@@ -254,6 +341,7 @@ impl ClaudeProvider {
 
     fn env_for_child(&self) -> Vec<(String, String)> {
         let mut env = exe::child_env(&(self.environment)());
+        env.extend(self.extra_env.iter().cloned());
         // The CLI's own limit for one MCP call. It must outlast the approval card, or a change could
         // run after the model was told it had failed.
         let ms = (self.approval_ms.load(Ordering::SeqCst) + 600_000).max(900_000);
@@ -325,13 +413,14 @@ impl ClaudeProvider {
 
     /// Whether this CLI lists `--autocompact` in its own `--help` (asked once per executable).
     fn knows_autocompact(&self, l: &Launch, env: &[(String, String)]) -> bool {
-        if let Some((p, ok)) = &*self.autocompact.lock().unwrap() {
-            if *p == l.program {
+        let key = ExeKey::of(&l.program);
+        if let Some((k, ok)) = &*self.autocompact.lock().unwrap() {
+            if *k == key {
                 return *ok;
             }
         }
         let ok = run_capture(l, &["--help"], env, Duration::from_secs(10)).is_ok_and(|h| h.contains("--autocompact"));
-        *self.autocompact.lock().unwrap() = Some((l.program.clone(), ok));
+        *self.autocompact.lock().unwrap() = Some((key, ok));
         ok
     }
 
@@ -377,14 +466,16 @@ impl ClaudeProvider {
         ] {
             a.push(s.to_string());
         }
+        // `--flag=value`: a value can never be read as another option. The model was checked by
+        // `accepted_model` and the conversation id comes from the CLI's own init event.
         if let Some(m) = model.filter(|m| !m.is_empty() && *m != "default") {
-            a.extend(["--model".into(), m.to_string()]);
+            a.push(format!("--model={m}"));
         }
         if let Some(e) = effort.filter(|e| EFFORTS.contains(e)) {
-            a.extend(["--effort".into(), e.to_string()]);
+            a.push(format!("--effort={e}"));
         }
-        if let Some(r) = resume {
-            a.extend(["--resume".into(), r.to_string()]);
+        if let Some(r) = resume.filter(|r| is_session_id(r)) {
+            a.push(format!("--resume={r}"));
         }
         if autocompact {
             a.extend(["--autocompact".into(), AUTOCOMPACT.to_string()]);
@@ -533,7 +624,8 @@ impl ClaudeProvider {
         if let Some(why) = self.forced() {
             return Err(Failure::hinted(why, "env"));
         }
-        let model = req.model.clone().filter(|m| !m.is_empty());
+        let known = self.models.lock().unwrap().as_ref().map(|(_, m)| m.clone()).unwrap_or_default();
+        let model = accepted_model(req.model.as_deref().unwrap_or(""), &known).map_err(Failure::new)?;
         let effort = req.effort.clone().filter(|e| !e.is_empty());
         let resumed = session.state.lock().unwrap().session_id.is_some();
         sink(ChatEvent::Status { phase: "connecting" });

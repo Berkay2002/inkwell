@@ -261,9 +261,16 @@ fn args_of(spawn: &Value) -> Vec<String> {
     spawn["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect()
 }
 
+/// The value of `flag`, written `--flag value` or `--flag=value`.
 fn after(args: &[String], flag: &str) -> Option<String> {
+    let eq = format!("{flag}=");
+    if let Some(v) = args.iter().find_map(|a| a.strip_prefix(&eq)) {
+        return Some(v.to_string());
+    }
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
 }
+
+const SESSION: &str = "fa4e0001-0000-4000-8000-000000000001";
 
 // ---- answers ---------------------------------------------------------------------------------------
 
@@ -323,10 +330,87 @@ fn a_new_model_restarts_the_child_and_resumes_the_conversation() {
     assert_eq!(chats.len(), 2, "{chats:?}");
     let (a, b) = (args_of(&chats[0]), args_of(&chats[1]));
     assert!(!a.contains(&"--resume".to_string()), "{a:?}");
-    assert_eq!(after(&b, "--resume").as_deref(), Some("fake-session-1"), "{b:?}");
+    assert_eq!(after(&b, "--resume").as_deref(), Some(SESSION), "{b:?}");
     assert_eq!(after(&b, "--model").as_deref(), Some("sonnet"));
+    // values are attached to their flag, so none of them can be taken for another option
+    assert!(b.iter().any(|a| a == "--model=sonnet") && b.iter().any(|a| *a == format!("--resume={SESSION}")), "{b:?}");
+    assert!(!b.iter().any(|a| a == "--model" || a == "--resume" || a == "--effort"), "{b:?}");
     // the model still has the excerpts: the resumed conversation is not sent them again
     assert!(r.stderr().contains("excerpts=0"), "{}", r.stderr());
+}
+
+fn model(id: &str) -> Result<Option<String>, String> {
+    accepted_model(id, &fallback_models())
+}
+
+#[test]
+fn only_a_model_id_that_cannot_be_an_option_reaches_the_command_line() {
+    assert_eq!(model(""), Ok(None));
+    assert_eq!(model("default"), Ok(None));
+    for ok in ["sonnet", "haiku", "opus", "claude-opus-4-1", "claude-haiku-5-5", "sonnet[1m]", "opus.4_5"] {
+        assert_eq!(model(ok), Ok(Some(ok.to_string())), "{ok}");
+    }
+    for bad in [
+        "--bare",
+        "-p",
+        "--model",
+        "--dangerously-skip-permissions",
+        "sonnet --bare",
+        "sonnet\n--bare",
+        "so\"net",
+        " sonnet",
+        "--setting-sources=local",
+        "[1m]",
+        &"a".repeat(101),
+    ] {
+        assert!(model(bad).is_err(), "{bad:?} must be refused");
+    }
+    // an id of the CLI's own list is accepted, but still never one that starts with a dash
+    let one = |id: &str| vec![ModelInfo { id: id.into(), name: "x".into(), efforts: vec![], default_effort: None, is_default: false }];
+    assert_eq!(accepted_model("my.model:1", &one("my.model:1")), Ok(Some("my.model:1".into())));
+    assert!(accepted_model("--bare", &one("--bare")).is_err());
+}
+
+#[test]
+fn a_model_id_from_the_webview_is_refused_before_anything_starts() {
+    let r = rig("ok");
+    let mut req = ask_req("one?");
+    req.model = Some("--bare".into());
+    let ev = r.run(req, contract());
+    match ev.last().unwrap() {
+        ChatEvent::Error { message, .. } => assert!(message.contains("not one Claude Code offers"), "{message}"),
+        e => panic!("{e:?}"),
+    }
+    assert!(r.chats().is_empty(), "no child was started: {:?}", r.chats());
+}
+
+#[test]
+fn a_conversation_id_that_is_not_a_uuid_is_not_resumed() {
+    let r = rig("ok");
+    r.p.session(DOC).state.lock().unwrap().session_id = Some("--bare".into());
+    done(&r.run(ask_req("one?"), contract()));
+    let a = args_of(&r.chats()[0]);
+    assert!(!a.iter().any(|x| x.starts_with("--resume") || x == "--bare"), "{a:?}");
+}
+
+#[test]
+fn a_program_that_is_not_claude_code_is_never_chosen() {
+    let dir = std::env::temp_dir().join(format!("inkwell-choose-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let r = rig("ok");
+    // named like the CLI but not it: whatever it prints for --version, that is not Claude Code
+    let named = dir.join(if cfg!(windows) { "claude.exe" } else { "claude" });
+    std::fs::copy(std::env::current_exe().unwrap(), &named).unwrap();
+    let e = r.p.choose_executable(&named).unwrap_err();
+    assert!(e.contains("not Claude Code") || e.contains("did not start"), "{e}");
+    // a name that is not the CLI's is refused before it is started
+    let other = dir.join(if cfg!(windows) { "notepad.exe" } else { "bash" });
+    std::fs::copy(std::env::current_exe().unwrap(), &other).unwrap();
+    assert!(r.p.choose_executable(&other).unwrap_err().contains("must be named"));
+    assert!(r.p.choose_executable(Path::new("claude.exe")).is_err(), "a relative path");
+    assert!(r.p.choose_executable(Path::new(r"\\evil\share\claude.exe")).is_err(), "a network path");
+    assert_eq!(r.p.executable(), None, "nothing was chosen");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// An edit (the assistant's own included) must not make it forget the conversation: the same child
@@ -691,7 +775,7 @@ fn child_death_is_reported_and_the_next_question_restarts_and_resumes() {
     done(&ev);
     let chats = r.chats();
     assert_eq!(chats.len(), 2);
-    assert_eq!(after(&args_of(&chats[1]), "--resume").as_deref(), Some("fake-session-1"));
+    assert_eq!(after(&args_of(&chats[1]), "--resume").as_deref(), Some(SESSION));
     let _ = std::fs::remove_file(&flag);
 }
 

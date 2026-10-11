@@ -104,6 +104,11 @@ interface AiStore {
   setSheet: (sheet: boolean) => void;
   /** Asks the provider's CLI again (default: the active document's provider). */
   refreshStatus: (provider?: ProviderId) => void;
+  /** The `claude` the user picked (kept by Rust, never sent from here); null while Inkwell finds it itself. */
+  claudePath: string | null;
+  /** Opens the file dialog for `claude`. Resolves to why a file was refused, or null (chosen or closed). */
+  pickClaudePath: () => Promise<string | null>;
+  clearClaudePath: () => void;
   /** Gives a document another provider: its chat starts afresh (a thread cannot move between CLIs). */
   setProvider: (doc: number, provider: ProviderId) => void;
   prepare: (doc: number) => void;
@@ -292,6 +297,7 @@ export const useAi = create<AiStore>((set, get) => {
   return {
     open: false,
     statuses: {},
+    claudePath: null,
     settings: ai.loadSettings(),
     chats: {},
     selection: null,
@@ -322,13 +328,28 @@ export const useAi = create<AiStore>((set, get) => {
       if (get().statuses[p] === "loading") return;
       const put = (status: AiStatus | "loading") => set((s) => ({ statuses: { ...s.statuses, [p]: status } }));
       put("loading");
-      // the user's own path to claude goes first, so the very first check already uses it
-      const ready = p === "claude" ? ai.aiSetClaudePath(get().settings.claudePath).catch(() => {}) : Promise.resolve();
-      ready
-        .then(() => ai.aiStatus(p))
-        .then(put, (e) =>
-          put({ installed: true, loggedIn: false, account: null, plan: null, models: [], error: String(e) }),
-        );
+      ai.aiStatus(p).then(put, (e) =>
+        put({ installed: true, loggedIn: false, account: null, plan: null, models: [], error: String(e) }),
+      );
+      // which file was picked (Rust restored it at startup)
+      if (p === "claude") void ai.aiClaudePath().then((claudePath) => set({ claudePath }), () => {});
+    },
+
+    pickClaudePath: async () => {
+      try {
+        const picked = await ai.aiPickClaudePath();
+        if (picked) {
+          set({ claudePath: picked });
+          get().refreshStatus("claude");
+        }
+        return null;
+      } catch (e) {
+        return String(e);
+      }
+    },
+    clearClaudePath: () => {
+      set({ claudePath: null });
+      void ai.aiClearClaudePath().then(() => get().refreshStatus("claude"), () => {});
     },
 
     setProvider: (doc, provider) => {
@@ -461,8 +482,6 @@ export const useAi = create<AiStore>((set, get) => {
       set({ settings });
       // a turn in flight must not keep the looser mode it started with
       if (p.permissions) for (const doc of Object.keys(get().chats)) void ai.aiSetPermissions(Number(doc), p.permissions);
-      // a new path to claude: look again with it
-      if ("claudePath" in p) get().refreshStatus("claude");
     },
 
     setSelection: (selection) => {

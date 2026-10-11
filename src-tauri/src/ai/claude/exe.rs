@@ -8,9 +8,11 @@
 //!   auth token, another base URL, a pasted OAuth token, a cloud provider switch) is never passed
 //!   on, and when the user's own environment sets one, Claude is refused with a message that names
 //!   it: the answer would not be billed to their Claude plan;
-//! * every other `CLAUDE*` / `ANTHROPIC*` variable is dropped too (an Inkwell started from a Claude
-//!   Code terminal carries the session ids and the message socket of that session), except the
-//!   config directory the user chose and the Git Bash path Claude Code needs on Windows.
+//! * the child's environment is an allowlist: what a program needs to run on Windows (paths, the
+//!   profile folders, temp, proxy and CA settings), the config directory the user chose and the Git
+//!   Bash path Claude Code needs. Everything else is dropped, so an Inkwell started from a Claude Code
+//!   terminal does not pass on that session's ids and message socket, and nothing like
+//!   `NODE_OPTIONS`, a cloud key or another tool's token reaches the child.
 
 use std::path::{Path, PathBuf};
 
@@ -26,13 +28,54 @@ const FORCING: &[&str] = &[
 /// Switches to another backend (Bedrock, Vertex, Foundry); only a truthy value forces.
 const BACKEND_SWITCHES: &[&str] = &["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
 
-/// What survives the strip.
+/// The two `CLAUDE*` variables that are the user's own settings for where things are.
 const KEEP: &[&str] = &["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_GIT_BASH_PATH"];
 
-fn is_claudeish(name: &str) -> bool {
-    let n = name.to_ascii_uppercase();
-    n.starts_with("CLAUDE") || n.starts_with("ANTHROPIC")
-}
+/// Everything else the child may see (names compared case-insensitively, as Windows does).
+const ALLOW: &[&str] = &[
+    // where programs and the system are
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "OS",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    // the profile
+    "USERPROFILE",
+    "USERNAME",
+    "USERDOMAIN",
+    "HOME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "ALLUSERSPROFILE",
+    "PUBLIC",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "COMMONPROGRAMW6432",
+    "LANG",
+    "LC_ALL",
+    // a network the user is behind: proxy and certificate settings
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+];
 
 fn truthy(v: &str) -> bool {
     let v = v.trim().to_ascii_lowercase();
@@ -65,16 +108,49 @@ pub fn refusal(names: &[String]) -> String {
     )
 }
 
-/// The environment the child gets: everything of `vars` except what is claudeish, minus the forcing
-/// names above, plus the keep-list.
+/// The environment the child gets: the allowlist and the keep-list of `vars`, nothing else.
 pub fn child_env(vars: &[(String, String)]) -> Vec<(String, String)> {
     vars.iter()
         .filter(|(k, _)| {
             let up = k.to_ascii_uppercase();
-            !is_claudeish(k) || KEEP.contains(&up.as_str())
+            ALLOW.contains(&up.as_str()) || KEEP.contains(&up.as_str())
         })
         .cloned()
         .collect()
+}
+
+/// The ways a `--version` answer can end for the real thing: Claude Code prints
+/// `2.1.296 (Claude Code)`.
+pub fn is_claude_version(out: &str) -> bool {
+    out.trim().ends_with("(Claude Code)")
+}
+
+/// Whether the user's choice of file could be the CLI: a full local path (no network or device
+/// path) to a file named `claude.exe`, `claude` or the npm shim `claude.cmd`. A shim is replaced by
+/// the binary it starts. The caller still has to see `--version` answer as Claude Code.
+pub fn vet_choice(p: &Path) -> Result<PathBuf, String> {
+    let s = p.to_string_lossy();
+    // an extended-length path of a local drive (`\\?\C:\...`) is a local path
+    let bytes = s.as_bytes();
+    let local_ext = s.starts_with(r"\\?\") && bytes.len() > 6 && bytes[4].is_ascii_alphabetic() && bytes[5] == b':';
+    if !local_ext && (s.starts_with(r"\\") || s.starts_with("//")) {
+        return Err("Choose a file on this computer, not a network or device path.".into());
+    }
+    if !p.is_absolute() {
+        return Err("Choose the file itself (its full path), not a relative one.".into());
+    }
+    let name = p.file_name().and_then(|n| n.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    let allowed: &[&str] = if cfg!(windows) { &["claude.exe", "claude.cmd"] } else { &["claude"] };
+    if !allowed.contains(&name.as_str()) {
+        return Err(format!("The file must be named {}.", allowed.join(" or ")));
+    }
+    if !p.is_file() {
+        return Err("That file does not exist.".into());
+    }
+    if is_shim(p) {
+        return real_exe_behind_shim(p).ok_or_else(|| "That is a launcher script without the claude.exe it starts.".to_string());
+    }
+    Ok(p.to_path_buf())
 }
 
 // ---- finding the executable --------------------------------------------------------------------------
@@ -182,10 +258,15 @@ mod tests {
     }
 
     #[test]
-    fn the_child_environment_has_no_claude_session_or_credential_variables() {
+    fn the_child_environment_is_an_allowlist() {
         let v = vars(&[
             ("PATH", "C:\\x"),
+            ("Path", "C:\\y"),
             ("USERPROFILE", "C:\\Users\\a"),
+            ("SystemRoot", "C:\\Windows"),
+            ("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+            ("HTTPS_PROXY", "http://proxy:8080"),
+            ("NODE_EXTRA_CA_CERTS", "C:\\ca.pem"),
             ("ANTHROPIC_API_KEY", "sk"),
             ("ANTHROPIC_BASE_URL", "u"),
             ("CLAUDECODE", "1"),
@@ -194,10 +275,57 @@ mod tests {
             ("CLAUDE_EFFORT", "high"),
             ("Claude_Config_Dir", "D:\\cfg"),
             ("CLAUDE_CODE_GIT_BASH_PATH", "C:\\git\\bash.exe"),
+            // not claudeish, still not the child's business
+            ("NODE_OPTIONS", "--require C:\\evil.js"),
+            ("OPENAI_API_KEY", "sk-o"),
+            ("GITHUB_TOKEN", "ghp"),
+            ("AWS_SECRET_ACCESS_KEY", "aws"),
+            ("MCP_TOOL_TIMEOUT", "1"),
+            ("FAKE_CLAUDE_LOG", "x"),
         ]);
         let e = child_env(&v);
         let names: Vec<&str> = e.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(names, ["PATH", "USERPROFILE", "Claude_Config_Dir", "CLAUDE_CODE_GIT_BASH_PATH"]);
+        assert_eq!(
+            names,
+            [
+                "PATH",
+                "Path",
+                "USERPROFILE",
+                "SystemRoot",
+                "ProgramFiles(x86)",
+                "HTTPS_PROXY",
+                "NODE_EXTRA_CA_CERTS",
+                "Claude_Config_Dir",
+                "CLAUDE_CODE_GIT_BASH_PATH"
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_claude_that_says_so_is_claude() {
+        assert!(is_claude_version("2.1.296 (Claude Code)\n"));
+        assert!(!is_claude_version("2.1.296"));
+        assert!(!is_claude_version("Microsoft Windows [Version 10]"));
+        assert!(!is_claude_version("(Claude Code) but not at the end"));
+        assert!(!is_claude_version(""));
+    }
+
+    #[test]
+    fn a_chosen_file_must_be_a_local_file_named_claude() {
+        let root = std::env::temp_dir().join(format!("inkwell-claude-vet-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let exe = root.join(if cfg!(windows) { "claude.exe" } else { "claude" });
+        std::fs::write(&exe, "MZ").unwrap();
+        let other = root.join("notepad.exe");
+        std::fs::write(&other, "MZ").unwrap();
+        assert_eq!(vet_choice(&exe), Ok(exe.clone()));
+        assert!(vet_choice(&other).unwrap_err().contains("must be named"));
+        assert!(vet_choice(&root.join("claude.EXE.missing")).is_err());
+        assert!(vet_choice(Path::new("claude.exe")).unwrap_err().contains("full path"));
+        assert!(vet_choice(Path::new("\\\\server\\share\\claude.exe")).unwrap_err().contains("network"));
+        assert!(vet_choice(Path::new("//server/share/claude.exe")).unwrap_err().contains("network"));
+        assert!(vet_choice(Path::new("\\\\.\\pipe\\claude.exe")).unwrap_err().contains("network"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
