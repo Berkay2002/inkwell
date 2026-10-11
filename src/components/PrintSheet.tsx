@@ -1,16 +1,28 @@
 import { useEffect, useRef } from "react";
 import type { PrintDuplex, PrintOrientation, PrintPageOrder } from "../lib/api";
-import { outcomeLine, PER_SHEET, type PrintOptions, type PrintSheetState, usePrint } from "../lib/printStore";
+import { outcomeLine, paperList, PER_SHEET, type PrintOptions, type PrintSheetState, usePrint } from "../lib/printStore";
 import { Icon } from "./Icons";
 import "./print.css";
 
 const act = () => usePrint.getState();
 
-function Seg<T extends string>({ label, value, items, onChange }: { label: string; value: T; items: { id: T; label: string }[]; onChange: (v: T) => void }) {
+function Seg<T extends string>({
+  label,
+  value,
+  items,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  value: T;
+  items: { id: T; label: string }[];
+  onChange: (v: T) => void;
+  disabled?: boolean;
+}) {
   return (
     <div className="ax-seg pr-seg" role="radiogroup" aria-label={label}>
       {items.map((i) => (
-        <button key={i.id} role="radio" aria-checked={value === i.id} className={value === i.id ? "on" : ""} onClick={() => onChange(i.id)}>
+        <button key={i.id} role="radio" aria-checked={value === i.id} disabled={disabled} className={value === i.id ? "on" : ""} onClick={() => onChange(i.id)}>
           {i.label}
         </button>
       ))}
@@ -131,6 +143,8 @@ function Options({ sheet }: { sheet: PrintSheetState }) {
   const caps = sheet.caps;
   const perSheetPreset = (PER_SHEET as readonly number[]).includes(o.perSheet);
   const outcome = outcomeLine(sheet.plan, o, caps);
+  const papers = paperList(caps, o.printer);
+  const canRun = !!sheet.plan && !sheet.planError;
   return (
     <>
       <div className="pr-body">
@@ -207,6 +221,7 @@ function Options({ sheet }: { sheet: PrintSheetState }) {
               { id: "size", label: "One" },
               { id: "multiple", label: "Several" },
               { id: "booklet", label: "Booklet" },
+              { id: "poster", label: "Poster" },
             ]}
             onChange={(mode) => set({ mode })}
           />
@@ -304,6 +319,55 @@ function Options({ sheet }: { sheet: PrintSheetState }) {
               ]}
               onChange={(binding) => set({ binding })}
             />
+            <div className="pr-pair">
+              <input
+                className="tl-field"
+                type="number"
+                min={0}
+                max={3}
+                step={0.1}
+                aria-label="Creep in millimetres"
+                value={o.creepMm}
+                onChange={(e) => set({ creepMm: Math.max(0, Math.min(3, Number(e.target.value) || 0)) })}
+              />
+              <span className="dim">mm creep, for thick paper</span>
+            </div>
+          </>
+        )}
+        {o.mode === "poster" && (
+          <>
+            <div className="pr-pair">
+              <input
+                className="tl-field"
+                type="number"
+                min={10}
+                max={1000}
+                aria-label="Tile scale in percent"
+                value={o.tileScale}
+                onChange={(e) => set({ tileScale: Math.max(10, Math.min(1000, Number(e.target.value) || 100)) })}
+              />
+              <span className="dim">% tile scale</span>
+            </div>
+            <div className="pr-pair">
+              <input
+                className="tl-field"
+                type="number"
+                min={0}
+                max={50}
+                aria-label="Overlap in millimetres"
+                value={o.overlapMm}
+                onChange={(e) => set({ overlapMm: Math.max(0, Math.min(50, Number(e.target.value) || 0)) })}
+              />
+              <span className="dim">mm overlap</span>
+            </div>
+            <label className="pr-check">
+              <input type="checkbox" checked={o.cutMarks} onChange={(e) => set({ cutMarks: e.target.checked })} />
+              <span>Cut marks at the overlap</span>
+            </label>
+            <label className="pr-check">
+              <input type="checkbox" checked={o.labels} onChange={(e) => set({ labels: e.target.checked })} />
+              <span>Label each tile with its row, column and page</span>
+            </label>
           </>
         )}
 
@@ -312,15 +376,15 @@ function Options({ sheet }: { sheet: PrintSheetState }) {
             className="tl-field"
             aria-label="Paper size"
             value={o.paperId ?? ""}
-            disabled={!caps || caps.papers.length === 0}
+            disabled={papers.length === 0}
             onChange={(e) => set({ paperId: Number(e.target.value) })}
           >
-            {(caps?.papers ?? []).map((p) => (
+            {papers.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
               </option>
             ))}
-            {!caps && <option value="">Printer default</option>}
+            {papers.length === 0 && <option value="">Printer default</option>}
           </select>
         </Field>
         {caps && caps.trays.length > 1 && (
@@ -349,7 +413,9 @@ function Options({ sheet }: { sheet: PrintSheetState }) {
               { id: "gray", label: "Grayscale" },
             ]}
             onChange={(v) => set({ grayscale: v === "gray" })}
+            disabled={!o.printer}
           />
+          <span className="dim">Save as PDF always keeps colour.</span>
         </Field>
         {(!caps || caps.duplex) && (
           <Field label="Two-sided">
@@ -387,7 +453,10 @@ function Options({ sheet }: { sheet: PrintSheetState }) {
         <button className="btn ghost" onClick={() => act().close()}>
           Cancel
         </button>
-        <button className="btn primary" disabled={!sheet.plan || !!sheet.planError || !o.printer} onClick={() => void act().start()}>
+        <button className="btn ghost" disabled={!canRun} onClick={() => void act().savePdf()}>
+          Save as PDF…
+        </button>
+        <button className="btn primary" disabled={!canRun || !o.printer} onClick={() => void act().start()}>
           Print
         </button>
       </footer>
@@ -399,16 +468,16 @@ function Running({ sheet }: { sheet: PrintSheetState }) {
   const { done, total } = sheet.progress;
   return (
     <div className="pr-state">
-      <p className="tl-big">Printing…</p>
+      <p className="tl-big">{sheet.job === "pdf" ? "Writing the PDF…" : "Printing…"}</p>
       <div className="tl-track" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={done}>
         <span style={{ width: `${total ? (100 * done) / total : 0}%` }} />
       </div>
       <p className="dim">
-        Side {Math.min(done + 1, total)} of {total}
+        {sheet.job === "pdf" ? "Page" : "Side"} {Math.min(done + 1, total)} of {total}
       </p>
       <div className="pr-actions">
         <button className="btn ghost" onClick={() => act().cancel()}>
-          Cancel printing
+          {sheet.job === "pdf" ? "Cancel" : "Cancel printing"}
         </button>
       </div>
     </div>
@@ -417,6 +486,25 @@ function Running({ sheet }: { sheet: PrintSheetState }) {
 
 function Done({ sheet }: { sheet: PrintSheetState }) {
   const r = sheet.report;
+  const saved = sheet.saved;
+  if (saved) {
+    return (
+      <div className="pr-state">
+        <p className="tl-big">Saved {saved.file.path.split(/[\\/]/).pop()}</p>
+        <p className="dim">
+          {saved.sheets} {saved.sheets === 1 ? "page" : "pages"} from {saved.pages} {saved.pages === 1 ? "page" : "pages"} of {sheet.name}. The original is untouched.
+        </p>
+        <div className="pr-actions">
+          <button className="btn ghost" onClick={() => act().close()}>
+            Done
+          </button>
+          <button className="btn primary" onClick={() => void act().openSaved()}>
+            Open it
+          </button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="pr-state">
       <p className="tl-big">Sent to {r?.printer}</p>
@@ -436,7 +524,7 @@ function Done({ sheet }: { sheet: PrintSheetState }) {
 function Failed({ sheet }: { sheet: PrintSheetState }) {
   return (
     <div className="pr-state">
-      <p className="tl-big">Could not print</p>
+      <p className="tl-big">{sheet.job === "pdf" ? "Could not save the PDF" : "Could not print"}</p>
       <p className="pr-note bad">{sheet.error}</p>
       <div className="pr-actions">
         <button className="btn ghost" onClick={() => act().back()}>

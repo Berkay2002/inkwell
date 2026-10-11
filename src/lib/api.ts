@@ -685,7 +685,10 @@ export type PrintRange = { kind: "all" } | { kind: "current"; page: number } | {
 export type PrintLayout =
   | { kind: "size"; mode: PrintSizeMode; percent: number }
   | { kind: "multiple"; perSheet: number; order: PrintPageOrder; border: boolean; autoRotate: boolean }
-  | { kind: "booklet"; sides: "both" | "frontOnly" | "backOnly"; binding: "left" | "right" };
+  /** `creep` in points: how much closer to the spine the innermost sheet's pages sit than the outermost's. */
+  | { kind: "booklet"; sides: "both" | "frontOnly" | "backOnly"; binding: "left" | "right"; creep: number }
+  /** `scale` in percent, `overlap` in points. */
+  | { kind: "poster"; scale: number; overlap: number; cutMarks: boolean; labels: boolean };
 
 export interface PrintSettings {
   printer: string | null;
@@ -708,6 +711,8 @@ export interface PrintFace {
   height: number;
   /** Source pages on this side (1-based), in the order drawn. */
   pages: number[];
+  /** Poster: which tile of its page this side is (0-based) in a `cols` x `rows` grid. */
+  tile: { col: number; row: number; cols: number; rows: number } | null;
 }
 
 export interface PrintPlan {
@@ -745,6 +750,22 @@ export function printStart(job: number, doc: number, settings: PrintSettings, sa
   const ch = new Channel<PrintProgress>();
   ch.onmessage = onProgress;
   return invoke<PrintReport>("print_start", { job, doc, settings, saveTo, onProgress: ch });
+}
+
+export interface PrintSavedPdf {
+  /** The new file, as an open token for a new tab. */
+  file: FileRef;
+  /** Source pages chosen. */
+  pages: number;
+  /** Pages of the new file. */
+  sheets: number;
+}
+
+/** Writes the plan as a new vector PDF at `saveTo` (a save token from `pickSave`). Needs no printer. */
+export function printSavePdf(job: number, doc: number, settings: PrintSettings, saveTo: string, onProgress: (p: PrintProgress) => void) {
+  const ch = new Channel<PrintProgress>();
+  ch.onmessage = onProgress;
+  return invoke<PrintSavedPdf>("print_save_pdf", { job, doc, settings, saveTo, onProgress: ch });
 }
 
 // ---- combine, attachments, page labels, transitions (src-tauri/src/organize) ----
