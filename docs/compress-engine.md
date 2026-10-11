@@ -113,9 +113,12 @@ Reproduce: `cargo test --lib compress::tests::presets -- --nocapture --test-thre
 - Cancel is polled per page and between stages; a cancelled job leaves no file behind.
 - The output is reopened, its page count checked, re-audited and render-compared (`visualPages` evenly spread pages,
   at most 64, 0 skips the check; 96 ppi). Pages the run flattened and pages set in an unembedded font are always
-  added (at most 24 of them, spread over the list): `visual.maxDiff`, `meanDiff`, `psnr`, `worstPage`, per page.
-  The result screen says "Looks the same" up to a difference of 8 of 255, "Slightly different" up to 64, and
-  "Looks different, check page N" (red) above that or when the PSNR is under 30.
+  added (at most 24 of them, spread over the list): `visual.maxDiff`, `meanDiff`, `psnr`, `p999Diff` (the difference
+  99.9 % of the samples stay under), `worstPage`, per page. A flattened page is drawn on both sides at the
+  resolution it was flattened at, so resampling alone is not a change. The result screen says "Looks the same" up to a
+  largest difference of 8 of 255, "Slightly different" above that, and "Looks different, check page N" (red) when
+  `p999Diff` is above 64 or the PSNR is under 30. Stray pixels (an edge after a lossy pass) do not trip it; a changed
+  line of text does. `worstPage` is the page furthest past either threshold.
 - A named-destination tree that cannot be read skips the invalid-links pass (warning), it does not make every named
   link look broken. A signed document is flagged in the audit reply (`signed`) so the sheet warns before Start.
 - The presets file is read up to 1 MB; an out-of-range `visualPages` in it is clamped to 64.

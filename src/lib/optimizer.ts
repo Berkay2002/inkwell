@@ -170,13 +170,19 @@ export type VisualLevel = "same" | "slight" | "different";
 
 /** Largest per-channel difference up to which a page counts as unchanged (of 255). */
 export const VISUAL_SAME_MAX = 8;
-/** Above this difference, or below [`VISUAL_PSNR_MIN`], the copy is flagged for a look. */
-export const VISUAL_DIFFERENT_MAX = 64;
+/** The copy is flagged for a look when the difference 99.9 % of the samples stay under is above this, or the
+ *  PSNR is under [`VISUAL_PSNR_MIN`]. Same numbers as `RED_P999` and `RED_PSNR` in compress/visual.rs. */
+export const VISUAL_DIFFERENT_P999 = 64;
 export const VISUAL_PSNR_MIN = 30;
 
-export function visualVerdict(v: { maxDiff: number; psnr: number; worstPage?: number }): { level: VisualLevel; text: string } {
+export function visualVerdict(v: {
+  maxDiff: number;
+  psnr: number;
+  p999Diff: number;
+  worstPage?: number;
+}): { level: VisualLevel; text: string } {
   const diff = Math.round(v.maxDiff);
-  if (v.maxDiff > VISUAL_DIFFERENT_MAX || v.psnr < VISUAL_PSNR_MIN) {
+  if (v.p999Diff > VISUAL_DIFFERENT_P999 || v.psnr < VISUAL_PSNR_MIN) {
     return {
       level: "different",
       text: `Looks different, check page ${(v.worstPage ?? 0) + 1}: largest difference ${diff} of 255.`,

@@ -1215,12 +1215,53 @@ fn a_flattened_page_that_looks_the_same_does_not_come_back_as_different() {
     println!("flat, same resolution: psnr {:.1} max {} mean {:.3}", v.psnr, v.max_diff, v.mean_diff);
     // "Looks the same" in the result screen: at most 8 of 255, nowhere near the red level
     assert!(v.max_diff <= 8, "{v:?}");
-    assert!(v.psnr >= 40.0, "{v:?}");
+    assert!(v.psnr >= 40.0 && v.p999_diff <= 8 && !v.looks_different(), "{v:?}");
 
     // at the sheet's usual 96 ppi the same pair differs only by resampling: that is what the check avoids
     let at_96 = diff(&input, &r.output, 1);
     println!("flat, 96 ppi: psnr {:.1} max {}", at_96.psnr, at_96.max_diff);
     assert!(v.per_page[0].psnr >= at_96.per_page[0].psnr, "{v:?} vs {at_96:?}");
+}
+
+#[test]
+fn a_page_with_other_letters_is_reported_as_different_and_named() {
+    let s = Scratch::new();
+    let original = s.path("original.pdf");
+    fs::write(&original, fixture::build(&fixture::Fixture { pages: 3, chapter_every: 0, needle_every: 0, lines: 6 })).unwrap();
+    // the same file with every letter of page 2's text moved 13 places along: glyphs swapped, layout kept
+    let doc = PdfDocument::from_bytes(&fs::read(&original).unwrap()).unwrap();
+    let mut contents = doc.find_page(1).unwrap().get_dict("Contents").unwrap().unwrap();
+    let mut inside = false;
+    let swapped: Vec<u8> = contents
+        .read_stream()
+        .unwrap()
+        .iter()
+        .map(|&b| match b {
+            b'(' => {
+                inside = true;
+                b
+            }
+            b')' => {
+                inside = false;
+                b
+            }
+            b'a'..=b'z' if inside => (b - b'a' + 13) % 26 + b'a',
+            b'A'..=b'Z' if inside => (b - b'A' + 13) % 26 + b'A',
+            _ => b,
+        })
+        .collect();
+    contents.write_stream_buffer(&mupdf::Buffer::from_bytes(&swapped).unwrap()).unwrap();
+    let changed = s.path("changed.pdf");
+    doc.save(changed.to_str().unwrap()).unwrap();
+
+    let same = diff(&original, &original, 3);
+    assert!(!same.looks_different() && same.max_diff == 0 && same.p999_diff == 0, "{same:?}");
+    let v = diff(&original, &changed, 3);
+    println!("glyph swap: psnr {:.1} p999 {} max {} worst page {}", v.psnr, v.p999_diff, v.max_diff, v.worst_page);
+    assert!(v.looks_different(), "{v:?}");
+    assert_eq!(v.worst_page, 1, "{v:?}");
+    // the untouched pages are exact
+    assert!(v.per_page.iter().filter(|p| p.page != 1).all(|p| p.max == 0), "{v:?}");
 }
 
 /// A document whose form fields point at each other, with one parent listed many times.

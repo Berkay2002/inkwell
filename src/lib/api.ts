@@ -708,7 +708,16 @@ export interface CompressReport {
   pages: number;
   /** Render comparison of before and after (the sampled pages, plus every page the run flattened or gave
    *  another font); null when skipped. `worstPage` is zero-based. */
-  visual: { maxDiff: number; meanDiff: number; psnr: number; worstPage: number; pagesChecked: number; pagesTotal: number } | null;
+  visual: {
+    maxDiff: number;
+    meanDiff: number;
+    psnr: number;
+    /** The difference 99.9 % of the compared samples stay under. */
+    p999Diff: number;
+    worstPage: number;
+    pagesChecked: number;
+    pagesTotal: number;
+  } | null;
   warnings: string[];
   before: CompressAudit;
   after: CompressAudit;

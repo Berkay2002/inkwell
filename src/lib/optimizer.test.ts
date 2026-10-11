@@ -159,19 +159,25 @@ describe("helpers", () => {
 
 describe("visualVerdict", () => {
   it("calls a small difference the same and a middling one slight", () => {
-    expect(visualVerdict({ maxDiff: 3, psnr: 60, worstPage: 0 })).toEqual({
+    expect(visualVerdict({ maxDiff: 3, psnr: 60, p999Diff: 0, worstPage: 0 })).toEqual({
       level: "same",
       text: "Looks the same: largest difference 3 of 255.",
     });
-    expect(visualVerdict({ maxDiff: 40, psnr: 38, worstPage: 2 }).level).toBe("slight");
+    expect(visualVerdict({ maxDiff: 40, psnr: 38, p999Diff: 12, worstPage: 2 }).level).toBe("slight");
   });
 
-  it("flags a large difference, or a low PSNR, with the worst page (1-based)", () => {
-    const v = visualVerdict({ maxDiff: 255, psnr: 45, worstPage: 6 });
+  it("flags a changed area, or a low PSNR, with the worst page (1-based)", () => {
+    const v = visualVerdict({ maxDiff: 255, psnr: 45, p999Diff: 200, worstPage: 6 });
     expect(v.level).toBe("different");
     expect(v.text).toBe("Looks different, check page 7: largest difference 255 of 255.");
-    // a small peak difference over a whole page still counts when the average is poor
-    expect(visualVerdict({ maxDiff: 50, psnr: 24, worstPage: 0 }).text).toContain("check page 1");
-    expect(visualVerdict({ maxDiff: 64, psnr: 30, worstPage: 0 }).level).toBe("slight");
+    // a poor average over a whole page counts even when no area is far off
+    expect(visualVerdict({ maxDiff: 50, psnr: 24, p999Diff: 30, worstPage: 0 }).text).toContain("check page 1");
+    expect(visualVerdict({ maxDiff: 90, psnr: 30, p999Diff: 64, worstPage: 0 }).level).toBe("slight");
+  });
+
+  it("does not call a few stray pixels different", () => {
+    // sharp text over a photo after a lossy pass: a handful of pixels far off, the rest within a few levels
+    const v = visualVerdict({ maxDiff: 255, psnr: 34, p999Diff: 40, worstPage: 3 });
+    expect(v.level).toBe("slight");
   });
 });
