@@ -51,7 +51,7 @@ export interface Identity {
 
 export type IdRef = { kind: "store"; fingerprint: string } | { kind: "session"; handle: number };
 
-/** `warning`: intact, but changed after signing or made with a weak hash (see `warnings`). */
+/** `warning`: intact and trusted, with a caution in `warnings`. An untrusted signer stays `unknownSigner`. */
 export type Status = "valid" | "unknownSigner" | "warning" | "invalid" | "unsigned";
 
 export interface SignatureInfo {
@@ -75,7 +75,7 @@ export interface SignatureInfo {
   trusted: boolean;
   trustNote: string;
   /** Cautions about an intact signature, one sentence each. */
-  warnings: string[];
+  warnings: Warning[];
   certNotAfter: string;
   certFingerprint: string;
 }
@@ -154,6 +154,15 @@ export function detailLines(name: string, d: Date, reason: string, location = ""
   return out;
 }
 
+/** A caution about an intact signature: changed after signing, a SHA-1 hash, a later visible box. */
+export type WarningCode = "changed" | "sha1" | "laterBox" | "laterBoxLarge";
+export interface Warning {
+  code: WarningCode;
+  text: string;
+}
+
+const has = (s: SignatureInfo, ...codes: WarningCode[]) => s.warnings.some((w) => codes.includes(w.code));
+
 export type Tone = "valid" | "unknown" | "invalid";
 
 export const STATUS: Record<Exclude<Status, "unsigned">, { tone: Tone; word: string }> = {
@@ -165,12 +174,16 @@ export const STATUS: Record<Exclude<Status, "unsigned">, { tone: Tone; word: str
 
 /** The status word on a signature's card. */
 export function statusWord(s: SignatureInfo): string {
-  if (s.status === "warning") return s.changes === "changed" ? "Valid, but changed after signing" : "Valid, but weak";
+  if (s.status === "warning") {
+    if (has(s, "changed")) return "Valid, but changed after signing";
+    if (has(s, "laterBox", "laterBoxLarge")) return "Valid, but a box was added later";
+    return "Valid, but weak";
+  }
   return STATUS[s.status as keyof typeof STATUS]?.word ?? "";
 }
 
 /** The warnings a card lists under the change note (which already says the document changed). */
-export const otherWarnings = (s: SignatureInfo) => s.warnings.filter((w) => !w.startsWith("The document was changed"));
+export const otherWarnings = (s: SignatureInfo) => s.warnings.filter((w) => w.code !== "changed").map((w) => w.text);
 
 export const signed = (l: SignatureInfo[]) => l.filter((s) => s.status !== "unsigned");
 
@@ -182,12 +195,18 @@ export function banner(list: SignatureInfo[]): { tone: Tone; text: string } | nu
   if (s.some((x) => x.status === "invalid"))
     return { tone: "invalid", text: s.length === 1 ? "The signature is invalid." : "At least one signature is invalid." };
   const one = s.length === 1;
-  if (s.some((x) => x.status === "warning" && x.changes === "changed"))
-    return { tone: "unknown", text: `${one ? "Signature" : "Signatures"} valid, but the document was changed after signing.` };
+  // Trust first: an untrusted signature is never called valid, whatever else is true.
+  const changed = s.some((x) => has(x, "changed"));
+  if (s.some((x) => x.status === "unknownSigner"))
+    return {
+      tone: "unknown",
+      text: `Signed. ${one ? "The signature is intact, but its signer is" : "The signatures are intact, but a signer is"} not in your trusted list.${changed ? " The document was changed after signing." : ""}`,
+    };
+  if (changed) return { tone: "unknown", text: `${one ? "Signature" : "Signatures"} valid, but the document was changed after signing.` };
+  if (s.some((x) => has(x, "laterBox", "laterBoxLarge")))
+    return { tone: "unknown", text: "Signatures valid, but a later signature added a visible box." };
   if (s.some((x) => x.status === "warning"))
     return { tone: "unknown", text: `Signed, but ${one ? "the signature uses" : "a signature uses"} a weak hash algorithm.` };
-  if (s.some((x) => x.status === "unknownSigner"))
-    return { tone: "unknown", text: `Signed. ${s.length === 1 ? "The signature is intact, but its signer is" : "The signatures are intact, but a signer is"} not in your trusted list.` };
   return { tone: "valid", text: `Signed. ${all} valid.` };
 }
 

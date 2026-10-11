@@ -7,7 +7,7 @@ use super::app::{list, sign_step, system_trust};
 use super::crypto::cms::{self, SignedData};
 use super::crypto::der::{self, tag};
 use super::crypto::{Certificate, DigestAlg, DigitalId, Name, PrivateKey, Time};
-use super::pdf::{self, Changes, SignDate, SignRequest, SignatureInfo, Status};
+use super::pdf::{self, Changes, SignDate, SignRequest, SignatureInfo, Status, WarningCode};
 use crate::annot::{NewAnnot, Style, add_one};
 use crate::engine::edit::{EditOp, EditSource};
 use crate::engine::fixture::{self, Fixture};
@@ -55,6 +55,10 @@ fn req(page: u32, rect: [f32; 4]) -> SignRequest {
 fn trust_tests(c: &Certificate, _: &[Certificate]) -> (bool, String) {
     let (a, b) = ids();
     if c.raw == a.cert.raw || c.raw == b.cert.raw { (true, String::new()) } else { (false, "not a test ID".into()) }
+}
+
+fn codes(s: &SignatureInfo) -> Vec<WarningCode> {
+    s.warnings.iter().map(|w| w.code).collect()
 }
 
 fn infos(bytes: &[u8]) -> Vec<SignatureInfo> {
@@ -123,7 +127,8 @@ fn a_second_signature_keeps_the_first_valid_and_an_edit_after_is_reported() {
     assert_eq!(i.len(), 2);
     let first = i.iter().find(|s| s.signer.starts_with("Maple")).unwrap();
     let second = i.iter().find(|s| s.signer.starts_with("Alex")).unwrap();
-    assert_eq!((first.status, first.changes), (Status::Valid, Changes::SignaturesOnly), "{first:?}");
+    // Only a signature came after the first, but its box is drawn on the page the first signed.
+    assert_eq!((first.status, first.changes, codes(first)), (Status::Warning, Changes::SignaturesOnly, vec![WarningCode::LaterBox]), "{first:?}");
     assert_eq!((second.status, second.changes), (Status::Valid, Changes::None), "{second:?}");
 
     // A comment after signing: both stay intact, and both warn that the document changed.
@@ -131,7 +136,8 @@ fn a_second_signature_keeps_the_first_valid_and_an_edit_after_is_reported() {
     eng.save(id, None).unwrap();
     for s in infos(&std::fs::read(&path).unwrap()) {
         assert_eq!((s.status, s.intact, s.changes), (Status::Warning, true, Changes::Changed), "{s:?}");
-        assert_eq!(s.warnings, ["The document was changed after it was signed."], "{s:?}");
+        assert_eq!(s.warnings[0].text, "The document was changed after it was signed.", "{s:?}");
+        assert_eq!(codes(&s)[0], WarningCode::Changed, "{s:?}");
     }
 
     // Deleting a page after signing appends too (no rewrite that would break the signatures).
@@ -347,7 +353,7 @@ fn an_update_without_eof_or_junk_after_a_signature_is_a_change() {
     sign_step(&eng, id, &ids().0, &req(0, [72.0, 600.0, 280.0, 680.0]), "A".into()).unwrap();
     sign_step(&eng, id, &ids().1, &req(0, [300.0, 600.0, 520.0, 680.0]), "B".into()).unwrap();
     let mut t = eng.current_bytes(id).unwrap();
-    assert!(infos(&t).iter().all(|s| s.status == Status::Valid));
+    assert!(infos(&t).iter().all(|s| s.intact && s.changes != Changes::Changed));
     t.extend_from_slice(b"\n9 0 obj\n<</Junk true>>\nendobj\n");
     for s in infos(&t) {
         assert_eq!((s.status, s.changes), (Status::Warning, Changes::Changed), "{s:?}");
@@ -404,7 +410,7 @@ fn signing_an_existing_empty_field_after_another_signature_is_signatures_only() 
     sign_step(&eng, id, &ids().1, &r, "B".into()).unwrap();
     let i = infos(&eng.current_bytes(id).unwrap());
     let first = i.iter().find(|s| s.field != "Tenant").unwrap();
-    assert_eq!((first.status, first.changes), (Status::Valid, Changes::SignaturesOnly), "{first:?}");
+    assert_eq!((first.status, first.changes, codes(first)), (Status::Warning, Changes::SignaturesOnly, vec![WarningCode::LaterBox]), "{first:?}");
 }
 
 // ---- the signer's certificate and the CMS -------------------------------------------------------
@@ -501,7 +507,7 @@ fn the_cms_must_name_its_certificate_carry_data_and_use_a_strong_hash() {
     // The document hashed with SHA-1 (Inkwell itself never signs that way).
     let s = &infos(&recms(&bytes, |data| by_hand(data, DigestAlg::Sha1, true)))[0];
     assert_eq!((s.status, s.intact, s.digest.as_str()), (Status::Warning, true, "SHA-1"), "{s:?}");
-    assert!(s.warnings.iter().any(|w| w.contains("SHA-1")), "{s:?}");
+    assert_eq!(codes(s), [WarningCode::Sha1], "{s:?}");
 
     // CAdES without signed attributes: the signature over the bytes is right, but nothing binds
     // the certificate, so it is refused.
@@ -554,4 +560,277 @@ fn security_and_signatures_never_meet() {
     let (eng, id, _) = open_bytes("secure-encrypted", &locked);
     let e = sign_step(&eng, id, &ids().0, &r, "Sign".into()).unwrap_err();
     assert!(e.to_string().contains("password-protected"), "{e}");
+}
+
+// ---- forged "signature-only" revisions (incremental saving and shadow attacks) -------------------
+// Each attack is a real signature by the second test ID whose revision also carries something
+// else. The first signature must report that its document changed.
+
+/// No box: the attacker's signature draws nothing, so only the forgery itself is judged.
+fn unseen() -> SignRequest {
+    SignRequest { rect: None, ..req(0, [0.0; 4]) }
+}
+
+/// The first test ID's signature on `bytes` (a new field on page 1).
+fn victim(bytes: &[u8]) -> Vec<u8> {
+    pdf::sign(bytes, &ids().0, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap()
+}
+
+/// The second test ID signs `bytes` with `r`, and `tamper` adds to the same revision.
+fn attack(bytes: &[u8], r: &SignRequest, mut tamper: impl FnMut(&mut PdfDocument, &mut PdfObject)) -> Vec<u8> {
+    pdf::sign_with(bytes, &ids().1, r, &mut tamper).unwrap()
+}
+
+/// The victim's and the attacker's signatures, after the attack.
+fn verdicts(bytes: &[u8]) -> (SignatureInfo, SignatureInfo) {
+    let i = infos(bytes);
+    let pick = |who: &str| i.iter().find(|s| s.signer.starts_with(who)).unwrap_or_else(|| panic!("{who}: {i:?}")).clone();
+    (pick("Maple"), pick("Alex"))
+}
+
+/// The victim reads "changed"; the attacker's own signature is real.
+fn assert_caught(bytes: &[u8]) {
+    let (v, a) = verdicts(bytes);
+    assert_eq!((v.status, v.intact, v.changes), (Status::Warning, true, Changes::Changed), "victim: {v:?}");
+    assert_eq!((a.status, a.changes), (Status::Valid, Changes::None), "attacker: {a:?}");
+}
+
+fn page1() -> Vec<u8> {
+    fixture::build(&Fixture { pages: 1, lines: 4, ..Default::default() })
+}
+
+fn write(d: &mut PdfDocument) -> Vec<u8> {
+    let mut out = Vec::new();
+    d.write_to(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn an_honest_second_signature_is_signatures_only() {
+    let v = victim(&page1());
+    let (first, _) = verdicts(&attack(&v, &unseen(), |_, _| {}));
+    assert_eq!((first.status, first.changes, codes(&first)), (Status::Valid, Changes::SignaturesOnly, vec![]), "{first:?}");
+}
+
+#[test]
+fn forged_a_second_catalog_swapped_in() {
+    // Acrobat's layout (the form its own object), with a second catalog planted before signing:
+    // the same pages and form, plus an action that runs on open.
+    let mut d = PdfDocument::from_bytes(&page1()).unwrap();
+    let form = d.new_object_from_str("<</Fields[]>>").unwrap();
+    let form = d.add_object(&form).unwrap();
+    d.catalog().unwrap().dict_put("AcroForm", form).unwrap();
+    let mut evil = d.catalog().unwrap().copy_dict().unwrap();
+    evil.dict_put("OpenAction", d.new_object_from_str("<</S/JavaScript/JS(app.alert(1))>>").unwrap()).unwrap();
+    let planted = d.add_object(&evil).unwrap().as_indirect().unwrap();
+    let v = victim(&write(&mut d));
+
+    let forged = attack(&v, &unseen(), |d, _| {
+        let root = d.new_indirect(planted, 0).unwrap();
+        d.trailer().unwrap().dict_put("Root", root).unwrap();
+    });
+    let swapped = PdfDocument::from_bytes(&forged).unwrap().catalog().unwrap().get_dict("OpenAction").unwrap();
+    assert!(swapped.is_some(), "the forged file opens the planted catalog");
+    assert_caught(&forged);
+}
+
+#[test]
+fn forged_page_content_of_the_same_length() {
+    // The page's text rewritten in place, its dictionary (and /Length) untouched.
+    let v = victim(&page1());
+    let forged = attack(&v, &unseen(), |d, _| {
+        let mut contents = d.find_page(0).unwrap().get_dict("Contents").unwrap().unwrap();
+        let mut raw = contents.read_raw_stream().unwrap();
+        let at = raw.windows(2).position(|w| w == b"Tj").unwrap() - 3;
+        raw[at] = if raw[at] == b'9' { b'8' } else { b'9' };
+        contents.write_raw_stream_buffer(&mupdf::Buffer::from_bytes(&raw).unwrap()).unwrap();
+    });
+    assert_caught(&forged);
+}
+
+#[test]
+fn forged_an_inline_form_changed() {
+    // Inkwell's own layout: the form lives inline in the catalog.
+    let v = victim(&page1());
+    for (key, value) in [("NeedAppearances", "true"), ("XFA", "(<xdp/>)"), ("DA", "(/Helv 0 Tf 1 0 0 rg)")] {
+        let forged = attack(&v, &unseen(), |d, _| {
+            let mut form = d.catalog().unwrap().get_dict("AcroForm").unwrap().unwrap();
+            form.dict_put(key, d.new_object_from_str(value).unwrap()).unwrap();
+        });
+        assert_caught(&forged);
+    }
+}
+
+#[test]
+fn a_later_visible_box_is_reported_and_a_large_one_flagged() {
+    let v = victim(&page1());
+    // A box the size of a signature: drawn over the page the first signer signed.
+    let (first, _) = verdicts(&attack(&v, &req(0, [300.0, 600.0, 520.0, 680.0]), |_, _| {}));
+    assert_eq!((first.status, first.changes, codes(&first)), (Status::Warning, Changes::SignaturesOnly, vec![WarningCode::LaterBox]), "{first:?}");
+    assert!(first.warnings[0].text.contains("page 1"), "{first:?}");
+    // The whole page ("sneaky signature"), also when /Rect has a fifth number that MuPDF ignores.
+    for rect in ["[0 0 612 792]", "[0 0 612 792 0]"] {
+        let forged = attack(&v, &req(0, [300.0, 600.0, 520.0, 680.0]), |d, w| {
+            w.dict_put("Rect", d.new_object_from_str(rect).unwrap()).unwrap();
+        });
+        let (first, _) = verdicts(&forged);
+        assert_eq!(codes(&first), [WarningCode::LaterBox, WarningCode::LaterBoxLarge], "{rect}: {first:?}");
+    }
+}
+
+#[test]
+fn forged_an_empty_field_that_is_an_annotation() {
+    // A "signature field" planted before signing whose field dictionary is a visible comment: signing
+    // it would hide (or redraw) the comment.
+    let mut d = PdfDocument::from_bytes(&page1()).unwrap();
+    let page = d.find_page(0).unwrap();
+    let note = d.new_object_from_str("<</Type/Annot/Subtype/FreeText/T(Landlord)/Rect[72 300 300 340]/Contents(Rent: 1000)/DA(/Helv 12 Tf 0 g)>>").unwrap();
+    let note = d.add_object(&note).unwrap();
+    push_annot(&mut d, page.clone(), note.clone());
+    let mut w = d.new_object_from_str("<</Type/Annot/Subtype/Widget/FT/Sig/F 132/Rect[0 0 0 0]>>").unwrap();
+    w.dict_put("Parent", note.clone()).unwrap();
+    let w = d.add_object(&w).unwrap();
+    push_annot(&mut d, page.clone(), w.clone());
+    let mut fields = d.new_array().unwrap();
+    fields.array_push(w).unwrap();
+    let mut form = d.new_dict().unwrap();
+    form.dict_put("Fields", fields).unwrap();
+    d.catalog().unwrap().dict_put("AcroForm", form).unwrap();
+    let v = victim(&write(&mut d));
+    let forged = attack(&v, &SignRequest { field: Some("Landlord".into()), ..unseen() }, |_, w| {
+        let mut parent = w.get_dict("Parent").unwrap().unwrap();
+        parent.dict_put("F", PdfObject::new_int(2).unwrap()).unwrap();
+    });
+    assert_caught(&forged);
+}
+
+#[test]
+fn forged_a_field_that_is_not_a_widget_in_annots() {
+    // The signature's field split off as its own object, and that object (not a widget) added to
+    // the page's annotations.
+    let v = victim(&page1());
+    let forged = attack(&v, &unseen(), |d, w| {
+        let mut field = d.new_object_from_str("<</FT/Sig/T(Split)>>").unwrap();
+        field.dict_put("V", w.get_dict("V").unwrap().unwrap()).unwrap();
+        let field = d.add_object(&field).unwrap();
+        w.dict_delete("T").unwrap();
+        w.dict_put("Parent", field.clone()).unwrap();
+        let page = d.find_page(0).unwrap();
+        push_annot(d, page, field);
+    });
+    assert_caught(&forged);
+}
+
+#[test]
+fn forged_a_widget_with_an_action() {
+    let v = victim(&page1());
+    for key in ["AA", "A"] {
+        let forged = attack(&v, &unseen(), |d, w| {
+            let act = d.new_object_from_str("<</S/JavaScript/JS(app.alert(1))>>").unwrap();
+            let act = if key == "AA" {
+                let mut aa = d.new_dict().unwrap();
+                aa.dict_put("PO", act).unwrap();
+                aa
+            } else {
+                act
+            };
+            w.dict_put(key, act).unwrap();
+        });
+        assert_caught(&forged);
+    }
+}
+
+#[test]
+fn a_signature_shown_by_a_field_added_later_is_invalid() {
+    // The victim signs page 2; a field on page 1 (first in page order) then shows the victim's
+    // signature dictionary, or a copy of its byte range and value with other details.
+    let doc = fixture::build(&Fixture { pages: 2, lines: 4, ..Default::default() });
+    let v = pdf::sign(&doc, &ids().0, &req(1, [72.0, 600.0, 280.0, 680.0])).unwrap();
+    for copy in [false, true] {
+        let forged = append(&v, |d| {
+            let form = d.catalog().unwrap().get_dict("AcroForm").unwrap().unwrap();
+            let mut fields = form.get_dict("Fields").unwrap().unwrap();
+            let theirs = fields.get_array(0).unwrap().unwrap().get_dict("V").unwrap().unwrap();
+            let value = if copy {
+                let mut c = theirs.copy_dict().unwrap();
+                c.dict_put("Reason", PdfObject::new_string("I agree to pay 9000").unwrap()).unwrap();
+                d.add_object(&c).unwrap()
+            } else {
+                theirs
+            };
+            let page = d.find_page(0).unwrap();
+            let mut w = d.new_object_from_str("<</Type/Annot/Subtype/Widget/FT/Sig/T(Forged)/F 132/Rect[72 72 280 150]>>").unwrap();
+            w.dict_put("V", value).unwrap();
+            w.dict_put("P", page.clone()).unwrap();
+            let w = d.add_object(&w).unwrap();
+            push_annot(d, page, w.clone());
+            fields.array_push(w).unwrap();
+        });
+        let i = infos(&forged);
+        let fake = i.iter().find(|s| s.field == "Forged").unwrap();
+        let real = i.iter().find(|s| s.field != "Forged").unwrap();
+        assert_eq!((fake.status, fake.intact), (Status::Invalid, false), "copy={copy}: {fake:?}");
+        assert_eq!((real.status, real.intact, real.changes), (Status::Warning, true, Changes::Changed), "copy={copy}: {real:?}");
+    }
+}
+
+#[test]
+fn an_untrusted_signer_is_never_called_valid() {
+    // Self-signed and hashed with SHA-1, then commented on: intact, with two cautions, but the
+    // signer comes first.
+    let bytes = with_comment(&recms(&signed("untrusted", None), |data| by_hand(data, DigestAlg::Sha1, true)));
+    let d = PdfDocument::from_bytes(&bytes).unwrap();
+    let s = &pdf::list(&d, &bytes, &|_: &Certificate, _: &[Certificate]| (false, "self-signed".into())).unwrap()[0];
+    assert_eq!((s.status, s.intact, s.trusted), (Status::UnknownSigner, true, false), "{s:?}");
+    assert_eq!(codes(s), [WarningCode::Changed, WarningCode::Sha1], "{s:?}");
+    assert!(s.summary.contains("not trusted") && !s.summary.contains("valid"), "{s:?}");
+}
+
+/// MuPDF never writes an object stream into an update, so the attack writes `/Type/ObjStn` and
+/// renames it in the bytes, then signs those again as the attacker.
+fn with_objstm(v: &[u8], tamper: impl FnMut(&mut PdfDocument, &mut PdfObject)) -> Vec<u8> {
+    let mut out = attack(v, &unseen(), tamper);
+    let at = v.len() + out[v.len()..].windows(6).position(|w| w == b"ObjStn").unwrap();
+    out[at..at + 6].copy_from_slice(b"ObjStm");
+    recms(&out, |data| {
+        let b = &ids().1;
+        let alg = DigestAlg::Sha256;
+        cms::build(&b.key, &b.cert, &[], alg, cms::DATA, None, &alg.digest(&[data]), &b.cert).unwrap()
+    })
+}
+
+fn objstm(d: &mut PdfDocument) -> PdfObject {
+    let dict = d.new_object_from_str("<</Type/ObjStn/N 0/First 0>>").unwrap();
+    d.add_stream(&mupdf::Buffer::from_bytes(b"").unwrap(), Some(&dict), false).unwrap()
+}
+
+#[test]
+fn an_object_stream_nothing_uses_is_structure_only() {
+    let v = victim(&page1());
+    let (first, second) = verdicts(&with_objstm(&v, |d, _| {
+        objstm(d);
+    }));
+    assert_eq!(second.status, Status::Valid, "{second:?}");
+    assert_eq!((first.status, first.changes), (Status::Valid, Changes::SignaturesOnly), "{first:?}");
+    // Named by anything (here an allowed key of the new widget), it is no longer just structure.
+    let forged = with_objstm(&v, |d, w| {
+        let s = objstm(d);
+        w.dict_put("TU", s).unwrap();
+    });
+    assert_caught(&forged);
+}
+
+#[test]
+fn a_signed_field_without_sigflags_still_counts_as_signed() {
+    // Signed, then /SigFlags dropped in a later update, then the file damaged so MuPDF repairs it:
+    // still a signed file, so it is never rewritten.
+    let bytes = append(&signed("noflags-src", None), |d| {
+        d.catalog().unwrap().get_dict("AcroForm").unwrap().unwrap().dict_delete("SigFlags").unwrap();
+    });
+    let mut bytes = bytes;
+    let at = bytes.windows(9).rposition(|w| w == b"startxref").unwrap() + 9;
+    let digit = at + bytes[at..].iter().position(u8::is_ascii_digit).unwrap();
+    bytes[digit] = if bytes[digit] == b'1' { b'2' } else { b'1' };
+    let (eng, id, _) = open_bytes("noflags", &bytes);
+    assert_eq!(eng.current_bytes(id).unwrap(), bytes, "opened as it is, not rewritten");
 }

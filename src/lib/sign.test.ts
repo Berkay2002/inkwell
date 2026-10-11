@@ -53,18 +53,31 @@ describe("helpers", () => {
     expect(banner([sig({ status: "unknownSigner" }), sig({ status: "invalid" })])).toEqual({ tone: "invalid", text: "At least one signature is invalid." });
   });
 
-  it("warns when a signed document was changed after signing, or the hash is weak", () => {
-    const changed = sig({ status: "warning", changes: "changed", warnings: ["The document was changed after it was signed."] });
-    const weak = sig({ status: "warning", warnings: ["It uses SHA-1, a hash algorithm that is no longer safe."] });
+  it("warns when a signed document was changed after signing, the hash is weak, or a box was added later", () => {
+    const changedW = { code: "changed" as const, text: "The document was changed after it was signed." };
+    const sha1W = { code: "sha1" as const, text: "It uses SHA-1, a hash algorithm that is no longer safe." };
+    const boxW = { code: "laterBox" as const, text: "A later signature added a visible box on page 1." };
+    const changed = sig({ status: "warning", changes: "changed", warnings: [changedW] });
+    const weak = sig({ status: "warning", warnings: [sha1W] });
+    // A later box on a document whose signatures are otherwise untouched: not "weak".
+    const boxed = sig({ status: "warning", changes: "signaturesOnly", warnings: [boxW] });
     expect(banner([changed])).toEqual({ tone: "unknown", text: "Signature valid, but the document was changed after signing." });
-    // Changed outranks an unknown signer and a weak hash; invalid outranks everything.
-    expect(banner([sig({ status: "unknownSigner" }), weak, changed])?.text).toBe("Signatures valid, but the document was changed after signing.");
+    expect(banner([weak, changed])?.text).toBe("Signatures valid, but the document was changed after signing.");
     expect(banner([weak])?.text).toBe("Signed, but the signature uses a weak hash algorithm.");
+    expect(banner([boxed, sig({})])?.text).toBe("Signatures valid, but a later signature added a visible box.");
     expect(banner([changed, sig({ status: "invalid" })])?.tone).toBe("invalid");
     expect(statusWord(changed)).toBe("Valid, but changed after signing");
     expect(statusWord(weak)).toBe("Valid, but weak");
+    expect(statusWord(boxed)).toBe("Valid, but a box was added later");
     expect(otherWarnings(changed)).toEqual([]);
-    expect(otherWarnings(weak)).toHaveLength(1);
+    expect(otherWarnings(weak)).toEqual([sha1W.text]);
+    // Trust comes first: an untrusted signer with a caution is never called valid.
+    const untrusted = sig({ status: "unknownSigner", trusted: false, changes: "changed", warnings: [changedW, sha1W] });
+    expect(statusWord(untrusted)).toBe("Unknown signer");
+    expect(banner([untrusted, changed])).toEqual({
+      tone: "unknown",
+      text: "Signed. The signatures are intact, but a signer is not in your trusted list. The document was changed after signing.",
+    });
     expect(STATUS.warning.tone).toBe("unknown");
   });
 

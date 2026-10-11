@@ -92,6 +92,12 @@ const BR_MARK: &str = "0 1111111111 2222222222 3333333333";
 /// Appends a signature to `base` (a complete PDF) and returns the signed file: `base` followed by
 /// one incremental update. `password` opens an encrypted file (refused for now).
 pub fn sign(base: &[u8], id: &DigitalId, req: &SignRequest) -> Result<Vec<u8>> {
+    sign_with(base, id, req, &mut |_, _| {})
+}
+
+/// [`sign`], with `tamper` given the document and the signature's widget just before the update
+/// is written: the tests forge signed revisions that carry more than a signature this way.
+pub(super) fn sign_with(base: &[u8], id: &DigitalId, req: &SignRequest, tamper: &mut dyn FnMut(&mut PdfDocument, &mut PdfObject)) -> Result<Vec<u8>> {
     let mut doc = PdfDocument::from_bytes(base).map_err(pdf_err)?;
     let trailer = doc.trailer().map_err(pdf_err)?;
     if trailer.get_dict("Encrypt").map_err(pdf_err)?.is_some() {
@@ -226,6 +232,7 @@ pub fn sign(base: &[u8], id: &DigitalId, req: &SignRequest) -> Result<Vec<u8>> {
         widget.dict_put("AP", apd).map_err(pdf_err)?;
     }
 
+    tamper(&mut doc, &mut widget);
     // Write the update with the placeholders, then patch them.
     let mut opts = PdfWriteOptions::default();
     opts.set_incremental(true);
@@ -455,6 +462,10 @@ struct SigField {
     rect: [f32; 4],
     /// Its size as the page shows it.
     size: [f32; 2],
+    /// Hidden or NoView: it draws nothing.
+    hidden: bool,
+    /// The share of the page's visible area (crop box) the widget's box covers, 0 to 1.
+    cover: f32,
 }
 
 fn sig_fields(doc: &PdfDocument) -> Result<Vec<SigField>> {
@@ -479,8 +490,22 @@ fn sig_fields(doc: &PdfDocument) -> Result<Vec<SigField>> {
             let field = if a.get_dict("T").ok().flatten().is_some() { a.clone() } else { a.get_dict("Parent").ok().flatten().unwrap_or_else(|| a.clone()) };
             let name = full_name(&field);
             let value = field.get_dict("V").ok().flatten().filter(|v| v.is_dict().unwrap_or(false));
-            let r = rect_of(&a).transform(&ctm);
-            out.push(SigField { name, page: p as u32, widget: a, field, value, rect: [r.x0, r.y0, r.x1, r.y1], size: [r.width(), r.height()] });
+            let raw = rect_of(&a);
+            let r = raw.transform(&ctm);
+            let flags = a.get_dict("F").ok().flatten().and_then(|f| f.as_int().ok()).unwrap_or(0);
+            let crop = page_box(&page);
+            let cover = if area(&crop) > 0.0 { area(&intersect(&raw, &crop)) / area(&crop) } else { 0.0 };
+            out.push(SigField {
+                name,
+                page: p as u32,
+                widget: a,
+                field,
+                value,
+                rect: [r.x0, r.y0, r.x1, r.y1],
+                size: [r.width(), r.height()],
+                hidden: flags & (2 | 32) != 0,
+                cover,
+            });
         }
     }
     Ok(out)
@@ -501,16 +526,80 @@ fn full_name(field: &PdfObject) -> String {
 }
 
 fn rect_of(a: &PdfObject) -> Rect {
-    let v: Vec<f32> = a
-        .get_dict("Rect")
-        .ok()
-        .flatten()
-        .and_then(|r| r.array_iter().ok().map(|it| it.filter_map(|x| x.ok()?.as_float().ok()).collect()))
-        .unwrap_or_default();
-    match v.as_slice() {
-        [a, b, c, d] => Rect { x0: a.min(*c), y0: b.min(*d), x1: a.max(*c), y1: b.max(*d) },
+    rect_in(a.get_dict("Rect").ok().flatten())
+}
+
+/// A rectangle array read as MuPDF draws it: its first four numbers (a longer array still draws).
+fn rect_in(o: Option<PdfObject>) -> Rect {
+    let v: Vec<f32> = o.and_then(|r| r.array_iter().ok().map(|it| it.filter_map(|x| x.ok()?.as_float().ok()).collect())).unwrap_or_default();
+    match v.get(..4) {
+        Some(&[a, b, c, d]) => Rect { x0: a.min(c), y0: b.min(d), x1: a.max(c), y1: b.max(d) },
         _ => Rect { x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0 },
     }
+}
+
+/// The page's visible area: its crop box, else its media box (unrotated page space).
+fn page_box(page: &PdfObject) -> Rect {
+    let get = |k: &str| page.get_dict_inheritable(k).ok().flatten();
+    let media = rect_in(get("MediaBox"));
+    match get("CropBox") {
+        Some(c) => intersect(&rect_in(Some(c)), &media),
+        None => media,
+    }
+}
+
+fn intersect(a: &Rect, b: &Rect) -> Rect {
+    Rect { x0: a.x0.max(b.x0), y0: a.y0.max(b.y0), x1: a.x1.min(b.x1), y1: a.y1.min(b.y1) }
+}
+
+fn area(r: &Rect) -> f32 {
+    (r.x1 - r.x0).max(0.0) * (r.y1 - r.y0).max(0.0)
+}
+
+/// The object number of an indirect reference.
+fn ind(o: &PdfObject) -> Option<i32> {
+    if o.is_indirect().unwrap_or(false) { o.as_indirect().ok() } else { None }
+}
+
+fn name_of(o: &PdfObject, key: &str) -> Option<Vec<u8>> {
+    o.get_dict(key).ok().flatten().and_then(|n| n.as_name().ok().map(|n| n.to_vec()))
+}
+
+/// Whether MuPDF had to rebuild the file's cross-reference table to read it. Then the objects it
+/// sees need not be the ones another reader sees, so no revision of it is judged harmless.
+fn repaired(d: &PdfDocument) -> bool {
+    !d.can_be_saved_incrementally()
+}
+
+/// Whether any signature field holds a value: the form's fields (each object once, at most
+/// 10 000 of them) and the pages' signature widgets.
+pub(crate) fn has_signed_field(doc: &PdfDocument) -> bool {
+    let fields = doc.catalog().ok().and_then(|c| c.get_dict("AcroForm").ok().flatten()).and_then(|f| f.get_dict("Fields").ok().flatten());
+    let mut stack: Vec<(PdfObject, bool)> = fields.and_then(|f| f.array_iter().ok().map(|it| it.filter_map(|x| x.ok()).map(|x| (x, false)).collect())).unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let mut budget = 10_000u32;
+    while let Some((o, inherited)) = stack.pop() {
+        budget -= 1;
+        if budget == 0 {
+            return true;
+        }
+        if let Some(n) = ind(&o) {
+            if !seen.insert(n) {
+                continue;
+            }
+        }
+        if !o.is_dict().unwrap_or(false) {
+            continue;
+        }
+        let sig = name_of(&o, "FT").map_or(inherited, |t| t == b"Sig");
+        if sig && o.get_dict("V").ok().flatten().is_some_and(|v| !v.is_null().unwrap_or(true)) {
+            return true;
+        }
+        if let Some(kids) = o.get_dict("Kids").ok().flatten() {
+            stack.extend(kids.array_iter().into_iter().flatten().filter_map(|x| x.ok()).map(|x| (x, sig)));
+        }
+    }
+    sig_fields(doc).is_ok_and(|f| f.iter().any(|f| f.value.is_some()))
 }
 
 /// The certification signature's DocMDP permissions (1-3), if the document is certified.
@@ -539,8 +628,8 @@ pub enum Status {
     Valid,
     /// Intact, but the signer isn't trusted (self-signed, unknown issuer, expired, not for signing).
     UnknownSigner,
-    /// Intact, but with a caution in `warnings`: the document was changed after signing, or the
-    /// signature uses a weak hash.
+    /// Intact and trusted, but with a caution in `warnings` (an untrusted signer stays
+    /// `UnknownSigner`, its warnings listed all the same).
     Warning,
     /// The signature doesn't match the bytes, or can't be read.
     Invalid,
@@ -557,6 +646,32 @@ pub enum Changes {
     SignaturesOnly,
     /// Something else was changed after it (form fill, comments, or other edits).
     Changed,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WarningCode {
+    /// The document was changed after signing.
+    Changed,
+    /// The signature hashes with SHA-1.
+    Sha1,
+    /// A later signature added a visible box, which can draw over what this one signed.
+    LaterBox,
+    /// ... and that box covers more than a quarter of its page.
+    LaterBoxLarge,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Warning {
+    pub code: WarningCode,
+    /// One sentence.
+    pub text: String,
+}
+
+impl Warning {
+    fn new(code: WarningCode, text: impl Into<String>) -> Self {
+        Warning { code, text: text.into() }
+    }
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -584,8 +699,8 @@ pub struct SignatureInfo {
     pub changes: Changes,
     pub trusted: bool,
     pub trust_note: String,
-    /// Cautions about an intact signature (changes after it, a weak hash), one sentence each.
-    pub warnings: Vec<String>,
+    /// Cautions about an intact signature (changes after it, a weak hash, a later visible box).
+    pub warnings: Vec<Warning>,
     pub cert_not_after: String,
     pub cert_fingerprint: String,
 }
@@ -598,25 +713,42 @@ pub type Trust = dyn Fn(&Certificate, &[Certificate]) -> (bool, String);
 pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<SignatureInfo>> {
     let fields = sig_fields(doc)?;
     let mut infos: Vec<SignatureInfo> = fields.iter().map(|f| info(f, bytes, trust)).collect();
+    // An intact signature must belong to its field in the bytes it signs (see `bound`) before it
+    // can vouch for anything below.
+    let mut prefixes = std::collections::HashMap::new();
+    for (f, i) in fields.iter().zip(infos.iter_mut()) {
+        if !i.intact {
+            continue;
+        }
+        match bound(f, doc, bytes, &mut prefixes) {
+            Ok(certify) => i.certify = certify,
+            Err(why) => {
+                i.status = Status::Invalid;
+                i.intact = false;
+                i.warnings.clear();
+                i.summary = format!("The signature is not valid: {why}.");
+            }
+        }
+    }
+    let covered = |f: &SigField| f.value.as_ref().and_then(out_covered);
     // Where each intact signature's revision ends. A later revision counts as "only a
     // signature" when it ends at one of these AND adds nothing but what a signature adds.
-    let intact_ends: Vec<usize> =
-        fields.iter().zip(&infos).filter(|(_, i)| i.intact).filter_map(|(f, _)| f.value.as_ref().and_then(out_covered)).collect();
+    let intact_ends: Vec<usize> = fields.iter().zip(&infos).filter(|(_, i)| i.intact).filter_map(|(f, _)| covered(f)).collect();
     let mut verdicts: std::collections::HashMap<(usize, usize), bool> = std::collections::HashMap::new();
     for (f, i) in fields.iter().zip(infos.iter_mut()) {
-        let Some(covered) = f.value.as_ref().and_then(out_covered).filter(|_| i.intact) else { continue };
+        let Some(covered) = covered(f).filter(|_| i.intact) else { continue };
         if bytes[covered.min(bytes.len())..].iter().all(u8::is_ascii_whitespace) {
             continue;
         }
+        // A file MuPDF rebuilt may not read the same anywhere else: its updates aren't judged.
+        let mut only_sigs = !repaired(doc);
         let mut prev = covered;
-        let mut only_sigs = true;
         for e in revision_ends(bytes, covered) {
-            let ok = intact_ends.iter().any(|s| s.abs_diff(e) <= 2)
-                && *verdicts.entry((prev, e)).or_insert_with(|| signature_only_revision(&bytes[..prev], &bytes[..e]).unwrap_or(false));
-            if !ok {
-                only_sigs = false;
+            if !only_sigs {
                 break;
             }
+            only_sigs = intact_ends.iter().any(|s| s.abs_diff(e) <= 2)
+                && *verdicts.entry((prev, e)).or_insert_with(|| signature_only_revision(&bytes[..prev], &bytes[..e]).unwrap_or(false));
             prev = e;
         }
         // Bytes after the last %%EOF are an update too (MuPDF loads one without %%EOF through its
@@ -626,17 +758,117 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<Vec<Signat
         }
         i.changes = if only_sigs { Changes::SignaturesOnly } else { Changes::Changed };
     }
+    // A later signature's visible box draws over the page this one signed (it can hide or
+    // "correct" what was signed), so every earlier signature says so.
+    for k in 0..fields.len() {
+        let Some(mine) = covered(&fields[k]).filter(|_| infos[k].intact) else { continue };
+        let mut found = Vec::new();
+        for (g, j) in fields.iter().zip(&infos) {
+            if j.intact && !g.hidden && g.cover > 0.0 && covered(g).is_some_and(|e| e > mine) {
+                let page = g.page + 1;
+                found.push(Warning::new(WarningCode::LaterBox, format!("A later signature added a visible box on page {page}.")));
+                if g.cover > 0.25 {
+                    found.push(Warning::new(WarningCode::LaterBoxLarge, format!("A later signature's box covers more than a quarter of page {page}.")));
+                }
+            }
+        }
+        for w in found {
+            if !infos[k].warnings.contains(&w) {
+                infos[k].warnings.push(w);
+            }
+        }
+    }
     for i in &mut infos {
         finish(i);
     }
     Ok(infos)
 }
 
-/// `after` is `before` with only references to `widgets` appended.
-fn gains_only(before: &[String], after: &[String], widgets: &std::collections::HashSet<i32>) -> bool {
+/// Ties an intact signature to the field showing it, through the bytes it signs: that revision
+/// must already hold this widget and field (by object number and name) with this signature
+/// dictionary as its value, and the dictionary must read the same there, nested objects
+/// included. Otherwise a field added later could show a copy of someone else's signature, or
+/// point at it. Returns the DocMDP level when that revision's catalog names this signature as
+/// its certification.
+fn bound(
+    f: &SigField,
+    doc: &PdfDocument,
+    bytes: &[u8],
+    prefixes: &mut std::collections::HashMap<usize, Option<PdfDocument>>,
+) -> std::result::Result<Option<u8>, &'static str> {
+    const UNBOUND: &str = "it is not part of the revision it signs";
+    let v = f.value.as_ref().ok_or(UNBOUND)?;
+    let (Some(vn), Some(wn), Some(fnum), Some(end)) = (ind(v), ind(&f.widget), ind(&f.field), out_covered(v)) else { return Err(UNBOUND) };
+    let then = prefixes.entry(end).or_insert_with(|| PdfDocument::from_bytes(&bytes[..end.min(bytes.len())]).ok().filter(|d| !repaired(d)));
+    let then = then.as_ref().ok_or("the revision it signs is damaged")?;
+    let fields = sig_fields(then).map_err(|_| UNBOUND)?;
+    let same = |g: &SigField| {
+        ind(&g.widget) == Some(wn) && ind(&g.field) == Some(fnum) && g.name == f.name && g.value.as_ref().and_then(ind) == Some(vn)
+    };
+    if !fields.iter().any(same) {
+        return Err(UNBOUND);
+    }
+    let now = deep(doc, vn);
+    if now.is_none() || now != deep(then, vn) {
+        return Err("its signature dictionary was changed after signing");
+    }
+    let perms = then.catalog().ok().and_then(|c| c.get_dict("Perms").ok().flatten()).and_then(|p| p.get_dict("DocMDP").ok().flatten());
+    Ok(if perms.as_ref().and_then(ind) == Some(vn) { Some(docmdp_of(v).unwrap_or(2)) } else { None })
+}
+
+/// Object `n` printed with every reference followed (each object once, streams by their raw
+/// bytes' hash), to compare it across revisions. `None` past 10 000 nodes.
+fn deep(d: &PdfDocument, n: i32) -> Option<String> {
+    use std::fmt::Write;
+    fn walk(o: &PdfObject, seen: &mut std::collections::HashSet<i32>, out: &mut String, budget: &mut u32) -> Option<()> {
+        *budget = budget.checked_sub(1)?;
+        if let Some(n) = ind(o) {
+            let _ = write!(out, "{n}R");
+            if seen.insert(n) {
+                out.push('=');
+                match o.resolve().ok()? {
+                    Some(r) if !r.is_indirect().ok()? => walk(&r, seen, out, budget)?,
+                    _ => out.push_str("null"),
+                }
+                // (Only the reference knows its stream: MuPDF finds it through the xref.)
+                if o.is_stream().ok()? {
+                    let raw = o.read_raw_stream().ok()?;
+                    let _ = write!(out, "stream{}", hex(&DigestAlg::Sha256.digest(&[&raw])));
+                }
+            }
+        } else if o.is_dict().ok()? {
+            out.push_str("<<");
+            for i in 0..o.dict_len().ok()? as i32 {
+                out.push_str(&o.get_dict_key(i).ok()??.to_string());
+                walk(&o.get_dict_val(i).ok()??, seen, out, budget)?;
+            }
+            out.push_str(">>");
+        } else if o.is_array().ok()? {
+            out.push('[');
+            for x in o.array_iter().ok()? {
+                walk(&x.ok()?, seen, out, budget)?;
+            }
+            out.push(']');
+        } else {
+            out.push_str(&o.to_string());
+            out.push(' ');
+        }
+        Some(())
+    }
+    let mut out = String::new();
+    walk(&d.new_indirect(n, 0).ok()?, &mut Default::default(), &mut out, &mut 10_000)?;
+    Some(out)
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// `after` is `before` with only references to `allowed` appended.
+fn gains_only(before: &[String], after: &[String], allowed: &std::collections::HashSet<i32>) -> bool {
     after.len() >= before.len()
         && after[..before.len()] == *before
-        && after[before.len()..].iter().all(|r| widgets.iter().any(|w| *r == format!("{w} 0 R")))
+        && after[before.len()..].iter().all(|r| allowed.iter().any(|w| *r == format!("{w} 0 R")))
 }
 
 fn printed_elems(o: Option<PdfObject>) -> Option<Vec<String>> {
@@ -647,39 +879,113 @@ fn printed_elems(o: Option<PdfObject>) -> Option<Vec<String>> {
     Some(o.array_iter().ok()?.filter_map(|x| x.ok()).map(|x| x.to_string()).collect())
 }
 
-/// Whether the revision from `prev` to `next` (both complete files) only adds signatures: every
-/// object it adds or changes is a newly signed signature widget, its field and signature
-/// dictionary, its appearance and the XObjects that names, the AcroForm's `/Fields` and
-/// `/SigFlags`, and `/Annots` arrays gaining only those widgets. Anything else (a new
-/// annotation, changed page content, another catalog entry) means the document was changed.
+/// A dictionary printed without some keys, to compare the rest.
+fn without(o: &PdfObject, keys: &[&str]) -> Option<String> {
+    let mut o = o.copy_dict().ok()?;
+    for k in keys {
+        o.dict_delete(*k).ok()?;
+    }
+    Some(o.to_string())
+}
+
+/// Every key of the dictionary `o` is one of `allowed`.
+fn keys_within(o: &PdfObject, allowed: &[&str]) -> bool {
+    let Ok(n) = o.dict_len() else { return false };
+    (0..n as i32).all(|i| {
+        o.get_dict_key(i).ok().flatten().and_then(|k| k.as_name().ok().map(|k| k.to_vec())).is_some_and(|k| allowed.iter().any(|a| a.as_bytes() == k))
+    })
+}
+
+/// Whether the printed object `s` refers to object `n`.
+fn refers_to(s: &str, n: i32) -> bool {
+    let pat = format!("{n} 0 R");
+    s.match_indices(&pat).any(|(i, _)| !s[..i].ends_with(|c: char| c.is_ascii_digit() || c == '.'))
+}
+
+/// What a signature's widget may carry. Not /A or /AA (actions), /OC, /Kids, /Type /Page ...
+const WIDGET_KEYS: &[&str] = &["Type", "Subtype", "FT", "T", "TU", "V", "Rect", "AP", "F", "P", "Parent", "MK", "DA", "Q", "Ff"];
+/// What a separate signature field (the widget's parent) may carry.
+const FIELD_KEYS: &[&str] = &["FT", "T", "TU", "V", "Kids", "Ff"];
+
+/// Whether the revision from `prev` to `next` (both complete files) only adds signatures. It may
+/// add: each new signature's dictionary, appearance and the images that names; its widget and
+/// field (from a fixed list of keys, no actions); the page's /Annots and the form's /Fields
+/// gaining exactly those; /SigFlags; and object or cross-reference streams nothing refers to. It
+/// may sign an empty signature field in place (its value, appearance and flags only). Anything
+/// else (another catalog, a new annotation, changed page content, form settings) means the
+/// document was changed.
 pub(super) fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     let a = PdfDocument::from_bytes(prev).map_err(pdf_err)?;
     let b = PdfDocument::from_bytes(next).map_err(pdf_err)?;
-    let ind = |o: &PdfObject| if o.is_indirect().unwrap_or(false) { o.as_indirect().ok() } else { None };
+    if repaired(&a) || repaired(&b) {
+        return Ok(false);
+    }
+    // The same catalog, and no new encryption.
+    let (ta, tb) = (a.trailer().map_err(pdf_err)?, b.trailer().map_err(pdf_err)?);
+    let root = |t: &PdfObject| t.get_dict("Root").ok().flatten().as_ref().and_then(ind);
+    let encrypt = |t: &PdfObject| t.get_dict("Encrypt").ok().flatten().map(|e| e.to_string());
+    let Some(catalog_num) = root(&ta).filter(|r| root(&tb) == Some(*r)) else { return Ok(false) };
+    if encrypt(&ta) != encrypt(&tb) {
+        return Ok(false);
+    }
+    let get = |d: &PdfDocument, n: i32| d.xref_object(n).ok().flatten();
+    let is_sig = |o: &PdfObject| name_of(o, "FT").as_deref() == Some(b"Sig");
+
     let before_fields = sig_fields(&a)?;
     let old: HashSet<String> = before_fields.iter().filter(|f| f.value.is_some()).map(|f| f.name.clone()).collect();
-    // The empty signature fields (and their widgets) that may be signed in place.
-    let empty: HashSet<i32> = before_fields.iter().filter(|f| f.value.is_none()).flat_map(|f| [ind(&f.widget), ind(&f.field)]).flatten().collect();
-    // New objects allowed, and existing ones allowed to change.
+    // The empty signature fields that may be signed in place, and what each object may change: a
+    // widget that is its own field (value, appearance, flags), or a widget (appearance, flags) and
+    // its parent field (value), which must be a field dictionary, not an annotation or a page.
+    let mut empty: HashMap<i32, &[&str]> = HashMap::new();
+    for f in before_fields.iter().filter(|f| f.value.is_none()) {
+        let (Some(w), Some(p)) = (ind(&f.widget), ind(&f.field)) else { continue };
+        if w == p {
+            empty.insert(w, &["V", "AP", "F"]);
+        } else if f.field.get_dict("Subtype").ok().flatten().is_none() && is_sig(&f.field) {
+            empty.insert(w, &["AP", "F"]);
+            empty.insert(p, &["V"]);
+        }
+    }
+
+    // What the new signatures bring.
     let mut parts: HashSet<i32> = HashSet::new();
     let mut widgets: HashSet<i32> = HashSet::new();
+    let mut fields: HashSet<i32> = HashSet::new();
+    let mut top: HashSet<i32> = HashSet::new();
     let mut pages: HashSet<i32> = HashSet::new();
     for f in sig_fields(&b)?.into_iter().filter(|f| f.value.is_some() && !old.contains(&f.name)) {
-        widgets.extend(ind(&f.widget));
-        widgets.extend(ind(&f.field));
-        parts.extend(f.value.as_ref().and_then(ind));
-        if let Ok(p) = b.find_page(f.page as i32) {
-            pages.extend(ind(&p));
+        let v = f.value.as_ref().expect("filtered");
+        let (Some(w), Some(p), Some(vn)) = (ind(&f.widget), ind(&f.field), ind(v)) else { return Ok(false) };
+        // Signed in this revision: it covers exactly up to the revision's end.
+        let end = out_covered(v).unwrap_or(usize::MAX);
+        if end > next.len() || !next[end..].iter().all(u8::is_ascii_whitespace) {
+            return Ok(false);
         }
-        // The normal appearance and the XObjects (and soft masks) its resources name.
-        if let Some(ap) = f.widget.get_dict("AP").ok().flatten().and_then(|d| d.get_dict("N").ok().flatten()) {
-            parts.extend(ind(&ap));
-            if let Some(xo) = ap.get_dict("Resources").ok().flatten().and_then(|r| r.get_dict("XObject").ok().flatten()) {
-                for i in 0..xo.dict_len().unwrap_or(0) as i32 {
-                    if let Some(x) = xo.get_dict_val(i).ok().flatten() {
-                        parts.extend(ind(&x));
-                        parts.extend(x.get_dict("SMask").ok().flatten().as_ref().and_then(ind));
+        widgets.insert(w);
+        fields.insert(p);
+        parts.insert(vn);
+        if f.field.get_dict("Parent").ok().flatten().is_none() {
+            top.insert(p);
+        }
+        let Some(page) = b.find_page(f.page as i32).ok().as_ref().and_then(ind) else { return Ok(false) };
+        if f.widget.get_dict("P").ok().flatten().is_some_and(|x| ind(&x) != Some(page)) {
+            return Ok(false);
+        }
+        pages.insert(page);
+        // The normal appearance (the only one) and the images (and soft masks) its resources name.
+        if let Some(ap) = f.widget.get_dict("AP").ok().flatten() {
+            if ind(&ap).is_some() || !keys_within(&ap, &["N"]) {
+                return Ok(false);
+            }
+            if let Some(n) = ap.get_dict("N").ok().flatten() {
+                parts.extend(ind(&n));
+                if let Some(xo) = n.get_dict("Resources").ok().flatten().and_then(|r| r.get_dict("XObject").ok().flatten()) {
+                    for i in 0..xo.dict_len().unwrap_or(0) as i32 {
+                        if let Some(x) = xo.get_dict_val(i).ok().flatten() {
+                            parts.extend(ind(&x));
+                            parts.extend(x.get_dict("SMask").ok().flatten().as_ref().and_then(ind));
+                        }
                     }
                 }
             }
@@ -688,62 +994,140 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8]) -> Result<bool> 
     if widgets.is_empty() {
         return Ok(false);
     }
-    let catalog_num = b.trailer().map_err(pdf_err)?.get_dict("Root").map_err(pdf_err)?.as_ref().and_then(ind);
-    let acroform_num = b.catalog().map_err(pdf_err)?.get_dict("AcroForm").map_err(pdf_err)?.as_ref().and_then(ind);
-    let get = |d: &PdfDocument, n: i32| d.xref_object(n).ok().flatten();
-    let plain_dict = |d: &PdfDocument, n: i32| get(d, n).is_some_and(|o| o.is_dict().unwrap_or(false) && !o.is_stream().unwrap_or(true));
+    let widget_ok = |o: &PdfObject| {
+        let mk_ok = match o.get_dict("MK").ok().flatten() {
+            Some(mk) => ind(&mk).is_none() && ["I", "RI", "IX"].iter().all(|k| mk.get_dict(*k).ok().flatten().is_none()),
+            None => true,
+        };
+        keys_within(o, WIDGET_KEYS) && name_of(o, "Subtype").as_deref() == Some(b"Widget") && mk_ok
+    };
+    let field_ok = |o: &PdfObject| {
+        let kids_ok = o.get_dict("Kids").ok().flatten().is_none_or(|k| printed_elems(Some(k)).is_some_and(|k| gains_only(&[], &k, &widgets)));
+        keys_within(o, FIELD_KEYS) && o.get_dict("Subtype").ok().flatten().is_none() && is_sig(o) && kids_ok
+    };
+    // Whether object `n` has a stream. Asked of its reference: a resolved object doesn't know.
+    let is_stream = |d: &PdfDocument, n: i32| d.new_indirect(n, 0).is_ok_and(|r| r.is_stream().unwrap_or(true));
+    let plain_dict = |d: &PdfDocument, n: i32| get(d, n).is_some_and(|o| o.is_dict().unwrap_or(false)) && !is_stream(d, n);
+
+    // The arrays that may grow: the signed pages' /Annots (each used by that page alone) and
+    // the form's /Fields.
+    let annots_of = |d: &PdfDocument, page: i32| get(d, page).and_then(|p| p.get_dict("Annots").ok().flatten()).as_ref().and_then(ind);
+    let annot_arrays: HashSet<i32> = pages.iter().filter_map(|&p| annots_of(&a, p)).collect();
+    let mut users: HashMap<i32, usize> = HashMap::new();
+    for i in 0..b.page_count().map_err(pdf_err)? {
+        if let Some(n) = b.find_page(i).ok().as_ref().and_then(ind).and_then(|p| annots_of(&b, p)) {
+            *users.entry(n).or_default() += 1;
+        }
+    }
+    if annot_arrays.iter().any(|n| users.get(n).copied().unwrap_or(0) > 1) {
+        return Ok(false);
+    }
+    let acroform = |d: &PdfDocument| get(d, catalog_num).and_then(|c| c.get_dict("AcroForm").ok().flatten());
+    let (form_a, form_b) = (acroform(&a), acroform(&b));
+    let form_num = form_a.as_ref().and_then(ind).filter(|n| form_b.as_ref().and_then(ind) == Some(*n));
+    let fields_array = form_a.as_ref().and_then(|f| f.get_dict("Fields").ok().flatten()).as_ref().and_then(ind);
+    // The form, before and after: only /Fields (gaining the new top-level fields) and /SigFlags.
+    let form_ok = |x: Option<&PdfObject>, y: &PdfObject| {
+        let fx = x.and_then(|x| x.get_dict("Fields").ok().flatten());
+        let fields_ok = match (fx, y.get_dict("Fields").ok().flatten()) {
+            (Some(fx), Some(fy)) if ind(&fy).is_some() => ind(&fx) == ind(&fy),
+            (fx, Some(fy)) => printed_elems(Some(fy)).is_some_and(|after| gains_only(&printed_elems(fx).unwrap_or_default(), &after, &top)),
+            (None, None) => true,
+            _ => false,
+        };
+        let rest_ok = match x {
+            Some(x) => without(x, &["Fields", "SigFlags"]) == without(y, &["Fields", "SigFlags"]),
+            None => keys_within(y, &["Fields", "SigFlags"]),
+        };
+        fields_ok && rest_ok
+    };
+
     let printed = |d: &PdfDocument, n: i32| -> Option<(String, Vec<u8>)> {
         let o = get(d, n)?;
-        let stream = if o.is_stream().unwrap_or(false) { o.read_raw_stream().unwrap_or_default() } else { Vec::new() };
+        let stream = if is_stream(d, n) { d.new_indirect(n, 0).ok()?.read_raw_stream().ok()? } else { Vec::new() };
         Some((o.to_string(), stream))
-    };
-    // A dict printed without some keys, to compare the rest.
-    let without = |d: &PdfDocument, n: i32, keys: &[&str]| -> Option<String> {
-        let mut o = get(d, n)?.copy_dict().ok()?;
-        for k in keys {
-            o.dict_delete(*k).ok()?;
-        }
-        Some(o.to_string())
     };
     let (count_a, count_b) = (a.xref_len().map_err(pdf_err)? as i32, b.xref_len().map_err(pdf_err)? as i32);
     if count_b < count_a {
         return Ok(false);
     }
+    let mut structural = Vec::new();
+    // Every object as printed, to find references to the structural ones (an earlier revision may
+    // have planted a dangling one).
+    let mut all = vec![tb.to_string()];
     for n in 1..count_b {
-        let before = if n < count_a { printed(&a, n) } else { None };
-        if before == printed(&b, n) {
+        // A free entry reads as null: the number was unused.
+        let before = if n < count_a { printed(&a, n).filter(|(s, _)| s != "null") } else { None };
+        let after = printed(&b, n);
+        all.extend(after.as_ref().map(|(s, _)| s.clone()));
+        if before == after {
             continue;
         }
+        let Some(o) = get(&b, n) else { return Ok(false) };
         let ok = if before.is_none() {
-            parts.contains(&n) || (widgets.contains(&n) && plain_dict(&b, n))
-        } else if widgets.contains(&n) {
-            // An existing empty field being signed: it was one before, and only its value,
-            // appearance and flags change. (Not a page, a content stream, or any other object a
-            // forged widget's /Parent could name.)
-            const SIGNING: &[&str] = &["V", "AP", "F"];
-            empty.contains(&n) && plain_dict(&a, n) && plain_dict(&b, n) && without(&a, n, SIGNING) == without(&b, n, SIGNING)
-        } else if let (Some(x), Some(y)) = (printed_elems(get(&a, n)), printed_elems(get(&b, n))) {
-            // An indirect /Annots or /Fields array.
-            gains_only(&x, &y, &widgets)
+            if parts.contains(&n) {
+                true
+            } else if widgets.contains(&n) {
+                plain_dict(&b, n) && widget_ok(&o)
+            } else if fields.contains(&n) {
+                plain_dict(&b, n) && field_ok(&o)
+            } else if is_stream(&b, n)
+                && matches!(name_of(&o, "Type").as_deref(), Some(b"ObjStm" | b"XRef"))
+                && o.get_dict("Subtype").ok().flatten().is_none()
+            {
+                // Structure only, as long as nothing uses it (checked below).
+                structural.push(n);
+                true
+            } else {
+                false
+            }
+        } else if widgets.contains(&n) || fields.contains(&n) {
+            // An existing empty field being signed: only its value, appearance and flags change.
+            match (empty.get(&n), get(&a, n)) {
+                (Some(keys), Some(was)) => plain_dict(&a, n) && plain_dict(&b, n) && without(&was, keys) == without(&o, keys),
+                _ => false,
+            }
+        } else if annot_arrays.contains(&n) {
+            match (printed_elems(get(&a, n)), printed_elems(Some(o.clone()))) {
+                (Some(x), Some(y)) => gains_only(&x, &y, &widgets),
+                _ => false,
+            }
+        } else if Some(n) == fields_array {
+            match (printed_elems(get(&a, n)), printed_elems(Some(o.clone()))) {
+                (Some(x), Some(y)) => gains_only(&x, &y, &top),
+                _ => false,
+            }
         } else if pages.contains(&n) {
             let annots = |d: &PdfDocument| get(d, n).and_then(|p| p.get_dict("Annots").ok().flatten());
-            let inline_ok = match (annots(&a), annots(&b)) {
+            let annots_ok = match (annots(&a), annots(&b)) {
                 (Some(x), Some(y)) if ind(&y).is_some() => ind(&x) == ind(&y),
                 (x, Some(y)) => printed_elems(Some(y)).is_some_and(|after| gains_only(&printed_elems(x).unwrap_or_default(), &after, &widgets)),
                 _ => false,
             };
-            inline_ok && without(&a, n, &["Annots"]) == without(&b, n, &["Annots"])
-        } else if Some(n) == acroform_num {
-            without(&a, n, &["Fields", "SigFlags"]) == without(&b, n, &["Fields", "SigFlags"])
-        } else if Some(n) == catalog_num {
-            // Only an inline AcroForm may change in the catalog.
-            acroform_num.is_none() && without(&a, n, &["AcroForm"]) == without(&b, n, &["AcroForm"])
+            annots_ok && get(&a, n).is_some_and(|was| without(&was, &["Annots"]) == without(&o, &["Annots"]))
+        } else if Some(n) == form_num {
+            get(&a, n).is_some_and(|was| form_ok(Some(&was), &o))
+        } else if n == catalog_num {
+            // Only an inline form may change in the catalog; it may not become (or stop being) a
+            // separate object.
+            let rest = get(&a, n).is_some_and(|was| without(&was, &["AcroForm"]) == without(&o, &["AcroForm"]));
+            let form = match (&form_a, &form_b) {
+                (Some(x), Some(y)) if ind(x).is_some() || ind(y).is_some() => form_num.is_some(),
+                (Some(x), Some(y)) => form_ok(Some(x), y),
+                (None, Some(y)) => ind(y).is_none() && form_ok(None, y),
+                _ => false,
+            };
+            rest && form
         } else {
             false
         };
         if !ok {
             return Ok(false);
         }
+    }
+    // An object or cross-reference stream is only structure: nothing may draw it or name it.
+    if structural.iter().any(|&m| all.iter().any(|s| refers_to(s, m))) {
+        return Ok(false);
     }
     Ok(true)
 }
@@ -877,7 +1261,7 @@ fn check(v: &PdfObject, bytes: &[u8], out: &mut SignatureInfo, trust: &Trust) ->
     }
     out.intact = true;
     if [si.digest, si.scheme_digest.unwrap_or(si.digest)].contains(&DigestAlg::Sha1) {
-        out.warnings.push("It uses SHA-1, a hash algorithm that is no longer safe.".into());
+        out.warnings.push(Warning::new(WarningCode::Sha1, "It uses SHA-1, a hash algorithm that is no longer safe."));
     }
     let others: Vec<Certificate> = sd.certificates.iter().filter(|x| x.raw != cert.raw).cloned().collect();
     let (trusted, note) = match cert.signing_problem() {
@@ -918,15 +1302,23 @@ fn finish(s: &mut SignatureInfo) {
         return;
     }
     if s.changes == Changes::Changed {
-        s.warnings.insert(0, "The document was changed after it was signed.".into());
+        s.warnings.insert(0, Warning::new(WarningCode::Changed, "The document was changed after it was signed."));
     }
     let trust = if s.trusted { format!("signed by {}", s.signer) } else { format!("but the signer is not trusted: {}", s.trust_note) };
     let only_sigs = if s.changes == Changes::SignaturesOnly { " Only signatures were added after it." } else { "" };
-    if s.warnings.is_empty() {
-        s.status = if s.trusted { Status::Valid } else { Status::UnknownSigner };
-        s.summary = if s.trusted { format!("The signature is valid, {trust}.{only_sigs}") } else { format!("The signature is intact, {trust}.{only_sigs}") };
+    // Trust and warnings are separate: only a trusted signer is ever "valid", with or without a
+    // caution, and an untrusted one stays unknown whatever else is true.
+    let cautions: Vec<&str> = s.warnings.iter().map(|w| w.text.as_str()).collect();
+    s.status = match (s.trusted, cautions.is_empty()) {
+        (false, _) => Status::UnknownSigner,
+        (true, true) => Status::Valid,
+        (true, false) => Status::Warning,
+    };
+    s.summary = if s.status == Status::Valid {
+        format!("The signature is valid, {trust}.{only_sigs}")
+    } else if cautions.is_empty() {
+        format!("The signature is intact, {trust}.{only_sigs}")
     } else {
-        s.status = Status::Warning;
-        s.summary = format!("The signature is intact, {trust}. {}", s.warnings.join(" "));
-    }
+        format!("The signature is intact, {trust}. {}", cautions.join(" "))
+    };
 }

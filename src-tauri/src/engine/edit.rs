@@ -233,14 +233,15 @@ pub fn set_redaction_hook(hook: impl Fn(DocId) + Send + Sync + 'static) {
     *REDACTION_HOOK.lock() = Some(Arc::new(hook));
 }
 
-/// `/AcroForm /SigFlags` has SignaturesExist (ISO 32000-1 12.7.2, table 219).
 /// Why a damaged signed file can't be changed.
 pub const DAMAGED_SIGNED: &str =
     "this signed file is damaged, and changing it would break its signatures, so Inkwell leaves it as it is";
 
+/// `/AcroForm /SigFlags` has SignaturesExist (ISO 32000-1 12.7.2, table 219), or a signature
+/// field holds a value (a signed file need not set the flag).
 fn has_signatures(doc: &PdfDocument) -> bool {
     let flags = || doc.catalog().ok()?.get_dict("AcroForm").ok()??.get_dict("SigFlags").ok()??.as_int().ok();
-    flags().is_some_and(|f| f & 1 != 0)
+    flags().is_some_and(|f| f & 1 != 0) || crate::sign::pdf::has_signed_field(doc)
 }
 
 fn now_ms() -> u64 {
