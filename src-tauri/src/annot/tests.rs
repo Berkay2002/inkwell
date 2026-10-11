@@ -417,3 +417,12 @@ fn the_listing_stops_at_its_annotation_budget_and_says_so() {
     assert!(l.items.iter().all(|a| a.page == 0));
     assert!(l.incomplete);
 }
+
+#[test]
+fn a_p_that_names_a_page_sharing_the_array_does_not_drop_the_annotation() {
+    // 3 note whose /P is the last page (object 7), 4 the array every page shares; pages are objects 5, 6, 7
+    let note = "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (a) /P 7 0 R >>";
+    let (eng, id) = open_raw("shared-p", pages_and(3, vec![note.into(), "[3 0 R]".into()], |_| "/Annots 4 0 R".into()));
+    let got: Vec<_> = list_all(&eng, id).unwrap().iter().map(|a| (a.page, a.xref)).collect();
+    assert_eq!(got, vec![(0, 3)]);
+}

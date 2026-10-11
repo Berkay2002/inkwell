@@ -1788,3 +1788,21 @@ fn two_thousand_pages_sharing_twenty_thousand_annotations_list_their_fields_fast
     assert_eq!(form.fields.iter().map(|f| (f.page, f.name.as_str())).collect::<Vec<_>>(), vec![(1234, "A"), (1234, "B")]);
     assert!(took < std::time::Duration::from_secs(2), "{took:?}");
 }
+
+#[test]
+fn a_widget_whose_p_names_a_page_sharing_the_array_is_still_listed() {
+    // 3 widget whose /P is the last page (object 6), 4 the array both pages share; pages are objects 5, 6
+    let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (A) /Rect [72 100 200 120] /F 4 /P 6 0 R >>";
+    let (eng, id, _) = open_bytes(
+        "scan-shared-p",
+        pdf_of(&[
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [3 0 R] >> >>".to_string(),
+            "<< /Type /Pages /Kids [5 0 R 6 0 R] /Count 2 >>".to_string(),
+            widget.to_string(),
+            "[3 0 R]".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots 4 0 R >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots 4 0 R >>".to_string(),
+        ]),
+    );
+    assert_eq!(list_all(&eng, id).unwrap().fields.iter().map(|f| (f.page, f.name.as_str())).collect::<Vec<_>>(), vec![(0, "A")]);
+}

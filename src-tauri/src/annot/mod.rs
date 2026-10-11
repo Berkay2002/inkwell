@@ -387,6 +387,11 @@ impl AnnotWalk {
             return Ok(false);
         }
         let Some(list) = doc.find_page(q)?.get_dict("Annots")?.filter(|a| a.is_array().unwrap_or(false)) else { return Ok(false) };
+        // That page's array is the one being walked or was walked: it will not be visited again, so
+        // the annotation stays with the first page that has it.
+        if list.is_indirect()? && self.arrays.contains(&list.as_indirect()?) {
+            return Ok(false);
+        }
         let len = list.len()?;
         if self.charge(len) {
             return Ok(false);
