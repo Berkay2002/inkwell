@@ -17,6 +17,7 @@ vi.mock("./api", () => ({
   pickSave: vi.fn(),
   saveDocument: vi.fn(),
   editState: vi.fn(),
+  editUndo: vi.fn(),
   toolCancel: vi.fn(() => Promise.resolve()),
   discardScratch: vi.fn(() => Promise.resolve(true)),
 }));
@@ -245,6 +246,66 @@ describe("Convert Colors", () => {
     expect(st().sheet).toMatchObject({ phase: "done", error: null, result: { path: "C:\\d\\other-name.pdf" } });
   });
 
+  describe("closing after a failed write", () => {
+    const unsaved = async () => {
+      st().openConvert();
+      st().review();
+      vi.mocked(api.pickSave).mockResolvedValue({ token: "tok-1", path: "C:\\d\\new.pdf" });
+      vi.mocked(prepressApi.convert).mockResolvedValue({ state: state(4), report, saved: false, saveError: "Access is denied." });
+      await st().runConvert();
+      // applyState is mocked: the document is at the generation the conversion made
+      useStore.setState((s) => ({ docs: { ...s.docs, 1: { ...s.docs[1], rev: 4 } } }));
+    };
+
+    it("asks first, and a second close goes back to the sheet", async () => {
+      await unsaved();
+      st().closeSheet();
+      expect(st().sheet).toMatchObject({ phase: "unsaved", closing: true });
+      st().closeSheet();
+      expect(st().sheet).toMatchObject({ phase: "unsaved", closing: false });
+      expect(api.editUndo).not.toHaveBeenCalled();
+    });
+
+    it("Undo takes the conversion back and closes", async () => {
+      await unsaved();
+      vi.mocked(api.editUndo).mockResolvedValue(state(3));
+      st().closeSheet();
+      await st().undoConversion();
+      expect(api.editUndo).toHaveBeenCalledExactlyOnceWith(1);
+      expect(applyState).toHaveBeenLastCalledWith(1, state(3));
+      expect(st().sheet).toBeNull();
+    });
+
+    it("Keep closes and leaves the document as it is", async () => {
+      await unsaved();
+      st().closeSheet();
+      st().keepConversion();
+      expect(api.editUndo).not.toHaveBeenCalled();
+      expect(st().sheet).toBeNull();
+    });
+
+    it("does not undo a step that is not the conversion, and says so instead of closing", async () => {
+      await unsaved();
+      // an undo and a redo while the sheet was open: the document is at a newer generation
+      useStore.setState((s) => ({ docs: { ...s.docs, 1: { ...s.docs[1], rev: 5 } } }));
+      st().closeSheet();
+      await st().undoConversion();
+      expect(api.editUndo).not.toHaveBeenCalled();
+      expect(st().sheet).toMatchObject({ phase: "unsaved", closing: true, error: expect.stringMatching(/changed since the conversion; nothing was undone/) });
+      // Keep still closes it
+      st().keepConversion();
+      expect(st().sheet).toBeNull();
+    });
+
+    it("keeps the sheet and says so when the undo fails", async () => {
+      await unsaved();
+      vi.mocked(api.editUndo).mockRejectedValueOnce("Nothing to undo");
+      st().closeSheet();
+      await st().undoConversion();
+      expect(st().sheet).toMatchObject({ phase: "unsaved", error: "Nothing to undo" });
+    });
+  });
+
   it("never writes over the original file or one that is open in another tab", async () => {
     useStore.setState({
       docs: {
@@ -332,6 +393,27 @@ describe("Printer's marks", () => {
     // nothing left to draw: no question, no stale picture
     expect(st().sheet).toMatchObject({ preview: null });
     expect(prepressApi.marksPreview).toHaveBeenCalledTimes(5);
+  });
+
+  it("an older preview that fails does not replace a newer one", async () => {
+    const asked: { ok: (v: never) => void; fail: (e: unknown) => void }[] = [];
+    vi.mocked(prepressApi.marksPreview).mockImplementation(() => new Promise((ok, fail) => asked.push({ ok: ok as never, fail })));
+    st().openMarks();
+    await flush();
+    st().setMarks({ weight: 0.5 });
+    await flush();
+    expect(asked).toHaveLength(2);
+    asked[1].ok({ media: [-10, -10, 622, 802], trim: [20, 20, 592, 772], bleed: [11, 11, 601, 781], content: "", notes: [] } as never);
+    await flush();
+    asked[0].fail("The first layout could not be drawn.");
+    await flush();
+    expect(st().sheet).toMatchObject({ error: null, preview: { data: { notes: [] } } });
+    // the newest one failing is still shown
+    st().setMarks({ weight: 1 });
+    await flush();
+    asked[2].fail("Could not draw the marks.");
+    await flush();
+    expect(st().sheet).toMatchObject({ preview: null, error: "Could not draw the marks." });
   });
 
   it("adds the marks to the chosen pages as one step", async () => {
