@@ -8,6 +8,7 @@ pub mod diff;
 pub mod engine;
 pub mod history;
 pub mod history_ipc;
+pub mod imageedit;
 pub mod marks;
 pub mod ocr;
 pub mod paths;
@@ -844,6 +845,8 @@ pub fn run() {
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
+            imageedit::app::image_blocks,
+            imageedit::app::image_edit,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,
