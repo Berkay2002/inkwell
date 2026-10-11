@@ -7,6 +7,7 @@ pub mod diff;
 pub mod engine;
 pub mod history;
 pub mod history_ipc;
+pub mod imageedit;
 pub mod ocr;
 pub mod paths;
 pub mod recents;
@@ -775,6 +776,8 @@ pub fn run() {
             annot::app::annot_state,
             textedit::app::text_blocks,
             textedit::app::text_edit,
+            imageedit::app::image_blocks,
+            imageedit::app::image_edit,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

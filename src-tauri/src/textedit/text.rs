@@ -294,7 +294,7 @@ fn nums(o: Option<PdfObject>) -> Vec<f64> {
     (0..a.len().unwrap_or(0) as i32).map(|i| a.get_array(i).ok().flatten().and_then(|x| x.as_float().ok()).map_or(0.0, f64::from)).collect()
 }
 
-fn page_streams(page: &PdfObject) -> Result<Vec<(PdfObject, Vec<u8>)>> {
+pub(crate) fn page_streams(page: &PdfObject) -> Result<Vec<(PdfObject, Vec<u8>)>> {
     let Some(c) = get(page, "Contents") else {
         return Ok(Vec::new());
     };
@@ -1289,7 +1289,7 @@ fn stand_in(pc: &PageContent, i: usize) -> Vec<Op> {
 
 /// Rewrites the page's content: `edit(i)` gives the operators to insert before operator `i`
 /// and whether to keep it. Everything else is copied byte for byte.
-fn splice(pieces: &Pieces, ops: &[Op], mut edit: impl FnMut(usize) -> (Vec<Op>, bool)) -> Vec<Vec<u8>> {
+pub(crate) fn splice(pieces: &Pieces, ops: &[Op], mut edit: impl FnMut(usize) -> (Vec<Op>, bool)) -> Vec<Vec<u8>> {
     let data = pieces.data();
     let mut edits = Vec::new();
     for (i, op) in ops.iter().enumerate() {
@@ -1312,8 +1312,14 @@ fn splice(pieces: &Pieces, ops: &[Op], mut edit: impl FnMut(usize) -> (Vec<Op>, 
 
 /// Puts the rewritten pieces back: changed ones become new (Flate) streams, the others stay.
 fn write_contents(doc: &mut PdfDocument, pc: &PageContent, new: Vec<Vec<u8>>) -> Result<()> {
+    write_streams(doc, &pc.page, &pc.streams, new)
+}
+
+/// Puts rewritten pieces back on `page`: changed ones become new (Flate) streams, the others
+/// stay. `streams` are the page's content streams as read.
+pub(crate) fn write_streams(doc: &mut PdfDocument, page: &PdfObject, streams: &[(PdfObject, Vec<u8>)], new: Vec<Vec<u8>>) -> Result<()> {
     let mut list = Vec::with_capacity(new.len());
-    for ((obj, old), data) in pc.streams.iter().zip(new) {
+    for ((obj, old), data) in streams.iter().zip(new) {
         if *old == data {
             list.push(obj.clone());
             continue;
@@ -1325,7 +1331,7 @@ fn write_contents(doc: &mut PdfDocument, pc: &PageContent, new: Vec<Vec<u8>>) ->
         dict.dict_put("Filter", PdfObject::new_name("FlateDecode")?)?;
         list.push(doc.add_stream(&Buffer::from_bytes(&packed)?, Some(&dict), true)?);
     }
-    let mut page = pc.page.clone();
+    let mut page = page.clone();
     if list.len() == 1 {
         page.dict_put("Contents", list.pop().expect("one"))?;
     } else {

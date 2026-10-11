@@ -350,6 +350,44 @@ pub fn parse(data: &[u8]) -> Vec<Op> {
     ops
 }
 
+/// The parameters of an inline image (the bytes of its `BI` operator), with abbreviated keys
+/// expanded (`W` → `Width`, `CS` → `ColorSpace`, …; ISO 32000-2 Table 91).
+pub fn inline_dict(data: &[u8]) -> Vec<(Vec<u8>, Obj)> {
+    let start = data.windows(2).position(|w| w == b"BI").map_or(0, |p| p + 2);
+    let mut lx = Lexer { data, pos: start };
+    let mut out = Vec::new();
+    loop {
+        lx.skip_ws();
+        if data.get(lx.pos..lx.pos + 2) == Some(b"ID") || lx.pos >= data.len() {
+            break;
+        }
+        let Some(Obj::Name(k)) = lx.object(0) else { break };
+        lx.skip_ws();
+        let v = match lx.object(0) {
+            Some(v) => v,
+            None => match lx.token() {
+                b"true" => Obj::Bool(true),
+                b"false" => Obj::Bool(false),
+                _ => break,
+            },
+        };
+        let key: &[u8] = match k.as_slice() {
+            b"W" => b"Width",
+            b"H" => b"Height",
+            b"CS" => b"ColorSpace",
+            b"BPC" => b"BitsPerComponent",
+            b"F" => b"Filter",
+            b"DP" => b"DecodeParms",
+            b"IM" => b"ImageMask",
+            b"D" => b"Decode",
+            b"I" => b"Interpolate",
+            other => other,
+        };
+        out.push((key.to_vec(), v));
+    }
+    out
+}
+
 /// Where an inline image that starts after `BI` ends (after its `EI`).
 fn inline_image_end(data: &[u8], pos: usize) -> usize {
     let mut i = pos;
