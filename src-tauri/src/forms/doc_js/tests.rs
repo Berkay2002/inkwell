@@ -393,3 +393,77 @@ fn listing_reading_checking_and_editing_never_run_a_script() {
     assert_eq!(f.fields.len(), 1);
     assert!(scripts.log_text().iter().any(|l| l.contains("RAN-EDIT")), "{:?}", scripts.log_text());
 }
+
+#[test]
+fn a_name_tree_cut_short_by_a_cap_is_reported_and_not_edited() {
+    // 11 nested /Kids nodes: the walk stops at depth 8, so the scripts below were never seen
+    let mut objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /Names << /JavaScript 5 0 R >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".into(),
+        "<< >>".into(),
+    ];
+    let depth = 11;
+    for i in 0..depth {
+        let kids = if i + 1 < depth { format!("/Kids [{} 0 R]", 6 + i) } else { String::new() };
+        objs.push(format!("<< {kids} /Names [(k{i:02}) {} 0 R] >>", 5 + depth + i));
+    }
+    objs.extend((0..depth).map(|i| format!("<< /S /JavaScript /JS (var v{i} = {i};) >>")));
+    let (eng, id, _) = open("cut-tree", &objs);
+    let l = list_all(&eng, id).unwrap();
+    assert!(l.incomplete);
+    assert!(l.named.len() < depth);
+    let seen = l.named.len();
+    for op in [
+        Op::Add { name: Some("new".into()), source: "var n;".into() },
+        Op::Rename { id: "n:k00".into(), name: "other".into() },
+        Op::SetSource { id: "n:k00".into(), source: "var z;".into() },
+        Op::Delete { id: "n:k00".into() },
+    ] {
+        let e = apply(&eng, id, &op, USER).unwrap_err();
+        assert!(format!("{e:?}").contains("too large or too deeply nested"), "{e:?}");
+    }
+    // nothing was written: still the same entries, and reading still works
+    assert_eq!(list_all(&eng, id).unwrap().named.len(), seen);
+    assert_eq!(text_of(&eng, id, "n:k00"), "var v0 = 0;");
+}
+
+#[test]
+fn an_action_shared_by_several_pages_is_not_changed_under_the_others() {
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /AA << /O 5 0 R >> >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /AA << /O 5 0 R >> >>".into(),
+        "<< /S /JavaScript /JS (var shared = 1;) /Next 6 0 R >>".into(),
+        "<< /S /JavaScript /JS (var after = 1;) >>".into(),
+    ];
+    let (eng, id, _) = open("shared-action", &objs);
+    set(&eng, id, "p:0:O:0", "var mine = 2;");
+    assert_eq!(text_of(&eng, id, "p:0:O:0"), "var mine = 2;");
+    assert_eq!(text_of(&eng, id, "p:1:O:0"), "var shared = 1;");
+    // what followed the head still follows it, on both pages
+    assert_eq!(text_of(&eng, id, "p:0:O:1"), "var after = 1;");
+    assert_eq!(text_of(&eng, id, "p:1:O:1"), "var after = 1;");
+}
+
+#[test]
+fn a_listing_of_streams_that_fail_to_read_is_still_bounded() {
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /Names << /JavaScript 5 0 R >> >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_string(),
+        "<< >>".to_string(),
+    ];
+    let n = 40;
+    let names: String = (0..n).map(|i| format!("(s{i:02}) {} 0 R ", 6 + i)).collect();
+    objs.push(format!("<< /Names [{names}] >>"));
+    objs.extend((0..n).map(|i| format!("<< /S /JavaScript /JS {} 0 R >>", 6 + n + i)));
+    // a stream whose decode parameters make MuPDF refuse it (columns overflow): reading it is an error
+    objs.extend((0..n).map(|_| "<< /Length 5 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Columns 2000000000 /Colors 4 /BitsPerComponent 16 >> >>\nstream\nhello\nendstream".to_string()));
+    let (eng, id, _) = open("failing-streams", &objs);
+    let l = list_all(&eng, id).unwrap();
+    // each failed read is charged: the budget (8 MiB at 1 MiB a read) runs out well before 40
+    assert!(l.incomplete);
+    assert!(l.named.iter().any(|n| n.meta.unread), "{:?}", l.named.iter().map(|n| (n.meta.unread, n.meta.size)).collect::<Vec<_>>());
+}

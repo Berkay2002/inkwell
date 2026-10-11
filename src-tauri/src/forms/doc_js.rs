@@ -259,11 +259,12 @@ fn read_js(js: &PdfObject, budget: &mut Budget) -> Read {
     } else if js.is_stream().unwrap_or(false) {
         match js.read_stream_capped(MAX_DOC_SCRIPT_BYTES + 1) {
             Ok(b) => b,
-            Err(e) if e.is_stream_cap() => {
+            Err(e) => {
+                // A read that failed was still work done: it is charged like a full one, so a file of many
+                // broken streams cannot make a listing read for ever.
                 budget.left = budget.left.saturating_sub(MAX_DOC_SCRIPT_BYTES);
-                return Read::Large;
+                return if e.is_stream_cap() { Read::Large } else { Read::Missing };
             }
-            Err(_) => return Read::Missing,
         }
     } else {
         return Read::Missing;
@@ -446,9 +447,9 @@ pub fn list(doc: &PdfDocument) -> Result<DocJs> {
         incomplete: false,
     };
     // named scripts
-    let entries = attach::tree_of(doc, "JavaScript")?;
+    let (entries, cut) = attach::tree_walk(doc, "JavaScript")?;
     let ids = attach::entry_ids(&entries);
-    if entries.len() > MAX_NAMED {
+    if cut || entries.len() > MAX_NAMED {
         sc.incomplete = true;
     }
     let mut named = Vec::new();
@@ -695,7 +696,9 @@ fn set_step(doc: &mut PdfDocument, w: Where, index: usize, source: &str) -> Resu
     let head = head_of(doc, w)?;
     let steps = head.as_ref().map(chain).unwrap_or_default();
     match steps.get(index) {
-        Some(step) if is_js(step) => {
+        // A later step is edited where it is; the head is replaced below, so an action object the file shares
+        // (one /AA /O for many pages, or a link too) is not changed under the others.
+        Some(step) if index > 0 && is_js(step) => {
             let mut step = step.clone();
             step.dict_put("JS", js_string(doc, source)?)?;
         }
@@ -751,7 +754,7 @@ fn apply_op(doc: &mut PdfDocument, op: &Op, created: &mut Option<String>) -> Res
     match op {
         Op::Add { name, source } => {
             check_size(source)?;
-            let mut entries = attach::tree_of(doc, "JavaScript")?;
+            let mut entries = attach::tree_of_editable(doc, "JavaScript")?;
             let name = match name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
                 Some(n) => clean_name(n)?,
                 None => {
@@ -769,7 +772,7 @@ fn apply_op(doc: &mut PdfDocument, op: &Op, created: &mut Option<String>) -> Res
             Ok(Some(Vec::new()))
         }
         Op::Rename { id, name } => {
-            let mut entries = attach::tree_of(doc, "JavaScript")?;
+            let mut entries = attach::tree_of_editable(doc, "JavaScript")?;
             let i = attach::find_entry(&entries, id).ok_or_else(|| bad("that script is no longer in the document"))?;
             let name = clean_name(name)?;
             if entries[i].key == name {
@@ -786,7 +789,7 @@ fn apply_op(doc: &mut PdfDocument, op: &Op, created: &mut Option<String>) -> Res
         Op::SetSource { id, source } => {
             check_size(source)?;
             if id.starts_with("n:") {
-                let mut entries = attach::tree_of(doc, "JavaScript")?;
+                let mut entries = attach::tree_of_editable(doc, "JavaScript")?;
                 let i = attach::find_entry(&entries, id).ok_or_else(|| bad("that script is no longer in the document"))?;
                 // A fresh action, so a spec two names share is not changed under the other one.
                 entries[i].spec = new_action(doc, source, None)?;
@@ -799,7 +802,7 @@ fn apply_op(doc: &mut PdfDocument, op: &Op, created: &mut Option<String>) -> Res
         }
         Op::Delete { id } => {
             if id.starts_with("n:") {
-                let mut entries = attach::tree_of(doc, "JavaScript")?;
+                let mut entries = attach::tree_of_editable(doc, "JavaScript")?;
                 let i = attach::find_entry(&entries, id).ok_or_else(|| bad("that script is no longer in the document"))?;
                 entries.remove(i);
                 attach::write_tree_of(doc, "JavaScript", entries)?;
