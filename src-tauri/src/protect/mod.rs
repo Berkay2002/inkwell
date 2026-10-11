@@ -12,7 +12,7 @@
 use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions, Permission};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub mod app;
 #[cfg(test)]
@@ -180,9 +180,12 @@ impl ProtectSpec {
         r
     }
 
-    /// Puts both passwords in Unicode NFKC, the form SASLprep (the PDF 2.0 password rule) starts from:
+    /// Puts both passwords in Unicode NFKC, the normalisation SASLprep (the PDF 2.0 password rule) starts
+    /// from; it is not full SASLprep (no prohibited-character or bidi checks, MuPDF has none either).
     /// MuPDF hashes the bytes it is given, so a decomposed or compatibility form would not open in
-    /// Acrobat or qpdf after the person types the composed one there. Call before [`Self::validate`].
+    /// Acrobat or qpdf after the person types the composed one there. Opening a file and checking an
+    /// owner password therefore try the password as typed and then its NFKC form ([`nfkc_form`]).
+    /// Call before [`Self::validate`].
     pub fn normalize(&mut self) {
         let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
         for p in [&mut self.open_password, &mut self.permissions_password] {
@@ -417,6 +420,12 @@ impl SecurityInfo {
 /// opened with (`None`: it asked for none). This session is `unlocked` only when that password is the
 /// file's owner (permissions) password: a file with an owner password of its own keeps it for the
 /// security even when its P value allows everything.
+/// `pw` in NFKC, when that differs from what was typed: the form [`ProtectSpec::normalize`] writes.
+pub fn nfkc_form(pw: &str) -> Option<Zeroizing<String>> {
+    let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
+    (!nfkc.is_normalized(pw)).then(|| Zeroizing::new(nfkc.normalize(pw).into_owned()))
+}
+
 pub fn read_security(doc: &PdfDocument, password: Option<&str>) -> crate::engine::Result<SecurityInfo> {
     let Some(enc) = doc.trailer()?.get_dict("Encrypt")? else {
         return Ok(SecurityInfo::plain());

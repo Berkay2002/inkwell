@@ -975,8 +975,12 @@ fn copy_over(target: &Path, bytes: &[u8], pages: u32, read: Readback) -> Result<
         std::fs::copy(target, &backup).map_err(io)?;
         let written = write_synced(target, bytes, false).map_err(io).and_then(|()| verify(target, pages, read));
         if written.is_err() {
+            let why = written.as_ref().err().map(ToString::to_string).unwrap_or_default();
             std::fs::copy(&backup, target).map_err(|e| {
-                EngineError::Io(format!("the file could not be written, and restoring it failed too ({e}); the original is at {}", backup.display()))
+                EngineError::Io(format!(
+                    "the file could not be written ({why}), and restoring it failed too ({e}): the file may be damaged, the original is at {}",
+                    backup.display()
+                ))
             })?;
         }
         written
@@ -1367,15 +1371,27 @@ impl Engine {
     pub fn save_recorded(&self, id: DocId, to: Option<&str>) -> Result<(EditState, Option<Saved>)> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
+        self.save_locked(id, &entry, &mut lane, to)
+    }
+
+    /// [`Engine::save_recorded`] with the edit lane already held, so that a caller can do something
+    /// else under the same guard (Protect applies its step and saves without anything in between).
+    pub(super) fn save_locked(
+        &self,
+        id: DocId,
+        entry: &DocEntry,
+        lane: &mut Option<Editor>,
+        to: Option<&str>,
+    ) -> Result<(EditState, Option<Saved>)> {
         let target = to.map(str::to_string).unwrap_or_else(|| entry.path());
         let same = same_path(&target, &entry.path());
         if same && lane.as_ref().is_none_or(|ed| ed.saved == Some(ed.cur)) {
-            return Ok((lane.as_ref().map_or_else(|| clean_state(&entry), |ed| ed.state(&entry)), None));
+            return Ok((lane.as_ref().map_or_else(|| clean_state(entry), |ed| ed.state(entry)), None));
         }
         if !same {
             self.check_not_open(&target, Some(id))?;
         }
-        let ed = self.lane(&entry, &mut lane)?;
+        let ed = self.lane(entry, lane)?;
         let secured = ed.security().is_some();
         let rewrite = secured || ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
         let full;
@@ -1387,7 +1403,7 @@ impl Engine {
         } else if rewrite {
             // From a throwaway copy: a garbage-collecting write leaves its document unable to take
             // incremental updates, which every later edit needs.
-            full = write_doc(&open_snap(&ed.step().snap, &entry)?.doc, ed.save_opts(), ed.step().snap.len)?;
+            full = write_doc(&open_snap(&ed.step().snap, entry)?.doc, ed.save_opts(), ed.step().snap.len)?;
             &full
         } else {
             ed.bytes()
@@ -1397,7 +1413,7 @@ impl Engine {
         let password = match ed.security() {
             Some(SecurityChange::Set(s)) => s.open().map(|p| Zeroizing::new(p.to_string())),
             Some(SecurityChange::Remove) => None,
-            None => entry.password.lock().clone().map(Zeroizing::new),
+            None => entry.password.lock().clone(),
         };
         let encrypted = ed.security().map(|c| matches!(c, SecurityChange::Set(_)));
         // A new encryption makes the file on disk unreadable with the password the replicas know:
@@ -1405,9 +1421,9 @@ impl Engine {
         if same || secured {
             // Replicas must read from memory before the file goes away under them.
             if entry.layout.read().snap.is_none() {
-                self.publish(&entry, ed);
+                self.publish(entry, ed);
             }
-            self.release_file(&entry);
+            self.release_file(entry);
         }
         write_atomic(Path::new(&target), bytes, pages, Readback { password: password.as_deref().map(String::as_str), encrypted })?;
         // the steps since the last save (all of them when the file holds none of the current ones)
@@ -1424,7 +1440,7 @@ impl Engine {
             Some(SecurityChange::Remove) => Some(None),
             None => None,
         };
-        Ok((ed.state(&entry), Some(saved)))
+        Ok((ed.state(entry), Some(saved)))
     }
 
     /// Drops every replica that has the file on disk open (rule 5). Waits for busy ones.

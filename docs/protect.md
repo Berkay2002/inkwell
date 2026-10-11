@@ -27,9 +27,11 @@ the edit-core steps in `src-tauri/src/engine/edit/security.rs`, UI in `src/compo
   keeps its encryption and rights (MuPDF `KEEP`), never silently dropping them.
 - **Output**: "Protect and save a copy…" asks for a file first (a `pick_save` token), then one command
   (`protect_and_save`) applies the step and saves to it; the original is not changed. "Protect this file
-  instead" asks again inline, then does the same with an in-place save. If the save fails for any reason the
-  command takes the step back out, so nothing stays pending and a later Ctrl+S cannot encrypt the file by
-  surprise; a retry is one clean call. Success is one undo step, listed in the version history ("Protect with a
+  instead" asks again inline, then does the same with an in-place save. Step and save run under one hold of
+  the document's edit lane (and in its UI edit queue), so no edit, save or assistant turn can get between
+  them. If the save fails for any reason the command takes exactly that step back out (what Redo had comes
+  back too), so nothing stays pending and a later Ctrl+S cannot encrypt the file by surprise; a retry is one
+  clean call, and the UI asks `edit_state` for the labels again. Success is one undo step, listed in the version history ("Protect with a
   password (AES-256)"), and the history store keeps its own XChaCha20 crypto. The in-place confirm only says
   the earlier version stays in version history when history is enabled and ready for that file.
 - **Restricted files**: extract pages, split, merge and the export family (PDF to Word, images, …) check the
@@ -45,9 +47,12 @@ the edit-core steps in `src-tauri/src/engine/edit/security.rs`, UI in `src/compo
   `validate()` refuses: nothing to set, equal passwords, more than 127 bytes (MuPDF's buffer), control characters
   (NUL included: MuPDF takes the password as a C string, so a NUL would silently cut it), restrictions without
   a permissions password, non-keyboard characters with AES-128. Before that, `normalize()` puts both passwords
-  in Unicode NFKC (the form SASLprep starts from), so "é" typed composed or decomposed is the same password.
-  This is applied when the passwords are *written*; MuPDF does not run SASLprep itself and an existing
-  file's password is taken as typed.
+  in Unicode NFKC, the normalisation SASLprep starts from (it is not full SASLprep: no prohibited-character or
+  bidi checks; MuPDF has none either). It is applied when the passwords are *written*. Where a password is
+  *checked* (opening the file, and the permissions password of Remove/Change security) the password is tried
+  as typed first and then in NFKC, because MuPDF itself hashes the bytes it is given: "é" typed decomposed,
+  full-width IME letters or a no-break space open a file that was protected with the NFKC form, and a file
+  made elsewhere with the raw form still opens as typed. The form that worked is kept for the session.
 - After every save the engine reads the file back (`verify`): page count, `/Encrypt` present after a Set and
   absent after a Remove, and that it opens with the password the step just wrote.
 - Permission bits follow the PDF spec: print 3, modify 4, copy 5, annotate 6, forms 9, accessibility 10, assemble
@@ -64,7 +69,7 @@ the edit-core steps in `src-tauri/src/engine/edit/security.rs`, UI in `src/compo
   the new open password once Save wrote one.
 
 ## Commands
-`security_info(doc)`, `protect_apply(doc, spec, permissionsPassword?)` (applies only, used by tests and the
+`edit_state(doc)` (read-only, for the refresh after a failed command), `security_info(doc)`, `protect_apply(doc, spec, permissionsPassword?)` (applies only, used by tests and the
 open-ended flow), `protect_and_save(doc, spec, permissionsPassword?, saveToken?)` (apply + save + rollback, what
 the panel calls), `remove_security(doc, permissionsPassword?)`.
 Errors: `needs-permissions-password`, `bad-permissions-password` (from the engine); the spec codes in
@@ -77,7 +82,9 @@ Errors: `needs-permissions-password`, `bad-permissions-password` (from the engin
 - A file whose owner password is "" but which has a user password (written by older Inkwell builds or by qpdf with
   an empty owner password) can't be unlocked as owner here: MuPDF refuses an empty owner password when a user
   password exists, the same as Acrobat does.
-- A failed protect-and-save rolls the step back, which also drops the redo stack of that tab.
+- The in-place save's last-resort path (a folder that takes no new files) copies over the target and restores a
+  backup copy when the write does not read back; if that restore fails too the error says so, names both
+  causes and where the original is kept.
 - RC4 files are read and shown but not written (AES only).
 - A file opened with only the user password of a document that has restrictions stays restricted; "unlocked" is
   decided from the rights the session received, not from the password's name.

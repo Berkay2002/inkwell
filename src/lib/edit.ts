@@ -61,6 +61,16 @@ function serial<T>(id: number, f: () => Promise<T>): Promise<T | undefined> {
   return run;
 }
 
+/**
+ * Runs `f` in the document's edit order like every edit, but hands its failure back to the caller
+ * (a sheet that shows its own errors) instead of the shared error line.
+ */
+export function queued<T>(id: number, f: () => Promise<T>): Promise<T> {
+  const run = (queues.get(id) ?? Promise.resolve()).then(f);
+  queues.set(id, run.catch(() => undefined));
+  return run;
+}
+
 function withState(id: number, f: () => Promise<EditState>) {
   return serial(id, async () => {
     const s = await f();

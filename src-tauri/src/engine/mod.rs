@@ -173,7 +173,7 @@ struct Layout {
 pub struct DocEntry {
     pub id: DocId,
     path: RwLock<String>,
-    password: Mutex<Option<String>>,
+    password: Mutex<Option<Zeroizing<String>>>,
     /// The open password of the file on disk after a save that set or removed security (`None` until
     /// then: the file is as it was opened and `password` unlocks it).
     file_password: Mutex<Option<Option<Zeroizing<String>>>>,
@@ -334,7 +334,7 @@ impl Engine {
 
     pub fn authenticate(&self, id: DocId, password: &str) -> Result<OpenInfo> {
         let entry = self.entry(id)?;
-        *entry.password.lock() = Some(password.to_string());
+        *entry.password.lock() = Some(Zeroizing::new(password.to_string()));
         let r = self.finish_open(&entry);
         if r.is_err() {
             *entry.password.lock() = None;
@@ -834,17 +834,17 @@ impl Engine {
     }
 
     /// The password the user unlocked `id` with (redaction checks its encrypted output with it).
-    pub(crate) fn password(&self, id: DocId) -> Result<Option<String>> {
+    pub(crate) fn password(&self, id: DocId) -> Result<Option<Zeroizing<String>>> {
         Ok(self.entry(id)?.password.lock().clone())
     }
 
     /// The password that opens the file on disk now: after Save wrote new password security it is the
     /// new open password, which the in-memory snapshots (`password`) do not share.
-    pub(crate) fn file_password(&self, id: DocId) -> Result<Option<String>> {
+    pub(crate) fn file_password(&self, id: DocId) -> Result<Option<Zeroizing<String>>> {
         let entry = self.entry(id)?;
         let over = entry.file_password.lock().clone();
         Ok(match over {
-            Some(p) => p.map(|p| (*p).clone()),
+            Some(p) => p,
             None => entry.password.lock().clone(),
         })
     }
@@ -972,8 +972,15 @@ fn authenticate(d: &mut Document, entry: &DocEntry) -> Result<()> {
         match pw {
             None => return Err(EngineError::NeedsPassword),
             Some(pw) => {
-                if !d.authenticate(&pw)? {
-                    return Err(EngineError::BadPassword);
+                if d.authenticate(&pw)? {
+                    return Ok(());
+                }
+                // MuPDF does no SASLprep, and the writer puts passwords in NFKC (Protect): a password
+                // typed decomposed or full-width opens the file under its NFKC form. The form that
+                // worked is kept, so every later read of the file uses it.
+                match crate::protect::nfkc_form(&pw) {
+                    Some(n) if d.authenticate(&n)? => *entry.password.lock() = Some(n),
+                    _ => return Err(EngineError::BadPassword),
                 }
             }
         }

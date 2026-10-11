@@ -13,12 +13,13 @@ vi.hoisted(() => {
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn(), message: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(() => Promise.resolve()), Channel: class {} }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({}) }));
-vi.mock("./edit", () => ({ save: vi.fn(), undo: vi.fn(), applyState: vi.fn() }));
+vi.mock("./edit", () => ({ save: vi.fn(), undo: vi.fn(), applyState: vi.fn(), queued: vi.fn((_id: number, f: () => Promise<unknown>) => f()) }));
 vi.mock("./api", () => ({
   pickSave: vi.fn(),
   securityInfo: vi.fn(),
   protectApply: vi.fn(),
   protectAndSave: vi.fn(),
+  editState: vi.fn(),
   removeSecurity: vi.fn(),
   saveDocument: vi.fn(),
   closeDocument: vi.fn(() => Promise.resolve()),
@@ -234,12 +235,17 @@ describe("the sheet", () => {
     expect(useProtect.getState().sheet?.result?.output).toBe("inPlace");
   });
 
-  it("a failed save leaves the sheet on the error with nothing applied here", async () => {
+  it("a failed save leaves the sheet on the error and asks for the state again", async () => {
     sheet({ openPassword: "Lantern7fish!", openConfirm: "Lantern7fish!" });
     vi.mocked(api.pickSave).mockResolvedValue({ token: "save-1", path: "C:\\d\\x.pdf" });
+    vi.mocked(api.editState).mockResolvedValue(state("C:/d/a.pdf") as never);
     vi.mocked(api.protectAndSave).mockRejectedValue("The file could not be written: disk full");
     await useProtect.getState().run("copy");
-    expect(edits.applyState).not.toHaveBeenCalled();
+    await flush();
+    // the engine took the step back; the labels are read again, and no saved state is applied
+    expect(api.editState).toHaveBeenCalledWith(1);
+    expect(edits.applyState).toHaveBeenCalledTimes(1);
+    expect(edits.applyState).toHaveBeenCalledWith(1, expect.objectContaining({ path: "C:/d/a.pdf" }));
     expect(useProtect.getState().sheet).toMatchObject({ phase: "error", error: "The file could not be written: disk full" });
     // a retry is one call again, never a second step
     vi.mocked(api.protectAndSave).mockResolvedValue(state("C:\\d\\x.pdf") as never);

@@ -146,6 +146,7 @@ export interface EditState {
 export const editApply = (doc: number, op: EditOp) => invoke<EditState>("edit_apply", { doc, op });
 export const editUndo = (doc: number) => invoke<EditState>("edit_undo", { doc });
 export const editRedo = (doc: number) => invoke<EditState>("edit_redo", { doc });
+export const editState = (doc: number) => invoke<EditState>("edit_state", { doc });
 /** `to`: a save token (Save as). */
 export const saveDocument = (doc: number, to?: string) => invoke<EditState>("save_document", { doc, to: to ?? null });
 /** `out`: a save token. */

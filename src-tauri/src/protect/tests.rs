@@ -409,8 +409,8 @@ fn the_file_on_disk_is_read_with_its_new_password_by_the_tools() {
     // set but not written yet: the file on disk is still the plain one
     assert_eq!(eng.file_password(id).unwrap(), None);
     eng.save(id, None).unwrap();
-    assert_eq!(eng.file_password(id).unwrap().as_deref(), Some("open sesame"));
-    let audit = crate::compress::audit_file(Path::new(&src), eng.file_password(id).unwrap().as_deref()).unwrap();
+    assert_eq!(eng.file_password(id).unwrap().as_ref().map(|p| p.as_str()), Some("open sesame"));
+    let audit = crate::compress::audit_file(Path::new(&src), eng.file_password(id).unwrap().as_ref().map(|p| p.as_str())).unwrap();
     assert!(audit.total > 0);
 
     // removed and saved: no password again
@@ -613,4 +613,62 @@ fn passwords_are_normalised_and_control_characters_refused() {
     eng.protect(id, typed, None, EditSource::User).unwrap();
     eng.save(id, Some(&out)).unwrap();
     assert_ne!(access_of(&out, "caf\u{e9}-pass") & 2, 0);
+
+    // MuPDF does no SASLprep: opening tries the password as typed, then its NFKC form, so typing it
+    // decomposed (or composed, as Acrobat's field gives it) both open the file
+    for typed in ["cafe\u{301}-pass", "caf\u{e9}-pass"] {
+        let eng2 = Engine::new(2, 64 << 20);
+        let id2 = open_with(&eng2, &out, typed);
+        assert!(eng2.security_info(id2).unwrap().encrypted);
+        assert!(!eng2.page_text(id2, 0).unwrap().is_empty());
+    }
+    // a wrong password is still wrong
+    let eng2 = Engine::new(2, 64 << 20);
+    let (id2, _) = eng2.open_pending(&out);
+    assert!(matches!(eng2.authenticate(id2, "cafe-pass"), Err(EngineError::BadPassword)));
+
+    // the permissions password too: typed full-width, written as "OWNER-secret", and checked the same way
+    let both = d.join("both.pdf").to_string_lossy().into_owned();
+    let id = open(&eng, &src);
+    let owner_typed = "\u{ff2f}\u{ff37}\u{ff2e}\u{ff25}\u{ff32}-secret";
+    eng.protect(id, tweak(|s| s.permissions_password = Some(owner_typed.into())), None, EditSource::User).unwrap();
+    eng.save(id, Some(&both)).unwrap();
+    assert_eq!(access_of(&both, "OWNER-secret") & 4, 4);
+    let eng3 = Engine::new(2, 64 << 20);
+    let id3 = open_with(&eng3, &both, "open sesame");
+    assert_eq!(invalid_code(eng3.remove_security(id3, Some("guess"), EditSource::User)), "bad-permissions-password");
+    eng3.remove_security(id3, Some(owner_typed), EditSource::User).unwrap();
+}
+
+/// The step and the save of Protect are one operation under one lock: edits made at the same time
+/// neither get between them nor leave the step behind when the save fails.
+#[test]
+fn protect_and_save_cannot_be_interleaved_with_other_edits() {
+    let d = dir("atomic");
+    let src = fixture_at(&d, "a.pdf", 4);
+    let nowhere = d.join("no-such-folder").join("x.pdf").to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &src);
+    std::thread::scope(|s| {
+        let protecting = s.spawn(|| {
+            for _ in 0..12 {
+                assert!(eng.protect_and_save(id, spec(), None, Some(&nowhere)).is_err());
+            }
+        });
+        let editing = s.spawn(|| {
+            for i in 0..12u32 {
+                eng.apply(id, EditOp::Rotate { pages: vec![i % 4], quarter_turns: 1 }).unwrap();
+            }
+        });
+        protecting.join().unwrap();
+        editing.join().unwrap();
+    });
+    // no security step survived, wherever the rotations landed
+    assert_eq!(eng.security_info(id).unwrap(), SecurityInfo::plain());
+    let mut undone = 0;
+    while eng.edit_state(id).unwrap().undo.is_some() {
+        eng.undo(id).unwrap();
+        undone += 1;
+    }
+    assert_eq!(undone, 12);
 }

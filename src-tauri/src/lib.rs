@@ -291,6 +291,13 @@ async fn edit_redo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
     blocking(move || eng.redo(doc)).await
 }
 
+/// The current state, changing nothing: what the UI asks for after a command that failed half way.
+#[tauri::command]
+async fn edit_state(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.edit_state(doc)).await
+}
+
 /// `to`: a save token (Save as); omitted: save over the document's own file.
 #[tauri::command]
 async fn save_document(
@@ -763,6 +770,7 @@ pub fn run() {
             tile_raw,
             edit_apply,
             edit_undo,
+            edit_state,
             edit_redo,
             history_ipc::history_state,
             history_ipc::history_versions,

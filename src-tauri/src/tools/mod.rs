@@ -120,14 +120,14 @@ pub struct AuditReply {
 pub fn estimate_for_ui(eng: &Engine, doc: DocId, cancel: &AtomicBool) -> Result<Vec<compress::estimate::Estimate>, ToolError> {
     let path = PathBuf::from(eng.doc_entry(doc)?.path());
     let password = eng.file_password(doc)?;
-    let audit = compress::audit_file(&path, password.as_deref())?;
-    Ok(compress::estimate::estimate(&path, password.as_deref(), &audit, cancel)?)
+    let audit = compress::audit_file(&path, password.as_ref().map(|p| p.as_str()))?;
+    Ok(compress::estimate::estimate(&path, password.as_ref().map(|p| p.as_str()), &audit, cancel)?)
 }
 
 pub fn audit_for_ui(eng: &Engine, doc: DocId) -> Result<AuditReply, ToolError> {
     let path = PathBuf::from(eng.doc_entry(doc)?.path());
     let path = path.as_path();
-    let audit = compress::audit_file(path, eng.file_password(doc)?.as_deref())?;
+    let audit = compress::audit_file(path, eng.file_password(doc)?.as_ref().map(|p| p.as_str()))?;
     let out = compress::default_output(path);
     Ok(AuditReply {
         size: std::fs::metadata(path).map_err(|e| ToolError(e.to_string()))?.len(),
@@ -170,7 +170,7 @@ pub fn run_compress(
     opts.replace_output = output.is_some();
     opts.output = output;
     // The file on disk is what compress reads: its password, which Save may have just changed.
-    opts.password = eng.file_password(req.doc)?;
+    opts.password = eng.file_password(req.doc)?.map(|p| p.to_string());
     // The fraction only ever grows, whatever the stages report.
     let mut last = 0.0f32;
     let mut mono = |mut p: compress::Progress| {

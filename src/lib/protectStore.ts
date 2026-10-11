@@ -5,7 +5,7 @@ import type { Changes, Cipher, Printing, ProtectSpec, SecurityInfo } from "./api
 import { useAi } from "./aiStore";
 import { useAnnot } from "./annot";
 import { useConvert } from "./convertStore";
-import { applyState } from "./edit";
+import { applyState, queued } from "./edit";
 import { useHistory } from "./historyStore";
 import { useRedact } from "./redact";
 import { useTools } from "./toolsStore";
@@ -315,7 +315,8 @@ export const useProtect = create<ProtectStore>((set, get) => {
         }
         // One command: when the save fails the engine takes the protection back, so nothing stays
         // pending on the original (a later Save would write it without asking) and a retry doesn't stack.
-        const saved = await api.protectAndSave(d.id, specOf(sheet), needsOwner ? sheet.currentPassword : null, to);
+        // In the document's edit queue: nothing else is applied between the step and the save.
+        const saved = await queued(d.id, () => api.protectAndSave(d.id, specOf(sheet), needsOwner ? sheet.currentPassword : null, to));
         applyState(d.id, saved);
         void get().refresh(d.id);
         patch({
@@ -330,6 +331,8 @@ export const useProtect = create<ProtectStore>((set, get) => {
         });
       } catch (e) {
         void get().refresh(d.id);
+        // The engine took the step back; the undo and redo labels are asked for again all the same.
+        void api.editState(d.id).then((s) => applyState(d.id, s), () => {});
         patch({ phase: "error", error: protectError(e) });
       }
     },
