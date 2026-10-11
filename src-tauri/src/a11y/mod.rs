@@ -475,12 +475,16 @@ pub fn check(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &Ato
     let n = doc.page_count()?.max(0) as u32;
     let index = tree::page_index(doc)?;
     let tree = Tree::read(doc, &index)?;
+    let cancelled = || cancel.load(Ordering::Relaxed);
+    if cancelled() {
+        return Err(bad("cancelled"));
+    }
     let cat = doc.catalog()?;
 
     let mut scans = Vec::with_capacity(n as usize);
     let mut pages = Vec::with_capacity(n as usize);
     for p in 0..n {
-        if cancel.load(Ordering::Relaxed) {
+        if cancelled() {
             return Err(bad("cancelled"));
         }
         let obj = doc.find_page(p as i32)?;
@@ -492,6 +496,9 @@ pub fn check(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &Ato
     let loc = Locator::new(&pages, &tree);
     let mut results = Vec::with_capacity(Rule::ALL.len());
     for rule in Rule::ALL {
+        if cancelled() {
+            return Err(bad("cancelled"));
+        }
         let (status, mut findings) = if rule.manual() {
             (Status::Manual, Vec::new())
         } else {
