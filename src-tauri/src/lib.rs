@@ -452,21 +452,22 @@ fn after_save(window: &Window, app: &tauri::AppHandle, hist: &Arc<History>, doc:
     match saved {
         // Save as: the document is another file now, with a history of its own
         Some(s) if s.moved => {
+            hist.spawn_open(app.clone(), doc, state.path.clone());
             // It may have replaced a file a catalog lists.
             if s.redacts {
                 search::catalog::app::forget_saved(app, &state.path);
             }
-            hist.spawn_open(app.clone(), doc, state.path.clone());
         }
         // history errors never fail a save
         Some(s) => {
-            // Text that was redacted must not stay in a catalog's index (or in its results) until a refresh.
-            if s.redacts {
-                search::catalog::app::forget_saved(app, &state.path);
-            }
             match hist.saved(doc, &s) {
                 Ok(_) => drop(app.emit("history-changed", doc)),
                 Err(e) => eprintln!("inkwell history: {e}"),
+            }
+            // Text that was redacted must not stay in a catalog's index (or in its results) until a refresh.
+            // After the history's own purge, so nothing here can keep that from running.
+            if s.redacts {
+                search::catalog::app::forget_saved(app, &state.path);
             }
         }
         None => {}
@@ -1178,6 +1179,9 @@ pub fn run() {
             }
             app.manage(Arc::new(tools::paths::ToolPaths::load(app.handle())));
             batch::app::sweep_at_startup(app.handle());
+            // A quit while a catalog was being built can have left a saved redaction's file to forget.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || search::catalog::app::replay_pending_at_startup(&handle));
             Ok(())
         })
         .run(tauri::generate_context!())

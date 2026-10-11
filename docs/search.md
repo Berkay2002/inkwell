@@ -68,15 +68,19 @@ format we control and version.
   left out and counted (`done.stale`, a note under the results), so a catalog never answers from text that was
   saved over. A save that includes a redaction (`save_document`, `protect_and_save`) makes every catalog forget that
   file: row, stored text and postings are rewritten as a new generation (`forget`), and the file is "new" until the
-  next refresh. A catalog that is being built forgets it when the build ends (the search check hides it meanwhile); if
-  the postings cannot be rewritten the live index is deleted, so the catalog reads "needs a rebuild" and keeps no
-  words of the file. A Save as, and Redact's own save, that replace a listed file do the same.
+  next refresh. A catalog that is being built forgets it when the build ends (the search check hides it meanwhile): the
+  path waits in `forget-pending.json` in the catalog's folder, so a quit does not lose it, and is replayed at startup,
+  when the catalogs are listed, and at the next hold. If the postings cannot be rewritten, or the entry or table is
+  unreadable, the stored text and the live index are deleted: the catalog reads "needs a rebuild" and keeps no words
+  of the file. A Save as, and Redact's own save, that replace a listed file do the same.
 - Embedded index: `/Root/PieceInfo/Inkwell` (`/Private` stream) holds the records of that file. A build reads it only
   if the trailer `/ID`, the page count, the version and a fingerprint of page content and annotations all match,
   so a file changed by another tool is read normally. Embedding and removing are one undo step each
   (`index_embed`, `index_unembed`; `index_embedded` reports present/current and `blocked`). A certified or signed
   document gets no index written, updated or removed (refused with the reason; the buttons are disabled): an update
-  or removal rewrites the file, which voids signatures, and a certification allows none of it.
+  or removal rewrites the file, which voids signatures, and a certification allows none of it. This is stricter
+  than the common rule for edit features (signed: incremental save plus a warning) on purpose: the first Embed on a
+  signed file would be incremental, but Update and Remove are not, and one rule is easier to explain than three.
 - An embedded index is untrusted input, like hidden text in the PDF itself: it can claim words that are not
   visible, and bookmarks on pages the file does not have are dropped. A build checks the dict (`/DocID`, `/Pages`)
   before decoding the blob, inflates it under a bound, and compares a fingerprint of the page content (page

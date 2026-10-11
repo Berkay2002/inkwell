@@ -1025,12 +1025,23 @@ fn canon(p: &Path) -> PathBuf {
 /// the catalog must not keep, or show, what was removed. The file is listed as new until the next refresh reads
 /// it again. Returns how many rows went. Nothing runs against a build of the same catalog: the caller holds it.
 pub fn forget(dir: &Path, path: &Path) -> Result<u32> {
-    let meta = load_meta(dir)?;
-    let Some(table) = (meta.generation > 0).then(|| load_table(dir, meta.generation)).flatten() else {
-        // Nothing here says which blob is whose, and the next build reads every file again anyway: none is kept.
+    // Nothing here says which blob is whose (no readable entry or table), and the next build reads every file
+    // again anyway: none is kept, and no index with words in it.
+    let wipe = || {
         let _ = std::fs::remove_dir_all(text_dir(dir));
         let _ = std::fs::create_dir_all(text_dir(dir));
-        let _ = std::fs::remove_file(index_path(dir, meta.generation));
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with("index-") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    };
+    let Ok(meta) = load_meta(dir) else {
+        wipe();
+        return Ok(0);
+    };
+    let Some(table) = (meta.generation > 0).then(|| load_table(dir, meta.generation)).flatten() else {
+        wipe();
         return Ok(0);
     };
     let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
@@ -1084,6 +1095,61 @@ pub fn forget(dir: &Path, path: &Path) -> Result<u32> {
         return Err(e);
     }
     Ok(gone.len() as u32)
+}
+
+// ---- saved while the catalog was busy ----------------------------------------------------------------------
+
+/// Paths saved (with redactions) while the catalog was held by a build: `forget` runs for them when it is free.
+/// On disk, so a quit in between does not leave the old text behind.
+fn pending_path(dir: &Path) -> PathBuf {
+    dir.join("forget-pending.json")
+}
+
+/// One writer at a time: the list is read, changed and written back.
+static PENDING: Mutex<()> = Mutex::new(());
+/// More than this and the oldest are dropped from the list (a catalog that long busy is rebuilt anyway).
+const MAX_PENDING: usize = 1000;
+
+/// The paths waiting for catalog `dir`.
+pub fn pending(dir: &Path) -> Vec<PathBuf> {
+    let _g = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    read_pending(dir)
+}
+
+fn read_pending(dir: &Path) -> Vec<PathBuf> {
+    let v: Vec<String> = std::fs::read(pending_path(dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    v.into_iter().map(PathBuf::from).collect()
+}
+
+fn write_pending(dir: &Path, list: &[PathBuf]) -> Result<()> {
+    if list.is_empty() {
+        return match std::fs::remove_file(pending_path(dir)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+            _ => Ok(()),
+        };
+    }
+    let names: Vec<String> = list.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    write_durable(&pending_path(dir), &serde_json::to_vec(&names).map_err(io)?)
+}
+
+/// Adds `path` to the list of catalog `dir`.
+pub fn defer_forget(dir: &Path, path: &Path) -> Result<()> {
+    let _g = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = read_pending(dir);
+    if !list.iter().any(|p| p == path) {
+        list.push(path.to_path_buf());
+    }
+    let over = list.len().saturating_sub(MAX_PENDING);
+    list.drain(..over);
+    write_pending(dir, &list)
+}
+
+/// Takes `done` off the list (what was added meanwhile stays).
+pub fn settle_pending(dir: &Path, done: &[PathBuf]) -> Result<()> {
+    let _g = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = read_pending(dir);
+    list.retain(|p| !done.contains(p));
+    write_pending(dir, &list)
 }
 
 // ---- is it out of date -------------------------------------------------------------------------------------

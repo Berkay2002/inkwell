@@ -1003,3 +1003,47 @@ fn a_catalog_that_cannot_be_rewritten_drops_its_index_rather_than_keep_a_forgott
     assert!(!s.cancelled && s.extracted > 20);
     assert!(!flat(&catalog_search(&d, "notice", SearchOpts::default())).0.is_empty());
 }
+
+#[test]
+fn a_catalog_whose_entry_is_unreadable_keeps_no_stored_text_when_a_file_is_forgotten() {
+    let (_, folder, d) = built("forget-meta");
+    assert!(std::fs::read_dir(text_dir(&d)).unwrap().count() > 20);
+    std::fs::write(meta_path(&d), b"{ nope").unwrap();
+    assert!(load_meta(&d).is_err());
+    assert_eq!(forget(&d, &folder.join("f03.pdf")).unwrap(), 0);
+    assert_eq!(std::fs::read_dir(text_dir(&d)).unwrap().count(), 0, "no blob is left");
+    assert!(!index_path(&d, 1).exists(), "nor the postings");
+    // It is still listed (so it can be deleted); an entry that is another version's can be built again.
+    assert_eq!(list(d.parent().unwrap()).len(), 1);
+}
+
+#[test]
+fn a_forget_waiting_for_a_busy_catalog_survives_a_restart() {
+    let base = dir("catalog-forget-restart");
+    let folder = base.join("docs");
+    let p = write(&folder, "a.pdf", plain(&[vec!["pre-redaction words: quokka"]]));
+    write(&folder, "b.pdf", plain(&[vec!["another notice"]]));
+    let root = base.join("catalogs");
+    let (m, d) = make(&root, &folder);
+    build(&d, true, &AtomicBool::new(false), &no_progress()).unwrap();
+    let jobs = super::app::Jobs::default();
+    jobs.guarded(&m.id, || {
+        assert_eq!(super::app::forget_all(&root, &jobs, &p), 0);
+        assert_eq!(pending(&d), vec![p.clone()], "the path is on disk, in the catalog's folder");
+        Ok(())
+    })
+    .unwrap();
+    // The app quit and started again: a new Jobs, the same folder. Nothing in memory remembers.
+    drop(jobs);
+    let again = super::app::Jobs::default();
+    super::app::replay_pending(&root, &again);
+    assert!(pending(&d).is_empty());
+    assert_eq!(load_meta(&d).unwrap().files, 1);
+    assert_eq!(flat(&catalog_search(&d, "quokka", SearchOpts::default())).0.len(), 0);
+    // A failed forget stays on the list for the next hold (the entry here is not a catalog's).
+    defer_forget(&d, &base.join("c.pdf")).unwrap();
+    settle_pending(&d, &[]).unwrap();
+    assert_eq!(pending(&d).len(), 1);
+    settle_pending(&d, &[base.join("c.pdf")]).unwrap();
+    assert!(!pending_path(&d).exists());
+}

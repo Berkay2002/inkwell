@@ -30,8 +30,6 @@ pub struct Jobs {
     next: AtomicU64,
     live: Mutex<HashMap<u64, (String, Arc<AtomicBool>)>>,
     busy: Mutex<HashSet<String>>,
-    /// Files to forget (`super::forget`) from a catalog that was busy when they were saved: done when it is free.
-    deferred: Mutex<Vec<(String, PathBuf)>>,
 }
 
 impl Jobs {
@@ -63,7 +61,10 @@ pub fn forget_all(root: &std::path::Path, jobs: &Jobs, path: &std::path::Path) -
     let mut n = 0;
     for m in super::list(root) {
         let Some(_held) = jobs.hold(&m.id) else {
-            jobs.deferred.lock().unwrap().push((m.id, path.to_path_buf()));
+            // Written into the catalog's folder: a quit before it is free does not lose it (`replay_pending`).
+            if let Err(e) = super::defer_forget(&root.join(&m.id), path) {
+                eprintln!("inkwell catalog {}: {e}", m.id);
+            }
             continue;
         };
         match super::forget(&root.join(&m.id), path) {
@@ -79,19 +80,43 @@ pub fn forget_all(root: &std::path::Path, jobs: &Jobs, path: &std::path::Path) -
 
 /// Catalog `id` (in `dir`) is free again: the files saved while it was busy are forgotten now.
 pub(super) fn forget_deferred(jobs: &Jobs, id: &str, dir: &std::path::Path) {
-    // Held first: when it is not free the queue is left as it is, for whoever frees it.
+    // Held first: when it is not free the list is left as it is, for whoever frees it.
     let Some(_held) = jobs.hold(id) else { return };
-    let mine: Vec<PathBuf> = {
-        let mut all = jobs.deferred.lock().unwrap();
-        let (mine, rest) = all.drain(..).partition(|(i, _)| i == id);
-        *all = rest;
-        mine.into_iter().map(|(_, p)| p).collect()
-    };
-    for p in mine {
-        if let Err(e) = super::forget(dir, &p) {
-            eprintln!("inkwell catalog {id}: {e}");
+    let mine = super::pending(dir);
+    if mine.is_empty() {
+        return;
+    }
+    // Only what was forgotten comes off the list: a failure is tried again at the next hold.
+    let done: Vec<PathBuf> = mine
+        .into_iter()
+        .filter(|p| match super::forget(dir, p) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("inkwell catalog {id}: {e}");
+                false
+            }
+        })
+        .collect();
+    if let Err(e) = super::settle_pending(dir, &done) {
+        eprintln!("inkwell catalog {id}: {e}");
+    }
+}
+
+/// Startup, and whenever the catalogs are listed: every catalog with paths waiting (a quit while it was being
+/// built) forgets them now.
+pub fn replay_pending(root: &std::path::Path, jobs: &Jobs) {
+    for m in super::list(root) {
+        let dir = root.join(&m.id);
+        if dir.join("forget-pending.json").is_file() {
+            forget_deferred(jobs, &m.id, &dir);
         }
     }
+}
+
+/// [`replay_pending`] for the app's own catalogs folder.
+pub fn replay_pending_at_startup(app: &tauri::AppHandle) {
+    let Ok((data, _)) = crate::recents::data_dir(app) else { return };
+    replay_pending(&data.join("catalogs"), &app.state::<Arc<Jobs>>());
 }
 
 /// A document with redactions was saved over `path`: no catalog keeps its old text.
@@ -154,9 +179,14 @@ pub async fn catalog_create(window: Window, folder: String, name: String, recurs
 }
 
 #[tauri::command]
-pub async fn catalog_list(window: Window) -> Result<Vec<Meta>> {
+pub async fn catalog_list(window: Window, jobs: State<'_, Arc<Jobs>>) -> Result<Vec<Meta>> {
     let root = root(&window)?;
-    blocking(move || Ok(super::list(&root))).await
+    let jobs = jobs.inner().clone();
+    blocking(move || {
+        replay_pending(&root, &jobs);
+        Ok(super::list(&root))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -164,12 +194,7 @@ pub async fn catalog_delete(window: Window, jobs: State<'_, Arc<Jobs>>, id: Stri
     let root = root(&window)?;
     // The id is held for the whole delete, so a build cannot start on a folder that is being removed.
     let jobs = jobs.inner().clone();
-    blocking(move || {
-        let r = jobs.guarded(&id, || super::delete(&root, &id));
-        jobs.deferred.lock().unwrap().retain(|(i, _)| *i != id);
-        r
-    })
-    .await
+    blocking(move || jobs.guarded(&id, || super::delete(&root, &id))).await
 }
 
 /// Whether a refresh would change anything (counts and modified times; no file is opened).
