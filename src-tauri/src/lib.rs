@@ -597,6 +597,57 @@ async fn ocr_choose_tesseract(app: tauri::AppHandle, paths: Tess<'_>) -> Result<
     .await
 }
 
+/// Opens Windows' language settings, where an OCR language pack is added (Optional language
+/// features). A fixed address: nothing from the page decides what is opened.
+#[tauri::command]
+fn open_language_settings() -> Result<(), tools::ToolError> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg("ms-settings:regionlanguage")
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| tools::ToolError(e.to_string()))
+    }
+    #[cfg(not(windows))]
+    Err(tools::ToolError("only available on Windows".into()))
+}
+
+/// The engine and languages the chosen languages will be read with, and what is missing.
+#[tauri::command]
+async fn ocr_plan(paths: Tess<'_>, languages: Vec<String>, backend: Option<tools::BackendChoice>) -> Result<ocr::lang::Plan, tools::ToolError> {
+    let configured = paths.tesseract();
+    tool_blocking(move || Ok(tools::ocr_plan(&languages, backend.unwrap_or_default(), configured.as_deref()))).await
+}
+
+/// The language `doc` is probably written in (its own text, else a quick sample read of its first scan).
+#[tauri::command]
+async fn ocr_detect(eng: Eng<'_>, paths: Tess<'_>, doc: DocId) -> Result<ocr::detect::Detection, tools::ToolError> {
+    let eng = eng.inner().clone();
+    let configured = paths.tesseract();
+    tool_blocking(move || tools::ocr_detect(&eng, doc, configured.as_deref(), &std::sync::atomic::AtomicBool::new(false))).await
+}
+
+/// What `req.style` would do to one page (zero-based), as before/after pictures. Changes nothing.
+#[tauri::command]
+async fn ocr_preview(
+    eng: Eng<'_>,
+    jobs: JobState<'_>,
+    paths: Tess<'_>,
+    job: u64,
+    page: u32,
+    mut req: tools::OcrRequest,
+) -> Result<tools::OcrPreview, tools::ToolError> {
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    let tesseract = paths.tesseract();
+    tool_blocking(move || {
+        let backend = tools::resolve_backend(&mut req, tesseract.as_deref())?;
+        tools::ocr_preview(&eng, &req, page, 1100, backend.as_ref(), &guard.cancel)
+    })
+    .await
+}
+
 #[tauri::command]
 fn ocr_clear_tesseract(paths: Tess<'_>) -> Result<(), tools::ToolError> {
     paths.set_tesseract(None).map_err(tools::ToolError)
@@ -611,7 +662,7 @@ async fn ocr_start(
     jobs: JobState<'_>,
     paths: Tess<'_>,
     job: u64,
-    req: tools::OcrRequest,
+    mut req: tools::OcrRequest,
     on_progress: Channel<ocr::Progress>,
 ) -> Result<tools::OcrOutcome, tools::ToolError> {
     let save_as = req.save_to.as_deref().map(|t| reg.take_save(window.label(), t)).transpose()?.map(std::path::PathBuf::from);
@@ -619,7 +670,7 @@ async fn ocr_start(
     let guard = jobs.inner().begin(job);
     let tesseract = paths.tesseract();
     tool_blocking(move || {
-        let backend = tools::make_backend(req.backend, tesseract.as_deref())?;
+        let backend = tools::resolve_backend(&mut req, tesseract.as_deref())?;
         let r = tools::run_ocr(
             &eng,
             &req,
@@ -929,6 +980,10 @@ pub fn run() {
             tool_cancel,
             ocr_languages,
             ocr_choose_tesseract,
+            ocr_plan,
+            ocr_detect,
+            ocr_preview,
+            open_language_settings,
             ocr_clear_tesseract,
             ocr_start,
             pick_source,

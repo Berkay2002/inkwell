@@ -20,7 +20,7 @@ export function toolItems(doc: Pick<DocState, "id" | "name">): ToolItem[] {
   const { id, name } = doc;
   return [
     { id: "compress", group: "optimize", label: "Compress file…", keywords: "reduce size smaller optimize", onSelect: () => useTools.getState().open("compress", id) },
-    { id: "ocr", group: "optimize", label: "Recognize text…", keywords: "ocr scan searchable", onSelect: () => useTools.getState().open("ocr", id) },
+    { id: "ocr", group: "optimize", label: "Recognize text…", keywords: "ocr scan scanned searchable language languages text", description: "Make scanned pages searchable or editable, in the languages you pick", onSelect: () => useTools.getState().open("ocr", id) },
     { id: "header-footer", group: "marks", label: "Header & footer…", keywords: "page numbers date", onSelect: () => useMarks.getState().open("headerFooter", id) },
     { id: "watermark", group: "marks", label: "Watermark…", keywords: "stamp draft confidential", onSelect: () => useMarks.getState().open("watermark", id) },
     { id: "background", group: "marks", label: "Background…", keywords: "colour color image", onSelect: () => useMarks.getState().open("background", id) },
@@ -186,6 +186,7 @@ export function ToolsMenu({ doc }: { doc: DocState }) {
                       role="option"
                       tabIndex={-1}
                       aria-selected={it === current}
+                      title={it.description}
                       className={it === current ? "active" : undefined}
                       // keep focus in the box while pointing at a row
                       onMouseDown={(e) => e.preventDefault()}

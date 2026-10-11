@@ -59,6 +59,8 @@ impl Bitmap {
 pub struct RawWord {
     pub text: String,
     pub rect: [f32; 4],
+    /// The engine's own confidence, 0..100, when it reports one (Tesseract does, Windows OCR does not).
+    pub conf: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -175,6 +177,7 @@ mod winrt {
                     l.words.push(RawWord {
                         text: word.Text().map_err(werr)?.to_string(),
                         rect: [r.X, r.Y, r.X + r.Width, r.Y + r.Height],
+                        conf: None,
                     });
                 }
                 if !l.words.is_empty() {
@@ -184,6 +187,18 @@ mod winrt {
             Ok(page)
         }
     }
+}
+
+/// The user's Windows languages, display language first (BCP-47); empty off Windows.
+pub fn profile_languages() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        use windows::System::UserProfile::GlobalizationPreferences;
+        if let Ok(v) = GlobalizationPreferences::Languages() {
+            return v.into_iter().map(|h| h.to_string()).collect();
+        }
+    }
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -291,7 +306,7 @@ impl Recognizer for TesseractCli {
             .lines()
             .skip(1)
             .map(str::trim)
-            .filter(|l| !l.is_empty() && *l != "osd")
+            .filter(|l| !l.is_empty() && *l != "osd" && !l.contains('/'))
             .map(|l| ISO3.iter().find(|(_, b)| *b == l).map(|(a, _)| a.to_string()).unwrap_or_else(|| l.to_string()))
             .collect())
     }
@@ -402,7 +417,8 @@ pub(crate) fn parse_tsv(tsv: &str) -> RawPage {
         }
         let p = |i: usize| f[i].parse::<i32>().unwrap_or(0);
         let text = f[11].trim();
-        if text.is_empty() || f[10].parse::<f32>().unwrap_or(0.0) < 0.0 {
+        let conf = f[10].parse::<f32>().unwrap_or(-1.0);
+        if text.is_empty() || conf < 0.0 {
             continue;
         }
         let k = (p(2) as u32, p(3), p(4), 0);
@@ -411,7 +427,7 @@ pub(crate) fn parse_tsv(tsv: &str) -> RawPage {
             key = k;
         }
         let (l, t, w, h) = (p(6) as f32, p(7) as f32, p(8) as f32, p(9) as f32);
-        page.lines.last_mut().unwrap().words.push(RawWord { text: text.to_string(), rect: [l, t, l + w, t + h] });
+        page.lines.last_mut().unwrap().words.push(RawWord { text: text.to_string(), rect: [l, t, l + w, t + h], conf: Some(conf) });
     }
     page
 }

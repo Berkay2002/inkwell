@@ -14,7 +14,7 @@ Sources: pdfcraft ROADMAP.md (area breadth/ready %), acrobat-features.toml ids, 
 | Fill & sign | F includes Fill & Sign | None found | Whole area |
 | Digital signatures | H 62.2/45; PAdES B-B, certify, cert store | None found (grep pades/pkcs/pdf_sign: no hits) | Whole area |
 | Edit text/images | C 53.3/30; edit paragraphs, add text and images | edit_apply, edit_undo (engine/edit.rs); no text-layout editing (study README row 2) | Reflow, fonts, CJK |
-| OCR | I 23.1/15; searchable image, Latin only | ocr/ module; ocr_start, ocr_languages, ocr_choose_tesseract; invisible text layer | Languages, output styles |
+| OCR | I 23.1/15; searchable image, Latin only | ocr/ module; ocr_start, ocr_languages, ocr_plan, ocr_preview; invisible layer, cleaned-up image, editable text; any installed Windows/Tesseract language, auto-detect | Done: languages, output styles (see docs/ocr-engine.md) |
 | Compress | K 34.5/20; Optimizer shipped | compress/; compress_audit, compress_start; Smallest/Balanced/High presets | Preflight, PDF/A |
 | Redact/sanitize | G 58.5/55; glyphs, pixels, vectors, sanitize shipped | redact/, sanitize.rs; set_redaction_hook; redact icon only, no UI label or command found | UI exposure |
 | Protect/encrypt | G; password-to-open, encryption level shipped | authenticate command opens protected PDFs; history/crypto.rs encrypts version store only | Output password and permissions |

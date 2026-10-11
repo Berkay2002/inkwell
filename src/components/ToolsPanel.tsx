@@ -1,6 +1,25 @@
+import { useEffect, useState } from "react";
 import { useAi } from "../lib/aiStore";
-import type { CompressEstimate, CompressPreset } from "../lib/api";
+import { ocrPlan } from "../lib/api";
+import type { CompressEstimate, CompressPreset, OcrMissing } from "../lib/api";
 import * as edits from "../lib/edit";
+import {
+  canStart,
+  changesPicture,
+  DPI_CHOICES,
+  detectedLine,
+  engineLabel,
+  engineLine,
+  FONTS,
+  keptLine,
+  languageName,
+  matchLanguages,
+  missingMatch,
+  previewPage,
+  reviewOrder,
+  STYLES,
+  unsureReason,
+} from "../lib/ocrLogic";
 import { parseRange } from "../lib/pageRange";
 import { fileName, formatBytes, type OcrScope, type Sheet, useTools } from "../lib/toolsStore";
 import type { DocState } from "../store";
@@ -29,7 +48,7 @@ export function ToolsPanel({ doc }: { doc: DocState }) {
         </div>
         {sheet.phase === "options" && (sheet.tool === "compress" ? <CompressOptions sheet={sheet} /> : <OcrOptions sheet={sheet} doc={doc} />)}
         {sheet.phase === "running" && <Running sheet={sheet} />}
-        {sheet.phase === "done" && (sheet.tool === "compress" ? <CompressDone sheet={sheet} /> : <OcrDone sheet={sheet} />)}
+        {sheet.phase === "done" && (sheet.tool === "compress" ? <CompressDone sheet={sheet} /> : <OcrDone sheet={sheet} doc={doc} />)}
         {sheet.phase === "error" && <Failed sheet={sheet} />}
       </section>
     </aside>
@@ -161,19 +180,38 @@ const SCOPES: { id: OcrScope; label: string }[] = [
   { id: "range", label: "Range" },
 ];
 
-const languageName = (tag: string) => {
-  try {
-    return new Intl.DisplayNames(["en"], { type: "language" }).of(tag) ?? tag;
-  } catch {
-    return tag;
-  }
-};
-
 function OcrOptions({ sheet, doc }: { sheet: Sheet; doc: DocState }) {
   const av = sheet.available;
-  const have = av == null ? [] : sheet.backend === "tesseract" ? (av.tesseract?.languages ?? []) : av.windows;
+  const [query, setQuery] = useState("");
+  const [help, setHelp] = useState<OcrMissing | null>(null);
   const rangeOk = sheet.scope !== "range" || (sheet.range.trim() !== "" && parseRange(sheet.range, doc.pageCount) != null);
-  const ready = av != null && sheet.languages.length > 0 && rangeOk;
+  const ready = canStart({ languages: sheet.languages, plan: sheet.plan, rangeOk });
+  const all = av?.catalog.languages ?? [];
+  const shown = matchLanguages(all, query);
+  // A typed name that no installed pack or Tesseract file matches: show how to add it.
+  const missingTag = av ? missingMatch(av.catalog, query) : null;
+  useEffect(() => {
+    if (!missingTag) {
+      setHelp(null);
+      return;
+    }
+    let live = true;
+    ocrPlan([missingTag], "auto").then(
+      (p) => live && setHelp(p.missing[0] ?? null),
+      () => live && setHelp(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [missingTag]);
+  const helps = [...(sheet.plan?.missing ?? []), ...(help && !sheet.plan?.missing.some((m) => m.tag === help.tag) ? [help] : [])];
+  const style = STYLES.find((x) => x.id === sheet.style) ?? STYLES[0];
+  const editable = sheet.style === "editable";
+  const chosen = sheet.scope === "range" ? parseRange(sheet.range, doc.pageCount) : sheet.scope === "page" ? [doc.currentPage] : null;
+  const pvPage = previewPage(chosen, doc.currentPage);
+  const pv = sheet.preview;
+  // Editable text replaces pixels: it is applied after the page was shown (a failed preview does not block it).
+  const gated = editable && pv?.phase !== "ready" && pv?.phase !== "error";
   return (
     <>
       <div className="ax-body tl-body">
@@ -197,55 +235,144 @@ function OcrOptions({ sheet, doc }: { sheet: Sheet; doc: DocState }) {
         )}
         {sheet.scope === "page" && <p className="dim small">Page {doc.currentPage + 1}</p>}
 
-        <label className="tl-label">Language</label>
-        <select
-          className="tl-field"
-          value={sheet.languages[0] ?? ""}
-          aria-label="Language"
-          disabled={have.length === 0}
-          onChange={(e) => st().set({ languages: [e.target.value] })}
-        >
-          {have.length === 0 && <option value="">{av ? "No language installed" : "Looking…"}</option>}
-          {have.map((t) => (
-            <option key={t} value={t}>
-              {languageName(t)}
-            </option>
-          ))}
-        </select>
-
-        <label className="tl-label">Engine</label>
-        <div className="ax-seg tl-seg" role="radiogroup" aria-label="Engine">
-          {(["windows", "tesseract"] as const).map((b) => {
-            const list = av == null ? [] : b === "tesseract" ? (av.tesseract?.languages ?? []) : av.windows;
-            return (
-              <button
-                key={b}
-                role="radio"
-                aria-checked={sheet.backend === b}
-                className={sheet.backend === b ? "on" : ""}
-                disabled={b === "tesseract" && !av?.tesseract}
-                onClick={() => st().set({ backend: b, languages: list[0] ? [list[0]] : [] })}
-              >
-                {b === "windows" ? "Windows" : "Tesseract"}
+        <label className="tl-label">Languages</label>
+        <p className="dim small tl-detected" aria-live="polite">
+          {detectedLine(sheet.detection, sheet.detecting)}
+        </p>
+        {sheet.languages.length > 0 && (
+          <div className="tl-chips" aria-label="Chosen languages">
+            {sheet.languages.map((t) => (
+              <button key={t} className="tl-chip" title={`Remove ${languageName(t)}`} onClick={() => st().toggleLanguage(t)}>
+                {languageName(t)}
+                <span aria-hidden="true">×</span>
               </button>
+            ))}
+          </div>
+        )}
+        <input
+          className="tl-field"
+          value={query}
+          placeholder="Search languages"
+          aria-label="Search languages"
+          spellCheck={false}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <ul className="tl-langs" aria-label="Languages">
+          {av == null && <li className="dim small tl-lang-empty">Looking…</li>}
+          {av != null && shown.length === 0 && <li className="dim small tl-lang-empty">{missingTag ? "Not installed" : "No language matches"}</li>}
+          {shown.map((l) => {
+            const on = sheet.languages.includes(l.tag);
+            return (
+              <li key={l.tag}>
+                <label className={on ? "tl-lang on" : "tl-lang"}>
+                  <input type="checkbox" checked={on} onChange={() => st().toggleLanguage(l.tag)} aria-label={languageName(l.tag)} />
+                  <span className="tl-lang-name">{languageName(l.tag)}</span>
+                  {l.experimental && (
+                    <span className="tl-badge" title="Read, but not as reliably as Latin-script text">
+                      experimental
+                    </span>
+                  )}
+                  <span className="tl-lang-engine dim small">{engineLabel(l)}</span>
+                </label>
+              </li>
             );
           })}
-        </div>
+        </ul>
+        {helps.map((m) => (
+          <div key={m.tag} className="tl-help" role="note">
+            <p>
+              <strong>{languageName(m.tag)}</strong> is not installed.
+            </p>
+            <p className="small">
+              Windows: add it in Settings, Time &amp; language, Language &amp; region, then install its "Optical character recognition" feature.
+            </p>
+            <button className="ax-btn tl-help-btn" onClick={() => st().openLanguageSettings()}>
+              Open language settings
+            </button>
+            <p className="small">
+              Tesseract: put <span className="tl-mono">{m.tessdataFile}</span> in {m.tessdataDir ? <span className="tl-mono">{m.tessdataDir}</span> : "its tessdata folder"}.
+            </p>
+            <p className="dim small">Nothing is downloaded for you.</p>
+          </div>
+        ))}
+        {sheet.plan?.dropped && sheet.plan.dropped.length > 0 && (
+          <p className="tl-warn small">Windows reads one language at a time: {sheet.plan.dropped.map(languageName).join(", ")} left out. Add Tesseract to read several together.</p>
+        )}
+        {sheet.plan?.note && <p className="dim small">{sheet.plan.note}</p>}
+        <p className="dim small tl-engine">{engineLine(sheet.plan)}</p>
         <button className="tl-link small" onClick={() => void st().chooseTesseract()}>
           {av?.tesseract ? "Choose another tesseract.exe…" : "Use Tesseract: choose tesseract.exe…"}
         </button>
 
+        <label className="tl-label">Result</label>
+        <div className="tl-presets" role="radiogroup" aria-label="Result">
+          {STYLES.map((x) => (
+            <button
+              key={x.id}
+              role="radio"
+              aria-checked={sheet.style === x.id}
+              className={sheet.style === x.id ? "tl-preset on" : "tl-preset"}
+              onClick={() => st().set({ style: x.id })}
+            >
+              <span className="tl-radio" aria-hidden="true" />
+              <span className="tl-preset-text">
+                <span className="tl-preset-name">{x.label}</span>
+                <span className="dim small">{x.text}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+        {style.warning && (
+          <p className="tl-warn small" role="note">
+            {style.warning}
+          </p>
+        )}
+        {editable && (
+          <>
+            <label className="tl-label">Font</label>
+            <div className="ax-seg tl-seg" role="radiogroup" aria-label="Font">
+              {FONTS.map((f) => (
+                <button key={f.id} role="radio" aria-checked={sheet.font === f.id} title={f.text} className={sheet.font === f.id ? "on" : ""} onClick={() => st().set({ font: f.id })}>
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+        {changesPicture(sheet.style) && !editable && (
+          <button className="ax-btn tl-wide" disabled={!ready || pv?.phase === "loading"} onClick={() => void st().showPreview()}>
+            Preview page {pvPage + 1}
+          </button>
+        )}
+        <PreviewPane sheet={sheet} />
+
+        <label className="tl-label">Quality</label>
+        <div className="ax-seg tl-seg" role="radiogroup" aria-label="Resolution">
+          {DPI_CHOICES.map((d) => (
+            <button key={d} role="radio" aria-checked={sheet.dpi === d} className={sheet.dpi === d ? "on" : ""} onClick={() => st().set({ dpi: d })}>
+              {d} dpi
+            </button>
+          ))}
+        </div>
+
         <label className="tl-switch">
-          <input type="checkbox" checked={sheet.force} onChange={(e) => st().set({ force: e.target.checked })} />
-          <span>Redo pages that already have text</span>
+          <input type="checkbox" checked={editable || sheet.skipText} disabled={editable} onChange={(e) => st().set({ skipText: e.target.checked })} />
+          <span>Skip pages that already have text</span>
         </label>
-        <p className="dim small">The text is added to this document as one step you can undo.</p>
+        {editable && <p className="dim small">Editable text is only made on pages that have none.</p>}
+        <p className="dim small">The result is added to this document as one step you can undo.</p>
       </div>
       <div className="tl-foot">
-        <button className="ax-btn primary tl-wide" disabled={!ready} onClick={() => void st().start()}>
-          Recognize text
-        </button>
-        <button className="ax-btn tl-wide" disabled={!ready} onClick={() => void st().start({ saveAs: true })}>
+        {gated ? (
+          <button className="ax-btn primary tl-wide" disabled={!ready || pv?.phase === "loading"} onClick={() => void st().showPreview()}>
+            {pv?.phase === "loading" ? "Reading the page…" : `Preview page ${pvPage + 1} first`}
+          </button>
+        ) : (
+          <button className="ax-btn primary tl-wide" disabled={!ready} onClick={() => void st().start()}>
+            Recognize text
+          </button>
+        )}
+        <button className="ax-btn tl-wide" disabled={!ready || gated} onClick={() => void st().start({ saveAs: true })}>
           Save as new file…
         </button>
       </div>
@@ -253,7 +380,53 @@ function OcrOptions({ sheet, doc }: { sheet: Sheet; doc: DocState }) {
   );
 }
 
-function OcrDone({ sheet }: { sheet: Sheet }) {
+/** One page before and after the chosen style (the rail is narrow: one picture at a time, switched). */
+function PreviewPane({ sheet }: { sheet: Sheet }) {
+  const [side, setSide] = useState<"after" | "before">("after");
+  const p = sheet.preview;
+  if (!p) return null;
+  const kept = keptLine({ words_kept: p.kept });
+  return (
+    <section className="tl-preview" aria-label="Preview">
+      <div className="tl-preview-head">
+        <span className="tl-label">Page {p.page + 1}</span>
+        <span className="grow" />
+        <div className="ax-seg tl-seg" role="radiogroup" aria-label="Show">
+          {(["before", "after"] as const).map((s) => (
+            <button key={s} role="radio" aria-checked={side === s} className={side === s ? "on" : ""} disabled={p.phase !== "ready"} onClick={() => setSide(s)}>
+              {s === "before" ? "Before" : "After"}
+            </button>
+          ))}
+        </div>
+        <button className="tl-link small" onClick={() => st().closePreview()}>
+          Close
+        </button>
+      </div>
+      {p.phase === "loading" && (
+        <p className="dim small" role="status">
+          Reading the page…
+        </p>
+      )}
+      {p.phase === "error" && (
+        <p className="tl-warn small" role="alert">
+          {p.message}
+        </p>
+      )}
+      {p.phase === "ready" && (
+        <>
+          <img className="tl-preview-img" src={(side === "after" ? p.after : p.before) ?? undefined} alt={`Page ${p.page + 1}, ${side}`} />
+          {sheet.style === "editable" && (
+            <p className="dim small">
+              {p.converted} word{p.converted === 1 ? "" : "s"} become text.{kept ? ` ${kept}.` : ""}
+            </p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function OcrDone({ sheet, doc }: { sheet: Sheet; doc: DocState }) {
   const o = sheet.recognized;
   if (!o) return null;
   const r = o.report;
@@ -278,6 +451,76 @@ function OcrDone({ sheet }: { sheet: Sheet }) {
           <dt>Failed</dt>
           <dd className="tl-mono">{r.pages_failed}</dd>
         </dl>
+        {r.clean && (
+          <dl className="tl-counts" aria-label="Clean-up">
+            <dt>Pictures cleaned up</dt>
+            <dd className="tl-mono">{r.clean.pages_cleaned}</dd>
+            <dt>Straightened</dt>
+            <dd className="tl-mono">{r.clean.pages_deskewed}</dd>
+            <dt>Specks removed</dt>
+            <dd className="tl-mono">{r.clean.specks_removed}</dd>
+            {r.clean.pages_clean > 0 && (
+              <>
+                <dt>Already clean</dt>
+                <dd className="tl-mono">{r.clean.pages_clean}</dd>
+              </>
+            )}
+            {r.clean.pages_left > 0 && (
+              <>
+                <dt>Left as they were</dt>
+                <dd className="tl-mono">{r.clean.pages_left}</dd>
+              </>
+            )}
+          </dl>
+        )}
+        {r.clean?.notes.map((n, i) => (
+          <p key={i} className="dim small">
+            {n}
+          </p>
+        ))}
+        {r.editable && (
+          <>
+            <dl className="tl-counts" aria-label="Editable text">
+              <dt>Pages made editable</dt>
+              <dd className="tl-mono">{r.editable.pages_converted}</dd>
+              <dt>Words made into text</dt>
+              <dd className="tl-mono">{r.editable.words_converted}</dd>
+              {r.editable.pages_kept > 0 && (
+                <>
+                  <dt>Left as a picture</dt>
+                  <dd className="tl-mono">{r.editable.pages_kept}</dd>
+                </>
+              )}
+            </dl>
+            {r.editable.notes.map((n, i) => (
+              <p key={i} className="dim small">
+                {n}
+              </p>
+            ))}
+            {r.editable.words_kept > 0 && <p className="tl-warn small">{keptLine(r.editable)}. They are still searchable.</p>}
+            {r.editable.unsure.length > 0 && (
+              <>
+                <label className="tl-label">Review unsure words</label>
+                <ul className="tl-unsure" aria-label="Unsure words">
+                  {reviewOrder(r.editable.unsure, doc.currentPage)
+                    .slice(0, 60)
+                    .map((u, i) => (
+                      <li key={i}>
+                        <button className="tl-unsure-item" onClick={() => st().reviewWord(u)}>
+                          <span className="tl-unsure-text">{u.text}</span>
+                          <span className="dim small">
+                            Page {u.page + 1} · {unsureReason(u.why)}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                </ul>
+                {r.editable.unsure.length > 60 && <p className="dim small">Showing 60 of {r.editable.unsure.length}.</p>}
+              </>
+            )}
+            <p className="dim small">The scan pixels under the new text were replaced. Undo, or the version history, brings the original back.</p>
+          </>
+        )}
         {r.words > 0 && <p className="dim small">{r.words} words added.</p>}
         {o.output && (
           <p className="dim small tl-file" title={o.output}>
@@ -330,7 +573,9 @@ function Running({ sheet }: { sheet: Sheet }) {
           <span style={{ width: `${pct}%` }} />
         </div>
         <p className="dim small">
-          {sheet.tool === "ocr" ? `${sheet.backend === "tesseract" ? "Tesseract" : "Windows OCR"}, ${sheet.languages.join(", ")}` : "Your original stays as it is."}
+          {sheet.tool === "ocr"
+            ? `${sheet.plan?.engine === "tesseract" ? "Tesseract" : "Windows OCR"}, ${sheet.languages.map(languageName).join(", ")}`
+            : "Your original stays as it is."}
         </p>
       </div>
       <div className="tl-foot">

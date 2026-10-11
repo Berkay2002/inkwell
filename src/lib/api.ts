@@ -503,20 +503,81 @@ export interface CompressRequest {
   saveTo?: string;
 }
 
-export type OcrBackend = "windows" | "tesseract";
+/** `auto`: the engine is picked from the languages (Windows reads one, several go to Tesseract). */
+export type OcrBackend = "auto" | "windows" | "tesseract";
+/** Searchable image (invisible layer), the same cleaned up, or real editable text. */
+export type OcrStyle = "searchable" | "cleaned" | "editable";
+/** The face editable text is set in: `auto` picks mono for typed pages. */
+export type OcrFont = "auto" | "sans" | "mono";
+
+/** One language as the list shows it: which engines have it. */
+export interface OcrLang {
+  /** Primary tag ("sv"). */
+  tag: string;
+  /** The installed Windows pack ("sv-SE"). */
+  windows: string | null;
+  tesseract: boolean;
+  rtl: boolean;
+  cjk: boolean;
+  /** Read, but not as reliably as Latin text. */
+  experimental: boolean;
+}
+
+export interface OcrCatalog {
+  languages: OcrLang[];
+  tesseractFound: boolean;
+  /** Where Tesseract's `*.traineddata` files go. */
+  tessdataDir: string | null;
+}
 
 export interface OcrLanguages {
   windows: string[];
   tesseract: { path: string; languages: string[] } | null;
+  catalog: OcrCatalog;
+  /** The user's Windows languages, display language first. */
+  profile: string[];
+  /** Display language plus English, as far as installed. */
+  defaults: string[];
+}
+
+export interface OcrMissing {
+  tag: string;
+  /** `ms-settings:regionlanguage`; opened with `openLanguageSettings`. */
+  windowsSettings: string;
+  /** `swe.traineddata` */
+  tessdataFile: string;
+  tessdataDir: string | null;
+}
+
+/** Which engine reads the chosen languages, and what is missing for them. */
+export interface OcrPlan {
+  engine: "windows" | "tesseract" | null;
+  languages: string[];
+  dropped: string[];
+  missing: OcrMissing[];
+  note: string | null;
+}
+
+export interface OcrDetection {
+  languages: string[];
+  source: "text" | "sample" | "profile";
+  guess: string | null;
+  confidence: number;
 }
 
 export interface OcrRequest {
   doc: number;
   /** One-based range like "1-3, 5"; omitted = every page. */
   pages?: string;
+  /** Primary tags ("sv"); the engine and its own tags are settled by Rust. */
   languages: string[];
   force: boolean;
   backend: OcrBackend;
+  style?: OcrStyle;
+  /** Render resolution: 150, 200 (default) or 300. */
+  dpi?: number;
+  /** Editable text only. */
+  font?: OcrFont;
   /** Save token: write a new file instead of changing the document. */
   saveTo?: string;
 }
@@ -538,6 +599,41 @@ export interface OcrReport {
   words: number;
   total_ms: number;
   warnings: string[];
+  /** What the cleaned-up style did to the pictures; absent for the other styles. */
+  clean?: OcrClean | null;
+  /** What the editable-text style did; absent for the other styles. */
+  editable?: OcrEditable | null;
+}
+
+/** A word that stayed in the picture (its text is still searchable). */
+export interface OcrUnsure {
+  /** 0-based page. */
+  page: number;
+  text: string;
+  /** [x0, y0, x1, y1] on the displayed page, points. */
+  bbox: [number, number, number, number];
+  why: "low-confidence" | "unusual" | "no-font" | "picture";
+}
+
+export interface OcrEditable {
+  pages_converted: number;
+  /** Pages left as a picture with an invisible layer, with the first few reasons in `notes`. */
+  pages_kept: number;
+  words_converted: number;
+  words_kept: number;
+  unsure: OcrUnsure[];
+  notes: string[];
+}
+
+export interface OcrClean {
+  pages_cleaned: number;
+  pages_deskewed: number;
+  specks_removed: number;
+  /** Pages that needed nothing. */
+  pages_clean: number;
+  /** Pages left as they were, with the first few reasons in `notes`. */
+  pages_left: number;
+  notes: string[];
 }
 
 export interface OcrOutcome {
@@ -632,7 +728,23 @@ export const toolCancel = (job: number) => invoke<void>("tool_cancel", { job });
 export const ocrLanguages = () => invoke<OcrLanguages>("ocr_languages");
 /** Opens a file picker (Rust side) and remembers tesseract.exe; resolves to the path or null. */
 export const ocrChooseTesseract = () => invoke<string | null>("ocr_choose_tesseract");
+/** Which engine reads `languages` and what is missing for them. */
+export const ocrPlan = (languages: string[], backend: OcrBackend = "auto") => invoke<OcrPlan>("ocr_plan", { languages, backend });
+/** The language the document is probably in: its own text, else a quick sample read of its first scan. */
+export const ocrDetect = (doc: number) => invoke<OcrDetection>("ocr_detect", { doc });
+/** Opens Windows' language settings, where an OCR language pack is added. A fixed address. */
+export const openLanguageSettings = () => invoke<void>("open_language_settings");
 export const ocrClearTesseract = () => invoke<void>("ocr_clear_tesseract");
+
+/** One page before and after the style, as PNG data URLs. Changes nothing. */
+export interface OcrPreview {
+  before: string;
+  after: string;
+  applied: { pages_written: number; words: number; editable?: OcrEditable | null; clean?: OcrClean | null };
+}
+
+/** `page` is 0-based. Runs on its own thread; `toolCancel(job)` stops it. */
+export const ocrPreview = (job: number, page: number, req: OcrRequest) => invoke<OcrPreview>("ocr_preview", { job, page, req });
 
 export function ocrStart(job: number, req: OcrRequest, onProgress: (p: OcrProgress) => void) {
   const ch = new Channel<OcrProgress>();

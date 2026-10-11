@@ -21,7 +21,11 @@ vi.mock("./api", () => ({
   toolCancel: vi.fn(() => Promise.resolve()),
   ocrLanguages: vi.fn(),
   ocrChooseTesseract: vi.fn(),
+  ocrDetect: vi.fn(),
+  ocrPlan: vi.fn(),
+  openLanguageSettings: vi.fn(() => Promise.resolve()),
   ocrStart: vi.fn(),
+  ocrPreview: vi.fn(),
 }));
 
 import { useStore } from "../store";
@@ -55,7 +59,7 @@ function doc(dirty = false) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.compressEstimate).mockResolvedValue(estimates as never);
-  useTools.setState({ sheet: null, settings: { ocrLanguage: null, ocrBackend: "windows", compressPreset: "balanced" } });
+  useTools.setState({ sheet: null, settings: { ocrLanguages: null, ocrStyle: "searchable", ocrDpi: 200, ocrSkipText: true, ocrFont: "auto", compressPreset: "balanced" } });
   doc();
 });
 
@@ -178,29 +182,164 @@ describe("compress estimate", () => {
 });
 
 describe("OCR sheet", () => {
-  const langs = { windows: ["en-US", "sv-SE"], tesseract: null };
+  const lang = (tag: string, windows: string | null, tesseract = false) => ({ tag, windows, tesseract, rtl: false, cjk: false, experimental: false });
+  const langs = {
+    windows: ["en-US", "sv-SE"],
+    tesseract: null,
+    catalog: { languages: [lang("en", "en-US"), lang("sv", "sv-SE")], tesseractFound: false, tessdataDir: null },
+    profile: ["sv-SE", "en-US"],
+    defaults: ["sv", "en"],
+  };
+  const plan = (languages: string[]) => ({ engine: "windows", languages, dropped: [], missing: [], note: null });
   const outcome = {
     report: { pages_recognized: 10, pages_skipped_text: 2, pages_failed: 0 },
     state: { rev: 1, undo: "Recognize text (10 pages)" },
     output: null,
   };
 
+  beforeEach(() => {
+    vi.mocked(api.ocrDetect).mockResolvedValue({ languages: ["sv", "en"], source: "profile", guess: null, confidence: 0 } as never);
+    vi.mocked(api.ocrPlan).mockImplementation((l) => Promise.resolve(plan(l) as never));
+  });
+
+  it("starts on the display language plus English and works out the engine", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    useTools.getState().open("ocr");
+    await flush();
+    await flush();
+    const s = useTools.getState().sheet!;
+    expect(s.languages).toEqual(["sv", "en"]);
+    expect(s.detecting).toBe(false);
+    expect(s.plan?.engine).toBe("windows");
+  });
+
+  it("starts on what the document is written in, when that is known", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    vi.mocked(api.ocrDetect).mockResolvedValue({ languages: ["en"], source: "text", guess: "en", confidence: 0.3 } as never);
+    useTools.getState().open("ocr");
+    await flush();
+    await flush();
+    expect(useTools.getState().sheet?.languages).toEqual(["en"]);
+    expect(useTools.getState().sheet?.detection?.source).toBe("text");
+  });
+
+  it("keeps the languages the user picked when the detection arrives late", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    let answer!: (v: unknown) => void;
+    vi.mocked(api.ocrDetect).mockReturnValue(new Promise((r) => (answer = r)) as never);
+    useTools.getState().open("ocr");
+    await flush();
+    useTools.getState().toggleLanguage("sv");
+    await flush();
+    expect(useTools.getState().sheet?.languages).toEqual(["en"]);
+    answer({ languages: ["sv"], source: "sample", guess: "sv", confidence: 0.3 });
+    await flush();
+    expect(useTools.getState().sheet?.languages).toEqual(["en"]);
+    expect(useTools.getState().sheet?.detection?.guess).toBe("sv");
+  });
+
+  it("asks for the engine again when a language is added or removed", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    useTools.getState().open("ocr");
+    await flush();
+    await flush();
+    vi.mocked(api.ocrPlan).mockClear();
+    useTools.getState().toggleLanguage("sv");
+    await flush();
+    expect(api.ocrPlan).toHaveBeenCalledWith(["en"], "auto");
+    expect(useTools.getState().sheet?.plan?.languages).toEqual(["en"]);
+  });
+
+  it("sends the style, resolution and skip choice, and remembers them", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    useTools.getState().open("ocr");
+    await flush();
+    await flush();
+    vi.mocked(api.ocrStart).mockResolvedValue(outcome as never);
+    useTools.getState().set({ style: "cleaned", dpi: 300, skipText: false });
+    await useTools.getState().start();
+    expect(vi.mocked(api.ocrStart).mock.calls[0][1]).toMatchObject({ languages: ["sv", "en"], backend: "auto", style: "cleaned", dpi: 300, force: true });
+    expect(useTools.getState().settings).toMatchObject({ ocrLanguages: ["sv", "en"], ocrStyle: "cleaned", ocrDpi: 300, ocrSkipText: false });
+  });
+
+  it("never redoes pages that have text when the style is editable text", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    useTools.getState().open("ocr");
+    await flush();
+    await flush();
+    vi.mocked(api.ocrStart).mockResolvedValue(outcome as never);
+    useTools.getState().set({ style: "editable", skipText: false });
+    await useTools.getState().start();
+    expect(vi.mocked(api.ocrStart).mock.calls[0][1]).toMatchObject({ style: "editable", force: false });
+  });
+
+  it("previews the page in view with the chosen style and font, and any change to the choices drops it", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    useTools.getState().open("ocr");
+    await flush();
+    await flush();
+    vi.mocked(api.ocrPreview).mockResolvedValue({
+      before: "data:image/png;base64,AA",
+      after: "data:image/png;base64,BB",
+      applied: { pages_written: 1, words: 40, editable: { words_converted: 37, words_kept: 3 } },
+    } as never);
+    useTools.getState().set({ style: "editable", font: "mono" });
+    await useTools.getState().showPreview();
+    const [, page, req] = vi.mocked(api.ocrPreview).mock.calls[0];
+    expect(page).toBe(2);
+    expect(req).toMatchObject({ doc: 1, languages: ["sv", "en"], style: "editable", font: "mono", force: false });
+    expect(useTools.getState().sheet?.preview).toMatchObject({ phase: "ready", page: 2, converted: 37, kept: 3 });
+    useTools.getState().set({ dpi: 300 });
+    expect(useTools.getState().sheet?.preview).toBeNull();
+  });
+
+  it("shows why a preview failed and leaves the choices alone", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    useTools.getState().open("ocr");
+    await flush();
+    await flush();
+    vi.mocked(api.ocrPreview).mockRejectedValue("signed-document");
+    useTools.getState().set({ style: "cleaned" });
+    await useTools.getState().showPreview();
+    const p = useTools.getState().sheet?.preview;
+    expect(p?.phase).toBe("error");
+    expect(p?.message).toMatch(/signed/);
+    expect(useTools.getState().sheet?.style).toBe("cleaned");
+  });
+
+  it("stops a preview that is still being made when it is closed", async () => {
+    vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
+    useTools.getState().open("ocr");
+    await flush();
+    await flush();
+    vi.mocked(api.ocrPreview).mockReturnValue(new Promise(() => {}) as never);
+    useTools.getState().set({ style: "cleaned" });
+    void useTools.getState().showPreview();
+    await flush();
+    const job = useTools.getState().sheet?.preview?.job;
+    expect(useTools.getState().sheet?.preview?.phase).toBe("loading");
+    useTools.getState().closePreview();
+    expect(vi.mocked(api.toolCancel)).toHaveBeenCalledWith(job);
+    expect(useTools.getState().sheet?.preview).toBeNull();
+  });
+
   it("offers the installed languages, runs on the chosen pages and applies the new state", async () => {
     vi.mocked(api.ocrLanguages).mockResolvedValue(langs as never);
     useTools.getState().open("ocr");
     await flush();
-    expect(useTools.getState().sheet?.languages).toEqual(["en-US"]);
+    await flush();
+    expect(useTools.getState().sheet?.languages).toEqual(["sv", "en"]);
 
     vi.mocked(api.ocrStart).mockImplementation((_j, _r, onP) => {
       onP({ done: 3, total: 12, page: 2 });
       return Promise.resolve(outcome as never);
     });
-    useTools.getState().set({ scope: "range", range: "1-3, 5", languages: ["sv-SE"] });
+    useTools.getState().set({ scope: "range", range: "1-3, 5", languages: ["sv"] });
     await useTools.getState().start();
-    expect(vi.mocked(api.ocrStart).mock.calls[0][1]).toMatchObject({ doc: 1, pages: "1-3, 5", languages: ["sv-SE"], force: false });
+    expect(vi.mocked(api.ocrStart).mock.calls[0][1]).toMatchObject({ doc: 1, pages: "1-3, 5", languages: ["sv"], force: false });
     expect(edits.applyState).toHaveBeenCalledWith(1, outcome.state);
     expect(useTools.getState().sheet?.phase).toBe("done");
-    expect(useTools.getState().settings.ocrLanguage).toBe("sv-SE");
+    expect(useTools.getState().settings.ocrLanguages).toEqual(["sv"]);
   });
 
   it("reads this page when asked, and undo reverts the single step", async () => {
@@ -229,7 +368,15 @@ describe("OCR sheet", () => {
 
 describe("the right-hand rail", () => {
   it("records the pages an OCR run has finished, for the thumbnails", async () => {
-    vi.mocked(api.ocrLanguages).mockResolvedValue({ windows: ["en-US"], tesseract: null } as never);
+    vi.mocked(api.ocrLanguages).mockResolvedValue({
+      windows: ["en-US"],
+      tesseract: null,
+      catalog: { languages: [{ tag: "en", windows: "en-US", tesseract: false, rtl: false, cjk: false, experimental: false }], tesseractFound: false, tessdataDir: null },
+      profile: ["en-US"],
+      defaults: ["en"],
+    } as never);
+    vi.mocked(api.ocrDetect).mockResolvedValue({ languages: ["en"], source: "profile", guess: null, confidence: 0 } as never);
+    vi.mocked(api.ocrPlan).mockResolvedValue({ engine: "windows", languages: ["en-US"], dropped: [], missing: [], note: null } as never);
     useTools.getState().open("ocr");
     await flush();
     vi.mocked(api.ocrStart).mockImplementation((_j, _r, onP) => {

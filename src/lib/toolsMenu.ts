@@ -8,6 +8,8 @@ export interface ToolItem {
   group: string;
   /** Extra words the filter also matches (so "ocr" finds "Recognize text…"). */
   keywords?: string;
+  /** One line shown as the row's tooltip; the filter matches on it too. */
+  description?: string;
   onSelect: () => void;
 }
 
@@ -34,8 +36,8 @@ const words = (s: string) =>
     .filter(Boolean);
 
 /**
- * The items that match `query` (every word of it must appear in the label, the keywords or the group's
- * title), under their headers in `TOOL_GROUPS` order, items in the order given. A group with nothing left
+ * The items that match `query` (every word of it must appear in the label, the keywords, the description or
+ * the group's title), under their headers in `TOOL_GROUPS` order, items in the order given. A group with nothing left
  * has no header. An empty query keeps everything.
  */
 export function filterTools(items: ToolItem[], query: string): ToolSection[] {
@@ -44,7 +46,7 @@ export function filterTools(items: ToolItem[], query: string): ToolSection[] {
   const sections = new Map<string, ToolSection>(TOOL_GROUPS.map((g) => [g.id, { id: g.id, title: g.title, items: [] }]));
   for (const it of items) {
     const title = titleOf.get(it.group) ?? it.group;
-    const hay = `${it.label} ${it.keywords ?? ""} ${title}`.toLowerCase().replace(/…/g, " ");
+    const hay = `${it.label} ${it.keywords ?? ""} ${it.description ?? ""} ${title}`.toLowerCase().replace(/…/g, " ");
     if (!terms.every((t) => hay.includes(t))) continue;
     let s = sections.get(it.group);
     if (!s) {

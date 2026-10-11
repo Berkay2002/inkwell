@@ -12,10 +12,14 @@
 //! [`ocr_file`] is both stages plus a save, for callers that just want "scan in, searchable out".
 
 pub mod backend;
+mod clean;
+pub mod detect;
+mod editable;
 mod glyphless;
 pub mod lang;
 mod layer;
 mod order;
+mod raster;
 
 #[cfg(test)]
 mod tests;
@@ -27,9 +31,10 @@ use std::time::Instant;
 
 use mupdf::pdf::{PdfDocument, PdfWriteOptions};
 use mupdf::{Colorspace, Matrix, TextPageFlags};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use backend::{Bitmap, RawPage, Recognizer};
+pub use editable::{EditableReport, FontPref, UnsureWord};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OcrError {
@@ -64,6 +69,9 @@ impl From<mupdf::Error> for OcrError {
 pub struct Word {
     pub text: String,
     pub bbox: [f32; 4],
+    /// Engine confidence 0..100 (Tesseract); none for Windows OCR, which reports none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conf: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -137,12 +145,25 @@ impl PageResult {
                         let ys = p.map(|q| q.1);
                         let min = |v: [f32; 4]| v.into_iter().fold(f32::MAX, f32::min);
                         let max = |v: [f32; 4]| v.into_iter().fold(f32::MIN, f32::max);
-                        Word { text: w.text.clone(), bbox: [min(xs), min(ys), max(xs), max(ys)] }
+                        Word { text: w.text.clone(), bbox: [min(xs), min(ys), max(xs), max(ys)], conf: w.conf }
                     })
                     .collect()
             })
             .collect()
     }
+}
+
+/// What a run leaves on the page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Style {
+    /// An invisible text layer over the unchanged scan.
+    #[default]
+    Searchable,
+    /// The same, after straightening a tilted scan and removing specks (`clean`).
+    Cleaned,
+    /// The recognised lines as real text, and the scan under them replaced (`editable`).
+    Editable,
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +178,10 @@ pub struct Options {
     pub dpi: u32,
     /// Read pages even if they already have text, and replace an earlier layer of ours.
     pub force: bool,
+    /// What the pages look like afterwards. `Editable` never reads pages that have text.
+    pub style: Style,
+    /// The face `Editable` text is set in.
+    pub font: FontPref,
     /// Look for pages scanned sideways or upside down when the first read finds little text.
     pub detect_orientation: bool,
     /// Pages recognised at once. The default is half the logical cores, at most 8: Windows OCR
@@ -167,7 +192,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-        Self { pages: None, languages: Vec::new(), dpi: 200, force: false, detect_orientation: true, workers: (cores / 2).clamp(1, 8) }
+        Self { pages: None, languages: Vec::new(), dpi: 200, force: false, style: Style::Searchable, font: FontPref::Auto, detect_orientation: true, workers: (cores / 2).clamp(1, 8) }
     }
 }
 
@@ -314,7 +339,7 @@ fn to_words(raw: RawPage, scale: f32) -> (Vec<Vec<Word>>, Option<f32>) {
         .lines
         .into_iter()
         .map(|l| {
-            let words = l.words.into_iter().map(|w| Word { text: normalize(w.text), bbox: w.rect.map(|v| v / scale) }).collect();
+            let words = l.words.into_iter().map(|w| Word { text: normalize(w.text), bbox: w.rect.map(|v| v / scale), conf: w.conf }).collect();
             join_number_fragments(words)
         })
         .filter(|l: &Vec<Word>| !l.is_empty())
@@ -649,7 +674,40 @@ pub struct ApplyReport {
     pub words: u32,
     /// Earlier Inkwell layers removed because `replace` was set.
     pub layers_replaced: u32,
+    /// What the cleaned-up style did to the pictures (none for the other styles).
+    pub clean: Option<clean::CleanReport>,
+    /// What the editable-text style did (none for the other styles).
+    pub editable: Option<EditableReport>,
 }
+
+/// Stage 2 for `opts.style`. `Cleaned` rewrites the picture of pages that need it and then lays the
+/// text over the straightened picture; `Searchable` is [`apply`]. Pages with a redaction mark and
+/// signed documents are not touched by the picture styles (the caller refuses the signed ones).
+pub fn apply_styled(doc: &mut PdfDocument, results: &[PageResult], opts: &Options) -> Result<ApplyReport, OcrError> {
+    match opts.style {
+        Style::Searchable => apply(doc, results, opts.force),
+        Style::Cleaned => {
+            if is_signed(doc) {
+                return Err(OcrError::Pdf(SIGNED.into()));
+            }
+            let mut results = results.to_vec();
+            let cleaned = clean::clean_pages(doc, &mut results)?;
+            let mut report = apply(doc, &results, opts.force)?;
+            report.clean = Some(cleaned);
+            Ok(report)
+        }
+        Style::Editable => {
+            if is_signed(doc) {
+                return Err(OcrError::Pdf(SIGNED.into()));
+            }
+            let done = editable::apply(doc, results, opts.font)?;
+            Ok(ApplyReport { pages_written: done.pages_written, words: done.words, layers_replaced: 0, clean: None, editable: Some(done.report) })
+        }
+    }
+}
+
+/// The error code for "this style does not change signed documents".
+pub const SIGNED: &str = "signed-document";
 
 /// Stage 2. Adds the recognised text of every `Recognized` result to `doc`. With `replace`, a
 /// layer an earlier OCR run of ours left on the page is removed first (the user's own content is
@@ -685,11 +743,20 @@ pub fn apply(doc: &mut PdfDocument, results: &[PageResult], replace: bool) -> Re
 /// included, stay exactly as they were and a 100-page scan is not rewritten), otherwise a full
 /// write that does not touch stream encodings.
 pub fn save(doc: &PdfDocument, path: &Path) -> Result<(), OcrError> {
+    save_as(doc, path, false)
+}
+
+/// [`save`]; with `removing` (a style that replaced pictures) the file is written in full without
+/// the objects nothing refers to any more, so the old pixels are not left in it.
+pub fn save_as(doc: &PdfDocument, path: &Path, removing: bool) -> Result<(), OcrError> {
     let mut o = PdfWriteOptions::default();
-    if doc.can_be_saved_incrementally() {
+    if doc.can_be_saved_incrementally() && !removing {
         o.set_incremental(true);
     } else {
         o.set_compress_images(false).set_compress_fonts(false).set_decompress(false);
+        if removing {
+            o.set_garbage_level(1);
+        }
     }
     doc.save_with_options(path.to_string_lossy().as_ref(), o)?;
     Ok(())
@@ -708,6 +775,10 @@ pub struct Report {
     pub pages: Vec<PageSummary>,
     /// Things the user should know about the output (a signed file, for one).
     pub warnings: Vec<String>,
+    /// What the cleaned-up style did to the pictures; none for the other styles.
+    pub clean: Option<clean::CleanReport>,
+    /// What the editable-text style did; none for the other styles.
+    pub editable: Option<EditableReport>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -752,6 +823,10 @@ pub fn ocr_file_with(
     if output.exists() && !replace {
         return Err(OcrError::OutputExists(output.display().to_string()));
     }
+    if opts.style != Style::Searchable && is_signed(&Input::Path(input).open()?) {
+        // Changing the pictures would break the signature: say so before anything is read.
+        return Err(OcrError::Pdf(SIGNED.into()));
+    }
     let rec = recognize(&Input::Path(input), backend, opts, progress, cancel)?;
     if rec.cancelled {
         return Err(OcrError::Cancelled);
@@ -774,17 +849,18 @@ pub fn ocr_file_with(
         drop(dst);
         // The document must be closed before its file is linked or renamed (Windows).
         let mut doc = Input::Path(&tmp.0).open()?;
-        applied = apply(&mut doc, &rec.pages, opts.force)?;
+        applied = apply_styled(&mut doc, &rec.pages, opts)?;
+        let removing = opts.style != Style::Searchable;
         if applied.pages_written > 0 {
             let signed = is_signed(&doc);
-            if doc.can_be_saved_incrementally() {
+            if doc.can_be_saved_incrementally() && !removing {
                 save(&doc, &tmp.0)?;
                 if signed {
                     warnings.push("The document is signed; the signature covers the original revision only and viewers may report the copy as modified.".into());
                 }
             } else {
                 let f = TempFile::beside(output)?;
-                save(&doc, &f.0)?;
+                save_as(&doc, &f.0, removing)?;
                 full = Some(f);
                 if signed {
                     warnings.push("The document is signed; the signatures are invalid in the OCR copy.".into());
@@ -802,6 +878,58 @@ pub fn ocr_file_with(
     }
 
     Ok(build_report(&rec, &applied, warnings))
+}
+
+/// One page before and after a style, for the sheet's side-by-side preview. Nothing is written.
+pub struct Preview {
+    pub before: Vec<u8>,
+    pub after: Vec<u8>,
+    pub applied: ApplyReport,
+}
+
+/// Reads page `page` (zero-based) of `input`, applies `opts.style` to an in-memory copy and renders
+/// the page before and after as PNGs whose longer side is at most `max_px`. Signed documents are
+/// refused for the styles that change pictures, like a real run.
+pub fn preview(
+    input: &Input,
+    page: u32,
+    backend: &dyn Recognizer,
+    opts: &Options,
+    max_px: u32,
+    cancel: &AtomicBool,
+) -> Result<Preview, OcrError> {
+    let mut o = opts.clone();
+    o.pages = Some(vec![page]);
+    let mut doc = input.open()?;
+    if opts.style != Style::Searchable && is_signed(&doc) {
+        return Err(OcrError::Pdf(SIGNED.into()));
+    }
+    let rec = recognize(input, backend, &o, &|_| {}, cancel)?;
+    if rec.cancelled {
+        return Err(OcrError::Cancelled);
+    }
+    let Some(r) = rec.pages.first() else { return Err(OcrError::BadPage(page)) };
+    match &r.status {
+        PageStatus::Recognized => {}
+        PageStatus::SkippedHasText => return Err(OcrError::Io("this page already has text".into())),
+        PageStatus::NoText => return Err(OcrError::Io("no text was found on this page".into())),
+        PageStatus::Failed(m) => return Err(OcrError::Backend(m.clone())),
+    }
+    let before = render_png(&doc, page, max_px)?;
+    let applied = apply_styled(&mut doc, &rec.pages, &o)?;
+    let after = render_png(&doc, page, max_px)?;
+    Ok(Preview { before, after, applied })
+}
+
+fn render_png(doc: &PdfDocument, index: u32, max_px: u32) -> Result<Vec<u8>, OcrError> {
+    let page = doc.load_page(index as i32)?;
+    let b = page.bounds()?;
+    let longest = (b.x1 - b.x0).max(b.y1 - b.y0).max(1.0);
+    let scale = (max_px as f32 / longest).min(3.0);
+    let pix = page.to_pixmap(&Matrix::new_scale(scale, scale), &Colorspace::device_rgb(), false, true)?;
+    let mut out = Vec::new();
+    pix.write_to(&mut out, mupdf::ImageFormat::PNG)?;
+    Ok(out)
 }
 
 /// The document has a signature (AcroForm `SigFlags` & 1): saving after OCR no longer validates it.
@@ -839,5 +967,7 @@ pub fn build_report(rec: &Recognition, applied: &ApplyReport, warnings: Vec<Stri
             })
             .collect(),
         warnings,
+        clean: applied.clean.clone(),
+        editable: applied.editable.clone(),
     }
 }
