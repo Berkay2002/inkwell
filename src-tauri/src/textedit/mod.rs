@@ -7,7 +7,7 @@
 //! See docs/text-edit.md.
 
 pub mod app;
-mod content;
+pub(crate) mod content;
 mod encodings;
 mod font;
 mod text;

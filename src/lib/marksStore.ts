@@ -65,6 +65,8 @@ export interface MarksSheet {
   wmSource: "text" | "picture";
   wmText: string;
   wmPicture: PictureChoice | null;
+  /** The file name the document's mark was made with: its path is not kept in the file, so it is chosen again. */
+  wmPictureWas: string | null;
   wmColor: Rgb;
   wmBold: boolean;
   wmFamily: FontFamily;
@@ -84,6 +86,7 @@ export interface MarksSheet {
   bgColor: Rgb;
   bgOpacity: number;
   bgPicture: PictureChoice | null;
+  bgPictureWas: string | null;
   bgScale: number;
   // Bates numbering
   btPrefix: string;
@@ -151,6 +154,7 @@ const blank = (doc: number, kind: MarkKind): MarksSheet => ({
   wmSource: "text",
   wmText: "",
   wmPicture: null,
+  wmPictureWas: null,
   wmColor: [0.6, 0.6, 0.6],
   wmBold: true,
   wmFamily: "helvetica",
@@ -165,6 +169,7 @@ const blank = (doc: number, kind: MarkKind): MarksSheet => ({
   bgColor: [1, 1, 0.85],
   bgOpacity: 100,
   bgPicture: null,
+  bgPictureWas: null,
   bgScale: 100,
   btPrefix: "",
   btSuffix: "",
@@ -317,11 +322,12 @@ export function readiness(s: MarksSheet, count: number): string | null {
       return s.text.every((t) => t.trim() === "") ? "Type the text of a header or footer." : sizeProblem(s);
     case "watermark":
       if (s.wmSource === "text" && s.wmText.trim() === "") return "Type the watermark text.";
-      if (s.wmSource === "picture" && !s.wmPicture) return "Choose the picture for the watermark.";
+      if (s.wmSource === "picture" && !s.wmPicture) return s.wmPictureWas ? `Choose the picture again (it was ${s.wmPictureWas}).` : "Choose the picture for the watermark.";
       if (!s.wmScreen && !s.wmPrint) return "Show it on screen, in print, or both.";
       return null;
     case "background":
-      return s.bgSource === "picture" && !s.bgPicture ? "Choose the picture for the background." : null;
+      if (s.bgSource === "picture" && !s.bgPicture) return s.bgPictureWas ? `Choose the picture again (it was ${s.bgPictureWas}).` : "Choose the picture for the background.";
+      return null;
     case "bates": {
       if (s.btFiles.length > 0) return s.btDigits < 3 || s.btDigits > 15 ? "A Bates number has 3 to 15 digits." : sizeProblem(s);
       const pages = pagesOf(s.pagesMode, s.range, count) ?? [];
@@ -402,6 +408,7 @@ export function fromMark(base: MarksSheet, mark: PageMark): MarksSheet {
         ...base,
         kind: "watermark",
         wmSource: mark.picture ? "picture" : "text",
+        wmPictureWas: mark.picture ? baseName(mark.picture.file) : null,
         wmText: mark.text,
         wmFamily: mark.style.family,
         wmBold: mark.style.bold,
@@ -419,6 +426,7 @@ export function fromMark(base: MarksSheet, mark: PageMark): MarksSheet {
         ...base,
         kind: "background",
         bgSource: mark.picture ? "picture" : "colour",
+        bgPictureWas: mark.picture ? baseName(mark.picture.file) : null,
         bgColor: mark.color,
         bgOpacity: Math.round(mark.opacity * 100),
         bgScale: Math.round(mark.scale * 100),
@@ -465,24 +473,8 @@ export const useMarks = create<MarksStore>((set, get) => {
       const count = st().docs[sheet.doc]?.pageCount ?? 0;
       if (found.pages.length > 0 && found.pages.length < count) next = { ...next, pagesMode: "range", range: formatRange(found.pages) };
       else next = { ...next, pagesMode: "all", range: "" };
-      // A picture the file remembers by path needs a new token to be sent again.
-      const pic = found.mark.kind === "watermark" || found.mark.kind === "background" ? found.mark.picture : null;
-      if (pic) void restorePicture(sheet.doc, kind, pic);
     }
     return next;
-  }
-
-  async function restorePicture(doc: number, kind: MarkKind, pic: MarkPicture) {
-    try {
-      const ref = await api.knownFile(pic.file);
-      const isPdf = /\.pdf$/i.test(ref.path);
-      const choice: PictureChoice = { file: ref.token, name: baseName(ref.path), kind: isPdf ? "pdf" : "image", page: pic.page + 1 };
-      const s = get().sheet;
-      if (!s || s.doc !== doc || s.kind !== kind) return;
-      patch(kind === "watermark" ? { wmPicture: choice } : { bgPicture: choice });
-    } catch {
-      // The file moved or was never chosen here: the sheet asks for the picture again.
-    }
   }
 
   async function run(step: () => Promise<api.EditState>, doneText: (r: api.EditState) => string) {
@@ -580,7 +572,7 @@ export const useMarks = create<MarksStore>((set, get) => {
         const f = picked[0];
         if (!f) return;
         const choice: PictureChoice = { file: f.token, name: baseName(f.path), kind, page: 1 };
-        patch(target === "wm" ? { wmPicture: choice, error: null } : { bgPicture: choice, error: null });
+        patch(target === "wm" ? { wmPicture: choice, wmPictureWas: null, error: null } : { bgPicture: choice, bgPictureWas: null, error: null });
       } catch (e) {
         patch({ error: marksError(e) });
       }

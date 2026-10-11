@@ -339,7 +339,7 @@ function HeaderFooterView({ sheet }: { sheet: MarksSheet }) {
 
 // ---- watermark and background ----
 
-function PicturePick({ target, choice }: { target: "wm" | "bg"; choice: MarksSheet["wmPicture"] }) {
+function PicturePick({ target, choice, was }: { target: "wm" | "bg"; choice: MarksSheet["wmPicture"]; was: string | null }) {
   return (
     <div className="mk-picture">
       <div className="tl-row">
@@ -365,7 +365,7 @@ function PicturePick({ target, choice }: { target: "wm" | "bg"; choice: MarksShe
           )}
         </div>
       ) : (
-        <p className="dim small">No picture chosen yet.</p>
+        <p className="dim small">{was ? `The picture was ${was}. Choose it again to update.` : "No picture chosen yet."}</p>
       )}
     </div>
   );
@@ -417,7 +417,7 @@ function WatermarkView({ sheet }: { sheet: MarksSheet }) {
           </div>
         </>
       ) : (
-        <PicturePick target="wm" choice={sheet.wmPicture} />
+        <PicturePick target="wm" choice={sheet.wmPicture} was={sheet.wmPictureWas} />
       )}
       <Slider label="Opacity" value={sheet.wmOpacity} min={5} max={100} onChange={(wmOpacity) => set({ wmOpacity })} />
       <span className="tl-label">Rotation</span>
@@ -489,7 +489,7 @@ function BackgroundView({ sheet }: { sheet: MarksSheet }) {
         </label>
       ) : (
         <>
-          <PicturePick target="bg" choice={sheet.bgPicture} />
+          <PicturePick target="bg" choice={sheet.bgPicture} was={sheet.bgPictureWas} />
           <Slider label="Size, relative to the page" value={sheet.bgScale} min={10} max={150} onChange={(bgScale) => set({ bgScale })} />
         </>
       )}

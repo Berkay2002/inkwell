@@ -103,6 +103,14 @@ pub async fn marks_bates_files(window: Window, eng: Eng<'_>, reg: Reg<'_>, reque
     let label = window.label().to_string();
     let eng = eng.inner().clone();
     let files = request.files.iter().map(|t| reg.open(&label, t)).collect::<Result<Vec<_>>>()?;
+    // A document that is open may have changes that are not saved: the copy would be made from the
+    // file on disk without them, so the person closes it (or saves it) first.
+    for f in &files {
+        eng.check_not_open(f, None).map_err(|_| {
+            let name = std::path::Path::new(f).file_name().unwrap_or_default().to_string_lossy().into_owned();
+            EngineError::Invalid(format!("{name} is open in Inkwell. Save and close it first, so its numbered copy has its changes."))
+        })?;
+    }
     let folder = reg.take_save(&label, &request.folder)?;
     blocking(move || {
         let out = apply::bates_files(&files, &request.bates, request.date, std::path::Path::new(&folder), &|out| {

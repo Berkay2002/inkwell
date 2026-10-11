@@ -464,3 +464,193 @@ fn bates_refuses_an_output_that_is_open_before_writing_anything() {
     assert_ne!(done[0].output, done[1].output);
     assert!(second.exists());
 }
+
+// ---- review fixes: shared resources, unbalanced q/Q, inline marks, resource clean-up -----------------
+
+/// A document with `pages` pages whose content is `content`. `shared` puts one indirect Resources
+/// object under every page; otherwise the pages have none at all (and no inherited ones).
+fn many(pages: usize, content: &str, shared: bool) -> Vec<u8> {
+    // 1 catalog, 2 pages, 3 font, 4 shared resources, then (page, content) pairs from 5.
+    let mut objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        format!("<< /Type /Pages /Kids [{}] /Count {pages} >>", (0..pages).map(|i| format!("{} 0 R", 5 + i * 2)).collect::<Vec<_>>().join(" ")),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        "<< /Font << /F1 3 0 R >> >>".into(),
+    ];
+    for i in 0..pages {
+        let res = if shared { "/Resources 4 0 R" } else { "" };
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {res} /Contents {} 0 R >>", 6 + i * 2));
+        objs.push(format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()));
+    }
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).bytes());
+    for o in offsets {
+        out.extend(format!("{o:010} 00000 n \n").bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).bytes());
+    out
+}
+
+fn category_names(doc: &PdfDocument, page: i32, category: &str) -> Vec<String> {
+    let p = doc.find_page(page).unwrap();
+    let Some(res) = p.get_dict_inheritable("Resources").unwrap() else { return vec![] };
+    let Some(cat) = res.get_dict(category).unwrap() else { return vec![] };
+    (0..cat.dict_len().unwrap())
+        .filter_map(|k| cat.get_dict_key(k as i32).unwrap().and_then(|n| n.as_name().ok()))
+        .map(|n| String::from_utf8_lossy(&n).into_owned())
+        .collect()
+}
+
+fn group_count(doc: &PdfDocument) -> usize {
+    let catalog = doc.catalog().unwrap();
+    catalog
+        .get_dict("OCProperties")
+        .unwrap()
+        .and_then(|p| p.get_dict("OCGs").unwrap())
+        .map(|a| a.len().unwrap())
+        .unwrap_or(0)
+}
+
+#[test]
+fn marks_leave_shared_resources_alone_and_keep_each_pages_layer() {
+    let mut doc = PdfDocument::from_bytes(&many(3, "BT /F1 12 Tf 250 400 Td (Body) Tj ET", true)).unwrap();
+    // pages 1-3 share one Resources object; a print-only watermark on pages 1-2
+    let print_only = Watermark { text: "PRINT".into(), show_on_screen: false, show_in_print: true, ..Watermark::default() };
+    add(&mut doc, &req(Mark::Watermark(print_only), vec![0, 1])).unwrap();
+    // page 3 shares the object and was not touched: it has no marks' resources
+    assert_eq!(category_names(&doc, 2, "Font"), vec!["F1".to_string()]);
+    assert!(category_names(&doc, 2, "Properties").is_empty());
+    // a second, screen-only watermark on page 2 only
+    let screen_only = Watermark { text: "SCREEN".into(), show_on_screen: true, show_in_print: false, ..Watermark::default() };
+    add(&mut doc, &req(Mark::Watermark(screen_only), vec![1])).unwrap();
+    assert_eq!(group_count(&doc), 2);
+    let p0 = category_names(&doc, 0, "Properties");
+    let p1 = category_names(&doc, 1, "Properties");
+    assert_eq!(p0.len(), 1, "{p0:?}");
+    assert_eq!(p1.len(), 2, "{p1:?}");
+    assert!(p0.iter().all(|n| p1.contains(n)), "page 1's layer is still page 2's first one");
+    // taking the watermarks off page 2 leaves page 1's layer and its group alone
+    remove(&mut doc, MarkKind::Watermark, &[1]).unwrap();
+    let doc = reopened(&doc);
+    assert_eq!(category_names(&doc, 0, "Properties"), p0);
+    assert!(category_names(&doc, 1, "Properties").is_empty());
+    assert_eq!(group_count(&doc), 1, "the screen-only group went, the print-only one stays");
+    // (a print-only layer is hidden on screen, so its text is not in the page text either way)
+    assert!(text_of(&doc, 0).contains("Body") && text_of(&doc, 1).contains("Body"));
+    assert!(!text_of(&doc, 1).contains("SCREEN"));
+}
+
+#[test]
+fn a_page_with_no_resources_gets_its_own() {
+    let mut doc = PdfDocument::from_bytes(&many(1, "0 0 m 10 10 l S", false)).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(hf(5, "Footer")), vec![0])).unwrap();
+    let w = Watermark { text: "COPY".into(), opacity: 0.5, ..Watermark::default() };
+    add(&mut doc, &req(Mark::Watermark(w), vec![0])).unwrap();
+    let doc = reopened(&doc);
+    assert!(text_of(&doc, 0).contains("Footer") && text_of(&doc, 0).contains("COPY"));
+}
+
+#[test]
+fn marks_start_from_a_clean_state_after_unbalanced_content() {
+    // the page's own content opens a q and a translation and never closes them
+    let unclosed = "q 1 0 0 1 100 100 cm 1 0 0 rg BT /F1 12 Tf 250 400 Td (Body) Tj ET";
+    let mut doc = PdfDocument::from_bytes(&many(1, unclosed, true)).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(hf(0, "TL")), vec![0])).unwrap();
+    let doc = reopened(&doc);
+    let tl = word(&doc, "TL");
+    near(tl.x0, 72.0, "TL left, not shifted by the page's own cm");
+    near(tl.y0, 36.0, "TL top");
+    // and the page's own content is still where it was
+    near(word(&doc, "Body").x0, 350.0, "Body");
+
+    // a stray Q in the page's content does not pop the wrapper
+    let stray = "Q Q BT /F1 12 Tf 250 400 Td (Body) Tj ET";
+    let mut doc = PdfDocument::from_bytes(&many(1, stray, true)).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(hf(0, "TL")), vec![0])).unwrap();
+    let doc = reopened(&doc);
+    near(word(&doc, "TL").x0, 72.0, "TL left after stray Q");
+    // the wrapper balances: its streams hold as many q as Q
+    let page = doc.find_page(0).unwrap();
+    let mut q = 0i64;
+    for s in super::apply::contents_list(&page).unwrap() {
+        for op in crate::textedit::content::parse(&s.read_stream().unwrap()) {
+            match op.op.as_slice() {
+                b"q" => q += 1,
+                b"Q" => q -= 1,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(q, 0);
+}
+
+/// What autotagging and text editing do to a page: all its streams become one stream of their own.
+fn merge_streams(doc: &mut PdfDocument, index: u32) {
+    let mut page = doc.find_page(index as i32).unwrap();
+    let mut data = Vec::new();
+    for s in super::apply::contents_list(&page).unwrap() {
+        data.extend(s.read_stream().unwrap());
+        data.push(b'\n');
+    }
+    let dict = doc.new_dict().unwrap();
+    let merged = doc.add_stream(&mupdf::Buffer::from_bytes(&data).unwrap(), Some(&dict), false).unwrap();
+    page.dict_put("Contents", merged).unwrap();
+}
+
+#[test]
+fn marks_are_found_and_removed_after_the_streams_were_rewritten() {
+    let mut doc = PdfDocument::from_bytes(&one_page("")).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(hf(5, "Footer text")), vec![0])).unwrap();
+    add(&mut doc, &req(Mark::Watermark(Watermark { text: "SECRET".into(), ..Watermark::default() }), vec![0])).unwrap();
+    merge_streams(&mut doc, 0);
+    let before = info(&doc).unwrap();
+    let kinds: Vec<MarkKind> = before.kinds.iter().map(|k| k.kind).collect();
+    assert!(kinds.contains(&MarkKind::HeaderFooter) && kinds.contains(&MarkKind::Watermark), "{kinds:?}");
+    assert_eq!(remove(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), 1);
+    let doc = reopened(&doc);
+    let text = text_of(&doc, 0);
+    assert!(!text.contains("Footer text") && text.contains("SECRET") && text.contains("Body"), "{text:?}");
+    let after = info(&doc).unwrap();
+    assert_eq!(after.kinds.len(), 1);
+    assert_eq!(after.kinds[0].kind, MarkKind::Watermark);
+}
+
+#[test]
+fn removing_a_mark_takes_its_resources_with_it() {
+    let mut doc = PdfDocument::from_bytes(&many(2, "BT /F1 12 Tf 250 400 Td (Body) Tj ET", true)).unwrap();
+    let w = Watermark { text: "COPY".into(), opacity: 0.5, ..Watermark::default() };
+    add(&mut doc, &req(Mark::Watermark(w), vec![0])).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(hf(5, "Footer")), vec![0])).unwrap();
+    assert!(category_names(&doc, 0, "ExtGState").iter().any(|n| n.starts_with("IWGS")));
+    remove(&mut doc, MarkKind::Watermark, &[0]).unwrap();
+    // the footer still draws with its font; the opacity state is gone
+    assert!(category_names(&doc, 0, "Font").iter().any(|n| n.starts_with("IWH")));
+    assert!(!category_names(&doc, 0, "ExtGState").iter().any(|n| n.starts_with("IWGS")));
+    remove(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap();
+    assert_eq!(category_names(&doc, 0, "Font"), vec!["F1".to_string()]);
+    let doc = reopened(&doc);
+    assert!(text_of(&doc, 0).contains("Body"));
+}
+
+#[test]
+fn the_file_remembers_a_picture_by_its_name_only() {
+    let d = dir("picture-name");
+    let p = d.join("logo.png");
+    png(&p);
+    let mut doc = PdfDocument::from_bytes(&one_page("")).unwrap();
+    let w = Watermark { picture: Some(Picture { file: p.to_string_lossy().into_owned(), page: 0, password: Some("secret".into()) }), ..Watermark::default() };
+    add(&mut doc, &req(Mark::Watermark(w), vec![0])).unwrap();
+    let bytes = write_doc(&doc, rewrite_opts(), 1 << 16).unwrap();
+    let hay = String::from_utf8_lossy(&bytes);
+    assert!(!hay.contains("inkwell-tests") && !hay.contains(&*d.to_string_lossy()), "the folder is not written");
+    assert!(!hay.contains("secret"));
+    let found = info(&PdfDocument::from_bytes(&bytes).unwrap()).unwrap();
+    let mark = found.kinds[0].mark.clone().unwrap();
+    assert_eq!(mark["picture"]["file"], "logo.png");
+}

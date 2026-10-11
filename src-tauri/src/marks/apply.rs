@@ -9,10 +9,12 @@ use super::text::{Measure, face, first_undrawable, literal, undrawable_message};
 use super::{AddRequest, Background, Bates, Date, Mark, MarkKind, Picture, Rgb, Style, Watermark, bates_fits, bates_text, expand};
 use crate::engine::edit::{open_source, rewrite_opts, write_doc, write_new};
 use crate::engine::{EngineError, Result};
+use crate::textedit::content::{self as cs, Obj};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::{Buffer, Document, Image};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 fn invalid(m: impl Into<String>) -> EngineError {
@@ -30,7 +32,7 @@ fn real(v: f64) -> Result<PdfObject> {
 // ---- reading and writing a page's content list -----------------------------------------------------
 
 /// The page's `/Contents` as a list of streams (a single stream is a list of one).
-fn contents_list(page: &PdfObject) -> Result<Vec<PdfObject>> {
+pub(super) fn contents_list(page: &PdfObject) -> Result<Vec<PdfObject>> {
     let mut out = Vec::new();
     if let Some(c) = page.get_dict("Contents")? {
         if c.is_null()? {
@@ -90,8 +92,18 @@ fn place(doc: &mut PdfDocument, index: u32, tag: &str, content: &[u8], behind: b
         let wrapped = list.iter().any(is_wrap);
         let original = list.iter().any(|o| tag_of(o).is_none());
         if !wrapped && original {
-            let open = add_stream(doc, b"q %Inkwell\n", "Wrap", None)?;
-            let close = add_stream(doc, b"Q %Inkwell\n", "Wrap", None)?;
+            // The page's own content may leave a `q` open (or close one it never opened): the wrapper
+            // balances it, so the marks start from the page's initial state and not from its leftovers.
+            let mut data = Vec::new();
+            for o in list.iter().filter(|o| tag_of(o).is_none()) {
+                if o.is_stream()? {
+                    data.extend(o.read_stream()?);
+                    data.push(b'\n');
+                }
+            }
+            let (opens, closes) = q_balance(&data);
+            let open = add_stream(doc, format!("{}q %Inkwell\n", "q\n".repeat(opens)).as_bytes(), "Wrap", None)?;
+            let close = add_stream(doc, format!("{}Q %Inkwell\n", "Q\n".repeat(closes)).as_bytes(), "Wrap", None)?;
             // Marks behind the page stay outside the wrapper.
             let split = list.iter().position(|o| tag_of(o).is_none()).unwrap_or(list.len());
             list.insert(split, open);
@@ -102,7 +114,44 @@ fn place(doc: &mut PdfDocument, index: u32, tag: &str, content: &[u8], behind: b
     set_contents(doc, &mut page, list)
 }
 
+/// How many `q` the content needs in front of it and how many `Q` after it to be balanced: a stray
+/// `Q` pops what the wrapper pushed, an unclosed `q` leaks its state into the marks.
+fn q_balance(data: &[u8]) -> (usize, usize) {
+    let (mut depth, mut low) = (0i64, 0i64);
+    for op in cs::parse(data) {
+        match op.op.as_slice() {
+            b"q" => depth += 1,
+            b"Q" => {
+                depth -= 1;
+                low = low.min(depth);
+            }
+            _ => {}
+        }
+    }
+    // Nothing legal nests deeper than a few dozen: a count beyond that is a damaged stream.
+    ((-low).min(256) as usize, (depth - low).min(256) as usize)
+}
+
 // ---- resources --------------------------------------------------------------------------------------
+
+/// Registers `value` as `/<category> /<key>` in page `index`'s resources. The page gets a
+/// resources dictionary and category of its own: what it had may be inherited from the page tree
+/// or shared with other pages, and those must not change with this one.
+fn put_resource(doc: &mut PdfDocument, index: u32, category: &str, key: &str, value: PdfObject) -> Result<()> {
+    let mut page = doc.find_page(index as i32)?;
+    let mut res = match page.get_dict_inheritable("Resources")? {
+        Some(r) if r.is_dict()? => r.copy_dict()?,
+        _ => doc.new_dict()?,
+    };
+    let mut cat = match res.get_dict(category)? {
+        Some(c) if c.is_dict()? => c.copy_dict()?,
+        _ => doc.new_dict()?,
+    };
+    cat.dict_put(key, value)?;
+    res.dict_put(category, cat)?;
+    page.dict_put("Resources", res)?;
+    Ok(())
+}
 
 /// `res[key]` as a dictionary, created when missing.
 fn sub(res: &mut PdfObject, doc: &PdfDocument, key: &str) -> Result<PdfObject> {
@@ -134,9 +183,7 @@ impl Shared {
             let o = doc.add_object(&d)?;
             self.fonts.insert(res_name.clone(), o);
         }
-        let mut res = doc.load_pdf_page(index as i32)?.resources()?;
-        let mut fonts = sub(&mut res, doc, "Font")?;
-        fonts.dict_put(res_name.as_str(), self.fonts[&res_name].clone())?;
+        put_resource(doc, index, "Font", &res_name, self.fonts[&res_name].clone())?;
         Ok(res_name)
     }
 }
@@ -152,9 +199,7 @@ fn opacity_state(doc: &mut PdfDocument, index: u32, opacity: f64) -> Result<Opti
     gs.dict_put("Type", name("ExtGState")?)?;
     gs.dict_put("CA", real(o)?)?;
     gs.dict_put("ca", real(o)?)?;
-    let mut res = doc.load_pdf_page(index as i32)?.resources()?;
-    let mut states = sub(&mut res, doc, "ExtGState")?;
-    states.dict_put(key.as_str(), gs)?;
+    put_resource(doc, index, "ExtGState", &key, gs)?;
     Ok(Some(key))
 }
 
@@ -441,12 +486,10 @@ fn picture_ops(src: &Loaded, page: (f64, f64), scale: f64, rotation: f64, offset
     format!("{} {} {} {} {} {} cm\n{place}\n/{res_name} Do\n", n(c), n(s), n(-s), n(c), n(cx), n(cy))
 }
 
-fn add_picture_resource(doc: &PdfDocument, index: u32, src: &Loaded) -> Result<String> {
+fn add_picture_resource(doc: &mut PdfDocument, index: u32, src: &Loaded) -> Result<String> {
     let num = src.obj.as_indirect()?;
     let key = format!("IWPic{num}");
-    let mut res = doc.load_pdf_page(index as i32)?.resources()?;
-    let mut xo = sub(&mut res, doc, "XObject")?;
-    xo.dict_put(key.as_str(), src.obj.clone())?;
+    put_resource(doc, index, "XObject", &key, src.obj.clone())?;
     Ok(key)
 }
 
@@ -468,6 +511,21 @@ fn ascii_json(mark: &Mark) -> Option<String> {
     }
     // Bound the entry: a spec this large is a mistake, and the marks still work without it.
     (out.len() <= 16 << 10).then_some(out)
+}
+
+/// The mark as it is written into the file for Update: a picture is remembered by its file name,
+/// not by the folder it came from, and a password never goes into the document.
+fn spec_mark(mark: &Mark) -> Mark {
+    let strip = |p: &Picture| Picture {
+        file: Path::new(&p.file).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        page: p.page,
+        password: None,
+    };
+    match mark {
+        Mark::Watermark(w) => Mark::Watermark(Watermark { picture: w.picture.as_ref().map(strip), ..w.clone() }),
+        Mark::Background(b) => Mark::Background(Background { picture: b.picture.as_ref().map(strip), ..b.clone() }),
+        other => other.clone(),
+    }
 }
 
 fn check_pages(pages: &[u32], count: u32) -> Result<Vec<u32>> {
@@ -577,7 +635,7 @@ pub fn add(doc: &mut PdfDocument, req: &AddRequest) -> Result<Vec<u32>> {
     if req.replace {
         remove(doc, req.mark.kind(), &pages)?;
     }
-    let spec = ascii_json(&req.mark);
+    let spec = ascii_json(&spec_mark(&req.mark));
     let spec = spec.as_deref();
     let mut shared = Shared::default();
     let mut m = Measure::default();
@@ -715,14 +773,15 @@ fn add_watermark(doc: &mut PdfDocument, pages: &[u32], w: &Watermark, spec: Opti
         }
         let oc = match &group {
             Some(g) => {
-                let mut res = doc.load_pdf_page(i as i32)?.resources()?;
-                let mut props = sub(&mut res, doc, "Properties")?;
-                props.dict_put("IWOC", g.clone())?;
-                Some("IWOC")
+                // Named by the group's object number: two watermarks (or two pages with different
+                // appearance options) never share a name, so one's removal leaves the other's layer.
+                let key = format!("IWOC{}", g.as_indirect()?);
+                put_resource(doc, i, "Properties", &key, g.clone())?;
+                Some(key)
             }
             None => None,
         };
-        let content = section_bytes_oc(MarkKind::Watermark, "Watermark", None, view.matrix, oc, &bytes);
+        let content = section_bytes_oc(MarkKind::Watermark, "Watermark", None, view.matrix, oc.as_deref(), &bytes);
         place(doc, i, MarkKind::Watermark.tag(), &content, w.behind, spec)?;
     }
     Ok(())
@@ -765,8 +824,157 @@ fn add_background(doc: &mut PdfDocument, pages: &[u32], bg: &Background, spec: O
 
 // ---- removing and reading ---------------------------------------------------------------------------
 
-/// Removes the marks of `kind` from `pages` and returns how many streams went. When no mark is
-/// left on top of a page, the q/Q wrapper goes too, restoring the original content list.
+/// The artifact sections a content stream carries that were tagged `/PCMark`, as (tag, byte range).
+/// A page rewritten by autotagging or text editing has the marks inline in one stream of its own,
+/// with the marked-content dictionary intact. The range takes in the `q` … `Q` around the section
+/// when it has them.
+fn inline_sections(data: &[u8]) -> Vec<(String, Range<usize>)> {
+    let ops = cs::parse(data);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < ops.len() {
+        let op = &ops[i];
+        if op.op == b"BDC" && op.operands.len() >= 2 && op.operands[0].as_name() == Some(b"Artifact".as_slice()) {
+            if let Obj::Dict(d) = &op.operands[1] {
+                let tag = d.iter().find(|(k, _)| k.as_slice() == b"PCMark").and_then(|(_, v)| v.as_name());
+                if let Some(tag) = tag {
+                    let mut depth = 1;
+                    let mut j = i + 1;
+                    while j < ops.len() {
+                        match ops[j].op.as_slice() {
+                            b"BDC" | b"BMC" => depth += 1,
+                            b"EMC" => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    if j < ops.len() {
+                        let (mut start, mut end) = (op.span.start, ops[j].span.end);
+                        if i > 0 && ops[i - 1].op == b"q" && j + 1 < ops.len() && ops[j + 1].op == b"Q" {
+                            start = ops[i - 1].span.start;
+                            end = ops[j + 1].span.end;
+                        }
+                        out.push((String::from_utf8_lossy(tag).into_owned(), start..end));
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn has_tag(data: &[u8]) -> bool {
+    data.windows(6).any(|w| w == b"PCMark")
+}
+
+/// A content stream without its inline sections of `kind`: the new stream and how many went.
+fn cut_inline(doc: &mut PdfDocument, stream: &PdfObject, kind: MarkKind) -> Result<Option<(PdfObject, usize)>> {
+    if !stream.is_stream()? {
+        return Ok(None);
+    }
+    let data = stream.read_stream()?;
+    if !has_tag(&data) {
+        return Ok(None);
+    }
+    let cuts: Vec<Range<usize>> = inline_sections(&data).into_iter().filter(|(t, _)| t == kind.tag()).map(|(_, r)| r).collect();
+    if cuts.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(data.len());
+    let mut at = 0;
+    for r in &cuts {
+        out.extend_from_slice(&data[at..r.start]);
+        out.push(b'\n');
+        at = r.end;
+    }
+    out.extend_from_slice(&data[at..]);
+    let dict = doc.new_dict()?;
+    let buf = Buffer::from_bytes(&out)?;
+    Ok(Some((doc.add_stream(&buf, Some(&dict), false)?, cuts.len())))
+}
+
+/// Every name the page's content refers to (fonts, graphics states, XObjects, layers).
+fn used_names(page: &PdfObject) -> Result<HashSet<Vec<u8>>> {
+    fn collect(o: &Obj, into: &mut HashSet<Vec<u8>>) {
+        match o {
+            Obj::Name(n) => {
+                into.insert(n.clone());
+            }
+            Obj::Array(a) => a.iter().for_each(|x| collect(x, into)),
+            Obj::Dict(d) => d.iter().for_each(|(_, v)| collect(v, into)),
+            _ => {}
+        }
+    }
+    let mut used = HashSet::new();
+    for s in contents_list(page)? {
+        if s.is_stream()? {
+            for op in cs::parse(&s.read_stream()?) {
+                op.operands.iter().for_each(|o| collect(o, &mut used));
+            }
+        }
+    }
+    Ok(used)
+}
+
+/// Takes the resource entries marks made (`IWH…` fonts, `IWGS…` graphics states, `IWPic…` pictures,
+/// `IWOC…` layers) out of page `index` when its content no longer uses them.
+fn clean_resources(doc: &mut PdfDocument, index: u32) -> Result<()> {
+    const OURS: [(&str, &[u8]); 4] = [("Font", b"IWH"), ("ExtGState", b"IWGS"), ("XObject", b"IWPic"), ("Properties", b"IWOC")];
+    let mut page = doc.find_page(index as i32)?;
+    let Some(res) = page.get_dict_inheritable("Resources")? else { return Ok(()) };
+    if !res.is_dict()? {
+        return Ok(());
+    }
+    let used = used_names(&page)?;
+    let mut drop: Vec<(&str, Vec<Vec<u8>>)> = Vec::new();
+    for (category, prefix) in OURS {
+        let Some(cat) = res.get_dict(category)? else { continue };
+        if !cat.is_dict()? {
+            continue;
+        }
+        let mut names = Vec::new();
+        for k in 0..cat.dict_len()? {
+            if let Some(key) = cat.get_dict_key(k as i32)? {
+                if let Ok(n) = key.as_name() {
+                    if n.starts_with(prefix) && !used.contains(&n) {
+                        names.push(n);
+                    }
+                }
+            }
+        }
+        if !names.is_empty() {
+            drop.push((category, names));
+        }
+    }
+    if drop.is_empty() {
+        return Ok(());
+    }
+    // Own copies, as when adding: the dictionaries may be shared with other pages.
+    let mut own = res.copy_dict()?;
+    for (category, names) in drop {
+        if let Some(cat) = own.get_dict(category)? {
+            let mut cat = cat.copy_dict()?;
+            for n in names {
+                cat.dict_delete(String::from_utf8_lossy(&n).as_ref())?;
+            }
+            own.dict_put(category, cat)?;
+        }
+    }
+    page.dict_put("Resources", own)?;
+    Ok(())
+}
+
+/// Removes the marks of `kind` from `pages` and returns how many sections went. When no mark is
+/// left on top of a page, the q/Q wrapper goes too, restoring the original content list; the page
+/// loses the fonts, graphics states, pictures and layers only these marks used.
 pub fn remove(doc: &mut PdfDocument, kind: MarkKind, pages: &[u32]) -> Result<usize> {
     let count = doc.page_count()?.max(0) as u32;
     let pages = check_pages(pages, count)?;
@@ -775,25 +983,33 @@ pub fn remove(doc: &mut PdfDocument, kind: MarkKind, pages: &[u32]) -> Result<us
         let mut page = doc.find_page(i as i32)?;
         let list = contents_list(&page)?;
         let before = list.len();
-        let mut kept: Vec<PdfObject> = list.into_iter().filter(|o| tag_of(o).as_deref() != Some(kind.tag())).collect();
-        removed += before - kept.len();
+        let mut changed = false;
+        let mut kept: Vec<PdfObject> = Vec::new();
+        for o in list {
+            match tag_of(&o) {
+                Some(t) if t == kind.tag() => {
+                    removed += 1;
+                    changed = true;
+                }
+                Some(_) => kept.push(o),
+                None => match cut_inline(doc, &o, kind)? {
+                    Some((new, n)) => {
+                        removed += n;
+                        changed = true;
+                        kept.push(new);
+                    }
+                    None => kept.push(o),
+                },
+            }
+        }
         let close = kept.iter().rposition(is_wrap);
         let on_top = close.is_some_and(|c| kept[c + 1..].iter().any(|o| tag_of(o).is_some_and(|t| t != "Wrap")));
         if !on_top {
             kept.retain(|o| !is_wrap(o));
         }
-        if kept.len() != before {
+        if changed || kept.len() != before {
             set_contents(doc, &mut page, kept)?;
-            if kind == MarkKind::Watermark {
-                // The page's name for the layer goes with its watermark.
-                if let Some(res) = page.get_dict_inheritable("Resources")? {
-                    if let Some(mut props) = res.get_dict("Properties")? {
-                        if props.get_dict("IWOC")?.is_some() {
-                            props.dict_delete("IWOC")?;
-                        }
-                    }
-                }
-            }
+            clean_resources(doc, i)?;
         }
     }
     if removed > 0 && kind == MarkKind::Watermark {
@@ -825,8 +1041,29 @@ pub fn info(doc: &PdfDocument) -> Result<Info> {
     let mut found: Vec<KindInfo> = Vec::new();
     for i in 0..count {
         let page = doc.find_page(i)?;
+        // (kind, the settings it was made with when its stream says)
+        let mut seen: Vec<(MarkKind, Option<serde_json::Value>)> = Vec::new();
         for s in contents_list(&page)? {
-            let Some(kind) = tag_of(&s).and_then(|t| MarkKind::from_tag(&t)) else { continue };
+            if let Some(t) = tag_of(&s) {
+                if let Some(kind) = MarkKind::from_tag(&t) {
+                    let spec = s.get_dict("IWSpec")?.and_then(|v| v.as_string().ok()).and_then(|v| serde_json::from_str(&v).ok());
+                    seen.push((kind, spec));
+                }
+                continue;
+            }
+            // Content rewritten since (autotagging, text editing) holds the marks inline.
+            if s.is_stream()? {
+                let data = s.read_stream()?;
+                if has_tag(&data) {
+                    for (t, _) in inline_sections(&data) {
+                        if let Some(kind) = MarkKind::from_tag(&t) {
+                            seen.push((kind, None));
+                        }
+                    }
+                }
+            }
+        }
+        for (kind, spec) in seen {
             let pos = match found.iter().position(|k| k.kind == kind) {
                 Some(p) => p,
                 None => {
@@ -839,9 +1076,7 @@ pub fn info(doc: &PdfDocument) -> Result<Info> {
                 k.pages.push(i as u32);
             }
             if k.mark.is_none() {
-                if let Some(v) = s.get_dict("IWSpec")?.and_then(|v| v.as_string().ok()) {
-                    k.mark = serde_json::from_str(&v).ok();
-                }
+                k.mark = spec;
             }
         }
     }
@@ -872,10 +1107,27 @@ fn output_name(dir: &Path, input: &Path, taken: &[PathBuf]) -> PathBuf {
         .expect("a free name")
 }
 
+/// Numbers one file from `first` and writes its copy at `out`.
+fn number_one(input: &str, out: &Path, d: &mut PdfDocument, bates: &Bates, first: u64, date: Date) -> Result<BatesFile> {
+    let pages = d.page_count()?.max(0) as u32;
+    let b = Bates { start: first, ..bates.clone() };
+    let req = AddRequest { mark: Mark::Bates(b), pages: (0..pages).collect(), replace: true, date };
+    add(d, &req)?;
+    let bytes = write_doc(d, rewrite_opts(), 1 << 20)?;
+    write_new(out, &bytes, pages)?;
+    Ok(BatesFile {
+        input: input.to_string(),
+        output: out.to_string_lossy().into_owned(),
+        pages,
+        first,
+        last: first + u64::from(pages).saturating_sub(1),
+    })
+}
+
 /// Numbers the files in order, continuing the count from one to the next, and writes each as a
 /// copy in `dir`. Nothing is written when any file cannot be opened, the numbers run out, or
 /// `not_open` refuses one of the output files (the caller checks that it is not a document that
-/// is open in the app).
+/// is open in the app). A failure after the first copy names the copies already written.
 pub fn bates_files(
     inputs: &[String],
     bates: &Bates,
@@ -921,28 +1173,20 @@ pub fn bates_files(
     let mut next = bates.start;
     let mut done: Vec<BatesFile> = Vec::new();
     for ((p, out), mut d) in inputs.iter().zip(outs).zip(docs) {
-        let pages = d.page_count()?.max(0) as u32;
-        let b = Bates { start: next, ..bates.clone() };
-        let req = AddRequest { mark: Mark::Bates(b), pages: (0..pages).collect(), replace: true, date };
-        add(&mut d, &req)?;
-        let bytes = write_doc(&d, rewrite_opts(), 1 << 20)?;
-        let r = write_new(&out, &bytes, pages);
-        if let Err(e) = r {
-            let written: Vec<_> = done.iter().map(|f| f.output.clone()).collect();
-            return Err(if written.is_empty() {
-                e
-            } else {
-                EngineError::Io(format!("{} could not be written ({e}); already written: {}", out.display(), written.join(", ")))
-            });
+        match number_one(p, &out, &mut d, bates, next, date) {
+            Ok(f) => {
+                next += u64::from(f.pages);
+                done.push(f);
+            }
+            Err(e) => {
+                let written: Vec<_> = done.iter().map(|f| f.output.clone()).collect();
+                return Err(if written.is_empty() {
+                    e
+                } else {
+                    EngineError::Io(format!("{} could not be numbered ({e}); already written: {}", out.display(), written.join(", ")))
+                });
+            }
         }
-        done.push(BatesFile {
-            input: p.clone(),
-            output: out.to_string_lossy().into_owned(),
-            pages,
-            first: next,
-            last: next + u64::from(pages).saturating_sub(1),
-        });
-        next += u64::from(pages);
     }
     Ok(done)
 }
