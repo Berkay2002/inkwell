@@ -18,3 +18,8 @@ pdfcraft
   Parts of Inkwell's source are adapted from pdfcraft, licensed MIT OR Apache-2.0:
   licenses/pdfcraft/LICENSE-MIT, licenses/pdfcraft/LICENSE-APACHE and licenses/pdfcraft/NOTICE.
   The adapted files are listed in third_party/pdfcraft/INKWELL-NOTICE.txt in the source.
+
+Fluent UI System Icons
+  Copyright (c) 2020 Microsoft Corporation
+  Licensed under the MIT licence: licenses/fluent/LICENSE-MIT
+  The interface icons in src/assets/icons/fluent/ are copied from @fluentui/svg-icons (see docs/icons.md).

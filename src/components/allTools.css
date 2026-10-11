@@ -1,33 +1,71 @@
-/* All tools: the left-slot panel, the hover card, the toolbar pins, the Home grid and the palette subtitles.
-   Each group has its own hue for the icon chip; groups other branches add fall back to the accent. */
+/* All tools: the left-slot panel, the hover card, the toolbar pins, the Home grid and the palette rows.
+   A tool's icon is a tile (ToolTile.tsx): a rounded square in the colour of its group with the Filled glyph on it,
+   the way Acrobat colour-codes its tools. One pair of tokens per group, light and dark, in this one block:
+   --tile-bg is the square, --tile-fg the glyph. Every pair keeps 4.5:1 or more (toolsCatalog.test.ts computes it).
+   Groups other branches add fall back to the accent; give them a pair here and add their id to TOOL_HUES. */
 [data-group] {
-  --tc: var(--accent);
+  --tile-bg: var(--accent);
+  --tile-fg: var(--accent-fg);
 }
 [data-group="optimize"] {
-  --tc: light-dark(#0b7a75, #5ad1c8);
+  --tile-bg: light-dark(#0e7490, #164e63);
+  --tile-fg: light-dark(#ffffff, #a5f3fc);
 }
 [data-group="marks"] {
-  --tc: light-dark(#b45309, #f6b862);
+  --tile-bg: light-dark(#b45309, #7c2d12);
+  --tile-fg: light-dark(#ffffff, #fed7aa);
 }
 [data-group="protect"] {
-  --tc: light-dark(#6d28d9, #b59cf8);
+  --tile-bg: light-dark(#7e22ce, #581c87);
+  --tile-fg: light-dark(#ffffff, #e9d5ff);
 }
 [data-group="convert"] {
-  --tc: light-dark(#1d4ed8, #7fb0ff);
+  --tile-bg: light-dark(#1d4ed8, #1e3a8a);
+  --tile-fg: light-dark(#ffffff, #bfdbfe);
 }
 [data-group="check"] {
-  --tc: light-dark(#15803d, #6fdc8c);
+  --tile-bg: light-dark(#4d7c0f, #365314);
+  --tile-fg: light-dark(#ffffff, #d9f99d);
+}
+[data-group="edit"] {
+  --tile-bg: light-dark(#be123c, #881337);
+  --tile-fg: light-dark(#ffffff, #fecdd3);
+}
+[data-group="comment"] {
+  --tile-bg: light-dark(#facc15, #a16207);
+  --tile-fg: light-dark(#422006, #fef9c3);
+}
+[data-group="organize"] {
+  --tile-bg: light-dark(#047857, #064e3b);
+  --tile-fg: light-dark(#ffffff, #a7f3d0);
+}
+[data-group="sign"] {
+  --tile-bg: light-dark(#4338ca, #312e81);
+  --tile-fg: light-dark(#ffffff, #c7d2fe);
 }
 .tool-icon {
+  --tile: 36px;
   display: inline-flex;
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--tc) 15%, transparent);
-  color: var(--tc);
+  width: var(--tile);
+  height: var(--tile);
+  border-radius: var(--radius-md);
+  background: var(--tile-bg);
+  color: var(--tile-fg);
+}
+.tool-icon[data-size="24"] {
+  --tile: 24px;
+  border-radius: 6px;
+}
+.tool-icon[data-size="28"] {
+  --tile: 28px;
+  border-radius: 7px;
+}
+.tool-icon[data-size="40"] {
+  --tile: 40px;
+  border-radius: var(--radius-md);
 }
 
 /* two classes: styles.css loads after this file and sets .sidebar to 220px */
@@ -110,11 +148,6 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background: var(--surface);
-}
-.tool-chip .tool-icon {
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-pill);
 }
 .tool-chip:hover,
 .tool-chip:focus-visible {
@@ -229,9 +262,18 @@
   font-size: 12px;
 }
 
-/* the palette's second line */
+/* the palette's rows: a leading slot (a tool's tile; empty for other commands so the titles line up), the text */
+.item {
+  align-items: center;
+}
+.item-lead {
+  display: inline-flex;
+  flex: none;
+  width: 28px;
+}
 .item-text {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-width: 0;
 }
@@ -271,11 +313,6 @@
 }
 .tool-card-btn:focus-visible {
   box-shadow: 0 0 0 2px var(--accent);
-}
-.tool-card-btn .tool-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-md);
 }
 .tools-group {
   margin: 14px 0 6px;

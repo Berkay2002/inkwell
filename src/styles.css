@@ -33,6 +33,9 @@
   --shadow-1: 0 1px 2px var(--sh-1), 0 2px 8px var(--sh-1);
   --shadow-2: 0 2px 4px var(--sh-1), 0 8px 24px var(--sh-2);
   --shadow-3: 0 4px 10px var(--sh-2), 0 16px 40px var(--sh-3);
+  /* Outer height of every grouped control on the toolbar: Read | Edit | Organize, Tools and the assistant group on
+     the right (28 px: its 24 px button plus 2 px of padding each side, measured in the DOM). */
+  --tb-control-h: 28px;
   --radius-sm: 8px;
   --radius-md: 10px;
   --radius-lg: 14px;
@@ -1522,10 +1525,11 @@ select {
   flex: none;
   align-items: center;
   gap: 6px;
+  box-sizing: border-box;
   width: auto;
-  height: 36px;
+  height: var(--tb-control-h);
   margin-left: 8px;
-  padding: 0 10px 0 12px;
+  padding: 0 8px 0 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);

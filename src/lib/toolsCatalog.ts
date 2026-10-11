@@ -29,6 +29,13 @@ export const TOOL_GROUPS: { id: string; title: string }[] = [
   { id: "check", title: "Check & compare" },
 ];
 
+/**
+ * Every group colour the tool tiles define (allTools.css: `--tile-bg` / `--tile-fg`, light and dark). The first five
+ * are `TOOL_GROUPS`; the rest are the groups other tools (Edit, comments, Organize, Fill & sign) take, so a tool
+ * added there only picks a glyph.
+ */
+export const TOOL_HUES = ["optimize", "marks", "protect", "convert", "check", "edit", "comment", "organize", "sign"] as const;
+
 export interface ToolSection {
   id: string;
   title: string;

@@ -52,7 +52,7 @@ export function AssistantToggle() {
             aria-label={MODE_NAMES[m]}
             onClick={() => (m === mode ? st().setOpen(false) : st().setMode(m))}
           >
-            <Glyph name={m} size={16} stroke={1.6} />
+            <Glyph name={m} size={16} />
           </button>
         ))}
       </div>

@@ -47,7 +47,7 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
     {
       id: "preflight",
       group: "optimize",
-      icon: "check",
+      icon: "pdfa",
       label: "Preflight",
       description: "Check and convert for long-term archiving",
       detail: "Checks the file against PDF/A, PDF/UA or PDF/X, shows each rule that fails, and converts it into a new file or in place. A report you can export; it is not a full validation.",
@@ -91,7 +91,7 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
     {
       id: "bates",
       group: "marks",
-      icon: "hash",
+      icon: "bates",
       label: "Bates numbering",
       description: "Number pages for legal filings",
       detail: "Give every page a running number with an optional prefix, such as ABC-000123.",
@@ -124,7 +124,7 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
     {
       id: "export",
       group: "convert",
-      icon: "share",
+      icon: "export",
       label: "Export",
       description: "Save as Word, images, text and more",
       detail: "Turn pages or the whole file into Word, images, plain text or HTML.",
@@ -146,7 +146,7 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null): ToolItem[]
     {
       id: "compare",
       group: "check",
-      icon: "swap",
+      icon: "compare",
       label: "Compare files",
       description: "Compare this file with another file or an earlier version",
       detail: "Compare this file with another file or with one of its earlier versions, and see what was added, removed or changed.",

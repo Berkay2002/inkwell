@@ -5,6 +5,7 @@ import { toolItems, runTool } from "../lib/toolItems";
 import { type ToolItem, MAX_PINNED, filterTools, pick } from "../lib/toolsCatalog";
 import { type DocState, useStore } from "../store";
 import { Icon } from "./Icons";
+import { ToolTile } from "./ToolTile";
 import "./allTools.css";
 
 /** The panel's id, for `aria-controls` on the Tools button. */
@@ -39,9 +40,9 @@ export function ToolsButton({ doc }: { doc: DocState }) {
         useToolPrefs.getState().setPanel(!open);
       }}
     >
-      <Icon name="tools" size={15} />
+      <Icon name="tools" size={16} filled={open} />
       Tools
-      <Icon name={open ? "up" : "down"} size={12} />
+      <Icon name={open ? "up" : "down"} size={16} />
     </button>
   );
 }
@@ -69,7 +70,7 @@ export function PinnedTools({ doc }: { doc: DocState }) {
             runTool(it);
           }}
         >
-          <Icon name={it.icon} />
+          <ToolTile icon={it.icon} group={it.group} size={24} />
         </button>
       ))}
     </span>
@@ -194,9 +195,7 @@ export function AllToolsPanel({ doc }: { doc: DocState }) {
               <div className="tp-chips">
                 {recents.map((it) => (
                   <button key={it.id} className="tool-chip" data-tool={it.id} onClick={() => run(it)} title={it.description}>
-                    <span className="tool-icon" data-group={it.group}>
-                      <Icon name={it.icon} size={14} />
-                    </span>
+                    <ToolTile icon={it.icon} group={it.group} size={24} />
                     {it.label}
                   </button>
                 ))}
@@ -222,9 +221,7 @@ export function AllToolsPanel({ doc }: { doc: DocState }) {
                         onMouseLeave={hideCard}
                         onBlur={hideCard}
                       >
-                        <span className="tool-icon" data-group={it.group}>
-                          <Icon name={it.icon} size={16} />
-                        </span>
+                        <ToolTile icon={it.icon} group={it.group} size={36} />
                         <span className="tool-text">
                           <span className="tool-name">{it.label}</span>
                           <span className="tool-desc" id={`${uid}-d-${it.id}`}>
@@ -245,7 +242,7 @@ export function AllToolsPanel({ doc }: { doc: DocState }) {
                           )
                         }
                       >
-                        <Icon name="pin" size={14} />
+                        <Icon name="pin" size={16} filled={on} />
                       </button>
                     </li>
                   );
@@ -262,9 +259,7 @@ export function AllToolsPanel({ doc }: { doc: DocState }) {
       </nav>
       {card && (
         <div className="tool-card" role="presentation" aria-hidden style={{ top: card.top, left: card.left }}>
-          <span className="tool-icon" data-group={card.item.group}>
-            <Icon name={card.item.icon} size={18} />
-          </span>
+          <ToolTile icon={card.item.icon} group={card.item.group} size={36} />
           <div>
             <strong>{card.item.label}</strong>
             <p>{card.item.detail ?? card.item.description}</p>

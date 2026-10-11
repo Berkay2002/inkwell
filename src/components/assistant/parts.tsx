@@ -4,6 +4,7 @@ import { type Msg, readViewerSelection, useAi } from "../../lib/aiStore";
 import type { DocState } from "../../store";
 import { isVerified } from "../../lib/activity";
 import { ActivityTrail } from "./ActivityTrail";
+import { Icon, type IconName } from "../Icons";
 import { Markdown } from "./Markdown";
 import { PermissionItems } from "./PermissionItems";
 
@@ -15,31 +16,26 @@ const PHASES: Record<string, string> = {
   thinking: "Thinking…",
 };
 
-const PATHS = {
-  doc: "M7 3.5h6.5L18 8v12.5H7zM13.5 3.5V8H18",
-  more: "M5.5 12h.01M12 12h.01M18.5 12h.01",
-  close: "M6.5 6.5l11 11M17.5 6.5l-11 11",
-  send: "M12 18.5v-13M6.5 11l5.5-5.5 5.5 5.5",
-  stop: "M8 8h8v8H8z",
-  chev: "M9.5 6.5l5.5 5.5-5.5 5.5",
-  down: "M7 10l5 5 5-5",
-  check: "M6 12.5l4 4 8-9",
-  copy: "M9 9h9.5v11H9zM6 15V4h9.5",
-  plus: "M12 6v12M6 12h12",
-  docked: "M4 5.5h16v13H4zM14.5 5.5v13",
-  floating: "M4 5.5h16v13H4zM12.5 8.5h5v7h-5z",
-  bar: "M4 5.5h16v13H4zM8 14.5h8",
-  brain:
-    "M12 5.2A3 3 0 0 0 6.6 6.7 3.2 3.2 0 0 0 4.6 10c0 .9.4 1.7 1 2.2A3.3 3.3 0 0 0 7 17a3 3 0 0 0 5 1.6zM12 5.2a3 3 0 0 1 5.4 1.5 3.2 3.2 0 0 1 2 3.3c0 .9-.4 1.7-1 2.2A3.3 3.3 0 0 1 17 17a3 3 0 0 1-5 1.6M12 5.2v13.4",
-} as const;
+/** The assistant's glyphs, all from the app icon set (components/Icons.tsx): the name is the part's, the glyph the set's. */
+const GLYPHS = {
+  doc: "file",
+  more: "more",
+  close: "close",
+  send: "send",
+  stop: "stop",
+  chev: "right",
+  down: "down",
+  check: "check",
+  copy: "copy",
+  plus: "plus",
+  docked: "panelRight",
+  floating: "windowFloating",
+  bar: "panelBottom",
+  brain: "brain",
+} as const satisfies Record<string, IconName>;
 
-/** `stroke` is the line width in screen px (default: 1.8 of the 24-unit drawing grid). */
-export function Glyph({ name, size = 16, stroke }: { name: keyof typeof PATHS; size?: number; stroke?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke ? (stroke * 24) / size : name === "more" ? 3.2 : 1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d={PATHS[name]} />
-    </svg>
-  );
+export function Glyph({ name, size = 16, filled }: { name: keyof typeof GLYPHS; size?: number; filled?: boolean }) {
+  return <Icon name={GLYPHS[name]} size={size} filled={filled} />;
 }
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -90,7 +86,7 @@ export function ModelPicker({ up = false, icon = false }: { up?: boolean; icon?:
           aria-expanded={open}
           onClick={() => setOpen(!open)}
         >
-          <Glyph name="brain" size={18} stroke={1.75} />
+          <Glyph name="brain" size={20} />
         </button>
       ) : (
         <button className="ax-pill" title="Model and reasoning effort" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -342,7 +338,7 @@ function Sources({ doc, m, variant, active }: { doc: DocState; m: Msg; variant: 
               {variant === "floating" && <PageSketch doc={doc} c={c} />}
               {variant === "docked" && (
                 <span className="ax-doc-glyph">
-                  <Glyph name="doc" size={18} />
+                  <Glyph name="doc" size={20} />
                 </span>
               )}
               <span className="ax-src-main">
@@ -501,7 +497,7 @@ function AttachMenu({ doc }: { doc: DocState }) {
   return (
     <div className="ax-pop-wrap" ref={ref}>
       <button className="ax-icon" title="Add the selection or page" aria-label="Add the selection or page" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <Glyph name="plus" size={18} stroke={2} />
+        <Glyph name="plus" size={20} />
       </button>
       {open && (
         <div className="ax-pop up" role="menu">
@@ -574,11 +570,11 @@ export function Composer({
         <ModelPicker up icon />
         {streaming ? (
           <button className="ax-send" title="Stop" aria-label="Stop" onClick={() => st().cancel(doc.id)}>
-            <Glyph name="stop" size={18} stroke={2.5} />
+            <Glyph name="stop" size={20} filled />
           </button>
         ) : (
           <button className="ax-send" title="Send" aria-label="Send" disabled={!text.trim() || noText} onClick={send}>
-            <Glyph name="send" size={18} stroke={2.5} />
+            <Glyph name="send" size={20} />
           </button>
         )}
       </div>

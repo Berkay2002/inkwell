@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { commands, prettyKeys } from "../lib/commands";
 import { useToolPrefs } from "../lib/toolPrefs";
 import { toolItems } from "../lib/toolItems";
+import { type ToolItem } from "../lib/toolsCatalog";
+import { ToolTile } from "./ToolTile";
 import { useRecents } from "../recents";
 import { useStore } from "../store";
 
@@ -13,6 +15,8 @@ interface Item {
   hint?: string;
   /** What the command is for, one plain line (the same text the All tools panel shows). */
   sub?: string;
+  /** The tool this command starts: its tile leads the row. */
+  tool?: ToolItem;
   /** Extra words the filter matches besides the title. */
   words?: string;
   run: () => void;
@@ -35,6 +39,7 @@ export function CommandPalette() {
           title: c.title,
           hint: c.keys?.[0] && prettyKeys(c.keys[0]),
           sub: tool?.description,
+          tool,
           words: tool && `${tool.label} ${tool.keywords ?? ""} ${tool.description}`,
           run: tool
             ? () => {
@@ -85,6 +90,7 @@ export function CommandPalette() {
         <div className="palette-list" ref={list}>
           {items.map((i, n) => (
             <div key={i.title + n} className={n === sel ? "item on" : "item"} onMouseMove={() => setSel(n)} onClick={() => run(i)}>
+              <span className="item-lead">{i.tool && <ToolTile icon={i.tool.icon} group={i.tool.group} size={28} />}</span>
               <span className="item-text">
                 <span className="item-title">{i.title}</span>
                 {i.sub && <span className="dim item-sub">{i.sub}</span>}
