@@ -48,6 +48,31 @@ const FAMILIES: &[(&str, [&str; 4])] = &[
     ("meiryo", ["meiryo", "meiryob", "meiryo", "meiryob"]),
 ];
 
+/// File stem (lower case) -> font file, from the Windows font folders.
+fn scan_font_dirs() -> HashMap<String, PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(w) = std::env::var_os("WINDIR") {
+        dirs.push(PathBuf::from(w).join("Fonts"));
+    }
+    if let Some(l) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(l).join(r"Microsoft\Windows\Fonts"));
+    }
+    let mut map = HashMap::new();
+    for d in dirs {
+        let Ok(rd) = std::fs::read_dir(d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let ext = p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+            if matches!(ext.as_deref(), Some("ttf" | "ttc" | "otf")) {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    map.entry(stem.to_ascii_lowercase()).or_insert(p.clone());
+                }
+            }
+        }
+    }
+    map
+}
+
 #[derive(Default)]
 pub struct WindowsFonts {
     index: OnceLock<HashMap<String, PathBuf>>,
@@ -56,29 +81,7 @@ pub struct WindowsFonts {
 
 impl WindowsFonts {
     fn index(&self) -> &HashMap<String, PathBuf> {
-        self.index.get_or_init(|| {
-            let mut dirs = Vec::new();
-            if let Some(w) = std::env::var_os("WINDIR") {
-                dirs.push(PathBuf::from(w).join("Fonts"));
-            }
-            if let Some(l) = std::env::var_os("LOCALAPPDATA") {
-                dirs.push(PathBuf::from(l).join(r"Microsoft\Windows\Fonts"));
-            }
-            let mut map = HashMap::new();
-            for d in dirs {
-                let Ok(rd) = std::fs::read_dir(d) else { continue };
-                for e in rd.flatten() {
-                    let p = e.path();
-                    let ext = p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-                    if matches!(ext.as_deref(), Some("ttf" | "ttc" | "otf")) {
-                        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                            map.entry(stem.to_ascii_lowercase()).or_insert(p.clone());
-                        }
-                    }
-                }
-            }
-            map
-        })
+        self.index.get_or_init(scan_font_dirs)
     }
 
     fn font_from_stem(&self, display: &str, stem: &str) -> Option<Font> {
@@ -145,6 +148,26 @@ impl FontLoader for WindowsFonts {
     }
 }
 
+/// Families the page loader above leaves to MuPDF's built-in fonts but that Windows has: used by
+/// Preflight to embed the real font (family key -> stems for regular, bold, italic, bold italic).
+const EXTRA_FAMILIES: &[(&str, [&str; 4])] = &[
+    ("arial", ["arial", "arialbd", "ariali", "arialbi"]),
+    ("timesnewroman", ["times", "timesbd", "timesi", "timesbi"]),
+    ("couriernew", ["cour", "courbd", "couri", "courbi"]),
+];
+
+/// The TrueType file (`.ttf`) of an installed font by the name a PDF gives it (`ABCDEF+Calibri-Bold`,
+/// `Arial,Italic`, `TimesNewRomanPS-BoldMT`), or `None`. Nothing is substituted: the family must be
+/// known and the file present.
+pub fn installed_file(name: &str) -> Option<PathBuf> {
+    static INDEX: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
+    let (family, bold, italic) = normalise(name, FontHints::default());
+    let (_, stems) = FAMILIES.iter().chain(EXTRA_FAMILIES.iter()).find(|(k, _)| *k == family)?;
+    let stem = stems[bold as usize + 2 * italic as usize];
+    let path = INDEX.get_or_init(scan_font_dirs).get(stem)?.clone();
+    (path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("ttf"))).then_some(path)
+}
+
 pub fn install() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| mupdf::set_font_loader(WindowsFonts::default()));
@@ -162,5 +185,7 @@ mod tests {
         assert_eq!(normalise("Segoe UI", h), ("segoeui".into(), false, false));
         assert_eq!(normalise("Verdana-Italic", h), ("verdana".into(), false, true));
         assert_eq!(normalise("GillSansMT", h).0, "gillsans");
+        assert_eq!(normalise("Arial-BoldMT", h), ("arial".into(), true, false));
+        assert_eq!(normalise("TimesNewRomanPS-BoldItalicMT", h), ("timesnewroman".into(), true, true));
     }
 }

@@ -102,6 +102,21 @@ impl Font {
             .map(|inner| Self { inner })
     }
 
+    /// Inkwell patch: the font program (a CFF file) of a built-in base-14 font by its standard name
+    /// (`Helvetica`, `Times-Bold`, ...), or `None` when `name` is not one of the 14.
+    pub fn base14_program(name: &str) -> Option<Vec<u8>> {
+        let c_name = CString::new(name).ok()?;
+        let mut len: c_int = 0;
+        // SAFETY: a lookup in the built-in table; the returned data is static.
+        unsafe {
+            let p = fz_lookup_base14_font(context(), c_name.as_ptr(), &mut len);
+            if p.is_null() || len <= 0 {
+                return None;
+            }
+            Some(std::slice::from_raw_parts(p, len as usize).to_vec())
+        }
+    }
+
     pub fn name(&self) -> &str {
         let f_name = unsafe { fz_font_name(context(), self.inner) };
         let c_name = unsafe { CStr::from_ptr(f_name) };

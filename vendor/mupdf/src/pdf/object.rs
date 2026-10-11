@@ -50,6 +50,12 @@ impl PdfObject {
         }
     }
 
+    /// Another handle on the same object (`Clone` is a deep copy: a copy of a direct dictionary
+    /// is detached from the document, so editing it changes nothing).
+    pub fn share(&self) -> Self {
+        unsafe { Self::from_raw_keep_ref(self.inner) }
+    }
+
     pub fn try_clone(&self) -> Result<Self, Error> {
         unsafe { ffi_try!(mupdf_pdf_clone_obj(context(), self.inner)) }.map(|inner| Self { inner })
     }
@@ -211,6 +217,17 @@ impl PdfObject {
 
     pub fn read_raw_stream(&self) -> Result<Vec<u8>, Error> {
         let inner = unsafe { ffi_try!(mupdf_pdf_read_raw_stream(context(), self.inner)) }?;
+        let buf = unsafe { Buffer::from_raw(inner) };
+        let buf_len = buf.len();
+        let mut reader = BufReader::new(buf);
+        let mut output = Vec::with_capacity(buf_len);
+        reader.read_to_end(&mut output)?;
+        Ok(output)
+    }
+
+    /// Inkwell patch: the first `limit` bytes of the decoded stream; the rest is never decoded.
+    pub fn read_stream_head(&self, limit: usize) -> Result<Vec<u8>, Error> {
+        let inner = unsafe { ffi_try!(mupdf_pdf_read_stream_head(context(), self.inner, limit)) }?;
         let buf = unsafe { Buffer::from_raw(inner) };
         let buf_len = buf.len();
         let mut reader = BufReader::new(buf);

@@ -9,7 +9,7 @@
 pub mod app;
 pub(crate) mod bundled;
 pub(crate) mod content;
-mod encodings;
+pub(crate) mod encodings;
 mod font;
 mod layout;
 pub(crate) mod text;

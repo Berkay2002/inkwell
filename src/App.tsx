@@ -10,6 +10,7 @@ import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
 import { A11yPanel } from "./components/a11y/A11yPanel";
+import { PreflightPanel } from "./components/preflight/PreflightPanel";
 import { EditPanel } from "./components/edit/EditPanel";
 import { FormTools, FormsPanel } from "./components/forms/FormsPanel";
 import { RedactPanel } from "./components/redact/RedactPanel";
@@ -166,6 +167,7 @@ export default function App() {
               <HistoryPanel doc={doc} />
               <RedactPanel doc={doc} />
               <A11yPanel doc={doc} />
+              <PreflightPanel doc={doc} />
               <CommentsPanel doc={doc} />
               <EditPanel doc={doc} />
               <FormsPanel doc={doc} />
