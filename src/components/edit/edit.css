@@ -1,0 +1,348 @@
+/* Edit mode: the page layer (page space, scaled by --z so hairlines stay one screen pixel) */
+.te-space {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.te-bg,
+.te-capture {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  touch-action: none;
+}
+.te-capture {
+  cursor: text;
+}
+.te-block {
+  position: absolute;
+  box-sizing: border-box;
+  min-width: 6px;
+  min-height: 6px;
+  pointer-events: auto;
+  cursor: text;
+  outline: calc(1px / var(--z, 1)) dotted color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: calc(2px / var(--z, 1));
+}
+.te-block:hover {
+  background: var(--accent-soft);
+  outline-style: solid;
+}
+.te-block.locked {
+  cursor: not-allowed;
+  outline: calc(1px / var(--z, 1)) dashed color-mix(in srgb, var(--text-2) 55%, transparent);
+}
+.te-block.locked:hover {
+  background: color-mix(in srgb, var(--text-2) 12%, transparent);
+}
+
+.te-editor {
+  position: absolute;
+  box-sizing: border-box;
+  display: block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  resize: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  background: #fff;
+  pointer-events: auto;
+  outline: none;
+  caret-color: currentColor;
+}
+.te-editor.te-new {
+  min-width: calc(120px / var(--z, 1));
+  width: calc(220px / var(--z, 1));
+  padding: 1px;
+  background: rgb(255 255 255 / 0.92);
+  outline: calc(1.5px / var(--z, 1)) solid var(--accent);
+}
+.te-frame {
+  position: absolute;
+  box-sizing: border-box;
+  outline: calc(1.5px / var(--z, 1)) solid var(--accent);
+  outline-offset: calc(2px / var(--z, 1));
+  pointer-events: none;
+}
+.te-h,
+.te-grip {
+  position: absolute;
+  background: var(--surface);
+  border: calc(1.5px / var(--z, 1)) solid var(--accent);
+  pointer-events: auto;
+  touch-action: none;
+}
+.te-h {
+  --s: calc(9px / var(--z, 1));
+  top: 50%;
+  width: var(--s);
+  height: var(--s);
+  margin: calc(var(--s) / -2) 0 0 calc(var(--s) / -2);
+  cursor: ew-resize;
+}
+.te-h.l {
+  left: calc(-2px / var(--z, 1));
+}
+.te-h.r {
+  left: calc(100% + 2px / var(--z, 1));
+}
+.te-grip {
+  --s: calc(9px / var(--z, 1));
+  left: 50%;
+  top: calc(-2px / var(--z, 1));
+  width: calc(22px / var(--z, 1));
+  height: var(--s);
+  margin: calc(var(--s) / -2) 0 0 calc(-11px / var(--z, 1));
+  border-radius: calc(5px / var(--z, 1));
+  cursor: move;
+}
+
+/* the rail */
+.te-panel {
+  min-height: 0;
+}
+.te-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.te-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.te-h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+}
+.te-add {
+  display: flex;
+  gap: 8px;
+}
+.te-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+.te-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.te-btn.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.te-btn:disabled {
+  opacity: 0.55;
+}
+.te-soon {
+  font-size: 11px;
+  color: var(--text-2);
+}
+.te-summary {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  line-height: 1.4;
+}
+.te-summary b {
+  font-weight: 600;
+}
+.te-format {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.te-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+.te-label {
+  flex: none;
+  width: 56px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.te-font {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 10px;
+  line-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.te-style {
+  display: inline-flex;
+  gap: 4px;
+}
+.te-tog,
+.te-stepper button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+.te-tog:hover,
+.te-stepper button:hover {
+  background: var(--surface-2);
+}
+.te-tog.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+.te-stepper {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.te-stepper input {
+  width: 52px;
+  height: 30px;
+  text-align: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+.te-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.te-sw {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  padding: 0;
+}
+.te-sw.on {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.te-sw.custom {
+  overflow: hidden;
+  cursor: pointer;
+}
+.te-sw.custom input {
+  position: absolute;
+  inset: -6px;
+  width: 40px;
+  height: 40px;
+  opacity: 0;
+  cursor: pointer;
+}
+.te-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.te-seg button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--text);
+}
+.te-seg button.on {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.te-select {
+  height: 30px;
+  min-width: 84px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+.te-note {
+  margin: 0;
+  color: var(--text-2);
+  line-height: 1.4;
+}
+.te-hint {
+  margin: 0;
+  line-height: 1.4;
+}
+.te-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.te-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  text-align: left;
+  color: var(--text);
+}
+.te-item:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.te-item.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.te-item .te-excerpt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.te-item .te-tag {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.te-foot {
+  flex: none;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}

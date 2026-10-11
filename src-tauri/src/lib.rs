@@ -2,12 +2,15 @@ pub mod a11y;
 pub mod ai;
 pub mod annot;
 pub mod fillsign;
+pub mod forms;
 pub mod compress;
 pub mod convert;
 pub mod diff;
 pub mod engine;
 pub mod history;
 pub mod history_ipc;
+pub mod imageedit;
+pub mod marks;
 pub mod ocr;
 pub mod paths;
 pub mod print;
@@ -811,6 +814,10 @@ pub fn run() {
             protect::app::protect_apply,
             protect_and_save,
             protect::app::remove_security,
+            marks::app::marks_info,
+            marks::app::marks_add,
+            marks::app::marks_remove,
+            marks::app::marks_bates_files,
             tool_cancel,
             ocr_languages,
             ocr_choose_tesseract,
@@ -823,6 +830,8 @@ pub fn run() {
             discard_scratch,
             a11y::app::a11y_check,
             a11y::app::a11y_fix,
+            a11y::app::a11y_preview,
+            a11y::app::a11y_export_report,
             annot::app::annot_default_author,
             annot::app::annot_list,
             annot::app::annot_add,
@@ -842,8 +851,22 @@ pub fn run() {
             sign::app::sign_create_test_id,
             sign::app::sign_document,
             sign::app::sign_list,
+            forms::app::forms_list,
+            forms::app::forms_set_value,
+            forms::app::forms_reset,
+            forms::app::forms_add,
+            forms::app::forms_add_many,
+            forms::app::forms_move,
+            forms::app::forms_edit,
+            forms::app::forms_delete,
+            forms::app::forms_tab_order,
+            forms::app::forms_arrange,
+            forms::app::forms_detect,
             textedit::app::text_blocks,
             textedit::app::text_edit,
+            textedit::app::text_add,
+            imageedit::app::image_blocks,
+            imageedit::app::image_edit,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

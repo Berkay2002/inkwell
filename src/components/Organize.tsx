@@ -3,6 +3,7 @@ import { pickOpen } from "../lib/api";
 import * as edits from "../lib/edit";
 import { clamp, previewScaleKey, type Size, type TileRef } from "../lib/layout";
 import { formatRange, movedIndices, parseRange } from "../lib/pageRange";
+import { useTextEdit } from "../lib/textEdit";
 import { tileClient, type Want } from "../lib/tiles";
 import { type DocState, useStore } from "../store";
 import { Icon, type IconName } from "./Icons";
@@ -29,12 +30,20 @@ const SPIN_MS = 200;
 const LEAVE_MS = 180;
 
 export function ModeSwitch({ doc }: { doc: DocState }) {
-  const set = (organize: boolean) => st().patch(doc.id, { organize });
+  const editing = useTextEdit((s) => s.open) && !doc.organize;
+  const set = (organize: boolean, edit = false) => {
+    useTextEdit.getState().setOpen(edit);
+    st().patch(doc.id, { organize });
+  };
   return (
     <div className="mode-pill" role="tablist" aria-label="View">
-      <button role="tab" aria-selected={!doc.organize} className={doc.organize ? "" : "on"} onClick={() => set(false)}>
+      <button role="tab" aria-selected={!doc.organize && !editing} className={doc.organize || editing ? "" : "on"} onClick={() => set(false)}>
         <Icon name="book" size={15} />
         Read
+      </button>
+      <button role="tab" aria-selected={editing} className={editing ? "on" : ""} onClick={() => set(false, true)}>
+        <Icon name="edit" size={15} />
+        Edit
       </button>
       <button role="tab" aria-selected={doc.organize} className={doc.organize ? "on" : ""} onClick={() => set(true)}>
         <Icon name="grid" size={15} />

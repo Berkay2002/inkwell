@@ -1,6 +1,6 @@
 /* Organize pages (design/approved/organize.png). Tokens from styles.css. */
 
-/* Read | Organize, also in the reader's toolbar */
+/* Read | Edit | Organize, also in the reader's toolbar */
 .mode-pill {
   display: inline-flex;
   flex: none;

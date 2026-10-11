@@ -147,6 +147,87 @@ export const editApply = (doc: number, op: EditOp) => invoke<EditState>("edit_ap
 export const editUndo = (doc: number) => invoke<EditState>("edit_undo", { doc });
 export const editRedo = (doc: number) => invoke<EditState>("edit_redo", { doc });
 export const editState = (doc: number) => invoke<EditState>("edit_state", { doc });
+
+// ---- editing existing text (src-tauri/src/textedit, docs/text-edit.md) ----
+
+export type TextAlign = "left" | "center" | "right" | "justify";
+/** Why a block can't be edited. `hidden` text is not offered at all. */
+export type TextIssue = "type3" | "noUnicode" | "vertical" | "encoding" | "clip" | "invisible" | "hidden";
+
+export interface TextBlock {
+  /** Pass to `textEdit` with the `rev` of the list it came from. */
+  index: number;
+  text: string;
+  /** x0, y0, x1, y1 in page space (the page as shown, y down). */
+  rect: [number, number, number, number];
+  lines: [number, number, number, number][];
+  /** `/BaseFont`, the subset prefix kept. */
+  font: string;
+  size: number;
+  bold: boolean;
+  italic: boolean;
+  /** RGB 0..1. */
+  color: [number, number, number];
+  align: TextAlign;
+  /** Distance between lines over the font size; null for a single line. */
+  lineSpacing: number | null;
+  editable: boolean;
+  issue: TextIssue | null;
+  reason: string | null;
+}
+
+export interface TextArea {
+  rect: [number, number, number, number];
+  issue: "inForm" | "outlines";
+  reason: string;
+}
+
+export interface TextBlocks {
+  rev: number;
+  blocks: TextBlock[];
+  areas: TextArea[];
+}
+
+/** Unset fields keep the block's own. `offset` and `width` are in page space. */
+export interface BlockChange {
+  text?: string;
+  size?: number;
+  color?: [number, number, number];
+  align?: TextAlign;
+  offset?: [number, number];
+  width?: number;
+  lineSpacing?: number;
+  bold?: boolean;
+  italic?: boolean;
+}
+
+/** Set when the block's font could not show the text and another one was used. */
+export interface TextFallback {
+  font: string;
+  embedded: boolean;
+  reason: string;
+}
+
+export interface TextEdited {
+  state: EditState;
+  fallback: TextFallback | null;
+}
+
+export interface NewTextBox {
+  text: string;
+  size: number;
+  color: [number, number, number];
+  /** Top left of the box in page space. */
+  at: [number, number];
+  /** Wrap to this width; unset keeps the lines as typed. */
+  width?: number;
+}
+
+export const textBlocks = (doc: number, page: number) => invoke<TextBlocks>("text_blocks", { doc, page });
+export const textEdit = (doc: number, rev: number, page: number, index: number, change: BlockChange) =>
+  invoke<TextEdited>("text_edit", { doc, rev, page, index, change });
+export const textAdd = (doc: number, rev: number, page: number, newText: NewTextBox) =>
+  invoke<EditState>("text_add", { doc, rev, page, new: newText });
 /** `to`: a save token (Save as). */
 export const saveDocument = (doc: number, to?: string) => invoke<EditState>("save_document", { doc, to: to ?? null });
 /** `out`: a save token. */
@@ -208,6 +289,102 @@ export const protectAndSave = (doc: number, spec: ProtectSpec, permissionsPasswo
   invoke<EditState>("protect_and_save", { doc, spec, permissionsPassword: permissionsPassword ?? null, to: to ?? null });
 export const removeSecurity = (doc: number, permissionsPassword?: string | null) =>
   invoke<EditState>("remove_security", { doc, permissionsPassword: permissionsPassword ?? null });
+
+// ---- page marks (src-tauri/src/marks) ----
+
+export type MarkKind = "headerFooter" | "watermark" | "background" | "bates";
+export type FontFamily = "helvetica" | "times" | "courier";
+export type Rgb = [number, number, number];
+
+export interface MarkStyle {
+  family: FontFamily;
+  bold: boolean;
+  italic: boolean;
+  size: number;
+  color: Rgb;
+  underline: boolean;
+}
+
+/** A watermark or background picture: `file` is an open token (`pickOpen`); `page` is 0-based, for a PDF. */
+export interface MarkPicture {
+  file: string;
+  page: number;
+  password?: string | null;
+}
+
+/** Top left, top centre, top right, bottom left, bottom centre, bottom right. */
+export type SixTexts = [string, string, string, string, string, string];
+
+export type PageMark =
+  | { kind: "headerFooter"; text: SixTexts; style: MarkStyle; margins: [number, number, number, number]; startNumber: number }
+  | {
+      kind: "watermark";
+      text: string;
+      picture: MarkPicture | null;
+      style: MarkStyle;
+      scale: number;
+      opacity: number;
+      rotation: number;
+      behind: boolean;
+      offset: [number, number];
+      showOnScreen: boolean;
+      showInPrint: boolean;
+    }
+  | { kind: "background"; color: Rgb; opacity: number; picture: MarkPicture | null; scale: number }
+  | {
+      kind: "bates";
+      prefix: string;
+      suffix: string;
+      digits: number;
+      start: number;
+      slot: number;
+      style: MarkStyle;
+      margins: [number, number, number, number];
+    };
+
+export interface MarkDate {
+  year: number;
+  month: number;
+  day: number;
+}
+
+export interface MarkRequest {
+  mark: PageMark;
+  /** 0-based. */
+  pages: number[];
+  replace: boolean;
+  date: MarkDate;
+}
+
+export interface MarkKindInfo {
+  kind: MarkKind;
+  pages: number[];
+  /** The settings it was made with, when this app made it. */
+  mark: PageMark | null;
+}
+
+export interface BatesFileResult {
+  input: string;
+  output: string;
+  pages: number;
+  first: number;
+  last: number;
+}
+
+export const marksInfo = (doc: number) => invoke<{ kinds: MarkKindInfo[] }>("marks_info", { doc });
+/** One undo step: Add, or Update when `replace`. */
+export const marksAdd = (doc: number, request: MarkRequest) => invoke<EditState>("marks_add", { doc, request });
+/** One undo step; all pages when `pages` is omitted. */
+export const marksRemove = (doc: number, kind: MarkKind, pages?: number[]) =>
+  invoke<EditState>("marks_remove", { doc, kind, pages: pages ?? null });
+/** Writes numbered copies of the files (open tokens) into a folder (`pickFolder` token); the originals stay as they are. */
+export const marksBatesFiles = (request: { files: string[]; bates: Extract<PageMark, { kind: "bates" }>; date: MarkDate; folder: string }) =>
+  invoke<BatesFileResult[]>("marks_bates_files", { request: { ...request, bates: stripKind(request.bates) } });
+
+function stripKind<T extends { kind: string }>(m: T): Omit<T, "kind"> {
+  const { kind: _kind, ...rest } = m;
+  return rest;
+}
 
 // ---- compress and OCR (src-tauri/src/tools/mod.rs) ----
 
