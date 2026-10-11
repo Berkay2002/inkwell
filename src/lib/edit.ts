@@ -239,6 +239,9 @@ export function combineFiles(files?: api.FileRef[]) {
 
 /** Save / Don't save / Cancel for a document with unsaved edits. True when it may close. */
 async function settle(id: number): Promise<boolean> {
+  // A conversion waiting to be kept or undone: its sheet asks, not a Save that would write it over the original.
+  // (imported here: the store imports this file)
+  if ((await import("./prepressStore")).usePrepress.getState().holdConversion(id)) return false;
   if (!(await settleTyped(id))) return false;
   const d = st().docs[id];
   if (!d || (!d.dirty && !d.scratch)) return true;

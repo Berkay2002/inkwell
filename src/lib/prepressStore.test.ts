@@ -279,6 +279,16 @@ describe("Convert Colors", () => {
       expect(st().sheet).toBeNull();
     });
 
+    it("closing the document (tab or window) goes back to the sheet's question instead of a Save prompt", async () => {
+      await unsaved();
+      expect(st().holdConversion(2)).toBe(false);
+      expect(st().sheet).toMatchObject({ closing: false });
+      expect(st().holdConversion(1)).toBe(true);
+      expect(st().sheet).toMatchObject({ phase: "unsaved", closing: true });
+      st().keepConversion();
+      expect(st().holdConversion(1)).toBe(false);
+    });
+
     it("Keep closes and leaves the document as it is", async () => {
       await unsaved();
       st().closeSheet();
