@@ -7,7 +7,7 @@
 //! The rules, which are automatic and which manual, and the gaps are in docs/a11y.md.
 
 use crate::engine::edit::{EditSource, EditState};
-use crate::engine::{DocId, Engine, EngineError};
+use crate::engine::{DocId, DocSource, Engine, EngineError};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -16,10 +16,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub mod app;
 pub mod autotag;
 pub mod content;
+pub mod locate;
+pub mod report;
 pub mod tree;
 #[cfg(test)]
 mod tests;
 
+use locate::Locator;
 use tree::{Tree, name, text, xref_of};
 
 pub type Result<T> = std::result::Result<T, EngineError>;
@@ -153,6 +156,19 @@ impl Rule {
         self.info().0
     }
 
+    /// Acrobat's group for the rule (see `report::GROUPS`).
+    pub fn group(self) -> &'static str {
+        match self {
+            Rule::TaggedPdf | Rule::Title | Rule::DisplayDocTitle | Rule::PrimaryLanguage | Rule::ReadingOrder | Rule::Bookmarks | Rule::ColorContrast => "Document",
+            Rule::TaggedLinks | Rule::TabOrder | Rule::FontsUnicode => "Page content",
+            Rule::FieldTooltips => "Forms",
+            Rule::FigureAltText => "Alternate text",
+            Rule::TableHeaders => "Tables",
+            Rule::ListStructure => "Lists",
+            Rule::HeadingNesting => "Headings",
+        }
+    }
+
     pub fn name(self) -> &'static str {
         self.info().1
     }
@@ -183,7 +199,7 @@ pub enum Status {
 }
 
 /// One problem.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
     /// 0-based page.
@@ -192,12 +208,15 @@ pub struct Finding {
     pub object: Option<String>,
     /// Object number, when the object is an indirect PDF object (`figureAlt` takes it).
     pub xref: Option<i32>,
+    /// Where it is on its page, `[x0, y0, x1, y1]` in points from the top left, when it has an extent
+    /// (annotations, figures and other painted content; not text).
+    pub rect: Option<locate::Box4>,
     pub message: String,
 }
 
 impl Finding {
     fn doc(message: impl Into<String>) -> Finding {
-        Finding { page: None, object: None, xref: None, message: message.into() }
+        Finding { message: message.into(), ..Finding::default() }
     }
 }
 
@@ -206,6 +225,8 @@ impl Finding {
 pub struct RuleResult {
     pub rule: Rule,
     pub name: &'static str,
+    /// Acrobat's group: Document, Page content, Forms, Alternate text, Tables, Lists or Headings.
+    pub group: &'static str,
     pub status: Status,
     pub hint: &'static str,
     /// The [`Fix`] that addresses it automatically, if any.
@@ -237,6 +258,8 @@ pub struct Progress {
     /// Pages scanned so far.
     pub done: u32,
     pub pages: u32,
+    /// What is running: `check`, or for Autotag `read` (the text of every page, to find the body size) then `tag`.
+    pub stage: &'static str,
 }
 
 /// Findings beyond this many per rule are summarised ("... and n more").
@@ -463,15 +486,16 @@ pub fn check(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &Ato
         let obj = doc.find_page(p as i32)?;
         scans.push(scan_page(&obj)?);
         pages.push(obj);
-        progress(Progress { done: p + 1, pages: n });
+        progress(Progress { done: p + 1, pages: n, stage: "check" });
     }
 
+    let loc = Locator::new(&pages, &tree);
     let mut results = Vec::with_capacity(Rule::ALL.len());
     for rule in Rule::ALL {
         let (status, mut findings) = if rule.manual() {
             (Status::Manual, Vec::new())
         } else {
-            match run_rule(rule, doc, &cat, &tree, &pages, &scans)? {
+            match run_rule(rule, doc, &cat, &tree, &pages, &scans, &loc)? {
                 None => (Status::Skipped, Vec::new()),
                 Some(f) => (if f.is_empty() { Status::Passed } else { Status::Failed }, f),
             }
@@ -481,24 +505,25 @@ pub fn check(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &Ato
             findings.truncate(MAX_FINDINGS);
             findings.push(Finding::doc(format!("... and {more} more")));
         }
-        results.push(RuleResult { rule, name: rule.name(), status, hint: rule.hint(), fix: rule.fix(), findings });
+        results.push(RuleResult { rule, name: rule.name(), group: rule.group(), status, hint: rule.hint(), fix: rule.fix(), findings });
     }
     Ok(Report { pages: n, tagged: tree.exists, results })
 }
 
-fn elem_finding(t: &Tree, i: usize, what: &str) -> Finding {
+fn elem_finding(t: &Tree, loc: &Locator, i: usize, what: &str) -> Finding {
     let e = &t.elems[i];
     let at = e.page.map(|p| format!(" on page {}", p + 1)).unwrap_or_default();
     Finding {
         page: e.page,
         object: Some(e.ty.clone()),
         xref: (e.xref != 0).then_some(e.xref),
+        rect: loc.element(i),
         message: format!("{} element{at}: {what}", e.ty),
     }
 }
 
 /// `None`: the rule does not apply (Skipped).
-fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[PdfObject], scans: &[PageScan]) -> Result<Option<Vec<Finding>>> {
+fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[PdfObject], scans: &[PageScan], loc: &Locator) -> Result<Option<Vec<Finding>>> {
     let mut out = Vec::new();
     let structure = matches!(rule, Rule::FigureAltText | Rule::ReadingOrder | Rule::TableHeaders | Rule::HeadingNesting | Rule::ListStructure);
     if structure && !t.exists {
@@ -533,7 +558,7 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
         Rule::FigureAltText => {
             for &i in &order {
                 if t.is(i, "Figure") && !t.elems[i].alt && !t.ancestors(i).any(|a| t.elems[a].alt) {
-                    out.push(elem_finding(t, i, "no alternate text"));
+                    out.push(elem_finding(t, loc, i, "no alternate text"));
                 }
             }
         }
@@ -556,6 +581,7 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
                         page: Some(p),
                         object: Some("Marked content".into()),
                         xref: None,
+                        rect: None,
                         message: format!("Page {}: {orphans} marked-content item{} not in the tag tree (never read)", p + 1, if orphans == 1 { " is" } else { "s are" }),
                     });
                 }
@@ -566,6 +592,7 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
                         page: Some(p),
                         object: Some("Marked content".into()),
                         xref: None,
+                        rect: None,
                         message: format!(
                             "Page {}: the tags read in a different order than the page is drawn (tag order reaches MCID {} where content order has MCID {})",
                             p + 1,
@@ -583,7 +610,7 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
                 }
                 let has_th = t.table_rows(i).iter().any(|&r| t.elems[r].children.iter().any(|&c| t.is(c, "TH")));
                 if !has_th {
-                    out.push(elem_finding(t, i, "no header cells (TH)"));
+                    out.push(elem_finding(t, loc, i, "no header cells (TH)"));
                 }
             }
         }
@@ -596,7 +623,7 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
                 };
                 if level > prev + 1 {
                     let what = if prev == 0 { format!("the first heading is an H{level}") } else { format!("H{level} follows an H{prev}") };
-                    out.push(elem_finding(t, i, &format!("{what}; heading levels should not skip")));
+                    out.push(elem_finding(t, loc, i, &format!("{what}; heading levels should not skip")));
                 }
                 prev = level;
             }
@@ -604,17 +631,17 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
         Rule::ListStructure => {
             for &i in &order {
                 match t.elems[i].ty.as_str() {
-                    "LI" if !t.parent_is(i, &["L"]) => out.push(elem_finding(t, i, "not in an L (list)")),
+                    "LI" if !t.parent_is(i, &["L"]) => out.push(elem_finding(t, loc, i, "not in an L (list)")),
                     "Lbl" | "LBody" if !t.parent_is(i, &["LI", "TOCI", "BibEntry", "Note", "FENote"]) => {
-                        out.push(elem_finding(t, i, "not in an LI (list item)"))
+                        out.push(elem_finding(t, loc, i, "not in an LI (list item)"))
                     }
                     "L" => {
                         let stray = t.elems[i].children.iter().filter(|&&c| !matches!(t.elems[c].ty.as_str(), "LI" | "L" | "Caption" | "NonStruct" | "Artifact")).count();
                         if stray > 0 {
-                            out.push(elem_finding(t, i, &format!("{stray} child element{} that are not LI", if stray == 1 { "" } else { "s" })));
+                            out.push(elem_finding(t, loc, i, &format!("{stray} child element{} that are not LI", if stray == 1 { "" } else { "s" })));
                         }
                         if t.elems[i].children.is_empty() {
-                            out.push(elem_finding(t, i, "an empty list"));
+                            out.push(elem_finding(t, loc, i, "an empty list"));
                         }
                     }
                     _ => {}
@@ -642,6 +669,7 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
                             page: Some(p as u32),
                             object: Some("Link annotation".into()),
                             xref: (x != 0).then_some(x),
+                            rect: locate::annot_box(page, &a)?,
                             message: format!("Link on page {}: {why}", p + 1),
                         });
                     }
@@ -666,6 +694,7 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
                             page: Some(p as u32),
                             object: Some(format!("Field \"{n}\"")),
                             xref: (x != 0).then_some(x),
+                            rect: locate::annot_box(page, &a)?,
                             message: format!("Field \"{n}\" on page {} has no tooltip (TU)", p + 1),
                         });
                     }
@@ -684,6 +713,7 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
                         page: Some(p as u32),
                         object: Some(format!("Font {base}")),
                         xref: (*x != 0).then_some(*x),
+                        rect: None,
                         message: format!("Font {base} on page {} doesn't map its characters to Unicode", p + 1),
                     });
                 }
@@ -702,6 +732,7 @@ fn run_rule(rule: Rule, doc: &PdfDocument, cat: &PdfObject, t: &Tree, pages: &[P
                         page: Some(p as u32),
                         object: Some("Page".into()),
                         xref: xref_of(page).ok().filter(|x| *x != 0),
+                        rect: None,
                         message: format!("Page {} has links, comments or fields but doesn't tab in structure order", p + 1),
                     });
                 }
@@ -732,6 +763,9 @@ pub enum Fix {
     FigureAlt { xref: i32, alt: String },
     /// Best-effort tags for an untagged document (see `autotag`).
     Autotag,
+    /// Several of the fixes above as one undo step ("Fix all safe issues"). Each that has nothing
+    /// to do is skipped; the step is refused only when none applied.
+    Many { fixes: Vec<Fix> },
 }
 
 impl Fix {
@@ -744,6 +778,7 @@ impl Fix {
             Fix::FieldTooltips => "Add form field tooltips".into(),
             Fix::FigureAlt { .. } => "Set figure alternate text".into(),
             Fix::Autotag => "Autotag (best effort)".into(),
+            Fix::Many { fixes } => format!("Fix {} accessibility issue{}", fixes.len(), if fixes.len() == 1 { "" } else { "s" }),
         }
     }
 }
@@ -790,6 +825,11 @@ fn valid_lang(l: &str) -> bool {
 /// Applies `fix` to `doc`; returns the pages it touched. `file_stem` names an untitled document.
 /// Fails, changing nothing that matters, when there is nothing to fix.
 pub fn apply_fix(doc: &mut PdfDocument, fix: &Fix, file_stem: &str) -> Result<Vec<u32>> {
+    apply_fix_with(doc, fix, file_stem, &mut |_| {}, &AtomicBool::new(false))
+}
+
+/// [`apply_fix`] with progress and cancel, which only Autotag uses (a cancelled step changes nothing).
+pub fn apply_fix_with(doc: &mut PdfDocument, fix: &Fix, file_stem: &str, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Vec<u32>> {
     let mut cat = doc.catalog()?;
     match fix {
         Fix::Title { title } => {
@@ -887,20 +927,82 @@ pub fn apply_fix(doc: &mut PdfDocument, fix: &Fix, file_stem: &str) -> Result<Ve
             obj.dict_put("Alt", text_obj(doc, alt)?)?;
             Ok(page.into_iter().collect())
         }
-        Fix::Autotag => autotag::run(doc),
+        Fix::Autotag => autotag::run(doc, progress, cancel),
+        Fix::Many { fixes } => {
+            let mut touched: Vec<u32> = Vec::new();
+            let mut applied = 0;
+            for f in fixes {
+                if matches!(f, Fix::Many { .. } | Fix::Autotag) {
+                    return Err(bad("a group of fixes holds only the simple fixes"));
+                }
+                match apply_fix_with(doc, f, file_stem, progress, cancel) {
+                    Ok(t) => {
+                        applied += 1;
+                        touched.extend(t);
+                    }
+                    // Nothing to do for this one (already set, invalid input): the others still apply.
+                    Err(EngineError::Invalid(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if applied == 0 {
+                return Err(bad("nothing to fix"));
+            }
+            touched.sort_unstable();
+            touched.dedup();
+            Ok(touched)
+        }
     }
 }
 
 // ---- engine entry points -------------------------------------------------------------------------
 
-/// Checks the document as it is now (unsaved edits included), on the edit lane.
+/// Checks the document as it is now (unsaved edits included). Reads its own copy of the current
+/// generation (the published snapshot, or the file before any edit), so edits are not held up
+/// while it runs. `cancel` is polled between pages.
 pub fn check_doc(eng: &Engine, doc: DocId, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Report> {
-    eng.read_custom(doc, |d| check(d, progress, cancel))
+    let d = open_copy(eng, doc)?;
+    check(&d, progress, cancel)
+}
+
+/// What Autotag would add to the document as it is now (counted, not run).
+pub fn preview_doc(eng: &Engine, doc: DocId) -> Result<autotag::Preview> {
+    autotag::preview(&open_copy(eng, doc)?)
+}
+
+/// The report as a file: HTML or a PDF. It checks the document again, so the file matches what is open now.
+pub fn report_bytes(eng: &Engine, doc: DocId, pdf: bool, date: &str, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Vec<u8>> {
+    let report = check_doc(eng, doc, progress, cancel)?;
+    let path = eng.doc_entry(doc)?.path();
+    let name = std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    if pdf { report::pdf(&name, date, &report) } else { Ok(report::html(&name, date, &report).into_bytes()) }
+}
+
+/// The document as it is now, in a copy of its own (the published snapshot, or the file before any edit).
+fn open_copy(eng: &Engine, doc: DocId) -> Result<PdfDocument> {
+    let (_, source) = eng.doc_source(doc)?;
+    let mut d = match &source {
+        DocSource::Path(p) => PdfDocument::open(p.as_str())?,
+        DocSource::Bytes(b, n) => PdfDocument::from_bytes(&b[..*n])?,
+    };
+    if d.needs_password()? {
+        match eng.password(doc)? {
+            Some(p) if d.authenticate(&p)? => {}
+            Some(_) => return Err(EngineError::BadPassword),
+            None => return Err(EngineError::NeedsPassword),
+        }
+    }
+    Ok(d)
 }
 
 /// Applies one fix as one undo step.
 pub fn fix_doc(eng: &Engine, doc: DocId, fix: &Fix, source: EditSource) -> Result<EditState> {
+    fix_doc_with(eng, doc, fix, source, &mut |_| {}, &AtomicBool::new(false))
+}
+
+/// [`fix_doc`] with progress and cancel (Autotag reports per page; a cancelled run leaves the document as it was).
+pub fn fix_doc_with(eng: &Engine, doc: DocId, fix: &Fix, source: EditSource, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<EditState> {
     let path = eng.doc_entry(doc)?.path();
     let stem = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    eng.apply_custom(doc, fix.label(), source, false, |d| apply_fix(d, fix, &stem))
+    eng.apply_custom(doc, fix.label(), source, false, |d| apply_fix_with(d, fix, &stem, progress, cancel))
 }

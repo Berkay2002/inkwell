@@ -816,6 +816,8 @@ pub fn run() {
             discard_scratch,
             a11y::app::a11y_check,
             a11y::app::a11y_fix,
+            a11y::app::a11y_preview,
+            a11y::app::a11y_export_report,
             annot::app::annot_default_author,
             annot::app::annot_list,
             annot::app::annot_add,

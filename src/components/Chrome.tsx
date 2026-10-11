@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
+import { openA11y } from "../lib/a11y";
 import { useConvert } from "../lib/convertStore";
 import { useProtect } from "../lib/protectStore";
 import { useTools } from "../lib/toolsStore";
@@ -129,6 +130,7 @@ export function Toolbar({ doc }: { doc: DocState }) {
             { label: "Protect with a password…", onSelect: () => useProtect.getState().open("protect", id) },
             { label: "Security…", onSelect: () => useProtect.getState().open("security", id) },
             { label: "Compare files…", onSelect: () => void openCompareSetup({ id, name: doc.name }) },
+            { label: "Check accessibility…", onSelect: openA11y },
             { label: "Export…", onSelect: () => useConvert.getState().openExport(id) },
             { label: "Create PDF…", onSelect: () => useConvert.getState().openCreate() },
           ]}

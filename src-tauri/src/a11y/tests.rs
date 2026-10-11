@@ -567,6 +567,42 @@ fn autotag_refuses_a_tagged_document_and_undoes_in_one_step() {
 }
 
 #[test]
+fn autotag_leaves_overlapping_runs_unmarked() {
+    // Invalid content: a path is left open across a text object, so the path's artifact run would
+    // start before the text run ends. It is skipped; the text is still tagged.
+    let mut s = Spec::default();
+    s.pages[0].1 = "0 G 72 650 m BT /F1 12 Tf 72 700 Td (Hello accessible world) Tj ET 300 650 l S".into();
+    let path = file("autotag-overlap", &s);
+    let (eng, id) = open(&path);
+    let before = texts(&eng, id);
+    fix_doc(&eng, id, &Fix::Autotag, EditSource::User).unwrap();
+    assert_eq!(texts(&eng, id), before);
+    let r = check_eng(&eng, id);
+    assert_eq!(r.status(Rule::TaggedPdf), Status::Passed);
+    assert_eq!(r.status(Rule::ReadingOrder), Status::Passed, "{:?}", r.result(Rule::ReadingOrder).findings);
+}
+
+#[test]
+fn check_is_cancellable_and_does_not_hold_the_edit_lane() {
+    let s = Spec { pages: (0..3).map(|_| (String::new(), TEXT.to_string())).collect(), ..Spec::default() };
+    let path = file("check-lane", &s);
+    let (eng, id) = open(&path);
+    let e = check_doc(&eng, id, &mut |_| {}, &AtomicBool::new(true)).unwrap_err();
+    assert_eq!(e.to_string(), "cancelled");
+    // Unsaved edits are checked (the published snapshot).
+    fix_doc(&eng, id, &Fix::Language { lang: "de".into() }, EditSource::User).unwrap();
+    assert_eq!(check_eng(&eng, id).status(Rule::PrimaryLanguage), Status::Passed);
+    // A check runs while an edit holds the lane (it would deadlock if it needed the lane).
+    let mut inside = None;
+    let r = eng.apply_custom(id, "probe".into(), EditSource::User, false, |_| {
+        inside = Some(check_eng(&eng, id));
+        Err(EngineError::Invalid("probe only".into()))
+    });
+    assert!(r.is_err());
+    assert_eq!(inside.unwrap().pages, 3);
+}
+
+#[test]
 fn check_reports_progress_per_page() {
     let s = Spec { pages: (0..5).map(|_| (String::new(), TEXT.to_string())).collect(), ..Spec::default() };
     let doc = PdfDocument::from_bytes(&build(&s)).unwrap();
@@ -585,4 +621,131 @@ fn report_serialises_with_rule_ids() {
     assert_eq!(f, Fix::FigureAlt { xref: 12, alt: "A map".into() });
     let f: Fix = serde_json::from_str(r#"{"fix":"title"}"#).unwrap();
     assert_eq!(f, Fix::Title { title: None });
+}
+
+// ---- where findings are, progress, groups, report files -------------------------------------------
+
+#[test]
+fn findings_carry_a_box_for_figures_and_links() {
+    // A 50 x 50 figure at (72, 600) in PDF space is at x 72..122, y 142..192 from the top of a 792 pt page.
+    let mut s = tagged(
+        "102 0 R",
+        vec![(102, "<</Type/StructElem /S/Figure /P 101 0 R /Pg 10 0 R /K 0>>".into())],
+        "/Figure <</MCID 0>> BDC q 50 0 0 50 72 600 cm /Im1 Do Q EMC",
+    );
+    s.pages[0].0 = "/StructParents 0 /Annots [120 0 R]".into();
+    s.objs.push((120, "<</Type/Annot /Subtype/Link /Rect [72 395 180 412] /Border [0 0 0]>>".into()));
+    let r = report(&s);
+    let fig = &r.result(Rule::FigureAltText).findings[0];
+    let b = fig.rect.expect("a figure has a box");
+    assert!((b[0] - 72.0).abs() < 0.5 && (b[1] - 142.0).abs() < 0.5 && (b[2] - 122.0).abs() < 0.5 && (b[3] - 192.0).abs() < 0.5, "{b:?}");
+    let link = &r.result(Rule::TaggedLinks).findings[0];
+    let b = link.rect.expect("a link has a box");
+    assert!((b[0] - 72.0).abs() < 0.5 && (b[1] - 380.0).abs() < 0.5 && (b[2] - 180.0).abs() < 0.5 && (b[3] - 397.0).abs() < 0.5, "{b:?}");
+    // a document-level finding has none
+    assert_eq!(report(&Spec::default()).result(Rule::Title).findings[0].rect, None);
+}
+
+#[test]
+fn many_fixes_are_one_undo_step_and_skip_what_has_nothing_to_do() {
+    let path = file("many", &Spec::default());
+    let (eng, id) = open(&path);
+    let steps = eng.history(id).unwrap().len();
+    // TabOrder has no annotated page here: skipped, the others apply.
+    let many = Fix::Many { fixes: vec![Fix::Title { title: None }, Fix::Language { lang: "en-US".into() }, Fix::TabOrder] };
+    fix_doc(&eng, id, &many, EditSource::User).unwrap();
+    assert_eq!(eng.history(id).unwrap().len(), steps + 1);
+    let r = check_eng(&eng, id);
+    assert_eq!((r.status(Rule::Title), r.status(Rule::PrimaryLanguage)), (Status::Passed, Status::Passed));
+    eng.undo(id).unwrap();
+    let r = check_eng(&eng, id);
+    assert_eq!((r.status(Rule::Title), r.status(Rule::PrimaryLanguage)), (Status::Failed, Status::Failed));
+    eng.redo(id).unwrap();
+    // Nothing left to do: refused, no step.
+    let n = eng.history(id).unwrap().len();
+    let e = fix_doc(&eng, id, &Fix::Many { fixes: vec![Fix::TabOrder, Fix::FieldTooltips] }, EditSource::User).unwrap_err();
+    assert_eq!(e.to_string(), "nothing to fix");
+    assert_eq!(eng.history(id).unwrap().len(), n, "a refused group adds no step");
+    let ser: Fix = serde_json::from_str(r#"{"fix":"many","fixes":[{"fix":"tabOrder"},{"fix":"language","lang":"sv"}]}"#).unwrap();
+    assert_eq!(ser, Fix::Many { fixes: vec![Fix::TabOrder, Fix::Language { lang: "sv".into() }] });
+}
+
+#[test]
+fn autotag_reports_progress_and_a_cancel_changes_nothing() {
+    let path = file("autotag-cancel", &untagged_article());
+    let (eng, id) = open(&path);
+    let mut seen: Vec<(&'static str, u32)> = Vec::new();
+    fix_doc_with(&eng, id, &Fix::Autotag, EditSource::User, &mut |p| seen.push((p.stage, p.done)), &AtomicBool::new(false)).unwrap();
+    assert_eq!(seen, [("read", 1), ("tag", 1)]);
+    eng.undo(id).unwrap();
+    let steps = eng.history(id).unwrap().len();
+
+    // Cancelled from the progress callback after the page was read: the step is not added and the document is untagged.
+    let stop = AtomicBool::new(false);
+    let e = fix_doc_with(&eng, id, &Fix::Autotag, EditSource::User, &mut |_| stop.store(true, Ordering::Relaxed), &stop).unwrap_err();
+    assert_eq!(e.to_string(), "cancelled");
+    assert_eq!(eng.history(id).unwrap().len(), steps, "no new step");
+    assert!(!check_eng(&eng, id).tagged);
+    // and it can still be run afterwards
+    fix_doc(&eng, id, &Fix::Autotag, EditSource::User).unwrap();
+    assert!(check_eng(&eng, id).tagged);
+}
+
+#[test]
+fn preview_counts_what_autotag_would_tag() {
+    let path = file("preview", &untagged_article());
+    let (eng, id) = open(&path);
+    let p = preview_doc(&eng, id).unwrap();
+    assert_eq!(p, autotag::Preview { untagged: true, pages: 1, figures: 1, links: 1, fields: 0 });
+    fix_doc(&eng, id, &Fix::Autotag, EditSource::User).unwrap();
+    assert!(!preview_doc(&eng, id).unwrap().untagged);
+}
+
+#[test]
+fn every_rule_has_one_of_acrobats_groups_and_the_report_lists_it() {
+    for rule in Rule::ALL {
+        assert!(report::GROUPS.contains(&rule.group()), "{rule:?}");
+    }
+    let r = report(&untagged_article());
+    assert!(r.results.iter().all(|x| !x.group.is_empty()));
+    let v = serde_json::to_value(&r).unwrap();
+    assert_eq!(v["results"][0]["group"], "Document");
+}
+
+#[test]
+fn the_report_is_written_as_html_and_as_a_pdf() {
+    let r = report(&untagged_article());
+    let html = report::html("Annual <report>.pdf", "11 Oct 2026", &r);
+    assert!(html.contains("<h1>Accessibility report</h1>"));
+    assert!(html.contains("Annual &lt;report&gt;.pdf"), "the name is escaped");
+    assert!(html.contains("<h3>Alternate text</h3>") && html.contains("Tagged PDF"));
+    assert!(html.contains("class=\"failed\">Failed"));
+    let pdf = report::pdf("Annual report.pdf", "11 Oct 2026", &r).unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    assert!(doc.page_count().unwrap() >= 1);
+    // through the engine, cancellable
+    let path = file("report-file", &untagged_article());
+    let (eng, id) = open(&path);
+    let bytes = report_bytes(&eng, id, false, "today", &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(String::from_utf8(bytes).unwrap().contains("Quarterly figures.pdf"));
+    assert!(report_bytes(&eng, id, true, "today", &mut |_| {}, &AtomicBool::new(true)).is_err());
+}
+
+#[test]
+fn a_report_never_replaces_a_document_that_is_open() {
+    let path = file("report-target", &untagged_article());
+    let (eng, _id) = open(&path);
+    // the guard both report exports call before they write
+    assert!(eng.check_not_open(&path, None).is_err(), "the open document's own file is refused");
+    let elsewhere = file("report-elsewhere", &untagged_article());
+    assert!(eng.check_not_open(&elsewhere, None).is_ok(), "a file that is not open is fine");
+    // and the commands do call it, ahead of the write
+    for (name, src) in [("a11y_export_report", include_str!("app.rs")), ("history_compare_report", include_str!("../history_ipc.rs"))] {
+        let at = src.find(&format!("fn {name}")).unwrap();
+        let body = &src[at..];
+        let guard = body.find("check_not_open").unwrap_or(usize::MAX);
+        let write = body.find("write_replace").or_else(|| body.find("report_to(")).unwrap();
+        assert!(guard < write, "{name} checks the target before writing");
+    }
 }
