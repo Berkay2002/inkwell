@@ -763,7 +763,7 @@ fn redact_apply(c: &Ctx, a: &Value) -> Result<Output, String> {
                 let mut places: Vec<&str> = verify.leaks.iter().map(|k| k.place.as_str()).collect();
                 places.sort_unstable();
                 places.dedup();
-                let _ = write!(s, "Checked: the marked text is gone from where it was marked, but the same text also appears unmarked ({}). ", places.iter().take(5).copied().collect::<Vec<_>>().join("; "));
+                let _ = write!(s, "Checked: the marked text is gone from where it was marked, but the same text also appears unmarked in {} ({}). Tell the user this and offer to mark those places too. ", plural(places.len(), "place"), places.iter().take(5).copied().collect::<Vec<_>>().join("; "));
             }
             s.push_str("The file on disk is unchanged until the user saves; suggest Save as to keep the original. The Redact panel shows the verification.");
             let redacted = json!({ "marks": n, "sanitize": sanitize, "verify": verify });

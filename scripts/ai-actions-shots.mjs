@@ -100,6 +100,16 @@ const keep = (name, m) => {
 await ev(`(() => { const a = window.__ai.getState(); a.setSettings({ consent: true, mode: "docked", float: null, permissions: "ask" }); a.setOpen(true); a.clear(window.__doc()); return true })()`);
 await theme("light");
 await sleep(1500);
+if (process.env.AI_LIVE) {
+  // a real model: use one the signed-in account can run (the user's own Codex config may name one it cannot)
+  const st = await ev(`(async () => { window.__ai.getState().refreshStatus(); for (let i = 0; i < 60; i++) { const s = window.__ai.getState().status; if (s && s !== "loading") return s; await new Promise((r) => setTimeout(r, 500)); } return null })()`);
+  console.log("status", JSON.stringify(st));
+  const models = st?.models ?? [];
+  const pick = process.env.AI_MODEL ?? (models.find((m) => m.isDefault ?? m.is_default) ?? models[0])?.id;
+  if (pick) await ev(`window.__ai.getState().setSettings({ model: ${JSON.stringify(pick)} })`);
+  report.model = pick ?? null;
+  console.log("model", pick);
+}
 await shot("start-light.png");
 
 // ---- a copy: compress (the document is still the saved file) ----
