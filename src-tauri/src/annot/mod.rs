@@ -457,6 +457,11 @@ impl AnnotWalk {
         }
         let mut nums = HashSet::new();
         for i in 0..list.len()? {
+            // Each entry read is charged: many annotations naming many other pages, each with a long array, would
+            // otherwise cost n x m reads. Out of budget the walk is incomplete and this one stays where it is.
+            if self.repeat() {
+                return Ok(false);
+            }
             if let Some(x) = list.get_array(i as i32)?.filter(|x| x.is_indirect().unwrap_or(false)) {
                 nums.insert(x.as_indirect()?);
             }

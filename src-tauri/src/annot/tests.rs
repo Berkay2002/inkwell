@@ -546,3 +546,25 @@ fn direct_entries_are_charged_against_the_scan_budget() {
     assert!(l.items.is_empty());
     assert!(l.incomplete);
 }
+
+#[test]
+fn reading_the_arrays_of_owner_pages_is_charged_against_the_scan_budget() {
+    // Page 0 lists n annotations, each with a /P that names a different later page; each of those has m inline
+    // entries. Deciding who owns an annotation reads that page's array: n x m reads, none of them a repeat.
+    let (n, m) = (1500usize, 1500usize);
+    let first = 3 + n;
+    let rest: Vec<String> = (0..n).map(|i| format!("<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /P {} 0 R >>", first + 1 + i)).collect();
+    let page0 = (0..n).map(|i| format!("{} 0 R ", 3 + i)).collect::<String>();
+    let inline = "0 ".repeat(m);
+    let (eng, id) = open_raw("owner-arrays", pages_and(n + 1, rest, |i| if i == 0 { format!("/Annots [{page0}]") } else { format!("/Annots [{inline}]") }));
+    let mut walk = AnnotWalk::default();
+    eng.read_custom(id, |d| {
+        let _ = walk.page(d, 0, Which::Comments)?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(walk.incomplete && walk.scanned > MAX_SCANNED, "scanned {}", walk.scanned);
+    // The whole listing is bounded and says so, and the form scan refuses rather than answer from part of it.
+    assert!(list_status(&eng, id).unwrap().incomplete);
+    assert!(eng.read_custom(id, |d| Ok(crate::forms::list(d).is_err())).unwrap());
+}
