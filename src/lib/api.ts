@@ -116,6 +116,50 @@ export interface PageImageBlock {
 /** The images page `page` draws (dark pages keep the photographs in their own colours). */
 export const pageImages = (doc: number, page: number) =>
   invoke<{ rev: number; images: PageImageBlock[] }>("image_blocks", { doc, page }).then((b) => b.images);
+
+// ---- editing images in place (src-tauri/src/imageedit, docs/image-edit.md) ----
+
+/** One image a page draws, with what the editor needs: all rectangles are page space (points, y down). */
+export interface ImageBlock extends PageImageBlock {
+  /** Pass to `imageEdit` with the `rev` of the list it came from. */
+  index: number;
+  kind: "xObject" | "inline";
+  /** The whole image's box: larger than `rect` when a clip crops it. */
+  fullRect: [number, number, number, number];
+  /** The placement: unit square to user space. */
+  matrix: [number, number, number, number, number, number];
+  /** Pixel size. */
+  width: number;
+  height: number;
+  bitsPerComponent: number;
+  /** The stream's filters, outermost first. */
+  filter: string[];
+  name?: string | null;
+  xref?: number | null;
+  editable: boolean;
+  reason?: string | null;
+}
+
+export interface ImageBlocks {
+  rev: number;
+  images: ImageBlock[];
+}
+
+/** `file`: an open token from `pickSource("images", …)`. `rect`s are the box to fit, in page space. */
+export type ImageChange =
+  | { op: "move"; dx: number; dy: number }
+  | { op: "resize"; rect: [number, number, number, number]; keepAspect: boolean }
+  | { op: "rotate"; quarterTurns: number }
+  | { op: "flip"; horizontal: boolean }
+  | { op: "delete" }
+  | { op: "replace"; file: string }
+  | { op: "crop"; rect: [number, number, number, number]; pixels: boolean }
+  | { op: "add"; file: string; rect: [number, number, number, number]; keepAspect?: boolean };
+
+export const imageBlocks = (doc: number, page: number) => invoke<ImageBlocks>("image_blocks", { doc, page });
+/** `index` is null for `add`. A `rev` older than the document's is refused as "stale". */
+export const imageEdit = (doc: number, rev: number, page: number, index: number | null, change: ImageChange) =>
+  invoke<{ state: EditState }>("image_edit", { doc, rev, page, index, change });
 export const cancelSearch = (doc: number) => invoke<void>("cancel_search", { doc });
 export const engineStats = () => invoke<EngineStats>("engine_stats");
 export const initialFiles = () => invoke<FileRef[]>("initial_files");

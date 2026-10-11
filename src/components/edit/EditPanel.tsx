@@ -3,6 +3,7 @@ import type { TextAlign, TextBlock } from "../../lib/api";
 import { displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
 import { type DocState } from "../../store";
 import { Icon } from "../Icons";
+import { AddImageButton, ImageSection } from "./ImagePanel";
 import "./edit.css";
 
 const te = () => useTextEdit.getState();
@@ -49,11 +50,7 @@ export function EditPanel({ doc }: { doc: DocState }) {
                 <Icon name="textT" size={16} />
                 Text
               </button>
-              <button className="te-btn" disabled title="Image editing is coming">
-                <Icon name="area" size={16} />
-                Image
-                <span className="te-soon">soon</span>
-              </button>
+              <AddImageButton id={id} />
             </div>
           </section>
 
@@ -75,6 +72,7 @@ export function EditPanel({ doc }: { doc: DocState }) {
               </p>
             )}
           </section>
+          <ImageSection doc={doc} />
           {here.length > 0 && (
             <section className="te-sec">
               <h3 className="te-h3">

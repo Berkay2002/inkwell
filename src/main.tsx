@@ -19,6 +19,7 @@ import { useMarks } from "./lib/marksStore";
 import { useSheets } from "./lib/organizePlus";
 import { usePrint } from "./lib/printStore";
 import { useProtect } from "./lib/protectStore";
+import { useImageEdit } from "./lib/imageEdit";
 import { useTextEdit } from "./lib/textEdit";
 import { useToolPrefs } from "./lib/toolPrefs";
 import { useTools } from "./lib/toolsStore";
@@ -27,7 +28,7 @@ import { useStore } from "./store";
 import "./styles.css";
 
 // Handle for automated checks (benchmarks, screenshots); harmless in normal use.
-(window as unknown as { __inkwell: unknown }).__inkwell = { useStore, useAi, useBar, useHistory, useTools, useConvert, useRedact, redactApi, useAnnot, useForms, useFind, useSearch, usePrint, useProtect, useMarks, useTextEdit, useA11y, usePreflight, useCombine, useSheets, useToolPrefs, edits, api };
+(window as unknown as { __inkwell: unknown }).__inkwell = { useStore, useAi, useBar, useHistory, useTools, useConvert, useRedact, redactApi, useAnnot, useForms, useFind, useSearch, usePrint, useProtect, useMarks, useTextEdit, useImageEdit, useA11y, usePreflight, useCombine, useSheets, useToolPrefs, edits, api };
 trackReadingPosition(useStore);
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

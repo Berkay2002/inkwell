@@ -1,0 +1,133 @@
+/* Edit mode, pictures: the page layer (page space, scaled by --z so hairlines stay one screen pixel) */
+.ie-block {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: auto;
+  cursor: pointer;
+  outline: calc(1px / var(--z, 1)) dotted color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: calc(-1px / var(--z, 1));
+}
+.ie-block:hover {
+  background: var(--accent-soft);
+  outline-style: solid;
+}
+.ie-block.locked {
+  cursor: not-allowed;
+  outline: calc(1px / var(--z, 1)) dashed color-mix(in srgb, var(--text-2) 55%, transparent);
+}
+.ie-block.locked:hover {
+  background: color-mix(in srgb, var(--text-2) 12%, transparent);
+}
+.ie-frame {
+  position: absolute;
+  box-sizing: border-box;
+  outline: calc(1.5px / var(--z, 1)) solid var(--accent);
+  pointer-events: auto;
+  cursor: move;
+  touch-action: none;
+}
+.ie-frame.quiet {
+  cursor: default;
+  outline-style: dashed;
+}
+/* what shows of a picture a clip crops: the frame is its whole box */
+.ie-visible {
+  position: absolute;
+  box-sizing: border-box;
+  outline: calc(1px / var(--z, 1)) dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  pointer-events: none;
+}
+.ie-h {
+  --s: calc(9px / var(--z, 1));
+  position: absolute;
+  width: var(--s);
+  height: var(--s);
+  margin: calc(var(--s) / -2) 0 0 calc(var(--s) / -2);
+  background: var(--surface);
+  border: calc(1.5px / var(--z, 1)) solid var(--accent);
+  pointer-events: auto;
+  touch-action: none;
+}
+.ie-h.nw { left: 0; top: 0; cursor: nwse-resize; }
+.ie-h.n { left: 50%; top: 0; cursor: ns-resize; }
+.ie-h.ne { left: 100%; top: 0; cursor: nesw-resize; }
+.ie-h.e { left: 100%; top: 50%; cursor: ew-resize; }
+.ie-h.se { left: 100%; top: 100%; cursor: nwse-resize; }
+.ie-h.s { left: 50%; top: 100%; cursor: ns-resize; }
+.ie-h.sw { left: 0; top: 100%; cursor: nesw-resize; }
+.ie-h.w { left: 0; top: 50%; cursor: ew-resize; }
+.ie-dim {
+  position: absolute;
+  background: rgb(0 0 0 / 0.45);
+  pointer-events: none;
+}
+.ie-crop {
+  position: absolute;
+  box-sizing: border-box;
+  outline: calc(1.5px / var(--z, 1)) solid #fff;
+  box-shadow: 0 0 0 calc(3px / var(--z, 1)) var(--accent);
+  cursor: move;
+  pointer-events: auto;
+  touch-action: none;
+}
+.ie-place {
+  cursor: crosshair;
+}
+.ie-ghost {
+  position: absolute;
+  box-sizing: border-box;
+  border: calc(1.5px / var(--z, 1)) dashed var(--accent);
+  background: var(--accent-soft);
+  pointer-events: none;
+}
+
+/* the rail */
+.ie-tools {
+  display: inline-flex;
+  gap: 6px;
+}
+.te-btn.ie-icon {
+  width: 34px;
+  padding: 0;
+  justify-content: center;
+}
+.ie-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ie-num {
+  width: 64px;
+  height: 30px;
+  text-align: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+.ie-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+  color: var(--text);
+}
+.te-btn.ie-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+.te-btn.ie-primary:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(1.08);
+}
+.ie-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ie-crop-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}

@@ -133,6 +133,15 @@ export function addText(id: number, rev: number, page: number, box: api.NewTextB
   });
 }
 
+/** Changes one image of a page, or adds one (`index` null): src-tauri/src/imageedit. */
+export function editImage(id: number, rev: number, page: number, index: number | null, change: api.ImageChange) {
+  return textResult(id, async () => {
+    const r = await api.imageEdit(id, rev, page, index, change);
+    applyState(id, r.state);
+    return r.state;
+  });
+}
+
 /**
  * Text typed into the editor lives outside the document until it is sent: closing a tab or the window
  * has to send it (or ask) first. The Edit store registers itself here.
