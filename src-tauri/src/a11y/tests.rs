@@ -304,6 +304,27 @@ fn fonts_unicode() {
 }
 
 #[test]
+fn fonts_unicode_simple_encodings() {
+    let font = |enc: &str| Spec { font: format!("<</Type/Font /Subtype/Type1 /BaseFont/Custom /Encoding {enc}>>"), ..Spec::default() };
+    assert_eq!(status(&font("/MacRomanEncoding"), Rule::FontsUnicode), Status::Passed);
+    assert_eq!(status(&font("/CustomEncoding"), Rule::FontsUnicode), Status::Failed);
+    assert_eq!(status(&font("<</BaseEncoding /WinAnsiEncoding /Differences [65 /Aacute /uni0141 /eacute]>>"), Rule::FontsUnicode), Status::Passed);
+    assert_eq!(status(&font("<</Differences [1 /g12 /g13 /g14]>>"), Rule::FontsUnicode), Status::Failed);
+    assert_eq!(status(&font("<</Differences [1 /glyph7]>>"), Rule::FontsUnicode), Status::Failed);
+    assert!(!opaque_glyph("a12") && !opaque_glyph("uni0041") && !opaque_glyph("g") && opaque_glyph("cid0042"));
+}
+
+#[test]
+fn utf16_text_strings_are_read() {
+    // Title and alternate text written as UTF-16BE (as `text_obj` writes non-ASCII text).
+    let mut s = tagged("102 0 R", vec![(102, "<</Type/StructElem /S/Figure /P 101 0 R /Pg 10 0 R /Alt <FEFF00C50072> /K 0>>".into())], "/Figure <</MCID 0>> BDC q 50 0 0 50 72 600 cm /Im1 Do Q EMC");
+    s.info = Some("<</Title <FEFF00C50072007300720061007000700070006F00720074>>>".into());
+    let r = report(&s);
+    assert_eq!(r.status(Rule::Title), Status::Passed);
+    assert_eq!(r.status(Rule::FigureAltText), Status::Passed);
+}
+
+#[test]
 fn bookmarks() {
     let pages = |n: usize| (0..n).map(|_| (String::new(), TEXT.to_string())).collect::<Vec<_>>();
     assert_eq!(status(&Spec { pages: pages(20), ..Spec::default() }, Rule::Bookmarks), Status::Passed);
@@ -435,6 +456,17 @@ fn fix_field_tooltips() {
     let doc = PdfDocument::open(&file_path("tooltips")).unwrap();
     let w = doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap();
     assert_eq!(text(&w, "TU").unwrap().as_deref(), Some("First name"));
+}
+
+#[test]
+fn fix_field_tooltips_named_by_an_ancestor() {
+    // The terminal field has no /T: its name comes from its parent ("address.line1" style).
+    let mut s = Spec { cat: "/AcroForm <</Fields [132 0 R]>>".into(), ..Spec::default() };
+    s.pages[0].0 = "/Annots [130 0 R]".into();
+    s.objs.push((130, "<</Type/Annot /Subtype/Widget /Parent 131 0 R /Rect [72 600 272 620] /P 10 0 R>>".into()));
+    s.objs.push((131, "<</FT/Tx /Parent 132 0 R /Kids [130 0 R]>>".into()));
+    s.objs.push((132, "<</T (homeAddress) /Kids [131 0 R]>>".into()));
+    fixes("tooltips-ancestor", &s, Fix::FieldTooltips, Rule::FieldTooltips);
 }
 
 #[test]

@@ -379,6 +379,18 @@ fn scan_page(page: &PdfObject) -> Result<PageScan> {
     Ok(out)
 }
 
+const STANDARD_ENCODINGS: &[&str] = &["StandardEncoding", "WinAnsiEncoding", "MacRomanEncoding", "MacExpertEncoding", "PDFDocEncoding"];
+
+/// A glyph name that says nothing about its character: `g12`, `glyph7`, `cid0042`, `index3`,
+/// `G5`, a bare number. (`uniXXXX`, `uXXXX` and Adobe Glyph List names do map.)
+fn opaque_glyph(n: &str) -> bool {
+    let digits = n.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+    let prefix = &n[..n.len() - digits.len()];
+    !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && matches!(prefix.to_ascii_lowercase().as_str(), "" | "g" | "gid" | "glyph" | "cid" | "index" | "c")
+}
+
 /// Whether text in this font can be mapped to Unicode: a ToUnicode CMap, a standard encoding,
 /// or a predefined CJK collection.
 fn maps_to_unicode(f: &PdfObject) -> Result<bool> {
@@ -404,7 +416,21 @@ fn maps_to_unicode(f: &PdfObject) -> Result<bool> {
         }
         Some("Type3") => enc.is_some(),
         _ => match &enc {
-            Some(e) if e.is_name()? || e.is_dict()? => true,
+            Some(e) if e.is_name()? => STANDARD_ENCODINGS.contains(&String::from_utf8_lossy(&e.as_name()?).as_ref()),
+            Some(e) if e.is_dict()? => {
+                let base_ok = name(e, "BaseEncoding")?.is_none_or(|b| STANDARD_ENCODINGS.contains(&b.as_str()));
+                let mut names_ok = true;
+                if let Some(d) = e.get_dict("Differences")?.filter(|d| d.is_array().unwrap_or(false)) {
+                    for x in d.array_iter()? {
+                        let x = x?;
+                        if x.is_name()? && opaque_glyph(&String::from_utf8_lossy(&x.as_name()?)) {
+                            names_ok = false;
+                            break;
+                        }
+                    }
+                }
+                base_ok && names_ok
+            }
             _ => {
                 // The font's built-in encoding: standard unless the font is symbolic.
                 let flags = f
@@ -827,8 +853,8 @@ pub fn apply_fix(doc: &mut PdfDocument, fix: &Fix, file_stem: &str) -> Result<Ve
                     if (x != 0 && !seen.insert(x)) || text(&field, "TU")?.is_some() {
                         continue;
                     }
-                    let n = text(&field, "T")?.unwrap_or_default();
-                    let tip = tooltip_from_name(&n);
+                    // The same name the checker reports: a terminal field may take it from an ancestor.
+                    let tip = tooltip_from_name(&full_name(&field)?);
                     if tip.is_empty() {
                         continue;
                     }
