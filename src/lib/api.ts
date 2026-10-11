@@ -60,7 +60,7 @@ export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word";
 export const pickSave = (name: string, at: { doc?: number; near?: string } = {}, kind?: SaveKind) =>
   invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null, kind: kind ?? null });
 /** Open dialog for what Create builds a PDF from: images (several) or one text file. */
-export const pickSource = (kind: "images" | "text", multiple: boolean) => invoke<FileRef[]>("pick_source", { kind, multiple });
+export const pickSource = (kind: "images" | "text" | "digitalId", multiple: boolean) => invoke<FileRef[]>("pick_source", { kind, multiple });
 /** Folder dialog (run by Rust); the token names the folder a multi-file export writes into. */
 export const pickFolder = (doc?: number) => invoke<FileRef | null>("pick_folder", { doc: doc ?? null });
 /** Open token for a path the user chose before (recent list); Rust refuses any other path. */

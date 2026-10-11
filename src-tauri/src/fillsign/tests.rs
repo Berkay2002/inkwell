@@ -72,6 +72,9 @@ fn every_item_is_one_undo_step_and_survives_save_and_reopen() {
     let kinds = |eng: &Engine, id| list_all(eng, id).unwrap().into_iter().map(|i| i.item).collect::<Vec<_>>();
     let want = ["text", "check", "cross", "dot", "circle", "line", "signature", "initials"];
     assert_eq!(kinds(&eng, id), want);
+    // ... and the comments list holds only the note.
+    let comments = annot::list_all(&eng, id).unwrap();
+    assert_eq!(comments.len(), 1, "{comments:?}");
     let items = list_all(&eng, id).unwrap();
     assert_eq!(items[0].annot.contents, "Alex Johnson");
     assert_eq!(items[6].annot.page, 1);

@@ -10,6 +10,8 @@ import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
 import { RedactPanel } from "./components/redact/RedactPanel";
+import { SignRail } from "./components/sign/SignRail";
+import { SignBanner, SignCreator, SignStrip } from "./components/sign/SignTools";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
 import { ConvertPanel } from "./components/ConvertPanel";
@@ -114,6 +116,8 @@ export default function App() {
                 {searchOpen && !viewing && <SearchBar key={doc.id} doc={doc} />}
                 <HistoryBanner doc={doc} />
                 <CommentTools doc={doc} />
+                <SignStrip doc={doc} />
+                {!viewing && <SignBanner doc={doc} />}
               </div>
               <ToolsPanel doc={doc} />
               <ConvertPanel doc={doc} />
@@ -121,6 +125,7 @@ export default function App() {
               <HistoryPanel doc={doc} />
               <RedactPanel doc={doc} />
               <CommentsPanel doc={doc} />
+              <SignRail doc={doc} />
             </div>
           )}
         </>
@@ -136,6 +141,7 @@ export default function App() {
       )}
       {paletteOpen && <CommandPalette />}
       {hasPassword && <PasswordDialog />}
+      <SignCreator />
       <Toast />
     </div>
   );

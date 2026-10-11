@@ -282,7 +282,8 @@ pub fn list(doc: &PdfDocument) -> Result<Vec<AnnotDto>> {
     for p in 0..doc.page_count()? as u32 {
         let page = doc.load_pdf_page(p as i32)?;
         for a in page.annotations() {
-            if a.r#type().is_ok_and(is_comment) {
+            // Fill & Sign items are annotations too; fillsign lists them, not as comments.
+            if a.r#type().is_ok_and(is_comment) && a.object().get_dict(crate::fillsign::MARK).ok().flatten().is_none() {
                 all.push(dto(p, &a)?);
             }
         }

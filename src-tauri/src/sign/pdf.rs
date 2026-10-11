@@ -820,7 +820,7 @@ fn check(v: &PdfObject, bytes: &[u8], out: &mut SignatureInfo, trust: &Trust) ->
     out.digest = alg.name().to_string();
     out.signer = cert.display_name();
     out.issuer = cert.issuer.display_name();
-    out.cert_not_after = format!("{:?}", cert.not_after);
+    out.cert_not_after = format!("{:04}-{:02}-{:02}", cert.not_after.year, cert.not_after.month, cert.not_after.day);
     out.cert_fingerprint = cert.fingerprint();
     let digest = alg.digest(&[&bytes[..b], &bytes[c..c + d]]);
     // Detached: the signed attributes commit to the document through messageDigest.

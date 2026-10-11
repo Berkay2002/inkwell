@@ -96,8 +96,7 @@ impl Identity {
 }
 
 fn day(t: &crypto::Time) -> String {
-    let s = t.to_string();
-    s.get(..10).unwrap_or(&s).to_string()
+    format!("{:04}-{:02}-{:02}", t.year, t.month, t.day)
 }
 
 /// Which identity signs.
@@ -109,6 +108,7 @@ pub enum IdRef {
 }
 
 /// The store's signing identities (read only) and this session's file and test IDs.
+/// `INKWELL_NO_CERT_STORE=1` leaves the store out (test runs and screenshots never show a real ID).
 #[tauri::command]
 pub async fn sign_identities(ids: State<'_, Ids>) -> Result<Vec<Identity>> {
     let mut out: Vec<Identity> = {
@@ -117,7 +117,9 @@ pub async fn sign_identities(ids: State<'_, Ids>) -> Result<Vec<Identity>> {
         v.sort_by_key(|i| i.handle);
         v
     };
-    out.extend(blocking(store_identities).await?);
+    if std::env::var("INKWELL_NO_CERT_STORE").as_deref() != Ok("1") {
+        out.extend(blocking(store_identities).await?);
+    }
     Ok(out)
 }
 
@@ -244,8 +246,8 @@ fn identity(ids: &Ids, which: &IdRef) -> Result<Arc<DigitalId>> {
 }
 
 /// Signs `doc` (one undo step: an incremental update appended to what Save writes) and saves
-/// it: over the file, or to `to` (a save token). Unsaved page deletions or redactions must be
-/// saved first.
+/// it: over the file, or to `to` (a save token). Pending page deletions or redactions are
+/// written out first, as Save would.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn sign_document(
@@ -286,6 +288,17 @@ pub async fn sign_list(eng: State<'_, Arc<Engine>>, doc: DocId) -> Result<Vec<Si
 }
 
 pub fn list(eng: &Engine, doc: DocId) -> Result<Vec<SignatureInfo>> {
+    // Most documents have no form: skip copying and reparsing them after every edit.
+    let has_fields = eng.read_custom(doc, |d| {
+        let fields = d.catalog()?.get_dict("AcroForm")?.and_then(|f| f.get_dict("Fields").ok().flatten());
+        Ok(match fields {
+            Some(f) => f.len()? > 0,
+            None => false,
+        })
+    })?;
+    if !has_fields {
+        return Ok(Vec::new());
+    }
     let bytes = eng.current_bytes(doc)?;
     let d = mupdf::pdf::PdfDocument::from_bytes(&bytes).map_err(EngineError::from)?;
     pdf::list(&d, &bytes, &system_trust).map_err(err)

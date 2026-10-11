@@ -6,6 +6,7 @@ import type { EditOp, EditState } from "./api";
 import { formatRange } from "./pageRange";
 import { useAnnot } from "./annot";
 import { useRedact } from "./redact";
+import { useSign } from "./sign";
 import { dropCached } from "./tiles";
 
 /**
@@ -39,6 +40,8 @@ export function applyState(id: number, s: EditState) {
   if (revChanged && useRedact.getState().docs[id]) void useRedact.getState().refreshMarks(id);
   // ... and comments: undo, redo and restoring a version change them too.
   if (revChanged && useAnnot.getState().docs[id]) void useAnnot.getState().refresh(id);
+  // ... and Fill & Sign items.
+  if (revChanged && useSign.getState().docs[id]) void useSign.getState().refresh(id);
   // Hits point at the old pages.
   if (revChanged && d.search.query) st().runSearch(id, d.search.query);
 }

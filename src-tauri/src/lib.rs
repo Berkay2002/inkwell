@@ -65,12 +65,13 @@ enum SaveKind {
     Word,
 }
 
-/// What an open dialog for Create filters for.
+/// What an open dialog for Create (or a digital ID) filters for.
 #[derive(serde::Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 enum SourceKind {
     Images,
     Text,
+    DigitalId,
 }
 
 /// Open dialog in Rust; the picked files come back as open tokens.
@@ -144,6 +145,7 @@ async fn pick_source(window: Window, kind: SourceKind, multiple: bool) -> Result
         let d = match kind {
             SourceKind::Images => d.set_title("Choose images").add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"]),
             SourceKind::Text => d.set_title("Choose a text file").add_filter("Text", &["txt", "text", "md", "log", "csv"]),
+            SourceKind::DigitalId => d.set_title("Choose a digital ID").add_filter("Digital ID", &["pfx", "p12"]),
         };
         let picked = if multiple { d.blocking_pick_files() } else { d.blocking_pick_file().map(|f| vec![f]) };
         let reg = window.state::<Paths>();
