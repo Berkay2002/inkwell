@@ -117,14 +117,15 @@ function Headings({ doc, existing }: { doc: number; existing: boolean }) {
   const h = useNav((s) => s.docs[doc]?.headings ?? null);
   const [replace, setReplace] = useState(false);
   if (!h) return <p className="dim te-hint">Looking for headings…</p>;
-  if (h.count === 0) return <p className="dim te-hint">No headings were found: no line is set clearly larger than the body text.</p>;
+  if (h.count === 0) return <p className="dim te-hint">No headings were found: the file has no heading tags and no line is set clearly larger than the body text.</p>;
   return (
     <div className="bm-heads">
       <p className="te-summary">
         <b>
           {h.count} {h.count === 1 ? "bookmark" : "bookmarks"}
         </b>{" "}
-        in {h.levels} {h.levels === 1 ? "level" : "levels"}, from the text set larger than the rest.
+        in {h.levels} {h.levels === 1 ? "level" : "levels"},{" "}
+        {h.source === "tags" ? "from the heading tags of this file." : "guessed from the text set larger than the rest."}
       </p>
       <ul className="bm-preview">
         {h.rows.slice(0, 6).map((r, i) => (

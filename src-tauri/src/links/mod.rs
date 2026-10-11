@@ -16,9 +16,10 @@ pub use urls::UrlPreview;
 
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
-use crate::outline::{broken_reason, dest_array, page_dest, text_object};
+use crate::outline::{Names, broken_reason, certified, dest_array, page_dest, text_object};
 use crate::textedit::{Matrix, page_space};
 use mupdf::pdf::{PdfDocument, PdfObject};
+use mupdf::Buffer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -121,6 +122,9 @@ pub struct LinkEdited {
     pub id: Option<i32>,
     /// Links added or removed.
     pub count: u32,
+    /// For a link to a file (Add, SetTarget): the name the link now has for it, which is found from
+    /// the folder of the document: a bare name, or a path with `..` when the file is above or beside it.
+    pub name: Option<String>,
 }
 
 /// Resolves the file token of a target: `f` turns it into a path.
@@ -166,8 +170,12 @@ pub fn gate_url(url: &str) -> Result<String> {
         if to.is_empty() && query.is_empty() {
             return Err(bad("the mail address is empty"));
         }
-        let lower = query.to_ascii_lowercase();
-        if lower.split('&').any(|p| p.starts_with("attach") || p.starts_with("insert")) {
+        // Parameter names are compared decoded (`%61ttach` is `attach`), with `&` or `;` between them.
+        let asks_for_a_file = query.split(['&', ';']).any(|p| {
+            let name = percent_decode(p.split('=').next().unwrap_or("")).to_ascii_lowercase();
+            name.starts_with("attach") || name.starts_with("insert")
+        });
+        if asks_for_a_file {
             return Err(bad("a mail link can't attach files"));
         }
         rest
@@ -184,8 +192,12 @@ pub fn gate_url(url: &str) -> Result<String> {
         out.push_str("//");
         after
     };
-    for ch in tail.chars() {
-        if ch.is_ascii() {
+    // What RFC 3986 does not allow in an address is percent-encoded: everything outside ASCII, the
+    // characters that are not part of the syntax (`"<>\^`{|}`), and a `%` that starts no escape.
+    let chars: Vec<char> = tail.chars().collect();
+    for (i, &ch) in chars.iter().enumerate() {
+        let is_escape = ch == '%' && chars.get(i + 1).is_some_and(char::is_ascii_hexdigit) && chars.get(i + 2).is_some_and(char::is_ascii_hexdigit);
+        if ch.is_ascii() && !matches!(ch, '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '|' | '}') && (ch != '%' || is_escape) {
             out.push(ch);
         } else {
             let mut b = [0u8; 4];
@@ -195,6 +207,24 @@ pub fn gate_url(url: &str) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+/// `s` with its `%XX` escapes decoded (anything that is not an escape is kept).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%' && i + 2 < b.len() && hex(b[i + 1]).is_some() && hex(b[i + 2]).is_some() {
+            out.push((hex(b[i + 1]).unwrap() * 16 + hex(b[i + 2]).unwrap()) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // ---- reading ----
@@ -243,7 +273,7 @@ fn border_of(a: &PdfObject) -> Border {
     Border { visible: width > 0.0 && !no_colour && !hidden, width: width.max(0.0), color }
 }
 
-fn target_of(doc: &PdfDocument, a: &PdfObject, spaces: &mut HashMap<u32, Option<Matrix>>) -> Target {
+fn target_of(doc: &PdfDocument, a: &PdfObject, spaces: &mut HashMap<u32, Option<Matrix>>, names: &mut Names) -> Target {
     let mut dest = a.get_dict("Dest").ok().flatten();
     if dest.is_none() {
         if let Some(act) = a.get_dict("A").ok().flatten() {
@@ -277,7 +307,7 @@ fn target_of(doc: &PdfDocument, a: &PdfObject, spaces: &mut HashMap<u32, Option<
         }
     }
     let Some(d) = dest else { return Target::Other { what: String::new() } };
-    match dest_array(doc, &d).and_then(|arr| page_dest(doc, spaces, &arr)) {
+    match dest_array(doc, names, &d).and_then(|arr| page_dest(doc, spaces, &arr)) {
         Some((page, at)) => Target::Page { page, at },
         None => Target::Broken { what: broken_reason(&d) },
     }
@@ -309,6 +339,11 @@ fn page_annots(doc: &PdfDocument, page: u32) -> Result<Vec<PdfObject>> {
 }
 
 pub fn read_page(doc: &PdfDocument, page: u32, rev: u32) -> Result<PageLinks> {
+    read_page_with(doc, page, rev, &mut Names::default())
+}
+
+/// [`read_page`] for a read of many pages: the named destinations are loaded once, in `names`.
+pub(crate) fn read_page_with(doc: &PdfDocument, page: u32, rev: u32, names: &mut Names) -> Result<PageLinks> {
     let m = page_space(doc, page)?;
     let mut spaces = HashMap::new();
     let mut links = Vec::new();
@@ -317,7 +352,7 @@ pub fn read_page(doc: &PdfDocument, page: u32, rev: u32) -> Result<PageLinks> {
         let b = m.bbox([r[0], r[1], r[2], r[3]].map(f64::from));
         let (x0, x1) = (b[0].min(b[2]) as f32, b[0].max(b[2]) as f32);
         let (y0, y1) = (b[1].min(b[3]) as f32, b[1].max(b[3]) as f32);
-        links.push(Link { id: a.as_indirect()?, rect: [x0, y0, x1, y1], target: target_of(doc, &a, &mut spaces), border: border_of(&a) });
+        links.push(Link { id: a.as_indirect()?, rect: [x0, y0, x1, y1], target: target_of(doc, &a, &mut spaces, names), border: border_of(&a) });
     }
     Ok(PageLinks { rev, links })
 }
@@ -363,8 +398,9 @@ pub struct LinkAudit {
 pub fn audit(eng: &Engine, doc: DocId) -> Result<LinkAudit> {
     eng.read_custom(doc, |d| {
         let mut out = LinkAudit::default();
+        let mut names = Names::default();
         for page in 0..d.page_count()?.max(0) as u32 {
-            for l in read_page(d, page, 0)?.links {
+            for l in read_page_with(d, page, 0, &mut names)?.links {
                 out.total += 1;
                 match l.target {
                     Target::Uri { .. } => out.external += 1,
@@ -403,6 +439,44 @@ fn real_array(doc: &PdfDocument, v: &[f32]) -> Result<PdfObject> {
     Ok(arr)
 }
 
+/// Gives a link whose border is visible an appearance stream that draws it, so page tiles and other
+/// readers show the border too (a link has none of its own to draw otherwise). `clear` takes the stream
+/// off when the border is not visible: only where the person just changed the border, never for a
+/// link that merely moved.
+fn sync_ap(doc: &mut PdfDocument, a: &mut PdfObject, clear: bool) -> Result<()> {
+    let b = border_of(a);
+    let rect = a.get_dict("Rect")?.and_then(|r| nums(&r, 4));
+    let Some(r) = rect.filter(|_| b.visible && b.width > 0.0) else {
+        if clear {
+            a.dict_delete("AP")?;
+        }
+        return Ok(());
+    };
+    let (w, h) = ((r[2] - r[0]).abs(), (r[3] - r[1]).abs());
+    // The stroke is centred on the line: keep the whole width inside the rectangle.
+    let bw = b.width.min(w / 2.0).min(h / 2.0);
+    let content = format!(
+        "q {:.3} {:.3} {:.3} RG {:.3} w {:.3} {:.3} {:.3} {:.3} re S Q",
+        b.color[0],
+        b.color[1],
+        b.color[2],
+        bw,
+        bw / 2.0,
+        bw / 2.0,
+        (w - bw).max(0.0),
+        (h - bw).max(0.0)
+    );
+    let mut form = doc.new_dict()?;
+    form.dict_put("Type", PdfObject::new_name("XObject")?)?;
+    form.dict_put("Subtype", PdfObject::new_name("Form")?)?;
+    form.dict_put("BBox", real_array(doc, &[0.0, 0.0, w, h])?)?;
+    let stream = doc.add_stream(&Buffer::from_bytes(content.as_bytes())?, Some(&form), false)?;
+    let mut ap = doc.new_dict()?;
+    ap.dict_put("N", stream)?;
+    a.dict_put("AP", ap)?;
+    Ok(())
+}
+
 fn put_border(doc: &PdfDocument, a: &mut PdfObject, b: &BorderSpec) -> Result<()> {
     let width = if b.visible { b.width.unwrap_or(1.0).clamp(0.25, 12.0) } else { 0.0 };
     let mut arr = doc.new_array()?;
@@ -421,22 +495,134 @@ fn put_border(doc: &PdfDocument, a: &mut PdfObject, b: &BorderSpec) -> Result<()
     Ok(())
 }
 
-/// A file as a link has it: relative to the document's folder when it is in it or below it, the
-/// bare file name otherwise (Inkwell never puts a folder path of this machine into a document).
-fn file_name_for(doc_path: &str, file: &str) -> String {
-    let f = std::path::Path::new(file);
-    let dir = std::path::Path::new(doc_path).parent();
-    if let Some(rel) = dir.and_then(|d| f.strip_prefix(d).ok()) {
-        let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-        if !parts.is_empty() {
-            return parts.join("/");
+/// The PDF a file link names, as a path on this machine, for opening it in Inkwell once the person
+/// said yes (the confirmation shows this path in full). Only a relative name is followed, from the
+/// document's folder: no drive or network share; and only a PDF, since nothing else is ever run from
+/// a link.
+pub fn resolve_file_link(doc_path: &str, name: &str) -> Result<std::path::PathBuf> {
+    let bad = |why: String| EngineError::Invalid(why);
+    let n = name.trim();
+    if n.is_empty() {
+        return Err(bad("the link names no file".into()));
+    }
+    if n.starts_with(['/', '\\']) || n.contains(':') || n.chars().any(char::is_control) {
+        return Err(bad(format!("the link names a file outside this document's folder ({n})")));
+    }
+    let mut path = std::path::Path::new(doc_path).parent().map(|d| d.to_path_buf()).unwrap_or_default();
+    for part in n.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".") {
+        if part == ".." {
+            // Up from the folder of the document: allowed (the confirmation shows where it ends up).
+            if !path.pop() {
+                return Err(bad(format!("the link names a file that can't be found from this document ({n})")));
+            }
+            continue;
+        }
+        path.push(part);
+    }
+    let is_pdf = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+    if !is_pdf {
+        return Err(bad(format!("Inkwell opens only PDF files from a link, and this one is {n}")));
+    }
+    if !path.is_file() {
+        return Err(bad(format!("{n} is not next to this document")));
+    }
+    Ok(path)
+}
+
+/// `p` as its volume (`c:`, `//server/share`, or `/`) and its components, `\\?\` prefixes dropped,
+/// separators unified, `.` and `..` resolved.
+fn split_volume(p: &str) -> Option<(String, Vec<String>)> {
+    let mut s = p.replace('\\', "/");
+    if let Some(r) = s.strip_prefix("//?/UNC/") {
+        s = format!("//{r}");
+    } else if let Some(r) = s.strip_prefix("//?/") {
+        s = r.to_string();
+    }
+    let (vol, rest) = if let Some(r) = s.strip_prefix("//") {
+        let mut it = r.splitn(3, '/');
+        let host = it.next()?;
+        let share = it.next()?;
+        (format!("//{host}/{share}"), it.next().unwrap_or("").to_string())
+    } else if s.len() >= 2 && s.as_bytes()[1] == b':' {
+        (s[..2].to_string(), s[2..].to_string())
+    } else if let Some(r) = s.strip_prefix('/') {
+        ("/".to_string(), r.to_string())
+    } else {
+        return None;
+    };
+    let mut comps: Vec<String> = Vec::new();
+    for c in rest.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                comps.pop();
+            }
+            c => comps.push(c.to_string()),
         }
     }
-    f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    Some((vol, comps))
+}
+
+/// A file as a link has it: its path from the folder of the document, with `/` between the parts and
+/// `..` to go up (the file on the same drive as the document, found without regard to case). A file on
+/// another drive or share can't be found from the document, so it is refused with that reason: Inkwell
+/// never writes a path of this machine into a document.
+fn file_link_name(doc_path: &str, file: &str) -> Result<String> {
+    let bad = |m: String| EngineError::Invalid(m);
+    let (Some((fv, fc)), Some((dv, dc))) = (split_volume(file), split_volume(doc_path)) else {
+        return Err(bad("that file has no full path, so a link can't find it from the document".into()));
+    };
+    let Some(name) = fc.last() else { return Err(bad("that file has no name".into())) };
+    if !fv.eq_ignore_ascii_case(&dv) {
+        return Err(bad(format!(
+            "{name} is on another drive than this document, so a link made here could not find it. Put a copy next to the document and link that."
+        )));
+    }
+    let dir = &dc[..dc.len().saturating_sub(1)];
+    let fdir = &fc[..fc.len() - 1];
+    let same = |a: &String, b: &String| a.to_lowercase() == b.to_lowercase();
+    let common = dir.iter().zip(fdir).take_while(|(a, b)| same(a, b)).count();
+    let mut out: Vec<String> = vec!["..".to_string(); dir.len() - common];
+    out.extend(fc[common..].iter().cloned());
+    Ok(out.join("/"))
+}
+
+/// A byte string (`/F` of a file specification is one: PDFDocEncoding, not a text string): ASCII as it
+/// is, other characters as their Latin-1 byte when they have one, else `_`.
+fn byte_string(doc: &PdfDocument, text: &str) -> Result<PdfObject> {
+    if text.chars().all(|c| c.is_ascii() && c != '\0' && !c.is_control()) {
+        return Ok(PdfObject::new_string(text)?);
+    }
+    let mut hex = String::from("<");
+    for c in text.chars() {
+        let b = if (c as u32) < 0x100 && !c.is_control() { c as u8 } else { b'_' };
+        hex.push_str(&format!("{b:02X}"));
+    }
+    hex.push('>');
+    Ok(doc.new_object_from_str(&hex)?)
+}
+
+/// File types a link may not launch: a program or a script would run from the document.
+const RUNNABLE: &[&str] = &[
+    "exe", "com", "scr", "pif", "bat", "cmd", "ps1", "psm1", "psd1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "msi", "msp", "msc",
+    "lnk", "url", "cpl", "reg", "inf", "scf", "jar", "dll", "sh", "command", "app", "py", "pl", "rb", "appx", "msix", "gadget", "ws",
+];
+
+/// The refusal for a file a link must not open, or `None`.
+fn runnable(name: &str) -> Option<EngineError> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim_end_matches(['.', ' ']);
+    let ext = base.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    match ext {
+        Some(e) if !RUNNABLE.contains(&e.as_str()) => None,
+        Some(_) | None => Some(EngineError::Invalid(format!(
+            "A link can't open {base}: a document is not allowed to run a program or a script, or a file Inkwell can't tell the kind of."
+        ))),
+    }
 }
 
 /// Puts `target` on `a` (and takes the other kind of target off).
-fn put_target(doc: &mut PdfDocument, doc_path: &str, a: &mut PdfObject, target: &NewTarget) -> Result<()> {
+/// Returns the name the link has for a file target.
+fn put_target(doc: &mut PdfDocument, doc_path: &str, a: &mut PdfObject, target: &NewTarget) -> Result<Option<String>> {
     match target {
         NewTarget::Page { page, at } => {
             let n = doc.page_count()?;
@@ -446,6 +632,7 @@ fn put_target(doc: &mut PdfDocument, doc_path: &str, a: &mut PdfObject, target: 
             let dest = crate::outline::dest_object(doc, *page, *at)?;
             a.dict_delete("A")?;
             a.dict_put("Dest", dest)?;
+            Ok(None)
         }
         NewTarget::Uri { uri } => {
             let uri = gate_url(uri)?;
@@ -454,16 +641,19 @@ fn put_target(doc: &mut PdfDocument, doc_path: &str, a: &mut PdfObject, target: 
             act.dict_put("URI", PdfObject::new_string(&uri)?)?;
             a.dict_delete("Dest")?;
             a.dict_put("A", act)?;
+            Ok(None)
         }
         NewTarget::File { file, page } => {
-            let name = file_name_for(doc_path, file);
-            if name.is_empty() {
-                return Err(EngineError::Invalid("that file has no name".into()));
-            }
+            let name = file_link_name(doc_path, file)?;
             let is_pdf = file.to_ascii_lowercase().ends_with(".pdf");
+            if !is_pdf {
+                if let Some(refusal) = runnable(&name) {
+                    return Err(refusal);
+                }
+            }
             let mut spec = doc.new_dict()?;
             spec.dict_put("Type", PdfObject::new_name("Filespec")?)?;
-            spec.dict_put("F", text_object(doc, &name)?)?;
+            spec.dict_put("F", byte_string(doc, &name)?)?;
             spec.dict_put("UF", text_object(doc, &name)?)?;
             let mut act = doc.new_dict()?;
             if is_pdf {
@@ -479,13 +669,20 @@ fn put_target(doc: &mut PdfDocument, doc_path: &str, a: &mut PdfObject, target: 
             act.dict_put("F", spec)?;
             a.dict_delete("Dest")?;
             a.dict_put("A", act)?;
+            Ok(Some(name))
         }
     }
-    Ok(())
 }
 
 /// A new link annotation on `page`; returns its reference.
-fn new_link(doc: &mut PdfDocument, doc_path: &str, page: u32, rect: [f32; 4], target: &NewTarget, border: &BorderSpec) -> Result<PdfObject> {
+fn new_link(
+    doc: &mut PdfDocument,
+    doc_path: &str,
+    page: u32,
+    rect: [f32; 4],
+    target: &NewTarget,
+    border: &BorderSpec,
+) -> Result<(PdfObject, Option<String>)> {
     let r = user_rect(doc, page, rect)?;
     let mut a = doc.new_dict()?;
     a.dict_put("Type", PdfObject::new_name("Annot")?)?;
@@ -493,7 +690,8 @@ fn new_link(doc: &mut PdfDocument, doc_path: &str, page: u32, rect: [f32; 4], ta
     a.dict_put("Rect", real_array(doc, &r)?)?;
     a.dict_put("F", PdfObject::new_int(4)?)?;
     put_border(doc, &mut a, border)?;
-    put_target(doc, doc_path, &mut a, target)?;
+    sync_ap(doc, &mut a, false)?;
+    let name = put_target(doc, doc_path, &mut a, target)?;
     let mut p = doc.find_page(page as i32)?;
     a.dict_put("P", p.clone())?;
     let r = doc.add_object(&a)?;
@@ -508,7 +706,7 @@ fn new_link(doc: &mut PdfDocument, doc_path: &str, page: u32, rect: [f32; 4], ta
             p.dict_put("Annots", arr)?;
         }
     }
-    Ok(r)
+    Ok((r, name))
 }
 
 fn link_obj(doc: &PdfDocument, page: u32, id: i32) -> Result<PdfObject> {
@@ -516,6 +714,77 @@ fn link_obj(doc: &PdfDocument, page: u32, id: i32) -> Result<PdfObject> {
         .into_iter()
         .find(|a| a.as_indirect().ok() == Some(id))
         .ok_or(EngineError::Stale)
+}
+
+/// A link that was in the structure tree (`/StructParent`) leaves its entry in the parent tree, and the
+/// object reference in the element that held it, when it is deleted; a dangling one is what a checker
+/// reports as a broken tag.
+fn leave_structure(doc: &PdfDocument, a: &PdfObject, link: i32) -> Result<()> {
+    let Some(key) = a.get_dict("StructParent")?.and_then(|k| k.resolve().ok().flatten().unwrap_or(k).as_int().ok()) else {
+        return Ok(());
+    };
+    let Some(root) = doc.catalog()?.get_dict("StructTreeRoot")? else { return Ok(()) };
+    let Some(tree) = root.get_dict("ParentTree")? else { return Ok(()) };
+    let mut todo = vec![tree];
+    let mut budget = 4096;
+    while let Some(node) = todo.pop() {
+        budget -= 1;
+        if budget == 0 {
+            break;
+        }
+        if let Some(nums) = node.get_dict("Nums")? {
+            let mut nums = nums.resolve()?.unwrap_or(nums);
+            if nums.is_array()? {
+                let len = nums.len()? as i32;
+                let mut i = 0;
+                while i + 1 < len {
+                    let k = nums.get_array(i)?.and_then(|k| k.resolve().ok().flatten().unwrap_or(k).as_int().ok());
+                    if k == Some(key) {
+                        if let Some(elem) = nums.get_array(i + 1)? {
+                            drop_object_ref(&elem, link)?;
+                        }
+                        nums.array_delete(i + 1)?;
+                        nums.array_delete(i)?;
+                        return Ok(());
+                    }
+                    i += 2;
+                }
+            }
+        }
+        if let Some(kids) = node.get_dict("Kids")? {
+            let kids = kids.resolve()?.unwrap_or(kids);
+            if kids.is_array()? {
+                for j in 0..kids.len()?.min(256) as i32 {
+                    if let Some(k) = kids.get_array(j)? {
+                        todo.push(k);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Takes the object reference (`/Type /OBJR`) to the annotation `link` out of the content of `elem`.
+fn drop_object_ref(elem: &PdfObject, link: i32) -> Result<()> {
+    let is_ref = |e: &PdfObject| -> bool {
+        e.is_dict().unwrap_or(false)
+            && e.get_dict("Obj").ok().flatten().is_some_and(|o| o.is_indirect().unwrap_or(false) && o.as_indirect().ok() == Some(link))
+    };
+    let mut elem = elem.clone();
+    let Some(k) = elem.get_dict("K")? else { return Ok(()) };
+    let kr = k.resolve()?.unwrap_or_else(|| k.clone());
+    if kr.is_array()? {
+        let mut arr = kr;
+        for i in (0..arr.len()? as i32).rev() {
+            if arr.get_array(i)?.is_some_and(|e| is_ref(&e)) {
+                arr.array_delete(i)?;
+            }
+        }
+    } else if is_ref(&k) {
+        elem.dict_delete("K")?;
+    }
+    Ok(())
 }
 
 fn remove_link(doc: &mut PdfDocument, page: u32, id: i32) -> Result<()> {
@@ -550,7 +819,34 @@ fn label(op: &LinkOp) -> String {
     }
 }
 
-fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<(Option<i32>, u32, Vec<u32>)> {
+/// What a change did: the new link, how many were made or removed, the pages touched, the name of a file.
+struct Done {
+    id: Option<i32>,
+    count: u32,
+    pages: Vec<u32>,
+    name: Option<String>,
+}
+
+impl Done {
+    fn on(page: u32) -> Done {
+        Done { id: None, count: 0, pages: vec![page], name: None }
+    }
+}
+
+fn near(a: f32, b: f32) -> bool {
+    (a - b).abs() < 0.01
+}
+
+/// Runs `op`; `None` when it would leave the document as it is (nothing was touched then).
+fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done>> {
+    // Links are annotations: a certification that does not allow annotations (`/P` 1 or 2) is voided by them.
+    if let Some(p) = certified(doc)? {
+        if p <= 2 {
+            return Err(EngineError::Invalid(
+                "This document is certified, and certification does not allow changes to its links. Inkwell leaves them as they are.".into(),
+            ));
+        }
+    }
     let guard = |doc: &PdfDocument, page: u32| -> Result<()> {
         if page as i32 >= doc.page_count()? { Err(EngineError::BadPage(page)) } else { Ok(()) }
     };
@@ -558,37 +854,62 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<(Option<i32
         LinkOp::Add { page, rect, target, border } => {
             guard(doc, *page)?;
             let b = border.clone().unwrap_or(DEFAULT_BORDER);
-            let r = new_link(doc, doc_path, *page, *rect, target, &b)?;
-            Ok((Some(r.as_indirect()?), 1, vec![*page]))
+            let (r, name) = new_link(doc, doc_path, *page, *rect, target, &b)?;
+            Ok(Some(Done { id: Some(r.as_indirect()?), count: 1, pages: vec![*page], name }))
         }
         LinkOp::SetTarget { page, id, target } => {
             guard(doc, *page)?;
             let mut a = link_obj(doc, *page, *id)?;
-            put_target(doc, doc_path, &mut a, target)?;
-            Ok((None, 0, vec![*page]))
+            if same_target(doc, doc_path, &a, target)? {
+                return Ok(None);
+            }
+            let name = put_target(doc, doc_path, &mut a, target)?;
+            Ok(Some(Done { name, ..Done::on(*page) }))
         }
         LinkOp::SetRect { page, id, rect } => {
             guard(doc, *page)?;
             let mut a = link_obj(doc, *page, *id)?;
             let r = user_rect(doc, *page, *rect)?;
+            if a.get_dict("Rect")?.and_then(|c| nums(&c, 4)).is_some_and(|c| (0..4).all(|i| near(c[i], r[i]))) {
+                return Ok(None);
+            }
             a.dict_put("Rect", real_array(doc, &r)?)?;
-            Ok((None, 0, vec![*page]))
+            sync_ap(doc, &mut a, false)?;
+            Ok(Some(Done::on(*page)))
         }
         LinkOp::SetBorder { page, id, border } => {
             guard(doc, *page)?;
             let mut a = link_obj(doc, *page, *id)?;
+            let now = border_of(&a);
+            let same = if border.visible {
+                let w = border.width.unwrap_or(1.0).clamp(0.25, 12.0);
+                let c = border.color.unwrap_or(INK).map(|v| v.clamp(0.0, 1.0));
+                now.visible && near(now.width, w) && (0..3).all(|i| (now.color[i] - c[i]).abs() < 0.002)
+            } else {
+                !now.visible
+            };
+            if same {
+                return Ok(None);
+            }
             put_border(doc, &mut a, border)?;
-            Ok((None, 0, vec![*page]))
+            sync_ap(doc, &mut a, true)?;
+            Ok(Some(Done::on(*page)))
         }
         LinkOp::Delete { page, ids } => {
             guard(doc, *page)?;
-            let mut n = 0;
-            for id in ids {
-                link_obj(doc, *page, *id)?;
-                remove_link(doc, *page, *id)?;
-                n += 1;
+            let mut ids = ids.clone();
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.is_empty() {
+                return Ok(None);
             }
-            Ok((None, n, vec![*page]))
+            // All of them are checked before the first goes.
+            let found: Vec<PdfObject> = ids.iter().map(|id| link_obj(doc, *page, *id)).collect::<Result<_>>()?;
+            for (id, a) in ids.iter().zip(&found) {
+                leave_structure(doc, a, *id)?;
+                remove_link(doc, *page, *id)?;
+            }
+            Ok(Some(Done { count: ids.len() as u32, ..Done::on(*page) }))
         }
         LinkOp::FromUrls => {
             let hits = urls::find(doc)?;
@@ -607,25 +928,49 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<(Option<i32
                     pages.push(h.page);
                 }
             }
-            Ok((None, n, pages))
+            Ok(Some(Done { id: None, count: n, pages, name: None }))
         }
     }
 }
 
-/// Applies `op`, listed at generation `rev`: one undo step. `Stale` when the document moved on.
+/// `target` is what the link `a` already goes to.
+fn same_target(doc: &PdfDocument, doc_path: &str, a: &PdfObject, target: &NewTarget) -> Result<bool> {
+    let now = target_of(doc, a, &mut HashMap::new(), &mut Names::default());
+    Ok(match (target, now) {
+        (NewTarget::Page { page, at }, Target::Page { page: p, at: q }) => {
+            *page == p
+                && match (at, q) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => near(x[0], y[0]) && near(x[1], y[1]),
+                    _ => false,
+                }
+        }
+        (NewTarget::Uri { uri }, Target::Uri { uri: u }) => gate_url(uri).is_ok_and(|g| g == u),
+        (NewTarget::File { file, page }, Target::File { name, page: p }) => {
+            let wanted = file_link_name(doc_path, file)?;
+            wanted == name && (!file.to_ascii_lowercase().ends_with(".pdf") || page.unwrap_or(0) == p.unwrap_or(0))
+        }
+        _ => false,
+    })
+}
+
+/// Applies `op`, listed at generation `rev`: one undo step, or none when it changes nothing.
+/// `Stale` when the document moved on.
 pub fn apply(eng: &Engine, doc: DocId, rev: u32, op: &LinkOp, source: EditSource) -> Result<LinkEdited> {
     let entry = eng.doc_entry(doc)?;
     let path = eng.edit_state(doc)?.path;
-    let mut out = (None, 0);
-    let state = eng.apply_custom(doc, label(op), source, false, |d| {
+    let mut out = (None, 0, None);
+    let removes = matches!(op, LinkOp::Delete { .. });
+    let state = eng.apply_custom_unless_noop(doc, label(op), source, removes, |d| {
         if entry.generation() != rev {
             return Err(EngineError::Stale);
         }
-        let (id, count, pages) = run(d, &path, op)?;
-        out = (id, count);
-        Ok(pages)
+        Ok(run(d, &path, op)?.map(|done| {
+            out = (done.id, done.count, done.name);
+            done.pages
+        }))
     })?;
-    Ok(LinkEdited { state, id: out.0, count: out.1 })
+    Ok(LinkEdited { state, id: out.0, count: out.1, name: out.2 })
 }
 
 /// What [`LinkOp::FromUrls`] would make, changing nothing.

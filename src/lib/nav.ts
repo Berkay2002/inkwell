@@ -4,6 +4,7 @@ import { useStore } from "../store";
 import * as api from "./api";
 import type { Bookmark, BookmarkOp, BorderSpec, HeadingPreview, LinkAudit, LinkOp, NewLinkTarget, PageLink, PageLinks, UrlPreview } from "./api";
 import { editBookmarks, editLinks } from "./edit";
+import { type Rot, unrotatePoint } from "./layout";
 import { dropViewPos, getViewPos } from "./viewPos";
 
 /**
@@ -342,7 +343,7 @@ export const useNav = create<Store>((set, get) => {
       const view = getViewPos(doc);
       const st = useStore.getState().docs[doc];
       const page = spot?.page ?? view?.page ?? st?.currentPage ?? 0;
-      const at: [number, number] | null = spot ? spot.at : view && view.page === page ? [0, Math.max(0, view.yPt)] : null;
+      const at: [number, number] | null = spot ? spot.at : view && view.page === page ? viewTarget(doc).at : null;
       const after = d.selectedBm != null ? locate(tree, d.selectedBm) : null;
       const inside = !!opts?.inside && after != null && d.selectedBm != null;
       const r = await bm(doc, {
@@ -396,10 +397,8 @@ export const useNav = create<Store>((set, get) => {
     },
 
     setDestHere: async (doc, id) => {
-      const view = getViewPos(doc);
-      const st = useStore.getState().docs[doc];
-      const page = view?.page ?? st?.currentPage ?? 0;
-      await bm(doc, { op: "setDest", id, page, at: view ? [0, Math.max(0, view.yPt)] : null });
+      const v = viewTarget(doc);
+      await bm(doc, { op: "setDest", id, page: v.page, at: v.at });
     },
 
     askHeadings: async (doc) => {
@@ -428,12 +427,14 @@ export const useNav = create<Store>((set, get) => {
       if (!r) return null;
       await reloadLinks(doc, page);
       if (r.id != null) patch(doc, { selectedLink: { page, id: r.id }, pending: null, urls: null });
+      if (r.name) patch(doc, { notice: fileLinkNote(r.name) });
       return r.id;
     },
 
     setLinkTarget: async (doc, page, id, target) => {
       const r = await lk(doc, page, { op: "setTarget", page, id, target });
       if (r) await reloadLinks(doc, page);
+      if (r?.name) patch(doc, { notice: fileLinkNote(r.name) });
       return r != null;
     },
 
@@ -489,6 +490,80 @@ export const useNav = create<Store>((set, get) => {
     setNotice: (doc, notice) => patch(doc, { notice }),
   };
 });
+
+/** What a link to a file says about where it looks, once it has its name. */
+export function fileLinkNote(name: string): string {
+  return `This link looks for ${name} relative to the document.`;
+}
+
+/**
+ * The page and the place the viewer shows now, in the page's own space (the view's rotation undone), for
+ * "set to current view": the top left of what is shown, so another reader opens the same place.
+ */
+export function viewTarget(doc: number): { page: number; at: [number, number] | null } {
+  const view = getViewPos(doc);
+  const st = useStore.getState().docs[doc];
+  const page = view?.page ?? st?.currentPage ?? 0;
+  if (!view) return { page, at: null };
+  const y = Math.max(0, view.yPt);
+  const raw = st?.sizes[page];
+  return { page, at: raw ? unrotatePoint(raw, (st.rot ?? 0) as Rot, 0, y) : [0, y] };
+}
+
+/** What hovering a link says: where it goes, in a plain line. */
+export function linkHint(t: api.LinkTarget): string {
+  switch (t.kind) {
+    case "page":
+      return `Go to page ${t.page + 1}`;
+    case "uri":
+      return t.uri;
+    case "file":
+      return t.page != null ? `Open ${t.name}, page ${t.page + 1}` : `Open ${t.name}`;
+    case "broken":
+      return `This link goes nowhere: ${t.what}`;
+    default:
+      return t.what ? `This link runs an action Inkwell does not follow (${t.what})` : "This link has no target";
+  }
+}
+
+/**
+ * Following a link in Read mode. A page link jumps straight there. A web, mail or file link asks first
+ * with the whole address (or path) shown. An action Inkwell does not follow, or a broken link, does nothing.
+ */
+export async function followLink(doc: number, t: api.LinkTarget): Promise<void> {
+  if (t.kind === "page") {
+    useStore.getState().goTo(doc, t.page, t.at ? Math.max(0, t.at[1] - 8) : undefined);
+  } else if (t.kind === "uri") {
+    await confirmOpen(t.uri);
+  } else if (t.kind === "file") {
+    await confirmOpenFile(doc, t.name, t.page);
+  }
+}
+
+/** A link to another PDF: the file it names, in full, is shown before it opens in a tab of its own. */
+export async function confirmOpenFile(doc: number, name: string, page: number | null): Promise<boolean> {
+  let ref: api.FileRef;
+  try {
+    ref = await api.linkFileRef(doc, name);
+  } catch (e) {
+    await message(String(e), { title: "Link", kind: "info" });
+    return false;
+  }
+  const r = await message(`This link opens the file:
+
+${ref.path}
+
+Open it in a new tab?`, {
+    title: "Open linked file",
+    kind: "warning",
+    buttons: { ok: "Open", cancel: "Cancel" },
+  });
+  if (r !== "Ok" && r !== "Open") return false;
+  await useStore.getState().openPath(ref.path, ref.token);
+  const now = useStore.getState().active;
+  if (page != null && now != null) useStore.getState().goTo(now, page);
+  return true;
+}
 
 /** Asks before an address is opened: nothing in a document goes to the web on its own. */
 export async function confirmOpen(url: string): Promise<boolean> {

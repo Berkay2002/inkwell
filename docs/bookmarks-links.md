@@ -43,17 +43,27 @@ change.
 - Read: `/Outlines` chain by `/First /Next`; title decoded from the PDF text string (UTF-16BE/LE BOM, UTF-8 BOM,
   PDFDocEncoding); destination `/Dest [page …]` or `/A` (GoTo, URI, other kept as "other"); `/C` clamped to 0..1,
   `/F` bit 1 italic, bit 2 bold; open when `/Count` is positive (Acrobat does the same). At most 50 000 items and
-  depth 48 are read; more are left as they are (`truncated`).
+  depth 48 are read; more are left as they are (`truncated`), and such an outline is not edited.
+- The outline is walked once from the root, first in first out, each item met once (`outline::Shape`): a link to an
+  item already met (a shared chain or a cycle) or to a deleted object ends that chain. Parent and children come from
+  that walk and never from an item's own `/Parent`, so a wrong `/Parent` can't misplace a move or delete, and the
+  work is bounded by the items, not by how the file links them. An item not found by the walk is `Stale`.
+- A certified document (a `/DocMDP` signature) is not changed: bookmarks and links refuse with a message, since any
+  change would void the certification. An op that changes nothing (same name, same place) makes no undo step.
 - Write: items are edited in place and relinked (`/First /Last /Prev /Next /Parent`), `/Count` of every ancestor is
   recomputed (sign = open or closed). A destination is `[page /XYZ x y null]` in user space. Titles are written as a
   plain string when ASCII, else UTF-16BE. Add or move into a closed parent opens it. Moving into itself or a
   descendant is refused. Deleting removes the item and everything under it.
-- **From headings**: body size = the size with most characters; a heading is a block of at most 3 lines and 160
-  characters set at least 15 % larger than the body, not a running head (same title on at least 3 pages and 30 % of
-  pages); level = rank of the distinct sizes (at most 5). The count and the first rows are shown before anything is
-  made; "Replace the bookmarks there are" is off by default (the new ones are added after the existing). Not done:
-  the structure tree (H1 to H6) as a source (needs the text under marked content ids; headings from a tagged file
-  are found by size like any other).
+- **From headings**, two sources, the preview says which was used (`source`: `tags` or `size`):
+  - *Tags*: when the file is tagged and its structure tree has headings, those are used: `H1` to `H6` give the level,
+    a bare `H` takes its depth in `Sect` elements (1 to 6). The text of a heading is the first text block (at most 3
+    lines, 160 characters) at the place its marked content starts (`a11y::locate::mcid_text_origins`); noise and
+    titles that repeat on most pages are skipped like in the size source.
+  - *Size* (an untagged file, or a tagged one without headings): body size = the size with most characters; a
+    heading is a block of at most 3 lines and 160 characters set at least 15 % larger than the body, not a running
+    head (same title on at least 3 pages and 30 % of pages); level = rank of the distinct sizes (at most 5).
+  The count and the first rows are shown before anything is made; "Replace the bookmarks there are" is off by
+  default (the new ones are added after the existing).
 
 ## Links
 
@@ -62,15 +72,36 @@ change.
   Border: visible when width is above 0, `/C` is not `[]` and the hidden flag is not set; default black 1 pt when
   `/C` is absent (what Acrobat draws).
 - Write: `/Rect` (minimum 2 pt a side), `/Border [0 0 w]`, `/C`, `/F 4`, `/P`; a page link as `/Dest`, a web link
-  as `/A << /S /URI /URI (…) >>`, a PDF file as GoToR with `/D [page /Fit]`, another file as Launch. Visible
-  borders have no appearance stream: the viewer's tiles do not draw them, the Edit overlay does.
+  as `/A << /S /URI /URI (…) >>`, a PDF file as GoToR with `/D [page /Fit]`, another file as Launch.
+- **Appearance stream**: a visible border is also written as `/AP << /N >>`, a form XObject that strokes the inside
+  of the rectangle in the border colour and width (`links::sync_ap`), so page tiles and other readers draw it.
+  It is rewritten when the rectangle or the border changes, and removed when the border is made invisible. Links
+  that were not made here keep the appearance they have until they are edited.
 - **Address gate** (`links::gate_url`, also on open): https, http or mailto only, at most 2048 characters, no control,
-  space or bidi characters, a host is required, mail attach/insert parameters are refused, non-ASCII is
-  percent-encoded.
+  space or bidi characters, a host is required, non-ASCII and characters RFC 3986 does not allow are
+  percent-encoded, mail attach/insert parameters are refused (names are percent-decoded and compared without case).
+  An address is handed to the system with `ShellExecuteW` (Windows), `open` or `xdg-open`, never through a shell.
 - **Files** are chosen through the open dialog (token only, `paths.rs`) and stored as a path relative to the
-  document's folder when under it, else the bare file name. Inkwell never runs a non-PDF file from a link.
-- **Opening** an address: only from the rail's "Open address…", always after a confirm dialog showing the address,
-  and through the gate again. Nothing opens on its own, and Read mode does not follow links yet.
+  document's folder, with `/` between the parts and `../` to go up: the paths are compared without regard to case
+  and `\\?\` is dropped. A file on another drive or share is refused with that reason: no path of this machine is
+  written into a document. The name stored comes back in `LinkEdited.name` and the rail says "This link looks for
+  <name> relative to the document". `/F` is a byte string, `/UF` a UTF-16 text string. Launch links refuse
+  executables and scripts (`.exe`, `.bat`, `.ps1`, `.js`, `.lnk`, … and files without an extension).
+- **Link edits** keep a link's other keys: an existing Launch, GoToR, JavaScript or named action survives a change
+  of rectangle or border. Deleting a link also takes it out of the structure tree (`/StructParent`, `/K` object
+  references), and the deletion is an `apply_removing` step.
+- **Opening** an address: from the rail's "Open address…" or by clicking a link in Read mode, always after a confirm
+  dialog showing the address, and through the gate again. Nothing opens on its own.
+- **Read mode** (`ReadLinks.tsx`, hidden while Edit is open): each link of the pages near the view is a hit area
+  over its rectangle. Hovering shows where it goes (page number, address, file name). A page link jumps to its
+  target at once; a web, mail or file link asks first, showing the whole address or path; an action Inkwell does
+  not follow ("other") and a broken link do nothing (the hover says why). The links are also reachable by Tab.
+- **File links** (`link_file_ref`): the name is resolved against the folder of the document (`..` goes up from it),
+  may not be absolute or hold `:`, and must be an existing `.pdf`; anything else is refused with the reason. The
+  confirm shows the resolved path, and Open opens it in a new tab (the page of a GoToR is jumped to afterwards).
+- **Reading** loads the `/Dests` name tree once per read and takes an annotation's object number and generation from
+  the walk of `/Annots`; "from web addresses" applies the same 2 pt minimum the link gets, so the preview count
+  is the number made.
 - **Links from web addresses**: finds `https://`, `http://`, `www.` and e-mail addresses per text line (trailing
   punctuation trimmed), skips addresses already under a link, shows the count first. One undo step.
 
@@ -83,8 +114,10 @@ change.
 - Bookmarks: **New** adds after the selected one (or at the top level), named from selected text when there is
   some, else "Untitled" with its name in edit; double-click or F2 renames in place; drag to reorder or nest (the
   top and bottom quarter of a row put it before or after, the middle puts it inside); indent / outdent buttons;
-  twisty = expand or collapse (saved; one undo step); style B / I and five colours; "Set to current view".
-- Keyboard: Delete removes the selected link or bookmark (not while typing in a field), F2 renames, Ctrl+Z undoes.
+  twisty = expand or collapse (saved; one undo step); style B / I and five colours; "Set to current view" (the
+  top left of the view in the page's own space, whatever way the view is rotated).
+- Keyboard: Delete removes the selected link or bookmark (not while typing in a field, nor from the bookmark list or
+  the rail), F2 renames, Ctrl+Z undoes.
 - Right-click on a bookmark (rail or sidebar): Add bookmark, Add bookmark inside, Rename, Set destination to current
   view, Delete.
 - **State dots** on every bookmark and link row: a muted dot goes somewhere, a ring goes to a web address, a diamond
@@ -92,18 +125,18 @@ change.
   which), a dashed ring is a bookmark that goes nowhere and has nothing under it. The dot is never the only signal
   (title and label text). **Problems** in the bookmark bar filters the tree to broken ones with their parents (shared
   by rail and sidebar); **Show problems** in the Links tab runs `links_audit` over the document and lists the broken
-  links ("Page 6 � the named destination "x" is not in the document", click goes there and selects it) with the
+  links ("Page 6 · the named destination "x" is not in the document", click goes there and selects it) with the
   counts of all links and web links.
 
 ## Not done
 
-- The structure tree as a source for bookmarks; clicking links in Read mode (the open path exists in the store);
-  appearance streams for visible link borders; named destinations and JavaScript are listed as "other" and kept as
-  they are, not editable; link highlight style (Invert, Outline, Inset) is not offered.
+- Named destinations and JavaScript are listed as "other" and kept as they are, not editable; link highlight style
+  (Invert, Outline, Inset) is not offered; a link made as a direct object in `/Annots` is neither listed nor
+  followed in Read mode.
 
 ## Tests
 
-`cargo test --lib outline -- --test-threads=1`, `cargo test --lib links -- --test-threads=1`, `src/lib/nav.test.ts`.
+`cargo test --lib outline -- --test-threads=1`, `cargo test --lib links -- --test-threads=1`, `src/lib/nav.test.ts` (including following links).
 
 CDP pass on a copy of `docs/study/samples/bookmarks-links-source.pdf`: `scripts/bookmarks-shots.mjs` (32 checks: add, rename,
 drag reorder and nest, undo and redo, set destination, style, collapse, sidebar menu, draw a link, gate refusal, open

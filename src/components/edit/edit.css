@@ -655,3 +655,27 @@
   gap: 10px;
   padding: 8px;
 }
+
+/* links followed in Read mode: invisible hit areas over the page's link rectangles */
+.rl-link {
+  position: absolute;
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.rl-link:hover {
+  background: var(--accent-soft);
+}
+.rl-link:focus-visible {
+  outline: calc(2px / var(--z, 1)) solid var(--accent);
+}
+.rl-link.idle {
+  cursor: default;
+}
+.rl-link.idle:hover {
+  background: transparent;
+}

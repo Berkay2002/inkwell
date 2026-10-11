@@ -4,6 +4,8 @@
 //! structure are for an untagged document; the count is shown before anything is made.
 
 use super::Result;
+use crate::a11y::locate;
+use crate::a11y::tree::{self, Tree};
 use mupdf::pdf::PdfDocument;
 use mupdf::text_page::{TextBlockType, TextPageFlags};
 use serde::Serialize;
@@ -31,6 +33,8 @@ pub struct Row {
 
 pub struct Found {
     pub rows: Vec<Row>,
+    /// `"tags"`: the headings of the structure tree; `"size"`: guessed from the size of the text.
+    pub source: &'static str,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -50,6 +54,8 @@ pub struct HeadingPreview {
     pub levels: u8,
     /// The first of them.
     pub rows: Vec<HeadingRow>,
+    /// Where they come from: `"tags"` (the file's structure tree) or `"size"` (the size of the text).
+    pub source: String,
 }
 
 impl Found {
@@ -64,6 +70,7 @@ impl Found {
                 .take(PREVIEW_ROWS)
                 .map(|r| HeadingRow { title: r.title.clone(), page: r.page, level: r.level })
                 .collect(),
+            source: self.source.to_string(),
         }
     }
 }
@@ -74,6 +81,8 @@ struct Line {
     block: usize,
     x0: f32,
     y0: f32,
+    x1: f32,
+    y1: f32,
 }
 
 fn half(s: f32) -> i32 {
@@ -105,7 +114,7 @@ fn page_lines(doc: &PdfDocument, p: i32) -> Result<Vec<Line>> {
             }
             any = true;
             let bb = l.bounds();
-            out.push(Line { text, size, block, x0: bb.x0, y0: bb.y0 });
+            out.push(Line { text, size, block, x0: bb.x0, y0: bb.y0, x1: bb.x1, y1: bb.y1 });
         }
         if any {
             block += 1;
@@ -120,8 +129,74 @@ fn is_noise(t: &str) -> bool {
     letters < 2 && t.chars().count() < 12
 }
 
-/// The headings of the whole document, in reading order.
+/// First marked content found at or under element `i`, as (page, marked-content id).
+fn first_content(t: &Tree, i: usize) -> Option<(u32, i32)> {
+    let e = &t.elems[i];
+    if let (Some(p), Some(m)) = (e.page, e.mcids.first()) {
+        return Some((p, *m));
+    }
+    e.children.iter().find_map(|c| first_content(t, *c))
+}
+
+/// The headings the file's own tags name (H1 to H6, and H by the sections it sits in), in reading
+/// order. The text is the block of text that starts where the heading's marked content starts.
+/// Empty when the file is not tagged or has no heading elements.
+fn find_tagged(doc: &PdfDocument) -> Result<Vec<Row>> {
+    let pages = tree::page_index(doc)?;
+    let t = Tree::read(doc, &pages)?;
+    if !t.exists {
+        return Ok(Vec::new());
+    }
+    let mut origins: HashMap<u32, HashMap<i32, [f32; 2]>> = HashMap::new();
+    let mut lines: HashMap<u32, Vec<Line>> = HashMap::new();
+    let mut rows: Vec<Row> = Vec::new();
+    for i in t.preorder() {
+        let level = match t.elems[i].ty.as_str() {
+            "H1" => 1,
+            "H2" => 2,
+            "H3" => 3,
+            "H4" => 4,
+            "H5" => 5,
+            "H6" => 6,
+            "H" => t.ancestors(i).filter(|a| t.is(*a, "Sect")).count().clamp(1, 6) as u8,
+            _ => continue,
+        };
+        let Some((page, mcid)) = first_content(&t, i) else { continue };
+        if !origins.contains_key(&page) {
+            let p = doc.find_page(page as i32)?;
+            origins.insert(page, locate::mcid_text_origins(&p)?);
+            lines.insert(page, page_lines(doc, page as i32)?);
+        }
+        let Some([x, y]) = origins[&page].get(&mcid).copied() else { continue };
+        let ls = &lines[&page];
+        let Some(hit) = ls.iter().find(|l| y >= l.y0 - 1.5 && y <= l.y1 + 1.5 && x >= l.x0 - 2.0 && x <= l.x1 + 2.0) else { continue };
+        let first = ls.iter().position(|l| l.block == hit.block).unwrap_or(0);
+        let title = ls[first..].iter().take_while(|l| l.block == hit.block).take(MAX_LINES).map(|l| l.text.as_str()).collect::<Vec<_>>().join(" ");
+        let title: String = title.chars().take(MAX_CHARS).collect();
+        if is_noise(&title) {
+            continue;
+        }
+        if rows.last().is_some_and(|r| r.page == page && r.title == title) {
+            continue;
+        }
+        rows.push(Row { title, page, at: [hit.x0, hit.y0], level });
+    }
+    Ok(rows)
+}
+
+/// The headings of the whole document, in reading order: from the file's tags when it is tagged and
+/// has heading elements, else guessed from the size of the text.
 pub fn find(doc: &PdfDocument) -> Result<Found> {
+    if let Ok(rows) = find_tagged(doc) {
+        if !rows.is_empty() {
+            return Ok(Found { rows, source: "tags" });
+        }
+    }
+    find_by_size(doc)
+}
+
+/// The headings guessed from the size of the text.
+fn find_by_size(doc: &PdfDocument) -> Result<Found> {
     let n = doc.page_count()?;
     let mut pages: Vec<Vec<Line>> = Vec::with_capacity(n.max(0) as usize);
     let mut chars_at: HashMap<i32, usize> = HashMap::new();
@@ -177,5 +252,5 @@ pub fn find(doc: &PdfDocument) -> Result<Found> {
     sizes.dedup();
     let level = |s: i32| (sizes.iter().position(|x| *x == s).unwrap_or(0) + 1).min(MAX_LEVELS) as u8;
     let rows = cands.iter().map(|c| Row { title: c.title.clone(), page: c.page, at: c.at, level: level(c.size) }).collect();
-    Ok(Found { rows })
+    Ok(Found { rows, source: "size" })
 }

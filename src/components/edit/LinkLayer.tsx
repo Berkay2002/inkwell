@@ -58,6 +58,8 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
       if (e.key !== "Delete" && e.key !== "Backspace") return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      // Delete in the bookmark tree, or anywhere in the Edit rail, belongs to what is selected there.
+      if (t?.closest?.(".bm-list, .te-dock")) return;
       e.preventDefault();
       void nav().removeLinks(docId, page, [mine.id]);
     };

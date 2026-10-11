@@ -63,15 +63,49 @@ pub async fn link_pick_file(window: Window) -> Result<Option<FileRef>> {
     .await
 }
 
+/// The PDF a file link names, as an open token, for the tab to open it. Call it only after the person
+/// confirmed; a name that is not a PDF next to the document is refused with the reason.
+#[tauri::command]
+pub fn link_file_ref(window: Window, eng: Eng<'_>, doc: DocId, name: String) -> Result<FileRef> {
+    let path = eng.doc_entry(doc)?.path();
+    let found = super::resolve_file_link(&path, &name)?;
+    Ok(window.state::<Paths>().issue_open(window.label(), found.to_string_lossy().into_owned()))
+}
+
 /// Hands a gated address to the system. Call it only after the person confirmed.
 #[tauri::command]
 pub fn link_open_url(url: String) -> Result<()> {
     let url = super::gate_url(&url)?;
-    #[cfg(windows)]
-    let status = std::process::Command::new("rundll32").arg("url.dll,FileProtocolHandler").arg(&url).spawn();
-    #[cfg(target_os = "macos")]
-    let status = std::process::Command::new("open").arg(&url).spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let status = std::process::Command::new("xdg-open").arg(&url).spawn();
-    status.map(|_| ()).map_err(|e| EngineError::Io(e.to_string()))
+    open_with_system(&url).map_err(|e| EngineError::Io(e.to_string()))
+}
+
+#[cfg(windows)]
+fn open_with_system(url: &str) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut std::ffi::c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> *mut std::ffi::c_void;
+    }
+    let wide = |s: &str| std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+    let (verb, file) = (wide("open"), wide(url));
+    // SW_SHOWNORMAL = 1. A result above 32 is success. The address has passed the gate: https, http or mailto.
+    let r = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1) };
+    if (r as usize) > 32 { Ok(()) } else { Err(std::io::Error::other(format!("the system could not open the address (code {})", r as usize))) }
+}
+
+#[cfg(target_os = "macos")]
+fn open_with_system(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("open").arg(url).spawn().map(|_| ())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_with_system(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("xdg-open").arg(url).spawn().map(|_| ())
 }

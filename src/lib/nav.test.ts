@@ -21,20 +21,26 @@ vi.mock("./api", () => ({
   linksUrls: vi.fn(),
   linkCheckUrl: vi.fn(),
   linkOpenUrl: vi.fn(),
+  linkFileRef: vi.fn(),
 }));
 
 import { message } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
+import { useStore } from "../store";
 import type { Bookmark, Bookmarks } from "./api";
 import { editBookmarks, editLinks } from "./edit";
+import { dropViewPos, setViewPos } from "./viewPos";
 import {
   bookmarkState,
   confirmOpen,
   countProblems,
   dragRect,
   findBookmark,
+  fileLinkNote,
+  followLink,
   hexToRgb,
   isUnder,
+  linkHint,
   linkState,
   locate,
   onlyProblems,
@@ -42,6 +48,7 @@ import {
   targetLabel,
   titleFromText,
   useNav,
+  viewTarget,
   visibleRows,
 } from "./nav";
 
@@ -154,7 +161,7 @@ describe("state dots and problems", () => {
 });
 
 const ok = <T,>(value: T) => ({ kind: "ok" as const, value });
-const edited = (id: number | null, count = 1) => ({ state: {} as never, id, count });
+const edited = (id: number | null, count = 1) => ({ state: {} as never, id, count, name: null });
 
 describe("bookmark actions", () => {
   beforeEach(() => {
@@ -317,5 +324,90 @@ describe("opening an address", () => {
     expect(await confirmOpen("file:///C:/x")).toBe(false);
     expect(api.linkOpenUrl).not.toHaveBeenCalled();
     expect(message).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("following a link in Read mode", () => {
+  const goTo = vi.fn();
+  const openPath = vi.fn();
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useStore.setState({ goTo, openPath, active: 4 });
+  });
+
+  it("says where each kind of link goes", () => {
+    expect(linkHint({ kind: "page", page: 2, at: null })).toBe("Go to page 3");
+    expect(linkHint({ kind: "uri", uri: "https://example.com/a?b=1" })).toBe("https://example.com/a?b=1");
+    expect(linkHint({ kind: "file", name: "other.pdf", page: null })).toBe("Open other.pdf");
+    expect(linkHint({ kind: "file", name: "other.pdf", page: 4 })).toBe("Open other.pdf, page 5");
+    expect(linkHint({ kind: "other", what: "Launch" })).toContain("Launch");
+    expect(linkHint({ kind: "broken", what: "page 99 does not exist" })).toContain("page 99");
+  });
+
+  it("jumps straight to a page link, a little above the target", async () => {
+    await followLink(1, { kind: "page", page: 5, at: [10, 300] });
+    expect(goTo).toHaveBeenCalledWith(1, 5, 292);
+    await followLink(1, { kind: "page", page: 2, at: null });
+    expect(goTo).toHaveBeenLastCalledWith(1, 2, undefined);
+    expect(message).not.toHaveBeenCalled();
+  });
+
+  it("asks before a web address and goes nowhere on Cancel", async () => {
+    vi.mocked(api.linkCheckUrl).mockResolvedValue("https://example.com/");
+    vi.mocked(message).mockResolvedValue("Cancel");
+    await followLink(1, { kind: "uri", uri: "https://example.com/" });
+    expect(message).toHaveBeenCalledTimes(1);
+    expect(String(vi.mocked(message).mock.calls[0][0])).toContain("https://example.com/");
+    expect(api.linkOpenUrl).not.toHaveBeenCalled();
+  });
+
+  it("shows the whole path of a file link and opens it only on Open", async () => {
+    vi.mocked(api.linkFileRef).mockResolvedValue({ token: "t1", path: "C:\docs\other.pdf" });
+    vi.mocked(message).mockResolvedValue("Cancel");
+    await followLink(1, { kind: "file", name: "other.pdf", page: 3 });
+    expect(String(vi.mocked(message).mock.calls[0][0])).toContain("C:\docs\other.pdf");
+    expect(openPath).not.toHaveBeenCalled();
+    vi.mocked(message).mockResolvedValue("Ok");
+    await followLink(1, { kind: "file", name: "other.pdf", page: 3 });
+    expect(openPath).toHaveBeenCalledWith("C:\docs\other.pdf", "t1");
+    expect(goTo).toHaveBeenCalledWith(4, 3);
+  });
+
+  it("reports a file link that is refused and opens nothing", async () => {
+    vi.mocked(api.linkFileRef).mockRejectedValue("Inkwell opens only PDF files from a link");
+    vi.mocked(message).mockResolvedValue("Ok");
+    await followLink(1, { kind: "file", name: "run.exe", page: null });
+    expect(openPath).not.toHaveBeenCalled();
+    expect(String(vi.mocked(message).mock.calls[0][0])).toContain("only PDF");
+  });
+
+  it("does nothing for an action it does not follow", async () => {
+    await followLink(1, { kind: "other", what: "Launch" });
+    await followLink(1, { kind: "broken", what: "x" });
+    expect(goTo).not.toHaveBeenCalled();
+    expect(message).not.toHaveBeenCalled();
+  });
+});
+
+describe("set to current view", () => {
+  const seed = (rot: number) =>
+    useStore.setState({ docs: { 1: { currentPage: 0, rot, sizes: [[612, 792]] } } } as never);
+
+  it("gives the top left of what is shown, in the page's own space whatever way the view is turned", () => {
+    setViewPos(1, { page: 0, yPt: 100 });
+    seed(0);
+    expect(viewTarget(1)).toEqual({ page: 0, at: [0, 100] });
+    seed(1);
+    expect(viewTarget(1).at).toEqual([100, 792]);
+    seed(2);
+    expect(viewTarget(1).at).toEqual([612, 692]);
+    seed(3);
+    expect(viewTarget(1).at).toEqual([512, 0]);
+    dropViewPos(1);
+    expect(viewTarget(1).at).toBeNull();
+  });
+
+  it("names where a file link looks", () => {
+    expect(fileLinkNote("../a.pdf")).toBe("This link looks for ../a.pdf relative to the document.");
   });
 });

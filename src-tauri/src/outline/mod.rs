@@ -20,7 +20,7 @@ use crate::engine::{DocId, Engine, EngineError};
 use crate::textedit::{Matrix, page_space};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 type Result<T> = std::result::Result<T, EngineError>;
 
@@ -179,9 +179,27 @@ fn number(o: &Option<PdfObject>) -> Option<f32> {
 
 // ---- destinations ----
 
+/// The document's named destinations, loaded once for as many lookups as a read needs (MuPDF builds
+/// the whole table each time it is asked).
+#[derive(Default)]
+pub(crate) struct Names {
+    tree: Option<Option<PdfObject>>,
+}
+
+impl Names {
+    fn tree(&mut self, doc: &PdfDocument) -> Option<&PdfObject> {
+        self.tree
+            .get_or_insert_with(|| {
+                let t = doc.load_name_tree(PdfObject::new_name("Dests").ok()?).ok()?;
+                t.is_dict().ok()?.then_some(t)
+            })
+            .as_ref()
+    }
+}
+
 /// The explicit destination array behind `target` (itself, a name or string looked up in the
 /// document's names, or a `<< /D … >>` dictionary), when it can be found.
-pub(crate) fn dest_array(doc: &PdfDocument, target: &PdfObject) -> Option<PdfObject> {
+pub(crate) fn dest_array(doc: &PdfDocument, names: &mut Names, target: &PdfObject) -> Option<PdfObject> {
     let mut t = target.resolve().ok().flatten();
     for _ in 0..4 {
         let cur = t?;
@@ -196,8 +214,7 @@ pub(crate) fn dest_array(doc: &PdfDocument, target: &PdfObject) -> Option<PdfObj
             dests.and_then(|d| d.get_dict(name.as_str()).ok().flatten())
         } else if cur.is_string().ok()? {
             // MuPDF flattens /Root /Names /Dests into a dict keyed by name.
-            let tree = doc.load_name_tree(PdfObject::new_name("Dests").ok()?).ok()?;
-            if tree.is_dict().ok()? { tree.get_dict(cur.as_string().ok()?.as_str()).ok().flatten() } else { None }
+            names.tree(doc)?.get_dict(cur.as_string().ok()?.as_str()).ok().flatten()
         } else {
             None
         };
@@ -234,7 +251,7 @@ pub(crate) fn page_dest(doc: &PdfDocument, spaces: &mut HashMap<u32, Option<Matr
     Some((page, at))
 }
 
-fn dest_of(doc: &PdfDocument, item: &PdfObject, spaces: &mut HashMap<u32, Option<Matrix>>) -> Dest {
+fn dest_of(doc: &PdfDocument, item: &PdfObject, spaces: &mut HashMap<u32, Option<Matrix>>, names: &mut Names) -> Dest {
     let mut target = item.get_dict("Dest").ok().flatten();
     if target.is_none() {
         if let Some(a) = item.get_dict("A").ok().flatten() {
@@ -246,7 +263,7 @@ fn dest_of(doc: &PdfDocument, item: &PdfObject, spaces: &mut HashMap<u32, Option
         }
     }
     let Some(t) = target else { return Dest::None };
-    match dest_array(doc, &t).and_then(|arr| page_dest(doc, spaces, &arr)) {
+    match dest_array(doc, names, &t).and_then(|arr| page_dest(doc, spaces, &arr)) {
         Some((page, at)) => Dest::Page { page, at },
         None => Dest::Broken { what: broken_reason(&t) },
     }
@@ -297,62 +314,132 @@ fn root(doc: &PdfDocument) -> Result<Option<PdfObject>> {
     Ok(doc.catalog()?.get_dict("Outlines")?.filter(|o| o.resolve().ok().flatten().is_some_and(|d| d.is_dict().unwrap_or(false))))
 }
 
-/// The items directly under `parent`, in order (a cycle or a runaway chain is cut).
-fn kids(parent: &PdfObject) -> Result<Vec<PdfObject>> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let mut cur = parent.get_dict("First")?;
-    while let Some(item) = cur {
-        if !item.is_indirect()? {
-            break;
-        }
-        let num = item.as_indirect()?;
-        if !seen.insert(num) || out.len() >= MAX_ITEMS {
-            break;
-        }
-        cur = item.get_dict("Next")?;
-        out.push(item);
-    }
-    Ok(out)
-}
-
 fn is_open(item: &PdfObject) -> bool {
     number(&item.get_dict("Count").ok().flatten()).is_some_and(|c| c > 0.0)
 }
 
-struct Reader<'a> {
-    doc: &'a PdfDocument,
-    spaces: HashMap<u32, Option<Matrix>>,
-    seen: HashSet<i32>,
+/// The outline as it really is, walked once from the root: each item is met once (a link to an item
+/// already met, from a shared chain or a cycle, ends that chain), at most [`MAX_ITEMS`] items and
+/// [`MAX_DEPTH`] levels. Everything that reads or changes the outline goes through this and never
+/// through an item's own `/Parent`, which a damaged file can get wrong, and the work is bounded by
+/// the items, not by how the file links them.
+struct Shape {
+    refs: HashMap<i32, PdfObject>,
+    /// Item → the item it is under (none: the root).
+    parent: HashMap<i32, Option<i32>>,
+    /// Item (none: the root) → the items directly under it, in order.
+    kids: HashMap<Option<i32>, Vec<i32>>,
+    /// Items were left out: more than [`MAX_ITEMS`], or deeper than [`MAX_DEPTH`].
     truncated: bool,
 }
 
-impl Reader<'_> {
-    fn level(&mut self, parent: &PdfObject, depth: usize) -> Result<Vec<Bookmark>> {
-        let mut out = Vec::new();
-        for item in kids(parent)? {
-            let id = item.as_indirect()?;
-            if self.seen.len() >= MAX_ITEMS || depth >= MAX_DEPTH {
-                self.truncated = true;
+fn shape(root: &PdfObject) -> Result<Shape> {
+    let mut s = Shape { refs: HashMap::new(), parent: HashMap::new(), kids: HashMap::new(), truncated: false };
+    let mut seen: HashSet<i32> = HashSet::new();
+    if root.is_indirect()? {
+        seen.insert(root.as_indirect()?);
+    }
+    // First in, first out: an item shared by two parents belongs to the one that comes first.
+    let mut todo: VecDeque<(Option<i32>, PdfObject, usize)> = VecDeque::from([(None, root.clone(), 0)]);
+    while let Some((key, obj, depth)) = todo.pop_front() {
+        let mut list = Vec::new();
+        let mut cur = obj.get_dict("First")?;
+        while let Some(item) = cur {
+            // A link to nothing, or to something that is not an item (a deleted object), ends the chain.
+            if !item.is_indirect()? || !item.resolve().ok().flatten().is_some_and(|d| d.is_dict().unwrap_or(false)) {
                 break;
             }
-            if !self.seen.insert(id) {
-                continue;
+            let id = item.as_indirect()?;
+            if !seen.insert(id) {
+                break;
             }
-            let color = item.get_dict("C")?.and_then(|c| {
-                let v: Vec<f32> = (0..3).filter_map(|i| number(&c.get_array(i).ok().flatten())).collect();
-                (v.len() == 3).then(|| [v[0].clamp(0.0, 1.0), v[1].clamp(0.0, 1.0), v[2].clamp(0.0, 1.0)])
-            });
+            if depth >= MAX_DEPTH || s.refs.len() >= MAX_ITEMS {
+                s.truncated = true;
+                break;
+            }
+            cur = item.get_dict("Next")?;
+            s.refs.insert(id, item.clone());
+            s.parent.insert(id, key);
+            list.push(id);
+            todo.push_back((Some(id), item, depth + 1));
+        }
+        s.kids.insert(key, list);
+    }
+    Ok(s)
+}
+
+impl Shape {
+    fn kid_ids(&self, key: Option<i32>) -> &[i32] {
+        self.kids.get(&key).map_or(&[], Vec::as_slice)
+    }
+
+    fn obj(&self, id: i32) -> Result<PdfObject> {
+        self.refs.get(&id).cloned().ok_or(EngineError::Stale)
+    }
+
+    fn objs(&self, key: Option<i32>) -> Vec<PdfObject> {
+        self.kid_ids(key).iter().filter_map(|id| self.refs.get(id).cloned()).collect()
+    }
+
+    /// `x` is `anc` or lies under it.
+    fn under(&self, x: Option<i32>, anc: i32) -> bool {
+        let mut cur = x;
+        for _ in 0..=MAX_DEPTH + 1 {
+            match cur {
+                None => return false,
+                Some(c) if c == anc => return true,
+                Some(c) => cur = self.parent.get(&c).copied().flatten(),
+            }
+        }
+        false
+    }
+
+    /// An outline that was cut short is not changed: the part left out would be given wrong counts.
+    fn editable(&self) -> Result<()> {
+        if self.truncated {
+            return Err(EngineError::Invalid("this outline is too large, or nested too deep, to be changed here".into()));
+        }
+        Ok(())
+    }
+}
+
+/// The outline root and its walked shape, for a change.
+fn walked(doc: &PdfDocument) -> Result<(PdfObject, Shape)> {
+    let root = root(doc)?.ok_or(EngineError::Stale)?;
+    let sh = shape(&root)?;
+    sh.editable()?;
+    Ok((root, sh))
+}
+
+fn color_of(item: &PdfObject) -> Option<[f32; 3]> {
+    let c = item.get_dict("C").ok().flatten()?;
+    let v: Vec<f32> = (0..3).filter_map(|i| number(&c.get_array(i).ok().flatten())).collect();
+    (v.len() == 3).then(|| [v[0].clamp(0.0, 1.0), v[1].clamp(0.0, 1.0), v[2].clamp(0.0, 1.0)])
+}
+
+struct Reader<'a> {
+    doc: &'a PdfDocument,
+    sh: &'a Shape,
+    spaces: HashMap<u32, Option<Matrix>>,
+    names: Names,
+}
+
+impl Reader<'_> {
+    fn level(&mut self, key: Option<i32>) -> Result<Vec<Bookmark>> {
+        let sh = self.sh;
+        let mut out = Vec::new();
+        for &id in sh.kid_ids(key) {
+            let item = &sh.refs[&id];
             let flags = number(&item.get_dict("F")?).map_or(0, |f| f as i32);
-            let children = self.level(&item, depth + 1)?;
+            let children = self.level(Some(id))?;
             out.push(Bookmark {
                 id,
                 title: string_of(item.get_dict("Title")?),
-                dest: dest_of(self.doc, &item, &mut self.spaces),
-                open: is_open(&item) && !children.is_empty(),
+                dest: dest_of(self.doc, item, &mut self.spaces, &mut self.names),
+                open: is_open(item) && !children.is_empty(),
                 bold: flags & 2 != 0,
                 italic: flags & 1 != 0,
-                color,
+                color: color_of(item),
                 children,
             });
         }
@@ -369,14 +456,34 @@ pub fn read(doc: &PdfDocument, rev: u32) -> Result<Bookmarks> {
     let Some(root) = root(doc)? else {
         return Ok(Bookmarks { rev, items: Vec::new(), count: 0, truncated: false });
     };
-    let mut r = Reader { doc, spaces: HashMap::new(), seen: HashSet::new(), truncated: false };
-    let items = r.level(&root, 0)?;
-    Ok(Bookmarks { rev, count: count_items(&items), items, truncated: r.truncated })
+    let sh = shape(&root)?;
+    let mut r = Reader { doc, sh: &sh, spaces: HashMap::new(), names: Names::default() };
+    let items = r.level(None)?;
+    Ok(Bookmarks { rev, count: count_items(&items), items, truncated: sh.truncated })
 }
 
 pub fn list(eng: &Engine, doc: DocId) -> Result<Bookmarks> {
     let entry = eng.doc_entry(doc)?;
     eng.read_custom(doc, |d| read(d, entry.generation()))
+}
+
+/// The document is certified (a `/DocMDP` signature): any change to it, even to its bookmarks, would
+/// void the certification. Its `/P`: 1 no changes, 2 forms and signing, 3 also annotations.
+pub(crate) fn certified(doc: &PdfDocument) -> Result<Option<i32>> {
+    let Some(perms) = doc.catalog()?.get_dict("Perms")? else { return Ok(None) };
+    let Some(sig) = perms.get_dict("DocMDP")? else { return Ok(None) };
+    let mut p = 2;
+    if let Some(refs) = sig.get_dict("Reference")?.filter(|r| r.is_array().unwrap_or(false)) {
+        for i in 0..refs.len()?.min(16) as i32 {
+            let Some(r) = refs.get_array(i)? else { continue };
+            if name_of(r.get_dict("TransformMethod")?) == "DocMDP" {
+                if let Some(v) = number(&r.get_dict("TransformParams")?.and_then(|t| t.get_dict("P").ok().flatten())) {
+                    p = v as i32;
+                }
+            }
+        }
+    }
+    Ok(Some(p))
 }
 
 // ---- writing ----
@@ -408,16 +515,23 @@ fn relink(parent: &mut PdfObject, kids: &[PdfObject]) -> Result<()> {
     Ok(())
 }
 
-/// Sets `/Count` on `item` and everything under it (its sign says open or closed, its size the
-/// items shown below it when it is open); returns that size.
-fn recount(item: &mut PdfObject, is_root: bool, depth: usize) -> Result<i32> {
+/// Sets `/Count` on the root and on every item under it, from the outline as it is now (an item's
+/// sign says open or closed, its size the items shown below it when it is open).
+fn recount(doc: &PdfDocument) -> Result<()> {
+    let Some(mut root) = root(doc)? else { return Ok(()) };
+    let sh = shape(&root)?;
+    sh.editable()?;
+    count_below(&sh, None, &mut root, true)?;
+    Ok(())
+}
+
+fn count_below(sh: &Shape, key: Option<i32>, item: &mut PdfObject, is_root: bool) -> Result<i32> {
     let mut visible = 0;
-    if depth < MAX_DEPTH {
-        for mut k in kids(item)? {
-            let open = is_open(&k);
-            let below = recount(&mut k, false, depth + 1)?;
-            visible += 1 + if open { below } else { 0 };
-        }
+    for &id in sh.kid_ids(key) {
+        let mut k = sh.refs[&id].clone();
+        let open = is_open(&k);
+        let below = count_below(sh, Some(id), &mut k, false)?;
+        visible += 1 + if open { below } else { 0 };
     }
     if visible == 0 {
         item.dict_delete("Count")?;
@@ -440,42 +554,15 @@ fn root_or_new(doc: &mut PdfDocument) -> Result<PdfObject> {
     Ok(r)
 }
 
-fn item(doc: &PdfDocument, id: i32) -> Result<PdfObject> {
-    let r = doc.new_indirect(id, 0)?;
-    match r.resolve() {
-        Ok(Some(d)) if d.is_dict()? && d.get_dict("Parent")?.is_some() && d.get_dict("Title")?.is_some() => Ok(r),
-        _ => Err(EngineError::Stale),
+/// The item `id` and everything under it, deleted; returns how many.
+fn delete_tree(doc: &mut PdfDocument, sh: &Shape, id: i32) -> Result<u32> {
+    let mut n = 0;
+    let mut stack = vec![id];
+    while let Some(cur) = stack.pop() {
+        stack.extend_from_slice(sh.kid_ids(Some(cur)));
+        doc.delete_object(cur)?;
+        n += 1;
     }
-}
-
-fn parent_of(doc: &PdfDocument, id: Option<i32>) -> Result<PdfObject> {
-    match id {
-        Some(p) => item(doc, p),
-        None => root(doc)?.ok_or(EngineError::Stale),
-    }
-}
-
-/// `x` is `anc` or lies under it.
-fn under(x: &PdfObject, anc: i32) -> bool {
-    let mut cur = Some(x.clone());
-    for _ in 0..=MAX_DEPTH * 4 {
-        let Some(c) = cur else { return false };
-        if c.is_indirect().unwrap_or(false) && c.as_indirect().unwrap_or(-1) == anc {
-            return true;
-        }
-        cur = c.get_dict("Parent").ok().flatten();
-    }
-    false
-}
-
-fn delete_tree(doc: &mut PdfDocument, it: &PdfObject, depth: usize) -> Result<u32> {
-    let mut n = 1;
-    if depth < MAX_DEPTH {
-        for k in kids(it)? {
-            n += delete_tree(doc, &k, depth + 1)?;
-        }
-    }
-    doc.delete_object(it.as_indirect()?)?;
     Ok(n)
 }
 
@@ -503,8 +590,16 @@ fn clean_title(t: &str) -> String {
     t.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Puts `new` under `parent` at `index` (none: last). Returns the new item.
-fn insert_new(doc: &mut PdfDocument, parent: &mut PdfObject, index: Option<usize>, title: &str, dest: Option<PdfObject>) -> Result<PdfObject> {
+/// Puts a new item under `parent`, whose children now are `ks`, at `index` (none: last); `ks` is
+/// updated. Returns the new item.
+fn insert_new(
+    doc: &mut PdfDocument,
+    parent: &mut PdfObject,
+    ks: &mut Vec<PdfObject>,
+    index: Option<usize>,
+    title: &str,
+    dest: Option<PdfObject>,
+) -> Result<PdfObject> {
     let mut dict = doc.new_dict()?;
     dict.dict_put("Title", text_object(doc, title)?)?;
     dict.dict_put("Parent", parent.clone())?;
@@ -512,15 +607,28 @@ fn insert_new(doc: &mut PdfDocument, parent: &mut PdfObject, index: Option<usize
         dict.dict_put("Dest", d)?;
     }
     let new = doc.add_object(&dict)?;
-    let mut ks = kids(parent)?;
     let at = index.map_or(ks.len(), |i| i.min(ks.len()));
     ks.insert(at, new.clone());
-    relink(parent, &ks)?;
+    relink(parent, ks)?;
     Ok(new)
 }
 
-/// Runs `op` on `doc`; returns the id and count for [`BookmarkEdited`].
-pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<(Option<i32>, u32)> {
+fn same_point(a: Option<[f32; 2]>, b: Option<[f32; 2]>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => (a[0] - b[0]).abs() < 0.01 && (a[1] - b[1]).abs() < 0.01,
+        _ => false,
+    }
+}
+
+/// Runs `op` on `doc`; returns the id and count for [`BookmarkEdited`], or `None` when the change
+/// would leave the document as it is (nothing was touched then).
+pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<Option<(Option<i32>, u32)>> {
+    if certified(doc)?.is_some() {
+        return Err(EngineError::Invalid(
+            "This document is certified. Changing its bookmarks would void the certification, so Inkwell leaves them as they are.".into(),
+        ));
+    }
     let mut made = None;
     let mut count = 0;
     match op {
@@ -530,92 +638,133 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<(Option<i32>
                 return Err(EngineError::Invalid("a bookmark needs a name".into()));
             }
             let dest = dest_object(doc, *page, *at)?;
-            let mut root = root_or_new(doc)?;
+            let root = root_or_new(doc)?;
+            let sh = shape(&root)?;
+            sh.editable()?;
             let mut p = match parent {
-                Some(id) => item(doc, *id)?,
+                Some(id) => sh.obj(*id)?,
                 None => root.clone(),
             };
-            let new = insert_new(doc, &mut p, index.map(|i| i as usize), &title, Some(dest))?;
+            let mut ks = sh.objs(*parent);
+            let new = insert_new(doc, &mut p, &mut ks, index.map(|i| i as usize), &title, Some(dest))?;
             if parent.is_some() {
                 // A group with a new member is shown open, so the member is seen.
                 p.dict_put("Count", PdfObject::new_int(1)?)?;
             }
             made = Some(new.as_indirect()?);
             count = 1;
-            recount(&mut root, true, 0)?;
+            recount(doc)?;
         }
         BookmarkOp::Rename { id, title } => {
             let title = clean_title(title);
             if title.is_empty() {
                 return Err(EngineError::Invalid("a bookmark needs a name".into()));
             }
-            let mut it = item(doc, *id)?;
+            let (_, sh) = walked(doc)?;
+            let mut it = sh.obj(*id)?;
+            let wanted: String = title.chars().filter(|c| !c.is_control() || *c == '\t').take(MAX_TITLE).collect();
+            if string_of(it.get_dict("Title")?) == wanted {
+                return Ok(None);
+            }
             it.dict_put("Title", text_object(doc, &title)?)?;
         }
         BookmarkOp::Delete { ids } => {
-            let mut root = root(doc)?.ok_or(EngineError::Stale)?;
-            // Nested picks go with their ancestor: take the topmost ones only.
-            let items: Vec<PdfObject> = ids.iter().map(|id| item(doc, *id)).collect::<Result<_>>()?;
-            // Decided before anything is deleted: a deleted item has no `/Parent` left to ask.
-            let mut nested = Vec::with_capacity(items.len());
-            for it in &items {
-                let mut gone = false;
-                if let Some(p) = it.get_dict("Parent")? {
-                    gone = ids.iter().any(|a| under(&p, *a));
-                }
-                nested.push(gone);
+            let (root, sh) = walked(doc)?;
+            let mut want = ids.clone();
+            want.sort_unstable();
+            want.dedup();
+            if want.iter().any(|id| !sh.refs.contains_key(id)) {
+                return Err(EngineError::Stale);
             }
-            for (it, gone) in items.iter().zip(nested) {
-                if gone {
-                    continue;
-                }
-                let mut parent = it.get_dict("Parent")?.ok_or(EngineError::Stale)?;
-                let num = it.as_indirect()?;
-                let rest: Vec<PdfObject> = kids(&parent)?.into_iter().filter(|k| k.as_indirect().ok() != Some(num)).collect();
-                relink(&mut parent, &rest)?;
-                count += delete_tree(doc, it, 0)?;
+            if want.is_empty() {
+                return Ok(None);
             }
-            recount(&mut root, true, 0)?;
+            // Nested picks go with their ancestor: take the topmost ones only, by the real tree.
+            let tops: Vec<i32> = want.iter().copied().filter(|id| !want.iter().any(|a| a != id && sh.under(sh.parent[id], *a))).collect();
+            let drop: HashSet<i32> = tops.iter().copied().collect();
+            let mut parents: Vec<Option<i32>> = Vec::new();
+            for id in &tops {
+                let p = sh.parent[id];
+                if !parents.contains(&p) {
+                    parents.push(p);
+                }
+            }
+            for p in parents {
+                let mut obj = match p {
+                    Some(id) => sh.obj(id)?,
+                    None => root.clone(),
+                };
+                let rest: Vec<PdfObject> = sh.objs(p).into_iter().filter(|k| !drop.contains(&k.as_indirect().unwrap_or(-1))).collect();
+                relink(&mut obj, &rest)?;
+            }
+            for id in &tops {
+                count += delete_tree(doc, &sh, *id)?;
+            }
+            recount(doc)?;
         }
         BookmarkOp::Move { id, parent, index } => {
-            let mut root = root(doc)?.ok_or(EngineError::Stale)?;
-            let it = item(doc, *id)?;
-            let mut to = parent_of(doc, *parent)?;
+            let (root, sh) = walked(doc)?;
+            let it = sh.obj(*id)?;
             if let Some(p) = parent {
-                if under(&to, *id) || p == id {
+                if !sh.refs.contains_key(p) {
+                    return Err(EngineError::Stale);
+                }
+                if p == id || sh.under(Some(*p), *id) {
                     return Err(EngineError::Invalid("a bookmark can't go inside itself".into()));
                 }
             }
-            let mut from = it.get_dict("Parent")?.ok_or(EngineError::Stale)?;
-            let num = *id;
-            let rest: Vec<PdfObject> = kids(&from)?.into_iter().filter(|k| k.as_indirect().ok() != Some(num)).collect();
-            relink(&mut from, &rest)?;
-            let mut ks = kids(&to)?;
+            let from = sh.parent[id];
+            let rest: Vec<PdfObject> = sh.objs(from).into_iter().filter(|k| k.as_indirect().ok() != Some(*id)).collect();
+            let old_at = sh.kid_ids(from).iter().position(|k| k == id).unwrap_or(0);
+            if from == *parent && old_at == (*index as usize).min(rest.len()) {
+                return Ok(None);
+            }
+            let obj_of = |key: Option<i32>| -> Result<PdfObject> {
+                match key {
+                    Some(k) => sh.obj(k),
+                    None => Ok(root.clone()),
+                }
+            };
+            let mut from_obj = obj_of(from)?;
+            relink(&mut from_obj, &rest)?;
+            let mut to = obj_of(*parent)?;
+            let mut ks = if from == *parent { rest } else { sh.objs(*parent) };
             let at = (*index as usize).min(ks.len());
             ks.insert(at, it);
             relink(&mut to, &ks)?;
             if parent.is_some() {
                 to.dict_put("Count", PdfObject::new_int(1)?)?;
             }
-            recount(&mut root, true, 0)?;
+            recount(doc)?;
         }
         BookmarkOp::SetDest { id, page, at } => {
-            let mut it = item(doc, *id)?;
+            let (_, sh) = walked(doc)?;
+            let mut it = sh.obj(*id)?;
             let dest = dest_object(doc, *page, *at)?;
+            let now = dest_of(doc, &it, &mut HashMap::new(), &mut Names::default());
+            if let Dest::Page { page: p, at: a } = now {
+                if p == *page && same_point(a, *at) && it.get_dict("A")?.is_none() {
+                    return Ok(None);
+                }
+            }
             it.dict_delete("A")?;
             it.dict_put("Dest", dest)?;
         }
         BookmarkOp::SetOpen { id, open } => {
-            let mut it = item(doc, *id)?;
-            let mut root = root(doc)?.ok_or(EngineError::Stale)?;
-            if kids(&it)?.is_empty() {
+            let (_, sh) = walked(doc)?;
+            let mut it = sh.obj(*id)?;
+            if sh.kid_ids(Some(*id)).is_empty() {
                 return Err(EngineError::Invalid("this bookmark has nothing under it".into()));
             }
+            if is_open(&it) == *open {
+                return Ok(None);
+            }
             it.dict_put("Count", PdfObject::new_int(if *open { 1 } else { -1 })?)?;
-            recount(&mut root, true, 0)?;
+            recount(doc)?;
         }
         BookmarkOp::SetStyle { id, bold, italic, color, reset_color } => {
-            let mut it = item(doc, *id)?;
+            let (_, sh) = walked(doc)?;
+            let mut it = sh.obj(*id)?;
             let cur = number(&it.get_dict("F")?).map_or(0, |f| f as i32);
             let mut flags = cur;
             if let Some(b) = bold {
@@ -624,7 +773,18 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<(Option<i32>
             if let Some(i) = italic {
                 flags = if *i { flags | 1 } else { flags & !1 };
             }
-            if flags != cur || number(&it.get_dict("F")?).is_none() {
+            let have = color_of(&it);
+            let same_color = if reset_color == &Some(true) {
+                it.get_dict("C")?.is_none()
+            } else if let Some(c) = color {
+                have.is_some_and(|h| (0..3).all(|i| (h[i] - c[i].clamp(0.0, 1.0)).abs() < 1e-4))
+            } else {
+                true
+            };
+            if flags == cur && same_color {
+                return Ok(None);
+            }
+            if flags != cur {
                 if flags == 0 {
                     it.dict_delete("F")?;
                 } else {
@@ -646,17 +806,20 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<(Option<i32>
             if found.rows.is_empty() {
                 return Err(EngineError::Invalid("no headings were found".into()));
             }
-            if *replace {
-                if let Some(r) = root(doc)? {
-                    for k in kids(&r)? {
-                        delete_tree(doc, &k, 0)?;
-                    }
-                    let mut r = r;
-                    relink(&mut r, &[])?;
-                }
-            }
             let mut root = root_or_new(doc)?;
-            // Level → the item last made at it, for nesting.
+            let sh = shape(&root)?;
+            sh.editable()?;
+            let mut top: Vec<PdfObject> = Vec::new();
+            if *replace {
+                for &id in sh.kid_ids(None) {
+                    delete_tree(doc, &sh, id)?;
+                }
+                relink(&mut root, &[])?;
+            } else {
+                top = sh.objs(None);
+            }
+            // The children of the items made here, by item; and, for nesting, level → the item last made.
+            let mut lists: HashMap<i32, Vec<PdfObject>> = HashMap::new();
             let mut stack: Vec<(u8, PdfObject)> = Vec::new();
             for row in &found.rows {
                 while stack.last().is_some_and(|(l, _)| *l >= row.level) {
@@ -664,7 +827,11 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<(Option<i32>
                 }
                 let mut parent = stack.last().map_or_else(|| root.clone(), |(_, p)| p.clone());
                 let dest = dest_object(doc, row.page, Some(row.at))?;
-                let new = insert_new(doc, &mut parent, None, &row.title, Some(dest))?;
+                let list = match stack.last() {
+                    Some((_, p)) => lists.entry(p.as_indirect()?).or_default(),
+                    None => &mut top,
+                };
+                let new = insert_new(doc, &mut parent, list, None, &row.title, Some(dest))?;
                 if made.is_none() {
                     made = Some(new.as_indirect()?);
                 }
@@ -674,22 +841,29 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<(Option<i32>
                 stack.push((row.level, new));
                 count += 1;
             }
-            recount(&mut root, true, 0)?;
+            recount(doc)?;
         }
     }
-    Ok((made, count))
+    Ok(Some((made, count)))
 }
 
-/// Applies `op`, listed at generation `rev`: one undo step. `Stale` when the document moved on.
+/// Applies `op`, listed at generation `rev`: one undo step, or none when it changes nothing.
+/// `Stale` when the document moved on.
 pub fn apply(eng: &Engine, doc: DocId, rev: u32, op: &BookmarkOp, source: EditSource) -> Result<BookmarkEdited> {
     let entry = eng.doc_entry(doc)?;
     let mut out = (None, 0);
-    let state = eng.apply_custom(doc, label(op), source, false, |d| {
+    let removes = matches!(op, BookmarkOp::Delete { .. } | BookmarkOp::FromHeadings { replace: true });
+    let state = eng.apply_custom_unless_noop(doc, label(op), source, removes, |d| {
         if entry.generation() != rev {
             return Err(EngineError::Stale);
         }
-        out = run(d, op)?;
-        Ok(Vec::new())
+        match run(d, op)? {
+            Some(r) => {
+                out = r;
+                Ok(Some(Vec::new()))
+            }
+            None => Ok(None),
+        }
     })?;
     Ok(BookmarkEdited { state, id: out.0, count: out.1 })
 }

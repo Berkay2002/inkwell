@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { linkCheckUrl, linkPickFile, type LinkTarget, type NewLinkTarget, type PageLink } from "../../lib/api";
-import { confirmOpen, isProblem, linkState, rgbToHex, stateLabel, targetLabel, useNav } from "../../lib/nav";
-import { getViewPos } from "../../lib/viewPos";
+import { confirmOpen, isProblem, linkState, rgbToHex, stateLabel, targetLabel, useNav, viewTarget } from "../../lib/nav";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
 
@@ -82,7 +81,7 @@ export function LinksPanel({ doc }: { doc: DocState }) {
           <Icon name="check" size={16} />
           Show problems
         </button>
-        {showProblems && !audit && <p className="dim te-hint">Checking the links…</p>}
+        {showProblems && !audit && <p className="dim te-hint">Checking the linksâ€¦</p>}
         {showProblems && audit && (
           <>
             <p className="te-summary">
@@ -105,7 +104,7 @@ export function LinksPanel({ doc }: { doc: DocState }) {
                     >
                       <span className="st-dot broken" aria-hidden />
                       <span className="te-excerpt">
-                        Page {r.page + 1} · {r.what}
+                        Page {r.page + 1} Â· {r.what}
                       </span>
                     </button>
                   </li>
@@ -295,10 +294,9 @@ function TargetForm(p: {
   const ok = kind === "page" ? pageOk : kind === "uri" ? uriNote?.ok === true : fileOk;
 
   const useView = () => {
-    const v = getViewPos(doc.id);
-    const pg = v?.page ?? doc.currentPage;
-    setPage(String(pg + 1));
-    setAt(v ? [0, Math.max(0, v.yPt)] : null);
+    const v = viewTarget(doc.id);
+    setPage(String(v.page + 1));
+    setAt(v.at);
   };
 
   const submit = async () => {
@@ -404,7 +402,10 @@ function TargetForm(p: {
             />
             <span className="dim">optional, for PDFs</span>
           </div>
-          <p className="dim te-hint">Inkwell stores the file's name and opens only PDFs; other files are left to you.</p>
+          <p className="dim te-hint">
+            The link stores the file's name from this document's folder (with ../ to go up), never a folder of this computer. In Read
+            mode it opens PDFs only, after you confirm.
+          </p>
         </>
       )}
 

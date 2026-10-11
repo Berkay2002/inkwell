@@ -331,6 +331,8 @@ export interface BookmarkEdited {
 export interface HeadingPreview {
   count: number;
   levels: number;
+  /** `tags`: the file's own heading tags; `size`: guessed from the size of the text. */
+  source: "tags" | "size";
   rows: { title: string; page: number; level: number }[];
 }
 
@@ -385,6 +387,8 @@ export interface LinkEdited {
   state: EditState;
   id: number | null;
   count: number;
+  /** A link to a file: the name the link now has for it, found from the folder of the document. */
+  name: string | null;
 }
 
 export interface LinkAudit {
@@ -412,6 +416,8 @@ export const linksAudit = (doc: number) => invoke<LinkAudit>("links_audit", { do
 export const linkCheckUrl = (url: string) => invoke<string>("link_check_url", { url });
 /** Any file, as an open token. */
 export const linkPickFile = () => invoke<FileRef | null>("link_pick_file");
+/** The PDF a file link names (next to the document), as an open token; refused with the reason otherwise. */
+export const linkFileRef = (doc: number, name: string) => invoke<FileRef>("link_file_ref", { doc, name });
 /** Only after the person confirmed. */
 export const linkOpenUrl = (url: string) => invoke<void>("link_open_url", { url });
 

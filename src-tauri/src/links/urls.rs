@@ -2,7 +2,8 @@
 //! e-mail addresses that have no link over them yet. Found line by line (an address broken over
 //! two lines is not joined), each with the rectangle of the characters it is made of.
 
-use super::{Result, gate_url, read_page};
+use super::{MIN_SIDE, Result, gate_url, read_page_with};
+use crate::outline::Names;
 use mupdf::pdf::PdfDocument;
 use mupdf::text_page::{TextBlockType, TextPageFlags};
 use regex::Regex;
@@ -87,8 +88,9 @@ fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
 pub fn find(doc: &PdfDocument) -> Result<Vec<Hit>> {
     let n = doc.page_count()?;
     let mut out = Vec::new();
+    let mut names = Names::default();
     for p in 0..n {
-        let existing: Vec<[f32; 4]> = read_page(doc, p as u32, 0)?.links.into_iter().map(|l| l.rect).collect();
+        let existing: Vec<[f32; 4]> = read_page_with(doc, p as u32, 0, &mut names)?.links.into_iter().map(|l| l.rect).collect();
         let page = doc.load_pdf_page(p)?;
         let tp = page.to_text_page(TextPageFlags::empty())?;
         for b in tp.blocks() {
@@ -129,6 +131,10 @@ pub fn find(doc: &PdfDocument) -> Result<Vec<Hit>> {
                         }
                     }
                     let Some(r) = r else { continue };
+                    // A link smaller than this can't be made, so it is not counted either.
+                    if r[2] - r[0] < MIN_SIDE || r[3] - r[1] < MIN_SIDE {
+                        continue;
+                    }
                     let lower = s.to_ascii_lowercase();
                     let full = if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:") {
                         s.to_string()
