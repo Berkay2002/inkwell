@@ -49,19 +49,24 @@ const MAX_ENTRIES: usize = 50_000;
 /// The largest attachment taken in or read out.
 pub const MAX_ATTACH: u64 = 512 << 20;
 
-/// One entry of the embedded-files name tree.
-pub(super) struct Entry {
-    pub(super) key: String,
-    pub(super) spec: PdfObject,
+/// One entry of a name tree (the embedded files; the document-level JavaScript, see `forms::doc_js`).
+pub(crate) struct Entry {
+    pub(crate) key: String,
+    pub(crate) spec: PdfObject,
 }
 
-fn names_root(doc: &PdfDocument) -> Result<Option<PdfObject>> {
+fn names_root(doc: &PdfDocument, tree_key: &str) -> Result<Option<PdfObject>> {
     let Some(names) = get(&doc.catalog()?, "Names") else { return Ok(None) };
-    Ok(names.resolve()?.filter(|n| n.is_dict().unwrap_or(false)).and_then(|n| get(&n, "EmbeddedFiles")))
+    Ok(names.resolve()?.filter(|n| n.is_dict().unwrap_or(false)).and_then(|n| get(&n, tree_key)))
 }
 
-/// The tree's entries, flattened (a /Kids tree too), in key order.
+/// The embedded files' entries, flattened (a /Kids tree too), in key order.
 pub(super) fn tree(doc: &PdfDocument) -> Result<Vec<Entry>> {
+    tree_of(doc, "EmbeddedFiles")
+}
+
+/// The entries of the `/Names /<tree_key>` tree, flattened, with the walk's visited set and caps.
+pub(crate) fn tree_of(doc: &PdfDocument, tree_key: &str) -> Result<Vec<Entry>> {
     /// Nodes looked at in all: /Kids may point at each other or at one node many times over.
     const MAX_NODES: usize = 100_000;
     fn walk(node: &PdfObject, depth: usize, out: &mut Vec<Entry>, seen: &mut HashSet<i32>, nodes: &mut usize) -> Result<()> {
@@ -81,7 +86,8 @@ pub(super) fn tree(doc: &PdfDocument) -> Result<Vec<Entry>> {
             let n = names.len().unwrap_or(0);
             let mut i = 0;
             while i + 1 < n && out.len() < MAX_ENTRIES {
-                let key = names.get_array(i as i32)?.and_then(|k| k.as_string().ok());
+                // A key in UTF-16 is not a Rust string as it stands: read its bytes as a PDF text string.
+                let key = names.get_array(i as i32)?.and_then(|k| k.as_string().ok().or_else(|| k.as_bytes().ok().map(|b| crate::outline::decode_text(&b))));
                 if let (Some(key), Some(spec)) = (key, names.get_array(i as i32 + 1)?) {
                     out.push(Entry { key, spec });
                 }
@@ -101,7 +107,7 @@ pub(super) fn tree(doc: &PdfDocument) -> Result<Vec<Entry>> {
         Ok(())
     }
     let mut out = Vec::new();
-    if let Some(root) = names_root(doc)? {
+    if let Some(root) = names_root(doc, tree_key)? {
         walk(&root, 0, &mut out, &mut HashSet::new(), &mut 0)?;
     }
     Ok(out)
@@ -109,7 +115,7 @@ pub(super) fn tree(doc: &PdfDocument) -> Result<Vec<Entry>> {
 
 /// The id of each entry (`n:<key>`); the second and later entries with one key get the index after a
 /// separator, so every id names one entry.
-pub(super) fn entry_ids(entries: &[Entry]) -> Vec<String> {
+pub(crate) fn entry_ids(entries: &[Entry]) -> Vec<String> {
     let mut seen: HashSet<&str> = HashSet::new();
     entries.iter().enumerate().map(|(i, e)| if seen.insert(&e.key) { format!("n:{}", e.key) } else { format!("n:{}{ID_SEP}{i}", e.key) }).collect()
 }
@@ -117,7 +123,7 @@ pub(super) fn entry_ids(entries: &[Entry]) -> Vec<String> {
 const ID_SEP: char = '\u{1f}';
 
 /// The index of the entry an `n:` id names (the first one with that key, or the one an [`entry_ids`] suffix says).
-pub(super) fn find_entry(entries: &[Entry], id: &str) -> Option<usize> {
+pub(crate) fn find_entry(entries: &[Entry], id: &str) -> Option<usize> {
     let key = id.strip_prefix("n:")?;
     if let Some(i) = entries.iter().position(|e| e.key == key) {
         return Some(i);
@@ -127,8 +133,26 @@ pub(super) fn find_entry(entries: &[Entry], id: &str) -> Option<usize> {
     entries.get(i).filter(|e| e.key == base).map(|_| i)
 }
 
-/// Writes `entries` as one flat, sorted name tree (none: the entry is removed).
-pub(super) fn write_tree(doc: &mut PdfDocument, mut entries: Vec<Entry>) -> Result<()> {
+/// Writes `entries` as the one flat, sorted embedded-files tree (none: the entry is removed).
+pub(super) fn write_tree(doc: &mut PdfDocument, entries: Vec<Entry>) -> Result<()> {
+    write_tree_of(doc, "EmbeddedFiles", entries)
+}
+
+/// A name tree key as a PDF string: plain when ASCII, else UTF-16BE with a byte order mark (what readers decode).
+fn key_object(doc: &PdfDocument, key: &str) -> Result<PdfObject> {
+    if key.is_ascii() && !key.contains('\0') {
+        return Ok(PdfObject::new_string(key)?);
+    }
+    let mut hex = String::from("<FEFF");
+    for u in key.replace('\0', " ").encode_utf16() {
+        hex.push_str(&format!("{u:04X}"));
+    }
+    hex.push('>');
+    Ok(doc.new_object_from_str(&hex)?)
+}
+
+/// Writes `entries` as `/Names /<tree_key>`, one flat, sorted name tree (none: the entry is removed).
+pub(crate) fn write_tree_of(doc: &mut PdfDocument, tree_key: &str, mut entries: Vec<Entry>) -> Result<()> {
     let mut catalog = doc.catalog()?;
     let mut names = match get(&catalog, "Names").and_then(|n| n.resolve().ok().flatten()).filter(|n| n.is_dict().unwrap_or(false)) {
         Some(n) => n,
@@ -143,18 +167,18 @@ pub(super) fn write_tree(doc: &mut PdfDocument, mut entries: Vec<Entry>) -> Resu
         }
     };
     if entries.is_empty() {
-        names.dict_delete("EmbeddedFiles")?;
+        names.dict_delete(tree_key)?;
         return Ok(());
     }
     entries.sort_by(|a, b| a.key.as_bytes().cmp(b.key.as_bytes()));
     let mut array = doc.new_array()?;
     for e in &entries {
-        array.array_push(PdfObject::new_string(&e.key)?)?;
+        array.array_push(key_object(doc, &e.key)?)?;
         array.array_push(e.spec.clone())?;
     }
     let mut root = doc.new_dict()?;
     root.dict_put("Names", array)?;
-    names.dict_put("EmbeddedFiles", root)?;
+    names.dict_put(tree_key, root)?;
     Ok(())
 }
 
