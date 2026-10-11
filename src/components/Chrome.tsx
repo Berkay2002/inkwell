@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useFind } from "../lib/findStore";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
@@ -13,6 +14,7 @@ import { HistoryToggle } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
 import { MenuButton } from "./Menu";
 import { CommentsToggle } from "./comments/CommentsPanel";
+import { OptionChips, OptionsMenu } from "./search/FindOptions";
 import { FormsToggle } from "./forms/FormsPanel";
 import { RedactToggle } from "./redact/RedactPanel";
 import { ModeSwitch } from "./Organize";
@@ -269,21 +271,15 @@ function PageBox({ doc }: { doc: DocState }) {
 
 export function SearchBar({ doc }: { doc: DocState }) {
   const input = useRef<HTMLInputElement>(null);
-  const [q, setQ] = useState(doc.search.query);
   const { id, search } = doc;
+  // The text is shared with the Search rail; SearchDriver runs the live search as it changes.
+  const q = useFind((s) => s.drafts[id] ?? doc.search.query);
+  const setQ = (t: string) => useFind.getState().setDraft(id, t);
 
   useEffect(() => {
     input.current?.focus();
     input.current?.select();
   }, []);
-
-  // Debounced live search; an empty box clears the highlights.
-  useEffect(() => {
-    if (q.trim() === search.query.trim()) return;
-    const t = setTimeout(() => st().runSearch(id, q), 220);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, id]);
 
   const n = search.hits.length;
   const status = !search.query ? "" : n === 0 ? (search.done ? "No results" : "Searching…") : `${search.current + 1} / ${n}${search.done ? "" : "…"}`;
@@ -303,14 +299,17 @@ export function SearchBar({ doc }: { doc: DocState }) {
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
+            useFind.getState().remember(q);
             if (q.trim() !== search.query.trim()) st().runSearch(id, q);
             else st().stepHit(id, e.shiftKey ? -1 : 1);
           } else if (e.key === "Escape") close();
         }}
       />
+      <OptionChips />
       <span className="dim count">{status}</span>
       <Btn icon="up" title="Previous (Shift+Enter)" onClick={() => st().stepHit(id, -1)} disabled={n === 0} />
       <Btn icon="down" title="Next (Enter)" onClick={() => st().stepHit(id, 1)} disabled={n === 0} />
+      <OptionsMenu />
       <Btn icon="close" title="Close (Esc)" onClick={close} />
     </div>
   );

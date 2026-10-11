@@ -34,7 +34,8 @@ interface Props {
   preview: TileRef;
   wantText: boolean;
   hits: Rect4[];
-  currentHit: Rect4 | null;
+  /** The rectangles of the current hit (a match over two lines has two). */
+  currentHit: Rect4[];
   /** Redaction marks on this page. */
   marks: Mark[];
   /** The accessibility checker's "Show": the finding to outline on this page. */
@@ -101,7 +102,7 @@ export const PageView = memo(function PageView(p: Props) {
       >
         <MarkPreview docId={docId} page={page} size={rawSize} />
         {p.hits.map((r, i) => (
-          <div key={i} className={r === p.currentHit ? "hit current" : "hit"} style={rectStyle(r)} />
+          <div key={i} className={p.currentHit.includes(r) ? "hit current" : "hit"} style={rectStyle(r)} />
         ))}
         {p.marks.map((m) => (
           <div key={m.xref} className={m.wholePage ? "rd-mark page-wide" : "rd-mark"} style={{ ...rectStyle(markRect(m, rawSize)), "--z": zoom } as React.CSSProperties} />

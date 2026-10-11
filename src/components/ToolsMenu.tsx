@@ -4,6 +4,7 @@ import { openA11y } from "../lib/a11y";
 import { useConvert } from "../lib/convertStore";
 import { useMarks } from "../lib/marksStore";
 import { useProtect } from "../lib/protectStore";
+import { useSearch } from "../lib/searchStore";
 import { type ToolItem, filterTools } from "../lib/toolsMenu";
 import { useTools } from "../lib/toolsStore";
 import { type DocState, useStore } from "../store";
@@ -30,6 +31,7 @@ export function toolItems(doc: Pick<DocState, "id" | "name">): ToolItem[] {
     { id: "create", group: "convert", label: "Create PDF…", keywords: "new from images", onSelect: () => useConvert.getState().openCreate() },
     { id: "compare", group: "check", label: "Compare files…", keywords: "diff differences", onSelect: () => void openCompareSetup({ id, name }) },
     { id: "a11y", group: "check", label: "Check accessibility…", keywords: "tagged ada wcag", onSelect: openA11y },
+    { id: "search-advanced", group: "check", label: "Advanced search…", keywords: "find options folder files history", onSelect: () => useSearch.getState().setOpen(true) },
   ];
 }
 
