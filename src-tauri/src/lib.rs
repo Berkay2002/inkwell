@@ -8,6 +8,7 @@ pub mod diff;
 pub mod engine;
 pub mod history;
 pub mod history_ipc;
+pub mod marks;
 pub mod ocr;
 pub mod paths;
 pub mod print;
@@ -804,6 +805,10 @@ pub fn run() {
             protect::app::protect_apply,
             protect_and_save,
             protect::app::remove_security,
+            marks::app::marks_info,
+            marks::app::marks_add,
+            marks::app::marks_remove,
+            marks::app::marks_bates_files,
             tool_cancel,
             ocr_languages,
             ocr_choose_tesseract,

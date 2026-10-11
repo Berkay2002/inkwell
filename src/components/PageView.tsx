@@ -7,6 +7,7 @@ import { type Mark, useRedact } from "../lib/redact";
 import { cached } from "../lib/tiles";
 import type { Rect4 } from "../store";
 import { AnnotLayer } from "./comments/AnnotLayer";
+import { MarkPreview } from "./MarkPreview";
 import { TextEditLayer } from "./edit/TextEditLayer";
 import { FormLayer } from "./forms/FormLayer";
 import { TileCanvas } from "./TileCanvas";
@@ -85,6 +86,7 @@ export const PageView = memo(function PageView(p: Props) {
         className="pagespace"
         style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom) }}
       >
+        <MarkPreview docId={docId} page={page} size={rawSize} />
         {p.hits.map((r, i) => (
           <div key={i} className={r === p.currentHit ? "hit current" : "hit"} style={rectStyle(r)} />
         ))}
