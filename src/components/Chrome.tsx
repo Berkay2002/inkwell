@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { useFind } from "../lib/findStore";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
 import { useProtect } from "../lib/protectStore";
 import { pageOfLabel, useSheets } from "../lib/organizePlus";
 import { pageBoxCh } from "../lib/pageBox";
+import { useToolPrefs } from "../lib/toolPrefs";
 import { type PageDark, togglePageDark } from "../lib/pageDark";
 import { usePagesDark, useSystemDark } from "../lib/usePagesDark";
 import { type DocState, pageLabel, type Theme, useStore } from "../store";
@@ -13,10 +15,11 @@ import { HistoryToggle } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
 import { MenuButton } from "./Menu";
 import { CommentsToggle } from "./comments/CommentsPanel";
+import { OptionChips, OptionsMenu } from "./search/FindOptions";
 import { FormsToggle } from "./forms/FormsPanel";
 import { RedactToggle } from "./redact/RedactPanel";
 import { ModeSwitch } from "./Organize";
-import { ToolsMenu } from "./ToolsMenu";
+import { PinnedTools, ToolsButton } from "./AllTools";
 import { WindowControls } from "./WindowControls";
 
 const st = () => useStore.getState();
@@ -111,7 +114,8 @@ export function Toolbar({ doc }: { doc: DocState }) {
   return (
     <div className="toolbar">
       <ModeSwitch doc={doc} />
-      <ToolsMenu doc={doc} />
+      <ToolsButton doc={doc} />
+      <PinnedTools doc={doc} />
       <span className="sep" />
       {doc.organize ? (
         <>
@@ -137,7 +141,9 @@ export function Toolbar({ doc }: { doc: DocState }) {
 }
 
 function ViewerControls({ doc, keys }: { doc: DocState; keys: (cmd: string) => string }) {
-  const sidebar = useStore((s) => s.sidebar);
+  // the All tools panel covers the sidebar while it is open: nothing in it is "on" then
+  const covered = useToolPrefs((s) => s.panelOpen);
+  const sidebar = useStore((s) => (covered ? "none" : s.sidebar));
   const { id } = doc;
   const zoomValue = doc.zoomMode === "custom" ? String(Math.round(doc.zoom * 100) / 100) : doc.zoomMode;
   const presets = ZOOM_STEPS.filter((z) => z >= 0.25 && z <= 8);
@@ -269,21 +275,15 @@ function PageBox({ doc }: { doc: DocState }) {
 
 export function SearchBar({ doc }: { doc: DocState }) {
   const input = useRef<HTMLInputElement>(null);
-  const [q, setQ] = useState(doc.search.query);
   const { id, search } = doc;
+  // The text is shared with the Search rail; SearchDriver runs the live search as it changes.
+  const q = useFind((s) => s.drafts[id] ?? doc.search.query);
+  const setQ = (t: string) => useFind.getState().setDraft(id, t);
 
   useEffect(() => {
     input.current?.focus();
     input.current?.select();
   }, []);
-
-  // Debounced live search; an empty box clears the highlights.
-  useEffect(() => {
-    if (q.trim() === search.query.trim()) return;
-    const t = setTimeout(() => st().runSearch(id, q), 220);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, id]);
 
   const n = search.hits.length;
   const status = !search.query ? "" : n === 0 ? (search.done ? "No results" : "Searching…") : `${search.current + 1} / ${n}${search.done ? "" : "…"}`;
@@ -303,14 +303,17 @@ export function SearchBar({ doc }: { doc: DocState }) {
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
+            useFind.getState().remember(q);
             if (q.trim() !== search.query.trim()) st().runSearch(id, q);
             else st().stepHit(id, e.shiftKey ? -1 : 1);
           } else if (e.key === "Escape") close();
         }}
       />
+      <OptionChips />
       <span className="dim count">{status}</span>
       <Btn icon="up" title="Previous (Shift+Enter)" onClick={() => st().stepHit(id, -1)} disabled={n === 0} />
       <Btn icon="down" title="Next (Enter)" onClick={() => st().stepHit(id, 1)} disabled={n === 0} />
+      <OptionsMenu />
       <Btn icon="close" title="Close (Esc)" onClick={close} />
     </div>
   );

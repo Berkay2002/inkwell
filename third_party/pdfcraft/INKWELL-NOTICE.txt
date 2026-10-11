@@ -24,3 +24,4 @@ Adapted files carry a header naming the pdfcraft path:
 - src-tauri/src/marks/apply.rs   <- crates/edit/src/lib.rs   (header & footer, watermark, background: artifact structure, /PCMark tags, remove)
 - src-tauri/src/marks/mod.rs     <- crates/edit/src/lib.rs   (mark kinds, <<…>> tokens, Bates numbering)
 - src-tauri/src/marks/text.rs    <- crates/fonts/src/lib.rs  (WinAnsi bytes, string literals)
+- src-tauri/src/search/mod.rs      <- crates/render/src/text.rs   (find_opts: case folding, white space collapse, whole-word check)

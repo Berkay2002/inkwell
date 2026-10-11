@@ -2,8 +2,10 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import type { OutlineItem } from "../lib/api";
 import { computeLayout, previewScaleKey, rotated, type Size, visibleRange } from "../lib/layout";
 import { type Want, tileClient } from "../lib/tiles";
+import { useToolPrefs } from "../lib/toolPrefs";
 import { useTools } from "../lib/toolsStore";
 import { type DocState, pageLabel, useStore } from "../store";
+import { AllToolsPanel } from "./AllTools";
 import { AttachmentsPanel } from "./AttachmentsPanel";
 import { Icon, type IconName } from "./Icons";
 import { ContextMenu, pageActions } from "./PageMenu";
@@ -13,6 +15,9 @@ const THUMB_W = 150;
 
 export function Sidebar({ doc }: { doc: DocState }) {
   const panel = useStore((s) => s.sidebar);
+  const tools = useToolPrefs((s) => s.panelOpen);
+  // the All tools panel takes the slot while it is open, whatever the sidebar was showing
+  if (tools) return <AllToolsPanel doc={doc} />;
   if (panel === "none") return null;
   return (
     <aside className="sidebar">

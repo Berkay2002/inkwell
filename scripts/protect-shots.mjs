@@ -78,9 +78,9 @@ report.file = path.basename(docPath);
 // The Tools menu with the new entries, then the sheet as it opens.
 await click('button[aria-label="Tools"]');
 await sleep(200);
-report.menuItems = await ev(`[...document.querySelectorAll('.ink-menu [role=menuitem], .ink-menu [role=option]')].map((e) => e.textContent.trim())`);
+report.menuItems = await ev(`[...document.querySelectorAll('.tools-panel .tool-name')].map((e) => e.textContent.trim())`);
 await shot("tools-menu-light.png", 150);
-await click(".ink-menu [role=menuitem], .ink-menu [role=option]", "Protect with a password…");
+await click(".tools-panel .tool-name", "Protect with a password");
 await sleep(500);
 report.opened = await ev(`${P}.getState().sheet?.view`);
 await both("protect-empty");

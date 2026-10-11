@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Size } from "./layout";
+import type { FindOpts, Found } from "./searchLogic";
 
 export interface OpenInfo {
   doc: number;
@@ -29,8 +30,42 @@ export interface TextLine {
 }
 
 export type SearchEvent =
-  | { kind: "hits"; search: number; page: number; rects: [number, number, number, number][] }
-  | { kind: "done"; search: number; hits: number; pages: number };
+  | { kind: "hits"; search: number; page: number; hits: Found[] }
+  | { kind: "progress"; search: number; scanned: number; total: number }
+  /** `capped`: the search stopped at 5000 hits; the ones listed are the first. */
+  | { kind: "done"; search: number; hits: number; pages: number; capped: boolean };
+
+/** What a search across files reports (src-tauri/src/search/files.rs). */
+export type FilesEvent =
+  /** The search exists: this id cancels it, even while the folder is still being listed. */
+  | { kind: "started"; search: number }
+  | {
+      kind: "file";
+      search: number;
+      index: number;
+      path: string;
+      name: string;
+      pageCount: number;
+      hits: number;
+      pages: number;
+      truncated: boolean;
+      items: (Found & { page: number })[];
+    }
+  | { kind: "progress"; search: number; scanned: number; total: number }
+  | {
+      kind: "done";
+      search: number;
+      files: number;
+      matched: number;
+      hits: number;
+      skipped: number;
+      /** PDFs left unread because they are only in the cloud (OneDrive placeholders). */
+      cloudOnly: number;
+      cancelled: boolean;
+      capped: boolean;
+    };
+
+export type SearchScope = { kind: "folder"; token: string; recursive: boolean } | { kind: "files"; tokens: string[] };
 
 export interface EngineStats {
   cacheBytes: number;
@@ -53,7 +88,7 @@ export interface FileRef {
 }
 
 /** Open dialog (run by Rust). */
-export const pickOpen = (multiple: boolean, title?: "locate" | "compare") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
+export const pickOpen = (multiple: boolean, title?: "locate" | "compare" | "search") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
 /** What a save dialog filters for; PDF unless told otherwise. */
 export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "any";
 /** Save dialog (run by Rust) in the folder of document `doc` or of open token `near`, with file name `name`. */
@@ -91,11 +126,24 @@ export function pageSizes(doc: number, onChunk: (start: number, sizes: Size[]) =
   return invoke<void>("page_sizes", { doc, onChunk: ch });
 }
 
-export function search(doc: number, query: string, onEvent: (e: SearchEvent) => void) {
+export function search(doc: number, query: string, opts: FindOpts, onEvent: (e: SearchEvent) => void) {
   const ch = new Channel<SearchEvent>();
   ch.onmessage = onEvent;
-  return invoke<number>("search", { doc, query, onEvent: ch });
+  return invoke<number>("search", { doc, query, opts, onEvent: ch });
 }
+
+/** Folder dialog (run by Rust) for search across files; the token names the folder to read. */
+export const pickSearchFolder = () => invoke<FileRef | null>("pick_search_folder");
+
+/** Starts a search of several files; resolves with the search id once it is running. */
+export function searchFiles(scope: SearchScope, query: string, opts: FindOpts, onEvent: (e: FilesEvent) => void) {
+  const ch = new Channel<FilesEvent>();
+  ch.onmessage = onEvent;
+  return invoke<number>("search_files", { scope, query, opts, onEvent: ch });
+}
+export const cancelSearchFiles = (search: number) => invoke<void>("cancel_search_files", { search });
+/** An open token for file `index` of search `search` (a result being opened); the path never reaches the page. */
+export const searchFileToken = (search: number, index: number) => invoke<FileRef>("search_file_token", { search, index });
 
 /** Origin of the tile protocol: WebView2 serves custom schemes as http://<scheme>.localhost. */
 export const TILE_ORIGIN = navigator.userAgent.includes("Windows") ? "http://inkwell.localhost" : "inkwell://localhost";

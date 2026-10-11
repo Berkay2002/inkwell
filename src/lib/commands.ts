@@ -4,6 +4,7 @@ import { readViewerSelection, useAi } from "./aiStore";
 import { openA11y, useA11y } from "./a11y";
 import { openPreflight, usePreflight } from "./preflight";
 import { useRedact } from "./redact";
+import { useSearch } from "./searchStore";
 import { useAnnot } from "./annot";
 import { useForms } from "./forms";
 import { useHistory } from "./historyStore";
@@ -180,6 +181,27 @@ export const commands: Command[] = [
     keys: ["Shift+F3"],
     needsDoc: true,
     run: withDoc((d) => st().stepHit(d.id, -1)),
+  },
+  {
+    id: "search-advanced",
+    title: "Advanced search",
+    keys: ["Ctrl+Shift+F"],
+    needsDoc: true,
+    run: () => {
+      const s = useSearch.getState();
+      s.setOpen(true);
+      document.querySelector<HTMLInputElement>('.sr-field input')?.focus();
+    },
+  },
+  {
+    id: "search-folder",
+    title: "Search in a folder…",
+    needsDoc: true,
+    run: () => {
+      const s = useSearch.getState();
+      s.setScope("folder");
+      s.setOpen(true);
+    },
   },
   { id: "goto", title: "Go to page…", keys: ["Ctrl+G"], needsDoc: true, run: focusPageInput },
   {

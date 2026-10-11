@@ -24,6 +24,7 @@ Sources: pdfcraft ROADMAP.md (area breadth/ready %), acrobat-features.toml ids, 
 | Print | L 39.7/35; no Windows printing (#756) | No print code found | Whole area |
 | Accessibility | M 63.1/30; checker, alt text, title | None; sanitize.rs only strips alt text | Whole area |
 | Command palette | view.command-palette, misc.command-registry shipped | Overlays.tsx:15 CommandPalette; commands.ts registry | Command set parity |
+| All tools | Acrobat's All tools view: search, groups, favourites | All tools side panel with synonym search, Recent chips, three pinned toolbar buttons, hover cards, Home grid, palette subtitles (docs/tools-panel.md) | Per-document recommendations |
 | AI/agent | N 30.0/35; MCP, 141 tools; AI providers planned | ai/ (Codex app-server, chat, tools.rs); assistant panel | Local providers |
 
 ## Crate fit (deps from Cargo.toml, scope from lib.rs headers)
