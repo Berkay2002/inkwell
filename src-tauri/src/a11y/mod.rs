@@ -7,7 +7,7 @@
 //! The rules, which are automatic and which manual, and the gaps are in docs/a11y.md.
 
 use crate::engine::edit::{EditSource, EditState};
-use crate::engine::{DocId, Engine, EngineError};
+use crate::engine::{DocId, DocSource, Engine, EngineError};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -893,9 +893,23 @@ pub fn apply_fix(doc: &mut PdfDocument, fix: &Fix, file_stem: &str) -> Result<Ve
 
 // ---- engine entry points -------------------------------------------------------------------------
 
-/// Checks the document as it is now (unsaved edits included), on the edit lane.
+/// Checks the document as it is now (unsaved edits included). Reads its own copy of the current
+/// generation (the published snapshot, or the file before any edit), so edits are not held up
+/// while it runs. `cancel` is polled between pages.
 pub fn check_doc(eng: &Engine, doc: DocId, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Report> {
-    eng.read_custom(doc, |d| check(d, progress, cancel))
+    let (_, source) = eng.doc_source(doc)?;
+    let mut d = match &source {
+        DocSource::Path(p) => PdfDocument::open(p.as_str())?,
+        DocSource::Bytes(b, n) => PdfDocument::from_bytes(&b[..*n])?,
+    };
+    if d.needs_password()? {
+        match eng.password(doc)? {
+            Some(p) if d.authenticate(&p)? => {}
+            Some(_) => return Err(EngineError::BadPassword),
+            None => return Err(EngineError::NeedsPassword),
+        }
+    }
+    check(&d, progress, cancel)
 }
 
 /// Applies one fix as one undo step.
