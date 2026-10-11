@@ -1,6 +1,7 @@
 pub mod a11y;
 pub mod ai;
 pub mod annot;
+pub mod batch;
 pub mod forms;
 pub mod compress;
 pub mod convert;
@@ -956,6 +957,14 @@ pub fn run() {
             marks::app::marks_remove,
             marks::app::marks_bates_files,
             tool_cancel,
+            batch::app::batch_list,
+            batch::app::batch_save,
+            batch::app::batch_delete,
+            batch::app::batch_import,
+            batch::app::batch_export,
+            batch::app::batch_validate,
+            batch::app::batch_run,
+            batch::app::batch_cancel,
             ocr_languages,
             ocr_choose_tesseract,
             ocr_clear_tesseract,
@@ -1078,6 +1087,7 @@ pub fn run() {
                 app.state::<Paths>().learn_recents(&json);
             }
             app.manage(Arc::new(tools::paths::ToolPaths::load(app.handle())));
+            batch::app::sweep_at_startup(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())
