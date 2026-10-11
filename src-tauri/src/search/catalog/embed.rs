@@ -98,8 +98,8 @@ impl Feed {
         });
     }
 
-    /// The Form XObjects and tiling patterns under `res` (they can show text) and the fonts' `/ToUnicode` maps
-    /// (they decide what a glyph reads as). `None`: too deep or over the budget, so the file is not vouched for.
+    /// The Form XObjects and tiling patterns under `res` (they can show text) and the fonts' `/Encoding` and
+    /// `/ToUnicode` (they decide what a glyph reads as). `None`: too deep or over the budget, so the file is not vouched for.
     fn resources(&mut self, res: &PdfObject, depth: u32, seen: &mut HashSet<i32>) -> Option<()> {
         if depth > DEPTH {
             return None;
@@ -109,6 +109,10 @@ impl Feed {
             for i in 0..d.dict_len().ok()? as i32 {
                 let Some(o) = d.get_dict_val(i).ok().flatten() else { continue };
                 let (stream, nested) = if cat == "Font" {
+                    // The encoding (a name, or a dict with /Differences) decides what a code reads as.
+                    if let Some(e) = o.get_dict("Encoding").ok().flatten().and_then(|e| e.resolve().ok().flatten()) {
+                        self.h.update(e.to_string().as_bytes());
+                    }
                     (o.get_dict("ToUnicode").ok().flatten(), false)
                 } else {
                     let form = cat == "Pattern" || o.get_dict("Subtype").ok().flatten().and_then(|n| n.as_name().ok().map(|n| n == b"Form")) == Some(true);

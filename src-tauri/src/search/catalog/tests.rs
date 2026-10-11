@@ -451,6 +451,21 @@ fn text_only_in_a_form_xobject_is_part_of_the_fingerprint() {
 }
 
 #[test]
+fn a_font_encoding_change_is_part_of_the_fingerprint() {
+    let base = dir("catalog-fp-encoding");
+    let p = write(&base, "a.pdf", form_text_pdf("encoded words"));
+    embed_and_save(&p);
+    assert!(current(&p));
+    let doc = PdfDocument::open(&*p).unwrap();
+    let mut font = doc.find_page(0).unwrap().get_dict("Resources").unwrap().unwrap().get_dict("XObject").unwrap().unwrap().get_dict("Fm0").unwrap().unwrap()
+        .get_dict("Resources").unwrap().unwrap().get_dict("Font").unwrap().unwrap().get_dict("F1").unwrap().unwrap();
+    font.dict_put("Encoding", PdfObject::new_name("MacRomanEncoding").unwrap()).unwrap();
+    let b = base.join("b.pdf");
+    doc.save(&b.to_string_lossy()).unwrap();
+    assert!(!current(&b), "the same codes read as other letters under another encoding");
+}
+
+#[test]
 fn a_field_value_kept_on_the_parent_is_part_of_the_fingerprint() {
     let base = dir("catalog-fp-parent");
     let extra = Extra {
