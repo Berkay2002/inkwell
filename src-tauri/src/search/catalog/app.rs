@@ -118,7 +118,10 @@ pub(super) fn forget_deferred(jobs: &Jobs, id: &str, dir: &std::path::Path) {
                         }
                     }
                     if let Err(e) = super::settle_pending(dir, &done) {
+                        // The list still names what was forgotten: looking again would find the same, so the next
+                        // hold does (a forget is safe to repeat).
                         eprintln!("inkwell catalog {id}: {e}");
+                        return;
                     }
                 }
             }

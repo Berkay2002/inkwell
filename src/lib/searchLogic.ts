@@ -275,6 +275,8 @@ export function buildLine(b: { files: number; added: number; changed: number; re
   if (b.added) head.push(`${b.added} new`);
   if (b.changed) head.push(`${b.changed} changed`);
   if (b.removed) head.push(`${b.removed} removed`);
-  const bad = b.damaged + b.password + (b.tooLarge ?? 0);
-  return head.join(", ") + (bad ? `; ${bad} could not be read` : "");
+  const bad = b.damaged + b.password;
+  const big = b.tooLarge ?? 0;
+  const left = [...(bad ? [`${bad} could not be read`] : []), ...(big ? [`${big} too large to index`] : [])];
+  return head.join(", ") + (left.length ? `; ${left.join(", ")}` : "");
 }

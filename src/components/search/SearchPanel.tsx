@@ -186,7 +186,7 @@ function FolderResults({ query }: { query: string }) {
       )}
       {!run.running && run.skipped > 0 && (
         <p className="sr-note">
-          {run.skipped} {run.skipped === 1 ? "file" : "files"} could not be read (damaged, or protected with a password).
+          {run.skipped} {run.skipped === 1 ? "file" : "files"} could not be read (damaged, protected with a password, or too large to index).
         </p>
       )}
       {!run.running && run.stale > 0 && <p className="sr-note">{staleResultsLine(run.stale)}</p>}
