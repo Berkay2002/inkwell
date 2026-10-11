@@ -1,3 +1,4 @@
+// Adapted from pdfcraft (MIT OR Apache-2.0), crates/edit/src/text.rs @ b8ddf71
 //! Setting text: the faces a rewrite writes in (the document's own fonts, standard 14 fonts and
 //! the bundled faces, embedded as subsets), the glyph items a block is made of, wrapping them into
 //! lines, and writing the lines as operators.
@@ -11,7 +12,7 @@
 //! over their spaces with TJ adjustments, which works for one- and two-byte fonts alike.
 
 use super::bundled::{self, Subset};
-use super::content::{Obj, Op, num};
+use super::content::{Obj, Op, Pieces, num};
 use super::font::{Metrics, STD14};
 use super::text::{Align, Fallback, Run};
 use crate::engine::EngineError;
@@ -252,6 +253,11 @@ impl<'a> Setter<'a> {
             return Ok(i);
         }
         let font = Font::new(name)?;
+        // One the page already has from an earlier edit.
+        if let Some(res) = self.find_std(name)? {
+            self.faces.push(Face::Std { res, font, name });
+            return Ok(self.faces.len() - 1);
+        }
         let res = self.free_name("IwEd")?;
         let mut f = self.doc.new_dict()?;
         f.dict_put("Type", PdfObject::new_name("Font")?)?;
@@ -264,6 +270,25 @@ impl<'a> Setter<'a> {
         Ok(self.faces.len() - 1)
     }
 
+    /// The page's `IwEd<n>` entry for standard font `name`, if an earlier edit added one.
+    fn find_std(&mut self, name: &str) -> Result<Option<Vec<u8>>> {
+        let fonts = self.font_dict()?;
+        let is = |o: &PdfObject, k: &str, v: &str| get(o, k).and_then(|n| n.as_name().ok()).as_deref() == Some(v.as_bytes());
+        for i in 0..fonts.dict_len()? as i32 {
+            let (Some(k), Some(v)) = (fonts.get_dict_key(i)?, fonts.get_dict_val(i)?) else { continue };
+            let k = k.as_name()?;
+            if k.starts_with(b"IwEd")
+                && !self.faces.iter().any(|f| f.res() == k.as_slice())
+                && is(&v, "Subtype", "Type1")
+                && is(&v, "BaseFont", name)
+                && is(&v, "Encoding", "WinAnsiEncoding")
+            {
+                return Ok(Some(k));
+            }
+        }
+        Ok(None)
+    }
+
     /// A bundled face (embedded by [`Setter::finish`]).
     pub fn bundled_face(&mut self, idx: usize) -> Result<usize> {
         if let Some(i) = self.faces.iter().position(|f| matches!(f, Face::Bundled { idx: x, .. } if *x == idx)) {
@@ -273,6 +298,20 @@ impl<'a> Setter<'a> {
         let font = bundled::load(idx)?;
         self.faces.push(Face::Bundled { idx, res, subset: Subset::default(), font });
         Ok(self.faces.len() - 1)
+    }
+
+    /// Bundled face `idx` if it has a glyph for any of `chars`.
+    fn bundled_covering(&mut self, idx: usize, chars: &[char]) -> Result<Option<usize>> {
+        if let Some(i) = self.faces.iter().position(|f| matches!(f, Face::Bundled { idx: x, .. } if *x == idx)) {
+            return Ok(chars.iter().any(|c| self.faces[i].has(*c)).then_some(i));
+        }
+        let font = bundled::load(idx)?;
+        if !chars.iter().any(|c| bundled::glyph(&font, *c).is_some()) {
+            return Ok(None);
+        }
+        let res = self.free_name("IwNoto")?;
+        self.faces.push(Face::Bundled { idx, res, subset: Subset::default(), font });
+        Ok(Some(self.faces.len() - 1))
     }
 
     /// A face from a font picker id: `doc:<object>`, `res:<resource name>`, `std:<name>` or
@@ -349,9 +388,9 @@ impl<'a> Setter<'a> {
         // Kept text: the source glyphs as they were, kerning included.
         if let (None, Some(src), true) = (&spec.text, spec.source, spec.own_font) {
             for g in &src.glyphs {
+                // A gap read as a space stays the gap it was (its kerning holds the rest of it).
                 let kind = if g.bytes.is_empty() {
-                    out.push(Item { kern: g.kern, ..self.space(spec.primary, base_style) });
-                    continue;
+                    Kind::Space(None)
                 } else if g.space {
                     Kind::Space(Some(g.bytes.clone()))
                 } else {
@@ -370,11 +409,12 @@ impl<'a> Setter<'a> {
         } else if missing.iter().all(|c| win_ansi_byte(*c).is_some()) && !matches!(self.faces[spec.primary], Face::Std { .. }) {
             Some(self.std_face(STD14[spec.family][spec.bold as usize + 2 * spec.italic as usize])?)
         } else {
-            Some(self.bundled_face(bundled::latin(spec.family == 0, spec.bold, spec.italic))?)
+            // The bundled Latin face, if it has any of them (CJK goes to the CJK face below).
+            self.bundled_covering(bundled::latin(spec.family == 0, spec.bold, spec.italic), &missing)?
         };
         if let Some(fb) = fallback {
             let what = self.faces[spec.primary].name();
-            let c = missing[0];
+            let c = missing.iter().copied().find(|c| self.faces[fb].has(*c)).unwrap_or(missing[0]);
             let subset = matches!(&self.faces[spec.primary], Face::Doc { m, .. } if m.subset);
             let reason = match (spec.own_font, subset) {
                 (true, true) => format!("the embedded subset of {what} has no glyph for '{c}'"),
@@ -438,6 +478,10 @@ impl<'a> Setter<'a> {
         let r = (|| {
             for f in &faces {
                 if let Face::Bundled { idx, res, subset, font } = f {
+                    // A face nothing was set in (picked, but every character went elsewhere).
+                    if subset.is_empty() {
+                        continue;
+                    }
                     let font = bundled::embed(self.doc, *idx, font, subset)?;
                     self.font_dict()?.dict_put(String::from_utf8_lossy(res).as_ref(), font)?;
                 }
@@ -447,6 +491,48 @@ impl<'a> Setter<'a> {
         self.faces = faces;
         r
     }
+}
+
+/// Removes the fonts edits added to page `page` (`IwEd`, `IwNoto`, `IwDoc` names) that its
+/// content no longer sets, so a replaced subset goes with the next full save. The page's
+/// resources and `/Font` dict are copied onto it first (shallowly), so pages that share them
+/// keep theirs.
+pub(crate) fn forget_unused_fonts(doc: &mut PdfDocument, page: u32) -> Result<()> {
+    let page = &doc.find_page(page as i32)?;
+    let ours = |n: &[u8]| [&b"IwEd"[..], b"IwNoto", b"IwDoc"].iter().any(|p| n.starts_with(p));
+    let Some(fonts) = page.get_dict_inheritable("Resources")?.and_then(|r| get(&r, "Font")) else { return Ok(()) };
+    let mut gone = Vec::new();
+    for i in 0..fonts.dict_len()? as i32 {
+        if let Some(k) = fonts.get_dict_key(i)? {
+            let k = k.as_name()?;
+            if ours(&k) {
+                gone.push(k);
+            }
+        }
+    }
+    if gone.is_empty() {
+        return Ok(());
+    }
+    let streams = super::text::page_streams(page)?;
+    let ops = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>()).parse();
+    let used: std::collections::HashSet<&[u8]> = ops.iter().filter(|o| o.is("Tf")).filter_map(|o| o.name(0)).collect();
+    gone.retain(|n| !used.contains(n.as_slice()));
+    if gone.is_empty() {
+        return Ok(());
+    }
+    let mut page = page.clone();
+    let res = match page.get_dict_inheritable("Resources")? {
+        Some(r) if r.is_dict()? => r.copy_dict()?,
+        _ => doc.new_dict()?,
+    };
+    page.dict_put("Resources", res)?;
+    let mut res = get(&page, "Resources").ok_or_else(|| invalid("the page has no resources"))?;
+    res.dict_put("Font", fonts.copy_dict()?)?;
+    let mut fonts = get(&res, "Font").ok_or_else(|| invalid("the page has no fonts"))?;
+    for n in gone {
+        fonts.dict_delete(String::from_utf8_lossy(&n).as_ref())?;
+    }
+    Ok(())
 }
 
 /// A line of items and whether it ends a paragraph.

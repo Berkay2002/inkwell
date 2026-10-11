@@ -334,18 +334,19 @@ pub fn fonts(eng: &Engine, doc: DocId) -> Result<Vec<FontInfo>> {
             let Some(fonts) = page.get_dict_inheritable("Resources")?.and_then(|r| r.get_dict("Font").ok().flatten()) else { continue };
             for i in 0..fonts.dict_len()? as i32 {
                 let (Some(k), Some(v)) = (fonts.get_dict_key(i)?, fonts.get_dict_val(i)?) else { continue };
+                // A font object is one entry for all pages; a direct dict is named on its page only.
                 let id = match v.is_indirect()? {
                     true => format!("doc:{}", v.as_indirect()?),
                     false => format!("res:{}", String::from_utf8_lossy(&k.as_name()?)),
                 };
-                if let Some(f) = out.iter_mut().find(|f| f.id == id) {
+                if let Some(f) = out.iter_mut().find(|f| f.id == id && (id.starts_with("doc:") || f.pages == [p as u32])) {
                     if !f.pages.contains(&(p as u32)) {
                         f.pages.push(p as u32);
                     }
                     continue;
                 }
                 let Some(dict) = v.resolve()?.filter(|o| o.is_dict().unwrap_or(false)) else { continue };
-                let m = font::Metrics::from_dict(&dict);
+                let m = font::Metrics::summary(&dict);
                 let name = match m.base_font.split_once('+') {
                     Some((t, rest)) if t.len() == 6 => rest.to_string(),
                     _ => m.base_font.clone(),
@@ -359,7 +360,7 @@ pub fn fonts(eng: &Engine, doc: DocId) -> Result<Vec<FontInfo>> {
                     kind: "document",
                     embedded: m.embedded,
                     subset: m.subset,
-                    usable: m.limit.is_none() && m.has_to_unicode,
+                    usable: m.usable,
                     pages: vec![p as u32],
                 });
             }

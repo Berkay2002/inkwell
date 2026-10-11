@@ -169,6 +169,11 @@ impl Subset {
         self.remapper.get(g).unwrap_or(0).to_be_bytes().to_vec()
     }
 
+    /// Whether no glyph was used.
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
     /// The new glyph ids in use.
     fn glyphs(&self) -> Vec<(u16, u16, &str)> {
         self.text.iter().filter_map(|(old, t)| Some((*old, self.remapper.get(*old)?, t.as_str()))).collect()

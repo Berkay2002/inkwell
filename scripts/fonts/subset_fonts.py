@@ -33,7 +33,7 @@ def cjk_chars(path):
 
 
 def subset(src, dst, *args):
-    subprocess.run(["pyftsubset", src, f"--output-file={dst}", "--layout-features=", "--no-hinting", *args], check=True)
+    subprocess.run(["pyftsubset", src, f"--output-file={dst}", "--layout-features=", "--no-hinting", "--name-IDs=*", *args], check=True)
 
 
 def main():

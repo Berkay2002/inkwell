@@ -15,7 +15,7 @@
 
 use super::content::{Matrix, Obj, Op, Pieces, num, serialize_ops};
 use super::font::{Limit, Metrics};
-use super::layout::{Face, Measure, Placement, RunSpec, Setter, emit, family_of, restyled_face, wrap};
+use super::layout::{Face, Measure, Placement, RunSpec, Setter, emit, family_of, forget_unused_fonts, restyled_face, wrap};
 use crate::engine::EngineError;
 use mupdf::Buffer;
 use mupdf::pdf::{PdfDocument, PdfObject};
@@ -665,11 +665,12 @@ fn interpret(
                                 let space = m.is_space(code, len);
                                 let w = m.width(code) * ts.size + ts.char_spacing + if space { ts.word_spacing } else { 0.0 };
                                 x_text += w * ts.scale;
-                                let ws = if space && ts.size.abs() > 1e-9 { ts.word_spacing * 1000.0 / ts.size } else { 0.0 };
+                                // The glyph's own advance: a rewrite sets Tw 0 and spreads
+                                // justified lines itself.
                                 glyphs.push(Glyph {
                                     bytes: s[at..(at + len).min(s.len())].to_vec(),
                                     text: t.unwrap_or_default().to_string(),
-                                    w: m.width(code) * 1000.0 + ws,
+                                    w: m.width(code) * 1000.0,
                                     kern: std::mem::take(&mut kern),
                                     space: space || t == Some(" "),
                                 });
@@ -1290,16 +1291,45 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         }
     }
     let at = if split { start } else { o.bt_op };
+    // An earlier edit's own `q … MP BT … ET Q` whose text all goes, goes whole: its Tf, colour
+    // and moves too, so the fonts it named are no longer set anywhere.
+    let whole = edited_objects(&pc.ops, &drop);
     let new_data = splice(&pc.pieces, &pc.ops, |i| {
         let mut insert = if i == at { std::mem::take(&mut block_ops) } else { Vec::new() };
-        let keep = !drop.contains(&i);
-        if !keep {
+        let keep = !drop.contains(&i) && !whole.contains(&i);
+        if !keep && !whole.contains(&i) {
             insert.extend(stand_in(&pc, i));
         }
         (insert, keep)
     });
     write_contents(doc, &pc, new_data)?;
+    forget_unused_fonts(doc, page)?;
     Ok(fallbacks)
+}
+
+/// The operators of the edited text objects (`q [cm] /TouchUp_TextEdit MP BT … ET Q`, as
+/// [`rewrite_block`] and [`add_text`] write them) whose every show operator is in `drop`.
+fn edited_objects(ops: &[Op], drop: &HashSet<usize>) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    for (i, op) in ops.iter().enumerate() {
+        if !(op.is("MP") && op.name(0) == Some(b"TouchUp_TextEdit".as_slice()) && ops.get(i + 1).is_some_and(|o| o.is("BT"))) {
+            continue;
+        }
+        let q = match i.checked_sub(1).map(|j| &ops[j]) {
+            Some(o) if o.is("q") => i - 1,
+            Some(o) if o.is("cm") && i >= 2 && ops[i - 2].is("q") => i - 2,
+            _ => continue,
+        };
+        let Some(et) = ops[i + 2..].iter().position(|o| o.is("ET") || o.is("BT")).map(|p| i + 2 + p) else { continue };
+        if !ops[et].is("ET") || !ops.get(et + 1).is_some_and(|o| o.is("Q")) {
+            continue;
+        }
+        let shows = (i + 2..et).filter(|&j| matches!(ops[j].op.as_slice(), b"Tj" | b"TJ" | b"'" | b"\""));
+        if shows.clone().count() > 0 && shows.into_iter().all(|j| drop.contains(&j)) {
+            out.extend(q..=et + 1);
+        }
+    }
+    out
 }
 
 /// New text for [`add_text`].

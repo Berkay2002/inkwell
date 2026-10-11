@@ -762,3 +762,105 @@ fn justified_paragraphs_rewrap_and_stay_justified() {
     let t = text(&eng, id);
     assert!(t.replace(' ', "").contains(&longer.replace(' ', "")), "{t}");
 }
+
+/// The names in page 1's /Font dict of a saved file.
+fn saved_font_names(path: &str) -> Vec<String> {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    let fonts = doc.find_page(0).unwrap().get_dict_inheritable("Resources").unwrap().unwrap().get_dict("Font").unwrap().unwrap();
+    (0..fonts.dict_len().unwrap() as i32)
+        .map(|i| String::from_utf8_lossy(&fonts.get_dict_key(i).unwrap().unwrap().as_name().unwrap()).into_owned())
+        .collect()
+}
+
+#[test]
+fn word_spacing_of_the_source_is_not_counted_twice() {
+    let d = dir("tw");
+    // Two lines justified with Tw: both 100 pt wide (each 64.704 pt of glyphs and two spaces).
+    let content = "BT /F1 12 Tf 17.648 Tw 14 TL 72 700 Td (aaa bbb ccc) Tj T* (ccc bbb aaa) Tj ET";
+    let (eng, id, path) = open(&d, &pdf(content, &[("F1", HELV)], &[]));
+    let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(b.align, Align::Justify, "{b:?}");
+    assert!(b.lines.iter().all(|l| (l[2] - l[0] - 100.0).abs() < 0.1), "{:?}", b.lines);
+    // A colour change re-sets the kept runs with Tw 0: the free width goes back over the spaces.
+    let ch = BlockChange { color: Some([0.0, 0.0, 1.0]), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &ch, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert_eq!(text(&eng, id), "aaa bbb ccc ccc bbb aaa");
+    let a = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    // Without Tw the first line takes four words, spread to the full 100 pt.
+    assert_eq!(a.lines.len(), 2, "{:?}", a.lines);
+    assert!((a.lines[0][0] - 72.0).abs() < 0.1 && (a.lines[0][2] - 172.0).abs() < 0.6, "{:?}", a.lines);
+    // Right-aligned, the lines end at the box's right edge.
+    let ch = BlockChange { align: Some(Align::Right), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &ch, EditSource::User).unwrap();
+    let r = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert!(r.lines.iter().all(|l| (l[2] - 172.0).abs() < 0.6), "{:?}", r.lines);
+}
+
+#[test]
+fn a_gap_read_as_a_space_keeps_its_width() {
+    let d = dir("gap");
+    let content = "BT /F1 12 Tf 72 700 Td [(Hello) -600 (world)] TJ ET";
+    let (eng, id, path) = open(&d, &pdf(content, &[("F1", HELV)], &[]));
+    let before = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(before.text, "Hello world");
+    let ch = BlockChange { color: Some([1.0, 0.0, 0.0]), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &ch, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let after = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(after.text, "Hello world");
+    assert!((after.rect[2] - before.rect[2]).abs() < 0.01, "{:?} -> {:?}", before.rect, after.rect);
+    // Still a gap, not Helvetica's space: -250 for the space and -350 left of it.
+    let shows =
+        |o: &content::Op| matches!(o.operands.first(), Some(content::Obj::Array(a)) if a.iter().any(|x| matches!(x, content::Obj::Str(_))));
+    let tj: Vec<_> = saved_ops(&path).into_iter().filter(|o| o.is("TJ") && shows(o)).collect();
+    let nums: f64 = tj
+        .iter()
+        .flat_map(|o| match o.operands.first() {
+            Some(content::Obj::Array(a)) => a.iter().filter_map(content::Obj::as_f64).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .sum();
+    assert!((nums + 600.0).abs() < 0.01, "{tj:?}");
+}
+
+#[test]
+fn cjk_only_text_falls_back_to_the_cjk_face_alone() {
+    let d = dir("cjk-only");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let r = set_text(&eng, id, 0, "你好 世界");
+    let fonts: Vec<&str> = r.fallbacks.iter().map(|f| f.font.as_str()).collect();
+    assert_eq!(fonts, ["NotoSansCJKsc-Regular"]);
+    assert!(r.fallbacks[0].reason.contains("Helvetica"), "{:?}", r.fallbacks);
+    eng.save(id, None).unwrap();
+    let embedded = saved_fonts(&path);
+    assert!(embedded.iter().all(|f| !f.0.contains("+NotoSans-")), "no empty Noto Sans subset: {embedded:?}");
+    assert_eq!(embedded.len(), 1, "{embedded:?}");
+}
+
+#[test]
+fn edits_again_leave_no_unused_fonts_behind() {
+    let d = dir("no-orphan-fonts");
+    let (eng, id, path) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    for t in ["你好", "世界 Ωμέγα", "再见"] {
+        set_text(&eng, id, 0, t);
+    }
+    // Italic Helvetica is not on the page: a standard face, added once and reused.
+    for t in ["one", "two"] {
+        let runs = vec![RunChange { text: Some(t.into()), source: Some(0), italic: Some(true), ..Default::default() }];
+        edit(&eng, id, rev(&eng, id), 0, 1, &BlockChange { runs: Some(runs), ..Default::default() }, EditSource::User).unwrap();
+    }
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let mut names = saved_font_names(&path);
+    names.sort();
+    assert_eq!(names, ["F1", "IwEd0", "IwNoto0"], "only what the content sets");
+    let embedded = saved_fonts(&path);
+    assert_eq!(embedded.len(), 1, "one CJK subset, the last one: {embedded:?}");
+    let (eng, id) = reopen(&path);
+    assert_eq!(text(&eng, id), "再见 two");
+}

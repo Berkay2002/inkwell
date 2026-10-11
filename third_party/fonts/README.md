@@ -11,7 +11,8 @@ glyphs a block uses are embedded into the PDF (a runtime subset, Type0/Identity-
 | NotoSansCJK-Regular.otf | notofonts/noto-cjk `Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf` @ f8d1575 (2.004) | OFL 1.1, `OFL-NotoSansCJK.txt` |
 
 The files are subsets made at build time (by a developer, committed) with `scripts/fonts/subset_fonts.py`
-(fontTools `pyftsubset`, no hinting, no layout tables):
+(fontTools `pyftsubset`, no hinting, no layout tables; the `name` table is kept whole, so each file carries
+its copyright and licence records):
 
 - Noto Sans and Noto Sans Mono: Latin (Basic to Extended-B, IPA, Latin Extended Additional), combining marks,
   Greek, Cyrillic, punctuation, currency, letterlike symbols, number forms, arrows, mathematical operators,
@@ -23,3 +24,6 @@ The files are subsets made at build time (by a developer, committed) with `scrip
 
 Total: 3.5 MB in the executable. Text outside these sets (rare Han ideographs, other scripts) is refused with a
 message naming the first character no bundled face has.
+
+The licence files ship with the app: `src-tauri/tauri.conf.json` bundles them as resources under `licenses/`
+(with `third_party/THIRD-PARTY-NOTICES.txt`, which lists them).

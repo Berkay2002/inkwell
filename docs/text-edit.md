@@ -28,9 +28,11 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
   no new text and no font or style change keeps its glyphs exactly, kerning included. Block-level `size` scales every
   run (the first run gets that size); `color`, `bold` and `italic` apply to every run without its own.
 - `FontInfo = { id, name, family, bold, italic, kind: document|standard|bundled, embedded, subset, usable, pages }`.
-  Ids: `doc:<object>` (a document font, named on the page when first used there), `res:<name>` (a font written into
-  a page's resources directly), `std:<name>` (standard 14), `bundled:<id>` (Noto faces). `usable` is false for Type 3,
-  predefined-CMap and unreadable fonts; `subset` warns that typed text may fall back.
+  Ids: `doc:<object>` (a document font, one entry for all its pages, named on the page when first used there),
+  `res:<name>` (a font written into a page's resources directly: one entry per page, valid on that page only),
+  `std:<name>` (standard 14), `bundled:<id>` (Noto faces). `usable` is false for Type 3, predefined-CMap, vertical and
+  unreadable fonts; `subset` warns that typed text may fall back. The list reads only the font dicts (`/BaseFont`,
+  `/Subtype`, `/Encoding`, the descriptor's flags and font file keys), never a font program or CMap.
 - `index` belongs to the `rev` of the list it came from; a `text_edit` against an older `rev` is `Stale` (list again).
 - Each `text_edit` is one edit-core step (`Engine::apply_removing`): one undo step labelled "Edit text on p. N",
   "Format text …", "Move text …" or "Resize text box …", kept by Save, recorded in history. A document with text
@@ -60,28 +62,37 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
    positioned with `Td` from the block's left edge in its text space; `center/right` offset each line; `justify`
    spreads the free width over the line's spaces with `TJ` adjustments (any font, one- or two-byte). The content is
    laid out as glyph items (`layout.rs`): an unchanged run's own codes and kerning, new text encoded per character.
+   The new object sets `Tw 0`: a kept space has its glyph's own width (the source's word spacing is not added to it),
+   and a `TJ` gap that read as a space stays a gap of the same total width (¼ em plus the rest as kerning).
    Words wrap at spaces, CJK text between any two characters, `\n` breaks a paragraph; a line with a larger run sits
    lower in proportion. Each style change writes `Tf` and the fill colour; each stretch of one style is one `TJ`. Each removed show operator is replaced by a stand-in with
    the same moves and no painting: a numeric-only `TJ` advancing the text matrix by the removed text's width, after
    `T*` for a `'` (and `Tw Tc T*` for a `"`), so text after it in the same object stays put. When the object is split,
    it is reopened at the removed operator's line and position. Everything else in the stream is copied byte for
-   byte. Changed streams become new Flate streams (a content stream may be shared with another page); the page's
+   byte. An earlier edit's own object (`q … /TouchUp_TextEdit MP BT … ET Q`) whose text all goes is removed whole,
+   its `Tf` and colour included. Changed streams become new Flate streams (a content stream may be shared with another page); the page's
    `/Contents` points at them.
 4. **Fonts.** A run's font is kept for every character it has a code (reverse ToUnicode/encoding) and a glyph for:
    a code with a zero width is missing, and for a subset simple font the embedded program (loaded by MuPDF) must have
    the glyph. A font without a space code (TeX) places words apart with `TJ` gaps of ¼ em. The characters a run's font
    lacks go to one fallback for the run: the matching standard 14 font (Courier/Times/Helvetica by the base name, with
    bold/italic) as a non-embedded WinAnsi Type1 when WinAnsi can show them all, else the bundled Noto Sans (or Noto
-   Sans Mono for monospaced runs, in the run's style) and, for what that lacks, Noto Sans CJK. Bold or italic without a
+   Sans Mono for monospaced runs, in the run's style) if it has any of them, and, for what that lacks, Noto Sans CJK
+   (CJK-only text goes straight to the CJK face, and only the faces something was set in are embedded and reported). Bold or italic without a
    font asks first for a font of the same family and style already on the page, then the standard face. Bundled faces
    are embedded per rewrite with only the glyphs used (`bundled.rs`: a runtime subset with the `subsetter` crate,
    Type0/Identity-H, CIDFontType2 + `/FontFile2` for TrueType, CIDFontType0 + `/FontFile3 /CIDFontType0C` for the
    CFF CJK face, `/W` widths and a ToUnicode map); bold CJK text is drawn by also stroking the outline (`2 Tr`), since
    the CJK face has one weight. New font resources are named `IwEd<n>` (standard), `IwNoto<n>` (bundled), `IwDoc<n>`
-   (a document font picked for a page that did not name it).
+   (a document font picked for a page that did not name it). A standard face already added to the page (`IwEd<n>`
+   with the same `/BaseFont`) is reused. After each rewrite, `Iw*` names that no `Tf` in the page's content uses any
+   more are removed from the page's `/Font` dict (resources and font dict copied onto the page first, shallowly, so
+   pages sharing them keep theirs); the next full save drops the replaced subsets.
    The bundled faces (`src-tauri/fonts`, 3.5 MB in the executable) are subset at build time by a developer
    (`scripts/fonts/subset_fonts.py`): Latin, Greek and Cyrillic for Noto Sans/Mono, GB 2312 + JIS X 0208 + KS X 1001
-   for the CJK face; see `third_party/fonts/README.md` (OFL 1.1).
+   for the CJK face, keeping the fonts' `name` tables (copyright and licence records); see
+   `third_party/fonts/README.md` (OFL 1.1). The OFL texts ship with the app as bundle resources under `licenses/`
+   (`tauri.conf.json`), with `third_party/THIRD-PARTY-NOTICES.txt`.
 5. **Size, colour, move, resize.** Size scales the text-space font size (and the line spacing with it); colour
    replaces the fill with `rg`; a move is a `cm` translation inside the block's `q … Q`, taken back through the CTM
    into the space the block is drawn in; a width change rewraps. Moving or resizing an edited block works the same way
@@ -111,6 +122,11 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - A justified paragraph re-wraps into its width with both edges aligned (all lines but the last) and stays justified
   after another text change and after save/reopen.
 - Font without a space glyph: words placed apart, text extracts with spaces.
+- A `Tw`-justified source re-set without `Tw` spreads its lines to the full width again, and right-aligned lines end
+  at the box's edge; a `TJ` gap read as a space keeps its exact width (the saved `TJ` numbers add up to the source's).
+- CJK-only text is reported and embedded as the CJK face alone (no empty Noto Sans subset).
+- Editing a block again and again leaves only the fonts its content uses: one `IwEd`, one `IwNoto`, one CJK subset in
+  the saved file after five edits.
 - Multi-line reflow keeps the block's left edge, width and line spacing; hard breaks with `\n`.
 - Size, colour, move, resize and right/centre alignment; a centred block stays centred after a text change.
 - Undo/redo of every change (each is one step); a stale `rev` is refused.
@@ -123,7 +139,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - Bold or italic in a font the document lacks uses a standard face (or Noto Sans for other scripts); there is no
   synthetic italic, and synthetic bold is used only for CJK.
 - A run whose text changed loses the original kerning (it uses the font's advances); unchanged runs keep theirs. Word
-  spacing (`Tw`) of kept runs is folded into their space widths.
+  spacing (`Tw`) is not kept: a left-aligned line that used it to space words comes out narrower (justified lines
+  are spread again).
 - Text inside form XObjects is reported, not edited (it may be shared by several pages).
 - Fallback fonts are the standard 14 and the bundled faces (no system fonts). Characters outside the bundled sets
   (rare Han ideographs, other scripts such as Arabic, Devanagari or Thai) are refused with a message naming the first
