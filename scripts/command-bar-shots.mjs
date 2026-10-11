@@ -147,6 +147,7 @@ for (const scale of [1, 1.5]) {
   const s = scale === 1 ? "" : "-150";
   for (const th of ["light", "dark"]) {
     await theme(th);
+    await ev(`window.__inkwell.useBar.getState().setAt("center")`);
     const n = (name) => `bar-${name}-${th}${s}.png`;
 
     // the bar alone
@@ -214,6 +215,14 @@ for (const scale of [1, 1.5]) {
     await shot(n("approval"));
 
     if (scale === 1) {
+      // setup states live in the same surface: not signed in, and the consent question
+      await stage([]);
+      await ev(`window.__ai.setState({ status: { installed: true, loggedIn: false, account: null, plan: null, models: [], error: null } })`);
+      await shot(n("gate"));
+      await ev(`window.__ai.setState({ status: ${STATUS}, pending: { doc: window.__doc(), task: { kind: "ask", question: "q" }, label: "q" } })`);
+      await shot(n("consent"));
+      await ev(`window.__ai.setState({ pending: null })`);
+
       // the chats menu and the layout menu, open over the page
       await stage(TURN1, { past: [{ id: 91, messages: [q(11, "Summarize page 2"), a(12, "Page 2 covers the revenue table.")] }] });
       await setView("open");
