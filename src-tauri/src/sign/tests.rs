@@ -1219,3 +1219,16 @@ fn forged_the_info_dictionary_re_pointed() {
     assert!(forged[v.len()..].windows(5).any(|w| w == b"/Info"), "written");
     assert_caught(&forged);
 }
+
+#[test]
+fn fill_and_sign_respects_a_certification() {
+    // Fill & Sign items are annotations: P=1 and P=2 don't allow them, P=3 does. Flattening changes
+    // the pages, which no certification allows.
+    use crate::fillsign::{NewItem, Spec};
+    let text = || NewItem { page: 0, spec: Spec::Text { at: [72.0, 120.0], text: "Alex".into(), font_size: None, width: None }, color: None };
+    for (p, allowed) in [(1, false), (2, false), (3, true)] {
+        let mut d = PdfDocument::from_bytes(&signed(&format!("fs-certified-{p}"), Some(p))).unwrap();
+        assert_eq!(crate::fillsign::add(&mut d, &text(), None).is_ok(), allowed, "P={p}");
+        assert!(crate::fillsign::flatten(&mut d, None).is_err(), "P={p}");
+    }
+}

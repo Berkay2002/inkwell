@@ -6,7 +6,7 @@ use mupdf_sys::*;
 
 use crate::link::LinkDestination;
 use crate::pdf::PdfDocument;
-use crate::{context, Buffer, Colorspace, Cookie, Error, FilePath, Outline, Page};
+use crate::{context, Buffer, Colorspace, Cookie, Error, FilePath, Outline, Page, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MetadataName {
@@ -237,6 +237,13 @@ impl Document {
         unsafe { ffi_try!(mupdf_load_page(context(), self.inner, page_no)) }
             // SAFETY: We're trusting the FFI layer here to provide a valid pointer
             .and_then(|fz_page| unsafe { Page::from_raw(fz_page) })
+    }
+
+    /// `load_page(page_no)?.bounds()` for a PDF, read from the page dictionary alone. Loading a page
+    /// also loads its annotations and links and scans its resources, which dominates when a document
+    /// has many of them. Errors on a document that is not a PDF.
+    pub fn pdf_page_bounds(&self, page_no: i32) -> Result<Rect, Error> {
+        unsafe { ffi_try!(mupdf_pdf_page_bounds(context(), self.inner, page_no)) }.map(Into::into)
     }
 
     pub fn pages(&self) -> Result<PageIter<'_>, Error> {

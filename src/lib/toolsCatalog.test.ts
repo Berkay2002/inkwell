@@ -37,7 +37,9 @@ const items: ToolItem[] = [
   mk("fill-sign", "Fill & Sign", "sign", "Type on the page, tick boxes and add your signature", "fill sign signature initials type text checkmark checkbox tick date form handwritten esign"),
   mk("sign-digital", "Sign with a digital ID", "sign", "Add a certificate signature that shows any later change", "digital signature certificate id certify pades pfx p12 secure esign"),
   mk("signatures", "Check signatures", "sign", "See who signed and whether the file changed since", "signatures validate verify signed signer certificate trust valid"),
+  mk("doc-javascript", "Document JavaScript", "scripts", "See, edit or remove the scripts in this file", "javascript script code action open save print launch url acrobat macro"),
   mk("export", "Export", "convert", "Save as Word, images, text and more", "save as word docx image jpg png text html convert"),
+  mk("create-portfolio", "Create PDF Portfolio", "convert", "Bundle files of any kind into one PDF", "portfolio bundle package collection attach combine files folder"),
   mk("compare", "Compare files", "check", "Compare this file with another file or an earlier version", "diff differences changes versions side by side"),
 ];
 const ids = (r: ToolItem[]) => r.map((i) => i.id);
@@ -102,7 +104,7 @@ describe("groupTools / filterTools", () => {
     expect(sec.map((s) => s.title)).toEqual(["Optimize", "forms"]);
   });
   it("shows the groups for an empty box and one ranked Results section for a query", () => {
-    expect(filterTools(items, "").map((s) => s.id)).toEqual(["optimize", "marks", "protect", "sign", "convert", "check"]);
+    expect(filterTools(items, "").map((s) => s.id)).toEqual(["optimize", "marks", "protect", "sign", "scripts", "convert", "check"]);
     const r = filterTools(items, "smaller");
     expect(r).toHaveLength(1);
     expect(r[0].id).toBe(RESULTS);

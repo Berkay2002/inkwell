@@ -1608,6 +1608,125 @@ fn a_certified_document_takes_scripted_values_but_not_other_properties() {
     }
 }
 
+/// Records a DocMDP certification of `/P` `p` in the catalog's `/Perms` (the field tree is left as it is).
+fn certify_catalog(eng: &Engine, id: DocId, p: i32) {
+    eng.apply_custom(id, "Certify".into(), EditSource::User, false, |d| {
+        let mut params = d.new_dict()?;
+        params.dict_put("P", PdfObject::new_int(p)?)?;
+        let mut r = d.new_dict()?;
+        put_name(&mut r, "TransformMethod", "DocMDP")?;
+        r.dict_put("TransformParams", params)?;
+        let mut refs = d.new_array()?;
+        refs.array_push(r)?;
+        let mut sig = d.new_dict()?;
+        put_name(&mut sig, "Type", "Sig")?;
+        sig.dict_put("Reference", refs)?;
+        let mut perms = d.new_dict()?;
+        perms.dict_put("DocMDP", sig)?;
+        d.catalog()?.dict_put("Perms", perms)?;
+        Ok(vec![0])
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_document_certified_in_the_catalog_takes_scripted_values_only() {
+    // The catalog certifies with P 2 and no signature field has a value; then over a signature that says P 3.
+    for (name, field_p) in [("catalog-only", None), ("catalog-over-field", Some(3))] {
+        let (eng, id, _) = script_form(&format!("js-certified-{name}"), &["Src", "Other"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+        script(&eng, id, "Src", "V", "var o = this.getField(\"Other\"); o.value = \"x\"; o.readonly = true; o.required = true; o.display = display.hidden;");
+        if let Some(p) = field_p {
+            sign(&eng, id, None, Some(p));
+        }
+        certify_catalog(&eng, id, 2);
+        fill(&eng, id, "Src", text("a")).unwrap();
+        let o = field(&eng, id, "Other");
+        assert_eq!(o.value, "x", "{name}: a value is what a certified form takes");
+        assert!(!o.read_only && !o.required && !o.hidden, "{name}: {o:?}");
+        assert!(scripts_state(&eng, id).unwrap().log.iter().any(|l| l.message.contains("certified")), "{name}");
+    }
+}
+
+#[test]
+fn a_catalog_certification_that_allows_no_change_refuses_typing_scripts_resets_and_calculations() {
+    // P 1 in the catalog alone, and over a signature field that says P 3.
+    for (name, field_p) in [("catalog-only", None), ("catalog-over-field", Some(3))] {
+        let (eng, id, _) = script_form(&format!("js-certified-p1-{name}"), &["Src", "Other", "Total"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+        fill(&eng, id, "Other", text("keep")).unwrap();
+        script(&eng, id, "Src", "V", "this.getField(\"Other\").value = \"x\";");
+        script(&eng, id, "Total", "C", "event.value = 7;");
+        if let Some(p) = field_p {
+            sign(&eng, id, None, Some(p));
+        }
+        certify_catalog(&eng, id, 1);
+        let err = fill(&eng, id, "Src", text("a")).unwrap_err().to_string();
+        assert!(err.contains("locked by a signature"), "{name}: {err}");
+        assert!(fill(&eng, id, "Other", text("typed")).is_err(), "{name}: typing into a field is refused");
+        reset_one(&eng, id, None, EditSource::User).unwrap();
+        for (f, want) in [("Src", ""), ("Other", "keep"), ("Total", "")] {
+            assert_eq!(field(&eng, id, f).value, want, "{name}: {f}");
+        }
+    }
+}
+
+#[test]
+fn a_certified_document_refuses_every_authoring_step_and_leaves_no_history() {
+    // Certified in the catalog (P 3, the loosest), and on a signature field (P 2).
+    for (name, catalog_p, field_p) in [("catalog", Some(3), None), ("signature", None, Some(2))] {
+        let (eng, id, _) = script_form(&format!("author-certified-{name}"), &["A", "B"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+        script(&eng, id, "A", "C", "event.value = 1;");
+        script(&eng, id, "B", "C", "event.value = 2;");
+        let (a, b) = (field(&eng, id, "A").xref, field(&eng, id, "B").xref);
+        let nodes = eng.read_custom(id, |d| Ok(scan(d)?.iter().filter(|e| e.name == "A" || e.name == "B").map(|e| e.node).collect::<Vec<_>>())).unwrap();
+        if let Some(p) = field_p {
+            sign(&eng, id, None, Some(p));
+        }
+        if let Some(p) = catalog_p {
+            certify_catalog(&eng, id, p);
+        }
+        let before = (steps(&eng, id), list_all(&eng, id).unwrap().fields.into_iter().map(|w| (w.name, w.xref)).collect::<Vec<_>>());
+        let refused = [
+            ("add", add_one(&eng, id, 0, &nf(FieldKind::Text, "New", [72.0, 300.0, 200.0, 320.0]), EditSource::User).map(|_| ())),
+            ("add many", add_many(&eng, id, 0, &[nf(FieldKind::Text, "N1", [72.0, 300.0, 200.0, 320.0])], EditSource::User).map(|_| ())),
+            ("move", move_one(&eng, id, 0, a, [100.0, 300.0, 260.0, 330.0], EditSource::User).map(|_| ())),
+            ("edit", edit_one(&eng, id, 0, a, &FieldPatch { tooltip: Some("t".into()), ..Default::default() }, EditSource::User).map(|_| ())),
+            ("delete", delete_many(&eng, id, &[(0, b)], EditSource::User).map(|_| ())),
+            ("calc order", calc_order_one(&eng, id, &[nodes[1], nodes[0]], EditSource::User).map(|_| ())),
+            ("tab order", tab_order_one(&eng, id, 0, &[b, a], EditSource::User).map(|_| ())),
+            ("arrange", arrange_one(&eng, id, 0, false, EditSource::User).map(|_| ())),
+        ];
+        for (what, r) in refused {
+            let e = r.expect_err(&format!("{name}: {what} must be refused")).to_string();
+            assert!(e.contains("certified"), "{name}: {what}: {e}");
+        }
+        let after = (steps(&eng, id), list_all(&eng, id).unwrap().fields.into_iter().map(|w| (w.name, w.xref)).collect::<Vec<_>>());
+        assert_eq!(before, after, "{name}: nothing changed and no step was made");
+    }
+}
+
+#[test]
+fn authoring_in_a_signed_document_is_saved_after_the_signed_bytes() {
+    let (eng, id, path) = script_form("author-signed", &["A"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+    sign(&eng, id, None, None);
+    eng.save(id, None).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert!(eng2.read_custom(id2, |d| Ok(crate::outline::signed(d))).unwrap(), "the signature is seen");
+    add1(&eng2, id2, 0, nf(FieldKind::Text, "B", [72.0, 300.0, 200.0, 320.0]));
+    let a = field(&eng2, id2, "A").xref;
+    delete_many(&eng2, id2, &[(0, a)], EditSource::User).unwrap();
+    eng2.save(id2, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the file was rewritten: the signature would no longer verify");
+    let (eng3, id3) = reopen(&path);
+    let names: Vec<String> = list_all(&eng3, id3).unwrap().fields.into_iter().map(|w| w.name).collect();
+    assert!(names.contains(&"B".to_string()) && !names.contains(&"A".to_string()), "{names:?}");
+}
+
 #[test]
 fn a_calculated_result_is_not_written_into_a_field_a_signature_locks() {
     let (eng, id, _) = script_form("js-signed-calc", &["Rent", "Deposit", "Total"]);
@@ -1704,4 +1823,216 @@ fn the_scripts_banner_does_not_wait_for_a_step_that_holds_the_edit_lane() {
 fn write_the_form_javascript_sample() {
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("docs").join("study").join("samples").join("_gen").join("formsjs-sample.pdf");
     std::fs::write(out, formsjs_sample()).unwrap();
+}
+
+/// What `scan` was before it skipped pages: every page loaded, every widget listed.
+fn scan_by_loading_every_page(doc: &PdfDocument) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for p in 0..doc.page_count().unwrap() as u32 {
+        let page = doc.load_pdf_page(p as i32).unwrap();
+        for (i, w) in page.widgets().enumerate() {
+            let Some(kind) = w.r#type().ok().and_then(kind_of) else { continue };
+            let a = w.annotation();
+            let (obj, xref, r) = (a.object(), a.xref().unwrap(), a.rect().unwrap());
+            let field = field_of(&obj);
+            let own = get(&obj, "T").is_some() || get(&obj, "Parent").is_none();
+            let node = if own { xref } else { field.as_indirect().unwrap_or(xref) };
+            out.push(Entry { page: p, xref, node, tab: i as u32, kind, name: full_name(&obj), rect: [r.x0, r.y0, r.x1, r.y1], obj, field });
+        }
+    }
+    out
+}
+
+fn key(e: &Entry) -> (u32, i32, i32, u32, FieldKind, String, [f32; 4]) {
+    (e.page, e.xref, e.node, e.tab, e.kind, e.name.clone(), e.rect)
+}
+
+fn scans_agree(eng: &Engine, id: DocId) -> usize {
+    let (want, got) = eng
+        .read_custom(id, |d| Ok((scan_by_loading_every_page(d).iter().map(key).collect::<Vec<_>>(), scan(d)?.iter().map(key).collect::<Vec<_>>())))
+        .unwrap();
+    assert_eq!(got, want);
+    got.len()
+}
+
+#[test]
+fn the_field_scan_equals_loading_every_page_on_normal_forms() {
+    // Fields of every kind added across both pages of a plain file
+    let (eng, id, _) = open("scan-equal");
+    let kinds = [FieldKind::Text, FieldKind::Checkbox, FieldKind::Radio, FieldKind::Combo, FieldKind::List, FieldKind::Button, FieldKind::Signature];
+    for (i, kind) in kinds.into_iter().enumerate() {
+        let y = 100.0 + 40.0 * i as f32;
+        add1(&eng, id, (i % 2) as u32, nf(kind, &format!("f{i}"), [72.0, y, 200.0, y + 20.0]));
+    }
+    assert_eq!(scans_agree(&eng, id), kinds.len());
+    for (name, bytes) in [("shared", shared_widgets_form()), ("need", need_appearances_form())] {
+        let (eng, id, _) = open_bytes(&format!("scan-{name}"), bytes);
+        assert!(scans_agree(&eng, id) >= 2);
+    }
+    if let Some(bytes) = study_sample("form-source.pdf") {
+        let (eng, id, _) = open_bytes("scan-study", bytes);
+        assert!(scans_agree(&eng, id) > 0);
+    }
+}
+
+#[test]
+fn two_thousand_pages_sharing_twenty_thousand_annotations_list_their_fields_fast() {
+    let list: String = (0..20_000).map(|_| "4 0 R ").collect();
+    let widget = |t: &str, y: u32| format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T ({t}) /Rect [72 {y} 200 {}] /F 4 >>", y + 20);
+    // 3 note, 4 square, 5 the shared array, 6 and 7 widgets, 8 their array; pages from 9
+    let rest = vec![
+        "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] >>".to_string(),
+        "<< /Type /Annot /Subtype /Square /Rect [40 40 90 90] >>".to_string(),
+        format!("[3 0 R {list}]"),
+        widget("A", 100),
+        widget("B", 140),
+        "[6 0 R 7 0 R]".to_string(),
+    ];
+    let first = 3 + rest.len();
+    let kids: String = (0..2000).map(|i| format!("{} 0 R ", first + i)).collect();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 7 0 R] >> >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count 2000 >>"),
+    ];
+    objs.extend(rest);
+    objs.extend((0..2000).map(|i| {
+        let annots = if i == 1234 { 8 } else { 5 };
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots {annots} 0 R >>")
+    }));
+    let (eng, id, _) = open_bytes("scan-hostile", pdf_of(&objs));
+    let t = std::time::Instant::now();
+    let form = list_all(&eng, id).unwrap();
+    let took = t.elapsed();
+    eprintln!("form list, 2000 pages x 20 000 shared annotations: {took:?}");
+    assert_eq!(form.fields.iter().map(|f| (f.page, f.name.as_str())).collect::<Vec<_>>(), vec![(1234, "A"), (1234, "B")]);
+    assert!(took < std::time::Duration::from_secs(30), "{took:?}");
+}
+
+#[test]
+fn a_widget_whose_p_names_a_page_sharing_the_array_is_still_listed() {
+    // 3 widget whose /P is the last page (object 6), 4 the array both pages share; pages are objects 5, 6
+    let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (A) /Rect [72 100 200 120] /F 4 /P 6 0 R >>";
+    let (eng, id, _) = open_bytes(
+        "scan-shared-p",
+        pdf_of(&[
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [3 0 R] >> >>".to_string(),
+            "<< /Type /Pages /Kids [5 0 R 6 0 R] /Count 2 >>".to_string(),
+            widget.to_string(),
+            "[3 0 R]".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots 4 0 R >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots 4 0 R >>".to_string(),
+        ]),
+    );
+    assert_eq!(list_all(&eng, id).unwrap().fields.iter().map(|f| (f.page, f.name.as_str())).collect::<Vec<_>>(), vec![(0, "A")]);
+}
+
+#[test]
+fn a_reversed_form_whose_widgets_keep_their_old_p_lists_every_field_fast() {
+    // 100 pages of 250 widgets each, every /P naming the page at the mirrored position (a later page that
+    // does not list it for the first half): asking that page for its array per widget used to cost
+    // widgets x array length and went past the scan cap.
+    let (pages, per) = (100usize, 250usize);
+    let first = 3 + pages * per;
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count {pages} >>", (0..pages).map(|i| format!("{} 0 R ", first + i)).collect::<String>()),
+    ];
+    for i in 0..pages {
+        for j in 0..per {
+            objs.push(format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (f{i}_{j}) /Rect [72 100 200 120] /F 4 /P {} 0 R >>", first + pages - 1 - i));
+        }
+    }
+    for i in 0..pages {
+        let list: String = (0..per).map(|j| format!("{} 0 R ", 3 + i * per + j)).collect();
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{list}] >>"));
+    }
+    let (eng, id, _) = open_bytes("scan-stale-p", pdf_of(&objs));
+    let t = std::time::Instant::now();
+    let found = eng.read_custom(id, |d| Ok(scan(d)?.len())).unwrap();
+    let took = t.elapsed();
+    eprintln!("form scan, {pages} pages x {per} widgets with stale /P: {took:?}");
+    assert_eq!(found, pages * per);
+    assert!(took < std::time::Duration::from_secs(30), "{took:?}");
+    let form = list_all(&eng, id).unwrap();
+    assert_eq!(form.fields.len(), pages * per);
+    assert!(form.fields.iter().enumerate().all(|(n, f)| f.page == (n / per) as u32));
+}
+
+/// 2000 pages whose direct `/Annots` list object 3 (a widget) 1001 times: past the scan budget.
+fn repeated_widget_form() -> Vec<u8> {
+    let refs = "3 0 R ".repeat(1001);
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [3 0 R] >> >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count 2000 >>", (0..2000).map(|i| format!("{} 0 R ", 4 + i)).collect::<String>()),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (A) /Rect [72 100 200 120] /F 4 >>".to_string(),
+    ];
+    objs.extend((0..2000).map(|_| format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{refs}] >>")));
+    pdf_of(&objs)
+}
+
+#[test]
+fn a_form_past_the_scan_budget_is_refused_not_listed_with_fields_missing() {
+    let (eng, id, _) = open_bytes("scan-repeats", repeated_widget_form());
+    let err = match list_all(&eng, id) {
+        Err(e) => e.to_string(),
+        Ok(f) => panic!("{} fields listed", f.fields.len()),
+    };
+    assert!(err.contains("too large to edit safely"), "{err}");
+}
+
+#[test]
+fn a_form_whose_pages_carry_many_unshared_links_lists_every_field() {
+    // 300 pages x 200 links of their own (60 000 entries), widgets A and B on page 150
+    let (pages, per) = (300usize, 200usize);
+    let first = 3 + 2 + pages * per;
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [3 0 R 4 0 R] >> >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count {pages} >>", (0..pages).map(|i| format!("{} 0 R ", first + i)).collect::<String>()),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (A) /Rect [72 100 200 120] /F 4 >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (B) /Rect [72 140 200 160] /F 4 >>".to_string(),
+    ];
+    objs.extend((0..pages * per).map(|_| "<< /Type /Annot /Subtype /Link /Rect [0 0 20 20] >>".to_string()));
+    for i in 0..pages {
+        let links: String = (0..per).map(|j| format!("{} 0 R ", 5 + i * per + j)).collect();
+        let widgets = if i == 150 { "3 0 R 4 0 R " } else { "" };
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{widgets}{links}] >>"));
+    }
+    let (eng, id, _) = open_bytes("scan-links", pdf_of(&objs));
+    let form = list_all(&eng, id).unwrap();
+    assert_eq!(form.fields.iter().map(|f| (f.page, f.name.as_str())).collect::<Vec<_>>(), vec![(150, "A"), (150, "B")]);
+}
+
+#[test]
+fn a_page_listed_many_times_in_kids_is_scanned_once_and_direct_entries_are_charged() {
+    // 2000 /Kids entries naming one page object whose direct /Annots holds 2000 inline widgets
+    let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (A) /Rect [72 100 200 120] /F 4 >>";
+    let kids = "3 0 R ".repeat(2000);
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count 2000 >>"),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{}] >>", vec![widget; 2000].join(" ")),
+    ];
+    // MuPDF refuses a /Count that is not below the number of objects
+    objs.extend((0..2000).map(|_| "null".to_string()));
+    let (eng, id, _) = open_bytes("scan-dup-kids", pdf_of(&objs));
+    let t = std::time::Instant::now();
+    let found = eng.read_custom(id, |d| Ok(scan(d)?.len())).unwrap();
+    let took = t.elapsed();
+    eprintln!("form scan, one page listed 2000 times with 2000 inline widgets: {took:?}");
+    assert_eq!(found, 2000);
+    assert!(took < std::time::Duration::from_secs(30), "{took:?}");
+
+    // Inline entries on distinct pages are charged one each: past the budget the form is refused
+    let page = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{}] >>", "0 ".repeat(1001));
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count 2000 >>", (0..2000).map(|i| format!("{} 0 R ", 3 + i)).collect::<String>()),
+    ];
+    objs.extend((0..2000).map(|_| page.clone()));
+    let (eng, id, _) = open_bytes("scan-direct", pdf_of(&objs));
+    let err = match list_all(&eng, id) {
+        Err(e) => e.to_string(),
+        Ok(f) => panic!("{} fields listed", f.fields.len()),
+    };
+    assert!(err.contains("too large to edit safely"), "{err}");
 }

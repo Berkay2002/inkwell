@@ -13,7 +13,7 @@ vi.hoisted(() => {
 
 let emit: (e: ChatEvent) => void = () => {};
 vi.mock("./ai", () => ({
-  aiAsk: vi.fn((_doc: number, _req: unknown, cb: (e: ChatEvent) => void) => {
+  aiAsk: vi.fn((_doc: number, _req: unknown, _provider: string, cb: (e: ChatEvent) => void) => {
     emit = cb;
     return Promise.resolve();
   }),

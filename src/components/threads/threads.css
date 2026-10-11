@@ -1,0 +1,228 @@
+/* Article threads: the beads on a page, the reading pill, the Articles panel */
+.th-space {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.th-capture {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: crosshair;
+}
+.th-bead {
+  position: absolute;
+  box-sizing: border-box;
+  min-width: 6px;
+  min-height: 6px;
+  touch-action: none;
+  outline: calc(1.5px / var(--z, 1)) solid color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.th-bead.bad {
+  outline-style: dashed;
+  outline-color: var(--danger);
+}
+/* reading: the number tag (Show beads) or the whole bead (while reading, no other tool) follows the article */
+.th-space {
+  --th-arrow:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10.5' fill='%23fff' stroke='%23222' stroke-width='1.5'/%3E%3Cpath d='M7 12h9m-4-4 4 4-4 4' fill='none' stroke='%23222' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+      12 12,
+    pointer;
+}
+.th-bead.grab {
+  pointer-events: auto;
+  cursor: var(--th-arrow);
+}
+.th-bead.tag .th-num {
+  pointer-events: auto;
+  cursor: var(--th-arrow);
+}
+.th-bead.edit {
+  pointer-events: auto;
+  cursor: move;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.th-bead.on {
+  outline: calc(2px / var(--z, 1)) solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+/* reading: the bead in view is faintly filled, the one after it outlined dimly */
+.th-bead.cur {
+  outline-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+.th-bead.next {
+  outline: calc(1px / var(--z, 1)) dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  background: transparent;
+}
+.th-num {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  padding: 1px 5px;
+  font: 600 11px/1.3 var(--font);
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-radius: 0 0 4px 0;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.th-h {
+  position: absolute;
+  width: calc(9px / var(--z, 1));
+  height: calc(9px / var(--z, 1));
+  margin: calc(-4.5px / var(--z, 1));
+  background: var(--surface);
+  border: calc(1.5px / var(--z, 1)) solid var(--accent);
+  box-sizing: border-box;
+  touch-action: none;
+}
+.th-h.nw { left: 0; top: 0; cursor: nwse-resize; }
+.th-h.n { left: 50%; top: 0; cursor: ns-resize; }
+.th-h.ne { left: 100%; top: 0; cursor: nesw-resize; }
+.th-h.e { left: 100%; top: 50%; cursor: ew-resize; }
+.th-h.se { left: 100%; top: 100%; cursor: nwse-resize; }
+.th-h.s { left: 50%; top: 100%; cursor: ns-resize; }
+.th-h.sw { left: 0; top: 100%; cursor: nesw-resize; }
+.th-h.w { left: 0; top: 50%; cursor: ew-resize; }
+.th-plus {
+  position: absolute;
+  left: 100%;
+  top: 100%;
+  width: calc(20px / var(--z, 1));
+  height: calc(20px / var(--z, 1));
+  margin: calc(6px / var(--z, 1)) 0 0 calc(6px / var(--z, 1));
+  display: grid;
+  place-items: center;
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: crosshair;
+  touch-action: none;
+}
+.th-plus svg {
+  width: calc(14px / var(--z, 1));
+  height: calc(14px / var(--z, 1));
+}
+.th-draft {
+  position: absolute;
+  pointer-events: none;
+  outline: calc(1.5px / var(--z, 1)) dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* the pill over the page area: reading position, or the Article tool's hint */
+.th-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: min(560px, 92%);
+  padding: 4px 6px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-2);
+}
+.th-pill-title {
+  min-width: 0;
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.th-pill .btn {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+}
+.th-flip {
+  transform: scaleX(-1);
+}
+
+/* the Articles panel (sidebar tab) */
+.th-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.th-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: none;
+  padding: 0 8px 8px;
+}
+.th-bar .btn {
+  height: 30px;
+  justify-content: center;
+}
+.th-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.th-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 8px 8px;
+  list-style: none;
+  overflow-y: auto;
+}
+.th-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 6px;
+  padding: 4px 4px 4px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.th-row.reading {
+  border-color: var(--accent);
+}
+.th-open {
+  flex: 1;
+  min-width: 0;
+  display: block;
+  padding: 4px 0;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.th-open b,
+.th-open span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.th-open span {
+  font-size: 12px;
+}
+.th-open .bad {
+  color: var(--danger);
+}
+.th-note {
+  padding: 0 12px 12px;
+  font-size: 12px;
+}

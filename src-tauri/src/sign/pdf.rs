@@ -112,7 +112,7 @@ pub(super) fn sign_with(base: &[u8], id: &DigitalId, req: &SignRequest, tamper: 
             return Err(refuse("the document is certified with no changes allowed; it can't be signed again"));
         }
     }
-    if req.certify.is_some() && signed_before {
+    if req.certify.is_some() && (signed_before || crate::outline::signed(&doc)) {
         return Err(refuse("only the first signature can certify a document; this one is already signed"));
     }
     let date = req.date.clone().unwrap_or_else(|| SignDate::now(0));
@@ -604,10 +604,10 @@ pub(crate) fn has_signed_field(doc: &PdfDocument) -> bool {
 }
 
 /// The certification signature's DocMDP permissions (1-3), if the document is certified.
+/// The strictest certification anywhere in the document (the catalog's /Perms or a field's DocMDP
+/// reference, see `outline::certified`); one that can't be read counts as allowing no changes.
 fn docmdp_level(doc: &PdfDocument) -> Result<Option<u8>> {
-    let catalog = doc.catalog().map_err(pdf_err)?;
-    let Some(sig) = catalog.get_dict("Perms").map_err(pdf_err)?.and_then(|p| p.get_dict("DocMDP").ok().flatten()) else { return Ok(None) };
-    Ok(Some(docmdp_of(&sig).unwrap_or(2)))
+    Ok(crate::outline::certified(doc).map_or(Some(1), |c| c.map(|p| p.clamp(1, 3) as u8)))
 }
 
 fn docmdp_of(sig: &PdfObject) -> Option<u8> {

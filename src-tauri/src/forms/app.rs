@@ -5,6 +5,7 @@ use super::{
     move_one, reset_report, scripts_enable, scripts_state, set_value_report, tab_order_one,
 };
 use super::af::{self, Format};
+use super::doc_js::{self, Applied, Check, DocJs, Op, Source};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use serde::Serialize;
@@ -135,4 +136,33 @@ pub async fn forms_arrange(eng: Eng<'_>, doc: DocId, page: u32, by: String) -> R
 pub async fn forms_detect(eng: Eng<'_>, doc: DocId, page: u32) -> Result<Vec<Detected>> {
     let eng = eng.inner().clone();
     blocking(move || detect_one(&eng, doc, page)).await
+}
+
+// ---- document JavaScript (the sheet; see doc_js.rs). Not an assistant tool. ----
+
+/// Every script the file carries: named, document and page actions in full, field/link/bookmark scripts counted.
+#[tauri::command]
+pub async fn doc_js_list(eng: Eng<'_>, doc: DocId) -> Result<DocJs> {
+    let eng = eng.inner().clone();
+    blocking(move || doc_js::list_all(&eng, doc)).await
+}
+
+/// The text of one script (`id` from the list).
+#[tauri::command]
+pub async fn doc_js_source(eng: Eng<'_>, doc: DocId, id: String) -> Result<Source> {
+    let eng = eng.inner().clone();
+    blocking(move || doc_js::source_of(&eng, doc, &id)).await
+}
+
+/// Whether `source` parses. Compiles only; nothing is run.
+#[tauri::command]
+pub async fn doc_js_check(source: String) -> Result<Check> {
+    blocking(move || Ok(doc_js::check(&source))).await
+}
+
+/// One edit of the file's scripts: one undo step.
+#[tauri::command]
+pub async fn doc_js_apply(eng: Eng<'_>, doc: DocId, op: Op) -> Result<Applied> {
+    let eng = eng.inner().clone();
+    blocking(move || doc_js::apply(&eng, doc, &op, EditSource::User)).await
 }

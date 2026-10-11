@@ -136,6 +136,10 @@ fn tag(a: &PdfAnnotation, kind: &str) -> Result<()> {
 
 /// Creates the item and returns its xref. `png` is the image of a signature or initials.
 pub fn add(doc: &mut PdfDocument, it: &NewItem, png: Option<&[u8]>) -> Result<i32> {
+    // Fill & Sign items are annotations: a certification allows them only at P=3.
+    if crate::outline::certified(doc).map_or(true, |c| c.is_some_and(|p| p < 3)) {
+        return Err(bad("this document is certified and its certification doesn't allow adding to it"));
+    }
     let kind = kind_name(&it.spec);
     let color = it.color.unwrap_or(INK);
     let xref = match &it.spec {
@@ -186,6 +190,10 @@ pub fn add(doc: &mut PdfDocument, it: &NewItem, png: Option<&[u8]>) -> Result<i3
 /// `pdf_bake_document` bakes every annotation of every page, so it is run while /Annots holds only the
 /// items to bake, and the rest is put back afterwards.
 pub fn flatten(doc: &mut PdfDocument, pages: Option<&[u32]>) -> Result<Vec<u32>> {
+    // Flattening changes the page content, which no certification allows.
+    if crate::outline::certified(doc).map_or(true, |c| c.is_some()) {
+        return Err(bad("this document is certified, and flattening would change its pages"));
+    }
     let mut held = Vec::new();
     let mut hit = Vec::new();
     for p in 0..doc.page_count()? as u32 {

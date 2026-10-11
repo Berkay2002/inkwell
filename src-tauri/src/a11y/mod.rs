@@ -339,6 +339,10 @@ pub struct RuleResult {
 pub struct Report {
     pub pages: u32,
     pub tagged: bool,
+    /// A `/DocMDP` certification: no accessibility edit is made to the document (see [`edit_doc`]).
+    pub certified: bool,
+    /// Signed: edits are saved after the signed bytes, which stay as they were.
+    pub signed: bool,
     pub results: Vec<RuleResult>,
 }
 
@@ -627,7 +631,7 @@ pub fn check(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &Ato
         }
         results.push(RuleResult { rule, name: rule.name(), group: rule.group(), status, hint: rule.hint(), fix: rule.fix(), findings });
     }
-    Ok(Report { pages: n, tagged: tree.exists, results })
+    Ok(Report { pages: n, tagged: tree.exists, certified: crate::outline::certified(doc).map_or(true, |c| c.is_some()), signed: crate::outline::signed(doc), results })
 }
 
 fn elem_finding(t: &Tree, loc: &Locator, i: usize, what: &str) -> Finding {
@@ -1267,6 +1271,33 @@ pub(crate) fn open_copy(eng: &Engine, doc: DocId) -> Result<PdfDocument> {
     Ok(d)
 }
 
+/// Every accessibility write goes through here: a certified document is refused (any change to it, the tags
+/// included, voids the certification; as outline/mod.rs does), and the step is never one that rewrites the file,
+/// so a signed document's save stays incremental and its signed bytes stay as they were.
+fn edit_doc(eng: &Engine, doc: DocId, label: String, source: EditSource, f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>) -> Result<EditState> {
+    eng.apply_custom(doc, label, source, false, |d| {
+        if crate::outline::certified(d)?.is_some() {
+            return Err(bad(
+                "This document is certified. Changing its tags or reading order would void the certification, so Inkwell leaves them as they are.",
+            ));
+        }
+        f(d)
+    })
+}
+
+/// Whether the document is certified or signed, as it is now: what the edit controls are gated on, known
+/// without the check having run.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Protection {
+    pub certified: bool,
+    pub signed: bool,
+}
+
+pub fn protection_doc(eng: &Engine, doc: DocId) -> Result<Protection> {
+    eng.read_custom(doc, |d| Ok(Protection { certified: crate::outline::certified(d).map_or(true, |c| c.is_some()), signed: crate::outline::signed(d) }))
+}
+
 /// Applies one fix as one undo step.
 pub fn fix_doc(eng: &Engine, doc: DocId, fix: &Fix, source: EditSource) -> Result<EditState> {
     fix_doc_with(eng, doc, fix, source, &mut |_| {}, &AtomicBool::new(false))
@@ -1276,7 +1307,7 @@ pub fn fix_doc(eng: &Engine, doc: DocId, fix: &Fix, source: EditSource) -> Resul
 pub fn fix_doc_with(eng: &Engine, doc: DocId, fix: &Fix, source: EditSource, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<EditState> {
     let path = eng.doc_entry(doc)?.path();
     let stem = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    eng.apply_custom(doc, fix.label(), source, false, |d| apply_fix_with(d, fix, &stem, progress, cancel))
+    edit_doc(eng, doc, fix.label(), source, |d| apply_fix_with(d, fix, &stem, progress, cancel))
 }
 
 // ---- reading order and tags ----------------------------------------------------------------------
@@ -1299,36 +1330,58 @@ pub fn tag_problems_doc(eng: &Engine, doc: DocId) -> Result<Vec<Problem>> {
 
 /// Puts the regions of a page in a new reading order, as one undo step.
 pub fn reorder_doc(eng: &Engine, doc: DocId, page: u32, order: &[i32], source: EditSource) -> Result<EditState> {
-    eng.apply_custom(doc, "Change reading order".into(), source, false, |d| tags::reorder(d, page, order))
+    edit_doc(eng, doc, "Change reading order".into(), source, |d| tags::reorder(d, page, order))
 }
 
 /// Changes an element's role (`Artifact` marks its content as artifact), as one undo step.
 pub fn set_role_doc(eng: &Engine, doc: DocId, xref: i32, role: &str, source: EditSource) -> Result<EditState> {
     let label = if role.trim() == "Artifact" { "Mark as artifact".to_string() } else { format!("Change tag to {}", role.trim()) };
-    eng.apply_custom(doc, label, source, false, |d| tags::set_role(d, xref, role))
+    edit_doc(eng, doc, label, source, |d| tags::set_role(d, xref, role))
 }
 
 /// Takes an element's content out of the reading order and marks it as artifact, as one undo step.
 pub fn artifact_doc(eng: &Engine, doc: DocId, xref: i32, source: EditSource) -> Result<EditState> {
-    eng.apply_custom(doc, "Mark as artifact".into(), source, false, |d| tags::artifact(d, xref))
+    edit_doc(eng, doc, "Mark as artifact".into(), source, |d| tags::artifact(d, xref))
 }
 
 /// Merges one region into another, as one undo step.
 pub fn merge_doc(eng: &Engine, doc: DocId, into: i32, from: i32, source: EditSource) -> Result<EditState> {
-    eng.apply_custom(doc, "Merge regions".into(), source, false, |d| tags::merge(d, into, from))
+    edit_doc(eng, doc, "Merge regions".into(), source, |d| tags::merge(d, into, from))
+}
+
+/// Most regions one merge takes, `into` included.
+const MAX_MERGE: usize = 100;
+
+/// Merges several regions into `into` (in the order given), as one undo step: a refusal part way leaves the
+/// document as it was.
+pub fn merge_many_doc(eng: &Engine, doc: DocId, into: i32, from: &[i32], source: EditSource) -> Result<EditState> {
+    // Each merge reads the tree again (the one before changed it), so the count is bounded.
+    if from.is_empty() || from.len() >= MAX_MERGE {
+        return Err(bad(format!("choose between two and {MAX_MERGE} regions to merge")));
+    }
+    edit_doc(eng, doc, "Merge regions".into(), source, |d| {
+        let mut pages = Vec::new();
+        for &f in from {
+            pages.extend(tags::merge(d, into, f)?);
+        }
+        pages.sort_unstable();
+        pages.dedup();
+        Ok(pages)
+    })
 }
 
 /// Splits a region before the content item with this MCID, as one undo step.
 pub fn split_doc(eng: &Engine, doc: DocId, xref: i32, at_mcid: i32, role: Option<&str>, source: EditSource) -> Result<EditState> {
-    eng.apply_custom(doc, "Split region".into(), source, false, |d| tags::split(d, xref, at_mcid, role))
+    edit_doc(eng, doc, "Split region".into(), source, |d| tags::split(d, xref, at_mcid, role))
 }
 
 /// Edits one node's role, alternate text, actual text, language, table scope or headers, as one undo step.
 pub fn edit_tag_doc(eng: &Engine, doc: DocId, xref: i32, patch: &tags::TagPatch, source: EditSource) -> Result<EditState> {
-    eng.apply_custom(doc, patch.label(), source, false, |d| tags::edit_tag(d, xref, patch))
+    edit_doc(eng, doc, patch.label(), source, |d| tags::edit_tag(d, xref, patch))
 }
 
-/// Moves a node under `parent` (0: the top of the tree) at `index`, as one undo step.
-pub fn move_tag_doc(eng: &Engine, doc: DocId, xref: i32, parent: i32, index: usize, source: EditSource) -> Result<EditState> {
-    eng.apply_custom(doc, "Move tag".into(), source, false, |d| tags::move_node(d, xref, parent, index))
+/// Moves a node under `parent` (0: the top of the tree), before or after its kid `anchor` (last when
+/// there is none), as one undo step.
+pub fn move_tag_doc(eng: &Engine, doc: DocId, xref: i32, parent: i32, anchor: Option<i32>, after: bool, source: EditSource) -> Result<EditState> {
+    edit_doc(eng, doc, "Move tag".into(), source, |d| tags::move_node(d, xref, parent, anchor, after))
 }

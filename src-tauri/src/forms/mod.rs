@@ -12,6 +12,7 @@
 //! A text field's `/V` keeps the raw value; its appearance shows the formatted one (as Acrobat does).
 //! Form data export and import (FDF, XFDF, JSON) is not built (see docs/forms.md).
 
+use crate::annot::{AnnotWalk, Which};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use mupdf::pdf::{FieldFlags, PdfDocument, PdfObject, WidgetType};
@@ -23,6 +24,7 @@ pub mod af;
 pub mod app;
 mod author;
 pub mod detect;
+pub mod doc_js;
 pub mod js;
 mod scripts;
 #[cfg(test)]
@@ -275,19 +277,33 @@ fn full_name(w: &PdfObject) -> String {
     parts.join(".")
 }
 
+/// Every widget of the document, page by page. Only pages that have widgets no earlier page had are
+/// loaded (see [`AnnotWalk`]): a widget that several pages list is returned once, for the first
+/// (or the page its `/P` names); one listed through different arrays with no `/P` stays with the first
+/// page and is not fillable on the later one.
 pub(crate) fn scan(doc: &PdfDocument) -> Result<Vec<Entry>> {
     let mut out = Vec::new();
+    let mut walk = AnnotWalk::default();
     for p in 0..doc.page_count()?.max(0) as u32 {
+        let Some(fresh) = walk.page(doc, p, Which::Widgets)? else { continue };
+        let mut pending = fresh.nums;
         let page = doc.load_pdf_page(p as i32)?;
         for (i, w) in page.widgets().enumerate() {
             let Some(kind) = w.r#type().ok().and_then(kind_of) else { continue };
             let a = w.annotation();
             let (obj, xref, r) = (a.object(), a.xref()?, a.rect()?);
+            if !(if xref == 0 { fresh.direct } else { pending.remove(&xref) }) {
+                continue;
+            }
             let field = field_of(&obj);
             let own = get(&obj, "T").is_some() || get(&obj, "Parent").is_none();
             let node = if own { xref } else { field.as_indirect().unwrap_or(xref) };
             out.push(Entry { page: p, xref, node, tab: i as u32, kind, name: full_name(&obj), rect: [r.x0, r.y0, r.x1, r.y1], obj, field });
         }
+    }
+    // Better no list than a form with fields missing: edits and calculations read all of them.
+    if walk.incomplete {
+        return Err(bad("this file's form is too large to edit safely"));
     }
     Ok(out)
 }
@@ -729,7 +745,7 @@ fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec
         return Err(bad(format!("The field [ {} ] is read-only", e.name)));
     }
     // Typing never silently breaks a signature: a field a signature covers (its /Lock, a FieldMDP or a DocMDP of 1) is refused.
-    if e.kind != FieldKind::Signature && scripts::locked(&scripts::locks_of(entries), e) {
+    if e.kind != FieldKind::Signature && scripts::locked(&scripts::locks_of(rt.doc(), entries), e) {
         return Err(bad(format!("The field [ {} ] is locked by a signature", e.name)));
     }
     let mut touched = vec![page];
@@ -825,7 +841,7 @@ pub fn reset(doc: &mut PdfDocument, which: Option<&[i32]>) -> Result<Vec<u32>> {
 
 fn reset_rt(rt: &Rt, which: Option<&[i32]>) -> Result<Vec<u32>> {
     let entries = rt.entries()?;
-    let locks = scripts::locks_of(entries);
+    let locks = scripts::locks_of(rt.doc(), entries);
     let mut done: Vec<i32> = Vec::new();
     let mut touched = Vec::new();
     for e in entries {
@@ -864,7 +880,7 @@ fn reset_rt(rt: &Rt, which: Option<&[i32]>) -> Result<Vec<u32>> {
 /// True when resetting `which` would change something (so an empty reset is not an undo step).
 fn reset_would_change(doc: &PdfDocument, which: Option<&[i32]>) -> Result<bool> {
     let entries = scan(doc)?;
-    let locks = scripts::locks_of(&entries);
+    let locks = scripts::locks_of(doc, &entries);
     Ok(entries.iter().any(|e| reset_differs(&entries, &locks, e, which)))
 }
 

@@ -5,7 +5,7 @@ vi.mock("./edit", () => ({ applyState: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
 import { useAnnot } from "./annot";
-import { type Annot, groupByPage, hitTest, placePopover, quadsFromRects, resizeRect, timeLabel, toScreen } from "./annotLogic";
+import { type Annot, emptyNote, groupByPage, hitTest, placePopover, quadsFromRects, resizeRect, timeLabel, toScreen } from "./annotLogic";
 import { applyState } from "./edit";
 
 const inv = vi.mocked(invoke);
@@ -99,5 +99,14 @@ describe("popover placement", () => {
   });
   it("pins inside the bounds when neither side fits", () => {
     expect(placePopover([400, 200, 500, 680], [200, 300], bounds)[1]).toBe(396);
+  });
+});
+
+describe("empty list note", () => {
+  it("says nothing when the list is only cut short, otherwise why it is empty", () => {
+    expect(emptyNote(0, 0, true)).toBeNull();
+    expect(emptyNote(0, 0, false)).toMatch(/No comments yet/);
+    expect(emptyNote(3, 0, true)).toBe("Nothing matches.");
+    expect(emptyNote(3, 2, false)).toBeNull();
   });
 });

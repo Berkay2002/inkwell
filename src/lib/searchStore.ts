@@ -3,7 +3,7 @@ import { useStore } from "../store";
 import * as api from "./api";
 import { useFind } from "./findStore";
 import { keyOf } from "./recent";
-import { type FileGroup, FIRST_ITEMS, MORE_ITEMS, insertFile } from "./searchLogic";
+import { type FileGroup, FIRST_ITEMS, MORE_ITEMS, buildLine, folderName, insertFile } from "./searchLogic";
 
 /** The state of one search across files. */
 export interface FolderRun {
@@ -23,6 +23,29 @@ export interface FolderRun {
   /** The folder held more PDFs than a search looks at. */
   capped: boolean;
   cancelled: boolean;
+  /** Catalog search: files that changed since the catalog read them, left out of the results. */
+  stale: number;
+}
+
+/** A catalog being built or refreshed. */
+export interface CatalogBuild {
+  id: string;
+  /** Engine job id (what Cancel needs) once the build says it started. */
+  job: number | null;
+  done: number;
+  total: number;
+  running: boolean;
+  /** How it ended: "1 804 files, 12 new", or the error. */
+  line: string;
+}
+
+/** The "New catalog" sheet: a folder picked, a name typed, the estimate shown before anything is read. */
+export interface NewCatalog {
+  token: string;
+  path: string;
+  name: string;
+  recursive: boolean;
+  estimate: api.CatalogEstimate | null;
 }
 
 interface Rail {
@@ -47,14 +70,35 @@ interface Rail {
   /** Runs `query` over the chosen folder or files. */
   startFolder: (query: string) => Promise<void>;
   cancelFolder: () => void;
+  /** The saved catalogs, and for each what a refresh would change (by id). */
+  catalogs: api.CatalogMeta[];
+  stale: Record<string, api.CatalogStale>;
+  build: CatalogBuild | null;
+  draft: NewCatalog | null;
+  loadCatalogs: () => Promise<void>;
+  /** Makes catalog `id` what the next search reads. */
+  selectCatalog: (id: string) => void;
+  /** Picks a folder and shows what indexing it would take. */
+  newCatalog: () => Promise<void>;
+  patchDraft: (p: Partial<Pick<NewCatalog, "name" | "recursive">>) => void;
+  dropDraft: () => void;
+  /** Creates the catalog from the sheet and builds it. */
+  createCatalog: () => Promise<void>;
+  /** Builds (`full`) or refreshes catalog `id`. */
+  buildCatalog: (id: string, full?: boolean) => Promise<void>;
+  cancelBuild: () => void;
+  removeCatalog: (id: string) => Promise<void>;
   /** Opens file `g` (or switches to its tab) at its hit number `item` and highlights the query there. */
   openAt: (g: FileGroup, item: number) => Promise<void>;
 }
 
-export type Target = { kind: "folder"; token: string; path: string } | { kind: "files"; tokens: string[]; paths: string[] };
+export type Target =
+  | { kind: "folder"; token: string; path: string }
+  | { kind: "files"; tokens: string[]; paths: string[] }
+  | { kind: "catalog"; id: string; name: string };
 
 const emptyRun = (query: string): FolderRun => ({
-  id: null, query, running: true, scanned: 0, total: 0, files: [], matched: 0, hits: 0, skipped: 0, cloudOnly: 0, capped: false, cancelled: false,
+  id: null, query, running: true, scanned: 0, total: 0, files: [], matched: 0, hits: 0, skipped: 0, cloudOnly: 0, capped: false, cancelled: false, stale: 0,
 });
 
 let runSeq = 0;
@@ -69,6 +113,10 @@ export const useSearch = create<Rail>((set, get) => ({
   setRecursive: (recursive) => set({ recursive }),
   run: null,
   shown: {},
+  catalogs: [],
+  stale: {},
+  build: null,
+  draft: null,
   showMore: (index) => set((s) => ({ shown: { ...s.shown, [index]: (s.shown[index] ?? FIRST_ITEMS) + MORE_ITEMS } })),
 
   pickFolder: async () => {
@@ -148,17 +196,21 @@ export const useSearch = create<Rail>((set, get) => ({
       } else if (e.kind === "progress") {
         apply({ scanned: e.scanned, total: e.total });
       } else {
-        apply({ files, running: false, scanned: e.cancelled ? get().run?.scanned ?? 0 : e.files, total: e.files, matched: e.matched, hits: e.hits, skipped: e.skipped, cloudOnly: e.cloudOnly, capped: e.capped, cancelled: e.cancelled });
+        apply({ files, running: false, scanned: e.cancelled ? get().run?.scanned ?? 0 : e.files, total: e.files, matched: e.matched, hits: e.hits, skipped: e.skipped, cloudOnly: e.cloudOnly, capped: e.capped, cancelled: e.cancelled, stale: e.stale });
       }
     };
 
     try {
-      const sid = await api.searchFiles(
-        target.kind === "folder" ? { kind: "folder", token: target.token, recursive: get().recursive } : { kind: "files", tokens: target.tokens },
-        q,
-        useFind.getState().opts,
-        handle,
-      );
+      const opts = useFind.getState().opts;
+      const sid =
+        target.kind === "catalog"
+          ? await api.catalogSearch(target.id, q, opts, handle)
+          : await api.searchFiles(
+              target.kind === "folder" ? { kind: "folder", token: target.token, recursive: get().recursive } : { kind: "files", tokens: target.tokens },
+              q,
+              opts,
+              handle,
+            );
       if (seq !== runSeq) {
         void api.cancelSearchFiles(sid);
         return;
@@ -182,6 +234,105 @@ export const useSearch = create<Rail>((set, get) => ({
     if (r.id != null) void api.cancelSearchFiles(r.id);
     else runSeq++;
     set({ run: { ...r, running: false, cancelled: true } });
+  },
+
+  loadCatalogs: async () => {
+    try {
+      const catalogs = await api.catalogList();
+      const found = await Promise.all(catalogs.map((c) => api.catalogStale(c.id).then((v) => [c.id, v] as const, () => null)));
+      set({ catalogs, stale: Object.fromEntries(found.filter((x) => x !== null)) });
+    } catch (e) {
+      useStore.getState().setUi({ error: String(e) });
+    }
+  },
+
+  selectCatalog: (id) => {
+    const c = get().catalogs.find((x) => x.id === id);
+    if (c) set({ target: { kind: "catalog", id, name: c.name } });
+  },
+
+  newCatalog: async () => {
+    try {
+      const f = await api.pickSearchFolder();
+      if (!f) return;
+      const draft: NewCatalog = { token: f.token, path: f.path, name: folderName(f.path), recursive: get().recursive, estimate: null };
+      set({ draft });
+      const estimate = await api.catalogEstimate(f.token, draft.recursive);
+      set((s) => (s.draft?.token === f.token && s.draft.recursive === draft.recursive ? { draft: { ...s.draft, estimate } } : s));
+    } catch (e) {
+      set({ draft: null });
+      useStore.getState().setUi({ error: String(e) });
+    }
+  },
+
+  patchDraft: (p) => {
+    const d = get().draft;
+    if (!d) return;
+    const next = { ...d, ...p, estimate: p.recursive === undefined || p.recursive === d.recursive ? d.estimate : null };
+    set({ draft: next });
+    if (next.estimate === null) {
+      void api.catalogEstimate(next.token, next.recursive).then(
+        (estimate) => set((s) => (s.draft?.token === next.token && s.draft.recursive === next.recursive ? { draft: { ...s.draft, estimate } } : s)),
+        (e) => useStore.getState().setUi({ error: String(e) }),
+      );
+    }
+  },
+
+  dropDraft: () => set({ draft: null }),
+
+  createCatalog: async () => {
+    const d = get().draft;
+    if (!d || get().build?.running) return;
+    try {
+      const meta = await api.catalogCreate(d.token, d.name.trim(), d.recursive);
+      set((s) => ({ draft: null, catalogs: [...s.catalogs, meta], target: { kind: "catalog", id: meta.id, name: meta.name } }));
+      await get().buildCatalog(meta.id, true);
+    } catch (e) {
+      useStore.getState().setUi({ error: String(e) });
+    }
+  },
+
+  buildCatalog: async (id, full = false) => {
+    if (get().build?.running) return;
+    const hadIndex = (get().catalogs.find((c) => c.id === id)?.built ?? 0) > 0;
+    set({ build: { id, job: null, done: 0, total: 0, running: true, line: "" } });
+    const apply = (p: Partial<CatalogBuild>) => set((s) => (s.build?.id === id ? { build: { ...s.build, ...p } } : s));
+    try {
+      const sum = await api.catalogBuild(id, full, (e) => {
+        if (e.kind === "started") apply({ job: e.job });
+        else if (e.kind === "progress") apply({ done: e.done, total: e.total });
+        else set((s) => ({ catalogs: s.catalogs.map((c) => (c.id === id ? e.catalog : c)) }));
+      });
+      apply({ running: false, line: buildLine(sum, hadIndex) });
+    } catch (e) {
+      apply({ running: false, line: String(e) });
+    }
+    // The index changed (or the build was cancelled): the badge is read again.
+    try {
+      const v = await api.catalogStale(id);
+      set((s) => ({ stale: { ...s.stale, [id]: v } }));
+    } catch {
+      /* the badge stays as it was */
+    }
+  },
+
+  cancelBuild: () => {
+    const b = get().build;
+    if (b?.running && b.job != null) void api.catalogCancel(b.job);
+  },
+
+  removeCatalog: async (id) => {
+    try {
+      await api.catalogDelete(id);
+    } catch (e) {
+      useStore.getState().setUi({ error: String(e) });
+      return;
+    }
+    set((s) => {
+      const { [id]: _gone, ...stale } = s.stale;
+      const was = s.target?.kind === "catalog" && s.target.id === id;
+      return { catalogs: s.catalogs.filter((c) => c.id !== id), stale, ...(was ? { target: null, run: null } : {}), ...(s.build?.id === id ? { build: null } : {}) };
+    });
   },
 
   openAt: async (g, item) => {

@@ -44,7 +44,7 @@ const caps = (over: Partial<PrinterCaps> = {}): PrinterCaps => ({
   maxCopies: 99,
   ...over,
 });
-const plan = { pages: 12, sheets: 3, papers: 6, sides: 6, faces: [{ width: 595, height: 842, pages: [1, 2], tile: null }], editRev: 0 };
+const plan = { pages: 12, sheets: 3, papers: 6, sides: 6, pdfSides: 3, faces: [{ width: 595, height: 842, pages: [1, 2], tile: null }], editRev: 0 };
 const png = new Uint8Array([137, 80, 78, 71]).buffer;
 
 beforeEach(() => {
@@ -319,6 +319,21 @@ describe("save as PDF", () => {
   it("a driver that does not answer is not the same as no printer: no paper list is invented", () => {
     expect(paperList(null, "Broken")).toEqual([]);
     expect(paperList(caps({ papers: [LETTER] }), "P")).toEqual([LETTER]);
+  });
+
+  it("counts Save as PDF progress to the pages the file gets, two-sided padding included", async () => {
+    withPrinters([]);
+    vi.mocked(api.printPlan).mockResolvedValue({ ...plan, sheets: 3, pdfSides: 4 });
+    vi.mocked(api.pickSave).mockResolvedValue({ token: "tok-pdf", path: "C:\\o\\a-print.pdf" });
+    let seen: unknown = null;
+    vi.mocked(api.printSavePdf).mockImplementation(async () => {
+      seen = usePrint.getState().sheet?.progress;
+      return { file: { token: "t", path: "C:\\o\\a-print.pdf" }, pages: 3, sheets: 4 };
+    });
+    usePrint.getState().open();
+    await ready();
+    await usePrint.getState().savePdf();
+    expect(seen).toEqual({ done: 0, total: 4 });
   });
 
   it("asks where, writes the plan, and offers the file in a new tab", async () => {

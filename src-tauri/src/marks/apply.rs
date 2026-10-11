@@ -1124,6 +1124,8 @@ fn number_one(input: &str, out: &Path, d: &mut PdfDocument, bates: &Bates, first
     let b = Bates { start: first, ..bates.clone() };
     let req = AddRequest { mark: Mark::Bates(b), pages: (0..pages).collect(), replace: true, date };
     add(d, &req)?;
+    // Replaced stamps are gone from the pages: the embedded search index must not keep their text.
+    crate::search::catalog::embed::drop_if_stale(d)?;
     let bytes = write_doc(d, rewrite_opts(), 1 << 20)?;
     write_new(out, &bytes, pages)?;
     Ok(BatesFile {
