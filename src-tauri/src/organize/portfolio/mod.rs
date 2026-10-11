@@ -341,15 +341,77 @@ fn ci_value(ci: &PdfObject, key: &str, texts: &mut Texts) -> Option<(Option<f64>
     plain(&v, texts).map(|(n, t)| (n, t, String::new()))
 }
 
+/// What one file gives the cells: the objects its values come from, and which of them can be told apart
+/// by object number (a repeated one is then read once, whatever number of files point at it).
+struct Given<'a> {
+    ci: Option<&'a PdfObject>,
+    /// `Some(None)`: no /CI; `Some(Some(n))`: the indirect object n; `None`: a direct dictionary.
+    ci_key: Option<Option<i32>>,
+    spec: &'a PdfObject,
+    stream: Option<&'a PdfObject>,
+    stream_key: Option<Option<i32>>,
+    meta: &'a Attachment,
+}
+
+type CiVal = (Option<f64>, String, String);
+
+/// What reading the cells already worked out, by object number: a /CI dictionary or a stream that many
+/// file specifications share has its strings decoded once.
+#[derive(Default)]
+struct Memo {
+    ci: HashMap<(i32, String), Option<CiVal>>,
+    params: HashMap<(i32, &'static str), Option<String>>,
+    cells: HashMap<(Option<i32>, Option<i32>, usize), Cell>,
+}
+
+const MEMO_MAX: usize = 1_000_000;
+
+/// The object-number key of an optional object: none when it is absent, its number when indirect, and
+/// nothing to go by when it is direct.
+fn num_key(o: Option<&PdfObject>) -> Option<Option<i32>> {
+    match o {
+        None => Some(None),
+        Some(o) if o.is_indirect().unwrap_or(false) => o.as_indirect().ok().map(Some),
+        Some(_) => None,
+    }
+}
+
 /// The cell of one file for one field. What the file says of itself (its name, description, size and
 /// dates: the file specification and the stream's /Params) comes first for the fields of those
 /// subtypes, as ISO 32000 has it; /CI has the value of text, number and date fields, and stands in
 /// for a fact the file does not give.
-fn cell(f: &Field, ci: Option<&PdfObject>, spec: &PdfObject, stream: Option<&PdfObject>, meta: &Attachment, texts: &mut Texts) -> Cell {
-    let from_ci = ci.and_then(|ci| ci_value(ci, &f.key, texts));
-    let params = |k: &str, texts: &mut Texts| {
-        let p = resolved_dict(stream.and_then(|s| get(s, "Params")))?;
-        get(&p, k).and_then(|v| plain(&v, texts)).map(|(_, t)| t)
+fn cell(f: &Field, at: usize, g: &Given, texts: &mut Texts, memo: &mut Memo) -> Cell {
+    // A cell that depends on the /CI (and the stream) alone is the same for every file that has the same ones.
+    let key = match f.sub {
+        Sub::Text | Sub::Number | Sub::Date => g.ci_key.map(|c| (c, None, at)),
+        Sub::Size | Sub::CompressedSize | Sub::ModDate | Sub::CreationDate => g.ci_key.zip(g.stream_key).map(|(c, s)| (c, s, at)),
+        Sub::File | Sub::Desc => None,
+    };
+    if let Some(c) = key.as_ref().and_then(|k| memo.cells.get(k)) {
+        return c.clone();
+    }
+    let c = cell_of(f, g, texts, memo);
+    if let Some(k) = key.filter(|_| memo.cells.len() < MEMO_MAX) {
+        memo.cells.insert(k, c.clone());
+    }
+    c
+}
+
+fn cell_of(f: &Field, g: &Given, texts: &mut Texts, memo: &mut Memo) -> Cell {
+    let (spec, stream, meta) = (g.spec, g.stream, g.meta);
+    let from_ci = g.ci.and_then(|ci| match g.ci_key {
+        Some(Some(n)) if memo.ci.len() < MEMO_MAX => memo.ci.entry((n, f.key.clone())).or_insert_with(|| ci_value(ci, &f.key, texts)).clone(),
+        _ => ci_value(ci, &f.key, texts),
+    });
+    let mut params = |k: &'static str, texts: &mut Texts| {
+        let read = |texts: &mut Texts| {
+            let p = resolved_dict(stream.and_then(|s| get(s, "Params")))?;
+            get(&p, k).and_then(|v| plain(&v, texts)).map(|(_, t)| t)
+        };
+        match g.stream_key {
+            Some(Some(n)) if memo.params.len() < MEMO_MAX => memo.params.entry((n, k)).or_insert_with(|| read(texts)).clone(),
+            _ => read(texts),
+        }
     };
     let as_size = |n: u64| Cell::number(n as f64, size_text(n));
     let ci_number = || match &from_ci {
@@ -589,6 +651,7 @@ pub fn read(doc: &PdfDocument) -> Result<Option<PortfolioInfo>> {
     let mut budget = CELL_BUDGET;
     // File specification object number -> the row it first made: the same one again is not read again.
     let mut rows_by_spec: HashMap<i32, usize> = HashMap::new();
+    let mut memo = Memo::default();
     for (e, id) in entries.iter().zip(ids) {
         let (prefix, plain_key) = split_prefix(&e.key);
         let meta = attach::info_with(&mut texts, &e.spec, plain_key, id.clone(), AttachKind::File, None, None);
@@ -607,7 +670,17 @@ pub fn read(doc: &PdfDocument) -> Result<Option<PortfolioInfo>> {
         let mut row: Vec<Cell> = match (&spec, spec_num.and_then(|n| rows_by_spec.get(&n))) {
             // The same specification again: its cells are the ones already made (the name column aside).
             (_, Some(&first)) => cells[first].clone(),
-            (Some(spec), None) => fields.iter().map(|f| cell(f, ci.as_ref(), spec, stream_dict.as_ref(), &meta, &mut texts)).collect(),
+            (Some(spec), None) => {
+                let given = Given {
+                    ci: ci.as_ref(),
+                    ci_key: num_key(get(spec, "CI").as_ref()),
+                    spec,
+                    stream: stream_dict.as_ref(),
+                    stream_key: num_key(stream.as_ref()),
+                    meta: &meta,
+                };
+                fields.iter().enumerate().map(|(at, f)| cell(f, at, &given, &mut texts, &mut memo)).collect()
+            }
             (None, None) => fields.iter().map(|_| Cell::none()).collect(),
         };
         if let Some(n) = spec_num {

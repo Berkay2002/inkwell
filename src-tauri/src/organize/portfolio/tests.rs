@@ -606,6 +606,46 @@ fn one_huge_string_shared_by_many_fields_and_files_is_read_once_and_cut() {
     assert!(all[0].description.len() <= 2048);
 }
 
+/// Thousands of separate file specifications that share one /CI whose 62 values are big direct strings,
+/// and one stream: the decode must happen once per shared object, not once per file.
+#[test]
+fn many_filespecs_sharing_one_ci_of_big_direct_strings_are_read_in_time() {
+    let mut doc = PdfDocument::new();
+    attach::add_one(&mut doc, &NewFile { name: "a.txt".into(), data: b"x".to_vec(), description: String::new(), modified: Some(1_700_000_000) }).unwrap();
+    let base = spec_of(&doc, "a.txt");
+    let big = "abc 123 ".repeat(1 << 15);
+    let mut ci = dict(&mut doc, "CollectionItem");
+    let keys: Vec<&'static str> = (0..62).map(|i| &*Box::leak(format!("f{i}").into_boxed_str())).collect();
+    for k in &keys {
+        ci.dict_put(*k, PdfObject::new_string(&big).unwrap()).unwrap();
+    }
+    ci.dict_put("M", PdfObject::new_string(&"D:20240102030405Z".to_string()).unwrap()).unwrap();
+    let ci = doc.add_object(&ci).unwrap();
+    let mut fields: Vec<FieldSpec> = vec![("Name", "F", "Name", 0, true), ("M", "ModDate", "Modified", 1, true)];
+    fields.extend(keys.iter().enumerate().map(|(i, k)| (*k, "S", *k, i as i32 + 2, true)));
+    set_collection(&mut doc, &fields, &[("f0", true)], None, None);
+    let entries: Vec<Entry> = (0..5000)
+        .map(|i| {
+            let mut spec = doc.new_dict().unwrap();
+            put_name(&mut spec, "Type", "Filespec").unwrap();
+            put_str(&mut spec, "F", &format!("n{i:05}.txt")).unwrap();
+            spec.dict_put("EF", get(&base, "EF").unwrap()).unwrap();
+            spec.dict_put("CI", ci.clone()).unwrap();
+            Entry { key: format!("n{i:05}.txt"), spec: doc.add_object(&spec).unwrap() }
+        })
+        .collect();
+    attach::write_tree(&mut doc, entries).unwrap();
+
+    let t = std::time::Instant::now();
+    let info = read(&doc).unwrap().unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+    assert_eq!(info.files.len(), 5000);
+    assert_eq!(info.files[0].cells[1], "2023-11-14 22:13");
+    assert!(info.files[0].cells[2].chars().count() <= 500);
+    assert_eq!(info.files[0].cells[0], "n00000.txt");
+    assert_eq!(info.files[4999].cells[0], "n04999.txt");
+}
+
 #[test]
 fn two_entries_with_one_key_have_two_ids() {
     let mut doc = PdfDocument::new();

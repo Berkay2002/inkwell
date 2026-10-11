@@ -170,6 +170,7 @@ pub fn create(eng: &Engine, sources: &[Source], out: &str) -> Result<Created> {
     let cover_pages = write_cover(&mut doc, &rows, total)?;
 
     let mut keys = Vec::with_capacity(sources.len());
+    let mut read_total = 0u64;
     for s in sources {
         // Read at most one byte past the limit: a file that grew since it was measured is refused, not slurped.
         let data = (|| {
@@ -181,6 +182,11 @@ pub fn create(eng: &Engine, sources: &[Source], out: &str) -> Result<Created> {
         .map_err(|e| bad(format!("{}: {e}", s.name)))?;
         if data.len() as u64 > MAX_ATTACH {
             return Err(bad(format!("{} is over {} MB, too large for a portfolio", s.name, MAX_ATTACH >> 20)));
+        }
+        // What was measured can have grown: the bytes actually read count against the total too.
+        read_total += data.len() as u64;
+        if read_total > CREATE_MAX_BYTES {
+            return Err(bad(format!("the files add up to over {} MB, more than a portfolio takes here", CREATE_MAX_BYTES >> 20)));
         }
         let modified = std::fs::metadata(&s.path)
             .ok()
@@ -342,6 +348,8 @@ pub fn extract_all(doc: &PdfDocument, dir: &Path, written: &mut dyn FnMut(&Path)
                 continue;
             }
             Err(err) => {
+                // It may have inflated to just under the cap before failing: that work is spent.
+                total += cap;
                 skip(&mut out, format!("{name}: {err}"));
                 continue;
             }
