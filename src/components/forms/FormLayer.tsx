@@ -193,7 +193,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
 
   if (f.kind === "checkbox" || f.kind === "radio") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <button
           className={cls}
           role={f.kind}
@@ -209,21 +209,21 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
   }
   if (f.kind === "button") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <button className={cls} aria-label={label} title={buttonTitle(f)} onClick={() => run(docId, f.action, all)} />
       </div>
     );
   }
   if (f.kind === "signature") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <div className={cls} role="img" aria-label={label} title={`${label} (signing is not available here)`} />
       </div>
     );
   }
   if (f.kind === "list") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <select
           className={cls}
           multiple
@@ -247,7 +247,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
   if (f.kind === "combo" && !f.editable) {
     const cur = f.values[0] ?? "";
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <select className={cls} aria-label={label} title={label} disabled={locked} value={cur} onChange={(e) => void commit(e.target.value)}>
           <option value="" />
           {cur && !f.options.some((o) => o.export === cur) && <option value={cur}>{cur}</option>}
@@ -260,7 +260,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
     );
   }
   return (
-    <div className="fm-cell" style={css}>
+    <div className="fm-cell" style={css} data-fm-xref={f.xref}>
       <TextEditor f={f} className={cls} label={label} locked={locked} onCommit={commit} onChange={() => setErr(null)} />
       {bubble}
     </div>

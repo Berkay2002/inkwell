@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { useForms } from "../../lib/forms";
+import { formsApi, useForms } from "../../lib/forms";
 import {
   type ButtonAction, type CalcOp, type Calculate, type Field, type FieldPatch, type Format, type Opt, type Validate,
   CALC_OPS, DATE_FORMATS, FIELD_ICON, FONT_SIZES, KIND_LABEL, NEGATIVES, SEPARATORS, SPECIAL_FORMATS, TIME_FORMATS,
-  calcSources, fromHex, needsMaxLen, toHex,
+  calcFields, calcSources, fromHex, moved, needsMaxLen, toHex,
 } from "../../lib/formsLogic";
 import { Icon } from "../Icons";
 
@@ -187,7 +187,7 @@ export function FieldProps({ doc, f, all }: { doc: number; f: Field; all: Field[
 
       {typed && <FormatProps f={f} set={set} />}
       {text && <ValidateProps f={f} set={set} />}
-      {text && <CalcProps f={f} all={all} set={set} />}
+      {text && <CalcProps doc={doc} f={f} all={all} set={set} />}
     </section>
   );
 }
@@ -290,8 +290,61 @@ function ButtonProps({ f, all, set }: { f: Field; all: Field[]; set: (p: FieldPa
   );
 }
 
+function Script({ label, value, onCommit, hint }: { label: string; value: string; onCommit: (v: string) => void; hint?: string }) {
+  const [v, setV] = useState(value);
+  useEffect(() => setV(value), [value]);
+  return (
+    <label className="fm-field">
+      <span>{label}</span>
+      <textarea
+        className="fm-in fm-code"
+        value={v}
+        rows={5}
+        spellCheck={false}
+        aria-label={label}
+        onChange={(e) => setV(e.target.value)}
+        onBlur={() => v !== value && onCommit(v)}
+        onKeyDown={(e) => e.stopPropagation()}
+      />
+      {hint && <small className="dim">{hint}</small>}
+    </label>
+  );
+}
+
+/** "1234.5 → $1,234.50": what the chosen format makes of a sample entry (a custom script is not run for a preview). */
+function FormatPreview({ format }: { format: Format }) {
+  const [shown, setShown] = useState<{ sample: string; shown: string } | null>(null);
+  const key = JSON.stringify(format);
+  useEffect(() => {
+    let live = true;
+    if (format.kind === "none" || format.kind === "custom") {
+      setShown(null);
+      return;
+    }
+    formsApi.formatPreview(format).then(
+      (r) => live && setShown(r),
+      () => live && setShown(null),
+    );
+    return () => {
+      live = false;
+    };
+    // `key` stands for the whole format.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  if (format.kind === "custom") return <p className="fm-sample dim small">Custom script: what it shows is decided when the field is filled.</p>;
+  if (!shown) return null;
+  return (
+    <p className="fm-sample" aria-label="Sample">
+      <span className="dim">Sample</span> <code>{shown.sample}</code> <span className="dim">→</span> <b>{shown.shown}</b>
+    </p>
+  );
+}
+
 function FormatProps({ f, set }: { f: Field; set: (p: FieldPatch) => void }) {
   const fmt = f.format;
+  // "Custom script" with both boxes empty is "no format" in the file, but the person has asked for the boxes.
+  const [forced, setForced] = useState(false);
+  const shownKind = fmt.kind === "custom" || (forced && fmt.kind === "none") ? "custom" : fmt.kind;
   const put = (format: Format) => set({ format });
   const kinds = [
     { value: "none", label: "None" },
@@ -301,21 +354,26 @@ function FormatProps({ f, set }: { f: Field; set: (p: FieldPatch) => void }) {
     { value: "time", label: "Time" },
     { value: "special", label: "Zip, phone, social security" },
     { value: "mask", label: "Pattern (9 digit, A letter, X any)" },
+    { value: "custom", label: "Custom script" },
   ];
   const choose = (k: string) => {
+    setForced(k === "custom");
+    if (k === shownKind) return;
     if (k === "number") put({ kind: "number", value: { decimals: 2, sep: 0, neg: 0, currency: "", prepend: true } });
     else if (k === "percent") put({ kind: "percent", value: { decimals: 0, sep: 0 } });
     else if (k === "date") put({ kind: "date", value: "mm/dd/yyyy" });
     else if (k === "time") put({ kind: "time", value: "HH:MM" });
     else if (k === "special") put({ kind: "special", value: 0 });
     else if (k === "mask") put({ kind: "mask", value: "999-999" });
+    else if (k === "custom") put({ kind: "custom", value: { format: "", keystroke: "" } });
     else put({ kind: "none" });
   };
+  const custom = fmt.kind === "custom" ? fmt.value : { format: "", keystroke: "" };
   const withCustom = (list: string[], cur: string) => (list.includes(cur) ? list : [cur, ...list]);
   return (
     <>
       <div className="fm-sub">Format</div>
-      <Pick label="Show the value as" value={fmt.kind} options={kinds} onChange={choose} />
+      <Pick label="Show the value as" value={shownKind} options={kinds} onChange={choose} />
       {fmt.kind === "number" && (
         <>
           <div className="fm-pair">
@@ -343,6 +401,23 @@ function FormatProps({ f, set }: { f: Field; set: (p: FieldPatch) => void }) {
         <Pick label="Kind" value={fmt.value} options={SPECIAL_FORMATS.map((l, i) => ({ value: i, label: l }))} onChange={(value) => put({ kind: "special", value })} />
       )}
       {fmt.kind === "mask" && <Text label="Pattern" value={fmt.value} onCommit={(value) => put({ kind: "mask", value })} />}
+      {shownKind === "custom" && (
+        <>
+          <Script
+            label="Custom format script"
+            value={custom.format}
+            hint="Runs to decide what the field shows. Set event.value to the text."
+            onCommit={(format) => put({ kind: "custom", value: { ...custom, format } })}
+          />
+          <Script
+            label="Custom keystroke script"
+            value={custom.keystroke}
+            hint="Runs on every key and on commit. Set event.rc = false to refuse."
+            onCommit={(keystroke) => put({ kind: "custom", value: { ...custom, keystroke } })}
+          />
+        </>
+      )}
+      <FormatPreview format={fmt} />
     </>
   );
 }
@@ -350,14 +425,28 @@ function FormatProps({ f, set }: { f: Field; set: (p: FieldPatch) => void }) {
 function ValidateProps({ f, set }: { f: Field; set: (p: FieldPatch) => void }) {
   const v: Validate = f.validate;
   const range = v.kind === "range" ? v : null;
+  const [forced, setForced] = useState(false);
+  const shownKind = v.kind === "custom" || (forced && v.kind === "none") ? "custom" : v.kind;
   const put = (validate: Validate) => set({ validate });
+  const choose = (k: string) => {
+    setForced(k === "custom");
+    if (k === shownKind) return;
+    if (k === "range") put({ kind: "range", min: 0, max: null });
+    else if (k === "custom") put({ kind: "custom", source: "" });
+    else put({ kind: "none" });
+  };
   return (
     <>
       <div className="fm-sub">Validate</div>
-      <Check
-        label="Value must be a number in a range"
-        checked={range !== null}
-        onChange={(on) => put(on ? { kind: "range", min: 0, max: null } : { kind: "none" })}
+      <Pick
+        label="Check the value"
+        value={shownKind}
+        options={[
+          { value: "none", label: "Not validated" },
+          { value: "range", label: "Number in a range" },
+          { value: "custom", label: "Custom validation script" },
+        ]}
+        onChange={choose}
       />
       {range && (
         <div className="fm-pair">
@@ -365,18 +454,32 @@ function ValidateProps({ f, set }: { f: Field; set: (p: FieldPatch) => void }) {
           <Num label="At most" value={range.max} min={-1e12} max={1e12} placeholder="no limit" onCommit={(max) => put({ kind: "range", min: range.min, max })} />
         </div>
       )}
+      {shownKind === "custom" && (
+        <Script
+          label="Custom validation script"
+          value={v.kind === "custom" ? v.source : ""}
+          hint="Runs when the value is committed. Set event.rc = false to refuse it."
+          onCommit={(source) => put({ kind: "custom", source })}
+        />
+      )}
     </>
   );
 }
 
-function CalcProps({ f, all, set }: { f: Field; all: Field[]; set: (p: FieldPatch) => void }) {
+function CalcProps({ doc, f, all, set }: { doc: number; f: Field; all: Field[]; set: (p: FieldPatch) => void }) {
   const c: Calculate = f.calculate;
   const sources = calcSources(all, f);
-  const kind = c.kind === "simple" ? c.value.op : c.kind;
+  const order = useForms((s) => s.docs[doc]?.calcOrder);
+  const [forced, setForced] = useState(false);
+  const [ordering, setOrdering] = useState(false);
+  const kind = c.kind === "simple" ? c.value.op : c.kind === "none" && forced ? "custom" : c.kind;
   const put = (calculate: Calculate) => set({ calculate });
   const choose = (k: string) => {
+    setForced(k === "custom");
+    if (k === kind) return;
     if (k === "none") put({ kind: "none" });
     else if (k === "notation") put({ kind: "notation", value: sources.slice(0, 2).join(" + ") || "0" });
+    else if (k === "custom") put({ kind: "custom", value: "" });
     else put({ kind: "simple", value: { op: k as CalcOp, fields: c.kind === "simple" ? c.value.fields : sources.slice(0, 2) } });
   };
   return (
@@ -385,7 +488,12 @@ function CalcProps({ f, all, set }: { f: Field; all: Field[]; set: (p: FieldPatc
       <Pick
         label="Value is"
         value={kind}
-        options={[{ value: "none", label: "Typed in" }, ...CALC_OPS.map((o) => ({ value: o.op as string, label: o.label })), { value: "notation", label: "A formula" }]}
+        options={[
+          { value: "none", label: "Not calculated" },
+          ...CALC_OPS.map((o) => ({ value: o.op as string, label: o.label })),
+          { value: "notation", label: "Simplified field notation" },
+          { value: "custom", label: "Custom calculation script" },
+        ]}
         onChange={choose}
       />
       {c.kind === "simple" && (
@@ -408,6 +516,76 @@ function CalcProps({ f, all, set }: { f: Field; all: Field[]; set: (p: FieldPatc
           <p className="dim small">Field names with + − × ÷ and brackets. Put a backslash before a space inside a name.</p>
         </>
       )}
+      {kind === "custom" && (
+        <Script
+          label="Custom calculation script"
+          value={c.kind === "custom" ? c.value : ""}
+          hint='Runs after any field changes. Set event.value, e.g. event.value = this.getField("Price").value * 2;'
+          onCommit={(value) => put({ kind: "custom", value })}
+        />
+      )}
+      {(order?.length ?? 0) > 1 && (
+        <div className="fm-actions">
+          <button className="fm-btn" onClick={() => setOrdering(true)}>
+            Calculation order…
+          </button>
+        </div>
+      )}
+      {ordering && <CalcOrder doc={doc} all={all} order={order ?? []} onClose={() => setOrdering(false)} />}
     </>
+  );
+}
+
+/** The calculated fields in the order they run, to move up or down. OK is one undo step. */
+function CalcOrder({ doc, all, order, onClose }: { doc: number; all: Field[]; order: number[]; onClose: () => void }) {
+  const [nodes, setNodes] = useState(order);
+  const fields = calcFields(all, nodes);
+  const changed = nodes.join() !== order.join();
+  return (
+    <div className="scrim" role="presentation">
+      <div
+        className="dialog fm-order-dlg"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Calculation order"
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Escape") onClose();
+        }}
+      >
+        <h2>Calculation order</h2>
+        <p className="dim small">Fields are calculated from the top down. Put a field after the ones it reads.</p>
+        <ol className="fm-order-list">
+          {fields.map((f, i) => (
+            <li key={f.node}>
+              <span className="n">{i + 1}</span>
+              <span className="name" title={f.name}>{f.name}</span>
+              <button className="fm-mini" disabled={i === 0} title="Earlier" aria-label={`Move ${f.name} earlier`} onClick={() => setNodes(moved(nodes, i, i - 1))}>
+                <Icon name="up" size={13} />
+              </button>
+              <button className="fm-mini" disabled={i === fields.length - 1} title="Later" aria-label={`Move ${f.name} later`} onClick={() => setNodes(moved(nodes, i, i + 1))}>
+                <Icon name="down" size={13} />
+              </button>
+            </li>
+          ))}
+        </ol>
+        <div className="dialog-actions">
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            autoFocus
+            className="btn primary"
+            disabled={!changed}
+            onClick={() => {
+              void fm().calcOrder(doc, nodes);
+              onClose();
+            }}
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

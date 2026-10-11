@@ -36,7 +36,7 @@ Forms rail, *Prepare form*: the strip over the page picks a field tool (text, ch
 button, signature); click for the default size or drag a rectangle. Select a field to move it, resize it from the eight
 handles, or change its properties in the rail: name, tooltip, required, read-only, hidden, default value, character
 limit, comb, multiple lines, password, choices, export value, button label and action, text size and colour, alignment,
-border and fill, number/percentage/date/time/special/pattern format, range validation, calculation. A radio button drawn
+border and fill, number/percentage/date/time/special/pattern/custom-script format (with a live sample), range or custom validation, calculation (sum, product, average, smallest, largest, simplified field notation or a custom script) and the calculation order (see [forms-js.md](forms-js.md)). A radio button drawn
 while another is selected joins its group. Delete removes the selection (the Delete key too).
 
 *Find fields on this page* runs auto-detection (underscore runs, rules under labels, empty boxes, small squares, boxes

@@ -11,7 +11,8 @@ import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
 import { A11yPanel } from "./components/a11y/A11yPanel";
 import { EditPanel } from "./components/edit/EditPanel";
-import { FormTools, FormsPanel } from "./components/forms/FormsPanel";
+import { FormTools, FormsBanner, FormsPanel } from "./components/forms/FormsPanel";
+import { ScriptPrompts } from "./components/forms/ScriptPrompts";
 import { RedactPanel } from "./components/redact/RedactPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { Sidebar } from "./components/Sidebar";
@@ -125,6 +126,7 @@ export default function App() {
                 <SecurityNotice doc={doc} />
                 <CommentTools doc={doc} />
                 <FormTools />
+                <FormsBanner doc={doc} />
               </div>
               <ToolsPanel doc={doc} />
               <ConvertPanel doc={doc} />
@@ -153,6 +155,7 @@ export default function App() {
       <PrintSheet />
       {paletteOpen && <CommandPalette />}
       {hasPassword && <PasswordDialog />}
+      <ScriptPrompts />
       <Toast />
     </div>
   );

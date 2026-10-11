@@ -76,3 +76,40 @@ persistence across sessions, and the like. Also not run: button mouse-up scripts
 scripts, and the K/V scripts of check boxes and list boxes (only text and combo fields have a keystroke and validate step).
 Authoring (`forms_edit`, `forms_add`) redraws a field with the native formatter only; the `/F` script of a field being
 authored is shown after the next fill or listing.
+
+## In the window
+- **Banner.** A file with scripts (document-level, or a field script that is not exactly one Acrobat call) shows "This form
+  runs scripts." over the page with a **Run scripts** switch. The choice is per open file and in memory (default on, as in
+  Acrobat). Off: the banner stays, as "Scripts are off for this file.", so it can be turned back on. While on, the banner can be
+  dismissed for the session (the switch is also in the Forms rail).
+- **Scripts note** in the Forms rail: the switch, and the script log (warnings and errors, with the field), collapsed, with a
+  count badge. Read again after every edit.
+- **`app.alert`** is an in-app dialog (title "Inkwell" unless the script gives one), one at a time, in order.
+- **Requests** (`Stepped.requests`): `reset` runs the existing reset path (a reset that a script asked for does not act on the
+  requests of that reset's own scripts, so a script cannot loop); `goToPage` goes to the page; `focus` goes to the field's page
+  and focuses it; `print` opens the Print sheet; `beep` does nothing. `launchUrl` opens a confirm dialog with the address
+  (http, https and mailto only, no credentials) and **Copy link** / Cancel: Inkwell has no browser opener and never opens one.
+  `submit` is a note, "This form wants to send its data to <url>. Inkwell never submits forms." Nothing acts on a link or a
+  submit by itself.
+
+## Preparing form scripts
+The rail's field properties follow Acrobat's tabs.
+- **Format**: None, Number, Percentage, Date, Time, Special, Pattern, **Custom script** (a format script, `/AA /F`, and a
+  keystroke script, `/AA /K`; either may be empty). Next to the pickers a **live sample** shows "1234.5 -> $1,234.50" (command
+  `forms_format_preview(format, sample)` over `af::format_value`; a custom script is not run for it).
+- **Validate**: Not validated, Number in a range, **Custom validation script** (`/AA /V`).
+- **Calculate**: Not calculated, Sum / Product / Average / Smallest / Largest of fields, **Simplified field notation**,
+  **Custom calculation script** (`/AA /C`; a calculated field is also put in `/CO`). **Calculation order...** (when two or more
+  fields calculate) lists them in `/CO` order with up and down; OK is one undo step (`forms_calc_order(doc, nodes)`, which
+  writes `/AcroForm /CO`; calculated fields left out follow the listed ones; the same order is not a step).
+- Reading a field back: the editor shows the Acrobat setting when the scripts are exactly its calls, otherwise Custom with the
+  scripts as found (`af::format_for_editor`, `validate_for_editor`, `calculate_for_editor`). A format call next to a keystroke
+  script of the author's own reads as Custom with both. Choosing Custom with empty boxes writes nothing (it clears the old
+  setting); emptying every box removes the scripts.
+- Each change is one `forms_edit` step; the Custom boxes commit when they lose focus.
+- `FormDto.calcOrder` lists the `node` of each calculated field in running order.
+
+## Checked at runtime
+`scripts/formsjs-shots.mjs` drives the debug app over CDP on a copy of `docs/study/samples/_gen/formsjs-sample.pdf` (written by
+`cargo test --lib write_the_form_javascript_sample -- --ignored`) and saves the screens, light and dark, in
+`docs/screens/forms-js/`.

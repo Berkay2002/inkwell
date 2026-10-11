@@ -1259,3 +1259,144 @@ fn the_format_preview_shows_what_a_format_makes_of_a_sample() {
     let c: Calculate = serde_json::from_str(r#"{"kind":"custom","value":"s"}"#).unwrap();
     assert_eq!(c, Calculate::Custom("s".into()));
 }
+
+// ---- the form JavaScript sample (docs/study/samples/_gen/formsjs-sample.pdf) -----------------------------------
+
+/// A one-page form for the form JavaScript checks: a number format, a date with `AFDate_KeystrokeEx`, three numbers with a
+/// SUM total, a range-validated age, a custom calculation that calls a document-level function, a field whose /C is
+/// `while(true){}`, a custom format with a keystroke script, and two fields whose scripts raise an alert and a link.
+fn formsjs_sample() -> Vec<u8> {
+    const FIRST: usize = 6;
+    // (name, label, extra entries)
+    let rows: [(&str, &str, &str); 12] = [
+        ("Name", "Name (alert on commit)", "/AA << /V << /S /JavaScript /JS (if (event.value !== \"\") { app.alert(\"Welcome, \" + event.value + \".\"); }) >> >>"),
+        ("Website", "Page to visit (link on commit)", "/AA << /V << /S /JavaScript /JS (if (event.value !== \"\") { app.launchURL(\"https://example.com/\" + event.value); }) >> >>"),
+        (
+            "Price",
+            "Price (number format)",
+            "/AA << /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, \"$\", true);) >> /K << /S /JavaScript /JS (AFNumber_Keystroke(2, 0, 0, 0, \"$\", true);) >> >>",
+        ),
+        (
+            "Born",
+            "Date of birth (dd/mm/yyyy)",
+            "/AA << /F << /S /JavaScript /JS (AFDate_FormatEx(\"dd/mm/yyyy\");) >> /K << /S /JavaScript /JS (AFDate_KeystrokeEx(\"dd/mm/yyyy\");) >> >>",
+        ),
+        ("Rent", "Rent", ""),
+        ("Fees", "Fees", ""),
+        ("Other", "Other", ""),
+        (
+            "Total",
+            "Total (sum of the three)",
+            "/Ff 1 /AA << /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, \"$\", true);) >> /C << /S /JavaScript /JS (AFSimple_Calculate(\"SUM\", new Array(\"Rent\", \"Fees\", \"Other\"));) >> >>",
+        ),
+        (
+            "Tax",
+            "Tax (custom script, document function)",
+            "/Ff 1 /AA << /C << /S /JavaScript /JS (event.value = tax(Number(this.getField(\"Total\").value) || 0);) >> >>",
+        ),
+        ("Age", "Age (18 to 65)", "/AA << /V << /S /JavaScript /JS (AFRange_Validate(true, 18, true, 65);) >> >>"),
+        (
+            "Code",
+            "Code (custom format + keystroke)",
+            "/AA << /F << /S /JavaScript /JS (if (event.value !== \"\") {\\n  event.value = \"#\" + event.value;\\n}) >> /K << /S /JavaScript /JS (if (event.willCommit) {\\n  event.value = event.value.toUpperCase();\\n}) >> >>",
+        ),
+        ("Spin", "Never finishes (while(true){})", "/Ff 1 /AA << /C << /S /JavaScript /JS (while(true){}) >> >>"),
+    ];
+    let fields: Vec<String> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _, extra))| {
+            let top = 110 + 40 * i as i32;
+            let (y1, y0) = (792 - top, 792 - top - 22);
+            format!(
+                "<< /Type /Annot /Subtype /Widget /FT /Tx /T ({name}) /Rect [230 {y0} 430 {y1}] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >> {extra} >>"
+            )
+        })
+        .collect();
+    let mut content = String::from("BT /Helv 18 Tf 72 720 Td (Form scripts sample) Tj ET\n");
+    for (i, (_, label, _)) in rows.iter().enumerate() {
+        let top = 110 + 40 * i as i32;
+        content.push_str(&format!("BT /Helv 10 Tf 0.25 g 72 {} Td ({label}) Tj ET\n", 792 - top - 15));
+    }
+    let refs = |names: &[&str]| names.iter().map(|n| format!("{} 0 R", FIRST + rows.iter().position(|r| r.0 == *n).unwrap())).collect::<Vec<_>>().join(" ");
+    let all: Vec<String> = (0..rows.len()).map(|i| format!("{} 0 R", FIRST + i)).collect();
+    let mut objs = vec![
+        format!(
+            "<< /Type /Catalog /Pages 2 0 R /Names << /JavaScript << /Names [(lib) {} 0 R] >> >> /AcroForm << /Fields [{}] /CO [{}] /NeedAppearances true /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>",
+            FIRST + rows.len(),
+            all.join(" "),
+            refs(&["Total", "Tax", "Spin"])
+        ),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /Helv 3 0 R >> >> /Contents 5 0 R /Annots [{}] >>",
+            all.join(" ")
+        ),
+        format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+    ];
+    objs.extend(fields);
+    objs.push("<< /S /JavaScript /JS (function tax(x) { return Math.round(x * 25) / 100; }) >>".to_string());
+    pdf_of(&objs)
+}
+
+#[test]
+fn the_form_javascript_sample_behaves_like_the_checklist() {
+    let (eng, id, path) = open_bytes("formsjs-sample", formsjs_sample());
+    assert_eq!(list_all(&eng, id).unwrap().fields.len(), 12);
+    assert!(scripts_state(&eng, id).unwrap().has_scripts);
+
+    // number format
+    fill(&eng, id, "Price", text("1234.5")).unwrap();
+    assert_eq!(field(&eng, id, "Price").shown, "$1,234.50");
+    // bad date rejected, a good one kept
+    assert!(fill(&eng, id, "Born", text("31/02/2000")).is_err());
+    assert!(fill(&eng, id, "Born", text("soon")).is_err());
+    fill(&eng, id, "Born", text("18/04/1991")).unwrap();
+    assert_eq!(field(&eng, id, "Born").shown, "18/04/1991");
+    // range error
+    let e = fill(&eng, id, "Age", text("12")).unwrap_err().to_string();
+    assert!(e.contains("greater than or equal to 18"), "{e}");
+    fill(&eng, id, "Age", text("30")).unwrap();
+    // an alert and a link come back to the UI
+    let w = field(&eng, id, "Name");
+    let r = set_value_report(&eng, id, w.page, w.xref, &text("Ada"), EditSource::User).unwrap();
+    assert_eq!(r.report.alerts[0].message, "Welcome, Ada.");
+    let w = field(&eng, id, "Website");
+    let r = set_value_report(&eng, id, w.page, w.xref, &text("help"), EditSource::User).unwrap();
+    assert_eq!(r.report.requests, vec![js::Request::LaunchUrl { url: "https://example.com/help".into() }]);
+    // custom format + keystroke
+    fill(&eng, id, "Code", text("ab1")).unwrap();
+    assert_eq!((field(&eng, id, "Code").value.as_str(), field(&eng, id, "Code").shown.as_str()), ("AB1", "#AB1"));
+    assert!(matches!(field(&eng, id, "Code").format, Format::Custom { .. }));
+    // the total follows; the document function serves the tax; the runaway script times out and the rest still works
+    let t0 = std::time::Instant::now();
+    fill(&eng, id, "Rent", text("1000")).unwrap();
+    fill(&eng, id, "Fees", text("200")).unwrap();
+    fill(&eng, id, "Other", text("50.5")).unwrap();
+    assert!(t0.elapsed() < std::time::Duration::from_secs(20), "{:?}", t0.elapsed());
+    assert_eq!(field(&eng, id, "Total").value, "1250.5");
+    assert_eq!(field(&eng, id, "Total").shown, "$1,250.50");
+    assert_eq!(field(&eng, id, "Tax").value, "312.63");
+    assert!(scripts_state(&eng, id).unwrap().log.iter().any(|l| l.message.contains("longer than") || l.message.contains("timed out") || l.message.contains("time")), "{:?}", scripts_state(&eng, id).unwrap().log);
+    assert_eq!(list_all(&eng, id).unwrap().calc_order.len(), 3);
+
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(field(&eng2, id2, "Total").value, "1250.5");
+    assert_eq!(field(&eng2, id2, "Born").value, "18/04/1991");
+    assert_eq!(field(&eng2, id2, "Code").shown, "#AB1");
+
+    // scripts off: not run, kept
+    scripts_enable(&eng2, id2, false).unwrap();
+    fill(&eng2, id2, "Rent", text("5")).unwrap();
+    assert_eq!(field(&eng2, id2, "Total").value, "1250.5");
+}
+
+/// Writes the sample for the runtime checks: `cargo test --lib write_the_form_javascript_sample -- --ignored`.
+#[test]
+#[ignore = "writes docs/study/samples/_gen/formsjs-sample.pdf"]
+fn write_the_form_javascript_sample() {
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("docs").join("study").join("samples").join("_gen").join("formsjs-sample.pdf");
+    std::fs::write(out, formsjs_sample()).unwrap();
+}

@@ -71,6 +71,7 @@ const PATHS = {
   pushButton: "M3 8h18v8H3ZM8 12h8",
   signature: "M3 16c3-6 4-9 6-9s0 8 2 8 3-4 5-4 2 2 4 2M3 21h18",
   wand: "M15 4v3M13.5 5.5h3M19 11v2M18 12h2M5 20 15 10l-2-2L3 18ZM9 5v2M8 6h2",
+  code: "m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16",
 };
 
 export type IconName = keyof typeof PATHS;

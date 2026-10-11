@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
-import { FORM_TOOLS, type FormTool, useForms } from "../../lib/forms";
+import { FORM_TOOLS, type FormTool, type ScriptsState, useForms } from "../../lib/forms";
 import {
-  type Field, FIELD_ICON, KIND_LABEL, SHORT, detectSummary, fieldLabel, isFillable, missingRequired, onPage, progress, rows, summary,
+  type Field, FIELD_ICON, KIND_LABEL, SHORT, detectSummary, fieldLabel, isFillable, logCount, missingRequired, onPage, progress, rows, summary,
 } from "../../lib/formsLogic";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
@@ -59,6 +59,59 @@ export function FormTools() {
   );
 }
 
+/** Over the page: "This form runs scripts", with the per-file switch (Acrobat runs them; so does Inkwell, unless told not to). */
+export function FormsBanner({ doc }: { doc: DocState }) {
+  const scripts = useForms((s) => s.docs[doc.id]?.scripts);
+  const gone = useForms((s) => s.docs[doc.id]?.bannerGone);
+  if (!scripts?.hasScripts || (scripts.enabled && gone)) return null;
+  return (
+    <div className="fm-banner" role="status">
+      <Icon name="code" size={14} />
+      <span>{scripts.enabled ? "This form runs scripts." : "Scripts are off for this file."}</span>
+      <label className="fm-check">
+        <input type="checkbox" checked={scripts.enabled} onChange={(e) => void fm().runScripts(doc.id, e.target.checked)} />
+        <span>Run scripts</span>
+      </label>
+      {scripts.enabled && (
+        <button className="ax-icon" title="Dismiss" aria-label="Dismiss" onClick={() => fm().dismissBanner(doc.id)}>
+          <Icon name="close" size={12} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The Scripts note of the rail: the switch and the log (warnings and errors, with the field), closed until asked for. */
+function ScriptsNote({ doc, scripts }: { doc: number; scripts: ScriptsState }) {
+  const n = logCount(scripts.log);
+  return (
+    <details className="fm-scripts">
+      <summary>
+        <span>Scripts</span>
+        {n > 0 && <span className="fm-badge" aria-label={`${n} warnings or errors`}>{n}</span>}
+        <span className="grow" />
+        <span className="dim small">{scripts.enabled ? "running" : "off"}</span>
+      </summary>
+      <label className="fm-check">
+        <input type="checkbox" checked={scripts.enabled} onChange={(e) => void fm().runScripts(doc, e.target.checked)} />
+        <span>Run scripts in this file</span>
+      </label>
+      {scripts.log.length === 0 ? (
+        <p className="dim small">Nothing to report.</p>
+      ) : (
+        <ul className="fm-log">
+          {scripts.log.map((l, i) => (
+            <li key={i} className={l.level}>
+              {l.field && <b>{l.field}</b>}
+              <span>{l.message}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </details>
+  );
+}
+
 export function FormsPanel({ doc }: { doc: DocState }) {
   const open = useForms((s) => s.open);
   const authoring = useForms((s) => s.authoring);
@@ -113,6 +166,8 @@ export function FormsPanel({ doc }: { doc: DocState }) {
               This form also carries XFA data, which Inkwell does not run. The fields below are its standard form fields.
             </p>
           )}
+
+          {d?.scripts?.hasScripts && <ScriptsNote doc={id} scripts={d.scripts} />}
 
           {!authoring && (
             <>
