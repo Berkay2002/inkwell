@@ -1006,8 +1006,8 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
                 return Err(EngineError::Invalid(format!("This document has more than {MAX_PAGES} pages, more than Inkwell removes the links of at once.")));
             }
             // Every page is read before the first link goes: a page that cannot be read in full stops the
-            // whole removal, so it is never half done.
-            let mut per_page: Vec<(u32, Vec<(i32, PdfObject)>)> = Vec::new();
+            // whole removal, so it is never half done. Nothing is kept between the two walks but numbers.
+            let mut any = false;
             for page in 0..n as u32 {
                 let found = page_annots(doc, page)?;
                 if found.cut {
@@ -1016,11 +1016,9 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
                         page + 1
                     )));
                 }
-                if !found.links.is_empty() {
-                    per_page.push((page, found.links));
-                }
+                any |= !found.links.is_empty();
             }
-            if per_page.is_empty() {
+            if !any {
                 return Ok(None);
             }
             let mut pages = Vec::new();
@@ -1028,8 +1026,12 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
             // An object can be listed by two pages: its structure entry and its object are dealt with once.
             let mut objects = Vec::new();
             let mut seen = HashSet::new();
-            for (page, links) in &per_page {
-                for (id, a) in links {
+            for page in 0..n as u32 {
+                let links = page_annots(doc, page)?.links;
+                if links.is_empty() {
+                    continue;
+                }
+                for (id, a) in &links {
                     if *id < 0 {
                         inline += 1;
                     } else if seen.insert(*id) {
@@ -1037,8 +1039,8 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
                         objects.push(*id);
                     }
                 }
-                drop_entries(doc, *page, &links.iter().map(|(id, _)| *id).collect::<Vec<_>>())?;
-                pages.push(*page);
+                drop_entries(doc, page, &links.iter().map(|(id, _)| *id).collect::<Vec<_>>())?;
+                pages.push(page);
             }
             for id in &objects {
                 doc.delete_object(*id)?;

@@ -495,18 +495,26 @@ export interface LinkBorder {
   color: [number, number, number];
 }
 
+/** How a link looks while it is pressed (`/H`): None, Invert (the default), Outline, Inset. */
+export type LinkHighlight = "none" | "invert" | "outline" | "inset";
+
 export interface PageLink {
-  /** The annotation's object number. */
+  /** The annotation's object number; negative for a link written inline in `/Annots` (minus its position, minus one). */
   id: number;
   /** x0, y0, x1, y1 in page space. */
   rect: [number, number, number, number];
   target: LinkTarget;
   border: LinkBorder;
+  highlight: LinkHighlight;
 }
 
 export interface PageLinks {
   rev: number;
   links: PageLink[];
+  /** Why the links cannot be changed (a certified document); null when they can. */
+  locked: string | null;
+  /** Signed: a change is saved after the signature. */
+  signed: boolean;
 }
 
 export type NewLinkTarget =
@@ -526,7 +534,9 @@ export type LinkOp =
   | { op: "setTarget"; page: number; id: number; target: NewLinkTarget }
   | { op: "setRect"; page: number; id: number; rect: [number, number, number, number] }
   | { op: "setBorder"; page: number; id: number; border: BorderSpec }
+  | { op: "setHighlight"; page: number; id: number; highlight: LinkHighlight }
   | { op: "delete"; page: number; ids: number[] }
+  | { op: "removeAll" }
   | { op: "fromUrls" };
 
 export interface LinkEdited {

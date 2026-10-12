@@ -29,7 +29,7 @@ export interface DocNav {
   urls: UrlPreview | null;
   /** Every link of the document counted, broken ones listed; null until asked. */
   audit: LinkAudit | null;
-  links: Record<number, { rev: number; links: PageLink[] }>;
+  links: Record<number, { rev: number; links: PageLink[]; locked: string | null; signed: boolean }>;
   selectedLink: { page: number; id: number } | null;
   /** A rectangle just drawn: the link is made when its target is chosen in the rail. */
   pending: { page: number; rect: Rect4 } | null;
@@ -237,6 +237,9 @@ interface Store {
   setLinkRect: (doc: number, page: number, id: number, rect: Rect4) => Promise<void>;
   setLinkBorder: (doc: number, page: number, id: number, border: BorderSpec) => Promise<void>;
   removeLinks: (doc: number, page: number, ids: number[]) => Promise<void>;
+  setLinkHighlight: (doc: number, page: number, id: number, highlight: api.LinkHighlight) => Promise<void>;
+  /** Counts the links, asks, then removes every one of them as one step; true when they went. */
+  removeAllLinks: (doc: number) => Promise<boolean>;
   askUrls: (doc: number) => Promise<void>;
   askAudit: (doc: number) => Promise<void>;
   /** Only broken bookmarks and links are listed. */
@@ -283,7 +286,7 @@ export const useNav = create<Store>((set, get) => {
       .then((l: PageLinks) => {
         const d = of(doc);
         const sel = d.selectedLink && d.selectedLink.page === page && !l.links.some((k) => k.id === d.selectedLink!.id) ? null : d.selectedLink;
-        patch(doc, { links: { ...d.links, [page]: { rev: l.rev, links: l.links } }, selectedLink: sel });
+        patch(doc, { links: { ...d.links, [page]: { rev: l.rev, links: l.links, locked: l.locked, signed: l.signed } }, selectedLink: sel });
       })
       .catch(() => undefined)
       .finally(() => inflight.delete(key));
@@ -456,6 +459,36 @@ export const useNav = create<Store>((set, get) => {
       }
     },
 
+    setLinkHighlight: async (doc, page, id, highlight) => {
+      const r = await lk(doc, page, { op: "setHighlight", page, id, highlight });
+      if (r) await reloadLinks(doc, page);
+    },
+
+    removeAllLinks: async (doc) => {
+      let total: number;
+      try {
+        total = (await api.linksAudit(doc)).total;
+      } catch (e) {
+        patch(doc, { notice: String(e) });
+        return false;
+      }
+      if (total === 0) {
+        patch(doc, { notice: "This document has no links." });
+        return false;
+      }
+      const signed = Object.values(of(doc).links).some((l) => l.signed);
+      const r = await message(
+        `Remove all ${plural(total, "link")} from this document?\n\nOther annotations and the bookmarks stay. You can undo it.${signed ? `\n\n${SIGNED_LINKS}` : ""}`,
+        { title: "Remove all links", kind: "warning", buttons: { ok: "Remove", cancel: "Cancel" } },
+      );
+      if (r !== "Ok" && r !== "Remove") return false;
+      const done = await editLinks(doc, docRev(doc), { op: "removeAll" });
+      if (done.kind === "stale") patch(doc, { notice: "The document changed while you were editing. Try that again." });
+      if (done.kind !== "ok") return false;
+      patch(doc, { selectedLink: null, pending: null, urls: null, notice: `${plural(done.value.count, "link")} removed.` });
+      return true;
+    },
+
     askUrls: async (doc) => {
       try {
         patch(doc, { urls: await api.linksUrls(doc) });
@@ -490,6 +523,19 @@ export const useNav = create<Store>((set, get) => {
     setNotice: (doc, notice) => patch(doc, { notice }),
   };
 });
+
+/** What a signed document's links warn when they are changed (the confirm and the panel show it). */
+export const SIGNED_LINKS =
+  "This document is signed. A change to its links is saved after the signature, which will show that the file was changed. Anything removed in the same session stays in the saved file, unused.";
+
+/** A link Inkwell follows in Read mode (anything else is kept as it is and does nothing). */
+export const isLive = (t: api.LinkTarget) => t.kind === "page" || t.kind === "uri" || t.kind === "file";
+
+/**
+ * What pressing a link shows in Read mode: the style the link asks for (`/H`), and nothing for a link that
+ * does nothing when it is clicked, since a press on it would promise a jump that does not come.
+ */
+export const pressFeedback = (t: api.LinkTarget, h: api.LinkHighlight): api.LinkHighlight => (isLive(t) ? h : "none");
 
 /** What a link to a file says about where it looks, once it has its name. */
 export function fileLinkNote(name: string): string {
