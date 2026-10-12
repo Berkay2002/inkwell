@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { pickSave, pickSource } from "../../lib/api";
 import {
   CERTIFY_LABEL, type Identity, type SignatureInfo, SOURCE_LABEL, STATUS, canSign, changeNote, idKey, locked, otherWarnings, outcome, pdfDate, picture, statusWord,
-  signApi, signed, useSign,
+  signApi, signed, uncheckedText, useSign,
 } from "../../lib/sign";
 import { type DocState, useStore } from "../../store";
 import { Icon, type IconName } from "../Icons";
@@ -256,7 +256,7 @@ function List({ doc }: { doc: DocState }) {
     <>
       <Head title="Signatures" count={done.length} />
       <div className="sg-body sg-list">
-        {error ? <p className="sg-callout">The signatures could not be checked: {error}.</p> : done.length === 0 && <p className="dim">This document has no signatures.</p>}
+        {error ? <p className="sg-callout">{uncheckedText(error)}</p> : done.length === 0 && <p className="dim">This document has no signatures.</p>}
         {done.map((x) => (
           <Card key={x.field} x={x} focus={x.field === focus?.field ? focus.n : 0} onOpen={() => go(x)} />
         ))}

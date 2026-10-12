@@ -204,11 +204,10 @@ describe("sign store", () => {
   it("keeps the level and says why when the signatures couldn't be checked, never 'not signed'", async () => {
     reply({ sign_list: { refused: "too many", certify: 1, signatures: [], error: "this document has more than 64 signatures, more than Inkwell checks" } });
     await s().refreshSigs(1, 1);
-    expect(locked(s().get(1))).toBe("too many");
-    expect(banner(s().get(1).sigs, s().get(1).sigsError)).toEqual({
-      tone: "invalid",
-      text: "The signatures could not be checked: this document has more than 64 signatures, more than Inkwell checks.",
-    });
+    // The sheet's callout (locked) and the banner say the same full sentence.
+    const text = "The signatures could not be checked: this document has more than 64 signatures, more than Inkwell checks.";
+    expect(locked(s().get(1))).toBe(text);
+    expect(banner(s().get(1).sigs, s().get(1).sigsError)).toEqual({ tone: "invalid", text });
   });
 
   it("says why when listing the signatures fails, never 'not signed'", async () => {

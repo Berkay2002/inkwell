@@ -205,10 +205,13 @@ export const otherWarnings = (s: SignatureInfo) => s.warnings.filter((w) => w.co
 
 export const signed = (l: SignatureInfo[]) => l.filter((s) => s.status !== "unsigned");
 
+/** The one sentence for signatures that couldn't be checked (the banner, the sheet's callout, the refusal on a field). */
+export const uncheckedText = (why: string) => `The signatures could not be checked: ${why}.`;
+
 /** The banner over a signed document: the worst state wins. Null when nothing is signed. */
 export function banner(list: SignatureInfo[], error: string | null = null): { tone: Tone; text: string } | null {
   // Signatures that couldn't be checked are never "not signed".
-  if (error) return { tone: "invalid", text: `The signatures could not be checked: ${error}.` };
+  if (error) return { tone: "invalid", text: uncheckedText(error) };
   const s = signed(list);
   if (s.length === 0) return null;
   const all = s.length === 1 ? "The signature is" : "All signatures are";
@@ -476,11 +479,11 @@ export const useSign = create<SignStore>((set, get) => {
       try {
         const { signatures: sigs, certify, refused, error } = await signApi.list(doc);
         const before = signed(get().get(doc).sigs).length;
-        patch(doc, { sigs, certify, refused, sigsError: error, sigsRev: rev, ...(signed(sigs).length !== before ? { bannerHidden: false } : {}) });
+        patch(doc, { sigs, certify, refused: error ? uncheckedText(error) : refused, sigsError: error, sigsRev: rev, ...(signed(sigs).length !== before ? { bannerHidden: false } : {}) });
       } catch (e) {
         // Never null: an empty list without a reason reads as "no signatures".
         const why = msg(e) || "the engine did not answer";
-        patch(doc, { sigs: [], certify: null, refused: `The signatures could not be checked: ${why}.`, sigsError: why, sigsRev: rev });
+        patch(doc, { sigs: [], certify: null, refused: uncheckedText(why), sigsError: why, sigsRev: rev });
       }
     },
     select: (doc, selected) => patch(doc, { selected }),

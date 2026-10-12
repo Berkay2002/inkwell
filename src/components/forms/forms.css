@@ -68,6 +68,15 @@ button.fm-w.k-signature {
 .fm-w.k-signature[aria-disabled="true"] {
   cursor: not-allowed;
 }
+/* a refused signature field: the tokens of .sg-field[aria-disabled] in Fill and Sign; opaque, to cover the tag MuPDF draws into the page */
+.fm-w.k-signature.locked {
+  background: var(--surface-2);
+  border: calc(1.5px / var(--z, 1)) dashed var(--border-strong);
+}
+/* nobody can fill it, so no red required frame */
+.fm-w.k-signature.locked:not(:focus) {
+  box-shadow: none;
+}
 .fm-w.ro {
   cursor: default;
 }
@@ -298,6 +307,10 @@ button.fm-w.k-signature {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-2);
+}
+.fm-row.locked {
+  color: var(--text-2);
+  opacity: 0.6;
 }
 .fm-row .req {
   color: var(--danger);
