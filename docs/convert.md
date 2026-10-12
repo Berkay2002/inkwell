@@ -18,8 +18,9 @@ colour; Heading 1 and 2 by size; tables found from the text layout; pictures at 
 style (`\s1`, `\s2`) and the same formatting directly, so a reader that ignores the style sheet still shows
 them. Every non-ASCII character is `\uN?` per UTF-16 unit (signed 16-bit N), so the file is plain ASCII.
 Pictures are `\pngblip` hex; the file holds at most 32 MB of PNG data, and pictures past that are left
-out with a warning. Check the file in Word and WordPad: only macOS TextEdit's reader (`textutil`) has
-been run against it.
+out with a warning. Not yet opened in Word or WordPad. macOS `textutil` read the text, the title and
+the table (one table, nine cells) but drops pictures even from a minimal hand-made RTF, so the picture
+is unconfirmed.
 
 ## Create
 From images (JPEG is embedded untouched; PNG/BMP/GIF Flate; every page of a multi-page TIFF), a plain-text
