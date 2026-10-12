@@ -115,6 +115,7 @@ pub(super) fn sign_with(base: &[u8], id: &DigitalId, req: &SignRequest, tamper: 
     if p == Some(1) {
         return Err(refuse(CERTIFIED_P1));
     }
+    let locks = locks_of(&fields, base);
     if req.certify.is_some() && (signed_before || crate::outline::signed(&doc)) {
         return Err(refuse("only the first signature can certify a document; this one is already signed"));
     }
@@ -155,7 +156,7 @@ pub(super) fn sign_with(base: &[u8], id: &DigitalId, req: &SignRequest, tamper: 
             if fields[k].value.is_some() {
                 return Err(refuse(format!("the field {n:?} is already signed")));
             }
-            if let Some(why) = refusal(p, &locks_of(&fields, base), &fields[k]) {
+            if let Some(why) = refusal(p, &locks, &fields[k]) {
                 return Err(refuse(why));
             }
             let f = fields.into_iter().nth(k).ok_or_else(|| refuse("the field"))?;
@@ -171,8 +172,16 @@ pub(super) fn sign_with(base: &[u8], id: &DigitalId, req: &SignRequest, tamper: 
             }
             let mut page = doc.find_page(req.page as i32).map_err(pdf_err)?;
             let rotate = page_rotation(&page);
-            let taken: Vec<String> = sig_fields(&doc)?.into_iter().map(|f| f.name).collect();
-            let fname = (1..).map(|i| format!("Signature{i}")).find(|n| !taken.contains(n)).unwrap_or_default();
+            // No name a form field has (a form too large to list keeps the signature fields' names) or a lock covers.
+            let mut taken: std::collections::HashSet<String> = sig_fields(&doc)?.into_iter().map(|f| f.name).collect();
+            taken.extend(crate::forms::scan(&doc).into_iter().flatten().map(|e| e.name));
+            let fname = match (1..=1000).map(|i| format!("Signature{i}")).find(|n| !taken.contains(n) && locked_by(&locks, n).is_none()) {
+                Some(n) => n,
+                None => {
+                    let why = locked_by(&locks, "Signature1").map_or("there is no free name for a new signature field".into(), |who| format!("New fields are locked by {who}'s signature."));
+                    return Err(refuse(why));
+                }
+            };
             let (rect, size) = match req.rect {
                 Some(r) => {
                     let ctm = page.page_ctm().map_err(pdf_err)?;

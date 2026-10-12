@@ -1635,8 +1635,8 @@ fn a_later_change_to_a_locked_field_is_flagged_on_the_signature_that_locks_it() 
     let s = field(&infos(&b), "Tenant").clone();
     assert!(s.changes == Changes::Changed && !codes(&s).contains(&WarningCode::LockedChanged), "{s:?}");
 
-    // A later signature into a field that /All locks (forged past the engine, which refuses it).
-    let b = lock_sign(&lease(), "Tenant", "<</Action/All>>", "");
+    // A later signature into a field the lock covers (forged past the engine, which refuses it).
+    let b = lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Witness)]>>", "");
     let forged = pdf::sign_with(&b, &ids().1, &unseen(), &mut |d, w| {
         let mut wit = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(1).unwrap().unwrap();
         wit.dict_put("V", w.get_dict("V").unwrap().unwrap()).unwrap();
@@ -1701,4 +1701,18 @@ fn a_lock_removed_in_a_later_update_still_locks() {
     assert!(PdfDocument::from_bytes(&stripped).unwrap().find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap().get_dict("Lock").unwrap().is_none());
     assert_eq!(locked_fields(&stripped), ["Witness"]);
     assert_eq!(field(&infos(&stripped), "Witness").locked_by.as_deref(), Some("Maple Property Test"));
+}
+
+#[test]
+fn a_new_signature_box_takes_no_form_name_and_no_locked_one() {
+    let names = |b: &[u8]| infos(b).into_iter().map(|s| s.field).collect::<Vec<_>>();
+    // A text field already called Signature1, and a lock on Signature2.
+    let b = form(&["/FT/Sig/T(Tenant)", "/FT/Tx/T(Signature1)"], |_, _| {});
+    let b = lock_sign(&b, "Tenant", "<</Action/Include/Fields[(Signature2)]>>", "");
+    let after = pdf::sign(&b, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap();
+    assert_eq!(names(&after), ["Tenant", "Signature3"]);
+    // /All covers every name a new field could take: refused, naming the signer.
+    let b = lock_sign(&lease(), "Tenant", "<</Action/All>>", "");
+    let e = pdf::sign(&b, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap_err();
+    assert_eq!(e.to_string(), "New fields are locked by Maple Property Test's signature.");
 }
