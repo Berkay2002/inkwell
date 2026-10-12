@@ -45,7 +45,17 @@ describe("the no-password footer", () => {
   it("shows for an unlocked row and for an owner-only source that has no password to enter", () => {
     expect(securityDropped([plain], [{ encrypted: false }])).toBe(false);
     expect(securityDropped([{ password: "pw", locked: null }], [{ encrypted: true }])).toBe(true);
-    expect(securityDropped([{ password: "", locked: 3 }], [])).toBe(true);
     expect(securityDropped([plain, plain], [{ encrypted: false }, { encrypted: true }])).toBe(true);
+    // a typed password counts before the plan has caught up
+    expect(securityDropped([{ password: "pw", locked: null }], [])).toBe(true);
+  });
+  it("does not show for a locked row that was never unlocked: it is left out", () => {
+    expect(securityDropped([{ password: "", locked: 3 }], [{ encrypted: false }])).toBe(false);
+    expect(securityDropped([{ password: "", locked: 3 }], [])).toBe(false);
+    expect(securityDropped([plain, { password: "", locked: 3 }], [{ encrypted: false }, { encrypted: false }])).toBe(false);
+    // the file next to it that does go in still says so
+    expect(securityDropped([{ password: "", locked: 3 }, plain], [{ encrypted: false }, { encrypted: true }])).toBe(true);
+    // unlocked, but its owner allows no copying: left out too, the plan says so
+    expect(securityDropped([{ password: "pw", locked: null }], [{ encrypted: false }])).toBe(false);
   });
 });

@@ -441,14 +441,65 @@ fn a_value_is_measured_by_length_before_it_is_read() {
             let short_list = string_over_limit(&list);
             list.array_push(s(MAX_STR + 1)?)?;
             Ok([
+                string_over_limit(&s(2 * MAX_STR + 3)?),
                 string_over_limit(&s(MAX_STR + 1)?),
-                string_over_limit(&s(MAX_STR)?),
                 string_over_limit(&PdfObject::new_name("On")?),
                 short_list,
                 string_over_limit(&list),
             ])
         })
         .unwrap();
-    // over the limit, at the limit, a name, a list of short values, the same list with one long entry
-    assert_eq!(got, [true, false, false, false, true]);
+    // over twice the limit, in between (measured once decoded, here 1 MB + 1 of plain text), a name, a list of
+    // short values, the same list with one long entry
+    assert_eq!(got, [true, true, false, false, true]);
+}
+
+#[test]
+fn a_utf16_value_is_measured_decoded_not_by_its_bytes() {
+    // One kanji makes the whole string UTF-16BE: 2 bytes a character, 1.5 MB raw, 750 002 bytes of text.
+    let (eng, id, _) = form("utf16-under");
+    let under = format!("あ{}", "x".repeat(749_999));
+    set(&eng, id, "Full name", text(&under));
+    set(&eng, id, "Address.Street", text("Main St"));
+    for fmt in [Format::Json, Format::Xfdf, Format::Fdf] {
+        let (bytes, done) = export(&eng, id, fmt, "a.pdf").unwrap();
+        assert_eq!(done.long_text, 0, "{fmt:?}");
+        let p = parse(&bytes).unwrap();
+        assert!(p.fields.iter().any(|(n, v)| n == "Full name" && *v == Val::Text(under.clone())), "{fmt:?}");
+    }
+    // 600 000 kanji: 1.2 MB raw, 1.8 MB of text: left out and counted
+    let (eng, id, _) = form("utf16-over");
+    set(&eng, id, "Full name", text(&"あ".repeat(600_000)));
+    set(&eng, id, "Address.Street", text("Main St"));
+    for fmt in [Format::Json, Format::Xfdf, Format::Fdf] {
+        let (bytes, done) = export(&eng, id, fmt, "a.pdf").unwrap();
+        assert_eq!(done.long_text, 1, "{fmt:?}");
+        let p = parse(&bytes).unwrap();
+        assert!(p.fields.iter().all(|(n, _)| n != "Full name"), "{fmt:?}");
+        assert!(p.fields.iter().any(|(n, v)| n == "Address.Street" && *v == Val::Text("Main St".into())), "{fmt:?}");
+    }
+}
+
+#[test]
+fn a_list_of_one_shared_utf16_string_is_not_decoded_once_per_entry() {
+    use crate::outline::tests::{open_bytes, raw_pdf};
+    // 1.99 MB of UTF-16BE (under the 2 MB that is surely over, 996 001 bytes of text), listed 4096 times
+    let units = 996_000;
+    let hex = format!("<FEFF3042{}>", "0078".repeat(units));
+    let refs = "7 0 R ".repeat(4096);
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".into(),
+        "<< >>".into(),
+        format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (List) /Rect [10 10 100 50] /P 3 0 R /V [{refs}] >>"),
+        "<< >>".into(),
+        hex,
+    ];
+    let d = dir("shared-utf16");
+    let (eng, id, _) = open_bytes(&d, "s.pdf", &raw_pdf(&objs));
+    let t = std::time::Instant::now();
+    let (_, done) = export(&eng, id, Format::Json, "s.pdf").unwrap();
+    assert_eq!(done.long_text, 1);
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "took {:?}", t.elapsed());
 }
