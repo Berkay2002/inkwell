@@ -1052,6 +1052,7 @@ pub fn run() {
         .manage(Arc::new(search::catalog::app::Jobs::default()))
         .manage(hist)
         .manage(sign::app::Ids::default())
+        .manage(imageedit::ImageClipboard::default())
         .manage(prepress)
         .manage(media)
         .on_window_event(|window, event| {
@@ -1357,6 +1358,11 @@ pub fn run() {
             textedit::app::text_fonts,
             imageedit::app::image_blocks,
             imageedit::app::image_edit,
+            imageedit::app::image_edit_many,
+            imageedit::app::image_copy,
+            imageedit::app::image_clip_info,
+            imageedit::app::image_paste,
+            imageedit::app::image_move_to_page,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,
