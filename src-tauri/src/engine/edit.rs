@@ -1433,6 +1433,15 @@ impl Engine {
         self.save_locked(id, &entry, &mut lane, Some(to))
     }
 
+    /// Why every edit of this document is refused before anything is written (a signed file that had to be
+    /// repaired on open), if it is: asked before the assistant shows its card.
+    pub fn edit_refusal(&self, id: DocId) -> Result<Option<&'static str>> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        Ok(ed.refuse)
+    }
+
     /// Runs `f` on the authoritative document (marks included) without changing it. `f` must not
     /// change the document or keep page handles.
     pub fn read_custom<R>(&self, id: DocId, f: impl FnOnce(&PdfDocument) -> Result<R>) -> Result<R> {

@@ -53,9 +53,9 @@ pub(super) fn state(l: &Lane) -> Result<EditState, String> {
     l.eng.edit_state(l.doc).map_err(err)
 }
 
-const REWRITE: &str = "This document is digitally signed and saving it would have to rewrite the whole file (Inkwell had \
-                        to repair it when opening it, or it was redacted in this session), which destroys the \
-                        signature. Tell the user; they can save a copy of the file and make the change there.";
+const REWRITE: &str = "This document is digitally signed and was redacted in this session, so saving it would have to rewrite \
+                        the whole file, which destroys the signature. Tell the user; they can save a copy of the file \
+                        and make the change there.";
 
 /// What a tool does to a signed file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,15 +74,17 @@ pub(super) enum Touch {
 pub(super) fn guard(l: &Lane, touch: Touch, fields: &[(u32, i32, String)]) -> Result<(), String> {
     // The signature reading every write path of the app uses (`outline`): signed, the certification's `/P`,
     // and whether a save of this document could be incremental.
-    let (signed, certified, incremental) = l
-        .eng
-        .read_custom(l.doc, |d| Ok((crate::outline::signed(d), crate::outline::certified(d)?, d.can_be_saved_incrementally())))
-        .map_err(err)?;
+    let (signed, certified) = l.eng.read_custom(l.doc, |d| Ok((crate::outline::signed(d), crate::outline::certified(d)?))).map_err(err)?;
+    // a file that had to be repaired on open is refused by the engine itself (`refuse_if_repaired_signed`); asked
+    // here too so the card is not shown for it
+    if let Some(m) = l.eng.edit_refusal(l.doc).map_err(err)? {
+        return Err(format!("{m} Tell the user."));
+    }
     if !signed {
         return Ok(());
     }
-    // repaired on open, or redacted in this session: either way every save is a full rewrite
-    if !incremental || l.eng.edit_state(l.doc).map_err(err)?.redacted {
+    // redacted in this session: every save from here on is a full rewrite
+    if l.eng.edit_state(l.doc).map_err(err)?.redacted {
         return Err(REWRITE.into());
     }
     match touch {

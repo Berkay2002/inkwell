@@ -537,6 +537,32 @@ fn a_signed_field_counts_even_without_sigflags_and_is_refused_before_the_card() 
 }
 
 #[test]
+fn a_signed_file_that_had_to_be_repaired_is_refused_before_the_card() {
+    // a signed file whose cross-reference table is gone: MuPDF rebuilds it, and the engine takes no edit of it
+    let src = fixture_doc("repaired-src");
+    certify(&src, None, None);
+    src.eng.save(src.doc, None).unwrap();
+    let path = src.eng.doc_entry(src.doc).unwrap().path().to_string();
+    let mut b = std::fs::read(path).unwrap();
+    let at = b.windows(10).rposition(|w| w == b"startxref
+").unwrap() + 10;
+    let end = at + b[at..].iter().position(|&c| c == b'
+').unwrap();
+    b.splice(at..end, *b"99999999");
+    let h = open_bytes("repaired", b);
+    let (r, s) = (rev(&h), steps(&h));
+    for (tool, args) in [
+        ("organize_pages", json!({ "action": "rotate", "pages": [1], "degrees": 90 })),
+        ("add_comment", json!({ "kind": "note", "page": 1, "x": 0.1, "y": 0.1, "text": "a" })),
+    ] {
+        let e = card(&h, tool, args.clone()).unwrap_err();
+        assert!(e.contains("repaired") && e.contains("save a copy"), "{tool}: {e}");
+        assert!(err_of(&h, tool, args).contains("repaired"), "{tool}");
+    }
+    assert_eq!((rev(&h), steps(&h)), (r, s));
+}
+
+#[test]
 fn a_certification_limits_comments_and_form_filling_to_what_it_allows() {
     // P=1: nothing may change; P=2: forms but no comments; P=3: forms and comments
     for (p, comments, forms) in [(1, false, false), (2, false, true), (3, true, true)] {

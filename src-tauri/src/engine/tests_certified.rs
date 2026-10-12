@@ -325,6 +325,8 @@ fn a_signed_file_that_had_to_be_repaired_takes_no_edit_but_can_be_saved_as_a_cop
         let e = r.unwrap_err().to_string();
         assert!(e.contains("repaired") && e.contains("save a copy"), "{e}");
     };
+    // The assistant asks before it shows a card.
+    assert!(eng.edit_refusal(id).unwrap().is_some_and(|m| m.contains("repaired")));
     refused(eng.apply(id, EditOp::Delete { pages: vec![1] }).map(|_| ()));
     refused(custom(&eng, id, |_| Ok(vec![0])));
     assert!(eng.edit_state(id).unwrap().undo.is_none(), "a refusal is not an undo step");
@@ -336,6 +338,7 @@ fn a_signed_file_that_had_to_be_repaired_takes_no_edit_but_can_be_saved_as_a_cop
     let again = crate::engine::Engine::new(2, 64 << 20);
     assert_eq!(again.open(&copy).unwrap().page_count, 2);
     // The copy is the document now, and takes edits.
+    assert!(eng.edit_refusal(id).unwrap().is_none());
     eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap();
     assert!(eng.edit_state(id).unwrap().undo.is_some());
 }

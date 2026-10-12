@@ -82,8 +82,9 @@ there meanwhile fails the job with `output-exists` and is left alone; progress g
 it runs; the panel's Stop ends the job and leaves nothing half-written; a made file is offered under the answer as
 **Open `<name>`** (`UiAction::File`, opened with its token); `open_tool` runs the tool as the All tools list would
 (`UiAction::OpenTool`, `aiOpenTool.ts`). Excluded for good (reasons in `aiCoverage.json`): digital signing and
-certifying, passwords and permissions, printing, overwriting the original, opening links, and anything that needs a
-file the user must pick (picture marks, insert image, merge).
+certifying, passwords and permissions, printing, overwriting the original, opening links, importing and exporting
+comments or form data (XFDF, FDF, JSON: a file the user picks or names, and an import overwrites what the document
+holds), laying out form fields, and anything that needs a file the user must pick (picture marks, insert image, merge).
 
 ## Rules every action tool follows
 
@@ -98,6 +99,8 @@ file the user must pick (picture marks, insert image, merge).
 - A password field (`/Ff` bit 14) is listed as `[password field]` without its value and is never filled: the user
   types it. A page list or range over 500 pages is an `Err`, not cut; a search with more than 500 matches is an
   `Err` and can be stopped (the search stops at 501 hits and honours the panel's Stop).
+- A signed file that Inkwell had to repair when opening it takes no edit at all (`Engine::edit_refusal`, from main's
+  `refuse_if_repaired_signed`): the refusal comes before the card and says to save a copy.
 - Every write goes through the module functions, which hold the guards (`outline::refuse_if_certified`,
   `refuse_unless_annotating_allowed`, `forms::set_value` locks); `sanitize_document` and `set_document_properties`
   call `refuse_if_certified` inside their closures. There is no second signature parser: `src-tauri/src/signed.rs` was
