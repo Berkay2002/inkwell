@@ -299,14 +299,52 @@ impl Dests {
         Ok(Some(Self { old, tree }))
     }
 
-    /// The destination a name or string stands for, if the document defines it.
-    fn lookup(&self, key: &PdfObject) -> Option<PdfObject> {
+    /// The destination a name or string stands for. `Some(None)`: the document does not define it. `None`: the key
+    /// could not be put in a form to look up (not UTF-8, a NUL, a lossy decode), so it is not judged.
+    fn lookup(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
         // A name goes in as the object itself: its bytes need not be UTF-8 (`/caf#E9`) and MuPDF compares bytes.
         // Resolved first: a dictionary lookup by a reference finds nothing.
         let key = key.resolve().ok().flatten().unwrap_or_else(|| key.share());
-        let key = if key.is_name().ok()? { key } else { PdfObject::new_name(&key.as_string().ok()?).ok()? };
-        [&self.tree, &self.old].into_iter().flatten().find_map(|d| d.get_dict(key.share()).ok().flatten())
+        let dicts = || [&self.tree, &self.old].into_iter().flatten();
+        if key.is_name().ok()? {
+            return Some(dicts().find_map(|d| d.get_dict(key.share()).ok().flatten()));
+        }
+        // A string: MuPDF keys the name tree by its decoded text (UTF-16BE, PDFDocEncoding), the old /Dests
+        // dictionary by the string's own bytes.
+        let bytes = key.as_bytes().ok()?;
+        let text = crate::outline::decode_text(&bytes);
+        let mut clean = !text.contains('\u{FFFD}');
+        match PdfObject::new_name(&text) {
+            Ok(n) => {
+                if let Some(v) = dicts().find_map(|d| d.get_dict(n.share()).ok().flatten()) {
+                    return Some(Some(v));
+                }
+            }
+            Err(_) => clean = false,
+        }
+        if let Some(old) = &self.old {
+            match raw_key_in(old, &bytes) {
+                Ok(Some(v)) => return Some(Some(v)),
+                Ok(None) => {}
+                Err(_) => clean = false,
+            }
+        }
+        clean.then_some(None)
     }
+}
+
+/// The value under the name whose bytes are `bytes`, which need not be UTF-8 (found by a scan, as a name object
+/// cannot be built from them).
+fn raw_key_in(dict: &PdfObject, bytes: &[u8]) -> Result<Option<PdfObject>, mupdf::Error> {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return dict.get_dict(s);
+    }
+    for i in 0..dict.dict_len()? as i32 {
+        if dict.get_dict_key(i)?.is_some_and(|k| k.as_name().is_ok_and(|n| n == bytes)) {
+            return dict.get_dict_val(i);
+        }
+    }
+    Ok(None)
 }
 
 /// An explicit destination array's page must be one of the document's pages. `pages`: when an integer
@@ -332,7 +370,10 @@ fn dest_ok(doc: &PdfDocument, d: &Dests, v: &PdfObject, pages: Option<i32>) -> b
         let next = if cur.is_dict().unwrap_or(false) {
             cur.get_dict("D").ok().flatten()
         } else if cur.is_name().unwrap_or(false) || cur.is_string().unwrap_or(false) {
-            d.lookup(&cur)
+            match d.lookup(&cur) {
+                Some(found) => found,
+                None => return true,
+            }
         } else {
             None
         };

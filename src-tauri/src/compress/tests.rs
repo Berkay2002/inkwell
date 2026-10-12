@@ -2025,3 +2025,68 @@ fn a_destination_name_held_by_an_indirect_object_is_still_looked_up() {
     let doc = open_pdf(&r.output, None).unwrap();
     assert_eq!(doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().len().unwrap(), 2);
 }
+
+#[test]
+fn a_string_destination_is_decoded_like_mupdf_does_and_one_that_cannot_be_judged_is_kept() {
+    let s = Scratch::new();
+    // the name tree has the keys "caf\351" (PDFDocEncoding) and U+00E9 U+00E9 (UTF-16BE)
+    let tree = "/Names << /Dests << /Names [(caf\\351) [5 0 R /Fit] <FEFF00E900E9> [5 0 R /Fit]] >> >>";
+    let input = s.path("tree.pdf");
+    bookmark_pdf(
+        &input,
+        tree,
+        "<< /Type /Outlines /First 7 0 R /Last 11 0 R /Count 5 >>",
+        &[
+            "<< /Title (A) /Parent 4 0 R /Dest <FEFF00E900E9> /Next 8 0 R >>",
+            "<< /Title (B) /Parent 4 0 R /Dest (caf\\351) /Next 9 0 R >>",
+            // a clean string that is not in the tree, in either encoding
+            "<< /Title (C) /Parent 4 0 R /Dest (gone) /Next 10 0 R >>",
+            "<< /Title (D) /Parent 4 0 R /Dest <FEFF0078> /Next 11 0 R >>",
+            // a lone surrogate does not decode cleanly: not judged, kept
+            "<< /Title (E) /Parent 4 0 R /A << /S /GoTo /D <FEFFD800> >> >>",
+        ],
+    );
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 2, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "A, B, E");
+
+    // the old /Dests dictionary is keyed by the string's own bytes, which are not UTF-8 here
+    let old = s.path("old.pdf");
+    bookmark_pdf(
+        &old,
+        "/Dests << /caf#E9 [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 2 >>",
+        &[
+            "<< /Title (Cafe) /Parent 4 0 R /Dest (caf\\351) /Next 8 0 R >>",
+            "<< /Title (Cag) /Parent 4 0 R /Dest (cag\\351) /Prev 7 0 R >>",
+        ],
+    );
+    o.output = Some(s.path("old-out.pdf"));
+    let r = run(&old, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 1, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "Cafe");
+
+    // and the same for a link's destination
+    let links = s.path("links.pdf");
+    let link = |rest: &str| format!("<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] {rest} >>");
+    let objs = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R {} >>", tree.replace("5 0 R", "4 0 R")),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 7 0 R 8 0 R] >>".to_string(),
+        link("/Dest <FEFF00E900E9>"),
+        link("/A << /S /GoTo /D (caf\\351) >>"),
+        link("/Dest (gone)"),
+        link("/Dest <FEFFD800>"),
+    ];
+    fs::write(&links, crate::outline::tests::raw_pdf(&objs)).unwrap();
+    let mut o = Options::preset(Preset::Custom);
+    o.strip.invalid_links = true;
+    o.output = Some(s.path("links-out.pdf"));
+    let r = run(&links, &o).unwrap();
+    assert_eq!(r.stripped.invalid_links, 1, "{:?}", r.stripped);
+    let doc = open_pdf(&r.output, None).unwrap();
+    assert_eq!(doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().len().unwrap(), 3);
+}
