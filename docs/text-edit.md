@@ -268,9 +268,12 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   judged the same way in a block too short or too indented to be read as justified: it ends where it did, unless it is the last line; a ragged line is not stretched. The spread is
   written as `TJ` adjustments at the spaces, so it works in any font (`Tw` would not in a two-byte one). The text
   of a run with a match is kept as it is (double and no-break spaces); only a space the replacement would double
-  at its edge goes. A line, a single-line block (heading, table cell) included, never grows past the width its
-  block had: nothing tells what is beside it, so a replacement that does not fit is not wrapped or pushed down
-  but skipped with "the replacement does not fit on its line". The same goes for a block whose line ends can't
+  at its edge goes. A line of a block of several lines never grows past the width its
+  block had, and a replacement that does not fit is not wrapped or pushed down but skipped with "the replacement
+  does not fit on its line". A one-line block (heading, table cell) may grow to the right: up to the nearer of the
+  next text or image box that starts to its right on its baseline band (less half its size) and the page's
+  margin (36 pt in), and never less than the room it had; past that it is skipped the same way. The columns of a
+  page are not known, so a column's edge counts only through the text beside it. The same goes for a block whose line ends can't
   be placed in its new text, for a block whose lines have their own character spacing or scale, and for a match
   that stops inside a word a dropped hyphen split. A match across a line end
   drops

@@ -1026,6 +1026,37 @@ fn edge_spaces(l: &Line) -> (f64, f64) {
     (lead, trail)
 }
 
+/// How far right (user space) the line `l` of a one-line block may be set when a replacement is longer: up to
+/// the nearest of the next text or image box that starts to its right on its baseline band and the page's margin,
+/// and never short of where it ends now.
+fn room_right(images: &[crate::imageedit::Placed], pc: &PageContent, l: &Line) -> f64 {
+    let [x0, y0, x1, y1] = l.rect;
+    let (lo, hi) = (y0.min(y1), y0.max(y1));
+    // On the band when more than a third of the line's height is shared.
+    let on_band = |a: f64, b: f64| b.min(hi) - a.max(lo) > (hi - lo) * 0.33;
+    // Starts at or after the line's end (a mark that touches it, or text over it, is not a neighbour).
+    let after = |x: f64| x >= x1 - l.size * 0.1;
+    let mut near = pc.crop[2] - 36.0;
+    for o in &pc.lines {
+        let [a, b, c, d] = o.rect;
+        let same = (a - x0).abs() < 1e-6 && (c - x1).abs() < 1e-6 && (b - y0).abs() < 1e-6 && (d - y1).abs() < 1e-6;
+        if !same && !o.hidden && o.render_mode != 3 && on_band(b.min(d), b.max(d)) && after(a) {
+            near = near.min(a - l.size * 0.5);
+        }
+    }
+    for img in images {
+        let [a, b, c, d, e, f] = img.ctm;
+        let xs = [e, a + e, c + e, a + c + e];
+        let ys = [f, b + f, d + f, b + d + f];
+        let (ax, ay) = (xs.iter().copied().fold(f64::MAX, f64::min), ys.iter().copied().fold(f64::MAX, f64::min));
+        let by = ys.iter().copied().fold(f64::MIN, f64::max);
+        if on_band(ay, by) && after(ax) {
+            near = near.min(ax - l.size * 0.5);
+        }
+    }
+    near.max(x1)
+}
+
 /// Whether a line's spaces were stretched to fill it (justified): the line, `width` wide in text space, is wider
 /// than its glyphs by more than a tenth of its size at each of its spaces. Kerning and the odd Tc are far below that.
 fn stretched(l: &Line, width: f64) -> bool {
@@ -1438,6 +1469,8 @@ fn rewrite_in(doc: &mut PdfDocument, page: u32, pc: &PageContent, b: &Block, cha
         return Err(invalid("there is no text to set"));
     }
     let st = &o.state;
+    // The images a one-line block's growth must keep clear of (read before the setter takes the document).
+    let images = if members.len() == 1 && change.keep.as_ref().is_some_and(|k| !k.wrap) { crate::imageedit::placed_images(doc, page).unwrap_or_default() } else { Vec::new() };
     let mut setter = Setter::new(doc, pc.page.clone());
     let mut items = Vec::new();
     // The size lines are spaced by: the first run that is not raised, and what it was.
@@ -1614,6 +1647,12 @@ fn rewrite_in(doc: &mut PdfDocument, page: u32, pc: &PageContent, b: &Block, cha
             return Err(invalid("there is no text to set"));
         }
         let grow = change.keep.as_ref().is_some_and(|k| k.wrap).then_some(lead);
+        // A one-line block (a heading, a table cell) may take a longer word where nothing is beside it.
+        let right = if members.len() == 1 && grow.is_none() && align == Align::Left && upright {
+            right + (room_right(&images, pc, first) - first.rect[2]).max(0.0) / k
+        } else {
+            right
+        };
         let (lines, at) = keep_lines(groups, &spans, &full, align, (left, right), 0.5 / k, &m, grow)
             .ok_or_else(|| invalid("the replacement does not fit on its line"))?;
         line_at = at;

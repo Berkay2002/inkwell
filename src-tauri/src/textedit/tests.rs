@@ -2275,11 +2275,10 @@ fn a_no_break_space_and_a_double_space_next_to_a_match_stay_as_they_were() {
 }
 
 #[test]
-fn a_single_line_is_never_set_wider_than_it_was() {
+fn a_single_line_stays_clear_of_the_text_beside_it() {
     let d = dir("replace-single-line-room");
-    // A heading or a cell: nothing tells what is beside it (a rule, an image, an empty cell), so it stays inside
-    // the width it had.
-    let page = "BT /F1 12 Tf 72 700 Td (A cat) Tj ET";
+    // A cell with another cell 15 pt past its end: a word of its own width goes on, a longer one is skipped.
+    let page = "BT /F1 12 Tf 72 700 Td (A cat) Tj ET\nBT /F1 12 Tf 120 700 Td (Qty) Tj ET";
     let (eng, id, _) = open(&d, &pages_pdf(&[page]));
     let r = do_replace(&eng, id, &req("cat", "act", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
@@ -2287,7 +2286,7 @@ fn a_single_line_is_never_set_wider_than_it_was() {
     let r = do_replace(&eng, id, &req("cat", "cat on a mat", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
     assert_eq!(r.skipped[0].reason, "skipped: the replacement does not fit on its line");
-    assert_eq!(all_text(&eng, id), "A cat");
+    assert_eq!(all_text(&eng, id), "A cat Qty");
 }
 
 #[test]
@@ -2464,6 +2463,36 @@ fn a_changed_line_justified_in_the_source_is_stretched_to_its_end_again() {
     do_replace(&eng, id, &req("eee", "e", SearchOpts::default())).unwrap();
     let last = blocks(&eng, id, 0).unwrap().blocks[0].clone();
     assert!(last.lines[1][2] < before.lines[1][2] - 5.0, "{:?} vs {:?}", last.lines, before.lines);
+}
+
+#[test]
+fn a_one_line_block_takes_a_longer_word_where_nothing_is_beside_it() {
+    let d = dir("replace-one-line-grows");
+    // A heading alone on its band, a cell with another cell 58 pt to its right, and a cell with an image there.
+    let page = "BT /F1 12 Tf 72 700 Td (Heading) Tj ET\nBT /F1 12 Tf 72 600 Td (Item) Tj ET\nBT /F1 12 Tf 130 600 Td (Qty) Tj ET\n\
+                BT /F1 12 Tf 72 500 Td (Cell) Tj ET\nq 20 0 0 20 130 498 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \0 EI Q";
+    let (eng, id, path) = open(&d, &pages_pdf(&[page]));
+    let all = |eng: &Engine| page_lines(eng, id);
+    // Free room: the line grows to the right, the start stays.
+    let before = blocks(&eng, id, 0).unwrap().blocks.iter().find(|b| b.text == "Heading").unwrap().lines[0];
+    let r = do_replace(&eng, id, &req("Heading", "A much longer heading than it was", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    let grown = blocks(&eng, id, 0).unwrap().blocks.iter().find(|b| b.text.starts_with("A much")).unwrap().lines[0];
+    assert!((grown[0] - before[0]).abs() < 0.1 && grown[2] > before[2] + 100.0, "{grown:?} vs {before:?}");
+    // A neighbour on the same baseline: what fits before it goes, what doesn't is skipped as before.
+    let r = do_replace(&eng, id, &req("Item", "Item and more items", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    assert_eq!(r.skipped[0].reason, "skipped: the replacement does not fit on its line");
+    let r = do_replace(&eng, id, &req("Item", "Items", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    // An image beside it is a neighbour too.
+    let r = do_replace(&eng, id, &req("Cell", "Cell with a long text", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    assert!(all(&eng).iter().any(|l| l == "Items") && all(&eng).iter().any(|l| l == "Cell"), "{:?}", all(&eng));
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert!(page_lines(&eng, id).iter().any(|l| l == "A much longer heading than it was"));
 }
 
 #[test]

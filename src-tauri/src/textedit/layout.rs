@@ -705,6 +705,7 @@ fn stroke_of(fill: &[Op]) -> Vec<Op> {
 /// `full[i]` is whether source line `i` had its spaces stretched to fill it (a justified line in a block too short
 /// or too indented to be read as justified): a changed line that stands for one is stretched to its end again,
 /// unless it is the block's last, as a line of a justified block is.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn keep_lines(
     groups: Vec<(usize, Vec<Item>, bool)>,
     spans: &[(f64, f64, f64)],
