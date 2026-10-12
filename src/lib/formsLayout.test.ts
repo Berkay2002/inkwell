@@ -9,8 +9,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { applyState } from "./edit";
 import { useForms } from "./forms";
 import {
-  CERTIFIED_REASON, type Field, NudgeBatch, anchorOf, layoutReason, marqueeHits, nextPicks, normBox, nudgeDelta, renameCheck,
+  CERTIFIED_REASON, type Field, NudgeBatch, anchorOf, groupDelta, groupDragEnd, groupPicks, layoutReason, marqueeHits, nextPicks, normBox, nudgeDelta,
+  renameCheck,
 } from "./formsLogic";
+import { type Rot, unrotatePoint } from "./layout";
 
 const inv = vi.mocked(invoke);
 const f = (p: Partial<Field>): Field => ({
@@ -200,5 +202,105 @@ describe("layout actions in the store", () => {
     inv.mockClear();
     await useForms.getState().nudge(1, 3, -10);
     expect(inv).toHaveBeenCalledWith("forms_nudge", { doc: 1, items: [[0, 2]], dx: 3, dy: -10 });
+  });
+});
+
+describe("group drag", () => {
+  const PAGE: [number, number] = [600, 800];
+  it("a press on a picked field of a selection of two or more drags the picked fields of its page", () => {
+    expect(groupPicks([p(1), p(2), p(3)], p(2))).toEqual([p(1), p(2), p(3)]);
+    // a field that is not picked drags alone (and becomes the selection); so does a one-field selection
+    expect(groupPicks([p(1), p(2)], p(3))).toBeNull();
+    expect(groupPicks([p(1)], p(1))).toBeNull();
+    expect(groupPicks([], p(1))).toBeNull();
+    // picks on other pages stay where they are
+    expect(groupPicks([p(1, 0), p(2, 1), p(3, 0)], p(1, 0))).toEqual([p(1, 0), p(3, 0)]);
+  });
+
+  it("the group moves by the pointer's distance, as one block that stops at the page edge", () => {
+    const rects: [number, number, number, number][] = [[100, 100, 160, 120], [300, 400, 380, 430]];
+    expect(groupDelta(rects, 25, -10, PAGE)).toEqual([25, -10]);
+    // the block's right edge is 380: 220 to go; the top edge is 100
+    expect(groupDelta(rects, 500, 0, PAGE)).toEqual([220, 0]);
+    expect(groupDelta(rects, 0, -500, PAGE)).toEqual([0, -100]);
+    expect(groupDelta(rects, -500, 900, PAGE)).toEqual([-100, 370]);
+    // each field keeps its place in the block: one field does not run ahead of the others
+    const moved = rects.map((r) => [r[0] + 220, r[2] + 220]);
+    expect(moved[1][1]).toBe(600);
+    expect(moved[1][0] - moved[0][0]).toBe(200);
+  });
+
+  it("a block already past an edge may not go further past it, but may come back", () => {
+    const off: [number, number, number, number][] = [[-10, 50, 40, 70], [100, 50, 150, 70]];
+    expect(groupDelta(off, -30, 0, PAGE)).toEqual([0, 0]);
+    expect(groupDelta(off, 30, 0, PAGE)).toEqual([30, 0]);
+    expect(groupDelta([], 5, 5, PAGE)).toEqual([0, 0]);
+  });
+
+  it("releasing: a cancelled drag sends nothing, a click narrows, a block that could not move sends nothing, a drag nudges", () => {
+    expect(groupDragEnd(null)).toEqual({ kind: "none" });
+    expect(groupDragEnd({ moved: false, delta: [1, 1] })).toEqual({ kind: "select" });
+    expect(groupDragEnd({ moved: true, delta: [0, 0] })).toEqual({ kind: "none" });
+    expect(groupDragEnd({ moved: true, delta: [0, -7] })).toEqual({ kind: "nudge", by: [0, -7] });
+  });
+
+  it("follows the page as shown: a drag across the turned page gives the page-space distance, whatever the view rotation", () => {
+    const rects: [number, number, number, number][] = [[100, 100, 160, 120], [300, 400, 380, 430]];
+    // A pointer that moved 40 right and 20 down on the screen, as page points for each view rotation.
+    const pageDelta = (rot: Rot): [number, number] => {
+      const [x0, y0] = unrotatePoint(PAGE, rot, 200, 300);
+      const [x1, y1] = unrotatePoint(PAGE, rot, 240, 320);
+      return [x1 - x0, y1 - y0];
+    };
+    expect(pageDelta(0)).toEqual([40, 20]);
+    expect(pageDelta(1)).toEqual([20, -40]);
+    expect(pageDelta(2)).toEqual([-40, -20]);
+    expect(pageDelta(3)).toEqual([-20, 40]);
+    for (const rot of [0, 1, 2, 3] as Rot[]) {
+      expect(groupDelta(rects, ...pageDelta(rot), PAGE)).toEqual(pageDelta(rot));
+    }
+    // Dragging far right on a page turned 90 degrees runs the block into the top edge of the page space (y) and its
+    // right edge (x, the drag also went 20 down on the screen).
+    const [dx, dy] = pageDelta(1);
+    expect(groupDelta(rects, dx * 100, dy * 100, PAGE)).toEqual([220, -100]);
+  });
+});
+
+describe("group drag in the store", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useForms.setState({ docs: {}, open: false, authoring: true, tool: "select" });
+  });
+  const list = {
+    fields: [f({ xref: 1 }), f({ xref: 2, node: 2 }), f({ xref: 3, node: 3, page: 1 })],
+    xfa: false,
+  };
+  const setup = async () => {
+    inv.mockImplementation((cmd: string) => Promise.resolve(cmd.startsWith("forms_") && cmd !== "forms_list" ? state : list));
+    await useForms.getState().refresh(1);
+  };
+
+  it("sends one nudge with the drag's distance and only the picked fields of the drag page", async () => {
+    await setup();
+    useForms.getState().pickMany(1, [p(1), p(3, 1), p(2)]);
+    inv.mockClear();
+    expect(await useForms.getState().nudge(1, 12.5, -4, 0)).toBe(true);
+    expect(inv).toHaveBeenCalledWith("forms_nudge", { doc: 1, items: [[0, 1], [0, 2]], dx: 12.5, dy: -4 });
+    expect(inv.mock.calls.filter((c) => c[0] === "forms_nudge")).toHaveLength(1);
+    // The selection (across pages) is still there afterwards.
+    expect(useForms.getState().get(1).picked).toEqual([p(1), p(3, 1), p(2)]);
+  });
+
+  it("a refusal refuses the whole drag: the engine's message is the error and the picks stay", async () => {
+    await setup();
+    useForms.getState().pickMany(1, [p(1), p(2)]);
+    inv.mockClear();
+    inv.mockImplementation((cmd: string) =>
+      cmd === "forms_nudge" ? Promise.reject("The field [ A ] is locked by a signature") : Promise.resolve(list),
+    );
+    expect(await useForms.getState().nudge(1, 8, 8, 0)).toBe(false);
+    expect(useForms.getState().get(1).error).toBe("The field [ A ] is locked by a signature");
+    expect(applyState).not.toHaveBeenCalled();
+    expect(useForms.getState().get(1).picked).toEqual([p(1), p(2)]);
   });
 });

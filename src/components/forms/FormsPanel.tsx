@@ -525,7 +525,7 @@ function LayoutTools({ doc, pageCount, picked, fields, certified }: {
       ) : (
         <>
           {signed && <p className="fm-note">{SIGNED_NOTE}</p>}
-          {picked.length < 2 && <p className="dim small" style={{ margin: 0 }}>Ctrl- or Shift-click more fields, or drag a box around them. The last one picked is the anchor. Arrow keys nudge (Shift: 10 pt).</p>}
+          {picked.length < 2 && <p className="dim small" style={{ margin: 0 }}>Ctrl- or Shift-click more fields, or drag a box around them. The last one picked is the anchor. Drag one of them to move them all; arrow keys nudge (Shift: 10 pt).</p>}
         </>
       )}
       {dialog === "duplicate" && <DuplicateDialog doc={doc} pageCount={pageCount} onDone={(m) => setNote(m)} />}

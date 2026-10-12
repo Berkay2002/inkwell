@@ -3,7 +3,7 @@ import { commandFor } from "../../lib/commands";
 import { useForms } from "../../lib/forms";
 import {
   type ButtonAction, type Field, type FieldValue, type Handle, type Pick, type Rect4, HANDLES, KIND_LABEL, anchorOf, commitThenRun, cssColor, dragged,
-  fontSize, isCalculated, marqueeHits, move, normBox, onPage, resetTargets, resize, samePick,
+  fontSize, groupDelta, groupDragEnd, groupPicks, isCalculated, marqueeHits, move, normBox, onPage, resetTargets, resize, samePick,
 } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 import { useStore } from "../../store";
@@ -41,7 +41,11 @@ export const FormLayer = memo(function FormLayer(p: Props) {
   return <Layer {...p} all={fields} mine={mine} authoring={authoring} />;
 });
 
-type Drag = { mode: "move" | { resize: Handle }; start: Pt; rect0: Rect4; rect: Rect4; moved: boolean; xref: number };
+/** `group` is set when the press was on a picked field of a selection of two or more: they all move by `delta`. */
+type Drag = {
+  mode: "move" | { resize: Handle }; start: Pt; rect0: Rect4; rect: Rect4; moved: boolean; xref: number;
+  group: Pick[] | null; delta: Pt;
+};
 
 function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props & { all: Field[]; mine: Field[]; authoring: boolean }) {
   const highlight = useForms((s) => s.highlight);
@@ -63,6 +67,7 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
     const k = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || (e.target as HTMLElement | null)?.closest("input, textarea, select")) return;
       setDraft(null);
+      setDrag(null); // a drag in progress is cancelled: nothing is sent
       if (fm().tool !== "select") fm().setTool("select");
     };
     window.addEventListener("keydown", k);
@@ -81,26 +86,39 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
     e.stopPropagation();
     if (MAC && e.ctrlKey) return; // the context menu follows
     e.currentTarget.setPointerCapture(e.pointerId);
-    // Ctrl, Cmd or Shift adds to the picked fields and does not drag; a plain press picks just this one (no group drag).
+    // Ctrl, Cmd or Shift adds to the picked fields and does not drag. A plain press on a picked field of a selection of
+    // two or more drags them all; on any other field it picks just that one and drags it.
     if (additive(e)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
       fm().toggle(docId, { page: f.page, xref: f.xref });
       return;
     }
-    if (!(picked.length === 1 && samePick(picked[0], f))) fm().select(docId, { page: f.page, xref: f.xref });
-    setDrag({ mode, start: toPage(e), rect0: f.rect, rect: f.rect, moved: false, xref: f.xref });
+    const group = mode === "move" ? groupPicks(picked, f) : null;
+    if (!group && !(picked.length === 1 && samePick(picked[0], f))) fm().select(docId, { page: f.page, xref: f.xref });
+    setDrag({ mode, start: toPage(e), rect0: f.rect, rect: f.rect, moved: false, xref: f.xref, group, delta: [0, 0] });
   };
   const onDragMove = (e: React.PointerEvent) => {
     if (!drag) return;
     const q = toPage(e);
     const [dx, dy] = [q[0] - drag.start[0], q[1] - drag.start[1]];
+    const moved = drag.moved || Math.hypot(dx, dy) * zoom > 3;
+    if (drag.group) {
+      const rects = mine.filter((m) => drag.group!.some((p) => samePick(p, m))).map((m) => m.rect);
+      return setDrag({ ...drag, delta: groupDelta(rects, dx, dy, rawSize), moved });
+    }
     const rect = drag.mode === "move" ? move(drag.rect0, dx, dy, rawSize) : resize(drag.rect0, drag.mode.resize, dx, dy, rawSize);
-    setDrag({ ...drag, rect, moved: drag.moved || Math.hypot(dx, dy) * zoom > 3 });
+    setDrag({ ...drag, rect, moved });
   };
   const onDragEnd = () => {
     const d = drag;
     setDrag(null);
-    if (d?.moved) void fm().move(docId, page, d.xref, d.rect);
+    if (!d) return;
+    if (d.group) {
+      // The group goes as one nudge of the picked fields of this page; a click without a drag narrows the selection to the field.
+      const end = groupDragEnd(d);
+      if (end.kind === "select") fm().select(docId, { page, xref: d.xref });
+      else if (end.kind === "nudge") void fm().nudge(docId, end.by[0], end.by[1], page);
+    } else if (d.moved) void fm().move(docId, page, d.xref, d.rect);
   };
 
   const create = () => {
@@ -152,7 +170,10 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
           {mine.map((f) => {
             const on = picked.some((p) => samePick(p, f));
             const isAnchor = on && picked.length > 1 && !!anchor && samePick(anchor, f);
-            const r = drag && drag.xref === f.xref ? drag.rect : f.rect;
+            const along = drag?.group?.some((p) => samePick(p, f)) ? (drag.moved ? drag.delta : ([0, 0] as Pt)) : null;
+            const r: Rect4 = along
+              ? [f.rect[0] + along[0], f.rect[1] + along[1], f.rect[2] + along[0], f.rect[3] + along[1]]
+              : drag && !drag.group && drag.xref === f.xref ? drag.rect : f.rect;
             return (
               <div
                 key={f.xref}
@@ -162,6 +183,7 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
                 onPointerDown={(e) => tool === "select" && e.button === 0 && startDrag(e, f, "move")}
                 onPointerMove={onDragMove}
                 onPointerUp={onDragEnd}
+                onPointerCancel={() => setDrag(null)}
                 onContextMenu={(e) => {
                   if (tool !== "select") return;
                   e.preventDefault();

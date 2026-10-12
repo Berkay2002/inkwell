@@ -38,6 +38,16 @@ fn is_password(e: &Entry) -> bool {
     e.kind == FieldKind::Text && flag(field_ff(e), FieldFlags::PASSWORD)
 }
 
+/// A string value, or one of an array's strings (as many as `values_of` reads), over 1 MB, found by its length.
+fn string_over_limit(v: &PdfObject) -> bool {
+    let over = |o: &PdfObject| o.is_string().unwrap_or(false) && o.string_len().is_ok_and(|n| n > MAX_STR);
+    if v.is_array().unwrap_or(false) {
+        (0..v.len().unwrap_or(0).min(4096) as i32).any(|i| v.get_array(i).ok().flatten().is_some_and(|x| over(&x)))
+    } else {
+        over(v)
+    }
+}
+
 /// The fields with a value, how many password fields were left out, and how many fields were left out for a value over
 /// 1 MB (a file Inkwell reads cannot hold one: XFDF refuses the whole file, and an import that read it as empty would
 /// clear the field).
@@ -55,7 +65,13 @@ fn collect(doc: &PdfDocument) -> Result<(Vec<Out>, usize, usize)> {
             passwords += 1;
             continue;
         }
-        let mut values: Vec<String> = values_of(geti(&e.field, "V"));
+        let v = geti(&e.field, "V");
+        // Measured before it is read: a value over 1 MB is counted, never copied.
+        if v.as_ref().is_some_and(string_over_limit) {
+            long_text += 1;
+            continue;
+        }
+        let mut values: Vec<String> = values_of(v);
         if values.iter().any(|v| v.len() > MAX_STR) {
             long_text += 1;
             continue;
@@ -279,15 +295,22 @@ pub fn parse_json(bytes: &[u8]) -> Result<Parsed> {
             serde_json::Value::Null => Val::Text(String::new()),
             serde_json::Value::Number(n) => Val::Text(n.to_string()),
             serde_json::Value::Array(a) if a.len() <= MAX_ITEMS => {
+                // An entry over 1 MB is named as such, as fdf_value does, not as a wrong kind of value.
+                let long = std::cell::Cell::new(false);
                 let strings: Option<Vec<String>> = a
                     .into_iter()
                     .map(|x| match x {
                         serde_json::Value::String(s) if str_ok(&s) => Some(s),
+                        serde_json::Value::String(_) => {
+                            long.set(true);
+                            None
+                        }
                         serde_json::Value::Number(n) => Some(n.to_string()),
                         _ => None,
                     })
                     .collect();
-                strings.map_or(Val::Invalid("a list takes text values only"), Val::Many)
+                let why = if long.get() { "the value is longer than 1 MB" } else { "a list takes text values only" };
+                strings.map_or(Val::Invalid(why), Val::Many)
             }
             _ => Val::Invalid("a field takes text, a list of text or on/off"),
         };
