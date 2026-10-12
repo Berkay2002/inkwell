@@ -32,8 +32,8 @@ the sanitize switches of Redact; the two exports have no range (not done, see Ga
   file: a warning "<step> (pages 8-9): the page range 8-9 is past the last page (the file has 5), so nothing was done."
   (Redact still applies its sanitize switches). Neither fails the file: a batch holds files of different lengths.
 - Header/footer `<<1>>` counts from the first page of the range (the marks engine's own numbering), Bates numbers go on
-  the pages of the range in order, flatten forms leaves the fields of the other pages as fields, redact finds and applies
-  only on the range, OCR reads only the pages of the range that have no text (all of them with `force`).
+  the pages of the range in order, flatten forms leaves the fields of the other pages as fields, redact searches only the
+  range (marks already placed in a source are applied wherever they are: `redact::apply` takes the whole document), OCR reads only the pages of the range that have no text (all of them with `force`).
 - Preview does not open the files for their page counts, so it cannot show clipping.
 
 ### Prompt user per step
@@ -167,7 +167,8 @@ Tools > Action Wizard, or "Action Wizard" in the command palette. One centred sh
   Run view's "What it does" list and each file's preview line ("asks before ...") show them too.
 - **Prompt sheet**: during a run, a dialog over the progress ("Step 2 of 4: Watermark", the file's name) with the step's
   options and Pages field, the engine's reason when an answer was refused, and Continue / Skip this step / Stop. It is a
-  modal dialog: Escape does nothing, so a stray key never stops the run. Cancel in the footer still works.
+  modal dialog over the whole sheet: Escape does nothing, so a stray key never stops the run, and Stop in the dialog is how
+  a run is cancelled while it waits (the footer's Cancel is behind it).
 
 Screens: `docs/screens/batch/` (light and dark), taken by `scripts/batch-shots.mjs` in headless Chrome against a mocked
 invoke layer, so they show the interface, not the engine. The runtime pass against the real exe is still to do on the PC.

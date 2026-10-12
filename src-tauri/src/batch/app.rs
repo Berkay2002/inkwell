@@ -289,3 +289,38 @@ pub fn batch_prompt_answer(prompts: PromptState<'_>, job: u64, request: u64, ans
 pub fn batch_cancel(jobs: JobState<'_>, job: u64) {
     jobs.cancel(job);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch::action::Step;
+
+    /// The exact JSON the UI sends (`BatchAnswer` in api.ts): a wrong tag or casing would leave a prompt
+    /// unanswerable, and the run waiting until it timed out.
+    #[test]
+    fn the_answers_the_ui_sends_are_read_and_a_late_or_second_one_is_dropped() {
+        let go: PromptAnswer = serde_json::from_str(
+            r#"{"kind":"continue","step":{"kind":"watermark","text":"FINAL","pages":"1-2","prompt":true}}"#,
+        )
+        .unwrap();
+        let PromptAnswer::Continue { step } = go else { panic!("not a continue") };
+        assert!(matches!(&step.step, Step::Watermark(w) if w.text == "FINAL"));
+        assert_eq!(step.pages, "1-2");
+        assert!(step.prompt);
+        assert!(matches!(serde_json::from_str::<PromptAnswer>(r#"{"kind":"skip"}"#).unwrap(), PromptAnswer::Skip));
+        assert!(matches!(serde_json::from_str::<PromptAnswer>(r#"{"kind":"stop"}"#).unwrap(), PromptAnswer::Stop));
+        assert!(serde_json::from_str::<PromptAnswer>(r#"{"kind":"carryOn"}"#).is_err());
+
+        let prompts = Prompts::default();
+        let rx = prompts.register(3, 11);
+        assert!(!prompts.answer(3, 99, Answer::Skip), "an unknown request");
+        assert!(!prompts.answer(4, 11, Answer::Skip), "another run's request");
+        assert!(prompts.answer(3, 11, Answer::Stop));
+        assert!(matches!(rx.recv().unwrap(), Answer::Stop));
+        assert!(!prompts.answer(3, 11, Answer::Skip), "a second answer");
+        // a run that ends takes its open questions with it
+        let _rx = prompts.register(5, 20);
+        prompts.end_job(5);
+        assert!(!prompts.answer(5, 20, Answer::Skip));
+    }
+}
