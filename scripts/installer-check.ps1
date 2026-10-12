@@ -1,6 +1,6 @@
 # Installs an Inkwell MSI, checks what it registered and that "Open with Inkwell" forwards to one running
 # instance, uninstalls, and checks nothing is left. Needs an elevated shell for the per-machine MSI.
-#   pwsh -File scripts/installer-check.ps1 -Msi <path to Inkwell_0.1.0_x64_en-US.msi> -Pdf 'a.pdf;b.pdf' [-Desktop]
+#   pwsh -File scripts/installer-check.ps1 -Msi <path to Inkwell_0.1.0_x64_en-US.msi> -Pdf 'a.pdf;b.pdf' [-Desktop] [-Burst]
 # Works on copies you give it (-Pdf): never point it at real documents. It does not change the default PDF app
 # and uses a scratch INKWELL_DATA_DIR, so the user's recent list is not touched.
 # -User checks a per-user build (HKCU roots, the user's Start menu) instead of the per-machine one.
@@ -8,7 +8,8 @@ param(
   [Parameter(Mandatory)][string]$Msi,
   [string]$Pdf = '', # copies of PDFs, separated by ;
   [switch]$Desktop,
-  [switch]$User
+  [switch]$User,
+  [switch]$Burst # start every file at once instead of the first one, then the rest
 )
 $ErrorActionPreference = 'Stop'
 $Msi = (Resolve-Path $Msi).Path
@@ -81,20 +82,40 @@ $pdfs = @($Pdf -split ';' | Where-Object { $_ })
 if ($pdfs.Count) {
   # Scratch data dir: the user's recent list is not touched. Forwarding is off for scratch runs unless asked for.
   $env:INKWELL_DATA_DIR = Join-Path $log 'data'
+  Remove-Item -Recurse -Force $env:INKWELL_DATA_DIR -ErrorAction SilentlyContinue
   $env:INKWELL_SINGLE_INSTANCE = '1'
   $files = $pdfs | ForEach-Object { (Resolve-Path $_).Path }
   # ours: the processes that did not exist before (a path can show in 8.3 form, so it is not matched)
   $known = @(Get-Process inkwell -ErrorAction SilentlyContinue).Id
-  Start-Process -FilePath $files[0] -Verb 'Inkwell.Open'
-  Start-Sleep 6
-  $files | Select-Object -Skip 1 | ForEach-Object { Start-Process -FilePath $_ -Verb 'Inkwell.Open' }
-  Start-Sleep 4
+  if ($Burst) {
+    # like a multi-select in Explorer: every launch within a few milliseconds, before the first window has loaded
+    $files | ForEach-Object { Start-Process -FilePath $_ -Verb 'Inkwell.Open' }
+    Start-Sleep 8
+  } else {
+    Start-Process -FilePath $files[0] -Verb 'Inkwell.Open'
+    Start-Sleep 6
+    $files | Select-Object -Skip 1 | ForEach-Object { Start-Process -FilePath $_ -Verb 'Inkwell.Open' }
+    Start-Sleep 4
+  }
   $procs = @(Get-Process inkwell -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Id })
   Check ($procs.Count -eq 1) "one running instance for $($files.Count) launches ($($procs.Count) process)"
-  # the window title is the active document: the last forwarded file opened last
+  # the window title is the active document: with a few files the last forwarded one, with a burst any of them
   $title = ($procs | Select-Object -First 1).MainWindowTitle
-  $name = [IO.Path]::GetFileNameWithoutExtension($files[-1])
-  Check ($title -like "*$name*") "window shows the last file ('$title')"
+  $names = @($files | ForEach-Object { [IO.Path]::GetFileName($_) })
+  if ($files.Count -le 3) {
+    Check ($title -like "*$($names[-1] -replace '\.pdf$','')*") "window shows the last file ('$title')"
+  } else {
+    Check (@($names | Where-Object { $title -like "*$($_ -replace '\.pdf$','')*" }).Count -ge 1) "window shows one of the files ('$title')"
+  }
+  # every file was opened: the recent list in the scratch data folder names each one (written as they open)
+  $recents = Join-Path $env:INKWELL_DATA_DIR 'recents.json'
+  $deadline = (Get-Date).AddSeconds(60)
+  do {
+    Start-Sleep 2
+    $json = if (Test-Path $recents) { Get-Content $recents -Raw } else { '' }
+    $seen = @($names | Where-Object { $json.Contains(('\\' + $_ + '"')) }).Count
+  } while ($seen -lt $names.Count -and (Get-Date) -lt $deadline)
+  Check ($seen -eq $names.Count) "all $($names.Count) files opened ($seen in the recent list)"
   $procs | Stop-Process -Force
   Start-Sleep 1
   Remove-Item Env:\INKWELL_DATA_DIR, Env:\INKWELL_SINGLE_INSTANCE

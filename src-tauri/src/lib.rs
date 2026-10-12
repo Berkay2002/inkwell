@@ -888,7 +888,7 @@ fn initial_files(window: Window, reg: Reg<'_>, forwarded: State<'_, launch::Forw
     let args: Vec<String> = std::env::args().collect();
     let cwd = std::env::current_dir().unwrap_or_default();
     // plus the files that later launches forwarded while the window was still loading
-    let mut files = launch::files_in(&args, &cwd);
+    let mut files = launch::pdfs_in(&args, &cwd);
     files.extend(forwarded.ui_ready());
     files
         .into_iter()
@@ -917,8 +917,7 @@ fn on_drop(window: &Window, paths: &[std::path::PathBuf]) {
 /// A later launch (Explorer "Open with", a double click on a PDF) reached the running app: bring its
 /// window forward and open the files the way a drop does.
 fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, cwd: String) {
-    let mut files = launch::files_in(&args, std::path::Path::new(&cwd));
-    files.retain(|p| launch::is_pdf(p));
+    let files = launch::pdfs_in(&args, std::path::Path::new(&cwd));
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();

@@ -3,19 +3,22 @@
 
 use std::path::{Path, PathBuf};
 
-/// The existing files in `args` (argv, program name first): flags skipped, relative paths taken from `cwd`.
-pub fn files_in(args: &[String], cwd: &Path) -> Vec<PathBuf> {
+/// The existing PDF files in `args` (argv, program name first); relative paths are taken from `cwd`.
+/// An argument is a file when it names one, so a flag never matches and a file called `-x.pdf` does.
+pub fn pdfs_in(args: &[String], cwd: &Path) -> Vec<PathBuf> {
     args.iter()
         .skip(1)
-        .filter(|a| !a.starts_with('-'))
         .map(|a| cwd.join(a)) // an absolute argument replaces `cwd`
-        .filter(|p| p.is_file())
+        .filter(|p| p.is_file() && is_pdf(p))
         .collect()
 }
 
 pub fn is_pdf(p: &Path) -> bool {
     p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
+
+/// A multi-select "Open with" of a whole folder is a few hundred files; more than this is not a launch.
+const MAX_WAITING: usize = 1000;
 
 /// Files forwarded by later launches. A multi-select "Open with" starts one process per file within a
 /// few milliseconds, long before the first process's window has loaded: those files wait here until the
@@ -32,7 +35,8 @@ impl Forwarded {
         if s.0 {
             return Some(files);
         }
-        s.1.extend(files);
+        let room = MAX_WAITING.saturating_sub(s.1.len());
+        s.1.extend(files.into_iter().take(room));
         None
     }
 
@@ -45,11 +49,16 @@ impl Forwarded {
 }
 
 /// Whether this process takes part in single-instance forwarding. Runs with a scratch data dir
-/// (`INKWELL_DATA_DIR`: tests, benchmarks, screenshot scripts) stay independent, so several can run
-/// at once next to an installed Inkwell; `INKWELL_SINGLE_INSTANCE=1` turns forwarding back on for them.
+/// (`INKWELL_DATA_DIR`: tests, benchmarks, screenshot scripts) and debug builds stay independent, so
+/// several can run at once next to an installed Inkwell; `INKWELL_SINGLE_INSTANCE=1` turns forwarding
+/// back on for them (the installer check does).
 pub fn single_instance() -> bool {
     let set = |k| std::env::var_os(k).is_some_and(|v| !v.is_empty());
-    !set("INKWELL_DATA_DIR") || std::env::var_os("INKWELL_SINGLE_INSTANCE").is_some_and(|v| v == "1")
+    takes_part(cfg!(debug_assertions), set("INKWELL_DATA_DIR"), std::env::var_os("INKWELL_SINGLE_INSTANCE").is_some_and(|v| v == "1"))
+}
+
+fn takes_part(debug_build: bool, scratch_data_dir: bool, forced: bool) -> bool {
+    forced || !(debug_build || scratch_data_dir)
 }
 
 #[cfg(test)]
@@ -71,19 +80,23 @@ mod tests {
         let d = scratch("a");
         std::fs::write(d.join("one.pdf"), b"%PDF").unwrap();
         std::fs::write(d.join("two words.pdf"), b"%PDF").unwrap();
+        std::fs::write(d.join("-dash.pdf"), b"%PDF").unwrap();
+        std::fs::write(d.join("notes.txt"), b"x").unwrap();
         std::fs::create_dir_all(d.join("folder.pdf")).unwrap();
-        let got = files_in(
+        let got = pdfs_in(
             &args(&[
                 "inkwell.exe",
                 "--flag",
                 d.join("one.pdf").to_str().unwrap(),
                 "two words.pdf",
+                "-dash.pdf",
+                "notes.txt",
                 "missing.pdf",
                 "folder.pdf",
             ]),
             &d,
         );
-        assert_eq!(got, vec![d.join("one.pdf"), d.join("two words.pdf")]);
+        assert_eq!(got, vec![d.join("one.pdf"), d.join("two words.pdf"), d.join("-dash.pdf")]);
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -99,6 +112,17 @@ mod tests {
     }
 
     #[test]
+    fn the_waiting_queue_is_capped() {
+        let f = Forwarded::default();
+        for i in 0..MAX_WAITING + 50 {
+            assert_eq!(f.forward(vec![format!("{i}.pdf").into()]), None);
+        }
+        let got = f.ui_ready();
+        assert_eq!(got.len(), MAX_WAITING);
+        assert_eq!(got[0], PathBuf::from("0.pdf"));
+    }
+
+    #[test]
     fn only_pdf_extensions_count() {
         assert!(is_pdf(Path::new("C:\\x\\Report.PDF")));
         assert!(!is_pdf(Path::new("notes.txt")));
@@ -109,8 +133,16 @@ mod tests {
     fn the_program_name_is_never_a_file() {
         let d = scratch("b");
         std::fs::write(d.join("inkwell.exe"), b"MZ").unwrap();
-        assert!(files_in(&args(&["inkwell.exe"]), &d).is_empty());
-        assert!(files_in(&[], &d).is_empty());
+        assert!(pdfs_in(&args(&["inkwell.exe"]), &d).is_empty());
+        assert!(pdfs_in(&[], &d).is_empty());
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn debug_builds_and_scratch_data_dirs_stay_independent_unless_forced() {
+        assert!(takes_part(false, false, false)); // an installed release build
+        assert!(!takes_part(true, false, false)); // a dev build next to the installed app
+        assert!(!takes_part(false, true, false)); // a scratch data dir
+        assert!(takes_part(true, true, true)); // INKWELL_SINGLE_INSTANCE=1
     }
 }

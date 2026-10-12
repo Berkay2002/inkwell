@@ -110,11 +110,14 @@ export default function App() {
 
   useEffect(() => {
     const st = useStore.getState();
-    // Command-line files are opened once per app run (StrictMode runs this effect twice in dev).
-    if (!launchFilesOpened) {
+    // Command-line files are opened once per app run (StrictMode runs this effect twice in dev). Asking for them
+    // also tells Rust the window is listening: later launches' files are emitted from then on, so the listener
+    // below has to be registered first or files forwarded in between would reach nobody.
+    const openLaunchFiles = () => {
+      if (launchFilesOpened) return;
       launchFilesOpened = true;
       initialFiles().then((files) => files.forEach((f) => void st.openPath(f.path, f.token)), () => {});
-    }
+    };
 
     // The listener registers asynchronously: if this effect is torn down first, unlisten on arrival.
     let off: (() => void) | undefined;
@@ -126,8 +129,16 @@ export default function App() {
         if (useCombine.getState().sheet) useCombine.getState().add(e.payload);
         else e.payload.forEach((f) => void st.openPath(f.path, f.token));
       })
-      .then((u) => (cancelled ? u() : (off = u)))
-      .catch(() => {});
+      .then(
+        (u) => {
+          if (cancelled) return u();
+          off = u;
+          openLaunchFiles();
+        },
+        () => {
+          if (!cancelled) openLaunchFiles(); // no listener: still open the launch files
+        },
+      );
 
     const onKey = (e: KeyboardEvent) => {
       const c = commandFor(e);

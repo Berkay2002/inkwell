@@ -178,10 +178,12 @@
                 </RegistryKey>
 
                 <!-- Context menu "Open with Inkwell" on PDFs, whoever the default handler is. Explorer starts the verb once
-                     per selected file; the running Inkwell takes each one (single instance). -->
+                     per selected file; the running Inkwell takes each one (single instance). MultiSelectModel=Player
+                     keeps the verb on the menu for any number of files (the default model hides it above 15). -->
                 <RegistryKey Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pdf\shell\Inkwell.Open" ForceDeleteOnUninstall="yes">
                     <RegistryValue Type="string" Value="Open with {{product_name}}" />
                     <RegistryValue Type="string" Name="Icon" Value="&quot;[!Path]&quot;,0" />
+                    <RegistryValue Type="string" Name="MultiSelectModel" Value="Player" />
                     <RegistryKey Key="command">
                         <RegistryValue Type="string" Value="&quot;[!Path]&quot; &quot;%1&quot;" />
                     </RegistryKey>

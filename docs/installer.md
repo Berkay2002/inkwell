@@ -66,12 +66,22 @@ profile in `%LOCALAPPDATA%\app.inkwell.desktop`. Delete them by hand for a clean
 - **Single instance** (`tauri-plugin-single-instance`): a second launch sends its arguments and working directory to
   the running Inkwell, which un-minimises and focuses its window and opens the PDFs the way a drop does (open tokens
   from `paths.rs`, event `files-dropped`). The second process exits. Explorer starts one process per selected file;
-  they all end up in the one window. Files forwarded before the window has loaded wait and are handed over with the
-  launch files (`launch::Forwarded`).
-- Runs with a scratch `INKWELL_DATA_DIR` (tests, benchmarks, screenshot scripts) stay independent of an installed
-  Inkwell and of each other; set `INKWELL_SINGLE_INSTANCE=1` to test forwarding with one.
+  they all end up in the one window. Only existing `.pdf` files count; an argument is a file when it names one, so
+  `-x` is skipped and `-x.pdf` is opened.
+- **Startup order.** Files forwarded before the window has loaded wait in `launch::Forwarded` (capped at 1000). The UI
+  registers its `files-dropped` listener first and only then calls `initial_files`, which hands over the waiting files
+  and switches later ones to being emitted; so none can fall in between.
+- Debug builds and runs with a scratch `INKWELL_DATA_DIR` (tests, benchmarks, screenshot scripts) stay independent of an
+  installed Inkwell and of each other; set `INKWELL_SINGLE_INSTANCE=1` to test forwarding with one.
+- The verb has `MultiSelectModel=Player`, so "Open with Inkwell" stays on the menu for any number of selected files
+  (Explorer hides a default-model verb above 15).
 - Code: `src-tauri/src/launch.rs` (argument parsing, the wait queue, unit tests), `lib.rs` (`initial_files`,
-  `on_second_launch`, `deliver_pdfs`).
+  `on_second_launch`, `deliver_pdfs`), `App.tsx` (listener, then `initialFiles`).
+
+Not done: `SHChangeNotify(SHCNE_ASSOCCHANGED)` after install and uninstall. WiX 3 has no built-in for it (it would need a
+custom action DLL or a script), and nothing here depends on it: Explorer reads the verb and the Open with list when it
+builds a menu, and the document icon only shows once Inkwell is the user's default, which is their choice in Settings
+(Windows broadcasts the change itself then).
 
 Skipped: a jump list / recent entries on the taskbar. Windows keeps its own "recent" for files opened through the
 shell; an app-side list would need `SHAddToRecentDocs` and a decision about what the app's own recent list is.
@@ -79,7 +89,8 @@ shell; an app-side list would need `SHAddToRecentDocs` and a decision about what
 ## Checking an installer
 
 `scripts/installer-check.ps1 -Msi <msi> -Pdf '<copy1.pdf>;<copy2.pdf>'` (elevated shell) installs, checks the list above,
-launches the verb twice and checks for one running instance, uninstalls, and checks nothing is left. It never touches
+launches the verb for each file and checks for one running instance with every file in its recent list, uninstalls,
+and checks nothing is left. `-Burst` starts all files at once (a multi-select; try it with 20 copies). It never touches
 the default PDF app and uses a scratch data folder.
 
 The shortcut components use `HKCU\Software\Inkwell` marker keys as key paths (Windows Installer requires a
