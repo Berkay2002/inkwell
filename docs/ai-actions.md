@@ -100,7 +100,7 @@ holds), laying out form fields, the custom stamps manager (stamp pictures come f
   types it. A page list or range over 500 pages is an `Err`, not cut; a search with more than 500 matches is an
   `Err` and can be stopped (the search stops at 501 hits and honours the panel's Stop).
 - A signed file that Inkwell had to repair when opening it takes no edit at all (`Engine::edit_refusal`, from main's
-  `refuse_if_repaired_signed`): the refusal comes before the card and says to save a copy.
+  `refuse_if_repaired_signed`): the refusal comes before the card and says to save a copy, and that the copy is a full rewrite so its signatures will read as invalid.
 - Every write goes through the module functions, which hold the guards (`outline::refuse_if_certified`,
   `refuse_unless_annotating_allowed`, `forms::set_value` locks); `sanitize_document` and `set_document_properties`
   call `refuse_if_certified` inside their closures. There is no second signature parser: `src-tauri/src/signed.rs` was

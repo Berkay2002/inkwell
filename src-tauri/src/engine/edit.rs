@@ -322,10 +322,10 @@ impl Editor {
         // checked against the bytes on disk, and edits are refused (see `refuse` and `snapshot`).
         if !doc.doc.can_be_saved_incrementally() {
             refuse = match crate::outline::signed_inner(&doc.doc) {
-                Ok(true) => Some("This signed file was damaged and had to be repaired; save a copy to edit it."),
+                Ok(true) => Some("This signed file was damaged and had to be repaired; save a copy to edit it. The copy is a full rewrite, so its signatures will read as invalid."),
                 Ok(false) => None,
                 // Fails closed, as `signed` does, but says what is unknown.
-                Err(_) => Some("This file was damaged and had to be repaired, and whether it is signed could not be read; save a copy to edit it."),
+                Err(_) => Some("This file was damaged and had to be repaired, and whether it is signed could not be read; save a copy to edit it. If it is signed, the copy is a full rewrite and its signatures will read as invalid."),
             };
             if refuse.is_none() {
                 let out = write_doc(&doc.doc, PdfWriteOptions::default(), snap.len)?;
@@ -1912,8 +1912,11 @@ impl Engine {
             *entry.path.write() = target;
             // The copy is the document now: it is edited like any file (the original's signatures are not its own).
             // It starts again from the clean copy, which takes incremental updates (if it didn't, it stays refused).
+            // The file is saved either way: if the copy can't be reopened, this editor stays and stays refused.
             if ed.refuse.is_some() {
-                *ed = Editor::from_bytes(entry, saved.bytes.clone())?;
+                if let Ok(copy) = Editor::from_bytes(entry, saved.bytes.clone()) {
+                    *ed = copy;
+                }
             }
         }
         ed.saved = Some(ed.cur);
