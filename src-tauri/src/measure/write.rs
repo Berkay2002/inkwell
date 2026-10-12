@@ -81,10 +81,10 @@ impl Look {
             let text = |n: Vec<u8>| String::from_utf8_lossy(&n).into_owned();
             Some([text(name(0)?), text(name(1)?)])
         });
-        // The annotation's own opacity; failing that the first graphics state of its appearance (a form, not a state dict)
-        // that has one.
-        let alpha = |d: &PdfObject| -> Option<f64> {
-            ["ca", "CA"].iter().find_map(|k| {
+        // The annotation's own opacity (`/ca` or `/CA`); failing that the first graphics state of its appearance (a form,
+        // not a state dict) with a `/ca`: a state that only sets the stroke's `/CA` says nothing about the fill.
+        let alpha = |d: &PdfObject, keys: &[&str]| -> Option<f64> {
+            keys.iter().find_map(|k| {
                 let v = d.get_dict(*k).ok()??;
                 if v.is_number().ok()? { v.as_float().ok().map(f64::from).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0)) } else { None }
             })
@@ -95,10 +95,10 @@ impl Look {
                 return None;
             }
             let states = n.get_dict("Resources").ok()??.get_dict("ExtGState").ok()??;
-            (0..states.dict_len().ok()?.min(32)).find_map(|i| alpha(&states.get_dict_val(i as i32).ok()??))
+            (0..states.dict_len().ok()?.min(32)).find_map(|i| alpha(&states.get_dict_val(i as i32).ok()??, &["ca"]))
         };
         Look {
-            fill_alpha: alpha(o).or_else(from_ap),
+            fill_alpha: alpha(o, &["ca", "CA"]).or_else(from_ap),
             color: nums("C").and_then(rgb).unwrap_or(COLOR.map(f64::from)),
             width: w,
             ends,

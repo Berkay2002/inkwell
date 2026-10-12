@@ -1350,6 +1350,9 @@ fn a_moved_foreign_area_keeps_the_fill_opacity_the_file_asked_for() {
     // /ca of its appearance's graphics state, when the annotation says nothing.
     let (ca, _) = fill_after_move("fill-gs", &foreign_area(RED, "/GS0 << /Type /ExtGState /ca 0.25 /CA 1 >>"));
     assert_eq!(ca, 0.25);
+    // A state that sets only the stroke's /CA, listed first, is not the fill's opacity.
+    let (ca, _) = fill_after_move("fill-stroke-gs", &foreign_area(RED, "/GS0 << /CA 1 >> /GS1 << /ca 0.3 >>"));
+    assert!((ca - 0.3).abs() < 1e-6, "{ca}");
     // The annotation's /CA wins over the form's.
     let (ca, _) = fill_after_move("fill-both", &foreign_area("/IC [1 0 0] /CA 0.5", "/GS0 << /ca 0.25 >>"));
     assert_eq!(ca, 0.5);

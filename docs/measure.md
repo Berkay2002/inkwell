@@ -148,8 +148,9 @@ Comments does (opening one closes the other) and shows a floating bar over the p
 - **Drag to edit:** with Select and a measurement selected, each of its points shows a handle. Drag one to move that
   point: it snaps as drawing does (end points, midpoints, crossings, the path), Shift holds it to 45 degrees from the
   point before it (an area's first point to its last) and turns snapping off, and the label next to it shows the new
-  value and the snap ("End point"...) while you drag, with the same marker as drawing on the point. Release writes it (`measure_move`, one undo step). Esc during the drag puts it back, and so does
-a release off the page (outside the window the pointer is clamped to the edge); a click
+  value and the snap ("End point"...) while you drag, with the same marker as drawing on the point. Release writes it
+  (`measure_move`, one undo step). Esc during the drag puts it back, and so does a release off the page or outside the
+  viewer (outside the window the pointer is clamped to the edge, and some webviews report 0,0); a click
   without moving writes nothing. From the keyboard a handle takes focus (Tab), the arrow keys move it by 1 point
   (Shift: 10) along the screen whatever the page rotation, and the move is written after a short pause, on Enter, when
   focus leaves or the tool changes (a run of keys is one undo step); Esc drops it, and so does a pointer capture that is

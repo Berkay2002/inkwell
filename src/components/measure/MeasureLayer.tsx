@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { scaleOf, useMeasure } from "../../lib/measure";
 import {
-  type Hover, type Measure, type MeasureKind, type Pt, KIND_NAME, MIN_POINTS, clickAt, latestOnly, neighbour, nudge, numText, onPage, place,
+  type Hover, type Measure, type MeasureKind, type Pt, KIND_NAME, MIN_POINTS, clickAt, latestOnly, neighbour, nudge, inBox, numText, onPage, place,
   quantityOf, UNSCALED,
 } from "../../lib/measureLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
@@ -291,8 +291,10 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
     asked.cancel();
     want.current = null;
-    // Let go off the page (outside the window the pointer is clamped to its edge): the point goes back, as with Esc.
-    if (!onPage(atPage(e), rawSize)) return cancel();
+    // Let go off the page or outside the viewer (outside the window the pointer is clamped to its edge, and a webview
+    // may report 0,0, which a zoomed page can cover): the point goes back, as with Esc.
+    const viewer = space.current?.closest(".viewer");
+    if (!onPage(atPage(e), rawSize) || (viewer && !inBox([e.clientX, e.clientY], viewer.getBoundingClientRect()))) return cancel();
     if (editRef.current && !editRef.current.saving) commit(editRef.current);
   };
   const press = (e: React.KeyboardEvent, m: Measure, i: number) => {
