@@ -172,16 +172,19 @@ pub(super) fn sign_with(base: &[u8], id: &DigitalId, req: &SignRequest, tamper: 
             }
             let mut page = doc.find_page(req.page as i32).map_err(pdf_err)?;
             let rotate = page_rotation(&page);
-            // No name a form field has (a form too large to list keeps the signature fields' names) or a lock covers.
+            // No name a form field has (a form too large to list keeps the signature fields' names) or an /Include
+            // lock names. FieldMDP covers the fields there when it signed (ISO 32000-1 12.8.2.4); adding fields is
+            // DocMDP's call, so /All and /Exclude don't stop a new box.
             let mut taken: std::collections::HashSet<String> = sig_fields(&doc)?.into_iter().map(|f| f.name).collect();
             taken.extend(crate::forms::scan(&doc).into_iter().flatten().map(|e| e.name));
-            let fname = match (1..=1000).map(|i| format!("Signature{i}")).find(|n| !taken.contains(n) && locked_by(&locks, n).is_none()) {
-                Some(n) => n,
-                None => {
-                    let why = locked_by(&locks, "Signature1").map_or("there is no free name for a new signature field".into(), |who| format!("New fields are locked by {who}'s signature."));
-                    return Err(refuse(why));
-                }
+            let included = |n: &str| {
+                use crate::forms::scripts::{Lock, name_locked};
+                locks.iter().flat_map(|(l, _)| l).any(|l| matches!(l, Lock::Include(_)) && name_locked(std::slice::from_ref(l), n))
             };
+            let fname = (1..=1000)
+                .map(|i| format!("Signature{i}"))
+                .find(|n| !taken.contains(n) && !included(n))
+                .ok_or_else(|| refuse("there is no free name for a new signature field"))?;
             let (rect, size) = match req.rect {
                 Some(r) => {
                     let ctm = page.page_ctm().map_err(pdf_err)?;
@@ -1007,7 +1010,7 @@ fn bound(f: &SigField, doc: &PdfDocument, bytes: &[u8]) -> std::result::Result<(
 
 /// The fields the signature in `g` locks (read from `then`, the revision it signs) whose value or appearance differs in
 /// `now`: each field's `/V` and every widget's `/AP`, followed through references, by full name. Only fields that were
-/// there when it signed count (a new field under a name no lock covers is not locked);
+/// there when it signed count (a lock covers those, ISO 32000-1 12.8.2.4: a new field is DocMDP's call);
 /// a removed one, or another widget under its name, does. A form either revision can't read in full counts as changed ("the form").
 fn locked_changes(g: &SigField, then: &PdfDocument, now: &PdfDocument) -> Vec<String> {
     use crate::forms::scripts::{name_locked, signature_locks};

@@ -1740,17 +1740,22 @@ fn a_lock_removed_in_a_later_update_still_locks() {
 }
 
 #[test]
-fn a_new_signature_box_takes_no_form_name_and_no_locked_one() {
+fn a_new_signature_box_takes_no_form_name_and_none_an_include_names() {
     let names = |b: &[u8]| infos(b).into_iter().map(|s| s.field).collect::<Vec<_>>();
     // A text field already called Signature1, and a lock on Signature2.
     let b = form(&["/FT/Sig/T(Tenant)", "/FT/Tx/T(Signature1)"], |_, _| {});
     let b = lock_sign(&b, "Tenant", "<</Action/Include/Fields[(Signature2)]>>", "");
     let after = pdf::sign(&b, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap();
     assert_eq!(names(&after), ["Tenant", "Signature3"]);
-    // /All covers every name a new field could take: refused, naming the signer.
-    let b = lock_sign(&lease(), "Tenant", "<</Action/All>>", "");
-    let e = pdf::sign(&b, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap_err();
-    assert_eq!(e.to_string(), "New fields are locked by Maple Property Test's signature.");
+    // /All and /Exclude lock the fields there when signing, not new ones (ISO 32000-1 12.8.2.4): a countersignature
+    // in a new box is fine, and doesn't read as a locked field changing.
+    for lock in ["<</Action/All>>", "<</Action/Exclude/Fields[(Note)]>>"] {
+        let b = lock_sign(&lease(), "Tenant", lock, "");
+        let after = pdf::sign(&b, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap();
+        let i = infos(&after);
+        assert!(i.iter().any(|s| s.field == "Signature1"), "{lock}: {i:?}");
+        assert!(!codes(field(&i, "Tenant")).contains(&WarningCode::LockedChanged), "{lock}: {i:?}");
+    }
 }
 
 #[test]
