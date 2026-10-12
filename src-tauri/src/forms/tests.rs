@@ -2863,7 +2863,16 @@ fn a_merged_widget_is_redrawn_with_the_targets_value_and_a_check_boxes_state_fol
     // A checked box merged into an unchecked one is unchecked; the other way round it is checked.
     fill(&eng, id, "Agree2", FieldValue::Checked(true)).unwrap();
     rename_one(&eng, id, it("Agree2"), "Agree", true, EditSource::User).unwrap();
+    // Checked target, unchecked box merged into it: both show the on state, not Off.
+    add1(&eng, id, 0, nf(FieldKind::Checkbox, "Tick", [140.0, 260.0, 154.0, 274.0]));
+    add1(&eng, id, 0, nf(FieldKind::Checkbox, "Tick2", [180.0, 260.0, 194.0, 274.0]));
+    fill(&eng, id, "Tick", FieldValue::Checked(true)).unwrap();
+    rename_one(&eng, id, it("Tick2"), "Tick", true, EditSource::User).unwrap();
     eng.save(id, None).unwrap();
+    let ticks = widget_looks(&path, "Tick");
+    assert_eq!(ticks.len(), 2);
+    assert!(ticks.iter().all(|(_, s)| s.as_deref().is_some_and(|s| s != "Off")), "the merged box shows the on state: {ticks:?}");
+    assert!(widgets_named(&eng, id, "Tick").iter().all(|w| w.checked));
     let names = widget_looks(&path, "Name");
     assert_eq!(names.len(), 2);
     assert!(names.iter().all(|(shown, _)| shown.contains("Alice")), "both widgets show the target's value: {names:?}");
