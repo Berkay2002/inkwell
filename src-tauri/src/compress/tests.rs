@@ -2090,3 +2090,65 @@ fn a_string_destination_is_decoded_like_mupdf_does_and_one_that_cannot_be_judged
     let doc = open_pdf(&r.output, None).unwrap();
     assert_eq!(doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().len().unwrap(), 3);
 }
+
+/// Bookmarks and then links, each with the destinations `dests` (strings, in order) against the name tree `tree`
+/// (its page is object 5 for bookmarks, 4 for links). Returns the surviving bookmark titles (A, B, ...) and the
+/// number of surviving link annotations.
+fn string_dests_judged(s: &Scratch, tree: &str, dests: &[&str]) -> (String, usize) {
+    let titles = ["A", "B", "C", "D", "E", "F"];
+    let n = dests.len();
+    let items: Vec<String> = dests
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let next = if i + 1 < n { format!(" /Next {} 0 R", 8 + i) } else { String::new() };
+            format!("<< /Title ({}) /Parent 4 0 R /Dest {d}{next} >>", titles[i])
+        })
+        .collect();
+    let input = s.path("b.pdf");
+    let root = format!("<< /Type /Outlines /First 7 0 R /Last {} 0 R /Count {n} >>", 6 + n);
+    fs::write(&input, crate::outline::tests::outline_pdf_with(tree, &root, &items)).unwrap();
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("b-out.pdf"));
+    let r = run(&input, &o).unwrap();
+    let kept = outline_text(&outline_of(&r.output).items);
+
+    let links = s.path("l.pdf");
+    let refs: Vec<String> = (5..5 + n).map(|i| format!("{i} 0 R")).collect();
+    let mut objs = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R {} >>", tree.replace("5 0 R", "4 0 R")),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{}] >>", refs.join(" ")),
+    ];
+    objs.extend(dests.iter().map(|d| format!("<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest {d} >>")));
+    fs::write(&links, crate::outline::tests::raw_pdf(&objs)).unwrap();
+    let mut o = Options::preset(Preset::Custom);
+    o.strip.invalid_links = true;
+    o.output = Some(s.path("l-out.pdf"));
+    let r = run(&links, &o).unwrap();
+    let doc = open_pdf(&r.output, None).unwrap();
+    let left = doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().len().unwrap();
+    (kept, left)
+}
+
+#[test]
+fn an_unmarked_utf8_string_destination_is_read_like_mupdf_does_before_pdfdocencoding() {
+    let s = Scratch::new();
+    // the key is "caf\u{e9}" stored as UTF-8 (C3 A9) with no byte order mark: MuPDF's text for it is "caf\u{e9}",
+    // not the PDFDocEncoding "caf\u{c3}\u{a9}"
+    let tree = "/Names << /Dests << /Names [(caf\\303\\251) [5 0 R /Fit]] >> >>";
+    let (kept, links) = string_dests_judged(
+        &s,
+        tree,
+        &[
+            "(caf\\303\\251)",
+            // clean and not in the tree
+            "(cag\\303\\251)",
+            // C0 80 is an overlong NUL: MuPDF reads it as UTF-8, Rust does not, so it is not judged
+            "(\\300\\200)",
+        ],
+    );
+    assert_eq!(kept, "A, C");
+    assert_eq!(links, 2);
+}

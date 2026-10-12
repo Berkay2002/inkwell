@@ -322,18 +322,20 @@ impl Dests {
         if key.is_name().ok()? {
             return Some(dicts().find_map(|d| d.get_dict(key.share()).ok().flatten()));
         }
-        // A string: MuPDF keys the name tree by its decoded text (UTF-16BE, PDFDocEncoding), the old /Dests
-        // dictionary by the string's own bytes.
+        // A string: MuPDF keys the name tree by its decoded text (UTF-16, UTF-8 with or without a mark, else
+        // PDFDocEncoding), the old /Dests dictionary by the string's own bytes.
         let bytes = key.as_bytes().ok()?;
-        let text = crate::outline::decode_text(&bytes);
-        let mut clean = !text.contains('\u{FFFD}');
-        match PdfObject::new_name(&text) {
-            Ok(n) => {
-                if let Some(v) = dicts().find_map(|d| d.get_dict(n.share()).ok().flatten()) {
-                    return Some(Some(v));
+        let text = mupdf_text(&bytes);
+        let mut clean = text.is_some();
+        if let Some(text) = &text {
+            match PdfObject::new_name(text) {
+                Ok(n) => {
+                    if let Some(v) = dicts().find_map(|d| d.get_dict(n.share()).ok().flatten()) {
+                        return Some(Some(v));
+                    }
                 }
+                Err(_) => clean = false,
             }
-            Err(_) => clean = false,
         }
         // Only a UTF-8 key can be a name object; any other is in the index built at load.
         match std::str::from_utf8(&bytes) {
@@ -350,6 +352,44 @@ impl Dests {
         }
         clean.then_some(None)
     }
+}
+
+/// MuPDF's `is_valid_utf8` (pdf-parse.c): looser than UTF-8 (overlong forms, surrogates and values past U+10FFFF
+/// pass) and no byte 0x18..=0x1F, which PDFDocEncoding keeps.
+fn mupdf_takes_as_utf8(b: &[u8]) -> bool {
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let follow = match c {
+            0x18..=0x1F => return false,
+            0..=0x7F => 0,
+            0x80..=0xBF => return false,
+            0xC0..=0xDF => 1,
+            0xE0..=0xEF => 2,
+            0xF0..=0xF4 => 3,
+            _ => return false,
+        };
+        for _ in 0..follow {
+            i += 1;
+            if b.get(i).is_none_or(|n| n & 0xC0 != 0x80) {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The text MuPDF's `pdf_new_utf8_from_pdf_string` makes of a string, which keys its name tree. A string with no
+/// byte order mark is taken as UTF-8 first and only then as PDFDocEncoding. None: no faithful text (a lone
+/// surrogate, a form MuPDF reads as UTF-8 and Rust does not), so the string is not judged.
+fn mupdf_text(b: &[u8]) -> Option<String> {
+    let marked = [&[0xFE, 0xFF][..], &[0xFF, 0xFE], &[0xEF, 0xBB, 0xBF]].iter().any(|m| b.starts_with(m));
+    if !marked && mupdf_takes_as_utf8(b) {
+        return String::from_utf8(b.to_vec()).ok();
+    }
+    let text = crate::outline::decode_text(b);
+    (!text.contains('\u{FFFD}')).then_some(text)
 }
 
 /// An explicit destination array's page must be one of the document's pages. `pages`: when an integer
