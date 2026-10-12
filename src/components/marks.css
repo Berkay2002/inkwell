@@ -256,3 +256,14 @@
   opacity: 0.45;
   cursor: not-allowed;
 }
+/* The rail's scrollbar (dark theme on Windows) must not narrow the sheet when it appears:
+   keep its gutter reserved, and let the insert selects shrink and ellipsise instead of clipping. */
+.mk .ax-body {
+  scrollbar-gutter: stable;
+}
+.mk-insert select.tl-field {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
