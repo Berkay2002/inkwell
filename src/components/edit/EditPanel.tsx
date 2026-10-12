@@ -22,8 +22,8 @@ const SPACINGS = [1, 1.15, 1.2, 1.5, 2];
 const DECORS: { id: Decor; label: string; title: string; glyph: React.ReactNode }[] = [
   { id: "underline", label: "Underline", title: "Underline (Ctrl+U)", glyph: <u>U</u> },
   { id: "strike", label: "Strikethrough", title: "Strikethrough", glyph: <s>S</s> },
-  { id: "super", label: "Superscript", title: "Superscript", glyph: <>x<sup>2</sup></> },
-  { id: "sub", label: "Subscript", title: "Subscript", glyph: <>x<sub>2</sub></> },
+  { id: "super", label: "Superscript", title: "Superscript", glyph: <span>x<sup>2</sup></span> },
+  { id: "sub", label: "Subscript", title: "Subscript", glyph: <span>x<sub>2</sub></span> },
 ];
 const SECTIONS: { id: EditSection; label: string }[] = [
   { id: "text", label: "Text" },

@@ -212,9 +212,15 @@
   background: var(--surface);
   color: var(--text);
 }
-.te-tog:hover,
-.te-stepper button:hover {
+.te-tog:hover:not(:disabled),
+.te-stepper button:hover:not(:disabled) {
   background: var(--surface-2);
+}
+/* A certified document: every format control is off, and should look it. */
+.te-format :disabled,
+.te-format .te-sw.custom:has(input:disabled) {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .te-tog.on {
   background: var(--accent);
