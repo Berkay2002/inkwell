@@ -1164,6 +1164,30 @@ fn an_endless_x_chain_is_left_out_not_walked() {
 }
 
 #[test]
+fn a_number_format_array_that_refers_to_itself_falls_back() {
+    // /D is an indirect array whose only element is itself (20), or an object that is its own value (21).
+    for (case, d, objs) in [
+        ("array holding itself", "20 0 R", vec![(20, "[20 0 R]".to_string())]),
+        ("reference to itself", "21 0 R", vec![(21, "21 0 R".to_string())]),
+    ] {
+        let measure = format!("<< /Type /Measure /Subtype /RL /R (1 in = 10 ft) /X [{XFT}] /D {d} /A {d} >>");
+        let mut extra = vec![(
+            5,
+            format!("<< /Type /Annot /Subtype /Line /Rect [0 0 200 200] /L [0 0 108 0] /IT /LineDimension /F 4 /Measure {measure} >>"),
+        )];
+        extra.extend(objs);
+        let spec = Spec { page: "/Annots [5 0 R]".into(), extra, ..Default::default() };
+        let (eng, id, _) = open("self-ref", &spec);
+        let all = list_all(&eng, id).unwrap();
+        assert_eq!(all.len(), 1, "{case}: still listed");
+        assert_eq!(all[0].quantity.text, "1.50 ft", "{case}");
+        assert!(all[0].quantity.note.is_some(), "{case}: says it was left out");
+        let q = value_in(&eng, id, 0, Kind::Distance, &[[0.0, 792.0], [72.0, 792.0]], all[0].xref).unwrap();
+        assert_eq!(q.text, "1.00 ft", "{case}");
+    }
+}
+
+#[test]
 fn plain_says_whether_the_ui_can_label_it_alone() {
     // Nothing on the page, and a scale of ours, are plain; so is an annotation we made.
     let (eng, id, _) = open("plain", &Spec::default());

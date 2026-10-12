@@ -157,7 +157,8 @@ impl MeasureDict {
         let list = |key: &str, strict: bool| -> Result<Option<Vec<NumberFormat>>> {
             let Some(arr) = o.get_dict(key)? else { return Ok(Some(Vec::new())) };
             if !arr.is_array()? {
-                return Ok(Some(Vec::new()));
+                // Present but not an array (a reference that loops back, a number): as malformed as a bad element.
+                return Ok(if strict { None } else { Some(Vec::new()) });
             }
             // Never walk an endless array.
             if arr.len()? > MAX_CHAIN {
