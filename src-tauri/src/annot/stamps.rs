@@ -184,15 +184,21 @@ fn load(dir: &Path, check_pictures: bool) -> Result<(Vec<Stamp>, Option<String>)
     Ok((stamps, warning))
 }
 
-/// How old a `*.tmp` file in the library is before a writer deletes it (a crash between create and rename leaves one;
-/// a write in progress is far younger).
+/// How old a temp file of [`write_atomic`] in the library is before a writer deletes it (a crash between create and
+/// rename leaves one; a write in progress is far younger).
 const STALE_TMP: Duration = Duration::from_secs(60);
+
+/// Whether `name` is one of `write_atomic`'s own temp names, `<name>.<16 hex>.tmp`, and not a user's `*.tmp`.
+fn is_write_tmp(name: &str) -> bool {
+    let Some((stem, id)) = name.strip_suffix(".tmp").and_then(|n| n.rsplit_once('.')) else { return false };
+    !stem.is_empty() && id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 fn sweep_tmp(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let p = e.path();
-        let old = p.extension().is_some_and(|x| x == "tmp")
+        let old = e.file_name().to_str().is_some_and(is_write_tmp)
             && e.metadata().ok().filter(std::fs::Metadata::is_file).and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age > STALE_TMP);
         if old {
             let _ = std::fs::remove_file(p);
