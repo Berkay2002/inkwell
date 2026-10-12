@@ -5,6 +5,7 @@ import * as api from "./api";
 import type { EditOp, EditState } from "./api";
 import { formatRange } from "./pageRange";
 import { useAnnot } from "./annot";
+import { useMeasure } from "./measure";
 import { useNav } from "./nav";
 import { useCombine } from "./combineStore";
 import { useRedact } from "./redact";
@@ -41,6 +42,8 @@ export function applyState(id: number, s: EditState) {
   if (revChanged && useRedact.getState().docs[id]) void useRedact.getState().refreshMarks(id);
   // ... and comments: undo, redo and restoring a version change them too.
   if (revChanged && useAnnot.getState().docs[id]) void useAnnot.getState().refresh(id);
+  // ... and measurements and the scales of pages.
+  if (revChanged && useMeasure.getState().docs[id]) useMeasure.getState().onRev(id);
   // ... and bookmarks and links.
   if (revChanged) useNav.getState().onRev(id);
   // Hits point at the old pages.

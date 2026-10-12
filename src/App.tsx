@@ -9,6 +9,8 @@ import { VersionView } from "./components/history/VersionView";
 import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
+import { MeasureBar } from "./components/measure/MeasureBar";
+import { MeasurePanel } from "./components/measure/MeasurePanel";
 import { A11yPanel } from "./components/a11y/A11yPanel";
 import { PreflightPanel } from "./components/preflight/PreflightPanel";
 import { EditPanel } from "./components/edit/EditPanel";
@@ -180,6 +182,7 @@ export default function App() {
                 <HistoryBanner doc={doc} />
                 <SecurityNotice doc={doc} />
                 <CommentTools doc={doc} />
+                <MeasureBar doc={doc} />
                 <FormTools />
                 <ThreadHost doc={doc} />
                 <FormsBanner doc={doc} />
@@ -195,6 +198,7 @@ export default function App() {
               <PreflightPanel doc={doc} />
               <PrepressPanel doc={doc} />
               <CommentsPanel doc={doc} />
+              <MeasurePanel doc={doc} />
               <EditPanel doc={doc} />
               <FormsPanel doc={doc} />
               <SearchPanel doc={doc} />
