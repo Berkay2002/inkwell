@@ -2349,8 +2349,13 @@ fn the_name_box_follows_the_same_rename_locks_as_the_layout_rename() {
     };
     assert!(name("Other", "Reserved").unwrap_err().contains("covered by a signature"));
     assert!(name("Free", "Free2").unwrap_err().contains("calculation of [ Sum ] is locked"));
+    // The field being renamed is guarded too: Sum is covered by the signature, and a signed signature field stays put.
+    assert!(name("Sum", "Total").unwrap_err().contains("locked by a signature"));
+    assert!(name("Sig", "Sig2").unwrap_err().contains("is signed"));
     assert_eq!(steps(&eng, id), n, "no step, nothing written");
     assert_eq!(field(&eng, id, "Free").name, "Free");
+    assert_eq!(field(&eng, id, "Sum").name, "Sum");
+    assert_eq!(field(&eng, id, "Sig").name, "Sig");
     name("Other", "Elsewhere").unwrap();
 }
 

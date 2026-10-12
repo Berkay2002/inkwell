@@ -77,7 +77,7 @@ fn pick<'a>(entries: &'a [Entry], items: &[Item], min: usize, what: &str) -> Res
 }
 
 /// A signed signature field stays where it is, and so does a field a signature covers (its /Lock, a FieldMDP).
-fn guard(doc: &PdfDocument, entries: &[Entry], picked: &[&Entry]) -> Result<()> {
+pub(crate) fn guard(doc: &PdfDocument, entries: &[Entry], picked: &[&Entry]) -> Result<()> {
     let locks = scripts::locks_of(doc, entries);
     for e in picked {
         if e.kind == FieldKind::Signature {
@@ -685,7 +685,7 @@ fn wrap_in_group(doc: &mut PdfDocument, node: &mut PdfObject, num: i32) -> Resul
 
 // ---- rename ------------------------------------------------------------------------------------
 
-fn valid_name(name: &str) -> Result<()> {
+pub(crate) fn valid_name(name: &str) -> Result<()> {
     if name.is_empty() || name.split('.').any(|p| p.trim().is_empty()) {
         return Err(bad("a field needs a name, and no part of a dotted name may be empty"));
     }
