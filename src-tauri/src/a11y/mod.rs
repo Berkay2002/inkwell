@@ -20,6 +20,7 @@ pub mod locate;
 pub mod matterhorn;
 pub mod order;
 pub mod report;
+pub mod tables;
 pub mod tags;
 pub mod tree;
 #[cfg(test)]
@@ -30,6 +31,8 @@ mod tests_structure;
 mod tests_matterhorn;
 #[cfg(test)]
 mod tests_hostile;
+#[cfg(test)]
+mod tests_tables;
 
 use locate::Locator;
 use tree::{Tree, name, text, xref_of};

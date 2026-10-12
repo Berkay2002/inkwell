@@ -1,7 +1,8 @@
 //! Autotag (best effort): a basic structure tree for an untagged document, from MuPDF's
 //! structured text. Headings come from font size (sizes clearly above the body text, largest
 //! first, as H1-H6), blocks become paragraphs, blocks whose lines start with a bullet or a number
-//! become lists (L > LI > LBody), images become figures (without alternate text: the checker
+//! become lists (L > LI > LBody), regular grids of short cells become tables (Table > TR > TH/TD,
+//! see `tables`), images become figures (without alternate text: the checker
 //! then asks for it), link and widget annotations become Link and Form elements, and every
 //! other painting (rules, fills, shadings) is marked as an artifact.
 //!
@@ -12,10 +13,11 @@
 //! it is. The result is labelled best effort: headings, lists and order are guesses to review.
 
 use super::content::{self, Op, TextPos};
+use super::tables::{self, Table};
 use super::tree::name;
 use super::{Progress, Result, annots, bad, page_content};
 use mupdf::pdf::{PdfDocument, PdfObject};
-use mupdf::text_page::{TextBlockType, TextPageFlags};
+use mupdf::text_page::{TextBlockType, TextCharFlags, TextPageFlags};
 use mupdf::{Buffer, Matrix, Rect};
 use std::collections::HashMap;
 use serde::Serialize;
@@ -38,11 +40,16 @@ struct Line {
     block: usize,
     text: String,
     size: f32,
+    baseline: f32,
+    bold: bool,
 }
 
 struct PageText {
     lines: Vec<Line>,
     blocks: usize,
+    tables: Vec<Table>,
+    /// The table each line is a cell of.
+    table_of: Vec<Option<usize>>,
 }
 
 fn page_text(doc: &PdfDocument, p: i32) -> Result<PageText> {
@@ -58,23 +65,89 @@ fn page_text(doc: &PdfDocument, p: i32) -> Result<PageText> {
         for l in b.lines() {
             let mut text = String::new();
             let mut size = 0f32;
+            let mut baseline = None;
+            let (mut glyphs, mut bold) = (0, 0);
             for ch in l.chars() {
                 size = size.max(ch.size());
+                baseline.get_or_insert(ch.origin().y);
                 if let Some(c) = ch.char() {
                     text.push(c);
+                    if !c.is_whitespace() {
+                        glyphs += 1;
+                        bold += ch.flags().contains(TextCharFlags::BOLD) as usize;
+                    }
                 }
             }
             if text.trim().is_empty() {
                 continue;
             }
             any = true;
-            lines.push(Line { bbox: l.bounds(), block: blocks, text, size });
+            let bbox = l.bounds();
+            lines.push(Line { bbox, block: blocks, text, size, baseline: baseline.unwrap_or(bbox.y1), bold: glyphs > 0 && bold == glyphs });
         }
         if any {
             blocks += 1;
         }
     }
-    Ok(PageText { lines, blocks })
+    let tables = find_tables(doc, p, &lines)?;
+    let mut table_of = vec![None; lines.len()];
+    for (i, t) in tables.iter().enumerate() {
+        t.rows.iter().flatten().for_each(|&l| table_of[l] = Some(i));
+    }
+    Ok(PageText { lines, blocks, tables, table_of })
+}
+
+/// The tables on page `p`. Only lines that get a marked-content run can be cells (text that is
+/// already marked, or inside a form, is left alone), and form fields keep the text near them.
+fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<Vec<Table>> {
+    if lines.len() < 4 {
+        return Ok(Vec::new());
+    }
+    let page = doc.find_page(p)?;
+    let ctm = page.page_ctm()?;
+    let res = page.get_dict_inheritable("Resources")?.filter(|r| r.is_dict().unwrap_or(false));
+    let data = page_content(&page)?;
+    let ops = content::parse(&data);
+    let mut marked = vec![false; lines.len()];
+    for r in in_order(runs(&ops, res.as_ref(), ctm.clone(), lines)?, data.len()) {
+        if let Target::Line(l) = r.target {
+            marked[l] = true;
+        }
+    }
+    let items: Vec<tables::Item> = (0..lines.len())
+        .filter(|&i| {
+            // Upright text only: a rotated line is taller than it is wide.
+            let l = &lines[i];
+            marked[i] && (l.bbox.x1 - l.bbox.x0 >= l.bbox.y1 - l.bbox.y0 || l.text.chars().count() <= 3)
+        })
+        .map(|i| {
+            let l = &lines[i];
+            tables::Item { id: i, bbox: l.bbox, baseline: l.baseline, size: l.size, bold: l.bold, text: &l.text }
+        })
+        .collect();
+    let mut widgets = Vec::new();
+    for (_, a) in annots(&page)? {
+        if name(&a, "Subtype")?.as_deref() == Some("Widget")
+            && let Some(r) = a.get_dict("Rect")?.filter(|r| r.is_array().unwrap_or(false) && r.len().unwrap_or(0) == 4)
+        {
+            let v: Vec<f32> = (0..4).map(|i| r.get_array(i).ok().flatten().and_then(|n| n.as_float().ok()).unwrap_or(0.0)).collect();
+            widgets.push(bbox_of(&ctm, Rect { x0: v[0], y0: v[1], x1: v[2], y1: v[3] }));
+        }
+    }
+    Ok(tables::detect(&items, &tables::rules(&ops, &ctm), &widgets))
+}
+
+/// A block's lines in order, cut where they change between a table's cells and plain text:
+/// `(table, line indices)`. A block with no table cells is one piece.
+fn pieces(t: &PageText, b: usize) -> Vec<(Option<usize>, Vec<usize>)> {
+    let mut out: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
+    for i in (0..t.lines.len()).filter(|&i| t.lines[i].block == b) {
+        match out.last_mut() {
+            Some((tb, idx)) if *tb == t.table_of[i] => idx.push(i),
+            _ => out.push((t.table_of[i], vec![i])),
+        }
+    }
+    out
 }
 
 /// Font sizes in half points.
@@ -372,19 +445,21 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
         texts.push(t);
     }
     let body = chars_at.iter().max_by_key(|(s, c)| (**c, -**s)).map_or(24, |(s, _)| *s);
-    let is_heading_block = |t: &PageText, b: usize| -> Option<i32> {
-        let ls: Vec<&Line> = t.lines.iter().filter(|l| l.block == b).collect();
-        let size = half(ls.iter().map(|l| l.size).fold(0.0, f32::max));
-        let chars: usize = ls.iter().map(|l| l.text.chars().count()).sum();
-        (size as f32 >= body as f32 * HEADING_RATIO && ls.len() <= HEADING_MAX_LINES && chars <= HEADING_MAX_CHARS).then_some(size)
+    let heading_size = |t: &PageText, idx: &[usize]| -> Option<i32> {
+        let size = half(idx.iter().map(|&i| t.lines[i].size).fold(0.0, f32::max));
+        let chars: usize = idx.iter().map(|&i| t.lines[i].text.chars().count()).sum();
+        (size as f32 >= body as f32 * HEADING_RATIO && idx.len() <= HEADING_MAX_LINES && chars <= HEADING_MAX_CHARS).then_some(size)
     };
     let mut heading_sizes: Vec<i32> = Vec::new();
     for t in &texts {
         for b in 0..t.blocks {
-            if let Some(s) = is_heading_block(t, b)
-                && !heading_sizes.contains(&s)
-            {
-                heading_sizes.push(s);
+            for (table, idx) in pieces(t, b) {
+                if table.is_none()
+                    && let Some(s) = heading_size(t, &idx)
+                    && !heading_sizes.contains(&s)
+                {
+                    heading_sizes.push(s);
+                }
             }
         }
     }
@@ -405,34 +480,53 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
         let ops = content::parse(&data);
         let runs = in_order(runs(&ops, res.as_ref(), page_ctm.clone(), &t.lines)?, data.len());
 
-        // Blocks to elements.
+        // Blocks to elements. A table takes its lines out of their blocks and comes in once, where
+        // its first line is.
         let mut pg = Page { els: Vec::new(), top: Vec::new(), owner: Vec::new() };
         let mut line_owner = vec![usize::MAX; t.lines.len()];
         let mut top: Vec<(usize, f32)> = Vec::new();
+        let mut seen = vec![false; t.tables.len()];
         for b in 0..t.blocks {
-            let idx: Vec<usize> = (0..t.lines.len()).filter(|&i| t.lines[i].block == b).collect();
-            let y0 = idx.iter().map(|&i| t.lines[i].bbox.y0).fold(f32::MAX, f32::min);
-            if let Some(s) = is_heading_block(t, b) {
-                let e = pg.add(&format!("H{}", level(s)));
-                idx.iter().for_each(|&i| line_owner[i] = e);
-                top.push((e, y0));
-            } else if LIST_MARK.is_match(&t.lines[idx[0]].text) {
-                let l = pg.add("L");
-                let mut body = usize::MAX;
-                for &i in &idx {
-                    if body == usize::MAX || LIST_MARK.is_match(&t.lines[i].text) {
-                        let li = pg.add("LI");
-                        body = pg.add("LBody");
-                        pg.els[li].kids.push(body);
-                        pg.els[l].kids.push(li);
+            for (table, idx) in pieces(t, b) {
+                let y0 = idx.iter().map(|&i| t.lines[i].bbox.y0).fold(f32::MAX, f32::min);
+                if let Some(ti) = table {
+                    if !std::mem::replace(&mut seen[ti], true) {
+                        let tb = &t.tables[ti];
+                        let e = pg.add("Table");
+                        for (r, row) in tb.rows.iter().enumerate() {
+                            let tr = pg.add("TR");
+                            pg.els[e].kids.push(tr);
+                            for &l in row {
+                                let c = pg.add(if r == 0 && tb.header { "TH" } else { "TD" });
+                                pg.els[tr].kids.push(c);
+                                line_owner[l] = c;
+                            }
+                        }
+                        let top_y = tb.rows.iter().flatten().map(|&l| t.lines[l].bbox.y0).fold(f32::MAX, f32::min);
+                        top.push((e, top_y));
                     }
-                    line_owner[i] = body;
+                } else if let Some(s) = heading_size(t, &idx) {
+                    let e = pg.add(&format!("H{}", level(s)));
+                    idx.iter().for_each(|&i| line_owner[i] = e);
+                    top.push((e, y0));
+                } else if LIST_MARK.is_match(&t.lines[idx[0]].text) {
+                    let l = pg.add("L");
+                    let mut body = usize::MAX;
+                    for &i in &idx {
+                        if body == usize::MAX || LIST_MARK.is_match(&t.lines[i].text) {
+                            let li = pg.add("LI");
+                            body = pg.add("LBody");
+                            pg.els[li].kids.push(body);
+                            pg.els[l].kids.push(li);
+                        }
+                        line_owner[i] = body;
+                    }
+                    top.push((l, y0));
+                } else {
+                    let e = pg.add("P");
+                    idx.iter().for_each(|&i| line_owner[i] = e);
+                    top.push((e, y0));
                 }
-                top.push((l, y0));
-            } else {
-                let e = pg.add("P");
-                idx.iter().for_each(|&i| line_owner[i] = e);
-                top.push((e, y0));
             }
         }
 
@@ -579,6 +673,9 @@ fn write_el(
     d.dict_put("S", PdfObject::new_name(&el.ty)?)?;
     d.dict_put("P", parent.clone())?;
     d.dict_put("Pg", page.clone())?;
+    if el.ty == "TH" {
+        d.dict_put("A", doc.new_object_from_str("<</O/Table/Scope/Column>>")?)?;
+    }
     let r = doc.add_object(&d)?;
     refs[e] = Some(r.clone());
     let mut k = doc.new_array()?;

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 // ---- a tiny PDF writer ---------------------------------------------------------------------------
 //
-// Object numbers: 1 catalog, 2 pages, 3 font /F1, 4 info, then page i at 10 + 2i with its content
+// Object numbers: 1 catalog, 2 pages, 3 font /F1, 4 info, 5 bold font /F2, then page i at 10 + 2i with its content
 // at 11 + 2i; tests number their own objects from 100.
 
 #[derive(Clone)]
@@ -48,6 +48,7 @@ pub(super) fn build(s: &Spec) -> Vec<u8> {
     let kids: String = (0..s.pages.len()).map(|i| format!("{} 0 R ", page_ref(i))).collect();
     objs.push((2, format!("<</Type/Pages /Kids [{kids}] /Count {}>>", s.pages.len())));
     objs.push((3, s.font.clone()));
+    objs.push((5, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold/Encoding/WinAnsiEncoding>>".into()));
     if let Some(i) = &s.info {
         objs.push((4, i.clone()));
     }
@@ -55,7 +56,7 @@ pub(super) fn build(s: &Spec) -> Vec<u8> {
         objs.push((
             page_ref(i),
             format!(
-                "<</Type/Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources <</Font <</F1 3 0 R>> /XObject <</Im1 90 0 R>>>> /Contents {} 0 R {extra}>>",
+                "<</Type/Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources <</Font <</F1 3 0 R /F2 5 0 R>> /XObject <</Im1 90 0 R>>>> /Contents {} 0 R {extra}>>",
                 page_ref(i) + 1
             ),
         ));
