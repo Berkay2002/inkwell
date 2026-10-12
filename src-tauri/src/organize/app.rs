@@ -342,6 +342,14 @@ pub async fn portfolio_create(window: Window, eng: Eng<'_>, reg: Reg<'_>, files:
     .await
 }
 
+/// Page 1 of an embedded PDF as a PNG (longest side `side` pixels), over IPC only: no temp file. The
+/// document is only read, so a certified or signed one is no different.
+#[tauri::command]
+pub async fn portfolio_thumb(eng: Eng<'_>, doc: DocId, id: String, side: u32) -> Result<tauri::ipc::Response> {
+    let eng = eng.inner().clone();
+    blocking(move || super::portfolio_thumb(&eng, doc, &id, side)).await.map(tauri::ipc::Response::new)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractReport {

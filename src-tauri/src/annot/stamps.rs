@@ -286,46 +286,16 @@ fn decode_picture(bytes: &[u8]) -> Result<image::RgbaImage> {
     from_pixmap(&img.to_pixmap()?)
 }
 
-/// Every image the page names under `/Resources /XObject`, and those of the forms it draws (four levels down), must be
-/// at most [`MAX_SOURCE_PIXELS`] by its own `/Width` x `/Height`: the page is drawn with them decoded, so one huge
-/// scan would take the memory before the time limit could help.
-// shortcut: inline (BI) images, an image's mask, and images in appearance streams (annotations), patterns and Type 3
-// fonts are not walked, and at most 4096 resource entries are looked at. Upgrade: a memory cap on the draw itself, if
-// a page gets past this.
+/// Every image the page names (and those of the forms it draws) must be at most [`MAX_SOURCE_PIXELS`] by its own
+/// `/Width` x `/Height` (`diff::visual::check_page_images`): the page is drawn with them decoded, so one huge scan
+/// would take the memory before the time limit could help.
 fn check_images(bytes: &[u8], page: i32) -> Result<()> {
     let Ok(doc) = PdfDocument::from_bytes(bytes) else { return Ok(()) };
-    let Ok(Some(res)) = doc.find_page(page).and_then(|p| p.get_dict_inheritable("Resources")) else { return Ok(()) };
-    let mut stack = vec![(res, 0u8)];
-    let mut left = 4096u32;
-    while let Some((res, depth)) = stack.pop() {
-        let Ok(Some(xo)) = res.get_dict("XObject") else { continue };
-        for i in 0..xo.dict_len().unwrap_or(0) as i32 {
-            if left == 0 {
-                return Ok(());
-            }
-            left -= 1;
-            let Ok(Some(x)) = xo.get_dict_val(i) else { continue };
-            let subtype = x.get_dict("Subtype").ok().flatten().and_then(|s| s.as_name().ok());
-            match subtype.as_deref() {
-                Some(t) if t == b"Image" => {
-                    // A size that is missing, not an integer, negative or unreadable is a size we cannot bound.
-                    let dim = |k: &str| x.get_dict(k).ok().flatten().filter(|v| v.is_int().unwrap_or(false)).and_then(|v| v.as_int().ok()).and_then(|v| u64::try_from(v).ok());
-                    match (dim("Width"), dim("Height")) {
-                        (Some(w), Some(h)) if w * h <= MAX_SOURCE_PIXELS => {}
-                        (Some(_), Some(_)) => return Err(bad("that page holds a picture with too many pixels (more than 50 megapixels)")),
-                        _ => return Err(bad("that page holds a picture whose size cannot be read")),
-                    }
-                }
-                Some(t) if t == b"Form" && depth < 4 => {
-                    if let Ok(Some(r)) = x.get_dict("Resources") {
-                        stack.push((r, depth + 1));
-                    }
-                }
-                _ => {}
-            }
-        }
+    match crate::diff::visual::check_page_images(&doc, page, MAX_SOURCE_PIXELS, u64::MAX, false) {
+        Ok(()) => Ok(()),
+        Err(crate::diff::DiffError::BigImage { unreadable: true }) => Err(bad("that page holds a picture whose size cannot be read")),
+        Err(_) => Err(bad("that page holds a picture with too many pixels (more than 50 megapixels)")),
     }
-    Ok(())
 }
 
 #[cfg(test)]

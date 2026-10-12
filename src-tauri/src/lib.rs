@@ -1334,6 +1334,7 @@ pub fn run() {
             organize::app::pick_portfolio_files,
             organize::app::portfolio_create,
             organize::app::portfolio_extract_all,
+            organize::app::portfolio_thumb,
             organize::app::labels_list,
             organize::app::labels_set,
             organize::app::labels_remove,

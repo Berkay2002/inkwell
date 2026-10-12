@@ -4,8 +4,10 @@ A PDF Portfolio is a PDF whose catalog has a `/Collection` dictionary over its e
 a file list, can extract its files, and can make a new one from picked files.
 
 Code: `src-tauri/src/organize/portfolio/` (`mod.rs` reads the collection and keeps it in step with edits, `make.rs`
-creates and extracts, `tests.rs`), commands in `organize/app.rs`. UI: `src/components/PortfolioView.tsx`
-(+ `portfolio.css`), state in `src/lib/portfolioStore.ts`, order and rows in `src/lib/portfolioLogic.ts`. The files
+creates and extracts, previews a file, `tests.rs`), commands in `organize/app.rs`. UI: `src/components/PortfolioView.tsx`
+(the header and the Details layout), `PortfolioTiles.tsx`, `PortfolioPane.tsx` (+ `portfolio.css`), state in
+`src/lib/portfolioStore.ts`, order, rows and tiles in `src/lib/portfolioLogic.ts`, pictures in
+`src/lib/portfolioThumb.ts`. The files
 themselves are read, listed, described and deleted by `organize/attach.rs`; portfolios add what the collection says
 about them. There is one embedded-file reader.
 
@@ -44,7 +46,10 @@ and a header click needs no round trip.
 ## The view
 
 When the document is a portfolio the stage shows the file list instead of the page view. `/View /H` (the author
-asked for no portfolio view) starts on the cover page instead.
+asked for no portfolio view) starts on the cover page instead. The header has a **Details | Tiles** switch and a
+**Preview** toggle (the pane). The layout starts as the collection says (`/View /T` tiles; `D`, `H` and `C` Details) and
+the person's choice, the pane and the tiles' folder are kept per document for the session only: nothing is written to
+the file, and a re-read after an edit keeps them.
 
 - Columns: the schema's visible fields in `/O` order. A click on a header sorts by it, a second click flips it;
   the collection's sort is the default (its column shows an arrow and "portfolio order"; the toolbar's "Portfolio
@@ -55,11 +60,35 @@ asked for no portfolio view) starts on the cover page instead.
   **Extract…** (one file to a Save dialog), **Extract all…** (a folder dialog), **Show cover page** (the normal page
   view; a note over it has "Show files").
 - **A file that is not a PDF is never opened or run.** The primary action for it is "Extract…", which first asks
-  with the file's name and type and then shows the Save dialog. No thumbnails or previews of non-PDF files.
+  with the file's name and type and then shows the Save dialog. No thumbnails or previews of non-PDF files: they show
+  a file-type icon (from the icon manifest, by extension) with the extension as a badge.
 - The attachments panel keeps working on the same files. A file added there to a portfolio gets its `/CI` filled from
   the document's own schema (name, description, size, modified, by subtype, whatever the keys are called);
   describing a file also updates the `/CI` description (the file's own `/Desc` is what is read first); deleting the initial
   document drops `/D`. All through the attach edit steps: one undo step each.
+
+## Tiles and the preview pane
+
+- **Tiles**: a grid with one tile per folder and file at the current level, folders first (name order), then the
+  files in the same sort as Details (the header clicks are Details only; "Portfolio order" and a reader's sort carry
+  over). A tile has the picture, the file's name and the first visible field that is not the file name, as its value.
+  A folder tile has its name and the number of files under it. A folder opens on double click or Enter; the
+  breadcrumb above the grid (and Backspace or Alt+Up, which also selects the folder just left) goes back up. The grid
+  is windowed by row. Arrow keys move over the grid (Up and Down by a row; a short last row is reached from above),
+  Home and End go to the ends, Enter opens or extracts as in Details. The grid is a listbox of options labelled with
+  the file's name and field value; the selection is `aria-activedescendant`. Details has no breadcrumb (its folders
+  expand in place); switching to Details opens the folders around the selection, switching to Tiles goes into its
+  folder.
+- **Pictures**: page 1 of an embedded PDF through `portfolio_thumb(doc, id, side)`, which reads the file with
+  `attach::read_data_capped` (32 MB decoded) and draws it with the same renderer and cache as the compare view
+  (`diff::render_page_fit`, longest side 220 px for a tile, 560 px for the pane). One draw runs at a time in the
+  engine (a page that runs over 6 seconds is aborted between content operators and gets a note; one huge image or shading is not interrupted, so a page that declares a picture over 50 megapixels, or over 100 in all, is refused before it is drawn, with a note), and the view asks for at most two; a request for a tile that scrolled away before its turn is dropped.
+  Only mounted tiles ask, so a long level costs only what is on screen. The answers are kept per document (300
+  pictures) and dropped when the portfolio is read again. A file over the cap, one without bytes in the document, an
+  encrypted PDF and a damaged one show the file-type icon and a short note; none of them blocks the view.
+- **Preview pane** (works in both layouts, follows the selection): the larger picture or icon, the file's name,
+  every visible field with its value (a missing one shows "-"), and **Open** (a PDF only; opens as in Details) and
+  **Extract…**. A selected folder shows its name and file count. Nothing is launched or executed.
 
 ## Extract
 
@@ -91,10 +120,15 @@ Command palette. Pick files (any type), then a Save dialog; the result opens in 
 
 ## Known limits
 
-- The view always lays out as Details; `/View T` and `C` are read but not drawn as tiles or a custom layout.
+- `/View C` (a custom layout, in the file's own navigator) is read and shown as Details; it is not drawn.
+- The tiles show the picture of page 1 only, and the pane has no page stepper or zoom; a PDF is looked at in full by
+  opening it in a tab. The images a page names, those of its forms (four levels down) and those of its
+  annotations' normal appearances are checked by their declared size before the draw. A page the check cannot vouch
+  for (more than 4096 entries to look at, a form deeper than four levels with resources of its own, a picture with no
+  readable size) gets the icon and a note. Inline images, /SMask and /Mask, patterns, shadings and Type 3 fonts are
+  not walked, and one huge shading is not interrupted, so the draw's memory is not bounded in every case.
 - Folders are shown as folders but Extract all writes flat (clashes get " (2)"), not into sub-folders.
 - Creating a portfolio makes no folders; a `/CI` field of subtype S, D or N is only read, never filled for new files.
-- There is no preview pane (Acrobat's layout has one beside the list); a PDF is looked at by opening it in a tab.
 - The page-view tools (zoom, find) act on the cover page, so they do nothing visible while the list shows.
 - The `<id>` folder prefix is read as a decimal number; this is the form the brief describes, not verified against
   a file made by Acrobat here.

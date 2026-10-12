@@ -6,11 +6,13 @@
 
 use super::types::{DiffError, Rect4, Result, Side};
 use lru::LruCache;
-use mupdf::pdf::PdfDocument;
-use mupdf::{Colorspace, Matrix};
+use mupdf::pdf::{PdfDocument, PdfObject};
+use mupdf::{Colorspace, Cookie, Device, Matrix, Pixmap};
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, mpsc};
+use std::time::Duration;
 
 /// Budget of the render cache in bytes of RGBA.
 const CACHE_BYTES: usize = 256 << 20;
@@ -30,6 +32,14 @@ impl BytesId {
         BytesId(*blake3::hash(bytes).as_bytes())
     }
 }
+
+/// How long a fitted render (a thumbnail) may take before the page is given up on.
+const FIT_LIMIT: Duration = Duration::from_secs(6);
+
+/// The most pixels one image, and all the images of a page together, may declare (by /Width x /Height) for a
+/// fitted render: the page is drawn with them decoded, which the watchdog cannot cut short.
+const FIT_IMAGE_PIXELS: u64 = 50_000_000;
+const FIT_IMAGES_TOTAL: u64 = 100_000_000;
 
 /// Largest render, in pixels (160 MB of RGBA).
 pub const MAX_PIXELS: f32 = 40e6;
@@ -83,12 +93,28 @@ pub fn render_page(id: BytesId, bytes: &[u8], page: u32, scale: f32) -> Result<A
 }
 
 pub fn render_page_pw(id: BytesId, bytes: &[u8], page: u32, scale: f32, password: Option<&str>) -> Result<Arc<Raster>> {
-    let key = (id, page, (scale * 1000.0).round() as u32);
+    cached((id, page, (scale * 1000.0).round() as u32), bytes, page, Size::Scale(scale), password)
+}
+
+/// A page drawn so its longest side is `side` pixels (whatever the page's own size): what a thumbnail wants.
+pub fn render_page_fit(id: BytesId, bytes: &[u8], page: u32, side: u32) -> Result<Arc<Raster>> {
+    // The high bit tells a fitted render from a scaled one in the cache key.
+    cached((id, page, (1 << 31) | side), bytes, page, Size::Side(side as f32), None)
+}
+
+/// How big a render is asked for: a scale (pixels per point) or a longest side in pixels.
+#[derive(Clone, Copy)]
+enum Size {
+    Scale(f32),
+    Side(f32),
+}
+
+fn cached(key: Key, bytes: &[u8], page: u32, size: Size, password: Option<&str>) -> Result<Arc<Raster>> {
     if let Some(r) = cache().lock().lru.get(&key) {
         return Ok(r.clone());
     }
     // Panics inside MuPDF become an error, as in `compare`.
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(bytes, page, scale, password)))
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(bytes, page, size, password)))
         .unwrap_or(Err(DiffError::Panic))?;
     let r = Arc::new(r);
     let mut c = cache().lock();
@@ -104,18 +130,31 @@ pub fn render_page_pw(id: BytesId, bytes: &[u8], page: u32, scale: f32, password
     Ok(r)
 }
 
-fn render(bytes: &[u8], page: u32, scale: f32, password: Option<&str>) -> Result<Raster> {
+fn render(bytes: &[u8], page: u32, size: Size, password: Option<&str>) -> Result<Raster> {
     let doc: PdfDocument = super::snap::open_doc(bytes, Side::A, password)?;
     let n = doc.page_count()?;
     if page as i32 >= n {
         return Err(DiffError::BadPage { page });
     }
+    // A fitted render (a thumbnail) is the one a stranger's file can reach, and the watchdog only acts between
+    // content operators: one huge image or shading is not interrupted, so a page that declares one is refused.
+    if matches!(size, Size::Side(_)) {
+        check_page_images(&doc, page as i32, FIT_IMAGE_PIXELS, FIT_IMAGES_TOTAL, true)?;
+    }
     let p = doc.load_page(page as i32)?;
     let b = p.bounds()?;
     let area = ((b.x1 - b.x0) * (b.y1 - b.y0)).max(1.0);
+    let scale = match size {
+        Size::Scale(s) => s,
+        Size::Side(side) => side / (b.x1 - b.x0).max(b.y1 - b.y0).max(1.0),
+    };
     // 0.99: the pixmap rounds its edges outward.
     let scale = scale.min((MAX_PIXELS / area).sqrt() * 0.99);
-    let pix = p.to_pixmap(&Matrix::new_scale(scale, scale), &Colorspace::device_rgb(), false, true)?;
+    let m = Matrix::new_scale(scale, scale);
+    let pix = match size {
+        Size::Scale(_) => p.to_pixmap(&m, &Colorspace::device_rgb(), false, true)?,
+        Size::Side(_) => draw_within(&p, &m, FIT_LIMIT)?,
+    };
     let (w, h, n) = (pix.width() as usize, pix.height() as usize, pix.n() as usize);
     let stride = pix.stride() as usize;
     let src = pix.samples();
@@ -134,6 +173,115 @@ fn render(bytes: &[u8], page: u32, scale: f32, password: Option<&str>) -> Result
         }
     }
     Ok(Raster { width: w as u32, height: h as u32, scale, rgba })
+}
+
+/// Every image the page names under `/Resources /XObject`, and those of the forms it draws (four levels down), must be
+/// at most `each` pixels by its own /Width x /Height, and `total`
+/// together: a page is drawn with them decoded, so one huge scan (or a small stream that inflates into one) would
+/// take the memory before any time limit could help.
+///
+/// `closed` (a thumbnail's way): what the walk cannot vouch for is refused (`BigImage { unreadable: true }`): more
+/// than 4096 entries looked at, or a form deeper than four levels that has resources of its own; and the pictures
+/// of the annotations' normal appearances (/AP /N), which the page draws, are counted too. Open (the stamp maker's
+/// way), it lets those pass and leaves the annotations alone, as it always did.
+// shortcut: inline (BI) images, an image's /SMask or /Mask, patterns, shadings and Type 3 fonts are not walked.
+// Upgrade: a memory cap on the draw itself, if a page gets past this.
+pub(crate) fn check_page_images(doc: &PdfDocument, page: i32, each: u64, total: u64, closed: bool) -> Result<()> {
+    const BUDGET: u32 = 4096;
+    const DEPTH: u8 = 4;
+    let Ok(page) = doc.find_page(page) else { return Ok(()) };
+    let unbounded = || if closed { Err(DiffError::BigImage { unreadable: true }) } else { Ok(()) };
+    let mut stack: Vec<(PdfObject, u8)> = Vec::new();
+    if let Ok(Some(res)) = page.get_dict_inheritable("Resources") {
+        stack.push((res, 0));
+    }
+    let mut left = BUDGET;
+    // The annotations' normal appearances (/AP /N: one form, or a dictionary of them by state) are drawn with the
+    // page; their resources are looked at within the same budget.
+    let annots = if closed { page.get_dict("Annots").ok().flatten() } else { None };
+    if let Some(annots) = annots {
+        for i in 0..annots.len().unwrap_or(0) as i32 {
+            let Ok(Some(an)) = annots.get_array(i) else { continue };
+            let Ok(Some(n)) = an.get_dict("AP").and_then(|ap| ap.map_or(Ok(None), |ap| ap.get_dict("N"))) else { continue };
+            let forms: Vec<PdfObject> = if n.is_stream().unwrap_or(false) {
+                vec![n]
+            } else {
+                (0..n.dict_len().unwrap_or(0).min(64) as i32).filter_map(|k| n.get_dict_val(k).ok().flatten()).collect()
+            };
+            for f in forms {
+                if left == 0 {
+                    return unbounded();
+                }
+                left -= 1;
+                if let Ok(Some(r)) = f.get_dict("Resources") {
+                    stack.push((r, 1));
+                }
+            }
+        }
+    }
+    let mut sum = 0u64;
+    while let Some((res, depth)) = stack.pop() {
+        let Ok(Some(xo)) = res.get_dict("XObject") else { continue };
+        for i in 0..xo.dict_len().unwrap_or(0) as i32 {
+            if left == 0 {
+                return unbounded();
+            }
+            left -= 1;
+            let Ok(Some(x)) = xo.get_dict_val(i) else { continue };
+            let subtype = x.get_dict("Subtype").ok().flatten().and_then(|s| s.as_name().ok());
+            match subtype.as_deref() {
+                Some(t) if t == b"Image" => {
+                    // A size that is missing, not an integer, negative or unreadable is a size we cannot bound.
+                    let dim = |k: &str| x.get_dict(k).ok().flatten().filter(|v| v.is_int().unwrap_or(false)).and_then(|v| v.as_int().ok()).and_then(|v| u64::try_from(v).ok());
+                    let (Some(w), Some(h)) = (dim("Width"), dim("Height")) else { return Err(DiffError::BigImage { unreadable: true }) };
+                    let px = w.saturating_mul(h);
+                    sum = sum.saturating_add(px);
+                    if px > each || sum > total {
+                        return Err(DiffError::BigImage { unreadable: false });
+                    }
+                }
+                Some(t) if t == b"Form" => {
+                    if let Ok(Some(r)) = x.get_dict("Resources") {
+                        if depth < DEPTH {
+                            stack.push((r, depth + 1));
+                        } else if r.get_dict("XObject").ok().flatten().is_some() {
+                            return unbounded();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What `Page::to_pixmap` makes (white paper, opaque, annotations and fields drawn), with a cookie so a watchdog
+/// can abort a page that takes longer than `limit`: a hostile page cannot hold the caller for good.
+fn draw_within(page: &mupdf::Page, m: &Matrix, limit: Duration) -> Result<Pixmap> {
+    let area = page.bounds()?.transform(m).round();
+    let mut pix = Pixmap::new_with_rect(&Colorspace::device_rgb(), area, false)?;
+    pix.clear_with(255)?;
+    let cookie = Cookie::new()?;
+    let timed_out = AtomicBool::new(false);
+    let (done, finished) = mpsc::channel::<()>();
+    let (timed, handle) = (&timed_out, cookie.abort_handle());
+    let run = std::thread::scope(|s| {
+        s.spawn(move || {
+            if finished.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
+                timed.store(true, Ordering::SeqCst);
+                handle.abort();
+            }
+        });
+        let run = Device::from_pixmap(&pix).and_then(|dev| page.run_with_cookie(&dev, m, &cookie));
+        drop(done);
+        run
+    });
+    if timed_out.load(Ordering::SeqCst) {
+        return Err(DiffError::Slow);
+    }
+    run?;
+    Ok(pix)
 }
 
 #[derive(Serialize, Debug)]

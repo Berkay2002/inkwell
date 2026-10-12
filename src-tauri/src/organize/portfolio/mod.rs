@@ -748,6 +748,37 @@ pub fn read(doc: &PdfDocument) -> Result<Option<PortfolioInfo>> {
     Ok(Some(PortfolioInfo { fields, sort, view: view.into(), initial, folders, files }))
 }
 
+// ---- preview ------------------------------------------------------------------------------------
+
+/// The most decoded bytes of an embedded PDF a thumbnail will open (the UI shows the file-type icon past it).
+pub const THUMB_MAX: usize = 32 << 20;
+
+/// One thumbnail is drawn at a time, however many the view asks for: a tile grid cannot pile up renders. A page
+/// that runs long is aborted between content operators (`diff::visual`'s fit limit); one huge image or shading
+/// is not interrupted, so a page declaring a picture over 50 MP (100 MP in all) is refused before it is drawn.
+static ONE_AT_A_TIME: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Page 1 of the embedded PDF `id` as a PNG whose longest side is `side` pixels (48 to 1024). The file is
+/// only read: a file over `cap` decoded bytes, one that is not a PDF, is encrypted or cannot be drawn is
+/// refused with a short reason the view shows as a note. Nothing is written or run.
+pub fn thumb(eng: &crate::engine::Engine, doc: crate::engine::DocId, id: &str, side: u32, cap: usize) -> Result<Vec<u8>> {
+    use crate::diff::{BytesId, DiffError, render_page_fit};
+    let _one = ONE_AT_A_TIME.lock();
+    let (_, bytes) = eng.read_custom(doc, |d| attach::read_data_capped(d, id, cap))?;
+    let r = render_page_fit(BytesId::of(&bytes), &bytes, 0, side.clamp(48, 1024)).map_err(|e| {
+        bad(match e {
+            DiffError::NeedsPassword { .. } | DiffError::BadPassword { .. } => "This PDF is password protected",
+            DiffError::BadPage { .. } => "This PDF has no pages",
+            DiffError::NotPdf { .. } => "This file is not a PDF Inkwell can open",
+            DiffError::Slow => "This PDF's first page took too long to draw",
+            DiffError::BigImage { unreadable: true } => "This PDF's first page has pictures that cannot be checked for size",
+            DiffError::BigImage { .. } => "This PDF's first page holds a picture too large to preview",
+            _ => "This PDF could not be drawn",
+        })
+    })?;
+    r.to_png().map_err(|_| bad("This PDF could not be drawn"))
+}
+
 // ---- editing a portfolio ------------------------------------------------------------------------
 
 /// `/CI` of the files `keys`, from the document's own schema: a field of the file's own facts (name,

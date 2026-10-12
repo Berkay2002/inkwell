@@ -216,6 +216,11 @@ pub fn portfolio_extract_all(eng: &Engine, doc: DocId, dir: &std::path::Path, wr
     eng.read_custom(doc, |d| portfolio::extract_all(d, dir, written))
 }
 
+/// Page 1 of an embedded PDF as a PNG for the portfolio's tiles and preview pane (read only).
+pub fn portfolio_thumb(eng: &Engine, doc: DocId, id: &str, side: u32) -> Result<Vec<u8>> {
+    portfolio::thumb(eng, doc, id, side, portfolio::THUMB_MAX)
+}
+
 // ---- article threads ----------------------------------------------------------------------------
 
 pub fn threads_get(eng: &Engine, doc: DocId) -> Result<Vec<Thread>> {

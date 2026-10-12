@@ -3,7 +3,8 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
 import type { PortfolioFile, PortfolioInfo, PortfolioSortKey } from "./api";
-import { nextSort, openAction, typeLabel } from "./portfolioLogic";
+import { defaultLayout, type Layout, nextSort, openAction, typeLabel } from "./portfolioLogic";
+import { dropThumbs } from "./portfolioThumb";
 
 const st = () => useStore.getState();
 
@@ -18,6 +19,12 @@ export interface PortfolioDoc {
   selected: string | null;
   /** The cover page (the normal page view) is showing instead of the file list. */
   cover: boolean;
+  /** Details or Tiles: the collection's /View until the person picks one. For this session only, never written. */
+  layout: Layout;
+  /** The preview pane beside the list is showing. */
+  pane: boolean;
+  /** The folder the tiles are in (null: the top level). */
+  folder: number | null;
 }
 
 interface Store {
@@ -29,6 +36,10 @@ interface Store {
   toggleFolder: (doc: number, folder: number) => void;
   select: (doc: number, key: string | null) => void;
   showCover: (doc: number, on: boolean) => void;
+  setLayout: (doc: number, layout: Layout) => void;
+  togglePane: (doc: number) => void;
+  /** Tiles: go into a folder (null: the top). */
+  enterFolder: (doc: number, folder: number | null) => void;
 }
 
 /** The newest read asked for of each document: an older answer that arrives late is dropped. */
@@ -55,10 +66,15 @@ export const usePortfolio = create<Store>((set, get) => ({
       return;
     }
     const had = get().docs[doc];
+    // The files may have changed: the pictures are drawn again when a tile or the pane asks.
+    dropThumbs(doc);
     set((s) => {
       // Documents that are gone take their state with them.
       const docs: Record<number, PortfolioDoc> = {};
-      for (const [k, v] of Object.entries(s.docs)) if (st().docs[Number(k)]) docs[Number(k)] = v;
+      for (const [k, v] of Object.entries(s.docs)) {
+        if (st().docs[Number(k)]) docs[Number(k)] = v;
+        else dropThumbs(Number(k));
+      }
       const keep = had?.info && info ? had : null;
       const has = (key: string | null) => !!key && !!info && (info.files.some((f) => f.id === key) || info.folders.some((f) => `d:${f.id}` === key));
       // The first look selects the author's initial document, with the folders around it open.
@@ -75,6 +91,10 @@ export const usePortfolio = create<Store>((set, get) => ({
         selected: keep ? (has(keep.selected) ? keep.selected : null) : (first?.id ?? null),
         // The first look shows the files, unless the author asked for no portfolio view.
         cover: keep ? keep.cover : info?.view === "hidden",
+        // What the person chose stays through every re-read (an attachment added, a file removed).
+        layout: keep?.layout ?? defaultLayout(info?.view ?? "details"),
+        pane: keep?.pane ?? false,
+        folder: keep ? (keep.folder != null && info?.folders.some((f) => f.id === keep.folder) ? keep.folder : null) : (first?.folder ?? null),
       };
       return { docs };
     });
@@ -93,6 +113,34 @@ export const usePortfolio = create<Store>((set, get) => ({
   },
   select: (doc, key) => patch(set, doc, { selected: key }),
   showCover: (doc, on) => patch(set, doc, { cover: on }),
+  setLayout: (doc, layout) => {
+    const d = get().docs[doc];
+    if (!d) return;
+    // Tiles open in the folder of what is selected, so the selection is still in view.
+    let folder = d.folder;
+    if (layout === "tiles" && d.info && d.selected) {
+      const file = d.info.files.find((f) => f.id === d.selected);
+      const dir = d.selected.startsWith("d:") ? d.info.folders.find((f) => `d:${f.id}` === d.selected) : undefined;
+      if (file) folder = file.folder;
+      else if (dir) folder = dir.parent;
+    }
+    // Details shows the selection with the folders around it open.
+    const open = [...d.open];
+    if (layout === "details" && d.info && d.selected) {
+      const file = d.info.files.find((f) => f.id === d.selected);
+      const dir = d.selected.startsWith("d:") ? d.info.folders.find((f) => `d:${f.id}` === d.selected) : undefined;
+      for (let p = file ? file.folder : (dir?.parent ?? null), n = 0; p != null && n < 33; n++) {
+        if (!open.includes(p)) open.push(p);
+        p = d.info.folders.find((f) => f.id === p)?.parent ?? null;
+      }
+    }
+    patch(set, doc, { layout, folder, open });
+  },
+  togglePane: (doc) => {
+    const d = get().docs[doc];
+    if (d) patch(set, doc, { pane: !d.pane });
+  },
+  enterFolder: (doc, folder) => patch(set, doc, { folder, selected: null }),
 }));
 
 const say = (m: string) => st().setUi({ error: m });

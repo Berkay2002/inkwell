@@ -718,3 +718,225 @@ fn adding_describing_and_removing_keep_the_collection_in_step() {
     e2.undo(id).unwrap();
     assert_eq!(table(&e2), start);
 }
+
+// ---- thumbnails ---------------------------------------------------------------------------------
+
+fn png_size(png: &[u8]) -> (u32, u32) {
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
+    (u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap()))
+}
+
+#[test]
+fn a_thumbnail_is_page_one_of_an_embedded_pdf_and_everything_else_is_refused() {
+    use mupdf::pdf::{Encryption, PdfWriteOptions};
+    let d = dir("thumb");
+    let a = pdf(&d, "a.pdf", 2);
+    let txt = d.join("notes.txt");
+    std::fs::write(&txt, "plain text\n").unwrap();
+    let broken = d.join("broken.pdf");
+    std::fs::write(&broken, b"%PDF-1.4\nthis is not a pdf\n").unwrap();
+    let locked = d.join("locked.pdf");
+    {
+        let src = PdfDocument::from_bytes(&fixture::build(&Fixture { pages: 1, chapter_every: 0, lines: 4, ..Default::default() })).unwrap();
+        let mut o = PdfWriteOptions::default();
+        o.set_encryption(Encryption::Aes256).set_user_password("secret").set_owner_password("owner");
+        src.save_with_options(locked.to_str().unwrap(), o).unwrap();
+    }
+    let made = d.join("p.pdf").to_string_lossy().into_owned();
+    let src = sources(&[
+        ("a.pdf", &a),
+        ("notes.txt", txt.to_str().unwrap()),
+        ("broken.pdf", broken.to_str().unwrap()),
+        ("locked.pdf", locked.to_str().unwrap()),
+    ]);
+    create(&Engine::new(2, 64 << 20), &src, &made).unwrap();
+    let (eng, id) = open(&made);
+
+    // the longest side is the one asked for (the fixture page is 612 x 792)
+    let (w, h) = png_size(&thumb(&eng, id, "n:a.pdf", 120, THUMB_MAX).unwrap());
+    assert_eq!((w, h), (93, 120));
+    // unpainted paper is white, not black or clear
+    let img = image::load_from_memory(&thumb(&eng, id, "n:a.pdf", 120, THUMB_MAX).unwrap()).unwrap().to_rgba8();
+    assert_eq!(img.get_pixel(w - 1, h - 1).0, [255, 255, 255, 255]);
+    // asked again it is the same picture; a silly size is held to the limits
+    assert_eq!(png_size(&thumb(&eng, id, "n:a.pdf", 120, THUMB_MAX).unwrap()), (93, 120));
+    assert_eq!(png_size(&thumb(&eng, id, "n:a.pdf", 1, THUMB_MAX).unwrap()).1, 48);
+    assert_eq!(png_size(&thumb(&eng, id, "n:a.pdf", 100_000, THUMB_MAX).unwrap()).1, 1024);
+
+    let refused = |key: &str, cap: usize| thumb(&eng, id, &format!("n:{key}"), 120, cap).unwrap_err().to_string();
+    assert!(refused("notes.txt", THUMB_MAX).contains("not a PDF"));
+    assert!(refused("broken.pdf", THUMB_MAX).to_lowercase().contains("pdf"));
+    assert!(refused("locked.pdf", THUMB_MAX).contains("password"));
+    assert!(refused("a.pdf", 100).contains("too large"));
+    assert!(thumb(&eng, id, "n:gone.pdf", 120, THUMB_MAX).is_err());
+    // read only
+    assert!(!eng.edit_state(id).unwrap().dirty);
+}
+
+/// A one-page PDF (a few hundred bytes) whose only content paints one gray image that declares `w` x `h` pixels
+/// and holds 4 bytes of data.
+fn pdf_with_image(w: u32, h: u32) -> Vec<u8> {
+    format!(
+        "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+         3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<</XObject<</Im 4 0 R>>>>/Contents 5 0 R>>endobj\n\
+         4 0 obj<</Type/XObject/Subtype/Image/Width {w}/Height {h}/ColorSpace/DeviceGray/BitsPerComponent 8/Length 4>>stream\nabcd\nendstream\nendobj\n\
+         5 0 obj<</Length 26>>stream\nq 200 0 0 200 0 0 cm /Im Do Q\nendstream\nendobj\n\
+         trailer<</Root 1 0 R/Size 6>>\n%%EOF\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn a_page_that_declares_a_huge_picture_is_refused_before_it_is_drawn() {
+    let d = dir("thumb-image");
+    let write = |name: &str, bytes: Vec<u8>| {
+        let p = d.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let small = write("small.pdf", pdf_with_image(2, 2));
+    // 20 000 x 20 000 = 400 MP declared by a stream of 4 bytes; 7 000 x 7 000 = 49 MP is just under the limit
+    let huge = write("huge.pdf", pdf_with_image(20_000, 20_000));
+    let two = write("two.pdf", pdf_with_image(7_000, 7_000));
+    let made = d.join("p.pdf").to_string_lossy().into_owned();
+    create(&Engine::new(2, 64 << 20), &sources(&[("small.pdf", &small), ("huge.pdf", &huge), ("two.pdf", &two)]), &made).unwrap();
+    let (eng, id) = open(&made);
+
+    // the control: the same file with a small picture draws
+    let (w, h) = png_size(&thumb(&eng, id, "n:small.pdf", 100, THUMB_MAX).unwrap());
+    assert_eq!((w, h), (100, 100));
+    let e = thumb(&eng, id, "n:huge.pdf", 100, THUMB_MAX).unwrap_err().to_string();
+    assert!(e.contains("too large to preview"), "{e}");
+    // 49 MP is under the per-image limit and drawn (a 4-byte stream is a short read, not an error)
+    assert!(thumb(&eng, id, "n:two.pdf", 100, THUMB_MAX).is_ok());
+}
+
+#[test]
+fn the_pictures_of_a_page_are_counted_together() {
+    let doc = PdfDocument::from_bytes(&pdf_with_image(7_000, 7_000)).unwrap();
+    // 49 MP: within 50 MP each and within 100 MP in all
+    assert!(crate::diff::visual::check_page_images(&doc, 0, 50_000_000, 100_000_000, true).is_ok());
+    // the same page over a lower total, or a lower per-image limit
+    assert!(crate::diff::visual::check_page_images(&doc, 0, 50_000_000, 40_000_000, true).is_err());
+    assert!(crate::diff::visual::check_page_images(&doc, 0, 40_000_000, 100_000_000, true).is_err());
+}
+
+/// A PDF from object bodies (numbered from 1; object 1 is the catalog): the xref is left out and the reader repairs.
+fn raw_pdf(bodies: &[String]) -> Vec<u8> {
+    let mut out = String::from("%PDF-1.4\n");
+    for (i, b) in bodies.iter().enumerate() {
+        out.push_str(&format!("{} 0 obj\n{b}\nendobj\n", i + 1));
+    }
+    out.push_str(&format!("trailer<</Root 1 0 R/Size {}>>\n%%EOF\n", bodies.len() + 1));
+    out.into_bytes()
+}
+
+const IMG: &str = "<</Type/XObject/Subtype/Image/Width {w}/Height {h}/ColorSpace/DeviceGray/BitsPerComponent 8/Length 4>>\nstream\nabcd\nendstream";
+
+fn image(w: u32, h: u32) -> String {
+    IMG.replace("{w}", &w.to_string()).replace("{h}", &h.to_string())
+}
+
+/// A form (a stream) whose resources are `resources`.
+fn form(resources: &str) -> String {
+    format!("<</Type/XObject/Subtype/Form/BBox[0 0 10 10]/Resources<<{resources}>>/Length 0>>\nstream\n\nendstream")
+}
+
+/// A one-page PDF (3 is the page, 4 its empty content) with `extra` objects from number 5 on; `page` is the page's
+/// own entries after /Parent and /MediaBox.
+fn page_pdf(page: &str, extra: &[String]) -> Vec<u8> {
+    let mut b = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        format!("<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R {page}>>"),
+        "<</Length 0>>\nstream\n\nendstream".to_string(),
+    ];
+    b.extend(extra.iter().cloned());
+    raw_pdf(&b)
+}
+
+#[test]
+fn what_the_check_cannot_vouch_for_is_refused_for_a_thumbnail_and_let_through_for_a_stamp() {
+    use crate::diff::visual::check_page_images;
+    // object 5 is a 2x2 picture, 6 a 20 000 x 20 000 one (where a case has them)
+    let small = image(2, 2);
+    let bomb = image(20_000, 20_000);
+    let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
+
+    // 4 100 entries, all small: more than the 4 096 that are looked at
+    let keys: String = (0..4100).map(|i| format!("/K{i} 5 0 R")).collect();
+    cases.push(("budget", page_pdf(&format!("/Resources<</XObject<<{keys}>>>>"), &[small.clone()])));
+
+    // a chain of forms, each in the resources of the one before, five deep, the last holding a picture
+    let chain = |n: usize| {
+        let mut objs = vec![small.clone(), bomb.clone()];
+        // forms are objects 7..: form k (1-based) holds form k+1; the last holds the bomb
+        for k in 1..=n {
+            let inner = if k == n { "/XObject<</Im 6 0 R>>".to_string() } else { format!("/XObject<</F {} 0 R>>", 7 + k) };
+            objs.push(form(&inner));
+        }
+        page_pdf("/Resources<</XObject<</F 7 0 R>>>>", &objs)
+    };
+    cases.push(("depth", chain(5)));
+
+    // a picture in an annotation's appearance only: the page's own content does not draw it
+    let annot = "<</Type/Annot/Subtype/Stamp/Rect[0 0 10 10]/AP<</N 8 0 R>>>>".to_string();
+    cases.push(("annotation", page_pdf("/Annots[7 0 R]", &[small.clone(), bomb.clone(), annot.clone(), form("/XObject<</Im 6 0 R>>")])));
+    // and in one of several states
+    let states = "<</Type/Annot/Subtype/Widget/Rect[0 0 10 10]/AP<</N<</On 8 0 R/Off 8 0 R>>>>>>".to_string();
+    cases.push(("annotation states", page_pdf("/Annots[7 0 R]", &[small.clone(), bomb.clone(), states, form("/XObject<</Im 6 0 R>>")])));
+
+    let d = dir("thumb-closed");
+    let files: Vec<(String, String)> = cases
+        .iter()
+        .map(|(name, bytes)| {
+            let p = d.join(format!("{}.pdf", name.replace(' ', "-")));
+            std::fs::write(&p, bytes).unwrap();
+            ((*name).to_string(), p.to_string_lossy().into_owned())
+        })
+        .collect();
+    let made = d.join("p.pdf").to_string_lossy().into_owned();
+    let src: Vec<Source> = files.iter().map(|(n, p)| Source { name: format!("{}.pdf", n.replace(' ', "-")), path: p.clone() }).collect();
+    create(&Engine::new(2, 64 << 20), &src, &made).unwrap();
+    let (eng, id) = open(&made);
+    for (name, bytes) in &cases {
+        let doc = PdfDocument::from_bytes(bytes).unwrap();
+        // the stamp maker's way, as before: none of these is refused
+        assert!(check_page_images(&doc, 0, 50_000_000, u64::MAX, false).is_ok(), "{name}");
+        let e = thumb(&eng, id, &format!("n:{}.pdf", name.replace(' ', "-")), 100, THUMB_MAX).unwrap_err().to_string();
+        assert!(e.contains("picture"), "{name}: {e}");
+    }
+    // the budget and the depth are refused as unverifiable; the bomb in an annotation by its size
+    let err = |n: &str| thumb(&eng, id, &format!("n:{n}.pdf"), 100, THUMB_MAX).unwrap_err().to_string();
+    assert!(err("budget").contains("cannot be checked"));
+    assert!(err("depth").contains("cannot be checked"));
+    assert!(err("annotation").contains("too large"));
+    assert!(err("annotation-states").contains("too large"));
+}
+
+#[test]
+fn a_stamp_is_checked_as_before_and_four_levels_of_forms_still_draw() {
+    use crate::diff::visual::check_page_images;
+    let small = image(2, 2);
+    let bomb = image(20_000, 20_000);
+    let keys: String = (0..4100).map(|i| format!("/K{i} 5 0 R")).collect();
+    let budget = PdfDocument::from_bytes(&page_pdf(&format!("/Resources<</XObject<<{keys}>>>>"), &[small.clone()])).unwrap();
+    // at the cap: open lets it through, closed refuses
+    assert!(check_page_images(&budget, 0, 50_000_000, u64::MAX, false).is_ok());
+    assert!(matches!(check_page_images(&budget, 0, 50_000_000, u64::MAX, true), Err(crate::diff::DiffError::BigImage { unreadable: true })));
+
+    // four forms deep with a small picture at the end: fine either way
+    let mut objs = vec![small.clone(), bomb.clone()];
+    for k in 1..=4 {
+        objs.push(form(&if k == 4 { "/XObject<</Im 5 0 R>>".to_string() } else { format!("/XObject<</F {} 0 R>>", 7 + k) }));
+    }
+    let four = PdfDocument::from_bytes(&page_pdf("/Resources<</XObject<</F 7 0 R>>>>", &objs)).unwrap();
+    assert!(check_page_images(&four, 0, 50_000_000, u64::MAX, true).is_ok());
+    assert!(check_page_images(&four, 0, 50_000_000, u64::MAX, false).is_ok());
+
+    // an annotation's picture is only looked at closed
+    let annot = "<</Type/Annot/Subtype/Stamp/Rect[0 0 10 10]/AP<</N 8 0 R>>>>".to_string();
+    let an = PdfDocument::from_bytes(&page_pdf("/Annots[7 0 R]", &[small, bomb, annot, form("/XObject<</Im 6 0 R>>")])).unwrap();
+    assert!(matches!(check_page_images(&an, 0, 50_000_000, u64::MAX, true), Err(crate::diff::DiffError::BigImage { unreadable: false })));
+    assert!(check_page_images(&an, 0, 50_000_000, u64::MAX, false).is_ok());
+}
