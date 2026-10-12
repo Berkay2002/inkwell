@@ -809,6 +809,8 @@ pub struct SignatureInfo {
 pub struct SignList {
     pub certify: Option<u8>,
     pub signatures: Vec<SignatureInfo>,
+    /// Why the signatures couldn't be checked (then `signatures` is empty): never shown as "not signed".
+    pub error: Option<String>,
 }
 
 /// Lists every signature field with its validation, in page order. `trust` judges the signer's
@@ -936,7 +938,7 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<SignList> 
     for i in &mut infos {
         finish(i);
     }
-    Ok(SignList { certify: p, signatures: infos })
+    Ok(SignList { certify: p, signatures: infos, error: None })
 }
 
 /// Ties an intact signature to the field showing it, through the bytes it signs: that revision

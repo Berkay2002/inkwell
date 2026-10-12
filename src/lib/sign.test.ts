@@ -149,7 +149,7 @@ describe("sign store", () => {
     useSign.setState({ ids: [testId], idChoice: "s3", reason: "Lease signed", lock: true, picture: true, saved: [saved("a", "signature")], pick: { signature: "a" } });
     s().setDraft(1, { page: 3, rect: [300, 600, 500, 680] });
     const signedState = { ...state, rev: 5, dirty: false };
-    reply({ sign_document: signedState, sign_list: { certify: 1, signatures: [sig({ certify: 1 })] } });
+    reply({ sign_document: signedState, sign_list: { certify: 1, signatures: [sig({ certify: 1 })], error: null } });
     expect(await s().sign(1, null)).toBe(true);
     const call = inv.mock.calls.find((c) => c[0] === "sign_document")![1] as Record<string, unknown>;
     expect(call.id).toEqual({ kind: "session", handle: 3 });
@@ -165,7 +165,7 @@ describe("sign store", () => {
   it("signs an existing field by name and never certifies a signed document", async () => {
     useSign.setState({ ids: [testId], idChoice: "s3", lock: true });
     useSign.setState({ docs: { 1: { ...s().get(1), sigs: [sig({})], draft: { page: 0, rect: [0, 0, 1, 1], field: "Tenant" } } } });
-    reply({ sign_document: state, sign_list: { certify: null, signatures: [] } });
+    reply({ sign_document: state, sign_list: { certify: null, signatures: [], error: null } });
     await s().sign(1, "save-token");
     const call = inv.mock.calls.find((c) => c[0] === "sign_document")![1] as { options: Record<string, unknown>; to: string };
     expect(call.options.field).toBe("Tenant");
@@ -187,15 +187,25 @@ describe("sign store", () => {
   });
 
   it("shows the banner again when the number of signatures changes", async () => {
-    reply({ sign_list: { certify: null, signatures: [sig({})] } });
+    reply({ sign_list: { certify: null, signatures: [sig({})], error: null } });
     await s().refreshSigs(1, 1);
     s().hideBanner(1);
     await s().refreshSigs(1, 2);
     expect(s().get(1).bannerHidden).toBe(true);
-    reply({ sign_list: { certify: 2, signatures: [sig({}), sig({ field: "B" })] } });
+    reply({ sign_list: { certify: 2, signatures: [sig({}), sig({ field: "B" })], error: null } });
     await s().refreshSigs(1, 3);
     expect(s().get(1).bannerHidden).toBe(false);
     expect(s().get(1).certify).toBe(2);
+  });
+
+  it("keeps the level and says why when the signatures couldn't be checked, never 'not signed'", async () => {
+    reply({ sign_list: { certify: 1, signatures: [], error: "this document has more than 64 signatures, more than Inkwell checks" } });
+    await s().refreshSigs(1, 1);
+    expect(locked(s().get(1))).toBe(true);
+    expect(banner(s().get(1).sigs, s().get(1).sigsError)).toEqual({
+      tone: "invalid",
+      text: "The signatures could not be checked: this document has more than 64 signatures, more than Inkwell checks.",
+    });
   });
 });
 

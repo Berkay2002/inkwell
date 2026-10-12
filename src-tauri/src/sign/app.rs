@@ -280,12 +280,13 @@ pub fn list(eng: &Engine, doc: DocId) -> Result<SignList> {
         Ok((has, pdf::docmdp_level(d)))
     })?;
     if !has_fields {
-        return Ok(SignList { certify, signatures: Vec::new() });
+        return Ok(SignList { certify, signatures: Vec::new(), error: None });
     }
     let bytes = eng.current_bytes(doc)?;
     let d = mupdf::pdf::PdfDocument::from_bytes(&bytes).map_err(EngineError::from)?;
-    // Signatures that can't be checked (too many) still leave the level signing refuses by, for the UI to say why.
-    Ok(pdf::list(&d, &bytes, &system_trust).unwrap_or(SignList { certify, signatures: Vec::new() }))
+    // Signatures that can't be checked (too many) still leave the level signing refuses by, and say why they
+    // weren't checked: the UI must not read that as an unsigned document.
+    Ok(pdf::list(&d, &bytes, &system_trust).unwrap_or_else(|e| SignList { certify, signatures: Vec::new(), error: Some(e.to_string()) }))
 }
 
 /// Windows' chain engine and trusted roots, at the current time.

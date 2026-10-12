@@ -980,6 +980,7 @@ fn more_signatures_than_inkwell_checks_are_refused() {
     let (eng, id, _) = open_bytes("too-many-certified", &certified);
     let l = list(&eng, id).unwrap();
     assert_eq!((l.certify, l.signatures.len()), (Some(1), 0));
+    assert!(l.error.is_some_and(|e| e.contains("more than 64 signatures")));
 }
 
 #[test]

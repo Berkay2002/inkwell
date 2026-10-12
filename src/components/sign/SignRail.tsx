@@ -247,6 +247,7 @@ const TONE_ICON: Record<string, IconName> = { valid: "check", unknown: "question
 
 function List({ doc }: { doc: DocState }) {
   const sigs = useSign((s) => s.docs[doc.id]?.sigs) ?? [];
+  const error = useSign((s) => s.docs[doc.id]?.sigsError ?? null);
   const focus = useSign((s) => s.docs[doc.id]?.focus ?? null);
   const done = signed(sigs);
   const empty = sigs.filter((x) => x.status === "unsigned");
@@ -255,7 +256,7 @@ function List({ doc }: { doc: DocState }) {
     <>
       <Head title="Signatures" count={done.length} />
       <div className="sg-body sg-list">
-        {done.length === 0 && <p className="dim">This document has no signatures.</p>}
+        {error ? <p className="sg-callout">The signatures could not be checked: {error}.</p> : done.length === 0 && <p className="dim">This document has no signatures.</p>}
         {done.map((x) => (
           <Card key={x.field} x={x} focus={x.field === focus?.field ? focus.n : 0} onOpen={() => go(x)} />
         ))}

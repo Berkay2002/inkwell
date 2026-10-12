@@ -90,6 +90,8 @@ export interface SignatureInfo {
 export interface SignList {
   certify: number | null;
   signatures: SignatureInfo[];
+  /** Why the signatures couldn't be checked (`signatures` is then empty). */
+  error: string | null;
 }
 
 export interface SignOptions {
@@ -201,7 +203,9 @@ export const otherWarnings = (s: SignatureInfo) => s.warnings.filter((w) => w.co
 export const signed = (l: SignatureInfo[]) => l.filter((s) => s.status !== "unsigned");
 
 /** The banner over a signed document: the worst state wins. Null when nothing is signed. */
-export function banner(list: SignatureInfo[]): { tone: Tone; text: string } | null {
+export function banner(list: SignatureInfo[], error: string | null = null): { tone: Tone; text: string } | null {
+  // Signatures that couldn't be checked are never "not signed".
+  if (error) return { tone: "invalid", text: `The signatures could not be checked: ${error}.` };
   const s = signed(list);
   if (s.length === 0) return null;
   const all = s.length === 1 ? "The signature is" : "All signatures are";
@@ -309,6 +313,8 @@ export interface DocSign {
   sigs: SignatureInfo[];
   /** The document's DocMDP level, as `sign_list` read it with `sigs`. */
   certify: number | null;
+  /** Why `sigs` couldn't be checked, from `sign_list`. */
+  sigsError: string | null;
   /** The rev `sigs` were read at. */
   sigsRev: number;
   draft: Draft | null;
@@ -316,7 +322,7 @@ export interface DocSign {
   error: string | null;
 }
 
-const fresh = (): DocSign => ({ focus: null, items: [], selected: null, sigs: [], certify: null, sigsRev: -1, draft: null, bannerHidden: false, error: null });
+const fresh = (): DocSign => ({ focus: null, items: [], selected: null, sigs: [], certify: null, sigsError: null, sigsRev: -1, draft: null, bannerHidden: false, error: null });
 
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 
@@ -462,11 +468,11 @@ export const useSign = create<SignStore>((set, get) => {
     },
     refreshSigs: async (doc, rev) => {
       try {
-        const { signatures: sigs, certify } = await signApi.list(doc);
+        const { signatures: sigs, certify, error } = await signApi.list(doc);
         const before = signed(get().get(doc).sigs).length;
-        patch(doc, { sigs, certify, sigsRev: rev, ...(signed(sigs).length !== before ? { bannerHidden: false } : {}) });
+        patch(doc, { sigs, certify, sigsError: error, sigsRev: rev, ...(signed(sigs).length !== before ? { bannerHidden: false } : {}) });
       } catch {
-        patch(doc, { sigs: [], certify: null, sigsRev: rev });
+        patch(doc, { sigs: [], certify: null, sigsError: null, sigsRev: rev });
       }
     },
     select: (doc, selected) => patch(doc, { selected }),
