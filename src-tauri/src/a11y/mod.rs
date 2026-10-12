@@ -1314,14 +1314,16 @@ pub fn protection_doc(eng: &Engine, doc: DocId) -> Result<Protection> {
     eng.read_custom(doc, |d| Ok(Protection { certified: crate::outline::certified(d).map_or(true, |c| c.is_some()), signed: crate::outline::signed(d) }))
 }
 
-/// What tells this document from another one at the same path: the first string of the trailer `/ID` (a save keeps
-/// it, so an edit and its save are still the same document) in hex, then `/` and the page count. Without an `/ID`
-/// it is only `/` and the page count, which is weak: a different file with as many pages will match.
+/// What tells this document from another one at the same path: the first string of the trailer `/ID` in hex (a
+/// save keeps it, so an edit and its save are the same document, and so is the file after a page was deleted).
+/// Without an `/ID` it is `/` and the page count, which is weak: a different file with as many pages will match.
 pub fn fingerprint_doc(eng: &Engine, doc: DocId) -> Result<String> {
     eng.read_custom(doc, |d| {
         let id = d.trailer()?.get_dict("ID")?.and_then(|a| a.get_array(0).ok().flatten()).and_then(|o| o.as_bytes().ok()).unwrap_or_default();
-        let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
-        Ok(format!("{hex}/{}", d.page_count()?))
+        if id.is_empty() {
+            return Ok(format!("/{}", d.page_count()?));
+        }
+        Ok(id.iter().map(|b| format!("{b:02x}")).collect())
     })
 }
 

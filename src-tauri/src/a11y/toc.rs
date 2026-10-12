@@ -154,8 +154,9 @@ fn spread(it: impl Iterator<Item = f32>) -> f32 {
 }
 
 /// The tables of contents among `items` (the caller leaves out the cells of tables). `widgets` are the
-/// form fields' boxes: text near one is a form.
-pub fn detect(items: &[Item], widgets: &[Rect]) -> Vec<Toc> {
+/// form fields' boxes: text near one is a form. `pages` is the document's page count: a run whose arabic page
+/// numbers go past it (a menu on a one-page document) is not a table of contents.
+pub fn detect(items: &[Item], widgets: &[Rect], pages: usize) -> Vec<Toc> {
     let mut found = Vec::new();
     if items.len() < MIN_ENTRIES {
         return found;
@@ -172,7 +173,7 @@ pub fn detect(items: &[Item], widgets: &[Rect]) -> Vec<Toc> {
     }
     let mut run: Vec<Entry> = Vec::new();
     let mut flush = |run: &mut Vec<Entry>| {
-        if let Some(t) = accept(items, run, widgets) {
+        if let Some(t) = accept(items, run, widgets, pages) {
             found.push(t);
         }
         run.clear();
@@ -194,7 +195,7 @@ pub fn detect(items: &[Item], widgets: &[Rect]) -> Vec<Toc> {
 }
 
 /// A run of entries, as a table of contents when it holds together.
-fn accept(items: &[Item], run: &[Entry], widgets: &[Rect]) -> Option<Toc> {
+fn accept(items: &[Item], run: &[Entry], widgets: &[Rect], pages: usize) -> Option<Toc> {
     if run.len() < MIN_ENTRIES || run.len() > MAX_ENTRIES {
         return None;
     }
@@ -204,9 +205,8 @@ fn accept(items: &[Item], run: &[Entry], widgets: &[Rect]) -> Option<Toc> {
     if !(right || left) || run.windows(2).any(|w| w[1].key < w[0].key) {
         return None;
     }
-    // Page numbers that all repeat or climb by one fixed step are a price list or a numbered column, not pages.
-    let step = |w: &[Entry]| (w[0].key.0 == w[1].key.0).then(|| i64::from(w[1].key.1) - i64::from(w[0].key.1));
-    if run.windows(2).all(|w| step(w).is_some() && step(w) == step(&run[..2])) {
+    // A page number past the last page is not one: a price list on a short document, or a chapter cut from a book.
+    if run.iter().any(|e| e.key.0 == 1 && e.key.1 as usize > pages) {
         return None;
     }
     // Drawn entry by entry, each line whole before the next: tag order and content order then agree.

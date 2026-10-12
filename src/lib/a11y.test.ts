@@ -448,10 +448,10 @@ describe("rules decided by hand", () => {
     const path = "C:\\Docs\\a.pdf";
     useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], path } as never } });
     useRecents.setState({ items: [{ path, opened: 1 }] });
-    reply({ a11y_check: sample, a11y_preview: { untagged: false }, a11y_fingerprint: "0a1b/12", recents_save: null });
+    reply({ a11y_check: sample, a11y_preview: { untagged: false }, a11y_fingerprint: "0a1b", recents_save: null });
     a().setMark(1, "title", "passed");
     await vi.waitFor(() => expect(useRecents.getState().items[0].a11yMarks).toEqual({ title: "passed" }));
-    expect(useRecents.getState().items[0].a11yFp).toBe("0a1b/12");
+    expect(useRecents.getState().items[0].a11yFp).toBe("0a1b");
     // A new session: the entry comes back from the stored JSON with the marks, and the panel reads them.
     const stored = parse(JSON.stringify(useRecents.getState().items))!;
     expect(stored[0].a11yMarks).toEqual({ title: "passed" });
@@ -466,11 +466,11 @@ describe("rules decided by hand", () => {
   it("are dropped when another file has taken the path (its fingerprint differs), so no report claims them", async () => {
     const path = "C:\\Docs\\b.pdf";
     useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], path } as never } });
-    useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b/12" }] });
-    // Another PDF with the same page count but another /ID, or the same /ID with another page count.
-    for (const other of ["ffff/12", "0a1b/13"]) {
+    useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b" }] });
+    // Another PDF with another /ID, or one without /ID that is only told apart by its page count.
+    for (const other of ["ffff", "/12"]) {
       useA11y.setState({ docs: {} });
-      useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b/12" }] });
+      useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b" }] });
       reply({ a11y_check: sample, a11y_preview: { untagged: false }, a11y_fingerprint: other, recents_save: null });
       await a().check(1);
       await vi.waitFor(() => expect(useRecents.getState().items[0].a11yMarks).toBeUndefined());
@@ -479,8 +479,8 @@ describe("rules decided by hand", () => {
     }
     // The same document, as Inkwell saves it (same fingerprint), keeps them.
     useA11y.setState({ docs: {} });
-    useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b/12" }] });
-    reply({ a11y_check: sample, a11y_preview: { untagged: false }, a11y_fingerprint: "0a1b/12", recents_save: null });
+    useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b" }] });
+    reply({ a11y_check: sample, a11y_preview: { untagged: false }, a11y_fingerprint: "0a1b", recents_save: null });
     await a().check(1);
     await vi.waitFor(() => expect(a().get(1).marks).toEqual({ title: "passed" }));
   });
@@ -488,7 +488,7 @@ describe("rules decided by hand", () => {
   it("are not applied when the fingerprint cannot be read", async () => {
     const path = "C:\\Docs\\c.pdf";
     useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], path } as never } });
-    useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b/12" }] });
+    useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b" }] });
     reply({ a11y_check: sample, a11y_preview: { untagged: false } });
     await a().check(1);
     await new Promise((r) => setTimeout(r, 10));

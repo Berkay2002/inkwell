@@ -28,11 +28,16 @@ static LABEL: LazyLock<Regex> = LazyLock::new(|| {
 /// What a paragraph's first line says it labels: "Figure 3", "Fig. 3.2.", "TABLE 4: Sales".
 pub fn label(text: &str) -> Option<Kind> {
     let c = LABEL.captures(text)?;
-    // "Figure 3 shows ...", "Figure 3, above, shows ..." and "Figure 3 (above) shows ..." are sentences. ("Table 2
-    // (continued)" is read as one too: a caption that is a parenthesis alone is the price of that.)
-    let rest = &c[3];
-    let first = rest.trim_start().chars().next();
-    if first.is_some_and(|f| f.is_lowercase() || f == ',') || (first == Some('(') && rest.starts_with(char::is_whitespace)) {
+    // A sentence: "Figure 3 shows ...", "Figure 3, above, shows ..." and "Figure 3 (above) shows ...". A
+    // parenthesis is a sentence only when a lowercase word follows it: "Table 2 (continued)" and "Figure 1 (a)
+    // Overview" are captions.
+    let rest = c[3].trim_start();
+    let sentence = match rest.chars().next() {
+        Some(f) if f.is_lowercase() || f == ',' => true,
+        Some('(') => rest.split_once(')').is_some_and(|(_, after)| after.trim_start().chars().next().is_some_and(char::is_lowercase)),
+        _ => false,
+    };
+    if sentence {
         return None;
     }
     Some(if c[1].to_lowercase().starts_with("fig") { Kind::Figure } else { Kind::Table })
@@ -88,10 +93,10 @@ mod tests {
 
     #[test]
     fn a_label_is_a_name_and_a_number() {
-        for (t, k) in [("Figure 3", Kind::Figure), ("figure 3.2: Sales", Kind::Figure), ("Fig. 4 Overview", Kind::Figure), ("FIG 2a. Detail", Kind::Figure), ("Table 1", Kind::Table), ("TABLE 12 - Totals", Kind::Table), ("Table 2.1. Costs", Kind::Table), ("Fig. 3(a) Overview", Kind::Figure)] {
+        for (t, k) in [("Figure 3", Kind::Figure), ("figure 3.2: Sales", Kind::Figure), ("Fig. 4 Overview", Kind::Figure), ("FIG 2a. Detail", Kind::Figure), ("Table 1", Kind::Table), ("TABLE 12 - Totals", Kind::Table), ("Table 2.1. Costs", Kind::Table), ("Fig. 3(a) Overview", Kind::Figure), ("Table 2 (continued)", Kind::Table), ("Figure 1 (a) Overview", Kind::Figure)] {
             assert_eq!(label(t), Some(k), "{t}");
         }
-        for t in ["Figure 3 shows the sales", "Figure 3, above, shows sales.", "Figure 3 (above) shows sales", "Table 2 is below", "Figures 3 and 4", "Figure", "Table of contents", "Tables 2", "The figure 3", "Table2x is"] {
+        for t in ["Figure 3 shows the sales", "Figure 3, above, shows sales.", "Figure 3 (above) shows sales", "Fig. 3(a) shows the sales", "Table 2 is below", "Figures 3 and 4", "Figure", "Table of contents", "Tables 2", "The figure 3", "Table2x is"] {
             assert_eq!(label(t), None, "{t}");
         }
     }

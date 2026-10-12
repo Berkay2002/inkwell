@@ -200,7 +200,7 @@ fn find_groups(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<Groups> {
     let mut taken = vec![false; lines.len()];
     found.iter().flat_map(|t| t.rows.iter().flatten()).for_each(|&l| taken[l] = true);
     let loose: Vec<tables::Item> = items.iter().filter(|it| !taken[it.id]).copied().collect();
-    let mut tocs = toc::detect(&loose, &widgets);
+    let mut tocs = toc::detect(&loose, &widgets, doc.page_count()?.max(0) as usize);
     let mut keep = undisturbed(&rs, &span, &tocs.iter().map(|t| cells(&t.rows)).collect::<Vec<_>>()).into_iter();
     tocs.retain(|_| keep.next().unwrap_or(false));
     Ok((found, tocs, Some((data.len(), rs))))
