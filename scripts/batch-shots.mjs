@@ -141,6 +141,7 @@ const mock = `(() => {
       return { action: action.name, files: reports, ok, skipped, errors, cancelled: false, stopped: false };
     },
     batch_cancel: () => {},
+    batch_prompt_answer: () => false,
   };
   let cb = 0;
   window.__TAURI_INTERNALS__ = {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { BatchAction, BatchBates, BatchIssue, BatchPattern, BatchQuery, BatchSanitize, BatchStep, MarkStyle } from "../lib/api";
-import { keyMoveTarget, STEP_GROUPS, STEP_INFO, stepLabel } from "../lib/batchLogic";
+import { keyMoveTarget, STEP_GROUPS, STEP_INFO, stepLabel, takesPages } from "../lib/batchLogic";
 import { useBatch } from "../lib/batchStore";
 import { Icon } from "./Icons";
 
@@ -154,6 +154,8 @@ function Sequence({ action, issues, selected, soft }: { action: BatchAction; iss
                       <span className="aw-step-sub bad">{bad[0].message}</span>
                     ) : soft.includes(i) ? (
                       <span className="aw-step-sub dim">Password is typed when it runs</span>
+                    ) : s.prompt ? (
+                      <span className="aw-step-sub dim">Asks before it runs, for each file</span>
                     ) : null}
                   </span>
                 </button>
@@ -189,7 +191,18 @@ function Options({ action, issues, selected, soft }: { action: BatchAction; issu
             {i.message}
           </p>
         ))}
-        <StepForm step={step} index={selected} />
+        <StepForm step={step} patch={(p) => act().patchStep(selected, p as Partial<BatchStep>)} />
+        {step.kind !== "invalid" && (
+          <div className="aw-common">
+            <PagesField step={step} patch={(p) => act().patchStep(selected, p as Partial<BatchStep>)} />
+            <Check
+              label="Ask before this step, for each file"
+              hint="(shows its options, for that file only)"
+              checked={step.prompt === true}
+              onChange={(v) => act().patchStep(selected, { prompt: v } as Partial<BatchStep>)}
+            />
+          </div>
+        )}
       </div>
     </section>
   );
@@ -305,8 +318,19 @@ const PATTERNS: { id: BatchPattern; label: string }[] = [
 
 const SLOTS = ["Top left", "Top centre", "Top right", "Bottom left", "Bottom centre", "Bottom right"];
 
-function StepForm({ step, index: i }: { step: BatchStep; index: number }) {
-  const patch = (p: Record<string, unknown>) => act().patchStep(i, p as Partial<BatchStep>);
+/** The page range of a step that works page by page: empty is every page. */
+export function PagesField({ step, patch }: { step: BatchStep; patch: (p: Record<string, unknown>) => void }) {
+  if (!takesPages(step)) return null;
+  return (
+    <>
+      <Text label="Pages" value={step.pages ?? ""} placeholder="All pages" onChange={(v) => patch({ pages: v })} />
+      <p className="dim aw-hint-block">For example 1-3, 5, 8- . A page a file does not have is left out, and the report says so.</p>
+    </>
+  );
+}
+
+/** The options of one step; `patch` changes them in the action being edited or in the answer to a prompt. */
+export function StepForm({ step, patch }: { step: BatchStep; patch: (p: Record<string, unknown>) => void }) {
   switch (step.kind) {
     case "invalid":
       return (

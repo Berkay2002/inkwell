@@ -1041,6 +1041,7 @@ pub fn run() {
         .manage(Paths::default())
         .manage(launch::Forwarded::default())
         .manage(Arc::new(tools::Jobs::default()))
+        .manage(Arc::new(batch::app::Prompts::default()))
         .manage(Arc::new(measure::SnapCache::default()))
         .manage(Arc::new(search::files::FolderSearches::default()))
         .manage(Arc::new(search::catalog::app::Jobs::default()))
@@ -1187,6 +1188,7 @@ pub fn run() {
             batch::app::batch_preview,
             batch::app::batch_folder_files,
             batch::app::batch_run,
+            batch::app::batch_prompt_answer,
             batch::app::batch_cancel,
             ocr_languages,
             ocr_choose_tesseract,

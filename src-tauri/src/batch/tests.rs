@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::action::*;
 use super::run::{Event, Report, Status, preview, run};
-use super::steps::Env;
+use super::steps::{Answer, Env};
 use super::store::{self, Store, StoreError};
 use crate::compress::Preset;
 use crate::engine::fixture::{self, Fixture};
@@ -141,7 +141,7 @@ fn env() -> Env {
 }
 
 fn action(name: &str, steps: Vec<Step>) -> Action {
-    Action { name: name.into(), steps, ..Action::default() }
+    Action { name: name.into(), steps: steps.into_iter().map(Into::into).collect(), ..Action::default() }
 }
 
 fn footer(text: &str) -> Step {
@@ -191,7 +191,7 @@ fn schema_round_trips_every_step() {
         id: "round-trip".into(),
         name: "All of it".into(),
         description: "Every step kind".into(),
-        steps: every_step(),
+        steps: every_step().into_iter().map(Into::into).collect(),
         output: OutputRule::Folder { suffix: " (done)".into() },
         on_error: OnError::Stop,
         built_in: false,
@@ -224,7 +224,7 @@ fn a_file_missing_fields_gets_the_defaults() {
 #[test]
 fn versions_and_foreign_files_are_refused() {
     let wrap = |v: serde_json::Value| json!({ "format": "inkwell-batch-action", "version": v, "action": { "name": "x", "steps": [] } }).to_string();
-    assert_eq!(store::from_file(wrap(json!(2)).as_bytes()).unwrap_err(), StoreError::TooNew(2));
+    assert_eq!(store::from_file(wrap(json!(3)).as_bytes()).unwrap_err(), StoreError::TooNew(3));
     assert_eq!(store::from_file(wrap(json!(999)).as_bytes()).unwrap_err(), StoreError::TooNew(999));
     for bad in [json!(0), json!("1"), json!(null), json!(-1)] {
         assert!(matches!(store::from_file(wrap(bad).as_bytes()), Err(StoreError::Invalid(_))));
@@ -251,7 +251,7 @@ fn passwords_are_never_written() {
     let text = String::from_utf8(bytes.clone()).unwrap();
     assert!(!text.contains("open-sesame") && !text.contains("owner-secret") && !text.contains("Password"), "{text}");
     let back = store::from_file(&bytes).unwrap();
-    let Step::Protect(p) = &back.steps[0] else { panic!() };
+    let Step::Protect(p) = &back.steps[0].step else { panic!() };
     assert!(p.open_password.is_none() && p.permissions_password.is_none());
     // Debug output hides them too.
     assert!(!format!("{a:?}").contains("open-sesame"));
@@ -319,7 +319,7 @@ fn the_store_refuses_bad_ids_built_ins_and_unnamed_actions() {
     assert!(matches!(s.save(action("   ", vec![])), Err(StoreError::Invalid(_))));
     // An unreadable step is not stored: the action would lose it silently.
     let mut a = action("Broken", vec![]);
-    a.steps.push(Step::Invalid { name: "wat".into(), why: "no".into() });
+    a.steps.push(Step::Invalid { name: "wat".into(), why: "no".into() }.into());
     assert!(matches!(s.save(a), Err(StoreError::Invalid(_))));
 }
 
@@ -1644,4 +1644,508 @@ fn two_files_with_one_name_for_a_chosen_folder_are_promised_different_names() {
     assert!(preview(&act, &[], &env()).is_err());
     act.steps.clear();
     assert!(preview(&act, &[d.join("same.pdf")], &env()).is_err());
+}
+
+// ---------------------------------------------------------------- page ranges and "prompt user"
+
+/// The text of each page of a PDF, in order.
+fn page_texts(p: &Path) -> Vec<String> {
+    let doc = Document::open(p.to_string_lossy().as_ref()).unwrap();
+    (0..doc.page_count().unwrap())
+        .map(|i| doc.load_page(i).unwrap().to_text_page(TextPageFlags::empty()).unwrap().to_text().unwrap())
+        .collect()
+}
+
+/// `step` with a page range.
+fn on(pages: &str, step: Step) -> StepEntry {
+    StepEntry { pages: pages.into(), ..step.into() }
+}
+
+fn ranged(name: &str, steps: Vec<StepEntry>) -> Action {
+    Action { name: name.into(), steps, ..Action::default() }
+}
+
+fn out_of(r: &Report) -> PathBuf {
+    PathBuf::from(&r.files[0].outputs[0].path)
+}
+
+#[test]
+fn a_header_with_a_range_touches_only_those_pages() {
+    let d = dir("range-footer");
+    let f = put(&d, "four.pdf", &text_pdf(&[&["alpha"], &["bravo"], &["charlie"], &["delta"]]));
+    let r = go(&ranged("R", vec![on("2-3", footer("STAMP"))]), &[f], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    let t = page_texts(&out_of(&r));
+    let stamped: Vec<bool> = t.iter().map(|x| x.contains("STAMP")).collect();
+    assert_eq!(stamped, [false, true, true, false], "{t:?}");
+    assert!(r.files[0].notes.iter().all(|n| !n.contains("past the last page")));
+    assert!(r.files[0].warnings.is_empty());
+
+    // An open end runs to the last page; a comma list and a semicolon both work.
+    let f = put(&d, "four2.pdf", &text_pdf(&[&["a"], &["b"], &["c"], &["d"]]));
+    let r = go(&ranged("R", vec![on("1; 3-", footer("STAMP"))]), &[f], None);
+    let stamped: Vec<bool> = page_texts(&out_of(&r)).iter().map(|x| x.contains("STAMP")).collect();
+    assert_eq!(stamped, [true, false, true, true]);
+}
+
+#[test]
+fn bates_numbers_only_the_pages_of_its_range_and_continue_from_there() {
+    let d = dir("range-bates");
+    let a = put(&d, "a.pdf", &text_pdf(&[&["a1"], &["a2"], &["a3"]]));
+    let b = put(&d, "b.pdf", &text_pdf(&[&["b1"], &["b2"], &["b3"]]));
+    let bates = BatesStep { bates: Bates { prefix: "N".into(), digits: 4, start: 7, slot: 4, ..Bates::default() }, continue_across_files: true };
+    let r = go(&ranged("B", vec![on("2-3", Step::Bates(bates))]), &[a, b], None);
+    let ta = page_texts(&out_of(&r));
+    assert!(!ta[0].contains("N0"), "{ta:?}");
+    assert!(ta[1].contains("N0007") && ta[2].contains("N0008"), "{ta:?}");
+    let tb = page_texts(Path::new(&r.files[1].outputs[0].path));
+    assert!(!tb[0].contains("N0") && tb[1].contains("N0009") && tb[2].contains("N0010"), "{tb:?}");
+}
+
+#[test]
+fn a_range_past_the_end_is_clipped_and_reported_and_one_wholly_past_does_nothing() {
+    let d = dir("range-past");
+    let f = put(&d, "three.pdf", &text_pdf(&[&["a"], &["b"], &["c"]]));
+
+    let r = go(&ranged("R", vec![on("2-9", footer("STAMP"))]), &[f.clone()], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    let stamped: Vec<bool> = page_texts(&out_of(&r)).iter().map(|x| x.contains("STAMP")).collect();
+    assert_eq!(stamped, [false, true, true]);
+    let note = r.files[0].notes.join(" | ");
+    assert!(note.contains("2-9") && note.contains("past the last page (3)") && note.contains("2-3"), "{note}");
+
+    let r = go(&ranged("R", vec![on("7-9", footer("STAMP"))]), &[f.clone()], None);
+    assert_eq!(r.files[0].status, Status::Ok);
+    assert_eq!(digest(&out_of(&r)), digest(&f), "no page was in the range: the result is the source");
+    assert!(r.files[0].warnings.iter().any(|w| w.contains("7-9") && w.contains("nothing was done")), "{:?}", r.files[0].warnings);
+
+    // An open end that starts past the end is the same.
+    let r = go(&ranged("R", vec![on("4-", footer("STAMP"))]), &[f.clone()], None);
+    assert_eq!(digest(&out_of(&r)), digest(&f));
+}
+
+#[test]
+fn ranges_are_checked_when_the_action_is_validated() {
+    let a = ranged(
+        "V",
+        vec![
+            on("1-3, 5", footer("x")),
+            on("0", footer("x")),
+            on("3-1", Step::FlattenForms(FlattenFormsStep {})),
+            on("2-", Step::Compress(CompressStep::default())),
+            on("1", Step::Protect(ProtectStep::default())),
+            on("one", Step::Ocr(OcrStep::default())),
+            on(&"1,".repeat(150), Step::Ocr(OcrStep::default())),
+        ],
+    );
+    let got = issues_of(&a);
+    assert!(!got.contains(&(Some(0), "invalid-step")), "{got:?}");
+    for i in 1..7 {
+        assert!(got.contains(&(Some(i), "invalid-step")), "step {i}: {got:?}");
+    }
+    let m = a.validate(&env());
+    assert!(m.iter().any(|i| i.step == Some(3) && i.message.contains("whole file")), "{m:?}");
+    assert!(m.iter().any(|i| i.step == Some(1) && i.message.contains("not a page range")), "{m:?}");
+}
+
+#[test]
+fn redact_with_a_range_searches_only_those_pages() {
+    let d = dir("range-redact");
+    let f = put(&d, "r.pdf", &text_pdf(&[&["the secret is quokka"], &["the secret is quokka"], &["the secret is quokka"]]));
+    let step = Step::Redact(RedactStep {
+        queries: vec![RedactQuery::Text { text: "quokka".into(), case_sensitive: false, whole_word: true }],
+        ..RedactStep::default()
+    });
+    let r = go(&ranged("R", vec![on("2", step)]), &[f], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    let t = page_texts(&out_of(&r));
+    assert!(t[0].contains("quokka") && !t[1].contains("quokka") && t[2].contains("quokka"), "{t:?}");
+}
+
+#[test]
+fn ocr_with_a_range_reads_only_those_pages() {
+    let d = dir("range-ocr");
+    let f = put(&d, "scan.pdf", &blank(3));
+    let r = go(&ranged("O", vec![on("2", Step::Ocr(OcrStep::default()))]), &[f], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    let t = page_texts(&out_of(&r));
+    assert!(!t[0].contains("Invoice") && t[1].contains("Invoice") && !t[2].contains("Invoice"), "{t:?}");
+}
+
+/// Two pages, one text field on each.
+fn two_page_form() -> Vec<u8> {
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 7 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [6 0 R] /Resources << /Font << /Helv 3 0 R >> >> >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [7 0 R] /Resources << /Font << /Helv 3 0 R >> >> >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (first) /V (Alpha) /DA (/Helv 12 Tf 0 g) /Rect [72 700 272 720] /P 4 0 R /F 4 >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (second) /V (Bravo) /DA (/Helv 12 Tf 0 g) /Rect [72 700 272 720] /P 5 0 R /F 4 >>".to_string(),
+    ];
+    assemble(&objs, "")
+}
+
+#[test]
+fn flatten_with_a_range_leaves_the_fields_of_the_other_pages_fillable() {
+    let d = dir("range-flatten");
+    let f = put(&d, "form.pdf", &two_page_form());
+    let r = go(&ranged("F", vec![on("1", Step::FlattenForms(FlattenFormsStep {}))]), &[f.clone()], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    let out = out_of(&r);
+    let t = page_texts(&out);
+    assert!(t[0].contains("Alpha"), "the first field is page content now: {t:?}");
+    let doc = PdfDocument::open(out.to_string_lossy().as_ref()).unwrap();
+    let left = crate::forms::list(&doc).unwrap().fields;
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!((left[0].name.as_str(), left[0].page), ("second", 1));
+    assert_eq!(left[0].value, "Bravo");
+
+    // No field on the pages of the range: nothing to do, said so.
+    let r = go(&ranged("F", vec![on("3", Step::FlattenForms(FlattenFormsStep {}))]), &[f.clone()], None);
+    assert_eq!(digest(&out_of(&r)), digest(&f));
+    assert!(r.files[0].warnings.iter().any(|w| w.contains("past the last page")), "{:?}", r.files[0].warnings);
+}
+
+#[test]
+fn ranges_and_prompts_are_saved_with_the_action_and_survive_export_and_import() {
+    let mut a = ranged("P", vec![on("2-4", footer("x")), Step::Compress(CompressStep::default()).into()]);
+    a.steps[1].prompt = true;
+    let bytes = store::to_file(&a).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["version"], 2, "an older Inkwell would run it on every page without asking, so it must refuse it");
+    assert_eq!(v["action"]["steps"][0]["pages"], "2-4");
+    assert!(v["action"]["steps"][0].get("prompt").is_none(), "defaults are left out");
+    assert_eq!(v["action"]["steps"][1]["prompt"], true);
+    assert!(v["action"]["steps"][1].get("pages").is_none());
+    let back = store::from_file(&bytes).unwrap();
+    assert_eq!(back, a);
+    assert_eq!((back.steps[0].pages.as_str(), back.steps[0].prompt), ("2-4", false));
+    assert!(back.steps[1].prompt && back.steps[1].pages.is_empty());
+    assert_eq!(store::to_file(&back).unwrap(), bytes);
+
+    // Through the store: saved under an id, listed, imported under a new one.
+    let d = dir("range-store");
+    let s = Store::new(&d);
+    let saved = s.save(a.clone()).unwrap();
+    assert_eq!(s.get(&saved.id).unwrap().steps, a.steps);
+    let imported = s.import(&bytes).unwrap();
+    assert_eq!(imported.steps, a.steps);
+
+    // An action that uses neither is still the version 1 file it always was.
+    let plain = action("Plain", vec![footer("x")]);
+    let v: serde_json::Value = serde_json::from_slice(&store::to_file(&plain).unwrap()).unwrap();
+    assert_eq!(v["version"], 1);
+    assert!(v["action"]["steps"][0].get("pages").is_none() && v["action"]["steps"][0].get("prompt").is_none());
+}
+
+#[test]
+fn an_action_file_from_before_ranges_still_imports_and_runs_on_every_page() {
+    let file = json!({ "format": "inkwell-batch-action", "version": 1, "action": {
+        "name": "Old", "steps": [ { "kind": "headerFooter", "text": ["", "", "", "", "STAMP", ""] } ] } });
+    let a = store::from_file(file.to_string().as_bytes()).unwrap();
+    assert!(a.steps[0].pages.is_empty() && !a.steps[0].prompt);
+    assert!(a.validate(&env()).is_empty());
+    let d = dir("range-old");
+    let f = put(&d, "p.pdf", &text_pdf(&[&["a"], &["b"]]));
+    let r = go(&a, &[f], None);
+    assert!(page_texts(&out_of(&r)).iter().all(|t| t.contains("STAMP")));
+
+    // A range or ask-first setting that is not the right type makes the step unreadable, not silently dropped.
+    let file = json!({ "format": "inkwell-batch-action", "version": 2, "action": {
+        "name": "Odd", "steps": [ { "kind": "compress", "pages": 3 }, { "kind": "compress", "prompt": "yes" } ] } });
+    let a = store::from_file(file.to_string().as_bytes()).unwrap();
+    assert!(a.steps.iter().all(|s| matches!(s.step, Step::Invalid { .. })));
+}
+
+// ---- prompt user
+
+type Answerer = Box<dyn FnMut(&Event) -> Option<Answer> + Send>;
+
+/// An environment whose `ask` hands each prompt's answer from `answer`, called with the prompt event as it is emitted.
+struct Asker {
+    env: Env,
+    senders: Arc<Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<Answer>>>>,
+}
+
+fn asker() -> Asker {
+    let senders: Arc<Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<Answer>>>> = Arc::default();
+    let mut env = env();
+    let s = senders.clone();
+    env.ask = Some(Arc::new(move |request| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        s.lock().unwrap().insert(request, tx);
+        rx
+    }));
+    Asker { env, senders }
+}
+
+impl Asker {
+    /// Runs `a` over `files`; `answer` is asked at each prompt and may answer (or not, to leave it waiting).
+    fn run(&self, a: &Action, files: &[PathBuf], cancel: &AtomicBool, mut answer: Answerer) -> (Report, Vec<Event>) {
+        let mut events = Vec::new();
+        let r = run(a, files, None, &self.env, cancel, &mut |ev| {
+            if let Event::Prompt { request, .. } = &ev {
+                if let Some(ans) = answer(&ev) {
+                    let tx = self.senders.lock().unwrap().get(request).cloned().expect("registered before the event");
+                    tx.send(ans).unwrap();
+                }
+            }
+            events.push(ev);
+        })
+        .unwrap();
+        (r, events)
+    }
+}
+
+fn prompted(step: Step) -> StepEntry {
+    StepEntry { prompt: true, ..step.into() }
+}
+
+fn wm(text: &str) -> Step {
+    Step::Watermark(Watermark { text: text.into(), ..Watermark::default() })
+}
+
+fn prompts_of(events: &[Event]) -> Vec<(u64, usize, usize, Option<String>)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Prompt { request, index, step, problem, .. } => Some((*request, *index, *step, problem.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_prompted_step_that_is_skipped_leaves_the_file_as_without_it() {
+    let d = dir("prompt-skip");
+    let f = put(&d, "p.pdf", &text_pdf(&[&["a"], &["b"]]));
+    let a = ranged("S", vec![prompted(wm("DRAFT"))]);
+    let k = asker();
+    let (r, ev) = k.run(&a, &[f.clone()], &AtomicBool::new(false), Box::new(|_| Some(Answer::Skip)));
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    assert_eq!(prompts_of(&ev).len(), 1);
+    assert_eq!(digest(&out_of(&r)), digest(&f), "the same bytes as a run of an action that does not have the step");
+    assert!(r.files[0].notes.iter().any(|n| n.contains("skipped at your request")), "{:?}", r.files[0].notes);
+    assert_eq!(r.files[0].steps_done, 1);
+
+    // Skipping one step of two runs the other as usual.
+    let a = ranged("S", vec![prompted(wm("DRAFT")), footer("STAMP").into()]);
+    let (r, _) = k.run(&a, &[f], &AtomicBool::new(false), Box::new(|_| Some(Answer::Skip)));
+    let t = page_texts(&out_of(&r));
+    assert!(t.iter().all(|x| x.contains("STAMP") && !x.contains("DRAFT")), "{t:?}");
+}
+
+#[test]
+fn what_the_person_changes_in_a_prompt_applies_to_that_file_only() {
+    let d = dir("prompt-edit");
+    let a1 = put(&d, "a.pdf", &text_pdf(&[&["a"]]));
+    let b1 = put(&d, "b.pdf", &text_pdf(&[&["b"]]));
+    let act = ranged("E", vec![prompted(wm("DRAFT"))]);
+    let k = asker();
+    let mut n = 0;
+    let (r, ev) = k.run(
+        &act,
+        &[a1, b1],
+        &AtomicBool::new(false),
+        Box::new(move |e| {
+            n += 1;
+            let Event::Prompt { entry, name, .. } = e else { unreachable!() };
+            // The question is the step with its saved options.
+            assert!(matches!(&entry.step, Step::Watermark(w) if w.text == "DRAFT"), "{entry:?} for {name}");
+            Some(if n == 1 {
+                let mut changed = entry.clone();
+                if let Step::Watermark(w) = &mut changed.step {
+                    w.text = "EDITED".into();
+                }
+                Answer::Continue(changed)
+            } else {
+                Answer::Continue(entry.clone())
+            })
+        }),
+    );
+    assert_eq!((r.ok, r.errors), (2, 0), "{:?}", r.files);
+    assert_eq!(prompts_of(&ev).len(), 2, "every file is asked");
+    let (ta, tb) = (page_texts(&out_of(&r)), page_texts(Path::new(&r.files[1].outputs[0].path)));
+    assert!(ta[0].contains("EDITED") && !ta[0].contains("DRAFT"), "{ta:?}");
+    assert!(tb[0].contains("DRAFT") && !tb[0].contains("EDITED"), "{tb:?}");
+    // The action itself was not touched.
+    assert!(matches!(&act.steps[0].step, Step::Watermark(w) if w.text == "DRAFT"));
+}
+
+#[test]
+fn an_answer_that_would_not_validate_or_is_another_step_is_asked_again_and_never_run() {
+    let d = dir("prompt-invalid");
+    let f = put(&d, "p.pdf", &text_pdf(&[&["a"]]));
+    let act = ranged("I", vec![prompted(wm("DRAFT"))]);
+    let k = asker();
+    let mut n = 0;
+    let (r, ev) = k.run(
+        &act,
+        &[f.clone()],
+        &AtomicBool::new(false),
+        Box::new(move |e| {
+            n += 1;
+            let Event::Prompt { entry, .. } = e else { unreachable!() };
+            Some(match n {
+                // Empty text: the marks engine's own sentence.
+                1 => {
+                    let mut x = entry.clone();
+                    if let Step::Watermark(w) = &mut x.step {
+                        w.text = String::new();
+                    }
+                    Answer::Continue(x)
+                }
+                // Another kind of step.
+                2 => Answer::Continue(Step::Compress(CompressStep::default()).into()),
+                // A page range on a step that has none, then a bad one.
+                3 => Answer::Continue(on("x", entry.step.clone())),
+                _ => Answer::Skip,
+            })
+        }),
+    );
+    assert_eq!(r.files[0].status, Status::Ok);
+    let p = prompts_of(&ev);
+    assert_eq!(p.len(), 4);
+    assert!(p[0].3.is_none());
+    assert!(p[1].3.as_deref().unwrap().contains("watermark text"), "{:?}", p[1]);
+    assert!(p[2].3.as_deref().unwrap().contains("not the options of this step"), "{:?}", p[2]);
+    assert!(p[3].3.as_deref().unwrap().contains("not a page range"), "{:?}", p[3]);
+    assert_eq!(digest(&out_of(&r)), digest(&f), "nothing of the refused answers ran");
+    assert_eq!(p.iter().map(|x| x.0).collect::<std::collections::HashSet<_>>().len(), 4, "a new request id each time");
+}
+
+#[test]
+fn stop_ends_the_run_with_nothing_of_the_file_left() {
+    let d = dir("prompt-stop");
+    let files: Vec<PathBuf> = ["a", "b", "c"].iter().map(|n| put(&d, &format!("{n}.pdf"), &text_pdf(&[&["x"]]))).collect();
+    let act = ranged("St", vec![prompted(wm("DRAFT"))]);
+    let k = asker();
+    let mut n = 0;
+    let (r, ev) = k.run(
+        &act,
+        &files,
+        &AtomicBool::new(false),
+        Box::new(move |_| {
+            n += 1;
+            Some(if n == 2 { Answer::Stop } else { Answer::Continue(act_entry()) })
+        }),
+    );
+    assert!(r.cancelled);
+    assert_eq!(r.files.iter().map(|f| f.status).collect::<Vec<_>>(), [Status::Ok, Status::Skipped, Status::Skipped]);
+    assert_eq!(prompts_of(&ev).len(), 2, "the third file was never started");
+    assert_eq!(names(&d), ["a (batch).pdf", "a.pdf", "b.pdf", "c.pdf"], "no output and no staging folder for the others");
+    assert!(matches!(ev.last(), Some(Event::Finished { cancelled: true, .. })));
+
+    fn act_entry() -> StepEntry {
+        prompted(wm("DRAFT"))
+    }
+}
+
+#[test]
+fn a_prompt_nobody_answers_ends_when_cancelled_or_after_the_wait() {
+    let d = dir("prompt-wait");
+    let f = put(&d, "p.pdf", &text_pdf(&[&["a"]]));
+    let act = ranged("W", vec![prompted(wm("DRAFT"))]);
+
+    // Cancel while it waits.
+    let k = asker();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let c = cancel.clone();
+    let (r, _) = k.run(
+        &act,
+        &[f.clone()],
+        &cancel,
+        Box::new(move |_| {
+            c.store(true, Ordering::SeqCst);
+            None
+        }),
+    );
+    assert!(r.cancelled && r.files[0].status == Status::Skipped);
+
+    // No answer at all: it gives up (and stops the run) instead of waiting for ever.
+    let mut k = asker();
+    k.env.prompt_wait = std::time::Duration::from_millis(150);
+    let t = std::time::Instant::now();
+    let (r, _) = k.run(&act, &[f.clone(), f.clone()], &AtomicBool::new(false), Box::new(|_| None));
+    assert!(t.elapsed() < std::time::Duration::from_secs(5));
+    assert!(r.cancelled);
+    assert_eq!(r.ok, 0);
+    assert_eq!(names(&d), ["p.pdf"]);
+}
+
+#[test]
+fn a_run_with_a_prompt_and_nobody_to_ask_is_refused_and_the_preview_names_the_prompts() {
+    let d = dir("prompt-none");
+    let f = sample(&d, "p.pdf", 1);
+    let act = ranged("N", vec![footer("x").into(), prompted(wm("DRAFT")), prompted(Step::Compress(CompressStep::default()))]);
+    let e = env();
+    assert!(matches!(run(&act, &[f.clone()], None, &e, &AtomicBool::new(false), &mut |_| {}), Err(super::BatchError::Input(_))));
+    assert_eq!(names(&d), ["p.pdf"]);
+    let p = preview(&act, &[f], &e).unwrap();
+    assert_eq!(p.files[0].prompts, [1, 2]);
+    assert_eq!(p.files[0].steps.len(), 3);
+}
+
+#[test]
+fn a_prompt_does_not_get_a_signed_file_past_the_gate_or_turn_a_step_into_another() {
+    let d = dir("prompt-signed");
+    let signed = put(&d, "signed.pdf", &signed_pdf());
+    // A rewriting step on a signed file is refused before anything is asked.
+    let k = asker();
+    let act = ranged("G", vec![prompted(wm("DRAFT"))]);
+    let (r, ev) = k.run(&act, &[signed.clone()], &AtomicBool::new(false), Box::new(|_| Some(Answer::Continue(prompted(wm("X"))))));
+    assert_eq!(r.files[0].status, Status::Skipped);
+    assert!(r.files[0].reason.as_deref().unwrap().starts_with("signed:"));
+    assert!(prompts_of(&ev).is_empty());
+
+    // An export passes the gate (it does not rewrite the file); answering with a watermark in its place is refused.
+    let act = ranged("G", vec![prompted(Step::ExportText(ExportTextStep::default()))]);
+    let before = digest(&signed);
+    let mut n = 0;
+    let (r, ev) = k.run(
+        &act,
+        &[signed.clone()],
+        &AtomicBool::new(false),
+        Box::new(move |_| {
+            n += 1;
+            Some(if n == 1 { Answer::Continue(wm("DRAFT").into()) } else { Answer::Skip })
+        }),
+    );
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    assert_eq!(prompts_of(&ev).len(), 2);
+    assert!(prompts_of(&ev)[1].3.is_some());
+    assert!(r.files[0].outputs.is_empty(), "{:?}", r.files[0].outputs);
+    assert_eq!(digest(&signed), before);
+    assert_eq!(names(&d), ["signed.pdf"]);
+}
+
+#[test]
+fn the_prompt_carries_no_password_and_the_runs_passwords_stay_in_force() {
+    let d = dir("prompt-protect");
+    let f = sample(&d, "p.pdf", 1);
+    let step = Step::Protect(ProtectStep { open_password: Some("open-sesame-123".into()), ..ProtectStep::default() });
+    let act = ranged("P", vec![prompted(step)]);
+    let k = asker();
+    let (r, ev) = k.run(
+        &act,
+        &[f],
+        &AtomicBool::new(false),
+        Box::new(|e| {
+            let text = serde_json::to_string(e).unwrap();
+            assert!(!text.contains("open-sesame") && !text.contains("Password"), "{text}");
+            // The answer names no password: the run's own is kept.
+            let Event::Prompt { entry, .. } = e else { unreachable!() };
+            let mut x = entry.clone();
+            if let Step::Protect(p) = &mut x.step {
+                p.open_password = None;
+            }
+            Some(Answer::Continue(x))
+        }),
+    );
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    assert_eq!(prompts_of(&ev).len(), 1);
+    let out = out_of(&r);
+    let doc = Document::open(out.to_string_lossy().as_ref()).unwrap();
+    assert!(doc.needs_password().unwrap(), "protected with the run's open password");
 }

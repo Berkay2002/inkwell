@@ -40,11 +40,31 @@ pub struct Env {
     /// Told of each PDF a run that takes content out (Redact, Sanitize) has just written, so a catalog that listed
     /// a file of that name forgets it (as a normal save of a redacted document does).
     pub saved: Option<Arc<dyn Fn(&Path) + Send + Sync>>,
+    /// How a run asks the person about a step that has "prompt user" on: given the id of the request it
+    /// makes the answer reachable (the command layer keeps the sender under that id) and returns where the
+    /// answer comes from. `None` = nobody to ask: a run with such a step is refused.
+    pub ask: Option<Arc<dyn Fn(u64) -> std::sync::mpsc::Receiver<Answer> + Send + Sync>>,
+    /// The longest a run waits for one answer; then it stops, as if cancelled. A closed window cannot leave it waiting.
+    pub prompt_wait: std::time::Duration,
 }
+
+/// What the person answers to a prompt.
+#[derive(Clone, Debug)]
+pub enum Answer {
+    /// Run the step with these options on this file (the step as shown, with whatever the person changed).
+    Continue(StepEntry),
+    /// Leave this step out for this file.
+    Skip,
+    /// Stop the run: this file is dropped and the files after it are not started.
+    Stop,
+}
+
+/// The longest a prompt is waited for.
+pub const PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 impl Env {
     pub fn new(tesseract: Option<PathBuf>, is_open: Arc<dyn Fn(&Path) -> bool + Send + Sync>) -> Self {
-        Self { tesseract, date: today_utc(), is_open, recognizer: None, journal: None, saved: None }
+        Self { tesseract, date: today_utc(), is_open, recognizer: None, journal: None, saved: None, ask: None, prompt_wait: PROMPT_WAIT }
     }
 
     /// Nothing is open; today's date; no Tesseract.
@@ -204,6 +224,38 @@ pub(crate) struct Cx<'a> {
     pub notes: Vec<String>,
     /// Things the person should look at in the result even though the file was processed.
     pub warnings: Vec<String>,
+    /// The page range and the label of the step that is running (the runner sets them before each step).
+    pub range: String,
+    pub label: String,
+}
+
+impl Cx<'_> {
+    /// Whether the running step was given a page range.
+    pub fn has_range(&self) -> bool {
+        !self.range.trim().is_empty()
+    }
+
+    /// The pages (zero-based) the running step works on in a file of `count` pages: all of them without a
+    /// range. Pages the range names beyond the last one are left out and said so, as a note when some pages
+    /// are left and as a warning when none are (the step then does nothing).
+    pub fn select(&mut self, count: u32) -> Result<Vec<u32>, StepError> {
+        let sel = super::pages::resolve(&self.range, count).map_err(StepError::Failed)?;
+        if sel.past_end {
+            let spec = self.range.trim();
+            if sel.pages.is_empty() {
+                self.warnings.push(format!(
+                    "{}: the page range {spec} is past the last page (the file has {count}), so nothing was done.",
+                    self.label
+                ));
+            } else {
+                self.notes.push(format!(
+                    "the page range {spec} reaches past the last page ({count}); used page(s) {}",
+                    super::pages::describe(&sel.pages)
+                ));
+            }
+        }
+        Ok(sel.pages)
+    }
 }
 
 pub(super) trait StepImpl {
@@ -254,10 +306,6 @@ fn finish(doc: &PdfDocument, out: &Path, opts: PdfWriteOptions, password: Option
     Ok(Outcome::Wrote)
 }
 
-fn all_pages(doc: &PdfDocument) -> Result<Vec<u32>, StepError> {
-    Ok((0..doc.page_count()?.max(0) as u32).collect())
-}
-
 /// A one-page document to try a mark's settings on.
 fn probe() -> Result<PdfDocument, String> {
     let bytes = crate::engine::fixture::build(&crate::engine::fixture::Fixture { pages: 1, ..Default::default() });
@@ -273,9 +321,12 @@ fn probe_mark(mark: &Mark, date: Date) -> Result<(), Problem> {
         .map_err(|e| Problem::Invalid(e.to_string()))
 }
 
-fn stamp(cx: &Cx, input: &Path, output: &Path, mark: Mark) -> Result<Outcome, StepError> {
+fn stamp(cx: &mut Cx, input: &Path, output: &Path, mark: Mark) -> Result<Outcome, StepError> {
     let mut doc = open_in(input)?;
-    let pages = all_pages(&doc)?;
+    let pages = cx.select(doc.page_count()?.max(0) as u32)?;
+    if pages.is_empty() {
+        return Ok(Outcome::Unchanged);
+    }
     // A second run over the same file updates the mark instead of stamping twice.
     marks::add(&mut doc, &AddRequest { mark, pages, replace: true, date: cx.env.date })?;
     finish(&doc, output, rewrite_opts(), None)
@@ -375,7 +426,15 @@ impl StepImpl for OcrStep {
 
     fn run(&self, cx: &mut Cx, input: &Path, output: &Path) -> Result<Outcome, StepError> {
         let backend = cx.env.backend(self.backend).map_err(StepError::Failed)?;
-        let opts = ocr::Options { languages: self.languages.clone(), force: self.force, ..ocr::Options::default() };
+        let mut opts = ocr::Options { languages: self.languages.clone(), force: self.force, ..ocr::Options::default() };
+        if cx.has_range() {
+            let count = open_in(input)?.page_count()?.max(0) as u32;
+            let pages = cx.select(count)?;
+            if pages.is_empty() {
+                return Ok(Outcome::Unchanged);
+            }
+            opts.pages = Some(pages);
+        }
         let r = ocr::ocr_file_with(input, output, false, backend.as_ref(), &opts, &|_| {}, cx.cancel)?;
         if r.pages_recognized == 0 {
             let _ = std::fs::remove_file(output);
@@ -428,7 +487,10 @@ impl StepImpl for BatesStep {
             _ => self.bates.start,
         };
         let mut doc = open_in(input)?;
-        let pages = all_pages(&doc)?;
+        let pages = cx.select(doc.page_count()?.max(0) as u32)?;
+        if pages.is_empty() {
+            return Ok(Outcome::Unchanged);
+        }
         let count = pages.len() as u64;
         let bates = marks::Bates { start, ..self.bates.clone() };
         marks::add(&mut doc, &AddRequest { mark: Mark::Bates(bates), pages, replace: true, date: cx.env.date })?;
@@ -481,13 +543,13 @@ fn removed(r: &SanitizeReport) -> u32 {
         + r.quoting
 }
 
-/// Pages (zero-based) with no text at all: scans and pictures, where a search finds nothing.
-fn pages_without_text(doc: &PdfDocument) -> Result<Vec<u32>, StepError> {
+/// Of `pages` (zero-based), those with no text at all: scans and pictures, where a search finds nothing.
+fn pages_without_text(doc: &PdfDocument, pages: &[u32]) -> Result<Vec<u32>, StepError> {
     let mut out = Vec::new();
-    for p in 0..doc.page_count()?.max(0) {
-        let text = doc.load_page(p)?.to_text_page(mupdf::TextPageFlags::empty())?.to_text()?;
+    for &p in pages {
+        let text = doc.load_page(p as i32)?.to_text_page(mupdf::TextPageFlags::empty())?.to_text()?;
         if text.trim().is_empty() {
-            out.push(p as u32);
+            out.push(p);
         }
     }
     Ok(out)
@@ -545,7 +607,8 @@ impl StepImpl for RedactStep {
 
     fn run(&self, cx: &mut Cx, input: &Path, output: &Path) -> Result<Outcome, StepError> {
         let mut doc = open_in(input)?;
-        let blind = pages_without_text(&doc)?;
+        let selected = cx.select(doc.page_count()?.max(0) as u32)?;
+        let blind = pages_without_text(&doc, &selected)?;
         if !blind.is_empty() {
             let shown: Vec<String> = blind.iter().take(5).map(|p| (p + 1).to_string()).collect();
             cx.warnings.push(format!(
@@ -564,7 +627,9 @@ impl StepImpl for RedactStep {
                 }
                 RedactQuery::Regex { regex, case_sensitive } => Query::Regex { pattern: regex.clone(), case_sensitive: *case_sensitive },
             };
-            hits.extend(redact::find(&doc, &query)?);
+            // A range limits the search; an empty selection searches nothing (the sanitize switches below still apply).
+            let only = cx.has_range().then_some(selected.as_slice());
+            hits.extend(redact::find_capped(&doc, &query, only, usize::MAX, None)?);
         }
         if hits.is_empty() {
             // Nothing on the pages, but a value can sit in the properties, a form field or a comment:
@@ -597,16 +662,42 @@ impl StepImpl for FlattenFormsStep {
 
     fn run(&self, cx: &mut Cx, input: &Path, output: &Path) -> Result<Outcome, StepError> {
         let mut doc = open_in(input)?;
-        let fields = crate::forms::list(&doc)?.fields.len();
+        let selected = cx.select(doc.page_count()?.max(0) as u32)?;
+        let fields = crate::forms::list(&doc)?.fields.iter().filter(|f| !cx.has_range() || selected.contains(&f.page)).count();
         if fields == 0 {
-            cx.notes.push("no form fields".into());
+            cx.notes.push(if cx.has_range() { "no form fields on those pages" } else { "no form fields" }.into());
             return Ok(Outcome::Unchanged);
         }
+        // `bake` takes every page: the pages outside the range hold their annotations back meanwhile.
+        let outside: Vec<u32> = if cx.has_range() { (0..doc.page_count()?.max(0) as u32).filter(|p| !selected.contains(p)).collect() } else { Vec::new() };
+        let held = hold_annots(&doc, &outside)?;
         // Widgets are drawn into the page content and removed; annotations (comments) stay.
-        doc.bake(false, true)?;
+        let baked = doc.bake(false, true);
+        restore_annots(held)?;
+        baked?;
         cx.notes.push(format!("{fields} field(s) flattened"));
         finish(&doc, output, redact::write_options(), None)
     }
+}
+
+/// Takes the /Annots of `pages` off their page dictionaries, to be put back by [`restore_annots`].
+fn hold_annots(doc: &PdfDocument, pages: &[u32]) -> Result<Vec<(PdfObject, PdfObject)>, StepError> {
+    let mut held = Vec::new();
+    for &p in pages {
+        let mut page = doc.find_page(p as i32)?;
+        if let Some(annots) = page.get_dict("Annots")? {
+            page.dict_delete("Annots")?;
+            held.push((page, annots));
+        }
+    }
+    Ok(held)
+}
+
+fn restore_annots(held: Vec<(PdfObject, PdfObject)>) -> Result<(), StepError> {
+    for (mut page, annots) in held {
+        page.dict_put("Annots", annots)?;
+    }
+    Ok(())
 }
 
 impl StepImpl for ExportImagesStep {
