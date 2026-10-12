@@ -70,7 +70,7 @@ export function ImageSection({ doc }: { doc: DocState }) {
   // text blocks keep their own).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || useStore.getState().active !== id) return;
       const t = e.target as HTMLElement | null;
       if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
       const k = e.key.toLowerCase();
