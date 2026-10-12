@@ -409,6 +409,148 @@ fn combine_keeps_form_fields_and_renames_the_ones_that_clash() {
 }
 
 #[test]
+fn a_source_with_a_parent_loop_in_its_field_tree_combines_and_its_fields_are_listed() {
+    use crate::outline::tests::raw_pdf;
+    // widget 5 and field 6 are each other's /Parent; widget 7 is its own /Parent
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 7 0 R] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 7 0 R] >>".into(),
+        "<< >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /Parent 6 0 R /Rect [10 10 100 50] /P 3 0 R >>".into(),
+        "<< /T (Loop) /FT /Tx /Kids [5 0 R] /Parent 5 0 R >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Own) /Parent 7 0 R /Rect [10 60 100 100] /P 3 0 R >>".into(),
+    ];
+    let d = dir("combine-parent-loop");
+    let a = write(&d, "a.pdf", 1, 0);
+    let l = d.join("loop.pdf");
+    std::fs::write(&l, raw_pdf(&objs)).unwrap();
+    let l = l.to_string_lossy().into_owned();
+    let (eng, _) = open(&a);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    combine::run(&eng, &[src(&a, ""), src(&l, "")], opt, &out).unwrap();
+    let (e2, i2) = open(&out);
+    let mut names: Vec<String> = crate::forms::list_all(&e2, i2).unwrap().fields.into_iter().map(|f| f.name).collect();
+    names.sort();
+    assert_eq!(names, ["Loop", "Own"]);
+}
+
+#[test]
+fn a_parent_loop_with_no_field_type_anywhere_still_writes_and_opens() {
+    use crate::outline::tests::raw_pdf;
+    // widget 5 and field 6 are each other's /Parent and no /FT is set: MuPDF refused the copied loop on readback
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".into(),
+        "<< >>".into(),
+        "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [10 10 100 50] /P 3 0 R >>".into(),
+        "<< /T (Loop) /Kids [5 0 R] /Parent 5 0 R >>".into(),
+    ];
+    let d = dir("combine-parent-loop-untyped");
+    let a = write(&d, "a.pdf", 1, 0);
+    let l = d.join("loop.pdf");
+    std::fs::write(&l, raw_pdf(&objs)).unwrap();
+    let l = l.to_string_lossy().into_owned();
+    let (eng, _) = open(&a);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    combine::run(&eng, &[src(&a, ""), src(&l, "")], opt, &out).unwrap();
+    let (e2, i2) = open(&out);
+    assert_eq!(e2.read_custom(i2, |d| Ok(d.page_count()?)).unwrap(), 2);
+}
+
+/// Combines `a` with a one-page file made of `objs` (a widget is annotation 5 on its page) and, for each widget of
+/// the result's last page, the object numbers of its /Parent chain upwards. Panics on a chain that does not end.
+fn parent_chains(test: &str, objs: &[String]) -> Vec<Vec<i32>> {
+    use crate::outline::tests::raw_pdf;
+    let d = dir(test);
+    let a = write(&d, "a.pdf", 1, 0);
+    let l = d.join("loop.pdf");
+    std::fs::write(&l, raw_pdf(objs)).unwrap();
+    let l = l.to_string_lossy().into_owned();
+    let (eng, _) = open(&a);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    combine::run(&eng, &[src(&a, ""), src(&l, "")], opt, &out).unwrap();
+    let (e2, i2) = open(&out);
+    e2.read_custom(i2, |d| {
+        let mut all = Vec::new();
+        let annots = d.find_page(1)?.get_dict("Annots")?.expect("the widgets were copied");
+        for i in 0..annots.len()? as i32 {
+            let mut cur = annots.get_array(i)?.unwrap();
+            let mut chain = Vec::new();
+            while let Some(p) = cur.get_dict("Parent")? {
+                chain.push(p.as_indirect()?);
+                assert!(chain.len() < 1000, "the /Parent chain does not end");
+                cur = p.resolve()?.unwrap();
+            }
+            all.push(chain);
+        }
+        Ok(all)
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_three_field_parent_loop_is_cut_where_it_closes() {
+    // widget 5 under 6 under 7 under 8, and 8 under 6 again
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".into(),
+        "<< >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /Parent 6 0 R /Rect [10 10 100 50] /P 3 0 R >>".into(),
+        "<< /T (A) /Kids [5 0 R 7 0 R] /Parent 7 0 R >>".into(),
+        "<< /T (B) /Kids [6 0 R 8 0 R] /Parent 8 0 R >>".into(),
+        "<< /T (C) /Kids [7 0 R] /Parent 6 0 R >>".into(),
+    ];
+    let chains = parent_chains("combine-parent-loop-3", &objs);
+    assert_eq!(chains.len(), 1);
+    assert_eq!(chains[0].len(), 3, "A, B and C above the widget, each once");
+}
+
+#[test]
+fn a_very_deep_parent_chain_is_cut_at_a_cap_and_the_result_opens() {
+    // widget 5 under field 6, under 7, ... under 10005 (the only one in /Fields): no loop, 10 000 deep
+    const DEPTH: usize = 10_000;
+    let mut objs: Vec<String> = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{} 0 R] >> >>", 5 + DEPTH),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".into(),
+        "<< >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /Parent 6 0 R /Rect [10 10 100 50] /P 3 0 R >>".into(),
+    ];
+    for n in 6..=5 + DEPTH {
+        let up = if n < 5 + DEPTH { format!(" /Parent {} 0 R", n + 1) } else { String::new() };
+        objs.push(format!("<< /T (f{n}) /Kids [{} 0 R]{up} >>", n - 1));
+    }
+    let chains = parent_chains("combine-parent-deep", &objs);
+    assert_eq!(chains.len(), 1);
+    assert!(!chains[0].is_empty() && chains[0].len() <= 64, "{} parents were copied", chains[0].len());
+}
+
+#[test]
+fn widgets_of_one_field_keep_one_shared_parent() {
+    // widgets 5 and 6 under field 7, under group 8
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [8 0 R] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R] >>".into(),
+        "<< >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /Parent 7 0 R /Rect [10 10 100 50] /P 3 0 R >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /Parent 7 0 R /Rect [10 60 100 100] /P 3 0 R >>".into(),
+        "<< /T (Shared) /Kids [5 0 R 6 0 R] /Parent 8 0 R >>".into(),
+        "<< /T (Group) /Kids [7 0 R] >>".into(),
+    ];
+    let chains = parent_chains("combine-parent-shared", &objs);
+    assert_eq!(chains.len(), 2);
+    assert_eq!(chains[0].len(), 2);
+    assert_eq!(chains[0], chains[1], "one copy of the field and of its group");
+}
+
+#[test]
 fn combine_and_insert_keep_page_transitions() {
     let d = dir("combine-trans");
     let a = write(&d, "a.pdf", 2, 0);
@@ -776,9 +918,9 @@ fn a_source_with_security_says_its_password_and_restrictions_are_not_carried_ove
     assert!(plan.files[1].encrypted);
     assert_eq!(
         plan.files[1].note.as_deref(),
-        Some("owner.pdf's password and restrictions are not carried over (it does not allow printing, editing, commenting, form filling, screen reader access)")
+        Some("owner.pdf's security is not carried over (it does not allow printing, editing, commenting, form filling, screen reader access)")
     );
-    // a source with a user password and every right still says the password goes
+    // a source with a user password keeps the wording that names the password
     assert!(plan.files[2].encrypted);
     assert_eq!(plan.files[2].note.as_deref(), Some("locked.pdf's password and restrictions are not carried over"));
     // not opened yet: left out, and it is not said to bring anything
@@ -822,7 +964,7 @@ fn a_revision_2_source_has_its_page_rights_read_from_the_older_bits() {
     assert_eq!(plan.files[1].state, FileState::Ready);
     assert_eq!(
         plan.files[1].note.as_deref(),
-        Some("edit.pdf's password and restrictions are not carried over (it does not allow printing, commenting, form filling)")
+        Some("edit.pdf's security is not carried over (it does not allow printing, commenting, form filling)")
     );
 }
 

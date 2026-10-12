@@ -16,7 +16,7 @@
 use super::labels::{self, LabelRange, LabelStyle};
 use super::{Result, bad};
 use crate::batch::action::Secret;
-use crate::engine::edit::{OutNode, RawOut, Readback, graft_pages_ex, open_source, page_size, read_outline, rewrite_opts, write_atomic, write_doc};
+use crate::engine::edit::{OutNode, RawOut, Readback, graft_pages_ex, open_source_ex, page_size, read_outline, rewrite_opts, write_atomic, write_doc};
 use crate::engine::{Engine, EngineError};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::{Font, Size};
@@ -214,6 +214,8 @@ struct Facts {
     signed: bool,
     /// The file has an `/Encrypt` dictionary, an owner-password-only one included.
     encrypted: bool,
+    /// It asked for an open password (a user password; an owner-password-only file does not).
+    locked: bool,
     /// What its permission bits withhold that the result will allow ("printing", "commenting").
     withheld: Vec<&'static str>,
     /// Bookmarks the file's own outline holds.
@@ -227,7 +229,7 @@ struct Facts {
 
 /// A file that is left out for what it is (password, no copying, no pages).
 fn left_out(state: FileState, message: String) -> Facts {
-    Facts { state, message: Some(message), pages: 0, has_outline: false, has_fields: false, signed: false, encrypted: false, withheld: Vec::new(), outline_nodes: 0, first_size: [0.0, 0.0], stable: true }
+    Facts { state, message: Some(message), pages: 0, has_outline: false, has_fields: false, signed: false, encrypted: false, locked: false, withheld: Vec::new(), outline_nodes: 0, first_size: [0.0, 0.0], stable: true }
 }
 
 /// A file that could not be read: left out now, asked again next time.
@@ -237,9 +239,9 @@ fn failed(message: String) -> Facts {
 
 /// Opens `path` to graft pages from. `Err` holds why the file cannot go in: its state and a reason that
 /// reads on after the file name.
-fn open_for_graft(path: &str, password: Option<&str>) -> std::result::Result<PdfDocument, (FileState, String)> {
+fn open_for_graft(path: &str, password: Option<&str>) -> std::result::Result<(PdfDocument, bool), (FileState, String)> {
     let name = file_name(path);
-    let src = match open_source(path, password) {
+    let (src, locked) = match open_source_ex(path, password) {
         Ok(d) => d,
         Err(EngineError::NeedsPassword) => return Err((FileState::Encrypted, format!("{name} is password protected"))),
         Err(EngineError::BadPassword) => return Err((FileState::Encrypted, format!("{name} does not open with the password given"))),
@@ -248,7 +250,7 @@ fn open_for_graft(path: &str, password: Option<&str>) -> std::result::Result<Pdf
     if !crate::protect::Rights::of(&src).may_extract() {
         return Err((FileState::NoCopy, format!("{name} doesn't allow copying or page changes")));
     }
-    Ok(src)
+    Ok((src, locked))
 }
 
 /// The rights a source's permission bits refuse that the result will allow. Copying is not listed: a file
@@ -284,20 +286,20 @@ fn read_facts(src: &PdfDocument) -> Result<Option<Facts>> {
     let int = |k: &str| encrypt.as_ref().and_then(|e| e.get_dict(k).ok().flatten()).and_then(|o| o.as_int().ok());
     let rights = crate::protect::Rights::from_p_r(int("P").unwrap_or(src.permissions().bits() as i32), int("R"));
     let withheld = if encrypt.is_some() { withheld_rights(rights) } else { Vec::new() };
-    Ok(Some(Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, signed, encrypted: encrypt.is_some(), withheld, outline_nodes: count_nodes(&outline), first_size, stable: true }))
+    Ok(Some(Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, signed, encrypted: encrypt.is_some(), locked: false, withheld, outline_nodes: count_nodes(&outline), first_size, stable: true }))
 }
 
 /// Opens `path`, reads what planning needs and lets the document go again. A file that cannot be read
 /// (at any step) is left out on its own: it never fails the whole look.
 fn facts_of(path: &str, password: Option<&str>) -> Facts {
     let name = file_name(path);
-    let src = match open_for_graft(path, password) {
+    let (src, locked) = match open_for_graft(path, password) {
         Ok(d) => d,
         Err((FileState::Unreadable, why)) => return failed(format!("{why}, so it is left out.")),
         Err((state, why)) => return left_out(state, format!("{why}, so it is left out.")),
     };
     match read_facts(&src) {
-        Ok(Some(f)) => f,
+        Ok(Some(f)) => Facts { locked, ..f },
         Ok(None) => left_out(FileState::Unreadable, format!("{name} has no pages, so it is left out.")),
         Err(e) => failed(format!("{name} could not be read ({e}), so it is left out.")),
     }
@@ -376,7 +378,9 @@ fn plan_from(specs: &[SourceSpec], opt: CombineOptions, facts: &[Facts]) -> Resu
             }
             if f.encrypted {
                 let cut = if f.withheld.is_empty() { String::new() } else { format!(" (it does not allow {})", f.withheld.join(", ")) };
-                notes.push(format!("{name}'s password and restrictions are not carried over{cut}"));
+                // An owner-password-only file has no password to carry over.
+                let what = if f.locked { "password and restrictions are" } else { "security is" };
+                notes.push(format!("{name}'s {what} not carried over{cut}"));
             }
             plan.note = (!notes.is_empty()).then(|| notes.join(". "));
         }
@@ -662,7 +666,7 @@ fn graft_sources(sources: Vec<Option<Source>>, opt: CombineOptions, toc_pages: u
     let mut done: Vec<(String, u32)> = Vec::new();
     let mut sections: Vec<LabelRange> = Vec::new();
     for s in sources.into_iter().flatten() {
-        let doc = open_for_graft(&s.path, s.password.as_ref().map(Secret::as_str)).map_err(|(_, why)| bad(format!("{why} now, so it can't be combined. {CHANGED}")))?;
+        let (doc, _) = open_for_graft(&s.path, s.password.as_ref().map(Secret::as_str)).map_err(|(_, why)| bad(format!("{why} now, so it can't be combined. {CHANGED}")))?;
         // Checked right after the open: the handle is of the file this key was read from, or the key differs.
         let changed = || bad(format!("{} has changed since it was added, so it can't be combined. {CHANGED}", file_name(&s.path)));
         if facts_key(&s.path) != s.key {
@@ -808,8 +812,8 @@ mod tests {
     #[test]
     fn a_source_with_a_parent_loop_in_its_field_tree_still_grafts() {
         use crate::outline::tests::raw_pdf;
-        // widget 5 and field 6 are each other's /Parent and no /FT is set anywhere. The result cannot be written
-        // (MuPDF refuses the loop when it reads the file back), but grafting it was never an error of its own.
+        // widget 5 and field 6 are each other's /Parent and no /FT is set anywhere: grafting it is no error
+        // (the loop is not copied; organize/tests.rs writes and reads the result back).
         let objs: Vec<String> = vec![
             "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] >> >>".into(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),

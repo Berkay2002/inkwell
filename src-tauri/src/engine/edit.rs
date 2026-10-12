@@ -602,16 +602,23 @@ pub(crate) fn authenticate_typed(d: &mut Document, pw: &str) -> Result<bool> {
 
 /// Another PDF to take pages from.
 pub(crate) fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocument> {
+    open_source_ex(path, password).map(|(d, _)| d)
+}
+
+/// [`open_source`] that also says whether the file asked for an open password (an owner-password-only
+/// file opens without one).
+pub(crate) fn open_source_ex(path: &str, password: Option<&str>) -> Result<(PdfDocument, bool)> {
     check_pdf(path)?;
     let mut d = Document::open(path)?;
-    if d.needs_password()? {
+    let locked = d.needs_password()?;
+    if locked {
         match password {
             None => return Err(EngineError::NeedsPassword),
             Some(pw) if !authenticate_typed(&mut d, pw)? => return Err(EngineError::BadPassword),
             _ => {}
         }
     }
-    Ok(PdfDocument::try_from(d)?)
+    Ok((PdfDocument::try_from(d)?, locked))
 }
 
 /// Page keys copied into a grafted page (MuPDF's list): nothing that points at other pages.
@@ -720,7 +727,7 @@ pub(crate) fn graft_pages_ex(dst: &mut PdfDocument, src: &PdfDocument, pages: &[
         made.push((from, page));
     }
     // Pass 2: their annotations.
-    let mut g = Graft { src, pages, made: &made, fields: Default::default(), names: None, defaults_done: false };
+    let mut g = Graft { src, pages, made: &made, fields: Default::default(), chain: Vec::new(), names: None, defaults_done: false };
     for (from, page) in &made {
         if let Some(annots) = from.get_dict("Annots")? {
             let copied = g.annots(dst, &mut map, &annots, page)?;
@@ -756,11 +763,18 @@ struct Graft<'a> {
     made: &'a [(PdfObject, PdfObject)],
     /// Source field object number to its copy in `dst`.
     fields: std::collections::HashMap<i32, PdfObject>,
+    /// Source field object numbers whose parents are being copied now, the widget first: a /Parent that
+    /// points back into it closes a loop.
+    chain: Vec<i32>,
     /// Names of `dst`'s root fields, loaded with the first field copied.
     names: Option<std::collections::HashSet<String>>,
     /// The source form's /DA and /DR were carried over already.
     defaults_done: bool,
 }
+
+/// How many parent fields are copied above one widget: a field tree is a few levels deep, and a chain far
+/// past that (or one a loop makes endless) would recurse as deep as the file allows. The field at the cap is a root.
+const MAX_FIELD_DEPTH: usize = 64;
 
 /// Keys never grafted as they are: they point back into the source's page or field tree.
 const BACK_REFS: [&str; 7] = ["P", "Popup", "Parent", "IRT", "Kids", "A", "AA"];
@@ -884,14 +898,23 @@ impl Graft<'_> {
         if num != 0 {
             self.fields.insert(num, copy.clone());
         }
-        match w.get_dict("Parent")? {
-            Some(p) if p.is_indirect()? => {
-                let parent = self.parent(dst, map, p.as_indirect()?)?;
-                link_kid(&parent, copy)?;
-            }
-            _ => self.add_root(dst, map, copy)?,
+        self.chain.push(num);
+        let up = self.up(dst, map, w);
+        self.chain.pop();
+        match up? {
+            Some(parent) => link_kid(&parent, copy)?,
+            None => self.add_root(dst, map, copy)?,
         }
         Ok(())
+    }
+
+    /// The copy of `f`'s /Parent field. None when it has none, when that /Parent closes a loop in a broken
+    /// field tree, or when the chain is past `MAX_FIELD_DEPTH`: `f` is then a root field of its own.
+    fn up(&mut self, dst: &mut PdfDocument, map: &mut PdfGraftMap, f: &PdfObject) -> Result<Option<PdfObject>> {
+        match f.get_dict("Parent")? {
+            Some(p) if p.is_indirect()? && self.chain.len() <= MAX_FIELD_DEPTH && !self.chain.contains(&p.as_indirect()?) => Ok(Some(self.parent(dst, map, p.as_indirect()?)?)),
+            _ => Ok(None),
+        }
     }
 
     /// The copy of source field `num` (made with its own parents when first needed).
@@ -910,14 +933,12 @@ impl Graft<'_> {
         copy.dict_put("Kids", dst.new_array()?)?;
         let r = dst.add_object(&copy)?;
         self.fields.insert(num, r.clone());
-        match f.get_dict("Parent")? {
-            // A loop in a broken field tree ends at the field already copied.
-            Some(p) if p.is_indirect()? && !self.fields.contains_key(&p.as_indirect()?) => {
-                let up = self.parent(dst, map, p.as_indirect()?)?;
-                link_kid(&up, &r)?;
-            }
-            Some(p) if p.is_indirect()? => link_kid(&self.fields[&p.as_indirect()?].clone(), &r)?,
-            _ => self.add_root(dst, map, &r)?,
+        self.chain.push(num);
+        let up = self.up(dst, map, &f);
+        self.chain.pop();
+        match up? {
+            Some(up) => link_kid(&up, &r)?,
+            None => self.add_root(dst, map, &r)?,
         }
         Ok(r)
     }
