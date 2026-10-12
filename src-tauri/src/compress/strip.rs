@@ -4,6 +4,7 @@ use mupdf::pdf::{PdfDocument, PdfObject};
 use serde::{Deserialize, Serialize};
 
 use super::Error;
+use crate::outline::Discarded;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -18,6 +19,9 @@ pub struct Strip {
     pub javascript: bool,
     /// The bookmark tree.
     pub bookmarks: bool,
+    /// Bookmarks whose destination does not exist (page gone, name not defined); the working ones under
+    /// them move up into their place.
+    pub invalid_bookmarks: bool,
     /// Submit-form, reset-form and import-data actions (fields, widgets, links).
     pub form_actions: bool,
     /// `/Alternates` of image XObjects (print or web variants of an image).
@@ -30,7 +34,7 @@ pub struct Strip {
     pub invalid_links: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StripReport {
     pub metadata: bool,
@@ -38,6 +42,7 @@ pub struct StripReport {
     pub embedded_files: u32,
     pub javascript: u32,
     pub bookmarks: bool,
+    pub invalid_bookmarks: u32,
     pub form_actions: u32,
     pub alternate_images: u32,
     pub private_data: u32,
@@ -45,6 +50,8 @@ pub struct StripReport {
     pub invalid_links: u32,
     /// Invalid links were asked for but the named destinations could not be read, so none were judged.
     pub links_unchecked: bool,
+    /// Invalid bookmarks were asked for but the outline was left as it is, for this reason.
+    pub bookmarks_unchecked: Option<String>,
 }
 
 impl StripReport {
@@ -53,6 +60,7 @@ impl StripReport {
         self.metadata
             || self.bookmarks
             || self.thumbnails
+                + self.invalid_bookmarks
                 + self.embedded_files
                 + self.javascript
                 + self.form_actions
@@ -147,8 +155,20 @@ pub(crate) fn strip(doc: &mut PdfDocument, s: &Strip, pages: usize) -> Result<St
     }
 
     // A name tree that cannot be read is not an empty one: every named link would look broken.
-    let named = if s.invalid_links { Dests::load(doc)? } else { None };
+    let judge_bookmarks = s.invalid_bookmarks && !s.bookmarks;
+    let named = if s.invalid_links || judge_bookmarks { Dests::load(doc)? } else { None };
     r.links_unchecked = s.invalid_links && named.is_none();
+    if judge_bookmarks {
+        match &named {
+            None => r.bookmarks_unchecked = Some("the named destinations could not be read".into()),
+            Some(d) => match crate::outline::discard_where(doc, &|item| !bookmark_works(doc, d, item, pages))
+                .map_err(|e| Error::Refused(e.to_string()))?
+            {
+                Discarded::Removed(n) => r.invalid_bookmarks = n,
+                Discarded::Left(why) => r.bookmarks_unchecked = Some(why),
+            },
+        }
+    }
     if s.metadata || s.thumbnails || s.javascript || s.embedded_files || s.links || s.invalid_links || s.private_data {
         for i in 0..pages {
             let mut page = doc.find_page(i as i32)?;
@@ -185,7 +205,7 @@ pub(crate) fn strip(doc: &mut PdfDocument, s: &Strip, pages: usize) -> Result<St
                         r.links += 1;
                         continue;
                     }
-                    if let Some(d) = &named && !link_works(doc, d, &a) {
+                    if s.invalid_links && let Some(d) = &named && !link_works(doc, d, &a) {
                         drop_at.push(k);
                         r.invalid_links += 1;
                         continue;
@@ -290,27 +310,30 @@ impl Dests {
     }
 }
 
-/// An explicit destination array's page must be one of the document's pages.
-fn dest_array_ok(doc: &PdfDocument, arr: &PdfObject) -> bool {
+/// An explicit destination array's page must be one of the document's pages. `pages`: when an integer
+/// stands for the page (a remote destination's form, which some viewers follow here too), it has to be
+/// below this; none leaves integers alone.
+fn dest_array_ok(doc: &PdfDocument, arr: &PdfObject, pages: Option<i32>) -> bool {
     let Ok(Some(first)) = arr.get_array(0) else { return false };
-    // A page number (remote destinations) cannot be checked here and is left alone.
     if first.is_int().unwrap_or(false) {
-        return true;
+        return pages.is_none_or(|n| first.as_int().is_ok_and(|p| (0..n).contains(&p)));
     }
     let is_ref = first.is_indirect().unwrap_or(false);
     is_ref && matches!(doc.lookup_page_number(&first), Ok(n) if n >= 0)
 }
 
 /// A destination value: a name or string looked up, an array, or a dictionary holding `/D`.
-fn dest_ok(doc: &PdfDocument, d: &Dests, v: &PdfObject) -> bool {
+fn dest_ok(doc: &PdfDocument, d: &Dests, v: &PdfObject, pages: Option<i32>) -> bool {
     if v.is_array().unwrap_or(false) {
-        return dest_array_ok(doc, v);
+        return dest_array_ok(doc, v, pages);
     }
     if v.is_name().unwrap_or(false) || v.is_string().unwrap_or(false) {
         let Some(target) = d.lookup(v) else { return false };
         return match target.get_dict("D").ok().flatten() {
-            Some(inner) if target.is_dict().unwrap_or(false) => inner.is_array().unwrap_or(false) && dest_array_ok(doc, &inner),
-            _ => target.is_array().unwrap_or(false) && dest_array_ok(doc, &target),
+            Some(inner) if target.is_dict().unwrap_or(false) => {
+                inner.is_array().unwrap_or(false) && dest_array_ok(doc, &inner, pages)
+            }
+            _ => target.is_array().unwrap_or(false) && dest_array_ok(doc, &target, pages),
         };
     }
     false
@@ -320,17 +343,33 @@ fn dest_ok(doc: &PdfDocument, d: &Dests, v: &PdfObject) -> bool {
 /// document (URI, remote go-to, launch, named, JavaScript ...) are not judged here.
 fn link_works(doc: &PdfDocument, d: &Dests, link: &PdfObject) -> bool {
     if let Ok(Some(dest)) = link.get_dict("Dest") {
-        return dest_ok(doc, d, &dest);
+        return dest_ok(doc, d, &dest, None);
     }
     match link.get_dict("A") {
         Ok(Some(a)) if a.is_dict().unwrap_or(false) => {
             if is_name(&a, "S", b"GoTo") {
-                a.get_dict("D").ok().flatten().is_some_and(|dest| dest_ok(doc, d, &dest))
+                a.get_dict("D").ok().flatten().is_some_and(|dest| dest_ok(doc, d, &dest, None))
             } else {
                 // Any other action type is a decision of its own; a dictionary without /S does nothing.
                 a.get_dict("S").ok().flatten().is_some()
             }
         }
         _ => false,
+    }
+}
+
+/// A bookmark works unless its `/Dest`, or the `/D` of a GoTo action, does not resolve to a page of this document
+/// (`pages` pages). An item with no destination is a heading and stays, and so does one with any other action
+/// (URI, remote go-to, launch, named, JavaScript ...): those are not judged here.
+fn bookmark_works(doc: &PdfDocument, d: &Dests, item: &PdfObject, pages: usize) -> bool {
+    let pages = Some(pages as i32);
+    if let Ok(Some(dest)) = item.get_dict("Dest") && !dest.is_null().unwrap_or(false) {
+        return dest_ok(doc, d, &dest, pages);
+    }
+    match item.get_dict("A") {
+        Ok(Some(a)) if a.is_dict().unwrap_or(false) && is_name(&a, "S", b"GoTo") => {
+            a.get_dict("D").ok().flatten().is_some_and(|dest| dest_ok(doc, d, &dest, pages))
+        }
+        _ => true,
     }
 }

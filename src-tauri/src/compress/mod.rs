@@ -553,6 +553,9 @@ pub fn compress(
     if stripped.links_unchecked {
         warnings.push("The named destinations could not be read, so links were not checked.".into());
     }
+    if let Some(why) = &stripped.bookmarks_unchecked {
+        warnings.push(format!("Invalid bookmarks were not removed: {why}."));
+    }
     run.check()?;
 
     // 3. Fonts that are to be unembedded, before any pass that would copy them.
