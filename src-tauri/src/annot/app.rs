@@ -4,10 +4,11 @@ use super::stamps::{self, Gate, Library, Source, Stamp};
 use super::{AnnotList, NewAnnot, Patch, Style, add_one, delete_many, edit_one, list_status, reply_one, state_one};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
+use crate::exchange::{self, Format};
 use crate::paths::Paths;
 use serde::Serialize;
 use std::path::PathBuf;
-use tauri::Window;
+use tauri::{Manager, Window};
 
 type Result<T> = std::result::Result<T, EngineError>;
 type Eng<'a> = tauri::State<'a, std::sync::Arc<Engine>>;
@@ -136,4 +137,39 @@ pub async fn stamp_place(app: tauri::AppHandle, eng: Eng<'_>, doc: DocId, page: 
 pub async fn stamp_gate(eng: Eng<'_>, doc: DocId) -> Result<Gate> {
     let eng = eng.inner().clone();
     blocking(move || stamps::gate(&eng, doc)).await
+}
+
+/// Writes every comment to `to` (a save token) as XFDF, or FDF when the name ends in `.fdf`.
+#[tauri::command]
+pub async fn annot_export(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Paths>, doc: DocId, to: String) -> Result<super::xfdf::Exported> {
+    let dest = reg.take_save(window.label(), &to)?;
+    eng.check_not_open(&dest, None)?;
+    let eng = eng.inner().clone();
+    blocking(move || {
+        let name = std::path::Path::new(&eng.doc_entry(doc)?.path()).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let (bytes, done) = super::xfdf::export(&eng, doc, Format::of_path(&dest, false), &name)?;
+        std::fs::write(&dest, bytes).map_err(|e| EngineError::Io(e.to_string()))?;
+        window.state::<Paths>().learn(&dest);
+        Ok(done)
+    })
+    .await
+}
+
+/// Reads comments from `file` (an open token; XFDF or FDF, told by what is inside) as one undo step.
+#[tauri::command]
+pub async fn annot_import(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Paths>, doc: DocId, file: String) -> Result<super::xfdf::Imported> {
+    let path = reg.open(window.label(), &file)?;
+    let eng = eng.inner().clone();
+    blocking(move || {
+        let parsed = super::xfdf::parse(&exchange::read_capped(&path)?)?;
+        super::xfdf::import_one(&eng, doc, &parsed, EditSource::User)
+    })
+    .await
+}
+
+/// What the import menus may offer for `doc` (see [`exchange::gates`]).
+#[tauri::command]
+pub async fn data_gates(eng: Eng<'_>, doc: DocId) -> Result<exchange::Gates> {
+    let eng = eng.inner().clone();
+    blocking(move || exchange::gates(&eng, doc)).await
 }

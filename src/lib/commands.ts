@@ -27,6 +27,7 @@ import { useSheets } from "./organizePlus";
 import { useDocJs } from "./docJsStore";
 import { useStamps } from "./stamps";
 import { createPortfolio } from "./portfolioStore";
+import { useExchange } from "./dataExchange";
 
 export interface Command {
   id: string;
@@ -346,6 +347,10 @@ export const commands: Command[] = [
   { id: "page-boxes", title: "Set page boxes (trim, bleed)…", needsDoc: true, run: openPageBoxes },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },
+  { id: "comments-export", title: "Export comments (XFDF, FDF)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().exportComments(d.id)) },
+  { id: "comments-import", title: "Import comments (XFDF, FDF)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().importComments(d.id)) },
+  { id: "forms-export", title: "Forms: export form data (FDF, XFDF, JSON)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().exportForm(d.id)) },
+  { id: "forms-import", title: "Forms: import form data (FDF, XFDF, JSON)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().importForm(d.id)) },
   { id: "measure", title: "Measure", needsDoc: true, run: () => useMeasure.getState().setOpen(!useMeasure.getState().open) },
   { id: "forms", title: "Forms", keys: ["Ctrl+Alt+F"], needsDoc: true, run: () => useForms.getState().setOpen(!useForms.getState().open) },
   {

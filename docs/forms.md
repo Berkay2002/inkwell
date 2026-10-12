@@ -87,9 +87,38 @@ label next to the field; a blank labelled Signature, Sign or Signed becomes a si
 Fields are built as plain AcroForm dictionaries (MuPDF only creates signature widgets): `/FT /Tx /Btn /Ch /Sig`, `/Ff`,
 `/MK`, `/DA` with the form's `/DR` Helvetica and ZapfDingbats, `/AP` from MuPDF.
 
+## Form data files: FDF, XFDF and JSON
+
+Forms panel menu (the three dots) and the command palette: **Export form data…** and **Import form data…**. Code:
+`src-tauri/src/forms/data.rs`, with the caps and the XML and FDF readers in `src-tauri/src/exchange.rs`. The format of an
+export follows the file name (`.fdf`, `.json`, anything else XFDF); an import is told by what is inside, not the name.
+
+- **Exported:** every text, check box, radio, drop-down and list field by its full name (`Address.Street`), as stored:
+  a check box or radio button as its export value or `Off`, a list box that takes several entries as a list, rich text as
+  its plain value. Push buttons and signature fields have no value and are not written. JSON is
+  `{ "full.name": "value" | ["values"] }`; XFDF nests `<field name>` by the dots; FDF is `/Fields` with `/T` and `/V`.
+  Export runs no script.
+- **Imported** as one undo step, through the same set-value path as typing: formats, validation, calculations and
+  signature locks apply as they would to a person. Reported and skipped (the summary lists the first few with the
+  reason, never a failure of the whole import): a name that is not a field, a value the field cannot take (a choice that
+  is not in the list, an on/off for a text field, a list for a text field), a read-only field, a field a signature
+  locks, a password text field (its value is never exported either: the export says how many were left out), a field
+  name over 1 MB, and anything past 10 000 fields in one file. The summary shows a skipped name by its first 60
+  characters. A script's alerts, links, submits and print requests during the import are dropped, not acted on.
+- **The document's own field scripts do run** on an import (keystroke, validate, calculate, format), as they do when a
+  person types: the same path, so an import cannot put a value in that typing it would refuse. This is deliberate. The
+  file's own `/JavaScript`, `/AA` and `/A` are never read.
+- **Never done with a file:** run `/JavaScript` or `/AA`, follow `/F` file references, load a DTD or entities, read
+  more than 32 MB, 100 000 values or objects, 64 levels or 1 MB in one string.
+- **Certified documents** take the import when the certification allows form filling (`/P` 2 or 3): values go into
+  the fields that exist, and a name the file has that the form lacks is reported, never created. At `/P` 1, or when the
+  certification cannot be read, the menu item is off with the reason. Export is always allowed. **Signed** documents
+  take it as an incremental update after the signature, and the summary says so.
+- Known limit: the fields are looked up once at the start of an import, so a field a calculation rewrites later in the
+  same import is compared with its earlier value when the file also has a value for it.
+- No file written by Acrobat was available while this was built: the shapes follow ISO 19444-1 and ISO 32000-2
+  section 12.7.8. XML data files (Acrobat's XDP and its plain XML/TXT forms) are not read.
+
 ## Later (not built)
-- FDF, XFDF and JSON export and import of field values. `forms_list` already carries name, value(s) and kind for every
-  field, so each format is a reader/writer over that list (`forms_set_value` takes the values back); XFDF can reuse the
-  field naming of `FieldDto::name` (dotted full names).
 - Field alignment tools (align, centre, match size, distribute) and the Fields list's rename-in-place.
 - Signing a signature field (see the Sign task).
