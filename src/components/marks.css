@@ -261,7 +261,7 @@
 .mk .ax-body {
   scrollbar-gutter: stable;
 }
-.mk-insert select.tl-field {
+.mk select.tl-field {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
