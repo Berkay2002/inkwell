@@ -89,7 +89,7 @@ describe("replacing through the store", () => {
           ...(useStore.getState().docs[1] ?? {}),
           id: 1,
           rev: 1,
-          search: { query: "cat", id: 5, hits: [hit(0, 10, 100), hit(0, 80, 100)], current: 1, done: true, scanned: 1, total: 1, capped: false },
+          search: { query: "cat", id: 5, hits: [hit(0, 10, 100), hit(0, 80, 100)], current: 1, done: true, scanned: 1, total: 1, capped: false, rev: 1 },
         } as never,
       },
       runSearch,
@@ -105,6 +105,15 @@ describe("replacing through the store", () => {
     expect(req).toMatchObject({ find: "cat", with: "dog", at: { page: 0, rect: [80, 100, 100, 110] } });
     expect(runSearch).toHaveBeenCalledWith(1, "cat", { page: 0, x: 80, y: 100, skip: 1 });
     expect(useReplace.getState().report[1]?.summary).toBe("1 replaced, 0 skipped");
+  });
+
+  it("sends the generation its hits were listed at, so a document that moved on is refused", async () => {
+    vi.mocked(replaceText).mockResolvedValue({ kind: "stale" });
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 3 } } } as never);
+    await useReplace.getState().one(1);
+    // The list is from generation 1; the document is at 3.
+    expect(vi.mocked(replaceText).mock.calls[0][1]).toBe(1);
+    expect(runSearch).toHaveBeenCalledWith(1, "cat");
   });
 
   it("replaces every match without a position and searches by the engine's own re-run", async () => {

@@ -52,7 +52,10 @@ export const useReplace = create<ReplaceStore>((set, get) => {
       if (!cur) return;
       const find = d.search.query;
       const at = hit ? { page: hit.page, rect: hit.rects[0] } : undefined;
-      const r = await replaceText(doc, cur.rev, { find, with: get().text, opts: useFind.getState().opts, at });
+      // One match is placed by where Find listed it, so it goes with the generation of that list and the
+      // engine refuses (Stale) if the document moved on; Replace all searches by itself, from what is now.
+      const rev = hit ? d.search.rev : cur.rev;
+      const r = await replaceText(doc, rev, { find, with: get().text, opts: useFind.getState().opts, at });
       if (r.kind === "stale") {
         say(doc, { summary: "The document changed. Searching again.", lines: [], more: 0, notes: [] });
         useStore.getState().runSearch(doc, find);

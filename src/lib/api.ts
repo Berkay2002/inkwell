@@ -655,7 +655,8 @@ export interface ReplaceResult {
   inserted: number;
 }
 
-/** Replace in the text blocks (one undo step); `rev` is the generation the matches were listed at. */
+/** Replace in the text blocks (one undo step); `rev`: the generation the request was made at (for one match,
+ * the one its hits were listed at): `Stale` when the document has moved on. */
 export const textReplace = (doc: number, rev: number, req: ReplaceRequest) => invoke<ReplaceResult>("text_replace", { doc, rev, req });
 /** `to`: a save token (Save as). */
 export const saveDocument = (doc: number, to?: string) => invoke<EditState>("save_document", { doc, to: to ?? null });

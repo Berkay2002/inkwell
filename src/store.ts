@@ -30,6 +30,8 @@ export interface SearchState {
   total: number;
   /** The search stopped at its hit limit: the list is the first hits only. */
   capped: boolean;
+  /** The document generation the search was started at: what its hits describe (Replace one sends it). */
+  rev: number;
 }
 
 export interface NavRequest {
@@ -72,7 +74,7 @@ export interface DocState {
   nav: NavRequest | null;
 }
 
-const emptySearch = (): SearchState => ({ query: "", id: null, hits: [], current: -1, done: true, scanned: 0, total: 0, capped: false });
+const emptySearch = (rev = 0): SearchState => ({ query: "", id: null, hits: [], current: -1, done: true, scanned: 0, total: 0, capped: false, rev });
 
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
@@ -352,7 +354,7 @@ export const useStore = create<Store>((set, get) => {
       }
       const seq = ++searchSeq;
       latestSearch.set(id, seq);
-      const mine = { ...emptySearch(), query, done: false, total: d.pageCount };
+      const mine = { ...emptySearch(d.rev), query, done: false, total: d.pageCount };
       get().patch(id, { search: mine });
 
       let buffer: Hit[] = [];
