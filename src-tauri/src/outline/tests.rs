@@ -494,6 +494,31 @@ fn a_string_destination_goes_to_the_key_the_viewer_forms_not_the_one_spelled_wit
     assert!(matches!(&got[2], Dest::Other { what } if what == UNCHECKED_DEST), "{:?}", got[2]);
 }
 
+/// A `/Dests` value that is itself a string is a later hop: MuPDF looks it up by its own bytes as a C string
+/// (`resolve_dest_rec` calls `pdf_lookup_dest` on it), not by the key the viewer forms for the link's own string.
+#[test]
+fn a_chained_string_is_looked_up_by_its_own_bytes() {
+    let d = dir("outline", "dests_chained");
+    let items: Vec<String> = [
+        r"<< /Title (Raw) /Parent 4 0 R /Dest (s) /Next 8 0 R >>",
+        r"<< /Title (Utf16) /Parent 4 0 R /Dest (t) /Prev 7 0 R >>",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // s: a PDFDocEncoded string, whose own bytes are the key caf\351; t: a UTF-16BE string, whose bytes are cut at the
+    // first 0 (FE FF), so only another viewer finds /c by its text
+    let bytes = outline_pdf_with(
+        r"/Dests << /s (caf\351) /caf#E9 [5 0 R /Fit] /t <FEFF0063> /c [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 2 >>",
+        &items,
+    );
+    let (eng, id, _p) = open_bytes(&d, "a.pdf", &bytes);
+    let got: Vec<_> = list(&eng, id).unwrap().items.into_iter().map(|b| b.dest).collect();
+    assert!(matches!(got[0], Dest::Page { page: 0, .. }), "{:?}", got[0]);
+    assert!(matches!(&got[1], Dest::Other { what } if what == UNCHECKED_DEST), "{:?}", got[1]);
+}
+
 /// A name tree that cannot be read is not an empty one: no name is called broken.
 #[test]
 fn an_unreadable_names_tree_leaves_a_name_unjudged() {

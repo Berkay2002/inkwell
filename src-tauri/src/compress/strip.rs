@@ -335,37 +335,46 @@ impl Dests {
     /// The destination a name or string stands for, MuPDF's way (`pdf_lookup_dest`): in `/Dests` alone when the
     /// catalog has one, else in the `/Names` tree. `Some(None)`: the document does not define it. `None`: the key
     /// could not be put in a form to look up (not UTF-8, a NUL, a lossy decode) or the tree could not be read,
-    /// so it is not judged.
-    pub(crate) fn lookup(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
+    /// so it is not judged. `first`: the key is the link's own destination, which MuPDF's viewer turns into a URI and
+    /// back (see `viewer_key`); a value found in `/Dests` that is itself a name or string (a later hop) is looked up
+    /// as it is (`resolve_dest_rec`).
+    pub(crate) fn lookup(&self, key: &PdfObject, first: bool) -> Option<Option<PdfObject>> {
         let key = Self::key(key);
-        if self.old.is_some() { self.in_old(&key, false) } else { self.in_tree(&key) }
+        if self.old.is_some() { self.in_old(&key, false, first) } else { self.in_tree(&key) }
     }
 
     /// Like `lookup`, but a name that either source defines is found (the optimizer only keeps more: a viewer
     /// other than MuPDF may read the tree when there is a `/Dests` too).
     pub(crate) fn lookup_any(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
         let key = Self::key(key);
-        match (self.in_old(&key, true), self.in_tree(&key)) {
+        match (self.in_old(&key, true, true), self.in_tree(&key)) {
             (Some(Some(v)), _) | (_, Some(Some(v))) => Some(Some(v)),
             (Some(None), Some(None)) => Some(None),
             _ => None,
         }
     }
 
-    /// In the `/Dests` dictionary. A name is the key itself. A string goes by the key MuPDF's viewer forms from it
-    /// (`pdf_resolve_link_dest`: the decoded text through `pdf_new_text_string`, see `viewer_key`) and by that alone,
-    /// as MuPDF does: a key spelled with the string's own bytes is not looked at. `any` (the optimizer, which only
-    /// keeps more) also tries the string's own bytes (`pdf_dict_gets`), its text as a UTF-8 name and as
-    /// PDFDocEncoding bytes.
-    fn in_old(&self, key: &PdfObject, any: bool) -> Option<Option<PdfObject>> {
+    /// In the `/Dests` dictionary. A name is the key itself. On the first hop a string goes by the key MuPDF's viewer
+    /// forms from it (`pdf_resolve_link_dest`: the decoded text through `pdf_new_text_string`, see `viewer_key`) and
+    /// by that alone, as MuPDF does: a key spelled with the string's own bytes is not looked at. A later hop goes by
+    /// the string's own bytes as a C string (`pdf_dict_gets`). `any` (the optimizer, which only keeps more) tries
+    /// all of those, and the text as a UTF-8 name and as PDFDocEncoding bytes.
+    fn in_old(&self, key: &PdfObject, any: bool, first: bool) -> Option<Option<PdfObject>> {
         let Some(old) = &self.old else { return Some(None) };
         if key.is_name().ok()? {
             return Some(old.get_dict(key.share()).ok().flatten());
         }
         let bytes = key.as_bytes().ok()?;
+        let cut = &bytes[..bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len())];
+        if !any && !first {
+            return self.by_bytes(old, cut);
+        }
         if any {
             // a NUL makes the key unbuildable here, so it is not judged
             if let Some(v) = self.by_bytes(old, &bytes)? {
+                return Some(Some(v));
+            }
+            if let Some(v) = self.by_bytes(old, cut)? {
                 return Some(Some(v));
             }
         }
