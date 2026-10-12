@@ -236,12 +236,17 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
 - **Skipped, never forced**: a match Edit text refuses (Type 3, no ToUnicode, invisible text, vertical, encoding,
   clipping text), a match across two blocks, text in a form XObject or converted to outlines, a block the replacement
   would leave empty, and a block whose rewrite is refused (its text or a character no font can show) are left as they
-  are and listed as `{ page, text, reason: "skipped: …" }`; a block is rewritten whole or not at all. The first 200
+  are and listed as `{ page, text, reason: "skipped: …" }`; a block is rewritten whole or not at all. Two more
+  reasons are about the block text, which drops a hyphen at the end of a line ("well-" "known" reads "wellknown"):
+  a block holding one is left alone unless a match covers it (a rewrite would lose the hyphen), and a block whose
+  matches differ in number from Find's hits in it (a match across the hyphen, a whole word cut by the block's edge)
+  is left alone because the matches can't be placed. The first 200
   are listed, `skippedCount` counts all. Text on a hidden layer is not offered by Find and is not counted.
 - **Locked**: a certified document is refused ("This document is certified…", nothing recorded); a signed one is saved
   incrementally as Edit text is. A stale `rev` is `Stale`.
-- **Bounds**: at most 2,000 replacements and 20 seconds per run; past either it stops at a page boundary, keeps what
-  it did (still one step) and says so in `stopped`. Nothing is written when nothing was replaced.
+- **Bounds**: at most 2,000 replacements and 20 seconds per run; past either it stops between two blocks (the time
+  is only checked once something was replaced, so every run gets somewhere), keeps what it did (still one step) and
+  says so in `stopped`. Nothing is written when nothing was replaced.
 - **UI**: while Edit text is on, the Find bar has a second row: "Replace with", Replace, Replace all and the result
   ("5 replaced, 2 skipped", which opens the list of what was skipped, with its page and reason). Replace goes on to
   the next match. The controls say why they are off (certified document, no match, a comment or form hit selected).

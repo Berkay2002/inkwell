@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 pub const MAX_REPLACEMENTS: usize = 2000;
 /// Skipped matches listed with their reason; the rest are only counted.
 const MAX_LISTED: usize = 200;
-/// Time one run takes before it stops at a page boundary, like a long search is bounded.
+/// Time one run takes before it stops at the next block or page, like a long search is bounded.
 const BUDGET: Duration = Duration::from_secs(20);
 /// Longest replacement text.
 const MAX_WITH: usize = 1000;
@@ -108,6 +108,11 @@ fn short(s: &str, n: usize) -> String {
 /// Replaces `req.find` with `req.with` in the document (every match, or the one at `req.at`), as one
 /// undo step. `Stale` when the document has changed since the matches were listed at `rev`.
 pub fn replace(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, source: EditSource) -> Result<Replaced> {
+    replace_within(eng, doc, rev, req, source, BUDGET)
+}
+
+/// [`replace`] with the time it may take given (tests shorten it).
+pub fn replace_within(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, source: EditSource, budget: Duration) -> Result<Replaced> {
     let entry = eng.doc_entry(doc)?;
     let opts = SearchOpts { comments: false, bookmarks: false, fields: false, ..req.opts };
     let q = Query::new(&req.find, opts).ok_or_else(|| invalid("Type the text to find first."))?;
@@ -128,7 +133,7 @@ pub fn replace(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, source:
             return Err(EngineError::Stale);
         }
         crate::outline::refuse_if_certified(d, "Replacing its text")?;
-        let touched = run(d, &q, &req.with, req.at.as_ref(), &mut out)?;
+        let touched = run(d, &q, &req.with, req.at.as_ref(), &mut out, budget)?;
         Ok((!touched.is_empty()).then_some(touched))
     })?;
     Ok(Replaced {
@@ -142,29 +147,46 @@ pub fn replace(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, source:
     })
 }
 
+/// The time one run may take. It is only checked once something was replaced, so every run gets somewhere
+/// ("Replace all again to go on" is then true) and a document with nothing to replace is searched whole.
+struct Clock {
+    started: Instant,
+    budget: Duration,
+}
+
+impl Clock {
+    fn over(&self, out: &Outcome) -> bool {
+        out.replaced > 0 && self.started.elapsed() > self.budget
+    }
+}
+
 /// The pages replaced on (0-based).
-fn run(d: &mut PdfDocument, q: &Query, with: &str, at: Option<&ReplaceAt>, out: &mut Outcome) -> Result<Vec<u32>> {
+fn run(d: &mut PdfDocument, q: &Query, with: &str, at: Option<&ReplaceAt>, out: &mut Outcome, budget: Duration) -> Result<Vec<u32>> {
     let pages = d.page_count()?.max(0) as u32;
     let range = match at {
         Some(a) if a.page >= pages => return Err(EngineError::BadPage(a.page)),
         Some(a) => a.page..a.page + 1,
         None => 0..pages,
     };
-    let started = Instant::now();
+    let clock = Clock { started: Instant::now(), budget };
     let mut touched = Vec::new();
     for page in range {
         if out.stopped.is_some() {
             break;
         }
-        if started.elapsed() > BUDGET {
-            out.stopped = Some(format!("Stopped at page {} after {} seconds. Replace all again to go on.", page + 1, BUDGET.as_secs()));
+        if clock.over(out) {
+            out.stopped = Some(stopped_at(page, &clock));
             break;
         }
-        if replace_page(d, page, q, with, at, out)? {
+        if replace_page(d, page, q, with, at, out, &clock)? {
             touched.push(page);
         }
     }
     Ok(touched)
+}
+
+fn stopped_at(page: u32, clock: &Clock) -> String {
+    format!("Stopped at page {} after {} seconds. Replace all again to go on.", page + 1, clock.budget.as_secs())
 }
 
 /// The block (index) whose lines hold every rectangle of a find hit; none when it lies elsewhere or
@@ -194,7 +216,7 @@ fn loose(s: &[char]) -> Vec<char> {
 }
 
 /// Plans and applies the replacements of one page; true when its content changed.
-fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Option<&ReplaceAt>, out: &mut Outcome) -> Result<bool> {
+fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Option<&ReplaceAt>, out: &mut Outcome, clock: &Clock) -> Result<bool> {
     let pc = read_page(d, page)?;
     let blocks = group_blocks(&pc.lines);
     let m = page_space(d, page)?;
@@ -314,6 +336,11 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             spans.truncate(left);
         }
         if spans.is_empty() {
+            break;
+        }
+        // Each block is rewritten whole, so stopping between two is safe (every re-read costs the page's parse).
+        if clock.over(out) {
+            out.stopped = Some(stopped_at(page, clock));
             break;
         }
         changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, out);

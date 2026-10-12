@@ -1380,7 +1380,7 @@ fn a_rise_that_is_not_a_number_the_file_can_hold_is_no_rise() {
 
 // ---- Find & Replace ----------------------------------------------------------------------------
 
-use super::replace::{replace, ReplaceAt, ReplaceRequest, Replaced};
+use super::replace::{replace, replace_within, ReplaceAt, ReplaceRequest, Replaced};
 use crate::search::{Query, SearchOpts};
 
 /// A PDF from whole objects (numbered from 1; object 1 is the catalog).
@@ -1714,4 +1714,21 @@ fn a_whole_word_at_a_block_edge_that_find_does_not_list_is_left_alone() {
     let r = do_replace(&eng, id, &req("cat", "dog", whole)).unwrap();
     assert_eq!((r.replaced, r.skipped_count, rev(&eng, id)), (0, 1, before), "{r:?}");
     assert!(r.skipped[0].reason.contains("reads differently"), "{r:?}");
+}
+
+#[test]
+fn replace_all_stops_between_blocks_when_its_time_is_up() {
+    let d = dir("replace-budget");
+    let two = "BT /F1 12 Tf 72 700 Td (first cat) Tj ET\nBT /F1 12 Tf 72 500 Td (second cat) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[two]));
+    let r = req("cat", "dog", SearchOpts::default());
+    // No time at all: the block that was started is done (a run always gets somewhere), then it stops.
+    let first = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, std::time::Duration::ZERO).unwrap();
+    assert_eq!((first.replaced, first.skipped_count), (1, 0), "{first:?}");
+    assert!(first.stopped.as_deref().is_some_and(|s| s.starts_with("Stopped at page 1")), "{first:?}");
+    assert_eq!(all_text(&eng, id), "first cat second dog");
+    // The next run carries on with what is left.
+    let next = do_replace(&eng, id, &r).unwrap();
+    assert_eq!((next.replaced, next.stopped), (1, None));
+    assert_eq!(all_text(&eng, id), "first dog second dog");
 }
