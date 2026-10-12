@@ -576,20 +576,23 @@ pub(crate) fn locks_of(doc: &PdfDocument, entries: &[Entry]) -> Vec<Lock> {
 }
 
 fn locks_of_fields(entries: &[Entry]) -> Vec<Lock> {
-    per_field(entries)
-        .into_iter()
-        .filter(|e| e.kind == FieldKind::Signature)
-        .flat_map(|e| {
-            // A /V or /Lock that errors when read is not an absent one: it may hold a lock, so everything is locked.
-            if e.field.get_dict_inheritable("V").is_err() || e.field.get_dict("Lock").is_err() || e.obj.get_dict("Lock").is_err() {
-                return vec![Lock::All];
-            }
-            let Some(v) = geti(&e.field, "V").filter(|v| v.is_dict().unwrap_or(false)) else { return Vec::new() };
-            let mut locks = reference_locks(&v);
-            locks.extend(get(&e.field, "Lock").or_else(|| get(&e.obj, "Lock")).map(|l| lock_of(&l)));
-            locks
-        })
-        .collect()
+    let read = |o: &PdfObject, k: &str, inherit: bool| if inherit { o.get_dict_inheritable(k) } else { o.get_dict(k) };
+    per_field(entries).into_iter().filter(|e| e.kind == FieldKind::Signature).flat_map(|e| field_locks(e, &read)).collect()
+}
+
+/// What one signature field locks. `read(object, key, inherit)` reads an entry: an `Err` is an entry that could not be
+/// read, which is not an absent one (a seam for the test, which cannot make MuPDF fail on a real file).
+pub(crate) fn field_locks(e: &Entry, read: &dyn Fn(&PdfObject, &str, bool) -> std::result::Result<Option<PdfObject>, mupdf::Error>) -> Vec<Lock> {
+    // A /V that cannot be read may be a signature: everything is locked.
+    let Ok(v) = read(&e.field, "V", true) else { return vec![Lock::All] };
+    // Unsigned (no /V, or not a dictionary): a /Lock, readable or not, locks nothing.
+    let Some(v) = v.filter(|v| !v.is_null().unwrap_or(true) && v.is_dict().unwrap_or(false)) else { return Vec::new() };
+    // A /Lock that cannot be read may hold a lock: everything is locked.
+    let (Ok(field_lock), Ok(widget_lock)) = (read(&e.field, "Lock", false), read(&e.obj, "Lock", false)) else { return vec![Lock::All] };
+    let mut locks = reference_locks(&v);
+    let live = |l: Option<PdfObject>| l.filter(|l| !l.is_null().unwrap_or(true));
+    locks.extend(live(field_lock).or_else(|| live(widget_lock)).map(|l| lock_of(&l)));
+    locks
 }
 
 /// A script may not write to a signature widget, nor to a field a signature in the document covers.

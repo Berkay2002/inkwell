@@ -3299,3 +3299,32 @@ fn a_usage_rights_or_identity_reference_locks_no_field() {
         }
     }
 }
+
+#[test]
+fn a_field_that_cannot_be_read_locks_everything_only_when_it_may_be_a_signature() {
+    use mupdf::Error;
+    let (eng, id, _) = script_form("fieldmdp-unreadable-entries", &["Sum"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    let locks = |fail: &'static str| {
+        let read = move |o: &PdfObject, k: &str, inherit: bool| -> std::result::Result<Option<PdfObject>, Error> {
+            if k == fail {
+                return Err(Error::UnexpectedNullPtr);
+            }
+            if inherit { o.get_dict_inheritable(k) } else { o.get_dict(k) }
+        };
+        eng.read_custom(id, |d| {
+            let entries = scan(d)?;
+            let e = entries.iter().find(|e| e.name == "Sig").expect("a signature field");
+            Ok(scripts::field_locks(e, &read).len())
+        })
+        .unwrap()
+    };
+    // Unsigned: a /Lock that cannot be read locks nothing, a /V that cannot be read may be a signature.
+    assert_eq!(locks("Lock"), 0);
+    assert_eq!(locks("V"), 1);
+    // Signed (no lock of its own): a /Lock that cannot be read now may hold one.
+    sign(&eng, id, None, None);
+    assert_eq!(locks("Lock"), 1);
+    assert_eq!(locks("V"), 1);
+    assert_eq!(locks("Nothing"), 0, "a signature with no lock locks nothing when everything reads");
+}
