@@ -30,6 +30,16 @@ const MAX_WITH: usize = 1000;
 /// Slack when placing a find hit (MuPDF's character boxes) in a block's line boxes, in points.
 const SLACK: f32 = 3.0;
 
+/// Where a stopped run left off, for the next request's `from`: the page, and on it only the blocks before
+/// `upto` are still to do (blocks are replaced from the last to the first; none means all of the page).
+/// Pages before it are done: a replacement that holds the find text must not be replaced again.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceFrom {
+    pub page: u32,
+    pub upto: Option<u32>,
+}
+
 /// What one run may use: its time and its replacements (the defaults are the constants; tests shorten them).
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -61,6 +71,9 @@ pub struct ReplaceRequest {
     pub opts: SearchOpts,
     /// Replace only this match; none replaces every match in the document.
     pub at: Option<ReplaceAt>,
+    /// Go on from where a stopped run left off (`Replaced::resume`); only for a Replace all.
+    #[serde(default)]
+    pub from: Option<ReplaceFrom>,
 }
 
 /// A match that was left as it was.
@@ -83,6 +96,8 @@ pub struct Replaced {
     pub skipped_count: u32,
     /// Why the run ended before the end of the document (the cap or the time limit).
     pub stopped: Option<String>,
+    /// Where to go on from when it stopped: send it back as `from`.
+    pub resume: Option<ReplaceFrom>,
     /// Fonts used instead of a run's own, as Edit text reports them.
     pub fallbacks: Vec<Fallback>,
     /// How many times the find text occurs in the replacement itself: the next match is that many
@@ -96,6 +111,7 @@ struct Outcome {
     skipped: Vec<Skipped>,
     skipped_count: u32,
     stopped: Option<String>,
+    resume: Option<ReplaceFrom>,
     fallbacks: Vec<Fallback>,
 }
 
@@ -146,7 +162,7 @@ pub fn replace_within(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, 
             return Err(EngineError::Stale);
         }
         crate::outline::refuse_if_certified(d, "Replacing its text")?;
-        let touched = run(d, &q, &req.with, req.at.as_ref(), &mut out, limits)?;
+        let touched = run(d, &q, &req.with, req.at.as_ref(), req.from, inserted, &mut out, limits)?;
         Ok((!touched.is_empty()).then_some(touched))
     })?;
     Ok(Replaced {
@@ -155,6 +171,7 @@ pub fn replace_within(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, 
         skipped: out.skipped,
         skipped_count: out.skipped_count,
         stopped: out.stopped,
+        resume: out.resume,
         fallbacks: out.fallbacks,
         inserted,
     })
@@ -162,45 +179,53 @@ pub fn replace_within(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, 
 
 /// The time one run may take. It is only checked once something was replaced, so every run gets somewhere
 /// ("Replace all again to go on" is then true) and a document with nothing to replace is searched whole.
-struct Clock {
+struct Bounds {
     started: Instant,
     budget: Duration,
     max: usize,
+    /// How often the find text occurs in the replacement: a block it is replaced in again would grow.
+    inserted: u32,
 }
 
-impl Clock {
+impl Bounds {
     fn over(&self, out: &Outcome) -> bool {
         out.replaced > 0 && self.started.elapsed() > self.budget
     }
 }
 
 /// The pages replaced on (0-based).
-fn run(d: &mut PdfDocument, q: &Query, with: &str, at: Option<&ReplaceAt>, out: &mut Outcome, limits: Limits) -> Result<Vec<u32>> {
+#[allow(clippy::too_many_arguments)]
+fn run(d: &mut PdfDocument, q: &Query, with: &str, at: Option<&ReplaceAt>, from: Option<ReplaceFrom>, inserted: u32, out: &mut Outcome, limits: Limits) -> Result<Vec<u32>> {
     let pages = d.page_count()?.max(0) as u32;
-    let range = match at {
-        Some(a) if a.page >= pages => return Err(EngineError::BadPage(a.page)),
-        Some(a) => a.page..a.page + 1,
-        None => 0..pages,
+    let from = from.filter(|_| at.is_none());
+    let range = match (at, from) {
+        (Some(a), _) if a.page >= pages => return Err(EngineError::BadPage(a.page)),
+        (_, Some(f)) if f.page >= pages => return Err(EngineError::BadPage(f.page)),
+        (Some(a), _) => a.page..a.page + 1,
+        (None, Some(f)) => f.page..pages,
+        (None, None) => 0..pages,
     };
-    let clock = Clock { started: Instant::now(), budget: limits.budget, max: limits.max };
+    let bounds = Bounds { started: Instant::now(), budget: limits.budget, max: limits.max, inserted };
     let mut touched = Vec::new();
     for page in range {
         if out.stopped.is_some() {
             break;
         }
-        if clock.over(out) {
-            out.stopped = Some(stopped_at(page, &clock));
+        if bounds.over(out) {
+            out.stopped = Some(stopped_at(page, &bounds));
+            out.resume = Some(ReplaceFrom { page, upto: None });
             break;
         }
-        if replace_page(d, page, q, with, at, out, &clock)? {
+        let upto = from.filter(|f| f.page == page).and_then(|f| f.upto).map(|u| u as usize);
+        if replace_page(d, page, q, with, at, upto, out, &bounds)? {
             touched.push(page);
         }
     }
     Ok(touched)
 }
 
-fn stopped_at(page: u32, clock: &Clock) -> String {
-    format!("Stopped at page {} after {} seconds. Replace all again to go on.", page + 1, clock.budget.as_secs())
+fn stopped_at(page: u32, bounds: &Bounds) -> String {
+    format!("Stopped at page {} after {} seconds. Replace all again to go on.", page + 1, bounds.budget.as_secs())
 }
 
 /// The block (index) whose lines hold every rectangle of a find hit; none when it lies elsewhere or
@@ -230,12 +255,13 @@ fn loose(s: &[char]) -> Vec<char> {
 }
 
 /// Plans and applies the replacements of one page; true when its content changed.
-fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Option<&ReplaceAt>, out: &mut Outcome, clock: &Clock) -> Result<bool> {
+#[allow(clippy::too_many_arguments)]
+fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Option<&ReplaceAt>, upto: Option<usize>, out: &mut Outcome, bounds: &Bounds) -> Result<bool> {
     let pc = read_page(d, page)?;
     let blocks = group_blocks(&pc.lines);
     let m = page_space(d, page)?;
     let boxes: Vec<Vec<[f32; 4]>> = blocks.iter().map(|b| b.lines.iter().map(|&l| rect32(&m, pc.lines[l].rect)).collect()).collect();
-    let room = clock.max.saturating_sub(out.replaced as usize);
+    let room = bounds.max.saturating_sub(out.replaced as usize);
     let text: Vec<Vec<char>> = blocks.iter().map(joined).collect();
     let found: Vec<Vec<(usize, usize)>> = text
         .iter()
@@ -273,12 +299,13 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
     let mut plan: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
     match at {
         None => {
+            // On a page a run went on from, what is after `upto` was done (or listed) by the run before.
             for (i, h) in hits.iter().enumerate() {
-                if owners[i].is_none() {
+                if owners[i].is_none() && upto.is_none() {
                     out.skip(page, h.text.clone(), nowhere(h));
                 }
             }
-            for (bi, spans) in found.iter().enumerate() {
+            for (bi, spans) in found.iter().enumerate().take(upto.unwrap_or(usize::MAX)) {
                 match blocks[bi].issue {
                     Some(issue) => {
                         for &(a, z) in spans {
@@ -336,9 +363,14 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
     // From the last block to the first: an edit can only change the grouping of the lines after it.
     let mut changed = false;
     for (bi, mut spans) in plan.into_iter().rev() {
-        let left = clock.max.saturating_sub(out.replaced as usize);
-        if spans.len() > left {
-            out.stopped = Some(format!("Stopped after {} replacements. Search again to replace the rest.", clock.max));
+        let left = bounds.max.saturating_sub(out.replaced as usize);
+        let cut = spans.len() > left;
+        if cut {
+            out.stopped = Some(format!("Stopped after {} replacements. Replace all again to go on.", bounds.max));
+            // A block that is cut is only part replaced: where the replacement holds the find text a second run
+            // could not tell its own work from the document's, so it goes on after that block (Find lists the rest).
+            let from_here = if left > 0 && bounds.inserted > 0 { bi } else { bi + 1 };
+            out.resume = Some(ReplaceFrom { page, upto: Some(from_here as u32) });
             spans.truncate(left);
         }
         if spans.is_empty() {
@@ -350,14 +382,21 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             for &(s, e) in &spans {
                 out.skip(page, text[bi][s..=e].iter().collect(), "a hyphen at the end of a line in the block would be lost");
             }
+            if cut {
+                break;
+            }
             continue;
         }
         // Each block is rewritten whole, so stopping between two is safe (every re-read costs the page's parse).
-        if clock.over(out) {
-            out.stopped = Some(stopped_at(page, clock));
+        if bounds.over(out) {
+            out.stopped = Some(stopped_at(page, bounds));
+            out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32 + 1) });
             break;
         }
         changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, out);
+        if cut {
+            break;
+        }
     }
     Ok(changed)
 }

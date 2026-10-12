@@ -1380,7 +1380,7 @@ fn a_rise_that_is_not_a_number_the_file_can_hold_is_no_rise() {
 
 // ---- Find & Replace ----------------------------------------------------------------------------
 
-use super::replace::{replace, replace_within, Limits, ReplaceAt, ReplaceRequest, Replaced};
+use super::replace::{replace, replace_within, Limits, ReplaceAt, ReplaceFrom, ReplaceRequest, Replaced};
 use crate::search::{Query, SearchOpts};
 
 /// A PDF from whole objects (numbered from 1; object 1 is the catalog).
@@ -1428,7 +1428,7 @@ fn all_text(eng: &Engine, id: DocId) -> String {
 }
 
 fn req(find: &str, with: &str, opts: SearchOpts) -> ReplaceRequest {
-    ReplaceRequest { find: find.into(), with: with.into(), opts, at: None }
+    ReplaceRequest { find: find.into(), with: with.into(), opts, at: None, from: None }
 }
 
 fn do_replace(eng: &Engine, id: DocId, r: &ReplaceRequest) -> Result<Replaced> {
@@ -1749,4 +1749,42 @@ fn a_block_cut_by_the_cap_is_checked_for_hyphens_after_the_cut() {
     // With room for both, the match across the hyphen covers it and the block is replaced.
     let r = do_replace(&eng, id, &req("lk", "XX", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (2, 0), "{r:?}");
+}
+
+#[test]
+fn going_on_after_a_stop_replaces_each_match_once_even_when_the_replacement_holds_the_find_text() {
+    let d = dir("replace-resume");
+    let page0 = "BT /F1 12 Tf 72 700 Td (first cat) Tj ET\nBT /F1 12 Tf 72 500 Td (second cat) Tj ET";
+    let page1 = "BT /F1 12 Tf 72 700 Td (third cat) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page0, page1]));
+    let mut r = req("cat", "cats", SearchOpts::default());
+    let none = Limits { budget: std::time::Duration::ZERO, ..Limits::default() };
+    // No time: one block per run (the last first), then it says where to go on from.
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, none).unwrap();
+        assert_eq!(out.replaced, 1, "{out:?}");
+        seen.push(out.resume);
+        r.from = out.resume;
+    }
+    // Stopped on page 1 with a block to do, then at the start of page 2, then done.
+    assert_eq!(seen, vec![Some(ReplaceFrom { page: 0, upto: Some(1) }), Some(ReplaceFrom { page: 1, upto: None }), None]);
+    assert_eq!(all_text(&eng, id), "first cats second cats | third cats");
+}
+
+#[test]
+fn a_cap_stop_goes_on_after_the_block_it_cut_when_the_replacement_holds_the_find_text() {
+    let d = dir("replace-resume-cap");
+    let (eng, id, _) = open(&d, &pages_pdf(&["BT /F1 12 Tf 72 700 Td (cat cat cat) Tj ET\nBT /F1 12 Tf 72 500 Td (cat) Tj ET"]));
+    let mut r = req("cat", "cats", SearchOpts::default());
+    // Room for 2: the last block (one match) is done, the first is cut after one of its three.
+    let two = Limits { max: 2, ..Limits::default() };
+    let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, two).unwrap();
+    assert_eq!(out.replaced, 2, "{out:?}");
+    assert_eq!(out.resume, Some(ReplaceFrom { page: 0, upto: Some(0) }), "{out:?}");
+    // Going on from there leaves the cut block (Find lists what is left of it) and does nothing twice.
+    r.from = out.resume;
+    let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, Limits::default()).unwrap();
+    assert_eq!((out.replaced, out.resume), (0, None), "{out:?}");
+    assert_eq!(all_text(&eng, id), "cats cat cat cats");
 }
