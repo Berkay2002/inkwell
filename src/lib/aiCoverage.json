@@ -41,7 +41,7 @@
     "forms-import": "Overwrites form values from a file the user picks, and the assistant never handles file paths. Replacing the values a form holds is destructive: the user's decision.",
     "forms-layout": "Aligning, distributing, sizing, duplicating and renaming form fields is visual authoring in the Forms panel, field by field; the assistant fills fields and does not lay a form out.",
     "custom-stamps": "Opens the manager of the user's own stamp pictures, which are picked from files; the assistant never handles file paths, and a stamp is placed by clicking a spot on the page.",
-    "links": "Editing links is a per-link decision in the page view; the assistant opens the tool for the user (open_tool).",
+    "links": "Editing links is a per-link decision in the page view, and Remove All Links deletes every link in the document in one go (destructive): the user's decision. The assistant opens the tool for the user (open_tool).",
     "bookmarks": "Editing bookmarks is done on the outline in the page view; the assistant opens the tool for the user (open_tool).",
     "articles": "Article threads are drawn by hand on the page; the assistant opens the tool for the user (open_tool).",
     "output-preview": "A prepress preview of separations and ink limits that the user inspects by eye; the assistant opens the tool for the user (open_tool).",
