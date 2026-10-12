@@ -156,7 +156,7 @@ pub(crate) fn strip(doc: &mut PdfDocument, s: &Strip, pages: usize) -> Result<St
 
     // A name tree that cannot be read is not an empty one: every named link would look broken.
     let judge_bookmarks = s.invalid_bookmarks && !s.bookmarks;
-    let named = if s.invalid_links || judge_bookmarks { Dests::load(doc)? } else { None };
+    let named = if s.invalid_links || judge_bookmarks { Some(Dests::load(doc)?).filter(|d| !d.tree_unreadable()) } else { None };
     r.links_unchecked = s.invalid_links && named.is_none();
     if judge_bookmarks {
         match &named {
@@ -276,27 +276,30 @@ fn sweep(doc: &PdfDocument, s: &Strip, r: &mut StripReport) -> Result<(), Error>
 }
 
 /// Named destinations of the document: the catalog's `/Dests` dictionary (PDF 1.1) and the `/Names`
-/// tree. Loaded once per run.
+/// tree. Loaded once per run. MuPDF (`pdf_lookup_dest`) reads `/Dests` alone whenever the catalog has one and the
+/// tree only when it has not: `lookup` follows that, `lookup_any` finds a name in either.
 pub(crate) struct Dests {
+    /// The catalog's `/Dests`, whatever it is (a value that is not a dictionary finds nothing, as in MuPDF).
     old: Option<PdfObject>,
     tree: Option<PdfObject>,
+    /// The `/Names` tree is there but could not be read.
+    tree_unreadable: bool,
     /// The `/Dests` entries whose key is not UTF-8, by the key's bytes (a name object cannot be built from them).
     raw: std::collections::HashMap<Vec<u8>, PdfObject>,
 }
 
 impl Dests {
-    /// None when the `/Names` tree is there but cannot be read.
-    pub(crate) fn load(doc: &PdfDocument) -> Result<Option<Self>, Error> {
+    pub(crate) fn load(doc: &PdfDocument) -> Result<Self, Error> {
         let catalog = doc.catalog()?;
-        let old = catalog.get_dict("Dests")?.filter(|d| d.is_dict().unwrap_or(false));
+        let old = catalog.get_dict("Dests")?.filter(|d| !d.is_null().unwrap_or(false));
         let has_tree = catalog.get_dict("Names")?.and_then(|n| n.get_dict("Dests").ok().flatten()).is_some();
-        let tree = if has_tree {
+        let (tree, tree_unreadable) = if has_tree {
             match doc.load_name_tree(PdfObject::new_name("Dests")?) {
-                Ok(t) => Some(t),
-                Err(_) => return Ok(None),
+                Ok(t) => (Some(t), false),
+                Err(_) => (None, true),
             }
         } else {
-            None
+            (None, false)
         };
         let mut raw = std::collections::HashMap::new();
         if let Some(d) = &old {
@@ -309,48 +312,75 @@ impl Dests {
                 }
             }
         }
-        Ok(Some(Self { old, tree, raw }))
+        Ok(Self { old, tree, tree_unreadable, raw })
     }
 
-    /// The destination a name or string stands for. `Some(None)`: the document does not define it. `None`: the key
-    /// could not be put in a form to look up (not UTF-8, a NUL, a lossy decode), so it is not judged.
+    /// The `/Names` tree is there but could not be read.
+    pub(crate) fn tree_unreadable(&self) -> bool {
+        self.tree_unreadable
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_unreadable_tree() -> Self {
+        Self { old: None, tree: None, tree_unreadable: true, raw: Default::default() }
+    }
+
+    /// A name goes in as the object itself: its bytes need not be UTF-8 (`/caf#E9`) and MuPDF compares bytes.
+    /// Resolved first: a dictionary lookup by a reference finds nothing.
+    fn key(key: &PdfObject) -> PdfObject {
+        key.resolve().ok().flatten().unwrap_or_else(|| key.share())
+    }
+
+    /// The destination a name or string stands for, MuPDF's way (`pdf_lookup_dest`): in `/Dests` alone when the
+    /// catalog has one, else in the `/Names` tree. `Some(None)`: the document does not define it. `None`: the key
+    /// could not be put in a form to look up (not UTF-8, a NUL, a lossy decode) or the tree could not be read,
+    /// so it is not judged.
     pub(crate) fn lookup(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
-        // A name goes in as the object itself: its bytes need not be UTF-8 (`/caf#E9`) and MuPDF compares bytes.
-        // Resolved first: a dictionary lookup by a reference finds nothing.
-        let key = key.resolve().ok().flatten().unwrap_or_else(|| key.share());
-        let dicts = || [&self.tree, &self.old].into_iter().flatten();
+        let key = Self::key(key);
+        if self.old.is_some() { self.in_old(&key) } else { self.in_tree(&key, false) }
+    }
+
+    /// Like `lookup`, but a name that either source defines is found (the optimizer only keeps more: a viewer
+    /// other than MuPDF may read the tree when there is a `/Dests` too).
+    pub(crate) fn lookup_any(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
+        let key = Self::key(key);
+        match (self.in_old(&key), self.in_tree(&key, true)) {
+            (Some(Some(v)), _) | (_, Some(Some(v))) => Some(Some(v)),
+            (Some(None), Some(None)) => Some(None),
+            _ => None,
+        }
+    }
+
+    /// In the `/Dests` dictionary: by the name object, or by a string's own bytes (MuPDF `pdf_dict_gets`).
+    fn in_old(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
+        let Some(old) = &self.old else { return Some(None) };
         if key.is_name().ok()? {
-            return Some(dicts().find_map(|d| d.get_dict(key.share()).ok().flatten()));
+            return Some(old.get_dict(key.share()).ok().flatten());
         }
-        // A string: MuPDF keys the name tree by its decoded text (UTF-16, UTF-8 with or without a mark, else
-        // PDFDocEncoding), the old /Dests dictionary by the string's own bytes.
         let bytes = key.as_bytes().ok()?;
-        let text = mupdf_text(&bytes);
-        let mut clean = text.is_some();
-        if let Some(text) = &text {
-            match PdfObject::new_name(text) {
-                Ok(n) => {
-                    if let Some(v) = dicts().find_map(|d| d.get_dict(n.share()).ok().flatten()) {
-                        return Some(Some(v));
-                    }
-                }
-                Err(_) => clean = false,
-            }
-        }
-        // Only a UTF-8 key can be a name object; any other is in the index built at load.
         match std::str::from_utf8(&bytes) {
-            Ok(k) => match self.old.as_ref().map(|d| d.get_dict(k)) {
-                Some(Ok(Some(v))) => return Some(Some(v)),
-                Some(Err(_)) => clean = false,
-                _ => {}
-            },
-            Err(_) => {
-                if let Some(v) = self.raw.get(&bytes) {
-                    return Some(Some(v.share()));
-                }
-            }
+            // a NUL makes the key unbuildable here, so it is not judged
+            Ok(k) => old.get_dict(k).ok(),
+            Err(_) => Some(self.raw.get(&bytes).map(|v| v.share())),
         }
-        clean.then_some(None)
+    }
+
+    /// In the `/Names` tree: MuPDF keys it by a string's decoded text (UTF-16, UTF-8 with or without a mark, else
+    /// PDFDocEncoding) and looks a name up as "" (`pdf_to_text_string`), so a name finds nothing there. `names`:
+    /// a name object is tried as a key anyway (the optimizer keeps more).
+    // shortcut: an empty-string key in the tree is not matched by a name needle as MuPDF does, and the tree is
+    // searched whole (MuPDF skips direct kids and takes the first duplicate); upgrade if a case shows up.
+    fn in_tree(&self, key: &PdfObject, names: bool) -> Option<Option<PdfObject>> {
+        if self.tree_unreadable {
+            return None;
+        }
+        if key.is_name().ok()? {
+            let found = self.tree.as_ref().zip(names.then_some(key));
+            return Some(found.and_then(|(t, k)| t.get_dict(k.share()).ok().flatten()));
+        }
+        // a string with no faithful text is not judged, tree or no tree
+        let name = PdfObject::new_name(&mupdf_text(&key.as_bytes().ok()?)?).ok()?;
+        Some(self.tree.as_ref().and_then(|t| t.get_dict(name).ok().flatten()))
     }
 }
 
@@ -423,7 +453,7 @@ fn dest_ok(doc: &PdfDocument, d: &Dests, v: &PdfObject, pages: Option<i32>) -> b
         let next = if cur.is_dict().unwrap_or(false) {
             cur.get_dict("D").ok().flatten()
         } else if cur.is_name().unwrap_or(false) || cur.is_string().unwrap_or(false) {
-            match d.lookup(&cur) {
+            match d.lookup_any(&cur) {
                 Some(found) => found,
                 None => return true,
             }

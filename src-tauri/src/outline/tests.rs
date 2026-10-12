@@ -351,10 +351,10 @@ fn text_decoding_follows_the_pdf_encodings() {
     assert_eq!(decode_text(&[0x80, 0xA0, 0xE9]), "•€é");
 }
 
-/// The panel judges a named destination the way the compressor does: MuPDF's decode of the string, the `/Names`
-/// tree as well as `/Dests`, and a string it cannot decode faithfully is not called broken.
+/// The panel finds a named destination the way MuPDF does: its decode of the string in the `/Names` tree (a name
+/// object finds nothing there), and a name or string it cannot find or decode faithfully is not called broken.
 #[test]
-fn a_named_destination_is_judged_by_the_compressors_lookup() {
+fn a_named_destination_is_judged_the_way_mupdf_looks_it_up() {
     let d = dir("outline", "named_lookup");
     let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 7, chapter_every: 1, ..Default::default() });
     // (what the bookmark names, what the panel shows)
@@ -362,7 +362,7 @@ fn a_named_destination_is_judged_by_the_compressors_lookup() {
     let broken = |d: &Dest| matches!(d, Dest::Broken { .. });
     let other = |d: &Dest| matches!(d, Dest::Other { .. });
     let cases: [(&str, &dyn Fn(&Dest) -> bool); 7] = [
-        ("/chap", &page),           // a name object, found in the /Names tree (the old code looked in /Dests only)
+        ("/chap", &other),          // a name object: MuPDF looks it up in the tree as "" and misses, another viewer may find it
         ("<FEFF00E900E9>", &page),  // UTF-16BE, the key's own form
         ("<C3A9C3A9>", &page),      // UTF-8 with no mark: the tree's UTF-16 key is the same text
         ("<E9E9>", &page),          // PDFDocEncoding
@@ -393,6 +393,65 @@ fn a_named_destination_is_judged_by_the_compressors_lookup() {
     for (b, (name, expect)) in list(&eng, id).unwrap().items.iter().zip(cases) {
         assert!(expect(&b.dest), "{name}: {:?}", b.dest);
     }
+}
+
+/// With `/Dests` in the catalog MuPDF reads it alone and never the tree (`pdf_lookup_dest`); a name only the tree has
+/// is not found, but another viewer may follow it, so it is Other and not Broken.
+#[test]
+fn a_dests_dictionary_hides_the_names_tree_as_it_does_in_mupdf() {
+    let d = dir("outline", "dests_order");
+    let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 5, chapter_every: 1, ..Default::default() });
+    let ids: Vec<i32> = list(&eng, id).unwrap().items.iter().map(|b| b.id).collect();
+    // (what the bookmark names, the page the panel shows or None for Other / Broken)
+    let cases = [("/old", Some(0)), ("/both", Some(1)), ("(both)", Some(1)), ("(treeonly)", None), ("(gone)", None)];
+    assert_eq!(ids.len(), cases.len());
+    eng.apply_custom(id, "Name destinations".into(), EditSource::User, false, |d| {
+        let mut dests = d.new_dict()?;
+        dests.dict_put("old", dest_object(d, 0, None)?)?;
+        dests.dict_put("both", dest_object(d, 1, None)?)?;
+        d.catalog()?.dict_put("Dests", dests)?;
+        let mut arr = d.new_array()?;
+        for (key, page) in [("(both)", 2), ("(treeonly)", 3)] {
+            arr.array_push(d.new_object_from_str(key)?)?;
+            arr.array_push(dest_object(d, page, None)?)?;
+        }
+        let mut tree = d.new_dict()?;
+        tree.dict_put("Names", arr)?;
+        let mut names = d.new_dict()?;
+        names.dict_put("Dests", tree)?;
+        d.catalog()?.dict_put("Names", names)?;
+        let sh = walked(d)?.1;
+        for (item, (name, _)) in ids.iter().zip(cases) {
+            sh.obj(*item)?.dict_put("Dest", d.new_object_from_str(name)?)?;
+        }
+        Ok(Vec::new())
+    })
+    .unwrap();
+    let got: Vec<_> = list(&eng, id).unwrap().items.into_iter().map(|b| b.dest).collect();
+    for ((name, want), dest) in cases.iter().zip(&got) {
+        match (want, dest) {
+            (Some(p), Dest::Page { page, .. }) => assert_eq!(page, p, "{name}"),
+            (None, Dest::Broken { .. } | Dest::Other { .. }) => {}
+            _ => panic!("{name}: {dest:?}"),
+        }
+    }
+    assert!(matches!(got[3], Dest::Other { .. }), "only the tree has it: {:?}", got[3]);
+    assert!(matches!(got[4], Dest::Broken { .. }), "neither has it: {:?}", got[4]);
+}
+
+/// A name tree that cannot be read is not an empty one: no name is called broken.
+#[test]
+fn an_unreadable_names_tree_leaves_a_name_unjudged() {
+    let d = dir("outline", "unreadable_tree");
+    let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 1, ..Default::default() });
+    let other = eng
+        .read_custom(id, |d| {
+            let mut names = Names { dests: Some(Some(Dests::with_unreadable_tree())) };
+            let t = d.new_object_from_str("(x)")?;
+            Ok(dest_array(d, &mut names, &t).is_none())
+        })
+        .unwrap();
+    assert!(other);
 }
 
 #[test]
