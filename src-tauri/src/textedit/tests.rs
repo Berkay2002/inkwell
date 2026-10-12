@@ -1377,3 +1377,284 @@ fn a_rise_that_is_not_a_number_the_file_can_hold_is_no_rise() {
     let ts: Vec<f64> = ops.iter().filter(|o| o.is("Ts")).filter_map(|o| o.num(0)).collect();
     assert!(!ts.is_empty() && ts.iter().all(|v| v.is_finite() && v.abs() < 1e5), "{ts:?}");
 }
+
+// ---- Find & Replace ----------------------------------------------------------------------------
+
+use super::replace::{replace, ReplaceAt, ReplaceRequest, Replaced};
+use crate::search::{Query, SearchOpts};
+
+/// A PDF from whole objects (numbered from 1; object 1 is the catalog).
+fn raw_pdf(objs: &[String]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+/// Pages with the given contents, all with the same fonts (`F1` Helvetica, `F2` bold, objects 3 and 4); the
+/// page and content objects follow from 5, then `extra`.
+fn pages_pdf(contents: &[&str]) -> Vec<u8> {
+    let n = contents.len();
+    let kids: String = (0..n).map(|i| format!("{} 0 R ", 5 + i * 2)).collect();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {n} >>"),
+        HELV.to_string(),
+        HELV_BOLD.to_string(),
+    ];
+    // Objects 5..: page, content, page, content ...
+    for (i, c) in contents.iter().enumerate() {
+        objs.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {} 0 R >>",
+            6 + i * 2
+        ));
+        objs.push(format!("<< /Length {} >>\nstream\n{c}\nendstream", c.len()));
+    }
+    raw_pdf(&objs)
+}
+
+fn all_text(eng: &Engine, id: DocId) -> String {
+    let n = eng.edit_state(id).unwrap().page_count;
+    (0..n).map(|p| eng.page_text(id, p).unwrap().iter().map(|l| l.t.trim().to_string()).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join(" | ")
+}
+
+fn req(find: &str, with: &str, opts: SearchOpts) -> ReplaceRequest {
+    ReplaceRequest { find: find.into(), with: with.into(), opts, at: None }
+}
+
+fn do_replace(eng: &Engine, id: DocId, r: &ReplaceRequest) -> Result<Replaced> {
+    replace(eng, id, rev(eng, id), r, EditSource::User)
+}
+
+const CATS: &str = "BT /F1 12 Tf 72 700 Td (The cat and the Cat sat by a concat.) Tj ET";
+
+#[test]
+fn replace_all_is_one_undo_step_across_pages_and_survives_save() {
+    let d = dir("replace-all");
+    let bytes = pages_pdf(&[CATS, "BT /F1 12 Tf 72 700 Td (A cat on page two.) Tj ET\nBT /F1 12 Tf 72 600 Td (Second cat block) Tj ET"]);
+    let (eng, id, path) = open(&d, &bytes);
+    let before = all_text(&eng, id);
+    let r = do_replace(&eng, id, &req("cat", "dog", SearchOpts::default())).unwrap();
+    // Case-insensitive, parts of words too: cat, Cat, concat, cat, cat.
+    assert_eq!((r.replaced, r.skipped_count, r.stopped.as_deref()), (5, 0, None), "{r:?}");
+    assert_eq!(r.state.undo.as_deref(), Some("Replace \"cat\" with \"dog\""));
+    assert_eq!(all_text(&eng, id), "The dog and the dog sat by a condog. | A dog on page two. Second dog block");
+    // One undo restores both pages.
+    let u = eng.undo(id).unwrap();
+    assert_eq!(all_text(&eng, id), before, "{u:?}");
+    eng.redo(id).unwrap();
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert_eq!(all_text(&eng, id), "The dog and the dog sat by a condog. | A dog on page two. Second dog block");
+}
+
+#[test]
+fn replace_follows_case_and_whole_word_options() {
+    let d = dir("replace-opts");
+    let (eng, id, _) = open(&d, &pages_pdf(&[CATS]));
+    let case = SearchOpts { case_sensitive: true, ..Default::default() };
+    let r = do_replace(&eng, id, &req("cat", "dog", case)).unwrap();
+    // "cat" lower case, also inside "concat"; not "Cat".
+    assert_eq!(r.replaced, 2, "{r:?}");
+    assert_eq!(all_text(&eng, id), "The dog and the Cat sat by a condog.");
+    eng.undo(id).unwrap();
+    let whole = SearchOpts { whole_words: true, ..Default::default() };
+    let r = do_replace(&eng, id, &req("cat", "dog", whole)).unwrap();
+    assert_eq!(r.replaced, 2, "{r:?}");
+    assert_eq!(all_text(&eng, id), "The dog and the dog sat by a concat.");
+}
+
+#[test]
+fn a_replacement_that_contains_the_find_text_is_set_once() {
+    let d = dir("replace-self");
+    let (eng, id, _) = open(&d, &pages_pdf(&["BT /F1 12 Tf 72 700 Td (a cat, a cat) Tj ET"]));
+    let r = do_replace(&eng, id, &req("cat", "cat cat", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.inserted), (2, 2));
+    assert_eq!(all_text(&eng, id), "a cat cat, a cat cat");
+    // A second run replaces what the first one wrote, once more each.
+    let r = do_replace(&eng, id, &req("a", "aa", SearchOpts::default())).unwrap();
+    assert_eq!(all_text(&eng, id), "aa caat caat, aa caat caat", "{r:?}");
+}
+
+#[test]
+fn replace_one_changes_only_the_current_match() {
+    let d = dir("replace-one");
+    let (eng, id, path) = open(&d, &pages_pdf(&["BT /F1 12 Tf 72 700 Td (red fox and red hen) Tj ET\nBT /F1 12 Tf 72 600 Td (another red one) Tj ET"]));
+    let q = Query::new("red", SearchOpts::default()).unwrap();
+    let hits = eng.read_custom(id, |d| crate::search::find_in_page(d, 0, &q)).unwrap();
+    assert_eq!(hits.len(), 3);
+    for pick in [1usize, 2] {
+        // The second and third match; the list is as it is now (each replacement is one step).
+        let hits = eng.read_custom(id, |d| crate::search::find_in_page(d, 0, &q)).unwrap();
+        let at = ReplaceAt { page: 0, rect: hits[pick.min(hits.len() - 1)].rects[0] };
+        let r = do_replace(&eng, id, &ReplaceRequest { at: Some(at), ..req("red", "blue", SearchOpts::default()) }).unwrap();
+        assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+        assert_eq!(r.state.undo.as_deref(), Some("Replace text on p. 1"));
+        if pick == 1 {
+            assert_eq!(all_text(&eng, id), "red fox and blue hen another red one");
+        }
+    }
+    // After the second replacement the list is [red, red]; picking index 1 again hit the last one.
+    assert_eq!(all_text(&eng, id), "red fox and blue hen another blue one");
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert_eq!(all_text(&eng, id), "red fox and blue hen another blue one");
+}
+
+#[test]
+fn a_match_across_runs_takes_the_style_of_the_run_it_starts_in() {
+    let d = dir("replace-runs");
+    let (eng, id, _) = open(&d, &pages_pdf(&[MIXED]));
+    // "and bold" starts in the regular run and ends in the bold one.
+    let r = do_replace(&eng, id, &req("and bold", "plus", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(b.text, "Worlds plus words");
+    let fonts: Vec<(&str, &str)> = b.runs.iter().map(|r| (r.text.as_str(), r.font.as_str())).collect();
+    // The text between the two halves is one style again, so it is one run.
+    assert_eq!(fonts, [("Worlds plus words", "Helvetica")], "{fonts:?}");
+    // A match inside the bold run only changes that run.
+    eng.undo(id).unwrap();
+    do_replace(&eng, id, &req("bold", "heavy", SearchOpts::default())).unwrap();
+    let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    let fonts: Vec<(&str, &str)> = b.runs.iter().map(|r| (r.text.as_str(), r.font.as_str())).collect();
+    assert_eq!(fonts, [("Worlds and ", "Helvetica"), ("heavy", "Helvetica-Bold"), (" words", "Helvetica")]);
+}
+
+#[test]
+fn matches_edit_text_refuses_are_skipped_with_their_reason_and_page() {
+    let d = dir("replace-skips");
+    let type3 = "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] \
+                 /CharProcs << /a 7 0 R >> /Encoding << /Type /Encoding /Differences [97 /a] >> /FirstChar 97 /LastChar 97 /Widths [1000] >>";
+    let glyph = "<< /Length 28 >>\nstream\n1000 0 d0 0 0 1000 1000 re f\nendstream".to_string();
+    // Page 1: one editable "aaa x" block and a Type 3 "aaa"; page 2: invisible OCR text "aaa".
+    let c1 = "BT /F1 12 Tf 72 700 Td (aaa x) Tj ET\nBT /F3 20 Tf 72 500 Td (aaa) Tj ET";
+    let c2 = "BT /F1 12 Tf 3 Tr 72 500 Td (aaa hidden) Tj ET";
+    // Objects: 1-4 catalog, pages, fonts; 5-8 the two pages and their contents; 9 the glyph; 10 the Type 3 font.
+    let mut objs = pages_pdf_objs(&[c1, c2]);
+    objs[4] = objs[4].replace("/F2 4 0 R", "/F2 4 0 R /F3 10 0 R");
+    objs.push(glyph);
+    objs.push(type3.replace("/a 7 0 R", "/a 9 0 R"));
+    let (eng, id, _) = open(&d, &raw_pdf(&objs));
+    let r = do_replace(&eng, id, &req("aaa", "bbb", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    assert_eq!(r.skipped_count, 2, "{r:?}");
+    let by_page: Vec<(u32, bool)> = r.skipped.iter().map(|s| (s.page, s.reason.starts_with("skipped: "))).collect();
+    assert_eq!(by_page, [(0, true), (1, true)], "{r:?}");
+    assert!(r.skipped[0].reason.contains("Type 3"), "{:?}", r.skipped[0]);
+    assert!(r.skipped[1].reason.contains("invisible"), "{:?}", r.skipped[1]);
+    // The editable block changed, nothing else did.
+    assert!(all_text(&eng, id).starts_with("bbb x"), "{}", all_text(&eng, id));
+    // A run that only meets refused text is no step at all.
+    let before = rev(&eng, id);
+    let r = do_replace(&eng, id, &req("hidden", "shown", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count, rev(&eng, id)), (0, 1, before));
+}
+
+/// The objects of `pages_pdf`, for tests that add to them.
+fn pages_pdf_objs(contents: &[&str]) -> Vec<String> {
+    let bytes = pages_pdf(contents);
+    let s = String::from_utf8(bytes).unwrap();
+    let mut objs = Vec::new();
+    let mut rest = s.as_str();
+    while let Some(i) = rest.find(" 0 obj\n") {
+        let after = &rest[i + 7..];
+        let end = after.find("\nendobj\n").unwrap();
+        objs.push(after[..end].to_string());
+        rest = &after[end + 8..];
+    }
+    objs
+}
+
+#[test]
+fn a_match_across_two_blocks_and_one_in_a_form_are_skipped() {
+    let d = dir("replace-across");
+    let form = "<< /Type /XObject /Subtype /Form /BBox [0 0 200 50] /Resources << /Font << /F1 3 0 R >> >> /Length 40 >>\nstream\nBT /F1 12 Tf 10 10 Td (stamp over) Tj ET\nendstream".to_string();
+    let c = "BT /F1 12 Tf 72 700 Td (the first over) Tj ET\nBT /F1 12 Tf 72 500 Td (over the second) Tj ET\nq 1 0 0 1 72 300 cm /Fm1 Do Q";
+    let mut objs = pages_pdf_objs(&[c]);
+    // Object 7 is the form: the page's content is 6, the next free number after the page (5) and content (6).
+    objs[4] = objs[4].replace("/F2 4 0 R >>", "/F2 4 0 R >> /XObject << /Fm1 7 0 R >>");
+    objs.push(form);
+    let (eng, id, _) = open(&d, &raw_pdf(&objs));
+    // The two matches in the page's own blocks are replaced; the one in the form is not (shared by pages).
+    let r = do_replace(&eng, id, &req("over", "OVER", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 2, "{r:?}");
+    assert_eq!(r.skipped_count, 1, "{r:?}");
+    assert!(r.skipped[0].reason.contains("form"), "{:?}", r.skipped);
+    let r = do_replace(&eng, id, &req("over over", "x", SearchOpts::default())).unwrap();
+    // "first OVER" and "OVER the second" now read "OVER OVER" across the gap: in no one block.
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    assert!(r.skipped[0].reason.contains("two text blocks"), "{:?}", r.skipped);
+    assert!(all_text(&eng, id).contains("the first OVER") && all_text(&eng, id).contains("OVER the second"));
+}
+
+#[test]
+fn a_certified_document_is_refused_and_a_signed_one_is_saved_after_the_signature() {
+    let d = dir("replace-certified");
+    let (eng, id, _) = open(&d, &pdf_in("BT /F1 12 Tf 72 700 Td (Hello Hello) Tj ET", &[("F1", HELV)], &[], CERTIFIED));
+    let before = rev(&eng, id);
+    match do_replace(&eng, id, &req("Hello", "Bye", SearchOpts::default())) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(rev(&eng, id), before, "nothing was recorded");
+    assert!(text(&eng, id).contains("Hello Hello"));
+
+    let d = dir("replace-signed");
+    let catalog = "/AcroForm << /SigFlags 3 /Fields [6 0 R] >>";
+    let (eng, id, path) = open(&d, &pdf_in("BT /F1 12 Tf 72 700 Td (Hello Hello) Tj ET", &[("F1", HELV)], &[SIG_FIELD], catalog));
+    let original = std::fs::read(&path).unwrap();
+    let r = do_replace(&eng, id, &req("Hello", "Bye", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 2);
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the signed bytes are not rewritten");
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert_eq!(text(&eng, id), "Bye Bye");
+}
+
+#[test]
+fn an_empty_find_and_a_replacement_with_a_line_break_are_refused() {
+    let d = dir("replace-refused");
+    let (eng, id, _) = open(&d, &pages_pdf(&[CATS]));
+    let before = rev(&eng, id);
+    for r in [req("", "x", SearchOpts::default()), req("   ", "x", SearchOpts::default()), req("cat", "a\nb", SearchOpts::default())] {
+        assert!(matches!(do_replace(&eng, id, &r), Err(EngineError::Invalid(_))), "{r:?}");
+    }
+    // A stale rev is refused like any text edit.
+    assert!(matches!(replace(&eng, id, before + 7, &req("cat", "x", SearchOpts::default()), EditSource::User), Err(EngineError::Stale)));
+    assert_eq!(rev(&eng, id), before);
+    // Replacing with nothing deletes the match; a block it would empty is left alone and listed.
+    let r = do_replace(&eng, id, &req(" and the cat", "", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1);
+    let r = do_replace(&eng, id, &req("The cat sat by a concat.", "", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+}
+
+#[test]
+fn replace_one_on_a_rotated_page_finds_its_block() {
+    let d = dir("replace-rotated");
+    let bytes = String::from_utf8(pages_pdf(&["BT /F1 12 Tf 72 700 Td (north east north) Tj ET"]))
+        .unwrap()
+        .replace("/MediaBox [0 0 612 792]", "/MediaBox [0 0 612 792] /Rotate 90");
+    let (eng, id, _) = open(&d, bytes.as_bytes());
+    let q = Query::new("north", SearchOpts::default()).unwrap();
+    let hits = eng.read_custom(id, |d| crate::search::find_in_page(d, 0, &q)).unwrap();
+    assert_eq!(hits.len(), 2);
+    let at = ReplaceAt { page: 0, rect: hits[1].rects[0] };
+    let r = do_replace(&eng, id, &ReplaceRequest { at: Some(at), ..req("north", "south", SearchOpts::default()) }).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    assert_eq!(all_text(&eng, id), "north east south");
+}

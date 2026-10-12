@@ -560,6 +560,12 @@ pub fn find_in_page(doc: &Document, page: u32, q: &Query) -> Result<Vec<Hit>> {
     Ok(extract_record(doc, page, q.opts.comments || q.opts.fields)?.find(q))
 }
 
+/// Where `q` matches in plain `text`, as inclusive character offsets (first, last), at most `limit`: what a
+/// replace edits. The same matcher as a find, so case and whole words mean the same.
+pub fn find_spans(text: &str, q: &Query, limit: usize) -> Vec<(usize, usize)> {
+    PageChars::of_text(text).spans(q, false, limit)
+}
+
 /// The hits of a bookmark title that goes to `page`.
 pub fn bookmark_hits_of(page: u32, title: &str, q: &Query) -> Vec<(u32, Hit)> {
     PageChars::of_text(title).find(q, Source::Bookmark).into_iter().map(|h| (page, h)).collect()

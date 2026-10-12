@@ -12,6 +12,7 @@ pub(crate) mod content;
 pub(crate) mod encodings;
 mod font;
 mod layout;
+pub mod replace;
 pub(crate) mod text;
 
 pub use text::{Align, Fallback, Issue, Rise, RunChange, TextChange};

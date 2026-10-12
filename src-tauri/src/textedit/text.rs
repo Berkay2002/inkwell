@@ -1287,9 +1287,18 @@ fn fill_ops(color: Option<[f64; 3]>, own: &[Op]) -> Result<Vec<Op>> {
 
 /// Rewrites block `index` of page `page` with `change`. Returns the fallback fonts used.
 pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &TextChange) -> Result<Vec<Fallback>> {
+    rewrite_block_expecting(doc, page, index, change, None)
+}
+
+/// [`rewrite_block`] that refuses when the block at `index` no longer reads `expect` (a batch of
+/// edits on one page, planned from one reading: Find & Replace).
+pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, change: &TextChange, expect: Option<&str>) -> Result<Vec<Fallback>> {
     let pc = read_page(doc, page)?;
     let blocks = group_blocks(&pc.lines);
     let b = blocks.get(index).cloned().ok_or_else(|| invalid(format!("page {} has no text block {}", page + 1, index + 1)))?;
+    if expect.is_some_and(|t| t != b.text) {
+        return Err(invalid("the text changed while it was being replaced"));
+    }
     if let Some(issue) = b.issue {
         return Err(invalid(format!("this text can't be edited: {}", issue_text(issue))));
     }
