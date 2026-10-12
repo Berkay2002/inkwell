@@ -387,3 +387,34 @@ fn a_password_field_is_never_written_to_a_file_or_filled_from_one() {
     assert_eq!(skipped(&r.summary, "Secret"), "password field");
     assert_eq!(dto(&eng, id, "Secret")[0].value, "hunter2");
 }
+
+#[test]
+fn a_value_over_1_mb_is_left_out_and_counted_on_export_and_named_on_import() {
+    let (eng, id, _) = form("long-value");
+    set(&eng, id, "Full name", text(&"x".repeat(MAX_STR + 1)));
+    set(&eng, id, "Address.Street", text("Main St"));
+    for fmt in [Format::Json, Format::Xfdf, Format::Fdf] {
+        let (bytes, done) = export(&eng, id, fmt, "a.pdf").unwrap();
+        assert_eq!(done.long_text, 1, "{fmt:?}");
+        // What was written is a file Inkwell reads back, with the short value in it.
+        let p = parse(&bytes).unwrap();
+        assert!(p.fields.iter().any(|(n, v)| n == "Address.Street" && *v == Val::Text("Main St".into())), "{fmt:?}");
+    }
+    // An FDF that carries one says why it was not taken, not that the field takes text only.
+    let long = "y".repeat(MAX_STR + 1);
+    let fdf = format!("%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [ << /T (Full name) /V ({long}) >> ] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    let r = import_one(&eng, id, &parse(fdf.as_bytes()).unwrap(), EditSource::User).unwrap();
+    assert_eq!(skipped(&r.summary, "Full name"), "the value is longer than 1 MB");
+}
+
+#[test]
+fn one_indirect_value_over_1_mb_shared_by_many_fields_is_dropped_by_each_and_not_copied() {
+    let long = "z".repeat(2 << 20);
+    let n = 200;
+    let fields: String = (0..n).map(|i| format!("<< /T (F{i}) /V 2 0 R >> ")).collect();
+    let fdf = format!("%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [ {fields}] >> >>\nendobj\n2 0 obj\n({long})\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    // 400 MB if each field took its own copy: the file is read, not refused, and no field holds the text.
+    let p = parse(fdf.as_bytes()).unwrap();
+    assert_eq!(p.fields.len(), n);
+    assert!(p.fields.iter().all(|(_, v)| *v == Val::Invalid("the value is longer than 1 MB")));
+}

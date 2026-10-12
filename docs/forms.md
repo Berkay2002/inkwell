@@ -145,7 +145,7 @@ export follows the file name (`.fdf`, `.json`, anything else XFDF); an import is
   reason, never a failure of the whole import): a name that is not a field, a value the field cannot take (a choice that
   is not in the list, an on/off for a text field, a list for a text field), a read-only field, a field a signature
   locks, a password text field (its value is never exported either: the export says how many were left out), a field
-  name over 1 MB, and anything past 10 000 fields in one file. The summary shows a skipped name by its first 60
+  name over 1 MB, a value over 1 MB (the export leaves such a field out and says how many, so what it writes can be read back and no import clears the field), and anything past 10 000 fields in one file. The summary shows a skipped name by its first 60
   characters. A script's alerts, links, submits and print requests during the import are dropped, not acted on.
 - **The document's own field scripts do run** on an import (keystroke, validate, calculate, format), as they do when a
   person types: the same path, so an import cannot put a value in that typing it would refuse. This is deliberate. The

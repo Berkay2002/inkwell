@@ -38,12 +38,15 @@ fn is_password(e: &Entry) -> bool {
     e.kind == FieldKind::Text && flag(field_ff(e), FieldFlags::PASSWORD)
 }
 
-/// The fields with a value, and how many password fields were left out.
-fn collect(doc: &PdfDocument) -> Result<(Vec<Out>, usize)> {
+/// The fields with a value, how many password fields were left out, and how many fields were left out for a value over
+/// 1 MB (a file Inkwell reads cannot hold one: XFDF refuses the whole file, and an import that read it as empty would
+/// clear the field).
+fn collect(doc: &PdfDocument) -> Result<(Vec<Out>, usize, usize)> {
     let entries = scan(doc)?;
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     let mut passwords = 0;
+    let mut long_text = 0;
     for e in per_field(&entries) {
         if matches!(e.kind, FieldKind::Button | FieldKind::Signature) || e.name.is_empty() || !seen.insert(e.name.clone()) {
             continue;
@@ -53,6 +56,10 @@ fn collect(doc: &PdfDocument) -> Result<(Vec<Out>, usize)> {
             continue;
         }
         let mut values: Vec<String> = values_of(geti(&e.field, "V"));
+        if values.iter().any(|v| v.len() > MAX_STR) {
+            long_text += 1;
+            continue;
+        }
         if matches!(e.kind, FieldKind::Checkbox | FieldKind::Radio) {
             // A box that has no /V but shows an on-state (the appearance state of one of its widgets).
             if values.first().is_none_or(|v| v.is_empty()) {
@@ -62,7 +69,7 @@ fn collect(doc: &PdfDocument) -> Result<(Vec<Out>, usize)> {
         }
         out.push(Out { name: e.name.clone(), kind: e.kind, values, multi: e.kind == FieldKind::List && flag(field_ff(e), FieldFlags::MULTI_SELECT) });
     }
-    Ok((out, passwords))
+    Ok((out, passwords, long_text))
 }
 
 fn json(fields: &[Out]) -> String {
@@ -177,17 +184,19 @@ pub struct Exported {
     pub count: usize,
     /// Password fields: their values are never written to a file.
     pub left_out: usize,
+    /// Fields left out for a value over 1 MB, which a file Inkwell reads cannot hold.
+    pub long_text: usize,
 }
 
 /// The file bytes for every field's value. Read-only: allowed on a signed or certified document.
 pub fn export(eng: &Engine, doc: DocId, format: Format, file_name: &str) -> Result<(Vec<u8>, Exported)> {
-    let (fields, left_out) = eng.read_custom(doc, collect)?;
+    let (fields, left_out, long_text) = eng.read_custom(doc, collect)?;
     let bytes = match format {
         Format::Json => json(&fields).into_bytes(),
         Format::Fdf => fdf(&fields, file_name),
         Format::Xfdf => xfdf(&fields, file_name).into_bytes(),
     };
-    Ok((bytes, Exported { count: fields.len(), left_out }))
+    Ok((bytes, Exported { count: fields.len(), left_out, long_text }))
 }
 
 // ---- parsing the files ---------------------------------------------------------------------------
@@ -336,12 +345,19 @@ pub fn parse_xfdf(bytes: &[u8]) -> Result<Parsed> {
 
 /// An FDF `/V`. Every string copied is charged to `b` (one object can be referred to from many fields).
 fn fdf_value(v: &PdfObject, b: &Budget) -> Val {
+    // A string over 1 MB is dropped, and the summary says that is why.
+    let long = std::cell::Cell::new(false);
     let one = |o: &PdfObject| -> Option<String> {
         if b.gone() {
             return None;
         }
         // An indirect string is read once; each use is a clone and is charged.
         let object = if o.is_indirect().unwrap_or(false) { o.as_indirect().ok() } else { None };
+        // One over the limit, shared by many fields, is dropped by each of them: never copied again.
+        if object.and_then(|n| b.string_len_of(n)).is_some_and(|n| n > MAX_STR) {
+            long.set(true);
+            return None;
+        }
         let s = match object.and_then(|n| b.string_of(n)) {
             Some(s) => Some(s),
             None => {
@@ -351,28 +367,39 @@ fn fdf_value(v: &PdfObject, b: &Budget) -> Val {
                     text(o)
                 };
                 if let (Some(n), Some(s)) = (object, &s) {
-                    b.keep_string(n, s);
+                    // Over the limit it is dropped below, so only its length is kept.
+                    if s.len() > MAX_STR {
+                        b.keep_long(n, s.len());
+                    } else {
+                        b.keep_string(n, s);
+                    }
                 }
                 s
             }
         };
+        // Dropped before it is charged, so it does not use up the budget of the other values.
+        if s.as_ref().is_some_and(|s| s.len() > MAX_STR) {
+            long.set(true);
+            return None;
+        }
         if !b.take(s.as_ref().map_or(0, String::len)) {
             return None;
         }
-        s.filter(|s| s.len() <= MAX_STR)
+        s
     };
+    const TOO_LONG: &str = "the value is longer than 1 MB";
     if v.is_array().unwrap_or(false) {
         let n = v.len().unwrap_or(0);
         if n > MAX_ITEMS {
             return Val::Invalid("a list of more than 10 000 values");
         }
         let all: Option<Vec<String>> = (0..n as i32).map(|i| v.get_array(i).ok().flatten().and_then(|x| one(&x))).collect();
-        return all.map_or(Val::Invalid("a list takes text values only"), Val::Many);
+        return all.map_or(Val::Invalid(if long.get() { TOO_LONG } else { "a list takes text values only" }), Val::Many);
     }
     if v.is_bool().unwrap_or(false) {
         return v.as_bool().map_or(Val::Invalid("not a value"), Val::Bool);
     }
-    one(v).map_or(Val::Invalid("a field takes text, a list of text or on/off"), Val::Text)
+    one(v).map_or(Val::Invalid(if long.get() { TOO_LONG } else { "a field takes text, a list of text or on/off" }), Val::Text)
 }
 
 #[cfg(test)]

@@ -53,6 +53,7 @@ describe("summary texts", () => {
     expect(commentsExportText({ count: 3, leftOut: 0, longText: 2 }, "a.xfdf")).toBe("Exported 3 comments to a.xfdf. 2 texts longer than 1 MB left empty.");
     expect(formExportText({ count: 4 }, "a.fdf")).toBe("Exported 4 fields to a.fdf.");
     expect(formExportText({ count: 4, leftOut: 1 }, "a.fdf")).toBe("Exported 4 fields to a.fdf. 1 password field left out.");
+    expect(formExportText({ count: 4, leftOut: 0, longText: 2 }, "a.fdf")).toBe("Exported 4 fields to a.fdf. 2 fields with a value over 1 MB left out.");
   });
 });
 

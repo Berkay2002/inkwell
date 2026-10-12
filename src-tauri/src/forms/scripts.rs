@@ -507,7 +507,8 @@ pub(crate) enum Lock {
 /// The names in a `/Lock /Fields` array, and whether all of them were read (the array is there, holds at most 4096
 /// entries, and each is a name or string).
 fn lock_names(lock: &PdfObject) -> (Vec<String>, bool) {
-    let Some(a) = get(lock, "Fields") else { return (Vec::new(), false) };
+    // Not an array (`/Fields (Sum)`): the names it meant are unknown, so the lock is not read in full.
+    let Some(a) = get(lock, "Fields").filter(|a| a.is_array().unwrap_or(false)) else { return (Vec::new(), false) };
     let len = a.len().unwrap_or(0);
     let names: Vec<String> = (0..len.min(4096) as i32).filter_map(|i| a.get_array(i).ok().flatten().as_ref().and_then(text)).collect();
     let complete = len <= 4096 && names.len() == len;
@@ -534,9 +535,18 @@ fn reference_locks(v: &PdfObject) -> Vec<Lock> {
         return vec![Lock::All];
     }
     let Some(refs) = get(v, "Reference") else { return Vec::new() };
+    // Neither an array nor a dictionary: what it meant to say is unknown.
+    if !refs.is_array().unwrap_or(false) && !refs.is_dict().unwrap_or(false) {
+        return vec![Lock::All];
+    }
     // One dictionary stands for the one entry it would be (as `outline::certified` reads it).
     let single = refs.is_dict().unwrap_or(false);
-    (0..if single { 1 } else { refs.len().unwrap_or(0).min(16) as i32 })
+    let len = if single { 1 } else { refs.len().unwrap_or(0) };
+    // Entries past the 16 read may hold a lock: it locks everything.
+    if len > 16 {
+        return vec![Lock::All];
+    }
+    (0..len as i32)
         .filter_map(|i| {
             let r = match if single { Ok(Some(refs.clone())) } else { refs.get_array(i) } {
                 Ok(r) => r?,
@@ -546,7 +556,10 @@ fn reference_locks(v: &PdfObject) -> Vec<Lock> {
                 // A FieldMDP that names no parameters says nothing about which fields: all of them.
                 Some("FieldMDP") => Some(get(&r, "TransformParams").map_or(Lock::All, |p| lock_of(&p))),
                 Some("DocMDP") if int_of(&get(&r, "TransformParams")?, "P") == Some(1) => Some(Lock::All),
-                _ => None,
+                // A method that is named and is none of these (UR3, Identity) locks no field.
+                Some(_) => None,
+                // No method that can be read: it may have been a FieldMDP, so everything is locked.
+                None => Some(Lock::All),
             }
         })
         .collect()
@@ -568,20 +581,23 @@ pub(crate) fn locks_of(doc: &PdfDocument, entries: &[Entry]) -> Vec<Lock> {
 }
 
 fn locks_of_fields(entries: &[Entry]) -> Vec<Lock> {
-    per_field(entries)
-        .into_iter()
-        .filter(|e| e.kind == FieldKind::Signature)
-        .flat_map(|e| {
-            // A /V or /Lock that errors when read is not an absent one: it may hold a lock, so everything is locked.
-            if e.field.get_dict_inheritable("V").is_err() || e.field.get_dict("Lock").is_err() || e.obj.get_dict("Lock").is_err() {
-                return vec![Lock::All];
-            }
-            let Some(v) = geti(&e.field, "V").filter(|v| v.is_dict().unwrap_or(false)) else { return Vec::new() };
-            let mut locks = reference_locks(&v);
-            locks.extend(get(&e.field, "Lock").or_else(|| get(&e.obj, "Lock")).map(|l| lock_of(&l)));
-            locks
-        })
-        .collect()
+    let read = |o: &PdfObject, k: &str, inherit: bool| if inherit { o.get_dict_inheritable(k) } else { o.get_dict(k) };
+    per_field(entries).into_iter().filter(|e| e.kind == FieldKind::Signature).flat_map(|e| field_locks(e, &read)).collect()
+}
+
+/// What one signature field locks. `read(object, key, inherit)` reads an entry: an `Err` is an entry that could not be
+/// read, which is not an absent one (a seam for the test, which cannot make MuPDF fail on a real file).
+pub(crate) fn field_locks(e: &Entry, read: &dyn Fn(&PdfObject, &str, bool) -> std::result::Result<Option<PdfObject>, mupdf::Error>) -> Vec<Lock> {
+    // A /V that cannot be read may be a signature: everything is locked.
+    let Ok(v) = read(&e.field, "V", true) else { return vec![Lock::All] };
+    // Unsigned (no /V, or not a dictionary): a /Lock, readable or not, locks nothing.
+    let Some(v) = v.filter(|v| !v.is_null().unwrap_or(true) && v.is_dict().unwrap_or(false)) else { return Vec::new() };
+    // A /Lock that cannot be read may hold a lock: everything is locked.
+    let (Ok(field_lock), Ok(widget_lock)) = (read(&e.field, "Lock", false), read(&e.obj, "Lock", false)) else { return vec![Lock::All] };
+    let mut locks = reference_locks(&v);
+    let live = |l: Option<PdfObject>| l.filter(|l| !l.is_null().unwrap_or(true));
+    locks.extend(live(field_lock).or_else(|| live(widget_lock)).map(|l| lock_of(&l)));
+    locks
 }
 
 /// A script may not write to a signature widget, nor to a field a signature in the document covers.
