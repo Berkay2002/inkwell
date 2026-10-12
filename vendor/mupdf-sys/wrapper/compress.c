@@ -703,6 +703,7 @@ ink_recompress_image(fz_context *ctx, fz_pixmap *pix, int type, int fmt, int met
 	fz_colorspace *cs = pix->colorspace;
 	int bpc = 8;
 
+	(void)type;
 	if (method == INK_RECOMPRESS_SAME_IF_SCALED)
 		method = scaled ? FZ_RECOMPRESS_SAME : FZ_RECOMPRESS_NEVER;
 

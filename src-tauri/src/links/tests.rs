@@ -566,7 +566,8 @@ fn a_named_destination_that_cannot_be_checked_is_told_apart_and_can_be_retargete
 
 #[test]
 fn a_utf16_string_destination_finds_its_key_in_the_old_dests_dictionary() {
-    // MuPDF's viewer re-encodes the decoded text before it looks it up in /Dests
+    // MuPDF's viewer re-encodes the decoded text before it looks it up in /Dests: ASCII as it is, any other text as
+    // UTF-16BE read as a C string, so "café" looks up the key FE FF and not /caf#E9 (another viewer may find that one)
     let cat = "/Dests << /c [3 0 R /Fit] /caf#E9 [3 0 R /Fit] >>";
     let annots = vec![
         link_annot("/Dest <FEFF0063>"),
@@ -576,7 +577,7 @@ fn a_utf16_string_destination_finds_its_key_in_the_old_dests_dictionary() {
     let (eng, id, _, _d) = opened("utf16_dests", &page_with_annots("", cat, &annots, &[]));
     let links = list(&eng, id, 0).unwrap().links;
     assert!(matches!(links[0].target, Target::Page { page: 0, .. }), "{:?}", links[0].target);
-    assert!(matches!(links[1].target, Target::Page { page: 0, .. }), "{:?}", links[1].target);
+    assert!(matches!(&links[1].target, Target::Other { what } if what == crate::outline::UNCHECKED_DEST), "{:?}", links[1].target);
     assert!(matches!(links[2].target, Target::Broken { .. }), "{:?}", links[2].target);
 }
 

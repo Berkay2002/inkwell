@@ -24,6 +24,7 @@ pub const CLOSED: &str = "__closed__";
 const MAX_LINE: usize = 16 * 1024 * 1024;
 
 pub struct Proc {
+    #[cfg(test)]
     pub pid: u32,
     outbox: Sender<Vec<u8>>,
     child: Mutex<Child>,
@@ -68,6 +69,7 @@ impl Proc {
         let alive = Arc::new(AtomicBool::new(true));
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let p = Arc::new(Proc {
+            #[cfg(test)]
             pid: child.id(),
             outbox,
             child: Mutex::new(child),

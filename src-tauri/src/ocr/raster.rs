@@ -13,6 +13,7 @@ pub struct Raster {
 }
 
 impl Raster {
+    #[cfg(test)]
     pub fn filled(w: usize, h: usize, n: usize, value: &[u8]) -> Self {
         let mut px = Vec::with_capacity(w * h * n);
         for _ in 0..w * h {

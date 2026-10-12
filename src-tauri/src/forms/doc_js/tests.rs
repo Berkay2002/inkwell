@@ -223,7 +223,7 @@ fn every_edit_is_one_undo_step_that_survives_save_and_reopen() {
     let (eng, id, path) = open("edits", &fixture());
     let before = list_all(&eng, id).unwrap();
     let steps_before = eng.history(id).unwrap().len();
-    let mut check_step = |op: Op, expect: &dyn Fn(&DocJs)| {
+    let check_step = |op: Op, expect: &dyn Fn(&DocJs)| {
         let was = list_all(&eng, id).unwrap();
         let n = eng.history(id).unwrap().len();
         apply(&eng, id, &op, USER).unwrap();

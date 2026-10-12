@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { type Pt, type Rect4, rectToScreen } from "../../lib/annotLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 import {
-  DEFAULT_WIDTH, type Draft, type Item, type MarkKind, type Saved, detailLines, idKey, imageRect, picture, sigBox, today, useSign,
+  DEFAULT_WIDTH, type Draft, type Item, type MarkKind, type Saved, canSign, detailLines, idKey, imageRect, picture, sigBox, today, useSign,
 } from "../../lib/sign";
 import { Icon } from "../Icons";
 
@@ -156,11 +156,12 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
               key={f.field}
               className="sg-field"
               style={style(f.rect)}
-              title={`Sign in "${f.field}"`}
+              title={canSign(f) ? `Sign in "${f.field}"` : (f.refused ?? "")}
+              aria-disabled={canSign(f) ? undefined : true}
               onPointerDown={(e) => e.stopPropagation()}
-              onClick={() => sg().signField(docId, f)}
+              onClick={() => canSign(f) && sg().signField(docId, f)}
             >
-              <span>Sign here</span>
+              <span>{canSign(f) ? "Sign here" : "Can't sign"}</span>
             </button>
           ))}
         {box && <div className="sg-drag" style={style(sigBox(box.a, box.b, [Infinity, Infinity]))} />}
