@@ -20,7 +20,7 @@ import { useStore } from "../store";
 import type { ReplaceResult } from "./api";
 import { replaceText } from "./edit";
 import { lockedReason, useReplace } from "./replace";
-import { reportAt, reportOf, resumeOf, whyNotReplace } from "./replaceLogic";
+import { barTops, reportAt, reportOf, resumeOf, whyNotReplace } from "./replaceLogic";
 import { useTextEdit } from "./textEdit";
 
 const result = (over: Partial<ReplaceResult> = {}): ReplaceResult => ({
@@ -38,12 +38,20 @@ const result = (over: Partial<ReplaceResult> = {}): ReplaceResult => ({
 describe("what a run reports", () => {
   it("says how many were replaced and skipped, and lists the reasons with their page", () => {
     const r = reportOf(
-      result({ replaced: 5, skippedCount: 2, skipped: [{ page: 2, text: "aaa", reason: "skipped: it is set in a Type 3 font, whose letters are drawings" }] }),
+      result({ replaced: 5, skippedCount: 2, skipped: [{ page: 2, text: "aaa", before: "", after: "", reason: "skipped: it is set in a Type 3 font, whose letters are drawings" }] }),
     );
     expect(r.summary).toBe("5 replaced, 2 skipped");
     expect(r.lines).toEqual(['p. 3, "aaa": skipped: it is set in a Type 3 font, whose letters are drawings']);
     // One listed of two counted: the other is "more".
     expect(r.more).toBe(1);
+  });
+
+  it("tells identical skipped rows apart by the words around them", () => {
+    const type3 = "skipped: it is set in a Type 3 font";
+    const row = (before: string, after: string) => ({ page: 0, text: "cat", before, after, reason: type3 });
+    const r = reportOf(result({ skippedCount: 3, skipped: [row("the ", " sat"), row("a big ", " on"), row("", "")] }));
+    expect(r.lines).toEqual([`p. 1, …the "cat" sat…: ${type3}`, `p. 1, …a big "cat" on…: ${type3}`, `p. 1, "cat": ${type3}`]);
+    expect(new Set(r.lines).size).toBe(3);
   });
 
   it("says in the summary when the run stopped early, and hides a report once the document moved on", () => {
@@ -70,7 +78,7 @@ describe("what a run reports", () => {
   });
 
   it("shortens a long match in the list", () => {
-    const r = reportOf(result({ skippedCount: 1, skipped: [{ page: 0, text: "x".repeat(60), reason: "skipped: why" }] }));
+    const r = reportOf(result({ skippedCount: 1, skipped: [{ page: 0, text: "x".repeat(60), before: "", after: "", reason: "skipped: why" }] }));
     expect(r.lines[0]).toContain("…");
     expect(r.lines[0].length).toBeLessThan(80);
   });
@@ -167,7 +175,7 @@ describe("replacing through the store", () => {
   });
 
   it("replaces every match without a position and searches by the engine's own re-run", async () => {
-    vi.mocked(replaceText).mockResolvedValue({ kind: "ok", value: result({ replaced: 4, skippedCount: 1, skipped: [{ page: 0, text: "cat", reason: "skipped: x" }] }) });
+    vi.mocked(replaceText).mockResolvedValue({ kind: "ok", value: result({ replaced: 4, skippedCount: 1, skipped: [{ page: 0, text: "cat", before: "", after: "", reason: "skipped: x" }] }) });
     await useReplace.getState().all(1);
     expect(vi.mocked(replaceText).mock.calls[0][2].at).toBeUndefined();
     expect(runSearch).not.toHaveBeenCalled();
@@ -196,5 +204,15 @@ describe("replacing through the store", () => {
     expect(lockedReason(1)).toBeNull();
     useTextEdit.setState({ docs: { 1: { pages: { 0: { rev: 1, blocks: [], areas: [], locked: "certified", signed: false } } } } } as never);
     expect(lockedReason(1)).toBe("certified");
+  });
+});
+
+describe("where the Find bar sits", () => {
+  it("stays at the top, and goes below the signature banner when that shows, rows and report with it", () => {
+    expect(barTops(false)).toEqual({ find: 12, replace: 58, report: 106 });
+    const t = barTops(true);
+    expect(t.find).toBeGreaterThanOrEqual(12 + 40);
+    expect(t.replace - t.find).toBe(46);
+    expect(t.report - t.replace).toBe(48);
   });
 });

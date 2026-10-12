@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useFind } from "../lib/findStore";
 import { useReplace } from "../lib/replace";
-import { reportAt, whyNotReplace } from "../lib/replaceLogic";
+import { barTops, reportAt, whyNotReplace } from "../lib/replaceLogic";
+import { bannerShown, useSign } from "../lib/sign";
 import { useTextEdit } from "../lib/textEdit";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
@@ -298,10 +299,12 @@ export function SearchBar({ doc }: { doc: DocState }) {
   };
 
   const editing = useTextEdit((s) => s.open && s.section === "text");
+  // The signature banner takes the strip the bar sits in: the bar and what hangs from it go below it.
+  const tops = barTops(useSign((s) => bannerShown(s.docs[id])));
 
   return (
     <>
-      <div className="searchbar">
+      <div className="searchbar" style={{ top: tops.find }}>
         <Icon name="search" size={14} />
         <input
           ref={input}
@@ -324,13 +327,13 @@ export function SearchBar({ doc }: { doc: DocState }) {
         <OptionsMenu />
         <Btn icon="close" title="Close (Esc)" onClick={close} />
       </div>
-      {editing && <ReplaceRow doc={doc} />}
+      {editing && <ReplaceRow doc={doc} tops={tops} />}
     </>
   );
 }
 
 /** Replace with ..., Replace and Replace all: the second row of the find bar while Edit text is on. */
-function ReplaceRow({ doc }: { doc: DocState }) {
+function ReplaceRow({ doc, tops }: { doc: DocState; tops: ReturnType<typeof barTops> }) {
   const { id, search } = doc;
   const text = useReplace((s) => s.text);
   const busy = useReplace((s) => s.busy);
@@ -351,7 +354,7 @@ function ReplaceRow({ doc }: { doc: DocState }) {
 
   return (
     <>
-      <div className="searchbar replace">
+      <div className="searchbar replace" style={{ top: tops.replace }}>
         <Icon name="swap" size={14} />
         <input
           value={text}
@@ -377,14 +380,19 @@ function ReplaceRow({ doc }: { doc: DocState }) {
           </button>
         )}
       </div>
-      {report && open && (report.lines.length > 0 || report.notes.length > 0) && (
-        <div className="replace-report" role="status">
+      {locked && (
+        <div className="replace-report" role="note" style={{ top: tops.report }}>
+          <p className="dim te-hint">{locked}</p>
+        </div>
+      )}
+      {!locked && report && open && (report.lines.length > 0 || report.notes.length > 0) && (
+        <div className="replace-report" role="status" style={{ top: tops.report }}>
           {report.notes.map((n) => (
             <p key={n}>{n}</p>
           ))}
           <ul>
-            {report.lines.map((l) => (
-              <li key={l}>{l}</li>
+            {report.lines.map((l, i) => (
+              <li key={i}>{l}</li>
             ))}
           </ul>
           {report.more > 0 && <p className="dim">and {report.more} more</p>}

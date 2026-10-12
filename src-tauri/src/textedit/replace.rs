@@ -29,6 +29,9 @@ const BUDGET: Duration = Duration::from_secs(20);
 const MAX_WITH: usize = 1000;
 /// Stands before a space in a run's new text while it is built: the space is where a line of the block ended.
 const END: char = '\u{E000}';
+/// Words, and the characters they are cut from, shown on each side of a skipped match.
+const AROUND_WORDS: usize = 3;
+const AROUND_CHARS: usize = 40;
 /// Slack when placing a find hit (MuPDF's character boxes) in a block's line boxes, in points.
 const SLACK: f32 = 3.0;
 
@@ -84,6 +87,9 @@ pub struct ReplaceRequest {
 pub struct Skipped {
     pub page: u32,
     pub text: String,
+    /// A few words before and after the match (with the space next to it), to tell equal rows apart.
+    pub before: String,
+    pub after: String,
     /// `skipped: <why>`.
     pub reason: String,
 }
@@ -118,12 +124,37 @@ struct Outcome {
 }
 
 impl Outcome {
-    fn skip(&mut self, page: u32, text: String, why: &str) {
+    fn skip(&mut self, page: u32, text: String, (before, after): (String, String), why: &str) {
         self.skipped_count += 1;
         if self.skipped.len() < MAX_LISTED {
-            self.skipped.push(Skipped { page, text, reason: format!("skipped: {why}") });
+            self.skipped.push(Skipped { page, text, before, after, reason: format!("skipped: {why}") });
         }
     }
+
+    /// A match Find listed, with the words Find has around it.
+    fn skip_hit(&mut self, page: u32, h: &search::Hit, why: &str) {
+        self.skip(page, h.text.clone(), around(&h.before, &h.after), why);
+    }
+
+    /// The match `t[s..=e]` of a block's text, with the words around it there.
+    fn skip_in(&mut self, page: u32, t: &[char], s: usize, e: usize, why: &str) {
+        let (before, after): (String, String) = (t[s.saturating_sub(AROUND_CHARS)..s].iter().collect(), t[e + 1..(e + 1 + AROUND_CHARS).min(t.len())].iter().collect());
+        self.skip(page, t[s..=e].iter().collect(), around(&before, &after), why);
+    }
+}
+
+/// The last words of `before` and the first of `after`, as a skipped row shows them.
+fn around(before: &str, after: &str) -> (String, String) {
+    let mut b: Vec<&str> = before.split_whitespace().rev().take(AROUND_WORDS).collect();
+    b.reverse();
+    let (mut b, mut a) = (b.join(" "), after.split_whitespace().take(AROUND_WORDS).collect::<Vec<_>>().join(" "));
+    if before.ends_with(char::is_whitespace) && !b.is_empty() {
+        b.push(' ');
+    }
+    if after.starts_with(char::is_whitespace) && !a.is_empty() {
+        a.insert(0, ' ');
+    }
+    (b, a)
 }
 
 fn invalid(m: impl Into<String>) -> EngineError {
@@ -304,21 +335,23 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             // On a page a run went on from, what is after `upto` was done (or listed) by the run before.
             for (i, h) in hits.iter().enumerate() {
                 if owners[i].is_none() && upto.is_none() {
-                    out.skip(page, h.text.clone(), nowhere(h));
+                    out.skip_hit(page, h, nowhere(h));
                 }
             }
             for (bi, spans) in found.iter().enumerate().take(upto.unwrap_or(usize::MAX)) {
                 match blocks[bi].issue {
                     Some(issue) => {
                         for &(a, z) in spans {
-                            out.skip(page, text[bi][a..=z].iter().collect(), issue_text(issue));
+                            out.skip_in(page, &text[bi], a, z, issue_text(issue));
                         }
                     }
                     None if uneven(bi) => {
-                        let listed: Vec<&str> = hits.iter().zip(&owners).filter(|(_, o)| **o == Some(bi)).map(|(h, _)| h.text.as_str()).collect();
+                        let listed: Vec<&search::Hit> = hits.iter().zip(&owners).filter(|(_, o)| **o == Some(bi)).map(|(h, _)| h).collect();
                         for i in 0..listed.len().max(spans.len()) {
-                            let t = listed.get(i).map_or_else(|| text[bi][spans[i].0..=spans[i].1].iter().collect(), |t| t.to_string());
-                            out.skip(page, t, UNEVEN);
+                            match listed.get(i) {
+                                Some(h) => out.skip_hit(page, h, UNEVEN),
+                                None => out.skip_in(page, &text[bi], spans[i].0, spans[i].1, UNEVEN),
+                            }
                         }
                     }
                     None if !spans.is_empty() => plan.push((bi, spans.clone())),
@@ -334,20 +367,20 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             let Some(n) = hits.iter().position(near) else { return Err(EngineError::Stale) };
             let h = &hits[n];
             let Some(bi) = owners[n] else {
-                out.skip(page, h.text.clone(), nowhere(h));
+                out.skip_hit(page, h, nowhere(h));
                 return Ok(false);
             };
             if let Some(issue) = blocks[bi].issue {
-                out.skip(page, h.text.clone(), issue_text(issue));
+                out.skip_hit(page, h, issue_text(issue));
                 return Ok(false);
             }
             if uneven(bi) {
-                out.skip(page, h.text.clone(), UNEVEN);
+                out.skip_hit(page, h, UNEVEN);
                 return Ok(false);
             }
             let k = owners[..n].iter().filter(|o| **o == Some(bi)).count();
             let Some(&(s, e)) = found[bi].get(k) else {
-                out.skip(page, h.text.clone(), "it could not be placed in its block of text; use Replace all");
+                out.skip_hit(page, h, "it could not be placed in its block of text; use Replace all");
                 return Ok(false);
             };
             let t = &text[bi];
@@ -355,7 +388,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             let (hb, ha) = (loose(&h.before.chars().collect::<Vec<_>>()), loose(&h.after.chars().collect::<Vec<_>>()));
             let (kb, ka) = (before.len().min(8), after.len().min(8));
             if !hb.ends_with(&before[before.len() - kb..]) || !ha.starts_with(&after[..ka]) {
-                out.skip(page, h.text.clone(), "it could not be placed in its block of text; use Replace all");
+                out.skip_hit(page, h, "it could not be placed in its block of text; use Replace all");
                 return Ok(false);
             }
             plan.push((bi, vec![(s, e)]));
@@ -373,7 +406,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
                 // One block that alone is over the cap: part replaced, and the rest listed (a second run could
                 // not tell its own work from the document's where the replacement holds the find text).
                 for &(s, e) in &spans[left..] {
-                    out.skip(page, text[bi][s..=e].iter().collect(), &format!("the block has more matches than the {} one run replaces", bounds.max));
+                    out.skip_in(page, &text[bi], s, e, &format!("the block has more matches than the {} one run replaces", bounds.max));
                 }
                 out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32) });
             } else if bounds.inserted > 0 {
@@ -393,7 +426,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
         // so a block that has one is left alone unless a match, one that is still replaced, covers it.
         if blocks[bi].joins.iter().any(|&h| !spans.iter().any(|&(s, e)| s < h && e >= h)) {
             for &(s, e) in &spans {
-                out.skip(page, text[bi][s..=e].iter().collect(), "a hyphen at the end of a line in the block would be lost");
+                out.skip_in(page, &text[bi], s, e, "a hyphen at the end of a line in the block would be lost");
             }
             if cut {
                 break;
@@ -421,7 +454,7 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
     let all: Vec<char> = joined(b);
     let skip_all = |out: &mut Outcome, why: &str| {
         for &(s, e) in spans {
-            out.skip(page, all[s..=e].iter().collect(), why);
+            out.skip_in(page, &all, s, e, why);
         }
     };
     let mut specs = Vec::new();

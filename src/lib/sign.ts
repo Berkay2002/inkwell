@@ -235,6 +235,10 @@ export function banner(list: SignatureInfo[], error: string | null = null): { to
   return { tone: "valid", text: `Signed. ${all} valid.` };
 }
 
+/** Whether the signature banner is on screen for a document: what `SignBanner` draws it for. */
+export const bannerShown = (d: { sigs: SignatureInfo[]; sigsError: string | null; bannerHidden: boolean } | undefined) =>
+  d != null && !d.bannerHidden && banner(d.sigs, d.sigsError) !== null;
+
 /** One line under the signer: what the signature promises about later changes. */
 export function changeNote(s: SignatureInfo): string {
   if (!s.intact) return "The document was changed after it was signed, or the signature is damaged.";

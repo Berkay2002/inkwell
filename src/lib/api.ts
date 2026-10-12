@@ -630,6 +630,9 @@ export const textAdd = (doc: number, rev: number, page: number, newText: NewText
 export interface ReplaceSkipped {
   page: number;
   text: string;
+  /** A few words of the text before and after the match, to tell identical rows apart. */
+  before: string;
+  after: string;
   reason: string;
 }
 

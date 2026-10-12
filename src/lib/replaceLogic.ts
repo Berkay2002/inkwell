@@ -1,4 +1,4 @@
-import type { ReplaceFrom, ReplaceResult } from "./api";
+import type { ReplaceFrom, ReplaceResult, ReplaceSkipped } from "./api";
 
 // What Find & Replace tells the person after a run. Pure: the store (replace.ts) runs the engine.
 
@@ -26,6 +26,9 @@ export interface ReplaceReport {
 
 const quote = (t: string) => `"${t.length > 40 ? `${t.slice(0, 40)}…` : t}"`;
 
+/** The hit with a few words of what surrounds it, so rows for the same word can be told apart. */
+const inContext = (s: ReplaceSkipped) => `${s.before ? `…${s.before.trimStart()}` : ""}${quote(s.text)}${s.after ? `${s.after.trimEnd()}…` : ""}`;
+
 export function reportOf(r: ReplaceResult): ReplaceReport {
   const listed = r.skipped.slice(0, LISTED);
   const notes: string[] = [];
@@ -34,7 +37,7 @@ export function reportOf(r: ReplaceResult): ReplaceReport {
   for (const f of r.fallbacks) notes.push(`${f.font} was used for some text: ${f.reason}.`);
   return {
     summary: `${r.replaced} replaced, ${r.skippedCount} skipped${r.stopped ? ", stopped early" : ""}`,
-    lines: listed.map((s) => `p. ${s.page + 1}, ${quote(s.text)}: ${s.reason}`),
+    lines: listed.map((s) => `p. ${s.page + 1}, ${inContext(s)}: ${s.reason}`),
     more: Math.max(0, r.skippedCount - listed.length),
     notes,
     resume: r.resume,
@@ -50,6 +53,12 @@ export function reportAt(report: ReplaceReport | null | undefined, rev: number):
 /** Where Replace all goes on from: the stopped run of this same request, on the document it left. */
 export function resumeOf(report: ReplaceReport | null | undefined, rev: number, ask: string): ReplaceFrom | undefined {
   return report && report.rev === rev && report.ask === ask ? (report.resume ?? undefined) : undefined;
+}
+
+/** Top offsets (px) of the Find bar, the Replace row and the report under them: below the signature banner when it shows. */
+export function barTops(banner: boolean): { find: number; replace: number; report: number } {
+  const down = banner ? 46 : 0;
+  return { find: 12 + down, replace: 58 + down, report: 106 + down };
 }
 
 /** Why Replace is unavailable, or null when it can run. */

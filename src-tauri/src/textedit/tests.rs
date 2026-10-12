@@ -1918,3 +1918,13 @@ fn lines_set_in_different_styles_keep_their_breaks_too() {
     assert_eq!(r.replaced, 1, "{r:?}");
     assert_eq!(page_lines(&eng, id), ["One big dog", "Bold two", "Three long hats here"]);
 }
+
+#[test]
+fn skipped_matches_carry_the_words_around_them() {
+    let d = dir("replace-skip-context");
+    let two = "BT /F1 12 Tf 72 700 Td (A well-) Tj ET\nBT /F1 12 Tf 72 686 Td (known fox and a fox) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[two]));
+    let r = do_replace(&eng, id, &req("fox", "dog", SearchOpts::default())).unwrap();
+    let rows: Vec<(&str, &str, &str)> = r.skipped.iter().map(|s| (s.before.as_str(), s.text.as_str(), s.after.as_str())).collect();
+    assert_eq!(rows, [("A wellknown ", "fox", " and a fox"), ("fox and a ", "fox", "")], "{r:?}");
+}

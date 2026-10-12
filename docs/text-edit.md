@@ -226,7 +226,11 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   replaced, whatever Find's options say. An empty `find` and a replacement with a line break are refused.
 - **Replace all** (`at` unset) plans each page from one reading of it and applies it from the last block to the first;
   one `rewrite_block` per block, however many matches it holds. Runs a match does not touch keep their glyphs and
-  kerning; a match across runs puts the replacement in the style of the run it starts in. Nothing is searched again
+  kerning; a match across runs puts the replacement in the style of the run it starts in. The block's lines stay
+  as they were (each line end is kept as a line end that does not end the paragraph, so a justified block stays
+  justified): only a line whose width changed reflows, and what no longer fits wraps onto a line of its own, to the
+  block's width. A match across a line end drops that one break. Edit text itself re-wraps the whole block to its
+  widest line when its text is committed (its draft is one paragraph), so short lines can join. Nothing is searched again
   after a replacement, so a replacement that contains the find text is set once and never loops. The whole run is
   one undo step ("Replace "cat" with "dog""), saved like any text edit (a full rewrite; incremental when signed).
 - **Replace one** (`at` = the first rectangle of the current Find hit): the match is the nth hit of its block in
@@ -236,7 +240,8 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
 - **Skipped, never forced**: a match Edit text refuses (Type 3, no ToUnicode, invisible text, vertical, encoding,
   clipping text), a match across two blocks, text in a form XObject or converted to outlines, a block the replacement
   would leave empty, and a block whose rewrite is refused (its text or a character no font can show) are left as they
-  are and listed as `{ page, text, reason: "skipped: …" }`; a block is rewritten whole or not at all. Two more
+  are and listed as `{ page, text, before, after, reason: "skipped: …" }` (`before` and `after` are a few words
+  around the match, so rows for the same word can be told apart); a block is rewritten whole or not at all. Two more
   reasons are about the block text, which drops a hyphen at the end of a line ("well-" "known" reads "wellknown"):
   a block holding one is left alone unless a match covers it (a rewrite would lose the hyphen), and a block whose
   matches differ in number from Find's hits in it (a match across the hyphen, a whole word cut by the block's edge)
@@ -255,7 +260,9 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   the rest of it is listed as skipped.
 - **UI**: while Edit text is on, the Find bar has a second row: "Replace with", Replace, Replace all and the result
   ("5 replaced, 2 skipped", which opens the list of what was skipped, with its page and reason). Replace goes on to
-  the next match. The controls say why they are off (certified document, no match, a comment or form hit selected).
+  the next match. The controls say why they are off (certified document, no match, a comment or form hit selected);
+  the certified reason is also shown as text under the row. With the signature banner showing, the Find bar and its
+  rows sit below it (`barTops` in `src/lib/replaceLogic.ts`).
   Typed text in a block is sent first (`src/lib/replace.ts`).
 - **Tests**: `textedit::tests::replace_*` and its neighbours (replace all across pages as one undo, case and whole
   word, a replacement holding the find text, replace one, runs, skips with reasons, certified and signed, a rotated
