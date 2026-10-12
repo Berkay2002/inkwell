@@ -34,6 +34,7 @@ const MAX_COLS: usize = 16;
 const MAX_RULES: usize = 5000;
 
 /// A structured-text line that can be a cell (page space, y down).
+#[derive(Clone, Copy)]
 pub struct Item<'a> {
     /// The caller's index of the line.
     pub id: usize,
@@ -240,8 +241,9 @@ fn region(items: &[Item], rows: &[Row], rules: &[Rule], widgets: &[Rect]) -> Opt
     }
 
     // Evidence: a ruling line across two columns near the rows, or a header row that differs.
-    // Without a rule, a last column of nothing but small integers (a table of contents: title and
-    // page, with a bold first entry or a number in front) is not evidence enough.
+    // Without a rule, a last column of nothing but page numbers (a table of contents: title and
+    // page, with a bold first entry or a number in front; arabic or roman) is not evidence enough:
+    // `toc` takes those rows.
     let spans = |r: &Rule| cols.iter().filter(|&&(a, b)| r.x0 <= b && r.x1 >= a).count() >= 2;
     let ruled = rules.iter().any(|r| r.y >= near.y0 && r.y <= near.y1 && spans(r));
     let bold = |r: usize| (0..n).all(|c| cell(r, c).bold);
@@ -255,7 +257,7 @@ fn region(items: &[Item], rows: &[Row], rules: &[Rule], widgets: &[Rect]) -> Opt
     let header = styled || below;
     let page_numbers = (0..rows.len()).all(|r| {
         let t = cell(r, n - 1).text.trim();
-        !t.is_empty() && t.len() <= 3 && t.bytes().all(|b| b.is_ascii_digit())
+        !t.is_empty() && (t.len() <= 3 && t.bytes().all(|b| b.is_ascii_digit()) || super::toc::roman(t).is_some())
     });
     if !(ruled || header) || (page_numbers && !ruled) {
         return None;

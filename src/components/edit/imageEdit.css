@@ -26,6 +26,57 @@
   cursor: move;
   touch-action: none;
 }
+/* the other picked images of a group: no handles, they move with the anchor */
+.ie-frame.group {
+  outline-width: calc(1px / var(--z, 1));
+}
+/* the turn knob above the frame's top middle */
+.ie-rot {
+  --s: calc(11px / var(--z, 1));
+  position: absolute;
+  left: 50%;
+  top: calc(-26px / var(--z, 1));
+  width: var(--s);
+  height: var(--s);
+  margin-left: calc(var(--s) / -2);
+  border-radius: 50%;
+  background: var(--surface);
+  border: calc(1.5px / var(--z, 1)) solid var(--accent);
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+}
+.ie-rot::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: calc(1.5px / var(--z, 1));
+  height: calc(15px / var(--z, 1));
+  margin-left: calc(-0.75px / var(--z, 1));
+  background: var(--accent);
+}
+.ie-quad {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.ie-quad polygon {
+  fill: color-mix(in srgb, var(--accent) 10%, transparent);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+.ie-marquee {
+  position: absolute;
+  box-sizing: border-box;
+  border: calc(1px / var(--z, 1)) solid var(--accent);
+  background: var(--accent-soft);
+  pointer-events: none;
+}
 .ie-frame.quiet {
   cursor: default;
   outline-style: dashed;
@@ -130,4 +181,10 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* The page a dragged picture would land on */
+.ie-drop-target {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }

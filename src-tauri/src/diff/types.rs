@@ -38,6 +38,10 @@ pub enum DiffError {
     NotPdf { side: Side },
     #[error("page {page} is out of range")]
     BadPage { page: u32 },
+    #[error("the {side} file has {count} {}, so page {page} is out of range", if *.count == 1 { "page" } else { "pages" })]
+    PageOutOfRange { side: Side, page: u32, count: u32 },
+    #[error("no pages of the {side} file were chosen")]
+    NoPages { side: Side },
     #[error("comparison failed unexpectedly")]
     Panic,
     #[error("cancelled")]
@@ -58,6 +62,10 @@ pub struct CompareOptions {
     pub password_b: Option<String>,
     /// Report Producer / ModDate / XMP modify-date style fields too (they change on every save).
     pub include_volatile_metadata: bool,
+    /// The pages of A and of B to compare, 0-based in the file's own numbering (`None` = every page). Page pairing,
+    /// text, formatting, image and visual diffs and the report then cover these pages only, under their own numbers.
+    pub pages_a: Option<Vec<u32>>,
+    pub pages_b: Option<Vec<u32>>,
 }
 
 /// Where a comparison is, for a progress bar: `done` of `total` units of the current stage.
@@ -91,29 +99,21 @@ pub struct Comparison {
     pub identical: bool,
 }
 
-/// How the pages of the two files correspond.
+/// How the pages of the two files correspond. Every page number is the file's own (0-based), so with a page range
+/// on a side the numbers are the picked pages' real ones (old p. 5), never positions in the range.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PageMap {
+    /// How many pages of each file were compared (all of them without a range).
     pub a_pages: u32,
     pub b_pages: u32,
-    /// For each page of B, the matched page of A (`None` = added).
+    /// The pages compared on each side, ascending.
+    pub a_ids: Vec<u32>,
+    pub b_ids: Vec<u32>,
+    /// For each of `b_ids`, the matched page of A (`None` = added).
     pub b_to_a: Vec<Option<u32>>,
-    /// Pages of A with no counterpart in B.
+    /// Compared pages of A with no counterpart in B.
     pub removed_a: Vec<u32>,
-}
-
-impl PageMap {
-    /// For each page of A, the matched page of B (`None` = removed).
-    pub fn a_to_b(&self) -> Vec<Option<u32>> {
-        let mut v = vec![None; self.a_pages as usize];
-        for (b, a) in self.b_to_a.iter().enumerate() {
-            if let Some(a) = a {
-                v[*a as usize] = Some(b as u32);
-            }
-        }
-        v
-    }
 }
 
 /// Declaration order is the order changes are listed in within one page.

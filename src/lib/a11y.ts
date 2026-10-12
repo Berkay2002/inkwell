@@ -4,7 +4,9 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import { type EditState, pickSave, toolCancel } from "./api";
 import { applyState, run } from "./edit";
-import { type Finding, type Fix, type Preview, type Progress, type Rect4, type Report, safeFixes, stem, suggestLang } from "./a11yLogic";
+import { type A11yMark, type A11yMarks, type Finding, type Fix, type Preview, type Progress, type Rect4, type Report, applyOverrides, marksIn, safeFixes, stem, suggestLang } from "./a11yLogic";
+import { useRecents } from "../recents";
+import { marksFor } from "./recent";
 import {
   type Problem,
   type ReadingOrder,
@@ -41,6 +43,8 @@ export const a11yApi = {
   },
   preview: (doc: number) => invoke<Preview>("a11y_preview", { doc }),
   protection: (doc: number) => invoke<Protection>("a11y_protection", { doc }),
+  /** Trailer /ID[0] and page count: what tells this document from another file at the same path. */
+  fingerprint: (doc: number) => invoke<string>("a11y_fingerprint", { doc }),
   readingOrder: (doc: number, page: number) => invoke<ReadingOrder>("a11y_reading_order", { doc, page }),
   tags: (doc: number, page: number | null) => invoke<TagNode[]>("a11y_tags", { doc, page }),
   tagProblems: (doc: number) => invoke<Problem[]>("a11y_tag_problems", { doc }),
@@ -52,10 +56,10 @@ export const a11yApi = {
   editTag: (doc: number, xref: number, patch: TagPatch) => invoke<EditState>("a11y_edit_tag", { doc, xref, patch }),
   moveTag: (doc: number, xref: number, parent: number, anchor: number | null, after: boolean) =>
     invoke<EditState>("a11y_move_tag", { doc, xref, parent, anchor, after }),
-  exportReport: (job: number, doc: number, format: "html" | "pdf", date: string, to: string, onProgress: (p: Progress) => void) => {
+  exportReport: (job: number, doc: number, format: "html" | "pdf", date: string, to: string, overrides: A11yMarks, onProgress: (p: Progress) => void) => {
     const ch = new Channel<Progress>();
     ch.onmessage = onProgress;
-    return invoke<string>("a11y_export_report", { job, doc, format, date, to, onProgress: ch });
+    return invoke<string>("a11y_export_report", { job, doc, format, date, to, overrides, onProgress: ch });
   },
 };
 
@@ -134,6 +138,13 @@ export interface DocA11y {
   error: string | null;
   /** Where the last report export went. */
   exported: string | null;
+  /**
+   * Rules the person marked "Passed manually" or "Skipped", by rule id. Not part of the document: they live with the
+   * file's recents entry (or only for the session when there is none) and only change how the report reads.
+   */
+  marks: A11yMarks;
+  /** The stored marks were read (or the person set one first). */
+  marksLoaded: boolean;
   shown: Shown | null;
   /** Groups collapsed by name. */
   collapsed: Record<string, boolean>;
@@ -154,6 +165,8 @@ const fresh = (): DocA11y => ({
   notNow: false,
   error: null,
   exported: null,
+  marks: {},
+  marksLoaded: false,
   shown: null,
   collapsed: {},
   order: freshOrder(),
@@ -191,6 +204,8 @@ interface A11yStore {
   autotag: (doc: number) => Promise<void>;
   cancel: (doc: number) => void;
   exportReport: (doc: number, format: "html" | "pdf") => Promise<void>;
+  /** Marks a rule passed or skipped by hand, or `null` to put it back to the checker's result. No edit, no new revision. */
+  setMark: (doc: number, rule: string, mark: A11yMark | null) => void;
   /** Jumps to the finding's page and highlights it. */
   show: (doc: number, f: Finding) => void;
   clearShown: (doc: number) => void;
@@ -349,6 +364,36 @@ export const useA11y = create<A11yStore>((set, get) => {
   const editTags = (doc: number, f: () => Promise<EditState>) =>
     edit(doc, f, (m) => patchTags(doc, { error: m }), () => get().loadTags(doc, true));
 
+  /**
+   * Reads the marks stored with the file once. They count only when they were made on this document (same
+   * fingerprint); otherwise a different file has taken the path and its marks are dropped. A mark set before the
+   * read finishes wins. Reading the fingerprint fails: nothing is applied or stored.
+   */
+  const marksRead = new Map<number, Promise<void>>();
+  function loadMarks(doc: number): Promise<void> {
+    const d = st().docs[doc];
+    if (!d || get().get(doc).marksLoaded) return marksRead.get(doc) ?? Promise.resolve();
+    patch(doc, { marksLoaded: true });
+    const p = (async () => {
+      if (!d.path) return;
+      const [entry, fp] = await Promise.all([useRecents.getState().entryOf(d.path), a11yApi.fingerprint(doc).catch(() => null)]);
+      if (!entry?.a11yMarks || !get().docs[doc]) return;
+      const stored = marksFor(entry, fp);
+      if (stored) patch(doc, { marks: { ...stored, ...get().get(doc).marks } });
+      else if (fp) useRecents.getState().setMarks(d.path, {}, fp);
+    })().catch(() => {});
+    marksRead.set(doc, p);
+    return p;
+  }
+  /** Stores the marks as they are now with the file's entry and the document's fingerprint. */
+  async function saveMarks(doc: number) {
+    await loadMarks(doc);
+    const d = st().docs[doc];
+    if (!d?.path || !get().docs[doc]) return;
+    const fp = await a11yApi.fingerprint(doc).catch(() => null);
+    if (fp && get().docs[doc]) useRecents.getState().setMarks(d.path, get().get(doc).marks, fp);
+  }
+
   async function loadPreview(doc: number, r: Report) {
     if (r.tagged) return patch(doc, { preview: null });
     try {
@@ -392,6 +437,7 @@ export const useA11y = create<A11yStore>((set, get) => {
       const job = ++jobSeq;
       latest.set(doc, job);
       const rev = d.rev;
+      void loadMarks(doc);
       patch(doc, { phase: "checking", progress: null, job, error: null, skipRev: null, errorRev: null });
       // Only a check that still owns the phase gives it back (an export may have taken it meanwhile).
       const done = () => (get().get(doc).phase === "checking" ? ({ phase: "idle", progress: null } as const) : {});
@@ -399,6 +445,8 @@ export const useA11y = create<A11yStore>((set, get) => {
         const report = await a11yApi.check(job, doc, (p) => latest.get(doc) === job && patch(doc, { progress: p }));
         if (latest.get(doc) !== job) return;
         patch(doc, { report, checkedRev: rev, shown: null, ...done() });
+        // The document may have changed (pages added) since the marks were stored with its fingerprint.
+        if (Object.keys(get().get(doc).marks).length) void saveMarks(doc);
         await loadPreview(doc, report);
       } catch (e) {
         if (latest.get(doc) !== job) return;
@@ -434,9 +482,10 @@ export const useA11y = create<A11yStore>((set, get) => {
     },
 
     fixAll: async (doc) => {
-      const r = get().get(doc).report;
-      if (!r) return;
-      const fixes = safeFixes(r, get().lang);
+      const d = get().get(doc);
+      if (!d.report) return;
+      // A rule the person decided by hand is not fixed, whatever the checker found.
+      const fixes = safeFixes(applyOverrides(d.report, d.marks), get().lang);
       if (!fixes.length) return;
       await get().fix(doc, fixes.length === 1 ? fixes[0] : { fix: "many", fixes });
     },
@@ -478,11 +527,23 @@ export const useA11y = create<A11yStore>((set, get) => {
         const job = ++jobSeq;
         patch(doc, { phase: "exporting", progress: null, job, error: null, exported: null });
         const date = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
-        const path = await a11yApi.exportReport(job, doc, format, date, to.token, (p) => patch(doc, { progress: p }));
+        const report = now.report;
+        const marks = report ? marksIn(report, now.marks) : {};
+        const path = await a11yApi.exportReport(job, doc, format, date, to.token, marks, (p) => patch(doc, { progress: p }));
         patch(doc, { phase: "idle", progress: null, exported: path });
       } catch (e) {
         patch(doc, { phase: "idle", progress: null, ...(msg(e) === CANCELLED ? {} : { error: msg(e) }) });
       }
+    },
+
+    setMark: (doc, rule, mark) => {
+      const d = st().docs[doc];
+      if (!d) return;
+      const { [rule]: _old, ...rest } = get().get(doc).marks;
+      void _old;
+      const marks = mark ? { ...rest, [rule]: mark } : rest;
+      patch(doc, { marks });
+      void saveMarks(doc);
     },
 
     show: (doc, f) => {
@@ -507,6 +568,7 @@ export const useA11y = create<A11yStore>((set, get) => {
         latestTags.delete(doc);
         reading.delete(doc);
         readSeq.delete(doc);
+        marksRead.delete(doc);
         return { docs: rest };
       }),
 

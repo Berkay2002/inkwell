@@ -367,8 +367,9 @@ impl<'a> Rt<'a> {
                 let mut states = field_states(entries);
                 lay_over(&mut states, &self.pending.borrow());
                 if matches!(event.name, "Keystroke" | "Validate") {
-                    if let Some(f) = states.iter_mut().find(|f| f.name == e.name && matches!(f.kind, FieldType::Text | FieldType::ComboBox)) {
-                        f.value = if event.value.is_empty() { Vec::new() } else { vec![event.value.clone()] };
+                    if let Some(f) = states.iter_mut().find(|f| f.name == e.name && matches!(f.kind, FieldType::Text | FieldType::ComboBox | FieldType::CheckBox | FieldType::ListBox)) {
+                        let none = event.value.is_empty() || (f.kind == FieldType::CheckBox && event.value == "Off");
+                        f.value = if none { Vec::new() } else { vec![event.value.clone()] };
                     }
                 }
                 owned = states;
@@ -420,7 +421,9 @@ impl<'a> Rt<'a> {
     pub(crate) fn keystroke(&self, e: &Entry, value: &str) -> std::result::Result<(String, Vec<FieldChange>), String> {
         match self.key_plan(e) {
             Plan::None => Ok((value.to_string(), Vec::new())),
-            Plan::Fast(f) => af::keystroke(&f, &e.name, value).map(|v| (v, Vec::new())),
+            Plan::Fast(f) if text_like(e) => af::keystroke(&f, &e.name, value).map(|v| (v, Vec::new())),
+            // The AF format and mask calls are for text; a check box or list box runs only scripts of its own.
+            Plan::Fast(_) => Ok((value.to_string(), Vec::new())),
             Plan::Js(src) => {
                 let out = self.run(None, e, Event::new("Keystroke", &e.name, value), src, EVENT_TIME);
                 let (kept, changed) = self.verdict(out, value, format!("The value entered does not match the format of the field [ {} ]", e.name))?;
@@ -434,7 +437,8 @@ impl<'a> Rt<'a> {
     pub(crate) fn validate(&self, e: &Entry, value: &str) -> std::result::Result<Vec<FieldChange>, String> {
         match self.validate_plan(e) {
             Plan::None => Ok(Vec::new()),
-            Plan::Fast(v) => af::validate(&v, value).map(|()| Vec::new()),
+            Plan::Fast(v) if text_like(e) => af::validate(&v, value).map(|()| Vec::new()),
+            Plan::Fast(_) => Ok(Vec::new()),
             Plan::Js(src) => {
                 let out = self.run(None, e, Event::new("Validate", &e.name, value), src, EVENT_TIME);
                 self.verdict(out, value, format!("Invalid value entered for the field [ {} ]", e.name)).map(|(_, changed)| changed)
@@ -459,6 +463,11 @@ impl<'a> Rt<'a> {
         }
         Ok((out.value, out.changed))
     }
+}
+
+/// A text or combo field: the ones the AF format, range and mask calls are for.
+fn text_like(e: &Entry) -> bool {
+    matches!(e.kind, FieldKind::Text | FieldKind::Combo)
 }
 
 /// Lays what earlier scripts of the step set (and the document does not hold yet) over a snapshot, property by property.

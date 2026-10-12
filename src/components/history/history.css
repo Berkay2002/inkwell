@@ -1334,6 +1334,34 @@
   border: 1px solid var(--border);
   border-radius: 16px;
 }
+.hx-slot-range {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+  margin-top: 12px;
+}
+.hx-slot-range label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.hx-slot-range input {
+  width: 190px;
+  max-width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.hx-slot-range input.bad {
+  border-color: var(--danger);
+}
+.hx-slot-range .bad {
+  color: var(--danger);
+}
 .hx-setup-foot {
   display: flex;
   flex-wrap: wrap;

@@ -61,19 +61,21 @@ fn similarity(fa: &PageFeat, fb: &PageFeat, ia: usize, ib: usize, total: usize) 
     if s > 0.0 { s + 0.01 * (1.0 - d as f64 / total.max(1) as f64) } else { 0.0 }
 }
 
-/// For each page of B the matching page of A.
+/// For each page of B (by the file's own page number) the matching page of A, over the compared pages only. Pairing
+/// works on positions in the compared pages, so a range on one side is paired as if it were a file of its own.
 pub fn match_pages(a: &Snap, b: &Snap) -> Vec<Option<usize>> {
-    let (na, nb) = (a.pages.len(), b.pages.len());
+    let (ia, ib) = (&a.ids, &b.ids);
+    let (na, nb) = (ia.len(), ib.len());
     let mut b2a: Vec<Option<usize>> = vec![None; nb];
     let mut a_used = vec![false; na];
 
     // 1. identical fingerprints
     let mut by_fp: HashMap<Hash, Vec<usize>> = HashMap::new();
-    for (i, p) in a.pages.iter().enumerate() {
-        by_fp.entry(p.fp).or_default().push(i);
+    for (i, &p) in ia.iter().enumerate() {
+        by_fp.entry(a.pages[p].fp).or_default().push(i);
     }
-    for (j, p) in b.pages.iter().enumerate() {
-        if let Some(cands) = by_fp.get(&p.fp) {
+    for (j, &p) in ib.iter().enumerate() {
+        if let Some(cands) = by_fp.get(&b.pages[p].fp) {
             let best = cands.iter().copied().filter(|&i| !a_used[i]).min_by_key(|&i| i.abs_diff(j));
             if let Some(i) = best {
                 a_used[i] = true;
@@ -86,8 +88,8 @@ pub fn match_pages(a: &Snap, b: &Snap) -> Vec<Option<usize>> {
     let ra: Vec<usize> = (0..na).filter(|&i| !a_used[i]).collect();
     let rb: Vec<usize> = (0..nb).filter(|&j| b2a[j].is_none()).collect();
     if !ra.is_empty() && !rb.is_empty() {
-        let fa: Vec<PageFeat> = ra.iter().map(|&i| feat(a, i)).collect();
-        let fb: Vec<PageFeat> = rb.iter().map(|&j| feat(b, j)).collect();
+        let fa: Vec<PageFeat> = ra.iter().map(|&i| feat(a, ia[i])).collect();
+        let fb: Vec<PageFeat> = rb.iter().map(|&j| feat(b, ib[j])).collect();
         let total = na.max(nb);
         let windowed = ra.len().max(rb.len()) > 200;
         let win = WINDOW + na.abs_diff(nb);
@@ -130,7 +132,11 @@ pub fn match_pages(a: &Snap, b: &Snap) -> Vec<Option<usize>> {
             }
         }
     }
-    b2a
+    let mut out = vec![None; b.pages.len()];
+    for (j, m) in b2a.into_iter().enumerate() {
+        out[ib[j]] = m.map(|i| ia[i]);
+    }
+    out
 }
 
 /// Minimum-cost assignment of rows to columns (rows or columns may be in surplus).

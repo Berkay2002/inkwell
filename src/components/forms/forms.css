@@ -68,10 +68,9 @@ button.fm-w.k-signature {
 .fm-w.k-signature[aria-disabled="true"] {
   cursor: not-allowed;
 }
-/* a refused signature field: the tokens of .sg-field[aria-disabled] in Fill and Sign; opaque, to cover the tag MuPDF draws into the page */
+/* a refused signature field: dimmed like .sg-field[aria-disabled] in Fill and Sign */
 .fm-w.k-signature.locked {
-  background: var(--surface-2);
-  border: calc(1.5px / var(--z, 1)) dashed var(--border-strong);
+  background: color-mix(in srgb, var(--text-2) 12%, transparent);
 }
 /* nobody can fill it, so no red required frame */
 .fm-w.k-signature.locked:not(:focus) {
@@ -657,4 +656,29 @@ button.fm-w.k-signature {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.fm-record-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: min(320px, 50vh);
+  overflow: auto;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+  border-radius: 8px;
+}
+.fm-record-list button {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fm-record-list button.on {
+  background: var(--surface-2);
 }

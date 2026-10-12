@@ -15,6 +15,7 @@ import { A11yPanel } from "./components/a11y/A11yPanel";
 import { PreflightPanel } from "./components/preflight/PreflightPanel";
 import { EditPanel } from "./components/edit/EditPanel";
 import { FormTools, FormsBanner, FormsPanel } from "./components/forms/FormsPanel";
+import { RecordPicker } from "./components/forms/RecordPicker";
 import { ScriptPrompts } from "./components/forms/ScriptPrompts";
 import { RedactPanel } from "./components/redact/RedactPanel";
 import { SignRail } from "./components/sign/SignRail";
@@ -337,6 +338,9 @@ export default function App() {
       </Guard>
       <Guard name="Form scripts" variant="overlay">
         <ScriptPrompts />
+      </Guard>
+      <Guard name="Form data records" variant="overlay">
+        <RecordPicker />
       </Guard>
       <Guard name="Notifications" variant="overlay">
         <Toast />

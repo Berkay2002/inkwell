@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod app;
 pub mod autotag;
+pub mod captions;
 pub mod content;
 pub mod locate;
 pub mod matterhorn;
@@ -22,6 +23,7 @@ pub mod order;
 pub mod report;
 pub mod tables;
 pub mod tags;
+pub mod toc;
 pub mod tree;
 #[cfg(test)]
 mod tests;
@@ -33,6 +35,8 @@ mod tests_matterhorn;
 mod tests_hostile;
 #[cfg(test)]
 mod tests_tables;
+#[cfg(test)]
+mod tests_toc;
 
 use locate::Locator;
 use tree::{Tree, name, text, xref_of};
@@ -1250,11 +1254,20 @@ pub fn preview_doc(eng: &Engine, doc: DocId) -> Result<autotag::Preview> {
 }
 
 /// The report as a file: HTML or a PDF. It checks the document again, so the file matches what is open now.
-pub fn report_bytes(eng: &Engine, doc: DocId, pdf: bool, date: &str, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Vec<u8>> {
+/// `overrides` are the rules the person marked "Passed manually" or "Skipped"; they only change how the report reads.
+pub fn report_bytes(
+    eng: &Engine,
+    doc: DocId,
+    pdf: bool,
+    date: &str,
+    overrides: &report::Overrides,
+    progress: &mut dyn FnMut(Progress),
+    cancel: &AtomicBool,
+) -> Result<Vec<u8>> {
     let report = check_doc(eng, doc, progress, cancel)?;
     let path = eng.doc_entry(doc)?.path();
     let name = std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    if pdf { report::pdf(&name, date, &report) } else { Ok(report::html(&name, date, &report).into_bytes()) }
+    if pdf { report::pdf(&name, date, &report, overrides) } else { Ok(report::html(&name, date, &report, overrides).into_bytes()) }
 }
 
 /// The document as it is now, in a copy of its own (the published snapshot, or the file before any edit).
@@ -1299,6 +1312,19 @@ pub struct Protection {
 
 pub fn protection_doc(eng: &Engine, doc: DocId) -> Result<Protection> {
     eng.read_custom(doc, |d| Ok(Protection { certified: crate::outline::certified(d).map_or(true, |c| c.is_some()), signed: crate::outline::signed(d) }))
+}
+
+/// What tells this document from another one at the same path: the first string of the trailer `/ID` in hex (a
+/// save keeps it, so an edit and its save are the same document, and so is the file after a page was deleted).
+/// Without an `/ID` it is `/` and the page count, which is weak: a different file with as many pages will match.
+pub fn fingerprint_doc(eng: &Engine, doc: DocId) -> Result<String> {
+    eng.read_custom(doc, |d| {
+        let id = d.trailer()?.get_dict("ID")?.and_then(|a| a.get_array(0).ok().flatten()).and_then(|o| o.as_bytes().ok()).unwrap_or_default();
+        if id.is_empty() {
+            return Ok(format!("/{}", d.page_count()?));
+        }
+        Ok(id.iter().map(|b| format!("{b:02x}")).collect())
+    })
 }
 
 /// Applies one fix as one undo step.

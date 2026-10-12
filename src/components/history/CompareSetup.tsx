@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { pickOpen } from "../../lib/api";
-import { type Source, type VersionInfo, sourceKey } from "../../lib/history";
-import { type SetupContent, setupShow, versionTitle, when } from "../../lib/historyLogic";
+import { type Source, type VersionInfo, historyPageCount, sourceKey } from "../../lib/history";
+import { type SetupContent, rangeField, setupShow, versionTitle, when } from "../../lib/historyLogic";
 import { type CompareReq, useHistory } from "../../lib/historyStore";
 import { useStore } from "../../store";
 import { Icon } from "../Icons";
@@ -22,6 +22,24 @@ const CONTENT: { id: keyof SetupContent; label: string }[] = [
   { id: "images", label: "Images" },
 ];
 
+/** How many pages a source has: null until known, and for a file that cannot be read (the engine says why on Compare). */
+function usePageCount(doc: number | null, src: Source, now: number | undefined): number | null {
+  const key = `${doc}|${sourceKey(src)}`;
+  const [got, setGot] = useState<{ key: string; n: number | null } | null>(null);
+  useEffect(() => {
+    let live = true;
+    historyPageCount(doc, src).then(
+      (n) => live && setGot({ key, n }),
+      () => live && setGot({ key, n: null }),
+    );
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return got?.key === key ? got.n : src.kind === "current" ? (now ?? null) : null;
+}
+
 /** The page before a comparison: two file slots, how each is chosen, what to compare, and the Compare button. */
 export function CompareSetup() {
   const req = useHistory((s) => s.compare)!;
@@ -31,10 +49,14 @@ export function CompareSetup() {
   const h = useHistory.getState();
   const [content, setContent] = useState<SetupContent>({ text: true, formatting: true, images: true });
   const names = req.names ?? ["", ""];
+  const ranges = req.ranges ?? ["", ""];
+  const counts: [number | null, number | null] = [usePageCount(req.doc, req.a, pageCount), usePageCount(req.doc, req.b, pageCount)];
+  const fields = [rangeField(ranges[0], counts[0]), rangeField(ranges[1], counts[1])];
+  const rangeBad = fields.some((f) => f.error !== null);
 
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !(e.target instanceof HTMLSelectElement)) h.closeCompare();
+      if (e.key === "Escape" && !(e.target instanceof HTMLSelectElement) && !(e.target instanceof HTMLInputElement)) h.closeCompare();
     };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
@@ -45,8 +67,12 @@ export function CompareSetup() {
     const i = side === "a" ? 0 : 1;
     const next: [string, string] = [names[0], names[1]];
     next[i] = name;
-    h.setCompare({ [side]: src, names: next });
+    // another file has other pages: the range typed for the old one is dropped
+    const r: [string, string] = [ranges[0], ranges[1]];
+    r[i] = "";
+    h.setCompare({ [side]: src, names: next, ranges: r });
   };
+  const setRange = (side: "a" | "b", text: string) => h.setCompare({ ranges: side === "a" ? [text, ranges[1]] : [ranges[0], text] });
   const chooseFile = async (side: "a" | "b") => {
     try {
       const f = (await pickOpen(false, "compare"))[0];
@@ -55,14 +81,23 @@ export function CompareSetup() {
       toast(`Could not pick the file: ${String(e)}`);
     }
   };
-  const swap = () => h.setCompare({ a: req.b, b: req.a, names: [names[1], names[0]] });
+  const swap = () => h.setCompare({ a: req.b, b: req.a, names: [names[1], names[0]], ranges: [ranges[1], ranges[0]] });
 
   /** A side with nothing chosen: no document is open and the placeholder is still "current". */
   const unset = (side: "a" | "b") => req.doc === null && (side === "a" ? req.a : req.b).kind === "current";
-  const same = sourceKey(req.a) === sourceKey(req.b);
   const none = !Object.values(content).some(Boolean);
-  const ready = !unset("a") && !unset("b") && !same && !none;
-  const hint = unset("a") || unset("b") ? "Choose both files to compare." : same ? "Choose two different files." : none ? "Switch on something to compare." : "";
+  // the same file is fine when the two sides cover different pages
+  const same = sourceKey(req.a) === sourceKey(req.b) && ranges[0].trim() === ranges[1].trim();
+  const ready = !unset("a") && !unset("b") && !same && !none && !rangeBad;
+  const hint = unset("a") || unset("b")
+    ? "Choose both files to compare."
+    : same
+      ? "Choose two different files, or different pages of one."
+      : rangeBad
+        ? "Fix the page range."
+        : none
+          ? "Switch on something to compare."
+          : "";
 
   const go = () => h.setCompare({ stage: undefined, show: setupShow(content) });
 
@@ -72,11 +107,11 @@ export function CompareSetup() {
         <h2>Compare files</h2>
         <p className="dim">Choose the files you want to compare and adjust the settings below.</p>
         <div className="hx-slots">
-          <Slot side="a" label="Old file" req={req} versions={versions} docName={docName} pageCount={pageCount} names={names} unset={unset("a")} onSet={set} onFile={chooseFile} />
+          <Slot side="a" label="Old file" req={req} versions={versions} docName={docName} pageCount={pageCount} names={names} unset={unset("a")} onSet={set} onFile={chooseFile} range={ranges[0]} rangeError={fields[0].error} count={counts[0]} onRange={setRange} />
           <button className="hx-swap-round" title="Swap old and new" aria-label="Swap old and new" onClick={swap}>
             <Icon name="swap" size={18} />
           </button>
-          <Slot side="b" label="New file" req={req} versions={versions} docName={docName} pageCount={pageCount} names={names} unset={unset("b")} onSet={set} onFile={chooseFile} />
+          <Slot side="b" label="New file" req={req} versions={versions} docName={docName} pageCount={pageCount} names={names} unset={unset("b")} onSet={set} onFile={chooseFile} range={ranges[1]} rangeError={fields[1].error} count={counts[1]} onRange={setRange} />
         </div>
         <div className="hx-setup-foot">
           <fieldset className="hx-content">
@@ -120,6 +155,10 @@ function Slot({
   unset,
   onSet,
   onFile,
+  range,
+  rangeError,
+  count,
+  onRange,
 }: {
   side: "a" | "b";
   label: string;
@@ -131,6 +170,11 @@ function Slot({
   unset: boolean;
   onSet: (side: "a" | "b", src: Source, name?: string) => void;
   onFile: (side: "a" | "b") => void;
+  /** The pages to compare as typed, what is wrong with them, and how many pages the file has (null = not known). */
+  range: string;
+  rangeError: string | null;
+  count: number | null;
+  onRange: (side: "a" | "b", text: string) => void;
 }) {
   const src = side === "a" ? req.a : req.b;
   const how = howOf(src);
@@ -176,6 +220,27 @@ function Slot({
           </button>
         </div>
       </div>
+      {!unset && (
+        <div className="hx-slot-range">
+          <label>
+            <span>Pages</span>
+            <input
+              className={rangeError ? "bad" : ""}
+              value={range}
+              placeholder={count ? `All ${count}, or e.g. 1-3, 5` : "All, or e.g. 1-3, 5"}
+              aria-label={`${label}: pages to compare`}
+              aria-invalid={rangeError !== null}
+              spellCheck={false}
+              onChange={(e) => onRange(side, e.target.value)}
+            />
+          </label>
+          {rangeError && (
+            <span className="bad" role="status">
+              {rangeError}
+            </span>
+          )}
+        </div>
+      )}
       {options.length > 0 && (
         <div className="hx-slot-how">
           <div className="hx-seg inline" role="group" aria-label={`${label} is`}>

@@ -237,7 +237,7 @@ pub async fn doc_js_apply(eng: Eng<'_>, doc: DocId, op: Op) -> Result<Applied> {
     blocking(move || doc_js::apply(&eng, doc, &op, EditSource::User)).await
 }
 
-/// Writes every field's value to `to` (a save token) as FDF, XFDF or JSON, by the file name's extension.
+/// Writes every field's value to `to` (a save token) as FDF, XFDF, JSON, CSV, tab text or XML, by the file name's extension.
 #[tauri::command]
 pub async fn forms_export(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Paths>, doc: DocId, to: String) -> Result<super::data::Exported> {
     let dest = reg.take_save(window.label(), &to)?;
@@ -253,13 +253,21 @@ pub async fn forms_export(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Pa
     .await
 }
 
-/// Fills fields from `file` (an open token; FDF, XFDF or JSON, told by what is inside) as one undo step.
+/// How many records `file` (an open token) holds and what to call each: more than one asks the person which to import.
 #[tauri::command]
-pub async fn forms_import(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Paths>, doc: DocId, file: String) -> Result<super::data::Imported> {
+pub async fn forms_import_records(window: Window, reg: tauri::State<'_, Paths>, file: String) -> Result<super::data::Records> {
+    let path = reg.open(window.label(), &file)?;
+    blocking(move || super::data::records(&exchange::read_capped(&path)?, super::data::table_hint(&path))).await
+}
+
+/// Fills fields from `file` (an open token; FDF, XFDF, JSON, XML, CSV or tab text, told by what is inside) as one
+/// undo step. `row` is the record of a CSV or tab text file with several (0 is the first under the header).
+#[tauri::command]
+pub async fn forms_import(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Paths>, doc: DocId, file: String, row: Option<usize>) -> Result<super::data::Imported> {
     let path = reg.open(window.label(), &file)?;
     let eng = eng.inner().clone();
     blocking(move || {
-        let parsed = super::data::parse(&exchange::read_capped(&path)?)?;
+        let parsed = super::data::parse_pick(&exchange::read_capped(&path)?, row, super::data::table_hint(&path))?;
         super::data::import_one(&eng, doc, &parsed, EditSource::User)
     })
     .await
