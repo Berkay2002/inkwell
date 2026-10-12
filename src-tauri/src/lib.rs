@@ -12,6 +12,7 @@ pub mod exchange;
 pub mod history;
 pub mod history_ipc;
 pub mod imageedit;
+pub mod launch;
 pub mod links;
 pub mod marks;
 pub mod media;
@@ -881,26 +882,49 @@ fn set_cache_budget(eng: Eng<'_>, megabytes: usize) {
     eng.set_cache_budget(megabytes << 20);
 }
 
-/// Files passed on the command line (and, later, by the Windows file association).
+/// Files passed on the command line (Explorer's "Open with" and the file association start the app this way).
 #[tauri::command]
-fn initial_files(window: Window, reg: Reg<'_>) -> Vec<FileRef> {
-    std::env::args()
-        .skip(1)
-        .filter(|a| !a.starts_with('-') && std::path::Path::new(a).is_file())
-        .map(|a| reg.issue_open(window.label(), a))
+fn initial_files(window: Window, reg: Reg<'_>, forwarded: State<'_, launch::Forwarded>) -> Vec<FileRef> {
+    let args: Vec<String> = std::env::args().collect();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    // plus the files that later launches forwarded while the window was still loading
+    let mut files = launch::pdfs_in(&args, &cwd);
+    files.extend(forwarded.ui_ready());
+    files
+        .into_iter()
+        .map(|p| reg.issue_open(window.label(), p.to_string_lossy().into_owned()))
         .collect()
 }
 
-/// Files dropped on a window from Explorer: open tokens for the PDFs, sent to that window.
-fn on_drop(window: &Window, paths: &[std::path::PathBuf]) {
-    let reg = window.state::<Paths>();
+/// Open tokens for the PDFs in `paths`, sent to the window `label` as a drop (the UI opens them in tabs).
+fn deliver_pdfs(app: &tauri::AppHandle, label: &str, paths: &[std::path::PathBuf]) {
+    let reg = app.state::<Paths>();
     let refs: Vec<FileRef> = paths
         .iter()
-        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")))
-        .map(|p| reg.issue_open(window.label(), p.to_string_lossy().into_owned()))
+        .filter(|p| launch::is_pdf(p))
+        .map(|p| reg.issue_open(label, p.to_string_lossy().into_owned()))
         .collect();
     if !refs.is_empty() {
-        let _ = window.emit_to(window.label(), "files-dropped", refs);
+        let _ = app.emit_to(label, "files-dropped", refs);
+    }
+}
+
+/// Files dropped on a window from Explorer.
+fn on_drop(window: &Window, paths: &[std::path::PathBuf]) {
+    deliver_pdfs(window.app_handle(), window.label(), paths);
+}
+
+/// A later launch (Explorer "Open with", a double click on a PDF) reached the running app: bring its
+/// window forward and open the files the way a drop does.
+fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, cwd: String) {
+    let files = launch::pdfs_in(&args, std::path::Path::new(&cwd));
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    if let Some(now) = app.state::<launch::Forwarded>().forward(files) {
+        deliver_pdfs(app, "main", &now);
     }
 }
 
@@ -1005,11 +1029,17 @@ pub fn run() {
     let media = Arc::new(media::Cache::default());
     let proto_media = media.clone();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    if launch::single_instance() {
+        // Registered first: a later launch must be caught before anything else starts.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| on_second_launch(app, args, cwd)));
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
         .manage(ai::Hub::new())
         .manage(Paths::default())
+        .manage(launch::Forwarded::default())
         .manage(Arc::new(tools::Jobs::default()))
         .manage(Arc::new(measure::SnapCache::default()))
         .manage(Arc::new(search::files::FolderSearches::default()))

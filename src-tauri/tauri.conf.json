@@ -3,6 +3,7 @@
   "productName": "Inkwell",
   "version": "0.1.0",
   "identifier": "app.inkwell.desktop",
+  "mainBinaryName": "inkwell",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -31,11 +32,26 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["msi"],
+    "publisher": "Berkay",
+    "category": "Productivity",
+    "shortDescription": "A fast, private PDF app.",
+    "longDescription": "Inkwell is a local, private PDF app for Windows: read, annotate, fill, edit, sign, convert and organise PDFs without an account or a network service.",
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": { "type": "embedBootstrapper", "silent": true },
+      "wix": {
+        "upgradeCode": "A7BB0957-BACE-46F2-A766-0F5C17191026",
+        "language": "en-US",
+        "template": "wix/main.wxs"
+      }
+    },
     "resources": {
+      "icons/pdf-document.ico": "pdf-document.ico",
       "../third_party/THIRD-PARTY-NOTICES.txt": "licenses/THIRD-PARTY-NOTICES.txt",
       "../third_party/fonts/OFL-NotoSans.txt": "licenses/OFL-NotoSans.txt",
       "../third_party/fonts/OFL-NotoSansCJK.txt": "licenses/OFL-NotoSansCJK.txt",
+      "../third_party/fluent/LICENSE-MIT": "licenses/fluent/LICENSE-MIT",
       "../third_party/pdfcraft/LICENSE-MIT": "licenses/pdfcraft/LICENSE-MIT",
       "../third_party/pdfcraft/LICENSE-APACHE": "licenses/pdfcraft/LICENSE-APACHE",
       "../third_party/pdfcraft/NOTICE": "licenses/pdfcraft/NOTICE"

@@ -65,7 +65,7 @@ export function SignStrip({ doc }: { doc: DocState }) {
           aria-label={s ? `Place ${label.toLowerCase()}` : `Add ${label.toLowerCase()}`}
           onClick={() => (s ? sg().setTool(tool === kind ? "select" : kind) : sg().setCreator(kind))}
         >
-          {s ? <img src={s.dataUrl} alt="" draggable={false} /> : <span>{kind === "signature" ? "Sign" : "AJ"}</span>}
+          {s ? <img src={s.dataUrl} alt="" draggable={false} /> : <span>{kind === "signature" ? "Sign" : "Initials"}</span>}
         </button>
         {s && (
           <button className="sg-tile-x" title={`Change ${label.toLowerCase()}`} aria-label={`Change ${label.toLowerCase()}`} onClick={() => sg().setCreator(kind)}>

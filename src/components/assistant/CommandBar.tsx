@@ -1,6 +1,7 @@
 import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { type Msg, providerOf, useAi } from "../../lib/aiStore";
 import { type DocState, useStore } from "../../store";
+import { Icon } from "../Icons";
 import { Answer, CloseButton, Composer, Consent, Gate, Glyph, MoreMenu, ProviderPicker, usePop } from "./parts";
 import { type BarAt, barStage, surfaceLeft, surfaceMaxH, surfaceWidth, useBar } from "./barView";
 
@@ -156,16 +157,6 @@ export function Bar({ doc }: { doc: DocState }) {
 
 // ---- header ------------------------------------------------------------------------------------
 
-const Line = ({ d }: { d: string }) => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d={d} />
-  </svg>
-);
-const MINUS = "M6 12h12";
-const GRIP = "M9.5 6h.01M14.5 6h.01M9.5 12h.01M14.5 12h.01M9.5 18h.01M14.5 18h.01";
-const UP = "M7 14l5-5 5 5";
-const DOWN = "M7 10l5 5 5-5";
-
 /** Gate and consent have no chat yet: a title and Close. */
 function PlainHeader({ doc }: { doc: DocState }) {
   return (
@@ -190,7 +181,7 @@ function BarHeader({ doc, open }: { doc: DocState; open: boolean }) {
       }}
     >
       <button className="ax-icon small" title="Minimize (Esc)" aria-label="Minimize" onClick={() => dispatch("minimize")}>
-        <Line d={MINUS} />
+        <Icon name="minus" size={16} />
       </button>
       <ChatsMenu doc={doc} />
       <span className="grow" />
@@ -202,7 +193,7 @@ function BarHeader({ doc, open }: { doc: DocState; open: boolean }) {
         aria-expanded={open}
         onClick={() => dispatch("headerClick")}
       >
-        <Line d={open ? DOWN : UP} />
+        <Icon name={open ? "down" : "up"} size={16} />
       </button>
       <LayoutMenu />
     </div>
@@ -280,7 +271,7 @@ function LayoutMenu() {
   return (
     <div className="ax-pop-wrap" ref={ref}>
       <button className="ax-icon small" title="Chat options" aria-label="Chat options" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <Line d={GRIP} />
+        <Icon name="grip" size={16} />
       </button>
       {open && (
         <div className="ax-pop up right" role="menu">

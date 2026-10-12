@@ -8,18 +8,19 @@ import { useTools } from "./toolsStore";
 
 export type ToolId = "organize" | "edit" | "annotate" | "fill" | "redact" | "ocr" | "compress" | "protect" | "merge" | "export" | "create";
 
-export const quickTools: { id: ToolId; label: string; icon: IconName }[] = [
-  { id: "organize", label: "Organize", icon: "organize" },
-  { id: "edit", label: "Edit", icon: "edit" },
-  { id: "annotate", label: "Annotate", icon: "annotate" },
-  { id: "fill", label: "Fill & sign", icon: "fill" },
-  { id: "redact", label: "Redact", icon: "redact" },
-  { id: "ocr", label: "OCR", icon: "ocr" },
-  { id: "compress", label: "Compress", icon: "compress" },
-  { id: "protect", label: "Protect", icon: "lock" },
-  { id: "merge", label: "Combine", icon: "merge" },
-  { id: "export", label: "Export", icon: "share" },
-  { id: "create", label: "Create PDF", icon: "filePlus" },
+/** `group` is the colour the tile takes (a `TOOL_GROUPS` id, or one of the hues in toolsCatalog.ts). */
+export const quickTools: { id: ToolId; label: string; icon: IconName; group: string }[] = [
+  { id: "organize", label: "Organize", icon: "organize", group: "organize" },
+  { id: "edit", label: "Edit", icon: "edit", group: "edit" },
+  { id: "annotate", label: "Annotate", icon: "annotate", group: "comment" },
+  { id: "fill", label: "Fill & sign", icon: "fill", group: "sign" },
+  { id: "redact", label: "Redact", icon: "redact", group: "protect" },
+  { id: "ocr", label: "OCR", icon: "ocr", group: "optimize" },
+  { id: "compress", label: "Compress", icon: "compress", group: "optimize" },
+  { id: "protect", label: "Protect", icon: "lock", group: "protect" },
+  { id: "merge", label: "Combine", icon: "merge", group: "organize" },
+  { id: "export", label: "Export", icon: "share", group: "convert" },
+  { id: "create", label: "Create PDF", icon: "filePlus", group: "convert" },
 ];
 
 /** Later phases register the real tool here; until one does, a tool just opens the picked file. */

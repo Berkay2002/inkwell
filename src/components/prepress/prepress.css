@@ -4,9 +4,15 @@
   flex-direction: column;
   gap: 8px;
 }
-.pp-seg {
+/* .ax-seg brings 18px side margins: with a 100% width the switch ran 36px past the panel and made a scrollbar */
+.pp-panel .pp-seg {
   display: flex;
-  width: 100%;
+  width: auto;
+  margin: 0;
+  align-self: stretch;
+}
+.pp-panel .a11y-body {
+  overflow-x: hidden;
 }
 .pp-seg button {
   flex: 1 1 0;
@@ -158,7 +164,8 @@
 .pr-scrim .pr-sheet:focus {
   outline: none;
 }
-.pp-sheet {
+/* two classes: .pr-sheet (print.css) is the same weight and loads later, which made this dialog 1020px wide and mostly empty */
+.pr-sheet.pp-sheet {
   width: min(560px, 94vw);
   height: auto;
   max-height: 90vh;
@@ -226,8 +233,19 @@
 .pp-caption {
   font-size: 12.5px;
 }
+/* minmax(0, ...) and a full-width field: an input's own width held the right column past the pane's edge */
 .pp-margins {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px 12px;
+}
+.pp-margins .tl-field {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+/* the reset link keeps to one line; the other button in its row takes what is left */
+.pr-pair > .a11y-quiet {
+  flex: none;
+  white-space: nowrap;
 }

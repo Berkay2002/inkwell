@@ -697,6 +697,44 @@ fn the_estimate_is_within_30_percent_of_the_real_size_on_the_study_samples() {
     assert!(checked >= 2, "samples with images: {checked}");
 }
 
+/// The sheet lists Smallest, Balanced and High quality in that order, so neither the predicted nor the
+/// real sizes may run the other way. The tour showed Smallest ~56 KB above Balanced ~55 KB on
+/// edit-source.pdf: the image pass had written a 2.3 KB ICC profile for the one image it rewrote
+/// (the file had no profile of its own), more than the recompression saved.
+#[test]
+fn the_presets_never_rank_a_smaller_preset_above_a_larger_one() {
+    use super::audit::Category as C;
+    let scratch = Scratch::new();
+    let mut bad = Vec::new();
+    for name in ["edit-source.pdf", "compress-source.pdf", "opt-in-01.pdf", "scan-source.pdf", "form-source.pdf", "red-in-01.pdf", "pages-a.pdf"] {
+        let input = scratch.copy(name);
+        let full = audit_file(&input, None).unwrap();
+        let est = estimate::estimate(&input, None, &full, &AtomicBool::new(false)).unwrap();
+        let by = |p: Preset| est.iter().find(|e| e.preset == p).unwrap().bytes;
+        let est = [by(Preset::Smallest), by(Preset::Balanced), by(Preset::HighQuality)];
+        let mut real = Vec::new();
+        for p in [Preset::Smallest, Preset::Balanced, Preset::HighQuality] {
+            let mut o = Options::preset(p);
+            let out = scratch.path(&format!("{name}-{p:?}.pdf"));
+            o.output = Some(out.clone());
+            real.push(run(&input, &o).unwrap().size_after);
+            // "Other" holds streams that are none of the known kinds: the invented profile used to land there.
+            let after = audit_file(&out, None).unwrap();
+            if after.bytes(C::Other) > full.bytes(C::Other) + 50 {
+                bad.push(format!("{name} {p:?}: {} B of unexplained streams (input {})", after.bytes(C::Other), full.bytes(C::Other)));
+            }
+        }
+        println!("{name:22} total {:>8} est {est:?} real {real:?}", full.total);
+        if !(est[0] <= est[1] && est[1] <= est[2]) {
+            bad.push(format!("{name}: estimated smallest {}, balanced {}, high {}", est[0], est[1], est[2]));
+        }
+        if !(real[0] <= real[1] && real[1] <= real[2]) {
+            bad.push(format!("{name}: real smallest {}, balanced {}, high {}", real[0], real[1], real[2]));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
 /// A big, image-heavy file: the sample covers a small part of it; the estimate is close and the range
 /// still holds the real size. Prints the time (a release build is the one that matters: < 1 s).
 #[test]

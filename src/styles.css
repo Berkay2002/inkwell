@@ -43,6 +43,9 @@
   --shadow-1: 0 1px 2px var(--sh-1), 0 2px 8px var(--sh-1);
   --shadow-2: 0 2px 4px var(--sh-1), 0 8px 24px var(--sh-2);
   --shadow-3: 0 4px 10px var(--sh-2), 0 16px 40px var(--sh-3);
+  /* Outer height of every grouped control on the toolbar: Read | Edit | Organize, Tools and the assistant group on
+     the right (28 px: its 24 px button plus 2 px of padding each side, measured in the DOM). */
+  --tb-control-h: 28px;
   --radius-sm: 8px;
   --radius-md: 10px;
   --radius-lg: 14px;
@@ -228,6 +231,11 @@ select {
   border-radius: 6px;
   color: var(--text-2);
 }
+/* every toolbar control is one height (the assistant group's), so tops and bottoms line up */
+.toolbar .icon-btn {
+  width: var(--tb-control-h);
+  height: var(--tb-control-h);
+}
 .icon-btn:hover:not(:disabled) {
   background: var(--surface-2);
   color: var(--text);
@@ -298,20 +306,28 @@ select {
   background: var(--sidebar);
   border-right: 1px solid var(--border);
 }
+/* a track with a raised active tab: bare words with a faint accent chip read as loose labels */
 .sidebar-tabs {
   display: flex;
-  gap: 4px;
-  padding: 8px;
+  gap: 2px;
+  margin: 8px;
+  padding: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 .seg {
   flex: 1;
   height: 26px;
+  padding: 0 6px;
   border-radius: 6px;
   color: var(--text-2);
 }
 .seg.on {
-  background: var(--accent-soft);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-1);
   color: var(--accent);
+  font-weight: 600;
 }
 .thumbs,
 .outline {
@@ -859,13 +875,14 @@ select {
 }
 .tools {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
-  gap: 12px;
+  /* eleven tiles: 96px minimum needed 1176px and left "Create PDF" alone on a second row in the 1160px column at 1440 */
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  gap: 10px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
-.tool {
+.quick-tool {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -880,7 +897,7 @@ select {
     transform 0.12s,
     box-shadow 0.12s;
 }
-.tool:hover {
+.quick-tool:hover {
   transform: translateY(-1px);
   box-shadow: var(--shadow-2);
 }
@@ -1544,10 +1561,11 @@ select {
   flex: none;
   align-items: center;
   gap: 6px;
+  box-sizing: border-box;
   width: auto;
-  height: 36px;
+  height: var(--tb-control-h);
   margin-left: 8px;
-  padding: 0 10px 0 12px;
+  padding: 0 8px 0 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
@@ -1568,7 +1586,7 @@ select {
   .home *::after {
     transition: none !important;
   }
-  .home .tool:hover {
+  .home .quick-tool:hover {
     transform: none;
   }
 }

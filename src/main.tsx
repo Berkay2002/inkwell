@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { trackReadingPosition } from "./recents";
 import { useA11y } from "./lib/a11y";
 import { usePreflight } from "./lib/preflight";
@@ -36,6 +37,8 @@ trackReadingPosition(useStore);
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary name="Inkwell">
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );

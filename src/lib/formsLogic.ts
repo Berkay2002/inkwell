@@ -194,6 +194,12 @@ export function progress(fields: Field[]): [number, number] {
   return [r.filter((f) => filled(f, fields)).length, r.length];
 }
 
+/**
+ * The number on the panel header. Filling counts what the progress line counts (fillable fields), so the header and
+ * "0 of 6 fields filled" never disagree; preparing a form lists every row, buttons included.
+ */
+export const fieldCount = (fields: Field[], authoring: boolean): number => (authoring ? rows(fields).length : progress(fields)[1]);
+
 /** Required fields still empty, in document order. */
 export const missingRequired = (fields: Field[]): Field[] => rows(fields).filter((f) => isFillable(f) && f.required && !filled(f, fields));
 

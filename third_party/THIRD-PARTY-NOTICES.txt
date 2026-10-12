@@ -19,6 +19,11 @@ pdfcraft
   licenses/pdfcraft/LICENSE-MIT, licenses/pdfcraft/LICENSE-APACHE and licenses/pdfcraft/NOTICE.
   The adapted files are listed in third_party/pdfcraft/INKWELL-NOTICE.txt in the source.
 
+Fluent UI System Icons
+  Copyright (c) 2020 Microsoft Corporation
+  Licensed under the MIT licence: licenses/fluent/LICENSE-MIT
+  The interface icons in src/assets/icons/fluent/ are copied from @fluentui/svg-icons (see docs/icons.md).
+
 OpenAI and Claude marks
   The two marks beside the assistant's provider names (src/components/assistant/providerMarks.tsx) are
   the "openai" and "claude" icons of simple-icons 16.35.0 (https://simpleicons.org), dedicated to the

@@ -27,7 +27,7 @@
   display: grid;
   place-items: center;
   /* fixed: a percentage collapses inside the shrink-to-fit strip */
-  width: 38px;
+  width: 46px;
   height: 30px;
   padding: 2px;
   color: var(--text-2);
@@ -37,7 +37,10 @@
   border: 1px solid var(--border);
   border-radius: 8px;
 }
+/* nothing saved yet: an "add" button in the theme's own colours (the paper is for a saved signature's ink) */
 .sg-tile.empty .sg-tile-btn {
+  color: var(--text);
+  background: var(--surface-2);
   border-style: dashed;
   border-color: var(--border-strong);
 }

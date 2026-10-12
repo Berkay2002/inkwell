@@ -16,7 +16,10 @@ const KEEP = 48;
 const done = new Map<string, string | null>();
 const flying = new Map<string, Promise<string | null>>();
 
-const scaleFor = (size: Size) => Math.max(1, Math.floor((EDGE / Math.max(size[0], size[1])) * 1000));
+/** A dialog's preview shows the page at about 450 px: drawn at the strip's 160 it was blurry. */
+export const PREVIEW_EDGE = 720;
+
+const scaleFor = (size: Size, edge = EDGE) => Math.max(1, Math.floor((edge / Math.max(size[0], size[1])) * 1000));
 
 function remember(key: string, url: string | null) {
   done.delete(key);
@@ -38,8 +41,8 @@ function once(key: string, make: () => Promise<string | null>): Promise<string |
   return p;
 }
 
-async function draw(doc: number, page: number, size: Size, rev: number, stream: number, view?: number): Promise<string | null> {
-  const t = await api.fetchTile(doc, page, 0, scaleFor(size), 0, 0, 1, 0, stream, rev, view);
+async function draw(doc: number, page: number, size: Size, rev: number, stream: number, view?: number, edge = EDGE): Promise<string | null> {
+  const t = await api.fetchTile(doc, page, 0, scaleFor(size, edge), 0, 0, 1, 0, stream, rev, view);
   if (!t) return null;
   const c = document.createElement("canvas");
   c.width = t.w;
@@ -49,8 +52,8 @@ async function draw(doc: number, page: number, size: Size, rev: number, stream: 
 }
 
 /** The page as printed, for the backdrop of a preview. */
-export const pageThumb = (doc: number, page: number, size: Size, rev: number) =>
-  once(`${doc}/${rev}/${page}/page`, () => draw(doc, page, size, rev, PAGE_STREAM));
+export const pageThumb = (doc: number, page: number, size: Size, rev: number, edge = EDGE) =>
+  once(`${doc}/${rev}/${page}/page/${edge}`, () => draw(doc, page, size, rev, PAGE_STREAM, undefined, edge));
 
 /** One plate of the page on its own (the plate's `key` as in `plateList`). */
 export const plateThumb = (doc: number, page: number, size: Size, rev: number, key: string, seps: PageSeps | null, overprint: boolean) =>

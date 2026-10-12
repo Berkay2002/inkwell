@@ -3,7 +3,7 @@ import type { TextAlign, TextBlock } from "../../lib/api";
 import { useImageEdit } from "../../lib/imageEdit";
 import { type Decor, type EditSection, SIGNED_TEXT, decorOn, displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
 import { type DocState } from "../../store";
-import { Icon } from "../Icons";
+import { Icon, type IconName } from "../Icons";
 import { BookmarksPanel } from "./BookmarksPanel";
 import { AddImageButton, ImageSection } from "./ImagePanel";
 import { LinksPanel } from "./LinksPanel";
@@ -12,11 +12,11 @@ import "./edit.css";
 const te = () => useTextEdit.getState();
 
 const SWATCHES = ["#1a1c20", "#6b675f", "#2e4b8f", "#2f7d4f", "#a8321f"];
-const ALIGNS: { id: TextAlign; label: string; path: string }[] = [
-  { id: "left", label: "Align left", path: "M4 6h16M4 10h10M4 14h16M4 18h10" },
-  { id: "center", label: "Centre", path: "M4 6h16M7 10h10M4 14h16M7 18h10" },
-  { id: "right", label: "Align right", path: "M4 6h16M10 10h10M4 14h16M10 18h10" },
-  { id: "justify", label: "Justify", path: "M4 6h16M4 10h16M4 14h16M4 18h16" },
+const ALIGNS: { id: TextAlign; label: string; icon: IconName }[] = [
+  { id: "left", label: "Align left", icon: "alignLeft" },
+  { id: "center", label: "Centre", icon: "alignCenter" },
+  { id: "right", label: "Align right", icon: "alignRight" },
+  { id: "justify", label: "Justify", icon: "alignJustify" },
 ];
 const SPACINGS = [1, 1.15, 1.2, 1.5, 2];
 const DECORS: { id: Decor; label: string; title: string; glyph: React.ReactNode }[] = [
@@ -303,9 +303,7 @@ function Format({ id, block, selection, locked }: { id: number; block: TextBlock
               {...keepFocus}
               onClick={() => block.align !== a.id && apply({ align: a.id })}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
-                <path d={a.path} />
-              </svg>
+              <Icon name={a.icon} size={16} filled={block.align === a.id} />
             </button>
           ))}
         </span>

@@ -37,12 +37,6 @@ export function BookmarkBar({ doc }: { doc: number }) {
         <Icon name="plus" size={16} />
         New
       </button>
-      <button className="te-icon" aria-label="Indent" title="Make it a part of the bookmark above" disabled={!sel || !where || where.index === 0} onClick={indent}>
-        <Icon name="right" size={16} />
-      </button>
-      <button className="te-icon" aria-label="Outdent" title="Move it out of its group" disabled={!sel || !where || where.parent == null} onClick={outdent}>
-        <Icon name="up" size={16} />
-      </button>
       <button
         className={showProblems ? "te-btn on bm-problems" : "te-btn bm-problems"}
         aria-pressed={showProblems}
@@ -54,6 +48,16 @@ export function BookmarkBar({ doc }: { doc: number }) {
       <span className="grow" />
       <button className="te-icon" aria-label="Delete bookmark" title="Delete the selected bookmark and what is under it" disabled={!sel} onClick={() => sel && void nav().remove(doc, [sel.id])}>
         <Icon name="trash" size={16} />
+      </button>
+      {/* a second row on purpose: words, not bare arrows, say which way each one moves the bookmark */}
+      <span className="bm-break" />
+      <button className="te-btn bm-move" title="Make it a part of the bookmark above" disabled={!sel || !where || where.index === 0} onClick={indent}>
+        <Icon name="right" size={16} />
+        Indent
+      </button>
+      <button className="te-btn bm-move" title="Move it out of its group" disabled={!sel || !where || where.parent == null} onClick={outdent}>
+        <Icon name="left" size={16} />
+        Outdent
       </button>
     </div>
   );
