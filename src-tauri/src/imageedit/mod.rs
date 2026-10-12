@@ -667,6 +667,12 @@ pub struct ImageEdited {
 /// a name never touches another page or form.
 fn local_xobjects(doc: &mut PdfDocument, page: &PdfObject) -> Result<PdfObject> {
     let mut page = page.clone();
+    // A copy of shared or inherited dictionaries makes every form in it have one more user.
+    let local = |o: &PdfObject| o.is_dict().unwrap_or(false) && !o.is_indirect().unwrap_or(true);
+    let resources = get(&page, "Resources").filter(local);
+    if !resources.as_ref().is_some_and(|r| get(r, "XObject").is_some_and(|x| local(&x))) {
+        references_added();
+    }
     let res = match page.get_dict_inheritable("Resources")? {
         Some(r) if r.is_dict()? => r.copy_dict()?,
         _ => doc.new_dict()?,
@@ -681,17 +687,22 @@ fn local_xobjects(doc: &mut PdfDocument, page: &PdfObject) -> Result<PdfObject> 
     get(&res, "XObject").ok_or_else(|| invalid("the page has no XObjects"))
 }
 
-/// Adds XObject `obj` to the holder's resources under a new name made of `prefix` and a number.
-fn add_named(doc: &mut PdfDocument, holder: &PdfObject, prefix: &str, obj: &PdfObject) -> Result<Vec<u8>> {
+/// Adds XObject `obj` to the holder's resources under a new name made of `prefix` and a number, one that is no
+/// key of its XObjects and not in `avoid` (names some content draws, so a dangling `Do` of it doesn't start
+/// drawing the new object).
+fn add_named(doc: &mut PdfDocument, holder: &PdfObject, prefix: &str, obj: &PdfObject, avoid: &HashSet<&[u8]>) -> Result<Vec<u8>> {
     let mut xo = local_xobjects(doc, holder)?;
-    let name = (0..).map(|i| format!("{prefix}{i}")).find(|n| get(&xo, n).is_none()).expect("a free name");
+    let name = (0..)
+        .map(|i| format!("{prefix}{i}"))
+        .find(|n| get(&xo, n).is_none() && !avoid.contains(n.as_bytes()))
+        .expect("a free name");
     xo.dict_put(name.as_str(), obj.clone())?;
     Ok(name.into_bytes())
 }
 
 /// Adds image object `img` to the holder's XObjects under a new name.
 fn add_resource(doc: &mut PdfDocument, holder: &PdfObject, img: &PdfObject) -> Result<Vec<u8>> {
-    add_named(doc, holder, "IwImg", img)
+    add_named(doc, holder, "IwImg", img, &HashSet::new())
 }
 
 /// The content streams of a page, or the one stream of a form XObject, as they are now.
@@ -716,24 +727,32 @@ fn forget_unused(doc: &mut PdfDocument, p: &PdfObject, names: &HashSet<Vec<u8>>)
     if gone.is_empty() {
         return Ok(());
     }
-    // A form XObject without its own resources draws with the holder's (PDF 1.1): keep names then.
-    let res = p.get_dict_inheritable("Resources")?;
-    let xobjects = res.as_ref().and_then(|r| get(r, "XObject"));
-    if let Some(x) = &xobjects {
-        for i in 0..x.dict_len()? as i32 {
-            if let Some(v) = x.get_dict_val(i)? {
-                let form = get(&v, "Subtype").and_then(|s| s.as_name().ok()).as_deref() == Some(b"Form");
-                if form && get(&v, "Resources").is_none() {
-                    return Ok(());
-                }
-            }
-        }
+    if shares_resources(p)? {
+        return Ok(());
     }
     let mut xo = local_xobjects(doc, p)?;
     for n in gone {
         xo.dict_delete(String::from_utf8_lossy(n).as_ref())?;
     }
     Ok(())
+}
+
+/// The holder's resources are also those of a form XObject or a Type3 font that has none of its own (PDF 1.1): its
+/// content can draw names the holder's own content doesn't.
+fn shares_resources(holder: &PdfObject) -> Result<bool> {
+    let Some(res) = holder.get_dict_inheritable("Resources")? else { return Ok(false) };
+    for (dict, subtype) in [("XObject", &b"Form"[..]), ("Font", &b"Type3"[..])] {
+        let Some(x) = get(&res, dict) else { continue };
+        for i in 0..x.dict_len()? as i32 {
+            if let Some(v) = x.get_dict_val(i)? {
+                let kind = get(&v, "Subtype").and_then(|s| s.as_name().ok());
+                if kind.as_deref() == Some(subtype) && get(&v, "Resources").is_none() {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn flate(data: &[u8]) -> Result<Vec<u8>> {
@@ -826,7 +845,7 @@ pub fn edit(
             return Err(EngineError::Stale);
         }
         crate::outline::refuse_if_certified(d, "Changing its images")?;
-        warning = apply(d, page, index, change)?;
+        warning = apply(d, page, index, change, &mut Users::new())?;
         Ok(vec![page])
     })?;
     Ok(ImageEdited { state, warning })
@@ -874,8 +893,9 @@ pub fn edit_many(eng: &Engine, doc: DocId, rev: u32, page: u32, items: &[ImageIt
             return Err(EngineError::Stale);
         }
         crate::outline::refuse_if_certified(d, "Changing its images")?;
+        let mut users = Users::new();
         for it in order {
-            let w = apply(d, page, Some(it.index), &it.change)?;
+            let w = apply(d, page, Some(it.index), &it.change, &mut users)?;
             warning = warning.take().or(w);
         }
         Ok(vec![page])
@@ -939,9 +959,58 @@ fn write_form(_d: &mut PdfDocument, form: &PdfObject, data: &[u8]) -> Result<()>
 /// The most objects the user count of a form looks at.
 const MAX_WALK: usize = 2_000_000;
 
+/// Bumped whenever a change gives forms or resource dictionaries more users than they had (a copy of a resources
+/// dictionary, a copy of a form): the counts taken before it are then too low. Per thread: one edit runs on one.
+fn references_added() {
+    REFERENCES.with(|r| r.set(r.get().wrapping_add(1)));
+}
+
+thread_local! {
+    static REFERENCES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Walks of the whole file made on this thread.
+    static WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The user counts of one edit (a batch, a move to another page): the file is walked once, and again only when a
+/// copy has added users since. A file too big to walk stays unwalked: its forms count as shared, except those this
+/// edit made itself.
+struct Users {
+    seen: u32,
+    counts: Option<HashMap<i32, u32>>,
+    walked: bool,
+    too_big: bool,
+    /// The forms this edit made: each is drawn once, by the `Do` that was pointed at it.
+    made: HashSet<i32>,
+}
+
+impl Users {
+    fn new() -> Users {
+        Users { seen: 0, counts: None, walked: false, too_big: false, made: HashSet::new() }
+    }
+
+    /// The slot counts of every form and resource dictionary `pi`'s scopes name; None when the file is too big.
+    fn of(&mut self, d: &PdfDocument, pi: &PageImages) -> Option<HashMap<i32, u32>> {
+        let now = REFERENCES.with(|r| r.get());
+        if !self.too_big && (!self.walked || self.seen != now) {
+            let mut targets: HashSet<i32> = pi.scopes.iter().flat_map(|s| [s.num, s.res_num, s.xo_num]).collect();
+            targets.retain(|n| *n > 0);
+            self.counts = incoming(d, &targets);
+            self.too_big = self.counts.is_none();
+            (self.walked, self.seen) = (true, now);
+        }
+        self.counts.clone()
+    }
+}
+
 /// How many slots (dictionary values and array elements) of the objects reachable from the trailer refer to each
 /// of `targets`. None when the file is too large to walk: the caller then takes everything as shared.
 fn incoming(d: &PdfDocument, targets: &HashSet<i32>) -> Option<HashMap<i32, u32>> {
+    #[cfg(test)]
+    WALKS.with(|w| w.set(w.get() + 1));
     let mut counts = HashMap::new();
     let mut seen = HashSet::new();
     let mut stack = vec![d.trailer().ok()?];
@@ -981,7 +1050,7 @@ fn incoming(d: &PdfDocument, targets: &HashSet<i32>) -> Option<HashMap<i32, u32>
 /// `Do` that draws it in the parent is pointed at the copy under a fresh name, and the copy's own `Do` of the next
 /// form is pointed at that one's copy. Whatever is not sure is taken as shared: a copy costs a few bytes, a change
 /// to another page is a wrong document.
-fn private_form(d: &mut PdfDocument, pi: &PageImages, at: usize) -> Result<PdfObject> {
+fn private_form(d: &mut PdfDocument, pi: &PageImages, at: usize, users: &mut Users) -> Result<PdfObject> {
     let mut chain = Vec::new();
     let mut s = at;
     while let Some((p, _, _)) = pi.scopes[s].via {
@@ -989,28 +1058,31 @@ fn private_form(d: &mut PdfDocument, pi: &PageImages, at: usize) -> Result<PdfOb
         s = p;
     }
     chain.reverse();
-    let mut targets = HashSet::new();
+    let counts = users.of(d, pi);
+    let used_once = |n: i32| n == 0 || counts.as_ref().is_some_and(|c| c.get(&n).copied().unwrap_or(0) <= 1);
+    // Names a form or a Type3 font without resources draws are not among the parent's own `Do`s.
+    let mut open_parent = HashSet::new();
     for &c in &chain {
-        let sc = &pi.scopes[c];
-        targets.insert(sc.num);
-        if let Some((p, _, _)) = sc.via {
-            targets.extend([pi.scopes[p].res_num, pi.scopes[p].xo_num]);
+        let Some((p, _, _)) = pi.scopes[c].via else { continue };
+        if shares_resources(&pi.scopes[p].holder)? {
+            open_parent.insert(p);
         }
     }
-    targets.retain(|n| *n > 0);
-    let counts = incoming(d, &targets);
-    let used_once = |n: i32| n == 0 || counts.as_ref().is_some_and(|c| c.get(&n).copied().unwrap_or(0) <= 1);
     let first_shared = chain.iter().position(|&c| {
         let sc = &pi.scopes[c];
         let Some((p, _, name)) = &sc.via else { return true };
         let parent = &pi.scopes[*p];
         let draws = parent.content.ops.iter().filter(|o| o.is("Do") && o.name(0) == Some(name.as_slice())).count();
-        let named = counts.as_ref().is_some_and(|c| c.get(&sc.num).copied() == Some(1));
-        !(sc.num > 0 && named && draws == 1 && parent.own_res && used_once(parent.res_num) && used_once(parent.xo_num))
+        let named = match &counts {
+            Some(c) => c.get(&sc.num).copied() == Some(1),
+            None => users.made.contains(&sc.num),
+        };
+        !(sc.num > 0 && named && draws == 1 && parent.own_res && !open_parent.contains(p) && used_once(parent.res_num) && used_once(parent.xo_num))
     });
     let Some(j) = first_shared else { return Ok(pi.scopes[at].holder.clone()) };
     // The parent of the first copy is not shared: the page, or a form this way alone reaches.
     let first_parent = pi.scopes[pi.scopes[chain[j]].via.as_ref().map_or(0, |v| v.0)].holder.clone();
+    let drawn: HashSet<&[u8]> = pi.scopes.iter().flat_map(|s| s.content.ops.iter()).filter(|o| o.is("Do")).filter_map(|o| o.name(0)).collect();
     let mut parent_holder = first_parent;
     let mut clone = pi.scopes[at].holder.clone();
     for &c in &chain[j..] {
@@ -1026,7 +1098,10 @@ fn private_form(d: &mut PdfDocument, pi: &PageImages, at: usize) -> Result<PdfOb
         let data = sc.content.streams.first().map(|(_, b)| b.as_slice()).unwrap_or_default();
         clone = d.add_stream(&Buffer::from_bytes(&flate(data)?)?, Some(&dict), true)?;
         local_xobjects(d, &clone)?;
-        let name = add_named(d, &parent_holder, "IwForm", &clone)?;
+        users.made.insert(clone.as_indirect()?);
+        // The copy's resources name the forms the original's do, and the parent names the copy.
+        references_added();
+        let name = add_named(d, &parent_holder, "IwForm", &clone, &drawn)?;
         // Only the one `Do` is pointed at the copy; the parent's other draws of the form stay on the original.
         let mut once = Some(vec![Op::new("Do", vec![Obj::Name(name)])]);
         let new = splice(&parent.content.pieces, &parent.content.ops, |i| if i == op { (once.take().unwrap_or_default(), false) } else { (Vec::new(), true) });
@@ -1040,7 +1115,7 @@ fn private_form(d: &mut PdfDocument, pi: &PageImages, at: usize) -> Result<PdfOb
 
 /// Applies `change` to image `index` of `page` (or adds one). The result is a warning for the user, if the change
 /// calls for one.
-fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChange) -> Result<Option<String>> {
+fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChange, users: &mut Users) -> Result<Option<String>> {
     let to_page = page_space(d, page)?;
     let to_user = to_page.invert().ok_or_else(|| invalid("the page has no area"))?;
     let pi = read_images(d, page)?;
@@ -1127,12 +1202,12 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
             let mut cm = Some(vec![cm]);
             splice(&c.pieces, &c.ops, |i| if i == start + 1 { (cm.take().unwrap_or_default(), true) } else { (Vec::new(), true) })
         };
-        let holder = if f.scope == 0 { pi.page.clone() } else { private_form(d, &pi, f.scope)? };
+        let holder = if f.scope == 0 { pi.page.clone() } else { private_form(d, &pi, f.scope, users)? };
         write_content(d, &holder, sc, new)?;
         return Ok(warning);
     }
     // Where a name is added or dropped: the page, or the form the picture is drawn in (its own copy when it is shared).
-    let holder = if f.scope == 0 { pi.page.clone() } else { private_form(d, &pi, f.scope)? };
+    let holder = if f.scope == 0 { pi.page.clone() } else { private_form(d, &pi, f.scope, users)? };
     let replacement: Vec<Op> = {
         match change {
             ImageChange::Delete => {
@@ -1657,8 +1732,9 @@ pub fn move_to_page(eng: &Engine, doc: DocId, rev: u32, from: u32, indices: &[u3
             }
         }
         in_forms.sort_unstable_by_key(|i| std::cmp::Reverse(*i));
+        let mut users = Users::new();
         for i in in_forms {
-            apply(d, from, Some(i), &ImageChange::Delete)?;
+            apply(d, from, Some(i), &ImageChange::Delete, &mut users)?;
         }
         if !remove.is_empty() {
             // Read again: copying a shared form pointed one of the page's `Do`s elsewhere (the operators stay).

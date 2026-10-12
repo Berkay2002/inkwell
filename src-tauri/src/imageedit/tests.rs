@@ -1515,6 +1515,127 @@ fn a_batch_in_one_shared_form_makes_one_copy() {
 }
 
 #[test]
+fn a_form_that_a_form_without_resources_also_draws_is_copied_before_it_changes() {
+    let d = dir("form-open-parent");
+    // FmA has no /Resources: its `/Fm0 Do` names the page's Fm0, so the page's own drawing of Fm0 is not its only one.
+    let res = "/Resources << /XObject << /Fm0 5 0 R /FmA 6 0 R >> >>";
+    let bytes = forms_file(
+        "",
+        &[(res, "q 1 0 0 1 50 100 cm /Fm0 Do Q q 1 0 0 1 300 400 cm /FmA Do Q")],
+        vec![
+            form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 7 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"),
+            form("/BBox [0 0 600 600]", "/Fm0 Do"),
+            red(),
+        ],
+    );
+    let (eng, id, path) = open(&d, &bytes);
+    let l = list(&eng, id);
+    assert_eq!(l.len(), 2);
+    assert_eq!(l[0].in_form, ["Fm0"]);
+    assert_eq!(l[1].in_form, ["FmA", "Fm0"]);
+    let before = text_of(&mupdf::pdf::PdfDocument::open(&path).unwrap(), 5);
+    change(&eng, id, Some(0), ImageChange::Move { dx: 0.0, dy: -40.0 });
+    let n = list(&eng, id);
+    assert!(near(n[0].rect, [l[0].rect[0], l[0].rect[1] - 40.0, l[0].rect[2], l[0].rect[3] - 40.0]), "{:?}", n[0].rect);
+    assert_eq!(n[0].in_form, ["IwForm0"]);
+    assert_eq!(n[1].rect, l[1].rect, "the drawing through FmA is as it was");
+    let doc = saved(&eng, id, &path);
+    assert_ne!(entry(&doc, 0, "Fm0"), 0, "the page keeps the name FmA's content uses");
+    assert_eq!(text_of(&doc, entry(&doc, 0, "Fm0")), before, "the form FmA draws is not rewritten");
+}
+
+#[test]
+fn a_form_that_a_type3_font_without_resources_could_draw_is_copied_before_it_changes() {
+    let d = dir("form-type3-parent");
+    let res = "/Resources << /XObject << /Fm0 5 0 R >> /Font << /F1 6 0 R >> >>";
+    let font = b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1 1] /FontMatrix [1 0 0 1 0 0] /CharProcs << /a 7 0 R >> \
+/Encoding << /Type /Encoding /Differences [97 /a] >> /FirstChar 97 /LastChar 97 /Widths [1] >>"
+        .to_vec();
+    let bytes = forms_file(
+        "",
+        &[(res, "q 1 0 0 1 50 100 cm /Fm0 Do Q")],
+        vec![
+            form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 8 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"),
+            font,
+            raw_obj("", b"1 0 d0 /Fm0 Do"),
+            red(),
+        ],
+    );
+    let (eng, id, path) = open(&d, &bytes);
+    let before = text_of(&mupdf::pdf::PdfDocument::open(&path).unwrap(), 5);
+    change(&eng, id, Some(0), ImageChange::Move { dx: 10.0, dy: 0.0 });
+    assert_eq!(list(&eng, id)[0].in_form, ["IwForm0"]);
+    let doc = saved(&eng, id, &path);
+    assert_ne!(entry(&doc, 0, "Fm0"), 0, "the page keeps the name the glyph procedure uses");
+    assert_eq!(text_of(&doc, entry(&doc, 0, "Fm0")), before);
+}
+
+#[test]
+fn a_batch_across_forms_the_pages_share_through_inherited_resources_changes_only_this_page() {
+    let d = dir("form-batch-inherited");
+    // Fm0 and Fm1 are each drawn once on each page and named only by the /Pages node's resources: each is used
+    // once until the first copy gives page 1 resources of its own, which name the other one a second time.
+    let page = "q 1 0 0 1 50 100 cm /Fm0 Do Q q 1 0 0 1 50 400 cm /Fm1 Do Q";
+    let bytes = forms_file(
+        "",
+        &[("", page), ("", page)],
+        vec![
+            form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 9 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"),
+            form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 9 0 R >> >>", "q 80 0 0 40 10 10 cm /Im0 Do Q"),
+            red(),
+        ],
+    );
+    let bytes = String::from_utf8_lossy(&bytes).replace("/Type /Pages /Kids", "/Type /Pages /Resources << /XObject << /Fm0 7 0 R /Fm1 8 0 R >> >> /Kids");
+    let (eng, id, path) = open(&d, bytes.as_bytes());
+    let p2 = page_images(&eng, id, 1);
+    assert_eq!(p2.len(), 2);
+    let before = {
+        let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+        (text_of(&doc, 7), text_of(&doc, 8), content_of(&doc, 1))
+    };
+    many(&eng, id, vec![(0, ImageChange::Move { dx: 5.0, dy: 5.0 }), (1, ImageChange::Move { dx: -5.0, dy: 0.0 })]).unwrap();
+    assert_eq!(page_images(&eng, id, 1), p2);
+    assert_eq!(page_images(&eng, id, 0).iter().map(|b| b.in_form.clone()).collect::<Vec<_>>(), [["IwForm0"], ["IwForm1"]]);
+    let doc = saved(&eng, id, &path);
+    let (f0, f1) = (entry(&doc, 1, "Fm0"), entry(&doc, 1, "Fm1"));
+    assert_eq!((text_of(&doc, f0), text_of(&doc, f1), content_of(&doc, 1)), before);
+}
+
+#[test]
+fn a_batch_counts_the_forms_users_once() {
+    let d = dir("form-walks");
+    let three = form(
+        "/BBox [0 0 300 300] /Resources << /XObject << /Im0 6 0 R >> >>",
+        "q 100 0 0 50 20 30 cm /Im0 Do Q q 40 0 0 40 150 150 cm /Im0 Do Q q 30 0 0 30 200 20 cm /Im0 Do Q",
+    );
+    let bytes = forms_file("", &[(FM0, "q 1 0 0 1 50 100 cm /Fm0 Do Q")], vec![three, red()]);
+    let (eng, id, _) = open(&d, &bytes);
+    assert_eq!(list(&eng, id).len(), 3);
+    WALKS.with(|w| w.set(0));
+    many(&eng, id, (0..3).map(|i| (i, ImageChange::Move { dx: 1.0, dy: 1.0 })).collect()).unwrap();
+    assert_eq!(WALKS.with(|w| w.get()), 1);
+}
+
+#[test]
+fn a_copy_does_not_take_a_name_some_content_already_draws() {
+    let d = dir("form-dangling");
+    // The page draws /IwForm0 too, which its resources don't have: the copy must not start answering to it.
+    let bytes = forms_file(
+        "",
+        &[(
+            "/Resources << /XObject << /Fm0 7 0 R >> >>",
+            "q 1 0 0 1 50 100 cm /Fm0 Do Q q 1 0 0 1 300 400 cm /IwForm0 Do Q",
+        ), ("/Resources << /XObject << /Fm0 7 0 R >> >>", "q 1 0 0 1 50 100 cm /Fm0 Do Q")],
+        vec![form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 8 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"), red()],
+    );
+    let (eng, id, path) = open(&d, &bytes);
+    change(&eng, id, Some(0), ImageChange::Move { dx: 10.0, dy: 0.0 });
+    let doc = saved(&eng, id, &path);
+    assert_eq!(entry(&doc, 0, "IwForm0"), 0);
+    assert_ne!(entry(&doc, 0, "IwForm1"), 0);
+}
+
+#[test]
 fn a_picture_moved_out_of_its_forms_frame_is_warned_about() {
     let d = dir("form-frame");
     let (eng, id, _) = open(&d, &one_form());

@@ -168,13 +168,20 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
    reachable from the trailer is walked once and the references to the forms on the way, and to the resource
    dictionaries that name them, are counted (a page's resources inherited from `/Pages` count as shared). A form
    is the picture's alone when exactly one slot names it, the parent's content has exactly one `Do` of that name,
-   and the dictionaries on the way are named once. The first form on the way down that is not alone is copied,
+   the dictionaries on the way are named once, and the parent's resources hold no form XObject or Type3 font
+   without `/Resources` of its own (that one draws with the parent's resources, so it can draw this form by name
+   without a `Do` the parent's content shows). The first form on the way down that is not alone is copied,
    with every form inside it: the copy has the decoded stream written again as Flate, its own `/Resources` and
    `/XObject` dictionaries, and is added to the parent's (itself private) resources as `IwForm<n>`; the one `Do`
    in the parent is rewritten to that name and the old name is dropped from the parent's resources if nothing
-   there draws it. Anything the walk can't settle (a file of over two million objects) counts as shared: a copy
-   costs a few bytes, a change to another page is a wrong document. In `image_edit_many` each item reads the page
-   again, so the first item of a shared form copies it and the others edit the copy in place.
+   there draws it, and none of its forms or Type3 fonts shares the resources. The copy's name is the first
+   `IwForm<n>` that no `Do` of the page or its forms draws either, so a dangling `Do` never starts drawing it.
+   Anything the walk can't settle (a file of over two million objects) counts as shared: a copy costs a few bytes,
+   a change to another page is a wrong document. In `image_edit_many` and `image_move_to_page` each item reads
+   the page again, so the first item of a shared form copies it and the others edit the copy in place. The walk is
+   made once per edit and again only after a copy (of a form, or of resources the page inherited or shared) has
+   given forms more users; in a file too big to walk, the forms this edit made count as its own and nothing else
+   is trusted.
 4. **Delete** removes the operator. **Replace** loads the file with MuPDF and adds it with `pdf_add_image` (JPEG data
    is stored as it is, `DCTDecode`; a PNG's alpha becomes an `/SMask`), names it `IwImg<n>` and draws it with
    `q <fit> cm /IwImg<n> Do Q` in place of the old operator. **Crop** with a clip draws
@@ -235,7 +242,10 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   nested forms with 30° `/Matrix` entries list the box that renders, within 0.5 pt; delete, replace and crop (pixels and clip)
   in a shared form; a form that draws itself and a chain deeper than 4 end the reading; a form drawn twice on a page is two
   pictures and one moves alone; resources inherited from `/Pages`, a `/Resources` dictionary two pages share and a
-  form that is an annotation's appearance all make a form shared; a batch in one shared form makes one copy; a move
+  form that is an annotation's appearance all make a form shared, and so does a form or Type3 font without
+  `/Resources` that draws it by name from the parent's resources; a batch in one shared form makes one copy and counts the users once, a batch over
+  forms the pages share through inherited resources changes only this page; a copy never takes a name some content
+  draws; a move
   out of the form's `/BBox` warns; a form picture goes to another page and is copied with its full place (mixed with
   page pictures too); a form without `/Resources` is listed and not changed; certified refuses, signed saves after
   its signed bytes; the 64 form-drawing cap holds.
