@@ -2,7 +2,8 @@
 #   - the app icon: src-tauri/icons/icon.ico (16..256) and the PNG set tauri-build and the bundler read
 #   - the PDF document icon Explorer shows for Inkwell's .pdf registration: src-tauri/icons/pdf-document.ico
 # Run from the repo root:  pwsh -File scripts/make-icons.ps1
-param([string]$Dir = "src-tauri/icons")
+# -Master <png> also writes the 1024 px app icon, the input of `pnpm tauri icon <png> -o <dir>` (it makes icon.icns).
+param([string]$Dir = "src-tauri/icons", [string]$Master = "")
 Add-Type -AssemblyName System.Drawing
 $PtF = [System.Drawing.PointF]
 $accent = [System.Drawing.Color]::FromArgb(46, 75, 143)
@@ -115,4 +116,5 @@ $png = [ordered]@{
   'Square284x284Logo.png' = 284; 'Square310x310Logo.png' = 310
 }
 foreach ($k in $png.Keys) { [System.IO.File]::WriteAllBytes((Join-Path $root $k), (AppIcon $png[$k])) }
+if ($Master) { [System.IO.File]::WriteAllBytes($Master, (AppIcon 1024)) }
 "wrote icon.ico, pdf-document.ico and $($png.Count) PNGs in $Dir"

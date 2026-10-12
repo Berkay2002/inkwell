@@ -17,8 +17,9 @@ the exe (`--no-bundle`).
 - WiX 3.14 comes from `%LOCALAPPDATA%\tauri\WixTools314` (the CLI downloads it on first use).
 - Icons are drawn by `scripts/make-icons.ps1` from the ink-drop mark in the title bar (`Chrome.tsx`, accent
   `#2e4b8f`): the app icon (`icon.ico`, a white drop on an accent tile, plus the PNG set) and the PDF document icon
-  (`pdf-document.ico`, a page with the drop on it). Rerun the script after changing the mark. There is no macOS
-  `icon.icns`: Inkwell is Windows only.
+  (`pdf-document.ico`, a page with the drop on it). Rerun the script after changing the mark. `icon.icns` (for
+  tauri on macOS) comes from the same mark: `pwsh scripts/make-icons.ps1 -Master <1024.png>`, then
+  `pnpm tauri icon <1024.png> -o <scratch dir>` and copy only `icon.icns` out of it.
 
 ## What the MSI does
 
