@@ -1254,6 +1254,7 @@ pub fn run() {
             forms::app::forms_detect,
             organize::app::combine_inspect,
             organize::app::combine_run,
+            organize::app::combine_unlock,
             organize::app::pick_attachments,
             organize::app::attachments_list,
             media::app::media_list,

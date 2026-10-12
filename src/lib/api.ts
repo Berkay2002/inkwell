@@ -1295,6 +1295,8 @@ export interface CombineFile {
   range: string;
   /** Bookmark title; null = the file's name. */
   title: string | null;
+  /** The open password typed for a locked file; left out for a file that has none. Memory only. */
+  password?: string;
 }
 
 export interface CombineOptions {
@@ -1304,6 +1306,8 @@ export interface CombineOptions {
   keepOutlines: boolean;
   /** A contents page in front. */
   contentsPage: boolean;
+  /** Each file's page labels, carried to the pages it gives. */
+  keepLabels: boolean;
 }
 
 export type CombineFileState = "ready" | "encrypted" | "noCopy" | "unreadable" | "badRange";
@@ -1337,6 +1341,8 @@ export interface Combined {
 
 export const combineInspect = (files: CombineFile[], options: CombineOptions) =>
   invoke<CombinePlan>("combine_inspect", { files, options });
+/** Opens a locked source's handle (`openDocument` said `needsPassword`) for drawing; no history is started. A wrong password rejects with "bad-password". */
+export const combineUnlock = (doc: number, password: string) => invoke<OpenInfo>("combine_unlock", { doc, password });
 /** `out`: a save token from `pickSave`. */
 export const combineRun = (files: CombineFile[], options: CombineOptions, out: string) =>
   invoke<Combined>("combine_run", { files, options, out });
