@@ -587,9 +587,9 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
     }
 }
 
-/// Unlocks `d` with a password the person typed: as typed, then in NFKC. MuPDF does no SASLprep and the
-/// writer (Protect) puts passwords in NFKC, so one typed decomposed or full-width opens the file under its
-/// NFKC form. `Ok(false)`: neither opens it.
+/// Unlocks `d` with a password the person typed: as typed, then in its SASLprep-mapped NFKC form
+/// ([`protect::nfkc_form`]). MuPDF does no SASLprep and the writer (Protect) puts passwords in NFKC, so one
+/// typed decomposed, full-width or with a non-ASCII space opens the file under that form. `Ok(false)`: neither opens it.
 pub(crate) fn authenticate_typed(d: &mut Document, pw: &str) -> Result<bool> {
     if d.authenticate(pw)? {
         return Ok(true);

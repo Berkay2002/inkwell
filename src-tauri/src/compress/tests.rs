@@ -1885,3 +1885,19 @@ fn dropping_all_bookmarks_leaves_nothing_for_the_invalid_option_to_count() {
     assert!(r.stripped.bookmarks_unchecked.is_none());
     assert!(!has_entry(&r.output, "Outlines"));
 }
+
+#[test]
+fn the_invalid_bookmarks_option_leaves_links_and_everything_else_alone() {
+    let s = Scratch::new();
+    let input = s.path("sink.pdf");
+    kitchen_sink(&input);
+    let base = probe(&input);
+    assert!(base.links.iter().any(|l| !l.starts_with("ok-")), "the fixture has links the invalid-links pass would drop: {base:?}");
+    let mut o = keep_images();
+    o.strip.invalid_bookmarks = true;
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!((r.stripped.invalid_bookmarks, r.stripped.invalid_links, r.stripped.links), (0, 0, 0), "{:?}", r.stripped);
+    assert!(r.stripped.bookmarks_unchecked.is_none());
+    assert_eq!(probe(&r.output), base);
+}

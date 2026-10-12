@@ -181,10 +181,12 @@ impl ProtectSpec {
     }
 
     /// Puts both passwords in Unicode NFKC, the normalisation SASLprep (the PDF 2.0 password rule) starts
-    /// from; it is not full SASLprep (no prohibited-character or bidi checks, MuPDF has none either).
+    /// from; it is not full SASLprep (no prohibited-character or bidi checks, MuPDF has none either). The
+    /// mapping step (non-ASCII spaces, invisible marks) is applied only when a password is checked
+    /// ([`nfkc_form`]), not when it is written.
     /// MuPDF hashes the bytes it is given, so a decomposed or compatibility form would not open in
     /// Acrobat or qpdf after the person types the composed one there. Opening a file and checking an
-    /// owner password therefore try the password as typed and then its NFKC form ([`nfkc_form`]).
+    /// owner password therefore try the password as typed and then its SASLprep-mapped NFKC form ([`nfkc_form`]).
     /// Call before [`Self::validate`].
     pub fn normalize(&mut self) {
         let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();

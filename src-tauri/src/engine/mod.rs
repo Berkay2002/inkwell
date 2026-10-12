@@ -1083,7 +1083,7 @@ fn authenticate(d: &mut Document, entry: &DocEntry) -> Result<()> {
                     return Ok(());
                 }
                 // MuPDF does no SASLprep, and the writer puts passwords in NFKC (Protect): a password
-                // typed decomposed or full-width opens the file under its NFKC form. The form that
+                // typed decomposed, full-width or with a non-ASCII space opens the file under its mapped NFKC form. The form that
                 // worked is kept, so every later read of the file uses it.
                 match crate::protect::nfkc_form(&pw) {
                     Some(n) if d.authenticate(&n)? => *entry.password.lock() = Some(n),
