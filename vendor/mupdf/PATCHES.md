@@ -9,6 +9,7 @@ Everything else is the upstream crate.
 | `src/cookie.rs` | `Cookie::abort_handle` and `AbortHandle`: abort a page run from another thread (one plain write of the cookie's abort flag) |
 | `src/pdf/object.rs` | `PdfObject::addr`: the object's address, equal for two references that resolve to one object (the links audit keys a shared `/Annots` on it) |
 | `src/pdf/object.rs` | `PdfObject::read_stream_head`: the first N bytes of a decoded stream, the rest never decoded |
+| `src/pdf/object.rs` | `PdfObject::string_len`: a string object's length in bytes, read without copying it (over `mupdf_pdf_to_bytes`) |
 | `src/pdf/widget.rs` | `PdfWidget::request_resynthesis`: marks a field's appearance stale after its dictionary was edited directly |
 | `src/font.rs` | `Font::base14_program`: the CFF program of a built-in base-14 font by its standard name |
 | `src/buffer.rs` | `Buffer::ccitt_g4`: 1-bit rows as CCITT Group 4 data |
