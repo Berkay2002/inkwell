@@ -661,6 +661,9 @@ pub fn add(doc: &mut PdfDocument, req: &AddRequest) -> Result<Vec<u32>> {
                 let texts: [String; 6] = std::array::from_fn(|s| expand(&hf.text[s], number, count as usize, req.date));
                 let font = shared.font(doc, i, &hf.style)?;
                 if let Some(content) = text_marks(&mut m, &view, MarkKind::HeaderFooter, &texts, &hf.style, &hf.margins, &font) {
+                    if hf.shrink {
+                        fit::check_wrappable(doc, i)?;
+                    }
                     place(doc, i, MarkKind::HeaderFooter.tag(), &content, false, spec)?;
                     if hf.shrink {
                         fit::apply_shrink(doc, i, MarkKind::HeaderFooter, text_bands(&texts, &hf.style, &hf.margins))?;
@@ -675,6 +678,9 @@ pub fn add(doc: &mut PdfDocument, req: &AddRequest) -> Result<Vec<u32>> {
                 texts[b.slot as usize] = bates_text(b, b.start + k as u64);
                 let font = shared.font(doc, i, &b.style)?;
                 if let Some(content) = text_marks(&mut m, &view, MarkKind::Bates, &texts, &b.style, &b.margins, &font) {
+                    if b.shrink {
+                        fit::check_wrappable(doc, i)?;
+                    }
                     place(doc, i, MarkKind::Bates.tag(), &content, false, spec)?;
                     if b.shrink {
                         fit::apply_shrink(doc, i, MarkKind::Bates, text_bands(&texts, &b.style, &b.margins))?;

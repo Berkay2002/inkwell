@@ -1205,3 +1205,23 @@ fn a_section_inside_a_text_object_of_the_page_is_left_when_it_moves_the_text() {
     let mut doc = PdfDocument::from_bytes(&page_with("", drawn)).unwrap();
     assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (1, 0));
 }
+
+#[test]
+fn an_update_with_shrink_is_refused_on_a_merged_page_with_marks_on_top() {
+    let mut doc = PdfDocument::from_bytes(&page_with("", &corners([0.0, 0.0, 612.0, 792.0]))).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+    let wm = Watermark { text: "DRAFT".into(), behind: false, ..Watermark::default() };
+    add(&mut doc, &req(Mark::Watermark(wm), vec![0])).unwrap();
+    merge_streams(&mut doc, 0);
+    let mut r = req(Mark::HeaderFooter(top_and_bottom(true)), vec![0]);
+    r.replace = true;
+    match add(&mut doc, &r) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("rewritten after marks were added"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    // the same Update without a shrink is fine (nothing on top is scaled), and so is a page without marks on top
+    let mut r = req(Mark::HeaderFooter(top_and_bottom(false)), vec![0]);
+    r.replace = true;
+    add(&mut doc, &r).unwrap();
+    near(word(&reopened(&doc), "UL").x0, 4.0, "the shrink went with the update");
+}

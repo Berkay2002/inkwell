@@ -15,7 +15,7 @@
 //! `/PCMark` tag are found by the marked-content sequence alone. Acrobat's own private `/PieceInfo`
 //! is not read (see docs/study/15-page-marks.md).
 
-use super::apply::{add_stream, check_pages, contents_list, has_tag, set_contents, tag_of};
+use super::apply::{add_stream, check_pages, contents_list, has_tag, is_wrap, set_contents, tag_of};
 use super::geometry::{M, View, mul, n};
 use super::{MarkKind, Style};
 use crate::engine::{EngineError, Result};
@@ -218,6 +218,27 @@ pub(super) fn set_shrink(doc: &mut PdfDocument, list: Vec<PdfObject>, view: &Vie
         }
     }
     Ok(out)
+}
+
+/// A page whose streams were merged has its earlier marks inline after the `Q %Inkwell` that closed
+/// its content, and a shrink wrapped around the whole stream would scale them with the page.
+pub(super) fn check_wrappable(doc: &PdfDocument, index: u32) -> Result<()> {
+    let page = doc.find_page(index as i32)?;
+    let list = contents_list(&page)?;
+    if list.iter().any(is_wrap) {
+        return Ok(());
+    }
+    let tail = b"Q %Inkwell";
+    for o in list.iter().filter(|o| tag_of(o).is_none() && o.is_stream().unwrap_or(false)) {
+        let data = o.read_stream()?;
+        let after = data.windows(tail.len()).rposition(|w| w == tail).map(|at| at + tail.len());
+        if after.is_some_and(|at| data[at..].windows(6).any(|w| w == b"PCMark")) {
+            return Err(invalid(
+                "This page's content was rewritten after marks were added, so the marks on it can't be told from the page and would shrink with it. Remove them first, then add this one.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Shrinks page `index` for a mark of `kind` that keeps `bands` clear. The mark's content is
