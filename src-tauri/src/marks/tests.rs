@@ -44,6 +44,31 @@ fn page_with(extra: &str, content: &str) -> Vec<u8> {
     out
 }
 
+/// One page whose content is `streams`, one stream each, in order (Helvetica is /F1).
+fn page_with_streams(extra: &str, streams: &[&str]) -> Vec<u8> {
+    let refs: Vec<String> = (0..streams.len()).map(|i| format!("{} 0 R", i + 5)).collect();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {extra} /Resources << /Font << /F1 4 0 R >> >> /Contents [{}] >>", refs.join(" ")),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    objs.extend(streams.iter().map(|c| format!("<< /Length {} >>\nstream\n{c}\nendstream", c.len())));
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).bytes());
+    for o in offsets {
+        out.extend(format!("{o:010} 00000 n \n").bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).bytes());
+    out
+}
+
 fn req(mark: Mark, pages: Vec<u32>) -> AddRequest {
     AddRequest { mark, pages, replace: false, date: DATE }
 }
@@ -1006,7 +1031,7 @@ fn a_stream_full_of_unclosed_sections_is_read_in_one_pass() {
     // 50,000 openers and no EMC: each must not scan to the end (this would be 10^9 steps)
     let hostile = "/Artifact <</Type /Pagination /Subtype /Header>> BDC\n".repeat(50_000);
     let started = std::time::Instant::now();
-    let found = super::fit::foreign_sections(hostile.as_bytes());
+    let (found, _) = super::fit::foreign_sections(hostile.as_bytes(), 0);
     assert_eq!(found.len(), 50_000);
     assert!(found.iter().all(|f| !f.clean));
     assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
@@ -1224,4 +1249,24 @@ fn an_update_with_shrink_is_refused_on_a_merged_page_with_marks_on_top() {
     r.replace = true;
     add(&mut doc, &r).unwrap();
     near(word(&reopened(&doc), "UL").x0, 4.0, "the shrink went with the update");
+}
+
+#[test]
+fn a_text_object_that_runs_on_into_the_next_stream_counts_as_inside_text() {
+    // the first stream leaves a BT open; the header is in the second, whose Td is relative to it
+    let open = "BT /F1 12 Tf 72 750 Td (A) Tj\n";
+    let header = "/Artifact <</Type /Pagination /Subtype /Header>> BDC 0 -20 Td (Hdr) Tj EMC (B) Tj ET\n";
+    let mut doc = PdfDocument::from_bytes(&page_with_streams("", &[open, header])).unwrap();
+    let found = foreign_of(&doc, MarkKind::HeaderFooter).unwrap();
+    assert_eq!((found.pages, found.stuck), (vec![0], vec![0]));
+    assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (0, 1));
+    assert!(text_of(&reopened(&doc), 0).contains("Hdr"));
+
+    // control: the first stream closes its text object, so the second one's own BT...ET is not inside it
+    let closed = "BT /F1 12 Tf 72 750 Td (A) Tj ET\n";
+    let own = "/Artifact <</Type /Pagination /Subtype /Header>> BDC BT /F1 10 Tf 72 700 Td (Hdr) Tj ET EMC\n";
+    let mut doc = PdfDocument::from_bytes(&page_with_streams("", &[closed, own])).unwrap();
+    assert!(foreign_of(&doc, MarkKind::HeaderFooter).unwrap().stuck.is_empty());
+    assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (1, 0));
+    assert!(!text_of(&reopened(&doc), 0).contains("Hdr"));
 }

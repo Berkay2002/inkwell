@@ -320,13 +320,15 @@ fn clean_inside(inner: &[cs::Op], in_text: bool) -> bool {
     q == 0 && text == 0
 }
 
-/// The sections of other apps in a content stream, outermost first (what is inside one is cut with it).
-pub(super) fn foreign_sections(data: &[u8]) -> Vec<Foreign> {
+/// The sections of other apps in a content stream, outermost first (what is inside one is cut with it),
+/// and how deep in `BT` the stream ends. `depth` is how deep the page's earlier streams left it: a
+/// text object runs on across the streams of a page.
+pub(super) fn foreign_sections(data: &[u8], depth: i32) -> (Vec<Foreign>, i32) {
     let ops = cs::parse(data);
     let ends = matching_ends(&ops);
     // Whether each operator is inside one of the page's own text objects.
     let mut in_text = Vec::with_capacity(ops.len());
-    let mut depth = 0i32;
+    let mut depth = depth.max(0);
     for op in &ops {
         in_text.push(depth > 0);
         match op.op.as_slice() {
@@ -354,7 +356,31 @@ pub(super) fn foreign_sections(data: &[u8]) -> Vec<Foreign> {
             }
         }
     }
-    out
+    (out, depth)
+}
+
+/// The sections of other apps in the untagged streams of a page (`list` is its contents), as the
+/// stream's place in `list`, its bytes and the sections. Empty without a look inside the streams
+/// when none of them can hold one.
+pub(super) fn page_sections(list: &[PdfObject]) -> Result<Vec<(usize, Vec<u8>, Vec<Foreign>)>> {
+    let mut streams = Vec::new();
+    for (n, o) in list.iter().enumerate() {
+        if tag_of(o).is_none() && o.is_stream()? {
+            streams.push((n, o.read_stream()?));
+        }
+    }
+    if !streams.iter().any(|(_, d)| may_have_foreign(d)) {
+        return Ok(Vec::new());
+    }
+    let (mut depth, mut out) = (0, Vec::new());
+    for (n, data) in streams {
+        let (sections, after) = foreign_sections(&data, depth);
+        depth = after;
+        if !sections.is_empty() {
+            out.push((n, data, sections));
+        }
+    }
+    Ok(out)
 }
 
 /// Cuts the sections of other apps that count as `kind` out of `pages`. Returns how many were cut
@@ -367,26 +393,15 @@ pub fn remove_foreign(doc: &mut PdfDocument, kind: MarkKind, pages: &[u32]) -> R
     for &i in &pages {
         let mut page = doc.find_page(i as i32)?;
         let mut changed = false;
-        let mut list = Vec::new();
-        for o in contents_list(&page)? {
-            if tag_of(&o).is_some() || !o.is_stream()? {
-                list.push(o);
-                continue;
-            }
-            let data = o.read_stream()?;
-            if !may_have_foreign(&data) {
-                list.push(o);
-                continue;
-            }
-            let of_kind: Vec<Foreign> = foreign_sections(&data).into_iter().filter(|f| f.kind == kind).collect();
+        let mut list = contents_list(&page)?;
+        for (at, data, sections) in page_sections(&list)? {
+            let of_kind: Vec<&Foreign> = sections.iter().filter(|f| f.kind == kind).collect();
             left += of_kind.iter().filter(|f| !f.clean).count();
             let ranges: Vec<Range<usize>> = of_kind.iter().filter(|f| f.clean).map(|f| f.range.clone()).collect();
-            if ranges.is_empty() {
-                list.push(o);
-            } else {
+            if !ranges.is_empty() {
                 cut += ranges.len();
                 changed = true;
-                list.push(without(doc, &data, &ranges, None)?);
+                list[at] = without(doc, &data, &ranges, None)?;
             }
         }
         if changed {

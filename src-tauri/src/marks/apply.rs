@@ -4,7 +4,7 @@
 //! `add_watermark`, `add_background`, `place_tagged`, `remove_marks`, `marks_present`), rebuilt on
 //! MuPDF's object API.
 
-use super::fit::{self, foreign_sections, may_have_foreign, set_shrink, text_bands};
+use super::fit::{self, page_sections, set_shrink, text_bands};
 use super::geometry::{M, View, n};
 use super::text::{Measure, face, first_undrawable, literal, undrawable_message};
 use super::{AddRequest, Background, Bates, Date, Mark, MarkKind, Picture, Rgb, Style, Watermark, bates_fits, bates_text, expand};
@@ -1097,8 +1097,9 @@ pub fn info(doc: &PdfDocument) -> Result<Info> {
         }
         // (kind, the settings it was made with when its stream says)
         let mut seen: Vec<(MarkKind, Option<serde_json::Value>)> = Vec::new();
-        for s in contents_list(&page)? {
-            if let Some(t) = tag_of(&s) {
+        let list = contents_list(&page)?;
+        for s in &list {
+            if let Some(t) = tag_of(s) {
                 if let Some(kind) = MarkKind::from_tag(&t) {
                     let spec = s.get_dict("IWSpec")?.and_then(|v| v.as_string().ok()).and_then(|v| serde_json::from_str(&v).ok());
                     seen.push((kind, spec));
@@ -1115,23 +1116,24 @@ pub fn info(doc: &PdfDocument) -> Result<Info> {
                         }
                     }
                 }
-                if may_have_foreign(&data) {
-                    for f in foreign_sections(&data) {
-                        let pos = match foreign.iter().position(|k| k.kind == f.kind) {
-                            Some(p) => p,
-                            None => {
-                                foreign.push(ForeignInfo { kind: f.kind, pages: vec![], stuck: vec![] });
-                                foreign.len() - 1
-                            }
-                        };
-                        let k = &mut foreign[pos];
-                        if k.pages.last() != Some(&(i as u32)) {
-                            k.pages.push(i as u32);
-                        }
-                        if !f.clean && k.stuck.last() != Some(&(i as u32)) {
-                            k.stuck.push(i as u32);
-                        }
+            }
+        }
+        // Other apps' marks, found by their marked content (a text object runs on across the streams).
+        for (_, _, sections) in page_sections(&list)? {
+            for f in sections {
+                let pos = match foreign.iter().position(|k| k.kind == f.kind) {
+                    Some(p) => p,
+                    None => {
+                        foreign.push(ForeignInfo { kind: f.kind, pages: vec![], stuck: vec![] });
+                        foreign.len() - 1
                     }
+                };
+                let k = &mut foreign[pos];
+                if k.pages.last() != Some(&(i as u32)) {
+                    k.pages.push(i as u32);
+                }
+                if !f.clean && k.stuck.last() != Some(&(i as u32)) {
+                    k.stuck.push(i as u32);
                 }
             }
         }
