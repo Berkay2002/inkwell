@@ -151,6 +151,7 @@ function changes(r: NonNullable<Sheet["compressed"]>): string[] {
   const n = (v: number, one: string, many: string) => v > 0 && out.push(`${v} ${v === 1 ? one : many}`);
   if (s.metadata) out.push("Document information and metadata");
   if (s.bookmarks) out.push("Bookmarks");
+  n(s.invalidBookmarks, "bookmark that led nowhere", "bookmarks that led nowhere");
   n(s.thumbnails, "page thumbnail", "page thumbnails");
   n(s.embeddedFiles, "attachment", "attachments");
   n(s.javascript, "JavaScript action", "JavaScript actions");
