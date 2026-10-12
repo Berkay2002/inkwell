@@ -244,8 +244,12 @@ fn a_page_that_takes_too_long_to_draw_is_aborted() {
         format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
     ]);
     assert!(err(render_pdf(&pdf, None, Duration::ZERO)).contains("too long"));
+    let stopped = LAST_PROGRESS.get();
     // The same page within the real limit draws.
     assert!(render_pdf(&pdf, None, RENDER_LIMIT).is_ok());
+    let full = LAST_PROGRESS.get();
+    // The abort reached the draw (not only the flag): it ran under half of the operators the whole page has.
+    assert!(full > 1000 && stopped < full / 2, "aborted run {stopped}, whole page {full}");
     // A time limit does not disturb a page that is quick.
     let quick = fixture::build(&Fixture { pages: 1, lines: 3, ..Default::default() });
     assert!(render_pdf(&quick, None, RENDER_LIMIT).is_ok());
@@ -464,14 +468,16 @@ fn a_writer_deletes_temp_files_older_than_a_minute_and_only_those() {
     aged("0123456789abcdef.png.fedcba9876543210.tmp", 120);
     aged("stamps.json.1111111111111111.tmp", 5);
     aged("keep.txt", 3600);
+    // Not a name of ours, so not ours to delete.
+    aged("notes.tmp", 3600);
     // A reader leaves them; a writer clears the old ones.
     list(&lib);
-    assert_eq!(std::fs::read_dir(&lib).unwrap().count(), 4);
+    assert_eq!(std::fs::read_dir(&lib).unwrap().count(), 5);
     let src = write(&d, "s.png", &half_red(4, 4));
     let s = create(&lib, &Source { path: &src, page: None }, "S", "").unwrap();
     let mut names: Vec<String> = std::fs::read_dir(&lib).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     names.sort();
-    assert_eq!(names, [format!("{}.png", s.id), format!("{}.t.png", s.id), "keep.txt".into(), "stamps.json".into(), "stamps.json.1111111111111111.tmp".into()]);
+    assert_eq!(names, [format!("{}.png", s.id), format!("{}.t.png", s.id), "keep.txt".into(), "notes.tmp".into(), "stamps.json".into(), "stamps.json.1111111111111111.tmp".into()]);
 }
 
 #[test]
