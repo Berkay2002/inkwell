@@ -827,11 +827,14 @@ fn leave_structure(doc: &PdfDocument, a: &PdfObject, link: i32) -> Result<()> {
                 while i + 1 < len {
                     let k = nums.get_array(i)?.and_then(|k| k.resolve().ok().flatten().unwrap_or(k).as_int().ok());
                     if k == Some(key) {
+                        // The pair goes only when its element held this link: a key a page's `/StructParents`
+                        // shares is that page's, and its tags stay.
                         if let Some(elem) = nums.get_array(i + 1)? {
-                            drop_object_ref(&elem, link)?;
+                            if drop_object_ref(&elem, link)? {
+                                nums.array_delete(i + 1)?;
+                                nums.array_delete(i)?;
+                            }
                         }
-                        nums.array_delete(i + 1)?;
-                        nums.array_delete(i)?;
                         return Ok(());
                     }
                     i += 2;
@@ -852,26 +855,30 @@ fn leave_structure(doc: &PdfDocument, a: &PdfObject, link: i32) -> Result<()> {
     Ok(())
 }
 
-/// Takes the object reference (`/Type /OBJR`) to the annotation `link` out of the content of `elem`.
-fn drop_object_ref(elem: &PdfObject, link: i32) -> Result<()> {
+/// Takes the object reference (`/Type /OBJR`) to the annotation `link` out of the content of `elem`; true when
+/// there was one.
+fn drop_object_ref(elem: &PdfObject, link: i32) -> Result<bool> {
     let is_ref = |e: &PdfObject| -> bool {
         e.is_dict().unwrap_or(false)
             && e.get_dict("Obj").ok().flatten().is_some_and(|o| o.is_indirect().unwrap_or(false) && o.as_indirect().ok() == Some(link))
     };
     let mut elem = elem.clone();
-    let Some(k) = elem.get_dict("K")? else { return Ok(()) };
+    let Some(k) = elem.get_dict("K")? else { return Ok(false) };
     let kr = k.resolve()?.unwrap_or_else(|| k.clone());
+    let mut removed = false;
     if kr.is_array()? {
         let mut arr = kr;
         for i in (0..arr.len()? as i32).rev() {
             if arr.get_array(i)?.is_some_and(|e| is_ref(&e)) {
                 arr.array_delete(i)?;
+                removed = true;
             }
         }
     } else if is_ref(&k) {
         elem.dict_delete("K")?;
+        removed = true;
     }
-    Ok(())
+    Ok(removed)
 }
 
 /// Takes the links `ids` (as [`annots_of`] names them) out of `page`'s `/Annots`. The objects of the ones that have

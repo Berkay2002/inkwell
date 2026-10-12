@@ -1061,3 +1061,29 @@ fn a_dictionary_that_is_a_form_field_too_is_not_a_link_to_list_or_delete() {
     let kept = eng.read_custom(id, |d| Ok(d.find_page(0)?.get_dict("Annots")?.unwrap().len()?)).unwrap();
     assert_eq!(kept, 3, "the three field widgets stay in /Annots");
 }
+
+#[test]
+fn a_parent_tree_entry_that_is_not_the_links_own_stays_when_the_link_goes() {
+    // The link's /StructParent key is also the key of a page's /StructParents: its value is an array of elements, not
+    // an element that holds an object reference to the link.
+    for (name, value) in [("page-array", "[ 6 0 R ]"), ("other-element", "6 0 R")] {
+        let annots = vec![link_annot("/Dest [3 0 R /Fit] /StructParent 0")];
+        let more = vec![
+            "<< /Type /StructTreeRoot /K 6 0 R /ParentTree 7 0 R >>".to_string(),
+            "<< /Type /StructElem /S /P /P 5 0 R /Pg 3 0 R /K [ 0 1 ] >>".to_string(),
+            format!("<< /Nums [ 0 {value} ] >>"),
+        ];
+        let (eng, id, _, _d) = opened(&format!("structure-{name}"), &page_with_annots("", "/StructTreeRoot 5 0 R", &annots, &more));
+        let link = list(&eng, id, 0).unwrap().links[0].id;
+        go(&eng, id, LinkOp::Delete { page: 0, ids: vec![link] });
+        let (nums, kids) = eng
+            .read_custom(id, |doc| {
+                let nums = doc.new_indirect(7, 0)?.get_dict("Nums")?.unwrap().len()?;
+                let k = doc.new_indirect(6, 0)?.get_dict("K")?.map_or(0, |k| k.len().unwrap_or(1));
+                Ok((nums, k))
+            })
+            .unwrap();
+        assert_eq!((nums, kids), (2, 2), "{name}: the entry and the element's content are untouched");
+        assert!(list(&eng, id, 0).unwrap().links.is_empty());
+    }
+}
