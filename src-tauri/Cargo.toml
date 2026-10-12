@@ -30,6 +30,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+# A later launch (Explorer "Open with", a double click on a PDF) forwards its files to the running app.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }
