@@ -343,7 +343,8 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
     };
 
     // The matches to replace, per block.
-    let mut plan: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
+    // (block, its matches, the number of the first of them among the block's matches).
+    let mut plan: Vec<(usize, Vec<(usize, usize)>, usize)> = Vec::new();
     match at {
         None => {
             // On a page a run went on from, what is after `upto` was done (or listed) by the run before.
@@ -369,7 +370,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
                             }
                         }
                     }
-                    None if !spans.is_empty() => plan.push((bi, spans.clone())),
+                    None if !spans.is_empty() => plan.push((bi, spans.clone(), 0)),
                     None => {}
                 }
             }
@@ -406,14 +407,15 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
                 out.skip_hit(page, h, "it could not be placed in its block of text; use Replace all");
                 return Ok(false);
             }
-            plan.push((bi, vec![(s, e)]));
+            plan.push((bi, vec![(s, e)], k));
         }
     }
 
     // From the last block to the first: an edit can only change the grouping of the lines after it.
     let mut changed = false;
-    for (bi, mut spans) in plan.into_iter().rev() {
+    for (bi, mut spans, first) in plan.into_iter().rev() {
         let listed = listed_for(bi);
+        let listed = &listed[first.min(listed.len())..];
         let left = bounds.max.saturating_sub(out.replaced as usize);
         let cut = spans.len() > left;
         if cut {
@@ -422,7 +424,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
                 // One block that alone is over the cap: part replaced, and the rest listed (a second run could
                 // not tell its own work from the document's where the replacement holds the find text).
                 for (k, &sp) in spans.iter().enumerate().skip(left) {
-                    out.skip_span(page, &listed, &text[bi], k, sp, &format!("the block has more matches than the {} one run replaces", bounds.max));
+                    out.skip_span(page, listed, &text[bi], k, sp, &format!("the block has more matches than the {} one run replaces", bounds.max));
                 }
                 out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32) });
             } else if bounds.inserted > 0 {
@@ -442,7 +444,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
         // so a block that has one is left alone unless a match, one that is still replaced, covers it.
         if blocks[bi].joins.iter().any(|&h| !spans.iter().any(|&(s, e)| s < h && e >= h)) {
             for (k, &sp) in spans.iter().enumerate() {
-                out.skip_span(page, &listed, &text[bi], k, sp, "a hyphen at the end of a line in the block would be lost");
+                out.skip_span(page, listed, &text[bi], k, sp, "a hyphen at the end of a line in the block would be lost");
             }
             if cut {
                 break;
@@ -455,7 +457,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32 + 1) });
             break;
         }
-        changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, &listed, out);
+        changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, listed, out);
         if cut {
             break;
         }
@@ -477,7 +479,7 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
     };
     // Each space that stood for a line end (not one a match swallows) is marked in the text it is in with
     // the line that follows it, and found again in the new text's coordinates.
-    let cant = "the block's lines can't be kept where they are";
+    let cant = "the lines of the block can't be kept where they are";
     if !b.breaks.is_empty() && (all.contains(&END) || with.contains(END) || b.breaks.iter().any(|&(p, _)| all.get(p) != Some(&' '))) {
         skip_all(out, cant);
         return false;

@@ -816,7 +816,7 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
         };
         prev_biggest = biggest;
         base -= down;
-        if li > 0 || dx != 0.0 {
+        if li > 0 || dx != 0.0 || down != 0.0 {
             ops.push(Op::new("Td", vec![num(dx - x), num(-down)]));
         }
         x = dx;

@@ -1875,6 +1875,36 @@ fn a_longer_replacement_stays_on_its_line_or_the_match_is_skipped() {
 }
 
 #[test]
+fn a_first_line_emptied_leaves_the_lines_below_where_they_were() {
+    let d = dir("replace-first-line-emptied");
+    let (eng, id, _) = open(&d, &pages_pdf(&[THREE_LINES]));
+    let before = line_boxes(&eng, id);
+    do_replace(&eng, id, &req("One cat", "", SearchOpts::default())).unwrap();
+    assert_eq!(page_lines(&eng, id), ["Two", "Three long hats here"]);
+    let tb = blocks(&eng, id, 0).unwrap();
+    let after: Vec<[f32; 4]> = tb.blocks.iter().flat_map(|b| b.lines.clone()).collect();
+    assert_eq!(after.len(), 2, "{after:?}");
+    for (a, b) in after.iter().zip(&before[1..]) {
+        assert!((a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05, "{after:?} vs {before:?}");
+    }
+}
+
+#[test]
+fn replace_one_that_does_not_fit_lists_its_own_row() {
+    let d = dir("replace-one-skipped-row");
+    let page = "BT /F1 12 Tf 72 700 Td 14 TL (One cat) Tj T* (Two cat) Tj T* (Three long hats here) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let q = Query::new("cat", SearchOpts::default()).unwrap();
+    let hits = eng.read_custom(id, |d| crate::search::find_in_page(d, 0, &q)).unwrap();
+    assert_eq!(hits.len(), 2);
+    let at = ReplaceAt { page: 0, rect: hits[1].rects[0] };
+    let r = do_replace(&eng, id, &ReplaceRequest { at: Some(at), ..req("cat", "cat on a big mat", SearchOpts::default()) }).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    // The second match's row (the first one has nothing before it).
+    assert_eq!((r.skipped[0].before.as_str(), r.skipped[0].after.as_str()), ("One cat Two ", " Three long hats"), "{r:?}");
+}
+
+#[test]
 fn lines_keep_their_own_place_with_an_indent_and_uneven_leading() {
     let d = dir("replace-keeps-places");
     // A first line indented 10 pt, then lines 14 and 15 pt below: one block, each line at its own place.
