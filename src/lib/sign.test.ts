@@ -241,8 +241,21 @@ describe("signature form fields on the page", () => {
   it("a signed field click opens the rail on that signature", () => {
     clickSigField(7, "Landlord", done, [done]);
     expect(s().rail).toBe("list");
-    expect(s().get(7).focus).toBe("Landlord");
+    expect(s().get(7).focus).toEqual({ field: "Landlord", n: 1 });
     expect(s().get(7).draft).toBeNull();
     expect(inv).not.toHaveBeenCalled();
+  });
+
+  it("a repeated click asks again, and closing or leaving the list clears the focus", () => {
+    clickSigField(7, "Landlord", done, [done]);
+    clickSigField(7, "Landlord", done, [done]);
+    expect(s().get(7).focus).toEqual({ field: "Landlord", n: 2 });
+    s().setRail(null);
+    expect(s().get(7).focus).toBeNull();
+    clickSigField(7, "Landlord", done, [done]);
+    s().setRail("sheet");
+    expect(s().get(7).focus).toBeNull();
+    s().setRail("list");
+    expect(s().get(7).focus).toBeNull();
   });
 });

@@ -285,8 +285,8 @@ export interface Draft {
 }
 
 export interface DocSign {
-  /** The signature field the Signatures rail scrolls to and marks. */
-  focus: string | null;
+  /** The signature the Signatures rail scrolls to and marks; `n` counts requests so a repeated one scrolls again. Cleared when the rail leaves the list. */
+  focus: { field: string; n: number } | null;
   items: Item[];
   selected: number | null;
   sigs: SignatureInfo[];
@@ -378,7 +378,13 @@ export const useSign = create<SignStore>((set, get) => {
     tool: "select",
     setTool: (tool) => set({ tool }),
     rail: null,
-    setRail: (rail) => set({ rail }),
+    setRail: (rail) =>
+      set((s) => ({
+        rail,
+        ...(rail !== "list" && Object.values(s.docs).some((d) => d.focus)
+          ? { docs: Object.fromEntries(Object.entries(s.docs).map(([k, d]) => [k, d.focus ? { ...d, focus: null } : d])) }
+          : {}),
+      })),
     pick: {},
     creator: null,
     setCreator: (creator) => set({ creator }),
@@ -465,10 +471,10 @@ export const useSign = create<SignStore>((set, get) => {
     setDraft: (doc, draft) => patch(doc, { draft }),
     signField: (doc, f) => {
       patch(doc, { draft: { page: f.page, rect: f.rect, field: f.field } });
-      set({ rail: "sheet" });
+      get().setRail("sheet");
     },
     showSignature: (doc, field) => {
-      patch(doc, { focus: field });
+      patch(doc, { focus: { field, n: (get().get(doc).focus?.n ?? 0) + 1 } });
       set({ rail: "list" });
     },
     hideBanner: (doc) => patch(doc, { bannerHidden: true }),

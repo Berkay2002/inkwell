@@ -257,7 +257,7 @@ function List({ doc }: { doc: DocState }) {
       <div className="sg-body sg-list">
         {done.length === 0 && <p className="dim">This document has no signatures.</p>}
         {done.map((x) => (
-          <Card key={x.field} x={x} focused={x.field === focus} onOpen={() => go(x)} />
+          <Card key={x.field} x={x} focus={x.field === focus?.field ? focus.n : 0} onOpen={() => go(x)} />
         ))}
         {empty.length > 0 && <h3 className="cm-page">Empty signature fields</h3>}
         {empty.map((x) => (
@@ -285,15 +285,17 @@ function List({ doc }: { doc: DocState }) {
   );
 }
 
-function Card({ x, focused, onOpen }: { x: SignatureInfo; focused: boolean; onOpen: () => void }) {
+/** `focus` is the request count when the field on the page asked for this card, else 0. */
+function Card({ x, focus, onOpen }: { x: SignatureInfo; focus: number; onOpen: () => void }) {
+  const focused = focus > 0;
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLElement>(null);
   // Reached from the signature field on the page: show its certificate details and bring the card into view.
   useEffect(() => {
-    if (!focused) return;
+    if (!focus) return;
     setOpen(true);
     ref.current?.scrollIntoView?.({ block: "nearest" });
-  }, [focused]);
+  }, [focus]);
   const st = STATUS[x.status as keyof typeof STATUS];
   return (
     <article ref={ref} className={`sg-card ${st.tone}${focused ? " focus" : ""}`} aria-current={focused || undefined}>
