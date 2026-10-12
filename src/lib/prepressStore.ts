@@ -201,6 +201,8 @@ interface PrepressStore {
   applyBoxes: () => Promise<void>;
 
   closeSheet: () => void;
+  /** The document holds a conversion that was not saved: closing it goes back to the sheet's Undo or Keep. True when held. */
+  holdConversion: (doc: number) => boolean;
   forget: (doc: number) => void;
 }
 
@@ -560,14 +562,13 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       const d = s && st().docs[s.doc];
       if (!s || !d || s.phase !== "unsaved") return;
       try {
-        // `queued` hands a failure back (the shared undo shows it on the error line and carries on). The check is
-        // made in the queue: another step may have landed since (an undo and redo, the assistant), and then the
-        // conversion is not what an undo would take back.
-        const after = await queued(s.doc, async () => (st().docs[s.doc]?.rev === s.convertedRev ? api.editUndo(s.doc) : null));
+        // The engine compares the generation under its edit lock: a step that landed since (an undo and redo, the
+        // assistant, which does not go through this queue) is not what an undo would take back.
+        const after = s.convertedRev == null ? null : await queued(s.doc, () => api.editUndoIf(s.doc, s.convertedRev as number));
         if (!after) return patchSheet<ConvertSheet>("convert", { error: MOVED_ON });
         applyState(s.doc, after);
       } catch (e) {
-        return patchSheet<ConvertSheet>("convert", { error: msg(e) });
+        return patchSheet<ConvertSheet>("convert", { error: String(e) === "stale" ? MOVED_ON : msg(e) });
       }
       if (sheet<ConvertSheet>("convert")?.phase === "unsaved") set({ sheet: null });
     },
@@ -753,6 +754,13 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       if (s.kind === "convert" && s.phase === "unsaved") return patchSheet<ConvertSheet>("convert", { closing: !s.closing });
       if ((s.kind === "marks" || s.kind === "boxes") && s.busy) return;
       set({ sheet: null });
+    },
+
+    holdConversion: (doc) => {
+      const s = get().sheet;
+      if (s?.kind !== "convert" || s.phase !== "unsaved" || s.doc !== doc) return false;
+      patchSheet<ConvertSheet>("convert", { closing: true });
+      return true;
     },
 
     forget: (doc) => {

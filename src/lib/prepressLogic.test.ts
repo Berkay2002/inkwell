@@ -246,5 +246,9 @@ describe("Save while a conversion is not saved", () => {
     expect(holdsSave(key("s"), true)).toBe(false);
     expect(holdsSave(key("s", { ctrlKey: true, shiftKey: true }), true)).toBe(false);
     expect(holdsSave(key("z", { ctrlKey: true }), true)).toBe(false);
+    // closing the tab and the palette (which offers Save) are held too
+    expect(holdsSave(key("w", { ctrlKey: true }), true)).toBe(true);
+    expect(holdsSave(key("K", { metaKey: true }), true)).toBe(true);
+    expect(holdsSave(key("w", { ctrlKey: true }), false)).toBe(false);
   });
 });

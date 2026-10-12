@@ -76,7 +76,11 @@ format we control and version.
   when the waiting list is unreadable (a missing file is an empty list), cannot be written, or would pass 1000 paths:
   a path is never dropped. The wipe is not done by whoever finds this out, because the catalog is held by a build that
   would write its words back: it runs under the hold of whoever frees the catalog, after the build, and the marker
-  and list stay while it fails. The next build reads every file again. A Save as, and Redact's own save, that replace a listed file do the same.
+  and list stay while it fails. The next build reads every file again. A Save as, and Redact's own save, that replace a listed file do the same. So does a batch run with a Redact or Sanitize step, for
+  each PDF it writes, as soon as that file is written (its result can take a name a catalog still lists). A forget that
+  finds the catalog held is looked at again once it is written down, and the holder looks once more after it lets go,
+  so a request that lands between the holder reading the list and letting go is not left for a later hold.
+  Listing catalogs replays a list or a wipe (a marker, or the in-memory one) without taking the hold of a catalog that has nothing waiting.
 - Embedded index: `/Root/PieceInfo/Inkwell` (`/Private` stream) holds the records of that file. A build reads it only
   if the trailer `/ID`, the page count, the version and a fingerprint of page content and annotations all match,
   so a file changed by another tool is read normally. Embedding and removing are one undo step each

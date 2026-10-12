@@ -7,6 +7,7 @@ import { openConvertColors, openOutputPreview, openPageBoxes, openPrinterMarks, 
 import { useRedact } from "./redact";
 import { useSearch } from "./searchStore";
 import { useAnnot } from "./annot";
+import { useMeasure } from "./measure";
 import { useForms } from "./forms";
 import { useThreads } from "./threads";
 import { useHistory } from "./historyStore";
@@ -348,6 +349,7 @@ export const commands: Command[] = [
   { id: "comments-import", title: "Import comments (XFDF, FDF)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().importComments(d.id)) },
   { id: "forms-export", title: "Forms: export form data (FDF, XFDF, JSON)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().exportForm(d.id)) },
   { id: "forms-import", title: "Forms: import form data (FDF, XFDF, JSON)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().importForm(d.id)) },
+  { id: "measure", title: "Measure", needsDoc: true, run: () => useMeasure.getState().setOpen(!useMeasure.getState().open) },
   { id: "forms", title: "Forms", keys: ["Ctrl+Alt+F"], needsDoc: true, run: () => useForms.getState().setOpen(!useForms.getState().open) },
   {
     id: "forms-prepare",
@@ -380,7 +382,7 @@ export const commands: Command[] = [
   })),
   {
     id: "comment-delete",
-    title: "Comments: delete selected",
+    title: "Comments: delete selected (or the selected measurement)",
     keys: ["Delete"],
     needsDoc: true,
     notInText: true,
@@ -391,6 +393,9 @@ export const commands: Command[] = [
       const f = useForms.getState();
       const field = f.open && f.authoring ? f.get(d.id).selected : null;
       if (field) return void f.remove(d.id, [field]);
+      const m = useMeasure.getState();
+      const measured = m.open ? m.get(d.id).selected : null;
+      if (measured) return void m.remove(d.id, measured);
       const a = useAnnot.getState();
       const sel = a.open ? a.get(d.id).selected : null;
       if (sel) void a.remove(d.id, [sel]);

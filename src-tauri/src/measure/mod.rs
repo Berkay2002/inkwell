@@ -8,6 +8,7 @@
 
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
+use mupdf::pdf::PdfDocument;
 use serde::Serialize;
 
 pub mod app;
@@ -20,7 +21,7 @@ mod tests;
 pub mod write;
 
 pub use calc::{Kind, Quantity, Scale, Unit};
-pub use snap::{SnapCache, SnapHit, SnapIndex, SnapKind};
+pub use snap::{SnapCache, SnapHit, SnapIndex, SnapKind, SnapKinds};
 pub use write::MeasureDto;
 
 type Result<T> = std::result::Result<T, EngineError>;
@@ -35,6 +36,27 @@ pub struct PageScale {
     pub label: String,
 }
 
+/// Why nothing may be measured on this document, if so: a certification that does not allow annotations (`/P` 1 or 2)
+/// would be voided by a measurement or a page scale. A certification that cannot be read counts as one (`?`): the
+/// check fails closed. `/P` 3 allows annotations.
+pub fn refuse_certified(d: &PdfDocument) -> Result<()> {
+    match crate::outline::certified(d)? {
+        Some(p) if p <= 2 => Err(EngineError::Invalid("This document is certified; its certification doesn't allow comments or measurements.".into())),
+        _ => Ok(()),
+    }
+}
+
+/// The reason measuring is off for this document, or `None` when it is allowed (the UI greys the tools with it).
+pub fn lock_of(eng: &Engine, doc: DocId) -> Result<Option<String>> {
+    eng.read_custom(doc, |d| {
+        Ok(match refuse_certified(d) {
+            Ok(()) => None,
+            Err(EngineError::Invalid(m)) => Some(m),
+            Err(e) => Some(e.to_string()),
+        })
+    })
+}
+
 pub fn scale_get(eng: &Engine, doc: DocId, page: u32) -> Result<PageScale> {
     eng.read_custom(doc, |d| {
         let (scale, defined) = write::page_scale(d, page)?;
@@ -45,6 +67,7 @@ pub fn scale_get(eng: &Engine, doc: DocId, page: u32) -> Result<PageScale> {
 pub fn scale_set(eng: &Engine, doc: DocId, page: u32, scale: &Scale, source: EditSource) -> Result<EditState> {
     scale.validate().map_err(EngineError::Invalid)?;
     eng.apply_custom(doc, format!("Set measurement scale on p. {} to {}", page + 1, scale.label()), source, false, |d| {
+        refuse_certified(d)?;
         write::set_page_scale(d, page, scale)?;
         Ok(vec![page])
     })
@@ -65,7 +88,27 @@ pub fn add_one(
 ) -> Result<(EditState, i32, Quantity)> {
     let mut made = None;
     let state = eng.apply_custom(doc, format!("Add {} measurement on p. {}", kind.noun(), page + 1), source, false, |d| {
+        refuse_certified(d)?;
         made = Some(write::add(d, page, kind, points, scale, author)?);
+        Ok(vec![page])
+    })?;
+    let (xref, quantity) = made.ok_or(EngineError::Panic)?;
+    Ok((state, xref, quantity))
+}
+
+/// Gives the measurement `xref` another scale and values it again: the annotation is replaced by one with the same
+/// kind, points and author (one undo step; the xref changes).
+pub fn rescale(eng: &Engine, doc: DocId, page: u32, xref: i32, scale: &Scale, source: EditSource) -> Result<(EditState, i32, Quantity)> {
+    scale.validate().map_err(EngineError::Invalid)?;
+    let mut made = None;
+    let state = eng.apply_custom(doc, format!("Change the scale of a measurement on p. {} to {}", page + 1, scale.label()), source, false, |d| {
+        refuse_certified(d)?;
+        let old = write::list(d)?
+            .into_iter()
+            .find(|m| m.page == page && m.xref == xref)
+            .ok_or_else(|| EngineError::Invalid("that measurement is no longer in the file".into()))?;
+        crate::annot::delete(d, page, &[xref])?;
+        made = Some(write::add(d, page, old.kind, &old.points, Some(scale), &old.author)?);
         Ok(vec![page])
     })?;
     let (xref, quantity) = made.ok_or(EngineError::Panic)?;
@@ -81,7 +124,39 @@ pub fn list_all(eng: &Engine, doc: DocId) -> Result<Vec<MeasureDto>> {
     eng.read_custom(doc, write::list)
 }
 
+/// The measurements as CSV (UTF-8 with a byte order mark and CRLF lines, as spreadsheets expect): page, type, the
+/// number and its unit apart, the label, the scale and the author. Text that a spreadsheet would run as a formula
+/// gets a leading apostrophe.
+pub fn csv_of(items: &[MeasureDto]) -> String {
+    fn cell(s: &str) -> String {
+        let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_owned() };
+        if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s }
+    }
+    let mut out = String::from("\u{feff}Page,Type,Value,Unit,Label,Scale,Author\r\n");
+    for m in items {
+        let scale = m.scale.as_ref().map(Scale::label).unwrap_or_default();
+        let row = [
+            (m.page + 1).to_string(),
+            m.kind.noun().to_owned(),
+            calc::trim_num((m.quantity.value * 1e4).round() / 1e4), // f32 page points leave a rounding tail
+            cell(&m.quantity.unit),
+            cell(&m.quantity.text),
+            cell(&scale),
+            cell(&m.author),
+        ];
+        out.push_str(&row.join(","));
+        out.push_str("\r\n");
+    }
+    out
+}
+
 /// The snap for one point, from the page's cached index.
 pub fn snap_at(eng: &Engine, cache: &SnapCache, doc: DocId, page: u32, x: f32, y: f32, radius: f32) -> Result<Option<SnapHit>> {
-    Ok(cache.index(eng, doc, page)?.snap(x, y, radius))
+    snap_at_kinds(eng, cache, doc, page, x, y, radius, &SnapKinds::default())
+}
+
+/// The snap for one point among the kinds that are on.
+#[allow(clippy::too_many_arguments)]
+pub fn snap_at_kinds(eng: &Engine, cache: &SnapCache, doc: DocId, page: u32, x: f32, y: f32, radius: f32, on: &SnapKinds) -> Result<Option<SnapHit>> {
+    Ok(cache.index(eng, doc, page)?.snap_with(x, y, radius, on))
 }
