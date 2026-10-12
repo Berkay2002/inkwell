@@ -18,9 +18,9 @@ vi.mock("./api", () => ({ textBlocks: vi.fn() }));
 
 import { useStore } from "../store";
 import * as api from "./api";
-import type { TextBlock } from "./api";
+import type { TextBlock, TextRun } from "./api";
 import { addText, editText } from "./edit";
-import { caretFor, changeFor, closestBlock, cssColor, cssFamily, displayFont, fallbackNote, hexOf, isOffered, rgbOf, useTextEdit } from "./textEdit";
+import { caretFor, changeFor, closestBlock, cssColor, cssFamily, decorChange, decorOn, displayFont, fallbackNote, hexOf, isOffered, rgbOf, useTextEdit } from "./textEdit";
 
 const block = (over: Partial<TextBlock> = {}): TextBlock => ({
   index: 0,
@@ -34,6 +34,7 @@ const block = (over: Partial<TextBlock> = {}): TextBlock => ({
   color: [0, 0, 0],
   align: "left",
   lineSpacing: null,
+  runs: [],
   editable: true,
   issue: null,
   reason: null,
@@ -102,8 +103,91 @@ describe("helpers", () => {
   });
 });
 
+const run = (index: number, text: string, over: Partial<TextRun> = {}): TextRun => ({
+  index,
+  text,
+  font: "Arial",
+  fontId: "F1",
+  size: 12,
+  color: [0, 0, 0],
+  bold: false,
+  italic: false,
+  underline: false,
+  strike: false,
+  rise: null,
+  ...over,
+});
+
+describe("decorations", () => {
+  const two = block({ text: "Hello world", runs: [run(0, "Hello "), run(1, "world")] });
+
+  it("applies to every run when nothing is selected", () => {
+    expect(decorOn(two, "underline")).toBe(false);
+    expect(decorChange(two, "underline")).toEqual({ underline: true });
+    expect(decorChange(two, "strike")).toEqual({ strike: true });
+    expect(decorChange(two, "super")).toEqual({ rise: "super" });
+  });
+
+  it("is on only when every touched run has it, and a press then clears it", () => {
+    const all = block({ text: "ab", runs: [run(0, "a", { underline: true }), run(1, "b", { underline: true })] });
+    expect(decorOn(all, "underline")).toBe(true);
+    expect(decorChange(all, "underline")).toEqual({ underline: false });
+    const some = block({ text: "ab", runs: [run(0, "a", { underline: true }), run(1, "b")] });
+    expect(decorOn(some, "underline")).toBe(false);
+    expect(decorChange(some, "underline")).toEqual({ underline: true });
+  });
+
+  it("lets super and sub replace one another, and a second press clear", () => {
+    const sup = block({ text: "x2", runs: [run(0, "x2", { rise: "super" })] });
+    expect(decorOn(sup, "super")).toBe(true);
+    expect(decorOn(sup, "sub")).toBe(false);
+    expect(decorChange(sup, "super")).toEqual({ rise: null });
+    expect(decorChange(sup, "sub")).toEqual({ rise: "sub" });
+  });
+
+  it("cuts a run at the selection and marks only the middle", () => {
+    const one = block({ text: "Hello world", runs: [run(0, "Hello world")] });
+    expect(decorChange(one, "underline", [2, 7])).toEqual({
+      runs: [
+        { source: 0, text: "He" },
+        { source: 0, text: "llo w", underline: true },
+        { source: 0, text: "orld" },
+      ],
+    });
+  });
+
+  it("marks whole runs a selection covers and sends the rest back as they were", () => {
+    expect(decorChange(two, "strike", [6, 11])).toEqual({ runs: [{ source: 0 }, { source: 1, strike: true }] });
+    expect(decorChange(two, "strike", [3, 8])).toEqual({
+      runs: [
+        { source: 0, text: "Hel" },
+        { source: 0, text: "lo ", strike: true },
+        { source: 1, text: "wo", strike: true },
+        { source: 1, text: "rld" },
+      ],
+    });
+  });
+
+  it("reads the selection's runs, not the whole block, for the pressed state", () => {
+    const b = block({ text: "Hello world", runs: [run(0, "Hello ", { underline: true }), run(1, "world")] });
+    expect(decorOn(b, "underline", [0, 5])).toBe(true);
+    expect(decorOn(b, "underline", [0, 11])).toBe(false);
+    expect(decorOn(b, "underline", [7, 9])).toBe(false);
+  });
+
+  it("falls back to the block's own field when the runs do not add up to the text", () => {
+    const b = block({ text: "Hello world", runs: [run(0, "Hello  "), run(1, "world")] });
+    expect(decorChange(b, "underline", [2, 7])).toEqual({ underline: true });
+    expect(decorChange(block({ runs: [] }), "underline", [0, 3])).toEqual({ underline: true });
+  });
+
+  it("treats an empty selection as none", () => {
+    expect(decorChange(two, "underline", [4, 4])).toEqual({ underline: true });
+  });
+});
+
 describe("store", () => {
-  const list = (blocks: TextBlock[], rev = 1) => ({ rev, blocks, areas: [] });
+  const list = (blocks: TextBlock[], rev = 1) => ({ rev, blocks, areas: [], locked: null, signed: false });
   const ok = <T>(value: T) => ({ kind: "ok" as const, value });
   const edited = (fallback: unknown = null) => ok({ state: {} as never, fallback: fallback as never });
   const text = () => useTextEdit.getState().docs[1];
@@ -321,5 +405,84 @@ describe("store", () => {
     useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], organize: true } } });
     await vi.waitFor(() => expect(editText).toHaveBeenCalledTimes(2));
     expect(editText).toHaveBeenLastCalledWith(1, 1, 0, 0, { text: "Typed before Organize" });
+  });
+
+  it("decorates the selection after sending the typed text first", async () => {
+    const runs = [run(0, "Rent is due on the first.")];
+    vi.mocked(api.textBlocks).mockResolvedValue(list([block({ runs })]));
+    vi.mocked(editText).mockResolvedValue(edited());
+    const te = useTextEdit.getState();
+    await te.load(1, 0);
+    await te.select(1, { page: 0, index: 0 });
+    te.setSelection(1, [0, 4]);
+    await te.decorate(1, "underline");
+    expect(editText).toHaveBeenCalledTimes(1);
+    expect(editText).toHaveBeenCalledWith(1, 1, 0, 0, {
+      runs: [
+        { source: 0, text: "Rent", underline: true },
+        { source: 0, text: " is due on the first." },
+      ],
+    });
+  });
+
+  it("commits typed text as its own step and ignores a selection made in text the engine changed", async () => {
+    const runs = [run(0, "Rent is due on the first.")];
+    vi.mocked(api.textBlocks).mockResolvedValue(list([block({ runs })]));
+    vi.mocked(editText).mockResolvedValue(edited());
+    const te = useTextEdit.getState();
+    await te.load(1, 0);
+    await te.select(1, { page: 0, index: 0 });
+    te.setDraft(1, "Rent  is due");
+    te.setSelection(1, [0, 4]);
+    await te.decorate(1, "strike");
+    expect(editText).toHaveBeenCalledTimes(2);
+    expect(editText).toHaveBeenNthCalledWith(1, 1, 1, 0, 0, { text: "Rent  is due" });
+    expect(editText).toHaveBeenNthCalledWith(2, 1, 1, 0, 0, { strike: true });
+  });
+
+  it("forgets the selection when another block is chosen", async () => {
+    vi.mocked(api.textBlocks).mockResolvedValue(list([block(), block({ index: 1, text: "Other", rect: [72, 200, 200, 214] })]));
+    const te = useTextEdit.getState();
+    await te.load(1, 0);
+    await te.select(1, { page: 0, index: 0 });
+    te.setSelection(1, [1, 3]);
+    expect(text().selection).toEqual([1, 3]);
+    await te.select(1, { page: 0, index: 1 });
+    expect(text().selection).toBeNull();
+  });
+
+  it("refuses a format change on a certified document and says why, without asking the engine", async () => {
+    const why = "This document is certified, so its text cannot be changed.";
+    vi.mocked(api.textBlocks).mockResolvedValue({ ...list([block({ runs: [run(0, "Rent is due on the first.")] })]), locked: why });
+    const te = useTextEdit.getState();
+    await te.load(1, 0);
+    await te.select(1, { page: 0, index: 0 });
+    await te.apply(1, { bold: true });
+    await te.apply(1, { size: 14 });
+    await te.apply(1, { align: "center" });
+    await te.decorate(1, "underline");
+    expect(editText).not.toHaveBeenCalled();
+    expect(text().notice).toBe(why);
+  });
+
+  it("drops the selection when the block it was made in is replaced or discarded", async () => {
+    vi.mocked(api.textBlocks).mockResolvedValue(list([block()]));
+    vi.mocked(editText).mockResolvedValue(edited());
+    const te = useTextEdit.getState();
+    await te.load(1, 0);
+    await te.select(1, { page: 0, index: 0 });
+    te.setSelection(1, [1, 3]);
+    // A format change that leaves the text as it was keeps it.
+    await te.apply(1, { bold: true });
+    expect(text().selection).toEqual([1, 3]);
+    // Typed text changes it: the offsets no longer line up.
+    te.setDraft(1, "Rent is due on the second.");
+    vi.mocked(api.textBlocks).mockResolvedValue(list([block({ text: "Rent is due on the second." })], 2));
+    await te.apply(1, { size: 14 });
+    expect(text().selection).toBeNull();
+    te.setSelection(1, [0, 2]);
+    te.discard(1);
+    expect(text().selection).toBeNull();
+    expect(text().selected).toBeNull();
   });
 });

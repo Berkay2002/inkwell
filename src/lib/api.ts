@@ -375,9 +375,29 @@ export interface TextBlock {
   align: TextAlign;
   /** Distance between lines over the font size; null for a single line. */
   lineSpacing: number | null;
+  /** The text in runs of one font, size and colour (pass an index as `source` in `BlockChange.runs`). */
+  runs: TextRun[];
   editable: boolean;
   issue: TextIssue | null;
   reason: string | null;
+}
+
+/** Super or subscript, by the sign of the run's `Ts` (any file). */
+export type TextRise = "super" | "sub";
+
+export interface TextRun {
+  index: number;
+  text: string;
+  font: string;
+  fontId: string;
+  size: number;
+  color: [number, number, number];
+  bold: boolean;
+  italic: boolean;
+  /** Under or through the run there is one of Inkwell's own tagged rectangles (other lines are not guessed at). */
+  underline: boolean;
+  strike: boolean;
+  rise: TextRise | null;
 }
 
 export interface TextArea {
@@ -390,6 +410,10 @@ export interface TextBlocks {
   rev: number;
   blocks: TextBlock[];
   areas: TextArea[];
+  /** Why the document's text can't be changed (certified); null when it can. */
+  locked: string | null;
+  /** The document is signed: a change is saved after the signature. */
+  signed: boolean;
 }
 
 /** Unset fields keep the block's own. `offset` and `width` are in page space. */
@@ -403,6 +427,21 @@ export interface BlockChange {
   lineSpacing?: number;
   bold?: boolean;
   italic?: boolean;
+  /** For every run without its own. `rise: null` clears super or subscript; unset keeps it. */
+  underline?: boolean;
+  strike?: boolean;
+  rise?: TextRise | null;
+  /** The new content run by run (replaces `text`); unset fields come from run `source`. */
+  runs?: RunChange[];
+}
+
+/** One run of a block's new content: with a `source` and no `text` (or its own text) its glyphs are kept as they were. */
+export interface RunChange {
+  text?: string;
+  source?: number;
+  underline?: boolean;
+  strike?: boolean;
+  rise?: TextRise | null;
 }
 
 /** Set when the block's font could not show the text and another one was used. */

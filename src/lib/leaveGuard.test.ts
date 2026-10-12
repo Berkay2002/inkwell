@@ -35,6 +35,7 @@ const block: TextBlock = {
   color: [0, 0, 0],
   align: "left",
   lineSpacing: null,
+  runs: [],
   editable: true,
   issue: null,
   reason: null,
@@ -50,7 +51,7 @@ beforeEach(async () => {
     active: 1,
   });
   useTextEdit.setState({ open: true, tool: "select", docs: {} });
-  vi.mocked(api.textBlocks).mockResolvedValue({ rev: 1, blocks: [block], areas: [] });
+  vi.mocked(api.textBlocks).mockResolvedValue({ rev: 1, blocks: [block], areas: [], locked: null, signed: false });
   const te = useTextEdit.getState();
   await te.load(1, 0);
   await te.select(1, { page: 0, index: 0 });

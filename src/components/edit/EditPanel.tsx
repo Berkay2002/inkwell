@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { TextAlign, TextBlock } from "../../lib/api";
 import { useImageEdit } from "../../lib/imageEdit";
-import { type EditSection, displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
+import { type Decor, type EditSection, SIGNED_TEXT, decorOn, displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
 import { type DocState } from "../../store";
 import { Icon, type IconName } from "../Icons";
 import { BookmarksPanel } from "./BookmarksPanel";
@@ -19,6 +19,12 @@ const ALIGNS: { id: TextAlign; label: string; icon: IconName }[] = [
   { id: "justify", label: "Justify", icon: "alignJustify" },
 ];
 const SPACINGS = [1, 1.15, 1.2, 1.5, 2];
+const DECORS: { id: Decor; label: string; title: string; glyph: React.ReactNode }[] = [
+  { id: "underline", label: "Underline", title: "Underline (Ctrl+U)", glyph: <u>U</u> },
+  { id: "strike", label: "Strikethrough", title: "Strikethrough", glyph: <s>S</s> },
+  { id: "super", label: "Superscript", title: "Superscript", glyph: <>x<sup>2</sup></> },
+  { id: "sub", label: "Subscript", title: "Subscript", glyph: <>x<sub>2</sub></> },
+];
 const SECTIONS: { id: EditSection; label: string }[] = [
   { id: "text", label: "Text" },
   { id: "links", label: "Links" },
@@ -33,6 +39,7 @@ export function EditPanel({ doc }: { doc: DocState }) {
   const section = useTextEdit((s) => s.section);
   const picture = useImageEdit((s) => s.docs[doc.id]?.selected != null);
   const block = d?.selected ? (d.pages[d.selected.page]?.blocks[d.selected.index] ?? null) : null;
+  const page = d?.selected ? d.pages[d.selected.page] : undefined;
   const id = doc.id;
   const here = d?.pages[doc.currentPage]?.blocks.filter(isOffered) ?? [];
 
@@ -95,7 +102,16 @@ export function EditPanel({ doc }: { doc: DocState }) {
                 </span>
               </p>
             )}
-            {block ? <Format key={`${d?.selected?.page}:${block.index}`} id={id} block={block} /> : <Hint empty={!d?.notice} />}
+            {block ? (
+              <Format key={`${d?.selected?.page}:${block.index}`} id={id} block={block} selection={d?.selection ?? null} locked={page?.locked ?? null} />
+            ) : (
+              <Hint empty={!d?.notice} />
+            )}
+            {block && (page?.locked || page?.signed) && (
+              <p className="dim te-hint" role="note">
+                {page.locked ?? SIGNED_TEXT}
+              </p>
+            )}
             {d?.notice && (
               <p className="te-note" role="status">
                 {d.notice}
@@ -146,7 +162,7 @@ function Hint({ empty }: { empty: boolean }) {
 /** Keeps focus where it is (the text being typed) when a control is pressed. */
 const keepFocus = { onMouseDown: (e: React.MouseEvent) => e.preventDefault() };
 
-function Format({ id, block }: { id: number; block: TextBlock }) {
+function Format({ id, block, selection, locked }: { id: number; block: TextBlock; selection: [number, number] | null; locked: string | null }) {
   const apply = (patch: Parameters<ReturnType<typeof te>["apply"]>[1]) => void te().apply(id, patch);
   const [size, setSize] = useState(String(round1(block.size)));
   useEffect(() => setSize(String(round1(block.size))), [block.size]);
@@ -171,6 +187,7 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
   }, [id]);
 
   const hex = hexOf(block.color);
+  const off = locked != null;
   return (
     <div className="te-format">
       <div className="te-row">
@@ -183,7 +200,8 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
             className={block.bold ? "te-tog on" : "te-tog"}
             aria-pressed={block.bold}
             aria-label="Bold"
-            title="Bold: sets the block in the standard face"
+            title={locked ?? "Bold: sets the block in the standard face"}
+            disabled={off}
             {...keepFocus}
             onClick={() => apply({ bold: !block.bold })}
           >
@@ -193,7 +211,8 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
             className={block.italic ? "te-tog on" : "te-tog"}
             aria-pressed={block.italic}
             aria-label="Italic"
-            title="Italic: sets the block in the standard face"
+            title={locked ?? "Italic: sets the block in the standard face"}
+            disabled={off}
             {...keepFocus}
             onClick={() => apply({ italic: !block.italic })}
           >
@@ -202,14 +221,38 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
         </span>
       </div>
       <div className="te-row">
+        <span className="te-label">Effects</span>
+        <span className="te-style">
+          {DECORS.map((e) => {
+            const on = decorOn(block, e.id, selection);
+            return (
+              <button
+                key={e.id}
+                className={on ? "te-tog on" : "te-tog"}
+                aria-pressed={on}
+                aria-label={e.label}
+                title={locked ?? e.title}
+                disabled={off}
+                {...keepFocus}
+                onClick={() => void te().decorate(id, e.id)}
+              >
+                {e.glyph}
+              </button>
+            );
+          })}
+        </span>
+      </div>
+      <div className="te-row">
         <span className="te-label">Size</span>
         <span className="te-stepper">
-          <button aria-label="Smaller" {...keepFocus} onClick={() => step(-1)}>
+          <button aria-label="Smaller" title={locked ?? undefined} disabled={off} {...keepFocus} onClick={() => step(-1)}>
             <Icon name="minus" size={14} />
           </button>
           <input
             className="te-keep"
             aria-label="Font size in points"
+            title={locked ?? undefined}
+            disabled={off}
             inputMode="decimal"
             value={size}
             onChange={(e) => setSize(e.target.value)}
@@ -219,7 +262,7 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
               else if (e.key === "Escape") setSize(String(round1(block.size)));
             }}
           />
-          <button aria-label="Larger" {...keepFocus} onClick={() => step(1)}>
+          <button aria-label="Larger" title={locked ?? undefined} disabled={off} {...keepFocus} onClick={() => step(1)}>
             <Icon name="plus" size={14} />
           </button>
         </span>
@@ -234,12 +277,14 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
               className={c === hex ? "te-sw on" : "te-sw"}
               style={{ background: c }}
               aria-label={`Colour ${c}`}
+              title={locked ?? undefined}
+              disabled={off}
               {...keepFocus}
               onClick={() => rgbOf(c) && apply({ color: rgbOf(c)! })}
             />
           ))}
-          <label className={SWATCHES.includes(hex) ? "te-sw custom" : "te-sw custom on"} title="Other colour…" style={{ background: hex }}>
-            <input ref={color} type="color" className="te-keep" value={hex} onChange={() => {}} aria-label="Other colour" />
+          <label className={SWATCHES.includes(hex) ? "te-sw custom" : "te-sw custom on"} title={locked ?? "Other colour…"} style={{ background: hex }}>
+            <input ref={color} type="color" className="te-keep" value={hex} onChange={() => {}} aria-label="Other colour" disabled={off} />
           </label>
         </span>
       </div>
@@ -253,7 +298,8 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
               aria-checked={block.align === a.id}
               className={block.align === a.id ? "on" : ""}
               aria-label={a.label}
-              title={a.label}
+              title={locked ?? a.label}
+              disabled={off}
               {...keepFocus}
               onClick={() => block.align !== a.id && apply({ align: a.id })}
             >
@@ -267,6 +313,8 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
         <select
           className="te-select te-keep"
           aria-label="Line spacing"
+          title={locked ?? undefined}
+          disabled={off}
           value={nearest(block.lineSpacing ?? 1.2)}
           onChange={(e) => apply({ lineSpacing: Number(e.target.value) })}
         >
