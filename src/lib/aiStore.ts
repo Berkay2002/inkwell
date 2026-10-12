@@ -3,7 +3,6 @@ import { addOffer } from "./activity";
 import * as ai from "./ai";
 import { openAppTool } from "./aiOpenTool";
 import { applyState } from "./edit";
-import { useForms } from "./forms";
 import { historyCheckpoint } from "./history";
 import { useRedact } from "./redact";
 import {
@@ -294,7 +293,10 @@ export const useAi = create<AiStore>((set, get) => {
    *  message has a Review in Redact button instead). */
   const adopt = (doc: number, a: Extract<ai.UiAction, { type: "edited" }>) => {
     applyState(doc, a.state);
-    if (useForms.getState().docs[doc]) void useForms.getState().refresh(doc);
+    // not imported at load: forms.ts reaches the tools store, which subscribes to this store as it loads
+    void import("./forms").then(({ useForms }) => {
+      if (useForms.getState().docs[doc]) void useForms.getState().refresh(doc);
+    });
     const r = a.redacted;
     if (!r) return;
     useRedact.getState().showApplied(doc, {

@@ -161,8 +161,9 @@ pub fn tools() -> Vec<Arc<Tool>> {
             "open_tool",
             "Opens one of the app's tools for the user, for what you may not do yourself: protect (password), security \
              (permissions), merge, search-advanced, and the tools you can also run (compress, ocr, preflight, header-footer, \
-             watermark, background, bates, export, create, compare, a11y). Says nothing about what to enter; tell the user in \
-             your answer what to do there.",
+             watermark, background, bates, export, create, compare, a11y), and links, bookmarks, articles, output-preview, \
+             convert-colors, printer-marks, page-boxes and create-portfolio. Says nothing about what to enter; tell the user \
+             in your answer what to do there.",
             json!({ "type": "object", "additionalProperties": false, "required": ["tool"], "properties": {
                 "tool": { "type": "string", "enum": OPEN_TOOLS },
             } }),
@@ -174,7 +175,7 @@ pub fn tools() -> Vec<Arc<Tool>> {
 }
 
 /// Tools `open_tool` may open (the ids of `src/lib/toolItems.ts` and `tools.ts`).
-const OPEN_TOOLS: [&str; 15] = [
+const OPEN_TOOLS: [&str; 23] = [
     "protect",
     "security",
     "merge",
@@ -190,6 +191,14 @@ const OPEN_TOOLS: [&str; 15] = [
     "create",
     "compare",
     "a11y",
+    "links",
+    "bookmarks",
+    "articles",
+    "output-preview",
+    "convert-colors",
+    "printer-marks",
+    "page-boxes",
+    "create-portfolio",
 ];
 
 // ---- shared -----------------------------------------------------------------------------------

@@ -16,7 +16,10 @@
     "edit": "edit_text",
     "annotate": "add_comment",
     "fill": "fill_form_fields",
-    "redact": "redact_apply"
+    "redact": "redact_apply",
+    "a11y-order": "check_accessibility",
+    "a11y-tags": "check_accessibility",
+    "a11y-matterhorn": "check_accessibility"
   },
   "excluded": {
     "protect": "Sets a password the user must choose and keep: the assistant opens the tool (open_tool) and the user types it.",
@@ -29,7 +32,16 @@
     "overwrite-original": "Assistant output never overwrites a file: new files get a free name next to the original and the user saves over it themselves.",
     "open-link": "Opening a link from a document is the user's decision.",
     "picture-marks": "A picture watermark, background or stamp needs an image file chosen by the user, and the assistant never handles file paths.",
-    "insert-image": "Inserting an image needs a file chosen by the user, and the assistant never handles file paths."
+    "insert-image": "Inserting an image needs a file chosen by the user, and the assistant never handles file paths.",
+    "links": "Editing links is a per-link decision in the page view; the assistant opens the tool for the user (open_tool).",
+    "bookmarks": "Editing bookmarks is done on the outline in the page view; the assistant opens the tool for the user (open_tool).",
+    "articles": "Article threads are drawn by hand on the page; the assistant opens the tool for the user (open_tool).",
+    "output-preview": "A prepress preview of separations and ink limits that the user inspects by eye; the assistant opens the tool for the user (open_tool).",
+    "convert-colors": "The colour profile and rendering intent are the print shop's settings, the user's to choose; the assistant opens the tool for the user (open_tool).",
+    "printer-marks": "Crop, bleed and registration marks depend on the press the user prints on; the assistant opens the tool for the user (open_tool).",
+    "page-boxes": "Trim, bleed and art boxes are set to the user's print job; the assistant opens the tool for the user (open_tool).",
+    "create-portfolio": "A portfolio combines files the user picks from disk and the assistant never handles file paths; the assistant opens the tool for the user (open_tool).",
+    "doc-javascript": "Document JavaScript runs code inside the file whenever it is opened: never the assistant's to add or change."
   },
   "registry": [
     "add_comment",
