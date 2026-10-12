@@ -35,6 +35,8 @@ interface Edit {
   /** All the points as they would be. */
   pts: Pt[];
   moved: boolean;
+  /** The snap the dragged point sits on, for the marker and the name next to it (null: none, or moved by the keys). */
+  snap: Hover["snap"];
   /** Written; the points stay on show until the list has been read again. */
   saving: boolean;
 }
@@ -237,7 +239,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     const was = ms().get(docId).items.find((m) => m.xref === e.xref);
     if (!e.moved || !was || was.points.every((p, j) => p[0] === e.pts[j][0] && p[1] === e.pts[j][1])) return setEdit(null);
     // the ref too: a blur or a click that follows in this event must see it is being written
-    editRef.current = { ...e, saving: true };
+    editRef.current = { ...e, snap: null, saving: true };
     setEdit(editRef.current);
     // The new points stay on show until the list has been read again; a refusal puts the old ones back (the panel says why).
     void ms().move(docId, { page, xref: e.xref }, e.pts).then(() => setEdit((cur) => (cur?.saving ? null : cur)));
@@ -264,7 +266,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     const same = cur?.xref === m.xref;
     holding.current = true;
     stopTimer();
-    setEdit({ xref: m.xref, i, pts: same ? cur.pts : m.points, moved: same && cur.moved, saving: false });
+    setEdit({ xref: m.xref, i, pts: same ? cur.pts : m.points, moved: same && cur.moved, snap: null, saving: false });
   };
   const drag = (e: React.PointerEvent, m: Measure) => {
     const cur = editRef.current;
@@ -273,7 +275,12 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
       setEdit((c) => {
         if (!c || c.saving) return c;
         const from = m.points[c.i];
-        return { ...c, pts: c.pts.map((p, j) => (j === c.i ? h.at : p)), moved: c.moved || Math.hypot(h.at[0] - from[0], h.at[1] - from[1]) * zoom > 2 };
+        return {
+          ...c,
+          pts: c.pts.map((p, j) => (j === c.i ? h.at : p)),
+          moved: c.moved || Math.hypot(h.at[0] - from[0], h.at[1] - from[1]) * zoom > 2,
+          snap: h.snap,
+        };
       }),
     );
   };
@@ -305,7 +312,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     if (!next) return;
     e.preventDefault();
     e.stopPropagation();
-    setEdit({ xref: m.xref, i, pts: next, moved: true, saving: false });
+    setEdit({ xref: m.xref, i, pts: next, moved: true, snap: null, saving: false });
     stopTimer();
     timer.current = window.setTimeout(() => {
       const c = editRef.current;
@@ -330,6 +337,8 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     return pagePlain ? quantityOf(liveKind!, live, scale).text : (drawRemote ?? "");
   })();
   const sz = 5 / zoom;
+  // The snap marker: at the pointer while drawing, on the dragged point while a handle is held.
+  const mark = kind ? hover : edit?.snap && !edit.saving ? { at: edit.pts[edit.i], snap: edit.snap } : null;
 
   return (
     <>
@@ -383,13 +392,13 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
           {pts.map((q, i) => (
             <circle key={i} className="ms-vertex" cx={q[0]} cy={q[1]} r={sz * 0.7} />
           ))}
-          {kind && hover?.snap && (
-            <g className={`ms-snap ${hover.snap}`} transform={`translate(${hover.at[0]} ${hover.at[1]})`}>
-              {hover.snap === "midpoint" ? (
+          {mark?.snap && (
+            <g className={`ms-snap ${mark.snap}`} transform={`translate(${mark.at[0]} ${mark.at[1]})`}>
+              {mark.snap === "midpoint" ? (
                 <polygon points={`0,${-sz * 1.3} ${sz * 1.2},${sz} ${-sz * 1.2},${sz}`} />
-              ) : hover.snap === "intersection" ? (
+              ) : mark.snap === "intersection" ? (
                 <path d={`M${-sz} ${-sz}L${sz} ${sz}M${sz} ${-sz}L${-sz} ${sz}`} />
-              ) : hover.snap === "line" ? (
+              ) : mark.snap === "line" ? (
                 <path d={`M${-sz} 0H${sz}M0 ${-sz}V${sz}`} />
               ) : (
                 <rect x={-sz} y={-sz} width={sz * 2} height={sz * 2} />
@@ -397,13 +406,14 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
             </g>
           )}
         </svg>
-        {edit?.moved && editLabel && (
+        {edit?.moved && (editLabel || mark?.snap) && (
           <div
             className="ms-label"
             style={{ ...style(edit.pts[edit.i]), transform: `rotate(${-rot * 90}deg) scale(${1 / zoom}) translate(14px, 14px)` }}
             aria-hidden="true"
           >
-            <b>{editLabel}</b>
+            {editLabel ? <b>{editLabel}</b> : null}
+            {!kind && mark?.snap && <span>{SNAP_NAME[mark.snap]}</span>}
           </div>
         )}
         {kind && hover && (
