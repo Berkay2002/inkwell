@@ -10,7 +10,7 @@
 
 use super::scripts::{self, Rt};
 use super::{
-    FieldKind, FieldValue, Entry, bad, field_ff, fill_is_noop, flag, geti, get, on_state, options_of, per_field, rt_of, scan, set_value_rt, text, values_of,
+    FieldKind, FieldValue, Entry, bad, field_ff, fill_is_noop, flag, geti, get, on_state, options_of, per_field, rt_of, scan, set_value_rt, text, values_by,
 };
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
@@ -41,13 +41,40 @@ fn is_password(e: &Entry) -> bool {
 /// Raw bytes of strings between 1 and 2 MB that one field's value may have decoded to be measured.
 const DECODE_BUDGET: usize = 8 << 20;
 
+/// Every string `collect` decoded on this thread (each value read through `values_by`, not only gray-zone ones):
+/// tests count them rather than time them.
+#[cfg(test)]
+thread_local!(static DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
+/// A string between 1 and 2 MB raw, judged once: many fields may share one indirect string.
+enum Gray {
+    Over,
+    /// Not over 1 MB: its text (None when it cannot be read).
+    Under(Option<String>),
+}
+
+/// The gray-zone strings of one `collect()`, by object number. Bounded by the file's own distinct strings between
+/// 1 and 2 MB raw (under 1 MB of text each), kept next to the copy in `Out`: not shared, the copy is a `String`.
+type Decoded = HashMap<i32, Gray>;
+
+fn obj_num(o: &PdfObject) -> Option<i32> {
+    if o.is_indirect().unwrap_or(false) { o.as_indirect().ok() } else { None }
+}
+
+fn decode(o: &PdfObject) -> Option<String> {
+    #[cfg(test)]
+    DECODES.with(|d| d.set(d.get() + 1));
+    text(o)
+}
+
 /// A string value, or one of an array's strings (as many as `values_of` reads), over 1 MB once decoded. The
 /// raw length decides when it can: a UTF-16 string decodes to at least half its bytes, so only one over twice
 /// the limit is surely over; one between is decoded (here) and its text measured, up to `DECODE_BUDGET` raw
-/// bytes a value: past that it counts as over, so a list of one shared string is not decoded once per entry.
-fn string_over_limit(v: &PdfObject) -> bool {
+/// bytes a value (every reference is charged, a shared one too): past that it counts as over, so a list of one
+/// shared string is not copied once per entry. An indirect string is decoded once for the whole `collect()`.
+fn string_over_limit(v: &PdfObject, decoded: &mut Decoded) -> bool {
     let spent = std::cell::Cell::new(0usize);
-    let over = |o: &PdfObject| {
+    let mut over = |o: &PdfObject| {
         if !o.is_string().unwrap_or(false) {
             return false;
         }
@@ -59,7 +86,19 @@ fn string_over_limit(v: &PdfObject) -> bool {
             return true;
         }
         spent.set(spent.get() + n);
-        spent.get() > DECODE_BUDGET || text(o).is_some_and(|s| s.len() > MAX_STR)
+        if spent.get() > DECODE_BUDGET {
+            return true;
+        }
+        let key = obj_num(o);
+        if let Some(g) = key.and_then(|k| decoded.get(&k)) {
+            return matches!(g, Gray::Over);
+        }
+        let t = decode(o);
+        let over = t.as_ref().is_some_and(|s| s.len() > MAX_STR);
+        if let Some(k) = key {
+            decoded.insert(k, if over { Gray::Over } else { Gray::Under(t) });
+        }
+        over
     };
     if v.is_array().unwrap_or(false) {
         (0..v.len().unwrap_or(0).min(4096) as i32).any(|i| v.get_array(i).ok().flatten().is_some_and(|x| over(&x)))
@@ -77,6 +116,7 @@ fn collect(doc: &PdfDocument) -> Result<(Vec<Out>, usize, usize)> {
     let mut out = Vec::new();
     let mut passwords = 0;
     let mut long_text = 0;
+    let mut decoded = Decoded::new();
     for e in per_field(&entries) {
         if matches!(e.kind, FieldKind::Button | FieldKind::Signature) || e.name.is_empty() || !seen.insert(e.name.clone()) {
             continue;
@@ -87,11 +127,14 @@ fn collect(doc: &PdfDocument) -> Result<(Vec<Out>, usize, usize)> {
         }
         let v = geti(&e.field, "V");
         // Measured before it is read: a value over 1 MB is counted, never copied.
-        if v.as_ref().is_some_and(string_over_limit) {
+        if v.as_ref().is_some_and(|v| string_over_limit(v, &mut decoded)) {
             long_text += 1;
             continue;
         }
-        let mut values: Vec<String> = values_of(v);
+        let mut values: Vec<String> = values_by(v, |x| match obj_num(x).and_then(|k| decoded.get(&k)) {
+            Some(Gray::Under(t)) => t.clone(),
+            _ => decode(x),
+        });
         if values.iter().any(|v| v.len() > MAX_STR) {
             long_text += 1;
             continue;
