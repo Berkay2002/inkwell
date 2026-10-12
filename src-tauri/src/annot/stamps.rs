@@ -291,7 +291,7 @@ fn decode_picture(bytes: &[u8]) -> Result<image::RgbaImage> {
 /// would take the memory before the time limit could help.
 fn check_images(bytes: &[u8], page: i32) -> Result<()> {
     let Ok(doc) = PdfDocument::from_bytes(bytes) else { return Ok(()) };
-    match crate::diff::visual::check_page_images(&doc, page, MAX_SOURCE_PIXELS, u64::MAX) {
+    match crate::diff::visual::check_page_images(&doc, page, MAX_SOURCE_PIXELS, u64::MAX, false) {
         Ok(()) => Ok(()),
         Err(crate::diff::DiffError::BigImage { unreadable: true }) => Err(bad("that page holds a picture whose size cannot be read")),
         Err(_) => Err(bad("that page holds a picture with too many pixels (more than 50 megapixels)")),

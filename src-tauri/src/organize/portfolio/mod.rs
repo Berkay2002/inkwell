@@ -771,6 +771,7 @@ pub fn thumb(eng: &crate::engine::Engine, doc: crate::engine::DocId, id: &str, s
             DiffError::BadPage { .. } => "This PDF has no pages",
             DiffError::NotPdf { .. } => "This file is not a PDF Inkwell can open",
             DiffError::Slow => "This PDF's first page took too long to draw",
+            DiffError::BigImage { unreadable: true } => "This PDF's first page has pictures that cannot be checked for size",
             DiffError::BigImage { .. } => "This PDF's first page holds a picture too large to preview",
             _ => "This PDF could not be drawn",
         })

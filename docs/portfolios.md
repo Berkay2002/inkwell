@@ -122,9 +122,11 @@ Command palette. Pick files (any type), then a Save dialog; the result opens in 
 
 - `/View C` (a custom layout, in the file's own navigator) is read and shown as Details; it is not drawn.
 - The tiles show the picture of page 1 only, and the pane has no page stepper or zoom; a PDF is looked at in full by
-  opening it in a tab. The images a page names (and those of its forms, four levels down) are checked by
-  their declared size before the draw; inline images, masks, patterns and annotation appearances are not walked, and
-  a single huge shading is not interrupted, so the draw's memory is not bounded in every case.
+  opening it in a tab. The images a page names, those of its forms (four levels down) and those of its
+  annotations' normal appearances are checked by their declared size before the draw. A page the check cannot vouch
+  for (more than 4096 entries to look at, a form deeper than four levels with resources of its own, a picture with no
+  readable size) gets the icon and a note. Inline images, /SMask and /Mask, patterns, shadings and Type 3 fonts are
+  not walked, and one huge shading is not interrupted, so the draw's memory is not bounded in every case.
 - Folders are shown as folders but Extract all writes flat (clashes get " (2)"), not into sub-folders.
 - Creating a portfolio makes no folders; a `/CI` field of subtype S, D or N is only read, never filled for new files.
 - The page-view tools (zoom, find) act on the cover page, so they do nothing visible while the list shows.

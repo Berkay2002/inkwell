@@ -6,7 +6,7 @@
 
 use super::types::{DiffError, Rect4, Result, Side};
 use lru::LruCache;
-use mupdf::pdf::PdfDocument;
+use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::{Colorspace, Cookie, Device, Matrix, Pixmap};
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -139,7 +139,7 @@ fn render(bytes: &[u8], page: u32, size: Size, password: Option<&str>) -> Result
     // A fitted render (a thumbnail) is the one a stranger's file can reach, and the watchdog only acts between
     // content operators: one huge image or shading is not interrupted, so a page that declares one is refused.
     if matches!(size, Size::Side(_)) {
-        check_page_images(&doc, page as i32, FIT_IMAGE_PIXELS, FIT_IMAGES_TOTAL)?;
+        check_page_images(&doc, page as i32, FIT_IMAGE_PIXELS, FIT_IMAGES_TOTAL, true)?;
     }
     let p = doc.load_page(page as i32)?;
     let b = p.bounds()?;
@@ -175,22 +175,56 @@ fn render(bytes: &[u8], page: u32, size: Size, password: Option<&str>) -> Result
     Ok(Raster { width: w as u32, height: h as u32, scale, rgba })
 }
 
-/// Every image the page names under `/Resources /XObject`, and those of the forms it draws (four levels down), must
-/// be at most `each` pixels by its own /Width x /Height, and `total` together: a page is drawn with them decoded, so
-/// one huge scan (or a small stream that inflates into one) would take the memory before any time limit could help.
-// shortcut: inline (BI) images, an image's mask, and images in appearance streams (annotations), patterns and Type 3
-// fonts are not walked, and at most 4096 resource entries are looked at. Upgrade: a memory cap on the draw itself,
-// if a page gets past this.
-pub(crate) fn check_page_images(doc: &PdfDocument, page: i32, each: u64, total: u64) -> Result<()> {
-    let Ok(Some(res)) = doc.find_page(page).and_then(|p| p.get_dict_inheritable("Resources")) else { return Ok(()) };
-    let mut stack = vec![(res, 0u8)];
-    let mut left = 4096u32;
+/// Every image the page names under `/Resources /XObject`, and those of the forms it draws (four levels down), must be
+/// at most `each` pixels by its own /Width x /Height, and `total`
+/// together: a page is drawn with them decoded, so one huge scan (or a small stream that inflates into one) would
+/// take the memory before any time limit could help.
+///
+/// `closed` (a thumbnail's way): what the walk cannot vouch for is refused (`BigImage { unreadable: true }`): more
+/// than 4096 entries looked at, or a form deeper than four levels that has resources of its own; and the pictures
+/// of the annotations' normal appearances (/AP /N), which the page draws, are counted too. Open (the stamp maker's
+/// way), it lets those pass and leaves the annotations alone, as it always did.
+// shortcut: inline (BI) images, an image's /SMask or /Mask, patterns, shadings and Type 3 fonts are not walked.
+// Upgrade: a memory cap on the draw itself, if a page gets past this.
+pub(crate) fn check_page_images(doc: &PdfDocument, page: i32, each: u64, total: u64, closed: bool) -> Result<()> {
+    const BUDGET: u32 = 4096;
+    const DEPTH: u8 = 4;
+    let Ok(page) = doc.find_page(page) else { return Ok(()) };
+    let unbounded = || if closed { Err(DiffError::BigImage { unreadable: true }) } else { Ok(()) };
+    let mut stack: Vec<(PdfObject, u8)> = Vec::new();
+    if let Ok(Some(res)) = page.get_dict_inheritable("Resources") {
+        stack.push((res, 0));
+    }
+    let mut left = BUDGET;
+    // The annotations' normal appearances (/AP /N: one form, or a dictionary of them by state) are drawn with the
+    // page; their resources are looked at within the same budget.
+    let annots = if closed { page.get_dict("Annots").ok().flatten() } else { None };
+    if let Some(annots) = annots {
+        for i in 0..annots.len().unwrap_or(0) as i32 {
+            let Ok(Some(an)) = annots.get_array(i) else { continue };
+            let Ok(Some(n)) = an.get_dict("AP").and_then(|ap| ap.map_or(Ok(None), |ap| ap.get_dict("N"))) else { continue };
+            let forms: Vec<PdfObject> = if n.is_stream().unwrap_or(false) {
+                vec![n]
+            } else {
+                (0..n.dict_len().unwrap_or(0).min(64) as i32).filter_map(|k| n.get_dict_val(k).ok().flatten()).collect()
+            };
+            for f in forms {
+                if left == 0 {
+                    return unbounded();
+                }
+                left -= 1;
+                if let Ok(Some(r)) = f.get_dict("Resources") {
+                    stack.push((r, 1));
+                }
+            }
+        }
+    }
     let mut sum = 0u64;
     while let Some((res, depth)) = stack.pop() {
         let Ok(Some(xo)) = res.get_dict("XObject") else { continue };
         for i in 0..xo.dict_len().unwrap_or(0) as i32 {
             if left == 0 {
-                return Ok(());
+                return unbounded();
             }
             left -= 1;
             let Ok(Some(x)) = xo.get_dict_val(i) else { continue };
@@ -206,9 +240,13 @@ pub(crate) fn check_page_images(doc: &PdfDocument, page: i32, each: u64, total: 
                         return Err(DiffError::BigImage { unreadable: false });
                     }
                 }
-                Some(t) if t == b"Form" && depth < 4 => {
+                Some(t) if t == b"Form" => {
                     if let Ok(Some(r)) = x.get_dict("Resources") {
-                        stack.push((r, depth + 1));
+                        if depth < DEPTH {
+                            stack.push((r, depth + 1));
+                        } else if r.get_dict("XObject").ok().flatten().is_some() {
+                            return unbounded();
+                        }
                     }
                 }
                 _ => {}
