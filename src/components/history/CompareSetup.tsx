@@ -135,7 +135,7 @@ export function CompareSetup() {
           <button className="hx-btn" onClick={() => h.closeCompare()}>
             Cancel
           </button>
-          <button className="hx-btn primary hx-go" disabled={!ready} onClick={go}>
+          <button className="hx-btn primary hx-go" disabled={!ready} aria-disabled={!ready} onClick={go}>
             Compare
           </button>
         </div>
