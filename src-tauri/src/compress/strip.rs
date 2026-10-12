@@ -338,46 +338,46 @@ impl Dests {
     /// so it is not judged.
     pub(crate) fn lookup(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
         let key = Self::key(key);
-        if self.old.is_some() { self.in_old(&key) } else { self.in_tree(&key) }
+        if self.old.is_some() { self.in_old(&key, false) } else { self.in_tree(&key) }
     }
 
     /// Like `lookup`, but a name that either source defines is found (the optimizer only keeps more: a viewer
     /// other than MuPDF may read the tree when there is a `/Dests` too).
     pub(crate) fn lookup_any(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
         let key = Self::key(key);
-        match (self.in_old(&key), self.in_tree(&key)) {
+        match (self.in_old(&key, true), self.in_tree(&key)) {
             (Some(Some(v)), _) | (_, Some(Some(v))) => Some(Some(v)),
             (Some(None), Some(None)) => Some(None),
             _ => None,
         }
     }
 
-    /// In the `/Dests` dictionary: by the name object, or by a string's own bytes (MuPDF `pdf_dict_gets`), and then
-    /// by the string re-encoded the way MuPDF's viewer does before it looks it up (`pdf_resolve_link_dest`:
-    /// `pdf_new_text_string` of the decoded text, which is ASCII as it is and UTF-16BE with a mark otherwise, read as a
-    /// C string). The text as a UTF-8 name and as PDFDocEncoding bytes are tried too: the optimizer only keeps more.
-    fn in_old(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
+    /// In the `/Dests` dictionary. A name is the key itself. A string goes by the key MuPDF's viewer forms from it
+    /// (`pdf_resolve_link_dest`: the decoded text through `pdf_new_text_string`, see `viewer_key`) and by that alone,
+    /// as MuPDF does: a key spelled with the string's own bytes is not looked at. `any` (the optimizer, which only
+    /// keeps more) also tries the string's own bytes (`pdf_dict_gets`), its text as a UTF-8 name and as
+    /// PDFDocEncoding bytes.
+    fn in_old(&self, key: &PdfObject, any: bool) -> Option<Option<PdfObject>> {
         let Some(old) = &self.old else { return Some(None) };
         if key.is_name().ok()? {
             return Some(old.get_dict(key.share()).ok().flatten());
         }
         let bytes = key.as_bytes().ok()?;
-        // a NUL makes the key unbuildable here, so it is not judged
-        if let Some(v) = self.by_bytes(old, &bytes)? {
-            return Some(Some(v));
+        if any {
+            // a NUL makes the key unbuildable here, so it is not judged
+            if let Some(v) = self.by_bytes(old, &bytes)? {
+                return Some(Some(v));
+            }
         }
-        // no faithful text: nothing more to try, and the tree decides whether it is judged
-        let Some(text) = mupdf_text(&bytes) else { return Some(None) };
-        let mut forms = vec![text.as_bytes().to_vec()];
+        // no faithful text: the viewer's key is not known, so it is not judged; `any` leaves that to the tree
+        let Some(text) = mupdf_text(&bytes) else { return if any { Some(None) } else { None } };
+        let viewer = viewer_key(&text);
+        if !any {
+            return self.by_bytes(old, &viewer);
+        }
+        let mut forms = vec![viewer, text.as_bytes().to_vec()];
         if let Some(doc) = text.chars().map(pdf_doc_byte).collect::<Option<Vec<u8>>>() {
             forms.push(doc);
-        }
-        if !text.is_ascii() {
-            let mut be = vec![0xFE, 0xFF];
-            be.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
-            // MuPDF compares the buffer as a C string, which ends at the first 0 byte
-            be.truncate(be.iter().position(|&c| c == 0).unwrap_or(be.len()));
-            forms.push(be);
         }
         // a form that cannot be a name (a NUL) finds nothing; the tree still judges the text
         Some(forms.iter().find_map(|f| self.by_bytes(old, f).flatten()))
@@ -412,6 +412,20 @@ impl Dests {
         let name = PdfObject::new_name(&text).ok()?;
         Some(self.tree.as_ref().and_then(|t| t.get_dict(name).ok().flatten()))
     }
+}
+
+/// The `/Dests` key MuPDF's viewer looks a string destination up by: the decoded text through `pdf_new_text_string`
+/// (ASCII as it is, any other text as UTF-16BE with a byte order mark, never PDFDocEncoding), read by `pdf_dict_gets`
+/// as a C string, which ends at the first 0 byte (so "caf\u{e9}" looks up the key FE FF).
+fn viewer_key(text: &str) -> Vec<u8> {
+    let text = text.split('\0').next().unwrap_or_default();
+    let mut key = if text.is_ascii() {
+        text.as_bytes().to_vec()
+    } else {
+        [0xFE, 0xFF].into_iter().chain(text.encode_utf16().flat_map(u16::to_be_bytes)).collect()
+    };
+    key.truncate(key.iter().position(|&c| c == 0).unwrap_or(key.len()));
+    key
 }
 
 /// MuPDF's `is_valid_utf8` (pdf-parse.c): looser than UTF-8 (overlong forms, surrogates and values past U+10FFFF

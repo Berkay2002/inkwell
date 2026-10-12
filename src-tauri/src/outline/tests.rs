@@ -440,7 +440,8 @@ fn a_dests_dictionary_hides_the_names_tree_as_it_does_in_mupdf() {
 }
 
 /// A string that is not the key's own bytes still reaches an old-style `/Dests` key: MuPDF's viewer re-encodes the
-/// decoded text before it looks it up there.
+/// decoded text before it looks it up there (`pdf_new_text_string`: ASCII as it is, any other text as UTF-16BE read as
+/// a C string, so "café" looks up the key FE FF and not `/caf#E9`: that one only another viewer may find).
 #[test]
 fn a_utf16_string_destination_finds_its_key_in_the_old_dests_dictionary() {
     let d = dir("outline", "dests_reencoded");
@@ -460,8 +461,37 @@ fn a_utf16_string_destination_finds_its_key_in_the_old_dests_dictionary() {
     let (eng, id, _p) = open_bytes(&d, "a.pdf", &bytes);
     let got: Vec<_> = list(&eng, id).unwrap().items.into_iter().map(|b| b.dest).collect();
     assert!(matches!(got[0], Dest::Page { page: 0, .. }), "{:?}", got[0]);
-    assert!(matches!(got[1], Dest::Page { page: 0, .. }), "{:?}", got[1]);
+    assert!(matches!(&got[1], Dest::Other { what } if what == UNCHECKED_DEST), "{:?}", got[1]);
     assert!(matches!(got[2], Dest::Broken { .. }), "{:?}", got[2]);
+}
+
+/// `/Dests` holding a key spelled with the string's own bytes (EF BB BF 41) and the key the viewer forms from its text
+/// (A), on two pages: MuPDF follows the second. A string with no faithful text (a lone surrogate) is not judged.
+#[test]
+fn a_string_destination_goes_to_the_key_the_viewer_forms_not_the_one_spelled_with_its_bytes() {
+    let d = dir("outline", "dests_two_spellings");
+    let items = [
+        "<< /Title (Both) /Parent 4 0 R /Dest <EFBBBF41> /Next 8 0 R >>",
+        "<< /Title (Utf16) /Parent 4 0 R /Dest <FEFF0041> /Prev 7 0 R /Next 9 0 R >>",
+        "<< /Title (Lone) /Parent 4 0 R /Dest <FEFFD800> /Prev 8 0 R >>",
+    ];
+    let mut objs: Vec<String> = [
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R /Dests << /#EF#BB#BFA [5 0 R /Fit] /A [6 0 R /Fit] >> >>",
+        "<< /Type /Pages /Kids [5 0 R 6 0 R] /Count 2 >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Outlines /First 7 0 R /Last 9 0 R /Count 3 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    objs.extend(items.iter().map(|s| s.to_string()));
+    let (eng, id, _p) = open_bytes(&d, "a.pdf", &raw_pdf(&objs));
+    let got: Vec<_> = list(&eng, id).unwrap().items.into_iter().map(|b| b.dest).collect();
+    assert!(matches!(got[0], Dest::Page { page: 1, .. }), "{:?}", got[0]);
+    assert!(matches!(got[1], Dest::Page { page: 1, .. }), "{:?}", got[1]);
+    assert!(matches!(&got[2], Dest::Other { what } if what == UNCHECKED_DEST), "{:?}", got[2]);
 }
 
 /// A name tree that cannot be read is not an empty one: no name is called broken.

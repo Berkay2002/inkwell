@@ -2059,6 +2059,31 @@ fn a_utf16_string_destination_is_found_in_the_old_dests_dictionary_by_its_text()
     assert_eq!(doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().len().unwrap(), 3);
 }
 
+/// The viewer's key is MuPDF's pick, but the optimizer only keeps more: a bookmark whose string is the bytes of a
+/// `/Dests` key, or has PDFDocEncoding bytes that are one, stays, and so does one with no faithful text.
+#[test]
+fn a_string_destination_is_kept_when_any_spelling_of_it_is_a_dests_key() {
+    let s = Scratch::new();
+    let input = s.path("spellings.pdf");
+    // /Dests keys: BOM + A (the bytes of the first string) and caf\351; the third string is a lone surrogate
+    bookmark_pdf(
+        &input,
+        "/Dests << /#EF#BB#BFA [5 0 R /Fit] /caf#E9 [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 10 0 R /Count 4 >>",
+        &[
+            "<< /Title (Bytes) /Parent 4 0 R /Dest <EFBBBF41> /Next 8 0 R >>",
+            "<< /Title (Cafe) /Parent 4 0 R /Dest <FEFF00630061006600E9> /Prev 7 0 R /Next 9 0 R >>",
+            "<< /Title (Lone) /Parent 4 0 R /Dest <FEFFD800> /Prev 8 0 R /Next 10 0 R >>",
+            "<< /Title (Gone) /Parent 4 0 R /Dest <FEFF0067006F006E0065> /Prev 9 0 R >>",
+        ],
+    );
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 1, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "Bytes, Cafe, Lone");
+}
+
 #[test]
 fn invalid_links_accept_a_destination_dictionary_and_still_drop_a_goto_without_one() {
     let s = Scratch::new();
