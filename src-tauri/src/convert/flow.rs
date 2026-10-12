@@ -60,14 +60,16 @@ pub struct Table {
 }
 
 impl Table {
-    /// How many leading rows are header rows (Word repeats them on the next page): the rows from the top that are
-    /// all bold, when the first has two or more filled cells (a bold caption that joined as a row has one) and
-    /// some later row is not bold.
+    /// How many leading rows are header rows (Word repeats them on the next page, from the top): a bold caption
+    /// that joined as a single-cell first row, then the all-bold rows, which need two or more filled cells in the
+    /// first of them and a body that is not all bold.
     pub fn header_rows(&self) -> usize {
-        let bold = |r: &Vec<Cell>| r.iter().any(|c| !c.text.is_empty()) && r.iter().all(|c| c.bold || c.text.is_empty());
-        let filled = self.rows.first().map_or(0, |r| r.iter().filter(|c| !c.text.is_empty()).count());
-        let n = self.rows.iter().take_while(|r| bold(r)).count();
-        if filled >= 2 && n < self.rows.len() { n } else { 0 }
+        let filled = |r: &Vec<Cell>| r.iter().filter(|c| !c.text.is_empty()).count();
+        let bold = |r: &Vec<Cell>| filled(r) > 0 && r.iter().all(|c| c.bold || c.text.is_empty());
+        let caption = self.rows.first().is_some_and(|r| filled(r) == 1) as usize;
+        let n = self.rows[caption.min(self.rows.len())..].iter().take_while(|r| bold(r)).count();
+        let first = self.rows.get(caption).map_or(0, filled);
+        if n > 0 && first >= 2 && caption + n < self.rows.len() { caption + n } else { 0 }
     }
 }
 
@@ -126,6 +128,12 @@ fn merge(run: &[Block]) -> Block {
     b.bold = len(&|p| p.bold);
     b.italic = len(&|p| p.italic);
     b
+}
+
+/// Whether `next` is the line right below `prev`: its top within a line of `prev`'s bottom.
+fn stacked(prev: &Block, next: &Block) -> bool {
+    let gap = prev.rect[1] - next.rect[3];
+    gap >= -0.5 * prev.size && gap <= prev.size
 }
 
 /// Lines that sat side by side (`blocks[range]` of each group, ascending and disjoint, `orig` the block they came
@@ -187,7 +195,9 @@ pub(super) fn unsplit(blocks: &mut Vec<Block>, groups: Vec<(Block, std::ops::Ran
                 while j < r.end {
                     let mut k = j + 1;
                     if !used[j] {
-                        while k < r.end && !used[k] {
+                        // Only pieces each directly below the one before; a line drawn between them that sits
+                        // elsewhere on the page (above the table, say) is not part of the paragraph.
+                        while k < r.end && !used[k] && stacked(&out[k - 1], &out[k]) {
                             k += 1;
                         }
                     }
@@ -459,20 +469,25 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
         in_row[*bi] = true;
     }
     let loose: Vec<usize> = (0..blocks.len()).filter(|i| !in_row[*i] && !blocks[*i].text.trim().is_empty()).collect();
-    // The median spacing of the rows' tops, or 1.5 lines for a run of one or two rows.
-    let pitch_of = |run: &[Vec<(usize, usize)>]| -> f64 {
-        let mut p: Vec<f64> = run.windows(2).map(|w| top(&w[0]) - top(&w[1])).collect();
-        p.sort_by(|a, b| a.total_cmp(b));
-        if p.len() >= 2 { p[p.len() / 2] } else { 1.5 * (top(&run[0]) - bottom(&run[0])).max(blocks[run[0][0].1].size) }
+    // A run's row pitch as `(unit, line)`: a line's height (the median of its rows' shortest blocks) plus the white
+    // space between rows, or 1.5 lines for a run of one or two rows; white space is measured bottom to top, so a
+    // row with a cell that wraps over several lines is not several pitches.
+    let unit_of = |run: &[Vec<(usize, usize)>]| -> (f64, f64) {
+        let mut hs: Vec<f64> = run.iter().map(|r| r.iter().map(|(_, i)| blocks[*i].rect[3] - blocks[*i].rect[1]).fold(f64::MAX, f64::min)).collect();
+        hs.sort_by(|a, b| a.total_cmp(b));
+        let line = hs[hs.len() / 2].max(1.0);
+        let mut ws: Vec<f64> = run.windows(2).map(|w| bottom(&w[0]) - top(&w[1])).collect();
+        ws.sort_by(|a, b| a.total_cmp(b));
+        (if ws.len() >= 2 { line + ws[ws.len() / 2].max(0.0) } else { 1.5 * line }, line)
     };
-    // Whether the rows `a` above `b` are one table's: not far apart (more than 3 pitches) and nothing between them
-    // under the table's width. A running header and a footer have the same columns, a page apart.
-    let together = |a: &Vec<(usize, usize)>, b: &Vec<(usize, usize)>, pitch: f64| -> bool {
-        let gap = top(a) - top(b);
-        if gap > 3.0 * pitch {
+    // Whether the rows `a` above `b` are one table's: not far apart (white space over 3 pitches less a line) and
+    // nothing between them under the table's width. A running header and a footer have the same columns, a page apart.
+    let together = |a: &Vec<(usize, usize)>, b: &Vec<(usize, usize)>, (unit, line): (f64, f64)| -> bool {
+        let ws = bottom(a) - top(b);
+        if ws > 3.0 * unit - line {
             return false;
         }
-        if gap <= 1.5 * pitch {
+        if ws <= 1.5 * unit - line {
             return true;
         }
         let (lo, hi) = (bottom(a), top(b));
@@ -494,25 +509,25 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
             i += 1;
         }
         let last = i; // qual rows: rows[first..last]
-        let pitch = pitch_of(&rows[first..last]);
+        let whole = unit_of(&rows[first..last]);
         let mut start = first;
         while start < last {
             let mut end = start + 1;
-            while end < last && together(&rows[end - 1], &rows[end], pitch) {
+            while end < last && together(&rows[end - 1], &rows[end], whole) {
                 end += 1;
             }
             // run = rows[start..end]
             let edges = run_edges(&rows[start..end]);
-            let pitch = if end - start == last - first { pitch } else { pitch_of(&rows[start..end]) };
+            let (unit, line) = if end - start == last - first { whole } else { unit_of(&rows[start..end]) };
+            let near = |above: &Vec<(usize, usize)>, below: &Vec<(usize, usize)>| bottom(above) - top(below) <= 1.5 * unit - line;
             let mut pieces: Vec<Vec<(usize, usize)>> = Vec::new();
-            // A line above or below joins only when it sits within the run's normal row pitch (1.5 times the
-            // median spacing of the rows' tops, or 1.5 lines for a run of one or two rows). Text that starts at the
-            // table's edge further away is a paragraph, even when it is as wide as the table.
-            if start > 0 && rows[start - 1].len() == 1 && top(&rows[start - 1]) - top(&rows[start]) <= 1.5 * pitch && spans_run(&edges, rows[start - 1][0].1) {
+            // A line above or below joins only when it sits within the run's normal row pitch (1.5 times it). Text
+            // that starts at the table's edge further away is a paragraph, even when it is as wide as the table.
+            if start > 0 && rows[start - 1].len() == 1 && near(&rows[start - 1], &rows[start]) && spans_run(&edges, rows[start - 1][0].1) {
                 pieces.push(rows[start - 1].clone());
             }
             pieces.extend(rows[start..end].iter().cloned());
-            if end < rows.len() && rows[end].len() == 1 && top(&rows[end - 1]) - top(&rows[end]) <= 1.5 * pitch && spans_run(&edges, rows[end][0].1) {
+            if end < rows.len() && rows[end].len() == 1 && near(&rows[end - 1], &rows[end]) && spans_run(&edges, rows[end][0].1) {
                 pieces.push(rows[end].clone());
             }
             flush(&mut pieces, &mut out, &mut consumed);

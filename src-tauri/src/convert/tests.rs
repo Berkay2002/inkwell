@@ -863,6 +863,36 @@ fn a_table_drawn_row_by_row_exports_like_one_drawn_column_by_column() {
 }
 
 #[test]
+fn a_cell_that_wraps_does_not_cut_a_table_drawn_column_by_column() {
+    // Three columns drawn one after the other; the Notes cell of the second row wraps to four lines, so the
+    // rows are 60 apart top to top but the white space between them is that of any other row.
+    let d = dir("wrapped_cell");
+    let notes = ["Ships in two weeks", "from the warehouse", "by sea freight and", "then by road"];
+    let rows = [("Item", "Qty"), ("Widgets", "12"), ("Gadgets", "7"), ("Total", "19")];
+    let ys = [700.0, 682.0, 622.0, 604.0];
+    let mut c = String::new();
+    for (r, (a, _)) in rows.iter().enumerate() {
+        c += &put(a, 72.0, ys[r], r == 0);
+    }
+    for (r, (_, b)) in rows.iter().enumerate() {
+        c += &put(b, 200.0, ys[r], r == 0);
+    }
+    c += &put("Notes", 300.0, ys[0], true);
+    for (i, n) in notes.iter().enumerate() {
+        c += &put(n, 300.0, ys[1] - 13.0 * i as f64, false);
+    }
+    c += &put("Paid", 300.0, ys[2], false);
+    c += &put("Paid", 300.0, ys[3], false);
+    let (rtf, xml) = export_both(&d, "column-order-wrapped", &raw_pdf(&c));
+    let toks = rtf_tokens(&rtf);
+    assert_eq!(word_count(&toks, "trowd"), 4, "{rtf}");
+    assert_eq!(cellx_of_first_row(&rtf).len(), 3, "{rtf}");
+    assert!(rtf.contains("Ships in two weeks from the warehouse by sea freight and then by road\\cell"), "{rtf}");
+    assert_eq!(xml.matches("<w:tr>").count() + xml.matches("<w:tr ").count(), 4, "{xml}");
+    assert_eq!(xml.matches("<w:tbl>").count(), 1, "{xml}");
+}
+
+#[test]
 fn the_lines_of_a_paragraph_stay_one_paragraph() {
     let content = put("First line of a paragraph that wraps", 72.0, 700.0, false) + &put("and carries on here.", 72.0, 686.0, false);
     let (rtf, xml) = export_both(&dir("wrapped"), "wrapped", &raw_pdf(&content));
@@ -1005,6 +1035,23 @@ fn pieces_a_table_leaves_are_one_paragraph_again() {
 }
 
 #[test]
+fn pieces_with_a_table_between_them_are_not_one_paragraph() {
+    let rows = |y: f64| [tight("a", 72.0, y), tight("b", 172.0, y), tight("c", 272.0, y)];
+    // One block's pieces in stream order: a row of a table, a line above the table, a line below it.
+    let mut blocks = rows(500.0).to_vec();
+    blocks.push(tight("line above", 72.0, 560.0));
+    blocks.push(tight("line below", 72.0, 400.0));
+    let orig = flow::Block { text: "whole".into(), rect: [72.0, 400.0, 300.0, 570.0], ..blocks[0].clone() };
+    let end = blocks.len();
+    blocks.extend(rows(480.0));
+    blocks.extend(rows(460.0));
+    flow::unsplit(&mut blocks, vec![(orig, 0..end)]);
+    let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
+    assert!(texts.contains(&"line above") && texts.contains(&"line below"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("line above line below")), "{texts:?}");
+}
+
+#[test]
 fn only_the_leading_bold_rows_with_cells_are_header_rows() {
     use super::rtf::rtf;
     let row = |y: f64, bold: bool, cells: &[&str]| -> Vec<flow::Block> {
@@ -1012,11 +1059,13 @@ fn only_the_leading_bold_rows_with_cells_are_header_rows() {
     };
     let hdr = |blocks: Vec<flow::Block>| word_count(&rtf_tokens(&rtf(&[page_of(blocks)], "t").text), "trhdr");
     let body = || [row(440.0, false, &["x", "y", "z"]), row(420.0, false, &["u", "v", "w"])].concat();
-    // A bold caption that spans columns joins as the first row: it is not a header row, and the row below is not
-    // contiguous from the top, so nothing repeats.
+    // A bold caption that spans columns joins as the first row; the real header row below it is marked too, and
+    // the caption with it, as Word repeats only header rows that are contiguous from the table's top.
     let caption = flow::Block { bold: true, ..wide("Table 1: Quarterly revenue by region", 72.0, 480.0, 250.0) };
-    let with_caption = [vec![caption], row(460.0, true, &["Item", "Qty", "Total"]), body()].concat();
-    assert_eq!(hdr(with_caption), 0);
+    let with_caption = [vec![caption.clone()], row(460.0, true, &["Item", "Qty", "Total"]), body()].concat();
+    assert_eq!(hdr(with_caption), 2);
+    // A caption over body rows only has no header row.
+    assert_eq!(hdr([vec![caption], body()].concat()), 0);
     // Two bold rows at the top are both header rows.
     assert_eq!(hdr([row(480.0, true, &["Region", "Q1", "Q2"]), row(460.0, true, &["", "units", "units"]), body()].concat()), 2);
     // One bold row over body rows; and a table that is bold throughout has none.
