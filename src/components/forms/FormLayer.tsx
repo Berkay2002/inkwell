@@ -245,7 +245,7 @@ const ALIGN = ["left", "center", "right"] as const;
 function SigField({ docId, f, cls: base, css, label }: { docId: number; f: Field; cls: string; css: React.CSSProperties; label: string }) {
   const sig = useSign((s) => s.docs[docId]?.sigs)?.find((x) => x.field === f.name);
   const v = sigFieldView(label, sig);
-  // A refused field is dimmed like the one in Fill and Sign (opaque, so MuPDF's own red tag in the page bitmap is covered).
+  // A refused field is dimmed like the one in Fill and Sign.
   const cls = v.state === "locked" ? `${base} locked` : base;
   return (
     <div className="fm-cell" style={css} data-fm-xref={f.xref}>

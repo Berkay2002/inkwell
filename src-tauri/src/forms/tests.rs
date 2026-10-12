@@ -133,13 +133,16 @@ fn every_field_type_is_one_undo_step_and_survives_save_and_reopen() {
     assert_eq!(back.fields[4].options, f.fields[4].options);
     assert_eq!(back.fields[6].caption, "Reset");
 
-    // A fresh MuPDF sees every widget with an appearance stream.
+    // A fresh MuPDF sees every widget with an appearance stream, except the unsigned signature box (MuPDF's own
+    // for it is a red "SIGN" arrow, which Inkwell never draws or writes).
     let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
     let page = doc.load_pdf_page(0).unwrap();
     let mut n = 0;
     for w in page.widgets() {
         n += 1;
-        assert!(w.annotation().object().get_dict("AP").unwrap().is_some(), "widget {n} has no /AP");
+        let o = w.annotation().object();
+        let sig = o.get_dict("FT").unwrap().and_then(|t| t.as_name().ok()).as_deref() == Some(b"Sig");
+        assert_eq!(o.get_dict("AP").unwrap().is_some(), !sig, "widget {n}: /AP");
     }
     assert_eq!(n, all.len());
 }
@@ -3385,4 +3388,26 @@ fn a_reference_array_past_the_entries_read_locks_every_field() {
     for r in touch_field(&eng, id, "Sum") {
         r.unwrap_err();
     }
+}
+
+#[test]
+fn a_new_signature_box_gets_no_appearance_from_mupdf() {
+    // MuPDF would draw its red "SIGN" arrow into the field (and into the file) the moment it is built.
+    let (eng, id, _) = open("sig-box-ap");
+    let xref = add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
+    let bytes = eng.current_bytes(id).unwrap();
+    let d = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let w = d.new_indirect(xref, 0).unwrap().resolve().unwrap().unwrap();
+    assert!(w.get_dict("AP").unwrap().is_none(), "no appearance is written for an unsigned signature box");
+    let arrow = (1..d.count_objects().unwrap() as i32).any(|n| {
+        d.new_indirect(n, 0).and_then(|o| o.resolve()).ok().flatten().is_some_and(|o| {
+            o.is_stream().unwrap_or(false) && o.read_stream().unwrap_or_default().windows(14).any(|w| w == b"0.95 0.33 0.18")
+        })
+    });
+    assert!(!arrow, "the arrow is in the file");
+    // Nor does it show on the page.
+    let rev = eng.doc_entry(id).unwrap().generation();
+    let png = image::load_from_memory(&eng.page_png(id, rev, 0, 800).unwrap()).unwrap().to_rgb8();
+    let tag = png.pixels().filter(|p| p.0[0] > p.0[1].saturating_add(12) && p.0[0] > p.0[2].saturating_add(12)).count();
+    assert_eq!(tag, 0);
 }

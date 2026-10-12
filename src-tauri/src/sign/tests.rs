@@ -1868,3 +1868,162 @@ fn a_signature_whose_signed_revision_cannot_be_read_locks_every_field() {
     });
     assert_eq!(locked_fields(&none), ["Witness", "Other"]);
 }
+
+// ---- an unsigned signature field draws the file's own appearance, never MuPDF's "SIGN" arrow --------
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Look {
+    NoAp,
+    BlankAp,
+    BlueAp,
+}
+
+/// Page 1 with an unsigned signature field "Tenant" (220 x 80 at 300,100) drawn as `look`, plus a text
+/// field "Name" with a value and a FreeText note, neither with an appearance (MuPDF still draws both).
+fn with_sig_field(look: Look) -> Vec<u8> {
+    let base = fixture::build(&Fixture { pages: 1, lines: 4, ..Default::default() });
+    let mut doc = PdfDocument::from_bytes(&base).unwrap();
+    let mut page = doc.find_page(0).unwrap();
+    let mut annots = doc.new_array().unwrap();
+    let mut fields = doc.new_array().unwrap();
+    for (src, field) in [
+        ("<</Type/Annot/Subtype/Widget/FT/Sig/T(Tenant)/F 4/Rect[300 100 520 180]>>", true),
+        ("<</Type/Annot/Subtype/Widget/FT/Tx/T(Name)/V(Hello)/DA(/Helv 14 Tf 0 g)/F 4/Rect[50 300 250 330]>>", true),
+        ("<</Type/Annot/Subtype/FreeText/Contents(Note)/DA(/Helv 14 Tf 0 g)/F 4/Rect[50 200 250 240]>>", false),
+    ] {
+        let o = doc.new_object_from_str(src).unwrap();
+        let mut w = doc.add_object(&o).unwrap();
+        w.dict_put("P", page.clone()).unwrap();
+        if src.contains("/Sig") && look != Look::NoAp {
+            let body: &[u8] = if look == Look::BlueAp { b"0 0 1 rg 0 0 220 80 re f" } else { b"q Q" };
+            let form = doc.new_object_from_str("<</Type/XObject/Subtype/Form/BBox[0 0 220 80]>>").unwrap();
+            let s = doc.add_stream(&mupdf::Buffer::from_bytes(body).unwrap(), Some(&form), false).unwrap();
+            let mut ap = doc.new_dict().unwrap();
+            ap.dict_put("N", s).unwrap();
+            w.dict_put("AP", ap).unwrap();
+        }
+        annots.array_push(w.clone()).unwrap();
+        if field {
+            fields.array_push(w).unwrap();
+        }
+    }
+    page.dict_put("Annots", annots).unwrap();
+    let dr = "<</Font<</Helv<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>>>>>";
+    let mut af = doc.new_object_from_str(&format!("<</DA(/Helv 12 Tf 0 g)/DR{dr}>>")).unwrap();
+    af.dict_put("Fields", fields).unwrap();
+    doc.catalog().unwrap().dict_put("AcroForm", af).unwrap();
+    let mut out = Vec::new();
+    doc.write_to(&mut out).unwrap();
+    out
+}
+
+/// Pixels that lean red or orange (the arrow's 0.95 0.33 0.18 and its antialiased edge); the page, the
+/// fixture's text, the blue appearance and the field texts are all gray or blue.
+fn tag_px(i: &image::RgbImage) -> usize {
+    i.pixels().filter(|p| p.0[0] > p.0[1].saturating_add(12) && p.0[0] > p.0[2].saturating_add(12)).count()
+}
+
+fn blue_px(i: &image::RgbImage) -> usize {
+    i.pixels().filter(|p| p.0[2] > 200 && p.0[0] < 60 && p.0[1] < 60).count()
+}
+
+fn dark_in(i: &image::RgbImage, r: [u32; 4]) -> usize {
+    (r[1]..r[3]).flat_map(|y| (r[0]..r[2]).map(move |x| (x, y))).filter(|&(x, y)| i.get_pixel(x, y).0[0] < 128).count()
+}
+
+/// Page 1 of `bytes` at 72 dpi through `Page::to_pixmap`, the path of OCR, export and compress.
+fn pixmap_rgb(bytes: &[u8]) -> image::RgbImage {
+    let page = mupdf::Document::from_bytes(bytes, "application/pdf").unwrap().load_page(0).unwrap();
+    let pix = page.to_pixmap(&mupdf::Matrix::IDENTITY, &mupdf::Colorspace::device_rgb(), false, true).unwrap();
+    assert_eq!(pix.n(), 3);
+    image::RgbImage::from_raw(pix.width(), pix.height(), pix.samples().to_vec()).unwrap()
+}
+
+/// Every way Inkwell puts page 1 on a bitmap, as (label, image).
+fn renders(test: &str, bytes: &[u8]) -> Vec<(&'static str, image::RgbImage)> {
+    let (eng, id, _) = open_bytes(test, bytes);
+    let rev = eng.doc_entry(id).unwrap().generation();
+    let png = |b: Vec<u8>| image::load_from_memory(&b).unwrap().to_rgb8();
+    let s = crate::print::Settings::default();
+    let out = dir(&format!("{test}-print")).join("print.pdf");
+    crate::print::pdf::save(&eng, id, &s, &out, &std::sync::atomic::AtomicBool::new(false), &mut |_| {}).unwrap();
+    vec![
+        ("view and thumbnails (engine page_png)", png(eng.page_png(id, rev, 0, 800).unwrap())),
+        ("to_pixmap (export, OCR, compress)", pixmap_rgb(bytes)),
+        ("print preview", png(crate::print::preview_png(&eng, id, &s, 0, 800).unwrap())),
+        ("print to PDF (baked), rendered", pixmap_rgb(&std::fs::read(&out).unwrap())),
+    ]
+}
+
+#[test]
+fn an_unsigned_signature_field_never_shows_the_sign_arrow() {
+    let mut bad = Vec::new();
+    for look in [Look::NoAp, Look::BlankAp, Look::BlueAp] {
+        let bytes = with_sig_field(look);
+        for (what, img) in renders(&format!("tag-{look:?}"), &bytes) {
+            let (tag, blue) = (tag_px(&img), blue_px(&img));
+            eprintln!("{look:?} / {what}: tag pixels {tag}, blue pixels {blue}");
+            if tag != 0 || (blue > 1000) != (look == Look::BlueAp) {
+                bad.push(format!("{look:?} / {what}: tag {tag}, blue {blue}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+#[test]
+fn a_text_field_and_a_free_text_note_without_an_appearance_are_still_drawn() {
+    // 72 dpi, 792 tall: PDF y 300..330 is device y 462..492, and 200..240 is 552..592.
+    let img = pixmap_rgb(&with_sig_field(Look::NoAp));
+    assert!(dark_in(&img, [50, 462, 250, 492]) > 20, "the text field's value");
+    assert!(dark_in(&img, [50, 552, 250, 592]) > 20, "the note's text");
+}
+
+/// The widget's /AP/N as (has /AP, the stream's bytes).
+fn sig_ap(bytes: &[u8]) -> (bool, Vec<u8>) {
+    let d = PdfDocument::from_bytes(bytes).unwrap();
+    let annots = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap();
+    for i in 0..annots.len().unwrap() as i32 {
+        let w = annots.get_array(i).unwrap().unwrap();
+        if w.get_dict("FT").unwrap().and_then(|n| n.as_name().ok()).as_deref() == Some(b"Sig") {
+            return match w.get_dict("AP").unwrap().and_then(|a| a.get_dict("N").unwrap()) {
+                Some(n) => (true, n.read_stream().unwrap_or_default()),
+                None => (false, Vec::new()),
+            };
+        }
+    }
+    panic!("no signature widget");
+}
+
+/// Does any stream in the file draw the arrow's colour?
+fn has_arrow(bytes: &[u8]) -> bool {
+    let d = PdfDocument::from_bytes(bytes).unwrap();
+    (1..d.count_objects().unwrap() as i32).any(|n| {
+        d.new_indirect(n, 0).and_then(|o| o.resolve()).ok().flatten().is_some_and(|o| o.is_stream().unwrap_or(false) && o.read_stream().unwrap_or_default().windows(14).any(|w| w == b"0.95 0.33 0.18"))
+    })
+}
+
+#[test]
+fn an_unrelated_edit_and_save_leaves_a_signature_fields_appearance_alone() {
+    for look in [Look::NoAp, Look::BlankAp, Look::BlueAp] {
+        let bytes = with_sig_field(look);
+        let before = sig_ap(&bytes);
+        assert!(!has_arrow(&bytes));
+        let (eng, id, _) = open_bytes(&format!("keep-{look:?}"), &bytes);
+        // The page is drawn first (that is when MuPDF loads and updates its widgets), then edited.
+        let rev = eng.doc_entry(id).unwrap().generation();
+        eng.page_png(id, rev, 0, 400).unwrap();
+        add_one(&eng, id, 0, &NewAnnot::Note { at: [100.0, 400.0], text: "x".into() }, &Style::default(), "T", EditSource::User).unwrap();
+        let inc = eng.current_bytes(id).unwrap();
+        // A full rewrite of the same document, as the compress, optimize and print writers do.
+        let d = PdfDocument::from_bytes(&inc).unwrap();
+        d.load_page(0).unwrap();
+        let mut full = Vec::new();
+        d.write_to(&mut full).unwrap();
+        for (what, b) in [("incremental", &inc), ("full", &full)] {
+            eprintln!("{look:?} / {what}: AP {:?} -> {:?}, arrow in file {}", (before.0, before.1.len()), (sig_ap(b).0, sig_ap(b).1.len()), has_arrow(b));
+            assert_eq!(sig_ap(b), before, "{look:?} / {what}: the widget's appearance");
+            assert!(!has_arrow(b), "{look:?} / {what}: the arrow was written into the file");
+        }
+    }
+}
