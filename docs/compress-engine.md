@@ -58,8 +58,11 @@ Invalid bookmarks (Acrobat's "Discard invalid bookmarks"): an item is invalid wh
 GoTo `/A`, is an array whose page is not a page of this document (a reference to something that is not in the page
 tree, or to an object that does not exist, or no page at all), a name or string the catalog's `/Dests` or `/Names`
 `/Dests` tree does not define (or defines as something that is not a destination), or anything that is not a
-destination. An integer page (the remote form) is kept while it is below the page count. Items with no destination
-(headings) and items with another action (URI, GoToR, Launch, Named, JavaScript) are never judged. An invalid item is
+destination. A destination written as a dictionary is followed through its `/D` (up to four hops, so a loop ends), the
+same way for bookmarks and links. An integer page (the remote form) is kept while it is below the page count. Items
+with no destination (headings), a GoTo with no `/D` (the panel shows those as headings too) and items with another
+action (URI, GoToR, Launch, Named, JavaScript) are never judged. A link that is a GoTo with no `/D` still counts as
+invalid. A destination name is looked up by its bytes, so `/caf#E9` finds its `/Dests` key. An invalid item is
 removed and **its working children are lifted into its place**, in order, at any depth (Acrobat does the same; the
 other choice, removing the whole subtree, would lose working bookmarks). `/First /Last /Prev /Next /Parent /Count`
 are rewritten, an item's open or closed state is kept. The walk has the outline editor's limits (50 000 items, 48

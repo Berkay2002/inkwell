@@ -1922,3 +1922,57 @@ fn a_destination_name_that_is_not_utf8_is_looked_up_by_its_bytes() {
     assert_eq!(r.stripped.invalid_bookmarks, 1, "{:?}", r.stripped);
     assert_eq!(outline_text(&outline_of(&r.output).items), "Cafe");
 }
+
+#[test]
+fn a_goto_without_a_destination_and_a_destination_dictionary_are_judged_like_the_bookmarks_panel_does() {
+    let s = Scratch::new();
+    let input = s.path("dicts.pdf");
+    bookmark_pdf(
+        &input,
+        NAMES,
+        "<< /Type /Outlines /First 7 0 R /Last 12 0 R /Count 6 >>",
+        &[
+            // no /D: the panel shows a heading, so it is not judged
+            "<< /Title (A) /Parent 4 0 R /A << /S /GoTo >> /Next 8 0 R >>",
+            // a destination written as a dictionary holding /D
+            "<< /Title (B) /Parent 4 0 R /Dest << /D [5 0 R /Fit] >> /Next 9 0 R >>",
+            "<< /Title (C) /Parent 4 0 R /Dest << /D (gone) >> /Next 10 0 R >>",
+            "<< /Title (D) /Parent 4 0 R /A << /S /GoTo /D null >> /Next 11 0 R >>",
+            "<< /Title (E) /Parent 4 0 R /Dest << /D 42 >> /Next 12 0 R >>",
+            // a dictionary that holds itself: ends, and is invalid
+            "<< /Title (F) /Parent 4 0 R /Dest 13 0 R >>",
+            "<< /D 13 0 R >>",
+        ],
+    );
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 3, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "A, B, D");
+}
+
+#[test]
+fn invalid_links_accept_a_destination_dictionary_and_still_drop_a_goto_without_one() {
+    let s = Scratch::new();
+    let input = s.path("links.pdf");
+    let link = |rest: &str| format!("<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] {rest} >>");
+    let objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /Dests << /ok [4 0 R /Fit] >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 7 0 R 8 0 R] >>".to_string(),
+        link("/Dest << /D [4 0 R /Fit] >>"),
+        link("/Dest << /D (gone) >>"),
+        link("/Dest << /D /ok >>"),
+        link("/A << /S /GoTo >>"),
+    ];
+    fs::write(&input, crate::outline::tests::raw_pdf(&objs)).unwrap();
+    let mut o = Options::preset(Preset::Custom);
+    o.strip.invalid_links = true;
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_links, 2, "{:?}", r.stripped);
+    let doc = open_pdf(&r.output, None).unwrap();
+    let annots = doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap();
+    assert_eq!(annots.len().unwrap(), 2);
+}

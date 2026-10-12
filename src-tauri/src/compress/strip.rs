@@ -319,19 +319,23 @@ fn dest_array_ok(doc: &PdfDocument, arr: &PdfObject, pages: Option<i32>) -> bool
     is_ref && matches!(doc.lookup_page_number(&first), Ok(n) if n >= 0)
 }
 
-/// A destination value: a name or string looked up, an array, or a dictionary holding `/D`.
+/// A destination value: an array, a dictionary holding `/D`, or a name or string looked up in the document's
+/// destinations. A few hops at most (a dictionary's `/D` can be a name), so a loop in a damaged file ends.
 fn dest_ok(doc: &PdfDocument, d: &Dests, v: &PdfObject, pages: Option<i32>) -> bool {
-    if v.is_array().unwrap_or(false) {
-        return dest_array_ok(doc, v, pages);
-    }
-    if v.is_name().unwrap_or(false) || v.is_string().unwrap_or(false) {
-        let Some(target) = d.lookup(v) else { return false };
-        return match target.get_dict("D").ok().flatten() {
-            Some(inner) if target.is_dict().unwrap_or(false) => {
-                inner.is_array().unwrap_or(false) && dest_array_ok(doc, &inner, pages)
-            }
-            _ => target.is_array().unwrap_or(false) && dest_array_ok(doc, &target, pages),
+    let mut cur = v.share();
+    for _ in 0..4 {
+        if cur.is_array().unwrap_or(false) {
+            return dest_array_ok(doc, &cur, pages);
+        }
+        let next = if cur.is_dict().unwrap_or(false) {
+            cur.get_dict("D").ok().flatten()
+        } else if cur.is_name().unwrap_or(false) || cur.is_string().unwrap_or(false) {
+            d.lookup(&cur)
+        } else {
+            None
         };
+        let Some(next) = next else { return false };
+        cur = next;
     }
     false
 }
@@ -357,7 +361,7 @@ fn link_works(doc: &PdfDocument, d: &Dests, link: &PdfObject) -> bool {
 
 /// A bookmark works unless its `/Dest`, or the `/D` of a GoTo action, does not resolve to a page of this document
 /// (`pages` pages). An item with no destination is a heading and stays, and so does one with any other action
-/// (URI, remote go-to, launch, named, JavaScript ...): those are not judged here.
+/// (URI, remote go-to, launch, named, JavaScript ...) or a GoTo with no `/D`: those are not judged here.
 fn bookmark_works(doc: &PdfDocument, d: &Dests, item: &PdfObject, pages: usize) -> bool {
     let pages = Some(pages as i32);
     if let Ok(Some(dest)) = item.get_dict("Dest") && !dest.is_null().unwrap_or(false) {
@@ -365,7 +369,10 @@ fn bookmark_works(doc: &PdfDocument, d: &Dests, item: &PdfObject, pages: usize) 
     }
     match item.get_dict("A") {
         Ok(Some(a)) if a.is_dict().unwrap_or(false) && is_name(&a, "S", b"GoTo") => {
-            a.get_dict("D").ok().flatten().is_some_and(|dest| dest_ok(doc, d, &dest, pages))
+            match a.get_dict("D").ok().flatten() {
+                Some(dest) if !dest.is_null().unwrap_or(false) => dest_ok(doc, d, &dest, pages),
+                _ => true,
+            }
         }
         _ => true,
     }
