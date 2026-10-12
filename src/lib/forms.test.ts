@@ -15,6 +15,7 @@ import {
   capPrompts,
   commitThenRun,
   effectsOf,
+  fieldCount,
   logCount,
   moved,
   safeLink,
@@ -131,6 +132,14 @@ describe("forms logic", () => {
     ];
     expect(progress(all)).toEqual([2, 3]);
     expect(missingRequired(all).map((x) => x.xref)).toEqual([2]);
+  });
+
+  it("the header count is the progress total while filling, every row while preparing", () => {
+    const all = [f({ xref: 1, node: 1 }), f({ xref: 3, node: 3, kind: "button" }), ...radios];
+    expect(rows(all)).toHaveLength(3);
+    expect(fieldCount(all, false)).toBe(progress(all)[1]);
+    expect(fieldCount(all, false)).toBe(2);
+    expect(fieldCount(all, true)).toBe(3);
   });
 
   it("resets the named fields, or with exclude everything but them", () => {

@@ -484,6 +484,61 @@ fn image_options(img: &Images) -> Option<ImageRewriteOptions> {
     any.then_some(o)
 }
 
+/// True when the document holds an ICC profile stream (a stream with /N 1, 3 or 4 that is not an object stream).
+fn has_icc_profile(doc: &PdfDocument) -> bool {
+    let n = doc.xref_len().unwrap_or(0);
+    (1..n).any(|x| {
+        let Ok(o) = doc.new_indirect(x as i32, 0) else { return false };
+        o.is_stream().unwrap_or(false)
+            && matches!(o.get_dict("N").ok().flatten().and_then(|v| v.as_int().ok()), Some(1 | 3 | 4))
+            && o.get_dict("Type").ok().flatten().and_then(|t| t.as_name().ok()).is_none_or(|t| t != b"ObjStm")
+    })
+}
+
+/// The image pass writes a rewritten image's colour space as a new ICCBased profile (~2.3 KB for RGB,
+/// ~2.3 KB gray) even when the original was plain DeviceRGB/DeviceGray. On a small file that outweighs what the
+/// recompression saved, and made Smallest bigger than Balanced. Where the document had no ICC profile of its own,
+/// every ICC colour space that appeared is one of those: the images go back to the device space (what they had)
+/// and the profile becomes an orphan the writer's garbage pass drops.
+fn drop_invented_profiles(doc: &PdfDocument) -> Result<(), Error> {
+    let n = doc.xref_len()?;
+    for x in 1..n {
+        let Ok(mut o) = doc.new_indirect(x as i32, 0) else { continue };
+        if !o.is_stream().unwrap_or(false) || o.get_dict("Subtype").ok().flatten().and_then(|s| s.as_name().ok()).is_none_or(|s| s != b"Image") {
+            continue;
+        }
+        let Some(cs) = o.get_dict("ColorSpace").ok().flatten().and_then(|c| c.resolve().ok().flatten()) else { continue };
+        if !cs.is_array().unwrap_or(false) || cs.len().unwrap_or(0) != 2 {
+            continue;
+        }
+        if cs.get_array(0).ok().flatten().and_then(|f| f.as_name().ok()).is_none_or(|f| f != b"ICCBased") {
+            continue;
+        }
+        let device = match cs.get_array(1).ok().flatten().and_then(|p| p.get_dict("N").ok().flatten()).and_then(|v| v.as_int().ok()) {
+            Some(3) => "DeviceRGB",
+            Some(1) => "DeviceGray",
+            _ => continue,
+        };
+        o.dict_put("ColorSpace", mupdf::pdf::PdfObject::new_name(device)?)?;
+    }
+    Ok(())
+}
+
+/// `rewrite_images`, minus the profiles it invents (see [`drop_invented_profiles`]).
+fn rewrite_images(
+    doc: &mut PdfDocument,
+    io: &ImageRewriteOptions,
+    cb: &mut dyn FnMut(u32, usize, usize) -> bool,
+) -> Result<ImageRewriteStats, mupdf::Error> {
+    let had_profile = has_icc_profile(doc);
+    let stats = doc.rewrite_images(io, cb)?;
+    if !had_profile && stats.replaced > 0 {
+        // Best effort: an image left with its profile is still a valid file.
+        let _ = drop_invented_profiles(doc);
+    }
+    Ok(stats)
+}
+
 /// `garbage` is the level to use (a run that took objects out never writes with 0: the orphans would stay).
 fn write_options(opts: &Options, garbage: u8) -> PdfWriteOptions {
     let mut w = PdfWriteOptions::default();
@@ -617,7 +672,7 @@ pub fn compress(
             });
             cancel.load(Ordering::Relaxed)
         };
-        match doc.rewrite_images(&io, &mut cb) {
+        match rewrite_images(&mut doc, &io, &mut cb) {
             Ok(s) => image_stats = s.into(),
             Err(_) if cancel.load(Ordering::Relaxed) => return Err(Error::Cancelled),
             Err(e) => return Err(e.into()),

@@ -40,6 +40,7 @@ import { useForms } from "./forms";
 import {
   batesText,
   expand,
+  footerLine,
   fromHex,
   fromMark,
   type Measure,
@@ -125,6 +126,17 @@ describe("colours", () => {
     expect(toHex([1, 1, 0.85])).toBe("#ffffd9");
     expect(fromHex("#ff0000")).toEqual([1, 0, 0]);
     expect(fromHex("nonsense")).toEqual([0, 0, 0]);
+  });
+});
+
+describe("footerLine", () => {
+  it("says what is missing, once, instead of an outcome sentence about a mark that cannot be added", () => {
+    const empty = open("headerFooter");
+    const why = readiness(empty, 12);
+    expect(why).toMatch(/Type the text/);
+    expect(footerLine(why, outcome(empty, 12, false, DATE))).toBe(why);
+    const w = open("watermark", { wmText: "DRAFT" });
+    expect(footerLine(readiness(w, 12), outcome(w, 12, false, DATE))).toBe("Adds 'DRAFT' in front of the text on 12 pages.");
   });
 });
 

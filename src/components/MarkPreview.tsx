@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { MarkKindInfo, PageMark } from "../lib/api";
+import { type Rot, pageSpaceTransform } from "../lib/layout";
 import { useStore } from "../store";
 import { canvasMeasure, CSS_FONT, markOf, type MarksSheet, type PreviewShape, previewShapes, todayDate, toHex, useMarks } from "../lib/marksStore";
 
@@ -28,11 +29,16 @@ function drawnAlready(sheet: MarksSheet, have: MarkKindInfo | undefined, page: n
   return canon(bare(markOf(sheet))) === canon(bare(have.mark));
 }
 
+/** A background colour is written behind the text, so the preview multiplies with the page instead of covering it. */
+export const needsBlend = (shapes: PreviewShape[]) => shapes.some((s) => s.kind === "rect" && s.blend);
+
 /**
  * The open Page marks sheet drawn over page `page` as the engine will write it: SVG in page points
- * (it lives inside the page space, so zoom and rotation apply), outlined so it reads as a preview.
+ * (in its own page space, so zoom and rotation apply), outlined so it reads as a preview.
+ * That space is a sibling of the page's other layers, not inside theirs: a transform makes a stacking context, and a
+ * multiply inside one has only transparent to blend with (the page turned solid yellow).
  */
-export function MarkPreview({ docId, page, size }: { docId: number; page: number; size: Size }) {
+export function MarkPreview({ docId, page, size, rot, zoom }: { docId: number; page: number; size: Size; rot: Rot; zoom: number }) {
   const count = useStore((s) => s.docs[docId]?.pageCount ?? 0);
   const sheet = useMarks((s) => (s.sheet && s.sheet.doc === docId ? s.sheet : null));
   const have = useMarks((s) => (sheet ? s.info[docId]?.find((k) => k.kind === sheet.kind) : undefined));
@@ -45,11 +51,16 @@ export function MarkPreview({ docId, page, size }: { docId: number; page: number
   }, [sheet, have, page, count, size, date]);
   if (shapes.length === 0) return null;
   return (
-    <svg className="mk-preview" width={size[0]} height={size[1]} viewBox={`0 0 ${size[0]} ${size[1]}`} aria-hidden>
-      {shapes.map((s, i) => (
-        <Shape key={i} s={s} />
-      ))}
-    </svg>
+    <div
+      className={needsBlend(shapes) ? "mk-space blend" : "mk-space"}
+      style={{ width: size[0], height: size[1], transform: pageSpaceTransform(size, rot, zoom) }}
+    >
+      <svg className="mk-preview" width={size[0]} height={size[1]} viewBox={`0 0 ${size[0]} ${size[1]}`} aria-hidden>
+        {shapes.map((s, i) => (
+          <Shape key={i} s={s} />
+        ))}
+      </svg>
+    </div>
   );
 }
 
@@ -94,7 +105,7 @@ function Shape({ s }: { s: PreviewShape }) {
         </g>
       );
     case "rect":
-      return <rect x={s.x} y={s.y} width={s.w} height={s.h} fill={toHex(s.color)} opacity={s.opacity} style={s.blend ? { mixBlendMode: "multiply" } : undefined} />;
+      return <rect x={s.x} y={s.y} width={s.w} height={s.h} fill={toHex(s.color)} opacity={s.opacity} />;
     case "picture":
       return (
         <g transform={`translate(${s.cx} ${s.cy}) rotate(${-s.rotation})`} opacity={Math.max(s.opacity, 0.35)}>

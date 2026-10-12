@@ -40,7 +40,7 @@ style reference, then traced to a vector path. The pipeline is in `scripts/icons
 | pageDark | a page with a half-filled disc |
 | stamp | a rubber stamp over a line |
 | dropdown | a combo box with its chevron |
-| squiggle | a letter A over a wavy underline |
+| squiggle | a letter A over a zigzag underline (the one hand-drawn glyph: the traced wave read as a plain underline at 16 px) |
 
 Not here: the app mark (ink drop, `Chrome.tsx`) and the assistant provider's mark (`AssistantPanel.tsx`) are brand
 marks and stay where they are.
