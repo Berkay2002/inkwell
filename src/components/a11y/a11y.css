@@ -793,7 +793,7 @@
   background: var(--accent);
   box-shadow: var(--shadow-2);
 }
-.a11y-mark {
+.a11y-rulemenu {
   display: grid;
   place-items: center;
   width: 24px;
@@ -801,10 +801,10 @@
   border-radius: 12px;
   color: var(--text-2);
 }
-.a11y-mark:hover {
+.a11y-rulemenu:hover {
   background: var(--accent-soft);
 }
-.a11y-mark:focus-visible {
+.a11y-rulemenu:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }

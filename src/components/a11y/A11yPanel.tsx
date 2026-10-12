@@ -442,7 +442,7 @@ function MarkMenu({ doc, x }: { doc: DocState; x: RuleResult }) {
   const set = (m: "passed" | "skipped" | null) => st().setMark(doc.id, x.rule, m);
   return (
     <MenuButton
-      className="a11y-mark"
+      className="a11y-rulemenu"
       label={`Decide ${x.name} by hand`}
       items={[
         { label: "Passed manually", checked: x.mark === "passed", onSelect: () => set("passed") },
