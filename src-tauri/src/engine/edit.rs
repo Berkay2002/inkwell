@@ -772,6 +772,10 @@ struct Graft<'a> {
     defaults_done: bool,
 }
 
+/// How many parent fields are copied above one widget: a field tree is a few levels deep, and a chain far
+/// past that (or one a loop makes endless) would recurse as deep as the file allows. The field at the cap is a root.
+const MAX_FIELD_DEPTH: usize = 64;
+
 /// Keys never grafted as they are: they point back into the source's page or field tree.
 const BACK_REFS: [&str; 7] = ["P", "Popup", "Parent", "IRT", "Kids", "A", "AA"];
 
@@ -904,11 +908,11 @@ impl Graft<'_> {
         Ok(())
     }
 
-    /// The copy of `f`'s /Parent field. None when it has none, or when that /Parent closes a loop in a
-    /// broken field tree: `f` is then a root field of its own and the loop is not copied.
+    /// The copy of `f`'s /Parent field. None when it has none, when that /Parent closes a loop in a broken
+    /// field tree, or when the chain is past `MAX_FIELD_DEPTH`: `f` is then a root field of its own.
     fn up(&mut self, dst: &mut PdfDocument, map: &mut PdfGraftMap, f: &PdfObject) -> Result<Option<PdfObject>> {
         match f.get_dict("Parent")? {
-            Some(p) if p.is_indirect()? && !self.chain.contains(&p.as_indirect()?) => Ok(Some(self.parent(dst, map, p.as_indirect()?)?)),
+            Some(p) if p.is_indirect()? && self.chain.len() <= MAX_FIELD_DEPTH && !self.chain.contains(&p.as_indirect()?) => Ok(Some(self.parent(dst, map, p.as_indirect()?)?)),
             _ => Ok(None),
         }
     }
