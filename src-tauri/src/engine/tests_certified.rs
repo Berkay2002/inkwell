@@ -62,10 +62,6 @@ fn custom(eng: &Arc<Engine>, id: DocId, f: impl FnOnce(&mut PdfDocument) -> Resu
     eng.apply_custom(id, "A change".into(), EditSource::User, false, f).map(|_| ())
 }
 
-fn removing(eng: &Arc<Engine>, id: DocId, f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>) -> Result<()> {
-    eng.apply_removing(id, "A change".into(), EditSource::User, f).map(|_| ())
-}
-
 fn user() -> EditSource {
     EditSource::User
 }
@@ -82,7 +78,6 @@ fn attachment_id(eng: &Engine, id: DocId) -> String {
 fn ops() -> Vec<(&'static str, bool, Op)> {
     let note = crate::annot::NewAnnot::Note { at: [50.0, 50.0], text: "n".into() };
     let patch = crate::annot::Patch { contents: Some("changed".into()), ..Default::default() };
-    let note2 = note.clone();
     let sheet = crate::organize::labels::LabelSpec { style: LabelStyle::LowerRoman, prefix: String::new(), start: 3, extend: false };
     let fade = TransChange {
         transition: Some(Transition { style: TransStyle::Dissolve, duration: 1.0, dimension: None, motion: None, direction: None }),
@@ -168,7 +163,6 @@ fn ops() -> Vec<(&'static str, bool, Op)> {
         let rev = eng.edit_state(id)?.rev;
         crate::imageedit::edit(eng, id, rev, 0, Some(0), &crate::imageedit::ImageChange::Move { dx: 1.0, dy: 1.0 }, user()).map(|_| ())
     });
-    let _ = note2;
     v
 }
 
@@ -229,7 +223,7 @@ fn a_signed_document_takes_the_incremental_edits_and_is_saved_after_the_signed_b
     let d = dir("certified", "signed");
     let (eng, id, path) = crate::outline::tests::open_bytes(&d, "a.pdf", &bytes);
     // Edits that add or change; then the ones that take something out (the saved file keeps the old objects).
-    for (name, comment, op) in ops() {
+    for (name, _comment, op) in ops() {
         if ["rotate", "add a comment", "page labels", "transition", "attach a file", "add a mark", "remove a mark", "describe an attachment",
             "delete an attachment", "edit text", "add text", "delete page", "mark an area for redaction", "measurement scale"]
             .contains(&name)
@@ -239,7 +233,6 @@ fn a_signed_document_takes_the_incremental_edits_and_is_saved_after_the_signed_b
             assert!(r.is_ok(), "{name}: {}", certified_message(&r));
             assert!(eng.edit_state(id).unwrap().rev > before, "{name}: no step");
         }
-        let _ = comment;
     }
     eng.save(id, None).unwrap();
     let saved = std::fs::read(&path).unwrap();
