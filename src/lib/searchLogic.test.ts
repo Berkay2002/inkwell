@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_OPTS, type FileGroup, type Hit, approxTime, buildLine, byPosition, estimateLine, staleLine, staleResultsLine, changedOptions, filesLine, folderName, groupByPage, insertFile, optsKey, parseHistory,
-  mergeHits, parseOpts, pickCurrent, pushHistory, resultsLine, shortDir, visibleRows,
+  mergeHits, parseOpts, pickAfter, pickCurrent, pushHistory, resultsLine, shortDir, visibleRows,
 } from "./searchLogic";
 
 const hit = (page: number, y: number | null, text = "notice"): Hit => ({
@@ -186,5 +186,26 @@ describe("catalog lines", () => {
     expect(buildLine({ ...b, damaged: 0, password: 0, tooLarge: 1 })).toBe("30 files, 2 changed; 1 too large to index");
     expect(buildLine({ ...b, cancelled: true })).toMatch(/previous index/);
     expect(buildLine({ ...b, cancelled: true }, false)).toMatch(/Build it again/);
+  });
+});
+
+describe("landing after a replacement", () => {
+  const hits = [hit(0, 100), hit(0, 100), hit(0, 300), hit(1, 40)];
+  hits[1].rects = [[120, 100, 160, 110]];
+
+  it("goes to the first match at or after the replaced one", () => {
+    // The match at (10, 100) was replaced by text without the find text: the next one is the one beside it.
+    expect(pickAfter([hits[1], hits[2], hits[3]], { page: 0, y: 100, x: 10 })).toBe(0);
+    // A match later on the same line, on a later line, then on the next page.
+    expect(pickAfter(hits, { page: 0, y: 100, x: 11 })).toBe(1);
+    expect(pickAfter(hits, { page: 0, y: 150, x: 0 })).toBe(2);
+    expect(pickAfter(hits, { page: 0, y: 301, x: 0 })).toBe(3);
+  });
+
+  it("steps over the matches the replacement holds, and wraps at the end", () => {
+    // The replaced match is still there (the replacement holds the find text once): skip it.
+    expect(pickAfter(hits, { page: 0, y: 100, x: 10 }, 1)).toBe(1);
+    expect(pickAfter(hits, { page: 1, y: 40, x: 10 }, 1)).toBe(0);
+    expect(pickAfter([], { page: 0, y: 0, x: 0 })).toBe(-1);
   });
 });

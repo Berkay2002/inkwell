@@ -15,7 +15,7 @@
 
 use super::content::{Matrix, Obj, Op, Pieces, num, serialize_ops};
 use super::font::{Limit, Metrics};
-use super::layout::{Deco, Face, Measure, Placement, RunSpec, Setter, emit, family_of, forget_unused_fonts, restyled_face, wrap};
+use super::layout::{Deco, Face, Item, Kind, Measure, Placement, RunSpec, Setter, emit, family_of, forget_unused_fonts, keep_lines, restyled_face, wrap};
 use crate::engine::EngineError;
 use mupdf::Buffer;
 use mupdf::pdf::{PdfDocument, PdfObject};
@@ -297,6 +297,15 @@ pub struct Block {
     /// The block's text as runs of one style, in reading order: a line break is a space (or
     /// nothing after a hyphen, which goes), consecutive parts of one style are one run.
     pub runs: Vec<Run>,
+    /// Where in the runs' joined text a line-end hyphen was dropped (the character offset the next line
+    /// starts at): a rewrite of the block does not put it back.
+    pub joins: Vec<usize>,
+    /// The index in `lines` of the line that starts at each of `joins`.
+    pub join_lines: Vec<usize>,
+    /// Where in the runs' joined text a line ended: the character offset of the space that stands for
+    /// the break (not a hyphen's, those are `joins`), and the index in `lines` of the line that follows it.
+    /// A rewrite that keeps the lines sets a line end there.
+    pub breaks: Vec<(usize, usize)>,
 }
 
 /// What the page holds that can't be edited, outside the blocks.
@@ -995,6 +1004,28 @@ fn add_shown(lines: &mut Vec<Line>, last: &mut Option<(usize, (f64, f64), f64)>,
     *last = Some((s.bt, s.end, s.size.max(1.0)));
 }
 
+/// How far a line's start and end are from its first and last glyph that is not a space (text space, after
+/// horizontal scaling): the spaces the block's text drops there, with their word spacing, and the kerning
+/// before the first word.
+fn edge_spaces(l: &Line) -> (f64, f64) {
+    let st = &l.origin.state;
+    let all: Vec<(&Glyph, f64)> = l.runs.iter().flat_map(|r| r.glyphs.iter().map(move |g| (g, r.tsize))).collect();
+    let blank = |g: &Glyph| !g.text.is_empty() && g.text.chars().all(paragraph_separator);
+    // `(w - kern)`: the TJ adjustment before a glyph is part of its advance, as `Measure::width` has it.
+    let advance = |g: &Glyph, size: f64| {
+        let tw = if g.bytes.as_slice() == [32] { st.word_spacing } else { 0.0 };
+        let tc = if g.bytes.is_empty() { 0.0 } else { st.char_spacing };
+        ((g.w - g.kern) / 1000.0 * size + tc + tw) * st.scale
+    };
+    let n = all.iter().take_while(|(g, _)| blank(g)).count();
+    if n == all.len() {
+        return (0.0, 0.0);
+    }
+    let lead = all[..n].iter().map(|(g, size)| advance(g, *size)).sum::<f64>() + all[n].0.kern / 1000.0 * all[n].1 * st.scale * -1.0;
+    let trail = all.iter().rev().take_while(|(g, _)| blank(g)).map(|(g, size)| advance(g, *size)).sum();
+    (lead, trail)
+}
+
 /// A line's start and end along the text direction of `first` (text space x of `first`).
 fn span_in(first: &Line, l: &Line) -> (f64, f64, f64) {
     let Some(inv) = first.origin.tm.then(&first.origin.ctm).invert() else {
@@ -1064,11 +1095,14 @@ pub fn group_blocks(lines: &[Line]) -> Vec<Block> {
                 issue: l.issue(),
                 lines: vec![i],
                 runs: Vec::new(),
+                joins: Vec::new(),
+                join_lines: Vec::new(),
+                breaks: Vec::new(),
             });
         }
     }
     for b in &mut blocks {
-        b.runs = block_runs(lines, &b.lines);
+        (b.runs, b.joins, b.join_lines, b.breaks) = block_runs(lines, &b.lines);
         if let Some(r) = b.runs.get(body_run(&b.runs)) {
             (b.base_font, b.size, b.bold, b.italic, b.color) = (r.base_font.clone(), r.size, r.bold, r.italic, r.color);
         }
@@ -1080,9 +1114,13 @@ pub fn group_blocks(lines: &[Line]) -> Vec<Block> {
     blocks
 }
 
-/// The runs of a block's lines in reading order, joined across line breaks (see [`Block::runs`]).
-fn block_runs(lines: &[Line], members: &[usize]) -> Vec<Run> {
+/// The runs of a block's lines in reading order, joined across line breaks (see [`Block::runs`]), where
+/// line-end hyphens were dropped (see [`Block::joins`]) and where the other lines ended (see [`Block::breaks`]).
+fn block_runs(lines: &[Line], members: &[usize]) -> (Vec<Run>, Vec<usize>, Vec<usize>, Vec<(usize, usize)>) {
     let mut out: Vec<Run> = Vec::new();
+    let mut joins = Vec::new();
+    let mut join_lines = Vec::new();
+    let mut breaks = Vec::new();
     for (n, &li) in members.iter().enumerate() {
         let line = &lines[li];
         for (k, run) in line.runs.iter().enumerate() {
@@ -1105,10 +1143,15 @@ fn block_runs(lines: &[Line], members: &[usize]) -> Vec<Run> {
                             if prev.glyphs.last().is_some_and(|g| g.text == "-") {
                                 prev.glyphs.pop();
                             }
+                            joins.push(out.iter().map(|r| r.text.chars().count()).sum());
+                            join_lines.push(n);
                         } else if prev.same_style(&run) {
+                            breaks.push((out.iter().map(|r| r.text.chars().count()).sum(), n));
+                            let prev = out.last_mut().expect("checked");
                             prev.text.push(' ');
                             prev.glyphs.push(Glyph::gap());
                         } else {
+                            breaks.push((out.iter().map(|r| r.text.chars().count()).sum(), n));
                             run.text.insert(0, ' ');
                             run.glyphs.insert(0, Glyph::gap());
                         }
@@ -1131,7 +1174,7 @@ fn block_runs(lines: &[Line], members: &[usize]) -> Vec<Run> {
         last.text = last.text.trim_end_matches(paragraph_separator).to_string();
     }
     out.retain(|r| !r.text.is_empty());
-    out
+    (out, joins, join_lines, breaks)
 }
 
 fn detect_align(lines: &[Line], members: &[usize]) -> Align {
@@ -1190,6 +1233,22 @@ pub struct TextChange {
     pub rise: Option<Option<Rise>>,
     /// The block's new content as runs of their own style, in order (replaces `text`).
     pub runs: Option<Vec<RunChange>>,
+    /// Set when the block's lines stay where they are (Find & Replace, which changes words and leaves the
+    /// lines): the runs' text is then used as it is, and each line is set at its own place.
+    #[serde(skip)]
+    pub keep: Option<KeepLines>,
+}
+
+/// How the lines of a block stay (see [`TextChange::keep`]). A line that no longer fits where it was makes the
+/// rewrite fail, as does a line end that can't be placed in the new text.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct KeepLines {
+    /// Where a line of the block ended and stays ended: the character offset in the new runs' text of the
+    /// space that is the line end, and the index of the block's line the text after it was on.
+    pub ends: Vec<(usize, usize)>,
+    /// What was replaced, as ranges of the new runs' text: a line that holds none of them is as it was and
+    /// is left exactly where and as wide as it was.
+    pub changed: Vec<(usize, usize)>,
 }
 
 /// One run of a block's new content. Unset fields come from run `source` of the block (or its
@@ -1256,7 +1315,7 @@ fn normalize(text: &str) -> String {
 }
 
 /// Text with each stretch of spaces as one space, hard breaks (`\n`) kept, the ends left as they are.
-fn collapse(text: &str) -> String {
+pub(super) fn collapse(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.replace("\r\n", "\n").chars() {
         if c != '\n' && paragraph_separator(c) {
@@ -1287,9 +1346,18 @@ fn fill_ops(color: Option<[f64; 3]>, own: &[Op]) -> Result<Vec<Op>> {
 
 /// Rewrites block `index` of page `page` with `change`. Returns the fallback fonts used.
 pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &TextChange) -> Result<Vec<Fallback>> {
+    rewrite_block_expecting(doc, page, index, change, None)
+}
+
+/// [`rewrite_block`] that refuses when the block at `index` no longer reads `expect` (a batch of
+/// edits on one page, planned from one reading: Find & Replace).
+pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, change: &TextChange, expect: Option<&str>) -> Result<Vec<Fallback>> {
     let pc = read_page(doc, page)?;
     let blocks = group_blocks(&pc.lines);
     let b = blocks.get(index).cloned().ok_or_else(|| invalid(format!("page {} has no text block {}", page + 1, index + 1)))?;
+    if expect.is_some_and(|t| t != b.text) {
+        return Err(invalid("the text changed while it was being replaced"));
+    }
     if let Some(issue) = b.issue {
         return Err(invalid(format!("this text can't be edited: {}", issue_text(issue))));
     }
@@ -1320,6 +1388,8 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     // The size lines are spaced by: the first run that is not raised, and what it was.
     let mut reference: Option<(f64, f64)> = None;
     let mut first_size = None;
+    // Characters the runs show, for placing `change.keep` in the items.
+    let mut shown = 0usize;
     for rc in &specs {
         let src = match rc.source {
             Some(i) => Some(b.runs.get(i).ok_or_else(|| invalid(format!("the block has no run {}", i + 1)))?),
@@ -1364,11 +1434,18 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         let rise = if rise.is_finite() && rise.abs() <= 1e5 { rise } else { 0.0 };
         first_size.get_or_insert(size);
         // A whole-block text loses outer spaces; a run keeps its own (they join it to the next).
-        let norm = if change.runs.is_some() { collapse } else { normalize };
+        let norm: fn(&str) -> String = if change.keep.is_some() {
+            |t| t.to_string()
+        } else if change.runs.is_some() {
+            collapse
+        } else {
+            normalize
+        };
         let text = rc.text.as_deref().map(norm).filter(|t| src.is_none_or(|s| *t != s.text));
         if text.is_none() && src.is_none() {
             continue;
         }
+        shown += text.as_deref().map_or_else(|| src.map_or(0, |s| s.text.chars().count()), |t| t.chars().count());
         let spec = RunSpec {
             source: src,
             text,
@@ -1388,6 +1465,44 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         }
         items.extend(setter.items(&spec)?);
     }
+    // Find & Replace keeps the lines: the items split at the kept line ends, each with the block's line it stands
+    // for and whether it holds a change. Only when the items add up to the runs' text, so an offset is known to
+    // be what it was meant for.
+    let kept = match &change.keep {
+        None => None,
+        Some(keep) => {
+            let cant = || invalid("the lines of the block can't be kept where they are");
+            // Lines are measured and set with the first line's character spacing and scale: one with its own
+            // would be spaced again.
+            let (tc, tz) = (first.origin.state.char_spacing, first.origin.state.scale);
+            let alike = members.iter().all(|l| (l.origin.state.char_spacing - tc).abs() < 1e-6 && (l.origin.state.scale - tz).abs() < 1e-6);
+            if !alike || items.iter().map(|i| i.text.chars().count()).sum::<usize>() != shown || items.iter().any(|i| matches!(i.kind, Kind::Break)) {
+                return Err(cant());
+            }
+            // Each line: its source line, its items, and where it starts and ends in the new text.
+            let mut groups: Vec<(usize, Vec<Item>, (usize, usize))> = vec![(0, Vec::new(), (0, shown))];
+            let (mut at, mut ends) = (0, keep.ends.iter().peekable());
+            for it in &items {
+                match ends.peek() {
+                    Some(&&(p, src)) if p == at => {
+                        if !matches!(it.kind, Kind::Space(_)) || src >= members.len() {
+                            return Err(cant());
+                        }
+                        ends.next();
+                        groups.last_mut().expect("one").2 .1 = p;
+                        groups.push((src, Vec::new(), (p + 1, shown)));
+                    }
+                    _ => groups.last_mut().expect("one").1.push(it.clone()),
+                }
+                at += it.text.chars().count();
+            }
+            if ends.next().is_some() {
+                return Err(cant());
+            }
+            let touched = |(a, z): (usize, usize)| keep.changed.iter().any(|&(c, d)| c <= z && d >= a);
+            Some(groups.into_iter().map(|(src, items, range)| (src, items, touched(range))).collect::<Vec<_>>())
+        }
+    };
     let (size, old_tf) = match (reference, first_size) {
         (Some(r), _) => r,
         (None, Some(s)) => (s, first_run.tsize),
@@ -1395,7 +1510,14 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     };
     let m = Measure { styles: &setter.styles, cs: st.char_spacing, scale: st.scale };
     // The block's extent along its first line, in that line's text space.
-    let spans: Vec<(f64, f64, f64)> = members.iter().map(|l| span_in(first, l)).collect();
+    let mut spans: Vec<(f64, f64, f64)> = members.iter().map(|l| span_in(first, l)).collect();
+    if change.keep.is_some() {
+        // Where each line's words are, not its blanks: a line may begin or end with spaces that the text drops.
+        for (sp, l) in spans.iter_mut().zip(&members) {
+            let (lead, trail) = edge_spaces(l);
+            (sp.0, sp.1) = (sp.0 + lead, (sp.1 - trail).max(sp.0 + lead));
+        }
+    }
     let mut left = spans.iter().map(|s| s.0).fold(f64::MAX, f64::min);
     let right = spans.iter().map(|s| s.1).fold(f64::MIN, f64::max);
     let align = change.align.unwrap_or(b.align);
@@ -1413,22 +1535,36 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         None if grows => own.max(pc.crop[2] - 36.0 - b.rect[0]),
         None => own,
     };
-    let mut lines = wrap(items.clone(), (width + 0.5) / k, &m);
-    if grows {
-        width = lines.iter().map(|l| m.line(&l.items) * k).fold(own, f64::max).min(width);
-    }
-    // A word longer than the width widens the box, keeping the aligned edge.
-    let widest = lines.iter().map(|l| m.line(&l.items) * k).fold(0.0, f64::max);
-    if widest > width {
-        let extra = widest - width;
-        match align {
-            Align::Center => left -= extra / 2.0 / k,
-            Align::Right => left -= extra / k,
-            _ => {}
+    let mut line_at = Vec::new();
+    let lines = if let Some(groups) = kept {
+        // Each line where it was; one that grew past the block, or past where it was, is not forced in.
+        let groups = groups.into_iter().filter(|(_, g, _)| g.iter().any(|i| !matches!(i.kind, Kind::Space(_)))).collect::<Vec<_>>();
+        if groups.is_empty() {
+            return Err(invalid("there is no text to set"));
         }
-        width = widest;
-        lines = wrap(items, (width + 0.5) / k, &m);
-    }
+        let (lines, at) = keep_lines(groups, &spans, align, (left, right), 0.5 / k, &m)
+            .ok_or_else(|| invalid("the replacement does not fit on its line"))?;
+        line_at = at;
+        lines
+    } else {
+        let mut lines = wrap(items.clone(), (width + 0.5) / k, &m);
+        if grows {
+            width = lines.iter().map(|l| m.line(&l.items) * k).fold(own, f64::max).min(width);
+        }
+        // A word longer than the width widens the box, keeping the aligned edge.
+        let widest = lines.iter().map(|l| m.line(&l.items) * k).fold(0.0, f64::max);
+        if widest > width {
+            let extra = widest - width;
+            match align {
+                Align::Center => left -= extra / 2.0 / k,
+                Align::Right => left -= extra / k,
+                _ => {}
+            }
+            width = widest;
+            lines = wrap(items, (width + 0.5) / k, &m);
+        }
+        lines
+    };
     let lead = if let Some(ls) = change.line_spacing {
         if !(ls.is_finite() && (0.5..=5.0).contains(&ls)) {
             return Err(invalid("the line spacing must be between 0.5 and 5 times the font size"));
@@ -1501,7 +1637,7 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     let origin = Matrix::translate(left, 0.0).then(&o.tm);
     block_ops.push(Op::new("Tm", origin.0.iter().map(|v| num(*v)).collect()));
     let tm_scale = (origin.0[0] * origin.0[3] - origin.0[1] * origin.0[2]).abs().sqrt();
-    let placement = Placement { align, width: width / k, lead, first_size: size, stroke: 0.03 * tm_scale, render_mode: st.render_mode };
+    let placement = Placement { align, width: width / k, lead, first_size: size, stroke: 0.03 * tm_scale, render_mode: st.render_mode, at: line_at };
     let (shown, decos) = emit(&setter, &lines, &m, &placement);
     block_ops.extend(shown);
     setter.finish()?;
@@ -1546,7 +1682,11 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         (insert, keep)
     });
     write_contents(doc, &pc, new_data)?;
-    forget_unused_fonts(doc, page)?;
+    // The edit is written: a stale font entry left behind is harmless (it goes with the next full save), so
+    // it is not an error the caller could mistake for a refused edit.
+    if let Err(e) = forget_unused_fonts(doc, page) {
+        eprintln!("textedit: could not tidy the fonts of page {}: {e}", page + 1);
+    }
     Ok(fallbacks)
 }
 
@@ -1696,7 +1836,7 @@ pub fn add_text(doc: &mut PdfDocument, page: u32, new: &NewText) -> Result<()> {
         Op::new("MP", vec![Obj::name("TouchUp_TextEdit")]),
         Op::new("BT", vec![]),
     ];
-    let placement = Placement { align: Align::Left, width: 0.0, lead: size * 1.2, first_size: size, stroke: 0.03, render_mode: 0 };
+    let placement = Placement { align: Align::Left, width: 0.0, lead: size * 1.2, first_size: size, stroke: 0.03, render_mode: 0, at: Vec::new() };
     ops.extend(emit(&setter, &lines, &m, &placement).0);
     setter.finish()?;
     drop(setter);
