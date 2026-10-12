@@ -196,7 +196,7 @@ fn a_field_locked_by_a_signature_is_skipped_and_reported() {
 }
 
 #[test]
-fn a_certified_document_refuses_import_with_no_history_step_but_exports() {
+fn a_p1_certification_refuses_the_import_with_no_history_step_but_exports() {
     let (eng, id, _) = form("certified");
     sign(&eng, id, None, Some(1));
     let before = eng.edit_state(id).unwrap();
@@ -209,6 +209,29 @@ fn a_certified_document_refuses_import_with_no_history_step_but_exports() {
     assert_eq!((after.rev, after.undo, after.dirty), (before.rev, before.undo, before.dirty));
     assert_eq!(eng.history(id).unwrap().len(), steps);
     assert!(export(&eng, id, Format::Json, "a.pdf").is_ok());
+    assert!(!exchange::gates(&eng, id).unwrap().forms);
+}
+
+#[test]
+fn p2_and_p3_certifications_fill_existing_fields_and_make_nothing_else() {
+    for p in [2, 3] {
+        let (eng, id, _) = form(&format!("certified-{p}"));
+        sign(&eng, id, None, Some(p));
+        assert!(exchange::gates(&eng, id).unwrap().forms, "P {p}");
+        let fields = |eng: &Engine| list_all(eng, id).unwrap().fields.len();
+        let (n, pages) = (fields(&eng), eng.edit_state(id).unwrap().page_count);
+        let r = import_one(&eng, id, &parse(br#"{"Full name": "Kim", "Brand new": "x", "Sig": "y"}"#).unwrap(), EditSource::User).unwrap();
+        assert_eq!(r.summary.set, 1, "P {p}: {:?}", r.summary);
+        assert!(skipped(&r.summary, "Brand new").contains("no field"), "P {p}");
+        assert_eq!(dto(&eng, id, "Full name")[0].value, "Kim", "P {p}");
+        assert_eq!((fields(&eng), eng.edit_state(id).unwrap().page_count), (n, pages), "P {p}: no field or page was made");
+        // Through FDF and XFDF too: a field the file names that the form lacks is reported, never created.
+        let (bytes, _) = export(&eng, id, Format::Fdf, "a.pdf").unwrap();
+        let extra = String::from_utf8_lossy(&bytes).replace("/Fields [", "/Fields [ << /T (Created) /V (x) >> ");
+        let r = import_one(&eng, id, &parse(extra.as_bytes()).unwrap(), EditSource::User).unwrap();
+        assert!(skipped(&r.summary, "Created").contains("no field"), "P {p}");
+        assert_eq!(fields(&eng), n, "P {p}");
+    }
 }
 
 #[test]

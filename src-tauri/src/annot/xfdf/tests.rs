@@ -240,21 +240,66 @@ fn one_page_pdf(catalog_extra: &str, page_extra: &str, more: &[&str]) -> Vec<u8>
 
 const ONE: &[u8] = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots><square page="0" rect="100,600,200,700" name="n1"><contents>One</contents></square></annots></xfdf>"##;
 
+fn certified_with_a_field(p: i32) -> Vec<u8> {
+    let cat = format!(
+        "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P {p} >> >> ] >> >> /AcroForm << /Fields [4 0 R] >>"
+    );
+    let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (orig) /Rect [10 10 100 30] /NM (w1) /P 3 0 R >>";
+    one_page_pdf(&cat, "/Annots [4 0 R]", &[widget])
+}
+
 #[test]
-fn a_certified_document_refuses_import_without_a_history_step_but_exports() {
-    let cat = "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 2 >> >> ] >> >>";
-    let d = dir("xfdf", "certified");
-    let (eng, id, _) = open_bytes(&d, "c.pdf", &one_page_pdf(cat, "", &[]));
-    let before = eng.edit_state(id).unwrap();
-    let steps = eng.history(id).unwrap().len();
-    match import_one(&eng, id, &parse(ONE).unwrap(), EditSource::User) {
-        Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
-        other => panic!("{:?}", other.map(|r| r.summary)),
+fn a_certification_below_p3_refuses_the_import_without_a_history_step_but_exports() {
+    for p in [1, 2] {
+        let d = dir("xfdf", &format!("certified-{p}"));
+        let (eng, id, _) = open_bytes(&d, "c.pdf", &certified_with_a_field(p));
+        let before = eng.edit_state(id).unwrap();
+        let steps = eng.history(id).unwrap().len();
+        match import_one(&eng, id, &parse(ONE).unwrap(), EditSource::User) {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "P {p}: {m}"),
+            other => panic!("P {p}: {:?}", other.map(|r| r.summary)),
+        }
+        let after = eng.edit_state(id).unwrap();
+        assert_eq!((after.rev, after.undo, after.dirty), (before.rev, before.undo, before.dirty));
+        assert_eq!(eng.history(id).unwrap().len(), steps);
+        assert!(export(&eng, id, Format::Xfdf, "c.pdf").is_ok(), "export is read-only");
+        assert!(!exchange::gates(&eng, id).unwrap().comments, "P {p}: the menu is off");
     }
-    let after = eng.edit_state(id).unwrap();
-    assert_eq!((after.rev, after.undo, after.dirty), (before.rev, before.undo, before.dirty));
-    assert_eq!(eng.history(id).unwrap().len(), steps);
-    assert!(export(&eng, id, Format::Xfdf, "c.pdf").is_ok(), "export is read-only");
+}
+
+/// What a comment import must leave alone on a certified document: the field, the form's field list, the page tree.
+fn untouched(eng: &Engine, id: DocId) -> (String, Vec<f32>, usize, i32) {
+    eng.read_custom(id, |d| {
+        let w = d.new_indirect(4, 0)?;
+        let cat = d.catalog()?;
+        let fields = cat.get_dict("AcroForm")?.expect("form").get_dict("Fields")?.expect("fields").len()?;
+        let count = cat.get_dict("Pages")?.expect("pages").get_dict("Count")?.expect("count").as_int()?;
+        Ok((string(&w, "V", &Budget::new()), floats(&w.get_dict("Rect")?.expect("rect"), 4, &Budget::new()), fields, count))
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_p3_certification_takes_comments_and_leaves_fields_and_pages_alone() {
+    let d = dir("xfdf", "certified-3");
+    let (eng, id, _) = open_bytes(&d, "c.pdf", &certified_with_a_field(3));
+    assert!(exchange::gates(&eng, id).unwrap().comments);
+    let before = untouched(&eng, id);
+    assert_eq!(before.0, "orig");
+    // A comment named like the field, a widget and a field of the file's own: only the comment is made.
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <square page="0" rect="100,600,200,700" name="w1"><contents>named like a field</contents></square>
+        <widget page="0" rect="0,0,5,5" name="w2"/></annots><fields><field name="new"><value>x</value></field></fields></xfdf>"##;
+    let r = import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.added, r.summary.updated), (1, 0), "{:?}", r.summary);
+    assert_eq!(untouched(&eng, id), before);
+    // The same through FDF, whose widgets and fields are objects of the file.
+    let fdf = b"%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [ << /T (new) /V (x) >> ] /Annots [ \
+        << /Subtype /Widget /Page 0 /Rect [0 0 5 5] /NM (w1) /FT /Tx /V (hacked) >> \
+        << /Subtype /Text /Page 0 /Rect [50 50 60 60] /NM (w1) /Contents (again) >> ] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+    let r = import_one(&eng, id, &parse(fdf).unwrap(), EditSource::User).unwrap();
+    assert!(r.summary.skipped.iter().any(|s| s.count == 1), "{:?}", r.summary);
+    assert_eq!(untouched(&eng, id), before);
 }
 
 #[test]

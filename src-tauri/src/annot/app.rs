@@ -102,3 +102,10 @@ pub async fn annot_import(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Pa
     })
     .await
 }
+
+/// What the import menus may offer for `doc` (see [`exchange::gates`]).
+#[tauri::command]
+pub async fn data_gates(eng: Eng<'_>, doc: DocId) -> Result<exchange::Gates> {
+    let eng = eng.inner().clone();
+    blocking(move || exchange::gates(&eng, doc)).await
+}

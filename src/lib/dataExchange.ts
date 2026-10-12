@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { useStore } from "../store";
-import { type DocProtection, type EditState, type FileRef, type SaveKind, docProtection, pickSave } from "./api";
+import { type EditState, type FileRef, type SaveKind, pickSave } from "./api";
 import { useAnnot } from "./annot";
 import { applyState } from "./edit";
 import { useForms } from "./forms";
@@ -40,7 +40,17 @@ export interface FormExported {
   count: number;
 }
 
-export const CERTIFIED_REASON = "This document is certified. Importing would void the certification, so Inkwell leaves it as it is.";
+/** What each import may do to a document (engine `data_gates`): a certification's `/P` 1 allows neither, 2 form data only, 3 both. */
+export interface Gates {
+  comments: boolean;
+  forms: boolean;
+  signed: boolean;
+}
+
+export const COMMENTS_CERTIFIED =
+  "This document is certified, and its certification does not allow comments. Importing them would void it, so Inkwell leaves the document as it is.";
+export const FORMS_CERTIFIED =
+  "This document is certified, and its certification does not allow filling in form fields. Importing form data would void it, so Inkwell leaves the document as it is.";
 export const SIGNED_NOTE = "This document is signed. The change is saved as an update after the signature, which will show that the file was changed.";
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -87,10 +97,10 @@ const toast = (text: string) => useStore.getState().setUi({ error: text });
 const nameOf = (doc: number) => useStore.getState().docs[doc]?.name ?? "document.pdf";
 
 interface Exchange {
-  /** Certified or signed, per document, once read (not known yet reads as neither: the engine refuses anyway). */
-  locks: Record<number, DocProtection>;
+  /** What each import may do, per document, once read (not known yet reads as allowed: the engine refuses anyway). */
+  gates: Record<number, Gates>;
   /** `fresh`: ask the engine again (a file can be signed or certified while the panel is open). */
-  readLocks: (doc: number, fresh?: boolean) => Promise<DocProtection | null>;
+  readGates: (doc: number, fresh?: boolean) => Promise<Gates | null>;
   exportComments: (doc: number) => Promise<void>;
   importComments: (doc: number) => Promise<void>;
   exportForm: (doc: number) => Promise<void>;
@@ -98,11 +108,11 @@ interface Exchange {
 }
 
 export const useExchange = create<Exchange>((set, get) => {
-  /** Whether an import may go on; a certified document says why it cannot (nothing is picked or read). */
-  const mayImport = async (doc: number): Promise<boolean> => {
-    const p = await get().readLocks(doc, true);
-    if (p?.certified) {
-      toast(CERTIFIED_REASON);
+  /** Whether an import may go on; a certification that does not allow it says why (nothing is picked or read). */
+  const mayImport = async (doc: number, kind: "comments" | "forms"): Promise<boolean> => {
+    const g = await get().readGates(doc, true);
+    if (g && !g[kind]) {
+      toast(kind === "comments" ? COMMENTS_CERTIFIED : FORMS_CERTIFIED);
       return false;
     }
     return true;
@@ -119,9 +129,9 @@ export const useExchange = create<Exchange>((set, get) => {
     }
   };
 
-  const importFrom = async <T extends { state: EditState }>(doc: number, cmd: string, done: (r: T) => string, reread: (doc: number) => Promise<void>) => {
+  const importFrom = async <T extends { state: EditState }>(doc: number, kind: "comments" | "forms", cmd: string, done: (r: T) => string, reread: (doc: number) => Promise<void>) => {
     try {
-      if (!(await mayImport(doc))) return;
+      if (!(await mayImport(doc, kind))) return;
       const file = await invoke<FileRef | null>("pick_data_file", { doc });
       if (!file) return;
       const r = await invoke<T>(cmd, { doc, file: file.token });
@@ -134,24 +144,24 @@ export const useExchange = create<Exchange>((set, get) => {
   };
 
   return {
-    locks: {},
-    readLocks: async (doc, fresh = false) => {
-      const known = get().locks[doc];
+    gates: {},
+    readGates: async (doc, fresh = false) => {
+      const known = get().gates[doc];
       if (known && !fresh) return known;
       try {
-        const p = await docProtection(doc);
-        set((s) => ({ locks: { ...s.locks, [doc]: p } }));
-        return p;
+        const g = await invoke<Gates>("data_gates", { doc });
+        set((s) => ({ gates: { ...s.gates, [doc]: g } }));
+        return g;
       } catch {
-        // unreadable: the engine refuses a certified document's import itself
+        // unreadable: the engine refuses the import itself
         return null;
       }
     },
     exportComments: (doc) => exportTo<CommentsExported>(doc, "comments", "comments", "annot_export", commentsExportText),
     importComments: (doc) =>
-      importFrom<CommentsImported>(doc, "annot_import", (r) => commentsImportText(r.summary, r.signed), (d) => useAnnot.getState().refresh(d)),
+      importFrom<CommentsImported>(doc, "comments", "annot_import", (r) => commentsImportText(r.summary, r.signed), (d) => useAnnot.getState().refresh(d)),
     exportForm: (doc) => exportTo<FormExported>(doc, "form data", "formData", "forms_export", formExportText),
     importForm: (doc) =>
-      importFrom<FormImported>(doc, "forms_import", (r) => formImportText(r.summary, r.signed), (d) => useForms.getState().refresh(d)),
+      importFrom<FormImported>(doc, "forms", "forms_import", (r) => formImportText(r.summary, r.signed), (d) => useForms.getState().refresh(d)),
   };
 });

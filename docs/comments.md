@@ -42,8 +42,9 @@ data). The format of an export follows the file name: `.fdf` is FDF, anything el
   value stale), and anything past 10 000 comments in one file.
 - **Never done with a file:** run `/JavaScript` or `/AA`, follow `/F` or `<f href>` file references, load a DTD or
   entities (a `DOCTYPE` is refused), read more than 32 MB, 100 000 elements, 64 levels or 1 MB in one string.
-- **Certified documents** refuse the import (the menu item is off, with the reason); export is always allowed. **Signed**
-  documents take the import as an incremental update after the signature, and the summary says so.
+- **Certified documents** take the import only when the certification allows annotations (`/P` 3); at `/P` 1 or 2, or
+  when the certification cannot be read, the menu item is off with the reason and nothing is changed. Export is always
+  allowed. **Signed** documents take the import as an incremental update after the signature, and the summary says so.
 - No file written by Acrobat was available while this was built: the shapes follow ISO 19444-1 and ISO 32000-2
   section 12.7.8, and are tested against our own exports and hand-written hostile files. A check against Acrobat's own
   XFDF and FDF is still to do.

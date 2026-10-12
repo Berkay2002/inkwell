@@ -106,8 +106,10 @@ export follows the file name (`.fdf`, `.json`, anything else XFDF); an import is
   import are dropped, not acted on.
 - **Never done with a file:** run `/JavaScript` or `/AA`, follow `/F` file references, load a DTD or entities, read
   more than 32 MB, 100 000 values or objects, 64 levels or 1 MB in one string.
-- **Certified documents** refuse the import (the menu item is off, with the reason); export is always allowed.
-  **Signed** documents take it as an incremental update after the signature, and the summary says so.
+- **Certified documents** take the import when the certification allows form filling (`/P` 2 or 3): values go into
+  the fields that exist, and a name the file has that the form lacks is reported, never created. At `/P` 1, or when the
+  certification cannot be read, the menu item is off with the reason. Export is always allowed. **Signed** documents
+  take it as an incremental update after the signature, and the summary says so.
 - Known limit: the fields are looked up once at the start of an import, so a field a calculation rewrites later in the
   same import is compared with its earlier value when the file also has a value for it.
 - No file written by Acrobat was available while this was built: the shapes follow ISO 19444-1 and ISO 32000-2

@@ -3,7 +3,7 @@ import { FORM_TOOLS, type FormTool, type ScriptsState, useForms } from "../../li
 import {
   type Field, FIELD_ICON, KIND_LABEL, SHORT, detectSummary, fieldLabel, isFillable, logCount, missingRequired, onPage, progress, rows, summary,
 } from "../../lib/formsLogic";
-import { CERTIFIED_REASON, useExchange } from "../../lib/dataExchange";
+import { FORMS_CERTIFIED, useExchange } from "../../lib/dataExchange";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
 import { MenuButton } from "../Menu";
@@ -134,9 +134,9 @@ export function FormsPanel({ doc }: { doc: DocState }) {
   useEffect(() => {
     void fm().refresh(id);
   }, [id, doc.rev]);
-  const certified = useExchange((s) => s.locks[id]?.certified === true);
+  const blocked = useExchange((s) => s.gates[id]?.forms === false);
   useEffect(() => {
-    if (open) void useExchange.getState().readLocks(id);
+    if (open) void useExchange.getState().readGates(id);
   }, [open, id]);
 
   const list = useMemo(() => rows(fields), [fields]);
@@ -169,8 +169,8 @@ export function FormsPanel({ doc }: { doc: DocState }) {
               { label: "Export form data…", onSelect: () => void useExchange.getState().exportForm(id) },
               {
                 label: "Import form data…",
-                disabled: certified,
-                title: certified ? CERTIFIED_REASON : undefined,
+                disabled: blocked,
+                title: blocked ? FORMS_CERTIFIED : undefined,
                 onSelect: () => void useExchange.getState().importForm(id),
               },
             ]}

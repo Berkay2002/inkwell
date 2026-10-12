@@ -4,15 +4,15 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("./edit", () => ({ applyState: vi.fn() }));
 const setUi = vi.fn();
 vi.mock("../store", () => ({ useStore: { getState: () => ({ setUi, docs: { 1: { name: "Contract.pdf" } } }) } }));
-vi.mock("./api", () => ({ docProtection: vi.fn(), pickSave: vi.fn() }));
+vi.mock("./api", () => ({ pickSave: vi.fn() }));
 vi.mock("./annot", () => ({ useAnnot: { getState: () => ({ refresh: vi.fn() }) } }));
 vi.mock("./forms", () => ({ useForms: { getState: () => ({ refresh: vi.fn() }) } }));
 
 import { invoke } from "@tauri-apps/api/core";
-import { docProtection, pickSave } from "./api";
+import { pickSave } from "./api";
 import { applyState } from "./edit";
 import {
-  CERTIFIED_REASON, SIGNED_NOTE, commentsExportText, commentsImportText, formExportText, formImportText, useExchange,
+  COMMENTS_CERTIFIED, FORMS_CERTIFIED, SIGNED_NOTE, commentsExportText, commentsImportText, formExportText, formImportText, useExchange,
 } from "./dataExchange";
 
 const inv = vi.mocked(invoke);
@@ -20,8 +20,7 @@ const state = { rev: 3, pageCount: 1, sizes: [], path: "C:\\Contract.pdf", dirty
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useExchange.setState({ locks: {} });
-  vi.mocked(docProtection).mockResolvedValue({ certified: false, signed: false });
+  useExchange.setState({ gates: {} });
 });
 
 describe("summary texts", () => {
@@ -70,10 +69,14 @@ describe("export and import", () => {
     expect(setUi).not.toHaveBeenCalled();
   });
 
+  const open = { comments: true, forms: true, signed: false };
+  /** The engine's answers by command; `data_gates` defaults to everything allowed. */
+  const engine = (answers: Record<string, unknown>) =>
+    inv.mockImplementation((cmd: string) => (cmd in answers ? Promise.resolve(answers[cmd]) : Promise.resolve(cmd === "data_gates" ? open : null)));
+  const ran = () => inv.mock.calls.map((c) => c[0]);
+
   it("import picks a file, applies the returned state once and shows the summary", async () => {
-    inv.mockImplementation((cmd: string) =>
-      Promise.resolve(cmd === "pick_data_file" ? { token: "f1", path: "C:\\in.xfdf" } : { summary: { added: 1, updated: 0, skipped: [] }, state, signed: false }),
-    );
+    engine({ pick_data_file: { token: "f1", path: "C:\\in.xfdf" }, annot_import: { summary: { added: 1, updated: 0, skipped: [] }, state, signed: false } });
     await useExchange.getState().importComments(1);
     expect(inv).toHaveBeenCalledWith("annot_import", { doc: 1, file: "f1" });
     expect(applyState).toHaveBeenCalledTimes(1);
@@ -82,21 +85,47 @@ describe("export and import", () => {
   });
 
   it("a cancelled file dialog changes nothing", async () => {
-    inv.mockResolvedValue(null);
+    engine({});
     await useExchange.getState().importForm(1);
-    expect(inv).toHaveBeenCalledTimes(1);
+    expect(ran()).toEqual(["data_gates", "pick_data_file"]);
     expect(applyState).not.toHaveBeenCalled();
   });
 
-  it("a certified document refuses before any dialog opens, with the reason", async () => {
-    vi.mocked(docProtection).mockResolvedValue({ certified: true, signed: true });
+  it.each([
+    ["P 1 (nothing allowed)", { comments: false, forms: false, signed: true }, "importComments", COMMENTS_CERTIFIED],
+    ["P 1 (nothing allowed)", { comments: false, forms: false, signed: true }, "importForm", FORMS_CERTIFIED],
+    ["P 2 (form filling only)", { comments: false, forms: true, signed: true }, "importComments", COMMENTS_CERTIFIED],
+  ] as const)("a certification at %s refuses before any dialog opens, with the reason", async (_, gates, act, reason) => {
+    engine({ data_gates: gates });
+    await useExchange.getState()[act](1);
+    expect(ran()).toEqual(["data_gates"]);
+    expect(setUi).toHaveBeenCalledWith({ error: reason });
+  });
+
+  it("a certification at P 2 takes form data, one at P 3 takes both", async () => {
+    engine({ data_gates: { comments: false, forms: true, signed: true } });
     await useExchange.getState().importForm(1);
-    expect(inv).not.toHaveBeenCalled();
-    expect(setUi).toHaveBeenCalledWith({ error: CERTIFIED_REASON });
+    expect(ran()).toEqual(["data_gates", "pick_data_file"]);
+    inv.mockClear();
+    engine({ data_gates: { comments: true, forms: true, signed: true } });
+    await useExchange.getState().importComments(1);
+    expect(ran()).toEqual(["data_gates", "pick_data_file"]);
+  });
+
+  it("the gates are read again for each import and cached for the panels", async () => {
+    engine({ data_gates: { comments: true, forms: false, signed: false } });
+    await useExchange.getState().readGates(1);
+    expect(useExchange.getState().gates[1]).toEqual({ comments: true, forms: false, signed: false });
+    engine({ data_gates: { comments: false, forms: false, signed: true } });
+    await useExchange.getState().importComments(1);
+    expect(useExchange.getState().gates[1].comments).toBe(false);
+    expect(setUi).toHaveBeenCalledWith({ error: COMMENTS_CERTIFIED });
   });
 
   it("an engine error becomes the toast", async () => {
-    inv.mockImplementation((cmd: string) => (cmd === "pick_data_file" ? Promise.resolve({ token: "f", path: "x" }) : Promise.reject("This FDF file is damaged, so Inkwell cannot read it.")));
+    inv.mockImplementation((cmd: string) =>
+      cmd === "data_gates" ? Promise.resolve(open) : cmd === "pick_data_file" ? Promise.resolve({ token: "f", path: "x" }) : Promise.reject("This FDF file is damaged, so Inkwell cannot read it."),
+    );
     await useExchange.getState().importForm(1);
     expect(applyState).not.toHaveBeenCalled();
     expect(setUi).toHaveBeenCalledWith({ error: "This FDF file is damaged, so Inkwell cannot read it." });

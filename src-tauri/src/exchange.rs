@@ -6,7 +6,7 @@
 //! was available to check them against. The XFDF and FDF code is written from the standards; pdfcraft's
 //! `crates/xfdf` was read for ideas only, no code taken.
 
-use crate::engine::EngineError;
+use crate::engine::{DocId, Engine, EngineError};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::cell::{Cell, RefCell};
@@ -17,6 +17,37 @@ type Result<T> = std::result::Result<T, EngineError>;
 
 pub fn bad(m: impl Into<String>) -> EngineError {
     EngineError::Invalid(m.into())
+}
+
+/// What a certification (DocMDP `/P`, ISO 32000-2 12.8.2.2) leaves to an import: 1 nothing, 2 filling in form
+/// fields (and signing), 3 also annotations. `None` is not certified. A certification that cannot be read is
+/// refused by the callers (`certified(d)?`), never treated as none.
+pub fn comments_allowed(level: Option<i32>) -> bool {
+    level.is_none_or(|p| p >= 3)
+}
+
+pub fn forms_allowed(level: Option<i32>) -> bool {
+    level.is_none_or(|p| p >= 2)
+}
+
+/// What the UI may offer for a document: each import, and whether the document is signed.
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Gates {
+    pub comments: bool,
+    pub forms: bool,
+    pub signed: bool,
+}
+
+pub fn gates(eng: &Engine, doc: DocId) -> Result<Gates> {
+    eng.read_custom(doc, |d| {
+        let signed = crate::outline::signed(d);
+        // Unreadable: neither is offered (the import itself refuses it too).
+        Ok(match crate::outline::certified(d) {
+            Ok(p) => Gates { comments: comments_allowed(p), forms: forms_allowed(p), signed },
+            Err(_) => Gates { comments: false, forms: false, signed },
+        })
+    })
 }
 
 /// Largest data file read.

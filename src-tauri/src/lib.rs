@@ -1203,6 +1203,7 @@ pub fn run() {
             annot::app::annot_state,
             annot::app::annot_export,
             annot::app::annot_import,
+            annot::app::data_gates,
             measure::app::measure_lock,
             measure::app::measure_scale_get,
             measure::app::measure_scale_set,

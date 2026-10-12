@@ -561,8 +561,10 @@ pub fn import_one(eng: &Engine, doc: DocId, parsed: &Parsed, source: EditSource)
     let (scripts, name) = eng.doc_scripts(doc)?;
     let mut summary = Summary::default();
     let state = eng.apply_custom_unless_noop(doc, "Import form data".into(), source, false, |d| {
-        if crate::outline::certified(d)?.is_some() {
-            return Err(bad("This document is certified. Importing form data would void the certification, so Inkwell leaves it as it is."));
+        // A certification that allows form filling (`/P` 2 or 3) takes values into the fields that exist (nothing
+        // else is made or changed); `/P` 1, and one that cannot be read, do not.
+        if !exchange::forms_allowed(crate::outline::certified(d)?) {
+            return Err(bad("This document is certified, and its certification does not allow filling in form fields. Importing form data would void it, so Inkwell leaves the document as it is."));
         }
         let rt = rt_of(d, &scripts, &name);
         let (s, pages) = fill(&rt, parsed)?;

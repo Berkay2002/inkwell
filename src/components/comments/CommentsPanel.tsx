@@ -3,7 +3,7 @@ import { type Tool, useAnnot } from "../../lib/annot";
 import {
   type Annot, FILTERS, KIND_LABEL, STAMPS, emptyNote, groupByPage, quadsFromRects, repliesOf, rgbHex, roots, timeLabel,
 } from "../../lib/annotLogic";
-import { CERTIFIED_REASON, useExchange } from "../../lib/dataExchange";
+import { COMMENTS_CERTIFIED, useExchange } from "../../lib/dataExchange";
 import { type DocState, useStore } from "../../store";
 import { Icon, type IconName } from "../Icons";
 import { MenuButton } from "../Menu";
@@ -130,13 +130,13 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
   const groups = useMemo(() => groupByPage(d.items, d.filter, d.query), [d.items, d.filter, d.query]);
   const total = roots(d.items).length;
   const note = emptyNote(total, groups.length, d.incomplete);
-  const certified = useExchange((s) => s.locks[id]?.certified === true);
+  const blocked = useExchange((s) => s.gates[id]?.comments === false);
 
   useEffect(() => {
     if (open) void st().refresh(id);
   }, [open, id, doc.rev]);
   useEffect(() => {
-    if (open) void useExchange.getState().readLocks(id);
+    if (open) void useExchange.getState().readGates(id);
   }, [open, id]);
 
   if (!open) return null;
@@ -158,8 +158,8 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
               { label: "Export comments…", onSelect: () => void useExchange.getState().exportComments(id) },
               {
                 label: "Import comments…",
-                disabled: certified,
-                title: certified ? CERTIFIED_REASON : undefined,
+                disabled: blocked,
+                title: blocked ? COMMENTS_CERTIFIED : undefined,
                 onSelect: () => void useExchange.getState().importComments(id),
               },
             ]}
