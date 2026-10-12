@@ -73,6 +73,10 @@ button.fm-w.k-signature {
   background: var(--surface-2);
   border: calc(1.5px / var(--z, 1)) dashed var(--border-strong);
 }
+/* nobody can fill it, so no red required frame */
+.fm-w.k-signature.locked:not(:focus) {
+  box-shadow: none;
+}
 .fm-w.ro {
   cursor: default;
 }
