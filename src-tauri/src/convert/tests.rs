@@ -797,8 +797,8 @@ fn raw_pdf(content: &str) -> Vec<u8> {
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>".to_string(),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>".to_string(),
         format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
     ];
     let mut out = b"%PDF-1.7\n".to_vec();
@@ -821,14 +821,17 @@ fn put(t: &str, x: f64, y: f64, bold: bool) -> String {
     format!("BT /{} 11 Tf {x} {y} Td ({t}) Tj ET\n", if bold { "F2" } else { "F1" })
 }
 
-/// Exports `pdf` as Rich Text and Word; returns the RTF and the document.xml.
-fn export_both(d: &Path, pdf: &[u8]) -> (String, String) {
-    let src = d.join("in.pdf");
+/// Exports `pdf` as Rich Text and Word into `d/<name>/table.{pdf,rtf,docx}` (the files stay for a look in Word, and
+/// the title, which is the file stem, is the same for every name); returns the RTF and the document.xml.
+fn export_both(d: &Path, name: &str, pdf: &[u8]) -> (String, String) {
+    let d = d.join(name);
+    fs::create_dir_all(&d).unwrap();
+    let src = d.join("table.pdf");
     fs::write(&src, pdf).unwrap();
     let eng = Engine::new(1, 1 << 20);
     let (doc, r) = eng.open_pending(&src.to_string_lossy());
     r.unwrap();
-    let (rtf, docx) = (d.join("out.rtf"), d.join("out.docx"));
+    let (rtf, docx) = (d.join("table.rtf"), d.join("table.docx"));
     run_export(&eng, doc, ExportKind::Rtf, None, Target::File(rtf.clone())).unwrap();
     run_export(&eng, doc, ExportKind::Word, None, Target::File(docx.clone())).unwrap();
     let xml = String::from_utf8(unzip(&fs::read(&docx).unwrap(), "word/document.xml").unwrap()).unwrap();
@@ -846,8 +849,8 @@ fn a_table_drawn_row_by_row_exports_like_one_drawn_column_by_column() {
         let cell = |r: usize, c: usize, p: f64| put(rows[r][c], xs[c], 700.0 - p * r as f64, r == 0);
         let by_row: String = (0..4).flat_map(|r| (0..3).map(move |c| (r, c))).map(|(r, c)| cell(r, c, pitch)).collect();
         let by_col: String = (0..3).flat_map(|c| (0..4).map(move |r| (r, c))).map(|(r, c)| cell(r, c, 18.0)).collect();
-        let (rtf_row, xml_row) = export_both(&d, &raw_pdf(&by_row));
-        let (rtf_col, xml_col) = export_both(&d, &raw_pdf(&by_col));
+        let (rtf_row, xml_row) = export_both(&d, &format!("row-order-pitch-{pitch}"), &raw_pdf(&by_row));
+        let (rtf_col, xml_col) = export_both(&d, &format!("column-order-pitch-{pitch}"), &raw_pdf(&by_col));
         let toks = rtf_tokens(&rtf_col);
         assert_eq!(word_count(&toks, "trowd"), 4, "{rtf_col}");
         // The bold first row is the table's header row, not a heading.
@@ -862,7 +865,7 @@ fn a_table_drawn_row_by_row_exports_like_one_drawn_column_by_column() {
 #[test]
 fn the_lines_of_a_paragraph_stay_one_paragraph() {
     let content = put("First line of a paragraph that wraps", 72.0, 700.0, false) + &put("and carries on here.", 72.0, 686.0, false);
-    let (rtf, xml) = export_both(&dir("wrapped"), &raw_pdf(&content));
+    let (rtf, xml) = export_both(&dir("wrapped"), "wrapped", &raw_pdf(&content));
     let toks = rtf_tokens(&rtf);
     assert_eq!(word_count(&toks, "par"), 1, "{rtf}");
     assert!(rtf_plain(&toks).contains("First line of a paragraph that wraps and carries on here."));
@@ -922,9 +925,33 @@ fn text_after_a_table_in_a_pdf_stays_a_paragraph() {
         }
     }
     content += &put("A paragraph after the table, long enough to reach across its columns.", 72.0, 600.0, false);
-    let (rtf, xml) = export_both(&dir("after_table"), &raw_pdf(&content));
+    let (rtf, xml) = export_both(&dir("after_table"), "after-table", &raw_pdf(&content));
     let toks = rtf_tokens(&rtf);
     assert_eq!(word_count(&toks, "trowd"), 3, "{rtf}");
     assert!(rtf.contains("long enough to reach across its columns.\\par}"), "{rtf}");
     assert_eq!(xml.matches("<w:tr>").count(), 3, "{xml}");
+}
+
+#[test]
+fn bulleted_and_numbered_lists_and_a_wide_word_gap_do_not_become_tables() {
+    let mut c = String::new();
+    // Three bullets with the text 18 pt to the right, a numbered item that wraps (text at 108), and a paragraph
+    // whose first line has a 1 em gap between two words.
+    for (i, t) in ["First point", "Second point", "Third point"].iter().enumerate() {
+        c += &put("\\225", 72.0, 700.0 - 14.0 * i as f64, false);
+        c += &put(t, 90.0, 700.0 - 14.0 * i as f64, false);
+    }
+    c += &put("1.", 72.0, 600.0, false);
+    c += &put("A numbered item that is long enough to", 108.0, 600.0, false);
+    c += &put("wrap onto a second line.", 108.0, 586.0, false);
+    c += "BT /F1 11 Tf 72 500 Td [(alpha) -1000 (beta)] TJ ET\n";
+    c += &put("gamma delta.", 72.0, 486.0, false);
+    let (rtf, xml) = export_both(&dir("lists"), "lists", &raw_pdf(&c));
+    let toks = rtf_tokens(&rtf);
+    assert_eq!(word_count(&toks, "trowd"), 0, "{rtf}");
+    assert!(!xml.contains("<w:tbl>"), "{xml}");
+    let plain = rtf_plain(&toks);
+    for want in ["First point", "Second point", "Third point", "A numbered item that is long enough to wrap onto a second line.", "alpha beta gamma delta."] {
+        assert!(plain.contains(want), "{want:?} not in {plain:?}\n{rtf}");
+    }
 }

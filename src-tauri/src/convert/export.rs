@@ -642,6 +642,8 @@ fn flow_model(doc: &Document, pages: &[u32], run: &mut Run<'_>) -> Result<Vec<fl
         let w = page.bounds()?.width() as f64;
         let tp = page.to_text_page(TextPageFlags::PRESERVE_IMAGES)?;
         let mut out_page = flow::Page { width: w, height: h, blocks: Vec::new(), images: Vec::new() };
+        // Blocks split into one per line, with the block they came from and where their pieces are.
+        let mut split: Vec<(flow::Block, std::ops::Range<usize>)> = Vec::new();
         // y runs up in the model
         let flip = |b: mupdf::Rect| [b.x0 as f64, h - b.y1 as f64, b.x1 as f64, h - b.y0 as f64];
         for block in tp.blocks() {
@@ -650,14 +652,27 @@ fn flow_model(doc: &Document, pages: &[u32], run: &mut Run<'_>) -> Result<Vec<fl
                     // A paragraph is one block. A row drawn cell by cell comes as one block whose lines sit side by
                     // side (cells, and in stream order the next row's after them): every line is its own block then,
                     // and the page's tables are found from where they are, not from the order they were drawn in.
+                    // A list label beside its item is not a cell, and the pieces go back into one block below
+                    // when no table takes them.
                     let lines: Vec<_> = block.lines().collect();
                     let rects: Vec<[f64; 4]> = lines.iter().map(|l| flip(l.bounds())).collect();
-                    if flow::side_by_side(&rects) {
-                        for (l, r) in lines.iter().zip(rects) {
-                            out_page.blocks.extend(text_block(std::slice::from_ref(l), r));
+                    let cells: Vec<[f64; 4]> = lines
+                        .iter()
+                        .zip(&rects)
+                        .filter(|(l, _)| !flow::list_label(&l.chars().filter_map(|c| c.char()).collect::<String>()))
+                        .map(|(_, r)| *r)
+                        .collect();
+                    let whole = text_block(&lines, flip(block.bounds()));
+                    match whole {
+                        Some(whole) if flow::side_by_side(&cells) => {
+                            let start = out_page.blocks.len();
+                            for (l, r) in lines.iter().zip(rects) {
+                                out_page.blocks.extend(text_block(std::slice::from_ref(l), r));
+                            }
+                            split.push((whole, start..out_page.blocks.len()));
                         }
-                    } else {
-                        out_page.blocks.extend(text_block(&lines, flip(block.bounds())));
+                        Some(whole) => out_page.blocks.push(whole),
+                        None => {}
                     }
                 }
                 TextBlockType::Image => {
@@ -672,6 +687,7 @@ fn flow_model(doc: &Document, pages: &[u32], run: &mut Run<'_>) -> Result<Vec<fl
                 _ => {}
             }
         }
+        flow::unsplit(&mut out_page.blocks, split);
         model.push(out_page);
         run.step(i as u32 + 1);
     }

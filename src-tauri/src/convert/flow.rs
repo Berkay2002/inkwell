@@ -91,6 +91,55 @@ pub(super) fn side_by_side(rects: &[[f64; 4]]) -> bool {
     })
 }
 
+/// Whether a line is only a list label: one symbol (a bullet, a dash) or a short number or letter with its
+/// closing `.` or `)` ("1.", "a)", "iv."). The text beside it is the item, not a cell of a row.
+pub(super) fn list_label(text: &str) -> bool {
+    let t = text.trim();
+    let mut chars = t.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => !c.is_alphanumeric(),
+        _ => {
+            let Some(body) = t.strip_suffix(['.', ')']) else { return false };
+            let n = body.chars().count();
+            (1..=4).contains(&n)
+                && (body.chars().all(|c| c.is_ascii_digit()) || n == 1 && body.chars().all(char::is_alphabetic) || body.chars().all(|c| "ivxlcdmIVXLCDM".contains(c)))
+        }
+    }
+}
+
+/// Which blocks of a page a table would consume (what `items` drops from the paragraph flow).
+pub(super) fn consumed(blocks: &[Block]) -> Vec<bool> {
+    tables(blocks).1
+}
+
+/// Puts back the original block for every group of pieces (`blocks[range]`, ascending and disjoint) that no
+/// table took: lines that sat side by side were only worth splitting when they make up a table.
+pub(super) fn unsplit(blocks: &mut Vec<Block>, groups: Vec<(Block, std::ops::Range<usize>)>) {
+    if groups.is_empty() {
+        return;
+    }
+    let used = consumed(blocks);
+    let src = std::mem::take(blocks);
+    let mut groups = groups.into_iter().peekable();
+    let mut i = 0;
+    while i < src.len() {
+        match groups.next_if(|(_, r)| r.start == i && r.end > i) {
+            Some((orig, r)) if !used[r.clone()].iter().any(|u| *u) => {
+                blocks.push(orig);
+                i = r.end;
+            }
+            Some((_, r)) => {
+                blocks.extend(src[r.clone()].iter().cloned());
+                i = r.end;
+            }
+            None => {
+                blocks.push(src[i].clone());
+                i += 1;
+            }
+        }
+    }
+}
+
 /// The body text size: the size most of the document's characters are set in.
 pub(super) fn body_size(pages: &[Page]) -> f64 {
     let mut by: Vec<(i64, usize)> = Vec::new();
