@@ -354,15 +354,26 @@ impl Dests {
         }
     }
 
-    /// In the `/Dests` dictionary. A name is the key itself. On the first hop a string goes by the key MuPDF's viewer
-    /// forms from it (`pdf_resolve_link_dest`: the decoded text through `pdf_new_text_string`, see `viewer_key`) and
-    /// by that alone, as MuPDF does: a key spelled with the string's own bytes is not looked at. A later hop goes by
-    /// the string's own bytes as a C string (`pdf_dict_gets`). `any` (the optimizer, which only keeps more) tries
-    /// all of those, and the text as a UTF-8 name and as PDFDocEncoding bytes.
+    /// In the `/Dests` dictionary. On the first hop a name or a string goes by the key MuPDF's viewer forms from its
+    /// text (`pdf_resolve_link_dest`: `pdf_new_text_string`, see `viewer_key`) and by that alone: a key spelled with
+    /// the string's own bytes is not looked at, and a name that is not UTF-8 is not judged. A later hop goes by the
+    /// name itself or the string's own bytes as a C string (`pdf_dict_get`, `pdf_dict_gets`). `any` (the optimizer,
+    /// which only keeps more) tries all of those, and the text as a UTF-8 name and as PDFDocEncoding bytes.
     fn in_old(&self, key: &PdfObject, any: bool, first: bool) -> Option<Option<PdfObject>> {
         let Some(old) = &self.old else { return Some(None) };
         if key.is_name().ok()? {
-            return Some(old.get_dict(key.share()).ok().flatten());
+            let by_name = old.get_dict(key.share()).ok().flatten();
+            if !first && !any {
+                return Some(by_name);
+            }
+            // the viewer turns a link's own name into a string of its text (pdf_parse_link_dest, then
+            // pdf_new_text_string): a name that is not UTF-8 has no faithful text, so it is not judged there
+            let text = String::from_utf8(key.as_name().ok()?).ok();
+            if !any {
+                return self.by_bytes(old, &viewer_key(&text?));
+            }
+            let viewed = text.and_then(|t| self.by_bytes(old, &viewer_key(&t)).flatten());
+            return Some(by_name.or(viewed));
         }
         let bytes = key.as_bytes().ok()?;
         let cut = &bytes[..bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len())];

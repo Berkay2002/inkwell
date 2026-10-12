@@ -494,6 +494,37 @@ fn a_string_destination_goes_to_the_key_the_viewer_forms_not_the_one_spelled_wit
     assert!(matches!(&got[2], Dest::Other { what } if what == UNCHECKED_DEST), "{:?}", got[2]);
 }
 
+/// A link's own name goes the same way as a string: MuPDF's viewer makes it a string of its text and re-encodes that
+/// (`pdf_parse_link_dest`, `pdf_new_text_string`), so /Omega looks up the key FE FF 03 A9 and not its own bytes. A
+/// name that is not UTF-8 has no faithful text and is not judged.
+#[test]
+fn a_non_ascii_name_destination_goes_to_the_key_the_viewer_forms() {
+    let d = dir("outline", "dests_name_viewer_key");
+    let items: Vec<String> = [
+        "<< /Title (Omega) /Parent 4 0 R /Dest /#CE#A9 /Next 8 0 R >>",
+        "<< /Title (Eacute) /Parent 4 0 R /Dest /#C3#A9 /Prev 7 0 R /Next 9 0 R >>",
+        "<< /Title (Latin1) /Parent 4 0 R /Dest /caf#E9 /Prev 8 0 R /Next 10 0 R >>",
+        "<< /Title (Plain) /Parent 4 0 R /Dest /c /Prev 9 0 R /Next 11 0 R >>",
+        "<< /Title (Gone) /Parent 4 0 R /Dest /gone /Prev 10 0 R >>",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // keys: FE FF 03 A9 (U+03A9), FE FF (U+00E9, cut at the 0), the Latin-1 name caf\351 and c
+    let bytes = outline_pdf_with(
+        "/Dests << /#FE#FF#03#A9 [5 0 R /Fit] /#FE#FF [5 0 R /Fit] /caf#E9 [5 0 R /Fit] /c [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 11 0 R /Count 5 >>",
+        &items,
+    );
+    let (eng, id, _p) = open_bytes(&d, "a.pdf", &bytes);
+    let got: Vec<_> = list(&eng, id).unwrap().items.into_iter().map(|b| b.dest).collect();
+    assert!(matches!(got[0], Dest::Page { page: 0, .. }), "{:?}", got[0]);
+    assert!(matches!(got[1], Dest::Page { page: 0, .. }), "{:?}", got[1]);
+    assert!(matches!(&got[2], Dest::Other { what } if what == UNCHECKED_DEST), "{:?}", got[2]);
+    assert!(matches!(got[3], Dest::Page { page: 0, .. }), "{:?}", got[3]);
+    assert!(matches!(got[4], Dest::Broken { .. }), "{:?}", got[4]);
+}
+
 /// A `/Dests` value that is itself a string is a later hop: MuPDF looks it up by its own bytes as a C string
 /// (`resolve_dest_rec` calls `pdf_lookup_dest` on it), not by the key the viewer forms for the link's own string.
 #[test]

@@ -2084,6 +2084,29 @@ fn a_string_destination_is_kept_when_any_spelling_of_it_is_a_dests_key() {
     assert_eq!(outline_text(&outline_of(&r.output).items), "Bytes, Cafe, Lone");
 }
 
+/// A name destination is looked up the viewer's way too, so a name whose only `/Dests` key is the one the viewer forms
+/// from its text (FE FF 03 A9 for U+03A9) stays; the optimizer keeps the name's own spelling as well.
+#[test]
+fn a_non_ascii_name_destination_is_kept_by_its_own_key_or_the_viewers() {
+    let s = Scratch::new();
+    let input = s.path("names.pdf");
+    bookmark_pdf(
+        &input,
+        "/Dests << /#FE#FF#03#A9 [5 0 R /Fit] /#CE#A8 [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 9 0 R /Count 3 >>",
+        &[
+            "<< /Title (Viewer) /Parent 4 0 R /Dest /#CE#A9 /Next 8 0 R >>",
+            "<< /Title (Own) /Parent 4 0 R /Dest /#CE#A8 /Prev 7 0 R /Next 9 0 R >>",
+            "<< /Title (Gone) /Parent 4 0 R /Dest /#CE#AA /Prev 8 0 R >>",
+        ],
+    );
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 1, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "Viewer, Own");
+}
+
 #[test]
 fn invalid_links_accept_a_destination_dictionary_and_still_drop_a_goto_without_one() {
     let s = Scratch::new();
