@@ -86,5 +86,5 @@ pub async fn image_move_to_page(
     at: [f64; 2],
 ) -> Result<ImageEdited> {
     let eng = eng.inner().clone();
-    blocking(move || super::move_to_page(&eng, doc, rev, page, &indices, to_page, at, EditSource::User)).await
+    blocking(move || super::move_to_page(&eng, doc, rev, page, &indices, (to_page, at), EditSource::User)).await
 }

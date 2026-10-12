@@ -663,7 +663,7 @@ pub fn edit_many(eng: &Engine, doc: DocId, rev: u32, page: u32, items: &[ImageIt
     let mut order: Vec<&ImageItem> = items.iter().collect();
     // Deleting renumbers the images after the one removed: from the last one back.
     if deleting {
-        order.sort_by(|a, b| b.index.cmp(&a.index));
+        order.sort_by_key(|it| std::cmp::Reverse(it.index));
     }
     let entry = eng.doc_entry(doc)?;
     let state = eng.apply_removing(doc, first.change.label_many(items.len(), page), source, |d| {
@@ -1005,10 +1005,10 @@ fn declared_bytes(img: &PdfObject, f: &Found) -> Result<u64> {
     let (n, bpc) = (components(img).unwrap_or(4), f.bpc.clamp(1, 16));
     let (bytes, _) = sample_size(f.width, f.height, n, bpc)
         .ok_or_else(|| invalid("the image is too large to copy (more than 100 megapixels or 512 MB of samples)"))?;
-    if let Some(m) = get(img, "SMask") {
-        if u64::from(int_of(get(&m, "Width"))) * u64::from(int_of(get(&m, "Height"))) > MAX_PIXELS {
-            return Err(invalid("the image's mask is too large to copy"));
-        }
+    if let Some(m) = get(img, "SMask")
+        && u64::from(int_of(get(&m, "Width"))) * u64::from(int_of(get(&m, "Height"))) > MAX_PIXELS
+    {
+        return Err(invalid("the image's mask is too large to copy"));
     }
     Ok(bytes as u64)
 }
@@ -1108,19 +1108,11 @@ pub fn paste(eng: &Engine, doc: DocId, rev: u32, page: u32, at: [f64; 2], clip: 
     Ok(ImageEdited { state })
 }
 
-/// Moves the images `indices` of page `from` (listed at `rev`) to page `to` of the same document,
-/// the group's top left corner at page-space `at` there (kept on the page): one undo step. The
-/// picture goes where it was dropped, whatever the two pages' size or rotation.
-pub fn move_to_page(
-    eng: &Engine,
-    doc: DocId,
-    rev: u32,
-    from: u32,
-    indices: &[u32],
-    to: u32,
-    at: [f64; 2],
-    source: EditSource,
-) -> Result<ImageEdited> {
+/// Moves the images `indices` of page `from` (listed at `rev`) to `target` of the same document: its
+/// page and the group's top left corner at page-space `at` there (kept on the page): one undo step.
+/// The picture goes where it was dropped, whatever the two pages' size or rotation.
+pub fn move_to_page(eng: &Engine, doc: DocId, rev: u32, from: u32, indices: &[u32], target: (u32, [f64; 2]), source: EditSource) -> Result<ImageEdited> {
+    let (to, at) = target;
     if from == to {
         return Err(invalid("the images are on that page already"));
     }

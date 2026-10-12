@@ -841,7 +841,7 @@ fn a_picture_moved_to_a_rotated_page_lands_where_it_was_dropped() {
     let (eng, id, path) = open(&d, &bytes);
     assert!(near(blocks(&eng, id, 0).unwrap().images[0].rect, [100.0, 192.0, 300.0, 292.0]));
     let rev0 = rev(&eng, id);
-    let r = move_to_page(&eng, id, rev0, 0, &[0], 1, [400.0, 300.0], EditSource::User).unwrap();
+    let r = move_to_page(&eng, id, rev0, 0, &[0], (1, [400.0, 300.0]), EditSource::User).unwrap();
     assert_eq!(r.state.undo.as_deref(), Some("Move image to p. 2"));
     let there = blocks(&eng, id, 1).unwrap().images;
     assert_eq!(there.len(), 1);
@@ -850,7 +850,7 @@ fn a_picture_moved_to_a_rotated_page_lands_where_it_was_dropped() {
     assert!(there[0].angle.abs() < 0.01 && near([there[0].quad[0], there[0].quad[1], 0.0, 0.0], [400.0, 400.0, 0.0, 0.0]), "{:?}", there[0]);
     assert_eq!(blocks(&eng, id, 0).unwrap().images.len(), 1, "the inline picture stays");
     // Dropped half outside the small page: kept on it.
-    move_to_page(&eng, id, rev(&eng, id), 1, &[0], 2, [250.0, 390.0], EditSource::User).unwrap();
+    move_to_page(&eng, id, rev(&eng, id), 1, &[0], (2, [250.0, 390.0]), EditSource::User).unwrap();
     let small = blocks(&eng, id, 2).unwrap().images;
     assert!(near(small[0].rect, [100.0, 300.0, 300.0, 400.0]), "{small:?}");
     // Two undo steps took it back; the file reopened shows each step's result.
@@ -874,7 +874,7 @@ fn a_group_with_an_inline_picture_moves_together_to_another_page() {
     let (eng, id, path) = open(&d, &pdf(2, false));
     // Both of page 1's pictures: (100,192)-(300,292) and the inline one at (400,142)-(450,192);
     // their group's top left is (100,142). Dropped with that corner at (50, 500) on page 2.
-    let r = move_to_page(&eng, id, rev(&eng, id), 0, &[0, 1], 1, [50.0, 500.0], EditSource::User).unwrap();
+    let r = move_to_page(&eng, id, rev(&eng, id), 0, &[0, 1], (1, [50.0, 500.0]), EditSource::User).unwrap();
     assert_eq!(r.state.undo.as_deref(), Some("Move 2 images to p. 2"));
     assert!(blocks(&eng, id, 0).unwrap().images.is_empty());
     let l = blocks(&eng, id, 1).unwrap().images;
@@ -905,10 +905,10 @@ fn copy_and_move_refuse_what_they_can_not_do() {
     assert!(matches!(copy(&eng, id, r + 1, 0, &[0]), Err(EngineError::Stale)));
     assert!(matches!(copy(&eng, id, r, 0, &[]), Err(EngineError::Invalid(_))));
     assert!(matches!(copy(&eng, id, r, 0, &[9]), Err(EngineError::Invalid(_))));
-    assert!(bad(move_to_page(&eng, id, r, 0, &[0], 0, [0.0, 0.0], EditSource::User)));
-    assert!(bad(move_to_page(&eng, id, r, 0, &[0], 1, [f64::NAN, 0.0], EditSource::User)));
-    assert!(matches!(move_to_page(&eng, id, r + 1, 0, &[0], 1, [0.0, 0.0], EditSource::User), Err(EngineError::Stale)));
-    assert!(move_to_page(&eng, id, r, 0, &[0], 7, [0.0, 0.0], EditSource::User).is_err());
+    assert!(bad(move_to_page(&eng, id, r, 0, &[0], (0, [0.0, 0.0]), EditSource::User)));
+    assert!(bad(move_to_page(&eng, id, r, 0, &[0], (1, [f64::NAN, 0.0]), EditSource::User)));
+    assert!(matches!(move_to_page(&eng, id, r + 1, 0, &[0], (1, [0.0, 0.0]), EditSource::User), Err(EngineError::Stale)));
+    assert!(move_to_page(&eng, id, r, 0, &[0], (7, [0.0, 0.0]), EditSource::User).is_err());
     assert_eq!(rev(&eng, id), r, "a refused paste or move changes nothing");
     // An inline picture in a colour space the page defines can't leave the page.
     let mut odd = pdf(2, false);
@@ -916,9 +916,9 @@ fn copy_and_move_refuse_what_they_can_not_do() {
     odd[at..at + 6].copy_from_slice(b"/CS /X");
     let (eng, id, _) = open(&dir("paste-refusals-cs"), &odd);
     let r = rev(&eng, id);
-    let e = move_to_page(&eng, id, r, 0, &[1], 1, [0.0, 0.0], EditSource::User);
+    let e = move_to_page(&eng, id, r, 0, &[1], (1, [0.0, 0.0]), EditSource::User);
     assert!(matches!(&e, Err(EngineError::Invalid(m)) if m.contains("colour space")), "{e:?}");
-    assert!(move_to_page(&eng, id, r, 0, &[0], 1, [0.0, 0.0], EditSource::User).is_ok());
+    assert!(move_to_page(&eng, id, r, 0, &[0], (1, [0.0, 0.0]), EditSource::User).is_ok());
 }
 
 #[test]
@@ -964,7 +964,7 @@ fn a_certified_document_takes_no_paste_and_no_move() {
     let r = rev(&eng, id);
     for e in [
         paste(&eng, id, r, 0, [10.0, 10.0], &clip, EditSource::User).map(|_| ()),
-        move_to_page(&eng, id, r, 0, &[0], 1, [10.0, 10.0], EditSource::User).map(|_| ()),
+        move_to_page(&eng, id, r, 0, &[0], (1, [10.0, 10.0]), EditSource::User).map(|_| ()),
     ] {
         match e {
             Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
@@ -985,7 +985,7 @@ fn a_paste_into_a_signed_document_comes_after_its_signed_bytes() {
     let (eng, id, path) = open(&d, &bytes);
     assert!(blocks(&eng, id, 0).unwrap().signed);
     pasted(&eng, id, 1, [40.0, 40.0], &clip).unwrap();
-    move_to_page(&eng, id, rev(&eng, id), 0, &[0], 1, [300.0, 300.0], EditSource::User).unwrap();
+    move_to_page(&eng, id, rev(&eng, id), 0, &[0], (1, [300.0, 300.0]), EditSource::User).unwrap();
     eng.save(id, None).unwrap();
     assert!(std::fs::read(&path).unwrap().starts_with(&bytes), "the signed bytes are not the start of the saved file");
 }

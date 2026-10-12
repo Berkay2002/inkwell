@@ -221,7 +221,7 @@ fn ops() -> Vec<(&'static str, bool, Op)> {
     });
     op!("move images to another page", false, |eng, _p, id| {
         let rev = eng.edit_state(id)?.rev;
-        crate::imageedit::move_to_page(eng, id, rev, 0, &[0], 1, [10.0, 10.0], user()).map(|_| ())
+        crate::imageedit::move_to_page(eng, id, rev, 0, &[0], (1, [10.0, 10.0]), user()).map(|_| ())
     });
     v
 }
