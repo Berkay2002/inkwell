@@ -281,6 +281,14 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
     // From the last block to the first: an edit can only change the grouping of the lines after it.
     let mut changed = false;
     for (bi, mut spans) in plan.into_iter().rev() {
+        // Rewriting a block drops its line-end hyphens (the block text joins "well-" "known" as "wellknown"),
+        // so a block that has one is left alone unless a match covers it.
+        if blocks[bi].joins.iter().any(|&h| !spans.iter().any(|&(s, e)| s < h && e >= h)) {
+            for &(s, e) in &spans {
+                out.skip(page, text[bi][s..=e].iter().collect(), "a hyphen at the end of a line in the block would be lost");
+            }
+            continue;
+        }
         let left = MAX_REPLACEMENTS.saturating_sub(out.replaced as usize);
         if spans.len() > left {
             out.stopped = Some(format!("Stopped after {MAX_REPLACEMENTS} replacements. Search again to replace the rest."));

@@ -297,6 +297,9 @@ pub struct Block {
     /// The block's text as runs of one style, in reading order: a line break is a space (or
     /// nothing after a hyphen, which goes), consecutive parts of one style are one run.
     pub runs: Vec<Run>,
+    /// Where in the runs' joined text a line-end hyphen was dropped (the character offset the next line
+    /// starts at): a rewrite of the block does not put it back.
+    pub joins: Vec<usize>,
 }
 
 /// What the page holds that can't be edited, outside the blocks.
@@ -1064,11 +1067,12 @@ pub fn group_blocks(lines: &[Line]) -> Vec<Block> {
                 issue: l.issue(),
                 lines: vec![i],
                 runs: Vec::new(),
+                joins: Vec::new(),
             });
         }
     }
     for b in &mut blocks {
-        b.runs = block_runs(lines, &b.lines);
+        (b.runs, b.joins) = block_runs(lines, &b.lines);
         if let Some(r) = b.runs.get(body_run(&b.runs)) {
             (b.base_font, b.size, b.bold, b.italic, b.color) = (r.base_font.clone(), r.size, r.bold, r.italic, r.color);
         }
@@ -1080,9 +1084,11 @@ pub fn group_blocks(lines: &[Line]) -> Vec<Block> {
     blocks
 }
 
-/// The runs of a block's lines in reading order, joined across line breaks (see [`Block::runs`]).
-fn block_runs(lines: &[Line], members: &[usize]) -> Vec<Run> {
+/// The runs of a block's lines in reading order, joined across line breaks (see [`Block::runs`]), and where
+/// line-end hyphens were dropped (see [`Block::joins`]).
+fn block_runs(lines: &[Line], members: &[usize]) -> (Vec<Run>, Vec<usize>) {
     let mut out: Vec<Run> = Vec::new();
+    let mut joins = Vec::new();
     for (n, &li) in members.iter().enumerate() {
         let line = &lines[li];
         for (k, run) in line.runs.iter().enumerate() {
@@ -1105,6 +1111,7 @@ fn block_runs(lines: &[Line], members: &[usize]) -> Vec<Run> {
                             if prev.glyphs.last().is_some_and(|g| g.text == "-") {
                                 prev.glyphs.pop();
                             }
+                            joins.push(out.iter().map(|r| r.text.chars().count()).sum());
                         } else if prev.same_style(&run) {
                             prev.text.push(' ');
                             prev.glyphs.push(Glyph::gap());
@@ -1131,7 +1138,7 @@ fn block_runs(lines: &[Line], members: &[usize]) -> Vec<Run> {
         last.text = last.text.trim_end_matches(paragraph_separator).to_string();
     }
     out.retain(|r| !r.text.is_empty());
-    out
+    (out, joins)
 }
 
 fn detect_align(lines: &[Line], members: &[usize]) -> Align {

@@ -1673,3 +1673,20 @@ fn a_run_is_capped_stops_with_a_reason_and_is_still_one_step() {
     eng.undo(id).unwrap();
     assert_eq!(all_text(&eng, id), before);
 }
+
+#[test]
+fn a_block_with_a_line_end_hyphen_is_left_alone_unless_a_match_covers_it() {
+    let d = dir("replace-hyphen");
+    let two = "BT /F1 12 Tf 72 700 Td (A well-) Tj ET\nBT /F1 12 Tf 72 686 Td (known fox and a fox) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[two]));
+    let (before, text) = (rev(&eng, id), all_text(&eng, id));
+    // "fox" twice in the block: rewriting it would turn "well-known" into "wellknown".
+    let r = do_replace(&eng, id, &req("fox", "dog", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count, rev(&eng, id)), (0, 2, before), "{r:?}");
+    assert_eq!(r.skipped[0].reason, "skipped: a hyphen at the end of a line in the block would be lost");
+    assert_eq!(all_text(&eng, id), text);
+    // A match across the hyphen replaces it with the replacement.
+    let r = do_replace(&eng, id, &req("wellknown", "famous", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    assert!(all_text(&eng, id).starts_with("A famous"), "{}", all_text(&eng, id));
+}
