@@ -352,7 +352,12 @@ fn read(o: &PdfObject, sub: Sub, b: &Budget) -> Comment {
 /// left out for having another type (carets, attachments, sound, ...). Unnamed comments get a stable
 /// name for this export only; nothing is written to the document.
 fn collect(doc: &PdfDocument) -> Result<(Vec<Comment>, usize)> {
-    let budget = Budget::with_limit(MAX_EXPORT_COPIED);
+    collect_within(doc, MAX_EXPORT_COPIED)
+}
+
+/// [`collect`] with the copy bound given (a test uses a small one: a shape that fills the real bound is slow to build).
+fn collect_within(doc: &PdfDocument, limit: usize) -> Result<(Vec<Comment>, usize)> {
+    let budget = Budget::with_limit(limit);
     let mut left = 0usize;
     // Measurements are left out (their /Measure scale has no place in these files), and so are their replies.
     let mut measured: HashSet<i32> = HashSet::new();

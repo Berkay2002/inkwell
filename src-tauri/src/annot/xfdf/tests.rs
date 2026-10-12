@@ -511,13 +511,14 @@ fn an_export_is_not_held_to_the_import_text_budget_but_still_has_a_bound() {
     assert_eq!(done.count, n);
     assert!(bytes.len() > 36_000_000);
 
-    // One ink list of 1024 strokes, each the same 65 536 numbers: far over the export bound, refused with
-    // the export message and nothing like 537 MB held.
+    // One ink list of 1024 strokes, each the same 1024 numbers (8 MB charged), over a 1 MB export bound: refused
+    // with the export message. The real bound (256 MB) needs a shape MuPDF takes half a minute to draw.
     let strokes = "6 0 R ".repeat(1024);
-    let ink = ["<< /Type /Annot /Subtype /Ink /Rect [0 0 50 50] /NM (i) /InkList 5 0 R /P 3 0 R >>".to_string(), format!("[{strokes}]"), format!("[{}]", "1 ".repeat(65_536))];
+    let ink = ["<< /Type /Annot /Subtype /Ink /Rect [0 0 50 50] /NM (i) /InkList 5 0 R /P 3 0 R >>".to_string(), format!("[{strokes}]"), format!("[{}]", "1 ".repeat(1024))];
     let refs: Vec<&str> = ink.iter().map(String::as_str).collect();
     let (eng, id, _) = open_bytes(&d, "ink.pdf", &one_page_pdf("", "/Annots [4 0 R]", &refs));
-    assert!(matches!(export(&eng, id, Format::Xfdf, "ink.pdf"), Err(EngineError::Invalid(m)) if m.contains("export") && !m.contains("does not read")));
+    let r = eng.read_custom(id, |d| collect_within(d, 1 << 20));
+    assert!(matches!(r, Err(EngineError::Invalid(m)) if m.contains("export") && !m.contains("does not read")));
 }
 
 #[test]
