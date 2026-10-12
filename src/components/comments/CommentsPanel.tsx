@@ -3,8 +3,10 @@ import { type Tool, useAnnot } from "../../lib/annot";
 import {
   type Annot, FILTERS, KIND_LABEL, STAMPS, emptyNote, groupByPage, quadsFromRects, repliesOf, rgbHex, roots, timeLabel,
 } from "../../lib/annotLogic";
+import { CERTIFIED_REASON, useExchange } from "../../lib/dataExchange";
 import { type DocState, useStore } from "../../store";
 import { Icon, type IconName } from "../Icons";
+import { MenuButton } from "../Menu";
 import "./comments.css";
 
 const st = () => useAnnot.getState();
@@ -128,10 +130,14 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
   const groups = useMemo(() => groupByPage(d.items, d.filter, d.query), [d.items, d.filter, d.query]);
   const total = roots(d.items).length;
   const note = emptyNote(total, groups.length, d.incomplete);
+  const certified = useExchange((s) => s.locks[id]?.certified === true);
 
   useEffect(() => {
     if (open) void st().refresh(id);
   }, [open, id, doc.rev]);
+  useEffect(() => {
+    if (open) void useExchange.getState().readLocks(id);
+  }, [open, id]);
 
   if (!open) return null;
   const go = (a: Annot) => {
@@ -145,6 +151,21 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
           <span className="ax-title">Comments</span>
           <span className="dim cm-count">{total}</span>
           <span className="grow" />
+          <MenuButton
+            className="ax-icon"
+            label="Comment data files"
+            items={[
+              { label: "Export comments…", onSelect: () => void useExchange.getState().exportComments(id) },
+              {
+                label: "Import comments…",
+                disabled: certified,
+                title: certified ? CERTIFIED_REASON : undefined,
+                onSelect: () => void useExchange.getState().importComments(id),
+              },
+            ]}
+          >
+            <Icon name="more" size={16} />
+          </MenuButton>
           <button className="ax-icon" title="Close" aria-label="Close Comments" onClick={() => st().setOpen(false)}>
             <Icon name="close" size={16} />
           </button>

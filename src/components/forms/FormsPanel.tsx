@@ -3,8 +3,10 @@ import { FORM_TOOLS, type FormTool, type ScriptsState, useForms } from "../../li
 import {
   type Field, FIELD_ICON, KIND_LABEL, SHORT, detectSummary, fieldLabel, isFillable, logCount, missingRequired, onPage, progress, rows, summary,
 } from "../../lib/formsLogic";
+import { CERTIFIED_REASON, useExchange } from "../../lib/dataExchange";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
+import { MenuButton } from "../Menu";
 import { FieldProps } from "./FieldProps";
 import "./forms.css";
 
@@ -132,6 +134,10 @@ export function FormsPanel({ doc }: { doc: DocState }) {
   useEffect(() => {
     void fm().refresh(id);
   }, [id, doc.rev]);
+  const certified = useExchange((s) => s.locks[id]?.certified === true);
+  useEffect(() => {
+    if (open) void useExchange.getState().readLocks(id);
+  }, [open, id]);
 
   const list = useMemo(() => rows(fields), [fields]);
   const [done, total] = useMemo(() => progress(fields), [fields]);
@@ -156,6 +162,21 @@ export function FormsPanel({ doc }: { doc: DocState }) {
           <span className="ax-title">Forms</span>
           <span className="dim cm-count">{list.length}</span>
           <span className="grow" />
+          <MenuButton
+            className="ax-icon"
+            label="Form data files"
+            items={[
+              { label: "Export form data…", onSelect: () => void useExchange.getState().exportForm(id) },
+              {
+                label: "Import form data…",
+                disabled: certified,
+                title: certified ? CERTIFIED_REASON : undefined,
+                onSelect: () => void useExchange.getState().importForm(id),
+              },
+            ]}
+          >
+            <Icon name="more" size={16} />
+          </MenuButton>
           <button className="ax-icon" title="Close" aria-label="Close Forms" onClick={() => fm().setOpen(false)}>
             <Icon name="close" size={16} />
           </button>

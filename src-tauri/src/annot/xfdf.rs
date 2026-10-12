@@ -941,10 +941,13 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
     let mut known: HashMap<String, (u32, i32, Option<Sub>)> = HashMap::new();
     each(doc, |p, a| {
         let o = a.object();
-        let nm = string(&o, "NM");
-        if !nm.is_empty() {
-            known.entry(nm).or_insert((p, a.xref()?, Sub::of_type(a.r#type()?)));
+        let x = a.xref()?;
+        let mut nm = string(&o, "NM");
+        if nm.is_empty() {
+            // The name an export gave a comment that has none (see `collect`).
+            nm = format!("inkwell-{p}-{x}");
         }
+        known.entry(nm).or_insert((p, x, Sub::of_type(a.r#type()?)));
         Ok(())
     })?;
     let mut ctms: HashMap<u32, Matrix> = HashMap::new();

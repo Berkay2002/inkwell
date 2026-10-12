@@ -8,6 +8,9 @@ export interface MenuItem {
   checked?: boolean;
   danger?: boolean;
   hint?: string;
+  /** Off, with `title` saying why. */
+  disabled?: boolean;
+  title?: string;
 }
 export type MenuEntry = MenuItem | "sep";
 
@@ -21,7 +24,7 @@ export function MenuButton({ items, label, className = "icon-btn", children }: {
 
   useEffect(() => {
     if (!pos) return;
-    menu.current?.querySelector<HTMLElement>("button")?.focus();
+    menu.current?.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
     const close = () => setPos(null);
     const away = (e: Event) => {
       if (!menu.current?.contains(e.target as Node)) close();
@@ -57,7 +60,7 @@ export function MenuButton({ items, label, className = "icon-btn", children }: {
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-    const all = [...menu.current!.querySelectorAll<HTMLElement>("button")];
+    const all = [...menu.current!.querySelectorAll<HTMLElement>("button:not(:disabled)")];
     const i = all.indexOf(document.activeElement as HTMLElement);
     all[(i + (e.key === "ArrowDown" ? 1 : -1) + all.length) % all.length]?.focus();
     e.preventDefault();
@@ -91,6 +94,8 @@ export function MenuButton({ items, label, className = "icon-btn", children }: {
                   key={n}
                   role="menuitem"
                   className={it.danger ? "danger" : undefined}
+                  disabled={it.disabled}
+                  title={it.title}
                   onClick={() => {
                     setPos(null);
                     it.onSelect();
