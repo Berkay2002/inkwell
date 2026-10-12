@@ -353,8 +353,12 @@ fn target_of(doc: &PdfDocument, a: &PdfObject, spaces: &mut HashMap<u32, Option<
     }
 }
 
+/// A link annotation. A dictionary that is a form field as well (`/FT`, or a `/Parent` field above it: a merged
+/// field and widget that names itself `/Link`) is the field's to change, never a link to list or delete.
 fn is_link(a: &PdfObject) -> bool {
     name_of(a.get_dict("Subtype").ok().flatten()) == "Link"
+        && a.get_dict("FT").ok().flatten().is_none()
+        && a.get_dict("Parent").ok().flatten().is_none()
 }
 
 fn highlight_of(a: &PdfObject) -> Highlight {

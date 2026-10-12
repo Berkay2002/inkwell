@@ -1027,3 +1027,37 @@ fn a_certification_that_cannot_be_read_still_lists_the_links_as_locked() {
     }
     assert_eq!(eng.edit_state(id).unwrap().rev, before.rev);
 }
+
+#[test]
+fn a_dictionary_that_is_a_form_field_too_is_not_a_link_to_list_or_delete() {
+    let cat = "/AcroForm << /Fields [5 0 R 6 0 R] >>";
+    let annots = [
+        link_annot("/Dest [3 0 R /Fit]"),
+        "<< /Type /Annot /Subtype /Link /FT /Sig /T (Signature1) /Rect [10 10 90 30] >>".to_string(),
+        "<< /Type /Annot /Subtype /Link /Parent 7 0 R /Rect [10 40 90 60] >>".to_string(),
+    ];
+    let more = vec!["<< /FT /Btn /T (group) /Kids [6 0 R] >>".to_string()];
+    let inline = "<< /Type /Annot /Subtype /Link /FT /Tx /T (x) /Rect [10 70 90 90] >>";
+    let bytes = {
+        let mut objs = vec![
+            format!("<< /Type /Catalog /Pages 2 0 R {cat} >>"),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [ 4 0 R 5 0 R 6 0 R {inline} ] >>"),
+        ];
+        objs.extend(annots);
+        objs.extend(more);
+        raw_pdf(&objs)
+    };
+    let (eng, id, _, _d) = opened("field-as-link", &bytes);
+    let l = list(&eng, id, 0).unwrap();
+    assert_eq!(l.links.len(), 1, "only the plain link is listed: {:?}", l.links);
+    assert_eq!(audit(&eng, id).unwrap().total, 1);
+    // Naming a field's number to Delete finds no link, and Remove all leaves the fields where they are.
+    assert!(matches!(
+        apply(&eng, id, rev(&eng, id), &LinkOp::Delete { page: 0, ids: vec![5] }, EditSource::User),
+        Err(EngineError::Stale)
+    ));
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count, 1);
+    let kept = eng.read_custom(id, |d| Ok(d.find_page(0)?.get_dict("Annots")?.unwrap().len()?)).unwrap();
+    assert_eq!(kept, 3, "the three field widgets stay in /Annots");
+}
