@@ -280,6 +280,8 @@ fn sweep(doc: &PdfDocument, s: &Strip, r: &mut StripReport) -> Result<(), Error>
 struct Dests {
     old: Option<PdfObject>,
     tree: Option<PdfObject>,
+    /// The `/Dests` entries whose key is not UTF-8, by the key's bytes (a name object cannot be built from them).
+    raw: std::collections::HashMap<Vec<u8>, PdfObject>,
 }
 
 impl Dests {
@@ -296,7 +298,18 @@ impl Dests {
         } else {
             None
         };
-        Ok(Some(Self { old, tree }))
+        let mut raw = std::collections::HashMap::new();
+        if let Some(d) = &old {
+            for i in 0..d.dict_len().unwrap_or(0) as i32 {
+                if let (Ok(Some(k)), Ok(Some(v))) = (d.get_dict_key(i), d.get_dict_val(i))
+                    && let Ok(name) = k.as_name()
+                    && std::str::from_utf8(&name).is_err()
+                {
+                    raw.insert(name, v);
+                }
+            }
+        }
+        Ok(Some(Self { old, tree, raw }))
     }
 
     /// The destination a name or string stands for. `Some(None)`: the document does not define it. `None`: the key
@@ -322,29 +335,21 @@ impl Dests {
             }
             Err(_) => clean = false,
         }
-        if let Some(old) = &self.old {
-            match raw_key_in(old, &bytes) {
-                Ok(Some(v)) => return Some(Some(v)),
-                Ok(None) => {}
-                Err(_) => clean = false,
+        // Only a UTF-8 key can be a name object; any other is in the index built at load.
+        match std::str::from_utf8(&bytes) {
+            Ok(k) => match self.old.as_ref().map(|d| d.get_dict(k)) {
+                Some(Ok(Some(v))) => return Some(Some(v)),
+                Some(Err(_)) => clean = false,
+                _ => {}
+            },
+            Err(_) => {
+                if let Some(v) = self.raw.get(&bytes) {
+                    return Some(Some(v.share()));
+                }
             }
         }
         clean.then_some(None)
     }
-}
-
-/// The value under the name whose bytes are `bytes`, which need not be UTF-8 (found by a scan, as a name object
-/// cannot be built from them).
-fn raw_key_in(dict: &PdfObject, bytes: &[u8]) -> Result<Option<PdfObject>, mupdf::Error> {
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        return dict.get_dict(s);
-    }
-    for i in 0..dict.dict_len()? as i32 {
-        if dict.get_dict_key(i)?.is_some_and(|k| k.as_name().is_ok_and(|n| n == bytes)) {
-            return dict.get_dict_val(i);
-        }
-    }
-    Ok(None)
 }
 
 /// An explicit destination array's page must be one of the document's pages. `pages`: when an integer
