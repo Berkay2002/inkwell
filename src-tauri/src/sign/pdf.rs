@@ -981,7 +981,7 @@ fn bound(f: &SigField, doc: &PdfDocument, bytes: &[u8]) -> std::result::Result<(
 
 /// The fields the signature in `g` locks (read from `then`, the revision it signs) whose value or appearance differs in
 /// `now`: each field's `/V` and every widget's `/AP`, followed through references, by full name. Only fields that were
-/// there when it signed count (a new field is not locked, as `sign` lets a new signature box in);
+/// there when it signed count (a new field under a name no lock covers is not locked);
 /// a removed one, or another widget under its name, does. A form either revision can't read in full counts as changed ("the form").
 fn locked_changes(g: &SigField, then: &PdfDocument, now: &PdfDocument) -> Vec<String> {
     use crate::forms::scripts::{name_locked, signature_locks};
