@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { PageBoxes, PageSeps } from "./prepressApi";
+import type { Inspected, PageBoxes, PageSeps } from "./prepressApi";
+import type { Rot, Size } from "./layout";
 import {
   DEFAULT_CONVERT,
   DEFAULT_MARKS,
@@ -16,11 +17,14 @@ import {
   isSolo,
   marginsBetween,
   marksKey,
+  NOTHING_PAINTED,
+  objectLines,
   onlyPlate,
   parseLength,
   parseLimit,
   parseMarks,
   plateList,
+  pointOnPage,
   rectShown,
   holdsSave,
   scopePages,
@@ -250,5 +254,77 @@ describe("Save while a conversion is not saved", () => {
     expect(holdsSave(key("w", { ctrlKey: true }), true)).toBe(true);
     expect(holdsSave(key("K", { metaKey: true }), true)).toBe(true);
     expect(holdsSave(key("w", { ctrlKey: true }), false)).toBe(false);
+  });
+});
+
+describe("object inspector", () => {
+  // where a page point lands on the displayed page, in CSS px: pageSpaceTransform's translate, rotate, scale by hand
+  const shown = ([x, y]: [number, number], [w, h]: Size, rot: Rot, zoom: number): [number, number] => {
+    const d: [number, number][] = [[x, y], [h - y, x], [w - x, h - y], [y, w - x]];
+    return [d[rot][0] * zoom, d[rot][1] * zoom];
+  };
+
+  it("maps a click back to page points for every view rotation and zoom", () => {
+    const raw: Size = [600, 800];
+    for (const zoom of [0.5, 1, 2.5]) {
+      for (const rot of [0, 1, 2, 3] as Rot[]) {
+        for (const p of [[0, 0], [100, 40], [599, 799], [300, 400]] as [number, number][]) {
+          const [dx, dy] = shown(p, raw, rot, zoom);
+          const got = pointOnPage(dx, dy, raw, rot, zoom);
+          expect(got[0]).toBeCloseTo(p[0], 6);
+          expect(got[1]).toBeCloseTo(p[1], 6);
+        }
+      }
+    }
+  });
+
+  it("matches known values and holds a click on the border to the page", () => {
+    const raw: Size = [600, 800];
+    expect(pointOnPage(100, 60, raw, 0, 2)).toEqual([50, 30]);
+    expect(pointOnPage(100, 60, raw, 1, 2)).toEqual([30, 750]);
+    expect(pointOnPage(100, 60, raw, 2, 2)).toEqual([550, 770]);
+    expect(pointOnPage(100, 60, raw, 3, 2)).toEqual([570, 50]);
+    expect(pointOnPage(-3, 9999, raw, 0, 1)).toEqual([0, 800]);
+  });
+
+  const hit = (o: Partial<Inspected>): Inspected => ({
+    kind: "fill",
+    colorSpace: "DeviceCMYK",
+    model: "cmyk",
+    colorants: [],
+    values: [0, 1, 1, 0],
+    cmyk: [0, 100, 100, 0],
+    ink: 200,
+    overprint: false,
+    overprintMode: false,
+    alpha: 1,
+    bounds: [0, 0, 10, 10],
+    font: null,
+    image: null,
+    ...o,
+  });
+
+  it("words each object", () => {
+    expect(objectLines(hit({}))).toEqual({
+      kind: "Fill",
+      space: "DeviceCMYK",
+      values: "C 0% M 100% Y 100% K 0%",
+      cmyk: "C 0% M 100% Y 100% K 0%, ink 200%",
+      overprint: "No",
+    });
+    expect(objectLines(hit({ kind: "strokedText", font: "Helvetica", overprint: true, overprintMode: true })).kind).toBe("Stroked text in Helvetica");
+    expect(objectLines(hit({ overprint: true })).overprint).toBe("Yes");
+    const spot = objectLines(hit({ model: "spot", colorSpace: "Separation / DeviceN", colorants: ["PANTONE 123"], values: [0.5], cmyk: [0, 10, 50, 0], ink: 60 }));
+    expect(spot.values).toBe("PANTONE 123 50%");
+    const rgb = objectLines(hit({ model: "rgb", colorSpace: "DeviceRGB", values: [1, 0, 0.5], cmyk: [0, 99.6, 100, 0], ink: 199.6 }));
+    expect(rgb.values).toBe("R 255 G 0 B 128");
+    expect(rgb.cmyk).toBe("C 0% M 99.6% Y 100% K 0%, ink 200%");
+  });
+
+  it("says what an image or a shading has instead of colours", () => {
+    const img = objectLines(hit({ kind: "image", model: "rgb", colorSpace: "DeviceRGB", values: [], cmyk: null, ink: null, image: [640, 480, 8] }));
+    expect(img).toMatchObject({ kind: "Image, 640 x 480 pixels", values: "", cmyk: "Not available" });
+    expect(objectLines(hit({ kind: "shading", model: "shading", values: [], cmyk: null, ink: null })).values).toBe("Colours are not read");
+    expect(NOTHING_PAINTED).toBe("Nothing is painted here");
   });
 });

@@ -7,6 +7,7 @@ import {
   type BoxKind,
   type InkAt,
   type InkReport,
+  type Inspected,
   type MarksPreview,
   type PageBoxes,
   type PageSeps,
@@ -82,10 +83,34 @@ export interface OutputDoc {
   probe: { page: number; rev: number; at: InkAt } | null;
   /** Certified (edits refused) or signed (edits stay incremental), as of document generation `rev`. */
   protection: (Protection & { rev: number }) | null;
+  inspect: InspectState;
   error: string | null;
 }
 
-const freshDoc = (): OutputDoc => ({ settings: DEFAULT_OUTPUT, seps: null, report: null, reporting: false, showAreas: true, probe: null, protection: null, error: null });
+/**
+ * The object inspector. `at` is the clicked point with the page and generation it was clicked on and the page the
+ * document showed then: it is dropped when any of them moves. `found` is null while the answer is on its way.
+ */
+export interface InspectState {
+  on: boolean;
+  at: { page: number; rev: number; shown: number; x: number; y: number } | null;
+  found: Inspected[] | null;
+  error: string | null;
+}
+
+const NO_INSPECT: InspectState = { on: false, at: null, found: null, error: null };
+
+const freshDoc = (): OutputDoc => ({
+  settings: DEFAULT_OUTPUT,
+  seps: null,
+  report: null,
+  reporting: false,
+  showAreas: true,
+  probe: null,
+  protection: null,
+  inspect: NO_INSPECT,
+  error: null,
+});
 
 /** The inks of the page the document shows now: what was read for another page or generation is not them. */
 export function currentSeps(o: OutputDoc | undefined, d: { currentPage: number; rev: number } | undefined): PageSeps | null {
@@ -166,6 +191,11 @@ interface PrepressStore {
   setShowAreas: (doc: number, on: boolean) => void;
   probe: (doc: number, page: number, x: number, y: number) => void;
   clearProbe: (doc: number) => void;
+  /** The object inspector: a mode in which a click on a page asks what is painted there. Read-only. */
+  setInspecting: (doc: number, on: boolean) => void;
+  inspectAt: (doc: number, page: number, x: number, y: number) => Promise<void>;
+  /** Drops the marker and the list; the mode stays. */
+  clearInspect: (doc: number) => void;
 
   /** The sheet's page or the document's pages changed under it (undo, an assistant edit): read it again or close. */
   resync: () => void;
@@ -320,6 +350,9 @@ export const usePrepress = create<PrepressStore>((set, get) => {
     }
   }
 
+  /** The newest click of a document: an answer for an older one is dropped. */
+  const inspectJob = new Map<number, number>();
+
   function changeSettings(doc: number, f: (o: OutputSettings) => OutputSettings) {
     const o = get().docs[doc];
     if (!o) return;
@@ -400,8 +433,10 @@ export const usePrepress = create<PrepressStore>((set, get) => {
         reportJob = 0;
         viewSeq++;
         waiting.clear();
+        inspectJob.clear();
         usePlates.setState({ doc: null, view: null });
-        set({ open: false });
+        // leaving Output Preview leaves the inspector too
+        set((s) => ({ open: false, docs: Object.fromEntries(Object.entries(s.docs).map(([k, o]) => [k, { ...o, inspect: NO_INSPECT }])) }));
         return;
       }
       const doc = docId ?? st().active;
@@ -444,6 +479,37 @@ export const usePrepress = create<PrepressStore>((set, get) => {
       waiting.delete(doc);
       left.set(doc, (left.get(doc) ?? 0) + 1);
       patchDoc(doc, { probe: null });
+    },
+
+    setInspecting: (doc, on) => {
+      if (!get().docs[doc]) return;
+      inspectJob.set(doc, (inspectJob.get(doc) ?? 0) + 1);
+      patchDoc(doc, { inspect: { ...NO_INSPECT, on } });
+    },
+    clearInspect: (doc) => {
+      const o = get().docs[doc];
+      if (!o) return;
+      inspectJob.set(doc, (inspectJob.get(doc) ?? 0) + 1);
+      patchDoc(doc, { inspect: { ...NO_INSPECT, on: o.inspect.on } });
+    },
+    inspectAt: async (doc, page, x, y) => {
+      const d = st().docs[doc];
+      if (!get().open || !d || !get().docs[doc]?.inspect.on) return;
+      const at = { page, rev: d.rev, shown: d.currentPage, x, y };
+      const job = (inspectJob.get(doc) ?? 0) + 1;
+      inspectJob.set(doc, job);
+      patchDoc(doc, { inspect: { on: true, at, found: null, error: null } });
+      // a newer click, leaving the mode, or a new generation or page while this was asked
+      const stale = () => {
+        const now = st().docs[doc];
+        return inspectJob.get(doc) !== job || !get().open || !now || now.rev !== at.rev || now.currentPage !== at.shown;
+      };
+      try {
+        const found = await prepressApi.inspect(doc, page, x, y);
+        if (!stale()) patchDoc(doc, { inspect: { on: true, at, found, error: null } });
+      } catch (e) {
+        if (!stale()) patchDoc(doc, { inspect: { on: true, at, found: null, error: msg(e) } });
+      }
     },
 
     // ---- Convert Colors ----
@@ -765,6 +831,7 @@ export const usePrepress = create<PrepressStore>((set, get) => {
 
     forget: (doc) => {
       waiting.delete(doc);
+      inspectJob.delete(doc);
       left.delete(doc);
       if (usePlates.getState().doc === doc) usePlates.setState({ doc: null, view: null });
       set((s) => {
@@ -780,6 +847,12 @@ export const usePrepress = create<PrepressStore>((set, get) => {
 useStore.subscribe((s, prev) => {
   if (s.docs === prev.docs) return;
   for (const id of Object.keys(usePrepress.getState().docs)) if (!s.docs[Number(id)]) usePrepress.getState().forget(Number(id));
+  // a clicked point belongs to the generation and page it was clicked on
+  for (const [id, o] of Object.entries(usePrepress.getState().docs)) {
+    const at = o.inspect.at;
+    const d = s.docs[Number(id)];
+    if (at && d && (d.rev !== at.rev || d.currentPage !== at.shown)) usePrepress.getState().clearInspect(Number(id));
+  }
   const sh = usePrepress.getState().sheet;
   if (sh && !s.docs[sh.doc]) return usePrepress.getState().forget(sh.doc);
   // an undo, redo or an assistant edit moved the document under an open sheet

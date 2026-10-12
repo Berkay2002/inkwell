@@ -3,6 +3,7 @@ import * as api from "../lib/api";
 import type { Shown } from "../lib/a11y";
 import { useAi } from "../lib/aiStore";
 import { type Rot, type Size, type TileRef, pageSpaceTransform, tileKeyStr } from "../lib/layout";
+import { pointOnPage } from "../lib/prepressLogic";
 import { type Mark, useRedact } from "../lib/redact";
 import { displayRect, naturalRects } from "../lib/pageDark";
 import { cached } from "../lib/tiles";
@@ -16,6 +17,7 @@ import { LinkLayer } from "./edit/LinkLayer";
 import { usePrepress } from "../lib/prepressStore";
 import { MarkPreview } from "./MarkPreview";
 import { MediaLayer } from "./MediaLayer";
+import { InspectMarker } from "./prepress/InspectMarker";
 import { TacRegions } from "./prepress/TacRegions";
 import { ReadLinks } from "./ReadLinks";
 import { NaturalImage } from "./NaturalImage";
@@ -86,24 +88,32 @@ export const PageView = memo(function PageView(p: Props) {
 
   // "Mark text or area": a drag over the page makes an area mark (page points, y down).
   const armed = useRedact((s) => s.tool);
-  const space = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<{ a: [number, number]; b: [number, number] } | null>(null);
-  const toPage = (e: React.PointerEvent): [number, number] => {
-    const m = new DOMMatrix(getComputedStyle(space.current!).transform).inverse();
+  const toPage = (e: React.MouseEvent): [number, number] => {
     const r = e.currentTarget.getBoundingClientRect();
-    const q = m.transformPoint({ x: e.clientX - r.left, y: e.clientY - r.top });
-    return [Math.min(Math.max(q.x, 0), rawSize[0]), Math.min(Math.max(q.y, 0), rawSize[1])];
+    return pointOnPage(e.clientX - r.left, e.clientY - r.top, rawSize, rot, zoom);
   };
 
   // Output Preview: the ink under the pointer (page points as shown, one question at a time).
   const probing = usePrepress((s) => s.open);
+  // The object inspector: a click asks what is painted there. Captured, so a link or a field underneath is not followed.
+  const inspecting = usePrepress((s) => s.open && s.docs[docId]?.inspect.on === true);
   return (
     <div
-      className="page"
+      className={inspecting ? "page inspecting" : "page"}
       style={{ top: p.top, left: p.left, width: size[0] * zoom, height: size[1] * zoom }}
       data-page={page}
       onPointerMove={probing ? (e) => usePrepress.getState().probe(docId, page, ...toPage(e)) : undefined}
       onPointerLeave={probing ? () => usePrepress.getState().clearProbe(docId) : undefined}
+      onClickCapture={
+        inspecting
+          ? (e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              void usePrepress.getState().inspectAt(docId, page, ...toPage(e));
+            }
+          : undefined
+      }
     >
       <TileCanvas docId={docId} tile={preview} size={size} zoom={zoom} cover />
       {underTiles.map((t) => (
@@ -117,11 +127,11 @@ export const PageView = memo(function PageView(p: Props) {
       ))}
       <MarkPreview docId={docId} page={page} size={rawSize} rot={rot} zoom={zoom} />
       <div
-        ref={space}
         className="pagespace"
         style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom) }}
       >
         <TacRegions docId={docId} page={page} />
+        <InspectMarker docId={docId} page={page} zoom={zoom} />
         {p.hits.map((r, i) => (
           <div key={i} className={p.currentHit.includes(r) ? "hit current" : "hit"} style={rectStyle(r)} />
         ))}

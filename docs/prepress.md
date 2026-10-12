@@ -83,6 +83,17 @@ bounds, the font of a text run and the size of an image. Clips are honoured when
 stroke or image-mask clip counts as inside. A shading is reported (model `shading`) wherever no path clip
 excludes it, without its colours. Tiling-pattern cells and soft-mask content are not page content and are skipped.
 
+In Output Preview the inspector is the "Object inspector" toggle under the Preview switch (a button with
+`aria-pressed`). While it is on, the page shows a crosshair and a click, instead of doing what it normally does (a
+link is not followed), asks `prepress_inspect` for the page point under it, mapped back through the view's rotation
+and zoom exactly as the ink probe's. The rail lists the objects topmost first: kind (with the font of a text run or
+the pixels of an image), colour space, values, CMYK equivalent with its ink, and overprint yes or no; an empty
+answer says "Nothing is painted here". A ring marks the point, the same size at any zoom. Escape clears the ring
+and the list and the mode stays; closing Output Preview, or switching the toggle off, leaves the mode. An answer
+is dropped when a newer click was made, or the document's generation or current page moved, or the mode ended
+while it was asked. It reads only: no edit, no new generation, the document does not become modified, so a
+certified or signed document needs no refusal.
+
 ## Convert colours
 
 `ConvertSpec { pages?, gray, rgb, spot, grayToK, preserveBlack, intent, condition? }`. The page streams are
@@ -187,8 +198,8 @@ are not assistant tools. State is `src/lib/prepressStore.ts` (logic in `prepress
 
 ## Not here
 
-- Output Preview works on one page at a time: there is no document-wide list of spot colours, and the object
-  inspector has no UI yet.
+- Output Preview works on one page at a time: there is no document-wide list of spot colours.
+- The object inspector is click only: there is no keyboard way to pick a point, and it lists at most 8 objects.
 - Convert Colors to a new file saves the open document there (Save As), because the engine converts in place.
 - A certified document is not edited at all; no incremental certified-save path (a change allowed by its
   DocMDP level) is written.

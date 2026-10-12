@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { type DocState } from "../../store";
+import type { Inspected } from "../../lib/prepressApi";
 import { currentSeps, usePrepress } from "../../lib/prepressStore";
-import { CERTIFIED_REASON, type Plate, coverageText, isSolo, plateList, readout, showInk } from "../../lib/prepressLogic";
+import { CERTIFIED_REASON, NOTHING_PAINTED, type Plate, coverageText, isSolo, objectLines, plateList, readout, showInk } from "../../lib/prepressLogic";
 import { Icon } from "../Icons";
+import { useEscape } from "../OrganizePlus";
 import { PlateThumb } from "./PlateThumb";
 import "../a11y/a11y.css";
 import "./prepress.css";
@@ -19,6 +21,12 @@ export function PrepressPanel({ doc }: { doc: DocState }) {
   useEffect(() => {
     if (open) void st().refresh(id);
   }, [open, id, doc.currentPage, doc.rev]);
+
+  // Escape drops the marker and the list; the mode stays
+  const marked = open && d?.inspect.at != null;
+  const sheetOpen = usePrepress((s) => s.sheet != null);
+  const clear = useCallback(() => st().clearInspect(id), [id]);
+  useEscape(marked && !sheetOpen, clear);
 
   if (!open) return null;
   const s = d?.settings;
@@ -55,6 +63,15 @@ export function PrepressPanel({ doc }: { doc: DocState }) {
             <input type="checkbox" checked={s.overprint} onChange={(e) => st().setOverprint(id, e.target.checked)} />
             <span>Simulate overprint</span>
           </label>
+          <button
+            className={d.inspect.on ? "a11y-quiet pp-inspect on" : "a11y-quiet pp-inspect"}
+            aria-pressed={d.inspect.on}
+            title="Click the page to see the objects painted at that point"
+            onClick={() => st().setInspecting(id, !d.inspect.on)}
+          >
+            <Icon name="cursor" size={14} /> Object inspector
+          </button>
+          {d.inspect.on && <Inspector at={d.inspect.at} found={d.inspect.found} error={d.inspect.error} />}
 
           <h3 className="pp-h">Plates{doc.pageCount > 1 ? ` on page ${doc.currentPage + 1}` : ""}</h3>
           <ul className="pp-plates">
@@ -129,6 +146,46 @@ export function PrepressPanel({ doc }: { doc: DocState }) {
         </footer>
       </section>
     </aside>
+  );
+}
+
+function Inspector({ at, found, error }: { at: { page: number; x: number; y: number } | null; found: Inspected[] | null; error: string | null }) {
+  let body: React.ReactNode;
+  if (!at) body = <p className="pp-note dim">Click the page to see what is painted there.</p>;
+  else if (error) body = <p className="pp-note bad">{error}</p>;
+  else if (!found) body = <p className="pp-note dim">Reading the page…</p>;
+  else if (found.length === 0) body = <p className="pp-note">{NOTHING_PAINTED}</p>;
+  else
+    body = (
+      <ol className="pp-objects" aria-label={`Objects at the point on page ${at.page + 1}, topmost first`}>
+        {found.map((o, i) => {
+          const l = objectLines(o);
+          return (
+            <li key={i} className="pp-object">
+              <b>{l.kind}</b>
+              <dl>
+                <dt>Colour space</dt>
+                <dd>{l.space}</dd>
+                {l.values && (
+                  <>
+                    <dt>Values</dt>
+                    <dd>{l.values}</dd>
+                  </>
+                )}
+                <dt>CMYK equivalent</dt>
+                <dd>{l.cmyk}</dd>
+                <dt>Overprint</dt>
+                <dd>{l.overprint}</dd>
+              </dl>
+            </li>
+          );
+        })}
+      </ol>
+    );
+  return (
+    <div className="pp-inspector" aria-live="polite">
+      {body}
+    </div>
   );
 }
 

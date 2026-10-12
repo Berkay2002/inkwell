@@ -249,3 +249,55 @@
   flex: none;
   white-space: nowrap;
 }
+/* object inspector */
+.pp-inspect {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+}
+.pp-inspect.on {
+  background: var(--accent-soft);
+}
+.page.inspecting {
+  cursor: crosshair;
+}
+.pp-objects {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pp-object {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.pp-object dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 10px;
+  margin: 4px 0 0;
+}
+.pp-object dt {
+  color: var(--text-2);
+}
+.pp-object dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+/* the clicked point: a ring that keeps its size at any zoom */
+.pp-mark {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px #fff, 0 0 0 3px rgb(0 0 0 / 0.35);
+  pointer-events: none;
+}
