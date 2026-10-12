@@ -283,3 +283,19 @@ fn a_signed_document_is_not_redacted_in_place_nor_given_password_security() {
     assert!(e.contains("signed"), "{e}");
     assert!(eng.edit_state(id).unwrap().undo.is_none());
 }
+
+#[test]
+fn an_edit_that_removes_the_signature_still_saves_after_the_signed_bytes() {
+    let bytes = signed_only();
+    let d = dir("certified", "signed-field-removed");
+    let (eng, id, path) = crate::outline::tests::open_bytes(&d, "a.pdf", &bytes);
+    // Whether it is signed is read before the edit runs: the edit may take the signature field away.
+    removing(&eng, id, |d| {
+        d.catalog()?.dict_delete("AcroForm")?;
+        Ok(vec![0])
+    })
+    .unwrap();
+    assert!(!eng.read_custom(id, |d| Ok(crate::outline::signed(d))).unwrap(), "the edit took the signature away");
+    eng.save(id, None).unwrap();
+    assert!(std::fs::read(&path).unwrap().starts_with(&bytes), "the signed bytes are not the start of the saved file");
+}

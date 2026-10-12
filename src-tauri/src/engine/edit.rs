@@ -1241,6 +1241,8 @@ impl Engine {
         // Every page operation changes the page tree: a certification does not survive one, at any /P.
         crate::outline::refuse_if_certified(&ed.doc.doc, "Changing its pages")?;
         let sizes = ed.step().sizes.clone();
+        // Read before the edit runs: it may be the one that takes the signature away.
+        let signed = crate::outline::signed(&ed.doc.doc);
         // A panic must also roll back below, or the next edit would snapshot what it left behind.
         let ran = catch_unwind(AssertUnwindSafe(|| run(&mut ed.doc.doc, op, &sizes))).unwrap_or(Err(EngineError::Panic));
         let changed = ran.and_then(|c| match c {
@@ -1251,7 +1253,7 @@ impl Engine {
                     crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
                 }
                 // A signed document's save stays incremental: a deleted page stays in the file, unused.
-                let drops = drops && !crate::outline::signed(&ed.doc.doc);
+                let drops = drops && !signed;
                 let snap = ed.snapshot()?;
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
@@ -1447,6 +1449,8 @@ impl Engine {
         let ed = self.lane(entry, lane)?;
         let len = ed.step().snap.len;
         let page_count = ed.step().sizes.len();
+        // Read before the edit runs: it may be the one that takes the signature away.
+        let signed = crate::outline::signed(&ed.doc.doc);
         let ran = catch_unwind(AssertUnwindSafe(|| {
             let out = f(&mut ed.doc.doc)?;
             // An edit that takes content out (pages included, as `drops` below sees them) must not leave it
@@ -1475,7 +1479,7 @@ impl Engine {
             let sizes = Arc::new(page_sizes(&doc.doc)?);
             // Content taken out makes the save a full rewrite, which would void a signature: a signed document's
             // stays incremental (the removed objects stay in the file, unused, as in outline and links).
-            let drops = (removes || sizes.len() < ed.step().sizes.len()) && !crate::outline::signed(&ed.doc.doc);
+            let drops = (removes || sizes.len() < ed.step().sizes.len()) && !signed;
             Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, sizes }, doc))
         });
         match changed {
