@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { scaleOf, useMeasure } from "../../lib/measure";
 import {
-  type Hover, type Measure, type MeasureKind, type Pt, KIND_NAME, MIN_POINTS, clickAt, latestOnly, neighbour, nudge, numText, place,
+  type Hover, type Measure, type MeasureKind, type Pt, KIND_NAME, MIN_POINTS, clickAt, latestOnly, neighbour, nudge, numText, onPage, place,
   quantityOf, UNSCALED,
 } from "../../lib/measureLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
@@ -165,11 +165,16 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     return () => window.removeEventListener("keydown", k);
   });
 
-  const toPage = (e: { clientX: number; clientY: number }): Pt => {
+  /** Where the pointer is in page space, off the page too. */
+  const atPage = (e: { clientX: number; clientY: number }): Pt => {
     const m = new DOMMatrix(getComputedStyle(space.current!).transform).inverse();
     const r = space.current!.parentElement!.getBoundingClientRect();
     const q = m.transformPoint({ x: e.clientX - r.left, y: e.clientY - r.top });
-    return [Math.min(Math.max(q.x, 0), rawSize[0]), Math.min(Math.max(q.y, 0), rawSize[1])];
+    return [q.x, q.y];
+  };
+  const toPage = (e: { clientX: number; clientY: number }): Pt => {
+    const q = atPage(e);
+    return [Math.min(Math.max(q[0], 0), rawSize[0]), Math.min(Math.max(q[1], 0), rawSize[1])];
   };
 
   const busy = useRef(false);
@@ -279,6 +284,8 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
     asked.cancel();
     want.current = null;
+    // Let go off the page (outside the window the pointer is clamped to its edge): the point goes back, as with Esc.
+    if (!onPage(atPage(e), rawSize)) return cancel();
     if (editRef.current && !editRef.current.saving) commit(editRef.current);
   };
   const press = (e: React.KeyboardEvent, m: Measure, i: number) => {

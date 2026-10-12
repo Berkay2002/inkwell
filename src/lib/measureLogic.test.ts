@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  neighbour, nudge, pageDelta,
+  neighbour, nudge, onPage, pageDelta, type Pt,
   type Measure, type Scale, UNSCALED, calibrate, clickAt, latestOnly, constrain45, inUnit, numText, parseScale, parseUnit, pathLength,
   place, polygonArea, quantityOf, realPerPt, scaleLabel, totals, trimNum,
 } from "./measureLogic";
@@ -161,5 +161,21 @@ describe("calibrating and totals", () => {
     expect(neighbour("perimeter", a, 0)).toEqual([10, 0]);
     expect(neighbour("perimeter", a, 2)).toEqual([10, 0]);
     expect(neighbour("area", a, 0)).toEqual([10, 10]);
+  });
+});
+
+describe("where a drag may end", () => {
+  const size: Pt = [612, 792];
+  it("a release on the page, edges included, is kept", () => {
+    expect(onPage([300, 400], size)).toBe(true);
+    expect(onPage([0, 0], size)).toBe(true);
+    expect(onPage([612, 792], size)).toBe(true);
+  });
+  it("a release past any edge, or at nothing, is dropped", () => {
+    expect(onPage([-0.5, 400], size)).toBe(false);
+    expect(onPage([300, -10], size)).toBe(false);
+    expect(onPage([612.5, 400], size)).toBe(false);
+    expect(onPage([300, 800], size)).toBe(false);
+    expect(onPage([NaN, 400], size)).toBe(false);
   });
 });

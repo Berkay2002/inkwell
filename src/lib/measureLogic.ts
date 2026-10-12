@@ -199,6 +199,11 @@ export function clickAt(hover: Hover | null, raw: Pt, last: Pt | null, shift: bo
   return hover ?? { at: raw, snap: null };
 }
 
+/** Whether `p` (page space, not clamped) lies on a page of `size`: the edge counts. A drag released off it is dropped. */
+export function onPage(p: Pt, size: Pt): boolean {
+  return p[0] >= 0 && p[0] <= size[0] && p[1] >= 0 && p[1] <= size[1];
+}
+
 /** A page-space vector for a screen-space one: the page is shown turned `rot` quarter turns clockwise. */
 export function pageDelta(screen: Pt, rot: number): Pt {
   let [x, y] = screen;
