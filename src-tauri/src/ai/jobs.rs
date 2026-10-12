@@ -314,12 +314,12 @@ fn other_document(l: &Lane, name: &str) -> Result<(DocId, String), String> {
     }
 }
 
-fn compare_other_check(c: &Ctx, a: &Value) -> Result<Option<String>, String> {
+fn compare_other_check(_c: &Ctx, a: &Value) -> Result<Option<String>, String> {
     unknown_keys(a, &["document"], "compare_with_open_document")?;
     let name = str_arg(a, "document").ok_or("\"document\" is required: the file name of the other open document.")?;
-    let Some(l) = c.host.lane() else { return Ok(None) };
-    let (_, found) = other_document(&l, name)?;
-    Ok(Some(format!("Reads the content of the open document “{found}” and sends what differs from this one to the assistant")))
+    // The same answer whether or not such a document is open: a miss is reported by the job, after the user has seen
+    // the card, so the names of the open documents cannot be found out by guessing.
+    Ok(Some(format!("Reads the content of the open document “{}” and sends what differs from this one to the assistant", clip(name, 80))))
 }
 
 fn compare_with_open_document(c: &Ctx, a: &Value) -> Result<Output, String> {
@@ -507,10 +507,24 @@ fn export_target(l: &Lane, kind: &ExportKind) -> Result<(Target, PathBuf), Strin
     }
 }
 
+/// A file a job writes carries none of the document's protection: a document its owner keeps from being copied out of
+/// is refused (as export and extract do), and a protected one is not made into an open one on the assistant's say-so.
+fn refuse_protected(l: &Lane, what: &str, instead: &str) -> Result<(), String> {
+    l.eng.ensure_extractable(l.doc).map_err(err)?;
+    if l.eng.security_info(l.doc).map_err(err)?.encrypted {
+        return Err(format!(
+            "This document is password protected, and {what} is written without its protection, so the assistant does not \
+             make one. Tell the user they can {instead}."
+        ));
+    }
+    Ok(())
+}
+
 fn export_check(c: &Ctx, a: &Value) -> Result<Option<String>, String> {
     unknown_keys(a, &["format", "pages", "from", "to", "layout", "image_format", "dpi", "grayscale"], "export_document")?;
     let kind = export_kind(a)?;
     let Some(l) = c.host.lane() else { return Ok(None) };
+    refuse_protected(&l, "an exported copy", "export it themselves with the Export tool")?;
     let (_, dest) = export_target(&l, &kind)?;
     let what = if kind.is_folder() { "folder" } else { "file" };
     Ok(Some(format!("Writes the {what} “{}” next to the document; nothing is overwritten", file_name(&dest))))
@@ -520,6 +534,7 @@ fn export_document(c: &Ctx, a: &Value) -> Result<Output, String> {
     let l = engine(c)?;
     unknown_keys(a, &["format", "pages", "from", "to", "layout", "image_format", "dpi", "grayscale"], "export_document")?;
     let kind = export_kind(a)?;
+    refuse_protected(&l, "an exported copy", "export it themselves with the Export tool")?;
     let count = l.eng.doc_entry(l.doc).map_err(err)?.page_count();
     let pages = pages_arg(a, count)?;
     let (target, dest) = export_target(&l, &kind)?;
@@ -578,15 +593,7 @@ fn convert_job(c: &Ctx, l: &Lane, a: &Value) -> Result<ConvertJob, String> {
     unknown_keys(a, &["profile", "lang"], "convert_to_standard")?;
     let profile = super::toolbox::profile_arg(a)?;
     let lang = super::toolbox::text_arg(a, "lang", 35)?.filter(|t| !t.is_empty());
-    // The copy is written without encryption: a document its owner keeps from being copied out of is refused (as
-    // export and extract do), and a protected one is not made into an open one on the assistant's say-so.
-    l.eng.ensure_extractable(l.doc).map_err(err)?;
-    if l.eng.security_info(l.doc).map_err(err)?.encrypted {
-        return Err("This document is password protected, and a converted copy is written without its protection, so the \
-                    assistant does not make one. Tell the user they can convert it themselves in the Preflight tool \
-                    (as a new file)."
-            .into());
-    }
+    refuse_protected(l, "a converted copy", "convert it themselves in the Preflight tool (as a new file)")?;
     let mut last = u32::MAX;
     let before = check_doc(l.eng, l.doc, profile, &mut |p| {
         if p.done != last {

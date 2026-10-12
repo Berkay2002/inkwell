@@ -68,10 +68,10 @@ files).
 | `check_preflight` | read | PDF/A, PDF/UA, PDF/X check: failing rules and what a conversion could settle |
 | `open_tool` | read | opens protect, security, merge, search-advanced, links, bookmarks, articles, output-preview, convert-colors, printer-marks, page-boxes, create-portfolio (and the tools it can also run) for the user |
 | `compare_documents` | read | changes between this document and the saved file |
-| `compare_with_open_document` | permanent | the changes between this document and another open one, found by file name; asks in every mode because it reads that document |
+| `compare_with_open_document` | permanent | the changes between this document and another open one, found by file name; asks in every mode because it reads that document, and the card is the same whether or not such a document is open (a miss is reported when it runs, without listing what else is open); password-field values are never part of the answer |
 | `compress_document` | edit | a smaller copy next to the document; wants the saved file (unsaved changes are an `Err`) |
 | `ocr_document` | edit | invisible text layer, one undo step; pages that have text are skipped; Windows or Tesseract engine |
-| `export_document` | edit | text, HTML, Word, images, extract_images into a new file or folder next to the document |
+| `export_document` | edit | text, HTML, Word, images, extract_images into a new file or folder next to the document; a password-protected document is refused before the card (the files carry no protection); a `pages` list or `from`/`to` range that names no page is an `Err`, not every page |
 | `convert_to_standard` | edit | a converted copy for PDF/A, PDF/UA or PDF/X plus a recheck; the original stays; a password-protected document is refused before the card (the copy would be written without its protection), and the card names the copy |
 | `create_blank_pdf` | edit | a new blank PDF (1-500 pages) offered as a separate document |
 

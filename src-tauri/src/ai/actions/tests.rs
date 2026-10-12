@@ -544,10 +544,8 @@ fn a_signed_file_that_had_to_be_repaired_is_refused_before_the_card() {
     src.eng.save(src.doc, None).unwrap();
     let path = src.eng.doc_entry(src.doc).unwrap().path().to_string();
     let mut b = std::fs::read(path).unwrap();
-    let at = b.windows(10).rposition(|w| w == b"startxref
-").unwrap() + 10;
-    let end = at + b[at..].iter().position(|&c| c == b'
-').unwrap();
+    let at = b.windows(10).rposition(|w| w == b"startxref\n").unwrap() + 10;
+    let end = at + b[at..].iter().position(|&c| c == b'\n').unwrap();
     b.splice(at..end, *b"99999999");
     let h = open_bytes("repaired", b);
     let (r, s) = (rev(&h), steps(&h));

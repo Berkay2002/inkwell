@@ -71,17 +71,21 @@ fn comparing_with_another_open_document_asks_every_time_and_names_it() {
     for m in [Mode::Ask, Mode::Auto, Mode::Full] {
         assert!(m.needs_approval(t.class), "{m:?}");
     }
-    // the card names the file (found by name, any case)
+    // the card names the file as the model asked for it, found or not (found by name, any case, when it runs)
     let c = card(&h, "compare_with_open_document", json!({ "document": "older VERSION.pdf" })).unwrap().unwrap();
-    assert!(c.contains("Older version.pdf"), "{c}");
+    assert!(c.contains("older VERSION.pdf"), "{c}");
     let o = ok(&h, "compare_with_open_document", json!({ "document": "Older version.pdf" }));
     assert!(o.text.contains("Older version.pdf") && o.text.contains("change"), "{}", o.text);
     assert!(o.text.contains("<<<DOCUMENT"), "document-derived lines are a data block: {}", o.text);
 
-    // unknown names, this document and nonsense are refused without saying what else is open
-    let e = card(&h, "compare_with_open_document", json!({ "document": "secret-plans.pdf" })).unwrap_err();
+    // the card is the same whether or not a document of that name is open, so names cannot be guessed before the
+    // user is asked; the job then reports the miss, without saying what else is open
+    let hit = card(&h, "compare_with_open_document", json!({ "document": "Older version.pdf" })).unwrap().unwrap();
+    let miss = card(&h, "compare_with_open_document", json!({ "document": "secret-plans.pdf" })).unwrap().unwrap();
+    assert_eq!(hit.replace("Older version.pdf", "X"), miss.replace("secret-plans.pdf", "X"), "{hit} / {miss}");
+    let e = err_of(&h, "compare_with_open_document", json!({ "document": "secret-plans.pdf" }));
     assert!(e.contains("No other open document") && !e.contains("Older version"), "{e}");
-    assert!(card(&h, "compare_with_open_document", json!({ "document": "a.pdf" })).is_err(), "this document is not another one");
+    assert!(err_of(&h, "compare_with_open_document", json!({ "document": "a.pdf" })).contains("No other open document"), "this document is not another one");
     assert!(card(&h, "compare_with_open_document", json!({})).unwrap_err().contains("document"));
     // the listing tool is gone: names of open documents come from the user
     assert!(builtin().iter().all(|t| t.name != "list_open_documents"));
@@ -147,6 +151,12 @@ fn export_writes_new_files_and_folders_with_free_names() {
     assert!(err_of(&h, "export_document", json!({ "format": "pdf" })).contains("Unknown format"));
     assert!(err_of(&h, "export_document", json!({})).contains("required"));
     assert!(err_of(&h, "export_document", json!({ "format": "text", "pages": [9] })).contains("does not exist"));
+    // a range or list that names no page is not "every page"
+    for bad in [json!({ "from": 3, "to": 1 }), json!({ "pages": ["x"] }), json!({ "pages": [] }), json!({ "pages": "1-2" })] {
+        let mut a = json!({ "format": "text" });
+        a.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+        assert!(err_of(&h, "export_document", a.clone()).contains("name no page"), "{a}");
+    }
     // the card names what is written before anything is
     let c = card(&h, "export_document", json!({ "format": "html" })).unwrap().unwrap();
     assert!(c.contains("a.html") && c.contains("nothing is overwritten"), "{c}");
@@ -286,5 +296,31 @@ fn converting_a_protected_document_is_refused_before_the_card_and_names_its_outp
     let e = card(&h, "convert_to_standard", args.clone()).unwrap_err();
     assert!(e.contains("password"), "{e}");
     assert!(err_of(&h, "convert_to_standard", args).contains("password"));
+    assert_eq!(names(&dir), files, "nothing was written");
+}
+
+#[test]
+fn exporting_a_protected_document_is_refused_before_the_card() {
+    let h = fixture_doc("jobs-export-protected");
+    let args = json!({ "format": "text" });
+    assert!(card(&h, "export_document", args.clone()).unwrap().is_some());
+    // a permissions password only: the file opens and may be copied from, but an export is written without it
+    let spec = crate::protect::ProtectSpec {
+        open_password: None,
+        permissions_password: Some("owner-pw".into()),
+        printing: Default::default(),
+        changes: Default::default(),
+        copy: true,
+        accessibility: true,
+        cipher: Default::default(),
+    };
+    h.eng.protect_and_save(h.doc, spec, None, None).unwrap();
+    let dir = folder(&h);
+    let files = names(&dir);
+    for a in [args, json!({ "format": "images", "dpi": 72 })] {
+        let e = card(&h, "export_document", a.clone()).unwrap_err();
+        assert!(e.contains("password protected") && e.contains("Export tool"), "{e}");
+        assert!(err_of(&h, "export_document", a).contains("password protected"));
+    }
     assert_eq!(names(&dir), files, "nothing was written");
 }

@@ -180,6 +180,26 @@ fn properties_reach_the_xmp_packet_too_and_a_cleared_one_leaves_it() {
 }
 
 #[test]
+fn a_packet_that_cannot_be_decoded_is_not_overwritten_by_a_property_change() {
+    let h = fixture_doc("tb-props-xmp-broken");
+    // a metadata stream that claims to be Flate-compressed and is not
+    h.eng
+        .apply_custom(h.doc, "Add broken XMP".into(), EditSource::User, false, |d| {
+            let mut stm = d.add_stream(&mupdf::Buffer::from_bytes(b"this is not zlib data at all, just text")?, None, true)?;
+            stm.dict_put("Type", mupdf::pdf::PdfObject::new_name("Metadata")?)?;
+            stm.dict_put("Subtype", mupdf::pdf::PdfObject::new_name("XML")?)?;
+            stm.dict_put("Filter", mupdf::pdf::PdfObject::new_name("FlateDecode")?)?;
+            d.catalog()?.dict_put("Metadata", stm)?;
+            Ok(Vec::new())
+        })
+        .unwrap();
+    let s = steps(&h);
+    let e = err_of(&h, "set_document_properties", json!({ "title": "New title" }));
+    assert!(e.contains("XMP metadata could not be read"), "{e}");
+    assert_eq!(steps(&h), s, "nothing was changed");
+}
+
+#[test]
 fn a_certified_document_takes_no_property_change_and_no_sanitize_and_a_signed_one_no_rewrite() {
     let h = fixture_doc("tb-cert-props");
     crate::ai::actions::tests::certify(&h, Some(2), None);

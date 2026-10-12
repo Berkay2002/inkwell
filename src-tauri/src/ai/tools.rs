@@ -267,7 +267,17 @@ pub(super) fn pages_checked(args: &Value) -> Result<Vec<i64>, String> {
             "Too many pages in one call (at most {MAX_PAGES_ASKED}). Nothing was done; ask for fewer pages, or leave the pages out for every page."
         ));
     }
-    Ok(pages_requested(args))
+    let pages = pages_requested(args);
+    // Given but yielding nothing is an error, not "every page": a reversed range, a list without a page number, or
+    // a `pages` that is not a list would otherwise run on the whole document.
+    if pages.is_empty() {
+        let list = args.get("pages").filter(|v| !v.is_null());
+        let reversed = matches!((int(args, "from"), int(args, "to")), (Some(a), Some(b)) if a > b);
+        if list.is_some() || reversed {
+            return Err("The pages asked for name no page. Nothing was done: give \"pages\" as a list of 1-based page numbers, or \"from\" no greater than \"to\", or leave them out for every page.".into());
+        }
+    }
+    Ok(pages)
 }
 
 /// Only for labels and cards: a list over the cap is cut here (see [`pages_checked`]).
