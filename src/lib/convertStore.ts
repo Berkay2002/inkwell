@@ -13,7 +13,7 @@ import { friendly, useTools } from "./toolsStore";
  */
 
 export type ConvertMode = "export" | "create";
-export type ExportWhat = "images" | "text" | "html" | "extractImages" | "word";
+export type ExportWhat = "images" | "text" | "html" | "extractImages" | "word" | "rtf";
 export type CreateFrom = "images" | "text" | "blank" | "clipboard";
 export type Scope = "all" | "page" | "range";
 export type Phase = "options" | "running" | "done" | "error";
@@ -174,14 +174,16 @@ export const useConvert = create<ConvertStore>((set, get) => {
                   ? { kind: "html", xhtml: sheet.xhtml }
                   : sheet.what === "extractImages"
                     ? { kind: "extractImages", minSide: 32 }
-                    : { kind: "word" };
+                    : sheet.what === "rtf"
+                      ? { kind: "rtf" }
+                      : { kind: "word" };
           // Rust shows the dialog; a dismissed one stays on the options.
           const name = stem(d.path);
           let to: FileRef | null;
           if (isFolderExport(sheet.what)) to = await api.pickFolder(d.id);
           else {
-            const ext = sheet.what === "text" ? "txt" : sheet.what === "html" ? (sheet.xhtml ? "xhtml" : "html") : "docx";
-            const k: SaveKind = sheet.what === "text" ? "text" : sheet.what === "html" ? (sheet.xhtml ? "xhtml" : "html") : "word";
+            const ext = sheet.what === "text" ? "txt" : sheet.what === "html" ? (sheet.xhtml ? "xhtml" : "html") : sheet.what === "rtf" ? "rtf" : "docx";
+            const k: SaveKind = sheet.what === "text" ? "text" : sheet.what === "html" ? (sheet.xhtml ? "xhtml" : "html") : sheet.what === "rtf" ? "rtf" : "word";
             to = await api.pickSave(`${name}.${ext}`, { doc: d.id }, k);
           }
           if (!to) return;
