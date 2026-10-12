@@ -178,7 +178,7 @@ fn a_reply_that_bears_the_name_of_another_type_of_comment_leaves_it_alone() {
 }
 
 #[test]
-fn an_imported_reply_and_state_stay_hidden_on_the_page_whatever_flags_the_file_gives_them() {
+fn an_imported_reply_and_state_stay_hidden_on_the_page_whatever_flags_the_file_gives_them_even_when_updated() {
     let (eng, id, _) = fresh("reply-hidden");
     let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
         <text page="0" rect="50,50,60,60" name="n"><contents>note</contents></text>
@@ -202,6 +202,16 @@ fn an_imported_reply_and_state_stay_hidden_on_the_page_whatever_flags_the_file_g
     }
     let note = all.iter().find(|d| d.parent.is_none()).unwrap();
     assert!(!flags(note.xref).contains(AnnotationFlags::IS_HIDDEN));
+
+    // The same reply again, matched by its name, with flags and without `inreplyto`: still hidden, still a reply.
+    let again = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="50,50,60,60" name="r" flags="print"><contents>edited</contents></text></annots></xfdf>"##;
+    let r = import_one(&eng, id, &parse(again).unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.added, r.summary.updated), (0, 1), "{:?}", r.summary);
+    let after = list_all(&eng, id).unwrap();
+    let rep = after.iter().find(|d| d.contents == "edited").expect("the reply was updated");
+    assert_eq!(rep.parent, Some(note.xref));
+    assert!(flags(rep.xref).contains(AnnotationFlags::IS_HIDDEN), "the updated reply shows on the page");
 }
 
 #[test]

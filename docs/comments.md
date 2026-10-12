@@ -41,7 +41,7 @@ data). The format of an export follows the file name: `.fdf` is FDF, anything el
   a comment whose name is a measurement of the document's (the Measure tool changes those; an update would leave the
   value stale), and anything past 10 000 comments in one file.
 - **Never done with a file:** run `/JavaScript` or `/AA`, follow `/F` or `<f href>` file references, load a DTD or
-  entities (a `DOCTYPE` is refused), read more than 32 MB, 100 000 elements, 64 levels or 1 MB in one string.
+  entities (a `DOCTYPE` is refused), read more than 32 MB, 100 000 elements or attributes, 64 levels or 1 MB in one string.
 - **Certified documents** take the import only when the certification allows annotations (`/P` 3); at `/P` 1 or 2, or
   when the certification cannot be read, the menu item is off with the reason and nothing is changed. Export is always
   allowed. **Signed** documents take the import as an incremental update after the signature, and the summary says so.

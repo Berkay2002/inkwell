@@ -901,8 +901,9 @@ fn stamp(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment) -> Result<()>
     }
     if let Some(f) = c.flags {
         let mut f = AnnotationFlags::from_bits_truncate(f);
-        // A reply or review state stays hidden on the page, whatever flags the file gives it.
-        if !c.parent.is_empty() {
+        // A reply or review state stays hidden on the page, whatever flags the file gives it (also one matched by
+        // name that the file lists without its `inreplyto`).
+        if !c.parent.is_empty() || a.object().get_dict("IRT")?.is_some() {
             f |= AnnotationFlags::IS_HIDDEN;
         }
         a.set_flags(f)?;
