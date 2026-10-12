@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { pickSave, pickSource } from "../../lib/api";
 import {
-  CERTIFY_LABEL, type Identity, type SignatureInfo, SOURCE_LABEL, STATUS, changeNote, idKey, locked, otherWarnings, outcome, pdfDate, picture, statusWord,
+  CERTIFY_LABEL, type Identity, LOCKED_REASON, type SignatureInfo, SOURCE_LABEL, STATUS, changeNote, idKey, locked, otherWarnings, outcome, pdfDate, picture, statusWord,
   signApi, signed, useSign,
 } from "../../lib/sign";
 import { type DocState, useStore } from "../../store";
@@ -66,7 +66,7 @@ function Sheet({ doc }: { doc: DocState }) {
       <Head title="Digital signature" />
       <div className="sg-body">
         {isLocked ? (
-          <p className="sg-callout">The document is certified with no changes allowed, so it can't be signed again.</p>
+          <p className="sg-callout">{LOCKED_REASON}</p>
         ) : !d.draft ? (
           <p className="sg-callout">
             <Icon name="nib" size={15} /> Drag a box on the page where the signature goes, or click an empty signature field.
@@ -247,6 +247,7 @@ const TONE_ICON: Record<string, IconName> = { valid: "check", unknown: "question
 
 function List({ doc }: { doc: DocState }) {
   const sigs = useSign((s) => s.docs[doc.id]?.sigs) ?? [];
+  const focus = useSign((s) => s.docs[doc.id]?.focus ?? null);
   const done = signed(sigs);
   const empty = sigs.filter((x) => x.status === "unsigned");
   const go = (x: SignatureInfo) => useStore.getState().goTo(doc.id, x.page, Math.max(0, x.rect[1] - 80));
@@ -256,7 +257,7 @@ function List({ doc }: { doc: DocState }) {
       <div className="sg-body sg-list">
         {done.length === 0 && <p className="dim">This document has no signatures.</p>}
         {done.map((x) => (
-          <Card key={x.field} x={x} onOpen={() => go(x)} />
+          <Card key={x.field} x={x} focused={x.field === focus} onOpen={() => go(x)} />
         ))}
         {empty.length > 0 && <h3 className="cm-page">Empty signature fields</h3>}
         {empty.map((x) => (
@@ -270,8 +271,7 @@ function List({ doc }: { doc: DocState }) {
                 className="sg-link"
                 onClick={() => {
                   go(x);
-                  sg().setDraft(doc.id, { page: x.page, rect: x.rect, field: x.field });
-                  sg().setRail("sheet");
+                  sg().signField(doc.id, x);
                 }}
               >
                 Sign
@@ -285,11 +285,16 @@ function List({ doc }: { doc: DocState }) {
   );
 }
 
-function Card({ x, onOpen }: { x: SignatureInfo; onOpen: () => void }) {
+function Card({ x, focused, onOpen }: { x: SignatureInfo; focused: boolean; onOpen: () => void }) {
   const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLElement>(null);
+  // Reached from the signature field on the page: bring its card into view.
+  useEffect(() => {
+    if (focused) ref.current?.scrollIntoView?.({ block: "nearest" });
+  }, [focused]);
   const st = STATUS[x.status as keyof typeof STATUS];
   return (
-    <article className={`sg-card ${st.tone}`}>
+    <article ref={ref} className={`sg-card ${st.tone}${focused ? " focus" : ""}`} aria-current={focused || undefined}>
       <button className="sg-card-main" onClick={onOpen}>
         <span className={`sg-badge ${st.tone}`}>
           <Icon name={TONE_ICON[st.tone]!} size={13} />

@@ -6,6 +6,7 @@ import {
   fontSize, groupDelta, groupDragEnd, groupPicks, isCalculated, marqueeHits, move, normBox, onPage, resetTargets, resize, samePick,
 } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
+import { type SignatureInfo, sigFieldView, useSign } from "../../lib/sign";
 import { useStore } from "../../store";
 import { ContextMenu } from "../PageMenu";
 import { layoutMenu, useCertified } from "./layoutTools";
@@ -22,6 +23,7 @@ interface Props {
 
 const EMPTY: Field[] = [];
 const NO_PICKS: Pick[] = [];
+const EMPTY_SIGS: SignatureInfo[] = [];
 const fm = () => useForms.getState();
 /** Ctrl-click is the context menu on a Mac: there only Cmd and Shift add to the picked fields. */
 const MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -240,6 +242,27 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
 
 const ALIGN = ["left", "center", "right"] as const;
 
+/** An empty signature field starts signing into it, a signed one shows its signature; the sheet still asks before anything is signed. */
+function SigField({ docId, f, cls, css, label }: { docId: number; f: Field; cls: string; css: React.CSSProperties; label: string }) {
+  const list = useSign((s) => s.docs[docId]?.sigs) ?? EMPTY_SIGS;
+  const sig = list.find((x) => x.field === f.name);
+  const v = sigFieldView(label, sig, list);
+  const act = () => {
+    // The engine finds the field by the signature list's name and box, so those are sent, not the form's.
+    if (sig && v.state === "sign") useSign.getState().signField(docId, sig);
+    else if (sig && v.state === "signed") useSign.getState().showSignature(docId, sig.field);
+  };
+  return (
+    <div className="fm-cell" style={css} data-fm-xref={f.xref}>
+      {v.state === "unknown" ? (
+        <div className={cls} role="img" aria-label={v.title} title={v.title} />
+      ) : (
+        <button className={cls} aria-label={v.title} title={v.title} aria-disabled={v.state === "locked" || undefined} onClick={act} />
+      )}
+    </div>
+  );
+}
+
 function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
   const [err, setErr] = useState<string | null>(null);
   const locked = f.readOnly || isCalculated(f);
@@ -290,13 +313,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
       </div>
     );
   }
-  if (f.kind === "signature") {
-    return (
-      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
-        <div className={cls} role="img" aria-label={label} title={`${label} (signing is not available here)`} />
-      </div>
-    );
-  }
+  if (f.kind === "signature") return <SigField docId={docId} f={f} cls={cls} css={css} label={label} />;
   if (f.kind === "list") {
     return (
       <div className="fm-cell" style={css} data-fm-xref={f.xref}>

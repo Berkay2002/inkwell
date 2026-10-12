@@ -227,6 +227,22 @@ export const CERTIFY_LABEL: Record<number, string> = {
 /** Whether a new signature may be added: a P=1 certification forbids it. */
 export const locked = (list: SignatureInfo[]) => signed(list).some((s) => s.certify === 1);
 
+export const LOCKED_REASON = "The document is certified with no changes allowed, so it can't be signed again.";
+
+/** How a signature form field on the page behaves: `sig` is the field's entry in the document's signature list, if read yet. */
+export interface SigFieldView {
+  /** `unknown`: not read yet (inert); `locked`: refused, with the reason in the title. */
+  state: "unknown" | "locked" | "sign" | "signed";
+  title: string;
+}
+
+export function sigFieldView(label: string, sig: SignatureInfo | undefined, list: SignatureInfo[]): SigFieldView {
+  if (!sig) return { state: "unknown", title: label };
+  if (sig.status !== "unsigned") return { state: "signed", title: `${label}: signed${sig.signer ? ` by ${sig.signer}` : ""}, click for details` };
+  if (locked(list)) return { state: "locked", title: `${label}: ${LOCKED_REASON}` };
+  return { state: "sign", title: `${label}: click to sign` };
+}
+
 /** The outcome line next to Sign. */
 export function outcome(list: SignatureInfo[], lock: boolean, dirty: boolean): string {
   const n = signed(list).length;
@@ -268,6 +284,8 @@ export interface Draft {
 }
 
 export interface DocSign {
+  /** The signature field the Signatures rail scrolls to and marks. */
+  focus: string | null;
   items: Item[];
   selected: number | null;
   sigs: SignatureInfo[];
@@ -278,7 +296,7 @@ export interface DocSign {
   error: string | null;
 }
 
-const fresh = (): DocSign => ({ items: [], selected: null, sigs: [], sigsRev: -1, draft: null, bannerHidden: false, error: null });
+const fresh = (): DocSign => ({ focus: null, items: [], selected: null, sigs: [], sigsRev: -1, draft: null, bannerHidden: false, error: null });
 
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 
@@ -326,6 +344,10 @@ interface SignStore {
   remove: (doc: number, page: number, xref: number) => Promise<void>;
   flatten: (doc: number, pages: number[] | null) => Promise<void>;
   setDraft: (doc: number, d: Draft | null) => void;
+  /** Opens the signing sheet aimed at an existing empty signature field. */
+  signField: (doc: number, f: Pick<SignatureInfo, "page" | "rect" | "field">) => void;
+  /** Opens the Signatures rail on one signature. */
+  showSignature: (doc: number, field: string) => void;
   hideBanner: (doc: number) => void;
   /** Signs the draft; `to` is a save token for a document that has no file yet. */
   sign: (doc: number, to: string | null) => Promise<boolean>;
@@ -440,6 +462,14 @@ export const useSign = create<SignStore>((set, get) => {
       patch(doc, { selected: null });
     },
     setDraft: (doc, draft) => patch(doc, { draft }),
+    signField: (doc, f) => {
+      patch(doc, { draft: { page: f.page, rect: f.rect, field: f.field } });
+      set({ rail: "sheet" });
+    },
+    showSignature: (doc, field) => {
+      patch(doc, { focus: field });
+      set({ rail: "list" });
+    },
     hideBanner: (doc) => patch(doc, { bannerHidden: true }),
     sign: async (doc, to) => {
       const s = get();
