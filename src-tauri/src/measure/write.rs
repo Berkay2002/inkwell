@@ -42,6 +42,9 @@ pub struct MeasureDto {
     pub quantity: Quantity,
     /// `None` when the measure uses a unit this app has no name for (the quantity is still right).
     pub scale: Option<Scale>,
+    /// The UI's own live label (the scale, two decimals) reads exactly as this measure does; when not (a file's own
+    /// `/D` or `/A`, a `/Y`), the engine values the points (`measure_value` with the xref).
+    pub plain: bool,
 }
 
 /// The page's user space <-> page space transform and `/UserUnit`.
@@ -104,6 +107,41 @@ pub fn value(doc: &PdfDocument, page: u32, kind: Kind, pts: &[[f32; 2]], scale: 
     Ok(resolve(&p, &geom, scale, pts[0])?.quantity(kind, &user_points(&geom, pts)))
 }
 
+/// The annotation `xref` on the page as a measurement: its kind and its own `/Measure`.
+fn find_measure(page: &PdfPage, xref: i32) -> Result<(PdfAnnotation, Kind, MeasureDict)> {
+    for a in page.annotations() {
+        if a.xref().ok() != Some(xref) {
+            continue;
+        }
+        let kind = match a.r#type() {
+            Ok(PdfAnnotationType::Line) => Kind::Distance,
+            Ok(PdfAnnotationType::PolyLine) => Kind::Perimeter,
+            Ok(PdfAnnotationType::Polygon) => Kind::Area,
+            _ => break,
+        };
+        if let Some(m) = a.object().get_dict("Measure").ok().flatten().and_then(|m| MeasureDict::read(&m).ok().flatten()) {
+            return Ok((a, kind, m));
+        }
+        break;
+    }
+    Err(bad("that measurement is no longer in the file"))
+}
+
+/// The value `pts` would measure under the `/Measure` of the annotation `xref` (a point being dragged), without making
+/// anything.
+pub fn value_in(doc: &PdfDocument, page: u32, kind: Kind, pts: &[[f32; 2]], xref: i32) -> Result<Quantity> {
+    check_points(kind, pts)?;
+    let p = doc.load_pdf_page(page as i32)?;
+    let geom = page_geom(&p)?;
+    let (_, _, measure) = find_measure(&p, xref)?;
+    Ok(measure.quantity(kind, &user_points(&geom, pts)))
+}
+
+/// Whether the page's scale reads in the UI's own live label (see [`MeasureDict::is_plain`]); true for a page with none.
+pub fn page_plain(doc: &PdfDocument, page: u32) -> Result<bool> {
+    dict::viewports_plain(&doc.load_pdf_page(page as i32)?.object())
+}
+
 /// The scale of the page (its widest viewport) and whether the page has one; 1 in = 1 in when it has none.
 pub fn page_scale(doc: &PdfDocument, page: u32) -> Result<(Scale, bool)> {
     let p = doc.load_pdf_page(page as i32)?;
@@ -154,15 +192,41 @@ pub fn add(doc: &mut PdfDocument, page: u32, kind: Kind, pts: &[[f32; 2]], scale
     o.dict_put("IT", PdfObject::new_name(kind.intent())?)?;
     let m = measure.write(doc)?;
     o.dict_put("Measure", m)?;
-    // MuPDF builds its own appearance here; ours replaces it (it draws the label and, for a line, the end ticks).
+    restyle(doc, &mut a, &geom, kind, pts, &q.text)?;
+    Ok((a.xref()?, q))
+}
+
+/// Gives the annotation `a` our appearance for `pts` and `label`, and the `/Rect` that holds it. MuPDF builds its own
+/// appearance on `update` (it would not draw the label); ours replaces it.
+fn restyle(doc: &mut PdfDocument, a: &mut PdfAnnotation, geom: &PageGeom, kind: Kind, pts: &[[f32; 2]], label: &str) -> Result<()> {
     a.update()?;
-    let ap = appearance(doc, &geom, kind, pts, &q.text)?;
+    let ap = appearance(doc, geom, kind, pts, label)?;
     let mut o = a.object();
     o.dict_put("Rect", rect_obj(doc, ap.bbox)?)?;
     let mut ap_dict = doc.new_dict()?;
     ap_dict.dict_put("N", ap.form)?;
     o.dict_put("AP", ap_dict)?;
-    Ok((a.xref()?, q))
+    Ok(())
+}
+
+/// Moves the points of the measurement `xref` (page space), in place: the geometry, `/Rect`, the appearance and the
+/// label in `/Contents` follow, and its own `/Measure`, author and replies stay. Returns the new value.
+pub fn set_points(doc: &mut PdfDocument, page: u32, xref: i32, pts: &[[f32; 2]]) -> Result<Quantity> {
+    let p = doc.load_pdf_page(page as i32)?;
+    let geom = page_geom(&p)?;
+    let (mut a, kind, measure) = find_measure(&p, xref)?;
+    check_points(kind, pts)?;
+    let q = measure.quantity(kind, &user_points(&geom, pts));
+    let at = |i: usize| Point { x: pts[i][0], y: pts[i][1] };
+    if kind == Kind::Distance {
+        a.set_line(at(0), at(1))?;
+    } else {
+        a.set_vertices((0..pts.len()).map(at))?;
+    }
+    a.set_contents(&q.text)?;
+    a.object().dict_put("M", PdfObject::new_string(&pdf_now())?)?;
+    restyle(doc, &mut a, &geom, kind, pts, &q.text)?;
+    Ok(q)
 }
 
 struct Appearance {
@@ -351,6 +415,7 @@ fn dto(page: u32, a: &PdfAnnotation, kind: Kind, pts: Vec<[f32; 2]>, geom: &Page
         author: text_of(&o, "T"),
         quantity,
         scale: measure.scale(geom.user_unit),
+        plain: measure.is_plain(),
     })
 }
 

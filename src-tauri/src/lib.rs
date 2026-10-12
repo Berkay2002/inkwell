@@ -1281,6 +1281,7 @@ pub fn run() {
             measure::app::measure_list,
             measure::app::measure_snap,
             measure::app::measure_rescale,
+            measure::app::measure_move,
             measure::app::measure_export_csv,
             forms::app::forms_list,
             forms::app::forms_export,

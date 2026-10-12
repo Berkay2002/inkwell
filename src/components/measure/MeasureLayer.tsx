@@ -1,9 +1,11 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { scaleOf, useMeasure } from "../../lib/measure";
 import {
-  type Hover, type Measure, type MeasureKind, type Pt, MIN_POINTS, clickAt, latestOnly, numText, place, quantityOf, UNSCALED,
+  type Hover, type Measure, type MeasureKind, type Pt, KIND_NAME, MIN_POINTS, clickAt, latestOnly, neighbour, nudge, numText, place,
+  quantityOf, UNSCALED,
 } from "../../lib/measureLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
+import { useRemoteLabel } from "./useRemoteLabel";
 
 interface Props {
   docId: number;
@@ -26,6 +28,57 @@ export const MeasureLayer = memo(function MeasureLayer(p: Props) {
   return open ? <Layer {...p} /> : null;
 });
 
+/** A measurement's points being moved: dragged with the pointer or nudged with the arrow keys. */
+interface Edit {
+  xref: number;
+  i: number;
+  /** All the points as they would be. */
+  pts: Pt[];
+  moved: boolean;
+  /** Written; the points stay on show until the list has been read again. */
+  saving: boolean;
+}
+/** Idle time after the last arrow key before the move is written (one undo step for a run of keys). */
+const NUDGE_MS = 600;
+
+interface HandleProps {
+  kind: MeasureKind;
+  pts: Pt[];
+  r: number;
+  onDown: (e: React.PointerEvent<SVGCircleElement>, i: number) => void;
+  onMove: (e: React.PointerEvent<SVGCircleElement>) => void;
+  onUp: (e: React.PointerEvent<SVGCircleElement>) => void;
+  onCancel: () => void;
+  onKey: (e: React.KeyboardEvent<SVGCircleElement>, i: number) => void;
+  onBlur: () => void;
+}
+
+/** One focusable handle per point of the selected measurement: drag it, or move it with the arrow keys. */
+export function Handles({ kind, pts, r, onDown, onMove, onUp, onCancel, onKey, onBlur }: HandleProps) {
+  return (
+    <g>
+      {pts.map((q, i) => (
+        <circle
+          key={i}
+          className="ms-handle"
+          cx={q[0]}
+          cy={q[1]}
+          r={r}
+          tabIndex={0}
+          role="button"
+          aria-label={`${KIND_NAME[kind]} point ${i + 1} of ${pts.length}. Drag it, or use the arrow keys (Shift for 10 points).`}
+          onPointerDown={(e) => onDown(e, i)}
+          onPointerMove={onMove}
+          onPointerUp={onUp}
+          onPointerCancel={onCancel}
+          onKeyDown={(e) => onKey(e, i)}
+          onBlur={onBlur}
+        />
+      ))}
+    </g>
+  );
+}
+
 const typing = (e: KeyboardEvent) => !!(e.target as HTMLElement | null)?.closest?.("input, textarea, select");
 
 function Layer({ docId, page, rot, rawSize, zoom }: Props) {
@@ -43,6 +96,20 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
   const locked = useMeasure((s) => !!s.locks[docId]);
   const kind: MeasureKind | null = locked || tool === "select" ? null : tool === "calibrate" ? "distance" : tool;
   const hasScale = !!d?.scales[page];
+  const pagePlain = d?.scales[page]?.plain ?? true;
+  const selM = selected ? (mine.find((m) => m.xref === selected.xref) ?? null) : null;
+  const canEdit = tool === "select" && !locked && !calib && !!selM;
+  const [edit, setEdit] = useState<Edit | null>(null);
+  const editRef = useRef<Edit | null>(null);
+  editRef.current = edit;
+  /** A pointer drag of a handle is under way (the arrow keys edit without one). */
+  const holding = useRef(false);
+  const timer = useRef<number | null>(null);
+  const stopTimer = () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+  };
+  useEffect(() => stopTimer, []);
 
   useEffect(() => {
     if (!hasScale) void ms().ensureScale(docId, page);
@@ -58,7 +125,14 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     setPts([]);
     setHover(null);
     hoverRef.current = null;
-  }, [tool]);
+    holding.current = false;
+    stopTimer();
+    setEdit(null);
+  }, [tool, locked]);
+  // What is being edited was deleted, or the file changed under it (undo): the edit is dropped.
+  useEffect(() => {
+    if (editRef.current && !mine.some((m) => m.xref === editRef.current!.xref)) setEdit(null);
+  }, [mine]);
 
   const finish = (all: Pt[]) => {
     // A double-click makes the same point twice; so does clicking the last point again.
@@ -93,22 +167,20 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
   };
 
   const busy = useRef(false);
-  const want = useRef<{ raw: Pt; c: ReturnType<typeof context>; t: number } | null>(null);
-  const context = () => {
+  type Ctx = { last: Pt | null; close: Pt | null; radius: number };
+  const want = useRef<{ raw: Pt; c: Ctx; t: number; apply: (h: Hover) => void } | null>(null);
+  const context = (): Ctx => {
     const last = pts.length ? pts[pts.length - 1] : null;
     const close = tool === "area" && pts.length >= 3 ? pts[0] : null;
     return { last, close, radius: REACH / zoom };
   };
-  const move = (e: React.PointerEvent) => {
-    if (!kind) return;
-    const raw = toPage(e);
-    const c = context();
+  /** Where a point at `raw` lands: at once without the engine, then (when it answers) snapped; `apply` takes each. */
+  const track = (raw: Pt, c: Ctx, shift: boolean, apply: (h: Hover) => void) => {
     const t = asked.start();
-    const h = place(raw, c.last, e.shiftKey, null, c.close, c.radius);
-    hoverRef.current = h;
-    setHover(h);
-    if (e.shiftKey || h.snap === "close") return void (want.current = null);
-    want.current = { raw, c, t };
+    const h = place(raw, c.last, shift, null, c.close, c.radius);
+    apply(h);
+    if (shift || h.snap === "close") return void (want.current = null);
+    want.current = { raw, c, t, apply };
     if (busy.current) return;
     const pump = () => {
       const w = want.current;
@@ -121,12 +193,17 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
           busy.current = false;
           if (want.current) return pump(); // the pointer moved on: ask for where it is now
           if (!asked.current(w.t)) return; // something happened since (Shift, leaving, a new tool)
-          const next = place(w.raw, w.c.last, false, hit, w.c.close, w.c.radius);
-          hoverRef.current = next;
-          setHover(next);
+          w.apply(place(w.raw, w.c.last, false, hit, w.c.close, w.c.radius));
         });
     };
     pump();
+  };
+  const move = (e: React.PointerEvent) => {
+    if (!kind) return;
+    track(toPage(e), context(), e.shiftKey, (h) => {
+      hoverRef.current = h;
+      setHover(h);
+    });
   };
   const leave = () => {
     asked.cancel();
@@ -142,14 +219,96 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     setPts([...pts, at]);
   };
 
+  // ---- moving the points of the selected measurement ----
+  const commit = (e: Edit) => {
+    stopTimer();
+    holding.current = false;
+    const was = ms().get(docId).items.find((m) => m.xref === e.xref);
+    if (!e.moved || !was || was.points.every((p, j) => p[0] === e.pts[j][0] && p[1] === e.pts[j][1])) return setEdit(null);
+    // the ref too: a blur or a click that follows in this event must see it is being written
+    editRef.current = { ...e, saving: true };
+    setEdit(editRef.current);
+    // The new points stay on show until the list has been read again; a refusal puts the old ones back (the panel says why).
+    void ms().move(docId, { page, xref: e.xref }, e.pts).then(() => setEdit((cur) => (cur?.saving ? null : cur)));
+  };
+  const cancel = () => {
+    holding.current = false;
+    asked.cancel();
+    want.current = null;
+    stopTimer();
+    setEdit(null);
+  };
+  const grab = (e: React.PointerEvent<SVGCircleElement>, m: Measure, i: number) => {
+    if (e.button !== 0 || editRef.current?.saving) return;
+    e.stopPropagation();
+    e.preventDefault(); // no text selection; the handle is focused below
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const cur = editRef.current;
+    e.currentTarget.focus(); // moving focus from another handle writes the keys pending on it
+    const same = cur?.xref === m.xref;
+    holding.current = true;
+    stopTimer();
+    setEdit({ xref: m.xref, i, pts: same ? cur.pts : m.points, moved: same && cur.moved, saving: false });
+  };
+  const drag = (e: React.PointerEvent, m: Measure) => {
+    const cur = editRef.current;
+    if (!holding.current || !cur || cur.saving) return;
+    track(toPage(e), { last: neighbour(m.kind, cur.pts, cur.i), close: null, radius: REACH / zoom }, e.shiftKey, (h) =>
+      setEdit((c) => {
+        if (!c || c.saving) return c;
+        const from = m.points[c.i];
+        return { ...c, pts: c.pts.map((p, j) => (j === c.i ? h.at : p)), moved: c.moved || Math.hypot(h.at[0] - from[0], h.at[1] - from[1]) * zoom > 2 };
+      }),
+    );
+  };
+  const release = (e: React.PointerEvent<SVGCircleElement>) => {
+    if (!holding.current) return;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    asked.cancel();
+    want.current = null;
+    holding.current = false;
+    if (editRef.current && !editRef.current.saving) commit(editRef.current);
+  };
+  const press = (e: React.KeyboardEvent, m: Measure, i: number) => {
+    const cur = editRef.current;
+    if (cur?.saving) return;
+    if (e.key === "Escape" && cur) {
+      e.preventDefault();
+      e.stopPropagation();
+      return cancel();
+    }
+    if (e.key === "Enter" && cur?.moved) {
+      e.preventDefault();
+      return commit(cur);
+    }
+    if (holding.current) return;
+    const next = nudge(cur && cur.xref === m.xref ? cur.pts : m.points, i, e.key, e.shiftKey ? 10 : 1, rot, rawSize);
+    if (!next) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setEdit({ xref: m.xref, i, pts: next, moved: true, saving: false });
+    stopTimer();
+    timer.current = window.setTimeout(() => {
+      const c = editRef.current;
+      if (c?.moved && !c.saving) commit(c);
+    }, NUDGE_MS);
+  };
+  const em = edit ? (mine.find((m) => m.xref === edit.xref) ?? null) : null;
+  const ownLabel = !!em && em.plain && !!em.scale;
+  const editRemote = useRemoteLabel(edit?.moved && em && !ownLabel ? { doc: docId, page, kind: em.kind, pts: edit.pts, xref: em.xref } : null);
+  const editLabel = !edit?.moved || !em ? null : ownLabel ? quantityOf(em.kind, edit.pts, em.scale!).text : editRemote;
+
   const style = (at: Pt) => ({ left: at[0], top: at[1] });
   const path = (p: Pt[]) => p.map((q) => `${q[0]},${q[1]}`).join(" ");
   const live = kind && pts.length > 0 && hover ? [...pts, hover.at] : pts;
+  const liveKind: MeasureKind | null = kind === "area" && live.length < 3 ? "perimeter" : kind;
+  // The page's own scale is worked out here; a file's own /D, /A or several viewports are valued by the engine.
+  const drawRemote = useRemoteLabel(liveKind && tool !== "calibrate" && hover && live.length >= 2 && !pagePlain ? { doc: docId, page, kind: liveKind, pts: live, xref: null } : null);
   const label = (() => {
     if (!kind || !hover) return null;
     if (tool === "calibrate") return live.length >= 2 ? `${numText(quantityOf("distance", live, UNSCALED).value)} in on the page` : "Click one end of a printed dimension";
     if (live.length < 2) return "";
-    return quantityOf(kind === "area" && live.length < 3 ? "perimeter" : kind, live, scale).text;
+    return pagePlain ? quantityOf(liveKind!, live, scale).text : (drawRemote ?? "");
   })();
   const sz = 5 / zoom;
 
@@ -164,11 +323,12 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
           {mine.map((m) => {
             const on = selected?.xref === m.xref;
             const Shape = m.kind === "area" ? "polygon" : "polyline";
+            const shown = edit?.xref === m.xref ? edit.pts : m.points;
             return (
               <g key={m.xref}>
-              {on && <Shape points={path(m.points)} className={`ms-sel${m.kind === "area" ? " area" : ""}`} />}
+              {on && <Shape points={path(shown)} className={`ms-sel${m.kind === "area" ? " area" : ""}`} />}
               <Shape
-                points={path(m.points)}
+                points={path(shown)}
                 className="ms-hit"
                 style={{ pointerEvents: tool === "select" ? "stroke" : "none" }}
                 onPointerDown={(e) => {
@@ -181,6 +341,22 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
               </g>
             );
           })}
+          {canEdit && selM && (
+            <Handles
+              kind={selM.kind}
+              pts={edit?.xref === selM.xref ? edit.pts : selM.points}
+              r={sz * 1.2}
+              onDown={(e, i) => grab(e, selM, i)}
+              onMove={(e) => drag(e, selM)}
+              onUp={release}
+              onCancel={cancel}
+              onKey={(e, i) => press(e, selM, i)}
+              onBlur={() => {
+                const c = editRef.current;
+                if (c?.moved && !c.saving && !holding.current) commit(c);
+              }}
+            />
+          )}
           {calib && <line className="ms-calib" x1={calib.a[0]} y1={calib.a[1]} x2={calib.b[0]} y2={calib.b[1]} />}
           {kind && live.length > 0 &&
             (kind === "area" && live.length >= 3 ? <polygon className="ms-draft area" points={path(live)} /> : <polyline className="ms-draft" points={path(live)} />)}
@@ -201,6 +377,15 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
             </g>
           )}
         </svg>
+        {edit?.moved && editLabel && (
+          <div
+            className="ms-label"
+            style={{ ...style(edit.pts[edit.i]), transform: `rotate(${-rot * 90}deg) scale(${1 / zoom}) translate(14px, 14px)` }}
+            aria-hidden="true"
+          >
+            <b>{editLabel}</b>
+          </div>
+        )}
         {kind && hover && (
           <div
             className="ms-label"

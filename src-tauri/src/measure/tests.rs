@@ -1040,6 +1040,296 @@ fn an_export_replaces_a_file_the_user_confirmed_over() {
     assert_eq!(left.len(), 1, "no temporary file is left behind: {left:?}");
 }
 
+// ---- number formats and a file's own /D and /A -----------------------------------------------------------------
+
+fn fmt(unit: &str) -> NumberFormat {
+    NumberFormat::new(unit, 1.0)
+}
+
+#[test]
+fn a_chain_of_units_reads_whole_units_then_the_remainder() {
+    // miles, feet (5280 to the mile), inches (12 to the foot, in eighths, reduced): 1 mi 2 ft 3 1/2 in.
+    let chain = [
+        fmt("mi"),
+        NumberFormat::new("ft", 5280.0),
+        NumberFormat { style: Style::Fraction, d: 8.0, fixed: false, ..NumberFormat::new("in", 12.0) },
+    ];
+    assert_eq!(chain_text(1.0 + (2.0 + 3.5 / 12.0) / 5280.0, &chain), "1 mi 2 ft 3 1/2 in");
+    // The whole units of the first element stay whole; nothing is left over to show.
+    assert_eq!(chain_text(3.0, &chain), "3 mi 0 ft 0 in");
+}
+
+#[test]
+fn a_remainder_that_rounds_up_to_a_whole_unit_carries() {
+    let ft_in = [fmt("ft"), NumberFormat::new("in", 12.0)];
+    assert_eq!(chain_text(2.999_999, &ft_in), "3 ft 0.00 in");
+    let eighths = [fmt("ft"), NumberFormat { style: Style::Fraction, d: 8.0, fixed: false, ..NumberFormat::new("in", 12.0) }];
+    assert_eq!(chain_text(2.999, &eighths), "3 ft 0 in");
+    // Cascades through every element: 1.9999999 h is 2 h, not 1 h 59 min 60.00 s.
+    let clock = [fmt("h"), NumberFormat::new("min", 60.0), NumberFormat::new("s", 60.0)];
+    assert_eq!(chain_text(1.999_999_99, &clock), "2 h 0 min 0.00 s");
+    // A value that needs no carry is untouched.
+    assert_eq!(chain_text(2.5, &ft_in), "2 ft 6.00 in");
+}
+
+#[test]
+fn separators_styles_and_the_label_position_follow_the_format() {
+    let eu = NumberFormat { thousands: ".".into(), decimal: ",".into(), ..fmt("m") };
+    assert_eq!(eu.text(1_234_567.891), "1.234.567,89 m");
+    // /FD false drops trailing zeros, /F /R rounds, /F /T truncates.
+    assert_eq!(NumberFormat { fixed: false, ..fmt("m") }.number(2.5), "2.5");
+    assert_eq!(NumberFormat { fixed: false, ..fmt("m") }.number(2.0), "2");
+    assert_eq!(NumberFormat { style: Style::Round, ..fmt("m") }.number(2.5), "3");
+    assert_eq!(NumberFormat { style: Style::Truncate, ..fmt("m") }.number(2.9), "2");
+    // /D 10 is one decimal, /D 1000 three.
+    assert_eq!(NumberFormat { d: 10.0, ..fmt("m") }.number(1.26), "1.3");
+    assert_eq!(NumberFormat { d: 1000.0, ..fmt("m") }.number(1.2345), "1.235");
+    // After the number the label is /PS, /U, /SS.
+    assert_eq!(NumberFormat { ps: "_".into(), ss: "!".into(), ..fmt("ft") }.text(3.0), "3.00_ft!");
+}
+
+/// A page with one line whose /Measure has `x`, `d` and `a` as given (number format arrays, as PDF text).
+fn own_formats(x: &str, d: &str, a: &str) -> Spec {
+    let measure = format!("<< /Type /Measure /Subtype /RL /R (1 in = 10 ft) /X [{x}] /D [{d}] /A [{a}] >>");
+    Spec {
+        page: "/Annots [5 0 R]".into(),
+        extra: vec![(
+            5,
+            format!("<< /Type /Annot /Subtype /Line /Rect [0 0 200 200] /L [0 0 108 0] /IT /LineDimension /F 4 /Measure {measure} >>"),
+        )],
+        ..Default::default()
+    }
+}
+
+const XFT: &str = "<< /Type /NumberFormat /U (ft) /C 0.0138888889 /D 100 /FD true >>"; // 72 user units to the foot
+
+#[test]
+fn a_files_own_distance_chain_values_and_labels_the_measurement() {
+    // /D: feet then inches (12 to the foot); 108 units = 1.5 ft = 1 ft 6.00 in.
+    let d = "<< /Type /NumberFormat /U (ft) /C 1 /D 1 /F /D >> << /Type /NumberFormat /U (in) /C 12 /D 100 /F /D /FD true >>";
+    let a = "<< /Type /NumberFormat /U (sq ft) /C 1 /D 100 /F /D /FD true >> << /Type /NumberFormat /U (sq in) /C 144 /D 100 /F /D /FD true >>";
+    let (eng, id, _) = open("own-chain", &own_formats(XFT, d, a));
+    let m = &list_all(&eng, id).unwrap()[0];
+    assert_eq!(m.quantity.text, "1 ft 6.00 in");
+    assert_eq!(m.quantity.note, None);
+    assert!(!m.plain, "the UI cannot show this label by itself");
+    // The live label asks the engine for the points under the annotation's own /Measure; 1 ft 0 in at 72 units.
+    // y = 792 is the top edge of the page in page space.
+    let q = value_in(&eng, id, 0, Kind::Distance, &[[0.0, 792.0], [72.0, 792.0]], m.xref).unwrap();
+    assert_eq!(q.text, "1 ft 0.00 in");
+    // An area reads through /A: a 72 x 72 unit square is 1 sq ft; half a unit more makes 1 sq ft 72.00 sq in.
+    let sq = [[0.0, 792.0], [72.0, 792.0], [72.0, 720.0], [0.0, 720.0]];
+    assert_eq!(value_in(&eng, id, 0, Kind::Area, &sq, m.xref).unwrap().text, "1 sq ft 0.00 sq in");
+    // Moving a point writes that label and keeps the file's formats.
+    let (_, q) = move_points(&eng, id, 0, m.xref, &[[0.0, 792.0], [144.0, 792.0]], EditSource::User).unwrap();
+    assert_eq!(q.text, "2 ft 0.00 in");
+    with_annot(&eng, id, m.xref, |o| {
+        assert_eq!(o.get_dict("Contents").unwrap().unwrap().as_string().unwrap(), "2 ft 0.00 in");
+        let measure = o.get_dict("Measure").unwrap().unwrap();
+        assert_eq!(measure.get_dict("D").unwrap().unwrap().len().unwrap(), 2, "the file's own /D is still there");
+    });
+}
+
+#[test]
+fn a_malformed_number_format_falls_back_with_a_note_and_stays_listed() {
+    let ok_d = "<< /Type /NumberFormat /U (ft) /C 1 /D 100 /FD true >>";
+    let nine = vec![ok_d; 9].join(" ");
+    for (case, d) in [
+        ("zero /C", "<< /Type /NumberFormat /U (in) /C 0 >>".to_string()),
+        ("negative /C", "<< /Type /NumberFormat /U (in) /C -3 >>".to_string()),
+        ("no /U", "<< /Type /NumberFormat /C 1 >>".to_string()),
+        ("a bad link in a chain", format!("{ok_d} 5 << /Type /NumberFormat /U (in) /C 12 >>")),
+        ("a chain of nine", nine.clone()),
+    ] {
+        let (eng, id, _) = open("malformed-d", &own_formats(XFT, &d, ok_d));
+        let all = list_all(&eng, id).unwrap();
+        assert_eq!(all.len(), 1, "{case}: still listed");
+        // 108 units at 72 to the foot, in the /X format: what a measure without /D reads.
+        assert_eq!(all[0].quantity.text, "1.50 ft", "{case}");
+        let note = all[0].quantity.note.as_deref().unwrap_or_default();
+        assert!(note.contains("/D") && note.contains("malformed"), "{case}: {note:?}");
+        assert!(!all[0].plain, "{case}: the engine words the note");
+    }
+    // The cap is 8: a chain of eight is fine.
+    let eight = vec![ok_d; 8].join(" ");
+    let (eng, id, _) = open("chain-8", &own_formats(XFT, &eight, ok_d));
+    assert_eq!(list_all(&eng, id).unwrap()[0].quantity.note, None);
+}
+
+#[test]
+fn an_endless_x_chain_is_left_out_not_walked() {
+    let x = vec![XFT; 9].join(" ");
+    let (eng, id, _) = open("x-chain", &own_formats(&x, XFT, XFT));
+    assert!(list_all(&eng, id).unwrap().is_empty());
+}
+
+#[test]
+fn plain_says_whether_the_ui_can_label_it_alone() {
+    // Nothing on the page, and a scale of ours, are plain; so is an annotation we made.
+    let (eng, id, _) = open("plain", &Spec::default());
+    assert!(scale_get(&eng, id, 0).unwrap().plain);
+    scale_set(&eng, id, 0, &FT10, EditSource::User).unwrap();
+    assert!(scale_get(&eng, id, 0).unwrap().plain);
+    add(&eng, id, Kind::Distance, &[[10.0, 10.0], [80.0, 10.0]], None);
+    assert!(list_all(&eng, id).unwrap()[0].plain);
+    // A page with a detail viewport over a page scale is valued by the engine.
+    let (eng, id, _) = open("plain-vp", &acrobat());
+    assert!(!scale_get(&eng, id, 0).unwrap().plain);
+}
+
+// ---- dragging a point -------------------------------------------------------------------------------------------
+
+fn history_len(eng: &Engine, id: DocId) -> usize {
+    eng.history(id).unwrap().len()
+}
+
+#[test]
+fn moving_a_point_rewrites_the_annotation_in_place_in_one_undo_step() {
+    let (eng, id, path) = open("move", &Spec::default());
+    let square = [[100.0, 100.0], [172.0, 100.0], [172.0, 172.0], [100.0, 172.0]];
+    let cases: [(Kind, Vec<[f32; 2]>, Vec<[f32; 2]>, &str, &str); 3] = [
+        // 200 pt = 27.78 ft; then 144 pt = 20.00 ft.
+        (Kind::Distance, vec![[100.0, 100.0], [300.0, 100.0]], vec![[100.0, 100.0], [100.0, 244.0]], "27.78 ft", "20.00 ft"),
+        // 72 + 72 = 144 pt = 20.00 ft; then 72 + 144 = 216 pt = 30.00 ft.
+        (Kind::Perimeter, vec![[100.0, 100.0], [172.0, 100.0], [172.0, 172.0]], vec![[100.0, 100.0], [172.0, 100.0], [172.0, 244.0]], "20.00 ft", "30.00 ft"),
+        // 1 sq in = 100 sq ft; then the last corner moved down 72 pt: shoelace 7776 pt^2 = 1.5 sq in = 150 sq ft.
+        (Kind::Area, square.to_vec(), vec![square[0], square[1], square[2], [100.0, 244.0]], "100.00 sq ft", "150.00 sq ft"),
+    ];
+    for (kind, before, after, v0, v1) in cases {
+        let (xref, q) = add(&eng, id, kind, &before, Some(&FT10));
+        assert_eq!(q.text, v0);
+        let user_before = with_annot(&eng, id, xref, |o| {
+            let key = if kind == Kind::Distance { "L" } else { "Vertices" };
+            (nums(o, "Rect"), nums(o, key))
+        });
+        let steps = history_len(&eng, id);
+
+        let (st, q) = move_points(&eng, id, 0, xref, &after, EditSource::User).unwrap();
+        assert!(st.dirty);
+        assert_eq!(q.text, v1, "{kind:?}");
+        assert_eq!(history_len(&eng, id), steps + 1, "{kind:?}: one undo step");
+        assert!(eng.history(id).unwrap().last().unwrap().label.starts_with("Move a point of a measurement on p. 1"));
+
+        // The same annotation: xref, author and subject stay; the points, label and rect are the new ones.
+        let all = list_all(&eng, id).unwrap();
+        let m = all.iter().find(|m| m.xref == xref).expect("same xref");
+        assert_eq!((m.points.clone(), m.contents.as_str(), m.quantity.text.as_str()), (after.clone(), v1, v1), "{kind:?}");
+        assert_eq!((m.author.as_str(), m.scale), ("Alex Johnson", Some(FT10)), "{kind:?}");
+        with_annot(&eng, id, xref, |o| {
+            // User space: y is 792 - y on this page.
+            let key = if kind == Kind::Distance { "L" } else { "Vertices" };
+            let user = nums(o, key);
+            let want: Vec<f64> = after.iter().flat_map(|p| [f64::from(p[0]), 792.0 - f64::from(p[1])]).collect();
+            assert!(user.iter().zip(&want).all(|(a, b)| (a - b).abs() < 1e-3), "{kind:?}: {user:?} vs {want:?}");
+            let rect = nums(o, "Rect");
+            for xy in want.chunks(2) {
+                assert!(xy[0] >= rect[0] - 1e-3 && xy[0] <= rect[2] + 1e-3 && xy[1] >= rect[1] - 1e-3 && xy[1] <= rect[3] + 1e-3, "{kind:?}: rect {rect:?} holds {xy:?}");
+            }
+            assert_eq!(o.get_dict("Subj").unwrap().unwrap().as_string().unwrap(), kind.subject());
+            assert_eq!(o.get_dict("IT").unwrap().unwrap().as_name().unwrap(), kind.intent().as_bytes());
+            assert!(o.get_dict("AP").unwrap().is_some());
+        });
+
+        // Undo brings the old geometry back whole; redo the new one.
+        eng.undo(id).unwrap();
+        let back = list_all(&eng, id).unwrap();
+        let m = back.iter().find(|m| m.xref == xref).unwrap();
+        assert_eq!((m.points.clone(), m.quantity.text.as_str()), (before.clone(), v0), "{kind:?}: undone");
+        with_annot(&eng, id, xref, |o| {
+            let key = if kind == Kind::Distance { "L" } else { "Vertices" };
+            assert_eq!((nums(o, "Rect"), nums(o, key)), (user_before.0.clone(), user_before.1.clone()), "{kind:?}: undone");
+        });
+        eng.redo(id).unwrap();
+        assert_eq!(list_all(&eng, id).unwrap().iter().find(|m| m.xref == xref).unwrap().quantity.text, v1, "{kind:?}: redone");
+    }
+
+    // Saved and read again, the three are where they were moved to.
+    eng.save(id, None).unwrap();
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    let texts: Vec<String> = list_all(&eng2, id2).unwrap().into_iter().map(|m| m.quantity.text).collect();
+    assert_eq!(texts, ["20.00 ft", "30.00 ft", "150.00 sq ft"]);
+}
+
+#[test]
+fn a_moved_measurement_keeps_the_scale_it_was_made_with_and_draws() {
+    // The page says 1 in = 10 ft, the measurement was made at 1 in = 1 m: moving it does not re-scale it.
+    let (eng, id, _) = open("move-scale", &Spec::default());
+    scale_set(&eng, id, 0, &FT10, EditSource::User).unwrap();
+    let m1 = Scale { paper: 1.0, paper_unit: Unit::In, real: 1.0, real_unit: Unit::M };
+    let (xref, _) = add(&eng, id, Kind::Distance, &[[100.0, 100.0], [172.0, 100.0]], Some(&m1));
+    let (_, q) = move_points(&eng, id, 0, xref, &[[100.0, 100.0], [244.0, 100.0]], EditSource::User).unwrap();
+    assert_eq!(q.text, "2.00 m");
+    // The appearance is the new one: the label is in the stream, and the page draws.
+    let ap = with_annot(&eng, id, xref, |o| {
+        let n = o.get_dict("AP").unwrap().unwrap().get_dict("N").unwrap().unwrap();
+        String::from_utf8_lossy(&n.read_stream().unwrap()).into_owned()
+    });
+    assert!(ap.contains("(2.00 m)"), "{ap}");
+}
+
+#[test]
+fn an_acrobat_measurement_keeps_its_own_measure_when_a_point_moves() {
+    let (eng, id, _) = open("move-acrobat", &acrobat());
+    let line = list_all(&eng, id).unwrap().into_iter().find(|m| m.kind == Kind::Distance).unwrap();
+    // User (0,0)-(0,72) is 72 units at 0.1388889 ft: 10.00 ft.
+    let (_, q) = move_points(&eng, id, 0, line.xref, &[[0.0, 792.0], [0.0, 720.0]], EditSource::User).unwrap();
+    assert_eq!(q.text, "10.00 ft");
+    with_annot(&eng, id, line.xref, |o| {
+        let m = o.get_dict("Measure").unwrap().unwrap();
+        assert_eq!(m.get_dict("R").unwrap().unwrap().as_string().unwrap(), "1 in = 10 ft");
+        assert!(m.get_dict("A").unwrap().is_some() && m.get_dict("D").unwrap().is_some());
+    });
+    assert_eq!(list_all(&eng, id).unwrap().iter().find(|m| m.xref == line.xref).unwrap().scale.map(|s| s.label()).as_deref(), Some("1 in = 10 ft"));
+}
+
+#[test]
+fn a_move_that_cannot_be_made_is_refused_and_leaves_no_step() {
+    let (eng, id, _) = open("move-bad", &Spec::default());
+    let (xref, _) = add(&eng, id, Kind::Distance, &[[100.0, 100.0], [200.0, 100.0]], Some(&FT10));
+    let steps = history_len(&eng, id);
+    let good = [[100.0, 100.0], [150.0, 100.0]];
+    let bad: [(&str, i32, Vec<[f32; 2]>); 5] = [
+        ("a gone xref", 99_999, good.to_vec()),
+        ("one point", xref, vec![[1.0, 1.0]]),
+        ("three points on a distance", xref, vec![[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]),
+        ("not a number", xref, vec![[1.0, f32::NAN], [2.0, 2.0]]),
+        ("too far away", xref, vec![[1.0, 1.0], [2e7, 1.0]]),
+    ];
+    for (what, x, pts) in bad {
+        assert!(move_points(&eng, id, 0, x, &pts, EditSource::User).is_err(), "{what}");
+        assert!(value_in(&eng, id, 0, Kind::Distance, &pts, x).is_err(), "{what}: the live value");
+    }
+    assert!(move_points(&eng, id, 1, xref, &good, EditSource::User).is_err(), "no such page");
+    assert_eq!(history_len(&eng, id), steps);
+    assert_eq!(list_all(&eng, id).unwrap()[0].points, vec![[100.0, 100.0], [200.0, 100.0]]);
+}
+
+#[test]
+fn moving_a_point_in_a_signed_document_is_saved_after_the_signature() {
+    // /P 3 certification allows annotations; the signature field has a value, so the file counts as signed.
+    let sig = "<< /FT /Sig /T (Signature1) /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> >> >>";
+    let line = "<< /Type /Annot /Subtype /Line /Rect [0 0 200 200] /L [0 0 72 0] /IT /LineDimension /F 4 /Measure \
+                << /Type /Measure /Subtype /RL /R (1 in = 10 ft) /X [<< /Type /NumberFormat /U (ft) /C 0.1388889 /D 100 /FD true >>] >> >>";
+    let spec = Spec {
+        page: "/Annots [6 0 R]".into(),
+        cat: "/AcroForm << /SigFlags 3 /Fields [5 0 R] >> /Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 3 >> >> ] >> >>".into(),
+        extra: vec![(5, sig.into()), (6, line.into())],
+        ..Default::default()
+    };
+    let (eng, id, path) = open("move-signed", &spec);
+    assert!(eng.read_custom(id, |d| Ok(crate::outline::signed(d))).unwrap());
+    let original = std::fs::read(&path).unwrap();
+    let xref = list_all(&eng, id).unwrap()[0].xref;
+    move_points(&eng, id, 0, xref, &[[0.0, 792.0], [144.0, 792.0]], EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "an update after the signed bytes, not a rewrite");
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    assert_eq!(list_all(&eng2, id2).unwrap()[0].quantity.text, "20.00 ft");
+}
+
 // ---- certified documents -----------------------------------------------------------------------------------
 
 /// `acrobat()` (a page with measurements on it) certified with DocMDP `/P` `p`.
@@ -1056,10 +1346,11 @@ fn refused(eng: &Engine, id: DocId, what: &str) {
     let (a, b) = ([10.0, 10.0], [50.0, 10.0]);
     let scale = Scale { paper: 1.0, paper_unit: Unit::In, real: 2.0, real_unit: Unit::M };
     let xref = list_all(eng, id).unwrap()[0].xref;
-    let rs: [(&str, Result<()>); 3] = [
+    let rs: [(&str, Result<()>); 4] = [
         ("add", add_one(eng, id, 0, Kind::Distance, &[a, b], None, "", EditSource::User).map(|_| ())),
         ("scale", scale_set(eng, id, 0, &scale, EditSource::User).map(|_| ())),
         ("rescale", rescale(eng, id, 0, xref, &scale, EditSource::User).map(|_| ())),
+        ("move", move_points(eng, id, 0, xref, &[a, b], EditSource::User).map(|_| ())),
     ];
     for (op, r) in rs {
         match r {
@@ -1088,11 +1379,14 @@ fn a_certification_that_allows_annotations_allows_measuring() {
     let all = list_all(&eng, id).unwrap();
     add(&eng, id, Kind::Distance, &[[10.0, 10.0], [50.0, 10.0]], Some(&FT10));
     rescale(&eng, id, 0, all[0].xref, &FT10, EditSource::User).unwrap();
-    assert_eq!(eng.history(id).unwrap().len(), steps + 2);
+    // The re-measured annotation has a new xref.
+    let again = list_all(&eng, id).unwrap();
+    move_points(&eng, id, 0, again.last().unwrap().xref, &[[10.0, 10.0], [60.0, 10.0]], EditSource::User).unwrap();
+    assert_eq!(eng.history(id).unwrap().len(), steps + 3);
     // A page scale is a /VP entry of the page dictionary: not an annotation, so no /P allows it.
     let e = scale_set(&eng, id, 0, &FT10, EditSource::User).unwrap_err().to_string();
     assert!(e.contains("certified"), "{e}");
-    assert_eq!(eng.history(id).unwrap().len(), steps + 2);
+    assert_eq!(eng.history(id).unwrap().len(), steps + 3);
 }
 
 #[test]
