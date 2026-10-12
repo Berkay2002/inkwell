@@ -648,8 +648,8 @@ pub struct ImageItem {
     pub change: ImageChange,
 }
 
-/// The most images one batch changes.
-const MAX_BATCH: usize = 500;
+/// The most images one batch changes (each change parses the page's content again).
+const MAX_BATCH: usize = 100;
 
 /// Applies one change to each of several images of `page` listed at `rev`: one undo step. Moves,
 /// turns, flips or deletes only, and all of one kind of "delete or not"; a failing item changes
@@ -1052,14 +1052,19 @@ const COPY_KEYS: &[&str] = &[
 
 /// How deep and how wide a copied image's description may go (an image's own graph is a few objects).
 const COPY_DEPTH: u32 = 8;
-const COPY_NODES: u32 = 512;
+/// Objects one copy may visit in all (a hundred pictures, each with a mask, a colour space and a few parameters).
+const COPY_NODES: u32 = 4096;
 
-/// Copies one image XObject, with the objects it needs, into `out` as new objects: dictionaries are rebuilt
-/// from [`COPY_KEYS`] only and streams are copied as raw bytes with their own filters.
+/// Copies image XObjects, with the objects they need, into `out` as new objects: dictionaries are rebuilt from
+/// [`COPY_KEYS`] only and streams are copied as raw bytes with their own filters. One copier serves a whole
+/// copy, so its caps cover every picture, and a stream several pictures share (a soft mask, a profile) is read
+/// and copied once, and shared in the copy.
 struct Copier<'a> {
     out: &'a mut PdfDocument,
     nodes: u32,
     bytes: u64,
+    /// The copy of each source stream already made (by object number, and whether it was met as a mask).
+    seen: std::collections::HashMap<(i32, bool), PdfObject>,
 }
 
 impl Copier<'_> {
@@ -1107,14 +1112,30 @@ impl Copier<'_> {
     }
 
     fn stream(&mut self, src: &PdfObject, depth: u32, in_mask: bool) -> Result<PdfObject> {
+        let num = src.as_indirect().unwrap_or(0);
+        if num > 0 {
+            if let Some(done) = self.seen.get(&(num, in_mask)) {
+                return Ok(done.clone());
+            }
+        }
+        let too_big = || invalid("these images are too large to copy together");
+        // The stream's own /Length says what is coming before any of it is read (it is only a hint).
+        let hint = get(src, "Length").and_then(|n| n.as_int().ok()).unwrap_or(0).max(0) as u64;
+        if self.bytes.saturating_add(hint) > MAX_SAMPLE_BYTES {
+            return Err(too_big());
+        }
         let raw = src.read_raw_stream()?;
         self.bytes += raw.len() as u64;
         if self.bytes > MAX_SAMPLE_BYTES {
-            return Err(invalid("these images are too large to copy together"));
+            return Err(too_big());
         }
         let mut d = self.out.new_dict()?;
         self.keys(src, &mut d, depth, in_mask)?;
-        Ok(self.out.add_stream(&Buffer::from_bytes(&raw)?, Some(&d), true)?)
+        let copy = self.out.add_stream(&Buffer::from_bytes(&raw)?, Some(&d), true)?;
+        if num > 0 {
+            self.seen.insert((num, in_mask), copy.clone());
+        }
+        Ok(copy)
     }
 }
 
@@ -1134,6 +1155,7 @@ pub fn copy(eng: &Engine, doc: DocId, rev: u32, page: u32, indices: &[u32]) -> R
         let to_page = page_space(d, page)?;
         let mut out = PdfDocument::new();
         let mut xo = out.new_dict()?;
+        let mut copier = Copier { out: &mut out, nodes: 0, bytes: 0, seen: Default::default() };
         let (mut images, mut rects, mut total) = (Vec::new(), Vec::new(), 0u64);
         for (n, i) in indices.iter().enumerate() {
             let f = pi.found.get(*i as usize).ok_or_else(|| invalid(format!("page {} has no image {}", page + 1, i + 1)))?;
@@ -1149,7 +1171,7 @@ pub fn copy(eng: &Engine, doc: DocId, rev: u32, page: u32, indices: &[u32]) -> R
             }
             // Only what an image is made of comes along: the page's layers, structure entry, alternates
             // and OPI proxies stay behind, and so does any other key that points elsewhere in the file.
-            let g = Copier { out: &mut out, nodes: 0, bytes: 0 }.stream(obj, 0, false)?;
+            let g = copier.stream(obj, 0, false)?;
             xo.dict_put(format!("I{n}").as_str(), g)?;
             let full = f.ctm.bbox(UNIT);
             rects.push(to_page.bbox(f.clip.map_or(full, |c| intersect(full, c))));

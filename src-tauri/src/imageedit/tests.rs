@@ -1112,3 +1112,32 @@ fn the_masks_samples_count_toward_what_may_be_copied() {
     let e = copy(&eng, id, rev(&eng, id), 0, &[0]);
     assert!(matches!(&e, Err(EngineError::Invalid(m)) if m.contains("too large")), "{e:?}");
 }
+
+#[test]
+fn pictures_that_share_a_soft_mask_copy_it_once_and_share_it_in_the_clip() {
+    // Two pictures with one /SMask (object 7): read and copied once, so the one caps count it once and a
+    // hundred pictures over one large mask can't read it a hundred times.
+    let mask = stream_obj("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", b"A");
+    let second = stream_obj("/Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 7 0 R", b"AB");
+    let mut bytes = pdf_with(1, false, "", &[mask, second]);
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let mut first = doc.new_indirect(3, 0).unwrap().resolve().unwrap().unwrap();
+    first.dict_put("SMask", doc.new_indirect(7, 0).unwrap()).unwrap();
+    let page = doc.new_indirect(5, 0).unwrap().resolve().unwrap().unwrap();
+    let mut xo = get(&get(&page, "Resources").unwrap(), "XObject").unwrap();
+    xo.dict_put("Im2", doc.new_indirect(8, 0).unwrap()).unwrap();
+    let mut content = doc.new_indirect(6, 0).unwrap().resolve().unwrap().unwrap();
+    content.write_stream_string("q 200 0 0 100 100 500 cm /Im1 Do Q\nq 50 0 0 50 300 400 cm /Im2 Do Q\n").unwrap();
+    bytes.clear();
+    doc.write_to(&mut bytes).unwrap();
+    let (eng, id, _) = open(&dir("copy-shared-mask"), &bytes);
+    assert_eq!(list(&eng, id).len(), 2);
+    let clip = copy(&eng, id, rev(&eng, id), 0, &[0, 1]).unwrap();
+    let clipped_doc = mupdf::pdf::PdfDocument::from_bytes(&clip.bytes).unwrap();
+    let xo = get(&get(&clipped_doc.find_page(0).unwrap(), "Resources").unwrap(), "XObject").unwrap();
+    let mask_of = |k: &str| get(&get(&xo, k).unwrap(), "SMask").unwrap().as_indirect().unwrap();
+    let (a, b) = (mask_of("I0"), mask_of("I1"));
+    assert!(a > 0 && a == b, "the two pictures' masks are objects {a} and {b}");
+    // The clip holds both pictures and one mask: no more objects than that and its own page tree.
+    assert!(clipped_doc.count_objects().unwrap() <= 8, "{} objects", clipped_doc.count_objects().unwrap());
+}

@@ -95,7 +95,7 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
 | `crop` | `rect, pixels` | show only `rect`: a clip, or with `pixels` a new image of just those pixels |
 | `add` | `file, rect, keepAspect` (default true) | new image in `rect` (no `index`), fitted and centred with `keepAspect` |
 
-- `image_edit_many` applies one `move`, `rotate`, `angle`, `flip` or `delete` to each of up to 500 images of one page
+- `image_edit_many` applies one `move`, `rotate`, `angle`, `flip` or `delete` to each of up to 100 images of one page
   as a single step: all deletes or none, no image twice; a batch that fails changes nothing. Deletes run from the
   last index back, since deleting renumbers.
 - `image_copy` reads, it does not change the document (`rev` must be current). It checks the owner's permission,
@@ -106,7 +106,8 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   use, so a stray key that points elsewhere in the source file (`/Parent`, a catalog reference) is not followed and
   nothing else of the document leaks into the clip; streams are copied as raw bytes with their own filters. The
   result has no `/OC`, `/StructParent`, `/Alternates` or `/OPI`. The clipboard is that file's bytes plus where
-  each picture sat; no document is held open.
+  each picture sat; no document is held open. One copy has one set of caps (bytes read, objects visited), and a
+  stream several pictures share (a soft mask, a profile) is read and copied once and shared in the clip.
 - `image_paste` grafts each picture from the clipboard's file into the target document (one graft map per paste), names it in the page's own `/XObject` dict and draws it after the content in a
   clean graphics state (the same `q … Q` balancing as Add), with the picture's rectangular clip. The objects are the
   document's own: no object is shared with the source document or with another paste.
