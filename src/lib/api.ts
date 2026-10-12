@@ -130,6 +130,10 @@ export interface ImageBlock extends PageImageBlock {
   fullRect: [number, number, number, number];
   /** The placement: unit square to user space. */
   matrix: [number, number, number, number, number, number];
+  /** How far the picture is turned on the page, degrees clockwise as seen (-180 to 180); 0 when upright. */
+  angle: number;
+  /** The picture's own corners in page space: bottom left, bottom right, top right, top left (x, y pairs). */
+  quad: [number, number, number, number, number, number, number, number];
   /** Pixel size. */
   width: number;
   height: number;
@@ -145,6 +149,11 @@ export interface ImageBlock extends PageImageBlock {
 export interface ImageBlocks {
   rev: number;
   images: ImageBlock[];
+  /** Why the images can't be changed (a certified document). */
+  locked: string | null;
+  signed: boolean;
+  /** Why they can't be copied (the owner's permissions). */
+  copyLocked: string | null;
 }
 
 /** `file`: an open token from `pickSource("images", …)`. `rect`s are the box to fit, in page space. */
@@ -152,6 +161,8 @@ export type ImageChange =
   | { op: "move"; dx: number; dy: number }
   | { op: "resize"; rect: [number, number, number, number]; keepAspect: boolean }
   | { op: "rotate"; quarterTurns: number }
+  /** Any angle, degrees clockwise as seen, about the centre. */
+  | { op: "angle"; degrees: number }
   | { op: "flip"; horizontal: boolean }
   | { op: "delete" }
   | { op: "replace"; file: string }
@@ -162,6 +173,25 @@ export const imageBlocks = (doc: number, page: number) => invoke<ImageBlocks>("i
 /** `index` is null for `add`. A `rev` older than the document's is refused as "stale". */
 export const imageEdit = (doc: number, rev: number, page: number, index: number | null, change: ImageChange) =>
   invoke<{ state: EditState }>("image_edit", { doc, rev, page, index, change });
+/** One change to each of several images of a page (move, turn, flip or delete), one undo step. */
+export const imageEditMany = (doc: number, rev: number, page: number, items: { index: number; change: ImageChange }[]) =>
+  invoke<{ state: EditState }>("image_edit_many", { doc, rev, page, items });
+/** What the picture clipboard holds: how many, and the boxes they covered on their page (page space). */
+export interface ImageClipInfo {
+  count: number;
+  rect: [number, number, number, number];
+  rects: [number, number, number, number][];
+}
+/** Copies images of a page to the picture clipboard (the app's, shared by every open document). */
+export const imageCopy = (doc: number, rev: number, page: number, indices: number[]) =>
+  invoke<ImageClipInfo>("image_copy", { doc, rev, page, indices });
+export const imageClipInfo = () => invoke<ImageClipInfo | null>("image_clip_info");
+/** Pastes the clipboard on `page`, its top left corner at `at` (page space); one undo step. */
+export const imagePaste = (doc: number, rev: number, page: number, at: [number, number]) =>
+  invoke<{ state: EditState }>("image_paste", { doc, rev, page, at });
+/** Moves images of `page` to `toPage` of the same document, the group's top left corner at `at` there. */
+export const imageMoveToPage = (doc: number, rev: number, page: number, indices: number[], toPage: number, at: [number, number]) =>
+  invoke<{ state: EditState }>("image_move_to_page", { doc, rev, page, indices, toPage, at });
 export const cancelSearch = (doc: number) => invoke<void>("cancel_search", { doc });
 export const engineStats = () => invoke<EngineStats>("engine_stats");
 export const initialFiles = () => invoke<FileRef[]>("initial_files");
