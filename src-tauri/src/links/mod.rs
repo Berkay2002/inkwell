@@ -438,7 +438,14 @@ pub fn list(eng: &Engine, doc: DocId, page: u32) -> Result<PageLinks> {
             return Err(EngineError::BadPage(page));
         }
         let mut l = read_page(d, page, entry.generation())?;
-        l.locked = certified(d)?.filter(|p| *p <= 2).map(|_| CERTIFIED.to_string());
+        // A certification that cannot be read (a form too large or damaged) is no reason to list no links: they
+        // are shown, locked with the reason, as the engine will refuse their changes for it too.
+        l.locked = match certified(d) {
+            Ok(Some(p)) if p <= 2 => Some(CERTIFIED.to_string()),
+            Ok(_) => None,
+            Err(EngineError::Invalid(why)) => Some(why),
+            Err(e) => Some(e.to_string()),
+        };
         l.signed = crate::outline::signed(d);
         Ok(l)
     })

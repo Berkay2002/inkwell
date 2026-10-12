@@ -1008,3 +1008,22 @@ fn a_hostile_annots_array_is_read_as_far_as_the_cap_and_never_half_removed() {
     assert_eq!(audit(&eng, id).unwrap().total, 1);
     assert_eq!(go(&eng, id, LinkOp::RemoveAll).count, 1);
 }
+
+// ---- round 2 ----
+
+#[test]
+fn a_certification_that_cannot_be_read_still_lists_the_links_as_locked() {
+    // A form with more fields than are checked: `certified` is an error, never a shorter answer.
+    let fields = "5 0 R ".repeat(20_001);
+    let cat = format!("/AcroForm << /Fields [ {fields} ] >>");
+    let (eng, id, _, _d) = opened("unreadable-certification", &page_with_annots("", &cat, &[link_annot("/Dest [3 0 R /Fit]")], &["<< /FT /Tx /T (a) >>".into()]));
+    assert!(eng.read_custom(id, |d| Ok(certified(d).is_err())).unwrap(), "the fixture's certification is unreadable");
+    let l = list(&eng, id, 0).unwrap();
+    assert_eq!(l.links.len(), 1, "the links are still listed");
+    assert!(l.locked.as_deref().is_some_and(|m| m.contains("certified")), "{:?}", l.locked);
+    let before = eng.edit_state(id).unwrap();
+    for op in [LinkOp::RemoveAll, LinkOp::SetHighlight { page: 0, id: l.links[0].id, highlight: Highlight::None }] {
+        assert!(matches!(apply(&eng, id, rev(&eng, id), &op, EditSource::User), Err(EngineError::Invalid(_))), "{op:?}");
+    }
+    assert_eq!(eng.edit_state(id).unwrap().rev, before.rev);
+}
