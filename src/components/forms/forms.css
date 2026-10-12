@@ -423,3 +423,167 @@ select.fm-w option {
 .fm-mini:disabled {
   opacity: 0.35;
 }
+
+/* scripts: banner over the page, the rail's Scripts note, custom script boxes, the dialogs */
+.fm-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  max-width: min(720px, calc(100% - 32px));
+  padding: 6px 8px 6px 14px;
+  font-size: 13px;
+  color: var(--text);
+  transform: translateX(-50%);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  box-shadow: var(--shadow-1);
+}
+.fm-banner > svg {
+  flex: none;
+  color: var(--text-2);
+}
+.fm-scripts {
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border-radius: 8px;
+}
+.fm-scripts > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  font-weight: 500;
+}
+.fm-scripts > summary::-webkit-details-marker {
+  display: none;
+}
+.fm-scripts[open] > summary {
+  margin-bottom: 8px;
+}
+.fm-badge {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  color: #fff;
+  background: var(--danger);
+}
+.fm-log {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.fm-log li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border-strong);
+}
+.fm-log li.warn {
+  border-left-color: var(--diff-chg);
+}
+.fm-log li.error {
+  border-left-color: var(--danger);
+}
+.fm-log b {
+  font-weight: 600;
+}
+.fm-code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+}
+.fm-field small {
+  font-size: 11.5px;
+}
+.fm-sample {
+  margin: 0;
+  padding: 6px 10px;
+  background: var(--accent-soft);
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+.fm-sample code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+.fm-prompt {
+  width: min(440px, 90vw);
+}
+.fm-pmsg {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.fm-purl {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border-radius: 8px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.fm-purl.inline {
+  display: inline;
+  margin: 0;
+  padding: 1px 6px;
+}
+.fm-prompt .dialog-actions {
+  flex-wrap: wrap;
+}
+.fm-more {
+  margin-right: auto;
+  align-self: center;
+}
+.fm-order-dlg {
+  width: min(420px, 90vw);
+}
+.fm-order-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.fm-order-list li {
+  display: grid;
+  grid-template-columns: 22px 1fr auto auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+.fm-order-list li:hover {
+  background: var(--surface-2);
+}
+.fm-order-list .n {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.fm-order-list .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

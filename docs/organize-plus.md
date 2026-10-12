@@ -1,5 +1,7 @@
 # Organize-plus: combine files, attachments, page labels, page transitions
 
+PDF Portfolios (the collection view over the attachments) are in docs/portfolios.md; article threads in docs/threads.md.
+
 Code: `src-tauri/src/organize/` (`combine.rs`, `attach.rs`, `labels.rs`, `trans.rs`, `app.rs` Tauri commands, `mod.rs`
 edit-lane entry points, `tests.rs`). UI: `src/components/CombineSheet.tsx` (+ `src/lib/combineStore.ts`,
 `combineLogic.ts`), `AttachmentsPanel.tsx`, `OrganizePlus.tsx` (labels and transitions sheets), `Presentation.tsx`
@@ -96,6 +98,6 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
 - The form fields of every source bring their `/DR` resources (fonts) along, merged key by key; where two files name
   a font the same, the first one's is kept.
 - The sources' page labels are not carried into a combined file (the result has none until set in Page labels).
-- The attachments list does not show portfolio (collection) structure.
+- The attachments list does not show portfolio (collection) structure; a PDF Portfolio opens in its own file list (docs/portfolios.md).
 - Transitions are not previewed in the sheet itself, only in full screen.
 - Full screen uses the HTML Fullscreen API; if the platform refuses it, the page still fills the window.

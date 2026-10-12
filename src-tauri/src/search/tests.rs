@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-fn dir(test: &str) -> PathBuf {
+pub(super) fn dir(test: &str) -> PathBuf {
     let d = std::env::temp_dir().join("inkwell-tests").join(format!("search-{test}"));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -17,7 +17,7 @@ fn dir(test: &str) -> PathBuf {
 }
 
 /// A PDF from object bodies (object `n` is `objs[n - 1]`; object 1 is the catalog).
-fn pdf_of(objs: &[String]) -> Vec<u8> {
+pub(super) fn pdf_of(objs: &[String]) -> Vec<u8> {
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut offs = Vec::new();
     for (i, o) in objs.iter().enumerate() {
@@ -34,7 +34,7 @@ fn pdf_of(objs: &[String]) -> Vec<u8> {
 }
 
 /// A string literal in WinAnsi: Latin-1 letters become octal escapes.
-fn lit(s: &str) -> String {
+pub(super) fn lit(s: &str) -> String {
     let mut o = String::from("(");
     for c in s.chars() {
         match c {
@@ -51,7 +51,7 @@ fn lit(s: &str) -> String {
 }
 
 /// The content stream of a page: each string is one line of text, 16 points apart.
-fn content(lines: &[&str]) -> String {
+pub(super) fn content(lines: &[&str]) -> String {
     let mut s = String::from("BT /F1 12 Tf 72 700 Td 16 TL\n");
     for l in lines {
         s.push_str(&format!("{} Tj T*\n", lit(l)));
@@ -61,18 +61,18 @@ fn content(lines: &[&str]) -> String {
 }
 
 /// Extra catalog entries, page annotations (object numbers from `first_extra`) and extra objects.
-struct Extra {
-    catalog: String,
-    annots: String,
-    objs: Vec<String>,
+pub(super) struct Extra {
+    pub(super) catalog: String,
+    pub(super) annots: String,
+    pub(super) objs: Vec<String>,
 }
 
-fn no_extra() -> Extra {
+pub(super) fn no_extra() -> Extra {
     Extra { catalog: String::new(), annots: String::new(), objs: Vec::new() }
 }
 
 /// Pages of text lines. Objects: 1 catalog, 2 pages, 3 font, then per page (page, content), then `extra.objs`.
-fn doc_with(pages: &[Vec<&str>], extra: Extra) -> Vec<u8> {
+pub(super) fn doc_with(pages: &[Vec<&str>], extra: Extra) -> Vec<u8> {
     let first_extra = 4 + pages.len() * 2;
     let kids: String = (0..pages.len()).map(|i| format!("{} 0 R ", 4 + i * 2)).collect();
     let mut objs = vec![
@@ -93,11 +93,11 @@ fn doc_with(pages: &[Vec<&str>], extra: Extra) -> Vec<u8> {
     pdf_of(&objs)
 }
 
-fn plain(pages: &[Vec<&str>]) -> Vec<u8> {
+pub(super) fn plain(pages: &[Vec<&str>]) -> Vec<u8> {
     doc_with(pages, no_extra())
 }
 
-fn write(d: &Path, name: &str, bytes: Vec<u8>) -> PathBuf {
+pub(super) fn write(d: &Path, name: &str, bytes: Vec<u8>) -> PathBuf {
     let p = d.join(name);
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).unwrap();
@@ -627,11 +627,11 @@ fn a_document_lists_at_most_the_document_cap_and_says_so() {
 #[test]
 fn an_in_document_search_finishes_while_a_long_folder_search_runs() {
     let d = dir("starve");
-    // 40 files of 150 pages: seconds of work for the folder search.
+    // 150 files of 150 pages: seconds of work for the folder search, even on a fast machine.
     let pages: Vec<Vec<&str>> = (0..150).map(|i| if i % 50 == 0 { vec!["the needle is here"] } else { vec!["nothing at all on this page"] }).collect();
     let bytes = plain(&pages);
     let mut files = Vec::new();
-    for i in 0..40 {
+    for i in 0..150 {
         files.push(write(&d, &format!("f{i:02}.pdf"), bytes.clone()));
     }
     let open = write(&d, "open.pdf", plain(&[vec!["a needle in the open document"], vec!["another needle"]]));

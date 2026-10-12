@@ -272,8 +272,10 @@ fn page_sizes(doc: &PdfDocument) -> Result<Vec<[f32; 2]>> {
     (0..n).map(|p| page_size(doc, p as u32)).collect()
 }
 
+/// From the page dictionary: `load_page` also loads the page's annotations and links, which is
+/// what made a document with many of them slow to size page by page.
 pub(crate) fn page_size(doc: &PdfDocument, p: u32) -> Result<[f32; 2]> {
-    let b = doc.load_page(p as i32)?.bounds()?;
+    let b = doc.pdf_page_bounds(p as i32)?;
     Ok([b.width(), b.height()])
 }
 
@@ -483,6 +485,10 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
             if let Some(labels) = &labels {
                 let _ = crate::organize::labels::after_delete(doc, labels, &pages, n as u32);
             }
+            // Article beads on the deleted pages are unlinked in the same step. As with the labels, a failure
+            // here never undoes the delete: the beads then point at a page that is gone, and the article is
+            // listed as damaged (Delete and Properties still work on it).
+            let _ = crate::organize::threads::after_delete(doc);
             let out = (0..n as u32).filter(|p| pages.binary_search(p).is_err()).map(|p| sizes[p as usize]).collect();
             Ok(Some((out, true)))
         }
@@ -1169,7 +1175,10 @@ pub(crate) fn write_new(target: &Path, bytes: &[u8], pages: u32) -> Result<()> {
     })
 }
 
-fn same_path(a: &str, b: &str) -> bool {
+/// Why a "Save as" that would be a plain save is refused.
+pub(crate) const OWN_FILE: &str = "That is this document's own file. Choose another name, or convert in this document and Save.";
+
+pub(crate) fn same_path(a: &str, b: &str) -> bool {
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p.to_lowercase()));
     a.eq_ignore_ascii_case(b) || canon(a) == canon(b)
 }
@@ -1235,6 +1244,10 @@ impl Engine {
         let changed = ran.and_then(|c| match c {
             None => Ok(None),
             Some((after, drops)) => {
+                // Deleted pages are not left in the embedded search index either.
+                if drops {
+                    crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
+                }
                 let snap = ed.snapshot()?;
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
@@ -1299,7 +1312,28 @@ impl Engine {
         redaction: bool,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, redaction, false, false, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, redaction, false, false, None, |d| Ok((f(d)?, None)))
+    }
+
+    /// [`Engine::apply_custom`] for an edit that may turn out to change nothing: `f` returns the pages
+    /// it touched, or `None` (having changed nothing) and then no step is made and the state is
+    /// returned as it was. `removes`: as [`Engine::apply_removing`].
+    pub fn apply_custom_unless_noop(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        removes: bool,
+        f: impl FnOnce(&mut PdfDocument) -> Result<Option<Vec<u32>>>,
+    ) -> Result<EditState> {
+        let unchanged = std::cell::Cell::new(false);
+        self.custom(id, label, source, false, removes, false, Some(&unchanged), |d| match f(d)? {
+            Some(pages) => Ok((pages, None)),
+            None => {
+                unchanged.set(true);
+                Ok((Vec::new(), None))
+            }
+        })
     }
 
     /// [`Engine::apply_custom`] for an edit that takes content out of the page (editing existing
@@ -1312,7 +1346,7 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, false, true, false, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, false, true, false, None, |d| Ok((f(d)?, None)))
     }
 
     /// [`Engine::apply_removing`] for an edit that takes document-level information out (the
@@ -1326,7 +1360,7 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, false, true, true, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, false, true, true, None, |d| Ok((f(d)?, None)))
     }
 
     /// A redaction whose result is a finished file: `f` changes the document and returns the
@@ -1340,7 +1374,40 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Vec<u8>)>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, true, false, false, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
+        self.custom(id, label, source, true, false, false, None, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
+    }
+
+    /// [`Engine::apply_custom`] and then a save as `to`, under one guard: no other edit, undo or save (an
+    /// assistant turn included) can land between the step and the file. The target must not be the document's
+    /// own file (checked under the guard). The step stands when the save fails: the second result is the
+    /// save's, and the first is the document as it is after the step.
+    pub fn apply_custom_and_save(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        to: &str,
+        f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
+    ) -> Result<(EditState, Result<(EditState, Option<Saved>)>)> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        if same_path(to, &entry.path()) {
+            return Err(EngineError::Invalid(OWN_FILE.into()));
+        }
+        let state = self.custom_locked(&entry, &mut lane, label, source, false, false, false, None, |d| Ok((f(d)?, None)))?;
+        let saved = self.save_locked(id, &entry, &mut lane, Some(to));
+        Ok((state, saved))
+    }
+
+    /// Save as another file: [`Engine::save_recorded`] with the own-file check made under the same guard, so the
+    /// target cannot become the document's own file between the check and the write.
+    pub fn save_as_other(&self, id: DocId, to: &str) -> Result<(EditState, Option<Saved>)> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        if same_path(to, &entry.path()) {
+            return Err(EngineError::Invalid(OWN_FILE.into()));
+        }
+        self.save_locked(id, &entry, &mut lane, Some(to))
     }
 
     /// Runs `f` on the authoritative document (marks included) without changing it. `f` must not
@@ -1360,13 +1427,52 @@ impl Engine {
         redaction: bool,
         removes: bool,
         full: bool,
+        unchanged: Option<&std::cell::Cell<bool>>,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
     ) -> Result<EditState> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
-        let ed = self.lane(&entry, &mut lane)?;
+        let state = self.custom_locked(&entry, &mut lane, label, source, redaction, removes, full, unchanged, f)?;
+        drop(lane);
+        if redaction {
+            if let Some(hook) = REDACTION_HOOK.lock().clone() {
+                hook(id);
+            }
+        }
+        Ok(state)
+    }
+
+    /// [`Engine::custom`] with the edit lane held by the caller (the redaction hook is the caller's to run).
+    #[allow(clippy::too_many_arguments)]
+    fn custom_locked(
+        &self,
+        entry: &DocEntry,
+        lane: &mut Option<Editor>,
+        label: String,
+        source: EditSource,
+        redaction: bool,
+        removes: bool,
+        full: bool,
+        unchanged: Option<&std::cell::Cell<bool>>,
+        f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
+    ) -> Result<EditState> {
+        let ed = self.lane(entry, lane)?;
         let len = ed.step().snap.len;
-        let ran = catch_unwind(AssertUnwindSafe(|| f(&mut ed.doc.doc))).unwrap_or(Err(EngineError::Panic));
+        let page_count = ed.step().sizes.len();
+        let ran = catch_unwind(AssertUnwindSafe(|| {
+            let out = f(&mut ed.doc.doc)?;
+            // An edit that takes content out (pages included, as `drops` below sees them) must not leave it
+            // in the embedded search index.
+            let fewer = ed.doc.doc.page_count().is_ok_and(|n| (n.max(0) as usize) < page_count);
+            if (removes || redaction || fewer) && !unchanged.is_some_and(std::cell::Cell::get) {
+                crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
+            }
+            Ok(out)
+        }))
+        .unwrap_or(Err(EngineError::Panic));
+        if ran.is_ok() && unchanged.is_some_and(std::cell::Cell::get) {
+            return Ok(ed.state(entry));
+        }
         let changed = ran.and_then(|(pages, bytes)| {
             let exact = bytes.is_some();
             let snap = if let Some(b) = bytes {
@@ -1377,7 +1483,7 @@ impl Engine {
             } else {
                 ed.snapshot()?
             };
-            let doc = open_snap(&snap, &entry)?;
+            let doc = open_snap(&snap, entry)?;
             let sizes = Arc::new(page_sizes(&doc.doc)?);
             let drops = removes || sizes.len() < ed.step().sizes.len();
             Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, sizes }, doc))
@@ -1386,17 +1492,10 @@ impl Engine {
             Ok((step, doc)) => {
                 ed.push(step);
                 ed.doc = doc;
-                let state = self.publish(&entry, ed);
-                drop(lane);
-                if redaction {
-                    if let Some(hook) = REDACTION_HOOK.lock().clone() {
-                        hook(id);
-                    }
-                }
-                Ok(state)
+                Ok(self.publish(entry, ed))
             }
             Err(e) => {
-                ed.doc = open_snap(&ed.step().snap, &entry)?;
+                ed.doc = open_snap(&ed.step().snap, entry)?;
                 Err(e)
             }
         }

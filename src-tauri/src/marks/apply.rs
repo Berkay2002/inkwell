@@ -10,7 +10,7 @@ use super::{AddRequest, Background, Bates, Date, Mark, MarkKind, Picture, Rgb, S
 use crate::engine::edit::{open_source, rewrite_opts, write_doc, write_new};
 use crate::engine::{EngineError, Result};
 use crate::textedit::content::{self as cs, Obj};
-use mupdf::pdf::{PdfDocument, PdfObject};
+use mupdf::pdf::{PdfDocument, PdfGraftMap, PdfObject};
 use mupdf::{Buffer, Document, Image};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -432,6 +432,14 @@ fn load_picture(doc: &mut PdfDocument, p: &Picture) -> Result<Loaded> {
 /// Page `index` of `src` as a form XObject of `doc`: its content, with its resources grafted, drawn
 /// in the page's display space (so `/Rotate` and the crop box are honoured).
 fn page_form(doc: &mut PdfDocument, src: &PdfDocument, index: u32) -> Result<Loaded> {
+    let mut map = doc.new_graft_map()?;
+    let (obj, w, h) = display_form(doc, &mut map, src, index)?;
+    Ok(Loaded { obj, size: (w, h), image: false })
+}
+
+/// [`page_form`] with the caller's graft map, so pages of one job share the fonts and images they
+/// have in common. Returns the form and the page's display size.
+pub(crate) fn display_form(doc: &mut PdfDocument, map: &mut PdfGraftMap, src: &PdfDocument, index: u32) -> Result<(PdfObject, f64, f64)> {
     let count = src.page_count()?.max(0) as u32;
     if index >= count {
         return Err(EngineError::BadPage(index));
@@ -446,7 +454,6 @@ fn page_form(doc: &mut PdfDocument, src: &PdfDocument, index: u32) -> Result<Loa
             bytes.push(b'\n');
         }
     }
-    let mut map = doc.new_graft_map()?;
     let mut dict = doc.new_dict()?;
     dict.dict_put("Type", name("XObject")?)?;
     dict.dict_put("Subtype", name("Form")?)?;
@@ -465,9 +472,13 @@ fn page_form(doc: &mut PdfDocument, src: &PdfDocument, index: u32) -> Result<Loa
     if let Some(res) = obj.get_dict_inheritable("Resources")? {
         dict.dict_put("Resources", map.graft_object(&res)?)?;
     }
+    // the page's transparency group, so blending inside the page composes as it did on the page
+    if let Some(group) = obj.get_dict("Group")? {
+        dict.dict_put("Group", map.graft_object(&group)?)?;
+    }
     let buf = Buffer::from_bytes(&bytes)?;
     let form = doc.add_stream(&buf, Some(&dict), false)?;
-    Ok(Loaded { obj: form, size: (view.w, view.h), image: false })
+    Ok((form, view.w, view.h))
 }
 
 /// Draws the picture fitted to the page at `scale`, centred plus `offset`, turned by `rotation`.
@@ -1113,6 +1124,8 @@ fn number_one(input: &str, out: &Path, d: &mut PdfDocument, bates: &Bates, first
     let b = Bates { start: first, ..bates.clone() };
     let req = AddRequest { mark: Mark::Bates(b), pages: (0..pages).collect(), replace: true, date };
     add(d, &req)?;
+    // Replaced stamps are gone from the pages: the embedded search index must not keep their text.
+    crate::search::catalog::embed::drop_if_stale(d)?;
     let bytes = write_doc(d, rewrite_opts(), 1 << 20)?;
     write_new(out, &bytes, pages)?;
     Ok(BatesFile {

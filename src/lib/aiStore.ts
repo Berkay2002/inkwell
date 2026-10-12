@@ -14,6 +14,7 @@ import {
   type AiStatus,
   type Citation,
   type Prepared,
+  type ProviderId,
   type Rect4,
   type Task,
 } from "./ai";
@@ -42,6 +43,8 @@ export interface Msg {
 export interface Chat {
   messages: Msg[];
   prep: Prepared | "loading" | "failed" | null;
+  /** This document's provider; absent = the last one picked (`settings.provider`). */
+  provider?: ProviderId;
   /** Brought back from the document's earlier chats: this many messages are from before, and the assistant
    *  itself no longer remembers them. */
   restored?: number;
@@ -52,6 +55,19 @@ export interface PastChat {
   id: number;
   messages: Msg[];
 }
+
+/** The provider that answers this document. */
+export const providerOf = (s: { chats: Record<number, Chat>; settings: AiSettings }, doc: number): ProviderId =>
+  s.chats[doc]?.provider ?? s.settings.provider;
+
+/** Model and effort the user chose for a provider (null = the provider's own default). */
+export const pickOf = (st: AiSettings, p: ProviderId): { model: string | null; effort: string | null } =>
+  p === "claude" ? { model: st.claudeModel, effort: st.claudeEffort } : { model: st.model, effort: st.effort };
+
+/** Whether the user already agreed to send text to this provider's company. */
+export const consentOf = (st: AiSettings, p: ProviderId) => (p === "claude" ? st.claudeConsent : st.consent);
+
+export type StatusEntry = AiStatus | "loading" | null;
 
 /** The outlined source of the citation the user clicked last. */
 export interface Mark {
@@ -72,7 +88,8 @@ export interface Selection {
 
 interface AiStore {
   open: boolean;
-  status: AiStatus | "loading" | null;
+  /** Per provider: not asked yet (absent), being asked, or what the CLI said. */
+  statuses: Partial<Record<ProviderId, AiStatus | "loading">>;
   settings: AiSettings;
   chats: Record<number, Chat>;
   selection: Selection | null;
@@ -81,7 +98,7 @@ interface AiStore {
   sheet: boolean;
   /** Earlier chats of each document, newest first. */
   past: Record<number, PastChat[]>;
-  /** A question asked before the user agreed to send text to OpenAI. */
+  /** A question asked before the user agreed to send text to the provider. */
   pending: { doc: number; task: Task; label: string } | null;
   /** Text on its way back into a document's composer ("Edit" on a question). */
   draft: { doc: number; text: string; nonce: number } | null;
@@ -91,7 +108,15 @@ interface AiStore {
   setMode: (mode: AiMode) => void;
   cycleMode: () => void;
   setSheet: (sheet: boolean) => void;
-  refreshStatus: () => void;
+  /** Asks the provider's CLI again (default: the active document's provider). */
+  refreshStatus: (provider?: ProviderId) => void;
+  /** The `claude` the user picked (kept by Rust, never sent from here); null while Inkwell finds it itself. */
+  claudePath: string | null;
+  /** Opens the file dialog for `claude`. Resolves to why a file was refused, or null (chosen or closed). */
+  pickClaudePath: () => Promise<string | null>;
+  clearClaudePath: () => void;
+  /** Gives a document another provider: its chat starts afresh (a thread cannot move between CLIs). */
+  setProvider: (doc: number, provider: ProviderId) => void;
   prepare: (doc: number) => void;
   ask: (doc: number, task: Task, label?: string) => void;
   cancel: (doc: number) => void;
@@ -141,13 +166,13 @@ const pastOf = (messages: Msg[]): PastChat => ({
 });
 
 /** A fresh model thread for the document (the old one is closed, the text read again). */
-function restart(doc: number) {
+function restart(doc: number, provider: ProviderId, prepared?: (prep: Prepared | null) => void) {
   const p: Promise<void> = ai
     .aiClose(doc)
-    .then(() => ai.aiPrepare(doc))
+    .then(() => ai.aiPrepare(doc, provider))
     .then(
-      () => {},
-      () => {},
+      (prep) => prepared?.(prep),
+      () => prepared?.(null),
     );
   resets.set(doc, p);
   void p.then(() => {
@@ -177,7 +202,16 @@ export const useAi = create<AiStore>((set, get) => {
     patchChat(doc, (c) => ({ ...c, messages: [...c.messages, user, bot] }), true);
     held = null;
     set({ mark: null, sheet: true });
-    const model = st.settings.model;
+    const provider = providerOf(st, doc);
+    // Codex gets what was picked; Claude only what its own model list offers (a leftover id from
+    // another provider, or an effort the model lacks, falls back to Claude's default).
+    let { model, effort } = pickOf(st.settings, provider);
+    if (provider === "claude") {
+      const s = st.statuses.claude;
+      const known = typeof s === "object" ? s.models.find((m) => m.id === model) : undefined;
+      model = known ? known.id : null;
+      if (!known || !effort || !known.efforts.includes(effort)) effort = null;
+    }
     const start = () => {
       if (unsent.get(doc) === bot.id) unsent.delete(doc);
       // the chat was cleared, switched or stopped while the model thread was being renewed: nothing to ask
@@ -188,11 +222,12 @@ export const useAi = create<AiStore>((set, get) => {
           task,
           name: d.name,
           model,
-          effort: st.settings.effort,
+          effort,
           currentPage: d.currentPage,
           selection: st.selection,
           permissions: st.settings.permissions,
         },
+        provider,
         (e) => {
           // the turn is over: what it changed (if anything) becomes a version history checkpoint
           if (e.kind === "done" || e.kind === "error" || e.kind === "cancelled") void historyCheckpoint(doc).catch(() => {});
@@ -202,6 +237,10 @@ export const useAi = create<AiStore>((set, get) => {
               break;
             case "delta":
               patchMsg(doc, bot.id, (m) => ({ ...m, text: m.text + e.text, phase: "answering" }));
+              break;
+            case "reset":
+              // what streamed so far was a lead-in to a tool call
+              patchMsg(doc, bot.id, (m) => ({ ...m, text: "", phase: "thinking" }));
               break;
             case "activity": {
               const { kind: _kind, ...a } = e;
@@ -233,7 +272,7 @@ export const useAi = create<AiStore>((set, get) => {
               break;
             case "error":
               patchMsg(doc, bot.id, (m) => ({ ...m, activity: settle(m.activity), state: "error", error: e.message, hint: e.hint }));
-              if (e.hint === "login" || e.hint === "install") get().refreshStatus();
+              if (e.hint === "login" || e.hint === "install") get().refreshStatus(provider);
               break;
             case "cancelled":
               patchMsg(doc, bot.id, (m) => ({ ...m, activity: settle(m.activity), state: "cancelled" }));
@@ -269,6 +308,12 @@ export const useAi = create<AiStore>((set, get) => {
     if (get().settings.mode !== "docked") useRedact.getState().setOpen(true);
   };
 
+  /** The provider of the document in front (or the last one picked, with no document open). */
+  const activeProvider = (): ProviderId => {
+    const a = useStore.getState().active;
+    return a != null ? providerOf(get(), a) : get().settings.provider;
+  };
+
   /** Scrolls the document to `page` and outlines `rects` there (`n` is the source badge lit, 0 = none). */
   const reveal = (doc: number, page: number, rects: Rect4[], n: number, msg?: number) => {
     held = null; // a real jump replaces whatever a hover had lit
@@ -278,7 +323,8 @@ export const useAi = create<AiStore>((set, get) => {
 
   return {
     open: false,
-    status: null,
+    statuses: {},
+    claudePath: null,
     settings: ai.loadSettings(),
     chats: {},
     selection: null,
@@ -304,21 +350,53 @@ export const useAi = create<AiStore>((set, get) => {
     cycleMode: () => get().setMode(MODES[(MODES.indexOf(get().settings.mode) + 1) % MODES.length]),
     setSheet: (sheet) => set(sheet ? { sheet } : { sheet, mark: null }),
 
-    refreshStatus: () => {
-      if (get().status === "loading") return;
-      set({ status: "loading" });
-      ai.aiStatus().then(
-        (status) => set({ status }),
-        (e) =>
-          set({ status: { installed: true, loggedIn: false, account: null, plan: null, models: [], error: String(e) } }),
+    refreshStatus: (provider) => {
+      const p = provider ?? activeProvider();
+      if (get().statuses[p] === "loading") return;
+      const put = (status: AiStatus | "loading") => set((s) => ({ statuses: { ...s.statuses, [p]: status } }));
+      put("loading");
+      ai.aiStatus(p).then(put, (e) =>
+        put({ installed: true, loggedIn: false, account: null, plan: null, models: [], error: String(e) }),
       );
+      // which file was picked (Rust restored it at startup)
+      if (p === "claude") void ai.aiClaudePath().then((claudePath) => set({ claudePath }), () => {});
+    },
+
+    pickClaudePath: async () => {
+      try {
+        const picked = await ai.aiPickClaudePath();
+        if (picked) {
+          set({ claudePath: picked });
+          get().refreshStatus("claude");
+        }
+        return null;
+      } catch (e) {
+        return String(e);
+      }
+    },
+    clearClaudePath: () => {
+      set({ claudePath: null });
+      void ai.aiClearClaudePath().then(() => get().refreshStatus("claude"), () => {});
+    },
+
+    setProvider: (doc, provider) => {
+      if (providerOf(get(), doc) === provider) return;
+      if (get().chats[doc]?.messages.some((m) => m.state === "streaming")) return;
+      get().setSettings({ provider }); // the next document starts with it too
+      patchChat(doc, (c) => ({ ...c, provider, messages: [], prep: "loading" }), true);
+      set({ mark: null, pending: get().pending?.doc === doc ? null : get().pending });
+      if (!get().statuses[provider]) get().refreshStatus(provider);
+      // the old provider's session for this document goes; the text is read again for the new one
+      held = null;
+      unsent.delete(doc);
+      restart(doc, provider, (prep) => patchChat(doc, (c) => ({ ...c, prep: prep ?? "failed" })));
     },
 
     prepare: (doc) => {
       const c = get().chats[doc] ?? EMPTY_CHAT;
       if (c.prep && c.prep !== "failed") return; // a failed read is tried again on the next open
       patchChat(doc, (c) => ({ ...c, prep: "loading" }), true);
-      ai.aiPrepare(doc).then(
+      ai.aiPrepare(doc, providerOf(get(), doc)).then(
         (prep) => patchChat(doc, (c) => ({ ...c, prep })),
         () => patchChat(doc, (c) => ({ ...c, prep: "failed" })),
       );
@@ -334,7 +412,7 @@ export const useAi = create<AiStore>((set, get) => {
             : task.kind === "summarizePage"
               ? `Summarize page ${task.page + 1}`
               : `${task.action[0].toUpperCase()}${task.action.slice(1)} the selected text`);
-      if (!get().settings.consent) {
+      if (!consentOf(get().settings, providerOf(get(), doc))) {
         set({ pending: { doc, task, label: text } });
         return;
       }
@@ -369,8 +447,11 @@ export const useAi = create<AiStore>((set, get) => {
       // a fresh thread: the model forgets the conversation (a turn in flight is interrupted)
       held = null;
       unsent.delete(doc);
-      set((s) => ({ chats: { ...s.chats, [doc]: { messages: [], prep: s.chats[doc]?.prep ?? null } }, mark: null }));
-      restart(doc);
+      set((s) => ({
+        chats: { ...s.chats, [doc]: { messages: [], prep: s.chats[doc]?.prep ?? null, provider: s.chats[doc]?.provider } },
+        mark: null,
+      }));
+      restart(doc, providerOf(get(), doc));
     },
 
     newChat: (doc) => {
@@ -389,11 +470,14 @@ export const useAi = create<AiStore>((set, get) => {
       unsent.delete(doc);
       set({
         past: { ...s.past, [doc]: cur.length > 0 ? [pastOf(cur), ...rest] : rest },
-        chats: { ...s.chats, [doc]: { messages: hit.messages, prep: s.chats[doc]?.prep ?? null, restored: hit.messages.length } },
+        chats: {
+          ...s.chats,
+          [doc]: { messages: hit.messages, prep: s.chats[doc]?.prep ?? null, provider: s.chats[doc]?.provider, restored: hit.messages.length },
+        },
         mark: null,
       });
       // the model thread starts over, as for "New chat"
-      restart(doc);
+      restart(doc, providerOf(get(), doc));
     },
 
     closeChat: (doc) => {
@@ -411,8 +495,9 @@ export const useAi = create<AiStore>((set, get) => {
     },
 
     grantConsent: () => {
-      get().setSettings({ consent: true });
       const p = get().pending;
+      const provider = p ? providerOf(get(), p.doc) : get().settings.provider;
+      get().setSettings(provider === "claude" ? { claudeConsent: true } : { consent: true });
       set({ pending: null });
       if (p) run(p.doc, p.task, p.label);
     },

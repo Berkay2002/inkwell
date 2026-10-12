@@ -111,6 +111,8 @@ export interface TileRef {
   ty: number;
   /** The document's edit generation; absent means 0 (never edited). */
   rev?: number;
+  /** A registered print-production view (`prepress_view`): the tile is drawn in its plates; absent is the page as it is. */
+  view?: number;
 }
 
 /**
@@ -143,13 +145,31 @@ export function tilesForRect(
   return out.sort((a, b) => dist(a) - dist(b));
 }
 
-export const tileKeyStr = (doc: number, t: TileRef) => `${doc}/${t.page}/${t.rot}/${t.scale}/${t.tx}/${t.ty}/${t.rev ?? 0}`;
+export const tileKeyStr = (doc: number, t: TileRef) =>
+  `${doc}/${t.page}/${t.rot}/${t.scale}/${t.tx}/${t.ty}/${t.rev ?? 0}${t.view ? `/v${t.view}` : ""}`;
 
 /** CSS transform mapping an unrotated page-space box (points) onto the rotated page at `zoom`. */
 export function pageSpaceTransform(size: Size, rot: Rot, zoom: number): string {
   const [w, h] = size;
   const t = [`translate(0px,0px)`, `translate(${h * zoom}px,0px)`, `translate(${w * zoom}px,${h * zoom}px)`, `translate(0px,${w * zoom}px)`][rot];
   return `${t} rotate(${rot * 90}deg) scale(${zoom})`;
+}
+
+/**
+ * A point of the displayed page (view rotation `rot` applied, origin top left) as the same point in the
+ * page's own space, whose size is `raw`: what a bookmark or a link stores, whatever way the view is turned.
+ */
+export function unrotatePoint(raw: Size, rot: Rot, x: number, y: number): [number, number] {
+  switch (rot) {
+    case 1:
+      return [y, raw[1] - x];
+    case 2:
+      return [raw[0] - x, raw[1] - y];
+    case 3:
+      return [raw[0] - y, x];
+    default:
+      return [x, y];
+  }
 }
 
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));

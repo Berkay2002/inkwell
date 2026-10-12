@@ -475,26 +475,26 @@ fn outline_level(doc: &mut PdfDocument, parent: &PdfObject, nodes: &[OutNode]) -
 }
 
 /// Helvetica as an embedded font, for the contents pages: every character it has.
-struct Face {
-    font: Font,
+pub(super) struct Face {
+    pub(super) font: Font,
 }
 
 impl Face {
-    fn gid(&self, c: char) -> u16 {
+    pub(super) fn gid(&self, c: char) -> u16 {
         let g = self.font.encode_character(c as i32).unwrap_or(0);
         if g > 0 { g as u16 } else { self.font.encode_character('?' as i32).unwrap_or(0).max(0) as u16 }
     }
 
-    fn width(&self, s: &str, size: f32) -> f32 {
+    pub(super) fn width(&self, s: &str, size: f32) -> f32 {
         s.chars().map(|c| self.font.advance_glyph(self.gid(c) as i32).unwrap_or(0.5)).sum::<f32>() * size
     }
 
-    fn hex(&self, s: &str) -> String {
+    pub(super) fn hex(&self, s: &str) -> String {
         s.chars().filter(|c| !c.is_control()).map(|c| format!("{:04x}", self.gid(c))).collect()
     }
 
     /// `s` cut with an ellipsis to fit `max` points.
-    fn fit(&self, s: &str, size: f32, max: f32) -> String {
+    pub(super) fn fit(&self, s: &str, size: f32, max: f32) -> String {
         if self.width(s, size) <= max {
             return s.to_string();
         }

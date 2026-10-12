@@ -320,17 +320,22 @@ fn a_hung_request_replaces_the_server() {
     assert!(a.server_pid().is_none(), "a server that stopped answering must be dropped");
 }
 
+/// An edit (the assistant's own included) must not make it forget the conversation: the thread is
+/// kept, the excerpts it holds are dropped from the books, and the next question says to read again.
 #[test]
-fn an_edited_document_gets_a_new_thread() {
+fn an_edited_document_keeps_the_thread_and_says_the_document_changed() {
     let a = fake("ok");
     assert!(matches!(run(&a, ask_req("one?"), contract_rev(0)).last(), Some(ChatEvent::Done { .. })));
     assert!(matches!(run(&a, ask_req("two?"), contract_rev(1)).last(), Some(ChatEvent::Done { .. })));
-    let client = a.server.lock().unwrap().as_ref().unwrap().client.clone();
-    assert!(wait_for(|| client.stderr_tail().contains("unsubscribed thr-1")), "{}", client.stderr_tail());
+    assert!(matches!(run(&a, ask_req("three?"), contract_rev(1)).last(), Some(ChatEvent::Done { .. })));
     let err = stderr(&a);
-    assert_eq!(err.matches("thread/start").count(), 2, "{err}");
-    // the excerpts go out again on the new thread
-    assert!(err.contains("turn thr-2 turn-2") && err.contains("excerpts=2"), "{err}");
+    assert_eq!(err.matches("thread/start").count(), 1, "{err}");
+    assert!(!err.contains("unsubscribed"), "{err}");
+    assert!(err.contains("turn thr-1 turn-1") && err.contains("changed=false"), "{err}");
+    let second = err.lines().find(|l| l.contains("turn thr-1 turn-2")).unwrap();
+    assert!(second.contains("changed=true"), "{second}");
+    let third = err.lines().find(|l| l.contains("turn thr-1 turn-3")).unwrap();
+    assert!(third.contains("changed=false"), "said once: {third}");
 }
 
 #[cfg(windows)]

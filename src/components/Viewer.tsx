@@ -17,9 +17,11 @@ import {
   visibleRange,
 } from "../lib/layout";
 import { useA11y } from "../lib/a11y";
+import { usePlates } from "../lib/platesView";
 import { usePreflight } from "../lib/preflight";
 import { type Mark, useRedact } from "../lib/redact";
 import { type Want, tileClient } from "../lib/tiles";
+import { setViewPos } from "../lib/viewPos";
 import { type DocState, type Rect4, useStore } from "../store";
 import { PageView } from "./PageView";
 
@@ -69,6 +71,11 @@ export function Viewer({ doc }: { doc: DocState }) {
     anchor.current = at(s.clientHeight / 2, s.clientWidth / 2);
     const top = at(0, 0);
     saved.current = { page: top.page, yPt: top.yPt };
+    // A jump to a page leaves the view PAD px above it, so the top of the view is still in the gap
+    // after the previous page: that is the page "in view", not the bottom of the one before.
+    const next = top.page + 1;
+    const inGap = next < L.tops.length - 1 && L.tops[next] - s.scrollTop <= PAD + 1;
+    setViewPos(cur.current.doc.id, inGap ? { page: next, yPt: 0 } : saved.current);
     return at;
   };
 
@@ -143,6 +150,8 @@ export function Viewer({ doc }: { doc: DocState }) {
     const y = n.y !== undefined && rot === 0 ? n.y * zoom : -PAD;
     const s = el.current!;
     s.scrollTop = layout.tops[n.page] + y;
+    // reading an article: the bead's left edge comes into view (an upright view only, like y)
+    if (n.x !== undefined && rot === 0) s.scrollLeft = (layout.contentWidth - layout.widths[n.page]) / 2 + n.x * zoom - 24;
     track();
   }, [doc.nav, layout, rot, zoom]);
 
@@ -165,6 +174,8 @@ export function Viewer({ doc }: { doc: DocState }) {
   }, [doc.search.hits]);
   const a11yOpen = useA11y((s) => s.open);
   const a11yShown = useA11y((s) => s.docs[id]?.shown) ?? null;
+  // Output Preview: the tiles are drawn in the plates that are switched on.
+  const plateView = usePlates((s) => (s.doc === id ? s.view : null)) ?? undefined;
   const pfOpen = usePreflight((s) => s.open);
   const pfShown = usePreflight((s) => s.docs[id]?.shown) ?? null;
   const redactMarks = useRedact((s) => s.docs[id]?.marks);
@@ -177,13 +188,14 @@ export function Viewer({ doc }: { doc: DocState }) {
 
   const stable = useRef(new Map<number, { sig: string; tiles: TileRef[] }>());
   const keepSame = (page: number, tiles: TileRef[]) => {
-    const sig = tiles.map((t) => `${t.rot}/${t.scale}/${t.tx}/${t.ty}/${t.rev ?? 0}`).join("|");
+    const sig = tiles.map((t) => `${t.rot}/${t.scale}/${t.tx}/${t.ty}/${t.rev ?? 0}/${t.view ?? 0}`).join("|");
     const e = stable.current.get(page);
     if (e?.sig === sig) return e.tiles;
     stable.current.set(page, { sig, tiles });
     return tiles;
   };
 
+  const withView = (t: TileRef): TileRef => (plateView ? { ...t, view: plateView } : t);
   const { tops, heights, widths, contentWidth, total } = layout;
   const vTop = pos.top;
   const vBot = pos.top + vp.h;
@@ -212,10 +224,10 @@ export function Viewer({ doc }: { doc: DocState }) {
                 x1: pos.left + vp.w - left + MARGIN,
                 y0: vTop - tops[i] - MARGIN,
                 y1: vBot - tops[i] + MARGIN,
-              }, rev),
+              }, rev).map(withView),
             )
           : EMPTY;
-      const preview: TileRef = { page: i, rot, scale: previewScaleKey(size), tx: 0, ty: 0, ...(rev ? { rev } : {}) };
+      const preview: TileRef = withView({ page: i, rot, scale: previewScaleKey(size), tx: 0, ty: 0, ...(rev ? { rev } : {}) });
       (i >= vf && i <= vl ? previews : farPreviews).push({ doc: id, tile: preview });
       const d = i < vf ? vf - i : i > vl ? i - vl : 0;
       for (const t of tiles) real.push({ d, w: { doc: id, tile: t } });

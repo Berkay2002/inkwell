@@ -226,6 +226,77 @@
   gap: 8px;
   color: var(--text-2);
 }
+.sr-cats {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sr-cats .sr-status,
+.sr-cats .sr-progress {
+  margin-left: 0;
+  margin-right: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+.sr-cat {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  border-radius: 8px;
+}
+.sr-cat.on {
+  background: var(--accent-soft);
+}
+.sr-catname {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+}
+.sr-stale {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+.sr-newcat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.sr-catinput {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text);
+}
+.sr-note.flush {
+  margin: 0;
+}
+.sr-embed {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0 14px 8px;
+}
 .sr-body {
   flex: 1;
   min-height: 0;
