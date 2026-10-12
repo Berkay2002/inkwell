@@ -1,6 +1,6 @@
 import { memo, useEffect } from "react";
 import { type Rot, type Size, pageSpaceTransform } from "../lib/layout";
-import { followLink, linkHint, useNav } from "../lib/nav";
+import { followLink, isLive, linkHint, pressFeedback, useNav } from "../lib/nav";
 import { useTextEdit } from "../lib/textEdit";
 
 interface Props {
@@ -41,12 +41,13 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
     >
       {listed.links.map((l) => {
         const hint = linkHint(l.target);
-        const live = l.target.kind === "page" || l.target.kind === "uri" || l.target.kind === "file";
+        const live = isLive(l.target);
         return (
           <button
             key={l.id}
             type="button"
             className={live ? "rl-link" : "rl-link idle"}
+            data-press={pressFeedback(l.target, l.highlight)}
             style={{ left: l.rect[0], top: l.rect[1], width: l.rect[2] - l.rect[0], height: l.rect[3] - l.rect[1] }}
             title={hint}
             aria-label={hint}
