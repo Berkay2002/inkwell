@@ -543,6 +543,56 @@ export interface BookmarkEdited {
   count: number;
 }
 
+/** One named destination (src-tauri/src/outline/dests.rs): `name` is its text as shown and what a change names it by. */
+export interface DestEntry {
+  name: string;
+  dest: BookmarkDest;
+  /** Where the name lives; a file that has both shows which. */
+  inDests: boolean;
+  inTree: boolean;
+  /** Only in the name tree while the catalog has `/Dests`: a viewer that reads `/Dests` alone does not find it. */
+  shadowed: boolean;
+  /** A source defines the name more than once. */
+  twice: boolean;
+  /** How many bookmarks, links and actions use it (scripts are not counted). */
+  refs: number;
+  /** The first few users, in words. */
+  usedBy: string[];
+  /** Why a script may use it, when one mentions the name. */
+  maybe: string | null;
+}
+
+export interface DestList {
+  rev: number;
+  items: DestEntry[];
+  /** The catalog has `/Dests` and the name tree has entries too. */
+  both: boolean;
+  /** More names than are read: the list is partial and nothing is changed. */
+  truncated: boolean;
+  /** Why they can't be changed (a shape that is not rewritten), if they can't. */
+  frozen: string | null;
+  /** Certified: why every change is refused. */
+  locked: string | null;
+  signed: boolean;
+  /** What uses a name could not be fully found, so "Remove unused" refuses. */
+  unchecked: boolean;
+}
+
+export type DestOp =
+  | { op: "rename"; name: string; to: string }
+  /** `zoom`: 1 is 100 %; null keeps the reader's. */
+  | { op: "setView"; name: string; page: number; at: [number, number] | null; zoom: number | null }
+  | { op: "delete"; name: string }
+  | { op: "add"; name: string; page: number; at: [number, number] | null; zoom: number | null }
+  | { op: "removeUnused" };
+
+export interface DestEdited {
+  state: EditState;
+  count: number;
+  /** "Remove unused": the names kept in doubt, each with why. */
+  kept: string[];
+}
+
 export interface HeadingPreview {
   count: number;
   levels: number;
@@ -634,6 +684,8 @@ export interface UrlPreview {
 
 export const bookmarksList = (doc: number) => invoke<Bookmarks>("bookmarks_list", { doc });
 export const bookmarksApply = (doc: number, rev: number, op: BookmarkOp) => invoke<BookmarkEdited>("bookmarks_apply", { doc, rev, op });
+export const destsList = (doc: number) => invoke<DestList>("dests_list", { doc });
+export const destsApply = (doc: number, rev: number, op: DestOp) => invoke<DestEdited>("dests_apply", { doc, rev, op });
 export const bookmarksHeadings = (doc: number) => invoke<HeadingPreview>("bookmarks_headings", { doc });
 export const linksList = (doc: number, page: number) => invoke<PageLinks>("links_list", { doc, page });
 export const linksApply = (doc: number, rev: number, op: LinkOp) => invoke<LinkEdited>("links_apply", { doc, rev, op });
