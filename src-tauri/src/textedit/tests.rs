@@ -1690,3 +1690,28 @@ fn a_block_with_a_line_end_hyphen_is_left_alone_unless_a_match_covers_it() {
     assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
     assert!(all_text(&eng, id).starts_with("A famous"), "{}", all_text(&eng, id));
 }
+
+#[test]
+fn a_block_whose_text_and_find_hits_disagree_is_left_alone_and_listed() {
+    let d = dir("replace-uneven");
+    // Find matches "well-known" across the break; the block text, with the hyphen dropped, does not.
+    let two = "BT /F1 12 Tf 72 700 Td (A well-) Tj ET\nBT /F1 12 Tf 72 686 Td (known fox) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[two]));
+    let before = rev(&eng, id);
+    let r = do_replace(&eng, id, &req("well-known", "famous", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count, rev(&eng, id)), (0, 1, before), "{r:?}");
+    assert!(r.skipped[0].reason.contains("reads differently"), "{r:?}");
+}
+
+#[test]
+fn a_whole_word_at_a_block_edge_that_find_does_not_list_is_left_alone() {
+    let d = dir("replace-uneven-edge");
+    // "cat" + "s" on one line: Find reads "cats", the first block's text ends in the whole word "cat".
+    let edge = "BT /F1 12 Tf 72 700 Td (the cat) Tj ET\nBT /F1 12 Tf 108.024 700 Td (s here) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[edge]));
+    let before = rev(&eng, id);
+    let whole = SearchOpts { whole_words: true, ..Default::default() };
+    let r = do_replace(&eng, id, &req("cat", "dog", whole)).unwrap();
+    assert_eq!((r.replaced, r.skipped_count, rev(&eng, id)), (0, 1, before), "{r:?}");
+    assert!(r.skipped[0].reason.contains("reads differently"), "{r:?}");
+}

@@ -223,6 +223,16 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
         }
     };
 
+    // Find and the block's own text can read a block differently (Find matches across a line-end hyphen the
+    // block text has dropped; a whole word at a block's edge on a line that goes on has no hit): the
+    // matches then can't be told apart, and the block is left alone.
+    let mut mine = vec![0usize; blocks.len()];
+    for o in owners.iter().flatten() {
+        mine[*o] += 1;
+    }
+    let uneven = |bi: usize| if found[bi].len() > room { mine[bi] < found[bi].len() } else { mine[bi] != found[bi].len() };
+    const UNEVEN: &str = "the block's text reads differently from what Find lists, so its matches can't be placed";
+
     // The matches to replace, per block.
     let mut plan: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
     match at {
@@ -233,16 +243,21 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
                 }
             }
             for (bi, spans) in found.iter().enumerate() {
-                if spans.is_empty() {
-                    continue;
-                }
                 match blocks[bi].issue {
                     Some(issue) => {
                         for &(a, z) in spans {
                             out.skip(page, text[bi][a..=z].iter().collect(), issue_text(issue));
                         }
                     }
-                    None => plan.push((bi, spans.clone())),
+                    None if uneven(bi) => {
+                        let listed: Vec<&str> = hits.iter().zip(&owners).filter(|(_, o)| **o == Some(bi)).map(|(h, _)| h.text.as_str()).collect();
+                        for i in 0..listed.len().max(spans.len()) {
+                            let t = listed.get(i).map_or_else(|| text[bi][spans[i].0..=spans[i].1].iter().collect(), |t| t.to_string());
+                            out.skip(page, t, UNEVEN);
+                        }
+                    }
+                    None if !spans.is_empty() => plan.push((bi, spans.clone())),
+                    None => {}
                 }
             }
         }
@@ -259,6 +274,10 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             };
             if let Some(issue) = blocks[bi].issue {
                 out.skip(page, h.text.clone(), issue_text(issue));
+                return Ok(false);
+            }
+            if uneven(bi) {
+                out.skip(page, h.text.clone(), UNEVEN);
                 return Ok(false);
             }
             let k = owners[..n].iter().filter(|o| **o == Some(bi)).count();
