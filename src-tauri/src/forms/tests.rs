@@ -1673,8 +1673,14 @@ fn a_catalog_certification_that_allows_no_change_refuses_typing_scripts_resets_a
 
 #[test]
 fn a_certified_document_refuses_every_authoring_step_and_leaves_no_history() {
-    // Certified in the catalog (P 3, the loosest), and on a signature field (P 2).
-    for (name, catalog_p, field_p) in [("catalog", Some(3), None), ("signature", None, Some(2))] {
+    // Certified in the catalog (P 1, 2 and 3, the loosest), and on a signature field (P 2 and 3).
+    for (name, catalog_p, field_p) in [
+        ("catalog", Some(3), None),
+        ("catalog-p1", Some(1), None),
+        ("catalog-p2", Some(2), None),
+        ("signature", None, Some(2)),
+        ("signature-p3", None, Some(3)),
+    ] {
         let (eng, id, _) = script_form(&format!("author-certified-{name}"), &["A", "B"]);
         add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
         script(&eng, id, "A", "C", "event.value = 1;");
