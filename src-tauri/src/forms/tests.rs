@@ -2426,6 +2426,108 @@ fn a_field_duplicated_to_other_pages_is_one_field_with_more_widgets() {
     assert!(!ap_text(&path, "Name", None).is_empty());
 }
 
+/// The raw `/MK /R` and the `/MediaBox` width of the `/P` page of the widget named `name` on `page`.
+fn widget_turn_and_page(path: &str, page: u32, name: &str) -> (Option<i32>, Option<f32>) {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    for w in doc.load_pdf_page(page as i32).unwrap().widgets() {
+        if w.name().unwrap().as_deref() != Some(name) {
+            continue;
+        }
+        let o = w.annotation().object();
+        let r = o.get_dict("MK").unwrap().and_then(|m| m.get_dict("R").unwrap()).and_then(|r| r.as_int().ok());
+        let width = o.get_dict("P").unwrap().and_then(|p| p.get_dict("MediaBox").unwrap()).map(|b| nums(&b)[2]);
+        return (r, width);
+    }
+    panic!("no widget {name} on page {page}")
+}
+
+#[test]
+fn a_duplicate_names_its_page_and_turns_the_widget_with_the_difference_in_page_rotation() {
+    // Page 1 is rotated 90 (612 wide); page 2 is not (200 wide).
+    let (eng, id, path) = rotated_form("layout-dup-rot", &[("Down", [100.0, 100.0, 180.0, 120.0])]);
+    let set_turn = |name: &str, page: u32, r: i32| {
+        eng.apply_custom(id, "mk".into(), EditSource::User, false, |d| {
+            let entries = scan(d)?;
+            let e = entries.iter().find(|e| e.name == name && e.page == page).unwrap();
+            let mut w = d.new_indirect(e.xref, 0)?;
+            let mut mk = d.new_dict()?;
+            mk.dict_put("R", PdfObject::new_int(r)?)?;
+            w.dict_put("MK", mk)?;
+            Ok(vec![page])
+        })
+        .unwrap();
+    };
+    set_turn("Down", 0, 90);
+    let it = items_of(&eng, id, &["Down"])[0];
+    duplicate_one(&eng, id, it, &[1], EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    assert_eq!(widget_turn_and_page(&path, 0, "Down").0, Some(90), "the original is as it was");
+    let (r, width) = widget_turn_and_page(&path, 1, "Down");
+    assert_eq!(r, Some(0), "90 on a page turned 90 is upright; on an unturned page it is 0");
+    assert_eq!(width, Some(200.0), "/P is the page it is on");
+
+    // The other way: from the plain page to the turned one.
+    add1(&eng, id, 1, nf(FieldKind::Text, "Up", [10.0, 10.0, 60.0, 30.0]));
+    set_turn("Up", 1, 0);
+    let up = items_of(&eng, id, &["Up"])[0];
+    duplicate_one(&eng, id, up, &[0], EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    assert_eq!(widget_turn_and_page(&path, 0, "Up"), (Some(90), Some(612.0)));
+}
+
+#[test]
+fn layout_in_page_space_holds_on_every_page_rotation() {
+    // Inside the smaller side of the page as shown (572) whichever way it is turned.
+    const FIT: [(&str, [f32; 4]); 3] =
+        [("A", [50.0, 60.0, 130.0, 80.0]), ("B", [200.0, 200.0, 240.0, 240.0]), ("C", [400.0, 300.0, 480.0, 330.0])];
+    for rot in [0, 90, 180, 270] {
+        let bytes = pdf_of(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [20 30 592 762] /Rotate {rot} /Resources << /Font << /Helv 3 0 R >> >> >>"),
+        ]);
+        let (eng, id, path) = open_bytes(&format!("layout-rot-{rot}"), bytes);
+        for (n, r) in FIT {
+            add1(&eng, id, 0, nf(FieldKind::Text, n, r));
+        }
+        let (abc, ab) = (items_of(&eng, id, &["A", "B", "C"]), items_of(&eng, id, &["A", "B"]));
+        let start = all_rects(&eng, id);
+        // What the page shows: the rectangles come back as they were given, whatever the rotation.
+        for (n, r) in FIT {
+            assert!((0..4).all(|i| near(rect_of_name(&eng, id, n)[i], r[i])), "{rot}: {n}");
+        }
+        align_one(&eng, id, &abc, Edge::Left, EditSource::User).unwrap();
+        for n in ["A", "B"] {
+            assert!(near(rect_of_name(&eng, id, n)[0], 400.0), "{rot}: {n} on the anchor's left edge");
+        }
+        distribute_one(&eng, id, &abc, Axis::Vertical, EditSource::User).unwrap();
+        let (a, b, c) = (rect_of_name(&eng, id, "A"), rect_of_name(&eng, id, "B"), rect_of_name(&eng, id, "C"));
+        assert!(near(b[1] - a[3], c[1] - b[3]), "{rot}: equal gaps {a:?} {b:?} {c:?}");
+        let before = rect_of_name(&eng, id, "A");
+        nudge_one(&eng, id, &ab, 5.0, -3.0, EditSource::User).unwrap();
+        let after = rect_of_name(&eng, id, "A");
+        assert!(near(after[0], before[0] + 5.0) && near(after[1], before[1] - 3.0), "{rot}: nudge right and up as shown {before:?} {after:?}");
+        center_one(&eng, id, &abc, Axis::Both, EditSource::User).unwrap();
+        let bounds = eng.read_custom(id, |d| { let b = d.load_pdf_page(0)?.bounds()?; Ok([b.x0, b.y0, b.x1, b.y1]) }).unwrap();
+        let rs: Vec<[f32; 4]> = ["A", "B", "C"].iter().map(|n| rect_of_name(&eng, id, n)).collect();
+        let x = (rs.iter().map(|r| r[0]).fold(f32::MAX, f32::min) + rs.iter().map(|r| r[2]).fold(f32::MIN, f32::max)) / 2.0;
+        let y = (rs.iter().map(|r| r[1]).fold(f32::MAX, f32::min) + rs.iter().map(|r| r[3]).fold(f32::MIN, f32::max)) / 2.0;
+        assert!(near(x, (bounds[0] + bounds[2]) / 2.0) && near(y, (bounds[1] + bounds[3]) / 2.0), "{rot}: centred in {bounds:?}");
+        let swapped = rot == 90 || rot == 270;
+        assert!(near(bounds[2] - bounds[0], if swapped { 732.0 } else { 572.0 }), "{rot}: the page as shown {bounds:?}");
+        // Saved and reopened with a fresh MuPDF: the same rectangles; undone: the start.
+        let now = all_rects(&eng, id);
+        eng.save(id, None).unwrap();
+        let (eng2, id2) = reopen(&path);
+        assert!(same_rects(&all_rects(&eng2, id2), &now), "{rot}: reopened");
+        for _ in 0..4 {
+            eng.undo(id).unwrap();
+        }
+        assert!(same_rects(&all_rects(&eng, id), &start), "{rot}: undone exactly");
+    }
+}
+
 #[test]
 fn a_duplicated_widget_goes_on_its_own_page_when_pages_share_an_annots_array() {
     let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Shared) /Rect [72 600 200 620] /F 4 /DA (/Helv 0 Tf 0 g) >>";

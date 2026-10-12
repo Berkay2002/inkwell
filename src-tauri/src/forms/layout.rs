@@ -409,14 +409,35 @@ fn into_kids(doc: &mut PdfDocument, e: &Entry) -> Result<PdfObject> {
     Ok(p_ref)
 }
 
-/// A new widget dictionary, added to the document. `field` (the fields keys, written in whole) makes it a field of
-/// its own named `field.0`; without it the widget is a kid and takes them from its parent.
-fn new_widget(doc: &mut PdfDocument, src: &Entry, rect: Rect, parent: &PdfObject, field: Option<&str>) -> Result<PdfObject> {
+/// A new widget dictionary for `page`, added to the document. `field` (the fields keys, written in whole) makes it a
+/// field of its own named `field.0`; without it the widget is a kid and takes them from its parent.
+fn new_widget(doc: &mut PdfDocument, src: &Entry, page: u32, rect: Rect, parent: &PdfObject, field: Option<&str>) -> Result<PdfObject> {
     let mut n = doc.new_dict()?;
-    for k in WIDGET_KEYS {
+    for k in WIDGET_KEYS.into_iter().filter(|k| *k != "MK") {
         if let Some(v) = geti(&src.obj, k) {
             n.dict_put(k, v.clone())?;
         }
+    }
+    let target = doc.find_page(page as i32)?;
+    if target.is_indirect().unwrap_or(false) {
+        n.dict_put("P", target.clone())?;
+    }
+    // The appearance characteristics, as a copy of their own: /R turns the widget relative to the page, so it follows
+    // the difference in rotation between the page it was drawn on and this one (same look on screen).
+    if let Some(mk) = geti(&src.obj, "MK").filter(|m| m.is_dict().unwrap_or(false)) {
+        let mut m = doc.new_dict()?;
+        for kv in mk.dict_iter()? {
+            let (k, v) = kv?;
+            if let Some(key) = text(&k) {
+                m.dict_put(key.as_str(), v)?;
+            }
+        }
+        let turn = page_rotation(doc, page)? - page_rotation(doc, src.page)?;
+        if turn != 0 {
+            let r = (int_of(&mk, "R").unwrap_or(0) + turn).rem_euclid(360);
+            m.dict_put("R", PdfObject::new_int(r)?)?;
+        }
+        n.dict_put("MK", m)?;
     }
     let mut r = doc.new_array()?;
     rect.encode_into(&mut r)?;
@@ -474,6 +495,11 @@ fn put_on_page(doc: &mut PdfDocument, page: u32, w: PdfObject) -> Result<()> {
     Ok(())
 }
 
+/// A page's /Rotate (inherited), as 0, 90, 180 or 270.
+fn page_rotation(doc: &PdfDocument, page: u32) -> Result<i32> {
+    Ok(int_of(&doc.find_page(page as i32)?, "Rotate").unwrap_or(0).rem_euclid(360))
+}
+
 fn fit_inside(r: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
     let (w, h) = (r[2] - r[0], r[3] - r[1]);
     if w > b[2] - b[0] + EPS || h > b[3] - b[1] + EPS {
@@ -524,7 +550,7 @@ pub fn duplicate_to_pages(doc: &mut PdfDocument, item: Item, pages: &[u32]) -> R
     let mut kids = get(&parent, "Kids").ok_or_else(|| bad("the field has no /Kids"))?;
     let mut made = Vec::with_capacity(pages.len());
     for (&pg, rect) in pages.iter().zip(rects) {
-        let w = new_widget(doc, e, rect, &parent, None)?;
+        let w = new_widget(doc, e, pg, rect, &parent, None)?;
         kids.array_push(w.clone())?;
         put_on_page(doc, pg, w.clone())?;
         made.push(w.as_indirect()?);
@@ -609,7 +635,7 @@ pub fn copies(doc: &mut PdfDocument, item: Item, rows: u32, cols: u32, gap_x: f3
     let mut kids = get(&owner, "Kids").ok_or_else(|| bad("the field has no /Kids"))?;
     let mut made = Vec::with_capacity(spots.len());
     for (i, rect) in spots.iter().enumerate() {
-        let n = new_widget(doc, e, *rect, &owner, Some(&(i + 1).to_string()))?;
+        let n = new_widget(doc, e, e.page, *rect, &owner, Some(&(i + 1).to_string()))?;
         kids.array_push(n.clone())?;
         put_on_page(doc, e.page, n.clone())?;
         made.push(n.as_indirect()?);
