@@ -70,6 +70,20 @@ describe("combine sheet", () => {
     await vi.advanceTimersByTimeAsync(300);
   });
 
+  it("a plan keeps the rows it was made for when the list changes while it is pending", async () => {
+    let answer: (p: unknown) => void = () => {};
+    vi.mocked(api.combineInspect).mockReturnValueOnce(new Promise((r) => (answer = r)) as never);
+    useCombine.getState().open([ref("a"), ref("b")]);
+    const [a, b] = useCombine.getState().sheet!.entries.map((e) => e.key);
+    await vi.advanceTimersByTimeAsync(300);
+    useCombine.getState().move(1, 0);
+    answer(plan);
+    await flush();
+    expect(useCombine.getState().sheet!.plan).not.toBeNull();
+    expect(useCombine.getState().sheet!.planKeys).toEqual([a, b]);
+    await vi.advanceTimersByTimeAsync(300);
+  });
+
   it("a page click rewrites the range text", async () => {
     useCombine.getState().open([ref("a")]);
     const e = useCombine.getState().sheet!.entries[0];

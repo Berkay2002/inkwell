@@ -114,6 +114,9 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
   `Error::is_stream_cap()`, not the message text.
 - The form fields of every source bring their `/DR` resources (fonts) along, merged key by key; where two files name
   a font the same, the first one's is kept.
+- A field tree deeper than 64 levels (hostile files only) is cut: the parents are copied up to 64 above each widget, and
+  past that a field becomes a root of its own, so a widget below the cut loses the inherited /FT, /Ff, /V, /DA and the
+  like, and its full name, of the ancestors left behind.
 - A file opened with a password is not remembered between looks (the cache key holds no password), so such a
   file is read again on every look. Combining never writes a source, so signed or certified sources need no
   special handling. A signature field of a source arrives empty (its value and appearance are dropped, the
