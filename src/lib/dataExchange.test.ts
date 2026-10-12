@@ -54,6 +54,7 @@ describe("summary texts", () => {
     expect(formExportText({ count: 4 }, "a.fdf")).toBe("Exported 4 fields to a.fdf.");
     expect(formExportText({ count: 4, leftOut: 1 }, "a.fdf")).toBe("Exported 4 fields to a.fdf. 1 password field left out.");
     expect(formExportText({ count: 4, leftOut: 0, longText: 2 }, "a.fdf")).toBe("Exported 4 fields to a.fdf. 2 fields with a value over 1 MB left out.");
+    expect(formExportText({ count: 4, flattened: 1 }, "a.txt")).toBe("Exported 4 fields to a.txt. 1 value had a tab or line break written as a space: tab text has no quoting.");
   });
 });
 
@@ -134,5 +135,53 @@ describe("export and import", () => {
     await useExchange.getState().importForm(1);
     expect(applyState).not.toHaveBeenCalled();
     expect(setUi).toHaveBeenCalledWith({ error: "This FDF file is damaged, so Inkwell cannot read it." });
+  });
+});
+
+describe("a table file with several records", () => {
+  const formState = { rev: 4, pageCount: 1, sizes: [], path: "C:\\Contract.pdf", dirty: true, undo: "Import form data", redo: null };
+  const summary = { set: 2, unchanged: 0, skipped: [], skippedTotal: 0 };
+  const answers = (records: { count: number; labels: string[] }) =>
+    inv.mockImplementation((cmd: string) =>
+      Promise.resolve(
+        cmd === "data_gates" ? { comments: true, forms: true, signed: false }
+        : cmd === "pick_data_file" ? { token: "f1", path: "C:\\Data\\people.csv" }
+        : cmd === "forms_import_records" ? records
+        : cmd === "forms_import" ? { summary, state: formState, signed: false }
+        : null,
+      ),
+    );
+  const importCall = () => inv.mock.calls.find((c) => c[0] === "forms_import");
+
+  it("asks which record and imports the picked one", async () => {
+    answers({ count: 3, labels: ["Asa Berg", "Side St 2", "Ole Dahl"] });
+    const done = useExchange.getState().importForm(1);
+    await vi.waitFor(() => expect(useExchange.getState().picker).not.toBeNull());
+    expect(useExchange.getState().picker).toEqual({ name: "people.csv", labels: ["Asa Berg", "Side St 2", "Ole Dahl"] });
+    expect(importCall()).toBeUndefined();
+    useExchange.getState().chooseRecord(2);
+    await done;
+    expect(importCall()).toEqual(["forms_import", { doc: 1, file: "f1", row: 2 }]);
+    expect(useExchange.getState().picker).toBeNull();
+    expect(applyState).toHaveBeenCalledWith(1, formState);
+    expect(setUi).toHaveBeenCalledWith({ error: "Imported form data: 2 fields filled." });
+  });
+
+  it("cancelling the question imports nothing", async () => {
+    answers({ count: 3, labels: ["a", "b", "c"] });
+    const done = useExchange.getState().importForm(1);
+    await vi.waitFor(() => expect(useExchange.getState().picker).not.toBeNull());
+    useExchange.getState().chooseRecord(null);
+    await done;
+    expect(importCall()).toBeUndefined();
+    expect(applyState).not.toHaveBeenCalled();
+    expect(useExchange.getState().picker).toBeNull();
+  });
+
+  it("a file with one record, or another format, asks nothing", async () => {
+    answers({ count: 1, labels: [] });
+    await useExchange.getState().importForm(1);
+    expect(importCall()).toEqual(["forms_import", { doc: 1, file: "f1", row: null }]);
+    expect(useExchange.getState().picker).toBeNull();
   });
 });

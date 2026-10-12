@@ -135,17 +135,29 @@ Acrobat Prepare Form's layout tools, in `forms/layout.rs`. Each is one undo step
 - Caps: 1 000 widgets per step, 500 places per grid (the field and its copies), 2 000 pages.
 - Not built: an assistant tool for any of this.
 
-## Form data files: FDF, XFDF and JSON
+## Form data files: FDF, XFDF, JSON, XML, CSV and tab text
 
 Forms panel menu (the three dots) and the command palette: **Export form data…** and **Import form data…**. Code:
-`src-tauri/src/forms/data.rs`, with the caps and the XML and FDF readers in `src-tauri/src/exchange.rs`. The format of an
-export follows the file name (`.fdf`, `.json`, anything else XFDF); an import is told by what is inside, not the name.
+`src-tauri/src/forms/data.rs` and `forms/table.rs` (CSV and tab text), with the caps and the XML, FDF and text-encoding
+readers in `src-tauri/src/exchange.rs`. The format of an export follows the file name (`.fdf`, `.json`, `.csv`,
+`.txt`/`.tsv`/`.tab` for tab text, `.xml`, anything else XFDF); an import is told by what is inside, not the name.
 
 - **Exported:** every text, check box, radio, drop-down and list field by its full name (`Address.Street`), as stored:
   a check box or radio button as its export value or `Off`, a list box that takes several entries as a list, rich text as
   its plain value. Push buttons and signature fields have no value and are not written. JSON is
   `{ "full.name": "value" | ["values"] }`; XFDF nests `<field name>` by the dots; FDF is `/Fields` with `/T` and `/V`.
   Export runs no script.
+- **CSV and tab text:** one header row of full field names and one record row, CRLF line ends, UTF-8 with a byte order
+  mark (so Excel opens it as UTF-8). CSV quotes per RFC 4180 (a comma, a quote or a line break puts the value in
+  quotes, a quote is doubled). Tab text has no quoting, so a tab or line break inside a value is written as a space and
+  the export says how many values that changed. A list box that takes several entries is one cell, its picks joined by
+  `, `; the import splits it again, unless the whole cell is one of the list's entries (an export value that itself
+  contains `, ` cannot round trip).
+- **XML:** plain form data, `<fields><name>value</name>...</fields>`, nested by the dots of the full name
+  (`<Address><Street>…</Street></Address>`). A name that is not a valid element name is written with its characters
+  replaced by `_` and the true name in `xfdf:original` (namespace `http://ns.adobe.com/xfdf-transition/`), which the
+  import reads back. A multi-select list is one element, joined as above. The import takes any root element name and
+  reads the tags with their case.
 - **Imported** as one undo step, through the same set-value path as typing: formats, validation, calculations and
   signature locks apply as they would to a person. Reported and skipped (the summary lists the first few with the
   reason, never a failure of the whole import): a name that is not a field, a value the field cannot take (a choice that
@@ -158,16 +170,33 @@ export follows the file name (`.fdf`, `.json`, anything else XFDF); an import is
 - **The document's own field scripts do run** on an import (keystroke, validate, calculate, format), as they do when a
   person types: the same path, so an import cannot put a value in that typing it would refuse. This is deliberate. The
   file's own `/JavaScript`, `/AA` and `/A` are never read.
+- **Records.** A CSV or tab text file with several rows under the header asks which one to import: a list of the rows,
+  each by its first cell that has text, numbered as a spreadsheet numbers them (the header is row 1); only the picked row
+  is imported (one undo step like every other format). Blank rows and rows of empty cells are not records. An empty
+  cell is a value (it clears the field); a cell the row does not have leaves the field alone. A column Inkwell has no
+  field for is reported like any unknown name; a column named twice (only the first is read), a column with no name and
+  a value past the last column are reported too.
+- **Text files, caps.** UTF-8 with or without a byte order mark, or UTF-16 with one (Excel's "Unicode Text"); anything
+  else (a code page, UTF-16 without a mark, UTF-32, a NUL byte) is refused with that message, never guessed at. The
+  delimiter is the most common of tab, comma and semicolon in the header row (a Swedish-locale spreadsheet writes
+  semicolons). Over 10 000 rows, 10 000 columns, 100 000 cells or 32 MB, or a quote that never closes, refuses the
+  file whole; a cell over 1 MB is that field's skip (as a JSON value is). Tab text is read as it is written: a cell
+  Excel wrapped in quotes keeps the quotes, and a line break inside a cell ends the record. A CSV whose first cell
+  starts with `{`, `<` or `%FDF` is taken for JSON, XML or FDF.
+- **Spreadsheets:** a value that starts with `=`, `+`, `-` or `@` is written as it is; a spreadsheet may treat it as a
+  formula. Export a form from an untrusted source to JSON or XML if that matters.
 - **Never done with a file:** run `/JavaScript` or `/AA`, follow `/F` file references, load a DTD or entities, read
   more than 32 MB, 100 000 values or objects, 64 levels or 1 MB in one string.
 - **Certified documents** take the import when the certification allows form filling (`/P` 2 or 3): values go into
   the fields that exist, and a name the file has that the form lacks is reported, never created. At `/P` 1, or when the
   certification cannot be read, the menu item is off with the reason. Export is always allowed. **Signed** documents
-  take it as an incremental update after the signature, and the summary says so.
+  take it as an incremental update after the signature, and the summary says so. The same holds for CSV, tab text and XML.
 - Known limit: the fields are looked up once at the start of an import, so a field a calculation rewrites later in the
   same import is compared with its earlier value when the file also has a value for it.
 - No file written by Acrobat was available while this was built: the shapes follow ISO 19444-1 and ISO 32000-2
-  section 12.7.8. XML data files (Acrobat's XDP and its plain XML/TXT forms) are not read.
+  section 12.7.8. The CSV, tab text and XML shapes follow what Acrobat's Export Data is described to write (a header row
+  and a value row; elements named by the fields), not a file Acrobat wrote: how Acrobat joins the picks of a list box
+  and names an element that is not a valid name is unverified. XDP (XFA) data files are not read.
 
 ## Later (not built)
 - Signing a signature field (see the Sign task).

@@ -543,3 +543,271 @@ fn many_fields_sharing_one_gray_zone_string_decode_it_once() {
     assert!(p.fields.iter().all(|(_, v)| *v == Val::Text("x".repeat(996_000))));
     assert_eq!(DECODES.with(|d| d.get()), 1);
 }
+
+// ---- CSV, tab text and XML ------------------------------------------------------------------------
+
+/// `form()` with a multi-line "Notes" field and a single-select list box "Single".
+fn table_form(test: &str) -> (Arc<Engine>, DocId) {
+    let (eng, id, _) = form(test);
+    let opts = vec![Opt { export: "se".into(), label: "Sweden".into() }, Opt { export: "no".into(), label: "Norway".into() }];
+    add_one(&eng, id, 0, &nf(FieldKind::Text, "Notes", [72.0, 460.0, 272.0, 500.0]), EditSource::User).unwrap();
+    add_one(&eng, id, 0, &NewField { options: Some(opts), ..nf(FieldKind::List, "Single", [72.0, 510.0, 220.0, 560.0]) }, EditSource::User).unwrap();
+    let w = &dto(&eng, id, "Notes")[0];
+    edit_one(&eng, id, 0, w.xref, &FieldPatch { multiline: Some(true), ..Default::default() }, EditSource::User).unwrap();
+    (eng, id)
+}
+
+const NOTES: &str = "line one\nline, two \"quoted\" \u{e5}\u{e4}\u{f6} \u{4e2d}";
+
+fn fill_table_form(eng: &Engine, id: DocId) {
+    fill_everything(eng, id);
+    set(eng, id, "Address.Street", text("Main St 4, apt 2"));
+    set(eng, id, "Notes", text(NOTES));
+}
+
+fn try_set(eng: &Engine, id: DocId, name: &str, v: FieldValue) -> std::result::Result<EditState, EngineError> {
+    let w = &dto(eng, id, name)[0];
+    set_value_one(eng, id, w.page, w.xref, &v, EditSource::User)
+}
+
+fn put_script(eng: &Engine, id: DocId, name: &str, key: &str, js: &str) {
+    eng.apply_custom(id, "Add script".into(), EditSource::User, false, |d| {
+        let entries = scan(d)?;
+        let e = entries.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no field {name}"));
+        let mut f = e.field.clone();
+        crate::forms::author::put_js(d, &mut f, key, Some(js.to_string()))?;
+        Ok(vec![e.page])
+    })
+    .unwrap();
+}
+
+#[test]
+fn csv_tab_text_and_xml_round_trip_with_a_comma_a_quote_a_newline_and_non_ascii() {
+    for (fmt, ext) in [(Format::Csv, "csv"), (Format::Tab, "tab"), (Format::Xml, "xml")] {
+        let (a, ida) = table_form(&format!("tbl-{ext}-a"));
+        fill_table_form(&a, ida);
+        let (bytes, done) = export(&a, ida, fmt, "a.pdf").unwrap();
+        // The signature and the push button carry no value.
+        assert_eq!(done.count, 9, "{ext}");
+        let text_of = String::from_utf8(bytes.clone()).unwrap();
+        match fmt {
+            Format::Csv => {
+                assert!(text_of.starts_with('\u{FEFF}'), "a spreadsheet needs the BOM to read UTF-8");
+                assert!(text_of.contains("\"Asa <Berg> & \"\"Co\"\""), "RFC 4180 quoting: {text_of}");
+                assert!(text_of.contains("\"Main St 4, apt 2\""), "{text_of}");
+                assert!(text_of.contains("\"line one\nline, two \"\"quoted\"\""), "{text_of}");
+                assert_eq!(done.flattened, 0);
+            }
+            Format::Tab => {
+                // A tab or line break cannot be quoted: it is a space, and the export counts those.
+                assert_eq!(done.flattened, 1, "{ext}");
+                assert_eq!(text_of.lines().count(), 2, "{ext}: one header row and one record row: {text_of:?}");
+            }
+            _ => {
+                assert!(text_of.contains("xfdf:original=\"Full name\""), "{text_of}");
+                assert!(text_of.contains("<Address><Street>Main St 4, apt 2</Street></Address>"), "{text_of}");
+            }
+        }
+        let parsed = parse(&bytes).unwrap();
+        assert_eq!(parsed.fields.len(), 9, "{ext}: {:?}", parsed.fields);
+
+        let (b, idb) = table_form(&format!("tbl-{ext}-b"));
+        let steps = b.history(idb).unwrap().len();
+        let r = import_one(&b, idb, &parsed, EditSource::User).unwrap();
+        assert!(r.summary.skipped.iter().all(|k| k.name == "Frozen") && r.summary.skipped_total <= 1, "{ext}: {:?}", r.summary);
+        assert_eq!(r.summary.set, 7, "{ext}: {:?}", r.summary);
+        assert_eq!(b.history(idb).unwrap().len(), steps + 1, "{ext}: one undo step");
+        let mut want = snapshot(&a, ida);
+        if fmt == Format::Tab {
+            for w in want.iter_mut().filter(|w| w.0 == "Notes") {
+                w.1 = w.1.replace('\n', " ");
+                w.2 = vec![w.1.clone()];
+            }
+        }
+        assert_eq!(snapshot(&b, idb), want, "{ext}");
+        // The same data again changes nothing.
+        assert_eq!(import_one(&b, idb, &parsed, EditSource::User).unwrap().summary.set, 0, "{ext}");
+    }
+}
+
+#[test]
+fn excels_unicode_text_is_read_as_utf16_with_a_bom() {
+    let (eng, id) = table_form("tbl-utf16");
+    for little in [true, false] {
+        let text = "Full name\tAddress.Street\tAgree\tCountry\tPick\tNope\r\nBj\u{f6}rn \u{c5}s\tStorgatan 1\tYes\tse\tse, no\tx\r\n";
+        let mut bytes: Vec<u8> = if little { vec![0xFF, 0xFE] } else { vec![0xFE, 0xFF] };
+        for u in text.encode_utf16() {
+            bytes.extend(if little { u.to_le_bytes() } else { u.to_be_bytes() });
+        }
+        let parsed = parse(&bytes).unwrap();
+        let r = import_one(&eng, id, &parsed, EditSource::User).unwrap();
+        assert_eq!(dto(&eng, id, "Full name")[0].value, "Bj\u{f6}rn \u{c5}s", "little {little}");
+        assert_eq!(dto(&eng, id, "Address.Street")[0].value, "Storgatan 1");
+        assert!(dto(&eng, id, "Agree")[0].checked);
+        assert_eq!(dto(&eng, id, "Pick")[0].values, vec!["se", "no"], "a multi-select list's picks are one cell");
+        // The unknown column is reported, and nothing else is lost.
+        assert!(skipped(&r.summary, "Nope").contains("no field"), "{:?}", r.summary);
+        assert_eq!(r.summary.skipped_total, 1);
+        eng.undo(id).unwrap();
+    }
+}
+
+#[test]
+fn text_that_is_not_utf8_or_utf16_with_a_bom_is_refused() {
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("Latin-1", b"Full name\r\nBj\xF6rn\r\n".to_vec()),
+        ("UTF-16 without a BOM", "Full name\r\nKim\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect()),
+        ("UTF-32", vec![0xFF, 0xFE, 0, 0, b'a', 0, 0, 0]),
+        ("an odd UTF-16 length", vec![0xFF, 0xFE, b'a', 0, b'b']),
+        ("an unpaired surrogate", vec![0xFF, 0xFE, 0x00, 0xD8, b'a', 0]),
+    ];
+    for (what, bytes) in cases {
+        match parse(&bytes) {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("UTF-8") && m.contains("UTF-16"), "{what}: {m}"),
+            other => panic!("{what}: {:?}", other.map(|p| p.fields)),
+        }
+    }
+    // UTF-8 with a BOM is fine.
+    assert_eq!(parse(b"\xEF\xBB\xBFFull name\r\nKim\r\n").unwrap().fields, vec![("Full name".to_string(), Val::Cell("Kim".into()))]);
+}
+
+#[test]
+fn a_file_with_several_records_lists_them_and_imports_the_picked_one() {
+    let (eng, id) = table_form("tbl-rows");
+    let csv = "Full name,Address.Street,Country\r\nAsa Berg,Main St 1,se\r\n,Side St 2,no\r\n\r\n,,\r\nOle Dahl,Hill 3,no\r\n";
+    let r = records(csv.as_bytes()).unwrap();
+    assert_eq!(r.count, 3, "a blank line and a row of empty cells are not records");
+    // The first column, or the first one with text.
+    assert_eq!(r.labels, vec!["Asa Berg", "Side St 2", "Ole Dahl"]);
+    match parse(csv.as_bytes()) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("3 records"), "{m}"),
+        other => panic!("{:?}", other.map(|p| p.fields)),
+    }
+    assert!(parse_pick(csv.as_bytes(), Some(3)).is_err());
+    let p = parse_pick(csv.as_bytes(), Some(2)).unwrap();
+    import_one(&eng, id, &p, EditSource::User).unwrap();
+    assert_eq!(dto(&eng, id, "Full name")[0].value, "Ole Dahl");
+    assert_eq!(dto(&eng, id, "Country")[0].value, "no");
+    // A one-record file needs no pick, and every other format is one record.
+    assert_eq!(records(b"A,B\r\n1,2\r\n").unwrap(), Records { count: 1, labels: vec![] });
+    assert_eq!(parse(b"A,B\r\n1,2\r\n").unwrap().fields.len(), 2);
+    assert_eq!(records(br#"{"A": "1"}"#).unwrap().count, 1);
+}
+
+#[test]
+fn csv_reading_edge_cases() {
+    let cells = |s: &str| -> Vec<(String, Val)> { parse(s.as_bytes()).unwrap().fields };
+    // Semicolons (a spreadsheet in a Swedish locale), quotes, a line break and a doubled quote inside one.
+    assert_eq!(cells("A;B\n\"x;y\";\"say \"\"hi\"\"\nthere\"\n"), vec![("A".into(), Val::Cell("x;y".into())), ("B".into(), Val::Cell("say \"hi\"\nthere".into()))]);
+    // No quoting in tab text: a quote stays where it is.
+    assert_eq!(cells("A\tB\n\"x\ty\"\t5\n"), vec![("A".into(), Val::Cell("\"x".into())), ("B".into(), Val::Cell("y\"".into()))]);
+    // A short row leaves the field alone; an empty cell is a value.
+    let p = parse(b"A,B,C\n1,,\n").unwrap();
+    assert_eq!(p.fields.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["A", "B", "C"]);
+    assert_eq!(parse(b"A,B,C\n1\n").unwrap().fields.len(), 1);
+    // A row longer than the header, a column named twice and one with no name are reported, not fatal.
+    let p = parse(b"A,A,,B\n1,2,3,4,5\n").unwrap();
+    assert_eq!(p.fields.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+    assert_eq!(p.over, 3, "{:?}", p.left_out);
+    assert!(p.left_out.iter().any(|(_, why)| why.contains("twice")) && p.left_out.iter().any(|(_, why)| why.contains("no name")));
+    // A header and no values, an empty file, a quote that never closes.
+    for (what, file) in [("header only", "A,B\r\n"), ("empty", ""), ("blank", "\r\n\r\n"), ("open quote", "A,B\r\n1,\"2\r\n")] {
+        assert!(matches!(parse(file.as_bytes()), Err(EngineError::Invalid(_))), "{what}");
+    }
+    // Over the caps: too many rows, too many columns, too many cells, one cell over 1 MB.
+    let rows = format!("A\n{}", "x\n".repeat(table::MAX_ROWS + 1));
+    assert!(matches!(parse(rows.as_bytes()), Err(EngineError::Invalid(m)) if m.contains("rows")));
+    let cols = format!("{}\n{}\n", vec!["c"; MAX_ITEMS + 1].join(","), vec!["v"; MAX_ITEMS + 1].join(","));
+    assert!(matches!(parse(cols.as_bytes()), Err(EngineError::Invalid(m)) if m.contains("columns")));
+    let cells_over = format!("{}\n{}", vec!["c"; 1000].join(","), vec!["v"; 1000].join(",") + &("\n".to_string() + &vec!["v"; 1000].join(",")).repeat(MAX_NODES / 1000));
+    assert!(matches!(parse(cells_over.as_bytes()), Err(EngineError::Invalid(m)) if m.contains("cells")));
+    let long = format!("A,B\n{},x\n", "y".repeat(MAX_STR + 5));
+    let p = parse(long.as_bytes()).unwrap();
+    assert_eq!(p.fields[0].1, Val::Invalid("the value is longer than 1 MB"));
+    assert_eq!(p.fields[1].1, Val::Cell("x".into()));
+    // A quote that never closes in a 30 MB file is refused without copying it.
+    let open = format!("A\n\"{}", "z".repeat(30 << 20));
+    assert!(parse(open.as_bytes()).is_err());
+}
+
+#[test]
+fn plain_xml_is_read_by_the_case_of_its_tags_and_nested_names() {
+    let (eng, id) = table_form("tbl-xml");
+    let xml = "<?xml version=\"1.0\"?>\n<fields xmlns:xfdf=\"http://ns.adobe.com/xfdf-transition/\">\n\
+        <Full_name xfdf:original=\"Full name\">Kim</Full_name>\n<Address><Street>Main St</Street></Address>\n<Agree>Yes</Agree><Unknown>1</Unknown></fields>";
+    let r = import_one(&eng, id, &parse(xml.as_bytes()).unwrap(), EditSource::User).unwrap();
+    assert_eq!(dto(&eng, id, "Full name")[0].value, "Kim");
+    assert_eq!(dto(&eng, id, "Address.Street")[0].value, "Main St");
+    assert!(dto(&eng, id, "Agree")[0].checked);
+    assert!(skipped(&r.summary, "Unknown").contains("no field"));
+    // A file with a DOCTYPE is still refused.
+    assert!(parse(b"<?xml version=\"1.0\"?><!DOCTYPE f [<!ENTITY a \"b\">]><fields><x>&a;</x></fields>").is_err());
+}
+
+#[test]
+fn a_certified_document_takes_csv_only_where_filling_is_allowed() {
+    let csv = b"Full name\r\nKim\r\n";
+    let (eng, id) = table_form("tbl-p1");
+    sign(&eng, id, None, Some(1));
+    let steps = eng.history(id).unwrap().len();
+    match import_one(&eng, id, &parse(csv).unwrap(), EditSource::User) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
+        other => panic!("{:?}", other.map(|r| r.summary)),
+    }
+    assert_eq!(eng.history(id).unwrap().len(), steps);
+    assert!(export(&eng, id, Format::Csv, "a.pdf").is_ok(), "export is always allowed");
+    let (eng, id) = table_form("tbl-p2");
+    sign(&eng, id, None, Some(2));
+    let r = import_one(&eng, id, &parse(csv).unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.set, dto(&eng, id, "Full name")[0].value.as_str()), (1, "Kim"));
+}
+
+#[test]
+fn a_check_box_validate_script_rejects_a_change_and_an_import_reports_it() {
+    let (eng, id) = table_form("tbl-checkbox");
+    put_script(&eng, id, "Agree", "V", "if (event.value !== \"Off\") { app.alert(\"Not yet.\"); event.rc = false; }");
+    let steps = eng.history(id).unwrap().len();
+    let e = try_set(&eng, id, "Agree", FieldValue::Checked(true)).unwrap_err().to_string();
+    assert!(e.contains("Not yet."), "{e}");
+    assert!(!dto(&eng, id, "Agree")[0].checked);
+    assert_eq!(eng.history(id).unwrap().len(), steps, "a rejected change leaves no step");
+    // An import goes the same way: the field is skipped with the script's own message, the rest is filled.
+    let r = import_one(&eng, id, &parse(b"Full name,Agree\r\nKim,Yes\r\n").unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.set, skipped(&r.summary, "Agree")), (1, "Not yet."));
+    assert!(!dto(&eng, id, "Agree")[0].checked);
+    // Turning it off is allowed (event.value is Off), and a script that is fine with it lets it through.
+    put_script(&eng, id, "Agree", "V", "if (event.value === \"Yes\") { event.rc = true; }");
+    try_set(&eng, id, "Agree", FieldValue::Checked(true)).unwrap();
+    assert!(dto(&eng, id, "Agree")[0].checked);
+}
+
+#[test]
+fn a_list_box_keystroke_script_runs_on_a_pick_and_on_import() {
+    let (eng, id) = table_form("tbl-listbox");
+    put_script(&eng, id, "Single", "K", "if (event.value === \"no\") { app.alert(\"Not Norway\"); event.rc = false; } else { this.getField(\"Full name\").value = \"picked \" + event.value; }");
+    try_set(&eng, id, "Single", text("se")).unwrap();
+    assert_eq!(dto(&eng, id, "Single")[0].value, "se");
+    assert_eq!(dto(&eng, id, "Full name")[0].value, "picked se", "the script saw the pick as event.value");
+    let steps = eng.history(id).unwrap().len();
+    let e = try_set(&eng, id, "Single", text("no")).unwrap_err().to_string();
+    assert!(e.contains("Not Norway"), "{e}");
+    assert_eq!(dto(&eng, id, "Single")[0].value, "se", "restored");
+    assert_eq!(eng.history(id).unwrap().len(), steps);
+    let r = import_one(&eng, id, &parse(b"Single,Notes\r\nno,hello\r\n").unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.set, skipped(&r.summary, "Single")), (1, "Not Norway"));
+    // A list box that takes several shows its first pick to a validate script, and may be rejected by it.
+    put_script(&eng, id, "Pick", "V", "if (event.value === \"no\") { event.rc = false; }");
+    assert!(try_set(&eng, id, "Pick", FieldValue::Many(vec!["no".into(), "se".into()])).is_err());
+    try_set(&eng, id, "Pick", FieldValue::Many(vec!["se".into(), "no".into()])).unwrap();
+    assert_eq!(dto(&eng, id, "Pick")[0].values, vec!["se", "no"]);
+}
+
+#[test]
+fn an_af_call_on_a_check_box_or_list_box_does_not_reject_its_value() {
+    // The AF number and mask calls are for text: a stray one on a check box must not make "Off" or "Yes" invalid.
+    let (eng, id) = table_form("tbl-af");
+    put_script(&eng, id, "Agree", "K", "AFNumber_Keystroke(2, 0, 0, 0, \"\", true);");
+    put_script(&eng, id, "Single", "V", "AFRange_Validate(true, 0, true, 10);");
+    try_set(&eng, id, "Agree", FieldValue::Checked(true)).unwrap();
+    try_set(&eng, id, "Single", text("se")).unwrap();
+}

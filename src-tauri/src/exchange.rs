@@ -168,14 +168,24 @@ pub enum Format {
     Xfdf,
     Fdf,
     Json,
+    /// Form data as comma-separated values (one header row, one record row).
+    Csv,
+    /// Form data as tab-delimited text.
+    Tab,
+    /// Form data as plain XML: `<fields><name>value</name>...`.
+    Xml,
 }
 
 impl Format {
-    /// By file extension (the person's choice in the save dialog); anything else is XFDF.
-    pub fn of_path(path: &str, allow_json: bool) -> Format {
+    /// By file extension (the person's choice in the save dialog); anything else is XFDF. `data` is form data, which
+    /// also has JSON, CSV, tab text and XML; comments are XFDF or FDF only.
+    pub fn of_path(path: &str, data: bool) -> Format {
         match std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
             Some("fdf") => Format::Fdf,
-            Some("json") if allow_json => Format::Json,
+            Some("json") if data => Format::Json,
+            Some("csv") if data => Format::Csv,
+            Some("txt" | "tsv" | "tab") if data => Format::Tab,
+            Some("xml") if data => Format::Xml,
             _ => Format::Xfdf,
         }
     }
@@ -191,6 +201,36 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
         b'{' => Some(Format::Json),
         _ => None,
     }
+}
+
+/// What a text data file says, as UTF-8: UTF-8 with or without a byte order mark, or UTF-16 with one (Excel's
+/// "Unicode Text"). An FDF is binary and passes as it is. Anything else is refused: a guess at a code page would
+/// put the wrong letters into a form without a word, and a NUL byte is UTF-16 saved without its mark.
+pub fn utf8_of(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>> {
+    use std::borrow::Cow;
+    let refuse = || bad("This is not a text file Inkwell can read. It takes UTF-8, or UTF-16 with a byte order mark (Excel's \"Unicode Text\"); save it as one of those and try again.");
+    if sniff(bytes) == Some(Format::Fdf) {
+        return Ok(Cow::Borrowed(bytes));
+    }
+    let text: Cow<[u8]> = match bytes {
+        // UTF-32 starts like UTF-16 little endian.
+        [0xFF, 0xFE, 0, 0, ..] | [0, 0, 0xFE, 0xFF, ..] => return Err(refuse()),
+        [0xFF, 0xFE, rest @ ..] | [0xFE, 0xFF, rest @ ..] => {
+            let little = bytes[0] == 0xFF;
+            if rest.len() % 2 != 0 {
+                return Err(refuse());
+            }
+            let units = rest.chunks_exact(2).map(|c| if little { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) });
+            let s: std::result::Result<String, _> = char::decode_utf16(units).collect();
+            Cow::Owned(s.map_err(|_| refuse())?.into_bytes())
+        }
+        [0xEF, 0xBB, 0xBF, rest @ ..] => Cow::Borrowed(rest),
+        _ => Cow::Borrowed(bytes),
+    };
+    if std::str::from_utf8(&text).is_err() || text.contains(&0) {
+        return Err(refuse());
+    }
+    Ok(text)
 }
 
 /// Reads a data file: more than [`MAX_FILE`] bytes (by its length, or by what is really there) is refused.
@@ -215,6 +255,8 @@ pub fn read_capped(path: &str) -> Result<Vec<u8>> {
 pub struct Node {
     /// Local name, lower case (XFDF is read without regard to case and namespace prefix).
     pub name: String,
+    /// Local name as written: plain form data XML names its fields by it.
+    pub tag: String,
     pub attrs: Vec<(String, String)>,
     /// The element's own text, in document order (children's text is not included).
     pub text: String,
@@ -258,7 +300,8 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Node> {
     };
     let make = |e: &quick_xml::events::BytesStart, count: &mut usize| -> Result<Node> {
         tick(count)?;
-        let mut n = Node { name: e.local_name().as_ref().to_ascii_lowercase(), ..Node::default() };
+        let tag = e.local_name().as_ref().to_string();
+        let mut n = Node { name: tag.to_ascii_lowercase(), tag, ..Node::default() };
         for a in e.attributes() {
             tick(count)?;
             let a = a.map_err(|_| err("an attribute is malformed"))?;
@@ -470,6 +513,12 @@ mod tests {
         assert_eq!(Format::of_path("C:\\x\\a.FDF", false), Format::Fdf);
         assert_eq!(Format::of_path("a.json", false), Format::Xfdf);
         assert_eq!(Format::of_path("a.json", true), Format::Json);
+        assert_eq!(Format::of_path("a.CSV", true), Format::Csv);
+        assert_eq!(Format::of_path("a.txt", true), Format::Tab);
+        assert_eq!(Format::of_path("a.xml", true), Format::Xml);
+        // Comments stay XFDF or FDF.
+        assert_eq!(Format::of_path("a.csv", false), Format::Xfdf);
+        assert_eq!(Format::of_path("a.xml", false), Format::Xfdf);
     }
 
     #[test]

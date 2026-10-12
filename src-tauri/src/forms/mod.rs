@@ -28,6 +28,7 @@ pub mod detect;
 pub mod doc_js;
 pub mod js;
 mod layout;
+mod table;
 pub(crate) mod scripts;
 #[cfg(test)]
 mod tests;
@@ -783,7 +784,17 @@ fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec
     let mut changed = Vec::new();
     let value = match e.kind {
         FieldKind::Button | FieldKind::Signature => return Err(bad("this field has no value to fill")),
-        FieldKind::Checkbox | FieldKind::Radio => value.clone(),
+        FieldKind::Radio => value.clone(),
+        FieldKind::Checkbox => {
+            // The scripts see the state the box is going to: its export value, or Off. A script may reject it or
+            // change other fields; what it makes of event.value is not used (the box has two states).
+            if let Some((state, _)) = button_plan(entries, e, value)? {
+                let (_, by_key) = rt.keystroke(e, &state).map_err(bad)?;
+                changed.extend(by_key);
+                changed.extend(rt.validate(e, &state).map_err(bad)?);
+            }
+            value.clone()
+        }
         FieldKind::Text | FieldKind::Combo | FieldKind::List => {
             let strings: Vec<String> = match value {
                 FieldValue::Text(s) => vec![s.clone()],
@@ -801,12 +812,15 @@ fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec
                     return Err(bad(format!("The field [ {} ] holds at most {max} characters", e.name)));
                 }
             }
-            if matches!(e.kind, FieldKind::Text | FieldKind::Combo) {
-                let (kept, by_key) = rt.keystroke(e, &stored).map_err(bad)?;
+            // A list box shows its first pick to the scripts; a script that rewrites it to something that is not an
+            // entry of the list is not followed.
+            let (kept, by_key) = rt.keystroke(e, &stored).map_err(bad)?;
+            let entry = |s: &str| s.is_empty() || options_of(&e.field).iter().any(|o| o.export == s);
+            if e.kind != FieldKind::List || entry(&kept) {
                 stored = kept;
-                changed.extend(by_key);
-                changed.extend(rt.validate(e, &stored).map_err(bad)?);
             }
+            changed.extend(by_key);
+            changed.extend(rt.validate(e, &stored).map_err(bad)?);
             if strings.len() > 1 { FieldValue::Many(strings) } else { FieldValue::Text(stored) }
         }
     };

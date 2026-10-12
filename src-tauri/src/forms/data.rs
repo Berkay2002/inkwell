@@ -1,5 +1,5 @@
-//! Form data to and from FDF, XFDF and JSON: Acrobat's Forms > Manage Form Data > Export / Import.
-//! The files are hostile input (see `crate::exchange` for the caps).
+//! Form data to and from FDF, XFDF, JSON, CSV, tab-delimited text and XML: Acrobat's Forms > Manage Form Data >
+//! Export / Import. The files are hostile input (see `crate::exchange` for the caps).
 //!
 //! Export reads each field's `/V` as it is stored (a rich text field's plain value, a check box's
 //! export value or `Off`, every selected entry of a multi-select list) and runs no script. Import goes
@@ -9,6 +9,7 @@
 //! Nothing a script asks for (submit, open a link, print) is acted on, and its alerts are dropped.
 
 use super::scripts::{self, Rt};
+use super::table;
 use super::{
     FieldKind, FieldValue, Entry, bad, field_ff, fill_is_noop, flag, geti, get, on_state, options_of, per_field, rt_of, scan, set_value_rt, text, values_by,
 };
@@ -256,11 +257,51 @@ fn fdf(fields: &[Out], file: &str) -> Vec<u8> {
     out
 }
 
+/// A field's value as one cell of CSV, tab text or XML: the picks of a list box that takes several are joined by
+/// ", " (the import splits them again, unless the whole cell is one of the list's entries).
+fn cell(f: &Out) -> String {
+    f.values.join(", ")
+}
+
+/// A name as an XML element name (letters, digits, `_`, `-`, `.`; not starting with a digit): what it is is kept
+/// in `xfdf:original` whenever it had to change.
+fn xml_name(part: &str) -> String {
+    let mut s: String = part.chars().map(|c| if c.is_alphanumeric() || matches!(c, '_' | '-' | '.') { c } else { '_' }).collect();
+    if !s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') {
+        s.insert(0, '_');
+    }
+    s
+}
+
+/// Plain form data: one element per field, nested by the dots of the full name.
+fn xml_data(fields: &[Out]) -> String {
+    fn walk(part: &str, t: &Tree, o: &mut String, top: bool) {
+        let tag = xml_name(part);
+        let original = if tag == part { String::new() } else { format!(" xfdf:original=\"{}\"", esc(part)) };
+        let _ = write!(o, "<{tag}{original}>");
+        if let Some(f) = t.leaf {
+            o.push_str(&esc(&cell(f)));
+        }
+        for (k, kid) in &t.kids {
+            walk(k, kid, o, false);
+        }
+        let _ = write!(o, "</{tag}>{}", if top { "\n" } else { "" });
+    }
+    let mut o = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<fields xmlns:xfdf=\"http://ns.adobe.com/xfdf-transition/\">\n");
+    for (k, kid) in &tree(fields).kids {
+        walk(k, kid, &mut o, true);
+    }
+    o.push_str("</fields>\n");
+    o
+}
+
 /// What an export wrote.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Exported {
     pub count: usize,
+    /// Tab text: values whose tab or line break was written as a space (the format has no quoting).
+    pub flattened: usize,
     /// Password fields: their values are never written to a file.
     pub left_out: usize,
     /// Fields left out for a value over 1 MB, which a file Inkwell reads cannot hold.
@@ -270,12 +311,22 @@ pub struct Exported {
 /// The file bytes for every field's value. Read-only: allowed on a signed or certified document.
 pub fn export(eng: &Engine, doc: DocId, format: Format, file_name: &str) -> Result<(Vec<u8>, Exported)> {
     let (fields, left_out, long_text) = eng.read_custom(doc, collect)?;
+    let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+    let cells = || fields.iter().map(cell).collect::<Vec<_>>();
+    let mut flattened = 0;
     let bytes = match format {
         Format::Json => json(&fields).into_bytes(),
         Format::Fdf => fdf(&fields, file_name),
         Format::Xfdf => xfdf(&fields, file_name).into_bytes(),
+        Format::Csv => table::csv(&names, &cells()).into_bytes(),
+        Format::Tab => {
+            let (text, n) = table::tab(&names, &cells());
+            flattened = n;
+            text.into_bytes()
+        }
+        Format::Xml => xml_data(&fields).into_bytes(),
     };
-    Ok((bytes, Exported { count: fields.len(), left_out, long_text }))
+    Ok((bytes, Exported { count: fields.len(), flattened, left_out, long_text }))
 }
 
 // ---- parsing the files ---------------------------------------------------------------------------
@@ -285,6 +336,8 @@ pub fn export(eng: &Engine, doc: DocId, format: Format, file_name: &str) -> Resu
 pub enum Val {
     Text(String),
     Many(Vec<String>),
+    /// A cell of CSV, tab text or XML: text, and for a list box that takes several, possibly ", "-joined picks.
+    Cell(String),
     Bool(bool),
     /// Something a field cannot take (a number-less object, a nested list ...); the reason.
     Invalid(&'static str),
@@ -391,6 +444,10 @@ pub fn parse_xfdf(bytes: &[u8]) -> Result<Parsed> {
     if root.name != "xfdf" {
         return Err(bad("This is not an XFDF file."));
     }
+    xfdf_of(&root)
+}
+
+fn xfdf_of(root: &exchange::Node) -> Result<Parsed> {
     let mut out = Parsed::default();
     let Some(fields) = root.child("fields") else { return Ok(out) };
     // Depth is bounded by the reader (64), so recursion here is too. Every name is built from its parent's,
@@ -560,14 +617,118 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
     })
 }
 
-/// A file's field values, by what it is (see [`exchange::sniff`]).
-pub fn parse(bytes: &[u8]) -> Result<Parsed> {
-    match exchange::sniff(bytes) {
-        Some(Format::Xfdf) => parse_xfdf(bytes),
-        Some(Format::Fdf) => parse_fdf(bytes),
-        Some(Format::Json) => parse_json(bytes),
-        None => Err(bad("This is not an XFDF, FDF or JSON file.")),
+/// Plain form data XML: each element is a field named by its tag (or by `xfdf:original` when the name was not a
+/// valid element name), nested by the field tree; an element with no element inside is a field's value.
+fn parse_xml_data(root: &exchange::Node) -> Result<Parsed> {
+    fn walk(n: &exchange::Node, prefix: &str, out: &mut Parsed, b: &Budget) {
+        for f in &n.kids {
+            if b.gone() {
+                return;
+            }
+            let part = f.attr("original").unwrap_or(&f.tag);
+            if prefix.len() + part.len() + usize::from(!prefix.is_empty()) > MAX_STR {
+                let shown: String = prefix.chars().chain(['.']).chain(part.chars()).take(60).collect();
+                out.leave_out(&shown, "the field name is longer than 1 MB");
+                continue;
+            }
+            let name = if prefix.is_empty() { part.to_string() } else { format!("{prefix}.{part}") };
+            if !b.take(name.len()) {
+                return;
+            }
+            if f.kids.is_empty() {
+                if out.fields.len() >= MAX_ITEMS {
+                    out.leave_out(&name, OVER_LIMIT);
+                } else if b.take(name.len() + f.text.len()) {
+                    out.fields.push((name, Val::Cell(f.text.clone())));
+                }
+            } else {
+                walk(f, &name, out, b);
+            }
+        }
     }
+    let mut out = Parsed::default();
+    let budget = Budget::new();
+    walk(root, "", &mut out, &budget);
+    budget.check()?;
+    Ok(out)
+}
+
+/// What the picker of a file with several records lists.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Records {
+    /// 1 for every format but CSV and tab text, which have a row per record.
+    pub count: usize,
+    /// One label per record (its first cell that has text); empty when there is nothing to pick from.
+    pub labels: Vec<String>,
+}
+
+const NOT_A_FILE: &str = "This is not an XFDF, FDF, JSON, XML, CSV or tab-delimited text file.";
+
+/// How many records the file has and how to tell them apart.
+pub fn records(bytes: &[u8]) -> Result<Records> {
+    let bytes = exchange::utf8_of(bytes)?;
+    if exchange::sniff(&bytes).is_some() {
+        return Ok(Records { count: 1, labels: Vec::new() });
+    }
+    let t = table::read(std::str::from_utf8(&bytes).map_err(|_| bad(NOT_A_FILE))?, None)?;
+    Ok(Records { count: t.labels.len(), labels: if t.labels.len() > 1 { t.labels } else { Vec::new() } })
+}
+
+/// A file's field values, by what it is (see [`exchange::sniff`]). `row` is the record of a CSV or tab text file
+/// (0 is the first under the header); a file with several records needs one.
+pub fn parse_pick(bytes: &[u8], row: Option<usize>) -> Result<Parsed> {
+    let bytes = exchange::utf8_of(bytes)?;
+    match exchange::sniff(&bytes) {
+        Some(Format::Xfdf) => {
+            let root = exchange::parse_xml(&bytes)?;
+            if root.name == "xfdf" { xfdf_of(&root) } else { parse_xml_data(&root) }
+        }
+        Some(Format::Fdf) => parse_fdf(&bytes),
+        Some(Format::Json) => parse_json(&bytes),
+        None => parse_table(std::str::from_utf8(&bytes).map_err(|_| bad(NOT_A_FILE))?, row),
+        // `sniff` never says these: they are chosen by the file name when writing.
+        Some(Format::Csv | Format::Tab | Format::Xml) => Err(bad(NOT_A_FILE)),
+    }
+}
+
+pub fn parse(bytes: &[u8]) -> Result<Parsed> {
+    parse_pick(bytes, None)
+}
+
+fn parse_table(text: &str, row: Option<usize>) -> Result<Parsed> {
+    let t = table::read(text, Some(row.unwrap_or(0)))?;
+    let count = t.labels.len();
+    match row {
+        Some(r) if r >= count => return Err(bad(format!("This file has {count} records; record {} is not one of them.", r + 1))),
+        None if count > 1 => return Err(bad(format!("This file has {count} records. Choose the one to import."))),
+        _ => {}
+    }
+    let mut out = Parsed::default();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let cells = t.picked.unwrap_or_default();
+    for (i, name) in t.header.iter().enumerate() {
+        if name.is_empty() {
+            out.leave_out(&format!("column {}", i + 1), "the column has no name");
+            continue;
+        }
+        if name.len() > MAX_STR || !seen.insert(name.as_str()) {
+            out.leave_out(name, if name.len() > MAX_STR { "the field name is longer than 1 MB" } else { "the column name is used twice, only the first one is read" });
+            continue;
+        }
+        // A short row has no cell here: the field is left as it is (an empty cell is a value, a missing one is not).
+        let Some(c) = cells.get(i) else { continue };
+        let val = match c {
+            Some(s) => Val::Cell(s.clone()),
+            None => Val::Invalid("the value is longer than 1 MB"),
+        };
+        out.fields.push((name.clone(), val));
+    }
+    // Values in cells past the header's last column have no name.
+    for _ in t.header.len()..cells.len() {
+        out.leave_out("(no column name)", "a value in a column without a name");
+    }
+    Ok(out)
 }
 
 // ---- import --------------------------------------------------------------------------------------
@@ -619,6 +780,12 @@ fn value_for(entries: &[Entry], e: &Entry, val: &Val) -> std::result::Result<Fie
         }
         Val::Text(s) => vec![s.clone()],
         Val::Many(v) => v.clone(),
+        Val::Cell(s) => {
+            // A list box that takes several is one cell of ", "-joined picks, unless the whole cell is one entry.
+            let many = e.kind == FieldKind::List && flag(field_ff(e), FieldFlags::MULTI_SELECT);
+            let whole = options_of(&e.field).iter().any(|o| o.export == *s || o.label == *s);
+            if many && !whole && s.contains(", ") { s.split(", ").filter(|p| !p.is_empty()).map(str::to_string).collect() } else { vec![s.clone()] }
+        }
     };
     let ff = field_ff(e);
     match e.kind {

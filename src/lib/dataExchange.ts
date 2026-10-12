@@ -7,8 +7,9 @@ import { applyState } from "./edit";
 import { useForms } from "./forms";
 
 /**
- * Comments (XFDF, FDF) and form data (FDF, XFDF, JSON) to and from files: src-tauri/src/annot/xfdf.rs and
- * forms/data.rs. The panels' menus and the command palette call these; every result is one toast.
+ * Comments (XFDF, FDF) and form data (FDF, XFDF, JSON, XML, CSV, tab text) to and from files: src-tauri/src/annot/xfdf.rs
+ * and forms/data.rs. The panels' menus and the command palette call these; every result is one toast. A CSV or tab
+ * text file with several records asks which one first (`picker`, shown by components/forms/RecordPicker.tsx).
  */
 
 export interface CommentsSummary {
@@ -38,8 +39,15 @@ export interface FormImported {
   state: EditState;
   signed: boolean;
 }
+/** What a data file holds: more than one record asks the person which to import (labels are empty for one). */
+export interface FormRecords {
+  count: number;
+  labels: string[];
+}
 export interface FormExported {
   count: number;
+  /** Tab text: values whose tab or line break was written as a space (the format has no quoting). */
+  flattened?: number;
   /** Password fields: their values are never written to a file. */
   leftOut?: number;
   /** Fields left out for a value over 1 MB, which a file Inkwell reads cannot hold. */
@@ -99,7 +107,8 @@ export function commentsExportText(r: CommentsExported, file: string): string {
 export function formExportText(r: FormExported, file: string): string {
   const left = r.leftOut ? ` ${plural(r.leftOut, "password field")} left out.` : "";
   const long = r.longText ? ` ${plural(r.longText, "field")} with a value over 1 MB left out.` : "";
-  return `Exported ${plural(r.count, "field")} to ${file}.${left}${long}`;
+  const flat = r.flattened ? ` ${plural(r.flattened, "value")} had a tab or line break written as a space: tab text has no quoting.` : "";
+  return `Exported ${plural(r.count, "field")} to ${file}.${left}${long}${flat}`;
 }
 
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
@@ -115,7 +124,14 @@ interface Exchange {
   importComments: (doc: number) => Promise<void>;
   exportForm: (doc: number) => Promise<void>;
   importForm: (doc: number) => Promise<void>;
+  /** The data file is a table with several records: the person picks one (null while nothing is asked). */
+  picker: { name: string; labels: string[] } | null;
+  /** The person's answer to `picker`: a record (0 is the first under the header), or null to cancel. */
+  chooseRecord: (row: number | null) => void;
 }
+
+/** Answers the question `picker` shows; one at a time. */
+let answer: ((row: number | null) => void) | null = null;
 
 export const useExchange = create<Exchange>((set, get) => {
   /** Whether an import may go on; a certification that does not allow it says why (nothing is picked or read). */
@@ -139,12 +155,33 @@ export const useExchange = create<Exchange>((set, get) => {
     }
   };
 
-  const importFrom = async <T extends { state: EditState }>(doc: number, kind: "comments" | "forms", cmd: string, done: (r: T) => string, reread: (doc: number) => Promise<void>) => {
+  /** The record of a table file to import: asks when there are several. `undefined` is "cancelled". */
+  const recordOf = async (file: FileRef): Promise<{ row: number | null } | undefined> => {
+    const recs = await invoke<FormRecords>("forms_import_records", { file: file.token });
+    if (recs.count <= 1) return { row: null };
+    const row = await new Promise<number | null>((resolve) => {
+      answer?.(null);
+      answer = resolve;
+      set({ picker: { name: baseName(file.path), labels: recs.labels } });
+    });
+    return row === null ? undefined : { row };
+  };
+
+  const importFrom = async <T extends { state: EditState }>(
+    doc: number,
+    kind: "comments" | "forms",
+    cmd: string,
+    done: (r: T) => string,
+    reread: (doc: number) => Promise<void>,
+    extra?: (file: FileRef) => Promise<Record<string, unknown> | undefined>,
+  ) => {
     try {
       if (!(await mayImport(doc, kind))) return;
       const file = await invoke<FileRef | null>("pick_data_file", { doc });
       if (!file) return;
-      const r = await invoke<T>(cmd, { doc, file: file.token });
+      const more = extra ? await extra(file) : {};
+      if (!more) return;
+      const r = await invoke<T>(cmd, { doc, file: file.token, ...more });
       applyState(doc, r.state);
       await reread(doc);
       toast(done(r));
@@ -155,6 +192,13 @@ export const useExchange = create<Exchange>((set, get) => {
 
   return {
     gates: {},
+    picker: null,
+    chooseRecord: (row) => {
+      const resolve = answer;
+      answer = null;
+      set({ picker: null });
+      resolve?.(row);
+    },
     readGates: async (doc, fresh = false) => {
       const known = get().gates[doc];
       if (known && !fresh) return known;
@@ -172,6 +216,6 @@ export const useExchange = create<Exchange>((set, get) => {
       importFrom<CommentsImported>(doc, "comments", "annot_import", (r) => commentsImportText(r.summary, r.signed), (d) => useAnnot.getState().refresh(d)),
     exportForm: (doc) => exportTo<FormExported>(doc, "form data", "formData", "forms_export", formExportText),
     importForm: (doc) =>
-      importFrom<FormImported>(doc, "forms", "forms_import", (r) => formImportText(r.summary, r.signed), (d) => useForms.getState().refresh(d)),
+      importFrom<FormImported>(doc, "forms", "forms_import", (r) => formImportText(r.summary, r.signed), (d) => useForms.getState().refresh(d), recordOf),
   };
 });
