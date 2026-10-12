@@ -162,6 +162,12 @@ export function countProblems(items: Bookmark[]): number {
 }
 
 /** A short line for a link's target, for lists. */
+/** The `what` the backend gives a destination it cannot check (`UNCHECKED_DEST` in outline/mod.rs). */
+export const UNCHECKED_DEST = "a named destination that cannot be checked";
+
+/** A link whose named destination could not be checked: kept as it is, but a new target may replace it. */
+export const isUnchecked = (t: api.LinkTarget): boolean => t.kind === "other" && t.what === UNCHECKED_DEST;
+
 export function targetLabel(t: api.LinkTarget): string {
   switch (t.kind) {
     case "page":
@@ -173,6 +179,7 @@ export function targetLabel(t: api.LinkTarget): string {
     case "broken":
       return "Missing destination";
     default:
+      if (isUnchecked(t)) return "Named destination, not checked";
       return t.what ? `Action: ${t.what}` : "No target";
   }
 }
@@ -583,6 +590,7 @@ export function linkHint(t: api.LinkTarget): string {
     case "broken":
       return `This link goes nowhere: ${t.what}`;
     default:
+      if (isUnchecked(t)) return "This link goes to a named destination Inkwell cannot check";
       return t.what ? `This link runs an action Inkwell does not follow (${t.what})` : "This link has no target";
   }
 }

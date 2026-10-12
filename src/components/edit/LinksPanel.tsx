@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { linkCheckUrl, linkPickFile, type LinkHighlight, type LinkTarget, type NewLinkTarget, type PageLink } from "../../lib/api";
-import { SIGNED_LINKS, confirmOpen, isProblem, linkLock, linkState, rgbToHex, stateLabel, targetLabel, useNav, viewTarget } from "../../lib/nav";
+import { SIGNED_LINKS, confirmOpen, isProblem, isUnchecked, linkLock, linkState, rgbToHex, stateLabel, targetLabel, useNav, viewTarget } from "../../lib/nav";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
 
@@ -219,7 +219,7 @@ function Selected({ doc, page, link, locked }: { doc: DocState; page: number; li
         <button
           className={change ? "te-btn on" : "te-btn"}
           aria-expanded={change}
-          disabled={t.kind === "other" || locked != null}
+          disabled={(t.kind === "other" && !isUnchecked(t)) || locked != null}
           title={locked ?? undefined}
           onClick={() => setChange(!change)}
         >
@@ -551,7 +551,7 @@ function describe(t: LinkTarget): string {
     case "broken":
       return "Its destination is missing";
     default:
-      return "An action this editor keeps as it is";
+      return isUnchecked(t) ? "Its named destination could not be checked, so it is kept until you change the target" : "An action this editor keeps as it is";
   }
 }
 
