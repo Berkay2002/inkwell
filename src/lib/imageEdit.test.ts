@@ -351,7 +351,7 @@ describe("store", () => {
     await ie.load(1, 0);
     ie.select(1, { page: 0, index: 0 });
     useTextEdit.setState({
-      docs: { 1: { pages: {}, selected: { page: 0, index: 0 }, draft: null, adding: null, notice: null, failed: false } },
+      docs: { 1: { pages: {}, selected: { page: 0, index: 0 }, draft: null, selection: null, adding: null, notice: null, failed: false } },
     });
     expect(st().selected).toBeNull();
 
