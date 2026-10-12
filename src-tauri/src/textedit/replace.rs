@@ -30,6 +30,19 @@ const MAX_WITH: usize = 1000;
 /// Slack when placing a find hit (MuPDF's character boxes) in a block's line boxes, in points.
 const SLACK: f32 = 3.0;
 
+/// What one run may use: its time and its replacements (the defaults are the constants; tests shorten them).
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    pub budget: Duration,
+    pub max: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits { budget: BUDGET, max: MAX_REPLACEMENTS }
+    }
+}
+
 /// The match to replace alone: the page and the first rectangle of the current hit, as Find listed it.
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -108,11 +121,11 @@ fn short(s: &str, n: usize) -> String {
 /// Replaces `req.find` with `req.with` in the document (every match, or the one at `req.at`), as one
 /// undo step. `Stale` when the document has changed since the matches were listed at `rev`.
 pub fn replace(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, source: EditSource) -> Result<Replaced> {
-    replace_within(eng, doc, rev, req, source, BUDGET)
+    replace_within(eng, doc, rev, req, source, Limits::default())
 }
 
-/// [`replace`] with the time it may take given (tests shorten it).
-pub fn replace_within(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, source: EditSource, budget: Duration) -> Result<Replaced> {
+/// [`replace`] with the limits of the run given.
+pub fn replace_within(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, source: EditSource, limits: Limits) -> Result<Replaced> {
     let entry = eng.doc_entry(doc)?;
     let opts = SearchOpts { comments: false, bookmarks: false, fields: false, ..req.opts };
     let q = Query::new(&req.find, opts).ok_or_else(|| invalid("Type the text to find first."))?;
@@ -133,7 +146,7 @@ pub fn replace_within(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, 
             return Err(EngineError::Stale);
         }
         crate::outline::refuse_if_certified(d, "Replacing its text")?;
-        let touched = run(d, &q, &req.with, req.at.as_ref(), &mut out, budget)?;
+        let touched = run(d, &q, &req.with, req.at.as_ref(), &mut out, limits)?;
         Ok((!touched.is_empty()).then_some(touched))
     })?;
     Ok(Replaced {
@@ -152,6 +165,7 @@ pub fn replace_within(eng: &Engine, doc: DocId, rev: u32, req: &ReplaceRequest, 
 struct Clock {
     started: Instant,
     budget: Duration,
+    max: usize,
 }
 
 impl Clock {
@@ -161,14 +175,14 @@ impl Clock {
 }
 
 /// The pages replaced on (0-based).
-fn run(d: &mut PdfDocument, q: &Query, with: &str, at: Option<&ReplaceAt>, out: &mut Outcome, budget: Duration) -> Result<Vec<u32>> {
+fn run(d: &mut PdfDocument, q: &Query, with: &str, at: Option<&ReplaceAt>, out: &mut Outcome, limits: Limits) -> Result<Vec<u32>> {
     let pages = d.page_count()?.max(0) as u32;
     let range = match at {
         Some(a) if a.page >= pages => return Err(EngineError::BadPage(a.page)),
         Some(a) => a.page..a.page + 1,
         None => 0..pages,
     };
-    let clock = Clock { started: Instant::now(), budget };
+    let clock = Clock { started: Instant::now(), budget: limits.budget, max: limits.max };
     let mut touched = Vec::new();
     for page in range {
         if out.stopped.is_some() {
@@ -221,7 +235,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
     let blocks = group_blocks(&pc.lines);
     let m = page_space(d, page)?;
     let boxes: Vec<Vec<[f32; 4]>> = blocks.iter().map(|b| b.lines.iter().map(|&l| rect32(&m, pc.lines[l].rect)).collect()).collect();
-    let room = MAX_REPLACEMENTS.saturating_sub(out.replaced as usize);
+    let room = clock.max.saturating_sub(out.replaced as usize);
     let text: Vec<Vec<char>> = blocks.iter().map(joined).collect();
     let found: Vec<Vec<(usize, usize)>> = text
         .iter()
@@ -322,21 +336,21 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
     // From the last block to the first: an edit can only change the grouping of the lines after it.
     let mut changed = false;
     for (bi, mut spans) in plan.into_iter().rev() {
+        let left = clock.max.saturating_sub(out.replaced as usize);
+        if spans.len() > left {
+            out.stopped = Some(format!("Stopped after {} replacements. Search again to replace the rest.", clock.max));
+            spans.truncate(left);
+        }
+        if spans.is_empty() {
+            break;
+        }
         // Rewriting a block drops its line-end hyphens (the block text joins "well-" "known" as "wellknown"),
-        // so a block that has one is left alone unless a match covers it.
+        // so a block that has one is left alone unless a match, one that is still replaced, covers it.
         if blocks[bi].joins.iter().any(|&h| !spans.iter().any(|&(s, e)| s < h && e >= h)) {
             for &(s, e) in &spans {
                 out.skip(page, text[bi][s..=e].iter().collect(), "a hyphen at the end of a line in the block would be lost");
             }
             continue;
-        }
-        let left = MAX_REPLACEMENTS.saturating_sub(out.replaced as usize);
-        if spans.len() > left {
-            out.stopped = Some(format!("Stopped after {MAX_REPLACEMENTS} replacements. Search again to replace the rest."));
-            spans.truncate(left);
-        }
-        if spans.is_empty() {
-            break;
         }
         // Each block is rewritten whole, so stopping between two is safe (every re-read costs the page's parse).
         if clock.over(out) {

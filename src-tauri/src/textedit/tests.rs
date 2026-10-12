@@ -1380,7 +1380,7 @@ fn a_rise_that_is_not_a_number_the_file_can_hold_is_no_rise() {
 
 // ---- Find & Replace ----------------------------------------------------------------------------
 
-use super::replace::{replace, replace_within, ReplaceAt, ReplaceRequest, Replaced};
+use super::replace::{replace, replace_within, Limits, ReplaceAt, ReplaceRequest, Replaced};
 use crate::search::{Query, SearchOpts};
 
 /// A PDF from whole objects (numbered from 1; object 1 is the catalog).
@@ -1723,7 +1723,7 @@ fn replace_all_stops_between_blocks_when_its_time_is_up() {
     let (eng, id, _) = open(&d, &pages_pdf(&[two]));
     let r = req("cat", "dog", SearchOpts::default());
     // No time at all: the block that was started is done (a run always gets somewhere), then it stops.
-    let first = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, std::time::Duration::ZERO).unwrap();
+    let first = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, Limits { budget: std::time::Duration::ZERO, ..Limits::default() }).unwrap();
     assert_eq!((first.replaced, first.skipped_count), (1, 0), "{first:?}");
     assert!(first.stopped.as_deref().is_some_and(|s| s.starts_with("Stopped at page 1")), "{first:?}");
     assert_eq!(all_text(&eng, id), "first cat second dog");
@@ -1731,4 +1731,22 @@ fn replace_all_stops_between_blocks_when_its_time_is_up() {
     let next = do_replace(&eng, id, &r).unwrap();
     assert_eq!((next.replaced, next.stopped), (1, None));
     assert_eq!(all_text(&eng, id), "first dog second dog");
+}
+
+#[test]
+fn a_block_cut_by_the_cap_is_checked_for_hyphens_after_the_cut() {
+    let d = dir("replace-cap-hyphen");
+    // "lk" at the start, and across the dropped hyphen of "well-" "known": with room for one, only the first
+    // is replaced, and that rewrite would lose the hyphen, so the block is left alone.
+    let two = "BT /F1 12 Tf 72 700 Td (lk well-) Tj ET\nBT /F1 12 Tf 72 686 Td (known) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[two]));
+    let (before, text) = (rev(&eng, id), all_text(&eng, id));
+    let one = Limits { max: 1, ..Limits::default() };
+    let r = replace_within(&eng, id, before, &req("lk", "XX", SearchOpts::default()), EditSource::User, one).unwrap();
+    assert_eq!((r.replaced, r.skipped_count, rev(&eng, id)), (0, 1, before), "{r:?}");
+    assert!(r.stopped.is_some() && r.skipped[0].reason.contains("hyphen"), "{r:?}");
+    assert_eq!(all_text(&eng, id), text);
+    // With room for both, the match across the hyphen covers it and the block is replaced.
+    let r = do_replace(&eng, id, &req("lk", "XX", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (2, 0), "{r:?}");
 }
