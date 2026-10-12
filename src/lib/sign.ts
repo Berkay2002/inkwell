@@ -235,6 +235,10 @@ export function banner(list: SignatureInfo[], error: string | null = null): { to
   return { tone: "valid", text: `Signed. ${all} valid.` };
 }
 
+/** Whether the signature banner is on screen for a document: what `SignBanner` draws it for. */
+export const bannerShown = (d: { sigs: SignatureInfo[]; sigsError: string | null; bannerHidden: boolean } | undefined) =>
+  d != null && !d.bannerHidden && banner(d.sigs, d.sigsError) !== null;
+
 /** One line under the signer: what the signature promises about later changes. */
 export function changeNote(s: SignatureInfo): string {
   if (!s.intact) return "The document was changed after it was signed, or the signature is damaged.";
@@ -328,10 +332,12 @@ export interface DocSign {
   sigsRev: number;
   draft: Draft | null;
   bannerHidden: boolean;
+  /** The banner's height as it is laid out (it wraps in a narrow window), for what sits below it; null when it isn't showing. */
+  bannerHeight: number | null;
   error: string | null;
 }
 
-const fresh = (): DocSign => ({ focus: null, items: [], selected: null, sigs: [], certify: null, refused: null, sigsError: null, sigsRev: -1, draft: null, bannerHidden: false, error: null });
+const fresh = (): DocSign => ({ focus: null, items: [], selected: null, sigs: [], certify: null, refused: null, sigsError: null, sigsRev: -1, draft: null, bannerHidden: false, bannerHeight: null, error: null });
 
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 
@@ -384,6 +390,7 @@ interface SignStore {
   /** Opens the Signatures rail on one signature. */
   showSignature: (doc: number, field: string) => void;
   hideBanner: (doc: number) => void;
+  setBannerHeight: (doc: number, height: number | null) => void;
   /** Signs the draft; `to` is a save token for a document that has no file yet. */
   sign: (doc: number, to: string | null) => Promise<boolean>;
 }
@@ -514,6 +521,9 @@ export const useSign = create<SignStore>((set, get) => {
       set({ rail: "list" });
     },
     hideBanner: (doc) => patch(doc, { bannerHidden: true }),
+    setBannerHeight: (doc, height) => {
+      if ((get().docs[doc]?.bannerHeight ?? null) !== height) patch(doc, { bannerHeight: height });
+    },
     sign: async (doc, to) => {
       const s = get();
       const d = s.get(doc).draft;

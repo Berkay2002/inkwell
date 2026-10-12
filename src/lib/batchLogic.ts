@@ -39,6 +39,11 @@ export const STEP_GROUPS: { id: string; title: string; kinds: BatchStepKind[] }[
 
 export const MAX_STEPS = 24;
 
+/** The steps that work page by page and so take a page range; the others act on the whole file. Mirrors `Step::takes_pages`. */
+export const RANGE_KINDS: ReadonlySet<BatchStepKind> = new Set<BatchStepKind>(["headerFooter", "watermark", "bates", "redact", "ocr", "flattenForms"]);
+
+export const takesPages = (s: BatchStep) => s.kind !== "invalid" && RANGE_KINDS.has(s.kind);
+
 const STYLE: MarkStyle = { family: "helvetica", bold: false, italic: false, size: 12, color: [0, 0, 0], underline: false };
 
 const ALL_ON: BatchSanitize = {
@@ -145,8 +150,14 @@ export function keyMoveTarget(key: string, i: number, n: number): number | null 
   return null;
 }
 
-/** One line for a card or a row: the step's name and its main setting. */
+/** One line for a card or a row: the step's name and its main setting, and its page range when it has one. */
 export function stepLabel(s: BatchStep): string {
+  const base = stepName(s);
+  const pages = s.pages?.trim();
+  return pages ? `${base} (pages ${pages})` : base;
+}
+
+function stepName(s: BatchStep): string {
   switch (s.kind) {
     case "invalid":
       return `Unknown step "${s.name}"`;

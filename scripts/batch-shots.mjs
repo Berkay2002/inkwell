@@ -105,8 +105,8 @@ const mock = `(() => {
         const name = f.path.split("\\\\").pop();
         const stem = name.replace(/\\.pdf$/i, "");
         if (/signed/.test(name) && action.steps.some((s) => s.kind !== "exportText" && s.kind !== "exportImages"))
-          return { index, input: f.path, name, status: "skipped", reason: 'signed: "' + (action.steps[0].kind) + '" would invalidate the signature', steps: [], outputs: [] };
-        return { index, input: f.path, name, status: "ok", reason: null, steps: action.steps.map((s) => s.kind), outputs: [stem + action.output.suffix + ".pdf"] };
+          return { index, input: f.path, name, status: "skipped", reason: 'signed: "' + (action.steps[0].kind) + '" would invalidate the signature', steps: [], prompts: [], outputs: [] };
+        return { index, input: f.path, name, status: "ok", reason: null, steps: action.steps.map((s) => s.kind), prompts: action.steps.flatMap((s, i) => (s.prompt ? [i] : [])), outputs: [stem + action.output.suffix + ".pdf"] };
       });
       return { action: action.name, files: rows, ok: rows.filter((r) => r.status === "ok").length, skipped: rows.filter((r) => r.status === "skipped").length, errors: 0 };
     },
@@ -141,6 +141,7 @@ const mock = `(() => {
       return { action: action.name, files: reports, ok, skipped, errors, cancelled: false, stopped: false };
     },
     batch_cancel: () => {},
+    batch_prompt_answer: () => false,
   };
   let cb = 0;
   window.__TAURI_INTERNALS__ = {

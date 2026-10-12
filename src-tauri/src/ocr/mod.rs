@@ -235,23 +235,39 @@ pub struct Recognition {
 /// Fewer non-space characters than this count as "no text" (a Bates number or a stamp on a scan).
 const MIN_TEXT_CHARS: usize = 12;
 
-/// `"1-3,5,8-"` (one-based, `-` open ends, `,` or `;` separators) to zero-based indices.
-pub fn parse_page_range(spec: &str, page_count: u32) -> Result<Vec<u32>, OcrError> {
+/// The spans of a page range `"1-3,5,8-"` (one-based, `-` open ends, `,` or `;` separators), checked for
+/// syntax only: a span is `(first, last)`, `last` being `None` for an open end (up to the final page). The
+/// page count is not needed, so a range can be checked before any document is at hand.
+pub fn page_spans(spec: &str) -> Result<Vec<(u32, Option<u32>)>, OcrError> {
     let bad = || OcrError::Io(format!("bad page range: {spec}"));
     let mut out = Vec::new();
     for part in spec.split([',', ';']).map(str::trim).filter(|p| !p.is_empty()) {
         let (a, b) = match part.split_once('-') {
             Some((a, b)) => {
                 let a = if a.trim().is_empty() { 1 } else { a.trim().parse::<u32>().map_err(|_| bad())? };
-                let b = if b.trim().is_empty() { page_count } else { b.trim().parse::<u32>().map_err(|_| bad())? };
+                let b = if b.trim().is_empty() { None } else { Some(b.trim().parse::<u32>().map_err(|_| bad())?) };
                 (a, b)
             }
             None => {
                 let n = part.parse::<u32>().map_err(|_| bad())?;
-                (n, n)
+                (n, Some(n))
             }
         };
-        if a == 0 || b < a || b > page_count {
+        if a == 0 || b.is_some_and(|b| b < a) {
+            return Err(bad());
+        }
+        out.push((a, b));
+    }
+    Ok(out)
+}
+
+/// `"1-3,5,8-"` (one-based, `-` open ends, `,` or `;` separators) to zero-based indices.
+pub fn parse_page_range(spec: &str, page_count: u32) -> Result<Vec<u32>, OcrError> {
+    let bad = || OcrError::Io(format!("bad page range: {spec}"));
+    let mut out = Vec::new();
+    for (a, b) in page_spans(spec)? {
+        let b = b.unwrap_or(page_count);
+        if b < a || b > page_count {
             return Err(bad());
         }
         out.extend(a - 1..b);

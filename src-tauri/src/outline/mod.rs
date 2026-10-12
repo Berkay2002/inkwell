@@ -9,10 +9,14 @@
 //! are the viewer's page space (points, origin top left, `/Rotate` applied). See docs/bookmarks-links.md.
 
 pub mod app;
+mod dests;
 mod headings;
+#[cfg(test)]
+mod dests_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
+pub use dests::{DestEdited, DestEntry, DestList, DestOp};
 pub use headings::{HeadingPreview, HeadingRow};
 
 use crate::compress::Dests;
@@ -271,12 +275,17 @@ fn dest_of(doc: &PdfDocument, item: &PdfObject, spaces: &mut HashMap<u32, Option
         }
     }
     let Some(t) = target else { return Dest::None };
-    let Some(found) = dest_array(doc, names, &t) else {
+    where_to(doc, &t, spaces, names)
+}
+
+/// Where the destination `t` (an array, a name or string, a `<< /D … >>`) goes, as the panels judge it.
+pub(crate) fn where_to(doc: &PdfDocument, t: &PdfObject, spaces: &mut HashMap<u32, Option<Matrix>>, names: &mut Names) -> Dest {
+    let Some(found) = dest_array(doc, names, t) else {
         return Dest::Other { what: UNCHECKED_DEST.into() };
     };
     match found.and_then(|arr| page_dest(doc, spaces, &arr)) {
         Some((page, at)) => Dest::Page { page, at },
-        None => Dest::Broken { what: broken_reason(&t) },
+        None => Dest::Broken { what: broken_reason(t) },
     }
 }
 
@@ -295,6 +304,11 @@ pub(crate) fn broken_reason(t: &PdfObject) -> String {
 
 /// `/Dest [page /XYZ x y null]`: `at` is page space; none shows the top left of the page.
 pub(crate) fn dest_object(doc: &PdfDocument, page: u32, at: Option<[f32; 2]>) -> Result<PdfObject> {
+    dest_object_zoomed(doc, page, at, None)
+}
+
+/// [`dest_object`] with the zoom (1.0 is 100 %; none keeps the reader's own).
+pub(crate) fn dest_object_zoomed(doc: &PdfDocument, page: u32, at: Option<[f32; 2]>, zoom: Option<f32>) -> Result<PdfObject> {
     let n = doc.page_count()?;
     if page as i32 >= n {
         return Err(EngineError::BadPage(page));
@@ -315,7 +329,10 @@ pub(crate) fn dest_object(doc: &PdfDocument, page: u32, at: Option<[f32; 2]>) ->
             arr.array_push(PdfObject::new_null())?;
         }
     }
-    arr.array_push(PdfObject::new_null())?;
+    match zoom.filter(|z| z.is_finite() && *z > 0.0) {
+        Some(z) => arr.array_push(PdfObject::new_real(z.min(64.0))?)?,
+        None => arr.array_push(PdfObject::new_null())?,
+    }
     Ok(arr)
 }
 

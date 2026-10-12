@@ -708,6 +708,15 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
     parse_pick(bytes, None, None)
 }
 
+/// The format a form data export file is written in, by its extension. An extension that is not one of the save
+/// dialog's formats is refused rather than written as XFDF under a name that says otherwise.
+pub fn export_format(path: &str) -> Result<Format> {
+    Format::of_ext(path, true).ok_or_else(|| {
+        let name = std::path::Path::new(path).file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        bad(format!("Inkwell cannot write form data to {name}. Name the file .xfdf, .fdf, .json, .csv, .txt or .xml."))
+    })
+}
+
 /// What a data file's name says about the table inside: `Tab` for `.txt`, `.tsv`, `.tab`, `Csv` for `.csv`.
 pub fn table_hint(path: &str) -> Option<Format> {
     Some(Format::of_path(path, true)).filter(|f| matches!(f, Format::Csv | Format::Tab))

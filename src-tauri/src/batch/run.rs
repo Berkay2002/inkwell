@@ -15,8 +15,8 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use super::action::{Action, Issue, OnError, OutputRule, Step};
-use super::steps::{Cx, Env, Outcome, Product, StepError};
+use super::action::{Action, Issue, OnError, OutputRule, Step, StepEntry};
+use super::steps::{Answer, Cx, Env, Outcome, Problem, Product, StepError};
 use crate::convert::Staging;
 use crate::engine::edit::open_source;
 use crate::engine::EngineError;
@@ -93,6 +93,10 @@ pub enum Event {
     FileStarted { index: usize, total: usize, name: String },
     Step { index: usize, step: usize, steps: usize, label: String },
     FileDone { index: usize, report: FileReport },
+    /// The run is waiting for the person: step `step` of file `index` has "prompt user" on. `entry` is the
+    /// step with its saved options (passwords are never part of it); `problem` says why the last answer was
+    /// not accepted. It is answered with `batch_prompt_answer(job, request, ...)`; until then nothing runs.
+    Prompt { request: u64, index: usize, name: String, step: usize, steps: usize, label: String, entry: StepEntry, problem: Option<String> },
     Finished { ok: usize, skipped: usize, errors: usize, cancelled: bool },
 }
 
@@ -127,6 +131,10 @@ pub fn run(
     emit: &mut dyn FnMut(Event),
 ) -> Result<Report, BatchError> {
     precheck(action, files, folder, env, true)?;
+    if env.ask.is_none() && action.steps.iter().any(|s| s.prompt) {
+        // Never run a step the person asked to be shown first, just because nobody can be asked.
+        return Err(BatchError::Input("This action asks before a step, and there is nobody here to ask.".into()));
+    }
 
     let total = files.len();
     emit(Event::Started { files: total });
@@ -175,7 +183,7 @@ pub fn run(
                     r.status = Status::Ok;
                     // Now, not after the run: a cancel or an error later must not leave this file's words in a catalog.
                     if let Some(saved) = &env.saved
-                        && action.steps.iter().any(|s| matches!(s, Step::Redact(_) | Step::Sanitize(_)))
+                        && action.steps.iter().any(|s| matches!(s.step, Step::Redact(_) | Step::Sanitize(_)))
                     {
                         d.outputs.iter().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))).for_each(|p| saved(p));
                     }
@@ -226,6 +234,8 @@ pub struct FilePreview {
     pub reason: Option<String>,
     /// The steps that would run, in order. Empty for a file that would be skipped.
     pub steps: Vec<String>,
+    /// Which of `steps` (by position) stop to ask first. Empty for a file that would be skipped.
+    pub prompts: Vec<usize>,
     /// File and folder names the run would write (the first free names today).
     pub outputs: Vec<String>,
 }
@@ -259,6 +269,7 @@ pub fn preview(action: &Action, files: &[PathBuf], env: &Env) -> Result<Preview,
             status: Status::Ok,
             reason: None,
             steps: Vec::new(),
+            prompts: Vec::new(),
             outputs: Vec::new(),
         };
         let canon = fs::canonicalize(src).unwrap_or_else(|_| src.clone());
@@ -269,7 +280,8 @@ pub fn preview(action: &Action, files: &[PathBuf], env: &Env) -> Result<Preview,
             seen.push(canon);
             match gate(action, env, src) {
                 Ok(()) => {
-                    f.steps = action.steps.iter().map(Step::label).collect();
+                    f.steps = action.steps.iter().map(StepEntry::label).collect();
+                    f.prompts = action.steps.iter().enumerate().filter(|(_, s)| s.prompt).map(|(i, _)| i).collect();
                     let out_dir = match &action.output {
                         OutputRule::Folder { .. } => None,
                         OutputRule::NextToSource { .. } => {
@@ -283,7 +295,7 @@ pub fn preview(action: &Action, files: &[PathBuf], env: &Env) -> Result<Preview,
                         want.push((format!("{base}.pdf"), false));
                     }
                     for s in &action.steps {
-                        match s {
+                        match &s.step {
                             Step::ExportText(_) => want.push((format!("{base}.txt"), false)),
                             Step::ExportImages(_) => want.push((format!("{base} (images)"), true)),
                             _ => {}
@@ -382,7 +394,7 @@ fn gate(action: &Action, env: &Env, src: &Path) -> Result<(), Verdict> {
     // The owner's password is not something a batch has. Without it the file's restrictions are the
     // owner's to change: a result keeps them, and a step that would replace them is refused.
     if sec.encrypted && !sec.unlocked {
-        if action.steps.iter().any(|s| matches!(s, Step::Protect(_))) {
+        if action.steps.iter().any(|s| matches!(s.step, Step::Protect(_))) {
             return Err(Verdict::Skip("its owner password guards its restrictions, and Protect would replace them".into()));
         }
         if !sec.rights.modify && action.first_signature_breaker().is_some() {
@@ -436,18 +448,45 @@ fn process(job: &Job, index: usize, src: &Path, emit: &mut dyn FnMut(Event)) -> 
         products: Vec::new(),
         notes: Vec::new(),
         warnings: Vec::new(),
+        range: String::new(),
+        label: String::new(),
     };
     let mut current = src.to_path_buf();
     let mut wrote = false;
-    for (i, step) in action.steps.iter().enumerate() {
+    for (i, saved) in action.steps.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return Verdict::Cancelled;
         }
-        emit(Event::Step { index, step: i, steps: action.steps.len(), label: step.label() });
-        cx.index = i;
-        let output = stage.path(&format!("step-{i}.pdf"));
         let note_from = cx.notes.len();
-        match step.imp().run(&mut cx, &current, &output) {
+        // "Prompt user": the person sees this step's options for this file and may change them (for this file
+        // only), skip the step, or stop the run. What comes back is checked like the saved step was.
+        let asked;
+        let entry = if saved.prompt {
+            match prompt_step(job, index, &name, i, saved, emit) {
+                Ok(Some(e)) => {
+                    asked = e;
+                    &asked
+                }
+                Ok(None) => {
+                    cx.notes.push("skipped at your request".into());
+                    for n in &mut cx.notes[note_from..] {
+                        *n = format!("{}: {n}", saved.label());
+                    }
+                    job.done.set(i + 1);
+                    continue;
+                }
+                Err(v) => return v,
+            }
+        } else {
+            saved
+        };
+        let label = entry.label();
+        emit(Event::Step { index, step: i, steps: action.steps.len(), label: label.clone() });
+        cx.index = i;
+        cx.range = entry.pages.clone();
+        cx.label = label.clone();
+        let output = stage.path(&format!("step-{i}.pdf"));
+        match entry.step.imp().run(&mut cx, &current, &output) {
             Ok(Outcome::Wrote) => {
                 job.done.set(i + 1);
                 if wrote {
@@ -462,10 +501,10 @@ fn process(job: &Job, index: usize, src: &Path, emit: &mut dyn FnMut(Event)) -> 
             }
             Err(StepError::Cancelled) => return Verdict::Cancelled,
             Err(StepError::Refused(why)) => return Verdict::Skip(why),
-            Err(StepError::Failed(why)) => return Verdict::Error(format!("{}: {why}", step.label())),
+            Err(StepError::Failed(why)) => return Verdict::Error(format!("{label}: {why}")),
         }
         for n in &mut cx.notes[note_from..] {
-            *n = format!("{}: {n}", step.label());
+            *n = format!("{label}: {n}");
         }
     }
     if cancel.load(Ordering::Relaxed) {
@@ -545,6 +584,92 @@ fn process(job: &Job, index: usize, src: &Path, emit: &mut dyn FnMut(Event)) -> 
         None => Some(claimed.iter().map(|c| tree_size(&c.to)).sum()),
     };
     Verdict::Done(Done { outputs, size_after, notes: cx.notes, warnings: cx.warnings, bates_used: cx.bates_used })
+}
+
+/// Ids of prompts: unique over the process, so an answer can never reach a prompt of another run.
+static REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// How often a wait for an answer looks at the cancel flag.
+const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Stops the run and drops the file.
+fn stop_run(cancel: &AtomicBool) -> Verdict {
+    cancel.store(true, Ordering::SeqCst);
+    Verdict::Cancelled
+}
+
+/// Shows `saved` (step `i` of the file `name`) to the person and waits. `Ok(Some(entry))` runs that entry,
+/// `Ok(None)` leaves the step out, an `Err` ends the file (Stop, a cancel, or no answer in time: the run
+/// stops, so a prompt can never hold a job for ever). An answer that is not the same kind of step, or that
+/// does not validate, is not run: the prompt comes again with the reason, and nothing fails open.
+fn prompt_step(job: &Job, index: usize, name: &str, i: usize, saved: &StepEntry, emit: &mut dyn FnMut(Event)) -> Result<Option<StepEntry>, Verdict> {
+    let Job { action, env, cancel, .. } = *job;
+    let Some(ask) = env.ask.as_ref() else {
+        return Err(Verdict::Error("this step asks first, and there is nobody to ask".into()));
+    };
+    let mut shown = saved.clone();
+    let mut problem: Option<String> = None;
+    loop {
+        let request = REQUESTS.fetch_add(1, Ordering::Relaxed);
+        // The way back is open before the person can see the question.
+        let answers = ask(request);
+        emit(Event::Prompt {
+            request,
+            index,
+            name: name.to_string(),
+            step: i,
+            steps: action.steps.len(),
+            label: shown.label(),
+            entry: shown.clone(),
+            problem: problem.take(),
+        });
+        let deadline = Instant::now() + env.prompt_wait;
+        let answer = loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Verdict::Cancelled);
+            }
+            match answers.recv_timeout(POLL) {
+                Ok(a) => break a,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
+                Err(_) => return Err(stop_run(cancel)),
+            }
+        };
+        match answer {
+            Answer::Skip => return Ok(None),
+            Answer::Stop => return Err(stop_run(cancel)),
+            Answer::Continue(mut e) => match checked(env, saved, &mut e) {
+                Ok(()) => return Ok(Some(e)),
+                Err(why) => {
+                    problem = Some(why);
+                    // The person's edits come back for them to fix, unless it was not this step at all.
+                    if std::mem::discriminant(&e.step) == std::mem::discriminant(&saved.step) {
+                        shown = e;
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// An answer's entry against the saved one: the same kind of step (a step cannot be turned into another,
+/// which the file gate did not check), the secrets of the run kept, and the options valid.
+fn checked(env: &Env, saved: &StepEntry, e: &mut StepEntry) -> Result<(), String> {
+    if std::mem::discriminant(&e.step) != std::mem::discriminant(&saved.step) || matches!(e.step, Step::Invalid { .. }) {
+        return Err("That is not the options of this step.".into());
+    }
+    e.prompt = saved.prompt;
+    // Passwords are typed in the run's setup, never in a prompt (the question carries none).
+    if let (Step::Protect(new), Step::Protect(old)) = (&mut e.step, &saved.step) {
+        new.open_password = old.open_password.clone();
+        new.permissions_password = old.permissions_password.clone();
+    }
+    if let Some(m) = e.range_problem() {
+        return Err(m);
+    }
+    match e.step.imp().validate(env) {
+        Ok(()) => Ok(()),
+        Err(Problem::Invalid(m) | Problem::Unavailable(m)) => Err(m),
+    }
 }
 
 struct Claim {

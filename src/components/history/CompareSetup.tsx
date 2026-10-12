@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { pickOpen } from "../../lib/api";
 import { type Source, type VersionInfo, historyPageCount, sourceKey } from "../../lib/history";
-import { type SetupContent, rangeField, setupShow, versionTitle, when } from "../../lib/historyLogic";
+import { type SetupContent, rangeField, sameSides, setupShow, versionTitle, when } from "../../lib/historyLogic";
 import { type CompareReq, useHistory } from "../../lib/historyStore";
 import { useStore } from "../../store";
 import { Icon } from "../Icons";
@@ -45,6 +45,7 @@ export function CompareSetup() {
   const req = useHistory((s) => s.compare)!;
   const versions = useHistory((s) => (req.doc != null ? (s.docs[req.doc]?.versions ?? EMPTY) : EMPTY));
   const docName = useStore((s) => (req.doc != null ? s.docs[req.doc]?.name : undefined));
+  const docPath = useStore((s) => (req.doc != null ? (s.docs[req.doc]?.path ?? null) : null));
   const pageCount = useStore((s) => (req.doc != null ? s.docs[req.doc]?.pageCount : undefined));
   const h = useHistory.getState();
   const [content, setContent] = useState<SetupContent>({ text: true, formatting: true, images: true });
@@ -76,7 +77,7 @@ export function CompareSetup() {
   const chooseFile = async (side: "a" | "b") => {
     try {
       const f = (await pickOpen(false, "compare"))[0];
-      if (f) set(side, { kind: "picked", token: f.token }, baseName(f.path));
+      if (f) set(side, { kind: "picked", token: f.token, path: f.path }, baseName(f.path));
     } catch (e) {
       toast(`Could not pick the file: ${String(e)}`);
     }
@@ -87,12 +88,12 @@ export function CompareSetup() {
   const unset = (side: "a" | "b") => req.doc === null && (side === "a" ? req.a : req.b).kind === "current";
   const none = !Object.values(content).some(Boolean);
   // the same file is fine when the two sides cover different pages
-  const same = sourceKey(req.a) === sourceKey(req.b) && ranges[0].trim() === ranges[1].trim();
+  const same = !rangeBad && sameSides(req.a, req.b, docPath, [fields[0].pages, fields[1].pages], counts);
   const ready = !unset("a") && !unset("b") && !same && !none && !rangeBad;
   const hint = unset("a") || unset("b")
     ? "Choose both files to compare."
     : same
-      ? "Choose two different files, or different pages of one."
+      ? "Both sides are the same pages of the same file"
       : rangeBad
         ? "Fix the page range."
         : none
@@ -135,7 +136,7 @@ export function CompareSetup() {
           <button className="hx-btn" onClick={() => h.closeCompare()}>
             Cancel
           </button>
-          <button className="hx-btn primary hx-go" disabled={!ready} onClick={go}>
+          <button className="hx-btn primary hx-go" disabled={!ready} aria-disabled={!ready} onClick={go}>
             Compare
           </button>
         </div>

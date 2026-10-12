@@ -40,7 +40,7 @@
     "action-wizard": "Runs a saved sequence of tools over files the user picks, and the assistant never handles file paths.",
     "comments-export": "Writes a data file (XFDF or FDF) the user names in a save dialog, and the assistant never handles file paths.",
     "comments-import": "Adds comments from a file the user picks, and the assistant never handles file paths. An import that replaces what the document holds would be destructive: the user's decision.",
-    "forms-export": "Writes form data (FDF, XFDF or JSON) to a file the user names in a save dialog, and the assistant never handles file paths.",
+    "forms-export": "Writes form data (FDF, XFDF, JSON, CSV, tab-delimited text or XML) to a file the user names in a save dialog, and the assistant never handles file paths.",
     "forms-import": "Overwrites form values from a file the user picks, and the assistant never handles file paths. Replacing the values a form holds is destructive: the user's decision.",
     "forms-layout": "Aligning, distributing, sizing, duplicating and renaming form fields is visual authoring in the Forms panel, field by field; the assistant fills fields and does not lay a form out.",
     "custom-stamps": "Opens the manager of the user's own stamp pictures, which are picked from files; the assistant never handles file paths, and a stamp is placed by clicking a spot on the page.",

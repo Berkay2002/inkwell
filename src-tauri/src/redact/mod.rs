@@ -32,7 +32,7 @@ mod sanitize;
 mod tests;
 
 pub use patterns::Pattern;
-pub use sanitize::{Sanitize, SanitizeReport, sanitize};
+pub use sanitize::{Sanitize, SanitizeReport, sanitize, sanitize_pages};
 
 use mupdf::pdf::{
     AnnotationArea, AnnotationQuadPoints, PdfAnnotationType, PdfDocument, PdfObject, PdfPage, PdfRedactImageMethod,
@@ -62,6 +62,9 @@ pub enum RedactError {
     /// A search that was asked to stop.
     #[error("cancelled")]
     Cancelled,
+    /// An option that cannot be done the way it was asked for; nothing was changed by it.
+    #[error("{0}")]
+    Unsupported(&'static str),
 }
 
 type Result<T> = std::result::Result<T, RedactError>;
@@ -429,6 +432,17 @@ fn redact_annots(page: &PdfPage) -> Vec<mupdf::pdf::PdfAnnotation> {
     page.annotations().filter(|a| a.r#type().is_ok_and(|t| t == PdfAnnotationType::Redact)).collect()
 }
 
+/// The pages (zero-based) that carry a pending mark.
+pub fn pages_with_marks(doc: &PdfDocument) -> Result<Vec<u32>> {
+    let mut out = Vec::new();
+    for p in 0..doc.page_count()? {
+        if !redact_annots(&doc.load_pdf_page(p)?).is_empty() {
+            out.push(p as u32);
+        }
+    }
+    Ok(out)
+}
+
 pub fn list_marks(doc: &PdfDocument) -> Result<Vec<Mark>> {
     let mut out = Vec::new();
     for p in 0..doc.page_count()? {
@@ -644,6 +658,9 @@ pub struct ApplyOptions {
     pub images: PdfRedactImageMethod,
     pub line_art: PdfRedactLineArtMethod,
     pub sanitize: Sanitize,
+    /// Pages (zero-based) the page-level sanitize switches are limited to; `None` = every page.
+    /// The marks themselves are always every pending mark of the document.
+    pub pages: Option<Vec<u32>>,
     /// The document's user password, if it has one: the copy is written encrypted as the
     /// original was, and verify needs it to read the copy back.
     pub password: Option<String>,
@@ -655,6 +672,7 @@ impl Default for ApplyOptions {
             images: PdfRedactImageMethod::Pixels,
             line_art: PdfRedactLineArtMethod::RemoveIfCovered,
             sanitize: Sanitize::default(),
+            pages: None,
             password: None,
         }
     }
@@ -726,7 +744,7 @@ pub fn apply(doc: &mut PdfDocument, opts: &ApplyOptions) -> Result<ApplyReport> 
         draw_overlays(doc, pm)?;
     }
 
-    let mut sanitize = sanitize::sanitize(doc, &opts.sanitize, &targets.needles)?;
+    let mut sanitize = sanitize::sanitize_pages(doc, &opts.sanitize, &targets.needles, opts.pages.as_deref())?;
     sanitize.annotations += rep.annotations;
     sanitize.form_fields += rep.form_fields;
     sanitize.metadata += rep.metadata;

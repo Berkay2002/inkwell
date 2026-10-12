@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Change, Comparison, VersionInfo } from "./history";
+import type { Change, Comparison, Source, VersionInfo } from "./history";
 import {
   alignRows,
   categoryCounts,
@@ -20,6 +20,7 @@ import {
   parentOf,
   rangeField,
   rowOf,
+  sameSides,
   stepIndex,
   setupShow,
   summaryChips,
@@ -359,5 +360,43 @@ describe("compare page range field", () => {
     expect(rangeField("1-20000000", 12)).toEqual({ pages: null, error: "This file has 12 pages" });
     expect(rangeField("1-20000000", null)).toEqual({ pages: null, error: "Enter pages like 1-3, 5" });
     expect(rangeField("1-99999999999999999999", null).pages).toBeNull();
+  });
+});
+
+describe("comparing a file with itself", () => {
+  const doc = "C:\\Docs\\Contract.pdf";
+  const pick = (token: string, path?: string): Source => ({ kind: "picked", token, path });
+  const all: [null, null] = [null, null];
+  const unknown: [null, null] = [null, null];
+
+  it("the same path picked twice, or the open document picked again, is the same file", () => {
+    expect(sameSides(pick("t1", doc), pick("t2", "c:/docs/contract.PDF"), doc, all, [5, 5])).toBe(true);
+    expect(sameSides({ kind: "current" }, pick("t1", doc), doc, all, [5, 5])).toBe(true);
+    expect(sameSides({ kind: "current" }, { kind: "current" }, doc, all, unknown)).toBe(true);
+  });
+
+  it("another path or name is another file", () => {
+    expect(sameSides(pick("t1", doc), pick("t2", "C:\\Other\\Contract.pdf"), doc, all, [5, 5])).toBe(false);
+    expect(sameSides({ kind: "current" }, pick("t1", "C:\\Other\\Contract.pdf"), doc, all, [5, 5])).toBe(false);
+  });
+
+  it("a past version against the current file, or against another version, is a comparison", () => {
+    expect(sameSides({ kind: "version", id: "v1" }, { kind: "current" }, doc, all, [5, 5])).toBe(false);
+    expect(sameSides({ kind: "version", id: "v1" }, { kind: "version", id: "v2" }, doc, all, [5, 5])).toBe(false);
+    expect(sameSides({ kind: "version", id: "v1" }, { kind: "version", id: "v1" }, doc, all, [5, 5])).toBe(true);
+  });
+
+  it("different pages of one file are allowed, the same pages written two ways are not", () => {
+    expect(sameSides({ kind: "current" }, { kind: "current" }, doc, [[0, 1], [2, 3]], [5, 5])).toBe(false);
+    expect(sameSides({ kind: "current" }, { kind: "current" }, doc, [[0, 1], [0, 1]], [5, 5])).toBe(true);
+    expect(sameSides({ kind: "current" }, { kind: "current" }, doc, [null, [0, 1, 2, 3, 4]], [5, 5])).toBe(true);
+    expect(sameSides({ kind: "current" }, { kind: "current" }, doc, [null, [0, 1]], [5, 5])).toBe(false);
+    // every page against some, with the count not known yet: not decided as the same
+    expect(sameSides({ kind: "current" }, { kind: "current" }, doc, [null, [0, 1]], [null, null])).toBe(false);
+  });
+
+  it("a picked file without a known path is told apart by its token", () => {
+    expect(sameSides(pick("t1"), pick("t1"), null, all, [5, 5])).toBe(true);
+    expect(sameSides(pick("t1"), pick("t2"), null, all, [5, 5])).toBe(false);
   });
 });

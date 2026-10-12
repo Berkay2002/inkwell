@@ -109,6 +109,17 @@ describe("export sheet", () => {
     expect(useConvert.getState().sheet).toMatchObject({ phase: "error", error: "bad page range: 9" });
   });
 
+  it("exports Rich Text as one .rtf file with its own save filter", async () => {
+    useConvert.getState().openExport(1, "rtf");
+    vi.mocked(api.pickSave).mockResolvedValue(ref("a.rtf"));
+    vi.mocked(api.exportStart).mockResolvedValue({ ...out, files: ["C:\\d\\a.rtf"] });
+    await useConvert.getState().start();
+    expect(api.pickSave).toHaveBeenCalledWith("a.rtf", { doc: 1 }, "rtf");
+    expect(api.pickFolder).not.toHaveBeenCalled();
+    const [, req] = vi.mocked(api.exportStart).mock.calls[0];
+    expect(req).toMatchObject({ kind: { kind: "rtf" }, saveTo: "tok-a.rtf" });
+  });
+
   it("helpers: folder exports, page scope, readiness", () => {
     expect(isFolderExport("images") && isFolderExport("extractImages") && !isFolderExport("word")).toBe(true);
     useConvert.getState().openExport();

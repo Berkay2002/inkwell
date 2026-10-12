@@ -73,6 +73,8 @@ await set({ imageFormat: "jpeg", dpi: 300, scope: "range", range: "1-2" });
 await both("export-jpeg-range");
 await set({ what: "text", scope: "all" });
 await both("export-text");
+await set({ what: "rtf" });
+await both("export-rtf");
 await set({ phase: "running", progress: 0.45, status: "Page 3 of 6" });
 await both("export-running");
 await set({ phase: "done", progress: 1 });

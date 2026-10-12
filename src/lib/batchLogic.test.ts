@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BatchAction, BatchIssue } from "./api";
-import { copyOf, emptyAction, exportName, keyMoveTarget, move, newStep, saveBlock, splitIssues, STEP_GROUPS, STEP_INFO, stepLabel, withoutPasswords, withPasswords } from "./batchLogic";
+import { copyOf, emptyAction, exportName, keyMoveTarget, move, newStep, RANGE_KINDS, saveBlock, splitIssues, STEP_GROUPS, STEP_INFO, stepLabel, takesPages, withoutPasswords, withPasswords } from "./batchLogic";
 
 const protect = (): BatchAction => ({ ...emptyAction(), name: "P", steps: [newStep("compress"), newStep("protect")] });
 
@@ -94,5 +94,22 @@ describe("keyboard reorder", () => {
       at = to;
     }
     expect(steps).toEqual(["a", "d", "b", "c"]);
+  });
+});
+
+describe("page ranges", () => {
+  it("are offered to the page by page steps and to no other", () => {
+    expect([...RANGE_KINDS].sort()).toEqual(["bates", "flattenForms", "headerFooter", "ocr", "redact", "watermark"]);
+    for (const k of Object.keys(STEP_INFO) as (keyof typeof STEP_INFO)[]) expect(takesPages(newStep(k))).toBe(RANGE_KINDS.has(k));
+    expect(takesPages({ kind: "invalid", name: "x", why: "y" })).toBe(false);
+  });
+
+  it("show in the step's label, and are kept when a step is copied or its passwords are handled", () => {
+    const s = { ...newStep("watermark"), pages: "1-3, 5", prompt: true };
+    expect(stepLabel(s)).toMatch(/\(pages 1-3, 5\)$/);
+    expect(stepLabel({ ...s, pages: "  " })).toBe(stepLabel(newStep("watermark")));
+    const a = { ...emptyAction(), steps: [s, newStep("protect")] };
+    expect(withoutPasswords(withPasswords(a, "o", "p")).steps[0]).toEqual(s);
+    expect(copyOf(a).steps[0]).toEqual(s);
   });
 });
