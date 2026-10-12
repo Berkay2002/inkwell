@@ -207,6 +207,16 @@ describe("sign store", () => {
       text: "The signatures could not be checked: this document has more than 64 signatures, more than Inkwell checks.",
     });
   });
+
+  it("says why when listing the signatures fails, never 'not signed'", async () => {
+    inv.mockRejectedValue("the file could not be read");
+    await s().refreshSigs(1, 1);
+    expect(s().get(1).sigsError).toBe("the file could not be read");
+    expect(banner(s().get(1).sigs, s().get(1).sigsError)).toEqual({ tone: "invalid", text: "The signatures could not be checked: the file could not be read." });
+    inv.mockRejectedValue(undefined);
+    await s().refreshSigs(1, 2);
+    expect(s().get(1).sigsError).toBeTruthy();
+  });
 });
 
 describe("signature form fields on the page", () => {

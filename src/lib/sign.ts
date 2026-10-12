@@ -471,8 +471,9 @@ export const useSign = create<SignStore>((set, get) => {
         const { signatures: sigs, certify, error } = await signApi.list(doc);
         const before = signed(get().get(doc).sigs).length;
         patch(doc, { sigs, certify, sigsError: error, sigsRev: rev, ...(signed(sigs).length !== before ? { bannerHidden: false } : {}) });
-      } catch {
-        patch(doc, { sigs: [], certify: null, sigsError: null, sigsRev: rev });
+      } catch (e) {
+        // Never null: an empty list without a reason reads as "no signatures".
+        patch(doc, { sigs: [], certify: null, sigsError: msg(e) || "the engine did not answer", sigsRev: rev });
       }
     },
     select: (doc, selected) => patch(doc, { selected }),
