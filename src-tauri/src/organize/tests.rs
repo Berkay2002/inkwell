@@ -792,6 +792,30 @@ fn a_source_with_security_says_its_password_and_restrictions_are_not_carried_ove
 }
 
 #[test]
+fn bits_9_to_12_of_a_revision_2_source_are_not_reported_as_withheld() {
+    use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions, Permission};
+    let d = dir("combine-r2");
+    let a = write(&d, "a.pdf", 1, 0);
+    // RC4-40 is revision 2: MuPDF writes only the bits it is given, so 9 to 12 are clear
+    let r2 = d.join("r2.pdf").to_string_lossy().into_owned();
+    let doc = PdfDocument::from_bytes(&fixture::build(&Fixture { pages: 2, ..Default::default() })).unwrap();
+    let mut o = PdfWriteOptions::default();
+    o.set_encryption(Encryption::Rc4_40).set_owner_password("owner-pw").set_permissions(Permission::COPY);
+    doc.save_with_options(&r2, o).unwrap();
+    let on_disk = PdfDocument::open(&r2).unwrap();
+    let enc = on_disk.trailer().unwrap().get_dict("Encrypt").unwrap().unwrap();
+    assert_eq!(enc.get_dict("R").unwrap().unwrap().as_int().unwrap(), 2);
+    assert_eq!(enc.get_dict("P").unwrap().unwrap().as_int().unwrap() as u32 & 0xf00, 0, "bits 9 to 12 are clear in the fixture");
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let plan = combine::inspect(&[src(&a, ""), src(&r2, "")], opt).unwrap();
+    assert_eq!(plan.files[1].state, FileState::Ready, "copying is allowed and bit 11 is not a revision 2 right");
+    assert_eq!(
+        plan.files[1].note.as_deref(),
+        Some("r2.pdf's password and restrictions are not carried over (it does not allow printing, editing, commenting)")
+    );
+}
+
+#[test]
 fn a_password_typed_full_width_opens_a_file_protect_wrote_in_nfkc() {
     let d = dir("combine-nfkc");
     let a = write(&d, "a.pdf", 2, 0);

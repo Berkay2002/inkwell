@@ -125,7 +125,8 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
   has neither, and the row says "x.pdf's password and restrictions are not carried over", naming the rights
   its permission bits withheld (printing, editing, commenting, form filling and the like) when there are any. An
   owner-password-only source has no password to type, so the row note and the footer ("The combined file has no
-  password and no restrictions") are where this shows. A source that forbids copying or page changes is left out.
+  password and no restrictions") are where this shows. A source that forbids copying or page changes is left out. Permission bits 9 to 12 (printing quality, form filling, page changes, screen
+  readers) only count for a file of security revision 3 or later; an older file's are read as set.
 - Labels are carried page by page: a source's section that is cut by a page range or reordered becomes several
   sections in the result, each with the number the page had in its source.
 - The attachments list does not show portfolio (collection) structure; a PDF Portfolio opens in its own file list (docs/portfolios.md).

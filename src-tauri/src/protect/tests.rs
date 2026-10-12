@@ -127,6 +127,19 @@ fn rights_map_to_bits_and_back() {
 }
 
 #[test]
+fn bits_9_to_12_only_count_from_revision_3() {
+    let p = 0xfffff0c0u32 as i32 | 0x4 | 0x10; // print, copy: the way an old writer left 9 to 12 clear
+    let r3 = Rights::from_p_r(p, Some(3));
+    assert!(!r3.forms && !r3.assemble && !r3.accessibility && r3.printing == Printing::Low);
+    for r in [Some(2), Some(1)] {
+        let old = Rights::from_p_r(p, r);
+        assert!(old.forms && old.assemble && old.accessibility && old.printing == Printing::High, "{r:?}");
+        assert!(old.copy && !old.modify && !old.annotate);
+    }
+    assert_eq!(Rights::from_p_r(p, None), r3, "an unknown revision is read as the current one");
+}
+
+#[test]
 fn debug_hides_passwords() {
     let s = format!("{:?}", spec());
     assert!(!s.contains("sesame") && !s.contains("owner-secret"), "{s}");

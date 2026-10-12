@@ -106,7 +106,7 @@ impl Source {
     /// only drops the page content first.
     pub(super) fn export_doc(&mut self, pages: &[u32]) -> Result<&PdfDocument, RenderError> {
         // Vector output makes text and images copyable, which a printer never gave anyone.
-        if !crate::protect::Rights::from_p(self.doc.permissions().bits() as i32).may_extract() {
+        if !crate::protect::Rights::of(&self.doc).may_extract() {
             return Err(RenderError::NoCopy);
         }
         self.isolate(pages)?;

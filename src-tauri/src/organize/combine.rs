@@ -245,7 +245,7 @@ fn open_for_graft(path: &str, password: Option<&str>) -> std::result::Result<Pdf
         Err(EngineError::BadPassword) => return Err((FileState::Encrypted, format!("{name} does not open with the password given"))),
         Err(e) => return Err((FileState::Unreadable, format!("{name} could not be read ({e})"))),
     };
-    if !crate::protect::Rights::from_p(src.permissions().bits() as i32).may_extract() {
+    if !crate::protect::Rights::of(&src).may_extract() {
         return Err((FileState::NoCopy, format!("{name} doesn't allow copying or page changes")));
     }
     Ok(src)
@@ -281,8 +281,9 @@ fn read_facts(src: &PdfDocument) -> Result<Option<Facts>> {
     let first_size = page_size(src, 0)?;
     let signed = crate::outline::signed(src);
     let encrypt = src.trailer()?.get_dict("Encrypt")?.filter(|e| !e.is_null().unwrap_or(true));
-    let p = encrypt.as_ref().and_then(|e| e.get_dict("P").ok().flatten()).and_then(|p| p.as_int().ok()).unwrap_or(src.permissions().bits() as i32);
-    let withheld = if encrypt.is_some() { withheld_rights(crate::protect::Rights::from_p(p)) } else { Vec::new() };
+    let int = |k: &str| encrypt.as_ref().and_then(|e| e.get_dict(k).ok().flatten()).and_then(|o| o.as_int().ok());
+    let rights = crate::protect::Rights::from_p_r(int("P").unwrap_or(src.permissions().bits() as i32), int("R"));
+    let withheld = if encrypt.is_some() { withheld_rights(rights) } else { Vec::new() };
     Ok(Some(Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, signed, encrypted: encrypt.is_some(), withheld, outline_nodes: count_nodes(&outline), first_size, stable: true }))
 }
 

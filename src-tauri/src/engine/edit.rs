@@ -1887,7 +1887,7 @@ impl Engine {
             .collect::<Result<Vec<_>>>()?;
         // The result is a plain file: a source whose owner allows no copying or page changes stays out.
         for (p, s) in paths.iter().zip(&srcs) {
-            if !crate::protect::Rights::from_p(s.permissions().bits() as i32).may_extract() {
+            if !crate::protect::Rights::of(s).may_extract() {
                 return Err(invalid(format!(
                     "{} doesn't allow copying or page changes. Open it with its permissions password and remove its security first.",
                     Path::new(p).file_name().unwrap_or_default().to_string_lossy()

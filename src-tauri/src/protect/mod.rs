@@ -262,6 +262,24 @@ impl Rights {
         }
     }
 
+    /// [`Rights::from_p`] for a file of handler revision `r` (`/R`). Bits 9 to 12 mean something from
+    /// revision 3 on: an older file's writer may have left them clear, and they restrict nothing there,
+    /// so they count as set.
+    pub fn from_p_r(p: i32, r: Option<i32>) -> Rights {
+        if r.is_some_and(|r| r < 3) { Rights::from_p(p | 0xf00) } else { Rights::from_p(p) }
+    }
+
+    /// The rights of an open document: its permission bits, read as its revision says.
+    pub fn of(doc: &PdfDocument) -> Rights {
+        let r = doc
+            .trailer()
+            .ok()
+            .and_then(|t| t.get_dict("Encrypt").ok().flatten())
+            .and_then(|e| e.get_dict("R").ok().flatten())
+            .and_then(|r| r.as_int().ok());
+        Rights::from_p_r(doc.permissions().bits() as i32, r)
+    }
+
     pub fn unrestricted(&self) -> bool {
         *self == Rights::ALL
     }
@@ -462,7 +480,7 @@ pub fn read_security(doc: &PdfDocument, password: Option<&str>) -> crate::engine
         _ => "RC4-128",
     };
     let p = int("P")?.unwrap_or(-1);
-    let rights = Rights::from_p(p);
+    let rights = Rights::from_p_r(p, r);
     let restricted = !rights.unrestricted();
     // The access MuPDF granted this session: 4 is the owner password (an empty one only counts when
     // the file needs no open password, as in Acrobat).

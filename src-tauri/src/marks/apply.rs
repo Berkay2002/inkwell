@@ -1166,7 +1166,7 @@ pub fn bates_files(
             }
             e => e,
         })?;
-        if !crate::protect::Rights::from_p(d.permissions().bits() as i32).may_extract() {
+        if !crate::protect::Rights::of(&d).may_extract() {
             return Err(invalid(format!(
                 "{} doesn't allow changes. Open it with its permissions password and remove its security first.",
                 Path::new(p).file_name().unwrap_or_default().to_string_lossy()
