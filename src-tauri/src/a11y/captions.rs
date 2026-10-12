@@ -12,6 +12,8 @@ pub const MAX_LINES: usize = 2;
 pub const MAX_CHARS: usize = 150;
 /// The gap (points) between a caption and its figure or table, at most.
 pub const MAX_GAP: f32 = 24.0;
+/// Label paragraphs times targets on one page: past this the page keeps its paragraphs (the work is quadratic).
+pub const MAX_WORK: usize = 1_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -40,8 +42,9 @@ pub struct Target {
 }
 
 /// The target a caption belongs to: its index, and whether the caption is above it. `cap` is the box of the
-/// whole paragraph; `others` are the boxes of every other line on the page (nothing may sit between).
-pub fn place(kind: Kind, cap: Rect, targets: &[Target], others: &[Rect]) -> Option<(usize, bool)> {
+/// whole paragraph; `lines` are the boxes of every line on the page and `own` the indices of the caption's own
+/// lines (nothing else may sit between).
+pub fn place(kind: Kind, cap: Rect, targets: &[Target], lines: &[Rect], own: &[usize]) -> Option<(usize, bool)> {
     let overlap = |a0: f32, a1: f32, b0: f32, b1: f32| (a1.min(b1) - a0.max(b0)).max(0.0);
     let mut best: Option<(f32, usize, bool)> = None;
     for (i, t) in targets.iter().enumerate().filter(|(_, t)| t.kind == kind) {
@@ -58,7 +61,10 @@ pub fn place(kind: Kind, cap: Rect, targets: &[Target], others: &[Rect]) -> Opti
         } else {
             continue;
         };
-        let between = others.iter().any(|o| o.y0 < band.1 - 1.0 && o.y1 > band.0 + 1.0 && overlap(o.x0, o.x1, cap.x0, cap.x1) > 0.0);
+        let between = lines
+            .iter()
+            .enumerate()
+            .any(|(n, o)| !own.contains(&n) && o.y0 < band.1 - 1.0 && o.y1 > band.0 + 1.0 && overlap(o.x0, o.x1, cap.x0, cap.x1) > 0.0);
         if gap <= MAX_GAP && !between && best.is_none_or(|(g, ..)| gap < g) {
             best = Some((gap, i, above));
         }
@@ -90,15 +96,15 @@ mod tests {
         let tab = Target { kind: Kind::Table, bbox: r(100.0, 400.0, 300.0, 500.0) };
         let ts = [fig, tab];
         // Below the figure, above the table.
-        assert_eq!(place(Kind::Figure, r(100.0, 256.0, 300.0, 270.0), &ts, &[]), Some((0, false)));
-        assert_eq!(place(Kind::Table, r(100.0, 380.0, 300.0, 394.0), &ts, &[]), Some((1, true)));
+        assert_eq!(place(Kind::Figure, r(100.0, 256.0, 300.0, 270.0), &ts, &[], &[]), Some((0, false)));
+        assert_eq!(place(Kind::Table, r(100.0, 380.0, 300.0, 394.0), &ts, &[], &[]), Some((1, true)));
         // The wrong kind, too far (25 pt), beside it, a line in between.
-        assert_eq!(place(Kind::Table, r(100.0, 256.0, 300.0, 270.0), &ts, &[]), None);
-        assert_eq!(place(Kind::Figure, r(100.0, 276.0, 300.0, 290.0), &ts, &[]), None);
-        assert_eq!(place(Kind::Figure, r(400.0, 256.0, 500.0, 270.0), &ts, &[]), None);
-        assert_eq!(place(Kind::Figure, r(100.0, 270.0, 300.0, 284.0), &ts, &[r(100.0, 254.0, 300.0, 266.0)]), None);
+        assert_eq!(place(Kind::Table, r(100.0, 256.0, 300.0, 270.0), &ts, &[], &[]), None);
+        assert_eq!(place(Kind::Figure, r(100.0, 276.0, 300.0, 290.0), &ts, &[], &[]), None);
+        assert_eq!(place(Kind::Figure, r(400.0, 256.0, 500.0, 270.0), &ts, &[], &[]), None);
+        assert_eq!(place(Kind::Figure, r(100.0, 270.0, 300.0, 284.0), &ts, &[r(100.0, 254.0, 300.0, 266.0)], &[]), None);
         // A caption narrower than the figure that overlaps it is fine; one that only grazes it is not.
-        assert_eq!(place(Kind::Figure, r(280.0, 256.0, 380.0, 270.0), &ts, &[]), None);
-        assert_eq!(place(Kind::Figure, r(150.0, 256.0, 250.0, 270.0), &ts, &[]), Some((0, false)));
+        assert_eq!(place(Kind::Figure, r(280.0, 256.0, 380.0, 270.0), &ts, &[], &[]), None);
+        assert_eq!(place(Kind::Figure, r(150.0, 256.0, 250.0, 270.0), &ts, &[], &[]), Some((0, false)));
     }
 }

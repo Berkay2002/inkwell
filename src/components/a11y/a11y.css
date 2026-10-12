@@ -793,3 +793,18 @@
   background: var(--accent);
   box-shadow: var(--shadow-2);
 }
+.a11y-mark {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+  color: var(--text-2);
+}
+.a11y-mark:hover {
+  background: var(--accent-soft);
+}
+.a11y-mark:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

@@ -4,7 +4,8 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import { type EditState, pickSave, toolCancel } from "./api";
 import { applyState, run } from "./edit";
-import { type Finding, type Fix, type Preview, type Progress, type Rect4, type Report, safeFixes, stem, suggestLang } from "./a11yLogic";
+import { type A11yMark, type A11yMarks, type Finding, type Fix, type Preview, type Progress, type Rect4, type Report, marksIn, safeFixes, stem, suggestLang } from "./a11yLogic";
+import { useRecents } from "../recents";
 import {
   type Problem,
   type ReadingOrder,
@@ -52,10 +53,10 @@ export const a11yApi = {
   editTag: (doc: number, xref: number, patch: TagPatch) => invoke<EditState>("a11y_edit_tag", { doc, xref, patch }),
   moveTag: (doc: number, xref: number, parent: number, anchor: number | null, after: boolean) =>
     invoke<EditState>("a11y_move_tag", { doc, xref, parent, anchor, after }),
-  exportReport: (job: number, doc: number, format: "html" | "pdf", date: string, to: string, onProgress: (p: Progress) => void) => {
+  exportReport: (job: number, doc: number, format: "html" | "pdf", date: string, to: string, overrides: A11yMarks, onProgress: (p: Progress) => void) => {
     const ch = new Channel<Progress>();
     ch.onmessage = onProgress;
-    return invoke<string>("a11y_export_report", { job, doc, format, date, to, onProgress: ch });
+    return invoke<string>("a11y_export_report", { job, doc, format, date, to, overrides, onProgress: ch });
   },
 };
 
@@ -134,6 +135,13 @@ export interface DocA11y {
   error: string | null;
   /** Where the last report export went. */
   exported: string | null;
+  /**
+   * Rules the person marked "Passed manually" or "Skipped", by rule id. Not part of the document: they live with the
+   * file's recents entry (or only for the session when there is none) and only change how the report reads.
+   */
+  marks: A11yMarks;
+  /** The stored marks were read (or the person set one first). */
+  marksLoaded: boolean;
   shown: Shown | null;
   /** Groups collapsed by name. */
   collapsed: Record<string, boolean>;
@@ -154,6 +162,8 @@ const fresh = (): DocA11y => ({
   notNow: false,
   error: null,
   exported: null,
+  marks: {},
+  marksLoaded: false,
   shown: null,
   collapsed: {},
   order: freshOrder(),
@@ -191,6 +201,8 @@ interface A11yStore {
   autotag: (doc: number) => Promise<void>;
   cancel: (doc: number) => void;
   exportReport: (doc: number, format: "html" | "pdf") => Promise<void>;
+  /** Marks a rule passed or skipped by hand, or `null` to put it back to the checker's result. No edit, no new revision. */
+  setMark: (doc: number, rule: string, mark: A11yMark | null) => void;
   /** Jumps to the finding's page and highlights it. */
   show: (doc: number, f: Finding) => void;
   clearShown: (doc: number) => void;
@@ -349,6 +361,15 @@ export const useA11y = create<A11yStore>((set, get) => {
   const editTags = (doc: number, f: () => Promise<EditState>) =>
     edit(doc, f, (m) => patchTags(doc, { error: m }), () => get().loadTags(doc, true));
 
+  /** Reads the marks stored with the file once; a mark set before the read finishes wins. */
+  async function loadMarks(doc: number) {
+    const d = st().docs[doc];
+    if (!d || get().get(doc).marksLoaded) return;
+    patch(doc, { marksLoaded: true });
+    const stored = d.path ? await useRecents.getState().marksOf(d.path).catch(() => undefined) : undefined;
+    if (stored && get().docs[doc]) patch(doc, { marks: { ...stored, ...get().get(doc).marks } });
+  }
+
   async function loadPreview(doc: number, r: Report) {
     if (r.tagged) return patch(doc, { preview: null });
     try {
@@ -392,6 +413,7 @@ export const useA11y = create<A11yStore>((set, get) => {
       const job = ++jobSeq;
       latest.set(doc, job);
       const rev = d.rev;
+      void loadMarks(doc);
       patch(doc, { phase: "checking", progress: null, job, error: null, skipRev: null, errorRev: null });
       // Only a check that still owns the phase gives it back (an export may have taken it meanwhile).
       const done = () => (get().get(doc).phase === "checking" ? ({ phase: "idle", progress: null } as const) : {});
@@ -478,11 +500,23 @@ export const useA11y = create<A11yStore>((set, get) => {
         const job = ++jobSeq;
         patch(doc, { phase: "exporting", progress: null, job, error: null, exported: null });
         const date = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
-        const path = await a11yApi.exportReport(job, doc, format, date, to.token, (p) => patch(doc, { progress: p }));
+        const report = now.report;
+        const marks = report ? marksIn(report, now.marks) : {};
+        const path = await a11yApi.exportReport(job, doc, format, date, to.token, marks, (p) => patch(doc, { progress: p }));
         patch(doc, { phase: "idle", progress: null, exported: path });
       } catch (e) {
         patch(doc, { phase: "idle", progress: null, ...(msg(e) === CANCELLED ? {} : { error: msg(e) }) });
       }
+    },
+
+    setMark: (doc, rule, mark) => {
+      const d = st().docs[doc];
+      if (!d) return;
+      const { [rule]: _old, ...rest } = get().get(doc).marks;
+      void _old;
+      const marks = mark ? { ...rest, [rule]: mark } : rest;
+      patch(doc, { marks, marksLoaded: true });
+      if (d.path) useRecents.getState().setMarks(d.path, marks);
     },
 
     show: (doc, f) => {

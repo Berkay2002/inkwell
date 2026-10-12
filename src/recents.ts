@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { type StoreApi, create } from "zustand";
 import * as api from "./lib/api";
 import { previewScaleKey, PREVIEW_EDGE, TILE, type Size } from "./lib/layout";
-import { type Recent, clean, fromLegacy, isJunk, keyOf, parse, upsert } from "./lib/recent";
+import { type A11yMarks, type Recent, clean, fromLegacy, isJunk, keyOf, parse, upsert } from "./lib/recent";
 
 interface FileStat {
   path: string;
@@ -34,6 +34,13 @@ interface RecentsStore {
   setPage: (path: string, page: number) => void;
   /** Where reading stopped, once the stored list is loaded. */
   lastPageOf: (path: string) => Promise<number | undefined>;
+  /** The accessibility marks stored for the file (`undefined` when it has no entry or none). */
+  marksOf: (path: string) => Promise<A11yMarks | undefined>;
+  /**
+   * Stores the marks with the file's entry. Without an entry (not listed, or evicted) nothing is stored and the
+   * caller keeps them for the session. shortcut: an entry that falls off the 24 unpinned loses its marks, pin to keep.
+   */
+  setMarks: (path: string, marks: A11yMarks) => void;
   relocate: (oldPath: string, newPath: string) => Promise<void>;
 }
 
@@ -124,6 +131,7 @@ export const useRecents = create<RecentsStore>((set, get) => {
         mtime: stat?.exists ? stat.modified : prev?.mtime,
         thumb: fresh ? prev.thumb : undefined,
         lastPage: prev?.pages === info.pageCount ? prev.lastPage : undefined,
+        a11yMarks: prev?.a11yMarks,
       };
       await mutate((l) => upsert(l, entry));
       if (entry.thumb || locked) return;
@@ -203,6 +211,21 @@ export const useRecents = create<RecentsStore>((set, get) => {
       await loaded;
       return get().items.find((r) => keyOf(r.path) === keyOf(path))?.lastPage;
     },
+
+    marksOf: async (path) => {
+      await loaded;
+      return get().items.find((r) => keyOf(r.path) === keyOf(path))?.a11yMarks;
+    },
+
+    setMarks: (path, marks) =>
+      void mutate((l) => {
+        const i = l.findIndex((r) => keyOf(r.path) === keyOf(path));
+        if (i < 0) return l;
+        const { a11yMarks: _old, ...rest } = l[i];
+        void _old;
+        const next = Object.keys(marks).length ? { ...rest, a11yMarks: marks } : rest;
+        return l.map((r, n) => (n === i ? next : r));
+      }),
 
     relocate: async (oldPath, newPath) => {
       let s: FileStat | undefined;

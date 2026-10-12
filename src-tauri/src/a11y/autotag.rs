@@ -679,15 +679,25 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
         }
         // A caption is a short paragraph that opens with "Figure 2" or "Table 1" and sits right above
         // or below a figure or table of that kind. It becomes a Caption inside it: first when above,
-        // last when below (ISO 32000-2, 14.8.4.8). A figure or table takes one of each.
+        // last when below (the standard's text was not checked). A figure or table takes one of each.
         let boxes: Vec<captions::Target> = targets.iter().map(|(_, t0)| captions::Target { kind: t0.kind, bbox: t0.bbox }).collect();
+        let cands: Vec<(usize, captions::Kind)> = paragraphs
+            .iter()
+            .enumerate()
+            .filter_map(|(n, (_, idx))| {
+                let chars: usize = idx.iter().map(|&i| t.lines[i].text.chars().count()).sum();
+                let kind = captions::label(&t.lines[idx[0]].text)?;
+                (idx.len() <= captions::MAX_LINES && chars <= captions::MAX_CHARS).then_some((n, kind))
+            })
+            .collect();
+        // Bounded work: a page with very many lines, targets or label paragraphs keeps its paragraphs.
+        let cheap = t.lines.len() <= tables::MAX_ITEMS && cands.len() * boxes.len() <= captions::MAX_WORK;
+        let line_boxes: Vec<Rect> = if cheap && !cands.is_empty() && !boxes.is_empty() { t.lines.iter().map(|l| l.bbox).collect() } else { Vec::new() };
         let mut filled: HashSet<(usize, bool)> = HashSet::new();
-        for (e, idx) in &paragraphs {
-            let chars: usize = idx.iter().map(|&i| t.lines[i].text.chars().count()).sum();
-            let Some(kind) = captions::label(&t.lines[idx[0]].text).filter(|_| idx.len() <= captions::MAX_LINES && chars <= captions::MAX_CHARS) else { continue };
+        for (n, kind) in cands.into_iter().filter(|_| !line_boxes.is_empty()) {
+            let (e, idx) = &paragraphs[n];
             let cap = union(idx.iter().map(|&i| t.lines[i].bbox));
-            let others: Vec<Rect> = (0..t.lines.len()).filter(|i| !idx.contains(i)).map(|i| t.lines[i].bbox).collect();
-            let Some((k, above)) = captions::place(kind, cap, &boxes, &others) else { continue };
+            let Some((k, above)) = captions::place(kind, cap, &boxes, &line_boxes, idx) else { continue };
             let host = targets[k].0;
             if !filled.insert((host, above)) {
                 continue;

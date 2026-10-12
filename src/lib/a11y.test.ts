@@ -22,6 +22,7 @@ vi.mock("./edit", () => ({ applyState: vi.fn(), run: vi.fn() }));
 vi.mock("./api", () => ({ pickSave: vi.fn(), toolCancel: vi.fn(() => Promise.resolve()) }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { useRecents } from "../recents";
 import { useStore } from "../store";
 import { useA11y } from "./a11y";
 import {
@@ -29,18 +30,23 @@ import {
   type Report,
   type RuleResult,
   afterFixAll,
+  applyOverrides,
   autoCheckDue,
   autotagText,
   counts,
   fixAllText,
   groupRules,
   isOverflowNote,
+  marksIn,
   progressFraction,
   progressText,
   safeFixes,
+  safeRules,
+  statusWord,
   summaryLine,
   suggestLang,
 } from "./a11yLogic";
+import { parse } from "./recent";
 import { applyState } from "./edit";
 import { pickSave, toolCancel } from "./api";
 
@@ -77,7 +83,7 @@ const sample = report([
 
 describe("report logic", () => {
   it("counts and words the result", () => {
-    expect(counts(sample)).toEqual({ failed: 5, manual: 1, passed: 1, skipped: 1 });
+    expect(counts(sample)).toEqual({ failed: 5, manual: 1, passed: 1, passedManually: 0, skipped: 1 });
     expect(summaryLine(sample)).toBe("5 failed · 1 needs a manual check · 1 passed · 1 skipped");
   });
 
@@ -366,5 +372,91 @@ describe("a report export", () => {
     await exporting;
     expect(toolCancel).toHaveBeenCalled();
     expect(a().get(1)).toMatchObject({ phase: "idle", exported: "C:\\r.html" });
+  });
+});
+
+describe("rules decided by hand", () => {
+  const marks = { title: "passed", "color-contrast": "skipped", "no-such-rule": "passed" } as const;
+
+  it("read as passed manually and skipped, in the counts, the summary line and Fix all", () => {
+    const r = applyOverrides(sample, marks);
+    const title = r.results.find((x) => x.rule === "title")!;
+    expect([title.status, title.mark, title.auto, statusWord(title)]).toEqual(["passed", "passed", "failed", "Passed manually"]);
+    const contrast = r.results.find((x) => x.rule === "color-contrast")!;
+    expect([contrast.status, contrast.mark, statusWord(contrast)]).toEqual(["skipped", "skipped", "Skipped"]);
+    expect(counts(r)).toEqual({ failed: 4, manual: 0, passed: 1, passedManually: 1, skipped: 2 });
+    expect(summaryLine(r)).toBe("4 failed · 0 need a manual check · 1 passed · 1 passed manually · 2 skipped");
+    // a title that was marked is no longer a failed rule to fix
+    expect(safeRules(r).map((x) => x.rule)).toEqual(["primary-language", "tab-order"]);
+    expect(afterFixAll(r)).toEqual({ pass: 4, of: 8 });
+    // the engine's report itself is not changed, and no marks is the same object
+    expect(sample.results[0].status).toBe("failed");
+    expect(applyOverrides(sample, {})).toBe(sample);
+  });
+
+  it("export only the marks that name a rule of the report", () => {
+    expect(marksIn(sample, marks)).toEqual({ title: "passed", "color-contrast": "skipped" });
+  });
+
+  it("are set and cleared without any edit, revision or fix", async () => {
+    reply({ a11y_check: sample, a11y_preview: { untagged: false } });
+    await a().check(1);
+    inv.mockClear();
+    a().setMark(1, "title", "passed");
+    a().setMark(1, "color-contrast", "skipped");
+    expect(a().get(1).marks).toEqual({ title: "passed", "color-contrast": "skipped" });
+    a().setMark(1, "title", null);
+    expect(a().get(1).marks).toEqual({ "color-contrast": "skipped" });
+    // Nothing went to the engine, the revision is the one that was checked, and the report is still current.
+    expect(inv.mock.calls.filter((c) => /^a11y_(fix|reorder|edit|set|move|merge|split|artifact)/.test(String(c[0])))).toEqual([]);
+    expect(applyState).not.toHaveBeenCalled();
+    expect(useStore.getState().docs[1].rev).toBe(3);
+    expect(a().get(1).checkedRev).toBe(3);
+    expect(a().get(1).report).toEqual(sample);
+  });
+
+  it("are kept when the report is read again, and go to the export", async () => {
+    reply({ a11y_check: sample, a11y_preview: { untagged: false } });
+    await a().check(1);
+    a().setMark(1, "title", "passed");
+    await a().check(1);
+    expect(a().get(1).marks).toEqual({ title: "passed" });
+    vi.mocked(pickSave).mockResolvedValue({ token: "tok", path: "C:\r.html" } as never);
+    reply({ a11y_export_report: "C:\r.html" });
+    await a().exportReport(1, "html");
+    expect(inv).toHaveBeenCalledWith("a11y_export_report", expect.objectContaining({ overrides: { title: "passed" } }));
+  });
+
+  it("can be set on a certified document: they never touch it", async () => {
+    reply({ a11y_check: { ...sample, certified: true }, a11y_preview: { untagged: false } });
+    await a().check(1);
+    a().setMark(1, "title", "skipped");
+    expect(a().get(1).marks).toEqual({ title: "skipped" });
+  });
+
+  it("are stored with the file's recents entry and read back when the document is opened again", async () => {
+    const path = "C:\Docs\a.pdf";
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], path } as never } });
+    useRecents.setState({ items: [{ path, opened: 1 }] });
+    reply({ a11y_check: sample, a11y_preview: { untagged: false }, recents_save: null });
+    a().setMark(1, "title", "passed");
+    await vi.waitFor(() => expect(useRecents.getState().items[0].a11yMarks).toEqual({ title: "passed" }));
+    // A new session: the entry comes back from the stored JSON with the marks, and the panel reads them.
+    const stored = parse(JSON.stringify(useRecents.getState().items))!;
+    expect(stored[0].a11yMarks).toEqual({ title: "passed" });
+    useA11y.setState({ docs: {} });
+    await a().check(1);
+    await vi.waitFor(() => expect(a().get(1).marks).toEqual({ title: "passed" }));
+    // Clearing the last mark removes the field.
+    a().setMark(1, "title", null);
+    await vi.waitFor(() => expect(useRecents.getState().items[0].a11yMarks).toBeUndefined());
+  });
+
+  it("are checked when stored: other values, long ids and too many are dropped", () => {
+    const many = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`r${i}`, "passed"]));
+    const l = parse(JSON.stringify([{ path: "C:\a.pdf", opened: 1, a11yMarks: { title: "passed", x: "failed", ["y".repeat(41)]: "skipped" } }, { path: "C:\b.pdf", opened: 2, a11yMarks: many }, { path: "C:\c.pdf", opened: 3, a11yMarks: ["passed"] }]))!;
+    expect(l[0].a11yMarks).toEqual({ title: "passed" });
+    expect(Object.keys(l[1].a11yMarks!)).toHaveLength(64);
+    expect("a11yMarks" in l[2]).toBe(false);
   });
 });
