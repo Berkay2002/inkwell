@@ -972,5 +972,69 @@ fn crop_stream(d: &mut PdfDocument, img: &PdfObject, sub: [f64; 4], masks: bool)
     Ok(d.add_stream(&Buffer::from_bytes(&flate(&out)?)?, Some(&dict), true)?)
 }
 
+// ---- for other modules (OCR clean-up) ----------------------------------------------------------
+
+/// An image a page draws, as the OCR clean-up needs it.
+#[derive(Clone)]
+pub(crate) struct Placed {
+    pub inline: bool,
+    pub in_text: bool,
+    /// Key in the page's `/XObject` dictionary (empty for an inline image).
+    pub name: Vec<u8>,
+    pub obj: Option<PdfObject>,
+    /// The unit square to default user space.
+    pub ctm: [f64; 6],
+    pub clipped: bool,
+    pub masked: bool,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The images `page` (0-based) draws, in drawing order.
+pub(crate) fn placed_images(doc: &PdfDocument, page: u32) -> Result<Vec<Placed>> {
+    Ok(read_images(doc, page)?
+        .found
+        .into_iter()
+        .map(|f| Placed {
+            inline: f.kind == ImageKind::Inline,
+            in_text: f.in_text,
+            name: f.name.unwrap_or_default(),
+            obj: f.obj,
+            ctm: f.ctm.0,
+            clipped: f.clip.is_some(),
+            masked: f.masked,
+            width: f.width,
+            height: f.height,
+        })
+        .collect())
+}
+
+/// The decoded samples of an image XObject, with the size guards of pixel crops.
+pub(crate) struct Decoded {
+    pub data: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+    /// Components per pixel.
+    pub n: u32,
+    pub bpc: u32,
+    /// Bytes per row.
+    pub row: usize,
+}
+
+pub(crate) fn decoded_samples(img: &PdfObject) -> Result<Decoded> {
+    let (w, h) = (int_of(get(img, "Width")), int_of(get(img, "Height")));
+    let bpc = if get(img, "ImageMask").and_then(|v| v.as_bool().ok()) == Some(true) { 1 } else { int_of(get(img, "BitsPerComponent")) };
+    let n = components(img).ok_or_else(|| invalid("the image's colour space is not one Inkwell can read"))?;
+    if w == 0 || h == 0 || !matches!(bpc, 1 | 2 | 4 | 8 | 16) {
+        return Err(invalid("the image's pixel format can't be read"));
+    }
+    let (size, row) = sample_size(w, h, n, bpc).ok_or_else(|| invalid("the image is too large to read by pixels"))?;
+    let data = samples(img, size)?;
+    if data.len() < size {
+        return Err(invalid("the image's data is shorter than its size"));
+    }
+    Ok(Decoded { data, w, h, n, bpc, row })
+}
+
 #[cfg(test)]
 mod tests;

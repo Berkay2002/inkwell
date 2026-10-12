@@ -20,7 +20,6 @@ use super::steps::{Cx, Env, Outcome, Product, StepError};
 use crate::convert::Staging;
 use crate::engine::edit::open_source;
 use crate::engine::EngineError;
-use crate::ocr;
 use crate::protect;
 
 #[derive(Debug, thiserror::Error)]
@@ -457,10 +456,19 @@ fn tree_size(p: &Path) -> u64 {
 // ---------------------------------------------------------------- signatures
 
 /// A signature the file carries: the "signatures exist" flag, a certification (DocMDP), or a signature
-/// field that has a value. `None` when the form cannot be listed (too large to scan): the caller
-/// treats that as signed.
+/// field that has a value. `None` when the form cannot be listed (too large to scan) or the
+/// certification cannot be read: the caller treats that as "could not check", never as not signed.
 fn is_signed(doc: &mupdf::pdf::PdfDocument) -> Option<bool> {
-    if ocr::is_signed(doc) {
+    // Only the flag here: `outline::signed` answers "signed" for a form it cannot read, and the batch
+    // must say "could not check" for that, so the certification and field checks below decide the rest.
+    let flagged = doc
+        .catalog()
+        .ok()
+        .and_then(|c| c.get_dict("AcroForm").ok().flatten())
+        .and_then(|f| f.get_dict("SigFlags").ok().flatten())
+        .and_then(|f| f.as_int().ok())
+        .is_some_and(|f| f & 1 != 0);
+    if flagged {
         return Some(true);
     }
     if crate::outline::certified(doc).ok()?.is_some() {
