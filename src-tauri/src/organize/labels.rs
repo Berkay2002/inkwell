@@ -107,6 +107,7 @@ fn alpha(n: u32) -> String {
 }
 
 const MAX_ENTRIES: usize = 100_000;
+const MAX_PREFIX_CHARS: usize = 256;
 /// Everything a walk may look at in all: nodes, `/Nums` pairs and `/Kids` entries together. The depth
 /// cap alone does not stop a node whose `/Kids` are itself many times over.
 const MAX_WORK: usize = 1_000_000;
@@ -123,7 +124,8 @@ pub fn read(doc: &PdfDocument) -> Result<Vec<LabelRange>> {
         let Some(v) = v.resolve()?.filter(|v| v.is_dict().unwrap_or(false)) else { continue };
         let Ok(page) = u32::try_from(k) else { continue };
         let style = get(&v, "S").and_then(|s| s.as_name().ok()).map_or(LabelStyle::None, |n| LabelStyle::from_name(&String::from_utf8_lossy(&n)));
-        let prefix = get(&v, "P").and_then(|p| p.as_string().ok()).unwrap_or_default();
+        // a hostile prefix is cut: it is cloned into every section a combine carries over
+        let prefix: String = get(&v, "P").and_then(|p| p.as_string().ok()).unwrap_or_default().chars().take(MAX_PREFIX_CHARS).collect();
         let start = get(&v, "St").and_then(|s| s.as_int().ok()).filter(|&s| s >= 1).map_or(1, |s| s as u32);
         if out.last().is_some_and(|l| l.page == page) {
             out.pop();
@@ -396,6 +398,24 @@ mod tests {
         let out = apply(&base, 6, 3, 3, &spec).unwrap();
         assert_eq!(labels_for(&out, 6), ["I", "II", "III", "IV", "2", "3"]);
         assert!(apply(&base, 6, 0, 1, &spec).is_err(), "nothing before the first page");
+    }
+
+    #[test]
+    fn a_hostile_prefix_is_cut_to_256_characters() {
+        let long = format!("{}é", "x".repeat(10_000));
+        let objs = vec![
+            format!("<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /D /P ({long}) >>] >> >>"),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_string(),
+        ];
+        let doc = PdfDocument::from_bytes(&crate::outline::tests::raw_pdf(&objs)).unwrap();
+        let ranges = read(&doc).unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].prefix.chars().count(), MAX_PREFIX_CHARS);
+        assert!(ranges[0].prefix.chars().all(|c| c == 'x'));
+        let short = format!("<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /D /P (Ap\\351ndice) >>] >> >>");
+        let doc = PdfDocument::from_bytes(&crate::outline::tests::raw_pdf(&[short, objs[1].clone(), objs[2].clone()])).unwrap();
+        assert_eq!(read(&doc).unwrap()[0].prefix, "Apéndice", "a short prefix is untouched");
     }
 
     #[test]
