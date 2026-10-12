@@ -302,7 +302,9 @@ impl Dests {
     /// The destination a name or string stands for, if the document defines it.
     fn lookup(&self, key: &PdfObject) -> Option<PdfObject> {
         // A name goes in as the object itself: its bytes need not be UTF-8 (`/caf#E9`) and MuPDF compares bytes.
-        let key = if key.is_name().ok()? { key.share() } else { PdfObject::new_name(&key.as_string().ok()?).ok()? };
+        // Resolved first: a dictionary lookup by a reference finds nothing.
+        let key = key.resolve().ok().flatten().unwrap_or_else(|| key.share());
+        let key = if key.is_name().ok()? { key } else { PdfObject::new_name(&key.as_string().ok()?).ok()? };
         [&self.tree, &self.old].into_iter().flatten().find_map(|d| d.get_dict(key.share()).ok().flatten())
     }
 }

@@ -1976,3 +1976,52 @@ fn invalid_links_accept_a_destination_dictionary_and_still_drop_a_goto_without_o
     let annots = doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap();
     assert_eq!(annots.len().unwrap(), 2);
 }
+
+#[test]
+fn a_destination_name_held_by_an_indirect_object_is_still_looked_up() {
+    let s = Scratch::new();
+    let input = s.path("indirect.pdf");
+    // objects 10 and 11 are the names /good (defined) and /nope (not); items use them through the reference
+    bookmark_pdf(
+        &input,
+        "/Dests << /good [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 9 0 R /Count 4 >>",
+        &[
+            "<< /Title (A) /Parent 4 0 R /Dest 10 0 R /Next 8 0 R >>",
+            "<< /Title (B) /Parent 4 0 R /Dest 11 0 R /Next 9 0 R >>",
+            "<< /Title (C) /Parent 4 0 R /A << /S /GoTo /D 10 0 R >> /Next 12 0 R >>",
+            "/good",
+            "/nope",
+            // a dictionary whose /D is the indirect name
+            "<< /Title (D) /Parent 4 0 R /Dest << /D 10 0 R >> >>",
+        ],
+    );
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 1, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "A, C, D");
+
+    // and as a link's destination or its GoTo /D
+    let links = s.path("links.pdf");
+    let link = |rest: &str| format!("<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] {rest} >>");
+    let objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /Dests << /ok [4 0 R /Fit] >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 7 0 R] >>".to_string(),
+        link("/A << /S /GoTo /D 8 0 R >>"),
+        link("/Dest 8 0 R"),
+        link("/Dest 9 0 R"),
+        "/ok".to_string(),
+        "/nope".to_string(),
+    ];
+    fs::write(&links, crate::outline::tests::raw_pdf(&objs)).unwrap();
+    let mut o = Options::preset(Preset::Custom);
+    o.strip.invalid_links = true;
+    o.output = Some(s.path("links-out.pdf"));
+    let r = run(&links, &o).unwrap();
+    assert_eq!(r.stripped.invalid_links, 1, "{:?}", r.stripped);
+    let doc = open_pdf(&r.output, None).unwrap();
+    assert_eq!(doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().len().unwrap(), 2);
+}
