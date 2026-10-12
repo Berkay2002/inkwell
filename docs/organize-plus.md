@@ -35,9 +35,11 @@ Entry: Tools > Merge/Combine, Organize > "Combine files…", command palette "Co
 - **Locked files**: a row that needs a password says "Password needed" and has an Unlock button. It asks with the same
   prompt as opening a file ("Password required", "x.pdf is protected."); a wrong password says so and changes nothing.
   The password lives in the sheet and in the requests for the plan and the run only: it is not written to the
-  plan, the history or any log (`Secret` in Rust: zeroed on drop, never serialised or printed; the sheet drops it
-  when it closes and a failed run takes it away, so the row asks again). The combined file has no password, and the
-  sheet says so. Unlocking opens the file's own handle without starting a version history for it.
+  plan, the history or any log (`Secret` in Rust: its last Rust copy is zeroed on drop, and it is never serialised
+  or printed. The copies that crossed the IPC bridge, the JSON of a request and the sheet's JavaScript strings are
+  not zeroed and wait for the garbage collector; the sheet drops its own when it closes and a failed run takes it
+  away, so the row asks again). The combined file has no password and no restrictions, and the sheet says so.
+  Unlocking opens the file's own handle without starting a version history for it.
 - **Left out, with the reason shown on the row**: files that need a password and have not been given it ("Password
   needed"), files whose owner allows no copying or page changes (even when the password opens them: the owner's
   restriction still applies), files that are not PDFs. A range outside a file refuses the
