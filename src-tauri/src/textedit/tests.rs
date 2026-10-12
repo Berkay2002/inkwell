@@ -14,11 +14,16 @@ fn dir(test: &str) -> PathBuf {
 
 /// A one-page PDF: `fonts` are `(resource name, font dict)`, `extra` more objects (numbered from 6).
 fn pdf(content: &str, fonts: &[(&str, &str)], extra: &[&str]) -> Vec<u8> {
+    pdf_in(content, fonts, extra, "")
+}
+
+/// [`pdf`] with `catalog` entries added to the document catalog.
+fn pdf_in(content: &str, fonts: &[(&str, &str)], extra: &[&str], catalog: &str) -> Vec<u8> {
     let font_objs: Vec<String> = fonts.iter().map(|(_, d)| d.to_string()).collect();
     let first_font = 5 + extra.len() + 1;
     let res: String = fonts.iter().enumerate().map(|(i, (n, _))| format!("/{n} {} 0 R ", first_font + i)).collect();
     let mut objs: Vec<Vec<u8>> = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>").into_bytes(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << {res}>> >> /Contents 4 0 R >>").into_bytes(),
         stream(content.as_bytes()),
@@ -994,4 +999,306 @@ fn moving_a_block_again_and_again_does_not_nest_deeper() {
         }
     }
     assert!(max <= 3, "q depth {max}");
+}
+
+// ---- underline, strikeout, superscript, subscript ----------------------------------------------
+
+/// The operators of page 1's content as the document is now.
+fn live_ops(eng: &Engine, id: DocId) -> Vec<content::Op> {
+    eng.read_custom(id, |d| {
+        let p = d.find_page(0)?;
+        let data: Vec<u8> = text::page_streams(&p)?.into_iter().flat_map(|(_, d)| [d, b"\n".to_vec()].concat()).collect();
+        Ok(content::parse(&data))
+    })
+    .unwrap()
+}
+
+/// Our decorations in `ops`: (strikeout, `re` operands).
+fn decorations(ops: &[content::Op]) -> Vec<(bool, Vec<f64>)> {
+    let mut out = Vec::new();
+    for (i, op) in ops.iter().enumerate() {
+        let Some(content::Obj::Dict(d)) = op.is("BDC").then(|| op.operands.get(1)).flatten() else { continue };
+        let Some((_, kind)) = d.iter().find(|(k, _)| k == b"IWDeco") else { continue };
+        let end = ops[i..].iter().position(|o| o.is("EMC")).map_or(ops.len(), |p| i + p);
+        let re = ops[i..end].iter().find(|o| o.is("re")).expect("a decoration draws a rectangle");
+        out.push((kind.as_name() == Some(b"S".as_slice()), re.operands.iter().filter_map(content::Obj::as_f64).collect()));
+    }
+    out
+}
+
+fn change_runs(eng: &Engine, id: DocId, runs: Vec<RunChange>) -> TextEdited {
+    let change = BlockChange { runs: Some(runs), ..Default::default() };
+    edit(eng, id, rev(eng, id), 0, 0, &change, EditSource::User).unwrap()
+}
+
+fn run_with(text: Option<&str>, source: usize, f: impl FnOnce(&mut RunChange)) -> RunChange {
+    let mut r = run_change(text, Some(source));
+    f(&mut r);
+    r
+}
+
+fn runs_of(eng: &Engine, id: DocId) -> Vec<RunDto> {
+    blocks(eng, id, 0).unwrap().blocks[0].runs.clone()
+}
+
+#[test]
+fn superscript_and_subscript_round_trip_and_toggle_back() {
+    let d = dir("rise");
+    let (eng, id, path) = open(&d, &pdf("BT /F1 12 Tf 72 700 Td (H2O and x2) Tj ET", &[("F1", HELV)], &[]));
+    let sub = |r: &mut RunChange| r.rise = Some(Some(Rise::Sub));
+    let sup = |r: &mut RunChange| r.rise = Some(Some(Rise::Super));
+    change_runs(
+        &eng,
+        id,
+        vec![
+            run_with(Some("H"), 0, |_| {}),
+            run_with(Some("2"), 0, sub),
+            run_with(Some("O and x"), 0, |_| {}),
+            run_with(Some("2"), 0, sup),
+        ],
+    );
+    let r = runs_of(&eng, id);
+    let shape: Vec<(&str, Option<Rise>, f32)> = r.iter().map(|r| (r.text.as_str(), r.rise, (r.size * 10.0).round() / 10.0)).collect();
+    assert_eq!(
+        shape,
+        [("H", None, 12.0), ("2", Some(Rise::Sub), 7.8), ("O and x", None, 12.0), ("2", Some(Rise::Super), 7.8)]
+    );
+    // One line, one block: the raised runs stay on their line.
+    let tb = blocks(&eng, id, 0).unwrap();
+    assert_eq!((tb.blocks.len(), tb.blocks[0].lines.len(), tb.blocks[0].text.as_str()), (1, 1, "H2O and x2"));
+    assert!((tb.blocks[0].size - 12.0).abs() < 0.01, "the block's own size is the body text's");
+    // Ts is written: -0.15 and +0.33 of the 12 pt base.
+    eng.save(id, None).unwrap();
+    let ts: Vec<f64> = saved_ops(&path).iter().filter(|o| o.is("Ts")).filter_map(|o| o.num(0)).collect();
+    assert!(ts.contains(&-1.8) && ts.contains(&3.96), "{ts:?}");
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert_eq!(runs_of(&eng, id).iter().map(|r| r.rise).collect::<Vec<_>>(), [None, Some(Rise::Sub), None, Some(Rise::Super)]);
+    // Back to the line: the base size returns.
+    change_runs(
+        &eng,
+        id,
+        (0..4).map(|i| run_with(None, i, |r| if i % 2 == 1 { r.rise = Some(None) })).collect(),
+    );
+    let r = runs_of(&eng, id);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!((r[0].text.as_str(), r[0].rise, r[0].size.round()), ("H2O and x2", None, 12.0));
+}
+
+#[test]
+fn a_rise_from_a_file_made_without_us_is_read_and_kept() {
+    let d = dir("foreign-rise");
+    let content = "BT /F1 12 Tf 72 700 Td (E = mc) Tj /F1 8 Tf 4 Ts (2) Tj 0 Ts /F1 12 Tf ( and H) Tj /F1 8 Tf -3 Ts (2) Tj 0 Ts /F1 12 Tf (O) Tj ET";
+    let (eng, id, path) = open(&d, &pdf(content, &[("F1", HELV)], &[]));
+    let tb = blocks(&eng, id, 0).unwrap();
+    assert_eq!((tb.blocks.len(), tb.blocks[0].lines.len()), (1, 1), "{:?}", tb.blocks);
+    let rises: Vec<Option<Rise>> = tb.blocks[0].runs.iter().map(|r| r.rise).collect();
+    assert_eq!(rises, [None, Some(Rise::Super), None, Some(Rise::Sub), None]);
+    assert_eq!(tb.blocks[0].runs[1].size, 8.0);
+    // Another run's text changes: the raised runs keep their own Ts and size.
+    change_runs(
+        &eng,
+        id,
+        vec![
+            run_with(Some("E = MC"), 0, |_| {}),
+            run_with(None, 1, |_| {}),
+            run_with(None, 2, |_| {}),
+            run_with(None, 3, |_| {}),
+            run_with(None, 4, |_| {}),
+        ],
+    );
+    eng.save(id, None).unwrap();
+    let ts: Vec<f64> = saved_ops(&path).iter().filter(|o| o.is("Ts")).filter_map(|o| o.num(0)).collect();
+    assert!(ts.contains(&4.0) && ts.contains(&-3.0), "{ts:?}");
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let r = runs_of(&eng, id);
+    assert_eq!((r.len(), r[1].size, r[1].rise), (5, 8.0, Some(Rise::Super)));
+}
+
+#[test]
+fn a_paragraph_that_starts_with_a_footnote_mark_keeps_its_line_gap() {
+    let d = dir("footnote");
+    let content = "BT /F1 8 Tf 72 700 Td 4 Ts (1) Tj 0 Ts /F1 12 Tf ( First line of the note) Tj 0 -14 Td (second line of it.) Tj ET";
+    let (eng, id, _) = open(&d, &pdf(content, &[("F1", HELV)], &[]));
+    let first = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!((first.lines.len(), first.size), (2, 12.0), "the block's own size is the body text's: {first:?}");
+    let gap = first.line_spacing.unwrap();
+    for colour in [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.5, 0.0]] {
+        let change = BlockChange { color: Some(colour), ..Default::default() };
+        edit(&eng, id, rev(&eng, id), 0, 0, &change, EditSource::User).unwrap();
+        let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+        assert!((b.line_spacing.unwrap() - gap).abs() < 0.01, "{gap} -> {:?}", b.line_spacing);
+        assert_eq!(b.runs[0].rise, Some(Rise::Super));
+    }
+}
+
+#[test]
+fn underline_and_strikeout_are_drawn_and_read_back() {
+    let d = dir("deco");
+    let (eng, id, path) = open(&d, &pdf("BT /F1 12 Tf 72 700 Td (Hello big world) Tj ET", &[("F1", HELV)], &[]));
+    let r = change_runs(
+        &eng,
+        id,
+        vec![
+            run_with(Some("Hello "), 0, |_| {}),
+            run_with(Some("big"), 0, |r| r.underline = Some(true)),
+            run_with(Some(" "), 0, |_| {}),
+            run_with(Some("world"), 0, |r| r.strike = Some(true)),
+        ],
+    );
+    assert_eq!(r.state.undo.as_deref(), Some("Format text on p. 1"));
+    let runs = runs_of(&eng, id);
+    let flags: Vec<(&str, bool, bool)> = runs.iter().map(|r| (r.text.as_str(), r.underline, r.strike)).collect();
+    assert_eq!(flags, [("Hello ", false, false), ("big", true, false), (" ", false, false), ("world", false, true)]);
+    let decos = decorations(&live_ops(&eng, id));
+    assert_eq!(decos.len(), 2, "{decos:?}");
+    // "big" at 12 pt in Helvetica is 0.556 + 0.222 + 0.556 em wide; the line is 0.05 em thick.
+    let (strike, re) = &decos[0];
+    assert!(!strike && (re[2] - 16.0).abs() < 0.2 && (re[3] - 0.6).abs() < 0.01, "{re:?}");
+    assert!(decos[1].0);
+    // Only our own tagged rectangles read back, and they survive save and reopen.
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    let flags: Vec<(bool, bool)> = runs_of(&eng, id).iter().map(|r| (r.underline, r.strike)).collect();
+    assert_eq!(flags, [(false, false), (true, false), (false, false), (false, true)]);
+    // The rectangle is not text, and a plain line another producer drew is not guessed at.
+    assert_eq!(text(&eng, id), "Hello big world");
+    let plain = "BT /F1 12 Tf 72 700 Td (Hello) Tj ET\n72 698 30 0.6 re f";
+    let (eng2, id2, _) = open(&dir("deco-foreign"), &pdf(plain, &[("F1", HELV)], &[]));
+    assert!(!runs_of(&eng2, id2)[0].underline);
+}
+
+#[test]
+fn a_decorated_block_moved_and_reflowed_keeps_one_decoration_per_line() {
+    let d = dir("deco-reflow");
+    let body = "The quick brown fox jumps over the lazy dog and keeps running far away from the farm";
+    let (eng, id, _) = open(&d, &pdf(&format!("BT /F1 12 Tf 72 700 Td ({body}) Tj ET"), &[("F1", HELV)], &[]));
+    let apply = |c: BlockChange| edit(&eng, id, rev(&eng, id), 0, 0, &c, EditSource::User).unwrap();
+    apply(BlockChange { underline: Some(true), width: Some(180.0), ..Default::default() });
+    let lines = |e: &Engine| blocks(e, id, 0).unwrap().blocks[0].lines.len();
+    let n = lines(&eng);
+    assert!(n >= 3, "wrapped into {n} lines");
+    assert_eq!(decorations(&live_ops(&eng, id)).len(), n, "one underline per line");
+    // Moved, reflowed wider, narrower, struck out too, moved again: never a leftover.
+    apply(BlockChange { offset: Some([30.0, -40.0]), ..Default::default() });
+    assert_eq!(decorations(&live_ops(&eng, id)).len(), n);
+    apply(BlockChange { width: Some(320.0), ..Default::default() });
+    let wide = lines(&eng);
+    assert!(wide < n);
+    assert_eq!(decorations(&live_ops(&eng, id)).len(), wide);
+    apply(BlockChange { width: Some(150.0), strike: Some(true), ..Default::default() });
+    let narrow = lines(&eng);
+    let all = decorations(&live_ops(&eng, id));
+    assert_eq!((all.len(), all.iter().filter(|d| d.0).count()), (narrow * 2, narrow), "{narrow} lines, underlined and struck");
+    apply(BlockChange { offset: Some([-10.0, 20.0]), ..Default::default() });
+    assert_eq!(decorations(&live_ops(&eng, id)).len(), narrow * 2);
+    let runs = runs_of(&eng, id);
+    assert!(runs.iter().all(|r| r.underline && r.strike), "the moved block still reads decorated: {runs:?}");
+    // Turned off, then on again: no rectangle is left behind by either.
+    apply(BlockChange { underline: Some(false), strike: Some(false), ..Default::default() });
+    assert!(decorations(&live_ops(&eng, id)).is_empty());
+    // Emptied: nothing of it is left.
+    apply(BlockChange { underline: Some(true), ..Default::default() });
+    assert_eq!(decorations(&live_ops(&eng, id)).len(), narrow);
+    apply(BlockChange { text: Some(String::new()), ..Default::default() });
+    assert!(decorations(&live_ops(&eng, id)).is_empty(), "a block's decorations go with it");
+    // Undo brings the decorated block back, whole.
+    eng.undo(id).unwrap();
+    assert_eq!(decorations(&live_ops(&eng, id)).len(), narrow);
+}
+
+#[test]
+fn a_justified_line_is_decorated_to_its_full_width() {
+    let d = dir("deco-justify");
+    let body = "The quick brown fox jumps over the lazy dog and keeps running far away from the farm and then some more";
+    let (eng, id, _) = open(&d, &pdf(&format!("BT /F1 12 Tf 72 700 Td ({body}) Tj ET"), &[("F1", HELV)], &[]));
+    let c = BlockChange { underline: Some(true), width: Some(200.0), align: Some(Align::Justify), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &c, EditSource::User).unwrap();
+    let ops = live_ops(&eng, id);
+    let decos = decorations(&ops);
+    let lines = blocks(&eng, id, 0).unwrap().blocks[0].lines.len();
+    assert_eq!(decos.len(), lines);
+    // Every line but the last fills the 200 pt (the rectangle runs from its first glyph to its last).
+    for (_, re) in &decos[..lines - 1] {
+        assert!((re[2] - 200.0).abs() < 1.5, "{re:?}");
+    }
+    assert!(decos[lines - 1].1[2] < 200.0);
+}
+
+#[test]
+fn a_formatting_only_change_of_runs_is_labelled_format_text() {
+    let d = dir("deco-label");
+    let (eng, id, _) = open(&d, &pdf("BT /F1 12 Tf 72 700 Td (Hello big world) Tj ET", &[("F1", HELV)], &[]));
+    let r = change_runs(
+        &eng,
+        id,
+        vec![
+            run_with(Some("Hello "), 0, |_| {}),
+            run_with(Some("big"), 0, |r| r.underline = Some(true)),
+            run_with(Some(" world"), 0, |_| {}),
+        ],
+    );
+    assert_eq!(r.state.undo.as_deref(), Some("Format text on p. 1"));
+    let r = change_runs(&eng, id, vec![run_with(Some("Hello"), 0, |_| {}), run_with(Some(" there"), 2, |_| {})]);
+    assert_eq!(r.state.undo.as_deref(), Some("Edit text on p. 1"));
+}
+
+#[test]
+fn rise_in_a_change_reads_null_as_clear_and_missing_as_keep() {
+    let c: BlockChange = serde_json::from_str(r#"{"rise":null}"#).unwrap();
+    assert_eq!(c.rise, Some(None));
+    let c: BlockChange = serde_json::from_str(r#"{"rise":"super","underline":true}"#).unwrap();
+    assert_eq!((c.rise, c.underline), (Some(Some(Rise::Super)), Some(true)));
+    let c: BlockChange = serde_json::from_str(r#"{"runs":[{"source":0,"rise":null},{"source":1}]}"#).unwrap();
+    let runs = c.runs.unwrap();
+    assert_eq!((runs[0].rise, runs[1].rise), (Some(None), None));
+    assert_eq!(serde_json::from_str::<BlockChange>("{}").unwrap(), BlockChange::default());
+}
+
+const CERTIFIED: &str =
+    "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 2 >> >> ] >> >>";
+const SIG_FIELD: &str = "<< /FT /Sig /T (Signature1) /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> >> >>";
+
+#[test]
+fn a_certified_document_refuses_decoration_and_says_why() {
+    let d = dir("deco-certified");
+    let (eng, id, _) = open(&d, &pdf_in("BT /F1 12 Tf 72 700 Td (Hello) Tj ET", &[("F1", HELV)], &[], CERTIFIED));
+    let tb = blocks(&eng, id, 0).unwrap();
+    assert!(tb.locked.as_deref().is_some_and(|m| m.contains("certified")), "{:?}", tb.locked);
+    let before = rev(&eng, id);
+    for c in [
+        BlockChange { underline: Some(true), ..Default::default() },
+        BlockChange { rise: Some(Some(Rise::Super)), ..Default::default() },
+        BlockChange { runs: Some(vec![run_with(None, 0, |r| r.strike = Some(true))]), ..Default::default() },
+    ] {
+        match edit(&eng, id, before, 0, 0, &c, EditSource::User) {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(rev(&eng, id), before, "nothing was recorded");
+    assert!(decorations(&live_ops(&eng, id)).is_empty());
+    // An ordinary document reports no lock and no signature.
+    let (eng, id, _) = open(&dir("deco-plain"), &pdf("BT /F1 12 Tf 72 700 Td (Hello) Tj ET", &[("F1", HELV)], &[]));
+    let tb = blocks(&eng, id, 0).unwrap();
+    assert_eq!((tb.locked, tb.signed), (None, false));
+}
+
+#[test]
+fn decorating_a_signed_document_is_saved_after_the_signature() {
+    let d = dir("deco-signed");
+    let catalog = "/AcroForm << /SigFlags 3 /Fields [6 0 R] >>";
+    let (eng, id, path) = open(&d, &pdf_in("BT /F1 12 Tf 72 700 Td (Hello big) Tj ET", &[("F1", HELV)], &[SIG_FIELD], catalog));
+    assert!(blocks(&eng, id, 0).unwrap().signed);
+    let original = std::fs::read(&path).unwrap();
+    let c = BlockChange { underline: Some(true), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &c, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the signed bytes are not rewritten");
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert!(runs_of(&eng, id)[0].underline);
 }

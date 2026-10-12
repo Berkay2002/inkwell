@@ -14,7 +14,7 @@
 use super::bundled::{self, Subset};
 use super::content::{Obj, Op, Pieces, num};
 use super::font::{Metrics, STD14};
-use super::text::{Align, Fallback, Run};
+use super::text::{Align, Fallback, Run, DECO_THICK, STRIKE_AT, UNDERLINE_AT};
 use crate::engine::EngineError;
 use mupdf::Font;
 use mupdf::pdf::{PdfDocument, PdfObject};
@@ -136,6 +136,11 @@ pub(crate) struct Style {
     pub fill: Vec<Op>,
     /// Draw bold by stroking the outline too (a bundled face without a bold style).
     pub synth_bold: bool,
+    /// `Ts` (text space): the rise of super and subscript, 0 on the line.
+    pub rise: f64,
+    /// Drawn after the text object, as filled rectangles (see [`Deco`]).
+    pub underline: bool,
+    pub strike: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +182,9 @@ pub(crate) struct RunSpec<'a> {
     pub italic: bool,
     /// The family for fallbacks: 0 Courier/mono, 1 Times/serif, 2 Helvetica/sans.
     pub family: usize,
+    pub rise: f64,
+    pub underline: bool,
+    pub strike: bool,
 }
 
 /// The faces and styles of one rewrite, and the fonts it adds to the page.
@@ -414,7 +422,15 @@ impl<'a> Setter<'a> {
 
     /// The items of one run.
     pub fn items(&mut self, spec: &RunSpec) -> Result<Vec<Item>> {
-        let base = Style { face: spec.primary, size: spec.size, fill: spec.fill.clone(), synth_bold: false };
+        let base = Style {
+            face: spec.primary,
+            size: spec.size,
+            fill: spec.fill.clone(),
+            synth_bold: false,
+            rise: spec.rise,
+            underline: spec.underline,
+            strike: spec.strike,
+        };
         let base_style = self.style(base.clone());
         let mut out = Vec::new();
         // Kept text: the source glyphs as they were, kerning included.
@@ -689,14 +705,40 @@ pub(crate) struct Placement {
     pub render_mode: i64,
 }
 
+/// An underline or strikeout to draw: a filled rectangle in the text matrix's space (`x`, `y` its
+/// bottom left), in the colour of the run it belongs to.
+pub(crate) struct Deco {
+    pub strike: bool,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub fill: Vec<Op>,
+}
+
+/// A decoration being built along a line: the style it runs over, and where it began and has got to.
+struct Stretch {
+    from: f64,
+    to: f64,
+    size: f64,
+    rise: f64,
+    fill: Vec<Op>,
+}
+
 /// The operators that show `lines`, after a `Tm` at the first line's start: `Td` between lines,
-/// `Tf` and colour where the style changes, and one TJ per stretch of one style.
-pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placement) -> Vec<Op> {
+/// `Tf`, `Ts` and colour where the style changes, and one TJ per stretch of one style; and the
+/// decorations of the underlined and struck-out stretches, one per line and style, measured on the
+/// same positions the text takes (alignment, justification and kerning included).
+pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placement) -> (Vec<Op>, Vec<Deco>) {
     let mut ops = Vec::new();
+    let mut decos: Vec<Deco> = Vec::new();
     let mut cur_font: Option<(usize, f64)> = None;
     let mut cur_fill: Option<Vec<Op>> = None;
+    let mut cur_rise = 0.0;
     let mut bold_on = false;
     let mut x = 0.0;
+    // The baseline of the line being set, below the first one.
+    let mut base = 0.0;
     let mut prev_biggest = p.first_size;
     for (li, line) in lines.iter().enumerate() {
         let items = &line.items;
@@ -712,6 +754,7 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
         // descenders reach down), so smaller text under large text doesn't run into it.
         let down = if li == 0 { 0.0 } else { p.lead * biggest.max((biggest + prev_biggest) / 2.0) / p.first_size.max(1e-9) };
         prev_biggest = biggest;
+        base -= down;
         if li > 0 || dx != 0.0 {
             ops.push(Op::new("Td", vec![num(dx - x), num(-down)]));
         }
@@ -726,6 +769,16 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
             }
         };
         let mut cur_style: Option<usize> = None;
+        // Underline and strikeout stretches open on this line, and the position along it.
+        let mut open: [Option<Stretch>; 2] = [None, None];
+        let mut pos = dx;
+        let close = |open: &mut Option<Stretch>, strike: bool, decos: &mut Vec<Deco>| {
+            if let Some(s) = open.take().filter(|s| s.to > s.from) {
+                let at = if strike { STRIKE_AT } else { UNDERLINE_AT };
+                let h = s.size * DECO_THICK;
+                decos.push(Deco { strike, x: s.from, y: base + s.rise + s.size * at - h / 2.0, w: s.to - s.from, h, fill: s.fill });
+            }
+        };
         for it in items {
             let st = &setter.styles[it.style];
             if cur_style != Some(it.style) {
@@ -740,6 +793,10 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
                 if cur_fill.as_ref() != Some(&st.fill) {
                     ops.extend(st.fill.iter().cloned());
                     cur_fill = Some(st.fill.clone());
+                }
+                if st.rise != cur_rise {
+                    ops.push(Op::new("Ts", vec![num(st.rise)]));
+                    cur_rise = st.rise;
                 }
                 if st.synth_bold != bold_on {
                     if st.synth_bold {
@@ -771,7 +828,24 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
                 flush(&mut arr, &mut text);
                 arr.push(num(-extra * 1000.0 / (st.size * m.scale)));
             }
+            // Its glyphs start after the adjustment before it and end where the next item starts.
+            let from = pos - it.kern / 1000.0 * st.size * m.scale;
+            pos += m.width(it) + if is_space(it) { extra } else { 0.0 };
+            for (n, (on, strike)) in [(st.underline, false), (st.strike, true)].into_iter().enumerate() {
+                let same = open[n].as_ref().is_some_and(|s| s.size == st.size && s.rise == st.rise && s.fill == st.fill);
+                if !(on && same) {
+                    close(&mut open[n], strike, &mut decos);
+                }
+                if on {
+                    match open[n].as_mut() {
+                        Some(s) => s.to = pos,
+                        None => open[n] = Some(Stretch { from, to: pos, size: st.size, rise: st.rise, fill: st.fill.clone() }),
+                    }
+                }
+            }
         }
+        close(&mut open[0], false, &mut decos);
+        close(&mut open[1], true, &mut decos);
         flush(&mut arr, &mut text);
         if !arr.is_empty() {
             ops.push(Op::new("TJ", vec![Obj::Array(arr)]));
@@ -780,7 +854,7 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
     if bold_on {
         ops.push(Op::new("Tr", vec![num(p.render_mode as f64)]));
     }
-    ops
+    (ops, decos)
 }
 
 /// The face a run starts in when no font was picked: the run's own, or with another style a font

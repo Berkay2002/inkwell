@@ -15,7 +15,7 @@
 
 use super::content::{Matrix, Obj, Op, Pieces, num, serialize_ops};
 use super::font::{Limit, Metrics};
-use super::layout::{Face, Measure, Placement, RunSpec, Setter, emit, family_of, forget_unused_fonts, restyled_face, wrap};
+use super::layout::{Deco, Face, Measure, Placement, RunSpec, Setter, emit, family_of, forget_unused_fonts, restyled_face, wrap};
 use crate::engine::EngineError;
 use mupdf::Buffer;
 use mupdf::pdf::{PdfDocument, PdfObject};
@@ -39,6 +39,41 @@ pub enum Align {
     Center,
     Right,
     Justify,
+}
+
+/// Superscript or subscript, written with `Ts` (text rise) and a smaller size.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Rise {
+    Super,
+    Sub,
+}
+
+/// The run's size over its base size, and the rise over the base size, for super and subscript
+/// (the usual word-processor values; docs/text-edit.md).
+const RISE_SCALE: f64 = 0.65;
+const RISE_UP: f64 = 0.33;
+const RISE_DOWN: f64 = 0.15;
+/// Decoration (underline, strikeout) thickness and the centre line's offset from the baseline, over
+/// the run's size.
+pub(crate) const DECO_THICK: f64 = 0.05;
+pub(crate) const UNDERLINE_AT: f64 = -0.12;
+pub(crate) const STRIKE_AT: f64 = 0.28;
+
+/// `null` in JSON is a value (clear), a missing key is `None` (keep).
+pub(crate) fn clearable<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Option<Rise>>, D::Error> {
+    Option::<Rise>::deserialize(d).map(Some)
+}
+
+/// The rise a `Ts` value means: its sign.
+fn rise_of(ts: f64) -> Option<Rise> {
+    if ts > 1e-6 {
+        Some(Rise::Super)
+    } else if ts < -1e-6 {
+        Some(Rise::Sub)
+    } else {
+        None
+    }
 }
 
 /// Why a block (or an area of the page) can't be edited as text.
@@ -157,12 +192,32 @@ pub struct Run {
     pub italic: bool,
     pub text: String,
     pub(crate) glyphs: Vec<Glyph>,
+    /// `Ts` (text space), kept exactly so an edit that leaves it alone does not move the run.
+    pub(crate) rise: f64,
+    /// Our own tagged decoration lies under or through it.
+    pub underline: bool,
+    pub strike: bool,
 }
 
 impl Run {
     pub(crate) fn same_style(&self, o: &Run) -> bool {
-        self.font == o.font && (self.size - o.size).abs() < 0.01 && self.color == o.color
+        self.font == o.font
+            && (self.size - o.size).abs() < 0.01
+            && self.color == o.color
+            && (self.rise - o.rise).abs() < 1e-6
+            && self.underline == o.underline
+            && self.strike == o.strike
     }
+
+    pub fn rise_kind(&self) -> Option<Rise> {
+        rise_of(self.rise)
+    }
+}
+
+/// The run block-level attributes (font, size, colour) are read from and that typed text takes
+/// the style of: the first one that is not raised (a footnote mark starts many paragraphs).
+pub(crate) fn body_run(runs: &[Run]) -> usize {
+    runs.iter().position(|r| r.rise == 0.0).unwrap_or(0)
 }
 
 /// One line of existing text.
@@ -306,6 +361,8 @@ struct Shown {
     em: f64,
     hidden: bool,
     glyphs: Vec<Glyph>,
+    underline: bool,
+    strike: bool,
 }
 
 /// How a show operator moves the text matrix, to keep that move when the operator is removed.
@@ -328,6 +385,9 @@ pub(crate) struct PageContent {
     pub areas: Vec<Area>,
     /// The page's crop box in user space.
     pub crop: [f64; 4],
+    /// Our own decorations (`/Span <</IWDeco …>> BDC … EMC`): the operators they span and the show
+    /// operators they lie under or through.
+    decos: Vec<(usize, usize, Vec<usize>)>,
 }
 
 impl PageContent {
@@ -384,8 +444,21 @@ pub(crate) fn read_page(doc: &PdfDocument, page: u32) -> Result<PageContent> {
     let mut cache = HashMap::new();
     let mut extra = Extra::default();
     let layers = Layers::of(doc, res.as_ref());
-    let shown = interpret(&ops, fonts.as_ref(), xobjects.as_ref(), &layers, &mut cache, &mut extra);
+    let mut shown = interpret(&ops, fonts.as_ref(), xobjects.as_ref(), &layers, &mut cache, &mut extra);
     let advances = shown.iter().map(|s| (s.op, Advance { x: s.advance, em: s.em })).collect();
+    // A run is underlined or struck out where one of our own decorations lies under or through it.
+    let mut decos = Vec::new();
+    for d in &extra.decos {
+        let under: Vec<usize> = shown.iter().filter(|s| d.lies_on(s)).map(|s| s.op).collect();
+        for s in shown.iter_mut().filter(|s| under.contains(&s.op)) {
+            if d.strike {
+                s.strike = true;
+            } else {
+                s.underline = true;
+            }
+        }
+        decos.push((d.first, d.last, under));
+    }
     let mut lines: Vec<Line> = Vec::new();
     let mut last = None;
     for s in shown {
@@ -402,7 +475,7 @@ pub(crate) fn read_page(doc: &PdfDocument, page: u32) -> Result<PageContent> {
     if lines.is_empty() && extra.glyphlike >= 100 {
         areas.push(Area { rect: extra.glyph_box, issue: Issue::Outlines });
     }
-    Ok(PageContent { page: p, streams, pieces, ops, fonts, advances, lines, areas, crop })
+    Ok(PageContent { page: p, streams, pieces, ops, fonts, advances, lines, areas, crop, decos })
 }
 
 /// What the interpreter notices besides text.
@@ -413,6 +486,43 @@ struct Extra {
     /// Filled paths the size of glyphs, with curves, and their union.
     glyphlike: usize,
     glyph_box: [f64; 4],
+    /// Our own decorations, in stream order.
+    decos: Vec<DecoMark>,
+}
+
+/// One decoration of ours as read: its operators, and the middle of its left and right edge in
+/// user space.
+struct DecoMark {
+    first: usize,
+    last: usize,
+    strike: bool,
+    a: (f64, f64),
+    b: (f64, f64),
+}
+
+impl DecoMark {
+    /// Whether it lies where `s`'s decoration would be drawn: across its middle, at the offset
+    /// the engine draws it at (from the baseline and the rise), in the shown text's own space.
+    fn lies_on(&self, s: &Shown) -> bool {
+        let Some(inv) = s.tm.then(&s.state.ctm).invert() else { return false };
+        let (xa, ya) = inv.apply(self.a.0, self.a.1);
+        let (xb, yb) = inv.apply(self.b.0, self.b.1);
+        let size = s.state.size.abs();
+        let want = s.state.rise + size * if self.strike { STRIKE_AT } else { UNDERLINE_AT };
+        let (lo, hi) = (xa.min(xb) - size * 0.05, xa.max(xb) + size * 0.05);
+        size > 0.0 && (ya - want).abs() <= size * 0.04 && (yb - ya).abs() <= size * 0.04 && (lo..=hi).contains(&(s.advance / 2.0))
+    }
+}
+
+/// Whether a `BDC` opens one of our decorations (`/Span <</IWDeco /U|/S>>`): `Some(true)` for a strikeout.
+fn deco_kind(op: &Op) -> Option<bool> {
+    if !op.is("BDC") || op.name(0) != Some(b"Span".as_slice()) {
+        return None;
+    }
+    match op.operands.get(1) {
+        Some(Obj::Dict(d)) => d.iter().find(|(k, _)| k == b"IWDeco").map(|(_, v)| v.as_name() == Some(b"S".as_slice())),
+        _ => None,
+    }
 }
 
 /// Which optional content groups are hidden in the default configuration (/OCProperties /D).
@@ -520,14 +630,28 @@ fn interpret(
     let mut stack: Vec<Ts> = Vec::new();
     let (mut tm, mut tlm) = (Matrix::IDENTITY, Matrix::IDENTITY);
     let mut bt = 0usize;
+    // The decoration being read: where its `BDC` is (marked-content depth, operator), its kind and
+    // its rectangle's edge midpoints.
+    let mut deco: Option<(usize, usize, bool, Option<((f64, f64), (f64, f64))>)> = None;
     // The current path: its box in user space and whether it has curves.
     let mut path = (EMPTY, false);
     extra.glyph_box = EMPTY;
     for (i, op) in ops.iter().enumerate() {
         match op.op.as_slice() {
             b"BMC" => marked.push(false),
-            b"BDC" => marked.push(op.name(0) == Some(b"OC") && layers.hidden(op.operands.get(1))),
+            b"BDC" => {
+                marked.push(op.name(0) == Some(b"OC") && layers.hidden(op.operands.get(1)));
+                if let Some(strike) = deco_kind(op) {
+                    deco = Some((marked.len(), i, strike, None));
+                }
+            }
             b"EMC" => {
+                if let Some((_, first, strike, Some((a, b)))) = deco.filter(|d| d.0 == marked.len()) {
+                    extra.decos.push(DecoMark { first, last: i, strike, a, b });
+                }
+                if deco.is_some_and(|d| d.0 == marked.len()) {
+                    deco = None;
+                }
                 marked.pop();
             }
             b"q" => stack.push(ts.clone()),
@@ -559,6 +683,9 @@ fn interpret(
             b"re" => {
                 if let Some([x, y, w, h]) = op.nums::<4>() {
                     path.0 = union(path.0, ts.ctm.bbox([x, y, x + w, y + h]));
+                    if let Some(d) = deco.as_mut() {
+                        d.3 = Some((ts.ctm.apply(x, y + h / 2.0), ts.ctm.apply(x + w, y + h / 2.0)));
+                    }
                 }
             }
             b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" | b"S" | b"s" | b"n" => {
@@ -646,7 +773,8 @@ fn interpret(
                     _ => op.operands.last().cloned().into_iter().collect(),
                 };
                 let trm0 = tm.then(&ts.ctm);
-                let start = trm0.apply(0.0, ts.rise);
+                // The baseline and the box ignore the rise: a raised run stays on its line.
+                let start = trm0.apply(0.0, 0.0);
                 let mut text = String::new();
                 let mut decodable = m.has_to_unicode;
                 let mut x_text = 0.0;
@@ -696,15 +824,15 @@ fn interpret(
                 }
                 let begin = tm;
                 tm = Matrix::translate(x_text, 0.0).then(&tm);
-                let end = tm.then(&ts.ctm).apply(0.0, ts.rise);
+                let end = tm.then(&ts.ctm).apply(0.0, 0.0);
                 if !pieces.iter().any(|p| matches!(p, Obj::Str(s) if !s.is_empty())) {
                     continue;
                 }
                 let corners = [
-                    trm0.apply(0.0, ts.rise + m.descent * ts.size),
-                    trm0.apply(x_text, ts.rise + m.descent * ts.size),
-                    trm0.apply(0.0, ts.rise + m.ascent * ts.size),
-                    trm0.apply(x_text, ts.rise + m.ascent * ts.size),
+                    trm0.apply(0.0, m.descent * ts.size),
+                    trm0.apply(x_text, m.descent * ts.size),
+                    trm0.apply(0.0, m.ascent * ts.size),
+                    trm0.apply(x_text, m.ascent * ts.size),
                 ];
                 let rect = corners.iter().fold(EMPTY, |b, p| [b[0].min(p.0), b[1].min(p.1), b[2].max(p.0), b[3].max(p.1)]);
                 let size_user = (trm0.0[2].powi(2) + trm0.0[3].powi(2)).sqrt() * ts.size;
@@ -727,6 +855,8 @@ fn interpret(
                     em: ts.size * ts.scale,
                     hidden: marked.iter().any(|h| *h),
                     glyphs,
+                    underline: false,
+                    strike: false,
                 });
             }
             _ => {}
@@ -752,6 +882,9 @@ fn add_shown(lines: &mut Vec<Line>, last: &mut Option<(usize, (f64, f64), f64)>,
         italic: m.italic,
         text: s.text.clone(),
         glyphs: s.glyphs.clone(),
+        rise: s.state.rise,
+        underline: s.underline,
+        strike: s.strike,
     };
     // Distance from the previous run's end, along and across the line (in its text direction).
     let along = |l: &Line, end: (f64, f64)| -> Option<(f64, f64)> {
@@ -897,7 +1030,7 @@ pub fn group_blocks(lines: &[Line]) -> Vec<Block> {
     }
     for b in &mut blocks {
         b.runs = block_runs(lines, &b.lines);
-        if let Some(r) = b.runs.first() {
+        if let Some(r) = b.runs.get(body_run(&b.runs)) {
             (b.base_font, b.size, b.bold, b.italic, b.color) = (r.base_font.clone(), r.size, r.bold, r.italic, r.color);
         }
         b.align = detect_align(lines, &b.lines);
@@ -1010,6 +1143,12 @@ pub struct TextChange {
     /// standard face of that style (reported as a fallback).
     pub bold: Option<bool>,
     pub italic: Option<bool>,
+    /// For every run without its own: underline, strikeout, superscript or subscript (`Some(None)`
+    /// clears the rise).
+    pub underline: Option<bool>,
+    pub strike: Option<bool>,
+    #[serde(default, deserialize_with = "clearable", skip_serializing_if = "Option::is_none")]
+    pub rise: Option<Option<Rise>>,
     /// The block's new content as runs of their own style, in order (replaces `text`).
     pub runs: Option<Vec<RunChange>>,
 }
@@ -1030,6 +1169,10 @@ pub struct RunChange {
     pub color: Option<[f64; 3]>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
+    pub underline: Option<bool>,
+    pub strike: Option<bool>,
+    #[serde(default, deserialize_with = "clearable", skip_serializing_if = "Option::is_none")]
+    pub rise: Option<Option<Rise>>,
 }
 
 /// The font new text was set in when the block's own could not show it.
@@ -1114,9 +1257,11 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     let members: Vec<&Line> = b.lines.iter().map(|&i| &pc.lines[i]).collect();
     let first = members[0];
     let o = &first.origin;
-    let (_, old_tf) = o.state.font.clone().ok_or_else(|| invalid("the text has no font"))?;
+    o.state.font.as_ref().ok_or_else(|| invalid("the text has no font"))?;
     let k = o.k.max(1e-6);
-    let first_run = b.runs.first().ok_or_else(|| invalid("the block has no text"))?;
+    // The run the block's own size, font and colour are, and typed text takes the style of.
+    let body = body_run(&b.runs);
+    let first_run = b.runs.get(body).ok_or_else(|| invalid("the block has no text"))?;
     let factor = match change.size {
         Some(pt) if pt.is_finite() && pt > 0.0 => pt / first_run.size.max(1e-6),
         Some(_) => return Err(invalid("the font size must be a positive number")),
@@ -1124,7 +1269,7 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     };
     let specs: Vec<RunChange> = match (&change.runs, &change.text) {
         (Some(r), _) => r.clone(),
-        (None, Some(t)) => vec![RunChange { text: Some(t.clone()), source: Some(0), ..Default::default() }],
+        (None, Some(t)) => vec![RunChange { text: Some(t.clone()), source: Some(body), ..Default::default() }],
         (None, None) => (0..b.runs.len()).map(|i| RunChange { source: Some(i), ..Default::default() }).collect(),
     };
     if specs.is_empty() {
@@ -1133,6 +1278,8 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     let st = &o.state;
     let mut setter = Setter::new(doc, pc.page.clone());
     let mut items = Vec::new();
+    // The size lines are spaced by: the first run that is not raised, and what it was.
+    let mut reference: Option<(f64, f64)> = None;
     let mut first_size = None;
     for rc in &specs {
         let src = match rc.source {
@@ -1151,10 +1298,26 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         };
         // The run's text-space size per point (its own text matrix and CTM).
         let per_pt = if like.size > 1e-9 { like.tsize / like.size } else { 1.0 / k };
+        let was = like.rise_kind();
+        let now = rc.rise.or(change.rise).unwrap_or(was);
+        let prior = like.tsize * factor;
+        // Super and subscript are set at 0.65 of the base size; our own are put back to it.
+        let ours = was.is_some()
+            && like.tsize > 0.0
+            && ((like.rise / like.tsize).abs() - if was == Some(Rise::Super) { RISE_UP } else { RISE_DOWN } / RISE_SCALE).abs() < 0.05;
         let size = match rc.size {
             Some(pt) if pt.is_finite() && pt > 0.0 => pt * per_pt,
             Some(_) => return Err(invalid("the font size must be a positive number")),
-            None => like.tsize * factor,
+            None if was.is_none() && now.is_some() => prior * RISE_SCALE,
+            None if was.is_some() && now.is_none() && ours => prior / RISE_SCALE,
+            None => prior,
+        };
+        let rise = match now {
+            None => 0.0,
+            // Unchanged: its own `Ts`, scaled with the size.
+            Some(_) if now == was && like.tsize > 0.0 => like.rise * size / like.tsize,
+            Some(Rise::Super) => RISE_UP * size / RISE_SCALE,
+            Some(Rise::Sub) => -RISE_DOWN * size / RISE_SCALE,
         };
         first_size.get_or_insert(size);
         // A whole-block text loses outer spaces; a run keeps its own (they join it to the next).
@@ -1173,10 +1336,20 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
             bold,
             italic,
             family: family_of(&like.base_font),
+            rise,
+            underline: rc.underline.or(change.underline).unwrap_or(like.underline),
+            strike: rc.strike.or(change.strike).unwrap_or(like.strike),
         };
+        if now.is_none() {
+            reference.get_or_insert((size, like.tsize));
+        }
         items.extend(setter.items(&spec)?);
     }
-    let size = first_size.unwrap_or(old_tf);
+    let (size, old_tf) = match (reference, first_size) {
+        (Some(r), _) => r,
+        (None, Some(s)) => (s, first_run.tsize),
+        (None, None) => (first_run.tsize, first_run.tsize),
+    };
     let m = Measure { styles: &setter.styles, cs: st.char_spacing, scale: st.scale };
     // The block's extent along its first line, in that line's text space.
     let spans: Vec<(f64, f64, f64)> = members.iter().map(|l| span_in(first, l)).collect();
@@ -1241,7 +1414,13 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
         .any(|(i, op)| matches!(op.op.as_slice(), b"Tj" | b"TJ" | b"'" | b"\"") && !drop.contains(&(o.bt_op + i)));
     // An earlier edit's own text object whose text all goes, goes whole: its Tf, colour and
     // moves too, so the fonts it named are no longer set anywhere.
-    let (whole, wrappers) = edited_objects(&pc.ops, &drop);
+    let (mut whole, wrappers) = edited_objects(&pc.ops, &drop);
+    // A decoration goes with the text it lies on (drawn again below where the text is now).
+    for (first, last, under) in &pc.decos {
+        if under.iter().any(|s| drop.contains(s)) {
+            whole.extend(*first..=*last);
+        }
+    }
     // The block was an earlier edit's, inside its own `q cm … Q`: it is set there again, and a
     // move changes that `cm` instead of adding another (nesting stays the same however often
     // it moves).
@@ -1271,6 +1450,8 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     block_ops.push(Op::new("BT", vec![]));
     let mut state = st.clone();
     state.word_spacing = 0.0;
+    // Each run sets its own rise.
+    state.rise = 0.0;
     state.font = None;
     state.fill = Vec::new();
     block_ops.extend(state.ops());
@@ -1278,11 +1459,13 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
     block_ops.push(Op::new("Tm", origin.0.iter().map(|v| num(*v)).collect()));
     let tm_scale = (origin.0[0] * origin.0[3] - origin.0[1] * origin.0[2]).abs().sqrt();
     let placement = Placement { align, width: width / k, lead, first_size: size, stroke: 0.03 * tm_scale, render_mode: st.render_mode };
-    block_ops.extend(emit(&setter, &lines, &m, &placement));
+    let (shown, decos) = emit(&setter, &lines, &m, &placement);
+    block_ops.extend(shown);
     setter.finish()?;
     let fallbacks = std::mem::take(&mut setter.fallbacks);
     std::mem::drop(setter);
     block_ops.push(Op::new("ET", vec![]));
+    block_ops.extend(deco_ops(&origin, &decos));
     if wrapper.is_none() {
         block_ops.push(Op::new("Q", vec![]));
     }
@@ -1342,20 +1525,47 @@ fn edited_objects(ops: &[Op], drop: &HashSet<usize>) -> (HashSet<usize>, Vec<Wra
             _ => continue,
         };
         let Some(et) = ops[i + 2..].iter().position(|o| o.is("ET") || o.is("BT")).map(|p| i + 2 + p) else { continue };
-        if !ops[et].is("ET") || !ops.get(et + 1).is_some_and(|o| o.is("Q")) {
+        // The object's own decorations (`BDC … EMC`) stand between its `ET` and its `Q`.
+        let mut close = et + 1;
+        while ops.get(close).is_some_and(|o| deco_kind(o).is_some()) {
+            match ops[close..].iter().position(|o| o.is("EMC")) {
+                Some(p) => close += p + 1,
+                None => break,
+            }
+        }
+        if !ops[et].is("ET") || !ops.get(close).is_some_and(|o| o.is("Q")) {
             continue;
         }
         let shows = (i + 2..et).filter(|&j| matches!(ops[j].op.as_slice(), b"Tj" | b"TJ" | b"'" | b"\""));
         if shows.clone().count() > 0 && shows.into_iter().all(|j| drop.contains(&j)) {
             if q == i - 1 {
-                out.extend(q..=et + 1);
+                out.extend(q..=close);
             } else {
-                out.extend(i..=et);
+                out.extend(i..close);
                 kept.push(Wrapper { cm: i - 1, bt: i + 1 });
             }
         }
     }
     (out, kept)
+}
+
+/// The operators that draw `decos` (from [`emit`]) in the space of the text matrix `origin`: a
+/// filled rectangle each, in the run's colour, tagged `/Span <</IWDeco /U|/S>>` so they are read
+/// back and replaced with the text they belong to.
+fn deco_ops(origin: &Matrix, decos: &[Deco]) -> Vec<Op> {
+    let mut ops = Vec::new();
+    for d in decos {
+        let tag = Obj::Dict(vec![(b"IWDeco".to_vec(), Obj::name(if d.strike { "S" } else { "U" }))]);
+        ops.push(Op::new("BDC", vec![Obj::name("Span"), tag]));
+        ops.push(Op::new("q", vec![]));
+        ops.push(Op::new("cm", origin.0.iter().map(|v| num(*v)).collect()));
+        ops.extend(d.fill.iter().cloned());
+        ops.push(Op::new("re", vec![num(d.x), num(d.y), num(d.w), num(d.h)]));
+        ops.push(Op::new("f", vec![]));
+        ops.push(Op::new("Q", vec![]));
+        ops.push(Op::new("EMC", vec![]));
+    }
+    ops
 }
 
 /// A kept `q cm … Q` around an earlier edit's text object: its `cm` and `BT` operators.
@@ -1422,6 +1632,9 @@ pub fn add_text(doc: &mut PdfDocument, page: u32, new: &NewText) -> Result<()> {
         bold: false,
         italic: false,
         family: 2,
+        rise: 0.0,
+        underline: false,
+        strike: false,
     };
     let items = setter.items(&spec)?;
     let m = Measure { styles: &setter.styles, cs: 0.0, scale: 1.0 };
@@ -1444,7 +1657,7 @@ pub fn add_text(doc: &mut PdfDocument, page: u32, new: &NewText) -> Result<()> {
         Op::new("BT", vec![]),
     ];
     let placement = Placement { align: Align::Left, width: 0.0, lead: size * 1.2, first_size: size, stroke: 0.03, render_mode: 0 };
-    ops.extend(emit(&setter, &lines, &m, &placement));
+    ops.extend(emit(&setter, &lines, &m, &placement).0);
     setter.finish()?;
     drop(setter);
     ops.push(Op::new("ET", vec![]));
