@@ -181,6 +181,13 @@ impl PdfObject {
             .map_err(|_| Error::InvalidUtf8)
     }
 
+    /// The length in bytes of a string object, read without copying it.
+    pub fn string_len(&self) -> Result<usize, Error> {
+        let mut len = 0;
+        unsafe { ffi_try!(mupdf_pdf_to_bytes(context(), self.inner, &mut len)) }?;
+        Ok(len)
+    }
+
     pub fn as_bytes(&self) -> Result<Vec<u8>, Error> {
         let mut len = 0;
         let ptr = unsafe { ffi_try!(mupdf_pdf_to_bytes(context(), self.inner, &mut len)) }?;

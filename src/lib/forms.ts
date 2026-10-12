@@ -167,7 +167,8 @@ interface FormsStore {
   center: (doc: number, axis: LayoutAxis) => Promise<void>;
   distribute: (doc: number, axis: LayoutAxis) => Promise<void>;
   matchSize: (doc: number, dim: SizeDim) => Promise<void>;
-  nudge: (doc: number, dx: number, dy: number) => Promise<void>;
+  /** Moves the picked fields by (dx, dy); `page` limits it to the picked fields of that page (a drag moves one page). */
+  nudge: (doc: number, dx: number, dy: number, page?: number) => Promise<boolean>;
   /** The picked field again on these pages (0-based). */
   duplicate: (doc: number, pages: number[]) => Promise<boolean>;
   /** A grid of copies of the picked field; resolves to what to tell the person, or null on failure (`error` is set). */
@@ -338,8 +339,9 @@ export const useForms = create<FormsStore>((set, get) => {
     matchSize: async (doc, dim) => {
       await run(doc, () => formsApi.matchSize(doc, pairs(doc), dim), (s) => s);
     },
-    nudge: async (doc, dx, dy) => {
-      await run(doc, () => formsApi.nudge(doc, pairs(doc), dx, dy), (s) => s);
+    nudge: async (doc, dx, dy, page) => {
+      const items = pairs(doc).filter((p) => page === undefined || p[0] === page);
+      return (await run(doc, () => formsApi.nudge(doc, items, dx, dy), (s) => s)) !== null;
     },
     duplicate: async (doc, pages) => {
       const a = anchorOf(get().get(doc).picked);

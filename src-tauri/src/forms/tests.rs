@@ -2325,6 +2325,22 @@ fn a_field_a_signature_covers_and_a_signed_signature_field_are_not_laid_out() {
 }
 
 #[test]
+fn a_group_drag_that_includes_a_locked_field_is_refused_whole_with_no_step() {
+    // The drag is the nudge op over the picked fields of the drag page: one locked field refuses all of them.
+    let (eng, id, _) = script_form("layout-drag-locked", &["Locked", "Free", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    let all = items_of(&eng, id, &["Locked", "Free", "Other"]);
+    sign(&eng, id, Some(("Include", &["Locked"])), None);
+    let before = (steps(&eng, id), all_rects(&eng, id));
+    let e = nudge_one(&eng, id, &all, 12.0, 8.0, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("locked by a signature") && e.contains("Locked"), "{e}");
+    assert_eq!(before, (steps(&eng, id), all_rects(&eng, id)));
+    // The picked fields the signature does not cover move together, as one step.
+    nudge_one(&eng, id, &all[1..], 12.0, 8.0, EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), before.0 + 1);
+}
+
+#[test]
 fn a_rename_may_not_take_a_name_a_signature_covers_or_rewrite_a_calculation_it_locks() {
     let (eng, id, _) = script_form("layout-lock-names", &["Free", "Sum", "Other"]);
     add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
