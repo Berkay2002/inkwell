@@ -1233,11 +1233,33 @@ fn finish(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment) -> Result<bo
     let mut d = doc.new_dict()?;
     // The appearance's objects are written last, after everything that can fail for this comment: a signed
     // document's incremental save writes every new object, referenced or not.
-    d.dict_put("N", ap::install(doc, p)?)?;
-    o.dict_put("AP", d)?;
-    o.dict_put("Rect", rect)?;
-    // So that the page shows the new appearance now, not after the document is reopened.
-    a.update()?;
+    let (root, nums) = ap::install(doc, p)?;
+    let old = get(&o, "AP");
+    let put = (|| -> Result<()> {
+        d.dict_put("N", root)?;
+        o.dict_put("AP", d)?;
+        o.dict_put("Rect", rect)?;
+        #[cfg(test)]
+        if tests_full::FAIL_AFTER_INSTALL.with(std::cell::Cell::get) {
+            return Err(bad("test failure"));
+        }
+        // So that the page shows the new appearance now, not after the document is reopened.
+        a.update()?;
+        Ok(())
+    })();
+    if let Err(e) = put {
+        // What the comment had stays, and what was just written goes: nothing is left unreferenced.
+        match old {
+            Some(v) => {
+                let _ = o.dict_put("AP", v);
+            }
+            None => {
+                let _ = o.dict_delete("AP");
+            }
+        }
+        ap::remove(doc, &nums);
+        return Err(e);
+    }
     Ok(true)
 }
 

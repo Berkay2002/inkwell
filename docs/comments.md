@@ -80,8 +80,8 @@ data). The format of an export follows the file name: `.fdf` is FDF, anything el
   (base64 of a small FDF file with one annotation) are still read. An appearance is never copied as it is: the XML (or
   FDF) is read through a whitelist into plain data (`annot/xfdf/ap.rs`): one form, at most 4 levels of forms, 64
   objects, simple Type 1 and TrueType fonts (their embedded font file included), graphics states with opacity and
-  blend mode, images up to 16 megapixels (one Flate or DCT filter, as stored; ICC profiles replaced by their device
-  space). Actions, `/AA`, `/OC`, metadata, patterns, shadings, inline images, soft masks of a graphics state, Type 3
+  blend mode, images up to 16 megapixels (one Flate or DCT filter, as stored; a predictor only when its columns, colours and
+  depth are the image's own, else the appearance is refused; ICC profiles replaced by their device space). Actions, `/AA`, `/OC`, metadata, patterns, shadings, inline images, soft masks of a graphics state, Type 3
   and composite fonts are not carried; an appearance that needs one of them is refused as a whole. Every name its
   content uses must resolve in the form's own `/Resources`.
   Streams (appearances, font programs, rich text and attached files) are decoded by `annot/xfdf/stream.rs`, one filter

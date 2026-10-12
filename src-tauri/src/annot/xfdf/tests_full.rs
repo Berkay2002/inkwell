@@ -10,6 +10,11 @@ use crate::outline::tests::{dir, open_bytes};
 use std::io::Write;
 use std::sync::Arc;
 
+thread_local! {
+    /// Makes `finish` fail after the appearance's objects were written (see `finish`).
+    pub(super) static FAIL_AFTER_INSTALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn hex(d: &[u8]) -> String {
     d.iter().map(|b| format!("{b:02X}")).collect()
 }
@@ -388,6 +393,64 @@ fn a_comment_that_fails_leaves_no_new_objects_in_the_document() {
     // The comment it would be written to is not there: nothing may be written for it first.
     assert!(finish(&mut doc, 0, 4242, &c).is_err());
     assert_eq!(doc.count_objects().unwrap(), before);
+}
+
+#[test]
+fn a_failure_after_the_appearance_was_written_takes_it_back_out() {
+    let f = fdf_file("5 0 R", &[obj(5, &freetext(1, 6)), stream_obj(6, RED_FORM, b"1 0 0 rg 0 0 100 50 re f")]);
+    let (a, ida, _) = blank("orphans-late-src");
+    run(&a, ida, &f);
+    let c = read_all(&a, ida).remove(0);
+    let annot = "<< /Type /Annot /Subtype /FreeText /Rect [100 600 200 650] /NM (ft1) /Contents (hi) /DA (/Helv 12 Tf 0 g) /P 3 0 R >>";
+    let mut doc = PdfDocument::from_bytes(&one_page_pdf("", "/Annots [4 0 R]", &[annot])).unwrap();
+    let xref = doc.load_pdf_page(0).unwrap().annotations().next().unwrap().xref().unwrap();
+    let before = doc.count_objects().unwrap();
+    FAIL_AFTER_INSTALL.with(|f| f.set(true));
+    let r = finish(&mut doc, 0, xref, &c);
+    FAIL_AFTER_INSTALL.with(|f| f.set(false));
+    assert!(r.is_err());
+    let after = doc.count_objects().unwrap();
+    assert!(after > before, "the appearance was written before it failed");
+    for n in before..after {
+        let gone = doc.new_indirect(n as i32, 0).unwrap().resolve().ok().flatten().is_none_or(|o| o.is_null().unwrap_or(true));
+        assert!(gone, "object {n} is still in the document");
+    }
+    let (_p, a) = find(&doc, 0, xref).unwrap();
+    assert!(get(&a.object(), "AP").is_none(), "the annotation does not point at a removed appearance");
+    // And without the failure the same call writes it.
+    assert!(finish(&mut doc, 0, xref, &c).unwrap());
+}
+
+#[test]
+fn a_predictor_that_does_not_match_the_image_is_refused_and_a_matching_one_kept() {
+    let form = format!("{RED_FORM} /Resources << /XObject << /Im 7 0 R >> >>");
+    let image = |parms: &str| {
+        format!("/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /DecodeParms {parms}")
+    };
+    let rows = zlib(&[0, 10, 20, 0, 30, 40]);
+    let cases: [(&str, Option<ap::Why>); 6] = [
+        ("<< /Predictor 12 /Columns 2 >>", None),
+        ("<< /Predictor 2 /Columns 2 /Colors 1 /BitsPerComponent 8 >>", None),
+        ("<< /Predictor 12 /Columns 70000 >>", Some(ap::DAMAGED)),
+        ("<< /Predictor 12 /Columns 2 /Colors 4 >>", Some(ap::DAMAGED)),
+        ("<< /Predictor 12 /Columns 2 /BitsPerComponent 16 >>", Some(ap::DAMAGED)),
+        ("<< /Predictor 3 /Columns 2 >>", Some(ap::UNSUPPORTED)),
+    ];
+    for (i, (parms, refused)) in cases.iter().enumerate() {
+        let objs = vec![obj(5, &freetext(1, 6)), stream_obj(6, &form, b"q 100 0 0 50 0 0 cm /Im Do Q"), stream_obj(7, &image(parms), &rows)];
+        let (eng, id, _) = blank(&format!("ap-predictor-{i}"));
+        let s = run(&eng, id, &fdf_file("5 0 R", &objs));
+        assert_eq!(s.added, 1, "{parms}: {s:?}");
+        match refused {
+            Some(w) => assert_eq!((s.appearances, reasons(&s.notes)), (0, vec![(*w, 1)]), "{parms}"),
+            None => {
+                assert_eq!((s.appearances, s.notes.len()), (1, 0), "{parms}: {s:?}");
+                let ap = read_all(&eng, id).remove(0).ap.unwrap();
+                let kept = ap.objs.iter().find_map(|o| o.dict.iter().find(|(k, _)| k == "DecodeParms")).map(|(_, v)| v.clone());
+                assert!(matches!(kept, Some(ap::Val::Dict(d)) if d.iter().any(|(k, v)| k == "Columns" && *v == ap::Val::Int(2))), "{parms}");
+            }
+        }
+    }
 }
 
 #[test]

@@ -474,6 +474,9 @@ impl Reader<'_> {
             return Err(UNSUPPORTED);
         }
         let flate_only = filters.iter().all(|f| matches!(f.as_str(), "FlateDecode" | "Fl"));
+        // The predictor's row length, colours and depth size MuPDF's buffers at render time, so they must be what the
+        // image's own are: anything else is refused, not clamped.
+        let parms = if filters.is_empty() { None } else { predictor_parms(get(im, "DecodeParms"), w, comps, bpc)? };
         let expected = (w * comps * bpc as u64).div_ceil(8) * h;
         // The stored bytes: refused by their declared length before they are read, and again by what was read.
         if int_of(get(im, "Length")).is_some_and(|v| v as usize > self.room()) {
@@ -499,20 +502,43 @@ impl Reader<'_> {
         if !filters.is_empty() {
             let names = filters.iter().map(|f| Val::Name(f.clone())).collect::<Vec<_>>();
             d.push(("Filter".into(), if names.len() == 1 { names.into_iter().next().unwrap_or(Val::Bool(false)) } else { Val::Arr(names) }));
-            if let Some(p) = dict_of(get(im, "DecodeParms")) {
-                let mut pd = Vec::new();
-                for k in ["Predictor", "Colors", "Columns", "BitsPerComponent", "ColorTransform"] {
-                    if let Some(v) = int_of(get(&p, k)) {
-                        pd.push((k.to_string(), Val::Int(v)));
-                    }
-                }
-                if !pd.is_empty() {
-                    d.push(("DecodeParms".into(), Val::Dict(pd)));
-                }
+            if let Some(parms) = parms {
+                d.push(("DecodeParms".into(), parms));
             }
         }
         self.push(Obj { dict: d, data: Some(data) }, num)
     }
+}
+
+/// `/DecodeParms` of an image as it is written: only a predictor that matches the image (rows of `/Width` pixels, its
+/// colour count and depth), and `/ColorTransform`. `None`: there is nothing to keep.
+fn predictor_parms(p: Option<PdfObject>, w: u64, comps: u64, bpc: i32) -> Result<Option<Val>, Why> {
+    let p = p.map(|p| p.resolve().ok().flatten().unwrap_or(p));
+    // A one-filter array's one entry.
+    let p = match p {
+        Some(a) if a.is_array().unwrap_or(false) => (a.len().unwrap_or(9) <= 1).then(|| a.get_array(0).ok().flatten()).flatten(),
+        p => p,
+    };
+    let Some(p) = dict_of(p) else { return Ok(None) };
+    let mut out = Vec::new();
+    let predictor = int_of(get(&p, "Predictor")).unwrap_or(1);
+    if predictor != 1 {
+        if !(predictor == 2 || (10..=15).contains(&predictor)) {
+            return Err(UNSUPPORTED);
+        }
+        // The defaults of the PDF (1 column, 1 colour, 8 bits) apply to a key that is missing, and are checked too.
+        let columns = int_of(get(&p, "Columns")).unwrap_or(1);
+        let colors = int_of(get(&p, "Colors")).unwrap_or(1);
+        let depth = int_of(get(&p, "BitsPerComponent")).unwrap_or(8);
+        if columns as i64 != w as i64 || colors as i64 != comps as i64 || depth != bpc {
+            return Err(DAMAGED);
+        }
+        out.extend([("Predictor", predictor), ("Columns", columns), ("Colors", colors), ("BitsPerComponent", depth)].map(|(k, v)| (k.to_string(), Val::Int(v))));
+    }
+    if let Some(t) = int_of(get(&p, "ColorTransform")).filter(|t| (0..=1).contains(t)) {
+        out.push(("ColorTransform".to_string(), Val::Int(t)));
+    }
+    Ok((!out.is_empty()).then_some(Val::Dict(out)))
 }
 
 /// The appearance of the annotation or FDF comment `o` (its `/AP /N`), or why it is not carried. `None` when it
@@ -703,22 +729,45 @@ fn operator(op: &[u8], ops: &[Tok], used: &mut Used) -> Result<(), Why> {
 
 // ---- writing: into a document ---------------------------------------------------------------
 
-/// Writes the package's objects into `doc` (children first) and returns the root. Nothing is registered anywhere:
-/// the caller puts the root where it belongs.
-pub(super) fn install(doc: &mut PdfDocument, p: &Package) -> Result<PdfObject, EngineError> {
+/// Writes the package's objects into `doc` (children first) and returns the root and the object numbers made. Nothing
+/// is registered anywhere: the caller puts the root where it belongs, and gives the numbers back (`delete_object`)
+/// if it cannot.
+pub(super) fn install(doc: &mut PdfDocument, p: &Package) -> Result<(PdfObject, Vec<i32>), EngineError> {
     let mut made: Vec<PdfObject> = Vec::with_capacity(p.objs.len());
+    let mut result = Ok(());
     for o in &p.objs {
-        let dict = dict_to_pdf(doc, &o.dict, &made)?;
-        let r = match &o.data {
-            Some(d) => {
-                let compressed = o.dict.iter().any(|(k, _)| k == "Filter");
-                doc.add_stream(&Buffer::from_bytes(d)?, Some(&dict), compressed)?
+        let step = (|| -> Result<PdfObject, EngineError> {
+            let dict = dict_to_pdf(doc, &o.dict, &made)?;
+            Ok(match &o.data {
+                Some(d) => {
+                    let compressed = o.dict.iter().any(|(k, _)| k == "Filter");
+                    doc.add_stream(&Buffer::from_bytes(d)?, Some(&dict), compressed)?
+                }
+                None => doc.add_object(&dict)?,
+            })
+        })();
+        match step {
+            Ok(r) => made.push(r),
+            Err(e) => {
+                result = Err(e);
+                break;
             }
-            None => doc.add_object(&dict)?,
-        };
-        made.push(r);
+        }
     }
-    made.get(p.root).cloned().ok_or_else(|| crate::exchange::bad("the appearance is empty"))
+    let nums: Vec<i32> = made.iter().filter_map(|m| m.as_indirect().ok()).collect();
+    if let Err(e) = result {
+        remove(doc, &nums);
+        return Err(e);
+    }
+    let root = made.get(p.root).cloned().ok_or_else(|| crate::exchange::bad("the appearance is empty"))?;
+    Ok((root, nums))
+}
+
+/// Takes objects that [`install`] made back out of the document.
+pub(super) fn remove(doc: &mut PdfDocument, nums: &[i32]) {
+    for n in nums {
+        let _ = doc.delete_object(*n);
+    }
 }
 
 fn dict_to_pdf(doc: &PdfDocument, d: &[(String, Val)], made: &[PdfObject]) -> Result<PdfObject, EngineError> {
