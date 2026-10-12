@@ -120,20 +120,35 @@ file the user must pick (picture marks, insert image, merge).
   the live document as stated in their descriptions; the assistant cannot save, so it asks the user to.
 - `convert_to_standard` applies only the safe fixes; what still fails is reported, never hidden.
 
-## Verification (2026-10-11)
+## Verification (2026-10-12)
 
-Open: the brief's prompts ("redact my name", "highlight every date") have not run against a real model; the
-scripted stand-in used other questions (SSNs, a literal phrase). "Highlight every date" needs `regex` (or one
-literal `find` per date, one card each): `every_date_is_highlighted_in_one_step_by_regex...` covers the regex path
-on the sample, where `2026-01-15` wraps over two lines and is matched across the break.
+Tests (after merging main 0a03617, which brought the Claude provider and the shared `gate.rs`):
 
+- `cargo test --lib` full suite, `cargo test --lib ai::` 161 passed, `pnpm tsc --noEmit` clean, `pnpm vitest run`
+  711 passed (46 files), debug exe built from the merged tree.
 
-- `cargo test --lib ai::` 118 passed; `pnpm tsc --noEmit`, `pnpm vitest run` (413) clean.
-- Live through the real app (debug exe, scratch data dir, a copy of `docs/study/samples/redact-source.pdf`,
-  `scripts/ai-actions-shots.mjs`, screens in `docs/screens/ai-actions/`): compress and export (cards, files made
-  next to the copy, "Open report (compressed).pdf" opens it), highlight, compare with the saved file, mark SSNs,
-  Review in Redact, apply (permanent card, "5 marks redacted, none of the marked text is left in the file"), and
-  `open_tool`. The model was **not** the real Codex: the account was at its usage limit until 2026-10-12 00:06, so
-  a scripted stand-in (the tests' `fake_codex.mjs` speaking the same app-server protocol, calling the tools a model
-  would call for each question) drove the turns. The tools, cards, engine and UI are the real ones; whether a
-  model picks these tools for these questions is still to be checked with Codex.
+Live, through the real app (debug exe, scratch data dir, a copy of `docs/study/samples/redact-source.pdf`,
+`AI_LIVE=1 node scripts/ai-actions-shots.mjs docs/screens/ai-actions-live 9246`, signed-in Codex, no scripted
+model). Screens: `docs/screens/ai-actions-live/` (the answers there are the real model's):
+
+| Question | What the model did |
+|---|---|
+| "Make a smaller copy of this document." | `compress_document` card, "report (compressed).pdf" (54 KB to 49 KB), button opens it |
+| "Export the text of pages 1 to 2 to a text file." | `export_document`, "report.txt" next to the copy |
+| "Highlight every date in this document." | one `add_comment` with `regex` `\d{4}-\s*\d{2}-\d{2}`: both dates (one wraps over two lines), one card, one undo step |
+| "What is different between this document and the saved file?" | `compare_documents`: the two highlights |
+| "Redact my name, Jane Q. Tester, everywhere in this document." | `redact_find_and_mark` (2 marks), `search` for the other forms, answer lists what it left unmarked ("Jane Tester" on p. 2, the e-mail address) |
+| "Apply the redactions now." | `redact_list_marks`, `redact_apply` card ("Permanently redact 2 marks on p. 1, delete ALL comments..."), applied; the answer reports the 4 places that still mention the text and offers to mark them |
+| "Open the password protection tool for me." | `open_tool` protect |
+
+Findings of the live runs, now fixed:
+
+- The first run did not say that the check still found the name in 5 other places: `redact_apply`'s result now tells
+  the model to report them and offer to mark them, and the base instructions ask for other forms of a name.
+- "Highlight every date" had no way to be done in one step with a literal `find`: `add_comment` takes `pattern`
+  or `regex` like `redact_find_and_mark`.
+- The user's Codex config named a model the account could not run (`gpt-6.1-sol` with a ChatGPT account); the
+  shots script picks one the account can (the model picker in the app does the same).
+
+Not verified: the Claude provider with these tools (it shares the registry and `gate.rs`, and its own tests pass,
+but no live run with a real `claude`); dark-mode screens exist for the cards and the Redact rail only.
