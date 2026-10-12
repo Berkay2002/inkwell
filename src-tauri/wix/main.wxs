@@ -1,0 +1,313 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Inkwell's MSI template (Tauri's WiX bundler fills in the double-brace variables; see docs/installer.md).
+  Based on Tauri's default main.wxs, changed to:
+  - install per machine, with every registry key under HKLM and every key it adds removed on uninstall;
+  - register .pdf as a capability ("Open with", Default apps) and never as the default handler: no
+    Extension/ProgId advertising, nothing written to .pdf's default value or to UserChoice;
+  - add an "Open with Inkwell" verb for PDFs (SystemFileAssociations, so it works whoever the default handler is);
+  - put the Start-menu shortcut directly in Programs, and make the desktop shortcut opt-in (DESKTOPSHORTCUT=1,
+    remembered for upgrades);
+  - drop what Inkwell does not use: deep links, the elevated update task, extra binaries, the PATH feature.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product
+            Id="*"
+            Name="{{product_name}}"
+            UpgradeCode="{{upgrade_code}}"
+            Language="!(loc.TauriLanguage)"
+            Manufacturer="{{manufacturer}}"
+            Version="{{version}}">
+
+        <Package Id="*"
+                 Keywords="Installer"
+                 InstallerVersion="450"
+                 Languages="0"
+                 Compressed="yes"
+                 InstallScope="perMachine"
+                 SummaryCodepage="!(loc.TauriCodepage)"/>
+
+        <!-- reinstall all files; rewrite all registry entries; reinstall all shortcuts -->
+        <Property Id="REINSTALLMODE" Value="amus" />
+
+        <!-- Auto launch app after installation (passive installs) -->
+        <Property Id="AUTOLAUNCHAPP" Secure="yes" />
+        <Property Id="LAUNCHAPPARGS" Secure="yes" />
+
+        <!-- A new version replaces the old one (same UpgradeCode); an older one does not replace a newer one. -->
+        {{#if allow_downgrades}}
+            <MajorUpgrade Schedule="afterInstallInitialize" AllowDowngrades="yes" />
+        {{else}}
+            <MajorUpgrade Schedule="afterInstallInitialize" DowngradeErrorMessage="!(loc.DowngradeErrorMessage)" AllowSameVersionUpgrades="yes" />
+        {{/if}}
+
+        <Media Id="1" Cabinet="app.cab" EmbedCab="yes" />
+
+        {{#if banner_path}}
+        <WixVariable Id="WixUIBannerBmp" Value="{{banner_path}}" />
+        {{/if}}
+        {{#if dialog_image_path}}
+        <WixVariable Id="WixUIDialogBmp" Value="{{dialog_image_path}}" />
+        {{/if}}
+        {{#if license}}
+        <WixVariable Id="WixUILicenseRtf" Value="{{license}}" />
+        {{/if}}
+
+        <Icon Id="ProductIcon" SourceFile="{{icon_path}}"/>
+        <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+        <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
+        <SetProperty Id="ARPNOMODIFY" Value="1" After="InstallValidate" Sequence="execute"/>
+
+        {{#if homepage}}
+        <Property Id="ARPURLINFOABOUT" Value="{{homepage}}"/>
+        <Property Id="ARPHELPLINK" Value="{{homepage}}"/>
+        <Property Id="ARPURLUPDATEINFO" Value="{{homepage}}"/>
+        {{/if}}
+
+        <!-- The folder of a previous install, so a new version goes to the same place. -->
+        <Property Id="INSTALLDIR">
+          <RegistrySearch Id="PrevInstallDir" Root="HKLM" Key="Software\Inkwell" Name="InstallDir" Type="raw" Win64="$(var.Win64)" />
+        </Property>
+
+        <!-- Opt-in desktop shortcut: msiexec /i Inkwell.msi DESKTOPSHORTCUT=1. An upgrade keeps the choice. -->
+        <Property Id="DESKTOPSHORTCUT" Secure="yes">
+          <RegistrySearch Id="PrevDesktopShortcut" Root="HKLM" Key="Software\Inkwell" Name="DesktopShortcut" Type="raw" Win64="$(var.Win64)" />
+        </Property>
+
+        <!-- launch app checkbox -->
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="!(loc.LaunchApp)" />
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1"/>
+        <CustomAction Id="LaunchApplication" Impersonate="yes" FileKey="Path" ExeCommand="[LAUNCHAPPARGS]" Return="asyncNoWait" />
+
+        <UI>
+            <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+
+            <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
+
+            {{#unless license}}
+            <!-- Skip license dialog -->
+            <Publish Dialog="WelcomeDlg"
+                     Control="Next"
+                     Event="NewDialog"
+                     Value="InstallDirDlg"
+                     Order="2">1</Publish>
+            <Publish Dialog="InstallDirDlg"
+                     Control="Back"
+                     Event="NewDialog"
+                     Value="WelcomeDlg"
+                     Order="2">1</Publish>
+            {{/unless}}
+        </UI>
+
+        <UIRef Id="WixUI_InstallDir" />
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="DesktopFolder" Name="Desktop" />
+            <Directory Id="$(var.PlatformProgramFilesFolder)" Name="PFiles">
+                <Directory Id="INSTALLDIR" Name="{{product_name}}"/>
+            </Directory>
+            <Directory Id="ProgramMenuFolder" Name="Programs" />
+        </Directory>
+
+        <DirectoryRef Id="INSTALLDIR">
+            <!-- Where the app lives (read by the next version's installer) and the install folder itself. -->
+            <Component Id="RegistryEntries" Guid="*" Win64="$(var.Win64)">
+                <RegistryKey Root="HKLM" Key="Software\Inkwell" ForceDeleteOnUninstall="yes">
+                    <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
+                </RegistryKey>
+                <RemoveFolder Id="RemoveInstallDir" On="uninstall" />
+            </Component>
+
+            <Component Id="Path" Guid="{{path_component_guid}}" Win64="$(var.Win64)">
+                <File Id="Path" Source="{{main_binary_path}}" KeyPath="yes" Checksum="yes"/>
+            </Component>
+
+            <!-- Explorer: a capability, an Open with entry, an "Open with Inkwell" verb. Never the default. -->
+            <Component Id="ExplorerIntegration" Guid="*" Win64="$(var.Win64)">
+                <!-- What a PDF is when Inkwell opens it: its name, its document icon, how to open it. -->
+                <RegistryKey Root="HKLM" Key="Software\Classes\Inkwell.PDF" ForceDeleteOnUninstall="yes">
+                    <RegistryValue Type="string" Value="PDF Document" KeyPath="yes" />
+                    <RegistryKey Key="DefaultIcon">
+                        <RegistryValue Type="string" Value="[INSTALLDIR]pdf-document.ico" />
+                    </RegistryKey>
+                    <RegistryKey Key="shell\open\command">
+                        <RegistryValue Type="string" Value="&quot;[!Path]&quot; &quot;%1&quot;" />
+                    </RegistryKey>
+                </RegistryKey>
+
+                <!-- Open with > Inkwell: the ProgId is one more candidate for .pdf; the default value of .pdf is not touched. -->
+                <RegistryKey Root="HKLM" Key="Software\Classes\.pdf\OpenWithProgids">
+                    <RegistryValue Type="string" Name="Inkwell.PDF" Value="" />
+                </RegistryKey>
+
+                <!-- Settings > Default apps lists Inkwell as an app that can open PDFs; Windows asks the user to pick. -->
+                <RegistryKey Root="HKLM" Key="Software\Inkwell\Capabilities" ForceDeleteOnUninstall="yes">
+                    <RegistryValue Type="string" Name="ApplicationName" Value="{{product_name}}" />
+                    <RegistryValue Type="string" Name="ApplicationDescription" Value="A fast, private PDF app." />
+                    <RegistryValue Type="string" Name="ApplicationIcon" Value="&quot;[!Path]&quot;,0" />
+                    <RegistryKey Key="FileAssociations">
+                        <RegistryValue Type="string" Name=".pdf" Value="Inkwell.PDF" />
+                    </RegistryKey>
+                </RegistryKey>
+                <RegistryKey Root="HKLM" Key="Software\RegisteredApplications">
+                    <RegistryValue Type="string" Name="Inkwell" Value="Software\Inkwell\Capabilities" />
+                </RegistryKey>
+
+                <!-- The app's own entry, used by the classic Open with list. -->
+                <RegistryKey Root="HKLM" Key="Software\Classes\Applications\inkwell.exe" ForceDeleteOnUninstall="yes">
+                    <RegistryValue Type="string" Name="FriendlyAppName" Value="{{product_name}}" />
+                    <RegistryKey Key="SupportedTypes">
+                        <RegistryValue Type="string" Name=".pdf" Value="" />
+                    </RegistryKey>
+                    <RegistryKey Key="shell\open\command">
+                        <RegistryValue Type="string" Value="&quot;[!Path]&quot; &quot;%1&quot;" />
+                    </RegistryKey>
+                </RegistryKey>
+
+                <!-- Context menu "Open with Inkwell" on PDFs, whoever the default handler is. Explorer starts the verb once
+                     per selected file; the running Inkwell takes each one (single instance). -->
+                <RegistryKey Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pdf\shell\Inkwell.Open" ForceDeleteOnUninstall="yes">
+                    <RegistryValue Type="string" Value="Open with {{product_name}}" />
+                    <RegistryValue Type="string" Name="Icon" Value="&quot;[!Path]&quot;,0" />
+                    <RegistryKey Key="command">
+                        <RegistryValue Type="string" Value="&quot;[!Path]&quot; &quot;%1&quot;" />
+                    </RegistryKey>
+                </RegistryKey>
+            </Component>
+
+            {{resources}}
+        </DirectoryRef>
+
+        <DirectoryRef Id="ProgramMenuFolder">
+            <Component Id="ApplicationShortcut" Guid="*" Win64="$(var.Win64)">
+                <Shortcut Id="ApplicationStartMenuShortcut"
+                    Name="{{product_name}}"
+                    Description="Runs {{product_name}}"
+                    Target="[!Path]"
+                    Icon="ProductIcon"
+                    WorkingDirectory="INSTALLDIR">
+                    <ShortcutProperty Key="System.AppUserModel.ID" Value="{{bundle_id}}"/>
+                </Shortcut>
+                <RegistryValue Root="HKLM" Key="Software\Inkwell" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes"/>
+            </Component>
+        </DirectoryRef>
+
+        <DirectoryRef Id="DesktopFolder">
+            <Component Id="ApplicationShortcutDesktop" Guid="*" Win64="$(var.Win64)">
+                <Condition>DESKTOPSHORTCUT = "1"</Condition>
+                <Shortcut Id="ApplicationDesktopShortcut"
+                    Name="{{product_name}}"
+                    Description="Runs {{product_name}}"
+                    Target="[!Path]"
+                    Icon="ProductIcon"
+                    WorkingDirectory="INSTALLDIR" />
+                <RegistryValue Root="HKLM" Key="Software\Inkwell" Name="DesktopShortcut" Type="string" Value="1" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <Feature
+                Id="MainProgram"
+                Title="{{product_name}}"
+                Description="!(loc.InstallAppFeature)"
+                Level="1"
+                ConfigurableDirectory="INSTALLDIR"
+                AllowAdvertise="no"
+                Display="expand"
+                Absent="disallow">
+            <ComponentRef Id="RegistryEntries"/>
+            <ComponentRef Id="Path"/>
+            <ComponentRef Id="ExplorerIntegration"/>
+            <ComponentRef Id="ApplicationShortcut"/>
+            <ComponentRef Id="ApplicationShortcutDesktop"/>
+            {{#each resource_file_ids as |resource_file_id| ~}}
+            <ComponentRef Id="{{ resource_file_id }}"/>
+            {{/each~}}
+        </Feature>
+
+        <Feature Id="External" AllowAdvertise="no" Absent="disallow">
+            {{#each component_group_refs as |id| ~}}
+            <ComponentGroupRef Id="{{ id }}"/>
+            {{/each~}}
+            {{#each component_refs as |id| ~}}
+            <ComponentRef Id="{{ id }}"/>
+            {{/each~}}
+            {{#each feature_group_refs as |id| ~}}
+            <FeatureGroupRef Id="{{ id }}"/>
+            {{/each~}}
+            {{#each feature_refs as |id| ~}}
+            <FeatureRef Id="{{ id }}"/>
+            {{/each~}}
+            {{#each merge_refs as |id| ~}}
+            <MergeRef Id="{{ id }}"/>
+            {{/each~}}
+        </Feature>
+
+        {{#if install_webview}}
+        <!-- WebView2 -->
+        <Property Id="INSTALLED_WEBVIEW2_VERSION">
+            <RegistrySearch Id="Webview2VersionSystemx64" Root="HKLM" Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" />
+            <RegistrySearch Id="Webview2VersionSystemx86" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" />
+            <RegistrySearch Id="Webview2VersionUser" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw"/>
+        </Property>
+
+        {{#if download_bootstrapper}}
+        <!-- Download webview bootstrapper mode -->
+        <CustomAction Id='DownloadAndInvokeBootstrapper' Directory="INSTALLDIR" Execute="deferred" ExeCommand='powershell.exe -NoProfile -windowstyle hidden try [\{] [\[]Net.ServicePointManager[\]]::SecurityProtocol = [\[]Net.SecurityProtocolType[\]]::Tls12 [\}] catch [\{][\}]; Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "$env:TEMP\MicrosoftEdgeWebview2Setup.exe" ; Start-Process -FilePath "$env:TEMP\MicrosoftEdgeWebview2Setup.exe" -ArgumentList ({{webview_installer_args}} &apos;/install&apos;) -Wait' Return='check'/>
+        <InstallExecuteSequence>
+            <Custom Action='DownloadAndInvokeBootstrapper' Before='InstallFinalize'>
+                <![CDATA[NOT(REMOVE OR INSTALLED_WEBVIEW2_VERSION)]]>
+            </Custom>
+        </InstallExecuteSequence>
+        {{/if}}
+
+        {{#if webview2_bootstrapper_path}}
+        <!-- Embedded webview bootstrapper mode: runs only when WebView2 is missing -->
+        <Binary Id="MicrosoftEdgeWebview2Setup.exe" SourceFile="{{webview2_bootstrapper_path}}"/>
+        <CustomAction Id='InvokeBootstrapper' BinaryKey='MicrosoftEdgeWebview2Setup.exe' Execute="deferred" ExeCommand='{{webview_installer_args}} /install' Return='check' />
+        <InstallExecuteSequence>
+            <Custom Action='InvokeBootstrapper' Before='InstallFinalize'>
+                <![CDATA[NOT(REMOVE OR INSTALLED_WEBVIEW2_VERSION)]]>
+            </Custom>
+        </InstallExecuteSequence>
+        {{/if}}
+
+        {{#if webview2_installer_path}}
+        <!-- Embedded offline installer -->
+        <Binary Id="MicrosoftEdgeWebView2RuntimeInstaller.exe" SourceFile="{{webview2_installer_path}}"/>
+        <CustomAction Id='InvokeStandalone' BinaryKey='MicrosoftEdgeWebView2RuntimeInstaller.exe' Execute="deferred" ExeCommand='{{webview_installer_args}} /install' Return='check' />
+        <InstallExecuteSequence>
+            <Custom Action='InvokeStandalone' Before='InstallFinalize'>
+                <![CDATA[NOT(REMOVE OR INSTALLED_WEBVIEW2_VERSION)]]>
+            </Custom>
+        </InstallExecuteSequence>
+        {{/if}}
+
+        {{#if minimum_webview2_version}}
+        <!-- Update WebView2 if minimum version requirement not met -->
+        <Property Id="MINIMUM_WEBVIEW2_VERSION" Value="{{minimum_webview2_version}}" />
+        <Property Id="EDGEUPDATE_PATH">
+            <RegistrySearch Id="EdgeUpdateLocalMachine64" Root="HKLM" Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate" Name="path" Type="raw" />
+            <RegistrySearch Id="EdgeUpdateLocalMachine32" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate" Name="path" Type="raw"/>
+            <RegistrySearch Id="EdgeUpdateCurrentUser" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate" Name="path" Type="raw"/>
+        </Property>
+        <CustomAction Id="UpdateWebView2ViaEdgeUpdate" Execute="deferred" Property="EDGEUPDATE_PATH" Return="check" Impersonate="no" ExeCommand="/install appguid={F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}&amp;needsadmin=true" />
+        <InstallExecuteSequence>
+            <Custom Action='UpdateWebView2ViaEdgeUpdate' Before='InstallFinalize'>
+                <![CDATA[
+                  NOT REMOVE
+                  AND INSTALLED_WEBVIEW2_VERSION
+                  AND (INSTALLED_WEBVIEW2_VERSION < MINIMUM_WEBVIEW2_VERSION)
+                ]]>
+            </Custom>
+        </InstallExecuteSequence>
+        {{/if}}
+
+        {{/if}}
+
+        <InstallExecuteSequence>
+          <Custom Action="LaunchApplication" After="InstallFinalize">AUTOLAUNCHAPP AND NOT Installed</Custom>
+        </InstallExecuteSequence>
+
+        <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize"/>
+    </Product>
+</Wix>
