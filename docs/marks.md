@@ -130,10 +130,11 @@ maps that to user space, so the same numbers hold on rotated and cropped pages (
   state the page's own content continues in). A section that is not clean, or whose `BDC` and `EMC` are in
   different streams, is left and counted as "stuck" (the row says so); when every page is stuck the step is
   refused with a sentence and nothing changes. Certified documents are refused, signed ones stay incremental.
-- Known limits: colour, `gs` and `Tf` set at depth 0 inside a cut section would have leaked into the following
-  content in the original too, so they are left as they were written (not tracked); property lists given by
-  name (`/Artifact /MC0 BDC`) are not read; sections inside Form XObjects are not handled; marks only in
-  Acrobat's `/PieceInfo` are not seen.
+- Known limits: colour, `gs`, `Tf` and the like set at the top level inside a cut section (outside `q`…`Q`) were
+  inherited by the content after it, so after the cut that content draws with the state before the section; this
+  is not checked (it would leave most word-processor files alone) and is usually what was meant, but it can change
+  how later content looks. Property lists given by name (`/Artifact /MC0 BDC`) are not read; sections inside Form
+  XObjects are not handled; marks only in Acrobat's `/PieceInfo` are not seen.
 - Tests: `another_apps_header_is_found_and_cut_and_the_body_stays`,
   `another_apps_watermark_and_background_are_their_own_rows`,
   `a_section_that_cannot_be_cut_cleanly_is_left_and_reported`, `our_marks_and_another_apps_do_not_mix`.

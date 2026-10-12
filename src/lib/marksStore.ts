@@ -598,9 +598,12 @@ export const useMarks = create<MarksStore>((set, get) => {
     remove: async (kind, foreign = false) => {
       const s = get().sheet;
       if (!s) return;
+      // The pages where a section of another app cannot be cut cleanly are left as they are.
+      const stuck = foreign ? (get().more[s.doc]?.foreign.find((f) => f.kind === kind)?.stuck ?? []) : [];
+      const left = stuck.length > 0 ? ` On ${pagesPhrase(stuck, st().docs[s.doc]?.pageCount ?? 0)} it can't be taken out without changing the rest of the page, so it stays.` : "";
       await run(
         () => (foreign ? api.marksRemove(s.doc, kind, undefined, true) : api.marksRemove(s.doc, kind)),
-        () => `Removed the ${KIND_NAME[kind]}${foreign ? " from another app" : ""}. You can undo it.`,
+        () => `Removed the ${KIND_NAME[kind]}${foreign ? " from another app" : ""}.${left} You can undo it.`,
       );
     },
 

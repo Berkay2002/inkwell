@@ -870,6 +870,31 @@ fn two_kinds_share_the_page_and_each_removal_recomputes_it() {
 }
 
 #[test]
+fn a_watermark_added_updated_and_removed_leaves_the_shrink_alone() {
+    let mut doc = PdfDocument::from_bytes(&page_with("", &corners([0.0, 0.0, 612.0, 792.0]))).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+    let shrunk = word(&reopened(&doc), "UL");
+    let same = |doc: &PdfDocument, step: &str| {
+        let w = word(&reopened(doc), "UL");
+        assert!((w.x0 - shrunk.x0).abs() < 0.01 && (w.y0 - shrunk.y0).abs() < 0.01 && (w.x1 - shrunk.x1).abs() < 0.01, "{step}: {w:?} is not {shrunk:?}");
+    };
+    for behind in [false, true] {
+        let wm = Watermark { text: "DRAFT".into(), behind, ..Watermark::default() };
+        add(&mut doc, &req(Mark::Watermark(wm.clone()), vec![0])).unwrap();
+        same(&doc, "added");
+        let mut r = req(Mark::Watermark(wm), vec![0]);
+        r.replace = true;
+        add(&mut doc, &r).unwrap();
+        same(&doc, "updated");
+        remove(&mut doc, MarkKind::Watermark, &[0]).unwrap();
+        same(&doc, "removed");
+    }
+    // and the header still gives the page back
+    remove(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap();
+    near(word(&reopened(&doc), "UL").x0, 4.0, "original");
+}
+
+#[test]
 fn a_shrink_is_found_again_after_the_streams_were_merged() {
     let mut doc = PdfDocument::from_bytes(&page_with("", &corners([0.0, 0.0, 612.0, 792.0]))).unwrap();
     add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
@@ -935,10 +960,24 @@ fn another_apps_header_is_found_and_cut_and_the_body_stays() {
     assert!(text.contains("Body") && text.contains("LayoutKeep") && text.contains("LineKeep"), "{text:?}");
     assert!(!text.contains("ForeignHeader") && !text.contains("ForeignFooter"), "{text:?}");
     assert_eq!(stream_count(&doc, 0, "/Type /Layout"), 1);
+    // the Layout and LineNum sections are in the streams byte for byte, nested BDC and all
+    let layout = "/Artifact <</Type /Layout /Subtype /Header>> BDC\nBT /F1 10 Tf 72 700 Td (LayoutKeep) Tj ET\nEMC";
+    assert_eq!(stream_count(&doc, 0, layout), 1);
     assert!(foreign_of(&doc, MarkKind::HeaderFooter).is_none());
     // removing again finds nothing
     let mut doc = doc;
     assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (0, 0));
+}
+
+#[test]
+fn a_stream_full_of_unclosed_sections_is_read_in_one_pass() {
+    // 50,000 openers and no EMC: each must not scan to the end (this would be 10^9 steps)
+    let hostile = "/Artifact <</Type /Pagination /Subtype /Header>> BDC\n".repeat(50_000);
+    let started = std::time::Instant::now();
+    let found = super::fit::foreign_sections(hostile.as_bytes());
+    assert_eq!(found.len(), 50_000);
+    assert!(found.iter().all(|f| !f.clean));
+    assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
 }
 
 #[test]

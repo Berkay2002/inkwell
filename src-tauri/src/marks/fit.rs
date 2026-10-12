@@ -109,6 +109,8 @@ fn shrink_sections(data: &[u8]) -> Vec<(Range<usize>, Vec<(MarkKind, Bands)>)> {
                         i = j + 1;
                         continue;
                     }
+                    // No EMC anywhere after this one: none after a later one either.
+                    break;
                 }
             }
         }
@@ -260,6 +262,21 @@ fn clean_inside(inner: &[cs::Op]) -> bool {
 /// The sections of other apps in a content stream, outermost first (what is inside one is cut with it).
 pub(super) fn foreign_sections(data: &[u8]) -> Vec<Foreign> {
     let ops = cs::parse(data);
+    // The EMC that closes each BDC/BMC, matched in one pass (a file full of unclosed sections must
+    // not cost a scan to the end for each of them).
+    let mut ends: Vec<Option<usize>> = vec![None; ops.len()];
+    let mut open = Vec::new();
+    for (j, op) in ops.iter().enumerate() {
+        match op.op.as_slice() {
+            b"BDC" | b"BMC" => open.push(j),
+            b"EMC" => {
+                if let Some(i) = open.pop() {
+                    ends[i] = Some(j);
+                }
+            }
+            _ => {}
+        }
+    }
     let mut out = Vec::new();
     let mut i = 0;
     while i < ops.len() {
@@ -267,16 +284,7 @@ pub(super) fn foreign_sections(data: &[u8]) -> Vec<Foreign> {
             i += 1;
             continue;
         };
-        let mut depth = 1;
-        let end = (i + 1..ops.len()).find(|&j| {
-            match ops[j].op.as_slice() {
-                b"BDC" | b"BMC" => depth += 1,
-                b"EMC" => depth -= 1,
-                _ => {}
-            }
-            depth == 0
-        });
-        match end {
+        match ends[i] {
             Some(j) => {
                 out.push(Foreign { kind, range: ops[i].span.start..ops[j].span.end, clean: clean_inside(&ops[i + 1..j]) });
                 i = j + 1;

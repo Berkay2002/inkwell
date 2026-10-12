@@ -361,7 +361,7 @@ describe("the sheet", () => {
     expect(useMarks.getState().more[1]).toEqual({ foreign, annotated: [2], signed: true, certified: false });
     await useMarks.getState().remove("headerFooter", true);
     expect(api.marksRemove).toHaveBeenCalledWith(1, "headerFooter", undefined, true);
-    expect(useMarks.getState().sheet?.done).toBe("Removed the header and footer from another app. You can undo it.");
+    expect(useMarks.getState().sheet?.done).toBe("Removed the header and footer from another app. On 1 page (2) it can't be taken out without changing the rest of the page, so it stays. You can undo it.");
   });
 
   it("numbers files into a picked folder and leaves this document alone", async () => {
