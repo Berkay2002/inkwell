@@ -758,21 +758,63 @@ fn every_rule_has_one_of_acrobats_groups_and_the_report_lists_it() {
 #[test]
 fn the_report_is_written_as_html_and_as_a_pdf() {
     let r = report(&untagged_article());
-    let html = report::html("Annual <report>.pdf", "11 Oct 2026", &r);
+    let html = report::html("Annual <report>.pdf", "11 Oct 2026", &r, &Default::default());
     assert!(html.contains("<h1>Accessibility report</h1>"));
     assert!(html.contains("Annual &lt;report&gt;.pdf"), "the name is escaped");
     assert!(html.contains("<h3>Alternate text</h3>") && html.contains("Tagged PDF"));
     assert!(html.contains("class=\"failed\">Failed"));
-    let pdf = report::pdf("Annual report.pdf", "11 Oct 2026", &r).unwrap();
+    let pdf = report::pdf("Annual report.pdf", "11 Oct 2026", &r, &Default::default()).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     let doc = PdfDocument::from_bytes(&pdf).unwrap();
     assert!(doc.page_count().unwrap() >= 1);
     // through the engine, cancellable
     let path = file("report-file", &untagged_article());
     let (eng, id) = open(&path);
-    let bytes = report_bytes(&eng, id, false, "today", &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    let bytes = report_bytes(&eng, id, false, "today", &Default::default(), &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert!(String::from_utf8(bytes).unwrap().contains("Quarterly figures.pdf"));
-    assert!(report_bytes(&eng, id, true, "today", &mut |_| {}, &AtomicBool::new(true)).is_err());
+    assert!(report_bytes(&eng, id, true, "today", &Default::default(), &mut |_| {}, &AtomicBool::new(true)).is_err());
+}
+
+#[test]
+fn rules_marked_by_hand_read_as_such_in_the_report_and_change_nothing_in_the_file() {
+    let path = file("report-marks", &untagged_article());
+    let before = std::fs::read(&path).unwrap();
+    let (eng, id) = open(&path);
+    let state = eng.edit_state(id).unwrap();
+    let steps = eng.history(id).unwrap().len();
+    let marks: report::Overrides = [("title".to_string(), report::Override::Passed), ("tagged-pdf".to_string(), report::Override::Skipped), ("no-such-rule".to_string(), report::Override::Passed)].into();
+    let bytes = report_bytes(&eng, id, false, "today", &marks, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    let html = String::from_utf8(bytes).unwrap();
+    assert!(html.contains("Passed manually") && html.contains("Skipped"), "{html}");
+    assert!(html.contains("The checker had it as failed."), "a rule the checker failed says so");
+    assert!(!html.contains("no-such-rule"));
+    // The same report without marks has neither.
+    let plain = report::html("a.pdf", "today", &report(&untagged_article()), &Default::default());
+    assert!(!plain.contains("Passed manually.") && plain.contains("<li>Passed manually: 0</li>"));
+    // Nothing about the document moved.
+    assert_eq!(eng.edit_state(id).unwrap().rev, state.rev);
+    assert_eq!(eng.history(id).unwrap().len(), steps);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn the_fingerprint_is_the_first_id_or_the_page_count_without_one_and_survives_an_edit_and_save() {
+    let path = file("fingerprint", &untagged_article());
+    // No /ID: only the page count.
+    let (eng, id) = open(&path);
+    assert_eq!(fingerprint_doc(&eng, id).unwrap(), "/1");
+    eng.close(id);
+    let bytes = std::fs::read_to_string(&path).unwrap().replace("/Root 1 0 R", "/Root 1 0 R /ID [<0123456789abcdef0123456789abcdef> <ffffffffffffffffffffffffffffffff>]");
+    std::fs::write(&path, bytes).unwrap();
+    let (eng, id) = open(&path);
+    assert_eq!(fingerprint_doc(&eng, id).unwrap(), "0123456789abcdef0123456789abcdef");
+    // An edit and Inkwell's own save keep the first string.
+    fix_doc(&eng, id, &Fix::Title { title: Some("Q3".into()) }, EditSource::User).unwrap();
+    assert_eq!(fingerprint_doc(&eng, id).unwrap(), "0123456789abcdef0123456789abcdef");
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = open(&path);
+    assert_eq!(fingerprint_doc(&eng, id).unwrap(), "0123456789abcdef0123456789abcdef");
 }
 
 #[test]

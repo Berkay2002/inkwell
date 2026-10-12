@@ -3,9 +3,10 @@
 
 use super::autotag::Preview;
 use super::order::ReadingOrder;
+use super::report::Overrides;
 use super::tags::{TagNode, TagPatch};
 use super::{
-    Fix, Problem, Progress, Protection, Report, artifact_doc, check_doc, edit_tag_doc, fix_doc_with, merge_doc, merge_many_doc, move_tag_doc, preview_doc, protection_doc, reading_order_doc, reorder_doc,
+    Fix, Problem, Progress, Protection, Report, artifact_doc, check_doc, edit_tag_doc, fix_doc_with, merge_doc, merge_many_doc, move_tag_doc, fingerprint_doc, preview_doc, protection_doc, reading_order_doc, reorder_doc,
     report_bytes, set_role_doc, split_doc, tag_problems_doc, tags_doc,
 };
 use crate::engine::edit::{EditSource, EditState};
@@ -69,7 +70,8 @@ pub enum ReportFormat {
 }
 
 /// Checks the document again and writes the report to the file of save token `to` (from `pick_save`); returns the
-/// path. `date` is display text for the report's header.
+/// path. `date` is display text for the report's header. `overrides` (rule id to `passed` or `skipped`) are the rules
+/// the person set aside by hand; they change how the report reads and never the document.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn a11y_export_report(
@@ -82,6 +84,7 @@ pub async fn a11y_export_report(
     format: ReportFormat,
     date: String,
     to: String,
+    overrides: Option<Overrides>,
     on_progress: Channel<Progress>,
 ) -> Result<String> {
     let dest = reg.take_save(window.label(), &to)?;
@@ -93,7 +96,7 @@ pub async fn a11y_export_report(
         let mut progress = |p: Progress| {
             let _ = on_progress.send(p);
         };
-        let bytes = report_bytes(&eng, doc, matches!(format, ReportFormat::Pdf), &date, &mut progress, &guard.cancel)?;
+        let bytes = report_bytes(&eng, doc, matches!(format, ReportFormat::Pdf), &date, &overrides.unwrap_or_default(), &mut progress, &guard.cancel)?;
         crate::history_ipc::write_replace(std::path::Path::new(&dest), &bytes).map_err(|e| EngineError::Io(e.to_string()))?;
         window.state::<Paths>().learn(&dest);
         Ok(dest)
@@ -107,6 +110,14 @@ pub async fn a11y_export_report(
 pub async fn a11y_protection(eng: Eng<'_>, doc: DocId) -> Result<Protection> {
     let eng = eng.inner().clone();
     blocking(move || protection_doc(&eng, doc)).await
+}
+
+/// The document's fingerprint (see `fingerprint_doc`): the UI stores it with the marks a person made, so marks
+/// are not applied to a different file that took the same path.
+#[tauri::command]
+pub async fn a11y_fingerprint(eng: Eng<'_>, doc: DocId) -> Result<String> {
+    let eng = eng.inner().clone();
+    blocking(move || fingerprint_doc(&eng, doc)).await
 }
 
 // ---- reading order and tags ----------------------------------------------------------------------

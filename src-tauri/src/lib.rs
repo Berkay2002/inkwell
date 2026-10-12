@@ -1227,6 +1227,7 @@ pub fn run() {
             prepress::app::prepress_save_other,
             prepress::app::prepress_protection,
             a11y::app::a11y_protection,
+            a11y::app::a11y_fingerprint,
             a11y::app::a11y_reading_order,
             a11y::app::a11y_tags,
             a11y::app::a11y_tag_problems,

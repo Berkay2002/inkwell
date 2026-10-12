@@ -10,7 +10,7 @@ import {
   CERTIFIED_WHY,
   LANGS,
   SIGNED_NOTE,
-  STATUS_WORD,
+  applyOverrides,
   autoCheckDue,
   autotagText,
   counts,
@@ -22,6 +22,7 @@ import {
   langLabel,
   progressFraction,
   progressText,
+  statusWord,
   summaryLine,
   takesAlt,
   whereText,
@@ -69,8 +70,8 @@ export function A11yPanel({ doc }: { doc: DocState }) {
     if (open && view === "tags") void st().loadTags(id);
   }, [open, view, id, doc.rev, tagScope, treeFollowsPage ? doc.currentPage : -1]);
 
+  const report = useMemo(() => (d?.report ? applyOverrides(d.report, d.marks) : null), [d?.report, d?.marks]);
   if (!open) return null;
-  const report = d?.report ?? null;
   return (
     <aside className="ax-dock a11y-dock" style={{ width: "min(400px, 45vw)" }} aria-label="Accessibility">
       <section className="ax-panel docked a11y-panel">
@@ -329,10 +330,10 @@ function Summary({ report, checking }: { report: Report; checking: boolean }) {
   return (
     <div className="a11y-summary" aria-busy={checking}>
       <p className="a11y-result">{summaryLine(report)}</p>
-      <div className="a11y-seg" role="img" aria-label={`${c.failed} failed, ${c.manual} to check by hand, ${c.passed} passed of ${total}`}>
+      <div className="a11y-seg" role="img" aria-label={`${c.failed} failed, ${c.manual} to check by hand, ${c.passed} passed${c.passedManually ? `, ${c.passedManually} passed manually` : ""}${c.skipped ? `, ${c.skipped} skipped` : ""} of ${total}`}>
         {seg(c.failed, "failed")}
         {seg(c.manual, "manual")}
-        {seg(c.passed, "passed")}
+        {seg(c.passed + c.passedManually, "passed")}
         {seg(c.skipped, "skipped")}
       </div>
     </div>
@@ -384,7 +385,8 @@ export function Rule({ doc, x }: { doc: DocState; x: RuleResult }) {
           <Icon name={GLYPH[x.status]} size={14} />
         </span>
         <span className="a11y-rule-name">{x.name}</span>
-        <span className={`a11y-status ${x.status}`}>{STATUS_WORD[x.status]}</span>
+        <span className={`a11y-status ${x.status}`}>{statusWord(x)}</span>
+        <MarkMenu doc={doc} x={x} />
       </div>
       {!quiet && (
         <>
@@ -432,6 +434,24 @@ export function Rule({ doc, x }: { doc: DocState; x: RuleResult }) {
         </>
       )}
     </li>
+  );
+}
+
+/** "Passed manually", "Skip rule" and the way back. Reads and writes only the marks: it never edits the document, so it works on a certified one too. */
+function MarkMenu({ doc, x }: { doc: DocState; x: RuleResult }) {
+  const set = (m: "passed" | "skipped" | null) => st().setMark(doc.id, x.rule, m);
+  return (
+    <MenuButton
+      className="a11y-mark"
+      label={`Decide ${x.name} by hand`}
+      items={[
+        { label: "Passed manually", checked: x.mark === "passed", onSelect: () => set("passed") },
+        { label: "Skip rule", checked: x.mark === "skipped", onSelect: () => set("skipped") },
+        { label: "Not checked", hint: "Back to the checker", disabled: !x.mark, title: "This rule has no mark", onSelect: () => set(null) },
+      ]}
+    >
+      <Icon name="more" size={14} />
+    </MenuButton>
   );
 }
 
