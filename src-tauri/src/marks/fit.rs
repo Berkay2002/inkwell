@@ -138,13 +138,17 @@ pub(super) fn shrink_sections(data: &[u8]) -> Vec<(Range<usize>, Vec<(MarkKind, 
     out
 }
 
-/// `data` without `ranges`, as a new stream of the document (a newline where each went).
-fn without(doc: &mut PdfDocument, data: &[u8], ranges: &[Range<usize>]) -> Result<PdfObject> {
+/// `data` without `ranges`, as a new stream of the document (a newline where each went, or `first`
+/// where the first one was).
+fn without(doc: &mut PdfDocument, data: &[u8], ranges: &[Range<usize>], first: Option<&str>) -> Result<PdfObject> {
     let mut out = Vec::with_capacity(data.len());
     let mut at = 0;
-    for r in ranges {
+    for (k, r) in ranges.iter().enumerate() {
         out.extend_from_slice(&data[at..r.start]);
-        out.push(b'\n');
+        match first {
+            Some(text) if k == 0 => out.extend_from_slice(text.as_bytes()),
+            _ => out.push(b'\n'),
+        }
         at = r.end;
     }
     out.extend_from_slice(&data[at..]);
@@ -162,6 +166,8 @@ pub(super) fn set_shrink(doc: &mut PdfDocument, list: Vec<PdfObject>, view: &Vie
     let mut out: Vec<PdfObject> = Vec::with_capacity(list.len());
     // The open wrapper (the first `Wrap` stream): where it is in `out` and how many `q` it has.
     let mut open: Option<(usize, usize)> = None;
+    // Streams with a section inline (a merged page): where in `out`, the bytes, and the ranges.
+    let mut inline: Vec<(usize, Vec<u8>, Vec<Range<usize>>)> = Vec::new();
     for o in list {
         let tag = tag_of(&o);
         if tag.as_deref().is_some_and(|t| t != "Wrap") || !o.is_stream()? {
@@ -171,18 +177,18 @@ pub(super) fn set_shrink(doc: &mut PdfDocument, list: Vec<PdfObject>, view: &Vie
         let data = o.read_stream()?;
         let sections = if has_tag(&data) { shrink_sections(&data) } else { Vec::new() };
         found |= !sections.is_empty();
-        entries.extend(sections.iter().flat_map(|(_, e)| e.iter().copied()));
+        entries.extend(sections.iter().flat_map(|(_, e)| e.iter().map(|(k, b)| (*k, *b))));
         if tag.is_some() {
             if open.is_none() {
                 let qs = cs::parse(&data).iter().filter(|op| op.op == b"q").count();
                 open = Some((out.len(), qs));
             }
             out.push(o);
-        } else if sections.is_empty() {
-            out.push(o);
         } else {
-            let ranges: Vec<Range<usize>> = sections.into_iter().map(|(r, _)| r).collect();
-            out.push(without(doc, &data, &ranges)?);
+            if !sections.is_empty() {
+                inline.push((out.len(), data, sections.into_iter().map(|(r, _)| r).collect()));
+            }
+            out.push(o);
         }
     }
     let kept = entries.iter().find(|(k, _)| *k == kind).map(|(_, b)| *b);
@@ -192,16 +198,19 @@ pub(super) fn set_shrink(doc: &mut PdfDocument, list: Vec<PdfObject>, view: &Vie
         let b = kept.map_or(b, |k| std::array::from_fn(|i| k[i].max(b[i])));
         entries.push((kind, b));
     }
-    if entries.is_empty() && !found {
-        return Ok(out);
-    }
-    let Some((at, qs)) = open else {
-        // Nothing wraps the page's content (it has none): there is nothing to scale.
-        return Ok(out);
-    };
     let body = if entries.is_empty() { String::new() } else { section(view, &entries)? };
-    let wrapper = format!("q %Inkwell\n{body}{}", "q\n".repeat(qs.saturating_sub(1)));
-    out[at] = add_stream(doc, wrapper.as_bytes(), "Wrap", None)?;
+    // Where the page has no open wrapper of its own (its streams were merged), what is left to say
+    // goes where the first inline section stood, and the others are cut.
+    let put_back = open.is_none() && !body.is_empty();
+    for (n, (at, data, ranges)) in inline.iter().enumerate() {
+        out[*at] = without(doc, data, ranges, if put_back && n == 0 { Some(&body) } else { None })?;
+    }
+    if let Some((at, qs)) = open {
+        if !entries.is_empty() || found {
+            let wrapper = format!("q %Inkwell\n{body}{}", "q\n".repeat(qs.saturating_sub(1)));
+            out[at] = add_stream(doc, wrapper.as_bytes(), "Wrap", None)?;
+        }
+    }
     Ok(out)
 }
 
@@ -333,7 +342,7 @@ pub fn remove_foreign(doc: &mut PdfDocument, kind: MarkKind, pages: &[u32]) -> R
             } else {
                 cut += ranges.len();
                 changed = true;
-                list.push(without(doc, &data, &ranges)?);
+                list.push(without(doc, &data, &ranges, None)?);
             }
         }
         if changed {

@@ -1140,3 +1140,31 @@ fn a_stream_of_unclosed_shrink_sections_is_read_in_one_pass() {
     assert_eq!(found.len(), 1);
     assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
 }
+
+#[test]
+fn on_a_merged_page_removing_one_kind_leaves_the_others_shrink() {
+    let page = || PdfDocument::from_bytes(&page_with("", &corners([0.0, 0.0, 612.0, 792.0]))).unwrap();
+    let bates = Bates { shrink: true, ..Bates::default() };
+    // what each kind alone does to the page
+    let mut hf_only = page();
+    add(&mut hf_only, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+    let mut bates_only = page();
+    add(&mut bates_only, &req(Mark::Bates(bates.clone()), vec![0])).unwrap();
+    let (hf_ul, bates_ul) = (word(&reopened(&hf_only), "UL"), word(&reopened(&bates_only), "UL"));
+    assert!((hf_ul.y0 - bates_ul.y0).abs() > 10.0, "the two differ, or the test says nothing");
+
+    for (removed, left, expect) in [(MarkKind::Bates, MarkKind::HeaderFooter, hf_ul), (MarkKind::HeaderFooter, MarkKind::Bates, bates_ul)] {
+        let mut doc = page();
+        add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+        add(&mut doc, &req(Mark::Bates(bates.clone()), vec![0])).unwrap();
+        merge_streams(&mut doc, 0);
+        assert!(remove(&mut doc, removed, &[0]).unwrap() >= 1);
+        let after = reopened(&doc);
+        near(word(&after, "UL").y0, expect.y0, &format!("the {left:?} shrink stays"));
+        assert_eq!(stream_count(&doc, 0, "PCMark /Shrink"), 1, "one section, not two");
+        // and the last one out gives the page back
+        assert!(remove(&mut doc, left, &[0]).unwrap() >= 1);
+        assert_eq!(stream_count(&doc, 0, "PCMark /Shrink"), 0);
+        near(word(&reopened(&doc), "UL").x0, 4.0, "original");
+    }
+}
