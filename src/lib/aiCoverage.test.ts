@@ -27,8 +27,8 @@ describe("the assistant's coverage of the app's tools", () => {
     expect(missing, `add these to src/lib/aiCoverage.json: tools (assistant tool) or excluded (reason)`).toEqual([]);
   });
 
-  it("covers or excludes every command that imports or exports data", () => {
-    const ids = [...commandsSource.matchAll(/id: "([a-z0-9-]+-(?:import|export))"/g)].map((m) => m[1]);
+  it("covers or excludes every command that imports or exports data, and the stamps manager", () => {
+    const ids = [...commandsSource.matchAll(/id: "([a-z0-9-]+-(?:import|export)|custom-stamps)"/g)].map((m) => m[1]);
     expect(ids.length).toBeGreaterThan(0);
     const missing = ids.filter((id) => !(id in tools) && !(id in excluded));
     expect(missing, `add these to src/lib/aiCoverage.json`).toEqual([]);

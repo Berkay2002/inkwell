@@ -84,7 +84,7 @@ it runs; the panel's Stop ends the job and leaves nothing half-written; a made f
 (`UiAction::OpenTool`, `aiOpenTool.ts`). Excluded for good (reasons in `aiCoverage.json`): digital signing and
 certifying, passwords and permissions, printing, overwriting the original, opening links, importing and exporting
 comments or form data (XFDF, FDF, JSON: a file the user picks or names, and an import overwrites what the document
-holds), laying out form fields, and anything that needs a file the user must pick (picture marks, insert image, merge).
+holds), laying out form fields, the custom stamps manager (stamp pictures come from files), and anything that needs a file the user must pick (picture marks, insert image, merge).
 
 ## Rules every action tool follows
 
