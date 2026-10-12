@@ -327,6 +327,20 @@ fn a_signed_file_that_had_to_be_repaired_takes_no_edit_but_can_be_saved_as_a_cop
     eng.save_as_other(id, &copy).unwrap();
     let again = crate::engine::Engine::new(2, 64 << 20);
     assert_eq!(again.open(&copy).unwrap().page_count, 2);
+    // The copy is the document now, and takes edits.
+    eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap();
+    assert!(eng.edit_state(id).unwrap().undo.is_some());
+}
+
+#[test]
+fn a_repaired_file_whose_signature_state_cannot_be_read_is_refused_with_its_own_message() {
+    let d = dir("certified", "repaired-unknown");
+    // More fields than the check walks: `signed` fails closed, and the message says why.
+    let bytes = broken_xref(pdf(&format!("/AcroForm << /Fields [{}] >>", "0 ".repeat(20_001)), "<< >>"));
+    let (eng, id, _) = crate::outline::tests::open_bytes(&d, "a.pdf", &bytes);
+    let e = eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap_err().to_string();
+    assert!(e.contains("repaired") && e.contains("could not be read") && !e.contains("signed file"), "{e}");
+    assert!(eng.edit_state(id).unwrap().undo.is_none());
 }
 
 #[test]
