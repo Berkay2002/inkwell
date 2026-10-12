@@ -335,3 +335,15 @@ fn an_fdf_with_more_fields_than_the_walk_allows_is_refused_not_cut_short() {
     let f = format!("%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [{refs}] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
     assert!(matches!(parse(f.as_bytes()), Err(EngineError::Invalid(_))));
 }
+
+#[test]
+fn one_kids_array_shared_by_many_parents_is_refused_before_the_stack_grows_past_the_limit() {
+    // Direct kids with no name that each point back at the one indirect array: nothing dedups them
+    // and no name is charged, so only the count of kids pushed can stop the walk.
+    let kids = "<< /Kids 2 0 R >> ".repeat(60_000);
+    let f = format!("%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [<< /Kids 2 0 R >>] >> >>\nendobj\n2 0 obj\n[{kids}]\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    PEAK_STACK.with(|p| p.set(0));
+    assert!(matches!(parse(f.as_bytes()), Err(EngineError::Invalid(m)) if m.contains("100 000 fields")));
+    let peak = PEAK_STACK.with(|p| p.get());
+    assert!(peak > 0 && peak <= MAX_NODES, "the stack held {peak} entries");
+}

@@ -347,6 +347,9 @@ fn fdf_value(v: &PdfObject, b: &Budget) -> Val {
     one(v).map_or(Val::Invalid("a field takes text, a list of text or on/off"), Val::Text)
 }
 
+#[cfg(test)]
+thread_local!(static PEAK_STACK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
 /// Reads `/Fields` (with `/Kids`) by an explicit stack: depth, node count and revisits are bounded, and
 /// only `/T`, `/V` and `/Kids` of a field are looked at: never `/AA`, `/JavaScript` or `/F`.
 pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
@@ -355,12 +358,15 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
         let budget = Budget::new();
         let Some(top) = get(root, "Fields").filter(|a| a.is_array().unwrap_or(false)) else { return Ok(out) };
         let mut stack: Vec<(PdfObject, String, usize)> = Vec::new();
-        let kids_of = |a: &PdfObject, prefix: &str, depth: usize, stack: &mut Vec<(PdfObject, String, usize)>| {
+        // Every kid pushed counts, not every kid popped: one /Kids array shared by many parents would
+        // otherwise grow the stack far past the limit before the pops reach it.
+        let mut pushed = 0usize;
+        let mut kids_of = |a: &PdfObject, prefix: &str, depth: usize, stack: &mut Vec<(PdfObject, String, usize)>| -> Result<()> {
             let n = a.len().unwrap_or(0);
-            if n > MAX_NODES {
+            pushed = pushed.saturating_add(n);
+            if pushed > MAX_NODES {
                 // Fails closed: the file is refused, not read in part.
-                budget.fail();
-                return;
+                return Err(bad("This FDF file has more than 100 000 fields, so Inkwell does not read it."));
             }
             for i in (0..n as i32).rev() {
                 // Each kid holds a copy of its parent's name.
@@ -371,16 +377,14 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
                     stack.push((k, prefix.to_string(), depth));
                 }
             }
+            #[cfg(test)]
+            PEAK_STACK.with(|p| p.set(p.get().max(stack.len())));
+            Ok(())
         };
-        kids_of(&top, "", 0, &mut stack);
+        kids_of(&top, "", 0, &mut stack)?;
         let mut seen: HashSet<i32> = HashSet::new();
-        let mut nodes = 0usize;
         while let Some((f, prefix, depth)) = stack.pop() {
             budget.check()?;
-            nodes += 1;
-            if nodes > MAX_NODES {
-                return Err(bad("This FDF file has more than 100 000 fields, so Inkwell does not read it."));
-            }
             if !f.is_dict().unwrap_or(false) || depth >= MAX_DEPTH {
                 continue;
             }
@@ -407,7 +411,7 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
                 }
             }
             if let Some(k) = get(&f, "Kids").filter(|a| a.is_array().unwrap_or(false)) {
-                kids_of(&k, &name, depth + 1, &mut stack);
+                kids_of(&k, &name, depth + 1, &mut stack)?;
             }
         }
         budget.check()?;
