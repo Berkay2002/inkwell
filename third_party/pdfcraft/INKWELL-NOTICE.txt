@@ -6,6 +6,7 @@ Adapted files carry a header naming the pdfcraft path:
 - src-tauri/src/convert/create.rs <- crates/create/src/lib.rs   (text decoding and wrapping rules, TIFF page handling)
 - src-tauri/src/sign/crypto/{der,x509,cms,pkcs12,keys,rsa_pad}.rs <- crates/sign/src/{der,x509,cms,pkcs12,keys,rsa_pad}.rs   (X.509, CMS/PAdES B-B, PKCS #12; windows.rs ideas reimplemented in winstore.rs;
   src-tauri/src/sign/crypto/testdata/ holds crates/sign/tests/data fixtures, test keys that protect nothing)
+- src-tauri/src/sign/crypto/tests.rs <- crates/sign/tests/crypto.rs, crates/sign/tests/store_keys.rs   (several tests)
 - src-tauri/src/forms/af.rs       <- crates/forms/src/af.rs       (AcroForm JavaScript subset: format, keystroke, validate, calculate)
 - src-tauri/src/forms/detect.rs   <- crates/forms/src/detect.rs   (field auto-detection on flat forms)
 - src-tauri/src/forms/mod.rs      <- crates/forms/src/appearance.rs (parse_da: default appearance string, font size clamp)
@@ -29,3 +30,9 @@ Adapted files carry a header naming the pdfcraft path:
 - src-tauri/src/search/mod.rs      <- crates/render/src/text.rs   (find_opts: case folding, white space collapse, whole-word check)
 - src-tauri/src/print/layout.rs    <- crates/print/src/lib.rs, crates/print/src/range.rs   (Size, Multiple, Booklet and Poster layouts, page choice, sequencing)
 - src-tauri/src/print/pdf.rs       <- crates/print/src/lib.rs   (Save as PDF: one form XObject per source page used, placed and clipped per cell or tile)
+- src-tauri/src/forms/js.rs        <- crates/js/src/lib.rs   (Acrobat JavaScript for forms: event, getField, app, util, console; runs on QuickJS instead of boa)
+- src-tauri/src/forms/js/prelude.js <- crates/js/src/lib.rs  (the Acrobat object model, as plain JavaScript over host functions)
+- src-tauri/src/forms/js/util.rs   <- crates/js/src/lib.rs   (util.printf, util.printd, util.printx)
+- src-tauri/src/sign/pdf.rs        <- crates/sign/src/pdf.rs   (signature dictionary, /ByteRange and /Contents placeholders, DocMDP certification, validation checks; objects on MuPDF)
+- src-tauri/src/sign/crypto/mod.rs <- crates/sign/src/lib.rs   (module layout; the header names the sign crate, not a file)
+- src-tauri/src/fillsign/store.rs  <- crates/engine/src/signature_image.rs   (signature picture checks: PNG or JPEG limits, metadata dropped, paper knocked out)

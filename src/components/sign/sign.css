@@ -341,6 +341,10 @@
   border: 1px solid var(--border);
   border-radius: 12px;
 }
+.sg-card.focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
 .sg-card-main {
   display: flex;
   gap: 10px;

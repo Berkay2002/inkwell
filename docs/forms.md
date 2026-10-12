@@ -8,7 +8,7 @@ tool strip while preparing a form.
 
 ## Filling
 - Every AcroForm field type: text (single and multi-line, comb, password, character limit), check box, radio groups,
-  drop-down (also editable), list box (also multiple), push buttons, signature fields (shown, not signed here).
+  drop-down (also editable), list box (also multiple), push buttons, signature fields (click one to sign into it or to see its signature, see sign.md).
 - The page tile already draws the field; a see-through control sits over it and becomes the editor on focus. Values
   commit on blur or Enter, Esc reverts. A value that fails its format or range is rejected with Acrobat's message and the
   document is left as it was.

@@ -181,7 +181,7 @@ change.
 
 ## Not done
 
-- Named destinations and JavaScript are listed as "other" and kept as they are, not editable.
+- Named destinations are followed and judged (a name the document does not have reads as broken), but the name tree and `/Dests` are not editable; JavaScript and named actions are listed as "other" and kept as they are.
 
 ## Tests
 

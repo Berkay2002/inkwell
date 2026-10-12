@@ -9,6 +9,10 @@ Engine: `src-tauri/src/sign/`. `pdf.rs` writes and checks PAdES signatures, `cry
 - `sign_document` signs as one incremental update (the bytes before it are kept as they are), optionally certifying (DocMDP P=1, 2 or 3), with a visible box or none.
 - `sign_list` checks every signature in the file and returns `SignatureInfo` per signature: `status` (`valid`, `unknownSigner`, `warning`, `invalid`), `changes` (`none`, `signaturesOnly`, `changed`), the signer, issuer, the time from `/M`, the reason, the certify level and `warnings` with a stable `code`.
 
+## Signature fields on the page
+
+A signature field in a form is a button over the field. An empty one (`<label>: click to sign`) opens the signing sheet aimed at that field (`signField`, the same entry as the Sign tool's "Sign here" and the rail's empty-field "Sign"); nothing is signed until Sign is pressed in the sheet. A signed one (`<label>: signed by <name>, click for details`) opens the Signatures rail on that signature. After a certification that allows no changes (P=1) an empty field shows the reason and does nothing (`aria-disabled`); P=2 and P=3 allow signing, as the engine does. A read-only empty field (`Ff` bit 1) shows `<label>: read-only field` and does nothing here; the Sign tool's "Sign here" and the rail still offer it, because the engine does not check the flag. A field-level `/Lock` (FieldMDP) is not read, so it is not shown as locked.
+
 ## How a signature is checked
 
 1. **Byte range.** `/ByteRange` must start at 0, leave exactly the `/Contents` hex string out, and stay inside the file. The signature covers the file up to the range's end.
