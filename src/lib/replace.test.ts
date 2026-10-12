@@ -20,7 +20,7 @@ import { useStore } from "../store";
 import type { ReplaceResult } from "./api";
 import { replaceText } from "./edit";
 import { lockedReason, useReplace } from "./replace";
-import { reportOf, whyNotReplace } from "./replaceLogic";
+import { reportAt, reportOf, whyNotReplace } from "./replaceLogic";
 import { useTextEdit } from "./textEdit";
 
 const result = (over: Partial<ReplaceResult> = {}): ReplaceResult => ({
@@ -43,6 +43,14 @@ describe("what a run reports", () => {
     expect(r.lines).toEqual(['p. 3, "aaa": skipped: it is set in a Type 3 font, whose letters are drawings']);
     // One listed of two counted: the other is "more".
     expect(r.more).toBe(1);
+  });
+
+  it("says in the summary when the run stopped early, and hides a report once the document moved on", () => {
+    expect(reportOf(result({ replaced: 2000, stopped: "Stopped after 2000 replacements." })).summary).toBe("2000 replaced, 0 skipped, stopped early");
+    const r = { ...reportOf(result({ replaced: 1 })), rev: 4 };
+    expect(reportAt(r, 4)).toBe(r);
+    expect(reportAt(r, 5)).toBeNull();
+    expect(reportAt(null, 5)).toBeNull();
   });
 
   it("carries why it stopped and which font stood in", () => {

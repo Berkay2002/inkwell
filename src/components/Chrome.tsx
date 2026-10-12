@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useFind } from "../lib/findStore";
 import { useReplace } from "../lib/replace";
-import { whyNotReplace } from "../lib/replaceLogic";
+import { reportAt, whyNotReplace } from "../lib/replaceLogic";
 import { useTextEdit } from "../lib/textEdit";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
@@ -334,7 +334,7 @@ function ReplaceRow({ doc }: { doc: DocState }) {
   const { id, search } = doc;
   const text = useReplace((s) => s.text);
   const busy = useReplace((s) => s.busy);
-  const report = useReplace((s) => s.report[id] ?? null);
+  const report = useReplace((s) => reportAt(s.report[id], doc.rev));
   const locked = useTextEdit((s) => Object.values(s.docs[id]?.pages ?? {}).find((p) => p.locked)?.locked ?? null);
   const [open, setOpen] = useState(false);
   const hit = search.hits[search.current];

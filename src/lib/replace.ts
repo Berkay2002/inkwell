@@ -31,7 +31,11 @@ export function lockedReason(doc: number): string | null {
 }
 
 export const useReplace = create<ReplaceStore>((set, get) => {
-  const say = (doc: number, report: ReplaceReport) => set((s) => ({ report: { ...s.report, [doc]: report } }));
+  // Stamped with the generation the run left, so a later undo or edit hides it (reportAt).
+  const say = (doc: number, report: ReplaceReport) => {
+    const rev = useStore.getState().docs[doc]?.rev;
+    set((s) => ({ report: { ...s.report, [doc]: { ...report, rev } } }));
+  };
 
   /** Sends what was typed in a block first (one undo step of its own), then lets go of the selection:
    * its index may name another block once the text is replaced. */
