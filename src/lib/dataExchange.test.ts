@@ -44,6 +44,8 @@ describe("summary texts", () => {
       "Imported form data: 1 field filled, 2 already had the value, 5 skipped: A (there is no field with this name); B (there is no field with this name); C (there is no field with this name) and 2 more.",
     );
     expect(formImportText({ set: 0, unchanged: 0, skipped: [], skippedTotal: 0 }, false)).toBe("Imported form data: nothing to fill.");
+    // A total with nothing listed (never a dangling "skipped:  and 1 more").
+    expect(formImportText({ set: 1, unchanged: 0, skipped: [], skippedTotal: 1 }, false)).toBe("Imported form data: 1 field filled, 1 skipped.");
   });
 
   it("export texts name the file and what was left out", () => {

@@ -195,7 +195,20 @@ pub struct Parsed {
     pub fields: Vec<(String, Val)>,
     /// Entries left out (past the per-file limit, or with a name over 1 MB): counted, not read.
     pub over: usize,
+    /// The first of them, with why, so the summary can name them.
+    pub left_out: Vec<(String, &'static str)>,
 }
+
+impl Parsed {
+    fn leave_out(&mut self, name: &str, why: &'static str) {
+        self.over += 1;
+        if self.left_out.len() < LISTED {
+            self.left_out.push((name.chars().take(60).collect(), why));
+        }
+    }
+}
+
+const OVER_LIMIT: &str = "past the limit of 10 000 entries in one file";
 
 pub fn parse_json(bytes: &[u8]) -> Result<Parsed> {
     // serde_json stops at 128 levels; the cap here is 64, and counting is cheap. Values are counted the same
@@ -233,7 +246,7 @@ pub fn parse_json(bytes: &[u8]) -> Result<Parsed> {
     let mut out = Parsed::default();
     for (k, v) in map {
         if out.fields.len() >= MAX_ITEMS {
-            out.over += 1;
+            out.leave_out(&k, OVER_LIMIT);
             continue;
         }
         let str_ok = |s: &str| s.len() <= MAX_STR;
@@ -259,7 +272,7 @@ pub fn parse_json(bytes: &[u8]) -> Result<Parsed> {
         if k.len() <= MAX_STR {
             out.fields.push((k, val));
         } else {
-            out.over += 1;
+            out.leave_out(&k, "the field name is longer than 1 MB");
         }
     }
     Ok(out)
@@ -280,7 +293,7 @@ pub fn parse_xfdf(bytes: &[u8]) -> Result<Parsed> {
             let values: Vec<String> = f.children("value").map(|v| v.text.clone()).collect();
             if !values.is_empty() {
                 if out.fields.len() >= MAX_ITEMS {
-                    out.over += 1;
+                    out.leave_out(&name, OVER_LIMIT);
                 } else {
                     let v = if values.len() == 1 { Val::Text(values.into_iter().next().unwrap_or_default()) } else { Val::Many(values) };
                     out.fields.push((name.clone(), v));
@@ -388,7 +401,7 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
             }
             if let Some(v) = get(&f, "V") {
                 if out.fields.len() >= MAX_ITEMS {
-                    out.over += 1;
+                    out.leave_out(&name, OVER_LIMIT);
                 } else if !name.is_empty() && budget.take(name.len()) {
                     out.fields.push((name.clone(), fdf_value(&v, &budget)));
                 }
@@ -548,9 +561,10 @@ fn fill(rt: &Rt, parsed: &Parsed) -> Result<(Summary, Vec<u32>)> {
             Err(other) => skip(&mut sum, name, other.to_string()),
         }
     }
-    if parsed.over > 0 {
-        sum.skipped_total += parsed.over;
+    for (name, why) in &parsed.left_out {
+        skip(&mut sum, name, *why);
     }
+    sum.skipped_total += parsed.over.saturating_sub(parsed.left_out.len());
     touched.sort_unstable();
     touched.dedup();
     Ok((sum, touched))

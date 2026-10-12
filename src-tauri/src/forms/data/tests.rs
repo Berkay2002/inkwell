@@ -312,6 +312,8 @@ fn a_json_name_over_one_megabyte_is_counted_as_skipped() {
     let file = format!(r#"{{"Full name": "Kim", "{}": "x"}}"#, "n".repeat(MAX_STR + 1));
     let r = import_one(&eng, id, &parse(file.as_bytes()).unwrap(), EditSource::User).unwrap();
     assert_eq!((r.summary.set, r.summary.skipped_total), (1, 1), "{:?}", r.summary);
+    let k = &r.summary.skipped[0];
+    assert!(k.name.starts_with("nnn") && k.name.len() <= 60 && k.reason.contains("1 MB"), "{k:?}");
 }
 
 #[test]

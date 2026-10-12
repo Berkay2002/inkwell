@@ -77,7 +77,8 @@ export function formImportText(s: FormSummary, signed: boolean): string {
   if (s.skippedTotal) {
     const shown = s.skipped.slice(0, 3).map((k) => `${k.name} (${k.reason})`);
     const more = s.skippedTotal - shown.length;
-    head += `, ${s.skippedTotal} skipped: ${shown.join("; ")}${more > 0 ? ` and ${more} more` : ""}`;
+    head += `, ${s.skippedTotal} skipped`;
+    if (shown.length) head += `: ${shown.join("; ")}${more > 0 ? ` and ${more} more` : ""}`;
   }
   head += ".";
   return signed && s.set ? `${head} ${SIGNED_NOTE}` : head;
