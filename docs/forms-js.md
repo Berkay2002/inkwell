@@ -128,9 +128,10 @@ Anything else returns `undefined` and the log says "<name> is not supported": ti
 back a handle and never fire), `app.execMenuItem`, mail, `Net`, `SOAP`, `importDataObject`, page content scripts, `global`
 persistence across sessions, and the like. Also not run: button mouse-up scripts, `OpenAction`/page/document-event
 scripts, and the K/V scripts of radio buttons.
-Page actions are one of these on purpose: a page's `/AA /O` and `/C` (and a widget's `PO` and `PC`) are listed and
-editable in the Document JavaScript sheet but never run, so an `app.alert` in one shows nothing. The sandbox loads only
-the document's `/Names /JavaScript` scripts and the field scripts above (`forms/scripts.rs`).
+Page actions are one of these on purpose: a page's `/AA /O` and `/C` are listed and editable in the Document JavaScript
+sheet but never run, so an `app.alert` in one shows nothing (a widget's `PO` and `PC` are only counted there, and not
+run either). The sandbox loads only the document's `/Names /JavaScript` scripts and the field scripts above
+(`forms/scripts.rs`).
 Authoring (`forms_edit`, `forms_add`) redraws a field with the native formatter only; the `/F` script of a field being
 authored is shown after the next fill or listing.
 
