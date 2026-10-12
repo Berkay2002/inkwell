@@ -19,9 +19,24 @@ const PIXELS: [u8; 24] = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 0, 0, 
 /// inline 2 × 2 grey image at (400,600)-(450,650), and a line of text; other pages draw `Im1` too
 /// when `shared`.
 fn pdf(pages: usize, shared: bool) -> Vec<u8> {
+    pdf_with(pages, shared, "", &[])
+}
+
+/// [`pdf`] with `catalog` keys added and `extra` objects after the pages' (numbered from `5 + 2 * pages`).
+fn pdf_with(pages: usize, shared: bool, catalog: &str, extra: &[String]) -> Vec<u8> {
+    pdf_attrs(pages, shared, catalog, extra, &|_| String::new())
+}
+
+/// [`pdf_with`] with `attrs(i)` added to page `i`'s dictionary (`/Rotate 90`, a different `/MediaBox`).
+fn pdf_attrs(pages: usize, shared: bool, catalog: &str, extra: &[String], attrs: &dyn Fn(usize) -> String) -> Vec<u8> {
+    pdf_inline(pages, shared, catalog, extra, attrs, "/G")
+}
+
+/// [`pdf_attrs`] with `inline_cs` as the colour space of page 1's inline image (4 data bytes, 2 × 2 pixels).
+fn pdf_inline(pages: usize, shared: bool, catalog: &str, extra: &[String], attrs: &dyn Fn(usize) -> String, inline_cs: &str) -> Vec<u8> {
     let mut objs: Vec<Vec<u8>> = Vec::new();
     let kids: String = (0..pages).map(|i| format!("{} 0 R ", 5 + i * 2)).collect();
-    objs.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
+    objs.push(format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>").into_bytes());
     objs.push(format!("<< /Type /Pages /Kids [{kids}] /Count {pages} >>").into_bytes());
     let mut img = format!(
         "<< /Type /XObject /Subtype /Image /Width 4 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n",
@@ -35,14 +50,16 @@ fn pdf(pages: usize, shared: bool) -> Vec<u8> {
     for i in 0..pages {
         objs.push(
             format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im1 3 0 R >> /Font << /F1 4 0 R >> >> /Contents {} 0 R >>",
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {} /Resources << /XObject << /Im1 3 0 R >> /Font << /F1 4 0 R >> >> /Contents {} 0 R >>",
+                attrs(i),
                 6 + i * 2
             )
             .into_bytes(),
         );
         let mut c: Vec<u8> = if i == 0 || shared { b"q 200 0 0 100 100 500 cm /Im1 Do Q\n".to_vec() } else { Vec::new() };
         if i == 0 {
-            c.extend_from_slice(b"q 50 0 0 50 400 600 cm BI /W 2 /H 2 /CS /G /BPC 8 ID \x10\x60\xa0\xf0 EI Q\n");
+            c.extend_from_slice(format!("q 50 0 0 50 400 600 cm BI /W 2 /H 2 /CS {inline_cs} /BPC 8 ID ").as_bytes());
+            c.extend_from_slice(b"\x10\x60\xa0\xf0 EI Q\n");
         }
         c.extend_from_slice(format!("BT /F1 12 Tf 72 72 Td (Page {}) Tj ET\n", i + 1).as_bytes());
         let mut s = format!("<< /Length {} >>\nstream\n", c.len()).into_bytes();
@@ -50,6 +67,7 @@ fn pdf(pages: usize, shared: bool) -> Vec<u8> {
         s.extend_from_slice(b"\nendstream");
         objs.push(s);
     }
+    objs.extend(extra.iter().map(|o| o.clone().into_bytes()));
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (i, body) in objs.iter().enumerate() {
@@ -551,4 +569,575 @@ fn a_crop_of_a_turned_image_keeps_its_shape() {
     // And it still moves as one with its image.
     change(&eng, id, Some(0), ImageChange::Move { dx: 10.0, dy: 0.0 });
     assert!(near(list(&eng, id)[0].rect, [310.0, 300.0, 410.0, 360.0]));
+}
+
+// ---- several images at once, free rotation -----------------------------------------------------
+
+fn many(eng: &Engine, id: DocId, items: Vec<(u32, ImageChange)>) -> Result<ImageEdited> {
+    let rev = eng.edit_state(id).unwrap().rev;
+    let items: Vec<ImageItem> = items.into_iter().map(|(index, change)| ImageItem { index, change }).collect();
+    edit_many(eng, id, rev, 0, &items, EditSource::User)
+}
+
+#[test]
+fn moving_several_images_is_one_undo_step() {
+    let d = dir("many-move");
+    let (eng, id, path) = open(&d, &pdf(1, false));
+    let r = many(&eng, id, vec![(0, ImageChange::Move { dx: 10.0, dy: 20.0 }), (1, ImageChange::Move { dx: -100.0, dy: 0.0 })]).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Move 2 images on p. 1"));
+    let l = list(&eng, id);
+    assert!(near(l[0].rect, [110.0, 212.0, 310.0, 312.0]) && near(l[1].rect, [300.0, 142.0, 350.0, 192.0]), "{l:?}");
+    // One undo takes both back, one redo does both again.
+    eng.undo(id).unwrap();
+    let l = list(&eng, id);
+    assert!(near(l[0].rect, [100.0, 192.0, 300.0, 292.0]) && near(l[1].rect, [400.0, 142.0, 450.0, 192.0]), "{l:?}");
+    eng.redo(id).unwrap();
+    // Saved and reopened the same.
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let l = list(&eng, id);
+    assert!(near(l[0].rect, [110.0, 212.0, 310.0, 312.0]) && near(l[1].rect, [300.0, 142.0, 350.0, 192.0]), "{l:?}");
+}
+
+#[test]
+fn deleting_several_images_is_one_undo_step_whatever_the_order() {
+    let d = dir("many-delete");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    let r = many(&eng, id, vec![(0, ImageChange::Delete), (1, ImageChange::Delete)]).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Delete 2 images on p. 1"));
+    assert!(list(&eng, id).is_empty());
+    eng.undo(id).unwrap();
+    assert_eq!(list(&eng, id).len(), 2, "one undo brings both back");
+    // Just the first of two: the one after it keeps its place.
+    many(&eng, id, vec![(0, ImageChange::Delete)]).unwrap();
+    let l = list(&eng, id);
+    assert_eq!((l.len(), l[0].kind), (1, ImageKind::Inline));
+}
+
+#[test]
+fn a_batch_that_does_not_make_sense_changes_nothing() {
+    let d = dir("many-bad");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    let rev = eng.edit_state(id).unwrap().rev;
+    let bad: Vec<Vec<(u32, ImageChange)>> = vec![
+        vec![],
+        vec![(0, ImageChange::Move { dx: 1.0, dy: 1.0 }), (0, ImageChange::Move { dx: 2.0, dy: 2.0 })],
+        vec![(0, ImageChange::Delete), (1, ImageChange::Move { dx: 1.0, dy: 1.0 })],
+        vec![(0, ImageChange::Crop { rect: [0.0, 0.0, 10.0, 10.0], pixels: false })],
+        vec![(0, ImageChange::Replace { file: "x".into() })],
+        // The second item fails after the first was applied: the step is not taken at all.
+        vec![(0, ImageChange::Move { dx: 5.0, dy: 5.0 }), (7, ImageChange::Move { dx: 5.0, dy: 5.0 })],
+    ];
+    for items in bad {
+        let r = many(&eng, id, items.clone());
+        assert!(matches!(r, Err(EngineError::Invalid(_))), "{items:?}: {r:?}");
+        assert_eq!(eng.edit_state(id).unwrap().rev, rev, "{items:?}");
+    }
+    assert!(near(list(&eng, id)[0].rect, [100.0, 192.0, 300.0, 292.0]));
+    let items = [ImageItem { index: 0, change: ImageChange::Delete }];
+    assert!(matches!(edit_many(&eng, id, rev + 1, 0, &items, EditSource::User), Err(EngineError::Stale)));
+}
+
+#[test]
+fn turning_by_30_degrees_is_saved_and_reopened() {
+    let d = dir("angle");
+    let (eng, id, path) = open(&d, &pdf(1, false));
+    assert!(list(&eng, id)[0].angle.abs() < 0.01);
+    let r = change(&eng, id, Some(0), ImageChange::Angle { degrees: 30.0 });
+    assert_eq!(r.state.undo.as_deref(), Some("Rotate image on p. 1"));
+    // 200 × 100 about (200, 242): the box grows to (200 cos + 100 sin, 200 sin + 100 cos) = (223.2, 186.6).
+    let check = |b: &ImageBlock| {
+        assert!(near(b.full_rect, [200.0 - 111.603, 242.0 - 93.301, 200.0 + 111.603, 242.0 + 93.301]), "{b:?}");
+        assert!((b.angle - 30.0).abs() < 0.01, "{}", b.angle);
+        // The picture's own corners: its bottom left (0,0) was (100, 292); turned clockwise about the centre.
+        let (s, c) = (30f32.to_radians().sin(), 30f32.to_radians().cos());
+        let (x, y) = (-100.0f32, 50.0f32);
+        let want = (200.0 + x * c - y * s, 242.0 + x * s + y * c);
+        assert!((b.quad[0] - want.0).abs() < 0.05 && (b.quad[1] - want.1).abs() < 0.05, "{:?} vs {want:?}", &b.quad[..2]);
+    };
+    check(&list(&eng, id)[0]);
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    check(&list(&eng2, id2)[0]);
+    // Turned again by -30 it is upright, and the content did not grow a stack of transforms it can't undo.
+    change(&eng2, id2, Some(0), ImageChange::Angle { degrees: -30.0 });
+    let b = list(&eng2, id2)[0].clone();
+    assert!(near(b.full_rect, [100.0, 192.0, 300.0, 292.0]) && b.angle.abs() < 0.01, "{b:?}");
+    eng2.undo(id2).unwrap();
+    check(&list(&eng2, id2)[0]);
+    // 360 and a turn that is no turn change nothing, and are refused.
+    let rev = eng2.edit_state(id2).unwrap().rev;
+    for degrees in [0.0, 360.0, f64::NAN] {
+        let r = edit(&eng2, id2, rev, 0, Some(0), &ImageChange::Angle { degrees }, EditSource::User);
+        assert!(matches!(r, Err(EngineError::Invalid(_))), "{degrees}: {r:?}");
+    }
+}
+
+#[test]
+fn a_turned_image_is_only_scaled_evenly_and_its_inline_twin_turns_too() {
+    let d = dir("angle-resize");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    change(&eng, id, Some(0), ImageChange::Angle { degrees: 30.0 });
+    let rev = eng.edit_state(id).unwrap().rev;
+    let r = edit(&eng, id, rev, 0, Some(0), &ImageChange::Resize { rect: [0.0, 0.0, 100.0, 300.0], keep_aspect: false }, EditSource::User);
+    assert!(matches!(r, Err(EngineError::Invalid(_))), "{r:?}");
+    // Kept proportions: half the size, the same angle.
+    let b = list(&eng, id)[0].clone();
+    let (w, h) = (b.full_rect[2] - b.full_rect[0], b.full_rect[3] - b.full_rect[1]);
+    change(&eng, id, Some(0), ImageChange::Resize { rect: [0.0, 0.0, f64::from(w) / 2.0, f64::from(h) / 2.0], keep_aspect: true });
+    let b = list(&eng, id)[0].clone();
+    assert!((b.angle - 30.0).abs() < 0.01 && near(b.full_rect, [0.0, 0.0, w / 2.0, h / 2.0]), "{b:?}");
+    // The inline image turns by an angle with its bytes kept.
+    change(&eng, id, Some(1), ImageChange::Angle { degrees: -45.0 });
+    assert!((list(&eng, id)[1].angle + 45.0).abs() < 0.01);
+}
+
+#[test]
+fn a_group_turn_leaves_each_image_in_place() {
+    let d = dir("many-angle");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    let before = list(&eng, id);
+    many(&eng, id, vec![(0, ImageChange::Angle { degrees: 90.0 }), (1, ImageChange::Angle { degrees: 90.0 })]).unwrap();
+    let after = list(&eng, id);
+    for (a, b) in before.iter().zip(&after) {
+        let (ca, cb) = ((a.full_rect[0] + a.full_rect[2]) / 2.0, (b.full_rect[0] + b.full_rect[2]) / 2.0);
+        assert!((ca - cb).abs() < 0.05 && (b.angle - 90.0).abs() < 0.01, "{a:?} {b:?}");
+    }
+}
+
+/// A one-page file whose catalog and objects are those of [`pdf_with`]: certified with `/P` 2.
+fn certified_pdf() -> Vec<u8> {
+    let perms = "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 2 >> >> ] >> >>";
+    pdf_with(1, false, perms, &[])
+}
+
+#[test]
+fn a_certified_document_refuses_every_change_to_its_images() {
+    let d = dir("certified");
+    let (eng, id, _) = open(&d, &certified_pdf());
+    let rev = eng.edit_state(id).unwrap().rev;
+    let blocks = blocks(&eng, id, 0).unwrap();
+    assert!(blocks.locked.as_deref().is_some_and(|m| m.contains("certified")), "{:?}", blocks.locked);
+    let one = |c: ImageChange| edit(&eng, id, rev, 0, Some(0), &c, EditSource::User).map(|_| ());
+    let batch = |c: ImageChange| edit_many(&eng, id, rev, 0, &[ImageItem { index: 0, change: c }, ImageItem { index: 1, change: ImageChange::Move { dx: 1.0, dy: 1.0 } }], EditSource::User).map(|_| ());
+    let results = [
+        one(ImageChange::Angle { degrees: 30.0 }),
+        one(ImageChange::Move { dx: 1.0, dy: 1.0 }),
+        batch(ImageChange::Move { dx: 1.0, dy: 1.0 }),
+        edit_many(&eng, id, rev, 0, &[ImageItem { index: 0, change: ImageChange::Delete }], EditSource::User).map(|_| ()),
+    ];
+    for r in results {
+        match r {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(eng.edit_state(id).unwrap().rev, rev);
+    assert!(eng.edit_state(id).unwrap().undo.is_none());
+}
+
+#[test]
+fn a_signed_document_takes_a_group_change_after_its_signed_bytes() {
+    let d = dir("signed");
+    let field = format!("<< /FT /Sig /T (S) /Type /Annot /Subtype /Widget /Rect [0 0 0 0] {} >>", crate::outline::tests::sig_value(""));
+    let bytes = pdf_with(1, false, "/AcroForm << /SigFlags 3 /Fields [7 0 R] >>", &[field]);
+    let (eng, id, path) = open(&d, &bytes);
+    assert!(blocks(&eng, id, 0).unwrap().signed);
+    many(&eng, id, vec![(0, ImageChange::Move { dx: 5.0, dy: 5.0 }), (1, ImageChange::Angle { degrees: 20.0 })]).unwrap();
+    eng.save(id, None).unwrap();
+    assert!(std::fs::read(&path).unwrap().starts_with(&bytes), "the signed bytes are not the start of the saved file");
+}
+
+// ---- copy, paste, move to another page ---------------------------------------------------------
+
+/// A one-page file whose only picture is a PNG with alpha (an image with an `/SMask`) at page-space
+/// (60, 80)-(140, 160), next to the fixture's own picture and inline image.
+fn with_smask(d: &Path) -> (Arc<Engine>, DocId, String, u32) {
+    let (eng, id, path) = open(d, &pdf(2, false));
+    let png = png_alpha(d);
+    change(&eng, id, None, ImageChange::Add { file: png, rect: [60.0, 80.0, 140.0, 160.0], keep_aspect: false });
+    let i = list(&eng, id).iter().position(|b| b.masked).expect("the added picture has an SMask") as u32;
+    (eng, id, path, i)
+}
+
+fn rev(eng: &Engine, id: DocId) -> u32 {
+    eng.edit_state(id).unwrap().rev
+}
+
+fn pasted(eng: &Engine, id: DocId, page: u32, at: [f64; 2], clip: &Clip) -> Result<ImageEdited> {
+    paste(eng, id, rev(eng, id), page, at, clip, EditSource::User)
+}
+
+#[test]
+fn a_copy_pasted_in_the_same_document_keeps_its_smask_and_is_its_own_object() {
+    let d = dir("paste-same");
+    let (eng, id, path, i) = with_smask(&d);
+    let before = blocks(&eng, id, 0).unwrap().images;
+    let clip = copy(&eng, id, rev(&eng, id), 0, &[i]).unwrap();
+    assert_eq!(clip.info().count, 1);
+    assert!(near(clip.info().rect, [60.0, 80.0, 140.0, 160.0]), "{:?}", clip.info());
+    // Nothing changed by copying.
+    assert!(eng.edit_state(id).unwrap().undo.as_deref() == Some("Add image on p. 1"));
+    // Pasted on page 2 (index 1) with its top left at (200, 300), then again at (20, 20) there.
+    let r = pasted(&eng, id, 1, [200.0, 300.0], &clip).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Paste image on p. 2"));
+    pasted(&eng, id, 1, [20.0, 20.0], &clip).unwrap();
+    let p1 = blocks(&eng, id, 1).unwrap().images;
+    assert_eq!(p1.len(), 2, "{p1:?}");
+    assert!(near(p1[0].rect, [200.0, 300.0, 280.0, 380.0]) && near(p1[1].rect, [20.0, 20.0, 100.0, 100.0]), "{p1:?}");
+    assert!(p1.iter().all(|b| b.masked && b.width == 8 && b.height == 8));
+    // Each paste is an object of its own: not the original, not each other.
+    let xrefs: HashSet<_> = p1.iter().map(|b| b.xref).chain(before.iter().filter(|b| b.masked).map(|b| b.xref)).collect();
+    assert_eq!(xrefs.len(), 3, "{xrefs:?}");
+    // The original did not move.
+    assert!(near(blocks(&eng, id, 0).unwrap().images[i as usize].rect, [60.0, 80.0, 140.0, 160.0]));
+    // Each is one undo step.
+    eng.undo(id).unwrap();
+    assert_eq!(blocks(&eng, id, 1).unwrap().images.len(), 1);
+    eng.redo(id).unwrap();
+    // Saved and reopened: three alpha pictures, each with its own soft mask.
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let masked: Vec<_> = image_objects(&path).into_iter().filter(|o| o.4).collect();
+    assert_eq!(masked.len(), 3, "{masked:?}");
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let p1 = blocks(&eng, id, 1).unwrap().images;
+    assert!(p1.len() == 2 && p1.iter().all(|b| b.masked), "{p1:?}");
+}
+
+#[test]
+fn a_copy_pasted_into_another_document_is_copied_not_shared() {
+    let (a, b) = (dir("paste-between-a"), dir("paste-between-b"));
+    let (eng_a, id_a, path_a, i) = with_smask(&a);
+    let (eng_b, id_b, path_b) = open(&b, &pdf(1, false));
+    let clip = copy(&eng_a, id_a, rev(&eng_a, id_a), 0, &[i]).unwrap();
+    let a_state = eng_a.edit_state(id_a).unwrap();
+    let r = pasted(&eng_b, id_b, 0, [300.0, 400.0], &clip).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Paste image on p. 1"));
+    let l = list(&eng_b, id_b);
+    let n = l.iter().find(|x| x.masked).expect("the pasted picture");
+    assert!(near(n.rect, [300.0, 400.0, 380.0, 480.0]) && n.width == 8, "{n:?}");
+    assert_eq!(eng_a.edit_state(id_a).unwrap().rev, a_state.rev);
+    // The first document goes away: the second still holds the picture and its mask on its own.
+    eng_a.save(id_a, None).unwrap();
+    eng_a.close(id_a);
+    std::fs::remove_file(&path_a).unwrap();
+    eng_b.save(id_b, None).unwrap();
+    eng_b.close(id_b);
+    let objs = image_objects(&path_b);
+    assert!(objs.iter().any(|o| o.4 && o.1 == 8 && o.2 == 8), "{objs:?}");
+    let doc = mupdf::pdf::PdfDocument::open(&path_b).unwrap();
+    assert!(doc.load_page(0).unwrap().to_pixmap(&mupdf::Matrix::IDENTITY, &mupdf::Colorspace::device_rgb(), true, false).is_ok());
+}
+
+#[test]
+fn a_picture_moved_to_a_rotated_page_lands_where_it_was_dropped() {
+    let d = dir("to-page");
+    // Page 2 is turned a quarter: 792 wide and 612 high as seen. Page 3 is a small page.
+    let bytes = pdf_attrs(3, false, "", &[], &|i| match i {
+        1 => "/Rotate 90".into(),
+        2 => "/CropBox [0 0 300 400]".into(),
+        _ => String::new(),
+    });
+    let (eng, id, path) = open(&d, &bytes);
+    assert!(near(blocks(&eng, id, 0).unwrap().images[0].rect, [100.0, 192.0, 300.0, 292.0]));
+    let rev0 = rev(&eng, id);
+    let r = move_to_page(&eng, id, rev0, 0, &[0], (1, [400.0, 300.0]), EditSource::User).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Move image to p. 2"));
+    let there = blocks(&eng, id, 1).unwrap().images;
+    assert_eq!(there.len(), 1);
+    assert!(near(there[0].rect, [400.0, 300.0, 600.0, 400.0]), "{there:?}");
+    // Upright as seen: a quarter-turned page does not turn the picture with it.
+    assert!(there[0].angle.abs() < 0.01 && near([there[0].quad[0], there[0].quad[1], 0.0, 0.0], [400.0, 400.0, 0.0, 0.0]), "{:?}", there[0]);
+    assert_eq!(blocks(&eng, id, 0).unwrap().images.len(), 1, "the inline picture stays");
+    // Dropped half outside the small page: kept on it.
+    move_to_page(&eng, id, rev(&eng, id), 1, &[0], (2, [250.0, 390.0]), EditSource::User).unwrap();
+    let small = blocks(&eng, id, 2).unwrap().images;
+    assert!(near(small[0].rect, [100.0, 300.0, 300.0, 400.0]), "{small:?}");
+    // Two undo steps took it back; the file reopened shows each step's result.
+    eng.undo(id).unwrap();
+    assert!(near(blocks(&eng, id, 1).unwrap().images[0].rect, [400.0, 300.0, 600.0, 400.0]));
+    eng.undo(id).unwrap();
+    assert!(near(blocks(&eng, id, 0).unwrap().images[0].rect, [100.0, 192.0, 300.0, 292.0]));
+    assert!(blocks(&eng, id, 1).unwrap().images.is_empty());
+    eng.redo(id).unwrap();
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    assert!(near(blocks(&eng, id, 1).unwrap().images[0].rect, [400.0, 300.0, 600.0, 400.0]));
+    assert_eq!(all_images(&path), 1 + 0, "one picture object, drawn on one page now");
+}
+
+#[test]
+fn a_group_with_an_inline_picture_moves_together_to_another_page() {
+    let d = dir("to-page-group");
+    let (eng, id, path) = open(&d, &pdf(2, false));
+    // Both of page 1's pictures: (100,192)-(300,292) and the inline one at (400,142)-(450,192);
+    // their group's top left is (100,142). Dropped with that corner at (50, 500) on page 2.
+    let r = move_to_page(&eng, id, rev(&eng, id), 0, &[0, 1], (1, [50.0, 500.0]), EditSource::User).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Move 2 images to p. 2"));
+    assert!(blocks(&eng, id, 0).unwrap().images.is_empty());
+    let l = blocks(&eng, id, 1).unwrap().images;
+    assert_eq!(l.len(), 2, "{l:?}");
+    let by_kind = |k: ImageKind| l.iter().find(|b| b.kind == k).unwrap();
+    assert!(near(by_kind(ImageKind::XObject).rect, [50.0, 550.0, 250.0, 650.0]), "{l:?}");
+    assert!(near(by_kind(ImageKind::Inline).rect, [350.0, 500.0, 400.0, 550.0]), "{l:?}");
+    // One step back; the content of page 1 is what it was.
+    eng.undo(id).unwrap();
+    assert_eq!(blocks(&eng, id, 0).unwrap().images.len(), 2);
+    assert!(blocks(&eng, id, 1).unwrap().images.is_empty());
+    eng.redo(id).unwrap();
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    assert_eq!(blocks(&eng, id, 1).unwrap().images.len(), 2);
+}
+
+#[test]
+fn copy_and_move_refuse_what_they_can_not_do() {
+    let d = dir("paste-refusals");
+    let (eng, id, _) = open(&d, &pdf(2, false));
+    let r = rev(&eng, id);
+    let bad = |e: Result<ImageEdited>| matches!(e, Err(EngineError::Invalid(_)));
+    // An inline picture can't be copied, only moved; a stale list or no picture at all is refused.
+    assert!(matches!(copy(&eng, id, r, 0, &[1]), Err(EngineError::Invalid(m)) if m.contains("inline")));
+    assert!(matches!(copy(&eng, id, r + 1, 0, &[0]), Err(EngineError::Stale)));
+    assert!(matches!(copy(&eng, id, r, 0, &[]), Err(EngineError::Invalid(_))));
+    assert!(matches!(copy(&eng, id, r, 0, &[9]), Err(EngineError::Invalid(_))));
+    assert!(bad(move_to_page(&eng, id, r, 0, &[0], (0, [0.0, 0.0]), EditSource::User)));
+    assert!(bad(move_to_page(&eng, id, r, 0, &[0], (1, [f64::NAN, 0.0]), EditSource::User)));
+    assert!(matches!(move_to_page(&eng, id, r + 1, 0, &[0], (1, [0.0, 0.0]), EditSource::User), Err(EngineError::Stale)));
+    assert!(move_to_page(&eng, id, r, 0, &[0], (7, [0.0, 0.0]), EditSource::User).is_err());
+    assert_eq!(rev(&eng, id), r, "a refused paste or move changes nothing");
+    // An inline picture in a colour space the page defines can't leave the page, whether it is named
+    // outright or is an Indexed one over such a base; device ones, and an Indexed one over a device base, go.
+    for (cs, moves) in [("/X", false), ("[/I /CS0 1 <00FF>]", false), ("[/Indexed /X 1 <00FF>]", false), ("[/I /RGB 1 <000000FFFFFF>]", true), ("/RGB", true), ("/G", true)] {
+        let odd = pdf_inline(2, false, "", &[], &|_| String::new(), cs);
+        let (eng, id, _) = open(&dir("paste-refusals-cs"), &odd);
+        let r = move_to_page(&eng, id, rev(&eng, id), 0, &[1], (1, [0.0, 0.0]), EditSource::User);
+        match (moves, &r) {
+            (true, Ok(_)) => {}
+            (false, Err(EngineError::Invalid(m))) if m.contains("colour space") => {}
+            _ => panic!("{cs}: {r:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_declared_size_beyond_the_bounds_is_not_copied() {
+    let d = dir("copy-bounds");
+    let mut bytes = pdf(1, false);
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let mut img = doc.new_indirect(3, 0).unwrap().resolve().unwrap().unwrap();
+    img.dict_put("Width", mupdf::pdf::PdfObject::new_int(2_000_000).unwrap()).unwrap();
+    img.dict_put("Height", mupdf::pdf::PdfObject::new_int(2_000_000).unwrap()).unwrap();
+    bytes.clear();
+    doc.write_to(&mut bytes).unwrap();
+    let (eng, id, _) = open(&d, &bytes);
+    let e = copy(&eng, id, rev(&eng, id), 0, &[0]);
+    assert!(matches!(&e, Err(EngineError::Invalid(m)) if m.contains("too large")), "{e:?}");
+}
+
+#[test]
+fn a_document_that_withholds_copying_gives_no_pictures() {
+    let d = dir("copy-rights");
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&pdf(1, false)).unwrap();
+    let mut w = mupdf::pdf::PdfWriteOptions::default();
+    w.set_encryption(mupdf::pdf::Encryption::Aes128);
+    w.set_owner_password("owner");
+    w.set_user_password("");
+    w.set_permissions(mupdf::pdf::Permission::PRINT);
+    let mut bytes = Vec::new();
+    doc.write_to_with_options(&mut bytes, w).unwrap();
+    let (eng, id, _) = open(&d, &bytes);
+    let b = blocks(&eng, id, 0).unwrap();
+    assert!(b.copy_locked.is_some(), "{:?}", b.copy_locked);
+    let e = copy(&eng, id, rev(&eng, id), 0, &[0]);
+    assert!(matches!(&e, Err(EngineError::Invalid(m)) if m.contains("copying")), "{e:?}");
+}
+
+#[test]
+fn a_certified_document_takes_no_paste_and_no_move() {
+    let (a, d) = (dir("certified-src"), dir("certified-paste"));
+    let (src, sid, _) = open(&a, &pdf(1, false));
+    let clip = copy(&src, sid, rev(&src, sid), 0, &[0]).unwrap();
+    let bytes = pdf_with(2, false, "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 2 >> >> ] >> >>", &[]);
+    let (eng, id, _) = open(&d, &bytes);
+    let r = rev(&eng, id);
+    for e in [
+        paste(&eng, id, r, 0, [10.0, 10.0], &clip, EditSource::User).map(|_| ()),
+        move_to_page(&eng, id, r, 0, &[0], (1, [10.0, 10.0]), EditSource::User).map(|_| ()),
+    ] {
+        match e {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(rev(&eng, id), r);
+    assert!(eng.edit_state(id).unwrap().undo.is_none());
+}
+
+#[test]
+fn a_paste_into_a_signed_document_comes_after_its_signed_bytes() {
+    let (a, d) = (dir("signed-src"), dir("signed-paste"));
+    let (src, sid, _) = open(&a, &pdf(1, false));
+    let clip = copy(&src, sid, rev(&src, sid), 0, &[0]).unwrap();
+    let field = format!("<< /FT /Sig /T (S) /Type /Annot /Subtype /Widget /Rect [0 0 0 0] {} >>", crate::outline::tests::sig_value(""));
+    let bytes = pdf_with(2, false, "/AcroForm << /SigFlags 3 /Fields [7 0 R] >>", &[field]);
+    let (eng, id, path) = open(&d, &bytes);
+    assert!(blocks(&eng, id, 0).unwrap().signed);
+    pasted(&eng, id, 1, [40.0, 40.0], &clip).unwrap();
+    move_to_page(&eng, id, rev(&eng, id), 0, &[0], (1, [300.0, 300.0]), EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    assert!(std::fs::read(&path).unwrap().starts_with(&bytes), "the signed bytes are not the start of the saved file");
+}
+
+#[test]
+fn a_mirrored_picture_reports_its_angle_from_the_left_right_mirror() {
+    let d = dir("mirrored-angle");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    change(&eng, id, Some(0), ImageChange::Flip { horizontal: true });
+    let b = list(&eng, id)[0].clone();
+    assert!(b.angle.abs() < 0.01, "a left-right flip reports {}", b.angle);
+    // The same picture flipped top to bottom is the mirror turned half a turn.
+    eng.undo(id).unwrap();
+    change(&eng, id, Some(0), ImageChange::Flip { horizontal: false });
+    let b = list(&eng, id)[0].clone();
+    assert!((b.angle.abs() - 180.0).abs() < 0.01, "a top-bottom flip reports {}", b.angle);
+    // Turned 30 from there it is 30 further on, and the box is that of the turned picture.
+    change(&eng, id, Some(0), ImageChange::Angle { degrees: 30.0 });
+    let b = list(&eng, id)[0].clone();
+    assert!((normalised(b.angle - 210.0)).abs() < 0.01, "{}", b.angle);
+}
+
+fn normalised(a: f32) -> f32 {
+    (a + 180.0).rem_euclid(360.0) - 180.0
+}
+
+/// The fixture with image object 3 given the entries of `<< … >>` source `dict` (values may name the `extra`
+/// objects, numbered from 7 for a one-page file), opened.
+fn with_image_entries(test: &str, dict: &str, extra: &[String]) -> (Arc<Engine>, DocId) {
+    let mut bytes = pdf_with(1, false, "", extra);
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let mut img = doc.new_indirect(3, 0).unwrap().resolve().unwrap().unwrap();
+    let entries = doc.new_object_from_str(&format!("<< {dict} >>")).unwrap();
+    for i in 0..entries.dict_len().unwrap() as i32 {
+        let k = entries.get_dict_key(i).unwrap().unwrap().as_name().unwrap();
+        img.dict_put(String::from_utf8_lossy(&k).as_ref(), entries.get_dict_val(i).unwrap().unwrap()).unwrap();
+    }
+    bytes.clear();
+    doc.write_to(&mut bytes).unwrap();
+    let (eng, id, _) = open(&dir(test), &bytes);
+    (eng, id)
+}
+
+fn stream_obj(dict: &str, data: &[u8]) -> String {
+    format!("<< {dict} /Length {} >>\nstream\n{}\nendstream", data.len(), String::from_utf8_lossy(data))
+}
+
+/// The first picture of a clip, read back from the clip's own file, with that file's object count. Keep the
+/// document: its objects are not valid once it is dropped.
+fn clipped(clip: &Clip) -> (mupdf::pdf::PdfDocument, mupdf::pdf::PdfObject, u32) {
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&clip.bytes).unwrap();
+    let img = get(&get(&doc.find_page(0).unwrap(), "Resources").unwrap(), "XObject").and_then(|x| get(&x, "I0")).unwrap();
+    let n = doc.count_objects().unwrap();
+    (doc, img, n)
+}
+
+#[test]
+fn a_copy_carries_the_colour_space_decode_and_mask_and_leaves_stray_keys_behind() {
+    // /Probe points at the catalog (so at every page and its text); the ICC profile's dictionary has one too.
+    let icc = stream_obj("/N 3 /Alternate /DeviceRGB /Probe 1 0 R", b"profile");
+    let (eng, id) = with_image_entries(
+        "copy-keys",
+        "/ColorSpace [/ICCBased 7 0 R] /Decode [1 0 1 0 1 0] /Mask [0 1 0 1 0 1] /Probe 1 0 R /Parent 2 0 R",
+        &[icc],
+    );
+    let clip = copy(&eng, id, rev(&eng, id), 0, &[0]).unwrap();
+    let (_doc, img, objects) = clipped(&clip);
+    let cs = get(&img, "ColorSpace").unwrap();
+    assert_eq!(cs.get_array(0).unwrap().unwrap().as_name().unwrap(), b"ICCBased");
+    let profile = cs.get_array(1).unwrap().unwrap();
+    assert!(profile.is_stream().unwrap());
+    assert_eq!(profile.read_raw_stream().unwrap(), b"profile");
+    assert_eq!(get(&profile, "N").unwrap().as_int().unwrap(), 3);
+    assert_eq!(get(&profile, "Alternate").unwrap().as_name().unwrap(), b"DeviceRGB");
+    assert!(get(&profile, "Probe").is_none());
+    let nums = |k: &str| -> Vec<i32> {
+        let a = get(&img, k).unwrap();
+        (0..a.len().unwrap() as i32).map(|i| a.get_array(i).unwrap().unwrap().as_int().unwrap()).collect()
+    };
+    assert_eq!(nums("Decode"), [1, 0, 1, 0, 1, 0]);
+    assert_eq!(nums("Mask"), [0, 1, 0, 1, 0, 1]);
+    assert!(get(&img, "Probe").is_none() && get(&img, "Parent").is_none());
+    // The picture, its profile and the clip's own page: nothing of the source document came along.
+    assert!(objects <= 8, "{objects} objects");
+    assert!(!clip.bytes.windows(7).any(|w| w == b"(Page 1"), "the source page's text is in the clip");
+    // And the picture's pixels are the same ones.
+    assert_eq!(img.read_raw_stream().unwrap(), PIXELS);
+}
+
+#[test]
+fn a_copy_carries_an_indexed_lookup_stream() {
+    let lookup = stream_obj("", b"\x01\x02\x03ABC");
+    let (eng, id) = with_image_entries("copy-indexed", "/ColorSpace [/Indexed /DeviceRGB 1 7 0 R] /BitsPerComponent 8", &[lookup]);
+    let clip = copy(&eng, id, rev(&eng, id), 0, &[0]).unwrap();
+    let (_doc, img, _) = clipped(&clip);
+    let cs = get(&img, "ColorSpace").unwrap();
+    assert_eq!(cs.get_array(0).unwrap().unwrap().as_name().unwrap(), b"Indexed");
+    assert_eq!(cs.get_array(1).unwrap().unwrap().as_name().unwrap(), b"DeviceRGB");
+    assert_eq!(cs.get_array(2).unwrap().unwrap().as_int().unwrap(), 1);
+    let table = cs.get_array(3).unwrap().unwrap();
+    assert!(table.is_stream().unwrap());
+    assert_eq!(table.read_raw_stream().unwrap(), b"\x01\x02\x03ABC");
+}
+
+#[test]
+fn the_masks_samples_count_toward_what_may_be_copied() {
+    // 10000 × 10000 CMYK at 8 bits is 400 MB, under the 512 MB bound; with a 16-bit soft mask of the same
+    // size (200 MB) the picture takes more than may be copied.
+    let mask = stream_obj("/Type /XObject /Subtype /Image /Width 10000 /Height 10000 /ColorSpace /DeviceGray /BitsPerComponent 16", b"x");
+    let (eng, id) = with_image_entries(
+        "copy-mask-bytes",
+        "/Width 10000 /Height 10000 /ColorSpace /DeviceCMYK /BitsPerComponent 8 /SMask 7 0 R",
+        &[mask],
+    );
+    let e = copy(&eng, id, rev(&eng, id), 0, &[0]);
+    assert!(matches!(&e, Err(EngineError::Invalid(m)) if m.contains("too large")), "{e:?}");
+}
+
+#[test]
+fn pictures_that_share_a_soft_mask_copy_it_once_and_share_it_in_the_clip() {
+    // Two pictures with one /SMask (object 7): read and copied once, so the one caps count it once and a
+    // hundred pictures over one large mask can't read it a hundred times.
+    let mask = stream_obj("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", b"A");
+    let second = stream_obj("/Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 7 0 R", b"AB");
+    let mut bytes = pdf_with(1, false, "", &[mask, second]);
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let mut first = doc.new_indirect(3, 0).unwrap().resolve().unwrap().unwrap();
+    first.dict_put("SMask", doc.new_indirect(7, 0).unwrap()).unwrap();
+    let page = doc.new_indirect(5, 0).unwrap().resolve().unwrap().unwrap();
+    let mut xo = get(&get(&page, "Resources").unwrap(), "XObject").unwrap();
+    xo.dict_put("Im2", doc.new_indirect(8, 0).unwrap()).unwrap();
+    let mut content = doc.new_indirect(6, 0).unwrap().resolve().unwrap().unwrap();
+    content.write_stream_string("q 200 0 0 100 100 500 cm /Im1 Do Q\nq 50 0 0 50 300 400 cm /Im2 Do Q\n").unwrap();
+    bytes.clear();
+    doc.write_to(&mut bytes).unwrap();
+    let (eng, id, _) = open(&dir("copy-shared-mask"), &bytes);
+    assert_eq!(list(&eng, id).len(), 2);
+    let clip = copy(&eng, id, rev(&eng, id), 0, &[0, 1]).unwrap();
+    let clipped_doc = mupdf::pdf::PdfDocument::from_bytes(&clip.bytes).unwrap();
+    let xo = get(&get(&clipped_doc.find_page(0).unwrap(), "Resources").unwrap(), "XObject").unwrap();
+    let mask_of = |k: &str| get(&get(&xo, k).unwrap(), "SMask").unwrap().as_indirect().unwrap();
+    let (a, b) = (mask_of("I0"), mask_of("I1"));
+    assert!(a > 0 && a == b, "the two pictures' masks are objects {a} and {b}");
+    // The clip holds both pictures and one mask: no more objects than that and its own page tree.
+    assert!(clipped_doc.count_objects().unwrap() <= 8, "{} objects", clipped_doc.count_objects().unwrap());
 }

@@ -151,6 +151,33 @@ export function editImage(id: number, rev: number, page: number, index: number |
   });
 }
 
+/** Changes several images of one page at once as one undo step: src-tauri/src/imageedit. */
+export function editImages(id: number, rev: number, page: number, items: { index: number; change: api.ImageChange }[]) {
+  return textResult(id, async () => {
+    const r = await api.imageEditMany(id, rev, page, items);
+    applyState(id, r.state);
+    return r.state;
+  });
+}
+
+/** Pastes the picture clipboard on a page, its top left corner at `at` (page space). */
+export function pasteImages(id: number, rev: number, page: number, at: [number, number]) {
+  return textResult(id, async () => {
+    const r = await api.imagePaste(id, rev, page, at);
+    applyState(id, r.state);
+    return r.state;
+  });
+}
+
+/** Moves images of one page to another page of the document as one undo step. */
+export function moveImagesToPage(id: number, rev: number, page: number, indices: number[], toPage: number, at: [number, number]) {
+  return textResult(id, async () => {
+    const r = await api.imageMoveToPage(id, rev, page, indices, toPage, at);
+    applyState(id, r.state);
+    return r.state;
+  });
+}
+
 /** Changes the bookmarks (src-tauri/src/outline). `rev`: the generation the tree was listed at. */
 export function editBookmarks(id: number, rev: number, op: api.BookmarkOp) {
   return textResult(id, async () => {
