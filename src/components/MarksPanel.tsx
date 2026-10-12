@@ -13,6 +13,7 @@ import {
   KIND_NAME,
   KIND_TITLE,
   KINDS,
+  marksLocked,
   type MarksSheet,
   outcome,
   pagesOf,
@@ -66,7 +67,7 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
   const existing = !!here && !!pages && pages.some((p) => here.pages.includes(p));
   const numbering = sheet.kind === "bates" && sheet.btFiles.length > 0;
   // A certified document is refused every change (numbered copies of other files are not this document).
-  const locked = !numbering && !!more?.certified;
+  const locked = marksLocked(numbering, more);
   const why = locked ? CERTIFIED_MARKS : readiness(sheet, doc.pageCount);
   const foreign = more?.foreign ?? [];
   const sentence = outcome(sheet, doc.pageCount, existing);
@@ -82,7 +83,7 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
                 <span className="mk-has-name">{KIND_NAME[k.kind]}</span>
                 <span className="dim small tl-mono">{k.pages.length === doc.pageCount ? "all pages" : `pp. ${formatRange(k.pages)}`}</span>
                 <span className="grow" />
-                <button className="tl-link" onClick={() => st().setKind(k.kind)}>
+                <button className="tl-link" disabled={locked} title={locked ? CERTIFIED_MARKS : undefined} onClick={() => st().setKind(k.kind)}>
                   Update
                 </button>
                 <button className="tl-link" disabled={sheet.busy || locked} onClick={() => void st().remove(k.kind)}>
@@ -116,12 +117,15 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
           ))}
         </div>
 
-        {sheet.kind === "headerFooter" && <HeaderFooterView sheet={sheet} count={doc.pageCount} />}
-        {sheet.kind === "watermark" && <WatermarkView sheet={sheet} />}
-        {sheet.kind === "background" && <BackgroundView sheet={sheet} />}
-        {sheet.kind === "bates" && <BatesView sheet={sheet} count={doc.pageCount} />}
+        {/* a fieldset turns off every control inside it, the colour pickers and sliders too */}
+        <fieldset className="mk-form" disabled={locked} title={locked ? CERTIFIED_MARKS : undefined}>
+          {sheet.kind === "headerFooter" && <HeaderFooterView sheet={sheet} count={doc.pageCount} />}
+          {sheet.kind === "watermark" && <WatermarkView sheet={sheet} />}
+          {sheet.kind === "background" && <BackgroundView sheet={sheet} />}
+          {sheet.kind === "bates" && <BatesView sheet={sheet} count={doc.pageCount} />}
 
-        {!numbering && <PagesRow sheet={sheet} count={doc.pageCount} />}
+          {!numbering && <PagesRow sheet={sheet} count={doc.pageCount} />}
+        </fieldset>
 
         {more?.signed && !locked && (
           <p className="dim small" role="note">

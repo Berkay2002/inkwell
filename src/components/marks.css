@@ -235,3 +235,24 @@
   fill: var(--ax-accent, #2e4b8f);
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
 }
+/* The sheet's controls sit in a fieldset so a certified document can turn them all off at once. */
+.mk-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.mk-form > * {
+  flex: none;
+}
+.mk-form:disabled {
+  cursor: not-allowed;
+}
+.mk-form :disabled,
+.mk-form .mk-swatch:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

@@ -45,6 +45,7 @@ import {
   fromMark,
   type Measure,
   markOf,
+  marksLocked,
   type MarksSheet,
   marksError,
   outcome,
@@ -162,6 +163,17 @@ describe("readiness", () => {
     const s = open("bates", { btDigits: 3, btStart: 995 });
     expect(readiness(s, 12)).toMatch(/12 pages from 995 need more than 3 digits/);
     expect(readiness({ ...s, btStart: 1 }, 12)).toBeNull();
+  });
+});
+
+describe("marksLocked", () => {
+  it("locks the sheet on a certified document only", () => {
+    expect(marksLocked(false, { certified: true })).toBe(true);
+    expect(marksLocked(false, { certified: false })).toBe(false);
+    expect(marksLocked(false, undefined)).toBe(false);
+  });
+  it("leaves numbering other files open even when this one is certified", () => {
+    expect(marksLocked(true, { certified: true })).toBe(false);
   });
 });
 
