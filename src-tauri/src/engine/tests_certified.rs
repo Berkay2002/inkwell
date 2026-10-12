@@ -206,6 +206,23 @@ fn ops() -> Vec<(&'static str, bool, Op)> {
         let rev = eng.edit_state(id)?.rev;
         crate::imageedit::edit(eng, id, rev, 0, Some(0), &crate::imageedit::ImageChange::Move { dx: 1.0, dy: 1.0 }, user()).map(|_| ())
     });
+    op!("turn an image by an angle", false, |eng, _p, id| {
+        let rev = eng.edit_state(id)?.rev;
+        crate::imageedit::edit(eng, id, rev, 0, Some(0), &crate::imageedit::ImageChange::Angle { degrees: 30.0 }, user()).map(|_| ())
+    });
+    op!("change several images", false, |eng, _p, id| {
+        let rev = eng.edit_state(id)?.rev;
+        let items = [0, 1].map(|index| crate::imageedit::ImageItem { index, change: crate::imageedit::ImageChange::Move { dx: 1.0, dy: 1.0 } });
+        crate::imageedit::edit_many(eng, id, rev, 0, &items, user()).map(|_| ())
+    });
+    op!("paste images", false, |eng, _p, id| {
+        let rev = eng.edit_state(id)?.rev;
+        crate::imageedit::paste(eng, id, rev, 0, [10.0, 10.0], &crate::imageedit::Clip::default(), user()).map(|_| ())
+    });
+    op!("move images to another page", false, |eng, _p, id| {
+        let rev = eng.edit_state(id)?.rev;
+        crate::imageedit::move_to_page(eng, id, rev, 0, &[0], (1, [10.0, 10.0]), user()).map(|_| ())
+    });
     v
 }
 
@@ -262,7 +279,8 @@ fn a_certified_document_cannot_be_given_password_security() {
 
 /// Rows the signed fixture cannot run (it has no picture, and no redaction mark on the page the row names once
 /// marks are applied); everything else must either stay incremental or say why not.
-const NOT_ON_THE_FIXTURE: [&str; 1] = ["change an image"];
+const NOT_ON_THE_FIXTURE: [&str; 5] =
+    ["change an image", "turn an image by an angle", "change several images", "paste images", "move images to another page"];
 
 #[test]
 fn a_signed_document_takes_every_write_incrementally_or_says_it_cannot() {
