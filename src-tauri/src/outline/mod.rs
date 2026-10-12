@@ -196,9 +196,9 @@ impl Names {
 
     /// `Dests::lookup`, except that a name MuPDF does not find but the other source defines is not judged: another
     /// viewer may follow it, so it is not called broken (the compressor keeps it for the same reason).
-    fn lookup(&mut self, doc: &PdfDocument, key: &PdfObject) -> Option<Option<PdfObject>> {
+    fn lookup(&mut self, doc: &PdfDocument, key: &PdfObject, first: bool) -> Option<Option<PdfObject>> {
         let d = self.dests(doc)?;
-        match d.lookup(key)? {
+        match d.lookup(key, first)? {
             None if d.lookup_any(key).flatten().is_some() => None,
             found => Some(found),
         }
@@ -210,7 +210,7 @@ impl Names {
 /// could not be looked up faithfully (see `Dests::lookup`), so the destination is not judged.
 pub(crate) fn dest_array(doc: &PdfDocument, names: &mut Names, target: &PdfObject) -> Option<Option<PdfObject>> {
     let mut t = target.resolve().ok().flatten();
-    for _ in 0..4 {
+    for hop in 0..4 {
         let Some(cur) = t else { break };
         if cur.is_array().unwrap_or(false) {
             return Some(Some(cur));
@@ -218,7 +218,7 @@ pub(crate) fn dest_array(doc: &PdfDocument, names: &mut Names, target: &PdfObjec
         t = if cur.is_dict().unwrap_or(false) {
             cur.get_dict("D").ok().flatten()
         } else if cur.is_name().unwrap_or(false) || cur.is_string().unwrap_or(false) {
-            names.lookup(doc, &cur)?
+            names.lookup(doc, &cur, hop == 0)?
         } else {
             None
         };
