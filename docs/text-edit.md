@@ -17,14 +17,21 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - Coordinates are page space as the viewer shows it (points, origin top left, `/Rotate` applied): the space of
   `page_text`. Offsets and widths in `change` are in that space too.
 - `TextBlock = { index, text, rect, lines: rect[], font, size, bold, italic, color, align, lineSpacing, runs, editable, issue, reason }`.
-  `runs: { index, text, font, fontId, size, color, bold, italic }[]` is the text in runs of one font, size and colour
-  (line breaks read as spaces); the block-level font, size, colour, bold and italic are its first run's.
+  `runs: { index, text, font, fontId, size, color, bold, italic, underline, strike, rise }[]` is the text in runs of one
+  font, size, colour and decoration (line breaks read as spaces); the block-level font, size, colour, bold and italic
+  are those of the first run that is not raised (a block that starts with a superscript is not sized by it).
+  `rise` is `"super" | "sub" | null`, read from the sign of `Ts` in any file; `underline` and `strike` are true only
+  where one of Inkwell's own tagged rectangles lies under the run (see Decorations).
+- `text_blocks` also returns `locked` (the reason string when the document is certified, null otherwise) and `signed`
+  (true when it carries signatures: edits stay incremental and the UI warns). A certified document refuses
+  `text_edit` / `add_text` with "This document is certified...".
   `lineSpacing` is the distance between lines over the font size (null for one line).
   `font` is the `/BaseFont` (subset prefix kept), `size` in points, `align` one of `left|center|right|justify`.
 - `change = { text?, runs?, size?, color?, align?, offset?: [dx, dy], width?, lineSpacing?, bold?, italic? }`; unset fields keep
   the block's own. `text` (one run, in the first run's style) may contain `\n` for hard line breaks; everything
-  reflows to the block's width. `runs: { text?, source?, font?, size?, color?, bold?, italic? }[]` is the new content run
-  by run: unset fields come from run `source` (or the first run); `font` is a `text_fonts` id. A run with a `source`,
+  reflows to the block's width. `underline?`, `strike?` and `rise?: "super" | "sub" | null` apply to every run (`null`
+  clears; a missing field keeps). `runs: { text?, source?, font?, size?, color?, bold?, italic?, underline?, strike?, rise? }[]`
+  is the new content run by run: unset fields come from run `source` (or the first run); `font` is a `text_fonts` id. A run with a `source`,
   no new text and no font or style change keeps its glyphs exactly, kerning included. Block-level `size` scales every
   run (the first run gets that size); `color`, `bold` and `italic` apply to every run without its own.
 - `FontInfo = { id, name, family, bold, italic, kind: document|standard|bundled, embedded, subset, usable, pages }`.
@@ -37,7 +44,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - Each `text_edit` is one edit-core step (`Engine::apply_removing`): one undo step labelled "Edit text on p. N",
   "Format text …", "Move text …" or "Resize text box …", kept by Save, recorded in history. A document with text
   edits is saved as a full, garbage-collected rewrite (not an incremental update), so the old text is not left in the
-  file's bytes.
+  file's bytes. A signed document is the exception:
+  its save stays incremental (the signed bytes are not rewritten, the old text stays in the file) and the UI says so.
 - `fallbacks: { font, embedded, reason }[]` when a run's font could not show its text (the UI's yellow `!`), one per
   font used instead; `reason` names the original font and the first character it lacks. `fallback` is the first.
 
@@ -110,6 +118,29 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
    `inForm` (text inside a form XObject: stamps, templates) and `outlines` (no text but ≥ 100 glyph-sized filled curves:
    text converted to paths).
 
+## Decorations: underline, strikeout, super/subscript
+
+- **Super/subscript** is text rise: `Ts` in the run's state, with the size scaled to 0.65 of the base size and the rise
+  at +0.33 (super) or -0.15 (sub) of the base size. Read back from any file by the sign of `Ts` (positive super,
+  negative sub); line grouping and block measurement ignore the rise, so a raised run stays in its line. Toggling off
+  restores the size by 1/0.65 only when `Ts`/size looks like ours (within 0.05); a foreign raised run keeps its size.
+  Each run writes its own `Ts` (and `Ts 0` in the header), so unchanged runs keep what they had.
+- **Underline and strikeout** are filled rectangles in the run's colour (thickness 0.05 of the size; underline centre
+  0.12 below the baseline, strike 0.28 above), one per line and stretch (justified and kerned lines are measured the
+  same way), written after the text object as `/Span <</IWDeco /U>> BDC q ... re f Q EMC` (`/S` for strike).
+- **Read back** only for our own groups: a `BDC` with `IWDeco` followed by exactly what `deco_ops` writes, in this
+  order: `q`, `cm`, the fill (`g`, `rg`, `k`, or `cs` with `sc`/`scn`), `re`, `f`, `Q`, `EMC` (checked by `deco_group`;
+  a lone `Q`, a bare `cm` or any other shape is not ours and is never read, skipped or removed). The rectangle is
+  matched by geometry onto the shown text above it. Other producers' lines are not guessed at (Acrobat does). Every
+  rewrite removes the block's groups and draws them again, so a moved or reflowed block keeps exactly one per line; a
+  stray tagged group with no text under it is left alone. A page is read for at most 10,000 of them.
+- **A group that lies on text of more than one block** (two blocks drawn over each other, a fake-bold copy) goes when
+  any of them is edited, and is drawn again only for the block that was edited: the other block loses that line.
+- **A rise past 0.6 of the size** is a position, not a script (some producers move text with `Ts`): it stays in the
+  run's start and box, reads as no rise, and is written back as it was unless the rise is cleared. A `Ts` that is not
+  a finite number up to 100,000 reads as no rise.
+- The block's undo label is "Format text" when only styles changed.
+
 ## What works (tests: `cargo test --lib textedit -- --test-threads=1`)
 
 - Listing blocks with font, size, colour, alignment and line boxes; headings and paragraphs separate.
@@ -141,11 +172,18 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - Size, colour, move, resize and right/centre alignment; a centred block stays centred after a text change.
 - Undo/redo of every change (each is one step); a stale `rev` is refused.
 - Issues reported for Type 3, missing ToUnicode, invisible text and text converted to outlines.
+- Decorations: super/subscript round trip (`Ts` and size written, read back, off again restores the size); `Ts` read
+  from a foreign fixture; underline and strikeout drawn and read back; a moved or reflowed decorated block keeps one
+  rectangle per line; line grouping unchanged by rise; a tagged group that is not ours is left alone; certified refused.
 
 ## Limits
 
-- Styles are per run: a change of style inside a word makes two runs. Underline, strikeout, super/subscript, character
-  spacing and horizontal scale per run are not offered (the block's `Tc`, `Tz` and `Ts` are kept for all runs).
+- Styles are per run: a change of style inside a word makes two runs. Character spacing and horizontal scale per run
+  are not offered (the block's `Tc` and `Tz` are kept for all runs; `Ts` is per run, see Decorations).
+- Formatting part of a run (a selection inside it) re-encodes that piece in the run's font: in a subset font a
+  letter the subset lacks falls back to another font for that piece (reported as for typed text).
+- Underline and strikeout read back only as Inkwell's own tagged rectangles: a line drawn by another producer shows
+  as no decoration, stays in the file and is not removed or redrawn with the text.
 - Bold or italic in a font the document lacks uses a standard face (or Noto Sans for other scripts); there is no
   synthetic italic, and synthetic bold is used only for CJK.
 - A run whose text changed loses the original kerning (it uses the font's advances); unchanged runs keep theirs. Word
@@ -198,7 +236,12 @@ opening any of those closes it (`src/lib/commentRail.ts`).
 - **Rail**: Add content (Text tool; Image is a dimmed "soon" slot for the image engine in `cloud-image-edit`);
   Format text: a one-line summary of what is selected, the font shown honestly (read-only) with B / I (standard face),
   size stepper, colour (presets and the system picker), alignment, line spacing; a quiet notice when a font was
-  replaced; the page's block list. Footer: "Changes apply when you click away. Undo with Ctrl+Z."
+  replaced; an **Effects** row with U, S, x² and x₂ toggles (pressed state from the selection's runs, else the whole
+  block; super and sub replace one another; on a certified document every Format control is disabled with the reason, and the store refuses a change without asking the engine; a hint under Format says
+  when the file is signed and the edit is saved incrementally); the page's block list. Ctrl/Cmd+U toggles underline.
+  With text selected in the editor the toggle applies to that selection (runs cut at its ends, one undo step), else to
+  the whole block; typed text is sent first, and a selection made in text the engine then tidied is ignored. The
+  editor previews underline and strikeout for the whole block only. Footer: "Changes apply when you click away. Undo with Ctrl+Z."
 - **Cost**: one `text_blocks` call per page that is near the viewport, cached per page and document generation
   (`src/lib/textEdit.ts`); edits list the one page again.
 - **Tests**: `src/lib/textEdit.test.ts` (helpers and store flows), `scripts/edit-shots.mjs` (runtime: edit a line,

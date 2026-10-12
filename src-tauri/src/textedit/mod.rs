@@ -14,7 +14,7 @@ mod font;
 mod layout;
 pub(crate) mod text;
 
-pub use text::{Align, Fallback, Issue, RunChange, TextChange};
+pub use text::{Align, Fallback, Issue, Rise, RunChange, TextChange};
 pub(crate) use content::Matrix;
 
 use crate::engine::edit::{EditSource, EditState};
@@ -69,6 +69,12 @@ pub struct RunDto {
     pub color: [f32; 3],
     pub bold: bool,
     pub italic: bool,
+    /// Drawn with one of our own tagged rectangles under or through it (other producers' lines
+    /// are not guessed at).
+    pub underline: bool,
+    pub strike: bool,
+    /// By the sign of its `Ts`, from any file.
+    pub rise: Option<Rise>,
 }
 
 /// An area that shows text that can't be edited here (outside any block).
@@ -87,6 +93,10 @@ pub struct TextBlocks {
     pub rev: u32,
     pub blocks: Vec<TextBlockDto>,
     pub areas: Vec<AreaDto>,
+    /// Why the document's text can't be changed (a certified document); none when it can.
+    pub locked: Option<String>,
+    /// The document is signed: a change is saved after the signature.
+    pub signed: bool,
 }
 
 /// A change to one block, in page space.
@@ -110,6 +120,12 @@ pub struct BlockChange {
     /// the standard face of that style.
     pub bold: Option<bool>,
     pub italic: Option<bool>,
+    /// For every run without its own: underline, strikeout, superscript or subscript (`null`
+    /// clears it; missing keeps it).
+    pub underline: Option<bool>,
+    pub strike: Option<bool>,
+    #[serde(default, deserialize_with = "text::clearable", skip_serializing_if = "Option::is_none")]
+    pub rise: Option<Option<Rise>>,
     /// The new content as runs, each with its own font, size, colour, bold and italic (replaces
     /// `text`; see `RunChange`).
     pub runs: Option<Vec<RunChange>>,
@@ -173,6 +189,9 @@ pub fn blocks(eng: &Engine, doc: DocId, page: u32) -> Result<TextBlocks> {
                         color: r.color.map(|v| v as f32),
                         bold: r.bold,
                         italic: r.italic,
+                        underline: r.underline,
+                        strike: r.strike,
+                        rise: r.rise_kind(),
                     })
                     .collect(),
                 editable: b.issue.is_none(),
@@ -185,7 +204,11 @@ pub fn blocks(eng: &Engine, doc: DocId, page: u32) -> Result<TextBlocks> {
             .iter()
             .map(|a| AreaDto { rect: rect32(&m, a.rect), issue: a.issue, reason: text::issue_text(a.issue).into() })
             .collect();
-        Ok(TextBlocks { rev, blocks, areas })
+        let locked = match crate::outline::refuse_if_certified(d, "Editing its text") {
+            Err(EngineError::Invalid(m)) => Some(m),
+            _ => None,
+        };
+        Ok(TextBlocks { rev, blocks, areas, locked, signed: crate::outline::signed(d) })
     })
 }
 
@@ -196,8 +219,19 @@ fn line_spacing(b: &text::Block, lines: &[text::Line], m: &Matrix) -> Option<f32
     (b.size > 0.0 && gap > 0.0).then(|| (gap / b.size) as f32)
 }
 
-fn label(c: &BlockChange, page: u32) -> String {
-    let what = if c.text.is_some() || c.runs.is_some() {
+/// Whether `runs` set the block's own text again (only their styles differ): a formatting change.
+fn keeps_text(d: &PdfDocument, page: u32, index: u32, runs: &[RunChange]) -> bool {
+    let Ok(pc) = text::read_page(d, page) else { return false };
+    let Some(b) = text::group_blocks(&pc.lines).into_iter().nth(index as usize) else { return false };
+    let new: Option<String> = runs
+        .iter()
+        .map(|r| r.text.clone().or_else(|| r.source.and_then(|i| b.runs.get(i)).map(|s| s.text.clone())))
+        .collect();
+    new.is_some_and(|t| t == b.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+}
+
+fn label(c: &BlockChange, page: u32, formatting_only: bool) -> String {
+    let what = if c.text.is_some() || (c.runs.is_some() && !formatting_only) {
         "Edit text"
     } else if c.offset.is_some()
         && c.size.is_none()
@@ -207,6 +241,9 @@ fn label(c: &BlockChange, page: u32) -> String {
         && c.line_spacing.is_none()
         && c.bold.is_none()
         && c.italic.is_none()
+        && c.underline.is_none()
+        && c.strike.is_none()
+        && c.rise.is_none()
     {
         "Move text"
     } else if c.width.is_some()
@@ -216,6 +253,9 @@ fn label(c: &BlockChange, page: u32) -> String {
         && c.line_spacing.is_none()
         && c.bold.is_none()
         && c.italic.is_none()
+        && c.underline.is_none()
+        && c.strike.is_none()
+        && c.rise.is_none()
     {
         "Resize text box"
     } else {
@@ -232,7 +272,11 @@ pub fn edit(eng: &Engine, doc: DocId, rev: u32, page: u32, index: u32, change: &
         return Err(EngineError::Invalid("nothing to change".into()));
     }
     let mut fallbacks = Vec::new();
-    let state = eng.apply_removing(doc, label(change, page), source, |d| {
+    let formatting_only = match &change.runs {
+        Some(runs) => eng.read_custom(doc, |d| Ok(keeps_text(d, page, index, runs))).unwrap_or(false),
+        None => false,
+    };
+    let state = eng.apply_removing(doc, label(change, page, formatting_only), source, |d| {
         if entry.generation() != rev {
             return Err(EngineError::Stale);
         }
@@ -257,6 +301,9 @@ pub fn edit(eng: &Engine, doc: DocId, rev: u32, page: u32, index: u32, change: &
             line_spacing: change.line_spacing.map(f64::from),
             bold: change.bold,
             italic: change.italic,
+            underline: change.underline,
+            strike: change.strike,
+            rise: change.rise,
             runs: change.runs.clone(),
         };
         fallbacks = text::rewrite_block(d, page, index as usize, &c)?;

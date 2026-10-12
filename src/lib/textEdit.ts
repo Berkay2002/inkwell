@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
-import type { BlockChange, TextArea, TextBlock, TextFallback } from "./api";
+import type { BlockChange, RunChange, TextArea, TextBlock, TextFallback, TextRun } from "./api";
 import { addText, editText, setLeaveGuard } from "./edit";
 
 /**
@@ -47,12 +47,17 @@ interface PageBlocks {
   rev: number;
   blocks: TextBlock[];
   areas: TextArea[];
+  /** Why the text can't be changed (a certified document); the format controls say so. */
+  locked: string | null;
+  signed: boolean;
 }
 
 export interface DocTextEdit {
   pages: Record<number, PageBlocks>;
   selected: BlockRef | null;
   draft: Draft | null;
+  /** The editor's selected text, as offsets into its value; null when nothing is selected. */
+  selection: [number, number] | null;
   adding: NewBox | null;
   /** A quiet sentence under the format controls: a font that was replaced, or why a block is locked. */
   notice: string | null;
@@ -63,7 +68,11 @@ export interface DocTextEdit {
 /** What "Add text" starts with (Acrobat's default is about 12 pt). */
 export const NEW_TEXT = { size: 12, color: [0, 0, 0] as Rgb };
 
-const empty = (): DocTextEdit => ({ pages: {}, selected: null, draft: null, adding: null, notice: null, failed: false });
+const empty = (): DocTextEdit => ({ pages: {}, selected: null, draft: null, selection: null, adding: null, notice: null, failed: false });
+
+/** What a signed document's text edit says (the format section shows it). */
+export const SIGNED_TEXT =
+  "This document is signed. A change to its text is saved after the signature, which will show that the file was changed.";
 
 // ---- pure helpers (tested in textEdit.test.ts) ----
 
@@ -133,6 +142,57 @@ export function fallbackNote(fb: TextFallback): string {
   return why ? `${why[0].toUpperCase()}${why.slice(1)}, so this block is now set in ${face}.` : `This block is now set in ${face}.`;
 }
 
+export type Decor = "underline" | "strike" | "super" | "sub";
+
+const has = (r: TextRun, d: Decor) => (d === "underline" ? r.underline : d === "strike" ? r.strike : r.rise === d);
+
+/** Whether the runs add up to the block's text, so a selection's offsets can be cut into them. */
+const cuttable = (b: TextBlock) => b.runs.length > 0 && b.runs.map((r) => r.text).join("") === b.text;
+
+/** The runs a non-empty selection `sel` touches, or all of them: no selection, or runs that don't add up to the text. */
+function touched(block: TextBlock, sel: [number, number] | null): TextRun[] {
+  if (!sel || sel[0] >= sel[1] || !cuttable(block)) return block.runs;
+  let at = 0;
+  return block.runs.filter((r) => {
+    const from = at;
+    at += r.text.length;
+    return from < sel[1] && at > sel[0];
+  });
+}
+
+/** Whether `d` is on for what a press would change: the selection's runs, else the whole block. */
+export function decorOn(block: TextBlock, d: Decor, sel: [number, number] | null = null): boolean {
+  const runs = touched(block, sel);
+  return runs.length > 0 && runs.every((r) => has(r, d));
+}
+
+/**
+ * The change a press of `d` makes: off when it is on for everything touched, else on (super and sub
+ * replace one another). With a selection the runs are cut at its ends and only the pieces inside are
+ * marked, the others sent back as they were; without one, or when the runs don't add up to the text,
+ * it is the block's own field and applies to every run.
+ */
+export function decorChange(block: TextBlock, d: Decor, sel: [number, number] | null = null): BlockChange {
+  const on = decorOn(block, d, sel);
+  const mark: RunChange = d === "underline" ? { underline: !on } : d === "strike" ? { strike: !on } : { rise: on ? null : d };
+  if (!sel || sel[0] >= sel[1] || !cuttable(block)) return mark;
+  const runs: RunChange[] = [];
+  let at = 0;
+  for (const r of block.runs) {
+    const [from, to] = [at, (at += r.text.length)];
+    const [lo, hi] = [Math.max(from, sel[0]), Math.min(to, sel[1])];
+    if (lo >= hi) runs.push({ source: r.index });
+    else if (lo === from && hi === to) runs.push({ source: r.index, ...mark });
+    else {
+      // Only a cut piece has text of its own: the whole run keeps its glyphs.
+      if (lo > from) runs.push({ source: r.index, text: r.text.slice(0, lo - from) });
+      runs.push({ source: r.index, text: r.text.slice(lo - from, hi - from), ...mark });
+      if (hi < to) runs.push({ source: r.index, text: r.text.slice(hi - from) });
+    }
+  }
+  return { runs };
+}
+
 /** A guess at where in `text` a click at (x, y) landed in a block of `lines` lines: proportional, not exact. */
 export function caretFor(block: TextBlock, text: string, x: number, y: number): number {
   const [x0, y0, x1, y1] = block.rect;
@@ -160,6 +220,10 @@ interface Store {
   /** Selects a block (sending what was typed into the previous one first; it stays when that fails). */
   select: (doc: number, ref: BlockRef | null) => Promise<void>;
   setDraft: (doc: number, text: string) => void;
+  /** The editor's selected text (offsets into its value), which decorations apply to. */
+  setSelection: (doc: number, sel: [number, number] | null) => void;
+  /** Toggles underline, strikeout or super/subscript on the selection, else the whole block: one undo step. */
+  decorate: (doc: number, d: Decor) => Promise<void>;
   /** Sends the typed text, if it differs. */
   commit: (doc: number) => Promise<void>;
   /** Applies `patch` (and any typed text) to the selected block as one undo step. */
@@ -193,13 +257,20 @@ export const useTextEdit = create<Store>((set, get) => {
     const d = of(doc);
     return d.selected ? (d.pages[d.selected.page]?.blocks[d.selected.index] ?? null) : null;
   };
+  /** Why a format change is refused before it is sent (a certified document), with the notice set; null when it may go. */
+  const lockedFor = (doc: number): string | null => {
+    const d = of(doc);
+    const why = d.selected ? (d.pages[d.selected.page]?.locked ?? null) : null;
+    if (why) patchDoc(doc, { notice: why });
+    return why;
+  };
   const docRev = (doc: number) => useStore.getState().docs[doc]?.rev ?? 0;
   /** Documents with a change in flight: that change settles its own selection. */
   const applying = new Set<number>();
 
   const fetchPage = async (doc: number, page: number) => {
     const r = await api.textBlocks(doc, page);
-    patchDoc(doc, { pages: { ...of(doc).pages, [page]: { rev: r.rev, blocks: r.blocks, areas: r.areas } } });
+    patchDoc(doc, { pages: { ...of(doc).pages, [page]: { rev: r.rev, blocks: r.blocks, areas: r.areas, locked: r.locked, signed: r.signed } } });
     return r;
   };
 
@@ -217,9 +288,13 @@ export const useTextEdit = create<Store>((set, get) => {
       const now = of(doc);
       if (now.selected?.page === page && now.selected.index === sel.index) {
         const same = closestBlock(was, r.blocks);
-        if (!same) patchDoc(doc, { selected: null, draft: null });
+        if (!same) patchDoc(doc, { selected: null, draft: null, selection: null });
         else if (same.index !== sel.index) {
-          patchDoc(doc, { selected: { page, index: same.index }, draft: now.draft ? { ...now.draft, page, index: same.index } : null });
+          patchDoc(doc, {
+            selected: { page, index: same.index },
+            draft: now.draft ? { ...now.draft, page, index: same.index } : null,
+            selection: null,
+          });
         }
       }
     }
@@ -257,6 +332,7 @@ export const useTextEdit = create<Store>((set, get) => {
         patchDoc(doc, {
           selected: same ? { page: ref.page, index: same.index } : null,
           draft: same && cur ? { ...cur, page: ref.page, index: same.index } : null,
+          selection: null,
           failed: false,
           notice: same ? null : "The page changed, so the text typed in that block was not applied.",
         });
@@ -267,6 +343,8 @@ export const useTextEdit = create<Store>((set, get) => {
       patchDoc(doc, {
         selected: same ? { page: ref.page, index: same.index } : null,
         draft: keep,
+        // A selection stays only where the text it was made in did.
+        selection: same && same.index === ref.index && same.text === block.text && !keep ? of(doc).selection : null,
         failed: false,
         notice: r.value.fallback ? fallbackNote(r.value.fallback) : null,
       });
@@ -290,7 +368,7 @@ export const useTextEdit = create<Store>((set, get) => {
       void Promise.all(ids.map((id) => get().commit(id))).then(() => {
         if (get().open) return;
         // Typed text that could not be sent stays (with its block) for the person to see on return.
-        for (const id of ids) if (!of(id).failed) patchDoc(id, { selected: null, draft: null, adding: null, notice: null });
+        for (const id of ids) if (!of(id).failed) patchDoc(id, { selected: null, draft: null, selection: null, adding: null, notice: null });
       });
     },
     tool: "select",
@@ -326,7 +404,7 @@ export const useTextEdit = create<Store>((set, get) => {
       await get().commit(doc);
       // A change the engine refused keeps its block: moving on would lose the typed text.
       if (of(doc).failed) return;
-      patchDoc(doc, { selected: ref, draft: null, notice: null });
+      patchDoc(doc, { selected: ref, draft: null, selection: null, notice: null });
     },
 
     setDraft: (doc, text) => {
@@ -334,12 +412,30 @@ export const useTextEdit = create<Store>((set, get) => {
       if (sel) patchDoc(doc, { draft: { ...sel, text }, failed: false });
     },
 
+    setSelection: (doc, selection) => {
+      const cur = of(doc).selection;
+      if (cur?.[0] !== selection?.[0] || cur?.[1] !== selection?.[1]) patchDoc(doc, { selection });
+    },
+
+    decorate: (doc, d) =>
+      queued(doc, async () => {
+        if (lockedFor(doc)) return;
+        // Typed text goes first, so the runs the change is cut from are the document's own.
+        const typed = of(doc).draft?.text;
+        await commitNow(doc);
+        const block = selectedBlock(doc);
+        if (!block || of(doc).failed) return;
+        // The engine tidies spaces: a selection made in text it changed no longer lines up.
+        const sel = typed == null || typed === block.text ? of(doc).selection : null;
+        await applyNow(doc, decorChange(block, d, sel));
+      }),
+
     commit: (doc) => queued(doc, () => commitNow(doc)),
-    apply: (doc, patch) => queued(doc, () => applyNow(doc, patch)),
+    apply: (doc, patch) => queued(doc, () => (lockedFor(doc) ? Promise.resolve() : applyNow(doc, patch))),
     move: (doc, d) => get().apply(doc, { offset: d }),
 
     startAdding: (doc, page, at) => {
-      patchDoc(doc, { adding: { page, at, text: "" }, selected: null, draft: null, failed: false, notice: null });
+      patchDoc(doc, { adding: { page, at, text: "" }, selected: null, draft: null, selection: null, failed: false, notice: null });
     },
 
     setAdding: (doc, text) => {
@@ -371,11 +467,11 @@ export const useTextEdit = create<Store>((set, get) => {
         // The new block is the one that starts where it was put.
         const dist = (b: TextBlock) => Math.hypot(b.rect[0] - a.at[0], b.rect[1] - a.at[1]);
         const mine = fresh.blocks.filter((b) => b.editable).sort((p, q) => dist(p) - dist(q))[0];
-        if (mine) patchDoc(doc, { selected: { page: a.page, index: mine.index } });
+        if (mine) patchDoc(doc, { selected: { page: a.page, index: mine.index }, selection: null });
       }),
 
     discard: (doc) => {
-      patchDoc(doc, { selected: null, draft: null, adding: null, failed: false, notice: null });
+      patchDoc(doc, { selected: null, draft: null, selection: null, adding: null, failed: false, notice: null });
       set({ tool: "select" });
     },
 
