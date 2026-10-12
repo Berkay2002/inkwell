@@ -29,6 +29,9 @@ describe("summary texts", () => {
       "Imported comments: 2 added, 1 updated, 4 skipped (the page is not in this document: 3; no position: 1).",
     );
     expect(commentsImportText({ added: 0, updated: 0, skipped: [] }, true)).toBe("This file has no comments to import.");
+    expect(
+      commentsImportText({ added: 3, updated: 0, skipped: [], appearances: 2, files: 1, notes: [{ reason: "appearance that is damaged or not understood", count: 1 }] }, false),
+    ).toBe("Imported comments: 3 added, 2 appearances from the file, 1 attached file, 1 made without part of the file (appearance that is damaged or not understood: 1).");
   });
 
   it("a signed document's import says it is saved after the signature, only when something changed", () => {
@@ -49,8 +52,13 @@ describe("summary texts", () => {
   });
 
   it("export texts name the file and what was left out", () => {
-    expect(commentsExportText({ count: 1, leftOut: 2 }, "a.xfdf")).toBe("Exported 1 comment to a.xfdf. 2 comments left out: measurements, and kinds the file cannot carry.");
+    expect(commentsExportText({ count: 1, leftOut: 2 }, "a.xfdf")).toBe(
+      "Exported 1 comment to a.xfdf. 2 comments left out: measurements, attachments over their limit, and kinds the file cannot carry.",
+    );
     expect(commentsExportText({ count: 3, leftOut: 0, longText: 2 }, "a.xfdf")).toBe("Exported 3 comments to a.xfdf. 2 texts longer than 1 MB left empty.");
+    expect(commentsExportText({ count: 2, leftOut: 0, appearances: 1, files: 1, notes: [{ reason: "attached file over 4 MB", count: 1 }] }, "a.xfdf")).toBe(
+      "Exported 2 comments to a.xfdf. Includes 1 appearance and 1 attached file. Not written: attached file over 4 MB: 1.",
+    );
     expect(formExportText({ count: 4 }, "a.fdf")).toBe("Exported 4 fields to a.fdf.");
     expect(formExportText({ count: 4, leftOut: 1 }, "a.fdf")).toBe("Exported 4 fields to a.fdf. 1 password field left out.");
     expect(formExportText({ count: 4, leftOut: 0, longText: 2 }, "a.fdf")).toBe("Exported 4 fields to a.fdf. 2 fields with a value over 1 MB left out.");

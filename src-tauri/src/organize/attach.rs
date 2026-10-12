@@ -448,7 +448,7 @@ pub fn clean_name(name: &str) -> String {
     }
 }
 
-pub(super) fn mime_for(name: &str) -> &'static str {
+pub(crate) fn mime_for(name: &str) -> &'static str {
     match name.rsplit('.').next().map(str::to_lowercase).as_deref() {
         Some("pdf") => "application/pdf",
         Some("txt" | "log" | "md") => "text/plain",

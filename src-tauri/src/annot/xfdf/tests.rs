@@ -7,7 +7,7 @@ use crate::engine::fixture::{self, Fixture};
 use crate::outline::tests::{dir, open_bytes, raw_pdf};
 use std::sync::Arc;
 
-fn fresh(test: &str) -> (Arc<Engine>, DocId, String) {
+pub(super) fn fresh(test: &str) -> (Arc<Engine>, DocId, String) {
     let d = dir("xfdf", test);
     open_bytes(&d, "a.pdf", &fixture::build(&Fixture { pages: 2, lines: 4, ..Default::default() }))
 }
@@ -31,11 +31,11 @@ fn every_type() -> Vec<NewAnnot> {
     ]
 }
 
-fn add(eng: &Engine, id: DocId, page: u32, what: &NewAnnot) -> i32 {
+pub(super) fn add(eng: &Engine, id: DocId, page: u32, what: &NewAnnot) -> i32 {
     add_one(eng, id, page, what, &Style::default(), "Alex Johnson", EditSource::User).unwrap().1
 }
 
-fn raw_rect(eng: &Engine, id: DocId, page: u32, xref: i32) -> Vec<f32> {
+pub(super) fn raw_rect(eng: &Engine, id: DocId, page: u32, xref: i32) -> Vec<f32> {
     eng.read_custom(id, |d| {
         let (_p, a) = find(d, page, xref)?;
         Ok(floats(&a.object().get_dict("Rect")?.expect("/Rect"), 8, &Budget::new()))
@@ -43,14 +43,14 @@ fn raw_rect(eng: &Engine, id: DocId, page: u32, xref: i32) -> Vec<f32> {
     .unwrap()
 }
 
-fn close(a: &[f32], b: &[f32], what: &str) {
+pub(super) fn close(a: &[f32], b: &[f32], what: &str) {
     assert_eq!(a.len(), b.len(), "{what}: {a:?} vs {b:?}");
     for (x, y) in a.iter().zip(b) {
         assert!((x - y).abs() < 1.5, "{what}: {a:?} vs {b:?}");
     }
 }
 
-fn same(a: &AnnotDto, b: &AnnotDto) {
+pub(super) fn same(a: &AnnotDto, b: &AnnotDto) {
     let what = format!("{:?}", a.kind);
     assert_eq!((a.kind, a.page, &a.author, &a.contents, &a.created, &a.modified), (b.kind, b.page, &b.author, &b.contents, &b.created, &b.modified), "{what}");
     close(&a.rect, &b.rect, &format!("{what} rect"));
@@ -235,7 +235,7 @@ fn a_page_out_of_range_and_types_the_files_cannot_carry_are_skipped_and_counted(
     let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
         <square page="9" rect="100,600,200,700" name="far"/>
         <square page="-1" rect="100,600,200,700" name="neg"/>
-        <caret page="0" rect="100,600,110,610" name="c"/>
+        <redact page="0" rect="100,600,110,610" name="c"/>
         <fileattachment page="0" rect="100,600,110,610" name="f"/>
         <sound page="0" rect="100,600,110,610" name="s"/>
         <square page="0" rect="100,600,200,700" name="ok"/>
@@ -301,7 +301,7 @@ fn an_fdf_with_javascript_and_file_references_is_read_without_them() {
     close(&raw_rect(&eng, id, 0, list_all(&eng, id).unwrap()[0].xref), &[100.0, 600.0, 200.0, 700.0], "rect");
 }
 
-fn one_page_pdf(catalog_extra: &str, page_extra: &str, more: &[&str]) -> Vec<u8> {
+pub(super) fn one_page_pdf(catalog_extra: &str, page_extra: &str, more: &[&str]) -> Vec<u8> {
     let mut objs = vec![
         format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>"),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
@@ -311,9 +311,9 @@ fn one_page_pdf(catalog_extra: &str, page_extra: &str, more: &[&str]) -> Vec<u8>
     raw_pdf(&objs)
 }
 
-const ONE: &[u8] = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots><square page="0" rect="100,600,200,700" name="n1"><contents>One</contents></square></annots></xfdf>"##;
+pub(super) const ONE: &[u8] = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots><square page="0" rect="100,600,200,700" name="n1"><contents>One</contents></square></annots></xfdf>"##;
 
-fn certified_with_a_field(p: i32) -> Vec<u8> {
+pub(super) fn certified_with_a_field(p: i32) -> Vec<u8> {
     let cat = format!(
         "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P {p} >> >> ] >> >> /AcroForm << /Fields [4 0 R] >>"
     );
@@ -563,7 +563,7 @@ fn distinct_texts_over_1_mb_are_dropped_before_they_are_charged_to_the_export_bu
     let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
     let d = dir("xfdf", "distinct-long-contents");
     let (eng, id, _) = open_bytes(&d, "distinct.pdf", &one_page_pdf("", &format!("/Annots [{annots}]"), &refs));
-    let (items, left_out, long_text) = eng.read_custom(id, |d| collect_within(d, 8 << 20)).unwrap();
+    let Collected { items, left: left_out, long_text, .. } = eng.read_custom(id, |d| collect_within(d, 8 << 20)).unwrap();
     assert_eq!((items.len(), left_out, long_text), (n, 0, n));
 }
 
