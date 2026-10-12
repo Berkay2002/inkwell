@@ -39,6 +39,9 @@ struct Look {
     leader_ext: f64,
     leader_off: f64,
     interior: Option<[f64; 3]>,
+    /// The fill opacity the file asks for: `/ca` or `/CA` of the annotation, else the `/ca` (or `/CA`) of its appearance's
+    /// graphics states. `None`: not said.
+    fill_alpha: Option<f64>,
 }
 
 impl Look {
@@ -78,7 +81,24 @@ impl Look {
             let text = |n: Vec<u8>| String::from_utf8_lossy(&n).into_owned();
             Some([text(name(0)?), text(name(1)?)])
         });
+        // The annotation's own opacity; failing that the first graphics state of its appearance (a form, not a state dict)
+        // that has one.
+        let alpha = |d: &PdfObject| -> Option<f64> {
+            ["ca", "CA"].iter().find_map(|k| {
+                let v = d.get_dict(*k).ok()??;
+                if v.is_number().ok()? { v.as_float().ok().map(f64::from).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0)) } else { None }
+            })
+        };
+        let from_ap = || -> Option<f64> {
+            let n = o.get_dict("AP").ok()??.get_dict("N").ok()??;
+            if !n.is_stream().ok()? {
+                return None;
+            }
+            let states = n.get_dict("Resources").ok()??.get_dict("ExtGState").ok()??;
+            (0..states.dict_len().ok()?.min(32)).find_map(|i| alpha(&states.get_dict_val(i as i32).ok()??))
+        };
         Look {
+            fill_alpha: alpha(o).or_else(from_ap),
             color: nums("C").and_then(rgb).unwrap_or(COLOR.map(f64::from)),
             width: w,
             ends,
@@ -459,7 +479,10 @@ fn appearance(
     fonts.dict_put("Helv", font)?;
     let mut gs = doc.new_dict()?;
     gs.dict_put("Type", PdfObject::new_name("ExtGState")?)?;
-    gs.dict_put("ca", PdfObject::new_real(0.12)?)?;
+    // An area of ours is a light wash. One that came with an interior colour is the file's: it keeps the opacity the
+    // file asked for, and is opaque when it asked for none.
+    let wash = look.fill_alpha.unwrap_or(if look.interior.is_some() { 1.0 } else { 0.12 });
+    gs.dict_put("ca", PdfObject::new_real(wash as f32)?)?;
     gs.dict_put("CA", PdfObject::new_real(1.0)?)?;
     let mut states = doc.new_dict()?;
     states.dict_put("GS1", gs)?;

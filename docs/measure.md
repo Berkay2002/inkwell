@@ -70,7 +70,9 @@ form `/BBox` are the box of all that. A measurement from another app keeps its o
 and last point), `/IC` for the area fill, and on a distance `/LL`, `/LLE` and `/LLO`: the dimension line, its label and
 its endings are drawn `/LL` from the points (clockwise on screen when positive), with leader lines from `/LLO` next to
 each point to `/LLE` past the dimension line. `/Rect` and `/BBox` take in the endings, the leaders and the wider
-stroke. A distance with no `/LE` gets our end ticks. Every move writes a new appearance stream and font and points
+stroke. A polygon with an `/IC` keeps the fill opacity the file asked for (`/ca` or `/CA` of the annotation, else the
+`/ca` of its appearance's graphics states) and is opaque when it asked for none; ours is a 12% wash. A distance with
+no `/LE` gets our end ticks. Every move writes a new appearance stream and font and points
 `/AP /N` at them; it never edits the stream the annotation pointed at, because a file can share that form with other
 annotations or the page. The stream MuPDF's own `update` makes in between is deleted, but the previous appearance (and
 its font) stays in the file unused until a full save. An `annot_edit` colour change makes MuPDF redraw the shape without the label.
