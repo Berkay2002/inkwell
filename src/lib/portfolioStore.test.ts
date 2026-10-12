@@ -448,4 +448,29 @@ describe("thumbnails", () => {
     asked[3].done(png);
     await vi.waitFor(() => expect(api.portfolioThumb).toHaveBeenCalledTimes(4));
   });
+
+  it("a picture that was in flight when the document was read again goes nowhere", async () => {
+    const asked: Array<(b: ArrayBuffer) => void> = [];
+    vi.mocked(api.portfolioThumb).mockImplementation(() => new Promise<ArrayBuffer>((res) => asked.push(res)));
+    const old = got();
+    requestThumb(901, "n:a.pdf", 100, (r) => (old.r = r));
+    expect(asked).toHaveLength(1);
+    // the file is replaced by another with the same name: the document is read again
+    dropThumbs(901);
+    const now = got();
+    requestThumb(901, "n:a.pdf", 100, (r) => (now.r = r));
+    expect(asked).toHaveLength(2);
+    const stale = new Uint8Array([1, 2, 3]).buffer;
+    const fresh = new Uint8Array([4, 5, 6]).buffer;
+    asked[0](stale);
+    await Promise.resolve();
+    await vi.waitFor(() => expect(old.r).toBeUndefined());
+    expect(now.r).toBeUndefined();
+    asked[1](fresh);
+    await vi.waitFor(() => expect(now.r?.url).toBe(`data:image/png;base64,${btoa("\x04\x05\x06")}`));
+    // and the remembered one is the new picture
+    const again = got();
+    requestThumb(901, "n:a.pdf", 100, (r) => (again.r = r));
+    expect(again.r?.url).toBe(now.r?.url);
+  });
 });

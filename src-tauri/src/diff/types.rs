@@ -44,6 +44,8 @@ pub enum DiffError {
     NoPages { side: Side },
     #[error("that page took too long to draw")]
     Slow,
+    #[error("{}", if *.unreadable { "that page holds a picture whose size cannot be read" } else { "that page holds a picture with too many pixels" })]
+    BigImage { unreadable: bool },
     #[error("comparison failed unexpectedly")]
     Panic,
     #[error("cancelled")]

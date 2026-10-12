@@ -82,7 +82,7 @@ the file, and a re-read after an edit keeps them.
 - **Pictures**: page 1 of an embedded PDF through `portfolio_thumb(doc, id, side)`, which reads the file with
   `attach::read_data_capped` (32 MB decoded) and draws it with the same renderer and cache as the compare view
   (`diff::render_page_fit`, longest side 220 px for a tile, 560 px for the pane). One draw runs at a time in the
-  engine (a page that takes over 6 seconds is aborted and gets a note), and the view asks for at most two; a request for a tile that scrolled away before its turn is dropped.
+  engine (a page that runs over 6 seconds is aborted between content operators and gets a note; one huge image or shading is not interrupted, so a page that declares a picture over 50 megapixels, or over 100 in all, is refused before it is drawn, with a note), and the view asks for at most two; a request for a tile that scrolled away before its turn is dropped.
   Only mounted tiles ask, so a long level costs only what is on screen. The answers are kept per document (300
   pictures) and dropped when the portfolio is read again. A file over the cap, one without bytes in the document, an
   encrypted PDF and a damaged one show the file-type icon and a short note; none of them blocks the view.
@@ -122,8 +122,9 @@ Command palette. Pick files (any type), then a Save dialog; the result opens in 
 
 - `/View C` (a custom layout, in the file's own navigator) is read and shown as Details; it is not drawn.
 - The tiles show the picture of page 1 only, and the pane has no page stepper or zoom; a PDF is looked at in full by
-  opening it in a tab. A picture is given up on after 6 seconds (a note says so), but the draw's
-  memory is bounded only by the page's size and the 32 MB file cap.
+  opening it in a tab. The images a page names (and those of its forms, four levels down) are checked by
+  their declared size before the draw; inline images, masks, patterns and annotation appearances are not walked, and
+  a single huge shading is not interrupted, so the draw's memory is not bounded in every case.
 - Folders are shown as folders but Extract all writes flat (clashes get " (2)"), not into sub-folders.
 - Creating a portfolio makes no folders; a `/CI` field of subtype S, D or N is only read, never filled for new files.
 - The page-view tools (zoom, find) act on the cover page, so they do nothing visible while the list shows.

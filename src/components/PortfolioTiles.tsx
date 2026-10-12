@@ -82,6 +82,8 @@ export function PortfolioTiles({ id, info, sort, selected, folder }: Props) {
     const y = PAD + Math.floor(at / cols) * rowH;
     if (y - PAD < s.scrollTop) s.scrollTop = Math.max(0, y - PAD);
     else if (y + TILE_H + PAD > s.scrollTop + s.clientHeight) s.scrollTop = y + TILE_H + PAD - s.clientHeight;
+    // The scroll event comes later: the window follows now, so the selected tile is mounted in this render.
+    setTop(s.scrollTop);
   };
   // A selection made elsewhere (the first look, a layout switch) is brought into view.
   useEffect(() => {

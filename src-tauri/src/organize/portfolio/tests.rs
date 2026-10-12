@@ -772,3 +772,51 @@ fn a_thumbnail_is_page_one_of_an_embedded_pdf_and_everything_else_is_refused() {
     // read only
     assert!(!eng.edit_state(id).unwrap().dirty);
 }
+
+/// A one-page PDF (a few hundred bytes) whose only content paints one gray image that declares `w` x `h` pixels
+/// and holds 4 bytes of data.
+fn pdf_with_image(w: u32, h: u32) -> Vec<u8> {
+    format!(
+        "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+         3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<</XObject<</Im 4 0 R>>>>/Contents 5 0 R>>endobj\n\
+         4 0 obj<</Type/XObject/Subtype/Image/Width {w}/Height {h}/ColorSpace/DeviceGray/BitsPerComponent 8/Length 4>>stream\nabcd\nendstream\nendobj\n\
+         5 0 obj<</Length 26>>stream\nq 200 0 0 200 0 0 cm /Im Do Q\nendstream\nendobj\n\
+         trailer<</Root 1 0 R/Size 6>>\n%%EOF\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn a_page_that_declares_a_huge_picture_is_refused_before_it_is_drawn() {
+    let d = dir("thumb-image");
+    let write = |name: &str, bytes: Vec<u8>| {
+        let p = d.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let small = write("small.pdf", pdf_with_image(2, 2));
+    // 20 000 x 20 000 = 400 MP declared by a stream of 4 bytes; 7 000 x 7 000 = 49 MP is just under the limit
+    let huge = write("huge.pdf", pdf_with_image(20_000, 20_000));
+    let two = write("two.pdf", pdf_with_image(7_000, 7_000));
+    let made = d.join("p.pdf").to_string_lossy().into_owned();
+    create(&Engine::new(2, 64 << 20), &sources(&[("small.pdf", &small), ("huge.pdf", &huge), ("two.pdf", &two)]), &made).unwrap();
+    let (eng, id) = open(&made);
+
+    // the control: the same file with a small picture draws
+    let (w, h) = png_size(&thumb(&eng, id, "n:small.pdf", 100, THUMB_MAX).unwrap());
+    assert_eq!((w, h), (100, 100));
+    let e = thumb(&eng, id, "n:huge.pdf", 100, THUMB_MAX).unwrap_err().to_string();
+    assert!(e.contains("too large to preview"), "{e}");
+    // 49 MP is under the per-image limit and drawn (a 4-byte stream is a short read, not an error)
+    assert!(thumb(&eng, id, "n:two.pdf", 100, THUMB_MAX).is_ok());
+}
+
+#[test]
+fn the_pictures_of_a_page_are_counted_together() {
+    let doc = PdfDocument::from_bytes(&pdf_with_image(7_000, 7_000)).unwrap();
+    // 49 MP: within 50 MP each and within 100 MP in all
+    assert!(crate::diff::visual::check_page_images(&doc, 0, 50_000_000, 100_000_000).is_ok());
+    // the same page over a lower total, or a lower per-image limit
+    assert!(crate::diff::visual::check_page_images(&doc, 0, 50_000_000, 40_000_000).is_err());
+    assert!(crate::diff::visual::check_page_images(&doc, 0, 40_000_000, 100_000_000).is_err());
+}

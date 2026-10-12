@@ -64,9 +64,13 @@ function pump() {
       .catch((e): ThumbResult => ({ note: String(e).replace(/^Error:\s*/, "") || "No preview" }))
       .then((r) => {
         running--;
-        jobs.delete(job.key);
-        remember(job.key, r);
-        for (const cb of job.subs) cb(r);
+        // A job dropped meanwhile (the document was read again) is not the one asked for now: its picture may be
+        // of a file that has been replaced, so it goes nowhere.
+        if (jobs.get(job.key) === job) {
+          jobs.delete(job.key);
+          remember(job.key, r);
+          for (const cb of job.subs) cb(r);
+        }
         pump();
       });
   }
@@ -106,4 +110,6 @@ export function requestThumb(doc: number, id: string, side: number, cb: (r: Thum
 export function dropThumbs(doc: number) {
   const prefix = `${doc}\u0000`;
   for (const k of [...cache.keys()]) if (k.startsWith(prefix)) cache.delete(k);
+  for (const k of [...jobs.keys()]) if (k.startsWith(prefix)) jobs.delete(k);
+  queue = queue.filter((j) => jobs.get(j.key) === j);
 }

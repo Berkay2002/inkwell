@@ -754,7 +754,8 @@ pub fn read(doc: &PdfDocument) -> Result<Option<PortfolioInfo>> {
 pub const THUMB_MAX: usize = 32 << 20;
 
 /// One thumbnail is drawn at a time, however many the view asks for: a tile grid cannot pile up renders. A page
-/// that takes too long is given up on (`diff::visual`'s fit limit), so one hostile file cannot hold the rest.
+/// that runs long is aborted between content operators (`diff::visual`'s fit limit); one huge image or shading
+/// is not interrupted, so a page declaring a picture over 50 MP (100 MP in all) is refused before it is drawn.
 static ONE_AT_A_TIME: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 /// Page 1 of the embedded PDF `id` as a PNG whose longest side is `side` pixels (48 to 1024). The file is
@@ -770,6 +771,7 @@ pub fn thumb(eng: &crate::engine::Engine, doc: crate::engine::DocId, id: &str, s
             DiffError::BadPage { .. } => "This PDF has no pages",
             DiffError::NotPdf { .. } => "This file is not a PDF Inkwell can open",
             DiffError::Slow => "This PDF's first page took too long to draw",
+            DiffError::BigImage { .. } => "This PDF's first page holds a picture too large to preview",
             _ => "This PDF could not be drawn",
         })
     })?;

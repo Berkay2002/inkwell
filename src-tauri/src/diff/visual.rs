@@ -36,6 +36,11 @@ impl BytesId {
 /// How long a fitted render (a thumbnail) may take before the page is given up on.
 const FIT_LIMIT: Duration = Duration::from_secs(6);
 
+/// The most pixels one image, and all the images of a page together, may declare (by /Width x /Height) for a
+/// fitted render: the page is drawn with them decoded, which the watchdog cannot cut short.
+const FIT_IMAGE_PIXELS: u64 = 50_000_000;
+const FIT_IMAGES_TOTAL: u64 = 100_000_000;
+
 /// Largest render, in pixels (160 MB of RGBA).
 pub const MAX_PIXELS: f32 = 40e6;
 
@@ -131,6 +136,11 @@ fn render(bytes: &[u8], page: u32, size: Size, password: Option<&str>) -> Result
     if page as i32 >= n {
         return Err(DiffError::BadPage { page });
     }
+    // A fitted render (a thumbnail) is the one a stranger's file can reach, and the watchdog only acts between
+    // content operators: one huge image or shading is not interrupted, so a page that declares one is refused.
+    if matches!(size, Size::Side(_)) {
+        check_page_images(&doc, page as i32, FIT_IMAGE_PIXELS, FIT_IMAGES_TOTAL)?;
+    }
     let p = doc.load_page(page as i32)?;
     let b = p.bounds()?;
     let area = ((b.x1 - b.x0) * (b.y1 - b.y0)).max(1.0);
@@ -163,6 +173,49 @@ fn render(bytes: &[u8], page: u32, size: Size, password: Option<&str>) -> Result
         }
     }
     Ok(Raster { width: w as u32, height: h as u32, scale, rgba })
+}
+
+/// Every image the page names under `/Resources /XObject`, and those of the forms it draws (four levels down), must
+/// be at most `each` pixels by its own /Width x /Height, and `total` together: a page is drawn with them decoded, so
+/// one huge scan (or a small stream that inflates into one) would take the memory before any time limit could help.
+// shortcut: inline (BI) images, an image's mask, and images in appearance streams (annotations), patterns and Type 3
+// fonts are not walked, and at most 4096 resource entries are looked at. Upgrade: a memory cap on the draw itself,
+// if a page gets past this.
+pub(crate) fn check_page_images(doc: &PdfDocument, page: i32, each: u64, total: u64) -> Result<()> {
+    let Ok(Some(res)) = doc.find_page(page).and_then(|p| p.get_dict_inheritable("Resources")) else { return Ok(()) };
+    let mut stack = vec![(res, 0u8)];
+    let mut left = 4096u32;
+    let mut sum = 0u64;
+    while let Some((res, depth)) = stack.pop() {
+        let Ok(Some(xo)) = res.get_dict("XObject") else { continue };
+        for i in 0..xo.dict_len().unwrap_or(0) as i32 {
+            if left == 0 {
+                return Ok(());
+            }
+            left -= 1;
+            let Ok(Some(x)) = xo.get_dict_val(i) else { continue };
+            let subtype = x.get_dict("Subtype").ok().flatten().and_then(|s| s.as_name().ok());
+            match subtype.as_deref() {
+                Some(t) if t == b"Image" => {
+                    // A size that is missing, not an integer, negative or unreadable is a size we cannot bound.
+                    let dim = |k: &str| x.get_dict(k).ok().flatten().filter(|v| v.is_int().unwrap_or(false)).and_then(|v| v.as_int().ok()).and_then(|v| u64::try_from(v).ok());
+                    let (Some(w), Some(h)) = (dim("Width"), dim("Height")) else { return Err(DiffError::BigImage { unreadable: true }) };
+                    let px = w.saturating_mul(h);
+                    sum = sum.saturating_add(px);
+                    if px > each || sum > total {
+                        return Err(DiffError::BigImage { unreadable: false });
+                    }
+                }
+                Some(t) if t == b"Form" && depth < 4 => {
+                    if let Ok(Some(r)) = x.get_dict("Resources") {
+                        stack.push((r, depth + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What `Page::to_pixmap` makes (white paper, opaque, annotations and fields drawn), with a cookie so a watchdog

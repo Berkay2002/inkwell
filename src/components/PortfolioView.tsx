@@ -64,9 +64,9 @@ export function PortfolioView({ doc, info }: { doc: DocState; info: PortfolioInf
         <span className="pf-count">
           {files} {files === 1 ? "file" : "files"}
         </span>
-        <div className="ax-seg pf-seg" role="radiogroup" aria-label="Layout">
+        <div className="ax-seg pf-seg" role="group" aria-label="Layout">
           {LAYOUTS.map((l) => (
-            <button key={l.id} role="radio" aria-checked={layout === l.id} className={layout === l.id ? "on" : ""} onClick={() => store().setLayout(id, l.id)}>
+            <button key={l.id} aria-pressed={layout === l.id} className={layout === l.id ? "on" : ""} onClick={() => store().setLayout(id, l.id)}>
               {l.label}
             </button>
           ))}
