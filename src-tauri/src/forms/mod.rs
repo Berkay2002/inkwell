@@ -10,7 +10,7 @@
 //! the network or files.
 //!
 //! A text field's `/V` keeps the raw value; its appearance shows the formatted one (as Acrobat does).
-//! Form data export and import (FDF, XFDF, JSON) is not built (see docs/forms.md).
+//! Form data export and import (FDF, XFDF, JSON) is `data.rs` (see docs/forms.md).
 
 use crate::annot::{AnnotWalk, Which};
 use crate::engine::edit::{EditSource, EditState};
@@ -23,6 +23,7 @@ use std::collections::HashMap;
 pub mod af;
 pub mod app;
 mod author;
+pub mod data;
 pub mod detect;
 pub mod doc_js;
 pub mod js;
@@ -161,7 +162,7 @@ pub(crate) fn text_or_stream(o: &PdfObject) -> Option<String> {
 }
 
 /// Bytes of a PDF text string or script stream: UTF-16 with a byte order mark, UTF-8, or Latin-1-ish text.
-fn decode_text(b: &[u8]) -> String {
+pub(crate) fn decode_text(b: &[u8]) -> String {
     let utf16 = |rest: &[u8], be: bool| {
         let units: Vec<u16> = rest.chunks_exact(2).map(|p| if be { u16::from_be_bytes([p[0], p[1]]) } else { u16::from_le_bytes([p[0], p[1]]) }).collect();
         String::from_utf16_lossy(&units)
@@ -700,13 +701,18 @@ fn button_plan(entries: &[Entry], e: &Entry, value: &FieldValue) -> Result<Optio
 fn set_value_is_noop(doc: &PdfDocument, page: u32, xref: i32, value: &FieldValue) -> Result<bool> {
     let entries = scan(doc)?;
     let Some(e) = entries.iter().find(|e| e.page == page && e.xref == xref) else { return Ok(false) };
+    Ok(fill_is_noop(&entries, e, value))
+}
+
+/// [`set_value_is_noop`] for a field already found (form data import asks it for every field).
+fn fill_is_noop(entries: &[Entry], e: &Entry, value: &FieldValue) -> bool {
     if flag(field_ff(e), FieldFlags::READ_ONLY) {
-        return Ok(false);
+        return false;
     }
     let current = values_of(geti(&e.field, "V"));
-    Ok(match e.kind {
+    match e.kind {
         FieldKind::Button | FieldKind::Signature => false,
-        FieldKind::Checkbox | FieldKind::Radio => match button_plan(&entries, e, value) {
+        FieldKind::Checkbox | FieldKind::Radio => match button_plan(entries, e, value) {
             Ok(None) => true,
             Ok(Some((v, states))) => {
                 let cur_v = current.first().map_or("Off", String::as_str);
@@ -721,13 +727,13 @@ fn set_value_is_noop(doc: &PdfDocument, page: u32, xref: i32, value: &FieldValue
             let typed: Vec<&String> = match value {
                 FieldValue::Text(s) => vec![s],
                 FieldValue::Many(v) => v.iter().collect(),
-                FieldValue::Checked(_) => return Ok(false),
+                FieldValue::Checked(_) => return false,
             };
             let typed: Vec<&str> = typed.into_iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
             let current: Vec<&str> = current.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
             typed == current
         }
-    })
+    }
 }
 
 /// Sets a field. A value that does not fit the field's format or range is rejected with
