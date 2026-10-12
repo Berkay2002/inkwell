@@ -20,7 +20,7 @@ import { useStore } from "../store";
 import type { ReplaceResult } from "./api";
 import { replaceText } from "./edit";
 import { lockedReason, useReplace } from "./replace";
-import { barTops, reportAt, reportOf, resumeOf, whyNotReplace } from "./replaceLogic";
+import { BANNER_HEIGHT, barTops, reportAt, reportOf, resumeOf, whyNotReplace } from "./replaceLogic";
 import { useTextEdit } from "./textEdit";
 
 const result = (over: Partial<ReplaceResult> = {}): ReplaceResult => ({
@@ -209,10 +209,16 @@ describe("replacing through the store", () => {
 
 describe("where the Find bar sits", () => {
   it("stays at the top, and goes below the signature banner when that shows, rows and report with it", () => {
-    expect(barTops(false)).toEqual({ find: 12, replace: 58, report: 106 });
-    const t = barTops(true);
-    expect(t.find).toBeGreaterThanOrEqual(12 + 40);
-    expect(t.replace - t.find).toBe(46);
-    expect(t.report - t.replace).toBe(48);
+    expect(barTops(null)).toEqual({ find: 12, replace: 58, report: 106 });
+    expect(barTops(BANNER_HEIGHT)).toEqual({ find: 58, replace: 104, report: 152 });
+  });
+
+  it("follows the banner's own height when its text wraps", () => {
+    const one = barTops(BANNER_HEIGHT);
+    const two = barTops(58.4);
+    expect(two.find).toBe(12 + 59 + 6);
+    expect(two.find).toBeGreaterThan(one.find);
+    expect(two.replace - two.find).toBe(one.replace - one.find);
+    expect(two.report - two.replace).toBe(one.report - one.replace);
   });
 });

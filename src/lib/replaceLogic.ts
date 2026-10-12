@@ -55,10 +55,17 @@ export function resumeOf(report: ReplaceReport | null | undefined, rev: number, 
   return report && report.rev === rev && report.ask === ask ? (report.resume ?? undefined) : undefined;
 }
 
-/** Top offsets (px) of the Find bar, the Replace row and the report under them: below the signature banner when it shows. */
-export function barTops(banner: boolean): { find: number; replace: number; report: number } {
-  const down = banner ? 46 : 0;
-  return { find: 12 + down, replace: 58 + down, report: 106 + down };
+/** The signature banner's height when it has not been measured yet (one line of text). */
+export const BANNER_HEIGHT = 40;
+
+/**
+ * Top offsets (px) of the Find bar, the Replace row and the report under them. The banner sits at 12 px in the
+ * same strip; when it shows (`banner` is its height) they go 6 px below its bottom edge, the row and the report at
+ * their usual distance from the bar.
+ */
+export function barTops(banner: number | null): { find: number; replace: number; report: number } {
+  const find = banner == null ? 12 : 12 + Math.ceil(banner) + 6;
+  return { find, replace: find + 46, report: find + 94 };
 }
 
 /** Why Replace is unavailable, or null when it can run. */
