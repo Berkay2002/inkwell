@@ -503,6 +503,18 @@ export function groupDelta(rects: Rect4[], dx: number, dy: number, page: [number
   return [ddx, ddy];
 }
 
+/**
+ * What releasing a group drag does. `d` is the drag as it stood (null when it was cancelled with Esc or by the system:
+ * nothing is sent). A click without a drag narrows the selection to the pressed field; a drag sends one nudge of the
+ * clamped distance (none when the block could not move at all).
+ */
+export type DragEnd = { kind: "none" } | { kind: "select" } | { kind: "nudge"; by: [number, number] };
+export function groupDragEnd(d: { moved: boolean; delta: [number, number] } | null): DragEnd {
+  if (!d) return { kind: "none" };
+  if (!d.moved) return { kind: "select" };
+  return d.delta[0] === 0 && d.delta[1] === 0 ? { kind: "none" } : { kind: "nudge", by: d.delta };
+}
+
 /** A click picks one; Ctrl, Cmd or Shift adds the clicked field (it becomes the anchor), or takes it out if it was picked. */
 export function nextPicks(picked: Pick[], ref: Pick, additive: boolean): Pick[] {
   if (!additive) return [ref];

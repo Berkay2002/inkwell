@@ -429,3 +429,26 @@ fn a_json_list_with_one_entry_over_1_mb_says_so_and_not_that_a_list_takes_text_o
     assert_eq!(of("Mixed"), Val::Invalid("a list takes text values only"));
     assert_eq!(of("Fine"), Val::Many(vec!["a".into(), "b".into()]));
 }
+
+#[test]
+fn a_value_is_measured_by_length_before_it_is_read() {
+    let (eng, id, _) = form("value-length");
+    let got = eng
+        .read_custom(id, |d| {
+            let s = |n: usize| PdfObject::new_string(&"v".repeat(n));
+            let mut list = d.new_array()?;
+            list.array_push(s(3)?)?;
+            let short_list = string_over_limit(&list);
+            list.array_push(s(MAX_STR + 1)?)?;
+            Ok([
+                string_over_limit(&s(MAX_STR + 1)?),
+                string_over_limit(&s(MAX_STR)?),
+                string_over_limit(&PdfObject::new_name("On")?),
+                short_list,
+                string_over_limit(&list),
+            ])
+        })
+        .unwrap();
+    // over the limit, at the limit, a name, a list of short values, the same list with one long entry
+    assert_eq!(got, [true, false, false, false, true]);
+}

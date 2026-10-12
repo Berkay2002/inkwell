@@ -9,7 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { applyState } from "./edit";
 import { useForms } from "./forms";
 import {
-  CERTIFIED_REASON, type Field, NudgeBatch, anchorOf, groupDelta, groupPicks, layoutReason, marqueeHits, nextPicks, normBox, nudgeDelta,
+  CERTIFIED_REASON, type Field, NudgeBatch, anchorOf, groupDelta, groupDragEnd, groupPicks, layoutReason, marqueeHits, nextPicks, normBox, nudgeDelta,
   renameCheck,
 } from "./formsLogic";
 import { type Rot, unrotatePoint } from "./layout";
@@ -235,6 +235,13 @@ describe("group drag", () => {
     expect(groupDelta(off, -30, 0, PAGE)).toEqual([0, 0]);
     expect(groupDelta(off, 30, 0, PAGE)).toEqual([30, 0]);
     expect(groupDelta([], 5, 5, PAGE)).toEqual([0, 0]);
+  });
+
+  it("releasing: a cancelled drag sends nothing, a click narrows, a block that could not move sends nothing, a drag nudges", () => {
+    expect(groupDragEnd(null)).toEqual({ kind: "none" });
+    expect(groupDragEnd({ moved: false, delta: [1, 1] })).toEqual({ kind: "select" });
+    expect(groupDragEnd({ moved: true, delta: [0, 0] })).toEqual({ kind: "none" });
+    expect(groupDragEnd({ moved: true, delta: [0, -7] })).toEqual({ kind: "nudge", by: [0, -7] });
   });
 
   it("follows the page as shown: a drag across the turned page gives the page-space distance, whatever the view rotation", () => {

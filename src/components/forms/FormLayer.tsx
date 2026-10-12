@@ -3,7 +3,7 @@ import { commandFor } from "../../lib/commands";
 import { useForms } from "../../lib/forms";
 import {
   type ButtonAction, type Field, type FieldValue, type Handle, type Pick, type Rect4, HANDLES, KIND_LABEL, anchorOf, commitThenRun, cssColor, dragged,
-  fontSize, groupDelta, groupPicks, isCalculated, marqueeHits, move, normBox, onPage, resetTargets, resize, samePick,
+  fontSize, groupDelta, groupDragEnd, groupPicks, isCalculated, marqueeHits, move, normBox, onPage, resetTargets, resize, samePick,
 } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 import { useStore } from "../../store";
@@ -115,8 +115,9 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
     if (!d) return;
     if (d.group) {
       // The group goes as one nudge of the picked fields of this page; a click without a drag narrows the selection to the field.
-      if (!d.moved) fm().select(docId, { page, xref: d.xref });
-      else if (d.delta[0] !== 0 || d.delta[1] !== 0) void fm().nudge(docId, d.delta[0], d.delta[1], page);
+      const end = groupDragEnd(d);
+      if (end.kind === "select") fm().select(docId, { page, xref: d.xref });
+      else if (end.kind === "nudge") void fm().nudge(docId, end.by[0], end.by[1], page);
     } else if (d.moved) void fm().move(docId, page, d.xref, d.rect);
   };
 
