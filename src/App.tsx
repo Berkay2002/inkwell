@@ -31,6 +31,7 @@ import { PrintSheet } from "./components/PrintSheet";
 import { ActionWizard } from "./components/ActionWizard";
 import { CombineSheet } from "./components/CombineSheet";
 import { DocJsSheet } from "./components/DocJsSheet";
+import { StampsManager } from "./components/comments/StampsManager";
 import { LabelsSheet, TransitionsSheet } from "./components/OrganizePlus";
 import { Presentation } from "./components/Presentation";
 import { ToolsPanel } from "./components/ToolsPanel";
@@ -220,6 +221,7 @@ export default function App() {
       <CombineSheet />
       <ActionWizard />
       <DocJsSheet />
+      <StampsManager />
       <LabelsSheet />
       <TransitionsSheet />
       <Presentation />

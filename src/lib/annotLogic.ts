@@ -27,6 +27,8 @@ export interface Annot {
   points: Pt[];
   strokes: Pt[][];
   icon: string | null;
+  /** A stamp that draws a picture (a custom stamp): resizing it keeps the picture's proportions. */
+  picture: boolean;
   fontSize: number | null;
   parent: number | null;
   state: string | null;

@@ -97,6 +97,8 @@ enum SourceKind {
     Text,
     /// An exported batch action.
     Json,
+    /// A picture or a PDF for a custom stamp.
+    Stamp,
 }
 
 /// Open dialog in Rust; the picked files come back as open tokens.
@@ -182,6 +184,7 @@ async fn pick_source(window: Window, kind: SourceKind, multiple: bool) -> Result
             SourceKind::Images => d.set_title("Choose images").add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"]),
             SourceKind::Text => d.set_title("Choose a text file").add_filter("Text", &["txt", "text", "md", "log", "csv"]),
             SourceKind::Json => d.set_title("Choose an action file").add_filter("Inkwell action", &["json"]),
+            SourceKind::Stamp => d.set_title("Choose a picture or PDF for the stamp").add_filter("Pictures and PDFs", &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "pdf"]),
         };
         let picked = if multiple { d.blocking_pick_files() } else { d.blocking_pick_file().map(|f| vec![f]) };
         let reg = window.state::<Paths>();
@@ -1201,6 +1204,13 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            annot::app::stamp_list,
+            annot::app::stamp_create,
+            annot::app::stamp_update,
+            annot::app::stamp_delete,
+            annot::app::stamp_thumb,
+            annot::app::stamp_place,
+            annot::app::stamp_gate,
             annot::app::annot_export,
             annot::app::annot_import,
             annot::app::data_gates,
