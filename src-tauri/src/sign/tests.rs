@@ -1977,6 +1977,9 @@ fn a_text_field_and_a_free_text_note_without_an_appearance_are_still_drawn() {
     let img = pixmap_rgb(&with_sig_field(Look::NoAp));
     assert!(dark_in(&img, [50, 462, 250, 492]) > 20, "the text field's value");
     assert!(dark_in(&img, [50, 552, 250, 592]) > 20, "the note's text");
+    // The same regions are blank on the plain fixture, so the check can fail.
+    let plain = pixmap_rgb(&fixture::build(&Fixture { pages: 1, lines: 4, ..Default::default() }));
+    assert_eq!(dark_in(&plain, [50, 462, 250, 492]) + dark_in(&plain, [50, 552, 250, 592]), 0);
 }
 
 /// The widget's /AP/N as (has /AP, the stream's bytes).
@@ -1995,11 +1998,12 @@ fn sig_ap(bytes: &[u8]) -> (bool, Vec<u8>) {
     panic!("no signature widget");
 }
 
-/// Does any stream in the file draw the arrow's colour?
+/// Does any stream in the file draw the arrow's colour (MuPDF writes it as `.95 .33 .18 rg`)?
 fn has_arrow(bytes: &[u8]) -> bool {
     let d = PdfDocument::from_bytes(bytes).unwrap();
-    (1..d.count_objects().unwrap() as i32).any(|n| {
-        d.new_indirect(n, 0).and_then(|o| o.resolve()).ok().flatten().is_some_and(|o| o.is_stream().unwrap_or(false) && o.read_stream().unwrap_or_default().windows(14).any(|w| w == b"0.95 0.33 0.18"))
+    // is_stream and read_stream want the indirect object, not what it resolves to.
+    (1..d.count_objects().unwrap() as i32).filter_map(|n| d.new_indirect(n, 0).ok()).any(|o| {
+        o.is_stream().unwrap_or(false) && o.read_stream().unwrap_or_default().windows(12).any(|w| w == b".95 .33 .18 ")
     })
 }
 
@@ -2042,4 +2046,25 @@ fn drawing_and_editing_a_signed_file_with_an_empty_field_writes_no_appearance_fo
     let i = infos(&after);
     let empty = i.iter().find(|s| s.field == "Tenant").unwrap();
     assert_eq!(empty.status, Status::Unsigned);
+}
+
+#[test]
+fn moving_or_editing_a_signature_field_keeps_the_files_own_appearance() {
+    use crate::forms::{edit_one, list_all, move_one, FieldPatch};
+    let mut bad = Vec::new();
+    for look in [Look::NoAp, Look::BlankAp, Look::BlueAp] {
+        let bytes = with_sig_field(look);
+        let before = sig_ap(&bytes);
+        let (eng, id, _) = open_bytes(&format!("move-{look:?}"), &bytes);
+        let f = list_all(&eng, id).unwrap().fields.into_iter().find(|f| f.name == "Tenant").unwrap();
+        move_one(&eng, id, f.page, f.xref, [300.0, 100.0, 520.0, 200.0], EditSource::User).unwrap();
+        edit_one(&eng, id, f.page, f.xref, &FieldPatch { required: Some(true), ..Default::default() }, EditSource::User).unwrap();
+        let b = eng.current_bytes(id).unwrap();
+        let after = sig_ap(&b);
+        eprintln!("{look:?}: AP {:?} -> {:?}, arrow in file {}", (before.0, before.1.len()), (after.0, after.1.len()), has_arrow(&b));
+        if after != before || has_arrow(&b) {
+            bad.push(format!("{look:?}: AP {:?} -> {:?}, arrow {}", (before.0, before.1.len()), (after.0, after.1.len()), has_arrow(&b)));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
 }

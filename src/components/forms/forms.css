@@ -68,10 +68,9 @@ button.fm-w.k-signature {
 .fm-w.k-signature[aria-disabled="true"] {
   cursor: not-allowed;
 }
-/* a refused signature field: the tokens of .sg-field[aria-disabled] in Fill and Sign */
+/* a refused signature field: dimmed like .sg-field[aria-disabled] in Fill and Sign */
 .fm-w.k-signature.locked {
-  background: var(--surface-2);
-  border: calc(1.5px / var(--z, 1)) dashed var(--border-strong);
+  background: color-mix(in srgb, var(--text-2) 12%, transparent);
 }
 /* nobody can fill it, so no red required frame */
 .fm-w.k-signature.locked:not(:focus) {
