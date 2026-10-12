@@ -480,8 +480,9 @@ fn appearance(
     let mut gs = doc.new_dict()?;
     gs.dict_put("Type", PdfObject::new_name("ExtGState")?)?;
     // An area of ours is a light wash. One that came with an interior colour is the file's: it keeps the opacity the
-    // file asked for, and is opaque when it asked for none.
-    let wash = look.fill_alpha.unwrap_or(if look.interior.is_some() { 1.0 } else { 0.12 });
+    // file asked for, and is opaque when it asked for none. Without `/IC` the file draws no fill, so an opacity it
+    // names (`/CA 1` is common) is not a reason to paint one.
+    let wash = if look.interior.is_some() { look.fill_alpha.unwrap_or(1.0) } else { 0.12 };
     gs.dict_put("ca", PdfObject::new_real(wash as f32)?)?;
     gs.dict_put("CA", PdfObject::new_real(1.0)?)?;
     let mut states = doc.new_dict()?;

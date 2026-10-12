@@ -1287,7 +1287,7 @@ fn moving_a_foreign_measure_keeps_its_look_and_does_not_clip_it() {
     });
 }
 
-/// A polygon from another app with a solid red `/IC`. `annot` is extra entries of the annotation (`/CA`), `gs` the
+/// A polygon from another app. `annot` is extra entries of the annotation (`/IC`, `/CA`), `gs` the
 /// graphics states its form carries (`/Resources` of the form).
 fn foreign_area(annot: &str, gs: &str) -> Spec {
     let d = "<< /Type /NumberFormat /U (sq ft) /C 1 /D 100 /FD true >>";
@@ -1300,7 +1300,7 @@ fn foreign_area(annot: &str, gs: &str) -> Spec {
                 5,
                 format!(
                     "<< /Type /Annot /Subtype /Polygon /Rect [100 600 172 672] /Vertices [100 600 172 600 172 672 100 672] \
-                     /IT /PolygonDimension /F 4 /C [0 0 1] /IC [1 0 0] {annot} /AP << /N 7 0 R >> /Measure {measure} >>"
+                     /IT /PolygonDimension /F 4 /C [0 0 1] {annot} /AP << /N 7 0 R >> /Measure {measure} >>"
                 ),
             ),
             (7, format!("<< /Type /XObject /Subtype /Form /BBox [100 600 172 672] {res} /Length 3 >>\nstream\nq Q\nendstream")),
@@ -1338,20 +1338,27 @@ fn fill_after_move(test: &str, spec: &Spec) -> (f64, [i32; 3]) {
 
 #[test]
 fn a_moved_foreign_area_keeps_the_fill_opacity_the_file_asked_for() {
+    const RED: &str = "/IC [1 0 0]";
     // An /IC and no opacity anywhere: opaque, as it was drawn before the move.
-    let (ca, px) = fill_after_move("fill-opaque", &foreign_area("", ""));
+    let (ca, px) = fill_after_move("fill-opaque", &foreign_area(RED, ""));
     assert_eq!(ca, 1.0);
     assert!(px[0] > 200 && px[1] < 30 && px[2] < 30, "solid red inside: {px:?}");
     // /CA on the annotation.
-    let (ca, px) = fill_after_move("fill-ca", &foreign_area("/CA 0.5", ""));
+    let (ca, px) = fill_after_move("fill-ca", &foreign_area("/IC [1 0 0] /CA 0.5", ""));
     assert_eq!(ca, 0.5);
     assert!(px[0] > 200 && (100..160).contains(&px[1]), "half red inside: {px:?}");
     // /ca of its appearance's graphics state, when the annotation says nothing.
-    let (ca, _) = fill_after_move("fill-gs", &foreign_area("", "/GS0 << /Type /ExtGState /ca 0.25 /CA 1 >>"));
+    let (ca, _) = fill_after_move("fill-gs", &foreign_area(RED, "/GS0 << /Type /ExtGState /ca 0.25 /CA 1 >>"));
     assert_eq!(ca, 0.25);
     // The annotation's /CA wins over the form's.
-    let (ca, _) = fill_after_move("fill-both", &foreign_area("/CA 0.5", "/GS0 << /ca 0.25 >>"));
+    let (ca, _) = fill_after_move("fill-both", &foreign_area("/IC [1 0 0] /CA 0.5", "/GS0 << /ca 0.25 >>"));
     assert_eq!(ca, 0.5);
+    // No /IC: the file draws no fill, so an opacity it names is no reason to paint one; the light wash stays.
+    for (test, annot, gs) in [("wash-ca", "/CA 1", ""), ("wash-gs", "", "/GS0 << /ca 1 >>")] {
+        let (ca, px) = fill_after_move(test, &foreign_area(annot, gs));
+        assert!((ca - 0.12).abs() < 1e-6, "{test}: {ca}");
+        assert!(px[0] > 200 && px[1] > 150, "{test}: pale inside: {px:?}");
+    }
 }
 
 #[test]
