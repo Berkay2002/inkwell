@@ -348,8 +348,11 @@ select.fm-w option {
   margin: 0 4px;
   background: var(--border);
 }
-.fm-tools .icon-btn:disabled {
+.fm-tools .icon-btn[aria-disabled="true"] {
   opacity: 0.4;
+  cursor: default;
+  background: none;
+  color: var(--text-2);
 }
 .fm-dialog {
   display: flex;

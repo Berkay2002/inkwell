@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import { FORM_TOOLS, type FormTool, type ScriptsState, useForms } from "../../lib/forms";
 import {
   type Field, FIELD_ICON, KIND_LABEL, NudgeBatch, SHORT, anchorOf, detectSummary, fieldLabel, isFillable, layoutReason, logCount, missingRequired,
@@ -453,6 +453,7 @@ function LayoutTools({ doc, pageCount, picked, fields, certified }: {
   doc: number; pageCount: number; picked: { page: number; xref: number }[]; fields: Field[]; certified: boolean;
 }) {
   const dialog = useForms((s) => (s.dialog?.doc === doc ? s.dialog.kind : null));
+  const uid = useId();
   const [note, setNote] = useState<string | null>(null);
   const anchor = anchorOf(picked);
   const anchorField = anchor ? fields.find((f) => samePick(f, anchor)) : null;
@@ -474,15 +475,22 @@ function LayoutTools({ doc, pageCount, picked, fields, certified }: {
                 <button
                   key={a.id}
                   className="icon-btn"
-                  disabled={!!why}
+                  aria-disabled={why ? true : undefined}
+                  aria-describedby={why ? `${uid}-${a.id}` : undefined}
                   title={why ? `${a.label}. ${why}` : a.label}
                   aria-label={a.label}
                   onClick={() => {
+                    if (why) return;
                     setNote(null);
                     a.run(doc);
                   }}
                 >
                   <Icon name={a.icon} size={16} />
+                  {why && (
+                    <span id={`${uid}-${a.id}`} className="sr-only" aria-hidden="true">
+                      {why}
+                    </span>
+                  )}
                 </button>
               );
             })}

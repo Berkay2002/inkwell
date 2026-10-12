@@ -1513,7 +1513,7 @@ select {
   opacity: 0.45;
   cursor: default;
 }
-.ink-menu .sr-only {
+.sr-only {
   position: absolute;
   width: 1px;
   height: 1px;
