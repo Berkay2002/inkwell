@@ -193,7 +193,7 @@ pub enum Val {
 pub struct Parsed {
     /// Full field name and value, in file order.
     pub fields: Vec<(String, Val)>,
-    /// Entries past the per-file limit (counted, not read).
+    /// Entries left out (past the per-file limit, or with a name over 1 MB): counted, not read.
     pub over: usize,
 }
 
@@ -258,6 +258,8 @@ pub fn parse_json(bytes: &[u8]) -> Result<Parsed> {
         };
         if k.len() <= MAX_STR {
             out.fields.push((k, val));
+        } else {
+            out.over += 1;
         }
     }
     Ok(out)

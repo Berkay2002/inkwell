@@ -307,6 +307,14 @@ fn hostile_data_files_are_refused_or_read_harmlessly() {
 }
 
 #[test]
+fn a_json_name_over_one_megabyte_is_counted_as_skipped() {
+    let (eng, id, _) = form("json-long-name");
+    let file = format!(r#"{{"Full name": "Kim", "{}": "x"}}"#, "n".repeat(MAX_STR + 1));
+    let r = import_one(&eng, id, &parse(file.as_bytes()).unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.set, r.summary.skipped_total), (1, 1), "{:?}", r.summary);
+}
+
+#[test]
 fn one_value_shared_by_many_fields_is_refused_by_the_byte_budget() {
     let fdf = |n: usize| {
         let fields: String = (0..n).map(|i| format!("<< /T (f{i}) /V 2 0 R >> ")).collect();
