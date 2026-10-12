@@ -14,3 +14,4 @@ Everything else is the upstream crate.
 | `src/font.rs` | `Font::base14_program`: the CFF program of a built-in base-14 font by its standard name |
 | `src/buffer.rs` | `Buffer::ccitt_g4`: 1-bit rows as CCITT Group 4 data |
 | `src/device/native.rs` | The `max_align_t` assertion is a literal 16 (bindgen does not emit `max_align_t` on MSVC) |
+| `../mupdf-sys/mupdf/source/pdf/pdf-appearance.c` | `pdf_update_appearance` returns early for every signature widget (it did for signed ones only): an unsigned one shows its own /AP or nothing, never the synthesised red "SIGN" arrow, and nothing is written back |

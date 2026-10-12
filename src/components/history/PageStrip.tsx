@@ -70,7 +70,7 @@ export function PageStrips({
   a,
   b,
   names,
-  pages,
+  ids,
   rows,
   active,
   changed,
@@ -80,7 +80,8 @@ export function PageStrips({
   a: Source;
   b: Source;
   names: [string, string];
-  pages: [number, number];
+  /** The pages compared on each side (a range shows only its own pages). */
+  ids: [number[], number[]];
   rows: Row[];
   /** The row the panes are showing. */
   active: number;
@@ -97,11 +98,11 @@ export function PageStrips({
   const here = rows[active];
   return (
     <div className="hx-pstrips" aria-label="Pages">
-      <Strip side="a" doc={doc} source={a} name={names[0]} count={pages[0]} active={here?.a ?? null} changed={changed[0]} rowOf={rowOfPage.current[0]} onGo={onGo} />
+      <Strip side="a" doc={doc} source={a} name={names[0]} ids={ids[0]} active={here?.a ?? null} changed={changed[0]} rowOf={rowOfPage.current[0]} onGo={onGo} />
       <span className="hx-plink" title="The pages are linked: they move together" aria-hidden>
         <Icon name="link" size={16} />
       </span>
-      <Strip side="b" doc={doc} source={b} name={names[1]} count={pages[1]} active={here?.b ?? null} changed={changed[1]} rowOf={rowOfPage.current[1]} onGo={onGo} />
+      <Strip side="b" doc={doc} source={b} name={names[1]} ids={ids[1]} active={here?.b ?? null} changed={changed[1]} rowOf={rowOfPage.current[1]} onGo={onGo} />
     </div>
   );
 }
@@ -111,7 +112,7 @@ function Strip({
   doc,
   source,
   name,
-  count,
+  ids,
   active,
   changed,
   rowOf,
@@ -121,7 +122,7 @@ function Strip({
   doc: number | null;
   source: Source;
   name: string;
-  count: number;
+  ids: number[];
   active: number | null;
   changed: Set<number>;
   rowOf: Map<number, number>;
@@ -151,11 +152,11 @@ function Strip({
       <div className="hx-pstrip-head">
         <strong title={name}>{name}</strong>
         <span className="dim">
-          {count} {count === 1 ? "page" : "pages"}
+          {ids.length} {ids.length === 1 ? "page" : "pages"}
         </span>
       </div>
       <div className="hx-pstrip-box" ref={box} onKeyDown={move}>
-        {Array.from({ length: count }, (_, p) => {
+        {ids.map((p) => {
           const row = rowOf.get(p);
           return (
             <button

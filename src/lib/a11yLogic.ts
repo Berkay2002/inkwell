@@ -3,7 +3,10 @@
  * (src-tauri/src/a11y). No state and no IPC here, so it can be tested alone.
  */
 
+import type { A11yMark, A11yMarks } from "./recent";
+
 export type Status = "passed" | "failed" | "manual" | "skipped";
+export type { A11yMark, A11yMarks };
 /** `[x0, y0, x1, y1]` in page points from the top left (the viewer's page space). */
 export type Rect4 = [number, number, number, number];
 
@@ -27,6 +30,10 @@ export interface RuleResult {
   hint: string;
   fix: FixKind | null;
   findings: Finding[];
+  /** Set by `applyOverrides` when the person decided this rule by hand; the checker's own result is in `auto`. */
+  mark?: A11yMark;
+  /** What the checker said before the mark. */
+  auto?: Status;
 }
 
 export interface Report {
@@ -83,25 +90,53 @@ export const STATUS_WORD: Record<Status, string> = {
   skipped: "Skipped",
 };
 
+/** "Passed manually" for a rule marked passed, "Skipped" for one marked skipped, else the status word. */
+export const statusWord = (x: RuleResult) => (x.mark === "passed" ? "Passed manually" : STATUS_WORD[x.status]);
+
+/**
+ * The report with the person's marks applied: a marked rule reads passed or skipped whatever the checker found, so
+ * the groups, counts and "Fix all" all follow. Pure: the document and the engine's report are not touched.
+ */
+export function applyOverrides(r: Report, marks: A11yMarks): Report {
+  if (!Object.keys(marks).length) return r;
+  return {
+    ...r,
+    results: r.results.map((x) => {
+      const m = marks[x.rule];
+      return m ? { ...x, status: m === "passed" ? "passed" : "skipped", mark: m, auto: x.status } : x;
+    }),
+  };
+}
+
+/** The marks that name a rule of this report, as the report export takes them. */
+export const marksIn = (r: Report, marks: A11yMarks): A11yMarks =>
+  Object.fromEntries(r.results.filter((x) => marks[x.rule]).map((x) => [x.rule, marks[x.rule]]));
+
 export const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
 export interface Counts {
   failed: number;
   manual: number;
   passed: number;
+  /** Rules the person marked passed (not in `passed`). */
+  passedManually: number;
   skipped: number;
 }
 
 export function counts(r: Report): Counts {
-  const c: Counts = { failed: 0, manual: 0, passed: 0, skipped: 0 };
-  for (const x of r.results) c[x.status]++;
+  const c: Counts = { failed: 0, manual: 0, passed: 0, passedManually: 0, skipped: 0 };
+  for (const x of r.results) {
+    if (x.mark === "passed") c.passedManually++;
+    else c[x.status]++;
+  }
   return c;
 }
 
-/** "5 failed · 1 needs a manual check · 9 passed" */
+/** "5 failed · 1 needs a manual check · 9 passed · 2 passed manually" */
 export function summaryLine(r: Report): string {
   const c = counts(r);
   const parts = [`${c.failed} failed`, `${c.manual} ${c.manual === 1 ? "needs" : "need"} a manual check`, `${c.passed} passed`];
+  if (c.passedManually) parts.push(`${c.passedManually} passed manually`);
   if (c.skipped) parts.push(`${c.skipped} skipped`);
   return parts.join(" · ");
 }
@@ -213,7 +248,8 @@ export function safeFixes(r: Report, lang: string): Fix[] {
 
 /** After "Fix all safe issues": how many of the rules pass. */
 export function afterFixAll(r: Report): { pass: number; of: number } {
-  return { pass: counts(r).passed + safeRules(r).length, of: r.results.length };
+  const c = counts(r);
+  return { pass: c.passed + c.passedManually + safeRules(r).length, of: r.results.length };
 }
 
 /** The label of the footer's primary button and the line under it. */
