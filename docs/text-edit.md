@@ -44,7 +44,7 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - Each `text_edit` is one edit-core step (`Engine::apply_removing`): one undo step labelled "Edit text on p. N",
   "Format text …", "Move text …" or "Resize text box …", kept by Save, recorded in history. A document with text
   edits is saved as a full, garbage-collected rewrite (not an incremental update), so the old text is not left in the
-  file's bytes A signed document is the exception:
+  file's bytes. A signed document is the exception:
   its save stays incremental (the signed bytes are not rewritten, the old text stays in the file) and the UI says so.
 - `fallbacks: { font, embedded, reason }[]` when a run's font could not show its text (the UI's yellow `!`), one per
   font used instead; `reason` names the original font and the first character it lacks. `fallback` is the first.
@@ -128,11 +128,17 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - **Underline and strikeout** are filled rectangles in the run's colour (thickness 0.05 of the size; underline centre
   0.12 below the baseline, strike 0.28 above), one per line and stretch (justified and kerned lines are measured the
   same way), written after the text object as `/Span <</IWDeco /U>> BDC q ... re f Q EMC` (`/S` for strike).
-- **Read back** only for our own groups: a `BDC` with `IWDeco` whose body is exactly one `re` with fill state (checked
-  by `deco_group`: at most 16 ops, only q/Q/cm/re/f and colour operators). The rectangle is matched by geometry onto
-  the shown text above it. Other producers' lines are not guessed at (Acrobat does). Every rewrite removes the block's
-  groups and draws them again, so a moved or reflowed block keeps exactly one per line; a stray tagged group with no
-  text under it, or one that is not our shape, is left alone.
+- **Read back** only for our own groups: a `BDC` with `IWDeco` followed by exactly what `deco_ops` writes, in this
+  order: `q`, `cm`, the fill (`g`, `rg`, `k`, or `cs` with `sc`/`scn`), `re`, `f`, `Q`, `EMC` (checked by `deco_group`;
+  a lone `Q`, a bare `cm` or any other shape is not ours and is never read, skipped or removed). The rectangle is
+  matched by geometry onto the shown text above it. Other producers' lines are not guessed at (Acrobat does). Every
+  rewrite removes the block's groups and draws them again, so a moved or reflowed block keeps exactly one per line; a
+  stray tagged group with no text under it is left alone. A page is read for at most 10,000 of them.
+- **A group that lies on text of more than one block** (two blocks drawn over each other, a fake-bold copy) goes when
+  any of them is edited, and is drawn again only for the block that was edited: the other block loses that line.
+- **A rise past 0.6 of the size** is a position, not a script (some producers move text with `Ts`): it stays in the
+  run's start and box, reads as no rise, and is written back as it was unless the rise is cleared. A `Ts` that is not
+  a finite number up to 100,000 reads as no rise.
 - The block's undo label is "Format text" when only styles changed.
 
 ## What works (tests: `cargo test --lib textedit -- --test-threads=1`)
@@ -174,6 +180,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 
 - Styles are per run: a change of style inside a word makes two runs. Character spacing and horizontal scale per run
   are not offered (the block's `Tc` and `Tz` are kept for all runs; `Ts` is per run, see Decorations).
+- Formatting part of a run (a selection inside it) re-encodes that piece in the run's font: in a subset font a
+  letter the subset lacks falls back to another font for that piece (reported as for typed text).
 - Underline and strikeout read back only as Inkwell's own tagged rectangles: a line drawn by another producer shows
   as no decoration, stays in the file and is not removed or redrawn with the text.
 - Bold or italic in a font the document lacks uses a standard face (or Noto Sans for other scripts); there is no
