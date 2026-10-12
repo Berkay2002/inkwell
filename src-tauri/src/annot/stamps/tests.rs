@@ -556,7 +556,8 @@ fn a_stamp_on_a_rotated_page_is_upright_and_stays_so_through_move_and_resize() {
     let src = write(&d, "rb.png", &red_blue(200, 100));
     let s = create(&lib, &Source { path: &src, page: None }, "Two colours", "").unwrap();
     let (_, png) = picture(&lib, &s.id).unwrap();
-    for turn in [0, 90, 180, 270] {
+    // 100 and -90 are snapped by MuPDF to 90 and 270.
+    for turn in [0, 90, 180, 270, 100, -90] {
         let pdf = raw_pdf(&[
             "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),

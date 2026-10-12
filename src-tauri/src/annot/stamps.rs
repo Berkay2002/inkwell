@@ -474,10 +474,9 @@ pub fn place_rect(at: [f32; 2], aspect: f32, page: Rect) -> [f32; 4] {
     [x0, y0, x0 + w, y0 + h]
 }
 
-/// The page's `/Rotate` in quarter turns (0..4), read the way MuPDF does: a value that is not a multiple of 90 is none.
+/// The page's `/Rotate` in quarter turns (0..4), snapped the way MuPDF does (to the nearest multiple of 90).
 pub fn quarter_turns(page: &mupdf::pdf::PdfPage) -> Result<u32> {
-    let r = page.rotation()?.rem_euclid(360);
-    Ok(if r % 90 == 0 { (r / 90) as u32 } else { 0 })
+    Ok((((page.rotation()?.rem_euclid(360) + 45) / 90) % 4) as u32)
 }
 
 /// `png` turned so that, once the page's `/Rotate` of `turns` quarter turns has turned the annotation's box, it is
