@@ -96,16 +96,8 @@ pub enum Event {
     Finished { ok: usize, skipped: usize, errors: usize, cancelled: bool },
 }
 
-/// Runs `action` over `files` (paths the command resolved from open tokens). `folder` is the folder
-/// of a [`OutputRule::Folder`] Action.
-pub fn run(
-    action: &Action,
-    files: &[PathBuf],
-    folder: Option<&Path>,
-    env: &Env,
-    cancel: &AtomicBool,
-    emit: &mut dyn FnMut(Event),
-) -> Result<Report, BatchError> {
+/// What a run (and its preview) needs before any file is looked at.
+fn precheck(action: &Action, files: &[PathBuf], folder: Option<&Path>, env: &Env, folder_needed: bool) -> Result<(), BatchError> {
     let issues = action.validate(env);
     if !issues.is_empty() {
         return Err(BatchError::Invalid(issues));
@@ -117,9 +109,24 @@ pub fn run(
         match folder {
             Some(f) if f.is_dir() => {}
             Some(f) => return Err(BatchError::Input(format!("{} is not a folder.", f.display()))),
-            None => return Err(BatchError::Input("Choose the folder the results go in.".into())),
+            None if folder_needed => return Err(BatchError::Input("Choose the folder the results go in.".into())),
+            None => {}
         }
     }
+    Ok(())
+}
+
+/// Runs `action` over `files` (paths the command resolved from open tokens). `folder` is the folder
+/// of a [`OutputRule::Folder`] Action.
+pub fn run(
+    action: &Action,
+    files: &[PathBuf],
+    folder: Option<&Path>,
+    env: &Env,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(Event),
+) -> Result<Report, BatchError> {
+    precheck(action, files, folder, env, true)?;
 
     let total = files.len();
     emit(Event::Started { files: total });
@@ -199,6 +206,125 @@ pub fn run(
     Ok(Report { action: action.name.clone(), files: reports, ok, skipped, errors, cancelled, stopped: halt.is_some() })
 }
 
+// ---------------------------------------------------------------- preview
+
+/// What one file would get from a run, decided without writing anything.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePreview {
+    pub index: usize,
+    pub input: String,
+    pub name: String,
+    /// `Ok`: the steps would run; `Skipped` and `Error` carry the reason a run would give.
+    pub status: Status,
+    pub reason: Option<String>,
+    /// The steps that would run, in order. Empty for a file that would be skipped.
+    pub steps: Vec<String>,
+    /// File and folder names the run would write (the first free names today).
+    pub outputs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Preview {
+    pub action: String,
+    pub files: Vec<FilePreview>,
+    pub ok: usize,
+    pub skipped: usize,
+    pub errors: usize,
+}
+
+/// A dry run: the same checks as [`run`] (validation, the per-file gate, repeated files), the names the
+/// results would get, and nothing written. It cannot know that a step will find nothing to do, that a
+/// step will fail, or that an error stops the run: those only show in the report. The folder of a
+/// [`OutputRule::Folder`] Action is chosen when the run starts, so its names are only kept apart from
+/// each other here, not checked against what the folder holds.
+pub fn preview(action: &Action, files: &[PathBuf], env: &Env) -> Result<Preview, BatchError> {
+    precheck(action, files, None, env, false)?;
+    let mut out: Vec<FilePreview> = Vec::with_capacity(files.len());
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut taken: Vec<PathBuf> = Vec::new();
+    for (index, src) in files.iter().enumerate() {
+        let name = src.file_name().map_or_else(|| src.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let mut f = FilePreview {
+            index,
+            input: src.to_string_lossy().into_owned(),
+            name,
+            status: Status::Ok,
+            reason: None,
+            steps: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let canon = fs::canonicalize(src).unwrap_or_else(|_| src.clone());
+        if seen.contains(&canon) {
+            f.status = Status::Skipped;
+            f.reason = Some("listed more than once".into());
+        } else {
+            seen.push(canon);
+            match gate(action, env, src) {
+                Ok(()) => {
+                    f.steps = action.steps.iter().map(Step::label).collect();
+                    let out_dir = match &action.output {
+                        OutputRule::Folder { .. } => None,
+                        OutputRule::NextToSource { .. } => {
+                            Some(src.parent().filter(|p| !p.as_os_str().is_empty()).map_or_else(|| PathBuf::from("."), Path::to_path_buf))
+                        }
+                    };
+                    let stem = src.file_stem().map_or_else(|| "document".into(), |s| s.to_string_lossy().into_owned());
+                    let base = format!("{stem}{}", action.output.suffix());
+                    let mut want: Vec<(String, bool)> = Vec::new();
+                    if action.writes_pdf() {
+                        want.push((format!("{base}.pdf"), false));
+                    }
+                    for s in &action.steps {
+                        match s {
+                            Step::ExportText(_) => want.push((format!("{base}.txt"), false)),
+                            Step::ExportImages(_) => want.push((format!("{base} (images)"), true)),
+                            _ => {}
+                        }
+                    }
+                    for (name, is_dir) in want {
+                        let path = first_free(out_dir.as_deref(), &name, is_dir, &taken);
+                        f.outputs.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                        taken.push(path);
+                    }
+                }
+                Err(Verdict::Skip(why)) => {
+                    f.status = Status::Skipped;
+                    f.reason = Some(why);
+                }
+                Err(Verdict::Error(why)) => {
+                    f.status = Status::Error;
+                    f.reason = Some(why);
+                }
+                Err(_) => unreachable!("the gate only skips or fails"),
+            }
+        }
+        out.push(f);
+    }
+    let count = |s: Status| out.iter().filter(|f| f.status == s).count();
+    let (ok, skipped, errors) = (count(Status::Ok), count(Status::Skipped), count(Status::Error));
+    Ok(Preview { action: action.name.clone(), files: out, ok, skipped, errors })
+}
+
+/// `name`, then `name (2)`...: the first one neither on disk (when the folder is known) nor named by an
+/// earlier file of the preview. `name` is `<base>.<ext>` or, for a folder, `<base> (images)`; the counter
+/// goes before the extension.
+fn first_free(dir: Option<&Path>, name: &str, is_dir: bool, taken: &[PathBuf]) -> PathBuf {
+    let at = |n: String| dir.map_or_else(|| PathBuf::from(&n), |d| d.join(&n));
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !is_dir => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    for n in 1..10_000u32 {
+        let candidate = at(if n == 1 { name.to_string() } else { format!("{stem} ({n}){ext}") });
+        if !taken.contains(&candidate) && (dir.is_none() || fs::symlink_metadata(&candidate).is_err()) {
+            return candidate;
+        }
+    }
+    at(name.to_string())
+}
+
 // ---------------------------------------------------------------- one file
 
 struct Done {
@@ -227,44 +353,55 @@ struct Job<'a> {
     done: std::cell::Cell<usize>,
 }
 
-fn process(job: &Job, index: usize, src: &Path, emit: &mut dyn FnMut(Event)) -> Verdict {
-    let Job { action, folder, env, cancel, bates_next, .. } = *job;
-    let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-
-    // 1. Whether this file may be touched at all.
+/// Whether `src` may be touched by `action` at all: the checks that need no staging and write nothing.
+/// The run and the preview both ask this, so what the preview promises is what the run decides.
+fn gate(action: &Action, env: &Env, src: &Path) -> Result<(), Verdict> {
     if !src.is_file() {
-        return Verdict::Error("the file is not there any more".into());
+        return Err(Verdict::Error("the file is not there any more".into()));
     }
     if (env.is_open)(src) {
-        return Verdict::Skip("open in Inkwell: save and close it first, so the result has its changes".into());
+        return Err(Verdict::Skip("open in Inkwell: save and close it first, so the result has its changes".into()));
     }
     let (signed, sec) = match open_source(&src.to_string_lossy(), None) {
         Ok(doc) => match protect::read_security(&doc, None) {
             Ok(sec) => (is_signed(&doc), sec),
-            Err(e) => return Verdict::Error(e.to_string()),
+            Err(e) => return Err(Verdict::Error(e.to_string())),
         },
-        Err(EngineError::NeedsPassword | EngineError::BadPassword) => return Verdict::Skip("needs a password".into()),
-        Err(e) => return Verdict::Error(e.to_string()),
+        Err(EngineError::NeedsPassword | EngineError::BadPassword) => return Err(Verdict::Skip("needs a password".into())),
+        Err(e) => return Err(Verdict::Error(e.to_string())),
     };
     if !sec.rights.may_extract() {
-        return Verdict::Skip("its owner restricted copying or page changes, and a batch cannot lift that".into());
+        return Err(Verdict::Skip("its owner restricted copying or page changes, and a batch cannot lift that".into()));
     }
     // The owner's password is not something a batch has. Without it the file's restrictions are the
     // owner's to change: a result keeps them, and a step that would replace them is refused.
     if sec.encrypted && !sec.unlocked {
         if action.steps.iter().any(|s| matches!(s, Step::Protect(_))) {
-            return Verdict::Skip("its owner password guards its restrictions, and Protect would replace them".into());
+            return Err(Verdict::Skip("its owner password guards its restrictions, and Protect would replace them".into()));
         }
         if !sec.rights.modify && action.first_signature_breaker().is_some() {
-            return Verdict::Skip("its owner does not allow changes to the content".into());
+            return Err(Verdict::Skip("its owner does not allow changes to the content".into()));
         }
     }
     if let Some(step) = action.first_signature_breaker() {
         match signed {
             Some(false) => {}
-            Some(true) => return Verdict::Skip(format!("signed: \"{}\" would invalidate the signature", step.label())),
-            None => return Verdict::Skip(format!("could not check whether the file is signed: \"{}\" might invalidate a signature", step.label())),
+            Some(true) => return Err(Verdict::Skip(format!("signed: \"{}\" would invalidate the signature", step.label()))),
+            None => {
+                return Err(Verdict::Skip(format!("could not check whether the file is signed: \"{}\" might invalidate a signature", step.label())));
+            }
         }
+    }
+    Ok(())
+}
+
+fn process(job: &Job, index: usize, src: &Path, emit: &mut dyn FnMut(Event)) -> Verdict {
+    let Job { action, folder, env, cancel, bates_next, .. } = *job;
+    let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+
+    // 1. Whether this file may be touched at all.
+    if let Err(v) = gate(action, env, src) {
+        return v;
     }
 
     // 2. A private working folder where the result will land.

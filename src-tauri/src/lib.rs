@@ -89,6 +89,8 @@ enum SaveKind {
 enum SourceKind {
     Images,
     Text,
+    /// An exported batch action.
+    Json,
 }
 
 /// Open dialog in Rust; the picked files come back as open tokens.
@@ -170,6 +172,7 @@ async fn pick_source(window: Window, kind: SourceKind, multiple: bool) -> Result
         let d = match kind {
             SourceKind::Images => d.set_title("Choose images").add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"]),
             SourceKind::Text => d.set_title("Choose a text file").add_filter("Text", &["txt", "text", "md", "log", "csv"]),
+            SourceKind::Json => d.set_title("Choose an action file").add_filter("Inkwell action", &["json"]),
         };
         let picked = if multiple { d.blocking_pick_files() } else { d.blocking_pick_file().map(|f| vec![f]) };
         let reg = window.state::<Paths>();
@@ -1107,6 +1110,8 @@ pub fn run() {
             batch::app::batch_import,
             batch::app::batch_export,
             batch::app::batch_validate,
+            batch::app::batch_preview,
+            batch::app::batch_folder_files,
             batch::app::batch_run,
             batch::app::batch_cancel,
             ocr_languages,

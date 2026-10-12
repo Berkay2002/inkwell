@@ -26,6 +26,7 @@ import { ConvertPanel } from "./components/ConvertPanel";
 import { MarksPanel } from "./components/MarksPanel";
 import { ProtectPanel, SecurityNotice } from "./components/ProtectPanel";
 import { PrintSheet } from "./components/PrintSheet";
+import { ActionWizard } from "./components/ActionWizard";
 import { CombineSheet } from "./components/CombineSheet";
 import { DocJsSheet } from "./components/DocJsSheet";
 import { LabelsSheet, TransitionsSheet } from "./components/OrganizePlus";
@@ -213,6 +214,7 @@ export default function App() {
       <PrintSheet />
       <PrepressSheets />
       <CombineSheet />
+      <ActionWizard />
       <DocJsSheet />
       <LabelsSheet />
       <TransitionsSheet />

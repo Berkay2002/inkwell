@@ -4,6 +4,7 @@ import { openCompareSetup } from "../components/history/HistoryPanel";
 import { type DocState, useStore } from "../store";
 import { pickOpen } from "./api";
 import { keyOf } from "./recent";
+import { useBatch } from "./batchStore";
 import { useConvert } from "./convertStore";
 import { useDocJs } from "./docJsStore";
 import { useMarks } from "./marksStore";
@@ -321,6 +322,18 @@ export function toolItems(doc: Pick<DocState, "id" | "name"> | null, portfolio =
       onSelect: () => openA11y("matterhorn"),
     },
     {
+      id: "action-wizard",
+      group: "automate",
+      icon: "wand",
+      label: "Action Wizard",
+      description: "Run a saved set of steps on many files at once",
+      detail:
+        "Build an action from steps such as compress, watermark, redact or protect, save it, and run it on a batch of files. Preview shows what would happen to each file before anything is written.",
+      keywords: "batch automate actions macro many files folder workflow script bulk run",
+      command: "action-wizard",
+      onSelect: () => void useBatch.getState().show(),
+    },
+    {
       id: "search-advanced",
       group: "check",
       icon: "search",
@@ -340,8 +353,8 @@ export function runTool(item: ToolItem) {
   item.onSelect();
 }
 
-/** Tools that need no open document (Create starts from nothing). */
-const NO_DOC = new Set(["create", "create-portfolio"]);
+/** Tools that need no open document (Create starts from nothing; the Action Wizard picks its own files). */
+const NO_DOC = new Set(["create", "create-portfolio", "action-wizard"]);
 
 /**
  * Home's grid: with a document open run the tool on it, otherwise ask for a file first (Create needs none),

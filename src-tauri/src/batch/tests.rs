@@ -9,7 +9,7 @@ use mupdf::{Document, TextPageFlags};
 use serde_json::json;
 
 use super::action::*;
-use super::run::{Event, Report, Status, run};
+use super::run::{Event, Report, Status, preview, run};
 use super::steps::Env;
 use super::store::{self, Store, StoreError};
 use crate::compress::Preset;
@@ -1546,4 +1546,69 @@ fn an_image_folder_is_published_as_one_rename() {
     assert_eq!(names(&busy), ["mine.txt"]);
     assert_eq!(names(&d.join("doc (batch) (images) (2)")), ["doc-1.png", "doc-2.png", "doc-3.png"]);
     assert_eq!(names(&d), ["doc (batch) (images)", "doc (batch) (images) (2)", "doc.pdf"]);
+}
+
+// ---------------------------------------------------------------- preview
+
+#[test]
+fn the_preview_agrees_with_the_run_and_writes_nothing() {
+    use crate::protect::{Changes, Printing};
+    let d = dir("preview");
+    let plain = sample(&d, "plain.pdf", 1);
+    let taken = sample(&d, "taken.pdf", 1);
+    put(&d, "taken (batch).pdf", b"already here");
+    let signed = put(&d, "signed.pdf", &signed_pdf());
+    let bad = put(&d, "bad.pdf", b"not a pdf");
+    let restricted = guarded(&d, "r.pdf", Changes::None, Printing::High);
+    let open = plain.clone();
+    let mut e = env();
+    e.is_open = Arc::new(move |p| p == open);
+    // Two exports and a stamp: the stamp breaks the signature, the exports bring a txt and an images folder.
+    let act = action(
+        "Stamp and export",
+        vec![footer("<<1>>"), Step::ExportText(ExportTextStep::default()), Step::ExportImages(ExportImagesStep::default())],
+    );
+    let files = [plain.clone(), taken.clone(), signed.clone(), bad.clone(), restricted.clone(), taken.clone()];
+    let before = names(&d);
+
+    let p = preview(&act, &files, &e).unwrap();
+    assert_eq!(names(&d), before, "a preview writes nothing, not even a staging folder");
+    let r = run(&act, &files, None, &e, &AtomicBool::new(false), &mut |_| {}).unwrap();
+
+    // The same verdict and the same reason, file by file (a step failing is the one thing a preview cannot say).
+    for (pf, rf) in p.files.iter().zip(&r.files) {
+        assert_eq!(pf.status, rf.status, "{}", pf.name);
+        assert_eq!(pf.reason, rf.reason, "{}", pf.name);
+    }
+    assert_eq!((p.ok, p.skipped, p.errors), (r.ok, r.skipped, r.errors));
+    assert!(p.files[0].reason.as_deref().unwrap().contains("open in Inkwell"));
+    assert!(p.files[2].reason.as_deref().unwrap().starts_with("signed:"));
+    assert_eq!(p.files[5].reason.as_deref(), Some("listed more than once"));
+
+    // The names it promised are the names the run made.
+    let f = &p.files[1];
+    assert_eq!(f.status, Status::Ok);
+    assert_eq!(f.steps.len(), 3);
+    let made: Vec<String> = r.files[1].outputs.iter().map(|o| Path::new(&o.path).file_name().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(f.outputs, made);
+    assert_eq!(f.outputs[0], "taken (batch) (2).pdf", "the name that is taken is not promised");
+}
+
+#[test]
+fn two_files_with_one_name_for_a_chosen_folder_are_promised_different_names() {
+    let d = dir("preview-folder");
+    let a = sample(&d, "same.pdf", 1);
+    let sub = d.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let b = sample(&sub, "same.pdf", 1);
+    let mut act = action("n", vec![footer("<<1>>")]);
+    act.output = OutputRule::Folder { suffix: "".into() };
+    // The folder is chosen when the run starts: the preview needs none, and only keeps the names apart.
+    let p = preview(&act, &[a, b], &env()).unwrap();
+    assert_eq!(p.files[0].outputs, ["same.pdf"]);
+    assert_eq!(p.files[1].outputs, ["same (2).pdf"]);
+    // It asks for what a run asks for: at least one file, and a valid action.
+    assert!(preview(&act, &[], &env()).is_err());
+    act.steps.clear();
+    assert!(preview(&act, &[d.join("same.pdf")], &env()).is_err());
 }
