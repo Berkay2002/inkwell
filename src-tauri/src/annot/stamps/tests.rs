@@ -440,6 +440,10 @@ fn a_stamp_is_clamped_to_the_page_and_a_small_page() {
     assert_eq!(place_rect([50.0, 250.0], 1.0, narrow), [0.0, 200.0, 100.0, 300.0]);
     let short = Rect { x0: 0.0, y0: 0.0, x1: 400.0, y1: 30.0 };
     assert_eq!(place_rect([200.0, 15.0], 0.5, short), [192.5, 0.0, 207.5, 30.0]);
+    // A page under 1 pt (a small /UserUnit) puts the stamp at its corner and does not panic.
+    let tiny = Rect { x0: 10.0, y0: 20.0, x1: 10.5, y1: 20.25 };
+    let r = place_rect([10.2, 20.1], 2.0, tiny);
+    assert!(r.iter().all(|v| v.is_finite()) && r[0] == 10.0 && r[1] == 20.0, "{r:?}");
     // A tall picture's default width still gives a tall stamp.
     let r = place_rect([300.0, 400.0], 0.25, page);
     assert_eq!((r[2] - r[0], r[3] - r[1]), (150.0, 600.0));

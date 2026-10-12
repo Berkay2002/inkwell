@@ -420,8 +420,9 @@ pub fn place_rect(at: [f32; 2], aspect: f32, page: Rect) -> [f32; 4] {
         h = ph;
         w = (h * aspect).max(1.0);
     }
-    let x0 = (at[0] - w / 2.0).clamp(page.x0, page.x1 - w);
-    let y0 = (at[1] - h / 2.0).clamp(page.y0, page.y1 - h);
+    // min then max, not `clamp`: that panics when the page is smaller than the stamp's 1 pt floor (or a bound is NaN).
+    let x0 = (at[0] - w / 2.0).min(page.x1 - w).max(page.x0);
+    let y0 = (at[1] - h / 2.0).min(page.y1 - h).max(page.y0);
     [x0, y0, x0 + w, y0 + h]
 }
 
