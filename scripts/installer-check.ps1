@@ -45,6 +45,10 @@ if (-not $User) {
   if (-not $admin) { throw 'The per-machine MSI needs an elevated PowerShell (or use -User with a per-user build).' }
 }
 
+# Checked before installing, so a wrong path fails here instead of leaving the app installed.
+$pdfs = @($Pdf -split ';' | Where-Object { $_ })
+$files = @($pdfs | ForEach-Object { (Resolve-Path -LiteralPath $_).Path })
+
 $before = [pscustomobject]@{
   Choice = Choice; PdfDefault = PdfDefault
   SfaPdf = Test-Path "$classes\SystemFileAssociations\.pdf"
@@ -78,13 +82,11 @@ Check (Has "$classes\SystemFileAssociations\.pdf\shell\Inkwell.Open\command") 'c
 Check ((Choice) -eq $before.Choice) 'default PDF app untouched (nothing changed under FileExts\.pdf)'
 Check ((PdfDefault) -eq $before.PdfDefault) ".pdf default value untouched ('$(PdfDefault)')"
 
-$pdfs = @($Pdf -split ';' | Where-Object { $_ })
 if ($pdfs.Count) {
   # Scratch data dir: the user's recent list is not touched. Forwarding is off for scratch runs unless asked for.
   $env:INKWELL_DATA_DIR = Join-Path $log 'data'
   Remove-Item -Recurse -Force $env:INKWELL_DATA_DIR -ErrorAction SilentlyContinue
   $env:INKWELL_SINGLE_INSTANCE = '1'
-  $files = $pdfs | ForEach-Object { (Resolve-Path $_).Path }
   # ours: the processes that did not exist before (a path can show in 8.3 form, so it is not matched)
   $known = @(Get-Process inkwell -ErrorAction SilentlyContinue).Id
   if ($Burst) {
