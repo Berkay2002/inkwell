@@ -60,10 +60,14 @@ pub struct Table {
 }
 
 impl Table {
-    /// Whether the first row is a header row: every cell bold while some later cell is not.
-    pub fn has_header(&self) -> bool {
-        let bold = |r: &Vec<Cell>| r.iter().all(|c| c.bold || c.text.is_empty());
-        self.rows.len() > 1 && bold(&self.rows[0]) && !self.rows[1..].iter().all(bold)
+    /// How many leading rows are header rows (Word repeats them on the next page): the rows from the top that are
+    /// all bold, when the first has two or more filled cells (a bold caption that joined as a row has one) and
+    /// some later row is not bold.
+    pub fn header_rows(&self) -> usize {
+        let bold = |r: &Vec<Cell>| r.iter().any(|c| !c.text.is_empty()) && r.iter().all(|c| c.bold || c.text.is_empty());
+        let filled = self.rows.first().map_or(0, |r| r.iter().filter(|c| !c.text.is_empty()).count());
+        let n = self.rows.iter().take_while(|r| bold(r)).count();
+        if filled >= 2 && n < self.rows.len() { n } else { 0 }
     }
 }
 
@@ -112,32 +116,94 @@ pub(super) fn consumed(blocks: &[Block]) -> Vec<bool> {
     tables(blocks).1
 }
 
-/// Puts back the original block for every group of pieces (`blocks[range]`, ascending and disjoint) that no
-/// table took: lines that sat side by side were only worth splitting when they make up a table.
+/// One block from consecutive pieces of a paragraph: their text in order, the union of their rects, the first
+/// one's size and colour, bold and italic where most of the characters are.
+fn merge(run: &[Block]) -> Block {
+    let mut b = run[0].clone();
+    let len = |f: &dyn Fn(&Block) -> bool| run.iter().filter(|p| f(p)).map(|p| p.text.len()).sum::<usize>() * 2 > run.iter().map(|p| p.text.len()).sum::<usize>();
+    b.text = run.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join(" ");
+    b.rect = run.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |r, p| [r[0].min(p.rect[0]), r[1].min(p.rect[1]), r[2].max(p.rect[2]), r[3].max(p.rect[3])]);
+    b.bold = len(&|p| p.bold);
+    b.italic = len(&|p| p.italic);
+    b
+}
+
+/// Lines that sat side by side (`blocks[range]` of each group, ascending and disjoint, `orig` the block they came
+/// from) were only worth splitting when they make up a table. A group no table takes a piece of goes back to its
+/// original block (repeated until that holds on the whole page, as putting one back can change what a table
+/// takes); in a group a table did take from, each run of pieces it left is one paragraph again, unless that
+/// changes the tables found.
 pub(super) fn unsplit(blocks: &mut Vec<Block>, groups: Vec<(Block, std::ops::Range<usize>)>) {
     if groups.is_empty() {
         return;
     }
-    let used = consumed(blocks);
-    let src = std::mem::take(blocks);
-    let mut groups = groups.into_iter().peekable();
-    let mut i = 0;
-    while i < src.len() {
-        match groups.next_if(|(_, r)| r.start == i && r.end > i) {
-            Some((orig, r)) if !used[r.clone()].iter().any(|u| *u) => {
-                blocks.push(orig);
-                i = r.end;
+    let pieces = std::mem::take(blocks);
+    let mut whole = vec![false; groups.len()];
+    // The page's blocks for the groups' current state, and where each group's blocks are in them.
+    let assemble = |whole: &[bool]| -> (Vec<Block>, Vec<std::ops::Range<usize>>) {
+        let (mut out, mut at) = (Vec::with_capacity(pieces.len()), Vec::with_capacity(groups.len()));
+        let mut i = 0;
+        for (g, (orig, r)) in groups.iter().enumerate() {
+            out.extend(pieces[i..r.start].iter().cloned());
+            let from = out.len();
+            if whole[g] {
+                out.push(orig.clone());
+            } else {
+                out.extend(pieces[r.clone()].iter().cloned());
             }
-            Some((_, r)) => {
-                blocks.extend(src[r.clone()].iter().cloned());
+            at.push(from..out.len());
+            i = r.end;
+        }
+        out.extend(pieces[i..].iter().cloned());
+        (out, at)
+    };
+    let (mut out, mut at) = assemble(&whole);
+    // shortcut: at most 8 rounds; a page that needs more keeps its last state (tables are found again from
+    // the final blocks anyway, so the output stays consistent), and each round is one detection pass.
+    for _ in 0..8 {
+        let used = consumed(&out);
+        let mut changed = false;
+        for (g, r) in at.iter().enumerate() {
+            if !whole[g] && !used[r.clone()].iter().any(|u| *u) {
+                whole[g] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+        (out, at) = assemble(&whole);
+    }
+    // Runs of pieces a table left, in groups it took from.
+    let used = consumed(&out);
+    let mut merged = Vec::with_capacity(out.len());
+    let mut groups_at = at.iter().enumerate().filter(|(g, _)| !whole[*g]).map(|(_, r)| r.clone()).peekable();
+    let mut i = 0;
+    let mut any = false;
+    while i < out.len() {
+        match groups_at.next_if(|r| r.start == i) {
+            Some(r) => {
+                let mut j = r.start;
+                while j < r.end {
+                    let mut k = j + 1;
+                    if !used[j] {
+                        while k < r.end && !used[k] {
+                            k += 1;
+                        }
+                    }
+                    any |= k - j > 1;
+                    merged.push(if k - j > 1 { merge(&out[j..k]) } else { out[j].clone() });
+                    j = k;
+                }
                 i = r.end;
             }
             None => {
-                blocks.push(src[i].clone());
+                merged.push(out[i].clone());
                 i += 1;
             }
         }
     }
+    *blocks = if any && tables(&merged).0 == tables(&out).0 { merged } else { out };
 }
 
 /// The body text size: the size most of the document's characters are set in.
@@ -191,7 +257,7 @@ pub(super) fn col_twips(t: &Table, text_w: f64) -> Vec<i64> {
         let mut col = 0;
         for c in row {
             if let Some(m) = min.get_mut(col).filter(|_| c.span <= 1) {
-                *m = m.max(c.word + 2.0 * CELL_PAD + 1.0);
+                *m = m.max(c.word * 1.1 + 2.0 * CELL_PAD);
             }
             col += c.span.max(1);
         }
@@ -385,34 +451,73 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
             cs.len() >= 2
         })
         .collect();
+    // Rows' vertical extents (y up), and the blocks no row holds (text between the rows of a run is not a table's).
+    let top = |row: &Vec<(usize, usize)>| row.iter().map(|(_, i)| blocks[*i].rect[3]).fold(f64::MIN, f64::max);
+    let bottom = |row: &Vec<(usize, usize)>| row.iter().map(|(_, i)| blocks[*i].rect[1]).fold(f64::MAX, f64::min);
+    let mut in_row = vec![false; blocks.len()];
+    for (_, bi) in rows.iter().flatten() {
+        in_row[*bi] = true;
+    }
+    let loose: Vec<usize> = (0..blocks.len()).filter(|i| !in_row[*i] && !blocks[*i].text.trim().is_empty()).collect();
+    // The median spacing of the rows' tops, or 1.5 lines for a run of one or two rows.
+    let pitch_of = |run: &[Vec<(usize, usize)>]| -> f64 {
+        let mut p: Vec<f64> = run.windows(2).map(|w| top(&w[0]) - top(&w[1])).collect();
+        p.sort_by(|a, b| a.total_cmp(b));
+        if p.len() >= 2 { p[p.len() / 2] } else { 1.5 * (top(&run[0]) - bottom(&run[0])).max(blocks[run[0][0].1].size) }
+    };
+    // Whether the rows `a` above `b` are one table's: not far apart (more than 3 pitches) and nothing between them
+    // under the table's width. A running header and a footer have the same columns, a page apart.
+    let together = |a: &Vec<(usize, usize)>, b: &Vec<(usize, usize)>, pitch: f64| -> bool {
+        let gap = top(a) - top(b);
+        if gap > 3.0 * pitch {
+            return false;
+        }
+        if gap <= 1.5 * pitch {
+            return true;
+        }
+        let (lo, hi) = (bottom(a), top(b));
+        let x0 = a.iter().chain(b).map(|(_, i)| blocks[*i].rect[0]).fold(f64::MAX, f64::min);
+        let x1 = a.iter().chain(b).map(|(_, i)| blocks[*i].rect[2]).fold(f64::MIN, f64::max);
+        !loose.iter().any(|&k| {
+            let r = &blocks[k].rect;
+            r[3] <= lo + 1.0 && r[1] >= hi - 1.0 && r[2] > x0 && r[0] < x1
+        })
+    };
     let mut i = 0;
     while i < rows.len() {
         if !qual[i] {
             i += 1;
             continue;
         }
-        let start = i;
+        let first = i;
         while i < rows.len() && qual[i] {
             i += 1;
         }
-        let end = i; // run = rows[start..end]
-        let mut pieces: Vec<Vec<(usize, usize)>> = Vec::new();
-        if start > 0 && rows[start - 1].len() == 1 && spans_run(&run_edges(&rows[start..end]), rows[start - 1][0].1) {
-            pieces.push(rows[start - 1].clone());
+        let last = i; // qual rows: rows[first..last]
+        let pitch = pitch_of(&rows[first..last]);
+        let mut start = first;
+        while start < last {
+            let mut end = start + 1;
+            while end < last && together(&rows[end - 1], &rows[end], pitch) {
+                end += 1;
+            }
+            // run = rows[start..end]
+            let edges = run_edges(&rows[start..end]);
+            let pitch = if end - start == last - first { pitch } else { pitch_of(&rows[start..end]) };
+            let mut pieces: Vec<Vec<(usize, usize)>> = Vec::new();
+            // A line above or below joins only when it sits within the run's normal row pitch (1.5 times the
+            // median spacing of the rows' tops, or 1.5 lines for a run of one or two rows). Text that starts at the
+            // table's edge further away is a paragraph, even when it is as wide as the table.
+            if start > 0 && rows[start - 1].len() == 1 && top(&rows[start - 1]) - top(&rows[start]) <= 1.5 * pitch && spans_run(&edges, rows[start - 1][0].1) {
+                pieces.push(rows[start - 1].clone());
+            }
+            pieces.extend(rows[start..end].iter().cloned());
+            if end < rows.len() && rows[end].len() == 1 && top(&rows[end - 1]) - top(&rows[end]) <= 1.5 * pitch && spans_run(&edges, rows[end][0].1) {
+                pieces.push(rows[end].clone());
+            }
+            flush(&mut pieces, &mut out, &mut consumed);
+            start = end;
         }
-        pieces.extend(rows[start..end].iter().cloned());
-        // A line below joins only when it sits within the run's normal row pitch (1.5 times the median spacing of
-        // the rows' tops, or 1.5 lines for a run of one row). Text that starts at the table's edge further down is a
-        // paragraph, even when it is as wide as the table.
-        let top = |row: &Vec<(usize, usize)>| row.iter().map(|(_, i)| blocks[*i].rect[3]).fold(f64::MIN, f64::max);
-        let mut pitches: Vec<f64> = rows[start..end].windows(2).map(|w| top(&w[0]) - top(&w[1])).collect();
-        pitches.sort_by(|a, b| a.total_cmp(b));
-        let pitch = pitches.get(pitches.len() / 2).copied().unwrap_or_else(|| blocks[rows[start][0].1].size);
-        let near = end < rows.len() && top(&rows[end - 1]) - top(&rows[end]) <= 1.5 * pitch;
-        if near && rows[end].len() == 1 && spans_run(&run_edges(&rows[start..end]), rows[end][0].1) {
-            pieces.push(rows[end].clone());
-        }
-        flush(&mut pieces, &mut out, &mut consumed);
     }
     (out, consumed)
 }

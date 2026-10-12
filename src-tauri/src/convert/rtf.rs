@@ -96,8 +96,8 @@ fn table(t: &Table, text_w: f64, cf: &dyn Fn([f64; 3]) -> String, out: &mut Stri
         .collect();
     let border = |side: &str| format!("\\clbrdr{side}\\brdrs\\brdrw10\\brdrcf1");
     for (i, row) in t.rows.iter().enumerate() {
-        // The header row repeats on the next page (`\\trhdr`).
-        out.push_str(if i == 0 && t.has_header() { "\\trowd\\trhdr\\trgaph108\\trleft0" } else { "\\trowd\\trgaph108\\trleft0" });
+        // The header rows repeat on the next page (`\\trhdr`).
+        out.push_str(if i < t.header_rows() { "\\trowd\\trhdr\\trgaph108\\trleft0" } else { "\\trowd\\trgaph108\\trleft0" });
         let mut column = 0;
         for c in row {
             column += c.span.max(1);

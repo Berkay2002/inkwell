@@ -750,9 +750,9 @@ fn a_narrow_last_column_stays_wide_enough_for_its_longest_word() {
     let revenue = 7.0 * 6.6;
     let fits = |gaps: &[i64]| {
         assert_eq!(gaps.len(), 3);
-        // Every gap holds the longest word of its column and both paddings (108 twips each).
+        // Every gap holds the longest word of its column with 10 % to spare and both paddings (108 twips each).
         for (g, word) in gaps.iter().zip([7.0 * 6.6, 3.0 * 6.6, revenue]) {
-            assert!(*g as f64 >= word * 20.0 + 216.0, "gap {g} twips for a {word} pt word in {gaps:?}");
+            assert!(*g as f64 >= word * 1.1 * 20.0 + 216.0, "gap {g} twips for a {word} pt word (and 10 %) in {gaps:?}");
         }
     };
     let x = cellx_of_first_row(&rtf(&pages, "t").text);
@@ -954,4 +954,72 @@ fn bulleted_and_numbered_lists_and_a_wide_word_gap_do_not_become_tables() {
     for want in ["First point", "Second point", "Third point", "A numbered item that is long enough to wrap onto a second line.", "alpha beta gamma delta."] {
         assert!(plain.contains(want), "{want:?} not in {plain:?}\n{rtf}");
     }
+}
+
+#[test]
+fn a_running_header_and_footer_are_not_one_table() {
+    // Three pieces each, same columns, a page apart, body text between (and then nothing between).
+    let mut head = String::new();
+    let mut foot = String::new();
+    for (x, h, f) in [(72.0, "Annual Report", "Confidential"), (250.0, "Section 2", "Draft 4"), (450.0, "Page 3", "Page 3")] {
+        head += &put(h, x, 760.0, false);
+        foot += &put(f, x, 40.0, false);
+    }
+    let mut body = String::new();
+    for i in 0..6 {
+        body += &put(&format!("Body line {i} of the text between the header and the footer."), 72.0, 700.0 - 14.0 * i as f64, false);
+    }
+    for (name, content) in [("with-body", format!("{head}{body}{foot}")), ("alone", format!("{foot}{head}"))] {
+        let (rtf, xml) = export_both(&dir("header_footer"), name, &raw_pdf(&content));
+        assert_eq!(word_count(&rtf_tokens(&rtf), "trowd"), 0, "{name}: {rtf}");
+        assert!(!xml.contains("<w:tbl>"), "{name}: {xml}");
+        let plain = rtf_plain(&rtf_tokens(&rtf));
+        let at = |t: &str| plain.find(t).unwrap_or_else(|| panic!("{t:?} not in {plain:?}"));
+        // The header stays at the top and the footer at the bottom.
+        assert!(at("Annual Report") < at("Confidential"), "{name}: {plain:?}");
+        if name == "with-body" {
+            assert!(at("Annual Report") < at("Body line 0") && at("Body line 5") < at("Confidential"), "{plain:?}");
+        }
+    }
+}
+
+#[test]
+fn pieces_a_table_leaves_are_one_paragraph_again() {
+    use super::rtf::rtf;
+    let rows = |y: f64| [tight("a", 72.0, y), tight("b", 172.0, y), tight("c", 272.0, y)];
+    // One block's pieces: the first row of a table, then two lines of a sentence that follows it.
+    let mut blocks = rows(500.0).to_vec();
+    blocks.push(tight("disclosed. SSN", 72.0, 400.0));
+    blocks.push(tight("123-45-6789 appears again.", 72.0, 386.0));
+    let orig = flow::Block { text: "whole".into(), rect: [72.0, 386.0, 300.0, 500.0], ..blocks[0].clone() };
+    let end = blocks.len();
+    blocks.extend(rows(480.0));
+    blocks.extend(rows(460.0));
+    flow::unsplit(&mut blocks, vec![(orig, 0..end)]);
+    let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
+    assert!(texts.contains(&"disclosed. SSN 123-45-6789 appears again."), "{texts:?}");
+    assert!(!texts.contains(&"whole") && !texts.contains(&"123-45-6789 appears again."), "{texts:?}");
+    let r = rtf(&[page_of(blocks)], "t");
+    assert_eq!(word_count(&rtf_tokens(&r.text), "trowd"), 3, "{}", r.text);
+    assert!(rtf_plain(&rtf_tokens(&r.text)).contains("disclosed. SSN 123-45-6789 appears again."));
+}
+
+#[test]
+fn only_the_leading_bold_rows_with_cells_are_header_rows() {
+    use super::rtf::rtf;
+    let row = |y: f64, bold: bool, cells: &[&str]| -> Vec<flow::Block> {
+        cells.iter().enumerate().map(|(c, t)| flow::Block { bold, ..tight(t, 72.0 + 100.0 * c as f64, y) }).collect()
+    };
+    let hdr = |blocks: Vec<flow::Block>| word_count(&rtf_tokens(&rtf(&[page_of(blocks)], "t").text), "trhdr");
+    let body = || [row(440.0, false, &["x", "y", "z"]), row(420.0, false, &["u", "v", "w"])].concat();
+    // A bold caption that spans columns joins as the first row: it is not a header row, and the row below is not
+    // contiguous from the top, so nothing repeats.
+    let caption = flow::Block { bold: true, ..wide("Table 1: Quarterly revenue by region", 72.0, 480.0, 250.0) };
+    let with_caption = [vec![caption], row(460.0, true, &["Item", "Qty", "Total"]), body()].concat();
+    assert_eq!(hdr(with_caption), 0);
+    // Two bold rows at the top are both header rows.
+    assert_eq!(hdr([row(480.0, true, &["Region", "Q1", "Q2"]), row(460.0, true, &["", "units", "units"]), body()].concat()), 2);
+    // One bold row over body rows; and a table that is bold throughout has none.
+    assert_eq!(hdr([row(460.0, true, &["Item", "Qty", "Total"]), body()].concat()), 1);
+    assert_eq!(hdr([row(460.0, true, &["Item", "Qty", "Total"]), row(440.0, true, &["a", "b", "c"]), row(420.0, true, &["d", "e", "f"])].concat()), 0);
 }
