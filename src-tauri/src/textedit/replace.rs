@@ -10,7 +10,7 @@
 //! text in a form) is skipped and listed with its page and reason; a block is rewritten whole or not at all.
 //! Comments, form-field values and bookmarks are not replaced.
 
-use super::text::{self, collapse, group_blocks, issue_text, read_page, Block, Fallback, RunChange, TextChange};
+use super::text::{self, group_blocks, issue_text, paragraph_separator, read_page, Block, Fallback, RunChange, TextChange};
 use super::{page_space, rect32, Result};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
@@ -134,6 +134,15 @@ impl Outcome {
     /// A match Find listed, with the words Find has around it.
     fn skip_hit(&mut self, page: u32, h: &search::Hit, why: &str) {
         self.skip(page, h.text.clone(), around(&h.before, &h.after), why);
+    }
+
+    /// Match number `k` of a block's text, `t[s..=e]`: as Find listed it when `listed` has its rows (they read
+    /// the text as the page has it, with the hyphens the block's text drops), else with the words around it there.
+    fn skip_span(&mut self, page: u32, listed: &[&search::Hit], t: &[char], k: usize, (s, e): (usize, usize), why: &str) {
+        match listed.get(k) {
+            Some(h) => self.skip_hit(page, h, why),
+            None => self.skip_in(page, t, s, e, why),
+        }
     }
 
     /// The match `t[s..=e]` of a block's text, with the words around it there.
@@ -327,6 +336,11 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
     }
     let uneven = |bi: usize| if found[bi].len() > room { mine[bi] < found[bi].len() } else { mine[bi] != found[bi].len() };
     const UNEVEN: &str = "the block's text reads differently from what Find lists, so its matches can't be placed";
+    // Find's rows for a block's matches, when there are as many as the block's text has (the nth is the nth).
+    let listed_for = |bi: usize| -> Vec<&search::Hit> {
+        let l: Vec<&search::Hit> = hits.iter().zip(&owners).filter(|(_, o)| **o == Some(bi)).map(|(h, _)| h).collect();
+        if l.len() == found[bi].len() { l } else { Vec::new() }
+    };
 
     // The matches to replace, per block.
     let mut plan: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
@@ -341,8 +355,9 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             for (bi, spans) in found.iter().enumerate().take(upto.unwrap_or(usize::MAX)) {
                 match blocks[bi].issue {
                     Some(issue) => {
-                        for &(a, z) in spans {
-                            out.skip_in(page, &text[bi], a, z, issue_text(issue));
+                        let listed = listed_for(bi);
+                        for (k, &sp) in spans.iter().enumerate() {
+                            out.skip_span(page, &listed, &text[bi], k, sp, issue_text(issue));
                         }
                     }
                     None if uneven(bi) => {
@@ -398,6 +413,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
     // From the last block to the first: an edit can only change the grouping of the lines after it.
     let mut changed = false;
     for (bi, mut spans) in plan.into_iter().rev() {
+        let listed = listed_for(bi);
         let left = bounds.max.saturating_sub(out.replaced as usize);
         let cut = spans.len() > left;
         if cut {
@@ -405,8 +421,8 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             if out.replaced == 0 {
                 // One block that alone is over the cap: part replaced, and the rest listed (a second run could
                 // not tell its own work from the document's where the replacement holds the find text).
-                for &(s, e) in &spans[left..] {
-                    out.skip_in(page, &text[bi], s, e, &format!("the block has more matches than the {} one run replaces", bounds.max));
+                for (k, &sp) in spans.iter().enumerate().skip(left) {
+                    out.skip_span(page, &listed, &text[bi], k, sp, &format!("the block has more matches than the {} one run replaces", bounds.max));
                 }
                 out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32) });
             } else if bounds.inserted > 0 {
@@ -425,8 +441,8 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
         // Rewriting a block drops its line-end hyphens (the block text joins "well-" "known" as "wellknown"),
         // so a block that has one is left alone unless a match, one that is still replaced, covers it.
         if blocks[bi].joins.iter().any(|&h| !spans.iter().any(|&(s, e)| s < h && e >= h)) {
-            for &(s, e) in &spans {
-                out.skip_in(page, &text[bi], s, e, "a hyphen at the end of a line in the block would be lost");
+            for (k, &sp) in spans.iter().enumerate() {
+                out.skip_span(page, &listed, &text[bi], k, sp, "a hyphen at the end of a line in the block would be lost");
             }
             if cut {
                 break;
@@ -439,7 +455,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32 + 1) });
             break;
         }
-        changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, out);
+        changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, &listed, out);
         if cut {
             break;
         }
@@ -448,25 +464,30 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
 }
 
 /// Rewrites one block with `spans` of its text replaced by `with`. Runs the spans don't touch keep their
-/// glyphs; a span across runs puts the replacement in the style of the run it starts in. A refusal skips
-/// the block's matches and leaves the page as it was. True when the block was rewritten.
-fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &[(usize, usize)], with: &str, out: &mut Outcome) -> bool {
+/// glyphs; a span across runs puts the replacement in the style of the run it starts in. The block's lines
+/// stay where they are (see [`TextChange::line_ends`]). A refusal skips the block's matches and leaves the
+/// page as it was. True when the block was rewritten.
+#[allow(clippy::too_many_arguments)]
+fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &[(usize, usize)], with: &str, listed: &[&search::Hit], out: &mut Outcome) -> bool {
     let all: Vec<char> = joined(b);
     let skip_all = |out: &mut Outcome, why: &str| {
-        for &(s, e) in spans {
-            out.skip_in(page, &all, s, e, why);
+        for (k, &sp) in spans.iter().enumerate() {
+            out.skip_span(page, listed, &all, k, sp, why);
         }
     };
+    // Each space that stood for a line end (not one a match swallows) is marked in the text it is in with
+    // the line that follows it, and found again in the new text's coordinates.
+    let cant = "the block's lines can't be kept where they are";
+    if !b.breaks.is_empty() && (all.contains(&END) || with.contains(END) || b.breaks.iter().any(|&(p, _)| all.get(p) != Some(&' '))) {
+        skip_all(out, cant);
+        return false;
+    }
     let mut specs = Vec::new();
     let (mut at, mut si) = (0usize, 0usize);
-    // The lines of the block stay as they were: each space that stood for a line end (not one a match
-    // swallows) is marked in the text it is in, and found again in the new text's coordinates.
-    // (Not when the text itself holds the mark character.)
-    let marked = all.contains(&END) || with.contains(END);
-    let ends: Vec<usize> = b.breaks.iter().copied().filter(|&p| !marked && all.get(p) == Some(&' ')).collect();
     let (mut line_ends, mut now) = (Vec::new(), 0usize);
     for (ri, run) in b.runs.iter().enumerate() {
         let (mut t, mut hit) = (String::new(), false);
+        let mut srcs = Vec::new();
         let n = run.text.chars().count();
         for (ci, c) in run.text.chars().enumerate() {
             let g = at + ci;
@@ -481,38 +502,36 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
                     }
                 }
                 _ => {
-                    if ends.contains(&g) {
+                    if let Some(&(_, src)) = b.breaks.iter().find(|&&(p, _)| p == g) {
                         t.push(END);
+                        srcs.push(src);
                     }
                     t.push(c);
                 }
             }
         }
         if !hit {
-            line_ends.extend(ends.iter().filter(|&&p| p >= at && p < at + n).map(|p| now + p - at));
+            line_ends.extend(b.breaks.iter().filter(|&&(p, _)| p >= at && p < at + n).map(|&(p, src)| (now + p - at, src)));
             now += n;
             specs.push(RunChange { source: Some(ri), ..Default::default() });
         } else {
             // The text as the rewrite will read it (spaces collapsed): the marks go, their places stay. A
-            // space just before a line end goes (a word replaced by nothing at a line's end). A replacement
-            // that ends in a space against a line end would still be collapsed by the rewrite and shift what
-            // follows: that run's lines are left to reflow.
-            let t = collapse(&t);
-            let (mut plain, mut marks) = (String::new(), Vec::new());
+            // space just before a line end goes (a word replaced by nothing at a line's end).
+            let (mut plain, mut srcs) = (String::new(), srcs.into_iter());
             for c in t.chars() {
                 if c == END {
                     if plain.ends_with(' ') {
                         plain.pop();
                     }
-                    marks.push(plain.chars().count());
+                    line_ends.push((now + plain.chars().count(), srcs.next().expect("a line for each mark")));
+                } else if c != '\n' && paragraph_separator(c) {
+                    if !plain.ends_with(' ') {
+                        plain.push(' ');
+                    }
                 } else {
                     plain.push(c);
                 }
             }
-            if collapse(&plain) == plain {
-                line_ends.extend(marks.iter().map(|m| now + m));
-            }
-            let plain = collapse(&plain);
             now += plain.chars().count();
             if !plain.is_empty() {
                 specs.push(RunChange { text: Some(plain), source: Some(ri), ..Default::default() });
@@ -520,6 +539,15 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
         }
         at += n;
     }
+    // Two ends in one place (the words between them were replaced by nothing): the later line is the one that
+    // stays; the gap the emptied line leaves is kept.
+    line_ends.dedup_by(|a, b| {
+        let same = a.0 == b.0;
+        if same {
+            b.1 = a.1;
+        }
+        same
+    });
     if specs.is_empty() {
         skip_all(out, "the replacement would leave no text in the block; delete the block's text with Edit text");
         return false;

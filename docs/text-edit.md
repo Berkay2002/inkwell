@@ -227,11 +227,13 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
 - **Replace all** (`at` unset) plans each page from one reading of it and applies it from the last block to the first;
   one `rewrite_block` per block, however many matches it holds. Runs a match does not touch keep their glyphs and
   kerning; a match across runs puts the replacement in the style of the run it starts in. The block's lines stay
-  as they were (each line end is kept as a line end that does not end the paragraph, so a justified block stays
-  justified): only a line whose width changed reflows. What no longer fits wraps onto a line of its own, except in
-  a justified block, where it goes on at the start of the next line (which passes its own on in turn only when it
-  is full), so the block stays justified. A match across a line end drops that one break. Edit text itself re-wraps the whole block to its
-  widest line when its text is committed (its draft is one paragraph), so short lines can join. Nothing is searched again
+  where they were: each output line is set at the start (or middle, or end, by the block's alignment) of the line it
+  was, with that line's own baseline, so untouched lines don't move even with a first-line indent or uneven leading,
+  and each line of a justified block but the last is stretched to the block's right edge. A line that no longer
+  fits where it was is not wrapped or pushed down: its matches are skipped with "the replacement does not fit on its
+  line". The same goes for a block whose line ends can't be placed in its new text. A match across a line end drops
+  that one break. Edit text itself re-wraps the whole block to its widest line when its text is committed (its draft
+  is one paragraph), so short lines can join. Nothing is searched again
   after a replacement, so a replacement that contains the find text is set once and never loops. The whole run is
   one undo step ("Replace "cat" with "dog""), saved like any text edit (a full rewrite; incremental when signed).
 - **Replace one** (`at` = the first rectangle of the current Find hit): the match is the nth hit of its block in

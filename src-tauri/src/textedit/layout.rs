@@ -153,10 +153,6 @@ pub(crate) enum Kind {
     Space(Option<Vec<u8>>),
     /// A hard line break.
     Break,
-    /// A line end the text keeps inside its paragraph (Find & Replace leaves the lines of a block as they
-    /// are): unlike `Break` it does not end the paragraph, so a justified line stays justified. It is the
-    /// space it replaced (its code, as in `Space`), which comes back when words are carried over it.
-    Line(Option<Vec<u8>>),
 }
 
 /// One glyph, space or break to set.
@@ -600,7 +596,7 @@ impl Measure<'_> {
     pub fn width(&self, it: &Item) -> f64 {
         let size = self.styles[it.style].size;
         let glyph = match it.kind {
-            Kind::Break | Kind::Line(_) => return 0.0,
+            Kind::Break => return 0.0,
             Kind::Space(None) => it.w / 1000.0 * size,
             _ => it.w / 1000.0 * size + self.cs,
         };
@@ -617,30 +613,20 @@ fn is_space(it: &Item) -> bool {
 }
 
 /// Wraps items into lines of at most `width` (text space). Breaks go at spaces (which end the
-/// line and are dropped), between CJK characters, and at hard breaks. A `Line` end keeps its line unless
-/// the line grew past the width: the words that no longer fit go on a line of their own, or with `carry_over`
-/// (a justified block, whose lines must all stay full) at the start of the next line, which takes them in as it
-/// would any text and passes its own on in turn when it is full.
-pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure, carry_over: bool) -> Vec<LineOut> {
-    type Words = Vec<(Vec<Item>, Vec<Item>)>;
+/// line and are dropped), between CJK characters, and at hard breaks.
+pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
     let mut out = Vec::new();
-    // Each paragraph, and the space a `Line` end stood for (none: a hard break or the end).
-    let mut paras: Vec<(Vec<Item>, Option<Item>)> = vec![(Vec::new(), None)];
+    let mut paras: Vec<Vec<Item>> = vec![Vec::new()];
     for it in items {
-        match it.kind {
-            Kind::Break => paras.push((Vec::new(), None)),
-            Kind::Line(code) => {
-                paras.last_mut().expect("one").1 = Some(Item { kind: Kind::Space(code), ..it });
-                paras.push((Vec::new(), None));
-            }
-            _ => paras.last_mut().expect("one").0.push(it),
+        if matches!(it.kind, Kind::Break) {
+            paras.push(Vec::new());
+        } else {
+            paras.last_mut().expect("one").push(it);
         }
     }
-    // Words that did not fit their line and the space that joins them to what follows.
-    let (mut carry, mut joint): (Words, Option<Item>) = (Vec::new(), None);
-    for (para, ending) in paras {
+    for para in paras {
         // Words: (spaces before, word).
-        let mut words: Words = Vec::new();
+        let mut words: Vec<(Vec<Item>, Vec<Item>)> = Vec::new();
         let mut spaces = Vec::new();
         let mut word: Vec<Item> = Vec::new();
         for it in para {
@@ -663,33 +649,17 @@ pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure, carry_over: bool) 
         if !word.is_empty() {
             words.push((spaces, word));
         }
-        if !carry.is_empty() {
-            if let (Some(f), Some(j)) = (words.first_mut(), joint.take()) {
-                f.0 = vec![j];
-                // It no longer starts a line: what it was kerned from there is not wanted.
-                if let Some(first) = f.1.first_mut() {
-                    first.kern = 0.0;
-                }
-            }
-            carry.append(&mut words);
-            words = std::mem::take(&mut carry);
-        }
-        // A line end that left nothing before it (its text was replaced by nothing) is not a blank line.
-        if words.is_empty() && ending.is_some() {
-            continue;
-        }
-        let first = out.len();
-        let (mut line, mut from): (Vec<Item>, usize) = (Vec::new(), 0);
+        let mut line: Vec<Item> = Vec::new();
         let mut w = 0.0;
-        for (i, (sp, wd)) in words.iter().enumerate() {
-            let (sw, ww) = (m.line(sp), m.line(wd));
+        for (sp, mut wd) in words {
+            let sw = m.line(&sp);
+            let ww = m.line(&wd);
             if !line.is_empty() && w + sw + ww > width {
                 out.push(LineOut { items: std::mem::take(&mut line), ends_para: false });
-                (w, from) = (0.0, i);
+                w = 0.0;
             }
             if line.is_empty() {
                 // A line starts with its first glyph: no spaces, no kerning against what came before.
-                let mut wd = wd.clone();
                 if let Some(first) = wd.first_mut() {
                     first.kern = 0.0;
                 }
@@ -697,18 +667,11 @@ pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure, carry_over: bool) 
                 line.extend(wd);
             } else {
                 w += sw + ww;
-                line.extend(sp.iter().cloned());
-                line.extend(wd.iter().cloned());
+                line.extend(sp);
+                line.extend(wd);
             }
         }
-        match ending {
-            // The line grew: its last words go on to the next line.
-            Some(space) if carry_over && out.len() > first => {
-                carry = words.split_off(from);
-                joint = Some(space);
-            }
-            e => out.push(LineOut { items: line, ends_para: e.is_none() }),
-        }
+        out.push(LineOut { items: line, ends_para: true });
     }
     out
 }
@@ -727,6 +690,50 @@ fn stroke_of(fill: &[Op]) -> Vec<Op> {
         .collect()
 }
 
+/// The lines of a block whose line ends are kept (Find & Replace), one per source line in `at`'s order: `groups`
+/// are the items of each, split at the kept line ends. A line stands where the line it was is: at its start for
+/// left and justified text, on its middle or its end for centred and right-aligned text, and each but the last of
+/// a justified block is stretched to `right`. A line that no longer fits between `left` and `right` is an error:
+/// nothing is moved to make room. `spans` are the (start, end, baseline) of the block's lines in the first line's
+/// text space.
+pub(crate) fn keep_lines(
+    groups: Vec<(usize, Vec<Item>)>,
+    spans: &[(f64, f64, f64)],
+    align: Align,
+    (left, right): (f64, f64),
+    tol: f64,
+    m: &Measure,
+) -> Option<(Vec<LineOut>, Vec<LineAt>)> {
+    let mut lines = Vec::new();
+    let mut at = Vec::new();
+    let last = groups.len().saturating_sub(1);
+    for (g, (src, mut items)) in groups.into_iter().enumerate() {
+        // A line starts with its first glyph: no spaces, no kerning against what came before.
+        while items.first().is_some_and(is_space) {
+            items.remove(0);
+        }
+        while items.last().is_some_and(is_space) {
+            items.pop();
+        }
+        let (x0, x1, y) = spans[src];
+        let used = m.line(&items);
+        let x = match align {
+            Align::Center => (x0 + x1) / 2.0 - used / 2.0,
+            Align::Right => x1 - used,
+            _ => x0,
+        };
+        if x + used > right + tol || x < left - tol {
+            return None;
+        }
+        if let Some(first) = items.first_mut() {
+            first.kern = 0.0;
+        }
+        at.push(LineAt { x: x - left, down: spans[0].2 - y, width: right - x });
+        lines.push(LineOut { items, ends_para: g == last });
+    }
+    Some((lines, at))
+}
+
 /// How the lines are placed.
 pub(crate) struct Placement {
     pub align: Align,
@@ -740,6 +747,17 @@ pub(crate) struct Placement {
     pub stroke: f64,
     /// The render mode to return to after synthetic bold.
     pub render_mode: i64,
+    /// Where each line goes, when the lines are not stacked by `lead` (Find & Replace keeps each line where it
+    /// was): one entry per line.
+    pub at: Vec<LineAt>,
+}
+
+/// Where one line stands: its start along the block's first line, how far below that line's baseline it is, and
+/// the width a justified line is stretched to (all in text space).
+pub(crate) struct LineAt {
+    pub x: f64,
+    pub down: f64,
+    pub width: f64,
 }
 
 /// An underline or strikeout to draw: a filled rectangle in the text matrix's space (`x`, `y` its
@@ -780,16 +798,22 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
     for (li, line) in lines.iter().enumerate() {
         let items = &line.items;
         let used = m.line(items);
-        let free = (p.width - used).max(0.0);
-        let dx = match p.align {
-            Align::Center => free / 2.0,
-            Align::Right => free,
+        let at = p.at.get(li);
+        let free = (at.map_or(p.width, |a| a.width) - used).max(0.0);
+        let dx = match (at, p.align) {
+            (Some(a), _) => a.x,
+            (None, Align::Center) => free / 2.0,
+            (None, Align::Right) => free,
             _ => 0.0,
         };
         let biggest = items.iter().map(|i| setter.styles[i.style].size).fold(p.first_size, f64::max);
         // A line is set lower for its own largest text, and for half of the line above's (whose
         // descenders reach down), so smaller text under large text doesn't run into it.
-        let down = if li == 0 { 0.0 } else { p.lead * biggest.max((biggest + prev_biggest) / 2.0) / p.first_size.max(1e-9) };
+        let down = match at {
+            Some(a) => a.down + base,
+            None if li == 0 => 0.0,
+            None => p.lead * biggest.max((biggest + prev_biggest) / 2.0) / p.first_size.max(1e-9),
+        };
         prev_biggest = biggest;
         base -= down;
         if li > 0 || dx != 0.0 {
@@ -859,7 +883,7 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
                     flush(&mut arr, &mut text);
                     arr.push(num(-it.w));
                 }
-                Kind::Break | Kind::Line(_) => {}
+                Kind::Break => {}
             }
             if is_space(it) && extra != 0.0 {
                 flush(&mut arr, &mut text);

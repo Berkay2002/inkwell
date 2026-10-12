@@ -1,22 +1,13 @@
-import { useEffect, useState } from "react";
 import { BANNER_HEIGHT, barTops } from "./replaceLogic";
 import { bannerShown, useSign } from "./sign";
 
 /**
  * Where the Find bar and what hangs from it sit for a document: the signature banner takes the strip at the top, so
- * with it showing they go below it, by the banner's own height (its text wraps in a narrow window).
+ * with it showing they go below it, by the banner's own height (`SignBanner` measures it, its text wraps in a narrow
+ * window).
  */
 export function useBarTops(doc: number) {
   const banner = useSign((s) => bannerShown(s.docs[doc]));
-  const [height, setHeight] = useState<number | null>(null);
-  useEffect(() => {
-    const el = banner ? document.querySelector<HTMLElement>(".sg-banner") : null;
-    if (!el) return setHeight(null);
-    const measure = () => setHeight(el.offsetHeight);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [banner]);
+  const height = useSign((s) => s.docs[doc]?.bannerHeight ?? null);
   return barTops(banner ? (height ?? BANNER_HEIGHT) : null);
 }

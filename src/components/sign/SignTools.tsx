@@ -117,10 +117,25 @@ export function SignBanner({ doc }: { doc: DocState }) {
     if ((d?.sigsRev ?? -1) !== doc.rev) void sg().refreshSigs(doc.id, doc.rev);
   }, [doc.id, doc.rev, d?.sigsRev]);
   const b = d ? banner(d.sigs, d.sigsError) : null;
-  if (!b || d?.bannerHidden) return null;
+  const shown = !!b && !d?.bannerHidden;
+  const el = useRef<HTMLDivElement>(null);
+  // What sits below the banner (the Find bar) goes by its height as laid out, which is wrapped text in a narrow window.
+  useEffect(() => {
+    const node = el.current;
+    if (!shown || !node) return;
+    const measure = () => sg().setBannerHeight(doc.id, node.offsetHeight);
+    measure();
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    ro?.observe(node);
+    return () => {
+      ro?.disconnect();
+      sg().setBannerHeight(doc.id, null);
+    };
+  }, [shown, doc.id]);
+  if (!b || !shown) return null;
   const icon: IconName = b.tone === "valid" ? "check" : b.tone === "invalid" ? "close" : "question";
   return (
-    <div className={`sg-banner ${b.tone}`} role="status">
+    <div ref={el} className={`sg-banner ${b.tone}`} role="status">
       <span className="sg-banner-ico">
         <Icon name={icon} size={15} />
       </span>

@@ -1854,7 +1854,7 @@ fn replace_all_keeps_the_lines_of_a_block_it_changes() {
 }
 
 #[test]
-fn a_longer_replacement_wraps_only_its_own_line() {
+fn a_longer_replacement_stays_on_its_line_or_the_match_is_skipped() {
     let d = dir("replace-grows-one-line");
     let (eng, id, _) = open(&d, &pages_pdf(&[THREE_LINES]));
     let before = line_boxes(&eng, id);
@@ -1864,14 +1864,45 @@ fn a_longer_replacement_wraps_only_its_own_line() {
     let after = line_boxes(&eng, id);
     assert_eq!(after.len(), 3);
     assert!(after.iter().zip(&before).all(|(a, b)| (a[1] - b[1]).abs() < 0.5), "{after:?}");
-    // Wider than the block: its overflow wraps onto a line of its own, and the lines below keep theirs.
+    // Wider than the block: nothing is moved to make room, the match is skipped and listed.
     eng.undo(id).unwrap();
-    do_replace(&eng, id, &req("cat", "cat on a big mat", SearchOpts::default())).unwrap();
-    let lines = page_lines(&eng, id);
-    assert_eq!(lines.len(), 4, "{lines:?}");
-    assert!(lines[0].starts_with("One cat on"), "{lines:?}");
-    assert_eq!(&lines[2..], ["Two", "Three long hats here"], "{lines:?}");
-    assert_eq!(line_boxes(&eng, id).len(), 4);
+    let r = do_replace(&eng, id, &req("cat", "cat on a big mat", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    assert_eq!(r.skipped[0].reason, "skipped: the replacement does not fit on its line");
+    assert_eq!((r.skipped[0].text.as_str(), r.skipped[0].before.as_str()), ("cat", "One "), "{r:?}");
+    assert!(r.skipped[0].after.contains("Two"), "{r:?}");
+    assert_eq!(page_lines(&eng, id), ["One cat", "Two", "Three long hats here"]);
+}
+
+#[test]
+fn lines_keep_their_own_place_with_an_indent_and_uneven_leading() {
+    let d = dir("replace-keeps-places");
+    // A first line indented 10 pt, then lines 14 and 15 pt below: one block, each line at its own place.
+    let page = "BT /F1 12 Tf 82 700 Td (One cat sat down) Tj ET BT /F1 12 Tf 72 686 Td (Two) Tj ET BT /F1 12 Tf 72 671 Td (Three long hats here) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let before = line_boxes(&eng, id);
+    assert_eq!(before.len(), 3);
+    let r = do_replace(&eng, id, &req("cat", "dog", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    assert_eq!(page_lines(&eng, id), ["One dog sat down", "Two", "Three long hats here"]);
+    let after = line_boxes(&eng, id);
+    assert_eq!(after.len(), 3);
+    for (a, b) in after.iter().zip(&before) {
+        assert!((a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05 && (a[3] - b[3]).abs() < 0.05, "{after:?} vs {before:?}");
+    }
+    // The lines it did not change are as wide as they were.
+    assert!((after[2][2] - before[2][2]).abs() < 0.05, "{after:?} vs {before:?}");
+}
+
+#[test]
+fn a_line_end_that_cannot_be_placed_skips_the_block_instead_of_reflowing_it() {
+    let d = dir("replace-unplaceable-end");
+    let (eng, id, _) = open(&d, &pages_pdf(&[THREE_LINES]));
+    // U+E000 marks the line ends while a block is rewritten: a block that has it can't tell them apart.
+    let r = do_replace(&eng, id, &req("cat", "\u{E000}", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    assert!(r.skipped[0].reason.contains("can't be kept"), "{r:?}");
+    assert_eq!(page_lines(&eng, id), ["One cat", "Two", "Three long hats here"]);
 }
 
 #[test]
@@ -1926,7 +1957,7 @@ fn skipped_matches_carry_the_words_around_them() {
     let (eng, id, _) = open(&d, &pages_pdf(&[two]));
     let r = do_replace(&eng, id, &req("fox", "dog", SearchOpts::default())).unwrap();
     let rows: Vec<(&str, &str, &str)> = r.skipped.iter().map(|s| (s.before.as_str(), s.text.as_str(), s.after.as_str())).collect();
-    assert_eq!(rows, [("A wellknown ", "fox", " and a fox"), ("fox and a ", "fox", "")], "{r:?}");
+    assert_eq!(rows, [("A well-known ", "fox", " and a fox"), ("fox and a ", "fox", "")], "{r:?}");
 }
 
 #[test]
@@ -1947,8 +1978,8 @@ fn a_word_replaced_by_nothing_at_a_line_end_leaves_no_blank_line_and_keeps_the_o
 }
 
 #[test]
-fn what_spills_over_from_a_longer_justified_line_goes_on_to_the_next_and_the_block_stays_justified() {
-    let d = dir("replace-justified-spill");
+fn a_justified_line_that_outgrows_its_place_is_skipped_and_the_block_stays_justified() {
+    let d = dir("replace-justified-grows");
     let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
     let long = "Justified text spreads the free width of every line but the last over its spaces, so both edges line up.";
     let change = BlockChange { text: Some(long.into()), align: Some(Align::Justify), width: Some(160.0), ..Default::default() };
@@ -1960,13 +1991,17 @@ fn what_spills_over_from_a_longer_justified_line_goes_on_to_the_next_and_the_blo
         let right = b.lines[0][2];
         assert!(b.lines[..n - 1].iter().all(|l| (l[2] - right).abs() < 0.6), "{:?}", b.lines);
         assert!(b.lines[n - 1][2] < right - 5.0, "the last line is not stretched");
-        n
+        b
     };
-    let n = check(&eng);
-    do_replace(&eng, id, &req("spreads", "spreads very far and wide", SearchOpts::default())).unwrap();
-    assert!(check(&eng) >= n);
-    // Another word replaced later: the block is still read, and set again, as justified.
+    let was = check(&eng);
+    // The line "spreads" is on is full: a longer word does not push the lines below it down.
+    let r = do_replace(&eng, id, &req("spreads", "spreads very far and wide", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    assert_eq!(r.skipped[0].reason, "skipped: the replacement does not fit on its line");
+    assert_eq!(check(&eng).lines, was.lines);
+    // A word of the same length goes on as it was, and the block is still justified.
     do_replace(&eng, id, &req("edges", "sides", SearchOpts::default())).unwrap();
-    check(&eng);
-    assert!(blocks(&eng, id, 0).unwrap().blocks[1].text.contains("very far and wide"));
+    let b = check(&eng);
+    assert_eq!(b.lines.len(), was.lines.len());
+    assert!(b.text.contains("sides line up"), "{}", b.text);
 }
