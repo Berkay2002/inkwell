@@ -1270,3 +1270,29 @@ fn a_text_object_that_runs_on_into_the_next_stream_counts_as_inside_text() {
     assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (1, 0));
     assert!(!text_of(&reopened(&doc), 0).contains("Hdr"));
 }
+
+#[test]
+fn a_shrink_is_refused_where_inline_marks_would_scale_with_the_page() {
+    let refused = |doc: &mut PdfDocument| match add(doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("rewritten after marks were added"), "{m}"),
+        other => panic!("{other:?}"),
+    };
+    // a background inline before the page's own content: nothing wraps it yet
+    let mut doc = PdfDocument::from_bytes(&page_with("", &corners([0.0, 0.0, 612.0, 792.0]))).unwrap();
+    add(&mut doc, &req(Mark::Background(Background { color: [0.9, 0.9, 0.5], ..Background::default() }), vec![0])).unwrap();
+    merge_streams(&mut doc, 0);
+    refused(&mut doc);
+    // the same page takes a header and footer that does not shrink
+    add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(false)), vec![0])).unwrap();
+
+    // a watermark on top, merged; a later mark without a shrink puts a wrapper around the stream
+    let mut doc = PdfDocument::from_bytes(&page_with("", &corners([0.0, 0.0, 612.0, 792.0]))).unwrap();
+    let wm = Watermark { text: "DRAFT".into(), behind: false, ..Watermark::default() };
+    add(&mut doc, &req(Mark::Watermark(wm), vec![0])).unwrap();
+    merge_streams(&mut doc, 0);
+    add(&mut doc, &req(Mark::Bates(Bates::default()), vec![0])).unwrap();
+    refused(&mut doc);
+    // and once the watermark is removed there is nothing left to scale
+    remove(&mut doc, MarkKind::Watermark, &[0]).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+}

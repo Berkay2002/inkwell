@@ -854,7 +854,7 @@ fn add_background(doc: &mut PdfDocument, pages: &[u32], bg: &Background, spec: O
 /// A page rewritten by autotagging or text editing has the marks inline in one stream of its own,
 /// with the marked-content dictionary intact. The range takes in the `q` … `Q` around the section
 /// when it has them.
-fn inline_sections(data: &[u8]) -> Vec<(String, Range<usize>)> {
+pub(super) fn inline_sections(data: &[u8]) -> Vec<(String, Range<usize>)> {
     let ops = cs::parse(data);
     let mut out = Vec::new();
     let mut i = 0;

@@ -112,8 +112,9 @@ maps that to user space, so the same numbers hold on rotated and cropped pages (
   is left (the content stream is then the original bytes). The entries are also read from a merged stream (a text
   edit or autotagging rewrote the page's streams): then the section stays where the first one stood, rewritten for
   the kinds that are left, and the others are cut. The bands read from a file are clamped to finite values inside
-  the page. An Update with the shrink on is refused on such a page when it has marks on top (after the inline
-  `Q %Inkwell`): the wrapper put around the whole stream would scale them with the page. Remove those marks first.
+  the page. An Add or Update with the shrink on is refused on such a page when one of its streams holds marks
+  of ours inline, before the page's content (a background) or after it (on top), with or without a wrapper of ours
+  around the stream now: the shrink would scale them with the page. Remove those marks first.
 - Comments, links and form fields are **not** moved (their rectangles are page-level): the sheet says "Comments
   and links keep their place." when a selected page has annotations (`info().annotated`). The preview does not
   show the shrink.
@@ -136,7 +137,8 @@ maps that to user space, so the same numbers hold on rotated and cropped pages (
   refused with a sentence and nothing changes. Certified documents are refused, signed ones stay incremental.
 - Inside a text object of the page's own (the section sits between its `BT` and `ET`), a section that holds
   `Td`, `TD`, `Tm`, `T*`, `'`, `"`, a text-state operator (`Tf`, `Tc`, `Tw`, `Tz`, `TL`, `Ts`, `Tr`) or a text-showing
-  operator is stuck too: what follows in that object is positioned relative to it.
+  operator is stuck too: what follows in that object is positioned relative to it. A text object runs on across
+  the page's streams, so a section in the stream after an open `BT` counts as inside it.
 - Known limits: colour, `gs`, `Tf` and the like set at the top level of a cut section outside text were
   inherited by the content after it, so after the cut that content draws with the state before the section; this
   is not checked (it would leave most word-processor files alone) and is usually what was meant, but it can
