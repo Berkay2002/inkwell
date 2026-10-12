@@ -618,6 +618,11 @@ pub fn copies(doc: &mut PdfDocument, item: Item, rows: u32, cols: u32, gap_x: f3
     if spots.is_empty() {
         return Err(bad("no copy fits on the page at that spacing"));
     }
+    // The names it makes (`name.0` ... `name.N`) may not be ones a signature covers.
+    let locks = scripts::locks_of(doc, &entries);
+    if let Some(n) = (0..=spots.len()).map(|i| format!("{}.{i}", e.name)).find(|n| scripts::name_locked(&locks, n)) {
+        return Err(bad(format!("The name [ {n} ] is covered by a signature, so no copy can take it")));
+    }
 
     // The field becomes a group `name` of fields `0`, `1`, ...: the original is `name.0`. A widget that is its own
     // field gets `T 0`; a field node with one widget kid becomes `0` itself (it keeps its keys, /AA and all).

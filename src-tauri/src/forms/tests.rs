@@ -2355,6 +2355,22 @@ fn the_name_box_follows_the_same_rename_locks_as_the_layout_rename() {
 }
 
 #[test]
+fn copies_may_not_take_a_name_a_signature_covers() {
+    let (eng, id, _) = script_form("copies-lock-names", &["Free", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    sign(&eng, id, Some(("Include", &["Free.1"])), None);
+    let n = steps(&eng, id);
+    let a = items_of(&eng, id, &["Free"])[0];
+    let e = copies_one(&eng, id, a, 1, 3, (6.0, 6.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("[ Free.1 ] is covered by a signature"), "{e}");
+    assert_eq!(steps(&eng, id), n, "no step, nothing written");
+    assert_eq!(field(&eng, id, "Free").name, "Free");
+    // Another field's copies are not affected.
+    let o = items_of(&eng, id, &["Other"])[0];
+    copies_one(&eng, id, o, 1, 2, (6.0, 6.0), EditSource::User).unwrap();
+}
+
+#[test]
 fn layout_in_a_signed_document_is_saved_after_the_signed_bytes() {
     let (eng, id, path) = script_form("layout-signed", &["A", "B"]);
     add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
