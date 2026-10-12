@@ -78,7 +78,7 @@ Rules the tests enforce:
 
 `node scripts/icons-sheet.mjs <outDir> <cdpPort> <vitePort> [custom|all]` draws a contact sheet of the set inside the
 running app (Regular and Filled at 16, 20 and 24, and a tile in three colours, light and dark) for a look before
-committing. `scripts/icons-shots.mjs` takes the toolbar, panel, Home, palette and hover card shots.
+committing. `scripts/icons-shots.mjs` takes the toolbar, panel, Home, palette and hover card shots; `docs/screens/icons/panel-full-light.png` and `panel-full-dark.png` show every tool and its tile in one tall panel.
 
 ## Outside the set
 
