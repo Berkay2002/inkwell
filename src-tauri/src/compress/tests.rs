@@ -1871,6 +1871,29 @@ fn a_certified_file_is_refused_and_a_signed_one_warns_like_any_compress() {
     assert!(outline_of(&r.output).items.is_empty());
 }
 
+/// MuPDF reads `/Dests` alone when the catalog has one, but another viewer may read the tree: a name either has stays.
+#[test]
+fn a_bookmark_whose_name_is_only_in_the_tree_is_kept_next_to_a_dests_dictionary() {
+    let s = Scratch::new();
+    let input = s.path("both-sources.pdf");
+    let catalog = "/Dests << /old [5 0 R /Fit] >> /Names << /Dests << /Names [(treeonly) [5 0 R /Fit]] >> >>";
+    bookmark_pdf(
+        &input,
+        catalog,
+        "<< /Type /Outlines /First 7 0 R /Last 9 0 R /Count 3 >>",
+        &[
+            "<< /Title (A) /Parent 4 0 R /Dest (treeonly) /Next 8 0 R >>",
+            "<< /Title (B) /Parent 4 0 R /Dest (gone) /Prev 7 0 R /Next 9 0 R >>",
+            "<< /Title (C) /Parent 4 0 R /Dest /old /Prev 8 0 R >>",
+        ],
+    );
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 1);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "A, C");
+}
+
 #[test]
 fn dropping_all_bookmarks_leaves_nothing_for_the_invalid_option_to_count() {
     let s = Scratch::new();
