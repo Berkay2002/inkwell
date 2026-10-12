@@ -302,6 +302,16 @@ fn a_page_with_more_than_6000_lines_keeps_its_paragraphs() {
 }
 
 #[test]
+fn a_bold_totals_row_keeps_the_header_a_header() {
+    let mut c = grid(&[&["Item", "Qty", "Price"], &["Pens", "12", "36"], &["Ink", "4", "80"]], &[72, 200, 330], 700, 18, true);
+    c += &at("F2", 12, 72, 646, "Total");
+    c += &at("F2", 12, 200, 646, "16");
+    c += &at("F2", 12, 330, 646, "116");
+    let t = autotag("table-totals", &page(c));
+    assert_eq!((t.count("Table"), t.count("TH"), t.count("TD")), (1, 3, 9), "{:?}", t.types);
+}
+
+#[test]
 fn a_page_listed_twice_in_kids_is_tagged_once() {
     let mut c = String::new();
     for (i, t) in ["First line of the page", "Second line", "Third line", "Fourth line"].iter().enumerate() {

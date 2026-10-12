@@ -247,7 +247,9 @@ fn region(items: &[Item], rows: &[Row], rules: &[Rule], widgets: &[Rect]) -> Opt
     let bold = |r: usize| (0..n).all(|c| cell(r, c).bold);
     let size = |r: usize| (0..n).map(|c| cell(r, c).size).fold(0.0, f32::max);
     let body_size = (1..rows.len()).map(size).fold(0.0, f32::max);
-    let styled = (bold(0) && !(1..rows.len()).any(bold)) || size(0) >= body_size * 1.1;
+    // A bold totals row under the body does not make the header ordinary text.
+    let body_end = rows.len() - usize::from(rows.len() >= 3);
+    let styled = (bold(0) && !(1..body_end).any(bold)) || size(0) >= body_size * 1.1;
     let (b0, b1) = (cell(0, 0).baseline, cell(1, 0).baseline);
     let below = rules.iter().any(|r| r.y > b0 + 0.5 && r.y < b1 - 0.25 * cell(1, 0).size && spans(r));
     let header = styled || below;
@@ -346,6 +348,11 @@ mod tests {
     #[test]
     fn a_header_row_is_styled_only_when_no_body_row_is_bold() {
         let mut g = grid(4, 3);
+        assert!(detect(&items(&g), &[], &[])[0].header);
+        // A bold last row (totals) leaves the header a header.
+        for c in 9..12 {
+            g[c].2 = true;
+        }
         assert!(detect(&items(&g), &[], &[])[0].header);
         // A bold row in the body: bold marks nothing, so there is nothing to confirm the table.
         g[6].2 = true;
