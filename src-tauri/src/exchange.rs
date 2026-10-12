@@ -67,6 +67,9 @@ pub const MAX_ATTACHMENT: usize = 4 << 20;
 /// Attachments and appearance streams together, decoded, in one file read or written: over it they are left out and
 /// counted. In hex they come to about twice this, which stays well under [`MAX_FILE`], so Inkwell can read what it writes.
 pub const MAX_BLOBS: usize = 10 << 20;
+/// Bytes one file may make Inkwell decode in all, counting what a cap stopped: a bomb that fails is not in
+/// [`MAX_BLOBS`], so many comments sharing one would otherwise each cost a full cap of inflating.
+pub const MAX_DECODE_WORK: usize = 256 << 20;
 /// The same bound for an export: the document is the person's own, so real comments may hold more than a
 /// file we read, but a damaged one still must not multiply one shared string or array without end.
 pub const MAX_EXPORT_COPIED: usize = 256 << 20;
@@ -84,6 +87,8 @@ pub struct Budget {
     numbers: RefCell<HashMap<(i32, usize), Vec<f32>>>,
     /// What is left of [`MAX_BLOBS`] for attachments and appearance streams.
     blobs: Cell<usize>,
+    /// What is left of [`MAX_DECODE_WORK`].
+    work: Cell<usize>,
 }
 
 impl Budget {
@@ -92,7 +97,7 @@ impl Budget {
     }
 
     pub fn with_limit(bytes: usize) -> Budget {
-        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default(), blobs: Cell::new(MAX_BLOBS) }
+        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default(), blobs: Cell::new(MAX_BLOBS), work: Cell::new(MAX_DECODE_WORK) }
     }
 
     /// Charges `n` bytes of attachment or appearance data; false (nothing charged) when they are not there. Unlike
@@ -101,6 +106,18 @@ impl Budget {
         match self.blobs.get().checked_sub(n) {
             Some(rest) => {
                 self.blobs.set(rest);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Charges `n` bytes of decoding that is about to be tried (whether or not it stays under its cap); false
+    /// (nothing charged) when the file's allowance is used up.
+    pub fn take_work(&self, n: usize) -> bool {
+        match self.work.get().checked_sub(n) {
+            Some(rest) => {
+                self.work.set(rest);
                 true
             }
             None => false,

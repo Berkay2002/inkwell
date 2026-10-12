@@ -98,6 +98,9 @@ fn read_spec(fs: &PdfObject, b: &Budget) -> Result<AttachFile, Why> {
     }
     let stream = stream_of(fs).ok_or(EXTERNAL)?;
     let cap = room(b);
+    if !b.take_work(cap) {
+        return Err(NO_ROOM);
+    }
     let data = stream.read_stream_capped(cap).map_err(|e| {
         if !e.is_stream_cap() {
             DAMAGED
@@ -162,7 +165,11 @@ pub(super) fn from_data(e: &Node, file: &str, b: &Budget) -> Result<AttachFile, 
         _ => text.as_bytes().to_vec(),
     };
     let cap = room(b);
-    let data = if e.attr("mode").is_some_and(|m| m.eq_ignore_ascii_case("filtered")) {
+    let filtered = e.attr("mode").is_some_and(|m| m.eq_ignore_ascii_case("filtered"));
+    if filtered && !b.take_work(cap) {
+        return Err(NO_ROOM);
+    }
+    let data = if filtered {
         inflate(&stored, cap).map_err(|w| if w == OVER && cap < MAX_ATTACHMENT { NO_ROOM } else { w })?
     } else {
         stored

@@ -409,3 +409,22 @@ fn a_certified_document_refuses_an_import_with_appearances_and_a_signed_one_take
     // And the plain file of the existing tests still reads as it did.
     assert!(parse(ONE).is_ok());
 }
+
+#[test]
+fn one_bomb_shared_by_many_comments_costs_a_bounded_amount_of_decoding() {
+    // 2000 comments whose /FS is the same file that inflates to 100 MB: each attempt stops at its cap and is not
+    // kept, so the file's decode allowance (not the 10 MB of kept bytes) is what ends the work.
+    let z = zlib(&vec![0u8; 100 << 20]);
+    let n = 2000;
+    let mut objs = vec![obj(5, "<< /Type /Filespec /F (b.bin) /EF << /F 6 0 R >> >>"), stream_obj(6, "/Type /EmbeddedFile /Filter /FlateDecode", &z)];
+    let refs: String = (0..n).map(|i| format!("{} 0 R ", 10 + i)).collect();
+    objs.extend((0..n).map(|i| obj(10 + i, &format!("<< /Type /Annot /Subtype /FileAttachment /Page 0 /Rect [100 600 120 620] /NM (b{i}) /FS 5 0 R >>"))));
+    let (eng, id, _) = blank("attach-shared-bomb");
+    let t = std::time::Instant::now();
+    let s = run(&eng, id, &fdf_file(&refs, &objs));
+    assert_eq!(s.added, 0, "{:?}", s.skipped);
+    assert_eq!(s.skipped.iter().map(|r| r.count).sum::<usize>(), n);
+    let over = s.skipped.iter().find(|r| r.reason == attach::OVER).map_or(0, |r| r.count);
+    assert!(over <= 64 + 1, "{over} full-size attempts: the allowance is 256 MB of 4 MB tries");
+    assert!(t.elapsed().as_secs() < 30, "{:?}", t.elapsed());
+}

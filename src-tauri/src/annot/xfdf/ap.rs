@@ -165,6 +165,9 @@ impl Reader<'_> {
     /// A stream's decoded bytes, stopped at what is left of the caps.
     fn decoded(&mut self, s: &PdfObject) -> Result<Vec<u8>, Why> {
         let room = self.room();
+        if !self.budget.take_work(room) {
+            return Err(NO_ROOM);
+        }
         let b = s.read_stream_capped(room).map_err(|e| if e.is_stream_cap() { TOO_BIG } else { DAMAGED })?;
         self.take(b.len())?;
         Ok(b)
@@ -459,7 +462,11 @@ impl Reader<'_> {
         }
         if flate_only && !filters.is_empty() {
             // What it inflates to must be what the picture needs: a bomb is stopped here, not at render time.
-            im.read_stream_capped(expected as usize + 65_536).map_err(|e| if e.is_stream_cap() { TOO_BIG } else { DAMAGED })?;
+            let slack = expected as usize + 65_536;
+            if !self.budget.take_work(slack) {
+                return Err(NO_ROOM);
+            }
+            im.read_stream_capped(slack).map_err(|e| if e.is_stream_cap() { TOO_BIG } else { DAMAGED })?;
         }
         let data = im.read_raw_stream().map_err(|_| DAMAGED)?;
         if data.len() > self.room() {
