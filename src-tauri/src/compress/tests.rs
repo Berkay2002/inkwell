@@ -1929,7 +1929,8 @@ fn the_invalid_bookmarks_option_leaves_links_and_everything_else_alone() {
 fn a_destination_name_that_is_not_utf8_is_looked_up_by_its_bytes() {
     let s = Scratch::new();
     let input = s.path("latin1.pdf");
-    // /Dests keeps a key with the byte E9; the bookmark names it, another names a key that is not there
+    // /Dests keeps a key with the byte E9; the bookmark names it, another names a key that is not there: a name that
+    // is not UTF-8 may be read lossily by another viewer through the tree, so it is not judged and stays
     bookmark_pdf(
         &input,
         "/Dests << /caf#E9 [5 0 R /Fit] >>",
@@ -1942,8 +1943,8 @@ fn a_destination_name_that_is_not_utf8_is_looked_up_by_its_bytes() {
     let mut o = invalid_bookmarks_only();
     o.output = Some(s.path("out.pdf"));
     let r = run(&input, &o).unwrap();
-    assert_eq!(r.stripped.invalid_bookmarks, 1, "{:?}", r.stripped);
-    assert_eq!(outline_text(&outline_of(&r.output).items), "Cafe");
+    assert_eq!(r.stripped.invalid_bookmarks, 0, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "Cafe, Other");
 }
 
 #[test]

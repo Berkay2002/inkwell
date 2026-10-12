@@ -376,9 +376,9 @@ impl Dests {
             return None;
         }
         let text = if key.is_name().ok()? {
-            // a name that is not UTF-8 is no key of the tree (its keys are decoded text)
-            let Ok(t) = String::from_utf8(key.as_name().ok()?) else { return Some(None) };
-            t
+            // MuPDF's viewer URI-encodes the bytes and reads them back as UTF-8 with U+FFFD for the bad ones: lossy,
+            // so a name that is not UTF-8 is not judged
+            String::from_utf8(key.as_name().ok()?).ok()?
         } else {
             mupdf_text(&key.as_bytes().ok()?)?
         };
