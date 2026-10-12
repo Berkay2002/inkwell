@@ -40,6 +40,8 @@ pub struct Item<'a> {
     pub size: f32,
     pub bold: bool,
     pub text: &'a str,
+    /// The first and last marked-content run of the line, in content order.
+    pub runs: (usize, usize),
 }
 
 /// A horizontal ruling line (page space).
@@ -208,12 +210,11 @@ fn region(items: &[Item], rows: &[Row], rules: &[Rule], widgets: &[Rect]) -> Opt
         }
         cols.push((a, b));
     }
-    // Drawn row by row: tag order and content order then agree.
-    let ids: Vec<usize> = rows.iter().flat_map(|r| r.cells.iter().map(|&i| items[i].id)).collect();
-    if ids.windows(2).any(|w| w[0] >= w[1]) {
+    // Drawn row by row, each cell whole before the next: tag order and content order then agree.
+    let cells: Vec<&Item> = rows.iter().flat_map(|r| r.cells.iter().map(|&i| &items[i])).collect();
+    if cells.windows(2).any(|w| w[0].runs.1 >= w[1].runs.0) {
         return None;
     }
-    let cells: Vec<&Item> = rows.iter().flat_map(|r| r.cells.iter().map(|&i| &items[i])).collect();
     let (x0, x1) = (cols[0].0, cols[n - 1].1);
     let (y0, y1) = (rows[0].y0, rows[rows.len() - 1].y1);
     let near = Rect { x0: x0 - RULE_TOL, y0: y0 - RULE_TOL, x1: x1 + RULE_TOL, y1: y1 + RULE_TOL };
@@ -270,7 +271,7 @@ mod tests {
     }
 
     fn items(g: &[(Rect, f32, bool, String)]) -> Vec<Item<'_>> {
-        g.iter().enumerate().map(|(id, (bbox, baseline, bold, text))| Item { id, bbox: *bbox, baseline: *baseline, size: 12.0, bold: *bold, text }).collect()
+        g.iter().enumerate().map(|(id, (bbox, baseline, bold, text))| Item { id, bbox: *bbox, baseline: *baseline, size: 12.0, bold: *bold, text, runs: (id, id) }).collect()
     }
 
     #[test]
@@ -284,9 +285,41 @@ mod tests {
         assert!(detect(&items(&grid(MAX_ROWS + 1, 3)), &[], &[]).is_empty());
         assert!(detect(&items(&grid(4, MAX_COLS + 1)), &[], &[]).is_empty());
         assert!(!detect(&items(&grid(MAX_ROWS, 3)), &[], &[]).is_empty(), "the cap itself is allowed");
-        let big = grid(MAX_ITEMS / 8 + 1, 8);
-        assert!(big.len() > MAX_ITEMS);
-        assert!(detect(&items(&big), &[], &[]).is_empty());
+    }
+
+    /// `n` small valid tables (4 rows by 8 columns) one under the other, a gap apart.
+    fn many(n: usize) -> Vec<(Rect, f32, bool, String)> {
+        let mut v = Vec::new();
+        for t in 0..n {
+            for (mut b, mut y, bold, text) in grid(4, 8) {
+                let dy = t as f32 * 150.0;
+                b.y0 += dy;
+                b.y1 += dy;
+                y += dy;
+                v.push((b, y, bold, format!("t{t}{text}")));
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn a_page_with_too_many_lines_keeps_its_paragraphs() {
+        let fits = many(MAX_ITEMS / 32);
+        assert!(fits.len() <= MAX_ITEMS);
+        assert_eq!(detect(&items(&fits), &[], &[]).len(), MAX_ITEMS / 32, "every small table is found");
+        let over = many(MAX_ITEMS / 32 + 1);
+        assert!(over.len() > MAX_ITEMS);
+        assert!(detect(&items(&over), &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_cell_split_around_another_cell_is_not_in_order() {
+        let g = grid(3, 3);
+        let mut it = items(&g);
+        assert_eq!(detect(&it, &[], &[]).len(), 1);
+        // Cell 0 is drawn in two pieces with cell 1 between them.
+        it[0].runs = (0, 2);
+        assert!(detect(&it, &[], &[]).is_empty());
     }
 
     #[test]

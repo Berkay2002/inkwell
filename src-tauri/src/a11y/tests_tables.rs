@@ -29,6 +29,8 @@ struct Tagged {
     types: Vec<String>,
     report: Report,
     tree: Tree,
+    /// The first page's content stream after Autotag.
+    content: String,
 }
 
 impl Tagged {
@@ -53,12 +55,13 @@ fn autotag(test: &str, s: &Spec) -> Tagged {
     let doc = PdfDocument::open(&path).unwrap();
     let tree = Tree::read(&doc, &tree::page_index(&doc).unwrap()).unwrap();
     let types = tree.preorder().into_iter().map(|i| tree.elems[i].ty.clone()).collect();
+    let content = String::from_utf8_lossy(&page_content(&doc.find_page(0).unwrap()).unwrap()).into_owned();
     let (eng2, id2) = open(&path);
     let report = check_eng(&eng2, id2);
     for rule in [Rule::TaggedPdf, Rule::ReadingOrder, Rule::TableStructure, Rule::TableScope, Rule::ListStructure] {
         assert_eq!(report.status(rule), Status::Passed, "{test}: {rule:?}: {:?}", report.result(rule).findings);
     }
-    Tagged { types, report, tree }
+    Tagged { types, report, tree, content }
 }
 
 fn row(n: usize, header: bool) -> Vec<&'static str> {
@@ -103,6 +106,8 @@ fn a_header_row_set_larger_or_under_a_rule_is_a_header() {
     c += "0 g 72 694 m 330 694 l S\n72 650 258 0.8 re f\n";
     let t = autotag("table-ruled", &page(c));
     assert_eq!(t.types, ["Document", "Table", "TR", "TH", "TH", "TR", "TD", "TD", "TR", "TD", "TD"].map(String::from));
+    // The stroked line and the filled rectangle are marked as artifacts, not left bare.
+    assert_eq!(t.content.matches("/Artifact BMC").count(), 2, "{}", t.content);
     assert_eq!(t.report.status(Rule::TableHeaders), Status::Passed);
 }
 
@@ -224,6 +229,16 @@ fn cells_drawn_column_by_column_stay_paragraphs() {
         }
     }
     let t = autotag("table-columns", &page(c));
+    assert_eq!(t.count("Table"), 0, "{:?}", t.types);
+}
+
+#[test]
+fn text_drawn_in_the_middle_of_a_table_keeps_it_from_being_one() {
+    // A footer is drawn between the second and third row: tag order could not match draw order.
+    let mut c = grid(&SALES[..2], &[72, 200, 330], 700, 18, true);
+    c += &at("F1", 10, 72, 40, "Page 1 of 3");
+    c += &grid(&SALES[2..], &[72, 200, 330], 664, 18, false);
+    let t = autotag("table-footer", &page(c));
     assert_eq!(t.count("Table"), 0, "{:?}", t.types);
 }
 

@@ -108,21 +108,19 @@ fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<Vec<Table>> 
     let res = page.get_dict_inheritable("Resources")?.filter(|r| r.is_dict().unwrap_or(false));
     let data = page_content(&page)?;
     let ops = content::parse(&data);
-    let mut marked = vec![false; lines.len()];
-    for r in in_order(runs(&ops, res.as_ref(), ctm.clone(), lines)?, data.len()) {
+    let rs = in_order(runs(&ops, res.as_ref(), ctm.clone(), lines)?, data.len());
+    let mut span: Vec<Option<(usize, usize)>> = vec![None; lines.len()];
+    for (k, r) in rs.iter().enumerate() {
         if let Target::Line(l) = r.target {
-            marked[l] = true;
+            span[l] = Some((span[l].map_or(k, |s| s.0), k));
         }
     }
     let items: Vec<tables::Item> = (0..lines.len())
-        .filter(|&i| {
+        .filter_map(|i| {
             // Upright text only: a rotated line is taller than it is wide.
             let l = &lines[i];
-            marked[i] && (l.bbox.x1 - l.bbox.x0 >= l.bbox.y1 - l.bbox.y0 || l.text.chars().count() <= 3)
-        })
-        .map(|i| {
-            let l = &lines[i];
-            tables::Item { id: i, bbox: l.bbox, baseline: l.baseline, size: l.size, bold: l.bold, text: &l.text }
+            let upright = l.bbox.x1 - l.bbox.x0 >= l.bbox.y1 - l.bbox.y0 || l.text.chars().count() <= 3;
+            span[i].filter(|_| upright).map(|runs| tables::Item { id: i, bbox: l.bbox, baseline: l.baseline, size: l.size, bold: l.bold, text: &l.text, runs })
         })
         .collect();
     let mut widgets = Vec::new();
@@ -134,7 +132,20 @@ fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<Vec<Table>> 
             widgets.push(bbox_of(&ctm, Rect { x0: v[0], y0: v[1], x1: v[2], y1: v[3] }));
         }
     }
-    Ok(tables::detect(&items, &tables::rules(&ops, &ctm), &widgets))
+    let mut found = tables::detect(&items, &tables::rules(&ops, &ctm), &widgets);
+    // Between a table's first and last cell the page may draw only its cells and artifacts: text
+    // drawn in the middle (a running footer, say) would be read in another order than drawn.
+    found.retain(|t| {
+        let cells: Vec<usize> = t.rows.iter().flatten().copied().collect();
+        let spans = cells.iter().filter_map(|&l| span[l]);
+        let (lo, hi) = spans.fold((usize::MAX, 0), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
+        rs[lo..=hi].iter().all(|r| match r.target {
+            Target::Artifact => true,
+            Target::Line(l) => cells.contains(&l),
+            _ => false,
+        })
+    });
+    Ok(found)
 }
 
 /// A block's lines in order, cut where they change between a table's cells and plain text:
