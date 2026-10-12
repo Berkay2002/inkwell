@@ -121,24 +121,23 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 // ---- the index -------------------------------------------------------------------------------
 
-/// Reads the index; never fails. A damaged file is set aside as `stamps.json.bad` and reads as empty.
-fn load(dir: &Path) -> (Vec<Stamp>, Option<String>) {
+/// Reads the index. A file that is not there is an empty library, and a damaged one is set aside as
+/// `stamps.json.bad` and reads as empty. A file that cannot be opened or read is an `Err`: a writer must not take
+/// that for an empty library and store over it. `check_pictures` drops entries whose PNG is missing (what a reader
+/// shows); a writer keeps them, so a picture that is briefly absent is not forgotten for good.
+fn load(dir: &Path, check_pictures: bool) -> Result<(Vec<Stamp>, Option<String>)> {
     let path = dir.join(INDEX);
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), None),
-        Err(_) => return (Vec::new(), Some("The custom stamps could not be read.".into())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
+        Err(e) => return Err(io(e)),
     };
     let mut raw = Vec::new();
-    let parsed = file
-        .take(MAX_INDEX + 1)
-        .read_to_end(&mut raw)
-        .ok()
-        .filter(|_| raw.len() as u64 <= MAX_INDEX)
-        .and_then(|_| serde_json::from_slice::<IndexFile>(&raw).ok());
+    file.take(MAX_INDEX + 1).read_to_end(&mut raw).map_err(io)?;
+    let parsed = Some(()).filter(|_| raw.len() as u64 <= MAX_INDEX).and_then(|_| serde_json::from_slice::<IndexFile>(&raw).ok());
     let Some(index) = parsed else {
         let _ = std::fs::rename(&path, dir.join(format!("{INDEX}.bad")));
-        return (Vec::new(), Some("The custom stamps list was damaged, so it starts empty.".into()));
+        return Ok((Vec::new(), Some("The custom stamps list was damaged, so it starts empty.".into())));
     };
     let total = index.stamps.len();
     let mut seen = std::collections::HashSet::new();
@@ -147,7 +146,7 @@ fn load(dir: &Path) -> (Vec<Stamp>, Option<String>) {
         .into_iter()
         .filter(|s| valid_id(&s.id) && (1..=MAX_SIDE).contains(&s.width) && (1..=MAX_SIDE).contains(&s.height))
         .filter(|s| seen.insert(s.id.clone()))
-        .filter(|s| png_path(dir, &s.id).is_file())
+        .filter(|s| !check_pictures || png_path(dir, &s.id).is_file())
         .take(MAX_STAMPS)
         .map(|s| {
             let name = tidy(&s.name, MAX_NAME);
@@ -160,7 +159,7 @@ fn load(dir: &Path) -> (Vec<Stamp>, Option<String>) {
         })
         .collect();
     let warning = (stamps.len() < total).then(|| "Some custom stamps could not be used and were left out.".to_string());
-    (stamps, warning)
+    Ok((stamps, warning))
 }
 
 fn store(dir: &Path, stamps: &[Stamp]) -> Result<()> {
@@ -171,8 +170,10 @@ fn store(dir: &Path, stamps: &[Stamp]) -> Result<()> {
 
 pub fn list(dir: &Path) -> Library {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (stamps, warning) = load(dir);
-    Library { stamps, warning }
+    match load(dir, true) {
+        Ok((stamps, warning)) => Library { stamps, warning },
+        Err(_) => Library { stamps: Vec::new(), warning: Some("The custom stamps could not be read.".into()) },
+    }
 }
 
 // ---- making a stamp's picture -----------------------------------------------------------------
@@ -338,7 +339,7 @@ pub fn create(dir: &Path, src: &Source, name: &str, category: &str) -> Result<St
     let (png, thumb) = (encode_png(&img)?, encode_png(&fit_side(img.clone(), THUMB_SIDE))?);
 
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut stamps, _) = load(dir);
+    let (mut stamps, _) = load(dir, false)?;
     if stamps.len() >= MAX_STAMPS {
         return Err(bad(format!("The library holds {MAX_STAMPS} stamps. Delete one to add another.")));
     }
@@ -366,7 +367,7 @@ pub fn update(dir: &Path, id: &str, name: Option<&str>, category: Option<&str>) 
     }
     let category = category.map(|c| field("A category", c, MAX_CATEGORY)).transpose()?;
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut stamps, _) = load(dir);
+    let (mut stamps, _) = load(dir, false)?;
     let s = stamps.iter_mut().find(|s| s.id == id).ok_or_else(|| bad("that stamp is not in the library"))?;
     if let Some(n) = name {
         s.name = n;
@@ -381,7 +382,7 @@ pub fn update(dir: &Path, id: &str, name: Option<&str>, category: Option<&str>) 
 
 pub fn delete(dir: &Path, id: &str) -> Result<()> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut stamps, _) = load(dir);
+    let (mut stamps, _) = load(dir, false)?;
     let before = stamps.len();
     stamps.retain(|s| s.id != id);
     if stamps.len() == before {
@@ -398,7 +399,7 @@ fn listed(dir: &Path, id: &str) -> Result<Stamp> {
         return Err(bad("that stamp is not in the library"));
     }
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    load(dir).0.into_iter().find(|s| s.id == id).ok_or_else(|| bad("that stamp is not in the library"))
+    load(dir, true)?.0.into_iter().find(|s| s.id == id).ok_or_else(|| bad("that stamp is not in the library"))
 }
 
 fn read_capped(path: &Path) -> Result<Vec<u8>> {

@@ -350,6 +350,45 @@ fn a_hostile_index_reads_as_an_empty_or_trimmed_library_and_never_panics() {
     assert!(err(picture(&lib2, &s.id)).contains("damaged"));
 }
 
+#[cfg(unix)]
+#[test]
+fn an_unreadable_index_stops_a_write_and_is_never_stored_over() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = dir("stamps", "unreadable");
+    let (lib, s, _) = one_stamp(&d);
+    let index = lib.join(INDEX);
+    let before = std::fs::read(&index).unwrap();
+    std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Running as root reads it anyway: the test then has nothing to show.
+    if std::fs::File::open(&index).is_ok() {
+        return;
+    }
+    let src = write(&d, "n.png", &half_red(4, 4));
+    assert!(create(&lib, &Source { path: &src, page: None }, "new", "").is_err());
+    assert!(update(&lib, &s.id, Some("x"), None).is_err());
+    assert!(delete(&lib, &s.id).is_err());
+    assert!(list(&lib).warning.is_some_and(|w| w.contains("could not be read")), "the list says so");
+    std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(std::fs::read(&index).unwrap(), before, "the index was not touched");
+    assert!(png_path(&lib, &s.id).exists());
+    assert_eq!(list(&lib).stamps, vec![s]);
+}
+
+#[test]
+fn a_picture_that_is_briefly_missing_is_left_out_of_the_list_but_not_forgotten_by_a_write() {
+    let d = dir("stamps", "missing");
+    let (lib, s, _) = one_stamp(&d);
+    let held = std::fs::read(png_path(&lib, &s.id)).unwrap();
+    std::fs::remove_file(png_path(&lib, &s.id)).unwrap();
+    assert!(list(&lib).stamps.is_empty());
+    // Another stamp is made while the first one's picture is away: the first stays in the index.
+    let src = write(&d, "n.png", &half_red(4, 4));
+    let n = create(&lib, &Source { path: &src, page: None }, "second", "").unwrap();
+    std::fs::write(png_path(&lib, &s.id), held).unwrap();
+    let ids: Vec<_> = list(&lib).stamps.into_iter().map(|x| x.id).collect();
+    assert_eq!(ids, vec![s.id, n.id]);
+}
+
 // ---- placing -------------------------------------------------------------------------------
 
 fn plain() -> Vec<u8> {
