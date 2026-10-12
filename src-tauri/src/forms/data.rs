@@ -14,7 +14,7 @@ use super::{
 };
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
-use crate::exchange::{self, Format, MAX_DEPTH, MAX_ITEMS, MAX_NODES, MAX_STR, esc, pdf_name, pdf_text};
+use crate::exchange::{self, Budget, Format, MAX_DEPTH, MAX_ITEMS, MAX_NODES, MAX_STR, esc, pdf_name, pdf_text};
 use mupdf::pdf::{FieldFlags, PdfDocument, PdfObject};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -291,13 +291,20 @@ pub fn parse_xfdf(bytes: &[u8]) -> Result<Parsed> {
     Ok(out)
 }
 
-fn fdf_value(v: &PdfObject) -> Val {
+/// An FDF `/V`. Every string copied is charged to `b` (one object can be referred to from many fields).
+fn fdf_value(v: &PdfObject, b: &Budget) -> Val {
     let one = |o: &PdfObject| -> Option<String> {
+        if b.gone() {
+            return None;
+        }
         let s = if o.is_string().unwrap_or(false) {
             o.as_string().ok().or_else(|| o.as_bytes().ok().map(|b| super::decode_text(&b)))
         } else {
             text(o)
         };
+        if !b.take(s.as_ref().map_or(0, String::len)) {
+            return None;
+        }
         s.filter(|s| s.len() <= MAX_STR)
     };
     if v.is_array().unwrap_or(false) {
@@ -316,11 +323,16 @@ fn fdf_value(v: &PdfObject) -> Val {
 pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
     exchange::with_fdf(bytes, |root| {
         let mut out = Parsed::default();
+        let budget = Budget::new();
         let Some(top) = get(root, "Fields").filter(|a| a.is_array().unwrap_or(false)) else { return Ok(out) };
         let mut stack: Vec<(PdfObject, String, usize)> = Vec::new();
         let kids_of = |a: &PdfObject, prefix: &str, depth: usize, stack: &mut Vec<(PdfObject, String, usize)>| {
             let n = a.len().unwrap_or(0).min(MAX_NODES);
             for i in (0..n as i32).rev() {
+                // Each kid holds a copy of its parent's name.
+                if !budget.take(prefix.len()) {
+                    break;
+                }
                 if let Some(k) = a.get_array(i).ok().flatten() {
                     stack.push((k, prefix.to_string(), depth));
                 }
@@ -330,6 +342,7 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
         let mut seen: HashSet<i32> = HashSet::new();
         let mut nodes = 0usize;
         while let Some((f, prefix, depth)) = stack.pop() {
+            budget.check()?;
             nodes += 1;
             if nodes > MAX_NODES {
                 return Err(bad("This FDF file has more than 100 000 fields, so Inkwell does not read it."));
@@ -341,22 +354,29 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
                 continue;
             }
             let part = get(&f, "T").as_ref().and_then(text).or_else(|| get(&f, "T").and_then(|t| t.as_bytes().ok().map(|b| super::decode_text(&b)))).unwrap_or_default();
+            if !budget.take(part.len()) {
+                break;
+            }
             let name = match (prefix.is_empty(), part.is_empty()) {
                 (_, true) => prefix.clone(),
                 (true, false) => part,
                 (false, false) => format!("{prefix}.{part}"),
             };
+            if !budget.take(name.len()) {
+                break;
+            }
             if let Some(v) = get(&f, "V") {
                 if out.fields.len() >= MAX_ITEMS {
                     out.over += 1;
-                } else if !name.is_empty() {
-                    out.fields.push((name.clone(), fdf_value(&v)));
+                } else if !name.is_empty() && budget.take(name.len()) {
+                    out.fields.push((name.clone(), fdf_value(&v, &budget)));
                 }
             }
             if let Some(k) = get(&f, "Kids").filter(|a| a.is_array().unwrap_or(false)) {
                 kids_of(&k, &name, depth + 1, &mut stack);
             }
         }
+        budget.check()?;
         Ok(out)
     })
 }

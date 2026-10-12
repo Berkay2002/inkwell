@@ -38,7 +38,7 @@ fn add(eng: &Engine, id: DocId, page: u32, what: &NewAnnot) -> i32 {
 fn raw_rect(eng: &Engine, id: DocId, page: u32, xref: i32) -> Vec<f32> {
     eng.read_custom(id, |d| {
         let (_p, a) = find(d, page, xref)?;
-        Ok(floats(&a.object().get_dict("Rect")?.expect("/Rect"), 8))
+        Ok(floats(&a.object().get_dict("Rect")?.expect("/Rect"), 8, &Budget::new()))
     })
     .unwrap()
 }
@@ -330,4 +330,38 @@ fn measurements_are_left_out_of_a_file_and_are_neither_made_nor_changed_by_one()
     let r = import_one(&b, idb, &parse(file).unwrap(), EditSource::User).unwrap();
     assert_eq!((r.summary.added, r.summary.updated), (0, 0), "{:?}", r.summary);
     assert_eq!(raw_rect(&b, idb, 0, mx), before);
+}
+
+/// An FDF whose annotations are objects 10.. and `shared` is object 2, with `extra` objects after them.
+fn fdf_sharing(n: usize, annot: impl Fn(usize) -> String, objects: &[String]) -> Vec<u8> {
+    let refs: String = (0..n).map(|i| format!("{} 0 R ", 10 + i)).collect();
+    let mut f = format!("%FDF-1.2\n1 0 obj\n<< /FDF << /Annots [{refs}] >> >>\nendobj\n");
+    for o in objects {
+        f.push_str(o);
+    }
+    for i in 0..n {
+        f.push_str(&format!("{} 0 obj\n{}\nendobj\n", 10 + i, annot(i)));
+    }
+    f.push_str("trailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    f.into_bytes()
+}
+
+#[test]
+fn one_string_or_ink_array_shared_by_many_comments_is_refused_by_the_byte_budget() {
+    let text = |i: usize, r: &str| format!("<< /Subtype /Text /Page 0 /Rect [100 600 120 620] /NM (n{i}) /Contents {r} >>");
+    let big = format!("2 0 obj\n({})\nendobj\n", "x".repeat(900_000));
+    // 200 references to one 900 kB string would be 180 MB of copies.
+    let f = fdf_sharing(200, |i| text(i, "2 0 R"), std::slice::from_ref(&big));
+    assert!(matches!(parse(&f), Err(EngineError::Invalid(m)) if m.contains("same data")));
+    // A few are fine and read in full.
+    let ok = parse(&fdf_sharing(5, |i| text(i, "2 0 R"), std::slice::from_ref(&big))).unwrap();
+    assert_eq!(ok.items.len(), 5);
+    assert!(ok.items.iter().all(|c| c.contents.len() == 900_000));
+
+    // One ink list of 1024 strokes, each the same 65 536 numbers, on 100 comments.
+    let nums = "1 ".repeat(65_536);
+    let strokes: String = "6 0 R ".repeat(1024);
+    let objs = [format!("5 0 obj\n[{strokes}]\nendobj\n"), format!("6 0 obj\n[{nums}]\nendobj\n")];
+    let f = fdf_sharing(100, |i| format!("<< /Subtype /Ink /Page 0 /Rect [0 0 50 50] /NM (i{i}) /InkList 5 0 R >>"), &objs);
+    assert!(matches!(parse(&f), Err(EngineError::Invalid(m)) if m.contains("same data")));
 }

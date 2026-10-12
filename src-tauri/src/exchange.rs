@@ -9,6 +9,7 @@
 use crate::engine::EngineError;
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use std::cell::Cell;
 use std::io::Read;
 
 type Result<T> = std::result::Result<T, EngineError>;
@@ -27,6 +28,52 @@ pub const MAX_DEPTH: usize = 64;
 pub const MAX_ITEMS: usize = 10_000;
 /// Longest single string (a comment's text, a value, a name).
 pub const MAX_STR: usize = 1 << 20;
+
+/// Bytes one file may copy out of PDF objects in all. Objects can be shared (one string many entries refer
+/// to), so counts of items do not bound what is copied; this does.
+pub const MAX_COPIED: usize = 32 << 20;
+
+/// What is left of [`MAX_COPIED`] for one read of a file or of a document's comments.
+pub struct Budget {
+    left: Cell<usize>,
+    gone: Cell<bool>,
+}
+
+impl Budget {
+    pub fn new() -> Budget {
+        Budget { left: Cell::new(MAX_COPIED), gone: Cell::new(false) }
+    }
+
+    /// Charges `n` bytes. When they are not there the budget is gone for good and this says false: the
+    /// caller copies nothing more. A copy already made is charged afterwards, so at most one object
+    /// (itself bounded by the file) goes over.
+    pub fn take(&self, n: usize) -> bool {
+        match self.left.get().checked_sub(n) {
+            Some(rest) if !self.gone.get() => {
+                self.left.set(rest);
+                true
+            }
+            _ => {
+                self.gone.set(true);
+                self.left.set(0);
+                false
+            }
+        }
+    }
+
+    pub fn gone(&self) -> bool {
+        self.gone.get()
+    }
+
+    /// Refuses the file once the budget is gone.
+    pub fn check(&self) -> Result<()> {
+        if self.gone.get() {
+            Err(bad("This file refers to the same data so many times that Inkwell does not read it."))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {

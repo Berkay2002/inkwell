@@ -282,3 +282,16 @@ fn hostile_data_files_are_refused_or_read_harmlessly() {
         }
     }
 }
+
+#[test]
+fn one_value_shared_by_many_fields_is_refused_by_the_byte_budget() {
+    let fdf = |n: usize| {
+        let fields: String = (0..n).map(|i| format!("<< /T (f{i}) /V 2 0 R >> ")).collect();
+        format!("%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [{fields}] >> >>\nendobj\n2 0 obj\n({})\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n", "x".repeat(900_000))
+            .into_bytes()
+    };
+    assert!(matches!(parse(&fdf(200)), Err(EngineError::Invalid(m)) if m.contains("same data")));
+    let ok = parse(&fdf(5)).unwrap();
+    assert_eq!(ok.fields.len(), 5);
+    assert!(ok.fields.iter().all(|(_, v)| matches!(v, Val::Text(t) if t.len() == 900_000)));
+}

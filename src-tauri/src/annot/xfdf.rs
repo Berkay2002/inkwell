@@ -14,7 +14,7 @@
 use super::{Kind, NewAnnot, Style, add, bad, each, find, meta, parent_of, put_str, rgb};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
-use crate::exchange::{self, Format, MAX_DEPTH, MAX_ITEMS, MAX_NODES, MAX_STR, esc, pdf_name, pdf_text};
+use crate::exchange::{self, Budget, Format, MAX_DEPTH, MAX_ITEMS, MAX_NODES, MAX_STR, esc, pdf_name, pdf_text};
 use crate::forms::{decode_text, get, parse_da, text};
 use mupdf::pdf::{AnnotationFlags, PdfAnnotationType, PdfDocument, PdfObject};
 use mupdf::{Matrix, Point, Quad};
@@ -206,21 +206,32 @@ const MAX_NUMS: usize = 65_536;
 const MAX_QUADS: usize = 4_096;
 const MAX_STROKES: usize = 1_024;
 
-fn string(o: &PdfObject, k: &str) -> String {
+/// A text entry. Charged to `b`; once the budget is gone nothing more is copied.
+fn string(o: &PdfObject, k: &str, b: &Budget) -> String {
+    if b.gone() {
+        return String::new();
+    }
     let Some(v) = get(o, k) else { return String::new() };
     let s = if v.is_string().unwrap_or(false) {
         v.as_string().ok().or_else(|| v.as_bytes().ok().map(|b| decode_text(&b)))
     } else {
         text(&v)
     };
+    if !b.take(s.as_ref().map_or(0, String::len)) {
+        return String::new();
+    }
     s.filter(|s| s.len() <= MAX_STR).unwrap_or_default()
 }
 
-fn floats(o: &PdfObject, cap: usize) -> Vec<f32> {
+/// Numbers of an array, at most `cap`; each is charged to `b` (8 bytes: it is held twice before it is used).
+fn floats(o: &PdfObject, cap: usize, b: &Budget) -> Vec<f32> {
     if !o.is_array().unwrap_or(false) {
         return Vec::new();
     }
     let n = o.len().unwrap_or(0).min(cap);
+    if !b.take(n * 8) {
+        return Vec::new();
+    }
     (0..n as i32).filter_map(|i| o.get_array(i).ok().flatten().and_then(|v| v.as_float().ok())).filter(|v| v.is_finite()).collect()
 }
 
@@ -248,28 +259,28 @@ fn is_measurement(o: &PdfObject) -> bool {
 
 /// Reads one comment dictionary. `/AP`, `/AA`, `/A`, `/F` file specifications and everything that is
 /// not listed here are never looked at.
-fn read(o: &PdfObject, sub: Sub) -> Comment {
+fn read(o: &PdfObject, sub: Sub, b: &Budget) -> Comment {
     let mut c = Comment::new(sub);
-    c.name = string(o, "NM");
-    c.contents = string(o, "Contents");
-    c.author = string(o, "T");
-    c.subject = string(o, "Subj");
-    c.created = string(o, "CreationDate");
-    c.modified = string(o, "M");
-    c.da = string(o, "DA");
-    c.state = string(o, "State");
-    c.state_model = string(o, "StateModel");
+    c.name = string(o, "NM", b);
+    c.contents = string(o, "Contents", b);
+    c.author = string(o, "T", b);
+    c.subject = string(o, "Subj", b);
+    c.created = string(o, "CreationDate", b);
+    c.modified = string(o, "M", b);
+    c.da = string(o, "DA", b);
+    c.state = string(o, "State", b);
+    c.state_model = string(o, "StateModel", b);
     c.icon = get(o, "Name").as_ref().and_then(text).unwrap_or_default();
     c.reply_type = get(o, "RT").as_ref().and_then(text).unwrap_or_default();
     c.flags = get(o, "F").and_then(|f| f.as_int().ok());
     c.measured = is_measurement(o);
-    let r = get(o, "Rect").map(|a| floats(&a, 4)).unwrap_or_default();
+    let r = get(o, "Rect").map(|a| floats(&a, 4, b)).unwrap_or_default();
     if r.len() == 4 {
         c.rect = Some([r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3])]);
     }
-    let q = get(o, "QuadPoints").map(|a| floats(&a, MAX_QUADS * 8)).unwrap_or_default();
+    let q = get(o, "QuadPoints").map(|a| floats(&a, MAX_QUADS * 8, b)).unwrap_or_default();
     c.quads = q[..q.len() / 8 * 8].to_vec();
-    let l = get(o, "L").map(|a| floats(&a, 4)).unwrap_or_default();
+    let l = get(o, "L").map(|a| floats(&a, 4, b)).unwrap_or_default();
     if l.len() == 4 {
         c.line = Some([l[0], l[1], l[2], l[3]]);
     }
@@ -277,24 +288,24 @@ fn read(o: &PdfObject, sub: Sub) -> Comment {
         let name = |i: i32| le.get_array(i).ok().flatten().as_ref().and_then(text).unwrap_or_default();
         (c.head, c.tail) = (name(0), name(1));
     }
-    c.vertices = pairs(&get(o, "Vertices").map(|a| floats(&a, MAX_NUMS)).unwrap_or_default());
+    c.vertices = pairs(&get(o, "Vertices").map(|a| floats(&a, MAX_NUMS, b)).unwrap_or_default());
     if let Some(ink) = get(o, "InkList").filter(|a| a.is_array().unwrap_or(false)) {
         for i in 0..ink.len().unwrap_or(0).min(MAX_STROKES) as i32 {
             if let Some(s) = ink.get_array(i).ok().flatten() {
-                c.strokes.push(pairs(&floats(&s, MAX_NUMS)));
+                c.strokes.push(pairs(&floats(&s, MAX_NUMS, b)));
             }
         }
     }
-    c.color = get(o, "C").and_then(|a| rgb_from(&floats(&a, 4)));
-    c.fill = get(o, "IC").and_then(|a| rgb_from(&floats(&a, 4)));
+    c.color = get(o, "C").and_then(|a| rgb_from(&floats(&a, 4, b)));
+    c.fill = get(o, "IC").and_then(|a| rgb_from(&floats(&a, 4, b)));
     c.opacity = get(o, "CA").and_then(|v| v.as_float().ok()).filter(|v| v.is_finite());
     c.width = get(o, "BS")
         .and_then(|b| get(&b, "W"))
         .and_then(|v| v.as_float().ok())
-        .or_else(|| get(o, "Border").and_then(|b| floats(&b, 3).get(2).copied()))
+        .or_else(|| get(o, "Border").and_then(|bd| floats(&bd, 3, b).get(2).copied()))
         .filter(|v| v.is_finite());
     if let Some(p) = get(o, "Popup").filter(|p| p.is_dict().unwrap_or(false)) {
-        let r = get(&p, "Rect").map(|a| floats(&a, 4)).unwrap_or_default();
+        let r = get(&p, "Rect").map(|a| floats(&a, 4, b)).unwrap_or_default();
         if r.len() == 4 {
             let open = get(&p, "Open").and_then(|v| v.as_bool().ok()).unwrap_or(false);
             c.popup = Some(([r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3])], open));
@@ -307,6 +318,7 @@ fn read(o: &PdfObject, sub: Sub) -> Comment {
 /// left out for having another type (carets, attachments, sound, ...). Unnamed comments get a stable
 /// name for this export only; nothing is written to the document.
 fn collect(doc: &PdfDocument) -> Result<(Vec<Comment>, usize)> {
+    let budget = Budget::new();
     let mut left = 0usize;
     // Measurements are left out (their /Measure scale has no place in these files), and so are their replies.
     let mut measured: HashSet<i32> = HashSet::new();
@@ -321,12 +333,13 @@ fn collect(doc: &PdfDocument) -> Result<(Vec<Comment>, usize)> {
             left += 1;
             return Ok(None);
         }
-        let mut c = read(&o, sub);
+        let mut c = read(&o, sub, &budget);
         c.page = i64::from(page);
         c.xref = a.xref()?;
         c.parent_xref = parent_of(&o);
         Ok(Some(c))
     })?;
+    budget.check()?;
     let mut items: Vec<Comment> = all.into_iter().flatten().collect();
     let kept = items.len();
     items.retain(|c| !c.parent_xref.is_some_and(|p| measured.contains(&p)));
@@ -641,6 +654,7 @@ pub fn parse_xfdf(bytes: &[u8]) -> Result<Parsed> {
 pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
     exchange::with_fdf(bytes, |root| {
         let mut out = Parsed::default();
+        let budget = Budget::new();
         let Some(annots) = get(root, "Annots").filter(|a| a.is_array().unwrap_or(false)) else { return Ok(out) };
         let count = annots.len().unwrap_or(0).min(MAX_NODES);
         // Object numbers of the comments, so an /IRT can name its parent.
@@ -654,11 +668,12 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
                 continue;
             }
             if let Some(n) = num {
-                number_of.insert(n, string(&e, "NM"));
+                number_of.insert(n, string(&e, "NM", &budget));
             }
             entries.push(e);
         }
         for e in entries {
+            budget.check()?;
             let sub = get(&e, "Subtype").as_ref().and_then(text).and_then(|t| Sub::of_pdf(&t));
             let Some(sub) = sub else {
                 out.unknown += 1;
@@ -668,7 +683,7 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
                 out.over += 1;
                 continue;
             }
-            let mut c = read(&e, sub);
+            let mut c = read(&e, sub, &budget);
             c.page = get(&e, "Page").and_then(|p| p.as_int().ok()).map_or(-1, i64::from);
             // The parent is named by its /NM: through the object the /IRT points at (this file's own
             // object number first), or the dictionary written in place.
@@ -676,11 +691,12 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
                 c.parent = if p.is_indirect().unwrap_or(false) {
                     p.as_indirect().ok().and_then(|n| number_of.get(&n).cloned()).unwrap_or_default()
                 } else {
-                    string(&p, "NM")
+                    string(&p, "NM", &budget)
                 };
             }
             out.items.push(c);
         }
+        budget.check()?;
         Ok(out)
     })
 }
@@ -963,9 +979,10 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
     let mut known: HashMap<String, (u32, i32, Option<Sub>)> = HashMap::new();
     // Names of the document's measurements: an update would move them away from the /Measure they carry.
     let mut measured_here: HashSet<String> = HashSet::new();
+    let budget = Budget::new();
     each(doc, |p, a| {
         let o = a.object();
-        let nm = string(&o, "NM");
+        let nm = string(&o, "NM", &budget);
         if !nm.is_empty() {
             if is_measurement(&o) {
                 measured_here.insert(nm.clone());
@@ -974,6 +991,7 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
         }
         Ok(())
     })?;
+    budget.check()?;
     let mut ctms: HashMap<u32, Matrix> = HashMap::new();
     let mut ctm = |doc: &PdfDocument, p: u32| -> Result<Matrix> {
         if let Some(m) = ctms.get(&p) {
