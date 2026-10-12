@@ -158,7 +158,8 @@ fn without(doc: &mut PdfDocument, data: &[u8], ranges: &[Range<usize>], first: O
 
 /// What was read from a file is not trusted: a band is a finite number of points inside the page.
 fn sane(b: Bands, view: &View) -> Bands {
-    let fit = |v: f64, max: f64| if v.is_finite() { v.clamp(0.0, max) } else { 0.0 };
+    // (not `clamp`: it panics on a NaN or negative maximum, and a damaged page box can give one)
+    let fit = |v: f64, max: f64| if v.is_finite() { v.max(0.0).min(max.max(0.0)) } else { 0.0 };
     [fit(b[0], view.h), fit(b[1], view.h), fit(b[2], view.w), fit(b[3], view.w)]
 }
 
@@ -213,7 +214,7 @@ pub(super) fn set_shrink(doc: &mut PdfDocument, list: Vec<PdfObject>, view: &Vie
     }
     if let Some((at, qs)) = open {
         if !entries.is_empty() || found {
-            let wrapper = format!("q %Inkwell\n{body}{}", "q\n".repeat(qs.saturating_sub(1)));
+            let wrapper = format!("q %Inkwell\n{body}{}", "q\n".repeat(qs.saturating_sub(1).min(256)));
             out[at] = add_stream(doc, wrapper.as_bytes(), "Wrap", None)?;
         }
     }
