@@ -1109,3 +1109,67 @@ fn the_count_the_confirm_shows_is_the_count_remove_all_removes() {
     assert_eq!(e.count, a.total);
     assert_eq!(audit(&eng, id).unwrap().total, 0);
 }
+
+#[test]
+fn remove_all_has_one_budget_for_the_whole_document_and_refuses_it_whole() {
+    // Three pages' worth of entries: the budget is what the walk reads in all, not what one page holds.
+    let (eng, id, _, _d) = opened("budget", &remove_all_fixture());
+    let run = |budget: usize| {
+        eng.apply_custom_unless_noop(id, "Remove all links".into(), EditSource::User, true, |d| {
+            Ok(remove_all(d, budget)?.map(|done| done.pages))
+        })
+    };
+    let before = eng.edit_state(id).unwrap();
+    match run(10) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("at once"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(eng.edit_state(id).unwrap().rev, before.rev, "refused: no step");
+    assert_eq!(list(&eng, id, 0).unwrap().links.len(), 2, "and nothing removed");
+    assert_eq!(list(&eng, id, 1).unwrap().links.len(), 2);
+    run(1000).unwrap();
+    assert_eq!(audit(&eng, id).unwrap().total, 0);
+}
+
+#[test]
+fn a_parent_tree_shared_by_many_links_is_cleaned_in_one_pass_and_keeps_the_others_pairs() {
+    // 1500 links with a /StructParent key each, one element per link, one big /Nums leaf that the tree's root lists 300
+    // times. Link 0's key leads to an element that is not its own, so that pair stays; key 5000 is nobody's.
+    const N: usize = 1500;
+    let first_link = 7;
+    let elem_first = first_link + N;
+    let leaf = first_link + 2 * N;
+    let refs = (0..N).map(|i| format!("{} 0 R", first_link + i)).collect::<Vec<_>>().join(" ");
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 4 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [ {refs} ] >>"),
+        "<< /Type /StructTreeRoot /K 5 0 R /ParentTree 6 0 R >>".to_string(),
+        "<< /Type /StructElem /S /Document /P 4 0 R /K [] >>".to_string(),
+        format!("<< /Kids [ {} ] >>", vec![format!("{leaf} 0 R"); 300].join(" ")),
+    ];
+    objs.extend((0..N).map(|i| link_annot(&format!("/Dest [3 0 R /Fit] /StructParent {i}"))));
+    objs.extend((0..N).map(|i| {
+        format!("<< /Type /StructElem /S /Link /P 5 0 R /Pg 3 0 R /K [ << /Type /OBJR /Obj {} 0 R /Pg 3 0 R >> ] >>", first_link + i)
+    }));
+    let mut nums = vec!["0 5 0 R".to_string()];
+    nums.extend((1..N).map(|i| format!("{i} {} 0 R", elem_first + i)));
+    nums.push("5000 5 0 R".to_string());
+    objs.push(format!("<< /Nums [ {} ] >>", nums.join(" ")));
+
+    let (eng, id, _, _d) = opened("shared-parent-tree", &raw_pdf(&objs));
+    assert_eq!(list(&eng, id, 0).unwrap().links.len(), N);
+    let t = std::time::Instant::now();
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count as usize, N);
+    assert!(t.elapsed().as_secs() < 10, "took {:?}", t.elapsed());
+    let (nums, held) = eng
+        .read_custom(id, |d| {
+            let nums = d.new_indirect(leaf as i32, 0)?.get_dict("Nums")?.unwrap();
+            let kept: Vec<i32> = (0..nums.len()? as i32).step_by(2).map(|i| nums.get_array(i).unwrap().unwrap().as_int().unwrap()).collect();
+            let elem = d.new_indirect(elem_first as i32 + 1, 0)?;
+            Ok((kept, elem.get_dict("K")?.map_or(0, |k| k.len().unwrap_or(1))))
+        })
+        .unwrap();
+    assert_eq!(nums, vec![0, 5000], "the pairs of the removed links' own elements are gone, the others stay");
+    assert_eq!(held, 0, "an element no longer refers to its link");
+}
