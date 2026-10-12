@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatOrder, pagesIn, parseOrder, togglePage } from "./combineLogic";
+import { formatOrder, pagesIn, parseOrder, securityDropped, togglePage } from "./combineLogic";
 
 describe("combine page ranges", () => {
   it("reads them in the order written, backwards ranges backwards", () => {
@@ -37,5 +37,15 @@ describe("combine page ranges", () => {
   it("the thumbnails read the text, not the other way round", () => {
     expect([...(pagesIn("2-3", 5) ?? [])]).toEqual([1, 2]);
     expect(pagesIn("nope", 5)).toBeNull();
+  });
+});
+
+describe("the no-password footer", () => {
+  const plain = { password: "", locked: null };
+  it("shows for an unlocked row and for an owner-only source that has no password to enter", () => {
+    expect(securityDropped([plain], [{ encrypted: false }])).toBe(false);
+    expect(securityDropped([{ password: "pw", locked: null }], [{ encrypted: true }])).toBe(true);
+    expect(securityDropped([{ password: "", locked: 3 }], [])).toBe(true);
+    expect(securityDropped([plain, plain], [{ encrypted: false }, { encrypted: true }])).toBe(true);
   });
 });

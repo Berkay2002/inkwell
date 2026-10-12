@@ -368,6 +368,19 @@ impl Engine {
         r
     }
 
+    /// `authenticate`, for a document that is waiting for its password (`open_pending` said so) and holds
+    /// none: anything else (an open tab, a document that has its password) is refused and left as it is,
+    /// because a wrong password would clear what that document is open with.
+    pub fn unlock_pending(&self, id: DocId, password: &str) -> Result<OpenInfo> {
+        let entry = self.entry(id)?;
+        match self.with_doc(&entry, |_| Ok(())) {
+            Err(EngineError::NeedsPassword) => {}
+            Err(e) => return Err(e),
+            Ok(()) => return Err(EngineError::Invalid("that document is not waiting for a password".into())),
+        }
+        self.authenticate(id, password)
+    }
+
     fn finish_open(&self, entry: &Arc<DocEntry>) -> Result<OpenInfo> {
         let (count, first, title) = self.with_doc(entry, |doc| {
             let count = doc.page_count()?.max(0) as u32;

@@ -38,6 +38,7 @@ the edit-core steps in `src-tauri/src/engine/edit/security.rs`, UI in `src/compo
   rights first. A file that forbids copying (extract) or assembling (merge/split) and was not opened with the
   owner password fails with `needs-permissions-password`, and the UI opens the Security view to ask for it,
   rather than writing an unencrypted copy of what the owner restricted.
+  Pages copied this way arrive without the signature of a signed source (its signature field stays, empty).
 
 ## How it is built
 - Security is a property of the *written file*: a `Step.security` (`Set(spec)` or `Remove`) makes the next save a

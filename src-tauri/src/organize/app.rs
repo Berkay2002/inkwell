@@ -1,6 +1,7 @@
 //! Tauri commands for combine, attachments, page labels and transitions. The UI is the user; the
 //! assistant calls the functions in `super` with its turn. Files are named by token only.
 
+use crate::batch::action::Secret;
 use super::attach::{Attachment, MAX_ATTACH, NewFile, clean_name};
 use super::combine::{self, CombineOptions, Plan, SourceSpec};
 use super::labels::{LabelSpec, LabelStyle};
@@ -35,12 +36,15 @@ pub struct CombineFile {
     pub range: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// The open password the person typed for a locked file; in memory only, never written anywhere.
+    #[serde(default)]
+    pub password: Option<Secret>,
 }
 
 fn specs(window: &Window, reg: &Paths, files: &[CombineFile]) -> Result<Vec<SourceSpec>> {
     files
         .iter()
-        .map(|f| Ok(SourceSpec { path: reg.open(window.label(), &f.file)?, range: f.range.clone(), title: f.title.clone() }))
+        .map(|f| Ok(SourceSpec { path: reg.open(window.label(), &f.file)?, range: f.range.clone(), title: f.title.clone(), password: f.password.clone() }))
         .collect()
 }
 
@@ -56,6 +60,16 @@ pub async fn combine_inspect(window: Window, reg: Reg<'_>, files: Vec<CombineFil
 pub struct Combined {
     pub file: FileRef,
     pub plan: Plan,
+}
+
+/// Opens a locked source's engine handle (the one the sheet drew its row with) with the password the
+/// person typed, so its pages can be drawn. Unlike `authenticate` this does not start a history for the
+/// file: it is only a source. A wrong password is `bad-password` and changes nothing; a document that is
+/// not waiting for a password (an open tab) is refused.
+#[tauri::command]
+pub async fn combine_unlock(eng: Eng<'_>, doc: DocId, password: Secret) -> Result<crate::engine::OpenInfo> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.unlock_pending(doc, password.as_str())).await
 }
 
 /// Combines into the file a save token names, and hands back an open token for it.

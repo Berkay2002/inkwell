@@ -587,6 +587,19 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
     }
 }
 
+/// Unlocks `d` with a password the person typed: as typed, then in NFKC. MuPDF does no SASLprep and the
+/// writer (Protect) puts passwords in NFKC, so one typed decomposed or full-width opens the file under its
+/// NFKC form. `Ok(false)`: neither opens it.
+pub(crate) fn authenticate_typed(d: &mut Document, pw: &str) -> Result<bool> {
+    if d.authenticate(pw)? {
+        return Ok(true);
+    }
+    match protect::nfkc_form(pw) {
+        Some(n) => Ok(d.authenticate(&n)?),
+        None => Ok(false),
+    }
+}
+
 /// Another PDF to take pages from.
 pub(crate) fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocument> {
     check_pdf(path)?;
@@ -594,7 +607,7 @@ pub(crate) fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocum
     if d.needs_password()? {
         match password {
             None => return Err(EngineError::NeedsPassword),
-            Some(pw) if !d.authenticate(pw)? => return Err(EngineError::BadPassword),
+            Some(pw) if !authenticate_typed(&mut d, pw)? => return Err(EngineError::BadPassword),
             _ => {}
         }
     }
@@ -720,6 +733,21 @@ pub(crate) fn graft_pages_ex(dst: &mut PdfDocument, src: &PdfDocument, pages: &[
     Ok(Grafted { pages: made.iter().map(|(_, p)| p.clone()).collect(), outline })
 }
 
+/// A signature field arrives empty: its value (and the appearance that shows it) would never verify in a
+/// file that is not the one that was signed, and a signature that cannot verify looks like tampering.
+/// `field` is the source object (its /FT may be inherited), `copy` the dictionary about to be grafted.
+fn drop_signature(field: &PdfObject, copy: &mut PdfObject) -> Result<()> {
+    // A /Parent loop in a broken field tree makes the lookup fail; that was tolerated before, so it is no signature.
+    let sig = name_of(field.get_dict_inheritable("FT").ok().flatten()) == b"Sig";
+    // The value may sit on a parent field while the widget kid only has the appearance that shows it.
+    let valued = field.get_dict_inheritable("V").ok().flatten().is_some_and(|v| !v.is_null().unwrap_or(true));
+    if sig && valued {
+        copy.dict_delete("V")?;
+        copy.dict_delete("AP")?;
+    }
+    Ok(())
+}
+
 /// State of one [`graft_pages`] call's annotation pass.
 struct Graft<'a> {
     src: &'a PdfDocument,
@@ -794,6 +822,9 @@ impl Graft<'_> {
                 c.dict_delete(k)?;
             }
             c.dict_delete("Dest")?;
+            if sub == b"Widget" {
+                drop_signature(&a, &mut c)?;
+            }
             let mut copy = map.graft_object(&c)?;
             if let Some(d) = dest {
                 copy.dict_put("Dest", d)?;
@@ -874,6 +905,7 @@ impl Graft<'_> {
         for k in BACK_REFS {
             c.dict_delete(k)?;
         }
+        drop_signature(&f, &mut c)?;
         let mut copy = map.graft_object(&c)?;
         copy.dict_put("Kids", dst.new_array()?)?;
         let r = dst.add_object(&copy)?;
@@ -1855,7 +1887,7 @@ impl Engine {
             .collect::<Result<Vec<_>>>()?;
         // The result is a plain file: a source whose owner allows no copying or page changes stays out.
         for (p, s) in paths.iter().zip(&srcs) {
-            if !crate::protect::Rights::from_p(s.permissions().bits() as i32).may_extract() {
+            if !crate::protect::Rights::of(s).may_extract() {
                 return Err(invalid(format!(
                     "{} doesn't allow copying or page changes. Open it with its permissions password and remove its security first.",
                     Path::new(p).file_name().unwrap_or_default().to_string_lossy()

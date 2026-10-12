@@ -267,11 +267,11 @@ fn attachments_of_a_pages_file_attachment_annotation_are_listed_and_deleted() {
 // ---- combine ------------------------------------------------------------------------------------
 
 fn src(path: &str, range: &str) -> SourceSpec {
-    SourceSpec { path: path.into(), range: range.into(), title: None }
+    SourceSpec { path: path.into(), range: range.into(), title: None, password: None }
 }
 
 fn all_options() -> CombineOptions {
-    CombineOptions { bookmarks: true, keep_outlines: true, contents_page: true }
+    CombineOptions { bookmarks: true, keep_outlines: true, contents_page: true, keep_labels: true }
 }
 
 fn count(items: &[crate::engine::OutlineItem]) -> u32 {
@@ -320,7 +320,7 @@ fn combine_options_off_give_a_plain_file() {
     let b = write(&d, "b.pdf", 2, 0);
     let (eng, _) = open(&a);
     let specs = [src(&a, ""), src(&b, "")];
-    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false };
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
     let plan = combine::inspect(&specs, opt).unwrap();
     assert_eq!((plan.pages, plan.bookmarks, plan.contents_pages), (4, 0, 0));
     assert_eq!(plan.summary, "Combines 2 files, 4 pages");
@@ -329,7 +329,7 @@ fn combine_options_off_give_a_plain_file() {
     let (e2, i2) = open(&out);
     assert!(e2.outline(i2).unwrap().is_empty());
     // outlines kept without a bookmark per file: the file's own items, flat
-    let opt = CombineOptions { bookmarks: false, keep_outlines: true, contents_page: false };
+    let opt = CombineOptions { bookmarks: false, keep_outlines: true, contents_page: false, keep_labels: true };
     let plan = combine::inspect(&specs, opt).unwrap();
     assert_eq!(plan.bookmarks, 2);
     let out2 = d.join("out2.pdf").to_string_lossy().into_owned();
@@ -354,7 +354,7 @@ fn combine_leaves_out_what_cannot_be_taken_and_refuses_bad_ranges() {
     std::fs::write(&junk, b"not a pdf at all").unwrap();
     let junk = junk.to_string_lossy().into_owned();
     let (eng, _) = open(&a);
-    let opt = CombineOptions { bookmarks: true, keep_outlines: false, contents_page: false };
+    let opt = CombineOptions { bookmarks: true, keep_outlines: false, contents_page: false, keep_labels: true };
     let specs = [src(&a, ""), src(&locked, ""), src(&junk, "")];
     let plan = combine::inspect(&specs, opt).unwrap();
     assert_eq!(plan.files[1].state, FileState::Encrypted);
@@ -398,7 +398,7 @@ fn combine_keeps_form_fields_and_renames_the_ones_that_clash() {
     }
     let (eng, _) = open(&paths[0]);
     let specs = [src(&paths[0], ""), src(&paths[1], "")];
-    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false };
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
     assert!(combine::inspect(&specs, opt).unwrap().files.iter().all(|f| f.has_fields));
     let out = d.join("out.pdf").to_string_lossy().into_owned();
     combine::run(&eng, &specs, opt, &out).unwrap();
@@ -417,7 +417,7 @@ fn combine_and_insert_keep_page_transitions() {
     trans_set(&eng, id, &[1], &change, user()).unwrap();
     eng.save(id, None).unwrap();
     let b = write(&d, "b.pdf", 1, 0);
-    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false };
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
     let out = d.join("out.pdf").to_string_lossy().into_owned();
     combine::run(&eng, &[src(&b, ""), src(&a, "")], opt, &out).unwrap();
     let (e2, i2) = open(&out);
@@ -444,7 +444,7 @@ fn a_damaged_file_costs_only_its_own_place_in_the_plan() {
     h[from..to].fill(0);
     std::fs::write(&holed, &h).unwrap();
     let (cut, holed) = (cut.to_string_lossy().into_owned(), holed.to_string_lossy().into_owned());
-    let opt = CombineOptions { bookmarks: true, keep_outlines: false, contents_page: false };
+    let opt = CombineOptions { bookmarks: true, keep_outlines: false, contents_page: false, keep_labels: true };
     let specs = [src(&a, ""), src(&cut, ""), src(&holed, ""), src(&b, "")];
     let plan = combine::inspect(&specs, opt).unwrap();
     assert_eq!(plan.files.len(), 4);
@@ -522,7 +522,7 @@ fn combine_merges_the_default_resources_of_every_form() {
         doc.save(&second).unwrap();
     }
     let (eng, _) = open(&paths[0]);
-    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false };
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
     let out = d.join("out.pdf").to_string_lossy().into_owned();
     combine::run(&eng, &[src(&paths[0], ""), src(&second, "")], opt, &out).unwrap();
     let doc = PdfDocument::open(&out).unwrap();
@@ -589,4 +589,336 @@ fn a_name_tree_cut_short_by_a_cap_is_never_written_back_flat() {
     assert!(r.is_err(), "an edit of a tree that was cut short must be refused");
     assert_eq!(attach_list(&eng, id).unwrap().len(), before);
     assert!(attach_remove(&eng, id, &["n:k00".to_string()], user()).is_err());
+}
+
+// ---- combine: source page labels and passwords --------------------------------------------------
+
+/// A file of `pages` pages with `style`/`prefix` labels over all of them.
+fn labelled(d: &std::path::Path, name: &str, pages: usize, style: LabelStyle, prefix: &str) -> String {
+    let p = write(d, name, pages, 0);
+    let (eng, id) = open(&p);
+    labels_apply(&eng, id, 0, pages as u32 - 1, &spec(style, prefix, 1), user()).unwrap();
+    eng.save(id, None).unwrap();
+    p
+}
+
+#[test]
+fn combine_carries_the_source_page_labels_to_the_pages_it_takes() {
+    let d = dir("combine-labels");
+    let a = labelled(&d, "a.pdf", 4, LabelStyle::LowerRoman, "");
+    let b = labelled(&d, "b.pdf", 5, LabelStyle::Decimal, "A-");
+    let c = write(&d, "c.pdf", 3, 0);
+    let (eng, _) = open(&c);
+    let specs = [src(&a, "2-3"), src(&b, "5-4, 1"), src(&c, "")];
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let run = |name: &str, opt: CombineOptions, specs: &[SourceSpec]| {
+        let out = d.join(name).to_string_lossy().into_owned();
+        combine::run(&eng, specs, opt, &out).unwrap();
+        let (e2, i2) = open(&out);
+        labels(&e2, i2)
+    };
+
+    // shifted to the page offset, limited to the picked pages (in the order picked); the file without
+    // labels gets plain decimal numbers that carry on the combined page numbers
+    assert_eq!(run("out.pdf", opt, &specs), ["ii", "iii", "A-5", "A-4", "A-1", "6", "7", "8"]);
+
+    // a contents page in front is plain decimal and counted
+    let toc = CombineOptions { contents_page: true, ..opt };
+    assert_eq!(run("toc.pdf", toc, &specs), ["1", "ii", "iii", "A-5", "A-4", "A-1", "7", "8", "9"]);
+
+    // unticked: the result has none
+    let off = CombineOptions { keep_labels: false, ..opt };
+    assert!(run("off.pdf", off, &specs).is_empty());
+
+    // nothing labelled anywhere: a plain document stays plain
+    assert!(run("plain.pdf", opt, &[src(&c, ""), src(&c, "1")]).is_empty());
+
+    // a source that spells out plain decimal numbering (what many producers write) counts as unlabelled:
+    // it carries on the combined numbers instead of starting again at 1
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /D >>] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".into(),
+    ];
+    let explicit = d.join("explicit.pdf");
+    std::fs::write(&explicit, crate::outline::tests::raw_pdf(&objs)).unwrap();
+    let explicit = explicit.to_string_lossy().into_owned();
+    assert!(run("explicit1.pdf", opt, &[src(&c, ""), src(&explicit, "")]).is_empty());
+    assert_eq!(run("explicit2.pdf", opt, &[src(&b, "5"), src(&explicit, "")]), ["A-5", "2"]);
+}
+
+#[test]
+fn a_hostile_page_label_tree_is_bounded_and_never_stops_a_combine() {
+    use crate::outline::tests::{open_bytes, raw_pdf};
+    // one node that is its own kid 200 000 times over: nothing is ever added to the result (the depth cap
+    // alone leaves 200 000 ^ 8 visits), so only a cap on the work stops the walk
+    let kids = "5 0 R ".repeat(200_000);
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /PageLabels 5 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".into(),
+        "<< >>".into(),
+        format!("<< /Kids [{kids}] >>"),
+    ];
+    let d = dir("combine-labels-hostile");
+    let bytes = raw_pdf(&objs);
+    let t = std::time::Instant::now();
+    let (eng, id, path) = open_bytes(&d, "hostile.pdf", &bytes);
+    assert!(labels(&eng, id).is_empty());
+    let a = write(&d, "a.pdf", 2, 0);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    let specs = [src(&path, ""), src(&a, "")];
+    let report = combine::run(&eng, &specs, opt, &out).unwrap();
+    assert_eq!(report.plan.pages, 3);
+    assert!(t.elapsed() < std::time::Duration::from_secs(20), "{:?}", t.elapsed());
+}
+
+fn locked_copy(d: &std::path::Path, name: &str, pages: usize, may_copy: bool) -> String {
+    locked_with(d, name, pages, may_copy, "secret-pw")
+}
+
+fn locked_with(d: &std::path::Path, name: &str, pages: usize, may_copy: bool, user_pw: &str) -> String {
+    use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions, Permission};
+    let path = d.join(name).to_string_lossy().into_owned();
+    let doc = PdfDocument::from_bytes(&fixture::build(&Fixture { pages, ..Default::default() })).unwrap();
+    let mut o = PdfWriteOptions::default();
+    o.set_encryption(Encryption::Aes256).set_user_password(user_pw).set_owner_password("owner-pw");
+    if !may_copy {
+        o.set_permissions(Permission::PRINT);
+    }
+    doc.save_with_options(&path, o).unwrap();
+    path
+}
+
+fn with_password(path: &str, pw: &str) -> SourceSpec {
+    SourceSpec { password: Some(pw.into()), ..src(path, "") }
+}
+
+#[test]
+fn a_locked_source_combines_with_its_password_and_the_result_has_none() {
+    let d = dir("combine-password");
+    let a = write(&d, "a.pdf", 2, 0);
+    let locked = locked_copy(&d, "locked.pdf", 3, true);
+    let (eng, _) = open(&a);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+
+    // none, then a wrong one: left out, the plan is the same, and the run goes on without it
+    let none = combine::inspect(&[src(&a, ""), src(&locked, "")], opt).unwrap();
+    assert_eq!(none.files[1].state, FileState::Encrypted);
+    let wrong_specs = [src(&a, ""), with_password(&locked, "not-it")];
+    let wrong = combine::inspect(&wrong_specs, opt).unwrap();
+    assert_eq!(wrong.files[1].state, FileState::Encrypted);
+    assert_eq!((wrong.pages, wrong.left_out, wrong.can_run), (none.pages, none.left_out, none.can_run));
+    assert_eq!(combine::run(&eng, &wrong_specs, opt, &out).unwrap().plan.pages, 2);
+    assert!(combine::run(&eng, &[with_password(&locked, "not-it")], opt, &out).is_err());
+
+    // the right one: its pages go in; the result opens without any password
+    let specs = [src(&a, ""), with_password(&locked, "secret-pw")];
+    let plan = combine::inspect(&specs, opt).unwrap();
+    assert_eq!((plan.files[1].state.clone(), plan.pages, plan.left_out), (FileState::Ready, 5, 0));
+    let report = combine::run(&eng, &specs, opt, &out).unwrap();
+    assert_eq!(report.plan, plan, "the run is what was predicted");
+    let (e2, i2) = open(&out);
+    assert_eq!(e2.edit_state(i2).unwrap().page_count, 5);
+
+    // the password is in no serialised form, debug print or error text
+    let mut seen = vec![format!("{specs:?}"), serde_json::to_string(&plan).unwrap(), serde_json::to_string(&report).unwrap()];
+    seen.push(combine::run(&eng, &[with_password(&locked, "not-it")], opt, &out).unwrap_err().to_string());
+    seen.push(serde_json::to_string(&wrong).unwrap());
+    for s in seen {
+        assert!(!s.contains("secret-pw") && !s.contains("not-it"), "{s}");
+    }
+
+    // the engine handle of the sheet's row: a wrong password changes nothing, the right one opens it
+    let eng2 = Engine::new(2, 64 << 20);
+    let (id, r) = eng2.open_pending(&locked);
+    assert!(matches!(r, Err(crate::engine::EngineError::NeedsPassword)));
+    assert!(matches!(eng2.authenticate(id, "not-it"), Err(crate::engine::EngineError::BadPassword)));
+    assert_eq!(eng2.authenticate(id, "secret-pw").unwrap().page_count, 3);
+}
+
+#[test]
+fn an_owner_restriction_still_leaves_a_source_out_after_it_opens() {
+    let d = dir("combine-restricted");
+    let a = write(&d, "a.pdf", 2, 0);
+    let locked = locked_copy(&d, "restricted.pdf", 3, false);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let plan = combine::inspect(&[src(&a, ""), with_password(&locked, "secret-pw")], opt).unwrap();
+    assert_eq!(plan.files[1].state, FileState::NoCopy);
+    assert!(plan.files[1].message.as_deref().unwrap().contains("doesn't allow copying"));
+    assert_eq!((plan.pages, plan.left_out), (2, 1));
+    let (eng, _) = open(&a);
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    let specs = [src(&a, ""), with_password(&locked, "secret-pw")];
+    assert_eq!(combine::run(&eng, &specs, opt, &out).unwrap().plan.pages, 2);
+}
+
+#[test]
+fn a_source_with_security_says_its_password_and_restrictions_are_not_carried_over() {
+    use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions, Permission};
+    let d = dir("combine-security");
+    let a = write(&d, "a.pdf", 2, 0);
+    // an owner-password-only source: opens with no password, may be copied and rearranged, forbids the rest
+    let owner = d.join("owner.pdf").to_string_lossy().into_owned();
+    let doc = PdfDocument::from_bytes(&fixture::build(&Fixture { pages: 2, ..Default::default() })).unwrap();
+    let mut o = PdfWriteOptions::default();
+    o.set_encryption(Encryption::Aes256).set_owner_password("owner-pw").set_permissions(Permission::COPY | Permission::ASSEMBLE);
+    doc.save_with_options(&owner, o).unwrap();
+    assert!(!PdfDocument::open(&owner).unwrap().needs_password().unwrap(), "the fixture must open without a password");
+    let locked = locked_copy(&d, "locked.pdf", 2, true);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let plan = combine::inspect(&[src(&a, ""), src(&owner, ""), with_password(&locked, "secret-pw")], opt).unwrap();
+    assert_eq!(plan.files[0].note, None);
+    assert!(!plan.files[0].encrypted);
+    assert_eq!(plan.files[1].state, FileState::Ready);
+    assert!(plan.files[1].encrypted);
+    assert_eq!(
+        plan.files[1].note.as_deref(),
+        Some("owner.pdf's password and restrictions are not carried over (it does not allow printing, editing, commenting, form filling, screen reader access)")
+    );
+    // a source with a user password and every right still says the password goes
+    assert!(plan.files[2].encrypted);
+    assert_eq!(plan.files[2].note.as_deref(), Some("locked.pdf's password and restrictions are not carried over"));
+    // not opened yet: left out, and it is not said to bring anything
+    let closed = combine::inspect(&[src(&locked, "")], opt).unwrap();
+    assert_eq!((closed.files[0].state.clone(), closed.files[0].note.clone(), closed.files[0].encrypted), (FileState::Encrypted, None, false));
+    // the result has none of it
+    let (eng, _) = open(&a);
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    combine::run(&eng, &[src(&a, ""), src(&owner, "")], opt, &out).unwrap();
+    assert!(!PdfDocument::open(&out).unwrap().needs_password().unwrap());
+}
+
+#[test]
+fn a_revision_2_source_has_its_page_rights_read_from_the_older_bits() {
+    use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions, Permission};
+    let d = dir("combine-r2");
+    let a = write(&d, "a.pdf", 1, 0);
+    // RC4-40 is revision 2: MuPDF writes only the bits it is given, so 9 to 12 are clear
+    let r2 = |name: &str, p: Permission| {
+        let path = d.join(name).to_string_lossy().into_owned();
+        let doc = PdfDocument::from_bytes(&fixture::build(&Fixture { pages: 2, ..Default::default() })).unwrap();
+        let mut o = PdfWriteOptions::default();
+        o.set_encryption(Encryption::Rc4_40).set_owner_password("owner-pw").set_permissions(p);
+        doc.save_with_options(&path, o).unwrap();
+        let on_disk = PdfDocument::open(&path).unwrap();
+        let enc = on_disk.trailer().unwrap().get_dict("Encrypt").unwrap().unwrap();
+        assert_eq!(enc.get_dict("R").unwrap().unwrap().as_int().unwrap(), 2);
+        assert_eq!(enc.get_dict("P").unwrap().unwrap().as_int().unwrap() as u32 & 0xf00, 0, "bits 9 to 12 are clear in the fixture");
+        path
+    };
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    // copy but no change right (bit 4 clear): page changes follow bit 4, so the file is left out
+    let copy_only = r2("copy.pdf", Permission::COPY);
+    let plan = combine::inspect(&[src(&a, ""), src(&copy_only, "")], opt).unwrap();
+    assert_eq!(plan.files[1].state, FileState::NoCopy);
+    assert!(plan.files[1].message.as_deref().unwrap().contains("doesn't allow copying"));
+    // copy and modify: it goes in; page changes follow modify and screen readers follow copy, so only
+    // printing, commenting and form filling (bit 9 follows bit 6) are named
+    let edit = r2("edit.pdf", Permission::COPY | Permission::MODIFY);
+    let plan = combine::inspect(&[src(&a, ""), src(&edit, "")], opt).unwrap();
+    assert_eq!(plan.files[1].state, FileState::Ready);
+    assert_eq!(
+        plan.files[1].note.as_deref(),
+        Some("edit.pdf's password and restrictions are not carried over (it does not allow printing, commenting, form filling)")
+    );
+}
+
+#[test]
+fn a_password_typed_full_width_opens_a_file_protect_wrote_in_nfkc() {
+    let d = dir("combine-nfkc");
+    let a = write(&d, "a.pdf", 2, 0);
+    // Protect writes the password in NFKC; the person types it full-width
+    let locked = locked_with(&d, "locked.pdf", 3, true, "ABC-secret");
+    let typed = "\u{ff21}\u{ff22}\u{ff23}-secret";
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let specs = [src(&a, ""), with_password(&locked, typed)];
+    let plan = combine::inspect(&specs, opt).unwrap();
+    assert_eq!((plan.files[1].state.clone(), plan.pages), (FileState::Ready, 5), "{:?}", plan.files[1].message);
+    let (eng, _) = open(&a);
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    assert_eq!(combine::run(&eng, &specs, opt, &out).unwrap().plan.pages, 5);
+    // the sheet's own unlock takes the same typed form
+    let eng2 = Engine::new(2, 64 << 20);
+    let (id, _) = eng2.open_pending(&locked);
+    assert_eq!(eng2.authenticate(id, typed).unwrap().page_count, 3);
+    // still refused when it is not the password in any form
+    assert_eq!(combine::inspect(&[with_password(&locked, "ＸＹＺ")], opt).unwrap().files[0].state, FileState::Encrypted);
+}
+
+#[test]
+fn unlocking_for_combine_refuses_a_document_that_is_not_waiting_for_a_password() {
+    let d = dir("combine-unlock-scope");
+    let locked = locked_copy(&d, "locked.pdf", 2, true);
+    let plain = write(&d, "plain.pdf", 2, 0);
+    let eng = Engine::new(2, 64 << 20);
+    // a tab: opened with its password, then a wrong one comes in through the combine command
+    let (tab, r) = eng.open_pending(&locked);
+    assert!(matches!(r, Err(crate::engine::EngineError::NeedsPassword)));
+    assert_eq!(eng.authenticate(tab, "secret-pw").unwrap().page_count, 2);
+    assert!(eng.unlock_pending(tab, "not-it").is_err());
+    assert!(eng.unlock_pending(tab, "secret-pw").is_err(), "it is open already");
+    assert_eq!(eng.edit_state(tab).unwrap().page_count, 2, "and it still has its password");
+    assert!(eng.outline(tab).is_ok());
+    // a document that never needed one
+    let open_plain = eng.open(&plain).unwrap().doc;
+    assert!(eng.unlock_pending(open_plain, "x").is_err());
+    assert!(eng.outline(open_plain).is_ok());
+    // the one that is waiting: a wrong password changes nothing, the right one opens it
+    let (wait, _) = eng.open_pending(&locked);
+    assert!(matches!(eng.unlock_pending(wait, "not-it"), Err(crate::engine::EngineError::BadPassword)));
+    assert!(matches!(eng.unlock_pending(wait, "not-it"), Err(crate::engine::EngineError::BadPassword)));
+    assert_eq!(eng.unlock_pending(wait, "secret-pw").unwrap().page_count, 2);
+}
+
+#[test]
+fn a_signature_field_of_a_source_arrives_empty_and_the_plan_says_so() {
+    use crate::outline::tests::{open_bytes, raw_pdf};
+    // object 5: a signature that is its own widget; 6 and 7: a signature field that holds the value and a
+    // widget kid that does not
+    let value = "/V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> >>";
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /SigFlags 3 /Fields [5 0 R 6 0 R] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 7 0 R] >>".into(),
+        "<< >>".into(),
+        format!("<< /Type /Annot /Subtype /Widget /FT /Sig /T (First) /Rect [10 10 100 50] /P 3 0 R /AP << /N 4 0 R >> {value} >>"),
+        format!("<< /FT /Sig /T (Second) /Kids [7 0 R] {value} >>"),
+        "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [10 60 100 100] /P 3 0 R /AP << /N 4 0 R >> >>".into(),
+    ];
+    let d = dir("combine-signed");
+    let (eng, id, path) = open_bytes(&d, "s.pdf", &raw_pdf(&objs));
+    assert!(eng.read_custom(id, |d| Ok(crate::outline::signed(d))).unwrap(), "the fixture is signed");
+    let a = write(&d, "a.pdf", 1, 0);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let specs = [src(&a, ""), src(&path, "")];
+    let plan = combine::inspect(&specs, opt).unwrap();
+    assert_eq!(plan.files[0].note, None);
+    assert_eq!(plan.files[1].note.as_deref(), Some("s.pdf's signature is not carried over"));
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    assert_eq!(combine::run(&eng, &specs, opt, &out).unwrap().plan, plan);
+
+    let (e2, i2) = open(&out);
+    assert!(!e2.read_custom(i2, |d| Ok(crate::outline::signed(d))).unwrap(), "no signed document comes out");
+    assert_eq!(crate::forms::list_all(&e2, i2).unwrap().fields.len(), 2, "the signature fields are still there");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("adbe.pkcs7.detached"), "no signature value in the file");
+    // neither widget draws the old signature: one has its own value, the other gets it from its parent field
+    let drawn = e2
+        .read_custom(i2, |d| {
+            let mut n = 0;
+            for p in 0..d.page_count()? {
+                let Some(annots) = d.find_page(p)?.get_dict("Annots")? else { continue };
+                for i in 0..annots.len()? as i32 {
+                    if annots.get_array(i)?.is_some_and(|w| w.get_dict("AP").ok().flatten().is_some()) {
+                        n += 1;
+                    }
+                }
+            }
+            Ok(n)
+        })
+        .unwrap();
+    assert_eq!(drawn, 0, "an empty signature field has no appearance");
 }
