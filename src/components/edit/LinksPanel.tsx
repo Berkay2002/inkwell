@@ -551,7 +551,7 @@ function describe(t: LinkTarget): string {
     case "broken":
       return "Its destination is missing";
     default:
-      return "An action this editor keeps as it is";
+      return isUnchecked(t) ? "Its named destination could not be checked, so it is kept until you change the target" : "An action this editor keeps as it is";
   }
 }
 

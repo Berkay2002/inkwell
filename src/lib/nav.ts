@@ -179,6 +179,7 @@ export function targetLabel(t: api.LinkTarget): string {
     case "broken":
       return "Missing destination";
     default:
+      if (isUnchecked(t)) return "Named destination, not checked";
       return t.what ? `Action: ${t.what}` : "No target";
   }
 }
@@ -589,6 +590,7 @@ export function linkHint(t: api.LinkTarget): string {
     case "broken":
       return `This link goes nowhere: ${t.what}`;
     default:
+      if (isUnchecked(t)) return "This link goes to a named destination Inkwell cannot check";
       return t.what ? `This link runs an action Inkwell does not follow (${t.what})` : "This link has no target";
   }
 }

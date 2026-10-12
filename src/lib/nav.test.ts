@@ -137,6 +137,8 @@ describe("small helpers", () => {
     expect(isUnchecked({ kind: "other", what: UNCHECKED_DEST })).toBe(true);
     expect(isUnchecked({ kind: "other", what: "JavaScript" })).toBe(false);
     expect(isUnchecked({ kind: "broken", what: UNCHECKED_DEST })).toBe(false);
+    expect(targetLabel({ kind: "other", what: UNCHECKED_DEST })).toBe("Named destination, not checked");
+    expect(linkHint({ kind: "other", what: UNCHECKED_DEST })).toBe("This link goes to a named destination Inkwell cannot check");
   });
 });
 
