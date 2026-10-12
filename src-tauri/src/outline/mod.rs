@@ -245,6 +245,10 @@ pub(crate) fn page_dest(doc: &PdfDocument, spaces: &mut HashMap<u32, Option<Matr
     Some((page, at))
 }
 
+/// The `what` of a destination or link target that names a destination which cannot be checked (see
+/// `dest_array`). The panels match this text (`UNCHECKED_DEST` in src/lib/nav.ts) to let such a link be retargeted.
+pub(crate) const UNCHECKED_DEST: &str = "a named destination that cannot be checked";
+
 fn dest_of(doc: &PdfDocument, item: &PdfObject, spaces: &mut HashMap<u32, Option<Matrix>>, names: &mut Names) -> Dest {
     let mut target = item.get_dict("Dest").ok().flatten();
     if target.is_none() {
@@ -258,7 +262,7 @@ fn dest_of(doc: &PdfDocument, item: &PdfObject, spaces: &mut HashMap<u32, Option
     }
     let Some(t) = target else { return Dest::None };
     let Some(found) = dest_array(doc, names, &t) else {
-        return Dest::Other { what: "a named destination that cannot be checked".into() };
+        return Dest::Other { what: UNCHECKED_DEST.into() };
     };
     match found.and_then(|arr| page_dest(doc, spaces, &arr)) {
         Some((page, at)) => Dest::Page { page, at },

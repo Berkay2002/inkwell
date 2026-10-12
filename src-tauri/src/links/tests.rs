@@ -553,6 +553,18 @@ fn links_on_a_rotated_and_cropped_page_keep_their_place() {
 }
 
 #[test]
+fn a_named_destination_that_cannot_be_checked_is_told_apart_and_can_be_retargeted() {
+    // 0x7F in a string that is not UTF-8: MuPDF reads it as a NUL, so the name is not judged
+    let annots = vec![link_annot("/Dest <41E97F>"), link_annot("/Dest (gone)")];
+    let (eng, id, _, _d) = opened("unchecked_dest", &page_with_annots("", "", &annots, &[]));
+    let links = list(&eng, id, 0).unwrap().links;
+    assert!(matches!(&links[0].target, Target::Other { what } if what == crate::outline::UNCHECKED_DEST), "{:?}", links[0].target);
+    assert!(matches!(&links[1].target, Target::Broken { .. }), "{:?}", links[1].target);
+    go(&eng, id, LinkOp::SetTarget { page: 0, id: links[0].id, target: NewTarget::Page { page: 0, at: None } });
+    assert!(matches!(list(&eng, id, 0).unwrap().links[0].target, Target::Page { page: 0, .. }));
+}
+
+#[test]
 fn existing_launch_goto_remote_javascript_and_named_actions_survive_rect_and_border_edits() {
     let annots = vec![
         link_annot("/A << /S /Launch /F (readme.docx) >>"),

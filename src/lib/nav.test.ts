@@ -41,6 +41,7 @@ import {
   fileLinkNote,
   followLink,
   hexToRgb,
+  isUnchecked,
   isUnder,
   linkHint,
   linkLock,
@@ -52,6 +53,7 @@ import {
   rgbToHex,
   targetLabel,
   titleFromText,
+  UNCHECKED_DEST,
   useNav,
   viewTarget,
   visibleRows,
@@ -129,6 +131,12 @@ describe("small helpers", () => {
     expect(targetLabel({ kind: "file", name: "annex.pdf", page: 2 })).toBe("annex.pdf, page 3");
     expect(targetLabel({ kind: "file", name: "annex.pdf", page: null })).toBe("annex.pdf");
     expect(targetLabel({ kind: "other", what: "JavaScript" })).toBe("Action: JavaScript");
+  });
+
+  it("tells a destination that could not be checked from the actions that are kept", () => {
+    expect(isUnchecked({ kind: "other", what: UNCHECKED_DEST })).toBe(true);
+    expect(isUnchecked({ kind: "other", what: "JavaScript" })).toBe(false);
+    expect(isUnchecked({ kind: "broken", what: UNCHECKED_DEST })).toBe(false);
   });
 });
 
