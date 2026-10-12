@@ -26,8 +26,9 @@ data). The format of an export follows the file name: `.fdf` is FDF, anything el
 - **Exported:** text notes, highlight, underline, squiggly and strikeout (with quad points), ink, square, circle, line,
   polygon, polyline, free text and stamps (by name), with name (`/NM`), page, rect, colour, opacity, border width, author,
   subject, dates, contents, review state and replies (`inreplyto`). A comment with no `/NM` is written under a name
-  made for the export (`inkwell-<page>-<object>`, nothing is added to the document) that an import into the same
-  document matches again; comments the tools add from now on carry a real one. Carets, file attachments, sound and redaction marks are left out and counted.
+  made for the export (`inkwell-<page>-<object>`, nothing is added to the document); importing it back adds it again
+  instead of updating it, because that name is not unique across files. Comments the tools add from now on carry a
+  real `/NM`. Carets, file attachments, sound and redaction marks are left out and counted.
   Appearance streams are not written. Page numbers and points are the file's (PDF user space, y up, 0-based page).
 - **Imported** as one undo step. A comment whose name matches one in the document is updated in place; the others are
   added, and a reply keeps its parent. Each comment is drawn with Inkwell's own appearance (the file's `/AP` and rich text
