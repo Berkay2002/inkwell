@@ -206,7 +206,9 @@ pub fn sanitize_pages(doc: &mut PdfDocument, o: &Sanitize, needles: &[String], o
             remove_field(doc, &w)?;
             r.form_fields += 1;
         }
-        if o.scripts_actions {
+        // The action of an annotation (a link's address, a button's script) goes with the page-level switches:
+        // pages outside `only` keep theirs. Script code (/JS) and /AA triggers are still removed file-wide below.
+        if o.scripts_actions && here {
             for mut a in annots_of(&page)? {
                 r.scripts_actions += del(&mut a, "A")? + del(&mut a, "AA")?;
             }

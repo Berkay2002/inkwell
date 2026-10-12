@@ -38,8 +38,9 @@ the whole file: clear its page range."). Compress, Protect, Sanitize and Set pro
     already on page(s) 7, outside the range 1-3". The mark is left where it is; apply it first, or include its page.
     Marks inside the range are applied with the hits, as without a range.
   - The sanitize switches that work page by page (comments and markups, hidden text, links) act on the pages of the
-    range only. The file-level ones (document information, scripts and actions, attached files, bookmarks) still act on
-    the whole file, and anything that quotes a redacted string is removed wherever it is. Hidden layers cannot be limited
+    range only; a link or button on another page keeps its action. The file-level ones (document information, attached
+    files, bookmarks, and the script part of "scripts and actions": JavaScript code, additional actions (`/AA`),
+    OpenAction, XFA) still act on the whole file, and anything that quotes a redacted string is removed wherever it is. Hidden layers cannot be limited
     to pages (the layer list is one for the file, and dropping it would show the hidden content of the pages left out):
     a Redact step with a range and "Hidden layers" on is an `invalid-step` issue; untick it or clear the range.
 - Header/footer, watermark and Bates on a range replace the step's own earlier marks on those pages only; the marks of

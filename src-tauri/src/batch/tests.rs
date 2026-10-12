@@ -1857,6 +1857,26 @@ fn redact_with_a_range_leaves_the_comments_and_text_layers_of_the_other_pages() 
 }
 
 #[test]
+fn a_ranged_redact_keeps_the_address_of_a_link_on_another_page() {
+    let d = dir("range-redact-links");
+    let link = "<< /Type /Annot /Subtype /Link /Rect [72 600 200 620] /Border [0 0 0] /A << /S /URI /URI (https://example.com/keep) >> >>";
+    let f = put(&d, "l.pdf", &pdf_with(&[(SECRET, &[]), ("BT /F1 12 Tf 72 700 Td (page two) Tj ET", &[]), ("BT /F1 12 Tf 72 700 Td (page three) Tj ET", &[link])]));
+    let uris = |p: &Path, page: i32| -> Vec<String> {
+        let doc = Document::open(p.to_string_lossy().as_ref()).unwrap();
+        doc.load_page(page).unwrap().links().unwrap().map(|l| l.uri).collect()
+    };
+    assert_eq!(uris(&f, 2), ["https://example.com/keep"]);
+    // Scripts and actions on (the default), range 1: the link on page 3 is not on a page the step works on.
+    let sanitize = Sanitize { hidden_layers: false, ..Sanitize::default() };
+    let r = go(&ranged("R", vec![on("1", quokka_redact(sanitize))]), &[f.clone()], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    assert_eq!(uris(&out_of(&r), 2), ["https://example.com/keep"]);
+    // With no range it goes, as it always did.
+    let r = go(&ranged("R", vec![quokka_redact(sanitize).into()]), &[f], None);
+    assert!(uris(&out_of(&r), 2).is_empty());
+}
+
+#[test]
 fn hidden_layers_are_refused_for_a_redact_step_with_a_range() {
     let a = ranged(
         "H",
