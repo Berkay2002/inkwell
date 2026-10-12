@@ -48,7 +48,8 @@ export function ImageSection({ doc }: { doc: DocState }) {
   const placing = d?.placing ?? null;
   const selected = d?.selected ? (d.pages[d.selected.page]?.images[d.selected.index] ?? null) : null;
   const count = d ? picksOf(d).length : 0;
-  const pageState = d?.selected ? d.pages[d.selected.page] : undefined;
+  // The page of the picks, else the page in view: its lock and signed note show for a paste too.
+  const pageState = d?.selected ? d.pages[d.selected.page] : d?.pages[doc.currentPage];
   const locked = pageState?.locked ?? null;
   const here = d?.pages[doc.currentPage]?.images ?? [];
   const hasClip = useImageEdit((s) => s.clip != null);
@@ -75,6 +76,8 @@ export function ImageSection({ doc }: { doc: DocState }) {
       if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
       const k = e.key.toLowerCase();
       const cur = ie().docs[id];
+      // Text the person has selected on the page is theirs to copy.
+      if (k === "c" && window.getSelection()?.toString()) return;
       if (k === "c" && cur && picksOf(cur).length > 0 && !cur.crop) {
         e.preventDefault();
         void ie().copy(id);
@@ -112,7 +115,7 @@ export function ImageSection({ doc }: { doc: DocState }) {
         <Format key={`${d.selected.page}:${selected.index}`} id={id} target={d.selected} image={selected} cropping={d.crop != null} locked={locked} />
       )}
       {!placing && <ClipRow id={id} page={doc.currentPage} picks={count} copyLocked={pageState?.copyLocked ?? null} locked={locked} />}
-      {!placing && selected && (locked || pageState?.signed) && (
+      {!placing && (selected || hasClip) && (locked || pageState?.signed) && (
         <p className="dim te-hint" role="note">
           {locked ?? SIGNED_IMAGES}
         </p>
