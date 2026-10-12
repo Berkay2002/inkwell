@@ -9,6 +9,8 @@ import { VersionView } from "./components/history/VersionView";
 import { Home } from "./components/Home";
 import { CommandPalette, PasswordDialog, Toast } from "./components/Overlays";
 import { CommentTools, CommentsPanel } from "./components/comments/CommentsPanel";
+import { MeasureBar } from "./components/measure/MeasureBar";
+import { MeasurePanel } from "./components/measure/MeasurePanel";
 import { A11yPanel } from "./components/a11y/A11yPanel";
 import { PreflightPanel } from "./components/preflight/PreflightPanel";
 import { EditPanel } from "./components/edit/EditPanel";
@@ -28,8 +30,10 @@ import { ConvertPanel } from "./components/ConvertPanel";
 import { MarksPanel } from "./components/MarksPanel";
 import { ProtectPanel, SecurityNotice } from "./components/ProtectPanel";
 import { PrintSheet } from "./components/PrintSheet";
+import { ActionWizard } from "./components/ActionWizard";
 import { CombineSheet } from "./components/CombineSheet";
 import { DocJsSheet } from "./components/DocJsSheet";
+import { StampsManager } from "./components/comments/StampsManager";
 import { LabelsSheet, TransitionsSheet } from "./components/OrganizePlus";
 import { Presentation } from "./components/Presentation";
 import { ToolsPanel } from "./components/ToolsPanel";
@@ -183,6 +187,7 @@ export default function App() {
                 <CommentTools doc={doc} />
                 <SignStrip doc={doc} />
                 {!viewing && <SignBanner doc={doc} />}
+                <MeasureBar doc={doc} />
                 <FormTools />
                 <ThreadHost doc={doc} />
                 <FormsBanner doc={doc} />
@@ -199,6 +204,7 @@ export default function App() {
               <PrepressPanel doc={doc} />
               <CommentsPanel doc={doc} />
               <SignRail doc={doc} />
+              <MeasurePanel doc={doc} />
               <EditPanel doc={doc} />
               <FormsPanel doc={doc} />
               <SearchPanel doc={doc} />
@@ -218,7 +224,9 @@ export default function App() {
       <PrintSheet />
       <PrepressSheets />
       <CombineSheet />
+      <ActionWizard />
       <DocJsSheet />
+      <StampsManager />
       <LabelsSheet />
       <TransitionsSheet />
       <Presentation />

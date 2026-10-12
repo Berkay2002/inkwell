@@ -142,6 +142,79 @@ pub(crate) fn apply(doc: &mut PdfDocument, profile: Profile, c: &Convert, stem: 
 
 /// The bytes of a new file: no encryption, a classic cross-reference table, a header the standard
 /// accepts.
+/// Sets (or, for an empty value, clears) entries of the document information (`Title`, `Author`, `Subject`,
+/// `Keywords`) and brings the XMP packet in line. The one write path of the assistant's property edit, so the
+/// certification is refused here, inside the step, and not only by the caller's guard.
+pub(crate) fn set_info_properties(doc: &mut PdfDocument, writes: &[(&str, String)]) -> Result<()> {
+    crate::outline::refuse_if_certified(doc, "Changing its properties")?;
+    let mut info = match doc.trailer()?.get_dict("Info")?.filter(|i| i.is_dict().unwrap_or(false)) {
+        Some(i) => i,
+        None => {
+            let i = doc.add_object(&doc.new_dict()?)?;
+            doc.trailer()?.dict_put("Info", i.clone())?;
+            i
+        }
+    };
+    for (key, v) in writes {
+        if v.is_empty() {
+            if info.get_dict(*key)?.is_some() {
+                info.dict_delete(*key)?;
+            }
+        } else {
+            info.dict_put(*key, crate::a11y::text_obj(doc, v)?)?;
+        }
+    }
+    sync_xmp_with_info(doc)?;
+    Ok(())
+}
+
+/// Brings the XMP packet in line with the document information after a property changed (the
+/// standards want the two to agree, and a reader that prefers XMP would otherwise show the old
+/// value). A document without a packet is left without one. A packet that is not UTF-8, cannot be decoded, or has
+/// no RDF element is refused, so the properties are never left silently disagreeing. Returns whether the packet was rewritten.
+pub(crate) fn sync_xmp_with_info(doc: &mut PdfDocument) -> Result<bool> {
+    let cat = doc.catalog()?;
+    let Some(mut meta) = cat.get_dict("Metadata")?.filter(|m| m.is_stream().unwrap_or(false)) else { return Ok(false) };
+    // An undecodable packet is an error, not an empty one: it would be overwritten with a packet made from the
+    // properties alone. (The decoder hands back what it could read, so a stream with stored bytes that decodes to
+    // nothing is the sign.)
+    let unreadable = || bad("the XMP metadata could not be read, so the properties aren't changed here; fix it in the source application");
+    let bytes = meta.read_stream().map_err(|_| unreadable())?;
+    if bytes.is_empty() && meta.read_raw_stream().is_ok_and(|raw| !raw.is_empty()) {
+        return Err(unreadable());
+    }
+    let old = String::from_utf8(bytes).map_err(|_| bad("the XMP metadata isn't UTF-8, so the properties aren't changed here; fix it in the source application"))?;
+    // A packet without its RDF element (cut short, or only partly decoded) would be replaced whole by `merge`, with
+    // whatever else it held; only a blank one is made from the properties alone.
+    if !old.trim().is_empty() && !(old.contains("<rdf:RDF") && old.contains("</rdf:RDF>")) {
+        return Err(unreadable());
+    }
+    let info = doc.trailer()?.get_dict("Info")?.filter(|i| i.is_dict().unwrap_or(false));
+    let props = check::info_props(info.as_ref());
+    // A cleared property leaves nothing to mirror, so its old XMP value is taken out here.
+    let mut base = old.clone();
+    for (set, key) in [
+        (&props.title, "dc:title"),
+        (&props.author, "dc:creator"),
+        (&props.subject, "dc:description"),
+        (&props.keywords, "pdf:Keywords"),
+    ] {
+        if set.as_deref().is_none_or(str::is_empty) {
+            xmp::remove_prop(&mut base, key);
+        }
+    }
+    let new = xmp::merge(&base, &props, &[], &[]);
+    if new == old {
+        return Ok(false);
+    }
+    let buf = Buffer::from_bytes(new.as_bytes())?;
+    // A stream with a filter becomes plain: other tools read the packet without decoding it.
+    meta.write_stream_buffer(&buf)?;
+    meta.dict_put("Type", PdfObject::new_name("Metadata")?)?;
+    meta.dict_put("Subtype", PdfObject::new_name("XML")?)?;
+    Ok(true)
+}
+
 pub(crate) fn write_new(doc: &PdfDocument, _profile: Profile) -> Result<Vec<u8>> {
     let mut o = PdfWriteOptions::default();
     o.set_garbage_level(3).set_compress(true).set_encryption(Encryption::None);

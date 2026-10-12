@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CompressAudit, CompressOptions } from "./api";
-import { discardCount, forPreset, normalizeOptions, sameOptions, summarize, usageRows, validateOptions, visualVerdict } from "./optimizer";
+import { DISCARD, discardCount, forPreset, normalizeOptions, sameOptions, summarize, usageRows, validateOptions, visualVerdict } from "./optimizer";
 
 const cls = (abovePpi: number, toPpi: number, codec: CompressOptions["images"]["color"]["codec"], quality: number) => ({
   abovePpi,
@@ -26,6 +26,7 @@ export const balanced = (): CompressOptions => ({
     embeddedFiles: false,
     javascript: false,
     bookmarks: false,
+    invalidBookmarks: false,
     formActions: false,
     alternateImages: false,
     privateData: false,
@@ -95,8 +96,21 @@ describe("normalizeOptions", () => {
     o.transparency = { flatten: true, ppi: 300 };
     o.strip.links = true;
     o.strip.invalidLinks = true;
+    o.strip.invalidBookmarks = true;
     const json = JSON.parse(JSON.stringify(forPreset(o)));
     expect(normalizeOptions(balanced(), json)).toEqual(forPreset(o));
+  });
+});
+
+describe("invalid bookmarks", () => {
+  it("is a discard option, off for a preset saved before it existed", () => {
+    expect(DISCARD.some((d) => d.key === "invalidBookmarks")).toBe(true);
+    const old = JSON.parse(JSON.stringify(balanced()));
+    delete old.strip.invalidBookmarks;
+    old.strip.bookmarks = true;
+    const o = normalizeOptions(balanced(), old);
+    expect(o.strip.invalidBookmarks).toBe(false);
+    expect(o.strip.bookmarks).toBe(true);
   });
 });
 

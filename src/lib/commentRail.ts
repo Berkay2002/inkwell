@@ -3,6 +3,7 @@ import { useAi } from "./aiStore";
 import { useAnnot } from "./annot";
 import { useConvert } from "./convertStore";
 import { useForms } from "./forms";
+import { useMeasure } from "./measure";
 import { useHistory } from "./historyStore";
 import { usePreflight } from "./preflight";
 import { useProtect } from "./protectStore";
@@ -187,4 +188,45 @@ export function wireCommentRail() {
   useConvert.subscribe((s, prev) => s.sheet && !prev.sheet && closePreflight());
   useProtect.subscribe((s, prev) => s.sheet && !prev.sheet && closePreflight());
   useSign.subscribe((s, prev) => s.rail && !prev.rail && closePreflight());
+
+  // Measure is a rail of the same kind: it takes the side (its bar and drawing layer go with it), and any of them
+  // opening closes it.
+  useMeasure.subscribe((s, prev) => {
+    if (!s.open || prev.open) return;
+    if (useTools.getState().sheet?.phase === "running" || useConvert.getState().sheet?.phase === "running") {
+      return void useMeasure.getState().setOpen(false);
+    }
+    const protect = useProtect.getState();
+    if (protect.sheet?.phase === "working") return void useMeasure.getState().setOpen(false);
+    if (protect.sheet) useProtect.setState({ sheet: null });
+    useAnnot.getState().setOpen(false);
+    useForms.getState().setOpen(false);
+    useTextEdit.getState().setOpen(false);
+    useSearch.getState().setOpen(false);
+    useHistory.getState().setOpen(false);
+    useRedact.getState().setOpen(false);
+    useA11y.getState().setOpen(false);
+    usePreflight.getState().setOpen(false);
+    useSign.getState().setRail(null);
+    useTools.setState({ sheet: null });
+    useConvert.setState({ sheet: null });
+    const ai = useAi.getState();
+    if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
+  });
+  const closeMeasure = () => {
+    if (useMeasure.getState().open) useMeasure.getState().setOpen(false);
+  };
+  useAi.subscribe((s, prev) => s.open && !prev.open && s.settings.mode === "docked" && closeMeasure());
+  useHistory.subscribe((s, prev) => s.open && !prev.open && closeMeasure());
+  useRedact.subscribe((s, prev) => s.open && !prev.open && closeMeasure());
+  useAnnot.subscribe((s, prev) => s.open && !prev.open && closeMeasure());
+  useForms.subscribe((s, prev) => s.open && !prev.open && closeMeasure());
+  useTextEdit.subscribe((s, prev) => s.open && !prev.open && closeMeasure());
+  useSearch.subscribe((s, prev) => s.open && !prev.open && closeMeasure());
+  useA11y.subscribe((s, prev) => s.open && !prev.open && closeMeasure());
+  usePreflight.subscribe((s, prev) => s.open && !prev.open && closeMeasure());
+  useTools.subscribe((s, prev) => s.sheet && !prev.sheet && closeMeasure());
+  useConvert.subscribe((s, prev) => s.sheet && !prev.sheet && closeMeasure());
+  useProtect.subscribe((s, prev) => s.sheet && !prev.sheet && closeMeasure());
+  useSign.subscribe((s, prev) => s.rail && !prev.rail && closeMeasure());
 }

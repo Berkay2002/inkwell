@@ -15,7 +15,7 @@ Tauri 2 (WebView2) shell, Rust engine on MuPDF, React + TypeScript + Vite UI. No
 | `scripts/perf.mjs` | Frame-timing, transport and memory harness driven over WebView2 DevTools; writes `docs/screens/phase1/` |
 | `src-tauri/src/recents.rs`, `src/recents.ts`, `src/components/Home.tsx` | Start screen: recent list stored in `<app data>/recents.json`, file stats, first-page thumbnails |
 | `scripts/landing-shots.mjs` | Start-screen screenshots (light/dark, empty/filled/drag-over) in an isolated profile; writes `docs/screens/landing/` |
-| `vendor/mupdf/` | mupdf 0.8.0 with a one-line MSVC fix (`max_align_t` assertion) and `PdfDocument::permissions` reading the P value of encrypted files (`from_bits_truncate`) |
+| `vendor/mupdf/` | mupdf 0.8.0 with Inkwell patches (a one-line MSVC fix, `permissions` for encrypted files, image rewriting and font subsetting in `optimize.rs`, `AbortHandle`, `PdfObject::addr`, and more): the list is in [`vendor/mupdf/PATCHES.md`](vendor/mupdf/PATCHES.md) |
 | `vendor/mupdf-sys/` | mupdf-sys 0.8.0 with JPEG 2000 decoding made thread-parallel (`load-jpx.c`: stock MuPDF decodes JPX under its global FreeType lock, one image at a time) |
 
 ## Build and run

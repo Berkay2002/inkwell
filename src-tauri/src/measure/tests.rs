@@ -31,6 +31,8 @@ struct Spec {
     second: Option<String>,
     /// Entries of the page dictionary beside /MediaBox: a /CropBox for instance.
     boxes: String,
+    /// Extra entries of the catalog: /Perms, /AcroForm.
+    cat: String,
 }
 
 impl Default for Spec {
@@ -44,6 +46,7 @@ impl Default for Spec {
             extra: Vec::new(),
             second: None,
             boxes: String::new(),
+            cat: String::new(),
         }
     }
 }
@@ -51,7 +54,7 @@ impl Default for Spec {
 fn build(s: &Spec) -> Vec<u8> {
     let uu = s.user_unit.map_or(String::new(), |u| format!("/UserUnit {u} "));
     let mut objs: Vec<(usize, Vec<u8>)> = vec![
-        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (1, format!("<< /Type /Catalog /Pages 2 0 R {} >>", s.cat).into_bytes()),
         (
             2,
             if s.second.is_some() {
@@ -469,6 +472,38 @@ fn curves_snap_by_end_points_midpoint_and_line() {
     // Off the middle, on the curve: a line hit within a point of the true curve.
     let h = snap_at(&eng, &SnapCache::default(), id, 0, 118.0, 650.0, 12.0).unwrap().unwrap();
     assert_eq!(h.kind, SnapKind::Line);
+}
+
+#[test]
+fn a_crossing_snaps_and_a_kind_that_is_off_falls_back() {
+    // Two strokes crossing at user (200, 200) = display (200, 592), away from their middles and ends.
+    let content: &'static str = "0 0 0 RG 100 100 m 400 400 l S 100 300 m 250 150 l S";
+    let (eng, id, _) = open("snap-cross", &Spec { content, ..Default::default() });
+    let ask = |x: f32, y: f32, r: f32, on: SnapKinds| snap_at_kinds(&eng, &SnapCache::default(), id, 0, x, y, r, &on).unwrap();
+    let all = SnapKinds::default();
+
+    let h = ask(203.0, 590.0, 6.0, all).expect("the crossing");
+    assert_eq!(h.kind, SnapKind::Intersection);
+    assert!((h.x - 200.0).abs() < 1e-3 && (h.y - 592.0).abs() < 1e-3);
+    // The same pointer with crossings off is a point on a line; with every kind off, nothing.
+    let h = ask(203.0, 590.0, 6.0, SnapKinds { intersection: false, ..all }).expect("line");
+    assert_eq!(h.kind, SnapKind::Line);
+    assert_eq!(ask(203.0, 590.0, 6.0, SnapKinds { endpoint: false, midpoint: false, intersection: false, line: false }), None);
+    // Two lines that do not meet inside their lengths cross nowhere.
+    let (eng2, id2, _) = open("snap-nocross", &Spec { content: "0 0 0 RG 100 100 m 150 150 l S 100 300 m 250 150 l S", ..Default::default() });
+    let h = snap_at_kinds(&eng2, &SnapCache::default(), id2, 0, 200.0, 592.0, 6.0, &all).unwrap().expect("line");
+    assert_eq!(h.kind, SnapKind::Line);
+
+    // An end point and a midpoint that are off give way to the line under the pointer, not to nothing.
+    let (eng, id, _) = open("snap-off", &Spec { content: PATHS, ..Default::default() });
+    let ask = |x: f32, y: f32, on: SnapKinds| snap_at_kinds(&eng, &SnapCache::default(), id, 0, x, y, 6.0, &on).unwrap();
+    let h = ask(303.0, 692.0, SnapKinds { endpoint: false, ..all }).expect("line near the corner");
+    assert_eq!(h.kind, SnapKind::Line);
+    let h = ask(201.0, 692.0, SnapKinds { midpoint: false, ..all }).expect("line near the midpoint");
+    assert_eq!((h.kind, h.x, h.y), (SnapKind::Line, 201.0, 692.0));
+    // Ends off at a corner that is also near a midpoint gives the midpoint.
+    let h = ask(299.0, 645.0, SnapKinds { endpoint: false, ..all }).unwrap();
+    assert_eq!(h.kind, SnapKind::Midpoint);
 }
 
 // ---- the edit path -------------------------------------------------------------------------------------------
@@ -932,4 +967,145 @@ fn a_viewport_that_encloses_the_crop_box_is_the_page_scale() {
     // Undoing restores the file's own viewport.
     eng.undo(id).unwrap();
     assert_eq!(scale_get(&eng, id, 0).unwrap().scale, Scale { real: 1.0, ..FT10 });
+}
+
+// ---- the UI's calls: change a scale, export ------------------------------------------------------------------
+
+#[test]
+fn rescale_replaces_the_measurement_in_one_undo_step() {
+    let (eng, id, path) = open("rescale", &Spec::default());
+    let (xref, q) = add(&eng, id, Kind::Distance, &[[100.0, 100.0], [300.0, 100.0]], Some(&FT10));
+    assert_eq!(q.text, "27.78 ft");
+    let base = eng.history(id).unwrap().len();
+
+    // 1 in = 1 m: the same 200 pt line is now 2.78 m.
+    let m = Scale { paper: 1.0, paper_unit: Unit::In, real: 1.0, real_unit: Unit::M };
+    let (st, new, q2) = rescale(&eng, id, 0, xref, &m, EditSource::User).unwrap();
+    assert!(st.dirty);
+    assert_eq!(q2.text, "2.78 m");
+    let h = eng.history(id).unwrap();
+    assert_eq!(h.len(), base + 1, "one step");
+    assert!(h.last().unwrap().label.starts_with("Change the scale of a measurement on p. 1"));
+    let all = list_all(&eng, id).unwrap();
+    assert_eq!(all.len(), 1, "replaced, not added");
+    assert_eq!(all[0].xref, new);
+    assert_eq!(all[0].points, vec![[100.0, 100.0], [300.0, 100.0]]);
+    assert_eq!(all[0].author, "Alex Johnson");
+    assert_eq!(all[0].scale, Some(m));
+
+    // Undo brings the first one back whole; a stale xref and a bad scale are refused and leave no step.
+    eng.undo(id).unwrap();
+    let back = list_all(&eng, id).unwrap();
+    assert_eq!((back.len(), back[0].quantity.text.as_str()), (1, "27.78 ft"));
+    let n = eng.history(id).unwrap().len();
+    assert!(rescale(&eng, id, 0, 99_999, &m, EditSource::User).is_err());
+    let zero = Scale { paper: 0.0, ..m };
+    assert!(rescale(&eng, id, 0, back[0].xref, &zero, EditSource::User).is_err());
+    assert_eq!(eng.history(id).unwrap().len(), n);
+
+    // Saved and reopened it is the new one.
+    rescale(&eng, id, 0, back[0].xref, &m, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    let m2 = list_all(&eng2, id2).unwrap();
+    assert_eq!((m2.len(), m2[0].quantity.text.as_str()), (1, "2.78 m"));
+}
+
+#[test]
+fn csv_has_value_and_unit_apart_and_is_safe_in_a_spreadsheet() {
+    let (eng, id, _) = open("csv", &Spec::default());
+    add(&eng, id, Kind::Distance, &[[0.0, 0.0], [720.0, 0.0]], Some(&FT10));
+    add(&eng, id, Kind::Area, &[[0.0, 0.0], [72.0, 0.0], [72.0, 72.0], [0.0, 72.0]], Some(&FT10));
+    let mut items = list_all(&eng, id).unwrap();
+    items[1].author = "=HYPERLINK(\"x\"),\"Bo\"".into();
+    let csv = csv_of(&items);
+    let lines: Vec<&str> = csv.trim_end().split("\r\n").collect();
+    assert_eq!(lines[0], "\u{feff}Page,Type,Value,Unit,Label,Scale,Author");
+    assert_eq!(lines[1], "1,distance,100,ft,100.00 ft,1 in = 10 ft,Alex Johnson");
+    // 1 sq in at 10 ft per inch is 100 sq ft; the formula-looking author is quoted and defused.
+    assert_eq!(lines[2], "1,area,100,sq ft,100.00 sq ft,1 in = 10 ft,\"'=HYPERLINK(\"\"x\"\"),\"\"Bo\"\"\"");
+    assert_eq!(csv_of(&[]), "\u{feff}Page,Type,Value,Unit,Label,Scale,Author\r\n");
+}
+
+#[test]
+fn an_export_replaces_a_file_the_user_confirmed_over() {
+    // The save dialog lets the user pick an existing file; the write goes through a temporary file and a rename that
+    // replaces the destination (MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows), never a failure.
+    let to = dir("overwrite").join("m.csv");
+    std::fs::write(&to, "old,contents that are longer than the new ones\r\n").unwrap();
+    crate::organize::app::write_plain(&to, csv_of(&[]).as_bytes()).unwrap();
+    assert_eq!(std::fs::read_to_string(&to).unwrap(), csv_of(&[]));
+    let left: Vec<_> = std::fs::read_dir(to.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left.len(), 1, "no temporary file is left behind: {left:?}");
+}
+
+// ---- certified documents -----------------------------------------------------------------------------------
+
+/// `acrobat()` (a page with measurements on it) certified with DocMDP `/P` `p`.
+fn certified(p: u8) -> Spec {
+    let mut s = acrobat();
+    s.cat = format!("/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P {p} >> >> ] >> >>");
+    s
+}
+
+/// Every write of measure.rs on a document that must not change: refused, nothing listed, no undo step.
+fn refused(eng: &Engine, id: DocId, what: &str) {
+    let steps = eng.history(id).unwrap().len();
+    let before = list_all(eng, id).unwrap().len();
+    let (a, b) = ([10.0, 10.0], [50.0, 10.0]);
+    let scale = Scale { paper: 1.0, paper_unit: Unit::In, real: 2.0, real_unit: Unit::M };
+    let xref = list_all(eng, id).unwrap()[0].xref;
+    let rs: [(&str, Result<()>); 3] = [
+        ("add", add_one(eng, id, 0, Kind::Distance, &[a, b], None, "", EditSource::User).map(|_| ())),
+        ("scale", scale_set(eng, id, 0, &scale, EditSource::User).map(|_| ())),
+        ("rescale", rescale(eng, id, 0, xref, &scale, EditSource::User).map(|_| ())),
+    ];
+    for (op, r) in rs {
+        match r {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{what} {op}: {m}"),
+            other => panic!("{what} {op}: expected a refusal, got {other:?}"),
+        }
+    }
+    assert_eq!(eng.history(id).unwrap().len(), steps, "{what}: no undo step");
+    assert_eq!(list_all(eng, id).unwrap().len(), before, "{what}: nothing added or replaced");
+    assert!(lock_of(eng, id).unwrap().is_some_and(|m| m.contains("certified")), "{what}: the UI is told why");
+}
+
+#[test]
+fn a_certified_document_that_forbids_annotations_is_not_measured_on() {
+    for p in [1, 2] {
+        let (eng, id, _) = open(&format!("certified-{p}"), &certified(p));
+        refused(&eng, id, &format!("P {p}"));
+    }
+}
+
+#[test]
+fn a_certification_that_allows_annotations_allows_measuring() {
+    let (eng, id, _) = open("certified-3", &certified(3));
+    assert_eq!(lock_of(&eng, id).unwrap(), None);
+    let steps = eng.history(id).unwrap().len();
+    let all = list_all(&eng, id).unwrap();
+    add(&eng, id, Kind::Distance, &[[10.0, 10.0], [50.0, 10.0]], Some(&FT10));
+    rescale(&eng, id, 0, all[0].xref, &FT10, EditSource::User).unwrap();
+    assert_eq!(eng.history(id).unwrap().len(), steps + 2);
+    // A page scale is a /VP entry of the page dictionary: not an annotation, so no /P allows it.
+    let e = scale_set(&eng, id, 0, &FT10, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("certified"), "{e}");
+    assert_eq!(eng.history(id).unwrap().len(), steps + 2);
+}
+
+#[test]
+fn a_certification_that_cannot_be_read_is_refused() {
+    // More fields than the check will walk: it fails closed, as a certified document.
+    let mut s = acrobat();
+    s.cat = format!("/AcroForm << /Fields [{}] >>", "0 ".repeat(20_001));
+    let (eng, id, _) = open("certified-unreadable", &s);
+    refused(&eng, id, "unreadable");
+}
+
+#[test]
+fn an_uncertified_document_is_not_locked() {
+    let (eng, id, _) = open("uncertified", &acrobat());
+    assert_eq!(lock_of(&eng, id).unwrap(), None);
 }

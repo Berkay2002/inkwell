@@ -10,7 +10,7 @@
 //! the network or files.
 //!
 //! A text field's `/V` keeps the raw value; its appearance shows the formatted one (as Acrobat does).
-//! Form data export and import (FDF, XFDF, JSON) is not built (see docs/forms.md).
+//! Form data export and import (FDF, XFDF, JSON) is `data.rs` (see docs/forms.md).
 
 use crate::annot::{AnnotWalk, Which};
 use crate::engine::edit::{EditSource, EditState};
@@ -23,14 +23,17 @@ use std::collections::HashMap;
 pub mod af;
 pub mod app;
 mod author;
+pub mod data;
 pub mod detect;
 pub mod doc_js;
 pub mod js;
+mod layout;
 mod scripts;
 #[cfg(test)]
 mod tests;
 
 pub use author::*;
+pub use layout::*;
 pub use scripts::{Report, Stepped};
 use scripts::Rt;
 
@@ -161,7 +164,7 @@ pub(crate) fn text_or_stream(o: &PdfObject) -> Option<String> {
 }
 
 /// Bytes of a PDF text string or script stream: UTF-16 with a byte order mark, UTF-8, or Latin-1-ish text.
-fn decode_text(b: &[u8]) -> String {
+pub(crate) fn decode_text(b: &[u8]) -> String {
     let utf16 = |rest: &[u8], be: bool| {
         let units: Vec<u16> = rest.chunks_exact(2).map(|p| if be { u16::from_be_bytes([p[0], p[1]]) } else { u16::from_le_bytes([p[0], p[1]]) }).collect();
         String::from_utf16_lossy(&units)
@@ -318,11 +321,16 @@ fn field_ff(e: &Entry) -> i32 {
 
 /// The values of a field as strings (`/V` is a string, a name or an array of strings).
 fn values_of(v: Option<PdfObject>) -> Vec<String> {
+    values_by(v, text)
+}
+
+/// `values_of` with the caller's way of reading one string (form data export reuses decodes it already made).
+fn values_by(v: Option<PdfObject>, one: impl Fn(&PdfObject) -> Option<String>) -> Vec<String> {
     let Some(v) = v else { return Vec::new() };
     if v.is_array().unwrap_or(false) {
-        (0..v.len().unwrap_or(0).min(4096) as i32).filter_map(|i| v.get_array(i).ok().flatten().and_then(|x| text(&x))).collect()
+        (0..v.len().unwrap_or(0).min(4096) as i32).filter_map(|i| v.get_array(i).ok().flatten().and_then(|x| one(&x))).collect()
     } else {
-        text(&v).into_iter().collect()
+        one(&v).into_iter().collect()
     }
 }
 
@@ -697,16 +705,21 @@ fn button_plan(entries: &[Entry], e: &Entry, value: &FieldValue) -> Result<Optio
 
 /// True when `set_value` would leave the document exactly as it is (a radio button that is already
 /// chosen, text typed that is already there): such a fill is not an undo step.
-fn set_value_is_noop(doc: &PdfDocument, page: u32, xref: i32, value: &FieldValue) -> Result<bool> {
+pub(crate) fn set_value_is_noop(doc: &PdfDocument, page: u32, xref: i32, value: &FieldValue) -> Result<bool> {
     let entries = scan(doc)?;
     let Some(e) = entries.iter().find(|e| e.page == page && e.xref == xref) else { return Ok(false) };
+    Ok(fill_is_noop(&entries, e, value))
+}
+
+/// [`set_value_is_noop`] for a field already found (form data import asks it for every field).
+fn fill_is_noop(entries: &[Entry], e: &Entry, value: &FieldValue) -> bool {
     if flag(field_ff(e), FieldFlags::READ_ONLY) {
-        return Ok(false);
+        return false;
     }
     let current = values_of(geti(&e.field, "V"));
-    Ok(match e.kind {
+    match e.kind {
         FieldKind::Button | FieldKind::Signature => false,
-        FieldKind::Checkbox | FieldKind::Radio => match button_plan(&entries, e, value) {
+        FieldKind::Checkbox | FieldKind::Radio => match button_plan(entries, e, value) {
             Ok(None) => true,
             Ok(Some((v, states))) => {
                 let cur_v = current.first().map_or("Off", String::as_str);
@@ -721,13 +734,13 @@ fn set_value_is_noop(doc: &PdfDocument, page: u32, xref: i32, value: &FieldValue
             let typed: Vec<&String> = match value {
                 FieldValue::Text(s) => vec![s],
                 FieldValue::Many(v) => v.iter().collect(),
-                FieldValue::Checked(_) => return Ok(false),
+                FieldValue::Checked(_) => return false,
             };
             let typed: Vec<&str> = typed.into_iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
             let current: Vec<&str> = current.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
             typed == current
         }
-    })
+    }
 }
 
 /// Sets a field. A value that does not fit the field's format or range is rejected with
@@ -737,6 +750,25 @@ pub fn set_value(doc: &mut PdfDocument, page: u32, xref: i32, value: &FieldValue
     set_value_rt(&Rt::off(doc), page, xref, value)
 }
 
+/// Why a signature keeps a field from being filled: typing never silently breaks a signature, so a field a signature
+/// covers (its /Lock, a FieldMDP or a DocMDP of 1) is refused. `None` when it may be filled.
+fn lock_refusal(doc: &PdfDocument, entries: &[Entry], e: &Entry) -> Option<String> {
+    let locks = scripts::locks_of(doc, entries);
+    if e.kind == FieldKind::Signature || !scripts::locked(&locks, e) {
+        return None;
+    }
+    if locks.iter().any(|l| matches!(l, scripts::Lock::Unchecked)) {
+        return Some(format!("The field [ {} ] is left as it is: too many form fields to check the signature locks", e.name));
+    }
+    Some(format!("The field [ {} ] is locked by a signature", e.name))
+}
+
+/// True when a signature keeps `set_value` from filling this field: asked before the assistant shows its card.
+pub(crate) fn field_is_locked(doc: &PdfDocument, page: u32, xref: i32) -> Result<bool> {
+    let entries = scan(doc)?;
+    Ok(entries.iter().find(|e| e.page == page && e.xref == xref).is_some_and(|e| lock_refusal(doc, &entries, e).is_some()))
+}
+
 fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec<u32>> {
     let entries = rt.entries()?;
     let e = entries.iter().find(|e| e.page == page && e.xref == xref).ok_or_else(|| bad(format!("no field {xref} on page {}", page + 1)))?;
@@ -744,9 +776,8 @@ fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec
     if flag(ff, FieldFlags::READ_ONLY) {
         return Err(bad(format!("The field [ {} ] is read-only", e.name)));
     }
-    // Typing never silently breaks a signature: a field a signature covers (its /Lock, a FieldMDP or a DocMDP of 1) is refused.
-    if e.kind != FieldKind::Signature && scripts::locked(&scripts::locks_of(rt.doc(), entries), e) {
-        return Err(bad(format!("The field [ {} ] is locked by a signature", e.name)));
+    if let Some(m) = lock_refusal(rt.doc(), entries, e) {
+        return Err(bad(m));
     }
     let mut touched = vec![page];
     let mut changed = Vec::new();

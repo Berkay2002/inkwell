@@ -79,6 +79,30 @@ fn rotate_undo_redo() {
 }
 
 #[test]
+fn undo_if_only_undoes_the_step_it_was_asked_about() {
+    let d = dir("undo-if");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    // Nothing to undo is a refusal, not a quiet success: the caller would take it for the conversion taken back.
+    assert!(matches!(eng.undo_if(id, 0), Err(EngineError::Stale)));
+    let converted = eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    // An assistant step lands before the undo: asked for the conversion's generation, nothing is undone.
+    let turn = EditSource::Assistant { turn: "t1".into() };
+    let after = eng.apply_from(id, EditOp::Rotate { pages: vec![1], quarter_turns: 1 }, turn).unwrap();
+    assert!(matches!(eng.undo_if(id, converted.rev), Err(EngineError::Stale)));
+    assert_eq!(eng.edit_state(id).unwrap().rev, after.rev, "no new generation, the step is still there");
+    assert_eq!(eng.edit_state(id).unwrap().sizes[1], TURNED);
+    // At the newest generation it undoes exactly that step.
+    let s = eng.undo_if(id, after.rev).unwrap();
+    assert_eq!((s.rev, s.sizes[0], s.sizes[1]), (after.rev + 1, TURNED, UPRIGHT));
+    // An undo and redo moved the generation on: the old number is refused, the new one is taken.
+    let s = eng.redo(id).unwrap();
+    assert!(matches!(eng.undo_if(id, after.rev), Err(EngineError::Stale)));
+    assert!(eng.undo_if(id, s.rev).is_ok());
+}
+
+#[test]
 fn delete_move_insert_and_undo_everything() {
     let d = dir("organize");
     let path = fixture_at(&d, "a.pdf", &pages(5));
@@ -951,4 +975,28 @@ fn page_size_reads_what_a_loaded_page_reports() {
     assert_eq!(page_size(&doc, 14).unwrap(), [2.0 * 220.25 - 2.0 * 20.0, 2.0 * 100.5]);
     assert_eq!(page_size(&doc, 0).unwrap(), UPRIGHT);
     assert!(page_size(&doc, n as u32).is_err());
+}
+
+#[test]
+fn a_noop_edit_that_wrote_something_before_giving_up_leaves_no_trace() {
+    let d = dir("noop-writes");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let before = eng.edit_state(id).unwrap();
+    // Writes, then reports that nothing changed (as a per-item error swallowed halfway does).
+    let s = eng
+        .apply_custom_unless_noop(id, "Nothing".into(), EditSource::User, false, |doc| {
+            doc.delete_page(1)?;
+            Ok(None)
+        })
+        .unwrap();
+    assert_eq!(s, before);
+    // The next step and the save carry no trace of the write.
+    eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    assert_eq!(labels(&eng, id), vec![1, 2, 3]);
+    eng.save(id, None).unwrap();
+    let again = Engine::new(1, 64 << 20);
+    let reopened = again.open(&path).unwrap();
+    assert_eq!(reopened.page_count, 3);
 }

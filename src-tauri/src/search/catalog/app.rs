@@ -67,6 +67,8 @@ pub fn forget_all(root: &std::path::Path, jobs: &Jobs, path: &std::path::Path) -
             if let Err(e) = super::defer_forget(&root.join(&m.id), path) {
                 eprintln!("inkwell catalog {}: could not keep the file to forget: {e}", m.id);
             }
+            // The holder may have finished between the failed hold and the write above: look again now.
+            forget_deferred(jobs, &m.id, &root.join(&m.id));
             continue;
         };
         match super::forget(&root.join(&m.id), path) {
@@ -86,33 +88,52 @@ pub fn forget_all(root: &std::path::Path, jobs: &Jobs, path: &std::path::Path) -
 
 /// Catalog `id` (in `dir`) is free again: the files saved while it was busy are forgotten now.
 pub(super) fn forget_deferred(jobs: &Jobs, id: &str, dir: &std::path::Path) {
-    // Held first: when it is not free the list is left as it is, for whoever frees it.
-    let Some(_held) = jobs.hold(id) else { return };
-    let mine = match super::pending(dir) {
-        // A forget that could not be kept (list unreadable, unwritable or past its bound): nothing says which
-        // file, so nothing stays. Done here, under the hold, after whatever else held the catalog is finished.
-        super::Waiting::Wipe => {
-            if let Err(e) = super::wipe_pending(dir) {
-                eprintln!("inkwell catalog {id}: {e}");
+    // What failed this call: not tried again here (the next hold does), or the loop below would never end.
+    let mut failed: Vec<PathBuf> = Vec::new();
+    loop {
+        {
+            // Held first: when it is not free the list is left as it is, for whoever frees it.
+            let Some(_held) = jobs.hold(id) else { return };
+            match super::pending(dir) {
+                // A forget that could not be kept (list unreadable, unwritable or past its bound): nothing says
+                // which file, so nothing stays. Done here, under the hold, after whatever else held the catalog
+                // is finished.
+                super::Waiting::Wipe => {
+                    if let Err(e) = super::wipe_pending(dir) {
+                        eprintln!("inkwell catalog {id}: {e}");
+                        return;
+                    }
+                }
+                super::Waiting::Paths(p) if p.is_empty() => return,
+                super::Waiting::Paths(p) => {
+                    // Only what was forgotten comes off the list: a failure is tried again at the next hold.
+                    let mut done = Vec::new();
+                    for path in p {
+                        match super::forget(dir, &path) {
+                            Ok(_) => done.push(path),
+                            Err(e) => {
+                                eprintln!("inkwell catalog {id}: {e}");
+                                failed.push(path);
+                            }
+                        }
+                    }
+                    if let Err(e) = super::settle_pending(dir, &done) {
+                        // The list still names what was forgotten: looking again would find the same, so the next
+                        // hold does (a forget is safe to repeat).
+                        eprintln!("inkwell catalog {id}: {e}");
+                        return;
+                    }
+                }
             }
-            return;
+            #[cfg(test)]
+            super::tests::while_held(dir);
         }
-        super::Waiting::Paths(p) if p.is_empty() => return,
-        super::Waiting::Paths(p) => p,
-    };
-    // Only what was forgotten comes off the list: a failure is tried again at the next hold.
-    let done: Vec<PathBuf> = mine
-        .into_iter()
-        .filter(|p| match super::forget(dir, p) {
-            Ok(_) => true,
-            Err(e) => {
-                eprintln!("inkwell catalog {id}: {e}");
-                false
-            }
-        })
-        .collect();
-    if let Err(e) = super::settle_pending(dir, &done) {
-        eprintln!("inkwell catalog {id}: {e}");
+        // A forget that found the catalog held (this one) wrote its path and left: it is done here, now that the
+        // hold is released, not at some later build.
+        match super::pending(dir) {
+            super::Waiting::Paths(p) if p.iter().all(|x| failed.contains(x)) => return,
+            _ => {}
+        }
     }
 }
 
@@ -121,7 +142,8 @@ pub(super) fn forget_deferred(jobs: &Jobs, id: &str, dir: &std::path::Path) {
 pub fn replay_pending(root: &std::path::Path, jobs: &Jobs) {
     for m in super::list(root) {
         let dir = root.join(&m.id);
-        if dir.join("forget-pending.json").exists() || dir.join("forget-wipe").exists() {
+        // Looked at without the hold, so listing never makes a build or a delete wait or be refused.
+        if !matches!(super::pending(&dir), super::Waiting::Paths(p) if p.is_empty()) {
             forget_deferred(jobs, &m.id, &dir);
         }
     }
@@ -231,24 +253,28 @@ pub async fn catalog_build(window: Window, jobs: State<'_, Arc<Jobs>>, id: Strin
     let cancel = Arc::new(AtomicBool::new(false));
     jobs.live.lock().unwrap().insert(job, (window.label().to_string(), cancel.clone()));
     let _ = on_event.send(BuildEvent::Started { job });
-    let (j2, id2, dir2) = (jobs.clone(), id.clone(), dir.clone());
-    let out = blocking(move || {
+    let (j2, id2) = (jobs.clone(), id.clone());
+    blocking(move || {
         let ev = on_event.clone();
-        let r = super::build(&dir, full, &cancel, &move |done, total| {
-            let _ = ev.send(BuildEvent::Progress { job, done, total });
-        });
-        if let Ok(summary) = &r
-            && let Ok(catalog) = super::load_meta(&dir)
-        {
-            let _ = on_event.send(BuildEvent::Done { job, summary: summary.clone(), catalog });
-        }
-        r
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let r = super::build(&dir, full, &cancel, &move |done, total| {
+                let _ = ev.send(BuildEvent::Progress { job, done, total });
+            });
+            if let Ok(summary) = &r
+                && let Ok(catalog) = super::load_meta(&dir)
+            {
+                let _ = on_event.send(BuildEvent::Done { job, summary: summary.clone(), catalog });
+            }
+            r
+        }));
+        // Free again (even after a panic), and what was saved meanwhile is forgotten now, here and not on the
+        // async thread.
+        j2.live.lock().unwrap().remove(&job);
+        j2.busy.lock().unwrap().remove(&id2);
+        forget_deferred(&j2, &id2, &dir);
+        r.unwrap_or(Err(EngineError::Panic))
     })
-    .await;
-    j2.live.lock().unwrap().remove(&job);
-    j2.busy.lock().unwrap().remove(&id2);
-    forget_deferred(&j2, &id2, &dir2);
-    out
+    .await
 }
 
 #[tauri::command]

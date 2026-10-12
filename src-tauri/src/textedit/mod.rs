@@ -236,6 +236,7 @@ pub fn edit(eng: &Engine, doc: DocId, rev: u32, page: u32, index: u32, change: &
         if entry.generation() != rev {
             return Err(EngineError::Stale);
         }
+        crate::outline::refuse_if_certified(d, "Editing its text")?;
         // Page space → user space for the move and the width.
         let back = page_space(d, page)?.invert().ok_or_else(|| EngineError::Invalid("the page has no area".into()))?;
         let offset = change.offset.map(|[x, y]| {
@@ -286,6 +287,7 @@ pub fn add(eng: &Engine, doc: DocId, rev: u32, page: u32, new: &NewTextBox, sour
         if entry.generation() != rev {
             return Err(EngineError::Stale);
         }
+        crate::outline::refuse_if_certified(d, "Adding text")?;
         let back = page_space(d, page)?.invert().ok_or_else(|| EngineError::Invalid("the page has no area".into()))?;
         let n = text::NewText {
             text: &new.text,

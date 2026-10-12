@@ -22,6 +22,7 @@ export interface ToolItem {
 
 /** Header order and titles. Add a group here to give it a place; items may name any id. */
 export const TOOL_GROUPS: { id: string; title: string }[] = [
+  { id: "comment", title: "Comment & measure" },
   { id: "edit", title: "Edit" },
   { id: "optimize", title: "Optimize" },
   { id: "marks", title: "Page marks" },
@@ -31,6 +32,7 @@ export const TOOL_GROUPS: { id: string; title: string }[] = [
   { id: "scripts", title: "Scripts" },
   { id: "convert", title: "Convert & create" },
   { id: "check", title: "Check & compare" },
+  { id: "automate", title: "Automate" },
 ];
 
 export interface ToolSection {

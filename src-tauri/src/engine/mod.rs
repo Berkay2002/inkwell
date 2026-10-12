@@ -368,6 +368,19 @@ impl Engine {
         r
     }
 
+    /// `authenticate`, for a document that is waiting for its password (`open_pending` said so) and holds
+    /// none: anything else (an open tab, a document that has its password) is refused and left as it is,
+    /// because a wrong password would clear what that document is open with.
+    pub fn unlock_pending(&self, id: DocId, password: &str) -> Result<OpenInfo> {
+        let entry = self.entry(id)?;
+        match self.with_doc(&entry, |_| Ok(())) {
+            Err(EngineError::NeedsPassword) => {}
+            Err(e) => return Err(e),
+            Ok(()) => return Err(EngineError::Invalid("that document is not waiting for a password".into())),
+        }
+        self.authenticate(id, password)
+    }
+
     fn finish_open(&self, entry: &Arc<DocEntry>) -> Result<OpenInfo> {
         let (count, first, title) = self.with_doc(entry, |doc| {
             let count = doc.page_count()?.max(0) as u32;
@@ -853,6 +866,11 @@ impl Engine {
         self.entry(id)
     }
 
+    /// The open documents, in no particular order.
+    pub fn open_docs(&self) -> Vec<Arc<DocEntry>> {
+        self.docs.read().values().cloned().collect()
+    }
+
     /// What the document currently shows, with the generation it belongs to (read together, so a
     /// page index taken from it is valid for that `rev`): the snapshot after an edit, the file
     /// on disk before the first one.
@@ -1065,7 +1083,7 @@ fn authenticate(d: &mut Document, entry: &DocEntry) -> Result<()> {
                     return Ok(());
                 }
                 // MuPDF does no SASLprep, and the writer puts passwords in NFKC (Protect): a password
-                // typed decomposed or full-width opens the file under its NFKC form. The form that
+                // typed decomposed, full-width or with a non-ASCII space opens the file under its mapped NFKC form. The form that
                 // worked is kept, so every later read of the file uses it.
                 match crate::protect::nfkc_form(&pw) {
                     Some(n) if d.authenticate(&n)? => *entry.password.lock() = Some(n),

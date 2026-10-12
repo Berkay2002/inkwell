@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Bookmark } from "../../lib/api";
-import { findBookmark, hexToRgb, rgbToHex, stateLabel, bookmarkState, useNav } from "../../lib/nav";
+import { findBookmark, hexToRgb, rgbToHex, stateLabel, bookmarkState, useNav, UNCHECKED_DEST } from "../../lib/nav";
 import { type DocState } from "../../store";
 import { Icon } from "../Icons";
 import { BookmarkBar, BookmarkTree } from "./BookmarkTree";
@@ -57,7 +57,9 @@ function Selected({ doc, b }: { doc: number; b: Bookmark }) {
       : b.dest.kind === "uri"
         ? "Opens a web address"
         : b.dest.kind === "other"
-          ? "Runs an action this editor keeps as it is"
+          ? b.dest.what === UNCHECKED_DEST
+            ? `Keeps its destination as it is (${b.dest.what})`
+            : "Runs an action this editor keeps as it is"
           : b.dest.kind === "broken"
             ? stateLabel(state, b.dest.what)
             : "Goes nowhere";

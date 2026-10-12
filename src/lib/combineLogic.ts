@@ -58,3 +58,30 @@ export function pagesIn(text: string, count: number): Set<number> | null {
   const p = parseOrder(text, count);
   return p ? new Set(p) : null;
 }
+
+/**
+ * Whether the sheet should say the combined file has no password and no restrictions: a file that goes in
+ * has security of its own (a password typed here, or an owner-password-only file, which has none to type).
+ * A locked row that was never unlocked is left out, so it counts for nothing. `files` is the plan, row by
+ * row (`planFiles`); until it has caught up, a typed password stands for the file.
+ */
+export function securityDropped(entries: { password?: string | null; locked?: unknown }[], files: ({ encrypted: boolean } | undefined)[]): boolean {
+  return entries.some((e, i) => e.locked == null && (files[i] ? files[i]!.encrypted : !!e.password));
+}
+
+/**
+ * The plan's file for each row, matched by row key: the plan was made for the rows `planKeys` (in that order)
+ * and the list may have been reordered or trimmed since. A row the plan has not seen is undefined.
+ */
+export function planFiles<T>(entries: { key: number }[], files: T[], planKeys: number[]): (T | undefined)[] {
+  return entries.map((e) => files[planKeys.indexOf(e.key)]);
+}
+
+/** The message of the first listed row whose range does not fit its file, from a plan that may be stale; undefined when none. */
+export function badRangeMessage(
+  entries: { key: number }[],
+  files: { state: { state: string }; message: string | null }[],
+  planKeys: number[],
+): string | null | undefined {
+  return planFiles(entries, files, planKeys).find((f) => f?.state.state === "badRange")?.message;
+}

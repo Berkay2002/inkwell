@@ -99,34 +99,46 @@ export function CommandPalette() {
   );
 }
 
-export function PasswordDialog() {
-  const p = useStore((s) => s.password);
+/** The prompt for a locked file's password: one wording wherever a file asks (opening it, Combine files). */
+export function PasswordPrompt({
+  path,
+  error,
+  className = "",
+  onSubmit,
+  onCancel,
+}: {
+  path: string;
+  error?: string;
+  /** Extra class of the scrim (a prompt that opens over another sheet). */
+  className?: string;
+  onSubmit: (password: string) => Promise<void>;
+  onCancel: () => void;
+}) {
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
-  useEffect(() => setBusy(false), [p?.error]);
-  if (!p) return null;
+  useEffect(() => setBusy(false), [error]);
   const submit = async () => {
     setBusy(true);
-    await st().submitPassword(pw);
+    await onSubmit(pw);
     setBusy(false);
     setPw("");
   };
   return (
-    <div className="scrim">
+    <div className={`scrim ${className}`.trim()}>
       <form
         className="dialog"
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
         }}
-        onKeyDown={(e) => e.key === "Escape" && st().cancelPassword()}
+        onKeyDown={(e) => e.key === "Escape" && onCancel()}
       >
         <h2>Password required</h2>
-        <p className="dim">{fileName(p.path)} is protected.</p>
+        <p className="dim">{fileName(path)} is protected.</p>
         <input autoFocus type="password" value={pw} placeholder="Password" onChange={(e) => setPw(e.target.value)} />
-        {p.error && <p className="error">{p.error}</p>}
+        {error && <p className="error">{error}</p>}
         <div className="dialog-actions">
-          <button type="button" className="btn" onClick={() => st().cancelPassword()}>
+          <button type="button" className="btn" onClick={onCancel}>
             Cancel
           </button>
           <button type="submit" className="btn primary" disabled={busy || pw === ""}>
@@ -136,6 +148,12 @@ export function PasswordDialog() {
       </form>
     </div>
   );
+}
+
+export function PasswordDialog() {
+  const p = useStore((s) => s.password);
+  if (!p) return null;
+  return <PasswordPrompt path={p.path} error={p.error} onSubmit={(pw) => st().submitPassword(pw)} onCancel={() => st().cancelPassword()} />;
 }
 
 export function Toast() {

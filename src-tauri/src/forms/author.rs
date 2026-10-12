@@ -100,7 +100,7 @@ pub(crate) fn ensure_dict(doc: &PdfDocument, parent: &mut PdfObject, key: &str) 
 }
 
 /// The AcroForm dictionary, created with the default appearance and resources if missing.
-fn acro_form(doc: &mut PdfDocument) -> Result<PdfObject> {
+pub(crate) fn acro_form(doc: &mut PdfDocument) -> Result<PdfObject> {
     let mut catalog = doc.catalog()?;
     let mut form = ensure_dict(doc, &mut catalog, "AcroForm")?;
     if get(&form, "Fields").is_none() {
@@ -129,7 +129,7 @@ fn acro_form(doc: &mut PdfDocument) -> Result<PdfObject> {
 
 /// Gives an `/AP /N` a stand-in stream under the on-state's name so MuPDF keeps that name when
 /// it draws the real appearance.
-fn seed_on_state(doc: &mut PdfDocument, w: &mut PdfObject, on: &str) -> Result<()> {
+pub(crate) fn seed_on_state(doc: &mut PdfDocument, w: &mut PdfObject, on: &str) -> Result<()> {
     let mut form = doc.new_dict()?;
     put_name(&mut form, "Type", "XObject")?;
     put_name(&mut form, "Subtype", "Form")?;
@@ -153,7 +153,7 @@ fn page_inverse(doc: &PdfDocument, page: u32) -> Result<Matrix> {
 }
 
 /// Normalised user-space `/Rect` for a page-space rectangle.
-fn user_rect(doc: &PdfDocument, page: u32, r: [f32; 4]) -> Result<Rect> {
+pub(crate) fn user_rect(doc: &PdfDocument, page: u32, r: [f32; 4]) -> Result<Rect> {
     let r = rect_of(r);
     if r.x1 - r.x0 < 2.0 || r.y1 - r.y0 < 2.0 {
         return Err(bad("a field needs a rectangle of at least 2 x 2 points"));
@@ -172,7 +172,7 @@ fn default_size(kind: FieldKind, r: &Rect) -> f32 {
 /// Authoring (adding, moving, deleting or changing a field, and the tab and calculation order) changes the structure
 /// of the form, which no certification allows: `/P` names what may change after it, and this is none of those. A
 /// document whose certification cannot be read is refused too.
-fn refuse_if_certified(doc: &PdfDocument) -> Result<()> {
+pub(crate) fn refuse_if_certified(doc: &PdfDocument) -> Result<()> {
     if crate::outline::certified(doc).map_or(true, |c| c.is_some()) {
         return Err(bad("This document is certified, and certification does not allow changes to its form fields. Inkwell leaves them as they are."));
     }
@@ -251,6 +251,10 @@ pub fn add(doc: &mut PdfDocument, page: u32, what: &NewField) -> Result<i32> {
     let existing_group = what.group.as_ref().and_then(|g| entries.iter().find(|e| e.kind == FieldKind::Radio && e.name == *g));
     if what.kind == FieldKind::Radio && what.group.is_some() && existing_group.is_none() {
         return Err(bad(format!("no radio group named {}", what.group.as_deref().unwrap_or(""))));
+    }
+    // A button that joins a group is written into the group's /Kids: a group a signature covers stays as it is.
+    if let Some(g) = existing_group {
+        super::layout::guard(doc, &entries, &[g])?;
     }
     let name = what.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
         if let Some(g) = existing_group { g.name.clone() } else { unique_name(&taken, base_name(what.kind)) }
@@ -336,6 +340,9 @@ pub fn move_to(doc: &mut PdfDocument, page: u32, xref: i32, rect: [f32; 4]) -> R
     if r.x1 - r.x0 < 2.0 || r.y1 - r.y0 < 2.0 {
         return Err(bad("a field needs a rectangle of at least 2 x 2 points"));
     }
+    let entries = scan(doc)?;
+    let e = entries.iter().find(|e| e.page == page && e.xref == xref).ok_or_else(|| bad(format!("no field {xref} on page {}", page + 1)))?;
+    super::layout::guard(doc, &entries, &[e])?;
     {
         let p = doc.load_pdf_page(page as i32)?;
         let w = p.load_widget(xref)?.ok_or_else(|| bad(format!("no field {xref} on page {}", page + 1)))?;
@@ -355,6 +362,8 @@ pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
             return Err(bad(format!("no field {x} on page {}", page + 1)));
         }
     }
+    let picked: Vec<&Entry> = entries.iter().filter(|e| e.page == page && xrefs.contains(&e.xref)).collect();
+    super::layout::guard(doc, &entries, &picked)?;
     let form = doc.catalog()?.get_dict("AcroForm")?;
     let mut p = doc.load_pdf_page(page as i32)?;
     for x in xrefs {
@@ -390,7 +399,7 @@ pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
     Ok(())
 }
 
-fn remove_ref(a: &mut PdfObject, num: i32) -> Result<()> {
+pub(crate) fn remove_ref(a: &mut PdfObject, num: i32) -> Result<()> {
     let n = a.len()? as i32;
     for i in (0..n).rev() {
         if a.get_array(i)?.is_some_and(|v| v.is_indirect().unwrap_or(false) && v.as_indirect().ok() == Some(num)) {
@@ -444,6 +453,8 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
     refuse_if_certified(doc)?;
     let entries = scan(doc)?;
     let e = entries.iter().find(|e| e.page == page && e.xref == xref).ok_or_else(|| bad(format!("no field {xref} on page {}", page + 1)))?;
+    // Every change, not only a new name: a field a signature covers, and a signed signature field, stay as they are.
+    super::layout::guard(doc, &entries, &[e])?;
     let mut field = e.field.clone();
     let mut widget = e.obj.clone();
     let siblings: Vec<&Entry> = entries.iter().filter(|s| s.node == e.node).collect();
@@ -462,10 +473,12 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
         let parents = get(&field, "Parent").map(|p| full_name(&p)).unwrap_or_default();
         let full = if parents.is_empty() { leaf.to_string() } else { format!("{parents}.{leaf}") };
         if full != e.name {
+            super::layout::valid_name(&full)?;
             let clash = |o: &Entry| o.node != e.node && (o.name == full || o.name.starts_with(&format!("{full}.")) || full.starts_with(&format!("{}.", o.name)));
             if entries.iter().any(clash) {
                 return Err(bad(format!("A field named {full} already exists")));
             }
+            check_rename(doc, &entries, &e.name, &full)?;
             renamed = Some((e.name.clone(), full));
         }
         let own_t = get(&field, "T").as_ref().and_then(text).unwrap_or_default();
@@ -682,19 +695,55 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
     Ok(())
 }
 
-/// `AFSimple_Calculate` lists that name the field `old` (or a field below it) name `new` instead.
-fn follow_rename(doc: &PdfDocument, entries: &[Entry], old: &str, new: &str) -> Result<()> {
+/// The calculated fields whose `AFSimple_Calculate` list names `old` (or a field below it): one entry per field.
+fn followers<'a>(entries: &'a [Entry], old: &str) -> Vec<(&'a Entry, af::CalcOp, Vec<String>)> {
     let below = format!("{old}.");
     let mut seen: Vec<i32> = Vec::new();
+    let mut out = Vec::new();
     for e in entries {
         if seen.contains(&e.node) {
             continue;
         }
         seen.push(e.node);
         let Calculate::Simple { op, fields } = calculate_of(e) else { continue };
-        if !fields.iter().any(|f| f == old || f.starts_with(&below)) {
-            continue;
+        if fields.iter().any(|f| f == old || f.starts_with(&below)) {
+            out.push((e, op, fields));
         }
+    }
+    out
+}
+
+/// A field may take the name `new` in place of `old` when no signature covers `new` and the calculations that list
+/// `old` are free to follow. The one check of every rename (properties, layout); run before anything is written.
+pub(crate) fn check_rename(doc: &PdfDocument, entries: &[Entry], old: &str, new: &str) -> Result<()> {
+    if super::scripts::name_locked(&super::scripts::locks_of(doc, entries), new) {
+        return Err(bad(format!("The name [ {new} ] is covered by a signature, so no field can take it")));
+    }
+    check_follow_rename(doc, entries, old)
+}
+
+/// Renaming `old` rewrites the calculations that list it; one a signature locks cannot be rewritten, so the rename
+/// is refused. Callers run this before writing anything.
+pub(crate) fn check_follow_rename(doc: &PdfDocument, entries: &[Entry], old: &str) -> Result<()> {
+    let todo = followers(entries, old);
+    if todo.is_empty() {
+        return Ok(());
+    }
+    let locks = super::scripts::locks_of(doc, entries);
+    match todo.iter().find(|(e, _, _)| super::scripts::locked(&locks, e)) {
+        Some((e, _, _)) => Err(bad(format!(
+            "The calculation of [ {} ] is locked by a signature and would have to follow the new name of [ {old} ]",
+            e.name
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// `AFSimple_Calculate` lists that name the field `old` (or a field below it) name `new` instead.
+pub(crate) fn follow_rename(doc: &PdfDocument, entries: &[Entry], old: &str, new: &str) -> Result<()> {
+    check_follow_rename(doc, entries, old)?;
+    let below = format!("{old}.");
+    for (e, op, fields) in followers(entries, old) {
         let fields = fields
             .into_iter()
             .map(|f| if f == old { new.to_string() } else if let Some(rest) = f.strip_prefix(&below) { format!("{new}.{rest}") } else { f })
@@ -881,7 +930,7 @@ pub fn detect_fields(doc: &PdfDocument, page: u32) -> Result<Vec<Detected>> {
 
 // ---- engine wiring: one undo step each ---------------------------------------------------------
 
-fn noun(k: FieldKind) -> &'static str {
+pub(crate) fn noun(k: FieldKind) -> &'static str {
     match k {
         FieldKind::Text => "text field",
         FieldKind::Checkbox => "check box",

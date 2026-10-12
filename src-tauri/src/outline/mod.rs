@@ -15,6 +15,7 @@ pub(crate) mod tests;
 
 pub use headings::{HeadingPreview, HeadingRow};
 
+use crate::compress::Dests;
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use crate::textedit::{Matrix, page_space};
@@ -179,48 +180,41 @@ fn number(o: &Option<PdfObject>) -> Option<f32> {
 
 // ---- destinations ----
 
-/// The document's named destinations, loaded once for as many lookups as a read needs (MuPDF builds
-/// the whole table each time it is asked).
+/// The document's named destinations (the `/Names` tree and the old `/Dests` dictionary), loaded once for as
+/// many lookups as a read needs (MuPDF builds the whole table each time it is asked). The lookup is the one
+/// the compressor judges bookmarks and links by.
 #[derive(Default)]
 pub(crate) struct Names {
-    tree: Option<Option<PdfObject>>,
+    /// None inside: the tree is there but cannot be read, so no name is judged.
+    dests: Option<Option<Dests>>,
 }
 
 impl Names {
-    fn tree(&mut self, doc: &PdfDocument) -> Option<&PdfObject> {
-        self.tree
-            .get_or_insert_with(|| {
-                let t = doc.load_name_tree(PdfObject::new_name("Dests").ok()?).ok()?;
-                t.is_dict().ok()?.then_some(t)
-            })
-            .as_ref()
+    fn dests(&mut self, doc: &PdfDocument) -> Option<&Dests> {
+        self.dests.get_or_insert_with(|| Dests::load(doc).ok().flatten()).as_ref()
     }
 }
 
 /// The explicit destination array behind `target` (itself, a name or string looked up in the
-/// document's names, or a `<< /D … >>` dictionary), when it can be found.
-pub(crate) fn dest_array(doc: &PdfDocument, names: &mut Names, target: &PdfObject) -> Option<PdfObject> {
+/// document's names, or a `<< /D … >>` dictionary). `Some(None)`: there is none to be found. `None`: a name
+/// could not be looked up faithfully (see `Dests::lookup`), so the destination is not judged.
+pub(crate) fn dest_array(doc: &PdfDocument, names: &mut Names, target: &PdfObject) -> Option<Option<PdfObject>> {
     let mut t = target.resolve().ok().flatten();
     for _ in 0..4 {
-        let cur = t?;
-        if cur.is_array().ok()? {
-            return Some(cur);
+        let Some(cur) = t else { break };
+        if cur.is_array().unwrap_or(false) {
+            return Some(Some(cur));
         }
-        t = if cur.is_dict().ok()? {
+        t = if cur.is_dict().unwrap_or(false) {
             cur.get_dict("D").ok().flatten()
-        } else if cur.is_name().ok()? {
-            let name = String::from_utf8_lossy(&cur.as_name().ok()?).into_owned();
-            let dests = doc.catalog().ok()?.get_dict("Dests").ok().flatten();
-            dests.and_then(|d| d.get_dict(name.as_str()).ok().flatten())
-        } else if cur.is_string().ok()? {
-            // MuPDF flattens /Root /Names /Dests into a dict keyed by name.
-            names.tree(doc)?.get_dict(cur.as_string().ok()?.as_str()).ok().flatten()
+        } else if cur.is_name().unwrap_or(false) || cur.is_string().unwrap_or(false) {
+            names.dests(doc)?.lookup(&cur)?
         } else {
             None
         };
         t = t.and_then(|v| v.resolve().ok().flatten());
     }
-    None
+    Some(None)
 }
 
 /// A destination array's page (0-based) and the point it shows at the top left, in page space.
@@ -251,6 +245,10 @@ pub(crate) fn page_dest(doc: &PdfDocument, spaces: &mut HashMap<u32, Option<Matr
     Some((page, at))
 }
 
+/// The `what` of a destination or link target that names a destination which cannot be checked (see
+/// `dest_array`). The panels match this text (`UNCHECKED_DEST` in src/lib/nav.ts) to let such a link be retargeted.
+pub(crate) const UNCHECKED_DEST: &str = "a named destination that cannot be checked";
+
 fn dest_of(doc: &PdfDocument, item: &PdfObject, spaces: &mut HashMap<u32, Option<Matrix>>, names: &mut Names) -> Dest {
     let mut target = item.get_dict("Dest").ok().flatten();
     if target.is_none() {
@@ -263,7 +261,10 @@ fn dest_of(doc: &PdfDocument, item: &PdfObject, spaces: &mut HashMap<u32, Option
         }
     }
     let Some(t) = target else { return Dest::None };
-    match dest_array(doc, names, &t).and_then(|arr| page_dest(doc, spaces, &arr)) {
+    let Some(found) = dest_array(doc, names, &t) else {
+        return Dest::Other { what: UNCHECKED_DEST.into() };
+    };
+    match found.and_then(|arr| page_dest(doc, spaces, &arr)) {
         Some((page, at)) => Dest::Page { page, at },
         None => Dest::Broken { what: broken_reason(&t) },
     }
@@ -495,7 +496,10 @@ fn unchecked() -> EngineError {
 /// The entries of an array object (nothing for anything else). An array longer than `max`, or an entry that cannot be
 /// read, is an error and not a shorter list: whatever is dropped may be what the caller is looking for.
 fn array_items(a: Option<PdfObject>, max: usize) -> Result<Vec<PdfObject>> {
-    let Some(a) = a.filter(|a| a.is_array().unwrap_or(false)) else { return Ok(Vec::new()) };
+    let Some(a) = a else { return Ok(Vec::new()) };
+    if !a.is_array()? {
+        return Ok(Vec::new());
+    }
     let n = a.len()?;
     if n > max {
         return Err(unchecked());
@@ -559,21 +563,37 @@ fn signature_values(form: &PdfObject) -> Result<Vec<PdfObject>> {
 /// signature has no such transform. Several: the strictest, whatever the order. A `/Reference` that is one dictionary
 /// is read as the one entry it would be, and one with more than 16 entries as `/P 1`.
 fn reference_p(sig: &PdfObject) -> Option<i32> {
-    let refs = sig.get_dict("Reference").ok().flatten();
-    let list = match refs {
-        Some(r) if r.is_dict().unwrap_or(false) => vec![r],
-        r => match array_items(r, 16) {
+    reference_p_with(sig, &|o, key| o.get_dict(key))
+}
+
+/// [`reference_p`] with how a key is read, so that a test can make a read fail (MuPDF repairs a damaged file quietly,
+/// so a file cannot). Whatever cannot be read is the strictest answer: a signature whose `/Reference` is unreadable
+/// may be certifying.
+fn reference_p_with(sig: &PdfObject, get: &dyn Fn(&PdfObject, &str) -> std::result::Result<Option<PdfObject>, mupdf::Error>) -> Option<i32> {
+    let Ok(refs) = get(sig, "Reference") else { return Some(1) };
+    let list = match refs.as_ref().map(PdfObject::is_dict) {
+        Some(Err(_)) => return Some(1),
+        Some(Ok(true)) => refs.into_iter().collect(),
+        _ => match array_items(refs, 16) {
             Ok(list) => list,
             Err(_) => return Some(1),
         },
     };
-    list.iter()
-        .filter(|r| name_of(r.get_dict("TransformMethod").ok().flatten()) == "DocMDP")
-        .map(|r| {
-            let p = r.get_dict("TransformParams").ok().flatten().and_then(|t| t.get_dict("P").ok().flatten()).filter(|p| !p.is_null().unwrap_or(false));
-            if p.is_none() { 2 } else { number(&p).filter(|v| matches!(*v, 1.0 | 2.0 | 3.0)).map_or(1, |v| v as i32) }
-        })
-        .min()
+    let mut strictest = None;
+    for r in &list {
+        let Ok(method) = get(r, "TransformMethod") else { return Some(1) };
+        if name_of(method) != "DocMDP" {
+            continue;
+        }
+        let Ok(params) = get(r, "TransformParams") else { return Some(1) };
+        let p = match params.map(|t| get(&t, "P")).transpose() {
+            Ok(p) => p.flatten().filter(|p| !p.is_null().unwrap_or(false)),
+            Err(_) => return Some(1),
+        };
+        let p = if p.is_none() { 2 } else { number(&p).filter(|v| matches!(*v, 1.0 | 2.0 | 3.0)).map_or(1, |v| v as i32) };
+        strictest = Some(strictest.map_or(p, |s: i32| s.min(p)));
+    }
+    strictest
 }
 
 /// The document is certified (a `/DocMDP` signature): any change to it, even to its bookmarks, would
@@ -602,7 +622,28 @@ pub(crate) fn signed(doc: &PdfDocument) -> bool {
     signed_inner(doc).unwrap_or(true)
 }
 
-fn signed_inner(doc: &PdfDocument) -> Result<bool> {
+/// A certified document is left as it is, at any `/P`: `what` names the change ("Changing its page labels"). Every edit
+/// step of a feature that writes the document calls this first inside its closure, so nothing is recorded.
+pub(crate) fn refuse_if_certified(doc: &PdfDocument, what: &str) -> Result<()> {
+    refuse_below(doc, what, i32::MAX)
+}
+
+/// [`refuse_if_certified`] for comments, markup and the like (annotations): a `/P` 3 certification allows them,
+/// 1 and 2 do not.
+pub(crate) fn refuse_unless_annotating_allowed(doc: &PdfDocument, what: &str) -> Result<()> {
+    refuse_below(doc, what, 3)
+}
+
+fn refuse_below(doc: &PdfDocument, what: &str, allowed_from: i32) -> Result<()> {
+    if certified(doc)?.is_some_and(|p| p < allowed_from) {
+        return Err(EngineError::Invalid(format!(
+            "This document is certified. {what} would void the certification, so Inkwell leaves the document as it is."
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn signed_inner(doc: &PdfDocument) -> Result<bool> {
     let cat = doc.catalog()?;
     if cat.get_dict("Perms")?.is_some_and(|p| p.get_dict("DocMDP").ok().flatten().is_some() || p.get_dict("UR3").ok().flatten().is_some()) {
         return Ok(true);
@@ -692,6 +733,55 @@ fn delete_tree(doc: &mut PdfDocument, sh: &Shape, id: i32) -> Result<u32> {
         n += 1;
     }
     Ok(n)
+}
+
+/// What [`discard_where`] did.
+pub(crate) enum Discarded {
+    /// Items taken out (their children, where kept, now hang from the item's parent).
+    Removed(u32),
+    /// The outline was left as it is, for this reason (too large, shared items, unreadable).
+    Left(String),
+}
+
+/// Takes out the items `broken` says no longer lead anywhere. The kept items under a removed one move up into
+/// its place, in order (Acrobat's "Discard invalid bookmarks"), and `/First /Last /Prev /Next /Parent /Count`
+/// are made right. Bounded like every other read of the outline ([`shape`]); an outline that is too large, or
+/// that reaches items from two places, is left alone. The removed items are left unreferenced: the writer's
+/// garbage pass drops them.
+pub(crate) fn discard_where(doc: &PdfDocument, broken: &dyn Fn(&PdfObject) -> bool) -> Result<Discarded> {
+    let Some(mut root) = root(doc)? else { return Ok(Discarded::Removed(0)) };
+    let Ok(sh) = shape(&root) else { return Ok(Discarded::Left("the bookmarks could not be read".into())) };
+    if let Err(EngineError::Invalid(why)) = sh.editable() {
+        return Ok(Discarded::Left(why));
+    }
+    let bad: HashSet<i32> = sh.refs.iter().filter(|(_, item)| broken(item)).map(|(id, _)| *id).collect();
+    if bad.is_empty() {
+        return Ok(Discarded::Removed(0));
+    }
+    // The kept items that stand in `key`'s list now: a removed kid gives way to its own kept descendants.
+    fn kept(sh: &Shape, bad: &HashSet<i32>, key: Option<i32>, out: &mut Vec<i32>) {
+        for &id in sh.kid_ids(key) {
+            if bad.contains(&id) {
+                kept(sh, bad, Some(id), out);
+            } else {
+                out.push(id);
+            }
+        }
+    }
+    let parents = std::iter::once(None).chain(sh.refs.keys().filter(|id| !bad.contains(id)).map(|id| Some(*id)));
+    for key in parents {
+        let mut now = Vec::new();
+        kept(&sh, &bad, key, &mut now);
+        if now != sh.kid_ids(key) {
+            let kids: Vec<PdfObject> = now.iter().map(|id| sh.refs[id].clone()).collect();
+            match key {
+                Some(id) => relink(&mut sh.obj(id)?, &kids)?,
+                None => relink(&mut root, &kids)?,
+            }
+        }
+    }
+    recount(doc)?;
+    Ok(Discarded::Removed(bad.len() as u32))
 }
 
 fn label(op: &BookmarkOp) -> String {

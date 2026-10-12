@@ -7,7 +7,7 @@
 use super::geometry::{M, View, n};
 use super::text::{Measure, face, first_undrawable, literal, undrawable_message};
 use super::{AddRequest, Background, Bates, Date, Mark, MarkKind, Picture, Rgb, Style, Watermark, bates_fits, bates_text, expand};
-use crate::engine::edit::{open_source, rewrite_opts, write_doc, write_new};
+use crate::engine::edit::{authenticate_typed, open_source, rewrite_opts, write_doc, write_new};
 use crate::engine::{EngineError, Result};
 use crate::textedit::content::{self as cs, Obj};
 use mupdf::pdf::{PdfDocument, PdfGraftMap, PdfObject};
@@ -413,7 +413,7 @@ fn load_picture(doc: &mut PdfDocument, p: &Picture) -> Result<Loaded> {
         if d.needs_password()? {
             match p.password.as_deref() {
                 None => return Err(EngineError::NeedsPassword),
-                Some(pw) if !d.authenticate(pw)? => return Err(EngineError::BadPassword),
+                Some(pw) if !authenticate_typed(&mut d, pw)? => return Err(EngineError::BadPassword),
                 _ => {}
             }
         }
@@ -640,6 +640,7 @@ fn text_marks(
 
 /// Adds `req.mark` to `req.pages`. Returns the pages touched.
 pub fn add(doc: &mut PdfDocument, req: &AddRequest) -> Result<Vec<u32>> {
+    crate::outline::refuse_if_certified(doc, "Adding to its pages")?;
     let count = doc.page_count()?.max(0) as u32;
     let pages = check_pages(&req.pages, count)?;
     validate(&req.mark, pages.len() as u64)?;
@@ -987,6 +988,7 @@ fn clean_resources(doc: &mut PdfDocument, index: u32) -> Result<()> {
 /// left on top of a page, the q/Q wrapper goes too, restoring the original content list; the page
 /// loses the fonts, graphics states, pictures and layers only these marks used.
 pub fn remove(doc: &mut PdfDocument, kind: MarkKind, pages: &[u32]) -> Result<usize> {
+    crate::outline::refuse_if_certified(doc, "Removing from its pages")?;
     let count = doc.page_count()?.max(0) as u32;
     let pages = check_pages(pages, count)?;
     let mut removed = 0;
@@ -1164,7 +1166,7 @@ pub fn bates_files(
             }
             e => e,
         })?;
-        if !crate::protect::Rights::from_p(d.permissions().bits() as i32).may_extract() {
+        if !crate::protect::Rights::of(&d).may_extract() {
             return Err(invalid(format!(
                 "{} doesn't allow changes. Open it with its permissions password and remove its security first.",
                 Path::new(p).file_name().unwrap_or_default().to_string_lossy()

@@ -18,6 +18,46 @@ pub(super) fn worker_dies_on(path: &Path) -> bool {
     path.file_name().is_some_and(|n| n == "worker-dies.pdf")
 }
 
+thread_local! {
+    /// Runs once, while `forget_deferred` holds a catalog (after it read the list, before it lets go).
+    static WHILE_HELD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn while_held(_dir: &Path) {
+    if let Some(f) = WHILE_HELD.with(|h| h.borrow_mut().take()) {
+        f();
+    }
+}
+
+/// Replaces the file with other bytes just before the build opens it (a file that grew after it was listed).
+static BEFORE_OPEN: Mutex<Option<(PathBuf, Vec<u8>)>> = Mutex::new(None);
+
+pub(super) fn before_open(path: &Path) {
+    let mut g = BEFORE_OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if g.as_ref().is_some_and(|(p, _)| p == path) {
+        let (p, bytes) = g.take().unwrap();
+        std::fs::write(p, bytes).unwrap();
+    }
+}
+
+/// Like `BEFORE_OPEN`, but just after the open handle's size was taken (a file that grew while it was being read).
+static AFTER_LEN: Mutex<Vec<(PathBuf, Vec<u8>)>> = Mutex::new(Vec::new());
+
+pub(super) fn after_len(path: &Path) {
+    let mut g = AFTER_LEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = g.iter().position(|(p, _)| p == path) {
+        let (p, bytes) = g.remove(i);
+        std::fs::write(p, bytes).unwrap();
+    }
+}
+
+/// The files whose bytes were read while holding the big-file lock.
+static READ_ALONE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+pub(super) fn read_alone(path: &Path) {
+    READ_ALONE.lock().unwrap_or_else(|e| e.into_inner()).push(path.to_path_buf());
+}
+
 fn no_progress() -> impl Fn(u32, u32) + Sync {
     |_, _| {}
 }
@@ -810,6 +850,20 @@ fn a_certified_or_signed_document_gets_no_index_written_updated_or_removed() {
 }
 
 #[test]
+fn a_certification_that_cannot_be_read_blocks_the_index_as_certified() {
+    // More fields than the check will walk: `certified` errs, which is a certification, not "not certified".
+    let base = dir("catalog-guard-unreadable");
+    let p = write(&base, "a.pdf", with_catalog(&format!("/AcroForm << /Fields [{}] >>", "0 ".repeat(20_001))));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&p.to_string_lossy()).unwrap().doc;
+    let e = embed::embedded(&eng, id).unwrap();
+    assert!(e.blocked.as_deref().is_some_and(|w| w.contains("certified")), "{e:?}");
+    let err = embed::embed(&eng, id, EditSource::User).unwrap_err().to_string();
+    assert!(err.contains("certified"), "{err}");
+    assert!(eng.edit_state(id).unwrap().undo.is_none(), "a refusal is not an undo step");
+}
+
+#[test]
 fn a_saved_redaction_is_gone_from_the_catalog_and_its_results() {
     use crate::redact::app::{apply, find, mark_hits, ApplyOutcome, FindQuery};
     use crate::redact::Sanitize;
@@ -916,7 +970,7 @@ fn a_file_that_failed_is_read_again_by_a_refresh_even_when_it_looks_unchanged() 
 }
 
 #[test]
-fn a_file_is_indexed_the_same_read_whole_or_opened_by_path() {
+fn a_file_is_indexed_the_same_read_whole_or_alone() {
     let base = dir("catalog-read");
     let folder = base.join("docs");
     // Over 128 KB, so the sample has a head and a tail.
@@ -929,15 +983,47 @@ fn a_file_is_indexed_the_same_read_whole_or_opened_by_path() {
     write(&folder, "bad.pdf", b"nope".to_vec());
     let rows = |max: u64, name: &str| {
         let (_, d) = make(&base.join(name), &folder);
-        let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), max).unwrap();
+        let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), max, MAX_FILE).unwrap();
         assert_eq!((s.files, s.extracted, s.damaged), (3, 2, 1), "{s:?}");
         let t = load_table(&d, 1).unwrap();
         (t.files.iter().map(|r| (r.path.clone(), r.size, r.head_tail.clone(), r.pages, r.status)).collect::<Vec<_>>(), flat(&catalog_search(&d, "notice", SearchOpts::default())).0)
     };
     let whole = rows(MAX_READ, "c1");
-    let by_path = rows(0, "c2");
-    assert_eq!(whole, by_path);
+    // Every file counts as big: read one at a time, the same bytes, so the same rows.
+    let alone = rows(0, "c2");
+    assert_eq!(whole, alone);
     assert_eq!(whole.1.len(), 2);
+}
+
+#[test]
+fn a_file_over_the_size_limit_is_listed_as_too_large_and_never_opened() {
+    let base = dir("catalog-too-large");
+    let folder = base.join("docs");
+    let big = doc_with(
+        &[vec!["a big file with notice in it"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    let limit = big.len() as u64 - 1;
+    write(&folder, "big.pdf", big);
+    write(&folder, "small.pdf", plain(&[vec!["a small notice"]]));
+    let (m, d) = make(&base.join("catalogs"), &folder);
+    let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), MAX_READ, limit).unwrap();
+    assert_eq!((s.files, s.extracted, s.damaged, s.too_large), (2, 1, 0, 1), "{s:?}");
+    let t = load_table(&d, 1).unwrap();
+    let row = t.files.iter().find(|r| r.path.ends_with("big.pdf")).unwrap();
+    assert_eq!((row.status, row.pages), (Status::TooLarge, 0));
+    assert!(!row.head_tail.is_empty(), "a sample is kept, so a move is recognised");
+    let meta = load_meta(&d).unwrap();
+    assert_eq!((meta.too_large, meta.indexed), (1, 1));
+    assert_eq!(flat(&catalog_search(&d, "notice", SearchOpts::default())).0.len(), 1);
+    // An entry from before this field existed still loads.
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(meta_path(&d)).unwrap()).unwrap();
+    v.as_object_mut().unwrap().remove("tooLarge");
+    std::fs::write(meta_path(&d), serde_json::to_vec(&v).unwrap()).unwrap();
+    assert_eq!(load_meta(&d).unwrap().id, m.id);
+    // A refresh with the same limit finds nothing changed.
+    let s = build_with(&d, false, &AtomicBool::new(false), &no_progress(), MAX_READ, limit).unwrap();
+    assert_eq!((s.added, s.changed, s.removed, s.too_large), (0, 0, 0, 1), "{s:?}");
 }
 
 #[test]
@@ -1047,6 +1133,137 @@ fn a_forget_waiting_for_a_busy_catalog_survives_a_restart() {
     assert_eq!(pending(&d), Waiting::Paths(vec![base.join("c.pdf")]));
     settle_pending(&d, &[base.join("c.pdf")]).unwrap();
     assert!(!pending_path(&d).exists());
+}
+
+#[test]
+fn a_file_that_grew_after_it_was_listed_is_checked_against_the_limit_by_what_is_read() {
+    let base = dir("catalog-grew");
+    let folder = base.join("docs");
+    let small = plain(&[vec!["a small notice"]]);
+    let limit = small.len() as u64 + 10;
+    let grown = doc_with(
+        &[vec!["a grown notice"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    let p = write(&folder, "a.pdf", small);
+    write(&folder, "b.pdf", plain(&[vec!["another notice"]]));
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    *BEFORE_OPEN.lock().unwrap() = Some((p.clone(), grown));
+    let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), MAX_READ, limit).unwrap();
+    assert!(BEFORE_OPEN.lock().unwrap().is_none(), "the file was replaced after the listing");
+    assert_eq!((s.files, s.extracted, s.too_large, s.damaged), (2, 1, 1, 0), "{s:?}");
+    assert_eq!(flat(&catalog_search(&d, "grown", SearchOpts::default())).0.len(), 0);
+}
+
+#[test]
+fn a_file_that_grows_while_it_is_read_is_read_again_under_the_big_file_lock() {
+    let base = dir("catalog-grows-reading");
+    let folder = base.join("docs");
+    let small = plain(&[vec!["a small notice"]]);
+    let grown = doc_with(
+        &[vec!["a grown notice"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    let (max_read, max_file) = (small.len() as u64 + 10, grown.len() as u64 + 10);
+    let p = write(&folder, "a.pdf", small);
+    let q = write(&folder, "b.pdf", plain(&[vec!["another notice"]]));
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    AFTER_LEN.lock().unwrap().push((p.clone(), grown));
+    let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), max_read, max_file).unwrap();
+    assert!(AFTER_LEN.lock().unwrap().iter().all(|(x, _)| x != &p), "the file was replaced after its size was taken");
+    assert_eq!((s.files, s.extracted, s.too_large, s.damaged), (2, 2, 0, 0), "{s:?}");
+    // The whole grown file was read, so its text is stored (a search leaves it out: it changed since the listing);
+    // the one that did not grow never took the lock.
+    let row = load_table(&d, 1).unwrap().files.into_iter().find(|r| r.path.ends_with("a.pdf")).unwrap();
+    let text = FileText::decode(&std::fs::read(text_path(&d, row.fid)).unwrap()).unwrap();
+    assert!(serde_json::to_string(&text).unwrap().contains("grown"));
+    let alone = READ_ALONE.lock().unwrap();
+    assert!(alone.contains(&p) && !alone.contains(&q), "{alone:?}");
+}
+
+#[test]
+fn a_file_that_grows_past_the_limit_while_it_is_read_is_too_large() {
+    let base = dir("catalog-grows-past");
+    let folder = base.join("docs");
+    let small = plain(&[vec!["a small notice"]]);
+    let grown = doc_with(
+        &[vec!["a grown notice"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    let limit = small.len() as u64 + 10;
+    let p = write(&folder, "a.pdf", small);
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    AFTER_LEN.lock().unwrap().push((p, grown));
+    let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), limit, limit).unwrap();
+    assert_eq!((s.files, s.extracted, s.too_large, s.damaged), (1, 0, 1, 0), "{s:?}");
+}
+
+#[test]
+fn a_refresh_counts_files_that_could_not_be_read_in_their_own_buckets_not_as_changed() {
+    let base = dir("catalog-failed-refresh");
+    let folder = base.join("docs");
+    let big = doc_with(
+        &[vec!["a big file with notice in it"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    let limit = big.len() as u64 - 1;
+    write(&folder, "big.pdf", big);
+    write(&folder, "broken.pdf", vec![b'x'; 40]);
+    write(&folder, "ok.pdf", plain(&[vec!["a small notice"]]));
+    {
+        use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions};
+        let src = PdfDocument::from_bytes(&plain(&[vec!["hidden notice"]])).unwrap();
+        let mut o = PdfWriteOptions::default();
+        o.set_encryption(Encryption::Aes256).set_user_password("secret").set_owner_password("owner");
+        src.save_with_options(&folder.join("secret.pdf").to_string_lossy(), o).unwrap();
+    }
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), MAX_READ, limit).unwrap();
+    assert_eq!((s.files, s.added, s.damaged, s.password, s.too_large), (4, 4, 1, 1, 1), "{s:?}");
+    // Nothing on disk changed: the three are tried again, and stay in their buckets.
+    let s = build_with(&d, false, &AtomicBool::new(false), &no_progress(), MAX_READ, limit).unwrap();
+    assert_eq!((s.files, s.added, s.changed, s.removed), (4, 0, 0, 0), "{s:?}");
+    assert_eq!((s.damaged, s.password, s.too_large), (1, 1, 1), "{s:?}");
+}
+
+#[test]
+fn a_forget_asked_for_just_after_the_holder_read_the_list_is_done_when_it_lets_go() {
+    let base = dir("catalog-forget-wakeup");
+    let folder = base.join("docs");
+    let a = write(&folder, "a.pdf", plain(&[vec!["first words: quokka"]]));
+    let b = write(&folder, "b.pdf", plain(&[vec!["second words: wombat"]]));
+    write(&folder, "c.pdf", plain(&[vec!["another notice"]]));
+    let root = base.join("catalogs");
+    let (m, d) = make(&root, &folder);
+    build(&d, true, &AtomicBool::new(false), &no_progress()).unwrap();
+    let jobs = Arc::new(super::app::Jobs::default());
+    defer_forget(&d, &a).unwrap();
+    // While the holder has the catalog (it has read a.pdf), a save of b.pdf asks to forget: it finds the catalog
+    // held and writes the path down. Nothing else will look at that list until some later hold.
+    let (j2, r2, b2) = (jobs.clone(), root.clone(), b.clone());
+    WHILE_HELD.with(|h| *h.borrow_mut() = Some(Box::new(move || assert_eq!(super::app::forget_all(&r2, &j2, &b2), 0))));
+    super::app::forget_deferred(&jobs, &m.id, &d);
+    assert_eq!(pending(&d), Waiting::Paths(vec![]));
+    assert_eq!(load_meta(&d).unwrap().files, 1);
+    assert_eq!(flat(&catalog_search(&d, "quokka", SearchOpts::default())).0.len(), 0);
+    assert_eq!(flat(&catalog_search(&d, "wombat", SearchOpts::default())).0.len(), 0);
+}
+
+#[test]
+fn a_wipe_kept_only_in_memory_is_done_when_the_catalogs_are_listed() {
+    let base = dir("catalog-replay-mem");
+    let folder = base.join("docs");
+    write(&folder, "a.pdf", plain(&[vec!["words that must go: quokka"]]));
+    let root = base.join("catalogs");
+    let (_, d) = make(&root, &folder);
+    build(&d, true, &AtomicBool::new(false), &no_progress()).unwrap();
+    assert!(blobs(&d) > 0);
+    // The marker file could not be written: only this process knows, and no list or marker is on disk.
+    WIPE_MEM.lock().unwrap().push(d.clone());
+    assert!(!marker(&d).exists() && !pending_path(&d).exists());
+    super::app::replay_pending(&root, &super::app::Jobs::default());
+    assert_eq!(blobs(&d), 0);
+    assert!(!WIPE_MEM.lock().unwrap().iter().any(|p| p == &d));
 }
 
 fn blobs(d: &Path) -> usize {

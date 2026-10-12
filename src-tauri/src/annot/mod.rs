@@ -9,7 +9,7 @@
 //! reply with `/StateModel /Review` and `/State` (the latest one wins; "Completed" is resolved).
 //! Replies and state replies are hidden on the page (they are only listed in the panel).
 //! The review-state convention follows pdfcraft's `crates/annot` (ideas only, no code taken).
-//! XFDF import and export is not built yet (see docs/comments.md).
+//! XFDF and FDF export and import of comments is `xfdf.rs` (see docs/comments.md).
 
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
@@ -20,8 +20,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub mod app;
+pub mod stamps;
 #[cfg(test)]
 mod tests;
+pub mod xfdf;
 
 type Result<T> = std::result::Result<T, EngineError>;
 
@@ -107,6 +109,8 @@ pub struct AnnotDto {
     pub points: Vec<[f32; 2]>,
     pub strokes: Vec<Vec<[f32; 2]>>,
     pub icon: Option<String>,
+    /// A stamp that draws a picture (a custom stamp): its resize keeps the picture's proportions.
+    pub picture: bool,
     pub font_size: Option<f32>,
     /// The annotation this one replies to.
     pub parent: Option<i32>,
@@ -273,6 +277,7 @@ pub(crate) fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
         points,
         strokes,
         icon: a.icon_name().ok().flatten().map(str::to_owned),
+        picture: kind == Kind::Stamp && stamps::picture_size(&o).is_some(),
         font_size: a.default_appearance().ok().flatten().map(|d| d.size),
         parent: parent_of(&o),
         resolved: false,
@@ -429,7 +434,12 @@ impl AnnotWalk {
                 fresh.direct = true;
                 continue;
             };
-            if self.seen.contains(&num) || self.belongs_later(doc, &e, p, num)? {
+            let later = self.seen.contains(&num) || self.belongs_later(doc, &e, p, num)?;
+            // Out of budget mid-check the answer above is a guess: stop here instead of listing from it.
+            if self.incomplete {
+                return Ok(None);
+            }
+            if later {
                 continue;
             }
             self.seen.insert(num);
@@ -457,6 +467,11 @@ impl AnnotWalk {
         }
         let mut nums = HashSet::new();
         for i in 0..list.len()? {
+            // Each entry read is charged: many annotations naming many other pages, each with a long array, would
+            // otherwise cost n x m reads. Out of budget the walk is incomplete and this one stays where it is.
+            if self.repeat() {
+                return Ok(false);
+            }
             if let Some(x) = list.get_array(i as i32)?.filter(|x| x.is_indirect().unwrap_or(false)) {
                 nums.insert(x.as_indirect()?);
             }
@@ -472,6 +487,27 @@ impl AnnotWalk {
 /// several pages list (a shared `/Annots`) is listed once, on one page; see [`AnnotWalk`] for
 /// which page and for the case that is left to the first.
 pub fn list(doc: &PdfDocument) -> Result<AnnotList> {
+    let (all, incomplete) = each(doc, |p, a| dto(p, a))?;
+    let mut items: Vec<AnnotDto> = Vec::new();
+    let mut states: Vec<(i32, String)> = Vec::new();
+    for d in all {
+        match (&d.state, d.parent) {
+            (Some(s), Some(parent)) => states.push((parent, s.clone())),
+            _ => items.push(d),
+        }
+    }
+    for (parent, s) in states {
+        if let Some(d) = items.iter_mut().find(|d| d.xref == parent) {
+            d.resolved = s == "Completed";
+            d.state = Some(s);
+        }
+    }
+    Ok(AnnotList { items, incomplete })
+}
+
+/// `f` for every comment annotation (everything [`is_comment`]) in page order, once each; and whether
+/// some pages were left out (see [`AnnotWalk`] for which page an object belongs to and the caps).
+pub(crate) fn each<T>(doc: &PdfDocument, mut f: impl FnMut(u32, &PdfAnnotation) -> Result<T>) -> Result<(Vec<T>, bool)> {
     let mut all = Vec::new();
     let mut walk = AnnotWalk::default();
     let mut loaded = 0usize;
@@ -490,25 +526,11 @@ pub fn list(doc: &PdfDocument) -> Result<AnnotList> {
             let ours = if x == 0 { fresh.direct } else { pending.remove(&x) };
             // Fill & Sign items are annotations too; fillsign lists them, not as comments.
             if ours && a.r#type().is_ok_and(is_comment) && a.object().get_dict(crate::fillsign::MARK).ok().flatten().is_none() {
-                all.push(dto(p, &a)?);
+                all.push(f(p, &a)?);
             }
         }
     }
-    let mut items: Vec<AnnotDto> = Vec::new();
-    let mut states: Vec<(i32, String)> = Vec::new();
-    for d in all {
-        match (&d.state, d.parent) {
-            (Some(s), Some(parent)) => states.push((parent, s.clone())),
-            _ => items.push(d),
-        }
-    }
-    for (parent, s) in states {
-        if let Some(d) = items.iter_mut().find(|d| d.xref == parent) {
-            d.resolved = s == "Completed";
-            d.state = Some(s);
-        }
-    }
-    Ok(AnnotList { items, incomplete: left_out || walk.incomplete })
+    Ok((all, left_out || walk.incomplete))
 }
 
 // ---- writing -----------------------------------------------------------------------------------
@@ -526,21 +548,36 @@ pub(crate) fn meta(a: &mut PdfAnnotation, author: &str, created: bool) -> Result
     put_str(a, "M", &now)?;
     if created {
         put_str(a, "CreationDate", &now)?;
+        // The name XFDF and FDF files match a comment by (an import updates the comment with the same one).
+        put_str(a, "NM", &new_name())?;
     }
     Ok(())
+}
+
+/// A random 128-bit name in UUID text form, for `/NM`.
+fn new_name() -> String {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("system random source");
+    b[6] = b[6] & 0x0F | 0x40;
+    b[8] = b[8] & 0x3F | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
 fn style(a: &mut PdfAnnotation, kind: Kind, s: &Style) -> Result<()> {
     if kind != Kind::FreeText {
         a.set_color(rgb(s.color.unwrap_or_else(|| default_color(kind))))?;
     }
-    if let Some(f) = s.fill {
+    // MuPDF throws for a fill or a border on a type that has none (a note, a markup, a stamp), which would
+    // leave the annotation half made: an import can carry both for any type.
+    let closed = matches!(kind, Kind::Rectangle | Kind::Ellipse | Kind::Line | Kind::Arrow | Kind::Polygon);
+    if let Some(f) = s.fill.filter(|_| closed) {
         a.set_interior_color(rgb(f))?;
     }
     if let Some(o) = s.opacity {
         a.set_opacity(o.clamp(0.0, 1.0))?;
     }
-    if let Some(w) = s.width {
+    if let Some(w) = s.width.filter(|_| closed || matches!(kind, Kind::Ink | Kind::FreeText)) {
         a.set_border_width(w.max(0.0))?;
     }
     Ok(())
@@ -560,6 +597,7 @@ fn hide_reply(a: &mut PdfAnnotation, parent: i32, doc: &PdfDocument, state: Opti
 
 /// Creates the annotation on `page` and returns its xref.
 pub fn add(doc: &mut PdfDocument, page: u32, what: &NewAnnot, st: &Style, author: &str) -> Result<i32> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Adding a comment")?;
     let mut p = doc.load_pdf_page(page as i32)?;
     let (mut a, kind) = match what {
         NewAnnot::Markup { markup: kind, quads } => {
@@ -639,7 +677,8 @@ fn map_point(p: Point, from: Rect, to: Rect) -> Point {
     Point { x: to.x0 + (p.x - from.x0) * sx, y: to.y0 + (p.y - from.y0) * sy }
 }
 
-fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
+/// `turns` is the page's `/Rotate` in quarter turns: a picture stamp's pixels are stored turned back by it.
+fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect, turns: u32) -> Result<()> {
     let from = a.rect()?;
     let m = |p: Point| map_point(p, from, to);
     match kind {
@@ -663,6 +702,14 @@ fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
             let strokes: Vec<Vec<Point>> = a.ink_list()?.into_iter().map(|s| s.into_iter().map(m).collect()).collect();
             a.set_ink_list(strokes.iter().map(|s| s.iter().copied()))?;
         }
+        // A picture stamp keeps the picture's proportions whatever box was asked for.
+        Kind::Stamp => {
+            let fit = stamps::picture_size(&a.object()).map_or(to, |(w, h)| {
+                let (w, h) = if turns % 2 == 1 { (h, w) } else { (w, h) };
+                stamps::fit_aspect(from, to, w as f32 / h as f32)
+            });
+            a.set_rect(fit)?;
+        }
         // Rect-based kinds; the others derive their /Rect from the geometry above.
         _ => a.set_rect(to)?,
     }
@@ -670,7 +717,8 @@ fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
 }
 
 pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: &str) -> Result<()> {
-    let (_p, mut a) = find(doc, page, xref)?;
+    crate::outline::refuse_unless_annotating_allowed(doc, "Changing a comment")?;
+    let (p, mut a) = find(doc, page, xref)?;
     let kind = kind_of(&a)?;
     let s = &patch.style;
     if let Some(c) = s.color {
@@ -702,7 +750,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: 
         a.set_default_appearance("Helv", sz, Some(c))?;
     }
     if let Some(r) = patch.rect {
-        reshape(&mut a, kind, rect_of(r))?;
+        reshape(&mut a, kind, rect_of(r), stamps::quarter_turns(&p)?)?;
     }
     meta(&mut a, author, false)?;
     a.update()?;
@@ -711,6 +759,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: 
 
 /// Deletes the annotations and everything that replies to them.
 pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Deleting a comment")?;
     let mut p = doc.load_pdf_page(page as i32)?;
     let mut doomed: Vec<i32> = xrefs.to_vec();
     loop {
@@ -738,6 +787,7 @@ pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
 
 /// A reply (a hidden `/Text` with `/IRT`) to `parent`; returns its xref.
 pub fn reply(doc: &mut PdfDocument, page: u32, parent: i32, text: &str, author: &str) -> Result<i32> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Replying to a comment")?;
     let (mut p, pa) = find(doc, page, parent)?;
     let r = pa.rect()?;
     let mut a = p.add_text_annotation(Rect { x0: r.x0, y0: r.y0, x1: r.x0 + 22.0, y1: r.y0 + 22.0 }, text)?;
@@ -748,6 +798,7 @@ pub fn reply(doc: &mut PdfDocument, page: u32, parent: i32, text: &str, author: 
 
 /// Sets the review state of `parent` ("Completed" = resolved; "None" reopens) as a new state reply.
 pub fn set_state(doc: &mut PdfDocument, page: u32, parent: i32, state: &str, author: &str) -> Result<i32> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Changing a comment's status")?;
     if !["None", "Accepted", "Rejected", "Cancelled", "Completed"].contains(&state) {
         return Err(bad(format!("unknown review state {state}")));
     }

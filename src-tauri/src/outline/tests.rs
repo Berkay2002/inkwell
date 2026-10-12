@@ -351,6 +351,50 @@ fn text_decoding_follows_the_pdf_encodings() {
     assert_eq!(decode_text(&[0x80, 0xA0, 0xE9]), "•€é");
 }
 
+/// The panel judges a named destination the way the compressor does: MuPDF's decode of the string, the `/Names`
+/// tree as well as `/Dests`, and a string it cannot decode faithfully is not called broken.
+#[test]
+fn a_named_destination_is_judged_by_the_compressors_lookup() {
+    let d = dir("outline", "named_lookup");
+    let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 7, chapter_every: 1, ..Default::default() });
+    // (what the bookmark names, what the panel shows)
+    let page = |d: &Dest| matches!(d, Dest::Page { page: 0, .. });
+    let broken = |d: &Dest| matches!(d, Dest::Broken { .. });
+    let other = |d: &Dest| matches!(d, Dest::Other { .. });
+    let cases: [(&str, &dyn Fn(&Dest) -> bool); 7] = [
+        ("/chap", &page),           // a name object, found in the /Names tree (the old code looked in /Dests only)
+        ("<FEFF00E900E9>", &page),  // UTF-16BE, the key's own form
+        ("<C3A9C3A9>", &page),      // UTF-8 with no mark: the tree's UTF-16 key is the same text
+        ("<E9E9>", &page),          // PDFDocEncoding
+        ("(gone)", &broken),        // cleanly missing
+        ("<41E97F>", &other),       // not UTF-8, and PDFDocEncoding has nothing at 0x7F: not judged
+        ("<C0AF>", &other),         // overlong: MuPDF takes it as UTF-8, Rust does not: not judged
+    ];
+    let ids: Vec<i32> = list(&eng, id).unwrap().items.iter().map(|b| b.id).collect();
+    assert_eq!(ids.len(), cases.len());
+    eng.apply_custom(id, "Name destinations".into(), EditSource::User, false, |d| {
+        let mut arr = d.new_array()?;
+        for key in ["(chap)", "<FEFF00E900E9>"] {
+            arr.array_push(d.new_object_from_str(key)?)?;
+            arr.array_push(dest_object(d, 0, None)?)?;
+        }
+        let mut tree = d.new_dict()?;
+        tree.dict_put("Names", arr)?;
+        let mut names = d.new_dict()?;
+        names.dict_put("Dests", tree)?;
+        d.catalog()?.dict_put("Names", names)?;
+        let sh = walked(d)?.1;
+        for (item, (name, _)) in ids.iter().zip(cases) {
+            sh.obj(*item)?.dict_put("Dest", d.new_object_from_str(name)?)?;
+        }
+        Ok(Vec::new())
+    })
+    .unwrap();
+    for (b, (name, expect)) in list(&eng, id).unwrap().items.iter().zip(cases) {
+        assert!(expect(&b.dest), "{name}: {:?}", b.dest);
+    }
+}
+
 #[test]
 fn a_bookmark_to_a_missing_named_destination_is_broken() {
     let d = dir("outline", "broken");
@@ -445,7 +489,7 @@ fn outline_pdf(root: &str, items: &[String]) -> Vec<u8> {
 }
 
 /// `outline_pdf` with `catalog` more keys in the document catalog (built whole, so the xref stays exact).
-fn outline_pdf_with(catalog: &str, root: &str, items: &[String]) -> Vec<u8> {
+pub(crate) fn outline_pdf_with(catalog: &str, root: &str, items: &[String]) -> Vec<u8> {
     let content = "BT /F1 24 Tf 72 700 Td (Chapter One) Tj ET BT /F1 12 Tf 72 600 Td (Plain body text of the document, long enough.) Tj ET BT /F1 12 Tf 72 560 Td (More plain body text in the same size here.) Tj ET";
     let mut objs = vec![
         format!("<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R {catalog} >>"),
@@ -735,11 +779,11 @@ fn checked_certification_of(name: &str, catalog: &str, objs: &[&str]) -> (std::r
 }
 
 /// A signature value whose `/Reference` holds `refs` (raw dictionaries).
-fn sig_value(refs: &str) -> String {
+pub(crate) fn sig_value(refs: &str) -> String {
     format!("/V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> /Reference [ {refs} ] >>")
 }
 
-fn doc_mdp(params: &str) -> String {
+pub(crate) fn doc_mdp(params: &str) -> String {
     format!("<< /Type /SigRef /TransformMethod /DocMDP {params} >>")
 }
 
@@ -990,4 +1034,27 @@ fn an_unsigned_document_is_still_rewritten_without_what_was_deleted() {
     eng.save(id, None).unwrap();
     let saved = std::fs::read(&path).unwrap();
     assert!(!String::from_utf8_lossy(&saved).contains("Secret title"), "a deleted bookmark's title does not stay in the file");
+}
+
+/// A signature whose `/Reference` is `refs`, as an object that the reads below can be made to fail on.
+fn sig_object(refs: &str) -> PdfObject {
+    let pdf = outline_pdf_with(&format!("/Perms << /DocMDP << /Type /Sig /Reference {refs} >> >>"), "<< /Type /Outlines /Count 0 >>", &[]);
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    doc.catalog().unwrap().get_dict("Perms").unwrap().unwrap().get_dict("DocMDP").unwrap().unwrap()
+}
+
+#[test]
+fn a_signature_reference_that_cannot_be_read_counts_as_certifying() {
+    // MuPDF repairs a damaged file on its own, so a file cannot make a read fail: the reads are made to.
+    let sig = sig_object("[ << /TransformMethod /DocMDP /TransformParams << /P 3 >> >> ]");
+    let ok = |o: &PdfObject, k: &str| o.get_dict(k);
+    assert_eq!(reference_p_with(&sig, &ok), Some(3));
+    for failing in ["Reference", "TransformMethod", "TransformParams", "P"] {
+        let get = |o: &PdfObject, k: &str| if k == failing { Err(mupdf::Error::InvalidPdfDocument) } else { o.get_dict(k) };
+        assert_eq!(reference_p_with(&sig, &get), Some(1), "{failing} unreadable");
+    }
+    // An entry that is not a DocMDP is not made strict by being unreadable elsewhere: only what is read counts.
+    let other = sig_object("[ << /TransformMethod /FieldMDP /TransformParams << /P 3 >> >> ]");
+    let get = |o: &PdfObject, k: &str| if k == "TransformParams" { Err(mupdf::Error::InvalidPdfDocument) } else { o.get_dict(k) };
+    assert_eq!(reference_p_with(&other, &get), None);
 }

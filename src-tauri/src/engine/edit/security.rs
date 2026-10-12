@@ -61,6 +61,21 @@ impl Editor {
         Ok(())
     }
 
+    /// Setting or removing password security makes the save a rewrite of every object: neither a certification nor
+    /// a signature survives it.
+    fn ensure_signatures_allow_security(&self) -> Result<()> {
+        // A signed file that was repaired on open: its signature cannot be told from the repaired copy, so the
+        // rewrite would go over the original as an unsigned-looking file.
+        self.refuse_if_repaired_signed()?;
+        crate::outline::refuse_if_certified(&self.doc.doc, "Changing its password security")?;
+        if crate::outline::signed(&self.doc.doc) {
+            return Err(invalid(
+                "This document is signed. Changing its password security rewrites the whole file and would break the signature, so Inkwell leaves it as it is.",
+            ));
+        }
+        Ok(())
+    }
+
     fn push_security(&mut self, label: String, source: EditSource, change: SecurityChange) {
         let cur = self.step().clone();
         self.push(Step { label, source, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, security: Some(change), exact: false, ..cur });
@@ -109,6 +124,7 @@ impl Engine {
         spec.normalize();
         spec.validate().map_err(|e| invalid(e.code()))?;
         let ed = self.lane(entry, lane)?;
+        ed.ensure_signatures_allow_security()?;
         if ed.steps[..=ed.cur].iter().any(|s| s.signed) {
             return Err(invalid(SIGNED));
         }
@@ -171,6 +187,7 @@ impl Engine {
         if !ed.security_info(&entry)?.encrypted {
             return Err(invalid("This document has no password security."));
         }
+        ed.ensure_signatures_allow_security()?;
         if ed.steps[..=ed.cur].iter().any(|s| s.signed) {
             return Err(invalid(SIGNED));
         }

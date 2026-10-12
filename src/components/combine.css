@@ -283,6 +283,13 @@
   padding: 10px 18px;
   border-top: 1px solid var(--border);
 }
+.scrim.cb-unlock {
+  z-index: 30;
+}
+.cb-note {
+  flex-basis: 100%;
+  font-size: 12.5px;
+}
 .cb-check {
   display: flex;
   align-items: center;

@@ -226,16 +226,34 @@ describe("beads and the other page tools", () => {
 });
 
 describe("certified and signed documents", () => {
-  it("reads once whether the document is certified or signed, and keeps unreadable as unknown", async () => {
-    inv.mockResolvedValueOnce({ certified: true, signed: true });
+  it("reads whether the document is certified or signed again each time, and keeps what it knew when a read fails", async () => {
+    inv.mockResolvedValueOnce({ certified: false, signed: false });
     await useThreads.getState().readLocks(1);
     expect(inv).toHaveBeenCalledWith("a11y_protection", { doc: 1 });
-    expect(useThreads.getState().locks[1]).toEqual({ certified: true, signed: true });
+    expect(useThreads.getState().locks[1]).toEqual({ certified: false, signed: false });
+    // Certified since (a save): the controls go down.
+    inv.mockResolvedValueOnce({ certified: true, signed: true });
     await useThreads.getState().readLocks(1);
-    expect(inv).toHaveBeenCalledTimes(1);
+    expect(useThreads.getState().locks[1]).toEqual({ certified: true, signed: true });
+    expect(inv).toHaveBeenCalledTimes(2);
+    // A failed read is not taken for "not certified".
+    inv.mockRejectedValueOnce("no");
+    await useThreads.getState().readLocks(1);
+    expect(useThreads.getState().locks[1]).toEqual({ certified: true, signed: true });
     inv.mockRejectedValueOnce("no");
     await useThreads.getState().readLocks(2);
     expect(useThreads.getState().locks[2]).toBeUndefined();
+  });
+
+  it("a read that was overtaken does not replace a newer one", async () => {
+    let first!: (v: unknown) => void;
+    inv.mockReturnValueOnce(new Promise((r) => (first = r)));
+    const slow = useThreads.getState().readLocks(1);
+    inv.mockResolvedValueOnce({ certified: true, signed: false });
+    await useThreads.getState().readLocks(1);
+    first({ certified: false, signed: false });
+    await slow;
+    expect(useThreads.getState().locks[1]).toEqual({ certified: true, signed: false });
   });
 });
 

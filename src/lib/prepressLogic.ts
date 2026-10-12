@@ -243,7 +243,7 @@ export function shownMargins(m: Margins, outward: boolean): Rect4 {
 /** Why the sheets do nothing on a certified document, and what a signed one gets instead of a rewrite. */
 export const CERTIFIED_REASON = "This document is certified. Any change would void the certification, so Inkwell leaves it as it is.";
 export const SIGNED_WARNING =
-  "This document is signed. Changes are added to the end of the file, so the signatures keep verifying the original, but the file shows as changed after signing.";
+  "This document is signed. Changes are added to the end of the file, so the signatures keep verifying the original, but the file shows as changed after signing. Anything added and then removed in the same session stays in the saved file.";
 
 /** The margins that take `ref` to `box`: `applyMargins` backwards. */
 export function marginsBetween(ref: Rect4, box: Rect4, rot: number, outward: boolean): Margins {
@@ -576,7 +576,10 @@ export function tabTarget(count: number, at: number, back: boolean): number | nu
   return (at + (back ? -1 : 1) + count) % count;
 }
 
-/** Ctrl/Cmd+S (not Save as) is held back while Convert Colors waits to save: a Save would write the conversion over the original. */
+/**
+ * Ctrl/Cmd+S (not Save as), Ctrl/Cmd+W and Ctrl/Cmd+K are held back while Convert Colors waits to save: a Save, the
+ * save prompt of a tab close and the palette's Save would each write the conversion over the original.
+ */
 export function holdsSave(e: { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }, unsaved: boolean): boolean {
-  return unsaved && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s";
+  return unsaved && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && ["s", "w", "k"].includes(e.key.toLowerCase());
 }

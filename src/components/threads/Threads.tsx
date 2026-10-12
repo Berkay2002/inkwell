@@ -43,9 +43,10 @@ export function ThreadHost({ doc }: { doc: DocState }) {
   }, [wantList, id, doc.rev]);
   // A certified document takes no edit: the Article tool stays down and the sheet's fields are off.
   const certified = useThreads((s) => s.locks[id]?.certified === true);
+  // Read again after every edit and every save (a save is where a document gets signed or certified).
   useEffect(() => {
     if (wantList) void th().readLocks(id);
-  }, [wantList, id]);
+  }, [wantList, id, doc.rev, doc.dirty]);
   useEffect(() => {
     if (certified && tool) th().setTool(false);
   }, [certified, tool]);

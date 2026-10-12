@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { pagesIn } from "../lib/combineLogic";
+import { badRangeMessage, pagesIn, planFiles, securityDropped } from "../lib/combineLogic";
 import { type CombineEntry, type CombineSheet as SheetState, pageUrl, useCombine } from "../lib/combineStore";
 import type { CombineFilePlan } from "../lib/api";
 import { Icon } from "./Icons";
+import { PasswordPrompt } from "./Overlays";
 import "./combine.css";
 
 const act = () => useCombine.getState();
@@ -12,10 +13,12 @@ export function CombineSheet() {
   const sheet = useCombine((s) => s.sheet);
   const open = sheet != null;
   const running = sheet?.phase === "running";
+  const unlocking = sheet?.unlock != null;
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !running) {
+      // the password prompt over the sheet takes its own Escape
+      if (e.key === "Escape" && !running && !unlocking) {
         // a field being typed in keeps its own Escape (blur)
         if ((e.target as HTMLElement | null)?.closest("input")) return;
         e.stopPropagation();
@@ -24,28 +27,41 @@ export function CombineSheet() {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, running]);
+  }, [open, running, unlocking]);
   if (!sheet) return null;
+  const asking = sheet.unlock ? sheet.entries.find((e) => e.key === sheet.unlock?.key) : undefined;
   return (
-    <div className="scrim cb-scrim" onMouseDown={() => !running && act().close()}>
-      <section className="cb-sheet" role="dialog" aria-label="Combine files" onMouseDown={(e) => e.stopPropagation()}>
-        <header className="cb-head">
-          <Icon name="merge" size={16} />
-          <span className="cb-title">Combine files</span>
-          <span className="grow" />
-          <button className="ax-icon" title="Close" aria-label="Close Combine files" disabled={running} onClick={() => act().close()}>
-            <Icon name="close" size={14} />
-          </button>
-        </header>
-        <Body sheet={sheet} />
-        <Footer sheet={sheet} />
-      </section>
-    </div>
+    <>
+      <div className="scrim cb-scrim" onMouseDown={() => !running && act().close()}>
+        <section className="cb-sheet" role="dialog" aria-label="Combine files" onMouseDown={(e) => e.stopPropagation()}>
+          <header className="cb-head">
+            <Icon name="merge" size={16} />
+            <span className="cb-title">Combine files</span>
+            <span className="grow" />
+            <button className="ax-icon" title="Close" aria-label="Close Combine files" disabled={running} onClick={() => act().close()}>
+              <Icon name="close" size={14} />
+            </button>
+          </header>
+          <Body sheet={sheet} />
+          <Footer sheet={sheet} />
+        </section>
+      </div>
+      {asking && (
+        <PasswordPrompt
+          className="cb-unlock"
+          path={asking.path}
+          error={sheet.unlock?.error}
+          onSubmit={(pw) => act().unlock(pw)}
+          onCancel={() => act().cancelUnlock()}
+        />
+      )}
+    </>
   );
 }
 
 function Body({ sheet }: { sheet: SheetState }) {
-  const { entries, plan } = sheet;
+  const { entries, plan, planKeys } = sheet;
+  const planned = planFiles(entries, plan?.files ?? [], planKeys);
   const [drag, setDrag] = useState<{ from: number; to: number } | null>(null);
   const list = useRef<HTMLUListElement>(null);
 
@@ -98,7 +114,7 @@ function Body({ sheet }: { sheet: SheetState }) {
                 entry={e}
                 index={i}
                 count={entries.length}
-                plan={plan?.files[i] ?? null}
+                plan={planned[i] ?? null}
                 dropBefore={drag != null && drag.to === i && drag.from !== i && drag.to < drag.from}
                 dropAfter={drag != null && drag.to === i && drag.from !== i && drag.to > drag.from}
                 lifted={drag?.from === i}
@@ -141,12 +157,13 @@ function Row({
   const { key, range, pages } = entry;
   const state = plan?.state.state ?? "ready";
   const bad = state !== "ready";
+  const needsPassword = state === "encrypted";
   const taken = pages != null ? pagesIn(range, pages) : null;
   const used = plan ? plan.used : taken ? taken.size : pages;
   const sub = plan
     ? plan.pages === 0
       ? ""
-      : `${plan.pages} ${plan.pages === 1 ? "page" : "pages"}${plan.hasOutline ? ", has bookmarks" : ""}${plan.hasFields ? ", has form fields" : ""}`
+      : `${plan.pages} ${plan.pages === 1 ? "page" : "pages"}${plan.hasOutline ? ", has bookmarks" : ""}${plan.hasFields ? ", has form fields" : ""}${plan.note ? `. ${plan.note}` : ""}`
     : pages != null
       ? `${pages} ${pages === 1 ? "page" : "pages"}`
       : "";
@@ -180,8 +197,15 @@ function Row({
           <span className="cb-name" title={entry.path}>
             {entry.name}
           </span>
-          <span className={bad ? "cb-sub bad" : "cb-sub dim"}>{bad && plan?.message ? plan.message : sub}</span>
+          <span className={bad ? "cb-sub bad" : "cb-sub dim"} title={bad && plan?.message ? plan.message : sub}>
+            {needsPassword && !entry.password ? "Password needed" : bad && plan?.message ? plan.message : sub}
+          </span>
         </div>
+        {needsPassword && entry.locked != null && (
+          <button className="btn" onClick={() => act().askUnlock(key)}>
+            Unlock…
+          </button>
+        )}
         <label className="cb-range">
           <span className="cb-sr">Pages of {entry.name}</span>
           <input
@@ -289,7 +313,7 @@ function PageThumb({ entry, page, on }: { entry: CombineEntry; page: number; on:
 }
 
 function Footer({ sheet }: { sheet: SheetState }) {
-  const { options, plan, planning, planError, phase, error, entries } = sheet;
+  const { options, plan, planKeys, planning, planError, phase, error, entries } = sheet;
   const running = phase === "running";
   const outcome =
     entries.length === 0
@@ -299,7 +323,7 @@ function Footer({ sheet }: { sheet: SheetState }) {
         : plan
           ? plan.canRun
             ? plan.summary
-            : (plan.files.find((f) => f.state.state === "badRange")?.message ?? "Fix the files marked in red to combine")
+            : (badRangeMessage(entries, plan.files, planKeys) ?? "Fix the files marked in red to combine")
           : "Reading the files…";
   const bad = !!planError || (plan != null && !plan.canRun && entries.length > 0);
   return (
@@ -313,6 +337,10 @@ function Footer({ sheet }: { sheet: SheetState }) {
           onChange={(v) => act().setOptions({ keepOutlines: v })}
         />
         <Check label="A contents page in front" checked={options.contentsPage} disabled={running} onChange={(v) => act().setOptions({ contentsPage: v })} />
+        <Check label="Keep the source page labels" checked={options.keepLabels} disabled={running} onChange={(v) => act().setOptions({ keepLabels: v })} />
+        {securityDropped(entries, planFiles(entries, plan?.files ?? [], planKeys)) && (
+          <span className="cb-note dim">The combined file has no password and no restrictions.</span>
+        )}
       </div>
       <footer className="cb-foot">
         <span className={bad ? "cb-outcome bad" : "cb-outcome"} aria-live="polite">

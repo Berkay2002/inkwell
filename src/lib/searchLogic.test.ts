@@ -182,6 +182,8 @@ describe("catalog lines", () => {
   it("summarises a build, and a stopped one keeps the old index", () => {
     const b = { files: 30, added: 0, changed: 2, removed: 0, damaged: 1, password: 1, cancelled: false };
     expect(buildLine(b)).toBe("30 files, 2 changed; 2 could not be read");
+    expect(buildLine({ ...b, tooLarge: 3 })).toBe("30 files, 2 changed; 2 could not be read, 3 too large to index");
+    expect(buildLine({ ...b, damaged: 0, password: 0, tooLarge: 1 })).toBe("30 files, 2 changed; 1 too large to index");
     expect(buildLine({ ...b, cancelled: true })).toMatch(/previous index/);
     expect(buildLine({ ...b, cancelled: true }, false)).toMatch(/Build it again/);
   });

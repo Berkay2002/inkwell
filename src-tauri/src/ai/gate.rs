@@ -7,7 +7,7 @@
 //! threads. Neither provider's wire format is in here.
 
 use super::chat::{ActState, ChatEvent, Sink, TurnCtx};
-use super::tools::{self, Class, Ctx, Mode, Tool, UiAction};
+use super::tools::{self, Class, Ctx, Mode, Tool};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -88,12 +88,39 @@ pub(super) fn run_call(
         act(ActState::Failed, Some("stopped".into()));
         return Err("The request was stopped.".into());
     }
+    let progress = |s: String| act(ActState::Running, Some(s));
+    let tc = Ctx {
+        text: ctx.text,
+        host: ctx.host,
+        name: &ctx.req.name,
+        current_page: *page,
+        selection: ctx.req.selection.as_ref(),
+        cancel: gate.cancel,
+        progress: &progress,
+    };
+    // a change that cannot happen is refused before the user is asked, and the card says exactly
+    // what will change
+    let mut card = None;
+    if let Some(check) = &tool.check {
+        match catch_unwind(AssertUnwindSafe(|| check(&tc, args))) {
+            Ok(Ok(detail)) => card = detail,
+            Ok(Err(e)) => {
+                act(ActState::Failed, Some(e.clone()));
+                return Err(e);
+            }
+            Err(_) => {
+                let e = "The tool failed unexpectedly.".to_string();
+                act(ActState::Failed, Some(e.clone()));
+                return Err(e);
+            }
+        }
+    }
     let mode = *gate.mode.lock().unwrap();
     if mode.needs_approval(tool.class) {
         // registered before the card is announced: the answer may come back at once
         let (tx, rx) = mpsc::channel();
         gate.approvals.lock().unwrap().insert(call_id.to_string(), tx);
-        act(ActState::Waiting, None);
+        act(ActState::Waiting, card);
         let (why, text) = match await_decision(gate, call_id, rx) {
             Decision::Apply => (None, None),
             Decision::Reject => (
@@ -118,20 +145,13 @@ pub(super) fn run_call(
         }
     }
     act(ActState::Running, None);
-    let tc = Ctx {
-        text: ctx.text,
-        host: ctx.host,
-        name: &ctx.req.name,
-        current_page: *page,
-        selection: ctx.req.selection.as_ref(),
-    };
     let out = catch_unwind(AssertUnwindSafe(|| (tool.run)(&tc, args)))
         .unwrap_or_else(|_| Err("The tool failed unexpectedly.".into()));
     match &out {
         Ok(o) => {
             if let Some(ui) = &o.ui {
-                match ui {
-                    UiAction::GoTo { page: p } | UiAction::Show { page: p, .. } => *page = *p,
+                if let Some(p) = ui.page() {
+                    *page = p;
                 }
                 sink(ChatEvent::Ui { action: ui.clone() });
             }

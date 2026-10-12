@@ -151,6 +151,11 @@ export const DISCARD: { key: keyof CompressOptions["strip"]; label: string; hint
   { key: "embeddedFiles", label: "File attachments", hint: "Embedded files and attachment annotations" },
   { key: "javascript", label: "JavaScript actions", hint: "Document, page and field scripts" },
   { key: "bookmarks", label: "Bookmarks", hint: "The outline tree" },
+  {
+    key: "invalidBookmarks",
+    label: "Invalid bookmarks",
+    hint: "Those whose page or named destination no longer exists; the working ones under them move up",
+  },
   { key: "formActions", label: "Form submit, reset and import actions", hint: "Fields keep their values" },
   {
     key: "alternateImages",

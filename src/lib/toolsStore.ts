@@ -10,9 +10,16 @@ import type {
   CompressReport,
   NamedCompressPreset,
   OcrBackend,
+  OcrDetection,
+  OcrFont,
   OcrLanguages,
   OcrOutcome,
+  OcrPlan,
+  OcrStyle,
+  OcrUnsure,
 } from "./api";
+import { initialLanguages, ocrProgress, previewPage, requestOptions, toggleLanguage } from "./ocrLogic";
+import { parseRange } from "./pageRange";
 import * as edits from "./edit";
 import { forPreset, normalizeOptions, validateOptions } from "./optimizer";
 
@@ -35,9 +42,14 @@ export type Phase = "options" | "running" | "done" | "error";
 export type OcrScope = "all" | "page" | "range";
 
 export interface ToolSettings {
-  /** BCP-47 tag of the language OCR starts with. */
-  ocrLanguage: string | null;
-  ocrBackend: OcrBackend;
+  /** What OCR was last run with: primary tags in priority order; null = never chosen. */
+  ocrLanguages: string[] | null;
+  ocrStyle: OcrStyle;
+  ocrDpi: number;
+  /** Leave pages that already have text alone. */
+  ocrSkipText: boolean;
+  /** The face editable text is set in. */
+  ocrFont: OcrFont;
   compressPreset: CompressPreset;
   compressMode: CompressMode;
   /** The Advanced settings as they were left (without the fonts picked for one document). */
@@ -46,8 +58,11 @@ export interface ToolSettings {
 
 const KEY = "inkwell.tools";
 const DEFAULTS: ToolSettings = {
-  ocrLanguage: null,
-  ocrBackend: "windows",
+  ocrLanguages: null,
+  ocrStyle: "searchable",
+  ocrDpi: 200,
+  ocrSkipText: true,
+  ocrFont: "auto",
   compressPreset: "balanced",
   compressMode: "presets",
   compressAdvanced: null,
@@ -55,10 +70,27 @@ const DEFAULTS: ToolSettings = {
 
 export function loadToolSettings(): ToolSettings {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    const raw = JSON.parse(localStorage.getItem(KEY) ?? "{}");
+    // The single language an older version kept.
+    if (!raw.ocrLanguages && typeof raw.ocrLanguage === "string") raw.ocrLanguages = [raw.ocrLanguage.split("-")[0].toLowerCase()];
+    const { ocrLanguage: _old, ocrBackend: _backend, ...rest } = raw;
+    return { ...DEFAULTS, ...rest };
   } catch {
     return DEFAULTS;
   }
+}
+
+/** The before/after of one page for the chosen style. */
+export interface PreviewState {
+  phase: "loading" | "ready" | "error";
+  /** 0-based. */
+  page: number;
+  before: string | null;
+  after: string | null;
+  message: string | null;
+  converted: number;
+  kept: number;
+  job: number;
 }
 
 export interface Sheet {
@@ -94,10 +126,20 @@ export interface Sheet {
   // ocr
   scope: OcrScope;
   range: string;
+  /** Primary tags in priority order. */
   languages: string[];
+  /** The user changed the selection: a late detection does not replace it. */
+  languagesTouched: boolean;
   backend: OcrBackend;
-  force: boolean;
+  style: OcrStyle;
+  dpi: number;
+  skipText: boolean;
+  font: OcrFont;
+  preview: PreviewState | null;
   available: OcrLanguages | null;
+  detection: OcrDetection | null;
+  detecting: boolean;
+  plan: OcrPlan | null;
   recognized: OcrOutcome | null;
   /** 0-based pages finished so far in an OCR run (the thumbnails tick them). */
   donePages: number[];
@@ -122,6 +164,15 @@ interface ToolsStore {
   deletePreset: (name: string) => Promise<void>;
   /** File picker for tesseract.exe (shown by the Rust side), then the languages are read again. */
   chooseTesseract: () => Promise<void>;
+  /** Adds or removes a language of the OCR selection and works out the engine for it. */
+  toggleLanguage: (tag: string) => void;
+  /** Opens Windows' language settings (where a language pack is added). */
+  openLanguageSettings: () => void;
+  /** Reads one page and shows it before and after the chosen style, changing nothing. */
+  showPreview: () => Promise<void>;
+  closePreview: () => void;
+  /** Scrolls to a word the editable-text run left in the picture. */
+  reviewWord: (w: OcrUnsure) => void;
   start: (opts?: { saveAs?: boolean }) => Promise<void>;
   cancel: () => void;
   /** Undoes an in-place OCR run (it is one undo step). */
@@ -135,8 +186,10 @@ export const FRIENDLY: Record<string, string> = {
   "bad-password": "That password is not right.",
   "invalid-options": "Those settings are not valid.",
   "needs-permissions-password": "This file doesn't allow copying or page changes. Open it with its permissions password, or remove its security first.",
-  "language-unavailable": "That OCR language is not installed.",
-  "tesseract-not-found": "Tesseract was not found. Set its location in the OCR options.",
+  "language-unavailable": "No installed OCR engine reads that language. The language list says how to add it.",
+  "tesseract-not-found": "Tesseract was not found. Choose its location in the OCR options.",
+  "signed-document": "This document is signed. Straightening or replacing its pictures would break the signature, so it was left alone. The searchable image style adds its text layer without touching the pictures.",
+  "certified-document": "This document is certified: its author allows no changes to it, not even a text layer. It was left alone.",
   stale: "The document changed while it was being read. Run it again.",
 };
 
@@ -172,9 +225,17 @@ const blank = (tool: ToolKind, doc: number): Sheet => ({
   scope: "all",
   range: "",
   languages: [],
-  backend: "windows",
-  force: false,
+  languagesTouched: false,
+  backend: "auto",
+  style: "searchable",
+  dpi: 200,
+  skipText: true,
+  font: "auto",
+  preview: null,
   available: null,
+  detection: null,
+  detecting: false,
+  plan: null,
   recognized: null,
   donePages: [],
   needsSave: false,
@@ -258,16 +319,48 @@ export const useTools = create<ToolsStore>((set, get) => {
     }
   };
 
+  const ocrOpen = (doc: number) => get().sheet?.doc === doc && get().sheet?.tool === "ocr";
+
+  /** Works out which engine reads `languages` and what is missing; only the latest answer counts. */
+  async function refreshPlan(doc: number, languages: string[]) {
+    if (languages.length === 0) {
+      if (ocrOpen(doc)) patch({ plan: null });
+      return;
+    }
+    try {
+      const plan = await api.ocrPlan(languages, "auto");
+      const cur = get().sheet;
+      if (cur && ocrOpen(doc) && cur.languages.join() === languages.join()) patch({ plan });
+    } catch {
+      /* the sheet keeps its last plan */
+    }
+  }
+
   async function loadLanguages(sheet: Sheet) {
     const s = get().settings;
     try {
       const available = await api.ocrLanguages();
-      const tess = s.ocrBackend === "tesseract" && available.tesseract != null;
-      const backend: OcrBackend = tess ? "tesseract" : "windows";
-      const have = backend === "tesseract" ? available.tesseract!.languages : available.windows;
-      const wanted = s.ocrLanguage && have.includes(s.ocrLanguage) ? s.ocrLanguage : have[0];
-      if (get().sheet?.doc === sheet.doc && get().sheet?.tool === "ocr") {
-        patch({ available, backend, languages: wanted ? [wanted] : [] });
+      if (!ocrOpen(sheet.doc)) return;
+      const languages = initialLanguages({ detection: null, saved: s.ocrLanguages, defaults: available.defaults, catalog: available.catalog });
+      patch({ available, languages, detecting: true });
+      void refreshPlan(sheet.doc, languages);
+      // What the document is written in decides the default, unless the user already chose.
+      try {
+        // Its job id sits where the compress estimate's does: closing the sheet or starting the run stops it.
+        const job = ++jobSeq;
+        patch({ estimateJob: job });
+        const detection = await api.ocrDetect(job, sheet.doc);
+        if (!ocrOpen(sheet.doc)) return;
+        const cur = get().sheet!;
+        if (cur.languagesTouched) {
+          patch({ detection, detecting: false });
+          return;
+        }
+        const next = initialLanguages({ detection, saved: s.ocrLanguages, defaults: available.defaults, catalog: available.catalog });
+        patch({ detection, detecting: false, languages: next });
+        void refreshPlan(sheet.doc, next);
+      } catch {
+        if (ocrOpen(sheet.doc)) patch({ detecting: false });
       }
     } catch (e) {
       patch({ phase: "error", error: friendly(e) });
@@ -288,8 +381,11 @@ export const useTools = create<ToolsStore>((set, get) => {
       const sheet: Sheet = {
         ...blank(tool, d.id),
         preset: s.compressPreset,
+        style: s.ocrStyle,
+        dpi: s.ocrDpi,
+        skipText: s.ocrSkipText,
+        font: s.ocrFont,
         mode: s.compressMode ?? "presets",
-        backend: s.ocrBackend,
         needsSave: d.dirty,
         scope: opts?.scope ?? "all",
         range: opts?.range ?? "",
@@ -308,7 +404,11 @@ export const useTools = create<ToolsStore>((set, get) => {
       set({ sheet: null });
     },
 
-    set: (p) => patch(p),
+    set: (p) => {
+      // A preview is of one set of choices: any change to them makes it stale.
+      if ("style" in p || "dpi" in p || "font" in p || "scope" in p || "range" in p) get().closePreview();
+      patch(p);
+    },
 
     setSettings: (p) => {
       const settings = { ...get().settings, ...p };
@@ -385,8 +485,62 @@ export const useTools = create<ToolsStore>((set, get) => {
     chooseTesseract: async () => {
       const sheet = get().sheet;
       if (!sheet || (await api.ocrChooseTesseract().catch(() => null)) == null) return;
-      get().setSettings({ ocrBackend: "tesseract" });
       await loadLanguages(sheet);
+    },
+
+    toggleLanguage: (tag) => {
+      const sheet = get().sheet;
+      if (!sheet) return;
+      const languages = toggleLanguage(sheet.languages, tag);
+      get().closePreview();
+      patch({ languages, languagesTouched: true });
+      void refreshPlan(sheet.doc, languages);
+    },
+
+    openLanguageSettings: () => {
+      void api.openLanguageSettings().catch(() => {});
+    },
+
+    showPreview: async () => {
+      const sheet = get().sheet;
+      if (!sheet || sheet.tool !== "ocr" || sheet.phase !== "options") return;
+      const d = st().docs[sheet.doc];
+      if (!d) return;
+      get().closePreview();
+      const job = ++jobSeq;
+      const pages = sheet.scope === "range" ? parseRange(sheet.range, d.pageCount) : sheet.scope === "page" ? [d.currentPage] : null;
+      const page = previewPage(pages, d.currentPage);
+      const base = { page, before: null, after: null, message: null, converted: 0, kept: 0, job };
+      patch({ preview: { ...base, phase: "loading" } });
+      const mine = () => get().sheet?.preview?.job === job;
+      try {
+        const p = await api.ocrPreview(job, page, {
+          doc: d.id,
+          languages: sheet.languages,
+          backend: sheet.backend,
+          ...requestOptions({ style: sheet.style, dpi: sheet.dpi, skipText: sheet.skipText }),
+          ...(sheet.style === "editable" ? { font: sheet.font } : {}),
+        });
+        if (!mine()) return;
+        const e = p.applied.editable;
+        patch({ preview: { ...base, phase: "ready", before: p.before, after: p.after, converted: e?.words_converted ?? 0, kept: e?.words_kept ?? 0 } });
+      } catch (e) {
+        if (!mine()) return;
+        if (String(e) === "cancelled") patch({ preview: null });
+        else patch({ preview: { ...base, phase: "error", message: friendly(e) } });
+      }
+    },
+
+    closePreview: () => {
+      const p = get().sheet?.preview;
+      if (!p) return;
+      if (p.phase === "loading") void api.toolCancel(p.job).catch(() => {});
+      patch({ preview: null });
+    },
+
+    reviewWord: (w) => {
+      const doc = get().sheet?.doc;
+      if (doc != null) st().goTo(doc, w.page, Math.max(0, w.bbox[1] - 80));
     },
 
     start: async (opts) => {
@@ -398,7 +552,7 @@ export const useTools = create<ToolsStore>((set, get) => {
       const job = ++jobSeq;
       current = job;
       const upd = live(job);
-      patch({ phase: "running", progress: 0, status: "Starting", error: null });
+      patch({ phase: "running", progress: 0, status: "Starting", error: null, preview: null });
       try {
         if (sheet.tool === "compress") {
           // The engine reads the file on disk: pending edits are saved first (the button says so).
@@ -438,8 +592,9 @@ export const useTools = create<ToolsStore>((set, get) => {
               doc: d.id,
               pages,
               languages: sheet.languages,
-              force: sheet.force,
               backend: sheet.backend,
+              ...requestOptions({ style: sheet.style, dpi: sheet.dpi, skipText: sheet.skipText }),
+              ...(sheet.style === "editable" ? { font: sheet.font } : {}),
               saveTo,
             },
             (p) =>
@@ -449,17 +604,19 @@ export const useTools = create<ToolsStore>((set, get) => {
                   ? {
                       sheet: {
                         ...s.sheet,
-                        progress: p.total ? p.done / p.total : 0,
-                        status: `Reading page ${p.page + 1} (${p.done} of ${p.total})`,
-                        donePages: [...s.sheet.donePages, p.page],
+                        progress: ocrProgress(p, s.sheet.style),
+                        status: p.writing ? `Writing page ${p.done} of ${p.total}` : `Reading page ${p.page + 1} (${p.done} of ${p.total})`,
+                        // Pages show as done when they were read; writing them is the same pages again.
+                        donePages: p.writing ? s.sheet.donePages : [...s.sheet.donePages, p.page],
                       },
                     }
                   : s,
               ),
           );
           if (out.state) edits.applyState(d.id, out.state);
-          const first = sheet.languages[0];
-          if (first) get().setSettings({ ocrLanguage: first, ocrBackend: sheet.backend });
+          if (sheet.languages.length > 0) {
+            get().setSettings({ ocrLanguages: sheet.languages, ocrStyle: sheet.style, ocrDpi: sheet.dpi, ocrSkipText: sheet.skipText, ocrFont: sheet.font });
+          }
           upd({ phase: "done", progress: 1, recognized: out });
         }
       } catch (e) {

@@ -42,6 +42,7 @@ pub use audit::{Audit, AuditItem, Category, CategoryUsage};
 pub use flatten::{FlattenReport, Transparency};
 pub use fonts::{FontUsage, Unembedded};
 pub use strip::{Strip, StripReport};
+pub(crate) use strip::Dests;
 pub use visual::{PageDiff, VisualCheck};
 
 // ---------------------------------------------------------------- options
@@ -188,6 +189,9 @@ pub enum Error {
     InvalidOptions(String),
     #[error("verification failed: {0}")]
     Verify(String),
+    /// The document is certified: a compressed copy of it would not be.
+    #[error("{0}")]
+    Refused(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -499,15 +503,10 @@ pub fn audit_file(path: &Path, password: Option<&str>) -> Result<Audit, Error> {
     audit::audit(&doc, fs::metadata(path)?.len())
 }
 
-/// The document has signatures (AcroForm /SigFlags bit 1): a rewritten copy invalidates them.
+/// The document is signed or certified (signature fields with a value count too, not only `/SigFlags`): a rewritten
+/// copy invalidates them.
 fn is_signed(doc: &mupdf::pdf::PdfDocument) -> bool {
-    let flags = doc
-        .catalog()
-        .ok()
-        .and_then(|c| c.get_dict("AcroForm").ok().flatten())
-        .and_then(|f| f.get_dict("SigFlags").ok().flatten())
-        .and_then(|f| f.as_int().ok());
-    flags.is_some_and(|f| f & 1 != 0)
+    crate::outline::signed(doc)
 }
 
 /// [`audit_file`], and whether the document is signed (the sheet warns before Start).
@@ -536,6 +535,8 @@ pub fn compress(
     let size_before = fs::metadata(input)?.len();
     let password = opts.password.as_deref();
     let mut doc = open_pdf(input, password)?;
+    // The copy is a rewrite of every object: a certification does not survive it (a signature only warns, below).
+    crate::outline::refuse_if_certified(&doc, "Compressing it").map_err(|e| Error::Refused(e.to_string()))?;
     let pages = doc.page_count()? as usize;
     run.lap("open");
 
@@ -552,6 +553,9 @@ pub fn compress(
     run.lap("strip");
     if stripped.links_unchecked {
         warnings.push("The named destinations could not be read, so links were not checked.".into());
+    }
+    if let Some(why) = &stripped.bookmarks_unchecked {
+        warnings.push(format!("Invalid bookmarks were not removed: {why}."));
     }
     run.check()?;
 

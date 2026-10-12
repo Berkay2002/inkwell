@@ -7,6 +7,7 @@ import { openConvertColors, openOutputPreview, openPageBoxes, openPrinterMarks, 
 import { useRedact } from "./redact";
 import { useSearch } from "./searchStore";
 import { useAnnot } from "./annot";
+import { useMeasure } from "./measure";
 import { useForms } from "./forms";
 import { useThreads } from "./threads";
 import { useHistory } from "./historyStore";
@@ -15,6 +16,7 @@ import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
 import { togglePageDark } from "./pageDark";
+import { useBatch } from "./batchStore";
 import { useConvert } from "./convertStore";
 import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
@@ -23,7 +25,9 @@ import { openEditSection, useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 import { useSheets } from "./organizePlus";
 import { useDocJs } from "./docJsStore";
+import { useStamps } from "./stamps";
 import { createPortfolio } from "./portfolioStore";
+import { useExchange } from "./dataExchange";
 
 export interface Command {
   id: string;
@@ -138,6 +142,7 @@ export const commands: Command[] = [
   { id: "split", title: "Split into single pages", needsDoc: true, run: withDoc((d) => void edits.split(d.id, 1)) },
   { id: "merge", title: "Combine files…", run: () => edits.combineFiles() },
   { id: "create-portfolio", title: "Create PDF Portfolio…", run: () => void createPortfolio() },
+  { id: "custom-stamps", title: "Custom stamps…", run: () => useStamps.getState().openManager() },
   { id: "doc-javascript", title: "Document JavaScript…", needsDoc: true, run: withDoc((d) => useDocJs.getState().open(d.id)) },
   {
     id: "page-labels",
@@ -330,6 +335,7 @@ export const commands: Command[] = [
     needsDoc: true,
     run: () => (usePreflight.getState().open ? usePreflight.getState().setOpen(false) : openPreflight()),
   },
+  { id: "action-wizard", title: "Action Wizard: run steps on many files…", run: () => void useBatch.getState().show() },
   {
     id: "output-preview",
     title: "Output Preview (plates, ink coverage)",
@@ -341,6 +347,11 @@ export const commands: Command[] = [
   { id: "page-boxes", title: "Set page boxes (trim, bleed)…", needsDoc: true, run: openPageBoxes },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },
+  { id: "comments-export", title: "Export comments (XFDF, FDF)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().exportComments(d.id)) },
+  { id: "comments-import", title: "Import comments (XFDF, FDF)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().importComments(d.id)) },
+  { id: "forms-export", title: "Forms: export form data (FDF, XFDF, JSON)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().exportForm(d.id)) },
+  { id: "forms-import", title: "Forms: import form data (FDF, XFDF, JSON)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().importForm(d.id)) },
+  { id: "measure", title: "Measure", needsDoc: true, run: () => useMeasure.getState().setOpen(!useMeasure.getState().open) },
   { id: "forms", title: "Forms", keys: ["Ctrl+Alt+F"], needsDoc: true, run: () => useForms.getState().setOpen(!useForms.getState().open) },
   {
     id: "forms-prepare",
@@ -373,7 +384,7 @@ export const commands: Command[] = [
   })),
   {
     id: "comment-delete",
-    title: "Comments: delete selected",
+    title: "Comments: delete selected (or the selected measurement)",
     keys: ["Delete"],
     needsDoc: true,
     notInText: true,
@@ -382,8 +393,11 @@ export const commands: Command[] = [
       const th = useThreads.getState();
       if (th.tool && th.selected?.doc === d.id) return void th.removeBead(d.id, th.selected.thread, th.selected.bead);
       const f = useForms.getState();
-      const field = f.open && f.authoring ? f.get(d.id).selected : null;
-      if (field) return void f.remove(d.id, [field]);
+      const fields = f.open && f.authoring ? f.get(d.id).picked : [];
+      if (fields.length > 0) return void f.remove(d.id, fields);
+      const m = useMeasure.getState();
+      const measured = m.open ? m.get(d.id).selected : null;
+      if (measured) return void m.remove(d.id, measured);
       const a = useAnnot.getState();
       const sel = a.open ? a.get(d.id).selected : null;
       if (sel) void a.remove(d.id, [sel]);

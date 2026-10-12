@@ -40,6 +40,8 @@ regex = "1"
 flate2 = "1"
 # Reads the user's codex config.toml (MCP server names). Already in the tree through tauri's build deps.
 toml = "0.8"
+# Reads XFDF (comments and form data exchange, src/exchange.rs). Already in the tree through tauri (plist); no DTD or entity expansion.
+quick-xml = "0.42"
 # Version history store (history/) and compare (diff/).
 fastcdc = "3"
 blake3 = "1"
@@ -81,7 +83,7 @@ windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win
 webview2-com = "0.39"
 windows-core = "0.62"
 # Windows.Media.Ocr (OCR backend); already in the tree through tauri, this only adds feature flags.
-windows = { version = "0.62", features = ["Media_Ocr", "Graphics_Imaging", "Storage_Streams", "Globalization", "Foundation_Collections"] }
+windows = { version = "0.62", features = ["Media_Ocr", "Graphics_Imaging", "Storage_Streams", "Globalization", "Foundation_Collections", "System_UserProfile"] }
 
 [profile.release]
 codegen-units = 1

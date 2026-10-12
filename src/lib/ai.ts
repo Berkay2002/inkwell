@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { EditState } from "./api";
 
 export type Rect4 = [number, number, number, number];
 
@@ -69,17 +70,39 @@ export interface AskRequest {
 export interface Activity {
   id: string;
   tool: string;
-  class: "read" | "edit" | "destructive";
+  /** `permanent` cannot be taken back from the saved file (a redaction) and asks in every mode. */
+  class: "read" | "edit" | "destructive" | "permanent";
   /** What and where, ready to show ("Searched “Ciri”", "Deleted page 4"). */
   label: string;
   state: "waiting" | "running" | "done" | "failed" | "rejected";
   detail: string | null;
 }
 
-/** The model moved the user's view. */
+/** The report of a redaction the assistant applied (the Redact rail opens on it). */
+export interface RedactReport {
+  marks: number;
+  sanitize: Record<string, unknown>;
+  verify: { leaks: { needle: string; place: string; critical: boolean }[] };
+}
+
+/** The model moved the user's view, or changed the document. */
 export type UiAction =
   | { type: "goTo"; page: number }
-  | { type: "show"; page: number; rects: Rect4[]; quote: string };
+  | { type: "show"; page: number; rects: Rect4[]; quote: string }
+  /** The assistant changed the document: this is its new generation (pages, undo label, marks). */
+  | { type: "edited"; state: EditState; redacted: RedactReport | null }
+  /** The assistant made a new file next to the document (compress, export, convert, create): the message offers
+   *  to open it. `token` is the open token the backend minted for `path`. */
+  | ({ type: "file" } & FileOffer)
+  /** Open one of the app's tools (`toolItems` ids) for what the assistant may not do itself. */
+  | { type: "openTool"; tool: string };
+
+/** A file the assistant made, offered under its answer as "Open <name>". */
+export interface FileOffer {
+  name: string;
+  path: string;
+  token: string;
+}
 
 export type ChatEvent =
   | { kind: "status"; phase: "reading" | "connecting" | "thinking" }
@@ -92,7 +115,6 @@ export type ChatEvent =
       kind: "done";
       answer: string;
       citations: Citation[];
-      followups: string[];
       firstTokenMs: number | null;
       totalMs: number;
       prepMs: number;

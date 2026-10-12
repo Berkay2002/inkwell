@@ -9,7 +9,7 @@ use mupdf::{Document, TextPageFlags};
 use serde_json::json;
 
 use super::action::*;
-use super::run::{Event, Report, Status, run};
+use super::run::{Event, Report, Status, preview, run};
 use super::steps::Env;
 use super::store::{self, Store, StoreError};
 use crate::compress::Preset;
@@ -127,7 +127,7 @@ impl Recognizer for Stub {
         }
         let words = [("Invoice", [72.0, 100.0, 120.0, 114.0]), ("Total", [126.0, 100.0, 166.0, 114.0])];
         Ok(RawPage {
-            lines: vec![RawLine { words: words.iter().map(|(t, r)| RawWord { text: t.to_string(), rect: *r }).collect() }],
+            lines: vec![RawLine { words: words.iter().map(|(t, r)| RawWord { text: t.to_string(), rect: *r, conf: None }).collect() }],
             angle_deg: None,
         })
     }
@@ -1047,6 +1047,39 @@ fn a_batch_output_drops_an_embedded_index_the_step_made_stale() {
     assert!(!embed::status(&out).present, "the stale index is not kept in the output");
 }
 
+/// A result is written to a name a catalog still lists (the file there was deleted after the catalog was built):
+/// the catalog must not keep the old file's words under it.
+#[test]
+fn a_redaction_written_over_a_catalogued_name_is_forgotten_by_the_catalog() {
+    use crate::search::catalog::{self, app::{forget_all, Jobs}};
+    let d = dir("redact-forgets");
+    let docs = d.join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    let src = put(&docs, "in.pdf", &text_pdf(&[&["the secret word is quokka"]]));
+    let stale = put(&docs, "in (batch).pdf", &text_pdf(&[&["older words, also quokka"]]));
+    let root = d.join("catalogs");
+    let m = catalog::create(&root, "T", &docs.to_string_lossy(), true).unwrap();
+    let cat = root.join(&m.id);
+    catalog::build(&cat, true, &AtomicBool::new(false), &|_, _| {}).unwrap();
+    assert_eq!(catalog::load_meta(&cat).unwrap().files, 2);
+    std::fs::remove_file(&stale).unwrap();
+    let jobs = Arc::new(Jobs::default());
+    let mut e = env();
+    let (r2, j2) = (root.clone(), jobs.clone());
+    e.saved = Some(Arc::new(move |p| {
+        let _ = forget_all(&r2, &j2, p);
+    }));
+    let redact = Step::Redact(RedactStep {
+        queries: vec![RedactQuery::Text { text: "quokka".into(), case_sensitive: false, whole_word: true }],
+        ..RedactStep::default()
+    });
+    let r = run(&action("R", vec![redact]), &[src], None, &e, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    assert_eq!(Path::new(&r.files[0].outputs[0].path), stale, "the result took the name the catalog lists");
+    let rows = catalog::load_meta(&cat).unwrap();
+    assert_eq!(rows.files, 1, "the row of the name the result was written to is gone");
+}
+
 #[test]
 fn the_built_in_actions_run_end_to_end() {
     let d = dir("builtins");
@@ -1546,4 +1579,69 @@ fn an_image_folder_is_published_as_one_rename() {
     assert_eq!(names(&busy), ["mine.txt"]);
     assert_eq!(names(&d.join("doc (batch) (images) (2)")), ["doc-1.png", "doc-2.png", "doc-3.png"]);
     assert_eq!(names(&d), ["doc (batch) (images)", "doc (batch) (images) (2)", "doc.pdf"]);
+}
+
+// ---------------------------------------------------------------- preview
+
+#[test]
+fn the_preview_agrees_with_the_run_and_writes_nothing() {
+    use crate::protect::{Changes, Printing};
+    let d = dir("preview");
+    let plain = sample(&d, "plain.pdf", 1);
+    let taken = sample(&d, "taken.pdf", 1);
+    put(&d, "taken (batch).pdf", b"already here");
+    let signed = put(&d, "signed.pdf", &signed_pdf());
+    let bad = put(&d, "bad.pdf", b"not a pdf");
+    let restricted = guarded(&d, "r.pdf", Changes::None, Printing::High);
+    let open = plain.clone();
+    let mut e = env();
+    e.is_open = Arc::new(move |p| p == open);
+    // Two exports and a stamp: the stamp breaks the signature, the exports bring a txt and an images folder.
+    let act = action(
+        "Stamp and export",
+        vec![footer("<<1>>"), Step::ExportText(ExportTextStep::default()), Step::ExportImages(ExportImagesStep::default())],
+    );
+    let files = [plain.clone(), taken.clone(), signed.clone(), bad.clone(), restricted.clone(), taken.clone()];
+    let before = names(&d);
+
+    let p = preview(&act, &files, &e).unwrap();
+    assert_eq!(names(&d), before, "a preview writes nothing, not even a staging folder");
+    let r = run(&act, &files, None, &e, &AtomicBool::new(false), &mut |_| {}).unwrap();
+
+    // The same verdict and the same reason, file by file (a step failing is the one thing a preview cannot say).
+    for (pf, rf) in p.files.iter().zip(&r.files) {
+        assert_eq!(pf.status, rf.status, "{}", pf.name);
+        assert_eq!(pf.reason, rf.reason, "{}", pf.name);
+    }
+    assert_eq!((p.ok, p.skipped, p.errors), (r.ok, r.skipped, r.errors));
+    assert!(p.files[0].reason.as_deref().unwrap().contains("open in Inkwell"));
+    assert!(p.files[2].reason.as_deref().unwrap().starts_with("signed:"));
+    assert_eq!(p.files[5].reason.as_deref(), Some("listed more than once"));
+
+    // The names it promised are the names the run made.
+    let f = &p.files[1];
+    assert_eq!(f.status, Status::Ok);
+    assert_eq!(f.steps.len(), 3);
+    let made: Vec<String> = r.files[1].outputs.iter().map(|o| Path::new(&o.path).file_name().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(f.outputs, made);
+    assert_eq!(f.outputs[0], "taken (batch) (2).pdf", "the name that is taken is not promised");
+}
+
+#[test]
+fn two_files_with_one_name_for_a_chosen_folder_are_promised_different_names() {
+    let d = dir("preview-folder");
+    let a = sample(&d, "same.pdf", 1);
+    let sub = d.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let b = sample(&sub, "same.pdf", 1);
+    let mut act = action("n", vec![footer("<<1>>")]);
+    act.output = OutputRule::Folder { suffix: "".into() };
+    // The folder is chosen when the run starts: the preview needs none, and only keeps the names apart.
+    let p = preview(&act, &[a, b], &env()).unwrap();
+    assert_eq!(p.files[0].outputs, ["same.pdf"]);
+    assert_eq!(p.files[1].outputs, ["same (2).pdf"]);
+    // It asks for what a run asks for: at least one file, and a valid action.
+    assert!(preview(&act, &[], &env()).is_err());
+    act.steps.clear();
+    assert!(preview(&act, &[d.join("same.pdf")], &env()).is_err());
 }

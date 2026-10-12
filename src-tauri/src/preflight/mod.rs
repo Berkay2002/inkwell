@@ -740,8 +740,8 @@ pub struct Converted {
 }
 
 /// Converts into a new file at `dest` (never an open document; the caller checked). The open
-/// document is not touched; the new file is read back and checked.
-#[allow(clippy::too_many_arguments)]
+/// document is not touched; the new file is read back and checked. The copy is written without encryption, so a
+/// document whose owner does not allow copying out of it is refused (as export and extract do).
 pub fn convert_to_file(
     eng: &Engine,
     doc: DocId,
@@ -751,6 +751,34 @@ pub fn convert_to_file(
     progress: &mut dyn FnMut(Progress),
     cancel: &AtomicBool,
 ) -> Result<Converted> {
+    convert_into(eng, doc, profile, c, dest, true, progress, cancel)
+}
+
+/// [`convert_to_file`] for a name nobody confirmed (the assistant's): a file at `dest` is never replaced.
+pub fn convert_to_new_file(
+    eng: &Engine,
+    doc: DocId,
+    profile: Profile,
+    c: &Convert,
+    dest: &str,
+    progress: &mut dyn FnMut(Progress),
+    cancel: &AtomicBool,
+) -> Result<Converted> {
+    convert_into(eng, doc, profile, c, dest, false, progress, cancel)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_into(
+    eng: &Engine,
+    doc: DocId,
+    profile: Profile,
+    c: &Convert,
+    dest: &str,
+    replace: bool,
+    progress: &mut dyn FnMut(Progress),
+    cancel: &AtomicBool,
+) -> Result<Converted> {
+    eng.ensure_extractable(doc)?;
     // The new file replaces what is at `dest`: never a document that is open.
     eng.check_not_open(dest, None)?;
     let path = eng.doc_entry(doc)?.path();
@@ -772,8 +800,28 @@ pub fn convert_to_file(
             return Err(bad(format!("The converted file does not pass its own check ({}), so it was not written", shown.join(", "))));
         }
     }
-    crate::history_ipc::write_replace(std::path::Path::new(dest), &bytes).map_err(|e| EngineError::Io(e.to_string()))?;
+    if replace {
+        crate::history_ipc::write_replace(std::path::Path::new(dest), &bytes).map_err(|e| EngineError::Io(e.to_string()))?;
+    } else {
+        write_new_file(std::path::Path::new(dest), &bytes)?;
+    }
     Ok(Converted { path: dest.to_string(), report, fixed: applied.log })
+}
+
+/// `bytes` into a file that must not exist: created exclusively, so a file that appeared at `path` meanwhile is
+/// never replaced (`output-exists`), and a failed write leaves nothing behind.
+fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::{ErrorKind, Write};
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| match e.kind() {
+        ErrorKind::AlreadyExists => EngineError::Io("output-exists".into()),
+        _ => EngineError::Io(e.to_string()),
+    })?;
+    if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
+        drop(f);
+        let _ = std::fs::remove_file(path);
+        return Err(EngineError::Io(e.to_string()));
+    }
+    Ok(())
 }
 
 /// The rules a file that is to say it conforms must not have open: the failed ones, and in the PDF/A
@@ -792,3 +840,4 @@ pub fn report_bytes(eng: &Engine, doc: DocId, profile: Profile, pdf: bool, date:
 
 #[allow(unused_imports)]
 pub(crate) use a11y::Progress as CheckProgress;
+pub(crate) use fix::{set_info_properties, sync_xmp_with_info};

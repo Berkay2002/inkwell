@@ -11,7 +11,7 @@ import { applyState } from "./edit";
 const inv = vi.mocked(invoke);
 const a = (p: Partial<Annot>): Annot => ({
   page: 0, xref: 1, kind: "note", author: "A", contents: "", created: "D:20260101120000Z", modified: "", color: null, fill: null,
-  opacity: 1, width: 1, rect: [0, 0, 10, 10], quads: [], points: [], strokes: [], icon: null, fontSize: null, parent: null,
+  opacity: 1, width: 1, rect: [0, 0, 10, 10], quads: [], points: [], strokes: [], icon: null, picture: false, fontSize: null, parent: null,
   state: null, resolved: false, ...p,
 });
 const state = { rev: 2, pageCount: 1, sizes: [], path: "C:\\a.pdf", dirty: true, undo: "Add note", redo: null };

@@ -99,6 +99,7 @@ impl Rig {
                     h.fetch_add(1, Ordering::SeqCst);
                     Ok(Output::text("changed"))
                 }),
+                check: None,
             }));
             hits
         };
@@ -278,14 +279,13 @@ const SESSION: &str = "fa4e0001-0000-4000-8000-000000000001";
 fn streams_the_answer_and_resolves_the_citation() {
     let r = rig("ok");
     let ev = r.run(ask_req("How do I end the agreement?"), contract());
-    let ChatEvent::Done { answer, citations, followups, first_token_ms, usage, chunks_sent, chunks_total, .. } = done(&ev) else {
+    let ChatEvent::Done { answer, citations, first_token_ms, usage, chunks_sent, chunks_total, .. } = done(&ev) else {
         unreachable!()
     };
     assert_eq!(&deltas(&ev), answer, "the deltas, concatenated, are exactly the answer");
     assert!(answer.contains("\"quoted\" line, café 😀 and a \\ backslash [1]"), "{answer}");
     assert!(ev.iter().filter(|e| matches!(e, ChatEvent::Delta { .. })).count() > 3, "must stream in pieces");
     assert!(first_token_ms.is_some());
-    assert_eq!(followups.len(), 3);
     let u = usage.as_ref().unwrap();
     assert_eq!((u["inputTokens"].as_u64(), u["outputTokens"].as_u64(), u["turns"].as_u64()), (Some(100), Some(20), Some(1)));
     assert_eq!(u["cacheReadInputTokens"], 7);
@@ -635,8 +635,12 @@ fn the_whole_registry_is_served_and_a_read_tool_answers_through_it() {
     assert_eq!(usage.as_ref().unwrap()["turns"], 2);
     let err = r.stderr();
     assert!(err.contains("excerpts=0"), "{err}");
+    // the registry's own tools (the action tools sit between the reads and the two test tools) and the test ones
+    let served = err.lines().find_map(|l| l.split("tools=").nth(1)).unwrap_or_default();
     assert!(
-        err.contains("tools=get_document_info,get_outline,get_text,search,get_selection,get_page_image,go_to_page,show_source,test_edit,test_destroy"),
+        served.starts_with("get_document_info,get_outline,get_text,search,get_selection,get_page_image,go_to_page,show_source,")
+            && served.contains(",redact_apply,")
+            && served.trim_end().ends_with("test_edit,test_destroy"),
         "every registered tool, edit and destructive ones included: {err}"
     );
     assert!(err.contains("tool-reply get_text isError=false images=0 :: <<<DOCUMENT --- page 2 --- [p2.1] The supplier"), "{err}");
@@ -926,6 +930,7 @@ fn live_with_the_installed_claude() {
             h.fetch_add(1, Ordering::SeqCst);
             Ok(Output::text("The note was added."))
         }),
+        check: None,
     }));
     let r = Rig { p: ClaudeProvider::new(tools), log: log_file("live") };
     let st = r.p.status();

@@ -2008,6 +2008,7 @@ dependencies = [
  "p384",
  "parking_lot",
  "pbkdf2",
+ "quick-xml",
  "rc2",
  "regex",
  "rquickjs",

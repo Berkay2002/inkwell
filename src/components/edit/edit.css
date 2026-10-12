@@ -673,6 +673,22 @@
 .rl-link:focus-visible {
   outline: calc(2px / var(--z, 1)) solid var(--accent);
 }
+/* The press, as the link's /H asks (Acrobat: None, Invert, Outline, Inset); the hover tint steps aside while it is down.
+   Invert uses the backdrop: the layer is a transformed box, so a blend mode would not reach the page behind it. */
+.rl-link:active {
+  background: transparent;
+}
+.rl-link[data-press="invert"]:active {
+  backdrop-filter: invert(1);
+}
+.rl-link[data-press="outline"]:active {
+  outline: calc(2px / var(--z, 1)) solid var(--accent);
+}
+.rl-link[data-press="inset"]:active {
+  box-shadow:
+    inset calc(2px / var(--z, 1)) calc(2px / var(--z, 1)) 0 color-mix(in srgb, var(--text) 45%, transparent),
+    inset calc(-2px / var(--z, 1)) calc(-2px / var(--z, 1)) 0 color-mix(in srgb, var(--surface) 80%, transparent);
+}
 .rl-link.idle {
   cursor: default;
 }

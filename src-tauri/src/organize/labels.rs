@@ -107,20 +107,25 @@ fn alpha(n: u32) -> String {
 }
 
 const MAX_ENTRIES: usize = 100_000;
+const MAX_PREFIX_CHARS: usize = 256;
+/// Everything a walk may look at in all: nodes, `/Nums` pairs and `/Kids` entries together. The depth
+/// cap alone does not stop a node whose `/Kids` are itself many times over.
+const MAX_WORK: usize = 1_000_000;
 
 /// The sections, sorted by page. A document whose first section starts after page 0 gets the
 /// implicit decimal section the spec describes in front of it. No /PageLabels: an empty list.
 pub fn read(doc: &PdfDocument) -> Result<Vec<LabelRange>> {
     let Some(root) = get(&doc.catalog()?, "PageLabels") else { return Ok(Vec::new()) };
     let mut raw: Vec<(i64, PdfObject)> = Vec::new();
-    walk(&root, 0, &mut raw)?;
+    walk(&root, 0, &mut raw, &mut 0)?;
     raw.sort_by_key(|(k, _)| *k);
     let mut out: Vec<LabelRange> = Vec::new();
     for (k, v) in raw {
         let Some(v) = v.resolve()?.filter(|v| v.is_dict().unwrap_or(false)) else { continue };
         let Ok(page) = u32::try_from(k) else { continue };
         let style = get(&v, "S").and_then(|s| s.as_name().ok()).map_or(LabelStyle::None, |n| LabelStyle::from_name(&String::from_utf8_lossy(&n)));
-        let prefix = get(&v, "P").and_then(|p| p.as_string().ok()).unwrap_or_default();
+        // a hostile prefix is cut: it is cloned into every section a combine carries over
+        let prefix: String = get(&v, "P").and_then(|p| p.as_string().ok()).unwrap_or_default().chars().take(MAX_PREFIX_CHARS).collect();
         let start = get(&v, "St").and_then(|s| s.as_int().ok()).filter(|&s| s >= 1).map_or(1, |s| s as u32);
         if out.last().is_some_and(|l| l.page == page) {
             out.pop();
@@ -133,8 +138,12 @@ pub fn read(doc: &PdfDocument) -> Result<Vec<LabelRange>> {
     Ok(out)
 }
 
-/// Number-tree leaves, depth and size bounded.
-fn walk(node: &PdfObject, depth: usize, out: &mut Vec<(i64, PdfObject)>) -> Result<()> {
+/// Number-tree leaves; depth, entries and total work (`work`) bounded.
+fn walk(node: &PdfObject, depth: usize, out: &mut Vec<(i64, PdfObject)>, work: &mut usize) -> Result<()> {
+    *work += 1;
+    if *work > MAX_WORK {
+        return Ok(());
+    }
     let Some(node) = node.resolve()? else { return Ok(()) };
     if depth > 8 || !node.is_dict()? {
         return Ok(());
@@ -142,7 +151,8 @@ fn walk(node: &PdfObject, depth: usize, out: &mut Vec<(i64, PdfObject)>) -> Resu
     if let Some(nums) = get(&node, "Nums") {
         let n = nums.len().unwrap_or(0);
         let mut i = 0;
-        while i + 1 < n && out.len() < MAX_ENTRIES {
+        while i + 1 < n && out.len() < MAX_ENTRIES && *work < MAX_WORK {
+            *work += 1;
             let key = nums.get_array(i as i32)?.and_then(|k| k.as_int().ok());
             if let (Some(k), Some(v)) = (key, nums.get_array(i as i32 + 1)?) {
                 out.push((k as i64, v));
@@ -152,11 +162,12 @@ fn walk(node: &PdfObject, depth: usize, out: &mut Vec<(i64, PdfObject)>) -> Resu
     }
     if let Some(kids) = get(&node, "Kids") {
         for i in 0..kids.len().unwrap_or(0).min(MAX_ENTRIES) {
-            if out.len() >= MAX_ENTRIES {
+            *work += 1;
+            if out.len() >= MAX_ENTRIES || *work >= MAX_WORK {
                 break;
             }
             if let Some(k) = kids.get_array(i as i32)? {
-                walk(&k, depth + 1, out)?;
+                walk(&k, depth + 1, out, work)?;
             }
         }
     }
@@ -191,6 +202,11 @@ fn section(ranges: &[LabelRange], page: u32) -> Option<&LabelRange> {
     ranges.iter().rev().find(|r| r.page <= page)
 }
 
+/// `r` (a later section) only carries on what `l` already shows.
+pub(super) fn continues(l: &LabelRange, r: &LabelRange) -> bool {
+    l.style == r.style && l.prefix == r.prefix && (r.style == LabelStyle::None || l.start.saturating_add(r.page - l.page) == r.start)
+}
+
 /// Sorted, one per page, inside the document, and without a section that only carries on the one
 /// before it (the same thing as not having it).
 pub fn normalize(mut ranges: Vec<LabelRange>, count: u32) -> Vec<LabelRange> {
@@ -207,10 +223,7 @@ pub fn normalize(mut ranges: Vec<LabelRange>, count: u32) -> Vec<LabelRange> {
     }
     let mut kept: Vec<LabelRange> = Vec::new();
     for r in out {
-        let continues = kept.last().is_some_and(|l| {
-            l.style == r.style && l.prefix == r.prefix && (r.style == LabelStyle::None || l.start.saturating_add(r.page - l.page) == r.start)
-        });
-        if !continues {
+        if !kept.last().is_some_and(|l| continues(l, &r)) {
             kept.push(r);
         }
     }
@@ -385,6 +398,24 @@ mod tests {
         let out = apply(&base, 6, 3, 3, &spec).unwrap();
         assert_eq!(labels_for(&out, 6), ["I", "II", "III", "IV", "2", "3"]);
         assert!(apply(&base, 6, 0, 1, &spec).is_err(), "nothing before the first page");
+    }
+
+    #[test]
+    fn a_hostile_prefix_is_cut_to_256_characters() {
+        let long = format!("{}é", "x".repeat(10_000));
+        let objs = vec![
+            format!("<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /D /P ({long}) >>] >> >>"),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_string(),
+        ];
+        let doc = PdfDocument::from_bytes(&crate::outline::tests::raw_pdf(&objs)).unwrap();
+        let ranges = read(&doc).unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].prefix.chars().count(), MAX_PREFIX_CHARS);
+        assert!(ranges[0].prefix.chars().all(|c| c == 'x'));
+        let short = format!("<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /D /P (Ap\\351ndice) >>] >> >>");
+        let doc = PdfDocument::from_bytes(&crate::outline::tests::raw_pdf(&[short, objs[1].clone(), objs[2].clone()])).unwrap();
+        assert_eq!(read(&doc).unwrap()[0].prefix, "Apéndice", "a short prefix is untouched");
     }
 
     #[test]

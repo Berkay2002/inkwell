@@ -20,6 +20,6 @@ pub mod store;
 mod tests;
 
 pub use action::{Action, Issue, OnError, OutputRule, Step};
-pub use run::{BatchError, Event, FileReport, Report, Status, run};
+pub use run::{BatchError, Event, FilePreview, FileReport, Preview, Report, Status, preview, run};
 pub use steps::Env;
 pub use store::{Store, StoreError};

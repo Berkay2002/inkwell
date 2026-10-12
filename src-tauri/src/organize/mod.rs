@@ -77,6 +77,7 @@ pub fn labels_apply(eng: &Engine, doc: DocId, from: u32, to: u32, spec: &LabelSp
     let pages: Vec<u32> = (from..=to).collect();
     let label = if from == to { format!("Page label on p. {}", from + 1) } else { format!("Page labels on pp. {}-{}", from + 1, to + 1) };
     eng.apply_custom(doc, label, source, false, |d| {
+        crate::outline::refuse_if_certified(d, "Changing its page labels")?;
         labels::write(d, &next)?;
         Ok(pages)
     })
@@ -88,6 +89,7 @@ pub fn labels_clear(eng: &Engine, doc: DocId, source: EditSource) -> Result<Edit
         return eng.edit_state(doc);
     }
     eng.apply_custom(doc, "Remove page labels".to_string(), source, false, |d| {
+        crate::outline::refuse_if_certified(d, "Removing its page labels")?;
         labels::write(d, &[])?;
         Ok(Vec::new())
     })
@@ -131,7 +133,10 @@ pub fn trans_set(eng: &Engine, doc: DocId, pages: &[u32], change: &TransChange, 
         (Some(_), _) => format!("Page transition on {}", pages_text(&pages)),
         (None, Some(_)) => format!("Auto-advance on {}", pages_text(&pages)),
     };
-    eng.apply_custom(doc, label, source, false, |d| trans::write(d, &pages, change))
+    eng.apply_custom(doc, label, source, false, |d| {
+        crate::outline::refuse_if_certified(d, "Changing its page transitions")?;
+        trans::write(d, &pages, change)
+    })
 }
 
 // ---- attachments --------------------------------------------------------------------------------
@@ -151,6 +156,7 @@ pub fn attach_add(eng: &Engine, doc: DocId, files: Vec<NewFile>, source: EditSou
         many => format!("Attach {} files", many.len()),
     };
     eng.apply_custom(doc, label, source, false, |d| {
+        crate::outline::refuse_if_certified(d, "Attaching a file")?;
         let before: std::collections::HashSet<String> = attach::tree(d)?.into_iter().map(|e| e.key).collect();
         let pages = attach::add(d, &files)?;
         // In a portfolio each new file also gets its collection item.
@@ -172,6 +178,7 @@ pub fn attach_remove(eng: &Engine, doc: DocId, ids: &[String], source: EditSourc
         many => format!("Delete {} attachments", many.len()),
     };
     eng.apply_removing(doc, label, source, |d| {
+        crate::outline::refuse_if_certified(d, "Deleting an attachment")?;
         let pages = attach::remove(d, ids)?;
         portfolio::after_remove(d)?;
         Ok(pages)
@@ -190,6 +197,7 @@ pub fn attach_describe(eng: &Engine, doc: DocId, id: &str, text: &str, source: E
         return eng.edit_state(doc);
     }
     eng.apply_custom(doc, format!("Describe attachment {name}"), source, false, |d| {
+        crate::outline::refuse_if_certified(d, "Changing an attachment's description")?;
         let pages = attach::describe(d, id, text)?;
         portfolio::after_describe(d, id, text)?;
         Ok(pages)

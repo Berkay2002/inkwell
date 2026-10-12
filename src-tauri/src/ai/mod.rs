@@ -5,21 +5,26 @@
 //! transcripts of a chat, as it does for any run). Text leaves the machine only on an explicit user
 //! action.
 
+pub mod actions;
 pub mod chat;
 pub mod claude;
 pub mod codex;
+pub mod jobs;
 mod gate;
 pub mod provider;
 pub mod rpc;
 pub mod text;
+pub mod toolbox;
 pub mod tools;
 
+use crate::engine::edit::EditSource;
 use crate::engine::{DocId, Engine, OutlineItem, pool::class};
 pub use chat::Assistant;
 use chat::{AskRequest, ChatEvent, Prepared, Status};
 pub use provider::{Hub, Provider, ProviderId};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State, Window};
 use tauri_plugin_dialog::DialogExt;
@@ -46,6 +51,63 @@ impl tools::DocHost for EngineHost {
     fn page_png(&self, rev: u32, page: u32, max_px: u32) -> Result<Vec<u8>, String> {
         let doc = self.doc;
         self.eng.call(class::INTERACTIVE, move |e| e.page_png(doc, rev, page, max_px)).map_err(|e| e.to_string())
+    }
+}
+
+/// The host of one turn: the engine side plus the edit lane the action tools change the document
+/// through. Every change of the turn is made as `EditSource::Assistant { turn }`, so the whole turn
+/// is one undo unit; once one landed, page images are rendered from the document as it is now.
+struct ActingHost {
+    inner: EngineHost,
+    turn: String,
+    edited: AtomicBool,
+    /// The window the question came from: files the assistant makes are offered to it as open tokens.
+    app: tauri::AppHandle,
+    window: String,
+}
+
+impl ActingHost {
+    fn new(eng: Arc<Engine>, doc: DocId, app: tauri::AppHandle, window: String) -> Self {
+        static TURNS: AtomicU64 = AtomicU64::new(1);
+        let n = TURNS.fetch_add(1, Ordering::Relaxed);
+        ActingHost { inner: EngineHost { eng, doc }, turn: format!("assistant-{n}"), edited: AtomicBool::new(false), app, window }
+    }
+}
+
+impl tools::DocHost for ActingHost {
+    fn meta(&self) -> Vec<(&'static str, String)> {
+        self.inner.meta()
+    }
+
+    fn outline(&self) -> Result<Vec<OutlineItem>, String> {
+        self.inner.outline()
+    }
+
+    fn page_png(&self, rev: u32, page: u32, max_px: u32) -> Result<Vec<u8>, String> {
+        let rev = if self.edited.load(Ordering::SeqCst) {
+            self.inner.eng.doc_entry(self.inner.doc).map_err(|e| e.to_string())?.generation()
+        } else {
+            rev
+        };
+        self.inner.page_png(rev, page, max_px)
+    }
+
+    fn lane(&self) -> Option<tools::Lane<'_>> {
+        Some(tools::Lane {
+            eng: &self.inner.eng,
+            doc: self.inner.doc,
+            source: EditSource::Assistant { turn: self.turn.clone() },
+            edited: &self.edited,
+        })
+    }
+
+    fn offer_file(&self, path: &str) -> Option<String> {
+        let paths = self.app.try_state::<crate::paths::Paths>()?;
+        Some(paths.issue_open(&self.window, path.to_string()).token)
+    }
+
+    fn tesseract(&self) -> Option<std::path::PathBuf> {
+        self.app.try_state::<Arc<crate::tools::paths::ToolPaths>>()?.tesseract()
     }
 }
 
@@ -88,6 +150,7 @@ pub async fn ai_prepare(eng: Eng<'_>, ai: Ai<'_>, doc: DocId, provider: Option<P
 /// Starts a question; the answer streams through `on_event`. Returns once the turn is queued.
 #[tauri::command]
 pub fn ai_ask(
+    window: tauri::Window,
     eng: Eng<'_>,
     ai: Ai<'_>,
     doc: DocId,
@@ -96,7 +159,7 @@ pub fn ai_ask(
     on_event: Channel<ChatEvent>,
 ) -> Result<(), String> {
     let (eng, ai) = (eng.inner().clone(), ai.inner().clone());
-    let host = Arc::new(EngineHost { eng: eng.clone(), doc });
+    let host = Arc::new(ActingHost::new(eng.clone(), doc, window.app_handle().clone(), window.label().to_string()));
     let p = ai.provider(provider.unwrap_or_default());
     let loader: provider::Loader = {
         let ai = ai.clone();

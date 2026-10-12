@@ -338,6 +338,12 @@ pub(crate) fn font_name_for(page: &PdfPage) -> String {
 
 /// Appends `stream` to the page and registers the font in the page's resources under `font_res`.
 pub(crate) fn add_layer(doc: &mut PdfDocument, page: &mut PdfPage, font: &PdfObject, font_res: &str, stream: &[u8]) -> Result<(), OcrError> {
+    add_streams(doc, page, &[(font_res.to_string(), font.clone())], &[stream])
+}
+
+/// Appends `streams` to the page, in order, and registers `fonts` (resource name, font object) in
+/// the page's own copy of its resources.
+pub(crate) fn add_streams(doc: &mut PdfDocument, page: &mut PdfPage, fonts: &[(String, PdfObject)], streams: &[&[u8]]) -> Result<(), OcrError> {
     let mut page_obj = page.object();
 
     // Own resources dictionary: the original may be inherited or shared with other pages.
@@ -346,18 +352,18 @@ pub(crate) fn add_layer(doc: &mut PdfDocument, page: &mut PdfPage, font: &PdfObj
         Some(r) if r.is_dict().map_err(mupdf_err)? => r.copy_dict().map_err(mupdf_err)?,
         _ => doc.new_dict().map_err(mupdf_err)?,
     };
-    let mut fonts = match res.get_dict("Font").map_err(mupdf_err)? {
+    let mut font_dict = match res.get_dict("Font").map_err(mupdf_err)? {
         Some(f) if f.is_dict().map_err(mupdf_err)? => f.copy_dict().map_err(mupdf_err)?,
         _ => doc.new_dict().map_err(mupdf_err)?,
     };
-    fonts.dict_put(font_res, font.clone()).map_err(mupdf_err)?;
-    res.dict_put("Font", fonts).map_err(mupdf_err)?;
+    for (name, font) in fonts {
+        font_dict.dict_put(name.as_str(), font.clone()).map_err(mupdf_err)?;
+    }
+    res.dict_put("Font", font_dict).map_err(mupdf_err)?;
     page_obj.dict_put("Resources", res).map_err(mupdf_err)?;
 
     page.wrap_contents(doc).map_err(mupdf_err)?;
     let dict = doc.new_object_from_str("<< /Filter /FlateDecode >>").map_err(mupdf_err)?;
-    let z = Buffer::from_bytes(&deflate(stream)).map_err(mupdf_err)?;
-    let new_stream = doc.add_stream(&z, Some(&dict), true).map_err(mupdf_err)?;
 
     let old = page_obj.get_dict("Contents").map_err(mupdf_err)?;
     let mut arr = doc.new_array().map_err(mupdf_err)?;
@@ -372,6 +378,10 @@ pub(crate) fn add_layer(doc: &mut PdfDocument, page: &mut PdfPage, font: &PdfObj
         Some(o) if !o.is_null().map_err(mupdf_err)? => arr.array_push(o).map_err(mupdf_err)?,
         _ => {}
     }
-    arr.array_push(new_stream).map_err(mupdf_err)?;
+    for stream in streams {
+        let z = Buffer::from_bytes(&deflate(stream)).map_err(mupdf_err)?;
+        let new_stream = doc.add_stream(&z, Some(&dict), true).map_err(mupdf_err)?;
+        arr.array_push(new_stream).map_err(mupdf_err)?;
+    }
     page_obj.dict_put("Contents", arr).map_err(mupdf_err)
 }

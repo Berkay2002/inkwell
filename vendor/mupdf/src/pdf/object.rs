@@ -152,6 +152,11 @@ impl PdfObject {
         unsafe { ffi_try!(mupdf_pdf_to_float(context(), self.inner)) }
     }
 
+    /// The address of the object, which is the same for two references that resolve to one object.
+    pub fn addr(&self) -> usize {
+        self.inner as usize
+    }
+
     pub fn as_indirect(&self) -> Result<i32, Error> {
         unsafe { ffi_try!(mupdf_pdf_to_indirect(context(), self.inner)) }
     }
@@ -174,6 +179,13 @@ impl PdfObject {
             .to_str()
             .map(ToOwned::to_owned)
             .map_err(|_| Error::InvalidUtf8)
+    }
+
+    /// The length in bytes of a string object, read without copying it.
+    pub fn string_len(&self) -> Result<usize, Error> {
+        let mut len = 0;
+        unsafe { ffi_try!(mupdf_pdf_to_bytes(context(), self.inner, &mut len)) }?;
+        Ok(len)
     }
 
     pub fn as_bytes(&self) -> Result<Vec<u8>, Error> {

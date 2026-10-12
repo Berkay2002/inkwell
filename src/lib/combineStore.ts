@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
-import type { CombineOptions, CombinePlan, FileRef } from "./api";
+import type { CombineOptions, CombinePlan, FileRef, OpenInfo } from "./api";
 import { togglePage } from "./combineLogic";
 import { previewScaleKey, type Size } from "./layout";
 
@@ -9,6 +9,10 @@ import { previewScaleKey, type Size } from "./layout";
  * The Combine files sheet. Each row is a PDF the user chose (an open token, never a path); the
  * engine's `combine_inspect` says what the result would be, the same code `combine_run` writes it
  * with. The row's range text is the source of truth: the page thumbnails only rewrite it.
+ *
+ * A locked file keeps its engine handle (`locked`) until the person unlocks it from the row. The password
+ * is held in the entry only: it goes with the requests, is dropped when the sheet closes, and a failed run
+ * takes it away too (the row asks again).
  */
 
 /** Spare tile stream of the engine: a thumbnail never delays the page view. */
@@ -26,6 +30,10 @@ export interface CombineEntry {
   range: string;
   /** Engine handle that draws the thumbnails; null while opening, or for a file that cannot be drawn. */
   doc: number | null;
+  /** Engine handle of a file that needs its password and has not got it yet. */
+  locked: number | null;
+  /** The open password typed for it; "" when there is none. Never stored anywhere but here. */
+  password: string;
   pages: number | null;
   /** Page sizes as they stream in. */
   sizes: (Size | null)[];
@@ -41,12 +49,16 @@ export interface CombineSheet {
   entries: CombineEntry[];
   options: CombineOptions;
   plan: CombinePlan | null;
+  /** The row keys `plan.files` was made for, in order: the list may have moved on since (see `planFiles`). */
+  planKeys: number[];
   planning: boolean;
   /** The engine could not plan (nothing usable in the list, a file named twice ...). */
   planError: string | null;
   phase: CombinePhase;
   /** A failed run: shown at the foot of the sheet. */
   error: string | null;
+  /** The password prompt of row `key` is up. */
+  unlock: { key: number; error?: string } | null;
 }
 
 interface CombineStore {
@@ -65,10 +77,15 @@ interface CombineStore {
   /** A click on page thumbnail `page` (0-based) of row `key`. */
   togglePage: (key: number, page: number) => void;
   setOptions: (p: Partial<CombineOptions>) => void;
+  /** Asks for the password of a locked row. */
+  askUnlock: (key: number) => void;
+  cancelUnlock: () => void;
+  /** Tries `password` on the row the prompt is for; a wrong one leaves the row as it was. */
+  unlock: (password: string) => Promise<void>;
   run: () => Promise<void>;
 }
 
-export const defaultCombineOptions = (): CombineOptions => ({ bookmarks: true, keepOutlines: true, contentsPage: false });
+export const defaultCombineOptions = (): CombineOptions => ({ bookmarks: true, keepOutlines: true, contentsPage: false, keepLabels: true });
 
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 const stem = (p: string) => baseName(p).replace(/\.pdf$/i, "");
@@ -82,7 +99,12 @@ let again = false;
 /** Tokens of the pages a drawn thumbnail was made for (doc:page): a thumbnail is drawn once. */
 const drawn = new Map<string, string>();
 
-const request = (e: CombineEntry): api.CombineFile => ({ file: e.token, range: e.range, title: e.title.trim() === "" ? null : e.title });
+const request = (e: CombineEntry): api.CombineFile => ({
+  file: e.token,
+  range: e.range,
+  title: e.title.trim() === "" ? null : e.title,
+  ...(e.password ? { password: e.password } : {}),
+});
 
 export const useCombine = create<CombineStore>((set, get) => {
   const patchSheet = (p: Partial<CombineSheet>) => set((s) => (s.sheet ? { sheet: { ...s.sheet, ...p } } : s));
@@ -98,7 +120,7 @@ export const useCombine = create<CombineStore>((set, get) => {
     if (!sheet) return;
     if (sheet.entries.length === 0) {
       planSeq++;
-      patchSheet({ plan: null, planning: false, planError: null });
+      patchSheet({ plan: null, planKeys: [], planning: false, planError: null });
       return;
     }
     patchSheet({ planning: true });
@@ -112,10 +134,11 @@ export const useCombine = create<CombineStore>((set, get) => {
       }
       inFlight = true;
       const seq = ++planSeq;
+      const planKeys = cur.entries.map((e) => e.key);
       api
         .combineInspect(cur.entries.map(request), cur.options)
-        .then((plan) => seq === planSeq && patchSheet({ plan, planning: again, planError: null }))
-        .catch((e) => seq === planSeq && patchSheet({ plan: null, planning: again, planError: String(e) }))
+        .then((plan) => seq === planSeq && patchSheet({ plan, planKeys, planning: again, planError: null }))
+        .catch((e) => seq === planSeq && patchSheet({ plan: null, planKeys: [], planning: again, planError: String(e) }))
         .finally(() => {
           inFlight = false;
           if (again) {
@@ -126,22 +149,10 @@ export const useCombine = create<CombineStore>((set, get) => {
     }, 220);
   };
 
-  /** Opens the file for drawing: first page now, page sizes as they stream in. */
-  const load = async (key: number, token: string) => {
-    let doc: number | null = null;
+  /** An open document's first page now, its page sizes as they stream in. */
+  const adopt = async (key: number, o: OpenInfo) => {
     try {
-      const o = await api.openDocument(token);
-      doc = o.doc;
-      if (o.status !== "opened") {
-        // Locked files are planned (and left out) by the engine; there is nothing to draw.
-        void api.closeDocument(o.doc);
-        return;
-      }
-      if (!get().sheet?.entries.some((e) => e.key === key)) {
-        void api.closeDocument(o.doc);
-        return;
-      }
-      patchEntry(key, { doc: o.doc, pages: o.pageCount, sizes: Array.from({ length: o.pageCount }, () => null) });
+      patchEntry(key, { doc: o.doc, locked: null, pages: o.pageCount, sizes: Array.from({ length: o.pageCount }, () => null) });
       void api.pageSizes(o.doc, (start, sizes) =>
         set((s) => {
           const e = s.sheet?.entries.find((x) => x.key === key);
@@ -156,7 +167,22 @@ export const useCombine = create<CombineStore>((set, get) => {
       const url = await pageUrl(o.doc, 0, o.firstPage);
       patchEntry(key, { thumb: url });
     } catch {
-      if (doc != null) void api.closeDocument(doc);
+      void api.closeDocument(o.doc);
+      patchEntry(key, { doc: null });
+    }
+  };
+
+  /** Opens the file for drawing; a locked one waits, with its handle kept, for the password. */
+  const load = async (key: number, token: string) => {
+    try {
+      const o = await api.openDocument(token);
+      if (!get().sheet?.entries.some((e) => e.key === key)) {
+        void api.closeDocument(o.doc);
+        return;
+      }
+      if (o.status === "opened") await adopt(key, o);
+      else patchEntry(key, { locked: o.doc });
+    } catch {
       patchEntry(key, { doc: null });
     }
   };
@@ -169,6 +195,8 @@ export const useCombine = create<CombineStore>((set, get) => {
     title: "",
     range: "",
     doc: null,
+    locked: null,
+    password: "",
     pages: null,
     sizes: [],
     thumb: null,
@@ -177,6 +205,7 @@ export const useCombine = create<CombineStore>((set, get) => {
 
   const release = (entries: CombineEntry[]) => {
     for (const e of entries) {
+      if (e.locked != null) void api.closeDocument(e.locked);
       if (e.doc != null) {
         void api.closeDocument(e.doc);
         for (const k of [...drawn.keys()]) if (k.startsWith(`${e.doc}:`)) drawn.delete(k);
@@ -189,7 +218,7 @@ export const useCombine = create<CombineStore>((set, get) => {
 
     open: (files) => {
       get().close();
-      set({ sheet: { entries: [], options: defaultCombineOptions(), plan: null, planning: false, planError: null, phase: "setup", error: null } });
+      set({ sheet: { entries: [], options: defaultCombineOptions(), plan: null, planKeys: [], planning: false, planError: null, phase: "setup", error: null, unlock: null } });
       if (files?.length) get().add(files);
     },
 
@@ -221,7 +250,7 @@ export const useCombine = create<CombineStore>((set, get) => {
       const s = get().sheet;
       if (!s || s.phase === "running") return;
       release(s.entries.filter((e) => e.key === key));
-      patchSheet({ entries: s.entries.filter((e) => e.key !== key) });
+      patchSheet({ entries: s.entries.filter((e) => e.key !== key), unlock: s.unlock?.key === key ? null : s.unlock });
       schedulePlan();
     },
 
@@ -264,6 +293,32 @@ export const useCombine = create<CombineStore>((set, get) => {
       schedulePlan();
     },
 
+    askUnlock: (key) => {
+      const s = get().sheet;
+      if (!s || s.phase === "running" || !s.entries.some((e) => e.key === key && e.locked != null)) return;
+      patchSheet({ unlock: { key } });
+    },
+
+    cancelUnlock: () => patchSheet({ unlock: null }),
+
+    unlock: async (password) => {
+      const ask = get().sheet?.unlock;
+      const e = ask && get().sheet?.entries.find((x) => x.key === ask.key);
+      if (!ask || !e || e.locked == null) return;
+      try {
+        const info = await api.combineUnlock(e.locked, password);
+        // the sheet may have closed, or the row gone, while the engine worked
+        if (!get().sheet?.entries.some((x) => x.key === ask.key)) return;
+        patchEntry(ask.key, { password });
+        patchSheet({ unlock: null });
+        schedulePlan();
+        await adopt(ask.key, info);
+      } catch (err) {
+        if (get().sheet?.unlock?.key !== ask.key) return;
+        patchSheet({ unlock: { key: ask.key, error: String(err) === "bad-password" ? "Wrong password, try again." : String(err) } });
+      }
+    },
+
     run: async () => {
       const s = get().sheet;
       if (!s || s.phase === "running" || !s.plan?.canRun || s.planning) return;
@@ -279,7 +334,17 @@ export const useCombine = create<CombineStore>((set, get) => {
         await useStore.getState().openPath(done.file.path, done.file.token);
         useStore.getState().setUi({ error: `${done.plan.summary}. Saved as ${baseName(done.file.path)}` });
       } catch (e) {
-        patchSheet({ phase: "setup", error: String(e) });
+        // the passwords go with the run, failed or not: a row that had one asks again
+        const cur = get().sheet;
+        const had = cur?.entries.filter((x) => x.password) ?? [];
+        release(had);
+        patchSheet({
+          phase: "setup",
+          error: String(e),
+          entries: cur?.entries.map((x) => (x.password ? { ...x, password: "", doc: null, locked: null, pages: null, sizes: [], thumb: null, open: false } : x)) ?? [],
+        });
+        had.forEach((x) => void load(x.key, x.token));
+        if (had.length > 0) schedulePlan();
       }
     },
   };
