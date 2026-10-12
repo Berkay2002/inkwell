@@ -237,6 +237,28 @@ fn the_caps_hold() {
     assert_eq!(std::fs::read_dir(&lib).unwrap().count(), MAX_STAMPS * 2 + 1, "a refused stamp leaves no files");
 }
 
+#[cfg(unix)]
+#[test]
+fn only_a_regular_file_is_read_as_a_source() {
+    let d = dir("stamps", "special");
+    let lib = d.join("lib");
+    let mk = |p: &std::path::Path| create(&lib, &Source { path: &p.to_string_lossy(), page: None }, "x", "");
+    // A symlink to a device that never ends, a directory, and a FIFO (opening it would block): refused, not read.
+    let zero = d.join("zero.png");
+    std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+    assert!(err(mk(&zero)).contains("not a file"));
+    assert!(err(mk(&d)).contains("not a file"));
+    let fifo = d.join("pipe.png");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    assert!(err(mk(&fifo)).contains("not a file"));
+    assert!(!lib.join(INDEX).exists(), "nothing was made");
+    // A link to a real picture still works.
+    let real = write(&d, "real.png", &half_red(4, 4));
+    let link = d.join("link.png");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(mk(&link).is_ok());
+}
+
 #[test]
 fn rename_recategorise_and_delete() {
     let d = dir("stamps", "manage");

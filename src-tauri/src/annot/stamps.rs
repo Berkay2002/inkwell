@@ -300,6 +300,30 @@ pub struct Source<'a> {
     pub page: Option<u32>,
 }
 
+/// The picked file's bytes, at most [`MAX_SOURCE`]. Only a regular file is opened (a FIFO would block the open and a
+/// device such as `/dev/zero` never ends), and the read itself is capped in case the file grows.
+fn read_source(path: &str) -> Result<Vec<u8>> {
+    let big = || bad("that file is larger than 20 MB");
+    let not_file = || bad("that is not a file Inkwell can read");
+    let meta = std::fs::metadata(path).map_err(io)?;
+    if !meta.is_file() {
+        return Err(not_file());
+    }
+    if meta.len() > MAX_SOURCE {
+        return Err(big());
+    }
+    let file = std::fs::File::open(path).map_err(io)?;
+    if !file.metadata().map_err(io)?.is_file() {
+        return Err(not_file());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SOURCE + 1).read_to_end(&mut bytes).map_err(io)?;
+    if bytes.len() as u64 > MAX_SOURCE {
+        return Err(big());
+    }
+    Ok(bytes)
+}
+
 pub fn create(dir: &Path, src: &Source, name: &str, category: &str) -> Result<Stamp> {
     let name = field("A stamp's name", name, MAX_NAME)?;
     if name.is_empty() {
@@ -308,11 +332,7 @@ pub fn create(dir: &Path, src: &Source, name: &str, category: &str) -> Result<St
     let category = field("A category", category, MAX_CATEGORY)?;
     let category = if category.is_empty() { DEFAULT_CATEGORY.to_string() } else { category };
 
-    let size = std::fs::metadata(src.path).map_err(io)?.len();
-    if size > MAX_SOURCE {
-        return Err(bad("that file is larger than 20 MB"));
-    }
-    let bytes = std::fs::read(src.path).map_err(io)?;
+    let bytes = read_source(src.path)?;
     let img = if bytes[..bytes.len().min(1024)].windows(5).any(|w| w == b"%PDF-") { render_pdf(&bytes, src.page)? } else { decode_picture(&bytes)? };
     let img = fit_side(img, MAX_SIDE);
     let (png, thumb) = (encode_png(&img)?, encode_png(&fit_side(img.clone(), THUMB_SIDE))?);
