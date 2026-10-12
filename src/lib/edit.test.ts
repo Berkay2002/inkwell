@@ -54,6 +54,18 @@ describe("applyState", () => {
   });
 });
 
+describe("applyState and Edit text", () => {
+  it("tells the registered guard when the generation changes, not otherwise", () => {
+    useStore.setState({ docs: { 1: doc(1, "C:\\a.pdf") } });
+    const rev = vi.fn();
+    edits.setLeaveGuard({ flush: () => Promise.resolve(), unsent: () => null, rev });
+    applyState(1, state(0));
+    expect(rev).not.toHaveBeenCalled();
+    applyState(1, state(1));
+    expect(rev).toHaveBeenCalledWith(1);
+  });
+});
+
 describe("openPath", () => {
   it("activates the open tab for another spelling of the same file", async () => {
     useStore.setState({ docs: { 1: doc(1, "C:\\Docs\\a.pdf"), 2: doc(2, "C:\\b.pdf") }, order: [1, 2], active: 2 });

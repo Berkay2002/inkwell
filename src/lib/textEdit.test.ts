@@ -355,6 +355,23 @@ describe("store", () => {
     expect(text().selected).toEqual({ page: 0, index: 0 });
   });
 
+  it("lists the pages again when the generation changes, and drops a selection whose block is gone", async () => {
+    vi.mocked(api.textBlocks).mockResolvedValue(list([block()]));
+    const te = useTextEdit.getState();
+    await te.load(1, 0);
+    await te.select(1, { page: 0, index: 0 });
+    te.setDraft(1, "Typed");
+    expect(api.textBlocks).toHaveBeenCalledTimes(1);
+    // Undo, redo or Replace: the engine's generation moved and nothing asked the layer to load.
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 2 } } });
+    vi.mocked(api.textBlocks).mockResolvedValue(list([block({ rect: [72, 600, 300, 614] })], 2));
+    te.onRev(1);
+    await vi.waitFor(() => expect(text().pages[0].rev).toBe(2));
+    expect(api.textBlocks).toHaveBeenCalledTimes(2);
+    expect(text().selected).toBeNull();
+    expect(text().draft).toBeNull();
+  });
+
   it("adds a text box and selects the block it became", async () => {
     vi.mocked(api.textBlocks).mockResolvedValue(list([block({ index: 7, text: "Hello", rect: [100, 200, 160, 214] })], 2));
     vi.mocked(addText).mockResolvedValue(ok({} as never));

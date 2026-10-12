@@ -217,6 +217,8 @@ interface Store {
 
   /** Lists the page's blocks for the document's current generation (cached; one call per page and generation). */
   load: (doc: number, page: number) => Promise<void>;
+  /** The document's generation changed (undo, redo, Replace, a restored version): the listed pages are listed again. */
+  onRev: (doc: number) => void;
   /** Selects a block (sending what was typed into the previous one first; it stays when that fails). */
   select: (doc: number, ref: BlockRef | null) => Promise<void>;
   setDraft: (doc: number, text: string) => void;
@@ -398,6 +400,12 @@ export const useTextEdit = create<Store>((set, get) => {
       return job;
     },
 
+    onRev: (doc) => {
+      // A change this store is sending settles its own pages and selection.
+      if (applying.has(doc)) return;
+      for (const k of Object.keys(of(doc).pages)) void get().load(doc, Number(k));
+    },
+
     select: async (doc, ref) => {
       const cur = of(doc).selected;
       if (cur && ref && cur.page === ref.page && cur.index === ref.index) return;
@@ -491,6 +499,7 @@ setLeaveGuard({
     const b = d.selected ? d.pages[d.selected.page]?.blocks[d.selected.index] : null;
     return d.draft && b && d.draft.text !== b.text ? d.draft.text : null;
   },
+  rev: (id) => useTextEdit.getState().onRev(id),
 });
 
 useStore.subscribe((s, prev) => {
