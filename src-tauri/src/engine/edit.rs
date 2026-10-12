@@ -1238,7 +1238,11 @@ impl Engine {
     }
 
     fn apply_locked(&self, entry: &DocEntry, ed: &mut Editor, op: &EditOp, source: EditSource) -> Result<EditState> {
+        // Every page operation changes the page tree: a certification does not survive one, at any /P.
+        crate::outline::refuse_if_certified(&ed.doc.doc, "Changing its pages")?;
         let sizes = ed.step().sizes.clone();
+        // Read before the edit runs: it may be the one that takes the signature away.
+        let signed = crate::outline::signed(&ed.doc.doc);
         // A panic must also roll back below, or the next edit would snapshot what it left behind.
         let ran = catch_unwind(AssertUnwindSafe(|| run(&mut ed.doc.doc, op, &sizes))).unwrap_or(Err(EngineError::Panic));
         let changed = ran.and_then(|c| match c {
@@ -1248,6 +1252,8 @@ impl Engine {
                 if drops {
                     crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
                 }
+                // A signed document's save stays incremental: a deleted page stays in the file, unused.
+                let drops = drops && !signed;
                 let snap = ed.snapshot()?;
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
@@ -1443,6 +1449,8 @@ impl Engine {
         let ed = self.lane(entry, lane)?;
         let len = ed.step().snap.len;
         let page_count = ed.step().sizes.len();
+        // Read before the edit runs: it may be the one that takes the signature away.
+        let signed = crate::outline::signed(&ed.doc.doc);
         let ran = catch_unwind(AssertUnwindSafe(|| {
             let out = f(&mut ed.doc.doc)?;
             // An edit that takes content out (pages included, as `drops` below sees them) must not leave it
@@ -1469,7 +1477,9 @@ impl Engine {
             };
             let doc = open_snap(&snap, entry)?;
             let sizes = Arc::new(page_sizes(&doc.doc)?);
-            let drops = removes || sizes.len() < ed.step().sizes.len();
+            // Content taken out makes the save a full rewrite, which would void a signature: a signed document's
+            // stays incremental (the removed objects stay in the file, unused, as in outline and links).
+            let drops = (removes || sizes.len() < ed.step().sizes.len()) && !signed;
             Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, sizes }, doc))
         });
         match changed {
@@ -1727,6 +1737,10 @@ impl Engine {
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
         ed.ensure_extractable(&entry)?;
+        if delete_after {
+            // Before the file is written: the delete that follows is refused on a certified document.
+            crate::outline::refuse_if_certified(&ed.doc.doc, "Removing the extracted pages")?;
+        }
         let pages = check_pages(pages, ed.step().sizes.len())?;
         let bytes = new_pdf(&[(&ed.doc.doc, &pages)])?;
         write_atomic(Path::new(out), &bytes, pages.len() as u32, Readback::default())?;
@@ -1815,3 +1829,7 @@ mod security;
 #[cfg(test)]
 #[path = "tests_edit.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_certified.rs"]
+mod tests_certified;

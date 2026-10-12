@@ -1087,9 +1087,12 @@ fn a_certification_that_allows_annotations_allows_measuring() {
     let steps = eng.history(id).unwrap().len();
     let all = list_all(&eng, id).unwrap();
     add(&eng, id, Kind::Distance, &[[10.0, 10.0], [50.0, 10.0]], Some(&FT10));
-    scale_set(&eng, id, 0, &FT10, EditSource::User).unwrap();
     rescale(&eng, id, 0, all[0].xref, &FT10, EditSource::User).unwrap();
-    assert_eq!(eng.history(id).unwrap().len(), steps + 3);
+    assert_eq!(eng.history(id).unwrap().len(), steps + 2);
+    // A page scale is a /VP entry of the page dictionary: not an annotation, so no /P allows it.
+    let e = scale_set(&eng, id, 0, &FT10, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("certified"), "{e}");
+    assert_eq!(eng.history(id).unwrap().len(), steps + 2);
 }
 
 #[test]

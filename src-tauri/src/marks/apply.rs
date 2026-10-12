@@ -640,6 +640,7 @@ fn text_marks(
 
 /// Adds `req.mark` to `req.pages`. Returns the pages touched.
 pub fn add(doc: &mut PdfDocument, req: &AddRequest) -> Result<Vec<u32>> {
+    crate::outline::refuse_if_certified(doc, "Adding to its pages")?;
     let count = doc.page_count()?.max(0) as u32;
     let pages = check_pages(&req.pages, count)?;
     validate(&req.mark, pages.len() as u64)?;
@@ -987,6 +988,7 @@ fn clean_resources(doc: &mut PdfDocument, index: u32) -> Result<()> {
 /// left on top of a page, the q/Q wrapper goes too, restoring the original content list; the page
 /// loses the fonts, graphics states, pictures and layers only these marks used.
 pub fn remove(doc: &mut PdfDocument, kind: MarkKind, pages: &[u32]) -> Result<usize> {
+    crate::outline::refuse_if_certified(doc, "Removing from its pages")?;
     let count = doc.page_count()?.max(0) as u32;
     let pages = check_pages(pages, count)?;
     let mut removed = 0;

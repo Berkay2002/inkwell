@@ -68,6 +68,8 @@ pub fn scale_set(eng: &Engine, doc: DocId, page: u32, scale: &Scale, source: Edi
     scale.validate().map_err(EngineError::Invalid)?;
     eng.apply_custom(doc, format!("Set measurement scale on p. {} to {}", page + 1, scale.label()), source, false, |d| {
         refuse_certified(d)?;
+        // The scale is a /VP entry of the page dictionary, which no /P allows (3 allows annotations only).
+        crate::outline::refuse_if_certified(d, "Setting a page scale")?;
         write::set_page_scale(d, page, scale)?;
         Ok(vec![page])
     })

@@ -80,7 +80,7 @@ export const otherToolHeld = (t: ToolsHeld): boolean =>
 /** Why the controls of a certified document are off, and what a signed one is told. */
 export const CERTIFIED_REASON = "This document is certified, so its articles can be read but not changed.";
 export const SIGNED_NOTE =
-  "This document is signed. A change to its articles is saved as an update after the signature, which will show that the file was changed.";
+  "This document is signed. A change to its articles is saved as an update after the signature, which will show that the file was changed. Anything added and then removed in the same session stays in the saved file.";
 
 /**
  * What the beads on a page take of the pointer. Outlines alone never do ("Show beads" must not get between the

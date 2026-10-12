@@ -59,6 +59,18 @@ impl Editor {
         Ok(())
     }
 
+    /// Setting or removing password security makes the save a rewrite of every object: neither a certification nor
+    /// a signature survives it.
+    fn ensure_signatures_allow_security(&self) -> Result<()> {
+        crate::outline::refuse_if_certified(&self.doc.doc, "Changing its password security")?;
+        if crate::outline::signed(&self.doc.doc) {
+            return Err(invalid(
+                "This document is signed. Changing its password security rewrites the whole file and would break the signature, so Inkwell leaves it as it is.",
+            ));
+        }
+        Ok(())
+    }
+
     fn push_security(&mut self, label: String, source: EditSource, change: SecurityChange) {
         let cur = self.step().clone();
         self.push(Step { label, source, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, security: Some(change), exact: false, ..cur });
@@ -107,6 +119,7 @@ impl Engine {
         spec.normalize();
         spec.validate().map_err(|e| invalid(e.code()))?;
         let ed = self.lane(entry, lane)?;
+        ed.ensure_signatures_allow_security()?;
         ed.ensure_unlocked(entry, permissions_password)?;
         let had = ed.security_info(entry)?.encrypted;
         let cipher = match spec.cipher {
@@ -166,6 +179,7 @@ impl Engine {
         if !ed.security_info(&entry)?.encrypted {
             return Err(invalid("This document has no password security."));
         }
+        ed.ensure_signatures_allow_security()?;
         ed.ensure_unlocked(&entry, permissions_password)?;
         ed.push_security("Remove password security".into(), source, SecurityChange::Remove);
         Ok(ed.state(&entry))

@@ -557,3 +557,14 @@ fn a_signed_document_is_not_changed_by_the_picture_styles() {
     let out = run_ocr(&eng, &req(id), None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
     assert!(!out.report.warnings.is_empty());
 }
+#[test]
+fn a_certified_document_is_not_compressed_into_a_copy() {
+    let d = dir("compress-certified");
+    let cert = "/Perms << /DocMDP << /Type /Sig /Filter /Adobe.PPKLite /Contents <00> /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 2 >> >> ] >> >>";
+    let bytes = image_pdf(&MARKER, cert);
+    let (eng, id, path) = open_bytes(&d, "cert.pdf", bytes.clone());
+    let e = run_compress(&eng, &creq(id), None, &AtomicBool::new(false), &mut |_| {}).unwrap_err().0;
+    assert!(e.contains("certified"), "{e}");
+    assert_eq!(files(&d), ["cert.pdf"]);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}

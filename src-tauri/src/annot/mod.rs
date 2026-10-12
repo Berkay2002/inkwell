@@ -430,7 +430,12 @@ impl AnnotWalk {
                 fresh.direct = true;
                 continue;
             };
-            if self.seen.contains(&num) || self.belongs_later(doc, &e, p, num)? {
+            let later = self.seen.contains(&num) || self.belongs_later(doc, &e, p, num)?;
+            // Out of budget mid-check the answer above is a guess: stop here instead of listing from it.
+            if self.incomplete {
+                return Ok(None);
+            }
+            if later {
                 continue;
             }
             self.seen.insert(num);
@@ -458,6 +463,11 @@ impl AnnotWalk {
         }
         let mut nums = HashSet::new();
         for i in 0..list.len()? {
+            // Each entry read is charged: many annotations naming many other pages, each with a long array, would
+            // otherwise cost n x m reads. Out of budget the walk is incomplete and this one stays where it is.
+            if self.repeat() {
+                return Ok(false);
+            }
             if let Some(x) = list.get_array(i as i32)?.filter(|x| x.is_indirect().unwrap_or(false)) {
                 nums.insert(x.as_indirect()?);
             }
@@ -579,6 +589,7 @@ fn hide_reply(a: &mut PdfAnnotation, parent: i32, doc: &PdfDocument, state: Opti
 
 /// Creates the annotation on `page` and returns its xref.
 pub fn add(doc: &mut PdfDocument, page: u32, what: &NewAnnot, st: &Style, author: &str) -> Result<i32> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Adding a comment")?;
     let mut p = doc.load_pdf_page(page as i32)?;
     let (mut a, kind) = match what {
         NewAnnot::Markup { markup: kind, quads } => {
@@ -689,6 +700,7 @@ fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
 }
 
 pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: &str) -> Result<()> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Changing a comment")?;
     let (_p, mut a) = find(doc, page, xref)?;
     let kind = kind_of(&a)?;
     let s = &patch.style;
@@ -730,6 +742,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: 
 
 /// Deletes the annotations and everything that replies to them.
 pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Deleting a comment")?;
     let mut p = doc.load_pdf_page(page as i32)?;
     let mut doomed: Vec<i32> = xrefs.to_vec();
     loop {
@@ -757,6 +770,7 @@ pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
 
 /// A reply (a hidden `/Text` with `/IRT`) to `parent`; returns its xref.
 pub fn reply(doc: &mut PdfDocument, page: u32, parent: i32, text: &str, author: &str) -> Result<i32> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Replying to a comment")?;
     let (mut p, pa) = find(doc, page, parent)?;
     let r = pa.rect()?;
     let mut a = p.add_text_annotation(Rect { x0: r.x0, y0: r.y0, x1: r.x0 + 22.0, y1: r.y0 + 22.0 }, text)?;
@@ -767,6 +781,7 @@ pub fn reply(doc: &mut PdfDocument, page: u32, parent: i32, text: &str, author: 
 
 /// Sets the review state of `parent` ("Completed" = resolved; "None" reopens) as a new state reply.
 pub fn set_state(doc: &mut PdfDocument, page: u32, parent: i32, state: &str, author: &str) -> Result<i32> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Changing a comment's status")?;
     if !["None", "Accepted", "Rejected", "Cancelled", "Completed"].contains(&state) {
         return Err(bad(format!("unknown review state {state}")));
     }

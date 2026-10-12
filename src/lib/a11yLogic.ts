@@ -41,7 +41,7 @@ export interface Report {
 
 export const CERTIFIED_WHY = "This document is certified: changing its tags or reading order would void the certification, so Inkwell leaves them as they are.";
 export const SIGNED_NOTE =
-  "This document is signed. Edits are saved after the signed part, so the signature still covers the original; readers will show that the document changed after it was signed.";
+  "This document is signed. Edits are saved after the signed part, so the signature still covers the original; readers will show that the document changed after it was signed. Anything added and then removed in the same session stays in the saved file.";
 
 export interface Progress {
   done: number;

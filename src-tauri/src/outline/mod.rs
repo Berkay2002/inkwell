@@ -495,7 +495,10 @@ fn unchecked() -> EngineError {
 /// The entries of an array object (nothing for anything else). An array longer than `max`, or an entry that cannot be
 /// read, is an error and not a shorter list: whatever is dropped may be what the caller is looking for.
 fn array_items(a: Option<PdfObject>, max: usize) -> Result<Vec<PdfObject>> {
-    let Some(a) = a.filter(|a| a.is_array().unwrap_or(false)) else { return Ok(Vec::new()) };
+    let Some(a) = a else { return Ok(Vec::new()) };
+    if !a.is_array()? {
+        return Ok(Vec::new());
+    }
     let n = a.len()?;
     if n > max {
         return Err(unchecked());
@@ -559,21 +562,37 @@ fn signature_values(form: &PdfObject) -> Result<Vec<PdfObject>> {
 /// signature has no such transform. Several: the strictest, whatever the order. A `/Reference` that is one dictionary
 /// is read as the one entry it would be, and one with more than 16 entries as `/P 1`.
 fn reference_p(sig: &PdfObject) -> Option<i32> {
-    let refs = sig.get_dict("Reference").ok().flatten();
-    let list = match refs {
-        Some(r) if r.is_dict().unwrap_or(false) => vec![r],
-        r => match array_items(r, 16) {
+    reference_p_with(sig, &|o, key| o.get_dict(key))
+}
+
+/// [`reference_p`] with how a key is read, so that a test can make a read fail (MuPDF repairs a damaged file quietly,
+/// so a file cannot). Whatever cannot be read is the strictest answer: a signature whose `/Reference` is unreadable
+/// may be certifying.
+fn reference_p_with(sig: &PdfObject, get: &dyn Fn(&PdfObject, &str) -> std::result::Result<Option<PdfObject>, mupdf::Error>) -> Option<i32> {
+    let Ok(refs) = get(sig, "Reference") else { return Some(1) };
+    let list = match refs.as_ref().map(PdfObject::is_dict) {
+        Some(Err(_)) => return Some(1),
+        Some(Ok(true)) => refs.into_iter().collect(),
+        _ => match array_items(refs, 16) {
             Ok(list) => list,
             Err(_) => return Some(1),
         },
     };
-    list.iter()
-        .filter(|r| name_of(r.get_dict("TransformMethod").ok().flatten()) == "DocMDP")
-        .map(|r| {
-            let p = r.get_dict("TransformParams").ok().flatten().and_then(|t| t.get_dict("P").ok().flatten()).filter(|p| !p.is_null().unwrap_or(false));
-            if p.is_none() { 2 } else { number(&p).filter(|v| matches!(*v, 1.0 | 2.0 | 3.0)).map_or(1, |v| v as i32) }
-        })
-        .min()
+    let mut strictest = None;
+    for r in &list {
+        let Ok(method) = get(r, "TransformMethod") else { return Some(1) };
+        if name_of(method) != "DocMDP" {
+            continue;
+        }
+        let Ok(params) = get(r, "TransformParams") else { return Some(1) };
+        let p = match params.map(|t| get(&t, "P")).transpose() {
+            Ok(p) => p.flatten().filter(|p| !p.is_null().unwrap_or(false)),
+            Err(_) => return Some(1),
+        };
+        let p = if p.is_none() { 2 } else { number(&p).filter(|v| matches!(*v, 1.0 | 2.0 | 3.0)).map_or(1, |v| v as i32) };
+        strictest = Some(strictest.map_or(p, |s: i32| s.min(p)));
+    }
+    strictest
 }
 
 /// The document is certified (a `/DocMDP` signature): any change to it, even to its bookmarks, would
@@ -600,6 +619,27 @@ pub(crate) fn certified(doc: &PdfDocument) -> Result<Option<i32>> {
 /// as it was), so changes to it stay incremental: nothing that was written is rewritten.
 pub(crate) fn signed(doc: &PdfDocument) -> bool {
     signed_inner(doc).unwrap_or(true)
+}
+
+/// A certified document is left as it is, at any `/P`: `what` names the change ("Changing its page labels"). Every edit
+/// step of a feature that writes the document calls this first inside its closure, so nothing is recorded.
+pub(crate) fn refuse_if_certified(doc: &PdfDocument, what: &str) -> Result<()> {
+    refuse_below(doc, what, i32::MAX)
+}
+
+/// [`refuse_if_certified`] for comments, markup and the like (annotations): a `/P` 3 certification allows them,
+/// 1 and 2 do not.
+pub(crate) fn refuse_unless_annotating_allowed(doc: &PdfDocument, what: &str) -> Result<()> {
+    refuse_below(doc, what, 3)
+}
+
+fn refuse_below(doc: &PdfDocument, what: &str, allowed_from: i32) -> Result<()> {
+    if certified(doc)?.is_some_and(|p| p < allowed_from) {
+        return Err(EngineError::Invalid(format!(
+            "This document is certified. {what} would void the certification, so Inkwell leaves the document as it is."
+        )));
+    }
+    Ok(())
 }
 
 fn signed_inner(doc: &PdfDocument) -> Result<bool> {
