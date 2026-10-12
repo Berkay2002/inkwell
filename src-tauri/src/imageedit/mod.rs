@@ -696,6 +696,17 @@ fn axis_aligned(m: &Matrix) -> bool {
     (b.abs() <= eps && c.abs() <= eps) || (a.abs() <= eps && d.abs() <= eps)
 }
 
+/// A `cm` with its numbers kept to eight decimals. The change is written in the image's own unit square,
+/// where a turn's entries are small ratios: at four decimals a typed 30 degrees was stored as 30.0007.
+fn fine_cm(m: &Matrix) -> Op {
+    let n = |v: f64| {
+        let s = format!("{v:.8}");
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        if s.is_empty() || s == "-" || s == "-0" { "0".to_string() } else { s.to_string() }
+    };
+    Op::verbatim(format!("{} cm", m.0.map(n).join(" ")).as_bytes())
+}
+
 fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChange) -> Result<()> {
     let to_page = page_space(d, page)?;
     let to_user = to_page.invert().ok_or_else(|| invalid("the page has no area"))?;
@@ -768,7 +779,7 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
         if !m.0.iter().all(|v| v.is_finite() && v.abs() < 1e9) {
             return Err(invalid("the image can't be moved that far"));
         }
-        let cm = Op::new("cm", m.0.iter().map(|v| num(*v)).collect());
+        let cm = fine_cm(&m);
         let new = if start == end {
             let mut wrapped = Some(vec![Op::new("q", vec![]), cm, original, Op::new("Q", vec![])]);
             splice(&pi.pieces, &pi.ops, |i| if i == f.op { (wrapped.take().unwrap_or_default(), false) } else { (Vec::new(), true) })

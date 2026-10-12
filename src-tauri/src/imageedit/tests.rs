@@ -650,7 +650,7 @@ fn turning_by_30_degrees_is_saved_and_reopened() {
     // 200 × 100 about (200, 242): the box grows to (200 cos + 100 sin, 200 sin + 100 cos) = (223.2, 186.6).
     let check = |b: &ImageBlock| {
         assert!(near(b.full_rect, [200.0 - 111.603, 242.0 - 93.301, 200.0 + 111.603, 242.0 + 93.301]), "{b:?}");
-        assert!((b.angle - 30.0).abs() < 0.01, "{}", b.angle);
+        assert!((b.angle - 30.0).abs() < 1e-4, "{}", b.angle);
         // The picture's own corners: its bottom left (0,0) was (100, 292); turned clockwise about the centre.
         let (s, c) = (30f32.to_radians().sin(), 30f32.to_radians().cos());
         let (x, y) = (-100.0f32, 50.0f32);
@@ -666,7 +666,7 @@ fn turning_by_30_degrees_is_saved_and_reopened() {
     // Turned again by -30 it is upright, and the content did not grow a stack of transforms it can't undo.
     change(&eng2, id2, Some(0), ImageChange::Angle { degrees: -30.0 });
     let b = list(&eng2, id2)[0].clone();
-    assert!(near(b.full_rect, [100.0, 192.0, 300.0, 292.0]) && b.angle.abs() < 0.01, "{b:?}");
+    assert!(near(b.full_rect, [100.0, 192.0, 300.0, 292.0]) && b.angle.abs() < 1e-4, "{b:?}");
     eng2.undo(id2).unwrap();
     check(&list(&eng2, id2)[0]);
     // 360 and a turn that is no turn change nothing, and are refused.
@@ -674,6 +674,25 @@ fn turning_by_30_degrees_is_saved_and_reopened() {
     for degrees in [0.0, 360.0, f64::NAN] {
         let r = edit(&eng2, id2, rev, 0, Some(0), &ImageChange::Angle { degrees }, EditSource::User);
         assert!(matches!(r, Err(EngineError::Invalid(_))), "{degrees}: {r:?}");
+    }
+}
+
+#[test]
+fn a_typed_angle_is_stored_as_typed_for_any_proportions() {
+    let d = dir("angle-exact");
+    // The picture drawn 150 × 100 instead of 200 × 100: three bytes patched in place, so every offset holds.
+    let mut bytes = pdf(1, false);
+    let at = bytes.windows(9).position(|w| w == b"q 200 0 0").unwrap();
+    bytes[at + 2..at + 5].copy_from_slice(b"150");
+    let (eng, id, _) = open(&d, &bytes);
+    for (turn, want) in [(30.0, 30.0), (30.0, 60.0), (-45.0, 15.0), (-15.0, 0.0)] {
+        change(&eng, id, Some(0), ImageChange::Angle { degrees: turn });
+        let b = list(&eng, id)[0].clone();
+        assert!((b.angle - want).abs() < 1e-4, "after {turn}: {} (want {want})", b.angle);
+        // Its own sides stay 150 × 100, whatever the angle.
+        let q = b.quad;
+        let (w, h) = ((q[2] - q[0]).hypot(q[3] - q[1]), (q[6] - q[0]).hypot(q[7] - q[1]));
+        assert!((w - 150.0).abs() < 0.01 && (h - 100.0).abs() < 0.01, "{w} x {h}");
     }
 }
 
