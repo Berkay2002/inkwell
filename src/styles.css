@@ -1504,10 +1504,14 @@ select {
   border-radius: var(--radius-sm);
   text-align: left;
 }
-.ink-menu button:hover,
+.ink-menu button:hover:not(:disabled),
 .ink-menu button:focus-visible {
   background: var(--surface-2);
   outline: none;
+}
+.ink-menu button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .ink-menu button.danger {
   color: var(--danger);

@@ -50,7 +50,7 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
   useLayoutEffect(() => {
     const r = el.current!.getBoundingClientRect();
     setPos({ left: Math.min(x, window.innerWidth - r.width - 8), top: Math.min(y, window.innerHeight - r.height - 8) });
-    el.current!.querySelector<HTMLElement>("button")?.focus();
+    el.current!.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
   }, [x, y]);
 
   useEffect(() => {
@@ -60,7 +60,7 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
         e.stopPropagation();
         onClose();
       } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        const all = [...el.current!.querySelectorAll<HTMLElement>("button")];
+        const all = [...el.current!.querySelectorAll<HTMLElement>("button:not(:disabled)")];
         const i = all.indexOf(document.activeElement as HTMLElement);
         all[(i + (e.key === "ArrowDown" ? 1 : -1) + all.length) % all.length]?.focus();
         e.preventDefault();
@@ -90,6 +90,8 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
             key={n}
             role="menuitem"
             className={it.danger ? "danger" : undefined}
+            disabled={!!it.disabled}
+            title={it.disabled}
             onClick={() => {
               onClose();
               it.onSelect();

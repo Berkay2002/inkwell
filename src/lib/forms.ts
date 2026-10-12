@@ -80,7 +80,7 @@ export const formsApi = {
   formatPreview: (format: Format, sample = "") => invoke<{ sample: string; shown: string } | null>("forms_format_preview", { format, sample }),
 };
 
-export type AlignEdge = "left" | "right" | "top" | "bottom" | "hcenter" | "vcenter";
+export type AlignEdge = "left" | "right" | "top" | "bottom" | "hCenter" | "vCenter";
 export type LayoutAxis = "horizontal" | "vertical" | "both";
 export type SizeDim = "width" | "height" | "both";
 
@@ -160,6 +160,9 @@ interface FormsStore {
   /** Which layout dialog the rail shows. */
   dialog: "duplicate" | "copies" | null;
   setDialog: (d: "duplicate" | "copies" | null) => void;
+  /** The field whose name is being edited in the Fields list (F2, double-click, the context menu). */
+  renaming: Ref | null;
+  setRenaming: (r: Ref | null) => void;
   align: (doc: number, edge: AlignEdge) => Promise<void>;
   center: (doc: number, axis: LayoutAxis) => Promise<void>;
   distribute: (doc: number, axis: LayoutAxis) => Promise<void>;
@@ -321,6 +324,8 @@ export const useForms = create<FormsStore>((set, get) => {
     },
     dialog: null,
     setDialog: (dialog) => set({ dialog }),
+    renaming: null,
+    setRenaming: (renaming) => set({ renaming }),
     align: async (doc, edge) => {
       await run(doc, () => formsApi.align(doc, pairs(doc), edge), (s) => s);
     },
