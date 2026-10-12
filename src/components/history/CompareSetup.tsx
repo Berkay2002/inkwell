@@ -56,7 +56,7 @@ export function CompareSetup() {
 
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !(e.target instanceof HTMLSelectElement)) h.closeCompare();
+      if (e.key === "Escape" && !(e.target instanceof HTMLSelectElement) && !(e.target instanceof HTMLInputElement)) h.closeCompare();
     };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
