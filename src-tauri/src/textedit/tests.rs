@@ -1831,14 +1831,206 @@ fn line_boxes(eng: &Engine, id: DocId) -> Vec<[f32; 4]> {
     tb.blocks[0].lines.clone()
 }
 
+/// Every line box of the page, block by block (a gap left by an emptied line may split a block).
+fn all_boxes(eng: &Engine, id: DocId) -> Vec<[f32; 4]> {
+    blocks(eng, id, 0).unwrap().blocks.iter().flat_map(|b| b.lines.clone()).collect()
+}
+
+fn same_box(a: &[f32; 4], b: &[f32; 4]) -> bool {
+    a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.05)
+}
+
+/// Where a line starts and sits: its left edge and its top.
+fn same_place(a: &[f32; 4], b: &[f32; 4]) -> bool {
+    (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05
+}
+
 #[test]
-fn edit_text_on_an_untouched_block_reflows_its_lines_to_the_widest() {
+fn edit_text_on_an_untouched_block_keeps_its_lines_and_their_places() {
     // What Edit text sends for one changed word: the block's text with spaces, no line breaks.
-    let d = dir("edit-joins");
-    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
-    assert_eq!(line_boxes(&eng, id).len(), 3);
+    let d = dir("edit-keeps-lines");
+    let (eng, id, path) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    assert_eq!(before.len(), 3);
     set_text(&eng, id, 0, "One dog Two Three long hats here");
-    assert!(line_boxes(&eng, id).len() < 3, "{:?}", page_lines(&eng, id));
+    let check = |eng: &Engine, id: DocId| {
+        assert_eq!(page_lines(eng, id), ["One dog", "Two", "Three long hats here"]);
+        let after = all_boxes(eng, id);
+        assert_eq!(after.len(), 3, "{after:?}");
+        assert!(same_place(&after[0], &before[0]), "{after:?} vs {before:?}");
+        assert!(same_box(&after[1], &before[1]) && same_box(&after[2], &before[2]), "{after:?} vs {before:?}");
+        // Still ragged: the short line was not stretched to the widest.
+        assert!(after[1][2] - after[1][0] < after[2][2] - after[2][0] - 30.0, "{after:?}");
+    };
+    check(&eng, id);
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    check(&eng, id);
+}
+
+#[test]
+fn an_edit_in_the_middle_line_moves_no_other_line() {
+    let d = dir("edit-middle-line");
+    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    set_text(&eng, id, 0, "One cat Two and a half Three long hats here");
+    assert_eq!(page_lines(&eng, id), ["One cat", "Two and a half", "Three long hats here"]);
+    let after = all_boxes(&eng, id);
+    assert_eq!(after.len(), 3, "{after:?}");
+    assert!(same_box(&after[0], &before[0]) && same_box(&after[2], &before[2]), "{after:?} vs {before:?}");
+    assert!(same_place(&after[1], &before[1]) && after[1][2] > before[1][2] + 40.0, "{after:?} vs {before:?}");
+    // Two edits in one commit, a line apart: the line between stays where it was.
+    set_text(&eng, id, 0, "One dog Two and a half Three long bats here");
+    assert_eq!(page_lines(&eng, id), ["One dog", "Two and a half", "Three long bats here"]);
+    let again = all_boxes(&eng, id);
+    assert!(same_box(&again[1], &after[1]), "{again:?} vs {after:?}");
+}
+
+#[test]
+fn a_line_end_deleted_joins_those_two_lines_only() {
+    let d = dir("edit-across-line-end");
+    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    // The space between "cat" and "Two" is gone: lines one and two are one line, line three stays.
+    set_text(&eng, id, 0, "One catTwo Three long hats here");
+    assert_eq!(page_lines(&eng, id), ["One catTwo", "Three long hats here"]);
+    let after = all_boxes(&eng, id);
+    assert_eq!(after.len(), 2, "{after:?}");
+    assert!(same_place(&after[0], &before[0]) && same_box(&after[1], &before[2]), "{after:?} vs {before:?}");
+}
+
+#[test]
+fn a_line_emptied_leaves_a_gap_and_the_lines_below_where_they_were() {
+    let d = dir("edit-line-deleted");
+    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    set_text(&eng, id, 0, "One cat Three long hats here");
+    assert_eq!(page_lines(&eng, id), ["One cat", "Three long hats here"]);
+    let after = all_boxes(&eng, id);
+    assert!(same_box(&after[0], &before[0]) && same_box(&after[1], &before[2]), "{after:?} vs {before:?}");
+}
+
+#[test]
+fn a_typed_line_break_starts_a_line_and_moves_the_lines_below_down_by_it() {
+    let d = dir("edit-typed-newline");
+    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    // Every word is as it was: only what stands between "One" and "cat" is not.
+    set_text(&eng, id, 0, "One\ncat Two Three long hats here");
+    assert_eq!(page_lines(&eng, id), ["One", "cat", "Two", "Three long hats here"]);
+    let after = all_boxes(&eng, id);
+    assert_eq!(after.len(), 4, "{after:?}");
+    assert!(same_place(&after[0], &before[0]), "{after:?} vs {before:?}");
+    // "cat" is on the line below (14 pt), and each line after it is one line lower than it was.
+    for (a, b) in after[1..].iter().zip(&before[0..]) {
+        assert!((a[0] - 72.0).abs() < 0.5 && ((a[1] - b[1]) - 14.0).abs() < 0.5, "{after:?} vs {before:?}");
+    }
+    assert!(same_box(&after[3], &[before[2][0], before[2][1] + 14.0, before[2][2], before[2][3] + 14.0]), "{after:?}");
+}
+
+#[test]
+fn a_line_that_grows_past_the_block_wraps_its_overflow_and_pushes_the_lines_below() {
+    let d = dir("edit-grown-line");
+    let (eng, id, path) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    let width = before.iter().map(|b| b[2]).fold(0.0, f32::max) - before[0][0];
+    set_text(&eng, id, 0, "One cat Two and a lot more words that will not fit on one line Three long hats here");
+    let check = |eng: &Engine, id: DocId| {
+        let lines = page_lines(eng, id);
+        let after = all_boxes(eng, id);
+        assert_eq!(lines.len(), after.len());
+        // The lines above are untouched; the changed line and its overflow stay inside the block's width.
+        assert!(same_box(&after[0], &before[0]), "{after:?} vs {before:?}");
+        assert_eq!(lines.last().unwrap(), "Three long hats here");
+        let added = lines.len() - 3;
+        assert!(added >= 2, "{lines:?}");
+        assert_eq!(lines[1..lines.len() - 1].join(" "), "Two and a lot more words that will not fit on one line");
+        for b in &after[1..after.len() - 1] {
+            assert!((b[0] - before[0][0]).abs() < 0.5 && b[2] - b[0] <= width + 1.0, "{b:?} wider than {width}");
+        }
+        assert!(same_place(&after[1], &before[1]), "{after:?}");
+        // Lines below move down by exactly the lines added: 14 pt each.
+        let tail = after.last().unwrap();
+        assert!(same_box(tail, &[before[2][0], before[2][1] + 14.0 * added as f32, before[2][2], before[2][3] + 14.0 * added as f32]), "{after:?}");
+    };
+    check(&eng, id);
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    check(&eng, id);
+}
+
+#[test]
+fn first_line_indent_and_uneven_leading_stay_through_an_edit() {
+    let d = dir("edit-keeps-places");
+    // A first line indented 10 pt, then lines 14 and 15 pt below: one block, each line at its own place.
+    let page = "BT /F1 12 Tf 82 700 Td (One cat sat down) Tj ET BT /F1 12 Tf 72 686 Td (Two) Tj ET BT /F1 12 Tf 72 671 Td (Three long hats here) Tj ET";
+    let (eng, id, _) = open(&d, &pdf(page, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    assert_eq!(before.len(), 3);
+    set_text(&eng, id, 0, "One cat sat down Twos Three long hats here");
+    assert_eq!(page_lines(&eng, id), ["One cat sat down", "Twos", "Three long hats here"]);
+    let after = line_boxes(&eng, id);
+    assert_eq!(after.len(), 3);
+    assert!(same_box(&after[0], &before[0]) && same_box(&after[2], &before[2]), "{after:?} vs {before:?}");
+    assert!(same_place(&after[1], &before[1]), "{after:?} vs {before:?}");
+}
+
+#[test]
+fn a_line_replaced_by_other_words_leaves_the_other_lines_alone() {
+    let d = dir("edit-line-replaced");
+    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    set_text(&eng, id, 0, "One cat Two Four");
+    assert_eq!(page_lines(&eng, id), ["One cat", "Two", "Four"]);
+    let after = all_boxes(&eng, id);
+    assert!(same_box(&after[0], &before[0]) && same_box(&after[1], &before[1]) && same_place(&after[2], &before[2]), "{after:?} vs {before:?}");
+}
+
+#[test]
+fn a_justified_block_edited_in_one_line_keeps_the_others_and_stays_justified() {
+    let d = dir("edit-justified-line");
+    let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let long = "Justified text spreads the free width of every line but the last over its spaces, so both edges line up.";
+    let change = BlockChange { text: Some(long.into()), align: Some(Align::Justify), width: Some(160.0), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 1, &change, EditSource::User).unwrap();
+    let before = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    let n = before.lines.len();
+    let edited = long.replace("free", "fine");
+    set_text(&eng, id, 1, &edited);
+    let after = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    assert_eq!((after.align, after.lines.len()), (Align::Justify, n), "{after:?}");
+    assert_eq!(after.text, edited);
+    // Only the first line has the word: the ones after it are where and as wide as they were; the first still
+    // reaches the right edge.
+    assert!(after.lines[1..].iter().zip(&before.lines[1..]).all(|(a, b)| same_box(a, b)), "{:?} vs {:?}", after.lines, before.lines);
+    assert!((after.lines[0][2] - before.lines[0][2]).abs() < 0.6 && (after.lines[0][0] - before.lines[0][0]).abs() < 0.05, "{:?}", after.lines);
+}
+
+#[test]
+fn a_block_edited_with_a_width_or_typed_over_is_laid_out_whole_as_before() {
+    let d = dir("edit-reflow-asked");
+    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    // A width is the user asking for a reflow: the lines run together to it.
+    let change = BlockChange { text: Some("One dog Two Three long hats here".into()), width: Some(300.0), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &change, EditSource::User).unwrap();
+    assert_eq!(page_lines(&eng, id), ["One dog Two Three long hats here"]);
+    eng.undo(id).unwrap();
+    // Most of the words typed over: nothing of the old lines is worth keeping.
+    set_text(&eng, id, 0, "A different paragraph altogether, written over the old lines of the block");
+    assert!(page_lines(&eng, id).len() >= 2);
+    assert_eq!(text(&eng, id), "A different paragraph altogether, written over the old lines of the block");
+}
+
+#[test]
+fn a_block_with_a_line_end_hyphen_is_laid_out_whole_as_before() {
+    let d = dir("edit-hyphen-reflows");
+    let page = "BT /F1 12 Tf 72 700 Td 14 TL (A well-) Tj T* (known cat sat) Tj T* (here today) Tj ET";
+    let (eng, id, _) = open(&d, &pdf(page, &[("F1", HELV)], &[]));
+    assert_eq!(blocks(&eng, id, 0).unwrap().blocks[0].text, "A wellknown cat sat here today");
+    set_text(&eng, id, 0, "A wellknown dog sat here today");
+    assert_eq!(text(&eng, id), "A wellknown dog sat here today");
 }
 
 #[test]
@@ -2178,4 +2370,59 @@ fn a_justified_line_that_outgrows_its_place_is_skipped_and_the_block_stays_justi
     let b = check(&eng);
     assert_eq!(b.lines.len(), was.lines.len());
     assert!(b.text.contains("sides line up"), "{}", b.text);
+}
+
+#[test]
+fn a_style_or_a_move_leaves_the_lines_of_a_block_as_they_are() {
+    let d = dir("edit-format-keeps-lines");
+    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    // Underline the whole block: nothing moves.
+    let runs = vec![RunChange { source: Some(0), underline: Some(true), ..Default::default() }];
+    edit(&eng, id, rev(&eng, id), 0, 0, &BlockChange { runs: Some(runs), ..Default::default() }, EditSource::User).unwrap();
+    assert_eq!(page_lines(&eng, id), ["One cat", "Two", "Three long hats here"]);
+    let after = all_boxes(&eng, id);
+    assert!(after.iter().zip(&before).all(|(a, b)| same_box(a, b)), "{after:?} vs {before:?}");
+    // Underline one word, cut out of the block's text: the other lines are exactly where they were.
+    eng.undo(id).unwrap();
+    let runs = vec![
+        RunChange { source: Some(0), text: Some("One cat ".into()), ..Default::default() },
+        RunChange { source: Some(0), text: Some("Two".into()), underline: Some(true), ..Default::default() },
+        RunChange { source: Some(0), text: Some(" Three long hats here".into()), ..Default::default() },
+    ];
+    edit(&eng, id, rev(&eng, id), 0, 0, &BlockChange { runs: Some(runs), ..Default::default() }, EditSource::User).unwrap();
+    let after = all_boxes(&eng, id);
+    assert!(after.iter().zip(&before).all(|(a, b)| same_box(a, b)), "{after:?} vs {before:?}");
+    // A move: three lines, each 20 right and 10 down.
+    let change = BlockChange { offset: Some([20.0, 10.0]), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &change, EditSource::User).unwrap();
+    let moved = all_boxes(&eng, id);
+    assert_eq!(moved.len(), 3, "{moved:?}");
+    for (m, b) in moved.iter().zip(&before) {
+        assert!(same_box(m, &[b[0] + 20.0, b[1] + 10.0, b[2] + 20.0, b[3] + 10.0]), "{moved:?} vs {before:?}");
+    }
+}
+
+#[test]
+fn a_multi_line_edit_is_refused_on_a_certified_file_and_saved_after_the_signature_on_a_signed_one() {
+    let d = dir("edit-lines-certified");
+    let (eng, id, _) = open(&d, &pdf_in(THREE_LINES, &[("F1", HELV)], &[], CERTIFIED));
+    let before = rev(&eng, id);
+    let change = BlockChange { text: Some("One dog Two Three long hats here".into()), ..Default::default() };
+    match edit(&eng, id, before, 0, 0, &change, EditSource::User) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(rev(&eng, id), before);
+    let d = dir("edit-lines-signed");
+    let catalog = "/AcroForm << /SigFlags 3 /Fields [6 0 R] >>";
+    let (eng, id, path) = open(&d, &pdf_in(THREE_LINES, &[("F1", HELV)], &[SIG_FIELD], catalog));
+    let original = std::fs::read(&path).unwrap();
+    edit(&eng, id, rev(&eng, id), 0, 0, &change, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the signed bytes are not rewritten");
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert_eq!(page_lines(&eng, id), ["One dog", "Two", "Three long hats here"]);
 }

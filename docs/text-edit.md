@@ -29,8 +29,9 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
   `lineSpacing` is the distance between lines over the font size (null for one line).
   `font` is the `/BaseFont` (subset prefix kept), `size` in points, `align` one of `left|center|right|justify`.
 - `change = { text?, runs?, size?, color?, align?, offset?: [dx, dy], width?, lineSpacing?, bold?, italic? }`; unset fields keep
-  the block's own. `text` (one run, in the first run's style) may contain `\n` for hard line breaks; everything
-  reflows to the block's width. `underline?`, `strike?` and `rise?: "super" | "sub" | null` apply to every run (`null`
+  the block's own. `text` (one run, in the first run's style) may contain `\n` for hard line breaks. A block of
+  two or more lines keeps its lines (see "Lines are kept" below); a block of one line, and any change with a `width`,
+  `size`, `lineSpacing` or `align`, reflows everything to the block's width. `underline?`, `strike?` and `rise?: "super" | "sub" | null` apply to every run (`null`
   clears; a missing field keeps). `runs: { text?, source?, font?, size?, color?, bold?, italic?, underline?, strike?, rise? }[]`
   is the new content run by run: unset fields come from run `source` (or the first run); `font` is a `text_fonts` id. A run with a `source`,
   no new text and no font or style change keeps its glyphs exactly, kerning included. Block-level `size` scales every
@@ -169,7 +170,7 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
   under a 48 pt run clears it.
 - Editing a block again and again leaves only the fonts its content uses: one `IwEd`, one `IwNoto`, one CJK subset in
   the saved file after five edits.
-- Multi-line reflow keeps the block's left edge, width and line spacing; hard breaks with `\n`.
+- Multi-line reflow (a width change, or a paragraph typed over) keeps the block's left edge, width and line spacing; hard breaks with `\n`. Otherwise the lines are kept: an edit in line 2 of three moves no other line.
 - Size, colour, move, resize and right/centre alignment; a centred block stays centred after a text change.
 - Undo/redo of every change (each is one step); a stale `rev` is refused.
 - Issues reported for Type 3, missing ToUnicode, invisible text and text converted to outlines.
@@ -214,6 +215,37 @@ page's contents with its own `q ... Q` and a `/TouchUp_TextEdit` marked-content 
 p. N"; unlike a rewrite it saves incrementally. The new box is listed as a block straight away and edited like any
 other.
 
+## Lines are kept (Edit text, move, style)
+
+A block of two or more lines is not re-wrapped when it is committed. The UI's draft is one paragraph (the lines
+run together with a space between them); `rewrite_block` compares it with the block's words (`replace::keep_edit`,
+a word diff) and sets only the stretches of words that changed, through the same builder as Replace
+(`replace::keep_change`, `KeepLines { ends, changed, wrap }`, `layout::keep_lines`):
+
+- A line the edit does not touch keeps its origin, baseline and width, so a ragged-right block stays ragged, a
+  first-line indent and uneven leading stay, and justified lines stay stretched.
+- A changed line is set at the start (middle, end) of the line it was. An edit across a line end (the space between
+  two lines deleted or typed over) joins those two lines into one, nothing else. A line emptied leaves a gap.
+- **A line that grows past the block's width** (its widest line) is wrapped at that width: the overflow goes on new
+  lines below it, at the block's left edge and the block's line distance. The lines under it move down by the
+  lines added (its own lines minus the source lines it covers; a line that got shorter or was emptied leaves a gap,
+  nothing is pulled up), each keeping its x and its place relative to the others. Lines above it do not move. The
+  block can end up taller than its box, and over the text below it: undo is the way back, as for any Edit text.
+  Acrobat does the closest thing (it reflows the paragraph and the block grows downwards); we don't pull the
+  overflow into the next line because that would join lines the user didn't touch.
+- A typed line break starts a new line below the line it was typed in, the lines under it move down by it. A line
+  break typed where two words were is a change even though no word is: what stands between words is compared too.
+- An edit that is only a style (underline, colour, bold, italic, rise, font) or a move keeps the lines the same
+  way: the lines without a restyled run are exactly as they were. A bolder line that no longer fits wraps as above.
+- **Whole-block reflow stays** where it is asked for or where there are no lines to keep: a change with a `width`
+  (dragging the box's edge), `size`, `lineSpacing` or `align`; a block of one line (it grows to the margin); most of
+  the words typed over (a paragraph written anew); a block with a line-end hyphen the edit doesn't cover (the rewrite
+  drops it, so the word is joined and the block reflows); a block whose lines have their own character spacing or
+  scale, whose runs text differs from the text the user was shown, that holds a private-use mark character or is over
+  20,000 characters; and a change of size, which scales the leading too.
+- Styles: typed text takes the style of the run the changed word starts in, as a Replace does; a word that spans two
+  runs of different styles takes the first's.
+
 ## Find & Replace
 
 Acrobat's Edit > Find & Replace, on top of the block edit (`textedit/replace.rs`, command `text_replace`).
@@ -239,8 +271,7 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   be placed in its new text, for a block whose lines have their own character spacing or scale, and for a match
   that stops inside a word a dropped hyphen split. A match across a line end
   drops
-  that one break. Edit text itself re-wraps the whole block to its widest line when its text is committed (its draft
-  is one paragraph), so short lines can join. Nothing is searched again
+  that one break. Edit text keeps the lines the same way (next section). Nothing is searched again
   after a replacement, so a replacement that contains the find text is set once and never loops. The whole run is
   one undo step ("Replace "cat" with "dog""), saved like any text edit (a full rewrite; incremental when signed).
 - **Replace one** (`at` = the first rectangle of the current Find hit): the match is the nth hit of its block in

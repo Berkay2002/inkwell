@@ -1036,7 +1036,7 @@ fn span_in(first: &Line, l: &Line) -> (f64, f64, f64) {
     (x0, x1, y0)
 }
 
-fn paragraph_separator(c: char) -> bool {
+pub(super) fn paragraph_separator(c: char) -> bool {
     c.is_whitespace() && c != '\u{3000}'
 }
 
@@ -1249,6 +1249,10 @@ pub struct KeepLines {
     /// What was replaced, as ranges of the new runs' text: a line that holds none of them is as it was and
     /// is left exactly where and as wide as it was.
     pub changed: Vec<(usize, usize)>,
+    /// Edit text, not Find & Replace: the user's own edit may make a changed line longer than the block, and
+    /// then its overflow goes on a new line below it, the lines under it move down by the lines that were
+    /// added, and a typed line break stays a line break.
+    pub wrap: bool,
 }
 
 /// One run of a block's new content. Unset fields come from run `source` of the block (or its
@@ -1354,13 +1358,49 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
 pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, change: &TextChange, expect: Option<&str>) -> Result<Vec<Fallback>> {
     let pc = read_page(doc, page)?;
     let blocks = group_blocks(&pc.lines);
-    let b = blocks.get(index).cloned().ok_or_else(|| invalid(format!("page {} has no text block {}", page + 1, index + 1)))?;
+    let b = blocks.get(index).ok_or_else(|| invalid(format!("page {} has no text block {}", page + 1, index + 1)))?;
     if expect.is_some_and(|t| t != b.text) {
         return Err(invalid("the text changed while it was being replaced"));
     }
     if let Some(issue) = b.issue {
         return Err(invalid(format!("this text can't be edited: {}", issue_text(issue))));
     }
+    // A block of several lines keeps its lines, like Replace does: typed text sets only the words that changed, a
+    // move or a style leaves the lines as they were. A block whose lines can't be kept that way (see
+    // `replace::keep_edit`) is set as a whole.
+    let kept = if change.keep.is_some() {
+        None
+    } else if let Some(t) = change.text.as_deref() {
+        let plain = change.runs.is_none()
+            && change.size.is_none()
+            && change.color.is_none()
+            && change.align.is_none()
+            && change.width.is_none()
+            && change.line_spacing.is_none()
+            && change.bold.is_none()
+            && change.italic.is_none()
+            && change.underline.is_none()
+            && change.strike.is_none()
+            && change.rise.is_none();
+        plain.then(|| super::replace::keep_edit(b, t)).flatten().map(|k| TextChange { offset: change.offset, ..k })
+    } else {
+        super::replace::keep_format(b, change)
+    };
+    if let Some(kept) = kept {
+        match rewrite_in(doc, page, &pc, b, &kept) {
+            Ok(f) => return Ok(f),
+            // A refusal may have named a font on the page before it stopped: tidy that away.
+            Err(EngineError::Invalid(_)) => {
+                let _ = forget_unused_fonts(doc, page);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    rewrite_in(doc, page, &pc, b, change)
+}
+
+/// [`rewrite_block_expecting`] once the block is read and checked.
+fn rewrite_in(doc: &mut PdfDocument, page: u32, pc: &PageContent, b: &Block, change: &TextChange) -> Result<Vec<Fallback>> {
     let members: Vec<&Line> = b.lines.iter().map(|&i| &pc.lines[i]).collect();
     let first = members[0];
     let o = &first.origin;
@@ -1476,7 +1516,10 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
             // would be spaced again.
             let (tc, tz) = (first.origin.state.char_spacing, first.origin.state.scale);
             let alike = members.iter().all(|l| (l.origin.state.char_spacing - tc).abs() < 1e-6 && (l.origin.state.scale - tz).abs() < 1e-6);
-            if !alike || items.iter().map(|i| i.text.chars().count()).sum::<usize>() != shown || items.iter().any(|i| matches!(i.kind, Kind::Break)) {
+            if !alike
+                || items.iter().map(|i| i.text.chars().count()).sum::<usize>() != shown
+                || (!keep.wrap && items.iter().any(|i| matches!(i.kind, Kind::Break)))
+            {
                 return Err(cant());
             }
             // Each line: its source line, its items, and where it starts and ends in the new text.
@@ -1535,6 +1578,18 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
         None if grows => own.max(pc.crop[2] - 36.0 - b.rect[0]),
         None => own,
     };
+    let lead = if let Some(ls) = change.line_spacing {
+        if !(ls.is_finite() && (0.5..=5.0).contains(&ls)) {
+            return Err(invalid("the line spacing must be between 0.5 and 5 times the font size"));
+        }
+        ls * size
+    } else if members.len() > 1 {
+        (spans[0].2 - spans[1].2) * size / old_tf
+    } else if st.leading > 0.0 {
+        st.leading * size / old_tf
+    } else {
+        size * 1.2
+    };
     let mut line_at = Vec::new();
     let lines = if let Some(groups) = kept {
         // Each line where it was; one that grew past the block, or past where it was, is not forced in.
@@ -1542,7 +1597,8 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
         if groups.is_empty() {
             return Err(invalid("there is no text to set"));
         }
-        let (lines, at) = keep_lines(groups, &spans, align, (left, right), 0.5 / k, &m)
+        let grow = change.keep.as_ref().is_some_and(|k| k.wrap).then_some(lead);
+        let (lines, at) = keep_lines(groups, &spans, align, (left, right), 0.5 / k, &m, grow)
             .ok_or_else(|| invalid("the replacement does not fit on its line"))?;
         line_at = at;
         lines
@@ -1564,18 +1620,6 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
             lines = wrap(items, (width + 0.5) / k, &m);
         }
         lines
-    };
-    let lead = if let Some(ls) = change.line_spacing {
-        if !(ls.is_finite() && (0.5..=5.0).contains(&ls)) {
-            return Err(invalid("the line spacing must be between 0.5 and 5 times the font size"));
-        }
-        ls * size
-    } else if members.len() > 1 {
-        (spans[0].2 - spans[1].2) * size / old_tf
-    } else if st.leading > 0.0 {
-        st.leading * size / old_tf
-    } else {
-        size * 1.2
     };
     // The block's operators go, and anything drawn in the same area.
     let member_rects: Vec<[f64; 4]> = members.iter().map(|l| l.rect).collect();
