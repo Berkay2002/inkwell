@@ -674,6 +674,7 @@ fn a_password_with_odd_spaces_or_invisible_marks_opens_the_file_under_its_mapped
     assert_eq!(crate::protect::nfkc_form("a\u{a0}b\u{3000}c").as_deref().map(String::as_str), Some("a b c"));
     assert_eq!(crate::protect::nfkc_form("a\u{200b}b").as_deref().map(String::as_str), Some("ab"), "U+200B is in B.1 and C.1.2: nothing");
     assert!(crate::protect::nfkc_form("plain ascii-pass").is_none());
+    assert!(crate::protect::nfkc_form("\u{200b}\u{ad}").is_none(), "all invisible: nothing to retry with");
 
     let d = dir("saslprep-map");
     let src = fixture_at(&d, "a.pdf", 1);

@@ -458,7 +458,8 @@ pub fn nfkc_form(pw: &str) -> Option<Zeroizing<String>> {
     let mapped: Zeroizing<String> =
         Zeroizing::new(pw.chars().filter(|&c| !dropped(c)).map(|c| if space(c) { ' ' } else { c }).collect());
     let form = Zeroizing::new(nfkc.normalize(&mapped).into_owned());
-    (*form != pw).then_some(form)
+    // A password of nothing but invisible characters maps to "": that is no retry, not an empty password.
+    (!form.is_empty() && *form != pw).then_some(form)
 }
 
 /// The security a document carries, from its `Encrypt` dictionary. `password`: what the document was
