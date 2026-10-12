@@ -969,6 +969,9 @@ fn more_signatures_than_inkwell_checks_are_refused() {
     let d = PdfDocument::from_bytes(&b).unwrap();
     let e = pdf::list(&d, &b, &trust_tests).unwrap_err();
     assert!(e.to_string().contains("more than 64 signatures"), "{e}");
+    // Signing again reads every signature's locks from its revision: refused past the same bound.
+    let e = pdf::sign(&b, &ids().1, &unseen()).unwrap_err();
+    assert!(e.to_string().contains("more than 64 signatures"), "{e}");
 }
 
 #[test]
@@ -1685,4 +1688,17 @@ fn each_locked_field_names_the_signature_that_locks_it() {
     assert_eq!(field(&i, "Witness").locked_by.as_deref(), Some("Maple Property Test"));
     assert_eq!(field(&i, "Other").locked_by.as_deref(), Some("Alex Johnson Test"));
     assert_eq!(field(&i, "Free").locked_by, None);
+}
+
+#[test]
+fn a_lock_removed_in_a_later_update_still_locks() {
+    let b = lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Witness)]>>", "");
+    let stripped = append(&b, |d| {
+        let mut t = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap();
+        assert_eq!(t.get_dict("T").unwrap().unwrap().as_string().unwrap(), "Tenant");
+        t.dict_delete("Lock").unwrap();
+    });
+    assert!(PdfDocument::from_bytes(&stripped).unwrap().find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap().get_dict("Lock").unwrap().is_none());
+    assert_eq!(locked_fields(&stripped), ["Witness"]);
+    assert_eq!(field(&infos(&stripped), "Witness").locked_by.as_deref(), Some("Maple Property Test"));
 }
