@@ -577,8 +577,8 @@ describe("named destinations", () => {
     expect(destNotice({ op: "delete", name: "zeta" }, done(), l)).toBe('Deleted "zeta".');
     expect(destNotice({ op: "setView", name: "alpha", page: 4, at: null, zoom: null }, done(0), l)).toBe('"alpha" already goes there.');
     expect(destNotice({ op: "removeUnused" }, done(3, ['"x": a script mentions it']), l)).toBe(
-      'Removed 3 destinations nothing uses. Kept in doubt: "x": a script mentions it.',
+      'Removed 3 destinations nothing in this file uses. Kept in doubt: "x": a script mentions it.',
     );
-    expect(destNotice({ op: "removeUnused" }, done(0), l)).toBe("No destination was unused.");
+    expect(destNotice({ op: "removeUnused" }, done(0), l)).toBe("No destination in this file was unused.");
   });
 });

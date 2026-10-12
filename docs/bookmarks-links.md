@@ -204,21 +204,27 @@ destinations", listed when opened, since finding what uses a name walks the docu
   document is not changed. A name that already exists in either source is refused; so is a non-ASCII name in
   `/Dests` (the viewer never forms such a key), which only the name tree takes.
 - **Set to current view**: `/XYZ` at the top left of the view (page space, rotation undone) and the viewer's zoom
-  (1 is 100 %); a value written as `<< /D … >>` keeps its dictionary. Setting the same view again changes nothing.
+  (1 is 100 %); a value written as `<< /D … >>` keeps its dictionary (an indirect one is copied for this name, so
+  another name that shares the object does not move). Setting the same view again changes nothing. A name defined
+  twice in one source (listed as defined more than once) is refused here and in Rename: delete one of them first.
 - **Add** (from the current view): a file whose only source is `/Dests` keeps it there (ASCII name); otherwise the
   name goes into the name tree (made when there is none). `/Dests` is never created or deleted: its presence flips
   MuPDF to `/Dests` alone, so adding one would hide every name in the tree.
 - **Delete** takes the name out of its source(s); what used it reads as Broken, and the notice says how many.
-- **Remove unused** takes out every name nothing uses: no bookmark, link, GoTo in a form field, page or document
-  action, `/OpenAction`, or chained destination. Names kept in doubt are reported with why (at most 20): a script
+- **Remove unused** takes out every name nothing in this file uses: no bookmark, link, GoTo in a form field, page or
+  document action, `/OpenAction`, or chained destination. Uses from other files (a `/GoToR` or `/GoToE` `/D`, a
+  `#nameddest=` link) can't be seen, so a name only they use is removed: the button's title and the notice say "in this
+  file". Names kept in doubt are reported with why (at most 20): a script
   mentions the name (any JavaScript text that contains it), or its own name can't be read as text. When the document
-  has too many objects or too much JavaScript to check, nothing is removed.
+  has too many objects, pages or name trees to look at, or names times script bytes is past 1 GiB, nothing is removed.
 - **The name tree comes out valid**: leaves of 32 pairs and inner nodes of 32 kids, keys sorted by their bytes
-  with no duplicates, `/Limits` on every node but the root, kids indirect; the root object is reused, so the
+  (a rebuild makes no duplicate key; one the tree already had is kept as it was, and that name can't be renamed or
+  set until one is deleted), `/Limits` on every node but the root, kids indirect; the root object is reused, so the
   catalog's reference stays. A node nobody else reaches is dropped; an emptied tree is a root with `/Names []`.
 - **Caps** (past any of them the list is partial, `truncated`, and nothing is edited): 20,000 entries in each
-  source, 4,096 name tree nodes, 12 levels; looking for uses reads at most 1,000,000 objects, 100,000 pages and
-  128 KiB of JavaScript. A tree of a shape this does not write (a node reached twice, a cycle, a kid that is not an
+  source, 4,096 name tree nodes, 12 levels; looking for uses reads at most 1,000,000 objects, 100,000 pages, 1,024 entries of the catalog's
+  `/Names` and 128 KiB of JavaScript, and past any of them "Remove unused" and Rename refuse (`unchecked`). The list
+  shows "a script mentions it" only while names times script bytes is under 32 MiB. A tree of a shape this does not write (a node reached twice, a cycle, a kid that is not an
   indirect node, `/Kids` with `/Names`, an odd `/Names`, a key that is not a string) is listed and left as it is:
   `frozen` says why.
 - **Certified** (`/P` of any value, as for bookmarks) refuses every change; `dests_list` returns `locked` and the
@@ -249,7 +255,7 @@ dictionary value; add into the source the file uses; delete; remove unused keeps
 reached through `/Next`, and rename rewrites them;
 the name tree walked node by node for byte order, `/Limits` and indirect kids after inserts and deletes, on a
 1,100-entry tree and a given two-level tree; certified refuses every op; a signed document saves incrementally;
-unreadable shapes and caps refuse; every bookmark and link resolves the same before and after each op),
+unreadable shapes and caps refuse (pages and name trees past the search cap make it `unchecked`); a shared `<< /D >>` object and a name defined twice; 20,000 names listed in about 90 ms; every bookmark and link resolves the same before and after each op),
 `Destinations.test.tsx` and `nav.test.ts` ("named destinations").
 
 `cargo test --lib outline -- --test-threads=1`, `cargo test --lib links -- --test-threads=1`, `src/lib/nav.test.ts` (including following links).

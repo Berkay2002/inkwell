@@ -604,7 +604,7 @@ export function destNotice(op: DestOp, done: api.DestEdited, listed: DestList | 
         : `Deleted ${q(op.name)}.`;
     }
     case "removeUnused": {
-      const gone = done.count ? `Removed ${plural(done.count, "destination")} nothing uses.` : "No destination was unused.";
+      const gone = done.count ? `Removed ${plural(done.count, "destination")} nothing in this file uses.` : "No destination in this file was unused.";
       return done.kept.length ? `${gone} Kept in doubt: ${done.kept.join("; ")}.` : gone;
     }
   }

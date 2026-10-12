@@ -166,7 +166,7 @@ export function Destinations({ doc }: { doc: number }) {
       <button
         className="te-btn"
         disabled={!!off || list.unchecked || list.items.length === 0}
-        title={off ?? (list.unchecked ? "What uses the names could not be fully found" : "Takes out every name no bookmark, link or action uses")}
+        title={off ?? (list.unchecked ? "What uses the names could not be fully found" : "Takes out every name no bookmark, link or action in this file uses. Links from other files are not seen.")}
         onClick={() => void nav().destOp(doc, { op: "removeUnused" })}
       >
         Remove unused

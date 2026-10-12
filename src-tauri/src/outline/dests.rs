@@ -28,6 +28,11 @@ pub const MAX_DEPTH: usize = 12;
 /// Objects visited when looking for what uses a name (pages, annotations, actions, fields, bookmarks).
 const MAX_WALK: usize = 1_000_000;
 const MAX_PAGES: i32 = 100_000;
+/// Entries of `/Names` of the catalog whose values are searched for actions (the other name trees).
+const MAX_NAME_TREES: usize = 1024;
+/// Bytes a name search may compare in all (names times JavaScript) before "Remove unused" refuses; the list shows the
+/// "a script mentions it" hint only while it is under a thirty-second of this, so listing stays quick.
+const MAX_SCAN: usize = 1 << 30;
 /// JavaScript text read in all, and per script: past it, every name counts as possibly used.
 const MAX_JS: usize = 128 * 1024;
 /// Entries per leaf and children per inner node of a tree this module writes.
@@ -61,6 +66,8 @@ struct Table {
     /// The root node of `/Names /Dests`.
     tree: Option<PdfObject>,
     entries: Vec<Entry>,
+    /// Text → indices into `entries`, so a name is found without a scan.
+    by_text: HashMap<String, Vec<usize>>,
     /// A cap was hit: some entries were not read.
     cut: bool,
     /// Why the tree cannot be rewritten from what was read (a shape no writer makes).
@@ -87,7 +94,7 @@ fn display(bytes: &[u8]) -> String {
 impl Table {
     fn load(doc: &PdfDocument) -> Result<Table> {
         let cat = doc.catalog()?;
-        let mut t = Table { has_old: false, old: None, tree: None, entries: Vec::new(), cut: false, shape: None };
+        let mut t = Table { has_old: false, old: None, tree: None, entries: Vec::new(), by_text: HashMap::new(), cut: false, shape: None };
         if let Some(old) = cat.get_dict("Dests")? {
             // MuPDF's `if (dests)`: a /Dests that is not a dictionary is still there, and hides the tree
             t.has_old = true;
@@ -115,6 +122,9 @@ impl Table {
                 }
                 None => t.shape = Some("the name tree of destinations is not a dictionary".into()),
             }
+        }
+        for (i, e) in t.entries.iter().enumerate() {
+            t.by_text.entry(e.text.clone()).or_default().push(i);
         }
         Ok(t)
     }
@@ -193,7 +203,7 @@ impl Table {
 
     /// The entries named `name`, in both sources.
     fn named(&self, name: &str) -> Vec<usize> {
-        (0..self.entries.len()).filter(|&i| self.entries[i].text == name).collect()
+        self.by_text.get(name).cloned().unwrap_or_default()
     }
 }
 
@@ -242,11 +252,12 @@ struct Js {
 }
 
 #[derive(Default)]
-struct Uses {
+pub(super) struct Uses {
     refs: Vec<Ref>,
     js: Vec<Js>,
-    /// Some of the document was not looked at (more objects than `MAX_WALK`, or more JavaScript than `MAX_JS`).
-    unchecked: bool,
+    /// Some of the document was not looked at (more objects than `MAX_WALK`, more pages or name trees than are read,
+    /// or more JavaScript than `MAX_JS`).
+    pub(super) unchecked: bool,
 }
 
 #[derive(Clone)]
@@ -352,6 +363,11 @@ impl Uses {
         }
     }
 
+    /// Bytes of script text held.
+    fn js_bytes(&self) -> usize {
+        self.js.iter().map(|j| j.text.as_ref().map_or(0, String::len)).sum()
+    }
+
     /// Why `name` may be used by something that can't be rewritten (a script that mentions it, one that could not be
     /// read): none when no script is in doubt.
     fn mentioned(&self, name: &str) -> Option<String> {
@@ -365,6 +381,11 @@ impl Uses {
 /// What uses a destination: every `/Dest`, GoTo `/D` and open action reached from the catalog (bookmarks, link
 /// annotations, form and page actions, fields), and the JavaScript there is. Bounded; `unchecked` says when it was.
 fn find_uses(doc: &PdfDocument) -> Result<Uses> {
+    find_uses_capped(doc, MAX_PAGES, MAX_NAME_TREES)
+}
+
+/// `find_uses` with the page and name tree caps given (the tests lower them).
+pub(super) fn find_uses_capped(doc: &PdfDocument, max_pages: i32, max_name_trees: usize) -> Result<Uses> {
     let mut u = Uses::default();
     let cat = doc.catalog()?;
     let mut todo: Vec<(PdfObject, Origin)> = Vec::new();
@@ -375,7 +396,9 @@ fn find_uses(doc: &PdfDocument) -> Result<Uses> {
         todo.push((form, Origin::Other("an action in a form field".into())));
     }
     if let Some(names) = cat.get_dict("Names")?.and_then(|n| n.resolve().ok().flatten()).filter(|n| n.is_dict().unwrap_or(false)) {
-        for i in 0..names.dict_len()?.min(1024) as i32 {
+        // what lies past the cap is not looked at, so a name used only there would look unused
+        u.unchecked |= names.dict_len()? > max_name_trees;
+        for i in 0..names.dict_len()?.min(max_name_trees) as i32 {
             let (Some(k), Some(v)) = (names.get_dict_key(i)?, names.get_dict_val(i)?) else { continue };
             if k.as_name().is_ok_and(|n| n != b"Dests") {
                 todo.push((v, Origin::Other(doc_label.clone())));
@@ -385,7 +408,8 @@ fn find_uses(doc: &PdfDocument) -> Result<Uses> {
     if let Some(o) = cat.get_dict("Outlines")? {
         todo.push((o, Origin::Bookmark(None)));
     }
-    for i in 0..doc.page_count()?.min(MAX_PAGES) {
+    u.unchecked |= doc.page_count()? > max_pages;
+    for i in 0..doc.page_count()?.min(max_pages) {
         todo.push((doc.find_page(i)?, Origin::Page(i as u32)));
     }
     let mut seen: HashSet<i32> = HashSet::new();
@@ -491,9 +515,10 @@ pub fn read(doc: &PdfDocument, rev: u32) -> Result<DestList> {
     };
     let mut names = Names::default();
     let mut spaces = HashMap::new();
-    let mut order: Vec<&str> = table.entries.iter().map(|e| e.text.as_str()).collect();
-    order.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
-    order.dedup();
+    let mut order: Vec<&str> = table.by_text.keys().map(String::as_str).collect();
+    order.sort_by_cached_key(|n| (n.to_lowercase(), n.to_string()));
+    // the script hint costs names times script bytes: only while that is small
+    let hints = table.by_text.len().saturating_mul(uses.js_bytes()) <= MAX_SCAN / 32;
     let mut items = Vec::with_capacity(order.len());
     for name in order {
         let at = table.named(name);
@@ -513,7 +538,7 @@ pub fn read(doc: &PdfDocument, rev: u32) -> Result<DestList> {
             twice: [Source::Old, Source::Tree].iter().any(|s| at.iter().filter(|&&i| table.entries[i].source == *s).count() > 1),
             refs: used.map_or(0, Vec::len) as u32,
             used_by: used.map(|u| u.iter().take(3).cloned().collect()).unwrap_or_default(),
-            maybe: uses.mentioned(name),
+            maybe: if hints { uses.mentioned(name) } else { None },
         });
     }
     let tree_entries = table.entries.iter().any(|e| e.source == Source::Tree);
@@ -767,6 +792,7 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &DestOp, out: &mut Done) -> Result<
             if at_entries.is_empty() {
                 return Err(EngineError::Stale);
             }
+            refuse_twice(&table, &at_entries, name)?;
             if at_entries.iter().all(|&i| is_view(doc, &table.entries[i].value, *page, *at, *zoom)) {
                 return Ok(false);
             }
@@ -776,16 +802,27 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &DestOp, out: &mut Done) -> Result<
             let mut old = table.old.as_ref().map(PdfObject::share);
             for &i in &at_entries {
                 let e = &table.entries[i];
-                let arr = dest_object_zoomed(doc, *page, *at, *zoom)?;
-                // a `<< /D … >>` keeps its dictionary
+                let mut new = dest_object_zoomed(doc, *page, *at, *zoom)?;
+                // a `<< /D … >>` keeps its dictionary: edited where it stands when it is this entry's own, else (an
+                // object other names may share) as a copy that this name alone gets
                 if let Some(mut dict) = e.value.resolve()?.filter(|v| v.is_dict().unwrap_or(false)) {
-                    dict.dict_put("D", arr)?;
-                    continue;
+                    if !e.value.is_indirect()? {
+                        dict.dict_put("D", new)?;
+                        continue;
+                    }
+                    let mut copy = doc.new_dict()?;
+                    for k in 0..dict.dict_len()? as i32 {
+                        if let (Some(key), Some(val)) = (dict.get_dict_key(k)?, dict.get_dict_val(k)?) {
+                            copy.dict_put(key, val)?;
+                        }
+                    }
+                    copy.dict_put("D", new)?;
+                    new = copy;
                 }
                 match e.source {
-                    Source::Old => old.as_mut().ok_or(EngineError::Stale)?.dict_put(e.key.share(), arr)?,
+                    Source::Old => old.as_mut().ok_or(EngineError::Stale)?.dict_put(e.key.share(), new)?,
                     Source::Tree => {
-                        pairs[slots[i].ok_or(EngineError::Stale)?].1 = arr;
+                        pairs[slots[i].ok_or(EngineError::Stale)?].1 = new;
                         tree_changed = true;
                     }
                 }
@@ -835,9 +872,11 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &DestOp, out: &mut Done) -> Result<
                 ));
             }
             let usage = Usage::of(&uses, &table);
-            let mut names: Vec<&str> = table.entries.iter().map(|e| e.text.as_str()).collect();
+            if table.by_text.len().saturating_mul(uses.js_bytes()) > MAX_SCAN {
+                return Err(invalid("this document has too many destinations and too much JavaScript to check which ones a script uses, so none are removed"));
+            }
+            let mut names: Vec<&str> = table.by_text.keys().map(String::as_str).collect();
             names.sort_unstable();
-            names.dedup();
             let mut gone = Vec::new();
             for name in names {
                 let at_entries = table.named(name);
@@ -897,6 +936,17 @@ fn remove(doc: &mut PdfDocument, table: &Table, gone: &[usize]) -> Result<()> {
     Ok(())
 }
 
+/// A name defined twice in one source (a tree that already had duplicate keys) is changed by neither a rename nor a
+/// new view: which of the two a reader finds is not ours to say.
+fn refuse_twice(table: &Table, at_entries: &[usize], name: &str) -> Result<()> {
+    for s in [Source::Old, Source::Tree] {
+        if at_entries.iter().filter(|&&i| table.entries[i].source == s).count() > 1 {
+            return Err(invalid(format!("\"{name}\" is defined twice in this document's destinations: delete one of them first")));
+        }
+    }
+    Ok(())
+}
+
 fn rename(doc: &mut PdfDocument, table: &Table, name: &str, to: &str, out: &mut Done) -> Result<bool> {
     let to = clean_name(to)?;
     if to == name {
@@ -909,11 +959,7 @@ fn rename(doc: &mut PdfDocument, table: &Table, name: &str, to: &str, out: &mut 
     if table.entries.iter().any(|e| e.text == to) {
         return Err(invalid(format!("a destination named \"{to}\" already exists")));
     }
-    for s in [Source::Old, Source::Tree] {
-        if at_entries.iter().filter(|&&i| table.entries[i].source == s).count() > 1 {
-            return Err(invalid(format!("\"{name}\" is defined twice in this document's destinations: delete one of them first")));
-        }
-    }
+    refuse_twice(table, &at_entries, name)?;
     if at_entries.iter().any(|&i| table.entries[i].source == Source::Old) {
         old_name_ok(&to)?;
     }

@@ -642,3 +642,78 @@ fn what_resolved_before_resolves_the_same_after_every_change() {
     go(&eng, id, DestOp::Rename { name: "alpha".into(), to: "first".into() });
     assert_eq!(resolved(&eng, id), before);
 }
+
+/// A `<< /D … >>` object two names share is not edited under the other one: the name set gets a copy.
+#[test]
+fn set_view_of_a_name_sharing_a_dictionary_leaves_the_other_name_alone() {
+    let cat = "/Names << /Dests << /Names [(one) 12 0 R (two) 12 0 R] >> >>";
+    let (eng, id, _) = open("shared_dict", cat, &["<< /D [5 0 R /Fit] /X (kept) >>"]);
+    go(&eng, id, DestOp::SetView { name: "one".into(), page: 2, at: None, zoom: None });
+    let l = dl(&eng, id);
+    assert_eq!((page_of(entry(&l, "one")), page_of(entry(&l, "two"))), (Some(2), Some(0)));
+    // the copy keeps the other keys, and the shared object is as it was
+    assert!(raw(&eng, id, 12, "X").contains("(kept)"), "{}", raw(&eng, id, 12, "X"));
+    check_tree(&eng, id);
+    eng.undo(id).unwrap();
+    assert_eq!(page_of(entry(&dl(&eng, id), "one")), Some(0));
+}
+
+#[test]
+fn a_name_defined_twice_is_not_given_a_view_or_renamed() {
+    let cat = "/Names << /Dests << /Names [(dup) [5 0 R /Fit] (dup) [6 0 R /Fit] (ok) [7 0 R /Fit]] >> >>";
+    let (eng, id, _) = open("twice", cat, &[]);
+    assert!(entry(&dl(&eng, id), "dup").twice);
+    for op in [DestOp::SetView { name: "dup".into(), page: 2, at: None, zoom: None }, DestOp::Rename { name: "dup".into(), to: "x".into() }] {
+        assert!(refused(&eng, id, op).contains("defined twice"));
+    }
+    // deleting is still possible, and takes both
+    go(&eng, id, DestOp::Delete { name: "dup".into() });
+    assert_eq!(names(&dl(&eng, id)), ["ok"]);
+}
+
+/// What lies past the page or name tree cap is not looked at, so the answer to "what uses it" is "unknown".
+#[test]
+fn a_cap_on_pages_or_name_trees_makes_the_search_unchecked() {
+    let cat = "/Names << /Dests << /Names [(alpha) [5 0 R /Fit]] >> /JavaScript << /Names [] >> >>";
+    let (eng, id, _) = open("uses_caps", cat, &[]);
+    let at = |pages, trees| eng.read_custom(id, |d| Ok(dests::find_uses_capped(d, pages, trees)?.unchecked)).unwrap();
+    assert!(!at(3, 2), "all of it was looked at");
+    assert!(at(2, 2), "a page past the cap");
+    assert!(at(3, 1), "a name tree past the cap");
+    assert!(!dl(&eng, id).unchecked);
+}
+
+/// 20,000 names (the cap) listed, and the same with a script in the document: the numbers are printed (`--nocapture`).
+#[test]
+fn listing_the_most_names_read_is_quick() {
+    let script = format!("<< /S /JavaScript /JS ({}) >>", "x".repeat(100_000));
+    let cat = format!("{} /OpenAction 12 0 R", many(dests::MAX_ENTRIES));
+    let (eng, id, _) = open("timing", &cat, &[&script]);
+    let t = std::time::Instant::now();
+    let l = dl(&eng, id);
+    let listed = t.elapsed();
+    assert_eq!(l.items.len(), dests::MAX_ENTRIES);
+    assert!(!l.truncated && !l.unchecked);
+    // names times script bytes is past what the list searches: no hint, and no cost
+    assert!(l.items.iter().all(|e| e.maybe.is_none()));
+    let t = std::time::Instant::now();
+    let why = refused(&eng, id, DestOp::RemoveUnused);
+    let removal = t.elapsed();
+    assert!(why.contains("too much JavaScript"), "{why}");
+    eprintln!("list of {} names with a 100 KB script: {listed:?}; Remove unused refusal: {removal:?}", l.items.len());
+    assert!(listed.as_secs() < 20, "{listed:?}");
+
+    // a small script: the hint is searched for every name, and Remove unused takes all 20,000 out
+    let script = "<< /S /JavaScript /JS (app.alert(1);) >>";
+    let (eng, id, _) = open("timing_small", &cat, &[script]);
+    let t = std::time::Instant::now();
+    let l = dl(&eng, id);
+    let listed = t.elapsed();
+    assert_eq!(l.items.len(), dests::MAX_ENTRIES);
+    let t = std::time::Instant::now();
+    let done = go(&eng, id, DestOp::RemoveUnused);
+    let removal = t.elapsed();
+    assert_eq!(done.count as usize, dests::MAX_ENTRIES);
+    eprintln!("list of {} names with a small script: {listed:?}; Remove unused of all of them: {removal:?}", l.items.len());
+    assert!(listed.as_secs() < 20 && removal.as_secs() < 60, "{listed:?} {removal:?}");
+}
