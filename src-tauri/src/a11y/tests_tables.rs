@@ -283,6 +283,25 @@ fn text_drawn_in_the_middle_of_a_table_keeps_it_from_being_one() {
 }
 
 #[test]
+fn a_page_with_more_than_6000_lines_keeps_its_paragraphs() {
+    // A bold-header table over small filler: 25 columns of 1 pt text (too wide to be a table).
+    let page_of = |rows: i32| {
+        let mut c = grid(&SALES, &[72, 200, 330], 700, 18, true);
+        for r in 0..rows {
+            for k in 0..25 {
+                c += &at("F1", 1, 40 + 20 * k, 600 - 2 * r, "x");
+            }
+        }
+        page(c)
+    };
+    let under = autotag("table-lines-under", &page_of(200));
+    assert_eq!(under.count("Table"), 1, "{} elements", under.types.len());
+    // 240 rows of 25 and the table's 9 cells are over the cap: nothing is a table.
+    let over = autotag("table-lines-over", &page_of(240));
+    assert_eq!(over.count("Table"), 0, "{} elements", over.types.len());
+}
+
+#[test]
 fn a_table_header_is_not_a_heading() {
     // The table's 18 pt header row is larger than the 16 pt "Notes" heading. It is a table row, so
     // it takes no heading level: the 24 pt title is H1 and "Notes" is H2.

@@ -50,6 +50,9 @@ struct PageText {
     tables: Vec<Table>,
     /// The table each line is a cell of.
     table_of: Vec<Option<usize>>,
+    /// The page's runs, when table detection computed them: the tag pass takes them instead of
+    /// walking the content again.
+    runs: Option<Vec<Run>>,
 }
 
 fn page_text(doc: &PdfDocument, p: i32) -> Result<PageText> {
@@ -89,19 +92,21 @@ fn page_text(doc: &PdfDocument, p: i32) -> Result<PageText> {
             blocks += 1;
         }
     }
-    let tables = find_tables(doc, p, &lines)?;
+    let (tables, runs) = find_tables(doc, p, &lines)?;
     let mut table_of = vec![None; lines.len()];
     for (i, t) in tables.iter().enumerate() {
         t.rows.iter().flatten().for_each(|&l| table_of[l] = Some(i));
     }
-    Ok(PageText { lines, blocks, tables, table_of })
+    Ok(PageText { lines, blocks, tables, table_of, runs })
 }
 
 /// The tables on page `p`. Only lines that get a marked-content run can be cells (text that is
 /// already marked, or inside a form, is left alone), and form fields keep the text near them.
-fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<Vec<Table>> {
-    if lines.len() < 4 {
-        return Ok(Vec::new());
+/// A page with too many lines is not looked at (walking its content is the costly part). Also
+/// returns the page's runs, which the tag pass needs again.
+fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<(Vec<Table>, Option<Vec<Run>>)> {
+    if lines.len() < 4 || lines.len() > tables::MAX_ITEMS {
+        return Ok((Vec::new(), None));
     }
     let page = doc.find_page(p)?;
     let ctm = page.page_ctm()?;
@@ -145,7 +150,7 @@ fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<Vec<Table>> 
             _ => false,
         })
     });
-    Ok(found)
+    Ok((found, Some(rs)))
 }
 
 /// A block's lines in order, cut where they change between a table's cells and plain text:
@@ -483,13 +488,17 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
         if cancel.load(Ordering::Relaxed) {
             return Err(stop());
         }
+        let cached = texts[p as usize].runs.take();
         let t = &texts[p as usize];
         let mut page_obj = doc.find_page(p)?;
         let page_ctm = page_obj.page_ctm()?;
         let res = page_obj.get_dict_inheritable("Resources")?.filter(|r| r.is_dict().unwrap_or(false));
         let data = page_content(&page_obj)?;
         let ops = content::parse(&data);
-        let runs = in_order(runs(&ops, res.as_ref(), page_ctm.clone(), &t.lines)?, data.len());
+        let runs = match cached {
+            Some(r) => r,
+            None => in_order(runs(&ops, res.as_ref(), page_ctm.clone(), &t.lines)?, data.len()),
+        };
 
         // Blocks to elements. A table takes its lines out of their blocks and comes in once, where
         // its first line is.

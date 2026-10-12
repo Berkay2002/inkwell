@@ -28,7 +28,7 @@ const RULE_THICK: f32 = 2.5;
 /// Shortest ruling line (points).
 const RULE_MIN: f32 = 8.0;
 /// A page with more text lines than this keeps its paragraphs.
-const MAX_ITEMS: usize = 6000;
+pub const MAX_ITEMS: usize = 6000;
 const MAX_ROWS: usize = 300;
 const MAX_COLS: usize = 16;
 const MAX_RULES: usize = 5000;
