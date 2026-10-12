@@ -131,6 +131,13 @@ fn ops() -> Vec<(&'static str, bool, Op)> {
         crate::annot::set_state(d, 0, 7, "Accepted", "me")?;
         Ok(vec![0])
     }));
+    op!("place a custom stamp", true, |eng, p, id| {
+        use crate::annot::stamps::tests::one_stamp;
+        let dir = std::path::Path::new(p).parent().unwrap().join("stamp-lib");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_lib, stamp, png) = one_stamp(&dir);
+        crate::annot::stamps::place_one(eng, id, 0, &stamp, &png, [200.0, 200.0], "me", user()).map(|_| ())
+    });
     op!("measurement", true, |eng, _p, id| crate::measure::add_one(
         eng, id, 0, crate::measure::Kind::Distance, &[[10.0, 10.0], [100.0, 10.0]], None, "me", user()
     )

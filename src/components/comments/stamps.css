@@ -1,0 +1,144 @@
+/* The custom stamps manager: a small centred sheet like the other sheets. */
+.scrim.st-scrim {
+  align-items: center;
+  padding: 0;
+  z-index: 20;
+}
+.st-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(640px, 94vw);
+  max-height: min(640px, 88vh);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+}
+.st-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  height: 48px;
+  padding: 0 14px 0 18px;
+  border-bottom: 1px solid var(--border);
+}
+.st-title {
+  font-weight: 600;
+}
+.st-body {
+  flex: 1;
+  min-height: 120px;
+  padding: 6px 18px 14px;
+  overflow-y: auto;
+}
+.st-empty {
+  margin: 14px 0;
+  line-height: 1.5;
+}
+.st-cat {
+  margin: 14px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.st-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.st-thumb {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 40px;
+  background: repeating-conic-gradient(var(--surface-2) 0% 25%, var(--surface) 0% 50%) 0 0 / 10px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.st-thumb img {
+  max-width: 52px;
+  max-height: 36px;
+}
+.st-name {
+  flex: 2;
+  min-width: 0;
+}
+.st-category {
+  flex: 1;
+  min-width: 0;
+}
+.st-size {
+  flex: none;
+  width: 84px;
+  font-size: 11.5px;
+  text-align: right;
+}
+.st-draft {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px 12px;
+  align-items: end;
+  flex: none;
+  padding: 12px 18px;
+  background: var(--window);
+  border-bottom: 1px solid var(--border);
+}
+.st-draft label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.st-file {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.st-page {
+  width: 64px;
+}
+.st-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.st-error {
+  flex: none;
+  margin: 0;
+  padding: 8px 18px;
+  font-size: 12.5px;
+  color: var(--danger, #c0392b);
+  background: var(--window);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The picker's note beside the tool strip: why stamps are off, or what a signed file is told. */
+.an-note {
+  position: absolute;
+  left: calc(100% + 8px);
+  bottom: 0;
+  width: 250px;
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+}
+.an-note.off {
+  color: var(--text);
+}

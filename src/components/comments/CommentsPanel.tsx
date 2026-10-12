@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Tool, useAnnot } from "../../lib/annot";
 import {
-  type Annot, FILTERS, KIND_LABEL, STAMPS, emptyNote, groupByPage, quadsFromRects, repliesOf, rgbHex, roots, timeLabel,
+  type Annot, FILTERS, KIND_LABEL, emptyNote, groupByPage, quadsFromRects, repliesOf, rgbHex, roots, timeLabel,
 } from "../../lib/annotLogic";
 import { type DocState, useStore } from "../../store";
 import { Icon, type IconName } from "../Icons";
+import { StampPicker } from "./StampPicker";
 import "./comments.css";
 
 const st = () => useAnnot.getState();
@@ -68,7 +69,6 @@ function selectionQuads(): Map<number, ReturnType<typeof quadsFromRects>> {
 export function CommentTools({ doc }: { doc: DocState }) {
   const open = useAnnot((s) => s.open);
   const tool = useAnnot((s) => s.tool);
-  const stamp = useAnnot((s) => s.stamp);
 
   useEffect(() => {
     if (!open || !MARKUP[tool]) return;
@@ -106,13 +106,7 @@ export function CommentTools({ doc }: { doc: DocState }) {
           <Icon name={t.icon} />
         </button>
       ))}
-      {tool === "stamp" && (
-        <select className="an-stamp" value={stamp} aria-label="Stamp" onChange={(e) => st().setStamp(e.target.value)}>
-          {[...STAMPS, "Date"].map((s) => (
-            <option key={s}>{s}</option>
-          ))}
-        </select>
-      )}
+      {tool === "stamp" && <StampPicker doc={doc} />}
     </div>
   );
 }

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub mod app;
+pub mod stamps;
 #[cfg(test)]
 mod tests;
 
@@ -107,6 +108,8 @@ pub struct AnnotDto {
     pub points: Vec<[f32; 2]>,
     pub strokes: Vec<Vec<[f32; 2]>>,
     pub icon: Option<String>,
+    /// A stamp that draws a picture (a custom stamp): its resize keeps the picture's proportions.
+    pub picture: bool,
     pub font_size: Option<f32>,
     /// The annotation this one replies to.
     pub parent: Option<i32>,
@@ -273,6 +276,7 @@ fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
         points,
         strokes,
         icon: a.icon_name().ok().flatten().map(str::to_owned),
+        picture: kind == Kind::Stamp && stamps::picture_size(&o).is_some(),
         font_size: a.default_appearance().ok().flatten().map(|d| d.size),
         parent: parent_of(&o),
         resolved: false,
@@ -672,6 +676,11 @@ fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
         Kind::Ink => {
             let strokes: Vec<Vec<Point>> = a.ink_list()?.into_iter().map(|s| s.into_iter().map(m).collect()).collect();
             a.set_ink_list(strokes.iter().map(|s| s.iter().copied()))?;
+        }
+        // A picture stamp keeps the picture's proportions whatever box was asked for.
+        Kind::Stamp => {
+            let fit = stamps::picture_size(&a.object()).map_or(to, |(w, h)| stamps::fit_aspect(from, to, w as f32 / h as f32));
+            a.set_rect(fit)?;
         }
         // Rect-based kinds; the others derive their /Rect from the geometry above.
         _ => a.set_rect(to)?,
