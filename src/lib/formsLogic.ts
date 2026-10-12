@@ -285,6 +285,17 @@ export function resetTargets(all: Field[], names: string[], exclude = false): nu
   return all.filter((f) => named(f) !== exclude).map((f) => f.xref);
 }
 
+/**
+ * Whether the error bubble of the field at `rect` goes above it: it sits under the field unless that runs past the
+ * bottom of the page (`pageH`, page units) and there is room above. The bubble is drawn at 12 px, so its size in page
+ * units is that over `zoom`; its width is capped at 260 px, so a long message wraps.
+ */
+export function bubbleAbove(rect: Rect4, pageH: number, zoom: number, text: string): boolean {
+  const lines = Math.max(1, Math.ceil((text.length * 6.5) / 244));
+  const h = (lines * 16 + 14) / zoom;
+  return rect[3] + h > pageH && rect[1] - h >= 0;
+}
+
 /** The text size a field is drawn at on the page: its own, or about 70% of its height (a line of text) when automatic. */
 export function fontSize(f: Field): number {
   if (f.fontSize > 0) return f.fontSize;

@@ -163,10 +163,10 @@ async fn pick_save(
             SaveKind::Rtf => d.add_filter("Rich Text Format", &["rtf"]),
             SaveKind::Comments => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]),
             SaveKind::FormData => d
-                .add_filter("XFDF", &["xfdf"])
+                .add_filter("Form data (XFDF)", &["xfdf"])
                 .add_filter("FDF", &["fdf"])
                 .add_filter("JSON", &["json"])
-                .add_filter("CSV (spreadsheet)", &["csv"])
+                .add_filter("CSV", &["csv"])
                 .add_filter("Tab-delimited text", &["txt"])
                 .add_filter("XML", &["xml"]),
             SaveKind::Csv => d.add_filter("CSV (spreadsheet)", &["csv"]),

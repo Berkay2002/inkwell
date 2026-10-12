@@ -237,15 +237,17 @@ pub async fn doc_js_apply(eng: Eng<'_>, doc: DocId, op: Op) -> Result<Applied> {
     blocking(move || doc_js::apply(&eng, doc, &op, EditSource::User)).await
 }
 
-/// Writes every field's value to `to` (a save token) as FDF, XFDF, JSON, CSV, tab text or XML, by the file name's extension.
+/// Writes every field's value to `to` (a save token) as FDF, XFDF, JSON, CSV, tab text or XML, by the file name's extension;
+/// any other extension is refused (the dialog does not say which filter was picked, so nothing is guessed).
 #[tauri::command]
 pub async fn forms_export(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Paths>, doc: DocId, to: String) -> Result<super::data::Exported> {
     let dest = reg.take_save(window.label(), &to)?;
+    let format = super::data::export_format(&dest)?;
     eng.check_not_open(&dest, None)?;
     let eng = eng.inner().clone();
     blocking(move || {
         let name = std::path::Path::new(&eng.doc_entry(doc)?.path()).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let (bytes, done) = super::data::export(&eng, doc, exchange::Format::of_path(&dest, true), &name)?;
+        let (bytes, done) = super::data::export(&eng, doc, format, &name)?;
         std::fs::write(&dest, bytes).map_err(|e| EngineError::Io(e.to_string()))?;
         window.state::<Paths>().learn(&dest);
         Ok(done)

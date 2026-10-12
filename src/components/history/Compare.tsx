@@ -225,7 +225,7 @@ function CompareResult() {
       const f = (await pickOpen(false, "compare"))[0];
       if (!f) return;
       const next: [string, string] = side === "a" ? [baseName(f.path), names[1]] : [names[0], baseName(f.path)];
-      h.setCompare({ [side]: { kind: "picked", token: f.token }, names: next, ranges: withoutRange(ranges, side) });
+      h.setCompare({ [side]: { kind: "picked", token: f.token, path: f.path }, names: next, ranges: withoutRange(ranges, side) });
     } catch (e) {
       toast(`Could not pick the file: ${String(e)}`);
     }

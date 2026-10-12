@@ -54,6 +54,10 @@
 .hx-btn.danger:hover {
   background: color-mix(in srgb, var(--danger) 10%, var(--surface));
 }
+.hx-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .hx-actions {
   display: flex;
   flex-wrap: wrap;
