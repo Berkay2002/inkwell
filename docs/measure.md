@@ -154,7 +154,7 @@ a release off the page (outside the window the pointer is clamped to the edge); 
   (Shift: 10) along the screen whatever the page rotation, and the move is written after a short pause, on Enter, when
   focus leaves or the tool changes (a run of keys is one undo step); Esc drops it, and so does a pointer capture that is
   lost before the button comes up. Handles have an aria label ("Area point 3 of 4").
-  Not shown on a certified file at `/P` 1 or 2 (it says why in the rail); a signed file shows the same note links and
+  Not shown on a certified file at `/P` 1 or 2 (the rail says why, with or without a selection); a signed file shows the same note links and
   outline give, and the change is saved after the signature.
 - **Result:** one `measure_add` (one undo step, saved by Save, in history). The page then draws the engine's own
   appearance with its label. With Select, a click on a measurement selects it: the rail shows its value, units and

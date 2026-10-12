@@ -17,6 +17,7 @@ export function MeasurePanel({ doc }: { doc: DocState }) {
   const sel = d?.selected ? (items.find((m) => m.page === d.selected!.page && m.xref === d.selected!.xref) ?? null) : null;
   const sums = useMemo(() => totals(items), [items]);
   const live = useMeasure((s) => s.live);
+  const locked = useMeasure((s) => s.locks[id]) ?? null;
   /** The value under way in a drag, else the stored one. */
   const valueOf = (m: Measure) => (live && live.doc === id && live.xref === m.xref ? live.text : m.quantity.text);
 
@@ -44,6 +45,11 @@ export function MeasurePanel({ doc }: { doc: DocState }) {
           </button>
         </div>
         <div className="cm-body ms-body">
+          {locked && (
+            <p className="dim ms-hint" role="note">
+              {locked}
+            </p>
+          )}
           {sel ? <Selected doc={id} m={sel} value={valueOf(sel)} /> : d?.last ? <Last last={d.last} /> : <p className="dim cm-empty">Pick Distance, Perimeter or Area and click on the page. Select shows a measurement here.</p>}
 
           {sums.length > 0 && (

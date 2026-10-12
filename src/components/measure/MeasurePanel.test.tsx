@@ -40,7 +40,7 @@ const render = () => renderToStaticMarkup(<MeasurePanel doc={doc} />);
 const docs = { 1: { items: [M], selected: { page: 0, xref: 5 }, scales: {}, last: null, calib: null, exported: null, error: null } };
 
 describe("the measure rail", () => {
-  beforeEach(() => set({ open: true, docs, live: null }));
+  beforeEach(() => set({ open: true, docs, locks: {}, live: null }));
 
   it("shows the value being dragged in place of the stored one, for that measurement only", () => {
     expect(render()).toContain('<div class="ms-big">10.00 ft</div>');
@@ -52,5 +52,14 @@ describe("the measure rail", () => {
     expect(out).toContain('<div class="ms-total"><span>Distance <span class="dim">× 1</span></span><b>10.00 ft</b></div>');
     set({ live: { doc: 1, xref: 6, text: "99 ft" } });
     expect(render()).toContain('<div class="ms-big">10.00 ft</div>');
+  });
+
+  it("says why nothing can be changed on a certified file", () => {
+    const why = "This document is certified and does not allow annotations.";
+    expect(render()).not.toContain(why);
+    set({ locks: { 1: why } });
+    const out = render();
+    expect(out).toContain(why);
+    expect(out).not.toContain("Drag a point on the page");
   });
 });
