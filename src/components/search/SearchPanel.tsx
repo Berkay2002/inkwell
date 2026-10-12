@@ -148,6 +148,7 @@ function FileResults({ doc, draft }: { doc: DocState; draft: string }) {
 
 function FolderResults({ query }: { query: string }) {
   const run = useSearch((s) => s.run);
+  const catalog = useSearch((s) => s.target?.kind === "catalog");
   const shown = useSearch((s) => s.shown);
   const [cursor, setCursor] = useState(0);
   const list = useRef<HTMLDivElement>(null);
@@ -186,7 +187,7 @@ function FolderResults({ query }: { query: string }) {
       )}
       {!run.running && run.skipped > 0 && (
         <p className="sr-note">
-          {run.skipped} {run.skipped === 1 ? "file" : "files"} could not be read (damaged, protected with a password, or too large to index).
+          {run.skipped} {run.skipped === 1 ? "file" : "files"} could not be read (damaged, protected with a password{catalog ? ", or too large to index" : ""}).
         </p>
       )}
       {!run.running && run.stale > 0 && <p className="sr-note">{staleResultsLine(run.stale)}</p>}

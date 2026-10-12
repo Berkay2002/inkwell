@@ -253,24 +253,28 @@ pub async fn catalog_build(window: Window, jobs: State<'_, Arc<Jobs>>, id: Strin
     let cancel = Arc::new(AtomicBool::new(false));
     jobs.live.lock().unwrap().insert(job, (window.label().to_string(), cancel.clone()));
     let _ = on_event.send(BuildEvent::Started { job });
-    let (j2, id2, dir2) = (jobs.clone(), id.clone(), dir.clone());
-    let out = blocking(move || {
+    let (j2, id2) = (jobs.clone(), id.clone());
+    blocking(move || {
         let ev = on_event.clone();
-        let r = super::build(&dir, full, &cancel, &move |done, total| {
-            let _ = ev.send(BuildEvent::Progress { job, done, total });
-        });
-        if let Ok(summary) = &r
-            && let Ok(catalog) = super::load_meta(&dir)
-        {
-            let _ = on_event.send(BuildEvent::Done { job, summary: summary.clone(), catalog });
-        }
-        r
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let r = super::build(&dir, full, &cancel, &move |done, total| {
+                let _ = ev.send(BuildEvent::Progress { job, done, total });
+            });
+            if let Ok(summary) = &r
+                && let Ok(catalog) = super::load_meta(&dir)
+            {
+                let _ = on_event.send(BuildEvent::Done { job, summary: summary.clone(), catalog });
+            }
+            r
+        }));
+        // Free again (even after a panic), and what was saved meanwhile is forgotten now, here and not on the
+        // async thread.
+        j2.live.lock().unwrap().remove(&job);
+        j2.busy.lock().unwrap().remove(&id2);
+        forget_deferred(&j2, &id2, &dir);
+        r.unwrap_or(Err(EngineError::Panic))
     })
-    .await;
-    j2.live.lock().unwrap().remove(&job);
-    j2.busy.lock().unwrap().remove(&id2);
-    forget_deferred(&j2, &id2, &dir2);
-    out
+    .await
 }
 
 #[tauri::command]
