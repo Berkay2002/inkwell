@@ -519,3 +519,17 @@ fn an_export_is_not_held_to_the_import_text_budget_but_still_has_a_bound() {
     let (eng, id, _) = open_bytes(&d, "ink.pdf", &one_page_pdf("", "/Annots [4 0 R]", &refs));
     assert!(matches!(export(&eng, id, Format::Xfdf, "ink.pdf"), Err(EngineError::Invalid(m)) if m.contains("export") && !m.contains("does not read")));
 }
+
+#[test]
+fn name_entries_given_as_one_shared_string_are_not_read_at_all() {
+    // /Name, /RT, /IT and /Subtype are names: a 20 MB string behind each of 100 comments would be 2 GB of copies.
+    let big = format!("2 0 obj\n({})\nendobj\n", "x".repeat(20_000_000));
+    let f = fdf_sharing(100, |i| format!("<< /Subtype /Text /Page 0 /Rect [1 1 2 2] /NM (n{i}) /Name 2 0 R /RT 2 0 R /IT 2 0 R >>"), std::slice::from_ref(&big));
+    let ok = parse(&f).unwrap();
+    assert_eq!(ok.items.len(), 100);
+    assert!(ok.items.iter().all(|c| c.icon.is_empty() && c.reply_type.is_empty() && !c.measured));
+    // The same names written as names are read.
+    let f = fdf_sharing(1, |_| "<< /Subtype /Text /Page 0 /Rect [1 1 2 2] /NM (a) /Name /Comment /RT /R >>".to_string(), &[]);
+    let ok = parse(&f).unwrap();
+    assert_eq!((ok.items[0].icon.as_str(), ok.items[0].reply_type.as_str()), ("Comment", "R"));
+}

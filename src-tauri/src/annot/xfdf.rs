@@ -233,6 +233,16 @@ fn string(o: &PdfObject, k: &str, b: &Budget) -> String {
     s.filter(|s| s.len() <= MAX_STR).unwrap_or_default()
 }
 
+/// A name entry, as text. Only a PDF name counts, never a string: a string can be large and shared by
+/// every comment, a name is not read at all otherwise. Charged to `b` like [`string`].
+fn name_in(v: Option<PdfObject>, b: &Budget) -> String {
+    let Some(n) = v.filter(|v| v.is_name().unwrap_or(false)).and_then(|v| v.as_name().ok()) else { return String::new() };
+    if b.gone() || !b.take(n.len()) {
+        return String::new();
+    }
+    String::from_utf8_lossy(&n).into_owned()
+}
+
 /// The object number of a reference (`None` for a direct object).
 fn indirect_number(v: &PdfObject) -> Option<i32> {
     if v.is_indirect().unwrap_or(false) { v.as_indirect().ok() } else { None }
@@ -278,7 +288,7 @@ fn pairs(v: &[f32]) -> Vec<f32> {
 
 /// A measurement annotation (the Measure tool's, or Acrobat's): `/Measure` data, or a dimension intent.
 fn is_measurement(o: &PdfObject) -> bool {
-    get(o, "Measure").is_some() || get(o, "IT").as_ref().and_then(text).is_some_and(|t| t.ends_with("Dimension"))
+    get(o, "Measure").is_some() || get(o, "IT").filter(|t| t.is_name().unwrap_or(false)).and_then(|t| t.as_name().ok()).is_some_and(|t| t.ends_with(b"Dimension"))
 }
 
 /// Reads one comment dictionary. `/AP`, `/AA`, `/A`, `/F` file specifications and everything that is
@@ -294,8 +304,8 @@ fn read(o: &PdfObject, sub: Sub, b: &Budget) -> Comment {
     c.da = string(o, "DA", b);
     c.state = string(o, "State", b);
     c.state_model = string(o, "StateModel", b);
-    c.icon = get(o, "Name").as_ref().and_then(text).unwrap_or_default();
-    c.reply_type = get(o, "RT").as_ref().and_then(text).unwrap_or_default();
+    c.icon = name_in(get(o, "Name"), b);
+    c.reply_type = name_in(get(o, "RT"), b);
     c.flags = get(o, "F").and_then(|f| f.as_int().ok());
     c.measured = is_measurement(o);
     let r = get(o, "Rect").map(|a| floats(&a, 4, b)).unwrap_or_default();
@@ -309,7 +319,7 @@ fn read(o: &PdfObject, sub: Sub, b: &Budget) -> Comment {
         c.line = Some([l[0], l[1], l[2], l[3]]);
     }
     if let Some(le) = get(o, "LE").filter(|a| a.is_array().unwrap_or(false)) {
-        let name = |i: i32| le.get_array(i).ok().flatten().as_ref().and_then(text).unwrap_or_default();
+        let name = |i: i32| name_in(le.get_array(i).ok().flatten(), b);
         (c.head, c.tail) = (name(0), name(1));
     }
     c.vertices = pairs(&get(o, "Vertices").map(|a| floats(&a, MAX_NUMS, b)).unwrap_or_default());
@@ -703,7 +713,7 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
         }
         for e in entries {
             budget.check()?;
-            let sub = get(&e, "Subtype").as_ref().and_then(text).and_then(|t| Sub::of_pdf(&t));
+            let sub = get(&e, "Subtype").filter(|t| t.is_name().unwrap_or(false)).and_then(|t| t.as_name().ok()).and_then(|t| Sub::of_pdf(&String::from_utf8_lossy(&t)));
             let Some(sub) = sub else {
                 out.unknown += 1;
                 continue;
