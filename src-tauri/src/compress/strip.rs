@@ -291,7 +291,8 @@ pub(crate) struct Dests {
 impl Dests {
     pub(crate) fn load(doc: &PdfDocument) -> Result<Self, Error> {
         let catalog = doc.catalog()?;
-        let old = catalog.get_dict("Dests")?.filter(|d| !d.is_null().unwrap_or(false));
+        // MuPDF's `if (dests)`: a reference to a missing object is still there, and hides the tree
+        let old = catalog.get_dict("Dests")?;
         let has_tree = catalog.get_dict("Names")?.and_then(|n| n.get_dict("Dests").ok().flatten()).is_some();
         let (tree, tree_unreadable) = if has_tree {
             match doc.load_name_tree(PdfObject::new_name("Dests")?) {
@@ -337,14 +338,14 @@ impl Dests {
     /// so it is not judged.
     pub(crate) fn lookup(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
         let key = Self::key(key);
-        if self.old.is_some() { self.in_old(&key) } else { self.in_tree(&key, false) }
+        if self.old.is_some() { self.in_old(&key) } else { self.in_tree(&key) }
     }
 
     /// Like `lookup`, but a name that either source defines is found (the optimizer only keeps more: a viewer
     /// other than MuPDF may read the tree when there is a `/Dests` too).
     pub(crate) fn lookup_any(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
         let key = Self::key(key);
-        match (self.in_old(&key), self.in_tree(&key, true)) {
+        match (self.in_old(&key), self.in_tree(&key)) {
             (Some(Some(v)), _) | (_, Some(Some(v))) => Some(Some(v)),
             (Some(None), Some(None)) => Some(None),
             _ => None,
@@ -366,20 +367,23 @@ impl Dests {
     }
 
     /// In the `/Names` tree: MuPDF keys it by a string's decoded text (UTF-16, UTF-8 with or without a mark, else
-    /// PDFDocEncoding) and looks a name up as "" (`pdf_to_text_string`), so a name finds nothing there. `names`:
-    /// a name object is tried as a key anyway (the optimizer keeps more).
-    // shortcut: an empty-string key in the tree is not matched by a name needle as MuPDF does, and the tree is
+    /// PDFDocEncoding). A stored `/name` is not looked up as a name: MuPDF's viewer turns it into a "#nameddest="
+    /// link and searches the tree by the name's text (`pdf_resolve_link_dest`), so it is found by its own bytes.
+    // shortcut: an empty-string key in the tree is not matched as MuPDF's `pdf_lookup_dest` would, and the tree is
     // searched whole (MuPDF skips direct kids and takes the first duplicate); upgrade if a case shows up.
-    fn in_tree(&self, key: &PdfObject, names: bool) -> Option<Option<PdfObject>> {
+    fn in_tree(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
         if self.tree_unreadable {
             return None;
         }
-        if key.is_name().ok()? {
-            let found = self.tree.as_ref().zip(names.then_some(key));
-            return Some(found.and_then(|(t, k)| t.get_dict(k.share()).ok().flatten()));
-        }
-        // a string with no faithful text is not judged, tree or no tree
-        let name = PdfObject::new_name(&mupdf_text(&key.as_bytes().ok()?)?).ok()?;
+        let text = if key.is_name().ok()? {
+            // a name that is not UTF-8 is no key of the tree (its keys are decoded text)
+            let Ok(t) = String::from_utf8(key.as_name().ok()?) else { return Some(None) };
+            t
+        } else {
+            mupdf_text(&key.as_bytes().ok()?)?
+        };
+        // a key with no faithful text is not judged, tree or no tree
+        let name = PdfObject::new_name(&text).ok()?;
         Some(self.tree.as_ref().and_then(|t| t.get_dict(name).ok().flatten()))
     }
 }

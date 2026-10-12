@@ -352,7 +352,7 @@ fn text_decoding_follows_the_pdf_encodings() {
 }
 
 /// The panel finds a named destination the way MuPDF does: its decode of the string in the `/Names` tree (a name
-/// object finds nothing there), and a name or string it cannot find or decode faithfully is not called broken.
+/// object by its text), and a string it cannot decode faithfully is not called broken.
 #[test]
 fn a_named_destination_is_judged_the_way_mupdf_looks_it_up() {
     let d = dir("outline", "named_lookup");
@@ -362,7 +362,7 @@ fn a_named_destination_is_judged_the_way_mupdf_looks_it_up() {
     let broken = |d: &Dest| matches!(d, Dest::Broken { .. });
     let other = |d: &Dest| matches!(d, Dest::Other { .. });
     let cases: [(&str, &dyn Fn(&Dest) -> bool); 7] = [
-        ("/chap", &other),          // a name object: MuPDF looks it up in the tree as "" and misses, another viewer may find it
+        ("/chap", &page),           // a name object: MuPDF's viewer looks it up in the tree by its text
         ("<FEFF00E900E9>", &page),  // UTF-16BE, the key's own form
         ("<C3A9C3A9>", &page),      // UTF-8 with no mark: the tree's UTF-16 key is the same text
         ("<E9E9>", &page),          // PDFDocEncoding
