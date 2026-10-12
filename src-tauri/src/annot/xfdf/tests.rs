@@ -205,6 +205,22 @@ fn an_imported_reply_and_state_stay_hidden_on_the_page_whatever_flags_the_file_g
 }
 
 #[test]
+fn a_review_state_whose_name_is_already_in_the_document_is_counted_as_skipped() {
+    let (eng, id, _) = fresh("state-twice");
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="50,50,60,60" name="n"><contents>note</contents></text>
+        <text page="0" rect="50,50,60,60" name="s" inreplyto="n" replyType="R" statemodel="Review" state="Completed"/>
+        </annots></xfdf>"##;
+    let first = import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!((first.summary.added, first.summary.skipped.len()), (2, 0), "{:?}", first.summary);
+    let n = list_all(&eng, id).unwrap().len();
+    let again = import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!(again.summary.added, 0, "{:?}", again.summary);
+    assert_eq!(again.summary.skipped.iter().map(|s| (s.reason.as_str(), s.count)).collect::<Vec<_>>(), [(STATE_KNOWN, 1)]);
+    assert_eq!(list_all(&eng, id).unwrap().len(), n);
+}
+
+#[test]
 fn a_page_out_of_range_and_types_the_files_cannot_carry_are_skipped_and_counted() {
     let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
         <square page="9" rect="100,600,200,700" name="far"/>

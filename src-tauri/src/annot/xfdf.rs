@@ -774,6 +774,7 @@ const NO_PLACE: &str = "no position";
 const NO_PARENT: &str = "reply to a comment that is not in the file or the document";
 const NOT_NOTE: &str = "reply that is not a note";
 const BAD_STATE: &str = "unknown review state";
+const STATE_KNOWN: &str = "a review state with this name is already in the document";
 const FAILED: &str = "could not be created";
 const MEASURED: &str = "a measurement, whose scale these files cannot carry";
 const MEASURED_HERE: &str = "a measurement of the document has this name (the Measure tool changes it)";
@@ -1104,6 +1105,7 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
             };
             if c.is_state() {
                 if known.contains_key(&c.name) && !c.name.is_empty() {
+                    *why.entry(STATE_KNOWN).or_default() += 1;
                     continue;
                 }
                 let r = super::set_state(doc, page, parent, &c.state, &c.author);
