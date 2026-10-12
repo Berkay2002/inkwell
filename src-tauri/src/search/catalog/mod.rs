@@ -760,9 +760,9 @@ fn index_file(sh: &Shared, job: &Job) -> Option<FileRec> {
     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Probe {
         let opened = match &bytes {
             Some(b) => PdfDocument::from_bytes(b),
-            // `Path` is not a MuPDF `FilePath` on Windows: open by its UTF-8 name.
+            // MuPDF takes a str path on Windows; a name that is not valid Unicode can't be opened there
             None => match job.path.to_str() {
-                Some(p) => PdfDocument::open(p),
+                Some(s) => PdfDocument::open(s),
                 None => return Probe::Bad(Status::Damaged),
             },
         };

@@ -47,7 +47,11 @@ Hard line, enforced in `ai/claude/exe.rs` and covered by tests:
 ## The child
 
 One long-lived `claude` per open document chat, in a private temp directory (its working directory,
-holding an `mcp.json`), started with `env_clear` plus the filtered environment:
+holding an `mcp.json`), started with `env_clear` plus the filtered environment. The directory is
+`inkwell-claude-<32 random hex digits>` (128 bits from the OS), made with `create_dir` so a name that
+already exists is an error, with mode 0700 on unix; `mcp.json` is written with `create_new` (a
+planted file or link is an error, never written through), mode 0600 on unix (`ai/claude/private.rs`).
+A shared `/tmp` therefore gives another local user neither the token nor a way to plant a link.
 
 ```
 claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages
