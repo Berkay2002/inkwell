@@ -3241,3 +3241,61 @@ fn a_lock_whose_fields_is_not_an_array_locks_every_field() {
         assert_eq!((steps(&eng, id), all_rects(&eng, id)), (n, rects), "{action}: no step, nothing moved");
     }
 }
+
+#[test]
+fn a_reference_entry_with_no_readable_method_or_a_reference_of_another_type_locks_every_field() {
+    let name = |n: &str| PdfObject::new_string(n).unwrap();
+    type Make = Box<dyn Fn(&PdfDocument) -> Result<PdfObject>>;
+    // An entry that names fields (Include [Sum]) but whose /TransformMethod is missing, or is not text.
+    let entry = |method: Option<PdfObject>| -> Make {
+        Box::new(move |d| {
+            let mut r = fieldmdp(d, "Include", &[PdfObject::new_string("Sum")?], true)?;
+            r.dict_delete("TransformMethod")?;
+            if let Some(m) = &method {
+                r.dict_put("TransformMethod", m.clone())?;
+            }
+            let mut refs = d.new_array()?;
+            refs.array_push(r)?;
+            Ok(refs)
+        })
+    };
+    let cases: Vec<(&str, Make)> = vec![
+        ("no /TransformMethod", entry(None)),
+        ("a /TransformMethod that is a number", entry(Some(PdfObject::new_int(7).unwrap()))),
+        ("a /Reference that is a number", Box::new(|_| Ok(PdfObject::new_int(1)?))),
+        ("a /Reference that is a string", Box::new(move |_| Ok(name("FieldMDP")))),
+    ];
+    for (i, (what, refs)) in cases.into_iter().enumerate() {
+        let (eng, id, _) = script_form(&format!("fieldmdp-reference-unreadable-{i}"), &["Sum", "Other"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+        sign_refs(&eng, id, refs);
+        let (n, rects) = (steps(&eng, id), all_rects(&eng, id));
+        for name in ["Sum", "Other"] {
+            for r in touch_field(&eng, id, name) {
+                let e = r.unwrap_err();
+                assert!(e.contains("locked by a signature") && e.contains(name), "{what} {name}: {e}");
+            }
+        }
+        assert_eq!((steps(&eng, id), all_rects(&eng, id)), (n, rects), "{what}: no step, nothing moved");
+    }
+}
+
+#[test]
+fn a_usage_rights_or_identity_reference_locks_no_field() {
+    for (i, method) in ["UR3", "Identity"].into_iter().enumerate() {
+        let (eng, id, _) = script_form(&format!("fieldmdp-other-method-{i}"), &["Sum", "Other"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+        sign_refs(&eng, id, |d| {
+            let mut r = fieldmdp(d, "Include", &[PdfObject::new_string("Sum")?], true)?;
+            put_name(&mut r, "TransformMethod", method)?;
+            let mut refs = d.new_array()?;
+            refs.array_push(r)?;
+            Ok(refs)
+        });
+        for name in ["Sum", "Other"] {
+            for r in touch_field(&eng, id, name) {
+                r.unwrap_or_else(|e| panic!("{method} {name}: {e}"));
+            }
+        }
+    }
+}

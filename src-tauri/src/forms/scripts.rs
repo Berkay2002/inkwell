@@ -535,6 +535,10 @@ fn reference_locks(v: &PdfObject) -> Vec<Lock> {
         return vec![Lock::All];
     }
     let Some(refs) = get(v, "Reference") else { return Vec::new() };
+    // Neither an array nor a dictionary: what it meant to say is unknown.
+    if !refs.is_array().unwrap_or(false) && !refs.is_dict().unwrap_or(false) {
+        return vec![Lock::All];
+    }
     // One dictionary stands for the one entry it would be (as `outline::certified` reads it).
     let single = refs.is_dict().unwrap_or(false);
     (0..if single { 1 } else { refs.len().unwrap_or(0).min(16) as i32 })
@@ -547,7 +551,10 @@ fn reference_locks(v: &PdfObject) -> Vec<Lock> {
                 // A FieldMDP that names no parameters says nothing about which fields: all of them.
                 Some("FieldMDP") => Some(get(&r, "TransformParams").map_or(Lock::All, |p| lock_of(&p))),
                 Some("DocMDP") if int_of(&get(&r, "TransformParams")?, "P") == Some(1) => Some(Lock::All),
-                _ => None,
+                // A method that is named and is none of these (UR3, Identity) locks no field.
+                Some(_) => None,
+                // No method that can be read: it may have been a FieldMDP, so everything is locked.
+                None => Some(Lock::All),
             }
         })
         .collect()
