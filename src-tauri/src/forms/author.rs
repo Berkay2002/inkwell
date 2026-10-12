@@ -127,6 +127,20 @@ pub(crate) fn acro_form(doc: &mut PdfDocument) -> Result<PdfObject> {
     Ok(form)
 }
 
+/// An appearance that draws nothing, for an unsigned signature box: MuPDF never draws or writes its own (a
+/// red "SIGN" arrow), and a file that checks for one (PDF/A) finds it.
+fn blank_appearance(doc: &mut PdfDocument, w: &mut PdfObject) -> Result<()> {
+    let mut form = doc.new_dict()?;
+    put_name(&mut form, "Type", "XObject")?;
+    put_name(&mut form, "Subtype", "Form")?;
+    put_nums(doc, &mut form, "BBox", &[0.0, 0.0, 1.0, 1.0])?;
+    let stream = doc.add_stream(&Buffer::from_bytes(b"q Q")?, Some(&form), false)?;
+    let mut ap = doc.new_dict()?;
+    ap.dict_put("N", stream)?;
+    w.dict_put("AP", ap)?;
+    Ok(())
+}
+
 /// Gives an `/AP /N` a stand-in stream under the on-state's name so MuPDF keeps that name when
 /// it draws the real appearance.
 pub(crate) fn seed_on_state(doc: &mut PdfDocument, w: &mut PdfObject, on: &str) -> Result<()> {
@@ -302,6 +316,9 @@ pub fn add(doc: &mut PdfDocument, page: u32, what: &NewField) -> Result<i32> {
             check_export(&export)?;
             seed_on_state(doc, &mut widget, &export)?;
             put_name(&mut widget, "V", "Off")?;
+        }
+        if what.kind == FieldKind::Signature {
+            blank_appearance(doc, &mut widget)?;
         }
         widget_ref = doc.add_object(&widget)?;
         get(&form, "Fields").ok_or_else(|| bad("the form has no field list"))?.array_push(widget_ref.clone())?;
