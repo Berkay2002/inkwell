@@ -2337,6 +2337,24 @@ fn a_rename_may_not_take_a_name_a_signature_covers_or_rewrite_a_calculation_it_l
 }
 
 #[test]
+fn the_name_box_follows_the_same_rename_locks_as_the_layout_rename() {
+    let (eng, id, _) = script_form("name-box-locks", &["Free", "Sum", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    patch_field(&eng, id, "Sum", FieldPatch { calculate: Some(Calculate::Simple { op: CalcOp::Sum, fields: vec!["Free".into()] }), ..Default::default() });
+    sign(&eng, id, Some(("Include", &["Reserved", "Sum"])), None);
+    let n = steps(&eng, id);
+    let name = |from: &str, to: &str| {
+        let w = field(&eng, id, from);
+        edit_one(&eng, id, w.page, w.xref, &FieldPatch { name: Some(to.into()), ..Default::default() }, EditSource::User).map_err(|e| e.to_string())
+    };
+    assert!(name("Other", "Reserved").unwrap_err().contains("covered by a signature"));
+    assert!(name("Free", "Free2").unwrap_err().contains("calculation of [ Sum ] is locked"));
+    assert_eq!(steps(&eng, id), n, "no step, nothing written");
+    assert_eq!(field(&eng, id, "Free").name, "Free");
+    name("Other", "Elsewhere").unwrap();
+}
+
+#[test]
 fn layout_in_a_signed_document_is_saved_after_the_signed_bytes() {
     let (eng, id, path) = script_form("layout-signed", &["A", "B"]);
     add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));

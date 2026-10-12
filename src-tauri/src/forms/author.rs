@@ -466,7 +466,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
             if entries.iter().any(clash) {
                 return Err(bad(format!("A field named {full} already exists")));
             }
-            check_follow_rename(doc, &entries, &e.name)?;
+            check_rename(doc, &entries, &e.name, &full)?;
             renamed = Some((e.name.clone(), full));
         }
         let own_t = get(&field, "T").as_ref().and_then(text).unwrap_or_default();
@@ -699,6 +699,15 @@ fn followers<'a>(entries: &'a [Entry], old: &str) -> Vec<(&'a Entry, af::CalcOp,
         }
     }
     out
+}
+
+/// A field may take the name `new` in place of `old` when no signature covers `new` and the calculations that list
+/// `old` are free to follow. The one check of every rename (properties, layout); run before anything is written.
+pub(crate) fn check_rename(doc: &PdfDocument, entries: &[Entry], old: &str, new: &str) -> Result<()> {
+    if super::scripts::name_locked(&super::scripts::locks_of(doc, entries), new) {
+        return Err(bad(format!("The name [ {new} ] is covered by a signature, so no field can take it")));
+    }
+    check_follow_rename(doc, entries, old)
 }
 
 /// Renaming `old` rewrites the calculations that list it; one a signature locks cannot be rewritten, so the rename
