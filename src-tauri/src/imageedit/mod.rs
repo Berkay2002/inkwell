@@ -880,9 +880,27 @@ fn add(d: &mut PdfDocument, pi: &PageImages, to_user: &Matrix, file: &str, rect:
     let place_page = Matrix([r[2] - r[0], 0.0, 0.0, -(r[3] - r[1]), r[0], r[3]]);
     let m = place_page.then(to_user);
     let name = add_resource(d, &pi.page, &img)?;
-    // Whatever state the page's content leaves (a cm, a clip, a colour, q without Q or Q
-    // without q) must not reach the new image: the content goes inside q … Q, with as many
-    // extra q before it as it closes more than it opens, and as many Q after it as are left open.
+    append_draws(d, pi, draw_ops(Op::new("Do", vec![Obj::Name(name)]), m, None))
+}
+
+/// `q [re W n] cm draw Q`: `draw` placed by `place` (unit square → user space), clipped to a
+/// user-space rectangle.
+fn draw_ops(draw: Op, place: Matrix, clip: Option<[f64; 4]>) -> Vec<Op> {
+    let mut ops = vec![Op::new("q", vec![])];
+    if let Some(c) = clip {
+        ops.push(Op::new("re", vec![num(c[0]), num(c[1]), num(c[2] - c[0]), num(c[3] - c[1])]));
+        ops.extend([Op::new("W", vec![]), Op::new("n", vec![])]);
+    }
+    ops.push(Op::new("cm", place.0.iter().map(|v| num(*v)).collect()));
+    ops.extend([draw, Op::new("Q", vec![])]);
+    ops
+}
+
+/// Appends `ops` after the page's content, in a clean graphics state. Whatever state the content
+/// leaves (a cm, a clip, a colour, q without Q or Q without q) must not reach them: the content
+/// goes inside q … Q, with as many extra q before it as it closes more than it opens, and as many
+/// Q after it as are left open.
+fn append_draws(d: &mut PdfDocument, pi: &PageImages, ops: Vec<Op>) -> Result<()> {
     let (mut depth, mut lowest) = (0i64, 0i64);
     for op in &pi.ops {
         match op.op.as_slice() {
@@ -896,12 +914,6 @@ fn add(d: &mut PdfDocument, pi: &PageImages, to_user: &Matrix, file: &str, rect:
     }
     let opened = 1 + (-lowest) as usize;
     let left_open = (opened as i64 + depth).max(0) as usize;
-    let ops = [
-        Op::new("q", vec![]),
-        Op::new("cm", m.0.iter().map(|v| num(*v)).collect()),
-        Op::new("Do", vec![Obj::Name(name)]),
-        Op::new("Q", vec![]),
-    ];
     let mut streams = pi.streams.clone();
     let mut new: Vec<Vec<u8>> = streams.iter().map(|(_, b)| b.clone()).collect();
     // New pieces of their own before and after, so the old streams stay as they are.
@@ -912,6 +924,262 @@ fn add(d: &mut PdfDocument, pi: &PageImages, to_user: &Matrix, file: &str, rect:
     streams.push((PdfObject::new_null(), Vec::new()));
     new.push(tail);
     write_streams(d, &pi.page, &streams, new)
+}
+
+// ---- copy, paste, move to another page ---------------------------------------------------------
+
+/// One copied picture: where it sat, in page space (as seen).
+#[derive(Clone, Debug)]
+struct ClipImage {
+    /// The image's unit square → page space.
+    place: Matrix,
+    /// The rectangular clip around it.
+    clip: Option<[f64; 4]>,
+}
+
+/// Copied pictures: a small PDF holding their image objects (with SMask, decode parameters and
+/// colour space; a paste grafts them into the target, so nothing is shared by reference) and where
+/// each of them sat.
+#[derive(Clone, Debug, Default)]
+pub struct Clip {
+    bytes: Vec<u8>,
+    images: Vec<ClipImage>,
+    /// What shows of each, page space.
+    rects: Vec<[f64; 4]>,
+}
+
+/// The pictures on the clipboard: how many, and the boxes they covered on their page.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipInfo {
+    pub count: u32,
+    pub rect: [f32; 4],
+    pub rects: Vec<[f32; 4]>,
+}
+
+impl Clip {
+    fn rect(&self) -> [f64; 4] {
+        self.rects.iter().copied().reduce(union).unwrap_or([0.0; 4])
+    }
+
+    pub fn info(&self) -> ClipInfo {
+        ClipInfo { count: self.images.len() as u32, rect: self.rect().map(|v| v as f32), rects: self.rects.iter().map(|r| r.map(|v| v as f32)).collect() }
+    }
+}
+
+/// What the app holds between a copy and a paste (any open document may paste it).
+#[derive(Default)]
+pub struct ImageClipboard(pub parking_lot::Mutex<Option<std::sync::Arc<Clip>>>);
+
+/// The most pictures one copy takes.
+const MAX_CLIP_IMAGES: usize = 100;
+
+/// The page's size in page space.
+fn page_size(d: &PdfDocument, page: u32) -> Result<(f64, f64)> {
+    let b = d.load_page(page as i32)?.bounds()?;
+    Ok((f64::from(b.x1 - b.x0), f64::from(b.y1 - b.y0)))
+}
+
+/// The top left corner of a `w × h` group dropped at `at`, kept on a `pw × ph` page.
+fn keep_on_page(at: [f64; 2], size: (f64, f64), page: (f64, f64)) -> Result<(f64, f64)> {
+    if !at.iter().all(|v| v.is_finite()) {
+        return Err(invalid("where to?"));
+    }
+    Ok((at[0].clamp(0.0, (page.0 - size.0).max(0.0)), at[1].clamp(0.0, (page.1 - size.1).max(0.0))))
+}
+
+fn unique(indices: &[u32]) -> Result<Vec<u32>> {
+    let mut seen = HashSet::new();
+    let v: Vec<u32> = indices.iter().copied().filter(|i| seen.insert(*i)).collect();
+    if v.is_empty() {
+        return Err(invalid("which images?"));
+    }
+    if v.len() > MAX_CLIP_IMAGES {
+        return Err(invalid("too many images at once"));
+    }
+    Ok(v)
+}
+
+/// The bytes of decoded samples `img` (declared) takes, or why it is too large to copy.
+fn declared_bytes(img: &PdfObject, f: &Found) -> Result<u64> {
+    let (n, bpc) = (components(img).unwrap_or(4), f.bpc.clamp(1, 16));
+    let (bytes, _) = sample_size(f.width, f.height, n, bpc)
+        .ok_or_else(|| invalid("the image is too large to copy (more than 100 megapixels or 512 MB of samples)"))?;
+    if let Some(m) = get(img, "SMask") {
+        if u64::from(int_of(get(&m, "Width"))) * u64::from(int_of(get(&m, "Height"))) > MAX_PIXELS {
+            return Err(invalid("the image's mask is too large to copy"));
+        }
+    }
+    Ok(bytes as u64)
+}
+
+/// Copies the images `indices` of `page` (listed at `rev`) as a [`Clip`]. Pictures drawn inline
+/// can be moved to another page but not copied; the owner's permissions must allow copying.
+pub fn copy(eng: &Engine, doc: DocId, rev: u32, page: u32, indices: &[u32]) -> Result<Clip> {
+    let entry = eng.doc_entry(doc)?;
+    let indices = unique(indices)?;
+    eng.read_custom(doc, |d| {
+        if entry.generation() != rev {
+            return Err(EngineError::Stale);
+        }
+        if !crate::protect::Rights::of(d).may_extract() {
+            return Err(invalid("The owner of this document does not allow copying its pictures."));
+        }
+        let pi = read_images(d, page)?;
+        let to_page = page_space(d, page)?;
+        let out = PdfDocument::new();
+        let mut map = out.new_graft_map()?;
+        let mut xo = out.new_dict()?;
+        let (mut images, mut rects, mut total) = (Vec::new(), Vec::new(), 0u64);
+        for (n, i) in indices.iter().enumerate() {
+            let f = pi.found.get(*i as usize).ok_or_else(|| invalid(format!("page {} has no image {}", page + 1, i + 1)))?;
+            if f.in_text {
+                return Err(invalid("this image is drawn inside a text object; it can't be copied"));
+            }
+            let Some(obj) = &f.obj else {
+                return Err(invalid("an inline picture can be moved to another page but not copied"));
+            };
+            total += declared_bytes(obj, f)?;
+            if total > MAX_SAMPLE_BYTES {
+                return Err(invalid("these images are too large to copy together"));
+            }
+            let mut g = map.graft_object(obj)?;
+            // Belongs to the page it was on: layers, the structure tree, alternates (other files'
+            // versions of the picture), OPI proxies.
+            for k in ["OC", "StructParent", "Alternates", "OPI"] {
+                g.dict_delete(k)?;
+            }
+            xo.dict_put(format!("I{n}").as_str(), g)?;
+            let full = f.ctm.bbox(UNIT);
+            rects.push(to_page.bbox(f.clip.map_or(full, |c| intersect(full, c))));
+            images.push(ClipImage { place: f.ctm.then(&to_page), clip: f.clip.map(|c| to_page.bbox(c)) });
+        }
+        // The grafted objects hang off a page's resources, so the file is an ordinary PDF.
+        let mut out = out;
+        let pg = out.new_page_at(0, mupdf::Size { width: 612.0, height: 792.0 })?;
+        let mut res = out.new_dict()?;
+        res.dict_put("XObject", xo)?;
+        pg.object().dict_put("Resources", res)?;
+        drop(pg);
+        let mut w = mupdf::pdf::PdfWriteOptions::default();
+        w.set_garbage_level(1);
+        let mut bytes = Vec::new();
+        out.write_to_with_options(&mut bytes, w)?;
+        Ok(Clip { bytes, images, rects })
+    })
+}
+
+/// Pastes `clip` on `page` of a document (listed at `rev`), its top left corner at page-space
+/// `at` (kept on the page): one undo step. The picture objects are copied into this document.
+pub fn paste(eng: &Engine, doc: DocId, rev: u32, page: u32, at: [f64; 2], clip: &Clip, source: EditSource) -> Result<ImageEdited> {
+    let n = clip.images.len();
+    let entry = eng.doc_entry(doc)?;
+    let label = if n == 1 { format!("Paste image on p. {}", page + 1) } else { format!("Paste {n} images on p. {}", page + 1) };
+    let state = eng.apply_removing(doc, label, source, |d| {
+        if entry.generation() != rev {
+            return Err(EngineError::Stale);
+        }
+        crate::outline::refuse_if_certified(d, "Pasting images")?;
+        if n == 0 {
+            return Err(invalid("nothing is copied"));
+        }
+        let to_page = page_space(d, page)?;
+        let to_user = to_page.invert().ok_or_else(|| invalid("the page has no area"))?;
+        let group = clip.rect();
+        let (x, y) = keep_on_page(at, (group[2] - group[0], group[3] - group[1]), page_size(d, page)?)?;
+        let shift = Matrix::translate(x - group[0], y - group[1]);
+        let into_user = shift.then(&to_user);
+        let pi = read_images(d, page)?;
+        let src = PdfDocument::from_bytes(&clip.bytes).map_err(|_| invalid("the copied images can't be read"))?;
+        let xo = get(&src.find_page(0)?, "Resources")
+            .and_then(|r| get(&r, "XObject"))
+            .ok_or_else(|| invalid("the copied images can't be read"))?;
+        let mut map = d.new_graft_map()?;
+        let mut ops = Vec::new();
+        for (i, im) in clip.images.iter().enumerate() {
+            let obj = get(&xo, &format!("I{i}")).ok_or_else(|| invalid("the copied images can't be read"))?;
+            let name = add_resource(d, &pi.page, &map.graft_object(&obj)?)?;
+            let place = im.place.then(&into_user);
+            ops.extend(draw_ops(Op::new("Do", vec![Obj::Name(name)]), place, im.clip.map(|c| into_user.bbox(c))));
+        }
+        append_draws(d, &pi, ops)?;
+        Ok(vec![page])
+    })?;
+    Ok(ImageEdited { state })
+}
+
+/// Moves the images `indices` of page `from` (listed at `rev`) to page `to` of the same document,
+/// the group's top left corner at page-space `at` there (kept on the page): one undo step. The
+/// picture goes where it was dropped, whatever the two pages' size or rotation.
+pub fn move_to_page(
+    eng: &Engine,
+    doc: DocId,
+    rev: u32,
+    from: u32,
+    indices: &[u32],
+    to: u32,
+    at: [f64; 2],
+    source: EditSource,
+) -> Result<ImageEdited> {
+    if from == to {
+        return Err(invalid("the images are on that page already"));
+    }
+    let indices = unique(indices)?;
+    let entry = eng.doc_entry(doc)?;
+    let label = if indices.len() == 1 { format!("Move image to p. {}", to + 1) } else { format!("Move {} images to p. {}", indices.len(), to + 1) };
+    let state = eng.apply_removing(doc, label, source, |d| {
+        if entry.generation() != rev {
+            return Err(EngineError::Stale);
+        }
+        crate::outline::refuse_if_certified(d, "Moving images")?;
+        let (from_page, to_page) = (page_space(d, from)?, page_space(d, to)?);
+        let to_user = to_page.invert().ok_or_else(|| invalid("the page has no area"))?;
+        let pf = read_images(d, from)?;
+        let pt = read_images(d, to)?;
+        let mut picked = Vec::new();
+        for i in &indices {
+            let f = pf.found.get(*i as usize).ok_or_else(|| invalid(format!("page {} has no image {}", from + 1, i + 1)))?;
+            if f.in_text {
+                return Err(invalid("this image is drawn inside a text object; it can only be deleted"));
+            }
+            // A page's own colour space can't come along in the picture's operator.
+            let device = matches!(f.color_space.as_str(), "DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "Indexed" | "ImageMask" | "");
+            if f.kind == ImageKind::Inline && !device {
+                return Err(invalid("this inline picture uses a colour space of its page, so it can't be moved to another page"));
+            }
+            picked.push(f);
+        }
+        let group = picked
+            .iter()
+            .map(|f| {
+                let full = f.ctm.bbox(UNIT);
+                from_page.bbox(f.clip.map_or(full, |c| intersect(full, c)))
+            })
+            .reduce(union)
+            .unwrap_or([0.0; 4]);
+        let (x, y) = keep_on_page(at, (group[2] - group[0], group[3] - group[1]), page_size(d, to)?)?;
+        let into_user = from_page.then(&Matrix::translate(x - group[0], y - group[1])).then(&to_user);
+        let (mut draws, mut gone, mut remove) = (Vec::new(), HashSet::new(), HashSet::new());
+        for f in picked {
+            let draw = match (&f.obj, &f.name) {
+                // The same image object moves: the new page names it, the old one forgets it.
+                (Some(obj), Some(name)) => {
+                    gone.insert(name.clone());
+                    Op::new("Do", vec![Obj::Name(add_resource(d, &pt.page, obj)?)])
+                }
+                _ => Op::verbatim(&pf.pieces.data()[pf.ops[f.op].span.clone()]),
+            };
+            let place = f.ctm.then(&into_user);
+            draws.extend(draw_ops(draw, place, f.clip.map(|c| into_user.bbox(c))));
+            remove.insert(f.op);
+        }
+        let new = splice(&pf.pieces, &pf.ops, |i| (Vec::new(), !remove.contains(&i)));
+        write_streams(d, &pf.page, &pf.streams, new)?;
+        append_draws(d, &pt, draws)?;
+        forget_unused(d, from, &gone)?;
+        Ok(vec![from, to])
+    })?;
+    Ok(ImageEdited { state })
 }
 
 /// Components per pixel of an image's colour space.

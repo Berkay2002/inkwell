@@ -1,7 +1,7 @@
 //! Tauri commands for editing images. The UI is the user; the assistant calls the functions in
 //! `super` with its turn.
 
-use super::{ImageBlocks, ImageChange, ImageEdited, ImageItem};
+use super::{ClipInfo, ImageBlocks, ImageChange, ImageClipboard, ImageEdited, ImageItem};
 use crate::engine::edit::EditSource;
 use crate::engine::{DocId, Engine, EngineError};
 use crate::paths::Paths;
@@ -47,4 +47,44 @@ pub async fn image_edit(
 pub async fn image_edit_many(eng: Eng<'_>, doc: DocId, rev: u32, page: u32, items: Vec<ImageItem>) -> Result<ImageEdited> {
     let eng = eng.inner().clone();
     blocking(move || super::edit_many(&eng, doc, rev, page, &items, EditSource::User)).await
+}
+
+/// Copies images `indices` of `page` (listed at `rev`) to the app's picture clipboard.
+#[tauri::command]
+pub async fn image_copy(eng: Eng<'_>, clip: tauri::State<'_, ImageClipboard>, doc: DocId, rev: u32, page: u32, indices: Vec<u32>) -> Result<ClipInfo> {
+    let eng = eng.inner().clone();
+    let copied = blocking(move || super::copy(&eng, doc, rev, page, &indices)).await?;
+    let info = copied.info();
+    *clip.0.lock() = Some(std::sync::Arc::new(copied));
+    Ok(info)
+}
+
+/// What the picture clipboard holds, if anything.
+#[tauri::command]
+pub fn image_clip_info(clip: tauri::State<'_, ImageClipboard>) -> Option<ClipInfo> {
+    clip.0.lock().as_ref().map(|c| c.info())
+}
+
+/// Pastes the picture clipboard on `page`, its top left corner at page-space `at`.
+#[tauri::command]
+pub async fn image_paste(eng: Eng<'_>, clip: tauri::State<'_, ImageClipboard>, doc: DocId, rev: u32, page: u32, at: [f64; 2]) -> Result<ImageEdited> {
+    let held = clip.0.lock().clone().ok_or_else(|| EngineError::Invalid("no pictures are copied".into()))?;
+    let eng = eng.inner().clone();
+    blocking(move || super::paste(&eng, doc, rev, page, at, &held, EditSource::User)).await
+}
+
+/// Moves images `indices` of `page` to `to_page` of the same document, the group's top left
+/// corner at page-space `at` there.
+#[tauri::command]
+pub async fn image_move_to_page(
+    eng: Eng<'_>,
+    doc: DocId,
+    rev: u32,
+    page: u32,
+    indices: Vec<u32>,
+    to_page: u32,
+    at: [f64; 2],
+) -> Result<ImageEdited> {
+    let eng = eng.inner().clone();
+    blocking(move || super::move_to_page(&eng, doc, rev, page, &indices, to_page, at, EditSource::User)).await
 }
