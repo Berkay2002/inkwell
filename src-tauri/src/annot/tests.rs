@@ -558,11 +558,8 @@ fn reading_the_arrays_of_owner_pages_is_charged_against_the_scan_budget() {
     let inline = "0 ".repeat(m);
     let (eng, id) = open_raw("owner-arrays", pages_and(n + 1, rest, |i| if i == 0 { format!("/Annots [{page0}]") } else { format!("/Annots [{inline}]") }));
     let mut walk = AnnotWalk::default();
-    eng.read_custom(id, |d| {
-        let _ = walk.page(d, 0, Which::Comments)?;
-        Ok(())
-    })
-    .unwrap();
+    let first = eng.read_custom(id, |d| Ok(walk.page(d, 0, Which::Comments)?.is_none())).unwrap();
+    assert!(first, "the page the budget ran out on lists nothing");
     assert!(walk.incomplete && walk.scanned > MAX_SCANNED, "scanned {}", walk.scanned);
     // The whole listing is bounded and says so, and the form scan refuses rather than answer from part of it.
     assert!(list_status(&eng, id).unwrap().incomplete);

@@ -429,7 +429,12 @@ impl AnnotWalk {
                 fresh.direct = true;
                 continue;
             };
-            if self.seen.contains(&num) || self.belongs_later(doc, &e, p, num)? {
+            let later = self.seen.contains(&num) || self.belongs_later(doc, &e, p, num)?;
+            // Out of budget mid-check the answer above is a guess: stop here instead of listing from it.
+            if self.incomplete {
+                return Ok(None);
+            }
+            if later {
                 continue;
             }
             self.seen.insert(num);
