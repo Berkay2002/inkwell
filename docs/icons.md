@@ -35,21 +35,21 @@ tinted glyph; Comment is yellow with a dark glyph, as in Acrobat. Every pair is 
 
 | Group id | Colour | Used by |
 |---|---|---|
-| optimize | teal | Compress, Recognize text, Preflight |
-| marks | amber | Header & footer, Watermark, Background, Bates |
-| protect | violet | Protect, Security, Redact |
-| convert | blue | Export, Create PDF |
-| check | green | Compare, accessibility, Advanced search |
-| edit | rose | Edit |
-| comment | yellow | Annotate |
+| optimize | teal | Compress file, Recognize text, Preflight |
+| marks | amber | Header & footer, Watermark, Background, Bates numbering |
+| protect | violet | Protect with a password, Security, Redact |
+| convert | blue | Export, Create PDF, Create PDF Portfolio, Portfolio files |
+| check | green | Compare files, Check accessibility, Reading order, Tags, Matterhorn results, Advanced search |
+| edit | rose | Edit, Links, Bookmarks, Article threads |
+| comment | yellow | Annotate, Measure |
 | organize | emerald | Organize, Combine |
-| sign | indigo | Fill & sign |
+| sign | indigo | Fill & Sign, Sign with a digital ID, Check signatures |
 | print | fuchsia | Output Preview, Convert Colors, Printer's marks, Page boxes |
 | scripts | slate | Document JavaScript |
-| automate | sky | Actions, batch |
+| automate | sky | Action Wizard |
 
 A tool only picks a glyph: `icon` in `toolItems.ts` names an entry of the manifest and the tile colour comes from its
-`group`. Groups beyond the five in `TOOL_GROUPS` are listed in `TOOL_HUES` (`lib/toolsCatalog.ts`).
+`group`. Every `TOOL_GROUPS` id has a hue; `organize` (the Organize and Combine quick tools) is a hue with no group. All of them are listed in `TOOL_HUES` (`lib/toolsCatalog.ts`).
 
 ## Adding an icon
 
@@ -73,7 +73,7 @@ Rules the tests enforce:
 - A custom glyph needs both `<name>.svg` and `<name>-filled.svg` in `src/assets/icons/inkwell/`, and a key in
   `inkwell`; a stray file or a key without files fails.
 - No component carries path data: no `const X = "M6 12h12"` and no literal `<path d="…">`, except the two brand marks
-  (`Chrome.tsx`, `AssistantPanel.tsx`). Use `<Icon name="…" />`; the assistant's own names are mapped in
+  (`Chrome.tsx`, `assistant/providerMarks.tsx`). Use `<Icon name="…" />`; the assistant's own names are mapped in
   `assistant/parts.tsx` (`GLYPHS`).
 
 `node scripts/icons-sheet.mjs <outDir> <cdpPort> <vitePort> [custom|all]` draws a contact sheet of the set inside the
@@ -82,8 +82,8 @@ committing. `scripts/icons-shots.mjs` takes the toolbar, panel, Home, palette an
 
 ## Outside the set
 
-The ink-drop app mark (`Chrome.tsx`, the tab bar) and the assistant provider's mark (`AssistantPanel.tsx`) are brand
-marks. Page drawings (`MarkPreview`, the annotation draft layer, the Compare connectors) are content, not icons.
+The ink-drop app mark (`Chrome.tsx`, the tab bar) and the assistant provider marks (`assistant/providerMarks.tsx`, simple-icons, CC0)
+are brand marks. Page drawings (`MarkPreview`, the annotation draft layer, the Compare connectors) are content, not icons.
 
 ## Licence
 

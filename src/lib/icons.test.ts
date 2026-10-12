@@ -75,8 +75,8 @@ describe("icon set", () => {
 
   it("no component carries its own table of icon paths (the app and provider marks aside)", () => {
     const hits = Object.entries(sources).flatMap(([f, src]) => inlinePaths(src).map((h) => `${f}: ${h}`));
-    // the ink-drop app mark (Chrome.tsx) and the assistant provider's mark (AssistantPanel.tsx) are brand marks
-    expect(hits.filter((h) => !/\/(Chrome|AssistantPanel)\.tsx: /.test(h))).toEqual([]);
+    // the ink-drop app mark (Chrome.tsx) and the assistant provider marks (providerMarks.tsx) are brand marks
+    expect(hits.filter((h) => !/\/(Chrome|providerMarks)\.tsx: /.test(h))).toEqual([]);
   });
 
   it("the inline-path check catches path constants and literal <path d>, and skips computed paths", () => {
