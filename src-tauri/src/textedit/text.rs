@@ -404,8 +404,10 @@ pub(crate) struct PageContent {
     pub areas: Vec<Area>,
     /// The page's crop box in user space.
     pub crop: [f64; 4],
-    /// What the page paints that is not text: the parts of its painted paths and its form XObjects.
+    /// What the page paints that is not text: the parts of its painted paths and its form XObjects, as far as
+    /// [`MAX_MARKS`] goes (`marks_cut`: further).
     pub marks: Vec<Obstacle>,
+    pub marks_cut: bool,
     /// Our own decorations (`/Span <</IWDeco …>> BDC … EMC`): the operators they span and the show
     /// operators they lie under or through.
     decos: Vec<(usize, usize, Vec<usize>)>,
@@ -500,7 +502,7 @@ pub(crate) fn read_page(doc: &PdfDocument, page: u32) -> Result<PageContent> {
     if lines.is_empty() && extra.glyphlike >= 100 {
         areas.push(Area { rect: extra.glyph_box, issue: Issue::Outlines });
     }
-    Ok(PageContent { page: p, streams, pieces, ops, fonts, advances, lines, areas, crop, marks: extra.marks, decos })
+    Ok(PageContent { page: p, streams, pieces, ops, fonts, advances, lines, areas, crop, marks: extra.marks, marks_cut: extra.marks_cut, decos })
 }
 
 /// What the interpreter notices besides text.
@@ -515,6 +517,7 @@ struct Extra {
     decos: Vec<DecoMark>,
     /// Painted path parts and form XObjects (see [`PageContent::marks`]).
     marks: Vec<Obstacle>,
+    marks_cut: bool,
 }
 
 /// Something on a page a one-line block that grows must keep clear of.
@@ -775,6 +778,7 @@ fn interpret(
                 // A path that only clips (`n`) paints nothing.
                 if !op.is("n") {
                     let room = MAX_MARKS.saturating_sub(extra.marks.len());
+                    extra.marks_cut |= parts.len() > room;
                     extra.marks.extend(parts.iter().take(room).map(|&rect| Obstacle { rect, form: false }));
                 }
                 parts.clear();
@@ -815,6 +819,8 @@ fn interpret(
                         let rect = m.then(&ts.ctm).bbox([b[0], b[1], b[2], b[3]]);
                         if extra.marks.len() < MAX_MARKS {
                             extra.marks.push(Obstacle { rect, form: true });
+                        } else {
+                            extra.marks_cut = true;
                         }
                         if form_shows_text(&f) {
                             extra.forms.push(rect);
@@ -1108,6 +1114,10 @@ fn room_right(beside: &[Obstacle], pc: &PageContent, l: &Line) -> f64 {
     let on_band = |a: f64, b: f64| b.min(hi) - a.max(lo) > (hi - lo) * 0.33;
     // Starts at or after the line's end (a mark that touches it, or text over it, is not a neighbour).
     let after = |x: f64| x >= x1 - l.size * 0.1;
+    // A page with more painted parts than are read: what lies beside the line is not known.
+    if pc.marks_cut {
+        return x1;
+    }
     let mut near = pc.crop[2] - 36.0;
     // The column: the text block of two or more lines nearest above or below that stands over the line's start
     // ends where the column does (cells are one-line blocks, and stop at their neighbour).

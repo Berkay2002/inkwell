@@ -280,7 +280,7 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   that it is skipped the same way. A form XObject on the band (its `/BBox`; what it draws is not read) that starts
   to the right is a neighbour, and one the line stands in stops it growing at all. The page's images and
   annotations are listed once per page (a rewrite moves none); paths and forms come with each read of the page.
-  Images or annotations that can't be listed leave the line as wide as it was. The same goes for a block whose line ends can't
+  Images or annotations that can't be listed, or a page with more than 20 000 painted path parts, leave the line as wide as it was. The same goes for a block whose line ends can't
   be placed in its new text, for a block whose lines have their own character spacing or scale, and for a match
   that stops inside a word a dropped hyphen split. A match across a line end
   drops

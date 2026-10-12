@@ -461,9 +461,11 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32 + 1) });
             break;
         }
-        // The images and annotations a one-line block must keep clear of when it grows, read once for the page.
-        let beside = beside.get_or_insert_with(|| text::page_obstacles(d, page).map(std::sync::Arc::new));
-        changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, listed, beside.clone(), out);
+        // The images and annotations a one-line block must keep clear of when it grows, read once for the page
+        // (and only when there is such a block).
+        let one_line = blocks[bi].lines.len() == 1;
+        let beside = if one_line { beside.get_or_insert_with(|| text::page_obstacles(d, page).map(std::sync::Arc::new)).clone() } else { None };
+        changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, listed, beside, out);
         if cut {
             break;
         }
