@@ -739,7 +739,9 @@ pub(crate) fn graft_pages_ex(dst: &mut PdfDocument, src: &PdfDocument, pages: &[
 fn drop_signature(field: &PdfObject, copy: &mut PdfObject) -> Result<()> {
     // A /Parent loop in a broken field tree makes the lookup fail; that was tolerated before, so it is no signature.
     let sig = name_of(field.get_dict_inheritable("FT").ok().flatten()) == b"Sig";
-    if sig && copy.get_dict("V")?.is_some() {
+    // The value may sit on a parent field while the widget kid only has the appearance that shows it.
+    let valued = field.get_dict_inheritable("V").ok().flatten().is_some_and(|v| !v.is_null().unwrap_or(true));
+    if sig && valued {
         copy.dict_delete("V")?;
         copy.dict_delete("AP")?;
     }

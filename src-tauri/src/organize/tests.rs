@@ -815,7 +815,7 @@ fn a_signature_field_of_a_source_arrives_empty_and_the_plan_says_so() {
         "<< >>".into(),
         format!("<< /Type /Annot /Subtype /Widget /FT /Sig /T (First) /Rect [10 10 100 50] /P 3 0 R /AP << /N 4 0 R >> {value} >>"),
         format!("<< /FT /Sig /T (Second) /Kids [7 0 R] {value} >>"),
-        "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [10 60 100 100] /P 3 0 R >>".into(),
+        "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [10 60 100 100] /P 3 0 R /AP << /N 4 0 R >> >>".into(),
     ];
     let d = dir("combine-signed");
     let (eng, id, path) = open_bytes(&d, "s.pdf", &raw_pdf(&objs));
@@ -834,4 +834,20 @@ fn a_signature_field_of_a_source_arrives_empty_and_the_plan_says_so() {
     assert_eq!(crate::forms::list_all(&e2, i2).unwrap().fields.len(), 2, "the signature fields are still there");
     let bytes = std::fs::read(&out).unwrap();
     assert!(!String::from_utf8_lossy(&bytes).contains("adbe.pkcs7.detached"), "no signature value in the file");
+    // neither widget draws the old signature: one has its own value, the other gets it from its parent field
+    let drawn = e2
+        .read_custom(i2, |d| {
+            let mut n = 0;
+            for p in 0..d.page_count()? {
+                let Some(annots) = d.find_page(p)?.get_dict("Annots")? else { continue };
+                for i in 0..annots.len()? as i32 {
+                    if annots.get_array(i)?.is_some_and(|w| w.get_dict("AP").ok().flatten().is_some()) {
+                        n += 1;
+                    }
+                }
+            }
+            Ok(n)
+        })
+        .unwrap();
+    assert_eq!(drawn, 0, "an empty signature field has no appearance");
 }
