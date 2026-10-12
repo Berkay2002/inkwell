@@ -566,13 +566,17 @@ fn locks_of_fields(entries: &[Entry]) -> Vec<Lock> {
 
 /// A script may not write to a signature widget, nor to a field a signature in the document covers.
 pub(crate) fn locked(locks: &[Lock], e: &Entry) -> bool {
-    let named = |names: &[String]| names.iter().any(|n| e.name == *n || e.name.starts_with(&format!("{n}.")));
-    e.kind == FieldKind::Signature
-        || locks.iter().any(|l| match l {
-            Lock::All | Lock::Unchecked => true,
-            Lock::Include(n) => named(n),
-            Lock::Exclude(n) => !named(n),
-        })
+    e.kind == FieldKind::Signature || name_locked(locks, &e.name)
+}
+
+/// Whether a field with this full name is covered by a signature's lock (a field about to take the name, too).
+pub(crate) fn name_locked(locks: &[Lock], name: &str) -> bool {
+    let named = |names: &[String]| names.iter().any(|n| name == n || name.starts_with(&format!("{n}.")));
+    locks.iter().any(|l| match l {
+        Lock::All | Lock::Unchecked => true,
+        Lock::Include(n) => named(n),
+        Lock::Exclude(n) => !named(n),
+    })
 }
 
 /// Applies what scripts wrote to fields to the document: the value (without running its keystroke or
