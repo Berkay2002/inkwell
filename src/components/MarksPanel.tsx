@@ -86,7 +86,7 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
                 <button className="tl-link" disabled={locked} title={locked ? CERTIFIED_MARKS : undefined} onClick={() => st().setKind(k.kind)}>
                   Update
                 </button>
-                <button className="tl-link" disabled={sheet.busy || locked} onClick={() => void st().remove(k.kind)}>
+                <button className="tl-link" disabled={sheet.busy || locked} title={locked ? CERTIFIED_MARKS : undefined} onClick={() => void st().remove(k.kind)}>
                   Remove
                 </button>
               </div>
@@ -96,7 +96,7 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
                 <span className="mk-has-name">{FOREIGN_NAME[f.kind]}</span>
                 <span className="dim small tl-mono">{f.pages.length === doc.pageCount ? "all pages" : `pp. ${formatRange(f.pages)}`}</span>
                 <span className="grow" />
-                <button className="tl-link" disabled={sheet.busy || locked} onClick={() => void st().remove(f.kind, true)}>
+                <button className="tl-link" disabled={sheet.busy || locked} title={locked ? CERTIFIED_MARKS : undefined} onClick={() => void st().remove(f.kind, true)}>
                   Remove
                 </button>
                 {f.stuck.length > 0 && (
@@ -151,7 +151,7 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
           {sheet.busy ? "Working…" : verb}
         </button>
         {here && !numbering && (
-          <button className="ax-btn tl-wide pr-quiet" disabled={sheet.busy || locked} onClick={() => void st().remove(sheet.kind)}>
+          <button className="ax-btn tl-wide pr-quiet" disabled={sheet.busy || locked} title={locked ? CERTIFIED_MARKS : undefined} onClick={() => void st().remove(sheet.kind)}>
             Remove {KIND_NAME[sheet.kind]}
           </button>
         )}
