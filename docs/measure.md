@@ -29,7 +29,8 @@ against a file from Acrobat; I had no Acrobat here, the shape is from memory of 
 - `/X` first element's `/C` = real distance (in `/U`) per user space unit; `/Y` (when present) scales the y axis, and
   `/CYX` (default 1) turns its units into the x axis units.
 - `/D` and `/A` first element's `/C` multiplies the result again (Acrobat writes 1). No `/D` or `/A`: the `/X` format is
-  used ("sq " + unit for an area). A later element's `/C` is how many of it make one of the previous (feet, then inches).
+  used ("sq " + unit for an area, from `/X`'s first element only: a later element's `/C` is a linear factor, so a chain
+  does not carry over to an area). A later element's `/C` is how many of it make one of the previous (feet, then inches).
 - Number formats keep `/U /C /F /D /FD /RT /RD /PS /SS /O`: decimal (D 100 is two decimals), fraction, round, truncate;
   our own are two decimals with trailing zeros, "," thousands, "." decimal. Absent `/PS` and `/SS` read as a single
   space (a trailing one is not shown); `/D` is clamped to 1..1e9. A malformed `/Measure` (not a dictionary, `/C` 0, no
@@ -64,7 +65,13 @@ copy, so the annotation keeps the scale it was made with), `/Subj` ("Distance Me
 ("25.00 ft"), print flag, author, dates. The appearance stream is ours: the shape in red (a polygon with a light wash),
 end ticks on a distance (no `/IC`: the wash exists only in the appearance, so a redraw elsewhere gives an outline, not
 a solid fill), and the label in Helvetica along the line (never upside down) with a white halo. `/Rect` and the
-form `/BBox` are the box of all that. An `annot_edit` colour change makes MuPDF redraw the shape without the label.
+form `/BBox` are the box of all that. A measurement from another app keeps its own look when a point is moved: `/C`,
+`/BS /W` (or `/Border`), `/LE` line endings (the arrows, butt, slash, square, diamond and circle styles at the first
+and last point), `/LL` leader lines on a distance (perpendicular, positive clockwise on screen; `/LLE` and `/LLO` are
+not drawn) and `/IC` for the area fill, and `/Rect` and `/BBox` take in the endings and leaders and the wider stroke.
+A distance with no `/LE` gets our end ticks. The form this module made is marked (`/InkwellMeasure true`) and is
+rewritten in place on the next move, with its font, so moving leaves nothing behind; a form from another app, which
+other annotations may share, is replaced by ours, never edited. An `annot_edit` colour change makes MuPDF redraw the shape without the label.
 `measure_list` lists every line, polyline or polygon with a readable `/Measure` and recomputes its value from its points
 and its own `/Measure`, so a file from Acrobat shows Acrobat's scale.
 
@@ -139,8 +146,9 @@ Comments does (opening one closes the other) and shows a floating bar over the p
   point before it (an area's first point to its last) and turns snapping off, and the label next to it shows the new
   value while you drag. Release writes it (`measure_move`, one undo step). Esc during the drag puts it back; a click
   without moving writes nothing. From the keyboard a handle takes focus (Tab), the arrow keys move it by 1 point
-  (Shift: 10) along the screen whatever the page rotation, and the move is written after a short pause, on Enter or
-  when focus leaves (a run of keys is one undo step); Esc drops it. Handles have an aria label ("Area point 3 of 4").
+  (Shift: 10) along the screen whatever the page rotation, and the move is written after a short pause, on Enter, when
+  focus leaves or the tool changes (a run of keys is one undo step); Esc drops it, and so does a pointer capture that is
+  lost before the button comes up. Handles have an aria label ("Area point 3 of 4").
   Not shown on a certified file at `/P` 1 or 2 (it says why in the rail); a signed file shows the same note links and
   outline give, and the change is saved after the signature.
 - **Result:** one `measure_add` (one undo step, saved by Save, in history). The page then draws the engine's own
@@ -170,8 +178,8 @@ Comments does (opening one closes the other) and shows a floating bar over the p
 - Not opened in real Acrobat (see the `/D`, `/A` `/C` reading above, the one assumption to confirm). The same goes for
   two number format entries whose spec text could not be checked here: `/FD` is read as "keep trailing zeros and do
   not reduce a fraction" when true (pdfcraft writes it that way, and Acrobat's files carry `/FD true` with two-decimal
-  labels), and `/PS` and `/SS` surround the label after the number; with `/O /P` the label comes first with `/PS`
-  between it and the number.
+  labels), and `/PS` and `/SS` surround the label after the number; with `/O /P` the label (`/PS` + unit + `/SS`)
+  comes before the number instead of after it.
 - The spec's own examples were not at hand (no copy of ISO 32000 on this machine); the number format tests use
   hand-worked chains (mile, foot, inch in eighths; hours, minutes, seconds) instead.
 - `/O` (origin) is kept but unused; `/Y` and `/CYX` are read and applied but never written.

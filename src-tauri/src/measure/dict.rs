@@ -98,7 +98,8 @@ impl MeasureDict {
         let (formats, value) = match explicit.first() {
             Some(first) => (explicit.clone(), raw * first.c),
             None => {
-                let mut f = self.x.clone();
+                // An area has no chain to fall back on: the later elements' /C are linear factors between units.
+                let mut f = if kind == Kind::Area { self.x.iter().take(1).cloned().collect() } else { self.x.clone() };
                 if let Some(first) = f.first_mut() {
                     first.c = 1.0;
                     if kind == Kind::Area {

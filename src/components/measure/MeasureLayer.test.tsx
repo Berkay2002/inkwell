@@ -22,7 +22,7 @@ describe("measure handles", () => {
   it("every point is a labelled, focusable handle", () => {
     const out = renderToStaticMarkup(
       <svg>
-        <Handles kind="perimeter" pts={[[10, 10], [60, 10], [60, 50]]} r={5} onDown={none} onMove={none} onUp={none} onCancel={none} onKey={none} onBlur={none} />
+        <Handles kind="perimeter" pts={[[10, 10], [60, 10], [60, 50]]} r={5} onDown={none} onMove={none} onUp={none} onCancel={none} onLost={none} onKey={none} onBlur={none} />
       </svg>,
     );
     expect(out.match(/class="ms-handle"/g)).toHaveLength(3);

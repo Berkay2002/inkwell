@@ -49,12 +49,14 @@ interface HandleProps {
   onMove: (e: React.PointerEvent<SVGCircleElement>) => void;
   onUp: (e: React.PointerEvent<SVGCircleElement>) => void;
   onCancel: () => void;
+  /** The pointer capture ended without a pointer up (the window lost it, the element went away). */
+  onLost: () => void;
   onKey: (e: React.KeyboardEvent<SVGCircleElement>, i: number) => void;
   onBlur: () => void;
 }
 
 /** One focusable handle per point of the selected measurement: drag it, or move it with the arrow keys. */
-export function Handles({ kind, pts, r, onDown, onMove, onUp, onCancel, onKey, onBlur }: HandleProps) {
+export function Handles({ kind, pts, r, onDown, onMove, onUp, onCancel, onLost, onKey, onBlur }: HandleProps) {
   return (
     <g>
       {pts.map((q, i) => (
@@ -71,6 +73,7 @@ export function Handles({ kind, pts, r, onDown, onMove, onUp, onCancel, onKey, o
           onPointerMove={onMove}
           onPointerUp={onUp}
           onPointerCancel={onCancel}
+          onLostPointerCapture={onLost}
           onKeyDown={(e) => onKey(e, i)}
           onBlur={onBlur}
         />
@@ -109,7 +112,9 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     if (timer.current !== null) window.clearTimeout(timer.current);
     timer.current = null;
   };
-  useEffect(() => stopTimer, []);
+  /** Writes what the arrow keys moved and the timer has not yet (set below, where `commit` is). */
+  const flush = useRef(() => {});
+  useEffect(() => () => flush.current(), []);
 
   useEffect(() => {
     if (!hasScale) void ms().ensureScale(docId, page);
@@ -121,6 +126,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
 
   // A tool change abandons what is half drawn.
   useEffect(() => {
+    flush.current();
     asked.cancel();
     setPts([]);
     setHover(null);
@@ -238,6 +244,11 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     stopTimer();
     setEdit(null);
   };
+  flush.current = () => {
+    stopTimer();
+    const c = editRef.current;
+    if (c?.moved && !c.saving && !holding.current) commit(c);
+  };
   const grab = (e: React.PointerEvent<SVGCircleElement>, m: Measure, i: number) => {
     if (e.button !== 0 || editRef.current?.saving) return;
     e.stopPropagation();
@@ -263,10 +274,11 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
   };
   const release = (e: React.PointerEvent<SVGCircleElement>) => {
     if (!holding.current) return;
+    // First: releasing the capture ends in a lostpointercapture, which must not read as a lost drag.
+    holding.current = false;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
     asked.cancel();
     want.current = null;
-    holding.current = false;
     if (editRef.current && !editRef.current.saving) commit(editRef.current);
   };
   const press = (e: React.KeyboardEvent, m: Measure, i: number) => {
@@ -350,6 +362,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
               onMove={(e) => drag(e, selM)}
               onUp={release}
               onCancel={cancel}
+              onLost={() => holding.current && cancel()}
               onKey={(e, i) => press(e, selM, i)}
               onBlur={() => {
                 const c = editRef.current;

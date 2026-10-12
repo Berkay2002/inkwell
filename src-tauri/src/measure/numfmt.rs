@@ -135,7 +135,7 @@ impl NumberFormat {
     /// The number with its label: "1,234.50 ft".
     pub fn text(&self, v: f64) -> String {
         let n = self.number(v);
-        if self.prefix { format!("{}{}{n}", self.unit, self.ps) } else { format!("{n}{}{}{}", self.ps, self.unit, self.ss) }
+        if self.prefix { format!("{}{}{}{n}", self.ps, self.unit, self.ss) } else { format!("{n}{}{}{}", self.ps, self.unit, self.ss) }
     }
 
     fn group(&self, int: &str, frac: &str) -> String {

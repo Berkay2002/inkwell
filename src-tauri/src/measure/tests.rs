@@ -164,7 +164,11 @@ fn units_scales_and_formats() {
     assert_eq!(frac.number(0.26), "1/4");
     assert_eq!(frac.number(2.97), "3");
     assert_eq!(NumberFormat { thousands: ".".into(), decimal: ",".into(), ..f.clone() }.number(1234.5), "1.234,50");
-    assert_eq!(NumberFormat { prefix: true, ..f.clone() }.text(2.0), "ft 2.00");
+    // The label is PS + unit + SS; /O says whether it comes before the number or after it.
+    assert_eq!(NumberFormat { prefix: true, ..f.clone() }.text(2.0), " ft2.00");
+    let fenced = NumberFormat { ps: "[".into(), ss: "]".into(), ..f.clone() };
+    assert_eq!(fenced.text(2.0), "2.00[ft]");
+    assert_eq!(NumberFormat { prefix: true, ..fenced }.text(2.0), "[ft]2.00");
     let inches = NumberFormat { c: 12.0, ..NumberFormat::new("in", 1.0) };
     assert_eq!(chain_text(3.375, &[f.clone(), inches]), "3 ft 4.50 in");
 }
@@ -1185,6 +1189,106 @@ fn a_number_format_array_that_refers_to_itself_falls_back() {
         let q = value_in(&eng, id, 0, Kind::Distance, &[[0.0, 792.0], [72.0, 792.0]], all[0].xref).unwrap();
         assert_eq!(q.text, "1.00 ft", "{case}");
     }
+}
+
+#[test]
+fn an_area_falling_back_to_a_chained_x_uses_its_first_unit_only() {
+    // No /A: /X is feet then inches (C 12); an area of 72 x 72 units is 1 sq ft, never "1 sq ft 0.00 sq in" with a
+    // linear 12 between the units.
+    let x = format!("{XFT} << /Type /NumberFormat /U (in) /C 12 /D 100 /FD true >>");
+    let measure = format!("<< /Type /Measure /Subtype /RL /R (1 in = 10 ft) /X [{x}] >>");
+    let spec = Spec {
+        page: "/Annots [5 0 R]".into(),
+        extra: vec![(
+            5,
+            format!(
+                "<< /Type /Annot /Subtype /Polygon /Rect [0 0 72 72] /Vertices [0 0 72 0 72 72 0 72] /IT /PolygonDimension /F 4 /Measure {measure} >>"
+            ),
+        )],
+        ..Default::default()
+    };
+    let (eng, id, _) = open("area-chain-x", &spec);
+    let all = list_all(&eng, id).unwrap();
+    assert_eq!(all[0].quantity.text, "1.00 sq ft");
+    assert_eq!(all[0].quantity.unit, "sq ft");
+}
+
+/// A line from another app: blue, 3 pt wide, open arrows at both ends and 20 pt leader lines.
+fn foreign_line() -> Spec {
+    let d = "<< /Type /NumberFormat /U (ft) /C 1 /D 100 /FD true >>";
+    let measure = format!("<< /Type /Measure /Subtype /RL /R (1 in = 10 ft) /X [{XFT}] /D [{d}] >>");
+    Spec {
+        page: "/Annots [5 0 R 8 0 R]".into(),
+        extra: vec![
+            (
+                5,
+                format!(
+                    "<< /Type /Annot /Subtype /Line /Rect [0 0 108 10] /L [0 0 108 0] /IT /LineDimension /F 4 /C [0 0 1] /BS << /W 3 >> \
+                     /LE [/OpenArrow /OpenArrow] /LL 20 /Contents (1.50 ft) /AP << /N 7 0 R >> /Measure {measure} >>"
+                ),
+            ),
+            (7, "<< /Type /XObject /Subtype /Form /BBox [0 0 108 10] /Length 3 >>\nstream\nq Q\nendstream".into()),
+            // A second annotation drawn with the same form.
+            (
+                8,
+                format!(
+                    "<< /Type /Annot /Subtype /Line /Rect [0 100 108 110] /L [0 100 108 100] /F 4 /AP << /N 7 0 R >> /Measure {measure} >>"
+                ),
+            ),
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn moving_a_foreign_measure_keeps_its_look_and_does_not_clip_it() {
+    let (eng, id, _) = open("foreign-look", &foreign_line());
+    let xref = list_all(&eng, id).unwrap().iter().find(|m| m.contents == "1.50 ft").unwrap().xref;
+    let steps = history_len(&eng, id);
+    // 144 units: 2 ft.
+    let (_, q) = move_points(&eng, id, 0, xref, &[[0.0, 792.0], [144.0, 792.0]], EditSource::User).unwrap();
+    assert_eq!(q.text, "2.00 ft");
+    assert_eq!(history_len(&eng, id), steps + 1);
+    with_annot(&eng, id, xref, |o| {
+        // Its own entries are still there.
+        assert_eq!(nums(o, "C"), vec![0.0, 0.0, 1.0]);
+        assert_eq!(o.get_dict("BS").unwrap().unwrap().get_dict("W").unwrap().unwrap().as_float().unwrap(), 3.0);
+        assert_eq!(o.get_dict("LE").unwrap().unwrap().len().unwrap(), 2);
+        let ap = o.get_dict("AP").unwrap().unwrap().get_dict("N").unwrap().unwrap();
+        let drawing = String::from_utf8(ap.read_stream().unwrap()).unwrap();
+        // It is drawn in that look: blue, 3 pt, with the arrows (a closed path of three points is not there).
+        assert!(drawing.contains("0.000 0.000 1.000 RG"), "{drawing}");
+        assert!(drawing.contains(" 3 w"), "{drawing}");
+        assert!(!drawing.contains("0.800 0.150 0.120"), "{drawing}");
+        // The arrows' strokes reach back 12 pt (4 x the width) from each end, and the leaders 20 pt below the
+        // line (clockwise on screen: user space y goes down to -20): all inside /Rect with the stroke's half width.
+        let r = nums(o, "Rect");
+        assert!(r[0] <= -1.5 && r[2] >= 144.0 + 1.5, "{r:?}");
+        assert!(r[1] <= -20.0 - 1.5, "{r:?}");
+        let bbox = nums(&ap, "BBox");
+        assert_eq!(bbox, r);
+    });
+    // The form they shared is another annotation's: it is untouched.
+    let other = list_all(&eng, id).unwrap().iter().find(|m| m.xref != xref).unwrap().xref;
+    with_annot(&eng, id, other, |o| {
+        let ap = o.get_dict("AP").unwrap().unwrap().get_dict("N").unwrap().unwrap();
+        assert_eq!(ap.read_stream().unwrap(), b"q Q");
+    });
+}
+
+#[test]
+fn moving_a_measure_again_rewrites_its_form_in_place() {
+    let (eng, id, _) = open("move-in-place", &Spec::default());
+    let (xref, _) = add(&eng, id, Kind::Perimeter, &[[100.0, 100.0], [172.0, 100.0], [172.0, 172.0]], Some(&FT10));
+    let form = |eng: &Engine| with_annot(eng, id, xref, |o| o.get_dict("AP").unwrap().unwrap().get_dict("N").unwrap().unwrap().as_indirect().unwrap());
+    let objects = |eng: &Engine| eng.read_custom(id, |d| Ok(d.count_objects()?)).unwrap();
+    let first = form(&eng);
+    move_points(&eng, id, 0, xref, &[[100.0, 100.0], [172.0, 100.0], [172.0, 244.0]], EditSource::User).unwrap();
+    let (n1, f1) = (objects(&eng), form(&eng));
+    move_points(&eng, id, 0, xref, &[[100.0, 100.0], [300.0, 100.0], [172.0, 244.0]], EditSource::User).unwrap();
+    assert_eq!(form(&eng), f1, "same appearance object");
+    assert_eq!(form(&eng), first);
+    assert_eq!(objects(&eng), n1, "no object left behind by a move");
 }
 
 #[test]

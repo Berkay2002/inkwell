@@ -25,6 +25,80 @@ fn bad(m: impl Into<String>) -> EngineError {
 const COLOR: [f32; 3] = [0.80, 0.15, 0.12];
 const LABEL_SIZE: f64 = 10.0;
 const LINE_WIDTH: f64 = 1.0;
+/// Key in the appearance stream's dictionary that says this module made it, so a later move rewrites it in place (a
+/// form from another app may be shared between annotations).
+const OWN_AP: &str = "InkwellMeasure";
+
+/// How the annotation already looks. A measurement made here has `/C` and a border width only; one from another app
+/// may also have line endings (`/LE`), a leader length (`/LL`) and an interior colour (`/IC`), and they are kept.
+struct Look {
+    color: [f64; 3],
+    width: f64,
+    /// `/LE` of a line or polyline (first and last point); `None` draws our short ticks across a distance.
+    ends: Option<[String; 2]>,
+    /// `/LL`: leader lines of a dimension line, perpendicular to it, positive clockwise.
+    leader: f64,
+    interior: Option<[f64; 3]>,
+}
+
+impl Look {
+    fn of(o: &PdfObject) -> Look {
+        let nums = |key: &str| -> Option<Vec<f64>> {
+            let a = o.get_dict(key).ok()??;
+            if !a.is_array().ok()? {
+                return None;
+            }
+            (0..a.len().ok()?).map(|i| a.get_array(i as i32).ok()?.filter(|v| v.is_number().unwrap_or(false))?.as_float().ok().map(f64::from)).collect()
+        };
+        let rgb = |v: Vec<f64>| -> Option<[f64; 3]> {
+            let v: Vec<f64> = v.into_iter().map(|c| c.clamp(0.0, 1.0)).collect();
+            match v.len() {
+                1 => Some([v[0]; 3]),
+                3 => Some([v[0], v[1], v[2]]),
+                4 => Some([(1.0 - v[0]) * (1.0 - v[3]), (1.0 - v[1]) * (1.0 - v[3]), (1.0 - v[2]) * (1.0 - v[3])]),
+                _ => None,
+            }
+        };
+        let w = o
+            .get_dict("BS")
+            .ok()
+            .flatten()
+            .and_then(|b| b.get_dict("W").ok().flatten())
+            .filter(|w| w.is_number().unwrap_or(false))
+            .and_then(|w| w.as_float().ok().map(f64::from))
+            .or_else(|| nums("Border").and_then(|b| b.get(2).copied()))
+            .filter(|w| w.is_finite() && *w > 0.0)
+            .map_or(LINE_WIDTH, |w| w.min(100.0));
+        let ends = o.get_dict("LE").ok().flatten().filter(|a| a.is_array().unwrap_or(false)).and_then(|a| {
+            let name = |i: i32| a.get_array(i).ok().flatten().filter(|n| n.is_name().unwrap_or(false)).and_then(|n| n.as_name().ok());
+            let text = |n: Vec<u8>| String::from_utf8_lossy(&n).into_owned();
+            Some([text(name(0)?), text(name(1)?)])
+        });
+        Look {
+            color: nums("C").and_then(rgb).unwrap_or(COLOR.map(f64::from)),
+            width: w,
+            ends,
+            leader: o
+                .get_dict("LL")
+                .ok()
+                .flatten()
+                .filter(|v| v.is_number().unwrap_or(false))
+                .and_then(|v| v.as_float().ok())
+                .map_or(0.0, |v| f64::from(v).clamp(-1000.0, 1000.0)),
+            interior: nums("IC").and_then(rgb),
+        }
+    }
+}
+
+/// The appearance stream this module made earlier for the annotation, and the Helvetica it uses.
+fn own_form(o: &PdfObject) -> Option<(PdfObject, Option<PdfObject>)> {
+    let n = o.get_dict("AP").ok()??.get_dict("N").ok()??;
+    if !n.is_stream().ok()? || n.get_dict(OWN_AP).ok()?.is_none() {
+        return None;
+    }
+    let font = n.get_dict("Resources").ok().flatten().and_then(|r| r.get_dict("Font").ok().flatten()).and_then(|f| f.get_dict("Helv").ok().flatten());
+    Some((n, font))
+}
 
 /// A measurement annotation as the panel lists it.
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -199,8 +273,18 @@ pub fn add(doc: &mut PdfDocument, page: u32, kind: Kind, pts: &[[f32; 2]], scale
 /// Gives the annotation `a` our appearance for `pts` and `label`, and the `/Rect` that holds it. MuPDF builds its own
 /// appearance on `update` (it would not draw the label); ours replaces it.
 fn restyle(doc: &mut PdfDocument, a: &mut PdfAnnotation, geom: &PageGeom, kind: Kind, pts: &[[f32; 2]], label: &str) -> Result<()> {
+    // Read before `update`, which may redraw the annotation's own form: its look and our earlier appearance.
+    let (look, own) = (Look::of(&a.object()), own_form(&a.object()));
+    let objects = doc.count_objects()? as i32;
     a.update()?;
-    let ap = appearance(doc, geom, kind, pts, label)?;
+    // The stream `update` made is replaced below by ours: drop it rather than leave it in the file.
+    if let Some(n) = a.object().get_dict("AP")?.and_then(|ap| ap.get_dict("N").ok().flatten())
+        && n.is_indirect()?
+        && n.as_indirect()? >= objects
+    {
+        doc.delete_object(n.as_indirect()?)?;
+    }
+    let ap = appearance(doc, geom, kind, pts, label, &look, own)?;
     let mut o = a.object();
     o.dict_put("Rect", rect_obj(doc, ap.bbox)?)?;
     let mut ap_dict = doc.new_dict()?;
@@ -245,7 +329,15 @@ fn rect_obj(doc: &PdfDocument, b: [f64; 4]) -> Result<PdfObject> {
 
 /// Draws the measurement in page space (y down, so text can be set the way it reads on screen) under a `cm` that maps
 /// page space to user space; the form's box is the drawing's box in user space.
-fn appearance(doc: &mut PdfDocument, geom: &PageGeom, kind: Kind, pts: &[[f32; 2]], label: &str) -> Result<Appearance> {
+fn appearance(
+    doc: &mut PdfDocument,
+    geom: &PageGeom,
+    kind: Kind,
+    pts: &[[f32; 2]],
+    label: &str,
+    look: &Look,
+    own: Option<(PdfObject, Option<PdfObject>)>,
+) -> Result<Appearance> {
     let pg: Vec<P2> = pts.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect();
     let w = text_width(label, LABEL_SIZE);
     // Where the label sits and which way it reads: along the line, never upside down.
@@ -269,7 +361,7 @@ fn appearance(doc: &mut PdfDocument, geom: &PageGeom, kind: Kind, pts: &[[f32; 2
             let dir = along(a, b);
             let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
             let up = [dir[1], -dir[0]];
-            let lift = LINE_WIDTH / 2.0 + 3.0;
+            let lift = look.width / 2.0 + 3.0;
             (dir, [mid[0] - dir[0] * w / 2.0 + up[0] * lift, mid[1] - dir[1] * w / 2.0 + up[1] * lift])
         }
     };
@@ -282,7 +374,9 @@ fn appearance(doc: &mut PdfDocument, geom: &PageGeom, kind: Kind, pts: &[[f32; 2
     ];
 
     let f = |v: f64| format!("{v:.4}");
-    let [cr, cg, cb] = COLOR.map(f64::from);
+    let [cr, cg, cb] = look.color;
+    let [ir, ig, ib] = look.interior.unwrap_or(look.color);
+    let lw = look.width;
     let mut s = String::new();
     let m = geom.page_to_user();
     let _ = writeln!(s, "q\n{} {} {} {} {} {} cm", f(m[0]), f(m[1]), f(m[2]), f(m[3]), f(m[4]), f(m[5]));
@@ -298,27 +392,47 @@ fn appearance(doc: &mut PdfDocument, geom: &PageGeom, kind: Kind, pts: &[[f32; 2
     extent.extend(text_box);
     match kind {
         Kind::Distance => {
-            let _ = writeln!(s, "{cr:.3} {cg:.3} {cb:.3} RG {LINE_WIDTH} w 0 J");
+            let _ = writeln!(s, "{cr:.3} {cg:.3} {cb:.3} RG {ir:.3} {ig:.3} {ib:.3} rg {lw} w 0 J");
             path(&mut s, false);
             s.push_str("S\n");
-            // Short ticks across both ends, as on a dimension line.
-            let d = along(pg[0], pg[1]);
-            for e in [pg[0], pg[1]] {
-                let (x0, y0, x1, y1) = (e[0] - d[1] * 5.0, e[1] + d[0] * 5.0, e[0] + d[1] * 5.0, e[1] - d[0] * 5.0);
-                let _ = writeln!(s, "{} {} m {} {} l S", f(x0), f(y0), f(x1), f(y1));
-                extent.extend([[x0, y0], [x1, y1]]);
+            if look.leader != 0.0 {
+                // Leader lines: from each end, perpendicular, clockwise on the screen when positive.
+                let l = dist(pg[0], pg[1]).max(1e-9);
+                let n = [-(pg[1][1] - pg[0][1]) / l * look.leader, (pg[1][0] - pg[0][0]) / l * look.leader];
+                for e in [pg[0], pg[1]] {
+                    let _ = writeln!(s, "{} {} m {} {} l S", f(e[0]), f(e[1]), f(e[0] + n[0]), f(e[1] + n[1]));
+                    extent.push([e[0] + n[0], e[1] + n[1]]);
+                }
+            }
+            if look.ends.is_none() {
+                // Short ticks across both ends, as on a dimension line.
+                let d = along(pg[0], pg[1]);
+                for e in [pg[0], pg[1]] {
+                    let (x0, y0, x1, y1) = (e[0] - d[1] * 5.0, e[1] + d[0] * 5.0, e[0] + d[1] * 5.0, e[1] - d[0] * 5.0);
+                    let _ = writeln!(s, "{} {} m {} {} l S", f(x0), f(y0), f(x1), f(y1));
+                    extent.extend([[x0, y0], [x1, y1]]);
+                }
             }
         }
         Kind::Perimeter => {
-            let _ = writeln!(s, "{cr:.3} {cg:.3} {cb:.3} RG {LINE_WIDTH} w 1 J 1 j");
+            let _ = writeln!(s, "{cr:.3} {cg:.3} {cb:.3} RG {ir:.3} {ig:.3} {ib:.3} rg {lw} w 1 J 1 j");
             path(&mut s, false);
             s.push_str("S\n");
         }
         Kind::Area => {
             s.push_str("q /GS1 gs\n");
-            let _ = writeln!(s, "{cr:.3} {cg:.3} {cb:.3} rg {cr:.3} {cg:.3} {cb:.3} RG {LINE_WIDTH} w 1 j");
+            let _ = writeln!(s, "{ir:.3} {ig:.3} {ib:.3} rg {cr:.3} {cg:.3} {cb:.3} RG {lw} w 1 j");
             path(&mut s, true);
             s.push_str("B\nQ\n");
+        }
+    }
+    // The file's own line endings, at the first and last point, pointing away from the line.
+    if let (Some(ends), true) = (&look.ends, kind != Kind::Area && pg.len() >= 2) {
+        let size = (lw * 4.0).max(8.0);
+        let n = pg.len();
+        let _ = writeln!(s, "{cr:.3} {cg:.3} {cb:.3} RG {ir:.3} {ig:.3} {ib:.3} rg {lw} w 0 J 0 j");
+        for (name, at, from) in [(&ends[0], pg[0], pg[1]), (&ends[1], pg[n - 1], pg[n - 2])] {
+            line_ending(&mut s, &mut extent, name, at, from, size);
         }
     }
     // The label: a white halo under the coloured text so it reads over drawings.
@@ -330,17 +444,24 @@ fn appearance(doc: &mut PdfDocument, geom: &PageGeom, kind: Kind, pts: &[[f32; 2
 
     // Box in user space: the page-space extent, padded for the stroke and the halo, through the transform.
     let (x0, y0, x1, y1) = bounds(&extent);
-    let pad = LINE_WIDTH / 2.0 + 2.0;
+    // The ending's points are in the extent; a wide stroke's mitred tips need room beyond them.
+    let pad = lw / 2.0 + 2.0 + if look.ends.is_some() { lw } else { 0.0 };
     let corners = [[x0 - pad, y0 - pad], [x1 + pad, y0 - pad], [x1 + pad, y1 + pad], [x0 - pad, y1 + pad]].map(|c| geom.to_user(c));
     let (bx0, by0, bx1, by1) = bounds(&corners);
     let bbox = [bx0, by0, bx1, by1];
 
-    let mut font = doc.new_dict()?;
-    font.dict_put("Type", PdfObject::new_name("Font")?)?;
-    font.dict_put("Subtype", PdfObject::new_name("Type1")?)?;
-    font.dict_put("BaseFont", PdfObject::new_name("Helvetica")?)?;
-    font.dict_put("Encoding", PdfObject::new_name("WinAnsiEncoding")?)?;
-    let font = doc.add_object(&font)?;
+    let (own, own_font) = own.map_or((None, None), |(n, f)| (Some(n), f));
+    let font = match own_font {
+        Some(f) => f,
+        None => {
+            let mut font = doc.new_dict()?;
+            font.dict_put("Type", PdfObject::new_name("Font")?)?;
+            font.dict_put("Subtype", PdfObject::new_name("Type1")?)?;
+            font.dict_put("BaseFont", PdfObject::new_name("Helvetica")?)?;
+            font.dict_put("Encoding", PdfObject::new_name("WinAnsiEncoding")?)?;
+            doc.add_object(&font)?
+        }
+    };
     let mut fonts = doc.new_dict()?;
     fonts.dict_put("Helv", font)?;
     let mut gs = doc.new_dict()?;
@@ -352,14 +473,69 @@ fn appearance(doc: &mut PdfDocument, geom: &PageGeom, kind: Kind, pts: &[[f32; 2
     let mut res = doc.new_dict()?;
     res.dict_put("Font", fonts)?;
     res.dict_put("ExtGState", states)?;
-    let mut dict = doc.new_dict()?;
-    dict.dict_put("Type", PdfObject::new_name("XObject")?)?;
-    dict.dict_put("Subtype", PdfObject::new_name("Form")?)?;
-    dict.dict_put("BBox", rect_obj(doc, bbox)?)?;
-    dict.dict_put("Resources", res)?;
     let buf = Buffer::from_bytes(s.as_bytes())?;
-    let form = doc.add_stream(&buf, Some(&dict), false)?;
+    let form = match own {
+        // The stream we made before: the same object takes the new drawing, so a move leaves nothing behind.
+        Some(mut n) => {
+            n.dict_put("BBox", rect_obj(doc, bbox)?)?;
+            n.dict_put("Resources", res)?;
+            n.dict_delete("Matrix")?;
+            n.write_stream_buffer(&buf)?;
+            n
+        }
+        None => {
+            let mut dict = doc.new_dict()?;
+            dict.dict_put("Type", PdfObject::new_name("XObject")?)?;
+            dict.dict_put("Subtype", PdfObject::new_name("Form")?)?;
+            dict.dict_put("BBox", rect_obj(doc, bbox)?)?;
+            dict.dict_put("Resources", res)?;
+            dict.dict_put(OWN_AP, PdfObject::new_bool(true))?;
+            doc.add_stream(&buf, Some(&dict), false)?
+        }
+    };
     Ok(Appearance { form, bbox })
+}
+
+/// Draws the `/LE` style `name` at `at`, the end of a line whose neighbouring point is `from`, `size` long (page
+/// space). The points drawn go into `extent`; an unknown name draws nothing.
+fn line_ending(s: &mut String, extent: &mut Vec<P2>, name: &str, at: P2, from: P2, size: f64) {
+    let l = dist(at, from).max(1e-9);
+    let reversed = name.starts_with('R') && name.ends_with("Arrow");
+    let name = if reversed { &name[1..] } else { name };
+    // `u` points away from the line, `v` across it.
+    let sign = if reversed { -1.0 } else { 1.0 };
+    let u = [(at[0] - from[0]) / l * sign, (at[1] - from[1]) / l * sign];
+    let v = [-u[1], u[0]];
+    let pt = |a: f64, b: f64| [at[0] + u[0] * a + v[0] * b, at[1] + u[1] * a + v[1] * b];
+    let f = |p: P2| format!("{:.4} {:.4}", p[0], p[1]);
+    let h = size / 2.0;
+    let (shape, op): (Vec<P2>, &str) = match name {
+        "OpenArrow" => (vec![pt(-size, h * 0.8), pt(0.0, 0.0), pt(-size, -h * 0.8)], "S"),
+        "ClosedArrow" => (vec![pt(-size, h * 0.8), pt(0.0, 0.0), pt(-size, -h * 0.8)], "b"),
+        "Butt" => (vec![pt(0.0, h), pt(0.0, -h)], "S"),
+        "Slash" => (vec![pt(h * 0.87, h * 0.5), pt(-h * 0.87, -h * 0.5)], "S"),
+        "Square" => (vec![pt(-h, h), pt(h, h), pt(h, -h), pt(-h, -h)], "b"),
+        "Diamond" => (vec![pt(h, 0.0), pt(0.0, h), pt(-h, 0.0), pt(0.0, -h)], "b"),
+        "Circle" => {
+            // Four Bezier arcs, centred on the end.
+            let k = 0.5523 * h;
+            let c = [pt(h, 0.0), pt(h, k), pt(k, h), pt(0.0, h), pt(-k, h), pt(-h, k), pt(-h, 0.0), pt(-h, -k), pt(-k, -h), pt(0.0, -h), pt(k, -h), pt(h, -k)];
+            let _ = write!(s, "{} m ", f(c[0]));
+            for i in 0..4 {
+                let (a, b, e) = (c[(3 * i + 1) % 12], c[(3 * i + 2) % 12], c[(3 * i + 3) % 12]);
+                let _ = write!(s, "{} {} {} c ", f(a), f(b), f(e));
+            }
+            s.push_str("b\n");
+            extent.extend([pt(h, h), pt(-h, -h), pt(h, -h), pt(-h, h)]);
+            return;
+        }
+        _ => return,
+    };
+    for (i, p) in shape.iter().enumerate() {
+        let _ = write!(s, "{} {} ", f(*p), if i == 0 { "m" } else { "l" });
+    }
+    let _ = writeln!(s, "{op}");
+    extent.extend(shape);
 }
 
 /// The advance of `text` in Helvetica at `size`, from MuPDF's metrics for the base face.
