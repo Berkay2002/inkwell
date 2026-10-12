@@ -53,6 +53,14 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   across the gap and over that page as a preview in the body, since a page clips what it holds): "Move image to p. 3", one undo step. The group lands
   with the same grip on it as at pick-up, so it ends up where it was dropped, whatever the other page's size or
   `/Rotate` (the picture stays upright as seen). A drop partly outside the page is moved back inside it.
+- **Pictures in forms.** A picture a page draws through a form XObject (Word, InDesign and scanner output, stamps and
+  overlays) is listed like any other, up to four forms deep, with its place on the page, whatever the forms'
+  `/Matrix` and the picture's own `cm`; the rail adds "Inside form Fm0 › Fm1". Move, resize, turn, flip, crop,
+  replace, delete, copy and drag to another page work as for a page's own pictures. A form is usually shared (the same
+  form drawn again on this page, on other pages, in an annotation's appearance, in a pattern): when anything but this
+  one drawing can reach it, the form is **copied first** and only this drawing is pointed at the copy, so no other page
+  changes. A picture moved out of its form's `/BBox` is still moved; the rail says it is cut off or hidden. One undo
+  step as always ("Move image on p. 1"; the copy is part of it).
 - **Locked.** A certified document refuses every one of these (certification check as for any image change); the
   rail's controls are disabled with the reason, and a paste or a move is refused by the engine too. A document whose
   owner withholds copying refuses Copy. Copy and Paste dim to 45% with the not-allowed cursor, like the other controls. Pasting into or changing a signed document keeps the signed-file path: the
@@ -89,8 +97,11 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   clip), `fullRect` the whole image; `matrix` is the placement (unit square → user space, the CTM at the `Do`);
   `width`/`height` in pixels; `filter` outermost first; `masked` = has `/SMask` or `/Mask`. `angle` is the turn of
   the picture's bottom edge as seen, degrees clockwise in (-180, 180]; `quad` its four corners in page space (bottom
-  left, bottom right, top right, top left of the picture itself), whose box `fullRect` is. `ImageBlocks` also carries
-  `locked` (a certified document: why), `signed` and `copyLocked` (the owner's permissions withhold copying).
+  left, bottom right, top right, top left of the picture itself), whose box `fullRect` is. `inForm` lists the resource
+  names of the forms it is drawn through, outermost first (empty on the page itself); `name` and `xref` are then its
+  entry in the innermost form's resources, and `matrix` and the boxes already include the forms' matrices and
+  `/BBox`es. `ImageBlocks` also carries `locked` (a certified document: why), `signed` and `copyLocked` (the owner's
+  permissions withhold copying).
 - `change` (tagged by `op`):
 
 | `op` | Fields | Effect |
@@ -105,6 +116,8 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
 | `crop` | `rect, pixels` | show only `rect`: a clip, or with `pixels` a new image of just those pixels |
 | `add` | `file, rect, keepAspect` (default true) | new image in `rect` (no `index`), fitted and centred with `keepAspect` |
 
+- Each of `image_edit`, `image_edit_many`, `image_paste` and `image_move_to_page` returns `{ state, warning? }`;
+  `warning` is a sentence when a picture was moved so that less of it shows inside the `/BBox` of its form.
 - `image_edit_many` applies one `move`, `rotate`, `angle`, `flip` or `delete` to each of up to 100 images of one page
   as a single step: all deletes or none, no image twice; a batch that fails changes nothing. Deletes run from the
   last index back, since deleting renumbers.
@@ -134,8 +147,13 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
 
 1. **Reading.** The page's content streams are parsed joined (one stream in pieces). The interpreter tracks the CTM
    (`q/Q/cm`), clips made of straight edges (`re … re W n`, or `m l … h W n`: the box of the path, intersected with the clip in effect, in user space; a path with curves is not tracked) and text objects, and records every `Do` of
-   an image XObject and every inline image (`BI … EI`, its abbreviated keys expanded). Form XObjects are not
-   entered: images inside them are not listed.
+   an image XObject and every inline image (`BI … EI`, its abbreviated keys expanded). A `Do` of a form XObject is
+   entered where it stands, so the pictures come out in drawing order: the form's stream is parsed as a scope of its
+   own, its CTM starts from the form's `/Matrix` and the CTM at the `Do`, and its `/BBox` (in user space) joins the
+   clip. A form drawn twice is two scopes, each with its own place. Reading stops at 4 forms deep, at 64 form
+   drawings and at 16 MB of form streams per page, and a form that is already being read (it draws itself, directly
+   or through others) is not entered again. A form without `/Resources` of its own (PDF 1.1) is read with its
+   parent's, and its pictures are shown but not changeable.
 2. **Transforms** (move, resize, rotate, flip) are page-space matrices `T`, taken to user space
    (`T_user = P·T·P⁻¹` with `P` user → page) and applied after the placement. The image moves as a unit with
    the wrappers around it: each enclosing `q … Q` that holds only `cm`s and a rectangular clip (a clip crop, an
@@ -143,7 +161,28 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
    wrapper's `q` (`C` the CTM there), so a crop moves with its image; a bare operator becomes
    `q <D·T_user·D⁻¹> cm <op> Q` (`D` the CTM at the operator). The image's operator is always written back
    byte for byte from its source, so an inline image keeps its parameters and data. Inline images work the same way.
-3. **Delete** removes the operator. **Replace** loads the file with MuPDF and adds it with `pdf_add_image` (JPEG data
+   For a picture in a form the same edit is made in the form's own stream (`unit_of` and the splice work on
+   that scope's operators, the CTM before each of which is the full one, so `C · T · C⁻¹` is unchanged), and the
+   form is written back as its stream object (Flate, same object number).
+3. **Copy before write.** Before a form is written, the file is asked who else can reach it: every object
+   reachable from the trailer is walked once and the references to the forms on the way, and to the resource
+   dictionaries that name them, are counted (a page's resources inherited from `/Pages` count as shared). A form
+   is the picture's alone when exactly one slot names it, the parent's content has exactly one `Do` of that name,
+   the dictionaries on the way are named once, and the parent's resources hold no form XObject or Type3 font
+   without `/Resources` of its own (that one draws with the parent's resources, so it can draw this form by name
+   without a `Do` the parent's content shows). The first form on the way down that is not alone is copied,
+   with every form inside it: the copy has the decoded stream written again as Flate, its own `/Resources` and
+   `/XObject` dictionaries, and is added to the parent's (itself private) resources as `IwForm<n>`; the one `Do`
+   in the parent is rewritten to that name and the old name is dropped from the parent's resources if nothing
+   there draws it, and none of its forms or Type3 fonts shares the resources. The copy's name is the first
+   `IwForm<n>` that no `Do` of the page or its forms draws either, so a dangling `Do` never starts drawing it.
+   Anything the walk can't settle (a file of over two million objects) counts as shared: a copy costs a few bytes,
+   a change to another page is a wrong document. In `image_edit_many` and `image_move_to_page` each item reads
+   the page again, so the first item of a shared form copies it and the others edit the copy in place. The walk is
+   made once per edit and again only after a copy (of a form, or of resources the page inherited or shared) has
+   given forms more users; in a file too big to walk, the forms this edit made count as its own and nothing else
+   is trusted.
+4. **Delete** removes the operator. **Replace** loads the file with MuPDF and adds it with `pdf_add_image` (JPEG data
    is stored as it is, `DCTDecode`; a PNG's alpha becomes an `/SMask`), names it `IwImg<n>` and draws it with
    `q <fit> cm /IwImg<n> Do Q` in place of the old operator. **Crop** with a clip draws
    `q u0 v0 du dv re W n <op> Q` (the rectangle in the image's unit square, the space its `Do` paints in); for an
@@ -155,13 +194,13 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
    are dropped, so a mask that refers back to its image can't recurse), and draws it where those pixels were.
    Before decoding, the declared size must stay under 100 megapixels and 512 MB of samples (sizes computed with checked arithmetic,
    colour spaces with 1-32 components); plain Flate data is inflated here with that size as the limit.
-4. **Add** appends `q <placement> cm /IwImg<n> Do Q` as a new content stream. The page's content is always
+5. **Add** appends `q <placement> cm /IwImg<n> Do Q` as a new content stream. The page's content is always
    wrapped first, so whatever state it leaves (a `cm`, a clip, a colour, an unclosed `q`) can't reach the new
    image: one `q` before it, plus one for each `Q` it has without a `q` (underflow), and after it as many `Q` as
    that leaves open (two new pieces; the old streams stay as they are). Image files over 256 MB or 100
    megapixels are refused before their pixels are decoded.
-5. **No orphans.** After a delete, replace or pixel crop, a name the page's content no longer draws is removed from
-   the page's `/XObject` dict. The page's resources and `/XObject` dict are copied onto the page first (shallowly)
+6. **No orphans.** After a delete, replace or pixel crop, a name the page's (or, for a picture in a form, the form's)
+   content no longer draws is removed from that `/XObject` dict. The page's resources and `/XObject` dict are copied onto the page first (shallowly)
    when they are inherited or shared, so other pages keep theirs. The next save is a full rewrite without
    unreferenced objects, so the old image (and its soft mask) is gone unless something else still uses it.
 
@@ -198,11 +237,29 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
 - Move to another page: lands where dropped on a page with `/Rotate 90`, on a smaller page it is kept inside, as one
   undo step and through save and reopen; a group with an inline picture moves together; a colour space of the page
   (or an Indexed one over it) can't go with an inline picture; a certified document refuses paste and move, a signed one keeps its signed bytes.
+- Pictures in forms: a picture in a form used once is listed and moved in the form's own stream; the same form on a
+  second page is copied for this page and the other page's content and form stay byte-identical (one undo step);
+  nested forms with 30° `/Matrix` entries list the box that renders, within 0.5 pt; delete, replace and crop (pixels and clip)
+  in a shared form; a form that draws itself and a chain deeper than 4 end the reading; a form drawn twice on a page is two
+  pictures and one moves alone; resources inherited from `/Pages`, a `/Resources` dictionary two pages share and a
+  form that is an annotation's appearance all make a form shared, and so does a form or Type3 font without
+  `/Resources` that draws it by name from the parent's resources; a batch in one shared form makes one copy and counts the users once, a batch over
+  forms the pages share through inherited resources changes only this page; a copy never takes a name some content
+  draws; a move
+  out of the form's `/BBox` warns; a form picture goes to another page and is copied with its full place (mixed with
+  page pictures too); a form without `/Resources` is listed and not changed; certified refuses, signed saves after
+  its signed bytes; the 64 form-drawing cap holds.
 
 ## Limits
 
-- Images inside form XObjects (and annotation appearances) are not listed; an image drawn inside a text object can
-  only be deleted.
+- Images in annotation appearance streams, Type3 glyph procedures, patterns and soft-mask groups are not listed; an
+  image drawn inside a text object can only be deleted.
+- Forms: only the first 64 form drawings of a page, at most 4 forms deep and 16 MB of form streams are read; the
+  rest is not listed. A form without `/Resources` of its own is listed and not changeable. A form's `/BBox` only
+  produces a warning when a move takes a picture out of it (the picture is still moved), and a form turned by its
+  `/Matrix` is approximated by the user-space box of its `/BBox`.
+- If the file has more than two million objects the sharing check gives up and the form is always copied.
+- OCR clean-up still looks at the page's own content only.
 - Only straight-edged clips are tracked for `rect`, by their box; curved clip paths are ignored (the box may show more
   than is visible).
 - A pixel crop of a turned or sheared image keeps the pixels of the crop's box in the image's own grid (a pixel crop is
@@ -213,6 +270,8 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
 - Replace fits the new image into the old box rather than keeping its pixel size.
 - A turned picture is only scaled evenly; a clip crop of one is the parallelogram of the requested rectangle.
 - A name is kept in the page's resources if a form XObject without its own `/Resources` could draw it (PDF 1.1).
+- Copy before write drops the old form's name from the parent's resources only when nothing there draws it; the
+  old form object stays for its other users. A form copy is stored Flate compressed, whatever the original filter was.
 - Delete and Replace leave the page's tagged structure as it was: a `/Figure` structure element (and its `/Alt`
   text) that pointed at the old image now points at nothing, or describes the wrong picture. Fix it in the
   accessibility checker after replacing or deleting tagged images.
@@ -227,7 +286,7 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   handles, and a crop, a replace or the angle field work on one picture. A group turn rotates each picture about its
   own centre, not the group's.
 - Copy and paste: inline pictures can't be copied (only moved), and a picture drawn inside a text object can only be
-  deleted. Pictures inside form XObjects are not listed, so are not copied. Another window of the app has
+  deleted. A picture in a form is copied with its full place onto a page's own content. Another window of the app has
   its own picks but shares the clipboard. A picture is not copied if the owner's permissions withhold copying
   (`/P` bit 5), as with extracting pages.
 - Drag to another page: the target must be in view (its layer is mounted); only a drop within the same document, a

@@ -144,6 +144,8 @@ export interface ImageBlock extends PageImageBlock {
   xref?: number | null;
   editable: boolean;
   reason?: string | null;
+  /** The form XObjects it is drawn through, outermost first (resource names); empty or absent when the page draws it itself. */
+  inForm?: string[];
 }
 
 export interface ImageBlocks {
@@ -169,13 +171,19 @@ export type ImageChange =
   | { op: "crop"; rect: [number, number, number, number]; pixels: boolean }
   | { op: "add"; file: string; rect: [number, number, number, number]; keepAspect?: boolean };
 
+/** What an image change returns: the new state, and a sentence when it moved a picture out of its form's frame. */
+export interface ImageEdited {
+  state: EditState;
+  warning?: string | null;
+}
+
 export const imageBlocks = (doc: number, page: number) => invoke<ImageBlocks>("image_blocks", { doc, page });
 /** `index` is null for `add`. A `rev` older than the document's is refused as "stale". */
 export const imageEdit = (doc: number, rev: number, page: number, index: number | null, change: ImageChange) =>
-  invoke<{ state: EditState }>("image_edit", { doc, rev, page, index, change });
+  invoke<ImageEdited>("image_edit", { doc, rev, page, index, change });
 /** One change to each of several images of a page (move, turn, flip or delete), one undo step. */
 export const imageEditMany = (doc: number, rev: number, page: number, items: { index: number; change: ImageChange }[]) =>
-  invoke<{ state: EditState }>("image_edit_many", { doc, rev, page, items });
+  invoke<ImageEdited>("image_edit_many", { doc, rev, page, items });
 /** What the picture clipboard holds: how many, and the boxes they covered on their page (page space). */
 export interface ImageClipInfo {
   count: number;
@@ -188,10 +196,10 @@ export const imageCopy = (doc: number, rev: number, page: number, indices: numbe
 export const imageClipInfo = () => invoke<ImageClipInfo | null>("image_clip_info");
 /** Pastes the clipboard on `page`, its top left corner at `at` (page space); one undo step. */
 export const imagePaste = (doc: number, rev: number, page: number, at: [number, number]) =>
-  invoke<{ state: EditState }>("image_paste", { doc, rev, page, at });
+  invoke<ImageEdited>("image_paste", { doc, rev, page, at });
 /** Moves images of `page` to `toPage` of the same document, the group's top left corner at `at` there. */
 export const imageMoveToPage = (doc: number, rev: number, page: number, indices: number[], toPage: number, at: [number, number]) =>
-  invoke<{ state: EditState }>("image_move_to_page", { doc, rev, page, indices, toPage, at });
+  invoke<ImageEdited>("image_move_to_page", { doc, rev, page, indices, toPage, at });
 export const cancelSearch = (doc: number) => invoke<void>("cancel_search", { doc });
 export const engineStats = () => invoke<EngineStats>("engine_stats");
 export const initialFiles = () => invoke<FileRef[]>("initial_files");

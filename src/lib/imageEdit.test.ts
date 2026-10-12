@@ -228,6 +228,24 @@ describe("store", () => {
     expect(st().selected).toEqual({ page: 0, index: 0 });
   });
 
+  it("shows the engine's warning when a picture is moved out of its form's frame", async () => {
+    vi.mocked(api.imageBlocks).mockResolvedValueOnce(list([image({ index: 0, inForm: ["Fm0"] })]));
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.select(1, { page: 0, index: 0 });
+    const warning = "Part of the picture now lies outside the frame (/BBox) of the form it is drawn in and is cut off.";
+    vi.mocked(editImage).mockResolvedValue({ kind: "ok", value: { state: {} as never, warning } });
+    vi.mocked(api.imageBlocks).mockResolvedValue(list([image({ index: 0, fullRect: [110, 90, 310, 190], rect: [110, 90, 310, 190] })], 2));
+    expect(await ie.move(1, [10, -10])).toBe(true);
+    expect(st().notice).toBe(warning);
+    // The next change that raises none clears it.
+    vi.mocked(editImage).mockResolvedValue(ok());
+    vi.mocked(api.imageBlocks).mockResolvedValue(list([image({ index: 0, fullRect: [100, 100, 300, 200], rect: [100, 100, 300, 200] })], 3));
+    bump(2);
+    expect(await ie.move(1, [-10, 10])).toBe(true);
+    expect(st().notice).toBeNull();
+  });
+
   it("deselects after a delete", async () => {
     vi.mocked(api.imageBlocks).mockResolvedValueOnce(list([image()]));
     const ie = useImageEdit.getState();
