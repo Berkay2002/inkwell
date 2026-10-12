@@ -175,7 +175,7 @@ function Row({ id }: { id: string }) {
           </button>
         </>
       ) : (
-        <button className="an-trash" title="Delete stamp" aria-label={`Delete ${s.name}`} onClick={() => setConfirm(true)}>
+        <button className="ax-icon" title="Delete stamp" aria-label={`Delete ${s.name}`} onClick={() => setConfirm(true)}>
           <Icon name="trash" size={15} />
         </button>
       )}
