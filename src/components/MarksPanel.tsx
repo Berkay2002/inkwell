@@ -7,6 +7,7 @@ import {
   CERTIFIED_MARKS,
   DATE_FORMATS,
   expand,
+  footerLine,
   FOREIGN_NAME,
   fromHex,
   KIND_NAME,
@@ -130,9 +131,8 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
       </div>
       <div className="tl-foot">
         <p className="pr-outcome" aria-live="polite">
-          {sentence}
+          {footerLine(why, sentence)}
         </p>
-        {why && <p className="dim small">{why}</p>}
         {sheet.error && (
           <p className="tl-warn small" role="alert">
             {sheet.error}

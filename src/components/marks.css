@@ -198,6 +198,21 @@
 }
 
 /* the preview over the page: in page points, so the page's own zoom and rotation carry it */
+.mk-space {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+/* A background goes behind the page's ink: multiply keeps dark text; on inverted (dark) pages the ink is the light
+   part, so lighten does the same job. */
+.mk-space.blend {
+  mix-blend-mode: multiply;
+}
+:root[data-pages="dark"] .mk-space.blend {
+  mix-blend-mode: lighten;
+}
 .mk-preview {
   position: absolute;
   left: 0;

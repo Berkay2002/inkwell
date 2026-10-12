@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../../store";
 import type { Size } from "../../lib/layout";
-import { pageThumb } from "../../lib/plateThumbs";
+import { PREVIEW_EDGE, pageThumb } from "../../lib/plateThumbs";
 import { newBox, usePrepress, type BoxesSheet, type ConvertSheet, type MarksSheet } from "../../lib/prepressStore";
 import type { BoxKind, Rect4 } from "../../lib/prepressApi";
 import {
@@ -219,7 +219,7 @@ function PagePreview({ doc, page, size, rev, extent, children, caption }: { doc:
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    void pageThumb(doc, page, size, rev).then((u) => live && setUrl(u));
+    void pageThumb(doc, page, size, rev, PREVIEW_EDGE).then((u) => live && setUrl(u));
     return () => {
       live = false;
     };
@@ -250,11 +250,11 @@ function PagePreview({ doc, page, size, rev, extent, children, caption }: { doc:
 
 function ConvertView({ sheet }: { sheet: ConvertSheet }) {
   const d = useStore((s) => s.docs[sheet.doc]);
+  const locked = useLocked(sheet.doc)?.certified === true;
   if (!d) return null;
   const o = sheet.opts;
   const set = act().setConvert;
   const running = sheet.phase === "running";
-  const locked = useLocked(sheet.doc)?.certified === true;
   const problem = convertProblem(o, d.pageCount, d.currentPage);
   return (
     <section className="pr-sheet pp-sheet" role="dialog" aria-modal="true" tabIndex={-1} aria-label="Convert Colors" onMouseDown={(e) => e.stopPropagation()}>

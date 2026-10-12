@@ -134,7 +134,7 @@ function Landing({ over, onSeeAll }: { over: boolean; onSeeAll: () => void }) {
       <ul className="tools" aria-label="Quick tools">
         {quickTools.map((t) => (
           <li key={t.id}>
-            <button className="tool" onClick={() => void launchTool(t.id)}>
+            <button className="quick-tool" onClick={() => void launchTool(t.id)}>
               <ToolTile icon={t.icon} group={t.group} size={28} />
               {t.label}
             </button>

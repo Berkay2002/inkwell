@@ -115,12 +115,12 @@ export const PageView = memo(function PageView(p: Props) {
       {naturalBoxes.map((r, i) => (
         <NaturalImage key={`n${i}`} rect={r} />
       ))}
+      <MarkPreview docId={docId} page={page} size={rawSize} rot={rot} zoom={zoom} />
       <div
         ref={space}
         className="pagespace"
         style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom) }}
       >
-        <MarkPreview docId={docId} page={page} size={rawSize} />
         <TacRegions docId={docId} page={page} />
         {p.hits.map((r, i) => (
           <div key={i} className={p.currentHit.includes(r) ? "hit current" : "hit"} style={rectStyle(r)} />

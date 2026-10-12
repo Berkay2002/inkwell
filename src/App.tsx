@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import { AssistantPanel } from "./components/assistant/AssistantPanel";
 import { SearchBar, TabBar, Toolbar } from "./components/Chrome";
 import { CompareView } from "./components/history/Compare";
@@ -48,7 +48,18 @@ import { guardWindowClose } from "./lib/edit";
 import { usePagesDark } from "./lib/usePagesDark";
 import { useToolPrefs } from "./lib/toolPrefs";
 import { Organize } from "./components/Organize";
+import { ErrorBoundary, type Variant } from "./components/ErrorBoundary";
 import { useActiveDoc, useStore } from "./store";
+
+/** A panel, strip or sheet that crashes shows its own error card; the rest of the window keeps working. */
+const Guard = ({ name, variant = "dock", children }: { name: string; variant?: Variant; children: ReactNode }) => {
+  const active = useStore((s) => s.active);
+  return (
+    <ErrorBoundary name={name} variant={variant} resetKey={active}>
+      {children}
+    </ErrorBoundary>
+  );
+};
 
 let launchFilesOpened = false;
 
@@ -110,11 +121,14 @@ export default function App() {
 
   useEffect(() => {
     const st = useStore.getState();
-    // Command-line files are opened once per app run (StrictMode runs this effect twice in dev).
-    if (!launchFilesOpened) {
+    // Command-line files are opened once per app run (StrictMode runs this effect twice in dev). Asking for them
+    // also tells Rust the window is listening: later launches' files are emitted from then on, so the listener
+    // below has to be registered first or files forwarded in between would reach nobody.
+    const openLaunchFiles = () => {
+      if (launchFilesOpened) return;
       launchFilesOpened = true;
       initialFiles().then((files) => files.forEach((f) => void st.openPath(f.path, f.token)), () => {});
-    }
+    };
 
     // The listener registers asynchronously: if this effect is torn down first, unlisten on arrival.
     let off: (() => void) | undefined;
@@ -126,8 +140,16 @@ export default function App() {
         if (useCombine.getState().sheet) useCombine.getState().add(e.payload);
         else e.payload.forEach((f) => void st.openPath(f.path, f.token));
       })
-      .then((u) => (cancelled ? u() : (off = u)))
-      .catch(() => {});
+      .then(
+        (u) => {
+          if (cancelled) return u();
+          off = u;
+          openLaunchFiles();
+        },
+        () => {
+          if (!cancelled) openLaunchFiles(); // no listener: still open the launch files
+        },
+      );
 
     const onKey = (e: KeyboardEvent) => {
       const c = commandFor(e);
@@ -155,86 +177,168 @@ export default function App() {
 
   return (
     <div className="app">
-      <TabBar />
+      <Guard name="The tab bar" variant="overlay">
+        <TabBar />
+      </Guard>
       {doc?.organize ? (
         <>
-          <Toolbar doc={doc} />
-          <Organize key={doc.id} doc={doc} />
+          <Guard name="The toolbar" variant="overlay">
+            <Toolbar doc={doc} />
+          </Guard>
+          <Guard name="Organize pages" variant="fill">
+            <Organize key={doc.id} doc={doc} />
+          </Guard>
         </>
       ) : doc ? (
         <>
-          <Toolbar doc={doc} />
-          <SearchDriver key={doc.id} doc={doc} />
+          <Guard name="The toolbar" variant="overlay">
+            <Toolbar doc={doc} />
+          </Guard>
+          <Guard name="Search" variant="overlay">
+            <SearchDriver key={doc.id} doc={doc} />
+          </Guard>
           {showCompare ? (
             <div className="main">
-              <CompareView />
+              <Guard name="Compare" variant="fill">
+                <CompareView />
+              </Guard>
             </div>
           ) : (
             <div className="main">
-              <Sidebar doc={doc} />
+              <Guard name="The sidebar">
+                <Sidebar doc={doc} />
+              </Guard>
               <div className="stage">
-                {viewing ? (
-                  <VersionView key={`${doc.id}:${viewing}`} doc={doc} versionId={viewing} />
-                ) : portfolio?.info && !portfolio.cover ? (
-                  <PortfolioView key={doc.id} doc={doc} info={portfolio.info} />
-                ) : (
-                  <Viewer key={doc.id} doc={doc} />
+                <Guard name="The page view" variant="fill">
+                  {viewing ? (
+                    <VersionView key={`${doc.id}:${viewing}`} doc={doc} versionId={viewing} />
+                  ) : portfolio?.info && !portfolio.cover ? (
+                    <PortfolioView key={doc.id} doc={doc} info={portfolio.info} />
+                  ) : (
+                    <Viewer key={doc.id} doc={doc} />
+                  )}
+                </Guard>
+                {!viewing && portfolio?.info && portfolio.cover && (
+                  <Guard name="The portfolio note" variant="overlay">
+                    <PortfolioCoverNote doc={doc} />
+                  </Guard>
                 )}
-                {!viewing && portfolio?.info && portfolio.cover && <PortfolioCoverNote doc={doc} />}
-                {searchOpen && !viewing && <SearchBar key={doc.id} doc={doc} />}
-                <HistoryBanner doc={doc} />
-                <SecurityNotice doc={doc} />
-                <CommentTools doc={doc} />
-                <SignStrip doc={doc} />
-                {!viewing && <SignBanner doc={doc} />}
-                <MeasureBar doc={doc} />
-                <FormTools />
-                <ThreadHost doc={doc} />
-                <FormsBanner doc={doc} />
+                {searchOpen && !viewing && (
+                  <Guard name="The find bar" variant="overlay">
+                    <SearchBar key={doc.id} doc={doc} />
+                  </Guard>
+                )}
+                <Guard name="The history banner" variant="overlay">
+                  <HistoryBanner doc={doc} />
+                </Guard>
+                <Guard name="The security notice" variant="overlay">
+                  <SecurityNotice doc={doc} />
+                </Guard>
+                <Guard name="The comment tools" variant="overlay">
+                  <CommentTools doc={doc} />
+                </Guard>
+                <Guard name="The signature strip" variant="overlay">
+                  <SignStrip doc={doc} />
+                </Guard>
+                {!viewing && (
+                  <Guard name="The signing banner" variant="overlay">
+                    <SignBanner doc={doc} />
+                  </Guard>
+                )}
+                <Guard name="The measure bar" variant="overlay">
+                  <MeasureBar doc={doc} />
+                </Guard>
+                <Guard name="The form tools" variant="overlay">
+                  <FormTools />
+                </Guard>
+                <Guard name="Articles" variant="overlay">
+                  <ThreadHost doc={doc} />
+                </Guard>
+                <Guard name="The forms banner" variant="overlay">
+                  <FormsBanner doc={doc} />
+                </Guard>
               </div>
-              <ToolsPanel doc={doc} />
-              <ConvertPanel doc={doc} />
-              <ProtectPanel doc={doc} />
-              <MarksPanel doc={doc} />
-              <AssistantPanel doc={doc} />
-              <HistoryPanel doc={doc} />
-              <RedactPanel doc={doc} />
-              <A11yPanel doc={doc} />
-              <PreflightPanel doc={doc} />
-              <PrepressPanel doc={doc} />
-              <CommentsPanel doc={doc} />
-              <SignRail doc={doc} />
-              <MeasurePanel doc={doc} />
-              <EditPanel doc={doc} />
-              <FormsPanel doc={doc} />
-              <SearchPanel doc={doc} />
+              <Guard name="All tools"><ToolsPanel doc={doc} /></Guard>
+              <Guard name="Convert"><ConvertPanel doc={doc} /></Guard>
+              <Guard name="Protect"><ProtectPanel doc={doc} /></Guard>
+              <Guard name="Page marks"><MarksPanel doc={doc} /></Guard>
+              <Guard name="Assistant"><AssistantPanel doc={doc} /></Guard>
+              <Guard name="Version history"><HistoryPanel doc={doc} /></Guard>
+              <Guard name="Redact"><RedactPanel doc={doc} /></Guard>
+              <Guard name="Accessibility"><A11yPanel doc={doc} /></Guard>
+              <Guard name="Preflight"><PreflightPanel doc={doc} /></Guard>
+              <Guard name="Output preview"><PrepressPanel doc={doc} /></Guard>
+              <Guard name="Comments"><CommentsPanel doc={doc} /></Guard>
+              <Guard name="Fill & Sign"><SignRail doc={doc} /></Guard>
+              <Guard name="Measure"><MeasurePanel doc={doc} /></Guard>
+              <Guard name="Edit"><EditPanel doc={doc} /></Guard>
+              <Guard name="Forms"><FormsPanel doc={doc} /></Guard>
+              <Guard name="Search"><SearchPanel doc={doc} /></Guard>
             </div>
           )}
         </>
       ) : showCompare ? (
         <div className="main" style={{ gridRow: "2 / 4" }}>
-          <CompareView />
+          <Guard name="Compare" variant="fill">
+            <CompareView />
+          </Guard>
         </div>
       ) : (
         <div className="home-wrap">
-          <Home />
-          <ConvertPanel doc={null} />
+          <Guard name="Home" variant="fill">
+            <Home />
+          </Guard>
+          <Guard name="Convert">
+            <ConvertPanel doc={null} />
+          </Guard>
         </div>
       )}
-      <PrintSheet />
-      <PrepressSheets />
-      <CombineSheet />
-      <ActionWizard />
-      <DocJsSheet />
-      <StampsManager />
-      <LabelsSheet />
-      <TransitionsSheet />
-      <Presentation />
-      {paletteOpen && <CommandPalette />}
-      {hasPassword && <PasswordDialog />}
-      <SignCreator />
-      <ScriptPrompts />
-      <Toast />
+      <Guard name="Print" variant="overlay">
+        <PrintSheet />
+      </Guard>
+      <Guard name="Output preview" variant="overlay">
+        <PrepressSheets />
+      </Guard>
+      <Guard name="Combine files" variant="overlay">
+        <CombineSheet />
+      </Guard>
+      <Guard name="Action Wizard" variant="overlay">
+        <ActionWizard />
+      </Guard>
+      <Guard name="Document JavaScript" variant="overlay">
+        <DocJsSheet />
+      </Guard>
+      <Guard name="Stamps" variant="overlay">
+        <StampsManager />
+      </Guard>
+      <Guard name="Page labels" variant="overlay">
+        <LabelsSheet />
+      </Guard>
+      <Guard name="Page transitions" variant="overlay">
+        <TransitionsSheet />
+      </Guard>
+      <Guard name="Presentation" variant="overlay">
+        <Presentation />
+      </Guard>
+      {paletteOpen && (
+        <Guard name="The command palette" variant="overlay">
+          <CommandPalette />
+        </Guard>
+      )}
+      {hasPassword && (
+        <Guard name="The password dialog" variant="overlay">
+          <PasswordDialog />
+        </Guard>
+      )}
+      <Guard name="Signatures" variant="overlay">
+        <SignCreator />
+      </Guard>
+      <Guard name="Form scripts" variant="overlay">
+        <ScriptPrompts />
+      </Guard>
+      <Guard name="Notifications" variant="overlay">
+        <Toast />
+      </Guard>
     </div>
   );
 }
