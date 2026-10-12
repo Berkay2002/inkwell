@@ -100,12 +100,14 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   last index back, since deleting renumbers.
 - `image_copy` reads, it does not change the document (`rev` must be current). It checks the owner's permission,
   refuses inline pictures and pictures drawn inside text, applies the megapixel and sample-byte bounds of crops to the
-  declared size (and the mask's pixels), takes at most 100 pictures, and puts the image objects into a small PDF of
-  their own: each object is grafted with its `/SMask`, `/Mask`, `/Decode`, `/DecodeParms` and colour space, without
-  `/OC`, `/StructParent`, `/Alternates` and `/OPI`, then written with unreferenced objects dropped. The clipboard is
-  that file's bytes plus where each picture sat; no document is held open.
-- `image_paste` grafts each picture from the clipboard's file into the target document (one graft map per paste, so a
-  shared colour space is one object), names it in the page's own `/XObject` dict and draws it after the content in a
+  declared size (the soft mask's and stencil mask's samples count too), takes at most 100 pictures, and puts the
+  image objects into a small PDF of their own. Each image is rebuilt there, not grafted: a dictionary keeps only
+  the keys an image, its masks, colour space (ICC profile, Indexed lookup, tint functions) and filter parameters
+  use, so a stray key that points elsewhere in the source file (`/Parent`, a catalog reference) is not followed and
+  nothing else of the document leaks into the clip; streams are copied as raw bytes with their own filters. The
+  result has no `/OC`, `/StructParent`, `/Alternates` or `/OPI`. The clipboard is that file's bytes plus where
+  each picture sat; no document is held open.
+- `image_paste` grafts each picture from the clipboard's file into the target document (one graft map per paste), names it in the page's own `/XObject` dict and draws it after the content in a
   clean graphics state (the same `q … Q` balancing as Add), with the picture's rectangular clip. The objects are the
   document's own: no object is shared with the source document or with another paste.
 - `image_move_to_page` moves in the same document. An XObject picture keeps its object (the target page names it, the
@@ -179,10 +181,12 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   and NaN refused; an uneven resize of a turned picture refused; an inline picture turns too.
 - Copy and paste: a copy with an `/SMask` pasted in the same document (its own object, own mask, original untouched,
   saved and reopened) and into another document that is then closed (the picture and its mask stay); a declared size
-  past the bounds, an inline picture, a stale list and a document that withholds copying are refused.
+  past the bounds (a mask's samples included), an inline picture, a stale list and a document that withholds copying
+  are refused; a copy keeps the colour space (ICC, Indexed lookup), `/Decode` and `/Mask` and drops a stray key that
+  points into the source file.
 - Move to another page: lands where dropped on a page with `/Rotate 90`, on a smaller page it is kept inside, as one
   undo step and through save and reopen; a group with an inline picture moves together; a colour space of the page
-  can't go with an inline picture; a certified document refuses paste and move, a signed one keeps its signed bytes.
+  (or an Indexed one over it) can't go with an inline picture; a certified document refuses paste and move, a signed one keeps its signed bytes.
 
 ## Limits
 

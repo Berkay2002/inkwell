@@ -1022,17 +1022,100 @@ fn unique(indices: &[u32]) -> Result<Vec<u32>> {
     Ok(v)
 }
 
-/// The bytes of decoded samples `img` (declared) takes, or why it is too large to copy.
+/// The bytes of decoded samples `img` (declared) takes, with those of its soft mask and stencil mask, or why
+/// it is too large to copy.
 fn declared_bytes(img: &PdfObject, f: &Found) -> Result<u64> {
     let (n, bpc) = (components(img).unwrap_or(4), f.bpc.clamp(1, 16));
     let (bytes, _) = sample_size(f.width, f.height, n, bpc)
         .ok_or_else(|| invalid("the image is too large to copy (more than 100 megapixels or 512 MB of samples)"))?;
-    if let Some(m) = get(img, "SMask")
-        && u64::from(int_of(get(&m, "Width"))) * u64::from(int_of(get(&m, "Height"))) > MAX_PIXELS
-    {
-        return Err(invalid("the image's mask is too large to copy"));
+    let mut total = bytes as u64;
+    for key in ["SMask", "Mask"] {
+        let Some(m) = get(img, key).filter(|m| m.is_stream().unwrap_or(false)) else { continue };
+        let bpc = if key == "Mask" { 1 } else { int_of(get(&m, "BitsPerComponent")).clamp(1, 16) };
+        let (b, _) = sample_size(int_of(get(&m, "Width")), int_of(get(&m, "Height")), 1, bpc)
+            .ok_or_else(|| invalid("the image's mask is too large to copy"))?;
+        total += b as u64;
     }
-    Ok(bytes as u64)
+    Ok(total)
+}
+
+/// Keys of an image, its masks, its colour space (ICC profile, Indexed lookup, tint functions) and the filter
+/// parameters that a copy keeps. Anything else, in any of those dictionaries, is left behind: an arbitrary key
+/// could point at the page, the catalog or any other part of the document.
+const COPY_KEYS: &[&str] = &[
+    "Type", "Subtype", "Width", "Height", "ColorSpace", "BitsPerComponent", "Filter", "DecodeParms", "Decode", "SMask", "Mask",
+    "ImageMask", "Interpolate", "Intent", "SMaskInData", "Matte", "Name", "Predictor", "Colors", "Columns", "Rows", "EarlyChange",
+    "K", "EndOfLine", "EncodedByteAlign", "EndOfBlock", "BlackIs1", "DamagedRowsBeforeError", "JBIG2Globals", "ColorTransform", "N",
+    "Alternate", "Range", "WhitePoint", "BlackPoint", "Gamma", "Matrix", "FunctionType", "Domain", "C0", "C1", "Size", "Order",
+    "Encode", "Bounds", "Functions", "BitsPerSample", "Colorants", "Process", "Components", "MixingHints",
+];
+
+/// How deep and how wide a copied image's description may go (an image's own graph is a few objects).
+const COPY_DEPTH: u32 = 8;
+const COPY_NODES: u32 = 512;
+
+/// Copies one image XObject, with the objects it needs, into `out` as new objects: dictionaries are rebuilt
+/// from [`COPY_KEYS`] only and streams are copied as raw bytes with their own filters.
+struct Copier<'a> {
+    out: &'a mut PdfDocument,
+    nodes: u32,
+    bytes: u64,
+}
+
+impl Copier<'_> {
+    fn value(&mut self, v: &PdfObject, depth: u32, in_mask: bool) -> Result<PdfObject> {
+        self.nodes += 1;
+        if depth > COPY_DEPTH || self.nodes > COPY_NODES {
+            return Err(invalid("the image's description is too deeply nested to copy"));
+        }
+        if v.is_stream()? {
+            return self.stream(v, depth, in_mask);
+        }
+        if v.is_dict()? {
+            let mut d = self.out.new_dict()?;
+            self.keys(v, &mut d, depth, in_mask)?;
+            return Ok(d);
+        }
+        if v.is_array()? {
+            let mut a = self.out.new_array()?;
+            for i in 0..v.len()? as i32 {
+                let e = match v.get_array(i)? {
+                    Some(e) => self.value(&e, depth + 1, in_mask)?,
+                    None => PdfObject::new_null(),
+                };
+                a.array_push(e)?;
+            }
+            return Ok(a);
+        }
+        // A number, name, string or boolean: nothing to follow.
+        Ok(self.out.graft_object(v)?)
+    }
+
+    fn keys(&mut self, src: &PdfObject, dst: &mut PdfObject, depth: u32, in_mask: bool) -> Result<()> {
+        for i in 0..src.dict_len()? as i32 {
+            let (Some(k), Some(v)) = (src.get_dict_key(i)?, src.get_dict_val(i)?) else { continue };
+            let name = String::from_utf8_lossy(&k.as_name()?).into_owned();
+            let mask = matches!(name.as_str(), "SMask" | "Mask");
+            // A mask is a plain image with no mask of its own (which also ends one that refers back to its image).
+            if !COPY_KEYS.contains(&name.as_str()) || v.is_null()? || (in_mask && mask) {
+                continue;
+            }
+            let c = self.value(&v, depth + 1, in_mask || mask)?;
+            dst.dict_put(name.as_str(), c)?;
+        }
+        Ok(())
+    }
+
+    fn stream(&mut self, src: &PdfObject, depth: u32, in_mask: bool) -> Result<PdfObject> {
+        let raw = src.read_raw_stream()?;
+        self.bytes += raw.len() as u64;
+        if self.bytes > MAX_SAMPLE_BYTES {
+            return Err(invalid("these images are too large to copy together"));
+        }
+        let mut d = self.out.new_dict()?;
+        self.keys(src, &mut d, depth, in_mask)?;
+        Ok(self.out.add_stream(&Buffer::from_bytes(&raw)?, Some(&d), true)?)
+    }
 }
 
 /// Copies the images `indices` of `page` (listed at `rev`) as a [`Clip`]. Pictures drawn inline
@@ -1049,8 +1132,7 @@ pub fn copy(eng: &Engine, doc: DocId, rev: u32, page: u32, indices: &[u32]) -> R
         }
         let pi = read_images(d, page)?;
         let to_page = page_space(d, page)?;
-        let out = PdfDocument::new();
-        let mut map = out.new_graft_map()?;
+        let mut out = PdfDocument::new();
         let mut xo = out.new_dict()?;
         let (mut images, mut rects, mut total) = (Vec::new(), Vec::new(), 0u64);
         for (n, i) in indices.iter().enumerate() {
@@ -1065,19 +1147,15 @@ pub fn copy(eng: &Engine, doc: DocId, rev: u32, page: u32, indices: &[u32]) -> R
             if total > MAX_SAMPLE_BYTES {
                 return Err(invalid("these images are too large to copy together"));
             }
-            let mut g = map.graft_object(obj)?;
-            // Belongs to the page it was on: layers, the structure tree, alternates (other files'
-            // versions of the picture), OPI proxies.
-            for k in ["OC", "StructParent", "Alternates", "OPI"] {
-                g.dict_delete(k)?;
-            }
+            // Only what an image is made of comes along: the page's layers, structure entry, alternates
+            // and OPI proxies stay behind, and so does any other key that points elsewhere in the file.
+            let g = Copier { out: &mut out, nodes: 0, bytes: 0 }.stream(obj, 0, false)?;
             xo.dict_put(format!("I{n}").as_str(), g)?;
             let full = f.ctm.bbox(UNIT);
             rects.push(to_page.bbox(f.clip.map_or(full, |c| intersect(full, c))));
             images.push(ClipImage { place: f.ctm.then(&to_page), clip: f.clip.map(|c| to_page.bbox(c)) });
         }
-        // The grafted objects hang off a page's resources, so the file is an ordinary PDF.
-        let mut out = out;
+        // The copies hang off a page's resources, so the file is an ordinary PDF.
         let pg = out.new_page_at(0, mupdf::Size { width: 612.0, height: 792.0 })?;
         let mut res = out.new_dict()?;
         res.dict_put("XObject", xo)?;

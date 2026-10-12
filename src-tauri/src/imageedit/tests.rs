@@ -1020,3 +1020,95 @@ fn a_mirrored_picture_reports_its_angle_from_the_left_right_mirror() {
 fn normalised(a: f32) -> f32 {
     (a + 180.0).rem_euclid(360.0) - 180.0
 }
+
+/// The fixture with image object 3 given the entries of `<< … >>` source `dict` (values may name the `extra`
+/// objects, numbered from 7 for a one-page file), opened.
+fn with_image_entries(test: &str, dict: &str, extra: &[String]) -> (Arc<Engine>, DocId) {
+    let mut bytes = pdf_with(1, false, "", extra);
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let mut img = doc.new_indirect(3, 0).unwrap().resolve().unwrap().unwrap();
+    let entries = doc.new_object_from_str(&format!("<< {dict} >>")).unwrap();
+    for i in 0..entries.dict_len().unwrap() as i32 {
+        let k = entries.get_dict_key(i).unwrap().unwrap().as_name().unwrap();
+        img.dict_put(String::from_utf8_lossy(&k).as_ref(), entries.get_dict_val(i).unwrap().unwrap()).unwrap();
+    }
+    bytes.clear();
+    doc.write_to(&mut bytes).unwrap();
+    let (eng, id, _) = open(&dir(test), &bytes);
+    (eng, id)
+}
+
+fn stream_obj(dict: &str, data: &[u8]) -> String {
+    format!("<< {dict} /Length {} >>\nstream\n{}\nendstream", data.len(), String::from_utf8_lossy(data))
+}
+
+/// The first picture of a clip, read back from the clip's own file, with that file's object count. Keep the
+/// document: its objects are not valid once it is dropped.
+fn clipped(clip: &Clip) -> (mupdf::pdf::PdfDocument, mupdf::pdf::PdfObject, u32) {
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&clip.bytes).unwrap();
+    let img = get(&get(&doc.find_page(0).unwrap(), "Resources").unwrap(), "XObject").and_then(|x| get(&x, "I0")).unwrap();
+    let n = doc.count_objects().unwrap();
+    (doc, img, n)
+}
+
+#[test]
+fn a_copy_carries_the_colour_space_decode_and_mask_and_leaves_stray_keys_behind() {
+    // /Probe points at the catalog (so at every page and its text); the ICC profile's dictionary has one too.
+    let icc = stream_obj("/N 3 /Alternate /DeviceRGB /Probe 1 0 R", b"profile");
+    let (eng, id) = with_image_entries(
+        "copy-keys",
+        "/ColorSpace [/ICCBased 7 0 R] /Decode [1 0 1 0 1 0] /Mask [0 1 0 1 0 1] /Probe 1 0 R /Parent 2 0 R",
+        &[icc],
+    );
+    let clip = copy(&eng, id, rev(&eng, id), 0, &[0]).unwrap();
+    let (_doc, img, objects) = clipped(&clip);
+    let cs = get(&img, "ColorSpace").unwrap();
+    assert_eq!(cs.get_array(0).unwrap().unwrap().as_name().unwrap(), b"ICCBased");
+    let profile = cs.get_array(1).unwrap().unwrap();
+    assert!(profile.is_stream().unwrap());
+    assert_eq!(profile.read_raw_stream().unwrap(), b"profile");
+    assert_eq!(get(&profile, "N").unwrap().as_int().unwrap(), 3);
+    assert_eq!(get(&profile, "Alternate").unwrap().as_name().unwrap(), b"DeviceRGB");
+    assert!(get(&profile, "Probe").is_none());
+    let nums = |k: &str| -> Vec<i32> {
+        let a = get(&img, k).unwrap();
+        (0..a.len().unwrap() as i32).map(|i| a.get_array(i).unwrap().unwrap().as_int().unwrap()).collect()
+    };
+    assert_eq!(nums("Decode"), [1, 0, 1, 0, 1, 0]);
+    assert_eq!(nums("Mask"), [0, 1, 0, 1, 0, 1]);
+    assert!(get(&img, "Probe").is_none() && get(&img, "Parent").is_none());
+    // The picture, its profile and the clip's own page: nothing of the source document came along.
+    assert!(objects <= 8, "{objects} objects");
+    assert!(!clip.bytes.windows(7).any(|w| w == b"(Page 1"), "the source page's text is in the clip");
+    // And the picture's pixels are the same ones.
+    assert_eq!(img.read_raw_stream().unwrap(), PIXELS);
+}
+
+#[test]
+fn a_copy_carries_an_indexed_lookup_stream() {
+    let lookup = stream_obj("", b"\x01\x02\x03ABC");
+    let (eng, id) = with_image_entries("copy-indexed", "/ColorSpace [/Indexed /DeviceRGB 1 7 0 R] /BitsPerComponent 8", &[lookup]);
+    let clip = copy(&eng, id, rev(&eng, id), 0, &[0]).unwrap();
+    let (_doc, img, _) = clipped(&clip);
+    let cs = get(&img, "ColorSpace").unwrap();
+    assert_eq!(cs.get_array(0).unwrap().unwrap().as_name().unwrap(), b"Indexed");
+    assert_eq!(cs.get_array(1).unwrap().unwrap().as_name().unwrap(), b"DeviceRGB");
+    assert_eq!(cs.get_array(2).unwrap().unwrap().as_int().unwrap(), 1);
+    let table = cs.get_array(3).unwrap().unwrap();
+    assert!(table.is_stream().unwrap());
+    assert_eq!(table.read_raw_stream().unwrap(), b"\x01\x02\x03ABC");
+}
+
+#[test]
+fn the_masks_samples_count_toward_what_may_be_copied() {
+    // 10000 × 10000 CMYK at 8 bits is 400 MB, under the 512 MB bound; with a 16-bit soft mask of the same
+    // size (200 MB) the picture takes more than may be copied.
+    let mask = stream_obj("/Type /XObject /Subtype /Image /Width 10000 /Height 10000 /ColorSpace /DeviceGray /BitsPerComponent 16", b"x");
+    let (eng, id) = with_image_entries(
+        "copy-mask-bytes",
+        "/Width 10000 /Height 10000 /ColorSpace /DeviceCMYK /BitsPerComponent 8 /SMask 7 0 R",
+        &[mask],
+    );
+    let e = copy(&eng, id, rev(&eng, id), 0, &[0]);
+    assert!(matches!(&e, Err(EngineError::Invalid(m)) if m.contains("too large")), "{e:?}");
+}
