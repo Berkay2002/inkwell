@@ -135,11 +135,16 @@ holds), laying out form fields, the custom stamps manager (stamp pictures come f
 
 ## Verification (2026-10-12)
 
-Tests (after merging main 15e84fb: ocr-plus, the guarded write paths of #29, `outline::signed` / `certified`; and the
-review fixes of b144e4e):
+Tests (after merging main dc6315f: #30-#34 data exchange, forms layout, custom stamps, links; and the review fixes
+of b144e4e and da5d59f):
 
-- `cargo test --lib` full suite 1352 passed, 0 failed, 7 ignored (`ai::` 169 passed); `pnpm tsc --noEmit` clean,
-  `pnpm vitest run` 803 passed (51 files).
+- `cargo test --lib` full suite 1467 passed, 0 failed, 7 ignored (`ai::` 171 passed); `pnpm tsc --noEmit` clean,
+  `pnpm vitest run` 862 passed (55 files).
+- Added by the second review round: a password field's value is never part of a compare answer ("(password field)");
+  `export_document` refuses a password-protected document before the card (as convert does); an XMP packet that cannot
+  be read stops a property change instead of being overwritten; a `pages` list or `from`/`to` range that names no page
+  is an error, not every page; the compare-with-open-document card is the same whether or not the document is open
+  (the job reports a miss, without listing what else is open); a repaired signed file is refused before the card.
 - Added with the review fixes: password fields hidden and never filled; page lists and searches over the cap are
   errors, and a search honours Stop; a file that appears at the chosen name is never replaced by compress, export or
   convert (`output-exists`); convert refuses a protected document before the card and its card names the copy;
