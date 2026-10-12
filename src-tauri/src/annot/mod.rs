@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub mod app;
+pub mod stamps;
 #[cfg(test)]
 mod tests;
 pub mod xfdf;
@@ -108,6 +109,8 @@ pub struct AnnotDto {
     pub points: Vec<[f32; 2]>,
     pub strokes: Vec<Vec<[f32; 2]>>,
     pub icon: Option<String>,
+    /// A stamp that draws a picture (a custom stamp): its resize keeps the picture's proportions.
+    pub picture: bool,
     pub font_size: Option<f32>,
     /// The annotation this one replies to.
     pub parent: Option<i32>,
@@ -274,6 +277,7 @@ fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
         points,
         strokes,
         icon: a.icon_name().ok().flatten().map(str::to_owned),
+        picture: kind == Kind::Stamp && stamps::picture_size(&o).is_some(),
         font_size: a.default_appearance().ok().flatten().map(|d| d.size),
         parent: parent_of(&o),
         resolved: false,
@@ -672,7 +676,8 @@ fn map_point(p: Point, from: Rect, to: Rect) -> Point {
     Point { x: to.x0 + (p.x - from.x0) * sx, y: to.y0 + (p.y - from.y0) * sy }
 }
 
-fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
+/// `turns` is the page's `/Rotate` in quarter turns: a picture stamp's pixels are stored turned back by it.
+fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect, turns: u32) -> Result<()> {
     let from = a.rect()?;
     let m = |p: Point| map_point(p, from, to);
     match kind {
@@ -696,6 +701,14 @@ fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
             let strokes: Vec<Vec<Point>> = a.ink_list()?.into_iter().map(|s| s.into_iter().map(m).collect()).collect();
             a.set_ink_list(strokes.iter().map(|s| s.iter().copied()))?;
         }
+        // A picture stamp keeps the picture's proportions whatever box was asked for.
+        Kind::Stamp => {
+            let fit = stamps::picture_size(&a.object()).map_or(to, |(w, h)| {
+                let (w, h) = if turns % 2 == 1 { (h, w) } else { (w, h) };
+                stamps::fit_aspect(from, to, w as f32 / h as f32)
+            });
+            a.set_rect(fit)?;
+        }
         // Rect-based kinds; the others derive their /Rect from the geometry above.
         _ => a.set_rect(to)?,
     }
@@ -704,7 +717,7 @@ fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
 
 pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: &str) -> Result<()> {
     crate::outline::refuse_unless_annotating_allowed(doc, "Changing a comment")?;
-    let (_p, mut a) = find(doc, page, xref)?;
+    let (p, mut a) = find(doc, page, xref)?;
     let kind = kind_of(&a)?;
     let s = &patch.style;
     if let Some(c) = s.color {
@@ -736,7 +749,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: 
         a.set_default_appearance("Helv", sz, Some(c))?;
     }
     if let Some(r) = patch.rect {
-        reshape(&mut a, kind, rect_of(r))?;
+        reshape(&mut a, kind, rect_of(r), stamps::quarter_turns(&p)?)?;
     }
     meta(&mut a, author, false)?;
     a.update()?;
