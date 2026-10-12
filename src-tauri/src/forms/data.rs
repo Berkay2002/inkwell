@@ -41,8 +41,8 @@ fn is_password(e: &Entry) -> bool {
 /// Raw bytes of strings between 1 and 2 MB that one field's value may have decoded to be measured.
 const DECODE_BUDGET: usize = 8 << 20;
 
-/// Every string `collect` decoded on this thread (each value read through `values_by`, not only gray-zone ones):
-/// tests count them rather than time them.
+// Every string `collect` decoded on this thread (each value read through `values_by`, not only gray-zone ones):
+// tests count them rather than time them.
 #[cfg(test)]
 thread_local!(static DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 

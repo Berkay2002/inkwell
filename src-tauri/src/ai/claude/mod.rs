@@ -21,7 +21,9 @@ use super::chat::{AskRequest, ChatEvent, ModelInfo, Sink, Status, TurnCtx, heade
 use super::gate::{self, Gate};
 use super::provider::{Loader, Provider, ProviderId};
 use super::text::{self, Citation, DocText, Task};
-use super::tools::{self, DocHost, Mode, Tool};
+#[cfg(test)]
+use super::tools;
+use super::tools::{DocHost, Mode, Tool};
 use crate::engine::DocId;
 use mcp::{Handler, McpServer};
 use proc::{CLOSED, Proc};

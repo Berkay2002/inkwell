@@ -1,7 +1,9 @@
 //! Fill & Sign items through the edit lane (one undo step each, kept by Save and reopen),
 //! flattening, and the encrypted saved-signature store. Signatures here are drawn by the test.
 
-use super::store::{self, Kind, Source, Store};
+use super::store::{self, Kind};
+#[cfg(windows)]
+use super::store::{Source, Store};
 use super::{Mark, NewItem, Spec, add_one, flatten_one, list_all};
 use crate::annot::{self, NewAnnot, Style};
 use crate::engine::edit::EditSource;
