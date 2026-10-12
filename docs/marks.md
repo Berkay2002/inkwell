@@ -110,7 +110,10 @@ maps that to user space, so the same numbers hold on rotated and cropped pages (
   updated or removed. `Update` keeps it (the checkbox comes back from `/IWSpec`), unticking it gives the page back,
   and removing the last mark that asked for it takes the section out, and the wrapper with it when no mark on top
   is left (the content stream is then the original bytes). The entries are also read from a merged stream (a text
-  edit or autotagging rewrote the page's streams).
+  edit or autotagging rewrote the page's streams): then the section stays where the first one stood, rewritten for
+  the kinds that are left, and the others are cut. The bands read from a file are clamped to finite values inside
+  the page. An Update with the shrink on is refused on such a page when it has marks on top (after the inline
+  `Q %Inkwell`): the wrapper put around the whole stream would scale them with the page. Remove those marks first.
 - Comments, links and form fields are **not** moved (their rectangles are page-level): the sheet says "Comments
   and links keep their place." when a selected page has annotations (`info().annotated`). The preview does not
   show the shrink.
@@ -131,11 +134,16 @@ maps that to user space, so the same numbers hold on rotated and cropped pages (
   state the page's own content continues in). A section that is not clean, or whose `BDC` and `EMC` are in
   different streams, is left and counted as "stuck" (the row says so); when every page is stuck the step is
   refused with a sentence and nothing changes. Certified documents are refused, signed ones stay incremental.
-- Known limits: colour, `gs`, `Tf` and the like set at the top level inside a cut section (outside `q`…`Q`) were
+- Inside a text object of the page's own (the section sits between its `BT` and `ET`), a section that holds
+  `Td`, `TD`, `Tm`, `T*`, `'`, `"`, a text-state operator (`Tf`, `Tc`, `Tw`, `Tz`, `TL`, `Ts`, `Tr`) or a text-showing
+  operator is stuck too: what follows in that object is positioned relative to it.
+- Known limits: colour, `gs`, `Tf` and the like set at the top level of a cut section outside text were
   inherited by the content after it, so after the cut that content draws with the state before the section; this
-  is not checked (it would leave most word-processor files alone) and is usually what was meant, but it can change
-  how later content looks. Property lists given by name (`/Artifact /MC0 BDC`) are not read; sections inside Form
-  XObjects are not handled; marks only in Acrobat's `/PieceInfo` are not seen.
+  is not checked (it would leave most word-processor files alone) and is usually what was meant, but it can
+  change how later content looks. Safe misses (the section is left, nothing is changed): a property list given by
+  name (`/Artifact /MC0 BDC`), a dictionary with a bare `true` or `false` (the reader does not take it as a
+  dictionary), sections inside Form XObjects, and marks only in Acrobat's `/PieceInfo`. A header nested in
+  another app's `/Background` goes with the background (the outermost section is cut whole).
 - Tests: `another_apps_header_is_found_and_cut_and_the_body_stays`,
   `another_apps_watermark_and_background_are_their_own_rows`,
   `a_section_that_cannot_be_cut_cleanly_is_left_and_reported`, `our_marks_and_another_apps_do_not_mix`.
