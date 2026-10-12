@@ -98,6 +98,7 @@
   color: var(--text-2);
   background: var(--surface-2);
   border-color: var(--border-strong);
+  border-radius: 0; /* square, so the corner of MuPDF's tag under it doesn't show through */
   cursor: not-allowed;
 }
 .sg-field span {
