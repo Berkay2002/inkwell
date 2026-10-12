@@ -541,7 +541,12 @@ fn reference_locks(v: &PdfObject) -> Vec<Lock> {
     }
     // One dictionary stands for the one entry it would be (as `outline::certified` reads it).
     let single = refs.is_dict().unwrap_or(false);
-    (0..if single { 1 } else { refs.len().unwrap_or(0).min(16) as i32 })
+    let len = if single { 1 } else { refs.len().unwrap_or(0) };
+    // Entries past the 16 read may hold a lock: it locks everything.
+    if len > 16 {
+        return vec![Lock::All];
+    }
+    (0..len as i32)
         .filter_map(|i| {
             let r = match if single { Ok(Some(refs.clone())) } else { refs.get_array(i) } {
                 Ok(r) => r?,

@@ -3328,3 +3328,45 @@ fn a_field_that_cannot_be_read_locks_everything_only_when_it_may_be_a_signature(
     assert_eq!(locks("V"), 1);
     assert_eq!(locks("Nothing"), 0, "a signature with no lock locks nothing when everything reads");
 }
+
+#[test]
+fn a_reference_array_past_the_entries_read_locks_every_field() {
+    // `n` usage-rights entries, then (when `lock`) a FieldMDP that would lock Sum.
+    let refs = |n: usize, lock: bool| {
+        move |d: &PdfDocument| -> Result<PdfObject> {
+            let mut a = d.new_array()?;
+            for _ in 0..n {
+                let mut r = fieldmdp(d, "Include", &[PdfObject::new_string("Sum")?], true)?;
+                put_name(&mut r, "TransformMethod", "UR3")?;
+                a.array_push(r)?;
+            }
+            if lock {
+                a.array_push(fieldmdp(d, "Include", &[PdfObject::new_string("Sum")?], true)?)?;
+            }
+            Ok(a)
+        }
+    };
+    // What the field's own reading says (the catalog check of `locks_of` reads past 16 entries as /P 1 on its own).
+    let locks = |test: &str, n: usize, lock: bool| {
+        let (eng, id, _) = script_form(test, &["Sum"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+        sign_refs(&eng, id, refs(n, lock));
+        let read = |o: &PdfObject, k: &str, inherit: bool| if inherit { o.get_dict_inheritable(k) } else { o.get_dict(k) };
+        eng.read_custom(id, |d| {
+            let entries = scan(d)?;
+            let e = entries.iter().find(|e| e.name == "Sig").expect("a signature field");
+            Ok(scripts::field_locks(e, &read).iter().map(|l| matches!(l, scripts::Lock::All)).collect::<Vec<_>>())
+        })
+        .unwrap()
+    };
+    // 16 entries are all read: usage rights lock nothing. A 17th is not read at all, so it locks everything.
+    assert_eq!(locks("fieldmdp-16-entries", 16, false), Vec::<bool>::new());
+    assert_eq!(locks("fieldmdp-17-entries", 16, true), vec![true]);
+    // And the document refuses authoring either way (certified at /P 1, or locked).
+    let (eng, id, _) = script_form("fieldmdp-17-entries-author", &["Sum"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    sign_refs(&eng, id, refs(16, true));
+    for r in touch_field(&eng, id, "Sum") {
+        r.unwrap_err();
+    }
+}
