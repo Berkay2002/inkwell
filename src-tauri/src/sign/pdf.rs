@@ -557,16 +557,23 @@ fn refusal(p: Option<u8>, locks: &Locks, f: &SigField) -> Option<String> {
 }
 
 /// Each signature's locks (FieldMDP and `/Lock`) with its signer: read once, then asked per field.
-type Locks = Vec<(Vec<crate::forms::scripts::Lock>, PdfObject)>;
+type Locks = Vec<(Vec<crate::forms::scripts::Lock>, String)>;
 
 fn locks_of(fields: &[SigField]) -> Locks {
     use crate::forms::scripts::signature_locks;
-    fields.iter().filter_map(|g| Some((signature_locks(&g.field, &g.widget), g.value.clone()?))).filter(|(l, _)| !l.is_empty()).collect()
+    fields
+        .iter()
+        .filter(|g| g.value.is_some())
+        .map(|g| (signature_locks(&g.field, &g.widget), g))
+        .filter(|(l, _)| !l.is_empty())
+        // The signer's name once per signature (it parses the CMS), not once per field asked about.
+        .filter_map(|(l, g)| Some((l, signer_name(g.value.as_ref()?))))
+        .collect()
 }
 
 /// The signer of the first signature whose lock covers the field named `name`.
 fn locked_by(locks: &Locks, name: &str) -> Option<String> {
-    locks.iter().find(|(l, _)| crate::forms::scripts::name_locked(l, name)).map(|(_, v)| signer_name(v))
+    locks.iter().find(|(l, _)| crate::forms::scripts::name_locked(l, name)).map(|(_, who)| who.clone())
 }
 
 /// Who signed: the certificate's name as the list shows it, else `/Name`, else the field.

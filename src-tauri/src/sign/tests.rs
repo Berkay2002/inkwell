@@ -1672,3 +1672,17 @@ fn a_huge_dotted_field_name_is_locked_and_cheap_to_check() {
     assert!(name_locked(&lock, "a.b") && !name_locked(&lock, "b.a"));
     assert!(!name_locked(&[], &".".repeat(200_000)));
 }
+
+#[test]
+fn each_locked_field_names_the_signature_that_locks_it() {
+    let b = form(&["/FT/Sig/T(Tenant)", "/FT/Sig/T(Landlord)", "/FT/Sig/T(Witness)", "/FT/Sig/T(Other)", "/FT/Sig/T(Free)"], |_, _| {});
+    let b = lock_sign(&b, "Tenant", "<</Action/Include/Fields[(Witness)]>>", "");
+    let b = pdf::sign_with(&b, &ids().1, &SignRequest { field: Some("Landlord".into()), ..unseen() }, &mut |d, w| {
+        w.dict_put("Lock", d.new_object_from_str("<</Action/Include/Fields[(Other)]>>").unwrap()).unwrap();
+    })
+    .unwrap();
+    let i = infos(&b);
+    assert_eq!(field(&i, "Witness").locked_by.as_deref(), Some("Maple Property Test"));
+    assert_eq!(field(&i, "Other").locked_by.as_deref(), Some("Alex Johnson Test"));
+    assert_eq!(field(&i, "Free").locked_by, None);
+}
