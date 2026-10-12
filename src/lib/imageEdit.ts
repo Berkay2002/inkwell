@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
 import type { ImageBlock, ImageChange } from "./api";
-import { editImage, editImages } from "./edit";
+import { editImage, editImages, moveImagesToPage, pasteImages } from "./edit";
 import { useTextEdit } from "./textEdit";
 
 /**
@@ -258,6 +258,26 @@ export function groupBox(rects: Rect4[]): Rect4 {
   return [Math.min(...rects.map((r) => r[0])), Math.min(...rects.map((r) => r[1])), Math.max(...rects.map((r) => r[2])), Math.max(...rects.map((r) => r[3]))];
 }
 
+/** How far each paste after the first lands from the one before it, in points: visible, not far. */
+export const PASTE_STEP = 16;
+
+/**
+ * Where the top left corner of a paste goes: the copied group's own place, `nth` steps down and right
+ * (`nth` counts the pastes already made on that page, plus one when the page is the one it was copied from,
+ * so a paste never hides exactly under its original).
+ */
+export function pastePoint(rect: Rect4, nth: number, step = PASTE_STEP): [number, number] {
+  return [rect[0] + step * nth, rect[1] + step * nth];
+}
+
+/**
+ * Where a group dropped on another page has its top left corner: the pointer's place there, less how far the
+ * pointer was inside the group when it was picked up (`grab`: the pointer at the start less the group's corner).
+ */
+export function dropPoint(pointer: [number, number], start: [number, number], corner: [number, number]): [number, number] {
+  return [pointer[0] - (start[0] - corner[0]), pointer[1] - (start[1] - corner[1])];
+}
+
 export type AlignHow = "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom";
 
 /** How far each rectangle moves to line up with the group's box (page space): one move per image. */
@@ -408,6 +428,17 @@ interface Store {
   align: (doc: number, how: AlignHow) => Promise<boolean>;
   /** Asks for an image file and draws it instead of the selected image. */
   replace: (doc: number) => Promise<boolean>;
+
+  /** What the picture clipboard holds (shared by the open documents), and where it came from. */
+  clip: { info: api.ImageClipInfo; from: { doc: number; page: number } | null } | null;
+  /** Pastes made on each `doc:page` since the last copy, for the offset. */
+  pastes: Record<string, number>;
+  /** Copies the picked pictures to the clipboard (inline ones can only be moved). */
+  copy: (doc: number) => Promise<boolean>;
+  /** Pastes the clipboard on `page`; the pasted pictures become the picks. */
+  paste: (doc: number, page: number) => Promise<boolean>;
+  /** Moves the picked pictures to `toPage`, the group's top left corner at `at` there (page space). */
+  transfer: (doc: number, toPage: number, at: [number, number]) => Promise<boolean>;
 
   /** Asks for an image file; the next place chosen on a page gets it. */
   startPlacing: (doc: number) => Promise<void>;
@@ -671,6 +702,119 @@ export const useImageEdit = create<Store>((set, get) => {
       };
       return grouped(doc, run) ?? Promise.resolve(false);
     },
+
+    clip: null,
+    pastes: {},
+
+    copy: (doc) =>
+      queued(doc, async () => {
+        const d = of(doc);
+        const refs = picksOf(d);
+        const page = refs.length > 0 ? d.pages[refs[0].page] : undefined;
+        if (!page || refs.length === 0) return false;
+        if (page.copyLocked) {
+          patchDoc(doc, { notice: page.copyLocked });
+          return false;
+        }
+        const picks = refs.flatMap((r) => (page.images[r.index] ? [page.images[r.index]] : []));
+        const copyable = picks.filter((b) => b.editable && b.kind === "xObject");
+        if (copyable.length === 0) {
+          patchDoc(doc, { notice: "A picture drawn inline can be moved to another page, but not copied." });
+          return false;
+        }
+        try {
+          const info = await api.imageCopy(doc, page.rev, refs[0].page, copyable.map((b) => b.index));
+          set({ clip: { info, from: { doc, page: refs[0].page } }, pastes: {} });
+          const skipped = picks.length - copyable.length;
+          patchDoc(doc, { notice: skipped > 0 ? `${skipped} of the pictures were not copied: they are drawn inline, or inside text.` : null });
+          return true;
+        } catch (e) {
+          patchDoc(doc, { notice: String(e) === "stale" ? STALE : `The pictures could not be copied: ${String(e)}` });
+          return false;
+        }
+      }),
+
+    paste: (doc, page) =>
+      queued(doc, async () => {
+        let clip = get().clip;
+        if (!clip) {
+          const info = await api.imageClipInfo().catch(() => null);
+          if (info) {
+            clip = { info, from: null };
+            set({ clip });
+          }
+        }
+        if (!clip) {
+          patchDoc(doc, { notice: "No pictures are copied." });
+          return false;
+        }
+        const cur = of(doc).pages[page];
+        const target = cur && cur.rev === docRev(doc) ? cur : await fetchPage(doc, page).then(() => of(doc).pages[page]);
+        if (!target) return false;
+        if (target.locked) {
+          patchDoc(doc, { notice: target.locked });
+          return false;
+        }
+        const key = `${doc}:${page}`;
+        const sameSpot = clip.from?.doc === doc && clip.from.page === page;
+        const at = pastePoint(clip.info.rect, (get().pastes[key] ?? 0) + (sameSpot ? 1 : 0));
+        applying.add(doc);
+        try {
+          const r = await pasteImages(doc, target.rev, page, at);
+          if (r.kind === "error") {
+            patchDoc(doc, { notice: `The pictures could not be pasted: ${r.message}` });
+            return false;
+          }
+          const fresh = await fetchPage(doc, page);
+          if (r.kind === "stale") {
+            patchDoc(doc, { notice: STALE });
+            return false;
+          }
+          set((s) => ({ pastes: { ...s.pastes, [key]: (s.pastes[key] ?? 0) + 1 } }));
+          // The pasted pictures are drawn last on the page: they are the picks.
+          const mine = fresh.images.slice(-clip.info.count).map((b) => b.index);
+          if (mine.length > 0) patchDoc(doc, { selected: { page, index: mine[mine.length - 1] }, extra: mine.slice(0, -1), crop: null, notice: null });
+          const te = useTextEdit.getState();
+          if (te.docs[doc]?.selected) void te.select(doc, null);
+          return true;
+        } finally {
+          applying.delete(doc);
+        }
+      }),
+
+    transfer: (doc, toPage, at) =>
+      queued(doc, async () => {
+        const d = of(doc);
+        const refs = picksOf(d);
+        const from = refs.length > 0 ? refs[0].page : -1;
+        const src = from >= 0 ? d.pages[from] : undefined;
+        if (!src || from === toPage) return false;
+        if (src.locked) {
+          patchDoc(doc, { notice: src.locked });
+          return false;
+        }
+        const moving = refs.flatMap((r) => (src.images[r.index]?.editable ? [r.index] : []));
+        if (moving.length === 0) return false;
+        applying.add(doc);
+        try {
+          const r = await moveImagesToPage(doc, src.rev, from, moving, toPage, at);
+          if (r.kind === "error") {
+            patchDoc(doc, { notice: `The pictures could not be moved: ${r.message}` });
+            return false;
+          }
+          await fetchPage(doc, from);
+          const fresh = await fetchPage(doc, toPage);
+          if (r.kind === "stale") {
+            patchDoc(doc, { selected: null, notice: STALE });
+            return false;
+          }
+          const mine = fresh.images.slice(-moving.length).map((b) => b.index);
+          if (mine.length > 0) patchDoc(doc, { selected: { page: toPage, index: mine[mine.length - 1] }, extra: mine.slice(0, -1), crop: null, notice: null });
+          return true;
+        } finally {
+          applying.delete(doc);
+        }
+      }),
 
     replace: async (doc) => {
       if (!selectedImage(doc)) return false;

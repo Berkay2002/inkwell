@@ -176,6 +176,22 @@ export const imageEdit = (doc: number, rev: number, page: number, index: number 
 /** One change to each of several images of a page (move, turn, flip or delete), one undo step. */
 export const imageEditMany = (doc: number, rev: number, page: number, items: { index: number; change: ImageChange }[]) =>
   invoke<{ state: EditState }>("image_edit_many", { doc, rev, page, items });
+/** What the picture clipboard holds: how many, and the boxes they covered on their page (page space). */
+export interface ImageClipInfo {
+  count: number;
+  rect: [number, number, number, number];
+  rects: [number, number, number, number][];
+}
+/** Copies images of a page to the picture clipboard (the app's, shared by every open document). */
+export const imageCopy = (doc: number, rev: number, page: number, indices: number[]) =>
+  invoke<ImageClipInfo>("image_copy", { doc, rev, page, indices });
+export const imageClipInfo = () => invoke<ImageClipInfo | null>("image_clip_info");
+/** Pastes the clipboard on `page`, its top left corner at `at` (page space); one undo step. */
+export const imagePaste = (doc: number, rev: number, page: number, at: [number, number]) =>
+  invoke<{ state: EditState }>("image_paste", { doc, rev, page, at });
+/** Moves images of `page` to `toPage` of the same document, the group's top left corner at `at` there. */
+export const imageMoveToPage = (doc: number, rev: number, page: number, indices: number[], toPage: number, at: [number, number]) =>
+  invoke<{ state: EditState }>("image_move_to_page", { doc, rev, page, indices, toPage, at });
 export const cancelSearch = (doc: number) => invoke<void>("cancel_search", { doc });
 export const engineStats = () => invoke<EngineStats>("engine_stats");
 export const initialFiles = () => invoke<FileRef[]>("initial_files");

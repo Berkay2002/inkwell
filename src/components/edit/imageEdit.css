@@ -182,3 +182,9 @@
   flex-direction: column;
   gap: 8px;
 }
+
+/* The page a dragged picture would land on */
+.ie-drop-target {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}

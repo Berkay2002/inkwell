@@ -8,6 +8,8 @@ import {
   dims,
   dragHandle,
   dragTurn,
+  dropPoint,
+  groupBox,
   isCorner,
   isQuarter,
   mapRect,
@@ -225,6 +227,7 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
     if (!g) return;
     const q = toPage(e);
     setDrag({ ...g, d: [q[0] - g.start[0], q[1] - g.start[1]], free: e.shiftKey });
+    if (g.what === "move" && !g.crop) markDrop(pageUnder(e));
   };
   /** The rectangle a drag makes of `r`: moved, or with the handle's sides moved. */
   const dragged = (r: Rect4, g: Drag): Rect4 =>
@@ -238,10 +241,39 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
     const c: [number, number] = [(mine.fullRect[0] + mine.fullRect[2]) / 2, (mine.fullRect[1] + mine.fullRect[3]) / 2];
     return dragTurn(c, g.start, [g.start[0] + g.d[0], g.start[1] + g.d[1]], g.free);
   };
+  // ---- a drop on another page of the document: the page layer under the pointer, other than this one ----
+  const dropEl = useRef<HTMLElement | null>(null);
+  const pageUnder = (e: { clientX: number; clientY: number }): HTMLElement | null => {
+    for (const el of document.querySelectorAll<HTMLElement>(`.te-space[data-ie-doc="${docId}"]`)) {
+      if (el === space.current || !el.parentElement) continue;
+      const r = el.parentElement.getBoundingClientRect();
+      if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) return el;
+    }
+    return null;
+  };
+  /** The pointer in the page space of another page's layer (not clamped: the engine keeps the group on the page). */
+  const pointIn = (el: HTMLElement, e: { clientX: number; clientY: number }): [number, number] => {
+    const m = new DOMMatrix(getComputedStyle(el).transform).inverse();
+    const r = el.parentElement!.getBoundingClientRect();
+    const q = m.transformPoint({ x: e.clientX - r.left, y: e.clientY - r.top });
+    return [q.x, q.y];
+  };
+  const markDrop = (el: HTMLElement | null) => {
+    if (dropEl.current === el) return;
+    dropEl.current?.parentElement?.classList.remove("ie-drop-target");
+    el?.parentElement?.classList.add("ie-drop-target");
+    dropEl.current = el;
+  };
+  useEffect(() => () => markDrop(null), []);
+
   /** A drag the system took away (a lost capture, a cancelled touch) is dropped: nothing is sent. */
-  const dragCancel = () => setDrag(null);
-  const dragEnd = () => {
+  const dragCancel = () => {
+    markDrop(null);
+    setDrag(null);
+  };
+  const dragEnd = (e?: React.PointerEvent) => {
     const g = dragRef.current;
+    markDrop(null);
     setDrag(null);
     if (!g || !mine) return;
     const far = Math.hypot(g.d[0], g.d[1]) * zoom >= 3;
@@ -256,6 +288,13 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
       const t = turned(g);
       if (Math.abs(t) >= 0.5) void ie().turn(docId, t);
     } else if (g.what === "move") {
+      // Let go over another page of this document: the pictures go there, where they were dropped.
+      const to = e ? pageUnder(e) : null;
+      if (e && to && !locked) {
+        const box = groupBox([mine.rect, ...others.map((o) => o.rect)]);
+        void ie().transfer(docId, Number(to.dataset.iePage), dropPoint(pointIn(to, e), g.start, [box[0], box[1]]));
+        return;
+      }
       const d: [number, number] = g.group ? groupMove(g) : g.d;
       if (d[0] !== 0 || d[1] !== 0) void ie().move(docId, d);
     } else {
@@ -288,6 +327,8 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
     <div
       ref={space}
       className="te-space"
+      data-ie-doc={docId}
+      data-ie-page={page}
       style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom), "--z": zoom } as React.CSSProperties}
     >
       {mine && !crop && (

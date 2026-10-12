@@ -15,7 +15,7 @@ import {
   turnTo,
   useImageEdit,
 } from "../../lib/imageEdit";
-import { type DocState } from "../../store";
+import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
 import "./imageEdit.css";
 
@@ -51,6 +51,7 @@ export function ImageSection({ doc }: { doc: DocState }) {
   const pageState = d?.selected ? d.pages[d.selected.page] : undefined;
   const locked = pageState?.locked ?? null;
   const here = d?.pages[doc.currentPage]?.images ?? [];
+  const hasClip = useImageEdit((s) => s.clip != null);
 
   // Esc puts a chosen file back (the page's own keys are in the layer).
   useEffect(() => {
@@ -65,7 +66,28 @@ export function ImageSection({ doc }: { doc: DocState }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [placing, id]);
 
-  if (!placing && !selected && here.length === 0 && !d?.notice) return null;
+  // Cmd or Ctrl and C copies the picked pictures, and V pastes them on the page in view (text fields and
+  // text blocks keep their own).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
+      const k = e.key.toLowerCase();
+      const cur = ie().docs[id];
+      if (k === "c" && cur && picksOf(cur).length > 0 && !cur.crop) {
+        e.preventDefault();
+        void ie().copy(id);
+      } else if (k === "v" && ie().clip && !cur?.placing) {
+        e.preventDefault();
+        void ie().paste(id, useStore.getState().docs[id]?.currentPage ?? 0);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [id]);
+
+  if (!placing && !selected && here.length === 0 && !d?.notice && !hasClip) return null;
   return (
     <section className="te-sec" aria-label="Images">
       <h3 className="te-h3">
@@ -89,6 +111,7 @@ export function ImageSection({ doc }: { doc: DocState }) {
       {!placing && count <= 1 && selected && d?.selected && (
         <Format key={`${d.selected.page}:${selected.index}`} id={id} target={d.selected} image={selected} cropping={d.crop != null} locked={locked} />
       )}
+      {!placing && <ClipRow id={id} page={doc.currentPage} picks={count} copyLocked={pageState?.copyLocked ?? null} locked={locked} />}
       {!placing && selected && (locked || pageState?.signed) && (
         <p className="dim te-hint" role="note">
           {locked ?? SIGNED_IMAGES}
@@ -127,6 +150,33 @@ export function ImageSection({ doc }: { doc: DocState }) {
         </p>
       )}
     </section>
+  );
+}
+
+/** Copy the picked pictures, and paste the clipboard on the page in view. */
+function ClipRow({ id, page, picks, copyLocked, locked }: { id: number; page: number; picks: number; copyLocked: string | null; locked: string | null }) {
+  const clip = useImageEdit((s) => s.clip);
+  const pageLocked = useImageEdit((s) => s.docs[id]?.pages[page]?.locked ?? locked);
+  if (picks === 0 && !clip) return null;
+  return (
+    <div className="te-row ie-actions">
+      {picks > 0 && (
+        <button className="te-btn" title={copyLocked ?? "Copy the picked pictures (Ctrl+C)"} disabled={copyLocked != null} onClick={() => void ie().copy(id)}>
+          <Icon name="copy" size={16} />
+          Copy
+        </button>
+      )}
+      {clip && (
+        <button
+          className="te-btn"
+          title={pageLocked ?? `Paste ${clip.info.count === 1 ? "the copied picture" : `the ${clip.info.count} copied pictures`} on page ${page + 1} (Ctrl+V)`}
+          disabled={pageLocked != null}
+          onClick={() => void ie().paste(id, page)}
+        >
+          Paste{clip.info.count > 1 ? ` ${clip.info.count}` : ""} on page {page + 1}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -236,7 +286,7 @@ function GroupTools({ id, locked }: { id: number; locked: string | null }) {
           Delete
         </button>
       </div>
-      <p className="dim te-hint">Drag any picked picture to move them all. Esc lets go.</p>
+      <p className="dim te-hint">Drag any picked picture to move them all, or drop them on another page. Esc lets go.</p>
     </div>
   );
 }

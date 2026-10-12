@@ -19,6 +19,34 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   along the screen when the view is rotated. The rail has typed width and height in points ("Keep proportions"; the top
   left stays).
 - **Turn / flip.** Quarter turns left and right, flip left-right and top-bottom, about the centre.
+- **Free angle.** The round knob above the frame turns the picture about its centre (hold Shift for steps of 15°),
+  and "Angle" in the rail takes degrees clockwise as seen, typed as the picture's angle (a field commit is one undo
+  step, and so is a knob drag). The picture keeps its shape: it is turned by a `cm` matrix about the centre of its
+  box, never sheared. A turned picture shows its own outline next to the frame, hides the side handles and is only
+  scaled evenly (the engine refuses an uneven resize of it).
+- **Several pictures.** Shift (or Cmd/Ctrl) and click adds a picture to the picks or takes it out; picks are of one
+  page at a time. A marquee picks the pictures it **touches**: any overlap counts, including a box that contains a
+  picture or sits inside one (Acrobat's rule). A turned picture is tested by its own outline, not by its bounding
+  box. Shift (Cmd) and a drag on the page starts a marquee, adding to the picks; a plain drag on empty page does it
+  when a picture is already selected (otherwise a plain drag belongs to the form, annotation or text layers below).
+  A click on an empty page with no drag clears the picks. The frames of the picks are drawn, the rail says "N images
+  picked", and a drag of any pick moves all of them as one block that stays on the page (the forms' rule). Move,
+  delete, turn (by quarter turns, by an angle, each about its own centre), flip and the six aligns (left, centre,
+  right, top, middle, bottom edges of the group) are one undo step each ("Move 3 images on p. 1").
+- **Copy and paste.** Cmd/Ctrl+C or the rail's Copy puts the picked pictures on the app's picture clipboard; Cmd/Ctrl+V
+  or "Paste on page N" puts them on the page in view, in the same document or in another open one. A paste lands
+  where the copy was, and 16 pt down and right of it for each paste after the first on that page (and from the first
+  one on the page it was copied from), so it is never hidden under its original; it is kept on the page. The pasted
+  pictures become the picks. One undo step ("Paste 2 images on p. 3"). Only image XObjects are copied: an inline
+  picture can be moved to another page but not copied (the rail says so).
+- **Drag to another page.** Dragging picks over another page of the same document and letting go moves them there
+  (the target page is outlined while the pointer is over it): "Move image to p. 3", one undo step. The group lands
+  with the same grip on it as at pick-up, so it ends up where it was dropped, whatever the other page's size or
+  `/Rotate` (the picture stays upright as seen). A drop partly outside the page is moved back inside it.
+- **Locked.** A certified document refuses every one of these (certification check as for any image change); the
+  rail's controls are disabled with the reason, and a paste or a move is refused by the engine too. A document whose
+  owner withholds copying refuses Copy. Pasting into or changing a signed document keeps the signed-file path: the
+  change is saved after the signed bytes and the rail says so.
 - **Crop.** "Crop" dims what is outside the rectangle you drag; Enter or "Apply crop" sends it, Esc leaves.
   By default it is a clip (the picture stays whole in the file and the cut-off part is marked on the frame
   afterwards); "Delete the cut-off pixels" makes a smaller image instead.
@@ -39,12 +67,20 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
 |---|---|---|
 | `image_blocks` | `doc, page` | `{ rev, images: ImageBlock[] }` |
 | `image_edit` | `doc, rev, page, index?, change` | `{ state: EditState }` |
+| `image_edit_many` | `doc, rev, page, items: { index, change }[]` | `{ state: EditState }` |
+| `image_copy` | `doc, rev, page, indices[]` | `ClipInfo { count, rect, rects[] }` |
+| `image_clip_info` | | `ClipInfo \| null` |
+| `image_paste` | `doc, rev, page, at: [x, y]` | `{ state: EditState }` |
+| `image_move_to_page` | `doc, rev, page, indices[], toPage, at: [x, y]` | `{ state: EditState }` |
 
 - Coordinates are page space as the viewer shows it (points, origin top left, `/Rotate` applied), as in `text_blocks`.
 - `ImageBlock = { index, kind: "xObject" | "inline", rect, fullRect, matrix, width, height, colorSpace,
   bitsPerComponent, filter[], masked, name?, xref?, editable, reason? }`. `rect` is what shows (cut by a rectangular
   clip), `fullRect` the whole image; `matrix` is the placement (unit square → user space, the CTM at the `Do`);
-  `width`/`height` in pixels; `filter` outermost first; `masked` = has `/SMask` or `/Mask`.
+  `width`/`height` in pixels; `filter` outermost first; `masked` = has `/SMask` or `/Mask`. `angle` is the turn of
+  the picture's bottom edge as seen, degrees clockwise in (-180, 180]; `quad` its four corners in page space (bottom
+  left, bottom right, top right, top left of the picture itself), whose box `fullRect` is. `ImageBlocks` also carries
+  `locked` (a certified document: why), `signed` and `copyLocked` (the owner's permissions withhold copying).
 - `change` (tagged by `op`):
 
 | `op` | Fields | Effect |
@@ -52,12 +88,30 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
 | `move` | `dx, dy` | translate |
 | `resize` | `rect, keepAspect` | fit the image's box to `rect`; with `keepAspect` as large as fits from its top left |
 | `rotate` | `quarterTurns` | ±1, 2, 3 quarter turns clockwise (as seen) about the centre |
+| `angle` | `degrees` | turn clockwise (as seen) by any angle about the centre; 0 and 360 are refused; the picture keeps its shape |
 | `flip` | `horizontal` | mirror left-right (`true`) or upside down, about the centre |
 | `delete` | | remove it |
 | `replace` | `file` | draw that image instead, fitted into the old box keeping its own proportions |
 | `crop` | `rect, pixels` | show only `rect`: a clip, or with `pixels` a new image of just those pixels |
 | `add` | `file, rect, keepAspect` (default true) | new image in `rect` (no `index`), fitted and centred with `keepAspect` |
 
+- `image_edit_many` applies one `move`, `rotate`, `angle`, `flip` or `delete` to each of up to 500 images of one page
+  as a single step: all deletes or none, no image twice; a batch that fails changes nothing. Deletes run from the
+  last index back, since deleting renumbers.
+- `image_copy` reads, it does not change the document (`rev` must be current). It checks the owner's permission,
+  refuses inline pictures and pictures drawn inside text, applies the megapixel and sample-byte bounds of crops to the
+  declared size (and the mask's pixels), takes at most 100 pictures, and puts the image objects into a small PDF of
+  their own: each object is grafted with its `/SMask`, `/Mask`, `/Decode`, `/DecodeParms` and colour space, without
+  `/OC`, `/StructParent`, `/Alternates` and `/OPI`, then written with unreferenced objects dropped. The clipboard is
+  that file's bytes plus where each picture sat; no document is held open.
+- `image_paste` grafts each picture from the clipboard's file into the target document (one graft map per paste, so a
+  shared colour space is one object), names it in the page's own `/XObject` dict and draws it after the content in a
+  clean graphics state (the same `q … Q` balancing as Add), with the picture's rectangular clip. The objects are the
+  document's own: no object is shared with the source document or with another paste.
+- `image_move_to_page` moves in the same document. An XObject picture keeps its object (the target page names it, the
+  source page forgets the name when it no longer draws it); an inline picture's operator is written byte for byte
+  into the target page. The placement is the picture's page-space placement, shifted and taken to the target page's
+  user space, so a rotated or differently sized page lands it where it was dropped.
 - `file` is an open token from `pick_source` (kind `images`); the command swaps it for the path (paths.rs).
 - `index` belongs to the `rev` of the list; an older `rev` is `Stale`.
 - Each change is one edit-core step (`Engine::apply_removing`): undoable, labelled "Move image on p. N" etc., kept by
@@ -118,6 +172,17 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
 - A soft mask that refers to its own image is cropped once, without recursion; images with absurd sizes or
   component counts are refused with a message.
 - Stale `rev`, a missing index and an index out of range are refused and change nothing.
+- Several pictures: moved as one undo step, deleted in any order as one step, a batch that makes no sense changes
+  nothing; a group turn leaves each picture's centre in place; a certified document refuses every change and a signed
+  one takes it after its signed bytes.
+- Free angle: 30° saved and reopened with the right bounding box and corners, turned again by -30° back upright; 0, 360
+  and NaN refused; an uneven resize of a turned picture refused; an inline picture turns too.
+- Copy and paste: a copy with an `/SMask` pasted in the same document (its own object, own mask, original untouched,
+  saved and reopened) and into another document that is then closed (the picture and its mask stay); a declared size
+  past the bounds, an inline picture, a stale list and a document that withholds copying are refused.
+- Move to another page: lands where dropped on a page with `/Rotate 90`, on a smaller page it is kept inside, as one
+  undo step and through save and reopen; a group with an inline picture moves together; a colour space of the page
+  can't go with an inline picture; a certified document refuses paste and move, a signed one keeps its signed bytes.
 
 ## Limits
 
@@ -130,7 +195,8 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
 - A pixel crop of a JPEG stores the cropped pixels losslessly (Flate), so it can be larger than the JPEG; JPEG 2000
   and inline images can only be cropped with a clip. A cropped image keeps its `/Decode`, `/Intent` and other keys;
   a colour-key `/Mask` array stays as it is.
-- Rotation is in quarter turns; replace fits the new image into the old box rather than keeping its pixel size.
+- Replace fits the new image into the old box rather than keeping its pixel size.
+- A turned picture is only scaled evenly; a clip crop of one is the parallelogram of the requested rectangle.
 - A name is kept in the page's resources if a form XObject without its own `/Resources` could draw it (PDF 1.1).
 - Delete and Replace leave the page's tagged structure as it was: a `/Figure` structure element (and its `/Alt`
   text) that pointed at the old image now points at nothing, or describes the wrong picture. Fix it in the
@@ -139,6 +205,19 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   predictor, CCITT …) are decoded by MuPDF after the declared-size check, and the result is refused if it is larger
   than declared.
 - New images are added through MuPDF's image loader: JPEG, PNG, GIF, BMP, TIFF (first page), JPEG 2000.
-- UI: one picture at a time (no multi-select, no copy and paste, no dragging a picture to another page), no turning
-  by a free angle, and the chooser offers only what `pick_source` allows (jpg, jpeg, png, tif, tiff, bmp, gif).
-  Resizing a clip-cropped picture scales the whole box, the visible part with it.
+- UI: the chooser offers only what `pick_source` allows (jpg, jpeg, png, tif, tiff, bmp, gif). Resizing a
+  clip-cropped picture scales the whole box, the visible part with it.
+- Several pictures: picks are of one page; a marquee from the empty page needs Shift (Cmd) unless a picture is
+  already selected, since a plain drag there belongs to the layers below in Edit mode. A group has no resize
+  handles, and a crop, a replace or the angle field work on one picture. A group turn rotates each picture about its
+  own centre, not the group's.
+- Copy and paste: inline pictures can't be copied (only moved), and a picture drawn inside a text object can only be
+  deleted. Pictures inside form XObjects are not listed, so are not copied. Another window of the app has
+  its own picks but shares the clipboard. A picture is not copied if the owner's permissions withhold copying
+  (`/P` bit 5), as with extracting pages.
+- Drag to another page: the target must be in view (its layer is mounted); only a drop within the same document, a
+  paste is how a picture reaches another document. An inline picture whose colour space is defined in its page's
+  resources (`/CS /Cs1`) is refused, since the other page does not have that name.
+- A move keeps the picture's object as it is. A copy drops the object's `/OC` (optional-content layer),
+  `/StructParent`, `/Alternates` and `/OPI`, so a pasted picture is on no layer and has no tagged-structure entry.
+- "Locked page" has no meaning in Inkwell beyond certification (a document-wide lock); there is no per-page lock.
