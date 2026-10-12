@@ -3,7 +3,7 @@
 //! first, as H1-H6), blocks become paragraphs, blocks whose lines start with a bullet or a number
 //! become lists (L > LI > LBody), regular grids of short cells become tables (Table > TR > TH/TD,
 //! see `tables`), runs of entries with a page number at the end become a table of contents
-//! (TOC > TOCI, see `toc`), images become figures (without alternate text: the checker
+//! (TOC > TOCI > Reference, see `toc`), images become figures (without alternate text: the checker
 //! then asks for it), a short "Figure 2" or "Table 1" line next to a figure or table becomes its
 //! Caption (see `captions`), link and widget annotations become Link and Form elements, and every
 //! other painting (rules, fills, shadings) is marked as an artifact.
