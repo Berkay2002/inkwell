@@ -480,14 +480,50 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
             out.skip_span(page, listed, &all, k, sp, why);
         }
     };
+    let change = match keep_change(b, spans, &vec![with; spans.len()], false) {
+        Ok(c) => c,
+        Err(why) => {
+            skip_all(out, &why);
+            return false;
+        }
+    };
+    match text::rewrite_block_expecting(d, page, index, &change, Some(&b.text)) {
+        Ok(fallbacks) => {
+            out.replaced += spans.len() as u32;
+            for f in fallbacks {
+                if !out.fallbacks.iter().any(|g| g.font == f.font && g.reason == f.reason) {
+                    out.fallbacks.push(f);
+                }
+            }
+            true
+        }
+        Err(e) => {
+            // A refused rewrite may have named a font on the page before it stopped: tidy that away.
+            let _ = super::layout::forget_unused_fonts(d, page);
+            let why = match e {
+                EngineError::Invalid(m) => m,
+                e => e.to_string(),
+            };
+            skip_all(out, &why);
+            false
+        }
+    }
+}
+
+/// The change that sets block `b` again with `with[i]` in place of each span `spans[i]` (inclusive character
+/// ranges of the block's runs text) and its lines kept (see [`TextChange::keep`]): the runs the spans don't
+/// touch are as they were, the line ends are marked in the text and found again in the new text's coordinates.
+/// With `wrap` (Edit text) a changed line may grow past the block's width and a replacement may hold line
+/// breaks; Find & Replace has neither. `Err` is the reason the lines can't be kept.
+pub(super) fn keep_change(b: &Block, spans: &[(usize, usize)], with: &[&str], wrap: bool) -> std::result::Result<TextChange, String> {
+    let all: Vec<char> = joined(b);
     // Each space that stood for a line end (not one a match swallows) is marked in the text it is in with
     // the line that follows it, and so is each replacement; the marks are found again in the new text's
     // coordinates. The text itself is kept as it is (double spaces, no-break spaces).
     let cant = "the lines of the block can't be kept where they are";
     let marks = [END, OPEN, CLOSE];
-    if all.iter().chain(with.chars().collect::<Vec<_>>().iter()).any(|c| marks.contains(c)) || b.breaks.iter().any(|&(p, _)| all.get(p) != Some(&' ')) {
-        skip_all(out, cant);
-        return false;
+    if all.iter().any(|c| marks.contains(c)) || with.iter().any(|w| w.chars().any(|c| marks.contains(&c))) || b.breaks.iter().any(|&(p, _)| all.get(p) != Some(&' ')) {
+        return Err(cant.into());
     }
     // A match that covers a dropped hyphen takes in the line after it, so its words after the match would
     // join the first line: when a space follows the match, that space is where the second line goes on. A
@@ -500,8 +536,7 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
                 continue;
             }
             if all[e + 1] != ' ' {
-                skip_all(out, "the match ends inside a word that a hyphen at the end of a line splits");
-                return false;
+                return Err("the match ends inside a word that a hyphen at the end of a line splits".into());
             }
             breaks.push((e + 1, n));
             forced.push(n);
@@ -525,7 +560,7 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
                     hit = true;
                     if g == s {
                         // Where it meets a space of the text, the replacement's own is not one more.
-                        let mut w = with;
+                        let mut w = with[si];
                         if s > 0 && all[s - 1].is_whitespace() {
                             w = w.trim_start();
                         }
@@ -602,29 +637,192 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
         same
     });
     if specs.is_empty() {
-        skip_all(out, "the replacement would leave no text in the block; delete the block's text with Edit text");
-        return false;
+        return Err("the replacement would leave no text in the block; delete the block's text with Edit text".into());
     }
-    let change = TextChange { runs: Some(specs), keep: Some(KeepLines { ends, changed }), ..Default::default() };
-    match text::rewrite_block_expecting(d, page, index, &change, Some(&b.text)) {
-        Ok(fallbacks) => {
-            out.replaced += spans.len() as u32;
-            for f in fallbacks {
-                if !out.fallbacks.iter().any(|g| g.font == f.font && g.reason == f.reason) {
-                    out.fallbacks.push(f);
+    Ok(TextChange { runs: Some(specs), keep: Some(KeepLines { ends, changed, wrap }), ..Default::default() })
+}
+
+/// Most characters of a block's text that Edit text compares with what was typed; a longer block is set as a whole.
+const MAX_EDIT_CHARS: usize = 20_000;
+
+/// Edit text on a block of two or more lines, as the change that keeps its lines: `new` is the typed text, a
+/// single paragraph in which the block's lines run together with a space between them. It is compared with the
+/// block's words, each changed stretch of words is a replacement (in the style of the run it starts in, see
+/// [`keep_change`]) and every line it doesn't touch stays where it was. A stretch across a line end joins those
+/// two lines; a typed line break starts a new line.
+///
+/// None when the lines can't be told from the text, and the block is set as a whole (its lines wrapped to its
+/// widest, as before): a block of one line (it grows to the margin), a block that holds a line-end hyphen the
+/// edit doesn't cover, whose runs text is not the text the user was shown, whose lines have their own character
+/// spacing or scale, or an edit that touches every line and rewrites most of the words (a paragraph typed over).
+pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
+    let old = joined(b);
+    if b.lines.len() < 2 || old.len() > MAX_EDIT_CHARS || b.text.chars().ne(old.iter().copied()) {
+        return None;
+    }
+    let new: Vec<char> = new.replace("\r\n", "\n").chars().collect();
+    if new.len() > MAX_EDIT_CHARS {
+        return None;
+    }
+    let (ow, nw) = (words(&old), words(&new));
+    if ow.is_empty() || nw.is_empty() {
+        return None;
+    }
+    let text = |s: &[char], (a, z): (usize, usize)| s[a..z].iter().collect::<String>();
+    let (os, ns): (Vec<String>, Vec<String>) = (ow.iter().map(|&r| text(&old, r)).collect(), nw.iter().map(|&r| text(&new, r)).collect());
+    // What stands between word `i` and the next, in the old text and in the new.
+    let sep_old = |i: usize| &old[ow[i].1..ow[i + 1].0];
+    let sep_new = |j: usize| &new[nw[j].1..nw[j + 1].0];
+    // Changed stretches as (old words a..b, new words c..d).
+    let mut hunks: Vec<[usize; 4]> = Vec::new();
+    let mut matched = 0;
+    for op in similar::capture_diff_slices(similar::Algorithm::Myers, &os, &ns) {
+        match op {
+            similar::DiffOp::Equal { old_index, new_index, len } => {
+                matched += len;
+                // Words that are the same but not what stands between them: a line break typed, or spaces.
+                for k in 0..len.saturating_sub(1) {
+                    if sep_old(old_index + k) != sep_new(new_index + k) {
+                        hunks.push([old_index + k, old_index + k + 2, new_index + k, new_index + k + 2]);
+                    }
                 }
             }
-            true
-        }
-        Err(e) => {
-            // A refused rewrite may have named a font on the page before it stopped: tidy that away.
-            let _ = super::layout::forget_unused_fonts(d, page);
-            let why = match e {
-                EngineError::Invalid(m) => m,
-                e => e.to_string(),
-            };
-            skip_all(out, &why);
-            false
+            op => {
+                let (o, n) = (op.old_range(), op.new_range());
+                // A deletion and an insertion that follow one another are one replacement.
+                match hunks.last_mut() {
+                    Some(h) if h[1] == o.start && h[3] == n.start => (h[1], h[3]) = (o.end, n.end),
+                    _ => hunks.push([o.start, o.end, n.start, n.end]),
+                }
+            }
         }
     }
+    // Nothing but blanks at the ends changed: every line stays as it was.
+    if hunks.is_empty() {
+        return keep_change(b, &[], &[], true).ok();
+    }
+    for h in &mut hunks {
+        let [mut a, mut b, mut c, mut d] = *h;
+        // A stretch that only adds words is set with the word it follows, so the line end that is after it
+        // stays after the words (they are on the line they were typed in); one that only takes words away is set
+        // with the word next to it. After this each side of the stretch holds a word, which the indexes below need.
+        if a == b || c == d {
+            if a > 0 && c > 0 {
+                (a, c) = (a - 1, c - 1);
+            } else if b < ow.len() && d < nw.len() {
+                (b, d) = (b + 1, d + 1);
+            } else {
+                return None;
+            }
+        }
+        // Where the space before or after the stretch is not the one that was there, the word beyond is set too.
+        if a > 0 && c > 0 && sep_old(a - 1) != sep_new(c - 1) {
+            (a, c) = (a - 1, c - 1);
+        }
+        if b < ow.len() && d < nw.len() && sep_old(b - 1) != sep_new(d - 1) {
+            (b, d) = (b + 1, d + 1);
+        }
+        *h = [a, b, c, d];
+    }
+    hunks.sort_unstable();
+    let mut merged: Vec<[usize; 4]> = Vec::new();
+    for h in hunks {
+        match merged.last_mut() {
+            Some(m) if h[0] <= m[1] => (m[1], m[3]) = (m[1].max(h[1]), m[3].max(h[3])),
+            _ => merged.push(h),
+        }
+    }
+    let spans: Vec<(usize, usize)> = merged.iter().map(|h| (ow[h[0]].0, ow[h[1] - 1].1 - 1)).collect();
+    // Most of the words are new (or most are gone) and each line is touched: a paragraph typed over, which is laid
+    // out again whole. A short block with one line retyped keeps the others.
+    let starts: Vec<usize> = std::iter::once(0).chain(b.breaks.iter().map(|&(p, _)| p + 1)).chain(b.joins.iter().copied()).collect();
+    let touched = |from: usize| {
+        let to = starts.iter().copied().filter(|&n| n > from).min().unwrap_or(old.len() + 1);
+        spans.iter().any(|&(s, e)| s < to && e >= from)
+    };
+    if matched * 2 < ow.len().min(nw.len()) && starts.iter().all(|&f| touched(f)) {
+        return None;
+    }
+    // A line-end hyphen is dropped by the rewrite: only an edit that covers it may go through.
+    if b.joins.iter().any(|&j| !spans.iter().any(|&(s, e)| s < j && e >= j)) {
+        return None;
+    }
+    let with: Vec<String> = merged.iter().map(|h| if h[2] == h[3] { String::new() } else { text(&new, (nw[h[2]].0, nw[h[3] - 1].1)) }).collect();
+    keep_change(b, &spans, &with.iter().map(String::as_str).collect::<Vec<_>>(), true).ok()
+}
+
+/// A change that sets the block's own text again (a move, a colour, bold, underline, ...) as the change that
+/// keeps its lines: every line without a restyled run is left exactly as it was, and a restyled line keeps its
+/// place (and may wrap if it got wider, see [`KeepLines::wrap`]). None when `change` has text, a size, a width,
+/// a line spacing or an alignment (the lines are laid out again), or when the lines can't be kept (see
+/// [`keep_edit`]); the block is then set as a whole.
+pub(super) fn keep_format(b: &Block, change: &TextChange) -> Option<TextChange> {
+    let old = joined(b);
+    if b.lines.len() < 2
+        || !b.joins.is_empty()
+        || old.len() > MAX_EDIT_CHARS
+        || change.text.is_some()
+        || change.size.is_some()
+        || change.width.is_some()
+        || change.line_spacing.is_some()
+        || change.align.is_some()
+        || b.breaks.iter().any(|&(p, _)| old.get(p) != Some(&' '))
+    {
+        return None;
+    }
+    let runs: Vec<RunChange> = match &change.runs {
+        Some(r) => r.clone(),
+        None => (0..b.runs.len()).map(|i| RunChange { source: Some(i), ..Default::default() }).collect(),
+    };
+    let block_style = change.color.is_some() || change.bold.is_some() || change.italic.is_some() || change.underline.is_some() || change.strike.is_some() || change.rise.is_some();
+    let (mut at, mut changed, mut same) = (0usize, Vec::new(), old.iter());
+    for rc in &runs {
+        let src = b.runs.get(rc.source?)?;
+        let t = rc.text.as_deref().unwrap_or(&src.text);
+        let n = t.chars().count();
+        // The runs set the block's own text again, only their style may differ.
+        if !t.chars().all(|c| same.next() == Some(&c)) {
+            return None;
+        }
+        let styled = block_style
+            || rc.font.is_some()
+            || rc.size.is_some()
+            || rc.color.is_some()
+            || rc.bold.is_some()
+            || rc.italic.is_some()
+            || rc.underline.is_some()
+            || rc.strike.is_some()
+            || rc.rise.is_some();
+        if rc.size.is_some() {
+            return None;
+        }
+        if styled {
+            changed.push((at, at + n));
+        }
+        at += n;
+    }
+    if same.next().is_some() {
+        return None;
+    }
+    Some(TextChange { runs: Some(runs), keep: Some(KeepLines { ends: b.breaks.clone(), changed, wrap: true }), ..change.clone() })
+}
+
+/// The words of `s` as character ranges: runs of what is not a space.
+fn words(s: &[char]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut from = None;
+    for (i, &c) in s.iter().enumerate() {
+        match (text::paragraph_separator(c), from) {
+            (false, None) => from = Some(i),
+            (true, Some(a)) => {
+                out.push((a, i));
+                from = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(a) = from {
+        out.push((a, s.len()));
+    }
+    out
 }

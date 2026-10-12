@@ -34,6 +34,9 @@ pub struct PageScale {
     pub defined: bool,
     /// "1 in = 10 ft"
     pub label: String,
+    /// The UI's own live label reads as the engine's does here (see [`dict::MeasureDict::is_plain`]); when not, it
+    /// asks `measure_value`.
+    pub plain: bool,
 }
 
 /// Why nothing may be measured on this document, if so: a certification that does not allow annotations (`/P` 1 or 2)
@@ -60,7 +63,7 @@ pub fn lock_of(eng: &Engine, doc: DocId) -> Result<Option<String>> {
 pub fn scale_get(eng: &Engine, doc: DocId, page: u32) -> Result<PageScale> {
     eng.read_custom(doc, |d| {
         let (scale, defined) = write::page_scale(d, page)?;
-        Ok(PageScale { label: scale.label(), scale, defined })
+        Ok(PageScale { label: scale.label(), scale, defined, plain: write::page_plain(d, page)? })
     })
 }
 
@@ -115,6 +118,23 @@ pub fn rescale(eng: &Engine, doc: DocId, page: u32, xref: i32, scale: &Scale, so
     })?;
     let (xref, quantity) = made.ok_or(EngineError::Panic)?;
     Ok((state, xref, quantity))
+}
+
+/// Moves the points of the measurement `xref` as one undo step: the same annotation (its xref, its own `/Measure`,
+/// author and replies stay), with its geometry, appearance and label made again. Returns the new value.
+pub fn move_points(eng: &Engine, doc: DocId, page: u32, xref: i32, points: &[[f32; 2]], source: EditSource) -> Result<(EditState, Quantity)> {
+    let mut made = None;
+    let state = eng.apply_custom(doc, format!("Move a point of a measurement on p. {}", page + 1), source, false, |d| {
+        refuse_certified(d)?;
+        made = Some(write::set_points(d, page, xref, points)?);
+        Ok(vec![page])
+    })?;
+    Ok((state, made.ok_or(EngineError::Panic)?))
+}
+
+/// The value the points would measure under the measurement `xref`'s own `/Measure`, without making anything.
+pub fn value_in(eng: &Engine, doc: DocId, page: u32, kind: Kind, points: &[[f32; 2]], xref: i32) -> Result<Quantity> {
+    eng.read_custom(doc, |d| write::value_in(d, page, kind, points, xref))
 }
 
 /// The value the points would measure, without making anything.

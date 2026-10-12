@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { type LastMeasure, scaleOf, useMeasure } from "../../lib/measure";
+import { type LastMeasure, SIGNED_MEASURE, scaleOf, useMeasure } from "../../lib/measure";
 import { type Measure, KIND_NAME, UNITS, type Unit, inUnit, parseScale, scaleLabel, totals } from "../../lib/measureLogic";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
@@ -101,6 +101,7 @@ function Last({ last }: { last: LastMeasure }) {
 function Selected({ doc, m }: { doc: number; m: Measure }) {
   const live = useMeasure((s) => scaleOf(s.docs[doc], m.page));
   const locked = useMeasure((s) => s.locks[doc]) ?? null;
+  const signed = useMeasure((s) => !!s.signed[doc]);
   const own = m.scale ?? live;
   const [text, setText] = useState(scaleLabel(own));
   useEffect(() => setText(scaleLabel(own)), [m.xref, m.scale?.paper, m.scale?.real, m.scale?.paperUnit, m.scale?.realUnit]);
@@ -125,6 +126,17 @@ function Selected({ doc, m }: { doc: number; m: Measure }) {
           </>
         )}
       </dl>
+      {m.quantity.note && (
+        <p className="dim ms-hint" role="note">
+          {m.quantity.note}
+        </p>
+      )}
+      {!locked && <p className="dim ms-hint">Drag a point on the page, or focus it and use the arrow keys, to change the measurement.</p>}
+      {signed && !locked && (
+        <p className="dim ms-hint" role="note">
+          {SIGNED_MEASURE}
+        </p>
+      )}
       <label className="ms-field">
         <span className="dim">Scale of this measurement</span>
         <input
