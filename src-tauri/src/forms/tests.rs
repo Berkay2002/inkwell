@@ -2540,6 +2540,39 @@ fn copies_of_a_field_node_with_one_widget_keep_its_format_on_the_original_and_ev
 }
 
 #[test]
+fn giving_a_field_a_second_widget_moves_only_the_fields_actions_up_and_keeps_the_widgets_triggers() {
+    let bytes = pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".to_string(),
+        concat!(
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Amt) /V (5) /Rect [72 600 140 620] /F 4 /DA (/Helv 0 Tf 0 g) ",
+            "/AA << /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, \"\", true);) >> ",
+            "/E << /S /JavaScript /JS (app.alert\\(\"in\"\\);) >> /Fo << /S /JavaScript /JS (app.beep\\(0\\);) >> >> >>"
+        )
+        .to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_string(),
+    ]);
+    let (eng, id, path) = open_bytes("layout-aa-split", bytes);
+    let amt = items_of(&eng, id, &["Amt"])[0];
+    let fmt = field(&eng, id, "Amt").format;
+    assert!(matches!(fmt, Format::Number { .. }), "{fmt:?}");
+    duplicate_one(&eng, id, amt, &[1], EditSource::User).unwrap();
+    assert!(widgets_named(&eng, id, "Amt").iter().all(|w| w.format == fmt), "the format is the field's, on both widgets");
+    eng.save(id, None).unwrap();
+    let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+    let w = doc.load_pdf_page(0).unwrap().widgets().next().unwrap().annotation().object();
+    let keys = |o: &PdfObject| -> Vec<String> {
+        o.dict_iter().unwrap().filter_map(|kv| kv.ok()).filter_map(|(k, _)| super::text(&k)).collect()
+    };
+    let own = keys(&w.get_dict("AA").unwrap().expect("the widget keeps its triggers"));
+    assert!(own.contains(&"E".to_string()) && own.contains(&"Fo".to_string()) && !own.contains(&"F".to_string()), "{own:?}");
+    let up = keys(&w.get_dict("Parent").unwrap().unwrap().get_dict("AA").unwrap().expect("the field's actions"));
+    assert_eq!(up, vec!["F".to_string()]);
+}
+
+#[test]
 fn copies_are_refused_for_a_field_with_several_widgets_or_a_calculation() {
     let (eng, id, _) = open_bytes("layout-copies-refused", shared_widgets_form());
     let n = steps(&eng, id);

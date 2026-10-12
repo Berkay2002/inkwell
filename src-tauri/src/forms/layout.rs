@@ -270,6 +270,38 @@ pub fn nudge(doc: &mut PdfDocument, items: &[Item], dx: f32, dy: f32) -> Result<
 
 /// Keys that belong to the field, not to one widget: they go to the parent when a field gets a second widget.
 const FIELD_KEYS: [&str; 14] = ["FT", "T", "TU", "TM", "Ff", "V", "DV", "AA", "MaxLen", "Opt", "Lock", "RV", "I", "TI"];
+/// The additional actions that belong to the field (keystroke, format, validate, calculate); the others (mouse, focus
+/// and page triggers) belong to the widget.
+const FIELD_ACTIONS: [&str; 4] = ["K", "F", "V", "C"];
+
+/// Takes the field's actions out of a widget's /AA and returns them as a dictionary of their own (`None` when it has
+/// none); the widget's own triggers stay on it.
+fn take_field_actions(doc: &mut PdfDocument, w: &mut PdfObject) -> Result<Option<PdfObject>> {
+    let Some(aa) = get(w, "AA").filter(|a| a.is_dict().unwrap_or(false)) else { return Ok(None) };
+    let (mut field, mut rest) = (doc.new_dict()?, doc.new_dict()?);
+    let (mut nf, mut nr) = (0, 0);
+    for kv in aa.dict_iter()? {
+        let (k, v) = kv?;
+        let Some(key) = text(&k) else { continue };
+        if FIELD_ACTIONS.contains(&key.as_str()) {
+            field.dict_put(key.as_str(), v)?;
+            nf += 1;
+        } else {
+            rest.dict_put(key.as_str(), v)?;
+            nr += 1;
+        }
+    }
+    if nf == 0 {
+        return Ok(None);
+    }
+    if nr == 0 {
+        w.dict_delete("AA")?;
+    } else {
+        w.dict_put("AA", rest)?;
+    }
+    Ok(Some(field))
+}
+
 /// Keys a new widget takes from the one it copies (looked up the parent chain, so inherited ones are written in).
 const WIDGET_KEYS: [&str; 11] = ["Type", "Subtype", "F", "MK", "BS", "Border", "C", "DA", "Q", "DS", "A"];
 
@@ -355,11 +387,15 @@ fn into_kids(doc: &mut PdfDocument, e: &Entry) -> Result<PdfObject> {
     let mut w = doc.new_indirect(e.xref, 0)?;
     let old_parent = get(&w, "Parent");
     let mut p = doc.new_dict()?;
-    for k in FIELD_KEYS {
+    for k in FIELD_KEYS.into_iter().filter(|k| *k != "AA") {
         if let Some(v) = get(&w, k) {
             p.dict_put(k, v)?;
             w.dict_delete(k)?;
         }
+    }
+    // Only the field's own actions go up; a widget's mouse and focus triggers stay with it.
+    if let Some(aa) = take_field_actions(doc, &mut w)? {
+        p.dict_put("AA", aa)?;
     }
     if let Some(op) = &old_parent {
         p.dict_put("Parent", op.clone())?;
@@ -694,11 +730,13 @@ pub fn rename(doc: &mut PdfDocument, item: Item, name: &str, merge: bool) -> Res
             let from = get(&w, "Parent");
             if m.node == m.xref {
                 detach(doc, from.as_ref(), m.xref)?;
-                for k in FIELD_KEYS {
+                for k in FIELD_KEYS.into_iter().filter(|k| *k != "AA") {
                     if get(&w, k).is_some() {
                         w.dict_delete(k)?;
                     }
                 }
+                // The widget's own triggers stay; the field's actions go with the field.
+                take_field_actions(doc, &mut w)?;
             } else if let Some(f) = &from {
                 if let Some(mut k) = get(f, "Kids") {
                     remove_ref(&mut k, m.xref)?;
