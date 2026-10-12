@@ -4,12 +4,12 @@ use super::tests::{Spec, check_eng, file, open};
 use super::*;
 
 /// One text object: `(t)` in font `f` (F1 regular, F2 bold) at `(x, y)`.
-fn at(f: &str, size: i32, x: i32, y: i32, t: &str) -> String {
+pub(super) fn at(f: &str, size: i32, x: i32, y: i32, t: &str) -> String {
     format!("BT /{f} {size} Tf {x} {y} Td ({t}) Tj ET\n")
 }
 
 /// A grid drawn row by row: the first row in bold when `bold_header`.
-fn grid(rows: &[&[&str]], xs: &[i32], top: i32, pitch: i32, bold_header: bool) -> String {
+pub(super) fn grid(rows: &[&[&str]], xs: &[i32], top: i32, pitch: i32, bold_header: bool) -> String {
     let mut c = String::new();
     for (r, row) in rows.iter().enumerate() {
         for (cell, x) in row.iter().zip(xs) {
@@ -19,29 +19,29 @@ fn grid(rows: &[&[&str]], xs: &[i32], top: i32, pitch: i32, bold_header: bool) -
     c
 }
 
-fn page(content: String) -> Spec {
+pub(super) fn page(content: String) -> Spec {
     Spec { pages: vec![(String::new(), content)], ..Spec::default() }
 }
 
 const SALES: [&[&str]; 3] = [&["Region", "Units", "Revenue"], &["North", "120", "4 800"], &["South", "95", "3 750"]];
 
-struct Tagged {
-    types: Vec<String>,
-    report: Report,
-    tree: Tree,
+pub(super) struct Tagged {
+    pub(super) types: Vec<String>,
+    pub(super) report: Report,
+    pub(super) tree: Tree,
     /// The first page's content stream after Autotag.
-    content: String,
+    pub(super) content: String,
 }
 
 impl Tagged {
-    fn count(&self, ty: &str) -> usize {
+    pub(super) fn count(&self, ty: &str) -> usize {
         self.types.iter().filter(|t| *t == ty).count()
     }
 }
 
 /// Runs Autotag on `s`, checks that the page looks and extracts the same, saves, reopens and
 /// reads the tree and the report back.
-fn autotag(test: &str, s: &Spec) -> Tagged {
+pub(super) fn autotag(test: &str, s: &Spec) -> Tagged {
     let path = file(test, s);
     let (eng, id) = open(&path);
     let before: Vec<String> = eng.page_text(id, 0).unwrap().into_iter().map(|l| l.t).collect();

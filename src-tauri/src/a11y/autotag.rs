@@ -2,8 +2,10 @@
 //! structured text. Headings come from font size (sizes clearly above the body text, largest
 //! first, as H1-H6), blocks become paragraphs, blocks whose lines start with a bullet or a number
 //! become lists (L > LI > LBody), regular grids of short cells become tables (Table > TR > TH/TD,
-//! see `tables`), images become figures (without alternate text: the checker
-//! then asks for it), link and widget annotations become Link and Form elements, and every
+//! see `tables`), runs of entries with a page number at the end become a table of contents
+//! (TOC > TOCI, see `toc`), images become figures (without alternate text: the checker
+//! then asks for it), a short "Figure 2" or "Table 1" line next to a figure or table becomes its
+//! Caption (see `captions`), link and widget annotations become Link and Form elements, and every
 //! other painting (rules, fills, shadings) is marked as an artifact.
 //!
 //! Content is tied to the tags by rewriting each page's content stream: every run of text that
@@ -13,7 +15,9 @@
 //! it is. The result is labelled best effort: headings, lists and order are guesses to review.
 
 use super::content::{self, Op, TextPos};
+use super::captions;
 use super::tables::{self, Table};
+use super::toc::{self, Toc};
 use super::tree::{name, xref_of};
 use super::{Progress, Result, annots, bad, page_content};
 use mupdf::pdf::{PdfDocument, PdfObject};
@@ -44,12 +48,20 @@ struct Line {
     bold: bool,
 }
 
+/// What a line belongs to when it is not ordinary text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Own {
+    Table(usize),
+    Toc(usize),
+}
+
 struct PageText {
     lines: Vec<Line>,
     blocks: usize,
     tables: Vec<Table>,
-    /// The table each line is a cell of.
-    table_of: Vec<Option<usize>>,
+    tocs: Vec<Toc>,
+    /// The table or table of contents each line is part of.
+    own: Vec<Option<Own>>,
     /// The page's runs and the length of the content they were computed from, when table
     /// detection computed them: the tag pass takes them instead of walking the content again.
     runs: Option<(usize, Vec<Run>)>,
@@ -92,21 +104,48 @@ fn page_text(doc: &PdfDocument, p: i32) -> Result<PageText> {
             blocks += 1;
         }
     }
-    let (tables, runs) = find_tables(doc, p, &lines)?;
-    let mut table_of = vec![None; lines.len()];
+    let (tables, tocs, runs) = find_groups(doc, p, &lines)?;
+    let mut own = vec![None; lines.len()];
     for (i, t) in tables.iter().enumerate() {
-        t.rows.iter().flatten().for_each(|&l| table_of[l] = Some(i));
+        t.rows.iter().flatten().for_each(|&l| own[l] = Some(Own::Table(i)));
     }
-    Ok(PageText { lines, blocks, tables, table_of, runs })
+    for (i, t) in tocs.iter().enumerate() {
+        t.rows.iter().flatten().for_each(|&l| own[l] = Some(Own::Toc(i)));
+    }
+    Ok(PageText { lines, blocks, tables, tocs, own, runs })
 }
 
-/// The tables on page `p`. Only lines that get a marked-content run can be cells (text that is
-/// already marked, or inside a form, is left alone), and form fields keep the text near them.
-/// A page with too many lines is not looked at (walking its content is the costly part). Also
-/// returns the page's runs, which the tag pass needs again.
-fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<(Vec<Table>, Option<(usize, Vec<Run>)>)> {
-    if lines.len() < 4 || lines.len() > tables::MAX_ITEMS {
-        return Ok((Vec::new(), None));
+/// For each group of lines, whether the page draws nothing but those lines and artifacts between
+/// the group's first and last run: only then are tag order and content order the same.
+fn undisturbed(rs: &[Run], span: &[Option<(usize, usize)>], groups: &[Vec<usize>]) -> Vec<bool> {
+    let mut owner: Vec<Option<usize>> = vec![None; span.len()];
+    for (g, ls) in groups.iter().enumerate() {
+        ls.iter().for_each(|&l| owner[l] = Some(g));
+    }
+    groups
+        .iter()
+        .enumerate()
+        .map(|(g, ls)| {
+            let (lo, hi) = ls.iter().filter_map(|&l| span[l]).fold((usize::MAX, 0), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
+            lo > hi
+                || rs[lo..=hi].iter().all(|r| match r.target {
+                    Target::Artifact => true,
+                    Target::Line(l) => owner[l] == Some(g),
+                    _ => false,
+                })
+        })
+        .collect()
+}
+
+/// The tables and the tables of contents on page `p`. Only lines that get a marked-content run can
+/// be part of them (text that is already marked, or inside a form, is left alone), and form fields
+/// keep the text near them. A page with too many lines is not looked at (walking its content is the
+/// costly part). Also returns the page's runs, which the tag pass needs again.
+type Groups = (Vec<Table>, Vec<Toc>, Option<(usize, Vec<Run>)>);
+
+fn find_groups(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<Groups> {
+    if lines.len() < toc::MIN_ENTRIES || lines.len() > tables::MAX_ITEMS {
+        return Ok((Vec::new(), Vec::new(), None));
     }
     let page = doc.find_page(p)?;
     let ctm = page.page_ctm()?;
@@ -140,33 +179,28 @@ fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<(Vec<Table>,
     let mut found = tables::detect(&items, &tables::rules(&ops, &ctm), &widgets);
     // Between a table's first and last cell the page may draw only its cells and artifacts: text
     // drawn in the middle (a running footer, say) would be read in another order than drawn.
-    let mut owner: Vec<Option<usize>> = vec![None; lines.len()];
-    for (ti, t) in found.iter().enumerate() {
-        t.rows.iter().flatten().for_each(|&l| owner[l] = Some(ti));
-    }
-    let mut ti = 0;
-    found.retain(|t| {
-        let me = Some(ti);
-        ti += 1;
-        let spans = t.rows.iter().flatten().filter_map(|&l| span[l]);
-        let (lo, hi) = spans.fold((usize::MAX, 0), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
-        rs[lo..=hi].iter().all(|r| match r.target {
-            Target::Artifact => true,
-            Target::Line(l) => owner[l] == me,
-            _ => false,
-        })
-    });
-    Ok((found, Some((data.len(), rs))))
+    let cells = |rows: &[Vec<usize>]| rows.iter().flatten().copied().collect::<Vec<usize>>();
+    let mut keep = undisturbed(&rs, &span, &found.iter().map(|t| cells(&t.rows)).collect::<Vec<_>>()).into_iter();
+    found.retain(|_| keep.next().unwrap_or(false));
+    // What the tables did not take may be a table of contents (a list of titles and page numbers
+    // that a table would not claim: no rule, no header).
+    let mut taken = vec![false; lines.len()];
+    found.iter().flat_map(|t| t.rows.iter().flatten()).for_each(|&l| taken[l] = true);
+    let loose: Vec<tables::Item> = items.iter().filter(|it| !taken[it.id]).copied().collect();
+    let mut tocs = toc::detect(&loose, &widgets);
+    let mut keep = undisturbed(&rs, &span, &tocs.iter().map(|t| cells(&t.rows)).collect::<Vec<_>>()).into_iter();
+    tocs.retain(|_| keep.next().unwrap_or(false));
+    Ok((found, tocs, Some((data.len(), rs))))
 }
 
-/// A block's lines in order, cut where they change between a table's cells and plain text:
-/// `(table, line indices)`. A block with no table cells is one piece.
-fn pieces(t: &PageText, b: usize) -> Vec<(Option<usize>, Vec<usize>)> {
-    let mut out: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
+/// A block's lines in order, cut where they change between a table's cells (or a table of
+/// contents' lines) and plain text: `(owner, line indices)`. A block with none is one piece.
+fn pieces(t: &PageText, b: usize) -> Vec<(Option<Own>, Vec<usize>)> {
+    let mut out: Vec<(Option<Own>, Vec<usize>)> = Vec::new();
     for i in (0..t.lines.len()).filter(|&i| t.lines[i].block == b) {
         match out.last_mut() {
-            Some((tb, idx)) if *tb == t.table_of[i] => idx.push(i),
-            _ => out.push((t.table_of[i], vec![i])),
+            Some((o, idx)) if *o == t.own[i] => idx.push(i),
+            _ => out.push((t.own[i], vec![i])),
         }
     }
     out
@@ -352,6 +386,8 @@ fn in_order(runs: Vec<Run>, len: usize) -> Vec<Run> {
 /// A structure element being built.
 struct El {
     ty: String,
+    /// Kids written before the element's own content (a caption above its figure or table).
+    before: Vec<usize>,
     kids: Vec<usize>,
     mcids: Vec<i32>,
     /// The annotation it owns through an OBJR.
@@ -368,14 +404,45 @@ struct Page {
 
 impl Page {
     fn add(&mut self, ty: &str) -> usize {
-        self.els.push(El { ty: ty.into(), kids: Vec::new(), mcids: Vec::new(), objr: None });
+        self.els.push(El { ty: ty.into(), before: Vec::new(), kids: Vec::new(), mcids: Vec::new(), objr: None });
         self.els.len() - 1
     }
 
     fn has_content(&self, i: usize) -> bool {
         let e = &self.els[i];
-        !e.mcids.is_empty() || e.objr.is_some() || e.kids.iter().any(|&k| self.has_content(k))
+        !e.mcids.is_empty() || e.objr.is_some() || e.before.iter().chain(&e.kids).any(|&k| self.has_content(k))
     }
+}
+
+/// The box that holds all of `boxes`.
+fn union(boxes: impl Iterator<Item = Rect>) -> Rect {
+    boxes.fold(Rect { x0: f32::MAX, y0: f32::MAX, x1: f32::MIN, y1: f32::MIN }, |a, b| Rect { x0: a.x0.min(b.x0), y0: a.y0.min(b.y0), x1: a.x1.max(b.x1), y1: a.y1.max(b.y1) })
+}
+
+/// The page's link annotations that go to a page of the document (a destination that exists), with
+/// their boxes in page space. Annotations with an inline dictionary can't be referenced and are left out.
+fn toc_links(doc: &PdfDocument, p: i32, page: &PdfObject) -> Result<Vec<(Rect, i32, PdfObject)>> {
+    let read = crate::links::read_page(doc, p as u32, 0)?;
+    let mut out = Vec::new();
+    for (x, a) in annots(page)? {
+        let hit = read.links.iter().find(|l| l.id == x && x > 0 && matches!(l.target, crate::links::Target::Page { .. }));
+        if let Some(l) = hit {
+            out.push((Rect { x0: l.rect[0], y0: l.rect[1], x1: l.rect[2], y1: l.rect[3] }, x, a));
+        }
+    }
+    Ok(out)
+}
+
+/// Takes the first link whose box is over the entry `row`: its middle is on the entry's lines and it
+/// shares at least half the narrower width with it.
+fn take_link(links: &mut Vec<(Rect, i32, PdfObject)>, row: Rect) -> Option<(i32, PdfObject)> {
+    let at = links.iter().position(|(r, ..)| {
+        let mid = (r.y0 + r.y1) / 2.0;
+        let shared = (r.x1.min(row.x1) - r.x0.max(row.x0)).max(0.0);
+        mid >= row.y0 - 2.0 && mid <= row.y1 + 2.0 && shared > 0.0 && shared >= 0.5 * (r.x1 - r.x0).min(row.x1 - row.x0)
+    })?;
+    let (_, x, a) = links.remove(at);
+    Some((x, a))
 }
 
 /// Inserts `el` (top at `y0`) before the first block that starts below it.
@@ -475,8 +542,8 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
     let mut heading_sizes: Vec<i32> = Vec::new();
     for t in &texts {
         for b in 0..t.blocks {
-            for (table, idx) in pieces(t, b) {
-                if table.is_none()
+            for (own, idx) in pieces(t, b) {
+                if own.is_none()
                     && let Some(s) = heading_size(t, &idx)
                     && !heading_sizes.contains(&s)
                 {
@@ -514,60 +581,126 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
             _ => in_order(runs(&ops, res.as_ref(), page_ctm.clone(), &t.lines)?, data.len()),
         };
 
-        // Blocks to elements. A table takes its lines out of their blocks and comes in once, where
-        // its first line is.
+        // Blocks to elements. A table or a table of contents takes its lines out of their blocks and
+        // comes in once, where its first line is.
         let mut pg = Page { els: Vec::new(), top: Vec::new(), owner: Vec::new() };
         let mut line_owner = vec![usize::MAX; t.lines.len()];
         let mut top: Vec<(usize, f32)> = Vec::new();
         let mut seen = vec![false; t.tables.len()];
+        let mut seen_toc = vec![false; t.tocs.len()];
+        // Paragraphs that may turn out to be captions, and the boxes of the tables they may belong to.
+        let mut paragraphs: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut table_boxes: Vec<(usize, Rect)> = Vec::new();
+        let mut links = if t.tocs.is_empty() { Vec::new() } else { toc_links(doc, p, &page_obj)? };
+        let mut claimed: HashSet<i32> = HashSet::new();
         for b in 0..t.blocks {
-            for (table, idx) in pieces(t, b) {
+            for (own, idx) in pieces(t, b) {
                 let y0 = idx.iter().map(|&i| t.lines[i].bbox.y0).fold(f32::MAX, f32::min);
-                if let Some(ti) = table {
-                    if !std::mem::replace(&mut seen[ti], true) {
-                        let tb = &t.tables[ti];
-                        let e = pg.add("Table");
-                        for (r, row) in tb.rows.iter().enumerate() {
-                            let tr = pg.add("TR");
-                            pg.els[e].kids.push(tr);
-                            for &l in row {
-                                let c = pg.add(if r == 0 && tb.header { "TH" } else { "TD" });
-                                pg.els[tr].kids.push(c);
-                                line_owner[l] = c;
+                match own {
+                    Some(Own::Table(ti)) => {
+                        if !std::mem::replace(&mut seen[ti], true) {
+                            let tb = &t.tables[ti];
+                            let e = pg.add("Table");
+                            for (r, row) in tb.rows.iter().enumerate() {
+                                let tr = pg.add("TR");
+                                pg.els[e].kids.push(tr);
+                                for &l in row {
+                                    let c = pg.add(if r == 0 && tb.header { "TH" } else { "TD" });
+                                    pg.els[tr].kids.push(c);
+                                    line_owner[l] = c;
+                                }
                             }
+                            let cells = || tb.rows.iter().flatten().map(|&l| t.lines[l].bbox);
+                            let top_y = cells().map(|b| b.y0).fold(f32::MAX, f32::min);
+                            table_boxes.push((e, union(cells())));
+                            top.push((e, top_y));
                         }
-                        let top_y = tb.rows.iter().flatten().map(|&l| t.lines[l].bbox.y0).fold(f32::MAX, f32::min);
-                        top.push((e, top_y));
                     }
-                } else if let Some(s) = heading_size(t, &idx) {
-                    let e = pg.add(&format!("H{}", level(s)));
-                    idx.iter().for_each(|&i| line_owner[i] = e);
-                    top.push((e, y0));
-                } else if LIST_MARK.is_match(&t.lines[idx[0]].text) {
-                    let l = pg.add("L");
-                    let mut body = usize::MAX;
-                    for &i in &idx {
-                        if body == usize::MAX || LIST_MARK.is_match(&t.lines[i].text) {
-                            let li = pg.add("LI");
-                            body = pg.add("LBody");
-                            pg.els[li].kids.push(body);
-                            pg.els[l].kids.push(li);
+                    Some(Own::Toc(ti)) => {
+                        if !std::mem::replace(&mut seen_toc[ti], true) {
+                            let e = pg.add("TOC");
+                            let mut top_y = f32::MAX;
+                            for row in &t.tocs[ti].rows {
+                                let item = pg.add("TOCI");
+                                pg.els[e].kids.push(item);
+                                let b = union(row.iter().map(|&l| t.lines[l].bbox));
+                                top_y = top_y.min(b.y0);
+                                // A link annotation already over the entry, with a target that exists,
+                                // wraps the entry's text; without one the entry's text is its own.
+                                let mut owner = item;
+                                if let Some((x, a)) = take_link(&mut links, b) {
+                                    claimed.insert(x);
+                                    owner = pg.add("Link");
+                                    pg.els[owner].objr = Some(a);
+                                    pg.els[item].kids.push(owner);
+                                }
+                                row.iter().for_each(|&l| line_owner[l] = owner);
+                            }
+                            top.push((e, top_y));
                         }
-                        line_owner[i] = body;
                     }
-                    top.push((l, y0));
-                } else {
-                    let e = pg.add("P");
-                    idx.iter().for_each(|&i| line_owner[i] = e);
-                    top.push((e, y0));
+                    None => {
+                        if let Some(s) = heading_size(t, &idx) {
+                            let e = pg.add(&format!("H{}", level(s)));
+                            idx.iter().for_each(|&i| line_owner[i] = e);
+                            top.push((e, y0));
+                        } else if LIST_MARK.is_match(&t.lines[idx[0]].text) {
+                            let l = pg.add("L");
+                            let mut body = usize::MAX;
+                            for &i in &idx {
+                                if body == usize::MAX || LIST_MARK.is_match(&t.lines[i].text) {
+                                    let li = pg.add("LI");
+                                    body = pg.add("LBody");
+                                    pg.els[li].kids.push(body);
+                                    pg.els[l].kids.push(li);
+                                }
+                                line_owner[i] = body;
+                            }
+                            top.push((l, y0));
+                        } else {
+                            let e = pg.add("P");
+                            idx.iter().for_each(|&i| line_owner[i] = e);
+                            top.push((e, y0));
+                            paragraphs.push((e, idx));
+                        }
+                    }
                 }
             }
+        }
+
+        // Figures get their elements now, so a caption can go inside; they take their place in the
+        // reading order below, with the run.
+        let figure_of: Vec<Option<usize>> = runs.iter().map(|r| matches!(r.target, Target::Figure(_)).then(|| pg.add("Figure"))).collect();
+        let mut targets: Vec<(usize, captions::Target)> = table_boxes.into_iter().map(|(e, bbox)| (e, captions::Target { kind: captions::Kind::Table, bbox })).collect();
+        for (r, e) in runs.iter().zip(&figure_of) {
+            if let (Target::Figure(bbox), Some(e)) = (r.target, e) {
+                targets.push((*e, captions::Target { kind: captions::Kind::Figure, bbox }));
+            }
+        }
+        // A caption is a short paragraph that opens with "Figure 2" or "Table 1" and sits right above
+        // or below a figure or table of that kind. It becomes a Caption inside it: first when above,
+        // last when below (ISO 32000-2, 14.8.4.8). A figure or table takes one of each.
+        let boxes: Vec<captions::Target> = targets.iter().map(|(_, t0)| captions::Target { kind: t0.kind, bbox: t0.bbox }).collect();
+        let mut filled: HashSet<(usize, bool)> = HashSet::new();
+        for (e, idx) in &paragraphs {
+            let chars: usize = idx.iter().map(|&i| t.lines[i].text.chars().count()).sum();
+            let Some(kind) = captions::label(&t.lines[idx[0]].text).filter(|_| idx.len() <= captions::MAX_LINES && chars <= captions::MAX_CHARS) else { continue };
+            let cap = union(idx.iter().map(|&i| t.lines[i].bbox));
+            let others: Vec<Rect> = (0..t.lines.len()).filter(|i| !idx.contains(i)).map(|i| t.lines[i].bbox).collect();
+            let Some((k, above)) = captions::place(kind, cap, &boxes, &others) else { continue };
+            let host = targets[k].0;
+            if !filled.insert((host, above)) {
+                continue;
+            }
+            pg.els[*e].ty = "Caption".into();
+            top.retain(|(x, _)| x != e);
+            if above { pg.els[host].before.push(*e) } else { pg.els[host].kids.push(*e) }
         }
 
         // Runs to marked content.
         let mut loose = None;
         let mut marks: Vec<(usize, usize, String)> = Vec::new();
-        for r in &runs {
+        for (k, r) in runs.iter().enumerate() {
             let el = match r.target {
                 Target::Artifact => {
                     marks.push((r.start, r.end, "/Artifact BMC\n".into()));
@@ -580,7 +713,7 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
                     e
                 }),
                 Target::Figure(b) => {
-                    let e = pg.add("Figure");
+                    let e = figure_of[k].expect("a figure run has its element");
                     place(&mut top, e, b.y0);
                     e
                 }
@@ -603,7 +736,7 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
                 Some("Widget") => "Form",
                 _ => continue,
             };
-            if a.get_dict("StructParent")?.is_some() {
+            if a.get_dict("StructParent")?.is_some() || claimed.contains(&xref_of(&a)?) {
                 continue;
             }
             let rect = match a.get_dict("Rect")? {
@@ -713,6 +846,12 @@ fn write_el(
     let r = doc.add_object(&d)?;
     refs[e] = Some(r.clone());
     let mut k = doc.new_array()?;
+    for &c in &el.before {
+        if pg.has_content(c) {
+            let cr = write_el(doc, pg, c, &r, page, refs, objrs)?;
+            k.array_push(cr)?;
+        }
+    }
     for &m in &el.mcids {
         k.array_push(PdfObject::new_int(m)?)?;
     }

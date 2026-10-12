@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod app;
 pub mod autotag;
+pub mod captions;
 pub mod content;
 pub mod locate;
 pub mod matterhorn;
@@ -22,6 +23,7 @@ pub mod order;
 pub mod report;
 pub mod tables;
 pub mod tags;
+pub mod toc;
 pub mod tree;
 #[cfg(test)]
 mod tests;
@@ -33,6 +35,8 @@ mod tests_matterhorn;
 mod tests_hostile;
 #[cfg(test)]
 mod tests_tables;
+#[cfg(test)]
+mod tests_toc;
 
 use locate::Locator;
 use tree::{Tree, name, text, xref_of};
@@ -1250,11 +1254,20 @@ pub fn preview_doc(eng: &Engine, doc: DocId) -> Result<autotag::Preview> {
 }
 
 /// The report as a file: HTML or a PDF. It checks the document again, so the file matches what is open now.
-pub fn report_bytes(eng: &Engine, doc: DocId, pdf: bool, date: &str, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<Vec<u8>> {
+/// `overrides` are the rules the person marked "Passed manually" or "Skipped"; they only change how the report reads.
+pub fn report_bytes(
+    eng: &Engine,
+    doc: DocId,
+    pdf: bool,
+    date: &str,
+    overrides: &report::Overrides,
+    progress: &mut dyn FnMut(Progress),
+    cancel: &AtomicBool,
+) -> Result<Vec<u8>> {
     let report = check_doc(eng, doc, progress, cancel)?;
     let path = eng.doc_entry(doc)?.path();
     let name = std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    if pdf { report::pdf(&name, date, &report) } else { Ok(report::html(&name, date, &report).into_bytes()) }
+    if pdf { report::pdf(&name, date, &report, overrides) } else { Ok(report::html(&name, date, &report, overrides).into_bytes()) }
 }
 
 /// The document as it is now, in a copy of its own (the published snapshot, or the file before any edit).
