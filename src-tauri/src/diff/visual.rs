@@ -7,10 +7,12 @@
 use super::types::{DiffError, Rect4, Result, Side};
 use lru::LruCache;
 use mupdf::pdf::PdfDocument;
-use mupdf::{Colorspace, Matrix};
+use mupdf::{Colorspace, Cookie, Device, Matrix, Pixmap};
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, mpsc};
+use std::time::Duration;
 
 /// Budget of the render cache in bytes of RGBA.
 const CACHE_BYTES: usize = 256 << 20;
@@ -30,6 +32,9 @@ impl BytesId {
         BytesId(*blake3::hash(bytes).as_bytes())
     }
 }
+
+/// How long a fitted render (a thumbnail) may take before the page is given up on.
+const FIT_LIMIT: Duration = Duration::from_secs(6);
 
 /// Largest render, in pixels (160 MB of RGBA).
 pub const MAX_PIXELS: f32 = 40e6;
@@ -135,7 +140,11 @@ fn render(bytes: &[u8], page: u32, size: Size, password: Option<&str>) -> Result
     };
     // 0.99: the pixmap rounds its edges outward.
     let scale = scale.min((MAX_PIXELS / area).sqrt() * 0.99);
-    let pix = p.to_pixmap(&Matrix::new_scale(scale, scale), &Colorspace::device_rgb(), false, true)?;
+    let m = Matrix::new_scale(scale, scale);
+    let pix = match size {
+        Size::Scale(_) => p.to_pixmap(&m, &Colorspace::device_rgb(), false, true)?,
+        Size::Side(_) => draw_within(&p, &m, FIT_LIMIT)?,
+    };
     let (w, h, n) = (pix.width() as usize, pix.height() as usize, pix.n() as usize);
     let stride = pix.stride() as usize;
     let src = pix.samples();
@@ -154,6 +163,34 @@ fn render(bytes: &[u8], page: u32, size: Size, password: Option<&str>) -> Result
         }
     }
     Ok(Raster { width: w as u32, height: h as u32, scale, rgba })
+}
+
+/// What `Page::to_pixmap` makes (white paper, opaque, annotations and fields drawn), with a cookie so a watchdog
+/// can abort a page that takes longer than `limit`: a hostile page cannot hold the caller for good.
+fn draw_within(page: &mupdf::Page, m: &Matrix, limit: Duration) -> Result<Pixmap> {
+    let area = page.bounds()?.transform(m).round();
+    let mut pix = Pixmap::new_with_rect(&Colorspace::device_rgb(), area, false)?;
+    pix.clear_with(255)?;
+    let cookie = Cookie::new()?;
+    let timed_out = AtomicBool::new(false);
+    let (done, finished) = mpsc::channel::<()>();
+    let (timed, handle) = (&timed_out, cookie.abort_handle());
+    let run = std::thread::scope(|s| {
+        s.spawn(move || {
+            if finished.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
+                timed.store(true, Ordering::SeqCst);
+                handle.abort();
+            }
+        });
+        let run = Device::from_pixmap(&pix).and_then(|dev| page.run_with_cookie(&dev, m, &cookie));
+        drop(done);
+        run
+    });
+    if timed_out.load(Ordering::SeqCst) {
+        return Err(DiffError::Slow);
+    }
+    run?;
+    Ok(pix)
 }
 
 #[derive(Serialize, Debug)]

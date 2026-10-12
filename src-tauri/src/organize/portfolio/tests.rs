@@ -755,6 +755,9 @@ fn a_thumbnail_is_page_one_of_an_embedded_pdf_and_everything_else_is_refused() {
     // the longest side is the one asked for (the fixture page is 612 x 792)
     let (w, h) = png_size(&thumb(&eng, id, "n:a.pdf", 120, THUMB_MAX).unwrap());
     assert_eq!((w, h), (93, 120));
+    // unpainted paper is white, not black or clear
+    let img = image::load_from_memory(&thumb(&eng, id, "n:a.pdf", 120, THUMB_MAX).unwrap()).unwrap().to_rgba8();
+    assert_eq!(img.get_pixel(w - 1, h - 1).0, [255, 255, 255, 255]);
     // asked again it is the same picture; a silly size is held to the limits
     assert_eq!(png_size(&thumb(&eng, id, "n:a.pdf", 120, THUMB_MAX).unwrap()), (93, 120));
     assert_eq!(png_size(&thumb(&eng, id, "n:a.pdf", 1, THUMB_MAX).unwrap()).1, 48);

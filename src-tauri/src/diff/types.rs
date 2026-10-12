@@ -42,6 +42,8 @@ pub enum DiffError {
     PageOutOfRange { side: Side, page: u32, count: u32 },
     #[error("no pages of the {side} file were chosen")]
     NoPages { side: Side },
+    #[error("that page took too long to draw")]
+    Slow,
     #[error("comparison failed unexpectedly")]
     Panic,
     #[error("cancelled")]

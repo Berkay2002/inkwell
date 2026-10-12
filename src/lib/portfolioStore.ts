@@ -124,7 +124,17 @@ export const usePortfolio = create<Store>((set, get) => ({
       if (file) folder = file.folder;
       else if (dir) folder = dir.parent;
     }
-    patch(set, doc, { layout, folder });
+    // Details shows the selection with the folders around it open.
+    const open = [...d.open];
+    if (layout === "details" && d.info && d.selected) {
+      const file = d.info.files.find((f) => f.id === d.selected);
+      const dir = d.selected.startsWith("d:") ? d.info.folders.find((f) => `d:${f.id}` === d.selected) : undefined;
+      for (let p = file ? file.folder : (dir?.parent ?? null), n = 0; p != null && n < 33; n++) {
+        if (!open.includes(p)) open.push(p);
+        p = d.info.folders.find((f) => f.id === p)?.parent ?? null;
+      }
+    }
+    patch(set, doc, { layout, folder, open });
   },
   togglePane: (doc) => {
     const d = get().docs[doc];

@@ -290,9 +290,16 @@ describe("layout", () => {
     expect(s()).toMatchObject({ layout: "details", pane: true });
     // not written to the file: nothing else is asked of the engine
     expect(api.portfolioInfo).toHaveBeenCalledTimes(2);
-    // another document has its own
     usePortfolio.getState().togglePane(DOC);
     expect(s().pane).toBe(false);
+  });
+
+  it("switching to Details opens the folders around the selection so it is in view", async () => {
+    vi.mocked(api.portfolioInfo).mockResolvedValue(info({ view: "tile" }));
+    await usePortfolio.getState().load(DOC);
+    usePortfolio.getState().select(DOC, "n:c.pdf");
+    usePortfolio.getState().setLayout(DOC, "details");
+    expect(usePortfolio.getState().docs[DOC].open.slice().sort()).toEqual([1, 2]);
   });
 
   it("tiles open in the folder of the initial document, and in the folder of the selection when switched to", async () => {

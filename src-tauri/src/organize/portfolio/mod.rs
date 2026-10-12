@@ -753,7 +753,8 @@ pub fn read(doc: &PdfDocument) -> Result<Option<PortfolioInfo>> {
 /// The most decoded bytes of an embedded PDF a thumbnail will open (the UI shows the file-type icon past it).
 pub const THUMB_MAX: usize = 32 << 20;
 
-/// One thumbnail is drawn at a time, however many the view asks for: a tile grid cannot pile up renders.
+/// One thumbnail is drawn at a time, however many the view asks for: a tile grid cannot pile up renders. A page
+/// that takes too long is given up on (`diff::visual`'s fit limit), so one hostile file cannot hold the rest.
 static ONE_AT_A_TIME: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 /// Page 1 of the embedded PDF `id` as a PNG whose longest side is `side` pixels (48 to 1024). The file is
@@ -768,6 +769,7 @@ pub fn thumb(eng: &crate::engine::Engine, doc: crate::engine::DocId, id: &str, s
             DiffError::NeedsPassword { .. } | DiffError::BadPassword { .. } => "This PDF is password protected",
             DiffError::BadPage { .. } => "This PDF has no pages",
             DiffError::NotPdf { .. } => "This file is not a PDF Inkwell can open",
+            DiffError::Slow => "This PDF's first page took too long to draw",
             _ => "This PDF could not be drawn",
         })
     })?;
