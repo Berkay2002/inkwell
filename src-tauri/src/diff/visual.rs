@@ -83,12 +83,28 @@ pub fn render_page(id: BytesId, bytes: &[u8], page: u32, scale: f32) -> Result<A
 }
 
 pub fn render_page_pw(id: BytesId, bytes: &[u8], page: u32, scale: f32, password: Option<&str>) -> Result<Arc<Raster>> {
-    let key = (id, page, (scale * 1000.0).round() as u32);
+    cached((id, page, (scale * 1000.0).round() as u32), bytes, page, Size::Scale(scale), password)
+}
+
+/// A page drawn so its longest side is `side` pixels (whatever the page's own size): what a thumbnail wants.
+pub fn render_page_fit(id: BytesId, bytes: &[u8], page: u32, side: u32) -> Result<Arc<Raster>> {
+    // The high bit tells a fitted render from a scaled one in the cache key.
+    cached((id, page, (1 << 31) | side), bytes, page, Size::Side(side as f32), None)
+}
+
+/// How big a render is asked for: a scale (pixels per point) or a longest side in pixels.
+#[derive(Clone, Copy)]
+enum Size {
+    Scale(f32),
+    Side(f32),
+}
+
+fn cached(key: Key, bytes: &[u8], page: u32, size: Size, password: Option<&str>) -> Result<Arc<Raster>> {
     if let Some(r) = cache().lock().lru.get(&key) {
         return Ok(r.clone());
     }
     // Panics inside MuPDF become an error, as in `compare`.
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(bytes, page, scale, password)))
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(bytes, page, size, password)))
         .unwrap_or(Err(DiffError::Panic))?;
     let r = Arc::new(r);
     let mut c = cache().lock();
@@ -104,7 +120,7 @@ pub fn render_page_pw(id: BytesId, bytes: &[u8], page: u32, scale: f32, password
     Ok(r)
 }
 
-fn render(bytes: &[u8], page: u32, scale: f32, password: Option<&str>) -> Result<Raster> {
+fn render(bytes: &[u8], page: u32, size: Size, password: Option<&str>) -> Result<Raster> {
     let doc: PdfDocument = super::snap::open_doc(bytes, Side::A, password)?;
     let n = doc.page_count()?;
     if page as i32 >= n {
@@ -113,6 +129,10 @@ fn render(bytes: &[u8], page: u32, scale: f32, password: Option<&str>) -> Result
     let p = doc.load_page(page as i32)?;
     let b = p.bounds()?;
     let area = ((b.x1 - b.x0) * (b.y1 - b.y0)).max(1.0);
+    let scale = match size {
+        Size::Scale(s) => s,
+        Size::Side(side) => side / (b.x1 - b.x0).max(b.y1 - b.y0).max(1.0),
+    };
     // 0.99: the pixmap rounds its edges outward.
     let scale = scale.min((MAX_PIXELS / area).sqrt() * 0.99);
     let pix = p.to_pixmap(&Matrix::new_scale(scale, scale), &Colorspace::device_rgb(), false, true)?;

@@ -1655,6 +1655,8 @@ export const pickPortfolioFiles = () => invoke<FileRef[]>("pick_portfolio_files"
 export const portfolioCreate = (files: string[], out: string) => invoke<FileRef>("portfolio_create", { files, out });
 /** `to`: a folder token from `pickFolder`. Never replaces a file there. */
 export const portfolioExtractAll = (doc: number, to: string) => invoke<PortfolioExtracted>("portfolio_extract_all", { doc, to });
+/** Page 1 of an embedded PDF as PNG bytes, its longest side `side` px. Read only; rejects with a short reason (locked, damaged, too big). */
+export const portfolioThumb = (doc: number, id: string, side: number) => invoke<ArrayBuffer>("portfolio_thumb", { doc, id, side });
 
 export type LabelStyle = "none" | "decimal" | "upperRoman" | "lowerRoman" | "upperAlpha" | "lowerAlpha";
 

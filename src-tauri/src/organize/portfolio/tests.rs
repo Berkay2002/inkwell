@@ -718,3 +718,54 @@ fn adding_describing_and_removing_keep_the_collection_in_step() {
     e2.undo(id).unwrap();
     assert_eq!(table(&e2), start);
 }
+
+// ---- thumbnails ---------------------------------------------------------------------------------
+
+fn png_size(png: &[u8]) -> (u32, u32) {
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
+    (u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap()))
+}
+
+#[test]
+fn a_thumbnail_is_page_one_of_an_embedded_pdf_and_everything_else_is_refused() {
+    use mupdf::pdf::{Encryption, PdfWriteOptions};
+    let d = dir("thumb");
+    let a = pdf(&d, "a.pdf", 2);
+    let txt = d.join("notes.txt");
+    std::fs::write(&txt, "plain text\n").unwrap();
+    let broken = d.join("broken.pdf");
+    std::fs::write(&broken, b"%PDF-1.4\nthis is not a pdf\n").unwrap();
+    let locked = d.join("locked.pdf");
+    {
+        let src = PdfDocument::from_bytes(&fixture::build(&Fixture { pages: 1, chapter_every: 0, lines: 4, ..Default::default() })).unwrap();
+        let mut o = PdfWriteOptions::default();
+        o.set_encryption(Encryption::Aes256).set_user_password("secret").set_owner_password("owner");
+        src.save_with_options(locked.to_str().unwrap(), o).unwrap();
+    }
+    let made = d.join("p.pdf").to_string_lossy().into_owned();
+    let src = sources(&[
+        ("a.pdf", &a),
+        ("notes.txt", txt.to_str().unwrap()),
+        ("broken.pdf", broken.to_str().unwrap()),
+        ("locked.pdf", locked.to_str().unwrap()),
+    ]);
+    create(&Engine::new(2, 64 << 20), &src, &made).unwrap();
+    let (eng, id) = open(&made);
+
+    // the longest side is the one asked for (the fixture page is 612 x 792)
+    let (w, h) = png_size(&thumb(&eng, id, "n:a.pdf", 120, THUMB_MAX).unwrap());
+    assert_eq!((w, h), (93, 120));
+    // asked again it is the same picture; a silly size is held to the limits
+    assert_eq!(png_size(&thumb(&eng, id, "n:a.pdf", 120, THUMB_MAX).unwrap()), (93, 120));
+    assert_eq!(png_size(&thumb(&eng, id, "n:a.pdf", 1, THUMB_MAX).unwrap()).1, 48);
+    assert_eq!(png_size(&thumb(&eng, id, "n:a.pdf", 100_000, THUMB_MAX).unwrap()).1, 1024);
+
+    let refused = |key: &str, cap: usize| thumb(&eng, id, &format!("n:{key}"), 120, cap).unwrap_err().to_string();
+    assert!(refused("notes.txt", THUMB_MAX).contains("not a PDF"));
+    assert!(refused("broken.pdf", THUMB_MAX).to_lowercase().contains("pdf"));
+    assert!(refused("locked.pdf", THUMB_MAX).contains("password"));
+    assert!(refused("a.pdf", 100).contains("too large"));
+    assert!(thumb(&eng, id, "n:gone.pdf", 120, THUMB_MAX).is_err());
+    // read only
+    assert!(!eng.edit_state(id).unwrap().dirty);
+}

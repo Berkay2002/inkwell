@@ -14,6 +14,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn(), mess
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({}) }));
 vi.mock("./api", () => ({
   portfolioInfo: vi.fn(),
+  portfolioThumb: vi.fn(),
   portfolioExtractAll: vi.fn(),
   portfolioCreate: vi.fn(),
   pickPortfolioFiles: vi.fn(),
@@ -27,8 +28,24 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
 import * as api from "./api";
 import type { PortfolioFile, PortfolioInfo } from "./api";
-import { nextSort, openAction, rowKey, rows, sortFiles, typeLabel } from "./portfolioLogic";
+import {
+  crumbs,
+  defaultLayout,
+  extBadge,
+  fileIcon,
+  gridMove,
+  nextSort,
+  openAction,
+  paneFields,
+  rowKey,
+  rows,
+  sortFiles,
+  tileField,
+  tilesAt,
+  typeLabel,
+} from "./portfolioLogic";
 import { activate, createPortfolio, extractAll, usePortfolio } from "./portfolioStore";
+import { dropThumbs, requestThumb, THUMB_MAX_BYTES, type ThumbResult, thumbable, thumbNote } from "./portfolioThumb";
 
 const file = (name: string, o: Partial<PortfolioFile> = {}): PortfolioFile => ({
   id: `n:${name}`,
@@ -251,5 +268,177 @@ describe("loading and creating", () => {
     vi.mocked(api.pickSave).mockClear();
     await createPortfolio();
     expect(api.pickSave).not.toHaveBeenCalled();
+  });
+});
+
+describe("layout", () => {
+  it("opens in the layout the collection asks for; hidden and custom views are Details", () => {
+    expect(defaultLayout("tile")).toBe("tiles");
+    expect(defaultLayout("details")).toBe("details");
+    expect(defaultLayout("hidden")).toBe("details");
+    expect(defaultLayout("custom")).toBe("details");
+  });
+
+  it("the store starts in that layout and keeps the person's choice through a re-read", async () => {
+    vi.mocked(api.portfolioInfo).mockResolvedValue(info({ view: "tile" }));
+    await usePortfolio.getState().load(DOC);
+    const s = () => usePortfolio.getState().docs[DOC];
+    expect(s()).toMatchObject({ layout: "tiles", pane: false, folder: null });
+    usePortfolio.getState().setLayout(DOC, "details");
+    usePortfolio.getState().togglePane(DOC);
+    await usePortfolio.getState().load(DOC);
+    expect(s()).toMatchObject({ layout: "details", pane: true });
+    // not written to the file: nothing else is asked of the engine
+    expect(api.portfolioInfo).toHaveBeenCalledTimes(2);
+    // another document has its own
+    usePortfolio.getState().togglePane(DOC);
+    expect(s().pane).toBe(false);
+  });
+
+  it("tiles open in the folder of the initial document, and in the folder of the selection when switched to", async () => {
+    vi.mocked(api.portfolioInfo).mockResolvedValue(info({ initial: "n:c.pdf", view: "tile" }));
+    await usePortfolio.getState().load(DOC);
+    expect(usePortfolio.getState().docs[DOC].folder).toBe(2);
+    usePortfolio.getState().setLayout(DOC, "details");
+    usePortfolio.getState().select(DOC, "n:b.txt");
+    usePortfolio.getState().setLayout(DOC, "tiles");
+    expect(usePortfolio.getState().docs[DOC].folder).toBeNull();
+    usePortfolio.getState().select(DOC, "d:2");
+    usePortfolio.getState().setLayout(DOC, "tiles");
+    expect(usePortfolio.getState().docs[DOC].folder).toBe(1);
+    // a folder that is gone after a re-read puts the tiles back at the top
+    usePortfolio.getState().enterFolder(DOC, 2);
+    vi.mocked(api.portfolioInfo).mockResolvedValue(info({ folders: [{ id: 1, name: "Reports", parent: null }], view: "tile" }));
+    await usePortfolio.getState().load(DOC);
+    expect(usePortfolio.getState().docs[DOC].folder).toBeNull();
+  });
+
+  it("a level of tiles is its folders (with the files under them counted) then its files in the sort", () => {
+    const i = info();
+    const label = (r: ReturnType<typeof tilesAt>[number]) => (r.kind === "folder" ? `[${r.folder.name}:${r.count}]` : r.file.name);
+    expect(tilesAt(i, i.sort, null).map(label)).toEqual(["[Reports:2]", "b.txt", "z.pdf"]);
+    expect(tilesAt(i, i.sort, 1).map(label)).toEqual(["[2026:1]", "a.pdf"]);
+    expect(tilesAt(i, i.sort, 2).map(label)).toEqual(["c.pdf"]);
+    // the reader's sort applies to the files of a level
+    expect(tilesAt(i, [{ field: 1, ascending: true }], null).map(label)).toEqual(["[Reports:2]", "b.txt", "z.pdf"]);
+    expect(crumbs(i, 2).map((f) => f.name)).toEqual(["Reports", "2026"]);
+    expect(crumbs(i, null)).toEqual([]);
+  });
+});
+
+describe("keyboard movement in the grid", () => {
+  // 7 items, 3 across:  0 1 2 / 3 4 5 / 6
+  it("moves by one and by a row, stops at the edges", () => {
+    expect(gridMove(4, "ArrowRight", 3, 7)).toBe(5);
+    expect(gridMove(4, "ArrowLeft", 3, 7)).toBe(3);
+    expect(gridMove(4, "ArrowDown", 3, 7)).toBe(6);
+    expect(gridMove(4, "ArrowUp", 3, 7)).toBe(1);
+    expect(gridMove(1, "ArrowUp", 3, 7)).toBe(1);
+    expect(gridMove(0, "ArrowLeft", 3, 7)).toBe(0);
+    expect(gridMove(6, "ArrowRight", 3, 7)).toBe(6);
+    expect(gridMove(6, "ArrowDown", 3, 7)).toBe(6);
+  });
+
+  it("a short last row is reached from the row above, at its end", () => {
+    expect(gridMove(5, "ArrowDown", 3, 7)).toBe(6);
+    expect(gridMove(3, "ArrowDown", 3, 7)).toBe(6);
+    expect(gridMove(2, "ArrowDown", 3, 7)).toBe(5);
+  });
+
+  it("starts at the first item with no selection, and Home and End go to the ends", () => {
+    expect(gridMove(-1, "ArrowDown", 3, 7)).toBe(0);
+    expect(gridMove(-1, "ArrowRight", 3, 7)).toBe(0);
+    expect(gridMove(3, "Home", 3, 7)).toBe(0);
+    expect(gridMove(3, "End", 3, 7)).toBe(6);
+    expect(gridMove(0, "ArrowDown", 3, 0)).toBe(-1);
+    expect(gridMove(0, "ArrowDown", 0, 1)).toBe(0);
+    expect(gridMove(2, "x", 3, 7)).toBe(2);
+  });
+});
+
+describe("preview pane", () => {
+  // the name is not the first column: the schema starts with an author
+  const schema = (): PortfolioInfo =>
+    info({
+      fields: [
+        { key: "Author", name: "Author", subtype: "S", kind: "text", visible: true },
+        { key: "Name", name: "Name", subtype: "F", kind: "text", visible: true },
+        { key: "Notes", name: "Notes", subtype: "S", kind: "text", visible: false },
+        { key: "Pages", name: "Pages", subtype: "N", kind: "number", visible: true },
+      ],
+    });
+  const f = file("a.pdf", { cells: ["Zed", "a.pdf", "secret", "10"] });
+
+  it("lists every visible field with its value, in the author's order, and none that is hidden", () => {
+    expect(paneFields(schema(), f)).toEqual([
+      { key: "Author", label: "Author", value: "Zed", number: false },
+      { key: "Name", label: "Name", value: "a.pdf", number: false },
+      { key: "Pages", label: "Pages", value: "10", number: true },
+    ]);
+  });
+
+  it("a tile says the first visible field that is not the file name", () => {
+    expect(tileField(schema(), f)).toEqual({ label: "Author", value: "Zed" });
+    const named = info(); // Name, Pages
+    expect(tileField(named, file("a.pdf", { cells: ["a.pdf", "9"] }))).toEqual({ label: "Pages", value: "9" });
+    expect(tileField(info({ fields: [named.fields[0]] }), file("a.pdf"))).toBeNull();
+  });
+
+  it("icons are from the manifest by type, with the extension as a badge", () => {
+    expect(fileIcon({ name: "a.pdf" })).toBe("file");
+    expect(fileIcon({ name: "notes.TXT" })).toBe("article");
+    expect(fileIcon({ name: "t.csv" })).toBe("grid");
+    expect(fileIcon({ name: "x.json" })).toBe("code");
+    expect(fileIcon({ name: "noext" })).toBe("file");
+    expect(extBadge({ name: "report.final.pdf" })).toBe("PDF");
+    expect(extBadge({ name: "noext" })).toBe("");
+  });
+});
+
+describe("thumbnails", () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]).buffer;
+  const got = (): { r?: ThumbResult } => ({});
+
+  it("only an embedded PDF with its bytes and under the cap is drawn; the others say why or are plain icons", () => {
+    expect(thumbable(file("a.pdf"))).toBe(true);
+    expect(thumbable(file("a.txt"))).toBe(false);
+    expect(thumbable(file("a.pdf", { hasData: false }))).toBe(false);
+    expect(thumbable(file("big.pdf", { size: THUMB_MAX_BYTES + 1 }))).toBe(false);
+    expect(thumbNote(file("big.pdf", { size: THUMB_MAX_BYTES + 1 }))).toContain("Too large");
+    expect(thumbNote(file("a.txt"))).toBeNull();
+  });
+
+  it("asks for at most two renders at a time, drops those no tile waits for, and remembers the answers", async () => {
+    const asked: Array<{ id: string; done: (b: ArrayBuffer | Error) => void }> = [];
+    vi.mocked(api.portfolioThumb).mockImplementation(
+      (_d, id) =>
+        new Promise<ArrayBuffer>((res, rej) => {
+          asked.push({ id, done: (b) => (b instanceof Error ? rej(b) : res(b)) });
+        }),
+    );
+    const out = ["a", "b", "c", "d"].map(() => got());
+    const cancels = ["a", "b", "c", "d"].map((n, k) => requestThumb(900, `n:${n}`, 100, (r) => (out[k].r = r)));
+    expect(asked.map((x) => x.id)).toEqual(["n:a", "n:b"]);
+    // the tile for d scrolled away before its turn
+    cancels[3]();
+    asked[0].done(png);
+    await vi.waitFor(() => expect(asked.map((x) => x.id)).toEqual(["n:a", "n:b", "n:c"]));
+    expect(out[0].r?.url).toMatch(/^data:image\/png;base64,/);
+    asked[1].done(new Error("This PDF is password protected"));
+    asked[2].done(png);
+    await vi.waitFor(() => expect(out[2].r?.url).toBeDefined());
+    // a failed one is a note, and nothing was asked for d
+    expect(out[1].r).toEqual({ note: "This PDF is password protected" });
+    expect(asked).toHaveLength(3);
+    // asked again, it is answered from memory; a re-read of the document draws it afresh
+    const again = got();
+    requestThumb(900, "n:a", 100, (r) => (again.r = r));
+    expect(again.r?.url).toBeDefined();
+    expect(asked).toHaveLength(3);
+    dropThumbs(900);
+    requestThumb(900, "n:a", 100, () => {});
+    expect(asked).toHaveLength(4);
+    asked[3].done(png);
+    await vi.waitFor(() => expect(api.portfolioThumb).toHaveBeenCalledTimes(4));
   });
 });
