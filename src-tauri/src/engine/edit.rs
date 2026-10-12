@@ -1643,7 +1643,7 @@ impl Engine {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
-        // A file that was repaired on open is held as a rewritten copy: signing it would sign that copy (and break
+        // A file that was repaired on open is held as it is on disk, but MuPDF reads a repaired copy: signing would write that copy (and break
         // any signature the original had). Save a copy first.
         ed.refuse_if_repaired_signed()?;
         if !ed.doc.doc.can_be_saved_incrementally() {

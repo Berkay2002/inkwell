@@ -62,6 +62,8 @@ sha2 = "0.11"
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 p384 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["std", "hazmat", "encoding"] }
+# Held at rc.4: pkcs1 rc.5 does not build with rsa rc.18 (a plain `cargo update` would move it).
+pkcs1 = { version = "=0.8.0-rc.4", default-features = false }
 pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 hmac = "0.13"
 aes = "0.9"
