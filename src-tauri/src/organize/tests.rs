@@ -756,6 +756,42 @@ fn an_owner_restriction_still_leaves_a_source_out_after_it_opens() {
 }
 
 #[test]
+fn a_source_with_security_says_its_password_and_restrictions_are_not_carried_over() {
+    use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions, Permission};
+    let d = dir("combine-security");
+    let a = write(&d, "a.pdf", 2, 0);
+    // an owner-password-only source: opens with no password, may be copied and rearranged, forbids the rest
+    let owner = d.join("owner.pdf").to_string_lossy().into_owned();
+    let doc = PdfDocument::from_bytes(&fixture::build(&Fixture { pages: 2, ..Default::default() })).unwrap();
+    let mut o = PdfWriteOptions::default();
+    o.set_encryption(Encryption::Aes256).set_owner_password("owner-pw").set_permissions(Permission::COPY | Permission::ASSEMBLE);
+    doc.save_with_options(&owner, o).unwrap();
+    assert!(!PdfDocument::open(&owner).unwrap().needs_password().unwrap(), "the fixture must open without a password");
+    let locked = locked_copy(&d, "locked.pdf", 2, true);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let plan = combine::inspect(&[src(&a, ""), src(&owner, ""), with_password(&locked, "secret-pw")], opt).unwrap();
+    assert_eq!(plan.files[0].note, None);
+    assert!(!plan.files[0].encrypted);
+    assert_eq!(plan.files[1].state, FileState::Ready);
+    assert!(plan.files[1].encrypted);
+    assert_eq!(
+        plan.files[1].note.as_deref(),
+        Some("owner.pdf's password and restrictions are not carried over (it does not allow printing, editing, commenting, form filling, screen reader access)")
+    );
+    // a source with a user password and every right still says the password goes
+    assert!(plan.files[2].encrypted);
+    assert_eq!(plan.files[2].note.as_deref(), Some("locked.pdf's password and restrictions are not carried over"));
+    // not opened yet: left out, and it is not said to bring anything
+    let closed = combine::inspect(&[src(&locked, "")], opt).unwrap();
+    assert_eq!((closed.files[0].state.clone(), closed.files[0].note.clone(), closed.files[0].encrypted), (FileState::Encrypted, None, false));
+    // the result has none of it
+    let (eng, _) = open(&a);
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    combine::run(&eng, &[src(&a, ""), src(&owner, "")], opt, &out).unwrap();
+    assert!(!PdfDocument::open(&out).unwrap().needs_password().unwrap());
+}
+
+#[test]
 fn a_password_typed_full_width_opens_a_file_protect_wrote_in_nfkc() {
     let d = dir("combine-nfkc");
     let a = write(&d, "a.pdf", 2, 0);

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { pagesIn } from "../lib/combineLogic";
+import { pagesIn, securityDropped } from "../lib/combineLogic";
 import { type CombineEntry, type CombineSheet as SheetState, pageUrl, useCombine } from "../lib/combineStore";
 import type { CombineFilePlan } from "../lib/api";
 import { Icon } from "./Icons";
@@ -337,7 +337,9 @@ function Footer({ sheet }: { sheet: SheetState }) {
         />
         <Check label="A contents page in front" checked={options.contentsPage} disabled={running} onChange={(v) => act().setOptions({ contentsPage: v })} />
         <Check label="Keep the source page labels" checked={options.keepLabels} disabled={running} onChange={(v) => act().setOptions({ keepLabels: v })} />
-        {entries.some((e) => e.password || e.locked != null) && <span className="cb-note dim">The combined file has no password.</span>}
+        {securityDropped(entries, plan?.files ?? []) && (
+          <span className="cb-note dim">The combined file has no password and no restrictions.</span>
+        )}
       </div>
       <footer className="cb-foot">
         <span className={bad ? "cb-outcome bad" : "cb-outcome"} aria-live="polite">

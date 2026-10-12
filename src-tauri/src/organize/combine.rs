@@ -86,6 +86,8 @@ pub struct FilePlan {
     pub used: u32,
     pub has_outline: bool,
     pub has_fields: bool,
+    /// The file has security (a password, owner restrictions, or both): none of it goes into the result.
+    pub encrypted: bool,
     /// Something the person should know about what this file brings, none when there is nothing.
     pub note: Option<String>,
 }
@@ -210,6 +212,10 @@ struct Facts {
     has_fields: bool,
     /// The file carries a digital signature (its signature fields arrive empty).
     signed: bool,
+    /// The file has an `/Encrypt` dictionary, an owner-password-only one included.
+    encrypted: bool,
+    /// What its permission bits withhold that the result will allow ("printing", "commenting").
+    withheld: Vec<&'static str>,
     /// Bookmarks the file's own outline holds.
     outline_nodes: u32,
     /// The first page's size in points.
@@ -221,7 +227,7 @@ struct Facts {
 
 /// A file that is left out for what it is (password, no copying, no pages).
 fn left_out(state: FileState, message: String) -> Facts {
-    Facts { state, message: Some(message), pages: 0, has_outline: false, has_fields: false, signed: false, outline_nodes: 0, first_size: [0.0, 0.0], stable: true }
+    Facts { state, message: Some(message), pages: 0, has_outline: false, has_fields: false, signed: false, encrypted: false, withheld: Vec::new(), outline_nodes: 0, first_size: [0.0, 0.0], stable: true }
 }
 
 /// A file that could not be read: left out now, asked again next time.
@@ -245,6 +251,24 @@ fn open_for_graft(path: &str, password: Option<&str>) -> std::result::Result<Pdf
     Ok(src)
 }
 
+/// The rights a source's permission bits refuse that the result will allow. Copying is not listed: a file
+/// that forbids it never gets this far.
+fn withheld_rights(r: crate::protect::Rights) -> Vec<&'static str> {
+    use crate::protect::Printing;
+    let mut out = Vec::new();
+    match r.printing {
+        Printing::None => out.push("printing"),
+        Printing::Low => out.push("high quality printing"),
+        Printing::High => {}
+    }
+    for (allowed, name) in [(r.modify, "editing"), (r.assemble, "page changes"), (r.annotate, "commenting"), (r.forms, "form filling"), (r.accessibility, "screen reader access")] {
+        if !allowed {
+            out.push(name);
+        }
+    }
+    out
+}
+
 /// What planning needs from an opened file; `None` when it has no pages.
 fn read_facts(src: &PdfDocument) -> Result<Option<Facts>> {
     let count = src.page_count()?.max(0) as u32;
@@ -256,7 +280,10 @@ fn read_facts(src: &PdfDocument) -> Result<Option<Facts>> {
     let has_fields = src.catalog()?.get_dict("AcroForm")?.and_then(|f| f.get_dict("Fields").ok().flatten()).is_some_and(|f| f.len().unwrap_or(0) > 0);
     let first_size = page_size(src, 0)?;
     let signed = crate::outline::signed(src);
-    Ok(Some(Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, signed, outline_nodes: count_nodes(&outline), first_size, stable: true }))
+    let encrypt = src.trailer()?.get_dict("Encrypt")?.filter(|e| !e.is_null().unwrap_or(true));
+    let p = encrypt.as_ref().and_then(|e| e.get_dict("P").ok().flatten()).and_then(|p| p.as_int().ok()).unwrap_or(src.permissions().bits() as i32);
+    let withheld = if encrypt.is_some() { withheld_rights(crate::protect::Rights::from_p(p)) } else { Vec::new() };
+    Ok(Some(Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, signed, encrypted: encrypt.is_some(), withheld, outline_nodes: count_nodes(&outline), first_size, stable: true }))
 }
 
 /// Opens `path`, reads what planning needs and lets the document go again. A file that cannot be read
@@ -338,8 +365,20 @@ fn plan_from(specs: &[SourceSpec], opt: CombineOptions, facts: &[Facts]) -> Resu
             used: 0,
             has_outline: f.has_outline,
             has_fields: f.has_fields,
-            note: (f.signed && f.state == FileState::Ready).then(|| format!("{name}'s signature is not carried over")),
+            encrypted: f.encrypted && f.state == FileState::Ready,
+            note: None,
         };
+        if f.state == FileState::Ready {
+            let mut notes = Vec::new();
+            if f.signed {
+                notes.push(format!("{name}'s signature is not carried over"));
+            }
+            if f.encrypted {
+                let cut = if f.withheld.is_empty() { String::new() } else { format!(" (it does not allow {})", f.withheld.join(", ")) };
+                notes.push(format!("{name}'s password and restrictions are not carried over{cut}"));
+            }
+            plan.note = (!notes.is_empty()).then(|| notes.join(". "));
+        }
         if f.state != FileState::Ready {
             files.push(plan);
             orders.push(None);
