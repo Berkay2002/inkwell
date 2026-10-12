@@ -3677,18 +3677,16 @@ retry_after_repair:
 			break;
 		}
 
-		/* Never update signed Signature widgets */
+		/* Never update Signature widgets (Inkwell). A signed one has no appearance we can
+		 * synthesise; an unsigned one shows the file's own appearance, or nothing, as in
+		 * Acrobat, rather than the red "SIGN" arrow, and none is ever written back. */
 		if (subtype == PDF_NAME(Widget))
 		{
 			ft = pdf_dict_get_inheritable(ctx, annot->obj, PDF_NAME(FT));
 			if (ft == PDF_NAME(Sig))
 			{
-				/* We cannot synthesise an appearance for a signed Sig, so don't even try. */
-				if (pdf_signature_is_signed(ctx, annot->page->doc, annot->obj))
-				{
-					pdf_end_operation(ctx, annot->page->doc);
-					break;
-				}
+				pdf_end_operation(ctx, annot->page->doc);
+				break;
 			}
 		}
 
