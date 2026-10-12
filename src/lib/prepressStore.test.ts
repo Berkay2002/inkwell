@@ -243,7 +243,7 @@ describe("object inspector", () => {
     expect(st().get(1).inspect).toMatchObject({ at: { x: 20, y: 20 }, found });
   });
 
-  it("drops an answer when the generation or the page moved, or the mode ended, while it was asked", async () => {
+  it("drops an answer when the generation moved, the page went, or the mode ended, while it was asked", async () => {
     await ask();
     const a = st().inspectAt(1, 2, 10, 10);
     useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 4 } } });
@@ -252,11 +252,12 @@ describe("object inspector", () => {
     expect(st().get(1).inspect).toMatchObject({ on: true, at: null, found: null });
 
     const b = st().inspectAt(1, 2, 10, 10);
-    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], currentPage: 5 } } });
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], pageCount: 2 } } });
     answers[1](found);
     await b;
     expect(st().get(1).inspect.at).toBeNull();
 
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], pageCount: 12 } } });
     const c = st().inspectAt(1, 5, 10, 10);
     st().setInspecting(1, false);
     answers[2](found);
@@ -265,6 +266,26 @@ describe("object inspector", () => {
     // and a click outside the mode asks nothing
     await st().inspectAt(1, 5, 1, 1);
     expect(prepressApi.inspect).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps a result on another page than the current one while the view scrolls", async () => {
+    await ask();
+    // continuous scroll: page 5 is clicked while page 2 is the current one, then the current page moves
+    const a = st().inspectAt(1, 5, 10, 10);
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], currentPage: 3 } } });
+    answers[0](found);
+    await a;
+    expect(st().get(1).inspect).toMatchObject({ at: { page: 5 }, found });
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], currentPage: 6 } } });
+    expect(st().get(1).inspect.found).toEqual(found);
+    // a new generation takes it, and so does losing its page
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 4 } } });
+    expect(st().get(1).inspect.at).toBeNull();
+    const b = st().inspectAt(1, 5, 10, 10);
+    answers[1](found);
+    await b;
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], pageCount: 5 } } });
+    expect(st().get(1).inspect.at).toBeNull();
   });
 
   it("clears the marker and keeps the mode; closing Output Preview leaves the mode", async () => {

@@ -90,8 +90,8 @@ and zoom exactly as the ink probe's. The rail lists the objects topmost first: k
 the pixels of an image), colour space, values, CMYK equivalent with its ink, and overprint yes or no; an empty
 answer says "Nothing is painted here". A ring marks the point, the same size at any zoom. Escape (when no field, menu, dialog, the find bar or the assistant takes it) clears the ring
 and the list and the mode stays; closing Output Preview, or switching the toggle off, leaves the mode. An answer
-is dropped when a newer click was made, or the document's generation or current page moved, or the mode ended
-while it was asked. It reads only: no edit, no new generation, the document does not become modified, so a
+is dropped when a newer click was made, or the document's generation moved, or its page is gone, or the mode ended
+while it was asked; a scroll that makes another page the current one keeps it (the list names its page). It reads only: no edit, no new generation, the document does not become modified, so a
 certified or signed document needs no refusal.
 
 ## Convert colours

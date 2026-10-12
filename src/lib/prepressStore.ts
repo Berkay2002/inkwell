@@ -88,12 +88,13 @@ export interface OutputDoc {
 }
 
 /**
- * The object inspector. `at` is the clicked point with the page and generation it was clicked on and the page the
- * document showed then: it is dropped when any of them moves. `found` is null while the answer is on its way.
+ * The object inspector. `at` is the clicked point with the page and generation it was clicked on: it is dropped when
+ * the generation moves or the page is gone (not when a scroll makes another page the current one). `found` is null
+ * while the answer is on its way.
  */
 export interface InspectState {
   on: boolean;
-  at: { page: number; rev: number; shown: number; x: number; y: number } | null;
+  at: { page: number; rev: number; x: number; y: number } | null;
   found: Inspected[] | null;
   error: string | null;
 }
@@ -495,14 +496,14 @@ export const usePrepress = create<PrepressStore>((set, get) => {
     inspectAt: async (doc, page, x, y) => {
       const d = st().docs[doc];
       if (!get().open || !d || !get().docs[doc]?.inspect.on) return;
-      const at = { page, rev: d.rev, shown: d.currentPage, x, y };
+      const at = { page, rev: d.rev, x, y };
       const job = (inspectJob.get(doc) ?? 0) + 1;
       inspectJob.set(doc, job);
       patchDoc(doc, { inspect: { on: true, at, found: null, error: null } });
-      // a newer click, leaving the mode, or a new generation or page while this was asked
+      // a newer click, leaving the mode, or a new generation (or the page gone) while this was asked
       const stale = () => {
         const now = st().docs[doc];
-        return inspectJob.get(doc) !== job || !get().open || !now || now.rev !== at.rev || now.currentPage !== at.shown;
+        return inspectJob.get(doc) !== job || !get().open || !now || now.rev !== at.rev || page >= now.pageCount;
       };
       try {
         const found = await prepressApi.inspect(doc, page, x, y);
@@ -847,11 +848,11 @@ export const usePrepress = create<PrepressStore>((set, get) => {
 useStore.subscribe((s, prev) => {
   if (s.docs === prev.docs) return;
   for (const id of Object.keys(usePrepress.getState().docs)) if (!s.docs[Number(id)]) usePrepress.getState().forget(Number(id));
-  // a clicked point belongs to the generation and page it was clicked on
+  // a clicked point belongs to the generation it was clicked on and to its page
   for (const [id, o] of Object.entries(usePrepress.getState().docs)) {
     const at = o.inspect.at;
     const d = s.docs[Number(id)];
-    if (at && d && (d.rev !== at.rev || d.currentPage !== at.shown)) usePrepress.getState().clearInspect(Number(id));
+    if (at && d && (d.rev !== at.rev || at.page >= d.pageCount)) usePrepress.getState().clearInspect(Number(id));
   }
   const sh = usePrepress.getState().sheet;
   if (sh && !s.docs[sh.doc]) return usePrepress.getState().forget(sh.doc);

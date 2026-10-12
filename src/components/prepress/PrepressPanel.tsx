@@ -163,30 +163,33 @@ function Inspector({ at, found, error }: { at: { page: number; x: number; y: num
   else if (found.length === 0) body = <p className="pp-note">{NOTHING_PAINTED}</p>;
   else
     body = (
-      <ol className="pp-objects" aria-label={`Objects at the point on page ${at.page + 1}, topmost first`}>
-        {found.map((o, i) => {
-          const l = objectLines(o);
-          return (
-            <li key={i} className="pp-object">
-              <b>{l.kind}</b>
-              <dl>
-                <dt>Colour space</dt>
-                <dd>{l.space}</dd>
-                {l.values && (
-                  <>
-                    <dt>Values</dt>
-                    <dd>{l.values}</dd>
-                  </>
-                )}
-                <dt>CMYK equivalent</dt>
-                <dd>{l.cmyk}</dd>
-                <dt>Overprint</dt>
-                <dd>{l.overprint}</dd>
-              </dl>
-            </li>
-          );
-        })}
-      </ol>
+      <>
+        <p className="pp-note dim">On page {at.page + 1}, topmost first</p>
+        <ol className="pp-objects" aria-label={`Objects at the point on page ${at.page + 1}, topmost first`}>
+          {found.map((o, i) => {
+            const l = objectLines(o);
+            return (
+              <li key={i} className="pp-object">
+                <b>{l.kind}</b>
+                <dl>
+                  <dt>Colour space</dt>
+                  <dd>{l.space}</dd>
+                  {l.values && (
+                    <>
+                      <dt>Values</dt>
+                      <dd>{l.values}</dd>
+                    </>
+                  )}
+                  <dt>CMYK equivalent</dt>
+                  <dd>{l.cmyk}</dd>
+                  <dt>Overprint</dt>
+                  <dd>{l.overprint}</dd>
+                </dl>
+              </li>
+            );
+          })}
+        </ol>
+      </>
     );
   return (
     <div className="pp-inspector" aria-live="polite">
