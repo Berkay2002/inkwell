@@ -328,8 +328,6 @@ pub(crate) struct Scan {
     pub obj: PdfObject,
     /// Pixel coordinates (x right, y down) to the displayed page.
     pub page_from_pixel: Matrix,
-    pub width: u32,
-    pub height: u32,
     /// Pixels per inch along the picture's width.
     pub dpi: f32,
 }
@@ -392,7 +390,7 @@ pub(crate) fn find_scan(doc: &PdfDocument, page: &PdfPage, index: u32, page_size
     if width_pt <= 0.0 {
         return Err("its picture has no size".into());
     }
-    Ok(Scan { name: one.name.clone(), obj, page_from_pixel, width: w, height: h, dpi: (f64::from(w) / (width_pt / 72.0)) as f32 })
+    Ok(Scan { name: one.name.clone(), obj, page_from_pixel, dpi: (f64::from(w) / (width_pt / 72.0)) as f32 })
 }
 
 /// Rotation about `c` by `deg` (clockwise on screen, y down): where the straight page's points land

@@ -1230,6 +1230,7 @@ fn xref_section_in(d: &PdfDocument, bytes: &[u8], off: u64, newer: &std::collect
 
 /// The entries of the section the last `startxref` of `next` names, which must start at or after
 /// `from`.
+#[cfg(test)]
 pub(super) fn update_entries(b: &PdfDocument, next: &[u8], from: usize) -> Option<Vec<(i32, u8, u64, u64)>> {
     let off = last_startxref(next).filter(|o| *o >= from as u64)?;
     Some(xref_section(b, next, off)?.entries)

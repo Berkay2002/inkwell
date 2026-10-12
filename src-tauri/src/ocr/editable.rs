@@ -426,7 +426,6 @@ fn convert_page(doc: &mut PdfDocument, r: &PageResult, kit: &mut Kit, pref: Font
 
     // Lines: boxes, baselines and sizes.
     struct LineInfo {
-        words: Vec<usize>,
         baseline: f32,
         size: f32,
         own_size: bool,
@@ -436,7 +435,7 @@ fn convert_page(doc: &mut PdfDocument, r: &PageResult, kit: &mut Kit, pref: Font
     let mut fallback_sizes: Vec<f32> = Vec::new();
     for line in &r.lines {
         if line.is_empty() {
-            infos.push(LineInfo { words: Vec::new(), baseline: 0.0, size: 0.0, own_size: false });
+            infos.push(LineInfo { baseline: 0.0, size: 0.0, own_size: false });
             continue;
         }
         let x0 = line.iter().map(|w| w.bbox[0]).fold(f32::MAX, f32::min);
@@ -463,7 +462,7 @@ fn convert_page(doc: &mut PdfDocument, r: &PageResult, kit: &mut Kit, pref: Font
                 (y1 - 0.2 * s, s, false)
             }
         };
-        infos.push(LineInfo { words: (0..line.len()).collect(), baseline, size, own_size: own });
+        infos.push(LineInfo { baseline, size, own_size: own });
     }
     let page_size = median(&mut sizes).or_else(|| median(&mut fallback_sizes)).unwrap_or(10.0).max(2.0);
     for i in &mut infos {

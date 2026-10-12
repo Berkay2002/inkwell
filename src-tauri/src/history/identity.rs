@@ -55,6 +55,7 @@ pub fn file_id(path: &Path) -> Option<FileId> {
 }
 
 /// Filesystems whose file ids survive renames and are not reused while the file exists.
+#[cfg(windows)]
 pub fn stable_ids(fs_name: &str) -> bool {
     fs_name.eq_ignore_ascii_case("NTFS") || fs_name.eq_ignore_ascii_case("ReFS")
 }
