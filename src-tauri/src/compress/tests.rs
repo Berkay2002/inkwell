@@ -1901,3 +1901,24 @@ fn the_invalid_bookmarks_option_leaves_links_and_everything_else_alone() {
     assert!(r.stripped.bookmarks_unchecked.is_none());
     assert_eq!(probe(&r.output), base);
 }
+
+#[test]
+fn a_destination_name_that_is_not_utf8_is_looked_up_by_its_bytes() {
+    let s = Scratch::new();
+    let input = s.path("latin1.pdf");
+    // /Dests keeps a key with the byte E9; the bookmark names it, another names a key that is not there
+    bookmark_pdf(
+        &input,
+        "/Dests << /caf#E9 [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 2 >>",
+        &[
+            "<< /Title (Cafe) /Parent 4 0 R /Dest /caf#E9 /Next 8 0 R >>",
+            "<< /Title (Other) /Parent 4 0 R /Dest /caf#E8 /Prev 7 0 R >>",
+        ],
+    );
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 1, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "Cafe");
+}
