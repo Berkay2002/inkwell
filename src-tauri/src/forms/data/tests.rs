@@ -418,3 +418,14 @@ fn one_indirect_value_over_1_mb_shared_by_many_fields_is_dropped_by_each_and_not
     assert_eq!(p.fields.len(), n);
     assert!(p.fields.iter().all(|(_, v)| *v == Val::Invalid("the value is longer than 1 MB")));
 }
+
+#[test]
+fn a_json_list_with_one_entry_over_1_mb_says_so_and_not_that_a_list_takes_text_only() {
+    let long = "y".repeat(MAX_STR + 1);
+    let file = format!(r#"{{"Long": ["a", "{long}"], "Mixed": ["a", {{"b": 1}}], "Fine": ["a", "b"]}}"#);
+    let p = parse(file.as_bytes()).unwrap();
+    let of = |k: &str| p.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap();
+    assert_eq!(of("Long"), Val::Invalid("the value is longer than 1 MB"));
+    assert_eq!(of("Mixed"), Val::Invalid("a list takes text values only"));
+    assert_eq!(of("Fine"), Val::Many(vec!["a".into(), "b".into()]));
+}
