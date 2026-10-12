@@ -367,3 +367,23 @@ fn xfdf_field_names_built_from_long_parents_are_charged_and_capped() {
     assert_eq!((p.over, p.left_out.len()), (1, 1));
     assert_eq!(p.left_out[0].0.len(), 60);
 }
+
+#[test]
+fn a_password_field_is_never_written_to_a_file_or_filled_from_one() {
+    let (eng, id, _) = form("password");
+    add_one(&eng, id, 1, &nf(FieldKind::Text, "Secret", [72.0, 100.0, 272.0, 120.0]), EditSource::User).unwrap();
+    let w = dto(&eng, id, "Secret").remove(0);
+    edit_one(&eng, id, w.page, w.xref, &FieldPatch { password: Some(true), ..Default::default() }, EditSource::User).unwrap();
+    set(&eng, id, "Full name", text("Asa"));
+    set(&eng, id, "Secret", text("hunter2"));
+    for fmt in [Format::Json, Format::Xfdf, Format::Fdf] {
+        let (bytes, done) = export(&eng, id, fmt, "a.pdf").unwrap();
+        assert_eq!(done.left_out, 1, "{fmt:?}");
+        assert!(!String::from_utf8_lossy(&bytes).contains("hunter2"), "{fmt:?}: the secret is in the file");
+        assert!(!parse(&bytes).unwrap().fields.iter().any(|(n, _)| n == "Secret"), "{fmt:?}");
+    }
+    let r = import_one(&eng, id, &parse(br#"{"Secret": "from the file", "Full name": "Bo"}"#).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.set, 1, "{:?}", r.summary);
+    assert_eq!(skipped(&r.summary, "Secret"), "password field");
+    assert_eq!(dto(&eng, id, "Secret")[0].value, "hunter2");
+}

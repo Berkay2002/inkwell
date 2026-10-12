@@ -1481,6 +1481,11 @@ impl Engine {
         }))
         .unwrap_or(Err(EngineError::Panic));
         if ran.is_ok() && unchanged.is_some_and(std::cell::Cell::get) {
+            // The edit said it changed nothing. Whatever it wrote before swallowing an error of its own would
+            // ride into the next step and the next save, so a document that holds writes is reopened.
+            if ed.doc.doc.has_unsaved_changes() {
+                ed.doc = open_snap(&ed.step().snap, entry)?;
+            }
             return Ok(ed.state(entry));
         }
         let changed = ran.and_then(|(pages, bytes)| {

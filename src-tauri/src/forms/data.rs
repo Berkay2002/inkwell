@@ -33,12 +33,23 @@ struct Out {
     multi: bool,
 }
 
-fn collect(doc: &PdfDocument) -> Result<Vec<Out>> {
+/// A password text field: its value is a secret the person typed, so no file carries it and no file fills it.
+fn is_password(e: &Entry) -> bool {
+    e.kind == FieldKind::Text && flag(field_ff(e), FieldFlags::PASSWORD)
+}
+
+/// The fields with a value, and how many password fields were left out.
+fn collect(doc: &PdfDocument) -> Result<(Vec<Out>, usize)> {
     let entries = scan(doc)?;
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
+    let mut passwords = 0;
     for e in per_field(&entries) {
         if matches!(e.kind, FieldKind::Button | FieldKind::Signature) || e.name.is_empty() || !seen.insert(e.name.clone()) {
+            continue;
+        }
+        if is_password(e) {
+            passwords += 1;
             continue;
         }
         let mut values: Vec<String> = values_of(geti(&e.field, "V"));
@@ -51,7 +62,7 @@ fn collect(doc: &PdfDocument) -> Result<Vec<Out>> {
         }
         out.push(Out { name: e.name.clone(), kind: e.kind, values, multi: e.kind == FieldKind::List && flag(field_ff(e), FieldFlags::MULTI_SELECT) });
     }
-    Ok(out)
+    Ok((out, passwords))
 }
 
 fn json(fields: &[Out]) -> String {
@@ -164,17 +175,19 @@ fn fdf(fields: &[Out], file: &str) -> Vec<u8> {
 #[serde(rename_all = "camelCase")]
 pub struct Exported {
     pub count: usize,
+    /// Password fields: their values are never written to a file.
+    pub left_out: usize,
 }
 
 /// The file bytes for every field's value. Read-only: allowed on a signed or certified document.
 pub fn export(eng: &Engine, doc: DocId, format: Format, file_name: &str) -> Result<(Vec<u8>, Exported)> {
-    let fields = eng.read_custom(doc, collect)?;
+    let (fields, left_out) = eng.read_custom(doc, collect)?;
     let bytes = match format {
         Format::Json => json(&fields).into_bytes(),
         Format::Fdf => fdf(&fields, file_name),
         Format::Xfdf => xfdf(&fields, file_name).into_bytes(),
     };
-    Ok((bytes, Exported { count: fields.len() }))
+    Ok((bytes, Exported { count: fields.len(), left_out }))
 }
 
 // ---- parsing the files ---------------------------------------------------------------------------
@@ -551,6 +564,10 @@ fn fill(rt: &Rt, parsed: &Parsed) -> Result<(Summary, Vec<u32>)> {
         };
         if matches!(e.kind, FieldKind::Button | FieldKind::Signature) {
             skip(&mut sum, name, "this field has no value to fill");
+            continue;
+        }
+        if is_password(e) {
+            skip(&mut sum, name, "password field");
             continue;
         }
         if flag(field_ff(e), FieldFlags::READ_ONLY) {
