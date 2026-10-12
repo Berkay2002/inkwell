@@ -1790,6 +1790,17 @@ fn a_signature_reset_to_cover_the_whole_file_but_not_intact_locks_every_field() 
 }
 
 #[test]
+fn listing_parses_each_signed_revision_once() {
+    // Tenant's locks and its binding both read the revision it signs; Witness covers the whole file.
+    let b = lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Other)]>>", "");
+    let b = pdf::sign(&b, &ids().1, &SignRequest { field: Some("Witness".into()), ..unseen() }).unwrap();
+    pdf::PARSES.with(|n| n.set(0));
+    let i = infos(&b);
+    assert!(i.iter().filter(|s| s.status != Status::Unsigned).all(|s| s.intact), "{i:?}");
+    assert_eq!(pdf::PARSES.with(|n| n.get()), 2);
+}
+
+#[test]
 fn a_signature_whose_signed_revision_cannot_be_read_locks_every_field() {
     let b = lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Witness)]>>", "");
     // A later update points the signature's byte range at bytes that are no revision at all.

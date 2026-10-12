@@ -111,7 +111,7 @@ pub(super) fn sign_with(base: &[u8], id: &DigitalId, req: &SignRequest, tamper: 
         return Err(refuse(format!("this document has more than {MAX_SIGNATURES} signatures, more than Inkwell checks")));
     }
     // DocMDP (ISO 32000-1 12.8.2.2): a certification that allows no changes ends the document.
-    let (locks, lock_p) = locks_of(&fields, base);
+    let (locks, lock_p) = locks_of(&fields, base, &mut Revisions::new());
     let p = [docmdp_level(&doc), lock_p].into_iter().flatten().min();
     if p == Some(1) {
         return Err(refuse(CERTIFIED_P1));
@@ -578,7 +578,7 @@ type Locks = Vec<(Vec<crate::forms::scripts::Lock>, String)>;
 /// The locks of every signed field, valid or not (the safe side): what it carries now and what it carried in the
 /// revision it signs, so a later update can't take a lock away by rewriting `/Lock` or `/Reference`. Also the lowest
 /// `/Lock /P` among them (PDF 2.0, ISO 32000-2 12.7.5.5): a document-level DocMDP level like a certification's.
-fn locks_of(fields: &[SigField], bytes: &[u8]) -> (Locks, Option<u8>) {
+fn locks_of(fields: &[SigField], bytes: &[u8], revs: &mut Revisions) -> (Locks, Option<u8>) {
     use crate::forms::scripts::signature_locks;
     let mut p = None;
     let locks = fields
@@ -586,7 +586,7 @@ fn locks_of(fields: &[SigField], bytes: &[u8]) -> (Locks, Option<u8>) {
         .filter(|g| g.value.is_some())
         .map(|g| {
             let mut l = signature_locks(&g.field, &g.widget);
-            let (was, was_p) = signed_locks(g, bytes);
+            let (was, was_p) = signed_locks(g, bytes, revs);
             l.extend(was);
             p = [p, lock_p(&g.field, &g.widget), was_p].into_iter().flatten().min();
             (l, g)
@@ -622,7 +622,7 @@ fn lock_p(field: &PdfObject, widget: &PdfObject) -> Option<u8> {
 /// when it is intact and covers the whole file (the current ones are those). A revision that can't be read, or that
 /// has no field holding this signature, locks everything: what it locked is unknown. So does a signature that claims
 /// the whole file but isn't intact: a later update may have stripped its locks and reset its `/ByteRange`.
-fn signed_locks(g: &SigField, bytes: &[u8]) -> (Vec<crate::forms::scripts::Lock>, Option<u8>) {
+fn signed_locks(g: &SigField, bytes: &[u8], revs: &mut Revisions) -> (Vec<crate::forms::scripts::Lock>, Option<u8>) {
     use crate::forms::scripts::{Lock, signature_locks};
     let Some(v) = g.value.as_ref() else { return (Vec::new(), None) };
     let end = out_covered(v);
@@ -632,11 +632,37 @@ fn signed_locks(g: &SigField, bytes: &[u8]) -> (Vec<crate::forms::scripts::Lock>
     }
     let then = |e: usize| -> Option<(Vec<Lock>, Option<u8>)> {
         let vn = ind(v)?;
-        let then = PdfDocument::from_bytes(bytes.get(..e)?).ok()?;
-        let h = sig_fields(&then).ok()?.into_iter().find(|h| h.value.as_ref().and_then(ind) == Some(vn))?;
+        let then = revs.get(bytes, e)?;
+        let h = sig_fields(then).ok()?.into_iter().find(|h| h.value.as_ref().and_then(ind) == Some(vn))?;
         Some((signature_locks(&h.field, &h.widget), lock_p(&h.field, &h.widget)))
     };
     end.and_then(then).unwrap_or_else(|| (vec![Lock::All], None))
+}
+
+/// The revisions of one file parsed so far, by where they end (`None`: past the file, or not a PDF).
+struct Revisions(std::collections::HashMap<usize, Option<PdfDocument>>);
+
+#[cfg(test)]
+thread_local! {
+    /// How many revisions `Revisions` parsed: the tests check each is parsed once.
+    pub(super) static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl Revisions {
+    fn new() -> Self {
+        Self(Default::default())
+    }
+
+    fn get(&mut self, bytes: &[u8], end: usize) -> Option<&PdfDocument> {
+        self.0
+            .entry(end)
+            .or_insert_with(|| {
+                #[cfg(test)]
+                PARSES.with(|n| n.set(n.get() + 1));
+                PdfDocument::from_bytes(bytes.get(..end)?).ok()
+            })
+            .as_ref()
+    }
 }
 
 /// The signer of the first signature whose lock covers the field named `name`.
@@ -858,7 +884,9 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<SignList> 
         return Err(refuse(format!("this document has more than {MAX_SIGNATURES} signatures, more than Inkwell checks")));
     }
     let mut infos: Vec<SignatureInfo> = fields.iter().map(|f| info(f, bytes, trust)).collect();
-    let (locks, lock_p) = locks_of(&fields, bytes);
+    // One parse per revision a signature signs, shared by its locks and `bound`.
+    let mut revs = Revisions::new();
+    let (locks, lock_p) = locks_of(&fields, bytes, &mut revs);
     let p = [docmdp_level(doc), lock_p].into_iter().flatten().min();
     for (f, i) in fields.iter().zip(infos.iter_mut()) {
         i.locked_by = locked_by(&locks, &f.name);
@@ -873,7 +901,7 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<SignList> 
         if !i.intact {
             continue;
         }
-        match bound(f, doc, bytes) {
+        match bound(f, doc, bytes, &mut revs) {
             Ok((certify, then, touched)) => {
                 i.certify = certify;
                 signed_then[k] = then;
@@ -978,13 +1006,12 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<SignList> 
 /// its certification, the widgets already signed in that revision, and the fields this signature
 /// locks there that read differently now (see `locked_changes`).
 #[allow(clippy::type_complexity)]
-fn bound(f: &SigField, doc: &PdfDocument, bytes: &[u8]) -> std::result::Result<(Option<u8>, std::collections::HashSet<i32>, Vec<String>), &'static str> {
+fn bound(f: &SigField, doc: &PdfDocument, bytes: &[u8], revs: &mut Revisions) -> std::result::Result<(Option<u8>, std::collections::HashSet<i32>, Vec<String>), &'static str> {
     const UNBOUND: &str = "it is not part of the revision it signs";
     let v = f.value.as_ref().ok_or(UNBOUND)?;
     let (Some(vn), Some(wn), Some(fnum), Some(end)) = (ind(v), ind(&f.widget), ind(&f.field), out_covered(v)) else { return Err(UNBOUND) };
     const DAMAGED: &str = "the revision it signs is damaged";
-    let then = PdfDocument::from_bytes(&bytes[..end.min(bytes.len())]).ok().filter(|d| !repaired(d)).ok_or(DAMAGED)?;
-    let then = &then;
+    let then = revs.get(bytes, end).filter(|d| !repaired(d)).ok_or(DAMAGED)?;
     let fields = sig_fields(then).map_err(|_| UNBOUND)?;
     let same = |g: &SigField| {
         ind(&g.widget) == Some(wn) && ind(&g.field) == Some(fnum) && g.name == f.name && g.value.as_ref().and_then(ind) == Some(vn)
