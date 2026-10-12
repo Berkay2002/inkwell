@@ -728,11 +728,49 @@ fn the_presets_never_rank_a_smaller_preset_above_a_larger_one() {
         if !(est[0] <= est[1] && est[1] <= est[2]) {
             bad.push(format!("{name}: estimated smallest {}, balanced {}, high {}", est[0], est[1], est[2]));
         }
-        if !(real[0] <= real[1] && real[1] <= real[2]) {
+        // Two presets that write the same content differ by the random /ID of each save (see the test below).
+        if !(real[0] <= real[1] + ID_JITTER && real[1] <= real[2] + ID_JITTER) {
             bad.push(format!("{name}: real smallest {}, balanced {}, high {}", real[0], real[1], real[2]));
         }
     }
     assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// The most the size of a save varies with its random /ID: MuPDF writes the new second half as 34 bytes of hex, or as a
+/// literal string when that is shorter (as short as 18 bytes), one save in eighty.
+const ID_JITTER: u64 = 16;
+
+/// MuPDF gives a saved file a new random second half of its /ID (`change_identity`, pdf-write.c), so the same file
+/// came out up to `ID_JITTER` bytes smaller now and then. The estimate wrote the sample several times and let that
+/// into its ratios: two presets with the same content swapped places by a byte.
+#[test]
+fn the_estimate_of_a_file_with_an_id_is_the_same_every_time() {
+    let scratch = Scratch::new();
+    let input = scratch.copy("edit-source.pdf");
+    let full = audit_file(&input, None).unwrap();
+    // one save in eighty is shorter and the estimate makes four: before the fix 600 rounds gave 11 different answers
+    let runs: std::collections::BTreeSet<Vec<u64>> = (0..100)
+        .map(|_| estimate::estimate(&input, None, &full, &AtomicBool::new(false)).unwrap().iter().map(|e| e.bytes).collect())
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+}
+
+/// The estimate keeps the sample's /ID when the file is encrypted: the key of the older encryption forms comes from
+/// it, and a sample that lost it would not open again.
+#[test]
+fn the_estimate_of_an_encrypted_file_still_opens_its_sample() {
+    let scratch = Scratch::new();
+    let source = scratch.copy("edit-source.pdf");
+    // an owner password only: the file opens with no password, and so does the sample
+    for (i, enc) in [Encryption::Rc4_128, Encryption::Aes128, Encryption::Aes256].into_iter().enumerate() {
+        let input = scratch.path(&format!("locked-{i}.pdf"));
+        let mut w = PdfWriteOptions::default();
+        w.set_encryption(enc).set_owner_password("owner");
+        PdfDocument::open(source.to_str().unwrap()).unwrap().save_with_options(input.to_str().unwrap(), w).unwrap();
+        let full = audit_file(&input, None).unwrap();
+        let est = estimate::estimate(&input, None, &full, &AtomicBool::new(false));
+        assert!(est.is_ok(), "{enc:?}: {est:?}");
+    }
 }
 
 /// A big, image-heavy file: the sample covers a small part of it; the estimate is close and the range

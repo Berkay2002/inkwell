@@ -334,10 +334,10 @@ impl Dests {
 
     /// The destination a name or string stands for, MuPDF's way (`pdf_lookup_dest`): in `/Dests` alone when the
     /// catalog has one, else in the `/Names` tree. `Some(None)`: the document does not define it. `None`: the key
-    /// could not be put in a form to look up (not UTF-8, a NUL, a lossy decode) or the tree could not be read,
-    /// so it is not judged. `first`: the key is the link's own destination, which MuPDF's viewer turns into a URI and
-    /// back (see `viewer_key`); a value found in `/Dests` that is itself a name or string (a later hop) is looked up
-    /// as it is (`resolve_dest_rec`).
+    /// could not be put in a form to look up (a string that is not UTF-8 text, a NUL, a lossy decode) or the tree
+    /// could not be read, so it is not judged. `first`: the key is the link's own destination, which MuPDF's viewer
+    /// turns into a URI and back (see `viewer_key`); a value found in `/Dests` that is itself a name or string (a
+    /// later hop) is looked up as it is (`resolve_dest_rec`).
     pub(crate) fn lookup(&self, key: &PdfObject, first: bool) -> Option<Option<PdfObject>> {
         let key = Self::key(key);
         if self.old.is_some() { self.in_old(&key, false, first) } else { self.in_tree(&key) }
@@ -356,7 +356,7 @@ impl Dests {
 
     /// In the `/Dests` dictionary. On the first hop a name or a string goes by the key MuPDF's viewer forms from its
     /// text (`pdf_resolve_link_dest`: `pdf_new_text_string`, see `viewer_key`) and by that alone: a key spelled with
-    /// the string's own bytes is not looked at, and a name that is not UTF-8 is not judged. A later hop goes by the
+    /// the string's own bytes is not looked at, and a name's bad bytes are U+FFFD in it. A later hop goes by the
     /// name itself or the string's own bytes as a C string (`pdf_dict_get`, `pdf_dict_gets`). `any` (the optimizer,
     /// which only keeps more) tries all of those, and the text as a UTF-8 name and as PDFDocEncoding bytes.
     fn in_old(&self, key: &PdfObject, any: bool, first: bool) -> Option<Option<PdfObject>> {
@@ -367,12 +367,12 @@ impl Dests {
                 return Some(by_name);
             }
             // the viewer turns a link's own name into a string of its text (pdf_parse_link_dest, then
-            // pdf_new_text_string): a name that is not UTF-8 has no faithful text, so it is not judged there
-            let text = String::from_utf8(key.as_name().ok()?).ok();
+            // pdf_new_text_string): a name that is not UTF-8 goes by the text MuPDF reads, bad bytes and all
+            let viewer = viewer_key(&key.as_name().ok()?);
             if !any {
-                return self.by_bytes(old, &viewer_key(&text?));
+                return self.by_bytes(old, &viewer);
             }
-            let viewed = text.and_then(|t| self.by_bytes(old, &viewer_key(&t)).flatten());
+            let viewed = self.by_bytes(old, &viewer).flatten();
             return Some(by_name.or(viewed));
         }
         let bytes = key.as_bytes().ok()?;
@@ -391,7 +391,7 @@ impl Dests {
         }
         // no faithful text: the viewer's key is not known, so it is not judged; `any` leaves that to the tree
         let Some(text) = mupdf_text(&bytes) else { return if any { Some(None) } else { None } };
-        let viewer = viewer_key(&text);
+        let viewer = viewer_key(text.as_bytes());
         if !any {
             return self.by_bytes(old, &viewer);
         }
@@ -423,7 +423,7 @@ impl Dests {
         }
         let text = if key.is_name().ok()? {
             // MuPDF's viewer URI-encodes the bytes and reads them back as UTF-8 with U+FFFD for the bad ones: lossy,
-            // so a name that is not UTF-8 is not judged
+            // so a name that is not UTF-8 is not looked for in the tree (`/Dests` takes it, see `viewer_key`)
             String::from_utf8(key.as_name().ok()?).ok()?
         } else {
             mupdf_text(&key.as_bytes().ok()?)?
@@ -434,18 +434,60 @@ impl Dests {
     }
 }
 
-/// The `/Dests` key MuPDF's viewer looks a string destination up by: the decoded text through `pdf_new_text_string`
-/// (ASCII as it is, any other text as UTF-16BE with a byte order mark, never PDFDocEncoding), read by `pdf_dict_gets`
-/// as a C string, which ends at the first 0 byte (so "caf\u{e9}" looks up the key FE FF).
-fn viewer_key(text: &str) -> Vec<u8> {
-    let text = text.split('\0').next().unwrap_or_default();
+/// The `/Dests` key MuPDF's viewer looks a destination up by: the text (a link's name bytes, or a string's decoded
+/// text) through `pdf_new_text_string` (ASCII as it is, any other text as UTF-16BE with a byte order mark, never
+/// PDFDocEncoding), read by `pdf_dict_gets` as a C string, which ends at the first 0 byte (so "caf\u{e9}" looks up the
+/// key FE FF). The text is taken the way `pdf_new_text_string_utf16be` does (pdf-parse.c, 495-531): rune by rune
+/// with `fz_chartorune`, which reads a byte that starts no valid sequence as U+FFFD, so `/caf#E9` is FE FF 00 63 00 61
+/// 00 66 FF FD, cut to FE FF.
+fn viewer_key(text: &[u8]) -> Vec<u8> {
+    let text = &text[..text.iter().position(|&c| c == 0).unwrap_or(text.len())];
     let mut key = if text.is_ascii() {
-        text.as_bytes().to_vec()
+        text.to_vec()
     } else {
-        [0xFE, 0xFF].into_iter().chain(text.encode_utf16().flat_map(u16::to_be_bytes)).collect()
+        let mut key = vec![0xFE, 0xFF];
+        let mut at = 0;
+        while at < text.len() {
+            let (c, n) = mupdf_rune(&text[at..]);
+            at += n;
+            // pdf-parse.c, 517-530: a rune past U+FFFF is two UTF-16 units, the masks also fit what UTF-8 cannot hold
+            let units = if c >= 0x10000 {
+                [(((c - 0x10000) >> 10) & 0x3FF) + 0xD800, ((c - 0x10000) & 0x3FF) + 0xDC00].to_vec()
+            } else {
+                vec![c]
+            };
+            key.extend(units.into_iter().flat_map(|u| [(u >> 8) as u8, u as u8]));
+        }
+        key
     };
     key.truncate(key.iter().position(|&c| c == 0).unwrap_or(key.len()));
     key
+}
+
+/// MuPDF's `fz_chartorune` (fitz/string.c, 569-647): the rune at the start of a NUL-terminated string and the bytes
+/// it takes. Shortest forms only, surrogates and values up to 0x1FFFFF pass, C0 80 is U+0000, and a byte that starts
+/// no valid sequence is U+FFFD and takes one byte. Not `String::from_utf8_lossy`, which differs on all of those.
+fn mupdf_rune(s: &[u8]) -> (u32, usize) {
+    let at = |i: usize| s.get(i).copied().unwrap_or(0) as u32;
+    let lead = at(0);
+    if lead == 0xC0 && at(1) == 0x80 {
+        return (0, 2);
+    }
+    let n = match lead {
+        0..=0x7F => return (lead, 1),
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => return (0xFFFD, 1),
+    };
+    let mut rune = lead & (0x7F >> n);
+    for i in 1..n {
+        if at(i) & 0xC0 != 0x80 {
+            return (0xFFFD, 1);
+        }
+        rune = (rune << 6) | (at(i) & 0x3F);
+    }
+    if rune < [0, 0, 0x80, 0x800, 0x10000][n] { (0xFFFD, 1) } else { (rune, n) }
 }
 
 /// MuPDF's `is_valid_utf8` (pdf-parse.c): looser than UTF-8 (overlong forms, surrogates and values past U+10FFFF

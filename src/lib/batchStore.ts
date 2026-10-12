@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import * as api from "./api";
-import type { BatchAction, BatchEvent, BatchFileReport, BatchIssue, BatchOutput, BatchPreview, BatchReport, BatchStep, BatchStepKind, FileRef } from "./api";
+import type { BatchAction, BatchAnswer, BatchEvent, BatchFileReport, BatchIssue, BatchOutput, BatchPreview, BatchPromptEvent, BatchReport, BatchStep, BatchStepKind, FileRef } from "./api";
 import { copyOf, emptyAction, exportName, hasProtect, MAX_STEPS, move, newStep, saveBlock, splitIssues, withoutPasswords, withPasswords } from "./batchLogic";
 
 /**
@@ -35,6 +35,24 @@ export interface Editor {
   error: string | null;
 }
 
+/** A step the run is waiting on: the person changes its options for this file, then continues, skips it or stops. */
+export interface RunPrompt {
+  /** The engine's id for this question: an answer for another one is dropped. */
+  request: number;
+  /** The file (position in the run) and its name, and the step's place. */
+  file: number;
+  name: string;
+  step: number;
+  steps: number;
+  label: string;
+  /** The step as the person has it now: the saved options, with their changes. */
+  entry: BatchStep;
+  /** Why the last answer was not accepted. */
+  problem: string | null;
+  /** An answer is on its way. */
+  sending: boolean;
+}
+
 export interface Run {
   /** Which run this is: an answer that arrives after the person left it is dropped. */
   rid: number;
@@ -54,6 +72,8 @@ export interface Run {
   issues: BatchIssue[];
   job: number | null;
   rows: RunRow[];
+  /** The step the run is waiting on, if any. */
+  prompt: RunPrompt | null;
   report: BatchReport | null;
   error: string | null;
 }
@@ -102,6 +122,10 @@ interface BatchStore {
   runNow: () => Promise<void>;
   cancel: () => void;
   again: () => void;
+  /** Changes the options (or page range) of the step the run is waiting on, for the file it is on. */
+  patchPrompt: (patch: Partial<BatchStep>) => void;
+  /** Answers the prompt with that `request`: one that is no longer the current is dropped. */
+  answerPrompt: (request: number, answer: "continue" | "skip" | "stop") => Promise<void>;
 }
 
 let jobSeq = 1_970_000_000;
@@ -119,9 +143,24 @@ export const runLocked = (r: Run | null) => !!r && (r.scanning || r.phase === "r
 
 const blankRow = (): RunRow => ({ state: "waiting", step: 0, steps: 0, label: "", report: null });
 
+/** The prompt an event opens (a `prompt` event), or null. */
+export const promptOf = (ev: BatchPromptEvent): RunPrompt => ({
+  request: ev.request,
+  file: ev.index,
+  name: ev.name,
+  step: ev.step,
+  steps: ev.steps,
+  label: ev.label,
+  entry: structuredClone(ev.entry),
+  problem: ev.problem,
+  sending: false,
+});
+
 /** One engine event applied to the rows: the run's state machine, kept pure for the tests. */
 export function applyEvent(rows: RunRow[], ev: BatchEvent): RunRow[] {
   switch (ev.event) {
+    case "prompt":
+      return rows;
     case "started":
       return Array.from({ length: ev.files }, blankRow);
     case "fileStarted":
@@ -347,6 +386,7 @@ export const useBatch = create<BatchStore>((set, get) => {
           issues: [],
           job: null,
           rows: [],
+          prompt: null,
           report: null,
           error: null,
         },
@@ -474,18 +514,46 @@ export const useBatch = create<BatchStore>((set, get) => {
           action,
           r.files.map((f) => f.token),
           folder,
-          (ev) => set((s) => (s.run && s.run.job === job ? { run: { ...s.run, rows: applyEvent(s.run.rows, ev) } } : s)),
+          (ev) =>
+            set((s) => {
+              if (!s.run || s.run.job !== job) return s;
+              // A question is open until the engine moves on: a step, a file or the end of the run closes it.
+              const prompt = ev.event === "prompt" ? promptOf(ev) : s.run.prompt && ev.event !== "started" ? null : s.run.prompt;
+              return { run: { ...s.run, rows: applyEvent(s.run.rows, ev), prompt } };
+            }),
         );
         // Passwords are done with: nothing keeps them past the run that used them.
-        if (mine()) patchRun({ phase: "done", report, openPassword: "", permissionsPassword: "", job: null });
+        if (mine()) patchRun({ phase: "done", report, openPassword: "", permissionsPassword: "", job: null, prompt: null });
       } catch (e) {
-        if (mine()) patchRun({ phase: get().run?.phase === "running" ? "done" : "setup", error: errText(e), openPassword: "", permissionsPassword: "", job: null });
+        if (mine()) patchRun({ phase: get().run?.phase === "running" ? "done" : "setup", error: errText(e), openPassword: "", permissionsPassword: "", job: null, prompt: null });
       }
     },
 
     cancel: () => {
       const j = get().run?.job;
       if (j != null && get().run?.phase === "running") void api.batchCancel(j).catch(() => {});
+    },
+
+    patchPrompt: (patch) =>
+      set((s) => {
+        const p = s.run?.prompt;
+        if (!s.run || !p || p.sending) return s;
+        return { run: { ...s.run, prompt: { ...p, entry: { ...p.entry, ...patch } as BatchStep } } };
+      }),
+
+    answerPrompt: async (request, answer) => {
+      const r = get().run;
+      const p = r?.prompt;
+      // An answer to a question that is no longer the open one (a second press, a slow double click) is not sent.
+      if (!r || !p || p.request !== request || p.sending || r.job == null || r.phase !== "running") return;
+      const body: BatchAnswer = answer === "continue" ? { kind: "continue", step: p.entry } : { kind: answer };
+      patchRun({ prompt: { ...p, sending: true } });
+      try {
+        await api.batchPromptAnswer(r.job, request, body);
+      } catch {
+        // The run decides what happens next; a failed call leaves the question as it was, to try again.
+        if (get().run?.prompt?.request === request) patchRun({ prompt: { ...p, sending: false } });
+      }
     },
 
     again: () => {

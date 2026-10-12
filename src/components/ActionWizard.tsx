@@ -1,10 +1,10 @@
 import { useEffect } from "react";
-import type { BatchAction, BatchFilePreview, BatchIssue } from "../lib/api";
+import type { BatchAction, BatchFilePreview, BatchIssue, BatchStep } from "../lib/api";
 import { filesWord, hasProtect, saveBlock, splitIssues, stepLabel } from "../lib/batchLogic";
-import { type Editor, type Run, type RunRow, runLocked, useBatch } from "../lib/batchStore";
+import { type Editor, type Run, type RunPrompt, type RunRow, runLocked, useBatch } from "../lib/batchStore";
 import { formatBytes } from "../lib/toolsStore";
 import { revealInFolder } from "../recents";
-import { ActionEditor } from "./ActionEditor";
+import { ActionEditor, PagesField, StepForm } from "./ActionEditor";
 import { Icon } from "./Icons";
 import "./actionWizard.css";
 
@@ -134,6 +134,7 @@ function Card({ a, confirm }: { a: BatchAction; confirm: boolean }) {
         {a.steps.map((s, i) => (
           <li key={i} className={s.kind === "invalid" ? "bad" : ""}>
             {stepLabel(s)}
+            {s.prompt && <span className="aw-ask"> asks first</span>}
           </li>
         ))}
       </ol>
@@ -300,7 +301,7 @@ function Setup({ run }: { run: Run }) {
                       <span className="aw-file-name" title={f.path}>
                         {f.path.split(/[\\/]/).pop()}
                       </span>
-                      {pv && !run.stale && <PreviewLine pv={pv} />}
+                      {pv && !run.stale && <PreviewLine pv={pv} steps={action.steps} />}
                     </span>
                     <button className="ax-icon" aria-label={`Remove ${f.path.split(/[\\/]/).pop()}`} title="Remove" disabled={locked} onClick={() => act().removeFile(i)}>
                       <Icon name="close" size={14} />
@@ -321,7 +322,10 @@ function Setup({ run }: { run: Run }) {
           <h3 className="aw-col-title aw-flat">What it does</h3>
           <ol className="aw-plan-steps">
             {action.steps.map((s, i) => (
-              <li key={i}>{stepLabel(s)}</li>
+              <li key={i}>
+                {stepLabel(s)}
+                {s.prompt && <span className="aw-ask"> asks first</span>}
+              </li>
             ))}
           </ol>
           <p className="dim aw-plan-out">
@@ -394,11 +398,14 @@ function Outcome({ run, blocking }: { run: Run; blocking: BatchIssue[] }) {
   return <>{run.action.output.kind === "folder" ? "You choose the output folder when you press Run" : "Ready to run"}</>;
 }
 
-function PreviewLine({ pv }: { pv: BatchFilePreview }) {
+function PreviewLine({ pv, steps }: { pv: BatchFilePreview; steps: BatchStep[] }) {
   if (pv.status === "ok") {
     return (
       <span className="aw-pv ok">
         Will run {pv.steps.length} {pv.steps.length === 1 ? "step" : "steps"}
+        {pv.prompts.length > 0 && (
+          <span className="aw-ask"> · asks before {pv.prompts.map((i) => (steps[i] ? stepLabel(steps[i]) : `step ${i + 1}`)).join(", ")}</span>
+        )}
         {pv.outputs.length > 0 && <span className="dim"> → {pv.outputs.join(", ")}</span>}
       </span>
     );
@@ -432,11 +439,14 @@ function Progress({ run }: { run: Run }) {
           ))}
         </ul>
       </div>
+      {run.prompt && <PromptSheet prompt={run.prompt} />}
       <footer className="aw-foot">
         <span className={counts.error || run.error ? "aw-outcome bad" : "aw-outcome"} aria-live="polite">
           {run.error
             ? run.error
-            : running
+            : run.prompt
+              ? "Waiting for your answer…"
+              : running
               ? `Working on file ${Math.min(done + 1, rows.length)} of ${rows.length}…`
               : `${report?.cancelled ? "Cancelled. " : report?.stopped ? "Stopped after a failure. " : ""}${counts.ok} done${counts.skipped ? `, ${counts.skipped} skipped` : ""}${counts.error ? `, ${counts.error} failed` : ""}`}
         </span>
@@ -456,6 +466,47 @@ function Progress({ run }: { run: Run }) {
         )}
       </footer>
     </>
+  );
+}
+
+/**
+ * A step marked "Prompt user": the run waits here, for this file, with the step's own options as saved. Changes
+ * apply to this file only. Escape does nothing: stopping the run is a button, never a stray key.
+ */
+function PromptSheet({ prompt }: { prompt: RunPrompt }) {
+  const patch = (p: Record<string, unknown>) => act().patchPrompt(p as Partial<BatchStep>);
+  const answer = (a: "continue" | "skip" | "stop") => void act().answerPrompt(prompt.request, a);
+  const title = `Step ${prompt.step + 1} of ${prompt.steps}: ${prompt.label}`;
+  return (
+    <div className="aw-prompt-scrim">
+      <section className="aw-prompt" role="dialog" aria-modal="true" aria-label={title}>
+        <h3 className="aw-prompt-title">{title}</h3>
+        <p className="dim aw-prompt-file">
+          For {prompt.name}. Changes here apply to this file only.
+        </p>
+        <div className="aw-prompt-body">
+          {prompt.problem && (
+            <p className="aw-issue" role="alert">
+              {prompt.problem}
+            </p>
+          )}
+          <StepForm step={prompt.entry} patch={patch} />
+          <PagesField step={prompt.entry} patch={patch} />
+        </div>
+        <div className="aw-prompt-foot">
+          <button className="btn danger" disabled={prompt.sending} onClick={() => answer("stop")} title="Cancels the whole run">
+            Stop
+          </button>
+          <span className="grow" />
+          <button className="btn ghost" disabled={prompt.sending} onClick={() => answer("skip")}>
+            Skip this step
+          </button>
+          <button className="btn primary" disabled={prompt.sending} onClick={() => answer("continue")} autoFocus>
+            Continue
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 

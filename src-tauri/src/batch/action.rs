@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+use super::pages;
 use super::steps::{Env, Problem, StepImpl};
 use crate::compress::Preset;
 use crate::convert::ImageFormat;
@@ -303,12 +304,120 @@ impl Step {
     pub fn breaks_signature(&self) -> bool {
         self.imp().breaks_signature()
     }
+
+    /// The step works page by page, so it can be given a page range. The others (compress, protect, set
+    /// properties, sanitize, the exports) act on the file as a whole.
+    pub fn takes_pages(&self) -> bool {
+        matches!(self, Step::HeaderFooter(_) | Step::Watermark(_) | Step::Bates(_) | Step::Redact(_) | Step::Ocr(_) | Step::FlattenForms(_))
+    }
 }
 
-/// `Vec<Step>` that keeps the steps it cannot read as [`Step::Invalid`] instead of failing the whole file.
-fn lenient_steps<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Step>, D::Error> {
-    let raw = Vec::<serde_json::Value>::deserialize(d)?;
-    Ok(raw.into_iter().map(parse_step).collect())
+/// A step as the Action holds it: the step, the pages it works on, and whether the run stops before it to
+/// ask. In JSON the two extras sit beside the step's own fields (`{"kind":"watermark","pages":"1-3","prompt":true,...}`)
+/// and are left out when they are at their defaults, so an action that uses neither is the file it always was.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepEntry {
+    pub step: Step,
+    /// Page range text (`1-3, 5, 8-`, one-based); empty = every page. Only for steps that [`Step::takes_pages`].
+    pub pages: String,
+    /// "Prompt user": a run shows the step's options for each file and waits for the answer.
+    pub prompt: bool,
+}
+
+impl From<Step> for StepEntry {
+    fn from(step: Step) -> Self {
+        Self { step, pages: String::new(), prompt: false }
+    }
+}
+
+impl std::ops::Deref for StepEntry {
+    type Target = Step;
+    fn deref(&self) -> &Step {
+        &self.step
+    }
+}
+
+impl PartialEq<Step> for StepEntry {
+    fn eq(&self, other: &Step) -> bool {
+        self.pages.is_empty() && !self.prompt && self.step == *other
+    }
+}
+
+impl StepEntry {
+    /// The step's label, with its page range when it has one.
+    pub fn label(&self) -> String {
+        match self.pages.trim() {
+            "" => self.step.label(),
+            p => format!("{} (pages {p})", self.step.label()),
+        }
+    }
+
+    pub fn has_range(&self) -> bool {
+        !self.pages.trim().is_empty()
+    }
+
+    /// Why this step's page range cannot be used, in a sentence for the person; None when it has none or it
+    /// is fine. Shared by validation and by the check of a prompt's answer.
+    pub fn range_problem(&self) -> Option<String> {
+        if !self.has_range() {
+            return None;
+        }
+        if !self.step.takes_pages() {
+            return Some("This step works on the whole file: clear its page range.".into());
+        }
+        if let Err(m) = pages::check(&self.pages) {
+            return Some(m);
+        }
+        // The layer list is one for the whole file: removing it would show the hidden content of the pages left out.
+        if matches!(&self.step, Step::Redact(r) if r.sanitize.hidden_layers) {
+            return Some("Hidden layers cannot be removed from some pages only: untick \"Hidden layers\" or clear the page range.".into());
+        }
+        None
+    }
+}
+
+impl Serialize for StepEntry {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut v = serde_json::to_value(&self.step).map_err(serde::ser::Error::custom)?;
+        if let Some(o) = v.as_object_mut() {
+            if !self.pages.is_empty() {
+                o.insert("pages".into(), self.pages.clone().into());
+            }
+            if self.prompt {
+                o.insert("prompt".into(), true.into());
+            }
+        }
+        v.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for StepEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        serde_json::Value::deserialize(d).map(parse_entry)
+    }
+}
+
+/// Reads one step, keeping what it cannot read as [`Step::Invalid`] instead of failing the whole file.
+pub(super) fn parse_entry(mut v: serde_json::Value) -> StepEntry {
+    let (mut pages, mut prompt, mut bad) = (String::new(), false, None);
+    if let Some(o) = v.as_object_mut() {
+        match o.remove("pages") {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(s)) => pages = s,
+            Some(_) => bad = Some("The page range of a step has to be text."),
+        }
+        match o.remove("prompt") {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::Bool(b)) => prompt = b,
+            Some(_) => bad = Some("The \"ask first\" setting of a step has to be true or false."),
+        }
+    }
+    let mut step = parse_step(v);
+    if let (Some(why), false) = (bad, matches!(step, Step::Invalid { .. })) {
+        let name = serde_json::to_value(&step).ok().and_then(|v| v.get("kind").and_then(|k| k.as_str().map(String::from))).unwrap_or_default();
+        step = Step::Invalid { name, why: why.into() };
+    }
+    StepEntry { step, pages, prompt }
 }
 
 pub(super) fn parse_step(v: serde_json::Value) -> Step {
@@ -350,8 +459,7 @@ pub struct Action {
     pub id: String,
     pub name: String,
     pub description: String,
-    #[serde(deserialize_with = "lenient_steps")]
-    pub steps: Vec<Step>,
+    pub steps: Vec<StepEntry>,
     pub output: OutputRule,
     pub on_error: OnError,
     /// A built-in Action: read-only; Duplicate it to change it. Never read from a file.
@@ -408,8 +516,8 @@ impl Action {
                 "Give the copies an ending (for example \" (email)\"): a result never replaces its source.".into(),
             );
         }
-        for (i, step) in self.steps.iter().enumerate() {
-            match step {
+        for (i, entry) in self.steps.iter().enumerate() {
+            match &entry.step {
                 Step::Invalid { name, why } => {
                     let code = if is_remove_security(name) { "forbidden-step" } else { "unknown-step" };
                     issue(Some(i), code, why.clone());
@@ -420,23 +528,26 @@ impl Action {
                         Err(Problem::Invalid(m)) => issue(Some(i), "invalid-step", m),
                         Err(Problem::Unavailable(m)) => issue(Some(i), "unavailable", m),
                     }
+                    if let Some(m) = entry.range_problem() {
+                        issue(Some(i), "invalid-step", m);
+                    }
                 }
             }
         }
         // Protecting writes an encrypted file: whatever comes after could not read it.
-        if let Some(p) = self.steps.iter().position(|s| matches!(s, Step::Protect(_)))
+        if let Some(p) = self.steps.iter().position(|s| matches!(s.step, Step::Protect(_)))
             && p + 1 != self.steps.len()
         {
             issue(Some(p), "order", "Protect with a password has to be the last step.".into());
         }
-        let protects = self.steps.iter().filter(|s| matches!(s, Step::Protect(_))).count();
+        let protects = self.steps.iter().filter(|s| matches!(s.step, Step::Protect(_))).count();
         if protects > 1 {
             issue(None, "order", "Use Protect with a password once.".into());
         }
         // One Bates numbering per file: a second would number over the first.
         let mut seen = HashSet::new();
         for (i, s) in self.steps.iter().enumerate() {
-            let dup = match s {
+            let dup = match &s.step {
                 Step::HeaderFooter(_) => "header and footer",
                 Step::Watermark(_) => "watermark",
                 Step::Bates(_) => "Bates numbering",
@@ -451,11 +562,11 @@ impl Action {
 
     /// True when the Action produces a PDF (it has a step other than the exports).
     pub fn writes_pdf(&self) -> bool {
-        self.steps.iter().any(|s| !matches!(s, Step::ExportImages(_) | Step::ExportText(_)))
+        self.steps.iter().any(|s| !matches!(s.step, Step::ExportImages(_) | Step::ExportText(_)))
     }
 
     /// The first step that would invalidate a signature, if any.
     pub fn first_signature_breaker(&self) -> Option<&Step> {
-        self.steps.iter().find(|s| s.breaks_signature())
+        self.steps.iter().map(|s| &s.step).find(|s| s.breaks_signature())
     }
 }

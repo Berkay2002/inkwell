@@ -1,5 +1,5 @@
 //! Export a PDF: pages to PNG / JPEG / TIFF, text (plain or layout-preserving), HTML / XHTML (from MuPDF's
-//! structured text), the embedded images, and Word.
+//! structured text), the embedded images, Word and RTF.
 //!
 //! The source is what the document shows now (pending edits included): the engine's snapshot when
 //! there is one, else the file on disk. Nothing here writes to the open document.
@@ -15,7 +15,7 @@ use mupdf::text_page::{TextBlockType, TextCharFlags, TextPage, TextPageFlags};
 use mupdf::{Colorspace, Document, Matrix, Pixmap};
 use serde::{Deserialize, Serialize};
 
-use super::docx;
+use super::{docx, flow, rtf};
 use super::{pages_from, safe_stem, unique_stem, Error, Progress, Run, Staging};
 use crate::engine::{DocId, DocSource, Engine};
 
@@ -80,6 +80,8 @@ pub enum ExportKind {
     },
     /// One `.docx`.
     Word,
+    /// One `.rtf`: the same flowing reconstruction as Word.
+    Rtf,
 }
 
 impl ExportKind {
@@ -96,6 +98,7 @@ impl ExportKind {
             Self::Html { xhtml: true } => "xhtml",
             Self::ExtractImages { .. } => "png",
             Self::Word => "docx",
+            Self::Rtf => "rtf",
         }
     }
 }
@@ -231,6 +234,7 @@ fn export_into(
         ExportKind::Text { layout } => single(&staging, &mut run, |out, run| text(doc, &pages, *layout, out, run))?,
         ExportKind::Html { xhtml } => single(&staging, &mut run, |out, run| html(doc, &pages, *xhtml, &stem, out, run))?,
         ExportKind::Word => single(&staging, &mut run, |out, run| word(doc, &pages, &stem, out, run))?,
+        ExportKind::Rtf => single(&staging, &mut run, |out, run| rich_text(doc, &pages, &stem, out, run, &mut warnings))?,
     };
     run.check()?;
 
@@ -596,16 +600,17 @@ fn with_title(head: &str, title: &str) -> String {
 
 // ---------------------------------------------------------------- Word
 
-fn word(doc: &Document, pages: &[u32], title: &str, mut out: impl Write, run: &mut Run<'_>) -> Result<(), Error> {
+/// The pages as the flowing model both document writers take (paragraphs, tables, PNG pictures).
+fn flow_model(doc: &Document, pages: &[u32], run: &mut Run<'_>) -> Result<Vec<flow::Page>, Error> {
     use image::{ExtendedColorType, ImageEncoder};
-    let mut model: Vec<docx::Page> = Vec::new();
+    let mut model: Vec<flow::Page> = Vec::new();
     for (i, &p) in pages.iter().enumerate() {
         run.check()?;
         let page = doc.load_page(p as i32)?;
         let h = page.bounds()?.height() as f64;
         let w = page.bounds()?.width() as f64;
         let tp = page.to_text_page(TextPageFlags::PRESERVE_IMAGES)?;
-        let mut out_page = docx::Page { width: w, height: h, blocks: Vec::new(), images: Vec::new() };
+        let mut out_page = flow::Page { width: w, height: h, blocks: Vec::new(), images: Vec::new() };
         // y runs up in the model
         let flip = |b: mupdf::Rect| [b.x0 as f64, h - b.y1 as f64, b.x1 as f64, h - b.y0 as f64];
         for block in tp.blocks() {
@@ -636,7 +641,7 @@ fn word(doc: &Document, pages: &[u32], title: &str, mut out: impl Write, run: &m
                         continue;
                     }
                     let c = |shift: u32| ((argb >> shift) & 0xff) as f64 / 255.0;
-                    out_page.blocks.push(docx::Block {
+                    out_page.blocks.push(flow::Block {
                         text: text.trim().to_string(),
                         rect: flip(block.bounds()),
                         size: size as f64,
@@ -651,7 +656,7 @@ fn word(doc: &Document, pages: &[u32], title: &str, mut out: impl Write, run: &m
                     let mut png = Vec::new();
                     let color = if r.channels == 1 { ExtendedColorType::L8 } else { ExtendedColorType::Rgb8 };
                     if image::codecs::png::PngEncoder::new(&mut png).write_image(&r.data, r.w, r.h, color).is_ok() {
-                        out_page.images.push(docx::Image { ext: "png", bytes: png, rect: flip(block.bounds()) });
+                        out_page.images.push(flow::Image { ext: "png", bytes: png, rect: flip(block.bounds()) });
                     }
                 }
                 _ => {}
@@ -660,7 +665,28 @@ fn word(doc: &Document, pages: &[u32], title: &str, mut out: impl Write, run: &m
         model.push(out_page);
         run.step(i as u32 + 1);
     }
-    out.write_all(&docx::docx(&model, title))?;
+    Ok(model)
+}
+
+fn word(doc: &Document, pages: &[u32], title: &str, mut out: impl Write, run: &mut Run<'_>) -> Result<(), Error> {
+    out.write_all(&docx::docx(&flow_model(doc, pages, run)?, title))?;
+    out.flush()?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- RTF
+
+fn rich_text(doc: &Document, pages: &[u32], title: &str, mut out: impl Write, run: &mut Run<'_>, warnings: &mut Vec<String>) -> Result<(), Error> {
+    let r = rtf::rtf(&flow_model(doc, pages, run)?, title);
+    if r.skipped_images > 0 {
+        warnings.push(format!(
+            "{} picture{} left out (the file holds at most {} MB of pictures)",
+            r.skipped_images,
+            if r.skipped_images == 1 { "" } else { "s" },
+            rtf::MAX_IMAGE_BYTES >> 20
+        ));
+    }
+    out.write_all(r.text.as_bytes())?;
     out.flush()?;
     Ok(())
 }

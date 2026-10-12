@@ -198,6 +198,14 @@ fn estimate_many(
         if !others.is_empty() {
             s.delete_pages(others)?;
         }
+        // Without an /ID no save has one to renew: MuPDF writes a random second half each time, up to 16 bytes
+        // shorter now and then, and that noise would land in the ratios (pdf-write.c `change_identity`).
+        // shortcut: an encrypted file keeps its /ID (the key of the older forms comes from it) and the rare
+        // jitter; upgrade if a case shows up.
+        let mut trailer = s.trailer()?;
+        if trailer.get_dict("Encrypt")?.is_none() {
+            trailer.dict_delete("ID")?;
+        }
         // Written as the original was (no optimisation), so the settings' structural savings show too.
         let mut plain = PdfWriteOptions::default();
         plain.set_garbage_level(1);
