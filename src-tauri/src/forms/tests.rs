@@ -2360,6 +2360,19 @@ fn the_name_box_follows_the_same_rename_locks_as_the_layout_rename() {
 }
 
 #[test]
+fn the_name_box_takes_the_same_name_limits_as_the_layout_rename() {
+    let (eng, id, _) = script_form("name-box-limits", &["A", "B"]);
+    let n = steps(&eng, id);
+    let w = field(&eng, id, "A");
+    let name = |to: &str| edit_one(&eng, id, w.page, w.xref, &FieldPatch { name: Some(to.into()), ..Default::default() }, EditSource::User).map_err(|e| e.to_string());
+    assert!(name("Bad\u{1}Name").unwrap_err().contains("not a usable field name"));
+    assert!(name(&"x".repeat(513)).unwrap_err().contains("not a usable field name"));
+    assert_eq!(steps(&eng, id), n, "no step, nothing written");
+    assert_eq!(field(&eng, id, "A").name, "A");
+    name(&"x".repeat(512)).unwrap();
+}
+
+#[test]
 fn copies_may_not_take_a_name_a_signature_covers() {
     let (eng, id, _) = script_form("copies-lock-names", &["Free", "Other"]);
     add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));

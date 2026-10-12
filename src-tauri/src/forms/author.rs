@@ -462,6 +462,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
         let parents = get(&field, "Parent").map(|p| full_name(&p)).unwrap_or_default();
         let full = if parents.is_empty() { leaf.to_string() } else { format!("{parents}.{leaf}") };
         if full != e.name {
+            super::layout::valid_name(&full)?;
             // The field's own lock first: a field a signature covers, and a signed signature field, keep their name.
             super::layout::guard(doc, &entries, &[e])?;
             let clash = |o: &Entry| o.node != e.node && (o.name == full || o.name.starts_with(&format!("{full}.")) || full.starts_with(&format!("{}.", o.name)));
