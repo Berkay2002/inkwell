@@ -63,9 +63,10 @@ export const BANNER_HEIGHT = 40;
  * same strip; when it shows (`banner` is its height) they go 6 px below its bottom edge, the row and the report at
  * their usual distance from the bar.
  */
-export function barTops(banner: number | null): { find: number; replace: number; report: number } {
+export function barTops(banner: number | null): { find: number; replace: number; report: number; measure: number } {
   const find = banner == null ? 12 : 12 + Math.ceil(banner) + 6;
-  return { find, replace: find + 46, report: find + 94 };
+  // `measure`: where the measure bar steps down to under an open Find bar (it is centred, at 12 px otherwise).
+  return { find, replace: find + 46, report: find + 94, measure: find + 52 };
 }
 
 /** Why Replace is unavailable, or null when it can run. */

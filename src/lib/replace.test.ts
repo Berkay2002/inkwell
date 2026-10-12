@@ -209,8 +209,8 @@ describe("replacing through the store", () => {
 
 describe("where the Find bar sits", () => {
   it("stays at the top, and goes below the signature banner when that shows, rows and report with it", () => {
-    expect(barTops(null)).toEqual({ find: 12, replace: 58, report: 106 });
-    expect(barTops(BANNER_HEIGHT)).toEqual({ find: 58, replace: 104, report: 152 });
+    expect(barTops(null)).toEqual({ find: 12, replace: 58, report: 106, measure: 64 });
+    expect(barTops(BANNER_HEIGHT)).toEqual({ find: 58, replace: 104, report: 152, measure: 110 });
   });
 
   it("follows the banner's own height when its text wraps", () => {

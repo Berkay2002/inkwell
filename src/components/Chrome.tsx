@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useFind } from "../lib/findStore";
 import { useReplace } from "../lib/replace";
-import { BANNER_HEIGHT, barTops, reportAt, whyNotReplace } from "../lib/replaceLogic";
-import { bannerShown, useSign } from "../lib/sign";
+import { type barTops, reportAt, whyNotReplace } from "../lib/replaceLogic";
+import { useBarTops } from "../lib/useBarTops";
 import { useTextEdit } from "../lib/textEdit";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
@@ -299,20 +299,7 @@ export function SearchBar({ doc }: { doc: DocState }) {
   };
 
   const editing = useTextEdit((s) => s.open && s.section === "text");
-  // The signature banner takes the strip the bar sits in: the bar and what hangs from it go below it, by the
-  // banner's own height (its text wraps in a narrow window).
-  const banner = useSign((s) => bannerShown(s.docs[id]));
-  const [bannerH, setBannerH] = useState<number | null>(null);
-  useEffect(() => {
-    const el = banner ? document.querySelector<HTMLElement>(".sg-banner") : null;
-    if (!el) return setBannerH(null);
-    const measure = () => setBannerH(el.offsetHeight);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [banner]);
-  const tops = barTops(banner ? (bannerH ?? BANNER_HEIGHT) : null);
+  const tops = useBarTops(id);
 
   return (
     <>
