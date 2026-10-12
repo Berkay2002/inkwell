@@ -234,7 +234,7 @@ a word diff) and sets only the stretches of words that changed, through the same
   Acrobat does the closest thing (it reflows the paragraph and the block grows downwards); we don't pull the
   overflow into the next line because that would join lines the user didn't touch.
 - A typed line break starts a new line below the line it was typed in, the lines under it move down by it. A line
-  break typed where two words were is a change even though no word is: what stands between words is compared too. Blanks typed at the start or end of the block change nothing.
+  break typed where two words were is a change even though no word is: what stands between words is compared too. Blanks typed at the start or end of the block change nothing. Neither do blanks typed next to a line end (words typed at the end of a line followed by a space): a line end is crossed only by deleting it or typing a line break over it, so a line that overflows puts the overflow on lines of its own and the next line is not touched.
 - An edit that is only a style (underline, colour, bold, italic, rise, font) or a move keeps the lines the same
   way: the lines without a restyled run are exactly as they were. A bolder line that no longer fits wraps as above.
 - **Whole-block reflow stays** where it is asked for or where there are no lines to keep: a change with a `width`
@@ -263,11 +263,24 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   did and its spaces take up its width, which is what its word spacing did); a line that holds one is set at
   the start (or middle, or end, by the block's alignment) of the line it was, with that line's own baseline, so
   nothing moves with a first-line indent or uneven leading; in a justified block it is stretched to the end that
-  line had, unless it is the last (a line's own leading and trailing spaces don't count in its width). The text
+  line had, unless it is the last (a line's own leading and trailing spaces don't count in its width). A line
+  whose own spaces were stretched in the source (wider than its glyphs by a tenth of its size at each space) is
+  judged the same way in a block too short or too indented to be read as justified: it ends where it did, unless it is the last line; a ragged line is not stretched, and a gap in a `TJ` counts as
+  the font's own space, so a line set with gaps is not taken for a justified one. The spread is
+  written as `TJ` adjustments at the spaces, so it works in any font (`Tw` would not in a two-byte one). The text
   of a run with a match is kept as it is (double and no-break spaces); only a space the replacement would double
-  at its edge goes. A line, a single-line block (heading, table cell) included, never grows past the width its
-  block had: nothing tells what is beside it, so a replacement that does not fit is not wrapped or pushed down
-  but skipped with "the replacement does not fit on its line". The same goes for a block whose line ends can't
+  at its edge goes. A line of a block of several lines never grows past the width its
+  block had, and a replacement that does not fit is not wrapped or pushed down but skipped with "the replacement
+  does not fit on its line". A one-line block (heading, table cell) may grow to the right: up to the nearer of the
+  next text, image, annotation (any `/Rect`, not a popup) or painted mark (one part of a stroked or filled path: a
+  rectangle, a segment) that starts to its right on its baseline band (less half its size; a rule above or below
+  the line is a hairline there and no neighbour), the right edge of a rectangle or annotation the line stands in
+  (its cell), and the page's margin (36 pt in) or, when a block of two or more lines stands over its start (the
+  nearest above or below), that block's right edge, which is the column's; never less than the room it had; past
+  that it is skipped the same way. A form XObject on the band (its `/BBox`; what it draws is not read) that starts
+  to the right is a neighbour, and one the line stands in stops it growing at all. The page's images and
+  annotations are listed once per page (a rewrite moves none); paths and forms come with each read of the page.
+  Images or annotations that can't be listed, or a page with more than 20 000 painted path parts, leave the line as wide as it was. The same goes for a block whose line ends can't
   be placed in its new text, for a block whose lines have their own character spacing or scale, and for a match
   that stops inside a word a dropped hyphen split. A match across a line end
   drops
@@ -340,7 +353,8 @@ opening any of those closes it (`src/lib/commentRail.ts`).
   the whole block; typed text is sent first, and a selection made in text the engine then tidied is ignored. The
   editor previews underline and strikeout for the whole block only. Footer: "Changes apply when you click away. Undo with Ctrl+Z."
 - **Cost**: one `text_blocks` call per page that is near the viewport, cached per page and document generation
-  (`src/lib/textEdit.ts`); edits list the one page again.
+  (`src/lib/textEdit.ts`); edits list the one page again. A new generation (undo, redo, Replace) lists only the selected page at once, so
+  that its block follows or goes (a typed text left without its block is told so); the others when they are shown.
 - **Tests**: `src/lib/textEdit.test.ts` (helpers and store flows), `scripts/edit-shots.mjs` (runtime: edit a line,
   size, colour, add a text box, undo/redo, save, reopen, on a copy of `docs/study/samples/edit-source.pdf`; screens in
   `docs/screens/edit/`).

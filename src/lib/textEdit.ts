@@ -217,6 +217,8 @@ interface Store {
 
   /** Lists the page's blocks for the document's current generation (cached; one call per page and generation). */
   load: (doc: number, page: number) => Promise<void>;
+  /** The document's generation changed (undo, redo, Replace, a restored version): the selected page is listed again, the others when next loaded. */
+  onRev: (doc: number) => void;
   /** Selects a block (sending what was typed into the previous one first; it stays when that fails). */
   select: (doc: number, ref: BlockRef | null) => Promise<void>;
   setDraft: (doc: number, text: string) => void;
@@ -267,6 +269,7 @@ export const useTextEdit = create<Store>((set, get) => {
   const docRev = (doc: number) => useStore.getState().docs[doc]?.rev ?? 0;
   /** Documents with a change in flight: that change settles its own selection. */
   const applying = new Set<number>();
+  const NOT_APPLIED = "The page changed, so the text typed in that block was not applied.";
 
   const fetchPage = async (doc: number, page: number) => {
     const r = await api.textBlocks(doc, page);
@@ -288,7 +291,7 @@ export const useTextEdit = create<Store>((set, get) => {
       const now = of(doc);
       if (now.selected?.page === page && now.selected.index === sel.index) {
         const same = closestBlock(was, r.blocks);
-        if (!same) patchDoc(doc, { selected: null, draft: null, selection: null });
+        if (!same) patchDoc(doc, { selected: null, draft: null, selection: null, ...(now.draft ? { notice: NOT_APPLIED } : {}) });
         else if (same.index !== sel.index) {
           patchDoc(doc, {
             selected: { page, index: same.index },
@@ -334,7 +337,7 @@ export const useTextEdit = create<Store>((set, get) => {
           draft: same && cur ? { ...cur, page: ref.page, index: same.index } : null,
           selection: null,
           failed: false,
-          notice: same ? null : "The page changed, so the text typed in that block was not applied.",
+          notice: same ? null : NOT_APPLIED,
         });
         return;
       }
@@ -396,6 +399,15 @@ export const useTextEdit = create<Store>((set, get) => {
         .finally(() => inflight.delete(key));
       inflight.set(key, job);
       return job;
+    },
+
+    onRev: (doc) => {
+      // A change this store is sending settles its own pages and selection.
+      if (applying.has(doc)) return;
+      // Only the selected page is listed again now (its block must follow or go); the others are listed
+      // again when they are next shown, `load` seeing their old generation.
+      const sel = of(doc).selected;
+      if (sel) void get().load(doc, sel.page);
     },
 
     select: async (doc, ref) => {
@@ -491,6 +503,7 @@ setLeaveGuard({
     const b = d.selected ? d.pages[d.selected.page]?.blocks[d.selected.index] : null;
     return d.draft && b && d.draft.text !== b.text ? d.draft.text : null;
   },
+  rev: (id) => useTextEdit.getState().onRev(id),
 });
 
 useStore.subscribe((s, prev) => {

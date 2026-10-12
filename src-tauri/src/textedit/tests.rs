@@ -1961,6 +1961,35 @@ fn a_line_that_grows_past_the_block_wraps_its_overflow_and_pushes_the_lines_belo
     check(&eng, id);
 }
 
+const FOUR_LINES: &str = "BT /F1 12 Tf 72 700 Td 14 TL (The quick brown fox jumps over) Tj T* (the lazy dog and then the) Tj T* \
+                          (edited line goes on here ok) Tj T* (and the very last one) Tj ET";
+
+#[test]
+fn an_overflow_gets_lines_of_its_own_and_leaves_the_next_line_as_it_was() {
+    let d = dir("edit-overflow-own-line");
+    let (eng, id, _) = open(&d, &pdf(FOUR_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    let lead = before[1][1] - before[0][1];
+    // Words typed at the end of line two, and the same typed with a blank after them: that blank, at a line
+    // end, is no change, and what the line pushes out is not carried into the next line.
+    for typed in ["the lazy dog and then the zzz yyy edited", "the lazy dog and then the zzz yyy  edited"] {
+        set_text(&eng, id, 0, &format!("The quick brown fox jumps over {typed} line goes on here ok and the very last one"));
+        assert_eq!(
+            page_lines(&eng, id),
+            ["The quick brown fox jumps over", "the lazy dog and then the zzz", "yyy", "edited line goes on here ok", "and the very last one"],
+            "{typed:?}"
+        );
+        let after = all_boxes(&eng, id);
+        assert!(same_box(&after[0], &before[0]) && same_place(&after[1], &before[1]), "{after:?} vs {before:?}");
+        assert!((after[2][0] - before[0][0]).abs() < 0.5 && ((after[2][1] - before[1][1]) - lead).abs() < 0.5, "{after:?}");
+        // Each line below is the box it was, one line lower.
+        for (a, b) in after[3..].iter().zip(&before[2..]) {
+            assert!(same_box(a, &[b[0], b[1] + lead, b[2], b[3] + lead]), "{after:?} vs {before:?}");
+        }
+        eng.undo(id).unwrap();
+    }
+}
+
 #[test]
 fn first_line_indent_and_uneven_leading_stay_through_an_edit() {
     let d = dir("edit-keeps-places");
@@ -2246,11 +2275,10 @@ fn a_no_break_space_and_a_double_space_next_to_a_match_stay_as_they_were() {
 }
 
 #[test]
-fn a_single_line_is_never_set_wider_than_it_was() {
+fn a_single_line_stays_clear_of_the_text_beside_it() {
     let d = dir("replace-single-line-room");
-    // A heading or a cell: nothing tells what is beside it (a rule, an image, an empty cell), so it stays inside
-    // the width it had.
-    let page = "BT /F1 12 Tf 72 700 Td (A cat) Tj ET";
+    // A cell with another cell 15 pt past its end: a word of its own width goes on, a longer one is skipped.
+    let page = "BT /F1 12 Tf 72 700 Td (A cat) Tj ET\nBT /F1 12 Tf 120 700 Td (Qty) Tj ET";
     let (eng, id, _) = open(&d, &pages_pdf(&[page]));
     let r = do_replace(&eng, id, &req("cat", "act", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
@@ -2258,7 +2286,7 @@ fn a_single_line_is_never_set_wider_than_it_was() {
     let r = do_replace(&eng, id, &req("cat", "cat on a mat", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
     assert_eq!(r.skipped[0].reason, "skipped: the replacement does not fit on its line");
-    assert_eq!(all_text(&eng, id), "A cat");
+    assert_eq!(all_text(&eng, id), "A cat Qty");
 }
 
 #[test]
@@ -2412,6 +2440,199 @@ fn a_justified_line_that_outgrows_its_place_is_skipped_and_the_block_stays_justi
     let b = check(&eng);
     assert_eq!(b.lines.len(), was.lines.len());
     assert!(b.text.contains("sides line up"), "{}", b.text);
+}
+
+#[test]
+fn a_changed_line_justified_in_the_source_is_stretched_to_its_end_again() {
+    let d = dir("replace-justified-tw");
+    // Two lines, the first spread to 100 pt with Tw (as a word processor writes it): too few lines to be read as a
+    // justified block, so each line is judged by its own spaces. The second is the paragraph's last.
+    let page = "BT /F1 12 Tf 14 TL 72 700 Td 17.648 Tw (aaa bbb ccc) Tj 0 Tw T* (ddd eee fff) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let before = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!((before.align, before.lines.len()), (Align::Left, 2), "{before:?}");
+    assert!((before.lines[0][2] - 172.0).abs() < 0.6 && before.lines[1][2] < 160.0, "{:?}", before.lines);
+    // A shorter word on the justified line: it still ends where it did.
+    let r = do_replace(&eng, id, &req("bbb", "b", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    let after = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(after.text, "aaa b ccc ddd eee fff");
+    assert!((after.lines[0][0] - before.lines[0][0]).abs() < 0.1 && (after.lines[0][2] - before.lines[0][2]).abs() < 0.5, "{:?} vs {:?}", after.lines, before.lines);
+    assert!(same_box(&after.lines[1], &before.lines[1]), "{:?} vs {:?}", after.lines, before.lines);
+    // The paragraph's last line is not stretched: it ends where its words do.
+    do_replace(&eng, id, &req("eee", "e", SearchOpts::default())).unwrap();
+    let last = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert!(last.lines[1][2] < before.lines[1][2] - 5.0, "{:?} vs {:?}", last.lines, before.lines);
+}
+
+#[test]
+fn a_one_line_block_takes_a_longer_word_where_nothing_is_beside_it() {
+    let d = dir("replace-one-line-grows");
+    // A heading alone on its band, a cell with another cell 58 pt to its right, and a cell with an image there.
+    let page = "BT /F1 12 Tf 72 700 Td (Heading) Tj ET\nBT /F1 12 Tf 72 600 Td (Item) Tj ET\nBT /F1 12 Tf 130 600 Td (Qty) Tj ET\n\
+                BT /F1 12 Tf 72 500 Td (Cell) Tj ET\nq 20 0 0 20 130 498 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \0 EI Q";
+    let (eng, id, path) = open(&d, &pages_pdf(&[page]));
+    let all = |eng: &Engine| page_lines(eng, id);
+    // Free room: the line grows to the right, the start stays.
+    let before = blocks(&eng, id, 0).unwrap().blocks.iter().find(|b| b.text == "Heading").unwrap().lines[0];
+    let r = do_replace(&eng, id, &req("Heading", "A much longer heading than it was", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    let grown = blocks(&eng, id, 0).unwrap().blocks.iter().find(|b| b.text.starts_with("A much")).unwrap().lines[0];
+    assert!((grown[0] - before[0]).abs() < 0.1 && grown[2] > before[2] + 100.0, "{grown:?} vs {before:?}");
+    // A neighbour on the same baseline: what fits before it goes, what doesn't is skipped as before.
+    let r = do_replace(&eng, id, &req("Item", "Item and more items", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    assert_eq!(r.skipped[0].reason, "skipped: the replacement does not fit on its line");
+    let r = do_replace(&eng, id, &req("Item", "Items", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    // An image beside it is a neighbour too.
+    let r = do_replace(&eng, id, &req("Cell", "Cell with a long text", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    assert!(all(&eng).iter().any(|l| l == "Items") && all(&eng).iter().any(|l| l == "Cell"), "{:?}", all(&eng));
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    assert!(page_lines(&eng, id).iter().any(|l| l == "A much longer heading than it was"));
+}
+
+const COURIER: &str = "<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>";
+
+#[test]
+fn a_ragged_line_whose_spaces_are_tj_gaps_is_not_stretched_back() {
+    let d = dir("replace-ragged-tj-gaps");
+    // Courier's space is 600: a gap of -600 in a TJ is a plain space, so these lines are ragged, not justified.
+    let page = "BT /F1 12 Tf 14 TL 72 700 Td [(aaa) -600 (bbb) -600 (ccc)] TJ T* [(dd) -600 (ee)] TJ T* [(ff) -600 (gg) -600 (hh)] TJ ET";
+    let (eng, id, _) = open(&d, &pdf(page, &[("F1", COURIER)], &[]));
+    let before = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(before.lines.len(), 3, "{before:?}");
+    let r = do_replace(&eng, id, &req("bbb", "b", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    let after = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    // "aaa b ccc" at 7.2 pt a character: it ends where its words do, not at the old end.
+    assert!((after.lines[0][2] - (72.0 + 9.0 * 7.2)).abs() < 0.5, "{:?} vs {:?}", after.lines, before.lines);
+}
+
+/// A two-byte font (Identity-H, code = Unicode) whose every glyph is `dw` wide, and its ToUnicode stream (object 6).
+fn wide_font(dw: u32) -> (String, String) {
+    let font = format!(
+        "<< /Type /Font /Subtype /Type0 /BaseFont /Wide /Encoding /Identity-H /ToUnicode 6 0 R /DescendantFonts \
+         [<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Wide /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW {dw} >>] >>"
+    );
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /Wide def 1 begincodespacerange <0000> <FFFF> endcodespacerange \
+                1 beginbfrange <0000> <00FF> <0000> endbfrange endcmap end end";
+    (font, String::from_utf8(stream(cmap.as_bytes())).unwrap())
+}
+
+#[test]
+fn a_composite_fonts_tj_gap_is_measured_against_a_plain_space_not_its_code_32() {
+    // (Edit text: MuPDF's Find lists nothing in a Type0 font that is not embedded.) Code 32 of a two-byte font is
+    // a CID like any other, its width no space: a gap is judged against 0.25 em. A gap of 0.4 em is justified
+    // spacing whatever the glyphs' width, one of 0.3 em is not.
+    let line = |dw: u32, gap: i32| {
+        let (font, cmap) = wide_font(dw);
+        let page = format!("BT /F1 12 Tf 14 TL 72 700 Td [<00610062> -{gap} <00630064> -{gap} <00650066>] TJ T* <00670068> Tj ET");
+        let d = dir(&format!("replace-composite-gap-{dw}-{gap}"));
+        let (eng, id, _) = open(&d, &pdf(&page, &[("F1", &font)], &[&cmap]));
+        let before = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+        assert_eq!(before.lines.len(), 2, "{before:?}");
+        set_text(&eng, id, 0, "ab c ef gh");
+        let after = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+        (before.lines[0][2], after.lines[0][2])
+    };
+    // Justified, wide glyphs (code 32 would be 1 em): the changed line is stretched to where it ended.
+    let (was, now) = line(1000, 400);
+    assert!((now - was).abs() < 0.6, "{now} vs {was}");
+    // Ragged, narrow glyphs (code 32 would be 0.1 em): it ends where its words do, shorter than it was.
+    let (was, now) = line(100, 300);
+    assert!(now < was - 0.8, "{now} vs {was}");
+}
+
+/// A page with `content`, Helvetica `F1`, the annotations `annots` (object 6 on) and the form XObject `Fm1` of `form`.
+fn page_with(content: &str, annots: &[&str], form: Option<&str>) -> Vec<u8> {
+    let refs: String = (0..annots.len()).map(|i| format!("{} 0 R ", 6 + i)).collect();
+    let n = 6 + annots.len();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> /XObject << /Fm1 {n} 0 R >> >> \
+             /Contents 4 0 R /Annots [{refs}] >>"
+        ),
+        String::from_utf8(stream(content.as_bytes())).unwrap(),
+        HELV.to_string(),
+    ];
+    objs.extend(annots.iter().map(|a| a.to_string()));
+    if let Some(f) = form {
+        objs.push(String::from_utf8(stream_with("/Type /XObject /Subtype /Form /BBox [130 690 250 710]", f.as_bytes())).unwrap());
+    }
+    raw_pdf(&objs)
+}
+
+fn stream_with(dict: &str, data: &[u8]) -> Vec<u8> {
+    let mut s = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+    s.extend_from_slice(data);
+    s.extend_from_slice(b"\nendstream");
+    s
+}
+
+#[test]
+fn a_one_line_block_keeps_clear_of_cell_borders() {
+    // "Qty" in a cell, and an empty cell 30 pt to its right: with only the neighbour's border, or with both
+    // cells' borders, the label stops at the line it would run over.
+    for (name, rects) in [("neighbour", "120 690 80 24 re S"), ("both", "60 690 60 24 re S 120 690 80 24 re S"), ("rule", "120 686 m 120 714 l S")] {
+        let page = format!("BT /F1 12 Tf 72 700 Td (Qty) Tj ET\n{rects}");
+        let (eng, id, _) = open(&dir(&format!("replace-border-{name}")), &pages_pdf(&[&page]));
+        let r = do_replace(&eng, id, &req("Qty", "Quantity ordered", SearchOpts::default())).unwrap();
+        assert_eq!((r.replaced, r.skipped_count), (0, 1), "{name}: {r:?}");
+        assert_eq!(r.skipped[0].reason, "skipped: the replacement does not fit on its line", "{name}");
+        // What fits before the border goes on.
+        let r = do_replace(&eng, id, &req("Qty", "Qtys", SearchOpts::default())).unwrap();
+        assert_eq!(r.replaced, 1, "{name}: {r:?}");
+    }
+    // Rules above and below the line (a table's top and bottom edges) and a rectangle far off the band are no neighbours.
+    let page = "BT /F1 12 Tf 72 700 Td (Qty) Tj ET\n60 720 m 300 720 l S 60 684 m 300 684 l S 150 500 40 20 re S";
+    let (eng, id, _) = open(&dir("replace-border-rules"), &pages_pdf(&[page]));
+    let r = do_replace(&eng, id, &req("Qty", "Quantity ordered", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+}
+
+#[test]
+fn a_one_line_block_keeps_clear_of_a_widget_and_a_form_beside_it() {
+    let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /Rect [130 690 250 710] >>";
+    let popup = "<< /Type /Annot /Subtype /Popup /Rect [130 690 250 710] >>";
+    let content = "BT /F1 12 Tf 72 700 Td (Name:) Tj ET";
+    let cases: [(&str, Vec<u8>, bool); 4] = [
+        ("widget", page_with(content, &[widget], None), false),
+        // A popup is a window the viewer opens, not something on the page.
+        ("popup", page_with(content, &[popup], None), true),
+        ("form", page_with(&format!("{content}\nq /Fm1 Do Q"), &[], Some("130 690 120 20 re S")), false),
+        ("nothing", page_with(content, &[], None), true),
+    ];
+    for (name, bytes, grows) in cases {
+        let (eng, id, _) = open(&dir(&format!("replace-beside-{name}")), &bytes);
+        let r = do_replace(&eng, id, &req("Name:", "Customer name and address:", SearchOpts::default())).unwrap();
+        assert_eq!((r.replaced, r.skipped_count), (u32::from(grows), u32::from(!grows)), "{name}: {r:?}");
+        let r = do_replace(&eng, id, &req(if grows { "Customer name and address:" } else { "Name:" }, "Names:", SearchOpts::default())).unwrap();
+        assert_eq!(r.replaced, 1, "{name}: {r:?}");
+    }
+}
+
+#[test]
+fn a_one_line_block_in_a_column_stops_at_the_columns_edge() {
+    let d = dir("replace-column-edge");
+    // A heading over the left column of two; nothing is beside it, but the column's text ends near 250 pt.
+    let page = "BT /F1 12 Tf 72 700 Td (Heading) Tj ET\n\
+                BT /F1 12 Tf 72 670 Td 14 TL (The left column is set in a narrow measure) Tj T* (and it goes on for a few more lines) Tj ET\n\
+                BT /F1 12 Tf 330 670 Td 14 TL (The right column is the same width) Tj T* (and goes on below the left one too) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let edge = blocks(&eng, id, 0).unwrap().blocks.iter().find(|b| b.text.starts_with("The left")).unwrap().rect[2];
+    assert!(edge < 330.0, "{edge}");
+    let r = do_replace(&eng, id, &req("Heading", "A heading far too long for the column to hold", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    let r = do_replace(&eng, id, &req("Heading", "Headings", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    let grown = blocks(&eng, id, 0).unwrap().blocks.iter().find(|b| b.text == "Headings").unwrap().rect[2];
+    assert!(grown <= edge + 0.5, "{grown} vs {edge}");
 }
 
 #[test]

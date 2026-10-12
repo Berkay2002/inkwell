@@ -701,9 +701,15 @@ fn stroke_of(fill: &[Op]) -> Vec<Op> {
 /// With `grow` (Edit text: the distance between lines) it is wrapped at the block's width instead: its overflow
 /// goes on new lines below it, and the lines after it are moved down by the lines added, that is its lines
 /// minus the source lines it covers (never up: a line that got shorter leaves a gap). Lines above it stay.
+///
+/// `full[i]` is whether source line `i` had its spaces stretched to fill it (a justified line in a block too short
+/// or too indented to be read as justified): a changed line that stands for one is stretched to its end again,
+/// unless it is the block's last, as a line of a justified block is.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn keep_lines(
     groups: Vec<(usize, Vec<Item>, bool)>,
     spans: &[(f64, f64, f64)],
+    full: &[bool],
     align: Align,
     (left, right): (f64, f64),
     tol: f64,
@@ -728,6 +734,7 @@ pub(crate) fn keep_lines(
             first.kern = 0.0;
         }
         let (x0, x1, y) = spans[src];
+        let justified = align == Align::Justify || full.get(src).copied().unwrap_or(false);
         let down = spans[0].2 - y + pushed as f64 * grow.unwrap_or(0.0);
         if !changed {
             at.push(LineAt { x: x0 - left, down, width: x1 - x0, stretch: true });
@@ -747,7 +754,7 @@ pub(crate) fn keep_lines(
             if x + used > right + tol || x < left - tol {
                 return None;
             }
-            at.push(LineAt { x: x - left, down, width: x1 - x, stretch: align == Align::Justify && g != last });
+            at.push(LineAt { x: x - left, down, width: x1 - x, stretch: justified && g != last });
             lines.push(LineOut { items, ends_para: g == last });
             continue;
         };
@@ -758,7 +765,7 @@ pub(crate) fn keep_lines(
         for (j, sub) in subs.into_iter().enumerate() {
             let x = place(m.line(&sub.items), j == 0);
             // Inside the group a line stretches unless a typed break ended it; the group's last is as its source was.
-            let stretch = align == Align::Justify && if j + 1 < n { !sub.ends_para } else { g != last };
+            let stretch = justified && if j + 1 < n { !sub.ends_para } else { g != last };
             // A justified block's lines end at its right edge, whatever the line this one stands for did (its last).
             let end = if align == Align::Justify { right } else { x1 };
             at.push(LineAt { x: x - left, down: down + j as f64 * lead, width: end - x, stretch });

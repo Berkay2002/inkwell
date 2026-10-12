@@ -416,6 +416,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
 
     // From the last block to the first: an edit can only change the grouping of the lines after it.
     let mut changed = false;
+    let mut beside = None;
     for (bi, mut spans, first) in plan.into_iter().rev() {
         let listed = listed_for(bi);
         let listed = &listed[first.min(listed.len())..];
@@ -460,7 +461,11 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
             out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32 + 1) });
             break;
         }
-        changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, listed, out);
+        // The images and annotations a one-line block must keep clear of when it grows, read once for the page
+        // (and only when there is such a block).
+        let one_line = blocks[bi].lines.len() == 1;
+        let beside = if one_line { beside.get_or_insert_with(|| text::page_obstacles(d, page).map(std::sync::Arc::new)).clone() } else { None };
+        changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, listed, beside, out);
         if cut {
             break;
         }
@@ -473,7 +478,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
 /// stay where they are (see [`TextChange::keep`]). A refusal skips the block's matches and leaves the
 /// page as it was. True when the block was rewritten.
 #[allow(clippy::too_many_arguments)]
-fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &[(usize, usize)], with: &str, listed: &[&search::Hit], out: &mut Outcome) -> bool {
+fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &[(usize, usize)], with: &str, listed: &[&search::Hit], beside: Option<std::sync::Arc<Vec<text::Obstacle>>>, out: &mut Outcome) -> bool {
     let all: Vec<char> = joined(b);
     let skip_all = |out: &mut Outcome, why: &str| {
         for (k, &sp) in spans.iter().enumerate() {
@@ -481,7 +486,12 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
         }
     };
     let change = match keep_change(b, spans, &vec![with; spans.len()], false) {
-        Ok(c) => c,
+        Ok(mut c) => {
+            if let Some(k) = c.keep.as_mut() {
+                k.beside = beside;
+            }
+            c
+        }
         Err(why) => {
             skip_all(out, &why);
             return false;
@@ -639,7 +649,7 @@ pub(super) fn keep_change(b: &Block, spans: &[(usize, usize)], with: &[&str], wr
     if specs.is_empty() {
         return Err("the replacement would leave no text in the block; delete the block's text with Edit text".into());
     }
-    Ok(TextChange { runs: Some(specs), keep: Some(KeepLines { ends, changed, wrap }), ..Default::default() })
+    Ok(TextChange { runs: Some(specs), keep: Some(KeepLines { ends, changed, wrap, beside: None }), ..Default::default() })
 }
 
 /// Most characters of a block's text that Edit text compares with what was typed; a longer block is set as a whole.
@@ -673,6 +683,11 @@ pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
     // What stands between word `i` and the next, in the old text and in the new.
     let sep_old = |i: usize| &old[ow[i].1..ow[i + 1].0];
     let sep_new = |j: usize| &new[nw[j].1..nw[j + 1].0];
+    // Whether what stands between old word `i` and new word `j` is as it was. At a line end more blanks are not a
+    // change (the lines don't join over them): only a typed line break is.
+    let same_sep = |i: usize, j: usize| {
+        sep_old(i) == sep_new(j) || (b.breaks.iter().any(|&(p, _)| p >= ow[i].1 && p < ow[i + 1].0) && !sep_new(j).contains(&'\n'))
+    };
     // Changed stretches as (old words a..b, new words c..d).
     let mut hunks: Vec<[usize; 4]> = Vec::new();
     let mut matched = 0;
@@ -682,7 +697,7 @@ pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
                 matched += len;
                 // Words that are the same but not what stands between them: a line break typed, or spaces.
                 for k in 0..len.saturating_sub(1) {
-                    if sep_old(old_index + k) != sep_new(new_index + k) {
+                    if !same_sep(old_index + k, new_index + k) {
                         hunks.push([old_index + k, old_index + k + 2, new_index + k, new_index + k + 2]);
                     }
                 }
@@ -716,10 +731,10 @@ pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
             }
         }
         // Where the space before or after the stretch is not the one that was there, the word beyond is set too.
-        if a > 0 && c > 0 && sep_old(a - 1) != sep_new(c - 1) {
+        if a > 0 && c > 0 && !same_sep(a - 1, c - 1) {
             (a, c) = (a - 1, c - 1);
         }
-        if b < ow.len() && d < nw.len() && sep_old(b - 1) != sep_new(d - 1) {
+        if b < ow.len() && d < nw.len() && !same_sep(b - 1, d - 1) {
             (b, d) = (b + 1, d + 1);
         }
         *h = [a, b, c, d];
@@ -804,7 +819,7 @@ pub(super) fn keep_format(b: &Block, change: &TextChange) -> Option<TextChange> 
     if same.next().is_some() {
         return None;
     }
-    Some(TextChange { runs: Some(runs), keep: Some(KeepLines { ends: b.breaks.clone(), changed, wrap: true }), ..change.clone() })
+    Some(TextChange { runs: Some(runs), keep: Some(KeepLines { ends: b.breaks.clone(), changed, wrap: true, beside: None }), ..change.clone() })
 }
 
 /// The words of `s` as character ranges: runs of what is not a space.
