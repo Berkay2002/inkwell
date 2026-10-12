@@ -389,7 +389,7 @@ fn a_password_field_is_never_written_to_a_file_or_filled_from_one() {
 }
 
 #[test]
-fn a_value_over_1_mb_is_left_empty_and_counted_on_export_and_named_on_import() {
+fn a_value_over_1_mb_is_left_out_and_counted_on_export_and_named_on_import() {
     let (eng, id, _) = form("long-value");
     set(&eng, id, "Full name", text(&"x".repeat(MAX_STR + 1)));
     set(&eng, id, "Address.Street", text("Main St"));
