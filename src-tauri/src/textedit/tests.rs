@@ -1961,6 +1961,35 @@ fn a_line_that_grows_past_the_block_wraps_its_overflow_and_pushes_the_lines_belo
     check(&eng, id);
 }
 
+const FOUR_LINES: &str = "BT /F1 12 Tf 72 700 Td 14 TL (The quick brown fox jumps over) Tj T* (the lazy dog and then the) Tj T* \
+                          (edited line goes on here ok) Tj T* (and the very last one) Tj ET";
+
+#[test]
+fn an_overflow_gets_lines_of_its_own_and_leaves_the_next_line_as_it_was() {
+    let d = dir("edit-overflow-own-line");
+    let (eng, id, _) = open(&d, &pdf(FOUR_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    let lead = before[1][1] - before[0][1];
+    // Words typed at the end of line two, and the same typed with a blank after them: that blank, at a line
+    // end, is no change, and what the line pushes out is not carried into the next line.
+    for typed in ["the lazy dog and then the zzz yyy edited", "the lazy dog and then the zzz yyy  edited"] {
+        set_text(&eng, id, 0, &format!("The quick brown fox jumps over {typed} line goes on here ok and the very last one"));
+        assert_eq!(
+            page_lines(&eng, id),
+            ["The quick brown fox jumps over", "the lazy dog and then the zzz", "yyy", "edited line goes on here ok", "and the very last one"],
+            "{typed:?}"
+        );
+        let after = all_boxes(&eng, id);
+        assert!(same_box(&after[0], &before[0]) && same_place(&after[1], &before[1]), "{after:?} vs {before:?}");
+        assert!((after[2][0] - before[0][0]).abs() < 0.5 && ((after[2][1] - before[1][1]) - lead).abs() < 0.5, "{after:?}");
+        // Each line below is the box it was, one line lower.
+        for (a, b) in after[3..].iter().zip(&before[2..]) {
+            assert!(same_box(a, &[b[0], b[1] + lead, b[2], b[3] + lead]), "{after:?} vs {before:?}");
+        }
+        eng.undo(id).unwrap();
+    }
+}
+
 #[test]
 fn first_line_indent_and_uneven_leading_stay_through_an_edit() {
     let d = dir("edit-keeps-places");

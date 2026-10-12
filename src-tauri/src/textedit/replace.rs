@@ -673,6 +673,11 @@ pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
     // What stands between word `i` and the next, in the old text and in the new.
     let sep_old = |i: usize| &old[ow[i].1..ow[i + 1].0];
     let sep_new = |j: usize| &new[nw[j].1..nw[j + 1].0];
+    // Whether what stands between old word `i` and new word `j` is as it was. At a line end more blanks are not a
+    // change (the lines don't join over them): only a typed line break is.
+    let same_sep = |i: usize, j: usize| {
+        sep_old(i) == sep_new(j) || (b.breaks.iter().any(|&(p, _)| p >= ow[i].1 && p < ow[i + 1].0) && !sep_new(j).contains(&'\n'))
+    };
     // Changed stretches as (old words a..b, new words c..d).
     let mut hunks: Vec<[usize; 4]> = Vec::new();
     let mut matched = 0;
@@ -682,7 +687,7 @@ pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
                 matched += len;
                 // Words that are the same but not what stands between them: a line break typed, or spaces.
                 for k in 0..len.saturating_sub(1) {
-                    if sep_old(old_index + k) != sep_new(new_index + k) {
+                    if !same_sep(old_index + k, new_index + k) {
                         hunks.push([old_index + k, old_index + k + 2, new_index + k, new_index + k + 2]);
                     }
                 }
@@ -716,10 +721,10 @@ pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
             }
         }
         // Where the space before or after the stretch is not the one that was there, the word beyond is set too.
-        if a > 0 && c > 0 && sep_old(a - 1) != sep_new(c - 1) {
+        if a > 0 && c > 0 && !same_sep(a - 1, c - 1) {
             (a, c) = (a - 1, c - 1);
         }
-        if b < ow.len() && d < nw.len() && sep_old(b - 1) != sep_new(d - 1) {
+        if b < ow.len() && d < nw.len() && !same_sep(b - 1, d - 1) {
             (b, d) = (b + 1, d + 1);
         }
         *h = [a, b, c, d];

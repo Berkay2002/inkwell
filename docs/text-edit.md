@@ -234,7 +234,7 @@ a word diff) and sets only the stretches of words that changed, through the same
   Acrobat does the closest thing (it reflows the paragraph and the block grows downwards); we don't pull the
   overflow into the next line because that would join lines the user didn't touch.
 - A typed line break starts a new line below the line it was typed in, the lines under it move down by it. A line
-  break typed where two words were is a change even though no word is: what stands between words is compared too. Blanks typed at the start or end of the block change nothing.
+  break typed where two words were is a change even though no word is: what stands between words is compared too. Blanks typed at the start or end of the block change nothing. Neither do blanks typed next to a line end (words typed at the end of a line followed by a space): a line end is crossed only by deleting it or typing a line break over it, so a line that overflows puts the overflow on lines of its own and the next line is not touched.
 - An edit that is only a style (underline, colour, bold, italic, rise, font) or a move keeps the lines the same
   way: the lines without a restyled run are exactly as they were. A bolder line that no longer fits wraps as above.
 - **Whole-block reflow stays** where it is asked for or where there are no lines to keep: a change with a `width`
