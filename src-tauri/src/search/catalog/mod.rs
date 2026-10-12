@@ -760,12 +760,26 @@ fn index_file(sh: &Shared, job: &Job) -> Option<FileRec> {
         return Some(rec);
     };
     let len = file.metadata().map_or(job.size, |m| m.len());
+    #[cfg(test)]
+    tests::after_len(&job.path);
     let mut too_large = len > sh.max_file;
     // A big file is read alone, so the copies in memory stay few.
-    let _alone = (!too_large && len > sh.max_read).then(|| sh.big.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut alone = (!too_large && len > sh.max_read).then(|| sh.big.lock().unwrap_or_else(|e| e.into_inner()));
     let mut bytes = Vec::new();
     if !too_large {
-        match (&mut file).take(sh.max_file.saturating_add(1)).read_to_end(&mut bytes) {
+        // Without the lock only `max_read` is read: a file that grew since the size was taken is read again, alone.
+        let cap = if alone.is_some() { sh.max_file } else { sh.max_read };
+        let mut read = (&mut file).take(cap.saturating_add(1)).read_to_end(&mut bytes);
+        if alone.is_none() && matches!(read, Ok(n) if n as u64 > sh.max_read) {
+            bytes = Vec::new();
+            alone = Some(sh.big.lock().unwrap_or_else(|e| e.into_inner()));
+            read = std::io::Seek::rewind(&mut file).and_then(|()| (&mut file).take(sh.max_file.saturating_add(1)).read_to_end(&mut bytes));
+        }
+        #[cfg(test)]
+        if alone.is_some() {
+            tests::read_alone(&job.path);
+        }
+        match read {
             Ok(n) => too_large = n as u64 > sh.max_file,
             Err(_) => bytes.clear(),
         }
