@@ -15,11 +15,13 @@
 
 use super::{Result, bad};
 use mupdf::pdf::{PdfDocument, PdfObject};
-use mupdf::{Buffer, Colorspace, Image, Matrix, Pixmap, Rect};
+use mupdf::{Buffer, Colorspace, Cookie, Device, Image, Matrix, Pixmap, Rect};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, mpsc};
+use std::time::Duration;
 
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
@@ -40,6 +42,8 @@ pub const DEFAULT_CATEGORY: &str = "Custom";
 pub const DEFAULT_WIDTH: f32 = 150.0;
 /// Resolution a PDF page is rendered at (less where the page would pass [`MAX_SIDE`]).
 const PDF_DPI: f32 = 300.0;
+/// How long drawing a PDF page may take before it is aborted (a page can be made to take minutes).
+const RENDER_LIMIT: Duration = Duration::from_secs(20);
 const THUMB_SIDE: u32 = 96;
 const INDEX: &str = "stamps.json";
 /// The index is a few kilobytes; one that is larger than this is not ours.
@@ -245,7 +249,7 @@ fn decode_picture(bytes: &[u8]) -> Result<image::RgbaImage> {
 /// paints nothing, cut to the part that has something on it.
 // shortcut: a page with a white background shape keeps it (only an unpainted page is transparent); cropping to
 // the painted part is not the page's own box. Upgrade: a "knock out white" switch if people ask.
-fn render_pdf(bytes: &[u8], page: Option<u32>) -> Result<image::RgbaImage> {
+fn render_pdf(bytes: &[u8], page: Option<u32>, limit: Duration) -> Result<image::RgbaImage> {
     let doc = mupdf::Document::from_bytes(bytes, "application/pdf").map_err(|_| bad("that PDF could not be opened"))?;
     if doc.needs_password()? {
         return Err(bad("that PDF is password protected"));
@@ -259,10 +263,33 @@ fn render_pdf(bytes: &[u8], page: Option<u32>) -> Result<image::RgbaImage> {
     let b = page.bounds()?;
     let longest = (b.x1 - b.x0).max(b.y1 - b.y0).max(1.0);
     let scale = (PDF_DPI / 72.0).min(MAX_SIDE as f32 / longest);
-    let pix = page.to_pixmap(&Matrix::new_scale(scale, scale), &Colorspace::device_rgb(), true, true)?;
-    if u64::from(pix.width()) * u64::from(pix.height()) > MAX_SOURCE_PIXELS {
+    let m = Matrix::new_scale(scale, scale);
+    let area = b.transform(&m).round();
+    if i64::from(area.x1 - area.x0) * i64::from(area.y1 - area.y0) > MAX_SOURCE_PIXELS as i64 {
         return Err(bad("that page is too large"));
     }
+    // What to_pixmap does, with a cookie so a watchdog can abort a page that takes too long.
+    let mut pix = Pixmap::new_with_rect(&Colorspace::device_rgb(), area, true)?;
+    pix.clear()?;
+    let cookie = Cookie::new()?;
+    let timed_out = AtomicBool::new(false);
+    let (done, finished) = mpsc::channel::<()>();
+    let (timed, handle) = (&timed_out, cookie.abort_handle());
+    let run = std::thread::scope(|s| {
+        s.spawn(move || {
+            if finished.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
+                timed.store(true, Ordering::SeqCst);
+                handle.abort();
+            }
+        });
+        let run = Device::from_pixmap(&pix).and_then(|dev| page.run_with_cookie(&dev, &m, &cookie));
+        drop(done);
+        run
+    });
+    if timed_out.load(Ordering::SeqCst) {
+        return Err(bad("that page took too long to draw"));
+    }
+    run?;
     let img = from_pixmap(&pix)?;
     let (w, h) = img.dimensions();
     let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
@@ -334,7 +361,7 @@ pub fn create(dir: &Path, src: &Source, name: &str, category: &str) -> Result<St
     let category = if category.is_empty() { DEFAULT_CATEGORY.to_string() } else { category };
 
     let bytes = read_source(src.path)?;
-    let img = if bytes[..bytes.len().min(1024)].windows(5).any(|w| w == b"%PDF-") { render_pdf(&bytes, src.page)? } else { decode_picture(&bytes)? };
+    let img = if bytes[..bytes.len().min(1024)].windows(5).any(|w| w == b"%PDF-") { render_pdf(&bytes, src.page, RENDER_LIMIT)? } else { decode_picture(&bytes)? };
     let img = fit_side(img, MAX_SIDE);
     let (png, thumb) = (encode_png(&img)?, encode_png(&fit_side(img.clone(), THUMB_SIDE))?);
 

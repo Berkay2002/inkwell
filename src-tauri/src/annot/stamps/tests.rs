@@ -157,6 +157,24 @@ fn a_pdf_page_becomes_a_stamp_transparent_where_the_page_paints_nothing() {
 }
 
 #[test]
+fn a_page_that_takes_too_long_to_draw_is_aborted() {
+    // A page of 150 000 small squares: far more work than a zero time limit allows.
+    let content = "0 0 5 5 re f\n".repeat(150_000);
+    let pdf = raw_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+    ]);
+    assert!(err(render_pdf(&pdf, None, Duration::ZERO)).contains("too long"));
+    // The same page within the real limit draws.
+    assert!(render_pdf(&pdf, None, RENDER_LIMIT).is_ok());
+    // A time limit does not disturb a page that is quick.
+    let quick = fixture::build(&Fixture { pages: 1, lines: 3, ..Default::default() });
+    assert!(render_pdf(&quick, None, RENDER_LIMIT).is_ok());
+}
+
+#[test]
 fn the_caps_hold() {
     let d = dir("stamps", "caps");
     let lib = d.join("lib");
