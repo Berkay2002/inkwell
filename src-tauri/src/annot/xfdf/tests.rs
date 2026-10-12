@@ -365,3 +365,15 @@ fn one_string_or_ink_array_shared_by_many_comments_is_refused_by_the_byte_budget
     let f = fdf_sharing(100, |i| format!("<< /Subtype /Ink /Page 0 /Rect [0 0 50 50] /NM (i{i}) /InkList 5 0 R >>"), &objs);
     assert!(matches!(parse(&f), Err(EngineError::Invalid(m)) if m.contains("same data")));
 }
+
+#[test]
+fn an_fdf_with_more_entries_than_the_walk_allows_is_refused_not_cut_short() {
+    let refs = "10 0 R ".repeat(MAX_NODES + 1);
+    let f = format!("%FDF-1.2\n1 0 obj\n<< /FDF << /Annots [{refs}] >> >>\nendobj\n10 0 obj\n<< /Subtype /Text /Page 0 /Rect [1 1 2 2] >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    assert!(matches!(parse(f.as_bytes()), Err(EngineError::Invalid(m)) if m.contains("100 000")));
+    // Empty strokes cost nothing in numbers; each is still charged, so a shared list of them runs out.
+    let strokes = "6 0 R ".repeat(1024);
+    let objs = [format!("5 0 obj\n[{strokes}]\nendobj\n"), "6 0 obj\n[]\nendobj\n".to_string()];
+    let f = fdf_sharing(10_000, |i| format!("<< /Subtype /Ink /Page 0 /Rect [0 0 50 50] /NM (e{i}) /InkList 5 0 R >>"), &objs);
+    assert!(parse(&f).is_err());
+}

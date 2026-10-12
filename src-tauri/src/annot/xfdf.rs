@@ -212,10 +212,20 @@ fn string(o: &PdfObject, k: &str, b: &Budget) -> String {
         return String::new();
     }
     let Some(v) = get(o, k) else { return String::new() };
-    let s = if v.is_string().unwrap_or(false) {
-        v.as_string().ok().or_else(|| v.as_bytes().ok().map(|b| decode_text(&b)))
-    } else {
-        text(&v)
+    let object = indirect_number(&v);
+    let s = match object.and_then(|n| b.string_of(n)) {
+        Some(s) => Some(s),
+        None => {
+            let s = if v.is_string().unwrap_or(false) {
+                v.as_string().ok().or_else(|| v.as_bytes().ok().map(|b| decode_text(&b)))
+            } else {
+                text(&v)
+            };
+            if let (Some(n), Some(s)) = (object, &s) {
+                b.keep_string(n, s);
+            }
+            s
+        }
     };
     if !b.take(s.as_ref().map_or(0, String::len)) {
         return String::new();
@@ -223,16 +233,30 @@ fn string(o: &PdfObject, k: &str, b: &Budget) -> String {
     s.filter(|s| s.len() <= MAX_STR).unwrap_or_default()
 }
 
+/// The object number of a reference (`None` for a direct object).
+fn indirect_number(v: &PdfObject) -> Option<i32> {
+    if v.is_indirect().unwrap_or(false) { v.as_indirect().ok() } else { None }
+}
+
 /// Numbers of an array, at most `cap`; each is charged to `b` (8 bytes: it is held twice before it is used).
 fn floats(o: &PdfObject, cap: usize, b: &Budget) -> Vec<f32> {
     if !o.is_array().unwrap_or(false) {
         return Vec::new();
     }
+    let object = indirect_number(o);
     let n = o.len().unwrap_or(0).min(cap);
-    if !b.take(n * 8) {
+    // Each use is a copy of its own, so each is charged; what a reference was read as is kept to read it once.
+    if !b.take(24 + n * 8) {
         return Vec::new();
     }
-    (0..n as i32).filter_map(|i| o.get_array(i).ok().flatten().and_then(|v| v.as_float().ok())).filter(|v| v.is_finite()).collect()
+    if let Some(v) = object.and_then(|x| b.numbers_of(x, cap)) {
+        return v;
+    }
+    let v: Vec<f32> = (0..n as i32).filter_map(|i| o.get_array(i).ok().flatten().and_then(|v| v.as_float().ok())).filter(|v| v.is_finite()).collect();
+    if let Some(x) = object {
+        b.keep_numbers(x, cap, &v);
+    }
+    v
 }
 
 fn rgb_from(a: &[f32]) -> Option<[f32; 3]> {
@@ -656,7 +680,10 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
         let mut out = Parsed::default();
         let budget = Budget::new();
         let Some(annots) = get(root, "Annots").filter(|a| a.is_array().unwrap_or(false)) else { return Ok(out) };
-        let count = annots.len().unwrap_or(0).min(MAX_NODES);
+        let count = annots.len().unwrap_or(0);
+        if count > MAX_NODES {
+            return Err(bad("This FDF file has more than 100 000 comments, so Inkwell does not read it."));
+        }
         // Object numbers of the comments, so an /IRT can name its parent.
         let mut number_of: HashMap<i32, String> = HashMap::new();
         let mut seen: HashSet<i32> = HashSet::new();

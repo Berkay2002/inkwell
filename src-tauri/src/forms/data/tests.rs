@@ -295,3 +295,10 @@ fn one_value_shared_by_many_fields_is_refused_by_the_byte_budget() {
     assert_eq!(ok.fields.len(), 5);
     assert!(ok.fields.iter().all(|(_, v)| matches!(v, Val::Text(t) if t.len() == 900_000)));
 }
+
+#[test]
+fn an_fdf_with_more_fields_than_the_walk_allows_is_refused_not_cut_short() {
+    let refs = "<< /T (a) /V (x) >> ".repeat(MAX_NODES + 1);
+    let f = format!("%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [{refs}] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    assert!(matches!(parse(f.as_bytes()), Err(EngineError::Invalid(_))));
+}

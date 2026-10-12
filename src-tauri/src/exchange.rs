@@ -9,7 +9,8 @@
 use crate::engine::EngineError;
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::io::Read;
 
 type Result<T> = std::result::Result<T, EngineError>;
@@ -37,11 +38,14 @@ pub const MAX_COPIED: usize = 32 << 20;
 pub struct Budget {
     left: Cell<usize>,
     gone: Cell<bool>,
+    /// Indirect strings and number lists already read, by object number: read once, then cloned.
+    strings: RefCell<HashMap<i32, String>>,
+    numbers: RefCell<HashMap<(i32, usize), Vec<f32>>>,
 }
 
 impl Budget {
     pub fn new() -> Budget {
-        Budget { left: Cell::new(MAX_COPIED), gone: Cell::new(false) }
+        Budget { left: Cell::new(MAX_COPIED), gone: Cell::new(false), strings: RefCell::default(), numbers: RefCell::default() }
     }
 
     /// Charges `n` bytes. When they are not there the budget is gone for good and this says false: the
@@ -61,6 +65,34 @@ impl Budget {
         }
     }
 
+    /// An indirect string read before (the clone is the caller's to charge).
+    pub fn string_of(&self, object: i32) -> Option<String> {
+        self.strings.borrow().get(&object).cloned()
+    }
+
+    pub fn keep_string(&self, object: i32, s: &str) {
+        if self.take(s.len()) {
+            self.strings.borrow_mut().insert(object, s.to_string());
+        }
+    }
+
+    /// An indirect number list read before, by object number and cap.
+    pub fn numbers_of(&self, object: i32, cap: usize) -> Option<Vec<f32>> {
+        self.numbers.borrow().get(&(object, cap)).cloned()
+    }
+
+    pub fn keep_numbers(&self, object: i32, cap: usize, v: &[f32]) {
+        if self.take(v.len() * 4) {
+            self.numbers.borrow_mut().insert((object, cap), v.to_vec());
+        }
+    }
+
+    /// The file is over a count that fails closed (it is refused, not cut short).
+    pub fn fail(&self) {
+        self.gone.set(true);
+        self.left.set(0);
+    }
+
     pub fn gone(&self) -> bool {
         self.gone.get()
     }
@@ -68,7 +100,7 @@ impl Budget {
     /// Refuses the file once the budget is gone.
     pub fn check(&self) -> Result<()> {
         if self.gone.get() {
-            Err(bad("This file refers to the same data so many times that Inkwell does not read it."))
+            Err(bad("This file refers to the same data so many times, or has so many entries, that Inkwell does not read it."))
         } else {
             Ok(())
         }

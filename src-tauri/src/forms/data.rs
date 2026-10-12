@@ -297,10 +297,21 @@ fn fdf_value(v: &PdfObject, b: &Budget) -> Val {
         if b.gone() {
             return None;
         }
-        let s = if o.is_string().unwrap_or(false) {
-            o.as_string().ok().or_else(|| o.as_bytes().ok().map(|b| super::decode_text(&b)))
-        } else {
-            text(o)
+        // An indirect string is read once; each use is a clone and is charged.
+        let object = if o.is_indirect().unwrap_or(false) { o.as_indirect().ok() } else { None };
+        let s = match object.and_then(|n| b.string_of(n)) {
+            Some(s) => Some(s),
+            None => {
+                let s = if o.is_string().unwrap_or(false) {
+                    o.as_string().ok().or_else(|| o.as_bytes().ok().map(|b| super::decode_text(&b)))
+                } else {
+                    text(o)
+                };
+                if let (Some(n), Some(s)) = (object, &s) {
+                    b.keep_string(n, s);
+                }
+                s
+            }
         };
         if !b.take(s.as_ref().map_or(0, String::len)) {
             return None;
@@ -308,7 +319,10 @@ fn fdf_value(v: &PdfObject, b: &Budget) -> Val {
         s.filter(|s| s.len() <= MAX_STR)
     };
     if v.is_array().unwrap_or(false) {
-        let n = v.len().unwrap_or(0).min(MAX_ITEMS);
+        let n = v.len().unwrap_or(0);
+        if n > MAX_ITEMS {
+            return Val::Invalid("a list of more than 10 000 values");
+        }
         let all: Option<Vec<String>> = (0..n as i32).map(|i| v.get_array(i).ok().flatten().and_then(|x| one(&x))).collect();
         return all.map_or(Val::Invalid("a list takes text values only"), Val::Many);
     }
@@ -327,7 +341,12 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
         let Some(top) = get(root, "Fields").filter(|a| a.is_array().unwrap_or(false)) else { return Ok(out) };
         let mut stack: Vec<(PdfObject, String, usize)> = Vec::new();
         let kids_of = |a: &PdfObject, prefix: &str, depth: usize, stack: &mut Vec<(PdfObject, String, usize)>| {
-            let n = a.len().unwrap_or(0).min(MAX_NODES);
+            let n = a.len().unwrap_or(0);
+            if n > MAX_NODES {
+                // Fails closed: the file is refused, not read in part.
+                budget.fail();
+                return;
+            }
             for i in (0..n as i32).rev() {
                 // Each kid holds a copy of its parent's name.
                 if !budget.take(prefix.len()) {
