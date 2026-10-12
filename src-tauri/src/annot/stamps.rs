@@ -138,7 +138,7 @@ fn load(dir: &Path, check_pictures: bool) -> Result<(Vec<Stamp>, Option<String>)
     };
     let mut raw = Vec::new();
     file.take(MAX_INDEX + 1).read_to_end(&mut raw).map_err(io)?;
-    let parsed = Some(()).filter(|_| raw.len() as u64 <= MAX_INDEX).and_then(|_| serde_json::from_slice::<IndexFile>(&raw).ok());
+    let parsed = if raw.len() as u64 <= MAX_INDEX { serde_json::from_slice::<IndexFile>(&raw).ok() } else { None };
     let Some(index) = parsed else {
         let _ = std::fs::rename(&path, dir.join(format!("{INDEX}.bad")));
         return Ok((Vec::new(), Some("The custom stamps list was damaged, so it starts empty.".into())));
