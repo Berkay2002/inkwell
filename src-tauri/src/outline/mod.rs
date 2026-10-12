@@ -181,17 +181,27 @@ fn number(o: &Option<PdfObject>) -> Option<f32> {
 // ---- destinations ----
 
 /// The document's named destinations (the `/Names` tree and the old `/Dests` dictionary), loaded once for as
-/// many lookups as a read needs (MuPDF builds the whole table each time it is asked). The lookup is the one
-/// the compressor judges bookmarks and links by.
+/// many lookups as a read needs (MuPDF builds the whole table each time it is asked). A name is found the way
+/// MuPDF's `pdf_lookup_dest` finds it: in `/Dests` alone when the document has one, else in the tree.
 #[derive(Default)]
 pub(crate) struct Names {
-    /// None inside: the tree is there but cannot be read, so no name is judged.
+    /// None inside: the destinations could not be loaded, so no name is judged.
     dests: Option<Option<Dests>>,
 }
 
 impl Names {
     fn dests(&mut self, doc: &PdfDocument) -> Option<&Dests> {
-        self.dests.get_or_insert_with(|| Dests::load(doc).ok().flatten()).as_ref()
+        self.dests.get_or_insert_with(|| Dests::load(doc).ok()).as_ref()
+    }
+
+    /// `Dests::lookup`, except that a name MuPDF does not find but the other source defines is not judged: another
+    /// viewer may follow it, so it is not called broken (the compressor keeps it for the same reason).
+    fn lookup(&mut self, doc: &PdfDocument, key: &PdfObject) -> Option<Option<PdfObject>> {
+        let d = self.dests(doc)?;
+        match d.lookup(key)? {
+            None if d.lookup_any(key).flatten().is_some() => None,
+            found => Some(found),
+        }
     }
 }
 
@@ -208,7 +218,7 @@ pub(crate) fn dest_array(doc: &PdfDocument, names: &mut Names, target: &PdfObjec
         t = if cur.is_dict().unwrap_or(false) {
             cur.get_dict("D").ok().flatten()
         } else if cur.is_name().unwrap_or(false) || cur.is_string().unwrap_or(false) {
-            names.dests(doc)?.lookup(&cur)?
+            names.lookup(doc, &cur)?
         } else {
             None
         };
@@ -961,7 +971,9 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<Option<(Opti
             let dest = dest_object(doc, *page, *at)?;
             let now = dest_of(doc, &it, &mut HashMap::new(), &mut Names::default());
             if let Dest::Page { page: p, at: a } = now {
-                if p == *page && same_point(a, *at) && it.get_dict("A")?.is_none() {
+                // a name is never "already the same": MuPDF and Acrobat may send it elsewhere than the tree does
+                let explicit = it.get_dict("Dest")?.is_some_and(|d| d.is_array().unwrap_or(false));
+                if explicit && p == *page && same_point(a, *at) && it.get_dict("A")?.is_none() {
                     return Ok(None);
                 }
             }
