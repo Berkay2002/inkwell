@@ -18,6 +18,8 @@ export const measureApi = {
   list: (doc: number) => invoke<Measure[]>("measure_list", { doc }),
   /** Why measuring is off for the document (a certification that forbids annotations); null when it is allowed. */
   lock: (doc: number) => invoke<string | null>("measure_lock", { doc }),
+  /** Whether the document is certified at any `/P`: a page scale is a page-dictionary entry, which none allows. */
+  protection: (doc: number) => invoke<{ certified: boolean; signed: boolean } | null>("a11y_protection", { doc }),
   scaleGet: (doc: number, page: number) => invoke<PageScale>("measure_scale_get", { doc, page }),
   scaleSet: (doc: number, page: number, scale: Scale) => invoke<EditState>("measure_scale_set", { doc, page, scale }),
   add: (doc: number, page: number, kind: MeasureKind, points: Pt[], scale: Scale | null, author: string) =>
@@ -76,6 +78,8 @@ interface MeasureStore {
 
   /** By document, read once: the reason nothing may be measured on it, or null. Absent until read. */
   locks: Record<number, string | null>;
+  /** The same for the page scale (the bar's scale chip, units and Calibrate): also off on a certified file at /P 3. */
+  scaleLocks: Record<number, string | null>;
   ensureLock: (doc: number) => Promise<void>;
 
   docs: Record<number, DocMeasure>;
@@ -100,6 +104,7 @@ interface MeasureStore {
   snap: (doc: number, page: number, p: Pt, radius: number) => Promise<SnapHit | null>;
 }
 
+const SCALE_CERTIFIED = "This document is certified; a certification doesn't allow a page scale to be set.";
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 const stem = (p: string) => baseName(p).replace(/\.pdf$/i, "");
@@ -138,14 +143,18 @@ export const useMeasure = create<MeasureStore>((set, get) => {
     toggleSnap: (k) => set((s) => ({ snaps: { ...s.snaps, [k]: !s.snaps[k] } })),
 
     locks: {},
+    scaleLocks: {},
     ensureLock: async (doc) => {
       if (get().locks[doc] !== undefined) return;
       try {
         const why = await measureApi.lock(doc);
-        set((s) => ({ locks: { ...s.locks, [doc]: why } }));
+        // Measurements are annotations (a /P 3 certification allows them), a page scale is not: no /P allows it.
+        const scaleWhy =
+          why ?? (await measureApi.protection(doc).then((p) => (p?.certified ? SCALE_CERTIFIED : null), (e) => msg(e)));
+        set((s) => ({ locks: { ...s.locks, [doc]: why }, scaleLocks: { ...s.scaleLocks, [doc]: scaleWhy } }));
       } catch (e) {
         // an unreadable answer is a refusal: nothing is written until the check has said it is fine
-        set((s) => ({ locks: { ...s.locks, [doc]: msg(e) } }));
+        set((s) => ({ locks: { ...s.locks, [doc]: msg(e) }, scaleLocks: { ...s.scaleLocks, [doc]: msg(e) } }));
       }
     },
 
@@ -164,7 +173,8 @@ export const useMeasure = create<MeasureStore>((set, get) => {
     onRev: (doc) => {
       set((s) => {
         const { [doc]: _, ...locks } = s.locks;
-        return { locks };
+        const { [doc]: __, ...scaleLocks } = s.scaleLocks;
+        return { locks, scaleLocks };
       });
       void get().ensureLock(doc);
       dropScales(doc);
@@ -194,6 +204,11 @@ export const useMeasure = create<MeasureStore>((set, get) => {
     setPageScale: async (doc, page, scale) => {
       if (!validScale(scale)) {
         patch(doc, { error: "A scale needs numbers above zero on both sides." });
+        return false;
+      }
+      const why = get().scaleLocks[doc];
+      if (why) {
+        patch(doc, { error: why });
         return false;
       }
       const ok = await run(doc, () => measureApi.scaleSet(doc, page, scale), (s) => s);

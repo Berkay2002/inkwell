@@ -325,7 +325,8 @@ pub struct Embedded {
 /// catalog dictionary of the file, and an update or removal rewrites the file, which no signature survives; a
 /// certification allows none of it. (A document that has an index when it is signed keeps it.)
 fn blocked(doc: &PdfDocument) -> Option<String> {
-    if crate::outline::certified(doc).is_ok_and(|c| c.is_some()) {
+    // A certification that cannot be read counts as one (it fails closed, as `signed` does).
+    if crate::outline::certified(doc).map_or(true, |c| c.is_some()) {
         Some("This document is certified. Changing its search index would void the certification, so Inkwell leaves it as it is.".into())
     } else if crate::outline::signed(doc) {
         Some("This document is signed. Inkwell does not change the search index of a signed document, so its signatures stay valid.".into())

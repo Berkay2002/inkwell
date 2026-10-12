@@ -642,7 +642,7 @@ fn refuse_below(doc: &PdfDocument, what: &str, allowed_from: i32) -> Result<()> 
     Ok(())
 }
 
-fn signed_inner(doc: &PdfDocument) -> Result<bool> {
+pub(crate) fn signed_inner(doc: &PdfDocument) -> Result<bool> {
     let cat = doc.catalog()?;
     if cat.get_dict("Perms")?.is_some_and(|p| p.get_dict("DocMDP").ok().flatten().is_some() || p.get_dict("UR3").ok().flatten().is_some()) {
         return Ok(true);
