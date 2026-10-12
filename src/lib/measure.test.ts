@@ -32,7 +32,7 @@ const calls = (name: string) => invoke.mock.calls.filter((c) => c[0] === name);
 beforeEach(() => {
   invoke.mockReset();
   vi.mocked(applyState).mockReset();
-  useMeasure.setState({ open: false, tool: "distance", docs: {}, locks: {} });
+  useMeasure.setState({ open: false, tool: "distance", docs: {}, locks: {}, scaleLocks: {} });
   useStore.setState({ docs: { 1: { id: 1, name: "plan.pdf" } as never } });
 });
 
@@ -126,6 +126,46 @@ describe("measure store", () => {
     useMeasure.getState().onRev(1);
     expect(useMeasure.getState().locks[1]).toBeUndefined();
     await vi.waitFor(() => expect(calls("measure_lock")).toHaveLength(2));
+  });
+
+  it("a certification that allows annotations (/P 3) keeps measuring on and turns the page scale off", async () => {
+    invoke.mockImplementation(async (cmd: string) => (cmd === "a11y_protection" ? { certified: true, signed: true } : cmd === "measure_lock" ? null : null));
+    await useMeasure.getState().ensureLock(1);
+    expect(useMeasure.getState().locks[1]).toBeNull();
+    const why = useMeasure.getState().scaleLocks[1];
+    expect(why).toMatch(/certified/);
+    invoke.mockClear();
+    expect(await useMeasure.getState().setPageScale(1, 0, { paper: 1, paperUnit: "in", real: 5, realUnit: "ft" })).toBe(false);
+    expect(calls("measure_scale_set")).toHaveLength(0);
+    expect(useMeasure.getState().get(1).error).toBe(why);
+    // a measurement is an annotation: it still goes through
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === "measure_add" ? { state, xref: 7, quantity: { value: 10, unit: "ft", text: "10.00 ft" } } : cmd === "measure_list" ? [m(7)] : null,
+    );
+    expect(await useMeasure.getState().add(1, 0, "distance", [[0, 0], [72, 0]])).toBe(7);
+  });
+
+  it("an uncertified document sets its page scale, and the scale lock is read again with the lock", async () => {
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === "a11y_protection" ? { certified: false, signed: false } : cmd === "measure_scale_set" ? state : cmd === "measure_list" ? [] : null,
+    );
+    await useMeasure.getState().ensureLock(1);
+    expect(useMeasure.getState().scaleLocks[1]).toBeNull();
+    useMeasure.getState().onRev(1);
+    expect(useMeasure.getState().scaleLocks[1]).toBeUndefined();
+    await vi.waitFor(() => expect(calls("a11y_protection")).toHaveLength(2));
+    expect(await useMeasure.getState().setPageScale(1, 0, { paper: 1, paperUnit: "in", real: 5, realUnit: "ft" })).toBe(true);
+    expect(calls("measure_scale_set")).toHaveLength(1);
+  });
+
+  it("a protection read that fails turns the page scale off but not measuring", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "a11y_protection") throw "engine gone";
+      return null;
+    });
+    await useMeasure.getState().ensureLock(1);
+    expect(useMeasure.getState().locks[1]).toBeNull();
+    expect(useMeasure.getState().scaleLocks[1]).toBe("engine gone");
   });
 
   it("an answer it cannot read counts as a refusal", async () => {
