@@ -28,7 +28,7 @@ pub mod detect;
 pub mod doc_js;
 pub mod js;
 mod layout;
-mod scripts;
+pub(crate) mod scripts;
 #[cfg(test)]
 mod tests;
 

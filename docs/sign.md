@@ -7,11 +7,21 @@ Engine: `src-tauri/src/sign/`. `pdf.rs` writes and checks PAdES signatures, `cry
 - `sign_identities` lists the IDs: Windows store certificates with a private key, ID files opened this session, and test IDs. An ID that can't sign is listed with the reason (`unusable`). The UI never pre-selects a Windows store ID: the user picks their own certificate.
 - `sign_open_id_file` opens a `.pfx`/`.p12` file with its password. `sign_create_test_id` makes a self-signed test ID.
 - `sign_document` signs as one incremental update (the bytes before it are kept as they are), optionally certifying (DocMDP P=1, 2 or 3), with a visible box or none.
-- `sign_list` checks every signature in the file and returns `SignatureInfo` per signature: `status` (`valid`, `unknownSigner`, `warning`, `invalid`), `changes` (`none`, `signaturesOnly`, `changed`), the signer, issuer, the time from `/M`, the reason, the certify level and `warnings` with a stable `code`.
+- `sign_list` returns `certify`, the document's DocMDP level as signing reads it (`docmdp_level`: the strictest in the catalog's `/Perms` or any signature; one that can't be read is 1), and `signatures`: a `SignatureInfo` per signature field with `status` (`valid`, `unknownSigner`, `warning`, `invalid`, `unsigned`), `changes` (`none`, `signaturesOnly`, `changed`), the signer, issuer, the time from `/M`, the reason, the certify level, `warnings` with a stable `code`, `readOnly`, `lockedBy` (the signer whose lock covers the field) and, on an empty field, `refused`: the reason `sign_document` would refuse it with. Both come from one function (`pdf.rs` `refusal`), so the UI never guesses.
 
 ## Signature fields on the page
 
-A signature field in a form is a button over the field. An empty one (`<label>: click to sign`) opens the signing sheet aimed at that field (`signField`, the same entry as the Sign tool's "Sign here" and the rail's empty-field "Sign"); nothing is signed until Sign is pressed in the sheet. A signed one (`<label>: signed by <name>, click for details`) opens the Signatures rail on that signature. After a certification that allows no changes (P=1) an empty field shows the reason and does nothing (`aria-disabled`); P=2 and P=3 allow signing, as the engine does. A read-only empty field (`Ff` bit 1) shows `<label>: read-only field` and does nothing here; the Sign tool's "Sign here" and the rail still offer it, because the engine does not check the flag. A field-level `/Lock` (FieldMDP) is not read, so it is not shown as locked.
+A signature field in a form is a button over the field. An empty one (`<label>: click to sign`) opens the signing sheet aimed at that field (`signField`, the same entry as the Sign tool's "Sign here" and the rail's empty-field "Sign"); nothing is signed until Sign is pressed in the sheet. A signed one (`<label>: signed by <name>, click for details`) opens the Signatures rail on that signature. An empty field the engine refuses (`refused`) shows `<label>: <reason>` and does nothing (`aria-disabled`); the Sign tool shows "Can't sign" on it with the reason as its title, and the rail lists the reason in place of Sign. The engine refuses an empty field when:
+
+- the document is certified with no changes allowed (P=1, or a certification that can't be read); P=2 and P=3 allow signing;
+- the field is read-only (`Ff` bit 1, on the widget or inherited through `/Parent`; a looping chain stops at the first object seen twice or 64 levels; an `/Ff` that is not a number counts as read-only);
+- an earlier signature locks it: "Field X is locked by <signer>'s signature."
+
+## Field locks (FieldMDP)
+
+A signature locks fields through its field's `/Lock` (ISO 32000-1 12.7.5.5) and its `/Reference` entries with `/TransformMethod /FieldMDP` (12.8.2.4), which name them the same way: `/Action /All`, `/Include` or `/Exclude` with `/Fields`, an array of full field names. A name also covers the fields below it (`a` covers `a.b`). The reader is shared with form scripts (`forms/scripts.rs` `signature_locks`). Anything it can't read locks every field: an unknown `/Action` (read as `/All`), a `/Lock` that isn't a dictionary, an `/Include` without `/Fields`, with `/Fields` not an array, with an entry that isn't text (a lone UTF-16 surrogate included) or with more than 4096 names, a `/Reference` that is neither an array nor a dictionary, has more than 16 entries or an entry without a readable method. A DocMDP P=1 reference locks everything too. Only signed fields lock; a `/Lock` on an empty field is a promise for later and locks nothing yet. A lock covers the fields that exist: a new signature in a new box is not refused.
+
+When a later update changes the `/V` or any widget's `/AP` of a field an intact signature locked (read from the revision it signs, by full name; a removed field or another widget under its name counts), that signature gets the `lockedChanged` warning naming up to three fields. The status follows the usual rules (`warning` when trusted), on top of `changed` or `signaturesOnly`.
 
 ## How a signature is checked
 
@@ -32,5 +42,6 @@ Limits on work: at most 64 signatures in a file, 64 revisions after a signature,
 - **No revocation.** CRLs and OCSP are not fetched or read (also not from `/DSS`), so a revoked certificate still reads as trusted.
 - **Form fill and comments are not told apart.** Any change other than further signatures is `changed`, including a form fill a P=2 certification allows.
 - **Adobe's own additions read as changed.** Acrobat adds `/DR`, `/DSS` and appearance updates when it signs again or adds long-term validation; Inkwell reports those as changes.
+- **A broken field lock is a warning, not invalid.** A change to a locked field is reported on the locking signature, as a P=2 change is; Inkwell does not call the signature invalid for it.
 - **No content-overlap check.** A later box is flagged by its size, not by whether it covers anything signed.
 - **One reader's view.** The check reads the file with MuPDF and closes the gaps known where other readers differ (repair, hybrid tables, object stream indexes), but cannot prove every reader shows the same page.

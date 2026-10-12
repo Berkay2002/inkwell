@@ -63,7 +63,7 @@ fn codes(s: &SignatureInfo) -> Vec<WarningCode> {
 
 fn infos(bytes: &[u8]) -> Vec<SignatureInfo> {
     let d = mupdf::pdf::PdfDocument::from_bytes(bytes).unwrap();
-    pdf::list(&d, bytes, &trust_tests).unwrap()
+    pdf::list(&d, bytes, &trust_tests).unwrap().signatures
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn a_signature_is_one_undo_step_appended_to_the_file_and_valid_after_reopen() {
     // Through the app's own listing (the Windows trust store): intact, signer unknown.
     let eng2 = Engine::new(2, 64 << 20);
     let id2 = eng2.open(&path).unwrap().doc;
-    let s = &list(&eng2, id2).unwrap()[0];
+    let s = &list(&eng2, id2).unwrap().signatures[0];
     assert_eq!((s.status, s.intact, s.trusted), (Status::UnknownSigner, true, false), "{s:?}");
 
     // Undo takes the signature away again.
@@ -430,7 +430,7 @@ fn a_certificate_not_for_document_signing_is_never_valid() {
     let bytes = eng.current_bytes(id).unwrap();
     let d = PdfDocument::from_bytes(&bytes).unwrap();
     // Even with a trust store that trusts everything.
-    let s = &pdf::list(&d, &bytes, &|_: &Certificate, _: &[Certificate]| (true, String::new())).unwrap()[0];
+    let s = &pdf::list(&d, &bytes, &|_: &Certificate, _: &[Certificate]| (true, String::new())).unwrap().signatures[0];
     assert_eq!((s.status, s.intact, s.trusted), (Status::UnknownSigner, true, false), "{s:?}");
     assert!(s.trust_note.contains("not issued for signing documents"), "{s:?}");
 }
@@ -783,7 +783,7 @@ fn an_untrusted_signer_is_never_called_valid() {
     // signer comes first.
     let bytes = with_comment(&recms(&signed("untrusted", None), |data| by_hand(data, DigestAlg::Sha1, true)));
     let d = PdfDocument::from_bytes(&bytes).unwrap();
-    let s = &pdf::list(&d, &bytes, &|_: &Certificate, _: &[Certificate]| (false, "self-signed".into())).unwrap()[0];
+    let s = &pdf::list(&d, &bytes, &|_: &Certificate, _: &[Certificate]| (false, "self-signed".into())).unwrap().signatures[0];
     assert_eq!((s.status, s.intact, s.trusted), (Status::UnknownSigner, true, false), "{s:?}");
     assert_eq!(codes(s), [WarningCode::Changed, WarningCode::Sha1], "{s:?}");
     assert!(s.summary.contains("not trusted") && !s.summary.contains("valid"), "{s:?}");
@@ -1423,4 +1423,226 @@ fn fill_and_sign_respects_a_certification() {
         assert_eq!(crate::fillsign::add(&mut d, &text(), None).is_ok(), allowed, "P={p}");
         assert!(crate::fillsign::flatten(&mut d, None).is_err(), "P={p}");
     }
+}
+
+// ---- field locks (FieldMDP, /Lock) and read-only fields ----
+
+/// Page 1 with these widgets (dictionaries without `/Type`, `/Subtype` and `/P`), all in the form's `/Fields`.
+/// `more` adds to the document before it is written (a `/Parent`, say), given the widgets.
+fn form(widgets: &[&str], more: impl FnOnce(&mut PdfDocument, &mut [PdfObject])) -> Vec<u8> {
+    let mut doc = PdfDocument::from_bytes(&page1()).unwrap();
+    let page = doc.find_page(0).unwrap();
+    let mut ws = Vec::new();
+    let mut fields = doc.new_array().unwrap();
+    for (k, w) in widgets.iter().enumerate() {
+        let y = 100 + k * 90;
+        let o = doc.new_object_from_str(&format!("<</Type/Annot/Subtype/Widget/F 4/Rect[300 {y} 520 {}]{w}>>", y + 80)).unwrap();
+        let mut o = doc.add_object(&o).unwrap();
+        o.dict_put("P", page.clone()).unwrap();
+        push_annot(&mut doc, page.clone(), o.clone());
+        fields.array_push(o.clone()).unwrap();
+        ws.push(o);
+    }
+    let mut af = doc.new_dict().unwrap();
+    af.dict_put("Fields", fields).unwrap();
+    doc.catalog().unwrap().dict_put("AcroForm", af).unwrap();
+    more(&mut doc, &mut ws);
+    write(&mut doc)
+}
+
+const SIG: &str = "/FT/Sig";
+
+/// Tenant, Witness and Other: empty signature fields; Note: a text field.
+fn lease() -> Vec<u8> {
+    form(&["/FT/Sig/T(Tenant)", "/FT/Sig/T(Witness)", "/FT/Sig/T(Other)", "/FT/Tx/T(Note)/V(before)"], |_, _| {})
+}
+
+/// Maple signs `field`, with `lock` as the field's `/Lock` and `reference` as the signature's `/Reference` (PDF
+/// syntax, empty for none).
+fn lock_sign(bytes: &[u8], field: &str, lock: &str, reference: &str) -> Vec<u8> {
+    pdf::sign_with(bytes, &ids().0, &SignRequest { field: Some(field.into()), ..unseen() }, &mut |d, w| {
+        let mut f = if w.get_dict("T").unwrap().is_some() { w.clone() } else { w.get_dict("Parent").unwrap().unwrap() };
+        if !lock.is_empty() {
+            f.dict_put("Lock", d.new_object_from_str(lock).unwrap()).unwrap();
+        }
+        if !reference.is_empty() {
+            f.get_dict("V").unwrap().unwrap().dict_put("Reference", d.new_object_from_str(reference).unwrap()).unwrap();
+        }
+    })
+    .unwrap()
+}
+
+fn field<'a>(i: &'a [SignatureInfo], name: &str) -> &'a SignatureInfo {
+    i.iter().find(|s| s.field == name).unwrap_or_else(|| panic!("{name}: {i:?}"))
+}
+
+/// Which of Witness and Other read as locked, in the list and when signing (the engine's refusal is the list's reason).
+fn locked_fields(bytes: &[u8]) -> Vec<&'static str> {
+    let i = infos(bytes);
+    let mut out = Vec::new();
+    for name in ["Witness", "Other"] {
+        let s = field(&i, name);
+        let r = pdf::sign(bytes, &ids().1, &SignRequest { field: Some(name.into()), ..unseen() });
+        match &s.refused {
+            Some(why) => {
+                assert_eq!(r.unwrap_err().to_string(), *why, "{name}: the engine refuses with the list's reason");
+                assert!(s.locked_by.is_some(), "{s:?}");
+                out.push(name);
+            }
+            None => assert!(r.is_ok() && s.locked_by.is_none(), "{name}: {s:?}"),
+        }
+    }
+    out
+}
+
+#[test]
+fn a_field_lock_refuses_signing_the_fields_it_names() {
+    let b = lock_sign(&lease(), "Tenant", "<</Type/SigFieldLock/Action/Include/Fields[(Witness)]>>", "");
+    let i = infos(&b);
+    let w = field(&i, "Witness");
+    assert_eq!(w.locked_by.as_deref(), Some("Maple Property Test"));
+    assert_eq!(w.refused.as_deref(), Some("Field Witness is locked by Maple Property Test's signature."));
+    assert_eq!(locked_fields(&b), ["Witness"]);
+    // The signed field reports what its signature locks only on the empty ones.
+    assert_eq!(field(&i, "Tenant").refused, None);
+
+    assert_eq!(locked_fields(&lock_sign(&lease(), "Tenant", "<</Action/Exclude/Fields[(Other)]>>", "")), ["Witness"]);
+    assert_eq!(locked_fields(&lock_sign(&lease(), "Tenant", "<</Action/All>>", "")), ["Witness", "Other"]);
+    // An action that isn't one of the three is read as /All (the strictest).
+    assert_eq!(locked_fields(&lock_sign(&lease(), "Tenant", "<</Action/Some/Fields[(Other)]>>", "")), ["Witness", "Other"]);
+    // The signature's own FieldMDP reference locks the same way.
+    let fieldmdp = "[<</Type/SigRef/TransformMethod/FieldMDP/TransformParams<</Type/TransformParams/Action/Include/Fields[(Other)]/V/1.2>>>>]";
+    assert_eq!(locked_fields(&lock_sign(&lease(), "Tenant", "", fieldmdp)), ["Other"]);
+    // A plain approval signature locks nothing.
+    assert!(locked_fields(&lock_sign(&lease(), "Tenant", "", "")).is_empty());
+}
+
+#[test]
+fn a_lock_that_cannot_be_read_locks_every_field() {
+    let many = format!("<</Action/Include/Fields[{}(Other)]>>", "(x) ".repeat(5000));
+    for lock in [
+        "5",                                          // /Lock not a dictionary
+        "<</Action/Include/Fields(Witness)>>",        // /Fields not an array
+        "<</Action/Include/Fields[1 2 (Witness)]>>",  // names that are not text
+        "<</Action/Include>>",                        // no /Fields
+        many.as_str(),                                // past the cap
+    ] {
+        assert_eq!(locked_fields(&lock_sign(&lease(), "Tenant", lock, "")), ["Witness", "Other"], "{lock}");
+    }
+    // A /Reference that is not an array (or a dictionary), or names no method it can read.
+    for reference in ["7", "[5]", "[<</TransformMethod 3>>]"] {
+        assert_eq!(locked_fields(&lock_sign(&lease(), "Tenant", "", reference)), ["Witness", "Other"], "{reference}");
+    }
+    // A name that is not valid text (a lone UTF-16 surrogate) can't be read either.
+    assert_eq!(locked_fields(&lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[<FEFFD800>]>>", "")), ["Witness", "Other"]);
+    // PDFDocEncoding bytes past ASCII are text: only the field they name is locked.
+    assert!(locked_fields(&lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[<C4D6>]>>", "")).is_empty());
+}
+
+#[test]
+fn a_read_only_field_is_refused_and_listed_with_its_reason() {
+    // Ff on the parent field, inherited by its widget (which has no /T of its own).
+    let b = form(&["/FT/Sig", "/FT/Sig/T(Open)"], |d, ws| {
+        let mut parent = d.add_object(&d.new_object_from_str("<</FT/Sig/T(Locked)/Ff 1>>").unwrap()).unwrap();
+        let mut kids = d.new_array().unwrap();
+        kids.array_push(ws[0].clone()).unwrap();
+        parent.dict_put("Kids", kids).unwrap();
+        ws[0].dict_put("Parent", parent).unwrap();
+    });
+    let i = infos(&b);
+    let s = field(&i, "Locked");
+    assert!(s.read_only, "{s:?}");
+    assert_eq!(s.refused.as_deref(), Some("Field Locked is read-only, so it can't be signed."));
+    let e = pdf::sign(&b, &ids().0, &SignRequest { field: Some("Locked".into()), ..unseen() }).unwrap_err();
+    assert_eq!(e.to_string(), "Field Locked is read-only, so it can't be signed.");
+    assert!(!field(&i, "Open").read_only);
+    assert!(pdf::sign(&b, &ids().0, &SignRequest { field: Some("Open".into()), ..unseen() }).is_ok());
+}
+
+#[test]
+fn a_looping_or_missing_parent_neither_hangs_nor_reads_as_read_only() {
+    let b = form(&["/FT/Sig/T(Loop)", "/FT/Sig/T(Orphan)/Parent 999 0 R"], |d, ws| {
+        // Two fields that are each other's /Parent, neither with /Ff.
+        let mut p = d.add_object(&d.new_object_from_str("<</T(up)>>").unwrap()).unwrap();
+        p.dict_put("Parent", ws[0].clone()).unwrap();
+        ws[0].dict_put("Parent", p).unwrap();
+    });
+    let i = infos(&b);
+    assert!(i.iter().all(|s| !s.read_only && s.refused.is_none()), "{i:?}");
+    // A loop with /Ff 1 above it is still read-only.
+    let b = form(&["/FT/Sig/T(Loop)"], |d, ws| {
+        let mut p = d.add_object(&d.new_object_from_str("<</Ff 1>>").unwrap()).unwrap();
+        p.dict_put("Parent", ws[0].clone()).unwrap();
+        ws[0].dict_put("Parent", p).unwrap();
+    });
+    assert!(infos(&b).iter().all(|s| s.read_only), "{:?}", infos(&b));
+}
+
+#[test]
+fn the_list_and_the_engine_read_the_same_certification_level() {
+    let level = |b: &[u8]| {
+        let d = PdfDocument::from_bytes(b).unwrap();
+        let l = pdf::list(&d, b, &trust_tests).unwrap();
+        assert_eq!(l.certify, pdf::docmdp_level(&d));
+        l
+    };
+    assert_eq!(level(&lease()).certify, None);
+    for p in [1, 2, 3] {
+        let b = pdf::sign(&lease(), &ids().0, &SignRequest { field: Some("Tenant".into()), certify: Some(p), ..unseen() }).unwrap();
+        let l = level(&b);
+        assert_eq!(l.certify, Some(p));
+        let w = field(&l.signatures, "Witness");
+        assert_eq!(w.refused.is_some(), p == 1, "P={p}: {w:?}");
+        assert_eq!(pdf::sign(&b, &ids().1, &SignRequest { field: Some("Witness".into()), ..unseen() }).is_err(), p == 1, "P={p}");
+    }
+    // A certification that can't be read (more form fields than are checked) is P=1, for both.
+    let b = form(&[SIG, "/FT/Sig/T(Witness)"], |d, _| {
+        let mut f = d.catalog().unwrap().get_dict("AcroForm").unwrap().unwrap().get_dict("Fields").unwrap().unwrap();
+        for _ in 0..20_001 {
+            f.array_push(d.new_indirect(5, 0).unwrap()).unwrap();
+        }
+    });
+    let l = level(&b);
+    assert_eq!(l.certify, Some(1));
+    let w = field(&l.signatures, "Witness");
+    assert_eq!(w.refused.as_deref(), Some("The document is certified with no changes allowed, so it can't be signed again."));
+    let e = pdf::sign(&b, &ids().1, &SignRequest { field: Some("Witness".into()), ..unseen() }).unwrap_err();
+    assert_eq!(e.to_string(), w.refused.clone().unwrap());
+}
+
+/// `bytes` with the text field Note filled in a later revision.
+fn fill_note(bytes: &[u8]) -> Vec<u8> {
+    append(bytes, |d| {
+        let mut n = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(3).unwrap().unwrap();
+        assert_eq!(n.get_dict("T").unwrap().unwrap().as_string().unwrap(), "Note");
+        n.dict_put("V", d.new_object_from_str("(after)").unwrap()).unwrap();
+    })
+}
+
+#[test]
+fn a_later_change_to_a_locked_field_is_flagged_on_the_signature_that_locks_it() {
+    let b = fill_note(&lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Note)]>>", ""));
+    let s = field(&infos(&b), "Tenant").clone();
+    assert!(s.intact && s.changes == Changes::Changed, "{s:?}");
+    assert!(codes(&s).contains(&WarningCode::LockedChanged), "{s:?}");
+    assert!(s.warnings.iter().any(|w| w.text == "After this signature, a field it locks changed: Note."), "{s:?}");
+
+    // A lock that doesn't cover Note: changed, but no locked field was.
+    let b = fill_note(&lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Witness)]>>", ""));
+    let s = field(&infos(&b), "Tenant").clone();
+    assert!(s.changes == Changes::Changed && !codes(&s).contains(&WarningCode::LockedChanged), "{s:?}");
+
+    // A later signature into a field that /All locks (forged past the engine, which refuses it).
+    let b = lock_sign(&lease(), "Tenant", "<</Action/All>>", "");
+    let forged = pdf::sign_with(&b, &ids().1, &unseen(), &mut |d, w| {
+        let mut wit = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(1).unwrap().unwrap();
+        wit.dict_put("V", w.get_dict("V").unwrap().unwrap()).unwrap();
+    })
+    .unwrap();
+    let s = field(&infos(&forged), "Tenant").clone();
+    assert!(codes(&s).contains(&WarningCode::LockedChanged), "{s:?}");
+    // An honest later signature in a new box leaves the locked fields alone.
+    let honest = pdf::sign(&b, &ids().1, &unseen()).unwrap();
+    let s = field(&infos(&honest), "Tenant").clone();
+    assert!(!codes(&s).contains(&WarningCode::LockedChanged), "{s:?}");
 }

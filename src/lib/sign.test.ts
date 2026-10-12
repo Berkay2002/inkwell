@@ -6,7 +6,7 @@ vi.mock("./edit", () => ({ applyState: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
 import { applyState } from "./edit";
 import {
-  type Identity, LOCKED_REASON, clickSigField, type Saved, type SignatureInfo, STATUS, sigFieldView, banner, changeNote, detailLines, imageRect, locked, otherWarnings, outcome, pdfDate, sigBox, statusWord, useSign,
+  type Identity, LOCKED_REASON, canSign, clickSigField, type Saved, type SignatureInfo, STATUS, sigFieldView, banner, changeNote, detailLines, imageRect, locked, otherWarnings, outcome, pdfDate, sigBox, statusWord, useSign,
 } from "./sign";
 
 const inv = vi.mocked(invoke);
@@ -20,7 +20,7 @@ function reply(map: Record<string, unknown>) {
 const sig = (p: Partial<SignatureInfo>): SignatureInfo => ({
   field: "Signature1", page: 0, rect: [0, 0, 10, 10], status: "valid", summary: "", signer: "Maple Property", issuer: "Maple Property",
   time: "D:20261011143200+02'00'", reason: "", location: "", subFilter: "ETSI.CAdES.detached", digest: "SHA-256", certify: null,
-  intact: true, changes: "none", trusted: true, trustNote: "", warnings: [], certNotAfter: "2031-10-11", certFingerprint: "AA", ...p,
+  intact: true, changes: "none", trusted: true, trustNote: "", warnings: [], certNotAfter: "2031-10-11", certFingerprint: "AA", readOnly: false, lockedBy: null, refused: null, ...p,
 });
 const saved = (id: string, kind: Saved["kind"]): Saved => ({ id, kind, source: "drawn", font: null, created: 1, width: 300, height: 100, dataUrl: "data:image/png;base64,AAAA" });
 const testId: Identity = {
@@ -88,8 +88,10 @@ describe("helpers", () => {
     expect(outcome([], false, false)).toBe("Saves the file. Later changes will show as made after signing.");
     expect(outcome([sig({})], false, true)).toBe("Saves the file with your other changes. Adds a new revision; the earlier signature stays valid.");
     expect(outcome([], true, false)).toMatch(/Locks the document/);
-    expect(locked([sig({ certify: 1 })])).toBe(true);
-    expect(locked([sig({ certify: 2 })])).toBe(false);
+    // The document's level from sign_list, not a guess from the signatures.
+    expect(locked({ certify: 1 })).toBe(true);
+    expect(locked({ certify: 2 })).toBe(false);
+    expect(locked({ certify: null })).toBe(false);
   });
 
   it("keeps placed pictures and signature boxes on the page", () => {
@@ -147,7 +149,7 @@ describe("sign store", () => {
     useSign.setState({ ids: [testId], idChoice: "s3", reason: "Lease signed", lock: true, picture: true, saved: [saved("a", "signature")], pick: { signature: "a" } });
     s().setDraft(1, { page: 3, rect: [300, 600, 500, 680] });
     const signedState = { ...state, rev: 5, dirty: false };
-    reply({ sign_document: signedState, sign_list: [sig({ certify: 1 })] });
+    reply({ sign_document: signedState, sign_list: { certify: 1, signatures: [sig({ certify: 1 })] } });
     expect(await s().sign(1, null)).toBe(true);
     const call = inv.mock.calls.find((c) => c[0] === "sign_document")![1] as Record<string, unknown>;
     expect(call.id).toEqual({ kind: "session", handle: 3 });
@@ -163,7 +165,7 @@ describe("sign store", () => {
   it("signs an existing field by name and never certifies a signed document", async () => {
     useSign.setState({ ids: [testId], idChoice: "s3", lock: true });
     useSign.setState({ docs: { 1: { ...s().get(1), sigs: [sig({})], draft: { page: 0, rect: [0, 0, 1, 1], field: "Tenant" } } } });
-    reply({ sign_document: state, sign_list: [] });
+    reply({ sign_document: state, sign_list: { certify: null, signatures: [] } });
     await s().sign(1, "save-token");
     const call = inv.mock.calls.find((c) => c[0] === "sign_document")![1] as { options: Record<string, unknown>; to: string };
     expect(call.options.field).toBe("Tenant");
@@ -185,14 +187,15 @@ describe("sign store", () => {
   });
 
   it("shows the banner again when the number of signatures changes", async () => {
-    reply({ sign_list: [sig({})] });
+    reply({ sign_list: { certify: null, signatures: [sig({})] } });
     await s().refreshSigs(1, 1);
     s().hideBanner(1);
     await s().refreshSigs(1, 2);
     expect(s().get(1).bannerHidden).toBe(true);
-    reply({ sign_list: [sig({}), sig({ field: "B" })] });
+    reply({ sign_list: { certify: 2, signatures: [sig({}), sig({ field: "B" })] } });
     await s().refreshSigs(1, 3);
     expect(s().get(1).bannerHidden).toBe(false);
+    expect(s().get(1).certify).toBe(2);
   });
 });
 
@@ -201,45 +204,48 @@ describe("signature form fields on the page", () => {
   const done = sig({ field: "Landlord", signer: "Maple Property" });
 
   it("titles an empty field, a signed field and a field not read yet", () => {
-    expect(sigFieldView("Tenant", empty, [empty])).toEqual({ state: "sign", title: "Tenant: click to sign" });
-    expect(sigFieldView("Landlord", done, [done, empty])).toEqual({ state: "signed", title: "Landlord: signed by Maple Property, click for details" });
-    expect(sigFieldView("Landlord", sig({ signer: "" }), [])).toEqual({ state: "signed", title: "Landlord: signed, click for details" });
-    expect(sigFieldView("Tenant", undefined, [])).toEqual({ state: "unknown", title: "Tenant" });
+    expect(sigFieldView("Tenant", empty)).toEqual({ state: "sign", title: "Tenant: click to sign" });
+    expect(sigFieldView("Landlord", done)).toEqual({ state: "signed", title: "Landlord: signed by Maple Property, click for details" });
+    expect(sigFieldView("Landlord", sig({ signer: "" }))).toEqual({ state: "signed", title: "Landlord: signed, click for details" });
+    expect(sigFieldView("Tenant", undefined)).toEqual({ state: "unknown", title: "Tenant" });
   });
 
-  it("is not actionable on a document certified with no changes allowed, and says why", () => {
-    const cert = sig({ field: "Landlord", certify: 1 });
-    expect(sigFieldView("Tenant", empty, [cert, empty])).toEqual({ state: "locked", title: `Tenant: ${LOCKED_REASON}` });
-    // P=2 and P=3 allow signing, as the engine does.
-    expect(sigFieldView("Tenant", empty, [sig({ certify: 2 }), empty]).state).toBe("sign");
-    // a signed field still opens its details
-    expect(sigFieldView("Landlord", cert, [cert]).state).toBe("signed");
-  });
+  // The engine's reason, whatever it is: certified with no changes, locked by a signature, read-only.
+  const byDoc = sig({ ...empty, refused: LOCKED_REASON });
+  const byField = sig({ ...empty, lockedBy: "Maple Property", refused: "Field Tenant is locked by Maple Property's signature." });
+  const readOnly = sig({ ...empty, readOnly: true, refused: "Field Tenant is read-only, so it can't be signed." });
 
-  it("a read-only empty field is not actionable and says so; a signed one still opens its details", () => {
-    expect(sigFieldView("Tenant", empty, [empty], true)).toEqual({ state: "locked", title: "Tenant: read-only field" });
-    clickSigField(7, "Tenant", empty, [empty], true);
-    expect(s().get(7).draft).toBeNull();
-    expect(s().rail).toBeNull();
-    expect(sigFieldView("Landlord", done, [done], true).state).toBe("signed");
+  it("a field the engine refuses is not actionable anywhere, and says the engine's reason", () => {
+    for (const f of [byDoc, byField, readOnly]) {
+      expect(sigFieldView("Tenant", f)).toEqual({ state: "locked", title: `Tenant: ${f.refused}` });
+      // The Sign tool's "Sign here" and the rail's Sign ask the same.
+      expect(canSign(f)).toBe(false);
+    }
+    expect(canSign(empty)).toBe(true);
+    expect(canSign(done)).toBe(false);
+    // Only the engine decides: a certification on another signature or a read-only flag alone is not a refusal.
+    expect(sigFieldView("Tenant", sig({ ...empty, certify: 1 })).state).toBe("sign");
+    expect(sigFieldView("Tenant", sig({ ...empty, readOnly: true })).state).toBe("sign");
+    // A signed field still opens its details, locked or not.
+    expect(sigFieldView("Landlord", sig({ ...done, readOnly: true, lockedBy: "Alex" })).state).toBe("signed");
   });
 
   it("an empty field click requests the sign flow with that field as the target, and signs nothing", () => {
-    clickSigField(7, "Tenant", empty, [empty]);
+    clickSigField(7, "Tenant", empty);
     expect(s().get(7).draft).toEqual({ page: 1, rect: [10, 20, 110, 60], field: "Tenant" });
     expect(s().rail).toBe("sheet");
     expect(inv).not.toHaveBeenCalled();
   });
 
   it("a refused field click does nothing", () => {
-    clickSigField(7, "Tenant", empty, [sig({ certify: 1 }), empty]);
+    for (const f of [byDoc, byField, readOnly]) clickSigField(7, "Tenant", f);
     expect(s().get(7).draft).toBeNull();
     expect(s().rail).toBeNull();
     expect(inv).not.toHaveBeenCalled();
   });
 
   it("a signed field click opens the rail on that signature", () => {
-    clickSigField(7, "Landlord", done, [done]);
+    clickSigField(7, "Landlord", done);
     expect(s().rail).toBe("list");
     expect(s().get(7).focus).toEqual({ field: "Landlord", n: 1 });
     expect(s().get(7).draft).toBeNull();
@@ -247,12 +253,12 @@ describe("signature form fields on the page", () => {
   });
 
   it("a repeated click asks again, and closing or leaving the list clears the focus", () => {
-    clickSigField(7, "Landlord", done, [done]);
-    clickSigField(7, "Landlord", done, [done]);
+    clickSigField(7, "Landlord", done);
+    clickSigField(7, "Landlord", done);
     expect(s().get(7).focus).toEqual({ field: "Landlord", n: 2 });
     s().setRail(null);
     expect(s().get(7).focus).toBeNull();
-    clickSigField(7, "Landlord", done, [done]);
+    clickSigField(7, "Landlord", done);
     s().setRail("sheet");
     expect(s().get(7).focus).toBeNull();
     s().setRail("list");

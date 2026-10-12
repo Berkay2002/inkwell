@@ -5,7 +5,7 @@
 //! certificate store, and a password is used once to open the file and then dropped.
 
 use super::crypto::{self, Certificate, DigitalId, SignError, Trust};
-use super::pdf::{self, SignDate, SignRequest, SignatureInfo};
+use super::pdf::{self, SignDate, SignList, SignRequest};
 use crate::engine::edit::EditState;
 use crate::engine::{DocId, Engine, EngineError};
 use crate::history_ipc::History;
@@ -264,22 +264,23 @@ pub fn sign_step(eng: &Engine, doc: DocId, id: &DigitalId, req: &SignRequest, la
 
 /// Every signature field with its validation, against what Save would write now.
 #[tauri::command]
-pub async fn sign_list(eng: State<'_, Arc<Engine>>, doc: DocId) -> Result<Vec<SignatureInfo>> {
+pub async fn sign_list(eng: State<'_, Arc<Engine>>, doc: DocId) -> Result<SignList> {
     let eng = eng.inner().clone();
     blocking(move || list(&eng, doc)).await
 }
 
-pub fn list(eng: &Engine, doc: DocId) -> Result<Vec<SignatureInfo>> {
+pub fn list(eng: &Engine, doc: DocId) -> Result<SignList> {
     // Most documents have no form: skip copying and reparsing them after every edit.
-    let has_fields = eng.read_custom(doc, |d| {
+    let (has_fields, certify) = eng.read_custom(doc, |d| {
         let fields = d.catalog()?.get_dict("AcroForm")?.and_then(|f| f.get_dict("Fields").ok().flatten());
-        Ok(match fields {
+        let has = match fields {
             Some(f) => f.len()? > 0,
             None => false,
-        })
+        };
+        Ok((has, pdf::docmdp_level(d)))
     })?;
     if !has_fields {
-        return Ok(Vec::new());
+        return Ok(SignList { certify, signatures: Vec::new() });
     }
     let bytes = eng.current_bytes(doc)?;
     let d = mupdf::pdf::PdfDocument::from_bytes(&bytes).map_err(EngineError::from)?;

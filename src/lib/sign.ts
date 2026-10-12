@@ -78,6 +78,18 @@ export interface SignatureInfo {
   warnings: Warning[];
   certNotAfter: string;
   certFingerprint: string;
+  /** The field's ReadOnly flag (inherited). */
+  readOnly: boolean;
+  /** The signer whose signature locks this field (FieldMDP or the field's /Lock). */
+  lockedBy: string | null;
+  /** Why this empty field can't be signed: the engine's own refusal (certified with no changes, read-only, locked). */
+  refused: string | null;
+}
+
+/** `sign_list`: the document's DocMDP level as signing reads it (one that can't be read is 1), and every signature field. */
+export interface SignList {
+  certify: number | null;
+  signatures: SignatureInfo[];
 }
 
 export interface SignOptions {
@@ -107,7 +119,7 @@ export const signApi = {
   openIdFile: (file: string, password: string) => invoke<Identity>("sign_open_id_file", { file, password }),
   createTestId: (name: string, email: string, org: string) => invoke<Identity>("sign_create_test_id", { name, email, org }),
   sign: (doc: number, id: IdRef, options: SignOptions, to: string | null) => invoke<EditState>("sign_document", { doc, id, options, to }),
-  list: (doc: number) => invoke<SignatureInfo[]>("sign_list", { doc }),
+  list: (doc: number) => invoke<SignList>("sign_list", { doc }),
 };
 
 // ---- pure helpers (tested) ----
@@ -155,7 +167,7 @@ export function detailLines(name: string, d: Date, reason: string, location = ""
 }
 
 /** A caution about an intact signature: changed after signing, a SHA-1 hash, a later visible box. */
-export type WarningCode = "changed" | "sha1" | "laterBox" | "laterBoxLarge" | "hybridXref" | "damaged";
+export type WarningCode = "changed" | "sha1" | "laterBox" | "laterBoxLarge" | "hybridXref" | "damaged" | "lockedChanged";
 export interface Warning {
   code: WarningCode;
   text: string;
@@ -175,6 +187,7 @@ export const STATUS: Record<Exclude<Status, "unsigned">, { tone: Tone; word: str
 /** The status word on a signature's card. */
 export function statusWord(s: SignatureInfo): string {
   if (s.status === "warning") {
+    if (has(s, "lockedChanged")) return "Valid, but a field it locks was changed";
     if (has(s, "changed")) return "Valid, but changed after signing";
     if (has(s, "laterBox", "laterBoxLarge")) return "Valid, but a box was added later";
     return "Valid, but weak";
@@ -202,6 +215,8 @@ export function banner(list: SignatureInfo[]): { tone: Tone; text: string } | nu
       tone: "unknown",
       text: `Signed. ${one ? "The signature is intact, but its signer is" : "The signatures are intact, but a signer is"} not in your trusted list.${changed ? " The document was changed after signing." : ""}`,
     };
+  if (s.some((x) => has(x, "lockedChanged")))
+    return { tone: "unknown", text: `${one ? "Signature" : "Signatures"} valid, but a field a signature locks was changed after signing.` };
   if (changed) return { tone: "unknown", text: `${one ? "Signature" : "Signatures"} valid, but the document was changed after signing.` };
   if (s.some((x) => has(x, "laterBox", "laterBoxLarge")))
     return { tone: "unknown", text: "Signatures valid, but a later signature added a visible box." };
@@ -224,10 +239,13 @@ export const CERTIFY_LABEL: Record<number, string> = {
   3: "Certified · form filling, signing and comments allowed",
 };
 
-/** Whether a new signature may be added: a P=1 certification forbids it. */
-export const locked = (list: SignatureInfo[]) => signed(list).some((s) => s.certify === 1);
+/** Whether a new signature may be added: a P=1 certification forbids it (the level the engine reads, from `sign_list`). */
+export const locked = (d: Pick<DocSign, "certify">) => d.certify === 1;
 
 export const LOCKED_REASON = "The document is certified with no changes allowed, so it can't be signed again.";
+
+/** An empty field the engine would sign into: the Sign tool's "Sign here", the rail's Sign and the form field all ask this. */
+export const canSign = (f: SignatureInfo) => f.status === "unsigned" && !f.refused;
 
 /** How a signature form field on the page behaves: `sig` is the field's entry in the document's signature list, if read yet. */
 export interface SigFieldView {
@@ -236,11 +254,10 @@ export interface SigFieldView {
   title: string;
 }
 
-export function sigFieldView(label: string, sig: SignatureInfo | undefined, list: SignatureInfo[], readOnly = false): SigFieldView {
+export function sigFieldView(label: string, sig: SignatureInfo | undefined): SigFieldView {
   if (!sig) return { state: "unknown", title: label };
   if (sig.status !== "unsigned") return { state: "signed", title: `${label}: signed${sig.signer ? ` by ${sig.signer}` : ""}, click for details` };
-  if (locked(list)) return { state: "locked", title: `${label}: ${LOCKED_REASON}` };
-  if (readOnly) return { state: "locked", title: `${label}: read-only field` };
+  if (!canSign(sig)) return { state: "locked", title: `${label}: ${sig.refused}` };
   return { state: "sign", title: `${label}: click to sign` };
 }
 
@@ -290,6 +307,8 @@ export interface DocSign {
   items: Item[];
   selected: number | null;
   sigs: SignatureInfo[];
+  /** The document's DocMDP level, as `sign_list` read it with `sigs`. */
+  certify: number | null;
   /** The rev `sigs` were read at. */
   sigsRev: number;
   draft: Draft | null;
@@ -297,7 +316,7 @@ export interface DocSign {
   error: string | null;
 }
 
-const fresh = (): DocSign => ({ focus: null, items: [], selected: null, sigs: [], sigsRev: -1, draft: null, bannerHidden: false, error: null });
+const fresh = (): DocSign => ({ focus: null, items: [], selected: null, sigs: [], certify: null, sigsRev: -1, draft: null, bannerHidden: false, error: null });
 
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 
@@ -443,11 +462,11 @@ export const useSign = create<SignStore>((set, get) => {
     },
     refreshSigs: async (doc, rev) => {
       try {
-        const sigs = await signApi.list(doc);
+        const { signatures: sigs, certify } = await signApi.list(doc);
         const before = signed(get().get(doc).sigs).length;
-        patch(doc, { sigs, sigsRev: rev, ...(signed(sigs).length !== before ? { bannerHidden: false } : {}) });
+        patch(doc, { sigs, certify, sigsRev: rev, ...(signed(sigs).length !== before ? { bannerHidden: false } : {}) });
       } catch {
-        patch(doc, { sigs: [], sigsRev: rev });
+        patch(doc, { sigs: [], certify: null, sigsRev: rev });
       }
     },
     select: (doc, selected) => patch(doc, { selected }),
@@ -511,9 +530,9 @@ export const useSign = create<SignStore>((set, get) => {
 });
 
 /** A click on a signature form field: starts signing into an empty one, shows a signed one, does nothing on a refused one. */
-export function clickSigField(doc: number, label: string, sig: SignatureInfo | undefined, list: SignatureInfo[], readOnly = false) {
+export function clickSigField(doc: number, label: string, sig: SignatureInfo | undefined) {
   const st = useSign.getState();
-  const { state } = sigFieldView(label, sig, list, readOnly);
+  const { state } = sigFieldView(label, sig);
   // The signature list's name and box are sent, not the form's: the engine looks the field up by them.
   if (sig && state === "sign") st.signField(doc, sig);
   else if (sig && state === "signed") st.showSignature(doc, sig.field);

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { pickSave, pickSource } from "../../lib/api";
 import {
-  CERTIFY_LABEL, type Identity, LOCKED_REASON, type SignatureInfo, SOURCE_LABEL, STATUS, changeNote, idKey, locked, otherWarnings, outcome, pdfDate, picture, statusWord,
+  CERTIFY_LABEL, type Identity, LOCKED_REASON, type SignatureInfo, SOURCE_LABEL, STATUS, canSign, changeNote, idKey, locked, otherWarnings, outcome, pdfDate, picture, statusWord,
   signApi, signed, useSign,
 } from "../../lib/sign";
 import { type DocState, useStore } from "../../store";
@@ -48,7 +48,7 @@ function Sheet({ doc }: { doc: DocState }) {
   // Closing the sheet drops the box on the page.
   useEffect(() => () => sg().setDraft(doc.id, null), [doc.id]);
 
-  const isLocked = locked(d.sigs);
+  const isLocked = locked(d);
   const already = signed(d.sigs).length > 0;
   const pic = picture(s);
   const sign = async () => {
@@ -266,7 +266,7 @@ function List({ doc }: { doc: DocState }) {
               {x.field} <span className="dim">· page {x.page + 1}</span>
             </span>
             <span className="grow" />
-            {!locked(sigs) && (
+            {canSign(x) && (
               <button
                 className="sg-link"
                 onClick={() => {
@@ -277,6 +277,7 @@ function List({ doc }: { doc: DocState }) {
                 Sign
               </button>
             )}
+            {x.refused && <p className="dim small sg-why">{x.refused}</p>}
           </div>
         ))}
         <p className="dim small sg-foot">Trust is checked against Windows' trusted certificates on this PC, without going online.</p>
