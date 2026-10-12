@@ -38,13 +38,28 @@ fn is_password(e: &Entry) -> bool {
     e.kind == FieldKind::Text && flag(field_ff(e), FieldFlags::PASSWORD)
 }
 
+/// Raw bytes of strings between 1 and 2 MB that one field's value may have decoded to be measured.
+const DECODE_BUDGET: usize = 8 << 20;
+
 /// A string value, or one of an array's strings (as many as `values_of` reads), over 1 MB once decoded. The
 /// raw length decides when it can: a UTF-16 string decodes to at least half its bytes, so only one over twice
-/// the limit is surely over; one between is decoded (once, here) and its text measured.
+/// the limit is surely over; one between is decoded (here) and its text measured, up to `DECODE_BUDGET` raw
+/// bytes a value: past that it counts as over, so a list of one shared string is not decoded once per entry.
 fn string_over_limit(v: &PdfObject) -> bool {
+    let spent = std::cell::Cell::new(0usize);
     let over = |o: &PdfObject| {
-        o.is_string().unwrap_or(false)
-            && o.string_len().is_ok_and(|n| n > 2 * MAX_STR + 2 || (n > MAX_STR && text(o).is_some_and(|s| s.len() > MAX_STR)))
+        if !o.is_string().unwrap_or(false) {
+            return false;
+        }
+        let Ok(n) = o.string_len() else { return false };
+        if n <= MAX_STR {
+            return false;
+        }
+        if n > 2 * MAX_STR + 2 {
+            return true;
+        }
+        spent.set(spent.get() + n);
+        spent.get() > DECODE_BUDGET || text(o).is_some_and(|s| s.len() > MAX_STR)
     };
     if v.is_array().unwrap_or(false) {
         (0..v.len().unwrap_or(0).min(4096) as i32).any(|i| v.get_array(i).ok().flatten().is_some_and(|x| over(&x)))

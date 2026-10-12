@@ -479,3 +479,27 @@ fn a_utf16_value_is_measured_decoded_not_by_its_bytes() {
         assert!(p.fields.iter().any(|(n, v)| n == "Address.Street" && *v == Val::Text("Main St".into())), "{fmt:?}");
     }
 }
+
+#[test]
+fn a_list_of_one_shared_utf16_string_is_not_decoded_once_per_entry() {
+    use crate::outline::tests::{open_bytes, raw_pdf};
+    // 1.99 MB of UTF-16BE (under the 2 MB that is surely over, 996 001 bytes of text), listed 4096 times
+    let units = 996_000;
+    let hex = format!("<FEFF3042{}>", "0078".repeat(units));
+    let refs = "7 0 R ".repeat(4096);
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".into(),
+        "<< >>".into(),
+        format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (List) /Rect [10 10 100 50] /P 3 0 R /V [{refs}] >>"),
+        "<< >>".into(),
+        hex,
+    ];
+    let d = dir("shared-utf16");
+    let (eng, id, _) = open_bytes(&d, "s.pdf", &raw_pdf(&objs));
+    let t = std::time::Instant::now();
+    let (_, done) = export(&eng, id, Format::Json, "s.pdf").unwrap();
+    assert_eq!(done.long_text, 1);
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "took {:?}", t.elapsed());
+}
