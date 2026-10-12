@@ -413,21 +413,65 @@ fn a_stamp_is_clamped_to_the_page_and_a_small_page() {
     assert_eq!((r[2] - r[0], r[3] - r[1]), (150.0, 600.0));
 }
 
+/// A `w x h` PNG whose top left quarter is red and top right quarter blue; the bottom half is transparent.
+/// Two colours side by side tell a turn from a mirror, and the transparent half a turn from a transpose.
+fn red_blue(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbaImage::from_fn(w, h, |x, y| match (x < w / 2, y < h / 2) {
+        (true, true) => image::Rgba([255, 0, 0, 255]),
+        (false, true) => image::Rgba([0, 0, 255, 255]),
+        _ => image::Rgba([0, 0, 0, 0]),
+    });
+    encode_png(&img).unwrap()
+}
+
+/// The stamp as the page shows it: red top left, blue top right, page white below, inside `rect` (page space).
+fn upright(p: &(Vec<u8>, usize, usize), rect: [f32; 4], what: &str) {
+    let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
+    let px = |fx: f32, fy: f32| at(p, (rect[0] + w * fx) as usize, (rect[1] + h * fy) as usize);
+    assert_eq!(px(0.25, 0.25), [255, 0, 0], "{what}: top left");
+    assert_eq!(px(0.75, 0.25), [0, 0, 255], "{what}: top right");
+    assert_eq!(px(0.25, 0.75), [255, 255, 255], "{what}: bottom left");
+    assert_eq!(px(0.75, 0.75), [255, 255, 255], "{what}: bottom right");
+}
+
 #[test]
-fn a_rotated_page_gets_the_stamp_upright_where_it_was_clicked() {
+fn a_stamp_on_a_rotated_page_is_upright_and_stays_so_through_move_and_resize() {
     let d = dir("stamps", "rotated");
-    let (_lib, s, png) = one_stamp(&d);
-    let pdf = raw_pdf(&[
-        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate 90 >>".to_string(),
-    ]);
-    let (eng, id, _) = open_bytes(&d, "r.pdf", &pdf);
-    // The page shows 792 x 612; (700, 100) is inside it.
-    place1(&eng, id, &s, &png, [700.0, 100.0]).unwrap();
-    let a = list_all(&eng, id).unwrap().remove(0);
-    assert!(a.rect[2] <= 792.0 + 0.01 && a.rect[3] <= 612.0 + 0.01 && a.rect[0] >= -0.01, "{:?}", a.rect);
-    assert!(((a.rect[2] - a.rect[0]) - 150.0).abs() < 0.01 && ((a.rect[3] - a.rect[1]) - 75.0).abs() < 0.01, "{:?}", a.rect);
+    let lib = d.join("lib");
+    let src = write(&d, "rb.png", &red_blue(200, 100));
+    let s = create(&lib, &Source { path: &src, page: None }, "Two colours", "").unwrap();
+    let (_, png) = picture(&lib, &s.id).unwrap();
+    for turn in [0, 90, 180, 270] {
+        let pdf = raw_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {turn} >>"),
+        ]);
+        let (eng, id, _) = open_bytes(&d, &format!("r{turn}.pdf"), &pdf);
+        // At 90 and 270 the page shows 792 x 612; (500, 300) is inside it either way.
+        let x = place1(&eng, id, &s, &png, [500.0, 300.0]).unwrap();
+        let a = list_all(&eng, id).unwrap().remove(0);
+        let r = a.rect;
+        assert!(((r[2] - r[0]) - 150.0).abs() < 0.01 && ((r[3] - r[1]) - 75.0).abs() < 0.01, "{turn}: {r:?}");
+        upright(&pixels(&eng, id), r, &format!("/Rotate {turn} placed"));
+
+        // Move (same size).
+        edit_one(&eng, id, 0, x, &Patch { rect: Some([100.0, 100.0, 250.0, 175.0]), ..Default::default() }, "Alex", user()).unwrap();
+        let r = list_all(&eng, id).unwrap().remove(0).rect;
+        assert!(r.iter().zip([100.0, 100.0, 250.0, 175.0]).all(|(g, w)| (g - w).abs() < 0.01), "{turn}: {r:?}");
+        upright(&pixels(&eng, id), r, &format!("/Rotate {turn} moved"));
+
+        // Resize into a box of another shape: the displayed 2:1 holds, the top left stays.
+        edit_one(&eng, id, 0, x, &Patch { rect: Some([100.0, 100.0, 400.0, 160.0]), ..Default::default() }, "Alex", user()).unwrap();
+        let r = list_all(&eng, id).unwrap().remove(0).rect;
+        assert!(r.iter().zip([100.0, 100.0, 220.0, 160.0]).all(|(g, w)| (g - w).abs() < 0.01), "{turn}: {r:?}");
+        upright(&pixels(&eng, id), r, &format!("/Rotate {turn} resized"));
+
+        // Delete and undo it again: still the same picture.
+        delete_many(&eng, id, &[(0, x)], user()).unwrap();
+        eng.undo(id).unwrap();
+        upright(&pixels(&eng, id), r, &format!("/Rotate {turn} after undo"));
+    }
 }
 
 #[test]

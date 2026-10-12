@@ -676,7 +676,8 @@ fn map_point(p: Point, from: Rect, to: Rect) -> Point {
     Point { x: to.x0 + (p.x - from.x0) * sx, y: to.y0 + (p.y - from.y0) * sy }
 }
 
-fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
+/// `turns` is the page's `/Rotate` in quarter turns: a picture stamp's pixels are stored turned back by it.
+fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect, turns: u32) -> Result<()> {
     let from = a.rect()?;
     let m = |p: Point| map_point(p, from, to);
     match kind {
@@ -702,7 +703,10 @@ fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
         }
         // A picture stamp keeps the picture's proportions whatever box was asked for.
         Kind::Stamp => {
-            let fit = stamps::picture_size(&a.object()).map_or(to, |(w, h)| stamps::fit_aspect(from, to, w as f32 / h as f32));
+            let fit = stamps::picture_size(&a.object()).map_or(to, |(w, h)| {
+                let (w, h) = if turns % 2 == 1 { (h, w) } else { (w, h) };
+                stamps::fit_aspect(from, to, w as f32 / h as f32)
+            });
             a.set_rect(fit)?;
         }
         // Rect-based kinds; the others derive their /Rect from the geometry above.
@@ -713,7 +717,7 @@ fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
 
 pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: &str) -> Result<()> {
     crate::outline::refuse_unless_annotating_allowed(doc, "Changing a comment")?;
-    let (_p, mut a) = find(doc, page, xref)?;
+    let (p, mut a) = find(doc, page, xref)?;
     let kind = kind_of(&a)?;
     let s = &patch.style;
     if let Some(c) = s.color {
@@ -745,7 +749,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: 
         a.set_default_appearance("Helv", sz, Some(c))?;
     }
     if let Some(r) = patch.rect {
-        reshape(&mut a, kind, rect_of(r))?;
+        reshape(&mut a, kind, rect_of(r), stamps::quarter_turns(&p)?)?;
     }
     meta(&mut a, author, false)?;
     a.update()?;

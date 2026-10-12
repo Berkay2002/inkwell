@@ -425,6 +425,25 @@ pub fn place_rect(at: [f32; 2], aspect: f32, page: Rect) -> [f32; 4] {
     [x0, y0, x0 + w, y0 + h]
 }
 
+/// The page's `/Rotate` in quarter turns (0..4), read the way MuPDF does: a value that is not a multiple of 90 is none.
+pub fn quarter_turns(page: &mupdf::pdf::PdfPage) -> Result<u32> {
+    let r = page.rotation()?.rem_euclid(360);
+    Ok(if r % 90 == 0 { (r / 90) as u32 } else { 0 })
+}
+
+/// `png` turned so that, once the page's `/Rotate` of `turns` quarter turns has turned the annotation's box, it is
+/// upright again. MuPDF rebuilds a picture stamp's appearance with an identity matrix on every move or resize, so
+/// the correction has to be in the pixels and not in a `/Matrix`.
+fn upright_for(png: &[u8], turns: u32) -> Result<Vec<u8>> {
+    use image::imageops::{rotate180, rotate270, rotate90};
+    let img = image::load_from_memory(png).map_err(|_| bad("that stamp's picture is damaged"))?.to_rgba8();
+    encode_png(&match turns {
+        1 => rotate270(&img),
+        2 => rotate180(&img),
+        _ => rotate90(&img),
+    })
+}
+
 /// Draws the library picture `png` of stamp `s` on `page` centred on `at`; returns the annotation's xref.
 /// A certified document refuses (unless its `/P` allows annotations); a signed one is added to incrementally
 /// by the caller's step, as for every comment.
@@ -432,6 +451,14 @@ pub fn place(doc: &mut PdfDocument, page: u32, s: &Stamp, png: &[u8], at: [f32; 
     crate::outline::refuse_unless_annotating_allowed(doc, "Placing a stamp")?;
     let mut p = doc.load_pdf_page(page as i32)?;
     let rect = place_rect(at, s.width as f32 / s.height as f32, p.bounds()?);
+    let turns = quarter_turns(&p)?;
+    let turned;
+    let png = if turns == 0 {
+        png
+    } else {
+        turned = upright_for(png, turns)?;
+        &turned
+    };
     let img = Image::from_bytes(png).map_err(|_| bad("that stamp's picture is damaged"))?;
     let image = doc.add_image(&img)?;
 
