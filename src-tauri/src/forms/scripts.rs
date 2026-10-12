@@ -500,18 +500,19 @@ pub(crate) enum Lock {
     All,
     /// The form was too large to check for a certification: it counts as locked, and the message says why.
     Unchecked,
-    Include(Vec<String>),
-    Exclude(Vec<String>),
+    Include(std::collections::HashSet<String>),
+    Exclude(std::collections::HashSet<String>),
 }
 
 /// The names in a `/Lock /Fields` array, and whether all of them were read (the array is there, holds at most 4096
 /// entries, and each is a name or string).
-fn lock_names(lock: &PdfObject) -> (Vec<String>, bool) {
+fn lock_names(lock: &PdfObject) -> (std::collections::HashSet<String>, bool) {
     // Not an array (`/Fields (Sum)`): the names it meant are unknown, so the lock is not read in full.
-    let Some(a) = get(lock, "Fields").filter(|a| a.is_array().unwrap_or(false)) else { return (Vec::new(), false) };
+    let Some(a) = get(lock, "Fields").filter(|a| a.is_array().unwrap_or(false)) else { return (Default::default(), false) };
     let len = a.len().unwrap_or(0);
     let names: Vec<String> = (0..len.min(4096) as i32).filter_map(|i| a.get_array(i).ok().flatten().as_ref().and_then(text)).collect();
     let complete = len <= 4096 && names.len() == len;
+    let names = names.into_iter().collect();
     (names, complete)
 }
 
@@ -581,19 +582,33 @@ pub(crate) fn locks_of(doc: &PdfDocument, entries: &[Entry]) -> Vec<Lock> {
 }
 
 fn locks_of_fields(entries: &[Entry]) -> Vec<Lock> {
+    per_field(entries).into_iter().filter(|e| e.kind == FieldKind::Signature).flat_map(|e| signature_locks(&e.field, &e.obj)).collect()
+}
+
+/// What the signature field `field` (with its widget `widget`) locks, read from the document (sign/pdf.rs refuses and
+/// checks with this too).
+pub(crate) fn signature_locks(field: &PdfObject, widget: &PdfObject) -> Vec<Lock> {
     let read = |o: &PdfObject, k: &str, inherit: bool| if inherit { o.get_dict_inheritable(k) } else { o.get_dict(k) };
-    per_field(entries).into_iter().filter(|e| e.kind == FieldKind::Signature).flat_map(|e| field_locks(e, &read)).collect()
+    locks_in(field, widget, &read)
 }
 
 /// What one signature field locks. `read(object, key, inherit)` reads an entry: an `Err` is an entry that could not be
 /// read, which is not an absent one (a seam for the test, which cannot make MuPDF fail on a real file).
-pub(crate) fn field_locks(e: &Entry, read: &dyn Fn(&PdfObject, &str, bool) -> std::result::Result<Option<PdfObject>, mupdf::Error>) -> Vec<Lock> {
+/// Reads one dictionary entry, optionally inherited; `Err` is an entry that could not be read.
+pub(crate) type ReadEntry = dyn Fn(&PdfObject, &str, bool) -> std::result::Result<Option<PdfObject>, mupdf::Error>;
+
+#[cfg(test)]
+pub(crate) fn field_locks(e: &Entry, read: &ReadEntry) -> Vec<Lock> {
+    locks_in(&e.field, &e.obj, read)
+}
+
+fn locks_in(field: &PdfObject, widget: &PdfObject, read: &ReadEntry) -> Vec<Lock> {
     // A /V that cannot be read may be a signature: everything is locked.
-    let Ok(v) = read(&e.field, "V", true) else { return vec![Lock::All] };
+    let Ok(v) = read(field, "V", true) else { return vec![Lock::All] };
     // Unsigned (no /V, or not a dictionary): a /Lock, readable or not, locks nothing.
     let Some(v) = v.filter(|v| !v.is_null().unwrap_or(true) && v.is_dict().unwrap_or(false)) else { return Vec::new() };
     // A /Lock that cannot be read may hold a lock: everything is locked.
-    let (Ok(field_lock), Ok(widget_lock)) = (read(&e.field, "Lock", false), read(&e.obj, "Lock", false)) else { return vec![Lock::All] };
+    let (Ok(field_lock), Ok(widget_lock)) = (read(field, "Lock", false), read(widget, "Lock", false)) else { return vec![Lock::All] };
     let mut locks = reference_locks(&v);
     let live = |l: Option<PdfObject>| l.filter(|l| !l.is_null().unwrap_or(true));
     locks.extend(live(field_lock).or_else(|| live(widget_lock)).map(|l| lock_of(&l)));
@@ -607,7 +622,12 @@ pub(crate) fn locked(locks: &[Lock], e: &Entry) -> bool {
 
 /// Whether a field with this full name is covered by a signature's lock (a field about to take the name, too).
 pub(crate) fn name_locked(locks: &[Lock], name: &str) -> bool {
-    let named = |names: &[String]| names.iter().any(|n| name == n || name.starts_with(&format!("{n}.")));
+    // A name too long or too deep to look up cheaply (each level hashes its prefix) is covered: the safe side.
+    if !locks.is_empty() && (name.len() > 1024 || name.bytes().filter(|&b| b == b'.').count() > 64) {
+        return true;
+    }
+    // The name itself or any field above it (`a` covers `a.b`): one lookup per level, however many names a lock has.
+    let named = |names: &std::collections::HashSet<String>| name.match_indices('.').map(|(i, _)| &name[..i]).chain([name]).any(|n| names.contains(n));
     locks.iter().any(|l| match l {
         Lock::All | Lock::Unchecked => true,
         Lock::Include(n) => named(n),
