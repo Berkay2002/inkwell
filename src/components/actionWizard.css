@@ -380,11 +380,10 @@
   flex-direction: column;
   min-width: 0;
 }
+/* The whole label, page range included: it wraps instead of cutting at "(pages ". */
 .aw-step-name {
-  overflow: hidden;
   font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .aw-step-sub {
   font-size: 12px;

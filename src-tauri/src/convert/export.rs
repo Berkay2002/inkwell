@@ -600,6 +600,37 @@ fn with_title(head: &str, title: &str) -> String {
 
 // ---------------------------------------------------------------- Word
 
+/// One paragraph of the model from text lines: the text, the first character's size and colour, bold and italic
+/// where most characters are. `None` when there is only white space.
+fn text_block(lines: &[mupdf::text_page::TextLine<'_>], rect: [f64; 4]) -> Option<flow::Block> {
+    let mut text = String::new();
+    let (mut size, mut argb) = (0.0f32, 0u32);
+    let (mut bold, mut italic, mut chars) = (0usize, 0usize, 0usize);
+    for line in lines {
+        if !text.is_empty() && !text.ends_with(' ') {
+            text.push(' ');
+        }
+        for c in line.chars() {
+            let Some(ch) = c.char() else { continue };
+            if chars == 0 {
+                size = c.size();
+                argb = c.argb();
+            }
+            chars += 1;
+            text.push(ch);
+            if !ch.is_whitespace() {
+                bold += (c.flags().contains(TextCharFlags::BOLD) || c.font().is_some_and(|f| f.is_bold())) as usize;
+                italic += c.font().is_some_and(|f| f.is_italic()) as usize;
+            }
+        }
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    let c = |shift: u32| ((argb >> shift) & 0xff) as f64 / 255.0;
+    Some(flow::Block { text: text.trim().to_string(), rect, size: size as f64, bold: bold * 2 > chars, italic: italic * 2 > chars, color: [c(16), c(8), c(0)] })
+}
+
 /// The pages as the flowing model both document writers take (paragraphs, tables, PNG pictures).
 fn flow_model(doc: &Document, pages: &[u32], run: &mut Run<'_>) -> Result<Vec<flow::Page>, Error> {
     use image::{ExtendedColorType, ImageEncoder};
@@ -611,44 +642,38 @@ fn flow_model(doc: &Document, pages: &[u32], run: &mut Run<'_>) -> Result<Vec<fl
         let w = page.bounds()?.width() as f64;
         let tp = page.to_text_page(TextPageFlags::PRESERVE_IMAGES)?;
         let mut out_page = flow::Page { width: w, height: h, blocks: Vec::new(), images: Vec::new() };
+        // Blocks split into one per line, with the block they came from and where their pieces are.
+        let mut split: Vec<(flow::Block, std::ops::Range<usize>)> = Vec::new();
         // y runs up in the model
         let flip = |b: mupdf::Rect| [b.x0 as f64, h - b.y1 as f64, b.x1 as f64, h - b.y0 as f64];
         for block in tp.blocks() {
             match block.r#type() {
                 TextBlockType::Text => {
-                    let mut text = String::new();
-                    let (mut size, mut argb) = (0.0f32, 0u32);
-                    let (mut bold, mut italic, mut chars) = (0usize, 0usize, 0usize);
-                    for line in block.lines() {
-                        if !text.is_empty() && !text.ends_with(' ') {
-                            text.push(' ');
-                        }
-                        for c in line.chars() {
-                            let Some(ch) = c.char() else { continue };
-                            if chars == 0 {
-                                size = c.size();
-                                argb = c.argb();
+                    // A paragraph is one block. A row drawn cell by cell comes as one block whose lines sit side by
+                    // side (cells, and in stream order the next row's after them): every line is its own block then,
+                    // and the page's tables are found from where they are, not from the order they were drawn in.
+                    // A list label beside its item is not a cell, and the pieces go back into one block below
+                    // when no table takes them.
+                    let lines: Vec<_> = block.lines().collect();
+                    let rects: Vec<[f64; 4]> = lines.iter().map(|l| flip(l.bounds())).collect();
+                    let cells: Vec<[f64; 4]> = lines
+                        .iter()
+                        .zip(&rects)
+                        .filter(|(l, _)| !flow::list_label(&l.chars().filter_map(|c| c.char()).collect::<String>()))
+                        .map(|(_, r)| *r)
+                        .collect();
+                    let whole = text_block(&lines, flip(block.bounds()));
+                    match whole {
+                        Some(whole) if flow::side_by_side(&cells) => {
+                            let start = out_page.blocks.len();
+                            for (l, r) in lines.iter().zip(rects) {
+                                out_page.blocks.extend(text_block(std::slice::from_ref(l), r));
                             }
-                            chars += 1;
-                            text.push(ch);
-                            if !ch.is_whitespace() {
-                                bold += (c.flags().contains(TextCharFlags::BOLD) || c.font().is_some_and(|f| f.is_bold())) as usize;
-                                italic += c.font().is_some_and(|f| f.is_italic()) as usize;
-                            }
+                            split.push((whole, start..out_page.blocks.len()));
                         }
+                        Some(whole) => out_page.blocks.push(whole),
+                        None => {}
                     }
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    let c = |shift: u32| ((argb >> shift) & 0xff) as f64 / 255.0;
-                    out_page.blocks.push(flow::Block {
-                        text: text.trim().to_string(),
-                        rect: flip(block.bounds()),
-                        size: size as f64,
-                        bold: bold * 2 > chars,
-                        italic: italic * 2 > chars,
-                        color: [c(16), c(8), c(0)],
-                    });
                 }
                 TextBlockType::Image => {
                     let Some(pix) = block.image().and_then(|im| im.to_pixmap().ok()) else { continue };
@@ -662,6 +687,7 @@ fn flow_model(doc: &Document, pages: &[u32], run: &mut Run<'_>) -> Result<Vec<fl
                 _ => {}
             }
         }
+        flow::unsplit(&mut out_page.blocks, split);
         model.push(out_page);
         run.step(i as u32 + 1);
     }

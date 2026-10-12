@@ -128,6 +128,9 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
       const cropping = ie().docs[docId]?.crop != null;
       if (e.key === "Escape") {
         e.preventDefault();
+        // The handle that holds the pointer goes away with the selection and sends no more events: end the drag
+        // here, which also takes the outline off the page it was over.
+        dragCancel();
         if (cropping) ie().cancelCrop(docId);
         else ie().select(docId, null);
         return;

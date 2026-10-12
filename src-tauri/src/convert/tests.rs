@@ -701,3 +701,391 @@ fn file_names_are_made_safe() {
     assert_eq!(safe_stem("  "), "document");
     assert_eq!(safe_stem("name."), "name");
 }
+
+// ---------------------------------------------------------------- table columns
+
+/// A one-line cell at 11 pt as tight as a PDF sets it: 6.6 pt (0.6 em) per character.
+fn tight(t: &str, x: f64, y: f64) -> flow::Block {
+    let w = t.chars().count() as f64 * 6.6;
+    flow::Block { text: t.into(), rect: [x, y, x + w, y + 11.0], size: 11.0, bold: false, italic: false, color: [0.0; 3] }
+}
+
+/// The `\cellx` positions of the first row of the first table.
+fn cellx_of_first_row(rtf: &str) -> Vec<i64> {
+    let row = rtf.split("\\trowd").nth(1).unwrap();
+    row[..row.find("\\pard").unwrap()].split("\\cellx").skip(1).map(|s| s.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap()).collect()
+}
+
+/// `(gridCol widths, tcW of the first row's cells)` of the first table in a document.xml.
+fn docx_widths(xml: &str) -> (Vec<i64>, Vec<i64>) {
+    let num = |s: &str, key: &str| -> Vec<i64> {
+        s.split(key).skip(1).map(|p| p.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap()).collect()
+    };
+    let grid = &xml[xml.find("<w:tblGrid>").unwrap()..xml.find("</w:tblGrid>").unwrap()];
+    let row = &xml[xml.find("<w:tr>").unwrap()..xml.find("</w:tr>").unwrap()];
+    (num(grid, "<w:gridCol w:w=\""), num(row, "<w:tcW w:w=\""))
+}
+
+fn page_of(blocks: Vec<flow::Block>) -> flow::Page {
+    flow::Page { width: 612.0, height: 792.0, blocks, images: vec![] }
+}
+
+fn doc_xml(pages: &[flow::Page]) -> String {
+    String::from_utf8(unzip(&super::docx::docx(pages, "t"), "word/document.xml").unwrap()).unwrap()
+}
+
+#[test]
+fn a_narrow_last_column_stays_wide_enough_for_its_longest_word() {
+    use super::rtf::rtf;
+    // The last column's cells end where their text ends, so its detected width is the word and 4 pt: less than the
+    // word plus the cell padding (5.4 pt a side) that Word and the RTF readers take out of it.
+    let rows = [["Item", "Qty", "Revenue"], ["Widgets", "12", "12.50"], ["Gadgets", "7", "340.00"]];
+    let mut blocks = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        for (c, t) in row.iter().enumerate() {
+            blocks.push(tight(t, 72.0 + 100.0 * c as f64, 500.0 - 20.0 * r as f64));
+        }
+    }
+    let pages = [page_of(blocks)];
+    let revenue = 7.0 * 6.6;
+    let fits = |gaps: &[i64]| {
+        assert_eq!(gaps.len(), 3);
+        // Every gap holds the longest word of its column with 10 % to spare and both paddings (108 twips each).
+        for (g, word) in gaps.iter().zip([7.0 * 6.6, 3.0 * 6.6, revenue]) {
+            assert!(*g as f64 >= word * 1.1 * 20.0 + 216.0, "gap {g} twips for a {word} pt word (and 10 %) in {gaps:?}");
+        }
+    };
+    let x = cellx_of_first_row(&rtf(&pages, "t").text);
+    let gaps: Vec<i64> = std::iter::once(x[0]).chain(x.windows(2).map(|w| w[1] - w[0])).collect();
+    fits(&gaps);
+    let (grid, tcw) = docx_widths(&doc_xml(&pages));
+    fits(&grid);
+    // The cell widths are the grid's: a cell in column 3 was given column 1's width.
+    assert_eq!(tcw, grid);
+    // RTF and docx agree on the grid.
+    assert_eq!(gaps, grid);
+}
+
+#[test]
+fn a_table_wider_than_the_text_shrinks_its_widest_columns_first() {
+    use super::rtf::rtf;
+    // Letter with 72 pt margins holds 468 pt. Three columns 135 pt apart and a last one 76.6 pt wide come to 481.6.
+    let mut blocks = Vec::new();
+    for r in 0..3 {
+        let y = 500.0 - 20.0 * r as f64;
+        for (c, x) in [36.0, 171.0, 306.0].into_iter().enumerate() {
+            blocks.push(tight(&format!("r{r}c{c}"), x, y));
+        }
+        blocks.push(tight("Description", 441.0, y));
+    }
+    let pages = [page_of(blocks)];
+    let x = cellx_of_first_row(&rtf(&pages, "t").text);
+    let gaps: Vec<i64> = std::iter::once(x[0]).chain(x.windows(2).map(|w| w[1] - w[0])).collect();
+    assert_eq!(gaps.len(), 4);
+    assert!(x[3] <= 9360 + 4, "the table fits the 468 pt text width: {x:?}");
+    // The last column keeps its width (the widest ones gave way), and no column went under its word.
+    assert!(gaps[3] as f64 >= 11.0 * 6.6 * 20.0 + 216.0, "{gaps:?}");
+    assert!(gaps[..3].iter().all(|g| *g < 2700 && *g as f64 >= 4.0 * 6.6 * 20.0 + 216.0), "{gaps:?}");
+    assert_eq!(docx_widths(&doc_xml(&pages)).0, gaps);
+}
+
+// ---------------------------------------------------------------- table drawn row by row
+
+/// A one-page PDF with `content` as its content stream; /F1 is Helvetica and /F2 Helvetica-Bold.
+fn raw_pdf(content: &str) -> Vec<u8> {
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut at = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        at.push(out.len());
+        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).bytes());
+    for a in at {
+        out.extend(format!("{a:010} 00000 n \n").bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).bytes());
+    out
+}
+
+/// Text at (x, y), bold or not, as its own text object.
+fn put(t: &str, x: f64, y: f64, bold: bool) -> String {
+    format!("BT /{} 11 Tf {x} {y} Td ({t}) Tj ET\n", if bold { "F2" } else { "F1" })
+}
+
+/// Exports `pdf` as Rich Text and Word into `d/<name>/table.{pdf,rtf,docx}` (the files stay for a look in Word, and
+/// the title, which is the file stem, is the same for every name); returns the RTF and the document.xml.
+fn export_both(d: &Path, name: &str, pdf: &[u8]) -> (String, String) {
+    let d = d.join(name);
+    fs::create_dir_all(&d).unwrap();
+    let src = d.join("table.pdf");
+    fs::write(&src, pdf).unwrap();
+    let eng = Engine::new(1, 1 << 20);
+    let (doc, r) = eng.open_pending(&src.to_string_lossy());
+    r.unwrap();
+    let (rtf, docx) = (d.join("table.rtf"), d.join("table.docx"));
+    run_export(&eng, doc, ExportKind::Rtf, None, Target::File(rtf.clone())).unwrap();
+    run_export(&eng, doc, ExportKind::Word, None, Target::File(docx.clone())).unwrap();
+    let xml = String::from_utf8(unzip(&fs::read(&docx).unwrap(), "word/document.xml").unwrap()).unwrap();
+    (fs::read_to_string(rtf).unwrap(), xml)
+}
+
+#[test]
+fn a_table_drawn_row_by_row_exports_like_one_drawn_column_by_column() {
+    let rows = [["Item", "Qty", "Revenue"], ["Widgets", "12", "12.50"], ["Gadgets", "7", "340.00"], ["Total", "19", "352.50"]];
+    let d = dir("rows_vs_columns");
+    // `x` of the columns and the row pitch of the row-wise drawing. The second is so tight that MuPDF puts
+    // several rows in one block; the column-wise drawing (MuPDF keeps columns of tight rows as paragraphs,
+    // which is a limit of its own) is then drawn at a pitch it splits, and the output must still be the same.
+    for (xs, pitch) in [([72.0, 200.0, 300.0], 18.0), ([72.0, 127.0, 182.0], 14.0)] {
+        let cell = |r: usize, c: usize, p: f64| put(rows[r][c], xs[c], 700.0 - p * r as f64, r == 0);
+        let by_row: String = (0..4).flat_map(|r| (0..3).map(move |c| (r, c))).map(|(r, c)| cell(r, c, pitch)).collect();
+        let by_col: String = (0..3).flat_map(|c| (0..4).map(move |r| (r, c))).map(|(r, c)| cell(r, c, 18.0)).collect();
+        let (rtf_row, xml_row) = export_both(&d, &format!("row-order-pitch-{pitch}"), &raw_pdf(&by_row));
+        let (rtf_col, xml_col) = export_both(&d, &format!("column-order-pitch-{pitch}"), &raw_pdf(&by_col));
+        let toks = rtf_tokens(&rtf_col);
+        assert_eq!(word_count(&toks, "trowd"), 4, "{rtf_col}");
+        // The bold first row is the table's header row, not a heading.
+        assert!(!rtf_col.contains("\\sa120\\s2"), "{rtf_col}");
+        assert_eq!(word_count(&toks, "trhdr"), 1);
+        assert_eq!(rtf_row, rtf_col);
+        assert_eq!(xml_row, xml_col);
+        assert!(!xml_row.contains("Heading2") && xml_row.contains("<w:tblHeader/>"), "{xml_row}");
+    }
+}
+
+#[test]
+fn a_cell_that_wraps_does_not_cut_a_table_drawn_column_by_column() {
+    // Three columns drawn one after the other; the Notes cell of the second row wraps to four lines, so the
+    // rows are 60 apart top to top but the white space between them is that of any other row.
+    let d = dir("wrapped_cell");
+    let notes = ["Ships in two weeks", "from the warehouse", "by sea freight and", "then by road"];
+    let rows = [("Item", "Qty"), ("Widgets", "12"), ("Gadgets", "7"), ("Total", "19")];
+    let ys = [700.0, 682.0, 622.0, 604.0];
+    let mut c = String::new();
+    for (r, (a, _)) in rows.iter().enumerate() {
+        c += &put(a, 72.0, ys[r], r == 0);
+    }
+    for (r, (_, b)) in rows.iter().enumerate() {
+        c += &put(b, 200.0, ys[r], r == 0);
+    }
+    c += &put("Notes", 300.0, ys[0], true);
+    for (i, n) in notes.iter().enumerate() {
+        c += &put(n, 300.0, ys[1] - 13.0 * i as f64, false);
+    }
+    c += &put("Paid", 300.0, ys[2], false);
+    c += &put("Paid", 300.0, ys[3], false);
+    let (rtf, xml) = export_both(&d, "column-order-wrapped", &raw_pdf(&c));
+    let toks = rtf_tokens(&rtf);
+    assert_eq!(word_count(&toks, "trowd"), 4, "{rtf}");
+    assert_eq!(cellx_of_first_row(&rtf).len(), 3, "{rtf}");
+    assert!(rtf.contains("Ships in two weeks from the warehouse by sea freight and then by road\\cell"), "{rtf}");
+    assert_eq!(xml.matches("<w:tr>").count() + xml.matches("<w:tr ").count(), 4, "{xml}");
+    assert_eq!(xml.matches("<w:tbl>").count(), 1, "{xml}");
+}
+
+#[test]
+fn the_lines_of_a_paragraph_stay_one_paragraph() {
+    let content = put("First line of a paragraph that wraps", 72.0, 700.0, false) + &put("and carries on here.", 72.0, 686.0, false);
+    let (rtf, xml) = export_both(&dir("wrapped"), "wrapped", &raw_pdf(&content));
+    let toks = rtf_tokens(&rtf);
+    assert_eq!(word_count(&toks, "par"), 1, "{rtf}");
+    assert!(rtf_plain(&toks).contains("First line of a paragraph that wraps and carries on here."));
+    assert_eq!(xml.matches("<w:p>").count(), 1);
+}
+
+#[test]
+fn only_lines_on_one_row_count_as_side_by_side() {
+    let r = |x0: f64, y0: f64, x1: f64, y1: f64| [x0, y0, x1, y1];
+    // Stacked lines of a paragraph, even when their boxes touch or overlap a little.
+    assert!(!flow::side_by_side(&[r(72.0, 700.0, 300.0, 715.0), r(72.0, 686.0, 280.0, 701.0), r(72.0, 672.0, 200.0, 687.0)]));
+    // Cells of a row, then the next row's.
+    assert!(flow::side_by_side(&[r(72.0, 700.0, 94.0, 715.0), r(200.0, 700.0, 218.0, 715.0), r(72.0, 682.0, 111.0, 697.0)]));
+    // Overlapping horizontally on one band is overprint, not cells.
+    assert!(!flow::side_by_side(&[r(72.0, 700.0, 200.0, 715.0), r(150.0, 700.0, 300.0, 715.0)]));
+    assert!(!flow::side_by_side(&[]));
+}
+
+/// A one-line block of `w` pt width at 11 pt.
+fn wide(t: &str, x: f64, y: f64, w: f64) -> flow::Block {
+    flow::Block { text: t.into(), rect: [x, y, x + w, y + 11.0], size: 11.0, bold: false, italic: false, color: [0.0; 3] }
+}
+
+#[test]
+fn a_line_below_a_table_joins_it_only_when_it_lines_up_and_is_within_the_row_pitch() {
+    use super::rtf::rtf;
+    // Rows at y 500, 480, 460 (pitch 20), columns at 72, 172 and 272.
+    let table = || -> Vec<flow::Block> {
+        (0..3).flat_map(|r| (0..3).map(move |c| tight(&format!("r{r}c{c}"), 72.0 + 100.0 * c as f64, 500.0 - 20.0 * r as f64))).collect()
+    };
+    // (the line, whether it joins the table)
+    let cases = [
+        (wide("Total of everything", 72.0, 440.0, 250.0), true),      // on the left edge, reaches the third column, next row
+        (wide("Total of everything", 72.0, 432.0, 250.0), true),      // a little further: 28 pt below the last row, 1.4 pitches
+        (wide("A paragraph that follows", 72.0, 420.0, 250.0), false), // 2 pitches down
+        (wide("A paragraph that follows", 72.0, 380.0, 250.0), false), // as wide, 3 pitches down
+        (wide("Short note", 72.0, 440.0, 50.0), false),               // next row, but reaches no second column
+        (wide("An indented paragraph", 90.0, 440.0, 250.0), false),   // next row, not on a column edge
+    ];
+    for (line, joins) in cases {
+        let mut blocks = table();
+        blocks.push(line.clone());
+        let r = rtf(&[page_of(blocks)], "t");
+        let rows = word_count(&rtf_tokens(&r.text), "trowd");
+        assert_eq!(rows, if joins { 4 } else { 3 }, "{:?}\n{}", line.text, r.text);
+        // A paragraph is outside the table: text before \par, not in a cell.
+        assert_eq!(r.text.contains(&format!("{}\\par}}", line.text)), !joins, "{:?}", line.text);
+    }
+}
+
+#[test]
+fn text_after_a_table_in_a_pdf_stays_a_paragraph() {
+    let mut content = String::new();
+    for (r, row) in [["Item", "Qty", "Revenue"], ["Widgets", "12", "12.50"], ["Gadgets", "7", "340.00"]].iter().enumerate() {
+        for (c, t) in row.iter().enumerate() {
+            content += &put(t, [72.0, 200.0, 300.0][c], 700.0 - 18.0 * r as f64, r == 0);
+        }
+    }
+    content += &put("A paragraph after the table, long enough to reach across its columns.", 72.0, 600.0, false);
+    let (rtf, xml) = export_both(&dir("after_table"), "after-table", &raw_pdf(&content));
+    let toks = rtf_tokens(&rtf);
+    assert_eq!(word_count(&toks, "trowd"), 3, "{rtf}");
+    assert!(rtf.contains("long enough to reach across its columns.\\par}"), "{rtf}");
+    assert_eq!(xml.matches("<w:tr>").count(), 3, "{xml}");
+}
+
+#[test]
+fn bulleted_and_numbered_lists_and_a_wide_word_gap_do_not_become_tables() {
+    let mut c = String::new();
+    // Three bullets with the text 18 pt to the right, a numbered item that wraps (text at 108), and a paragraph
+    // whose first line has a 1 em gap between two words.
+    for (i, t) in ["First point", "Second point", "Third point"].iter().enumerate() {
+        c += &put("\\225", 72.0, 700.0 - 14.0 * i as f64, false);
+        c += &put(t, 90.0, 700.0 - 14.0 * i as f64, false);
+    }
+    c += &put("1.", 72.0, 600.0, false);
+    c += &put("A numbered item that is long enough to", 108.0, 600.0, false);
+    c += &put("wrap onto a second line.", 108.0, 586.0, false);
+    c += "BT /F1 11 Tf 72 500 Td [(alpha) -1000 (beta)] TJ ET\n";
+    c += &put("gamma delta.", 72.0, 486.0, false);
+    let (rtf, xml) = export_both(&dir("lists"), "lists", &raw_pdf(&c));
+    let toks = rtf_tokens(&rtf);
+    assert_eq!(word_count(&toks, "trowd"), 0, "{rtf}");
+    assert!(!xml.contains("<w:tbl>"), "{xml}");
+    let plain = rtf_plain(&toks);
+    for want in ["First point", "Second point", "Third point", "A numbered item that is long enough to wrap onto a second line.", "alpha beta gamma delta."] {
+        assert!(plain.contains(want), "{want:?} not in {plain:?}\n{rtf}");
+    }
+}
+
+#[test]
+fn a_running_header_and_footer_are_not_one_table() {
+    // Three pieces each, same columns, a page apart, body text between (and then nothing between).
+    let mut head = String::new();
+    let mut foot = String::new();
+    for (x, h, f) in [(72.0, "Annual Report", "Confidential"), (250.0, "Section 2", "Draft 4"), (450.0, "Page 3", "Page 3")] {
+        head += &put(h, x, 760.0, false);
+        foot += &put(f, x, 40.0, false);
+    }
+    let mut body = String::new();
+    for i in 0..6 {
+        body += &put(&format!("Body line {i} of the text between the header and the footer."), 72.0, 700.0 - 14.0 * i as f64, false);
+    }
+    for (name, content) in [("with-body", format!("{head}{body}{foot}")), ("alone", format!("{foot}{head}"))] {
+        let (rtf, xml) = export_both(&dir("header_footer"), name, &raw_pdf(&content));
+        assert_eq!(word_count(&rtf_tokens(&rtf), "trowd"), 0, "{name}: {rtf}");
+        assert!(!xml.contains("<w:tbl>"), "{name}: {xml}");
+        let plain = rtf_plain(&rtf_tokens(&rtf));
+        let at = |t: &str| plain.find(t).unwrap_or_else(|| panic!("{t:?} not in {plain:?}"));
+        // The header stays at the top and the footer at the bottom.
+        assert!(at("Annual Report") < at("Confidential"), "{name}: {plain:?}");
+        if name == "with-body" {
+            assert!(at("Annual Report") < at("Body line 0") && at("Body line 5") < at("Confidential"), "{plain:?}");
+        }
+    }
+}
+
+#[test]
+fn pieces_a_table_leaves_are_one_paragraph_again() {
+    use super::rtf::rtf;
+    let rows = |y: f64| [tight("a", 72.0, y), tight("b", 172.0, y), tight("c", 272.0, y)];
+    // One block's pieces: the first row of a table, then two lines of a sentence that follows it.
+    let mut blocks = rows(500.0).to_vec();
+    blocks.push(tight("disclosed. SSN", 72.0, 400.0));
+    blocks.push(tight("123-45-6789 appears again.", 72.0, 386.0));
+    let orig = flow::Block { text: "whole".into(), rect: [72.0, 386.0, 300.0, 500.0], ..blocks[0].clone() };
+    let end = blocks.len();
+    blocks.extend(rows(480.0));
+    blocks.extend(rows(460.0));
+    flow::unsplit(&mut blocks, vec![(orig, 0..end)]);
+    let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
+    assert!(texts.contains(&"disclosed. SSN 123-45-6789 appears again."), "{texts:?}");
+    assert!(!texts.contains(&"whole") && !texts.contains(&"123-45-6789 appears again."), "{texts:?}");
+    let r = rtf(&[page_of(blocks)], "t");
+    assert_eq!(word_count(&rtf_tokens(&r.text), "trowd"), 3, "{}", r.text);
+    assert!(rtf_plain(&rtf_tokens(&r.text)).contains("disclosed. SSN 123-45-6789 appears again."));
+}
+
+#[test]
+fn a_line_cut_by_a_gap_above_a_table_is_one_paragraph() {
+    use super::rtf::rtf;
+    let rows = |y: f64| [tight("a", 72.0, y), tight("b", 172.0, y), tight("c", 272.0, y)];
+    // One block's pieces: a line a gap cut in two (left, then right on the same row), then the first row of a table.
+    let mut blocks = vec![tight("Confidential: the project", 72.0, 540.0), tight("must not be disclosed.", 300.0, 540.0)];
+    blocks.extend(rows(500.0));
+    let orig = flow::Block { text: "whole".into(), rect: [72.0, 500.0, 400.0, 551.0], ..blocks[0].clone() };
+    let end = blocks.len();
+    blocks.extend(rows(480.0));
+    blocks.extend(rows(460.0));
+    flow::unsplit(&mut blocks, vec![(orig, 0..end)]);
+    let r = rtf(&[page_of(blocks)], "t");
+    assert!(rtf_plain(&rtf_tokens(&r.text)).contains("Confidential: the project must not be disclosed."), "{}", r.text);
+    assert_eq!(word_count(&rtf_tokens(&r.text), "trowd"), 3, "{}", r.text);
+}
+
+#[test]
+fn pieces_with_a_table_between_them_are_not_one_paragraph() {
+    let rows = |y: f64| [tight("a", 72.0, y), tight("b", 172.0, y), tight("c", 272.0, y)];
+    // One block's pieces in stream order: a row of a table, a line above the table, a line below it.
+    let mut blocks = rows(500.0).to_vec();
+    blocks.push(tight("line above", 72.0, 560.0));
+    blocks.push(tight("line below", 72.0, 400.0));
+    let orig = flow::Block { text: "whole".into(), rect: [72.0, 400.0, 300.0, 570.0], ..blocks[0].clone() };
+    let end = blocks.len();
+    blocks.extend(rows(480.0));
+    blocks.extend(rows(460.0));
+    flow::unsplit(&mut blocks, vec![(orig, 0..end)]);
+    let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
+    assert!(texts.contains(&"line above") && texts.contains(&"line below"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("line above line below")), "{texts:?}");
+}
+
+#[test]
+fn only_the_leading_bold_rows_with_cells_are_header_rows() {
+    use super::rtf::rtf;
+    let row = |y: f64, bold: bool, cells: &[&str]| -> Vec<flow::Block> {
+        cells.iter().enumerate().map(|(c, t)| flow::Block { bold, ..tight(t, 72.0 + 100.0 * c as f64, y) }).collect()
+    };
+    let hdr = |blocks: Vec<flow::Block>| word_count(&rtf_tokens(&rtf(&[page_of(blocks)], "t").text), "trhdr");
+    let body = || [row(440.0, false, &["x", "y", "z"]), row(420.0, false, &["u", "v", "w"])].concat();
+    // A bold caption that spans columns joins as the first row; the real header row below it is marked too, and
+    // the caption with it, as Word repeats only header rows that are contiguous from the table's top.
+    let caption = flow::Block { bold: true, ..wide("Table 1: Quarterly revenue by region", 72.0, 480.0, 250.0) };
+    let with_caption = [vec![caption.clone()], row(460.0, true, &["Item", "Qty", "Total"]), body()].concat();
+    assert_eq!(hdr(with_caption), 2);
+    // A caption over body rows only has no header row.
+    assert_eq!(hdr([vec![caption], body()].concat()), 0);
+    // Two bold rows at the top are both header rows.
+    assert_eq!(hdr([row(480.0, true, &["Region", "Q1", "Q2"]), row(460.0, true, &["", "units", "units"]), body()].concat()), 2);
+    // One bold row over body rows; and a table that is bold throughout has none.
+    assert_eq!(hdr([row(460.0, true, &["Item", "Qty", "Total"]), body()].concat()), 1);
+    assert_eq!(hdr([row(460.0, true, &["Item", "Qty", "Total"]), row(440.0, true, &["a", "b", "c"]), row(420.0, true, &["d", "e", "f"])].concat()), 0);
+}

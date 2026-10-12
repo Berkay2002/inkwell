@@ -7,7 +7,7 @@
 
 use std::io::Write;
 
-use super::flow::{allowed, hex, items, Block, Image, Item, Page, Table};
+use super::flow::{allowed, col_twips, hex, items, Block, Image, Item, Page, Table, CELL_PAD};
 
 fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
@@ -43,11 +43,10 @@ fn run_xml(text: &str, size: f64, bold: bool, italic: bool, color: [f64; 3]) -> 
 }
 
 /// One Word table: explicit single borders (so it renders without a table style), a grid sized
-/// from the detected column edges, `gridSpan` for spanning cells, empty cells for holes.
-fn docx_table(t: &Table) -> String {
-    let mut edges = t.cols.clone();
-    edges.push(t.rect[2]);
-    let widths: Vec<i64> = edges.windows(2).map(|w| ((w[1] - w[0]).max(20.0) * 20.0).round().clamp(60.0, 31680.0) as i64).collect();
+/// from the shared column widths (`flow::col_twips`), `gridSpan` for spanning cells, empty cells for holes.
+fn docx_table(t: &Table, text_w: f64) -> String {
+    let widths = col_twips(t, text_w);
+    let pad = (CELL_PAD * 20.0).round() as i64;
     let border = "<w:top w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"999999\"/>";
     let mut s = String::from("<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>");
     for b in [
@@ -60,16 +59,21 @@ fn docx_table(t: &Table) -> String {
     ] {
         s.push_str(b);
     }
-    s.push_str("</w:tblBorders></w:tblPr><w:tblGrid>");
+    s.push_str(&format!(
+        "</w:tblBorders><w:tblCellMar><w:left w:w=\"{pad}\" w:type=\"dxa\"/><w:right w:w=\"{pad}\" w:type=\"dxa\"/></w:tblCellMar></w:tblPr><w:tblGrid>"
+    ));
     for w in &widths {
         s.push_str(&format!("<w:gridCol w:w=\"{w}\"/>"));
     }
     s.push_str("</w:tblGrid>");
-    for row in &t.rows {
-        s.push_str("<w:tr>");
+    for (i, row) in t.rows.iter().enumerate() {
+        // The header rows repeat on the next page.
+        s.push_str(if i < t.header_rows() { "<w:tr><w:trPr><w:tblHeader/></w:trPr>" } else { "<w:tr>" });
+        let mut col = 0;
         for c in row {
             let span = if c.span > 1 { format!("<w:gridSpan w:val=\"{}\"/>", c.span) } else { String::new() };
-            let w: i64 = widths.iter().take(c.span.min(widths.len())).sum();
+            let w: i64 = widths.iter().skip(col).take(c.span.max(1)).sum();
+            col += c.span.max(1);
             s.push_str(&format!(
                 "<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}</w:tcPr><w:p>{}</w:p></w:tc>",
                 run_xml(&c.text, c.size, c.bold, c.italic, c.color)
@@ -77,8 +81,8 @@ fn docx_table(t: &Table) -> String {
         }
         // Pad the grid so every row covers all columns (Word rejects short rows).
         let used: usize = row.iter().map(|c| c.span).sum();
-        for _ in used..t.cols.len() {
-            s.push_str("<w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr><w:p/></w:tc>");
+        for w in widths.iter().skip(used) {
+            s.push_str(&format!("<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/></w:tcPr><w:p/></w:tc>"));
         }
         s.push_str("</w:tr>");
     }
@@ -115,7 +119,7 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
                 if after_table {
                     body.push_str("<w:p/>");
                 }
-                body.push_str(&docx_table(t));
+                body.push_str(&docx_table(t, text_w));
             }
             Item::Img(im) => {
                 let n = media.len() + 1;
