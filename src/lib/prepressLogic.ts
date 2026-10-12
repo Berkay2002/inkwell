@@ -564,3 +564,19 @@ export function remainingText(r: ConvertReport): string {
 export function convertedFileName(stem: string, o: ConvertOptions): string {
   return `${stem} (CMYK${o.intent === "profile" && o.profile ? ` ${o.profile.name.replace(/\.(icc|icm)$/i, "")}` : ""}).pdf`;
 }
+
+/**
+ * Where Tab or Shift+Tab goes inside a sheet that holds focus: the next of `count` controls, wrapping at the ends.
+ * `at` is the focused control's index, or -1 when focus is on the sheet itself (or outside it): then the first
+ * (the last backwards). `null` when there is nothing to focus.
+ */
+export function tabTarget(count: number, at: number, back: boolean): number | null {
+  if (count <= 0) return null;
+  if (at < 0) return back ? count - 1 : 0;
+  return (at + (back ? -1 : 1) + count) % count;
+}
+
+/** Ctrl/Cmd+S (not Save as) is held back while Convert Colors waits to save: a Save would write the conversion over the original. */
+export function holdsSave(e: { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }, unsaved: boolean): boolean {
+  return unsaved && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s";
+}

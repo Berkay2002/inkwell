@@ -572,37 +572,6 @@ fn repaired(d: &PdfDocument) -> bool {
     !d.can_be_saved_incrementally()
 }
 
-/// Whether any signature field holds a value: the form's fields (each object once, at most
-/// 10 000 of them) and the pages' signature widgets.
-pub(crate) fn has_signed_field(doc: &PdfDocument) -> bool {
-    let fields = doc.catalog().ok().and_then(|c| c.get_dict("AcroForm").ok().flatten()).and_then(|f| f.get_dict("Fields").ok().flatten());
-    let mut stack: Vec<(PdfObject, bool)> = fields.and_then(|f| f.array_iter().ok().map(|it| it.filter_map(|x| x.ok()).map(|x| (x, false)).collect())).unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
-    let mut budget = 10_000u32;
-    while let Some((o, inherited)) = stack.pop() {
-        budget -= 1;
-        if budget == 0 {
-            return true;
-        }
-        if let Some(n) = ind(&o) {
-            if !seen.insert(n) {
-                continue;
-            }
-        }
-        if !o.is_dict().unwrap_or(false) {
-            continue;
-        }
-        let sig = name_of(&o, "FT").map_or(inherited, |t| t == b"Sig");
-        if sig && o.get_dict("V").ok().flatten().is_some_and(|v| !v.is_null().unwrap_or(true)) {
-            return true;
-        }
-        if let Some(kids) = o.get_dict("Kids").ok().flatten() {
-            stack.extend(kids.array_iter().into_iter().flatten().filter_map(|x| x.ok()).map(|x| (x, sig)));
-        }
-    }
-    sig_fields(doc).is_ok_and(|f| f.iter().any(|f| f.value.is_some()))
-}
-
 /// The certification signature's DocMDP permissions (1-3), if the document is certified.
 /// The strictest certification anywhere in the document (the catalog's /Perms or a field's DocMDP
 /// reference, see `outline::certified`); one that can't be read counts as allowing no changes.

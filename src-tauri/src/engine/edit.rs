@@ -237,11 +237,10 @@ pub fn set_redaction_hook(hook: impl Fn(DocId) + Send + Sync + 'static) {
 pub const DAMAGED_SIGNED: &str =
     "this signed file is damaged, and changing it would break its signatures, so Inkwell leaves it as it is";
 
-/// `/AcroForm /SigFlags` has SignaturesExist (ISO 32000-1 12.7.2, table 219), or a signature
-/// field holds a value (a signed file need not set the flag).
+/// SigFlags' SignaturesExist, a certification, or a signature field with a value: the form's field
+/// tree only, so a document with many annotations is not loaded page by page to answer.
 fn has_signatures(doc: &PdfDocument) -> bool {
-    let flags = || doc.catalog().ok()?.get_dict("AcroForm").ok()??.get_dict("SigFlags").ok()??.as_int().ok();
-    flags().is_some_and(|f| f & 1 != 0) || crate::sign::pdf::has_signed_field(doc)
+    crate::outline::signed(doc)
 }
 
 fn now_ms() -> u64 {
@@ -1405,6 +1404,17 @@ impl Engine {
         let state = self.custom_locked(&entry, &mut lane, label, source, false, false, None, |d| Ok((f(d)?, None)))?;
         let saved = self.save_locked(id, &entry, &mut lane, Some(to));
         Ok((state, saved))
+    }
+
+    /// Save as another file: [`Engine::save_recorded`] with the own-file check made under the same guard, so the
+    /// target cannot become the document's own file between the check and the write.
+    pub fn save_as_other(&self, id: DocId, to: &str) -> Result<(EditState, Option<Saved>)> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        if same_path(to, &entry.path()) {
+            return Err(EngineError::Invalid(OWN_FILE.into()));
+        }
+        self.save_locked(id, &entry, &mut lane, Some(to))
     }
 
     /// Runs `f` on the authoritative document (marks included) without changing it. `f` must not
