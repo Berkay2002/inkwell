@@ -159,6 +159,8 @@ export default function App() {
         e.preventDefault();
         if (!c.needsDoc || useStore.getState().active != null) c.run();
       } else if (e.key === "Escape" && useStore.getState().searchOpen) {
+        // used: a marker or a list behind it keeps this press
+        e.preventDefault();
         useStore.getState().setUi({ searchOpen: false });
       }
     };

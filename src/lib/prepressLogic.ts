@@ -1,4 +1,5 @@
-import type { BoxKind, Cmyk, ConvertReport, InkAt, Intent, MarkSet, MarksPreview, MarksSpec, PageBoxes, PageSeps, PrepressView, Rect4, ViewMode } from "./prepressApi";
+import type { BoxKind, Cmyk, ConvertReport, InkAt, Inspected, Intent, ObjectKind, MarkSet, MarksPreview, MarksSpec, PageBoxes, PageSeps, PrepressView, Rect4, ViewMode } from "./prepressApi";
+import { type Rot, type Size, unrotatePoint } from "./layout";
 import { parseRange } from "./pageRange";
 
 /** Pure rules of the print-production tools (lib/prepressStore.ts holds the state, components/prepress the screens). */
@@ -164,6 +165,62 @@ export function coverageText(max: number, limit: number, regions: number, trunca
   if (max <= limit) return `Highest ink on this page is ${Math.round(max)}%, within ${limit}%.`;
   const where = regions === 0 ? "" : ` in ${truncated ? "more than " : ""}${regions} ${regions === 1 ? "area" : "areas"}`;
   return `Ink goes up to ${Math.round(max)}%${where}, above ${limit}%.`;
+}
+
+// ---- object inspector ----
+
+export const NOTHING_PAINTED = "Nothing is painted here";
+
+/**
+ * A point of the displayed page, `dx`, `dy` CSS px from its top-left corner at `zoom` and view rotation `rot`, as page
+ * points from the top-left of the page as shown (`raw` is its size), which is what the engine's inspector and ink
+ * probe take. Held to the page.
+ */
+export function pointOnPage(dx: number, dy: number, raw: Size, rot: Rot, zoom: number): [number, number] {
+  const [x, y] = unrotatePoint(raw, rot, dx / zoom, dy / zoom);
+  return [Math.min(Math.max(x, 0), raw[0]), Math.min(Math.max(y, 0), raw[1])];
+}
+
+const KIND_NAME: Record<ObjectKind, string> = {
+  fill: "Fill",
+  stroke: "Stroke",
+  text: "Text",
+  strokedText: "Stroked text",
+  image: "Image",
+  imageMask: "Image mask",
+  shading: "Shading",
+};
+
+const round1 = (v: number) => String(Math.round(v * 10) / 10);
+const unit = (v: number) => `${round1(v * 100)}%`;
+
+/** One object as lines of text: what it is, its colour space, the values as written, the CMYK equivalent, overprint. */
+export function objectLines(o: Inspected) {
+  const v = o.values;
+  let values: string;
+  if (o.model === "shading") values = "Colours are not read";
+  else if (v.length === 0) values = "";
+  else if (o.model === "gray") values = `Gray ${unit(v[0])}`;
+  else if (o.model === "rgb" && v.length === 3) values = `R ${Math.round(v[0] * 255)} G ${Math.round(v[1] * 255)} B ${Math.round(v[2] * 255)}`;
+  else if (o.model === "cmyk" && v.length === 4) values = `C ${unit(v[0])} M ${unit(v[1])} Y ${unit(v[2])} K ${unit(v[3])}`;
+  else if (o.model === "spot" && o.colorants.length === v.length) values = o.colorants.map((n, i) => `${n} ${unit(v[i])}`).join(", ");
+  else values = v.map((x) => String(Math.round(x * 100) / 100)).join(" ");
+  const cmyk = o.cmyk
+    ? `C ${round1(o.cmyk[0])}% M ${round1(o.cmyk[1])}% Y ${round1(o.cmyk[2])}% K ${round1(o.cmyk[3])}%${o.ink == null ? "" : `, ink ${showInk(o.ink)}`}`
+    : "Not available";
+  const detail = o.font ? ` in ${o.font}` : o.image ? `, ${o.image[0]} x ${o.image[1]} pixels` : "";
+  return {
+    kind: `${KIND_NAME[o.kind]}${detail}`,
+    space: o.colorSpace,
+    values,
+    cmyk,
+    overprint: o.overprint ? (o.overprintMode ? "Yes, mode 1" : "Yes") : "No",
+  };
+}
+
+/** Escape clears the inspector's marker unless a field, menu, dialog, the find bar or the assistant already used it. */
+export function escapeClearsMarker(e: { key: string; defaultPrevented: boolean }, inField: boolean): boolean {
+  return e.key === "Escape" && !e.defaultPrevented && !inField;
 }
 
 // ---- pages ----

@@ -64,6 +64,31 @@ export interface InkAt {
   total: number;
 }
 
+export type ObjectKind = "fill" | "stroke" | "text" | "strokedText" | "image" | "imageMask" | "shading";
+
+/** One painted object under a point (the engine's `Inspected`), topmost first. */
+export interface Inspected {
+  kind: ObjectKind;
+  /** `DeviceCMYK`, `ICCBased (...)`, `Separation / DeviceN`, ... */
+  colorSpace: string;
+  /** `gray`, `rgb`, `cmyk`, `lab`, `indexed`, `spot` or `shading` (a shading's colours are not read). */
+  model: string;
+  colorants: string[];
+  /** The components as the page gives them (0 to 1). */
+  values: number[];
+  /** Per cent; null for an image or a shading. */
+  cmyk: Cmyk | null;
+  /** The four inks added plus any spot tint, per cent. */
+  ink: number | null;
+  overprint: boolean;
+  overprintMode: boolean;
+  alpha: number;
+  bounds: Rect4;
+  font: string | null;
+  /** Pixels wide, high, bits per component. */
+  image: [number, number, number] | null;
+}
+
 export type BoxKind = "trim" | "bleed" | "art" | "crop";
 
 export interface PageBoxes {
@@ -174,6 +199,8 @@ export const prepressApi = {
   ink: (job: number, doc: number, pages: number[] | null, limit: number, trimOnly: boolean, onProgress?: (p: Progress) => void) =>
     invoke<InkReport[]>("prepress_ink", { job, doc, pages, limit, trimOnly, onProgress: channel(onProgress) }),
   inkAt: (doc: number, page: number, x: number, y: number) => invoke<InkAt>("prepress_ink_at", { doc, page, x, y }),
+  /** What the page paints at the point, topmost first (at most 8). Read-only. */
+  inspect: (doc: number, page: number, x: number, y: number) => invoke<Inspected[]>("prepress_inspect", { doc, page, x, y }),
   /**
    * `profile`: an open token of a CMYK ICC profile, for `intent: "profile"`. `saveTo`: a save token; the engine
    * then also writes the result there as Save as, in the same command, and refuses the document's own file.
