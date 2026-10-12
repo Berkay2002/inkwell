@@ -196,7 +196,7 @@ function Row({
           <span className="cb-name" title={entry.path}>
             {entry.name}
           </span>
-          <span className={bad ? "cb-sub bad" : "cb-sub dim"}>
+          <span className={bad ? "cb-sub bad" : "cb-sub dim"} title={bad && plan?.message ? plan.message : sub}>
             {needsPassword && !entry.password ? "Password needed" : bad && plan?.message ? plan.message : sub}
           </span>
         </div>
