@@ -1173,3 +1173,66 @@ fn a_parent_tree_shared_by_many_links_is_cleaned_in_one_pass_and_keeps_the_other
     assert_eq!(nums, vec![0, 5000], "the pairs of the removed links' own elements are gone, the others stay");
     assert_eq!(held, 0, "an element no longer refers to its link");
 }
+
+#[test]
+fn a_link_whose_subtype_or_field_type_is_an_indirect_object_is_read_as_a_reader_would() {
+    // 6: a name, 7: a name that makes object 5 a field.
+    let annots = [
+        "<< /Type /Annot /Subtype 6 0 R /Rect [100 600 300 650] /Dest [3 0 R /Fit] >>".to_string(),
+        "<< /Type /Annot /Subtype /Link /FT 7 0 R /T (x) /Rect [10 10 90 30] >>".to_string(),
+    ];
+    let more = vec!["/Link".to_string(), "/Tx".to_string()];
+    let (eng, id, _, _d) = opened("indirect-names", &page_with_annots("", "", &annots, &more));
+    assert_eq!(list(&eng, id, 0).unwrap().links.len(), 1, "the first is a link, the second a field");
+    assert_eq!(audit(&eng, id).unwrap().total, 1);
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count, 1);
+    let kept = eng.read_custom(id, |d| Ok(d.find_page(0)?.get_dict("Annots")?.unwrap().len()?)).unwrap();
+    assert_eq!(kept, 1, "the field stays");
+}
+
+#[test]
+fn the_audit_and_delete_are_bounded_like_remove_all() {
+    // 3,000 pages that each hold a direct array of 400 entries: 1.2 million entries is over what one walk may read
+    // (twice that is paid for), so the audit refuses instead of walking them all, as Remove all does.
+    let n = 3000;
+    let page = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [ {} ] >>", "0 ".repeat(400));
+    let kids = (0..n).map(|i| format!("{} 0 R", 3 + i)).collect::<Vec<_>>().join(" ");
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [ {kids} ] /Count {n} >>"),
+    ];
+    objs.extend((0..n).map(|_| page.clone()));
+    let (eng, id, _, _d) = opened("audit-budget", &raw_pdf(&objs));
+    match audit(&eng, id) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("at once"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    match apply(&eng, id, rev(&eng, id), &LinkOp::RemoveAll, EditSource::User) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("at once"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    // Delete names no more ids than a page lists: a list of a million is stale at once, without a scan for each.
+    let ids: Vec<i32> = (1..=1_000_000).collect();
+    assert!(matches!(
+        apply(&eng, id, rev(&eng, id), &LinkOp::Delete { page: 0, ids }, EditSource::User),
+        Err(EngineError::Stale)
+    ));
+}
+
+#[test]
+fn removing_thousands_of_links_from_the_front_of_a_long_array_is_quick() {
+    // A page at the caps: the most links it lists (one short of the line where the page counts as cut), then the
+    // entries that are not links up to MAX_ANNOTS.
+    const LINKS: usize = MAX_LINKS - 1;
+    let refs = (0..LINKS).map(|i| format!("{} 0 R", 4 + i)).collect::<Vec<_>>().join(" ");
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [ {refs} {} ] >>", "0 ".repeat(MAX_ANNOTS - LINKS)),
+    ];
+    objs.extend((0..LINKS).map(|_| link_annot("/Dest [3 0 R /Fit]")));
+    let (eng, id, _, _d) = opened("front-of-long-array", &raw_pdf(&objs));
+    let t = std::time::Instant::now();
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count as usize, LINKS);
+    assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+}

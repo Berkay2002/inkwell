@@ -138,7 +138,8 @@ change.
   links says so and asks nothing. Every page is read before the first link goes: a page with more than the read
   caps (above), a document of more than 100,000 pages, or one whose walk would read more than 2,000,000 entries
   (pages and `/Annots` entries, both passes; an `/Annots` array that pages share is read once) refuses the whole
-  removal ("... at once") instead of doing part of it. The count is the one the audit gives (a link two pages
+  removal ("... at once") instead of doing part of it; the audit spends the same budget, so it refuses where
+  Remove all would, and a Delete names no more ids than a page lists and reads the page once. The count is the one the audit gives (a link two pages
   list is one); its object is deleted once. The structure tree is cleaned once for all the links, not once per
   link: each parent-tree node is read once (4,096 nodes, 256 kids each, 500,000 `/Nums` and `/K` entries in
   all; what lies past that is left as it is). It is a removal like Delete: an unsigned document's next

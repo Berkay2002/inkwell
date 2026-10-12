@@ -509,11 +509,20 @@ pub fn audit(eng: &Engine, doc: DocId) -> Result<LinkAudit> {
         let mut out = LinkAudit { signed: crate::outline::signed(d), ..Default::default() };
         let mut names = Names::default();
         let (mut arrays, mut seen) = (HashSet::new(), HashSet::new());
+        // The same budget Remove all has, so the count is never one that Remove all then refuses.
+        let mut budget = MAX_WALK;
+        let mut spend = |cost: usize| -> Result<()> {
+            budget = budget.checked_sub(cost).ok_or_else(over_budget)?;
+            Ok(())
+        };
         for page in 0..d.page_count()?.max(0) as u32 {
+            spend(2)?;
             if !fresh_array(&d.find_page(page as i32)?, &mut arrays)? {
                 continue;
             }
-            let counted: HashSet<i32> = page_annots(d, page)?.links.iter().map(|(id, _)| *id).filter(|id| *id < 0 || seen.insert(*id)).collect();
+            let found = page_annots(d, page)?;
+            spend(2 * found.looked)?;
+            let counted: HashSet<i32> = found.links.iter().map(|(id, _)| *id).filter(|id| *id < 0 || seen.insert(*id)).collect();
             out.total += counted.len() as u32;
             for l in read_page_with(d, page, 0, &mut names)?.links.into_iter().filter(|l| counted.contains(&l.id)) {
                 match l.target {
@@ -1071,8 +1080,13 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
             if ids.is_empty() {
                 return Ok(None);
             }
+            // Only so many are listed; the page is read once, not once per id.
+            if ids.len() > MAX_LINKS {
+                return Err(EngineError::Stale);
+            }
+            let mut listed: HashMap<i32, PdfObject> = page_annots(doc, *page)?.links.into_iter().collect();
             // All of them are checked before the first goes.
-            let found: Vec<PdfObject> = ids.iter().map(|id| link_obj(doc, *page, *id)).collect::<Result<_>>()?;
+            let found: Vec<PdfObject> = ids.iter().map(|id| listed.remove(id).ok_or(EngineError::Stale)).collect::<Result<_>>()?;
             let mut keyed = Vec::new();
             for (id, a) in ids.iter().zip(&found).filter(|(id, _)| **id > 0) {
                 keyed.extend(struct_key(a)?.map(|k| (*id, k)));
@@ -1107,6 +1121,10 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
     }
 }
 
+fn over_budget() -> EngineError {
+    EngineError::Invalid("This document has more links and annotations than Inkwell counts or removes at once, so it leaves them as they are.".into())
+}
+
 /// [`LinkOp::RemoveAll`]: every link annotation of every page, in one step. `budget`: the entries it may read in all
 /// (see [`MAX_WALK`]); every page is read before the first link goes, and the second walk is paid for in the first,
 /// so a document over a cap or the budget is refused whole and never half done. `None`: nothing to remove.
@@ -1115,9 +1133,8 @@ fn remove_all(doc: &mut PdfDocument, mut budget: usize) -> Result<Option<Done>> 
     if n > MAX_PAGES {
         return Err(EngineError::Invalid(format!("This document has more than {MAX_PAGES} pages, more than Inkwell removes the links of at once.")));
     }
-    let over = || EngineError::Invalid("This document has more links and annotations than Inkwell removes at once, so it leaves them as they are.".into());
     let mut spend = |cost: usize| -> Result<()> {
-        budget = budget.checked_sub(cost).ok_or_else(over)?;
+        budget = budget.checked_sub(cost).ok_or_else(over_budget)?;
         Ok(())
     };
     let mut any = false;
