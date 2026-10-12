@@ -704,8 +704,9 @@ pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
     for h in &mut hunks {
         let [mut a, mut b, mut c, mut d] = *h;
         // A stretch that only adds words is set with the word it follows, so the line end that is after it
-        // stays after the words (they are on the line they were typed in).
-        if a == b {
+        // stays after the words (they are on the line they were typed in); one that only takes words away is set
+        // with the word next to it. After this each side of the stretch holds a word, which the indexes below need.
+        if a == b || c == d {
             if a > 0 && c > 0 {
                 (a, c) = (a - 1, c - 1);
             } else if b < ow.len() && d < nw.len() {

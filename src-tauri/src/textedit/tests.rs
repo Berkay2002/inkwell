@@ -2026,6 +2026,31 @@ fn blanks_typed_at_the_ends_and_a_retyped_line_in_a_short_block_keep_the_lines()
 }
 
 #[test]
+fn words_deleted_or_added_anywhere_in_a_block_never_fail_and_read_as_typed() {
+    let d = dir("edit-every-position");
+    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    let words = ["One", "cat", "Two", "Three", "long", "hats", "here"];
+    let mut drafts: Vec<String> = Vec::new();
+    // The first and last word, and every other, deleted.
+    for i in 0..words.len() {
+        drafts.push(words.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, w)| *w).collect::<Vec<_>>().join(" "));
+    }
+    // A word added at each position, the ends included.
+    for i in 0..=words.len() {
+        let mut w = words.to_vec();
+        w.insert(i, "extra");
+        drafts.push(w.join(" "));
+    }
+    // Each line deleted whole.
+    drafts.extend(["Two Three long hats here", "One cat Three long hats here", "One cat Two"].map(String::from));
+    for t in &drafts {
+        set_text(&eng, id, 0, t);
+        assert_eq!(text(&eng, id), *t, "{t:?}");
+        eng.undo(id).unwrap();
+    }
+}
+
+#[test]
 fn a_block_edited_with_a_width_or_typed_over_is_laid_out_whole_as_before() {
     let d = dir("edit-reflow-asked");
     let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
