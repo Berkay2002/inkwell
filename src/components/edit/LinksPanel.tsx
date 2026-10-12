@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { linkCheckUrl, linkPickFile, type LinkTarget, type NewLinkTarget, type PageLink } from "../../lib/api";
-import { confirmOpen, isProblem, linkState, rgbToHex, stateLabel, targetLabel, useNav, viewTarget } from "../../lib/nav";
+import { linkCheckUrl, linkPickFile, type LinkHighlight, type LinkTarget, type NewLinkTarget, type PageLink } from "../../lib/api";
+import { SIGNED_LINKS, confirmOpen, isProblem, linkState, rgbToHex, stateLabel, targetLabel, useNav, viewTarget } from "../../lib/nav";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
 
@@ -16,6 +16,13 @@ const COLORS: [number, number, number][] = [
 
 type Kind = "page" | "uri" | "file";
 
+const HIGHLIGHTS: [LinkHighlight, string][] = [
+  ["none", "None"],
+  ["invert", "Invert"],
+  ["outline", "Outline"],
+  ["inset", "Inset"],
+];
+
 /** The Links section of the Edit rail: draw, set where a link goes, border, and links from addresses. */
 export function LinksPanel({ doc }: { doc: DocState }) {
   const id = doc.id;
@@ -26,6 +33,9 @@ export function LinksPanel({ doc }: { doc: DocState }) {
   const audit = d?.audit ?? null;
   const all = d?.links[doc.currentPage]?.links ?? [];
   const here = showProblems ? all.filter((k) => isProblem(linkState(k.target))) : all;
+  // Certified: the engine leaves the links alone, so the controls that change them are off, with the reason.
+  const locked = d?.links[doc.currentPage]?.locked ?? null;
+  const signed = d?.links[doc.currentPage]?.signed ?? false;
   const sel: PageLink | null = d?.selectedLink ? (d.links[d.selectedLink.page]?.links.find((k) => k.id === d.selectedLink!.id) ?? null) : null;
 
   // Leaving the section stops drawing.
@@ -42,7 +52,8 @@ export function LinksPanel({ doc }: { doc: DocState }) {
         <button
           className={tool === "draw" ? "te-btn on" : "te-btn"}
           aria-pressed={tool === "draw"}
-          title="Drag a rectangle on the page, then choose where it goes"
+          title={locked ?? "Drag a rectangle on the page, then choose where it goes"}
+          disabled={locked != null}
           onClick={() => nav().setLinkTool(tool === "draw" ? "select" : "draw")}
         >
           <Icon name="link" size={16} />
@@ -68,7 +79,13 @@ export function LinksPanel({ doc }: { doc: DocState }) {
         </section>
       )}
 
-      {sel && !pending && <Selected key={`${d?.selectedLink?.page}:${sel.id}`} doc={doc} page={d!.selectedLink!.page} link={sel} />}
+      {sel && !pending && <Selected key={`${d?.selectedLink?.page}:${sel.id}`} doc={doc} page={d!.selectedLink!.page} link={sel} locked={locked} />}
+
+      {(locked || signed) && (
+        <p className="dim te-hint" role="note">
+          {locked ?? SIGNED_LINKS}
+        </p>
+      )}
 
       <section className="te-sec">
         <h3 className="te-h3">Check</h3>
@@ -117,7 +134,20 @@ export function LinksPanel({ doc }: { doc: DocState }) {
 
       <section className="te-sec">
         <h3 className="te-h3">From the document</h3>
-        <Urls doc={doc} />
+        <Urls doc={doc} locked={locked} />
+      </section>
+
+      <section className="te-sec">
+        <h3 className="te-h3">All links</h3>
+        <button
+          className="te-btn"
+          disabled={locked != null}
+          title={locked ?? "Counts the links of the whole document, then asks before removing them"}
+          onClick={() => void nav().removeAllLinks(id)}
+        >
+          <Icon name="trash" size={16} />
+          Remove all links…
+        </button>
       </section>
 
       {here.length > 0 && (
@@ -156,7 +186,7 @@ export function LinksPanel({ doc }: { doc: DocState }) {
   );
 }
 
-function Selected({ doc, page, link }: { doc: DocState; page: number; link: PageLink }) {
+function Selected({ doc, page, link, locked }: { doc: DocState; page: number; link: PageLink; locked: string | null }) {
   const id = doc.id;
   const [change, setChange] = useState(false);
   const t = link.target;
@@ -186,11 +216,22 @@ function Selected({ doc, page, link }: { doc: DocState; page: number; link: Page
             Open address…
           </button>
         )}
-        <button className={change ? "te-btn on" : "te-btn"} aria-expanded={change} disabled={t.kind === "other"} onClick={() => setChange(!change)}>
+        <button
+          className={change ? "te-btn on" : "te-btn"}
+          aria-expanded={change}
+          disabled={t.kind === "other" || locked != null}
+          title={locked ?? undefined}
+          onClick={() => setChange(!change)}
+        >
           Change target
         </button>
         <span className="grow" />
-        <button className="te-icon" aria-label="Delete link" title="Delete link (Delete)" onClick={() => void nav().removeLinks(id, page, [link.id])}>
+        <button
+          className="te-icon"
+          aria-label="Delete link"
+          title={locked ?? "Delete link (Delete)"}
+          disabled={locked != null}
+          onClick={() => void nav().removeLinks(id, page, [link.id])}>
           <Icon name="trash" size={16} />
         </button>
       </div>
@@ -207,9 +248,26 @@ function Selected({ doc, page, link }: { doc: DocState; page: number; link: Page
         />
       )}
       <div className="te-row">
+        <span className="te-label">Highlight</span>
+        <select
+          className="te-select te-keep"
+          aria-label="Highlight style"
+          title={locked ?? "How the link looks while it is pressed in Read mode"}
+          disabled={locked != null}
+          value={link.highlight}
+          onChange={(e) => void nav().setLinkHighlight(id, page, link.id, e.target.value as LinkHighlight)}
+        >
+          {HIGHLIGHTS.map(([v, label]) => (
+            <option key={v} value={v}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="te-row">
         <span className="te-label">Border</span>
         <label className="te-check">
-          <input type="checkbox" checked={b.visible} onChange={(e) => setBorder({ visible: e.target.checked, width: e.target.checked ? mark : b.width })} />
+          <input type="checkbox" checked={b.visible} disabled={locked != null} onChange={(e) => setBorder({ visible: e.target.checked, width: e.target.checked ? mark : b.width })} />
           Visible
         </label>
       </div>
@@ -217,7 +275,7 @@ function Selected({ doc, page, link }: { doc: DocState; page: number; link: Page
         <>
           <div className="te-row">
             <span className="te-label">Width</span>
-            <select className="te-select te-keep" aria-label="Border width" value={nearestWidth(b.width)} onChange={(e) => setBorder({ width: Number(e.target.value) })}>
+            <select className="te-select te-keep" aria-label="Border width" disabled={locked != null} value={nearestWidth(b.width)} onChange={(e) => setBorder({ width: Number(e.target.value) })}>
               {WIDTHS.map((w) => (
                 <option key={w} value={w}>
                   {w} pt
@@ -234,6 +292,7 @@ function Selected({ doc, page, link }: { doc: DocState; page: number; link: Page
                   className={sameColor(c, b.color) ? "te-sw on" : "te-sw"}
                   style={{ background: rgbToHex(c) }}
                   aria-label={`Colour ${rgbToHex(c)}`}
+                  disabled={locked != null}
                   onClick={() => setBorder({ color: c })}
                 />
               ))}
@@ -428,7 +487,7 @@ function TargetForm(p: {
 }
 
 /** "Create links from web addresses": the count first, then one undo step for all of them. */
-function Urls({ doc }: { doc: DocState }) {
+function Urls({ doc, locked }: { doc: DocState; locked: string | null }) {
   const u = useNav((s) => s.docs[doc.id]?.urls ?? null);
   const [asked, setAsked] = useState(false);
   return (
@@ -436,6 +495,8 @@ function Urls({ doc }: { doc: DocState }) {
       <button
         className={asked ? "te-btn on" : "te-btn"}
         aria-expanded={asked}
+        disabled={locked != null}
+        title={locked ?? undefined}
         onClick={() => {
           const next = !asked;
           setAsked(next);

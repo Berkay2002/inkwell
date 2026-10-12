@@ -728,3 +728,511 @@ fn deleting_a_link_of_an_unsigned_document_still_leaves_its_address_out_of_the_f
     let saved = std::fs::read(&path).unwrap();
     assert!(!String::from_utf8_lossy(&saved).contains("secret.example"), "a deleted link's address does not stay in the file");
 }
+
+// ---- highlight style, inline links, remove all ----
+
+/// Objects: 1 catalog, 2 pages, 3 the page (`annots` is the literal `/Annots` value), then `more` from 4.
+fn doc_with(annots: &str, catalog_extra: &str, more: &[String]) -> Vec<u8> {
+    let mut objs = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>"),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots {annots} >>"),
+    ];
+    objs.extend(more.iter().cloned());
+    raw_pdf(&objs)
+}
+
+const INLINE: &str = "<< /Type /Annot /Subtype /Link /Rect [100 600 300 650] /Border [0 0 0] /A << /S /URI /URI (https://inline.example/) >> >>";
+
+/// For each entry of page 0's `/Annots`: is it written inline (not a reference)?
+fn direct_entries(eng: &Engine, id: DocId) -> Vec<bool> {
+    eng.read_custom(id, |d| {
+        let p = d.find_page(0)?;
+        let arr = p.get_dict("Annots")?.unwrap();
+        let arr = arr.resolve()?.unwrap_or(arr);
+        (0..arr.len()? as i32).map(|i| Ok(!arr.get_array(i)?.unwrap().is_indirect()?)).collect::<Result<Vec<bool>>>()
+    })
+    .unwrap()
+}
+
+fn uri_at(l: &PageLinks, i: usize) -> String {
+    match &l.links[i].target {
+        Target::Uri { uri } => uri.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_highlight_style_is_read_set_and_kept_through_save_for_all_four() {
+    let links: Vec<String> = ["", "/H /N", "/H /O", "/H /P", "/H /Z"].iter().map(|h| link_annot(&format!("/A << /S /URI /URI (https://e.example/) >> {h}"))).collect();
+    let (eng, id, path, _d) = opened("highlight-read", &page_with_annots("", "", &links, &[]));
+    let read: Vec<Highlight> = list(&eng, id, 0).unwrap().links.iter().map(|l| l.highlight).collect();
+    assert_eq!(read, [Highlight::Invert, Highlight::None, Highlight::Outline, Highlight::Inset, Highlight::Invert], "absent and unknown are Invert");
+
+    let link = list(&eng, id, 0).unwrap().links[0].id;
+    let before = eng.edit_state(id).unwrap();
+    let s = go(&eng, id, LinkOp::SetHighlight { page: 0, id: link, highlight: Highlight::Invert }).state;
+    assert_eq!((s.rev, s.undo.clone()), (before.rev, before.undo.clone()), "Invert on a link with no /H is no change");
+    let want = [Highlight::None, Highlight::Outline, Highlight::Inset, Highlight::Invert];
+    for h in want {
+        let e = go(&eng, id, LinkOp::SetHighlight { page: 0, id: link, highlight: h });
+        assert_eq!(e.state.undo.as_deref(), Some("Change link highlight on p. 1"));
+        assert_eq!(list(&eng, id, 0).unwrap().links[0].highlight, h);
+    }
+    // Each change is its own step, and undo goes back one at a time.
+    eng.undo(id).unwrap();
+    assert_eq!(list(&eng, id, 0).unwrap().links[0].highlight, Highlight::Inset);
+    eng.redo(id).unwrap();
+    // Moving the link does not touch its style.
+    go(&eng, id, LinkOp::SetHighlight { page: 0, id: link, highlight: Highlight::Outline });
+    go(&eng, id, LinkOp::SetRect { page: 0, id: link, rect: [10.0, 10.0, 90.0, 40.0] });
+    assert_eq!(list(&eng, id, 0).unwrap().links[0].highlight, Highlight::Outline);
+    eng.save(id, None).unwrap();
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    let back: Vec<Highlight> = list(&eng2, id2, 0).unwrap().links.iter().map(|l| l.highlight).collect();
+    assert_eq!(back, [Highlight::Outline, Highlight::None, Highlight::Outline, Highlight::Inset, Highlight::Invert]);
+}
+
+#[test]
+fn a_link_written_inline_in_annots_is_listed_followed_and_audited() {
+    let annots = format!("[ {INLINE} 4 0 R << /Type /Annot /Subtype /Link /Rect [100 500 300 550] /Dest (nowhere) >> ]");
+    let more = vec![link_annot("/Dest [3 0 R /Fit]")];
+    let (eng, id, _, _d) = opened("inline-list", &doc_with(&annots, "", &more));
+    assert_eq!(direct_entries(&eng, id), [true, false, true], "the fixture really holds inline dictionaries");
+    let l = list(&eng, id, 0).unwrap();
+    assert_eq!(l.links.len(), 3);
+    assert_eq!(l.links[0].id, -1);
+    assert_eq!(uri_at(&l, 0), "https://inline.example/");
+    assert!(l.links[1].id > 0 && matches!(l.links[1].target, Target::Page { page: 0, .. }));
+    assert_eq!(l.links[2].id, -3);
+    assert!(matches!(l.links[2].target, Target::Broken { .. }), "{:?}", l.links[2].target);
+    let a = audit(&eng, id).unwrap();
+    assert_eq!((a.total, a.external, a.broken), (3, 1, 1));
+    assert_eq!(a.rows[0].id, -3);
+}
+
+#[test]
+fn an_inline_link_is_edited_in_place_each_change_one_exact_undo_step() {
+    let annots = format!("[ {INLINE} 4 0 R ]");
+    let more = vec![link_annot("/Dest [3 0 R /Fit]")];
+    let (eng, id, path, _d) = opened("inline-edit", &doc_with(&annots, "", &more));
+    let start = list(&eng, id, 0).unwrap().links;
+    let ops = [
+        LinkOp::SetTarget { page: 0, id: -1, target: NewTarget::Uri { uri: "https://changed.example/".into() } },
+        LinkOp::SetRect { page: 0, id: -1, rect: [20.0, 30.0, 220.0, 80.0] },
+        LinkOp::SetBorder { page: 0, id: -1, border: BorderSpec { visible: true, width: Some(2.0), color: Some([1.0, 0.0, 0.0]) } },
+        LinkOp::SetHighlight { page: 0, id: -1, highlight: Highlight::Inset },
+    ];
+    let mut states = vec![start.clone()];
+    for op in ops {
+        let e = go(&eng, id, op);
+        assert!(e.state.dirty);
+        states.push(list(&eng, id, 0).unwrap().links);
+        assert_eq!(states.last().unwrap()[0].id, -1, "the link keeps its number");
+        assert_eq!(states.last().unwrap()[1], start[1], "the other link is untouched");
+    }
+    let end = states.last().unwrap().clone();
+    assert_eq!(end[0].target, Target::Uri { uri: "https://changed.example/".into() });
+    assert!(end[0].border.visible && end[0].highlight == Highlight::Inset);
+    assert!((end[0].rect[2] - 220.0).abs() < 0.1);
+    assert_eq!(direct_entries(&eng, id), [true, false], "it is still written where it was");
+    // Undo goes back through exactly the lists it came through.
+    for want in states.iter().rev().skip(1) {
+        eng.undo(id).unwrap();
+        assert_eq!(&list(&eng, id, 0).unwrap().links, want);
+    }
+    for want in states.iter().skip(1) {
+        eng.redo(id).unwrap();
+        assert_eq!(&list(&eng, id, 0).unwrap().links, want);
+    }
+    eng.save(id, None).unwrap();
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    assert_eq!(list(&eng2, id2, 0).unwrap().links, end, "the edit is in the saved file");
+}
+
+#[test]
+fn deleting_inline_and_indirect_links_together_takes_the_right_entries() {
+    let annots = format!("[ {INLINE} 4 0 R {INLINE} 5 0 R {INLINE} ]");
+    let more = vec![link_annot("/Dest [3 0 R /Fit]"), "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (keep) >>".to_string()];
+    let (eng, id, _, _d) = opened("inline-delete", &doc_with(&annots, "", &more));
+    let l = list(&eng, id, 0).unwrap();
+    assert_eq!(l.links.iter().map(|k| k.id).collect::<Vec<_>>(), [-1, 4, -3, -5]);
+    // Not in order, and a repeat: all resolved against the list the person saw.
+    let e = go(&eng, id, LinkOp::Delete { page: 0, ids: vec![-5, 4, -1, -5] });
+    assert_eq!(e.count, 3);
+    let left = list(&eng, id, 0).unwrap();
+    assert_eq!(left.links.len(), 1);
+    assert_eq!(direct_entries(&eng, id), [true, false], "the inline link and the note that were not named are still there");
+    eng.undo(id).unwrap();
+    assert_eq!(list(&eng, id, 0).unwrap(), PageLinks { rev: eng.edit_state(id).unwrap().rev, ..l });
+}
+
+fn two_page_doc(annots_1: &str, annots_2: &str, catalog_extra: &str, more: &[String]) -> Vec<u8> {
+    let mut objs = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>"),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots {annots_1} >>"),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots {annots_2} >>"),
+    ];
+    objs.extend(more.iter().cloned());
+    raw_pdf(&objs)
+}
+
+/// Objects from 5: a link (5), a highlight annotation (6), an outline root (7) and its item (8).
+fn remove_all_fixture() -> Vec<u8> {
+    let more = vec![
+        link_annot("/A << /S /URI /URI (https://indirect.example/zz-marker-9) >>"),
+        "<< /Type /Annot /Subtype /Highlight /Rect [10 10 90 30] /QuadPoints [10 30 90 30 10 10 90 10] /C [1 1 0] >>".to_string(),
+        "<< /Type /Outlines /First 8 0 R /Last 8 0 R /Count 1 >>".to_string(),
+        "<< /Title (Start) /Parent 7 0 R /Dest [3 0 R /Fit] >>".to_string(),
+    ];
+    // Page 1: an inline link, the shared one, the highlight. Page 2: the shared one again and an inline one.
+    two_page_doc(&format!("[ {INLINE} 5 0 R 6 0 R ]"), &format!("[ 5 0 R {INLINE} ]"), "/Outlines 7 0 R", &more)
+}
+
+#[test]
+fn remove_all_links_takes_every_link_in_one_step_and_keeps_the_rest() {
+    let d = dir("links", "remove-all");
+    let (eng, id, path) = open_bytes(&d, "a.pdf", &remove_all_fixture());
+    let has = |p: &str, m: &str| String::from_utf8_lossy(&std::fs::read(p).unwrap()).contains(m);
+    let before: Vec<PageLinks> = (0..2).map(|p| list(&eng, id, p).unwrap()).collect();
+    assert_eq!((before[0].links.len(), before[1].links.len()), (2, 2));
+    assert_eq!(audit(&eng, id).unwrap().total, 3, "the link both pages list is one");
+    let outline = crate::outline::list(&eng, id).unwrap().items.len();
+    assert_eq!(outline, 1);
+
+    let e = go(&eng, id, LinkOp::RemoveAll);
+    assert_eq!(e.count, 3, "as many as the audit counted: the shared one is on two pages");
+    assert_eq!(e.state.undo.as_deref(), Some("Remove all links"));
+    for p in 0..2 {
+        assert!(list(&eng, id, p).unwrap().links.is_empty(), "page {p}");
+    }
+    assert_eq!(crate::outline::list(&eng, id).unwrap().items.len(), outline, "the outline stays");
+    let page1 = eng
+        .read_custom(id, |d| {
+            let arr = d.find_page(0)?.get_dict("Annots")?.unwrap();
+            let arr = arr.resolve()?.unwrap_or(arr);
+            let sub = arr.get_array(0)?.unwrap().get_dict("Subtype")?.map(|s| s.as_name().map(|n| String::from_utf8_lossy(&n).into_owned()));
+            Ok((arr.len()?, sub))
+        })
+        .unwrap();
+    assert_eq!((page1.0, page1.1.and_then(|s| s.ok()).as_deref()), (1, Some("Highlight")), "the highlight annotation stays");
+
+    // One step: undo brings all four back, as they were.
+    eng.undo(id).unwrap();
+    for (p, was) in before.iter().enumerate() {
+        let now = list(&eng, id, p as u32).unwrap();
+        assert_eq!(now.links, was.links, "page {p}");
+    }
+    eng.redo(id).unwrap();
+    eng.save(id, None).unwrap();
+    assert!(!has(&path, "zz-marker-9") && !has(&path, "inline.example"), "a removed link's address is not kept in the file");
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    assert_eq!(audit(&eng2, id2).unwrap().total, 0);
+    assert_eq!(crate::outline::list(&eng2, id2).unwrap().items.len(), 1);
+    // Nothing left: asking again is no step.
+    let s = eng.edit_state(id).unwrap();
+    let again = apply(&eng, id, rev(&eng, id), &LinkOp::RemoveAll, EditSource::User).unwrap().state;
+    assert_eq!((again.rev, again.undo), (s.rev, s.undo));
+}
+
+#[test]
+fn a_certified_document_takes_neither_remove_all_nor_a_highlight_change() {
+    let cat = "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 2 >> >> ] >> >>";
+    let (eng, id, _, _d) = opened("certified-depth", &page_with_annots("", cat, &[link_annot("/Dest [3 0 R /Fit]"), INLINE.to_string()], &[]));
+    let l = list(&eng, id, 0).unwrap();
+    assert!(l.locked.as_deref().is_some_and(|m| m.contains("certified")), "the list says why");
+    let before = eng.edit_state(id).unwrap();
+    for op in [
+        LinkOp::RemoveAll,
+        LinkOp::SetHighlight { page: 0, id: l.links[0].id, highlight: Highlight::None },
+        LinkOp::SetHighlight { page: 0, id: l.links[1].id, highlight: Highlight::None },
+        LinkOp::Delete { page: 0, ids: vec![l.links[1].id] },
+    ] {
+        match apply(&eng, id, rev(&eng, id), &op, EditSource::User) {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{op:?}: {m}"),
+            other => panic!("{op:?}: {other:?}"),
+        }
+        let s = eng.edit_state(id).unwrap();
+        assert_eq!((s.rev, s.undo, s.dirty), (before.rev, before.undo.clone(), before.dirty), "{op:?} left a step");
+    }
+}
+
+#[test]
+fn remove_all_links_of_a_signed_document_stays_incremental() {
+    let cat = "/AcroForm << /SigFlags 3 /Fields [5 0 R] >>";
+    let sig = "<< /FT /Sig /T (Signature1) /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> >> >>".to_string();
+    let annots = format!("[ {INLINE} 4 0 R ]");
+    let more = vec![link_annot("/A << /S /URI /URI (https://secret.example/) >>"), sig];
+    let bytes = doc_with(&annots, cat, &more);
+    let (eng, id, path, _d) = opened("signed-remove-all", &bytes);
+    let l = list(&eng, id, 0).unwrap();
+    assert!(l.signed && l.locked.is_none());
+    let original = std::fs::read(&path).unwrap();
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count, 2);
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the signed bytes stay the start of the file");
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    assert!(list(&eng2, id2, 0).unwrap().links.is_empty());
+}
+
+#[test]
+fn a_hostile_annots_array_is_read_as_far_as_the_cap_and_never_half_removed() {
+    // 60,000 entries that are not links, then a link; the same object listed many times; an array that holds itself.
+    let junk = "0 ".repeat(MAX_ANNOTS + 10_000);
+    let (eng, id, _, _d) = opened("hostile-long", &doc_with(&format!("[ {junk} 4 0 R ]"), "", &[link_annot("/Dest [3 0 R /Fit]")]));
+    assert!(list(&eng, id, 0).unwrap().links.is_empty(), "past the cap nothing is read");
+    let before = eng.edit_state(id).unwrap();
+    match apply(&eng, id, rev(&eng, id), &LinkOp::RemoveAll, EditSource::User) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("more annotations"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(eng.edit_state(id).unwrap().rev, before.rev);
+
+    let repeated = "4 0 R ".repeat(10_000);
+    let (eng, id, _, _d) = opened("hostile-repeat", &doc_with(&format!("[ {repeated} ]"), "", &[link_annot("/Dest [3 0 R /Fit]")]));
+    assert_eq!(list(&eng, id, 0).unwrap().links.len(), 1, "one object listed ten thousand times is one link");
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count, 1);
+    assert!(list(&eng, id, 0).unwrap().links.is_empty(), "and every entry for it went");
+
+    // /Annots is object 4, an array that holds itself, a nested array and a link (5).
+    let more = vec!["[ 4 0 R [ 4 0 R ] 5 0 R 5 0 R ]".to_string(), link_annot("/Dest [3 0 R /Fit]")];
+    let (eng, id, _, _d) = opened("hostile-loop", &doc_with("4 0 R", "", &more));
+    assert_eq!(list(&eng, id, 0).unwrap().links.len(), 1);
+    assert_eq!(audit(&eng, id).unwrap().total, 1);
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count, 1);
+}
+
+// ---- round 2 ----
+
+#[test]
+fn a_certification_that_cannot_be_read_still_lists_the_links_as_locked() {
+    // A form with more fields than are checked: `certified` is an error, never a shorter answer.
+    let fields = "5 0 R ".repeat(20_001);
+    let cat = format!("/AcroForm << /Fields [ {fields} ] >>");
+    let (eng, id, _, _d) = opened("unreadable-certification", &page_with_annots("", &cat, &[link_annot("/Dest [3 0 R /Fit]")], &["<< /FT /Tx /T (a) >>".into()]));
+    assert!(eng.read_custom(id, |d| Ok(certified(d).is_err())).unwrap(), "the fixture's certification is unreadable");
+    let l = list(&eng, id, 0).unwrap();
+    assert_eq!(l.links.len(), 1, "the links are still listed");
+    assert!(l.locked.as_deref().is_some_and(|m| m.contains("certified")), "{:?}", l.locked);
+    let before = eng.edit_state(id).unwrap();
+    for op in [LinkOp::RemoveAll, LinkOp::SetHighlight { page: 0, id: l.links[0].id, highlight: Highlight::None }] {
+        assert!(matches!(apply(&eng, id, rev(&eng, id), &op, EditSource::User), Err(EngineError::Invalid(_))), "{op:?}");
+    }
+    assert_eq!(eng.edit_state(id).unwrap().rev, before.rev);
+}
+
+#[test]
+fn a_dictionary_that_is_a_form_field_too_is_not_a_link_to_list_or_delete() {
+    let cat = "/AcroForm << /Fields [5 0 R 6 0 R] >>";
+    let annots = [
+        link_annot("/Dest [3 0 R /Fit]"),
+        "<< /Type /Annot /Subtype /Link /FT /Sig /T (Signature1) /Rect [10 10 90 30] >>".to_string(),
+        "<< /Type /Annot /Subtype /Link /Parent 7 0 R /Rect [10 40 90 60] >>".to_string(),
+    ];
+    let more = vec!["<< /FT /Btn /T (group) /Kids [6 0 R] >>".to_string()];
+    let inline = "<< /Type /Annot /Subtype /Link /FT /Tx /T (x) /Rect [10 70 90 90] >>";
+    let bytes = {
+        let mut objs = vec![
+            format!("<< /Type /Catalog /Pages 2 0 R {cat} >>"),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [ 4 0 R 5 0 R 6 0 R {inline} ] >>"),
+        ];
+        objs.extend(annots);
+        objs.extend(more);
+        raw_pdf(&objs)
+    };
+    let (eng, id, _, _d) = opened("field-as-link", &bytes);
+    let l = list(&eng, id, 0).unwrap();
+    assert_eq!(l.links.len(), 1, "only the plain link is listed: {:?}", l.links);
+    assert_eq!(audit(&eng, id).unwrap().total, 1);
+    // Naming a field's number to Delete finds no link, and Remove all leaves the fields where they are.
+    assert!(matches!(
+        apply(&eng, id, rev(&eng, id), &LinkOp::Delete { page: 0, ids: vec![5] }, EditSource::User),
+        Err(EngineError::Stale)
+    ));
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count, 1);
+    let kept = eng.read_custom(id, |d| Ok(d.find_page(0)?.get_dict("Annots")?.unwrap().len()?)).unwrap();
+    assert_eq!(kept, 3, "the three field widgets stay in /Annots");
+}
+
+#[test]
+fn a_parent_tree_entry_that_is_not_the_links_own_stays_when_the_link_goes() {
+    // The link's /StructParent key is also the key of a page's /StructParents: its value is an array of elements, not
+    // an element that holds an object reference to the link.
+    for (name, value) in [("page-array", "[ 6 0 R ]"), ("other-element", "6 0 R")] {
+        let annots = vec![link_annot("/Dest [3 0 R /Fit] /StructParent 0")];
+        let more = vec![
+            "<< /Type /StructTreeRoot /K 6 0 R /ParentTree 7 0 R >>".to_string(),
+            "<< /Type /StructElem /S /P /P 5 0 R /Pg 3 0 R /K [ 0 1 ] >>".to_string(),
+            format!("<< /Nums [ 0 {value} ] >>"),
+        ];
+        let (eng, id, _, _d) = opened(&format!("structure-{name}"), &page_with_annots("", "/StructTreeRoot 5 0 R", &annots, &more));
+        let link = list(&eng, id, 0).unwrap().links[0].id;
+        go(&eng, id, LinkOp::Delete { page: 0, ids: vec![link] });
+        let (nums, kids) = eng
+            .read_custom(id, |doc| {
+                let nums = doc.new_indirect(7, 0)?.get_dict("Nums")?.unwrap().len()?;
+                let k = doc.new_indirect(6, 0)?.get_dict("K")?.map_or(0, |k| k.len().unwrap_or(1));
+                Ok((nums, k))
+            })
+            .unwrap();
+        assert_eq!((nums, kids), (2, 2), "{name}: the entry and the element's content are untouched");
+        assert!(list(&eng, id, 0).unwrap().links.is_empty());
+    }
+}
+
+#[test]
+fn the_count_the_confirm_shows_is_the_count_remove_all_removes() {
+    // Object 5 is an `/Annots` array both pages share; it holds a link, a link with no rectangle, a link with a
+    // malformed one, an inline link, and the first link again.
+    let shared = format!(
+        "[ 6 0 R 7 0 R 8 0 R {INLINE} 6 0 R ]"
+    );
+    let more = vec![
+        shared,
+        link_annot("/Dest [3 0 R /Fit]"),
+        "<< /Type /Annot /Subtype /Link /Dest [3 0 R /Fit] >>".to_string(),
+        "<< /Type /Annot /Subtype /Link /Rect [1 2] /Dest [3 0 R /Fit] >>".to_string(),
+    ];
+    let bytes = two_page_doc("5 0 R", "5 0 R", "", &more);
+    let (eng, id, _, _d) = opened("count-agrees", &bytes);
+    let a = audit(&eng, id).unwrap();
+    assert_eq!(a.total, 4, "four links, the shared array and the repeat counted once, none skipped for its rectangle");
+    assert!(!a.signed);
+    let e = go(&eng, id, LinkOp::RemoveAll);
+    assert_eq!(e.count, a.total);
+    assert_eq!(audit(&eng, id).unwrap().total, 0);
+}
+
+#[test]
+fn remove_all_has_one_budget_for_the_whole_document_and_refuses_it_whole() {
+    // Three pages' worth of entries: the budget is what the walk reads in all, not what one page holds.
+    let (eng, id, _, _d) = opened("budget", &remove_all_fixture());
+    let run = |budget: usize| {
+        eng.apply_custom_unless_noop(id, "Remove all links".into(), EditSource::User, true, |d| {
+            Ok(remove_all(d, budget)?.map(|done| done.pages))
+        })
+    };
+    let before = eng.edit_state(id).unwrap();
+    match run(10) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("at once"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(eng.edit_state(id).unwrap().rev, before.rev, "refused: no step");
+    assert_eq!(list(&eng, id, 0).unwrap().links.len(), 2, "and nothing removed");
+    assert_eq!(list(&eng, id, 1).unwrap().links.len(), 2);
+    run(1000).unwrap();
+    assert_eq!(audit(&eng, id).unwrap().total, 0);
+}
+
+#[test]
+fn a_parent_tree_shared_by_many_links_is_cleaned_in_one_pass_and_keeps_the_others_pairs() {
+    // 1500 links with a /StructParent key each, one element per link, one big /Nums leaf that the tree's root lists 300
+    // times. Link 0's key leads to an element that is not its own, so that pair stays; key 5000 is nobody's.
+    const N: usize = 1500;
+    let first_link = 7;
+    let elem_first = first_link + N;
+    let leaf = first_link + 2 * N;
+    let refs = (0..N).map(|i| format!("{} 0 R", first_link + i)).collect::<Vec<_>>().join(" ");
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 4 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [ {refs} ] >>"),
+        "<< /Type /StructTreeRoot /K 5 0 R /ParentTree 6 0 R >>".to_string(),
+        "<< /Type /StructElem /S /Document /P 4 0 R /K [] >>".to_string(),
+        format!("<< /Kids [ {} ] >>", vec![format!("{leaf} 0 R"); 300].join(" ")),
+    ];
+    objs.extend((0..N).map(|i| link_annot(&format!("/Dest [3 0 R /Fit] /StructParent {i}"))));
+    objs.extend((0..N).map(|i| {
+        format!("<< /Type /StructElem /S /Link /P 5 0 R /Pg 3 0 R /K [ << /Type /OBJR /Obj {} 0 R /Pg 3 0 R >> ] >>", first_link + i)
+    }));
+    let mut nums = vec!["0 5 0 R".to_string()];
+    nums.extend((1..N).map(|i| format!("{i} {} 0 R", elem_first + i)));
+    nums.push("5000 5 0 R".to_string());
+    objs.push(format!("<< /Nums [ {} ] >>", nums.join(" ")));
+
+    let (eng, id, _, _d) = opened("shared-parent-tree", &raw_pdf(&objs));
+    assert_eq!(list(&eng, id, 0).unwrap().links.len(), N);
+    let t = std::time::Instant::now();
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count as usize, N);
+    assert!(t.elapsed().as_secs() < 10, "took {:?}", t.elapsed());
+    let (nums, held) = eng
+        .read_custom(id, |d| {
+            let nums = d.new_indirect(leaf as i32, 0)?.get_dict("Nums")?.unwrap();
+            let kept: Vec<i32> = (0..nums.len()? as i32).step_by(2).map(|i| nums.get_array(i).unwrap().unwrap().as_int().unwrap()).collect();
+            let elem = d.new_indirect(elem_first as i32 + 1, 0)?;
+            Ok((kept, elem.get_dict("K")?.map_or(0, |k| k.len().unwrap_or(1))))
+        })
+        .unwrap();
+    assert_eq!(nums, vec![0, 5000], "the pairs of the removed links' own elements are gone, the others stay");
+    assert_eq!(held, 0, "an element no longer refers to its link");
+}
+
+#[test]
+fn a_link_whose_subtype_or_field_type_is_an_indirect_object_is_read_as_a_reader_would() {
+    // 6: a name, 7: a name that makes object 5 a field.
+    let annots = [
+        "<< /Type /Annot /Subtype 6 0 R /Rect [100 600 300 650] /Dest [3 0 R /Fit] >>".to_string(),
+        "<< /Type /Annot /Subtype /Link /FT 7 0 R /T (x) /Rect [10 10 90 30] >>".to_string(),
+    ];
+    let more = vec!["/Link".to_string(), "/Tx".to_string()];
+    let (eng, id, _, _d) = opened("indirect-names", &page_with_annots("", "", &annots, &more));
+    assert_eq!(list(&eng, id, 0).unwrap().links.len(), 1, "the first is a link, the second a field");
+    assert_eq!(audit(&eng, id).unwrap().total, 1);
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count, 1);
+    let kept = eng.read_custom(id, |d| Ok(d.find_page(0)?.get_dict("Annots")?.unwrap().len()?)).unwrap();
+    assert_eq!(kept, 1, "the field stays");
+}
+
+#[test]
+fn the_audit_and_delete_are_bounded_like_remove_all() {
+    // 3,000 pages that each hold a direct array of 400 entries: 1.2 million entries is over what one walk may read
+    // (twice that is paid for), so the audit refuses instead of walking them all, as Remove all does.
+    let n = 3000;
+    let page = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [ {} ] >>", "0 ".repeat(400));
+    let kids = (0..n).map(|i| format!("{} 0 R", 3 + i)).collect::<Vec<_>>().join(" ");
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [ {kids} ] /Count {n} >>"),
+    ];
+    objs.extend((0..n).map(|_| page.clone()));
+    let (eng, id, _, _d) = opened("audit-budget", &raw_pdf(&objs));
+    match audit(&eng, id) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("at once"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    match apply(&eng, id, rev(&eng, id), &LinkOp::RemoveAll, EditSource::User) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("at once"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    // Delete names no more ids than a page lists: a list of a million is stale at once, without a scan for each.
+    let ids: Vec<i32> = (1..=1_000_000).collect();
+    assert!(matches!(
+        apply(&eng, id, rev(&eng, id), &LinkOp::Delete { page: 0, ids }, EditSource::User),
+        Err(EngineError::Stale)
+    ));
+}
+
+#[test]
+fn removing_thousands_of_links_from_the_front_of_a_long_array_is_quick() {
+    // A page at the caps: the most links it lists (one short of the line where the page counts as cut), then the
+    // entries that are not links up to MAX_ANNOTS.
+    const LINKS: usize = MAX_LINKS - 1;
+    let refs = (0..LINKS).map(|i| format!("{} 0 R", 4 + i)).collect::<Vec<_>>().join(" ");
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [ {refs} {} ] >>", "0 ".repeat(MAX_ANNOTS - LINKS)),
+    ];
+    objs.extend((0..LINKS).map(|_| link_annot("/Dest [3 0 R /Fit]")));
+    let (eng, id, _, _d) = opened("front-of-long-array", &raw_pdf(&objs));
+    let t = std::time::Instant::now();
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count as usize, LINKS);
+    assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+}

@@ -21,7 +21,7 @@ fn pdf(catalog: &str, field: &str) -> Vec<u8> {
         format!("<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [(a.txt) 10 0 R] >> >> {catalog} >>"),
         "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 >>".to_string(),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R /Annots [7 0 R 9 0 R 12 0 R] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R /Annots [7 0 R 9 0 R 12 0 R 13 0 R] >>".to_string(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>".to_string(),
         format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
         "<< /Type /Annot /Subtype /Text /Rect [100 100 120 120] /Contents (a note) /T (A) >>".to_string(),
@@ -32,6 +32,7 @@ fn pdf(catalog: &str, field: &str) -> Vec<u8> {
         "<< /Type /Annot /Subtype /Line /Rect [0 0 108 144] /L [0 0 108 144] /IT /LineDimension /C [1 0 0] /Contents (5 in) /F 4 \
          /Measure << /Type /Measure /Subtype /RL /R (1 in = 1 in) /X [<< /Type /NumberFormat /U (in) /C 1 >>] /D [<< /Type /NumberFormat /U (in) /C 1 >>] >> >>"
             .to_string(),
+        "<< /Type /Annot /Subtype /Link /Rect [72 500 200 520] /Border [0 0 0] /A << /S /URI /URI (https://example.com/) >> >>".to_string(),
     ])
 }
 
@@ -190,6 +191,16 @@ fn ops() -> Vec<(&'static str, bool, Op)> {
         let rev = eng.edit_state(id)?.rev;
         let new = crate::textedit::NewTextBox { text: "New".into(), size: 12.0, color: [0.0; 3], at: [72.0, 72.0], width: None };
         crate::textedit::add(eng, id, rev, 0, &new, user()).map(|_| ())
+    });
+    // Links are annotations: a /P 3 certification allows them, /P 1 and 2 do not.
+    op!("set a link's highlight", true, |eng, _p, id| {
+        let rev = eng.edit_state(id)?.rev;
+        let op = crate::links::LinkOp::SetHighlight { page: 0, id: 13, highlight: crate::links::Highlight::Outline };
+        crate::links::apply(eng, id, rev, &op, user()).map(|_| ())
+    });
+    op!("remove all links", true, |eng, _p, id| {
+        let rev = eng.edit_state(id)?.rev;
+        crate::links::apply(eng, id, rev, &crate::links::LinkOp::RemoveAll, user()).map(|_| ())
     });
     op!("change an image", false, |eng, _p, id| {
         let rev = eng.edit_state(id)?.rev;
