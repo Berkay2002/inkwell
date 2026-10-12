@@ -1338,6 +1338,8 @@ pub fn run() {
             textedit::app::text_add,
             outline::app::bookmarks_list,
             outline::app::bookmarks_apply,
+            outline::app::dests_list,
+            outline::app::dests_apply,
             outline::app::bookmarks_headings,
             links::app::links_list,
             links::app::links_apply,

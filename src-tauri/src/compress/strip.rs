@@ -478,7 +478,7 @@ fn mupdf_takes_as_utf8(b: &[u8]) -> bool {
 /// byte order mark is taken as UTF-8 first and only then as PDFDocEncoding. None: no faithful text (a lone
 /// surrogate, a form MuPDF reads as UTF-8 and Rust does not, a NUL or an escape MuPDF drops), so the string is
 /// not judged.
-fn mupdf_text(b: &[u8]) -> Option<String> {
+pub(crate) fn mupdf_text(b: &[u8]) -> Option<String> {
     let marked = [&[0xFE, 0xFF][..], &[0xFF, 0xFE], &[0xEF, 0xBB, 0xBF]].iter().any(|m| b.starts_with(m));
     if !marked {
         if mupdf_takes_as_utf8(b) {
