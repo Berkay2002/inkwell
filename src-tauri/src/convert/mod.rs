@@ -1,4 +1,4 @@
-//! Export a PDF (pages to images, text, HTML, Word) and Create a PDF (from images, text, the clipboard,
+//! Export a PDF (pages to images, text, HTML, Word, RTF) and Create a PDF (from images, text, the clipboard,
 //! or blank): the logic behind the Tauri commands in `lib.rs`.
 //!
 //! Plain functions over `&Engine` (export) or nothing at all (create), a progress callback and a cancel
@@ -7,12 +7,14 @@
 //! nothing behind.
 //!
 //! Gaps against Acrobat, by design of the engine underneath: no ".doc"/".xlsx"/".pptx" or PostScript
-//! output, and the Word export is a flowing reconstruction (paragraphs, headings, simple tables, images),
-//! not a layout-exact one.
+//! output, and the Word and RTF exports are a flowing reconstruction (paragraphs, headings, simple tables,
+//! images), not a layout-exact one.
 
 mod create;
 mod docx;
 mod export;
+mod flow;
+mod rtf;
 #[cfg(test)]
 mod tests;
 

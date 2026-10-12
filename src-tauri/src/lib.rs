@@ -83,6 +83,7 @@ enum SaveKind {
     Html,
     Xhtml,
     Word,
+    Rtf,
     /// Comments: XFDF or FDF.
     Comments,
     /// Form data: XFDF, FDF or JSON.
@@ -159,6 +160,7 @@ async fn pick_save(
             SaveKind::Html => d.add_filter("HTML", &["html", "htm"]),
             SaveKind::Xhtml => d.add_filter("XHTML", &["xhtml"]),
             SaveKind::Word => d.add_filter("Word document", &["docx"]),
+            SaveKind::Rtf => d.add_filter("Rich Text Format", &["rtf"]),
             SaveKind::Comments => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]),
             SaveKind::FormData => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]).add_filter("JSON", &["json"]),
             SaveKind::Csv => d.add_filter("CSV (spreadsheet)", &["csv"]),
