@@ -31,6 +31,7 @@ export const TOOL_GROUPS: { id: string; title: string }[] = [
   { id: "scripts", title: "Scripts" },
   { id: "convert", title: "Convert & create" },
   { id: "check", title: "Check & compare" },
+  { id: "automate", title: "Automate" },
 ];
 
 export interface ToolSection {

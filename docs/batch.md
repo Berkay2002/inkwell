@@ -2,7 +2,7 @@
 
 Code: `src-tauri/src/batch/` (`action.rs` the Action and its steps, `steps.rs` the step trait and one adapter per
 step, `run.rs` the runner, report and events, `store.rs` files on disk and the built-ins, `app.rs` the Tauri
-commands, `tests.rs`). Engine only: there is no UI yet. Parity row: Acrobat Pro "Action Wizard".
+commands, `tests.rs`); the UI is `src/components/ActionWizard.tsx` (see "In the app"). Parity row: Acrobat Pro "Action Wizard".
 
 ## The Action
 A name, a description, ordered steps, an output rule and "on error". JSON, camelCase, every field defaulted.
@@ -78,7 +78,8 @@ metadata/layers/scripts/attachments only so comments and bookmarks stay).
 
 ## Commands
 `batch_list`, `batch_save(action)`, `batch_delete(id)`, `batch_import(file token)`, `batch_export(action, saveTo token)`,
-`batch_validate(action)`, `batch_run(job, action, files[], folder?, onEvent)`, `batch_cancel(job)`. Files are open tokens
+`batch_validate(action)`, `batch_preview(action, files[])`, `batch_folder_files(folder, recursive)`,
+`batch_run(job, action, files[], folder?, onEvent)`, `batch_cancel(job)`. Files are open tokens
 and the result files come back as open tokens (`outputs[].token`), never as paths to use. Events (`event` tag):
 `started`, `fileStarted`, `step`, `fileDone {report}`, `finished`. The report has, per file, `status` (`ok`, `skipped`,
 `error`), `reason`, `sizeBefore`, `sizeAfter`, `outputs`, `notes`, `stepsDone`, `ms`, and the run's counts, `cancelled`
@@ -93,8 +94,41 @@ claims that are absolute, directly inside the journaled folder, and named after 
 ending (`<name><ending>.pdf`, `.txt`, ` (images)`, with an optional ` (n)`); published claims and everything else are left
 alone. `batch_run` refuses a `job` id that is already running (`Jobs::try_begin`).
 
+## In the app
+Tools > Action Wizard, or "Action Wizard" in the command palette. One centred sheet with three views.
+
+- **Actions**: the saved actions, then the four built-ins, as cards with their steps listed. Run, Edit (saved ones; a
+  built-in is read-only: Duplicate it), Duplicate, Export, Delete (asks twice), Import. Import goes through the engine
+  (`batch_import`), so a file that names an unknown or forbidden step ("remove security") is refused with the engine's own
+  sentence, shown above the list. An imported action opens in the editor for a look before anything runs.
+- **Editor**: the step library on the left in Acrobat's groups (Protect, Document processing, Pages, Export, Optimize),
+  the sequence in the middle, the selected step's options on the right. Click a step to add it; drag the grip or press
+  Up/Down on it to reorder. Name, description, where results go, and what a failing file does sit under the columns.
+  The draft is validated by the engine a moment after each change and the issue is shown on its step. Save needs a name,
+  one step and no step the engine could not read; other issues still let a draft be kept, they only stop it running.
+- **Run**: files (Add files, or Add folder with an "include sub-folders" box: the engine lists the PDFs, at most 500),
+  what it does, **Preview**, Run. A folder result is chosen when Run is pressed, not before, so its token is spent only
+  on a run that starts. Progress is per file with the step it is on; Cancel stops between files and inside compress/OCR.
+  The summary lists done (size before and after, notes, warnings), skipped (with the engine's reason, for example
+  "its owner restricted copying") and failed, with "Show in folder" for a result (the existing `reveal_in_folder`).
+- **Preview** (`batch_preview`) is a dry run. It runs the same checks as a run (the action's validation, repeated files and
+  the per-file gate: open in a tab, password, restricted, signed) through one shared function, and lists per file whether it
+  would run or be skipped and why, and the file names it would write (the first free ones today). It writes nothing: no
+  staging folder, no journal. It cannot know that a step will find nothing to do, that a file will fail partway, or that an
+  error stops the run; the summary says so. It does not take the output folder (chosen at Run), so names are only kept
+  apart from each other there.
+- **Passwords** of a Protect step are typed in the Run view, held in memory, merged into the one `batch_run` call, and cleared
+  when the run ends. The editor never holds one, `batch_save` and `batch_export` are given the action with any password
+  removed, and the engine drops them anyway. A Protect step with no password only waits (the editor shows "Password is typed
+  when it runs"); Preview uses stand-in passwords when none are typed, since it writes nothing.
+- There is no "prompt user" switch per step: the engine has no such field (an invented one would be dropped on save), and
+  Protect already asks for its passwords at every run.
+
+Screens: `docs/screens/batch/` (light and dark), taken by `scripts/batch-shots.mjs` in headless Chrome against a mocked
+invoke layer, so they show the interface, not the engine. The runtime pass against the real exe is still to do on the PC.
+
 ## Gaps
-- No UI, no scheduling, no watch folders.
+- No scheduling, no watch folders. No "prompt user" switch (above); no page ranges per step.
 - Watermark pictures are refused (their file token does not outlast a session). No page ranges on stamps; they go on all pages.
 - Set properties writes the Info dictionary only; an existing XMP packet keeps its old values.
 - A password-protected source is skipped; there is no per-file password.

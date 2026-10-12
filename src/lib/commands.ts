@@ -16,6 +16,7 @@ import { pickOpen } from "./api";
 import * as edits from "./edit";
 import { stepZoom } from "./layout";
 import { togglePageDark } from "./pageDark";
+import { useBatch } from "./batchStore";
 import { useConvert } from "./convertStore";
 import { useMarks } from "./marksStore";
 import { useProtect } from "./protectStore";
@@ -331,6 +332,7 @@ export const commands: Command[] = [
     needsDoc: true,
     run: () => (usePreflight.getState().open ? usePreflight.getState().setOpen(false) : openPreflight()),
   },
+  { id: "action-wizard", title: "Action Wizard: run steps on many files…", run: () => void useBatch.getState().show() },
   {
     id: "output-preview",
     title: "Output Preview (plates, ink coverage)",
