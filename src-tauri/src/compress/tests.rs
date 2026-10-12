@@ -2152,3 +2152,28 @@ fn an_unmarked_utf8_string_destination_is_read_like_mupdf_does_before_pdfdocenco
     assert_eq!(kept, "A, C");
     assert_eq!(links, 2);
 }
+
+#[test]
+fn a_string_destination_that_mupdf_cuts_short_or_skips_is_not_judged() {
+    let s = Scratch::new();
+    // "Mart\u{ed}" in UTF-8 ends in the byte 0xAD, which is only a continuation byte there
+    let tree = "/Names << /Dests << /Names [(Mart\\303\\255) [5 0 R /Fit]] >> >>";
+    let (kept, links) = string_dests_judged(
+        &s,
+        tree,
+        &[
+            "(Mart\\303\\255)",
+            "(Mart\\303\\255x)",
+            // not UTF-8, so PDFDocEncoding, where 0x7F is NUL and ends the key
+            "(\\351\\177)",
+            // 0xAD alone is the same
+            "(a\\255b)",
+            // U+001B is a language escape that MuPDF skips
+            "<FEFF0061001B0062>",
+            // a byte order mark: U+00AD is an ordinary character, clean and missing
+            "<FEFF00AD>",
+        ],
+    );
+    assert_eq!(kept, "A, C, D, E");
+    assert_eq!(links, 4);
+}

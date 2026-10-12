@@ -382,14 +382,22 @@ fn mupdf_takes_as_utf8(b: &[u8]) -> bool {
 
 /// The text MuPDF's `pdf_new_utf8_from_pdf_string` makes of a string, which keys its name tree. A string with no
 /// byte order mark is taken as UTF-8 first and only then as PDFDocEncoding. None: no faithful text (a lone
-/// surrogate, a form MuPDF reads as UTF-8 and Rust does not), so the string is not judged.
+/// surrogate, a form MuPDF reads as UTF-8 and Rust does not, a NUL or an escape MuPDF drops), so the string is
+/// not judged.
 fn mupdf_text(b: &[u8]) -> Option<String> {
     let marked = [&[0xFE, 0xFF][..], &[0xFF, 0xFE], &[0xEF, 0xBB, 0xBF]].iter().any(|m| b.starts_with(m));
-    if !marked && mupdf_takes_as_utf8(b) {
-        return String::from_utf8(b.to_vec()).ok();
+    if !marked {
+        if mupdf_takes_as_utf8(b) {
+            return String::from_utf8(b.to_vec()).ok();
+        }
+        // PDFDocEncoding has nothing at 0x7F and 0xAD: MuPDF reads them as NUL and the C string ends there
+        if b.iter().any(|&c| c == 0x7F || c == 0xAD) {
+            return None;
+        }
     }
     let text = crate::outline::decode_text(b);
-    (!text.contains('\u{FFFD}')).then_some(text)
+    // U+001B starts a language escape, which MuPDF skips
+    (!text.contains(['\u{FFFD}', '\u{1B}'])).then_some(text)
 }
 
 /// An explicit destination array's page must be one of the document's pages. `pages`: when an integer
