@@ -148,6 +148,24 @@ describe("replacing through the store", () => {
     expect(vi.mocked(replaceText).mock.calls[2][2].from).toBeUndefined();
   });
 
+  it("says so when an edit lost the place of a stopped run whose replacement holds the find text", async () => {
+    const stopped = result({ replaced: 2000, stopped: "Stopped after 2000 replacements.", resume: { page: 2, upto: null }, inserted: 1 });
+    vi.mocked(replaceText).mockResolvedValue({ kind: "ok", value: stopped });
+    await useReplace.getState().all(1);
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 2 } } } as never);
+    vi.mocked(replaceText).mockResolvedValue({ kind: "ok", value: result({ replaced: 3 }) });
+    await useReplace.getState().all(1);
+    expect(vi.mocked(replaceText).mock.calls[1][2].from).toBeUndefined();
+    expect(useReplace.getState().report[1]?.notes[0]).toMatch(/edited since the last run/);
+    // Not said when the replacement can't grow (the rerun is harmless) ...
+    vi.mocked(replaceText).mockResolvedValue({ kind: "ok", value: { ...stopped, inserted: 0 } });
+    await useReplace.getState().all(1);
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 3 } } } as never);
+    vi.mocked(replaceText).mockResolvedValue({ kind: "ok", value: result({ replaced: 3 }) });
+    await useReplace.getState().all(1);
+    expect(useReplace.getState().report[1]?.notes).toEqual([]);
+  });
+
   it("replaces every match without a position and searches by the engine's own re-run", async () => {
     vi.mocked(replaceText).mockResolvedValue({ kind: "ok", value: result({ replaced: 4, skippedCount: 1, skipped: [{ page: 0, text: "cat", reason: "skipped: x" }] }) });
     await useReplace.getState().all(1);

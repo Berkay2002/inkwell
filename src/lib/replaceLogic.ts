@@ -18,6 +18,8 @@ export interface ReplaceReport {
   rev?: number;
   /** Where Replace all goes on from when the run stopped early. */
   resume?: ReplaceFrom | null;
+  /** The replacement holds the find text, so a second run would grow what the first one wrote. */
+  grows?: boolean;
   /** The request it answers (find, replacement, options): a go-on is only for the same one. */
   ask?: string;
 }
@@ -36,6 +38,7 @@ export function reportOf(r: ReplaceResult): ReplaceReport {
     more: Math.max(0, r.skippedCount - listed.length),
     notes,
     resume: r.resume,
+    grows: r.inserted > 0,
   };
 }
 

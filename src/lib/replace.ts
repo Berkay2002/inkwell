@@ -63,13 +63,18 @@ export const useReplace = create<ReplaceStore>((set, get) => {
       // Replace all after a run that stopped early goes on from there: a replacement that holds the find text
       // would otherwise be replaced again on the pages already done.
       const ask = JSON.stringify([find, text, opts]);
-      const from = hit ? undefined : resumeOf(get().report[doc], cur.rev, ask);
+      const prev = get().report[doc];
+      const from = hit ? undefined : resumeOf(prev, cur.rev, ask);
+      // A stopped run of this request whose place is lost to an edit: starting over may grow what it wrote.
+      const lost = !hit && !from && !!prev?.resume && !!prev.grows && prev.ask === ask;
       const r = await replaceText(doc, rev, { find, with: text, opts, at, from });
       if (r.kind === "stale") {
         say(doc, { summary: "The document changed. Searching again.", lines: [], more: 0, notes: [] });
         useStore.getState().runSearch(doc, find);
       } else if (r.kind === "ok") {
-        say(doc, reportOf(r.value), ask);
+        const report = reportOf(r.value);
+        if (lost) report.notes.unshift("The document was edited since the last run, so Replace all started from the beginning and may have replaced text it had already replaced.");
+        say(doc, report, ask);
         // Replace one goes on to the next match, past any the replacement itself holds.
         if (hit && r.value.replaced > 0) {
           const [x, y] = hit.rects[0];
