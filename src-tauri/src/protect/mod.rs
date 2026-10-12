@@ -441,16 +441,28 @@ impl SecurityInfo {
     }
 }
 
+/// `pw` as SASLprep's mapping step and NFKC make it, when that differs from what was typed: what other
+/// writers (Acrobat, qpdf) hash for a password with a non-ASCII space or an invisible mark in it. The
+/// commonly-mapped-to-nothing characters (RFC 3454 B.1: soft hyphen, ZWJ, ZWNJ, variation selectors ...)
+/// are dropped first, then the non-ASCII spaces (C.1.2) become U+0020, as RFC 4013 has it (U+200B is in
+/// both tables and goes). Callers try the password as typed first; this is the retry. Still not full
+/// SASLprep: no prohibited-character or bidi checks (MuPDF has none either).
+pub fn nfkc_form(pw: &str) -> Option<Zeroizing<String>> {
+    let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
+    let dropped = |c: char| {
+        matches!(c, '\u{AD}' | '\u{34F}' | '\u{1806}' | '\u{180B}'..='\u{180D}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}')
+    };
+    let space = |c: char| matches!(c, '\u{A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}');
+    let mapped: Zeroizing<String> =
+        Zeroizing::new(pw.chars().filter(|&c| !dropped(c)).map(|c| if space(c) { ' ' } else { c }).collect());
+    let form = Zeroizing::new(nfkc.normalize(&mapped).into_owned());
+    (*form != pw).then_some(form)
+}
+
 /// The security a document carries, from its `Encrypt` dictionary. `password`: what the document was
 /// opened with (`None`: it asked for none). This session is `unlocked` only when that password is the
 /// file's owner (permissions) password: a file with an owner password of its own keeps it for the
 /// security even when its P value allows everything.
-/// `pw` in NFKC, when that differs from what was typed: the form [`ProtectSpec::normalize`] writes.
-pub fn nfkc_form(pw: &str) -> Option<Zeroizing<String>> {
-    let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
-    (!nfkc.is_normalized(pw)).then(|| Zeroizing::new(nfkc.normalize(pw).into_owned()))
-}
-
 pub fn read_security(doc: &PdfDocument, password: Option<&str>) -> crate::engine::Result<SecurityInfo> {
     let Some(enc) = doc.trailer()?.get_dict("Encrypt")? else {
         return Ok(SecurityInfo::plain());
