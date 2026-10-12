@@ -102,8 +102,12 @@ export follows the file name (`.fdf`, `.json`, anything else XFDF); an import is
   signature locks apply as they would to a person. Reported and skipped (the summary lists the first few with the
   reason, never a failure of the whole import): a name that is not a field, a value the field cannot take (a choice that
   is not in the list, an on/off for a text field, a list for a text field), a read-only field, a field a signature
-  locks, and anything past 10 000 fields in one file. A script's alerts, links, submits and print requests during the
-  import are dropped, not acted on.
+  locks, a password text field (its value is never exported either: the export says how many were left out), a field
+  name over 1 MB, and anything past 10 000 fields in one file. The summary shows a skipped name by its first 60
+  characters. A script's alerts, links, submits and print requests during the import are dropped, not acted on.
+- **The document's own field scripts do run** on an import (keystroke, validate, calculate, format), as they do when a
+  person types: the same path, so an import cannot put a value in that typing it would refuse. This is deliberate. The
+  file's own `/JavaScript`, `/AA` and `/A` are never read.
 - **Never done with a file:** run `/JavaScript` or `/AA`, follow `/F` file references, load a DTD or entities, read
   more than 32 MB, 100 000 values or objects, 64 levels or 1 MB in one string.
 - **Certified documents** take the import when the certification allows form filling (`/P` 2 or 3): values go into

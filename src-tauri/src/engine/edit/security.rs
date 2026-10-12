@@ -62,6 +62,9 @@ impl Editor {
     /// Setting or removing password security makes the save a rewrite of every object: neither a certification nor
     /// a signature survives it.
     fn ensure_signatures_allow_security(&self) -> Result<()> {
+        // A signed file that was repaired on open: its signature cannot be told from the repaired copy, so the
+        // rewrite would go over the original as an unsigned-looking file.
+        self.refuse_if_repaired_signed()?;
         crate::outline::refuse_if_certified(&self.doc.doc, "Changing its password security")?;
         if crate::outline::signed(&self.doc.doc) {
             return Err(invalid(
