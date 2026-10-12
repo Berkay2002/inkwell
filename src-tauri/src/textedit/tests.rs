@@ -1302,3 +1302,19 @@ fn decorating_a_signed_document_is_saved_after_the_signature() {
     let (eng, id) = reopen(&path);
     assert!(runs_of(&eng, id)[0].underline);
 }
+
+#[test]
+fn a_tagged_group_that_is_not_ours_is_left_alone() {
+    let d = dir("deco-foreign-tag");
+    // Tagged like a decoration, but it holds text: not a rectangle of ours, so no edit removes it.
+    let content = "BT /F1 12 Tf 72 700 Td (Hello) Tj ET\n/Span <</IWDeco /U>> BDC 72 698 30 0.6 re f BT /F1 12 Tf 72 600 Td (Keep me) Tj ET EMC";
+    let (eng, id, _) = open(&d, &pdf(content, &[("F1", HELV)], &[]));
+    let hello = blocks(&eng, id, 0).unwrap().blocks.iter().find(|b| b.text == "Hello").unwrap().index;
+    let c = BlockChange { underline: Some(true), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, hello, &c, EditSource::User).unwrap();
+    assert!(text(&eng, id).contains("Keep me"), "{}", text(&eng, id));
+    let ops = live_ops(&eng, id);
+    assert!(ops.iter().any(|o| o.is("BDC") && matches!(o.operands.get(1), Some(content::Obj::Dict(_)))));
+    // Only the one underline we drew counts as ours (the foreign group is not read as a decoration).
+    assert_eq!(decorations(&ops).len(), 2, "the foreign group is still there, and one underline of ours");
+}

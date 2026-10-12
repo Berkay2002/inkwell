@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { TextAlign, TextBlock } from "../../lib/api";
 import { useImageEdit } from "../../lib/imageEdit";
-import { type EditSection, displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
+import { type Decor, type EditSection, SIGNED_TEXT, decorOn, displayFont, hexOf, isOffered, rgbOf, useTextEdit } from "../../lib/textEdit";
 import { type DocState } from "../../store";
 import { Icon } from "../Icons";
 import { BookmarksPanel } from "./BookmarksPanel";
@@ -19,6 +19,12 @@ const ALIGNS: { id: TextAlign; label: string; path: string }[] = [
   { id: "justify", label: "Justify", path: "M4 6h16M4 10h16M4 14h16M4 18h16" },
 ];
 const SPACINGS = [1, 1.15, 1.2, 1.5, 2];
+const DECORS: { id: Decor; label: string; title: string; glyph: React.ReactNode }[] = [
+  { id: "underline", label: "Underline", title: "Underline (Ctrl+U)", glyph: <u>U</u> },
+  { id: "strike", label: "Strikethrough", title: "Strikethrough", glyph: <s>S</s> },
+  { id: "super", label: "Superscript", title: "Superscript", glyph: <>x<sup>2</sup></> },
+  { id: "sub", label: "Subscript", title: "Subscript", glyph: <>x<sub>2</sub></> },
+];
 const SECTIONS: { id: EditSection; label: string }[] = [
   { id: "text", label: "Text" },
   { id: "links", label: "Links" },
@@ -33,6 +39,7 @@ export function EditPanel({ doc }: { doc: DocState }) {
   const section = useTextEdit((s) => s.section);
   const picture = useImageEdit((s) => s.docs[doc.id]?.selected != null);
   const block = d?.selected ? (d.pages[d.selected.page]?.blocks[d.selected.index] ?? null) : null;
+  const page = d?.selected ? d.pages[d.selected.page] : undefined;
   const id = doc.id;
   const here = d?.pages[doc.currentPage]?.blocks.filter(isOffered) ?? [];
 
@@ -95,7 +102,16 @@ export function EditPanel({ doc }: { doc: DocState }) {
                 </span>
               </p>
             )}
-            {block ? <Format key={`${d?.selected?.page}:${block.index}`} id={id} block={block} /> : <Hint empty={!d?.notice} />}
+            {block ? (
+              <Format key={`${d?.selected?.page}:${block.index}`} id={id} block={block} selection={d?.selection ?? null} locked={page?.locked ?? null} />
+            ) : (
+              <Hint empty={!d?.notice} />
+            )}
+            {block && (page?.locked || page?.signed) && (
+              <p className="dim te-hint" role="note">
+                {page.locked ?? SIGNED_TEXT}
+              </p>
+            )}
             {d?.notice && (
               <p className="te-note" role="status">
                 {d.notice}
@@ -146,7 +162,7 @@ function Hint({ empty }: { empty: boolean }) {
 /** Keeps focus where it is (the text being typed) when a control is pressed. */
 const keepFocus = { onMouseDown: (e: React.MouseEvent) => e.preventDefault() };
 
-function Format({ id, block }: { id: number; block: TextBlock }) {
+function Format({ id, block, selection, locked }: { id: number; block: TextBlock; selection: [number, number] | null; locked: string | null }) {
   const apply = (patch: Parameters<ReturnType<typeof te>["apply"]>[1]) => void te().apply(id, patch);
   const [size, setSize] = useState(String(round1(block.size)));
   useEffect(() => setSize(String(round1(block.size))), [block.size]);
@@ -199,6 +215,28 @@ function Format({ id, block }: { id: number; block: TextBlock }) {
           >
             <i>I</i>
           </button>
+        </span>
+      </div>
+      <div className="te-row">
+        <span className="te-label">Effects</span>
+        <span className="te-style">
+          {DECORS.map((e) => {
+            const on = decorOn(block, e.id, selection);
+            return (
+              <button
+                key={e.id}
+                className={on ? "te-tog on" : "te-tog"}
+                aria-pressed={on}
+                aria-label={e.label}
+                title={locked ?? e.title}
+                disabled={locked != null}
+                {...keepFocus}
+                onClick={() => void te().decorate(id, e.id)}
+              >
+                {e.glyph}
+              </button>
+            );
+          })}
         </span>
       </div>
       <div className="te-row">

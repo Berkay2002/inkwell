@@ -514,6 +514,19 @@ impl DecoMark {
     }
 }
 
+/// The `EMC` that closes the decoration `ops[at]` opens, when the group is exactly what [`deco_ops`]
+/// writes (a rectangle, its colour and its `q cm … Q`): a tagged group of anything else is not ours
+/// to read, skip or remove.
+fn deco_group(ops: &[Op], at: usize) -> Option<usize> {
+    deco_kind(ops.get(at)?)?;
+    let end = at + ops[at..].iter().position(|o| o.is("EMC"))?;
+    let body = &ops[at + 1..end];
+    let ours = body.len() <= 16
+        && body.iter().filter(|o| o.is("re")).count() == 1
+        && body.iter().all(|o| matches!(o.op.as_slice(), b"q" | b"Q" | b"cm" | b"re" | b"f" | b"g" | b"rg" | b"k" | b"cs" | b"sc" | b"scn"));
+    ours.then_some(end)
+}
+
 /// Whether a `BDC` opens one of our decorations (`/Span <</IWDeco /U|/S>>`): `Some(true)` for a strikeout.
 fn deco_kind(op: &Op) -> Option<bool> {
     if !op.is("BDC") || op.name(0) != Some(b"Span".as_slice()) {
@@ -641,7 +654,7 @@ fn interpret(
             b"BMC" => marked.push(false),
             b"BDC" => {
                 marked.push(op.name(0) == Some(b"OC") && layers.hidden(op.operands.get(1)));
-                if let Some(strike) = deco_kind(op) {
+                if let Some(strike) = deco_kind(op).filter(|_| deco_group(ops, i).is_some()) {
                     deco = Some((marked.len(), i, strike, None));
                 }
             }
@@ -1527,11 +1540,8 @@ fn edited_objects(ops: &[Op], drop: &HashSet<usize>) -> (HashSet<usize>, Vec<Wra
         let Some(et) = ops[i + 2..].iter().position(|o| o.is("ET") || o.is("BT")).map(|p| i + 2 + p) else { continue };
         // The object's own decorations (`BDC … EMC`) stand between its `ET` and its `Q`.
         let mut close = et + 1;
-        while ops.get(close).is_some_and(|o| deco_kind(o).is_some()) {
-            match ops[close..].iter().position(|o| o.is("EMC")) {
-                Some(p) => close += p + 1,
-                None => break,
-            }
+        while let Some(end) = deco_group(ops, close) {
+            close = end + 1;
         }
         if !ops[et].is("ET") || !ops.get(close).is_some_and(|o| o.is("Q")) {
             continue;
