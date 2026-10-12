@@ -2042,3 +2042,254 @@ fn a_page_listed_many_times_in_kids_is_scanned_once_and_direct_entries_are_charg
     };
     assert!(err.contains("too large to edit safely"), "{err}");
 }
+
+// ---- layout tools (layout.rs) -------------------------------------------------------------------
+
+/// Page 1 is rotated a quarter turn and cropped (the crop box does not start at the origin): 732 x 572 points as
+/// shown. Page 2 is small (200 x 100).
+fn rotated_cropped_form() -> Vec<u8> {
+    pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [20 30 592 762] /Rotate 90 /Resources << /Font << /Helv 3 0 R >> >> >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Resources << /Font << /Helv 3 0 R >> >> >>".to_string(),
+    ])
+}
+
+fn rotated_form(test: &str, fields: &[(&str, [f32; 4])]) -> (Arc<Engine>, DocId, String) {
+    let (eng, id, path) = open_bytes(test, rotated_cropped_form());
+    for (n, r) in fields {
+        add1(&eng, id, 0, nf(FieldKind::Text, n, *r));
+    }
+    (eng, id, path)
+}
+
+fn items_of(eng: &Engine, id: DocId, names: &[&str]) -> Vec<Item> {
+    names
+        .iter()
+        .map(|n| {
+            let f = field(eng, id, n);
+            (f.page, f.xref)
+        })
+        .collect()
+}
+
+fn rect_of_name(eng: &Engine, id: DocId, name: &str) -> [f32; 4] {
+    field(eng, id, name).rect
+}
+
+fn near(a: f32, b: f32) -> bool {
+    (a - b).abs() < 0.5
+}
+
+fn all_rects(eng: &Engine, id: DocId) -> Vec<(String, [f32; 4])> {
+    list_all(eng, id).unwrap().fields.into_iter().map(|f| (f.name, f.rect)).collect()
+}
+
+fn same_rects(a: &[(String, [f32; 4])], b: &[(String, [f32; 4])]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.0 == y.0 && (0..4).all(|i| near(x.1[i], y.1[i])))
+}
+
+const THREE: [(&str, [f32; 4]); 3] = [("A", [100.0, 100.0, 180.0, 120.0]), ("B", [300.0, 160.0, 340.0, 200.0]), ("C", [500.0, 300.0, 600.0, 330.0])];
+
+#[test]
+fn align_centre_distribute_and_match_size_work_in_page_space_each_one_undo_step() {
+    let (eng, id, path) = rotated_form("layout-geo", &THREE);
+    let ab = items_of(&eng, id, &["A", "B"]);
+    let abc = items_of(&eng, id, &["A", "B", "C"]);
+    let start = all_rects(&eng, id);
+
+    // The anchor is the last field picked.
+    let n = steps(&eng, id);
+    align_one(&eng, id, &abc, Edge::Left, EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), n + 1);
+    let c = rect_of_name(&eng, id, "C");
+    for name in ["A", "B"] {
+        let r = rect_of_name(&eng, id, name);
+        assert!(near(r[0], c[0]), "{name}: left edge {r:?} vs anchor {c:?}");
+    }
+    assert!(near(rect_of_name(&eng, id, "A")[2] - rect_of_name(&eng, id, "A")[0], 80.0), "the width is kept");
+    assert!(near(c[0], 500.0) && near(c[1], 300.0), "the anchor stays: {c:?}");
+    eng.undo(id).unwrap();
+    assert!(same_rects(&all_rects(&eng, id), &start), "undo puts every field back exactly");
+    eng.redo(id).unwrap();
+
+    // Another anchor, another result (B last): right edges.
+    let bac = items_of(&eng, id, &["C", "A", "B"]);
+    align_one(&eng, id, &bac, Edge::Right, EditSource::User).unwrap();
+    let b = rect_of_name(&eng, id, "B");
+    assert!(near(rect_of_name(&eng, id, "A")[2], b[2]) && near(rect_of_name(&eng, id, "C")[2], b[2]));
+    // Top, bottom and the two centre lines.
+    align_one(&eng, id, &abc, Edge::Top, EditSource::User).unwrap();
+    assert!(near(rect_of_name(&eng, id, "A")[1], rect_of_name(&eng, id, "C")[1]));
+    align_one(&eng, id, &abc, Edge::Bottom, EditSource::User).unwrap();
+    assert!(near(rect_of_name(&eng, id, "B")[3], rect_of_name(&eng, id, "C")[3]));
+    align_one(&eng, id, &abc, Edge::HCenter, EditSource::User).unwrap();
+    let mid = |n: &str| (rect_of_name(&eng, id, n)[0] + rect_of_name(&eng, id, n)[2]) / 2.0;
+    assert!(near(mid("A"), mid("C")) && near(mid("B"), mid("C")));
+    align_one(&eng, id, &abc, Edge::VCenter, EditSource::User).unwrap();
+    let midy = |n: &str| (rect_of_name(&eng, id, n)[1] + rect_of_name(&eng, id, n)[3]) / 2.0;
+    assert!(near(midy("A"), midy("C")) && near(midy("B"), midy("C")));
+
+    // Aligned already: not a step.
+    let n = steps(&eng, id);
+    align_one(&eng, id, &abc, Edge::VCenter, EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), n);
+    assert!(align_one(&eng, id, &abc[..1], Edge::Left, EditSource::User).unwrap_err().to_string().contains("at least 2"));
+
+    // Same size as the anchor, then centred on the page (732 x 572).
+    match_size_one(&eng, id, &abc, Dim::Both, EditSource::User).unwrap();
+    for name in ["A", "B"] {
+        let (r, c) = (rect_of_name(&eng, id, name), rect_of_name(&eng, id, "C"));
+        assert!(near(r[2] - r[0], c[2] - c[0]) && near(r[3] - r[1], c[3] - c[1]), "{name}: {r:?} vs {c:?}");
+    }
+    center_one(&eng, id, &abc, Axis::Both, EditSource::User).unwrap();
+    let rs: Vec<[f32; 4]> = ["A", "B", "C"].iter().map(|n| rect_of_name(&eng, id, n)).collect();
+    let (x0, x1) = (rs.iter().map(|r| r[0]).fold(f32::MAX, f32::min), rs.iter().map(|r| r[2]).fold(f32::MIN, f32::max));
+    let (y0, y1) = (rs.iter().map(|r| r[1]).fold(f32::MAX, f32::min), rs.iter().map(|r| r[3]).fold(f32::MIN, f32::max));
+    let b = eng.read_custom(id, |d| { let b = d.load_pdf_page(0)?.bounds()?; Ok([b.x0, b.y0, b.x1, b.y1]) }).unwrap();
+    assert!(near((x0 + x1) / 2.0, (b[0] + b[2]) / 2.0) && near((y0 + y1) / 2.0, (b[1] + b[3]) / 2.0), "centred in {b:?}: {x0} {x1} {y0} {y1}");
+    assert!(near(b[2] - b[0], 732.0) && near(b[3] - b[1], 572.0), "the page as shown: {b:?}");
+
+    // A nudge moves the group and stops at the page edge.
+    let before = rect_of_name(&eng, id, "A");
+    nudge_one(&eng, id, &ab, 5.0, -3.0, EditSource::User).unwrap();
+    let after = rect_of_name(&eng, id, "A");
+    assert!(near(after[0], before[0] + 5.0) && near(after[1], before[1] - 3.0), "{before:?} {after:?}");
+    nudge_one(&eng, id, &abc, 100_000.0 / 20.0, 0.0, EditSource::User).unwrap();
+    let r = rect_of_name(&eng, id, "A");
+    assert!(r[2] <= b[2] + 0.5, "kept on the page: {r:?}");
+    let far = ["A", "B", "C"].iter().map(|n| rect_of_name(&eng, id, n)[2]).fold(f32::MIN, f32::max);
+    assert!(near(far, b[2]), "the group reached the edge: {far}");
+
+    // Saved, reopened with a fresh MuPDF: the same rectangles, and the raw /Rect is not the page-space one.
+    let now = all_rects(&eng, id);
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert!(same_rects(&all_rects(&eng2, id2), &now));
+    let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+    let page = doc.load_pdf_page(0).unwrap();
+    let raw: Vec<Vec<f32>> = page.widgets().map(|w| nums(&w.annotation().object().get_dict("Rect").unwrap().unwrap())).collect();
+    assert_eq!(raw.len(), 3);
+    for (r, (_, shown)) in raw.iter().zip(&now) {
+        assert!(r.iter().all(|v| v.is_finite()));
+        assert!((r[2] - r[0] - (shown[3] - shown[1])).abs() < 0.5, "a quarter turn swaps width and height: {r:?} vs {shown:?}");
+    }
+}
+
+#[test]
+fn distribute_needs_three_fields_and_makes_the_gaps_equal() {
+    let (eng, id, _) = rotated_form(
+        "layout-distribute",
+        &[("A", [100.0, 100.0, 140.0, 120.0]), ("B", [160.0, 100.0, 260.0, 120.0]), ("C", [300.0, 100.0, 330.0, 120.0]), ("D", [500.0, 100.0, 560.0, 120.0])],
+    );
+    let two = items_of(&eng, id, &["A", "D"]);
+    let n = steps(&eng, id);
+    assert!(distribute_one(&eng, id, &two, Axis::Horizontal, EditSource::User).unwrap_err().to_string().contains("at least 3"));
+    assert_eq!(steps(&eng, id), n);
+    let all = items_of(&eng, id, &["D", "B", "A", "C"]);
+    distribute_one(&eng, id, &all, Axis::Horizontal, EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), n + 1);
+    let r = |n: &str| rect_of_name(&eng, id, n);
+    assert!(near(r("A")[0], 100.0) && near(r("D")[2], 560.0), "the outer two stay");
+    let gaps = [r("B")[0] - r("A")[2], r("C")[0] - r("B")[2], r("D")[0] - r("C")[2]];
+    assert!(gaps.iter().all(|g| near(*g, gaps[0])), "{gaps:?}");
+    assert!(distribute_one(&eng, id, &all, Axis::Both, EditSource::User).is_err());
+}
+
+#[test]
+fn layout_tools_refuse_a_certified_document_a_covered_field_and_a_signed_signature() {
+    for (name, catalog_p, field_p) in [
+        ("catalog-p1", Some(1), None),
+        ("catalog-p2", Some(2), None),
+        ("catalog-p3", Some(3), None),
+        ("signature-p2", None, Some(2)),
+        ("signature-p3", None, Some(3)),
+    ] {
+        let (eng, id, _) = script_form(&format!("layout-certified-{name}"), &["A", "B", "C"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+        let abc = items_of(&eng, id, &["A", "B", "C"]);
+        let a = items_of(&eng, id, &["A"]);
+        if let Some(p) = field_p {
+            sign(&eng, id, None, Some(p));
+        }
+        if let Some(p) = catalog_p {
+            certify_catalog(&eng, id, p);
+        }
+        let before = (steps(&eng, id), all_rects(&eng, id));
+        let src = || EditSource::User;
+        // The first is a no-op op on a fresh document (everything is left aligned already): still refused.
+        let refused = [
+            ("align", align_one(&eng, id, &abc, Edge::Left, src()).map(|_| ())),
+            ("align noop", align_one(&eng, id, &abc, Edge::Left, src()).map(|_| ())),
+            ("centre", center_one(&eng, id, &abc, Axis::Both, src()).map(|_| ())),
+            ("distribute", distribute_one(&eng, id, &abc, Axis::Vertical, src()).map(|_| ())),
+            ("match size", match_size_one(&eng, id, &abc, Dim::Both, src()).map(|_| ())),
+            ("nudge", nudge_one(&eng, id, &abc, 1.0, 1.0, src()).map(|_| ())),
+            ("nudge zero", nudge_one(&eng, id, &abc, 0.0, 0.0, src()).map(|_| ())),
+            ("duplicate", duplicate_one(&eng, id, a[0], &[1], src()).map(|_| ())),
+            ("copies", copies_one(&eng, id, a[0], 2, 2, (4.0, 4.0), src()).map(|_| ())),
+            ("rename", rename_one(&eng, id, a[0], "Renamed", false, src()).map(|_| ())),
+            ("rename same", rename_one(&eng, id, a[0], "A", false, src()).map(|_| ())),
+        ];
+        for (what, r) in refused {
+            let e = r.expect_err(&format!("{name}: {what} must be refused")).to_string();
+            assert!(e.contains("certified"), "{name}: {what}: {e}");
+        }
+        assert_eq!(before, (steps(&eng, id), all_rects(&eng, id)), "{name}: nothing changed and no step was made");
+    }
+}
+
+#[test]
+fn a_field_a_signature_covers_and_a_signed_signature_field_are_not_laid_out() {
+    let (eng, id, _) = script_form("layout-locked", &["Locked", "Free", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    let all = items_of(&eng, id, &["Locked", "Free", "Other"]);
+    // Unsigned: a signature field is laid out like any other.
+    let sig = items_of(&eng, id, &["Sig"]);
+    nudge_one(&eng, id, &sig, 4.0, 0.0, EditSource::User).unwrap();
+    sign(&eng, id, Some(("Include", &["Locked"])), None);
+    let before = (steps(&eng, id), all_rects(&eng, id));
+    let e = align_one(&eng, id, &all, Edge::Left, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("locked by a signature") && e.contains("Locked"), "{e}");
+    assert!(rename_one(&eng, id, all[0], "L2", false, EditSource::User).unwrap_err().to_string().contains("locked by a signature"));
+    let e = nudge_one(&eng, id, &sig, 4.0, 0.0, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("signed"), "{e}");
+    assert_eq!(before, (steps(&eng, id), all_rects(&eng, id)));
+    // The fields it does not cover still move.
+    align_one(&eng, id, &all[1..], Edge::Right, EditSource::User).unwrap();
+}
+
+#[test]
+fn layout_in_a_signed_document_is_saved_after_the_signed_bytes() {
+    let (eng, id, path) = script_form("layout-signed", &["A", "B"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    sign(&eng, id, None, None);
+    eng.save(id, None).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert!(eng2.read_custom(id2, |d| Ok(crate::outline::signed(d))).unwrap());
+    let ab = items_of(&eng2, id2, &["B", "A"]);
+    align_one(&eng2, id2, &ab, Edge::Right, EditSource::User).unwrap();
+    center_one(&eng2, id2, &ab, Axis::Horizontal, EditSource::User).unwrap();
+    eng2.save(id2, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the file was rewritten: the signature would no longer verify");
+}
+
+#[test]
+fn layout_tools_hold_their_caps() {
+    let (eng, id, _) = script_form("layout-caps", &["A", "B"]);
+    let a = items_of(&eng, id, &["A"])[0];
+    let n = steps(&eng, id);
+    let many: Vec<Item> = std::iter::repeat(a).take(1001).collect();
+    let e = align_one(&eng, id, &many, Edge::Left, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("at most 1000"), "{e}");
+    let e = copies_one(&eng, id, a, 20, 26, (1.0, 1.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("at most 500"), "{e}");
+    let pages: Vec<u32> = (1..=2001).collect();
+    let e = duplicate_one(&eng, id, a, &pages, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("at most 2000"), "{e}");
+    assert_eq!(steps(&eng, id), n, "no step");
+}

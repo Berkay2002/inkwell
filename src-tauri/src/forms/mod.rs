@@ -23,6 +23,7 @@ use std::collections::HashMap;
 pub mod af;
 pub mod app;
 mod author;
+mod layout;
 pub mod detect;
 pub mod doc_js;
 pub mod js;
@@ -31,6 +32,7 @@ mod scripts;
 mod tests;
 
 pub use author::*;
+pub use layout::*;
 pub use scripts::{Report, Stepped};
 use scripts::Rt;
 

@@ -100,7 +100,7 @@ pub(crate) fn ensure_dict(doc: &PdfDocument, parent: &mut PdfObject, key: &str) 
 }
 
 /// The AcroForm dictionary, created with the default appearance and resources if missing.
-fn acro_form(doc: &mut PdfDocument) -> Result<PdfObject> {
+pub(crate) fn acro_form(doc: &mut PdfDocument) -> Result<PdfObject> {
     let mut catalog = doc.catalog()?;
     let mut form = ensure_dict(doc, &mut catalog, "AcroForm")?;
     if get(&form, "Fields").is_none() {
@@ -129,7 +129,7 @@ fn acro_form(doc: &mut PdfDocument) -> Result<PdfObject> {
 
 /// Gives an `/AP /N` a stand-in stream under the on-state's name so MuPDF keeps that name when
 /// it draws the real appearance.
-fn seed_on_state(doc: &mut PdfDocument, w: &mut PdfObject, on: &str) -> Result<()> {
+pub(crate) fn seed_on_state(doc: &mut PdfDocument, w: &mut PdfObject, on: &str) -> Result<()> {
     let mut form = doc.new_dict()?;
     put_name(&mut form, "Type", "XObject")?;
     put_name(&mut form, "Subtype", "Form")?;
@@ -153,7 +153,7 @@ fn page_inverse(doc: &PdfDocument, page: u32) -> Result<Matrix> {
 }
 
 /// Normalised user-space `/Rect` for a page-space rectangle.
-fn user_rect(doc: &PdfDocument, page: u32, r: [f32; 4]) -> Result<Rect> {
+pub(crate) fn user_rect(doc: &PdfDocument, page: u32, r: [f32; 4]) -> Result<Rect> {
     let r = rect_of(r);
     if r.x1 - r.x0 < 2.0 || r.y1 - r.y0 < 2.0 {
         return Err(bad("a field needs a rectangle of at least 2 x 2 points"));
@@ -172,7 +172,7 @@ fn default_size(kind: FieldKind, r: &Rect) -> f32 {
 /// Authoring (adding, moving, deleting or changing a field, and the tab and calculation order) changes the structure
 /// of the form, which no certification allows: `/P` names what may change after it, and this is none of those. A
 /// document whose certification cannot be read is refused too.
-fn refuse_if_certified(doc: &PdfDocument) -> Result<()> {
+pub(crate) fn refuse_if_certified(doc: &PdfDocument) -> Result<()> {
     if crate::outline::certified(doc).map_or(true, |c| c.is_some()) {
         return Err(bad("This document is certified, and certification does not allow changes to its form fields. Inkwell leaves them as they are."));
     }
@@ -390,7 +390,7 @@ pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
     Ok(())
 }
 
-fn remove_ref(a: &mut PdfObject, num: i32) -> Result<()> {
+pub(crate) fn remove_ref(a: &mut PdfObject, num: i32) -> Result<()> {
     let n = a.len()? as i32;
     for i in (0..n).rev() {
         if a.get_array(i)?.is_some_and(|v| v.is_indirect().unwrap_or(false) && v.as_indirect().ok() == Some(num)) {
@@ -683,7 +683,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
 }
 
 /// `AFSimple_Calculate` lists that name the field `old` (or a field below it) name `new` instead.
-fn follow_rename(doc: &PdfDocument, entries: &[Entry], old: &str, new: &str) -> Result<()> {
+pub(crate) fn follow_rename(doc: &PdfDocument, entries: &[Entry], old: &str, new: &str) -> Result<()> {
     let below = format!("{old}.");
     let mut seen: Vec<i32> = Vec::new();
     for e in entries {
@@ -881,7 +881,7 @@ pub fn detect_fields(doc: &PdfDocument, page: u32) -> Result<Vec<Detected>> {
 
 // ---- engine wiring: one undo step each ---------------------------------------------------------
 
-fn noun(k: FieldKind) -> &'static str {
+pub(crate) fn noun(k: FieldKind) -> &'static str {
     match k {
         FieldKind::Text => "text field",
         FieldKind::Checkbox => "check box",
