@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { pickSave, pickSource } from "../../lib/api";
 import {
-  CERTIFY_LABEL, type Identity, LOCKED_REASON, type SignatureInfo, SOURCE_LABEL, STATUS, changeNote, idKey, locked, otherWarnings, outcome, pdfDate, picture, statusWord,
+  CERTIFY_LABEL, type Identity, type SignatureInfo, SOURCE_LABEL, STATUS, canSign, changeNote, idKey, locked, otherWarnings, outcome, pdfDate, picture, statusWord,
   signApi, signed, useSign,
 } from "../../lib/sign";
 import { type DocState, useStore } from "../../store";
@@ -48,7 +48,7 @@ function Sheet({ doc }: { doc: DocState }) {
   // Closing the sheet drops the box on the page.
   useEffect(() => () => sg().setDraft(doc.id, null), [doc.id]);
 
-  const isLocked = locked(d.sigs);
+  const isLocked = locked(d);
   const already = signed(d.sigs).length > 0;
   const pic = picture(s);
   const sign = async () => {
@@ -66,7 +66,7 @@ function Sheet({ doc }: { doc: DocState }) {
       <Head title="Digital signature" />
       <div className="sg-body">
         {isLocked ? (
-          <p className="sg-callout">{LOCKED_REASON}</p>
+          <p className="sg-callout">{isLocked}</p>
         ) : !d.draft ? (
           <p className="sg-callout">
             <Icon name="nib" size={15} /> Drag a box on the page where the signature goes, or click an empty signature field.
@@ -143,7 +143,7 @@ function Sheet({ doc }: { doc: DocState }) {
             </button>
           )}
           <span className="grow" />
-          <button className="cm-btn primary sg-sign" disabled={!d.draft || !who || !!who.unusable || isLocked || s.signing} onClick={() => void sign()}>
+          <button className="cm-btn primary sg-sign" disabled={!d.draft || !who || !!who.unusable || !!isLocked || s.signing} onClick={() => void sign()}>
             {s.signing ? "Signing…" : "Sign"}
           </button>
         </div>
@@ -247,6 +247,7 @@ const TONE_ICON: Record<string, IconName> = { valid: "check", unknown: "question
 
 function List({ doc }: { doc: DocState }) {
   const sigs = useSign((s) => s.docs[doc.id]?.sigs) ?? [];
+  const error = useSign((s) => s.docs[doc.id]?.sigsError ?? null);
   const focus = useSign((s) => s.docs[doc.id]?.focus ?? null);
   const done = signed(sigs);
   const empty = sigs.filter((x) => x.status === "unsigned");
@@ -255,7 +256,7 @@ function List({ doc }: { doc: DocState }) {
     <>
       <Head title="Signatures" count={done.length} />
       <div className="sg-body sg-list">
-        {done.length === 0 && <p className="dim">This document has no signatures.</p>}
+        {error ? <p className="sg-callout">The signatures could not be checked: {error}.</p> : done.length === 0 && <p className="dim">This document has no signatures.</p>}
         {done.map((x) => (
           <Card key={x.field} x={x} focus={x.field === focus?.field ? focus.n : 0} onOpen={() => go(x)} />
         ))}
@@ -266,7 +267,7 @@ function List({ doc }: { doc: DocState }) {
               {x.field} <span className="dim">· page {x.page + 1}</span>
             </span>
             <span className="grow" />
-            {!locked(sigs) && (
+            {canSign(x) && (
               <button
                 className="sg-link"
                 onClick={() => {
@@ -277,6 +278,7 @@ function List({ doc }: { doc: DocState }) {
                 Sign
               </button>
             )}
+            {x.refused && <p className="dim small sg-why">{x.refused}</p>}
           </div>
         ))}
         <p className="dim small sg-foot">Trust is checked against Windows' trusted certificates on this PC, without going online.</p>

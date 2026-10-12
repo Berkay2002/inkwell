@@ -6,7 +6,7 @@ import {
   fontSize, groupDelta, groupDragEnd, groupPicks, isCalculated, marqueeHits, move, normBox, onPage, resetTargets, resize, samePick,
 } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
-import { type SignatureInfo, clickSigField, sigFieldView, useSign } from "../../lib/sign";
+import { clickSigField, sigFieldView, useSign } from "../../lib/sign";
 import { useStore } from "../../store";
 import { ContextMenu } from "../PageMenu";
 import { layoutMenu, useCertified } from "./layoutTools";
@@ -23,7 +23,6 @@ interface Props {
 
 const EMPTY: Field[] = [];
 const NO_PICKS: Pick[] = [];
-const EMPTY_SIGS: SignatureInfo[] = [];
 const fm = () => useForms.getState();
 /** Ctrl-click is the context menu on a Mac: there only Cmd and Shift add to the picked fields. */
 const MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -244,15 +243,14 @@ const ALIGN = ["left", "center", "right"] as const;
 
 /** An empty signature field starts signing into it, a signed one shows its signature; the sheet still asks before anything is signed. */
 function SigField({ docId, f, cls, css, label }: { docId: number; f: Field; cls: string; css: React.CSSProperties; label: string }) {
-  const list = useSign((s) => s.docs[docId]?.sigs) ?? EMPTY_SIGS;
-  const sig = list.find((x) => x.field === f.name);
-  const v = sigFieldView(label, sig, list, f.readOnly);
+  const sig = useSign((s) => s.docs[docId]?.sigs)?.find((x) => x.field === f.name);
+  const v = sigFieldView(label, sig);
   return (
     <div className="fm-cell" style={css} data-fm-xref={f.xref}>
       {v.state === "unknown" ? (
         <div className={cls} role="img" aria-label={v.title} title={v.title} />
       ) : (
-        <button className={cls} aria-label={v.title} title={v.title} aria-disabled={v.state === "locked" || undefined} onClick={() => clickSigField(docId, label, sig, list, f.readOnly)} />
+        <button className={cls} aria-label={v.title} title={v.title} aria-disabled={v.state === "locked" || undefined} onClick={() => clickSigField(docId, label, sig)} />
       )}
     </div>
   );

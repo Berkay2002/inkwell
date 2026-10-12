@@ -116,7 +116,7 @@ export function SignBanner({ doc }: { doc: DocState }) {
   useEffect(() => {
     if ((d?.sigsRev ?? -1) !== doc.rev) void sg().refreshSigs(doc.id, doc.rev);
   }, [doc.id, doc.rev, d?.sigsRev]);
-  const b = d ? banner(d.sigs) : null;
+  const b = d ? banner(d.sigs, d.sigsError) : null;
   if (!b || d?.bannerHidden) return null;
   const icon: IconName = b.tone === "valid" ? "check" : b.tone === "invalid" ? "close" : "question";
   return (
