@@ -216,6 +216,14 @@ describe("signature form fields on the page", () => {
     expect(sigFieldView("Landlord", cert, [cert]).state).toBe("signed");
   });
 
+  it("a read-only empty field is not actionable and says so; a signed one still opens its details", () => {
+    expect(sigFieldView("Tenant", empty, [empty], true)).toEqual({ state: "locked", title: "Tenant: read-only field" });
+    clickSigField(7, "Tenant", empty, [empty], true);
+    expect(s().get(7).draft).toBeNull();
+    expect(s().rail).toBeNull();
+    expect(sigFieldView("Landlord", done, [done], true).state).toBe("signed");
+  });
+
   it("an empty field click requests the sign flow with that field as the target, and signs nothing", () => {
     clickSigField(7, "Tenant", empty, [empty]);
     expect(s().get(7).draft).toEqual({ page: 1, rect: [10, 20, 110, 60], field: "Tenant" });

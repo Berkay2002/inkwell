@@ -246,13 +246,13 @@ const ALIGN = ["left", "center", "right"] as const;
 function SigField({ docId, f, cls, css, label }: { docId: number; f: Field; cls: string; css: React.CSSProperties; label: string }) {
   const list = useSign((s) => s.docs[docId]?.sigs) ?? EMPTY_SIGS;
   const sig = list.find((x) => x.field === f.name);
-  const v = sigFieldView(label, sig, list);
+  const v = sigFieldView(label, sig, list, f.readOnly);
   return (
     <div className="fm-cell" style={css} data-fm-xref={f.xref}>
       {v.state === "unknown" ? (
         <div className={cls} role="img" aria-label={v.title} title={v.title} />
       ) : (
-        <button className={cls} aria-label={v.title} title={v.title} aria-disabled={v.state === "locked" || undefined} onClick={() => clickSigField(docId, label, sig, list)} />
+        <button className={cls} aria-label={v.title} title={v.title} aria-disabled={v.state === "locked" || undefined} onClick={() => clickSigField(docId, label, sig, list, f.readOnly)} />
       )}
     </div>
   );

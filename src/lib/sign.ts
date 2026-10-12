@@ -236,10 +236,11 @@ export interface SigFieldView {
   title: string;
 }
 
-export function sigFieldView(label: string, sig: SignatureInfo | undefined, list: SignatureInfo[]): SigFieldView {
+export function sigFieldView(label: string, sig: SignatureInfo | undefined, list: SignatureInfo[], readOnly = false): SigFieldView {
   if (!sig) return { state: "unknown", title: label };
   if (sig.status !== "unsigned") return { state: "signed", title: `${label}: signed${sig.signer ? ` by ${sig.signer}` : ""}, click for details` };
   if (locked(list)) return { state: "locked", title: `${label}: ${LOCKED_REASON}` };
+  if (readOnly) return { state: "locked", title: `${label}: read-only field` };
   return { state: "sign", title: `${label}: click to sign` };
 }
 
@@ -504,9 +505,9 @@ export const useSign = create<SignStore>((set, get) => {
 });
 
 /** A click on a signature form field: starts signing into an empty one, shows a signed one, does nothing on a refused one. */
-export function clickSigField(doc: number, label: string, sig: SignatureInfo | undefined, list: SignatureInfo[]) {
+export function clickSigField(doc: number, label: string, sig: SignatureInfo | undefined, list: SignatureInfo[], readOnly = false) {
   const st = useSign.getState();
-  const { state } = sigFieldView(label, sig, list);
+  const { state } = sigFieldView(label, sig, list, readOnly);
   // The signature list's name and box are sent, not the form's: the engine looks the field up by them.
   if (sig && state === "sign") st.signField(doc, sig);
   else if (sig && state === "signed") st.showSignature(doc, sig.field);
