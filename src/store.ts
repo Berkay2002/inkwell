@@ -6,7 +6,7 @@ import { useFind } from "./lib/findStore";
 import { useMedia } from "./lib/media";
 import { PAGE_DARK_KEY, type PageDark, parsePageDark } from "./lib/pageDark";
 import { keyOf } from "./lib/recent";
-import { type Hit, hitY, mergeHits, pickCurrent } from "./lib/searchLogic";
+import { type Hit, hitY, mergeHits, pickAfter, pickCurrent } from "./lib/searchLogic";
 import { dropCached } from "./lib/tiles";
 import { useToolPrefs } from "./lib/toolPrefs";
 import { useRecents } from "./recents";
@@ -113,7 +113,8 @@ interface Store {
   setPageDark: (p: PageDark) => void;
   setUi: (p: Partial<Pick<Store, "paletteOpen" | "searchOpen" | "error">>) => void;
   /** Searches document `id`; with `focus` the hit at that spot (a page and y) is the current one. */
-  runSearch: (id: number, query: string, focus?: { page: number; y: number }) => void;
+  /** `focus`: start on the hit nearest that page and y, or, with `x`, on the one after it (`skip` further). */
+  runSearch: (id: number, query: string, focus?: { page: number; y: number; x?: number; skip?: number }) => void;
   stepHit: (id: number, dir: 1 | -1) => void;
   /** Makes hit `index` the current one and scrolls to it. */
   selectHit: (id: number, index: number) => void;
@@ -373,8 +374,10 @@ export const useStore = create<Store>((set, get) => {
         }
         if (current === -1 && hits.length > 0) {
           // With a focus the start waits for the page that has it (hits stream in page by page).
-          const at = pickCurrent(hits, cur.currentPage, focused ? undefined : focus);
-          const onFocus = !focus || focused || hits[at]?.page === focus.page;
+          // After a replacement the start is the next hit in reading order: that waits for every page.
+          const after = focus?.x != null && !focused;
+          const at = after ? pickAfter(hits, { page: focus.page, y: focus.y, x: focus.x ?? 0 }, focus.skip) : pickCurrent(hits, cur.currentPage, focused ? undefined : focus);
+          const onFocus = !focus || focused || (!after && hits[at]?.page === focus.page);
           if (onFocus || cur.search.done) {
             current = at;
             focused = true;

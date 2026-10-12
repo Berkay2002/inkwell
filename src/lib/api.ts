@@ -626,6 +626,37 @@ export const textEdit = (doc: number, rev: number, page: number, index: number, 
   invoke<TextEdited>("text_edit", { doc, rev, page, index, change });
 export const textAdd = (doc: number, rev: number, page: number, newText: NewTextBox) =>
   invoke<EditState>("text_add", { doc, rev, page, new: newText });
+/** One match Find & Replace left as it was. `reason` starts with "skipped: ". */
+export interface ReplaceSkipped {
+  page: number;
+  text: string;
+  reason: string;
+}
+
+export interface ReplaceRequest {
+  find: string;
+  with: string;
+  /** Case and whole words count; comments, fields and bookmarks are never replaced. */
+  opts: FindOpts;
+  /** Replace only the match whose first rectangle this is; unset replaces every match. */
+  at?: { page: number; rect: [number, number, number, number] };
+}
+
+export interface ReplaceResult {
+  state: EditState;
+  replaced: number;
+  /** The first of the skipped matches (`skippedCount` counts all). */
+  skipped: ReplaceSkipped[];
+  skippedCount: number;
+  /** Set when the run ended early (its cap or its time limit). */
+  stopped: string | null;
+  fallbacks: TextFallback[];
+  /** How often the find text occurs in the replacement itself. */
+  inserted: number;
+}
+
+/** Replace in the text blocks (one undo step); `rev` is the generation the matches were listed at. */
+export const textReplace = (doc: number, rev: number, req: ReplaceRequest) => invoke<ReplaceResult>("text_replace", { doc, rev, req });
 /** `to`: a save token (Save as). */
 export const saveDocument = (doc: number, to?: string) => invoke<EditState>("save_document", { doc, to: to ?? null });
 /** `out`: a save token. */

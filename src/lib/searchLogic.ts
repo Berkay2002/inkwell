@@ -168,6 +168,17 @@ export function pickCurrent(hits: Hit[], currentPage: number, focus?: { page: nu
   return i === -1 ? 0 : i;
 }
 
+/**
+ * The hit to land on after a replacement: the first at or after `at` (a page and the top left of the
+ * hit that was replaced), `skip` further on (the hits the replacement itself holds); wraps to the first.
+ */
+export function pickAfter(hits: Hit[], at: { page: number; y: number; x: number }, skip = 0): number {
+  if (hits.length === 0) return -1;
+  const probe = { page: at.page, rects: [[at.x, at.y, at.x, at.y]] } as unknown as Hit;
+  const first = hits.findIndex((h) => byPosition(h, probe) >= 0);
+  return ((first === -1 ? 0 : first) + skip) % hits.length;
+}
+
 /** Where the viewer scrolls to for a hit: a little above it. */
 export const hitY = (h: Hit) => Math.max(0, (h.rects[0]?.[1] ?? 0) - 80);
 

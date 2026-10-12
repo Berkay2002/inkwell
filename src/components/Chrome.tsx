@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useFind } from "../lib/findStore";
+import { useReplace } from "../lib/replace";
+import { whyNotReplace } from "../lib/replaceLogic";
+import { useTextEdit } from "../lib/textEdit";
 import { openDialog, prettyKeys, commands } from "../lib/commands";
 import { redo, requestClose, undo } from "../lib/edit";
 import { ZOOM_STEPS, stepZoom } from "../lib/layout";
@@ -294,29 +297,99 @@ export function SearchBar({ doc }: { doc: DocState }) {
     document.querySelector<HTMLElement>(".viewer")?.focus();
   };
 
+  const editing = useTextEdit((s) => s.open && s.section === "text");
+
   return (
-    <div className="searchbar">
-      <Icon name="search" size={14} />
-      <input
-        ref={input}
-        value={q}
-        placeholder="Find in document"
-        spellCheck={false}
-        onChange={(e) => setQ(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            useFind.getState().remember(q);
-            if (q.trim() !== search.query.trim()) st().runSearch(id, q);
-            else st().stepHit(id, e.shiftKey ? -1 : 1);
-          } else if (e.key === "Escape") close();
-        }}
-      />
-      <OptionChips />
-      <span className="dim count">{status}</span>
-      <Btn icon="up" title="Previous (Shift+Enter)" onClick={() => st().stepHit(id, -1)} disabled={n === 0} />
-      <Btn icon="down" title="Next (Enter)" onClick={() => st().stepHit(id, 1)} disabled={n === 0} />
-      <OptionsMenu />
-      <Btn icon="close" title="Close (Esc)" onClick={close} />
-    </div>
+    <>
+      <div className="searchbar">
+        <Icon name="search" size={14} />
+        <input
+          ref={input}
+          value={q}
+          placeholder="Find in document"
+          spellCheck={false}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              useFind.getState().remember(q);
+              if (q.trim() !== search.query.trim()) st().runSearch(id, q);
+              else st().stepHit(id, e.shiftKey ? -1 : 1);
+            } else if (e.key === "Escape") close();
+          }}
+        />
+        <OptionChips />
+        <span className="dim count">{status}</span>
+        <Btn icon="up" title="Previous (Shift+Enter)" onClick={() => st().stepHit(id, -1)} disabled={n === 0} />
+        <Btn icon="down" title="Next (Enter)" onClick={() => st().stepHit(id, 1)} disabled={n === 0} />
+        <OptionsMenu />
+        <Btn icon="close" title="Close (Esc)" onClick={close} />
+      </div>
+      {editing && <ReplaceRow doc={doc} />}
+    </>
+  );
+}
+
+/** Replace with ..., Replace and Replace all: the second row of the find bar while Edit text is on. */
+function ReplaceRow({ doc }: { doc: DocState }) {
+  const { id, search } = doc;
+  const text = useReplace((s) => s.text);
+  const busy = useReplace((s) => s.busy);
+  const report = useReplace((s) => s.report[id] ?? null);
+  const locked = useTextEdit((s) => Object.values(s.docs[id]?.pages ?? {}).find((p) => p.locked)?.locked ?? null);
+  const [open, setOpen] = useState(false);
+  const hit = search.hits[search.current];
+  const state = {
+    locked,
+    query: search.query,
+    hits: search.hits.length,
+    searching: !search.done,
+    current: hit ? (hit.source === "text" ? ("text" as const) : ("other" as const)) : null,
+  };
+  const noOne = whyNotReplace(state, false);
+  const noAll = whyNotReplace(state, true);
+  const r = useReplace.getState;
+
+  return (
+    <>
+      <div className="searchbar replace">
+        <Icon name="swap" size={14} />
+        <input
+          value={text}
+          placeholder="Replace with"
+          spellCheck={false}
+          aria-label="Replace with"
+          disabled={locked != null}
+          title={locked ?? undefined}
+          onChange={(e) => r().setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !noOne) void r().one(id);
+          }}
+        />
+        <button className="btn ghost" title={noOne ?? "Replace this match and go to the next"} disabled={busy || noOne != null} onClick={() => void r().one(id)}>
+          Replace
+        </button>
+        <button className="btn ghost" title={noAll ?? "Replace every match in the document (one undo step)"} disabled={busy || noAll != null} onClick={() => void r().all(id)}>
+          Replace all
+        </button>
+        {report && (
+          <button className="replace-status" title={report.lines.length > 0 ? "Show what was skipped" : undefined} aria-expanded={open} onClick={() => setOpen(!open)}>
+            {report.summary}
+          </button>
+        )}
+      </div>
+      {report && open && (report.lines.length > 0 || report.notes.length > 0) && (
+        <div className="replace-report" role="status">
+          {report.notes.map((n) => (
+            <p key={n}>{n}</p>
+          ))}
+          <ul>
+            {report.lines.map((l) => (
+              <li key={l}>{l}</li>
+            ))}
+          </ul>
+          {report.more > 0 && <p className="dim">and {report.more} more</p>}
+        </div>
+      )}
+    </>
   );
 }

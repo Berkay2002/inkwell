@@ -558,6 +558,44 @@ select {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+/* second row while editing text: Replace with ..., Replace, Replace all */
+.searchbar.replace {
+  top: 58px;
+}
+.searchbar.replace .btn {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.searchbar .replace-status {
+  padding: 0 6px;
+  height: 26px;
+  font-size: 12px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.replace-report {
+  position: absolute;
+  top: 106px;
+  right: 24px;
+  z-index: 2;
+  width: 360px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 12px;
+  font-size: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-2);
+}
+.replace-report p {
+  margin: 0 0 6px;
+}
+.replace-report ul {
+  margin: 0;
+  padding-left: 16px;
+}
 
 /* overlays */
 .scrim {
