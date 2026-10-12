@@ -58,6 +58,8 @@ the edit-core steps in `src-tauri/src/engine/edit/security.rs`, UI in `src/compo
   Mongolian and variation selectors, BOM) and turns the non-ASCII spaces of C.1.2 (U+1680, U+2000..200A, U+202F,
   U+205F, U+3000, no-break space) into U+0020, so a password typed with those opens a file written with the plain
   one. The form that worked is kept for the session.
+  Inkwell itself writes passwords as NFKC only (no mapping), so a password set here that contains a soft hyphen,
+  ZWJ or similar may not open in Acrobat when typed that way, because Acrobat maps those characters away first.
 - After every save the engine reads the file back (`verify`): page count, `/Encrypt` present after a Set and
   absent after a Remove, and that it opens with the password the step just wrote.
 - Permission bits follow the PDF spec: print 3, modify 4, copy 5, annotate 6, forms 9, accessibility 10, assemble
