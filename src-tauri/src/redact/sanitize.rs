@@ -102,6 +102,21 @@ fn pages(doc: &PdfDocument) -> Result<Vec<PdfObject>> {
 
 /// Sanitizes `doc`. `needles` = redacted strings (empty when sanitizing without a redaction).
 pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Result<SanitizeReport> {
+    sanitize_pages(doc, o, needles, None)
+}
+
+/// [`sanitize`] with the page-level switches limited to the pages in `only` (zero-based; `None` = all):
+/// comments and markups (`annotations`), invisible text (`hidden_text`) and the removal of links
+/// (`scripts_actions`) leave the other pages as they are. The file-level switches (document information,
+/// scripts, attached files, bookmarks) still act on the whole file, and so does anything that quotes a
+/// redacted string. Hidden layers cannot be limited to pages (the layer settings are one list for the
+/// whole file, and removing it would show the hidden content of the pages left out): with `only` set and
+/// `hidden_layers` on this refuses rather than do it file-wide.
+pub fn sanitize_pages(doc: &mut PdfDocument, o: &Sanitize, needles: &[String], only: Option<&[u32]>) -> Result<SanitizeReport> {
+    if only.is_some() && o.hidden_layers {
+        return Err(RedactError::Unsupported("hidden layers cannot be removed from some pages only"));
+    }
+    let here = |p: usize| only.is_none_or(|s| s.contains(&(p as u32)));
     let res: Vec<Regex> = needles.iter().map(|n| Regex::new(&needle_regex(n))).collect::<std::result::Result<_, _>>()?;
     let mut r = SanitizeReport::default();
     // Our own search index is a copy of the text, comments and bookmarks as they were, and it is compressed, so
@@ -154,7 +169,8 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
         r.metadata += del(&mut doc.trailer()?, "Info")?;
     }
 
-    for mut page in pages(doc)? {
+    for (pn, mut page) in pages(doc)?.into_iter().enumerate() {
+        let here = here(pn);
         if o.scripts_actions {
             r.scripts_actions += del(&mut page, "AA")?;
         }
@@ -178,11 +194,11 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
                 }
                 return Ok(quoting);
             }
-            if st == b"Link" && (quoting || o.scripts_actions) {
+            if st == b"Link" && (quoting || (o.scripts_actions && here)) {
                 links += 1;
                 return Ok(true);
             }
-            Ok(quoting || (o.annotations && st != b"Link") || (o.embedded_files && st == b"FileAttachment"))
+            Ok(quoting || (o.annotations && here && st != b"Link") || (o.embedded_files && st == b"FileAttachment"))
         })?;
         r.annotations += n - links;
         r.scripts_actions += links;
@@ -198,7 +214,7 @@ pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Resu
     }
     // After annotation removal: invisible text in an annotation the switches removed is gone.
     if o.hidden_text {
-        r.hidden_text_pages = strip_invisible_text(doc)?;
+        r.hidden_text_pages = strip_invisible_text(doc, only)?;
     }
 
     if o.bookmarks {
@@ -542,10 +558,10 @@ fn has_invisible_text(doc: &PdfDocument, p: i32) -> Result<bool> {
 /// Removes invisible text page by page with a page-sized redaction that only targets invisible
 /// text. The page's annotations are set aside meanwhile: MuPDF drops every link and free-text
 /// annotation a redaction touches, and this one touches all of them.
-fn strip_invisible_text(doc: &mut PdfDocument) -> Result<u32> {
+fn strip_invisible_text(doc: &mut PdfDocument, only: Option<&[u32]>) -> Result<u32> {
     let mut n = 0;
     for p in 0..doc.page_count()? {
-        if !has_invisible_text(doc, p)? {
+        if only.is_some_and(|s| !s.contains(&(p as u32))) || !has_invisible_text(doc, p)? {
             continue;
         }
         let mut obj = doc.find_page(p)?;

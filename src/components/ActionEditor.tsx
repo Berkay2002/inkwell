@@ -605,6 +605,13 @@ function RedactForm({ step, patch }: { step: Extract<BatchStep, { kind: "redact"
       />
       <h4 className="aw-sub">Also remove</h4>
       <SanitizeChecks redact value={step.sanitize} onChange={(v) => patch({ sanitize: v })} />
+      {step.pages?.trim() && (
+        <p className="dim aw-hint-block">
+          With a page range, comments, hidden text and links are removed on those pages only. Document information, scripts, attached files and
+          bookmarks are removed from the whole file. Hidden layers cannot be limited to pages: untick it to use a range. A file with redaction marks
+          already on other pages is skipped.
+        </p>
+      )}
     </>
   );
 }

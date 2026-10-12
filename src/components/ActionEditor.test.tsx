@@ -44,6 +44,11 @@ describe("a step's options in the editor", () => {
     expect(options(out)).toMatch(/type="checkbox"[^>]*checked/);
   });
 
+  it("tell a Redact step with a range what stays whole-file, and say nothing without one", () => {
+    expect(options(html([{ ...newStep("redact"), pages: "1-3" }]))).toContain("Hidden layers cannot be limited to pages");
+    expect(options(html([newStep("redact")]))).not.toContain("Hidden layers cannot be limited to pages");
+  });
+
   it("send the typed range through patch, whole", () => {
     const patch = vi.fn();
     const el = PagesField({ step: newStep("ocr"), patch }) as ReactElement<{ children: ReactElement<{ onChange: (v: string) => void }>[] }>;

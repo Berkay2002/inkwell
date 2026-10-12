@@ -1754,12 +1754,150 @@ fn redact_with_a_range_searches_only_those_pages() {
     let f = put(&d, "r.pdf", &text_pdf(&[&["the secret is quokka"], &["the secret is quokka"], &["the secret is quokka"]]));
     let step = Step::Redact(RedactStep {
         queries: vec![RedactQuery::Text { text: "quokka".into(), case_sensitive: false, whole_word: true }],
+        sanitize: Sanitize { hidden_layers: false, ..Sanitize::default() },
         ..RedactStep::default()
     });
     let r = go(&ranged("R", vec![on("2", step)]), &[f], None);
     assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
     let t = page_texts(&out_of(&r));
     assert!(t[0].contains("quokka") && !t[1].contains("quokka") && t[2].contains("quokka"), "{t:?}");
+}
+
+/// A PDF of pages given as (content stream, annotation dictionaries): the annotations are objects after the pages.
+fn pdf_with(pages: &[(&str, &[&str])]) -> Vec<u8> {
+    let n = pages.len();
+    let kids: String = (0..n).map(|i| format!("{} 0 R ", 4 + i * 2)).collect();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {n} >>"),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
+    ];
+    let mut annots = Vec::new();
+    let mut next = 4 + 2 * n;
+    for (i, (content, notes)) in pages.iter().enumerate() {
+        let refs: String = notes
+            .iter()
+            .map(|a| {
+                annots.push(a.to_string());
+                next += 1;
+                format!("{} 0 R ", next - 1)
+            })
+            .collect();
+        let annots_key = if notes.is_empty() { String::new() } else { format!("/Annots [{refs}]") };
+        objs.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> {annots_key} /Contents {} 0 R >>",
+            5 + i * 2
+        ));
+        objs.push(format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()));
+    }
+    objs.extend(annots);
+    assemble(&objs, "")
+}
+
+const SECRET: &str = "BT /F1 12 Tf 72 700 Td (the secret is quokka) Tj ET";
+const GHOST: &str = "BT /F1 12 Tf 3 Tr 72 500 Td (ghosttext) Tj ET";
+const COMMENT: &str = "<< /Type /Annot /Subtype /Text /Rect [300 700 320 720] /Contents (a note) /F 4 >>";
+const MARK: &str = "<< /Type /Annot /Subtype /Redact /Rect [70 695 300 715] /QuadPoints [70 715 300 715 70 695 300 695] /IC [0 0 0] /F 4 >>";
+
+fn notes_on(p: &Path, page: i32) -> usize {
+    let doc = PdfDocument::open(p.to_string_lossy().as_ref()).unwrap();
+    let n = doc.load_pdf_page(page).unwrap().annotations().count();
+    n
+}
+
+fn quokka_redact(sanitize: Sanitize) -> Step {
+    Step::Redact(RedactStep {
+        queries: vec![RedactQuery::Text { text: "quokka".into(), case_sensitive: false, whole_word: true }],
+        sanitize,
+        ..RedactStep::default()
+    })
+}
+
+#[test]
+fn a_redaction_mark_left_outside_the_range_is_not_applied_and_the_file_is_not_touched() {
+    let d = dir("range-redact-marks");
+    // A person marked page 3 and has not applied it; the step is told to work on page 1.
+    let f = put(&d, "m.pdf", &pdf_with(&[(SECRET, &[]), ("BT /F1 12 Tf 72 700 Td (page two) Tj ET", &[]), (SECRET, &[MARK])]));
+    let none = Sanitize { hidden_layers: false, ..Sanitize::NONE };
+    let r = go(&ranged("R", vec![on("1", quokka_redact(none))]), &[f.clone()], None);
+    assert_eq!(r.files[0].status, Status::Skipped, "{:?}", r.files[0]);
+    let why = r.files[0].reason.clone().unwrap();
+    assert!(why.contains("marks already on page(s) 3") && why.contains("outside the range 1"), "{why}");
+    assert!(r.files[0].outputs.is_empty());
+    assert!(text_of(&f).matches("quokka").count() == 2, "the source is as it was");
+    assert_eq!(notes_on(&f, 2), 1, "the mark is still there");
+
+    // The same mark inside the range is applied with the rest, as always.
+    let r = go(&ranged("R", vec![on("1-3", quokka_redact(none))]), &[f], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    assert!(!text_of(&out_of(&r)).contains("quokka"));
+}
+
+#[test]
+fn redact_with_a_range_leaves_the_comments_and_text_layers_of_the_other_pages() {
+    let d = dir("range-redact-sanitize");
+    let both = format!("{SECRET}\n{GHOST}");
+    let f = put(&d, "s.pdf", &pdf_with(&[(&both, &[COMMENT]), (SECRET, &[]), ("BT /F1 12 Tf 72 700 Td (page three) Tj ET", &[COMMENT]), (&both, &[COMMENT])]));
+    // Every page-level switch on (hidden layers cannot be limited to pages, so that one is off).
+    let r = go(&ranged("R", vec![on("1-2", quokka_redact(Sanitize { hidden_layers: false, ..Sanitize::default() }))]), &[f.clone()], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    let out = out_of(&r);
+    let t = page_texts(&out);
+    assert!(!t[0].contains("quokka") && !t[1].contains("quokka") && t[3].contains("quokka"), "{t:?}");
+    assert!(!t[0].contains("ghosttext"), "the text layer of a page in the range goes: {t:?}");
+    assert!(t[3].contains("ghosttext"), "the text layer of page 4 stays: {t:?}");
+    assert_eq!(notes_on(&out, 0), 0, "the comment on page 1 goes");
+    assert_eq!((notes_on(&out, 2), notes_on(&out, 3)), (1, 1), "the comments on pages 3 and 4 stay");
+
+    // A range wholly past the end does nothing at all, the sanitize switches included.
+    let r = go(&ranged("R", vec![on("9", quokka_redact(Sanitize { hidden_layers: false, ..Sanitize::default() }))]), &[f.clone()], None);
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    assert_eq!(digest(&out_of(&r)), digest(&f));
+    assert!(r.files[0].warnings.iter().any(|w| w.contains("nothing was done")), "{:?}", r.files[0].warnings);
+}
+
+#[test]
+fn hidden_layers_are_refused_for_a_redact_step_with_a_range() {
+    let a = ranged(
+        "H",
+        vec![
+            on("1-2", quokka_redact(Sanitize::default())),
+            on("1-2", quokka_redact(Sanitize { hidden_layers: false, ..Sanitize::default() })),
+            quokka_redact(Sanitize::default()).into(),
+        ],
+    );
+    let got = issues_of(&a);
+    assert!(got.contains(&(Some(0), "invalid-step")), "{got:?}");
+    assert!(!got.contains(&(Some(1), "invalid-step")) && !got.contains(&(Some(2), "invalid-step")), "{got:?}");
+    let m = a.validate(&env());
+    assert!(m.iter().any(|i| i.step == Some(0) && i.message.contains("Hidden layers")), "{m:?}");
+}
+
+#[test]
+fn marks_added_on_a_range_leave_the_earlier_ones_on_the_other_pages() {
+    let d = dir("range-marks-update");
+    let f = put(&d, "t.pdf", &text_pdf(&[&["one"], &["two"], &["three"]]));
+    // Header/footer: the second run replaces the first one's marks on page 1 only.
+    let a = go(&ranged("A", vec![footer("FIRST").into()]), &[f], None);
+    let b = go(&ranged("B", vec![on("1", footer("SECOND"))]), &[out_of(&a)], None);
+    let t = page_texts(&out_of(&b));
+    assert!(t[0].contains("SECOND") && !t[0].contains("FIRST"), "{t:?}");
+    assert!(t[1].contains("FIRST") && t[2].contains("FIRST") && !t[1].contains("SECOND"), "{t:?}");
+
+    // Watermark: the same.
+    let a = go(&ranged("A", vec![wm("ALPHA").into()]), &[out_of(&b)], None);
+    let b = go(&ranged("B", vec![on("3", wm("OMEGA"))]), &[out_of(&a)], None);
+    let t = page_texts(&out_of(&b));
+    assert!(t[2].contains("OMEGA") && !t[2].contains("ALPHA"), "{t:?}");
+    assert!(t[0].contains("ALPHA") && t[1].contains("ALPHA") && !t[0].contains("OMEGA"), "{t:?}");
+
+    // Bates: page 1 gets the new numbering, pages 2 and 3 keep the old numbers.
+    let bates = |prefix: &str| BatesStep { bates: Bates { prefix: prefix.into(), digits: 4, start: 1, slot: 4, ..Bates::default() }, continue_across_files: false };
+    let a = go(&ranged("A", vec![Step::Bates(bates("N")).into()]), &[out_of(&b)], None);
+    let b = go(&ranged("B", vec![on("1", Step::Bates(bates("M")))]), &[out_of(&a)], None);
+    let t = page_texts(&out_of(&b));
+    assert!(t[0].contains("M0001") && !t[0].contains("N0001"), "{t:?}");
+    assert!(t[1].contains("N0002") && t[2].contains("N0003"), "{t:?}");
 }
 
 #[test]

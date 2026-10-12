@@ -607,7 +607,12 @@ impl StepImpl for RedactStep {
 
     fn run(&self, cx: &mut Cx, input: &Path, output: &Path) -> Result<Outcome, StepError> {
         let mut doc = open_in(input)?;
-        let selected = cx.select(doc.page_count()?.max(0) as u32)?;
+        let count = doc.page_count()?.max(0) as u32;
+        let selected = cx.select(count)?;
+        // A range wholly past the end: nothing is done, the sanitize switches included.
+        if cx.has_range() && selected.is_empty() {
+            return Ok(Outcome::Unchanged);
+        }
         let blind = pages_without_text(&doc, &selected)?;
         if !blind.is_empty() {
             let shown: Vec<String> = blind.iter().take(5).map(|p| (p + 1).to_string()).collect();
@@ -618,6 +623,7 @@ impl StepImpl for RedactStep {
                 if blind.len() > 5 { ", ..." } else { "" }
             ));
         }
+        let only = cx.has_range().then_some(selected.as_slice());
         let mut hits = Vec::new();
         for q in &self.queries {
             let query = match q {
@@ -628,13 +634,12 @@ impl StepImpl for RedactStep {
                 RedactQuery::Regex { regex, case_sensitive } => Query::Regex { pattern: regex.clone(), case_sensitive: *case_sensitive },
             };
             // A range limits the search; an empty selection searches nothing (the sanitize switches below still apply).
-            let only = cx.has_range().then_some(selected.as_slice());
             hits.extend(redact::find_capped(&doc, &query, only, usize::MAX, None)?);
         }
         if hits.is_empty() {
             // Nothing on the pages, but a value can sit in the properties, a form field or a comment:
             // the sanitize switches still apply.
-            let r = redact::sanitize(&mut doc, &self.sanitize, &[])?;
+            let r = redact::sanitize_pages(&mut doc, &self.sanitize, &[], only)?;
             if r == SanitizeReport::default() {
                 cx.notes.push("nothing found to redact".into());
                 return Ok(Outcome::Unchanged);
@@ -642,11 +647,24 @@ impl StepImpl for RedactStep {
             cx.notes.push(format!("nothing found on the pages; {} hidden item(s) removed", removed(&r)));
             return finish(&doc, output, redact::write_options(), None);
         }
+        // Applying takes every pending mark of the document, not just ours: a mark a person left on a page
+        // outside the range would be applied (its content removed for good) by a step told to leave that page alone.
+        // It is left in place and the file is not touched.
+        if let Some(inside) = only {
+            let outside: Vec<u32> = redact::pages_with_marks(&doc)?.into_iter().filter(|p| !inside.contains(p)).collect();
+            if !outside.is_empty() {
+                return Err(StepError::Refused(format!(
+                    "redaction marks already on page(s) {}, outside the range {}",
+                    super::pages::describe(&outside),
+                    cx.range.trim()
+                )));
+            }
+        }
         let style = MarkStyle { overlay_text: self.overlay_text.clone().filter(|t| !t.is_empty()), ..MarkStyle::default() };
         redact::mark_hits(&mut doc, &hits, &style)?;
         // Apply removes the content, sanitizes, and reads a full rewrite back for the redacted text;
         // those verified bytes are what is written, no other write of the document is.
-        let opts = ApplyOptions { sanitize: self.sanitize, ..ApplyOptions::default() };
+        let opts = ApplyOptions { sanitize: self.sanitize, pages: only.map(<[u32]>::to_vec), ..ApplyOptions::default() };
         let report = redact::apply(&mut doc, &opts)?;
         std::fs::write(output, &report.bytes)?;
         verify_written(output, doc.page_count()?.max(0) as u32, None)?;

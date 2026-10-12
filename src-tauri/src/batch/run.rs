@@ -663,11 +663,8 @@ fn checked(env: &Env, saved: &StepEntry, e: &mut StepEntry) -> Result<(), String
         new.open_password = old.open_password.clone();
         new.permissions_password = old.permissions_password.clone();
     }
-    if e.has_range() {
-        if !e.step.takes_pages() {
-            return Err("This step works on the whole file: clear its page range.".into());
-        }
-        super::pages::check(&e.pages)?;
+    if let Some(m) = e.range_problem() {
+        return Err(m);
     }
     match e.step.imp().validate(env) {
         Ok(()) => Ok(()),

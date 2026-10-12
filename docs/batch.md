@@ -25,15 +25,25 @@ A name, a description, ordered steps, an output rule and "on error". JSON, camel
 `pages` is the range syntax of OCR and Convert (`1-3, 5, 8-`, one-based, `,` or `;`, at most 200 characters); empty or
 absent means every page. Only the steps that work page by page take one: `headerFooter`, `watermark`, `bates`, `redact`,
 `ocr`, `flattenForms` (`Step::takes_pages`). A range on any other step is an `invalid-step` issue ("This step works on
-the whole file: clear its page range."). Compress, Protect, Sanitize and Set properties act on the whole file, and so do
-the sanitize switches of Redact; the two exports have no range (not done, see Gaps).
+the whole file: clear its page range."). Compress, Protect, Sanitize and Set properties act on the whole file; the two exports have no range (not done, see Gaps).
 - A range reaching past a file's last page is **clipped to the pages that exist**, and the report says so: a note
   "the page range 3-9 reaches past the last page (5); used page(s) 3-5". A range wholly past the end does nothing to that
   file: a warning "<step> (pages 8-9): the page range 8-9 is past the last page (the file has 5), so nothing was done."
-  (Redact still applies its sanitize switches). Neither fails the file: a batch holds files of different lengths.
+  (nothing at all: Redact's sanitize switches are not applied either). Neither fails the file: a batch holds files of different lengths.
 - Header/footer `<<1>>` counts from the first page of the range (the marks engine's own numbering), Bates numbers go on
   the pages of the range in order, flatten forms leaves the fields of the other pages as fields, redact searches only the
-  range (marks already placed in a source are applied wherever they are: `redact::apply` takes the whole document), OCR reads only the pages of the range that have no text (all of them with `force`).
+  range, OCR reads only the pages of the range that have no text (all of them with `force`).
+- **Redact with a range** (`redact::apply` takes every pending mark of the document, so the range is guarded):
+  - A file that already has a redaction mark on a page outside the range is **skipped**, not touched: "redaction marks
+    already on page(s) 7, outside the range 1-3". The mark is left where it is; apply it first, or include its page.
+    Marks inside the range are applied with the hits, as without a range.
+  - The sanitize switches that work page by page (comments and markups, hidden text, links) act on the pages of the
+    range only. The file-level ones (document information, scripts and actions, attached files, bookmarks) still act on
+    the whole file, and anything that quotes a redacted string is removed wherever it is. Hidden layers cannot be limited
+    to pages (the layer list is one for the file, and dropping it would show the hidden content of the pages left out):
+    a Redact step with a range and "Hidden layers" on is an `invalid-step` issue; untick it or clear the range.
+- Header/footer, watermark and Bates on a range replace the step's own earlier marks on those pages only; the marks of
+  an earlier run on the other pages stay.
 - Preview does not open the files for their page counts, so it cannot show clipping.
 
 ### Prompt user per step
@@ -181,7 +191,8 @@ invoke layer, so they show the interface, not the engine. The runtime pass again
 - Set properties writes the Info dictionary only; an existing XMP packet keeps its old values.
 - A password-protected source is skipped; there is no per-file password.
 - Steps do not run in parallel across files, and only compress/OCR/export stop in the middle of a step on cancel.
-- Redaction: marks already in a source (placed by hand) are applied too. Glyph boxes are taller than the font size, so a
+- Redaction: marks already in a source (placed by hand) are applied too (with a page range, a file with marks outside
+  the range is skipped instead). Glyph boxes are taller than the font size, so a
   mark on a line also takes the glyphs of a line closer than about 1.4 em with it (an engine behaviour; it errs towards
   removing too much, and `redact::apply` still verifies the result).
 - Tests run on Linux through a scratch crate that includes the engine modules without `history`/`print`/`ai` (the crate

@@ -355,6 +355,25 @@ impl StepEntry {
     pub fn has_range(&self) -> bool {
         !self.pages.trim().is_empty()
     }
+
+    /// Why this step's page range cannot be used, in a sentence for the person; None when it has none or it
+    /// is fine. Shared by validation and by the check of a prompt's answer.
+    pub fn range_problem(&self) -> Option<String> {
+        if !self.has_range() {
+            return None;
+        }
+        if !self.step.takes_pages() {
+            return Some("This step works on the whole file: clear its page range.".into());
+        }
+        if let Err(m) = pages::check(&self.pages) {
+            return Some(m);
+        }
+        // The layer list is one for the whole file: removing it would show the hidden content of the pages left out.
+        if matches!(&self.step, Step::Redact(r) if r.sanitize.hidden_layers) {
+            return Some("Hidden layers cannot be removed from some pages only: untick \"Hidden layers\" or clear the page range.".into());
+        }
+        None
+    }
 }
 
 impl Serialize for StepEntry {
@@ -509,12 +528,8 @@ impl Action {
                         Err(Problem::Invalid(m)) => issue(Some(i), "invalid-step", m),
                         Err(Problem::Unavailable(m)) => issue(Some(i), "unavailable", m),
                     }
-                    if entry.has_range() {
-                        if !s.takes_pages() {
-                            issue(Some(i), "invalid-step", "This step works on the whole file: clear its page range.".into());
-                        } else if let Err(m) = pages::check(&entry.pages) {
-                            issue(Some(i), "invalid-step", m);
-                        }
+                    if let Some(m) = entry.range_problem() {
+                        issue(Some(i), "invalid-step", m);
                     }
                 }
             }
