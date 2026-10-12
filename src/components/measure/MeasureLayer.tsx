@@ -40,7 +40,8 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
   const [pts, setPts] = useState<Pt[]>([]);
   const [hover, setHover] = useState<Hover | null>(null);
   const hoverRef = useRef<Hover | null>(null);
-  const kind: MeasureKind | null = tool === "calibrate" ? "distance" : tool === "select" ? null : tool;
+  const locked = useMeasure((s) => !!s.locks[docId]);
+  const kind: MeasureKind | null = locked || tool === "select" ? null : tool === "calibrate" ? "distance" : tool;
   const hasScale = !!d?.scales[page];
 
   useEffect(() => {

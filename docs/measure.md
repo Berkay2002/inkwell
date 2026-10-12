@@ -116,6 +116,10 @@ Comments does (opening one closes the other) and shows a floating bar over the p
   units); the list by page (click to jump to it); Export to CSV.
 - **Calibrate:** pick it from the scale chip, draw over a dimension printed on the drawing, type its real length and
   unit: the page scale becomes "1 in = n unit" (n = real length x 72 / the line's length in points).
+- **Certified files:** a document certified with DocMDP `/P` 1 or 2 does not allow annotations, so adding a
+  measurement, setting a page scale and re-measuring are refused (`measure_*` write calls check `certified()` first, so
+  nothing changes and there is no undo step). `/P` 3 allows them. A certification that cannot be read is refused too.
+  The tools are greyed out with the reason (`measure_lock`); Select, the rail and Export to CSV still work.
 - **Shortcuts taken:** the live label is worked out in the UI from the page's scale (it does not apply a file's own `/D`
   or `/A` multipliers or a detail viewport under the pointer: the label written by the engine is the exact one). The
   crossings are found among the 64 segments nearest the pointer, and curves cross as their 12 pieces.

@@ -1,6 +1,6 @@
 //! Tauri commands for measuring. The UI is the user; the assistant calls the functions in `super` with its turn.
 
-use super::{Kind, MeasureDto, PageScale, Quantity, Scale, SnapCache, SnapHit, SnapKinds, add_one, csv_of, list_all, rescale, scale_get, scale_set, snap_at_kinds, value_of};
+use super::{Kind, MeasureDto, PageScale, Quantity, Scale, SnapCache, SnapHit, SnapKinds, add_one, csv_of, list_all, lock_of, rescale, scale_get, scale_set, snap_at_kinds, value_of};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use crate::paths::Paths;
@@ -21,6 +21,13 @@ pub struct Added {
     pub state: EditState,
     pub xref: i32,
     pub quantity: Quantity,
+}
+
+/// Why measuring is off for the document (certified so that annotations are not allowed), `null` when it is allowed.
+#[tauri::command]
+pub async fn measure_lock(eng: Eng<'_>, doc: DocId) -> Result<Option<String>> {
+    let eng = eng.inner().clone();
+    blocking(move || lock_of(&eng, doc)).await
 }
 
 /// The scale of a page (its widest viewport), 1 in = 1 in when the file has none.

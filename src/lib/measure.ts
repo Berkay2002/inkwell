@@ -16,6 +16,8 @@ import {
 
 export const measureApi = {
   list: (doc: number) => invoke<Measure[]>("measure_list", { doc }),
+  /** Why measuring is off for the document (a certification that forbids annotations); null when it is allowed. */
+  lock: (doc: number) => invoke<string | null>("measure_lock", { doc }),
   scaleGet: (doc: number, page: number) => invoke<PageScale>("measure_scale_get", { doc, page }),
   scaleSet: (doc: number, page: number, scale: Scale) => invoke<EditState>("measure_scale_set", { doc, page, scale }),
   add: (doc: number, page: number, kind: MeasureKind, points: Pt[], scale: Scale | null, author: string) =>
@@ -72,6 +74,10 @@ interface MeasureStore {
   snaps: Snaps;
   toggleSnap: (k: keyof Snaps) => void;
 
+  /** By document, read once: the reason nothing may be measured on it, or null. Absent until read. */
+  locks: Record<number, string | null>;
+  ensureLock: (doc: number) => Promise<void>;
+
   docs: Record<number, DocMeasure>;
   get: (doc: number) => DocMeasure;
   refresh: (doc: number) => Promise<void>;
@@ -104,6 +110,11 @@ export const useMeasure = create<MeasureStore>((set, get) => {
     set((s) => ({ docs: { ...s.docs, [doc]: { ...(s.docs[doc] ?? fresh()), ...p } } }));
   /** Runs one engine call, shows its new state, and re-reads the list. */
   const run = async <T>(doc: number, f: () => Promise<T>, state: (r: T) => EditState): Promise<T | null> => {
+    const why = get().locks[doc];
+    if (why) {
+      patch(doc, { error: why });
+      return null;
+    }
     try {
       const r = await f();
       applyState(doc, state(r));
@@ -126,6 +137,18 @@ export const useMeasure = create<MeasureStore>((set, get) => {
     snaps: { endpoint: true, midpoint: true, intersection: true, line: true },
     toggleSnap: (k) => set((s) => ({ snaps: { ...s.snaps, [k]: !s.snaps[k] } })),
 
+    locks: {},
+    ensureLock: async (doc) => {
+      if (get().locks[doc] !== undefined) return;
+      try {
+        const why = await measureApi.lock(doc);
+        set((s) => ({ locks: { ...s.locks, [doc]: why } }));
+      } catch (e) {
+        // an unreadable answer is a refusal: nothing is written until the check has said it is fine
+        set((s) => ({ locks: { ...s.locks, [doc]: msg(e) } }));
+      }
+    },
+
     docs: {},
     get: (doc) => get().docs[doc] ?? fresh(),
     refresh: async (doc) => {
@@ -139,6 +162,11 @@ export const useMeasure = create<MeasureStore>((set, get) => {
       }
     },
     onRev: (doc) => {
+      set((s) => {
+        const { [doc]: _, ...locks } = s.locks;
+        return { locks };
+      });
+      void get().ensureLock(doc);
       dropScales(doc);
       void get().refresh(doc);
     },

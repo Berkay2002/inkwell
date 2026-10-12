@@ -31,6 +31,8 @@ struct Spec {
     second: Option<String>,
     /// Entries of the page dictionary beside /MediaBox: a /CropBox for instance.
     boxes: String,
+    /// Extra entries of the catalog: /Perms, /AcroForm.
+    cat: String,
 }
 
 impl Default for Spec {
@@ -44,6 +46,7 @@ impl Default for Spec {
             extra: Vec::new(),
             second: None,
             boxes: String::new(),
+            cat: String::new(),
         }
     }
 }
@@ -51,7 +54,7 @@ impl Default for Spec {
 fn build(s: &Spec) -> Vec<u8> {
     let uu = s.user_unit.map_or(String::new(), |u| format!("/UserUnit {u} "));
     let mut objs: Vec<(usize, Vec<u8>)> = vec![
-        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (1, format!("<< /Type /Catalog /Pages 2 0 R {} >>", s.cat).into_bytes()),
         (
             2,
             if s.second.is_some() {
@@ -1035,4 +1038,71 @@ fn an_export_replaces_a_file_the_user_confirmed_over() {
     assert_eq!(std::fs::read_to_string(&to).unwrap(), csv_of(&[]));
     let left: Vec<_> = std::fs::read_dir(to.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert_eq!(left.len(), 1, "no temporary file is left behind: {left:?}");
+}
+
+// ---- certified documents -----------------------------------------------------------------------------------
+
+/// `acrobat()` (a page with measurements on it) certified with DocMDP `/P` `p`.
+fn certified(p: u8) -> Spec {
+    let mut s = acrobat();
+    s.cat = format!("/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P {p} >> >> ] >> >>");
+    s
+}
+
+/// Every write of measure.rs on a document that must not change: refused, nothing listed, no undo step.
+fn refused(eng: &Engine, id: DocId, what: &str) {
+    let steps = eng.history(id).unwrap().len();
+    let before = list_all(eng, id).unwrap().len();
+    let (a, b) = ([10.0, 10.0], [50.0, 10.0]);
+    let scale = Scale { paper: 1.0, paper_unit: Unit::In, real: 2.0, real_unit: Unit::M };
+    let xref = list_all(eng, id).unwrap()[0].xref;
+    let rs: [(&str, Result<()>); 3] = [
+        ("add", add_one(eng, id, 0, Kind::Distance, &[a, b], None, "", EditSource::User).map(|_| ())),
+        ("scale", scale_set(eng, id, 0, &scale, EditSource::User).map(|_| ())),
+        ("rescale", rescale(eng, id, 0, xref, &scale, EditSource::User).map(|_| ())),
+    ];
+    for (op, r) in rs {
+        match r {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{what} {op}: {m}"),
+            other => panic!("{what} {op}: expected a refusal, got {other:?}"),
+        }
+    }
+    assert_eq!(eng.history(id).unwrap().len(), steps, "{what}: no undo step");
+    assert_eq!(list_all(eng, id).unwrap().len(), before, "{what}: nothing added or replaced");
+    assert!(lock_of(eng, id).unwrap().is_some_and(|m| m.contains("certified")), "{what}: the UI is told why");
+}
+
+#[test]
+fn a_certified_document_that_forbids_annotations_is_not_measured_on() {
+    for p in [1, 2] {
+        let (eng, id, _) = open(&format!("certified-{p}"), &certified(p));
+        refused(&eng, id, &format!("P {p}"));
+    }
+}
+
+#[test]
+fn a_certification_that_allows_annotations_allows_measuring() {
+    let (eng, id, _) = open("certified-3", &certified(3));
+    assert_eq!(lock_of(&eng, id).unwrap(), None);
+    let steps = eng.history(id).unwrap().len();
+    let all = list_all(&eng, id).unwrap();
+    add(&eng, id, Kind::Distance, &[[10.0, 10.0], [50.0, 10.0]], Some(&FT10));
+    scale_set(&eng, id, 0, &FT10, EditSource::User).unwrap();
+    rescale(&eng, id, 0, all[0].xref, &FT10, EditSource::User).unwrap();
+    assert_eq!(eng.history(id).unwrap().len(), steps + 3);
+}
+
+#[test]
+fn a_certification_that_cannot_be_read_is_refused() {
+    // More fields than the check will walk: it fails closed, as a certified document.
+    let mut s = acrobat();
+    s.cat = format!("/AcroForm << /Fields [{}] >>", "0 ".repeat(20_001));
+    let (eng, id, _) = open("certified-unreadable", &s);
+    refused(&eng, id, "unreadable");
+}
+
+#[test]
+fn an_uncertified_document_is_not_locked() {
+    let (eng, id, _) = open("uncertified", &acrobat());
+    assert_eq!(lock_of(&eng, id).unwrap(), None);
 }

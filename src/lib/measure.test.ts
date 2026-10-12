@@ -32,7 +32,7 @@ const calls = (name: string) => invoke.mock.calls.filter((c) => c[0] === name);
 beforeEach(() => {
   invoke.mockReset();
   vi.mocked(applyState).mockReset();
-  useMeasure.setState({ open: false, tool: "distance", docs: {} });
+  useMeasure.setState({ open: false, tool: "distance", docs: {}, locks: {} });
   useStore.setState({ docs: { 1: { id: 1, name: "plan.pdf" } as never } });
 });
 
@@ -102,6 +102,36 @@ describe("measure store", () => {
     invoke.mockResolvedValue([]);
     await useMeasure.getState().refresh(1);
     expect(useMeasure.getState().get(1).selected).toBeNull();
+  });
+
+  it("a certified document is read once for its reason, and nothing is written on it", async () => {
+    const why = "This document is certified; its certification doesn't allow comments or measurements.";
+    invoke.mockResolvedValue(why);
+    await useMeasure.getState().ensureLock(1);
+    await useMeasure.getState().ensureLock(1);
+    expect(calls("measure_lock")).toHaveLength(1);
+    expect(useMeasure.getState().locks[1]).toBe(why);
+    invoke.mockClear();
+    expect(await useMeasure.getState().add(1, 0, "distance", [[0, 0], [72, 0]])).toBeNull();
+    await useMeasure.getState().setPageScale(1, 0, { paper: 1, paperUnit: "in", real: 5, realUnit: "ft" });
+    await useMeasure.getState().remove(1, { page: 0, xref: 7 });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(useMeasure.getState().get(1).error).toBe(why);
+  });
+
+  it("measures freely when nothing certifies the file, and reads the lock again when the file changes under it", async () => {
+    invoke.mockResolvedValue(null);
+    await useMeasure.getState().ensureLock(1);
+    expect(useMeasure.getState().locks[1]).toBeNull();
+    useMeasure.getState().onRev(1);
+    expect(useMeasure.getState().locks[1]).toBeUndefined();
+    await vi.waitFor(() => expect(calls("measure_lock")).toHaveLength(2));
+  });
+
+  it("an answer it cannot read counts as a refusal", async () => {
+    invoke.mockRejectedValue("engine gone");
+    await useMeasure.getState().ensureLock(1);
+    expect(useMeasure.getState().locks[1]).toBe("engine gone");
   });
 
   it("exports through a save token, and does nothing when the dialog is cancelled", async () => {

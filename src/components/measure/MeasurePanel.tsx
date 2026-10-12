@@ -100,6 +100,7 @@ function Last({ last }: { last: LastMeasure }) {
 /** One measurement: its value, scale and units; the scale can be changed (it is measured again) and it can be deleted. */
 function Selected({ doc, m }: { doc: number; m: Measure }) {
   const live = useMeasure((s) => scaleOf(s.docs[doc], m.page));
+  const locked = useMeasure((s) => s.locks[doc]) ?? null;
   const own = m.scale ?? live;
   const [text, setText] = useState(scaleLabel(own));
   useEffect(() => setText(scaleLabel(own)), [m.xref, m.scale?.paper, m.scale?.real, m.scale?.paperUnit, m.scale?.realUnit]);
@@ -129,7 +130,7 @@ function Selected({ doc, m }: { doc: number; m: Measure }) {
         <input
           className="cm-input"
           value={text}
-          disabled={m.scale === null}
+          disabled={m.scale === null || !!locked}
           aria-invalid={!parsed}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && parsed && changed && void ms().rescale(doc, ref, parsed)}
@@ -141,7 +142,7 @@ function Selected({ doc, m }: { doc: number; m: Measure }) {
           aria-label="Show in"
           title="Show this measurement in another unit"
           value={m.scale?.realUnit ?? ""}
-          disabled={m.scale === null}
+          disabled={m.scale === null || !!locked}
           onChange={(e) => m.scale && void ms().rescale(doc, ref, inUnit(m.scale, e.target.value as Unit))}
         >
           {m.scale === null && <option value="">?</option>}
@@ -151,11 +152,11 @@ function Selected({ doc, m }: { doc: number; m: Measure }) {
             </option>
           ))}
         </select>
-        <button className="cm-btn primary" disabled={!changed} onClick={() => parsed && void ms().rescale(doc, ref, parsed)}>
+        <button className="cm-btn primary" disabled={!changed || !!locked} title={locked ?? undefined} onClick={() => parsed && void ms().rescale(doc, ref, parsed)}>
           Apply scale
         </button>
         <span className="grow" />
-        <button className="cm-link" title="Delete (Delete key)" aria-label="Delete measurement" onClick={() => void ms().remove(doc, ref)}>
+        <button className="cm-link" disabled={!!locked} title={locked ?? "Delete (Delete key)"} aria-label="Delete measurement" onClick={() => void ms().remove(doc, ref)}>
           <Icon name="trash" size={14} />
         </button>
       </div>

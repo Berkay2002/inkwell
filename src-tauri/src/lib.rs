@@ -1170,6 +1170,7 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            measure::app::measure_lock,
             measure::app::measure_scale_get,
             measure::app::measure_scale_set,
             measure::app::measure_add,

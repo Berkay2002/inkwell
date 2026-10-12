@@ -8,6 +8,7 @@
 
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
+use mupdf::pdf::PdfDocument;
 use serde::Serialize;
 
 pub mod app;
@@ -35,6 +36,27 @@ pub struct PageScale {
     pub label: String,
 }
 
+/// Why nothing may be measured on this document, if so: a certification that does not allow annotations (`/P` 1 or 2)
+/// would be voided by a measurement or a page scale. A certification that cannot be read counts as one (`?`): the
+/// check fails closed. `/P` 3 allows annotations.
+pub fn refuse_certified(d: &PdfDocument) -> Result<()> {
+    match crate::outline::certified(d)? {
+        Some(p) if p <= 2 => Err(EngineError::Invalid("This document is certified; its certification doesn't allow comments or measurements.".into())),
+        _ => Ok(()),
+    }
+}
+
+/// The reason measuring is off for this document, or `None` when it is allowed (the UI greys the tools with it).
+pub fn lock_of(eng: &Engine, doc: DocId) -> Result<Option<String>> {
+    eng.read_custom(doc, |d| {
+        Ok(match refuse_certified(d) {
+            Ok(()) => None,
+            Err(EngineError::Invalid(m)) => Some(m),
+            Err(e) => Some(e.to_string()),
+        })
+    })
+}
+
 pub fn scale_get(eng: &Engine, doc: DocId, page: u32) -> Result<PageScale> {
     eng.read_custom(doc, |d| {
         let (scale, defined) = write::page_scale(d, page)?;
@@ -45,6 +67,7 @@ pub fn scale_get(eng: &Engine, doc: DocId, page: u32) -> Result<PageScale> {
 pub fn scale_set(eng: &Engine, doc: DocId, page: u32, scale: &Scale, source: EditSource) -> Result<EditState> {
     scale.validate().map_err(EngineError::Invalid)?;
     eng.apply_custom(doc, format!("Set measurement scale on p. {} to {}", page + 1, scale.label()), source, false, |d| {
+        refuse_certified(d)?;
         write::set_page_scale(d, page, scale)?;
         Ok(vec![page])
     })
@@ -65,6 +88,7 @@ pub fn add_one(
 ) -> Result<(EditState, i32, Quantity)> {
     let mut made = None;
     let state = eng.apply_custom(doc, format!("Add {} measurement on p. {}", kind.noun(), page + 1), source, false, |d| {
+        refuse_certified(d)?;
         made = Some(write::add(d, page, kind, points, scale, author)?);
         Ok(vec![page])
     })?;
@@ -78,6 +102,7 @@ pub fn rescale(eng: &Engine, doc: DocId, page: u32, xref: i32, scale: &Scale, so
     scale.validate().map_err(EngineError::Invalid)?;
     let mut made = None;
     let state = eng.apply_custom(doc, format!("Change the scale of a measurement on p. {} to {}", page + 1, scale.label()), source, false, |d| {
+        refuse_certified(d)?;
         let old = write::list(d)?
             .into_iter()
             .find(|m| m.page == page && m.xref == xref)
