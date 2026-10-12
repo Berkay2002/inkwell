@@ -747,7 +747,11 @@ fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec
         return Err(bad(format!("The field [ {} ] is read-only", e.name)));
     }
     // Typing never silently breaks a signature: a field a signature covers (its /Lock, a FieldMDP or a DocMDP of 1) is refused.
-    if e.kind != FieldKind::Signature && scripts::locked(&scripts::locks_of(rt.doc(), entries), e) {
+    let locks = scripts::locks_of(rt.doc(), entries);
+    if e.kind != FieldKind::Signature && scripts::locked(&locks, e) {
+        if locks.iter().any(|l| matches!(l, scripts::Lock::Unchecked)) {
+            return Err(bad(format!("The field [ {} ] is left as it is: too many form fields to check the signature locks", e.name)));
+        }
         return Err(bad(format!("The field [ {} ] is locked by a signature", e.name)));
     }
     let mut touched = vec![page];

@@ -583,6 +583,7 @@ pub fn edit(
         if entry.generation() != rev {
             return Err(EngineError::Stale);
         }
+        crate::outline::refuse_if_certified(d, "Changing its images")?;
         apply(d, page, index, change)?;
         Ok(vec![page])
     })?;

@@ -2542,3 +2542,23 @@ fn renaming_one_widget_of_a_field_renames_the_field() {
     assert_eq!(widgets_named(&eng, id, "consent").len(), 3);
     assert!(widgets_named(&eng, id, "agree").is_empty());
 }
+
+#[test]
+fn a_form_too_large_to_check_for_a_certification_refuses_typing_and_says_so() {
+    // The text field is object 3; the form lists it once and then past the walk's cap (20 000 nodes).
+    let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (A) /Rect [72 100 200 120] /F 4 /P 4 0 R >>";
+    let fields: String = "3 0 R ".repeat(20_001);
+    let (eng, id, _) = open_bytes(
+        "too-large-for-locks",
+        pdf_of(&[
+            format!("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{fields}] >> >>"),
+            "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+            widget.to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [3 0 R] >>".to_string(),
+        ]),
+    );
+    let err = fill(&eng, id, "A", text("x")).unwrap_err().to_string();
+    assert!(err.contains("too many form fields to check the signature locks"), "{err}");
+    assert!(!err.contains("locked by a signature"), "{err}");
+    assert_eq!(field(&eng, id, "A").value, "");
+}

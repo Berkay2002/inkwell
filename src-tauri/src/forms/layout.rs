@@ -5,7 +5,7 @@
 //! Positions are page space (what the page shows, /Rotate and the crop box applied: `Entry::rect`), written back through
 //! the annotation so the inverse transform is MuPDF's. The anchor of a selection is its **last** field, as in Acrobat.
 
-use super::author::{acro_form, follow_rename, refuse_if_certified, remove_ref, seed_on_state, user_rect};
+use super::author::{acro_form, follow_rename, remove_ref, seed_on_state, user_rect};
 use super::scripts;
 use super::*;
 
@@ -18,6 +18,12 @@ const MAX_PAGES: usize = 2000;
 const MAX_NAME: usize = 512;
 /// Smaller moves than this are not moves (float noise from the page transform).
 const EPS: f32 = 0.01;
+
+/// Every layout tool leaves a certified document alone, at any `/P` (P 3 allows form fill and comments, not moving or
+/// renaming fields). Called first inside each edit closure, so a refusal records no step.
+fn refuse_certified(doc: &PdfDocument) -> Result<()> {
+    crate::outline::refuse_if_certified(doc, "Changing its form fields")
+}
 
 /// What an align puts on the anchor's line. `HCenter` lines the horizontal centres up (one column), `VCenter` the
 /// vertical centres (one row): Acrobat's Align > Horizontally and Vertically.
@@ -147,7 +153,7 @@ fn redraw_all(doc: &PdfDocument, xrefs: &[i32]) -> Result<()> {
 
 /// Moves every field but the anchor (the last one) onto the anchor's edge or centre line. Same page.
 pub fn align(doc: &mut PdfDocument, items: &[Item], edge: Edge) -> Result<Option<Vec<u32>>> {
-    refuse_if_certified(doc)?;
+    refuse_certified(doc)?;
     let entries = scan(doc)?;
     let picked = pick(&entries, items, 2, "Align")?;
     guard(doc, &entries, &picked)?;
@@ -173,7 +179,7 @@ pub fn align(doc: &mut PdfDocument, items: &[Item], edge: Edge) -> Result<Option
 
 /// Centres the selection, as a group, on its page (per page when it spans several).
 pub fn center(doc: &mut PdfDocument, items: &[Item], axis: Axis) -> Result<Option<Vec<u32>>> {
-    refuse_if_certified(doc)?;
+    refuse_certified(doc)?;
     let entries = scan(doc)?;
     let picked = pick(&entries, items, 1, "Centre")?;
     guard(doc, &entries, &picked)?;
@@ -190,7 +196,7 @@ pub fn center(doc: &mut PdfDocument, items: &[Item], axis: Axis) -> Result<Optio
 
 /// Equal gaps between the fields along `axis`, the two outermost staying where they are. Three or more, one page.
 pub fn distribute(doc: &mut PdfDocument, items: &[Item], axis: Axis) -> Result<Option<Vec<u32>>> {
-    refuse_if_certified(doc)?;
+    refuse_certified(doc)?;
     if axis == Axis::Both {
         return Err(bad("Distribute works along one direction at a time"));
     }
@@ -218,7 +224,7 @@ pub fn distribute(doc: &mut PdfDocument, items: &[Item], axis: Axis) -> Result<O
 /// Gives every field the anchor's width and/or height, keeping its top-left corner (pulled back onto the page if the
 /// new size would run off it).
 pub fn match_size(doc: &mut PdfDocument, items: &[Item], dim: Dim) -> Result<Option<Vec<u32>>> {
-    refuse_if_certified(doc)?;
+    refuse_certified(doc)?;
     let entries = scan(doc)?;
     let picked = pick(&entries, items, 2, "Set to the same size")?;
     guard(doc, &entries, &picked)?;
@@ -241,7 +247,7 @@ pub fn match_size(doc: &mut PdfDocument, items: &[Item], dim: Dim) -> Result<Opt
 
 /// Moves the selection by `(dx, dy)` points (page space, y down), the group kept on its page.
 pub fn nudge(doc: &mut PdfDocument, items: &[Item], dx: f32, dy: f32) -> Result<Option<Vec<u32>>> {
-    refuse_if_certified(doc)?;
+    refuse_certified(doc)?;
     if !dx.is_finite() || !dy.is_finite() || dx.abs() > 10_000.0 || dy.abs() > 10_000.0 {
         return Err(bad("that is not a distance on the page"));
     }
@@ -448,7 +454,7 @@ fn single(doc: &PdfDocument, entries: &[Entry], item: Item, what: &str) -> Resul
 /// The same field again on other pages: new widgets of the field (one name, one value), at the same place, pulled
 /// back inside a page that is smaller. Returns the pages touched.
 pub fn duplicate_to_pages(doc: &mut PdfDocument, item: Item, pages: &[u32]) -> Result<Vec<u32>> {
-    refuse_if_certified(doc)?;
+    refuse_certified(doc)?;
     let entries = scan(doc)?;
     single(doc, &entries, item, "Duplicate")?;
     let e = pick(&entries, &[item], 1, "Duplicate")?[0];
@@ -497,7 +503,7 @@ pub struct Copied {
 /// them; to the right and down. The original becomes `name.0` and the copies `name.1`, `name.2`, ... in row order
 /// (Acrobat's naming); a place that would run off the page is skipped.
 pub fn copies(doc: &mut PdfDocument, item: Item, rows: u32, cols: u32, gap_x: f32, gap_y: f32) -> Result<(Copied, Vec<u32>)> {
-    refuse_if_certified(doc)?;
+    refuse_certified(doc)?;
     let cells = u64::from(rows) * u64::from(cols);
     if rows == 0 || cols == 0 || cells < 2 {
         return Err(bad("choose at least two places: more than one row or column"));
@@ -602,7 +608,7 @@ fn valid_name(name: &str) -> Result<()> {
 /// `merge`, which makes this field's widgets part of it (the other's value stays). Returns the pages touched, `None`
 /// when the name is the one it has.
 pub fn rename(doc: &mut PdfDocument, item: Item, name: &str, merge: bool) -> Result<Option<Vec<u32>>> {
-    refuse_if_certified(doc)?;
+    refuse_certified(doc)?;
     let full = name.trim();
     valid_name(full)?;
     let entries = scan(doc)?;

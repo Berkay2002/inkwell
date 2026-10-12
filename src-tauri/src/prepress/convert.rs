@@ -243,7 +243,7 @@ fn convert(
         IntentSource::Profile => format!("Convert colours to {}", spec.condition.as_deref().unwrap_or("CMYK")),
     };
     let step = |d: &mut PdfDocument| -> Result<Vec<u32>> {
-        super::refuse_certified(d, "Converting its colours")?;
+        crate::outline::refuse_if_certified(d, "Converting its colours")?;
         let count = d.page_count()?.max(0) as u32;
         let pages: Vec<u32> = match &spec.pages {
             Some(p) => {

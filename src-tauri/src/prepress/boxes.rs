@@ -204,7 +204,7 @@ pub fn set_boxes(eng: &Engine, doc: DocId, spec: &BoxSpec, source: EditSource) -
     }
     let label = format!("Set {}", spec.kind.label());
     eng.apply_custom(doc, label, source, false, |d| {
-        super::refuse_certified(d, "Changing its page boxes")?;
+        crate::outline::refuse_if_certified(d, "Changing its page boxes")?;
         let count = d.page_count()?.max(0) as u32;
         let pages: Vec<u32> = match &spec.pages {
             Some(p) => {
