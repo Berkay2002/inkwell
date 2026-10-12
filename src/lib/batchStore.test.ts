@@ -423,4 +423,26 @@ describe("run state machine", () => {
     expect(st().run!.cappedFolders).toEqual(["Big"]);
     expect(st().run!.files).toHaveLength(3);
   });
+
+  it("opening the wizard again under a running job keeps the run and its Cancel", async () => {
+    st().startRun(action());
+    vi.mocked(api.pickOpen).mockResolvedValue([ref("a")]);
+    await st().addFiles();
+    let job = 0;
+    vi.mocked(api.batchRun).mockImplementation((j) => {
+      job = j;
+      return new Promise(() => {});
+    });
+    void st().runNow();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(st().run!.phase).toBe("running");
+    useBatch.setState({ open: false });
+    await st().show();
+    expect(st().open).toBe(true);
+    expect(st().view).toBe("run");
+    expect(st().run!.phase).toBe("running");
+    st().cancel();
+    expect(api.batchCancel).toHaveBeenCalledWith(job);
+  });
 });

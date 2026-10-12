@@ -175,6 +175,11 @@ export const useBatch = create<BatchStore>((set, get) => {
     run: null,
 
     show: async () => {
+      // Opened again (the palette, the Tools panel) under a live run: the sheet stays as it is, with its Cancel.
+      if (runLocked(get().run)) {
+        set({ open: true });
+        return;
+      }
       set({ open: true, view: "list", editor: null, run: null, listError: null, confirmDelete: null });
       await get().refresh();
     },
