@@ -152,7 +152,7 @@ fn export_writes_new_files_and_folders_with_free_names() {
     assert!(err_of(&h, "export_document", json!({})).contains("required"));
     assert!(err_of(&h, "export_document", json!({ "format": "text", "pages": [9] })).contains("does not exist"));
     // a range or list that names no page is not "every page"
-    for bad in [json!({ "from": 3, "to": 1 }), json!({ "pages": ["x"] }), json!({ "pages": [] }), json!({ "pages": "1-2" })] {
+    for bad in [json!({ "from": 3, "to": 1 }), json!({ "pages": ["x"] }), json!({ "pages": [] }), json!({ "pages": "1-2" }), json!({ "to": 5 }), json!({ "from": "x" })] {
         let mut a = json!({ "format": "text" });
         a.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
         assert!(err_of(&h, "export_document", a.clone()).contains("name no page"), "{a}");

@@ -72,7 +72,7 @@ files).
 | `compress_document` | edit | a smaller copy next to the document; wants the saved file (unsaved changes are an `Err`) |
 | `ocr_document` | edit | invisible text layer, one undo step; pages that have text are skipped; Windows or Tesseract engine |
 | `export_document` | edit | text, HTML, Word, images, extract_images into a new file or folder next to the document; a password-protected document is refused before the card (the files carry no protection); a `pages` list or `from`/`to` range that names no page is an `Err`, not every page |
-| `convert_to_standard` | edit | a converted copy for PDF/A, PDF/UA or PDF/X plus a recheck; the original stays; a password-protected document is refused before the card (the copy would be written without its protection), and the card names the copy |
+| `convert_to_standard` | edit | a converted copy for PDF/A, PDF/UA or PDF/X plus a recheck; the original stays; a password-protected document is refused before the card (the copy would be written without its protection), and the card names the copy; a document that may not be copied out of is refused as well (decided: matches export and extract and Acrobat's permission handling) |
 | `create_blank_pdf` | edit | a new blank PDF (1-500 pages) offered as a separate document |
 
 Rules for the job tools: output is always a new file next to the document under a free name (`unique_stem`:
@@ -135,11 +135,14 @@ holds), laying out form fields, the custom stamps manager (stamp pictures come f
 
 ## Verification (2026-10-12)
 
-Tests (after merging main dc6315f: #30-#34 data exchange, forms layout, custom stamps, links; and the review fixes
-of b144e4e and da5d59f):
+Tests (after merging main dc6315f: #30-#34 data exchange, forms layout, custom stamps, links; the review fixes of
+b144e4e and da5d59f; and the two follow-up lows):
 
-- `cargo test --lib` full suite 1467 passed, 0 failed, 7 ignored (`ai::` 171 passed); `pnpm tsc --noEmit` clean,
+- `cargo test --lib` full suite 1468 passed, 0 failed, 7 ignored (`ai::` 172 passed); `pnpm tsc --noEmit` clean,
   `pnpm vitest run` 862 passed (55 files).
+- Follow-up lows: a lone `to`, a `from` that is no number, a reversed range, an empty list or a non-list `pages` is an
+  error in every tool that takes pages (`move` included), never every page; an XMP packet without its RDF element is
+  refused by a property change instead of being replaced whole.
 - Added by the second review round: a password field's value is never part of a compare answer ("(password field)");
   `export_document` refuses a password-protected document before the card (as convert does); an XMP packet that cannot
   be read stops a property change instead of being overwritten; a `pages` list or `from`/`to` range that names no page
