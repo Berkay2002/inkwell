@@ -475,7 +475,17 @@ fn the_child_has_no_tools_of_its_own_no_settings_and_no_credentials_on_its_comma
     assert!(a.iter().all(|x| !x.contains(&token)), "{a:?}");
     assert!(body.contains("127.0.0.1"));
     // the working directory is the child's own private folder, not the document's
-    assert!(spawn_cwd(&r.chats()[0]).contains("inkwell-claude-"), "{:?}", r.chats()[0]);
+    let cwd = spawn_cwd(&r.chats()[0]);
+    let name = Path::new(&cwd).file_name().unwrap().to_str().unwrap();
+    let hex = name.strip_prefix("inkwell-claude-").unwrap_or_else(|| panic!("{cwd}"));
+    assert!(hex.len() == 32 && hex.chars().all(|c| c.is_ascii_hexdigit()), "an unguessable name: {name}");
+    assert_eq!(Path::new(&cfg).parent().unwrap().file_name().unwrap(), name, "mcp.json is in that folder");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &str| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!((mode(&cwd), mode(&cfg)), (0o700, 0o600), "only the owner can enter or read");
+    }
 }
 
 fn spawn_cwd(s: &Value) -> String {

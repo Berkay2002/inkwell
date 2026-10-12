@@ -406,7 +406,7 @@ fn an_embedded_index_of_pages_that_changed_afterwards_is_not_used() {
     embed::embed(&eng, id, EditSource::User).unwrap();
     eng.save(id, None).unwrap();
     drop(eng);
-    let open = || PdfDocument::open(&*p).unwrap();
+    let open = || PdfDocument::open(&*p.to_string_lossy()).unwrap();
     let before = open();
     let n = before.page_count().unwrap() as u32;
     let id_before = pdf_id(&before);
@@ -419,7 +419,7 @@ fn an_embedded_index_of_pages_that_changed_afterwards_is_not_used() {
     let tmp = base.join("b.pdf");
     changed.save(&tmp.to_string_lossy()).unwrap();
     drop(changed);
-    let after = PdfDocument::open(&*tmp).unwrap();
+    let after = PdfDocument::open(&*tmp.to_string_lossy()).unwrap();
     assert_eq!(pdf_id(&after), id_before);
     assert!(embed::status(&after).present);
     assert!(!embed::status(&after).current);
@@ -459,7 +459,7 @@ fn embed_and_save(p: &Path) {
 }
 
 fn current(p: &Path) -> bool {
-    embed::status(&PdfDocument::open(p).unwrap()).current
+    embed::status(&PdfDocument::open(&*p.to_string_lossy()).unwrap()).current
 }
 
 #[test]
@@ -468,7 +468,7 @@ fn text_only_in_a_form_xobject_is_part_of_the_fingerprint() {
     let p = write(&base, "a.pdf", form_text_pdf("the form words"));
     embed_and_save(&p);
     assert!(current(&p));
-    let doc = PdfDocument::open(&*p).unwrap();
+    let doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
     let t = embed::read(&doc, 1, &pdf_id(&doc)).unwrap();
     assert!(t.pages[0].text.text.contains("the form words"), "the form's text is in the index");
     let mut fm = doc.find_page(0).unwrap().get_dict("Resources").unwrap().unwrap().get_dict("XObject").unwrap().unwrap().get_dict("Fm0").unwrap().unwrap();
@@ -476,7 +476,7 @@ fn text_only_in_a_form_xobject_is_part_of_the_fingerprint() {
     let b = base.join("b.pdf");
     doc.save(&b.to_string_lossy()).unwrap();
     assert!(!current(&b), "a change that only the form's stream shows is seen");
-    assert!(embed::read(&PdfDocument::open(&*b).unwrap(), 1, &pdf_id(&doc)).is_none());
+    assert!(embed::read(&PdfDocument::open(&*b.to_string_lossy()).unwrap(), 1, &pdf_id(&doc)).is_none());
 }
 
 #[test]
@@ -485,7 +485,7 @@ fn a_font_encoding_change_is_part_of_the_fingerprint() {
     let p = write(&base, "a.pdf", form_text_pdf("encoded words"));
     embed_and_save(&p);
     assert!(current(&p));
-    let doc = PdfDocument::open(&*p).unwrap();
+    let doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
     let mut font = doc.find_page(0).unwrap().get_dict("Resources").unwrap().unwrap().get_dict("XObject").unwrap().unwrap().get_dict("Fm0").unwrap().unwrap()
         .get_dict("Resources").unwrap().unwrap().get_dict("Font").unwrap().unwrap().get_dict("F1").unwrap().unwrap();
     font.dict_put("Encoding", PdfObject::new_name("MacRomanEncoding").unwrap()).unwrap();
@@ -507,7 +507,7 @@ fn a_field_value_kept_on_the_parent_is_part_of_the_fingerprint() {
     };
     let p = write(&base, "a.pdf", doc_with(&[vec!["body"]], extra));
     embed_and_save(&p);
-    let doc = PdfDocument::open(&*p).unwrap();
+    let doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
     let t = embed::read(&doc, 1, &pdf_id(&doc)).unwrap();
     assert_eq!(t.pages[0].fields.first().map(|f| f.0.as_str()), Some("original value"));
     let mut parent = doc.catalog().unwrap().get_dict("AcroForm").unwrap().unwrap().get_dict("Fields").unwrap().unwrap().get_array(0).unwrap().unwrap();
@@ -521,13 +521,14 @@ fn a_field_value_kept_on_the_parent_is_part_of_the_fingerprint() {
 fn fingerprinting_is_bounded_and_the_dict_is_checked_before_the_blob() {
     let base = dir("catalog-fp-bound");
     let p = write(&base, "a.pdf", form_text_pdf("some words"));
-    let doc = PdfDocument::open(&*p).unwrap();
+    let doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
     assert!(embed::fingerprint_with(&doc, 1 << 20, 1 << 20).is_some());
     assert!(embed::fingerprint_with(&doc, 8, 1 << 20).is_none(), "a stream over its cap is not vouched for");
     assert!(embed::fingerprint_with(&doc, 1 << 20, 40).is_none(), "nor are streams over the file's budget");
     // A claim for another page count is "out of date" from the dict alone: the blob is garbage here and never read.
+    drop(doc); // Windows can't save over a file that is still open
     embed_and_save(&p);
-    let doc = PdfDocument::open(&*p).unwrap();
+    let doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
     let mut s = doc.catalog().unwrap().get_dict("PieceInfo").unwrap().unwrap().get_dict("Inkwell").unwrap().unwrap().get_dict("Private").unwrap().unwrap();
     s.dict_put("Pages", PdfObject::new_int(99).unwrap()).unwrap();
     s.write_stream_string("not an index at all").unwrap();
@@ -546,7 +547,7 @@ fn comment_and_field_text_is_charged_to_the_fingerprint_budget() {
         objs: vec![format!("<< /Type /Annot /Subtype /Text /Rect [72 400 90 420] /Contents ({long}) >>")],
     };
     let p = write(&base, "a.pdf", doc_with(&[vec!["body"]], extra));
-    let doc = PdfDocument::open(&*p).unwrap();
+    let doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
     assert!(embed::fingerprint_with(&doc, 1 << 20, 1 << 20).is_some());
     assert!(embed::fingerprint_with(&doc, 1 << 20, 1000).is_none(), "a long comment is not free");
 }
@@ -570,7 +571,7 @@ fn current_after(name: &str, bytes: Vec<u8>, change: impl FnOnce(&PdfDocument)) 
     let p = write(&base, "a.pdf", bytes);
     embed_and_save(&p);
     assert!(current(&p), "{name}: the index is current before the change");
-    let doc = PdfDocument::open(&*p).unwrap();
+    let doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
     change(&doc);
     let b = base.join("b.pdf");
     doc.save(&b.to_string_lossy()).unwrap();
@@ -657,7 +658,7 @@ fn a_resources_dict_shared_by_many_pages_is_walked_once_and_a_huge_one_runs_the_
     objs.extend((0..pages).map(|_| "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources 3 0 R >>".to_string()));
     let base = dir("catalog-fp-shared");
     let p = write(&base, "a.pdf", crate::search::tests::pdf_of(&objs));
-    let doc = PdfDocument::open(&*p).unwrap();
+    let doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
     let t = std::time::Instant::now();
     assert!(embed::fingerprint_with(&doc, 1 << 20, 64 << 20).is_some(), "walked once, well inside the budget");
     assert!(embed::fingerprint_in(&doc, 1 << 20, 64 << 20, 10_000).is_none(), "20000 entries are not free: the walk runs out of steps");
@@ -680,7 +681,7 @@ fn empty_content_parts_and_annotation_lists_shared_by_pages_cost_steps() {
     objs.extend((0..pages).map(|_| "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 3 0 R /Annots 3 0 R >>".to_string()));
     let base = dir("catalog-fp-steps");
     let p = write(&base, "a.pdf", crate::search::tests::pdf_of(&objs));
-    let doc = PdfDocument::open(&*p).unwrap();
+    let doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
     let t = std::time::Instant::now();
     assert!(embed::fingerprint_in(&doc, 1 << 20, 64 << 20, 100_000).is_none(), "a million empty parts are not free");
     assert!(t.elapsed().as_secs() < 30, "{:?}", t.elapsed());
@@ -760,7 +761,7 @@ fn a_corrupt_index_shows_as_unusable_before_a_refresh_trusts_it() {
 fn embedded_bookmarks_that_name_missing_pages_are_dropped() {
     let base = dir("catalog-bookmark-range");
     let p = write(&base, "a.pdf", plain(&[vec!["only page"]]));
-    let mut doc = PdfDocument::open(&*p).unwrap();
+    let mut doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
     // (A file without /ID gets one when it is embedded; the index is matched by it.)
     embed::add(&mut doc).unwrap();
     let mut t = read_pages(&doc, &AtomicBool::new(false)).unwrap();
@@ -809,7 +810,7 @@ fn a_certified_or_signed_document_gets_no_index_written_updated_or_removed() {
         assert_eq!(std::fs::read(&p).unwrap(), before, "{name}: the file is as it was");
 
         // With one (made before it was signed): Update and Remove are refused, the index stays, no step is made.
-        let mut doc = PdfDocument::open(&*p).unwrap();
+        let mut doc = PdfDocument::open(&*p.to_string_lossy()).unwrap();
         embed::install_for_test(&mut doc, &index_text());
         let q = base.join("b.pdf");
         doc.save(&q.to_string_lossy()).unwrap();
