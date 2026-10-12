@@ -414,8 +414,8 @@ pub fn picture(dir: &Path, id: &str) -> Result<(Stamp, Vec<u8>)> {
 pub fn place_rect(at: [f32; 2], aspect: f32, page: Rect) -> [f32; 4] {
     let (pw, ph) = ((page.x1 - page.x0).max(1.0), (page.y1 - page.y0).max(1.0));
     let aspect = if aspect.is_finite() && aspect > 1e-3 { aspect } else { 1.0 };
-    let (mut w, mut h) = (DEFAULT_WIDTH.min(pw), 0.0);
-    h = (w / aspect).max(1.0);
+    let mut w = DEFAULT_WIDTH.min(pw);
+    let mut h = (w / aspect).max(1.0);
     if h > ph {
         h = ph;
         w = (h * aspect).max(1.0);
@@ -460,6 +460,7 @@ pub fn place(doc: &mut PdfDocument, page: u32, s: &Stamp, png: &[u8], at: [f32; 
 }
 
 /// [`place`] as one undo step.
+#[allow(clippy::too_many_arguments)]
 pub fn place_one(eng: &Engine, doc: DocId, page: u32, s: &Stamp, png: &[u8], at: [f32; 2], author: &str, source: EditSource) -> Result<(EditState, i32)> {
     let mut xref = 0;
     let state = eng.apply_custom(doc, format!("Add stamp on p. {}", page + 1), source, false, |d| {
