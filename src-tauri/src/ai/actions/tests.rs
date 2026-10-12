@@ -474,7 +474,7 @@ fn certify(h: &Host, p: Option<i32>, lock: Option<&str>) {
                 field.dict_put("Lock", lock)?;
             }
             let field = d.add_object(&field)?;
-            let mut form = match d.catalog()?.get_dict("AcroForm")? {
+            let form = match d.catalog()?.get_dict("AcroForm")? {
                 Some(f) => f,
                 None => {
                     // an indirect object, as in a real file, so adding to its array is a change of it

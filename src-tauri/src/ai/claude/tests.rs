@@ -99,6 +99,7 @@ impl Rig {
                     h.fetch_add(1, Ordering::SeqCst);
                     Ok(Output::text("changed"))
                 }),
+                check: None,
             }));
             hits
         };
@@ -925,6 +926,7 @@ fn live_with_the_installed_claude() {
             h.fetch_add(1, Ordering::SeqCst);
             Ok(Output::text("The note was added."))
         }),
+        check: None,
     }));
     let r = Rig { p: ClaudeProvider::new(tools), log: log_file("live") };
     let st = r.p.status();
