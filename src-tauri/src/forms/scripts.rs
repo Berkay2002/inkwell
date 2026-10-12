@@ -500,18 +500,19 @@ pub(crate) enum Lock {
     All,
     /// The form was too large to check for a certification: it counts as locked, and the message says why.
     Unchecked,
-    Include(Vec<String>),
-    Exclude(Vec<String>),
+    Include(std::collections::HashSet<String>),
+    Exclude(std::collections::HashSet<String>),
 }
 
 /// The names in a `/Lock /Fields` array, and whether all of them were read (the array is there, holds at most 4096
 /// entries, and each is a name or string).
-fn lock_names(lock: &PdfObject) -> (Vec<String>, bool) {
+fn lock_names(lock: &PdfObject) -> (std::collections::HashSet<String>, bool) {
     // Not an array (`/Fields (Sum)`): the names it meant are unknown, so the lock is not read in full.
-    let Some(a) = get(lock, "Fields").filter(|a| a.is_array().unwrap_or(false)) else { return (Vec::new(), false) };
+    let Some(a) = get(lock, "Fields").filter(|a| a.is_array().unwrap_or(false)) else { return (Default::default(), false) };
     let len = a.len().unwrap_or(0);
     let names: Vec<String> = (0..len.min(4096) as i32).filter_map(|i| a.get_array(i).ok().flatten().as_ref().and_then(text)).collect();
     let complete = len <= 4096 && names.len() == len;
+    let names = names.into_iter().collect();
     (names, complete)
 }
 
@@ -621,7 +622,8 @@ pub(crate) fn locked(locks: &[Lock], e: &Entry) -> bool {
 
 /// Whether a field with this full name is covered by a signature's lock (a field about to take the name, too).
 pub(crate) fn name_locked(locks: &[Lock], name: &str) -> bool {
-    let named = |names: &[String]| names.iter().any(|n| name == n || name.starts_with(&format!("{n}.")));
+    // The name itself or any field above it (`a` covers `a.b`): one lookup per level, however many names a lock has.
+    let named = |names: &std::collections::HashSet<String>| name.match_indices('.').map(|(i, _)| &name[..i]).chain([name]).any(|n| names.contains(n));
     locks.iter().any(|l| match l {
         Lock::All | Lock::Unchecked => true,
         Lock::Include(n) => named(n),

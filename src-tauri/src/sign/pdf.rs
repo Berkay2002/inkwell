@@ -151,7 +151,7 @@ pub(super) fn sign_with(base: &[u8], id: &DigitalId, req: &SignRequest, tamper: 
             if fields[k].value.is_some() {
                 return Err(refuse(format!("the field {n:?} is already signed")));
             }
-            if let Some(why) = refusal(p, &fields, &fields[k]) {
+            if let Some(why) = refusal(p, &locks_of(&fields), &fields[k]) {
                 return Err(refuse(why));
             }
             let f = fields.into_iter().nth(k).ok_or_else(|| refuse("the field"))?;
@@ -546,21 +546,27 @@ const CERTIFIED_P1: &str = "The document is certified with no changes allowed, s
 /// Why a new signature may not go into the empty signature field `f`, given the document's DocMDP level `p`: a
 /// certification that allows no changes, a read-only field, or a field an earlier signature locks (FieldMDP, ISO 32000-1
 /// 12.8.2.4, and the field's `/Lock`, 12.7.5.5). `sign` refuses with this and `list` reports it, so they agree.
-fn refusal(p: Option<u8>, fields: &[SigField], f: &SigField) -> Option<String> {
+fn refusal(p: Option<u8>, locks: &Locks, f: &SigField) -> Option<String> {
     if p == Some(1) {
         return Some(CERTIFIED_P1.into());
     }
     if f.read_only {
         return Some(format!("Field {} is read-only, so it can't be signed.", f.name));
     }
-    locked_by(fields, &f.name).map(|who| format!("Field {} is locked by {who}'s signature.", f.name))
+    locked_by(locks, &f.name).map(|who| format!("Field {} is locked by {who}'s signature.", f.name))
+}
+
+/// Each signature's locks (FieldMDP and `/Lock`) with its signer: read once, then asked per field.
+type Locks = Vec<(Vec<crate::forms::scripts::Lock>, PdfObject)>;
+
+fn locks_of(fields: &[SigField]) -> Locks {
+    use crate::forms::scripts::signature_locks;
+    fields.iter().filter_map(|g| Some((signature_locks(&g.field, &g.widget), g.value.clone()?))).filter(|(l, _)| !l.is_empty()).collect()
 }
 
 /// The signer of the first signature whose lock covers the field named `name`.
-fn locked_by(fields: &[SigField], name: &str) -> Option<String> {
-    use crate::forms::scripts::{name_locked, signature_locks};
-    let g = fields.iter().find(|g| g.value.is_some() && name_locked(&signature_locks(&g.field, &g.widget), name))?;
-    Some(g.value.as_ref().map(signer_name).unwrap_or_default())
+fn locked_by(locks: &Locks, name: &str) -> Option<String> {
+    locks.iter().find(|(l, _)| crate::forms::scripts::name_locked(l, name)).map(|(_, v)| signer_name(v))
 }
 
 /// Who signed: the certificate's name as the list shows it, else `/Name`, else the field.
@@ -776,10 +782,11 @@ pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<SignList> 
         return Err(refuse(format!("this document has more than {MAX_SIGNATURES} signatures, more than Inkwell checks")));
     }
     let mut infos: Vec<SignatureInfo> = fields.iter().map(|f| info(f, bytes, trust)).collect();
+    let locks = locks_of(&fields);
     for (f, i) in fields.iter().zip(infos.iter_mut()) {
-        i.locked_by = locked_by(&fields, &f.name);
+        i.locked_by = locked_by(&locks, &f.name);
         if f.value.is_none() {
-            i.refused = refusal(p, &fields, f);
+            i.refused = refusal(p, &locks, f);
         }
     }
     // An intact signature must belong to its field in the bytes it signs (see `bound`) before it
@@ -937,12 +944,14 @@ fn locked_changes(g: &SigField, then: &PdfDocument, now: &PdfDocument) -> Vec<St
     }
     let prints = |d: &PdfDocument| -> Option<BTreeMap<String, Vec<String>>> {
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        // One budget for the whole form: a hostile one can't make each of thousands of fields cost 10 000 nodes.
+        let mut budget = 100_000;
         for e in crate::forms::scan(d).ok()? {
             if !name_locked(&locks, &e.name) {
                 continue;
             }
-            let v = e.field.get_dict_inheritable("V").ok()?.map_or(Some(String::new()), |v| deep_of(&v))?;
-            let ap = e.obj.get_dict("AP").ok()?.map_or(Some(String::new()), |a| deep_of(&a))?;
+            let v = e.field.get_dict_inheritable("V").ok()?.map_or(Some(String::new()), |v| deep_of(&v, &mut budget))?;
+            let ap = e.obj.get_dict("AP").ok()?.map_or(Some(String::new()), |a| deep_of(&a, &mut budget))?;
             out.entry(e.name).or_default().push(format!("{v}|{ap}"));
         }
         Some(out)
@@ -955,11 +964,11 @@ fn locked_changes(g: &SigField, then: &PdfDocument, now: &PdfDocument) -> Vec<St
 /// bytes' hash), to compare it across revisions. `None` past 10 000 nodes or 64 levels (the app
 /// checks on a small stack).
 fn deep(d: &PdfDocument, n: i32) -> Option<String> {
-    deep_of(&d.new_indirect(n, 0).ok()?)
+    deep_of(&d.new_indirect(n, 0).ok()?, &mut 10_000)
 }
 
-/// [`deep`] from any object.
-fn deep_of(o: &PdfObject) -> Option<String> {
+/// [`deep`] from any object, spending nodes from `budget` (`None` when it runs out).
+fn deep_of(o: &PdfObject, budget: &mut u32) -> Option<String> {
     use std::fmt::Write;
     fn walk(o: &PdfObject, seen: &mut std::collections::HashSet<i32>, out: &mut String, budget: &mut u32, depth: u32) -> Option<()> {
         *budget = budget.checked_sub(1)?;
@@ -1000,7 +1009,7 @@ fn deep_of(o: &PdfObject) -> Option<String> {
         Some(())
     }
     let mut out = String::new();
-    walk(o, &mut Default::default(), &mut out, &mut 10_000, 0)?;
+    walk(o, &mut Default::default(), &mut out, budget, 0)?;
     Some(out)
 }
 
