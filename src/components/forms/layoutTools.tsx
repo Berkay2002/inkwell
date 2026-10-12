@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useA11y } from "../../lib/a11y";
+import { isSigned, useA11y } from "../../lib/a11y";
 import { type AlignEdge, type LayoutAxis, type SizeDim, useForms } from "../../lib/forms";
 import { CERTIFIED_REASON, type Field, type LayoutOp, type Pick, layoutReason } from "../../lib/formsLogic";
 import type { IconName } from "../Icons";
@@ -83,4 +83,9 @@ export function layoutMenu(doc: number, picked: Pick[], fields: Field[], certifi
     onSelect: () => void fm().remove(doc, picked),
   });
   return out;
+}
+
+/** Whether the document is signed and not certified: its layout changes are saved after the signed part. */
+export function useSigned(doc: number): boolean {
+  return useA11y((s) => isSigned(s.docs[doc]));
 }

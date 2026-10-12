@@ -4,11 +4,12 @@ import {
   type Field, FIELD_ICON, KIND_LABEL, NudgeBatch, SHORT, anchorOf, detectSummary, fieldLabel, isFillable, layoutReason, logCount, missingRequired,
   nudgeDelta, onPage, progress, renameCheck, rows, samePick, summary,
 } from "../../lib/formsLogic";
+import { SIGNED_NOTE } from "../../lib/a11yLogic";
 import { parseRange } from "../../lib/pageRange";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
 import { FieldProps } from "./FieldProps";
-import { LAYOUT_GROUPS, useCertified } from "./layoutTools";
+import { LAYOUT_GROUPS, useCertified, useSigned } from "./layoutTools";
 import "./forms.css";
 
 const fm = () => useForms.getState();
@@ -454,6 +455,7 @@ function LayoutTools({ doc, pageCount, picked, fields, certified }: {
 }) {
   const dialog = useForms((s) => (s.dialog?.doc === doc ? s.dialog.kind : null));
   const uid = useId();
+  const signed = useSigned(doc);
   const [note, setNote] = useState<string | null>(null);
   const anchor = anchorOf(picked);
   const anchorField = anchor ? fields.find((f) => samePick(f, anchor)) : null;
@@ -500,7 +502,10 @@ function LayoutTools({ doc, pageCount, picked, fields, certified }: {
       {certified ? (
         <p className="fm-note warn">This document is certified, so its form fields cannot be changed.</p>
       ) : (
-        picked.length < 2 && <p className="dim small" style={{ margin: 0 }}>Ctrl- or Shift-click more fields, or drag a box around them. The last one picked is the anchor. Arrow keys nudge (Shift: 10 pt).</p>
+        <>
+          {signed && <p className="fm-note">{SIGNED_NOTE}</p>}
+          {picked.length < 2 && <p className="dim small" style={{ margin: 0 }}>Ctrl- or Shift-click more fields, or drag a box around them. The last one picked is the anchor. Arrow keys nudge (Shift: 10 pt).</p>}
+        </>
       )}
       {dialog === "duplicate" && <DuplicateDialog doc={doc} pageCount={pageCount} onDone={(m) => setNote(m)} />}
       {dialog === "copies" && <CopiesDialog doc={doc} onDone={(m) => setNote(m)} />}
