@@ -899,7 +899,12 @@ fn stamp(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment) -> Result<()>
         }
     }
     if let Some(f) = c.flags {
-        a.set_flags(AnnotationFlags::from_bits_truncate(f))?;
+        let mut f = AnnotationFlags::from_bits_truncate(f);
+        // A reply or review state stays hidden on the page, whatever flags the file gives it.
+        if !c.parent.is_empty() {
+            f |= AnnotationFlags::IS_HIDDEN;
+        }
+        a.set_flags(f)?;
     }
     if c.sub == Sub::Text && !c.icon.is_empty() {
         a.set_icon_name(&c.icon)?;

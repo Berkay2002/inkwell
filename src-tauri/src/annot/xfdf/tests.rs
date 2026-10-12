@@ -178,6 +178,33 @@ fn a_reply_that_bears_the_name_of_another_type_of_comment_leaves_it_alone() {
 }
 
 #[test]
+fn an_imported_reply_and_state_stay_hidden_on_the_page_whatever_flags_the_file_gives_them() {
+    let (eng, id, _) = fresh("reply-hidden");
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="50,50,60,60" name="n"><contents>note</contents></text>
+        <text page="0" rect="50,50,60,60" name="r" inreplyto="n" replyType="R" flags="print"><contents>reply</contents></text>
+        <text page="0" rect="50,50,60,60" name="s" inreplyto="n" replyType="R" statemodel="Review" state="Completed" flags="print"/>
+        </annots></xfdf>"##;
+    let r = import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.added, 3, "{:?}", r.summary);
+    let flags = |xref: i32| {
+        eng.read_custom(id, |d| {
+            let (_p, a) = find(d, 0, xref)?;
+            Ok(a.flags()?)
+        })
+        .unwrap()
+    };
+    let all = list_all(&eng, id).unwrap();
+    let replies: Vec<_> = all.iter().filter(|d| d.parent.is_some()).collect();
+    assert!(!replies.is_empty());
+    for d in replies {
+        assert!(flags(d.xref).contains(AnnotationFlags::IS_HIDDEN), "{:?} shows on the page", d.contents);
+    }
+    let note = all.iter().find(|d| d.parent.is_none()).unwrap();
+    assert!(!flags(note.xref).contains(AnnotationFlags::IS_HIDDEN));
+}
+
+#[test]
 fn a_page_out_of_range_and_types_the_files_cannot_carry_are_skipped_and_counted() {
     let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
         <square page="9" rect="100,600,200,700" name="far"/>
