@@ -42,6 +42,8 @@ export interface FormExported {
   count: number;
   /** Password fields: their values are never written to a file. */
   leftOut?: number;
+  /** Fields left out for a value over 1 MB, which a file Inkwell reads cannot hold. */
+  longText?: number;
 }
 
 /** What each import may do to a document (engine `data_gates`): a certification's `/P` 1 allows neither, 2 form data only, 3 both. */
@@ -96,7 +98,8 @@ export function commentsExportText(r: CommentsExported, file: string): string {
 
 export function formExportText(r: FormExported, file: string): string {
   const left = r.leftOut ? ` ${plural(r.leftOut, "password field")} left out.` : "";
-  return `Exported ${plural(r.count, "field")} to ${file}.${left}`;
+  const long = r.longText ? ` ${plural(r.longText, "field")} with a value over 1 MB left out.` : "";
+  return `Exported ${plural(r.count, "field")} to ${file}.${left}${long}`;
 }
 
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
