@@ -216,7 +216,7 @@ fn estimate_many(
             let mut d = open_pdf(&base.0, None)?;
             if let Some(io) = image_options(&opts.images) {
                 let mut cb = |_: u32, _: usize, _: usize| cancel.load(Ordering::Relaxed);
-                if let Err(e) = d.rewrite_images(&io, &mut cb) {
+                if let Err(e) = super::rewrite_images(&mut d, &io, &mut cb) {
                     return Err(if cancel.load(Ordering::Relaxed) { Error::Cancelled } else { e.into() });
                 }
             }
