@@ -3,6 +3,7 @@
 
 use super::*;
 use mupdf::pdf::{PdfDocument, PdfWriteOptions};
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 // ---- a tiny PDF writer ------------------------------------------------------------------------
@@ -910,6 +911,157 @@ endobj
     let c = compare(&pdf, &pdf, &CompareOptions::default()).unwrap();
     assert!(c.identical);
     assert!(t.elapsed().as_secs_f32() < 3.0, "took {:?}", t.elapsed());
+}
+
+// ---- page ranges ------------------------------------------------------------------------------------
+
+fn cmp_in(a: &DocSpec, pages_a: Option<&[u32]>, b: &DocSpec, pages_b: Option<&[u32]>) -> Result<Comparison> {
+    let opts = CompareOptions { pages_a: pages_a.map(<[u32]>::to_vec), pages_b: pages_b.map(<[u32]>::to_vec), ..Default::default() };
+    compare(&build(a), &build(b), &opts)
+}
+
+/// `a` = 8 pages; `b` = 8 pages whose pages 2-4 (0-based 1..=3) are `a`'s pages 4-6 (0-based 3..=5), the middle
+/// one edited, and whose first page differs from `a`'s (outside both ranges).
+fn shifted() -> (DocSpec, DocSpec) {
+    let mut a = base(8);
+    a.pages[4].lines.push((72.0, 500.0, "Signed by: blank on the last day".into()));
+    let mut b = base(8);
+    b.pages[0].lines.push((72.0, 500.0, "Only the first page of the new file says this".into()));
+    for k in 0..3 {
+        b.pages[1 + k] = a.pages[3 + k].clone();
+    }
+    b.pages[2].lines.last_mut().unwrap().2 = "Signed by: A. Novak on the last day".into();
+    (a, b)
+}
+
+#[test]
+fn a_range_on_each_side_pairs_the_picked_pages_under_their_own_numbers() {
+    let (a, b) = shifted();
+    let c = cmp_in(&a, Some(&[3, 4, 5]), &b, Some(&[1, 2, 3])).unwrap();
+    assert_eq!(kinds(&c), vec![ChangeKind::TextChanged], "{:?}", labels(&c));
+    let ch = &c.changes[0];
+    assert_eq!((ch.a_page, ch.b_page), (Some(4), Some(2)));
+    assert_eq!(ch.label, "Text changed on p. 3: 'blank' -> 'A. Novak'");
+    let m = &c.pages;
+    assert_eq!((m.a_pages, m.b_pages), (3, 3));
+    assert_eq!((&m.a_ids[..], &m.b_ids[..]), (&[3, 4, 5][..], &[1, 2, 3][..]));
+    assert_eq!(m.b_to_a, vec![Some(3), Some(4), Some(5)]);
+    assert!(m.removed_a.is_empty());
+    // without the ranges the files differ everywhere: the first page of B is no longer outside the comparison
+    assert!(cmp(&a, &b).changes.len() > 1);
+}
+
+#[test]
+fn a_range_on_one_side_only() {
+    let (a, b) = shifted();
+    // B as a file of its own: a's pages 4-6 (0-based 3..=5), the middle one edited
+    let only = DocSpec { pages: b.pages[1..4].to_vec(), info: b.info.clone(), ..Default::default() };
+    let c = cmp_in(&a, Some(&[3, 4, 5]), &only, None).unwrap();
+    assert_eq!(c.pages.a_ids, vec![3, 4, 5]);
+    assert_eq!(c.pages.b_ids, vec![0, 1, 2]);
+    assert_eq!(c.pages.b_to_a, vec![Some(3), Some(4), Some(5)]);
+    assert_eq!(kinds(&c), vec![ChangeKind::TextChanged], "{:?}", labels(&c));
+    assert_eq!((c.changes[0].a_page, c.changes[0].b_page), (Some(4), Some(1)));
+    // and the range on the right side only
+    let old = DocSpec { pages: a.pages[3..6].to_vec(), info: a.info.clone(), ..Default::default() };
+    let c = cmp_in(&old, None, &b, Some(&[1, 2, 3])).unwrap();
+    assert_eq!(c.pages.a_ids, vec![0, 1, 2]);
+    assert_eq!((c.changes[0].a_page, c.changes[0].b_page), (Some(1), Some(2)));
+}
+
+#[test]
+fn ranges_of_different_lengths_report_the_unmatched_pages_by_their_numbers() {
+    // the same bytes on both sides: the picked pages are what differ
+    let a = base(6);
+    let c = cmp_in(&a, Some(&[1, 2, 3, 4]), &a, Some(&[1, 2])).unwrap();
+    assert_eq!(kinds(&c), vec![ChangeKind::PageRemoved, ChangeKind::PageRemoved]);
+    assert_eq!(labels(&c), vec!["Page 4 removed", "Page 5 removed"]);
+    assert_eq!(c.pages.removed_a, vec![3, 4]);
+    assert_eq!((c.pages.a_pages, c.pages.b_pages), (4, 2));
+    assert!(!c.identical);
+
+    // the first pages are not the same pages on the two sides
+    let c = cmp_in(&base(3), Some(&[0, 1]), &base(3), Some(&[1, 2])).unwrap();
+    assert_eq!(labels(&c), vec!["Page 1 removed", "Page 3 added"]);
+    assert_eq!(c.pages.b_to_a, vec![Some(1), None]);
+}
+
+#[test]
+fn the_same_pages_of_the_same_file_are_identical_and_still_report_which_pages() {
+    let a = base(5);
+    for pages_b in [&[3, 1][..], &[1, 3, 3][..]] {
+        let c = cmp_in(&a, Some(&[3, 1]), &a, Some(pages_b)).unwrap();
+        assert!(c.identical);
+        assert_eq!(c.pages.a_ids, vec![1, 3]);
+        assert_eq!(c.pages.b_to_a, vec![Some(1), Some(3)]);
+    }
+}
+
+#[test]
+fn an_invalid_range_is_refused_with_a_message() {
+    let (a, b) = (base(3), base(4));
+    let e = cmp_in(&a, Some(&[1, 3]), &b, None).unwrap_err();
+    assert_eq!(e, DiffError::PageOutOfRange { side: Side::A, page: 4, count: 3 });
+    assert_eq!(e.to_string(), "the first file has 3 pages, so page 4 is out of range");
+    let e = cmp_in(&a, None, &b, Some(&[0, 9])).unwrap_err();
+    assert_eq!(e.to_string(), "the second file has 4 pages, so page 10 is out of range");
+    assert_eq!(cmp_in(&a, Some(&[]), &b, None).unwrap_err(), DiffError::NoPages { side: Side::A });
+    // identical bytes take no shortcut around the check
+    let e = cmp_in(&a, Some(&[7]), &a, Some(&[7])).unwrap_err();
+    assert_eq!(e, DiffError::PageOutOfRange { side: Side::A, page: 8, count: 3 });
+    assert_eq!(page_count(&build(&b)).unwrap(), 4);
+}
+
+#[test]
+fn a_bad_range_on_b_is_refused_before_any_page_of_a_is_read() {
+    let (a, b) = (base(40), base(3));
+    let opts = CompareOptions { pages_b: Some(vec![5]), ..Default::default() };
+    let mut seen = Vec::new();
+    let e = compare_with(&build(&a), &build(&b), &opts, &AtomicBool::new(false), &mut |p| seen.push(p)).unwrap_err();
+    assert_eq!(e, DiffError::PageOutOfRange { side: Side::B, page: 6, count: 3 });
+    assert!(seen.is_empty(), "A was read: {seen:?}");
+}
+
+#[test]
+fn only_the_picked_pages_are_read_and_counted() {
+    let (a, b) = shifted();
+    let mut firsts = Vec::new();
+    let opts = CompareOptions { pages_a: Some(vec![3, 4, 5]), pages_b: Some(vec![1, 2, 3]), ..Default::default() };
+    compare_with(&build(&a), &build(&b), &opts, &AtomicBool::new(false), &mut |p| {
+        if p.stage == Stage::First || p.stage == Stage::Second {
+            firsts.push((p.stage, p.done, p.total));
+        }
+    })
+    .unwrap();
+    assert_eq!(firsts.len(), 6, "{firsts:?}");
+    assert!(firsts.iter().all(|f| f.2 == 3), "{firsts:?}");
+}
+
+#[test]
+fn bookmarks_to_pages_outside_the_range_are_not_compared() {
+    let mut a = base(6);
+    a.bookmarks = vec![("Intro".into(), 0), ("Results".into(), 4)];
+    let mut b = a.clone();
+    b.bookmarks = vec![("Intro".into(), 1), ("Results".into(), 4)];
+    assert_eq!(kinds(&cmp(&a, &b)), vec![ChangeKind::BookmarksChanged]);
+    let c = cmp_in(&a, Some(&[3, 4, 5]), &b, Some(&[3, 4, 5])).unwrap();
+    assert!(c.identical, "{:?}", labels(&c));
+}
+
+#[test]
+fn the_report_of_a_ranged_comparison_names_the_pages_as_the_files_number_them() {
+    let (a, b) = shifted();
+    let (ba, bb) = (build(&a), build(&b));
+    let opts = CompareOptions { pages_a: Some(vec![3, 4, 5]), pages_b: Some(vec![1, 2, 3]), ..Default::default() };
+    let c = compare(&ba, &bb, &opts).unwrap();
+    let input = report::ReportInput { a: &ba, b: &bb, a_name: "old.pdf", b_name: "new.pdf", date: "12 Oct 2026" };
+    let out = report::build(&input, &c, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    let (_, text) = pdf_text(&out);
+    assert!(text.contains("1 difference"), "{text}");
+    assert!(text.contains("Page 3"), "the list is grouped under B's page 3 (0-based 2): {text}");
+    assert!(text.contains("Page 5 before, page 3 after"), "the picture page names both: {text}");
+    assert!(text.contains("A. Novak"));
+    assert!(!text.contains("Page 2 "), "no position in the range leaks into the report: {text}");
 }
 
 // ---- formatting, cancel, progress, report ---------------------------------------------------------

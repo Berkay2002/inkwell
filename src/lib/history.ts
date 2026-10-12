@@ -104,12 +104,21 @@ export interface Change {
   detail: Detail;
 }
 
+/** Every page number is the file's own (0-based): with a page range on a side they are the picked pages' real ones. */
 export interface PageMap {
+  /** How many pages of each file were compared. */
   aPages: number;
   bPages: number;
+  /** The pages compared on each side, ascending. */
+  aIds: number[];
+  bIds: number[];
+  /** For each of `bIds`, the matched page of A. */
   bToA: (number | null)[];
   removedA: number[];
 }
+
+/** The pages of each side a comparison covers (0-based; null = every page). */
+export type ComparePages = [number[] | null, number[] | null];
 
 export interface Comparison {
   pages: PageMap;
@@ -164,12 +173,16 @@ export interface CompareProgress {
   total: number;
 }
 
-/** As `historyCompare`, on its own thread: progress through `onProgress`, `toolCancel(job)` stops it. */
-export function historyCompareRun(job: number, doc: number | null, a: Source, b: Source, onProgress: (p: CompareProgress) => void) {
+/** As `historyCompare`, on its own thread: progress through `onProgress`, `toolCancel(job)` stops it. A page past the
+ *  end of its file is refused before any page is read. */
+export function historyCompareRun(job: number, doc: number | null, a: Source, b: Source, pages: ComparePages, onProgress: (p: CompareProgress) => void) {
   const ch = new Channel<CompareProgress>();
   ch.onmessage = onProgress;
-  return invoke<Comparison>("history_compare_run", { job, doc, a, b, onProgress: ch });
+  return invoke<Comparison>("history_compare_run", { job, doc, a, b, pagesA: pages[0], pagesB: pages[1], onProgress: ch });
 }
+
+/** How many pages a source has; rejects for a file that cannot be read (a password, damage). */
+export const historyPageCount = (doc: number | null, source: Source) => invoke<number>("history_page_count", { doc, source });
 
 /** Save dialog (in Rust), then writes the report PDF there; null = cancelled. Returns the path. */
 export async function historyCompareReport(
@@ -177,6 +190,7 @@ export async function historyCompareReport(
   doc: number | null,
   a: Source,
   b: Source,
+  pages: ComparePages,
   names: [string, string],
   suggested: string,
   onProgress: (p: CompareProgress) => void,
@@ -186,7 +200,7 @@ export async function historyCompareReport(
   const ch = new Channel<CompareProgress>();
   ch.onmessage = onProgress;
   const date = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
-  return invoke<string>("history_compare_report", { job, doc, a, b, names, date, to: to.token, onProgress: ch });
+  return invoke<string>("history_compare_report", { job, doc, a, b, pagesA: pages[0], pagesB: pages[1], names, date, to: to.token, onProgress: ch });
 }
 
 export const compareCancel = (job: number) => toolCancel(job);

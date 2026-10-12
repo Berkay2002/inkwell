@@ -19,6 +19,8 @@ export interface CompareReq {
   a: Source;
   b: Source;
   names?: [string, string];
+  /** The pages of each side to compare, as typed ("3-10"); empty = all of them. */
+  ranges?: [string, string];
   /** "setup" shows the choose-what-to-compare page first; the Compare button clears it. */
   stage?: "setup";
   /** The categories the result starts with (the setup page's content switches); unset = all. */
@@ -133,7 +135,7 @@ export const useHistory = create<HStore>((set, get) => {
       const v = versions.find((x) => x.id === id);
       const parent = v && parentOf(versions, v);
       if (!parent) {
-        set((s) => ({ changes: { ...s.changes, [key]: { pages: { aPages: 0, bPages: 0, bToA: [], removedA: [] }, changes: [], identical: true } } }));
+        set((s) => ({ changes: { ...s.changes, [key]: { pages: { aPages: 0, bPages: 0, aIds: [], bIds: [], bToA: [], removedA: [] }, changes: [], identical: true } } }));
         return;
       }
       set((s) => ({ changes: { ...s.changes, [key]: "loading" } }));

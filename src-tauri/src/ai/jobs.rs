@@ -230,6 +230,7 @@ fn compare_bytes(c: &Ctx, l: &Lane, old: Vec<u8>, old_name: String, old_pw: Opti
         password_a: old_pw.map(|p| p.to_string()),
         password_b: l.eng.password(l.doc).map_err(err)?.map(|p| p.to_string()),
         include_volatile_metadata: false,
+        ..Default::default()
     };
     let mut last = (u32::MAX, u32::MAX);
     let cmp = crate::diff::compare_with(&old, &new, &opts, c.cancel, &mut |p| {

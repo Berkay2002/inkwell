@@ -89,6 +89,7 @@ impl Gfx {
     }
 }
 
+#[derive(Default)]
 pub struct PageSnap {
     /// Everything the page paints: its content streams plus the resources they actually use.
     pub fp: Hash,
@@ -106,7 +107,11 @@ pub struct PageSnap {
 
 pub struct Snap {
     pub doc: PdfDocument,
+    /// One entry per page of the file, indexed by the file's own page number; only the pages in `ids` are read, the
+    /// rest are blanks that are never looked at.
     pub pages: Vec<PageSnap>,
+    /// The pages being compared, ascending: all of them unless the caller picked a range.
+    pub ids: Vec<usize>,
     memo: RefCell<HashMap<i32, Hash>>,
     active: RefCell<HashSet<i32>>,
     forms_left: Cell<u32>,
@@ -172,26 +177,34 @@ fn to_page_space(v: &[f32], ctm: &Matrix) -> Rect4 {
 }
 
 impl Snap {
-    /// `step(done, total)` is called after each page; it returns false to stop (the open is cancelled).
-    pub fn open(bytes: &[u8], side: Side, password: Option<&str>, step: &mut dyn FnMut(u32, u32) -> bool) -> Result<Snap> {
+    /// Opens the document and settles which pages will be read (`pages`: the 0-based pages, `None` = all; refused
+    /// when empty or past the end), without reading any: both sides are checked before either is read.
+    pub fn open(bytes: &[u8], side: Side, password: Option<&str>, pages: Option<&[u32]>) -> Result<Snap> {
         let doc = open_doc(bytes, side, password)?;
         let n = doc.page_count()?.max(0) as usize;
-        let mut snap = Snap {
+        let ids = pick_pages(pages, n, side)?;
+        Ok(Snap {
             doc,
-            pages: Vec::with_capacity(n),
+            pages: (0..n).map(|_| PageSnap::default()).collect(),
+            ids,
             memo: RefCell::default(),
             active: RefCell::default(),
             forms_left: Cell::new(MAX_FORMS_PER_PAGE),
             words: RefCell::default(),
-        };
-        for i in 0..n {
-            let p = snap.read_page(i)?;
-            snap.pages.push(p);
-            if !step(i as u32 + 1, n as u32) {
+        })
+    }
+
+    /// Reads the picked pages. `step(done, total)` is called after each; it returns false to stop (cancelled).
+    pub fn read(&mut self, step: &mut dyn FnMut(u32, u32) -> bool) -> Result<()> {
+        let total = self.ids.len() as u32;
+        for k in 0..self.ids.len() {
+            let i = self.ids[k];
+            self.pages[i] = self.read_page(i)?;
+            if !step(k as u32 + 1, total) {
                 return Err(DiffError::Cancelled);
             }
         }
-        Ok(snap)
+        Ok(())
     }
 
     fn read_page(&self, i: usize) -> Result<PageSnap> {
@@ -502,6 +515,22 @@ fn page_words(tp: &mupdf::TextPage) -> Vec<Word> {
         }
     }
     out
+}
+
+/// The pages a side compares: `pages` sorted and de-duplicated, or all `n` when none were picked. An empty pick or
+/// one past the file's last page is refused, naming the side.
+pub fn pick_pages(pages: Option<&[u32]>, n: usize, side: Side) -> Result<Vec<usize>> {
+    let Some(p) = pages else { return Ok((0..n).collect()) };
+    let mut ids: Vec<usize> = p.iter().map(|&x| x as usize).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return Err(DiffError::NoPages { side });
+    }
+    match ids.iter().find(|&&i| i >= n) {
+        Some(&i) => Err(DiffError::PageOutOfRange { side, page: i as u32 + 1, count: n as u32 }),
+        None => Ok(ids),
+    }
 }
 
 pub fn open_doc(bytes: &[u8], side: Side, password: Option<&str>) -> Result<PdfDocument> {

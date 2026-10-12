@@ -41,30 +41,36 @@ impl Ctl<'_> {
 
 pub fn compare(a: &[u8], b: &[u8], opts: &CompareOptions, cancel: &AtomicBool, on: &mut dyn FnMut(Progress)) -> Result<Comparison> {
     let mut ctl = Ctl { cancel, on };
-    if a == b {
-        // Same bytes: nothing to look at, but still validate the file and report its pages.
-        let n = snap::open_doc(a, Side::A, opts.password_a.as_deref())?.page_count()?.max(0) as u32;
-        let ids: Vec<Option<u32>> = (0..n).map(Some).collect();
+    if a == b && opts.pages_a == opts.pages_b {
+        // Same bytes and pages: nothing to look at, but still validate the file and report its pages.
+        let n = snap::open_doc(a, Side::A, opts.password_a.as_deref())?.page_count()?.max(0) as usize;
+        let ids: Vec<u32> = snap::pick_pages(opts.pages_a.as_deref(), n, Side::A)?.into_iter().map(|i| i as u32).collect();
         return Ok(Comparison {
-            pages: PageMap { a_pages: n, b_pages: n, b_to_a: ids, removed_a: vec![] },
+            pages: PageMap { a_pages: ids.len() as u32, b_pages: ids.len() as u32, a_ids: ids.clone(), b_ids: ids.clone(), b_to_a: ids.iter().map(|&i| Some(i)).collect(), removed_a: vec![] },
             changes: vec![],
             identical: true,
         });
     }
-    let sa = Snap::open(a, Side::A, opts.password_a.as_deref(), &mut |d, t| ctl.tick(Stage::First, d, t).is_ok())?;
-    let sb = Snap::open(b, Side::B, opts.password_b.as_deref(), &mut |d, t| ctl.tick(Stage::Second, d, t).is_ok())?;
+    // Both files are opened and both ranges checked before the first page is read: a bad B range costs nothing.
+    let mut sa = Snap::open(a, Side::A, opts.password_a.as_deref(), opts.pages_a.as_deref())?;
+    let mut sb = Snap::open(b, Side::B, opts.password_b.as_deref(), opts.pages_b.as_deref())?;
+    sa.read(&mut |d, t| ctl.tick(Stage::First, d, t).is_ok())?;
+    sb.read(&mut |d, t| ctl.tick(Stage::Second, d, t).is_ok())?;
     ctl.tick(Stage::Pages, 0, 0)?;
+    // From here every page number is the file's own: `b2a` is indexed by B's page number and holds A's, and only
+    // the compared pages (`ids`) have entries, so a page outside a range is never "added" or "removed".
     let b2a = match_pages(&sa, &sb);
-    let (na, nb) = (sa.pages.len(), sb.pages.len());
-    let mut a_seen = vec![false; na];
+    let mut a_seen = vec![false; sa.pages.len()];
     for i in b2a.iter().flatten() {
         a_seen[*i] = true;
     }
     let map = PageMap {
-        a_pages: na as u32,
-        b_pages: nb as u32,
-        b_to_a: b2a.iter().map(|m| m.map(|i| i as u32)).collect(),
-        removed_a: (0..na).filter(|i| !a_seen[*i]).map(|i| i as u32).collect(),
+        a_pages: sa.ids.len() as u32,
+        b_pages: sb.ids.len() as u32,
+        a_ids: sa.ids.iter().map(|&i| i as u32).collect(),
+        b_ids: sb.ids.iter().map(|&j| j as u32).collect(),
+        b_to_a: sb.ids.iter().map(|&j| b2a[j].map(|i| i as u32)).collect(),
+        removed_a: sa.ids.iter().filter(|&&i| !a_seen[i]).map(|&i| i as u32).collect(),
     };
 
     let mut ch: Vec<Change> = Vec::new();
@@ -74,8 +80,8 @@ pub fn compare(a: &[u8], b: &[u8], opts: &CompareOptions, cancel: &AtomicBool, o
     let a_matched: Vec<usize> = b2a.iter().flatten().copied().collect();
     let gap_a = |i: usize| a_matched.iter().filter(|&&x| x < i).count();
     let mut free_a: Vec<usize> = map.removed_a.iter().map(|&i| i as usize).collect();
-    for (j, m) in b2a.iter().enumerate() {
-        if m.is_some() {
+    for &j in &sb.ids {
+        if b2a[j].is_some() {
             continue;
         }
         match free_a.iter().position(|&i| gap_a(i) == gap_b(j)) {
@@ -111,7 +117,7 @@ pub fn compare(a: &[u8], b: &[u8], opts: &CompareOptions, cancel: &AtomicBool, o
 
     ctl.tick(Stage::Document, 0, 0)?;
     metadata_changes(&sa, &sb, opts, &mut ch);
-    bookmark_changes(&sa, &sb, &map, &mut ch);
+    bookmark_changes(&sa, &sb, &b2a, &mut ch);
     attachment_changes(&sa, &sb, &mut ch);
 
     ch.sort_by_key(|c| (c.b_page.or(c.a_page).unwrap_or(u32::MAX), c.kind));
@@ -850,11 +856,22 @@ fn flatten_outline(o: &[mupdf::Outline], depth: u32, out: &mut Vec<(u32, String,
     }
 }
 
-fn bookmark_changes(sa: &Snap, sb: &Snap, map: &PageMap, ch: &mut Vec<Change>) {
+fn bookmark_changes(sa: &Snap, sb: &Snap, b2a: &[Option<usize>], ch: &mut Vec<Change>) {
     let (mut la, mut lb) = (Vec::new(), Vec::new());
     flatten_outline(&sa.doc.outlines().unwrap_or_default(), 0, &mut la);
     flatten_outline(&sb.doc.outlines().unwrap_or_default(), 0, &mut lb);
-    let a_to_b = map.a_to_b();
+    // With a page range, only bookmarks that point into the compared pages (or nowhere) are compared.
+    for (s, l) in [(sa, &mut la), (sb, &mut lb)] {
+        if s.ids.len() != s.pages.len() {
+            l.retain(|e| e.2.is_none_or(|p| s.ids.binary_search(&(p as usize)).is_ok()));
+        }
+    }
+    let mut a_to_b: Vec<Option<u32>> = vec![None; sa.pages.len()];
+    for (j, m) in b2a.iter().enumerate() {
+        if let Some(i) = m {
+            a_to_b[*i] = Some(j as u32);
+        }
+    }
     let key = |e: &(u32, String, Option<u32>)| format!("{}\u{1}{}", e.0, e.1);
     let (ka, kb): (Vec<String>, Vec<String>) = (la.iter().map(key).collect(), lb.iter().map(key).collect());
     let mut items: Vec<BookmarkChange> = Vec::new();
