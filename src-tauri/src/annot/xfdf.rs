@@ -914,8 +914,9 @@ fn stamp(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment) -> Result<()>
     if let Some(f) = c.flags {
         let mut f = AnnotationFlags::from_bits_truncate(f);
         // A reply or review state stays hidden on the page, whatever flags the file gives it (also one matched by
-        // name that the file lists without its `inreplyto`).
-        if !c.parent.is_empty() || a.object().get_dict("IRT")?.is_some() {
+        // name that the file lists without its `inreplyto`). What the document's own comment is decides, not what
+        // the file says: an entry naming an existing top-level note does not hide it.
+        if a.object().get_dict("IRT")?.is_some() {
             f |= AnnotationFlags::IS_HIDDEN;
         }
         a.set_flags(f)?;
@@ -953,13 +954,15 @@ fn update(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment, m: &Matrix) 
     } else if let Some(v) = c.color {
         a.set_color(rgb(v))?;
     }
-    if let Some(v) = c.fill {
+    // Only the types that have a fill or a border take one (MuPDF throws otherwise, after the colour changed).
+    let shape = matches!(c.sub, Sub::Square | Sub::Circle | Sub::Line | Sub::PolyLine | Sub::Polygon);
+    if let Some(v) = c.fill.filter(|_| shape) {
         a.set_interior_color(rgb(v))?;
     }
     if let Some(v) = c.opacity {
         a.set_opacity(v.clamp(0.0, 1.0))?;
     }
-    if let Some(v) = c.width.filter(|_| c.sub != Sub::FreeText) {
+    if let Some(v) = c.width.filter(|_| shape || c.sub == Sub::Ink) {
         a.set_border_width(v.max(0.0))?;
     }
     if !c.contents.is_empty() || c.sub == Sub::Text {

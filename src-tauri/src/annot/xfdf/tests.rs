@@ -533,3 +533,39 @@ fn name_entries_given_as_one_shared_string_are_not_read_at_all() {
     let ok = parse(&f).unwrap();
     assert_eq!((ok.items[0].icon.as_str(), ok.items[0].reply_type.as_str()), ("Comment", "R"));
 }
+
+#[test]
+fn an_entry_that_names_a_top_level_note_as_a_reply_does_not_hide_that_note() {
+    let (eng, id, _) = fresh("reply-names-note");
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="50,50,60,60" name="n"><contents>one</contents></text>
+        <text page="0" rect="80,50,90,60" name="m"><contents>two</contents></text></annots></xfdf>"##;
+    import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    let again = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="80,50,90,60" name="m" inreplyto="n" replyType="R" flags="print"><contents>edited</contents></text></annots></xfdf>"##;
+    let r = import_one(&eng, id, &parse(again).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.updated, 1, "{:?}", r.summary);
+    let m = list_all(&eng, id).unwrap().into_iter().find(|d| d.contents == "edited").expect("m was updated");
+    assert_eq!(m.parent, None);
+    let hidden = eng.read_custom(id, |d| Ok(find(d, 0, m.xref)?.1.flags()?.contains(AnnotationFlags::IS_HIDDEN))).unwrap();
+    assert!(!hidden, "a top-level note was hidden");
+}
+
+#[test]
+fn a_note_with_a_border_round_trips_without_a_fill_or_width_it_cannot_take() {
+    let note = "<< /Type /Annot /Subtype /Text /Rect [100 600 122 622] /Contents (hello) /NM (n1) /C [1 0 0] /IC [0 0 1] /Border [0 0 3] /P 3 0 R >>";
+    let d = dir("xfdf", "note-border");
+    let (a, ida, _) = open_bytes(&d, "a.pdf", &one_page_pdf("", "/Annots [4 0 R]", &[note]));
+    let (bytes, done) = export(&a, ida, Format::Xfdf, "a.pdf").unwrap();
+    assert_eq!(done.count, 1);
+    let parsed = parse(&bytes).unwrap();
+    let (b, idb, _) = fresh("note-border-b");
+    let r = import_one(&b, idb, &parsed, EditSource::User).unwrap();
+    assert_eq!((r.summary.added, r.summary.skipped.len()), (1, 0), "{:?}", r.summary);
+    let made = list_all(&b, idb).unwrap();
+    assert_eq!(made.len(), 1);
+    assert_eq!(made[0].contents, "hello");
+    // Again: it is matched by name and updated, not failed.
+    let r = import_one(&b, idb, &parsed, EditSource::User).unwrap();
+    assert_eq!((r.summary.updated, r.summary.skipped.len()), (1, 0), "{:?}", r.summary);
+}

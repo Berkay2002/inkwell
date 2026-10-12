@@ -563,13 +563,16 @@ fn style(a: &mut PdfAnnotation, kind: Kind, s: &Style) -> Result<()> {
     if kind != Kind::FreeText {
         a.set_color(rgb(s.color.unwrap_or_else(|| default_color(kind))))?;
     }
-    if let Some(f) = s.fill {
+    // MuPDF throws for a fill or a border on a type that has none (a note, a markup, a stamp), which would
+    // leave the annotation half made: an import can carry both for any type.
+    let closed = matches!(kind, Kind::Rectangle | Kind::Ellipse | Kind::Line | Kind::Arrow | Kind::Polygon);
+    if let Some(f) = s.fill.filter(|_| closed) {
         a.set_interior_color(rgb(f))?;
     }
     if let Some(o) = s.opacity {
         a.set_opacity(o.clamp(0.0, 1.0))?;
     }
-    if let Some(w) = s.width {
+    if let Some(w) = s.width.filter(|_| closed || matches!(kind, Kind::Ink | Kind::FreeText)) {
         a.set_border_width(w.max(0.0))?;
     }
     Ok(())
