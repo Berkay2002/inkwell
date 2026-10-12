@@ -8,13 +8,13 @@ import { useExchange } from "../../lib/dataExchange";
 export function RecordPicker() {
   const picker = useExchange((s) => s.picker);
   if (!picker) return null;
-  return <Picker name={picker.name} labels={picker.labels} />;
+  return <Picker name={picker.name} labels={picker.labels} rows={picker.rows} />;
 }
 
-/** The text a row shows: its place in the file, then its label. */
-export const rowText = (i: number, label: string) => `${i + 2}. ${label}`;
+/** The text a row shows: its line in the file, then its label. */
+export const rowText = (row: number, label: string) => `${row}. ${label}`;
 
-export function Picker({ name, labels }: { name: string; labels: string[] }) {
+export function Picker({ name, labels, rows }: { name: string; labels: string[]; rows: number[] }) {
   const [at, setAt] = useState(0);
   const choose = useExchange.getState().chooseRecord;
   const title = "Choose a record to import";
@@ -51,7 +51,7 @@ export function Picker({ name, labels }: { name: string; labels: string[] }) {
                   }
                 }}
               >
-                {rowText(i, label)}
+                {rowText(rows[i] ?? i + 2, label)}
               </button>
             </li>
           ))}

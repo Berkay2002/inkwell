@@ -257,12 +257,14 @@ fn fdf(fields: &[Out], file: &str) -> Vec<u8> {
     out
 }
 
+// Adapted from pdfcraft (MIT OR Apache-2.0), crates/xfdf/src/lib.rs @ b8ddf71 (the ", " join and its split in `value_for`)
 /// A field's value as one cell of CSV, tab text or XML: the picks of a list box that takes several are joined by
 /// ", " (the import splits them again, unless the whole cell is one of the list's entries).
 fn cell(f: &Out) -> String {
     f.values.join(", ")
 }
 
+// Adapted from pdfcraft (MIT OR Apache-2.0), crates/xfdf/src/lib.rs @ b8ddf71
 /// A name as an XML element name (letters, digits, `_`, `-`, `.`; not starting with a digit): what it is is kept
 /// in `xfdf:original` whenever it had to change.
 fn xml_name(part: &str) -> String {
@@ -661,6 +663,8 @@ pub struct Records {
     pub count: usize,
     /// One label per record (its first cell that has text); empty when there is nothing to pick from.
     pub labels: Vec<String>,
+    /// The line of each record in the file as a spreadsheet numbers its rows (the header is the first line).
+    pub rows: Vec<usize>,
 }
 
 const NOT_A_FILE: &str = "This is not an XFDF, FDF, JSON, XML, CSV or tab-delimited text file.";
@@ -669,10 +673,11 @@ const NOT_A_FILE: &str = "This is not an XFDF, FDF, JSON, XML, CSV or tab-delimi
 pub fn records(bytes: &[u8]) -> Result<Records> {
     let bytes = exchange::utf8_of(bytes)?;
     if exchange::sniff(&bytes).is_some() {
-        return Ok(Records { count: 1, labels: Vec::new() });
+        return Ok(Records { count: 1, labels: Vec::new(), rows: Vec::new() });
     }
     let t = table::read(std::str::from_utf8(&bytes).map_err(|_| bad(NOT_A_FILE))?, None)?;
-    Ok(Records { count: t.labels.len(), labels: if t.labels.len() > 1 { t.labels } else { Vec::new() } })
+    let many = t.labels.len() > 1;
+    Ok(Records { count: t.labels.len(), labels: if many { t.labels } else { Vec::new() }, rows: if many { t.rows } else { Vec::new() } })
 }
 
 /// A file's field values, by what it is (see [`exchange::sniff`]). `row` is the record of a CSV or tab text file

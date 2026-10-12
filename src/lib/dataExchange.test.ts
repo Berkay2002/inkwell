@@ -141,7 +141,7 @@ describe("export and import", () => {
 describe("a table file with several records", () => {
   const formState = { rev: 4, pageCount: 1, sizes: [], path: "C:\\Contract.pdf", dirty: true, undo: "Import form data", redo: null };
   const summary = { set: 2, unchanged: 0, skipped: [], skippedTotal: 0 };
-  const answers = (records: { count: number; labels: string[] }) =>
+  const answers = (records: { count: number; labels: string[]; rows: number[] }) =>
     inv.mockImplementation((cmd: string) =>
       Promise.resolve(
         cmd === "data_gates" ? { comments: true, forms: true, signed: false }
@@ -154,10 +154,10 @@ describe("a table file with several records", () => {
   const importCall = () => inv.mock.calls.find((c) => c[0] === "forms_import");
 
   it("asks which record and imports the picked one", async () => {
-    answers({ count: 3, labels: ["Asa Berg", "Side St 2", "Ole Dahl"] });
+    answers({ count: 3, labels: ["Asa Berg", "Side St 2", "Ole Dahl"], rows: [2, 3, 6] });
     const done = useExchange.getState().importForm(1);
     await vi.waitFor(() => expect(useExchange.getState().picker).not.toBeNull());
-    expect(useExchange.getState().picker).toEqual({ name: "people.csv", labels: ["Asa Berg", "Side St 2", "Ole Dahl"] });
+    expect(useExchange.getState().picker).toEqual({ name: "people.csv", labels: ["Asa Berg", "Side St 2", "Ole Dahl"], rows: [2, 3, 6] });
     expect(importCall()).toBeUndefined();
     useExchange.getState().chooseRecord(2);
     await done;
@@ -168,7 +168,7 @@ describe("a table file with several records", () => {
   });
 
   it("cancelling the question imports nothing", async () => {
-    answers({ count: 3, labels: ["a", "b", "c"] });
+    answers({ count: 3, labels: ["a", "b", "c"], rows: [2, 3, 4] });
     const done = useExchange.getState().importForm(1);
     await vi.waitFor(() => expect(useExchange.getState().picker).not.toBeNull());
     useExchange.getState().chooseRecord(null);
@@ -179,7 +179,7 @@ describe("a table file with several records", () => {
   });
 
   it("a file with one record, or another format, asks nothing", async () => {
-    answers({ count: 1, labels: [] });
+    answers({ count: 1, labels: [], rows: [] });
     await useExchange.getState().importForm(1);
     expect(importCall()).toEqual(["forms_import", { doc: 1, file: "f1", row: null }]);
     expect(useExchange.getState().picker).toBeNull();

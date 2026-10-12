@@ -43,6 +43,8 @@ export interface FormImported {
 export interface FormRecords {
   count: number;
   labels: string[];
+  /** The line of each record in the file, as a spreadsheet numbers rows (the header is 1). */
+  rows: number[];
 }
 export interface FormExported {
   count: number;
@@ -125,7 +127,7 @@ interface Exchange {
   exportForm: (doc: number) => Promise<void>;
   importForm: (doc: number) => Promise<void>;
   /** The data file is a table with several records: the person picks one (null while nothing is asked). */
-  picker: { name: string; labels: string[] } | null;
+  picker: { name: string; labels: string[]; rows: number[] } | null;
   /** The person's answer to `picker`: a record (0 is the first under the header), or null to cancel. */
   chooseRecord: (row: number | null) => void;
 }
@@ -162,7 +164,7 @@ export const useExchange = create<Exchange>((set, get) => {
     const row = await new Promise<number | null>((resolve) => {
       answer?.(null);
       answer = resolve;
-      set({ picker: { name: baseName(file.path), labels: recs.labels } });
+      set({ picker: { name: baseName(file.path), labels: recs.labels, rows: recs.rows } });
     });
     return row === null ? undefined : { row };
   };

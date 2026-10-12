@@ -7,7 +7,7 @@
 //! as it is written: it has no quoting, so a cell that Excel wrapped in quotes keeps them.
 
 use crate::engine::EngineError;
-use crate::exchange::{bad, MAX_ITEMS, MAX_NODES, MAX_STR};
+use crate::exchange::{bad, MAX_ITEMS, MAX_STR};
 
 type Result<T> = std::result::Result<T, EngineError>;
 
@@ -23,6 +23,8 @@ pub struct Table {
     pub header: Vec<String>,
     /// The first cell that has text, per record (what the row picker lists).
     pub labels: Vec<String>,
+    /// The line of each record, as a spreadsheet numbers rows: blank lines count, a line break inside quotes does not.
+    pub rows: Vec<usize>,
     /// The record asked for: a cell is `None` when it is longer than 1 MB.
     pub picked: Option<Vec<Option<String>>>,
 }
@@ -50,14 +52,15 @@ fn delimiter(text: &str) -> char {
 }
 
 /// Reads `text`, keeping the record numbered `pick` (0 is the first row under the header). More than
-/// [`MAX_ROWS`] rows, [`MAX_ITEMS`] columns or [`MAX_NODES`] cells in all, and a quote that never closes, refuse the
-/// file whole: a part of a file would be a wrong answer.
+/// [`MAX_ROWS`] rows or [`MAX_ITEMS`] columns, and a quote that never closes, refuse the file whole: a part of a
+/// file would be a wrong answer. A row is dropped once read, so memory is the header, the labels and one row.
 pub fn read(text: &str, pick: Option<usize>) -> Result<Table> {
     let delim = delimiter(text);
     let quoting = delim != '\t';
     let mut table = Table::default();
     let mut rows = 0usize;
-    let mut cells = 0usize;
+    // Records seen, blank ones too: the row number a spreadsheet shows.
+    let mut line = 0usize;
     let mut header_done = false;
     let mut record: Vec<String> = Vec::new();
     let mut cell = String::new();
@@ -73,8 +76,9 @@ pub fn read(text: &str, pick: Option<usize>) -> Result<Table> {
             cell.push(c);
         }
     };
-    let end_record = |record: &mut Vec<String>, table: &mut Table, rows: &mut usize, header_done: &mut bool| -> Result<()> {
+    let end_record = |record: &mut Vec<String>, table: &mut Table, rows: &mut usize, line: &mut usize, header_done: &mut bool| -> Result<()> {
         let done = std::mem::take(record);
+        *line += 1;
         // A blank line, or a row of nothing but empty cells (spreadsheets pad with them), is not a record.
         if done.iter().all(String::is_empty) {
             return Ok(());
@@ -87,8 +91,11 @@ pub fn read(text: &str, pick: Option<usize>) -> Result<Table> {
         if *rows >= MAX_ROWS {
             return Err(bad(format!("This file has more than {MAX_ROWS} rows, so Inkwell does not read it.")));
         }
-        let label: String = done.iter().find(|c| !c.is_empty()).map_or(String::new(), |c| c.chars().map(|c| if c.is_control() { ' ' } else { c }).take(LABEL).collect());
+        // Control and bidirectional formatting characters are spaces: a label is shown in a list.
+        let plain = |c: char| if c.is_control() || matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') { ' ' } else { c };
+        let label: String = done.iter().find(|c| !c.is_empty()).map_or(String::new(), |c| c.chars().map(plain).take(LABEL).collect());
         table.labels.push(label);
+        table.rows.push(*line);
         if pick == Some(*rows) {
             table.picked = Some(done.into_iter().map(|c| (c.len() <= MAX_STR).then_some(c)).collect());
         }
@@ -98,11 +105,7 @@ pub fn read(text: &str, pick: Option<usize>) -> Result<Table> {
 
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        let mut push_cell = |record: &mut Vec<String>, cell: &mut String| -> Result<()> {
-            cells += 1;
-            if cells > MAX_NODES {
-                return Err(bad("This file has more than 100 000 cells, so Inkwell does not read it."));
-            }
+        let push_cell = |record: &mut Vec<String>, cell: &mut String| -> Result<()> {
             if record.len() >= MAX_ITEMS {
                 return Err(bad(format!("This file has more than {MAX_ITEMS} columns, so Inkwell does not read it.")));
             }
@@ -134,7 +137,7 @@ pub fn read(text: &str, pick: Option<usize>) -> Result<Table> {
                     chars.next();
                 }
                 push_cell(&mut record, &mut cell)?;
-                end_record(&mut record, &mut table, &mut rows, &mut header_done)?;
+                end_record(&mut record, &mut table, &mut rows, &mut line, &mut header_done)?;
                 at_start = true;
                 was_quoted = false;
             }
@@ -148,12 +151,11 @@ pub fn read(text: &str, pick: Option<usize>) -> Result<Table> {
         return Err(bad("This file is cut off: a quoted value never ends."));
     }
     if !cell.is_empty() || !record.is_empty() || was_quoted {
-        cells += 1;
-        if cells > MAX_NODES || record.len() >= MAX_ITEMS {
-            return Err(bad("This file has too many cells, so Inkwell does not read it."));
+        if record.len() >= MAX_ITEMS {
+            return Err(bad(format!("This file has more than {MAX_ITEMS} columns, so Inkwell does not read it.")));
         }
         record.push(cell);
-        end_record(&mut record, &mut table, &mut rows, &mut header_done)?;
+        end_record(&mut record, &mut table, &mut rows, &mut line, &mut header_done)?;
     }
     if !header_done {
         return Err(bad("This file is empty: a data file has a row of field names, then a row of values."));

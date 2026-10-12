@@ -251,6 +251,22 @@ fn a_signed_document_keeps_its_signed_bytes_as_a_prefix_after_an_import() {
 }
 
 #[test]
+fn a_signed_document_keeps_its_signed_bytes_as_a_prefix_after_a_csv_import() {
+    let (eng, id, path) = form("signed_csv");
+    sign(&eng, id, None, None);
+    eng.save(id, None).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    let r = import_one(&eng2, id2, &parse(b"Full name\r\nKim\r\n").unwrap(), EditSource::User).unwrap();
+    assert!(r.signed);
+    assert_eq!(r.summary.set, 1);
+    eng2.save(id2, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original));
+}
+
+#[test]
 fn an_fdf_is_read_by_name_without_its_scripts_or_file_references() {
     let fdf = b"%FDF-1.2\n\
         1 0 obj\n<< /FDF << /F (evil.exe) /JavaScript << /Before (evil_before) >> /Fields [ \
@@ -679,6 +695,12 @@ fn a_file_with_several_records_lists_them_and_imports_the_picked_one() {
     assert_eq!(r.count, 3, "a blank line and a row of empty cells are not records");
     // The first column, or the first one with text.
     assert_eq!(r.labels, vec!["Asa Berg", "Side St 2", "Ole Dahl"]);
+    // As a spreadsheet numbers them: the header is row 1, the blank line and the row of empty cells count.
+    assert_eq!(r.rows, vec![2, 3, 6]);
+    // A line break inside quotes is not a row of its own.
+    assert_eq!(records(b"A,B\n\"x\ny\",1\nz,2\n").unwrap().rows, vec![2, 3]);
+    // Bidirectional overrides cannot reorder what the picker shows.
+    assert_eq!(records(b"A\n\xE2\x80\xAEgnp.exe\nb\n").unwrap().labels[0], " gnp.exe");
     match parse(csv.as_bytes()) {
         Err(EngineError::Invalid(m)) => assert!(m.contains("3 records"), "{m}"),
         other => panic!("{:?}", other.map(|p| p.fields)),
@@ -689,7 +711,7 @@ fn a_file_with_several_records_lists_them_and_imports_the_picked_one() {
     assert_eq!(dto(&eng, id, "Full name")[0].value, "Ole Dahl");
     assert_eq!(dto(&eng, id, "Country")[0].value, "no");
     // A one-record file needs no pick, and every other format is one record.
-    assert_eq!(records(b"A,B\r\n1,2\r\n").unwrap(), Records { count: 1, labels: vec![] });
+    assert_eq!(records(b"A,B\r\n1,2\r\n").unwrap(), Records { count: 1, labels: vec![], rows: vec![] });
     assert_eq!(parse(b"A,B\r\n1,2\r\n").unwrap().fields.len(), 2);
     assert_eq!(records(br#"{"A": "1"}"#).unwrap().count, 1);
 }
@@ -714,13 +736,11 @@ fn csv_reading_edge_cases() {
     for (what, file) in [("header only", "A,B\r\n"), ("empty", ""), ("blank", "\r\n\r\n"), ("open quote", "A,B\r\n1,\"2\r\n")] {
         assert!(matches!(parse(file.as_bytes()), Err(EngineError::Invalid(_))), "{what}");
     }
-    // Over the caps: too many rows, too many columns, too many cells, one cell over 1 MB.
+    // Over the caps: too many rows, too many columns, one cell over 1 MB.
     let rows = format!("A\n{}", "x\n".repeat(table::MAX_ROWS + 1));
     assert!(matches!(parse(rows.as_bytes()), Err(EngineError::Invalid(m)) if m.contains("rows")));
     let cols = format!("{}\n{}\n", vec!["c"; MAX_ITEMS + 1].join(","), vec!["v"; MAX_ITEMS + 1].join(","));
     assert!(matches!(parse(cols.as_bytes()), Err(EngineError::Invalid(m)) if m.contains("columns")));
-    let cells_over = format!("{}\n{}", vec!["c"; 1000].join(","), vec!["v"; 1000].join(",") + &("\n".to_string() + &vec!["v"; 1000].join(",")).repeat(MAX_NODES / 1000));
-    assert!(matches!(parse(cells_over.as_bytes()), Err(EngineError::Invalid(m)) if m.contains("cells")));
     let long = format!("A,B\n{},x\n", "y".repeat(MAX_STR + 5));
     let p = parse(long.as_bytes()).unwrap();
     assert_eq!(p.fields[0].1, Val::Invalid("the value is longer than 1 MB"));

@@ -172,14 +172,14 @@ readers in `src-tauri/src/exchange.rs`. The format of an export follows the file
   file's own `/JavaScript`, `/AA` and `/A` are never read.
 - **Records.** A CSV or tab text file with several rows under the header asks which one to import: a list of the rows,
   each by its first cell that has text, numbered as a spreadsheet numbers them (the header is row 1); only the picked row
-  is imported (one undo step like every other format). Blank rows and rows of empty cells are not records. An empty
+  is imported (one undo step like every other format). Blank rows and rows of empty cells are not records (they still count in the numbering, so the number is the row a spreadsheet shows). An empty
   cell is a value (it clears the field); a cell the row does not have leaves the field alone. A column Inkwell has no
   field for is reported like any unknown name; a column named twice (only the first is read), a column with no name and
   a value past the last column are reported too.
 - **Text files, caps.** UTF-8 with or without a byte order mark, or UTF-16 with one (Excel's "Unicode Text"); anything
   else (a code page, UTF-16 without a mark, UTF-32, a NUL byte) is refused with that message, never guessed at. The
   delimiter is the most common of tab, comma and semicolon in the header row (a Swedish-locale spreadsheet writes
-  semicolons). Over 10 000 rows, 10 000 columns, 100 000 cells or 32 MB, or a quote that never closes, refuses the
+  semicolons). Over 10 000 rows, 10 000 columns or 32 MB, or a quote that never closes, refuses the
   file whole; a cell over 1 MB is that field's skip (as a JSON value is). Tab text is read as it is written: a cell
   Excel wrapped in quotes keeps the quotes, and a line break inside a cell ends the record. A CSV whose first cell
   starts with `{`, `<` or `%FDF` is taken for JSON, XML or FDF.
@@ -196,7 +196,7 @@ readers in `src-tauri/src/exchange.rs`. The format of an export follows the file
 - No file written by Acrobat was available while this was built: the shapes follow ISO 19444-1 and ISO 32000-2
   section 12.7.8. The CSV, tab text and XML shapes follow what Acrobat's Export Data is described to write (a header row
   and a value row; elements named by the fields), not a file Acrobat wrote: how Acrobat joins the picks of a list box
-  and names an element that is not a valid name is unverified. XDP (XFA) data files are not read.
+  and names an element that is not a valid name is unverified. An XDP (XFA) data file is walked as plain XML, so its names are reported as unknown fields.
 
 ## Later (not built)
 - Signing a signature field (see the Sign task).
