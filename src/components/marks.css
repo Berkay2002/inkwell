@@ -251,8 +251,7 @@
 .mk-form:disabled {
   cursor: not-allowed;
 }
-.mk-form :disabled,
-.mk-form .mk-swatch:disabled {
+.mk-form :disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }

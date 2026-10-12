@@ -126,6 +126,8 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
 
           {!numbering && <PagesRow sheet={sheet} count={doc.pageCount} />}
         </fieldset>
+        {/* numbering other files writes copies and never changes this document, so a certified one may still do it */}
+        {sheet.kind === "bates" && <BatesFiles sheet={sheet} />}
 
         {more?.signed && !locked && (
           <p className="dim small" role="note">
@@ -591,6 +593,13 @@ function BatesView({ sheet, count }: { sheet: MarksSheet; count: number }) {
       <StyleRow style={sheet.style} onChange={(style) => set({ style })} />
       <MarginsRow sheet={sheet} />
       <ShrinkRow sheet={sheet} count={count} />
+    </>
+  );
+}
+
+export function BatesFiles({ sheet }: { sheet: MarksSheet }) {
+  return (
+    <>
       <span className="tl-label">Files</span>
       <p className="dim small">
         {sheet.btFiles.length === 0
