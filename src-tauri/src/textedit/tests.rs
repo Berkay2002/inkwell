@@ -1338,3 +1338,42 @@ fn a_page_of_tagged_groups_is_read_and_edited_fast() {
     assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
     assert!(text(&eng, id).contains("Hello"));
 }
+
+#[test]
+fn a_rise_past_most_of_the_size_is_a_position_not_a_script() {
+    let d = dir("rise-position");
+    // 100 pt of `Ts` on 12 pt text: text moved with the rise operator, not a superscript.
+    let (eng, id, _) = open(&d, &pdf("BT /F1 12 Tf 72 400 Td 100 Ts (Moved by rise) Tj ET", &[("F1", HELV)], &[]));
+    let at = |eng: &Engine| {
+        let b = &blocks(eng, id, 0).unwrap().blocks[0];
+        assert_eq!(b.runs[0].rise, None, "read as no rise");
+        b.rect
+    };
+    let before = at(&eng);
+    // The baseline is at 400 + 100 up: 292 from the top of a 792 pt page.
+    assert!(before[1] <= 292.0 && 292.0 <= before[3], "{before:?}");
+    set_text(&eng, id, 0, "Moved by rise, edited");
+    let after = at(&eng);
+    assert!((after[1] - before[1]).abs() < 1.0 && (after[3] - before[3]).abs() < 1.0, "{before:?} -> {after:?}");
+    assert!(text(&eng, id).contains("edited"));
+}
+
+#[test]
+fn a_rise_that_is_not_a_number_the_file_can_hold_is_no_rise() {
+    let d = dir("rise-inf");
+    // A literal that overflows to infinity as a double.
+    let content = format!("BT /F1 12 Tf 72 400 Td {} Ts (Hello) Tj ET", "9".repeat(400));
+    let (eng, id, path) = open(&d, &pdf(&content, &[("F1", HELV)], &[]));
+    let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(b.runs[0].rise, None);
+    assert!(b.rect.iter().all(|v| v.is_finite()), "{:?}", b.rect);
+    set_text(&eng, id, 0, "Hello again");
+    let c = BlockChange { rise: Some(Some(Rise::Super)), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &c, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    let ops = saved_ops(&path);
+    // `inf` would not parse as a number: it would come back as an operator of its own.
+    assert!(!ops.iter().any(|o| o.op.eq_ignore_ascii_case(b"inf") || o.op.eq_ignore_ascii_case(b"nan")));
+    let ts: Vec<f64> = ops.iter().filter(|o| o.is("Ts")).filter_map(|o| o.num(0)).collect();
+    assert!(!ts.is_empty() && ts.iter().all(|v| v.is_finite() && v.abs() < 1e5), "{ts:?}");
+}

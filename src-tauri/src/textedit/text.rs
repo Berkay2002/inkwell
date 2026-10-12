@@ -65,9 +65,17 @@ pub(crate) fn clearable<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::
     Option::<Rise>::deserialize(d).map(Some)
 }
 
-/// The rise a `Ts` value means: its sign.
+/// Whether a `Ts` of `rise` on text of `size` is a super or subscript, as opposed to a position
+/// (some producers move text with `Ts`): up to 0.6 of the size.
+fn is_script(rise: f64, size: f64) -> bool {
+    rise.abs() <= size.abs() * 0.6
+}
+
+/// The rise a `Ts` value means: its sign (none for a value that is not a finite, sane number).
 fn rise_of(ts: f64) -> Option<Rise> {
-    if ts > 1e-6 {
+    if !ts.is_finite() || ts.abs() > 1e5 {
+        None
+    } else if ts > 1e-6 {
         Some(Rise::Super)
     } else if ts < -1e-6 {
         Some(Rise::Sub)
@@ -209,15 +217,17 @@ impl Run {
             && self.strike == o.strike
     }
 
+    /// Super or subscript; a rise past most of the size is a position and reads as none (it is kept
+    /// as written, not scaled with the size).
     pub fn rise_kind(&self) -> Option<Rise> {
-        rise_of(self.rise)
+        rise_of(self.rise).filter(|_| is_script(self.rise, self.tsize))
     }
 }
 
 /// The run block-level attributes (font, size, colour) are read from and that typed text takes
 /// the style of: the first one that is not raised (a footnote mark starts many paragraphs).
 pub(crate) fn body_run(runs: &[Run]) -> usize {
-    runs.iter().position(|r| r.rise == 0.0).unwrap_or(0)
+    runs.iter().position(|r| r.rise_kind().is_none()).unwrap_or(0)
 }
 
 /// One line of existing text.
@@ -799,8 +809,11 @@ fn interpret(
                     _ => op.operands.last().cloned().into_iter().collect(),
                 };
                 let trm0 = tm.then(&ts.ctm);
-                // The baseline and the box ignore the rise: a raised run stays on its line.
-                let start = trm0.apply(0.0, 0.0);
+                // The baseline and the box ignore a script's rise: a raised run stays on its line. A
+                // rise past 0.6 of the size is a position (some producers move text with `Ts`): it
+                // stays in the start and the box, and reads as no rise.
+                let lift = if rise_of(ts.rise).is_some() && !is_script(ts.rise, ts.size) { ts.rise } else { 0.0 };
+                let start = trm0.apply(0.0, lift);
                 let mut text = String::new();
                 let mut decodable = m.has_to_unicode;
                 let mut x_text = 0.0;
@@ -850,15 +863,15 @@ fn interpret(
                 }
                 let begin = tm;
                 tm = Matrix::translate(x_text, 0.0).then(&tm);
-                let end = tm.then(&ts.ctm).apply(0.0, 0.0);
+                let end = tm.then(&ts.ctm).apply(0.0, lift);
                 if !pieces.iter().any(|p| matches!(p, Obj::Str(s) if !s.is_empty())) {
                     continue;
                 }
                 let corners = [
-                    trm0.apply(0.0, m.descent * ts.size),
-                    trm0.apply(x_text, m.descent * ts.size),
-                    trm0.apply(0.0, m.ascent * ts.size),
-                    trm0.apply(x_text, m.ascent * ts.size),
+                    trm0.apply(0.0, lift + m.descent * ts.size),
+                    trm0.apply(x_text, lift + m.descent * ts.size),
+                    trm0.apply(0.0, lift + m.ascent * ts.size),
+                    trm0.apply(x_text, lift + m.ascent * ts.size),
                 ];
                 let rect = corners.iter().fold(EMPTY, |b, p| [b[0].min(p.0), b[1].min(p.1), b[2].max(p.0), b[3].max(p.1)]);
                 let size_user = (trm0.0[2].powi(2) + trm0.0[3].powi(2)).sqrt() * ts.size;
@@ -1339,12 +1352,16 @@ pub fn rewrite_block(doc: &mut PdfDocument, page: u32, index: usize, change: &Te
             None => prior,
         };
         let rise = match now {
+            // A position written with `Ts` stays as it was unless the rise was cleared on purpose.
+            None if was.is_none() && rc.rise.or(change.rise).is_none() && like.rise.is_finite() && like.rise.abs() <= 1e5 => like.rise,
             None => 0.0,
             // Unchanged: its own `Ts`, scaled with the size.
             Some(_) if now == was && like.tsize > 0.0 => like.rise * size / like.tsize,
             Some(Rise::Super) => RISE_UP * size / RISE_SCALE,
             Some(Rise::Sub) => -RISE_DOWN * size / RISE_SCALE,
         };
+        // Never a number the file can't hold ("inf" is not a PDF number).
+        let rise = if rise.is_finite() && rise.abs() <= 1e5 { rise } else { 0.0 };
         first_size.get_or_insert(size);
         // A whole-block text loses outer spaces; a run keeps its own (they join it to the next).
         let norm = if change.runs.is_some() { collapse } else { normalize };
