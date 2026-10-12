@@ -621,16 +621,19 @@ fn lock_p(field: &PdfObject, widget: &PdfObject) -> Option<u8> {
 
 /// The locks the signature in `g` carried in the revision it signs (the field holding the same signature
 /// dictionary there, whatever it is called now: renaming it later must not drop its locks), and its `/Lock /P`. None
-/// when it is intact and covers the whole file (the current ones are those). A revision that can't be read, or that
-/// has no field holding this signature, locks everything: what it locked is unknown. So does a signature that claims
-/// the whole file but isn't intact: a later update may have stripped its locks and reset its `/ByteRange`.
+/// when it is intact and covers the whole file (the current ones are those). A signature that isn't intact locks
+/// everything, wherever its `/ByteRange` ends: a later update may have stripped its locks and pointed the range at
+/// itself. So does a revision that can't be read, or that has no field holding this signature: what it locked is unknown.
 fn signed_locks(g: &SigField, bytes: &[u8], revs: &mut Revisions, intact: Option<bool>) -> (Vec<crate::forms::scripts::Lock>, Option<u8>) {
     use crate::forms::scripts::{Lock, signature_locks};
     let Some(v) = g.value.as_ref() else { return (Vec::new(), None) };
+    let unknown = || (vec![Lock::All], None);
+    if !intact.unwrap_or_else(|| info(g, bytes, &|_, _| (false, String::new())).intact) {
+        return unknown();
+    }
     let end = out_covered(v);
     if end.is_some_and(|e| e <= bytes.len() && bytes[e..].iter().all(u8::is_ascii_whitespace)) {
-        let intact = intact.unwrap_or_else(|| info(g, bytes, &|_, _| (false, String::new())).intact);
-        return (if intact { Vec::new() } else { vec![Lock::All] }, None);
+        return (Vec::new(), None);
     }
     let then = |e: usize| -> Option<(Vec<Lock>, Option<u8>)> {
         let vn = ind(v)?;
@@ -638,7 +641,7 @@ fn signed_locks(g: &SigField, bytes: &[u8], revs: &mut Revisions, intact: Option
         let h = sig_fields(then).ok()?.into_iter().find(|h| h.value.as_ref().and_then(ind) == Some(vn))?;
         Some((signature_locks(&h.field, &h.widget), lock_p(&h.field, &h.widget)))
     };
-    end.and_then(then).unwrap_or_else(|| (vec![Lock::All], None))
+    end.and_then(then).unwrap_or_else(unknown)
 }
 
 /// The revisions of one file parsed so far, by where they end (`None`: past the file, or not a PDF). A parse holds a

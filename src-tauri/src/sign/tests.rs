@@ -1790,6 +1790,31 @@ fn a_signature_reset_to_cover_the_whole_file_but_not_intact_locks_every_field() 
 }
 
 #[test]
+fn a_signature_pointed_at_a_later_update_that_strips_its_lock_locks_every_field() {
+    let b = lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Witness)]>>", "");
+    // U1 strips the lock and points the byte range at U1's end; U2 follows, so it isn't the whole-file case.
+    let u1 = |len: usize| {
+        append(&b, |d| {
+            let mut t = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap();
+            t.dict_delete("Lock").unwrap();
+            let br = t.get_dict("V").unwrap().unwrap().get_dict("ByteRange").unwrap().unwrap();
+            let at = |i| br.get_array(i).unwrap().unwrap().as_int().unwrap() as usize;
+            let (x, y) = (at(1), at(2));
+            let r = format!("[0 {x} {y} {}]", len.saturating_sub(y));
+            t.get_dict("V").unwrap().unwrap().dict_put("ByteRange", d.new_object_from_str(&r).unwrap()).unwrap();
+        })
+    };
+    let mut u = u1(0);
+    for _ in 0..4 {
+        u = u1(u.len());
+    }
+    let u2 = with_comment(&u);
+    assert!(u2.len() > u.len());
+    assert!(!field(&infos(&u2), "Tenant").intact);
+    assert_eq!(locked_fields(&u2), ["Witness", "Other"]);
+}
+
+#[test]
 fn listing_parses_each_signed_revision_once() {
     // Tenant's locks and its binding both read the revision it signs; Witness covers the whole file.
     let b = lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Other)]>>", "");
