@@ -701,3 +701,90 @@ fn file_names_are_made_safe() {
     assert_eq!(safe_stem("  "), "document");
     assert_eq!(safe_stem("name."), "name");
 }
+
+// ---------------------------------------------------------------- table columns
+
+/// A one-line cell at 11 pt as tight as a PDF sets it: 6.6 pt (0.6 em) per character.
+fn tight(t: &str, x: f64, y: f64) -> flow::Block {
+    let w = t.chars().count() as f64 * 6.6;
+    flow::Block { text: t.into(), rect: [x, y, x + w, y + 11.0], size: 11.0, bold: false, italic: false, color: [0.0; 3] }
+}
+
+/// The `\cellx` positions of the first row of the first table.
+fn cellx_of_first_row(rtf: &str) -> Vec<i64> {
+    let row = rtf.split("\\trowd").nth(1).unwrap();
+    row[..row.find("\\pard").unwrap()].split("\\cellx").skip(1).map(|s| s.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap()).collect()
+}
+
+/// `(gridCol widths, tcW of the first row's cells)` of the first table in a document.xml.
+fn docx_widths(xml: &str) -> (Vec<i64>, Vec<i64>) {
+    let num = |s: &str, key: &str| -> Vec<i64> {
+        s.split(key).skip(1).map(|p| p.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap()).collect()
+    };
+    let grid = &xml[xml.find("<w:tblGrid>").unwrap()..xml.find("</w:tblGrid>").unwrap()];
+    let row = &xml[xml.find("<w:tr>").unwrap()..xml.find("</w:tr>").unwrap()];
+    (num(grid, "<w:gridCol w:w=\""), num(row, "<w:tcW w:w=\""))
+}
+
+fn page_of(blocks: Vec<flow::Block>) -> flow::Page {
+    flow::Page { width: 612.0, height: 792.0, blocks, images: vec![] }
+}
+
+fn doc_xml(pages: &[flow::Page]) -> String {
+    String::from_utf8(unzip(&super::docx::docx(pages, "t"), "word/document.xml").unwrap()).unwrap()
+}
+
+#[test]
+fn a_narrow_last_column_stays_wide_enough_for_its_longest_word() {
+    use super::rtf::rtf;
+    // The last column's cells end where their text ends, so its detected width is the word and 4 pt: less than the
+    // word plus the cell padding (5.4 pt a side) that Word and the RTF readers take out of it.
+    let rows = [["Item", "Qty", "Revenue"], ["Widgets", "12", "12.50"], ["Gadgets", "7", "340.00"]];
+    let mut blocks = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        for (c, t) in row.iter().enumerate() {
+            blocks.push(tight(t, 72.0 + 100.0 * c as f64, 500.0 - 20.0 * r as f64));
+        }
+    }
+    let pages = [page_of(blocks)];
+    let revenue = 7.0 * 6.6;
+    let fits = |gaps: &[i64]| {
+        assert_eq!(gaps.len(), 3);
+        // Every gap holds the longest word of its column and both paddings (108 twips each).
+        for (g, word) in gaps.iter().zip([7.0 * 6.6, 3.0 * 6.6, revenue]) {
+            assert!(*g as f64 >= word * 20.0 + 216.0, "gap {g} twips for a {word} pt word in {gaps:?}");
+        }
+    };
+    let x = cellx_of_first_row(&rtf(&pages, "t").text);
+    let gaps: Vec<i64> = std::iter::once(x[0]).chain(x.windows(2).map(|w| w[1] - w[0])).collect();
+    fits(&gaps);
+    let (grid, tcw) = docx_widths(&doc_xml(&pages));
+    fits(&grid);
+    // The cell widths are the grid's: a cell in column 3 was given column 1's width.
+    assert_eq!(tcw, grid);
+    // RTF and docx agree on the grid.
+    assert_eq!(gaps, grid);
+}
+
+#[test]
+fn a_table_wider_than_the_text_shrinks_its_widest_columns_first() {
+    use super::rtf::rtf;
+    // Letter with 72 pt margins holds 468 pt. Three columns 135 pt apart and a last one 76.6 pt wide come to 481.6.
+    let mut blocks = Vec::new();
+    for r in 0..3 {
+        let y = 500.0 - 20.0 * r as f64;
+        for (c, x) in [36.0, 171.0, 306.0].into_iter().enumerate() {
+            blocks.push(tight(&format!("r{r}c{c}"), x, y));
+        }
+        blocks.push(tight("Description", 441.0, y));
+    }
+    let pages = [page_of(blocks)];
+    let x = cellx_of_first_row(&rtf(&pages, "t").text);
+    let gaps: Vec<i64> = std::iter::once(x[0]).chain(x.windows(2).map(|w| w[1] - w[0])).collect();
+    assert_eq!(gaps.len(), 4);
+    assert!(x[3] <= 9360 + 4, "the table fits the 468 pt text width: {x:?}");
+    // The last column keeps its width (the widest ones gave way), and no column went under its word.
+    assert!(gaps[3] as f64 >= 11.0 * 6.6 * 20.0 + 216.0, "{gaps:?}");
+    assert!(gaps[..3].iter().all(|g| *g < 2700 && *g as f64 >= 4.0 * 6.6 * 20.0 + 216.0), "{gaps:?}");
+    assert_eq!(docx_widths(&doc_xml(&pages)).0, gaps);
+}

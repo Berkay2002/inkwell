@@ -46,6 +46,8 @@ pub struct Cell {
     /// Text fill colour as sRGB components in 0..=1.
     pub color: [f64; 3],
     pub span: usize,
+    /// Width in points of the cell's longest word, so a writer can keep the column from breaking it.
+    pub word: f64,
 }
 
 /// A table detected from the page's text layout: rows of cells, and the left edge of each
@@ -89,6 +91,58 @@ fn level(b: &Block, body: f64) -> u8 {
     } else {
         0
     }
+}
+
+/// The estimated width in points of a block's longest word. A one-line block is measured by its own
+/// width per character; anything taller (or without a usable rect) falls back to size x 0.6 per character.
+fn word_width(b: &Block) -> f64 {
+    let chars = b.text.chars().count().max(1) as f64;
+    let (w, h) = (b.rect[2] - b.rect[0], b.rect[3] - b.rect[1]);
+    let per = if w.is_finite() && w > 0.0 && h <= b.size * 1.6 { w / chars } else { b.size * 0.6 };
+    let longest = b.text.split_whitespace().map(|word| word.chars().count()).max().unwrap_or(0);
+    longest as f64 * if per.is_finite() { per } else { 6.6 }
+}
+
+/// A table cell's left and right padding in points (108 twips: Word's default, and RTF's `\trgaph108`).
+pub(super) const CELL_PAD: f64 = 5.4;
+/// No column is narrower than this, in points.
+const MIN_COL: f64 = 20.0;
+
+/// Grid column widths in twips for a writer: the detected column edges (the last column runs to the table's
+/// rect), each column at least as wide as its longest single-column word plus the cell padding, then, when
+/// the table is wider than `text_w` points, the widest columns shrunk first and never below that minimum.
+/// Both writers take their widths from here so the two files agree.
+pub(super) fn col_twips(t: &Table, text_w: f64) -> Vec<i64> {
+    let n = t.cols.len();
+    let mut min = vec![MIN_COL; n];
+    for row in &t.rows {
+        let mut col = 0;
+        for c in row {
+            if let Some(m) = min.get_mut(col).filter(|_| c.span <= 1) {
+                *m = m.max(c.word + 2.0 * CELL_PAD + 1.0);
+            }
+            col += c.span.max(1);
+        }
+    }
+    let natural: Vec<f64> = (0..n)
+        .map(|i| {
+            let right = t.cols.get(i + 1).copied().unwrap_or(t.rect[2]);
+            let w = right - t.cols[i];
+            if w.is_finite() { w } else { 0.0 }
+        })
+        .collect();
+    let at = |cap: f64| -> Vec<f64> { natural.iter().zip(&min).map(|(w, m)| w.min(cap).max(*m)).collect() };
+    let mut w = at(f64::MAX);
+    if text_w.is_finite() && w.iter().sum::<f64>() > text_w {
+        // The largest cap on column width that fits (or none: every column at its minimum).
+        let (mut lo, mut hi) = (0.0, w.iter().copied().fold(0.0, f64::max));
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if at(mid).iter().sum::<f64>() > text_w { hi = mid } else { lo = mid }
+        }
+        w = at(lo);
+    }
+    w.into_iter().map(|p| (p * 20.0).ceil().clamp(60.0, 31680.0) as i64).collect()
 }
 
 /// How far two cell left edges may drift (points) and still be the same grid column.
@@ -196,11 +250,12 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
                 let b = &blocks[bi];
                 let Some(slot) = edges.iter().position(|e| (*e - b.rect[0]).abs() <= COL_TOL) else { continue };
                 let span = edges[slot + 1..].iter().filter(|e| **e > b.rect[0] + COL_TOL && **e < b.rect[2] - COL_TOL).count() + 1;
-                let cell = Cell { text: b.text.trim().to_string(), size: b.size, bold: b.bold, italic: b.italic, color: b.color, span };
+                let cell = Cell { text: b.text.trim().to_string(), size: b.size, bold: b.bold, italic: b.italic, color: b.color, span, word: word_width(b) };
                 match &mut slots[slot] {
                     Some(c) => {
                         c.text.push(' ');
                         c.text.push_str(&cell.text);
+                        c.word = c.word.max(cell.word);
                     }
                     None => slots[slot] = Some(cell),
                 }
@@ -217,7 +272,7 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
                     }
                     None => {
                         column += 1;
-                        materialized.push(Cell { text: String::new(), size: 11.0, bold: false, italic: false, color: [0.0; 3], span: 1 });
+                        materialized.push(Cell { text: String::new(), size: 11.0, bold: false, italic: false, color: [0.0; 3], span: 1, word: 0.0 });
                     }
                 }
             }

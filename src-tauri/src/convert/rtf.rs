@@ -7,7 +7,7 @@
 
 use std::fmt::Write;
 
-use super::flow::{allowed, items, rgb8, Image, Item, Page, Table};
+use super::flow::{allowed, col_twips, items, rgb8, Image, Item, Page, Table};
 
 /// The most PNG bytes embedded in one file. A picture is written as hex (two characters a byte), and
 /// readers such as WordPad slow down badly past a few tens of MB; the rest are skipped and counted.
@@ -83,18 +83,17 @@ fn char_fmt(size: f64, bold: bool, italic: bool, cf: &str) -> String {
     format!("\\fs{}{}{}{cf}", fs(size), if bold { "\\b" } else { "" }, if italic { "\\i" } else { "" })
 }
 
-/// A table: a row per detected row, single grey borders on every cell, cell edges from the grid (measured
-/// from the left margin), the same padding of short rows as the Word writer.
-fn table(t: &Table, cf: &dyn Fn([f64; 3]) -> String, out: &mut String) {
-    let left = t.cols.first().copied().unwrap_or(0.0);
-    let mut edges = t.cols.clone();
-    edges.push(t.rect[2]);
-    // Right edge of grid column i, in twips from the left margin (at least 60 wide, like the grid in docx).
-    let mut right: Vec<i64> = Vec::new();
-    for e in edges.iter().skip(1) {
-        let prev = right.last().copied().unwrap_or(0);
-        right.push((((e - left) * 20.0).round() as i64).clamp(prev + 60, prev + 31680));
-    }
+/// A table: a row per detected row, single grey borders on every cell, cell edges from the grid widths
+/// (`flow::col_twips`, measured from the left margin), the same padding of short rows as the Word writer.
+fn table(t: &Table, text_w: f64, cf: &dyn Fn([f64; 3]) -> String, out: &mut String) {
+    // Right edge of grid column i, in twips from the left margin.
+    let right: Vec<i64> = col_twips(t, text_w)
+        .into_iter()
+        .scan(0i64, |x, w| {
+            *x += w;
+            Some(*x)
+        })
+        .collect();
     let border = |side: &str| format!("\\clbrdr{side}\\brdrs\\brdrw10\\brdrcf1");
     for row in &t.rows {
         out.push_str("\\trowd\\trgaph108\\trleft0");
@@ -188,7 +187,7 @@ pub fn rtf(pages: &[Page], title: &str) -> Rtf {
                 let fmt = char_fmt(b.size, b.bold && style.is_empty(), b.italic, &cf(b.color));
                 let _ = writeln!(s, "{{\\pard\\plain{brk}\\sa120{style}{fmt} {}\\par}}", text(&b.text));
             }
-            Item::Table(t) => table(t, &cf, &mut s),
+            Item::Table(t) => table(t, text_w, &cf, &mut s),
             Item::Img(im) => {
                 if image_bytes + im.bytes.len() > MAX_IMAGE_BYTES || !picture(im, text_w, brk, &mut s) {
                     skipped += 1;
