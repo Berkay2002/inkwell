@@ -26,7 +26,8 @@ Entry: Tools > Merge/Combine, Organize > "Combine files…", command palette "Co
   it and limited to the pages picked, in the order picked (`1-3, 6, 9-7` labels as the source labelled 1-3, 6, 9-7).
   A source without labels gets plain decimal numbers that carry on the combined page numbers (a file of 3 pages
   after 5 labelled ones shows 6, 7, 8), as Acrobat does. A contents page in front is plain decimal and counted. A
-  result whose pages are all plain decimal has no `/PageLabels` at all. A source whose labels cannot be read counts
+  result whose pages are all plain decimal has no `/PageLabels` at all, and a source that only spells out plain
+  decimal numbering from page 1 (many producers write that) counts as unlabelled. A source whose labels cannot be read counts
   as unlabelled; a hostile number tree (a node that is its own kid, a million entries) is read under a cap on the
   total work, so it costs time but never hangs the sheet. Unticked: the result has no labels, as before.
 - **Form fields** are kept; a field whose name clashes with one already in the result is renamed the way Acrobat does
@@ -113,7 +114,8 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
   a font the same, the first one's is kept.
 - A file opened with a password is not remembered between looks (the cache key holds no password), so such a
   file is read again on every look. Combining never writes a source, so signed or certified sources need no
-  special handling; their signatures are not carried into the result.
+  special handling. A signature field of a source comes along with its value, as every form field does; it no
+  longer verifies (the bytes are not the file that was signed), and the result counts as a signed document.
 - Labels are carried page by page: a source's section that is cut by a page range or reordered becomes several
   sections in the result, each with the number the page had in its source.
 - The attachments list does not show portfolio (collection) structure; a PDF Portfolio opens in its own file list (docs/portfolios.md).

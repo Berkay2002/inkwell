@@ -632,6 +632,19 @@ fn combine_carries_the_source_page_labels_to_the_pages_it_takes() {
 
     // nothing labelled anywhere: a plain document stays plain
     assert!(run("plain.pdf", opt, &[src(&c, ""), src(&c, "1")]).is_empty());
+
+    // a source that spells out plain decimal numbering (what many producers write) counts as unlabelled:
+    // it carries on the combined numbers instead of starting again at 1
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /D >>] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".into(),
+    ];
+    let explicit = d.join("explicit.pdf");
+    std::fs::write(&explicit, crate::outline::tests::raw_pdf(&objs)).unwrap();
+    let explicit = explicit.to_string_lossy().into_owned();
+    assert!(run("explicit1.pdf", opt, &[src(&c, ""), src(&explicit, "")]).is_empty());
+    assert_eq!(run("explicit2.pdf", opt, &[src(&b, "5"), src(&explicit, "")]), ["A-5", "2"]);
 }
 
 #[test]

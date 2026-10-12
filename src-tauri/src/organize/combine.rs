@@ -631,7 +631,8 @@ fn graft_sources(sources: Vec<Option<Source>>, opt: CombineOptions, toc_pages: u
         let g = graft_pages_ex(&mut dst, &doc, &s.pages, at, opt.keep_outlines)?;
         if opt.keep_labels {
             // A source whose labels cannot be read counts as one without: they never stop a combine.
-            let own = labels::read(&doc).unwrap_or_default();
+            // (sections that only spell out plain decimal numbering are no labels: they carry on)
+            let own = labels::normalize(labels::read(&doc).unwrap_or_default(), count);
             for (j, &p) in s.pages.iter().enumerate() {
                 let r = carried(&own, p, toc_pages + at as u32 + j as u32);
                 if !sections.last().is_some_and(|l| labels::continues(l, &r)) {
