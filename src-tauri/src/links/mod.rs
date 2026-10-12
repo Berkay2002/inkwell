@@ -2,7 +2,8 @@
 //! delete) and links made from the addresses in the text.
 //!
 //! Every change is one `Engine::apply_custom` step on the authoritative document: one undo step,
-//! kept by Save, recorded in history. A link is named by `(page, object number)`. Coordinates in and
+//! kept by Save, recorded in history. A link is named by `(page, object number)`; one written inline in `/Annots`
+//! (no object of its own) by its position in the array, as a negative number. Coordinates in and
 //! out are the viewer's page space (points, origin top left, `/Rotate` applied). A web address
 //! passes [`gate_url`] before it is written or opened, and nothing here opens one: the UI asks
 //! first (docs/bookmarks-links.md). A link to a file is made from an open token (never a path).
@@ -21,7 +22,7 @@ use crate::textedit::{Matrix, page_space};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::Buffer;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type Result<T> = std::result::Result<T, EngineError>;
 
@@ -31,6 +32,12 @@ pub const MAX_URL: usize = 2048;
 const SCHEMES: [&str; 3] = ["https", "http", "mailto"];
 /// Links of one page read at most.
 const MAX_LINKS: usize = 5000;
+/// Entries of one page's `/Annots` that are looked at; a longer array is read as far as this.
+const MAX_ANNOTS: usize = 50_000;
+/// Pages "Remove all links" walks: a longer document is refused whole rather than half done.
+const MAX_PAGES: i32 = 100_000;
+/// Why the links of a certified document (`/P` 1 or 2) are left alone.
+const CERTIFIED: &str = "This document is certified, and certification does not allow changes to its links. Inkwell leaves them as they are.";
 /// The smallest side of a link rectangle, in points.
 const MIN_SIDE: f32 = 2.0;
 
@@ -60,15 +67,41 @@ pub struct Border {
     pub color: [f32; 3],
 }
 
+/// How a link looks while it is pressed (`/H`, PDF 32000 12.5.6.5). A link with no `/H`, or one this does not
+/// know, is `Invert`, as the standard says.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Highlight {
+    None,
+    #[default]
+    Invert,
+    Outline,
+    /// `/P`: the pressed-in look.
+    Inset,
+}
+
+impl Highlight {
+    fn name(self) -> &'static str {
+        match self {
+            Highlight::None => "N",
+            Highlight::Invert => "I",
+            Highlight::Outline => "O",
+            Highlight::Inset => "P",
+        }
+    }
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Link {
-    /// The annotation's object number.
+    /// The annotation's object number; for a link written inline in `/Annots`, minus its position in the array
+    /// minus one (good for the generation it was listed at, like every id here).
     pub id: i32,
     /// `[x0, y0, x1, y1]` in page space.
     pub rect: [f32; 4],
     pub target: Target,
     pub border: Border,
+    pub highlight: Highlight,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -77,6 +110,10 @@ pub struct PageLinks {
     /// The generation the list belongs to; pass it back with a change.
     pub rev: u32,
     pub links: Vec<Link>,
+    /// Why the links of this document cannot be changed (certified, `/P` 1 or 2); null when they can.
+    pub locked: Option<String>,
+    /// Signed: a change is saved after the signature, which shows that the file changed.
+    pub signed: bool,
 }
 
 /// Where a new or changed link goes.
@@ -109,7 +146,10 @@ pub enum LinkOp {
     SetTarget { page: u32, id: i32, target: NewTarget },
     SetRect { page: u32, id: i32, rect: [f32; 4] },
     SetBorder { page: u32, id: i32, border: BorderSpec },
+    SetHighlight { page: u32, id: i32, highlight: Highlight },
     Delete { page: u32, ids: Vec<i32> },
+    /// Every link annotation of every page, inline ones included; other annotations and bookmarks stay.
+    RemoveAll,
     /// A link on every web address in the text that has none (see [`urls`]).
     FromUrls,
 }
@@ -317,25 +357,53 @@ fn is_link(a: &PdfObject) -> bool {
     name_of(a.get_dict("Subtype").ok().flatten()) == "Link"
 }
 
-/// The link annotations of `page` that are indirect objects (the ones that can be named).
-fn page_annots(doc: &PdfDocument, page: u32) -> Result<Vec<PdfObject>> {
-    let p = doc.find_page(page as i32)?;
-    let Some(annots) = p.get_dict("Annots")? else { return Ok(Vec::new()) };
+fn highlight_of(a: &PdfObject) -> Highlight {
+    match name_of(a.get_dict("H").ok().flatten()).as_str() {
+        "N" => Highlight::None,
+        "O" => Highlight::Outline,
+        "P" => Highlight::Inset,
+        _ => Highlight::Invert,
+    }
+}
+
+/// The link annotations of a page: `(id, object)` each, the id being the object number or, for a dictionary
+/// written inline in `/Annots`, `-(position + 1)`. `cut`: the array was longer than what is read.
+struct Annots {
+    links: Vec<(i32, PdfObject)>,
+    cut: bool,
+}
+
+fn annots_of(page: &PdfObject) -> Result<Annots> {
+    let mut out = Annots { links: Vec::new(), cut: false };
+    let Some(annots) = page.get_dict("Annots")? else { return Ok(out) };
     let arr = annots.resolve()?.unwrap_or(annots);
     if !arr.is_array()? {
-        return Ok(Vec::new());
+        return Ok(out);
     }
-    let mut out = Vec::new();
-    for a in arr.array_iter()? {
-        let a = a?;
-        if out.len() >= MAX_LINKS {
+    let len = arr.len()?;
+    out.cut = len > MAX_ANNOTS;
+    let mut seen = HashSet::new();
+    for i in 0..len.min(MAX_ANNOTS) as i32 {
+        if out.links.len() >= MAX_LINKS {
+            out.cut = true;
             break;
         }
-        if a.is_indirect()? && a.resolve()?.is_some_and(|d| d.is_dict().unwrap_or(false) && is_link(&d)) {
-            out.push(a);
+        let Some(a) = arr.get_array(i)? else { continue };
+        if a.is_indirect()? {
+            let n = a.as_indirect()?;
+            // The same object listed twice is one link.
+            if a.resolve()?.is_some_and(|d| d.is_dict().unwrap_or(false) && is_link(&d)) && seen.insert(n) {
+                out.links.push((n, a));
+            }
+        } else if a.is_dict()? && is_link(&a) {
+            out.links.push((-(i + 1), a));
         }
     }
     Ok(out)
+}
+
+fn page_annots(doc: &PdfDocument, page: u32) -> Result<Annots> {
+    annots_of(&doc.find_page(page as i32)?)
 }
 
 pub fn read_page(doc: &PdfDocument, page: u32, rev: u32) -> Result<PageLinks> {
@@ -347,14 +415,20 @@ pub(crate) fn read_page_with(doc: &PdfDocument, page: u32, rev: u32, names: &mut
     let m = page_space(doc, page)?;
     let mut spaces = HashMap::new();
     let mut links = Vec::new();
-    for a in page_annots(doc, page)? {
+    for (id, a) in page_annots(doc, page)?.links {
         let Some(r) = a.get_dict("Rect")?.and_then(|r| nums(&r, 4)) else { continue };
         let b = m.bbox([r[0], r[1], r[2], r[3]].map(f64::from));
         let (x0, x1) = (b[0].min(b[2]) as f32, b[0].max(b[2]) as f32);
         let (y0, y1) = (b[1].min(b[3]) as f32, b[1].max(b[3]) as f32);
-        links.push(Link { id: a.as_indirect()?, rect: [x0, y0, x1, y1], target: target_of(doc, &a, &mut spaces, names), border: border_of(&a) });
+        links.push(Link {
+            id,
+            rect: [x0, y0, x1, y1],
+            target: target_of(doc, &a, &mut spaces, names),
+            border: border_of(&a),
+            highlight: highlight_of(&a),
+        });
     }
-    Ok(PageLinks { rev, links })
+    Ok(PageLinks { rev, links, locked: None, signed: false })
 }
 
 pub fn list(eng: &Engine, doc: DocId, page: u32) -> Result<PageLinks> {
@@ -363,7 +437,10 @@ pub fn list(eng: &Engine, doc: DocId, page: u32) -> Result<PageLinks> {
         if page as i32 >= d.page_count()? {
             return Err(EngineError::BadPage(page));
         }
-        read_page(d, page, entry.generation())
+        let mut l = read_page(d, page, entry.generation())?;
+        l.locked = certified(d)?.filter(|p| *p <= 2).map(|_| CERTIFIED.to_string());
+        l.signed = crate::outline::signed(d);
+        Ok(l)
     })
 }
 
@@ -712,10 +789,7 @@ fn new_link(
 }
 
 fn link_obj(doc: &PdfDocument, page: u32, id: i32) -> Result<PdfObject> {
-    page_annots(doc, page)?
-        .into_iter()
-        .find(|a| a.as_indirect().ok() == Some(id))
-        .ok_or(EngineError::Stale)
+    page_annots(doc, page)?.links.into_iter().find(|(n, _)| *n == id).map(|(_, a)| a).ok_or(EngineError::Stale)
 }
 
 /// A link that was in the structure tree (`/StructParent`) leaves its entry in the parent tree, and the
@@ -789,21 +863,22 @@ fn drop_object_ref(elem: &PdfObject, link: i32) -> Result<()> {
     Ok(())
 }
 
-fn remove_link(doc: &mut PdfDocument, page: u32, id: i32) -> Result<()> {
+/// Takes the links `ids` (as [`annots_of`] names them) out of `page`'s `/Annots`. The objects of the ones that have
+/// one are the caller's to delete.
+fn drop_entries(doc: &PdfDocument, page: u32, ids: &[i32]) -> Result<()> {
     let p = doc.find_page(page as i32)?;
+    let gone: HashSet<i32> = ids.iter().copied().collect();
     if let Some(arr) = p.get_dict("Annots")? {
-        let arr = arr.resolve()?.unwrap_or(arr);
-        let mut arr = arr;
-        let len = arr.len()? as i32;
-        for i in (0..len).rev() {
-            if let Some(e) = arr.get_array(i)? {
-                if e.is_indirect()? && e.as_indirect()? == id {
-                    arr.array_delete(i)?;
-                }
+        let mut arr = arr.resolve()?.unwrap_or(arr);
+        // From the end, so a position still names its entry after the ones behind it went.
+        for i in (0..arr.len()? as i32).rev() {
+            let Some(e) = arr.get_array(i)? else { continue };
+            let id = if e.is_indirect()? { e.as_indirect()? } else { -(i + 1) };
+            if gone.contains(&id) {
+                arr.array_delete(i)?;
             }
         }
     }
-    doc.delete_object(id)?;
     Ok(())
 }
 
@@ -815,8 +890,10 @@ fn label(op: &LinkOp) -> String {
         LinkOp::SetTarget { page, .. } => format!("Change link target on p. {}", page + 1),
         LinkOp::SetRect { page, .. } => format!("Move link on p. {}", page + 1),
         LinkOp::SetBorder { page, .. } => format!("Change link border on p. {}", page + 1),
+        LinkOp::SetHighlight { page, .. } => format!("Change link highlight on p. {}", page + 1),
         LinkOp::Delete { page, ids } if ids.len() == 1 => format!("Delete link on p. {}", page + 1),
         LinkOp::Delete { page, ids } => format!("Delete {} links on p. {}", ids.len(), page + 1),
+        LinkOp::RemoveAll => "Remove all links".into(),
         LinkOp::FromUrls => "Create links from web addresses".into(),
     }
 }
@@ -844,9 +921,7 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
     // Links are annotations: a certification that does not allow annotations (`/P` 1 or 2) is voided by them.
     if let Some(p) = certified(doc)? {
         if p <= 2 {
-            return Err(EngineError::Invalid(
-                "This document is certified, and certification does not allow changes to its links. Inkwell leaves them as they are.".into(),
-            ));
+            return Err(EngineError::Invalid(CERTIFIED.into()));
         }
     }
     let guard = |doc: &PdfDocument, page: u32| -> Result<()> {
@@ -897,6 +972,15 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
             sync_ap(doc, &mut a, true)?;
             Ok(Some(Done::on(*page)))
         }
+        LinkOp::SetHighlight { page, id, highlight } => {
+            guard(doc, *page)?;
+            let mut a = link_obj(doc, *page, *id)?;
+            if highlight_of(&a) == *highlight {
+                return Ok(None);
+            }
+            a.dict_put("H", PdfObject::new_name(highlight.name())?)?;
+            Ok(Some(Done::on(*page)))
+        }
         LinkOp::Delete { page, ids } => {
             guard(doc, *page)?;
             let mut ids = ids.clone();
@@ -907,11 +991,60 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
             }
             // All of them are checked before the first goes.
             let found: Vec<PdfObject> = ids.iter().map(|id| link_obj(doc, *page, *id)).collect::<Result<_>>()?;
-            for (id, a) in ids.iter().zip(&found) {
+            for (id, a) in ids.iter().zip(&found).filter(|(id, _)| **id > 0) {
                 leave_structure(doc, a, *id)?;
-                remove_link(doc, *page, *id)?;
+            }
+            drop_entries(doc, *page, &ids)?;
+            for id in ids.iter().filter(|id| **id > 0) {
+                doc.delete_object(*id)?;
             }
             Ok(Some(Done { count: ids.len() as u32, ..Done::on(*page) }))
+        }
+        LinkOp::RemoveAll => {
+            let n = doc.page_count()?;
+            if n > MAX_PAGES {
+                return Err(EngineError::Invalid(format!("This document has more than {MAX_PAGES} pages, more than Inkwell removes the links of at once.")));
+            }
+            // Every page is read before the first link goes: a page that cannot be read in full stops the
+            // whole removal, so it is never half done.
+            let mut per_page: Vec<(u32, Vec<(i32, PdfObject)>)> = Vec::new();
+            for page in 0..n as u32 {
+                let found = page_annots(doc, page)?;
+                if found.cut {
+                    return Err(EngineError::Invalid(format!(
+                        "Page {} has more annotations than Inkwell reads, so it can't tell that every link was removed.",
+                        page + 1
+                    )));
+                }
+                if !found.links.is_empty() {
+                    per_page.push((page, found.links));
+                }
+            }
+            if per_page.is_empty() {
+                return Ok(None);
+            }
+            let mut pages = Vec::new();
+            let mut inline = 0;
+            // An object can be listed by two pages: its structure entry and its object are dealt with once.
+            let mut objects = Vec::new();
+            let mut seen = HashSet::new();
+            for (page, links) in &per_page {
+                for (id, a) in links {
+                    if *id < 0 {
+                        inline += 1;
+                    } else if seen.insert(*id) {
+                        leave_structure(doc, a, *id)?;
+                        objects.push(*id);
+                    }
+                }
+                drop_entries(doc, *page, &links.iter().map(|(id, _)| *id).collect::<Vec<_>>())?;
+                pages.push(*page);
+            }
+            for id in &objects {
+                doc.delete_object(*id)?;
+            }
+            let count = inline + objects.len() as u32;
+            Ok(Some(Done { id: None, count, pages, name: None }))
         }
         LinkOp::FromUrls => {
             let hits = urls::find(doc)?;
@@ -964,7 +1097,7 @@ pub fn apply(eng: &Engine, doc: DocId, rev: u32, op: &LinkOp, source: EditSource
     let mut out = (None, 0, None);
     // A removal makes the next Save a full rewrite, which would void a signature (a /P 3 certified file
     // allows deleting links): a signed document's save stays incremental.
-    let removes = matches!(op, LinkOp::Delete { .. }) && !eng.read_custom(doc, |d| Ok(crate::outline::signed(d)))?;
+    let removes = matches!(op, LinkOp::Delete { .. } | LinkOp::RemoveAll) && !eng.read_custom(doc, |d| Ok(crate::outline::signed(d)))?;
     let state = eng.apply_custom_unless_noop(doc, label(op), source, removes, |d| {
         if entry.generation() != rev {
             return Err(EngineError::Stale);
