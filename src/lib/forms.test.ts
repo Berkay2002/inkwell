@@ -11,6 +11,7 @@ import { useForms } from "./forms";
 import {
   type Field,
   MAX_PROMPTS,
+  bubbleAbove,
   calcFields,
   capPrompts,
   commitThenRun,
@@ -366,5 +367,24 @@ describe("script helpers", () => {
     expect(moved([1, 2, 3], 0, -1)).toEqual([1, 2, 3]);
     expect(moved([1, 2, 3], 5, 0)).toEqual([1, 2, 3]);
     expect(logCount([{ level: "info" }, { level: "warn" }, { level: "error" }])).toBe(2);
+  });
+});
+
+describe("error bubble placement", () => {
+  const rect: [number, number, number, number] = [72, 100, 272, 120];
+  it("sits under the field when there is room", () => {
+    expect(bubbleAbove(rect, 792, 1, "Enter a number")).toBe(false);
+  });
+  it("goes above a field near the bottom of the page", () => {
+    expect(bubbleAbove([72, 760, 272, 780], 792, 1, "Enter a number")).toBe(true);
+    // zoomed out, the same bubble covers more of the page
+    expect(bubbleAbove([72, 725, 272, 745], 792, 0.5, "Enter a number")).toBe(true);
+    expect(bubbleAbove([72, 725, 272, 745], 792, 1, "Enter a number")).toBe(false);
+  });
+  it("a long message is taller", () => {
+    expect(bubbleAbove([72, 700, 272, 720], 792, 1, "x".repeat(200))).toBe(true);
+  });
+  it("stays under when it fits neither side", () => {
+    expect(bubbleAbove([72, 10, 272, 780], 792, 1, "Enter a number")).toBe(false);
   });
 });
