@@ -79,7 +79,10 @@ export function Bar({ doc }: { doc: DocState }) {
       if (useStore.getState().searchOpen || document.querySelector(".ax-pop")) return;
       const a = document.activeElement;
       if (a && a !== document.body && !wrap.current?.contains(a) && !a.closest(".viewer, .stage")) return;
+      const was = useBar.getState().view;
       dispatch("esc");
+      // stepped down: that was this press's use
+      if (useBar.getState().view !== was) e.preventDefault();
     };
     const down = (e: PointerEvent) => {
       if ((e.target as Element | null)?.closest(".viewer")) dispatch("outside");
