@@ -321,11 +321,16 @@ fn field_ff(e: &Entry) -> i32 {
 
 /// The values of a field as strings (`/V` is a string, a name or an array of strings).
 fn values_of(v: Option<PdfObject>) -> Vec<String> {
+    values_by(v, text)
+}
+
+/// `values_of` with the caller's way of reading one string (form data export reuses decodes it already made).
+fn values_by(v: Option<PdfObject>, one: impl Fn(&PdfObject) -> Option<String>) -> Vec<String> {
     let Some(v) = v else { return Vec::new() };
     if v.is_array().unwrap_or(false) {
-        (0..v.len().unwrap_or(0).min(4096) as i32).filter_map(|i| v.get_array(i).ok().flatten().and_then(|x| text(&x))).collect()
+        (0..v.len().unwrap_or(0).min(4096) as i32).filter_map(|i| v.get_array(i).ok().flatten().and_then(|x| one(&x))).collect()
     } else {
-        text(&v).into_iter().collect()
+        one(&v).into_iter().collect()
     }
 }
 

@@ -438,14 +438,15 @@ fn a_value_is_measured_by_length_before_it_is_read() {
             let s = |n: usize| PdfObject::new_string(&"v".repeat(n));
             let mut list = d.new_array()?;
             list.array_push(s(3)?)?;
-            let short_list = string_over_limit(&list);
+            let mut c = Decoded::new();
+            let short_list = string_over_limit(&list, &mut c);
             list.array_push(s(MAX_STR + 1)?)?;
             Ok([
-                string_over_limit(&s(2 * MAX_STR + 3)?),
-                string_over_limit(&s(MAX_STR + 1)?),
-                string_over_limit(&PdfObject::new_name("On")?),
+                string_over_limit(&s(2 * MAX_STR + 3)?, &mut c),
+                string_over_limit(&s(MAX_STR + 1)?, &mut c),
+                string_over_limit(&PdfObject::new_name("On")?, &mut c),
                 short_list,
-                string_over_limit(&list),
+                string_over_limit(&list, &mut c),
             ])
         })
         .unwrap();
@@ -498,8 +499,47 @@ fn a_list_of_one_shared_utf16_string_is_not_decoded_once_per_entry() {
     ];
     let d = dir("shared-utf16");
     let (eng, id, _) = open_bytes(&d, "s.pdf", &raw_pdf(&objs));
-    let t = std::time::Instant::now();
+    DECODES.with(|d| d.set(0));
     let (_, done) = export(&eng, id, Format::Json, "s.pdf").unwrap();
     assert_eq!(done.long_text, 1);
-    assert!(t.elapsed() < std::time::Duration::from_secs(5), "took {:?}", t.elapsed());
+    // Decoded once: the 8 MiB budget charges every entry, so the list is over, but the string is read one time.
+    assert_eq!(DECODES.with(|d| d.get()), 1);
+}
+
+/// `n` text fields (F0, F1 ...) whose /V all reference one string of `hex`, opened as a document.
+fn shared_string_form(test: &str, n: usize, hex: &str) -> (Arc<Engine>, DocId) {
+    use crate::outline::tests::{open_bytes, raw_pdf};
+    let refs: String = (0..n).map(|i| format!("{} 0 R ", 5 + i)).collect();
+    let mut objs: Vec<String> = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{refs}] >> >>"),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{refs}] >>"),
+        "<< >>".into(),
+    ];
+    objs.extend((0..n).map(|i| {
+        format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (F{i}) /Rect [10 10 100 50] /P 3 0 R /V {} 0 R >>", 5 + n)
+    }));
+    objs.push(format!("<{hex}>"));
+    let (eng, id, _) = open_bytes(&dir(test), "s.pdf", &raw_pdf(&objs));
+    (eng, id)
+}
+
+#[test]
+fn many_fields_sharing_one_gray_zone_string_decode_it_once() {
+    // 10 fields on 1.9 MB of UTF-16BE kanji (2.85 MB of text): every one is over, and the string is read once.
+    // The counter covers forms/data.rs decodes only, not MuPDF's own per-widget load work (scan).
+    let (eng, id) = shared_string_form("shared-over", 10, &format!("FEFF{}", "3042".repeat(950_000)));
+    DECODES.with(|d| d.set(0));
+    let (_, done) = export(&eng, id, Format::Json, "s.pdf").unwrap();
+    assert_eq!((done.count, done.long_text), (0, 10));
+    assert_eq!(DECODES.with(|d| d.get()), 1);
+
+    // Under the limit (996 000 characters), the value each field exports comes from that one decode too.
+    let (eng, id) = shared_string_form("shared-under", 3, &format!("FEFF{}", "0078".repeat(996_000)));
+    DECODES.with(|d| d.set(0));
+    let (bytes, done) = export(&eng, id, Format::Json, "s.pdf").unwrap();
+    assert_eq!((done.count, done.long_text), (3, 0));
+    let p = parse(&bytes).unwrap();
+    assert!(p.fields.iter().all(|(_, v)| *v == Val::Text("x".repeat(996_000))));
+    assert_eq!(DECODES.with(|d| d.get()), 1);
 }
