@@ -97,7 +97,7 @@ export function CompareSetup() {
               {hint}
             </span>
           )}
-          <button className="hx-link" onClick={() => h.closeCompare()}>
+          <button className="hx-btn" onClick={() => h.closeCompare()}>
             Cancel
           </button>
           <button className="hx-btn primary hx-go" disabled={!ready} onClick={go}>

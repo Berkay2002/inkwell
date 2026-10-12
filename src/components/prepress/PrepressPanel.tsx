@@ -181,9 +181,12 @@ function Limit({ doc, value }: { doc: number; value: number }) {
         onKeyDown={(e) => e.key === "Enter" && commit()}
       />
       <span className="dim">% of ink at most</span>
-      <button className="a11y-quiet" disabled={value === 300 && text === "300"} onClick={() => st().setLimit(doc, "300")}>
-        300%
-      </button>
+      {/* only offered when it changes something: a faint "300%" beside a field that says 300 read as a repeat */}
+      {!(value === 300 && text === "300") && (
+        <button className="a11y-quiet" onClick={() => st().setLimit(doc, "300")}>
+          Reset to 300%
+        </button>
+      )}
     </div>
   );
 }

@@ -23,8 +23,9 @@
 }
 
 /* ---- toolbar switch ---- */
-/* One pill: the ChatGPT mark, and while the assistant is open the three layouts slide out of it to the right. */
+/* The ChatGPT mark, and while the assistant is open the three layouts in a pill under it. */
 .ax-toggle-group {
+  position: relative;
   display: flex;
   align-items: center;
   height: var(--tb-control-h, 28px);
@@ -50,21 +51,28 @@
 .ax-toggle-group.on .ax-toggle {
   color: var(--ax-accent);
 }
+/* A pill under the switch, not a part of the row: inserted in the row it pushed every icon to its left by ~60 px. */
 .ax-layouts {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
   display: flex;
   gap: 2px;
-  max-width: 0;
-  overflow: hidden;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-2);
   opacity: 0;
-  transform: translateX(-8px);
-  transition: max-width 220ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 160ms ease, transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    margin-left 220ms ease;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
 }
 .ax-toggle-group.on .ax-layouts {
-  max-width: 96px;
-  margin-left: 2px;
   opacity: 1;
   transform: none;
+  pointer-events: auto;
 }
 .ax-layouts button {
   display: grid;

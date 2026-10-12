@@ -5,6 +5,8 @@
   flex-direction: column;
   gap: 8px;
   padding-top: 6px;
+  /* the last control scrolls clear of the footer instead of ending against its edge */
+  padding-bottom: 16px;
 }
 /* The rail scrolls; a long sheet must not squeeze its lists and previews to fit. */
 .tl-body > * {

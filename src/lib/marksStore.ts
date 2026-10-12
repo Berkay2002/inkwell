@@ -340,6 +340,9 @@ export function readiness(s: MarksSheet, count: number): string | null {
   }
 }
 
+/** The one line under the sheet: what is missing while the mark can't be added yet, else what adding it will do. */
+export const footerLine = (why: string | null, sentence: string): string => why ?? sentence;
+
 function sizeProblem(s: MarksSheet): string | null {
   return s.style.size > 0 && s.style.size <= 600 ? null : "The font size has to be between 1 and 600 points.";
 }

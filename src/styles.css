@@ -306,20 +306,28 @@ select {
   background: var(--sidebar);
   border-right: 1px solid var(--border);
 }
+/* a track with a raised active tab: bare words with a faint accent chip read as loose labels */
 .sidebar-tabs {
   display: flex;
-  gap: 4px;
-  padding: 8px;
+  gap: 2px;
+  margin: 8px;
+  padding: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 .seg {
   flex: 1;
   height: 26px;
+  padding: 0 6px;
   border-radius: 6px;
   color: var(--text-2);
 }
 .seg.on {
-  background: var(--accent-soft);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-1);
   color: var(--accent);
+  font-weight: 600;
 }
 .thumbs,
 .outline {
@@ -867,8 +875,9 @@ select {
 }
 .tools {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
-  gap: 12px;
+  /* eleven tiles: 96px minimum needed 1176px and left "Create PDF" alone on a second row in the 1160px column at 1440 */
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  gap: 10px;
   margin: 0;
   padding: 0;
   list-style: none;

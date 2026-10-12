@@ -159,14 +159,16 @@
 }
 .pr-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   flex: none;
   padding: 12px 18px 14px;
   border-top: 1px solid var(--border);
 }
-.pr-outcome {
-  flex: 1;
+/* the summary takes a row of its own: in the options column it used to be squeezed beside three buttons */
+.pr-foot .pr-outcome {
+  flex: 1 1 100%;
   min-width: 0;
   font-size: 15px;
   font-weight: 600;

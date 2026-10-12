@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import { FORM_TOOLS, type FormTool, type ScriptsState, useForms } from "../../lib/forms";
 import {
-  type Field, FIELD_ICON, KIND_LABEL, NudgeBatch, SHORT, anchorOf, detectSummary, fieldLabel, isFillable, layoutReason, logCount, missingRequired,
+  type Field, FIELD_ICON, KIND_LABEL, NudgeBatch, SHORT, anchorOf, detectSummary, fieldCount, fieldLabel, isFillable, layoutReason, logCount, missingRequired,
   nudgeDelta, onPage, progress, renameCheck, rows, samePick, summary,
 } from "../../lib/formsLogic";
 import { SIGNED_NOTE } from "../../lib/a11yLogic";
@@ -204,7 +204,7 @@ export function FormsPanel({ doc }: { doc: DocState }) {
       <section className="ax-panel docked fm-panel">
         <div className="ax-head">
           <span className="ax-title">Forms</span>
-          <span className="dim cm-count">{list.length}</span>
+          <span className="dim cm-count">{fieldCount(fields, authoring)}</span>
           <span className="grow" />
           <MenuButton
             className="ax-icon"
@@ -486,6 +486,7 @@ function LayoutTools({ doc, pageCount, picked, fields, certified }: {
     <section className="fm-props" aria-label="Layout">
       <h3>
         <span>Layout</span>
+        {picked.length === 0 && <span className="dim small">Off until you select a field</span>}
         {picked.length > 1 && anchorField && <span className="dim small">{picked.length} fields, anchor {SHORT(anchorField.name, 20)}</span>}
       </h3>
       <div className="fm-tools" role="toolbar" aria-label="Layout tools" onMouseDown={(e) => e.preventDefault()}>
