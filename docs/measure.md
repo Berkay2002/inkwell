@@ -67,11 +67,13 @@ end ticks on a distance (no `/IC`: the wash exists only in the appearance, so a 
 a solid fill), and the label in Helvetica along the line (never upside down) with a white halo. `/Rect` and the
 form `/BBox` are the box of all that. A measurement from another app keeps its own look when a point is moved: `/C`,
 `/BS /W` (or `/Border`), `/LE` line endings (the arrows, butt, slash, square, diamond and circle styles at the first
-and last point), `/LL` leader lines on a distance (perpendicular, positive clockwise on screen; `/LLE` and `/LLO` are
-not drawn) and `/IC` for the area fill, and `/Rect` and `/BBox` take in the endings and leaders and the wider stroke.
-A distance with no `/LE` gets our end ticks. The form this module made is marked (`/InkwellMeasure true`) and is
-rewritten in place on the next move, with its font, so moving leaves nothing behind; a form from another app, which
-other annotations may share, is replaced by ours, never edited. An `annot_edit` colour change makes MuPDF redraw the shape without the label.
+and last point), `/IC` for the area fill, and on a distance `/LL`, `/LLE` and `/LLO`: the dimension line, its label and
+its endings are drawn `/LL` from the points (clockwise on screen when positive), with leader lines from `/LLO` next to
+each point to `/LLE` past the dimension line. `/Rect` and `/BBox` take in the endings, the leaders and the wider
+stroke. A distance with no `/LE` gets our end ticks. Every move writes a new appearance stream and font and points
+`/AP /N` at them; it never edits the stream the annotation pointed at, because a file can share that form with other
+annotations or the page. The stream MuPDF's own `update` makes in between is deleted, but the previous appearance (and
+its font) stays in the file unused until a full save. An `annot_edit` colour change makes MuPDF redraw the shape without the label.
 `measure_list` lists every line, polyline or polygon with a readable `/Measure` and recomputes its value from its points
 and its own `/Measure`, so a file from Acrobat shows Acrobat's scale.
 

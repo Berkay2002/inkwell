@@ -25,10 +25,6 @@ fn bad(m: impl Into<String>) -> EngineError {
 const COLOR: [f32; 3] = [0.80, 0.15, 0.12];
 const LABEL_SIZE: f64 = 10.0;
 const LINE_WIDTH: f64 = 1.0;
-/// Key in the appearance stream's dictionary that says this module made it, so a later move rewrites it in place (a
-/// form from another app may be shared between annotations).
-const OWN_AP: &str = "InkwellMeasure";
-
 /// How the annotation already looks. A measurement made here has `/C` and a border width only; one from another app
 /// may also have line endings (`/LE`), a leader length (`/LL`) and an interior colour (`/IC`), and they are kept.
 struct Look {
@@ -36,8 +32,12 @@ struct Look {
     width: f64,
     /// `/LE` of a line or polyline (first and last point); `None` draws our short ticks across a distance.
     ends: Option<[String; 2]>,
-    /// `/LL`: leader lines of a dimension line, perpendicular to it, positive clockwise.
+    /// `/LL`: the dimension line is drawn this far from `/L`, with leader lines from its ends back to the points;
+    /// perpendicular, positive clockwise on screen.
     leader: f64,
+    /// `/LLE`: how far the leaders go on past the dimension line; `/LLO`: the gap left next to the points.
+    leader_ext: f64,
+    leader_off: f64,
     interior: Option<[f64; 3]>,
 }
 
@@ -49,6 +49,10 @@ impl Look {
                 return None;
             }
             (0..a.len().ok()?).map(|i| a.get_array(i as i32).ok()?.filter(|v| v.is_number().unwrap_or(false))?.as_float().ok().map(f64::from)).collect()
+        };
+        let number = |key: &str| -> Option<f64> {
+            let v = o.get_dict(key).ok()??;
+            if v.is_number().ok()? { v.as_float().ok().map(f64::from).filter(|v| v.is_finite()) } else { None }
         };
         let rgb = |v: Vec<f64>| -> Option<[f64; 3]> {
             let v: Vec<f64> = v.into_iter().map(|c| c.clamp(0.0, 1.0)).collect();
@@ -78,26 +82,12 @@ impl Look {
             color: nums("C").and_then(rgb).unwrap_or(COLOR.map(f64::from)),
             width: w,
             ends,
-            leader: o
-                .get_dict("LL")
-                .ok()
-                .flatten()
-                .filter(|v| v.is_number().unwrap_or(false))
-                .and_then(|v| v.as_float().ok())
-                .map_or(0.0, |v| f64::from(v).clamp(-1000.0, 1000.0)),
+            leader: number("LL").map_or(0.0, |v| v.clamp(-1000.0, 1000.0)),
+            leader_ext: number("LLE").map_or(0.0, |v| v.clamp(0.0, 1000.0)),
+            leader_off: number("LLO").map_or(0.0, |v| v.clamp(0.0, 1000.0)),
             interior: nums("IC").and_then(rgb),
         }
     }
-}
-
-/// The appearance stream this module made earlier for the annotation, and the Helvetica it uses.
-fn own_form(o: &PdfObject) -> Option<(PdfObject, Option<PdfObject>)> {
-    let n = o.get_dict("AP").ok()??.get_dict("N").ok()??;
-    if !n.is_stream().ok()? || n.get_dict(OWN_AP).ok()?.is_none() {
-        return None;
-    }
-    let font = n.get_dict("Resources").ok().flatten().and_then(|r| r.get_dict("Font").ok().flatten()).and_then(|f| f.get_dict("Helv").ok().flatten());
-    Some((n, font))
 }
 
 /// A measurement annotation as the panel lists it.
@@ -273,8 +263,8 @@ pub fn add(doc: &mut PdfDocument, page: u32, kind: Kind, pts: &[[f32; 2]], scale
 /// Gives the annotation `a` our appearance for `pts` and `label`, and the `/Rect` that holds it. MuPDF builds its own
 /// appearance on `update` (it would not draw the label); ours replaces it.
 fn restyle(doc: &mut PdfDocument, a: &mut PdfAnnotation, geom: &PageGeom, kind: Kind, pts: &[[f32; 2]], label: &str) -> Result<()> {
-    // Read before `update`, which may redraw the annotation's own form: its look and our earlier appearance.
-    let (look, own) = (Look::of(&a.object()), own_form(&a.object()));
+    // Read before `update`, which may redraw the annotation's own form.
+    let look = Look::of(&a.object());
     let objects = doc.count_objects()? as i32;
     a.update()?;
     // The stream `update` made is replaced below by ours: drop it rather than leave it in the file.
@@ -284,7 +274,7 @@ fn restyle(doc: &mut PdfDocument, a: &mut PdfAnnotation, geom: &PageGeom, kind: 
     {
         doc.delete_object(n.as_indirect()?)?;
     }
-    let ap = appearance(doc, geom, kind, pts, label, &look, own)?;
+    let ap = appearance(doc, geom, kind, pts, label, &look)?;
     let mut o = a.object();
     o.dict_put("Rect", rect_obj(doc, ap.bbox)?)?;
     let mut ap_dict = doc.new_dict()?;
@@ -336,9 +326,14 @@ fn appearance(
     pts: &[[f32; 2]],
     label: &str,
     look: &Look,
-    own: Option<(PdfObject, Option<PdfObject>)>,
 ) -> Result<Appearance> {
-    let pg: Vec<P2> = pts.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect();
+    let orig: Vec<P2> = pts.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect();
+    // `/LL` on a distance: the points are what is measured, the dimension line (and its label and endings) is drawn
+    // `LL` away from them, clockwise on screen when positive, and leader lines join the two.
+    let l = dist(orig[0], orig[1]).max(1e-9);
+    let side = if kind == Kind::Distance && look.leader != 0.0 { [-(orig[1][1] - orig[0][1]) / l, (orig[1][0] - orig[0][0]) / l] } else { [0.0, 0.0] };
+    let shift = [side[0] * look.leader, side[1] * look.leader];
+    let pg: Vec<P2> = orig.iter().map(|p| [p[0] + shift[0], p[1] + shift[1]]).collect();
     let w = text_width(label, LABEL_SIZE);
     // Where the label sits and which way it reads: along the line, never upside down.
     let along = |a: P2, b: P2| {
@@ -389,6 +384,7 @@ fn appearance(
         }
     };
     let mut extent: Vec<P2> = pg.clone();
+    extent.extend(orig.iter().copied());
     extent.extend(text_box);
     match kind {
         Kind::Distance => {
@@ -396,12 +392,13 @@ fn appearance(
             path(&mut s, false);
             s.push_str("S\n");
             if look.leader != 0.0 {
-                // Leader lines: from each end, perpendicular, clockwise on the screen when positive.
-                let l = dist(pg[0], pg[1]).max(1e-9);
-                let n = [-(pg[1][1] - pg[0][1]) / l * look.leader, (pg[1][0] - pg[0][0]) / l * look.leader];
-                for e in [pg[0], pg[1]] {
-                    let _ = writeln!(s, "{} {} m {} {} l S", f(e[0]), f(e[1]), f(e[0] + n[0]), f(e[1] + n[1]));
-                    extent.push([e[0] + n[0], e[1] + n[1]]);
+                // From next to each point (`/LLO` away), across the dimension line and `/LLE` past it.
+                let u = if look.leader > 0.0 { side } else { [-side[0], -side[1]] };
+                for (e, o) in pg.iter().zip(&orig).take(2).map(|(e, o)| (*e, *o)) {
+                    let (x0, y0) = (o[0] + u[0] * look.leader_off, o[1] + u[1] * look.leader_off);
+                    let (x1, y1) = (e[0] + u[0] * look.leader_ext, e[1] + u[1] * look.leader_ext);
+                    let _ = writeln!(s, "{} {} m {} {} l S", f(x0), f(y0), f(x1), f(y1));
+                    extent.extend([[x0, y0], [x1, y1]]);
                 }
             }
             if look.ends.is_none() {
@@ -450,18 +447,14 @@ fn appearance(
     let (bx0, by0, bx1, by1) = bounds(&corners);
     let bbox = [bx0, by0, bx1, by1];
 
-    let (own, own_font) = own.map_or((None, None), |(n, f)| (Some(n), f));
-    let font = match own_font {
-        Some(f) => f,
-        None => {
-            let mut font = doc.new_dict()?;
-            font.dict_put("Type", PdfObject::new_name("Font")?)?;
-            font.dict_put("Subtype", PdfObject::new_name("Type1")?)?;
-            font.dict_put("BaseFont", PdfObject::new_name("Helvetica")?)?;
-            font.dict_put("Encoding", PdfObject::new_name("WinAnsiEncoding")?)?;
-            doc.add_object(&font)?
-        }
-    };
+    // A new form and font on every call, never an edit of the stream the annotation points at: a file may share
+    // that form between annotations or with a page, whatever it says about itself.
+    let mut font = doc.new_dict()?;
+    font.dict_put("Type", PdfObject::new_name("Font")?)?;
+    font.dict_put("Subtype", PdfObject::new_name("Type1")?)?;
+    font.dict_put("BaseFont", PdfObject::new_name("Helvetica")?)?;
+    font.dict_put("Encoding", PdfObject::new_name("WinAnsiEncoding")?)?;
+    let font = doc.add_object(&font)?;
     let mut fonts = doc.new_dict()?;
     fonts.dict_put("Helv", font)?;
     let mut gs = doc.new_dict()?;
@@ -474,25 +467,12 @@ fn appearance(
     res.dict_put("Font", fonts)?;
     res.dict_put("ExtGState", states)?;
     let buf = Buffer::from_bytes(s.as_bytes())?;
-    let form = match own {
-        // The stream we made before: the same object takes the new drawing, so a move leaves nothing behind.
-        Some(mut n) => {
-            n.dict_put("BBox", rect_obj(doc, bbox)?)?;
-            n.dict_put("Resources", res)?;
-            n.dict_delete("Matrix")?;
-            n.write_stream_buffer(&buf)?;
-            n
-        }
-        None => {
-            let mut dict = doc.new_dict()?;
-            dict.dict_put("Type", PdfObject::new_name("XObject")?)?;
-            dict.dict_put("Subtype", PdfObject::new_name("Form")?)?;
-            dict.dict_put("BBox", rect_obj(doc, bbox)?)?;
-            dict.dict_put("Resources", res)?;
-            dict.dict_put(OWN_AP, PdfObject::new_bool(true))?;
-            doc.add_stream(&buf, Some(&dict), false)?
-        }
-    };
+    let mut dict = doc.new_dict()?;
+    dict.dict_put("Type", PdfObject::new_name("XObject")?)?;
+    dict.dict_put("Subtype", PdfObject::new_name("Form")?)?;
+    dict.dict_put("BBox", rect_obj(doc, bbox)?)?;
+    dict.dict_put("Resources", res)?;
+    let form = doc.add_stream(&buf, Some(&dict), false)?;
     Ok(Appearance { form, bbox })
 }
 
