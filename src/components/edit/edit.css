@@ -222,7 +222,8 @@
   opacity: 0.45;
   cursor: not-allowed;
 }
-.te-tog.on {
+.te-tog.on,
+.te-tog.on:hover {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-fg);
