@@ -456,8 +456,14 @@ fn new_widget(doc: &mut PdfDocument, src: &Entry, page: u32, rect: Rect, parent:
         }
         // Calculations are not copied (the copy is not in the calculation order); formats and validation are.
         if let Some(aa) = geti(&src.obj, "AA").filter(|a| a.is_dict().unwrap_or(false)) {
-            let mut c = aa.clone();
-            c.dict_delete("C")?;
+            // A dictionary of its own: /AA may be shared with the original, which keeps its /C.
+            let mut c = doc.new_dict()?;
+            for kv in aa.dict_iter()? {
+                let (k, v) = kv?;
+                if let Some(key) = text(&k).filter(|k| k != "C") {
+                    c.dict_put(key.as_str(), v)?;
+                }
+            }
             if c.dict_len()? > 0 {
                 n.dict_put("AA", c)?;
             }

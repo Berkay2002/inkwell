@@ -2733,6 +2733,36 @@ fn copies_of_a_field_node_with_one_widget_keep_its_format_on_the_original_and_ev
 }
 
 #[test]
+fn copies_leave_the_originals_shared_actions_alone() {
+    // /AA is an indirect dictionary; its /C is an action with no script, so the field still counts as copyable.
+    // /T is the leaf: the widgets are the kids 0, 1, 2 of the group Amt.
+    let bytes = pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Amt) /Rect [72 600 140 620] /F 4 /DA (/Helv 0 Tf 0 g) /AA 6 0 R >>".to_string(),
+        "<< /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, \"\", true);) >> /C << /S /ResetForm >> >>".to_string(),
+    ]);
+    let (eng, id, path) = open_bytes("layout-copies-shared-aa", bytes);
+    let amt = items_of(&eng, id, &["Amt"])[0];
+    let (_, done) = copies_one(&eng, id, amt, 1, 3, (10.0, 0.0), EditSource::User).unwrap();
+    assert_eq!(done.made, 2);
+    eng.save(id, None).unwrap();
+    let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+    let mut seen = std::collections::BTreeMap::new();
+    for w in doc.load_pdf_page(0).unwrap().widgets() {
+        let o = w.annotation().object();
+        let aa = o.get_dict("AA").unwrap().expect("every widget keeps its actions");
+        let t = super::text(&o.get_dict("T").unwrap().unwrap()).unwrap();
+        seen.insert(t, (aa.get_dict("F").unwrap().is_some(), aa.get_dict("C").unwrap().is_some()));
+    }
+    let want: std::collections::BTreeMap<String, (bool, bool)> =
+        [("0", (true, true)), ("1", (true, false)), ("2", (true, false))].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    assert_eq!(seen, want, "the original keeps /F and /C, a copy has /F and no /C");
+}
+
+#[test]
 fn giving_a_field_a_second_widget_moves_only_the_fields_actions_up_and_keeps_the_widgets_triggers() {
     let bytes = pdf_of(&[
         "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
