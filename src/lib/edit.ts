@@ -49,7 +49,7 @@ export function applyState(id: number, s: EditState) {
   if (revChanged && useMeasure.getState().docs[id]) useMeasure.getState().onRev(id);
   // ... and bookmarks and links.
   if (revChanged) useNav.getState().onRev(id);
-  // ... and the text blocks Edit text has listed (it registers itself below).
+  // ... and the text blocks Edit text has listed (the Edit store hooks in through the leave guard).
   if (revChanged) guard?.rev(id);
   // Hits point at the old pages.
   if (revChanged && d.search.query) st().runSearch(id, d.search.query);
