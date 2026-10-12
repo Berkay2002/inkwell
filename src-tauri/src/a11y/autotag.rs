@@ -140,13 +140,19 @@ fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<(Vec<Table>,
     let mut found = tables::detect(&items, &tables::rules(&ops, &ctm), &widgets);
     // Between a table's first and last cell the page may draw only its cells and artifacts: text
     // drawn in the middle (a running footer, say) would be read in another order than drawn.
+    let mut owner: Vec<Option<usize>> = vec![None; lines.len()];
+    for (ti, t) in found.iter().enumerate() {
+        t.rows.iter().flatten().for_each(|&l| owner[l] = Some(ti));
+    }
+    let mut ti = 0;
     found.retain(|t| {
-        let cells: Vec<usize> = t.rows.iter().flatten().copied().collect();
-        let spans = cells.iter().filter_map(|&l| span[l]);
+        let me = Some(ti);
+        ti += 1;
+        let spans = t.rows.iter().flatten().filter_map(|&l| span[l]);
         let (lo, hi) = spans.fold((usize::MAX, 0), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
         rs[lo..=hi].iter().all(|r| match r.target {
             Target::Artifact => true,
-            Target::Line(l) => cells.contains(&l),
+            Target::Line(l) => owner[l] == me,
             _ => false,
         })
     });
