@@ -130,7 +130,7 @@ export function usePreviewSrc(r: Recent, missing: boolean): string | undefined {
 export function NavItem({ icon, label, on, onClick }: { icon: IconName; label: string; on?: boolean; onClick: () => void }) {
   return (
     <button className={on ? "nav-item on" : "nav-item"} aria-current={on ? "page" : undefined} onClick={onClick}>
-      <Icon name={icon} size={18} />
+      <Icon name={icon} size={20} filled={on} />
       {label}
     </button>
   );

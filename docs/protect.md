@@ -96,7 +96,7 @@ Errors: `needs-permissions-password`, `bad-permissions-password` (from the engin
 - A file opened with only the user password of a document that has restrictions stays restricted; "unlocked" is
   decided from the rights the session received, not from the password's name.
 - Restoring an old encrypted version (`reloadInPlace`) can't ask for the password again.
-- No batch protect, no certificate (public-key) security, no "encrypt attachments only" / "all except metadata"
+- No certificate (public-key) security (a Protect step in an Action Wizard action sets passwords, see batch.md), no "encrypt attachments only" / "all except metadata"
   choices (Acrobat's classic dialog has them; it writes `/EncryptMetadata false` for the latter).
 - The strength meter is Weak / Fair / Strong over five segments; Acrobat's is Weak / Medium / Strong / Best over
   four (thresholds in the study note). Left as designed.

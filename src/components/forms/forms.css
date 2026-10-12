@@ -55,13 +55,18 @@ select.fm-w option {
 }
 .fm-w.k-checkbox,
 .fm-w.k-radio,
-.fm-w.k-button {
+.fm-w.k-button,
+button.fm-w.k-signature {
   cursor: pointer;
 }
 .fm-w.k-checkbox:focus,
 .fm-w.k-radio:focus,
-.fm-w.k-button:focus {
+.fm-w.k-button:focus,
+.fm-w.k-signature:focus {
   background: transparent;
+}
+.fm-w.k-signature[aria-disabled="true"] {
+  cursor: not-allowed;
 }
 .fm-w.ro {
   cursor: default;

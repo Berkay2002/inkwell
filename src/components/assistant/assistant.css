@@ -27,7 +27,7 @@
 .ax-toggle-group {
   display: flex;
   align-items: center;
-  height: 28px;
+  height: var(--tb-control-h, 28px);
   padding: 2px;
   border-radius: 14px;
   transition: background 160ms ease;

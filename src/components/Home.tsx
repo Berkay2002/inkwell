@@ -12,6 +12,7 @@ import type { PageDark } from "../lib/pageDark";
 import { type Theme, useStore } from "../store";
 import { FileMenu, NavItem, SearchPill, Thumb, useDropOver, useNow, usePreviewSrc, useRecentsSync } from "./FileParts";
 import { Icon } from "./Icons";
+import { ToolTile } from "./ToolTile";
 import { Library, type Scope } from "./Library";
 import { MenuButton, type MenuEntry } from "./Menu";
 import "./allTools.css";
@@ -134,7 +135,7 @@ function Landing({ over, onSeeAll }: { over: boolean; onSeeAll: () => void }) {
         {quickTools.map((t) => (
           <li key={t.id}>
             <button className="tool" onClick={() => void launchTool(t.id)}>
-              <Icon name={t.icon} size={22} />
+              <ToolTile icon={t.icon} group={t.group} size={28} />
               {t.label}
             </button>
           </li>
@@ -237,9 +238,7 @@ function Landing({ over, onSeeAll }: { over: boolean; onSeeAll: () => void }) {
               {g.items.map((it) => (
                 <li key={it.id}>
                   <button className="tool-card-btn" data-tool={it.id} onClick={() => void launchToolFromHome(it.id)}>
-                    <span className="tool-icon" data-group={it.group}>
-                      <Icon name={it.icon} size={20} />
-                    </span>
+                    <ToolTile icon={it.icon} group={it.group} size={40} />
                     <span className="tool-text">
                       <span className="tool-name">{it.label}</span>
                       <span className="tool-desc">{it.description}</span>

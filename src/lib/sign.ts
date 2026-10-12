@@ -227,6 +227,23 @@ export const CERTIFY_LABEL: Record<number, string> = {
 /** Whether a new signature may be added: a P=1 certification forbids it. */
 export const locked = (list: SignatureInfo[]) => signed(list).some((s) => s.certify === 1);
 
+export const LOCKED_REASON = "The document is certified with no changes allowed, so it can't be signed again.";
+
+/** How a signature form field on the page behaves: `sig` is the field's entry in the document's signature list, if read yet. */
+export interface SigFieldView {
+  /** `unknown`: not read yet (inert); `locked`: refused, with the reason in the title. */
+  state: "unknown" | "locked" | "sign" | "signed";
+  title: string;
+}
+
+export function sigFieldView(label: string, sig: SignatureInfo | undefined, list: SignatureInfo[], readOnly = false): SigFieldView {
+  if (!sig) return { state: "unknown", title: label };
+  if (sig.status !== "unsigned") return { state: "signed", title: `${label}: signed${sig.signer ? ` by ${sig.signer}` : ""}, click for details` };
+  if (locked(list)) return { state: "locked", title: `${label}: ${LOCKED_REASON}` };
+  if (readOnly) return { state: "locked", title: `${label}: read-only field` };
+  return { state: "sign", title: `${label}: click to sign` };
+}
+
 /** The outcome line next to Sign. */
 export function outcome(list: SignatureInfo[], lock: boolean, dirty: boolean): string {
   const n = signed(list).length;
@@ -268,6 +285,8 @@ export interface Draft {
 }
 
 export interface DocSign {
+  /** The signature the Signatures rail scrolls to and marks; `n` counts requests so a repeated one scrolls again. Cleared when the rail leaves the list. */
+  focus: { field: string; n: number } | null;
   items: Item[];
   selected: number | null;
   sigs: SignatureInfo[];
@@ -278,7 +297,7 @@ export interface DocSign {
   error: string | null;
 }
 
-const fresh = (): DocSign => ({ items: [], selected: null, sigs: [], sigsRev: -1, draft: null, bannerHidden: false, error: null });
+const fresh = (): DocSign => ({ focus: null, items: [], selected: null, sigs: [], sigsRev: -1, draft: null, bannerHidden: false, error: null });
 
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 
@@ -326,6 +345,10 @@ interface SignStore {
   remove: (doc: number, page: number, xref: number) => Promise<void>;
   flatten: (doc: number, pages: number[] | null) => Promise<void>;
   setDraft: (doc: number, d: Draft | null) => void;
+  /** Opens the signing sheet aimed at an existing empty signature field. */
+  signField: (doc: number, f: Pick<SignatureInfo, "page" | "rect" | "field">) => void;
+  /** Opens the Signatures rail on one signature. */
+  showSignature: (doc: number, field: string) => void;
   hideBanner: (doc: number) => void;
   /** Signs the draft; `to` is a save token for a document that has no file yet. */
   sign: (doc: number, to: string | null) => Promise<boolean>;
@@ -355,7 +378,13 @@ export const useSign = create<SignStore>((set, get) => {
     tool: "select",
     setTool: (tool) => set({ tool }),
     rail: null,
-    setRail: (rail) => set({ rail }),
+    setRail: (rail) =>
+      set((s) => ({
+        rail,
+        ...(rail !== "list" && Object.values(s.docs).some((d) => d.focus)
+          ? { docs: Object.fromEntries(Object.entries(s.docs).map(([k, d]) => [k, d.focus ? { ...d, focus: null } : d])) }
+          : {}),
+      })),
     pick: {},
     creator: null,
     setCreator: (creator) => set({ creator }),
@@ -440,6 +469,14 @@ export const useSign = create<SignStore>((set, get) => {
       patch(doc, { selected: null });
     },
     setDraft: (doc, draft) => patch(doc, { draft }),
+    signField: (doc, f) => {
+      patch(doc, { draft: { page: f.page, rect: f.rect, field: f.field } });
+      get().setRail("sheet");
+    },
+    showSignature: (doc, field) => {
+      patch(doc, { focus: { field, n: (get().get(doc).focus?.n ?? 0) + 1 } });
+      set({ rail: "list" });
+    },
     hideBanner: (doc) => patch(doc, { bannerHidden: true }),
     sign: async (doc, to) => {
       const s = get();
@@ -472,6 +509,15 @@ export const useSign = create<SignStore>((set, get) => {
     },
   };
 });
+
+/** A click on a signature form field: starts signing into an empty one, shows a signed one, does nothing on a refused one. */
+export function clickSigField(doc: number, label: string, sig: SignatureInfo | undefined, list: SignatureInfo[], readOnly = false) {
+  const st = useSign.getState();
+  const { state } = sigFieldView(label, sig, list, readOnly);
+  // The signature list's name and box are sent, not the form's: the engine looks the field up by them.
+  if (sig && state === "sign") st.signField(doc, sig);
+  else if (sig && state === "signed") st.showSignature(doc, sig.field);
+}
 
 /** The saved signature the appearance can show (the engine writes the name when there is none). */
 export const picture = (s: { saved: Saved[]; pick: Partial<Record<SavedKind, string>> }) =>

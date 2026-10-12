@@ -23,12 +23,12 @@ const size = (dim: SizeDim, label: string, icon: IconName): LayoutAction => ({ i
 /** The layout tools in toolbar order; the groups are the separators of the context menu. */
 export const LAYOUT_GROUPS: LayoutAction[][] = [
   [
-    align("left", "Align left", "alignLeft"),
-    align("right", "Align right", "alignRight"),
-    align("top", "Align top", "alignTop"),
-    align("bottom", "Align bottom", "alignBottom"),
-    align("hCenter", "Align horizontal centres", "alignHCenter"),
-    align("vCenter", "Align vertical centres", "alignVCenter"),
+    align("left", "Align left", "layoutLeft"),
+    align("right", "Align right", "layoutRight"),
+    align("top", "Align top", "layoutTop"),
+    align("bottom", "Align bottom", "layoutBottom"),
+    align("hCenter", "Align horizontal centres", "layoutHCenter"),
+    align("vCenter", "Align vertical centres", "layoutVCenter"),
   ],
   [
     center("horizontal", "Centre horizontally on the page", "centerH"),
