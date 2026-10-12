@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { pagesIn, planFiles, securityDropped } from "../lib/combineLogic";
+import { badRangeMessage, pagesIn, planFiles, securityDropped } from "../lib/combineLogic";
 import { type CombineEntry, type CombineSheet as SheetState, pageUrl, useCombine } from "../lib/combineStore";
 import type { CombineFilePlan } from "../lib/api";
 import { Icon } from "./Icons";
@@ -323,7 +323,7 @@ function Footer({ sheet }: { sheet: SheetState }) {
         : plan
           ? plan.canRun
             ? plan.summary
-            : (plan.files.find((f) => f.state.state === "badRange")?.message ?? "Fix the files marked in red to combine")
+            : (badRangeMessage(entries, plan.files, planKeys) ?? "Fix the files marked in red to combine")
           : "Reading the files…";
   const bad = !!planError || (plan != null && !plan.canRun && entries.length > 0);
   return (

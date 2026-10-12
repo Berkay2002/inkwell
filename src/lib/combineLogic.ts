@@ -76,3 +76,12 @@ export function securityDropped(entries: { password?: string | null; locked?: un
 export function planFiles<T>(entries: { key: number }[], files: T[], planKeys: number[]): (T | undefined)[] {
   return entries.map((e) => files[planKeys.indexOf(e.key)]);
 }
+
+/** The message of the first listed row whose range does not fit its file, from a plan that may be stale; undefined when none. */
+export function badRangeMessage(
+  entries: { key: number }[],
+  files: { state: { state: string }; message: string | null }[],
+  planKeys: number[],
+): string | null | undefined {
+  return planFiles(entries, files, planKeys).find((f) => f?.state.state === "badRange")?.message;
+}

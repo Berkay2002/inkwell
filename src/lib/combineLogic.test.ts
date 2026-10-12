@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatOrder, pagesIn, parseOrder, planFiles, securityDropped, togglePage } from "./combineLogic";
+import { formatOrder, pagesIn, parseOrder, planFiles, securityDropped, togglePage, badRangeMessage } from "./combineLogic";
 
 describe("combine page ranges", () => {
   it("reads them in the order written, backwards ranges backwards", () => {
@@ -73,6 +73,14 @@ describe("a plan made before the list changed", () => {
   });
   it("does not give a remaining row the security of a removed one", () => {
     expect(dropped([row(2)], files(true, false), [1, 2])).toBe(false);
+  });
+  it("says nothing about a bad range of a row that was removed", () => {
+    const bad = [
+      { state: { state: "badRange" }, message: "Page 9 is not in a.pdf" },
+      { state: { state: "ready" }, message: null },
+    ];
+    expect(badRangeMessage([{ key: 1 }, { key: 2 }], bad, [1, 2])).toBe("Page 9 is not in a.pdf");
+    expect(badRangeMessage([{ key: 2 }], bad, [1, 2])).toBeUndefined();
   });
   it("lets a row the plan has not seen stand on its password", () => {
     expect(planFiles([{ key: 5 }], files(true), [1])).toEqual([undefined]);

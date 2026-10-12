@@ -775,7 +775,8 @@ struct Graft<'a> {
 /// How many parent fields are copied above one widget: a field tree is a few levels deep, and a chain far
 /// past that (or one a loop makes endless) would recurse as deep as the file allows. The field at the cap is a root.
 /// The count starts at each widget, so a tree deeper than the cap is cut into several roots, and below the cut
-/// a field loses the /FT, /Ff and /DA it would inherit from the ancestors left behind (hostile files only).
+/// a field loses the inherited /FT, /Ff, /V, /DA and the like, and its full name, of the ancestors left behind
+/// (hostile files only).
 const MAX_FIELD_DEPTH: usize = 64;
 
 /// Keys never grafted as they are: they point back into the source's page or field tree.
