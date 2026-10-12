@@ -2438,6 +2438,13 @@ fn layout_tools_hold_their_caps() {
     assert!(e.contains("at most 1000"), "{e}");
     let e = copies_one(&eng, id, a, 20, 26, (1.0, 1.0), EditSource::User).unwrap_err().to_string();
     assert!(e.contains("at most 500"), "{e}");
+    // 501 places is one over; 500 passes the cap (here nearly all of them run off the page and are skipped).
+    let e = copies_one(&eng, id, a, 3, 167, (1.0, 1.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("at most 500"), "{e}");
+    assert_eq!(steps(&eng, id), n, "no step");
+    let (_, done) = copies_one(&eng, id, a, 2, 250, (900.0, 0.0), EditSource::User).unwrap();
+    assert_eq!(done, Copied { made: 1, skipped: 498 });
+    let n = steps(&eng, id);
     let pages: Vec<u32> = (1..=2001).collect();
     let e = duplicate_one(&eng, id, a, &pages, EditSource::User).unwrap_err().to_string();
     assert!(e.contains("at most 2000"), "{e}");

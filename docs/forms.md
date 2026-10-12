@@ -114,7 +114,7 @@ Acrobat Prepare Form's layout tools, in `forms/layout.rs`. Each is one undo step
 - **Create multiple copies** (rows × columns, space between across and down in points) lays a grid to the right of and
   below the field. The field itself becomes `name.0` and the copies `name.1`, `name.2` … in row order. The gaps are the
   space *between* fields, not offsets. A copy that would run off the page is left out and the answer says how many.
-  Refused for a field with several widgets, a calculated field and a radio or signature field. At most 500 copies.
+  Refused for a field with several widgets, a calculated field and a radio or signature field. At most 500 places in all (the field and its copies).
   Calculations that use the old name through the simplified notation follow the rename; a script that calls
   `getField("name")` does not, and keeps naming the old field.
 - **Rename**: F2 or a double click on a row of the Fields list edits the field's **full** dotted name in place (the name
@@ -126,7 +126,7 @@ Acrobat Prepare Form's layout tools, in `forms/layout.rs`. Each is one undo step
   signature covers (`/Lock`) and a signature field that is signed. A certified document, or a selection that is too
   small, shows the controls disabled with the reason as their tooltip; a signature lock is refused by the engine with a
   message. A signed, uncertified document is changed incrementally: the signed bytes stay a prefix of the file.
-- Caps: 1 000 widgets per step, 500 copies, 2 000 pages.
+- Caps: 1 000 widgets per step, 500 places per grid (the field and its copies), 2 000 pages.
 - Not built: dragging a group, and an assistant tool for any of this.
 
 ## Later (not built)

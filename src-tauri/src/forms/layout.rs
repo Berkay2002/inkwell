@@ -586,8 +586,9 @@ pub fn copies(doc: &mut PdfDocument, item: Item, rows: u32, cols: u32, gap_x: f3
     if rows == 0 || cols == 0 || cells < 2 {
         return Err(bad("choose at least two places: more than one row or column"));
     }
-    if cells - 1 > MAX_COPIES as u64 {
-        return Err(bad(format!("at most {MAX_COPIES} copies at once")));
+    // The field's own place counts: 500 places in all, as the dialog says.
+    if cells > MAX_COPIES as u64 {
+        return Err(bad(format!("at most {MAX_COPIES} places (the field and its copies) at once")));
     }
     if !gap_x.is_finite() || !gap_y.is_finite() || gap_x.abs() > 10_000.0 || gap_y.abs() > 10_000.0 {
         return Err(bad("that is not a distance on the page"));
