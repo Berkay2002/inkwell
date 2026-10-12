@@ -2294,6 +2294,33 @@ fn a_field_a_signature_covers_and_a_signed_signature_field_are_not_laid_out() {
 }
 
 #[test]
+fn a_rename_may_not_take_a_name_a_signature_covers_or_rewrite_a_calculation_it_locks() {
+    let (eng, id, _) = script_form("layout-lock-names", &["Free", "Sum", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    patch_field(&eng, id, "Sum", FieldPatch { calculate: Some(Calculate::Simple { op: CalcOp::Sum, fields: vec!["Free".into()] }), ..Default::default() });
+    sign(&eng, id, Some(("Include", &["Reserved", "Sum"])), None);
+    let it = |n: &str| items_of(&eng, id, &[n])[0];
+    let n = steps(&eng, id);
+    let e = rename_one(&eng, id, it("Other"), "Reserved", false, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("covered by a signature"), "{e}");
+    let e = rename_one(&eng, id, it("Other"), "Reserved.Sub", false, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("covered by a signature"), "{e}");
+    // Sum is locked and lists Free: Free may not take another name (the list would have to follow), nor be copied.
+    let e = rename_one(&eng, id, it("Free"), "Free2", false, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("calculation of [ Sum ] is locked"), "{e}");
+    let e = copies_one(&eng, id, it("Free"), 1, 2, (6.0, 6.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("calculation of [ Sum ] is locked"), "{e}");
+    assert_eq!(steps(&eng, id), n, "no step, nothing written");
+    assert_eq!(field(&eng, id, "Free").name, "Free");
+    match field(&eng, id, "Sum").calculate {
+        Calculate::Simple { fields, .. } => assert_eq!(fields, vec!["Free".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    // A name nothing covers is fine.
+    rename_one(&eng, id, it("Other"), "Elsewhere", false, EditSource::User).unwrap();
+}
+
+#[test]
 fn layout_in_a_signed_document_is_saved_after_the_signed_bytes() {
     let (eng, id, path) = script_form("layout-signed", &["A", "B"]);
     add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));

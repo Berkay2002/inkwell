@@ -466,6 +466,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
             if entries.iter().any(clash) {
                 return Err(bad(format!("A field named {full} already exists")));
             }
+            check_follow_rename(doc, &entries, &e.name)?;
             renamed = Some((e.name.clone(), full));
         }
         let own_t = get(&field, "T").as_ref().and_then(text).unwrap_or_default();
@@ -682,19 +683,46 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
     Ok(())
 }
 
-/// `AFSimple_Calculate` lists that name the field `old` (or a field below it) name `new` instead.
-pub(crate) fn follow_rename(doc: &PdfDocument, entries: &[Entry], old: &str, new: &str) -> Result<()> {
+/// The calculated fields whose `AFSimple_Calculate` list names `old` (or a field below it): one entry per field.
+fn followers<'a>(entries: &'a [Entry], old: &str) -> Vec<(&'a Entry, af::CalcOp, Vec<String>)> {
     let below = format!("{old}.");
     let mut seen: Vec<i32> = Vec::new();
+    let mut out = Vec::new();
     for e in entries {
         if seen.contains(&e.node) {
             continue;
         }
         seen.push(e.node);
         let Calculate::Simple { op, fields } = calculate_of(e) else { continue };
-        if !fields.iter().any(|f| f == old || f.starts_with(&below)) {
-            continue;
+        if fields.iter().any(|f| f == old || f.starts_with(&below)) {
+            out.push((e, op, fields));
         }
+    }
+    out
+}
+
+/// Renaming `old` rewrites the calculations that list it; one a signature locks cannot be rewritten, so the rename
+/// is refused. Callers run this before writing anything.
+pub(crate) fn check_follow_rename(doc: &PdfDocument, entries: &[Entry], old: &str) -> Result<()> {
+    let todo = followers(entries, old);
+    if todo.is_empty() {
+        return Ok(());
+    }
+    let locks = super::scripts::locks_of(doc, entries);
+    match todo.iter().find(|(e, _, _)| super::scripts::locked(&locks, e)) {
+        Some((e, _, _)) => Err(bad(format!(
+            "The calculation of [ {} ] is locked by a signature and would have to follow the new name of [ {old} ]",
+            e.name
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// `AFSimple_Calculate` lists that name the field `old` (or a field below it) name `new` instead.
+pub(crate) fn follow_rename(doc: &PdfDocument, entries: &[Entry], old: &str, new: &str) -> Result<()> {
+    check_follow_rename(doc, entries, old)?;
+    let below = format!("{old}.");
+    for (e, op, fields) in followers(entries, old) {
         let fields = fields
             .into_iter()
             .map(|f| if f == old { new.to_string() } else if let Some(rest) = f.strip_prefix(&below) { format!("{new}.{rest}") } else { f })

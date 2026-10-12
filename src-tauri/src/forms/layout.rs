@@ -5,7 +5,7 @@
 //! Positions are page space (what the page shows, /Rotate and the crop box applied: `Entry::rect`), written back through
 //! the annotation so the inverse transform is MuPDF's. The anchor of a selection is its **last** field, as in Acrobat.
 
-use super::author::{acro_form, follow_rename, remove_ref, seed_on_state, user_rect};
+use super::author::{acro_form, check_follow_rename, follow_rename, remove_ref, seed_on_state, user_rect};
 use super::scripts;
 use super::*;
 
@@ -530,6 +530,7 @@ pub fn copies(doc: &mut PdfDocument, item: Item, rows: u32, cols: u32, gap_x: f3
     if aa_js(e, "C").is_some() {
         return Err(bad("A calculated field is not copied: its calculation would not follow"));
     }
+    check_follow_rename(doc, &entries, &e.name)?;
     let b = bounds_of(doc, e.page)?;
     let (w, h) = (e.rect[2] - e.rect[0], e.rect[3] - e.rect[1]);
     let mut spots = Vec::new();
@@ -651,6 +652,12 @@ pub fn rename(doc: &mut PdfDocument, item: Item, name: &str, merge: bool) -> Res
     if let Some(t) = target {
         guard(doc, &entries, &[t])?;
     }
+    // The name it takes must not be one a signature covers, and the calculations that list the old name must be
+    // free to follow (checked before anything is written).
+    if scripts::name_locked(&scripts::locks_of(doc, &entries), full) {
+        return Err(bad(format!("The name [ {full} ] is covered by a signature, so no field can take it")));
+    }
+    check_follow_rename(doc, &entries, &e.name)?;
     let (parent_name, leaf) = full.rsplit_once('.').unwrap_or(("", full));
     let field = if e.node == e.xref { doc.new_indirect(e.xref, 0)? } else { e.field.clone() };
     let field_num = if e.node == e.xref { Some(e.xref) } else { field.as_indirect().ok().filter(|n| *n > 0) };
