@@ -2290,6 +2290,21 @@ fn layout_tools_refuse_a_certified_document_a_covered_field_and_a_signed_signatu
 }
 
 #[test]
+fn layout_tools_refuse_a_damaged_certification() {
+    // /P 9 is not a certification level: it counts as the strictest (1), not as none.
+    let (eng, id, _) = script_form("layout-damaged-p", &["A", "B"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    sign(&eng, id, None, Some(9));
+    let ab = items_of(&eng, id, &["A", "B"]);
+    let before = (steps(&eng, id), all_rects(&eng, id));
+    let e = align_one(&eng, id, &ab, Edge::Right, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("certified"), "{e}");
+    let e = rename_one(&eng, id, ab[0], "Renamed", false, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("certified"), "{e}");
+    assert_eq!(before, (steps(&eng, id), all_rects(&eng, id)));
+}
+
+#[test]
 fn a_field_a_signature_covers_and_a_signed_signature_field_are_not_laid_out() {
     let (eng, id, _) = script_form("layout-locked", &["Locked", "Free", "Other"]);
     add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
