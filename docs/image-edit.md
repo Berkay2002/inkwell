@@ -192,8 +192,8 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
    image: one `q` before it, plus one for each `Q` it has without a `q` (underflow), and after it as many `Q` as
    that leaves open (two new pieces; the old streams stay as they are). Image files over 256 MB or 100
    megapixels are refused before their pixels are decoded.
-6. **No orphans.** After a delete, replace or pixel crop, a name the page's content no longer draws is removed from
-   the page's `/XObject` dict. The page's resources and `/XObject` dict are copied onto the page first (shallowly)
+6. **No orphans.** After a delete, replace or pixel crop, a name the page's (or, for a picture in a form, the form's)
+   content no longer draws is removed from that `/XObject` dict. The page's resources and `/XObject` dict are copied onto the page first (shallowly)
    when they are inherited or shared, so other pages keep theirs. The next save is a full rewrite without
    unreferenced objects, so the old image (and its soft mask) is gone unless something else still uses it.
 
@@ -232,8 +232,8 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   (or an Indexed one over it) can't go with an inline picture; a certified document refuses paste and move, a signed one keeps its signed bytes.
 - Pictures in forms: a picture in a form used once is listed and moved in the form's own stream; the same form on a
   second page is copied for this page and the other page's content and form stay byte-identical (one undo step);
-  nested forms with 30° `/Matrix` entries list the box that renders, within 0.5 pt; delete and replace in a shared
-  form; a form that draws itself and a chain deeper than 4 end the reading; a form drawn twice on a page is two
+  nested forms with 30° `/Matrix` entries list the box that renders, within 0.5 pt; delete, replace and crop (pixels and clip)
+  in a shared form; a form that draws itself and a chain deeper than 4 end the reading; a form drawn twice on a page is two
   pictures and one moves alone; resources inherited from `/Pages`, a `/Resources` dictionary two pages share and a
   form that is an annotation's appearance all make a form shared; a batch in one shared form makes one copy; a move
   out of the form's `/BBox` warns; a form picture goes to another page and is copied with its full place (mixed with

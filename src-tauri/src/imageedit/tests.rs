@@ -1348,6 +1348,30 @@ fn moving_a_picture_in_a_shared_form_copies_the_form_and_leaves_the_other_page_a
 }
 
 #[test]
+fn cropping_a_picture_in_a_shared_form_leaves_the_other_page_alone() {
+    let d = dir("form-crop");
+    let (eng, id, path) = open(&d, &two_pages_one_form());
+    let p2 = page_images(&eng, id, 1);
+    let before = {
+        let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+        (content_of(&doc, 1), entry(&doc, 1, "Fm0"), text_of(&doc, 7))
+    };
+    // Cut pixels (a new image object, repointed in the form's resources), then clip what is left.
+    edit_on(&eng, id, 0, 0, ImageChange::Crop { rect: [70.0, 612.0, 120.0, 662.0], pixels: true }).unwrap();
+    let n = page_images(&eng, id, 0);
+    assert!(near(n[0].rect, [70.0, 612.0, 120.0, 662.0]), "{:?}", n[0].rect);
+    assert_eq!(n[0].in_form, ["IwForm0"]);
+    edit_on(&eng, id, 0, 0, ImageChange::Crop { rect: [70.0, 612.0, 95.0, 662.0], pixels: false }).unwrap();
+    assert_eq!(page_images(&eng, id, 1), p2, "the other page's pictures are as they were");
+    let doc = saved(&eng, id, &path);
+    assert_eq!(content_of(&doc, 1), before.0);
+    assert_ne!(entry(&doc, 1, "Fm0"), 0, "page 2 still names the shared form");
+    assert_eq!(text_of(&doc, entry(&doc, 1, "Fm0")), before.2);
+    assert_eq!(entry(&doc, 0, "Fm0"), 0, "page 1 no longer names the shared form");
+    assert!(near(rendered_box(&path, 1), p2[0].rect), "{:?}", rendered_box(&path, 1));
+}
+
+#[test]
 fn nested_forms_with_matrices_list_the_box_that_is_rendered() {
     let d = dir("form-nested");
     let img = red();
