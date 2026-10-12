@@ -1,25 +1,32 @@
 pub mod a11y;
 pub mod ai;
 pub mod annot;
+pub mod fillsign;
+pub mod batch;
 pub mod forms;
 pub mod compress;
 pub mod convert;
 pub mod diff;
 pub mod engine;
+pub mod exchange;
 pub mod history;
 pub mod history_ipc;
 pub mod imageedit;
 pub mod links;
 pub mod marks;
+pub mod media;
+pub mod measure;
 pub mod ocr;
 pub mod organize;
 pub mod outline;
 pub mod paths;
 pub mod preflight;
+pub mod prepress;
 pub mod print;
 pub mod protect;
 pub mod recents;
 pub mod redact;
+pub mod sign;
 pub mod search;
 pub mod textedit;
 pub mod tools;
@@ -75,16 +82,26 @@ enum SaveKind {
     Html,
     Xhtml,
     Word,
+    /// Comments: XFDF or FDF.
+    Comments,
+    /// Form data: XFDF, FDF or JSON.
+    FormData,
+    Csv,
     /// No filter: print-to-file output whose format the printer driver decides.
     Any,
 }
 
-/// What an open dialog for Create filters for.
+/// What an open dialog for Create (or a digital ID) filters for.
 #[derive(serde::Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 enum SourceKind {
     Images,
     Text,
+    DigitalId,
+    /// An exported batch action.
+    Json,
+    /// A picture or a PDF for a custom stamp.
+    Stamp,
 }
 
 /// Open dialog in Rust; the picked files come back as open tokens.
@@ -141,6 +158,9 @@ async fn pick_save(
             SaveKind::Html => d.add_filter("HTML", &["html", "htm"]),
             SaveKind::Xhtml => d.add_filter("XHTML", &["xhtml"]),
             SaveKind::Word => d.add_filter("Word document", &["docx"]),
+            SaveKind::Comments => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]),
+            SaveKind::FormData => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]).add_filter("JSON", &["json"]),
+            SaveKind::Csv => d.add_filter("CSV (spreadsheet)", &["csv"]),
             SaveKind::Any => d,
         };
         if let Some(dir) = near.as_deref().and_then(|p| std::path::Path::new(p).parent()) {
@@ -166,6 +186,9 @@ async fn pick_source(window: Window, kind: SourceKind, multiple: bool) -> Result
         let d = match kind {
             SourceKind::Images => d.set_title("Choose images").add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"]),
             SourceKind::Text => d.set_title("Choose a text file").add_filter("Text", &["txt", "text", "md", "log", "csv"]),
+            SourceKind::DigitalId => d.set_title("Choose a digital ID").add_filter("Digital ID", &["pfx", "p12"]),
+            SourceKind::Json => d.set_title("Choose an action file").add_filter("Inkwell action", &["json"]),
+            SourceKind::Stamp => d.set_title("Choose a picture or PDF for the stamp").add_filter("Pictures and PDFs", &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "pdf"]),
         };
         let picked = if multiple { d.blocking_pick_files() } else { d.blocking_pick_file().map(|f| vec![f]) };
         let reg = window.state::<Paths>();
@@ -175,6 +198,21 @@ async fn pick_source(window: Window, kind: SourceKind, multiple: bool) -> Result
             .filter_map(|f| f.into_path().ok())
             .map(|p| reg.issue_open(window.label(), p.to_string_lossy().into_owned()))
             .collect())
+    })
+    .await
+}
+
+/// Open dialog for an XFDF, FDF or JSON data file of open document `doc`; an open token comes back.
+#[tauri::command]
+async fn pick_data_file(window: Window, eng: Eng<'_>, doc: DocId) -> Result<Option<FileRef>, EngineError> {
+    let near = eng.doc_entry(doc)?.path();
+    blocking(move || {
+        let mut d = window.dialog().file().set_parent(&window).set_title("Choose a data file").add_filter("XFDF, FDF or JSON", &["xfdf", "fdf", "json", "xml"]);
+        if let Some(dir) = std::path::Path::new(&near).parent() {
+            d = d.set_directory(dir);
+        }
+        let picked = d.blocking_pick_file().and_then(|f| f.into_path().ok());
+        Ok(picked.map(|p| window.state::<Paths>().issue_open(window.label(), p.to_string_lossy().into_owned())))
     })
     .await
 }
@@ -233,8 +271,9 @@ async fn authenticate(app: tauri::AppHandle, eng: Eng<'_>, hist: State<'_, Arc<H
 }
 
 #[tauri::command]
-fn close_document(eng: Eng<'_>, hist: State<'_, Arc<History>>, doc: DocId) {
+fn close_document(eng: Eng<'_>, hist: State<'_, Arc<History>>, pre: State<'_, Arc<prepress::app::Prepress>>, doc: DocId) {
     hist.forget(doc);
+    pre.drop_doc(doc);
     eng.close(doc);
 }
 
@@ -406,6 +445,13 @@ async fn edit_undo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
     blocking(move || eng.undo(doc)).await
 }
 
+/// Undo, but only while the document is still at generation `rev` (see `Engine::undo_if`); "stale" otherwise.
+#[tauri::command]
+async fn edit_undo_if(eng: Eng<'_>, doc: DocId, rev: u32) -> Result<EditState, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.undo_if(doc, rev)).await
+}
+
 #[tauri::command]
 async fn edit_redo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
     let eng = eng.inner().clone();
@@ -432,12 +478,15 @@ async fn save_document(
 ) -> Result<EditState, EngineError> {
     let to = to.map(|t| reg.take_save(window.label(), &t)).transpose()?;
     let (eng, hist) = (eng.inner().clone(), hist.inner().clone());
-    blocking(move || {
-        let (state, saved) = eng.save_recorded(doc, to.as_deref())?;
-        after_save(&window, &app, &hist, doc, to.as_deref(), &state, saved);
-        Ok(state)
-    })
-    .await
+    blocking(move || save_and_record(&window, app, &eng, &hist, doc, to)).await
+}
+
+/// Save (to `to`, a path from a spent save token, or over the file) and record the version.
+/// Blocking.
+pub(crate) fn save_and_record(window: &Window, app: tauri::AppHandle, eng: &Engine, hist: &Arc<History>, doc: DocId, to: Option<String>) -> Result<EditState, EngineError> {
+    let (state, saved) = eng.save_recorded(doc, to.as_deref())?;
+    after_save(window, &app, hist, doc, to.as_deref(), &state, saved);
+    Ok(state)
 }
 
 /// What follows a save: the folder is remembered, and the version history records what was written.
@@ -447,12 +496,25 @@ fn after_save(window: &Window, app: &tauri::AppHandle, hist: &Arc<History>, doc:
     }
     match saved {
         // Save as: the document is another file now, with a history of its own
-        Some(s) if s.moved => hist.spawn_open(app.clone(), doc, state.path.clone()),
+        Some(s) if s.moved => {
+            hist.spawn_open(app.clone(), doc, state.path.clone());
+            // It may have replaced a file a catalog lists.
+            if s.redacts {
+                search::catalog::app::forget_saved(app, &state.path);
+            }
+        }
         // history errors never fail a save
-        Some(s) => match hist.saved(doc, &s) {
-            Ok(_) => drop(app.emit("history-changed", doc)),
-            Err(e) => eprintln!("inkwell history: {e}"),
-        },
+        Some(s) => {
+            match hist.saved(doc, &s) {
+                Ok(_) => drop(app.emit("history-changed", doc)),
+                Err(e) => eprintln!("inkwell history: {e}"),
+            }
+            // Text that was redacted must not stay in a catalog's index (or in its results) until a refresh.
+            // After the history's own purge, so nothing here can keep that from running.
+            if s.redacts {
+                search::catalog::app::forget_saved(app, &state.path);
+            }
+        }
         None => {}
     }
 }
@@ -551,6 +613,52 @@ async fn compress_estimate(
     tool_blocking(move || tools::estimate_for_ui(&eng, doc, &guard.cancel)).await
 }
 
+/// The three presets as `Options`: what the Advanced settings start from.
+#[tauri::command]
+fn compress_preset_options() -> std::collections::BTreeMap<&'static str, compress::Options> {
+    use compress::Preset;
+    [("smallest", Preset::Smallest), ("balanced", Preset::Balanced), ("highQuality", Preset::HighQuality)]
+        .into_iter()
+        .map(|(k, p)| (k, compress::Options::preset(p)))
+        .collect()
+}
+
+/// The Advanced settings' size, on the same sample. `job` as above.
+#[tauri::command]
+async fn compress_estimate_custom(
+    eng: Eng<'_>,
+    jobs: JobState<'_>,
+    job: u64,
+    doc: DocId,
+    options: compress::Options,
+) -> Result<compress::estimate::Estimate, tools::ToolError> {
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    tool_blocking(move || tools::estimate_custom_for_ui(&eng, doc, &options, &guard.cancel)).await
+}
+
+#[tauri::command]
+async fn compress_presets(app: tauri::AppHandle) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::load(&dir))).await
+}
+
+#[tauri::command]
+async fn compress_preset_save(
+    app: tauri::AppHandle,
+    name: String,
+    options: compress::Options,
+) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::save(&dir, &name, &options)?)).await
+}
+
+#[tauri::command]
+async fn compress_preset_delete(app: tauri::AppHandle, name: String) -> Result<Vec<compress::presets::Named>, tools::ToolError> {
+    let (dir, _) = recents::data_dir(&app).map_err(tools::ToolError)?;
+    tool_blocking(move || Ok(compress::presets::delete(&dir, &name)?)).await
+}
+
 /// `job`: an id the UI picks, for `tool_cancel`. `req.save_to`: a save token from `pick_save`.
 #[tauri::command]
 async fn compress_start(
@@ -600,6 +708,56 @@ async fn ocr_choose_tesseract(app: tauri::AppHandle, paths: Tess<'_>) -> Result<
     .await
 }
 
+/// Opens Windows' language settings, where an OCR language pack is added (Optional language
+/// features). A fixed address: nothing from the page decides what is opened.
+#[tauri::command]
+fn open_language_settings() -> Result<(), tools::ToolError> {
+    #[cfg(windows)]
+    {
+        // Through the shell's own association for the address, not a program found by name on the path.
+        links::app::open_with_system(ocr::lang::WINDOWS_LANGUAGE_SETTINGS).map_err(|e| tools::ToolError(e.to_string()))
+    }
+    #[cfg(not(windows))]
+    Err(tools::ToolError("only available on Windows".into()))
+}
+
+/// The engine and languages the chosen languages will be read with, and what is missing.
+#[tauri::command]
+async fn ocr_plan(paths: Tess<'_>, languages: Vec<String>, backend: Option<tools::BackendChoice>) -> Result<ocr::lang::Plan, tools::ToolError> {
+    let configured = paths.tesseract();
+    tool_blocking(move || Ok(tools::ocr_plan(&languages, backend.unwrap_or_default(), configured.as_deref()))).await
+}
+
+/// The language `doc` is probably written in (its own text, else a quick sample read of its first scan).
+#[tauri::command]
+async fn ocr_detect(eng: Eng<'_>, jobs: JobState<'_>, paths: Tess<'_>, job: u64, doc: DocId) -> Result<ocr::detect::Detection, tools::ToolError> {
+    let eng = eng.inner().clone();
+    // `tool_cancel(job)` stops the sample reads: the sheet closed, or the real run is about to start.
+    let guard = jobs.inner().begin(job);
+    let configured = paths.tesseract();
+    tool_blocking(move || tools::ocr_detect(&eng, doc, configured.as_deref(), &guard.cancel)).await
+}
+
+/// What `req.style` would do to one page (zero-based), as before/after pictures. Changes nothing.
+#[tauri::command]
+async fn ocr_preview(
+    eng: Eng<'_>,
+    jobs: JobState<'_>,
+    paths: Tess<'_>,
+    job: u64,
+    page: u32,
+    mut req: tools::OcrRequest,
+) -> Result<tools::OcrPreview, tools::ToolError> {
+    let eng = eng.inner().clone();
+    let guard = jobs.inner().begin(job);
+    let tesseract = paths.tesseract();
+    tool_blocking(move || {
+        let backend = tools::resolve_backend(&mut req, tesseract.as_deref())?;
+        tools::ocr_preview(&eng, &req, page, 1100, backend.as_ref(), &guard.cancel)
+    })
+    .await
+}
+
 #[tauri::command]
 fn ocr_clear_tesseract(paths: Tess<'_>) -> Result<(), tools::ToolError> {
     paths.set_tesseract(None).map_err(tools::ToolError)
@@ -614,7 +772,7 @@ async fn ocr_start(
     jobs: JobState<'_>,
     paths: Tess<'_>,
     job: u64,
-    req: tools::OcrRequest,
+    mut req: tools::OcrRequest,
     on_progress: Channel<ocr::Progress>,
 ) -> Result<tools::OcrOutcome, tools::ToolError> {
     let save_as = req.save_to.as_deref().map(|t| reg.take_save(window.label(), t)).transpose()?.map(std::path::PathBuf::from);
@@ -622,7 +780,7 @@ async fn ocr_start(
     let guard = jobs.inner().begin(job);
     let tesseract = paths.tesseract();
     tool_blocking(move || {
-        let backend = tools::make_backend(req.backend, tesseract.as_deref())?;
+        let backend = tools::resolve_backend(&mut req, tesseract.as_deref())?;
         let r = tools::run_ocr(
             &eng,
             &req,
@@ -842,21 +1000,63 @@ pub fn run() {
     // a saved redaction then replaces the versions from before it (history_ipc::History::saved)
     engine::edit::set_redaction_hook(move |doc| h.on_redactions_applied(doc));
     let autosave = (hist.clone(), engine.clone());
+    let prepress = Arc::new(prepress::app::Prepress::default());
+    let proto_prepress = prepress.clone();
+    let media = Arc::new(media::Cache::default());
+    let proto_media = media.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
-        .manage(ai::Assistant::new())
+        .manage(ai::Hub::new())
         .manage(Paths::default())
         .manage(Arc::new(tools::Jobs::default()))
+        .manage(Arc::new(measure::SnapCache::default()))
         .manage(Arc::new(search::files::FolderSearches::default()))
+        .manage(Arc::new(search::catalog::app::Jobs::default()))
         .manage(hist)
+        .manage(sign::app::Ids::default())
+        .manage(prepress)
+        .manage(media)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 on_drop(window, paths);
             }
         })
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
+            // `/m/<doc>/<token>/<asset>`: an embedded video or sound of an open document, with byte ranges
+            if let Some((doc, token, id)) = media::route::parse(request.uri().path()) {
+                let (eng, cache) = (proto_engine.clone(), proto_media.clone());
+                let range = request.headers().get("range").and_then(|v| v.to_str().ok()).map(str::to_owned);
+                tauri::async_runtime::spawn_blocking(move || {
+                    let r = media::serve(&eng, &cache, doc, &token, &id, range.as_deref());
+                    let mut b = tauri::http::Response::builder().status(r.status);
+                    for (k, v) in r.headers {
+                        b = b.header(k, v);
+                    }
+                    responder.respond(b.body(std::borrow::Cow::Owned(r.body)).unwrap());
+                });
+                return;
+            }
+            // `/p/...`: a page tile in a print production view (plates, coverage)
+            if let Some((key, view, stream, epoch, rank)) = prepress::app::parse_tile_request(request.uri()) {
+                proto_prepress.request_tile(
+                    &proto_engine,
+                    key,
+                    view,
+                    stream,
+                    epoch,
+                    rank,
+                    Box::new(move |outcome| {
+                        responder.respond(match outcome {
+                            TileOutcome::Ready(t) => reply(200, t.rgba.as_ref().clone(), Some((t.w, t.h))),
+                            TileOutcome::Stale => reply(410, Vec::new(), None),
+                            TileOutcome::Failed(e) => reply(500, e.into_bytes(), None),
+                        })
+                    }),
+                );
+                return;
+            }
             let Some((key, stream, epoch, rank)) = parse_tile_request(request.uri()) else {
                 return responder.respond(reply(404, Vec::new(), None));
             };
@@ -890,12 +1090,24 @@ pub fn run() {
             search_files,
             cancel_search_files,
             search_file_token,
+            search::catalog::app::catalog_estimate,
+            search::catalog::app::catalog_create,
+            search::catalog::app::catalog_list,
+            search::catalog::app::catalog_delete,
+            search::catalog::app::catalog_stale,
+            search::catalog::app::catalog_build,
+            search::catalog::app::catalog_cancel,
+            search::catalog::app::catalog_search,
+            search::catalog::app::index_embedded,
+            search::catalog::app::index_embed,
+            search::catalog::app::index_unembed,
             engine_stats,
             set_cache_budget,
             initial_files,
             tile_raw,
             edit_apply,
             edit_undo,
+            edit_undo_if,
             edit_state,
             edit_redo,
             history_ipc::history_state,
@@ -920,6 +1132,11 @@ pub fn run() {
             merge_files,
             compress_audit,
             compress_estimate,
+            compress_estimate_custom,
+            compress_preset_options,
+            compress_presets,
+            compress_preset_save,
+            compress_preset_delete,
             compress_start,
             protect::app::security_info,
             protect::app::protect_apply,
@@ -930,12 +1147,27 @@ pub fn run() {
             marks::app::marks_remove,
             marks::app::marks_bates_files,
             tool_cancel,
+            batch::app::batch_list,
+            batch::app::batch_save,
+            batch::app::batch_delete,
+            batch::app::batch_import,
+            batch::app::batch_export,
+            batch::app::batch_validate,
+            batch::app::batch_preview,
+            batch::app::batch_folder_files,
+            batch::app::batch_run,
+            batch::app::batch_cancel,
             ocr_languages,
             ocr_choose_tesseract,
+            ocr_plan,
+            ocr_detect,
+            ocr_preview,
+            open_language_settings,
             ocr_clear_tesseract,
             ocr_start,
             pick_source,
             pick_folder,
+            pick_data_file,
             export_start,
             create_start,
             discard_scratch,
@@ -943,6 +1175,31 @@ pub fn run() {
             a11y::app::a11y_fix,
             a11y::app::a11y_preview,
             a11y::app::a11y_export_report,
+            prepress::app::prepress_separations,
+            prepress::app::prepress_view,
+            prepress::app::prepress_ink,
+            prepress::app::prepress_inspect,
+            prepress::app::prepress_convert,
+            prepress::app::prepress_boxes,
+            prepress::app::prepress_marks,
+            prepress::app::prepress_page_boxes,
+            prepress::app::prepress_marks_preview,
+            prepress::app::prepress_ink_at,
+            prepress::app::prepress_pick_profile,
+            prepress::app::prepress_save_other,
+            prepress::app::prepress_protection,
+            a11y::app::a11y_protection,
+            a11y::app::a11y_reading_order,
+            a11y::app::a11y_tags,
+            a11y::app::a11y_tag_problems,
+            a11y::app::a11y_reorder,
+            a11y::app::a11y_set_role,
+            a11y::app::a11y_artifact,
+            a11y::app::a11y_merge_regions,
+            a11y::app::a11y_merge_many,
+            a11y::app::a11y_split_region,
+            a11y::app::a11y_edit_tag,
+            a11y::app::a11y_move_tag,
             preflight::app::preflight_check,
             preflight::app::preflight_claim,
             preflight::app::preflight_fix,
@@ -955,31 +1212,96 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            fillsign::app::fillsign_list,
+            fillsign::app::fillsign_add,
+            fillsign::app::fillsign_flatten,
+            fillsign::app::fillsign_saved_list,
+            fillsign::app::fillsign_saved_add,
+            fillsign::app::fillsign_saved_add_file,
+            fillsign::app::fillsign_saved_remove,
+            sign::app::sign_identities,
+            sign::app::sign_open_id_file,
+            sign::app::sign_create_test_id,
+            sign::app::sign_document,
+            sign::app::sign_list,
+            annot::app::stamp_list,
+            annot::app::stamp_create,
+            annot::app::stamp_update,
+            annot::app::stamp_delete,
+            annot::app::stamp_thumb,
+            annot::app::stamp_place,
+            annot::app::stamp_gate,
+            annot::app::annot_export,
+            annot::app::annot_import,
+            annot::app::data_gates,
+            measure::app::measure_lock,
+            measure::app::measure_scale_get,
+            measure::app::measure_scale_set,
+            measure::app::measure_add,
+            measure::app::measure_value,
+            measure::app::measure_list,
+            measure::app::measure_snap,
+            measure::app::measure_rescale,
+            measure::app::measure_export_csv,
             forms::app::forms_list,
+            forms::app::forms_export,
+            forms::app::forms_import,
             forms::app::forms_set_value,
             forms::app::forms_reset,
+            forms::app::forms_scripts,
+            forms::app::forms_scripts_enable,
+            forms::app::doc_js_list,
+            forms::app::doc_js_source,
+            forms::app::doc_js_check,
+            forms::app::doc_js_apply,
             forms::app::forms_add,
             forms::app::forms_add_many,
             forms::app::forms_move,
             forms::app::forms_edit,
             forms::app::forms_delete,
+            forms::app::forms_calc_order,
+            forms::app::forms_format_preview,
             forms::app::forms_tab_order,
             forms::app::forms_arrange,
+            forms::app::forms_align,
+            forms::app::forms_center,
+            forms::app::forms_distribute,
+            forms::app::forms_match_size,
+            forms::app::forms_nudge,
+            forms::app::forms_duplicate,
+            forms::app::forms_copies,
+            forms::app::forms_rename,
             forms::app::forms_detect,
             organize::app::combine_inspect,
             organize::app::combine_run,
+            organize::app::combine_unlock,
             organize::app::pick_attachments,
             organize::app::attachments_list,
+            media::app::media_list,
+            media::app::media_play,
+            media::app::media_release,
             organize::app::attachments_add,
             organize::app::attachment_save,
             organize::app::attachment_open,
             organize::app::attachments_remove,
             organize::app::attachment_describe,
+            organize::app::portfolio_info,
+            organize::app::pick_portfolio_files,
+            organize::app::portfolio_create,
+            organize::app::portfolio_extract_all,
             organize::app::labels_list,
             organize::app::labels_set,
             organize::app::labels_remove,
             organize::app::transitions_list,
             organize::app::transitions_set,
+            organize::app::threads_list,
+            organize::app::thread_start,
+            organize::app::thread_bead_add,
+            organize::app::thread_bead_move,
+            organize::app::thread_bead_delete,
+            organize::app::thread_remove,
+            organize::app::thread_describe,
+            organize::app::thread_move,
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
@@ -1009,6 +1331,7 @@ pub fn run() {
             print::app::print_plan,
             print::app::print_preview,
             print::app::print_start,
+            print::app::print_save_pdf,
             recents::stat_files,
             recents::recents_load,
             recents::recents_save,
@@ -1019,6 +1342,9 @@ pub fn run() {
             ai::ai_cancel,
             ai::ai_tool_decision,
             ai::ai_set_permissions,
+            ai::ai_pick_claude_path,
+            ai::ai_claude_path,
+            ai::ai_clear_claude_path,
             ai::ai_close,
         ])
         .setup(move |app| {
@@ -1029,6 +1355,11 @@ pub fn run() {
                 app.state::<Paths>().learn_recents(&json);
             }
             app.manage(Arc::new(tools::paths::ToolPaths::load(app.handle())));
+            ai::restore_claude_path(app.handle(), &app.state::<Arc<ai::Hub>>());
+            batch::app::sweep_at_startup(app.handle());
+            // A quit while a catalog was being built can have left a saved redaction's file to forget.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || search::catalog::app::replay_pending_at_startup(&handle));
             Ok(())
         })
         .run(tauri::generate_context!())

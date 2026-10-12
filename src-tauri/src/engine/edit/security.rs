@@ -12,10 +12,12 @@ use std::sync::Arc;
 /// The UI matches on these messages (`FRIENDLY` in the stores).
 const NEEDS_OWNER: &str = "needs-permissions-password";
 const BAD_OWNER: &str = "bad-permissions-password";
+/// Security is written by a full rewrite, which would break every signature.
+const SIGNED: &str = "This document is signed, and changing its security would break its signatures.";
 
 impl Editor {
     /// Security as Save would write it: the latest security step, else what the file carries.
-    fn security_info(&self, entry: &DocEntry) -> Result<SecurityInfo> {
+    pub(super) fn security_info(&self, entry: &DocEntry) -> Result<SecurityInfo> {
         let step = self.steps[..=self.cur].iter().enumerate().rev().find(|(_, s)| s.security.is_some());
         if let Some((i, s)) = step {
             let written = self.saved.is_some_and(|w| w >= i);
@@ -55,6 +57,21 @@ impl Editor {
         let info = self.security_info(entry)?;
         if info.encrypted && !info.unlocked && !info.rights.may_extract() {
             return Err(invalid(NEEDS_OWNER));
+        }
+        Ok(())
+    }
+
+    /// Setting or removing password security makes the save a rewrite of every object: neither a certification nor
+    /// a signature survives it.
+    fn ensure_signatures_allow_security(&self) -> Result<()> {
+        // A signed file that was repaired on open: its signature cannot be told from the repaired copy, so the
+        // rewrite would go over the original as an unsigned-looking file.
+        self.refuse_if_repaired_signed()?;
+        crate::outline::refuse_if_certified(&self.doc.doc, "Changing its password security")?;
+        if crate::outline::signed(&self.doc.doc) {
+            return Err(invalid(
+                "This document is signed. Changing its password security rewrites the whole file and would break the signature, so Inkwell leaves it as it is.",
+            ));
         }
         Ok(())
     }
@@ -107,6 +124,10 @@ impl Engine {
         spec.normalize();
         spec.validate().map_err(|e| invalid(e.code()))?;
         let ed = self.lane(entry, lane)?;
+        ed.ensure_signatures_allow_security()?;
+        if ed.steps[..=ed.cur].iter().any(|s| s.signed) {
+            return Err(invalid(SIGNED));
+        }
         ed.ensure_unlocked(entry, permissions_password)?;
         let had = ed.security_info(entry)?.encrypted;
         let cipher = match spec.cipher {
@@ -165,6 +186,10 @@ impl Engine {
         let ed = self.lane(&entry, &mut lane)?;
         if !ed.security_info(&entry)?.encrypted {
             return Err(invalid("This document has no password security."));
+        }
+        ed.ensure_signatures_allow_security()?;
+        if ed.steps[..=ed.cur].iter().any(|s| s.signed) {
+            return Err(invalid(SIGNED));
         }
         ed.ensure_unlocked(&entry, permissions_password)?;
         ed.push_security("Remove password security".into(), source, SecurityChange::Remove);

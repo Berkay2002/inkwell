@@ -112,7 +112,7 @@ async function runTurn(id, p) {
   const tid = p.threadId;
   const prompt = p.input?.[0]?.text ?? "";
   const markers = prompt.match(/\[p\d+\.\d+\]/g) ?? [];
-  log(`turn ${tid} ${turn} effort=${p.effort ?? "-"} model=${p.model ?? "-"} schema=${p.outputSchema ? "yes" : "no"} excerpts=${markers.length}`);
+  log(`turn ${tid} ${turn} effort=${p.effort ?? "-"} model=${p.model ?? "-"} schema=${p.outputSchema ? "yes" : "no"} excerpts=${markers.length} changed=${prompt.includes("document changed since")}`);
   out({ id, result: { turn: { id: turn, status: "inProgress", items: [] } } });
   out({ method: "turn/started", params: { threadId: tid, turn: { id: turn, status: "inProgress", items: [] } } });
 
@@ -181,12 +181,11 @@ async function runTurn(id, p) {
     text = JSON.stringify({
       answer,
       citations: first ? [{ n: 1, chunks: [first[1]], quote }] : [],
-      followups: ["What else?", "Why so?", "Who wrote it?"],
     });
   } else {
     text = "Plain **markdown** reply.\n\n- one\n- two";
   }
-  if (mode === "slow") text = JSON.stringify({ answer: "word ".repeat(400), citations: [], followups: [] });
+  if (mode === "slow") text = JSON.stringify({ answer: "word ".repeat(400), citations: [] });
 
   out({ method: "item/started", params: { threadId: tid, turnId: turn, item: { type: "agentMessage", id: "i1", text: "", phase: "final_answer" } } });
   const step = mode === "slow" ? 8 : 7;

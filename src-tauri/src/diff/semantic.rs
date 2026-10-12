@@ -361,6 +361,20 @@ fn widget_changes(pa: &PageSnap, pb: &PageSnap, ia: usize, ib: usize, ch: &mut V
         if wa.is_some() && wb.is_some() && old.clone().unwrap_or_default() == new.clone().unwrap_or_default() {
             continue;
         }
+        // A password field's values are secrets: that it changed is reported, what it held is not.
+        if wa.is_some_and(|w| w.secret) || wb.is_some_and(|w| w.secret) {
+            let hidden = Some("(password field)".to_string());
+            ch.push(Change {
+                kind: ChangeKind::FormFieldChanged,
+                a_page: Some(ia as u32),
+                b_page: Some(ib as u32),
+                rect_a: wa.map(|w| w.rect),
+                rect_b: wb.map(|w| w.rect),
+                label: format!("Form field '{name}' (password field) changed on p. {}", ib + 1),
+                detail: Detail::FormField { name: name.clone(), old: hidden.clone(), new: hidden },
+            });
+            continue;
+        }
         ch.push(Change {
             kind: ChangeKind::FormFieldChanged,
             a_page: Some(ia as u32),

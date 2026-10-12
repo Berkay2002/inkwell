@@ -100,6 +100,8 @@ interface RedactStore {
   unmark: (doc: number, marks: Mark[]) => Promise<void>;
   /** After any change to the document (undo, redo, marking elsewhere). */
   refreshMarks: (doc: number) => Promise<void>;
+  /** A redaction the assistant applied: its result is shown like one applied from the rail. */
+  showApplied: (doc: number, out: Extract<ApplyOutcome, { status: "applied" }>) => void;
   confirm: (doc: number) => Promise<void>;
   setSanitize: (doc: number, s: Sanitize) => Promise<void>;
   cancel: (doc: number) => void;
@@ -166,6 +168,7 @@ export const useRedact = create<RedactStore>((set, get) => {
     unmark: (doc, marks) =>
       run(doc, async () => edited(doc, await redactApi.unmark(doc, marks.map((m) => [m.page, m.xref])))),
     refreshMarks: (doc) => run(doc, async () => patch(doc, { marks: await redactApi.listMarks(doc) })),
+    showApplied: (doc, outcome) => patch(doc, { ...fresh(), outcome, phase: "report" }),
     confirm: (doc) =>
       run(doc, async () => {
         if (!get().get(doc).marks.length) return;

@@ -146,7 +146,7 @@ fn deltas(ev: &[ChatEvent]) -> String {
 fn streams_the_answer_and_resolves_the_citation() {
     let a = fake("ok");
     let ev = run(&a, ask_req("How do I end the agreement?"), contract());
-    let ChatEvent::Done { answer, citations, followups, first_token_ms, usage, chunks_sent, chunks_total, .. } = ev.last().unwrap() else {
+    let ChatEvent::Done { answer, citations, first_token_ms, usage, chunks_sent, chunks_total, .. } = ev.last().unwrap() else {
         panic!("not done: {:?}", ev.last());
     };
     // the deltas, concatenated, are exactly the final answer (escapes, accents, emoji, backslash)
@@ -154,7 +154,6 @@ fn streams_the_answer_and_resolves_the_citation() {
     assert!(answer.contains("\"quoted\" line, café 😀 and a \\ backslash [1]"), "{answer}");
     assert!(ev.iter().filter(|e| matches!(e, ChatEvent::Delta { .. })).count() > 3, "must stream in pieces");
     assert!(first_token_ms.is_some());
-    assert_eq!(followups.len(), 3);
     assert_eq!(usage.as_ref().unwrap()["inputTokens"], 100);
     assert_eq!((*chunks_sent, *chunks_total), (2, 2));
     assert_eq!(citations.len(), 1);
@@ -321,17 +320,22 @@ fn a_hung_request_replaces_the_server() {
     assert!(a.server_pid().is_none(), "a server that stopped answering must be dropped");
 }
 
+/// An edit (the assistant's own included) must not make it forget the conversation: the thread is
+/// kept, the excerpts it holds are dropped from the books, and the next question says to read again.
 #[test]
-fn an_edited_document_gets_a_new_thread() {
+fn an_edited_document_keeps_the_thread_and_says_the_document_changed() {
     let a = fake("ok");
     assert!(matches!(run(&a, ask_req("one?"), contract_rev(0)).last(), Some(ChatEvent::Done { .. })));
     assert!(matches!(run(&a, ask_req("two?"), contract_rev(1)).last(), Some(ChatEvent::Done { .. })));
-    let client = a.server.lock().unwrap().as_ref().unwrap().client.clone();
-    assert!(wait_for(|| client.stderr_tail().contains("unsubscribed thr-1")), "{}", client.stderr_tail());
+    assert!(matches!(run(&a, ask_req("three?"), contract_rev(1)).last(), Some(ChatEvent::Done { .. })));
     let err = stderr(&a);
-    assert_eq!(err.matches("thread/start").count(), 2, "{err}");
-    // the excerpts go out again on the new thread
-    assert!(err.contains("turn thr-2 turn-2") && err.contains("excerpts=2"), "{err}");
+    assert_eq!(err.matches("thread/start").count(), 1, "{err}");
+    assert!(!err.contains("unsubscribed"), "{err}");
+    assert!(err.contains("turn thr-1 turn-1") && err.contains("changed=false"), "{err}");
+    let second = err.lines().find(|l| l.contains("turn thr-1 turn-2")).unwrap();
+    assert!(second.contains("changed=true"), "{second}");
+    let third = err.lines().find(|l| l.contains("turn thr-1 turn-3")).unwrap();
+    assert!(third.contains("changed=false"), "said once: {third}");
 }
 
 #[cfg(windows)]
@@ -485,6 +489,7 @@ fn edit_tools(a: &Assistant) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
                 h.fetch_add(1, Ordering::SeqCst);
                 Ok(tools::Output::text("changed"))
             }),
+            check: None,
         }));
         hits
     };
@@ -944,13 +949,13 @@ fn live_codex_smoke() {
             }
         }
         match ev.last().unwrap() {
-        ChatEvent::Done { answer, citations, followups, first_token_ms, total_ms, prep_ms, chunks_sent, chunks_total, usage } => {
+        ChatEvent::Done { answer, citations, first_token_ms, total_ms, prep_ms, chunks_sent, chunks_total, usage } => {
             println!(
                 "{label}: first token {:?} ms, total {total_ms} ms (prep {prep_ms} ms), chunks {chunks_sent}/{chunks_total}, usage {usage:?}",
                 first_token_ms
             );
             println!("  answer: {}", answer.replace('\n', "\n          "));
-            println!("  citations: {citations:#?}\n  followups: {followups:?}");
+            println!("  citations: {citations:#?}");
         }
         e => panic!("{label}: {e:?}"),
         }

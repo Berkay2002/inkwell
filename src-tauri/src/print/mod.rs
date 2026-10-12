@@ -12,18 +12,42 @@
 
 pub mod app;
 pub mod layout;
+pub mod pdf;
 pub mod render;
 #[cfg(windows)]
 pub mod win;
+/// Non-Windows builds (engine tests on macOS/Linux): no printers.
+#[cfg(not(windows))]
+pub mod win {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Printer {
+        pub name: String,
+        pub is_default: bool,
+        pub to_file: bool,
+    }
+    #[derive(serde::Serialize)]
+    pub struct Capabilities;
+    pub fn printers() -> Vec<Printer> {
+        Vec::new()
+    }
+    pub fn capabilities(_printer: &str) -> Option<Capabilities> {
+        None
+    }
+}
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_layouts;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(windows)]
+use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 
-pub use layout::{Layout, Orientation, Range, Sheet, Subset};
+pub use layout::{Layout, Orientation, Range, Sheet, Subset, Tile};
 pub use render::Content;
 
 use crate::engine::{DocId, Engine};
@@ -238,6 +262,8 @@ pub struct PlanInfo {
     pub papers: u32,
     /// Sides sent to the printer for all copies (blank backs included): the total a job's progress counts to.
     pub sides: u32,
+    /// Pages Save as PDF writes (padding for two-sided included, copies not): the total its progress counts to.
+    pub pdf_sides: u32,
     /// For each side: its size in points and the source pages on it (1-based), in the order drawn.
     pub faces: Vec<Face>,
     pub edit_rev: u32,
@@ -249,19 +275,23 @@ pub struct Face {
     pub width: f64,
     pub height: f64,
     pub pages: Vec<u32>,
+    /// Poster: which tile of its page this side is.
+    pub tile: Option<Tile>,
 }
 
 pub fn plan_info(eng: &Engine, doc: DocId, s: &Settings) -> Result<PlanInfo, PrintError> {
     let p = plan(eng, doc, s)?;
     let faces: Vec<Face> =
-        p.sheets.iter().map(|f| Face { width: f.w, height: f.h, pages: f.placed.iter().map(|x| x.page + 1).collect() }).collect();
+        p.sheets.iter().map(|f| Face { width: f.w, height: f.h, pages: f.placed.iter().map(|x| x.page + 1).collect(), tile: f.tile }).collect();
     let n = faces.len();
     let sent = layout::sequence(n, s.copies.clamp(1, 999), s.collate, s.two_sided()).len();
+    let pdf_sides = layout::sequence(n, 1, true, s.two_sided()).len();
     Ok(PlanInfo {
         pages: p.selected.len() as u32,
         sheets: n as u32,
         papers: if s.two_sided() { sent.div_ceil(2) } else { sent } as u32,
         sides: sent as u32,
+        pdf_sides: pdf_sides as u32,
         faces,
         edit_rev: p.rev,
     })

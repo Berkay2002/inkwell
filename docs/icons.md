@@ -44,6 +44,9 @@ tinted glyph; Comment is yellow with a dark glyph, as in Acrobat. Every pair is 
 | comment | yellow | Annotate |
 | organize | emerald | Organize, Combine |
 | sign | indigo | Fill & sign |
+| print | fuchsia | Output Preview, Convert Colors, Printer's marks, Page boxes |
+| scripts | slate | Document JavaScript |
+| automate | sky | Actions, batch |
 
 A tool only picks a glyph: `icon` in `toolItems.ts` names an entry of the manifest and the tile colour comes from its
 `group`. Groups beyond the five in `TOOL_GROUPS` are listed in `TOOL_HUES` (`lib/toolsCatalog.ts`).

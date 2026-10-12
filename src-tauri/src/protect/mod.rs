@@ -181,10 +181,12 @@ impl ProtectSpec {
     }
 
     /// Puts both passwords in Unicode NFKC, the normalisation SASLprep (the PDF 2.0 password rule) starts
-    /// from; it is not full SASLprep (no prohibited-character or bidi checks, MuPDF has none either).
+    /// from; it is not full SASLprep (no prohibited-character or bidi checks, MuPDF has none either). The
+    /// mapping step (non-ASCII spaces, invisible marks) is applied only when a password is checked
+    /// ([`nfkc_form`]), not when it is written.
     /// MuPDF hashes the bytes it is given, so a decomposed or compatibility form would not open in
     /// Acrobat or qpdf after the person types the composed one there. Opening a file and checking an
-    /// owner password therefore try the password as typed and then its NFKC form ([`nfkc_form`]).
+    /// owner password therefore try the password as typed and then its SASLprep-mapped NFKC form ([`nfkc_form`]).
     /// Call before [`Self::validate`].
     pub fn normalize(&mut self) {
         let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
@@ -260,6 +262,31 @@ impl Rights {
             copy: has(Permission::COPY),
             accessibility: has(Permission::ACCESSIBILITY),
         }
+    }
+
+    /// [`Rights::from_p`] for a file of handler revision `r` (`/R`). Bits 9 to 12 mean something from
+    /// revision 3 on; an older file's writer leaves them as it likes, and what they govern there is
+    /// governed by the older bits, so they are taken from those: forms (9) from annotate (6), screen
+    /// readers (10) from copy (5), page changes (11) from modify (4), and 12 (printing quality) is set.
+    pub fn from_p_r(p: i32, r: Option<i32>) -> Rights {
+        if !r.is_some_and(|r| r < 3) {
+            return Rights::from_p(p);
+        }
+        let old = p as u32;
+        let from = |src: u32, to: u32| if old & src != 0 { to } else { 0 };
+        let bits = (old & !0xf00) | from(0x20, 0x100) | from(0x10, 0x200) | from(0x8, 0x400) | 0x800;
+        Rights::from_p(bits as i32)
+    }
+
+    /// The rights of an open document: its permission bits, read as its revision says.
+    pub fn of(doc: &PdfDocument) -> Rights {
+        let r = doc
+            .trailer()
+            .ok()
+            .and_then(|t| t.get_dict("Encrypt").ok().flatten())
+            .and_then(|e| e.get_dict("R").ok().flatten())
+            .and_then(|r| r.as_int().ok());
+        Rights::from_p_r(doc.permissions().bits() as i32, r)
     }
 
     pub fn unrestricted(&self) -> bool {
@@ -416,16 +443,29 @@ impl SecurityInfo {
     }
 }
 
+/// `pw` as SASLprep's mapping step and NFKC make it, when that differs from what was typed: what other
+/// writers (Acrobat, qpdf) hash for a password with a non-ASCII space or an invisible mark in it. The
+/// commonly-mapped-to-nothing characters (RFC 3454 B.1: soft hyphen, ZWJ, ZWNJ, variation selectors ...)
+/// are dropped first, then the non-ASCII spaces (C.1.2) become U+0020, as RFC 4013 has it (U+200B is in
+/// both tables and goes). Callers try the password as typed first; this is the retry. Still not full
+/// SASLprep: no prohibited-character or bidi checks (MuPDF has none either).
+pub fn nfkc_form(pw: &str) -> Option<Zeroizing<String>> {
+    let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
+    let dropped = |c: char| {
+        matches!(c, '\u{AD}' | '\u{34F}' | '\u{1806}' | '\u{180B}'..='\u{180D}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}')
+    };
+    let space = |c: char| matches!(c, '\u{A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}');
+    let mapped: Zeroizing<String> =
+        Zeroizing::new(pw.chars().filter(|&c| !dropped(c)).map(|c| if space(c) { ' ' } else { c }).collect());
+    let form = Zeroizing::new(nfkc.normalize(&mapped).into_owned());
+    // A password of nothing but invisible characters maps to "": that is no retry, not an empty password.
+    (!form.is_empty() && *form != pw).then_some(form)
+}
+
 /// The security a document carries, from its `Encrypt` dictionary. `password`: what the document was
 /// opened with (`None`: it asked for none). This session is `unlocked` only when that password is the
 /// file's owner (permissions) password: a file with an owner password of its own keeps it for the
 /// security even when its P value allows everything.
-/// `pw` in NFKC, when that differs from what was typed: the form [`ProtectSpec::normalize`] writes.
-pub fn nfkc_form(pw: &str) -> Option<Zeroizing<String>> {
-    let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
-    (!nfkc.is_normalized(pw)).then(|| Zeroizing::new(nfkc.normalize(pw).into_owned()))
-}
-
 pub fn read_security(doc: &PdfDocument, password: Option<&str>) -> crate::engine::Result<SecurityInfo> {
     let Some(enc) = doc.trailer()?.get_dict("Encrypt")? else {
         return Ok(SecurityInfo::plain());
@@ -462,7 +502,7 @@ pub fn read_security(doc: &PdfDocument, password: Option<&str>) -> crate::engine
         _ => "RC4-128",
     };
     let p = int("P")?.unwrap_or(-1);
-    let rights = Rights::from_p(p);
+    let rights = Rights::from_p_r(p, r);
     let restricted = !rights.unrestricted();
     // The access MuPDF granted this session: 4 is the owner password (an empty one only counts when
     // the file needs no open password, as in Acrobat).

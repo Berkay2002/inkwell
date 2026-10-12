@@ -63,6 +63,8 @@ export type FilesEvent =
       cloudOnly: number;
       cancelled: boolean;
       capped: boolean;
+      /** Catalog searches: files whose stored text is of another version than the file on disk (left out). */
+      stale: number;
     };
 
 export type SearchScope = { kind: "folder"; token: string; recursive: boolean } | { kind: "files"; tokens: string[] };
@@ -90,12 +92,12 @@ export interface FileRef {
 /** Open dialog (run by Rust). */
 export const pickOpen = (multiple: boolean, title?: "locate" | "compare" | "search") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
 /** What a save dialog filters for; PDF unless told otherwise. */
-export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "any";
+export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "csv" | "comments" | "formData" | "any";
 /** Save dialog (run by Rust) in the folder of document `doc` or of open token `near`, with file name `name`. */
 export const pickSave = (name: string, at: { doc?: number; near?: string } = {}, kind?: SaveKind) =>
   invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null, kind: kind ?? null });
-/** Open dialog for what Create builds a PDF from: images (several) or one text file. */
-export const pickSource = (kind: "images" | "text", multiple: boolean) => invoke<FileRef[]>("pick_source", { kind, multiple });
+/** Open dialog for what Create builds a PDF from: images (several) or one text file; `stamp`: a picture or PDF for a custom stamp; `digitalId`: a .pfx/.p12 digital ID. */
+export const pickSource = (kind: "images" | "text" | "json" | "stamp" | "digitalId", multiple: boolean) => invoke<FileRef[]>("pick_source", { kind, multiple });
 /** Folder dialog (run by Rust); the token names the folder a multi-file export writes into. */
 export const pickFolder = (doc?: number) => invoke<FileRef | null>("pick_folder", { doc: doc ?? null });
 /** Open token for a path the user chose before (recent list); Rust refuses any other path. */
@@ -116,6 +118,50 @@ export interface PageImageBlock {
 /** The images page `page` draws (dark pages keep the photographs in their own colours). */
 export const pageImages = (doc: number, page: number) =>
   invoke<{ rev: number; images: PageImageBlock[] }>("image_blocks", { doc, page }).then((b) => b.images);
+
+// ---- editing images in place (src-tauri/src/imageedit, docs/image-edit.md) ----
+
+/** One image a page draws, with what the editor needs: all rectangles are page space (points, y down). */
+export interface ImageBlock extends PageImageBlock {
+  /** Pass to `imageEdit` with the `rev` of the list it came from. */
+  index: number;
+  kind: "xObject" | "inline";
+  /** The whole image's box: larger than `rect` when a clip crops it. */
+  fullRect: [number, number, number, number];
+  /** The placement: unit square to user space. */
+  matrix: [number, number, number, number, number, number];
+  /** Pixel size. */
+  width: number;
+  height: number;
+  bitsPerComponent: number;
+  /** The stream's filters, outermost first. */
+  filter: string[];
+  name?: string | null;
+  xref?: number | null;
+  editable: boolean;
+  reason?: string | null;
+}
+
+export interface ImageBlocks {
+  rev: number;
+  images: ImageBlock[];
+}
+
+/** `file`: an open token from `pickSource("images", …)`. `rect`s are the box to fit, in page space. */
+export type ImageChange =
+  | { op: "move"; dx: number; dy: number }
+  | { op: "resize"; rect: [number, number, number, number]; keepAspect: boolean }
+  | { op: "rotate"; quarterTurns: number }
+  | { op: "flip"; horizontal: boolean }
+  | { op: "delete" }
+  | { op: "replace"; file: string }
+  | { op: "crop"; rect: [number, number, number, number]; pixels: boolean }
+  | { op: "add"; file: string; rect: [number, number, number, number]; keepAspect?: boolean };
+
+export const imageBlocks = (doc: number, page: number) => invoke<ImageBlocks>("image_blocks", { doc, page });
+/** `index` is null for `add`. A `rev` older than the document's is refused as "stale". */
+export const imageEdit = (doc: number, rev: number, page: number, index: number | null, change: ImageChange) =>
+  invoke<{ state: EditState }>("image_edit", { doc, rev, page, index, change });
 export const cancelSearch = (doc: number) => invoke<void>("cancel_search", { doc });
 export const engineStats = () => invoke<EngineStats>("engine_stats");
 export const initialFiles = () => invoke<FileRef[]>("initial_files");
@@ -145,6 +191,101 @@ export const cancelSearchFiles = (search: number) => invoke<void>("cancel_search
 /** An open token for file `index` of search `search` (a result being opened); the path never reaches the page. */
 export const searchFileToken = (search: number, index: number) => invoke<FileRef>("search_file_token", { search, index });
 
+// ---- catalogs: a saved full-text index over a folder (src-tauri/src/search/catalog) ----------------
+
+export interface CatalogMeta {
+  id: string;
+  name: string;
+  folder: string;
+  recursive: boolean;
+  created: number;
+  /** Unix milliseconds the live index was built; 0 when it never was. */
+  built: number;
+  generation: number;
+  files: number;
+  indexed: number;
+  pages: number;
+  damaged: number;
+  password: number;
+  tooLarge: number;
+  cloudOnly: number;
+  cut: number;
+  capped: boolean;
+  indexLen: number;
+}
+
+export interface CatalogSummary {
+  files: number;
+  kept: number;
+  extracted: number;
+  fromEmbedded: number;
+  added: number;
+  changed: number;
+  removed: number;
+  damaged: number;
+  password: number;
+  tooLarge: number;
+  cloudOnly: number;
+  pages: number;
+  cut: number;
+  capped: boolean;
+  cancelled: boolean;
+}
+
+/** What a refresh would change; `unusable`: never built, or the index must be built again. */
+export interface CatalogStale {
+  added: number;
+  changed: number;
+  removed: number;
+  unusable: boolean;
+}
+
+export interface CatalogEstimate {
+  files: number;
+  bytes: number;
+  secs: number;
+  indexBytes: number;
+  capped: boolean;
+}
+
+export type CatalogBuildEvent =
+  | { kind: "started"; job: number }
+  | { kind: "progress"; job: number; done: number; total: number }
+  | { kind: "done"; job: number; summary: CatalogSummary; catalog: CatalogMeta };
+
+/** What a document carries of an embedded search index. */
+export interface Embedded {
+  present: boolean;
+  /** Same /ID, page count and page content as the file now: a build reads it. */
+  current: boolean;
+  pages: number;
+  bytes: number;
+  /** Why the index cannot be written, updated or removed (certified, signed document); null when it can. */
+  blocked: string | null;
+}
+
+export const catalogEstimate = (folder: string, recursive: boolean) => invoke<CatalogEstimate>("catalog_estimate", { folder, recursive });
+export const catalogCreate = (folder: string, name: string, recursive: boolean) => invoke<CatalogMeta>("catalog_create", { folder, name, recursive });
+export const catalogList = () => invoke<CatalogMeta[]>("catalog_list");
+export const catalogDelete = (id: string) => invoke<void>("catalog_delete", { id });
+export const catalogStale = (id: string) => invoke<CatalogStale>("catalog_stale", { id });
+/** Builds (`full`) or refreshes a catalog; resolves with what it did. Cancel with `catalogCancel(job)` from the `started` event. */
+export function catalogBuild(id: string, full: boolean, onEvent: (e: CatalogBuildEvent) => void) {
+  const ch = new Channel<CatalogBuildEvent>();
+  ch.onmessage = onEvent;
+  return invoke<CatalogSummary>("catalog_build", { id, full, onEvent: ch });
+}
+export const catalogCancel = (job: number) => invoke<void>("catalog_cancel", { job });
+/** Searches a catalog; same events and ids as `searchFiles`, so `searchFileToken` and `cancelSearchFiles` work on it. */
+export function catalogSearch(id: string, query: string, opts: FindOpts, onEvent: (e: FilesEvent) => void) {
+  const ch = new Channel<FilesEvent>();
+  ch.onmessage = onEvent;
+  return invoke<number>("catalog_search", { id, query, opts, onEvent: ch });
+}
+export const indexEmbedded = (doc: number) => invoke<Embedded>("index_embedded", { doc });
+export const indexEmbed = (doc: number) => invoke<EditState>("index_embed", { doc });
+export const indexUnembed = (doc: number) => invoke<EditState>("index_unembed", { doc });
+
 /** Origin of the tile protocol: WebView2 serves custom schemes as http://<scheme>.localhost. */
 export const TILE_ORIGIN = navigator.userAgent.includes("Windows") ? "http://inkwell.localhost" : "inkwell://localhost";
 
@@ -166,8 +307,11 @@ export async function fetchTile(
   rank: number,
   stream: number,
   rev: number,
+  /** A registered print-production view: the tile comes from the `p` route in its plates. */
+  view?: number,
 ): Promise<TileData | null> {
-  const url = `${TILE_ORIGIN}/t/${doc}/${page}/${rot}/${scale}/${tx}/${ty}?e=${epoch}&r=${rank}&s=${stream}&g=${rev}`;
+  const route = view ? "p" : "t";
+  const url = `${TILE_ORIGIN}/${route}/${doc}/${page}/${rot}/${scale}/${tx}/${ty}?e=${epoch}&r=${rank}&s=${stream}&g=${rev}${view ? `&v=${view}` : ""}`;
   const res = await fetch(url);
   if (res.status === 410) return null;
   if (!res.ok) throw new Error(`tile ${res.status}`);
@@ -203,6 +347,8 @@ export interface EditState {
 
 export const editApply = (doc: number, op: EditOp) => invoke<EditState>("edit_apply", { doc, op });
 export const editUndo = (doc: number) => invoke<EditState>("edit_undo", { doc });
+/** Undo only while the document is still at generation `rev`; rejects with "stale" when a step landed since. */
+export const editUndoIf = (doc: number, rev: number) => invoke<EditState>("edit_undo_if", { doc, rev });
 export const editRedo = (doc: number) => invoke<EditState>("edit_redo", { doc });
 export const editState = (doc: number) => invoke<EditState>("edit_state", { doc });
 
@@ -349,18 +495,26 @@ export interface LinkBorder {
   color: [number, number, number];
 }
 
+/** How a link looks while it is pressed (`/H`): None, Invert (the default), Outline, Inset. */
+export type LinkHighlight = "none" | "invert" | "outline" | "inset";
+
 export interface PageLink {
-  /** The annotation's object number. */
+  /** The annotation's object number; negative for a link written inline in `/Annots` (minus its position, minus one). */
   id: number;
   /** x0, y0, x1, y1 in page space. */
   rect: [number, number, number, number];
   target: LinkTarget;
   border: LinkBorder;
+  highlight: LinkHighlight;
 }
 
 export interface PageLinks {
   rev: number;
   links: PageLink[];
+  /** Why the links cannot be changed (a certified document); null when they can. */
+  locked: string | null;
+  /** Signed: a change is saved after the signature. */
+  signed: boolean;
 }
 
 export type NewLinkTarget =
@@ -380,7 +534,9 @@ export type LinkOp =
   | { op: "setTarget"; page: number; id: number; target: NewLinkTarget }
   | { op: "setRect"; page: number; id: number; rect: [number, number, number, number] }
   | { op: "setBorder"; page: number; id: number; border: BorderSpec }
+  | { op: "setHighlight"; page: number; id: number; highlight: LinkHighlight }
   | { op: "delete"; page: number; ids: number[] }
+  | { op: "removeAll" }
   | { op: "fromUrls" };
 
 export interface LinkEdited {
@@ -395,6 +551,8 @@ export interface LinkAudit {
   total: number;
   external: number;
   broken: number;
+  /** The document is signed: a change to its links is saved after the signature. */
+  signed: boolean;
   /** The first broken ones. */
   rows: { page: number; id: number; what: string }[];
 }
@@ -591,11 +749,85 @@ function stripKind<T extends { kind: string }>(m: T): Omit<T, "kind"> {
 
 export type CompressPreset = "smallest" | "balanced" | "highQuality";
 
+export type AuditCategory =
+  | "images"
+  | "fonts"
+  | "contentStreams"
+  | "forms"
+  | "comments"
+  | "links"
+  | "bookmarks"
+  | "thumbnails"
+  | "embeddedFiles"
+  | "metadata"
+  | "structure"
+  | "other";
+
+/** One font by name, as the audit lists it (what "Unembed" works on). */
+export interface FontUsage {
+  /** `/BaseFont` as written, subset tag included. */
+  name: string;
+  kind: string;
+  embedded: boolean;
+  subset: boolean;
+  /** Stored size of the font file(s). */
+  bytes: number;
+  canUnembed: boolean;
+  whyNot: string | null;
+}
+
 export interface CompressAudit {
   total: number;
-  categories: { category: "images" | "fonts" | "contentStreams" | "metadata" | "structure" | "other"; bytes: number; objects: number }[];
+  /** The categories add up to `total`; `percent` is the share of the file, 0..100. */
+  categories: { category: AuditCategory; bytes: number; objects: number; percent: number }[];
   images: number;
   fonts: number;
+  fontList: FontUsage[];
+}
+
+export type ImageCodec = "retain" | "jpeg" | "jpx" | "flate" | "fax";
+
+export interface ImageClassSettings {
+  /** Downsample images shown above this many ppi (0 = never). */
+  abovePpi: number;
+  toPpi: number;
+  codec: ImageCodec;
+  quality: number;
+}
+
+export interface DiscardSettings {
+  metadata: boolean;
+  thumbnails: boolean;
+  embeddedFiles: boolean;
+  javascript: boolean;
+  bookmarks: boolean;
+  invalidBookmarks: boolean;
+  formActions: boolean;
+  alternateImages: boolean;
+  privateData: boolean;
+  links: boolean;
+  invalidLinks: boolean;
+}
+
+/** The engine's `Options` as it serializes: the three presets and the Advanced settings are the same thing. */
+export interface CompressOptions {
+  preset: CompressPreset | "custom";
+  images: { color: ImageClassSettings; gray: ImageClassSettings; mono: ImageClassSettings; onlyIfSmaller: boolean };
+  subsetFonts: boolean;
+  unembedFonts: string[];
+  unembedAll: boolean;
+  transparency: { flatten: boolean; ppi: number };
+  compressStreams: boolean;
+  objectStreams: boolean;
+  /** 0 none, 1 unused, 2 + renumber, 3 + identical objects, 4 + identical streams. */
+  garbage: number;
+  strip: DiscardSettings;
+  visualPages: number;
+}
+
+export interface NamedCompressPreset {
+  name: string;
+  options: CompressOptions;
 }
 
 export interface CompressAuditReply {
@@ -603,11 +835,13 @@ export interface CompressAuditReply {
   size: number;
   defaultOutput: string;
   outputExists: boolean;
+  /** The document carries signatures; the compressed copy invalidates them. */
+  signed: boolean;
 }
 
 /** Predicted size per preset, from recompressing a sample of the file's images. */
 export interface CompressEstimate {
-  preset: CompressPreset;
+  preset: CompressPreset | "custom";
   bytes: number;
   /** The range it should fall in; equal when the sample covered every image. */
   low: number;
@@ -615,7 +849,7 @@ export interface CompressEstimate {
 }
 
 export interface CompressProgress {
-  stage: "open" | "scan" | "images" | "fonts" | "write" | "verify";
+  stage: "open" | "scan" | "flatten" | "images" | "fonts" | "write" | "verify";
   /** 0..1 over the whole job, never decreasing. */
   fraction: number;
   page: number;
@@ -631,35 +865,128 @@ export interface CompressReport {
   savedPercent: number;
   keptOriginal: boolean;
   pages: number;
-  /** Render comparison of before and after (8 pages at most); null when skipped. */
-  visual: { maxDiff: number; meanDiff: number; psnr: number } | null;
+  /** Render comparison of before and after (the sampled pages, plus every page the run flattened or gave
+   *  another font); null when skipped. `worstPage` is zero-based. */
+  visual: {
+    maxDiff: number;
+    meanDiff: number;
+    psnr: number;
+    /** The difference 99.9 % of the compared samples stay under. */
+    p999Diff: number;
+    worstPage: number;
+    pagesChecked: number;
+    pagesTotal: number;
+  } | null;
   warnings: string[];
+  before: CompressAudit;
+  after: CompressAudit;
+  /** What the discard options took out, by option. */
+  stripped: {
+    metadata: boolean;
+    bookmarks: boolean;
+    /** Outline items whose destination did not exist; the working ones under them moved up. */
+    invalidBookmarks: number;
+    /** Why the outline was left as it is, when invalid bookmarks were asked for and could not be judged. */
+    bookmarksUnchecked?: string | null;
+    thumbnails: number;
+    embeddedFiles: number;
+    javascript: number;
+    formActions: number;
+    alternateImages: number;
+    privateData: number;
+    links: number;
+    invalidLinks: number;
+  };
+  unembedded: { files: number; bytes: number; skipped: [string, string][] };
+  /** 1-based pages drawn as a picture, and the ones that use transparency and could not be. */
+  flattened: { pages: number[]; skipped: [number, string][] };
 }
 
 /** Documents are named by id; an output file by a save token from `pickSave`. */
 export interface CompressRequest {
   doc: number;
   preset: CompressPreset;
-  /** Full options from a Customize panel; wins over `preset`. */
-  custom?: unknown;
+  /** The Advanced settings; wins over `preset`. */
+  custom?: CompressOptions;
   /** Save token for the output instead of `<name> (compressed).pdf` (used when that name is taken). */
   saveTo?: string;
 }
 
-export type OcrBackend = "windows" | "tesseract";
+/** `auto`: the engine is picked from the languages (Windows reads one, several go to Tesseract). */
+export type OcrBackend = "auto" | "windows" | "tesseract";
+/** Searchable image (invisible layer), the same cleaned up, or real editable text. */
+export type OcrStyle = "searchable" | "cleaned" | "editable";
+/** The face editable text is set in: `auto` picks mono for typed pages. */
+export type OcrFont = "auto" | "sans" | "mono";
+
+/** One language as the list shows it: which engines have it. */
+export interface OcrLang {
+  /** Primary tag ("sv"). */
+  tag: string;
+  /** The installed Windows pack ("sv-SE"). */
+  windows: string | null;
+  tesseract: boolean;
+  rtl: boolean;
+  cjk: boolean;
+  /** Read, but not as reliably as Latin text. */
+  experimental: boolean;
+}
+
+export interface OcrCatalog {
+  languages: OcrLang[];
+  tesseractFound: boolean;
+  /** Where Tesseract's `*.traineddata` files go. */
+  tessdataDir: string | null;
+}
 
 export interface OcrLanguages {
   windows: string[];
   tesseract: { path: string; languages: string[] } | null;
+  catalog: OcrCatalog;
+  /** The user's Windows languages, display language first. */
+  profile: string[];
+  /** Display language plus English, as far as installed. */
+  defaults: string[];
+}
+
+export interface OcrMissing {
+  tag: string;
+  /** `ms-settings:regionlanguage`; opened with `openLanguageSettings`. */
+  windowsSettings: string;
+  /** `swe.traineddata` */
+  tessdataFile: string;
+  tessdataDir: string | null;
+}
+
+/** Which engine reads the chosen languages, and what is missing for them. */
+export interface OcrPlan {
+  engine: "windows" | "tesseract" | null;
+  languages: string[];
+  dropped: string[];
+  missing: OcrMissing[];
+  note: string | null;
+}
+
+export interface OcrDetection {
+  languages: string[];
+  source: "text" | "sample" | "profile";
+  guess: string | null;
+  confidence: number;
 }
 
 export interface OcrRequest {
   doc: number;
   /** One-based range like "1-3, 5"; omitted = every page. */
   pages?: string;
+  /** Primary tags ("sv"); the engine and its own tags are settled by Rust. */
   languages: string[];
   force: boolean;
   backend: OcrBackend;
+  style?: OcrStyle;
+  /** Render resolution: 150, 200 (default) or 300. */
+  dpi?: number;
+  /** Editable text only. */
+  font?: OcrFont;
   /** Save token: write a new file instead of changing the document. */
   saveTo?: string;
 }
@@ -668,6 +995,8 @@ export interface OcrProgress {
   done: number;
   total: number;
   page: number;
+  /** After every page was read: the pages are being written into the document (the picture styles). */
+  writing?: boolean;
 }
 
 /** The engine's report as it serializes (snake_case: the AI tools read the same shape). */
@@ -681,6 +1010,41 @@ export interface OcrReport {
   words: number;
   total_ms: number;
   warnings: string[];
+  /** What the cleaned-up style did to the pictures; absent for the other styles. */
+  clean?: OcrClean | null;
+  /** What the editable-text style did; absent for the other styles. */
+  editable?: OcrEditable | null;
+}
+
+/** A word that stayed in the picture (its text is still searchable). */
+export interface OcrUnsure {
+  /** 0-based page. */
+  page: number;
+  text: string;
+  /** [x0, y0, x1, y1] on the displayed page, points. */
+  bbox: [number, number, number, number];
+  why: "low-confidence" | "unusual" | "no-font" | "picture";
+}
+
+export interface OcrEditable {
+  pages_converted: number;
+  /** Pages left as a picture with an invisible layer, with the first few reasons in `notes`. */
+  pages_kept: number;
+  words_converted: number;
+  words_kept: number;
+  unsure: OcrUnsure[];
+  notes: string[];
+}
+
+export interface OcrClean {
+  pages_cleaned: number;
+  pages_deskewed: number;
+  specks_removed: number;
+  /** Pages that needed nothing. */
+  pages_clean: number;
+  /** Pages left as they were, with the first few reasons in `notes`. */
+  pages_left: number;
+  notes: string[];
 }
 
 export interface OcrOutcome {
@@ -693,6 +1057,16 @@ export interface OcrOutcome {
 export const compressAudit = (doc: number) => invoke<CompressAuditReply>("compress_audit", { doc });
 /** Runs on its own thread; `toolCancel(job)` stops it. */
 export const compressEstimate = (job: number, doc: number) => invoke<CompressEstimate[]>("compress_estimate", { job, doc });
+
+/** The three presets as the engine defines them: the starting point of the Advanced settings. */
+export const compressPresetOptions = () => invoke<Record<CompressPreset, CompressOptions>>("compress_preset_options");
+/** One estimate for a set of Advanced settings (on the same sample). `toolCancel(job)` stops it. */
+export const compressEstimateCustom = (job: number, doc: number, options: CompressOptions) =>
+  invoke<CompressEstimate>("compress_estimate_custom", { job, doc, options });
+export const compressPresets = () => invoke<NamedCompressPreset[]>("compress_presets");
+export const compressPresetSave = (name: string, options: CompressOptions) =>
+  invoke<NamedCompressPreset[]>("compress_preset_save", { name, options });
+export const compressPresetDelete = (name: string) => invoke<NamedCompressPreset[]>("compress_preset_delete", { name });
 
 export function compressStart(job: number, req: CompressRequest, onProgress: (p: CompressProgress) => void) {
   const ch = new Channel<CompressProgress>();
@@ -775,7 +1149,23 @@ export const toolCancel = (job: number) => invoke<void>("tool_cancel", { job });
 export const ocrLanguages = () => invoke<OcrLanguages>("ocr_languages");
 /** Opens a file picker (Rust side) and remembers tesseract.exe; resolves to the path or null. */
 export const ocrChooseTesseract = () => invoke<string | null>("ocr_choose_tesseract");
+/** Which engine reads `languages` and what is missing for them. */
+export const ocrPlan = (languages: string[], backend: OcrBackend = "auto") => invoke<OcrPlan>("ocr_plan", { languages, backend });
+/** The language the document is probably in: its own text, else a quick sample read of its first scan. */
+export const ocrDetect = (job: number, doc: number) => invoke<OcrDetection>("ocr_detect", { job, doc });
+/** Opens Windows' language settings, where an OCR language pack is added. A fixed address. */
+export const openLanguageSettings = () => invoke<void>("open_language_settings");
 export const ocrClearTesseract = () => invoke<void>("ocr_clear_tesseract");
+
+/** One page before and after the style, as PNG data URLs. Changes nothing. */
+export interface OcrPreview {
+  before: string;
+  after: string;
+  applied: { pages_written: number; words: number; editable?: OcrEditable | null; clean?: OcrClean | null };
+}
+
+/** `page` is 0-based. Runs on its own thread; `toolCancel(job)` stops it. */
+export const ocrPreview = (job: number, page: number, req: OcrRequest) => invoke<OcrPreview>("ocr_preview", { job, page, req });
 
 export function ocrStart(job: number, req: OcrRequest, onProgress: (p: OcrProgress) => void) {
   const ch = new Channel<OcrProgress>();
@@ -828,7 +1218,10 @@ export type PrintRange = { kind: "all" } | { kind: "current"; page: number } | {
 export type PrintLayout =
   | { kind: "size"; mode: PrintSizeMode; percent: number }
   | { kind: "multiple"; perSheet: number; order: PrintPageOrder; border: boolean; autoRotate: boolean }
-  | { kind: "booklet"; sides: "both" | "frontOnly" | "backOnly"; binding: "left" | "right" };
+  /** `creep` in points: how much closer to the spine the innermost sheet's pages sit than the outermost's. */
+  | { kind: "booklet"; sides: "both" | "frontOnly" | "backOnly"; binding: "left" | "right"; creep: number }
+  /** `scale` in percent, `overlap` in points. */
+  | { kind: "poster"; scale: number; overlap: number; cutMarks: boolean; labels: boolean };
 
 export interface PrintSettings {
   printer: string | null;
@@ -851,6 +1244,8 @@ export interface PrintFace {
   height: number;
   /** Source pages on this side (1-based), in the order drawn. */
   pages: number[];
+  /** Poster: which tile of its page this side is (0-based) in a `cols` x `rows` grid. */
+  tile: { col: number; row: number; cols: number; rows: number } | null;
 }
 
 export interface PrintPlan {
@@ -861,6 +1256,8 @@ export interface PrintPlan {
   papers: number;
   /** Sides sent to the printer for all copies, blank backs included: what a job's progress counts to. */
   sides: number;
+  /** Pages Save as PDF writes, two-sided padding included: what its progress counts to. */
+  pdfSides: number;
   faces: PrintFace[];
   editRev: number;
 }
@@ -890,6 +1287,22 @@ export function printStart(job: number, doc: number, settings: PrintSettings, sa
   return invoke<PrintReport>("print_start", { job, doc, settings, saveTo, onProgress: ch });
 }
 
+export interface PrintSavedPdf {
+  /** The new file, as an open token for a new tab. */
+  file: FileRef;
+  /** Source pages chosen. */
+  pages: number;
+  /** Pages of the new file. */
+  sheets: number;
+}
+
+/** Writes the plan as a new vector PDF at `saveTo` (a save token from `pickSave`). Needs no printer. */
+export function printSavePdf(job: number, doc: number, settings: PrintSettings, saveTo: string, onProgress: (p: PrintProgress) => void) {
+  const ch = new Channel<PrintProgress>();
+  ch.onmessage = onProgress;
+  return invoke<PrintSavedPdf>("print_save_pdf", { job, doc, settings, saveTo, onProgress: ch });
+}
+
 // ---- combine, attachments, page labels, transitions (src-tauri/src/organize) ----
 
 export interface CombineFile {
@@ -899,6 +1312,8 @@ export interface CombineFile {
   range: string;
   /** Bookmark title; null = the file's name. */
   title: string | null;
+  /** The open password typed for a locked file; left out for a file that has none. Memory only. */
+  password?: string;
 }
 
 export interface CombineOptions {
@@ -908,6 +1323,8 @@ export interface CombineOptions {
   keepOutlines: boolean;
   /** A contents page in front. */
   contentsPage: boolean;
+  /** Each file's page labels, carried to the pages it gives. */
+  keepLabels: boolean;
 }
 
 export type CombineFileState = "ready" | "encrypted" | "noCopy" | "unreadable" | "badRange";
@@ -921,6 +1338,10 @@ export interface CombineFilePlan {
   used: number;
   hasOutline: boolean;
   hasFields: boolean;
+  /** The file has a password and/or owner restrictions; the result carries neither. */
+  encrypted: boolean;
+  /** Worth knowing about what the file brings ("x.pdf's signature is not carried over"); null when nothing. */
+  note: string | null;
 }
 
 export interface CombinePlan {
@@ -941,6 +1362,8 @@ export interface Combined {
 
 export const combineInspect = (files: CombineFile[], options: CombineOptions) =>
   invoke<CombinePlan>("combine_inspect", { files, options });
+/** Opens a locked source's handle (`openDocument` said `needsPassword`) for drawing; no history is started. A wrong password rejects with "bad-password". */
+export const combineUnlock = (doc: number, password: string) => invoke<OpenInfo>("combine_unlock", { doc, password });
 /** `out`: a save token from `pickSave`. */
 export const combineRun = (files: CombineFile[], options: CombineOptions, out: string) =>
   invoke<Combined>("combine_run", { files, options, out });
@@ -971,6 +1394,73 @@ export const attachmentOpen = (doc: number, id: string) => invoke<FileRef>("atta
 export const attachmentsRemove = (doc: number, ids: string[]) => invoke<EditState>("attachments_remove", { doc, ids });
 export const attachmentDescribe = (doc: number, id: string, text: string) =>
   invoke<EditState>("attachment_describe", { doc, id, text });
+
+// ---- PDF Portfolios (src-tauri/src/organize/portfolio) ----
+
+export interface PortfolioField {
+  key: string;
+  name: string;
+  /** The schema's subtype: S, D, N, F, Desc, Size, ModDate, CreationDate, CompressedSize. */
+  subtype: string;
+  kind: "text" | "number" | "date";
+  visible: boolean;
+}
+
+export interface PortfolioSortKey {
+  /** Index into `fields`. */
+  field: number;
+  ascending: boolean;
+}
+
+export interface PortfolioFolder {
+  id: number;
+  name: string;
+  parent: number | null;
+}
+
+export interface PortfolioFile {
+  /** The attachment id: what `attachmentOpen`, `attachmentSave` and the other attachment calls take. */
+  id: string;
+  name: string;
+  description: string;
+  size: number;
+  mime: string | null;
+  isPdf: boolean;
+  hasData: boolean;
+  folder: number | null;
+  /** What each field shows, in `fields` order. */
+  cells: string[];
+  /** The value's place among all files per field (equal values share one; null: none). Sorting is a sort of these. */
+  ranks: (number | null)[];
+}
+
+export interface PortfolioInfo {
+  /** The schema's fields in the author's column order. */
+  fields: PortfolioField[];
+  /** The collection's own sort: `files` come in this order. */
+  sort: PortfolioSortKey[];
+  view: "details" | "tile" | "hidden" | "custom";
+  /** The file that opens first (an attachment id). */
+  initial: string | null;
+  /** Parents before children, siblings by name. */
+  folders: PortfolioFolder[];
+  files: PortfolioFile[];
+}
+
+export interface PortfolioExtracted {
+  folder: string;
+  written: string[];
+  skipped: string[];
+}
+
+/** The portfolio view of a document; null for a plain PDF. Rejects when the collection is unusable (folders that loop). */
+export const portfolioInfo = (doc: number) => invoke<PortfolioInfo | null>("portfolio_info", { doc });
+/** Open dialog for the files of a new portfolio (any type). */
+export const pickPortfolioFiles = () => invoke<FileRef[]>("pick_portfolio_files");
+/** `out`: a save token from `pickSave`. Resolves to an open token for the new file. The sources are only read. */
+export const portfolioCreate = (files: string[], out: string) => invoke<FileRef>("portfolio_create", { files, out });
+/** `to`: a folder token from `pickFolder`. Never replaces a file there. */
+export const portfolioExtractAll = (doc: number, to: string) => invoke<PortfolioExtracted>("portfolio_extract_all", { doc, to });
 
 export type LabelStyle = "none" | "decimal" | "upperRoman" | "lowerRoman" | "upperAlpha" | "lowerAlpha";
 
@@ -1012,6 +1502,312 @@ export interface PageTrans {
   autoAdvance: number | null;
 }
 
+// ---- article threads ----
+
+export interface ThreadInfo {
+  title: string;
+  subject: string;
+  author: string;
+  keywords: string;
+}
+
+export interface ThreadBead {
+  /** The bead's object number: valid for the generation it was listed at. */
+  id: number;
+  page: number;
+  /** x0, y0, x1, y1 in points on the page as shown (y down). */
+  rect: [number, number, number, number];
+}
+
+export interface ArticleThread {
+  id: number;
+  title: string;
+  info: ThreadInfo;
+  beads: ThreadBead[];
+  /** Why the article cannot be edited (only Delete and Properties are offered), or null. */
+  damaged: string | null;
+}
+
+/** Whether the document is certified (no edit is made) or signed (an edit is saved as an update after the signature). */
+export interface DocProtection {
+  certified: boolean;
+  signed: boolean;
+}
+export const docProtection = (doc: number) => invoke<DocProtection>("a11y_protection", { doc });
+export const threadsList = (doc: number) => invoke<ArticleThread[]>("threads_list", { doc });
+export const threadStart = (doc: number, title: string, page: number, rect: ThreadBead["rect"]) =>
+  invoke<EditState>("thread_start", { doc, title, page, rect });
+/** `after`: the bead to put the new one behind; null puts it at the end. */
+export const threadBeadAdd = (doc: number, thread: number, after: number | null, page: number, rect: ThreadBead["rect"]) =>
+  invoke<EditState>("thread_bead_add", { doc, thread, after, page, rect });
+export const threadBeadMove = (doc: number, thread: number, bead: number, page: number, rect: ThreadBead["rect"]) =>
+  invoke<EditState>("thread_bead_move", { doc, thread, bead, page, rect });
+export const threadBeadDelete = (doc: number, thread: number, bead: number) =>
+  invoke<EditState>("thread_bead_delete", { doc, thread, bead });
+export const threadRemove = (doc: number, thread: number) => invoke<EditState>("thread_remove", { doc, thread });
+export const threadDescribe = (doc: number, thread: number, info: ThreadInfo) =>
+  invoke<EditState>("thread_describe", { doc, thread, info });
+export const threadMove = (doc: number, thread: number, to: number) => invoke<EditState>("thread_move", { doc, thread, to });
+
 export const transitionsList = (doc: number) => invoke<PageTrans[]>("transitions_list", { doc });
 export const transitionsSet = (doc: number, pages: number[], change: PageTrans) =>
   invoke<EditState>("transitions_set", { doc, pages, change });
+
+// ---- batch actions (Action Wizard; src-tauri/src/batch, docs/batch.md) ----
+
+export type BatchPreset = "smallest" | "balanced" | "highQuality" | "custom";
+export interface BatchSanitize {
+  metadata: boolean;
+  hiddenLayers: boolean;
+  hiddenText: boolean;
+  scriptsActions: boolean;
+  embeddedFiles: boolean;
+  annotations: boolean;
+  formFieldsUnderMarks: boolean;
+  bookmarks: boolean;
+}
+export type BatchPattern = "personnummer" | "ssn" | "iban" | "card" | "email" | "phone";
+export type BatchQuery =
+  | { type: "pattern"; pattern: BatchPattern }
+  | { type: "text"; text: string; caseSensitive: boolean; wholeWord: boolean }
+  | { type: "regex"; regex: string; caseSensitive: boolean };
+export interface BatchHeaderFooter {
+  text: SixTexts;
+  style: MarkStyle;
+  margins: [number, number, number, number];
+  startNumber: number;
+}
+export interface BatchWatermark {
+  text: string;
+  /** Pictures are refused by a batch (their file token does not outlast a session). */
+  picture: null;
+  style: MarkStyle;
+  scale: number;
+  opacity: number;
+  rotation: number;
+  behind: boolean;
+  offset: [number, number];
+  showOnScreen: boolean;
+  showInPrint: boolean;
+}
+export interface BatchBates {
+  prefix: string;
+  suffix: string;
+  digits: number;
+  start: number;
+  slot: number;
+  style: MarkStyle;
+  margins: [number, number, number, number];
+}
+
+/** One step. The engine's set is closed; `invalid` is what a file's unknown step reads as (never sent back). */
+export type BatchStep =
+  | { kind: "compress"; preset: BatchPreset }
+  | { kind: "ocr"; languages: string[]; force: boolean; backend: OcrBackend }
+  | ({ kind: "headerFooter" } & BatchHeaderFooter)
+  | ({ kind: "watermark" } & BatchWatermark)
+  | { kind: "bates"; bates: BatchBates; continueAcrossFiles: boolean }
+  /** The passwords exist only in a run's request: the engine never stores or returns them. */
+  | { kind: "protect"; printing: Printing; changes: Changes; copy: boolean; accessibility: boolean; cipher: Cipher; openPassword?: string; permissionsPassword?: string }
+  | ({ kind: "sanitize" } & BatchSanitize)
+  | { kind: "redact"; queries: BatchQuery[]; overlayText: string | null; sanitize: BatchSanitize }
+  | { kind: "flattenForms" }
+  | { kind: "exportImages"; format: ImageFormat; dpi: number; gray: boolean; quality: number }
+  | { kind: "exportText"; layout: boolean }
+  | { kind: "setProperties"; title: string | null; author: string | null; subject: string | null; keywords: string | null; creator: string | null; producer: string | null }
+  | { kind: "invalid"; name: string; why: string };
+
+export type BatchStepKind = Exclude<BatchStep["kind"], "invalid">;
+
+export type BatchOutput = { kind: "nextToSource"; suffix: string } | { kind: "folder"; suffix: string };
+
+export interface BatchAction {
+  /** Empty for a new action; the engine gives it one when it is saved. */
+  id: string;
+  name: string;
+  description: string;
+  steps: BatchStep[];
+  output: BatchOutput;
+  onError: "skip" | "stop";
+  /** Read-only action that ships with the app: Duplicate it to change it. */
+  builtIn: boolean;
+}
+
+export interface BatchIssue {
+  /** Index of the step; null for the action itself. */
+  step: number | null;
+  code: "name" | "no-steps" | "output" | "order" | "unknown-step" | "forbidden-step" | "invalid-step" | "unavailable";
+  message: string;
+}
+
+export type BatchStatus = "ok" | "skipped" | "error";
+
+export interface BatchOutputFile {
+  path: string;
+  /** Open token of a file the run made. */
+  token: string | null;
+}
+
+export interface BatchFileReport {
+  index: number;
+  input: string;
+  name: string;
+  status: BatchStatus;
+  reason: string | null;
+  sizeBefore: number;
+  sizeAfter: number | null;
+  outputs: BatchOutputFile[];
+  notes: string[];
+  warnings: string[];
+  stepsDone: number;
+  ms: number;
+}
+
+export interface BatchReport {
+  action: string;
+  files: BatchFileReport[];
+  ok: number;
+  skipped: number;
+  errors: number;
+  cancelled: boolean;
+  stopped: boolean;
+}
+
+export type BatchEvent =
+  | { event: "started"; files: number }
+  | { event: "fileStarted"; index: number; total: number; name: string }
+  | { event: "step"; index: number; step: number; steps: number; label: string }
+  | { event: "fileDone"; index: number; report: BatchFileReport }
+  | { event: "finished"; ok: number; skipped: number; errors: number; cancelled: boolean };
+
+export interface BatchFilePreview {
+  index: number;
+  input: string;
+  name: string;
+  status: BatchStatus;
+  reason: string | null;
+  steps: string[];
+  outputs: string[];
+}
+
+export interface BatchPreview {
+  action: string;
+  files: BatchFilePreview[];
+  ok: number;
+  skipped: number;
+  errors: number;
+}
+
+export const batchList = () => invoke<BatchAction[]>("batch_list");
+export const batchSave = (action: BatchAction) => invoke<BatchAction>("batch_save", { action });
+export const batchDelete = (id: string) => invoke<void>("batch_delete", { id });
+/** `file`: an open token of an exported action (`pickSource("json")`). Stored under a new id. */
+export const batchImport = (file: string) => invoke<BatchAction>("batch_import", { file });
+/** `saveTo`: a save token from `pickSave(name, {}, "any")`. Passwords are never written. */
+export const batchExport = (action: BatchAction, saveTo: string) => invoke<void>("batch_export", { action, saveTo });
+export const batchValidate = (action: BatchAction) => invoke<BatchIssue[]>("batch_validate", { action });
+/** `files`: open tokens. A dry run: per file, would it run or be skipped, and under which names. Writes nothing. */
+export const batchPreview = (action: BatchAction, files: string[]) => invoke<BatchPreview>("batch_preview", { action, files });
+/** `folder`: an open token of a directory (`pickSearchFolder`). The PDFs in it come back as open tokens (at most 500). */
+export const batchFolderFiles = (folder: string, recursive: boolean) =>
+  invoke<{ files: FileRef[]; capped: boolean }>("batch_folder_files", { folder, recursive });
+/** `folder`: a save token from `pickFolder`, needed when the action's output is a folder. `batchCancel(job)` stops it. */
+export function batchRun(
+  job: number,
+  action: BatchAction,
+  files: string[],
+  folder: string | null,
+  onEvent: (e: BatchEvent) => void,
+) {
+  const ch = new Channel<BatchEvent>();
+  ch.onmessage = onEvent;
+  return invoke<BatchReport>("batch_run", { job, action, files, folder, onEvent: ch });
+}
+export const batchCancel = (job: number) => invoke<void>("batch_cancel", { job });
+
+/** Document JavaScript (src-tauri/src/forms/doc_js.rs). Nothing here runs a script. */
+export interface DocJsMeta {
+  /** Bytes of source; 0 when it was not read. */
+  size: number;
+  /** Over 1 MiB: not shown or scanned here. */
+  tooLarge: boolean;
+  /** Not read: the listing had read its share of script text. */
+  unread: boolean;
+  /** Keys of the capabilities the source mentions. */
+  risks: string[];
+}
+export interface DocJsNamed extends DocJsMeta {
+  /** `n:<name>`. */
+  id: string;
+  name: string;
+}
+export interface DocJsStep extends DocJsMeta {
+  /** `d:<event>:<i>` or `p:<page>:<event>:<i>`; `d:open:<i>` is the open action. */
+  id: string;
+  javascript: boolean;
+  /** What a step that is not JavaScript does. */
+  what: string;
+}
+export interface DocJsSlot {
+  /** `d:<event>` or `p:<page>:<event>`. */
+  id: string;
+  label: string;
+  page: number | null;
+  steps: DocJsStep[];
+}
+export interface DocJsCounts {
+  fields: number;
+  fieldScripts: number;
+  links: number;
+  bookmarks: number;
+}
+export interface DocJsCapability {
+  key: string;
+  label: string;
+  count: number;
+  places: string[];
+}
+export interface DocJsList {
+  named: DocJsNamed[];
+  docActions: DocJsSlot[];
+  pageActions: DocJsSlot[];
+  counts: DocJsCounts;
+  capabilities: DocJsCapability[];
+  incomplete: boolean;
+  /** Signed: an edit is saved as an update and the signature will show the change. */
+  signed: boolean;
+  /** Certified (any /P): script edits are refused. */
+  certified: boolean;
+}
+export interface DocJsSource {
+  id: string;
+  text: string;
+  size: number;
+  tooLarge: boolean;
+}
+export interface DocJsCheck {
+  ok: boolean;
+  message: string | null;
+  /** 1-based. */
+  line: number | null;
+  column: number | null;
+  /** Over what the engine runs (256 KiB): not compiled. */
+  tooLarge: boolean;
+}
+export type DocJsOp =
+  | { op: "add"; name: string | null; source: string }
+  | { op: "rename"; id: string; name: string }
+  | { op: "setSource"; id: string; source: string }
+  | { op: "delete"; id: string };
+export interface DocJsApplied {
+  state: EditState;
+  /** The id of the script an `add` made (and of a renamed one). */
+  id: string | null;
+  /** Set when the file is signed and the edit changed it. */
+  warning: string | null;
+}
+
+export const docJsList = (doc: number) => invoke<DocJsList>("doc_js_list", { doc });
+export const docJsSource = (doc: number, id: string) => invoke<DocJsSource>("doc_js_source", { doc, id });
+export const docJsCheck = (source: string) => invoke<DocJsCheck>("doc_js_check", { source });
+export const docJsApply = (doc: number, op: DocJsOp) => invoke<DocJsApplied>("doc_js_apply", { doc, op });

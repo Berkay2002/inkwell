@@ -17,6 +17,9 @@ pub enum Obj {
     Chunk = b'c' as isize,
     Manifest = b'v' as isize,
     Names = b'n' as isize,
+    /// Saved Fill & Sign records (`fillsign::store`), bound to their kind the same way.
+    Signature = b's' as isize,
+    Initials = b'i' as isize,
 }
 
 /// Everything derived from one document's random key. Wiped on drop (the AEAD wipes its own key).
@@ -114,9 +117,22 @@ fn unpack(packed: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
+/// Non-Windows builds (engine tests on macOS/Linux) have no DPAPI: the store refuses to make or open a key.
+#[cfg(not(windows))]
+pub fn protect(_key: &[u8; 32]) -> Result<Vec<u8>> {
+    Err(HistoryError::Dpapi)
+}
+
+#[cfg(not(windows))]
+pub fn unprotect(_blob: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    Err(HistoryError::Dpapi)
+}
+
+#[cfg(windows)]
 const ENTROPY: &[u8] = b"inkwell history key v1";
 
 /// Wraps a key for the current Windows user (no UI).
+#[cfg(windows)]
 pub fn protect(key: &[u8; 32]) -> Result<Vec<u8>> {
     use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData};
     let input = CRYPT_INTEGER_BLOB { cbData: 32, pbData: key.as_ptr() as *mut u8 };
@@ -129,6 +145,7 @@ pub fn protect(key: &[u8; 32]) -> Result<Vec<u8>> {
     take_blob(ok, out).map(|v| v.to_vec())
 }
 
+#[cfg(windows)]
 pub fn unprotect(blob: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData};
     let input = CRYPT_INTEGER_BLOB { cbData: blob.len() as u32, pbData: blob.as_ptr() as *mut u8 };
@@ -143,6 +160,7 @@ pub fn unprotect(blob: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     Ok(Zeroizing::new(k))
 }
 
+#[cfg(windows)]
 fn take_blob(ok: windows_sys::core::BOOL, out: windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB) -> Result<Zeroizing<Vec<u8>>> {
     if ok == 0 || out.pbData.is_null() {
         return Err(HistoryError::Dpapi);

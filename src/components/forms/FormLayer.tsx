@@ -1,11 +1,14 @@
 import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
+import { commandFor } from "../../lib/commands";
 import { useForms } from "../../lib/forms";
 import {
-  type ButtonAction, type Field, type FieldValue, type Handle, type Rect4, HANDLES, KIND_LABEL, cssColor, dragged, fontSize,
-  isCalculated, move, onPage, resetTargets, resize,
+  type ButtonAction, type Field, type FieldValue, type Handle, type Pick, type Rect4, HANDLES, KIND_LABEL, anchorOf, commitThenRun, cssColor, dragged,
+  fontSize, groupDelta, groupDragEnd, groupPicks, isCalculated, marqueeHits, move, normBox, onPage, resetTargets, resize, samePick,
 } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 import { useStore } from "../../store";
+import { ContextMenu } from "../PageMenu";
+import { layoutMenu, useCertified } from "./layoutTools";
 import "./forms.css";
 
 interface Props {
@@ -18,7 +21,11 @@ interface Props {
 }
 
 const EMPTY: Field[] = [];
+const NO_PICKS: Pick[] = [];
 const fm = () => useForms.getState();
+/** Ctrl-click is the context menu on a Mac: there only Cmd and Shift add to the picked fields. */
+const MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+const additive = (e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => e.metaKey || e.shiftKey || (e.ctrlKey && !MAC);
 type Pt = [number, number];
 
 /**
@@ -34,16 +41,24 @@ export const FormLayer = memo(function FormLayer(p: Props) {
   return <Layer {...p} all={fields} mine={mine} authoring={authoring} />;
 });
 
-type Drag = { mode: "move" | { resize: Handle }; start: Pt; rect0: Rect4; rect: Rect4; moved: boolean; xref: number };
+/** `group` is set when the press was on a picked field of a selection of two or more: they all move by `delta`. */
+type Drag = {
+  mode: "move" | { resize: Handle }; start: Pt; rect0: Rect4; rect: Rect4; moved: boolean; xref: number;
+  group: Pick[] | null; delta: Pt;
+};
 
 function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props & { all: Field[]; mine: Field[]; authoring: boolean }) {
   const highlight = useForms((s) => s.highlight);
   const tool = useForms((s) => s.tool);
-  const selected = useForms((s) => s.docs[docId]?.selected ?? null);
+  const picked = useForms((s) => s.docs[docId]?.picked ?? NO_PICKS);
+  const anchor = anchorOf(picked);
+  const certified = useCertified(docId);
   const predicted = useForms((s) => (s.docs[docId]?.detectPage === page ? s.docs[docId]?.detected : null));
   const space = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [draft, setDraft] = useState<{ a: Pt; b: Pt } | null>(null);
+  const [marquee, setMarquee] = useState<{ a: Pt; b: Pt; add: boolean } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   // A tool change or Esc abandons what is half drawn.
   useEffect(() => setDraft(null), [tool]);
@@ -52,6 +67,7 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
     const k = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || (e.target as HTMLElement | null)?.closest("input, textarea, select")) return;
       setDraft(null);
+      setDrag(null); // a drag in progress is cancelled: nothing is sent
       if (fm().tool !== "select") fm().setTool("select");
     };
     window.addEventListener("keydown", k);
@@ -68,28 +84,48 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
 
   const startDrag = (e: React.PointerEvent, f: Field, mode: Drag["mode"]) => {
     e.stopPropagation();
+    if (MAC && e.ctrlKey) return; // the context menu follows
     e.currentTarget.setPointerCapture(e.pointerId);
-    if (!(selected && selected.page === f.page && selected.xref === f.xref)) fm().select(docId, { page: f.page, xref: f.xref });
-    setDrag({ mode, start: toPage(e), rect0: f.rect, rect: f.rect, moved: false, xref: f.xref });
+    // Ctrl, Cmd or Shift adds to the picked fields and does not drag. A plain press on a picked field of a selection of
+    // two or more drags them all; on any other field it picks just that one and drags it.
+    if (additive(e)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+      fm().toggle(docId, { page: f.page, xref: f.xref });
+      return;
+    }
+    const group = mode === "move" ? groupPicks(picked, f) : null;
+    if (!group && !(picked.length === 1 && samePick(picked[0], f))) fm().select(docId, { page: f.page, xref: f.xref });
+    setDrag({ mode, start: toPage(e), rect0: f.rect, rect: f.rect, moved: false, xref: f.xref, group, delta: [0, 0] });
   };
   const onDragMove = (e: React.PointerEvent) => {
     if (!drag) return;
     const q = toPage(e);
     const [dx, dy] = [q[0] - drag.start[0], q[1] - drag.start[1]];
+    const moved = drag.moved || Math.hypot(dx, dy) * zoom > 3;
+    if (drag.group) {
+      const rects = mine.filter((m) => drag.group!.some((p) => samePick(p, m))).map((m) => m.rect);
+      return setDrag({ ...drag, delta: groupDelta(rects, dx, dy, rawSize), moved });
+    }
     const rect = drag.mode === "move" ? move(drag.rect0, dx, dy, rawSize) : resize(drag.rect0, drag.mode.resize, dx, dy, rawSize);
-    setDrag({ ...drag, rect, moved: drag.moved || Math.hypot(dx, dy) * zoom > 3 });
+    setDrag({ ...drag, rect, moved });
   };
   const onDragEnd = () => {
     const d = drag;
     setDrag(null);
-    if (d?.moved) void fm().move(docId, page, d.xref, d.rect);
+    if (!d) return;
+    if (d.group) {
+      // The group goes as one nudge of the picked fields of this page; a click without a drag narrows the selection to the field.
+      const end = groupDragEnd(d);
+      if (end.kind === "select") fm().select(docId, { page, xref: d.xref });
+      else if (end.kind === "nudge") void fm().nudge(docId, end.by[0], end.by[1], page);
+    } else if (d.moved) void fm().move(docId, page, d.xref, d.rect);
   };
 
   const create = () => {
     const d = draft;
     setDraft(null);
     if (!d || tool === "select") return;
-    const sel = selected ? all.find((f) => f.page === selected.page && f.xref === selected.xref) : null;
+    const sel = anchor ? all.find((f) => samePick(f, anchor)) : null;
     // A radio button drawn while another is selected joins its group.
     const group = tool === "radio" && sel?.kind === "radio" ? sel.name : undefined;
     void fm().add(docId, page, { kind: tool, rect: dragged(tool, d.a, d.b, rawSize), group });
@@ -106,26 +142,58 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
       {authoring && (
         <>
           {tool === "select" && (
-            <div className="fm-bg" style={{ width: rawSize[0], height: rawSize[1] }} onPointerDown={() => fm().select(docId, null)} />
+            <div
+              className="fm-bg"
+              style={{ width: rawSize[0], height: rawSize[1] }}
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId);
+                const q = toPage(e);
+                setMarquee({ a: q, b: q, add: additive(e) });
+              }}
+              onPointerMove={(e) => marquee && setMarquee({ ...marquee, b: toPage(e) })}
+              onPointerUp={() => {
+                const m = marquee;
+                setMarquee(null);
+                if (!m) return;
+                // A click (no real box) on the page clears the selection, unless adding.
+                if (Math.hypot(m.b[0] - m.a[0], m.b[1] - m.a[1]) * zoom < 4) return m.add ? undefined : fm().select(docId, null);
+                fm().pickMany(docId, marqueeHits(mine, page, normBox(m.a, m.b)), m.add);
+              }}
+              onPointerCancel={() => setMarquee(null)}
+            >
+              {marquee && <div className="fm-marquee" style={style(normBox(marquee.a, marquee.b))} />}
+            </div>
           )}
           {predicted?.map((d, i) => (
             <div key={`p${i}`} className={`fm-pred k-${d.kind}`} style={style(d.rect)} title={`Would add: ${d.name}`} />
           ))}
           {mine.map((f) => {
-            const on = selected?.page === f.page && selected.xref === f.xref;
-            const r = drag && drag.xref === f.xref ? drag.rect : f.rect;
+            const on = picked.some((p) => samePick(p, f));
+            const isAnchor = on && picked.length > 1 && !!anchor && samePick(anchor, f);
+            const along = drag?.group?.some((p) => samePick(p, f)) ? (drag.moved ? drag.delta : ([0, 0] as Pt)) : null;
+            const r: Rect4 = along
+              ? [f.rect[0] + along[0], f.rect[1] + along[1], f.rect[2] + along[0], f.rect[3] + along[1]]
+              : drag && !drag.group && drag.xref === f.xref ? drag.rect : f.rect;
             return (
               <div
                 key={f.xref}
-                className={`fm-hit k-${f.kind}${on ? " on" : ""}${f.hidden ? " hidden" : ""}`}
+                className={`fm-hit k-${f.kind}${on ? " on" : ""}${isAnchor ? " anchor" : ""}${f.hidden ? " hidden" : ""}`}
                 style={style(r)}
                 title={`${f.name} · ${KIND_LABEL[f.kind]}`}
-                onPointerDown={(e) => tool === "select" && startDrag(e, f, "move")}
+                onPointerDown={(e) => tool === "select" && e.button === 0 && startDrag(e, f, "move")}
                 onPointerMove={onDragMove}
                 onPointerUp={onDragEnd}
+                onPointerCancel={() => setDrag(null)}
+                onContextMenu={(e) => {
+                  if (tool !== "select") return;
+                  e.preventDefault();
+                  // A right click on a field that is not picked picks it, as in Acrobat.
+                  if (!on) fm().select(docId, { page: f.page, xref: f.xref });
+                  setMenu({ x: e.clientX, y: e.clientY });
+                }}
               >
                 <span className="fm-name">{f.name}</span>
-                {on && tool === "select" &&
+                {on && picked.length === 1 && tool === "select" &&
                   HANDLES.map((h) => (
                     <span
                       key={h}
@@ -155,6 +223,14 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
             </div>
           )}
         </>
+      )}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={layoutMenu(docId, fm().get(docId).picked, all, certified)}
+          onClose={() => setMenu(null)}
+        />
       )}
     </div>
   );
@@ -193,7 +269,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
 
   if (f.kind === "checkbox" || f.kind === "radio") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <button
           className={cls}
           role={f.kind}
@@ -209,21 +285,21 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
   }
   if (f.kind === "button") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <button className={cls} aria-label={label} title={buttonTitle(f)} onClick={() => run(docId, f.action, all)} />
       </div>
     );
   }
   if (f.kind === "signature") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <div className={cls} role="img" aria-label={label} title={`${label} (signing is not available here)`} />
       </div>
     );
   }
   if (f.kind === "list") {
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <select
           className={cls}
           multiple
@@ -247,7 +323,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
   if (f.kind === "combo" && !f.editable) {
     const cur = f.values[0] ?? "";
     return (
-      <div className="fm-cell" style={css}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
         <select className={cls} aria-label={label} title={label} disabled={locked} value={cur} onChange={(e) => void commit(e.target.value)}>
           <option value="" />
           {cur && !f.options.some((o) => o.export === cur) && <option value={cur}>{cur}</option>}
@@ -260,7 +336,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
     );
   }
   return (
-    <div className="fm-cell" style={css}>
+    <div className="fm-cell" style={css} data-fm-xref={f.xref}>
       <TextEditor f={f} className={cls} label={label} locked={locked} onCommit={commit} onChange={() => setErr(null)} />
       {bubble}
     </div>
@@ -314,7 +390,12 @@ function TextEditor({ f, className, label, locked, onCommit, onChange }: {
   };
   const keys = (multi: boolean) => (e: React.KeyboardEvent) => {
     e.stopPropagation();
-    if (e.key === "Escape") {
+    // Save while typing: the typed value is committed first (it would only commit on blur), then the save runs.
+    const cmd = commandFor(e.nativeEvent);
+    if (cmd?.id === "save" || cmd?.id === "save-as") {
+      e.preventDefault();
+      void commitThenRun(live.current.v, f.value, onCommit, () => cmd.run());
+    } else if (e.key === "Escape") {
       show(f.value);
       onChange();
       (e.target as HTMLElement).blur();

@@ -27,6 +27,8 @@ export interface Annot {
   points: Pt[];
   strokes: Pt[][];
   icon: string | null;
+  /** A stamp that draws a picture (a custom stamp): resizing it keeps the picture's proportions. */
+  picture: boolean;
   fontSize: number | null;
   parent: number | null;
   state: string | null;
@@ -82,6 +84,12 @@ export function matches(a: Annot, filter: Filter, query: string): boolean {
 export interface PageGroup {
   page: number;
   items: Annot[];
+}
+
+/** What the list says when it shows nothing; none when the list is only cut short (`incomplete`, no comments seen). */
+export function emptyNote(total: number, shown: number, incomplete: boolean): string | null {
+  if (shown > 0 || (total === 0 && incomplete)) return null;
+  return total === 0 ? "No comments yet. Pick a tool and mark up the page." : "Nothing matches.";
 }
 
 /**

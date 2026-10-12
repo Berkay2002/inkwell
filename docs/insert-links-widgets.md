@@ -4,6 +4,9 @@ Today `graft_pages` (src-tauri/src/engine/edit.rs) copies each page alone, and `
 form widgets and every link that is not a web link: their targets (pages, fields) live elsewhere
 in the source, and grafting /P, /Parent or /Dest would pull in the source's whole page tree. Insert,
 extract, split and merge all go through `graft_pages`, so all of them gain this.
+They also share its signature rule: a signature field of the source arrives empty (value and appearance
+dropped, `drop_signature`), so Extract, Split and Merge files write the pages of a signed document without
+its signature, as Insert pages from file and Combine do. The source itself is not changed.
 
 ## Change (edit.rs only)
 

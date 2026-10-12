@@ -60,8 +60,10 @@ change.
   the items of the other. Parent and children come from that walk and never from an item's own `/Parent`, so a
   wrong `/Parent` can't misplace a move or delete, and the work is bounded by the items, not by how the file
   links them. An item not found by the walk is `Stale`.
-- A certified document (a `/DocMDP` signature) is not changed: bookmarks and links refuse with a message, since any
-  change would void the certification. An op that changes nothing (same name, same place) makes no undo step.
+- A certified document (a `/DocMDP` signature) is not changed where the certification does not allow it. Bookmarks
+  change the document's structure, so they refuse at any `/P` (1, 2 or 3). Links are annotations: they refuse at `/P`
+  1 and 2 and are allowed at `/P` 3, which permits annotations. A certification that cannot be read counts as
+  certified, and the message says why. An op that changes nothing (same name, same place) makes no undo step.
 - Write: items are edited in place and relinked (`/First /Last /Prev /Next /Parent`), `/Count` of every ancestor is
   recomputed (sign = open or closed). A destination is `[page /XYZ x y null]` in user space. Titles are written as a
   plain string when ASCII, else UTF-16BE. Add or move into a closed parent opens it. Moving into itself or a
@@ -105,7 +107,7 @@ change.
 - **Link edits** keep a link's other keys: an existing Launch, GoToR, JavaScript or named action survives a change
   of rectangle or border. Deleting a link also takes it out of the structure tree (`/StructParent`, `/K` object
   references), and the deletion is an `apply_removing` step (an ordinary `apply_custom` one in a signed document,
-  see above).
+  see above); so is Remove all links.
 - **Opening** an address: from the rail's "Open address…" or by clicking a link in Read mode, always after a confirm
   dialog showing the address, and through the gate again. Nothing opens on its own.
 - **Read mode** (`ReadLinks.tsx`, hidden while Edit is open): each link of the pages near the view is a hit area
@@ -118,6 +120,36 @@ change.
   `link_file_path` resolved, with no token issued; only when the person answers Open is `link_file_ref` called,
   which issues the open token, and the file opens in a new tab (the page of a GoToR is jumped to afterwards).
   Cancel leaves no token behind.
+- **Highlight style** (`/H`): None, Invert, Outline, Inset (`N`, `I`, `O`, `P`); a link with no `/H`, or one with a
+  value this does not know, is Invert, as PDF 32000 12.5.6.5 says. It is read into the link model, set from the
+  rail's Highlight select as one undo step (writing the same style as the link has makes no step), and in Read
+  mode drawn while the link is pressed (`:active`, `data-press`): Invert inverts what is behind it
+  (`backdrop-filter`, since the layer is a transformed box and a blend mode would not reach the page), Outline
+  draws the accent outline, Inset a pressed-in bevel, None nothing. A link that does nothing when clicked (an
+  action Inkwell does not follow, a broken one) shows no press whatever its style (`pressFeedback`).
+- **Links written inline in `/Annots`** (a `/Link` dictionary in the array, not a reference) are listed, followed
+  in Read mode through the same confirm gate and counted by the audit. They have no object number, so their id is
+  `-(position in /Annots + 1)`, good for the generation they were listed at like every id here (a change checks
+  `rev`). Edits (target, rectangle, border, highlight) are made in place, in the array, by MuPDF's tracking of the
+  object that holds a nested dictionary; the id does not change. Delete takes the entry out by position, from the
+  end, together with any indirect links named in the same call. An object listed twice in the array is one link.
+  `/Annots` is read up to 50,000 entries and 5,000 links per page.
+- **Remove all links** (rail, "All links"; `LinkOp::RemoveAll`): one undo step that takes every `/Link` annotation,
+  indirect and inline, off every page, and their objects out of the file. Comments, highlights, form widgets and
+  the bookmarks are not touched. The rail counts first (`links_audit`) and asks with the count; a document with no
+  links says so and asks nothing. Every page is read before the first link goes: a page with more than the read
+  caps (above), a document of more than 100,000 pages, or one whose walk would read more than 2,000,000 entries
+  (pages and `/Annots` entries, both passes; an `/Annots` array that pages share is read once) refuses the whole
+  removal ("... at once") instead of doing part of it; the audit spends the same budget, so it refuses where
+  Remove all would, and a Delete names no more ids than a page lists and reads the page once. The count is the one the audit gives (a link two pages
+  list is one); its object is deleted once. The structure tree is cleaned once for all the links, not once per
+  link: each parent-tree node is read once (4,096 nodes, 256 kids each, 500,000 `/Nums` and `/K` entries in
+  all; what lies past that is left as it is). It is a removal like Delete: an unsigned document's next
+  Save rewrites the file without the objects (the addresses are not left in it); a signed one stays incremental.
+- **Certified and signed**: `/P` 1 or 2 refuses every links change inside the closure (no step), and `links_list`
+  returns `locked` (the reason) so the rail turns Draw, Change target, Delete, border, Highlight, Links from web
+  addresses and Remove all links off with it as the title. A signed document gets `signed`: the rail shows the
+  note and the Remove all confirm repeats it.
 - **Reading** loads the `/Dests` name tree once per read and takes an annotation's object number and generation from
   the walk of `/Annots`; "from web addresses" applies the same 2 pt minimum the link gets, so the preview count
   is the number made.
@@ -149,11 +181,14 @@ change.
 
 ## Not done
 
-- Named destinations and JavaScript are listed as "other" and kept as they are, not editable; link highlight style
-  (Invert, Outline, Inset) is not offered; a link made as a direct object in `/Annots` is neither listed nor
-  followed in Read mode.
+- Named destinations and JavaScript are listed as "other" and kept as they are, not editable.
 
 ## Tests
+
+Highlight, inline links and Remove all links: `links::tests` (`the_highlight_style_*`, `a_link_written_inline_*`,
+`an_inline_link_is_edited_in_place_*`, `deleting_inline_and_indirect_*`, `remove_all_links_*`, `a_certified_document_takes_neither_*`,
+`remove_all_links_of_a_signed_document_*`, `a_hostile_annots_array_*`), the two ops in `engine/tests_certified.rs`, and
+`nav.test.ts` ("link actions").
 
 `cargo test --lib outline -- --test-threads=1`, `cargo test --lib links -- --test-threads=1`, `src/lib/nav.test.ts` (including following links).
 

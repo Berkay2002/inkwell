@@ -192,9 +192,22 @@ pub struct DocEntry {
     /// The edit lane: the authoritative document and its history, created on the first edit.
     /// Every mutation holds this lock for its whole run, so edits to one file are serial.
     editor: Mutex<Option<edit::Editor>>,
+    /// The form scripts of this document (their runtime lives on a thread of its own, started on first
+    /// use); dropped with the entry when the document closes.
+    scripts: Arc<crate::forms::js::Scripts>,
 }
 
 impl DocEntry {
+    /// Records that the view of `stream` has reached `epoch` (tiles of older epochs are then stale).
+    pub(crate) fn note_epoch(&self, stream: usize, epoch: u64) {
+        self.epochs[stream.min(STREAMS - 1)].fetch_max(epoch, Ordering::SeqCst);
+    }
+
+    /// Whether the view of `stream` has moved past `epoch`.
+    pub(crate) fn epoch_passed(&self, stream: usize, epoch: u64) -> bool {
+        epoch < self.epochs[stream.min(STREAMS - 1)].load(Ordering::SeqCst)
+    }
+
     pub fn page_count(&self) -> u32 {
         self.layout.read().page_count
     }
@@ -286,6 +299,13 @@ impl Engine {
         self.docs.read().get(&id).cloned().ok_or(EngineError::NoDoc)
     }
 
+    /// The form scripts of an open document and the file's name (for `this.documentFileName`).
+    pub fn doc_scripts(&self, id: DocId) -> Result<(Arc<crate::forms::js::Scripts>, String)> {
+        let entry = self.entry(id)?;
+        let name = std::path::Path::new(&entry.path()).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Ok((entry.scripts.clone(), name))
+    }
+
     /// Opens `path`. Returns `NeedsPassword` (with the document kept registered under the id in
     /// the error-adjacent `OpenInfo` flow) via [`Engine::open_pending`].
     pub fn open(&self, path: &str) -> Result<OpenInfo> {
@@ -332,6 +352,7 @@ impl Engine {
             slots: Default::default(),
             next_slot: AtomicUsize::new(0),
             editor: Mutex::new(None),
+            scripts: Arc::new(crate::forms::js::Scripts::for_path(path)),
         });
         self.docs.write().insert(id, entry.clone());
         entry
@@ -345,6 +366,19 @@ impl Engine {
             *entry.password.lock() = None;
         }
         r
+    }
+
+    /// `authenticate`, for a document that is waiting for its password (`open_pending` said so) and holds
+    /// none: anything else (an open tab, a document that has its password) is refused and left as it is,
+    /// because a wrong password would clear what that document is open with.
+    pub fn unlock_pending(&self, id: DocId, password: &str) -> Result<OpenInfo> {
+        let entry = self.entry(id)?;
+        match self.with_doc(&entry, |_| Ok(())) {
+            Err(EngineError::NeedsPassword) => {}
+            Err(e) => return Err(e),
+            Ok(()) => return Err(EngineError::Invalid("that document is not waiting for a password".into())),
+        }
+        self.authenticate(id, password)
     }
 
     fn finish_open(&self, entry: &Arc<DocEntry>) -> Result<OpenInfo> {
@@ -488,9 +522,16 @@ impl Engine {
         rx.recv().map_err(|_| EngineError::Panic)?
     }
 
+    /// Queues `f` on a pool worker without waiting for it (print production's tiles, which are
+    /// not plain page tiles but are scheduled with them).
+    pub(crate) fn spawn(self: &Arc<Self>, class: u8, epoch: u64, rank: u32, f: impl FnOnce(&Engine) + Send + 'static) {
+        let eng = self.clone();
+        self.pool.submit(Job { prio: Prio::new(class, epoch, rank), run: Box::new(move || f(&eng)) });
+    }
+
     // ---- pages ----------------------------------------------------------------------------
 
-    fn page_list(&self, entry: &DocEntry, rev: u32, page: u32) -> Result<Arc<DisplayList>> {
+    pub(crate) fn page_list(&self, entry: &DocEntry, rev: u32, page: u32) -> Result<Arc<DisplayList>> {
         {
             let l = entry.layout.read();
             if l.rev != rev {
@@ -552,7 +593,7 @@ impl Engine {
                             if held != rev {
                                 return Err(EngineError::Stale);
                             }
-                            let b = doc.load_page(p as i32)?.bounds()?;
+                            let b = doc.pdf_page_bounds(p as i32)?;
                             Ok([b.width(), b.height()])
                         });
                         match size {
@@ -825,6 +866,11 @@ impl Engine {
         self.entry(id)
     }
 
+    /// The open documents, in no particular order.
+    pub fn open_docs(&self) -> Vec<Arc<DocEntry>> {
+        self.docs.read().values().cloned().collect()
+    }
+
     /// What the document currently shows, with the generation it belongs to (read together, so a
     /// page index taken from it is valid for that `rev`): the snapshot after an edit, the file
     /// on disk before the first one.
@@ -1037,7 +1083,7 @@ fn authenticate(d: &mut Document, entry: &DocEntry) -> Result<()> {
                     return Ok(());
                 }
                 // MuPDF does no SASLprep, and the writer puts passwords in NFKC (Protect): a password
-                // typed decomposed or full-width opens the file under its NFKC form. The form that
+                // typed decomposed, full-width or with a non-ASCII space opens the file under its mapped NFKC form. The form that
                 // worked is kept, so every later read of the file uses it.
                 match crate::protect::nfkc_form(&pw) {
                     Some(n) if d.authenticate(&n)? => *entry.password.lock() = Some(n),

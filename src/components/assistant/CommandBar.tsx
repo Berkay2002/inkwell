@@ -1,8 +1,8 @@
 import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { type Msg, useAi } from "../../lib/aiStore";
+import { type Msg, providerOf, useAi } from "../../lib/aiStore";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
-import { Answer, CloseButton, Composer, Consent, Gate, Glyph, MoreMenu, usePop } from "./parts";
+import { Answer, CloseButton, Composer, Consent, Gate, Glyph, MoreMenu, ProviderPicker, usePop } from "./parts";
 import { type BarAt, barStage, surfaceLeft, surfaceMaxH, surfaceWidth, useBar } from "./barView";
 
 // The command bar, after ChatGPT's companion composer: one rounded surface that is the composer at rest,
@@ -43,7 +43,7 @@ const BOTTOM_GAP = 18;
 
 export function Bar({ doc }: { doc: DocState }) {
   const box = useStageBox();
-  const status = useAi((s) => s.status);
+  const status = useAi((s) => s.statuses[providerOf(s, doc.id)]);
   const pending = useAi((s) => s.pending?.doc === doc.id);
   const count = useAi((s) => s.chats[doc.id]?.messages.length ?? 0);
   const hasPast = useAi((s) => (s.past[doc.id]?.length ?? 0) > 0);
@@ -141,9 +141,11 @@ export function Bar({ doc }: { doc: DocState }) {
         }}
       >
         <section className={`ax-bar-surface ${stage}`} aria-label="Assistant">
-          {header && (forced ? <PlainHeader /> : <BarHeader doc={doc} open={open} />)}
+          {header && (forced ? <PlainHeader doc={doc} /> : <BarHeader doc={doc} open={open} />)}
           <div className="ax-bar-fold" ref={fold} data-open={open} inert={!open}>
-            <div className="ax-bar-fold-in">{pending ? <Consent /> : !ready ? <Gate /> : <Thread doc={doc} open={open} />}</div>
+            <div className="ax-bar-fold-in">
+              {pending ? <Consent doc={doc.id} /> : !ready ? <Gate doc={doc.id} /> : <Thread doc={doc} open={open} />}
+            </div>
           </div>
           {ready && !pending && <Composer doc={doc} variant="bar" trail={<MoreMenu doc={doc} up />} />}
         </section>
@@ -156,10 +158,11 @@ export function Bar({ doc }: { doc: DocState }) {
 // ---- header ------------------------------------------------------------------------------------
 
 /** Gate and consent have no chat yet: a title and Close. */
-function PlainHeader() {
+function PlainHeader({ doc }: { doc: DocState }) {
   return (
     <div className="ax-bar-head">
       <span className="ax-bar-title static">Assistant</span>
+      <ProviderPicker doc={doc.id} />
       <span className="grow" />
       <CloseButton />
     </div>
@@ -182,6 +185,7 @@ function BarHeader({ doc, open }: { doc: DocState; open: boolean }) {
       </button>
       <ChatsMenu doc={doc} />
       <span className="grow" />
+      <ProviderPicker doc={doc.id} />
       <button
         className="ax-icon small"
         title={open ? "Collapse the chat" : "Show the chat"}
@@ -337,7 +341,7 @@ function Thread({ doc, open }: { doc: DocState; open: boolean }) {
         </div>,
       );
     if (m.at != null) prevAt = m.at;
-    rows.push(m.role === "user" ? <Question key={m.id} doc={doc.id} m={m} /> : <Answer key={m.id} doc={doc} m={m} variant="bar" isLast={m === last} plain />);
+    rows.push(m.role === "user" ? <Question key={m.id} doc={doc.id} m={m} /> : <Answer key={m.id} doc={doc} m={m} variant="bar" isLast={m === last} />);
   }
   if (restored != null && restored >= list.length) rows.push(note);
 

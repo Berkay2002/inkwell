@@ -9,7 +9,7 @@
 //! reply with `/StateModel /Review` and `/State` (the latest one wins; "Completed" is resolved).
 //! Replies and state replies are hidden on the page (they are only listed in the panel).
 //! The review-state convention follows pdfcraft's `crates/annot` (ideas only, no code taken).
-//! XFDF import and export is not built yet (see docs/comments.md).
+//! XFDF and FDF export and import of comments is `xfdf.rs` (see docs/comments.md).
 
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
@@ -17,10 +17,13 @@ use mupdf::color::AnnotationColor;
 use mupdf::pdf::{AnnotationFlags, LineEndingStyle, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject};
 use mupdf::{Point, Quad, Rect};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 pub mod app;
+pub mod stamps;
 #[cfg(test)]
 mod tests;
+pub mod xfdf;
 
 type Result<T> = std::result::Result<T, EngineError>;
 
@@ -106,6 +109,8 @@ pub struct AnnotDto {
     pub points: Vec<[f32; 2]>,
     pub strokes: Vec<Vec<[f32; 2]>>,
     pub icon: Option<String>,
+    /// A stamp that draws a picture (a custom stamp): its resize keeps the picture's proportions.
+    pub picture: bool,
     pub font_size: Option<f32>,
     /// The annotation this one replies to.
     pub parent: Option<i32>,
@@ -148,9 +153,13 @@ fn rgb_of(c: Option<AnnotationColor>) -> Option<[f32; 3]> {
     }
 }
 
-/// `D:YYYYMMDDHHmmSSZ` for the current time (civil date from days: Hinnant's algorithm).
+/// `D:YYYYMMDDHHmmSSZ` for the current time.
 pub fn pdf_now() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    pdf_date(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64))
+}
+
+/// `D:YYYYMMDDHHmmSSZ` for `secs` since the Unix epoch (civil date from days: Hinnant's algorithm).
+pub fn pdf_date(secs: i64) -> String {
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -185,7 +194,7 @@ fn default_color(kind: Kind) -> [f32; 3] {
     }
 }
 
-fn find(doc: &PdfDocument, page: u32, xref: i32) -> Result<(mupdf::pdf::PdfPage, PdfAnnotation)> {
+pub(crate) fn find(doc: &PdfDocument, page: u32, xref: i32) -> Result<(mupdf::pdf::PdfPage, PdfAnnotation)> {
     let p = doc.load_pdf_page(page as i32)?;
     let a = p
         .annotations()
@@ -227,7 +236,7 @@ fn is_comment(t: PdfAnnotationType) -> bool {
 
 // ---- reading -----------------------------------------------------------------------------------
 
-fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
+pub(crate) fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
     let o = a.object();
     let kind = kind_of(a)?;
     let r = a.rect()?;
@@ -268,6 +277,7 @@ fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
         points,
         strokes,
         icon: a.icon_name().ok().flatten().map(str::to_owned),
+        picture: kind == Kind::Stamp && stamps::picture_size(&o).is_some(),
         font_size: a.default_appearance().ok().flatten().map(|d| d.size),
         parent: parent_of(&o),
         resolved: false,
@@ -275,33 +285,252 @@ fn dto(page: u32, a: &PdfAnnotation) -> Result<AnnotDto> {
     })
 }
 
-/// Every comment of the document in page order. A review-state reply is folded into its parent's
-/// `state`/`resolved` (the latest wins) and not listed on its own.
-pub fn list(doc: &PdfDocument) -> Result<Vec<AnnotDto>> {
-    let mut all = Vec::new();
-    for p in 0..doc.page_count()? as u32 {
-        let page = doc.load_pdf_page(p as i32)?;
-        for a in page.annotations() {
-            if a.r#type().is_ok_and(is_comment) {
-                all.push(dto(p, &a)?);
+/// Annotations loaded for one document by [`list`]: past this the rest of the pages are left out
+/// and the list says so (`incomplete`).
+const MAX_LOADED: usize = 50_000;
+/// Entries [`AnnotWalk`] charges in one document: an indirect object an earlier array listed too, and
+/// every direct entry. The first sight of an indirect object is not counted.
+const MAX_SCANNED: usize = 2_000_000;
+
+/// The comments of a document, and whether some were left out (past [`MAX_LOADED`] annotations or
+/// [`MAX_SCANNED`] repeated array entries).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotList {
+    pub items: Vec<AnnotDto>,
+    pub incomplete: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Which {
+    /// Everything MuPDF puts in `page.annotations()`: not links, popups or widgets.
+    Comments,
+    /// What `page.widgets()` returns.
+    Widgets,
+}
+
+/// The annotations a page brings that no earlier page had.
+pub(crate) struct Fresh {
+    /// Their object numbers.
+    pub nums: HashSet<i32>,
+    /// The page has annotation dictionaries written inline (object number 0), which are never shared.
+    pub direct: bool,
+    /// Annotations loading the page makes (every dictionary in `/Annots` but links and popups).
+    pub loaded: usize,
+}
+
+/// Which pages have annotations that still need listing, read from the page dictionaries alone.
+/// Loading a page makes MuPDF create every annotation in its `/Annots`, so a document whose pages
+/// share one array (or list the same objects) costs pages x annotations if every page is loaded.
+/// An object is assigned to the first page that has it, or to the page its `/P` names when that
+/// page has it too. Pages that bring nothing new are not loaded.
+///
+/// Known limit: a dictionary that two pages list through different arrays, with no `/P` naming the
+/// later one, belongs to the first page only. The later page still draws it, but it is not listed
+/// or selectable there (and a widget is not fillable there).
+#[derive(Default)]
+pub(crate) struct AnnotWalk {
+    arrays: HashSet<i32>,
+    seen: HashSet<i32>,
+    /// Page objects walked: a page listed several times in `/Kids` is one object, one walk.
+    pages: HashSet<i32>,
+    /// What each indirect entry met so far is, so that meeting it again costs no dictionary read.
+    class: HashMap<i32, Class>,
+    /// What an owner page's array lists, read once per array (by object number when it is indirect).
+    listed: HashMap<ListKey, HashSet<i32>>,
+    scanned: usize,
+    /// The scan cap was hit: pages from then on are left out.
+    pub incomplete: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+    NotDict,
+    /// Loading the page makes no annotation of it.
+    Link,
+    Widget,
+    Other,
+}
+
+impl Class {
+    fn of(e: &PdfObject) -> Result<Class> {
+        if !e.is_dict()? {
+            return Ok(Class::NotDict);
+        }
+        Ok(match e.get_dict("Subtype")?.and_then(|s| s.as_name().ok()).as_deref() {
+            Some(b"Link" | b"Popup") => Class::Link,
+            Some(b"Widget") => Class::Widget,
+            _ => Class::Other,
+        })
+    }
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum ListKey {
+    /// An indirect `/Annots` array, by object number.
+    Array(i32),
+    /// A direct one, by the page that has it.
+    Page(i32),
+}
+
+impl AnnotWalk {
+    /// Counts one repeated entry; true once the budget is gone.
+    fn repeat(&mut self) -> bool {
+        self.scanned += 1;
+        if self.scanned > MAX_SCANNED {
+            self.incomplete = true;
+        }
+        self.incomplete
+    }
+
+    /// `None` when loading page `p` would add nothing (no annotations, or all assigned already).
+    pub fn page(&mut self, doc: &PdfDocument, p: u32, which: Which) -> Result<Option<Fresh>> {
+        if self.incomplete {
+            return Ok(None);
+        }
+        let page = doc.find_page(p as i32)?;
+        if page.is_indirect()? && !self.pages.insert(page.as_indirect()?) {
+            return Ok(None);
+        }
+        let Some(annots) = page.get_dict("Annots")? else { return Ok(None) };
+        if !annots.is_array()? {
+            return Ok(None);
+        }
+        // One array shared by pages (an indirect /Annots): its objects went to the first of them.
+        if annots.is_indirect()? && !self.arrays.insert(annots.as_indirect()?) {
+            return Ok(None);
+        }
+        let mut fresh = Fresh { nums: HashSet::new(), direct: false, loaded: 0 };
+        for i in 0..annots.len()? {
+            let Some(e) = annots.get_array(i as i32)? else { continue };
+            let num = if e.is_indirect()? { Some(e.as_indirect()?) } else { None };
+            let cached = num.and_then(|n| self.class.get(&n).copied());
+            // Only the first sight of an indirect object is free; a direct entry is never shared, but
+            // a page object listed twice (or many inline dictionaries) would still cost per page.
+            if (num.is_none() || cached.is_some()) && self.repeat() {
+                return Ok(None);
+            }
+            let class = match cached {
+                Some(c) => c,
+                None => {
+                    let c = Class::of(&e)?;
+                    if let Some(n) = num {
+                        self.class.insert(n, c);
+                    }
+                    c
+                }
+            };
+            if matches!(class, Class::Other | Class::Widget) {
+                fresh.loaded += 1;
+            }
+            let wanted = match which {
+                Which::Widgets => class == Class::Widget,
+                Which::Comments => class == Class::Other,
+            };
+            if !wanted {
+                continue;
+            }
+            let Some(num) = num else {
+                fresh.direct = true;
+                continue;
+            };
+            let later = self.seen.contains(&num) || self.belongs_later(doc, &e, p, num)?;
+            // Out of budget mid-check the answer above is a guess: stop here instead of listing from it.
+            if self.incomplete {
+                return Ok(None);
+            }
+            if later {
+                continue;
+            }
+            self.seen.insert(num);
+            fresh.nums.insert(num);
+        }
+        Ok((fresh.direct || !fresh.nums.is_empty()).then_some(fresh))
+    }
+
+    /// The annotation names a later page in its `/P` and that page lists it too.
+    fn belongs_later(&mut self, doc: &PdfDocument, e: &PdfObject, p: u32, num: i32) -> Result<bool> {
+        let Some(owner) = e.get_dict("P")?.filter(|o| o.is_dict().unwrap_or(false)) else { return Ok(false) };
+        let q = doc.lookup_page_number(&owner).unwrap_or(-1);
+        if q <= p as i32 || q >= doc.page_count()? {
+            return Ok(false);
+        }
+        let Some(list) = doc.find_page(q)?.get_dict("Annots")?.filter(|a| a.is_array().unwrap_or(false)) else { return Ok(false) };
+        let key = if list.is_indirect()? { ListKey::Array(list.as_indirect()?) } else { ListKey::Page(q) };
+        // That page's array is the one being walked or was walked: it will not be visited again, so
+        // the annotation stays with the first page that has it.
+        if matches!(key, ListKey::Array(a) if self.arrays.contains(&a)) {
+            return Ok(false);
+        }
+        if let Some(nums) = self.listed.get(&key) {
+            return Ok(nums.contains(&num));
+        }
+        let mut nums = HashSet::new();
+        for i in 0..list.len()? {
+            // Each entry read is charged: many annotations naming many other pages, each with a long array, would
+            // otherwise cost n x m reads. Out of budget the walk is incomplete and this one stays where it is.
+            if self.repeat() {
+                return Ok(false);
+            }
+            if let Some(x) = list.get_array(i as i32)?.filter(|x| x.is_indirect().unwrap_or(false)) {
+                nums.insert(x.as_indirect()?);
             }
         }
+        let found = nums.contains(&num);
+        self.listed.insert(key, nums);
+        Ok(found)
     }
-    let mut out: Vec<AnnotDto> = Vec::new();
+}
+
+/// Every comment of the document in page order. A review-state reply is folded into its parent's
+/// `state`/`resolved` (the latest wins) and not listed on its own. An annotation object that
+/// several pages list (a shared `/Annots`) is listed once, on one page; see [`AnnotWalk`] for
+/// which page and for the case that is left to the first.
+pub fn list(doc: &PdfDocument) -> Result<AnnotList> {
+    let (all, incomplete) = each(doc, |p, a| dto(p, a))?;
+    let mut items: Vec<AnnotDto> = Vec::new();
     let mut states: Vec<(i32, String)> = Vec::new();
     for d in all {
         match (&d.state, d.parent) {
             (Some(s), Some(parent)) => states.push((parent, s.clone())),
-            _ => out.push(d),
+            _ => items.push(d),
         }
     }
     for (parent, s) in states {
-        if let Some(d) = out.iter_mut().find(|d| d.xref == parent) {
+        if let Some(d) = items.iter_mut().find(|d| d.xref == parent) {
             d.resolved = s == "Completed";
             d.state = Some(s);
         }
     }
-    Ok(out)
+    Ok(AnnotList { items, incomplete })
+}
+
+/// `f` for every comment annotation (everything [`is_comment`]) in page order, once each; and whether
+/// some pages were left out (see [`AnnotWalk`] for which page an object belongs to and the caps).
+pub(crate) fn each<T>(doc: &PdfDocument, mut f: impl FnMut(u32, &PdfAnnotation) -> Result<T>) -> Result<(Vec<T>, bool)> {
+    let mut all = Vec::new();
+    let mut walk = AnnotWalk::default();
+    let mut loaded = 0usize;
+    let mut left_out = false;
+    for p in 0..doc.page_count()?.max(0) as u32 {
+        let Some(fresh) = walk.page(doc, p, Which::Comments)? else { continue };
+        if loaded + fresh.loaded > MAX_LOADED {
+            left_out = true;
+            continue;
+        }
+        loaded += fresh.loaded;
+        let mut pending = fresh.nums;
+        let page = doc.load_pdf_page(p as i32)?;
+        for a in page.annotations() {
+            let x = a.xref()?;
+            let ours = if x == 0 { fresh.direct } else { pending.remove(&x) };
+            // Fill & Sign items are annotations too; fillsign lists them, not as comments.
+            if ours && a.r#type().is_ok_and(is_comment) && a.object().get_dict(crate::fillsign::MARK).ok().flatten().is_none() {
+                all.push(f(p, &a)?);
+            }
+        }
+    }
+    Ok((all, left_out || walk.incomplete))
 }
 
 // ---- writing -----------------------------------------------------------------------------------
@@ -311,7 +540,7 @@ pub fn os_user(var: impl Fn(&str) -> Option<String>) -> String {
     ["USERNAME", "USER"].iter().filter_map(|k| var(k)).map(|v| v.trim().to_owned()).find(|v| !v.is_empty()).unwrap_or_default()
 }
 
-fn meta(a: &mut PdfAnnotation, author: &str, created: bool) -> Result<()> {
+pub(crate) fn meta(a: &mut PdfAnnotation, author: &str, created: bool) -> Result<()> {
     if !author.is_empty() {
         a.set_author(author)?;
     }
@@ -319,21 +548,36 @@ fn meta(a: &mut PdfAnnotation, author: &str, created: bool) -> Result<()> {
     put_str(a, "M", &now)?;
     if created {
         put_str(a, "CreationDate", &now)?;
+        // The name XFDF and FDF files match a comment by (an import updates the comment with the same one).
+        put_str(a, "NM", &new_name())?;
     }
     Ok(())
+}
+
+/// A random 128-bit name in UUID text form, for `/NM`.
+fn new_name() -> String {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("system random source");
+    b[6] = b[6] & 0x0F | 0x40;
+    b[8] = b[8] & 0x3F | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
 fn style(a: &mut PdfAnnotation, kind: Kind, s: &Style) -> Result<()> {
     if kind != Kind::FreeText {
         a.set_color(rgb(s.color.unwrap_or_else(|| default_color(kind))))?;
     }
-    if let Some(f) = s.fill {
+    // MuPDF throws for a fill or a border on a type that has none (a note, a markup, a stamp), which would
+    // leave the annotation half made: an import can carry both for any type.
+    let closed = matches!(kind, Kind::Rectangle | Kind::Ellipse | Kind::Line | Kind::Arrow | Kind::Polygon);
+    if let Some(f) = s.fill.filter(|_| closed) {
         a.set_interior_color(rgb(f))?;
     }
     if let Some(o) = s.opacity {
         a.set_opacity(o.clamp(0.0, 1.0))?;
     }
-    if let Some(w) = s.width {
+    if let Some(w) = s.width.filter(|_| closed || matches!(kind, Kind::Ink | Kind::FreeText)) {
         a.set_border_width(w.max(0.0))?;
     }
     Ok(())
@@ -353,6 +597,7 @@ fn hide_reply(a: &mut PdfAnnotation, parent: i32, doc: &PdfDocument, state: Opti
 
 /// Creates the annotation on `page` and returns its xref.
 pub fn add(doc: &mut PdfDocument, page: u32, what: &NewAnnot, st: &Style, author: &str) -> Result<i32> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Adding a comment")?;
     let mut p = doc.load_pdf_page(page as i32)?;
     let (mut a, kind) = match what {
         NewAnnot::Markup { markup: kind, quads } => {
@@ -432,7 +677,8 @@ fn map_point(p: Point, from: Rect, to: Rect) -> Point {
     Point { x: to.x0 + (p.x - from.x0) * sx, y: to.y0 + (p.y - from.y0) * sy }
 }
 
-fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
+/// `turns` is the page's `/Rotate` in quarter turns: a picture stamp's pixels are stored turned back by it.
+fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect, turns: u32) -> Result<()> {
     let from = a.rect()?;
     let m = |p: Point| map_point(p, from, to);
     match kind {
@@ -456,6 +702,14 @@ fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
             let strokes: Vec<Vec<Point>> = a.ink_list()?.into_iter().map(|s| s.into_iter().map(m).collect()).collect();
             a.set_ink_list(strokes.iter().map(|s| s.iter().copied()))?;
         }
+        // A picture stamp keeps the picture's proportions whatever box was asked for.
+        Kind::Stamp => {
+            let fit = stamps::picture_size(&a.object()).map_or(to, |(w, h)| {
+                let (w, h) = if turns % 2 == 1 { (h, w) } else { (w, h) };
+                stamps::fit_aspect(from, to, w as f32 / h as f32)
+            });
+            a.set_rect(fit)?;
+        }
         // Rect-based kinds; the others derive their /Rect from the geometry above.
         _ => a.set_rect(to)?,
     }
@@ -463,7 +717,8 @@ fn reshape(a: &mut PdfAnnotation, kind: Kind, to: Rect) -> Result<()> {
 }
 
 pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: &str) -> Result<()> {
-    let (_p, mut a) = find(doc, page, xref)?;
+    crate::outline::refuse_unless_annotating_allowed(doc, "Changing a comment")?;
+    let (p, mut a) = find(doc, page, xref)?;
     let kind = kind_of(&a)?;
     let s = &patch.style;
     if let Some(c) = s.color {
@@ -495,7 +750,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: 
         a.set_default_appearance("Helv", sz, Some(c))?;
     }
     if let Some(r) = patch.rect {
-        reshape(&mut a, kind, rect_of(r))?;
+        reshape(&mut a, kind, rect_of(r), stamps::quarter_turns(&p)?)?;
     }
     meta(&mut a, author, false)?;
     a.update()?;
@@ -504,6 +759,7 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &Patch, author: 
 
 /// Deletes the annotations and everything that replies to them.
 pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Deleting a comment")?;
     let mut p = doc.load_pdf_page(page as i32)?;
     let mut doomed: Vec<i32> = xrefs.to_vec();
     loop {
@@ -531,6 +787,7 @@ pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
 
 /// A reply (a hidden `/Text` with `/IRT`) to `parent`; returns its xref.
 pub fn reply(doc: &mut PdfDocument, page: u32, parent: i32, text: &str, author: &str) -> Result<i32> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Replying to a comment")?;
     let (mut p, pa) = find(doc, page, parent)?;
     let r = pa.rect()?;
     let mut a = p.add_text_annotation(Rect { x0: r.x0, y0: r.y0, x1: r.x0 + 22.0, y1: r.y0 + 22.0 }, text)?;
@@ -541,6 +798,7 @@ pub fn reply(doc: &mut PdfDocument, page: u32, parent: i32, text: &str, author: 
 
 /// Sets the review state of `parent` ("Completed" = resolved; "None" reopens) as a new state reply.
 pub fn set_state(doc: &mut PdfDocument, page: u32, parent: i32, state: &str, author: &str) -> Result<i32> {
+    crate::outline::refuse_unless_annotating_allowed(doc, "Changing a comment's status")?;
     if !["None", "Accepted", "Rejected", "Cancelled", "Completed"].contains(&state) {
         return Err(bad(format!("unknown review state {state}")));
     }
@@ -626,5 +884,10 @@ pub fn state_one(eng: &Engine, doc: DocId, page: u32, parent: i32, state: &str, 
 }
 
 pub fn list_all(eng: &Engine, doc: DocId) -> Result<Vec<AnnotDto>> {
+    list_status(eng, doc).map(|l| l.items)
+}
+
+/// [`list_all`] with whether some annotations were left out.
+pub fn list_status(eng: &Engine, doc: DocId) -> Result<AnnotList> {
     eng.read_custom(doc, |d| list(d))
 }

@@ -655,6 +655,12 @@ pub fn claim(doc: &PdfDocument) -> Result<Option<Claim>> {
     check::claim(doc)
 }
 
+/// Which device colour spaces (gray, RGB, CMYK) the pages still use, not counting ones a Default
+/// colour space covers (print production's "is any RGB left" question).
+pub fn device_colours(doc: &PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<[bool; 3]> {
+    Ok(check::survey(doc, progress, cancel)?.device)
+}
+
 /// What a file's own claim says, as a profile this module can verify.
 pub fn claimed_profile(label: &str) -> Option<Profile> {
     Profile::ALL.iter().copied().find(|p| p.label().eq_ignore_ascii_case(label))
@@ -734,8 +740,8 @@ pub struct Converted {
 }
 
 /// Converts into a new file at `dest` (never an open document; the caller checked). The open
-/// document is not touched; the new file is read back and checked.
-#[allow(clippy::too_many_arguments)]
+/// document is not touched; the new file is read back and checked. The copy is written without encryption, so a
+/// document whose owner does not allow copying out of it is refused (as export and extract do).
 pub fn convert_to_file(
     eng: &Engine,
     doc: DocId,
@@ -745,12 +751,42 @@ pub fn convert_to_file(
     progress: &mut dyn FnMut(Progress),
     cancel: &AtomicBool,
 ) -> Result<Converted> {
+    convert_into(eng, doc, profile, c, dest, true, progress, cancel)
+}
+
+/// [`convert_to_file`] for a name nobody confirmed (the assistant's): a file at `dest` is never replaced.
+pub fn convert_to_new_file(
+    eng: &Engine,
+    doc: DocId,
+    profile: Profile,
+    c: &Convert,
+    dest: &str,
+    progress: &mut dyn FnMut(Progress),
+    cancel: &AtomicBool,
+) -> Result<Converted> {
+    convert_into(eng, doc, profile, c, dest, false, progress, cancel)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_into(
+    eng: &Engine,
+    doc: DocId,
+    profile: Profile,
+    c: &Convert,
+    dest: &str,
+    replace: bool,
+    progress: &mut dyn FnMut(Progress),
+    cancel: &AtomicBool,
+) -> Result<Converted> {
+    eng.ensure_extractable(doc)?;
     // The new file replaces what is at `dest`: never a document that is open.
     eng.check_not_open(dest, None)?;
     let path = eng.doc_entry(doc)?.path();
     let stem = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let (mut d, _) = open_copy(eng, doc)?;
     let applied = fix::apply(&mut d, profile, c, &stem, true, fix::NEW_FILE_HEAD, progress, cancel)?;
+    // What the fixes removed (annotations, files, JavaScript) must not stay in an embedded search index.
+    crate::search::catalog::embed::drop_if_stale(&d).map_err(|e| EngineError::Io(e.to_string()))?;
     let bytes = fix::write_new(&d, profile)?;
     // The check of what was written runs before the file is put in place: a cancel leaves nothing behind.
     let reread = PdfDocument::from_bytes(&bytes)?;
@@ -764,8 +800,28 @@ pub fn convert_to_file(
             return Err(bad(format!("The converted file does not pass its own check ({}), so it was not written", shown.join(", "))));
         }
     }
-    crate::history_ipc::write_replace(std::path::Path::new(dest), &bytes).map_err(|e| EngineError::Io(e.to_string()))?;
+    if replace {
+        crate::history_ipc::write_replace(std::path::Path::new(dest), &bytes).map_err(|e| EngineError::Io(e.to_string()))?;
+    } else {
+        write_new_file(std::path::Path::new(dest), &bytes)?;
+    }
     Ok(Converted { path: dest.to_string(), report, fixed: applied.log })
+}
+
+/// `bytes` into a file that must not exist: created exclusively, so a file that appeared at `path` meanwhile is
+/// never replaced (`output-exists`), and a failed write leaves nothing behind.
+fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::{ErrorKind, Write};
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| match e.kind() {
+        ErrorKind::AlreadyExists => EngineError::Io("output-exists".into()),
+        _ => EngineError::Io(e.to_string()),
+    })?;
+    if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
+        drop(f);
+        let _ = std::fs::remove_file(path);
+        return Err(EngineError::Io(e.to_string()));
+    }
+    Ok(())
 }
 
 /// The rules a file that is to say it conforms must not have open: the failed ones, and in the PDF/A
@@ -784,3 +840,4 @@ pub fn report_bytes(eng: &Engine, doc: DocId, profile: Profile, pdf: bool, date:
 
 #[allow(unused_imports)]
 pub(crate) use a11y::Progress as CheckProgress;
+pub(crate) use fix::set_info_properties;

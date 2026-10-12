@@ -43,6 +43,18 @@
   --tile-bg: light-dark(#4338ca, #312e81);
   --tile-fg: light-dark(#ffffff, #c7d2fe);
 }
+[data-group="print"] {
+  --tile-bg: light-dark(#a21caf, #701a75);
+  --tile-fg: light-dark(#ffffff, #fae8ff);
+}
+[data-group="scripts"] {
+  --tile-bg: light-dark(#475569, #1e293b);
+  --tile-fg: light-dark(#ffffff, #e2e8f0);
+}
+[data-group="automate"] {
+  --tile-bg: light-dark(#0369a1, #0c4a6e);
+  --tile-fg: light-dark(#ffffff, #e0f2fe);
+}
 .tool-icon {
   --tile: 36px;
   display: inline-flex;

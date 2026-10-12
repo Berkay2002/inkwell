@@ -85,6 +85,8 @@ describe("icon set", () => {
     expect(inlinePaths('<path d="M1 2h3" />')).toHaveLength(1);
     expect(inlinePaths("<path d={`M${x} ${y}L${x2} ${y2}`} />")).toHaveLength(0);
     expect(inlinePaths('const msg = "Make the file smaller";')).toHaveLength(0);
+    // a format label that starts with M and a digit is not path data (it has no second number)
+    expect(inlinePaths('  "audio/mp4": "M4A",')).toHaveLength(0);
   });
 
   it("every vendored Fluent file is one that the manifest asks for, and every manifest glyph is vendored", () => {
@@ -136,7 +138,7 @@ function inlinePaths(src: string): string[] {
   const hits: string[] = [];
   for (const line of src.split(/\r?\n/)) {
     const literalPath = /<path\b[^>]*\sd="[^"{]/.test(line);
-    const pathConstant = /["'`][Mm]\s?-?\d[\d.\s,-]*[A-Za-z][^"'`]*["'`]/.test(line) && /^\s*(export\s+)?(const|let)\s|:\s*["'`]/.test(line);
+    const pathConstant = /["'`][Mm]\s?-?\d+(?:\.\d+)?[\s,]-?[\d.][^"'`]*["'`]/.test(line) && /^\s*(export\s+)?(const|let)\s|:\s*["'`]/.test(line);
     if (literalPath || pathConstant) hits.push(line.trim().slice(0, 80));
   }
   return hits;

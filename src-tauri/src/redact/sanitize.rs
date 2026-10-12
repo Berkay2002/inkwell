@@ -104,6 +104,10 @@ fn pages(doc: &PdfDocument) -> Result<Vec<PdfObject>> {
 pub fn sanitize(doc: &mut PdfDocument, o: &Sanitize, needles: &[String]) -> Result<SanitizeReport> {
     let res: Vec<Regex> = needles.iter().map(|n| Regex::new(&needle_regex(n))).collect::<std::result::Result<_, _>>()?;
     let mut r = SanitizeReport::default();
+    // Our own search index is a copy of the text, comments and bookmarks as they were, and it is compressed, so
+    // neither the byte check nor the options see it: it goes whatever the options (the metadata switch removes
+    // /PieceInfo only when it is on).
+    r.metadata += u32::from(crate::search::catalog::embed::drop_index(doc)?);
     let mut cat = doc.catalog()?;
 
     if o.hidden_layers {

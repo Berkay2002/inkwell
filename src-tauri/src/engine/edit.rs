@@ -186,6 +186,9 @@ struct Step {
     /// The snapshot is the file exactly as a save must write it (the redaction engine's verified
     /// bytes): saving this step writes them as they are, not a rewrite of them.
     exact: bool,
+    /// The bytes hold a digital signature: later saves append to them (a page deletion no longer
+    /// forces a rewrite, which would break every signature).
+    signed: bool,
     sizes: Arc<Vec<[f32; 2]>>,
 }
 
@@ -197,6 +200,10 @@ pub struct Editor {
     cur: usize,
     /// The step whose content is in the file on disk.
     saved: Option<usize>,
+    /// Why the file takes no edit: a signed file that MuPDF had to repair is held as a rewritten copy, so any save
+    /// of an edit would break its signatures with no warning (also when whether it is signed cannot be read).
+    /// Save as another file writes the copy, and the copy is edited from then on.
+    refuse: Option<&'static str>,
 }
 
 /// What a save wrote, for the version history.
@@ -228,6 +235,16 @@ static REDACTION_HOOK: parking_lot::Mutex<Option<RedactionHook>> = parking_lot::
 /// store can purge what it kept from before it.
 pub fn set_redaction_hook(hook: impl Fn(DocId) + Send + Sync + 'static) {
     *REDACTION_HOOK.lock() = Some(Arc::new(hook));
+}
+
+/// Why a damaged signed file can't be changed.
+pub const DAMAGED_SIGNED: &str =
+    "this signed file is damaged, and changing it would break its signatures, so Inkwell leaves it as it is";
+
+/// SigFlags' SignaturesExist, a certification, or a signature field with a value: the form's field
+/// tree only, so a document with many annotations is not loaded page by page to answer.
+fn has_signatures(doc: &PdfDocument) -> bool {
+    crate::outline::signed(doc)
 }
 
 fn now_ms() -> u64 {
@@ -272,8 +289,10 @@ fn page_sizes(doc: &PdfDocument) -> Result<Vec<[f32; 2]>> {
     (0..n).map(|p| page_size(doc, p as u32)).collect()
 }
 
+/// From the page dictionary: `load_page` also loads the page's annotations and links, which is
+/// what made a document with many of them slow to size page by page.
 pub(crate) fn page_size(doc: &PdfDocument, p: u32) -> Result<[f32; 2]> {
-    let b = doc.load_page(p as i32)?.bounds()?;
+    let b = doc.pdf_page_bounds(p as i32)?;
     Ok([b.width(), b.height()])
 }
 
@@ -291,16 +310,31 @@ fn check_pages(pages: &[u32], count: usize) -> Result<Vec<u32>> {
 
 impl Editor {
     fn open(entry: &DocEntry) -> Result<Editor> {
-        let bytes = std::fs::read(entry.path()).map_err(io)?;
+        Self::from_bytes(entry, std::fs::read(entry.path()).map_err(io)?)
+    }
+
+    fn from_bytes(entry: &DocEntry, bytes: Vec<u8>) -> Result<Editor> {
         let mut snap = Snap { len: bytes.len(), bytes: Arc::new(bytes) };
         let mut doc = open_snap(&snap, entry)?;
+        let mut refuse = None;
         // A file MuPDF had to repair takes no incremental updates: start from a clean copy of it.
+        // Not a signed one (or one whose signatures can't be read): it is held as it is, so its signatures are
+        // checked against the bytes on disk, and edits are refused (see `refuse` and `snapshot`).
         if !doc.doc.can_be_saved_incrementally() {
-            let out = write_doc(&doc.doc, PdfWriteOptions::default(), snap.len)?;
-            snap = Snap { len: out.len(), bytes: Arc::new(out) };
-            doc = open_snap(&snap, entry)?;
+            refuse = match crate::outline::signed_inner(&doc.doc) {
+                Ok(true) => Some("This signed file was damaged and had to be repaired; save a copy to edit it. The copy is a full rewrite, so its signatures will read as invalid."),
+                Ok(false) => None,
+                // Fails closed, as `signed` does, but says what is unknown.
+                Err(_) => Some("This file was damaged and had to be repaired, and whether it is signed could not be read; save a copy to edit it. If it is signed, the copy is a full rewrite and its signatures will read as invalid."),
+            };
+            if refuse.is_none() {
+                let out = write_doc(&doc.doc, PdfWriteOptions::default(), snap.len)?;
+                snap = Snap { len: out.len(), bytes: Arc::new(out) };
+                doc = open_snap(&snap, entry)?;
+            }
         }
         let sizes = Arc::new(page_sizes(&doc.doc)?);
+        let signed = has_signatures(&doc.doc);
         let base = Step {
             snap,
             label: "Opened".into(),
@@ -311,9 +345,15 @@ impl Editor {
             redacts: false,
             security: None,
             exact: false,
+            signed,
             sizes,
         };
-        Ok(Editor { doc, steps: vec![base], cur: 0, saved: Some(0) })
+        Ok(Editor { doc, steps: vec![base], cur: 0, saved: Some(0), refuse })
+    }
+
+    /// An edit of a signed file that was repaired on open is refused before anything is written.
+    fn refuse_if_repaired_signed(&self) -> Result<()> {
+        self.refuse.map_or(Ok(()), |m| Err(invalid(m)))
     }
 
     fn step(&self) -> &Step {
@@ -328,6 +368,9 @@ impl Editor {
 
     /// The edited document as an incremental update of the current step.
     fn snapshot(&self) -> Result<Snap> {
+        if !self.doc.doc.can_be_saved_incrementally() {
+            return Err(invalid(DAMAGED_SIGNED));
+        }
         let mut opts = PdfWriteOptions::default();
         opts.set_incremental(true);
         let out = write_doc(&self.doc.doc, opts, self.step().snap.len + (64 << 10))?;
@@ -483,6 +526,10 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
             if let Some(labels) = &labels {
                 let _ = crate::organize::labels::after_delete(doc, labels, &pages, n as u32);
             }
+            // Article beads on the deleted pages are unlinked in the same step. As with the labels, a failure
+            // here never undoes the delete: the beads then point at a page that is gone, and the article is
+            // listed as damaged (Delete and Properties still work on it).
+            let _ = crate::organize::threads::after_delete(doc);
             let out = (0..n as u32).filter(|p| pages.binary_search(p).is_err()).map(|p| sizes[p as usize]).collect();
             Ok(Some((out, true)))
         }
@@ -565,18 +612,38 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
     }
 }
 
+/// Unlocks `d` with a password the person typed: as typed, then in its SASLprep-mapped NFKC form
+/// ([`protect::nfkc_form`]). MuPDF does no SASLprep and the writer (Protect) puts passwords in NFKC, so one
+/// typed decomposed, full-width or with a non-ASCII space opens the file under that form. `Ok(false)`: neither opens it.
+pub(crate) fn authenticate_typed(d: &mut Document, pw: &str) -> Result<bool> {
+    if d.authenticate(pw)? {
+        return Ok(true);
+    }
+    match protect::nfkc_form(pw) {
+        Some(n) => Ok(d.authenticate(&n)?),
+        None => Ok(false),
+    }
+}
+
 /// Another PDF to take pages from.
 pub(crate) fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocument> {
+    open_source_ex(path, password).map(|(d, _)| d)
+}
+
+/// [`open_source`] that also says whether the file asked for an open password (an owner-password-only
+/// file opens without one).
+pub(crate) fn open_source_ex(path: &str, password: Option<&str>) -> Result<(PdfDocument, bool)> {
     check_pdf(path)?;
     let mut d = Document::open(path)?;
-    if d.needs_password()? {
+    let locked = d.needs_password()?;
+    if locked {
         match password {
             None => return Err(EngineError::NeedsPassword),
-            Some(pw) if !d.authenticate(pw)? => return Err(EngineError::BadPassword),
+            Some(pw) if !authenticate_typed(&mut d, pw)? => return Err(EngineError::BadPassword),
             _ => {}
         }
     }
-    Ok(PdfDocument::try_from(d)?)
+    Ok((PdfDocument::try_from(d)?, locked))
 }
 
 /// Page keys copied into a grafted page (MuPDF's list): nothing that points at other pages.
@@ -685,7 +752,7 @@ pub(crate) fn graft_pages_ex(dst: &mut PdfDocument, src: &PdfDocument, pages: &[
         made.push((from, page));
     }
     // Pass 2: their annotations.
-    let mut g = Graft { src, pages, made: &made, fields: Default::default(), names: None, defaults_done: false };
+    let mut g = Graft { src, pages, made: &made, fields: Default::default(), chain: Vec::new(), names: None, defaults_done: false };
     for (from, page) in &made {
         if let Some(annots) = from.get_dict("Annots")? {
             let copied = g.annots(dst, &mut map, &annots, page)?;
@@ -698,6 +765,21 @@ pub(crate) fn graft_pages_ex(dst: &mut PdfDocument, src: &PdfDocument, pages: &[
     Ok(Grafted { pages: made.iter().map(|(_, p)| p.clone()).collect(), outline })
 }
 
+/// A signature field arrives empty: its value (and the appearance that shows it) would never verify in a
+/// file that is not the one that was signed, and a signature that cannot verify looks like tampering.
+/// `field` is the source object (its /FT may be inherited), `copy` the dictionary about to be grafted.
+fn drop_signature(field: &PdfObject, copy: &mut PdfObject) -> Result<()> {
+    // A /Parent loop in a broken field tree makes the lookup fail; that was tolerated before, so it is no signature.
+    let sig = name_of(field.get_dict_inheritable("FT").ok().flatten()) == b"Sig";
+    // The value may sit on a parent field while the widget kid only has the appearance that shows it.
+    let valued = field.get_dict_inheritable("V").ok().flatten().is_some_and(|v| !v.is_null().unwrap_or(true));
+    if sig && valued {
+        copy.dict_delete("V")?;
+        copy.dict_delete("AP")?;
+    }
+    Ok(())
+}
+
 /// State of one [`graft_pages`] call's annotation pass.
 struct Graft<'a> {
     src: &'a PdfDocument,
@@ -706,11 +788,21 @@ struct Graft<'a> {
     made: &'a [(PdfObject, PdfObject)],
     /// Source field object number to its copy in `dst`.
     fields: std::collections::HashMap<i32, PdfObject>,
+    /// Source field object numbers whose parents are being copied now, the widget first: a /Parent that
+    /// points back into it closes a loop.
+    chain: Vec<i32>,
     /// Names of `dst`'s root fields, loaded with the first field copied.
     names: Option<std::collections::HashSet<String>>,
     /// The source form's /DA and /DR were carried over already.
     defaults_done: bool,
 }
+
+/// How many parent fields are copied above one widget: a field tree is a few levels deep, and a chain far
+/// past that (or one a loop makes endless) would recurse as deep as the file allows. The field at the cap is a root.
+/// The count starts at each widget, so a tree deeper than the cap is cut into several roots, and below the cut
+/// a field loses the inherited /FT, /Ff, /V, /DA and the like, and its full name, of the ancestors left behind
+/// (hostile files only).
+const MAX_FIELD_DEPTH: usize = 64;
 
 /// Keys never grafted as they are: they point back into the source's page or field tree.
 const BACK_REFS: [&str; 7] = ["P", "Popup", "Parent", "IRT", "Kids", "A", "AA"];
@@ -772,6 +864,9 @@ impl Graft<'_> {
                 c.dict_delete(k)?;
             }
             c.dict_delete("Dest")?;
+            if sub == b"Widget" {
+                drop_signature(&a, &mut c)?;
+            }
             let mut copy = map.graft_object(&c)?;
             if let Some(d) = dest {
                 copy.dict_put("Dest", d)?;
@@ -831,14 +926,23 @@ impl Graft<'_> {
         if num != 0 {
             self.fields.insert(num, copy.clone());
         }
-        match w.get_dict("Parent")? {
-            Some(p) if p.is_indirect()? => {
-                let parent = self.parent(dst, map, p.as_indirect()?)?;
-                link_kid(&parent, copy)?;
-            }
-            _ => self.add_root(dst, map, copy)?,
+        self.chain.push(num);
+        let up = self.up(dst, map, w);
+        self.chain.pop();
+        match up? {
+            Some(parent) => link_kid(&parent, copy)?,
+            None => self.add_root(dst, map, copy)?,
         }
         Ok(())
+    }
+
+    /// The copy of `f`'s /Parent field. None when it has none, when that /Parent closes a loop in a broken
+    /// field tree, or when the chain is past `MAX_FIELD_DEPTH`: `f` is then a root field of its own.
+    fn up(&mut self, dst: &mut PdfDocument, map: &mut PdfGraftMap, f: &PdfObject) -> Result<Option<PdfObject>> {
+        match f.get_dict("Parent")? {
+            Some(p) if p.is_indirect()? && self.chain.len() <= MAX_FIELD_DEPTH && !self.chain.contains(&p.as_indirect()?) => Ok(Some(self.parent(dst, map, p.as_indirect()?)?)),
+            _ => Ok(None),
+        }
     }
 
     /// The copy of source field `num` (made with its own parents when first needed).
@@ -852,18 +956,17 @@ impl Graft<'_> {
         for k in BACK_REFS {
             c.dict_delete(k)?;
         }
+        drop_signature(&f, &mut c)?;
         let mut copy = map.graft_object(&c)?;
         copy.dict_put("Kids", dst.new_array()?)?;
         let r = dst.add_object(&copy)?;
         self.fields.insert(num, r.clone());
-        match f.get_dict("Parent")? {
-            // A loop in a broken field tree ends at the field already copied.
-            Some(p) if p.is_indirect()? && !self.fields.contains_key(&p.as_indirect()?) => {
-                let up = self.parent(dst, map, p.as_indirect()?)?;
-                link_kid(&up, &r)?;
-            }
-            Some(p) if p.is_indirect()? => link_kid(&self.fields[&p.as_indirect()?].clone(), &r)?,
-            _ => self.add_root(dst, map, &r)?,
+        self.chain.push(num);
+        let up = self.up(dst, map, &f);
+        self.chain.pop();
+        match up? {
+            Some(up) => link_kid(&up, &r)?,
+            None => self.add_root(dst, map, &r)?,
         }
         Ok(r)
     }
@@ -1169,7 +1272,10 @@ pub(crate) fn write_new(target: &Path, bytes: &[u8], pages: u32) -> Result<()> {
     })
 }
 
-fn same_path(a: &str, b: &str) -> bool {
+/// Why a "Save as" that would be a plain save is refused.
+pub(crate) const OWN_FILE: &str = "That is this document's own file. Choose another name, or convert in this document and Save.";
+
+pub(crate) fn same_path(a: &str, b: &str) -> bool {
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p.to_lowercase()));
     a.eq_ignore_ascii_case(b) || canon(a) == canon(b)
 }
@@ -1229,12 +1335,23 @@ impl Engine {
     }
 
     fn apply_locked(&self, entry: &DocEntry, ed: &mut Editor, op: &EditOp, source: EditSource) -> Result<EditState> {
+        ed.refuse_if_repaired_signed()?;
+        // Every page operation changes the page tree: a certification does not survive one, at any /P.
+        crate::outline::refuse_if_certified(&ed.doc.doc, "Changing its pages")?;
         let sizes = ed.step().sizes.clone();
+        // Read before the edit runs: it may be the one that takes the signature away.
+        let signed = crate::outline::signed(&ed.doc.doc);
         // A panic must also roll back below, or the next edit would snapshot what it left behind.
         let ran = catch_unwind(AssertUnwindSafe(|| run(&mut ed.doc.doc, op, &sizes))).unwrap_or(Err(EngineError::Panic));
         let changed = ran.and_then(|c| match c {
             None => Ok(None),
             Some((after, drops)) => {
+                // Deleted pages are not left in the embedded search index either.
+                if drops {
+                    crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
+                }
+                // A signed document's save stays incremental: a deleted page stays in the file, unused.
+                let drops = drops && !signed;
                 let snap = ed.snapshot()?;
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
@@ -1248,6 +1365,7 @@ impl Engine {
                     redacts: false,
                     security: None,
                     exact: false,
+                    signed: false,
                     sizes: Arc::new(after),
                 };
                 Ok(Some((step, doc)))
@@ -1299,7 +1417,7 @@ impl Engine {
         redaction: bool,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, redaction, false, None, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, redaction, false, false, None, |d| Ok((f(d)?, None)))
     }
 
     /// [`Engine::apply_custom`] for an edit that may turn out to change nothing: `f` returns the pages
@@ -1314,7 +1432,7 @@ impl Engine {
         f: impl FnOnce(&mut PdfDocument) -> Result<Option<Vec<u32>>>,
     ) -> Result<EditState> {
         let unchanged = std::cell::Cell::new(false);
-        self.custom(id, label, source, false, removes, Some(&unchanged), |d| match f(d)? {
+        self.custom(id, label, source, false, removes, false, Some(&unchanged), |d| match f(d)? {
             Some(pages) => Ok((pages, None)),
             None => {
                 unchanged.set(true);
@@ -1333,7 +1451,21 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, false, true, None, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, false, true, false, None, |d| Ok((f(d)?, None)))
+    }
+
+    /// [`Engine::apply_removing`] for an edit that takes document-level information out (the
+    /// metadata, `/Info`, the XMP): the step's snapshot is a full garbage-collected rewrite, since an
+    /// incremental update of the file still shows what the new trailer no longer names. It is not a
+    /// redaction: nothing is verified and the document is not marked redacted.
+    pub fn apply_sanitizing(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
+    ) -> Result<EditState> {
+        self.custom(id, label, source, false, true, true, None, |d| Ok((f(d)?, None)))
     }
 
     /// A redaction whose result is a finished file: `f` changes the document and returns the
@@ -1347,7 +1479,49 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Vec<u8>)>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, true, false, None, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
+        self.custom(id, label, source, true, false, false, None, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
+    }
+
+    /// [`Engine::apply_custom`] and then a save as `to`, under one guard: no other edit, undo or save (an
+    /// assistant turn included) can land between the step and the file. The target must not be the document's
+    /// own file (checked under the guard). The step stands when the save fails: the second result is the
+    /// save's, and the first is the document as it is after the step.
+    pub fn apply_custom_and_save(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        to: &str,
+        f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
+    ) -> Result<(EditState, Result<(EditState, Option<Saved>)>)> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        if same_path(to, &entry.path()) {
+            return Err(EngineError::Invalid(OWN_FILE.into()));
+        }
+        let state = self.custom_locked(&entry, &mut lane, label, source, false, false, false, None, |d| Ok((f(d)?, None)))?;
+        let saved = self.save_locked(id, &entry, &mut lane, Some(to));
+        Ok((state, saved))
+    }
+
+    /// Save as another file: [`Engine::save_recorded`] with the own-file check made under the same guard, so the
+    /// target cannot become the document's own file between the check and the write.
+    pub fn save_as_other(&self, id: DocId, to: &str) -> Result<(EditState, Option<Saved>)> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        if same_path(to, &entry.path()) {
+            return Err(EngineError::Invalid(OWN_FILE.into()));
+        }
+        self.save_locked(id, &entry, &mut lane, Some(to))
+    }
+
+    /// Why every edit of this document is refused before anything is written (a signed file that had to be
+    /// repaired on open), if it is: asked before the assistant shows its card.
+    pub fn edit_refusal(&self, id: DocId) -> Result<Option<&'static str>> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        Ok(ed.refuse)
     }
 
     /// Runs `f` on the authoritative document (marks included) without changing it. `f` must not
@@ -1359,6 +1533,16 @@ impl Engine {
         catch_unwind(AssertUnwindSafe(|| f(&ed.doc.doc))).unwrap_or(Err(EngineError::Panic))
     }
 
+    /// [`Engine::read_custom`] with the bytes of the current state as well (what Save would
+    /// write, unless a rewrite is due): signature validation reads both.
+    pub fn read_with_bytes<R>(&self, id: DocId, f: impl FnOnce(&PdfDocument, &[u8]) -> Result<R>) -> Result<R> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        let bytes = ed.bytes();
+        catch_unwind(AssertUnwindSafe(|| f(&ed.doc.doc, bytes))).unwrap_or(Err(EngineError::Panic))
+    }
+
     fn custom(
         &self,
         id: DocId,
@@ -1366,50 +1550,134 @@ impl Engine {
         source: EditSource,
         redaction: bool,
         removes: bool,
+        full: bool,
         unchanged: Option<&std::cell::Cell<bool>>,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
     ) -> Result<EditState> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
-        let ed = self.lane(&entry, &mut lane)?;
+        let state = self.custom_locked(&entry, &mut lane, label, source, redaction, removes, full, unchanged, f)?;
+        drop(lane);
+        if redaction {
+            if let Some(hook) = REDACTION_HOOK.lock().clone() {
+                hook(id);
+            }
+        }
+        Ok(state)
+    }
+
+    /// [`Engine::custom`] with the edit lane held by the caller (the redaction hook is the caller's to run).
+    #[allow(clippy::too_many_arguments)]
+    fn custom_locked(
+        &self,
+        entry: &DocEntry,
+        lane: &mut Option<Editor>,
+        label: String,
+        source: EditSource,
+        redaction: bool,
+        removes: bool,
+        full: bool,
+        unchanged: Option<&std::cell::Cell<bool>>,
+        f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
+    ) -> Result<EditState> {
+        let ed = self.lane(entry, lane)?;
+        ed.refuse_if_repaired_signed()?;
         let len = ed.step().snap.len;
-        let ran = catch_unwind(AssertUnwindSafe(|| f(&mut ed.doc.doc))).unwrap_or(Err(EngineError::Panic));
+        let page_count = ed.step().sizes.len();
+        // Read before the edit runs: it may be the one that takes the signature away.
+        let signed = crate::outline::signed(&ed.doc.doc);
+        let ran = catch_unwind(AssertUnwindSafe(|| {
+            let out = f(&mut ed.doc.doc)?;
+            // An edit that takes content out (pages included, as `drops` below sees them) must not leave it
+            // in the embedded search index.
+            let fewer = ed.doc.doc.page_count().is_ok_and(|n| (n.max(0) as usize) < page_count);
+            if (removes || redaction || fewer) && !unchanged.is_some_and(std::cell::Cell::get) {
+                crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
+            }
+            Ok(out)
+        }))
+        .unwrap_or(Err(EngineError::Panic));
         if ran.is_ok() && unchanged.is_some_and(std::cell::Cell::get) {
-            return Ok(ed.state(&entry));
+            // The edit said it changed nothing. Whatever it wrote before swallowing an error of its own would
+            // ride into the next step and the next save, so a document that holds writes is reopened.
+            if ed.doc.doc.has_unsaved_changes() {
+                ed.doc = open_snap(&ed.step().snap, entry)?;
+            }
+            return Ok(ed.state(entry));
         }
         let changed = ran.and_then(|(pages, bytes)| {
             let exact = bytes.is_some();
             let snap = if let Some(b) = bytes {
                 Snap { len: b.len(), bytes: Arc::new(b) }
-            } else if redaction {
+            } else if redaction || full {
                 let out = write_doc(&ed.doc.doc, rewrite_opts(), len)?;
                 Snap { len: out.len(), bytes: Arc::new(out) }
             } else {
                 ed.snapshot()?
             };
-            let doc = open_snap(&snap, &entry)?;
+            let doc = open_snap(&snap, entry)?;
             let sizes = Arc::new(page_sizes(&doc.doc)?);
-            let drops = removes || sizes.len() < ed.step().sizes.len();
-            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, sizes }, doc))
+            // Content taken out makes the save a full rewrite, which would void a signature: a signed document's
+            // stays incremental (the removed objects stay in the file, unused, as in outline and links).
+            let drops = (removes || sizes.len() < ed.step().sizes.len()) && !signed;
+            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, signed: false, sizes }, doc))
         });
         match changed {
             Ok((step, doc)) => {
                 ed.push(step);
                 ed.doc = doc;
-                let state = self.publish(&entry, ed);
-                drop(lane);
-                if redaction {
-                    if let Some(hook) = REDACTION_HOOK.lock().clone() {
-                        hook(id);
-                    }
-                }
-                Ok(state)
+                Ok(self.publish(entry, ed))
             }
             Err(e) => {
-                ed.doc = open_snap(&ed.step().snap, &entry)?;
+                ed.doc = open_snap(&ed.step().snap, entry)?;
                 Err(e)
             }
         }
+    }
+
+    /// A digital signature: `f` gets the bytes Save would write now and returns them with a
+    /// signed incremental update appended. That file becomes one undo step that a save writes
+    /// exactly (earlier signatures stay valid). Refused while an unsaved step would make Save
+    /// rewrite the file (deleted pages, redactions): those must be saved first.
+    pub fn apply_signature(&self, id: DocId, label: String, f: impl FnOnce(&[u8]) -> Result<Vec<u8>>) -> Result<EditState> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        // A file that was repaired on open is held as it is on disk, but MuPDF reads a repaired copy: signing would write that copy (and break
+        // any signature the original had). Save a copy first.
+        ed.refuse_if_repaired_signed()?;
+        if !ed.doc.doc.can_be_saved_incrementally() {
+            return Err(invalid(DAMAGED_SIGNED));
+        }
+        // Security is written by a full rewrite (which would drop the signature), and an update
+        // appended to an encrypted file would need its strings encrypted too.
+        if ed.security_info(&entry)?.encrypted {
+            return Err(invalid("Inkwell can't sign a password-protected file yet. Remove its security, save, and reopen it first."));
+        }
+        if ed.security().is_some() {
+            return Err(invalid("The security of this document changed in this session. Save it, then close and reopen it before signing."));
+        }
+        let after = ed.steps[..=ed.cur].iter().rposition(|s| s.exact).map_or(0, |i| i + 1);
+        let signed = ed.steps[..=ed.cur].iter().any(|s| s.signed);
+        // Signs exactly what Save would write: with removed pages or redactions pending, the
+        // rewritten file, so nothing they took out survives in the signed bytes.
+        let full;
+        let base: &[u8] = if !ed.step().exact && ed.steps[after..=ed.cur].iter().any(|s| s.redacts || (s.drops && !signed)) {
+            full = write_doc(&open_snap(&ed.step().snap, &entry)?.doc, rewrite_opts(), ed.step().snap.len)?;
+            &full
+        } else {
+            ed.bytes()
+        };
+        let out = catch_unwind(AssertUnwindSafe(|| f(base))).unwrap_or(Err(EngineError::Panic))?;
+        if out.len() <= base.len() || out[..base.len()] != *base {
+            return Err(invalid("the signed file does not extend the document"));
+        }
+        let snap = Snap { len: out.len(), bytes: Arc::new(out) };
+        let doc = open_snap(&snap, &entry)?;
+        let sizes = Arc::new(page_sizes(&doc.doc)?);
+        ed.push(Step { snap, label, source: EditSource::User, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, security: None, exact: true, signed: true, sizes });
+        ed.doc = doc;
+        Ok(self.publish(&entry, ed))
     }
 
     /// Drops every history entry before the current one (e.g. the versions from before a
@@ -1437,12 +1705,19 @@ impl Engine {
     /// Reverts the last step (or the last assistant turn). A no-op (returning the state) when
     /// there is nothing to undo.
     pub fn undo(&self, id: DocId) -> Result<EditState> {
-        self.travel(id, |ed| ed.undo_target())
+        self.travel(id, None, |ed| ed.undo_target())
+    }
+
+    /// [`Engine::undo`] only while the document is still at generation `rev` (the one a step just made): checked
+    /// under the lane lock, so a step that landed since (an assistant edit, an undo and redo) is never undone in
+    /// its place. `Err(Stale)` then, and nothing changes.
+    pub fn undo_if(&self, id: DocId, rev: u32) -> Result<EditState> {
+        self.travel(id, Some(rev), |ed| ed.undo_target())
     }
 
     /// Reapplies what was undone last. A no-op when there is nothing to redo.
     pub fn redo(&self, id: DocId) -> Result<EditState> {
-        self.travel(id, |ed| ed.redo_target())
+        self.travel(id, None, |ed| ed.redo_target())
     }
 
     /// Shows the document as of history entry `index` (undo or redo up to it). Later entries
@@ -1450,7 +1725,7 @@ impl Engine {
     pub fn restore(&self, id: DocId, index: usize) -> Result<EditState> {
         // Checked under the lane lock: an edit in between may have dropped the entry.
         let mut bad = index > 0;
-        let state = self.travel(id, |ed| {
+        let state = self.travel(id, None, |ed| {
             bad = index >= ed.steps.len();
             Some(index).filter(|_| !bad)
         })?;
@@ -1484,11 +1759,20 @@ impl Engine {
             .collect())
     }
 
-    fn travel(&self, id: DocId, target: impl FnOnce(&Editor) -> Option<usize>) -> Result<EditState> {
+    fn travel(&self, id: DocId, only_at: Option<u32>, target: impl FnOnce(&Editor) -> Option<usize>) -> Result<EditState> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
-        let Some(ed) = lane.as_mut() else { return Ok(clean_state(&entry)) };
-        let Some(to) = target(ed).filter(|&t| t != ed.cur) else { return Ok(ed.state(&entry)) };
+        // The generation only moves under this lock (`publish`), so this cannot change before the step is taken.
+        if only_at.is_some_and(|rev| entry.layout.read().rev != rev) {
+            return Err(EngineError::Stale);
+        }
+        // A conditional undo that finds nothing to undo did not undo: the caller must not think it did.
+        let nothing = |entry: &DocEntry, ed: Option<&Editor>| match only_at {
+            Some(_) => Err(EngineError::Stale),
+            None => Ok(ed.map_or_else(|| clean_state(entry), |ed| ed.state(entry))),
+        };
+        let Some(ed) = lane.as_mut() else { return nothing(&entry, None) };
+        let Some(to) = target(ed).filter(|&t| t != ed.cur) else { return nothing(&entry, Some(ed)) };
         ed.doc = open_snap(&ed.steps[to].snap, &entry)?;
         ed.cur = to;
         Ok(self.publish(&entry, ed))
@@ -1498,6 +1782,14 @@ impl Engine {
         let entry = self.entry(id)?;
         let lane = entry.editor.lock();
         Ok(lane.as_ref().map_or_else(|| clean_state(&entry), |ed| ed.state(&entry)))
+    }
+
+    /// The file as Save would write it now, with every step applied (signatures are validated
+    /// against these bytes). A rewrite pending from deleted pages or redactions is not applied.
+    pub fn current_bytes(&self, id: DocId) -> Result<Vec<u8>> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        Ok(self.lane(&entry, &mut lane)?.bytes().to_vec())
     }
 
     /// What Save would write for the current content, `None` when there are no unsaved edits
@@ -1570,11 +1862,19 @@ impl Engine {
         }
         let ed = self.lane(entry, lane)?;
         let secured = ed.security().is_some();
-        let rewrite = secured || ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
+        // An exact step's bytes already hold everything before it; once signed, only a redaction
+        // or new security rewrites (and so invalidates the signatures).
+        let after = ed.steps[..=ed.cur].iter().rposition(|s| s.exact).map_or(0, |i| i + 1);
+        let signed = ed.steps[..=ed.cur].iter().any(|s| s.signed);
+        let rewrite = secured || ed.steps[after..=ed.cur].iter().any(|s| s.redacts || (s.drops && !signed));
         let full;
         // Security wins over a redaction's exact bytes: they could not carry the new encryption, and
         // a rewrite of verified-clean content only ever drops objects, it adds none.
-        let bytes: &[u8] = if ed.step().exact && !secured {
+        let bytes: &[u8] = if ed.refuse.is_some() && !same {
+            // A copy of a repaired file that is held as it is (signed): the repaired file, from a throwaway copy.
+            full = write_doc(&open_snap(&ed.step().snap, entry)?.doc, PdfWriteOptions::default(), ed.step().snap.len)?;
+            &full
+        } else if ed.step().exact && !secured {
             // The redaction engine's verified file: any other write of it is unverified.
             ed.bytes()
         } else if rewrite {
@@ -1610,6 +1910,14 @@ impl Engine {
         let saved = Saved { bytes: bytes.to_vec(), summary, pages, redacts, moved: !same };
         if !same {
             *entry.path.write() = target;
+            // The copy is the document now: it is edited like any file (the original's signatures are not its own).
+            // It starts again from the clean copy, which takes incremental updates (if it didn't, it stays refused).
+            // The file is saved either way: if the copy can't be reopened, this editor stays and stays refused.
+            if ed.refuse.is_some() {
+                if let Ok(copy) = Editor::from_bytes(entry, saved.bytes.clone()) {
+                    *ed = copy;
+                }
+            }
         }
         ed.saved = Some(ed.cur);
         *entry.file_password.lock() = match ed.security() {
@@ -1638,6 +1946,10 @@ impl Engine {
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
         ed.ensure_extractable(&entry)?;
+        if delete_after {
+            // Before the file is written: the delete that follows is refused on a certified document.
+            crate::outline::refuse_if_certified(&ed.doc.doc, "Removing the extracted pages")?;
+        }
         let pages = check_pages(pages, ed.step().sizes.len())?;
         let bytes = new_pdf(&[(&ed.doc.doc, &pages)])?;
         write_atomic(Path::new(out), &bytes, pages.len() as u32, Readback::default())?;
@@ -1702,7 +2014,7 @@ impl Engine {
             .collect::<Result<Vec<_>>>()?;
         // The result is a plain file: a source whose owner allows no copying or page changes stays out.
         for (p, s) in paths.iter().zip(&srcs) {
-            if !crate::protect::Rights::from_p(s.permissions().bits() as i32).may_extract() {
+            if !crate::protect::Rights::of(s).may_extract() {
                 return Err(invalid(format!(
                     "{} doesn't allow copying or page changes. Open it with its permissions password and remove its security first.",
                     Path::new(p).file_name().unwrap_or_default().to_string_lossy()
@@ -1726,3 +2038,7 @@ mod security;
 #[cfg(test)]
 #[path = "tests_edit.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_certified.rs"]
+mod tests_certified;

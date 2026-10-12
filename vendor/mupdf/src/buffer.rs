@@ -60,6 +60,31 @@ impl Buffer {
         Self { inner, offset: 0 }
     }
 
+    /// Inkwell: `rows` rows of `columns` pixels (1 bit each, `stride` bytes per row, 1 = white) as
+    /// CCITT Group 4 data, for a `/CCITTFaxDecode` stream with `/K -1` (and `/BlackIs1 false`).
+    pub fn ccitt_g4(data: &[u8], columns: u32, rows: u32, stride: usize) -> Result<Vec<u8>, Error> {
+        use std::io::Read;
+        let need = stride
+            .checked_mul(rows as usize)
+            .filter(|n| *n <= data.len() && stride * 8 >= columns as usize);
+        if need.is_none() || columns == 0 || rows == 0 {
+            return Err(Error::UnexpectedNullPtr);
+        }
+        let inner = unsafe {
+            ffi_try!(mupdf_buffer_ccitt_g4(
+                context(),
+                data.as_ptr(),
+                columns as i32,
+                rows as i32,
+                stride
+            ))
+        }?;
+        let mut buf = unsafe { Self::from_raw(inner) };
+        let mut out = Vec::with_capacity(buf.len());
+        buf.read_to_end(&mut out)?;
+        Ok(out)
+    }
+
     pub fn len(&self) -> usize {
         unsafe { fz_buffer_storage(context(), self.inner, ptr::null_mut()) }
     }

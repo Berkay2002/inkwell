@@ -11,6 +11,15 @@ From the phase 1 pre-merge review. The viewer keeps up to `DOC_SLOTS=4` read-onl
 4. Page organize changes `page_count` and `sizes`: swap them atomically with the generation; page indices belong to one generation.
 5. Save = write from the authoritative doc to a temp file, release every replica/display list on the old file (see `close()`), then rename over the original.
 
+## Certified and signed documents
+
+- Every edit that writes the document starts its closure with `outline::refuse_if_certified(d, what)` (page and content
+  changes) or `outline::refuse_unless_annotating_allowed(d, what)` (comments and measurements, which `/P` 3 allows), so a
+  refused edit records no step. `engine/tests_certified.rs` runs every write path against a certified and a signed fixture.
+- A signed document stays incremental: `apply_removing` and page deletes do not turn the save into a rewrite
+  (`Step.drops` is false). Whether it is signed is read before the edit runs. Content added and then removed in the
+  same session therefore stays in the saved bytes, unused; the signed warnings say so.
+
 ## File paths: tokens only (`src-tauri/src/paths.rs`)
 
 The webview never hands Rust a path. Every command that reads or writes a file takes a token; Rust is the only source of paths.

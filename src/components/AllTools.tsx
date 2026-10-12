@@ -1,5 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { commands, prettyKeys } from "../lib/commands";
+import { usePortfolio } from "../lib/portfolioStore";
 import { useToolPrefs } from "../lib/toolPrefs";
 import { toolItems, runTool } from "../lib/toolItems";
 import { type ToolItem, MAX_PINNED, filterTools, pick } from "../lib/toolsCatalog";
@@ -15,7 +16,9 @@ const CARD_DELAY = 600;
 
 /** The tools for `doc`, rebuilt only when the document changes. */
 export function useToolItems(doc: Pick<DocState, "id" | "name">): ToolItem[] {
-  return useMemo(() => toolItems(doc), [doc.id, doc.name]);
+  // a PDF Portfolio also gets its "Portfolio files" tool
+  const portfolio = usePortfolio((s) => s.docs[doc.id]?.info != null);
+  return useMemo(() => toolItems(doc, portfolio), [doc.id, doc.name, portfolio]);
 }
 
 const shortcutOf = (it: ToolItem): string | null => {
@@ -54,7 +57,9 @@ export function PinnedTools({ doc }: { doc: DocState }) {
   const items = pick(all, pinned);
   // ids that are not tools any more (renamed, removed) go, so they cannot hold a pin slot
   const recent = useToolPrefs((s) => s.recent);
-  useEffect(() => useToolPrefs.getState().prune(all.map((i) => i.id)), [all, pinned, recent]);
+  // every tool counts as known, the portfolio ones too: a pin on one must survive a plain PDF being active
+  const known = useMemo(() => toolItems(doc, true).map((i) => i.id), [doc.id, doc.name]);
+  useEffect(() => useToolPrefs.getState().prune(known), [known, pinned, recent]);
   if (items.length === 0) return null;
   return (
     <span className="tb-cluster pinned-tools" role="group" aria-label="Pinned tools">
@@ -238,7 +243,7 @@ export function AllToolsPanel({ doc }: { doc: DocState }) {
                         onClick={() =>
                           useToolPrefs.getState().togglePin(
                             it.id,
-                            items.map((i) => i.id),
+                            toolItems(doc, true).map((i) => i.id),
                           )
                         }
                       >

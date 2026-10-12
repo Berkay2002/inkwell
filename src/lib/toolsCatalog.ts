@@ -22,12 +22,17 @@ export interface ToolItem {
 
 /** Header order and titles. Add a group here to give it a place; items may name any id. */
 export const TOOL_GROUPS: { id: string; title: string }[] = [
+  { id: "comment", title: "Comment & measure" },
   { id: "edit", title: "Edit" },
   { id: "optimize", title: "Optimize" },
   { id: "marks", title: "Page marks" },
   { id: "protect", title: "Protect" },
+  { id: "sign", title: "Fill & sign" },
+  { id: "print", title: "Print production" },
+  { id: "scripts", title: "Scripts" },
   { id: "convert", title: "Convert & create" },
   { id: "check", title: "Check & compare" },
+  { id: "automate", title: "Automate" },
 ];
 
 /**
@@ -35,7 +40,7 @@ export const TOOL_GROUPS: { id: string; title: string }[] = [
  * are `TOOL_GROUPS`; the rest are the groups other tools (Edit, comments, Organize, Fill & sign) take, so a tool
  * added there only picks a glyph.
  */
-export const TOOL_HUES = ["optimize", "marks", "protect", "convert", "check", "edit", "comment", "organize", "sign"] as const;
+export const TOOL_HUES = ["optimize", "marks", "protect", "convert", "check", "edit", "comment", "organize", "sign", "print", "scripts", "automate"] as const;
 
 export interface ToolSection {
   id: string;

@@ -299,6 +299,11 @@ impl Page {
         })
     }
 
+    /// Whether the page paints with overprint.
+    pub fn uses_overprint(&self) -> Result<bool, Error> {
+        unsafe { ffi_try!(mupdf_page_uses_overprint(context(), self.as_ptr().cast_mut())) }.map(|v| v != 0)
+    }
+
     pub fn separations(&self) -> Result<Separations, Error> {
         unsafe { ffi_try!(mupdf_page_separations(context(), self.as_ptr().cast_mut())) }
             .map(|inner| unsafe { Separations::from_raw(inner) })

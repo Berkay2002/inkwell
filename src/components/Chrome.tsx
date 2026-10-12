@@ -15,6 +15,7 @@ import { HistoryToggle } from "./history/HistoryPanel";
 import { Icon, type IconName } from "./Icons";
 import { MenuButton } from "./Menu";
 import { CommentsToggle } from "./comments/CommentsPanel";
+import { SignToggle } from "./sign/SignTools";
 import { OptionChips, OptionsMenu } from "./search/FindOptions";
 import { FormsToggle } from "./forms/FormsPanel";
 import { RedactToggle } from "./redact/RedactPanel";
@@ -129,6 +130,7 @@ export function Toolbar({ doc }: { doc: DocState }) {
       <span className="tb-cluster" onClickCapture={leaveOrganize}>
         <Btn icon="search" title={`Find${keys("find")}`} on={searchOpen && !doc.organize} onClick={() => st().setUi({ searchOpen: doc.organize ? true : !searchOpen })} />
         <CommentsToggle />
+        <SignToggle />
         <FormsToggle />
         <RedactToggle />
         <HistoryToggle />

@@ -1,0 +1,618 @@
+//! Comment export and import: every type through XFDF and FDF, absolute coordinates, update by name,
+//! replies, skipped entries, hostile files, certified and signed documents.
+
+use super::*;
+use crate::annot::{AnnotDto, add_one, list_all, reply_one, state_one};
+use crate::engine::fixture::{self, Fixture};
+use crate::outline::tests::{dir, open_bytes, raw_pdf};
+use std::sync::Arc;
+
+fn fresh(test: &str) -> (Arc<Engine>, DocId, String) {
+    let d = dir("xfdf", test);
+    open_bytes(&d, "a.pdf", &fixture::build(&Fixture { pages: 2, lines: 4, ..Default::default() }))
+}
+
+fn every_type() -> Vec<NewAnnot> {
+    let q = |x: f32, y: f32| [x, y, x + 120.0, y, x, y + 14.0, x + 120.0, y + 14.0];
+    vec![
+        NewAnnot::Markup { markup: Kind::Highlight, quads: vec![q(72.0, 100.0)] },
+        NewAnnot::Markup { markup: Kind::Underline, quads: vec![q(72.0, 130.0)] },
+        NewAnnot::Markup { markup: Kind::StrikeOut, quads: vec![q(72.0, 160.0)] },
+        NewAnnot::Markup { markup: Kind::Squiggly, quads: vec![q(72.0, 190.0)] },
+        NewAnnot::Note { at: [400.0, 100.0], text: "Is this the final rent? <5 & \"6\">".into() },
+        NewAnnot::FreeText { rect: [300.0, 300.0, 460.0, 340.0], text: "Check with the landlord".into(), font_size: Some(12.0) },
+        NewAnnot::Ink { strokes: vec![vec![[100.0, 400.0], [120.0, 380.0], [150.0, 410.0]], vec![[160.0, 400.0], [170.0, 420.0]]] },
+        NewAnnot::Shape { shape: Kind::Rectangle, points: vec![[72.0, 450.0], [200.0, 500.0]] },
+        NewAnnot::Shape { shape: Kind::Ellipse, points: vec![[220.0, 450.0], [300.0, 500.0]] },
+        NewAnnot::Shape { shape: Kind::Line, points: vec![[72.0, 530.0], [200.0, 560.0]] },
+        NewAnnot::Shape { shape: Kind::Arrow, points: vec![[220.0, 530.0], [300.0, 560.0]] },
+        NewAnnot::Shape { shape: Kind::Polygon, points: vec![[320.0, 450.0], [400.0, 460.0], [380.0, 520.0]] },
+        NewAnnot::Stamp { name: "Approved".into(), rect: [400.0, 600.0, 520.0, 650.0] },
+    ]
+}
+
+fn add(eng: &Engine, id: DocId, page: u32, what: &NewAnnot) -> i32 {
+    add_one(eng, id, page, what, &Style::default(), "Alex Johnson", EditSource::User).unwrap().1
+}
+
+fn raw_rect(eng: &Engine, id: DocId, page: u32, xref: i32) -> Vec<f32> {
+    eng.read_custom(id, |d| {
+        let (_p, a) = find(d, page, xref)?;
+        Ok(floats(&a.object().get_dict("Rect")?.expect("/Rect"), 8, &Budget::new()))
+    })
+    .unwrap()
+}
+
+fn close(a: &[f32], b: &[f32], what: &str) {
+    assert_eq!(a.len(), b.len(), "{what}: {a:?} vs {b:?}");
+    for (x, y) in a.iter().zip(b) {
+        assert!((x - y).abs() < 1.5, "{what}: {a:?} vs {b:?}");
+    }
+}
+
+fn same(a: &AnnotDto, b: &AnnotDto) {
+    let what = format!("{:?}", a.kind);
+    assert_eq!((a.kind, a.page, &a.author, &a.contents, &a.created, &a.modified), (b.kind, b.page, &b.author, &b.contents, &b.created, &b.modified), "{what}");
+    close(&a.rect, &b.rect, &format!("{what} rect"));
+    assert_eq!((a.quads.len(), a.points.len(), a.strokes.len(), &a.icon), (b.quads.len(), b.points.len(), b.strokes.len(), &b.icon), "{what}");
+    for (p, q) in a.points.iter().zip(&b.points) {
+        close(p, q, &format!("{what} point"));
+    }
+    for (p, q) in a.quads.iter().zip(&b.quads) {
+        close(p, q, &format!("{what} quad"));
+    }
+    assert_eq!(a.color.is_some(), b.color.is_some(), "{what} colour");
+}
+
+#[test]
+fn every_comment_type_round_trips_through_xfdf_and_fdf_as_one_undo_step() {
+    for (fmt, ext) in [(Format::Xfdf, "xfdf"), (Format::Fdf, "fdf")] {
+        let (a, ida, _) = fresh(&format!("rt-{ext}-a"));
+        for w in every_type() {
+            add(&a, ida, 0, &w);
+        }
+        let (bytes, done) = export(&a, ida, fmt, "a.pdf").unwrap();
+        assert_eq!((done.count, done.left_out), (13, 0), "{ext}");
+        let want = list_all(&a, ida).unwrap();
+
+        let parsed = parse(&bytes).unwrap();
+        assert_eq!((parsed.items.len(), parsed.unknown, parsed.over), (13, 0, 0), "{ext}");
+        let (b, idb, _) = fresh(&format!("rt-{ext}-b"));
+        let steps = b.history(idb).unwrap().len();
+        let got = import_one(&b, idb, &parsed, EditSource::User).unwrap();
+        assert_eq!((got.summary.added, got.summary.updated, got.signed), (13, 0, false), "{ext}: {:?}", got.summary);
+        assert!(got.summary.skipped.is_empty(), "{ext}: {:?}", got.summary.skipped);
+        assert_eq!(b.history(idb).unwrap().len(), steps + 1, "{ext}: one undo step");
+
+        let have = list_all(&b, idb).unwrap();
+        assert_eq!(have.len(), 13, "{ext}");
+        for (x, y) in want.iter().zip(&have) {
+            same(x, y);
+        }
+        b.undo(idb).unwrap();
+        assert!(list_all(&b, idb).unwrap().is_empty(), "{ext}: undo takes all of them away");
+    }
+}
+
+#[test]
+fn geometry_is_pdf_user_space_in_the_files_and_maps_back_through_the_page() {
+    let (eng, id, _) = fresh("abs");
+    // The DTO is page space (y down): this quad is 72..192 across and 100..114 down, so in user space
+    // of a 792 pt page it is 72..192 and 678..692 (MuPDF pads the /Rect a little around it).
+    let x = add(&eng, id, 0, &NewAnnot::Markup { markup: Kind::Highlight, quads: vec![[72.0, 100.0, 192.0, 100.0, 72.0, 114.0, 192.0, 114.0]] });
+    let raw = raw_rect(&eng, id, 0, x);
+    let (bytes, _) = export(&eng, id, Format::Xfdf, "a.pdf").unwrap();
+    let parsed = parse(&bytes).unwrap();
+    close(&parsed.items[0].rect.unwrap(), &raw, "the file carries the /Rect as stored");
+    assert!(raw[1] > 670.0 && raw[3] < 700.0 && raw[3] > 685.0, "{raw:?} is in user space (y up), not page space");
+    close(&parsed.items[0].quads, &[72.0, 692.0, 192.0, 692.0, 72.0, 678.0, 192.0, 678.0], "exported QuadPoints");
+    assert_eq!(parsed.items[0].page, 0);
+
+    // A file written by hand, in user space, on page 2.
+    let file = br##"<?xml version="1.0"?><xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <square page="1" rect="100,600,200,700" name="sq-1" title="Pat" color="#FF0000" date="D:20260102030405Z"><contents>Hand</contents></square>
+        </annots></xfdf>"##;
+    let (b, idb, _) = fresh("abs-b");
+    let r = import_one(&b, idb, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.added, 1);
+    let d = list_all(&b, idb).unwrap();
+    assert_eq!((d[0].page, d[0].author.as_str(), d[0].contents.as_str(), d[0].modified.as_str()), (1, "Pat", "Hand", "D:20260102030405Z"));
+    close(&raw_rect(&b, idb, 1, d[0].xref), &[100.0, 600.0, 200.0, 700.0], "imported raw /Rect");
+    close(&d[0].rect, &[100.0, 92.0, 200.0, 192.0], "page-space rect");
+}
+
+#[test]
+fn import_updates_by_name_in_place_adds_the_rest_and_keeps_replies_and_states() {
+    let (a, ida, _) = fresh("upd");
+    let note = add(&a, ida, 0, &NewAnnot::Note { at: [100.0, 100.0], text: "Is this the final rent?".into() });
+    let reply = reply_one(&a, ida, 0, note, "Yes, signed today", "Sam", EditSource::User).unwrap().1;
+    state_one(&a, ida, 0, note, "Completed", "Alex Johnson", EditSource::User).unwrap();
+    let before = list_all(&a, ida).unwrap();
+    let (bytes, done) = export(&a, ida, Format::Xfdf, "a.pdf").unwrap();
+    assert_eq!(done.count, before.len() + 1, "the state is a comment of its own in the file");
+
+    // Into the same document: everything is matched by name, nothing is added.
+    let r = import_one(&a, ida, &parse(&bytes).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.added, 0, "{:?}", r.summary);
+    assert!(r.summary.updated >= 2, "{:?}", r.summary);
+    let after = list_all(&a, ida).unwrap();
+    assert_eq!(after.iter().map(|d| d.xref).collect::<Vec<_>>(), before.iter().map(|d| d.xref).collect::<Vec<_>>());
+
+    // Changed text of the file lands on the same comment, whose reply stays under it.
+    let changed = String::from_utf8(bytes.clone()).unwrap().replace("Is this the final rent?", "Changed");
+    let r = import_one(&a, ida, &parse(changed.as_bytes()).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.added, 0);
+    let now = list_all(&a, ida).unwrap();
+    assert_eq!(now.iter().find(|d| d.xref == note).unwrap().contents, "Changed");
+    assert_eq!(now.iter().find(|d| d.xref == reply).unwrap().parent, Some(note));
+
+    // Into another document: the reply is made under the new parent, the state resolves it.
+    let (b, idb, _) = fresh("upd-b");
+    let r = import_one(&b, idb, &parse(&bytes).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.updated, 0);
+    let have = list_all(&b, idb).unwrap();
+    let n = have.iter().find(|d| d.kind == Kind::Note && d.parent.is_none()).expect("note");
+    let rep = have.iter().find(|d| d.contents == "Yes, signed today").expect("reply");
+    assert_eq!((rep.parent, rep.author.as_str()), (Some(n.xref), "Sam"));
+    assert!(n.resolved, "the review state came along");
+}
+
+#[test]
+fn a_reply_that_bears_the_name_of_another_type_of_comment_leaves_it_alone() {
+    let (eng, id, _) = fresh("reply-name");
+    let first = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <square page="0" rect="100,600,200,700" name="sq"><contents>box</contents></square>
+        <text page="0" rect="50,50,60,60" name="n"><contents>note</contents></text></annots></xfdf>"##;
+    assert_eq!(import_one(&eng, id, &parse(first).unwrap(), EditSource::User).unwrap().summary.added, 2);
+    let before = list_all(&eng, id).unwrap();
+    let hijack = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="300,300,310,310" name="sq" inreplyto="n" replyType="R"><contents>hijack</contents></text></annots></xfdf>"##;
+    let r = import_one(&eng, id, &parse(hijack).unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.added, r.summary.updated), (0, 0), "{:?}", r.summary);
+    assert_eq!(r.summary.skipped.iter().map(|s| (s.reason.as_str(), s.count)).collect::<Vec<_>>(), [(DIFFERS, 1)]);
+    let after = list_all(&eng, id).unwrap();
+    assert_eq!(after.len(), before.len());
+    let sq = |l: &[AnnotDto]| l.iter().find(|d| d.kind == Kind::Rectangle).map(|d| (d.contents.clone(), d.rect, d.parent)).unwrap();
+    assert_eq!(sq(&after), sq(&before));
+    assert_eq!(sq(&after).0, "box");
+}
+
+#[test]
+fn an_imported_reply_and_state_stay_hidden_on_the_page_whatever_flags_the_file_gives_them_even_when_updated() {
+    let (eng, id, _) = fresh("reply-hidden");
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="50,50,60,60" name="n"><contents>note</contents></text>
+        <text page="0" rect="50,50,60,60" name="r" inreplyto="n" replyType="R" flags="print"><contents>reply</contents></text>
+        <text page="0" rect="50,50,60,60" name="s" inreplyto="n" replyType="R" statemodel="Review" state="Completed" flags="print"/>
+        </annots></xfdf>"##;
+    let r = import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.added, 3, "{:?}", r.summary);
+    let flags = |xref: i32| {
+        eng.read_custom(id, |d| {
+            let (_p, a) = find(d, 0, xref)?;
+            Ok(a.flags()?)
+        })
+        .unwrap()
+    };
+    let all = list_all(&eng, id).unwrap();
+    let replies: Vec<_> = all.iter().filter(|d| d.parent.is_some()).collect();
+    assert!(!replies.is_empty());
+    for d in replies {
+        assert!(flags(d.xref).contains(AnnotationFlags::IS_HIDDEN), "{:?} shows on the page", d.contents);
+    }
+    let note = all.iter().find(|d| d.parent.is_none()).unwrap();
+    assert!(!flags(note.xref).contains(AnnotationFlags::IS_HIDDEN));
+
+    // The same reply again, matched by its name, with flags and without `inreplyto`: still hidden, still a reply.
+    let again = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="50,50,60,60" name="r" flags="print"><contents>edited</contents></text></annots></xfdf>"##;
+    let r = import_one(&eng, id, &parse(again).unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.added, r.summary.updated), (0, 1), "{:?}", r.summary);
+    let after = list_all(&eng, id).unwrap();
+    let rep = after.iter().find(|d| d.contents == "edited").expect("the reply was updated");
+    assert_eq!(rep.parent, Some(note.xref));
+    assert!(flags(rep.xref).contains(AnnotationFlags::IS_HIDDEN), "the updated reply shows on the page");
+}
+
+#[test]
+fn a_review_state_whose_name_is_already_in_the_document_is_counted_as_skipped() {
+    let (eng, id, _) = fresh("state-twice");
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="50,50,60,60" name="n"><contents>note</contents></text>
+        <text page="0" rect="50,50,60,60" name="s" inreplyto="n" replyType="R" statemodel="Review" state="Completed"/>
+        </annots></xfdf>"##;
+    let first = import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!((first.summary.added, first.summary.skipped.len()), (2, 0), "{:?}", first.summary);
+    let n = list_all(&eng, id).unwrap().len();
+    let again = import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!(again.summary.added, 0, "{:?}", again.summary);
+    assert_eq!(again.summary.skipped.iter().map(|s| (s.reason.as_str(), s.count)).collect::<Vec<_>>(), [(STATE_KNOWN, 1)]);
+    assert_eq!(list_all(&eng, id).unwrap().len(), n);
+}
+
+#[test]
+fn a_page_out_of_range_and_types_the_files_cannot_carry_are_skipped_and_counted() {
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <square page="9" rect="100,600,200,700" name="far"/>
+        <square page="-1" rect="100,600,200,700" name="neg"/>
+        <caret page="0" rect="100,600,110,610" name="c"/>
+        <fileattachment page="0" rect="100,600,110,610" name="f"/>
+        <sound page="0" rect="100,600,110,610" name="s"/>
+        <square page="0" rect="100,600,200,700" name="ok"/>
+        </annots></xfdf>"##;
+    let (eng, id, _) = fresh("skip");
+    let r = import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.added, 1);
+    assert_eq!(r.summary.skipped.iter().map(|s| s.count).sum::<usize>(), 5, "{:?}", r.summary.skipped);
+    assert_eq!(list_all(&eng, id).unwrap().len(), 1);
+}
+
+#[test]
+fn hostile_files_are_refused_or_read_harmlessly() {
+    let head = r#"<?xml version="1.0"?>"#;
+    let laughs = format!(
+        "{head}<!DOCTYPE lolz [<!ENTITY lol \"lol\"><!ENTITY l1 \"&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;\"><!ENTITY l2 \"&l1;&l1;&l1;&l1;&l1;&l1;&l1;&l1;&l1;&l1;\">]>\
+         <xfdf xmlns=\"http://ns.adobe.com/xfdf/\"><annots><text page=\"0\" rect=\"1,1,2,2\"><contents>&l2;</contents></text></annots></xfdf>"
+    );
+    let external = format!(
+        "{head}<!DOCTYPE x [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><xfdf xmlns=\"http://ns.adobe.com/xfdf/\"><annots><text page=\"0\" rect=\"1,1,2,2\"><contents>&e;</contents></text></annots></xfdf>"
+    );
+    let deep = format!("{head}<xfdf>{}{}</xfdf>", "<a>".repeat(5000), "</a>".repeat(5000));
+    for (what, f) in [("billion laughs", laughs), ("external entity", external), ("deep nesting", deep)] {
+        assert!(matches!(parse(f.as_bytes()), Err(EngineError::Invalid(_))), "{what}");
+    }
+
+    // Truncated and damaged files never panic: every prefix and a few byte flips either parse or fail.
+    let (eng, id, _) = fresh("hostile");
+    for w in every_type() {
+        add(&eng, id, 0, &w);
+    }
+    for fmt in [Format::Xfdf, Format::Fdf] {
+        let (bytes, _) = export(&eng, id, fmt, "a.pdf").unwrap();
+        for cut in (0..bytes.len()).step_by(37) {
+            let _ = parse(&bytes[..cut]);
+        }
+        for at in (0..bytes.len()).step_by(53) {
+            let mut b = bytes.clone();
+            b[at] ^= 0xA5;
+            let _ = parse(&b);
+        }
+    }
+    for junk in [&b"%FDF-1.2\n\x00\xff\xfe garbage"[..], b"%FDF-1.2\n1 0 obj << /FDF << /Annots 99 0 R >> >> endobj\ntrailer << /Root 1 0 R >>", b"", b"\x00\x01\x02"] {
+        let _ = parse(junk);
+    }
+}
+
+#[test]
+fn an_fdf_with_javascript_and_file_references_is_read_without_them() {
+    let fdf = b"%FDF-1.2\n\
+        1 0 obj\n<< /FDF << /Annots [2 0 R] /F (C:\\\\Windows\\\\evil.exe) /JavaScript << /Before (app.alert\\(1\\)) /After (evil_after) >> >> >>\nendobj\n\
+        2 0 obj\n<< /Type /Annot /Subtype /Square /Page 0 /Rect [100 600 200 700] /NM (x1) /Contents (hi) \
+        /AA << /E << /S /JavaScript /JS (evil_aa) >> >> /A << /S /JavaScript /JS (evil_a) >> >>\nendobj\n\
+        trailer\n<< /Root 1 0 R >>\n%%EOF\n";
+    let (eng, id, _) = fresh("fdf-js");
+    let r = import_one(&eng, id, &parse(fdf).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.added, 1);
+    let bytes = eng.unsaved_bytes(id).unwrap().expect("pending edit");
+    let text = String::from_utf8_lossy(&bytes);
+    for s in ["evil", "JavaScript", "/AA"] {
+        assert!(!text.contains(s), "{s} reached the document");
+    }
+    close(&raw_rect(&eng, id, 0, list_all(&eng, id).unwrap()[0].xref), &[100.0, 600.0, 200.0, 700.0], "rect");
+}
+
+fn one_page_pdf(catalog_extra: &str, page_extra: &str, more: &[&str]) -> Vec<u8> {
+    let mut objs = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>"),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {page_extra} >>"),
+    ];
+    objs.extend(more.iter().map(|s| s.to_string()));
+    raw_pdf(&objs)
+}
+
+const ONE: &[u8] = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots><square page="0" rect="100,600,200,700" name="n1"><contents>One</contents></square></annots></xfdf>"##;
+
+fn certified_with_a_field(p: i32) -> Vec<u8> {
+    let cat = format!(
+        "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P {p} >> >> ] >> >> /AcroForm << /Fields [4 0 R] >>"
+    );
+    let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (orig) /Rect [10 10 100 30] /NM (w1) /P 3 0 R >>";
+    one_page_pdf(&cat, "/Annots [4 0 R]", &[widget])
+}
+
+#[test]
+fn a_certification_below_p3_refuses_the_import_without_a_history_step_but_exports() {
+    for p in [1, 2] {
+        let d = dir("xfdf", &format!("certified-{p}"));
+        let (eng, id, _) = open_bytes(&d, "c.pdf", &certified_with_a_field(p));
+        let before = eng.edit_state(id).unwrap();
+        let steps = eng.history(id).unwrap().len();
+        match import_one(&eng, id, &parse(ONE).unwrap(), EditSource::User) {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "P {p}: {m}"),
+            other => panic!("P {p}: {:?}", other.map(|r| r.summary)),
+        }
+        let after = eng.edit_state(id).unwrap();
+        assert_eq!((after.rev, after.undo, after.dirty), (before.rev, before.undo, before.dirty));
+        assert_eq!(eng.history(id).unwrap().len(), steps);
+        assert!(export(&eng, id, Format::Xfdf, "c.pdf").is_ok(), "export is read-only");
+        assert!(!exchange::gates(&eng, id).unwrap().comments, "P {p}: the menu is off");
+    }
+}
+
+/// What a comment import must leave alone on a certified document: the field, the form's field list, the page tree.
+fn untouched(eng: &Engine, id: DocId) -> (String, Vec<f32>, usize, i32) {
+    eng.read_custom(id, |d| {
+        let w = d.new_indirect(4, 0)?;
+        let cat = d.catalog()?;
+        let fields = cat.get_dict("AcroForm")?.expect("form").get_dict("Fields")?.expect("fields").len()?;
+        let count = cat.get_dict("Pages")?.expect("pages").get_dict("Count")?.expect("count").as_int()?;
+        Ok((string(&w, "V", &Budget::new()), floats(&w.get_dict("Rect")?.expect("rect"), 4, &Budget::new()), fields, count))
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_p3_certification_takes_comments_and_leaves_fields_and_pages_alone() {
+    let d = dir("xfdf", "certified-3");
+    let (eng, id, _) = open_bytes(&d, "c.pdf", &certified_with_a_field(3));
+    assert!(exchange::gates(&eng, id).unwrap().comments);
+    let before = untouched(&eng, id);
+    assert_eq!(before.0, "orig");
+    // A comment named like the field, a widget and a field of the file's own: only the comment is made.
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <square page="0" rect="100,600,200,700" name="w1"><contents>named like a field</contents></square>
+        <widget page="0" rect="0,0,5,5" name="w2"/></annots><fields><field name="new"><value>x</value></field></fields></xfdf>"##;
+    let r = import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.added, r.summary.updated), (1, 0), "{:?}", r.summary);
+    assert_eq!(untouched(&eng, id), before);
+    // The same through FDF, whose widgets and fields are objects of the file.
+    let fdf = b"%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [ << /T (new) /V (x) >> ] /Annots [ \
+        << /Subtype /Widget /Page 0 /Rect [0 0 5 5] /NM (w1) /FT /Tx /V (hacked) >> \
+        << /Subtype /Text /Page 0 /Rect [50 50 60 60] /NM (w1) /Contents (again) >> ] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+    let r = import_one(&eng, id, &parse(fdf).unwrap(), EditSource::User).unwrap();
+    assert!(r.summary.skipped.iter().any(|s| s.count == 1), "{:?}", r.summary);
+    assert_eq!(untouched(&eng, id), before);
+}
+
+#[test]
+fn a_signed_document_takes_comments_as_an_update_after_the_signature() {
+    let cat = "/AcroForm << /SigFlags 3 /Fields [4 0 R] >>";
+    let sig = "<< /FT /Sig /T (Signature1) /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> >> >>";
+    let d = dir("xfdf", "signed");
+    let (eng, id, path) = open_bytes(&d, "s.pdf", &one_page_pdf(cat, "", &[sig]));
+    let original = std::fs::read(&path).unwrap();
+    let r = import_one(&eng, id, &parse(ONE).unwrap(), EditSource::User).unwrap();
+    assert!(r.signed);
+    assert_eq!(r.summary.added, 1);
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the signed bytes are kept as a prefix");
+}
+
+#[test]
+fn a_rotated_page_with_an_offset_crop_box_still_gets_the_file_s_user_space_numbers() {
+    let d = dir("xfdf", "rotated");
+    let (eng, id, _) = open_bytes(&d, "r.pdf", &one_page_pdf("", "/Rotate 90 /CropBox [50 40 562 700]", &[]));
+    let r = import_one(&eng, id, &parse(ONE).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.added, 1);
+    let x = list_all(&eng, id).unwrap()[0].xref;
+    close(&raw_rect(&eng, id, 0, x), &[100.0, 600.0, 200.0, 700.0], "raw /Rect on a rotated page");
+    let (bytes, _) = export(&eng, id, Format::Xfdf, "r.pdf").unwrap();
+    close(&parse(&bytes).unwrap().items[0].rect.unwrap(), &[100.0, 600.0, 200.0, 700.0], "and back out");
+}
+
+#[test]
+fn measurements_are_left_out_of_a_file_and_are_neither_made_nor_changed_by_one() {
+    use crate::measure::{Kind as MKind, add_one as measure};
+    let (a, ida, _) = fresh("measure");
+    add(&a, ida, 0, &NewAnnot::Note { at: [100.0, 100.0], text: "keep".into() });
+    let (_, m, _) = measure(&a, ida, 0, MKind::Distance, &[[100.0, 300.0], [300.0, 300.0]], None, "Alex", EditSource::User).unwrap();
+    reply_one(&a, ida, 0, m, "Check the scale", "Sam", EditSource::User).unwrap();
+    for fmt in [Format::Xfdf, Format::Fdf] {
+        let (bytes, done) = export(&a, ida, fmt, "a.pdf").unwrap();
+        assert_eq!((done.count, done.left_out), (1, 2), "the measurement and its reply are counted, not dropped silently");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("Check the scale") && !text.contains("Measure"), "{fmt:?}");
+    }
+
+    // A measurement in a file (FDF with /Measure, XFDF with a dimension intent) is skipped and counted.
+    let fdf = b"%FDF-1.2\n1 0 obj\n<< /FDF << /Annots [ \
+        << /Subtype /Line /Page 0 /Rect [100 500 300 520] /L [100 510 300 510] /NM (m1) /IT /LineDimension \
+           /Measure << /Type /Measure /Subtype /RL /R (1 in = 1 ft) /X [<< /Type /NumberFormat /U (ft) /C 1 >>] >> >> \
+        << /Subtype /Text /Page 0 /Rect [100 100 120 120] /NM (n1) /Contents (kept) >> ] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+    let xfdf = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <line page="0" rect="100,500,300,520" start="100,510" end="300,510" intent="LineDimension" name="m2"/>
+        <polygon page="0" rect="100,500,300,520" name="m3" intent="PolygonDimension"><vertices>100,500;300,500;200,520</vertices></polygon>
+        <text page="0" rect="100,100,120,120" name="n2"><contents>kept</contents></text></annots></xfdf>"##;
+    for (what, file, skipped) in [("fdf", &fdf[..], 1), ("xfdf", &xfdf[..], 2)] {
+        let (b, idb, _) = fresh(&format!("measure-in-{what}"));
+        let r = import_one(&b, idb, &parse(file).unwrap(), EditSource::User).unwrap();
+        assert_eq!(r.summary.added, 1, "{what}: {:?}", r.summary);
+        assert_eq!(r.summary.skipped.iter().map(|s| s.count).sum::<usize>(), skipped, "{what}: {:?}", r.summary.skipped);
+        let list = list_all(&b, idb).unwrap();
+        assert!(list.iter().all(|d| d.kind == Kind::Note), "{what}: no line or polygon was made");
+    }
+
+    // A measurement of the document that a file's comment has the name of is not updated.
+    let (b, idb, _) = fresh("measure-name");
+    let (_, mx, _) = measure(&b, idb, 0, MKind::Distance, &[[100.0, 300.0], [300.0, 300.0]], None, "Alex", EditSource::User).unwrap();
+    b.apply_custom(idb, "Name".into(), EditSource::User, false, |d| {
+        let (_p, ann) = find(d, 0, mx)?;
+        put_str(&ann, "NM", "m-doc")?;
+        Ok(vec![0])
+    })
+    .unwrap();
+    let before = raw_rect(&b, idb, 0, mx);
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots><line page="0" rect="10,10,50,50" start="10,10" end="50,50" name="m-doc"><contents>moved</contents></line></annots></xfdf>"##;
+    let r = import_one(&b, idb, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.added, r.summary.updated), (0, 0), "{:?}", r.summary);
+    assert_eq!(raw_rect(&b, idb, 0, mx), before);
+}
+
+/// An FDF whose annotations are objects 10.. and `shared` is object 2, with `extra` objects after them.
+fn fdf_sharing(n: usize, annot: impl Fn(usize) -> String, objects: &[String]) -> Vec<u8> {
+    let refs: String = (0..n).map(|i| format!("{} 0 R ", 10 + i)).collect();
+    let mut f = format!("%FDF-1.2\n1 0 obj\n<< /FDF << /Annots [{refs}] >> >>\nendobj\n");
+    for o in objects {
+        f.push_str(o);
+    }
+    for i in 0..n {
+        f.push_str(&format!("{} 0 obj\n{}\nendobj\n", 10 + i, annot(i)));
+    }
+    f.push_str("trailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    f.into_bytes()
+}
+
+#[test]
+fn one_string_or_ink_array_shared_by_many_comments_is_refused_by_the_byte_budget() {
+    let text = |i: usize, r: &str| format!("<< /Subtype /Text /Page 0 /Rect [100 600 120 620] /NM (n{i}) /Contents {r} >>");
+    let big = format!("2 0 obj\n({})\nendobj\n", "x".repeat(900_000));
+    // 200 references to one 900 kB string would be 180 MB of copies.
+    let f = fdf_sharing(200, |i| text(i, "2 0 R"), std::slice::from_ref(&big));
+    assert!(matches!(parse(&f), Err(EngineError::Invalid(m)) if m.contains("same data")));
+    // A few are fine and read in full.
+    let ok = parse(&fdf_sharing(5, |i| text(i, "2 0 R"), std::slice::from_ref(&big))).unwrap();
+    assert_eq!(ok.items.len(), 5);
+    assert!(ok.items.iter().all(|c| c.contents.len() == 900_000));
+
+    // One ink list of 1024 strokes, each the same 65 536 numbers, on 100 comments.
+    let nums = "1 ".repeat(65_536);
+    let strokes: String = "6 0 R ".repeat(1024);
+    let objs = [format!("5 0 obj\n[{strokes}]\nendobj\n"), format!("6 0 obj\n[{nums}]\nendobj\n")];
+    let f = fdf_sharing(100, |i| format!("<< /Subtype /Ink /Page 0 /Rect [0 0 50 50] /NM (i{i}) /InkList 5 0 R >>"), &objs);
+    assert!(matches!(parse(&f), Err(EngineError::Invalid(m)) if m.contains("same data")));
+}
+
+#[test]
+fn an_fdf_with_more_entries_than_the_walk_allows_is_refused_not_cut_short() {
+    let refs = "10 0 R ".repeat(MAX_NODES + 1);
+    let f = format!("%FDF-1.2\n1 0 obj\n<< /FDF << /Annots [{refs}] >> >>\nendobj\n10 0 obj\n<< /Subtype /Text /Page 0 /Rect [1 1 2 2] >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    assert!(matches!(parse(f.as_bytes()), Err(EngineError::Invalid(m)) if m.contains("100 000")));
+    // Empty strokes cost nothing in numbers; each is still charged, so a shared list of them runs out.
+    let strokes = "6 0 R ".repeat(1024);
+    let objs = [format!("5 0 obj\n[{strokes}]\nendobj\n"), "6 0 obj\n[]\nendobj\n".to_string()];
+    let f = fdf_sharing(10_000, |i| format!("<< /Subtype /Ink /Page 0 /Rect [0 0 50 50] /NM (e{i}) /InkList 5 0 R >>"), &objs);
+    assert!(parse(&f).is_err());
+}
+
+#[test]
+fn an_export_is_not_held_to_the_import_text_budget_but_still_has_a_bound() {
+    // 40 comments share one 900 kB text: 36 MB, over the 32 MB an import file may copy.
+    let n = 40;
+    let annots: String = (0..n).map(|i| format!("{} 0 R ", 5 + i)).collect();
+    let big = format!("({})", "x".repeat(900_000));
+    let mut objs = vec![big];
+    objs.extend((0..n).map(|i| format!("<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /NM (n{i}) /Contents 4 0 R /P 3 0 R >>")));
+    let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    let d = dir("xfdf", "export-budget");
+    let (eng, id, _) = open_bytes(&d, "big.pdf", &one_page_pdf("", &format!("/Annots [{annots}]"), &refs));
+    let (bytes, done) = export(&eng, id, Format::Xfdf, "big.pdf").unwrap();
+    assert_eq!(done.count, n);
+    assert!(bytes.len() > 36_000_000);
+
+    // One ink list of 1024 strokes, each the same 1024 numbers (8 MB charged), over a 1 MB export bound: refused
+    // with the export message. The real bound (256 MB) needs a shape MuPDF takes half a minute to draw.
+    let strokes = "6 0 R ".repeat(1024);
+    let ink = ["<< /Type /Annot /Subtype /Ink /Rect [0 0 50 50] /NM (i) /InkList 5 0 R /P 3 0 R >>".to_string(), format!("[{strokes}]"), format!("[{}]", "1 ".repeat(1024))];
+    let refs: Vec<&str> = ink.iter().map(String::as_str).collect();
+    let (eng, id, _) = open_bytes(&d, "ink.pdf", &one_page_pdf("", "/Annots [4 0 R]", &refs));
+    let r = eng.read_custom(id, |d| collect_within(d, 1 << 20));
+    assert!(matches!(r, Err(EngineError::Invalid(m)) if m.contains("export") && !m.contains("does not read")));
+}
+
+#[test]
+fn a_comment_text_over_1_mb_is_left_empty_and_counted_so_the_file_still_imports() {
+    // The importer refuses a value over 1 MB (and so the whole file), so an export that carried it would not read back.
+    let objs = [format!("({})", "x".repeat(1_500_000)), "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /NM (long) /Contents 4 0 R /P 3 0 R >>".to_string(), "<< /Type /Annot /Subtype /Text /Rect [40 10 60 30] /NM (short) /Contents (kept) /P 3 0 R >>".to_string()];
+    let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    let d = dir("xfdf", "long-contents");
+    let (eng, id, _) = open_bytes(&d, "long.pdf", &one_page_pdf("", "/Annots [5 0 R 6 0 R]", &refs));
+    for fmt in [Format::Xfdf, Format::Fdf] {
+        let (bytes, done) = export(&eng, id, fmt, "long.pdf").unwrap();
+        assert_eq!((done.count, done.left_out, done.long_text), (2, 0, 1), "{fmt:?}");
+        let back = parse(&bytes).unwrap();
+        let text = |n: &str| back.items.iter().find(|c| c.name == n).map(|c| c.contents.clone());
+        assert_eq!((text("long").as_deref(), text("short").as_deref()), (Some(""), Some("kept")), "{fmt:?}");
+    }
+}
+
+#[test]
+fn a_shared_text_over_1_mb_is_not_charged_to_the_export_budget_by_every_comment() {
+    // 200 comments share one 1.5 MB /Contents: charged each, that is 300 MB, over the 256 MB export bound.
+    let n = 200;
+    let annots: String = (0..n).map(|i| format!("{} 0 R ", 5 + i)).collect();
+    let mut objs = vec![format!("({})", "x".repeat(1_500_000))];
+    objs.extend((0..n).map(|i| format!("<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /NM (n{i}) /Contents 4 0 R /P 3 0 R >>")));
+    let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    let d = dir("xfdf", "shared-long-contents");
+    let (eng, id, _) = open_bytes(&d, "shared.pdf", &one_page_pdf("", &format!("/Annots [{annots}]"), &refs));
+    let (bytes, done) = export(&eng, id, Format::Xfdf, "shared.pdf").unwrap();
+    assert_eq!((done.count, done.left_out, done.long_text), (n, 0, n));
+    assert!(bytes.len() < 200_000, "no text was carried");
+}
+
+#[test]
+fn distinct_texts_over_1_mb_are_dropped_before_they_are_charged_to_the_export_budget() {
+    // 10 comments, each its own 1.5 MB indirect /Contents: kept and charged that is 15 MB, over the 8 MB bound,
+    // although every one is dropped (the bound is 256 MB in the app: 200 such comments).
+    let n = 10;
+    let annots: String = (0..n).map(|i| format!("{} 0 R ", 4 + n + i)).collect();
+    let mut objs: Vec<String> = (0..n).map(|_| format!("({})", "x".repeat(1_500_000))).collect();
+    objs.extend((0..n).map(|i| format!("<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /NM (n{i}) /Contents {} 0 R /P 3 0 R >>", 4 + i)));
+    let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    let d = dir("xfdf", "distinct-long-contents");
+    let (eng, id, _) = open_bytes(&d, "distinct.pdf", &one_page_pdf("", &format!("/Annots [{annots}]"), &refs));
+    let (items, left_out, long_text) = eng.read_custom(id, |d| collect_within(d, 8 << 20)).unwrap();
+    assert_eq!((items.len(), left_out, long_text), (n, 0, n));
+}
+
+#[test]
+fn name_entries_given_as_one_shared_string_are_not_read_at_all() {
+    // /Name, /RT, /IT and /Subtype are names: a 20 MB string behind each of 100 comments would be 2 GB of copies.
+    let big = format!("2 0 obj\n({})\nendobj\n", "x".repeat(20_000_000));
+    let f = fdf_sharing(100, |i| format!("<< /Subtype /Text /Page 0 /Rect [1 1 2 2] /NM (n{i}) /Name 2 0 R /RT 2 0 R /IT 2 0 R >>"), std::slice::from_ref(&big));
+    let ok = parse(&f).unwrap();
+    assert_eq!(ok.items.len(), 100);
+    assert!(ok.items.iter().all(|c| c.icon.is_empty() && c.reply_type.is_empty() && !c.measured));
+    // The same names written as names are read.
+    let f = fdf_sharing(1, |_| "<< /Subtype /Text /Page 0 /Rect [1 1 2 2] /NM (a) /Name /Comment /RT /R >>".to_string(), &[]);
+    let ok = parse(&f).unwrap();
+    assert_eq!((ok.items[0].icon.as_str(), ok.items[0].reply_type.as_str()), ("Comment", "R"));
+}
+
+#[test]
+fn an_entry_that_names_a_top_level_note_as_a_reply_does_not_hide_that_note() {
+    let (eng, id, _) = fresh("reply-names-note");
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="50,50,60,60" name="n"><contents>one</contents></text>
+        <text page="0" rect="80,50,90,60" name="m"><contents>two</contents></text></annots></xfdf>"##;
+    import_one(&eng, id, &parse(file).unwrap(), EditSource::User).unwrap();
+    let again = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="80,50,90,60" name="m" inreplyto="n" replyType="R" flags="print"><contents>edited</contents></text></annots></xfdf>"##;
+    let r = import_one(&eng, id, &parse(again).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.updated, 1, "{:?}", r.summary);
+    let m = list_all(&eng, id).unwrap().into_iter().find(|d| d.contents == "edited").expect("m was updated");
+    assert_eq!(m.parent, None);
+    let hidden = eng.read_custom(id, |d| Ok(find(d, 0, m.xref)?.1.flags()?.contains(AnnotationFlags::IS_HIDDEN))).unwrap();
+    assert!(!hidden, "a top-level note was hidden");
+}
+
+#[test]
+fn a_note_with_a_border_round_trips_without_a_fill_or_width_it_cannot_take() {
+    let note = "<< /Type /Annot /Subtype /Text /Rect [100 600 122 622] /Contents (hello) /NM (n1) /C [1 0 0] /IC [0 0 1] /Border [0 0 3] /P 3 0 R >>";
+    let d = dir("xfdf", "note-border");
+    let (a, ida, _) = open_bytes(&d, "a.pdf", &one_page_pdf("", "/Annots [4 0 R]", &[note]));
+    let (bytes, done) = export(&a, ida, Format::Xfdf, "a.pdf").unwrap();
+    assert_eq!(done.count, 1);
+    let parsed = parse(&bytes).unwrap();
+    let (b, idb, _) = fresh("note-border-b");
+    let r = import_one(&b, idb, &parsed, EditSource::User).unwrap();
+    assert_eq!((r.summary.added, r.summary.skipped.len()), (1, 0), "{:?}", r.summary);
+    let made = list_all(&b, idb).unwrap();
+    assert_eq!(made.len(), 1);
+    assert_eq!(made[0].contents, "hello");
+    // Again: it is matched by name and updated, not failed.
+    let r = import_one(&b, idb, &parsed, EditSource::User).unwrap();
+    assert_eq!((r.summary.updated, r.summary.skipped.len()), (1, 0), "{:?}", r.summary);
+}

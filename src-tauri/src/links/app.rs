@@ -88,7 +88,7 @@ pub fn link_open_url(url: String) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn open_with_system(url: &str) -> std::io::Result<()> {
+pub(crate) fn open_with_system(url: &str) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "shell32")]
     unsafe extern "system" {

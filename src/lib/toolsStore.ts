@@ -2,8 +2,26 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
 import { useAi } from "./aiStore";
-import type { CompressAuditReply, CompressEstimate, CompressPreset, CompressReport, OcrBackend, OcrLanguages, OcrOutcome } from "./api";
+import type {
+  CompressAuditReply,
+  CompressEstimate,
+  CompressOptions,
+  CompressPreset,
+  CompressReport,
+  NamedCompressPreset,
+  OcrBackend,
+  OcrDetection,
+  OcrFont,
+  OcrLanguages,
+  OcrOutcome,
+  OcrPlan,
+  OcrStyle,
+  OcrUnsure,
+} from "./api";
+import { initialLanguages, ocrProgress, previewPage, requestOptions, toggleLanguage } from "./ocrLogic";
+import { parseRange } from "./pageRange";
 import * as edits from "./edit";
+import { forPreset, normalizeOptions, validateOptions } from "./optimizer";
 
 /**
  * Compress and OCR share one sheet that changes state in place: options, running, done (or error).
@@ -18,25 +36,61 @@ async function askSaveTo(doc: number, name: string) {
 }
 
 export type ToolKind = "compress" | "ocr";
+/** The Compress sheet shows the three presets, or the Advanced settings (Acrobat's Optimized PDF). */
+export type CompressMode = "presets" | "advanced";
 export type Phase = "options" | "running" | "done" | "error";
 export type OcrScope = "all" | "page" | "range";
 
 export interface ToolSettings {
-  /** BCP-47 tag of the language OCR starts with. */
-  ocrLanguage: string | null;
-  ocrBackend: OcrBackend;
+  /** What OCR was last run with: primary tags in priority order; null = never chosen. */
+  ocrLanguages: string[] | null;
+  ocrStyle: OcrStyle;
+  ocrDpi: number;
+  /** Leave pages that already have text alone. */
+  ocrSkipText: boolean;
+  /** The face editable text is set in. */
+  ocrFont: OcrFont;
   compressPreset: CompressPreset;
+  compressMode: CompressMode;
+  /** The Advanced settings as they were left (without the fonts picked for one document). */
+  compressAdvanced: CompressOptions | null;
 }
 
 const KEY = "inkwell.tools";
-const DEFAULTS: ToolSettings = { ocrLanguage: null, ocrBackend: "windows", compressPreset: "balanced" };
+const DEFAULTS: ToolSettings = {
+  ocrLanguages: null,
+  ocrStyle: "searchable",
+  ocrDpi: 200,
+  ocrSkipText: true,
+  ocrFont: "auto",
+  compressPreset: "balanced",
+  compressMode: "presets",
+  compressAdvanced: null,
+};
 
 export function loadToolSettings(): ToolSettings {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    const raw = JSON.parse(localStorage.getItem(KEY) ?? "{}");
+    // The single language an older version kept.
+    if (!raw.ocrLanguages && typeof raw.ocrLanguage === "string") raw.ocrLanguages = [raw.ocrLanguage.split("-")[0].toLowerCase()];
+    const { ocrLanguage: _old, ocrBackend: _backend, ...rest } = raw;
+    return { ...DEFAULTS, ...rest };
   } catch {
     return DEFAULTS;
   }
+}
+
+/** The before/after of one page for the chosen style. */
+export interface PreviewState {
+  phase: "loading" | "ready" | "error";
+  /** 0-based. */
+  page: number;
+  before: string | null;
+  after: string | null;
+  message: string | null;
+  converted: number;
+  kept: number;
+  job: number;
 }
 
 export interface Sheet {
@@ -56,13 +110,36 @@ export interface Sheet {
   /** Job id of the running estimate, so closing the rail can stop it. */
   estimateJob: number;
   compressed: CompressReport | null;
+  mode: CompressMode;
+  /** The Advanced settings; null until the engine's defaults have arrived. */
+  advanced: CompressOptions | null;
+  /** The engine's three presets, the starting points of the Advanced settings. */
+  defaults: Record<CompressPreset, CompressOptions> | null;
+  /** Saved settings by name. */
+  saved: NamedCompressPreset[];
+  /** The saved settings the sheet last loaded or saved (so a change can say "changed"). */
+  savedName: string | null;
+  savedError: string | null;
+  /** Size of the Advanced settings; null while it is worked out. */
+  customEstimate: CompressEstimate | null;
+  customEstimateJob: number;
   // ocr
   scope: OcrScope;
   range: string;
+  /** Primary tags in priority order. */
   languages: string[];
+  /** The user changed the selection: a late detection does not replace it. */
+  languagesTouched: boolean;
   backend: OcrBackend;
-  force: boolean;
+  style: OcrStyle;
+  dpi: number;
+  skipText: boolean;
+  font: OcrFont;
+  preview: PreviewState | null;
   available: OcrLanguages | null;
+  detection: OcrDetection | null;
+  detecting: boolean;
+  plan: OcrPlan | null;
   recognized: OcrOutcome | null;
   /** 0-based pages finished so far in an OCR run (the thumbnails tick them). */
   donePages: number[];
@@ -77,8 +154,25 @@ interface ToolsStore {
   close: () => void;
   set: (p: Partial<Sheet>) => void;
   setSettings: (p: Partial<ToolSettings>) => void;
+  setMode: (m: CompressMode) => void;
+  /** Changes the Advanced settings and asks for a new size. */
+  setAdvanced: (fn: (o: CompressOptions) => CompressOptions) => void;
+  /** Resets the Advanced settings to one of the three presets. */
+  startFrom: (p: CompressPreset) => void;
+  savePreset: (name: string) => Promise<void>;
+  loadPreset: (name: string) => void;
+  deletePreset: (name: string) => Promise<void>;
   /** File picker for tesseract.exe (shown by the Rust side), then the languages are read again. */
   chooseTesseract: () => Promise<void>;
+  /** Adds or removes a language of the OCR selection and works out the engine for it. */
+  toggleLanguage: (tag: string) => void;
+  /** Opens Windows' language settings (where a language pack is added). */
+  openLanguageSettings: () => void;
+  /** Reads one page and shows it before and after the chosen style, changing nothing. */
+  showPreview: () => Promise<void>;
+  closePreview: () => void;
+  /** Scrolls to a word the editable-text run left in the picture. */
+  reviewWord: (w: OcrUnsure) => void;
   start: (opts?: { saveAs?: boolean }) => Promise<void>;
   cancel: () => void;
   /** Undoes an in-place OCR run (it is one undo step). */
@@ -92,8 +186,10 @@ export const FRIENDLY: Record<string, string> = {
   "bad-password": "That password is not right.",
   "invalid-options": "Those settings are not valid.",
   "needs-permissions-password": "This file doesn't allow copying or page changes. Open it with its permissions password, or remove its security first.",
-  "language-unavailable": "That OCR language is not installed.",
-  "tesseract-not-found": "Tesseract was not found. Set its location in the OCR options.",
+  "language-unavailable": "No installed OCR engine reads that language. The language list says how to add it.",
+  "tesseract-not-found": "Tesseract was not found. Choose its location in the OCR options.",
+  "signed-document": "This document is signed. Straightening or replacing its pictures would break the signature, so it was left alone. The searchable image style adds its text layer without touching the pictures.",
+  "certified-document": "This document is certified: its author allows no changes to it, not even a text layer. It was left alone.",
   stale: "The document changed while it was being read. Run it again.",
 };
 
@@ -118,12 +214,28 @@ const blank = (tool: ToolKind, doc: number): Sheet => ({
   estimates: null,
   estimateJob: 0,
   compressed: null,
+  mode: "presets",
+  advanced: null,
+  defaults: null,
+  saved: [],
+  savedName: null,
+  savedError: null,
+  customEstimate: null,
+  customEstimateJob: 0,
   scope: "all",
   range: "",
   languages: [],
-  backend: "windows",
-  force: false,
+  languagesTouched: false,
+  backend: "auto",
+  style: "searchable",
+  dpi: 200,
+  skipText: true,
+  font: "auto",
+  preview: null,
   available: null,
+  detection: null,
+  detecting: false,
+  plan: null,
   recognized: null,
   donePages: [],
   needsSave: false,
@@ -144,6 +256,8 @@ export const useTools = create<ToolsStore>((set, get) => {
       patch({ phase: "error", error: friendly(e) });
       return;
     }
+    // The Advanced settings start from the engine's own presets; saved settings come from its data folder.
+    void loadAdvanced(sheet);
     // The sizes take longer than the audit: they arrive on their own, the panel shows "…" until then.
     const job = ++jobSeq;
     patch({ estimateJob: job });
@@ -153,24 +267,100 @@ export const useTools = create<ToolsStore>((set, get) => {
     } catch {
       /* cancelled, or a file the sampler cannot read: no prediction beats a wrong one */
     }
+    if (get().sheet?.mode === "advanced") scheduleEstimate(0);
+  }
+
+  async function loadAdvanced(sheet: Sheet) {
+    try {
+      const [defaults, saved] = await Promise.all([api.compressPresetOptions(), api.compressPresets().catch(() => [])]);
+      const cur = get().sheet;
+      if (!cur || cur.doc !== sheet.doc || cur.tool !== "compress") return;
+      const base = defaults[get().settings.compressPreset] ?? defaults.balanced;
+      const kept = get().settings.compressAdvanced;
+      patch({
+        defaults,
+        saved: saved.map((p) => ({ ...p, options: normalizeOptions(defaults.balanced, p.options) })),
+        advanced: forPreset(kept ? normalizeOptions(base, kept) : base),
+      });
+    } catch {
+      /* no engine defaults: the Advanced tab stays empty and the presets still work */
+    }
+  }
+
+  let estimateTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The size of the Advanced settings, a moment after the last change (it recompresses a sample). */
+  function scheduleEstimate(delay = 600) {
+    clearTimeout(estimateTimer);
+    const s = get().sheet;
+    if (!s || s.tool !== "compress" || s.mode !== "advanced" || !s.advanced) return;
+    if (s.customEstimateJob) void api.toolCancel(s.customEstimateJob).catch(() => {});
+    if (validateOptions(s.advanced)) return void patch({ customEstimate: null, customEstimateJob: 0 });
+    patch({ customEstimate: null });
+    estimateTimer = setTimeout(async () => {
+      const sheet = get().sheet;
+      if (!sheet?.advanced || sheet.phase !== "options" || sheet.mode !== "advanced") return;
+      const job = ++jobSeq;
+      patch({ customEstimateJob: job });
+      try {
+        const customEstimate = await api.compressEstimateCustom(job, sheet.doc, sheet.advanced);
+        if (get().sheet?.customEstimateJob === job) patch({ customEstimate });
+      } catch {
+        /* cancelled, or a file the sampler cannot read: no prediction beats a wrong one */
+      }
+    }, delay);
   }
 
   /** Stops a running estimate: the rail closed, or the real job is about to need the CPU. */
   const stopEstimate = () => {
-    const job = get().sheet?.estimateJob;
-    if (job) void api.toolCancel(job).catch(() => {});
+    clearTimeout(estimateTimer);
+    const sheet = get().sheet;
+    for (const job of [sheet?.estimateJob, sheet?.customEstimateJob]) {
+      if (job) void api.toolCancel(job).catch(() => {});
+    }
   };
+
+  const ocrOpen = (doc: number) => get().sheet?.doc === doc && get().sheet?.tool === "ocr";
+
+  /** Works out which engine reads `languages` and what is missing; only the latest answer counts. */
+  async function refreshPlan(doc: number, languages: string[]) {
+    if (languages.length === 0) {
+      if (ocrOpen(doc)) patch({ plan: null });
+      return;
+    }
+    try {
+      const plan = await api.ocrPlan(languages, "auto");
+      const cur = get().sheet;
+      if (cur && ocrOpen(doc) && cur.languages.join() === languages.join()) patch({ plan });
+    } catch {
+      /* the sheet keeps its last plan */
+    }
+  }
 
   async function loadLanguages(sheet: Sheet) {
     const s = get().settings;
     try {
       const available = await api.ocrLanguages();
-      const tess = s.ocrBackend === "tesseract" && available.tesseract != null;
-      const backend: OcrBackend = tess ? "tesseract" : "windows";
-      const have = backend === "tesseract" ? available.tesseract!.languages : available.windows;
-      const wanted = s.ocrLanguage && have.includes(s.ocrLanguage) ? s.ocrLanguage : have[0];
-      if (get().sheet?.doc === sheet.doc && get().sheet?.tool === "ocr") {
-        patch({ available, backend, languages: wanted ? [wanted] : [] });
+      if (!ocrOpen(sheet.doc)) return;
+      const languages = initialLanguages({ detection: null, saved: s.ocrLanguages, defaults: available.defaults, catalog: available.catalog });
+      patch({ available, languages, detecting: true });
+      void refreshPlan(sheet.doc, languages);
+      // What the document is written in decides the default, unless the user already chose.
+      try {
+        // Its job id sits where the compress estimate's does: closing the sheet or starting the run stops it.
+        const job = ++jobSeq;
+        patch({ estimateJob: job });
+        const detection = await api.ocrDetect(job, sheet.doc);
+        if (!ocrOpen(sheet.doc)) return;
+        const cur = get().sheet!;
+        if (cur.languagesTouched) {
+          patch({ detection, detecting: false });
+          return;
+        }
+        const next = initialLanguages({ detection, saved: s.ocrLanguages, defaults: available.defaults, catalog: available.catalog });
+        patch({ detection, detecting: false, languages: next });
+        void refreshPlan(sheet.doc, next);
+      } catch {
+        if (ocrOpen(sheet.doc)) patch({ detecting: false });
       }
     } catch (e) {
       patch({ phase: "error", error: friendly(e) });
@@ -191,7 +381,11 @@ export const useTools = create<ToolsStore>((set, get) => {
       const sheet: Sheet = {
         ...blank(tool, d.id),
         preset: s.compressPreset,
-        backend: s.ocrBackend,
+        style: s.ocrStyle,
+        dpi: s.ocrDpi,
+        skipText: s.ocrSkipText,
+        font: s.ocrFont,
+        mode: s.compressMode ?? "presets",
         needsSave: d.dirty,
         scope: opts?.scope ?? "all",
         range: opts?.range ?? "",
@@ -210,7 +404,11 @@ export const useTools = create<ToolsStore>((set, get) => {
       set({ sheet: null });
     },
 
-    set: (p) => patch(p),
+    set: (p) => {
+      // A preview is of one set of choices: any change to them makes it stale.
+      if ("style" in p || "dpi" in p || "font" in p || "scope" in p || "range" in p) get().closePreview();
+      patch(p);
+    },
 
     setSettings: (p) => {
       const settings = { ...get().settings, ...p };
@@ -218,11 +416,131 @@ export const useTools = create<ToolsStore>((set, get) => {
       set({ settings });
     },
 
+    setMode: (mode) => {
+      patch({ mode });
+      get().setSettings({ compressMode: mode });
+      if (mode === "advanced") scheduleEstimate(0);
+      else {
+        clearTimeout(estimateTimer);
+        const job = get().sheet?.customEstimateJob;
+        if (job) void api.toolCancel(job).catch(() => {});
+      }
+    },
+
+    setAdvanced: (fn) => {
+      const cur = get().sheet?.advanced;
+      if (!cur) return;
+      const next = { ...fn(cur), preset: "custom" as const };
+      patch({ advanced: next, savedError: null });
+      get().setSettings({ compressAdvanced: forPreset(next) });
+      scheduleEstimate();
+    },
+
+    startFrom: (p) => {
+      const base = get().sheet?.defaults?.[p];
+      if (!base) return;
+      patch({ savedName: null });
+      get().setAdvanced(() => ({ ...base }));
+    },
+
+    savePreset: async (name) => {
+      const o = get().sheet?.advanced;
+      if (!o) return;
+      try {
+        const saved = await api.compressPresetSave(name, forPreset(o));
+        const base = get().sheet?.defaults?.balanced;
+        patch({
+          saved: base ? saved.map((p) => ({ ...p, options: normalizeOptions(base, p.options) })) : saved,
+          savedName: name.trim(),
+          savedError: null,
+        });
+      } catch (e) {
+        patch({ savedError: friendly(e) });
+      }
+    },
+
+    loadPreset: (name) => {
+      const sheet = get().sheet;
+      const p = sheet?.saved.find((x) => x.name === name);
+      if (!sheet || !p) return patch({ savedName: null });
+      // Fonts are picked per document: the ones in this document stay as they were.
+      patch({ savedName: p.name });
+      get().setAdvanced((cur) => ({ ...p.options, unembedFonts: cur.unembedFonts }));
+    },
+
+    deletePreset: async (name) => {
+      try {
+        const saved = await api.compressPresetDelete(name);
+        const base = get().sheet?.defaults?.balanced;
+        patch({
+          saved: base ? saved.map((p) => ({ ...p, options: normalizeOptions(base, p.options) })) : saved,
+          savedName: get().sheet?.savedName === name ? null : (get().sheet?.savedName ?? null),
+          savedError: null,
+        });
+      } catch (e) {
+        patch({ savedError: friendly(e) });
+      }
+    },
+
     chooseTesseract: async () => {
       const sheet = get().sheet;
       if (!sheet || (await api.ocrChooseTesseract().catch(() => null)) == null) return;
-      get().setSettings({ ocrBackend: "tesseract" });
       await loadLanguages(sheet);
+    },
+
+    toggleLanguage: (tag) => {
+      const sheet = get().sheet;
+      if (!sheet) return;
+      const languages = toggleLanguage(sheet.languages, tag);
+      get().closePreview();
+      patch({ languages, languagesTouched: true });
+      void refreshPlan(sheet.doc, languages);
+    },
+
+    openLanguageSettings: () => {
+      void api.openLanguageSettings().catch(() => {});
+    },
+
+    showPreview: async () => {
+      const sheet = get().sheet;
+      if (!sheet || sheet.tool !== "ocr" || sheet.phase !== "options") return;
+      const d = st().docs[sheet.doc];
+      if (!d) return;
+      get().closePreview();
+      const job = ++jobSeq;
+      const pages = sheet.scope === "range" ? parseRange(sheet.range, d.pageCount) : sheet.scope === "page" ? [d.currentPage] : null;
+      const page = previewPage(pages, d.currentPage);
+      const base = { page, before: null, after: null, message: null, converted: 0, kept: 0, job };
+      patch({ preview: { ...base, phase: "loading" } });
+      const mine = () => get().sheet?.preview?.job === job;
+      try {
+        const p = await api.ocrPreview(job, page, {
+          doc: d.id,
+          languages: sheet.languages,
+          backend: sheet.backend,
+          ...requestOptions({ style: sheet.style, dpi: sheet.dpi, skipText: sheet.skipText }),
+          ...(sheet.style === "editable" ? { font: sheet.font } : {}),
+        });
+        if (!mine()) return;
+        const e = p.applied.editable;
+        patch({ preview: { ...base, phase: "ready", before: p.before, after: p.after, converted: e?.words_converted ?? 0, kept: e?.words_kept ?? 0 } });
+      } catch (e) {
+        if (!mine()) return;
+        if (String(e) === "cancelled") patch({ preview: null });
+        else patch({ preview: { ...base, phase: "error", message: friendly(e) } });
+      }
+    },
+
+    closePreview: () => {
+      const p = get().sheet?.preview;
+      if (!p) return;
+      if (p.phase === "loading") void api.toolCancel(p.job).catch(() => {});
+      patch({ preview: null });
+    },
+
+    reviewWord: (w) => {
+      const doc = get().sheet?.doc;
+      if (doc != null) st().goTo(doc, w.page, Math.max(0, w.bbox[1] - 80));
     },
 
     start: async (opts) => {
@@ -234,7 +552,7 @@ export const useTools = create<ToolsStore>((set, get) => {
       const job = ++jobSeq;
       current = job;
       const upd = live(job);
-      patch({ phase: "running", progress: 0, status: "Starting", error: null });
+      patch({ phase: "running", progress: 0, status: "Starting", error: null, preview: null });
       try {
         if (sheet.tool === "compress") {
           // The engine reads the file on disk: pending edits are saved first (the button says so).
@@ -244,10 +562,18 @@ export const useTools = create<ToolsStore>((set, get) => {
           }
           // A taken default name is asked for in a save dialog.
           const saveTo = sheet.audit?.outputExists ? await askSaveTo(d.id, baseName(sheet.audit.defaultOutput)) : undefined;
-          const report = await api.compressStart(job, { doc: d.id, preset: sheet.preset, saveTo }, (p) =>
+          // Advanced: the whole set of settings; presets: just the name, the engine knows the rest.
+          const advanced = sheet.mode === "advanced" && sheet.advanced ? sheet.advanced : undefined;
+          const req = advanced ? { doc: d.id, preset: sheet.preset, custom: advanced, saveTo } : { doc: d.id, preset: sheet.preset, saveTo };
+          const report = await api.compressStart(job, req, (p) =>
             upd({
               progress: p.fraction,
-              status: p.stage === "images" && p.pages > 0 ? `Optimizing images, page ${p.page} of ${p.pages}` : STAGE[p.stage],
+              status:
+                p.stage === "images" && p.pages > 0
+                  ? `Optimizing images, page ${p.page} of ${p.pages}`
+                  : p.stage === "flatten" && p.pages > 0
+                    ? `Flattening transparency, ${p.page} of ${p.pages} pages`
+                    : STAGE[p.stage],
             }),
           );
           get().setSettings({ compressPreset: sheet.preset });
@@ -266,8 +592,9 @@ export const useTools = create<ToolsStore>((set, get) => {
               doc: d.id,
               pages,
               languages: sheet.languages,
-              force: sheet.force,
               backend: sheet.backend,
+              ...requestOptions({ style: sheet.style, dpi: sheet.dpi, skipText: sheet.skipText }),
+              ...(sheet.style === "editable" ? { font: sheet.font } : {}),
               saveTo,
             },
             (p) =>
@@ -277,17 +604,19 @@ export const useTools = create<ToolsStore>((set, get) => {
                   ? {
                       sheet: {
                         ...s.sheet,
-                        progress: p.total ? p.done / p.total : 0,
-                        status: `Reading page ${p.page + 1} (${p.done} of ${p.total})`,
-                        donePages: [...s.sheet.donePages, p.page],
+                        progress: ocrProgress(p, s.sheet.style),
+                        status: p.writing ? `Writing page ${p.done} of ${p.total}` : `Reading page ${p.page + 1} (${p.done} of ${p.total})`,
+                        // Pages show as done when they were read; writing them is the same pages again.
+                        donePages: p.writing ? s.sheet.donePages : [...s.sheet.donePages, p.page],
                       },
                     }
                   : s,
               ),
           );
           if (out.state) edits.applyState(d.id, out.state);
-          const first = sheet.languages[0];
-          if (first) get().setSettings({ ocrLanguage: first, ocrBackend: sheet.backend });
+          if (sheet.languages.length > 0) {
+            get().setSettings({ ocrLanguages: sheet.languages, ocrStyle: sheet.style, ocrDpi: sheet.dpi, ocrSkipText: sheet.skipText, ocrFont: sheet.font });
+          }
           upd({ phase: "done", progress: 1, recognized: out });
         }
       } catch (e) {
@@ -333,6 +662,7 @@ useAi.subscribe((s, prev) => {
 const STAGE: Record<string, string> = {
   open: "Opening",
   scan: "Looking at what is in the file",
+  flatten: "Flattening transparency",
   images: "Optimizing images",
   fonts: "Subsetting fonts",
   write: "Writing the new file",

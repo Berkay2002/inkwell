@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Tool, useAnnot } from "../../lib/annot";
 import {
-  type Annot, FILTERS, KIND_LABEL, STAMPS, groupByPage, quadsFromRects, repliesOf, rgbHex, roots, timeLabel,
+  type Annot, FILTERS, KIND_LABEL, emptyNote, groupByPage, quadsFromRects, repliesOf, rgbHex, roots, timeLabel,
 } from "../../lib/annotLogic";
+import { COMMENTS_CERTIFIED, useExchange } from "../../lib/dataExchange";
 import { type DocState, useStore } from "../../store";
 import { Icon, type IconName } from "../Icons";
+import { StampPicker } from "./StampPicker";
+import { MenuButton } from "../Menu";
 import "./comments.css";
 
 const st = () => useAnnot.getState();
@@ -68,7 +71,6 @@ function selectionQuads(): Map<number, ReturnType<typeof quadsFromRects>> {
 export function CommentTools({ doc }: { doc: DocState }) {
   const open = useAnnot((s) => s.open);
   const tool = useAnnot((s) => s.tool);
-  const stamp = useAnnot((s) => s.stamp);
 
   useEffect(() => {
     if (!open || !MARKUP[tool]) return;
@@ -106,18 +108,12 @@ export function CommentTools({ doc }: { doc: DocState }) {
           <Icon name={t.icon} size={20} filled={tool === t.tool} />
         </button>
       ))}
-      {tool === "stamp" && (
-        <select className="an-stamp" value={stamp} aria-label="Stamp" onChange={(e) => st().setStamp(e.target.value)}>
-          {[...STAMPS, "Date"].map((s) => (
-            <option key={s}>{s}</option>
-          ))}
-        </select>
-      )}
+      {tool === "stamp" && <StampPicker doc={doc} />}
     </div>
   );
 }
 
-const NO_DOC = { items: [] as Annot[], selected: null, editing: null, filter: "all" as const, query: "", error: null };
+const NO_DOC = { items: [] as Annot[], selected: null, editing: null, filter: "all" as const, query: "", error: null, incomplete: false };
 
 export function CommentsPanel({ doc }: { doc: DocState }) {
   const open = useAnnot((s) => s.open);
@@ -127,10 +123,15 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
   const defaultAuthor = useAnnot((s) => s.defaultAuthor);
   const groups = useMemo(() => groupByPage(d.items, d.filter, d.query), [d.items, d.filter, d.query]);
   const total = roots(d.items).length;
+  const note = emptyNote(total, groups.length, d.incomplete);
+  const blocked = useExchange((s) => s.gates[id]?.comments === false);
 
   useEffect(() => {
     if (open) void st().refresh(id);
   }, [open, id, doc.rev]);
+  useEffect(() => {
+    if (open) void useExchange.getState().readGates(id);
+  }, [open, id]);
 
   if (!open) return null;
   const go = (a: Annot) => {
@@ -144,6 +145,21 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
           <span className="ax-title">Comments</span>
           <span className="dim cm-count">{total}</span>
           <span className="grow" />
+          <MenuButton
+            className="ax-icon"
+            label="Comment data files"
+            items={[
+              { label: "Export comments…", onSelect: () => void useExchange.getState().exportComments(id) },
+              {
+                label: "Import comments…",
+                disabled: blocked,
+                title: blocked ? COMMENTS_CERTIFIED : undefined,
+                onSelect: () => void useExchange.getState().importComments(id),
+              },
+            ]}
+          >
+            <Icon name="more" size={16} />
+          </MenuButton>
           <button className="ax-icon" title="Close" aria-label="Close Comments" onClick={() => st().setOpen(false)}>
             <Icon name="close" size={16} />
           </button>
@@ -165,9 +181,7 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
           </div>
         </div>
         <div className="cm-body">
-          {groups.length === 0 && (
-            <p className="dim cm-empty">{total === 0 ? "No comments yet. Pick a tool and mark up the page." : "Nothing matches."}</p>
-          )}
+          {note && <p className="dim cm-empty">{note}</p>}
           {groups.map((g) => (
             <section key={g.page} className="cm-group">
               <h3 className="cm-page">Page {g.page + 1}</h3>
@@ -176,6 +190,7 @@ export function CommentsPanel({ doc }: { doc: DocState }) {
               ))}
             </section>
           ))}
+          {d.incomplete && <p className="dim">This document has too many annotations to list them all. Some are not shown.</p>}
           {d.error && (
             <p className="cm-error" role="alert">
               {d.error}

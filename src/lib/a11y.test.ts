@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     onmessage: ((m: unknown) => void) | null = null;
   },
 }));
-vi.mock("./edit", () => ({ applyState: vi.fn() }));
+vi.mock("./edit", () => ({ applyState: vi.fn(), run: vi.fn() }));
 vi.mock("./api", () => ({ pickSave: vi.fn(), toolCancel: vi.fn(() => Promise.resolve()) }));
 
 import { invoke } from "@tauri-apps/api/core";
@@ -56,7 +56,7 @@ const rule = (over: Partial<RuleResult>): RuleResult => ({
   findings: [],
   ...over,
 });
-const report = (results: RuleResult[], tagged = true): Report => ({ pages: 12, tagged, results });
+const report = (results: RuleResult[], tagged = true): Report => ({ pages: 12, tagged, certified: false, signed: false, results });
 const sample = report([
   rule({ rule: "title", name: "Title", status: "failed", fix: "title", findings: [f({ page: null })] }),
   rule({ rule: "display-doc-title", name: "Title in title bar", status: "passed", fix: "displayDocTitle" }),
@@ -280,6 +280,41 @@ describe("when the report is read again by itself", () => {
   });
 });
 
+describe("a document's protection", () => {
+  const prot = (certified: boolean, signed = false) => ({ certified, signed });
+
+  it("is read again when the document is edited or saved, and the controls follow", async () => {
+    reply({ a11y_protection: prot(false) });
+    await a().protection(1);
+    expect(a().get(1).protection).toEqual(prot(false));
+    reply({ a11y_protection: prot(true, true) });
+    // a save certified it: the revision and the dirty flag change
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], dirty: true } } });
+    await vi.waitFor(() => expect(a().get(1).protection).toEqual(prot(true, true)));
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 4 } } });
+    await vi.waitFor(() => expect(inv.mock.calls.filter((c) => c[0] === "a11y_protection")).toHaveLength(3));
+    // the edit guards go by the new value
+    reply({ a11y_check: sample, a11y_preview: { untagged: false } });
+    expect(await a().fix(1, { fix: "tabOrder" })).toBe(false);
+  });
+
+  it("keeps what it knew when a read fails, and the newest read wins", async () => {
+    reply({ a11y_protection: prot(true) });
+    await a().protection(1);
+    reply({ a11y_protection: () => Promise.reject("no") });
+    expect(await a().refreshProtection(1)).toEqual(prot(true));
+    expect(a().get(1).protection).toEqual(prot(true));
+    let first!: (v: unknown) => void;
+    inv.mockReturnValueOnce(new Promise((r) => (first = r)));
+    const slow = a().refreshProtection(1);
+    reply({ a11y_protection: prot(false) });
+    await a().refreshProtection(1);
+    first(prot(true));
+    await slow;
+    expect(a().get(1).protection).toEqual(prot(false));
+  });
+});
+
 describe("a closed document", () => {
   it("is not brought back by a late progress or completion", async () => {
     let finish: (r: Report) => void = () => {};
@@ -302,6 +337,8 @@ describe("a closed document", () => {
   it("a fix finishing after the tab closed leaves no entry either", async () => {
     reply({ a11y_check: sample, a11y_preview: { untagged: false } });
     await a().check(1);
+    // The first edit of a document reads its protection first; read it here so the next call is the fix.
+    await a().protection(1);
     let finish: (s: unknown) => void = () => {};
     inv.mockImplementationOnce(() => new Promise((res) => (finish = res)));
     const run = a().fix(1, { fix: "tabOrder" });

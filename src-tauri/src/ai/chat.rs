@@ -4,16 +4,16 @@
 //! Inkwell's dynamic tools (`tools.rs`), whose calls are answered here, in the turn's stream loop,
 //! under the user's permission mode. The server is started lazily and restarted after a crash.
 
+use super::gate;
 use super::rpc::{CLOSED, Client, RpcError, SpawnSpec, TOOL_CALL};
 use super::text::{self, Citation, DocText, Task};
-use super::tools::{self, Class, Ctx, DocHost, Mode, Selected, Tool, UiAction};
+use super::tools::{self, Class, DocHost, Mode, Selected, Tool, UiAction};
 use crate::engine::DocId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -47,11 +47,13 @@ pub enum ChatEvent {
     Status { phase: &'static str },
     /// Growth of the visible answer; append it.
     Delta { text: String },
+    /// What was streamed so far was a remark before a tool call, not the answer: drop it. (Codex
+    /// marks such messages as commentary up front; Claude only says so when the message ends.)
+    Reset,
     #[serde(rename_all = "camelCase")]
     Done {
         answer: String,
         citations: Vec<Citation>,
-        followups: Vec<String>,
         /// From the ask until the first answer text.
         first_token_ms: Option<u64>,
         total_ms: u64,
@@ -108,6 +110,8 @@ pub struct Status {
     pub plan: Option<String>,
     pub models: Vec<ModelInfo>,
     pub error: Option<String>,
+    /// The CLI's own version, when it reports one (Claude Code does).
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,8 +157,10 @@ struct SessionState {
     /// Excerpt ids the model already has in this thread.
     sent: HashSet<String>,
     intro_sent: bool,
-    /// Text revision the thread's excerpts came from; an edit starts a new thread.
+    /// Text revision the thread's excerpts came from.
     rev: u32,
+    /// The document changed (an edit) since the model last read it: the next question says so.
+    stale: bool,
 }
 
 #[derive(Default)]
@@ -178,21 +184,10 @@ struct Session {
     mode: Mutex<Mode>,
 }
 
-/// How a call that needed the user's say ended.
-#[derive(Debug, PartialEq, Eq)]
-enum Decision {
-    Apply,
-    Reject,
-    /// No answer within the limit: final, a late Apply is ignored.
-    TimedOut,
-    /// The turn was stopped or the tab closed while the card waited.
-    Stopped,
-}
-
 pub struct Assistant {
     spec: Box<dyn Fn() -> Option<SpawnSpec> + Send + Sync>,
     /// The dynamic tools every thread is started with (`register` adds to them).
-    tools: RwLock<Vec<Arc<Tool>>>,
+    tools: Arc<RwLock<Vec<Arc<Tool>>>>,
     /// Documents with at most this many characters go into the first turn whole.
     inline_max: AtomicUsize,
     /// How long a change card may wait for Apply / Reject, in ms.
@@ -224,7 +219,7 @@ impl Assistant {
     ) -> Arc<Self> {
         Arc::new(Self {
             spec,
-            tools: RwLock::new(tools::builtin()),
+            tools: Arc::new(RwLock::new(tools::builtin())),
             inline_max: AtomicUsize::new(text::INLINE_CHARS),
             approval_ms: AtomicU64::new(APPROVAL_TIMEOUT.as_millis() as u64),
             server: Mutex::new(None),
@@ -240,6 +235,12 @@ impl Assistant {
     /// Adds a tool. Threads already started do not get it, so register before the first question.
     pub fn register(&self, tool: Arc<Tool>) {
         self.tools.write().unwrap().push(tool);
+    }
+
+    /// The registry itself, which the Claude provider's MCP server serves as well: a tool registered
+    /// here is there too, and neither provider has any code of its own for a tool.
+    pub fn tool_registry(&self) -> Arc<RwLock<Vec<Arc<Tool>>>> {
+        self.tools.clone()
     }
 
     /// Overrides the short-document threshold (`text::INLINE_CHARS`); used to measure it.
@@ -332,7 +333,15 @@ impl Assistant {
     // ---- status ---------------------------------------------------------------------------
 
     pub fn status(&self) -> Status {
-        let mut st = Status { installed: true, logged_in: false, account: None, plan: None, models: Vec::new(), error: None };
+        let mut st = Status {
+            installed: true,
+            logged_in: false,
+            account: None,
+            plan: None,
+            models: Vec::new(),
+            error: None,
+            version: None,
+        };
         let (client, _) = match self.ensure_server() {
             Ok(c) => c,
             Err(f) => {
@@ -426,17 +435,20 @@ impl Assistant {
     ) -> Result<String, Failure> {
         // `start` serialises thread starts; `state` is only held briefly, never across the RPC.
         let _start = session.start.lock().unwrap();
-        let stale = {
-            let st = session.state.lock().unwrap();
-            match &st.thread {
-                Some((g, id)) if *g == epoch && client.is_alive() && st.rev == rev => return Ok(id.clone()),
-                // same server, but the document text changed: the old excerpts are wrong
-                Some((g, id)) if *g == epoch && client.is_alive() => Some(id.clone()),
-                _ => None,
+        {
+            let mut st = session.state.lock().unwrap();
+            if let Some((g, id)) = st.thread.clone() {
+                if g == epoch && client.is_alive() {
+                    // An edit changes the text, not the conversation: the thread keeps its memory,
+                    // loses its excerpts (the ids may mean something else now) and is told to read again.
+                    if st.rev != rev {
+                        st.stale |= st.intro_sent;
+                        st.sent.clear();
+                        st.rev = rev;
+                    }
+                    return Ok(id);
+                }
             }
-        };
-        if let Some(id) = stale {
-            release_thread(client, id);
         }
         let mut p = json!({
             "ephemeral": true,
@@ -467,6 +479,7 @@ impl Assistant {
         st.thread = Some((epoch, id.clone()));
         st.sent.clear();
         st.intro_sent = false;
+        st.stale = false;
         st.rev = rev;
         Ok(id)
     }
@@ -558,6 +571,7 @@ impl Assistant {
                 selection: req.selection.as_ref().map(|s| (s.text.as_str(), s.page)),
             };
             let input = text::build_turn(&req.task, &info);
+            let input = if st.stale { format!("{}\n{input}", text::CHANGED_NOTE) } else { input };
             let ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
             // drop notifications left over from an earlier turn; a tool call among them would leave
             // codex waiting for ever
@@ -594,6 +608,7 @@ impl Assistant {
             let mut st = session.state.lock().unwrap();
             st.intro_sent |= first;
             st.sent.extend(fresh_ids);
+            st.stale = false;
         }
         if let Some(a) = session.active.lock().unwrap().as_mut() {
             a.2 = Some(turn_id.clone());
@@ -628,19 +643,17 @@ impl Assistant {
 
         // ---- answer --------------------------------------------------------------------
         let sent = session.state.lock().unwrap().sent.clone();
-        let (answer, citations, followups) = match text::parse_reply(&final_text).filter(|_| req.task.cited()) {
+        let (answer, citations) = match text::parse_reply(&final_text).filter(|_| req.task.cited()) {
             Some(r) => {
                 let mut cs: Vec<Citation> = r.citations.iter().map(|c| text::resolve(c, &text, &sent)).collect();
                 cs.sort_by_key(|c| c.n);
-                let f = r.followups.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).take(4).collect();
-                (r.answer, cs, f)
+                (r.answer, cs)
             }
-            None => (final_text, Vec::new(), Vec::new()),
+            None => (final_text, Vec::new()),
         };
         Ok(ChatEvent::Done {
             answer,
             citations,
-            followups,
             first_token_ms: first_ms,
             total_ms: t0.elapsed().as_millis() as u64,
             prep_ms,
@@ -766,9 +779,8 @@ impl Assistant {
 
     // ---- tools ----------------------------------------------------------------------------
 
-    /// Answers one `item/tool/call`: finds the tool, applies the permission mode (waiting for the
-    /// user when it needs to), runs it and replies with its result. Every outcome, a refusal
-    /// included, is a reply the model can read; the turn is never left hanging.
+    /// Answers one `item/tool/call` through the shared gate (`gate::run_call`) and replies with its
+    /// result. Every outcome, a refusal included, is a reply the model can read.
     #[allow(clippy::too_many_arguments)]
     fn tool_call(
         &self,
@@ -780,138 +792,34 @@ impl Assistant {
         page: &mut u32,
         sink: &Sink,
     ) {
-        let call_id = p.get("callId").and_then(Value::as_str).unwrap_or_default().to_string();
-        let name = p.get("tool").and_then(Value::as_str).unwrap_or_default().to_string();
-        let args = match p.get("arguments") {
-            // some models hand the arguments over as a JSON string
-            Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
-            Some(v) => v.clone(),
-            None => Value::Null,
+        let call_id = p.get("callId").and_then(Value::as_str).unwrap_or_default();
+        let name = p.get("tool").and_then(Value::as_str).unwrap_or_default();
+        let args = gate::parse_args(p.get("arguments"));
+        let g = gate::Gate {
+            tools: &self.tools,
+            approvals: &session.approvals,
+            mode: &session.mode,
+            cancel: &session.cancel,
+            closed: &session.closed,
+            approval_ms: self.approval_ms.load(Ordering::SeqCst),
         };
-        let args = if args.is_null() { json!({}) } else { args };
-        let reply = |r: &Result<tools::Output, String>| {
-            let _ = client.respond(rpc_id, tools::response(r));
-        };
-        let tool = self.tools.read().unwrap().iter().find(|t| t.name == name).cloned();
-        let Some(tool) = tool else {
-            let why = format!("Unknown tool \"{name}\".");
-            sink(ChatEvent::Activity {
-                id: call_id,
-                tool: name,
-                class: Class::Read,
-                label: "Called an unknown tool".into(),
-                state: ActState::Failed,
-                detail: Some(why.clone()),
-            });
-            reply(&Err(why));
-            return;
-        };
-        let label = (tool.label)(&args);
-        let act = |state: ActState, detail: Option<String>| {
-            sink(ChatEvent::Activity {
-                id: call_id.clone(),
-                tool: name.clone(),
-                class: tool.class,
-                label: label.clone(),
-                state,
-                detail,
-            });
-        };
-        if session.closed.load(Ordering::SeqCst) || session.cancel.load(Ordering::SeqCst) {
-            act(ActState::Failed, Some("stopped".into()));
-            reply(&Err("The request was stopped.".into()));
-            return;
+        let out = gate::run_call(&g, call_id, name, &args, ctx, page, sink);
+        if let Ok(o) = &out {
+            session.state.lock().unwrap().sent.extend(o.seen.iter().cloned());
         }
-        // read now, not at the start of the turn: the user may have tightened it since
-        let mode = *session.mode.lock().unwrap();
-        if mode.needs_approval(tool.class) {
-            // registered before the card is announced: the answer may come back at once
-            let (tx, rx) = mpsc::channel();
-            session.approvals.lock().unwrap().insert(call_id.clone(), tx);
-            act(ActState::Waiting, None);
-            let (why, text) = match self.await_decision(session, &call_id, rx) {
-                Decision::Apply => (None, None),
-                Decision::Reject => (
-                    None,
-                    Some("The user rejected this change, so nothing was changed. Do not try it again; \
-                          say what you would have done and ask how they want to proceed."),
-                ),
-                Decision::TimedOut => (
-                    Some("no answer in time"),
-                    Some("The user did not answer in time, so the change was NOT made and cannot be made any more. \
-                          Do not try it again unless they ask; say what you would have done."),
-                ),
-                Decision::Stopped => (Some("stopped"), Some("The request was stopped, so nothing was changed.")),
-            };
-            if let Some(text) = text {
-                act(ActState::Rejected, why.map(str::to_string));
-                reply(&Err(text.into()));
-                return;
-            }
-        }
-        act(ActState::Running, None);
-        let tc = Ctx {
-            text: ctx.text,
-            host: ctx.host,
-            name: &ctx.req.name,
-            current_page: *page,
-            selection: ctx.req.selection.as_ref(),
-        };
-        let out = catch_unwind(AssertUnwindSafe(|| (tool.run)(&tc, &args)))
-            .unwrap_or_else(|_| Err("The tool failed unexpectedly.".into()));
-        match &out {
-            Ok(o) => {
-                session.state.lock().unwrap().sent.extend(o.seen.iter().cloned());
-                if let Some(ui) = &o.ui {
-                    match ui {
-                        UiAction::GoTo { page: p } | UiAction::Show { page: p, .. } => *page = *p,
-                    }
-                    sink(ChatEvent::Ui { action: ui.clone() });
-                }
-                act(ActState::Done, None);
-            }
-            Err(e) => act(ActState::Failed, Some(e.clone())),
-        }
-        reply(&out);
-    }
-
-    /// Waits for the user's Apply / Reject. A cancel, a closed tab and the timeout each end it, and
-    /// the call is final then: the pending entry is removed, so a late Apply finds nothing to answer.
-    fn await_decision(&self, session: &Session, call_id: &str, rx: Receiver<bool>) -> Decision {
-        let deadline = Instant::now() + Duration::from_millis(self.approval_ms.load(Ordering::SeqCst));
-        let decision = loop {
-            match rx.recv_timeout(Duration::from_millis(150)) {
-                Ok(true) => break Decision::Apply,
-                Ok(false) => break Decision::Reject,
-                Err(RecvTimeoutError::Timeout) => {
-                    if session.cancel.load(Ordering::SeqCst) || session.closed.load(Ordering::SeqCst) {
-                        break Decision::Stopped;
-                    }
-                    if Instant::now() > deadline {
-                        break Decision::TimedOut;
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => break Decision::Stopped,
-            }
-        };
-        // `decide` takes the sender out of this map: once it is gone (or the receiver dropped), a
-        // late answer is a no-op. Removing under the lock settles a decide racing the timeout.
-        let mut pending = session.approvals.lock().unwrap();
-        pending.remove(call_id);
-        // an Apply that slipped in between the last poll and the removal came too late: still final
-        decision
+        let _ = client.respond(rpc_id, tools::response(&out));
     }
 }
 
 /// What a turn's tool calls work against.
-struct TurnCtx<'a> {
-    req: &'a AskRequest,
-    text: &'a DocText,
-    host: &'a dyn DocHost,
+pub(super) struct TurnCtx<'a> {
+    pub(super) req: &'a AskRequest,
+    pub(super) text: &'a DocText,
+    pub(super) host: &'a dyn DocHost,
 }
 
 /// Title and outline for the first message of a thread.
-fn header_text(host: &dyn DocHost) -> String {
+pub(super) fn header_text(host: &dyn DocHost) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
     if let Some((_, t)) = host.meta().into_iter().find(|(k, _)| *k == "title") {

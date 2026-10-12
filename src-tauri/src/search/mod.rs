@@ -9,6 +9,7 @@
 //! whitespace, bounded by word characters), translated to MuPDF characters and extended with accents,
 //! hyphenated line ends and snippets.
 
+pub mod catalog;
 pub mod files;
 #[cfg(test)]
 mod tests;
@@ -28,6 +29,11 @@ pub const PAGE_CAP: usize = 2000;
 pub const DOC_CAP: usize = 5000;
 /// Longest query that is searched.
 const QUERY_CAP: usize = 256;
+/// The fold a catalog indexes in: case folded, accents dropped (every option set looks for less than this).
+const WIDEST: SearchOpts = SearchOpts { case_sensitive: false, whole_words: false, ignore_accents: true, comments: false, bookmarks: false, fields: false };
+/// Characters of the longest word a catalog lists, and words listed per page; a page that has more is always verified.
+pub const MAX_TERM: usize = 64;
+pub const MAX_TERMS: usize = 8192;
 
 /// The find options. All off is a plain, case-insensitive text search.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -62,6 +68,17 @@ pub struct Hit {
     pub text: String,
     pub after: String,
     pub source: Source,
+}
+
+/// The words of a query in the widest fold (what a catalog's index is looked up with); none when the
+/// query is only marks. See `PageChars::terms`.
+pub fn index_needle(query: &str) -> Vec<String> {
+    let mut f = Folder::new(WIDEST);
+    let mut folded = Vec::new();
+    for c in query.trim().chars().take(QUERY_CAP) {
+        f.push(c, &mut folded);
+    }
+    folded.into_iter().collect::<String>().split(' ').filter(|w| !w.is_empty()).map(str::to_owned).collect()
 }
 
 /// A query ready to match: folded and with runs of white space collapsed, as the page text is.
@@ -165,6 +182,29 @@ impl Folder {
     }
 }
 
+/// One page's text as a catalog stores it (`PageChars::to_stored`): the characters, which of them are the
+/// synthetic spaces between lines and which are line-end hyphens that join to the next line, and one box
+/// (x0 y0 x1 y1, page points, origin top left) per line, with the index of its first character. A hit lists the
+/// box of the line it is on, not the characters' own rectangles.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct StoredText {
+    pub text: String,
+    pub synth: Vec<u32>,
+    pub skip: Vec<u32>,
+    pub lines: Vec<(u32, [f32; 4])>,
+}
+
+/// `s` folded the way a find folds it (case-insensitive, accents kept), for ordering names the way
+/// searching matches them.
+pub(crate) fn fold_text(s: &str) -> String {
+    let mut f = Folder::new(SearchOpts::default());
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        f.push(c, &mut out);
+    }
+    out.into_iter().collect()
+}
+
 /// The characters of one page, in reading order, with a synthetic space between lines.
 pub struct PageChars {
     /// What the page shows, one entry per character; `None` rect for a synthetic space.
@@ -239,6 +279,62 @@ impl PageChars {
         PageChars { chars, skip }
     }
 
+    /// The page as a catalog keeps it: the characters and one box per line instead of one per character.
+    pub fn to_stored(&self) -> StoredText {
+        let mut st = StoredText::default();
+        let mut line = 0u32;
+        for (i, (c, r, l)) in self.chars.iter().enumerate() {
+            st.text.push(*c);
+            if r.is_none() {
+                st.synth.push(i as u32);
+            }
+            if self.skip[i] {
+                st.skip.push(i as u32);
+            }
+            if r.is_some() && *l != line {
+                line = *l;
+                st.lines.push((i as u32, [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY]));
+            }
+            if let (Some(r), Some(b)) = (r, st.lines.last_mut()) {
+                b.1 = [b.1[0].min(r[0]), b.1[1].min(r[1]), b.1[2].max(r[2]), b.1[3].max(r[3])];
+            }
+        }
+        st
+    }
+
+    /// A page from its stored form (which may come from a PDF's embedded index, so nothing in it is trusted:
+    /// indexes out of range are ignored). Every character of a line gets the line's box.
+    pub fn from_stored(st: &StoredText) -> PageChars {
+        let n = st.text.chars().count();
+        let mut skip = vec![false; n];
+        for &i in &st.skip {
+            if let Some(s) = skip.get_mut(i as usize) {
+                *s = true;
+            }
+        }
+        let mut synth = vec![false; n];
+        for &i in &st.synth {
+            if let Some(s) = synth.get_mut(i as usize) {
+                *s = true;
+            }
+        }
+        let mut k = 0usize;
+        let chars = st
+            .text
+            .chars()
+            .enumerate()
+            .map(|(i, c)| {
+                while k < st.lines.len() && st.lines[k].0 as usize <= i {
+                    k += 1;
+                }
+                // `k` lines have started: the character is on line `k` (1-based), or on none yet.
+                let rect = (!synth[i]).then(|| k.checked_sub(1).map(|j| st.lines[j].1)).flatten();
+                (c, rect, k as u32)
+            })
+            .collect();
+        PageChars { chars, skip }
+    }
+
     /// Every match of `q`, in reading order, at most `PAGE_CAP`.
     pub fn find(&self, q: &Query, source: Source) -> Vec<Hit> {
         self.find_limit(q, source, PAGE_CAP)
@@ -261,9 +357,10 @@ impl PageChars {
         spans.into_iter().map(|(start, end)| self.hit(start, end, source)).collect()
     }
 
-    /// Where `q` matches, as (first, last) character indexes, with the line-end hyphens dropped or kept.
-    fn spans(&self, q: &Query, keep_hyphens: bool, limit: usize) -> Vec<(usize, usize)> {
-        let mut f = Folder::new(q.opts);
+    /// The folded characters of the page (each with the index of the character it came from), runs of white space
+    /// collapsed, with the line-end hyphens dropped or kept.
+    fn flat(&self, opts: SearchOpts, keep_hyphens: bool) -> Vec<(char, usize)> {
+        let mut f = Folder::new(opts);
         let mut flat: Vec<(char, usize)> = Vec::with_capacity(self.chars.len());
         let mut buf: Vec<char> = Vec::new();
         for (i, (c, _, _)) in self.chars.iter().enumerate() {
@@ -276,7 +373,37 @@ impl PageChars {
                 flat.push((*d, i));
             }
         }
-        let flat = collapse(flat);
+        collapse(flat)
+    }
+
+    /// The words (runs between spaces) of the page in the widest fold, over both readings of a line-end hyphen:
+    /// what a catalog indexes. Any match of any query, under any options, lies inside a run of these words.
+    /// Longer than `MAX_TERM` characters, or more than `MAX_TERMS` words: not listed, and `false` comes back (the
+    /// page must then be verified for every query).
+    pub fn terms(&self, out: &mut std::collections::BTreeSet<String>) -> bool {
+        let mut complete = true;
+        for keep in [false, true] {
+            if keep && !self.skip.iter().any(|s| *s) {
+                break;
+            }
+            let flat = self.flat(WIDEST, keep);
+            for w in flat.split(|c| c.0 == ' ') {
+                if w.is_empty() {
+                    continue;
+                }
+                if w.len() > MAX_TERM || out.len() >= MAX_TERMS {
+                    complete = false;
+                } else {
+                    out.insert(w.iter().map(|c| c.0).collect());
+                }
+            }
+        }
+        complete
+    }
+
+    /// Where `q` matches, as (first, last) character indexes, with the line-end hyphens dropped or kept.
+    fn spans(&self, q: &Query, keep_hyphens: bool, limit: usize) -> Vec<(usize, usize)> {
+        let flat = self.flat(q.opts, keep_hyphens);
         let n = q.needle.len();
         let word = |k: Option<&(char, usize)>| k.is_some_and(|c| c.0.is_alphanumeric());
         let mark = |k: Option<&(char, usize)>| k.is_some_and(|c| is_mark(c.0));
@@ -348,44 +475,94 @@ fn tail(s: &str, n: usize) -> String {
     s.chars().skip(k.saturating_sub(n)).collect()
 }
 
+/// Everything the matcher needs of one page: its text, and the comments and form-field values. `find_in_page`
+/// is `extract_record` then `PageRec::find`; a catalog keeps the record and runs `find` alone, so both give the
+/// same hits by construction.
+pub struct PageRec {
+    pub text: PageChars,
+    /// The text of every markup annotation (not links, widgets, popups or redaction marks) and its bounds.
+    pub comments: Vec<(String, [f32; 4])>,
+    /// The value of every form field and its bounds.
+    pub fields: Vec<(String, [f32; 4])>,
+}
+
+/// The record of `page` (0-based); comments and fields only when `extras` (the find options ask for them, or
+/// a catalog is being built).
+pub fn extract_record(doc: &Document, page: u32, extras: bool) -> Result<PageRec> {
+    let p = doc.load_page(page as i32)?;
+    let mut rec = PageRec { text: PageChars::of(&p)?, comments: Vec::new(), fields: Vec::new() };
+    if !extras {
+        return Ok(rec);
+    }
+    // Not every document is a PDF with annotations; the text hits stand either way.
+    if let Ok((comments, fields)) = extras_of(p) {
+        rec.comments = comments;
+        rec.fields = fields;
+    }
+    Ok(rec)
+}
+
+/// The comments (text and box) and the form-field values (text and box) of a PDF page, in page space.
+/// The one place both are read: the embedded index's fingerprint hashes exactly what is stored here.
+pub(crate) fn extras_of(p: mupdf::Page) -> Result<(Vec<(String, [f32; 4])>, Vec<(String, [f32; 4])>)> {
+    let origin = p.bounds()?;
+    let pp = PdfPage::try_from(p)?;
+    let rect = |r: mupdf::Rect| [r.x0 - origin.x0, r.y0 - origin.y0, r.x1 - origin.x0, r.y1 - origin.y0];
+    let (mut comments, mut fields) = (Vec::new(), Vec::new());
+    for a in pp.annotations() {
+        let Ok(t) = a.r#type() else { continue };
+        if matches!(t, PdfAnnotationType::Link | PdfAnnotationType::Widget | PdfAnnotationType::Popup | PdfAnnotationType::Redact) {
+            continue;
+        }
+        let Ok(Some(c)) = a.contents() else { continue };
+        let Ok(b) = a.bounds() else { continue };
+        comments.push((c.to_string(), rect(b)));
+    }
+    for w in pp.widgets() {
+        let Ok(Some(v)) = w.value() else { continue };
+        let Ok(b) = w.annotation().bounds() else { continue };
+        fields.push((v, rect(b)));
+    }
+    Ok((comments, fields))
+}
+
+impl PageRec {
+    /// Every hit on the page: its text, and per the options its comments and form-field values. One budget per
+    /// page across text, comments and fields: the page never lists more than `PAGE_CAP`.
+    pub fn find(&self, q: &Query) -> Vec<Hit> {
+        let mut hits = self.text.find(q, Source::Text);
+        if !(q.opts.comments || q.opts.fields) || hits.len() >= PAGE_CAP {
+            return hits;
+        }
+        let room = |hits: &Vec<Hit>| PAGE_CAP.saturating_sub(hits.len());
+        if q.opts.comments {
+            for (c, b) in &self.comments {
+                for mut h in PageChars::of_text(c).find_limit(q, Source::Comment, room(&hits)) {
+                    h.rects = vec![*b];
+                    hits.push(h);
+                }
+            }
+        }
+        if q.opts.fields {
+            for (v, b) in &self.fields {
+                for mut h in PageChars::of_text(v).find_limit(q, Source::Field, room(&hits)) {
+                    h.rects = vec![*b];
+                    hits.push(h);
+                }
+            }
+        }
+        hits
+    }
+}
+
 /// Every hit on `page` (0-based): its text, and per the options its comments and form-field values.
 pub fn find_in_page(doc: &Document, page: u32, q: &Query) -> Result<Vec<Hit>> {
-    let p = doc.load_page(page as i32)?;
-    let mut hits = PageChars::of(&p)?.find(q, Source::Text);
-    if !(q.opts.comments || q.opts.fields) || hits.len() >= PAGE_CAP {
-        return Ok(hits);
-    }
-    // One budget per page across text, comments and fields: the page never lists more than `PAGE_CAP`.
-    let room = |hits: &Vec<Hit>| PAGE_CAP.saturating_sub(hits.len());
-    let origin = p.bounds()?;
-    // Not every document is a PDF with annotations; the text hits stand either way.
-    let Ok(pp) = PdfPage::try_from(p) else { return Ok(hits) };
-    let rect = |r: mupdf::Rect| [r.x0 - origin.x0, r.y0 - origin.y0, r.x1 - origin.x0, r.y1 - origin.y0];
-    if q.opts.comments {
-        for a in pp.annotations() {
-            let Ok(t) = a.r#type() else { continue };
-            if matches!(t, PdfAnnotationType::Link | PdfAnnotationType::Widget | PdfAnnotationType::Popup | PdfAnnotationType::Redact) {
-                continue;
-            }
-            let Ok(Some(c)) = a.contents() else { continue };
-            let Ok(b) = a.bounds() else { continue };
-            for mut h in PageChars::of_text(c).find_limit(q, Source::Comment, room(&hits)) {
-                h.rects = vec![rect(b)];
-                hits.push(h);
-            }
-        }
-    }
-    if q.opts.fields {
-        for w in pp.widgets() {
-            let Ok(Some(v)) = w.value() else { continue };
-            let Ok(b) = w.annotation().bounds() else { continue };
-            for mut h in PageChars::of_text(&v).find_limit(q, Source::Field, room(&hits)) {
-                h.rects = vec![rect(b)];
-                hits.push(h);
-            }
-        }
-    }
-    Ok(hits)
+    Ok(extract_record(doc, page, q.opts.comments || q.opts.fields)?.find(q))
+}
+
+/// The hits of a bookmark title that goes to `page`.
+pub fn bookmark_hits_of(page: u32, title: &str, q: &Query) -> Vec<(u32, Hit)> {
+    PageChars::of_text(title).find(q, Source::Bookmark).into_iter().map(|h| (page, h)).collect()
 }
 
 /// Bookmarks whose title matches, as (page, hit); a bookmark that goes nowhere is not a result.
@@ -393,9 +570,7 @@ pub fn bookmark_hits(doc: &Document, q: &Query) -> Result<Vec<(u32, Hit)>> {
     fn walk(items: &[mupdf::Outline], q: &Query, out: &mut Vec<(u32, Hit)>) {
         for o in items {
             if let Some(d) = o.dest {
-                for h in PageChars::of_text(&o.title).find(q, Source::Bookmark) {
-                    out.push((d.loc.page_number, h));
-                }
+                out.extend(bookmark_hits_of(d.loc.page_number, &o.title, q));
             }
             walk(&o.down, q, out);
         }

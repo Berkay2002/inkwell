@@ -127,6 +127,31 @@ fn rights_map_to_bits_and_back() {
 }
 
 #[test]
+fn bits_9_to_12_of_a_revision_2_file_follow_the_older_bits() {
+    // print and copy only, 9 to 12 clear (the way an old writer leaves them)
+    let p = 0xfffff0c0u32 as i32 | 0x4 | 0x10;
+    let r3 = Rights::from_p_r(p, Some(3));
+    assert!(!r3.forms && !r3.assemble && !r3.accessibility && r3.printing == Printing::Low);
+    assert_eq!(Rights::from_p_r(p, None), r3, "an unknown revision is read as the current one");
+    for r in [Some(2), Some(1)] {
+        let old = Rights::from_p_r(p, r);
+        // copy allows screen readers (bit 10 = 5) and sets printing quality; page changes follow modify (11 = 4)
+        // and form filling follows annotate (9 = 6): neither is set here
+        assert!(old.copy && old.accessibility && old.printing == Printing::High, "{r:?}");
+        assert!(!old.modify && !old.assemble && !old.annotate && !old.forms, "{r:?}");
+        assert!(!old.may_extract(), "copy without any change right is not extractable: {r:?}");
+        // modify on: page changes follow it
+        let m = Rights::from_p_r(p | 0x8, r);
+        assert!(m.modify && m.assemble && !m.forms && m.may_extract(), "{r:?}");
+        // annotate on: forms follow it; the stale bits 9 to 12 of the number are ignored
+        let a = Rights::from_p_r(p | 0x20, r);
+        assert!(a.annotate && a.forms && !a.assemble, "{r:?}");
+        let stale = Rights::from_p_r(p | 0xf00, r);
+        assert!(!stale.forms && !stale.assemble, "bits 9 to 12 as written do not count below revision 3: {r:?}");
+    }
+}
+
+#[test]
 fn debug_hides_passwords() {
     let s = format!("{:?}", spec());
     assert!(!s.contains("sesame") && !s.contains("owner-secret"), "{s}");
@@ -638,6 +663,41 @@ fn passwords_are_normalised_and_control_characters_refused() {
     let id3 = open_with(&eng3, &both, "open sesame");
     assert_eq!(invalid_code(eng3.remove_security(id3, Some("guess"), EditSource::User)), "bad-permissions-password");
     eng3.remove_security(id3, Some(owner_typed), EditSource::User).unwrap();
+}
+
+/// SASLprep's mapping step: a password typed with a non-ASCII space or an invisible mark opens a file written
+/// with the plain one (what Acrobat and qpdf hash); the form as typed is still tried first.
+#[test]
+fn a_password_with_odd_spaces_or_invisible_marks_opens_the_file_under_its_mapped_form() {
+    // NFKC leaves U+1680 and the B.1 characters alone, so only the mapping step reaches the plain form
+    assert_eq!(crate::protect::nfkc_form("ab\u{1680}cd\u{ad}-ef\u{200d}\u{fe0f}").as_deref().map(String::as_str), Some("ab cd-ef"));
+    assert_eq!(crate::protect::nfkc_form("a\u{a0}b\u{3000}c").as_deref().map(String::as_str), Some("a b c"));
+    assert_eq!(crate::protect::nfkc_form("a\u{200b}b").as_deref().map(String::as_str), Some("ab"), "U+200B is in B.1 and C.1.2: nothing");
+    assert!(crate::protect::nfkc_form("plain ascii-pass").is_none());
+    assert!(crate::protect::nfkc_form("\u{200b}\u{ad}").is_none(), "all invisible: nothing to retry with");
+
+    let d = dir("saslprep-map");
+    let src = fixture_at(&d, "a.pdf", 1);
+    let out = d.join("locked.pdf").to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &src);
+    let plain = tweak(|s| {
+        (s.open_password, s.permissions_password, s.printing, s.changes, s.copy) =
+            (Some("ab cd-ef".into()), None, Printing::High, Changes::AllButExtract, true);
+    });
+    eng.protect(id, plain, None, EditSource::User).unwrap();
+    eng.save(id, Some(&out)).unwrap();
+
+    for typed in ["ab cd-ef", "ab\u{1680}cd\u{ad}-ef", "ab\u{200c}\u{a0}cd-ef\u{fe0f}"] {
+        let eng2 = Engine::new(2, 64 << 20);
+        let id2 = open_with(&eng2, &out, typed);
+        assert!(eng2.security_info(id2).unwrap().encrypted, "{typed:?}");
+        assert!(!eng2.page_text(id2, 0).unwrap().is_empty(), "{typed:?}");
+    }
+    // a different password is still wrong, and so is one that differs by more than the mapped characters
+    let eng2 = Engine::new(2, 64 << 20);
+    let (id2, _) = eng2.open_pending(&out);
+    assert!(matches!(eng2.authenticate(id2, "abcd-ef"), Err(EngineError::BadPassword)));
 }
 
 /// The step and the save of Protect are one operation under one lock: edits made at the same time

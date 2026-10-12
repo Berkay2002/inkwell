@@ -44,6 +44,8 @@ pub struct ImageRef {
 pub struct WidgetInfo {
     pub name: String,
     pub value: Option<String>,
+    /// A password field (`/Ff` bit 14): its value is a secret and is never put into a report.
+    pub secret: bool,
     pub rect: Rect4,
 }
 
@@ -390,7 +392,8 @@ impl Snap {
                 "Link" | "Popup" => {}
                 "Widget" => {
                     let value = field_attr(&a, "V").and_then(|v| value_string(&v));
-                    widgets.push(WidgetInfo { name: field_name(&a), value, rect });
+                    let secret = field_attr(&a, "Ff").and_then(|f| f.as_int().ok()).is_some_and(|f| f & (1 << 13) != 0);
+                    widgets.push(WidgetInfo { name: field_name(&a), value, secret, rect });
                 }
                 _ => {
                     let colour = gd(&a, "C").and_then(|c| {

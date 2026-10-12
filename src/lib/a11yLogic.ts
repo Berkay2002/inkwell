@@ -17,7 +17,7 @@ export interface Finding {
   message: string;
 }
 
-export type FixKind = "title" | "displayDocTitle" | "language" | "tabOrder" | "fieldTooltips" | "figureAlt" | "autotag";
+export type FixKind = "title" | "displayDocTitle" | "language" | "tabOrder" | "fieldTooltips" | "figureAlt" | "autotag" | "metadata" | "parentTree";
 
 export interface RuleResult {
   rule: string;
@@ -32,8 +32,16 @@ export interface RuleResult {
 export interface Report {
   pages: number;
   tagged: boolean;
+  /** A certification (/DocMDP): the engine refuses every edit. */
+  certified: boolean;
+  /** Signed: edits are saved after the signed bytes. */
+  signed: boolean;
   results: RuleResult[];
 }
+
+export const CERTIFIED_WHY = "This document is certified: changing its tags or reading order would void the certification, so Inkwell leaves them as they are.";
+export const SIGNED_NOTE =
+  "This document is signed. Edits are saved after the signed part, so the signature still covers the original; readers will show that the document changed after it was signed. Anything added and then removed in the same session stays in the saved file.";
 
 export interface Progress {
   done: number;
@@ -59,6 +67,8 @@ export type Fix =
   | { fix: "fieldTooltips" }
   | { fix: "figureAlt"; xref: number; alt: string }
   | { fix: "autotag" }
+  | { fix: "metadata" }
+  | { fix: "parentTree" }
   | { fix: "many"; fixes: Fix[] };
 
 export const GROUPS = ["Document", "Page content", "Forms", "Alternate text", "Tables", "Lists", "Headings"] as const;
@@ -159,6 +169,10 @@ export function fixFor(x: RuleResult, lang: string): Fix | null {
       return { fix: "fieldTooltips" };
     case "autotag":
       return { fix: "autotag" };
+    case "metadata":
+      return { fix: "metadata" };
+    case "parentTree":
+      return { fix: "parentTree" };
     default:
       return null;
   }
@@ -177,6 +191,10 @@ export function fixEffect(x: RuleResult, file: string, lang: string): string | n
       return "Tabs through links and fields in structure order.";
     case "fieldTooltips":
       return "Gives each field a tooltip made from its name.";
+    case "metadata":
+      return "Adds the PDF/UA identification and the title to the XMP metadata.";
+    case "parentTree":
+      return "Rebuilds the links between the tags and the page content from the tag tree.";
     default:
       return null;
   }

@@ -6,10 +6,17 @@
 //! 37 pages, 4 bookmarks") is what the run writes. Files that cannot be taken (password protected,
 //! no copying allowed, unreadable) are left out with a reason; they never stop the others.
 //!
+//! A locked source goes in when its password came with the request (`SourceSpec::password`, held in
+//! memory only: a `Secret` zeroes itself when dropped and is never serialised or printed). The result
+//! has no password. With `keep_labels`, each source's `/PageLabels` travel with its pages (PDF 32000
+//! 12.4.2): a source without labels gets plain decimal numbers that carry on the combined page numbers.
+//!
 //! The result is written to a new file; no open document is touched.
 
+use super::labels::{self, LabelRange, LabelStyle};
 use super::{Result, bad};
-use crate::engine::edit::{OutNode, RawOut, Readback, graft_pages_ex, open_source, page_size, read_outline, rewrite_opts, write_atomic, write_doc};
+use crate::batch::action::Secret;
+use crate::engine::edit::{OutNode, RawOut, Readback, graft_pages_ex, open_source_ex, page_size, read_outline, rewrite_opts, write_atomic, write_doc};
 use crate::engine::{Engine, EngineError};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::{Font, Size};
@@ -27,6 +34,9 @@ pub struct SourceSpec {
     /// The bookmark's title; none: the file's name without .pdf.
     #[serde(default)]
     pub title: Option<String>,
+    /// The open password of a locked file, typed in the sheet; none for a file that has none.
+    #[serde(default)]
+    pub password: Option<Secret>,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +48,13 @@ pub struct CombineOptions {
     pub keep_outlines: bool,
     /// A contents page in front, one line per file with its page number and a link.
     pub contents_page: bool,
+    /// Each source's page labels, carried over to the pages it gives.
+    #[serde(default = "yes")]
+    pub keep_labels: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -69,6 +86,10 @@ pub struct FilePlan {
     pub used: u32,
     pub has_outline: bool,
     pub has_fields: bool,
+    /// The file has security (a password, owner restrictions, or both): none of it goes into the result.
+    pub encrypted: bool,
+    /// Something the person should know about what this file brings, none when there is nothing.
+    pub note: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -102,6 +123,7 @@ struct Source {
     /// The file's path, length and time as they were when the plan was made: a file that differs when its
     /// turn comes is not the one that was planned.
     key: Option<FactsKey>,
+    password: Option<Secret>,
 }
 
 const TOC_SIZE: f32 = 12.0;
@@ -188,6 +210,14 @@ struct Facts {
     pages: u32,
     has_outline: bool,
     has_fields: bool,
+    /// The file carries a digital signature (its signature fields arrive empty).
+    signed: bool,
+    /// The file has an `/Encrypt` dictionary, an owner-password-only one included.
+    encrypted: bool,
+    /// It asked for an open password (a user password; an owner-password-only file does not).
+    locked: bool,
+    /// What its permission bits withhold that the result will allow ("printing", "commenting").
+    withheld: Vec<&'static str>,
     /// Bookmarks the file's own outline holds.
     outline_nodes: u32,
     /// The first page's size in points.
@@ -199,7 +229,7 @@ struct Facts {
 
 /// A file that is left out for what it is (password, no copying, no pages).
 fn left_out(state: FileState, message: String) -> Facts {
-    Facts { state, message: Some(message), pages: 0, has_outline: false, has_fields: false, outline_nodes: 0, first_size: [0.0, 0.0], stable: true }
+    Facts { state, message: Some(message), pages: 0, has_outline: false, has_fields: false, signed: false, encrypted: false, locked: false, withheld: Vec::new(), outline_nodes: 0, first_size: [0.0, 0.0], stable: true }
 }
 
 /// A file that could not be read: left out now, asked again next time.
@@ -209,17 +239,36 @@ fn failed(message: String) -> Facts {
 
 /// Opens `path` to graft pages from. `Err` holds why the file cannot go in: its state and a reason that
 /// reads on after the file name.
-fn open_for_graft(path: &str) -> std::result::Result<PdfDocument, (FileState, String)> {
+fn open_for_graft(path: &str, password: Option<&str>) -> std::result::Result<(PdfDocument, bool), (FileState, String)> {
     let name = file_name(path);
-    let src = match open_source(path, None) {
+    let (src, locked) = match open_source_ex(path, password) {
         Ok(d) => d,
-        Err(EngineError::NeedsPassword | EngineError::BadPassword) => return Err((FileState::Encrypted, format!("{name} is password protected"))),
+        Err(EngineError::NeedsPassword) => return Err((FileState::Encrypted, format!("{name} is password protected"))),
+        Err(EngineError::BadPassword) => return Err((FileState::Encrypted, format!("{name} does not open with the password given"))),
         Err(e) => return Err((FileState::Unreadable, format!("{name} could not be read ({e})"))),
     };
-    if !crate::protect::Rights::from_p(src.permissions().bits() as i32).may_extract() {
+    if !crate::protect::Rights::of(&src).may_extract() {
         return Err((FileState::NoCopy, format!("{name} doesn't allow copying or page changes")));
     }
-    Ok(src)
+    Ok((src, locked))
+}
+
+/// The rights a source's permission bits refuse that the result will allow. Copying is not listed: a file
+/// that forbids it never gets this far.
+fn withheld_rights(r: crate::protect::Rights) -> Vec<&'static str> {
+    use crate::protect::Printing;
+    let mut out = Vec::new();
+    match r.printing {
+        Printing::None => out.push("printing"),
+        Printing::Low => out.push("high quality printing"),
+        Printing::High => {}
+    }
+    for (allowed, name) in [(r.modify, "editing"), (r.assemble, "page changes"), (r.annotate, "commenting"), (r.forms, "form filling"), (r.accessibility, "screen reader access")] {
+        if !allowed {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// What planning needs from an opened file; `None` when it has no pages.
@@ -232,20 +281,25 @@ fn read_facts(src: &PdfDocument) -> Result<Option<Facts>> {
     let has_outline = src.catalog()?.get_dict("Outlines")?.is_some_and(|o| !o.is_null().unwrap_or(true) && o.get_dict("First").ok().flatten().is_some());
     let has_fields = src.catalog()?.get_dict("AcroForm")?.and_then(|f| f.get_dict("Fields").ok().flatten()).is_some_and(|f| f.len().unwrap_or(0) > 0);
     let first_size = page_size(src, 0)?;
-    Ok(Some(Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, outline_nodes: count_nodes(&outline), first_size, stable: true }))
+    let signed = crate::outline::signed(src);
+    let encrypt = src.trailer()?.get_dict("Encrypt")?.filter(|e| !e.is_null().unwrap_or(true));
+    let int = |k: &str| encrypt.as_ref().and_then(|e| e.get_dict(k).ok().flatten()).and_then(|o| o.as_int().ok());
+    let rights = crate::protect::Rights::from_p_r(int("P").unwrap_or(src.permissions().bits() as i32), int("R"));
+    let withheld = if encrypt.is_some() { withheld_rights(rights) } else { Vec::new() };
+    Ok(Some(Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, signed, encrypted: encrypt.is_some(), locked: false, withheld, outline_nodes: count_nodes(&outline), first_size, stable: true }))
 }
 
 /// Opens `path`, reads what planning needs and lets the document go again. A file that cannot be read
 /// (at any step) is left out on its own: it never fails the whole look.
-fn facts_of(path: &str) -> Facts {
+fn facts_of(path: &str, password: Option<&str>) -> Facts {
     let name = file_name(path);
-    let src = match open_for_graft(path) {
+    let (src, locked) = match open_for_graft(path, password) {
         Ok(d) => d,
         Err((FileState::Unreadable, why)) => return failed(format!("{why}, so it is left out.")),
         Err((state, why)) => return left_out(state, format!("{why}, so it is left out.")),
     };
     match read_facts(&src) {
-        Ok(Some(f)) => f,
+        Ok(Some(f)) => Facts { locked, ..f },
         Ok(None) => left_out(FileState::Unreadable, format!("{name} has no pages, so it is left out.")),
         Err(e) => failed(format!("{name} could not be read ({e}), so it is left out.")),
     }
@@ -264,15 +318,20 @@ fn facts_key(path: &str) -> Option<FactsKey> {
     Some((path.to_string(), m.len(), m.modified().ok()))
 }
 
-/// The cached facts of `path`, or read now (and kept for the next look).
-fn facts_cached(path: &str) -> Facts {
+/// The cached facts of `path`, or read now (and kept for the next look). A file opened with a password is
+/// never cached: the key does not hold the password, and what it opened with must not answer for a look
+/// that has none.
+fn facts_cached(path: &str, password: Option<&str>) -> Facts {
+    if password.is_some() {
+        return facts_of(path, password);
+    }
     let key = facts_key(path);
     if let Some(k) = &key {
         if let Some(f) = facts_cache().lock().ok().and_then(|c| c.get(k).cloned()) {
             return f;
         }
     }
-    let facts = facts_of(path);
+    let facts = facts_of(path, None);
     if !facts.stable {
         return facts;
     }
@@ -283,6 +342,10 @@ fn facts_cached(path: &str) -> Facts {
         c.insert(k, facts.clone());
     }
     facts
+}
+
+fn pw(s: &SourceSpec) -> Option<&str> {
+    s.password.as_ref().map(Secret::as_str)
 }
 
 /// Decides what happens to every file, and what the result holds. `orders[i]` is the pages of file
@@ -305,7 +368,22 @@ fn plan_from(specs: &[SourceSpec], opt: CombineOptions, facts: &[Facts]) -> Resu
             used: 0,
             has_outline: f.has_outline,
             has_fields: f.has_fields,
+            encrypted: f.encrypted && f.state == FileState::Ready,
+            note: None,
         };
+        if f.state == FileState::Ready {
+            let mut notes = Vec::new();
+            if f.signed {
+                notes.push(format!("{name}'s signature is not carried over"));
+            }
+            if f.encrypted {
+                let cut = if f.withheld.is_empty() { String::new() } else { format!(" (it does not allow {})", f.withheld.join(", ")) };
+                // An owner-password-only file has no password to carry over.
+                let what = if f.locked { "password and restrictions are" } else { "security is" };
+                notes.push(format!("{name}'s {what} not carried over{cut}"));
+            }
+            plan.note = (!notes.is_empty()).then(|| notes.join(". "));
+        }
         if f.state != FileState::Ready {
             files.push(plan);
             orders.push(None);
@@ -365,7 +443,7 @@ fn prepare(specs: &[SourceSpec], opt: CombineOptions) -> Result<(Plan, Vec<Optio
     }
     let _ = mupdf::Context::get();
     // each key is taken before its file is read, so a change during the read shows up at the run
-    let seen: Vec<(Option<FactsKey>, Facts)> = specs.iter().map(|s| (facts_key(&s.path), facts_of(&s.path))).collect();
+    let seen: Vec<(Option<FactsKey>, Facts)> = specs.iter().map(|s| (facts_key(&s.path), facts_of(&s.path, pw(s)))).collect();
     let facts: Vec<Facts> = seen.iter().map(|(_, f)| f.clone()).collect();
     let (plan, orders) = plan_from(specs, opt, &facts)?;
     let mut first = None;
@@ -377,7 +455,7 @@ fn prepare(specs: &[SourceSpec], opt: CombineOptions) -> Result<(Plan, Vec<Optio
         .map(|(((s, order), f), (key, facts))| {
             let pages = order?;
             first.get_or_insert(facts.first_size);
-            Some(Source { path: s.path.clone(), pages, title: f.title.clone(), key })
+            Some(Source { path: s.path.clone(), pages, title: f.title.clone(), key, password: s.password.clone() })
         })
         .collect();
     Ok((plan, sources, first))
@@ -390,7 +468,7 @@ pub fn inspect(specs: &[SourceSpec], opt: CombineOptions) -> Result<Plan> {
         return Err(bad("add at least one file to combine"));
     }
     let _ = mupdf::Context::get();
-    let facts: Vec<Facts> = specs.iter().map(|s| facts_cached(&s.path)).collect();
+    let facts: Vec<Facts> = specs.iter().map(|s| facts_cached(&s.path, pw(s))).collect();
     plan_from(specs, opt, &facts).map(|(p, _)| p)
 }
 
@@ -475,26 +553,26 @@ fn outline_level(doc: &mut PdfDocument, parent: &PdfObject, nodes: &[OutNode]) -
 }
 
 /// Helvetica as an embedded font, for the contents pages: every character it has.
-struct Face {
-    font: Font,
+pub(super) struct Face {
+    pub(super) font: Font,
 }
 
 impl Face {
-    fn gid(&self, c: char) -> u16 {
+    pub(super) fn gid(&self, c: char) -> u16 {
         let g = self.font.encode_character(c as i32).unwrap_or(0);
         if g > 0 { g as u16 } else { self.font.encode_character('?' as i32).unwrap_or(0).max(0) as u16 }
     }
 
-    fn width(&self, s: &str, size: f32) -> f32 {
+    pub(super) fn width(&self, s: &str, size: f32) -> f32 {
         s.chars().map(|c| self.font.advance_glyph(self.gid(c) as i32).unwrap_or(0.5)).sum::<f32>() * size
     }
 
-    fn hex(&self, s: &str) -> String {
+    pub(super) fn hex(&self, s: &str) -> String {
         s.chars().filter(|c| !c.is_control()).map(|c| format!("{:04x}", self.gid(c))).collect()
     }
 
     /// `s` cut with an ellipsis to fit `max` points.
-    fn fit(&self, s: &str, size: f32, max: f32) -> String {
+    pub(super) fn fit(&self, s: &str, size: f32, max: f32) -> String {
         if self.width(s, size) <= max {
             return s.to_string();
         }
@@ -571,6 +649,9 @@ struct Grafted {
     kept: Vec<Vec<OutNode>>,
     /// (title, pages used) of every file that went in
     done: Vec<(String, u32)>,
+    /// The label sections of the result, in its final page numbers (the contents pages counted); empty
+    /// when the labels are not kept.
+    labels: Vec<LabelRange>,
 }
 
 const CHANGED: &str = "Add the files again to see the new plan.";
@@ -578,13 +659,14 @@ const CHANGED: &str = "Add the files again to see the new plan.";
 /// Grafts the planned sources into a new document, each opened when its turn comes and closed as soon as
 /// its pages are in, so big files are never all held at once. A file that is not the one that was planned
 /// (its length or time differ from when the plan was made, or its pages no longer fit) stops the run.
-fn graft_sources(sources: Vec<Option<Source>>, opt: CombineOptions) -> Result<Grafted> {
+fn graft_sources(sources: Vec<Option<Source>>, opt: CombineOptions, toc_pages: u32) -> Result<Grafted> {
     let mut dst = PdfDocument::new();
     let mut tops: Vec<PdfObject> = Vec::new();
     let mut kept: Vec<Vec<OutNode>> = Vec::new();
     let mut done: Vec<(String, u32)> = Vec::new();
+    let mut sections: Vec<LabelRange> = Vec::new();
     for s in sources.into_iter().flatten() {
-        let doc = open_for_graft(&s.path).map_err(|(_, why)| bad(format!("{why} now, so it can't be combined. {CHANGED}")))?;
+        let (doc, _) = open_for_graft(&s.path, s.password.as_ref().map(Secret::as_str)).map_err(|(_, why)| bad(format!("{why} now, so it can't be combined. {CHANGED}")))?;
         // Checked right after the open: the handle is of the file this key was read from, or the key differs.
         let changed = || bad(format!("{} has changed since it was added, so it can't be combined. {CHANGED}", file_name(&s.path)));
         if facts_key(&s.path) != s.key {
@@ -597,11 +679,32 @@ fn graft_sources(sources: Vec<Option<Source>>, opt: CombineOptions) -> Result<Gr
         }
         let at = dst.page_count()?;
         let g = graft_pages_ex(&mut dst, &doc, &s.pages, at, opt.keep_outlines)?;
+        if opt.keep_labels {
+            // A source whose labels cannot be read counts as one without: they never stop a combine.
+            // (sections that only spell out plain decimal numbering are no labels: they carry on)
+            let own = labels::normalize(labels::read(&doc).unwrap_or_default(), count);
+            for (j, &p) in s.pages.iter().enumerate() {
+                let r = carried(&own, p, toc_pages + at as u32 + j as u32);
+                if !sections.last().is_some_and(|l| labels::continues(l, &r)) {
+                    sections.push(r);
+                }
+            }
+        }
         tops.push(g.pages[0].clone());
         kept.push(g.outline);
         done.push((s.title, s.pages.len() as u32));
     }
-    Ok(Grafted { dst, tops, kept, done })
+    Ok(Grafted { dst, tops, kept, done, labels: sections })
+}
+
+/// The label of result page `to` when it shows page `p` of a source whose sections are `own`: that
+/// page's own label, or (no sections) a plain decimal number on the combined numbering, as Acrobat does.
+fn carried(own: &[LabelRange], p: u32, to: u32) -> LabelRange {
+    match own.partition_point(|s| s.page <= p).checked_sub(1).map(|i| &own[i]) {
+        // PDF writes the start as a 32-bit integer
+        Some(s) => LabelRange { page: to, style: s.style, prefix: s.prefix.clone(), start: s.start.saturating_add(p - s.page).min(i32::MAX as u32) },
+        None => LabelRange { page: to, style: LabelStyle::Decimal, prefix: String::new(), start: to.saturating_add(1) },
+    }
 }
 
 /// Combines the files into a new PDF at `out` (replacing it) and reports what it holds.
@@ -621,7 +724,7 @@ pub fn run(eng: &Engine, specs: &[SourceSpec], opt: CombineOptions, out: &str) -
     let Some(first) = first else {
         return Err(bad("there is nothing to combine"));
     };
-    let Grafted { mut dst, tops, kept, done } = graft_sources(sources, opt)?;
+    let Grafted { mut dst, tops, kept, done, labels: mut sections } = graft_sources(sources, opt, plan.contents_pages)?;
     // Contents pages go in front; the page numbers they show count them.
     let mut toc_dest: Option<PdfObject> = None;
     if opt.contents_page {
@@ -659,11 +762,14 @@ pub fn run(eng: &Engine, specs: &[SourceSpec], opt: CombineOptions, out: &str) -
         return Err(bad("a file changed while it was being combined. Add the files again to see the new plan."));
     }
     write_outline(&mut dst, &top_nodes)?;
-    // Adding the contents pages made MuPDF number the pages ("1", "1", "2" ...): the sources' own page
-    // labels are not carried over, so the result has none until the person sets them.
-    super::labels::write(&mut dst, &[])?;
-
+    // Written last: adding the contents pages made MuPDF number the pages ("1", "1", "2" ...). The
+    // contents pages are plain decimal; a result with nothing but decimal numbering has no labels.
     let total = dst.page_count()?.max(0) as u32;
+    if plan.contents_pages > 0 && opt.keep_labels {
+        sections.insert(0, LabelRange { page: 0, style: LabelStyle::Decimal, prefix: String::new(), start: 1 });
+    }
+    labels::write(&mut dst, &labels::normalize(sections, total))?;
+
     let bytes = write_doc(&dst, rewrite_opts(), 1 << 20)?;
     drop(dst);
     write_atomic(Path::new(out), &bytes, total, Readback::default())?;
@@ -676,7 +782,7 @@ mod tests {
     use crate::engine::fixture::{self, Fixture};
     use std::time::{Duration, SystemTime};
 
-    const OPT: CombineOptions = CombineOptions { bookmarks: true, keep_outlines: true, contents_page: false };
+    const OPT: CombineOptions = CombineOptions { bookmarks: true, keep_outlines: true, contents_page: false, keep_labels: true };
 
     fn scratch(test: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("inkwell-combine-{test}-{}", std::process::id()));
@@ -692,15 +798,35 @@ mod tests {
     }
 
     fn spec(path: &str) -> SourceSpec {
-        SourceSpec { path: path.into(), range: String::new(), title: None }
+        SourceSpec { path: path.into(), range: String::new(), title: None, password: None }
     }
 
     /// Plans `specs` and grafts at once, the way a run does, returning the message when it stops.
     fn graft(specs: &[SourceSpec]) -> std::result::Result<u32, String> {
         let (plan, sources, _) = prepare(specs, OPT).map_err(|e| e.to_string())?;
         assert!(plan.can_run, "{:?}", plan.summary);
-        let g = graft_sources(sources, OPT).map_err(|e| e.to_string())?;
+        let g = graft_sources(sources, OPT, 0).map_err(|e| e.to_string())?;
         Ok(g.dst.page_count().unwrap().max(0) as u32)
+    }
+
+    #[test]
+    fn a_source_with_a_parent_loop_in_its_field_tree_still_grafts() {
+        use crate::outline::tests::raw_pdf;
+        // widget 5 and field 6 are each other's /Parent and no /FT is set anywhere: grafting it is no error
+        // (the loop is not copied; organize/tests.rs writes and reads the result back).
+        let objs: Vec<String> = vec![
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] >> >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".into(),
+            "<< >>".into(),
+            "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [10 10 100 50] /P 3 0 R >>".into(),
+            "<< /T (Loop) /Kids [5 0 R] /Parent 5 0 R >>".into(),
+        ];
+        let d = scratch("parent-loop");
+        let a = write(&d, "a.pdf", 1, 0);
+        let b = d.join("loop.pdf");
+        std::fs::write(&b, raw_pdf(&objs)).unwrap();
+        assert_eq!(graft(&[spec(&a), spec(&b.to_string_lossy())]), Ok(2));
     }
 
     #[test]
@@ -717,13 +843,13 @@ mod tests {
         // not there any more (it used to be a debug assertion), so it stops
         let (_, sources, _) = prepare(&specs, OPT).unwrap();
         write(&d, "b.pdf", 3, 0);
-        let e = graft_sources(sources, OPT).err().expect("swapped file").to_string();
+        let e = graft_sources(sources, OPT, 0).err().expect("swapped file").to_string();
         assert!(e.contains("b.pdf has changed"), "{e}");
 
         // replaced by one with more pages
         let (_, sources, _) = prepare(&specs, OPT).unwrap();
         write(&d, "b.pdf", 6, 1);
-        let e = graft_sources(sources, OPT).err().expect("longer file").to_string();
+        let e = graft_sources(sources, OPT, 0).err().expect("longer file").to_string();
         assert!(e.contains("b.pdf has changed"), "{e}");
 
         // the same bytes written again later: the time differs, so it is not the planned file either
@@ -732,13 +858,13 @@ mod tests {
         let f = std::fs::OpenOptions::new().write(true).open(&b).unwrap();
         f.set_modified(SystemTime::now() + Duration::from_secs(30)).unwrap();
         drop(f);
-        let e = graft_sources(sources, OPT).err().expect("touched file").to_string();
+        let e = graft_sources(sources, OPT, 0).err().expect("touched file").to_string();
         assert!(e.contains("b.pdf has changed"), "{e}");
 
         // gone: says which file and that it can't be combined, no panic
         let (_, sources, _) = prepare(&specs, OPT).unwrap();
         std::fs::remove_file(&b).unwrap();
-        let e = graft_sources(sources, OPT).err().expect("deleted file").to_string();
+        let e = graft_sources(sources, OPT, 0).err().expect("deleted file").to_string();
         assert!(e.contains("b.pdf") && e.contains("can't be combined"), "{e}");
     }
 
@@ -751,10 +877,10 @@ mod tests {
         let junk = junk.to_string_lossy().into_owned();
         let remembered = |p: &str| facts_cache().lock().unwrap().contains_key(&facts_key(p).unwrap());
 
-        assert_eq!(facts_cached(&good).state, FileState::Ready);
+        assert_eq!(facts_cached(&good, None).state, FileState::Ready);
         assert!(remembered(&good));
         // an open or read error may be a lock that passes: asked again next time
-        assert_eq!(facts_cached(&junk).state, FileState::Unreadable);
+        assert_eq!(facts_cached(&junk, None).state, FileState::Unreadable);
         assert!(!remembered(&junk));
     }
 

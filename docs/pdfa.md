@@ -58,7 +58,10 @@ All in `preflight/app.rs`; the assistant calls the functions in `preflight/mod.r
 - `preflight_convert(job, doc, profile, convert, to, onProgress) -> {path, report, fixed}` writes a new file to the
   save token `to`. The open document is untouched; the command refuses a target that is an open document
   (`Engine::check_not_open`). The result is checked against the same profile and returned, with what was done as
-  sentences.
+  sentences. A document whose owner kept it from being copied out of (no "copy" permission) is refused here
+  (`Engine::ensure_extractable`), as export and extract refuse it, and as Acrobat handles that permission: the new file
+  would carry the content without the restriction. The assistant's `convert_to_standard` refuses it too, and refuses a
+  password-protected document (the copy is written without its protection) before it asks.
 - `preflight_export_report(job, doc, profile, format, date, to, onProgress) -> path` checks again and writes an
   HTML or PDF report (the PDF with the comparison report's writer), refusing an open document as the target.
 

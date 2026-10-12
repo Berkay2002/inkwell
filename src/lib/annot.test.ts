@@ -5,13 +5,13 @@ vi.mock("./edit", () => ({ applyState: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
 import { useAnnot } from "./annot";
-import { type Annot, groupByPage, hitTest, placePopover, quadsFromRects, resizeRect, timeLabel, toScreen } from "./annotLogic";
+import { type Annot, emptyNote, groupByPage, hitTest, placePopover, quadsFromRects, resizeRect, timeLabel, toScreen } from "./annotLogic";
 import { applyState } from "./edit";
 
 const inv = vi.mocked(invoke);
 const a = (p: Partial<Annot>): Annot => ({
   page: 0, xref: 1, kind: "note", author: "A", contents: "", created: "D:20260101120000Z", modified: "", color: null, fill: null,
-  opacity: 1, width: 1, rect: [0, 0, 10, 10], quads: [], points: [], strokes: [], icon: null, fontSize: null, parent: null,
+  opacity: 1, width: 1, rect: [0, 0, 10, 10], quads: [], points: [], strokes: [], icon: null, picture: false, fontSize: null, parent: null,
   state: null, resolved: false, ...p,
 });
 const state = { rev: 2, pageCount: 1, sizes: [], path: "C:\\a.pdf", dirty: true, undo: "Add note", redo: null };
@@ -99,5 +99,14 @@ describe("popover placement", () => {
   });
   it("pins inside the bounds when neither side fits", () => {
     expect(placePopover([400, 200, 500, 680], [200, 300], bounds)[1]).toBe(396);
+  });
+});
+
+describe("empty list note", () => {
+  it("says nothing when the list is only cut short, otherwise why it is empty", () => {
+    expect(emptyNote(0, 0, true)).toBeNull();
+    expect(emptyNote(0, 0, false)).toMatch(/No comments yet/);
+    expect(emptyNote(3, 0, true)).toBe("Nothing matches.");
+    expect(emptyNote(3, 2, false)).toBeNull();
   });
 });

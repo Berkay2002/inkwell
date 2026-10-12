@@ -3,6 +3,7 @@
 //! that driver skips them with a note.
 
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::sync::atomic::AtomicBool;
 
 use super::layout::*;
@@ -97,17 +98,17 @@ fn two_per_sheet_uses_landscape_paper_and_rotates_portrait_pages_when_asked() {
 fn booklet_imposes_saddle_stitch_order() {
     let sizes = vec![LETTER; 8];
     let pages: Vec<u32> = (0..8).collect();
-    let l = Layout::Booklet { sides: BookletSides::Both, binding: Binding::Left };
+    let l = Layout::Booklet { sides: BookletSides::Both, binding: Binding::Left, creep: 0.0 };
     let sheets = layout(&sizes, &pages, LETTER, Orientation::Auto, &l).unwrap();
     assert_eq!(sheets.len(), 4);
     assert!(sheets.iter().all(Sheet::landscape));
     let order: Vec<Vec<u32>> = sheets.iter().map(|s| s.placed.iter().map(|p| p.page + 1).collect()).collect();
     assert_eq!(order, [vec![8, 1], vec![2, 7], vec![6, 3], vec![4, 5]]);
     // fronts only
-    let l = Layout::Booklet { sides: BookletSides::FrontOnly, binding: Binding::Left };
+    let l = Layout::Booklet { sides: BookletSides::FrontOnly, binding: Binding::Left, creep: 0.0 };
     assert_eq!(layout(&sizes, &pages, LETTER, Orientation::Auto, &l).unwrap().len(), 2);
     // right binding swaps the halves; a 5-page booklet pads to 8 with blanks
-    let l = Layout::Booklet { sides: BookletSides::Both, binding: Binding::Right };
+    let l = Layout::Booklet { sides: BookletSides::Both, binding: Binding::Right, creep: 0.0 };
     let five = layout(&sizes[..5], &[0, 1, 2, 3, 4], LETTER, Orientation::Auto, &l).unwrap();
     assert_eq!(five.len(), 4);
     let firsts: Vec<usize> = five.iter().map(|s| s.placed.len()).collect();
@@ -171,7 +172,7 @@ fn paper_beyond_the_pdf_page_limit_is_rejected() {
 
 #[test]
 fn a_booklet_of_one_side_is_not_printed_two_sided() {
-    let booklet = |sides| Layout::Booklet { sides, binding: Binding::Left };
+    let booklet = |sides| Layout::Booklet { sides, binding: Binding::Left, creep: 0.0 };
     let both = Settings { duplex: Duplex::LongEdge, layout: booklet(BookletSides::Both), ..Settings::default() };
     assert!(both.two_sided());
     for sides in [BookletSides::FrontOnly, BookletSides::BackOnly] {
@@ -190,9 +191,11 @@ fn plan_info_counts_the_sides_sent() {
     let info = plan_info(&eng, doc, &s).unwrap();
     // 3 sides make 2 papers with a blank back, twice
     assert_eq!((info.sheets, info.sides, info.papers), (3, 8, 4));
+    // Save as PDF has one of each, padded to whole papers: 3 sides become 4 pages
+    assert_eq!(info.pdf_sides, 4);
     let simplex = Settings { duplex: Duplex::Off, ..s };
     let info = plan_info(&eng, doc, &simplex).unwrap();
-    assert_eq!((info.sides, info.papers), (6, 6));
+    assert_eq!((info.sides, info.papers, info.pdf_sides), (6, 6, 3));
 }
 
 #[cfg(windows)]
@@ -408,7 +411,7 @@ mod printer {
         let book = print(
             "booklet",
             8,
-            Settings { layout: Layout::Booklet { sides: BookletSides::Both, binding: Binding::Left }, ..base },
+            Settings { layout: Layout::Booklet { sides: BookletSides::Both, binding: Binding::Left, creep: 0.0 }, ..base },
         );
         assert_eq!(book.len(), 4);
         assert!(book.iter().all(|(w, h)| w > h));

@@ -40,6 +40,8 @@ regex = "1"
 flate2 = "1"
 # Reads the user's codex config.toml (MCP server names). Already in the tree through tauri's build deps.
 toml = "0.8"
+# Reads XFDF (comments and form data exchange, src/exchange.rs). Already in the tree through tauri (plist); no DTD or entity expansion.
+quick-xml = "0.42"
 # Version history store (history/) and compare (diff/).
 fastcdc = "3"
 blake3 = "1"
@@ -54,6 +56,26 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tiff = "0.11"
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# Digital signatures (sign/crypto, adapted from pdfcraft): X.509, CMS, PKCS #12, RSA/ECDSA. RustCrypto, same versions pdfcraft pins.
+sha1 = "0.11"
+sha2 = "0.11"
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
+p384 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
+rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["std", "hazmat", "encoding"] }
+# Held at rc.4: pkcs1 rc.5 does not build with rsa rc.18 (a plain `cargo update` would move it).
+pkcs1 = { version = "=0.8.0-rc.4", default-features = false }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+hmac = "0.13"
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc", "block-padding"] }
+des = "0.9"
+rc2 = "0.9"
+
+# Form JavaScript (forms/js): QuickJS-ng with an interrupt handler and a heap cap (boa has neither, see docs/forms-js.md).
+# No `rust-alloc`/`allocator` (they turn set_memory_limit into a no-op) and no `parallel`. `std` stays on: without it a
+# panic in a host function is not caught at the C boundary and aborts the process (see the `a_panic_in_a_host_function` test).
+# Pinned: the interrupt and panic behaviour above is what was checked.
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 # Subsets the bundled fallback fonts (src-tauri/fonts) to the glyphs an edit uses.
 subsetter = { version = "0.2.6", default-features = false }
 
@@ -63,13 +85,21 @@ windows-sys = { version = "0.60", features = ["Win32_System_ProcessStatus", "Win
 webview2-com = "0.39"
 windows-core = "0.62"
 # Windows.Media.Ocr (OCR backend); already in the tree through tauri, this only adds feature flags.
-windows = { version = "0.62", features = ["Media_Ocr", "Graphics_Imaging", "Storage_Streams", "Globalization", "Foundation_Collections"] }
+windows = { version = "0.62", features = ["Media_Ocr", "Graphics_Imaging", "Storage_Streams", "Globalization", "Foundation_Collections", "System_UserProfile"] }
 
 [profile.release]
 codegen-units = 1
 lto = "thin"
 opt-level = 3
 strip = true
+
+# Debug-build speed for RSA key generation and signing (tests, `cargo run`).
+[profile.dev.package.rsa]
+opt-level = 3
+[profile.dev.package.crypto-primes]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
+opt-level = 3
 
 [patch.crates-io]
 # Local patch: `max_align_t` is not emitted by bindgen on MSVC, which breaks mupdf 0.8.0's native-device assert.

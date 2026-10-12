@@ -79,6 +79,30 @@ fn rotate_undo_redo() {
 }
 
 #[test]
+fn undo_if_only_undoes_the_step_it_was_asked_about() {
+    let d = dir("undo-if");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    // Nothing to undo is a refusal, not a quiet success: the caller would take it for the conversion taken back.
+    assert!(matches!(eng.undo_if(id, 0), Err(EngineError::Stale)));
+    let converted = eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    // An assistant step lands before the undo: asked for the conversion's generation, nothing is undone.
+    let turn = EditSource::Assistant { turn: "t1".into() };
+    let after = eng.apply_from(id, EditOp::Rotate { pages: vec![1], quarter_turns: 1 }, turn).unwrap();
+    assert!(matches!(eng.undo_if(id, converted.rev), Err(EngineError::Stale)));
+    assert_eq!(eng.edit_state(id).unwrap().rev, after.rev, "no new generation, the step is still there");
+    assert_eq!(eng.edit_state(id).unwrap().sizes[1], TURNED);
+    // At the newest generation it undoes exactly that step.
+    let s = eng.undo_if(id, after.rev).unwrap();
+    assert_eq!((s.rev, s.sizes[0], s.sizes[1]), (after.rev + 1, TURNED, UPRIGHT));
+    // An undo and redo moved the generation on: the old number is refused, the new one is taken.
+    let s = eng.redo(id).unwrap();
+    assert!(matches!(eng.undo_if(id, after.rev), Err(EngineError::Stale)));
+    assert!(eng.undo_if(id, s.rev).is_ok());
+}
+
+#[test]
 fn delete_move_insert_and_undo_everything() {
     let d = dir("organize");
     let path = fixture_at(&d, "a.pdf", &pages(5));
@@ -814,4 +838,165 @@ fn a_link_whose_page_stays_behind_is_dropped() {
     // The web link stays; the widgets stay, "addr" with only the widget that came along.
     assert_eq!(links_and_widgets(&path)[0], (vec![-1], vec!["name".to_string(), "addr".to_string()]));
     assert_eq!(form_fields(&path), [("name".into(), "Ada".into(), 1), ("addr".into(), "Main St".into(), 1)]);
+}
+
+/// A classic-xref file: `pages_extra` goes in the /Pages node, `page_extra(i)` in each page, and
+/// `extra` are more objects (number, body) numbered from 10.
+fn raw_doc(pages: usize, pages_extra: &str, page_extra: impl Fn(usize) -> String, extra: &[(usize, String)]) -> Vec<u8> {
+    let first = 10 + extra.len();
+    let kids: String = (0..pages).map(|i| format!("{} 0 R ", first + i)).collect();
+    let mut objs: Vec<(usize, String)> = vec![
+        (1, "<< /Type /Catalog /Pages 2 0 R >>".into()),
+        (2, format!("<< /Type /Pages /Kids [{kids}] /Count {pages} {pages_extra} >>")),
+    ];
+    objs.extend(extra.iter().cloned());
+    for i in 0..pages {
+        objs.push((first + i, format!("<< /Type /Page /Parent 2 0 R {} >>", page_extra(i))));
+    }
+    let n = first + pages;
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offs = vec![0usize; n];
+    for (num, body) in &objs {
+        offs[*num] = out.len();
+        out.extend(format!("{num} 0 obj\n{body}\nendobj\n").as_bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {n}\n0000000000 65535 f \n").as_bytes());
+    for o in offs.iter().skip(1) {
+        match o {
+            0 => out.extend(b"0000000000 65535 f \n"),
+            o => out.extend(format!("{o:010} 00000 n \n").as_bytes()),
+        }
+    }
+    out.extend(format!("trailer\n<< /Size {n} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    out
+}
+
+/// Pages that all point at one /Annots array of `entries` references to a single annotation:
+/// loading a page loads every one of them, so sizing N pages costs N x `entries`. Every seventh
+/// page is 300 x 400 turned a quarter.
+fn shared_annots(pages: usize, entries: usize) -> Vec<u8> {
+    let list: String = (0..entries).map(|_| "11 0 R ").collect();
+    let extra = [(10, format!("[{list}]")), (11, "<< /Type /Annot /Subtype /Square /Rect [0 0 10 10] >>".to_string())];
+    raw_doc(
+        pages,
+        "/MediaBox [0 0 612 792]",
+        |i| if i % 7 == 3 { "/MediaBox [0 0 300 400] /Rotate 90 /Annots 10 0 R".into() } else { "/Annots 10 0 R".into() },
+        &extra,
+    )
+}
+
+fn big_sizes(pages: usize) -> Vec<[f32; 2]> {
+    (0..pages).map(|i| if i % 7 == 3 { [400.0, 300.0] } else { UPRIGHT }).collect()
+}
+
+#[test]
+fn the_first_edit_lane_read_does_not_load_every_pages_annotations() {
+    let d = dir("bigopen");
+    let pages = 2000;
+    let path = d.join("big.pdf");
+    // 20 000 annotations behind every page: 40 million loads if each page is loaded to size it
+    std::fs::write(&path, shared_annots(pages, 20_000)).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let before = std::fs::read(&path).unwrap();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+
+    let t = std::time::Instant::now();
+    let count = eng.read_custom(id, |doc| Ok(doc.page_count()?)).unwrap();
+    let first = t.elapsed();
+    assert_eq!(count, pages as i32);
+    // 62 s before the fix (debug), milliseconds after. The bound is generous for a loaded CI box.
+    assert!(first < std::time::Duration::from_secs(5), "first read took {first:?}");
+    eprintln!("first read_custom on {pages} pages x 20000 annotations: {first:?}");
+
+    // A step on the opened base, undone back to it: the base step's sizes are the ones the open read.
+    let s = eng.apply(id, EditOp::Rotate { pages: vec![0, 3], quarter_turns: 1 }).unwrap();
+    let mut turned = big_sizes(pages);
+    (turned[0], turned[3]) = (TURNED, [300.0, 400.0]);
+    assert_eq!(s.sizes, turned);
+    let s = eng.undo(id).unwrap();
+    assert_eq!((s.sizes.clone(), s.undo, s.dirty), (big_sizes(pages), None, false));
+
+    // Save round trip: nothing to save leaves the file alone; an edit, saved and reopened, keeps every size.
+    eng.save(id, None).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    eng.save(id, None).unwrap();
+    let mut want = big_sizes(pages);
+    want[0] = TURNED;
+    let saved = PdfDocument::open(&path).unwrap();
+    assert_eq!(page_sizes(&saved).unwrap(), want);
+    let b = saved.load_page(0).unwrap().bounds().unwrap();
+    assert_eq!([b.width(), b.height()], TURNED);
+}
+
+/// The size read from the page dictionary is the size MuPDF reports for the loaded page, for the
+/// boxes, rotations and units a file can carry.
+#[test]
+fn page_size_reads_what_a_loaded_page_reports() {
+    let pages: Vec<&str> = vec![
+        "",                                                              // inherited MediaBox and Rotate
+        "/Rotate 270",                                                   // own rotation over the inherited one
+        "/Rotate -90",
+        "/Rotate 450",
+        "/Rotate 45",
+        "/Rotate 44",
+        "/Rotate 90.0",
+        "/MediaBox [0 0 200 100]",
+        "/MediaBox [200 100 0 0]",                                       // corners swapped
+        "/MediaBox [0 0 200 100] /CropBox [50 25 150 75]",
+        "/MediaBox [0 0 200 100] /CropBox [-50 -50 500 500]",            // larger than the paper
+        "/MediaBox [0 0 200 100] /CropBox [300 300 400 400]",            // outside it: empty
+        "/MediaBox [0 0 200 100] /CropBox [10 10 10.5 10.5]",            // under a point
+        "/MediaBox [0 0 0 0]",
+        "/MediaBox [10 20 110.5 220.25] /UserUnit 2 /Rotate 90",
+        "/MediaBox [0 0 200 100] /UserUnit 0.5",
+        "/MediaBox (not a box) /CropBox [0 0 50 50]",
+        "/MediaBox [0 0 200] ",
+        "/CropBox 7",
+    ];
+    let n = pages.len();
+    let d = dir("pagesizeparity");
+    for (name, inherited) in [("inherited", "/MediaBox [0 0 612 792] /Rotate 90 /CropBox [10 10 600 780]"), ("none", "")] {
+        let path = d.join(format!("{name}.pdf"));
+        std::fs::write(&path, raw_doc(n, inherited, |i| pages[i].to_string(), &[])).unwrap();
+        let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+        for p in 0..n {
+            let b = doc.load_page(p as i32).unwrap().bounds().unwrap();
+            assert_eq!(page_size(&doc, p as u32).unwrap(), [b.width(), b.height()], "{name}: page {p} ({})", pages[p]);
+        }
+    }
+    // The values themselves, so a wrong answer from both sides does not pass: 200 x 100 turned is 100 x 200.
+    let path = d.join("none.pdf");
+    let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+    assert_eq!(page_size(&doc, 7).unwrap(), [200.0, 100.0]);
+    assert_eq!(page_size(&doc, 9).unwrap(), [100.0, 50.0]);
+    assert_eq!(page_size(&doc, 14).unwrap(), [2.0 * 220.25 - 2.0 * 20.0, 2.0 * 100.5]);
+    assert_eq!(page_size(&doc, 0).unwrap(), UPRIGHT);
+    assert!(page_size(&doc, n as u32).is_err());
+}
+
+#[test]
+fn a_noop_edit_that_wrote_something_before_giving_up_leaves_no_trace() {
+    let d = dir("noop-writes");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let before = eng.edit_state(id).unwrap();
+    // Writes, then reports that nothing changed (as a per-item error swallowed halfway does).
+    let s = eng
+        .apply_custom_unless_noop(id, "Nothing".into(), EditSource::User, false, |doc| {
+            doc.delete_page(1)?;
+            Ok(None)
+        })
+        .unwrap();
+    assert_eq!(s, before);
+    // The next step and the save carry no trace of the write.
+    eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    assert_eq!(labels(&eng, id), vec![1, 2, 3]);
+    eng.save(id, None).unwrap();
+    let again = Engine::new(1, 64 << 20);
+    let reopened = again.open(&path).unwrap();
+    assert_eq!(reopened.page_count, 3);
 }

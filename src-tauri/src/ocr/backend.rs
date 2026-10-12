@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::OcrError;
+use super::lang::ISO3;
 
 /// 8-bit grey page raster, tightly packed (`pixels.len() == w * h`).
 pub struct Bitmap {
@@ -58,6 +59,8 @@ impl Bitmap {
 pub struct RawWord {
     pub text: String,
     pub rect: [f32; 4],
+    /// The engine's own confidence, 0..100, when it reports one (Tesseract does, Windows OCR does not).
+    pub conf: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -174,6 +177,7 @@ mod winrt {
                     l.words.push(RawWord {
                         text: word.Text().map_err(werr)?.to_string(),
                         rect: [r.X, r.Y, r.X + r.Width, r.Y + r.Height],
+                        conf: None,
                     });
                 }
                 if !l.words.is_empty() {
@@ -183,6 +187,18 @@ mod winrt {
             Ok(page)
         }
     }
+}
+
+/// The user's Windows languages, display language first (BCP-47); empty off Windows.
+pub fn profile_languages() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        use windows::System::UserProfile::GlobalizationPreferences;
+        if let Ok(v) = GlobalizationPreferences::Languages() {
+            return v.into_iter().map(|h| h.to_string()).collect();
+        }
+    }
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -200,28 +216,6 @@ pub struct TesseractCli {
 
 /// Default for [`TesseractCli::timeout`].
 pub const TESSERACT_TIMEOUT: Duration = Duration::from_secs(180);
-
-const ISO3: &[(&str, &str)] = &[
-    ("en", "eng"),
-    ("sv", "swe"),
-    ("de", "deu"),
-    ("fr", "fra"),
-    ("es", "spa"),
-    ("it", "ita"),
-    ("nl", "nld"),
-    ("pt", "por"),
-    ("da", "dan"),
-    ("nb", "nor"),
-    ("no", "nor"),
-    ("fi", "fin"),
-    ("pl", "pol"),
-    ("cs", "ces"),
-    ("ru", "rus"),
-    ("tr", "tur"),
-    ("ja", "jpn"),
-    ("zh", "chi_sim"),
-    ("ko", "kor"),
-];
 
 impl TesseractCli {
     /// Where to look for `tesseract.exe`, in order: the host's `ocr.tesseractPath` setting
@@ -268,18 +262,12 @@ impl TesseractCli {
         None
     }
 
-    fn lang_arg(languages: &[String]) -> String {
+    pub(crate) fn lang_arg(languages: &[String]) -> String {
         if languages.is_empty() {
             return "eng".into();
         }
-        let v: Vec<String> = languages
-            .iter()
-            .map(|l| {
-                let primary = l.split(['-', '_']).next().unwrap_or(l).to_ascii_lowercase();
-                ISO3.iter().find(|(a, _)| *a == primary).map(|(_, b)| b.to_string()).unwrap_or(primary)
-            })
-            .collect();
-        v.join("+")
+        // `sv` is `swe`; a data name (`chi_tra`, `srp_latn`) goes through unchanged.
+        languages.iter().map(|l| super::lang::tessdata_name(l)).collect::<Vec<_>>().join("+")
     }
 
     fn tessdata_dir(&self) -> Option<&Path> {
@@ -312,7 +300,7 @@ impl Recognizer for TesseractCli {
             .lines()
             .skip(1)
             .map(str::trim)
-            .filter(|l| !l.is_empty() && *l != "osd")
+            .filter(|l| !l.is_empty() && *l != "osd" && !l.contains('/'))
             .map(|l| ISO3.iter().find(|(_, b)| *b == l).map(|(a, _)| a.to_string()).unwrap_or_else(|| l.to_string()))
             .collect())
     }
@@ -423,7 +411,8 @@ pub(crate) fn parse_tsv(tsv: &str) -> RawPage {
         }
         let p = |i: usize| f[i].parse::<i32>().unwrap_or(0);
         let text = f[11].trim();
-        if text.is_empty() || f[10].parse::<f32>().unwrap_or(0.0) < 0.0 {
+        let conf = f[10].parse::<f32>().unwrap_or(-1.0);
+        if text.is_empty() || conf < 0.0 {
             continue;
         }
         let k = (p(2) as u32, p(3), p(4), 0);
@@ -432,7 +421,7 @@ pub(crate) fn parse_tsv(tsv: &str) -> RawPage {
             key = k;
         }
         let (l, t, w, h) = (p(6) as f32, p(7) as f32, p(8) as f32, p(9) as f32);
-        page.lines.last_mut().unwrap().words.push(RawWord { text: text.to_string(), rect: [l, t, l + w, t + h] });
+        page.lines.last_mut().unwrap().words.push(RawWord { text: text.to_string(), rect: [l, t, l + w, t + h], conf: Some(conf) });
     }
     page
 }

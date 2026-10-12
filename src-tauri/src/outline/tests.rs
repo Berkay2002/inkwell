@@ -351,6 +351,161 @@ fn text_decoding_follows_the_pdf_encodings() {
     assert_eq!(decode_text(&[0x80, 0xA0, 0xE9]), "•€é");
 }
 
+/// The panel finds a named destination the way MuPDF does: its decode of the string in the `/Names` tree (a name
+/// object by its text), and a string it cannot decode faithfully is not called broken.
+#[test]
+fn a_named_destination_is_judged_the_way_mupdf_looks_it_up() {
+    let d = dir("outline", "named_lookup");
+    let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 7, chapter_every: 1, ..Default::default() });
+    // (what the bookmark names, what the panel shows)
+    let page = |d: &Dest| matches!(d, Dest::Page { page: 0, .. });
+    let broken = |d: &Dest| matches!(d, Dest::Broken { .. });
+    let other = |d: &Dest| matches!(d, Dest::Other { .. });
+    let cases: [(&str, &dyn Fn(&Dest) -> bool); 7] = [
+        ("/chap", &page),           // a name object: MuPDF's viewer looks it up in the tree by its text
+        ("<FEFF00E900E9>", &page),  // UTF-16BE, the key's own form
+        ("<C3A9C3A9>", &page),      // UTF-8 with no mark: the tree's UTF-16 key is the same text
+        ("<E9E9>", &page),          // PDFDocEncoding
+        ("(gone)", &broken),        // cleanly missing
+        ("<41E97F>", &other),       // not UTF-8, and PDFDocEncoding has nothing at 0x7F: not judged
+        ("<C0AF>", &other),         // overlong: MuPDF takes it as UTF-8, Rust does not: not judged
+    ];
+    let ids: Vec<i32> = list(&eng, id).unwrap().items.iter().map(|b| b.id).collect();
+    assert_eq!(ids.len(), cases.len());
+    eng.apply_custom(id, "Name destinations".into(), EditSource::User, false, |d| {
+        let mut arr = d.new_array()?;
+        for key in ["(chap)", "<FEFF00E900E9>"] {
+            arr.array_push(d.new_object_from_str(key)?)?;
+            arr.array_push(dest_object(d, 0, None)?)?;
+        }
+        let mut tree = d.new_dict()?;
+        tree.dict_put("Names", arr)?;
+        let mut names = d.new_dict()?;
+        names.dict_put("Dests", tree)?;
+        d.catalog()?.dict_put("Names", names)?;
+        let sh = walked(d)?.1;
+        for (item, (name, _)) in ids.iter().zip(cases) {
+            sh.obj(*item)?.dict_put("Dest", d.new_object_from_str(name)?)?;
+        }
+        Ok(Vec::new())
+    })
+    .unwrap();
+    for (b, (name, expect)) in list(&eng, id).unwrap().items.iter().zip(cases) {
+        assert!(expect(&b.dest), "{name}: {:?}", b.dest);
+    }
+}
+
+/// With `/Dests` in the catalog MuPDF reads it alone and never the tree (`pdf_lookup_dest`); a name only the tree has
+/// is not found, but another viewer may follow it, so it is Other and not Broken.
+#[test]
+fn a_dests_dictionary_hides_the_names_tree_as_it_does_in_mupdf() {
+    let d = dir("outline", "dests_order");
+    let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 5, chapter_every: 1, ..Default::default() });
+    let ids: Vec<i32> = list(&eng, id).unwrap().items.iter().map(|b| b.id).collect();
+    // (what the bookmark names, the page the panel shows or None for Other / Broken)
+    let cases = [("/old", Some(0)), ("/both", Some(1)), ("(both)", Some(1)), ("(treeonly)", None), ("(gone)", None)];
+    assert_eq!(ids.len(), cases.len());
+    eng.apply_custom(id, "Name destinations".into(), EditSource::User, false, |d| {
+        let mut dests = d.new_dict()?;
+        dests.dict_put("old", dest_object(d, 0, None)?)?;
+        dests.dict_put("both", dest_object(d, 1, None)?)?;
+        d.catalog()?.dict_put("Dests", dests)?;
+        let mut arr = d.new_array()?;
+        for (key, page) in [("(both)", 2), ("(treeonly)", 3)] {
+            arr.array_push(d.new_object_from_str(key)?)?;
+            arr.array_push(dest_object(d, page, None)?)?;
+        }
+        let mut tree = d.new_dict()?;
+        tree.dict_put("Names", arr)?;
+        let mut names = d.new_dict()?;
+        names.dict_put("Dests", tree)?;
+        d.catalog()?.dict_put("Names", names)?;
+        let sh = walked(d)?.1;
+        for (item, (name, _)) in ids.iter().zip(cases) {
+            sh.obj(*item)?.dict_put("Dest", d.new_object_from_str(name)?)?;
+        }
+        Ok(Vec::new())
+    })
+    .unwrap();
+    let got: Vec<_> = list(&eng, id).unwrap().items.into_iter().map(|b| b.dest).collect();
+    for ((name, want), dest) in cases.iter().zip(&got) {
+        match (want, dest) {
+            (Some(p), Dest::Page { page, .. }) => assert_eq!(page, p, "{name}"),
+            (None, Dest::Broken { .. } | Dest::Other { .. }) => {}
+            _ => panic!("{name}: {dest:?}"),
+        }
+    }
+    assert!(matches!(got[3], Dest::Other { .. }), "only the tree has it: {:?}", got[3]);
+    assert!(matches!(got[4], Dest::Broken { .. }), "neither has it: {:?}", got[4]);
+}
+
+/// A string that is not the key's own bytes still reaches an old-style `/Dests` key: MuPDF's viewer re-encodes the
+/// decoded text before it looks it up there.
+#[test]
+fn a_utf16_string_destination_finds_its_key_in_the_old_dests_dictionary() {
+    let d = dir("outline", "dests_reencoded");
+    let items: Vec<String> = [
+        "<< /Title (C) /Parent 4 0 R /Dest <FEFF0063> /Next 8 0 R >>",
+        "<< /Title (Cafe) /Parent 4 0 R /Dest <FEFF00630061006600E9> /Prev 7 0 R /Next 9 0 R >>",
+        "<< /Title (Gone) /Parent 4 0 R /Dest <FEFF0067006F006E0065> /Prev 8 0 R >>",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let bytes = outline_pdf_with(
+        "/Dests << /c [5 0 R /Fit] /caf#E9 [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 9 0 R /Count 3 >>",
+        &items,
+    );
+    let (eng, id, _p) = open_bytes(&d, "a.pdf", &bytes);
+    let got: Vec<_> = list(&eng, id).unwrap().items.into_iter().map(|b| b.dest).collect();
+    assert!(matches!(got[0], Dest::Page { page: 0, .. }), "{:?}", got[0]);
+    assert!(matches!(got[1], Dest::Page { page: 0, .. }), "{:?}", got[1]);
+    assert!(matches!(got[2], Dest::Broken { .. }), "{:?}", got[2]);
+}
+
+/// A name tree that cannot be read is not an empty one: no name is called broken.
+#[test]
+fn an_unreadable_names_tree_leaves_a_name_unjudged() {
+    let d = dir("outline", "unreadable_tree");
+    let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 1, ..Default::default() });
+    let other = eng
+        .read_custom(id, |d| {
+            let mut names = Names { dests: Some(Some(Dests::with_unreadable_tree())) };
+            let t = d.new_object_from_str("(x)")?;
+            Ok(dest_array(d, &mut names, &t).is_none())
+        })
+        .unwrap();
+    assert!(other);
+}
+
+/// Setting a bookmark to the page its named destination already resolves to still replaces the name with an array.
+#[test]
+fn setting_a_named_bookmark_to_the_page_it_resolves_to_writes_an_explicit_destination() {
+    let d = dir("outline", "set_named_dest");
+    let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 2, chapter_every: 1, ..Default::default() });
+    let first = list(&eng, id).unwrap().items[0].id;
+    eng.apply_custom(id, "Name destination".into(), EditSource::User, false, |d| {
+        let mut dests = d.new_dict()?;
+        dests.dict_put("n", dest_object(d, 0, None)?)?;
+        d.catalog()?.dict_put("Dests", dests)?;
+        walked(d)?.1.obj(first)?.dict_put("Dest", d.new_object_from_str("/n")?)?;
+        Ok(Vec::new())
+    })
+    .unwrap();
+    assert!(matches!(list(&eng, id).unwrap().items[0].dest, Dest::Page { page: 0, .. }));
+    go(&eng, id, BookmarkOp::SetDest { id: first, page: 0, at: None });
+    let explicit = eng.read_custom(id, |d| Ok(walked(d)?.1.obj(first)?.get_dict("Dest")?.is_some_and(|x| x.is_array().unwrap_or(false)))).unwrap();
+    assert!(explicit, "the bookmark still holds the name");
+}
+
+/// The Rust text and the TS literal the panels compare it with are one string.
+#[test]
+fn the_unchecked_destination_text_matches_the_one_in_nav_ts() {
+    let nav = include_str!("../../../src/lib/nav.ts");
+    assert!(nav.contains(&format!("UNCHECKED_DEST = \"{UNCHECKED_DEST}\"")), "src/lib/nav.ts has another text");
+}
+
 #[test]
 fn a_bookmark_to_a_missing_named_destination_is_broken() {
     let d = dir("outline", "broken");
@@ -445,7 +600,7 @@ fn outline_pdf(root: &str, items: &[String]) -> Vec<u8> {
 }
 
 /// `outline_pdf` with `catalog` more keys in the document catalog (built whole, so the xref stays exact).
-fn outline_pdf_with(catalog: &str, root: &str, items: &[String]) -> Vec<u8> {
+pub(crate) fn outline_pdf_with(catalog: &str, root: &str, items: &[String]) -> Vec<u8> {
     let content = "BT /F1 24 Tf 72 700 Td (Chapter One) Tj ET BT /F1 12 Tf 72 600 Td (Plain body text of the document, long enough.) Tj ET BT /F1 12 Tf 72 560 Td (More plain body text in the same size here.) Tj ET";
     let mut objs = vec![
         format!("<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R {catalog} >>"),
@@ -719,6 +874,192 @@ fn a_certified_document_keeps_its_bookmarks() {
     assert_eq!(titles(&list(&eng, id).unwrap().items), ["A"]);
 }
 
+/// `certified` and `signed` of a file whose catalog carries `catalog` and whose objects 7, 8, ... are `objs`.
+fn certification_of(name: &str, catalog: &str, objs: &[&str]) -> (Option<i32>, bool) {
+    let (certified, signed) = checked_certification_of(name, catalog, objs);
+    (certified.unwrap(), signed)
+}
+
+/// As [`certification_of`], with `certified`'s own result (an error is an answer here, `signed` still gives one).
+fn checked_certification_of(name: &str, catalog: &str, objs: &[&str]) -> (std::result::Result<Option<i32>, EngineError>, bool) {
+    let d = dir("outline", name);
+    let items: Vec<String> = objs.iter().map(|o| o.to_string()).collect();
+    let pdf = outline_pdf_with(catalog, "<< /Type /Outlines /Count 0 >>", &items);
+    let (eng, id, _) = open_bytes(&d, "c.pdf", &pdf);
+    eng.read_custom(id, |doc| Ok((certified(doc), signed(doc)))).unwrap()
+}
+
+/// A signature value whose `/Reference` holds `refs` (raw dictionaries).
+pub(crate) fn sig_value(refs: &str) -> String {
+    format!("/V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> /Reference [ {refs} ] >>")
+}
+
+pub(crate) fn doc_mdp(params: &str) -> String {
+    format!("<< /Type /SigRef /TransformMethod /DocMDP {params} >>")
+}
+
+#[test]
+fn a_signature_field_that_certifies_the_document_is_seen_like_the_catalog_entry() {
+    let form = "/AcroForm << /SigFlags 3 /Fields [7 0 R] >>";
+    let field = |refs: &str| format!("<< /FT /Sig /T (S) {} >>", sig_value(refs));
+    // The catalog's entry: P read, default 2, one that makes no sense is 2 as well.
+    let cat = |p: &str| format!("/Perms << /DocMDP << /Type /Sig /Reference [ {} ] >> >>", doc_mdp(p));
+    assert_eq!(certification_of("cat-1", &cat("/TransformParams << /P 1 >>"), &[]), (Some(1), true));
+    assert_eq!(certification_of("cat-default", &cat(""), &[]), (Some(2), true));
+    assert_eq!(certification_of("cat-null", "/Perms << /DocMDP null >>", &[]).0, None);
+    // The field's own reference: P 3, no /P (2). A /P that is there and is not 1, 2 or 3 is the strictest (1).
+    let p3 = field(&doc_mdp("/TransformParams << /P 3 >>"));
+    assert_eq!(certification_of("field-3", form, &[&p3]), (Some(3), true));
+    let none = field(&doc_mdp("/TransformParams << /Type /TransformParams >>"));
+    assert_eq!(certification_of("field-default", form, &[&none]).0, Some(2));
+    assert_eq!(certification_of("field-no-params", form, &[&field(&doc_mdp(""))]).0, Some(2));
+    for (name, p) in [("99", "99"), ("0", "0"), ("name", "/One"), ("string", "(1)"), ("fraction", "2.5"), ("array", "[2]")] {
+        let wild = field(&doc_mdp(&format!("/TransformParams << /P {p} >>")));
+        assert_eq!(certification_of(&format!("field-p-{name}"), form, &[&wild]).0, Some(1), "/P {p}");
+    }
+    let null_p = field(&doc_mdp("/TransformParams << /P null >>"));
+    assert_eq!(certification_of("field-p-null", form, &[&null_p]).0, Some(2));
+    let cat_bad = |p: &str| format!("/Perms << /DocMDP << /Type /Sig /Reference [ {} ] >> >>", doc_mdp(&format!("/TransformParams << /P {p} >>")));
+    assert_eq!(certification_of("cat-p-0", &cat_bad("0"), &[]).0, Some(1));
+    // Several references: the strictest, in whatever order they come.
+    let two = field(&format!("{} {}", doc_mdp("/TransformParams << /P 3 >>"), doc_mdp("/TransformParams << /P 1 >>")));
+    assert_eq!(certification_of("field-two", form, &[&two]).0, Some(1));
+    // A reference that is not a DocMDP certifies nothing.
+    let fmdp = field("<< /Type /SigRef /TransformMethod /FieldMDP /TransformParams << /Action /All >> >>");
+    assert_eq!(certification_of("field-fieldmdp", form, &[&fmdp]), (None, true));
+    // Both exist: the lower P counts.
+    let both = format!("{form} {}", cat("/TransformParams << /P 1 >>"));
+    assert_eq!(certification_of("both", &both, &[&p3]).0, Some(1));
+    // Strictest of the two, either way round: the catalog's 3 over a field's 1 is 1.
+    let p1 = field(&doc_mdp("/TransformParams << /P 1 >>"));
+    let both = format!("{form} {}", cat("/TransformParams << /P 3 >>"));
+    assert_eq!(certification_of("both-field-stricter", &both, &[&p1]).0, Some(1));
+    // A signature with a value and no DocMDP is signed, not certified; an empty field is neither.
+    let plain = format!("<< /FT /Sig /T (S) /V << /Type /Sig /ByteRange [0 10 20 30] /Contents <00> >> >>");
+    assert_eq!(certification_of("plain", form, &[&plain]), (None, true));
+    assert_eq!(certification_of("empty", "/AcroForm << /Fields [7 0 R] >>", &["<< /FT /Sig /T (S) >>"]), (None, false));
+}
+
+#[test]
+fn the_signature_type_and_value_are_found_through_the_field_tree() {
+    // /FT on the parent, the value on a kid of a kid.
+    let v = sig_value(&doc_mdp("/TransformParams << /P 3 >>"));
+    let objs = ["<< /FT /Sig /T (P) /Kids [8 0 R] >>".to_string(), "<< /Parent 7 0 R /Kids [9 0 R] >>".to_string(), format!("<< /Parent 8 0 R /T (K) {v} >>")];
+    let objs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    assert_eq!(certification_of("tree", "/AcroForm << /Fields [7 0 R] >>", &objs), (Some(3), true));
+    // /V on the parent, /FT only on the kid: the kid is a signature with the parent's value.
+    let objs = [format!("<< /T (P) {v} /Kids [8 0 R] >>"), "<< /Parent 7 0 R /FT /Sig /T (K) >>".to_string()];
+    let objs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    assert_eq!(certification_of("inherited-value", "/AcroForm << /Fields [7 0 R] >>", &objs), (Some(3), true));
+    // A kid with no value of its own under two parents that each carry one: the DocMDP of the second is not missed,
+    // whichever parent is read first.
+    let approval = "/V << /Type /Sig /ByteRange [0 10 20 30] /Contents <00> >>";
+    let certifying = sig_value(&doc_mdp("/TransformParams << /P 1 >>"));
+    for (name, fields) in [("two-parents-a", "[7 0 R 8 0 R]"), ("two-parents-b", "[8 0 R 7 0 R]")] {
+        let objs = [
+            format!("<< /T (A) {approval} /Kids [9 0 R] >>"),
+            format!("<< /T (B) {certifying} /Kids [9 0 R] >>"),
+            "<< /FT /Sig /T (K) >>".to_string(),
+        ];
+        let objs: Vec<&str> = objs.iter().map(String::as_str).collect();
+        assert_eq!(certification_of(name, &format!("/AcroForm << /Fields {fields} >>"), &objs), (Some(1), true), "{name}");
+    }
+    // Not a signature field: a text field's /V is not looked at.
+    let text = format!("<< /FT /Tx /T (T) {v} >>");
+    assert_eq!(certification_of("text-field", "/AcroForm << /Fields [7 0 R] >>", &[&text]), (None, false));
+}
+
+#[test]
+fn a_signature_of_a_shape_no_writer_makes_is_read_toward_refusing() {
+    let form = "/AcroForm << /Fields [7 0 R] >>";
+    let certifying = doc_mdp("/TransformParams << /P 1 >>");
+    // /V that is not a dictionary: a value, so signed, and no DocMDP to read.
+    for (name, v) in [("string", "(text)"), ("int", "12"), ("name", "/Sig")] {
+        let obj = format!("<< /FT /Sig /T (S) /V {v} >>");
+        assert_eq!(certification_of(&format!("v-{name}"), form, &[&obj]), (None, true), "/V {v}");
+    }
+    // /Reference that is one dictionary where an array belongs: read as the one entry it would be.
+    let lone = format!("<< /FT /Sig /T (S) /V << /Type /Sig /Contents <00> /Reference {certifying} >> >>");
+    assert_eq!(certification_of("reference-dict", form, &[&lone]), (Some(1), true));
+    // /Reference that is neither: nothing to read, still signed.
+    let junk = "<< /FT /Sig /T (S) /V << /Type /Sig /Contents <00> /Reference (x) >> >>";
+    assert_eq!(certification_of("reference-string", form, &[junk]), (None, true));
+    // More references than are read: the strictest answer, not the first 16.
+    let many = format!("<< /FT /Sig /T (S) /V << /Type /Sig /Contents <00> /Reference [ {} {certifying} ] >> >>", "<< /TransformMethod /FieldMDP >> ".repeat(16));
+    assert_eq!(certification_of("reference-many", form, &[&many]), (Some(1), true));
+}
+
+/// A form whose first field (object 7) is a certifying signature (`/P 1`), then `n` references to one plain text field
+/// (object 8), and `kids` of those under a parent (object 9) listed last.
+fn crowded_form(name: &str, n: usize, kids: usize) -> (std::result::Result<Option<i32>, EngineError>, bool) {
+    let certifying = format!("<< /FT /Sig /T (S) {} >>", sig_value(&doc_mdp("/TransformParams << /P 1 >>")));
+    let parent = format!("<< /T (P) /Kids [{}] >>", "8 0 R ".repeat(kids));
+    let fields = format!("[7 0 R {}{}]", "8 0 R ".repeat(n), if kids > 0 { "9 0 R" } else { "" });
+    checked_certification_of(name, &format!("/AcroForm << /Fields {fields} >>"), &[&certifying, "<< /FT /Tx /T (t) >>", &parent])
+}
+
+#[test]
+fn a_walk_that_hits_its_caps_refuses_instead_of_answering_not_certified() {
+    // Exactly at the cap: fine, and the signature is found.
+    assert_eq!(crowded_form("cap-exact", 19_999, 0).0.unwrap(), Some(1));
+    // One field past the cap in /Fields: an error, and signed (nothing else says so).
+    let (c, signed) = crowded_form("cap-fields", 20_000, 0);
+    assert!(matches!(&c, Err(EngineError::Invalid(m)) if m.contains("certified")), "{c:?}");
+    assert!(signed);
+    // The nodes of the walk add up past the cap: the certifying field at the front is the last one popped.
+    let (c, signed) = crowded_form("cap-budget", 1, 19_998);
+    assert!(matches!(&c, Err(EngineError::Invalid(m)) if m.contains("certified")), "{c:?}");
+    assert!(signed);
+    // A caller that refuses on a certified document refuses on that too.
+    let d = dir("outline", "cap-caller");
+    let certifying = format!("<< /FT /Sig /T (S) {} >>", sig_value(&doc_mdp("/TransformParams << /P 1 >>")));
+    let parent = format!("<< /T (P) /Kids [{}] >>", "8 0 R ".repeat(19_999));
+    let pdf = outline_pdf_with("/AcroForm << /Fields [7 0 R 9 0 R] >>", "<< /Type /Outlines /Count 0 >>", &[certifying, "<< /FT /Tx /T (t) >>".into(), parent]);
+    let (eng, id, _) = open_bytes(&d, "big.pdf", &pdf);
+    match apply(&eng, id, rev(&eng, id), &BookmarkOp::Rename { id: 7, title: "B".into() }, EditSource::User) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_field_shared_by_parents_that_hold_their_value_inline_is_read_under_each() {
+    // Both parents are direct (no object number), so only what each one certifies tells their states apart.
+    let approval = "/V << /Type /Sig /ByteRange [0 10 20 30] /Contents <00> >>";
+    let certifying = sig_value(&doc_mdp("/TransformParams << /P 1 >>"));
+    for (name, a, b) in [("inline-ab", approval, certifying.as_str()), ("inline-ba", certifying.as_str(), approval)] {
+        let form = format!("/AcroForm << /Fields [ << /T (A) {a} /Kids [7 0 R] >> << /T (B) {b} /Kids [7 0 R] >> ] >>");
+        assert_eq!(certification_of(name, &form, &["<< /FT /Sig /T (K) >>"]), (Some(1), true), "{name}");
+    }
+}
+
+#[test]
+fn a_direct_value_that_loops_back_to_its_field_ends_the_walk() {
+    // 7 -> a direct kid with a direct /V -> 7: every lap is the same state, so it is read once (and it is an answer,
+    // not the error a walk that never ran out of new states would end in).
+    let v = sig_value(&doc_mdp("/TransformParams << /P 3 >>"));
+    let looped = format!("<< /FT /Sig /T (A) /Kids [ << /T (B) {v} /Kids [7 0 R] >> ] >>");
+    assert_eq!(certification_of("direct-loop", "/AcroForm << /Fields [7 0 R] >>", &[&looped]), (Some(3), true));
+}
+
+#[test]
+fn a_hostile_field_tree_is_walked_once_and_reads_nothing_it_should_not() {
+    let v = sig_value(&doc_mdp("/TransformParams << /P 1 >>"));
+    // 7 -> 8 -> 7 -> ..., a field that is its own kid, a kid that is not a dictionary, and a valued signature after them.
+    let objs = [
+        "<< /FT /Sig /T (A) /Parent 8 0 R /Kids [8 0 R 7 0 R 42 0 R 5 /Name (str)] >>".to_string(),
+        "<< /Parent 7 0 R /Kids [7 0 R 8 0 R 9 0 R] >>".to_string(),
+        format!("<< /Parent 8 0 R /T (B) {v} >>"),
+    ];
+    let objs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    assert_eq!(certification_of("loop", "/AcroForm << /Fields [7 0 R 7 0 R 8 0 R] >>", &objs), (Some(1), true));
+    let looped = ["<< /FT /Sig /Kids [8 0 R] >>", "<< /Kids [7 0 R] >>"];
+    assert_eq!(certification_of("loop-only", "/AcroForm << /Fields [7 0 R] >>", &looped), (None, false));
+    // /Fields that is not an array, and an AcroForm that is not a dictionary.
+    assert_eq!(certification_of("fields-name", "/AcroForm << /Fields /Nope >>", &[]).0, None);
+    assert_eq!(certification_of("acroform-int", "/AcroForm 12", &[]).0, None);
+}
+
 #[test]
 fn bookmarks_follow_their_pages_through_insert_move_and_delete() {
     use crate::engine::edit::EditOp;
@@ -804,4 +1145,27 @@ fn an_unsigned_document_is_still_rewritten_without_what_was_deleted() {
     eng.save(id, None).unwrap();
     let saved = std::fs::read(&path).unwrap();
     assert!(!String::from_utf8_lossy(&saved).contains("Secret title"), "a deleted bookmark's title does not stay in the file");
+}
+
+/// A signature whose `/Reference` is `refs`, as an object that the reads below can be made to fail on.
+fn sig_object(refs: &str) -> PdfObject {
+    let pdf = outline_pdf_with(&format!("/Perms << /DocMDP << /Type /Sig /Reference {refs} >> >>"), "<< /Type /Outlines /Count 0 >>", &[]);
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    doc.catalog().unwrap().get_dict("Perms").unwrap().unwrap().get_dict("DocMDP").unwrap().unwrap()
+}
+
+#[test]
+fn a_signature_reference_that_cannot_be_read_counts_as_certifying() {
+    // MuPDF repairs a damaged file on its own, so a file cannot make a read fail: the reads are made to.
+    let sig = sig_object("[ << /TransformMethod /DocMDP /TransformParams << /P 3 >> >> ]");
+    let ok = |o: &PdfObject, k: &str| o.get_dict(k);
+    assert_eq!(reference_p_with(&sig, &ok), Some(3));
+    for failing in ["Reference", "TransformMethod", "TransformParams", "P"] {
+        let get = |o: &PdfObject, k: &str| if k == failing { Err(mupdf::Error::InvalidPdfDocument) } else { o.get_dict(k) };
+        assert_eq!(reference_p_with(&sig, &get), Some(1), "{failing} unreadable");
+    }
+    // An entry that is not a DocMDP is not made strict by being unreadable elsewhere: only what is read counts.
+    let other = sig_object("[ << /TransformMethod /FieldMDP /TransformParams << /P 3 >> >> ]");
+    let get = |o: &PdfObject, k: &str| if k == "TransformParams" { Err(mupdf::Error::InvalidPdfDocument) } else { o.get_dict(k) };
+    assert_eq!(reference_p_with(&other, &get), None);
 }

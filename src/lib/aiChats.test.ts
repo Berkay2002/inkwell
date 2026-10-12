@@ -13,7 +13,7 @@ vi.hoisted(() => {
 
 let emit: (e: ChatEvent) => void = () => {};
 vi.mock("./ai", () => ({
-  aiAsk: vi.fn((_doc: number, _req: unknown, cb: (e: ChatEvent) => void) => {
+  aiAsk: vi.fn((_doc: number, _req: unknown, _provider: string, cb: (e: ChatEvent) => void) => {
     emit = cb;
     return Promise.resolve();
   }),
@@ -53,7 +53,7 @@ beforeEach(() => {
 });
 
 const ask = (q: string) => useAi.getState().ask(1, { kind: "ask", question: q });
-const finish = () => emit({ kind: "done", answer: "a", citations: [], followups: [], firstTokenMs: 1, totalMs: 2, prepMs: 0, chunksSent: 0, chunksTotal: 0 });
+const finish = () => emit({ kind: "done", answer: "a", citations: [], firstTokenMs: 1, totalMs: 2, prepMs: 0, chunksSent: 0, chunksTotal: 0 });
 
 describe("a document's chats (command bar)", () => {
   it("stamps each message with the time it was asked", () => {

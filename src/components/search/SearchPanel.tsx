@@ -1,7 +1,11 @@
+import { message } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useFind } from "../../lib/findStore";
+import * as api from "../../lib/api";
+import { run as editRun } from "../../lib/edit";
 import {
-  type FileGroup, FIRST_ITEMS, MORE_ITEMS, type Hit, SOURCE_LABEL, filesLine, folderName, groupByPage, optsKey, resultsLine, shortDir, visibleRows,
+  type FileGroup, FIRST_ITEMS, MORE_ITEMS, type Hit, SOURCE_LABEL, estimateLine, filesLine, folderName, groupByPage, optsKey, resultsLine, shortDir,
+  staleLine, staleResultsLine, visibleRows,
 } from "../../lib/searchLogic";
 import { useSearch } from "../../lib/searchStore";
 import { type DocState, useStore } from "../../store";
@@ -144,6 +148,7 @@ function FileResults({ doc, draft }: { doc: DocState; draft: string }) {
 
 function FolderResults({ query }: { query: string }) {
   const run = useSearch((s) => s.run);
+  const catalog = useSearch((s) => s.target?.kind === "catalog");
   const shown = useSearch((s) => s.shown);
   const [cursor, setCursor] = useState(0);
   const list = useRef<HTMLDivElement>(null);
@@ -182,9 +187,10 @@ function FolderResults({ query }: { query: string }) {
       )}
       {!run.running && run.skipped > 0 && (
         <p className="sr-note">
-          {run.skipped} {run.skipped === 1 ? "file" : "files"} could not be read (damaged, or protected with a password).
+          {run.skipped} {run.skipped === 1 ? "file" : "files"} could not be read (damaged, protected with a password{catalog ? ", or too large to index" : ""}).
         </p>
       )}
+      {!run.running && run.stale > 0 && <p className="sr-note">{staleResultsLine(run.stale)}</p>}
       {!run.running && run.cloudOnly > 0 && (
         <p className="sr-note">
           {run.cloudOnly} cloud-only {run.cloudOnly === 1 ? "file" : "files"} skipped (not downloaded to this PC, so not read).
@@ -262,6 +268,146 @@ function FolderResults({ query }: { query: string }) {
   );
 }
 
+/** The saved catalogs of the Folder scope: pick one to search it, refresh or delete it, or make a new one. */
+function Catalogs({ disabled }: { disabled: boolean }) {
+  /** Asks first, naming the catalog and how many files its index holds (the PDFs themselves are never touched). */
+  const remove = async (c: api.CatalogMeta) => {
+    const files = `${c.files.toLocaleString("en-US")} ${c.files === 1 ? "file" : "files"}`;
+    const ok = await message(`Delete the catalog “${c.name}”? Its search index of ${files} is removed. The PDFs are not touched.`, {
+      title: "Inkwell",
+      kind: "warning",
+      buttons: { ok: "Delete", cancel: "Cancel" },
+    });
+    if (ok === "Ok" || ok === "Delete") void sr().removeCatalog(c.id);
+  };
+  const catalogs = useSearch((s) => s.catalogs);
+  const stale = useSearch((s) => s.stale);
+  const target = useSearch((s) => s.target);
+  const build = useSearch((s) => s.build);
+  const draft = useSearch((s) => s.draft);
+  useEffect(() => void sr().loadCatalogs(), []);
+  const busy = build?.running ?? false;
+  const pct = build && build.total > 0 ? Math.min(100, (build.done / build.total) * 100) : 0;
+
+  return (
+    <div className="sr-cats">
+      {catalogs.map((c) => {
+        const on = target?.kind === "catalog" && target.id === c.id;
+        const badge = staleLine(stale[c.id], c.built);
+        return (
+          <div key={c.id} className={on ? "sr-cat on" : "sr-cat"}>
+            <button className="sr-catname" aria-pressed={on} disabled={disabled} title={c.folder} onClick={() => sr().selectCatalog(c.id)}>
+              <Icon name="book" size={14} />
+              <span className="sr-fname">Catalog: {c.name}</span>
+            </button>
+            {badge && <span className="sr-stale" title="What a refresh would change">{badge}</span>}
+            <button className="ax-icon" title="Refresh" aria-label={`Refresh ${c.name}`} disabled={busy || disabled} onClick={() => void sr().buildCatalog(c.id)}>
+              <Icon name="rotate" size={14} />
+            </button>
+            <button className="ax-icon" title="Delete" aria-label={`Delete ${c.name}`} disabled={busy || disabled} onClick={() => void remove(c)}>
+              <Icon name="trash" size={14} />
+            </button>
+          </div>
+        );
+      })}
+      {build && (
+        <>
+          <div className="sr-status" aria-live="polite">
+            <span>{build.running ? (build.total ? `Indexing ${build.done.toLocaleString("en-US")} of ${build.total.toLocaleString("en-US")} files` : "Listing files…") : build.line}</span>
+            <span className="grow" />
+            {build.running && (
+              <button className="sr-link" disabled={build.job == null} onClick={() => sr().cancelBuild()}>
+                Cancel
+              </button>
+            )}
+          </div>
+          {build.running && (
+            <div className="sr-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} aria-label="Indexing">
+              <i style={{ width: `${pct}%` }} />
+            </div>
+          )}
+        </>
+      )}
+      {draft ? (
+        <div className="sr-newcat">
+          <div className="sr-folderrow">
+            <Icon name="open" size={14} />
+            <span className="sr-fname" title={draft.path}>{folderName(draft.path)}</span>
+          </div>
+          <input
+            className="sr-catinput"
+            value={draft.name}
+            aria-label="Catalog name"
+            placeholder="Catalog name"
+            spellCheck={false}
+            onChange={(e) => sr().patchDraft({ name: e.target.value })}
+          />
+          <label className="sr-switch">
+            <input type="checkbox" checked={draft.recursive} onChange={(e) => sr().patchDraft({ recursive: e.target.checked })} />
+            <span>Include sub-folders</span>
+          </label>
+          <p className="sr-note flush" aria-live="polite">{draft.estimate ? estimateLine(draft.estimate) : "Counting files…"}</p>
+          {draft.estimate?.capped && <p className="sr-note flush">The folder has more PDFs than a catalog holds; the first ones are indexed.</p>}
+          <div className="sr-pickrow">
+            <button className="sr-pick" onClick={() => sr().dropDraft()}>
+              Cancel
+            </button>
+            <button className="sr-go" disabled={busy || !draft.estimate || draft.estimate.files === 0} onClick={() => void sr().createCatalog()}>
+              Build catalog
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button className="sr-pick" disabled={busy || disabled} onClick={() => void sr().newCatalog()}>
+          <Icon name="plus" size={14} /> New catalog…
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Puts the search index of the open document into the file itself, or takes it out. */
+function EmbeddedIndex({ doc }: { doc: DocState }) {
+  const [info, setInfo] = useState<api.Embedded | null>(null);
+  const [busy, setBusy] = useState(false);
+  // The file changes with every edit (rev), so the status is read again.
+  useEffect(() => {
+    let live = true;
+    api.indexEmbedded(doc.id).then((e) => live && setInfo(e), () => {});
+    return () => {
+      live = false;
+    };
+  }, [doc.id, doc.rev]);
+  if (!info) return null;
+  const change = async (f: () => Promise<api.EditState>) => {
+    setBusy(true);
+    try {
+      await editRun(doc.id, f);
+    } catch (e) {
+      st().setUi({ error: String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const note =
+    info.blocked ?? (!info.present ? "No search index in this file." : info.current ? "This file carries a search index." : "The index in this file is out of date.");
+  const off = busy || info.blocked !== null;
+  return (
+    <div className="sr-embed">
+      <span className="dim">{note}</span>
+      <span className="grow" />
+      <button className="sr-link" disabled={off} title={info.blocked ?? undefined} onClick={() => void change(() => api.indexEmbed(doc.id))}>
+        {info.present ? "Update" : "Embed search index"}
+      </button>
+      {info.present && (
+        <button className="sr-link" disabled={off} title={info.blocked ?? undefined} onClick={() => void change(() => api.indexUnembed(doc.id))}>
+          Remove embedded index
+        </button>
+      )}
+    </div>
+  );
+}
+
 function History({ onPick, onClose }: { onPick: (q: string) => void; onClose: () => void }) {
   const history = useFind((s) => s.history);
   const box = useRef<HTMLDivElement>(null);
@@ -332,7 +478,8 @@ export function SearchPanel({ doc }: { doc: DocState }) {
 
   if (!open) return null;
   const setDraft = (t: string) => useFind.getState().setDraft(doc.id, t);
-  const canRun = scope === "folder" && !!target && draft.trim().length > 0;
+  const built = useSearch((s) => target?.kind !== "catalog" || (s.catalogs.find((c) => c.id === target.id)?.built ?? 0) > 0);
+  const canRun = scope === "folder" && !!target && built && draft.trim().length > 0;
   const runFolder = () => void sr().startFolder(draft);
   const choose = async (files: boolean) => {
     if (await (files ? sr().pickFiles() : sr().pickFolder())) {
@@ -406,7 +553,8 @@ export function SearchPanel({ doc }: { doc: DocState }) {
 
         {scope === "folder" && (
           <div className="sr-folder">
-            {target && (
+            <Catalogs disabled={running} />
+            {target && target.kind !== "catalog" && (
               <div className="sr-folderrow">
                 <Icon name={target.kind === "folder" ? "open" : "file"} size={14} />
                 <span className="sr-fname" title={target.kind === "folder" ? target.path : target.paths.join("\n")}>
@@ -429,11 +577,12 @@ export function SearchPanel({ doc }: { doc: DocState }) {
               </label>
             )}
             <button className="sr-go" disabled={!canRun || running} onClick={runFolder}>
-              Search folder
+              {target?.kind === "catalog" ? "Search catalog" : "Search folder"}
             </button>
           </div>
         )}
 
+        {scope === "file" && <EmbeddedIndex doc={doc} />}
         <div className="sr-body">{scope === "file" ? <FileResults doc={doc} draft={draft} /> : <FolderResults query={draft} />}</div>
       </section>
     </aside>

@@ -23,3 +23,9 @@ Fluent UI System Icons
   Copyright (c) 2020 Microsoft Corporation
   Licensed under the MIT licence: licenses/fluent/LICENSE-MIT
   The interface icons in src/assets/icons/fluent/ are copied from @fluentui/svg-icons (see docs/icons.md).
+
+OpenAI and Claude marks
+  The two marks beside the assistant's provider names (src/components/assistant/providerMarks.tsx) are
+  the "openai" and "claude" icons of simple-icons 16.35.0 (https://simpleicons.org), dedicated to the
+  public domain under CC0 1.0. OpenAI and Claude are trademarks of their owners; the marks only say
+  which service answers and do not mean that the owners endorse Inkwell.

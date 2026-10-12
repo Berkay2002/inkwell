@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { EditState } from "./api";
 
 export type Rect4 = [number, number, number, number];
 
@@ -10,6 +11,11 @@ export interface ModelInfo {
   isDefault: boolean;
 }
 
+/** Which CLI answers: Codex (ChatGPT subscription) or Claude Code (Claude subscription). */
+export type ProviderId = "codex" | "claude";
+export const PROVIDERS: ProviderId[] = ["codex", "claude"];
+export const PROVIDER_NAMES: Record<ProviderId, string> = { codex: "Codex", claude: "Claude" };
+
 export interface AiStatus {
   installed: boolean;
   loggedIn: boolean;
@@ -17,6 +23,8 @@ export interface AiStatus {
   plan: string | null;
   models: ModelInfo[];
   error: string | null;
+  /** The CLI's own version, when it said. */
+  version?: string | null;
 }
 
 export interface Prepared {
@@ -62,28 +70,51 @@ export interface AskRequest {
 export interface Activity {
   id: string;
   tool: string;
-  class: "read" | "edit" | "destructive";
+  /** `permanent` cannot be taken back from the saved file (a redaction) and asks in every mode. */
+  class: "read" | "edit" | "destructive" | "permanent";
   /** What and where, ready to show ("Searched “Ciri”", "Deleted page 4"). */
   label: string;
   state: "waiting" | "running" | "done" | "failed" | "rejected";
   detail: string | null;
 }
 
-/** The model moved the user's view. */
+/** The report of a redaction the assistant applied (the Redact rail opens on it). */
+export interface RedactReport {
+  marks: number;
+  sanitize: Record<string, unknown>;
+  verify: { leaks: { needle: string; place: string; critical: boolean }[] };
+}
+
+/** The model moved the user's view, or changed the document. */
 export type UiAction =
   | { type: "goTo"; page: number }
-  | { type: "show"; page: number; rects: Rect4[]; quote: string };
+  | { type: "show"; page: number; rects: Rect4[]; quote: string }
+  /** The assistant changed the document: this is its new generation (pages, undo label, marks). */
+  | { type: "edited"; state: EditState; redacted: RedactReport | null }
+  /** The assistant made a new file next to the document (compress, export, convert, create): the message offers
+   *  to open it. `token` is the open token the backend minted for `path`. */
+  | ({ type: "file" } & FileOffer)
+  /** Open one of the app's tools (`toolItems` ids) for what the assistant may not do itself. */
+  | { type: "openTool"; tool: string };
+
+/** A file the assistant made, offered under its answer as "Open <name>". */
+export interface FileOffer {
+  name: string;
+  path: string;
+  token: string;
+}
 
 export type ChatEvent =
   | { kind: "status"; phase: "reading" | "connecting" | "thinking" }
   | { kind: "delta"; text: string }
+  /** What was streamed so far was a preamble before a tool call, not the answer: start the text again. */
+  | { kind: "reset" }
   | ({ kind: "activity" } & Activity)
   | { kind: "ui"; action: UiAction }
   | {
       kind: "done";
       answer: string;
       citations: Citation[];
-      followups: string[];
       firstTokenMs: number | null;
       totalMs: number;
       prepMs: number;
@@ -93,8 +124,13 @@ export type ChatEvent =
   | { kind: "error"; message: string; hint: string | null }
   | { kind: "cancelled" };
 
-export const aiStatus = () => invoke<AiStatus>("ai_status");
-export const aiPrepare = (doc: number) => invoke<Prepared>("ai_prepare", { doc });
+export const aiStatus = (provider: ProviderId) => invoke<AiStatus>("ai_status", { provider });
+export const aiPrepare = (doc: number, provider: ProviderId) => invoke<Prepared>("ai_prepare", { doc, provider });
+/** Native file dialog for `claude`; Rust vets the file and keeps it. Resolves to the path, or null when closed. */
+export const aiPickClaudePath = () => invoke<string | null>("ai_pick_claude_path");
+/** The file picked earlier (null: Inkwell finds `claude` itself). */
+export const aiClaudePath = () => invoke<string | null>("ai_claude_path");
+export const aiClearClaudePath = () => invoke<void>("ai_clear_claude_path");
 export const aiCancel = (doc: number) => invoke<void>("ai_cancel", { doc });
 export const aiClose = (doc: number) => invoke<void>("ai_close", { doc });
 /** The mode changed while a turn runs: its very next tool call is checked against it. */
@@ -104,10 +140,10 @@ export const aiToolDecision = (doc: number, callId: string, allow: boolean) =>
   invoke<void>("ai_tool_decision", { doc, callId, allow });
 
 /** Starts a question; every event of the answer arrives through `onEvent`. */
-export function aiAsk(doc: number, req: AskRequest, onEvent: (e: ChatEvent) => void) {
+export function aiAsk(doc: number, req: AskRequest, provider: ProviderId, onEvent: (e: ChatEvent) => void) {
   const ch = new Channel<ChatEvent>();
   ch.onmessage = onEvent;
-  return invoke<void>("ai_ask", { doc, req, onEvent: ch });
+  return invoke<void>("ai_ask", { doc, req, provider, onEvent: ch });
 }
 
 // ---- settings kept on this machine (never chats) ---------------------------------------------
@@ -124,9 +160,16 @@ export interface Geo {
 }
 
 export interface AiSettings {
+  /** The provider a document without its own choice uses (the last one picked). */
+  provider: ProviderId;
+  /** Model and effort chosen for Codex; Claude's are `claudeModel` / `claudeEffort`. */
   model: string | null;
   effort: string;
+  claudeModel: string | null;
+  claudeEffort: string | null;
+  /** Agreed to send document text to OpenAI (Codex) / to Anthropic (Claude): each is asked once. */
   consent: boolean;
+  claudeConsent: boolean;
   hideSources: boolean;
   /** Docked width in px. */
   width: number;
@@ -139,9 +182,14 @@ export interface AiSettings {
 
 const KEY = "inkwell.ai";
 const DEFAULTS: AiSettings = {
+  provider: "codex",
   model: null,
   effort: "low",
+  // Claude starts on the small, quick model; a choice made in the picker is kept
+  claudeModel: "haiku",
+  claudeEffort: "medium",
   consent: false,
+  claudeConsent: false,
   hideSources: false,
   width: 400,
   mode: "docked",
@@ -151,9 +199,15 @@ const DEFAULTS: AiSettings = {
 
 export function loadSettings(): AiSettings {
   try {
-    const s: AiSettings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    const s: AiSettings & { claudePath?: unknown } = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    // a path to claude used to live here; Rust keeps the picked file now and never reads this
+    delete s.claudePath;
     return {
       ...s,
+      // null was "never chosen" before the defaults existed: the picker only ever stores an id
+      claudeModel: s.claudeModel ?? DEFAULTS.claudeModel,
+      claudeEffort: s.claudeEffort ?? DEFAULTS.claudeEffort,
+      provider: PROVIDERS.includes(s.provider) ? s.provider : "codex",
       mode: MODES.includes(s.mode) ? s.mode : "docked",
       permissions: PERMISSIONS.includes(s.permissions) ? s.permissions : "ask",
     };

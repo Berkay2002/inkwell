@@ -473,3 +473,23 @@ int mupdf_pdf_lookup_page_number(fz_context *ctx, pdf_document *doc, pdf_obj *pa
 {
     TRY_CATCH(int, -1, pdf_lookup_page_number(ctx, doc, page_obj));
 }
+
+/* Decodes the encoded image (PNG, JPEG, ...) in `buffer` and makes it the appearance of a stamp annotation. */
+void mupdf_pdf_set_annot_stamp_image_from_buffer(fz_context *ctx, pdf_annot *annot, fz_buffer *buffer, mupdf_error_t **errptr)
+{
+    fz_image *image = NULL;
+    fz_var(image);
+    fz_try(ctx)
+    {
+        image = fz_new_image_from_buffer(ctx, buffer);
+        pdf_set_annot_stamp_image(ctx, annot, image);
+    }
+    fz_always(ctx)
+    {
+        fz_drop_image(ctx, image);
+    }
+    fz_catch(ctx)
+    {
+        mupdf_save_error(ctx, errptr);
+    }
+}
