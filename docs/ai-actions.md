@@ -135,7 +135,7 @@ model). Screens: `docs/screens/ai-actions-live/` (the answers there are the real
 |---|---|
 | "Make a smaller copy of this document." | `compress_document` card, "report (compressed).pdf" (54 KB to 49 KB), button opens it |
 | "Export the text of pages 1 to 2 to a text file." | `export_document`, "report.txt" next to the copy |
-| "Highlight every date in this document." | one `add_comment` with `regex` `\d{4}-\s*\d{2}-\d{2}`: both dates (one wraps over two lines), one card, one undo step |
+| "Highlight every date in this document." | one `add_comment` with `regex` `\b\d{4}-\s*\d{2}-\d{2}\b`: both dates (one wraps over two lines), one card, one undo step |
 | "What is different between this document and the saved file?" | `compare_documents`: the two highlights |
 | "Redact my name, Jane Q. Tester, everywhere in this document." | `redact_find_and_mark` (2 marks), `search` for the other forms, answer lists what it left unmarked ("Jane Tester" on p. 2, the e-mail address) |
 | "Apply the redactions now." | `redact_list_marks`, `redact_apply` card ("Permanently redact 2 marks on p. 1, delete ALL comments..."), applied; the answer reports the 4 places that still mention the text and offers to mark them |
