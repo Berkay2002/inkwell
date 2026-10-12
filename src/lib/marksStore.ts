@@ -159,6 +159,11 @@ export const FOREIGN_NAME: Record<MarkKind, string> = {
 
 export const CERTIFIED_MARKS =
   "This document is certified. Changing its pages would void the certification, so Inkwell leaves the document as it is.";
+/** A certified document is refused every change; numbered copies of other files are not this document. */
+export function marksLocked(numbering: boolean, more: Pick<MarksMore, "certified"> | undefined): boolean {
+  return !numbering && !!more?.certified;
+}
+
 export const SIGNED_MARKS =
   "This document is signed. A change to its pages is saved after the signature, which will show that the file was changed. Anything removed in the same session stays in the saved file, unused.";
 export const SHRINK_KEEPS_ANNOTATIONS = "Comments and links keep their place.";

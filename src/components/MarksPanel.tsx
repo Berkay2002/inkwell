@@ -13,6 +13,7 @@ import {
   KIND_NAME,
   KIND_TITLE,
   KINDS,
+  marksLocked,
   type MarksSheet,
   outcome,
   pagesOf,
@@ -66,7 +67,7 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
   const existing = !!here && !!pages && pages.some((p) => here.pages.includes(p));
   const numbering = sheet.kind === "bates" && sheet.btFiles.length > 0;
   // A certified document is refused every change (numbered copies of other files are not this document).
-  const locked = !numbering && !!more?.certified;
+  const locked = marksLocked(numbering, more);
   const why = locked ? CERTIFIED_MARKS : readiness(sheet, doc.pageCount);
   const foreign = more?.foreign ?? [];
   const sentence = outcome(sheet, doc.pageCount, existing);
@@ -82,10 +83,10 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
                 <span className="mk-has-name">{KIND_NAME[k.kind]}</span>
                 <span className="dim small tl-mono">{k.pages.length === doc.pageCount ? "all pages" : `pp. ${formatRange(k.pages)}`}</span>
                 <span className="grow" />
-                <button className="tl-link" onClick={() => st().setKind(k.kind)}>
+                <button className="tl-link" disabled={locked} title={locked ? CERTIFIED_MARKS : undefined} onClick={() => st().setKind(k.kind)}>
                   Update
                 </button>
-                <button className="tl-link" disabled={sheet.busy || locked} onClick={() => void st().remove(k.kind)}>
+                <button className="tl-link" disabled={sheet.busy || locked} title={locked ? CERTIFIED_MARKS : undefined} onClick={() => void st().remove(k.kind)}>
                   Remove
                 </button>
               </div>
@@ -95,7 +96,7 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
                 <span className="mk-has-name">{FOREIGN_NAME[f.kind]}</span>
                 <span className="dim small tl-mono">{f.pages.length === doc.pageCount ? "all pages" : `pp. ${formatRange(f.pages)}`}</span>
                 <span className="grow" />
-                <button className="tl-link" disabled={sheet.busy || locked} onClick={() => void st().remove(f.kind, true)}>
+                <button className="tl-link" disabled={sheet.busy || locked} title={locked ? CERTIFIED_MARKS : undefined} onClick={() => void st().remove(f.kind, true)}>
                   Remove
                 </button>
                 {f.stuck.length > 0 && (
@@ -116,12 +117,17 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
           ))}
         </div>
 
-        {sheet.kind === "headerFooter" && <HeaderFooterView sheet={sheet} count={doc.pageCount} />}
-        {sheet.kind === "watermark" && <WatermarkView sheet={sheet} />}
-        {sheet.kind === "background" && <BackgroundView sheet={sheet} />}
-        {sheet.kind === "bates" && <BatesView sheet={sheet} count={doc.pageCount} />}
+        {/* a fieldset turns off every control inside it, the colour pickers and sliders too */}
+        <fieldset className="mk-form" disabled={locked} title={locked ? CERTIFIED_MARKS : undefined}>
+          {sheet.kind === "headerFooter" && <HeaderFooterView sheet={sheet} count={doc.pageCount} />}
+          {sheet.kind === "watermark" && <WatermarkView sheet={sheet} />}
+          {sheet.kind === "background" && <BackgroundView sheet={sheet} />}
+          {sheet.kind === "bates" && <BatesView sheet={sheet} count={doc.pageCount} />}
 
-        {!numbering && <PagesRow sheet={sheet} count={doc.pageCount} />}
+          {!numbering && <PagesRow sheet={sheet} count={doc.pageCount} />}
+        </fieldset>
+        {/* numbering other files writes copies and never changes this document, so a certified one may still do it */}
+        {sheet.kind === "bates" && <BatesFiles sheet={sheet} />}
 
         {more?.signed && !locked && (
           <p className="dim small" role="note">
@@ -147,7 +153,7 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
           {sheet.busy ? "Working…" : verb}
         </button>
         {here && !numbering && (
-          <button className="ax-btn tl-wide pr-quiet" disabled={sheet.busy || locked} onClick={() => void st().remove(sheet.kind)}>
+          <button className="ax-btn tl-wide pr-quiet" disabled={sheet.busy || locked} title={locked ? CERTIFIED_MARKS : undefined} onClick={() => void st().remove(sheet.kind)}>
             Remove {KIND_NAME[sheet.kind]}
           </button>
         )}
@@ -587,6 +593,13 @@ function BatesView({ sheet, count }: { sheet: MarksSheet; count: number }) {
       <StyleRow style={sheet.style} onChange={(style) => set({ style })} />
       <MarginsRow sheet={sheet} />
       <ShrinkRow sheet={sheet} count={count} />
+    </>
+  );
+}
+
+export function BatesFiles({ sheet }: { sheet: MarksSheet }) {
+  return (
+    <>
       <span className="tl-label">Files</span>
       <p className="dim small">
         {sheet.btFiles.length === 0
