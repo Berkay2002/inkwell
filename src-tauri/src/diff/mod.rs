@@ -25,6 +25,11 @@ pub use visual::{BytesId, Raster, VisualDiff, diff_rasters, diff_rasters_hinted,
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::AtomicBool;
 
+/// The number of pages of a PDF given as bytes (an encrypted file is an error: compare takes no passwords from the UI).
+pub fn page_count(bytes: &[u8]) -> Result<u32> {
+    catch_unwind(AssertUnwindSafe(|| Ok(snap::open_doc(bytes, Side::A, None)?.page_count()?.max(0) as u32))).unwrap_or(Err(DiffError::Panic))
+}
+
 /// Semantic comparison of two PDFs given as bytes. Panics inside MuPDF are turned into an error.
 pub fn compare(a: &[u8], b: &[u8], opts: &CompareOptions) -> Result<Comparison> {
     compare_with(a, b, opts, &AtomicBool::new(false), &mut |_| {})

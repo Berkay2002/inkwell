@@ -133,8 +133,15 @@ pub struct History {
     bytes: Mutex<LruCache<String, Arc<(BytesId, Vec<u8>)>>>,
     /// MuPDF work of the diff module, one thread at a time.
     diff_lock: Mutex<()>,
-    /// The latest comparisons by (bytes of A, bytes of B).
-    compared: Mutex<LruCache<(BytesId, BytesId), Arc<Comparison>>>,
+    /// The latest comparisons by (bytes of A, bytes of B, pages of each).
+    compared: Mutex<LruCache<(BytesId, BytesId, Picks), Arc<Comparison>>>,
+}
+
+/// The pages each side of a comparison covers (0-based, the file's own numbers; `None` = every page).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Picks {
+    pub a: Option<Vec<u32>>,
+    pub b: Option<Vec<u32>>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -514,15 +521,16 @@ impl History {
     }
 
     pub fn compare(&self, doc: Option<EngDoc>, a: &Source, b: &Source) -> Result<Comparison, String> {
-        self.compare_job(doc, a, b, &AtomicBool::new(false), &mut |_| {}).map(|j| (*j.cmp).clone())
+        self.compare_job(doc, a, b, &Picks::default(), &AtomicBool::new(false), &mut |_| {}).map(|j| (*j.cmp).clone())
     }
 
-    /// The comparison of two sources, from the cache when these exact bytes were compared a moment ago
-    /// (the report and the view ask for the same one). `cancel` is polled between pages. The bytes come back with
-    /// it: whoever draws on the result (the report) must use the very bytes that were compared.
-    pub fn compare_job(&self, doc: Option<EngDoc>, a: &Source, b: &Source, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<Compared, String> {
+    /// The comparison of two sources, from the cache when these exact bytes were compared a moment ago over the same
+    /// pages (the report and the view ask for the same one). `picks` limits each side to some pages; a page past the
+    /// end of its file is refused here, before any page is read. `cancel` is polled between pages. The bytes come back
+    /// with it: whoever draws on the result (the report) must use the very bytes that were compared.
+    pub fn compare_job(&self, doc: Option<EngDoc>, a: &Source, b: &Source, picks: &Picks, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<Compared, String> {
         let (a, b) = (self.load(doc, a)?, self.load(doc, b)?);
-        let key = (a.0, b.0);
+        let key = (a.0, b.0, picks.clone());
         if let Some(c) = self.compared.lock().get(&key) {
             return Ok(Compared { cmp: c.clone(), a, b });
         }
@@ -531,27 +539,35 @@ impl History {
         if let Some(c) = self.compared.lock().get(&key) {
             return Ok(Compared { cmp: c.clone(), a, b });
         }
-        let c = Arc::new(diff::compare_with(&a.1, &b.1, &CompareOptions::default(), cancel, on).map_err(err)?);
+        let opts = CompareOptions { pages_a: picks.a.clone(), pages_b: picks.b.clone(), ..Default::default() };
+        let c = Arc::new(diff::compare_with(&a.1, &b.1, &opts, cancel, on).map_err(err)?);
         self.compared.lock().put(key, c.clone());
         Ok(Compared { cmp: c, a, b })
     }
 
     /// The comparison of two sources as a PDF report. Returns its bytes; the caller writes them. The report draws
     /// the pages from the same bytes the comparison read, even if a file changed on disk in between.
-    pub fn report(&self, doc: Option<EngDoc>, a: &Source, b: &Source, names: (&str, &str), date: &str, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<Vec<u8>, String> {
-        let job = self.compare_job(doc, a, b, cancel, on)?;
+    pub fn report(&self, doc: Option<EngDoc>, a: &Source, b: &Source, picks: &Picks, names: (&str, &str), date: &str, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<Vec<u8>, String> {
+        let job = self.compare_job(doc, a, b, picks, cancel, on)?;
         let _g = self.diff_lock.lock();
         let input = diff::report::ReportInput { a: &job.a.1, b: &job.b.1, a_name: names.0, b_name: names.1, date };
         diff::report::build(&input, &job.cmp, cancel, on).map_err(err)
     }
 
     /// The report, written to `dest`. A job cancelled any time before the file is replaced leaves `dest` as it was.
-    pub fn report_to(&self, doc: Option<EngDoc>, a: &Source, b: &Source, names: (&str, &str), date: &str, dest: &Path, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<(), String> {
-        let bytes = self.report(doc, a, b, names, date, cancel, on)?;
+    pub fn report_to(&self, doc: Option<EngDoc>, a: &Source, b: &Source, picks: &Picks, names: (&str, &str), date: &str, dest: &Path, cancel: &AtomicBool, on: &mut dyn FnMut(diff::Progress)) -> Result<(), String> {
+        let bytes = self.report(doc, a, b, picks, names, date, cancel, on)?;
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(err(diff::DiffError::Cancelled));
         }
         write_replace(dest, &bytes).map_err(|e| format!("could not write {}: {e}", dest.display()))
+    }
+
+    /// How many pages a source has (the setup page offers it as the end of the range fields).
+    pub fn page_count(&self, doc: Option<EngDoc>, src: &Source) -> Result<u32, String> {
+        let s = self.load(doc, src)?;
+        let _g = self.diff_lock.lock();
+        diff::page_count(&s.1).map_err(err)
     }
 
     pub fn render(&self, doc: Option<EngDoc>, src: &Source, page: u32, scale: f32) -> Result<Vec<u8>, String> {
@@ -720,13 +736,16 @@ pub async fn history_compare_run(
     doc: Option<EngDoc>,
     a: Source,
     b: Source,
+    pages_a: Option<Vec<u32>>,
+    pages_b: Option<Vec<u32>>,
     on_progress: Channel<diff::Progress>,
 ) -> Result<Comparison, String> {
     let (a, b) = (a.resolve(&reg, window.label())?, b.resolve(&reg, window.label())?);
     let h = h.inner().clone();
     let guard = jobs.inner().begin(job);
+    let picks = Picks { a: pages_a, b: pages_b };
     off(move || {
-        h.compare_job(doc, &a, &b, &guard.cancel, &mut |p| {
+        h.compare_job(doc, &a, &b, &picks, &guard.cancel, &mut |p| {
             let _ = on_progress.send(p);
         })
         .map(|j| (*j.cmp).clone())
@@ -747,6 +766,8 @@ pub async fn history_compare_report(
     doc: Option<EngDoc>,
     a: Source,
     b: Source,
+    pages_a: Option<Vec<u32>>,
+    pages_b: Option<Vec<u32>>,
     names: (String, String),
     date: String,
     to: String,
@@ -758,14 +779,23 @@ pub async fn history_compare_report(
     eng.check_not_open(&dest, None).map_err(err)?;
     let h = h.inner().clone();
     let guard = jobs.inner().begin(job);
+    let picks = Picks { a: pages_a, b: pages_b };
     off(move || {
-        h.report_to(doc, &a, &b, (&names.0, &names.1), &date, Path::new(&dest), &guard.cancel, &mut |p| {
+        h.report_to(doc, &a, &b, &picks, (&names.0, &names.1), &date, Path::new(&dest), &guard.cancel, &mut |p| {
             let _ = on_progress.send(p);
         })?;
         window.state::<Paths>().learn(&dest);
         Ok(dest)
     })
     .await
+}
+
+/// The number of pages of a source, for the page range fields of the compare setup.
+#[tauri::command]
+pub async fn history_page_count(window: Window, h: Hist<'_>, reg: State<'_, Paths>, doc: Option<EngDoc>, source: Source) -> Result<u32, String> {
+    let source = source.resolve(&reg, window.label())?;
+    let h = h.inner().clone();
+    off(move || h.page_count(doc, &source)).await
 }
 
 /// One page as a PNG (`scale` 1 = one pixel per point). Over IPC only: no temp file.
@@ -1151,8 +1181,8 @@ mod tests {
         let (a, b) = (Source::Version { id: first }, Source::Current);
         let no = AtomicBool::new(false);
 
-        let c1 = h.compare_job(Some(doc), &a, &b, &no, &mut |_| {}).unwrap();
-        let c2 = h.compare_job(Some(doc), &a, &b, &no, &mut |_| {}).unwrap();
+        let c1 = h.compare_job(Some(doc), &a, &b, &Picks::default(), &no, &mut |_| {}).unwrap();
+        let c2 = h.compare_job(Some(doc), &a, &b, &Picks::default(), &no, &mut |_| {}).unwrap();
         assert!(Arc::ptr_eq(&c1.cmp, &c2.cmp), "same bytes, same comparison");
         assert!(Arc::ptr_eq(&c1.a, &c2.a) && Arc::ptr_eq(&c1.b, &c2.b), "and the same bytes come back with it");
         assert!(!c1.cmp.identical);
@@ -1162,7 +1192,7 @@ mod tests {
         let t = reg.issue_save("main", dest.clone());
         let to = reg.take_save("main", &t.token).unwrap();
         let mut stages = Vec::new();
-        let bytes = h.report(Some(doc), &a, &b, ("before.pdf", "after.pdf"), "11 Oct 2026", &no, &mut |p| stages.push(p.stage)).unwrap();
+        let bytes = h.report(Some(doc), &a, &b, &Picks::default(), ("before.pdf", "after.pdf"), "11 Oct 2026", &no, &mut |p| stages.push(p.stage)).unwrap();
         write_replace(Path::new(&to), &bytes).unwrap();
         let again = mupdf::pdf::PdfDocument::open(&dest).unwrap();
         assert!(again.page_count().unwrap() >= 1);
@@ -1176,7 +1206,7 @@ mod tests {
         let (fa, fb) = (dir.join("a.pdf"), dir.join("b.pdf"));
         std::fs::copy(sample("edit-source.pdf"), &fa).unwrap();
         std::fs::copy(sample("edit-out-02-addtext.pdf"), &fb).unwrap();
-        let r = h2.report_to(None, &Source::File { path: fa.clone() }, &Source::File { path: fb.clone() }, ("a", "b"), "d", &dest2, &flag, &mut |_| {});
+        let r = h2.report_to(None, &Source::File { path: fa.clone() }, &Source::File { path: fb.clone() }, &Picks::default(), ("a", "b"), "d", &dest2, &flag, &mut |_| {});
         assert!(r.unwrap_err().contains("cancelled"));
         assert!(!dest2.exists());
 
@@ -1186,8 +1216,8 @@ mod tests {
         std::fs::write(&old, b"old contents").unwrap();
         let late = AtomicBool::new(false);
         // (the comparison itself is cached by now, so only the report's own progress reaches the callback)
-        h2.compare_job(None, &Source::File { path: fa.clone() }, &Source::File { path: fb.clone() }, &no, &mut |_| {}).unwrap();
-        let r = h2.report_to(None, &Source::File { path: fa }, &Source::File { path: fb }, ("a", "b"), "d", &old, &late, &mut |p| {
+        h2.compare_job(None, &Source::File { path: fa.clone() }, &Source::File { path: fb.clone() }, &Picks::default(), &no, &mut |_| {}).unwrap();
+        let r = h2.report_to(None, &Source::File { path: fa }, &Source::File { path: fb }, &Picks::default(), ("a", "b"), "d", &old, &late, &mut |p| {
             if p.stage == diff::Stage::Pages && p.done == p.total {
                 late.store(true, std::sync::atomic::Ordering::Relaxed);
             }

@@ -1,5 +1,6 @@
 // Pure logic of the version history panel and Compare mode (grouping, filters, change lists, stepper).
 import type { Change, ChangeKind, Comparison, PageMap, Rect4, TextRun, VersionInfo } from "./history";
+import { parseRange } from "./pageRange";
 
 // ---- versions ---------------------------------------------------------------------------------------
 
@@ -258,13 +259,24 @@ export function ranges(nums: number[]): [number, number][] {
 
 const pagesWord = (a: number, b: number) => (a === b ? `Page ${a}` : `Pages ${a}-${b}`);
 
+/** A page range field of the compare setup. `pages` is null for an empty field (every page) and while the text is not
+ *  usable; `error` is what to tell the user then. Without `count` (the file's pages are not known yet) only the syntax
+ *  is checked and the engine refuses a page past the end. */
+export function rangeField(text: string, count: number | null): { pages: number[] | null; error: string | null } {
+  if (!text.trim()) return { pages: null, error: null };
+  const syntax = parseRange(text, Number.MAX_SAFE_INTEGER);
+  if (!syntax?.length) return { pages: null, error: "Enter pages like 1-3, 5" };
+  if (count !== null && syntax[syntax.length - 1] >= count) return { pages: null, error: `This file has ${count} ${count === 1 ? "page" : "pages"}` };
+  return { pages: syntax, error: null };
+}
+
 /** Page-level summary lines for the top of the change list: "Page 3 inserted", "Pages 5-6 moved to 9". */
 export function pageSummary(c: Comparison): string[] {
   const out: string[] = [];
   const label = (r: [number, number][], verb: string) => r.forEach(([a, b]) => out.push(`${pagesWord(a + 1, b + 1)} ${verb}`));
   const replaced = new Map(c.changes.flatMap((ch) => (ch.kind === "pageReplaced" && ch.bPage !== null ? [[ch.bPage, ch.aPage] as const] : [])));
   const replacedA = new Set(replaced.values());
-  const added = c.pages.bToA.flatMap((a, j) => (a === null && !replaced.has(j) ? [j] : []));
+  const added = c.pages.bToA.flatMap((a, k) => (a === null && !replaced.has(c.pages.bIds[k]) ? [c.pages.bIds[k]] : []));
   label(ranges(added), "inserted");
   label(ranges(c.pages.removedA.filter((a) => !replacedA.has(a))), "removed");
   label(ranges([...replaced.keys()]), "replaced");
@@ -296,11 +308,12 @@ export function alignRows(m: PageMap): Row[] {
   const rows: Row[] = [];
   const removed = [...m.removedA].sort((x, y) => x - y);
   let r = 0;
-  m.bToA.forEach((a, b) => {
+  m.bToA.forEach((a, k) => {
+    const b = m.bIds[k];
     if (a !== null) while (r < removed.length && removed[r] < a) rows.push({ a: removed[r++], b: null });
     else {
       // an unmatched B page sharing its gap with a removed A page is a replaced page: one row
-      const next = m.bToA.slice(b + 1).find((x) => x !== null) ?? Infinity;
+      const next = m.bToA.slice(k + 1).find((x) => x !== null) ?? Infinity;
       if (r < removed.length && removed[r] < next) return rows.push({ a: removed[r++], b });
     }
     rows.push({ a, b });

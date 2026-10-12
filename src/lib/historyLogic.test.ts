@@ -18,6 +18,7 @@ import {
   progressFraction,
   progressLabel,
   parentOf,
+  rangeField,
   rowOf,
   stepIndex,
   setupShow,
@@ -174,10 +175,12 @@ describe("change lists", () => {
 
 describe("page summary and rows", () => {
   const cmp = (o: Partial<Comparison["pages"]>, changes: Change[] = []): Comparison => ({
-    pages: { aPages: 6, bPages: 6, bToA: [0, 1, null, 2, 3, 4], removedA: [], ...o },
+    pages: { aPages: 6, bPages: 6, aIds: [0, 1, 2, 3, 4, 5], bIds: [0, 1, 2, 3, 4, 5], bToA: [0, 1, null, 2, 3, 4], removedA: [], ...o },
     changes,
     identical: false,
   });
+
+  const four = { aPages: 4, bPages: 4, aIds: [0, 1, 2, 3], bIds: [0, 1, 2, 3] };
 
   it("names inserted, removed, moved and rotated pages", () => {
     const moved = [
@@ -193,11 +196,11 @@ describe("page summary and rows", () => {
       "Pages 5-6 moved to 9",
       "Page 4 rotated",
     ]);
-    expect(pageSummary(cmp({ bToA: [0, null, null, 1] }))).toEqual(["Pages 2-3 inserted"]);
+    expect(pageSummary(cmp({ bIds: [0, 1, 2, 3], bToA: [0, null, null, 1] }))).toEqual(["Pages 2-3 inserted"]);
   });
 
   it("aligns pages into rows, removed pages keep their place", () => {
-    const rows = alignRows({ aPages: 4, bPages: 4, bToA: [0, null, 1, 3], removedA: [2] });
+    const rows = alignRows({ ...four, bToA: [0, null, 1, 3], removedA: [2] });
     expect(rows).toEqual([
       { a: 0, b: 0 },
       { a: null, b: 1 },
@@ -212,7 +215,7 @@ describe("page summary and rows", () => {
 
   it("puts a replaced page on one row, both sides", () => {
     // A pages 1 and 3 were swapped for B pages 1 and 3 (each pair shares a gap); only the first has a pageReplaced change
-    const pages = { aPages: 4, bPages: 4, bToA: [0, null, 2, null], removedA: [1, 3] };
+    const pages = { ...four, bToA: [0, null, 2, null], removedA: [1, 3] };
     const rows = alignRows(pages);
     expect(rows).toEqual([
       { a: 0, b: 0 },
@@ -225,8 +228,20 @@ describe("page summary and rows", () => {
     expect(pageSummary(cmp(pages, [replaced]))).toEqual(["Page 4 inserted", "Page 4 removed", "Page 2 replaced"]);
   });
 
+  it("rows and the summary use the pages' own numbers when a side has a range", () => {
+    // A pages 4-7 against B pages 2-4: A's 4 pairs B's 2, B's 3 is new, A's 7 has no partner
+    const pages = { aPages: 4, bPages: 3, aIds: [3, 4, 5, 6], bIds: [1, 2, 3], bToA: [3, null, 5], removedA: [4, 6] };
+    expect(alignRows(pages)).toEqual([
+      { a: 3, b: 1 },
+      { a: 4, b: 2 },
+      { a: 5, b: 3 },
+      { a: 6, b: null },
+    ]);
+    expect(pageSummary(cmp(pages, [chg("pageReplaced", { aPage: 4, bPage: 2 })]))).toEqual(["Page 7 removed", "Page 3 replaced"]);
+  });
+
   it("an inserted page next to a removed one in another gap is not paired", () => {
-    expect(alignRows({ aPages: 2, bPages: 2, bToA: [null, 0], removedA: [1] })).toEqual([
+    expect(alignRows({ aPages: 2, bPages: 2, aIds: [0, 1], bIds: [0, 1], bToA: [null, 0], removedA: [1] })).toEqual([
       { a: null, b: 0 },
       { a: 0, b: 1 },
       { a: 1, b: null },
@@ -316,5 +331,27 @@ describe("compare summary and progress", () => {
     expect(setupShow({ text: true, formatting: true, images: true })).toBeUndefined();
     expect(setupShow({ text: true, formatting: false, images: true })).toEqual(["text", "images", "annotations", "pages", "forms", "metadata"]);
     expect(setupShow({ text: false, formatting: false, images: false })).toEqual(["annotations", "pages", "forms", "metadata"]);
+  });
+});
+
+describe("compare page range field", () => {
+  it("an empty field is every page", () => {
+    expect(rangeField("", 12)).toEqual({ pages: null, error: null });
+    expect(rangeField("  ", null)).toEqual({ pages: null, error: null });
+  });
+
+  it("reads the organize syntax into 0-based pages", () => {
+    expect(rangeField("3-10", 12)).toEqual({ pages: [2, 3, 4, 5, 6, 7, 8, 9], error: null });
+    expect(rangeField("1, 3-4, 4", null)).toEqual({ pages: [0, 2, 3], error: null });
+  });
+
+  it("says what is wrong", () => {
+    expect(rangeField("abc", 12).error).toBe("Enter pages like 1-3, 5");
+    expect(rangeField("0-2", 12).error).toBe("Enter pages like 1-3, 5");
+    expect(rangeField(",", null).error).toBe("Enter pages like 1-3, 5");
+    expect(rangeField("5-20", 12)).toEqual({ pages: null, error: "This file has 12 pages" });
+    expect(rangeField("2", 1).error).toBe("This file has 1 page");
+    // the page count is not known yet: only the syntax is judged, the engine refuses a page past the end
+    expect(rangeField("5-20", null).pages).toHaveLength(16);
   });
 });

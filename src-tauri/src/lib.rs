@@ -1153,6 +1153,7 @@ pub fn run() {
             history_ipc::history_compare,
             history_ipc::history_compare_run,
             history_ipc::history_compare_report,
+            history_ipc::history_page_count,
             history_ipc::history_render,
             history_ipc::history_visual_diff,
             history_ipc::history_checkpoint,

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { pickOpen } from "../../lib/api";
 import {
   type CompareProgress,
+  type ComparePages,
   type Comparison,
   type Rect4,
   type Source,
@@ -25,6 +26,7 @@ import {
   pageSummary,
   progressFraction,
   progressLabel,
+  rangeField,
   rowOf,
   stepIndex,
   summaryChips,
@@ -54,6 +56,8 @@ const FILE = "__file";
 const toast = (error: string) => useStore.getState().setUi({ error });
 const baseName = (p: string) => p.split(/[\/]/).pop() || "file";
 const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+/** A side whose source changed starts with all of its pages again. */
+const withoutRange = (ranges: [string, string], side: "a" | "b"): [string, string] => (side === "a" ? ["", ranges[1]] : [ranges[0], ""]);
 
 /** Compare mode: the whole window. First the setup page when asked for, then the comparison. */
 export function CompareView() {
@@ -80,6 +84,10 @@ function CompareResult() {
   const scroller = useRef<HTMLDivElement>(null);
   const aKey = sourceKey(req.a);
   const bKey = sourceKey(req.b);
+  // The fields were checked on the setup page; a page past the end of its file is refused by the engine.
+  const ranges = req.ranges ?? ["", ""];
+  const pages: ComparePages = [rangeField(ranges[0], null).pages, rangeField(ranges[1], null).pages];
+  const pagesKey = JSON.stringify(pages);
 
   useEffect(
     () => () => {
@@ -97,7 +105,7 @@ function CompareResult() {
     setCur(null);
     setProgress(null);
     setJob(id);
-    historyCompareRun(id, req.doc, req.a, req.b, (p) => live && setProgress(p)).then(
+    historyCompareRun(id, req.doc, req.a, req.b, pages, (p) => live && setProgress(p)).then(
       (c) => {
         finished = true;
         if (!live) return;
@@ -115,7 +123,7 @@ function CompareResult() {
       if (!finished) void compareCancel(id).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [req.doc, aKey, bKey, run]);
+  }, [req.doc, aKey, bKey, pagesKey, run]);
 
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
@@ -217,7 +225,7 @@ function CompareResult() {
       const f = (await pickOpen(false, "compare"))[0];
       if (!f) return;
       const next: [string, string] = side === "a" ? [baseName(f.path), names[1]] : [names[0], baseName(f.path)];
-      h.setCompare({ [side]: { kind: "picked", token: f.token }, names: next });
+      h.setCompare({ [side]: { kind: "picked", token: f.token }, names: next, ranges: withoutRange(ranges, side) });
     } catch (e) {
       toast(`Could not pick the file: ${String(e)}`);
     }
@@ -227,15 +235,17 @@ function CompareResult() {
     const src: Source = value === "current" ? { kind: "current" } : { kind: "version", id: value };
     // a picked file's name does not describe the document or version that replaces it
     const next: [string, string] = side === "a" ? ["", names[1]] : [names[0], ""];
-    h.setCompare(side === "a" ? { a: src, names: next } : { b: src, names: next });
+    h.setCompare(side === "a" ? { a: src, names: next, ranges: withoutRange(ranges, side) } : { b: src, names: next, ranges: withoutRange(ranges, side) });
   };
-  const swap = () => h.setCompare({ a: req.b, b: req.a, names: [names[1], names[0]] });
+  const swap = () => h.setCompare({ a: req.b, b: req.a, names: [names[1], names[0]], ranges: [ranges[1], ranges[0]] });
   const exportReport = async () => {
     const id = ++jobSeq;
     const stem = (names[1] || "comparison").replace(/\.pdf$/i, "");
     setReport({ job: id, progress: null });
     try {
-      const dest = await historyCompareReport(id, req.doc, req.a, req.b, names, `${stem} comparison report.pdf`, (progress) =>
+      // the report's header names the pages a ranged side covers
+      const shown = names.map((n, i) => (pages[i] ? `${n} (pages ${ranges[i].trim()})` : n)) as [string, string];
+      const dest = await historyCompareReport(id, req.doc, req.a, req.b, pages, shown, `${stem} comparison report.pdf`, (progress) =>
         setReport((r) => (r && r.job === id ? { job: id, progress } : r)),
       );
       if (dest) toast(`Saved the comparison report as ${baseName(dest)}`);
@@ -423,7 +433,7 @@ function CompareResult() {
           a={req.a}
           b={req.b}
           names={names}
-          pages={[done.pages.aPages, done.pages.bPages]}
+          ids={[done.pages.aIds, done.pages.bIds]}
           rows={rows}
           active={active}
           changed={changedPages}
