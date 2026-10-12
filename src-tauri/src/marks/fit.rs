@@ -85,35 +85,51 @@ fn section(view: &View, entries: &[(MarkKind, Bands)]) -> Result<String> {
     Ok(s)
 }
 
+/// For each operator, the index of the `EMC` that closes it when it is a `BDC` or `BMC` (None for
+/// every other operator and for an opener nothing closes), matched in one pass with a stack so a
+/// stream full of unclosed sections does not cost a scan to the end for each of them.
+fn matching_ends(ops: &[cs::Op]) -> Vec<Option<usize>> {
+    let mut ends = vec![None; ops.len()];
+    let mut open = Vec::new();
+    for (j, op) in ops.iter().enumerate() {
+        match op.op.as_slice() {
+            b"BDC" | b"BMC" => open.push(j),
+            b"EMC" => {
+                if let Some(i) = open.pop() {
+                    ends[i] = Some(j);
+                }
+            }
+            _ => {}
+        }
+    }
+    ends
+}
+
 /// The `/Shrink` sections in a content stream: the byte range of each, and the entries of its
 /// dictionary (which kind of mark asked, for which bands).
-fn shrink_sections(data: &[u8]) -> Vec<(Range<usize>, Vec<(MarkKind, Bands)>)> {
+pub(super) fn shrink_sections(data: &[u8]) -> Vec<(Range<usize>, Vec<(MarkKind, Bands)>)> {
     let ops = cs::parse(data);
+    let ends = matching_ends(&ops);
     let mut out = Vec::new();
     let mut i = 0;
     while i < ops.len() {
         let op = &ops[i];
         if op.op == b"BDC" && op.operands.len() >= 2 && op.operands[0].as_name() == Some(b"Artifact".as_slice()) {
-            if let Obj::Dict(d) = &op.operands[1] {
-                let tagged = d.iter().any(|(k, v)| k.as_slice() == b"PCMark" && v.as_name() == Some(b"Shrink".as_slice()));
-                if tagged {
-                    if let Some(j) = (i + 1..ops.len()).find(|&j| ops[j].op == b"EMC") {
-                        let mut entries = Vec::new();
-                        for (k, v) in d {
-                            let kind = MarkKind::from_tag(&String::from_utf8_lossy(k));
-                            if let (Some(kind), Obj::Array(a)) = (kind, v) {
-                                let nums: Vec<f64> = a.iter().filter_map(Obj::as_f64).collect();
-                                if let Ok(b) = <Bands>::try_from(nums) {
-                                    entries.push((kind, b));
-                                }
+            if let (Obj::Dict(d), Some(j)) = (&op.operands[1], ends[i]) {
+                if d.iter().any(|(k, v)| k.as_slice() == b"PCMark" && v.as_name() == Some(b"Shrink".as_slice())) {
+                    let mut entries = Vec::new();
+                    for (k, v) in d {
+                        let kind = MarkKind::from_tag(&String::from_utf8_lossy(k));
+                        if let (Some(kind), Obj::Array(a)) = (kind, v) {
+                            let nums: Vec<f64> = a.iter().filter_map(Obj::as_f64).collect();
+                            if let Ok(b) = <Bands>::try_from(nums) {
+                                entries.push((kind, b));
                             }
                         }
-                        out.push((op.span.start..ops[j].span.end, entries));
-                        i = j + 1;
-                        continue;
                     }
-                    // No EMC anywhere after this one: none after a later one either.
-                    break;
+                    out.push((op.span.start..ops[j].span.end, entries));
+                    i = j + 1;
+                    continue;
                 }
             }
         }
@@ -265,21 +281,7 @@ fn clean_inside(inner: &[cs::Op]) -> bool {
 /// The sections of other apps in a content stream, outermost first (what is inside one is cut with it).
 pub(super) fn foreign_sections(data: &[u8]) -> Vec<Foreign> {
     let ops = cs::parse(data);
-    // The EMC that closes each BDC/BMC, matched in one pass (a file full of unclosed sections must
-    // not cost a scan to the end for each of them).
-    let mut ends: Vec<Option<usize>> = vec![None; ops.len()];
-    let mut open = Vec::new();
-    for (j, op) in ops.iter().enumerate() {
-        match op.op.as_slice() {
-            b"BDC" | b"BMC" => open.push(j),
-            b"EMC" => {
-                if let Some(i) = open.pop() {
-                    ends[i] = Some(j);
-                }
-            }
-            _ => {}
-        }
-    }
+    let ends = matching_ends(&ops);
     let mut out = Vec::new();
     let mut i = 0;
     while i < ops.len() {

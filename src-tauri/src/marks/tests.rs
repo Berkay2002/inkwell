@@ -1130,3 +1130,13 @@ fn a_signed_document_keeps_its_signed_bytes_through_a_shrink_and_a_removal() {
     assert!(!text_of(&doc, 0).contains("ForeignHeader"));
     assert_eq!(stream_count(&doc, 0, "PCMark /Shrink"), 1);
 }
+
+#[test]
+fn a_stream_of_unclosed_shrink_sections_is_read_in_one_pass() {
+    // 50,000 openers and one EMC: only the last opener is closed, and none scans to the end
+    let hostile = "/Artifact <</PCMark /Shrink /HeaderFooter [1 1 1 1]>> BDC\n".repeat(50_000) + "EMC\n";
+    let started = std::time::Instant::now();
+    let found = super::fit::shrink_sections(hostile.as_bytes());
+    assert_eq!(found.len(), 1);
+    assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+}
