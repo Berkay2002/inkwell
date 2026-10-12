@@ -720,7 +720,7 @@ pub(crate) fn graft_pages_ex(dst: &mut PdfDocument, src: &PdfDocument, pages: &[
         made.push((from, page));
     }
     // Pass 2: their annotations.
-    let mut g = Graft { src, pages, made: &made, fields: Default::default(), names: None, defaults_done: false };
+    let mut g = Graft { src, pages, made: &made, fields: Default::default(), chain: Vec::new(), names: None, defaults_done: false };
     for (from, page) in &made {
         if let Some(annots) = from.get_dict("Annots")? {
             let copied = g.annots(dst, &mut map, &annots, page)?;
@@ -756,6 +756,9 @@ struct Graft<'a> {
     made: &'a [(PdfObject, PdfObject)],
     /// Source field object number to its copy in `dst`.
     fields: std::collections::HashMap<i32, PdfObject>,
+    /// Source field object numbers whose parents are being copied now, the widget first: a /Parent that
+    /// points back into it closes a loop.
+    chain: Vec<i32>,
     /// Names of `dst`'s root fields, loaded with the first field copied.
     names: Option<std::collections::HashSet<String>>,
     /// The source form's /DA and /DR were carried over already.
@@ -884,14 +887,23 @@ impl Graft<'_> {
         if num != 0 {
             self.fields.insert(num, copy.clone());
         }
-        match w.get_dict("Parent")? {
-            Some(p) if p.is_indirect()? => {
-                let parent = self.parent(dst, map, p.as_indirect()?)?;
-                link_kid(&parent, copy)?;
-            }
-            _ => self.add_root(dst, map, copy)?,
+        self.chain.push(num);
+        let up = self.up(dst, map, w);
+        self.chain.pop();
+        match up? {
+            Some(parent) => link_kid(&parent, copy)?,
+            None => self.add_root(dst, map, copy)?,
         }
         Ok(())
+    }
+
+    /// The copy of `f`'s /Parent field. None when it has none, or when that /Parent closes a loop in a
+    /// broken field tree: `f` is then a root field of its own and the loop is not copied.
+    fn up(&mut self, dst: &mut PdfDocument, map: &mut PdfGraftMap, f: &PdfObject) -> Result<Option<PdfObject>> {
+        match f.get_dict("Parent")? {
+            Some(p) if p.is_indirect()? && !self.chain.contains(&p.as_indirect()?) => Ok(Some(self.parent(dst, map, p.as_indirect()?)?)),
+            _ => Ok(None),
+        }
     }
 
     /// The copy of source field `num` (made with its own parents when first needed).
@@ -910,14 +922,12 @@ impl Graft<'_> {
         copy.dict_put("Kids", dst.new_array()?)?;
         let r = dst.add_object(&copy)?;
         self.fields.insert(num, r.clone());
-        match f.get_dict("Parent")? {
-            // A loop in a broken field tree ends at the field already copied.
-            Some(p) if p.is_indirect()? && !self.fields.contains_key(&p.as_indirect()?) => {
-                let up = self.parent(dst, map, p.as_indirect()?)?;
-                link_kid(&up, &r)?;
-            }
-            Some(p) if p.is_indirect()? => link_kid(&self.fields[&p.as_indirect()?].clone(), &r)?,
-            _ => self.add_root(dst, map, &r)?,
+        self.chain.push(num);
+        let up = self.up(dst, map, &f);
+        self.chain.pop();
+        match up? {
+            Some(up) => link_kid(&up, &r)?,
+            None => self.add_root(dst, map, &r)?,
         }
         Ok(r)
     }

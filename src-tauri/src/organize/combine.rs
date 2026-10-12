@@ -808,8 +808,8 @@ mod tests {
     #[test]
     fn a_source_with_a_parent_loop_in_its_field_tree_still_grafts() {
         use crate::outline::tests::raw_pdf;
-        // widget 5 and field 6 are each other's /Parent and no /FT is set anywhere. The result cannot be written
-        // (MuPDF refuses the loop when it reads the file back), but grafting it was never an error of its own.
+        // widget 5 and field 6 are each other's /Parent and no /FT is set anywhere: grafting it is no error
+        // (the loop is not copied; organize/tests.rs writes and reads the result back).
         let objs: Vec<String> = vec![
             "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] >> >>".into(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
