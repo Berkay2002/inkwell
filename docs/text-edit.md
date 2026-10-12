@@ -250,8 +250,9 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   that page, and on it the blocks before `upto`, as blocks are replaced from the last to the first); a Replace all
   sent with that as `from` goes on there, so pages already done are not replaced again (a replacement that holds the
   find text would grow: "cat" to "cats" to "catss"). The Find bar does this by itself when Replace all is pressed
-  again for the same text and options on the document the run left. A block cut at the cap is only part replaced:
-  when the replacement holds the find text, going on leaves what is left of that block (Find lists it).
+  again for the same text and options on the document the run left. A block the cap would cut is left whole for
+  the next run (with `resume` at it); only a single block with more matches than the cap is part replaced, and
+  the rest of it is listed as skipped.
 - **UI**: while Edit text is on, the Find bar has a second row: "Replace with", Replace, Replace all and the result
   ("5 replaced, 2 skipped", which opens the list of what was skipped, with its page and reason). Replace goes on to
   the next match. The controls say why they are off (certified document, no match, a comment or form hit selected).

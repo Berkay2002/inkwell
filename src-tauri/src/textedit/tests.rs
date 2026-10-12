@@ -1736,19 +1736,22 @@ fn replace_all_stops_between_blocks_when_its_time_is_up() {
 #[test]
 fn a_block_cut_by_the_cap_is_checked_for_hyphens_after_the_cut() {
     let d = dir("replace-cap-hyphen");
-    // "lk" at the start, and across the dropped hyphen of "well-" "known": with room for one, only the first
-    // is replaced, and that rewrite would lose the hyphen, so the block is left alone.
-    let two = "BT /F1 12 Tf 72 700 Td (lk well-) Tj ET\nBT /F1 12 Tf 72 686 Td (known) Tj ET";
+    // The block at the top has "lk" at its start and across the dropped hyphen of "well-" "known"; below it
+    // is one more "lk". With room for two, the lower one is done and the top block is cut to its first match,
+    // which would lose the hyphen: the block is left alone, and the next run still has it to do.
+    let two = "BT /F1 12 Tf 72 700 Td (lk well-) Tj ET\nBT /F1 12 Tf 72 686 Td (known) Tj ET\nBT /F1 12 Tf 72 400 Td (lk) Tj ET";
     let (eng, id, _) = open(&d, &pages_pdf(&[two]));
-    let (before, text) = (rev(&eng, id), all_text(&eng, id));
-    let one = Limits { max: 1, ..Limits::default() };
-    let r = replace_within(&eng, id, before, &req("lk", "XX", SearchOpts::default()), EditSource::User, one).unwrap();
-    assert_eq!((r.replaced, r.skipped_count, rev(&eng, id)), (0, 1, before), "{r:?}");
-    assert!(r.stopped.is_some() && r.skipped[0].reason.contains("hyphen"), "{r:?}");
-    assert_eq!(all_text(&eng, id), text);
-    // With room for both, the match across the hyphen covers it and the block is replaced.
-    let r = do_replace(&eng, id, &req("lk", "XX", SearchOpts::default())).unwrap();
-    assert_eq!((r.replaced, r.skipped_count), (2, 0), "{r:?}");
+    let mut r = req("lk", "XX", SearchOpts::default());
+    let cap = Limits { max: 2, ..Limits::default() };
+    let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, cap).unwrap();
+    assert_eq!((out.replaced, out.skipped_count), (1, 1), "{out:?}");
+    assert!(out.stopped.is_some() && out.skipped[0].reason.contains("hyphen"), "{out:?}");
+    assert_eq!(out.resume, Some(ReplaceFrom { page: 0, upto: Some(1) }), "{out:?}");
+    assert_eq!(all_text(&eng, id), "lk well- known XX");
+    // With room, the match across the hyphen covers it and the block is replaced.
+    r.from = out.resume;
+    let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, Limits::default()).unwrap();
+    assert_eq!((out.replaced, out.skipped_count), (2, 0), "{out:?}");
 }
 
 #[test]
@@ -1773,18 +1776,32 @@ fn going_on_after_a_stop_replaces_each_match_once_even_when_the_replacement_hold
 }
 
 #[test]
-fn a_cap_stop_goes_on_after_the_block_it_cut_when_the_replacement_holds_the_find_text() {
+fn a_block_the_cap_would_cut_is_left_whole_for_the_next_run() {
     let d = dir("replace-resume-cap");
     let (eng, id, _) = open(&d, &pages_pdf(&["BT /F1 12 Tf 72 700 Td (cat cat cat) Tj ET\nBT /F1 12 Tf 72 500 Td (cat) Tj ET"]));
     let mut r = req("cat", "cats", SearchOpts::default());
-    // Room for 2: the last block (one match) is done, the first is cut after one of its three.
+    // Room for 2: the last block (one match) is done; the first has three and is not started.
     let two = Limits { max: 2, ..Limits::default() };
     let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, two).unwrap();
-    assert_eq!(out.replaced, 2, "{out:?}");
-    assert_eq!(out.resume, Some(ReplaceFrom { page: 0, upto: Some(0) }), "{out:?}");
-    // Going on from there leaves the cut block (Find lists what is left of it) and does nothing twice.
+    assert_eq!((out.replaced, out.skipped_count), (1, 0), "{out:?}");
+    assert_eq!(out.resume, Some(ReplaceFrom { page: 0, upto: Some(1) }), "{out:?}");
+    assert_eq!(all_text(&eng, id), "cat cat cat cats");
+    // The next run does it whole: each "cat" is replaced exactly once.
     r.from = out.resume;
     let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, Limits::default()).unwrap();
-    assert_eq!((out.replaced, out.resume), (0, None), "{out:?}");
-    assert_eq!(all_text(&eng, id), "cats cat cat cats");
+    assert_eq!((out.replaced, out.resume), (3, None), "{out:?}");
+    assert_eq!(all_text(&eng, id), "cats cats cats cats");
+}
+
+#[test]
+fn one_block_over_the_cap_is_part_replaced_and_the_rest_listed() {
+    let d = dir("replace-over-cap");
+    let (eng, id, _) = open(&d, &pages_pdf(&["BT /F1 12 Tf 72 700 Td (cat cat cat) Tj ET"]));
+    let two = Limits { max: 2, ..Limits::default() };
+    let out = replace_within(&eng, id, rev(&eng, id), &req("cat", "cats", SearchOpts::default()), EditSource::User, two).unwrap();
+    assert_eq!((out.replaced, out.skipped_count), (2, 1), "{out:?}");
+    assert!(out.skipped[0].reason.contains("more matches than the 2"), "{out:?}");
+    // It is done with: going on does not start it again.
+    assert_eq!(out.resume, Some(ReplaceFrom { page: 0, upto: Some(0) }), "{out:?}");
+    assert_eq!(all_text(&eng, id), "cats cats cat");
 }

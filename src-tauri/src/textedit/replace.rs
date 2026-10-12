@@ -367,10 +367,21 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
         let cut = spans.len() > left;
         if cut {
             out.stopped = Some(format!("Stopped after {} replacements. Replace all again to go on.", bounds.max));
-            // A block that is cut is only part replaced: where the replacement holds the find text a second run
-            // could not tell its own work from the document's, so it goes on after that block (Find lists the rest).
-            let from_here = if left > 0 && bounds.inserted > 0 { bi } else { bi + 1 };
-            out.resume = Some(ReplaceFrom { page, upto: Some(from_here as u32) });
+            if out.replaced == 0 {
+                // One block that alone is over the cap: part replaced, and the rest listed (a second run could
+                // not tell its own work from the document's where the replacement holds the find text).
+                for &(s, e) in &spans[left..] {
+                    out.skip(page, text[bi][s..=e].iter().collect(), &format!("the block has more matches than the {} one run replaces", bounds.max));
+                }
+                out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32) });
+            } else if bounds.inserted > 0 {
+                // A cut block would be part replaced, and replaced again from its start by the next run: it is
+                // left whole, and the next run starts with it.
+                out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32 + 1) });
+                break;
+            } else {
+                out.resume = Some(ReplaceFrom { page, upto: Some(bi as u32 + 1) });
+            }
             spans.truncate(left);
         }
         if spans.is_empty() {
