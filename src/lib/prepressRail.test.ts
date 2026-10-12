@@ -41,6 +41,17 @@ describe("Output Preview and the drawing tools", () => {
     expect(useMeasure.getState()).toMatchObject({ open: false, tool: "select" });
   });
 
+  it("does not close a signing sheet from under its draft; the list is closed as before", () => {
+    useSign.setState({ open: true, rail: "sheet" });
+    usePrepress.getState().setOpen(true);
+    expect(usePrepress.getState().open).toBe(false);
+    expect(useSign.getState()).toMatchObject({ open: true, rail: "sheet" });
+    useSign.setState({ rail: "list" });
+    usePrepress.getState().setOpen(true);
+    expect(usePrepress.getState().open).toBe(true);
+    expect(useSign.getState().rail).toBeNull();
+  });
+
   it("opening Sign or Measure while Output Preview is open closes it", () => {
     usePrepress.getState().setOpen(true);
     useSign.getState().setOpen(true);

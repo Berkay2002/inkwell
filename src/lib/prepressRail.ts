@@ -45,7 +45,12 @@ export function wirePrepressRail() {
   };
   usePrepress.subscribe((s, prev) => {
     if (!s.open || prev.open) return;
-    const running = useTools.getState().sheet?.phase === "running" || useConvert.getState().sheet?.phase === "running" || useMarks.getState().sheet?.busy;
+    // a signing sheet holds a draft, like a running sheet: it is answered first, not closed from under the person
+    const running =
+      useTools.getState().sheet?.phase === "running" ||
+      useConvert.getState().sheet?.phase === "running" ||
+      useMarks.getState().sheet?.busy ||
+      useSign.getState().rail === "sheet";
     if (running) return void usePrepress.getState().setOpen(false);
     closeOthers();
   });
