@@ -272,10 +272,12 @@ fn foreign_kind(op: &cs::Op) -> Option<MarkKind> {
 }
 
 /// Whether cutting `inner` (the operators between a `BDC` and its `EMC`) leaves the rest of the
-/// page as it was: `q`/`Q` and `BT`/`ET` balanced inside, and no `cm` outside a `q`…`Q` (it would
-/// have moved what follows). Colour, font and the like set at the top level inside are not checked:
-/// that would leave most files from word processors alone, and what follows sets its own.
-fn clean_inside(inner: &[cs::Op]) -> bool {
+/// page as it was: `q`/`Q` and `BT`/`ET` balanced inside, no `cm` outside a `q`…`Q` (it would have
+/// moved what follows), and, when the section sits inside a text object of the page's own, nothing
+/// in it that positions or sets up text or advances the text position (what follows in that
+/// object would land somewhere else). Colour, font and the like set at the top level of a section
+/// outside text are not checked: that would leave most files from word processors alone.
+fn clean_inside(inner: &[cs::Op], in_text: bool) -> bool {
     let (mut q, mut text) = (0i32, 0i32);
     for op in inner {
         match op.op.as_slice() {
@@ -284,6 +286,9 @@ fn clean_inside(inner: &[cs::Op]) -> bool {
             b"BT" => text += 1,
             b"ET" => text -= 1,
             b"cm" if q == 0 => return false,
+            b"Td" | b"TD" | b"Tm" | b"T*" | b"'" | b"\"" | b"Tf" | b"Tc" | b"Tw" | b"Tz" | b"TL" | b"Ts" | b"Tr" | b"Tj" | b"TJ" if in_text && text == 0 => {
+                return false;
+            }
             _ => {}
         }
         if q < 0 || text < 0 {
@@ -297,6 +302,17 @@ fn clean_inside(inner: &[cs::Op]) -> bool {
 pub(super) fn foreign_sections(data: &[u8]) -> Vec<Foreign> {
     let ops = cs::parse(data);
     let ends = matching_ends(&ops);
+    // Whether each operator is inside one of the page's own text objects.
+    let mut in_text = Vec::with_capacity(ops.len());
+    let mut depth = 0i32;
+    for op in &ops {
+        in_text.push(depth > 0);
+        match op.op.as_slice() {
+            b"BT" => depth += 1,
+            b"ET" => depth = (depth - 1).max(0),
+            _ => {}
+        }
+    }
     let mut out = Vec::new();
     let mut i = 0;
     while i < ops.len() {
@@ -306,7 +322,7 @@ pub(super) fn foreign_sections(data: &[u8]) -> Vec<Foreign> {
         };
         match ends[i] {
             Some(j) => {
-                out.push(Foreign { kind, range: ops[i].span.start..ops[j].span.end, clean: clean_inside(&ops[i + 1..j]) });
+                out.push(Foreign { kind, range: ops[i].span.start..ops[j].span.end, clean: clean_inside(&ops[i + 1..j], in_text[i]) });
                 i = j + 1;
             }
             // No matching end in this stream: it cannot be cut. What follows may still hold sections.

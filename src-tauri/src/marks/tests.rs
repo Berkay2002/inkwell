@@ -1189,3 +1189,19 @@ fn bands_read_from_a_file_are_kept_inside_the_page() {
     assert_eq!(stream_count(&doc, 0, "/Bates [0 0 0 0]"), 1);
     assert_eq!(stream_count(&doc, 0, "-50"), 0);
 }
+
+#[test]
+fn a_section_inside_a_text_object_of_the_page_is_left_when_it_moves_the_text() {
+    // cutting the header would move "Body": its Td is relative to the header's
+    let inside_text = "BT /F1 12 Tf /Artifact <</Type /Pagination>> BDC 72 750 Td (Hdr) Tj EMC 0 -700 Td (Body) Tj ET\n";
+    let mut doc = PdfDocument::from_bytes(&page_with("", inside_text)).unwrap();
+    let found = foreign_of(&doc, MarkKind::HeaderFooter).unwrap();
+    assert_eq!((found.pages.clone(), found.stuck.clone()), (vec![0], vec![0]));
+    assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (0, 1));
+    assert!(text_of(&reopened(&doc), 0).contains("Hdr"));
+
+    // a section that only draws (its own BT...ET, nothing inherited) inside the page's text is as good as outside
+    let drawn = "BT /F1 12 Tf 72 500 Td (Before) Tj /Artifact <</Type /Pagination>> BDC EMC (After) Tj ET\n";
+    let mut doc = PdfDocument::from_bytes(&page_with("", drawn)).unwrap();
+    assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (1, 0));
+}
