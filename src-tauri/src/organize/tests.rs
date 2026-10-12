@@ -835,4 +835,3 @@ fn a_signature_field_of_a_source_arrives_empty_and_the_plan_says_so() {
     let bytes = std::fs::read(&out).unwrap();
     assert!(!String::from_utf8_lossy(&bytes).contains("adbe.pkcs7.detached"), "no signature value in the file");
 }
-

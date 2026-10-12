@@ -737,7 +737,8 @@ pub(crate) fn graft_pages_ex(dst: &mut PdfDocument, src: &PdfDocument, pages: &[
 /// file that is not the one that was signed, and a signature that cannot verify looks like tampering.
 /// `field` is the source object (its /FT may be inherited), `copy` the dictionary about to be grafted.
 fn drop_signature(field: &PdfObject, copy: &mut PdfObject) -> Result<()> {
-    let sig = name_of(field.get_dict_inheritable("FT")?) == b"Sig";
+    // A /Parent loop in a broken field tree makes the lookup fail; that was tolerated before, so it is no signature.
+    let sig = name_of(field.get_dict_inheritable("FT").ok().flatten()) == b"Sig";
     if sig && copy.get_dict("V")?.is_some() {
         copy.dict_delete("V")?;
         copy.dict_delete("AP")?;

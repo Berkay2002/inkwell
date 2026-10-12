@@ -766,6 +766,26 @@ mod tests {
     }
 
     #[test]
+    fn a_source_with_a_parent_loop_in_its_field_tree_still_grafts() {
+        use crate::outline::tests::raw_pdf;
+        // widget 5 and field 6 are each other's /Parent and no /FT is set anywhere. The result cannot be written
+        // (MuPDF refuses the loop when it reads the file back), but grafting it was never an error of its own.
+        let objs: Vec<String> = vec![
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] >> >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".into(),
+            "<< >>".into(),
+            "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [10 10 100 50] /P 3 0 R >>".into(),
+            "<< /T (Loop) /Kids [5 0 R] /Parent 5 0 R >>".into(),
+        ];
+        let d = scratch("parent-loop");
+        let a = write(&d, "a.pdf", 1, 0);
+        let b = d.join("loop.pdf");
+        std::fs::write(&b, raw_pdf(&objs)).unwrap();
+        assert_eq!(graft(&[spec(&a), spec(&b.to_string_lossy())]), Ok(2));
+    }
+
+    #[test]
     fn a_source_swapped_after_the_plan_is_not_combined() {
         let d = scratch("swap");
         let a = write(&d, "a.pdf", 2, 0);
