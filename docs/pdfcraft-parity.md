@@ -80,7 +80,7 @@ Code present but not run on macOS: history (DPAPI, NTFS ids), saved Fill & Sign 
 | automation | Headless tool table, CLI run, MCP server | engine, render, organize, platform, serde_json, png | not separable | Not used; `batch/` is Inkwell's own |
 | ocr | ocrs/rten recognition on caller pixels; text_layer emits invisible text | fonts, ocrs 0.13.1, rten 0.26; no cos | standalone on bytes (pixels in); you splice text into the page | Not used; backends are Windows.Media.Ocr and Tesseract, text layer in `ocr/glyphless.rs`, `ocr/layer.rs` |
 
-Crates main already adapts (from the `Adapted from pdfcraft` headers in the code; `third_party/pdfcraft/INKWELL-NOTICE.txt` does not yet list `forms/js.rs`, `forms/js/prelude.js`, `forms/js/util.rs`, `fillsign/store.rs`, `sign/pdf.rs` and `sign/crypto/mod.rs`):
+Crates main already adapts (from `third_party/pdfcraft/INKWELL-NOTICE.txt`):
 
 | pdfcraft crate | Inkwell files |
 |---|---|
