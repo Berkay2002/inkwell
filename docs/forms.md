@@ -94,7 +94,13 @@ Acrobat Prepare Form's layout tools, in `forms/layout.rs`. Each is one undo step
 - **Picking.** Ctrl, Cmd or Shift click adds a field to the picked ones (or takes it out; on a Mac Ctrl-click is the context menu, so Cmd or Shift); dragging a box on empty
   page picks every visible field it touches (with Ctrl, Cmd or Shift it adds). The **anchor** is the field picked last
   (a box picks in reading order, so the last one in the box), and has a heavier outline. A plain click picks one field.
-  There is no group drag: a press on a field picks just that one, and it moves alone.
+  A plain press on a field that is not picked picks just it, and it moves alone; a plain click (no drag) on a picked
+  field narrows the selection to that one.
+- **Group drag.** Dragging a field of a selection of two or more moves every picked field by the same distance, shown
+  as an outline of each while dragging, and sent on release as one undo step (the engine's nudge, so the group stops
+  at the page edge as one block). Esc during the drag cancels it. Only the picked fields on the page being dragged move
+  (a selection across pages is moved one page at a time, as Acrobat does). A refusal of the nudge (certified document,
+  a field a signature covers, a signed signature field) refuses the whole drag, with the engine's message and no step.
 - **Align** (left, right, top, bottom, horizontal centres, vertical centres) and **Same width / height / size** follow the
   anchor, as in Acrobat, and need two or more fields on one page. "Horizontal centres" gives the fields one x centre (a
   column); "vertical centres" one y centre (a row). Same size keeps each field's top-left corner and pulls the field back
@@ -127,7 +133,7 @@ Acrobat Prepare Form's layout tools, in `forms/layout.rs`. Each is one undo step
   small, shows the controls disabled with the reason as their tooltip; a signature lock is refused by the engine with a
   message. A signed, uncertified document is changed incrementally: the signed bytes stay a prefix of the file.
 - Caps: 1 000 widgets per step, 500 places per grid (the field and its copies), 2 000 pages.
-- Not built: dragging a group, and an assistant tool for any of this.
+- Not built: an assistant tool for any of this.
 
 ## Form data files: FDF, XFDF and JSON
 
@@ -145,8 +151,10 @@ export follows the file name (`.fdf`, `.json`, anything else XFDF); an import is
   reason, never a failure of the whole import): a name that is not a field, a value the field cannot take (a choice that
   is not in the list, an on/off for a text field, a list for a text field), a read-only field, a field a signature
   locks, a password text field (its value is never exported either: the export says how many were left out), a field
-  name over 1 MB, a value over 1 MB (the export leaves such a field out and says how many, so what it writes can be read back and no import clears the field), and anything past 10 000 fields in one file. The summary shows a skipped name by its first 60
-  characters. A script's alerts, links, submits and print requests during the import are dropped, not acted on.
+  name over 1 MB, a value over 1 MB (FDF and JSON; an XFDF with one is refused whole; the export leaves such a field out
+  and says how many, so what it writes can be read back and no import clears the field), and anything past 10 000
+  fields in one file. The summary shows a skipped name by its first 60 characters. A script's alerts, links, submits and
+  print requests during the import are dropped, not acted on.
 - **The document's own field scripts do run** on an import (keystroke, validate, calculate, format), as they do when a
   person types: the same path, so an import cannot put a value in that typing it would refuse. This is deliberate. The
   file's own `/JavaScript`, `/AA` and `/A` are never read.
