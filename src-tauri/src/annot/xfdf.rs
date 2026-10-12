@@ -1115,7 +1115,12 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
                 }
             } else if c.sub != Sub::Text {
                 *why.entry(NOT_NOTE).or_default() += 1;
-            } else if let Some(&(kp, kx, _)) = known.get(&c.name).filter(|_| !c.name.is_empty()) {
+            } else if let Some(&(kp, kx, ksub)) = known.get(&c.name).filter(|_| !c.name.is_empty()) {
+                // A reply is a note: the name of a comment of another type is not its own.
+                if ksub != Some(Sub::Text) {
+                    *why.entry(DIFFERS).or_default() += 1;
+                    continue;
+                }
                 let m = ctm(doc, kp)?;
                 match update(doc, kp, kx, c, &m) {
                     Ok(()) => {

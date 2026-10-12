@@ -158,6 +158,26 @@ fn import_updates_by_name_in_place_adds_the_rest_and_keeps_replies_and_states() 
 }
 
 #[test]
+fn a_reply_that_bears_the_name_of_another_type_of_comment_leaves_it_alone() {
+    let (eng, id, _) = fresh("reply-name");
+    let first = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <square page="0" rect="100,600,200,700" name="sq"><contents>box</contents></square>
+        <text page="0" rect="50,50,60,60" name="n"><contents>note</contents></text></annots></xfdf>"##;
+    assert_eq!(import_one(&eng, id, &parse(first).unwrap(), EditSource::User).unwrap().summary.added, 2);
+    let before = list_all(&eng, id).unwrap();
+    let hijack = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <text page="0" rect="300,300,310,310" name="sq" inreplyto="n" replyType="R"><contents>hijack</contents></text></annots></xfdf>"##;
+    let r = import_one(&eng, id, &parse(hijack).unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.added, r.summary.updated), (0, 0), "{:?}", r.summary);
+    assert_eq!(r.summary.skipped.iter().map(|s| (s.reason.as_str(), s.count)).collect::<Vec<_>>(), [(DIFFERS, 1)]);
+    let after = list_all(&eng, id).unwrap();
+    assert_eq!(after.len(), before.len());
+    let sq = |l: &[AnnotDto]| l.iter().find(|d| d.kind == Kind::Rectangle).map(|d| (d.contents.clone(), d.rect, d.parent)).unwrap();
+    assert_eq!(sq(&after), sq(&before));
+    assert_eq!(sq(&after).0, "box");
+}
+
+#[test]
 fn a_page_out_of_range_and_types_the_files_cannot_carry_are_skipped_and_counted() {
     let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
         <square page="9" rect="100,600,200,700" name="far"/>
