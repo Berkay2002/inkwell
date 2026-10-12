@@ -112,20 +112,60 @@ fn a_header_row_set_larger_or_under_a_rule_is_a_header() {
 }
 
 #[test]
-fn a_plain_grid_needs_three_rows_and_three_columns_and_then_has_no_header() {
+fn a_grid_needs_a_header_row_or_a_rule_to_be_a_table() {
+    // Nothing separates a plain grid from key-value pairs or a letterhead: paragraphs.
     let t = autotag("table-plain", &page(grid(&SALES, &[72, 200, 330], 700, 18, false)));
-    assert_eq!(t.count("Table"), 1, "{:?}", t.types);
-    assert_eq!(t.count("TD"), 9);
-    assert_eq!(t.count("TH"), 0);
-    // The checker asks for the header, which the Tags panel can set.
-    assert_eq!(t.report.status(Rule::TableHeaders), Status::Failed);
-
-    // Two columns without a rule or a header row: pairs, not a table.
+    assert_eq!(t.count("Table"), 0, "{:?}", t.types);
     let pairs = grid(&[&["Alpha", "1"], &["Beta", "2"], &["Gamma", "3"], &["Delta", "4"]], &[72, 250], 700, 18, false);
     assert_eq!(autotag("table-pairs", &page(pairs)).count("Table"), 0);
-    // Three columns, two rows, nothing to confirm it.
     let small = grid(&[&["a", "b", "c"], &["d", "e", "f"]], &[72, 200, 330], 700, 18, false);
     assert_eq!(autotag("table-small", &page(small)).count("Table"), 0);
+
+    // A rule under the last row only: a table, with no header row for the checker to find.
+    let mut c = grid(&SALES, &[72, 200, 330], 700, 18, false);
+    c += "0 g 72 658 330 0.8 re f\n";
+    let t = autotag("table-bottom-rule", &page(c));
+    assert_eq!((t.count("Table"), t.count("TD"), t.count("TH")), (1, 9, 0), "{:?}", t.types);
+    assert_eq!(t.report.status(Rule::TableHeaders), Status::Failed);
+}
+
+#[test]
+fn key_value_grids_and_tables_of_contents_are_not_tables() {
+    // Four columns of label and value, no colons.
+    let kv: [&[&str]; 3] = [&["Invoice no", "1234", "Date", "2024-10-01"], &["Customer", "Acme AB", "Due", "2024-10-31"], &["Reference", "PO 7781", "Terms", "30 days"]];
+    let t = autotag("table-keyvalue", &page(grid(&kv, &[72, 180, 300, 400], 700, 20, false)));
+    assert_eq!(t.count("Table"), 0, "{:?}", t.types);
+
+    // Title and page number, the first entry in bold.
+    let mut c = String::new();
+    for (i, (title, page_no)) in [("Preface", "3"), ("Background", "7"), ("Method", "12"), ("Results", "20")].iter().enumerate() {
+        let y = 700 - 18 * i as i32;
+        let font = if i == 0 { "F2" } else { "F1" };
+        c += &at(font, 12, 72, y, title);
+        c += &at(font, 12, 500 - 7 * page_no.len() as i32, y, page_no);
+    }
+    let t = autotag("table-toc-bold", &page(c));
+    assert_eq!(t.count("Table"), 0, "{:?}", t.types);
+
+    // Number, title and page number.
+    let mut c = String::new();
+    for (i, (title, page_no)) in [("Introduction", "1"), ("Background", "7"), ("Method", "12"), ("Results", "20")].iter().enumerate() {
+        let y = 700 - 18 * i as i32;
+        c += &at("F1", 12, 72, y, &(i + 1).to_string());
+        c += &at("F1", 12, 100, y, title);
+        c += &at("F1", 12, 500 - 7 * page_no.len() as i32, y, page_no);
+    }
+    let t = autotag("table-toc-numbered", &page(c));
+    assert_eq!(t.count("Table"), 0, "{:?}", t.types);
+
+    // The same last column under a header row with words in it, or a rule, is a table.
+    let mut c = at("F2", 12, 72, 700, "Title");
+    c += &at("F2", 12, 470, 700, "Pages");
+    for (y, title, no) in [(682, "Method", "12"), (664, "Results", "20")] {
+        c += &at("F1", 12, 72, y, title);
+        c += &at("F1", 12, 486, y, no);
+    }
+    assert_eq!(autotag("table-pages-header", &page(c)).count("Table"), 1);
 }
 
 #[test]

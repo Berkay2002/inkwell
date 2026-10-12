@@ -7,8 +7,10 @@
 //! Row = lines whose baselines are within `BASELINE_TOL`. Column = the cells at one position of
 //! every row: their left edges, right edges or centers must agree within `ALIGN_TOL` (the header
 //! row may be aligned differently from the body), and neighbouring columns must not overlap.
-//! Ruling lines (stroked lines, thin filled rectangles, stroked rectangle edges) confirm a table
-//! but are not needed for one with at least 3 rows and 3 columns.
+//! A table also needs evidence that it is one: a header row that differs (bold, larger, or under a
+//! ruling line) or ruling lines (stroked lines, thin filled rectangles, stroked rectangle edges)
+//! across its columns. A grid of plain text with neither is left alone, because nothing separates it
+//! from key-value pairs, a table of contents or a letterhead.
 
 use super::autotag::bbox_of;
 use super::content::{self, Op};
@@ -238,17 +240,22 @@ fn region(items: &[Item], rows: &[Row], rules: &[Rule], widgets: &[Rect]) -> Opt
     }
 
     // Evidence: a ruling line across two columns near the rows, or a header row that differs.
+    // Without a rule, a last column of nothing but small integers (a table of contents: title and
+    // page, with a bold first entry or a number in front) is not evidence enough.
     let spans = |r: &Rule| cols.iter().filter(|&&(a, b)| r.x0 <= b && r.x1 >= a).count() >= 2;
     let ruled = rules.iter().any(|r| r.y >= near.y0 && r.y <= near.y1 && spans(r));
     let bold = |r: usize| (0..n).all(|c| cell(r, c).bold);
     let size = |r: usize| (0..n).map(|c| cell(r, c).size).fold(0.0, f32::max);
     let body_size = (1..rows.len()).map(size).fold(0.0, f32::max);
-    let styled = (bold(0) && !(1..rows.len()).all(bold)) || size(0) >= body_size * 1.1;
+    let styled = (bold(0) && !(1..rows.len()).any(bold)) || size(0) >= body_size * 1.1;
     let (b0, b1) = (cell(0, 0).baseline, cell(1, 0).baseline);
     let below = rules.iter().any(|r| r.y > b0 + 0.5 && r.y < b1 - 0.25 * cell(1, 0).size && spans(r));
     let header = styled || below;
-    let regular = rows.len() >= 3 && n >= 3;
-    if !((ruled || header) || regular) {
+    let page_numbers = (0..rows.len()).all(|r| {
+        let t = cell(r, n - 1).text.trim();
+        !t.is_empty() && t.len() <= 3 && t.bytes().all(|b| b.is_ascii_digit())
+    });
+    if !(ruled || header) || (page_numbers && !ruled) {
         return None;
     }
     Some(Table { rows: rows.iter().map(|r| r.cells.iter().map(|&i| items[i].id).collect()).collect(), header })
@@ -334,6 +341,22 @@ mod tests {
         g[4].0.y0 += 4.0;
         g[4].0.y1 += 4.0;
         assert!(detect(&items(&g), &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_header_row_is_styled_only_when_no_body_row_is_bold() {
+        let mut g = grid(4, 3);
+        assert!(detect(&items(&g), &[], &[])[0].header);
+        // A bold row in the body: bold marks nothing, so there is nothing to confirm the table.
+        g[6].2 = true;
+        g[7].2 = true;
+        g[8].2 = true;
+        assert!(detect(&items(&g), &[], &[]).is_empty());
+        // With a rule under the last row it is a table again, with no header row.
+        let under = Rule { x0: 50.0, x1: 330.0, y: 98.0 };
+        let t = detect(&items(&g), &[under], &[]);
+        assert_eq!(t.len(), 1);
+        assert!(!t[0].header);
     }
 
     #[test]
