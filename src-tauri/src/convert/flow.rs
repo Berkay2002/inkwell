@@ -59,6 +59,14 @@ pub struct Table {
     pub rows: Vec<Vec<Cell>>,
 }
 
+impl Table {
+    /// Whether the first row is a header row: every cell bold while some later cell is not.
+    pub fn has_header(&self) -> bool {
+        let bold = |r: &Vec<Cell>| r.iter().all(|c| c.bold || c.text.is_empty());
+        self.rows.len() > 1 && bold(&self.rows[0]) && !self.rows[1..].iter().all(bold)
+    }
+}
+
 /// What goes into the output, in order.
 pub(super) enum Item<'a> {
     Para(&'a Block, u8),
@@ -66,6 +74,21 @@ pub(super) enum Item<'a> {
     Table(Table),
     Img(&'a Image),
     PageBreak,
+}
+
+/// Whether two of the rects (lines of one text block, y up) sit side by side on one row: they share more than
+/// half of the shorter one's height and do not overlap horizontally. A paragraph's lines are stacked, so only
+/// text drawn cell by cell along a row (MuPDF keeps those in one block, in stream order) passes.
+pub(super) fn side_by_side(rects: &[[f64; 4]]) -> bool {
+    let mut by: Vec<&[f64; 4]> = rects.iter().collect();
+    by.sort_by(|a, b| (a[1] + a[3]).total_cmp(&(b[1] + b[3])).then(a[0].total_cmp(&b[0])));
+    // shortcut: only neighbours in vertical order are compared, which finds a row of two or more
+    // cells (whatever else sits in the block), and is linear after the sort.
+    by.windows(2).any(|w| {
+        let (a, b) = (w[0], w[1]);
+        let shared = a[3].min(b[3]) - a[1].max(b[1]);
+        shared > 0.5 * (a[3] - a[1]).min(b[3] - b[1]) && (a[2] <= b[0] || b[2] <= a[0])
+    })
 }
 
 /// The body text size: the size most of the document's characters are set in.

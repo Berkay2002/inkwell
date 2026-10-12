@@ -788,3 +788,95 @@ fn a_table_wider_than_the_text_shrinks_its_widest_columns_first() {
     assert!(gaps[..3].iter().all(|g| *g < 2700 && *g as f64 >= 4.0 * 6.6 * 20.0 + 216.0), "{gaps:?}");
     assert_eq!(docx_widths(&doc_xml(&pages)).0, gaps);
 }
+
+// ---------------------------------------------------------------- table drawn row by row
+
+/// A one-page PDF with `content` as its content stream; /F1 is Helvetica and /F2 Helvetica-Bold.
+fn raw_pdf(content: &str) -> Vec<u8> {
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut at = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        at.push(out.len());
+        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).bytes());
+    for a in at {
+        out.extend(format!("{a:010} 00000 n \n").bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).bytes());
+    out
+}
+
+/// Text at (x, y), bold or not, as its own text object.
+fn put(t: &str, x: f64, y: f64, bold: bool) -> String {
+    format!("BT /{} 11 Tf {x} {y} Td ({t}) Tj ET\n", if bold { "F2" } else { "F1" })
+}
+
+/// Exports `pdf` as Rich Text and Word; returns the RTF and the document.xml.
+fn export_both(d: &Path, pdf: &[u8]) -> (String, String) {
+    let src = d.join("in.pdf");
+    fs::write(&src, pdf).unwrap();
+    let eng = Engine::new(1, 1 << 20);
+    let (doc, r) = eng.open_pending(&src.to_string_lossy());
+    r.unwrap();
+    let (rtf, docx) = (d.join("out.rtf"), d.join("out.docx"));
+    run_export(&eng, doc, ExportKind::Rtf, None, Target::File(rtf.clone())).unwrap();
+    run_export(&eng, doc, ExportKind::Word, None, Target::File(docx.clone())).unwrap();
+    let xml = String::from_utf8(unzip(&fs::read(&docx).unwrap(), "word/document.xml").unwrap()).unwrap();
+    (fs::read_to_string(rtf).unwrap(), xml)
+}
+
+#[test]
+fn a_table_drawn_row_by_row_exports_like_one_drawn_column_by_column() {
+    let rows = [["Item", "Qty", "Revenue"], ["Widgets", "12", "12.50"], ["Gadgets", "7", "340.00"], ["Total", "19", "352.50"]];
+    let d = dir("rows_vs_columns");
+    // `x` of the columns and the row pitch of the row-wise drawing. The second is so tight that MuPDF puts
+    // several rows in one block; the column-wise drawing (MuPDF keeps columns of tight rows as paragraphs,
+    // which is a limit of its own) is then drawn at a pitch it splits, and the output must still be the same.
+    for (xs, pitch) in [([72.0, 200.0, 300.0], 18.0), ([72.0, 127.0, 182.0], 14.0)] {
+        let cell = |r: usize, c: usize, p: f64| put(rows[r][c], xs[c], 700.0 - p * r as f64, r == 0);
+        let by_row: String = (0..4).flat_map(|r| (0..3).map(move |c| (r, c))).map(|(r, c)| cell(r, c, pitch)).collect();
+        let by_col: String = (0..3).flat_map(|c| (0..4).map(move |r| (r, c))).map(|(r, c)| cell(r, c, 18.0)).collect();
+        let (rtf_row, xml_row) = export_both(&d, &raw_pdf(&by_row));
+        let (rtf_col, xml_col) = export_both(&d, &raw_pdf(&by_col));
+        let toks = rtf_tokens(&rtf_col);
+        assert_eq!(word_count(&toks, "trowd"), 4, "{rtf_col}");
+        // The bold first row is the table's header row, not a heading.
+        assert!(!rtf_col.contains("\\sa120\\s2"), "{rtf_col}");
+        assert_eq!(word_count(&toks, "trhdr"), 1);
+        assert_eq!(rtf_row, rtf_col);
+        assert_eq!(xml_row, xml_col);
+        assert!(!xml_row.contains("Heading2") && xml_row.contains("<w:tblHeader/>"), "{xml_row}");
+    }
+}
+
+#[test]
+fn the_lines_of_a_paragraph_stay_one_paragraph() {
+    let content = put("First line of a paragraph that wraps", 72.0, 700.0, false) + &put("and carries on here.", 72.0, 686.0, false);
+    let (rtf, xml) = export_both(&dir("wrapped"), &raw_pdf(&content));
+    let toks = rtf_tokens(&rtf);
+    assert_eq!(word_count(&toks, "par"), 1, "{rtf}");
+    assert!(rtf_plain(&toks).contains("First line of a paragraph that wraps and carries on here."));
+    assert_eq!(xml.matches("<w:p>").count(), 1);
+}
+
+#[test]
+fn only_lines_on_one_row_count_as_side_by_side() {
+    let r = |x0: f64, y0: f64, x1: f64, y1: f64| [x0, y0, x1, y1];
+    // Stacked lines of a paragraph, even when their boxes touch or overlap a little.
+    assert!(!flow::side_by_side(&[r(72.0, 700.0, 300.0, 715.0), r(72.0, 686.0, 280.0, 701.0), r(72.0, 672.0, 200.0, 687.0)]));
+    // Cells of a row, then the next row's.
+    assert!(flow::side_by_side(&[r(72.0, 700.0, 94.0, 715.0), r(200.0, 700.0, 218.0, 715.0), r(72.0, 682.0, 111.0, 697.0)]));
+    // Overlapping horizontally on one band is overprint, not cells.
+    assert!(!flow::side_by_side(&[r(72.0, 700.0, 200.0, 715.0), r(150.0, 700.0, 300.0, 715.0)]));
+    assert!(!flow::side_by_side(&[]));
+}

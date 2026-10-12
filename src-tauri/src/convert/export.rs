@@ -600,6 +600,37 @@ fn with_title(head: &str, title: &str) -> String {
 
 // ---------------------------------------------------------------- Word
 
+/// One paragraph of the model from text lines: the text, the first character's size and colour, bold and italic
+/// where most characters are. `None` when there is only white space.
+fn text_block(lines: &[mupdf::text_page::TextLine<'_>], rect: [f64; 4]) -> Option<flow::Block> {
+    let mut text = String::new();
+    let (mut size, mut argb) = (0.0f32, 0u32);
+    let (mut bold, mut italic, mut chars) = (0usize, 0usize, 0usize);
+    for line in lines {
+        if !text.is_empty() && !text.ends_with(' ') {
+            text.push(' ');
+        }
+        for c in line.chars() {
+            let Some(ch) = c.char() else { continue };
+            if chars == 0 {
+                size = c.size();
+                argb = c.argb();
+            }
+            chars += 1;
+            text.push(ch);
+            if !ch.is_whitespace() {
+                bold += (c.flags().contains(TextCharFlags::BOLD) || c.font().is_some_and(|f| f.is_bold())) as usize;
+                italic += c.font().is_some_and(|f| f.is_italic()) as usize;
+            }
+        }
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    let c = |shift: u32| ((argb >> shift) & 0xff) as f64 / 255.0;
+    Some(flow::Block { text: text.trim().to_string(), rect, size: size as f64, bold: bold * 2 > chars, italic: italic * 2 > chars, color: [c(16), c(8), c(0)] })
+}
+
 /// The pages as the flowing model both document writers take (paragraphs, tables, PNG pictures).
 fn flow_model(doc: &Document, pages: &[u32], run: &mut Run<'_>) -> Result<Vec<flow::Page>, Error> {
     use image::{ExtendedColorType, ImageEncoder};
@@ -616,39 +647,18 @@ fn flow_model(doc: &Document, pages: &[u32], run: &mut Run<'_>) -> Result<Vec<fl
         for block in tp.blocks() {
             match block.r#type() {
                 TextBlockType::Text => {
-                    let mut text = String::new();
-                    let (mut size, mut argb) = (0.0f32, 0u32);
-                    let (mut bold, mut italic, mut chars) = (0usize, 0usize, 0usize);
-                    for line in block.lines() {
-                        if !text.is_empty() && !text.ends_with(' ') {
-                            text.push(' ');
+                    // A paragraph is one block. A row drawn cell by cell comes as one block whose lines sit side by
+                    // side (cells, and in stream order the next row's after them): every line is its own block then,
+                    // and the page's tables are found from where they are, not from the order they were drawn in.
+                    let lines: Vec<_> = block.lines().collect();
+                    let rects: Vec<[f64; 4]> = lines.iter().map(|l| flip(l.bounds())).collect();
+                    if flow::side_by_side(&rects) {
+                        for (l, r) in lines.iter().zip(rects) {
+                            out_page.blocks.extend(text_block(std::slice::from_ref(l), r));
                         }
-                        for c in line.chars() {
-                            let Some(ch) = c.char() else { continue };
-                            if chars == 0 {
-                                size = c.size();
-                                argb = c.argb();
-                            }
-                            chars += 1;
-                            text.push(ch);
-                            if !ch.is_whitespace() {
-                                bold += (c.flags().contains(TextCharFlags::BOLD) || c.font().is_some_and(|f| f.is_bold())) as usize;
-                                italic += c.font().is_some_and(|f| f.is_italic()) as usize;
-                            }
-                        }
+                    } else {
+                        out_page.blocks.extend(text_block(&lines, flip(block.bounds())));
                     }
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    let c = |shift: u32| ((argb >> shift) & 0xff) as f64 / 255.0;
-                    out_page.blocks.push(flow::Block {
-                        text: text.trim().to_string(),
-                        rect: flip(block.bounds()),
-                        size: size as f64,
-                        bold: bold * 2 > chars,
-                        italic: italic * 2 > chars,
-                        color: [c(16), c(8), c(0)],
-                    });
                 }
                 TextBlockType::Image => {
                     let Some(pix) = block.image().and_then(|im| im.to_pixmap().ok()) else { continue };

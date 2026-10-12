@@ -66,8 +66,9 @@ fn docx_table(t: &Table, text_w: f64) -> String {
         s.push_str(&format!("<w:gridCol w:w=\"{w}\"/>"));
     }
     s.push_str("</w:tblGrid>");
-    for row in &t.rows {
-        s.push_str("<w:tr>");
+    for (i, row) in t.rows.iter().enumerate() {
+        // The header row repeats on the next page.
+        s.push_str(if i == 0 && t.has_header() { "<w:tr><w:trPr><w:tblHeader/></w:trPr>" } else { "<w:tr>" });
         let mut col = 0;
         for c in row {
             let span = if c.span > 1 { format!("<w:gridSpan w:val=\"{}\"/>", c.span) } else { String::new() };
