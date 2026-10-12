@@ -94,6 +94,13 @@
   pointer-events: auto;
   cursor: pointer;
 }
+.sg-field[aria-disabled] {
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  border-radius: 0; /* square, so the corner of MuPDF's tag under it doesn't show through */
+  cursor: not-allowed;
+}
 .sg-field span {
   transform: scale(calc(1 / var(--z, 1)));
 }
@@ -422,10 +429,15 @@
 }
 .sg-empty {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   padding: 8px 12px;
   border: 1px dashed var(--border-strong);
   border-radius: 10px;
+}
+.sg-why {
+  flex-basis: 100%;
+  margin: 4px 0 0;
 }
 .sg-foot {
   margin-top: 8px;
