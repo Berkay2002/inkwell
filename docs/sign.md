@@ -11,7 +11,7 @@ Engine: `src-tauri/src/sign/`. `pdf.rs` writes and checks PAdES signatures, `cry
 
 ## Signature fields on the page
 
-A signature field in a form is a button over the field. An empty one (`<label>: click to sign`) opens the signing sheet aimed at that field (`signField`, the same entry as the Sign tool's "Sign here" and the rail's empty-field "Sign"); nothing is signed until Sign is pressed in the sheet. A signed one (`<label>: signed by <name>, click for details`) opens the Signatures rail on that signature. After a certification that allows no changes (P=1) an empty field shows the reason and does nothing (`aria-disabled`); P=2 and P=3 allow signing, as the engine does. A field-level `/Lock` (FieldMDP) is not read, so it is not shown as locked.
+A signature field in a form is a button over the field. An empty one (`<label>: click to sign`) opens the signing sheet aimed at that field (`signField`, the same entry as the Sign tool's "Sign here" and the rail's empty-field "Sign"); nothing is signed until Sign is pressed in the sheet. A signed one (`<label>: signed by <name>, click for details`) opens the Signatures rail on that signature. After a certification that allows no changes (P=1) an empty field shows the reason and does nothing (`aria-disabled`); P=2 and P=3 allow signing, as the engine does. A read-only empty field (`Ff` bit 1) shows `<label>: read-only field` and does nothing here; the Sign tool's "Sign here" and the rail still offer it, because the engine does not check the flag. A field-level `/Lock` (FieldMDP) is not read, so it is not shown as locked.
 
 ## How a signature is checked
 
