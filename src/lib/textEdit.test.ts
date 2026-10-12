@@ -464,4 +464,25 @@ describe("store", () => {
     expect(editText).not.toHaveBeenCalled();
     expect(text().notice).toBe(why);
   });
+
+  it("drops the selection when the block it was made in is replaced or discarded", async () => {
+    vi.mocked(api.textBlocks).mockResolvedValue(list([block()]));
+    vi.mocked(editText).mockResolvedValue(edited());
+    const te = useTextEdit.getState();
+    await te.load(1, 0);
+    await te.select(1, { page: 0, index: 0 });
+    te.setSelection(1, [1, 3]);
+    // A format change that leaves the text as it was keeps it.
+    await te.apply(1, { bold: true });
+    expect(text().selection).toEqual([1, 3]);
+    // Typed text changes it: the offsets no longer line up.
+    te.setDraft(1, "Rent is due on the second.");
+    vi.mocked(api.textBlocks).mockResolvedValue(list([block({ text: "Rent is due on the second." })], 2));
+    await te.apply(1, { size: 14 });
+    expect(text().selection).toBeNull();
+    te.setSelection(1, [0, 2]);
+    te.discard(1);
+    expect(text().selection).toBeNull();
+    expect(text().selected).toBeNull();
+  });
 });

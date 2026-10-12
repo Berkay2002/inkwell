@@ -288,9 +288,13 @@ export const useTextEdit = create<Store>((set, get) => {
       const now = of(doc);
       if (now.selected?.page === page && now.selected.index === sel.index) {
         const same = closestBlock(was, r.blocks);
-        if (!same) patchDoc(doc, { selected: null, draft: null });
+        if (!same) patchDoc(doc, { selected: null, draft: null, selection: null });
         else if (same.index !== sel.index) {
-          patchDoc(doc, { selected: { page, index: same.index }, draft: now.draft ? { ...now.draft, page, index: same.index } : null });
+          patchDoc(doc, {
+            selected: { page, index: same.index },
+            draft: now.draft ? { ...now.draft, page, index: same.index } : null,
+            selection: null,
+          });
         }
       }
     }
@@ -328,6 +332,7 @@ export const useTextEdit = create<Store>((set, get) => {
         patchDoc(doc, {
           selected: same ? { page: ref.page, index: same.index } : null,
           draft: same && cur ? { ...cur, page: ref.page, index: same.index } : null,
+          selection: null,
           failed: false,
           notice: same ? null : "The page changed, so the text typed in that block was not applied.",
         });
@@ -338,6 +343,8 @@ export const useTextEdit = create<Store>((set, get) => {
       patchDoc(doc, {
         selected: same ? { page: ref.page, index: same.index } : null,
         draft: keep,
+        // A selection stays only where the text it was made in did.
+        selection: same && same.index === ref.index && same.text === block.text && !keep ? of(doc).selection : null,
         failed: false,
         notice: r.value.fallback ? fallbackNote(r.value.fallback) : null,
       });
@@ -361,7 +368,7 @@ export const useTextEdit = create<Store>((set, get) => {
       void Promise.all(ids.map((id) => get().commit(id))).then(() => {
         if (get().open) return;
         // Typed text that could not be sent stays (with its block) for the person to see on return.
-        for (const id of ids) if (!of(id).failed) patchDoc(id, { selected: null, draft: null, adding: null, notice: null });
+        for (const id of ids) if (!of(id).failed) patchDoc(id, { selected: null, draft: null, selection: null, adding: null, notice: null });
       });
     },
     tool: "select",
@@ -428,7 +435,7 @@ export const useTextEdit = create<Store>((set, get) => {
     move: (doc, d) => get().apply(doc, { offset: d }),
 
     startAdding: (doc, page, at) => {
-      patchDoc(doc, { adding: { page, at, text: "" }, selected: null, draft: null, failed: false, notice: null });
+      patchDoc(doc, { adding: { page, at, text: "" }, selected: null, draft: null, selection: null, failed: false, notice: null });
     },
 
     setAdding: (doc, text) => {
@@ -460,11 +467,11 @@ export const useTextEdit = create<Store>((set, get) => {
         // The new block is the one that starts where it was put.
         const dist = (b: TextBlock) => Math.hypot(b.rect[0] - a.at[0], b.rect[1] - a.at[1]);
         const mine = fresh.blocks.filter((b) => b.editable).sort((p, q) => dist(p) - dist(q))[0];
-        if (mine) patchDoc(doc, { selected: { page: a.page, index: mine.index } });
+        if (mine) patchDoc(doc, { selected: { page: a.page, index: mine.index }, selection: null });
       }),
 
     discard: (doc) => {
-      patchDoc(doc, { selected: null, draft: null, adding: null, failed: false, notice: null });
+      patchDoc(doc, { selected: null, draft: null, selection: null, adding: null, failed: false, notice: null });
       set({ tool: "select" });
     },
 
