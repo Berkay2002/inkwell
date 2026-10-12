@@ -97,7 +97,7 @@ export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "any";
 export const pickSave = (name: string, at: { doc?: number; near?: string } = {}, kind?: SaveKind) =>
   invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null, kind: kind ?? null });
 /** Open dialog for what Create builds a PDF from: images (several) or one text file. */
-export const pickSource = (kind: "images" | "text", multiple: boolean) => invoke<FileRef[]>("pick_source", { kind, multiple });
+export const pickSource = (kind: "images" | "text" | "json", multiple: boolean) => invoke<FileRef[]>("pick_source", { kind, multiple });
 /** Folder dialog (run by Rust); the token names the folder a multi-file export writes into. */
 export const pickFolder = (doc?: number) => invoke<FileRef | null>("pick_folder", { doc: doc ?? null });
 /** Open token for a path the user chose before (recent list); Rust refuses any other path. */
@@ -891,20 +891,81 @@ export interface CompressRequest {
   saveTo?: string;
 }
 
-export type OcrBackend = "windows" | "tesseract";
+/** `auto`: the engine is picked from the languages (Windows reads one, several go to Tesseract). */
+export type OcrBackend = "auto" | "windows" | "tesseract";
+/** Searchable image (invisible layer), the same cleaned up, or real editable text. */
+export type OcrStyle = "searchable" | "cleaned" | "editable";
+/** The face editable text is set in: `auto` picks mono for typed pages. */
+export type OcrFont = "auto" | "sans" | "mono";
+
+/** One language as the list shows it: which engines have it. */
+export interface OcrLang {
+  /** Primary tag ("sv"). */
+  tag: string;
+  /** The installed Windows pack ("sv-SE"). */
+  windows: string | null;
+  tesseract: boolean;
+  rtl: boolean;
+  cjk: boolean;
+  /** Read, but not as reliably as Latin text. */
+  experimental: boolean;
+}
+
+export interface OcrCatalog {
+  languages: OcrLang[];
+  tesseractFound: boolean;
+  /** Where Tesseract's `*.traineddata` files go. */
+  tessdataDir: string | null;
+}
 
 export interface OcrLanguages {
   windows: string[];
   tesseract: { path: string; languages: string[] } | null;
+  catalog: OcrCatalog;
+  /** The user's Windows languages, display language first. */
+  profile: string[];
+  /** Display language plus English, as far as installed. */
+  defaults: string[];
+}
+
+export interface OcrMissing {
+  tag: string;
+  /** `ms-settings:regionlanguage`; opened with `openLanguageSettings`. */
+  windowsSettings: string;
+  /** `swe.traineddata` */
+  tessdataFile: string;
+  tessdataDir: string | null;
+}
+
+/** Which engine reads the chosen languages, and what is missing for them. */
+export interface OcrPlan {
+  engine: "windows" | "tesseract" | null;
+  languages: string[];
+  dropped: string[];
+  missing: OcrMissing[];
+  note: string | null;
+}
+
+export interface OcrDetection {
+  languages: string[];
+  source: "text" | "sample" | "profile";
+  guess: string | null;
+  confidence: number;
 }
 
 export interface OcrRequest {
   doc: number;
   /** One-based range like "1-3, 5"; omitted = every page. */
   pages?: string;
+  /** Primary tags ("sv"); the engine and its own tags are settled by Rust. */
   languages: string[];
   force: boolean;
   backend: OcrBackend;
+  style?: OcrStyle;
+  /** Render resolution: 150, 200 (default) or 300. */
+  dpi?: number;
+  /** Editable text only. */
+  font?: OcrFont;
   /** Save token: write a new file instead of changing the document. */
   saveTo?: string;
 }
@@ -913,6 +974,8 @@ export interface OcrProgress {
   done: number;
   total: number;
   page: number;
+  /** After every page was read: the pages are being written into the document (the picture styles). */
+  writing?: boolean;
 }
 
 /** The engine's report as it serializes (snake_case: the AI tools read the same shape). */
@@ -926,6 +989,41 @@ export interface OcrReport {
   words: number;
   total_ms: number;
   warnings: string[];
+  /** What the cleaned-up style did to the pictures; absent for the other styles. */
+  clean?: OcrClean | null;
+  /** What the editable-text style did; absent for the other styles. */
+  editable?: OcrEditable | null;
+}
+
+/** A word that stayed in the picture (its text is still searchable). */
+export interface OcrUnsure {
+  /** 0-based page. */
+  page: number;
+  text: string;
+  /** [x0, y0, x1, y1] on the displayed page, points. */
+  bbox: [number, number, number, number];
+  why: "low-confidence" | "unusual" | "no-font" | "picture";
+}
+
+export interface OcrEditable {
+  pages_converted: number;
+  /** Pages left as a picture with an invisible layer, with the first few reasons in `notes`. */
+  pages_kept: number;
+  words_converted: number;
+  words_kept: number;
+  unsure: OcrUnsure[];
+  notes: string[];
+}
+
+export interface OcrClean {
+  pages_cleaned: number;
+  pages_deskewed: number;
+  specks_removed: number;
+  /** Pages that needed nothing. */
+  pages_clean: number;
+  /** Pages left as they were, with the first few reasons in `notes`. */
+  pages_left: number;
+  notes: string[];
 }
 
 export interface OcrOutcome {
@@ -1030,7 +1128,23 @@ export const toolCancel = (job: number) => invoke<void>("tool_cancel", { job });
 export const ocrLanguages = () => invoke<OcrLanguages>("ocr_languages");
 /** Opens a file picker (Rust side) and remembers tesseract.exe; resolves to the path or null. */
 export const ocrChooseTesseract = () => invoke<string | null>("ocr_choose_tesseract");
+/** Which engine reads `languages` and what is missing for them. */
+export const ocrPlan = (languages: string[], backend: OcrBackend = "auto") => invoke<OcrPlan>("ocr_plan", { languages, backend });
+/** The language the document is probably in: its own text, else a quick sample read of its first scan. */
+export const ocrDetect = (job: number, doc: number) => invoke<OcrDetection>("ocr_detect", { job, doc });
+/** Opens Windows' language settings, where an OCR language pack is added. A fixed address. */
+export const openLanguageSettings = () => invoke<void>("open_language_settings");
 export const ocrClearTesseract = () => invoke<void>("ocr_clear_tesseract");
+
+/** One page before and after the style, as PNG data URLs. Changes nothing. */
+export interface OcrPreview {
+  before: string;
+  after: string;
+  applied: { pages_written: number; words: number; editable?: OcrEditable | null; clean?: OcrClean | null };
+}
+
+/** `page` is 0-based. Runs on its own thread; `toolCancel(job)` stops it. */
+export const ocrPreview = (job: number, page: number, req: OcrRequest) => invoke<OcrPreview>("ocr_preview", { job, page, req });
 
 export function ocrStart(job: number, req: OcrRequest, onProgress: (p: OcrProgress) => void) {
   const ch = new Channel<OcrProgress>();
@@ -1407,6 +1521,178 @@ export const threadMove = (doc: number, thread: number, to: number) => invoke<Ed
 export const transitionsList = (doc: number) => invoke<PageTrans[]>("transitions_list", { doc });
 export const transitionsSet = (doc: number, pages: number[], change: PageTrans) =>
   invoke<EditState>("transitions_set", { doc, pages, change });
+
+// ---- batch actions (Action Wizard; src-tauri/src/batch, docs/batch.md) ----
+
+export type BatchPreset = "smallest" | "balanced" | "highQuality" | "custom";
+export interface BatchSanitize {
+  metadata: boolean;
+  hiddenLayers: boolean;
+  hiddenText: boolean;
+  scriptsActions: boolean;
+  embeddedFiles: boolean;
+  annotations: boolean;
+  formFieldsUnderMarks: boolean;
+  bookmarks: boolean;
+}
+export type BatchPattern = "personnummer" | "ssn" | "iban" | "card" | "email" | "phone";
+export type BatchQuery =
+  | { type: "pattern"; pattern: BatchPattern }
+  | { type: "text"; text: string; caseSensitive: boolean; wholeWord: boolean }
+  | { type: "regex"; regex: string; caseSensitive: boolean };
+export interface BatchHeaderFooter {
+  text: SixTexts;
+  style: MarkStyle;
+  margins: [number, number, number, number];
+  startNumber: number;
+}
+export interface BatchWatermark {
+  text: string;
+  /** Pictures are refused by a batch (their file token does not outlast a session). */
+  picture: null;
+  style: MarkStyle;
+  scale: number;
+  opacity: number;
+  rotation: number;
+  behind: boolean;
+  offset: [number, number];
+  showOnScreen: boolean;
+  showInPrint: boolean;
+}
+export interface BatchBates {
+  prefix: string;
+  suffix: string;
+  digits: number;
+  start: number;
+  slot: number;
+  style: MarkStyle;
+  margins: [number, number, number, number];
+}
+
+/** One step. The engine's set is closed; `invalid` is what a file's unknown step reads as (never sent back). */
+export type BatchStep =
+  | { kind: "compress"; preset: BatchPreset }
+  | { kind: "ocr"; languages: string[]; force: boolean; backend: OcrBackend }
+  | ({ kind: "headerFooter" } & BatchHeaderFooter)
+  | ({ kind: "watermark" } & BatchWatermark)
+  | { kind: "bates"; bates: BatchBates; continueAcrossFiles: boolean }
+  /** The passwords exist only in a run's request: the engine never stores or returns them. */
+  | { kind: "protect"; printing: Printing; changes: Changes; copy: boolean; accessibility: boolean; cipher: Cipher; openPassword?: string; permissionsPassword?: string }
+  | ({ kind: "sanitize" } & BatchSanitize)
+  | { kind: "redact"; queries: BatchQuery[]; overlayText: string | null; sanitize: BatchSanitize }
+  | { kind: "flattenForms" }
+  | { kind: "exportImages"; format: ImageFormat; dpi: number; gray: boolean; quality: number }
+  | { kind: "exportText"; layout: boolean }
+  | { kind: "setProperties"; title: string | null; author: string | null; subject: string | null; keywords: string | null; creator: string | null; producer: string | null }
+  | { kind: "invalid"; name: string; why: string };
+
+export type BatchStepKind = Exclude<BatchStep["kind"], "invalid">;
+
+export type BatchOutput = { kind: "nextToSource"; suffix: string } | { kind: "folder"; suffix: string };
+
+export interface BatchAction {
+  /** Empty for a new action; the engine gives it one when it is saved. */
+  id: string;
+  name: string;
+  description: string;
+  steps: BatchStep[];
+  output: BatchOutput;
+  onError: "skip" | "stop";
+  /** Read-only action that ships with the app: Duplicate it to change it. */
+  builtIn: boolean;
+}
+
+export interface BatchIssue {
+  /** Index of the step; null for the action itself. */
+  step: number | null;
+  code: "name" | "no-steps" | "output" | "order" | "unknown-step" | "forbidden-step" | "invalid-step" | "unavailable";
+  message: string;
+}
+
+export type BatchStatus = "ok" | "skipped" | "error";
+
+export interface BatchOutputFile {
+  path: string;
+  /** Open token of a file the run made. */
+  token: string | null;
+}
+
+export interface BatchFileReport {
+  index: number;
+  input: string;
+  name: string;
+  status: BatchStatus;
+  reason: string | null;
+  sizeBefore: number;
+  sizeAfter: number | null;
+  outputs: BatchOutputFile[];
+  notes: string[];
+  warnings: string[];
+  stepsDone: number;
+  ms: number;
+}
+
+export interface BatchReport {
+  action: string;
+  files: BatchFileReport[];
+  ok: number;
+  skipped: number;
+  errors: number;
+  cancelled: boolean;
+  stopped: boolean;
+}
+
+export type BatchEvent =
+  | { event: "started"; files: number }
+  | { event: "fileStarted"; index: number; total: number; name: string }
+  | { event: "step"; index: number; step: number; steps: number; label: string }
+  | { event: "fileDone"; index: number; report: BatchFileReport }
+  | { event: "finished"; ok: number; skipped: number; errors: number; cancelled: boolean };
+
+export interface BatchFilePreview {
+  index: number;
+  input: string;
+  name: string;
+  status: BatchStatus;
+  reason: string | null;
+  steps: string[];
+  outputs: string[];
+}
+
+export interface BatchPreview {
+  action: string;
+  files: BatchFilePreview[];
+  ok: number;
+  skipped: number;
+  errors: number;
+}
+
+export const batchList = () => invoke<BatchAction[]>("batch_list");
+export const batchSave = (action: BatchAction) => invoke<BatchAction>("batch_save", { action });
+export const batchDelete = (id: string) => invoke<void>("batch_delete", { id });
+/** `file`: an open token of an exported action (`pickSource("json")`). Stored under a new id. */
+export const batchImport = (file: string) => invoke<BatchAction>("batch_import", { file });
+/** `saveTo`: a save token from `pickSave(name, {}, "any")`. Passwords are never written. */
+export const batchExport = (action: BatchAction, saveTo: string) => invoke<void>("batch_export", { action, saveTo });
+export const batchValidate = (action: BatchAction) => invoke<BatchIssue[]>("batch_validate", { action });
+/** `files`: open tokens. A dry run: per file, would it run or be skipped, and under which names. Writes nothing. */
+export const batchPreview = (action: BatchAction, files: string[]) => invoke<BatchPreview>("batch_preview", { action, files });
+/** `folder`: an open token of a directory (`pickSearchFolder`). The PDFs in it come back as open tokens (at most 500). */
+export const batchFolderFiles = (folder: string, recursive: boolean) =>
+  invoke<{ files: FileRef[]; capped: boolean }>("batch_folder_files", { folder, recursive });
+/** `folder`: a save token from `pickFolder`, needed when the action's output is a folder. `batchCancel(job)` stops it. */
+export function batchRun(
+  job: number,
+  action: BatchAction,
+  files: string[],
+  folder: string | null,
+  onEvent: (e: BatchEvent) => void,
+) {
+  const ch = new Channel<BatchEvent>();
+  ch.onmessage = onEvent;
+  return invoke<BatchReport>("batch_run", { job, action, files, folder, onEvent: ch });
+}
+export const batchCancel = (job: number) => invoke<void>("batch_cancel", { job });
 
 /** Document JavaScript (src-tauri/src/forms/doc_js.rs). Nothing here runs a script. */
 export interface DocJsMeta {
