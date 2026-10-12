@@ -476,9 +476,10 @@ export function SearchPanel({ doc }: { doc: DocState }) {
     }
   }, [open]);
 
+  const built = useSearch((s) => target?.kind !== "catalog" || (s.catalogs.find((c) => c.id === target.id)?.built ?? 0) > 0);
+
   if (!open) return null;
   const setDraft = (t: string) => useFind.getState().setDraft(doc.id, t);
-  const built = useSearch((s) => target?.kind !== "catalog" || (s.catalogs.find((c) => c.id === target.id)?.built ?? 0) > 0);
   const canRun = scope === "folder" && !!target && built && draft.trim().length > 0;
   const runFolder = () => void sr().startFolder(draft);
   const choose = async (files: boolean) => {

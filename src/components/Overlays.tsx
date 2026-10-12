@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { commands, prettyKeys } from "../lib/commands";
+import { rankPalette } from "../lib/paletteRank";
 import { useToolPrefs } from "../lib/toolPrefs";
 import { toolItems } from "../lib/toolItems";
 import { type ToolItem } from "../lib/toolsCatalog";
@@ -50,11 +51,7 @@ export function CommandPalette() {
         };
       });
     const files = recent.map(({ path: p }): Item => ({ title: `Open ${fileName(p)}`, hint: p, run: () => void st().openPath(p) }));
-    const words = q.toLowerCase().split(/\s+/).filter(Boolean);
-    return [...cmds, ...files].filter((i) => {
-      const hay = `${i.title} ${i.words ?? ""}`.toLowerCase();
-      return words.every((w) => hay.includes(w));
-    });
+    return rankPalette([...cmds, ...files], q);
   }, [q, recent, hasDoc]);
 
   useEffect(() => setSel(0), [q]);

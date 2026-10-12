@@ -5,6 +5,8 @@
 //   Copy-Item docs\study\samples\{edit-source,form-source,bookmarks-links-source,scan-source,redact-source,pages-a,pages-b}.pdf $d\in
 //   vite --port 1433 --strictPort            (any free port; the debug exe is built for 1420)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv"
+//   mkdir $d\hist; $env:INKWELL_HISTORY_ROOT = "$d\hist"   (else versions land in %LOCALAPPDATA%\Inkwell\history and a
+//   second run shows the "same document as the one last changed" prompt over the page)
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9261'
 //   inkwell.exe "$d\in\edit-source.pdf" "$d\in\form-source.pdf" ...      (the order is the tab order)
 //   node scripts/tour-shots.mjs docs/screens/tour 9261 1433
