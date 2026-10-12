@@ -251,6 +251,13 @@ fn a_file_that_appears_at_the_chosen_name_is_never_replaced() {
     let r = crate::preflight::convert_to_new_file(&h.eng, h.doc, crate::preflight::Profile::Pdfa2b, &c, &taken.to_string_lossy(), &mut |_| {}, &cancel);
     assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some("output-exists"));
     assert_eq!(std::fs::read(&taken).unwrap(), theirs);
+    // a folder that already has the name is not filled: the export takes the next free one
+    let folder = dir.join("a (images)");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("keep.txt"), b"mine").unwrap();
+    ok(&h, "export_document", json!({ "format": "images", "dpi": 72, "pages": [1] }));
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "files were put into a folder that was there already");
+    assert!(dir.join("a (images) (2)").is_dir(), "{:?}", names(&dir));
     // none of them left a stray temporary file behind
     let left = names(&dir);
     assert!(left.iter().all(|n| !n.contains(".tmp") && !n.contains("partial")), "{left:?}");
@@ -260,10 +267,8 @@ fn a_file_that_appears_at_the_chosen_name_is_never_replaced() {
 fn converting_a_protected_document_is_refused_before_the_card_and_names_its_output() {
     let h = fixture_doc("jobs-convert-protected");
     // the card names the file the copy would be written to
-    let c = card(&h, "convert_to_standard", json!({ "profile": "pdfa-2b", "lang": "en-US" }));
-    if let Ok(Some(text)) = &c {
-        assert!(text.contains("(PDF-A-2b).pdf") && text.contains("original is not changed"), "{text}");
-    }
+    let text = card(&h, "convert_to_standard", json!({ "profile": "pdfa-2b", "lang": "en-US" })).unwrap().unwrap();
+    assert!(text.contains("(PDF-A-2b).pdf") && text.contains("original is not changed"), "{text}");
     // a permissions password only: the file opens, but a converted copy would be written without it
     let spec = crate::protect::ProtectSpec {
         open_password: None,

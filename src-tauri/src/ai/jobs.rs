@@ -524,7 +524,10 @@ fn export_document(c: &Ctx, a: &Value) -> Result<Output, String> {
     let pages = pages_arg(a, count)?;
     let (target, dest) = export_target(&l, &kind)?;
     let made_folder = if let Target::Folder(d) = &target {
-        std::fs::create_dir_all(d).map_err(|e| format!("Could not make the folder: {e}"))?;
+        // not `create_dir_all`: a folder that appeared at this name meanwhile is not filled
+        std::fs::create_dir(d).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists { job_err("output-exists".into()) } else { format!("Could not make the folder: {e}") }
+        })?;
         true
     } else {
         false

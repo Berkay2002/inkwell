@@ -142,6 +142,32 @@ pub(crate) fn apply(doc: &mut PdfDocument, profile: Profile, c: &Convert, stem: 
 
 /// The bytes of a new file: no encryption, a classic cross-reference table, a header the standard
 /// accepts.
+/// Sets (or, for an empty value, clears) entries of the document information (`Title`, `Author`, `Subject`,
+/// `Keywords`) and brings the XMP packet in line. The one write path of the assistant's property edit, so the
+/// certification is refused here, inside the step, and not only by the caller's guard.
+pub(crate) fn set_info_properties(doc: &mut PdfDocument, writes: &[(&str, String)]) -> Result<()> {
+    crate::outline::refuse_if_certified(doc, "Changing its properties")?;
+    let mut info = match doc.trailer()?.get_dict("Info")?.filter(|i| i.is_dict().unwrap_or(false)) {
+        Some(i) => i,
+        None => {
+            let i = doc.add_object(&doc.new_dict()?)?;
+            doc.trailer()?.dict_put("Info", i.clone())?;
+            i
+        }
+    };
+    for (key, v) in writes {
+        if v.is_empty() {
+            if info.get_dict(*key)?.is_some() {
+                info.dict_delete(*key)?;
+            }
+        } else {
+            info.dict_put(*key, crate::a11y::text_obj(doc, v)?)?;
+        }
+    }
+    sync_xmp_with_info(doc)?;
+    Ok(())
+}
+
 /// Brings the XMP packet in line with the document information after a property changed (the
 /// standards want the two to agree, and a reader that prefers XMP would otherwise show the old
 /// value). A document without a packet is left without one. A packet that is not UTF-8 is refused,

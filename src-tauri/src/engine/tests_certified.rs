@@ -142,6 +142,10 @@ fn ops() -> Vec<(&'static str, bool, Op)> {
     op!("mark pages for redaction", true, |eng, _p, id| crate::redact::app::mark_pages(eng, id, &[1], user()).map(|_| ()));
     op!("remove a redaction mark", true, |eng, _p, id| crate::redact::app::unmark(eng, id, &[(0, 9)], user()).map(|_| ()));
     op!("apply redactions", false, |eng, _p, id| crate::redact::app::apply(eng, id, Sanitize::default(), None, user()).map(|_| ()));
+    op!("set document properties", false, |eng, _p, id| custom(eng, id, |d| {
+        crate::preflight::set_info_properties(d, &[("Title", "Changed".to_string())])?;
+        Ok(Vec::new())
+    }));
     op!("remove hidden information", false, |eng, _p, id| crate::redact::app::sanitize_doc(
         eng, id, Sanitize { metadata: true, ..Default::default() }, user()
     )

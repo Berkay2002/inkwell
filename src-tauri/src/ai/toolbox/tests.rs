@@ -185,8 +185,8 @@ fn a_certified_document_takes_no_property_change_and_no_sanitize_and_a_signed_on
     crate::ai::actions::tests::certify(&h, Some(2), None);
     let (r, s) = (rev(&h), steps(&h));
     for (tool, args) in [("set_document_properties", json!({ "title": "T" })), ("sanitize_document", json!({}))] {
-        // the assistant's own guard answers first; the closure's `refuse_if_certified` is the backstop
-        // (`engine/tests_certified.rs` runs the same writes without it)
+        // the assistant's own guard answers first; `set_info_properties` and `sanitize_doc` refuse the
+        // certification themselves, which `engine/tests_certified.rs` runs without the guard
         let e = err_of(&h, tool, args);
         assert!(e.contains("certified") || e.contains("digitally signed"), "{tool}: {e}");
     }
