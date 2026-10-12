@@ -4,7 +4,8 @@ import type { EditState } from "./api";
 import { applyState } from "./edit";
 import { useStore } from "../store";
 import type { Detected, Field, FieldKind, FieldPatch, FieldValue, Form, Format, NewField, Rect4, ScriptAction, ScriptPrompt } from "./formsLogic";
-import { capPrompts, detectedToNew, effectsOf, resetTargets } from "./formsLogic";
+import { anchorOf, capPrompts, detectedToNew, effectsOf, nextPicks, resetTargets, samePick } from "./formsLogic";
+import type { Pick } from "./formsLogic";
 import { usePrint } from "./printStore";
 
 /**
@@ -66,9 +67,22 @@ export const formsApi = {
   arrange: (doc: number, page: number, by: "row" | "column") => invoke<EditState>("forms_arrange", { doc, page, by }),
   detect: (doc: number, page: number) => invoke<Detected[]>("forms_detect", { doc, page }),
   calcOrder: (doc: number, nodes: number[]) => invoke<EditState>("forms_calc_order", { doc, nodes }),
+  align: (doc: number, items: [number, number][], edge: AlignEdge) => invoke<EditState>("forms_align", { doc, items, edge }),
+  center: (doc: number, items: [number, number][], axis: LayoutAxis) => invoke<EditState>("forms_center", { doc, items, axis }),
+  distribute: (doc: number, items: [number, number][], axis: LayoutAxis) => invoke<EditState>("forms_distribute", { doc, items, axis }),
+  matchSize: (doc: number, items: [number, number][], dim: SizeDim) => invoke<EditState>("forms_match_size", { doc, items, dim }),
+  nudge: (doc: number, items: [number, number][], dx: number, dy: number) => invoke<EditState>("forms_nudge", { doc, items, dx, dy }),
+  duplicate: (doc: number, item: [number, number], pages: number[]) => invoke<EditState>("forms_duplicate", { doc, item, pages }),
+  copies: (doc: number, item: [number, number], rows: number, cols: number, gapX: number, gapY: number) =>
+    invoke<EditState & { made: number; skipped: number }>("forms_copies", { doc, item, rows, cols, gapX, gapY }).then((r) => r),
+  rename: (doc: number, item: [number, number], name: string, merge: boolean) => invoke<EditState>("forms_rename", { doc, item, name, merge }),
   /** What a format makes of a sample entry (empty: a default one); null for no format and for a custom script. */
   formatPreview: (format: Format, sample = "") => invoke<{ sample: string; shown: string } | null>("forms_format_preview", { format, sample }),
 };
+
+export type AlignEdge = "left" | "right" | "top" | "bottom" | "hcenter" | "vcenter";
+export type LayoutAxis = "horizontal" | "vertical" | "both";
+export type SizeDim = "width" | "height" | "both";
 
 /** The field tools of the authoring strip. */
 export type FormTool = "select" | FieldKind;
@@ -88,8 +102,10 @@ export interface DocForm {
   scripts: ScriptsState | null;
   /** The banner over the page was dismissed for this session. */
   bannerGone: boolean;
-  /** Field chosen on the page or in the list. */
+  /** Field chosen on the page or in the list: the anchor, the last of `picked`. */
   selected: Ref | null;
+  /** Every field picked (Ctrl or Shift click, marquee), in the order picked; the last is the anchor. */
+  picked: Ref[];
   /** What detection found on `detectPage`, shown as a prediction before it is added. */
   detected: Detected[] | null;
   detectPage: number | null;
@@ -97,7 +113,7 @@ export interface DocForm {
   error: string | null;
 }
 
-const fresh = (): DocForm => ({ fields: [], calcOrder: [], xfa: false, scripts: null, bannerGone: false, selected: null, detected: null, detectPage: null, error: null });
+const fresh = (): DocForm => ({ fields: [], calcOrder: [], xfa: false, scripts: null, bannerGone: false, selected: null, picked: [], detected: null, detectPage: null, error: null });
 
 const HIGHLIGHT_KEY = "inkwell.forms.highlight";
 const loadHighlight = () => {
@@ -137,6 +153,24 @@ interface FormsStore {
   get: (doc: number) => DocForm;
   refresh: (doc: number) => Promise<void>;
   select: (doc: number, ref: Ref | null) => void;
+  /** Click with Ctrl, Cmd or Shift: adds the field to the picked ones (or takes it out). */
+  toggle: (doc: number, ref: Ref) => void;
+  /** Replaces the picked fields (a marquee); `add` keeps the ones already picked. */
+  pickMany: (doc: number, refs: Ref[], add?: boolean) => void;
+  /** Which layout dialog the rail shows. */
+  dialog: "duplicate" | "copies" | null;
+  setDialog: (d: "duplicate" | "copies" | null) => void;
+  align: (doc: number, edge: AlignEdge) => Promise<void>;
+  center: (doc: number, axis: LayoutAxis) => Promise<void>;
+  distribute: (doc: number, axis: LayoutAxis) => Promise<void>;
+  matchSize: (doc: number, dim: SizeDim) => Promise<void>;
+  nudge: (doc: number, dx: number, dy: number) => Promise<void>;
+  /** The picked field again on these pages (0-based). */
+  duplicate: (doc: number, pages: number[]) => Promise<boolean>;
+  /** A grid of copies of the picked field; resolves to what to tell the person, or null on failure (`error` is set). */
+  copies: (doc: number, rows: number, cols: number, gapX: number, gapY: number) => Promise<string | null>;
+  /** The field's full name; `merge` joins it to the field that has the name. Resolves to the message of a refusal, or null. */
+  rename: (doc: number, ref: Ref, name: string, merge: boolean) => Promise<string | null>;
   clearError: (doc: number) => void;
   /** Fill a field; resolves to the rejection message (the field is left as it was), or null when accepted. */
   setValue: (doc: number, page: number, xref: number, value: FieldValue) => Promise<string | null>;
@@ -173,6 +207,9 @@ const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.
 export const useForms = create<FormsStore>((set, get) => {
   const patch = (doc: number, p: Partial<DocForm>) =>
     set((s) => ({ docs: { ...s.docs, [doc]: { ...(s.docs[doc] ?? fresh()), ...p } } }));
+  /** Picks fields; the anchor (the last) is the selected one the properties follow. */
+  const setPicked = (doc: number, picked: Pick[]) => patch(doc, { picked, selected: anchorOf(picked) });
+  const pairs = (doc: number): [number, number][] => get().get(doc).picked.map((r) => [r.page, r.xref]);
   /** Alerts show in a dialog; resets, page changes, focus and print happen now; links and submits wait for the person. */
   const react = (doc: number, r: Stepped, quiet = false) => {
     const { prompts, actions } = effectsOf(r.alerts ?? [], r.requests ?? []);
@@ -266,8 +303,9 @@ export const useForms = create<FormsStore>((set, get) => {
       try {
         const form = await formsApi.list(doc);
         const d = get().get(doc);
-        const has = (r: Ref | null) => (r && form.fields.some((f) => f.page === r.page && f.xref === r.xref) ? r : null);
-        patch(doc, { fields: form.fields, calcOrder: form.calcOrder ?? [], xfa: form.xfa, selected: has(d.selected) });
+        const alive = (r: Ref) => form.fields.some((f) => f.page === r.page && f.xref === r.xref);
+        const picked = d.picked.filter(alive);
+        patch(doc, { fields: form.fields, calcOrder: form.calcOrder ?? [], xfa: form.xfa, picked, selected: anchorOf(picked) });
         await early;
         await readScripts();
       } catch (e) {
@@ -275,7 +313,46 @@ export const useForms = create<FormsStore>((set, get) => {
         patch(doc, { error: msg(e) });
       }
     },
-    select: (doc, selected) => patch(doc, { selected }),
+    select: (doc, ref) => setPicked(doc, ref ? [ref] : []),
+    toggle: (doc, ref) => setPicked(doc, nextPicks(get().get(doc).picked, ref, true)),
+    pickMany: (doc, refs, add = false) => {
+      const had = add ? get().get(doc).picked : [];
+      setPicked(doc, [...had.filter((h) => !refs.some((r) => samePick(r, h))), ...refs]);
+    },
+    dialog: null,
+    setDialog: (dialog) => set({ dialog }),
+    align: async (doc, edge) => {
+      await run(doc, () => formsApi.align(doc, pairs(doc), edge), (s) => s);
+    },
+    center: async (doc, axis) => {
+      await run(doc, () => formsApi.center(doc, pairs(doc), axis), (s) => s);
+    },
+    distribute: async (doc, axis) => {
+      await run(doc, () => formsApi.distribute(doc, pairs(doc), axis), (s) => s);
+    },
+    matchSize: async (doc, dim) => {
+      await run(doc, () => formsApi.matchSize(doc, pairs(doc), dim), (s) => s);
+    },
+    nudge: async (doc, dx, dy) => {
+      await run(doc, () => formsApi.nudge(doc, pairs(doc), dx, dy), (s) => s);
+    },
+    duplicate: async (doc, pages) => {
+      const a = anchorOf(get().get(doc).picked);
+      if (!a) return false;
+      return (await run(doc, () => formsApi.duplicate(doc, [a.page, a.xref], pages), (s) => s)) !== null;
+    },
+    copies: async (doc, rows, cols, gapX, gapY) => {
+      const a = anchorOf(get().get(doc).picked);
+      if (!a) return null;
+      const r = await run(doc, () => formsApi.copies(doc, [a.page, a.xref], rows, cols, gapX, gapY), (s) => s);
+      if (!r) return null;
+      // The original is name.0 now: keep it picked, as the same widget.
+      return `${r.made} cop${r.made === 1 ? "y" : "ies"} made${r.skipped ? `, ${r.skipped} left out because they would run off the page` : ""}.`;
+    },
+    rename: async (doc, ref, name, merge) => {
+      const r = await run(doc, () => formsApi.rename(doc, [ref.page, ref.xref], name, merge), (s) => s);
+      return r ? null : get().get(doc).error;
+    },
     clearError: (doc) => patch(doc, { error: null }),
 
     setValue: async (doc, page, xref, value) => {
@@ -290,7 +367,7 @@ export const useForms = create<FormsStore>((set, get) => {
     add: async (doc, page, what) => {
       const r = await run(doc, () => formsApi.add(doc, page, what), (x) => x.state);
       if (!r) return null;
-      patch(doc, { selected: { page, xref: r.xref } });
+      setPicked(doc, [{ page, xref: r.xref }]);
       return r.xref;
     },
     move: async (doc, page, xref, rect) => {
@@ -303,7 +380,7 @@ export const useForms = create<FormsStore>((set, get) => {
     remove: async (doc, refs) => {
       if (refs.length === 0) return;
       await run(doc, () => formsApi.remove(doc, refs.map((r) => [r.page, r.xref])), (s) => s);
-      patch(doc, { selected: null });
+      setPicked(doc, []);
     },
     tabOrder: async (doc, page, order) => {
       await run(doc, () => formsApi.tabOrder(doc, page, order), (s) => s);

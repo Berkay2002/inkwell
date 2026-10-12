@@ -464,3 +464,129 @@ export function moved<T>(list: T[], from: number, to: number): T[] {
 
 /** How many lines of the script log are worth a badge: warnings and errors. */
 export const logCount = (log: { level: string }[]): number => log.filter((l) => l.level !== "info").length;
+
+// ---- layout tools: selection, availability, nudge, rename --------------------------------------
+
+/** A picked widget. The last one picked is the anchor the align and size tools follow, as in Acrobat. */
+export interface Pick {
+  page: number;
+  xref: number;
+}
+
+export const samePick = (a: Pick, b: Pick): boolean => a.page === b.page && a.xref === b.xref;
+export const anchorOf = (picked: Pick[]): Pick | null => picked[picked.length - 1] ?? null;
+
+/** A click picks one; Ctrl, Cmd or Shift adds the clicked field (it becomes the anchor), or takes it out if it was picked. */
+export function nextPicks(picked: Pick[], ref: Pick, additive: boolean): Pick[] {
+  if (!additive) return [ref];
+  return picked.some((p) => samePick(p, ref)) ? picked.filter((p) => !samePick(p, ref)) : [...picked, ref];
+}
+
+export function normBox(a: [number, number], b: [number, number]): Rect4 {
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
+}
+
+/** The widgets of `page` the box touches, in reading order (rows top to bottom), so the anchor is the last one. Hidden ones are not hit. */
+export function marqueeHits(fields: Field[], page: number, box: Rect4): Pick[] {
+  const [x0, y0, x1, y1] = box;
+  return fields
+    .filter((f) => f.page === page && !f.hidden && f.rect[0] < x1 && f.rect[2] > x0 && f.rect[1] < y1 && f.rect[3] > y0)
+    .sort((a, b) => Math.round(a.rect[1] / 8) - Math.round(b.rect[1] / 8) || a.rect[0] - b.rect[0])
+    .map((f) => ({ page: f.page, xref: f.xref }));
+}
+
+export type LayoutOp = "align" | "center" | "distribute" | "size" | "nudge" | "duplicate" | "copies" | "rename";
+
+export const CERTIFIED_REASON = "This document is certified, and certification does not allow changes to its form fields.";
+
+/** Why a layout tool is off for this selection (shown on the disabled control), or null when it can run. */
+export function layoutReason(op: LayoutOp, picked: Pick[], fields: Field[], certified: boolean): string | null {
+  if (certified) return CERTIFIED_REASON;
+  const of = picked.map((p) => fields.find((f) => samePick(f, p))).filter((f): f is Field => !!f);
+  const n = of.length;
+  const onePage = of.every((f) => f.page === of[0].page);
+  switch (op) {
+    case "align":
+    case "size":
+      if (n < 2) return "Select two or more fields. The last one picked is the anchor.";
+      return onePage ? null : "Select fields on one page.";
+    case "distribute":
+      if (n < 3) return "Select three or more fields.";
+      return onePage ? null : "Select fields on one page.";
+    case "center":
+    case "nudge":
+      return n < 1 ? "Select a field." : null;
+    case "rename":
+      return n === 1 ? null : "Select one field.";
+    case "duplicate":
+    case "copies": {
+      if (n !== 1) return "Select one field.";
+      const f = of[0];
+      if (f.kind === "radio") return "A radio button belongs to its group: draw another one with the radio tool.";
+      if (f.kind === "signature") return "A signature field is not copied.";
+      if (op === "duplicate") return null;
+      if (fields.filter((x) => x.node === f.node).length > 1) return "This field has several widgets. Copy a field that has one.";
+      return isCalculated(f) ? "A calculated field is not copied: its calculation would not follow." : null;
+    }
+  }
+}
+
+/** The arrow keys' step on the page: 1 point, 10 with Shift. */
+export function nudgeDelta(key: string, shift: boolean): [number, number] | null {
+  const s = shift ? 10 : 1;
+  switch (key) {
+    case "ArrowLeft":
+      return [-s, 0];
+    case "ArrowRight":
+      return [s, 0];
+    case "ArrowUp":
+      return [0, -s];
+    case "ArrowDown":
+      return [0, s];
+    default:
+      return null;
+  }
+}
+
+/** Arrow-key presses collected until the burst ends (key up), then sent as one move: one undo step. */
+export class NudgeBatch {
+  private dx = 0;
+  private dy = 0;
+  /** Adds a key press; false when it is not an arrow key. */
+  push(key: string, shift: boolean): boolean {
+    const d = nudgeDelta(key, shift);
+    if (!d) return false;
+    this.dx += d[0];
+    this.dy += d[1];
+    return true;
+  }
+  /** What was collected (null when nothing, or when it cancelled out); starts over. */
+  take(): [number, number] | null {
+    const r: [number, number] = [this.dx, this.dy];
+    this.dx = 0;
+    this.dy = 0;
+    return r[0] === 0 && r[1] === 0 ? null : r;
+  }
+}
+
+export type RenameCheck = { kind: "same" } | { kind: "ok" } | { kind: "merge"; target: Field } | { kind: "error"; message: string };
+
+/** What renaming `f` to `to` (a full, dotted name) would do, decided the way the engine decides it, so a merge is asked about first. */
+export function renameCheck(fields: Field[], f: Field, to: string): RenameCheck {
+  const name = to.trim();
+  if (name === f.name) return { kind: "same" };
+  if (name === "" || name.split(".").some((p) => p.trim() === "")) {
+    return { kind: "error", message: "A field needs a name, and no part of a dotted name may be empty." };
+  }
+  for (const o of fields) {
+    if (o.node === f.node) continue;
+    if (o.name === name) {
+      if (o.kind !== f.kind) return { kind: "error", message: `A ${KIND_LABEL[o.kind].toLowerCase()} named ${name} already exists, so this ${KIND_LABEL[f.kind].toLowerCase()} cannot take that name or merge into it.` };
+      if (f.kind === "radio" || f.kind === "signature") return { kind: "error", message: `A field named ${name} already exists. Radio groups and signature fields are not merged.` };
+      return { kind: "merge", target: o };
+    }
+    if (o.name.startsWith(`${name}.`)) return { kind: "error", message: `${name} is already the name of a group of fields.` };
+    if (name.startsWith(`${o.name}.`)) return { kind: "error", message: `${o.name} is a field, so no field can be named below it.` };
+  }
+  return { kind: "ok" };
+}
