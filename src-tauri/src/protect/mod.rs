@@ -263,10 +263,17 @@ impl Rights {
     }
 
     /// [`Rights::from_p`] for a file of handler revision `r` (`/R`). Bits 9 to 12 mean something from
-    /// revision 3 on: an older file's writer may have left them clear, and they restrict nothing there,
-    /// so they count as set.
+    /// revision 3 on; an older file's writer leaves them as it likes, and what they govern there is
+    /// governed by the older bits, so they are taken from those: forms (9) from annotate (6), screen
+    /// readers (10) from copy (5), page changes (11) from modify (4), and 12 (printing quality) is set.
     pub fn from_p_r(p: i32, r: Option<i32>) -> Rights {
-        if r.is_some_and(|r| r < 3) { Rights::from_p(p | 0xf00) } else { Rights::from_p(p) }
+        if !r.is_some_and(|r| r < 3) {
+            return Rights::from_p(p);
+        }
+        let old = p as u32;
+        let from = |src: u32, to: u32| if old & src != 0 { to } else { 0 };
+        let bits = (old & !0xf00) | from(0x20, 0x100) | from(0x10, 0x200) | from(0x8, 0x400) | 0x800;
+        Rights::from_p(bits as i32)
     }
 
     /// The rights of an open document: its permission bits, read as its revision says.

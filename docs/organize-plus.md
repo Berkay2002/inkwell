@@ -126,8 +126,9 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
   its permission bits withheld (printing, editing, commenting, form filling and the like) when there are any. An
   owner-password-only source has no password to type, so the row note and the footer ("The combined file has no
   password and no restrictions") are where this shows. A source that forbids copying, or both page
-  changes and editing, is left out. Permission bits 9 to 12 (printing quality, form filling, page changes, screen
-  readers) only count for a file of security revision 3 or later; an older file's are read as set.
+  changes and editing, is left out. Permission bits 9 to 12 only exist from security revision 3: for an older file form
+  filling is read from bit 6, screen readers from bit 5 and page changes from bit 4, so one that allows copying but
+  not changes is left out.
 - Labels are carried page by page: a source's section that is cut by a page range or reordered becomes several
   sections in the result, each with the number the page had in its source.
 - The attachments list does not show portfolio (collection) structure; a PDF Portfolio opens in its own file list (docs/portfolios.md).
