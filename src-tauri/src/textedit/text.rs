@@ -515,16 +515,20 @@ impl DecoMark {
 }
 
 /// The `EMC` that closes the decoration `ops[at]` opens, when the group is exactly what [`deco_ops`]
-/// writes (a rectangle, its colour and its `q cm … Q`): a tagged group of anything else is not ours
-/// to read, skip or remove.
+/// writes, in that order: `q`, `cm`, the fill (`g`, `rg`, `k`, or `cs` with `sc`/`scn`), `re`, `f`,
+/// `Q`. A tagged group of anything else (a lone `Q`, a bare `cm`, text) is not ours to read, skip
+/// or remove. The shape fixes where the `EMC` is, so nothing is searched for.
 fn deco_group(ops: &[Op], at: usize) -> Option<usize> {
     deco_kind(ops.get(at)?)?;
-    let end = at + ops[at..].iter().position(|o| o.is("EMC"))?;
-    let body = &ops[at + 1..end];
-    let ours = body.len() <= 16
-        && body.iter().filter(|o| o.is("re")).count() == 1
-        && body.iter().all(|o| matches!(o.op.as_slice(), b"q" | b"Q" | b"cm" | b"re" | b"f" | b"g" | b"rg" | b"k" | b"cs" | b"sc" | b"scn"));
-    ours.then_some(end)
+    if !(ops.get(at + 1)?.is("q") && ops.get(at + 2)?.is("cm")) {
+        return None;
+    }
+    let fills = ops[at + 3..].iter().take(8).take_while(|o| matches!(o.op.as_slice(), b"g" | b"rg" | b"k" | b"cs" | b"sc" | b"scn")).count();
+    if fills == 0 {
+        return None;
+    }
+    let tail = ops.get(at + 3 + fills..at + 7 + fills)?;
+    (tail[0].is("re") && tail[1].is("f") && tail[2].is("Q") && tail[3].is("EMC")).then_some(at + 6 + fills)
 }
 
 /// Whether a `BDC` opens one of our decorations (`/Span <</IWDeco /U|/S>>`): `Some(true)` for a strikeout.
@@ -1812,6 +1816,33 @@ pub fn issue_text(i: Issue) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn group(src: &str) -> Option<usize> {
+        deco_group(&super::super::content::parse(src.as_bytes()), 0)
+    }
+
+    #[test]
+    fn a_decoration_group_is_exactly_what_deco_ops_writes() {
+        let tag = "/Span <</IWDeco /U>> BDC";
+        // Ours: with each kind of fill, and with the group closed at its own EMC.
+        assert_eq!(group(&format!("{tag} q 1 0 0 1 5 6 cm 0 g 0 -1 30 0.6 re f Q EMC")), Some(7));
+        assert_eq!(group(&format!("{tag} q 1 0 0 1 5 6 cm 1 0 0 rg 0 -1 30 0.6 re f Q EMC")), Some(7));
+        assert_eq!(group(&format!("{tag} q 1 0 0 1 5 6 cm /DeviceN cs 0.1 0.2 scn 0 -1 30 0.6 re f Q EMC")), Some(8));
+        // Not ours: a lone Q, a bare cm (it would leak into what follows), a lost fill, a wrong order, text inside.
+        for bad in [
+            "Q 0 -1 30 0.6 re f EMC",
+            "1 0 0 1 100 0 cm 0 g 0 -1 30 0.6 re f EMC",
+            "q 1 0 0 1 5 6 cm 0 -1 30 0.6 re f Q EMC",
+            "q 0 g 1 0 0 1 5 6 cm 0 -1 30 0.6 re f Q EMC",
+            "q 1 0 0 1 5 6 cm 0 g 0 -1 30 0.6 re Q f EMC",
+            "q 1 0 0 1 5 6 cm 0 g 0 -1 30 0.6 re f Q Q EMC",
+            "q 1 0 0 1 5 6 cm 0 g 0 -1 30 0.6 re f Q",
+            "q 1 0 0 1 5 6 cm 0 g 0 -1 30 0.6 re f BT ET Q EMC",
+        ] {
+            assert_eq!(group(&format!("{tag} {bad}")), None, "{bad}");
+        }
+        assert_eq!(group("/Span <</Other /U>> BDC q 1 0 0 1 5 6 cm 0 g 0 -1 30 0.6 re f Q EMC"), None);
+    }
 
     #[test]
     fn normalizes_spaces_and_keeps_breaks() {
