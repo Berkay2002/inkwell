@@ -633,6 +633,12 @@ export interface ReplaceSkipped {
   reason: string;
 }
 
+/** Where a stopped Replace all left off: that page, and on it only the blocks before `upto` (none: all of it). */
+export interface ReplaceFrom {
+  page: number;
+  upto: number | null;
+}
+
 export interface ReplaceRequest {
   find: string;
   with: string;
@@ -640,6 +646,8 @@ export interface ReplaceRequest {
   opts: FindOpts;
   /** Replace only the match whose first rectangle this is; unset replaces every match. */
   at?: { page: number; rect: [number, number, number, number] };
+  /** Goes on from where a stopped run left off (its `resume`): what is before it is not replaced again. */
+  from?: ReplaceFrom;
 }
 
 export interface ReplaceResult {
@@ -650,6 +658,8 @@ export interface ReplaceResult {
   skippedCount: number;
   /** Set when the run ended early (its cap or its time limit). */
   stopped: string | null;
+  /** Where to go on from when it stopped; send it back as `from`. */
+  resume: ReplaceFrom | null;
   fallbacks: TextFallback[];
   /** How often the find text occurs in the replacement itself. */
   inserted: number;

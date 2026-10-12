@@ -1,4 +1,4 @@
-import type { ReplaceResult } from "./api";
+import type { ReplaceFrom, ReplaceResult } from "./api";
 
 // What Find & Replace tells the person after a run. Pure: the store (replace.ts) runs the engine.
 
@@ -16,6 +16,10 @@ export interface ReplaceReport {
   notes: string[];
   /** The document generation the run left behind; the report is about that one only. */
   rev?: number;
+  /** Where Replace all goes on from when the run stopped early. */
+  resume?: ReplaceFrom | null;
+  /** The request it answers (find, replacement, options): a go-on is only for the same one. */
+  ask?: string;
 }
 
 const quote = (t: string) => `"${t.length > 40 ? `${t.slice(0, 40)}…` : t}"`;
@@ -31,12 +35,18 @@ export function reportOf(r: ReplaceResult): ReplaceReport {
     lines: listed.map((s) => `p. ${s.page + 1}, ${quote(s.text)}: ${s.reason}`),
     more: Math.max(0, r.skippedCount - listed.length),
     notes,
+    resume: r.resume,
   };
 }
 
 /** The report while the document is still the one the run left (an undo or another edit makes it history). */
 export function reportAt(report: ReplaceReport | null | undefined, rev: number): ReplaceReport | null {
   return report && report.rev === rev ? report : null;
+}
+
+/** Where Replace all goes on from: the stopped run of this same request, on the document it left. */
+export function resumeOf(report: ReplaceReport | null | undefined, rev: number, ask: string): ReplaceFrom | undefined {
+  return report && report.rev === rev && report.ask === ask ? (report.resume ?? undefined) : undefined;
 }
 
 /** Why Replace is unavailable, or null when it can run. */

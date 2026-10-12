@@ -20,7 +20,7 @@ import { useStore } from "../store";
 import type { ReplaceResult } from "./api";
 import { replaceText } from "./edit";
 import { lockedReason, useReplace } from "./replace";
-import { reportAt, reportOf, whyNotReplace } from "./replaceLogic";
+import { reportAt, reportOf, resumeOf, whyNotReplace } from "./replaceLogic";
 import { useTextEdit } from "./textEdit";
 
 const result = (over: Partial<ReplaceResult> = {}): ReplaceResult => ({
@@ -29,6 +29,7 @@ const result = (over: Partial<ReplaceResult> = {}): ReplaceResult => ({
   skipped: [],
   skippedCount: 0,
   stopped: null,
+  resume: null,
   fallbacks: [],
   inserted: 0,
   ...over,
@@ -51,6 +52,16 @@ describe("what a run reports", () => {
     expect(reportAt(r, 4)).toBe(r);
     expect(reportAt(r, 5)).toBeNull();
     expect(reportAt(null, 5)).toBeNull();
+  });
+
+  it("goes on only from the stopped run of the same request on the document it left", () => {
+    const from = { page: 3, upto: 2 };
+    const r = { ...reportOf(result({ replaced: 5, stopped: "Stopped.", resume: from })), rev: 4, ask: "a" };
+    expect(r.resume).toEqual(from);
+    expect(resumeOf(r, 4, "a")).toEqual(from);
+    expect(resumeOf(r, 5, "a")).toBeUndefined();
+    expect(resumeOf(r, 4, "b")).toBeUndefined();
+    expect(resumeOf({ ...r, resume: null }, 4, "a")).toBeUndefined();
   });
 
   it("carries why it stopped and which font stood in", () => {
@@ -122,6 +133,19 @@ describe("replacing through the store", () => {
     // The list is from generation 1; the document is at 3.
     expect(vi.mocked(replaceText).mock.calls[0][1]).toBe(1);
     expect(runSearch).toHaveBeenCalledWith(1, "cat");
+  });
+
+  it("goes on from where a stopped run left off, for the same request only", async () => {
+    const resume = { page: 2, upto: null };
+    vi.mocked(replaceText).mockResolvedValue({ kind: "ok", value: result({ replaced: 2000, stopped: "Stopped after 2000 replacements.", resume }) });
+    await useReplace.getState().all(1);
+    expect(vi.mocked(replaceText).mock.calls[0][2].from).toBeUndefined();
+    await useReplace.getState().all(1);
+    expect(vi.mocked(replaceText).mock.calls[1][2].from).toEqual(resume);
+    // Another replacement text is another request: it starts from the top.
+    useReplace.setState({ text: "bird" });
+    await useReplace.getState().all(1);
+    expect(vi.mocked(replaceText).mock.calls[2][2].from).toBeUndefined();
   });
 
   it("replaces every match without a position and searches by the engine's own re-run", async () => {

@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import { replaceText } from "./edit";
 import { useFind } from "./findStore";
-import { type ReplaceReport, reportOf } from "./replaceLogic";
+import { type ReplaceReport, reportOf, resumeOf } from "./replaceLogic";
 import { useTextEdit } from "./textEdit";
 
 /**
@@ -32,9 +32,9 @@ export function lockedReason(doc: number): string | null {
 
 export const useReplace = create<ReplaceStore>((set, get) => {
   // Stamped with the generation the run left, so a later undo or edit hides it (reportAt).
-  const say = (doc: number, report: ReplaceReport) => {
+  const say = (doc: number, report: ReplaceReport, ask?: string) => {
     const rev = useStore.getState().docs[doc]?.rev;
-    set((s) => ({ report: { ...s.report, [doc]: { ...report, rev } } }));
+    set((s) => ({ report: { ...s.report, [doc]: { ...report, rev, ask } } }));
   };
 
   /** Sends what was typed in a block first (one undo step of its own), then lets go of the selection:
@@ -59,12 +59,17 @@ export const useReplace = create<ReplaceStore>((set, get) => {
       // One match is placed by where Find listed it, so it goes with the generation of that list and the
       // engine refuses (Stale) if the document moved on; Replace all searches by itself, from what is now.
       const rev = hit ? d.search.rev : cur.rev;
-      const r = await replaceText(doc, rev, { find, with: get().text, opts: useFind.getState().opts, at });
+      const [text, opts] = [get().text, useFind.getState().opts];
+      // Replace all after a run that stopped early goes on from there: a replacement that holds the find text
+      // would otherwise be replaced again on the pages already done.
+      const ask = JSON.stringify([find, text, opts]);
+      const from = hit ? undefined : resumeOf(get().report[doc], cur.rev, ask);
+      const r = await replaceText(doc, rev, { find, with: text, opts, at, from });
       if (r.kind === "stale") {
         say(doc, { summary: "The document changed. Searching again.", lines: [], more: 0, notes: [] });
         useStore.getState().runSearch(doc, find);
       } else if (r.kind === "ok") {
-        say(doc, reportOf(r.value));
+        say(doc, reportOf(r.value), ask);
         // Replace one goes on to the next match, past any the replacement itself holds.
         if (hit && r.value.replaced > 0) {
           const [x, y] = hit.rects[0];

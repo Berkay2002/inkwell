@@ -217,7 +217,7 @@ other.
 ## Find & Replace
 
 Acrobat's Edit > Find & Replace, on top of the block edit (`textedit/replace.rs`, command `text_replace`).
-`req = { find, with, opts: { caseSensitive, wholeWords, ignoreAccents }, at?: { page, rect } }`. There is no new
+`req = { find, with, opts: { caseSensitive, wholeWords, ignoreAccents }, at?: { page, rect }, from?: { page, upto } }`. There is no new
 content-stream writer: every changed block goes through `rewrite_block`, so fonts, fallback and the
 `fallbacks` report are those of Edit text.
 
@@ -246,7 +246,12 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   incrementally as Edit text is. A stale `rev` is `Stale`.
 - **Bounds**: at most 2,000 replacements and 20 seconds per run; past either it stops between two blocks (the time
   is only checked once something was replaced, so every run gets somewhere), keeps what it did (still one step) and
-  says so in `stopped`. Nothing is written when nothing was replaced.
+  says so in `stopped`. Nothing is written when nothing was replaced. `resume` is where it stopped (`{ page, upto }`:
+  that page, and on it the blocks before `upto`, as blocks are replaced from the last to the first); a Replace all
+  sent with that as `from` goes on there, so pages already done are not replaced again (a replacement that holds the
+  find text would grow: "cat" to "cats" to "catss"). The Find bar does this by itself when Replace all is pressed
+  again for the same text and options on the document the run left. A block cut at the cap is only part replaced:
+  when the replacement holds the find text, going on leaves what is left of that block (Find lists it).
 - **UI**: while Edit text is on, the Find bar has a second row: "Replace with", Replace, Replace all and the result
   ("5 replaced, 2 skipped", which opens the list of what was skipped, with its page and reason). Replace goes on to
   the next match. The controls say why they are off (certified document, no match, a comment or form hit selected).
