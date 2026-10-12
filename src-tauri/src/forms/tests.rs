@@ -2565,6 +2565,50 @@ fn rename_keeps_dotted_names_valid_and_merges_only_fields_of_one_kind() {
     assert!(back.iter().any(|f| f.name == "Grp.Other"));
 }
 
+/// The appearance text and the `/AS` of every widget named `name`, on every page, as written to the file.
+fn widget_looks(path: &str, name: &str) -> Vec<(String, Option<String>)> {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    let mut out = Vec::new();
+    for p in 0..doc.page_count().unwrap() {
+        for w in doc.load_pdf_page(p).unwrap().widgets() {
+            if w.name().unwrap().as_deref() != Some(name) {
+                continue;
+            }
+            let o = w.annotation().object();
+            let n = o.get_dict("AP").unwrap().and_then(|ap| ap.get_dict("N").unwrap());
+            let shown = match &n {
+                Some(n) if n.is_stream().unwrap_or(false) => String::from_utf8_lossy(&n.read_stream().unwrap()).into_owned(),
+                _ => String::new(),
+            };
+            let state = o.get_dict("AS").unwrap().and_then(|s| super::text(&s));
+            out.push((shown, state));
+        }
+    }
+    out
+}
+
+#[test]
+fn a_merged_widget_is_redrawn_with_the_targets_value_and_a_check_boxes_state_follows_it() {
+    let (eng, id, path) = layout_form("layout-merge-look");
+    add1(&eng, id, 0, nf(FieldKind::Text, "Title", [72.0, 300.0, 272.0, 320.0]));
+    add1(&eng, id, 0, nf(FieldKind::Checkbox, "Agree2", [100.0, 260.0, 114.0, 274.0]));
+    fill(&eng, id, "Title", text("Mr")).unwrap();
+    fill(&eng, id, "Name", text("Alice")).unwrap();
+    let it = |n: &str| items_of(&eng, id, &[n])[0];
+    rename_one(&eng, id, it("Title"), "Name", true, EditSource::User).unwrap();
+    // A checked box merged into an unchecked one is unchecked; the other way round it is checked.
+    fill(&eng, id, "Agree2", FieldValue::Checked(true)).unwrap();
+    rename_one(&eng, id, it("Agree2"), "Agree", true, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    let names = widget_looks(&path, "Name");
+    assert_eq!(names.len(), 2);
+    assert!(names.iter().all(|(shown, _)| shown.contains("Alice")), "both widgets show the target's value: {names:?}");
+    let boxes = widget_looks(&path, "Agree");
+    assert_eq!(boxes.len(), 2);
+    assert!(boxes.iter().all(|(_, s)| s.as_deref() == Some("Off")), "the merged check box follows the target's /V: {boxes:?}");
+    assert!(widgets_named(&eng, id, "Agree").iter().all(|w| !w.checked));
+}
+
 #[test]
 fn renaming_a_calculated_field_into_a_group_keeps_its_place_in_the_calculation_order() {
     let (eng, id, path) = script_form("layout-rename-co", &["X", "Y", "Z"]);

@@ -665,7 +665,7 @@ pub fn rename(doc: &mut PdfDocument, item: Item, name: &str, merge: bool) -> Res
         Some(group_for(doc, &entries, parent_name)?)
     };
 
-    if target.is_some() {
+    if let Some(t) = target {
         // Merge: every widget becomes a kid of the target's group; this field's own keys are dropped with its node.
         let owner = owner.ok_or_else(|| bad("the target has no group"))?;
         let mut kids = get(&owner, "Kids").ok_or_else(|| bad("the target has no /Kids"))?;
@@ -693,6 +693,16 @@ pub fn rename(doc: &mut PdfDocument, item: Item, name: &str, merge: bool) -> Res
         } else if e.node == e.xref {
             prune(doc, old_parent)?;
         }
+        // The widgets now show the target's value: a check box's state follows it, and every widget is redrawn.
+        if e.kind == FieldKind::Checkbox {
+            let v = geti(&t.field, "V").and_then(|v| text(&v));
+            for m in &mine {
+                let mut w = doc.new_indirect(m.xref, 0)?;
+                let on = on_state(&m.obj).filter(|on| v.as_ref() == Some(on));
+                put_name(&mut w, "AS", on.as_deref().unwrap_or("Off"))?;
+            }
+        }
+        redraw_all(doc, &mine.iter().map(|m| m.xref).collect::<Vec<_>>())?;
     } else {
         let mut f = field;
         let same_group = parent_name == old_parent.as_ref().map(full_name).unwrap_or_default();
