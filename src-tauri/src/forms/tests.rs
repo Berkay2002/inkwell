@@ -2511,6 +2511,35 @@ fn copies_make_a_grid_named_after_the_field_clipped_to_the_page() {
 }
 
 #[test]
+fn copies_of_a_field_node_with_one_widget_keep_its_format_on_the_original_and_every_copy() {
+    let bytes = pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [6 0 R] >>".to_string(),
+        "<< /FT /Tx /T (Amt) /V (5) /Kids [6 0 R] /AA << /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, \"\", true);) >> >> >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /Parent 5 0 R /Rect [72 600 140 620] /F 4 /DA (/Helv 0 Tf 0 g) >>".to_string(),
+    ]);
+    let (eng, id, path) = open_bytes("layout-copies-node", bytes);
+    let amt = items_of(&eng, id, &["Amt"])[0];
+    let fmt = field(&eng, id, "Amt").format;
+    assert!(matches!(fmt, Format::Number { .. }), "{fmt:?}");
+    let (_, done) = copies_one(&eng, id, amt, 1, 3, (10.0, 0.0), EditSource::User).unwrap();
+    assert_eq!(done.made, 2);
+    for n in ["Amt.0", "Amt.1", "Amt.2"] {
+        assert_eq!(field(&eng, id, n).format, fmt, "{n} keeps the format");
+    }
+    assert_eq!(field(&eng, id, "Amt.0").value, "5", "the original keeps its value");
+    eng.undo(id).unwrap();
+    assert_eq!(field(&eng, id, "Amt").format, fmt);
+    eng.redo(id).unwrap();
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(field(&eng2, id2, "Amt.2").format, fmt);
+    assert_eq!(field(&eng2, id2, "Amt.0").format, fmt);
+}
+
+#[test]
 fn copies_are_refused_for_a_field_with_several_widgets_or_a_calculation() {
     let (eng, id, _) = open_bytes("layout-copies-refused", shared_widgets_form());
     let n = steps(&eng, id);

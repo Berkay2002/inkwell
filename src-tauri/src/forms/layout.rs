@@ -554,39 +554,22 @@ pub fn copies(doc: &mut PdfDocument, item: Item, rows: u32, cols: u32, gap_x: f3
         return Err(bad("no copy fits on the page at that spacing"));
     }
 
-    // The field becomes a group `name` of fields `0`, `1`, ...: the original is `name.0`.
-    let mut w_obj = doc.new_indirect(e.xref, 0)?;
+    // The field becomes a group `name` of fields `0`, `1`, ...: the original is `name.0`. A widget that is its own
+    // field gets `T 0`; a field node with one widget kid becomes `0` itself (it keeps its keys, /AA and all).
     let owner = if e.node == e.xref {
-        let leaf = get(&e.obj, "T").as_ref().and_then(text).filter(|t| !t.is_empty()).ok_or_else(|| bad("this field has no name"))?;
-        let old_parent = get(&e.obj, "Parent");
-        let mut p = doc.new_dict()?;
-        put_str(&mut p, "T", &leaf)?;
-        if let Some(op) = &old_parent {
-            p.dict_put("Parent", op.clone())?;
-        }
-        let mut kids = doc.new_array()?;
-        kids.array_push(w_obj.clone())?;
-        p.dict_put("Kids", kids)?;
-        let p_ref = doc.add_object(&p)?;
-        // The calculation order keeps its entry: the widget stays a field (`name.0`), it only moved down.
-        match &old_parent {
-            Some(op) => {
-                if let Some(mut k) = get(op, "Kids") {
-                    replace_ref(&mut k, e.xref, &p_ref)?;
-                }
-            }
-            None => {
-                if let Some(mut f) = get(&acro_form(doc)?, "Fields") {
-                    replace_ref(&mut f, e.xref, &p_ref)?;
-                }
-            }
-        }
-        w_obj.dict_put("Parent", p_ref.clone())?;
-        p_ref
+        let mut w_obj = doc.new_indirect(e.xref, 0)?;
+        let group = wrap_in_group(doc, &mut w_obj, e.xref)?;
+        put_str(&mut w_obj, "T", "0")?;
+        group
     } else {
-        get(&e.obj, "Parent").ok_or_else(|| bad("the field has no parent"))?
+        if e.node <= 0 {
+            return Err(bad("this field is stored inside another object and cannot be copied"));
+        }
+        let mut node = doc.new_indirect(e.node, 0)?;
+        let group = wrap_in_group(doc, &mut node, e.node)?;
+        put_str(&mut node, "T", "0")?;
+        group
     };
-    put_str(&mut w_obj, "T", "0")?;
     let mut kids = get(&owner, "Kids").ok_or_else(|| bad("the field has no /Kids"))?;
     let mut made = Vec::with_capacity(spots.len());
     for (i, rect) in spots.iter().enumerate() {
@@ -598,6 +581,36 @@ pub fn copies(doc: &mut PdfDocument, item: Item, rows: u32, cols: u32, gap_x: f3
     follow_rename(doc, &entries, &e.name, &format!("{}.0", e.name))?;
     redraw_all(doc, &made)?;
     Ok((Copied { made: made.len(), skipped }, vec![e.page]))
+}
+
+/// A new group node named like `node` (its `/T`), put where `node` hung and holding it as its only kid. The node's
+/// place in the calculation order is kept (it is the same field, one level down). The caller renames `node`.
+fn wrap_in_group(doc: &mut PdfDocument, node: &mut PdfObject, num: i32) -> Result<PdfObject> {
+    let leaf = get(node, "T").as_ref().and_then(text).filter(|t| !t.is_empty()).ok_or_else(|| bad("this field has no name"))?;
+    let old_parent = get(node, "Parent");
+    let mut p = doc.new_dict()?;
+    put_str(&mut p, "T", &leaf)?;
+    if let Some(op) = &old_parent {
+        p.dict_put("Parent", op.clone())?;
+    }
+    let mut kids = doc.new_array()?;
+    kids.array_push(node.clone())?;
+    p.dict_put("Kids", kids)?;
+    let p_ref = doc.add_object(&p)?;
+    match &old_parent {
+        Some(op) => {
+            if let Some(mut k) = get(op, "Kids") {
+                replace_ref(&mut k, num, &p_ref)?;
+            }
+        }
+        None => {
+            if let Some(mut f) = get(&acro_form(doc)?, "Fields") {
+                replace_ref(&mut f, num, &p_ref)?;
+            }
+        }
+    }
+    node.dict_put("Parent", p_ref.clone())?;
+    Ok(p_ref)
 }
 
 // ---- rename ------------------------------------------------------------------------------------
