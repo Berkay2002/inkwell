@@ -288,9 +288,11 @@ function List({ doc }: { doc: DocState }) {
 function Card({ x, focused, onOpen }: { x: SignatureInfo; focused: boolean; onOpen: () => void }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLElement>(null);
-  // Reached from the signature field on the page: bring its card into view.
+  // Reached from the signature field on the page: show its certificate details and bring the card into view.
   useEffect(() => {
-    if (focused) ref.current?.scrollIntoView?.({ block: "nearest" });
+    if (!focused) return;
+    setOpen(true);
+    ref.current?.scrollIntoView?.({ block: "nearest" });
   }, [focused]);
   const st = STATUS[x.status as keyof typeof STATUS];
   return (
