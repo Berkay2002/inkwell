@@ -474,6 +474,13 @@ fn setting_a_named_bookmark_to_the_page_it_resolves_to_writes_an_explicit_destin
     assert!(explicit, "the bookmark still holds the name");
 }
 
+/// The Rust text and the TS literal the panels compare it with are one string.
+#[test]
+fn the_unchecked_destination_text_matches_the_one_in_nav_ts() {
+    let nav = include_str!("../../../src/lib/nav.ts");
+    assert!(nav.contains(&format!("UNCHECKED_DEST = \"{UNCHECKED_DEST}\"")), "src/lib/nav.ts has another text");
+}
+
 #[test]
 fn a_bookmark_to_a_missing_named_destination_is_broken() {
     let d = dir("outline", "broken");
