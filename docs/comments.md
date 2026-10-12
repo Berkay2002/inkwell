@@ -43,9 +43,9 @@ then one group per category) and the "Custom stamps" sheet (button beside the pi
   that did not move stays put. One placement is one undo step, kept by Save. On a page with `/Rotate` the picture's
   pixels are stored turned back by the rotation (MuPDF rebuilds the appearance with an identity matrix on every move,
   so a `/Matrix` would not last), and resize fits the proportions as the page shows them.
-- **XFDF and FDF**: a placed stamp is exported as a stamp with its name, without the picture. Imported into the same
-  document it updates the stamp in place (the picture stays); into another document it is made as a plain stamp
-  with that name, not a picture.
+- **XFDF and FDF**: a placed stamp is exported with its name and its appearance (the picture), so imported into another
+  document it shows the same picture (`picture` is true there, so resize keeps the proportions). Into the same document
+  it updates the stamp in place. See "Data files" below for the limits.
 - **Certified and signed**: placing uses `outline::refuse_unless_annotating_allowed` inside the edit, so a document
   certified with P1 or P2 refuses it with no history step and the picker is off with the reason; P3 allows it. A
   signed document takes the stamp as an incremental update and the picker says so. The library sheet never touches the
@@ -60,30 +60,77 @@ Comments panel menu (the three dots) and the command palette: **Export commentsâ
 data). The format of an export follows the file name: `.fdf` is FDF, anything else XFDF 3.0 (ISO 19444-1).
 
 - **Exported:** text notes, highlight, underline, squiggly and strikeout (with quad points), ink, square, circle, line,
-  polygon, polyline, free text and stamps (by name), with name (`/NM`), page, rect, colour, opacity, border width, author,
-  subject, dates, contents, review state and replies (`inreplyto`). A comment with no `/NM` is written under a name
+  polygon, polyline, free text, stamps, carets (`/RD` as `fringe`, `/Sy` as `symbol`) and file attachments, with name
+  (`/NM`), page, rect, colour, opacity, border width, author, subject, dates, contents, rich text (`/RC`, as
+  `<contents-richtext>`), review state and replies (`inreplyto`). A comment with no `/NM` is written under a name
   made for the export (`inkwell-<page>-<object>`, nothing is added to the document); importing it back adds it again
   instead of updating it, because that name is not unique across files. Comments the tools add from now on carry a
-  real `/NM`. Carets, file attachments, sound and redaction marks are left out and counted.
+  real `/NM`. Sound and redaction marks are left out and counted.
   So are measurements (a line, polyline or polygon with `/Measure` data, see [measure.md](measure.md)) and their replies:
   these files have no place for the scale, and a plain line would be a measurement that lost its meaning. The export
   summary counts them.
-  Appearance streams are not written. Page numbers and points are the file's (PDF user space, y up, 0-based page).
+  Page numbers and points are the file's (PDF user space, y up, 0-based page).
+- **Appearance (`/AP`)**: written for picture stamps only (the other types are drawn from their data, which any reader
+  can do). XFDF `<appearance>` holds the base64 of an XML tree that spells the PDF objects: `<DICT KEY="AP">` with
+  `<STREAM KEY="N">`, whose entries are `INT`, `FIXED`, `NAME`, `BOOL`, `ARRAY`, `DICT` and `STREAM` elements (`KEY` is
+  the entry, `VAL` a scalar) and whose bytes are a `<DATA MODE ENCODING LENGTH>` element (`HEX` or `ASCII`). **These
+  element and attribute names are not confirmed against the standard or an Acrobat file**: the text of ISO 19444-1
+  was not available (only its table of contents), and the names come from Apache PDFBox's reader for the appearance
+  Acrobat writes. `STRING` elements are skipped and `MODE` is written but not needed to read. Files Inkwell wrote before
+  (base64 of a small FDF file with one annotation) are still read. An appearance is never copied as it is: the XML (or
+  FDF) is read through a whitelist into plain data (`annot/xfdf/ap.rs`): one form, at most 4 levels of forms, 64
+  objects, simple Type 1 and TrueType fonts (their embedded font file included), graphics states with opacity and
+  blend mode, images up to 16 megapixels (one Flate or DCT filter, as stored; a predictor only when its columns, colours and
+  depth are the image's own, else the appearance is refused; ICC profiles replaced by their device space). Actions, `/AA`, `/OC`, metadata, patterns, shadings, inline images, soft masks of a graphics state, Type 3
+  and composite fonts are not carried; an appearance that needs one of them is refused as a whole. Every name its
+  content uses must resolve in the form's own `/Resources`.
+  Streams (appearances, font programs, rich text and attached files) are decoded by `annot/xfdf/stream.rs`, one filter
+  stage at a time: Flate, ASCII hex and ASCII 85, as `[ASCII]? [Flate]{0,2}` (an ASCII filter only first, never after a
+  decompressor, and at most 3 filters). Every stage's output is held to the cap (4 MB per appearance or file) and
+  charged to a per-file allowance of 256 MB of decoding, so a bomb stops at the cap and a stream shared by thousands of
+  comments is decoded once and then refused from what was learned. DCT, JPX, JBIG2, CCITT, LZW, run length, `/Crypt`
+  and a Flate predictor are not decoded outside of an image (an LZW attachment is left out as "not understood").
+  There is also 64 MB for what appearances hold in memory (a font many comments share is a copy each); past either, the
+  rest get Inkwell's own drawing and are counted.
+- **Attached files**: a FileAttachment comment carries its file in XFDF `<data mode="raw" encoding="hex">` (a
+  `filtered` mode is Flate; ascii and base64 are read too) or FDF `/FS` with `/EF`. At most 4 MB each and 10 MB for all
+  attachments and appearances of one file; a larger one is left out and counted (a comment whose file cannot be written is
+  left out of an export with its replies; one that cannot be read is skipped on import). A file that is a link to
+  another file is never followed or opened, and a name is display text only (no folder, no characters a file system
+  refuses). Name, size, modification date, description and MIME type are kept. The document's own embedded files
+  (`/Names /EmbeddedFiles`) are not touched: the file lives in the comment. An import never replaces the file of a
+  comment that is already in the document (matched by name): the other fields update, and the report counts "its own
+  file is kept". A file stored with an image codec (JPEG, JPEG 2000, JBIG2, CCITT) is refused, since decoding it would
+  give pixels, not the file.
+- **Rich text**: read with the XML reader (no DOCTYPE), rebuilt from a whitelist (`p span b i u s br div ul ol li`,
+  `style` properties for font, colour, alignment and spacing, `dir`); links lose their address, `script` and `style`
+  go with their content. Never executed or fetched. Over 128 KB or 16 levels deep it is dropped and the plain
+  `/Contents` stays; when a file has no `<contents>`, the plain text is made from the rich text. An edit by Inkwell
+  replaces `/Contents` and drops `/RC` (MuPDF does the same).
 - **Imported** as one undo step. A comment whose name matches one in the document is updated in place; the others are
-  added, and a reply keeps its parent. Each comment is drawn with Inkwell's own appearance (the file's `/AP` and rich text
-  are not used). Skipped and counted by reason, never a failure of the whole import: a page that is not in the document,
+  added, and a reply keeps its parent. A comment is drawn with the file's own appearance when it could be read as above
+  (the comment's `/AP` is that one, with the file's `/Rect`; an edit by Inkwell's own code regenerates it); otherwise
+  with Inkwell's own, and the report counts it ("made without part of the file", with the reason). Rich text and a
+  caret's `fringe` and `symbol` are put back last, after every setter. Skipped and counted by reason, never a failure
+  of the whole import: a page that is not in the document,
   a type these files cannot carry here, a comment of another type that has the same name, a reply to a comment that is in
   neither the file nor the document, no position, a measurement in the file (`/Measure` or a dimension intent: it is not made as a plain line),
   a comment whose name is a measurement of the document's (the Measure tool changes those; an update would leave the
-  value stale), and anything past 10 000 comments in one file.
-- **Never done with a file:** run `/JavaScript` or `/AA`, follow `/F` or `<f href>` file references, load a DTD or
-  entities (a `DOCTYPE` is refused), read more than 32 MB, 100 000 elements or attributes, 64 levels or 1 MB in one string.
+  value stale), an attachment whose file is over its limit, is a link or is missing, and anything past 10 000 comments
+  in one file.
+- **Never done with a file:** run `/JavaScript` or `/AA`, follow `/F` or `<f href>` file references or open an
+  attached file, load a DTD or entities (a `DOCTYPE` is refused), read more than 32 MB, 100 000 elements or
+  attributes, 64 levels or 1 MB in one string (9 MB for a `<data>` or `<appearance>` element, which holds a file).
 - **Certified documents** take the import only when the certification allows annotations (`/P` 3); at `/P` 1 or 2, or
   when the certification cannot be read, the menu item is off with the reason and nothing is changed. Export is always
   allowed. **Signed** documents take the import as an incremental update after the signature, and the summary says so.
 - No file written by Acrobat was available while this was built: the shapes follow ISO 19444-1 and ISO 32000-2
   section 12.7.8, and are tested against our own exports and hand-written hostile files. A check against Acrobat's own
-  XFDF and FDF is still to do.
+  XFDF and FDF is still to do. What is least certain: what Acrobat puts inside `<appearance>` (Inkwell reads and
+  writes the XML tree described above there, from PDFBox's reader), the exact attributes of `<data>`, and the caret attributes `fringe` and `symbol`.
+- Tests: `annot::xfdf::tests` and `annot::xfdf::tests_full` (round trips of carets, rich text, attachments and picture
+  stamps in both formats and between two documents, the appearance drawing and replaced by an edit, a hostile file per
+  new element, certified and signed documents), `src/lib/dataExchange.test.ts`.
 
 ## Later
 

@@ -163,10 +163,10 @@ async fn pick_save(
             SaveKind::Rtf => d.add_filter("Rich Text Format", &["rtf"]),
             SaveKind::Comments => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]),
             SaveKind::FormData => d
-                .add_filter("XFDF", &["xfdf"])
+                .add_filter("Form data (XFDF)", &["xfdf"])
                 .add_filter("FDF", &["fdf"])
                 .add_filter("JSON", &["json"])
-                .add_filter("CSV (spreadsheet)", &["csv"])
+                .add_filter("CSV", &["csv"])
                 .add_filter("Tab-delimited text", &["txt"])
                 .add_filter("XML", &["xml"]),
             SaveKind::Csv => d.add_filter("CSV (spreadsheet)", &["csv"]),
@@ -1285,6 +1285,7 @@ pub fn run() {
             measure::app::measure_list,
             measure::app::measure_snap,
             measure::app::measure_rescale,
+            measure::app::measure_move,
             measure::app::measure_export_csv,
             forms::app::forms_list,
             forms::app::forms_export,
@@ -1349,8 +1350,11 @@ pub fn run() {
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
+            textedit::app::text_replace,
             outline::app::bookmarks_list,
             outline::app::bookmarks_apply,
+            outline::app::dests_list,
+            outline::app::dests_apply,
             outline::app::bookmarks_headings,
             links::app::links_list,
             links::app::links_apply,

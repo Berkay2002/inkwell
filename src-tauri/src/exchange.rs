@@ -59,6 +59,40 @@ pub const MAX_STR: usize = 1 << 20;
 /// Bytes one file may copy out of PDF objects in all. Objects can be shared (one string many entries refer
 /// to), so counts of items do not bound what is copied; this does.
 pub const MAX_COPIED: usize = 32 << 20;
+/// Longest text of a `<data>` (a file attachment) or `<appearance>` element: they are the only ones that may pass
+/// [`MAX_STR`]. One that is longer is not an error of the file: the element is marked [`Node::over`] and left empty.
+pub const MAX_BLOB_TEXT: usize = 9 << 20;
+/// Largest file attachment taken or written, decoded. Hex text doubles it, so it stays under [`MAX_BLOB_TEXT`].
+pub const MAX_ATTACHMENT: usize = 4 << 20;
+/// Attachments and appearance streams together, decoded, in one file read or written: over it they are left out and
+/// counted. In hex they come to about twice this, which stays well under [`MAX_FILE`], so Inkwell can read what it writes.
+pub const MAX_BLOBS: usize = 10 << 20;
+/// Bytes one file may make Inkwell decode in all, counting what a cap stopped: a bomb that fails is not in
+/// [`MAX_BLOBS`], so many comments sharing one would otherwise each cost a full cap of inflating.
+pub const MAX_DECODE_WORK: usize = 256 << 20;
+/// Bytes of dictionaries, arrays and names of appearances one file may hold at once (an estimate of their size in
+/// memory): the same font read again by every comment is a copy each. Past it appearances are left out and counted.
+pub const MAX_AP_STRUCT: usize = 64 << 20;
+/// Charged to [`MAX_DECODE_WORK`] for every decode on top of the bytes it moved: what setting one up costs.
+pub const MIN_DECODE_WORK: usize = 16 << 10;
+/// Decoded streams one file keeps for the next comment that shares them (failures are always kept: they are small).
+pub const MAX_CACHED_STREAMS: usize = 24 << 20;
+
+/// Why a stream was not decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unpack {
+    /// Its decoded size, or the size of one of its filters' output, is over the limit asked for.
+    Over,
+    /// What is left of the file's decode allowance is not enough.
+    NoWork,
+    /// A filter failed.
+    Damaged,
+    /// A filter or predictor that is not decoded (see `annot::xfdf::stream`).
+    Unsupported,
+}
+
+/// A decoded stream, shared by every comment that refers to the same object.
+pub type Unpacked = std::result::Result<std::rc::Rc<Vec<u8>>, Unpack>;
 /// The same bound for an export: the document is the person's own, so real comments may hold more than a
 /// file we read, but a damaged one still must not multiply one shared string or array without end.
 pub const MAX_EXPORT_COPIED: usize = 256 << 20;
@@ -74,6 +108,19 @@ pub struct Budget {
     /// Indirect strings over [`MAX_STR`]: only the length is kept (they are dropped, so not charged).
     long: RefCell<HashMap<i32, usize>>,
     numbers: RefCell<HashMap<(i32, usize), Vec<f32>>>,
+    /// What is left of [`MAX_BLOBS`] for attachments and appearance streams.
+    blobs: Cell<usize>,
+    /// What is left of [`MAX_DECODE_WORK`].
+    work: Cell<usize>,
+    /// What is left of [`MAX_AP_STRUCT`].
+    structs: Cell<usize>,
+    /// Which file of the import is being read: object numbers mean something only inside one (an `<appearance>`
+    /// holds a file of its own).
+    scope: Cell<u32>,
+    /// Streams decoded already, by (file, object number, limit, predictors allowed): a stream many comments share is
+    /// decoded once, bombs included.
+    streams: RefCell<HashMap<(u32, i32, usize, bool), Unpacked>>,
+    cached: Cell<usize>,
 }
 
 impl Budget {
@@ -82,7 +129,69 @@ impl Budget {
     }
 
     pub fn with_limit(bytes: usize) -> Budget {
-        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default() }
+        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default(), blobs: Cell::new(MAX_BLOBS), work: Cell::new(MAX_DECODE_WORK), structs: Cell::new(MAX_AP_STRUCT), scope: Cell::new(0), streams: RefCell::default(), cached: Cell::new(0) }
+    }
+
+    /// Charges `n` bytes of attachment or appearance data; false (nothing charged) when they are not there. Unlike
+    /// [`Budget::take`] the budget is not gone: the entry is left out and the file goes on.
+    pub fn take_blob(&self, n: usize) -> bool {
+        match self.blobs.get().checked_sub(n) {
+            Some(rest) => {
+                self.blobs.set(rest);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Charges `n` bytes of appearance structure; false (nothing charged) when they are not there.
+    pub fn take_struct(&self, n: usize) -> bool {
+        match self.structs.get().checked_sub(n) {
+            Some(rest) => {
+                self.structs.set(rest);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Gives back what an appearance that was not kept had charged to [`MAX_BLOBS`].
+    pub fn restore_blobs(&self, left: usize) {
+        self.blobs.set(left.min(MAX_BLOBS));
+    }
+
+    /// What is left of the file's decode allowance: a decode is capped to it, and not tried at 0.
+    pub fn work_left(&self) -> usize {
+        self.work.get()
+    }
+
+    /// Charges `n` bytes a decoder moved: what it read or produced, or its cap when it was stopped by it.
+    pub fn spend_work(&self, n: usize) {
+        self.work.set(self.work.get().saturating_sub(n));
+    }
+
+    /// From here on object numbers are those of another file.
+    pub fn next_file(&self) {
+        self.scope.set(self.scope.get() + 1);
+    }
+
+    pub fn stream_known(&self, object: i32, limit: usize, predictors: bool) -> Option<Unpacked> {
+        self.streams.borrow().get(&(self.scope.get(), object, limit, predictors)).cloned()
+    }
+
+    pub fn stream_keep(&self, object: i32, limit: usize, predictors: bool, r: &Unpacked) {
+        if let Ok(d) = r {
+            if self.cached.get() + d.len() > MAX_CACHED_STREAMS {
+                return;
+            }
+            self.cached.set(self.cached.get() + d.len());
+        }
+        self.streams.borrow_mut().insert((self.scope.get(), object, limit, predictors), r.clone());
+    }
+
+    /// What is left for attachments and appearance streams.
+    pub fn blobs_left(&self) -> usize {
+        self.blobs.get()
     }
 
     /// Charges `n` bytes. When they are not there the budget is gone for good and this says false: the
@@ -178,16 +287,34 @@ pub enum Format {
 }
 
 impl Format {
-    /// By file extension (the person's choice in the save dialog); anything else is XFDF. `data` is form data, which
-    /// also has JSON, CSV, tab text and XML; comments are XFDF or FDF only.
-    pub fn of_path(path: &str, data: bool) -> Format {
+    /// By file extension (the person's choice in the save dialog); `None` for one that is not a format of this kind.
+    /// `data` is form data, which also has JSON, CSV, tab text and XML; comments are XFDF or FDF only.
+    pub fn of_ext(path: &str, data: bool) -> Option<Format> {
         match std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-            Some("fdf") => Format::Fdf,
-            Some("json") if data => Format::Json,
-            Some("csv") if data => Format::Csv,
-            Some("txt" | "tsv" | "tab") if data => Format::Tab,
-            Some("xml") if data => Format::Xml,
-            _ => Format::Xfdf,
+            Some("xfdf") => Some(Format::Xfdf),
+            Some("fdf") => Some(Format::Fdf),
+            Some("json") if data => Some(Format::Json),
+            Some("csv") if data => Some(Format::Csv),
+            Some("txt" | "tsv" | "tab") if data => Some(Format::Tab),
+            Some("xml") if data => Some(Format::Xml),
+            _ => None,
+        }
+    }
+
+    /// `of_ext`, with anything else read as XFDF (a hint for import, where the bytes decide; comments export).
+    pub fn of_path(path: &str, data: bool) -> Format {
+        Format::of_ext(path, data).unwrap_or(Format::Xfdf)
+    }
+
+    /// The extension a file of this format is saved with (the first of its save filter).
+    pub fn ext(self) -> &'static str {
+        match self {
+            Format::Xfdf => "xfdf",
+            Format::Fdf => "fdf",
+            Format::Json => "json",
+            Format::Csv => "csv",
+            Format::Tab => "txt",
+            Format::Xml => "xml",
         }
     }
 }
@@ -259,8 +386,14 @@ pub struct Node {
     /// Local name as written: plain form data XML names its fields by it.
     pub tag: String,
     pub attrs: Vec<(String, String)>,
-    /// The element's own text, in document order (children's text is not included).
+    /// The element's own text, in document order (children's text is not included): the text before its first child,
+    /// then each child's `tail`.
     pub text: String,
+    /// The text that follows this element inside its parent, before the next child or the parent's end (mixed content,
+    /// which rich text is made of). It is also part of the parent's `text`.
+    pub tail: String,
+    /// A `data` or `appearance` element whose text was over [`MAX_BLOB_TEXT`]: `text` is empty.
+    pub over: bool,
     pub kids: Vec<Node>,
 }
 
@@ -283,6 +416,16 @@ impl Node {
 /// external entities), only the five predefined entities and character references, at most
 /// [`MAX_NODES`] elements, [`MAX_DEPTH`] levels and [`MAX_STR`] bytes in any one string.
 pub fn parse_xml(bytes: &[u8]) -> Result<Node> {
+    parse_xml_in(bytes, false)
+}
+
+/// [`parse_xml`] for a file that is a comment's appearance on its own: a `data` element may be longer than
+/// [`MAX_STR`] anywhere in it.
+pub fn parse_xml_blobs(bytes: &[u8]) -> Result<Node> {
+    parse_xml_in(bytes, true)
+}
+
+fn parse_xml_in(bytes: &[u8], blobs: bool) -> Result<Node> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let err = |m: &str| bad(format!("This file is not valid XFDF: {m}."));
     let mut rd = Reader::from_reader(bytes);
@@ -320,11 +463,25 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Node> {
         Ok(n)
     };
     let grow = |stack: &mut Vec<Node>, s: &str| -> Result<()> {
+        let in_annots = blobs || stack.iter().any(|n| n.name == "annots");
         if let Some(top) = stack.last_mut() {
-            if top.text.len() + s.len() > MAX_STR {
-                return Err(bad("A value in this file is longer than 1 MB."));
+            // Only a comment's file or appearance may be longer than MAX_STR: not a form field that has this name.
+            let blob = matches!(top.name.as_str(), "data" | "appearance") && in_annots;
+            if top.over {
+                return Ok(());
+            }
+            if top.text.len() + s.len() > if blob { MAX_BLOB_TEXT } else { MAX_STR } {
+                if !blob {
+                    return Err(bad("A value in this file is longer than 1 MB."));
+                }
+                top.over = true;
+                top.text = String::new();
+                return Ok(());
             }
             top.text.push_str(s);
+            if let Some(k) = top.kids.last_mut() {
+                k.tail.push_str(s);
+            }
         }
         Ok(())
     };
@@ -464,6 +621,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_comment_may_hold_a_long_data_or_appearance_element() {
+        let big = "0".repeat(2 << 20);
+        let ok = format!("<xfdf><annots><fileattachment><data>{big}</data></fileattachment></annots></xfdf>");
+        assert_eq!(parse_xml(ok.as_bytes()).unwrap().child("annots").unwrap().kids[0].child("data").unwrap().text.len(), 2 << 20);
+        for tag in ["data", "appearance"] {
+            let form = format!("<xfdf><fields><field name=\"a\"><{tag}>{big}</{tag}></field></fields></xfdf>");
+            assert!(parse_xml(form.as_bytes()).is_err(), "{tag} outside <annots> keeps the 1 MB limit");
+        }
+    }
+
+    #[test]
     fn xml_reads_text_entities_and_namespaces() {
         let x = b"<?xml version=\"1.0\"?>\n<xfdf xmlns=\"http://ns.adobe.com/xfdf/\"><text a=\"x &amp; &quot;y&quot;\"><contents>1 &lt; 2 &#38; &#x26; \xC3\xA9<![CDATA[ <raw> ]]></contents></text><f href=\"a.pdf\"/></xfdf>";
         let n = parse_xml(x).unwrap();
@@ -520,6 +688,26 @@ mod tests {
         // Comments stay XFDF or FDF.
         assert_eq!(Format::of_path("a.csv", false), Format::Xfdf);
         assert_eq!(Format::of_path("a.xml", false), Format::Xfdf);
+    }
+
+    #[test]
+    fn a_save_name_maps_to_a_format_and_back() {
+        const ALL: [Format; 6] = [Format::Xfdf, Format::Fdf, Format::Json, Format::Csv, Format::Tab, Format::Xml];
+        // each format's own extension names it again (what the save dialog's filters offer)
+        for f in ALL {
+            assert_eq!(Format::of_ext(&format!("C:\\x\\a.{}", f.ext()), true), Some(f));
+        }
+        // the import dialog's other spellings of tab text
+        assert_eq!(Format::of_ext("a.TSV", true), Some(Format::Tab));
+        assert_eq!(Format::of_ext("a.tab", true), Some(Format::Tab));
+        // comments carry no form data formats
+        assert_eq!(Format::of_ext("a.csv", false), None);
+        assert_eq!(Format::of_ext("a.fdf", false), Some(Format::Fdf));
+        // anything else, and no extension at all, is not a format
+        assert_eq!(Format::of_ext("a.pdf", true), None);
+        assert_eq!(Format::of_ext("a.html", true), None);
+        assert_eq!(Format::of_ext("a", true), None);
+        assert_eq!(Format::of_ext("C:\\x.d\\a", true), None);
     }
 
     #[test]

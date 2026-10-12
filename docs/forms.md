@@ -140,7 +140,9 @@ Acrobat Prepare Form's layout tools, in `forms/layout.rs`. Each is one undo step
 Forms panel menu (the three dots) and the command palette: **Export form data…** and **Import form data…**. Code:
 `src-tauri/src/forms/data.rs` and `forms/table.rs` (CSV and tab text), with the caps and the XML, FDF and text-encoding
 readers in `src-tauri/src/exchange.rs`. The format of an export follows the file name (`.fdf`, `.json`, `.csv`,
-`.txt`/`.tsv`/`.tab` for tab text, `.xml`, anything else XFDF); an import is told by what is inside, not the name.
+`.txt`/`.tsv`/`.tab` for tab text, `.xml`, `.xfdf`; any other extension is refused on export). The save dialog suggests
+`.xfdf`: pick the type under **Save as type** to get another (on Windows the dialog adds that type's extension to a
+bare name). An import is told by what is inside, not the name.
 
 - **Exported:** every text, check box, radio, drop-down and list field by its full name (`Address.Street`), as stored:
   a check box or radio button as its export value or `Off`, a list box that takes several entries as a list, rich text as

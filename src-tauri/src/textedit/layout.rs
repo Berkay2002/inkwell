@@ -690,6 +690,86 @@ fn stroke_of(fill: &[Op]) -> Vec<Op> {
         .collect()
 }
 
+/// The lines of a block whose line ends are kept (Find & Replace, Edit text), one per `(source line, items,
+/// changed)` in the block's order. A line that holds no change stays exactly as it was: it starts where it did
+/// and its spaces take up the width it had (what its word spacing did). A changed line is set at the start (or
+/// middle, or end, by the block's alignment) of the line it was; in a justified block it is stretched to the end
+/// that line had unless it is the block's last. `spans` are the (start, end, baseline) of the block's lines in
+/// the first line's text space.
+///
+/// A changed line that no longer fits between `left` and `right` gives `None`: nothing is moved to make room.
+/// With `grow` (Edit text: the distance between lines) it is wrapped at the block's width instead: its overflow
+/// goes on new lines below it, and the lines after it are moved down by the lines added, that is its lines
+/// minus the source lines it covers (never up: a line that got shorter leaves a gap). Lines above it stay.
+pub(crate) fn keep_lines(
+    groups: Vec<(usize, Vec<Item>, bool)>,
+    spans: &[(f64, f64, f64)],
+    align: Align,
+    (left, right): (f64, f64),
+    tol: f64,
+    m: &Measure,
+    grow: Option<f64>,
+) -> Option<(Vec<LineOut>, Vec<LineAt>)> {
+    let mut lines = Vec::new();
+    let mut at = Vec::new();
+    let last = groups.len().saturating_sub(1);
+    let srcs: Vec<usize> = groups.iter().map(|g| g.0).collect();
+    // Lines added above the one being set.
+    let mut pushed = 0usize;
+    for (g, (src, mut items, changed)) in groups.into_iter().enumerate() {
+        // A line starts with its first glyph: no spaces, no kerning against what came before.
+        while items.first().is_some_and(is_space) {
+            items.remove(0);
+        }
+        while items.last().is_some_and(is_space) {
+            items.pop();
+        }
+        if let Some(first) = items.first_mut() {
+            first.kern = 0.0;
+        }
+        let (x0, x1, y) = spans[src];
+        let down = spans[0].2 - y + pushed as f64 * grow.unwrap_or(0.0);
+        if !changed {
+            at.push(LineAt { x: x0 - left, down, width: x1 - x0, stretch: true });
+            lines.push(LineOut { items, ends_para: g == last });
+            continue;
+        }
+        let place = |used: f64, first: bool| match align {
+            Align::Center => (x0 + x1) / 2.0 - used / 2.0,
+            Align::Right => x1 - used,
+            // A line the text wrapped onto starts at the block's left edge, not at a first line's indent.
+            _ if first => x0,
+            _ => left,
+        };
+        let Some(lead) = grow else {
+            let used = m.line(&items);
+            let x = place(used, true);
+            if x + used > right + tol || x < left - tol {
+                return None;
+            }
+            at.push(LineAt { x: x - left, down, width: x1 - x, stretch: align == Align::Justify && g != last });
+            lines.push(LineOut { items, ends_para: g == last });
+            continue;
+        };
+        // A word wider than the room stays on a line of its own and goes past the edge.
+        let room = if matches!(align, Align::Left | Align::Justify) { right - x0 } else { right - left };
+        let subs = wrap(items, room + tol, m);
+        let n = subs.len();
+        for (j, sub) in subs.into_iter().enumerate() {
+            let x = place(m.line(&sub.items), j == 0);
+            // Inside the group a line stretches unless a typed break ended it; the group's last is as its source was.
+            let stretch = align == Align::Justify && if j + 1 < n { !sub.ends_para } else { g != last };
+            // A justified block's lines end at its right edge, whatever the line this one stands for did (its last).
+            let end = if align == Align::Justify { right } else { x1 };
+            at.push(LineAt { x: x - left, down: down + j as f64 * lead, width: end - x, stretch });
+            lines.push(LineOut { items: sub.items, ends_para: sub.ends_para && (j + 1 < n || g == last) });
+        }
+        let next = srcs.get(g + 1).copied().unwrap_or(spans.len());
+        pushed += n.saturating_sub(next.saturating_sub(src).max(1));
+    }
+    Some((lines, at))
+}
+
 /// How the lines are placed.
 pub(crate) struct Placement {
     pub align: Align,
@@ -703,6 +783,18 @@ pub(crate) struct Placement {
     pub stroke: f64,
     /// The render mode to return to after synthetic bold.
     pub render_mode: i64,
+    /// Where each line goes, when the lines are not stacked by `lead` (Find & Replace keeps each line where it
+    /// was): one entry per line.
+    pub at: Vec<LineAt>,
+}
+
+/// Where one line stands: its start along the block's first line, how far below that line's baseline it is, and
+/// the width its spaces are stretched to fill when `stretch` is set (all in text space).
+pub(crate) struct LineAt {
+    pub x: f64,
+    pub down: f64,
+    pub width: f64,
+    pub stretch: bool,
 }
 
 /// An underline or strikeout to draw: a filled rectangle in the text matrix's space (`x`, `y` its
@@ -743,24 +835,34 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
     for (li, line) in lines.iter().enumerate() {
         let items = &line.items;
         let used = m.line(items);
-        let free = (p.width - used).max(0.0);
-        let dx = match p.align {
-            Align::Center => free / 2.0,
-            Align::Right => free,
+        let at = p.at.get(li);
+        let free = (at.map_or(p.width, |a| a.width) - used).max(0.0);
+        let dx = match (at, p.align) {
+            (Some(a), _) => a.x,
+            (None, Align::Center) => free / 2.0,
+            (None, Align::Right) => free,
             _ => 0.0,
         };
         let biggest = items.iter().map(|i| setter.styles[i.style].size).fold(p.first_size, f64::max);
         // A line is set lower for its own largest text, and for half of the line above's (whose
         // descenders reach down), so smaller text under large text doesn't run into it.
-        let down = if li == 0 { 0.0 } else { p.lead * biggest.max((biggest + prev_biggest) / 2.0) / p.first_size.max(1e-9) };
+        let down = match at {
+            Some(a) => a.down + base,
+            None if li == 0 => 0.0,
+            None => p.lead * biggest.max((biggest + prev_biggest) / 2.0) / p.first_size.max(1e-9),
+        };
         prev_biggest = biggest;
         base -= down;
-        if li > 0 || dx != 0.0 {
+        if li > 0 || dx != 0.0 || down != 0.0 {
             ops.push(Op::new("Td", vec![num(dx - x), num(-down)]));
         }
         x = dx;
         let spaces = items.iter().filter(|i| is_space(i)).count();
-        let extra = if p.align == Align::Justify && !line.ends_para && spaces > 0 { free / spaces as f64 } else { 0.0 };
+        let stretch = match at {
+            Some(a) => a.stretch,
+            None => p.align == Align::Justify && !line.ends_para,
+        };
+        let extra = if stretch && spaces > 0 { free / spaces as f64 } else { 0.0 };
         let mut arr: Vec<Obj> = Vec::new();
         let mut text: Vec<u8> = Vec::new();
         let flush = |arr: &mut Vec<Obj>, text: &mut Vec<u8>| {

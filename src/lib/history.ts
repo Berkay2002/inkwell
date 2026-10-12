@@ -42,8 +42,8 @@ export interface HistoryState {
   candidates: Candidate[];
 }
 
-/** What a command reads PDF bytes from. */
-export type Source = { kind: "version"; id: string } | { kind: "current" } | { kind: "picked"; token: string };
+/** What a command reads PDF bytes from. A picked file's `path` is for the window only (the engine reads the token). */
+export type Source = { kind: "version"; id: string } | { kind: "current" } | { kind: "picked"; token: string; path?: string };
 
 export type ChangeKind =
   | "pageAdded"

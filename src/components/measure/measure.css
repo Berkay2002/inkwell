@@ -28,6 +28,21 @@
 .ms-sel.area {
   fill: var(--accent-soft);
 }
+/* a point of the selected measurement: drag it or use the arrow keys */
+.ms-handle {
+  fill: var(--surface);
+  stroke: var(--accent);
+  stroke-width: 2;
+  pointer-events: all;
+  cursor: move;
+  touch-action: none;
+  outline: none;
+}
+.ms-handle:hover,
+.ms-handle:focus-visible {
+  fill: var(--accent-soft);
+  stroke-width: 3;
+}
 .ms-draft {
   fill: none;
   stroke: var(--accent);

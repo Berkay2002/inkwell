@@ -821,7 +821,7 @@ fn a_stamp_that_is_not_a_picture_is_not_flagged_and_is_left_to_mupdf() {
 }
 
 #[test]
-fn a_placed_custom_stamp_exports_to_xfdf_by_name_without_its_picture_and_reimports() {
+fn a_placed_custom_stamp_exports_to_xfdf_with_its_picture_and_reimports_into_another_document() {
     use crate::annot::xfdf::{export, import_one, parse};
     use crate::exchange::Format;
     let d = dir("stamps", "xfdf");
@@ -837,8 +837,8 @@ fn a_placed_custom_stamp_exports_to_xfdf_by_name_without_its_picture_and_reimpor
         let text = String::from_utf8_lossy(&bytes);
         // (An FDF name object writes the spaces as #20.)
         assert!(text.contains("Approved by me") || text.contains("Approved#20by#20me"), "the stamp is listed by its name: {text}");
-        // The picture is not in the file: a few hundred bytes of text, no image data.
-        assert!(bytes.len() < 4000 && !text.contains("PNG") && !text.contains("FlateDecode"), "{} bytes", bytes.len());
+        // The picture is in the file (its appearance, as a few KB: the test picture is 200 x 100 pixels).
+        assert!(bytes.len() > 400 && (text.contains("<appearance>") || text.contains("/AP")), "{} bytes", bytes.len());
 
         // Back into the same document: the stamp is matched by name and updated, still the same picture.
         let parsed = parse(&bytes).unwrap();
@@ -850,11 +850,11 @@ fn a_placed_custom_stamp_exports_to_xfdf_by_name_without_its_picture_and_reimpor
         assert!(after[0].picture, "the picture survives the update");
         assert_eq!(after[0].icon.as_deref(), Some("Approved by me"));
 
-        // Into a document that has no such stamp: a stamp with that name is made (as MuPDF's own, not a picture).
+        // Into a document that has no such stamp: it is made with the picture of the file.
         let (eng2, id2, _) = open_bytes(&dir("stamps", "xfdf-b"), "b.pdf", &plain());
         let got = import_one(&eng2, id2, &parsed, user()).unwrap();
-        assert_eq!((got.summary.added, got.summary.updated), (1, 0), "{:?}", got.summary);
+        assert_eq!((got.summary.added, got.summary.updated, got.summary.appearances), (1, 0, 1), "{:?}", got.summary);
         let made = list_all(&eng2, id2).unwrap();
-        assert_eq!((made.len(), made[0].kind, made[0].icon.as_deref(), made[0].picture), (1, Kind::Stamp, Some("Approved by me"), false));
+        assert_eq!((made.len(), made[0].kind, made[0].icon.as_deref(), made[0].picture), (1, Kind::Stamp, Some("Approved by me"), true));
     }
 }

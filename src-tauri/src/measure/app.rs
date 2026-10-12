@@ -1,6 +1,6 @@
 //! Tauri commands for measuring. The UI is the user; the assistant calls the functions in `super` with its turn.
 
-use super::{Kind, MeasureDto, PageScale, Quantity, Scale, SnapCache, SnapHit, SnapKinds, add_one, csv_of, list_all, lock_of, rescale, scale_get, scale_set, snap_at_kinds, value_of};
+use super::{Kind, MeasureDto, PageScale, Quantity, Scale, SnapCache, SnapHit, SnapKinds, add_one, csv_of, list_all, lock_of, move_points, rescale, scale_get, scale_set, snap_at_kinds, value_in, value_of};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use crate::paths::Paths;
@@ -56,11 +56,35 @@ pub async fn measure_add(eng: Eng<'_>, doc: DocId, page: u32, kind: Kind, points
     .await
 }
 
-/// The value `points` would measure (the live readout while clicking), without adding anything.
+/// The value `points` would measure (the live readout while clicking or dragging), without adding anything. `xref`: under
+/// that measurement's own `/Measure`; else `scale`, else the page's at the first point.
 #[tauri::command]
-pub async fn measure_value(eng: Eng<'_>, doc: DocId, page: u32, kind: Kind, points: Vec<[f32; 2]>, scale: Option<Scale>) -> Result<Quantity> {
+pub async fn measure_value(
+    eng: Eng<'_>,
+    doc: DocId,
+    page: u32,
+    kind: Kind,
+    points: Vec<[f32; 2]>,
+    scale: Option<Scale>,
+    xref: Option<i32>,
+) -> Result<Quantity> {
     let eng = eng.inner().clone();
-    blocking(move || value_of(&eng, doc, page, kind, &points, scale.as_ref())).await
+    blocking(move || match xref {
+        Some(x) => value_in(&eng, doc, page, kind, &points, x),
+        None => value_of(&eng, doc, page, kind, &points, scale.as_ref()),
+    })
+    .await
+}
+
+/// Moves the points of the measurement `xref` (page space); one undo step. The annotation stays (same xref).
+#[tauri::command]
+pub async fn measure_move(eng: Eng<'_>, doc: DocId, page: u32, xref: i32, points: Vec<[f32; 2]>) -> Result<Added> {
+    let eng = eng.inner().clone();
+    blocking(move || {
+        let (state, quantity) = move_points(&eng, doc, page, xref, &points, EditSource::User)?;
+        Ok(Added { state, xref, quantity })
+    })
+    .await
 }
 
 /// Every measurement annotation of the document, valued from its own `/Measure`.

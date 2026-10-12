@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  neighbour, nudge, pageDelta,
   type Measure, type Scale, UNSCALED, calibrate, clickAt, latestOnly, constrain45, inUnit, numText, parseScale, parseUnit, pathLength,
   place, polygonArea, quantityOf, realPerPt, scaleLabel, totals, trimNum,
 } from "./measureLogic";
@@ -128,7 +129,7 @@ describe("calibrating and totals", () => {
   });
   it("sums per kind and unit, never across units", () => {
     const m = (kind: Measure["kind"], value: number, unit: string): Measure => ({
-      page: 0, xref: Math.random(), kind, points: [], contents: "", author: "", scale: null, quantity: { value, unit, text: "" },
+      page: 0, xref: Math.random(), kind, points: [], contents: "", author: "", scale: null, plain: true, quantity: { value, unit, text: "" },
     });
     const t = totals([m("area", 100, "sq ft"), m("distance", 10, "ft"), m("distance", 5, "m"), m("distance", 2.5, "ft")]);
     expect(t.map((x) => [x.kind, x.unit, x.count, x.text])).toEqual([
@@ -136,5 +137,29 @@ describe("calibrating and totals", () => {
       ["distance", "m", 1, "5.00 m"],
       ["area", "sq ft", 1, "100.00 sq ft"],
     ]);
+  });
+
+  it("arrow keys move a point along the screen, whatever the page rotation", () => {
+    const size: [number, number] = [612, 792];
+    const pts: [number, number][] = [[100, 100], [200, 100]];
+    // unrotated: right is +x, down is +y
+    expect(nudge(pts, 0, "ArrowRight", 1, 0, size)).toEqual([[101, 100], [200, 100]]);
+    expect(nudge(pts, 1, "ArrowDown", 10, 0, size)).toEqual([[100, 100], [200, 110]]);
+    // the page shown a quarter turn clockwise: a page point's screen right is page up
+    expect(pageDelta([1, 0], 1)).toEqual([0, -1]);
+    expect(nudge(pts, 0, "ArrowRight", 1, 1, size)).toEqual([[100, 99], [200, 100]]);
+    expect(nudge(pts, 0, "ArrowLeft", 1, 2, size)).toEqual([[101, 100], [200, 100]]);
+    expect(nudge(pts, 0, "ArrowDown", 1, 3, size)).toEqual([[99, 100], [200, 100]]);
+    // kept on the page; other keys do nothing; the input is not changed
+    expect(nudge([[0, 0], [5, 5]], 0, "ArrowLeft", 10, 0, size)).toEqual([[0, 0], [5, 5]]);
+    expect(nudge(pts, 0, "a", 1, 0, size)).toBeNull();
+    expect(pts[0]).toEqual([100, 100]);
+  });
+
+  it("Shift holds a dragged point to 45 degrees from its neighbour", () => {
+    const a: [number, number][] = [[0, 0], [10, 0], [10, 10]];
+    expect(neighbour("perimeter", a, 0)).toEqual([10, 0]);
+    expect(neighbour("perimeter", a, 2)).toEqual([10, 0]);
+    expect(neighbour("area", a, 0)).toEqual([10, 10]);
   });
 });

@@ -75,9 +75,26 @@ impl NumberFormat {
         }
     }
 
+    /// `/D` as used: the precision, or the largest denominator of a fraction.
+    fn precision(&self) -> f64 {
+        if self.d.is_finite() && self.d >= 1.0 { self.d.min(1e9) } else { 100.0 }
+    }
+
+    /// `v` as this format would round it (what "1,234.50" or "3 7/8" stand for), so a caller can see whether rounding
+    /// made it a whole unit of the one before.
+    pub fn rounded(&self, v: f64) -> f64 {
+        let d = self.precision();
+        match self.style {
+            Style::Round => v.round(),
+            Style::Truncate => v.trunc(),
+            Style::Decimal => (v * d).round() / d,
+            Style::Fraction => (v * d.round()).round() / d.round(),
+        }
+    }
+
     /// The number alone: "1,234.50".
     pub fn number(&self, v: f64) -> String {
-        let d = if self.d.is_finite() && self.d >= 1.0 { self.d.min(1e9) } else { 100.0 };
+        let d = self.precision();
         match self.style {
             Style::Round => self.group(&format!("{:.0}", v.round()), ""),
             Style::Truncate => self.group(&format!("{:.0}", v.trunc()), ""),
@@ -118,7 +135,7 @@ impl NumberFormat {
     /// The number with its label: "1,234.50 ft".
     pub fn text(&self, v: f64) -> String {
         let n = self.number(v);
-        if self.prefix { format!("{}{}{n}", self.unit, self.ps) } else { format!("{n}{}{}{}", self.ps, self.unit, self.ss) }
+        if self.prefix { format!("{}{}{}{n}", self.ps, self.unit, self.ss) } else { format!("{n}{}{}{}", self.ps, self.unit, self.ss) }
     }
 
     fn group(&self, int: &str, frac: &str) -> String {
@@ -146,20 +163,30 @@ fn gcd(a: u64, b: u64) -> u64 {
 }
 
 /// Writes `v`, a value in the units of the first element, through the whole array: with `[ft, in(C 12)]`, 3.375 ft
-/// reads "3 ft 4.50 in". The last element takes the remainder, formatted by its own style.
+/// reads "3 ft 4.50 in". All but the last element show whole units; the last takes the remainder in its own style.
+/// A remainder that rounds up to a whole unit of the one before is carried (2.9999 ft is "3 ft 0.00 in", never
+/// "2 ft 12.00 in").
 pub fn chain_text(v: f64, formats: &[NumberFormat]) -> String {
     let Some(last) = formats.len().checked_sub(1) else { return String::new() };
+    let mut parts = vec![0.0; formats.len()];
     let mut rest = v;
-    let mut parts = Vec::new();
-    for (i, f) in formats.iter().enumerate() {
-        if i == last {
-            parts.push(f.text(rest));
-        } else {
-            let whole = rest.trunc();
-            parts.push(NumberFormat { style: Style::Truncate, ..f.clone() }.text(whole));
-            rest = (rest - whole) * formats[i + 1].c;
+    for i in 0..last {
+        parts[i] = rest.trunc();
+        rest = (rest - parts[i]) * formats[i + 1].c;
+    }
+    parts[last] = formats[last].rounded(rest);
+    for i in (1..=last).rev() {
+        if parts[i] >= formats[i].c {
+            parts[i] -= formats[i].c;
+            parts[i - 1] += 1.0;
         }
     }
-    // A suffix such as the default one (a single space) must not leave the label ending in a blank.
-    parts.join(" ").trim_end().to_owned()
+    let texts: Vec<String> = formats
+        .iter()
+        .zip(&parts)
+        .enumerate()
+        .map(|(i, (f, p))| if i == last { f.text(*p) } else { NumberFormat { style: Style::Truncate, ..f.clone() }.text(*p) })
+        .collect();
+    // A default `/SS` (a single space) must not leave a blank at the end of a part, or double the one between parts.
+    texts.iter().map(|t| t.trim()).collect::<Vec<_>>().join(" ")
 }

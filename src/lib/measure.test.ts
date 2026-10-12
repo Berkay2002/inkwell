@@ -24,7 +24,7 @@ import type { Measure } from "./measureLogic";
 
 const state = { rev: 2, pageCount: 1, sizes: [], path: "a.pdf", dirty: true, undo: "Add", redo: null };
 const m = (xref: number, extra: Partial<Measure> = {}): Measure => ({
-  page: 0, xref, kind: "distance", points: [[0, 0], [72, 0]], contents: "10.00 ft", author: "", scale: null,
+  page: 0, xref, kind: "distance", points: [[0, 0], [72, 0]], contents: "10.00 ft", author: "", scale: null, plain: true,
   quantity: { value: 10, unit: "ft", text: "10.00 ft" }, ...extra,
 });
 const calls = (name: string) => invoke.mock.calls.filter((c) => c[0] === name);
@@ -32,7 +32,7 @@ const calls = (name: string) => invoke.mock.calls.filter((c) => c[0] === name);
 beforeEach(() => {
   invoke.mockReset();
   vi.mocked(applyState).mockReset();
-  useMeasure.setState({ open: false, tool: "distance", docs: {}, locks: {}, scaleLocks: {} });
+  useMeasure.setState({ open: false, tool: "distance", docs: {}, locks: {}, scaleLocks: {}, signed: {} });
   useStore.setState({ docs: { 1: { id: 1, name: "plan.pdf" } as never } });
 });
 
@@ -201,5 +201,27 @@ describe("measure store", () => {
     }
     expect(await useMeasure.getState().snap(1, 0, [5, 5], 8)).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("moving a point is one engine call that keeps the selection, and a refusal writes nothing", async () => {
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === "measure_move" ? { state, xref: 7, quantity: { value: 20, unit: "ft", text: "20.00 ft" } } : cmd === "measure_list" ? [m(7)] : null,
+    );
+    useMeasure.setState({ locks: { 1: null } });
+    useMeasure.getState().select(1, { page: 0, xref: 7 });
+    expect(await useMeasure.getState().move(1, { page: 0, xref: 7 }, [[0, 0], [144, 0]])).toBe(true);
+    expect(calls("measure_move")[0][1]).toEqual({ doc: 1, page: 0, xref: 7, points: [[0, 0], [144, 0]] });
+    expect(useMeasure.getState().get(1).selected).toEqual({ page: 0, xref: 7 });
+
+    invoke.mockClear();
+    useMeasure.setState({ locks: { 1: "This document is certified; its certification doesn't allow comments or measurements." } });
+    expect(await useMeasure.getState().move(1, { page: 0, xref: 7 }, [[0, 0], [144, 0]])).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("a document that is signed says so (read with the lock)", async () => {
+    invoke.mockImplementation(async (cmd: string) => (cmd === "a11y_protection" ? { certified: false, signed: true } : null));
+    await useMeasure.getState().ensureLock(1);
+    expect(useMeasure.getState().signed[1]).toBe(true);
   });
 });

@@ -2,8 +2,8 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
-import type { Bookmark, BookmarkOp, BorderSpec, HeadingPreview, LinkAudit, LinkOp, NewLinkTarget, PageLink, PageLinks, UrlPreview } from "./api";
-import { editBookmarks, editLinks } from "./edit";
+import type { Bookmark, BookmarkOp, BorderSpec, DestList, DestOp, HeadingPreview, LinkAudit, LinkOp, NewLinkTarget, PageLink, PageLinks, UrlPreview } from "./api";
+import { editBookmarks, editDests, editLinks } from "./edit";
 import { type Rot, unrotatePoint } from "./layout";
 import { dropViewPos, getViewPos } from "./viewPos";
 
@@ -20,6 +20,8 @@ export type LinkTool = "select" | "draw";
 export interface DocNav {
   /** The tree as listed; null until the first list. */
   bookmarks: api.Bookmarks | null;
+  /** The named destinations as listed; null until the section is opened. */
+  dests: DestList | null;
   selectedBm: number | null;
   /** The bookmark whose name is being typed. */
   renaming: number | null;
@@ -39,6 +41,7 @@ export interface DocNav {
 
 const empty = (): DocNav => ({
   bookmarks: null,
+  dests: null,
   selectedBm: null,
   renaming: null,
   headings: null,
@@ -128,6 +131,9 @@ export function bookmarkState(b: Bookmark): DotState {
       return "ok";
   }
 }
+
+/** The dot of a named destination: where it goes, or that it goes nowhere. */
+export const destState = (d: api.BookmarkDest): DotState => (d.kind === "broken" ? "broken" : d.kind === "uri" ? "external" : "ok");
 
 export const linkState = (t: api.LinkTarget): DotState => (t.kind === "broken" ? "broken" : t.kind === "uri" ? "external" : "ok");
 
@@ -234,6 +240,13 @@ interface Store {
   /** The bookmark goes to what the viewer shows now. */
   setDestHere: (doc: number, id: number) => Promise<void>;
   askHeadings: (doc: number) => Promise<void>;
+
+  loadDests: (doc: number) => Promise<void>;
+  /**
+   * One change to the named destinations, one undo step. The bookmarks and links that use a name are listed again;
+   * a refusal (a script that may use the name, a certified file) is the document error. Returns the sentence, or null.
+   */
+  destOp: (doc: number, op: DestOp) => Promise<string | null>;
   makeFromHeadings: (doc: number, replace: boolean) => Promise<void>;
 
   loadLinks: (doc: number, page: number) => Promise<void>;
@@ -295,6 +308,19 @@ export const useNav = create<Store>((set, get) => {
         const sel = d.selectedLink && d.selectedLink.page === page && !l.links.some((k) => k.id === d.selectedLink!.id) ? null : d.selectedLink;
         patch(doc, { links: { ...d.links, [page]: { rev: l.rev, links: l.links, locked: l.locked, signed: l.signed } }, selectedLink: sel });
       })
+      .catch(() => undefined)
+      .finally(() => inflight.delete(key));
+    inflight.set(key, job);
+    return job;
+  };
+
+  const reloadDests = (doc: number) => {
+    const key = `d:${doc}:${docRev(doc)}`;
+    const running = inflight.get(key);
+    if (running) return running;
+    const job = api
+      .destsList(doc)
+      .then((dests) => patch(doc, { dests }))
       .catch(() => undefined)
       .finally(() => inflight.delete(key));
     inflight.set(key, job);
@@ -409,6 +435,30 @@ export const useNav = create<Store>((set, get) => {
     setDestHere: async (doc, id) => {
       const v = viewTarget(doc);
       await bm(doc, { op: "setDest", id, page: v.page, at: v.at });
+    },
+
+    loadDests: async (doc) => {
+      const l = of(doc).dests;
+      if (l && l.rev === docRev(doc)) return;
+      await reloadDests(doc);
+    },
+
+    destOp: async (doc, op) => {
+      if (!of(doc).dests) await reloadDests(doc);
+      const listed = of(doc).dests;
+      const r = await editDests(doc, listed?.rev ?? docRev(doc), op);
+      if (r.kind === "stale") {
+        await reloadDests(doc);
+        const n = "The document changed while you were editing. Try that again.";
+        patch(doc, { notice: n });
+        return n;
+      }
+      // a refusal is already shown as the document error (edit.ts), as for bookmarks: not repeated in the rail
+      if (r.kind === "error") return r.message;
+      // applyState (edit.ts) has listed the bookmarks, links and destinations again for the new generation
+      const n = destNotice(op, r.value, listed);
+      patch(doc, { notice: n });
+      return n;
     },
 
     askHeadings: async (doc) => {
@@ -530,11 +580,35 @@ export const useNav = create<Store>((set, get) => {
       if (!d) return;
       patch(doc, { headings: null, urls: null, audit: null });
       if (d.bookmarks) void reloadBookmarks(doc);
+      if (d.dests) void reloadDests(doc);
       for (const k of Object.keys(d.links)) void reloadLinks(doc, Number(k));
     },
     setNotice: (doc, notice) => patch(doc, { notice }),
   };
 });
+
+/** The sentence after a destination change: what was done, and what was kept in doubt. */
+export function destNotice(op: DestOp, done: api.DestEdited, listed: DestList | null): string {
+  const q = (n: string) => `"${n}"`;
+  switch (op.op) {
+    case "rename":
+      return `Renamed ${q(op.name)} to ${q(op.to.trim())}. Every bookmark and link that used it follows.`;
+    case "setView":
+      return done.count ? `${q(op.name)} now goes to page ${op.page + 1}.` : `${q(op.name)} already goes there.`;
+    case "add":
+      return `Added ${q(op.name.trim())}.`;
+    case "delete": {
+      const refs = listed?.items.find((e) => e.name === op.name)?.refs ?? 0;
+      return refs > 0
+        ? `Deleted ${q(op.name)}. ${refs === 1 ? "1 bookmark, link or action that used it now goes" : `${refs} bookmarks, links or actions that used it now go`} nowhere.`
+        : `Deleted ${q(op.name)}.`;
+    }
+    case "removeUnused": {
+      const gone = done.count ? `Removed ${plural(done.count, "destination")} nothing in this file uses.` : "No destination in this file was unused.";
+      return done.kept.length ? `${gone} Kept in doubt: ${done.kept.join("; ")}.` : gone;
+    }
+  }
+}
 
 /** What a signed document's links warn when they are changed (the confirm and the panel show it). */
 export const SIGNED_LINKS =

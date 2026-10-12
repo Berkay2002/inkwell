@@ -1,6 +1,6 @@
 //! Tauri commands for bookmarks. The UI is the user; the assistant calls the functions in `super`.
 
-use super::{BookmarkEdited, BookmarkOp, Bookmarks, HeadingPreview};
+use super::{BookmarkEdited, BookmarkOp, Bookmarks, DestEdited, DestList, DestOp, HeadingPreview};
 use crate::engine::edit::EditSource;
 use crate::engine::{DocId, Engine, EngineError};
 
@@ -30,4 +30,18 @@ pub async fn bookmarks_apply(eng: Eng<'_>, doc: DocId, rev: u32, op: BookmarkOp)
 pub async fn bookmarks_headings(eng: Eng<'_>, doc: DocId) -> Result<HeadingPreview> {
     let eng = eng.inner().clone();
     blocking(move || super::preview_headings(&eng, doc)).await
+}
+
+/// The named destinations, each with its page and what uses it, with the `rev` they belong to.
+#[tauri::command]
+pub async fn dests_list(eng: Eng<'_>, doc: DocId) -> Result<DestList> {
+    let eng = eng.inner().clone();
+    blocking(move || super::dests::list(&eng, doc)).await
+}
+
+/// Applies one change to the named destinations as listed at `rev` (`Stale` if the document moved on).
+#[tauri::command]
+pub async fn dests_apply(eng: Eng<'_>, doc: DocId, rev: u32, op: DestOp) -> Result<DestEdited> {
+    let eng = eng.inner().clone();
+    blocking(move || super::dests::apply(&eng, doc, rev, &op, EditSource::User)).await
 }

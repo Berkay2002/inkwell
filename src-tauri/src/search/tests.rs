@@ -778,3 +778,19 @@ fn starting_a_search_ends_the_windows_previous_one_and_its_late_files_are_not_li
     searches.record(WIN, second, 0, files[0].clone());
     assert_eq!(searches.path_of(WIN, second, 0), Some(files[0].clone()));
 }
+
+#[test]
+fn spans_give_character_offsets_under_the_same_options_as_a_find() {
+    let q = |s: &str, o: SearchOpts| Query::new(s, o).unwrap();
+    let text = "The cat, the Cat and a concat. Café cafe";
+    // Inclusive (first, last) characters; the case counts only when asked.
+    assert_eq!(find_spans(text, &q("cat", opts()), 10), [(4, 6), (13, 15), (26, 28)]);
+    assert_eq!(find_spans(text, &q("cat", SearchOpts { case_sensitive: true, ..opts() }), 10), [(4, 6), (26, 28)]);
+    assert_eq!(find_spans(text, &q("cat", SearchOpts { whole_words: true, ..opts() }), 10), [(4, 6), (13, 15)]);
+    assert_eq!(find_spans(text, &q("cat", opts()), 2).len(), 2);
+    // A mark counts unless accents are ignored; "cafe" is not the start of "Café".
+    assert_eq!(find_spans(text, &q("cafe", opts()), 10), [(36, 39)]);
+    assert_eq!(find_spans(text, &q("cafe", SearchOpts { ignore_accents: true, ..opts() }), 10), [(31, 34), (36, 39)]);
+    // Runs of white space are one space; the span covers all of them.
+    assert_eq!(find_spans("a  b   c", &q("a b c", opts()), 10), [(0, 7)]);
+}

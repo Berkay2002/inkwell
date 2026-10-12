@@ -921,3 +921,14 @@ fn a_keystroke_script_on_a_multi_select_list_replaces_the_first_pick() {
     try_set(&eng, id, "Pick", FieldValue::Many(vec!["no".into(), "se".into()])).unwrap();
     assert_eq!(dto(&eng, id, "Pick")[0].values, vec!["no", "se"]);
 }
+
+#[test]
+fn an_export_name_picks_its_format_and_an_unknown_extension_is_refused() {
+    for (name, f) in [("a.xfdf", Format::Xfdf), ("a.FDF", Format::Fdf), ("a.json", Format::Json), ("a.csv", Format::Csv), ("a.txt", Format::Tab), ("a.xml", Format::Xml)] {
+        assert_eq!(export_format(name).unwrap(), f, "{name}");
+    }
+    for name in ["a.pdf", "a.html", "a"] {
+        let Err(EngineError::Invalid(m)) = export_format(name) else { panic!("{name} was not refused") };
+        assert!(m.contains(".csv") && m.contains(name), "{m}");
+    }
+}

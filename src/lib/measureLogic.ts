@@ -20,6 +20,8 @@ export interface Quantity {
   value: number;
   unit: string;
   text: string;
+  /** Something to know about how it was valued: a number format of the file that could not be used. */
+  note?: string;
 }
 
 export interface Measure {
@@ -32,12 +34,16 @@ export interface Measure {
   quantity: Quantity;
   /** null: the file's measure uses a unit we have no name for (the quantity is still right). */
   scale: Scale | null;
+  /** The live label below (`quantityOf` at `scale`) reads as the engine's does; when not, ask `measure_value`. */
+  plain: boolean;
 }
 
 export interface PageScale {
   scale: Scale;
   defined: boolean;
   label: string;
+  /** As `Measure.plain`, for what is drawn on the page: false when the file has its own /D or /A or several viewports. */
+  plain: boolean;
 }
 
 export type SnapKind = "endpoint" | "midpoint" | "intersection" | "line";
@@ -142,9 +148,9 @@ export function numText(v: number): string {
 }
 
 /**
- * The value `pts` would measure at `scale`, as the live label shows it before the engine writes the real one.
- * shortcut: the engine also applies a file's own /D and /A multipliers and per-viewport scales; this does not, so a
- * file from Acrobat with those can differ until the measurement is made (then the engine's label is shown).
+ * The value `pts` would measure at `scale`, as the live label shows it. Exact only where the file's measure is plain
+ * (`PageScale.plain`, `Measure.plain`: our own scale and formats); with a file's own /D or /A, several viewports or a
+ * /Y the label comes from the engine (`measure_value`) instead.
  */
 export function quantityOf(kind: MeasureKind, pts: Pt[], scale: Scale): Quantity {
   const k = realPerPt(scale);
@@ -191,6 +197,32 @@ export interface Hover {
 export function clickAt(hover: Hover | null, raw: Pt, last: Pt | null, shift: boolean): Hover {
   if (shift && last) return { at: constrain45(last, raw), snap: null };
   return hover ?? { at: raw, snap: null };
+}
+
+/** A page-space vector for a screen-space one: the page is shown turned `rot` quarter turns clockwise. */
+export function pageDelta(screen: Pt, rot: number): Pt {
+  let [x, y] = screen;
+  for (let i = ((rot % 4) + 4) % 4; i > 0; i--) [x, y] = [y, -x];
+  return [x, y];
+}
+
+/** `pts` with point `i` moved by the arrow key `key` (`step` points on the screen), kept on the page. Null for another key. */
+export function nudge(pts: Pt[], i: number, key: string, step: number, rot: number, size: Pt): Pt[] | null {
+  const dir: Record<string, Pt> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  const d = dir[key];
+  if (!d) return null;
+  const [dx, dy] = pageDelta([d[0] * step, d[1] * step], rot);
+  const at: Pt = [Math.min(Math.max(pts[i][0] + dx, 0), size[0]), Math.min(Math.max(pts[i][1] + dy, 0), size[1])];
+  return pts.map((p, j) => (j === i ? at : p));
+}
+
+/**
+ * The point a dragged point is held to 45 degrees from with Shift: its neighbour before it (an area's first point wraps
+ * to its last), the one after for the first point of an open path.
+ */
+export function neighbour(kind: MeasureKind, pts: Pt[], i: number): Pt {
+  if (i > 0) return pts[i - 1];
+  return kind === "area" ? pts[pts.length - 1] : pts[1];
 }
 
 /** Stamps requests so that only the newest answer is used: `start()` for each request, `cancel()` when the pointer moves on. */
