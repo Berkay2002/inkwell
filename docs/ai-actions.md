@@ -66,7 +66,7 @@ files).
 | `sanitize_document` | destructive | metadata, hidden layers, scripts and actions, attached files (on) / hidden text, ALL comments, bookmarks (off); a full-rewrite snapshot, so the removed data is gone from the saved file |
 | `check_accessibility` / `fix_accessibility` | read / edit | the a11y checker's list; safe fixes (title, language, tab order, tooltips, figure alt, autotag) as one step |
 | `check_preflight` | read | PDF/A, PDF/UA, PDF/X check: failing rules and what a conversion could settle |
-| `open_tool` | read | opens protect, security, merge, search-advanced (and the tools it can also run) for the user |
+| `open_tool` | read | opens protect, security, merge, search-advanced, links, bookmarks, articles, output-preview, convert-colors, printer-marks, page-boxes, create-portfolio (and the tools it can also run) for the user |
 | `list_open_documents` / `compare_documents` | read | ids and names; changes between this document and the saved file or another open one |
 | `compress_document` | edit | a smaller copy next to the document; wants the saved file (unsaved changes are an `Err`) |
 | `ocr_document` | edit | invisible text layer, one undo step; pages that have text are skipped; Windows or Tesseract engine |

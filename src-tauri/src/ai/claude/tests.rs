@@ -635,8 +635,12 @@ fn the_whole_registry_is_served_and_a_read_tool_answers_through_it() {
     assert_eq!(usage.as_ref().unwrap()["turns"], 2);
     let err = r.stderr();
     assert!(err.contains("excerpts=0"), "{err}");
+    // the registry's own tools (the action tools sit between the reads and the two test tools) and the test ones
+    let served = err.lines().find_map(|l| l.split("tools=").nth(1)).unwrap_or_default();
     assert!(
-        err.contains("tools=get_document_info,get_outline,get_text,search,get_selection,get_page_image,go_to_page,show_source,test_edit,test_destroy"),
+        served.starts_with("get_document_info,get_outline,get_text,search,get_selection,get_page_image,go_to_page,show_source,")
+            && served.contains(",redact_apply,")
+            && served.trim_end().ends_with("test_edit,test_destroy"),
         "every registered tool, edit and destructive ones included: {err}"
     );
     assert!(err.contains("tool-reply get_text isError=false images=0 :: <<<DOCUMENT --- page 2 --- [p2.1] The supplier"), "{err}");

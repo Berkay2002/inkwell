@@ -1332,7 +1332,10 @@ fn a_file_whose_form_cannot_be_scanned_is_left_alone_as_possibly_signed() {
     let f = put(&d, "big.pdf", &assemble(&objs, ""));
     let r = go(&action("n", vec![footer("<<1>>")]), &[f], None);
     assert_eq!(r.files[0].status, Status::Skipped, "{:?}", r.files[0].reason);
-    assert!(r.files[0].reason.as_deref().unwrap().starts_with("could not check whether the file is signed:"), "{:?}", r.files[0].reason);
+    // the shared reading of the signature structure (signed.rs) finds this signature without scanning the pages
+    // and says "signed"; a form it could not list at all says "could not check": both leave the file alone
+    let why = r.files[0].reason.as_deref().unwrap();
+    assert!(why.starts_with("signed:") || why.starts_with("could not check whether the file is signed:"), "{why:?}");
 }
 
 #[test]
