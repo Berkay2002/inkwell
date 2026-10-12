@@ -88,7 +88,7 @@ fn section(view: &View, entries: &[(MarkKind, Bands)]) -> Result<String> {
 /// For each operator, the index of the `EMC` that closes it when it is a `BDC` or `BMC` (None for
 /// every other operator and for an opener nothing closes), matched in one pass with a stack so a
 /// stream full of unclosed sections does not cost a scan to the end for each of them.
-fn matching_ends(ops: &[cs::Op]) -> Vec<Option<usize>> {
+pub(super) fn matching_ends(ops: &[cs::Op]) -> Vec<Option<usize>> {
     let mut ends = vec![None; ops.len()];
     let mut open = Vec::new();
     for (j, op) in ops.iter().enumerate() {

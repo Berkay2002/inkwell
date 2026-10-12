@@ -856,6 +856,7 @@ fn add_background(doc: &mut PdfDocument, pages: &[u32], bg: &Background, spec: O
 /// when it has them.
 pub(super) fn inline_sections(data: &[u8]) -> Vec<(String, Range<usize>)> {
     let ops = cs::parse(data);
+    let ends = fit::matching_ends(&ops);
     let mut out = Vec::new();
     let mut i = 0;
     while i < ops.len() {
@@ -863,32 +864,15 @@ pub(super) fn inline_sections(data: &[u8]) -> Vec<(String, Range<usize>)> {
         if op.op == b"BDC" && op.operands.len() >= 2 && op.operands[0].as_name() == Some(b"Artifact".as_slice()) {
             if let Obj::Dict(d) = &op.operands[1] {
                 let tag = d.iter().find(|(k, _)| k.as_slice() == b"PCMark").and_then(|(_, v)| v.as_name());
-                if let Some(tag) = tag {
-                    let mut depth = 1;
-                    let mut j = i + 1;
-                    while j < ops.len() {
-                        match ops[j].op.as_slice() {
-                            b"BDC" | b"BMC" => depth += 1,
-                            b"EMC" => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                        j += 1;
+                if let (Some(tag), Some(j)) = (tag, ends[i]) {
+                    let (mut start, mut end) = (op.span.start, ops[j].span.end);
+                    if i > 0 && ops[i - 1].op == b"q" && j + 1 < ops.len() && ops[j + 1].op == b"Q" {
+                        start = ops[i - 1].span.start;
+                        end = ops[j + 1].span.end;
                     }
-                    if j < ops.len() {
-                        let (mut start, mut end) = (op.span.start, ops[j].span.end);
-                        if i > 0 && ops[i - 1].op == b"q" && j + 1 < ops.len() && ops[j + 1].op == b"Q" {
-                            start = ops[i - 1].span.start;
-                            end = ops[j + 1].span.end;
-                        }
-                        out.push((String::from_utf8_lossy(tag).into_owned(), start..end));
-                        i = j + 1;
-                        continue;
-                    }
+                    out.push((String::from_utf8_lossy(tag).into_owned(), start..end));
+                    i = j + 1;
+                    continue;
                 }
             }
         }

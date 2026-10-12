@@ -1296,3 +1296,18 @@ fn a_shrink_is_refused_where_inline_marks_would_scale_with_the_page() {
     remove(&mut doc, MarkKind::Watermark, &[0]).unwrap();
     add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
 }
+
+#[test]
+fn a_stream_of_unclosed_mark_sections_is_read_fast() {
+    // 50,000 PCMark openers and one EMC: only the last is closed, and none scans to the end
+    let hostile = "/Artifact <</PCMark /HeaderFooter>> BDC\n".repeat(50_000) + "EMC\n";
+    let started = std::time::Instant::now();
+    let found = super::apply::inline_sections(hostile.as_bytes());
+    assert_eq!(found.len(), 1);
+    assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+    // and the same through the check the shrink makes on every untagged stream
+    let none = "/Artifact <</PCMark /HeaderFooter>> BDC\n".repeat(50_000);
+    let started = std::time::Instant::now();
+    assert!(super::apply::inline_sections(none.as_bytes()).is_empty());
+    assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+}
