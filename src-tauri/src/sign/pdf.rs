@@ -627,7 +627,8 @@ fn lock_p(field: &PdfObject, widget: &PdfObject) -> Option<u8> {
 fn signed_locks(g: &SigField, bytes: &[u8], revs: &mut Revisions, intact: Option<bool>) -> (Vec<crate::forms::scripts::Lock>, Option<u8>) {
     use crate::forms::scripts::{Lock, signature_locks};
     let Some(v) = g.value.as_ref() else { return (Vec::new(), None) };
-    let unknown = || (vec![Lock::All], None);
+    // What it allowed is unknown too: no changes, as `docmdp_level` reads a certification it can't read.
+    let unknown = || (vec![Lock::All], Some(1));
     if !intact.unwrap_or_else(|| info(g, bytes, &|_, _| (false, String::new())).intact) {
         return unknown();
     }

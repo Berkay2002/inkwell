@@ -1812,6 +1812,11 @@ fn a_signature_pointed_at_a_later_update_that_strips_its_lock_locks_every_field(
     assert!(u2.len() > u.len());
     assert!(!field(&infos(&u2), "Tenant").intact);
     assert_eq!(locked_fields(&u2), ["Witness", "Other"]);
+    // And what it allowed is unknown: no changes, so no new box either.
+    let p1 = "The document is certified with no changes allowed, so it can't be signed again.";
+    let l = pdf::list(&PdfDocument::from_bytes(&u2).unwrap(), &u2, &trust_tests).unwrap();
+    assert_eq!(l.certify, Some(1));
+    assert_eq!(pdf::sign(&u2, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap_err().to_string(), p1);
 }
 
 #[test]
