@@ -106,9 +106,10 @@ the message is the `app.alert` text or the default). What the script sees as `ev
 - **Check box:** its export value when it is going on (`Yes` unless it was given another), `Off` when it is going off.
   `event.target.value` is the same. A script cannot make the box hold something else: only `rc` and the changes it makes
   to other fields count.
-- **List box:** the picked entry's export value. In a list box that takes several, the first pick; a validate script of
-  one that rejects it rejects the whole selection. A keystroke script that sets `event.value` to something that is not
-  an entry of the list is not followed.
+- **List box:** the picked entry's export value. In a list box that takes several, the first pick: scripts see one
+  pick, and a validate script that rejects it rejects the whole selection. A keystroke script that sets `event.value`
+  to an entry of the list replaces the first pick, the others are kept; one that sets something that is not an entry is
+  not followed.
 - The AF format, mask and range calls (`AFNumber_Keystroke`, `AFRange_Validate` ...) are for text: on a check box or
   list box they do nothing. Only a script of the field's own is run.
 - Radio buttons are not run (a group's scripts sit on its widgets, and an import fills it by its first one).

@@ -4,8 +4,8 @@
 //!
 //! Shapes follow ISO 19444-1 (XFDF) and ISO 32000-2 section 12.7.8 (FDF). No file written by Acrobat
 //! was available to check them against. The XFDF and FDF code is written from the standards; pdfcraft's
-//! `crates/xfdf` was read for ideas, and the one function taken from it (`xml_name`, form data XML) is marked in
-//! `forms/data.rs` and listed in `third_party/pdfcraft/INKWELL-NOTICE.txt`.
+//! `crates/xfdf` was read for ideas, and what the form data XML export takes from it (`xml_name`, the shape of
+//! `xml_data`) is marked in `forms/data.rs` and listed in `third_party/pdfcraft/INKWELL-NOTICE.txt`.
 
 use crate::engine::{DocId, Engine, EngineError};
 use quick_xml::events::Event;

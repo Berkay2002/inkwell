@@ -149,8 +149,8 @@ readers in `src-tauri/src/exchange.rs`. The format of an export follows the file
   Export runs no script.
 - **CSV and tab text:** one header row of full field names and one record row, CRLF line ends, UTF-8 with a byte order
   mark (so Excel opens it as UTF-8). CSV quotes per RFC 4180 (a comma, a quote or a line break puts the value in
-  quotes, a quote is doubled). Tab text has no quoting, so a tab or line break inside a value is written as a space and
-  the export says how many values that changed. A list box that takes several entries is one cell, its picks joined by
+  quotes, a quote is doubled). Tab text is quoted the same way (a tab, a quote or a line break puts the value in
+  quotes), as Excel writes it, so nothing in a value is changed. A list box that takes several entries is one cell, its picks joined by
   `, `; the import splits it again, unless the whole cell is one of the list's entries (an export value that itself
   contains `, ` cannot round trip).
 - **XML:** plain form data, `<fields><name>value</name>...</fields>`, nested by the dots of the full name
@@ -178,10 +178,11 @@ readers in `src-tauri/src/exchange.rs`. The format of an export follows the file
   a value past the last column are reported too.
 - **Text files, caps.** UTF-8 with or without a byte order mark, or UTF-16 with one (Excel's "Unicode Text"); anything
   else (a code page, UTF-16 without a mark, UTF-32, a NUL byte) is refused with that message, never guessed at. The
-  delimiter is the most common of tab, comma and semicolon in the header row (a Swedish-locale spreadsheet writes
-  semicolons). Over 10 000 rows, 10 000 columns or 32 MB, or a quote that never closes, refuses the
-  file whole; a cell over 1 MB is that field's skip (as a JSON value is). Tab text is read as it is written: a cell
-  Excel wrapped in quotes keeps the quotes, and a line break inside a cell ends the record. A CSV whose first cell
+  delimiter comes from the file name first: `.txt`, `.tsv` and `.tab` are tab text, `.csv` is comma or semicolon (the
+  more common one in the header row, a tie goes to comma; a Swedish-locale spreadsheet writes semicolons). Any other
+  name takes a tab in the header row as tab text. A header with none of them is one column, not split. Over 10 000 rows, 10 000 columns or 32 MB, or a quote that never closes, refuses the
+  file whole; a cell over 1 MB is that field's skip (as a JSON value is). Quotes work in tab text as in CSV: a cell
+  that starts with a quote ends at the closing one, `""` is a quote and a line break inside stays in the cell. A CSV whose first cell
   starts with `{`, `<` or `%FDF` is taken for JSON, XML or FDF.
 - **Spreadsheets:** a value that starts with `=`, `+`, `-` or `@` is written as it is; a spreadsheet may treat it as a
   formula. Export a form from an untrusted source to JSON or XML if that matters.

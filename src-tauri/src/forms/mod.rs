@@ -821,7 +821,14 @@ fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec
             }
             changed.extend(by_key);
             changed.extend(rt.validate(e, &stored).map_err(bad)?);
-            if strings.len() > 1 { FieldValue::Many(strings) } else { FieldValue::Text(stored) }
+            // Scripts see one pick, the first: what they make of it takes its place among the others.
+            if strings.len() > 1 {
+                let mut strings = strings;
+                strings[0] = stored;
+                FieldValue::Many(strings)
+            } else {
+                FieldValue::Text(stored)
+            }
         }
     };
     touched.extend(store(rt, e, &value)?);

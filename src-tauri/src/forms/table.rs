@@ -2,12 +2,13 @@
 //! row of full field names, then one row per record. The file is hostile input: it is read in one pass and
 //! only the header, a short label per row and the one row asked for are kept.
 //!
-//! CSV follows RFC 4180 (quotes, doubled quotes, line breaks inside quotes), with the delimiter taken from the
-//! header row (comma, semicolon for spreadsheets set to a Swedish locale, or tab). Tab text is read literally,
-//! as it is written: it has no quoting, so a cell that Excel wrapped in quotes keeps them.
+//! Both follow RFC 4180 for quoting (a cell that starts with a quote ends at the closing quote, `""` is a quote,
+//! line breaks inside quotes stay in the cell): that is what Excel writes for tab text too. The delimiter comes
+//! from the file name when it has a known one (`.txt`, `.tsv`, `.tab` are tab text, `.csv` is comma or
+//! semicolon), otherwise from the header row.
 
 use crate::engine::EngineError;
-use crate::exchange::{bad, MAX_ITEMS, MAX_STR};
+use crate::exchange::{bad, Format, MAX_ITEMS, MAX_STR};
 
 type Result<T> = std::result::Result<T, EngineError>;
 
@@ -29,34 +30,46 @@ pub struct Table {
     pub picked: Option<Vec<Option<String>>>,
 }
 
-fn delimiter(text: &str) -> char {
-    let (mut tab, mut comma, mut semi, mut quoted) = (0usize, 0usize, 0usize, false);
+/// The delimiter, or `None` for a file with one column (nothing to split). `hint` is what the file name says:
+/// `Tab` (`.txt`, `.tsv`, `.tab`), `Csv`, or nothing known.
+fn delimiter(text: &str, hint: Option<Format>) -> Option<char> {
+    if hint == Some(Format::Tab) {
+        return Some('\t');
+    }
+    let (mut tab, mut comma, mut semi, mut quoted, mut seen) = (0usize, 0usize, 0usize, false, false);
     for c in text.chars() {
         match c {
             '"' => quoted = !quoted,
-            '\n' | '\r' if !quoted => break,
+            // Blank lines above the header do not end it.
+            '\n' | '\r' if !quoted && seen => break,
+            '\n' | '\r' if !quoted => continue,
             '\t' if !quoted => tab += 1,
             ',' if !quoted => comma += 1,
             ';' if !quoted => semi += 1,
             _ => {}
         }
+        seen = true;
     }
-    // The most common one; a tie goes to tab, then comma.
-    if tab > 0 && tab >= comma && tab >= semi {
-        '\t'
+    // A tab in the header of a file that does not say it is CSV is tab text, whatever else the names hold. A
+    // comma/semicolon tie goes to comma. A header with none of them is one column: no split.
+    if hint.is_none() && tab > 0 {
+        Some('\t')
     } else if semi > comma {
-        ';'
+        Some(';')
+    } else if comma > 0 {
+        Some(',')
+    } else if tab > 0 {
+        Some('\t')
     } else {
-        ','
+        None
     }
 }
 
 /// Reads `text`, keeping the record numbered `pick` (0 is the first row under the header). More than
 /// [`MAX_ROWS`] rows or [`MAX_ITEMS`] columns, and a quote that never closes, refuse the file whole: a part of a
 /// file would be a wrong answer. A row is dropped once read, so memory is the header, the labels and one row.
-pub fn read(text: &str, pick: Option<usize>) -> Result<Table> {
-    let delim = delimiter(text);
-    let quoting = delim != '\t';
+pub fn read(text: &str, pick: Option<usize>, hint: Option<Format>) -> Result<Table> {
+    let delim = delimiter(text, hint);
     let mut table = Table::default();
     let mut rows = 0usize;
     // Records seen, blank ones too: the row number a spreadsheet shows.
@@ -113,7 +126,7 @@ pub fn read(text: &str, pick: Option<usize>) -> Result<Table> {
             Ok(())
         };
         match c {
-            '"' if quoting && quoted => {
+            '"' if quoted => {
                 if chars.peek() == Some(&'"') {
                     chars.next();
                     grow(&mut cell, '"');
@@ -122,12 +135,12 @@ pub fn read(text: &str, pick: Option<usize>) -> Result<Table> {
                     was_quoted = true;
                 }
             }
-            '"' if quoting && at_start && !was_quoted => {
+            '"' if at_start && !was_quoted => {
                 quoted = true;
                 at_start = false;
             }
             _ if quoted => grow(&mut cell, c),
-            c if c == delim => {
+            c if Some(c) == delim => {
                 push_cell(&mut record, &mut cell)?;
                 at_start = true;
                 was_quoted = false;
@@ -166,25 +179,29 @@ pub fn read(text: &str, pick: Option<usize>) -> Result<Table> {
     Ok(table)
 }
 
-/// A CSV cell: quoted when it holds a comma, a quote or a line break (RFC 4180).
-fn csv_cell(s: &str) -> String {
-    if s.contains([',', '"', '\r', '\n']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+/// A cell of either file: quoted when it holds the delimiter, a quote or a line break (RFC 4180).
+fn cell(s: &str, delim: char) -> String {
+    if s.contains([delim, '"', '\r', '\n']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
 }
 
 /// UTF-8 text starts with a byte order mark so a spreadsheet opens it as UTF-8 and not as a code page.
 const BOM: &str = "\u{FEFF}";
 
-/// The file text: a header row and one record row (CRLF, as RFC 4180 has it). Every value is one cell.
-pub fn csv(names: &[&str], values: &[String]) -> String {
-    let row = |v: &mut dyn Iterator<Item = String>| v.collect::<Vec<_>>().join(",");
-    format!("{BOM}{}\r\n{}\r\n", row(&mut names.iter().map(|n| csv_cell(n))), row(&mut values.iter().map(|v| csv_cell(v))))
+fn file(names: &[&str], values: &[String], delim: char) -> String {
+    let row = |v: Vec<String>| v.join(&delim.to_string());
+    format!(
+        "{BOM}{}\r\n{}\r\n",
+        row(names.iter().map(|n| cell(n, delim)).collect()),
+        row(values.iter().map(|v| cell(v, delim)).collect())
+    )
 }
 
-/// Tab text has no quoting, so a tab or line break inside a value is written as a space: returns the text and how
-/// many values that changed.
-pub fn tab(names: &[&str], values: &[String]) -> (String, usize) {
-    let clean = |s: &str| s.replace(['\t', '\r', '\n'], " ");
-    let changed = names.iter().copied().chain(values.iter().map(String::as_str)).filter(|s| s.contains(['\t', '\r', '\n'])).count();
-    let row = |v: Vec<String>| v.join("\t");
-    (format!("{BOM}{}\r\n{}\r\n", row(names.iter().map(|n| clean(n)).collect()), row(values.iter().map(|v| clean(v)).collect())), changed)
+/// The file text: a header row and one record row (CRLF, as RFC 4180 has it). Every value is one cell.
+pub fn csv(names: &[&str], values: &[String]) -> String {
+    file(names, values, ',')
+}
+
+/// Tab text, quoted the way Excel writes it, so a tab, quote or line break in a value survives.
+pub fn tab(names: &[&str], values: &[String]) -> String {
+    file(names, values, '\t')
 }

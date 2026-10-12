@@ -612,12 +612,11 @@ fn csv_tab_text_and_xml_round_trip_with_a_comma_a_quote_a_newline_and_non_ascii(
                 assert!(text_of.contains("\"Asa <Berg> & \"\"Co\"\""), "RFC 4180 quoting: {text_of}");
                 assert!(text_of.contains("\"Main St 4, apt 2\""), "{text_of}");
                 assert!(text_of.contains("\"line one\nline, two \"\"quoted\"\""), "{text_of}");
-                assert_eq!(done.flattened, 0);
             }
             Format::Tab => {
-                // A tab or line break cannot be quoted: it is a space, and the export counts those.
-                assert_eq!(done.flattened, 1, "{ext}");
-                assert_eq!(text_of.lines().count(), 2, "{ext}: one header row and one record row: {text_of:?}");
+                // Quoted as Excel does, so the tab and the line break in a value stay what they are.
+                assert!(text_of.contains("\"line one\nline, two \"\"quoted\"\" "), "{text_of:?}");
+                assert!(text_of.contains("\"Asa <Berg> & \"\"Co\"\" "), "{text_of:?}");
             }
             _ => {
                 assert!(text_of.contains("xfdf:original=\"Full name\""), "{text_of}");
@@ -633,14 +632,7 @@ fn csv_tab_text_and_xml_round_trip_with_a_comma_a_quote_a_newline_and_non_ascii(
         assert!(r.summary.skipped.iter().all(|k| k.name == "Frozen") && r.summary.skipped_total <= 1, "{ext}: {:?}", r.summary);
         assert_eq!(r.summary.set, 7, "{ext}: {:?}", r.summary);
         assert_eq!(b.history(idb).unwrap().len(), steps + 1, "{ext}: one undo step");
-        let mut want = snapshot(&a, ida);
-        if fmt == Format::Tab {
-            for w in want.iter_mut().filter(|w| w.0 == "Notes") {
-                w.1 = w.1.replace('\n', " ");
-                w.2 = vec![w.1.clone()];
-            }
-        }
-        assert_eq!(snapshot(&b, idb), want, "{ext}");
+        assert_eq!(snapshot(&b, idb), snapshot(&a, ida), "{ext}");
         // The same data again changes nothing.
         assert_eq!(import_one(&b, idb, &parsed, EditSource::User).unwrap().summary.set, 0, "{ext}");
     }
@@ -691,29 +683,29 @@ fn text_that_is_not_utf8_or_utf16_with_a_bom_is_refused() {
 fn a_file_with_several_records_lists_them_and_imports_the_picked_one() {
     let (eng, id) = table_form("tbl-rows");
     let csv = "Full name,Address.Street,Country\r\nAsa Berg,Main St 1,se\r\n,Side St 2,no\r\n\r\n,,\r\nOle Dahl,Hill 3,no\r\n";
-    let r = records(csv.as_bytes()).unwrap();
+    let r = records(csv.as_bytes(), None).unwrap();
     assert_eq!(r.count, 3, "a blank line and a row of empty cells are not records");
     // The first column, or the first one with text.
     assert_eq!(r.labels, vec!["Asa Berg", "Side St 2", "Ole Dahl"]);
     // As a spreadsheet numbers them: the header is row 1, the blank line and the row of empty cells count.
     assert_eq!(r.rows, vec![2, 3, 6]);
     // A line break inside quotes is not a row of its own.
-    assert_eq!(records(b"A,B\n\"x\ny\",1\nz,2\n").unwrap().rows, vec![2, 3]);
+    assert_eq!(records(b"A,B\n\"x\ny\",1\nz,2\n", None).unwrap().rows, vec![2, 3]);
     // Bidirectional overrides cannot reorder what the picker shows.
-    assert_eq!(records(b"A\n\xE2\x80\xAEgnp.exe\nb\n").unwrap().labels[0], " gnp.exe");
+    assert_eq!(records(b"A\n\xE2\x80\xAEgnp.exe\nb\n", None).unwrap().labels[0], " gnp.exe");
     match parse(csv.as_bytes()) {
         Err(EngineError::Invalid(m)) => assert!(m.contains("3 records"), "{m}"),
         other => panic!("{:?}", other.map(|p| p.fields)),
     }
-    assert!(parse_pick(csv.as_bytes(), Some(3)).is_err());
-    let p = parse_pick(csv.as_bytes(), Some(2)).unwrap();
+    assert!(parse_pick(csv.as_bytes(), Some(3), None).is_err());
+    let p = parse_pick(csv.as_bytes(), Some(2), None).unwrap();
     import_one(&eng, id, &p, EditSource::User).unwrap();
     assert_eq!(dto(&eng, id, "Full name")[0].value, "Ole Dahl");
     assert_eq!(dto(&eng, id, "Country")[0].value, "no");
     // A one-record file needs no pick, and every other format is one record.
-    assert_eq!(records(b"A,B\r\n1,2\r\n").unwrap(), Records { count: 1, labels: vec![], rows: vec![] });
+    assert_eq!(records(b"A,B\r\n1,2\r\n", None).unwrap(), Records { count: 1, labels: vec![], rows: vec![] });
     assert_eq!(parse(b"A,B\r\n1,2\r\n").unwrap().fields.len(), 2);
-    assert_eq!(records(br#"{"A": "1"}"#).unwrap().count, 1);
+    assert_eq!(records(br#"{"A": "1"}"#, None).unwrap().count, 1);
 }
 
 #[test]
@@ -721,8 +713,8 @@ fn csv_reading_edge_cases() {
     let cells = |s: &str| -> Vec<(String, Val)> { parse(s.as_bytes()).unwrap().fields };
     // Semicolons (a spreadsheet in a Swedish locale), quotes, a line break and a doubled quote inside one.
     assert_eq!(cells("A;B\n\"x;y\";\"say \"\"hi\"\"\nthere\"\n"), vec![("A".into(), Val::Cell("x;y".into())), ("B".into(), Val::Cell("say \"hi\"\nthere".into()))]);
-    // No quoting in tab text: a quote stays where it is.
-    assert_eq!(cells("A\tB\n\"x\ty\"\t5\n"), vec![("A".into(), Val::Cell("\"x".into())), ("B".into(), Val::Cell("y\"".into()))]);
+    // Tab text is quoted the same way: the tab inside the quotes is part of the cell.
+    assert_eq!(cells("A\tB\n\"x\ty\"\t5\n"), vec![("A".into(), Val::Cell("x\ty".into())), ("B".into(), Val::Cell("5".into()))]);
     // A short row leaves the field alone; an empty cell is a value.
     let p = parse(b"A,B,C\n1,,\n").unwrap();
     assert_eq!(p.fields.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["A", "B", "C"]);
@@ -830,4 +822,96 @@ fn an_af_call_on_a_check_box_or_list_box_does_not_reject_its_value() {
     put_script(&eng, id, "Single", "V", "AFRange_Validate(true, 0, true, 10);");
     try_set(&eng, id, "Agree", FieldValue::Checked(true)).unwrap();
     try_set(&eng, id, "Single", text("se")).unwrap();
+}
+
+// ---- delimiter, quoting in tab text, XML names, multi-select scripts ----------------------------
+
+#[test]
+fn the_delimiter_comes_from_the_file_name_then_the_header() {
+    let one = |p: Parsed| p.fields;
+    // A one-field tab file has no tab in its header: its own export reads back, comma and all.
+    let one_field = table::tab(&["Full name"], &["Berg, Asa".to_string()]);
+    let want = vec![("Full name".to_string(), Val::Cell("Berg, Asa".into()))];
+    assert_eq!(one(parse_pick(one_field.as_bytes(), None, Some(Format::Tab)).unwrap()), want);
+    // With no name to go by, a header with no delimiter is one column: no split.
+    assert_eq!(one(parse(one_field.as_bytes()).unwrap()), want);
+    assert_eq!(one(parse(b"Full name\r\nBerg, Asa\r\n").unwrap()), want);
+    assert_eq!(one(parse_pick(b"Full name\r\nBerg, Asa\r\n", None, Some(Format::Csv)).unwrap()), want);
+    // A tab in the header wins over commas inside the names.
+    let tabbed = b"a, b, c\tAge\r\nx\t3\r\n";
+    for hint in [None, Some(Format::Tab)] {
+        let f = one(parse_pick(tabbed, None, hint).unwrap());
+        assert_eq!(f, vec![("a, b, c".to_string(), Val::Cell("x".into())), ("Age".to_string(), Val::Cell("3".into()))], "{hint:?}");
+    }
+    // Spreadsheets in a Swedish locale write semicolons; a tie goes to comma.
+    let f = one(parse_pick(b"A;B\r\n1;2\r\n", None, Some(Format::Csv)).unwrap());
+    assert_eq!(f.len(), 2);
+    let f = one(parse(b"a,b;c\r\n1,2;3\r\n").unwrap());
+    assert_eq!(f[1].0, "b;c");
+    // Blank lines above the header do not hide it.
+    assert_eq!(one(parse(b"\r\n\r\nA\tB\r\n1\t2\r\n").unwrap()).len(), 2);
+    // A one-field file round trips through each of the writers.
+    for (hint, text) in [(Some(Format::Csv), table::csv(&["N"], &["a, \"b\"".to_string()])), (Some(Format::Tab), table::tab(&["N"], &["a\t\"b\"".to_string()]))] {
+        assert_eq!(one(parse_pick(text.as_bytes(), None, hint).unwrap())[0].1, Val::Cell(if hint == Some(Format::Csv) { "a, \"b\"" } else { "a\t\"b\"" }.into()));
+    }
+}
+
+#[test]
+fn excels_tab_text_quotes_a_cell_with_a_quote_a_tab_or_a_line_break() {
+    let (eng, id) = table_form("tbl-excel-quotes");
+    let text = "Full name\tNotes\tAddress.Street\r\n\"He said \"\"hi\"\"\"\t\"line one\nline\ttwo, \"\"x\"\"\"\tMain St\r\n";
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let r = records(&bytes, Some(Format::Tab)).unwrap();
+    assert_eq!(r.count, 1, "a line break in quotes does not split the record");
+    let parsed = parse_pick(&bytes, None, Some(Format::Tab)).unwrap();
+    import_one(&eng, id, &parsed, EditSource::User).unwrap();
+    assert_eq!(dto(&eng, id, "Full name")[0].value, "He said \"hi\"");
+    assert_eq!(dto(&eng, id, "Notes")[0].value, "line one\nline\ttwo, \"x\"");
+    assert_eq!(dto(&eng, id, "Address.Street")[0].value, "Main St");
+    // A quote that starts inside a cell is just a character.
+    let f = parse_pick(b"A\tB\r\n5\" pipe\tx\r\n", None, Some(Format::Tab)).unwrap().fields;
+    assert_eq!(f[0].1, Val::Cell("5\" pipe".into()));
+}
+
+#[test]
+fn a_field_name_that_is_not_an_xml_name_exports_as_valid_xml_and_comes_back() {
+    let make = |t: &str| {
+        let (eng, id) = table_form(t);
+        for (i, n) in ["m\u{b2}", "1st", "a<b>&\"c"].iter().enumerate() {
+            add_one(&eng, id, 0, &nf(FieldKind::Text, n, [320.0, 100.0 + 40.0 * i as f32, 420.0, 130.0 + 40.0 * i as f32]), EditSource::User).unwrap();
+        }
+        (eng, id)
+    };
+    let (a, ida) = make("xml-names-a");
+    for (n, v) in [("m\u{b2}", "one"), ("1st", "two"), ("a<b>&\"c", "three")] {
+        set(&a, ida, n, text(v));
+    }
+    let (bytes, _) = export(&a, ida, Format::Xml, "a.pdf").unwrap();
+    let xml = String::from_utf8(bytes.clone()).unwrap();
+    assert!(xml.contains("<m_ xfdf:original=\"m\u{b2}\">one</m_>"), "{xml}");
+    // Valid: our own reader (quick-xml underneath) takes it, and no element name has a character XML forbids.
+    let root = exchange::parse_xml(xml.trim_start_matches('\u{FEFF}').as_bytes()).unwrap();
+    assert_eq!(root.name, "fields");
+    for k in &root.kids {
+        assert!(k.tag.chars().next().is_some_and(name_start) && k.tag.chars().all(name_char), "{}", k.tag);
+    }
+    let (b, idb) = make("xml-names-b");
+    let r = import_one(&b, idb, &parse(&bytes).unwrap(), EditSource::User).unwrap();
+    assert_eq!(r.summary.skipped_total, 1, "only the frozen field: {:?}", r.summary);
+    assert_eq!(dto(&b, idb, "m\u{b2}")[0].value, "one");
+    assert_eq!(dto(&b, idb, "1st")[0].value, "two");
+    assert_eq!(dto(&b, idb, "a<b>&\"c")[0].value, "three");
+}
+
+#[test]
+fn a_keystroke_script_on_a_multi_select_list_replaces_the_first_pick() {
+    let (eng, id) = table_form("tbl-multi-k");
+    put_script(&eng, id, "Pick", "K", "if (event.value === \"no\") { event.value = \"se\"; }");
+    try_set(&eng, id, "Pick", FieldValue::Many(vec!["no".into(), "se".into()])).unwrap();
+    assert_eq!(dto(&eng, id, "Pick")[0].values, vec!["se", "se"]);
+    // What is not an entry of the list is not followed.
+    put_script(&eng, id, "Pick", "K", "event.value = \"zz\";");
+    try_set(&eng, id, "Pick", FieldValue::Many(vec!["no".into(), "se".into()])).unwrap();
+    assert_eq!(dto(&eng, id, "Pick")[0].values, vec!["no", "se"]);
 }

@@ -48,8 +48,6 @@ export interface FormRecords {
 }
 export interface FormExported {
   count: number;
-  /** Tab text: values whose tab or line break was written as a space (the format has no quoting). */
-  flattened?: number;
   /** Password fields: their values are never written to a file. */
   leftOut?: number;
   /** Fields left out for a value over 1 MB, which a file Inkwell reads cannot hold. */
@@ -109,8 +107,7 @@ export function commentsExportText(r: CommentsExported, file: string): string {
 export function formExportText(r: FormExported, file: string): string {
   const left = r.leftOut ? ` ${plural(r.leftOut, "password field")} left out.` : "";
   const long = r.longText ? ` ${plural(r.longText, "field")} with a value over 1 MB left out.` : "";
-  const flat = r.flattened ? ` ${plural(r.flattened, "value")} had a tab or line break written as a space: tab text has no quoting.` : "";
-  return `Exported ${plural(r.count, "field")} to ${file}.${left}${long}${flat}`;
+  return `Exported ${plural(r.count, "field")} to ${file}.${left}${long}`;
 }
 
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));

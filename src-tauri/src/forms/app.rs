@@ -257,7 +257,7 @@ pub async fn forms_export(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Pa
 #[tauri::command]
 pub async fn forms_import_records(window: Window, reg: tauri::State<'_, Paths>, file: String) -> Result<super::data::Records> {
     let path = reg.open(window.label(), &file)?;
-    blocking(move || super::data::records(&exchange::read_capped(&path)?)).await
+    blocking(move || super::data::records(&exchange::read_capped(&path)?, super::data::table_hint(&path))).await
 }
 
 /// Fills fields from `file` (an open token; FDF, XFDF, JSON, XML, CSV or tab text, told by what is inside) as one
@@ -267,7 +267,7 @@ pub async fn forms_import(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Pa
     let path = reg.open(window.label(), &file)?;
     let eng = eng.inner().clone();
     blocking(move || {
-        let parsed = super::data::parse_pick(&exchange::read_capped(&path)?, row)?;
+        let parsed = super::data::parse_pick(&exchange::read_capped(&path)?, row, super::data::table_hint(&path))?;
         super::data::import_one(&eng, doc, &parsed, EditSource::User)
     })
     .await

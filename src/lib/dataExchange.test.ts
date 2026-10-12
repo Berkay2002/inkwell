@@ -54,7 +54,6 @@ describe("summary texts", () => {
     expect(formExportText({ count: 4 }, "a.fdf")).toBe("Exported 4 fields to a.fdf.");
     expect(formExportText({ count: 4, leftOut: 1 }, "a.fdf")).toBe("Exported 4 fields to a.fdf. 1 password field left out.");
     expect(formExportText({ count: 4, leftOut: 0, longText: 2 }, "a.fdf")).toBe("Exported 4 fields to a.fdf. 2 fields with a value over 1 MB left out.");
-    expect(formExportText({ count: 4, flattened: 1 }, "a.txt")).toBe("Exported 4 fields to a.txt. 1 value had a tab or line break written as a space: tab text has no quoting.");
   });
 });
 

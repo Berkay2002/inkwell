@@ -264,17 +264,31 @@ fn cell(f: &Out) -> String {
     f.values.join(", ")
 }
 
+/// XML 1.0 (fifth edition) NameStartChar, without ':' (a name here has no namespace prefix).
+fn name_start(c: char) -> bool {
+    matches!(c, 'A'..='Z' | '_' | 'a'..='z' | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}' | '\u{370}'..='\u{37D}'
+        | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
+}
+
+/// XML 1.0 NameChar, without ':'. `²` (a number, but not a name character) and `×` are not in it.
+fn name_char(c: char) -> bool {
+    name_start(c) || matches!(c, '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
+}
+
 // Adapted from pdfcraft (MIT OR Apache-2.0), crates/xfdf/src/lib.rs @ b8ddf71
-/// A name as an XML element name (letters, digits, `_`, `-`, `.`; not starting with a digit): what it is is kept
-/// in `xfdf:original` whenever it had to change.
+/// A name as an XML element name (the characters XML 1.0 allows in one; not starting with a digit, `-` or `.`):
+/// what it is is kept in `xfdf:original` whenever it had to change.
 fn xml_name(part: &str) -> String {
-    let mut s: String = part.chars().map(|c| if c.is_alphanumeric() || matches!(c, '_' | '-' | '.') { c } else { '_' }).collect();
-    if !s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') {
+    let mut s: String = part.chars().map(|c| if name_char(c) { c } else { '_' }).collect();
+    if !s.chars().next().is_some_and(name_start) {
         s.insert(0, '_');
     }
     s
 }
 
+// Adapted from pdfcraft (MIT OR Apache-2.0), crates/xfdf/src/lib.rs @ b8ddf71 (`export_data`: the shape, the
+// xfdf-transition namespace and `xfdf:original`)
 /// Plain form data: one element per field, nested by the dots of the full name.
 fn xml_data(fields: &[Out]) -> String {
     fn walk(part: &str, t: &Tree, o: &mut String, top: bool) {
@@ -302,8 +316,6 @@ fn xml_data(fields: &[Out]) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct Exported {
     pub count: usize,
-    /// Tab text: values whose tab or line break was written as a space (the format has no quoting).
-    pub flattened: usize,
     /// Password fields: their values are never written to a file.
     pub left_out: usize,
     /// Fields left out for a value over 1 MB, which a file Inkwell reads cannot hold.
@@ -315,20 +327,15 @@ pub fn export(eng: &Engine, doc: DocId, format: Format, file_name: &str) -> Resu
     let (fields, left_out, long_text) = eng.read_custom(doc, collect)?;
     let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
     let cells = || fields.iter().map(cell).collect::<Vec<_>>();
-    let mut flattened = 0;
     let bytes = match format {
         Format::Json => json(&fields).into_bytes(),
         Format::Fdf => fdf(&fields, file_name),
         Format::Xfdf => xfdf(&fields, file_name).into_bytes(),
         Format::Csv => table::csv(&names, &cells()).into_bytes(),
-        Format::Tab => {
-            let (text, n) = table::tab(&names, &cells());
-            flattened = n;
-            text.into_bytes()
-        }
+        Format::Tab => table::tab(&names, &cells()).into_bytes(),
         Format::Xml => xml_data(&fields).into_bytes(),
     };
-    Ok((bytes, Exported { count: fields.len(), flattened, left_out, long_text }))
+    Ok((bytes, Exported { count: fields.len(), left_out, long_text }))
 }
 
 // ---- parsing the files ---------------------------------------------------------------------------
@@ -670,19 +677,19 @@ pub struct Records {
 const NOT_A_FILE: &str = "This is not an XFDF, FDF, JSON, XML, CSV or tab-delimited text file.";
 
 /// How many records the file has and how to tell them apart.
-pub fn records(bytes: &[u8]) -> Result<Records> {
+pub fn records(bytes: &[u8], hint: Option<Format>) -> Result<Records> {
     let bytes = exchange::utf8_of(bytes)?;
     if exchange::sniff(&bytes).is_some() {
         return Ok(Records { count: 1, labels: Vec::new(), rows: Vec::new() });
     }
-    let t = table::read(std::str::from_utf8(&bytes).map_err(|_| bad(NOT_A_FILE))?, None)?;
+    let t = table::read(std::str::from_utf8(&bytes).map_err(|_| bad(NOT_A_FILE))?, None, hint)?;
     let many = t.labels.len() > 1;
     Ok(Records { count: t.labels.len(), labels: if many { t.labels } else { Vec::new() }, rows: if many { t.rows } else { Vec::new() } })
 }
 
 /// A file's field values, by what it is (see [`exchange::sniff`]). `row` is the record of a CSV or tab text file
 /// (0 is the first under the header); a file with several records needs one.
-pub fn parse_pick(bytes: &[u8], row: Option<usize>) -> Result<Parsed> {
+pub fn parse_pick(bytes: &[u8], row: Option<usize>, hint: Option<Format>) -> Result<Parsed> {
     let bytes = exchange::utf8_of(bytes)?;
     match exchange::sniff(&bytes) {
         Some(Format::Xfdf) => {
@@ -691,18 +698,23 @@ pub fn parse_pick(bytes: &[u8], row: Option<usize>) -> Result<Parsed> {
         }
         Some(Format::Fdf) => parse_fdf(&bytes),
         Some(Format::Json) => parse_json(&bytes),
-        None => parse_table(std::str::from_utf8(&bytes).map_err(|_| bad(NOT_A_FILE))?, row),
+        None => parse_table(std::str::from_utf8(&bytes).map_err(|_| bad(NOT_A_FILE))?, row, hint),
         // `sniff` never says these: they are chosen by the file name when writing.
         Some(Format::Csv | Format::Tab | Format::Xml) => Err(bad(NOT_A_FILE)),
     }
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Parsed> {
-    parse_pick(bytes, None)
+    parse_pick(bytes, None, None)
 }
 
-fn parse_table(text: &str, row: Option<usize>) -> Result<Parsed> {
-    let t = table::read(text, Some(row.unwrap_or(0)))?;
+/// What a data file's name says about the table inside: `Tab` for `.txt`, `.tsv`, `.tab`, `Csv` for `.csv`.
+pub fn table_hint(path: &str) -> Option<Format> {
+    Some(Format::of_path(path, true)).filter(|f| matches!(f, Format::Csv | Format::Tab))
+}
+
+fn parse_table(text: &str, row: Option<usize>, hint: Option<Format>) -> Result<Parsed> {
+    let t = table::read(text, Some(row.unwrap_or(0)), hint)?;
     let count = t.labels.len();
     match row {
         Some(r) if r >= count => return Err(bad(format!("This file has {count} records; record {} is not one of them.", r + 1))),
