@@ -156,6 +156,12 @@ fn without(doc: &mut PdfDocument, data: &[u8], ranges: &[Range<usize>], first: O
     Ok(doc.add_stream(&Buffer::from_bytes(&out)?, Some(&dict), false)?)
 }
 
+/// What was read from a file is not trusted: a band is a finite number of points inside the page.
+fn sane(b: Bands, view: &View) -> Bands {
+    let fit = |v: f64, max: f64| if v.is_finite() { v.clamp(0.0, max) } else { 0.0 };
+    [fit(b[0], view.h), fit(b[1], view.h), fit(b[2], view.w), fit(b[3], view.w)]
+}
+
 /// The page's content list with what `kind` asks of the shrink brought in (`bands`) or taken out
 /// (`None`): the entries of every kind are read from the sections already there (the open wrapper's,
 /// or ones left inline in a merged stream), changed, and written again as one section right after
@@ -177,7 +183,7 @@ pub(super) fn set_shrink(doc: &mut PdfDocument, list: Vec<PdfObject>, view: &Vie
         let data = o.read_stream()?;
         let sections = if has_tag(&data) { shrink_sections(&data) } else { Vec::new() };
         found |= !sections.is_empty();
-        entries.extend(sections.iter().flat_map(|(_, e)| e.iter().map(|(k, b)| (*k, *b))));
+        entries.extend(sections.iter().flat_map(|(_, e)| e.iter().map(|(k, b)| (*k, sane(*b, view)))));
         if tag.is_some() {
             if open.is_none() {
                 let qs = cs::parse(&data).iter().filter(|op| op.op == b"q").count();

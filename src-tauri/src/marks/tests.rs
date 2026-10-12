@@ -1168,3 +1168,24 @@ fn on_a_merged_page_removing_one_kind_leaves_the_others_shrink() {
         near(word(&reopened(&doc), "UL").x0, 4.0, "original");
     }
 }
+
+#[test]
+fn bands_read_from_a_file_are_kept_inside_the_page() {
+    // a merged page (no tagged wrapper) with a /Shrink section that has a negative and a huge band
+    let content = format!(
+        "q %Inkwell\n/Artifact <</PCMark /Shrink /Bates [-50 0 0 0] /Watermark [0 999999999 0 0]>> BDC\n1 0 0 1 0 0 cm\nEMC\n{}Q %Inkwell\n",
+        corners([0.0, 0.0, 612.0, 792.0])
+    );
+    let mut doc = PdfDocument::from_bytes(&page_with("", &content)).unwrap();
+    // the huge band is clamped to the page: it leaves no room, and says so, instead of poisoning the cm
+    match add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("too little room"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    // without it, the negative band is read as 0
+    let content = content.replace("/Watermark [0 999999999 0 0]", "");
+    let mut doc = PdfDocument::from_bytes(&page_with("", &content)).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+    assert_eq!(stream_count(&doc, 0, "/Bates [0 0 0 0]"), 1);
+    assert_eq!(stream_count(&doc, 0, "-50"), 0);
+}
