@@ -40,6 +40,24 @@ pub(super) fn before_open(path: &Path) {
     }
 }
 
+/// Like `BEFORE_OPEN`, but just after the open handle's size was taken (a file that grew while it was being read).
+static AFTER_LEN: Mutex<Vec<(PathBuf, Vec<u8>)>> = Mutex::new(Vec::new());
+
+pub(super) fn after_len(path: &Path) {
+    let mut g = AFTER_LEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = g.iter().position(|(p, _)| p == path) {
+        let (p, bytes) = g.remove(i);
+        std::fs::write(p, bytes).unwrap();
+    }
+}
+
+/// The files whose bytes were read while holding the big-file lock.
+static READ_ALONE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+pub(super) fn read_alone(path: &Path) {
+    READ_ALONE.lock().unwrap_or_else(|e| e.into_inner()).push(path.to_path_buf());
+}
+
 fn no_progress() -> impl Fn(u32, u32) + Sync {
     |_, _| {}
 }
@@ -832,6 +850,20 @@ fn a_certified_or_signed_document_gets_no_index_written_updated_or_removed() {
 }
 
 #[test]
+fn a_certification_that_cannot_be_read_blocks_the_index_as_certified() {
+    // More fields than the check will walk: `certified` errs, which is a certification, not "not certified".
+    let base = dir("catalog-guard-unreadable");
+    let p = write(&base, "a.pdf", with_catalog(&format!("/AcroForm << /Fields [{}] >>", "0 ".repeat(20_001))));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&p.to_string_lossy()).unwrap().doc;
+    let e = embed::embedded(&eng, id).unwrap();
+    assert!(e.blocked.as_deref().is_some_and(|w| w.contains("certified")), "{e:?}");
+    let err = embed::embed(&eng, id, EditSource::User).unwrap_err().to_string();
+    assert!(err.contains("certified"), "{err}");
+    assert!(eng.edit_state(id).unwrap().undo.is_none(), "a refusal is not an undo step");
+}
+
+#[test]
 fn a_saved_redaction_is_gone_from_the_catalog_and_its_results() {
     use crate::redact::app::{apply, find, mark_hits, ApplyOutcome, FindQuery};
     use crate::redact::Sanitize;
@@ -1121,6 +1153,77 @@ fn a_file_that_grew_after_it_was_listed_is_checked_against_the_limit_by_what_is_
     assert!(BEFORE_OPEN.lock().unwrap().is_none(), "the file was replaced after the listing");
     assert_eq!((s.files, s.extracted, s.too_large, s.damaged), (2, 1, 1, 0), "{s:?}");
     assert_eq!(flat(&catalog_search(&d, "grown", SearchOpts::default())).0.len(), 0);
+}
+
+#[test]
+fn a_file_that_grows_while_it_is_read_is_read_again_under_the_big_file_lock() {
+    let base = dir("catalog-grows-reading");
+    let folder = base.join("docs");
+    let small = plain(&[vec!["a small notice"]]);
+    let grown = doc_with(
+        &[vec!["a grown notice"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    let (max_read, max_file) = (small.len() as u64 + 10, grown.len() as u64 + 10);
+    let p = write(&folder, "a.pdf", small);
+    let q = write(&folder, "b.pdf", plain(&[vec!["another notice"]]));
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    AFTER_LEN.lock().unwrap().push((p.clone(), grown));
+    let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), max_read, max_file).unwrap();
+    assert!(AFTER_LEN.lock().unwrap().iter().all(|(x, _)| x != &p), "the file was replaced after its size was taken");
+    assert_eq!((s.files, s.extracted, s.too_large, s.damaged), (2, 2, 0, 0), "{s:?}");
+    // The whole grown file was read, so its text is stored (a search leaves it out: it changed since the listing);
+    // the one that did not grow never took the lock.
+    let row = load_table(&d, 1).unwrap().files.into_iter().find(|r| r.path.ends_with("a.pdf")).unwrap();
+    let text = FileText::decode(&std::fs::read(text_path(&d, row.fid)).unwrap()).unwrap();
+    assert!(serde_json::to_string(&text).unwrap().contains("grown"));
+    let alone = READ_ALONE.lock().unwrap();
+    assert!(alone.contains(&p) && !alone.contains(&q), "{alone:?}");
+}
+
+#[test]
+fn a_file_that_grows_past_the_limit_while_it_is_read_is_too_large() {
+    let base = dir("catalog-grows-past");
+    let folder = base.join("docs");
+    let small = plain(&[vec!["a small notice"]]);
+    let grown = doc_with(
+        &[vec!["a grown notice"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    let limit = small.len() as u64 + 10;
+    let p = write(&folder, "a.pdf", small);
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    AFTER_LEN.lock().unwrap().push((p, grown));
+    let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), limit, limit).unwrap();
+    assert_eq!((s.files, s.extracted, s.too_large, s.damaged), (1, 0, 1, 0), "{s:?}");
+}
+
+#[test]
+fn a_refresh_counts_files_that_could_not_be_read_in_their_own_buckets_not_as_changed() {
+    let base = dir("catalog-failed-refresh");
+    let folder = base.join("docs");
+    let big = doc_with(
+        &[vec!["a big file with notice in it"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    let limit = big.len() as u64 - 1;
+    write(&folder, "big.pdf", big);
+    write(&folder, "broken.pdf", vec![b'x'; 40]);
+    write(&folder, "ok.pdf", plain(&[vec!["a small notice"]]));
+    {
+        use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions};
+        let src = PdfDocument::from_bytes(&plain(&[vec!["hidden notice"]])).unwrap();
+        let mut o = PdfWriteOptions::default();
+        o.set_encryption(Encryption::Aes256).set_user_password("secret").set_owner_password("owner");
+        src.save_with_options(&folder.join("secret.pdf").to_string_lossy(), o).unwrap();
+    }
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), MAX_READ, limit).unwrap();
+    assert_eq!((s.files, s.added, s.damaged, s.password, s.too_large), (4, 4, 1, 1, 1), "{s:?}");
+    // Nothing on disk changed: the three are tried again, and stay in their buckets.
+    let s = build_with(&d, false, &AtomicBool::new(false), &no_progress(), MAX_READ, limit).unwrap();
+    assert_eq!((s.files, s.added, s.changed, s.removed), (4, 0, 0, 0), "{s:?}");
+    assert_eq!((s.damaged, s.password, s.too_large), (1, 1, 1), "{s:?}");
 }
 
 #[test]

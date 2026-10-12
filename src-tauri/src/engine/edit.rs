@@ -197,6 +197,10 @@ pub struct Editor {
     cur: usize,
     /// The step whose content is in the file on disk.
     saved: Option<usize>,
+    /// Why the file takes no edit: a signed file that MuPDF had to repair is held as a rewritten copy, so any save
+    /// of an edit would break its signatures with no warning (also when whether it is signed cannot be read).
+    /// Save as another file writes the copy, and the copy is edited from then on.
+    refuse: Option<&'static str>,
 }
 
 /// What a save wrote, for the version history.
@@ -296,8 +300,15 @@ impl Editor {
         let bytes = std::fs::read(entry.path()).map_err(io)?;
         let mut snap = Snap { len: bytes.len(), bytes: Arc::new(bytes) };
         let mut doc = open_snap(&snap, entry)?;
+        let mut refuse = None;
         // A file MuPDF had to repair takes no incremental updates: start from a clean copy of it.
         if !doc.doc.can_be_saved_incrementally() {
+            refuse = match crate::outline::signed_inner(&doc.doc) {
+                Ok(true) => Some("This signed file was damaged and had to be repaired; save a copy to edit it."),
+                Ok(false) => None,
+                // Fails closed, as `signed` does, but says what is unknown.
+                Err(_) => Some("This file was damaged and had to be repaired, and whether it is signed could not be read; save a copy to edit it."),
+            };
             let out = write_doc(&doc.doc, PdfWriteOptions::default(), snap.len)?;
             snap = Snap { len: out.len(), bytes: Arc::new(out) };
             doc = open_snap(&snap, entry)?;
@@ -315,7 +326,12 @@ impl Editor {
             exact: false,
             sizes,
         };
-        Ok(Editor { doc, steps: vec![base], cur: 0, saved: Some(0) })
+        Ok(Editor { doc, steps: vec![base], cur: 0, saved: Some(0), refuse })
+    }
+
+    /// An edit of a signed file that was repaired on open is refused before anything is written.
+    fn refuse_if_repaired_signed(&self) -> Result<()> {
+        self.refuse.map_or(Ok(()), |m| Err(invalid(m)))
     }
 
     fn step(&self) -> &Step {
@@ -1238,6 +1254,7 @@ impl Engine {
     }
 
     fn apply_locked(&self, entry: &DocEntry, ed: &mut Editor, op: &EditOp, source: EditSource) -> Result<EditState> {
+        ed.refuse_if_repaired_signed()?;
         // Every page operation changes the page tree: a certification does not survive one, at any /P.
         crate::outline::refuse_if_certified(&ed.doc.doc, "Changing its pages")?;
         let sizes = ed.step().sizes.clone();
@@ -1447,6 +1464,7 @@ impl Engine {
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
     ) -> Result<EditState> {
         let ed = self.lane(entry, lane)?;
+        ed.refuse_if_repaired_signed()?;
         let len = ed.step().snap.len;
         let page_count = ed.step().sizes.len();
         // Read before the edit runs: it may be the one that takes the signature away.
@@ -1709,6 +1727,8 @@ impl Engine {
         let saved = Saved { bytes: bytes.to_vec(), summary, pages, redacts, moved: !same };
         if !same {
             *entry.path.write() = target;
+            // The copy is the document now: it is edited like any file (the original's signatures are not its own).
+            ed.refuse = None;
         }
         ed.saved = Some(ed.cur);
         *entry.file_password.lock() = match ed.security() {
