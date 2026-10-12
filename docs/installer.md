@@ -81,3 +81,10 @@ shell; an app-side list would need `SHAddToRecentDocs` and a decision about what
 `scripts/installer-check.ps1 -Msi <msi> -Pdf '<copy1.pdf>;<copy2.pdf>'` (elevated shell) installs, checks the list above,
 launches the verb twice and checks for one running instance, uninstalls, and checks nothing is left. It never touches
 the default PDF app and uses a scratch data folder.
+
+The shortcut components use `HKCU\Software\Inkwell` marker keys as key paths (Windows Installer requires a
+per-user key path for per-user shortcuts); uninstall removes them.
+
+What has been verified so far: unit tests for the argument parsing and the wait queue, the MSI tables, and a full
+install / Open with / forward / uninstall run of a per-user variant of the same template (HKCU roots, different
+`UpgradeCode`). The per-machine MSI itself needs the elevated run above, which is a one-time manual step (UAC).
