@@ -22,6 +22,17 @@ out with a warning. Not yet opened in Word or WordPad. macOS `textutil` read the
 the table (one table, nine cells) but drops pictures even from a minimal hand-made RTF, so the picture
 is unconfirmed.
 
+Tables: columns come from the cells' left edges. Each column is at least as wide as its longest word plus
+the cell padding (5.4 pt a side; the word is measured from the cell's own width, else 0.6 em a character),
+and when the table is wider than the text area the widest columns shrink first, never below that minimum
+(`flow::col_twips`, shared by both writers). A table drawn cell by cell along each row comes out of MuPDF as
+one block per row (or several rows), one line per cell; lines that sit side by side become their own
+paragraphs, so the table is found from where its cells are, not from the order they were drawn in. A first
+row that is all bold, above a body that is not, is the table's header row (it repeats on the next page). A
+line below a table joins it only when it starts on a column edge, reaches the next column and sits within
+1.5 row pitches. Limits: a cell that wraps in a row-wise drawing becomes an extra row, and MuPDF itself keeps
+a column of tight rows (pitch under about 1.5 times the size) as one paragraph, drawn in either order.
+
 ## Create
 From images (JPEG is embedded untouched; PNG/BMP/GIF Flate; every page of a multi-page TIFF), a plain-text
 file (UTF-8/UTF-16 BOM, else UTF-8, else cp1254/cp1252), blank pages, or the clipboard image. The result is

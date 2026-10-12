@@ -315,6 +315,7 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
     // Runs of consecutive multi-column rows are tables. Rows on either side of a run that
     // hold a single cell wide enough to span two columns (a header band, a totals row) join
     // the table; other single-column rows (captions, following text) stay paragraphs.
+    // Below the run, only a row within the table's row pitch joins.
     let spans_run = |edges: &[f64], bi: usize| -> bool {
         let b = &blocks[bi];
         edges.iter().any(|e| (*e - b.rect[0]).abs() <= COL_TOL) && edges.iter().any(|e| *e > b.rect[0] + COL_TOL && *e < b.rect[2] - COL_TOL)
@@ -351,7 +352,15 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
             pieces.push(rows[start - 1].clone());
         }
         pieces.extend(rows[start..end].iter().cloned());
-        if end < rows.len() && rows[end].len() == 1 && spans_run(&run_edges(&rows[start..end]), rows[end][0].1) {
+        // A line below joins only when it sits within the run's normal row pitch (1.5 times the median spacing of
+        // the rows' tops, or 1.5 lines for a run of one row). Text that starts at the table's edge further down is a
+        // paragraph, even when it is as wide as the table.
+        let top = |row: &Vec<(usize, usize)>| row.iter().map(|(_, i)| blocks[*i].rect[3]).fold(f64::MIN, f64::max);
+        let mut pitches: Vec<f64> = rows[start..end].windows(2).map(|w| top(&w[0]) - top(&w[1])).collect();
+        pitches.sort_by(|a, b| a.total_cmp(b));
+        let pitch = pitches.get(pitches.len() / 2).copied().unwrap_or_else(|| blocks[rows[start][0].1].size);
+        let near = end < rows.len() && top(&rows[end - 1]) - top(&rows[end]) <= 1.5 * pitch;
+        if near && rows[end].len() == 1 && spans_run(&run_edges(&rows[start..end]), rows[end][0].1) {
             pieces.push(rows[end].clone());
         }
         flush(&mut pieces, &mut out, &mut consumed);

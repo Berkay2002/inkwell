@@ -880,3 +880,51 @@ fn only_lines_on_one_row_count_as_side_by_side() {
     assert!(!flow::side_by_side(&[r(72.0, 700.0, 200.0, 715.0), r(150.0, 700.0, 300.0, 715.0)]));
     assert!(!flow::side_by_side(&[]));
 }
+
+/// A one-line block of `w` pt width at 11 pt.
+fn wide(t: &str, x: f64, y: f64, w: f64) -> flow::Block {
+    flow::Block { text: t.into(), rect: [x, y, x + w, y + 11.0], size: 11.0, bold: false, italic: false, color: [0.0; 3] }
+}
+
+#[test]
+fn a_line_below_a_table_joins_it_only_when_it_lines_up_and_is_within_the_row_pitch() {
+    use super::rtf::rtf;
+    // Rows at y 500, 480, 460 (pitch 20), columns at 72, 172 and 272.
+    let table = || -> Vec<flow::Block> {
+        (0..3).flat_map(|r| (0..3).map(move |c| tight(&format!("r{r}c{c}"), 72.0 + 100.0 * c as f64, 500.0 - 20.0 * r as f64))).collect()
+    };
+    // (the line, whether it joins the table)
+    let cases = [
+        (wide("Total of everything", 72.0, 440.0, 250.0), true),      // on the left edge, reaches the third column, next row
+        (wide("Total of everything", 72.0, 432.0, 250.0), true),      // a little further: 28 pt below the last row, 1.4 pitches
+        (wide("A paragraph that follows", 72.0, 420.0, 250.0), false), // 2 pitches down
+        (wide("A paragraph that follows", 72.0, 380.0, 250.0), false), // as wide, 3 pitches down
+        (wide("Short note", 72.0, 440.0, 50.0), false),               // next row, but reaches no second column
+        (wide("An indented paragraph", 90.0, 440.0, 250.0), false),   // next row, not on a column edge
+    ];
+    for (line, joins) in cases {
+        let mut blocks = table();
+        blocks.push(line.clone());
+        let r = rtf(&[page_of(blocks)], "t");
+        let rows = word_count(&rtf_tokens(&r.text), "trowd");
+        assert_eq!(rows, if joins { 4 } else { 3 }, "{:?}\n{}", line.text, r.text);
+        // A paragraph is outside the table: text before \par, not in a cell.
+        assert_eq!(r.text.contains(&format!("{}\\par}}", line.text)), !joins, "{:?}", line.text);
+    }
+}
+
+#[test]
+fn text_after_a_table_in_a_pdf_stays_a_paragraph() {
+    let mut content = String::new();
+    for (r, row) in [["Item", "Qty", "Revenue"], ["Widgets", "12", "12.50"], ["Gadgets", "7", "340.00"]].iter().enumerate() {
+        for (c, t) in row.iter().enumerate() {
+            content += &put(t, [72.0, 200.0, 300.0][c], 700.0 - 18.0 * r as f64, r == 0);
+        }
+    }
+    content += &put("A paragraph after the table, long enough to reach across its columns.", 72.0, 600.0, false);
+    let (rtf, xml) = export_both(&dir("after_table"), &raw_pdf(&content));
+    let toks = rtf_tokens(&rtf);
+    assert_eq!(word_count(&toks, "trowd"), 3, "{rtf}");
+    assert!(rtf.contains("long enough to reach across its columns.\\par}"), "{rtf}");
+    assert_eq!(xml.matches("<w:tr>").count(), 3, "{xml}");
+}
