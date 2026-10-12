@@ -202,6 +202,7 @@ export const commands: Command[] = [
   { id: "security", title: "Document properties and security…", needsDoc: true, run: () => useProtect.getState().open("security") },
   { id: "export", title: "Export pages, text or images…", needsDoc: true, run: () => useConvert.getState().openExport() },
   { id: "export-word", title: "Export to Word…", needsDoc: true, run: () => useConvert.getState().openExport(undefined, "word") },
+  { id: "export-rtf", title: "Export to Rich Text…", needsDoc: true, run: () => useConvert.getState().openExport(undefined, "rtf") },
   { id: "print", title: "Print…", keys: ["Ctrl+P"], needsDoc: true, run: () => usePrint.getState().open() },
   { id: "create-pdf", title: "Create PDF…", run: () => useConvert.getState().openCreate() },
   { id: "create-clipboard", title: "Create PDF from the clipboard image", run: () => useConvert.getState().openCreate("clipboard") },

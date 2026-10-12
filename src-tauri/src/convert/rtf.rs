@@ -60,13 +60,14 @@ fn png_size(b: &[u8]) -> Option<(u32, u32)> {
     (w > 0 && h > 0).then_some((w, h))
 }
 
-fn picture(im: &Image, text_w: f64, out: &mut String) -> bool {
+/// `brk` is `\pagebb` when the picture starts a page.
+fn picture(im: &Image, text_w: f64, brk: &str, out: &mut String) -> bool {
     let Some((pw, ph)) = (im.ext == "png").then(|| png_size(&im.bytes)).flatten() else { return false };
     // Size on the page in twips, at most the text width, like the Word writer.
     let (w, h) = ((im.rect[2] - im.rect[0]).max(1.0), (im.rect[3] - im.rect[1]).max(1.0));
     let k = (text_w / w).min(1.0);
     let goal = |pt: f64| (pt * k * 20.0).round().clamp(1.0, 31680.0) as i64;
-    let _ = writeln!(out, "{{\\pard\\plain\\sa120{{\\pict\\pngblip\\picw{pw}\\pich{ph}\\picwgoal{}\\pichgoal{}", goal(w), goal(h));
+    let _ = writeln!(out, "{{\\pard\\plain{brk}\\sa120{{\\pict\\pngblip\\picw{pw}\\pich{ph}\\picwgoal{}\\pichgoal{}", goal(w), goal(h));
     for line in im.bytes.chunks(48) {
         for b in line {
             let _ = write!(out, "{b:02x}");
@@ -83,8 +84,9 @@ fn char_fmt(size: f64, bold: bool, italic: bool, cf: &str) -> String {
 }
 
 /// A table: a row per detected row, single grey borders on every cell, cell edges from the grid (measured
-/// from the left margin), the same padding of short rows as the Word writer.
-fn table(t: &Table, cf: &dyn Fn([f64; 3]) -> String, out: &mut String) {
+/// from the left margin), the same padding of short rows as the Word writer. `brk` is `\pagebb` when the
+/// table starts a page (on the first cell).
+fn table(t: &Table, cf: &dyn Fn([f64; 3]) -> String, brk: &str, out: &mut String) {
     let left = t.cols.first().copied().unwrap_or(0.0);
     let mut edges = t.cols.clone();
     edges.push(t.rect[2]);
@@ -95,7 +97,7 @@ fn table(t: &Table, cf: &dyn Fn([f64; 3]) -> String, out: &mut String) {
         right.push((((e - left) * 20.0).round() as i64).clamp(prev + 60, prev + 31680));
     }
     let border = |side: &str| format!("\\clbrdr{side}\\brdrs\\brdrw10\\brdrcf1");
-    for row in &t.rows {
+    for (ri, row) in t.rows.iter().enumerate() {
         out.push_str("\\trowd\\trgaph108\\trleft0");
         let mut column = 0;
         for c in row {
@@ -109,8 +111,9 @@ fn table(t: &Table, cf: &dyn Fn([f64; 3]) -> String, out: &mut String) {
             let _ = write!(out, "{}{}{}{}\\cellx{x}", border("t"), border("l"), border("b"), border("r"));
         }
         out.push('\n');
-        for c in row {
-            let _ = write!(out, "\\pard\\plain\\intbl{} {}\\cell", char_fmt(c.size, c.bold, c.italic, &cf(c.color)), text(&c.text));
+        for (ci, c) in row.iter().enumerate() {
+            let brk = if ri == 0 && ci == 0 { brk } else { "" };
+            let _ = write!(out, "\\pard\\plain\\intbl{brk}{} {}\\cell", char_fmt(c.size, c.bold, c.italic, &cf(c.color)), text(&c.text));
         }
         for _ in used..right.len() {
             out.push_str("\\pard\\plain\\intbl\\cell");
@@ -140,7 +143,7 @@ pub fn rtf(pages: &[Page], title: &str) -> Rtf {
     }
     let cf = |c: [f64; 3]| {
         let c = rgb8(c);
-        colors.iter().skip(1).position(|e| *e == c).map_or(String::new(), |i| format!("\\cf{}", i + 2))
+        colors.iter().position(|e| *e == c).map_or(String::new(), |i| format!("\\cf{}", i + 1))
     };
     // Page size and margins as the Word writer takes them from the first page.
     let twips = |pt: f64| if pt.is_finite() { (pt * 20.0).round().clamp(144.0, 31680.0) as i64 } else { 12240 };
@@ -161,11 +164,15 @@ pub fn rtf(pages: &[Page], title: &str) -> Rtf {
     // A table is followed by an empty paragraph (another table next to it would merge, and the
     // document must not end inside one), as in the Word writer.
     let mut after_table = false;
+    // A page break is `\pagebb` on the first paragraph of the next page (an `\page` of its own would leave an
+    // empty paragraph at the top of it). Two breaks in a row are a blank page: its own empty paragraph.
+    let mut page_break = false;
     for it in items {
         if after_table && matches!(it, Item::Table(_)) {
             s.push_str("{\\pard\\plain\\par}\n");
         }
         after_table = matches!(it, Item::Table(_));
+        let brk = if !matches!(it, Item::PageBreak) && std::mem::take(&mut page_break) { "\\pagebb" } else { "" };
         match &it {
             Item::Para(b, lvl) => {
                 let style = match lvl {
@@ -175,21 +182,26 @@ pub fn rtf(pages: &[Page], title: &str) -> Rtf {
                 };
                 // A heading is bold by its style; the run's own bold is not needed twice.
                 let fmt = char_fmt(b.size, b.bold && style.is_empty(), b.italic, &cf(b.color));
-                let _ = writeln!(s, "{{\\pard\\plain\\sa120{style}{fmt} {}\\par}}", text(&b.text));
+                let _ = writeln!(s, "{{\\pard\\plain{brk}\\sa120{style}{fmt} {}\\par}}", text(&b.text));
             }
-            Item::Table(t) => table(t, &cf, &mut s),
+            Item::Table(t) => table(t, &cf, brk, &mut s),
             Item::Img(im) => {
-                if image_bytes + im.bytes.len() > MAX_IMAGE_BYTES || !picture(im, text_w, &mut s) {
+                if image_bytes + im.bytes.len() > MAX_IMAGE_BYTES || !picture(im, text_w, brk, &mut s) {
                     skipped += 1;
+                    page_break = !brk.is_empty(); // the break moves to the next item
                 } else {
                     image_bytes += im.bytes.len();
                 }
             }
-            Item::PageBreak => s.push_str("{\\pard\\plain\\page\\par}\n"),
+            Item::PageBreak => {
+                if std::mem::replace(&mut page_break, true) {
+                    s.push_str("{\\pard\\plain\\pagebb\\par}\n");
+                }
+            }
         }
     }
-    if after_table {
-        s.push_str("{\\pard\\plain\\par}\n");
+    if after_table || page_break {
+        s.push_str(if page_break { "{\\pard\\plain\\pagebb\\par}\n" } else { "{\\pard\\plain\\par}\n" });
     }
     s.push('}');
     Rtf { text: s, skipped_images: skipped }

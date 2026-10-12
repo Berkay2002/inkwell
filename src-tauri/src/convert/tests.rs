@@ -356,7 +356,7 @@ fn rtf_keeps_text_formatting_table_picture_and_page_break() {
     let toks = rtf_tokens(&r.text);
     assert!(balanced(&toks), "{}", r.text);
     assert!(matches!(toks.first(), Some(Tok::Open)) && matches!(toks.get(1), Some(Tok::Word(w, Some(1))) if w == "rtf"));
-    for w in ["ansi", "ansicpg", "deff", "fonttbl", "colortbl", "stylesheet", "paperw", "margl", "trowd", "cellx", "cell", "row", "intbl", "pngblip", "page", "b", "i"] {
+    for w in ["ansi", "ansicpg", "deff", "fonttbl", "colortbl", "stylesheet", "paperw", "margl", "trowd", "cellx", "cell", "row", "intbl", "pngblip", "pagebb", "b", "i"] {
         assert!(has_word(&toks, w), "missing \\{w}\n{}", r.text);
     }
     assert!(r.text.contains("\\paperw12240\\paperh15840\\margl1440\\margr1440\\margt1440\\margb1440"), "{}", r.text);
@@ -369,6 +369,11 @@ fn rtf_keeps_text_formatting_table_picture_and_page_break() {
     assert_eq!(word_count(&toks, "row"), 3);
     assert_eq!(word_count(&toks, "cellx"), 9);
     assert!(r.text.contains("\\picw4\\pich3\\picwgoal4000\\pichgoal2000"), "{}", r.text);
+    // The break is on the next page's first paragraph: no paragraph of its own, no \page.
+    assert!(r.text.contains("{\\pard\\plain\\pagebb\\sa120\\fs22\\i\\cf"), "{}", r.text);
+    assert_eq!(word_count(&toks, "pagebb"), 1);
+    assert!(!has_word(&toks, "page"));
+    assert!(!r.text.contains("\\pagebb\\par}"), "no empty paragraph for a break");
     assert!(r.text.contains("\\cellx"));
     // Hex of the PNG signature right after the picture header.
     assert!(r.text.contains("89504e470d0a1a0a"));
@@ -378,6 +383,28 @@ fn rtf_keeps_text_formatting_table_picture_and_page_break() {
     }
     assert!(plain.contains("Body text, long enough to be the main text size of this page ok.\tTabbed."));
     assert!(!plain.contains("Report"), "the title stays in \\info");
+}
+
+#[test]
+fn rtf_grey_text_keeps_its_colour_and_a_blank_page_stays_a_page() {
+    use super::rtf::rtf;
+    let grey = 153.0 / 255.0;
+    let page = |blocks| flow::Page { width: 612.0, height: 792.0, blocks, images: vec![] };
+    let r = rtf(
+        &[
+            page(vec![model_block("Grey", 72.0, 700.0, 11.0, false, [grey; 3])]),
+            page(vec![]),
+            page(vec![model_block("Last", 72.0, 700.0, 11.0, false, [0.0; 3])]),
+        ],
+        "t",
+    );
+    // #999999 is colour table entry 1 (the border grey is the same colour), not black.
+    assert!(r.text.contains("\\fs22\\i\\cf1 Grey"), "{}", r.text);
+    assert!(r.text.contains("{\\colortbl;\\red153\\green153\\blue153;}"), "{}", r.text);
+    // Page 2 is empty: its own paragraph holds the break, page 3's text carries the next one.
+    let toks = rtf_tokens(&r.text);
+    assert_eq!(word_count(&toks, "pagebb"), 2, "{}", r.text);
+    assert!(r.text.contains("{\\pard\\plain\\pagebb\\par}\n{\\pard\\plain\\pagebb\\sa120\\fs22\\i Last"), "{}", r.text);
 }
 
 #[test]
@@ -409,7 +436,7 @@ fn rtf_export_writes_one_parsable_file_with_the_text() {
     assert!(balanced(&toks));
     let plain = rtf_plain(&toks);
     assert!(plain.contains("Inkwell fixture page 1") && plain.contains("Inkwell fixture page 2"), "{plain:?}");
-    assert_eq!(word_count(&toks, "page"), 1, "one break between two pages");
+    assert_eq!(word_count(&toks, "pagebb"), 1, "one break between two pages");
     // macOS ships textutil: a real RTF reader must agree on the text (skipped where it is absent).
     if let Ok(o) = std::process::Command::new("textutil").args(["-convert", "txt", "-stdout"]).arg(&to).output() {
         if o.status.success() {
