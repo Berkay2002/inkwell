@@ -10,7 +10,7 @@
 //! text in a form) is skipped and listed with its page and reason; a block is rewritten whole or not at all.
 //! Comments, form-field values and bookmarks are not replaced.
 
-use super::text::{self, group_blocks, issue_text, paragraph_separator, read_page, Block, Fallback, RunChange, TextChange};
+use super::text::{self, group_blocks, issue_text, read_page, Block, Fallback, KeepLines, RunChange, TextChange};
 use super::{page_space, rect32, Result};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
@@ -29,6 +29,9 @@ const BUDGET: Duration = Duration::from_secs(20);
 const MAX_WITH: usize = 1000;
 /// Stands before a space in a run's new text while it is built: the space is where a line of the block ended.
 const END: char = '\u{E000}';
+/// Stand before and after a replacement in a run's new text while it is built.
+const OPEN: char = '\u{E001}';
+const CLOSE: char = '\u{E002}';
 /// Words, and the characters they are cut from, shown on each side of a skipped match.
 const AROUND_WORDS: usize = 3;
 const AROUND_CHARS: usize = 40;
@@ -467,7 +470,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
 
 /// Rewrites one block with `spans` of its text replaced by `with`. Runs the spans don't touch keep their
 /// glyphs; a span across runs puts the replacement in the style of the run it starts in. The block's lines
-/// stay where they are (see [`TextChange::line_ends`]). A refusal skips the block's matches and leaves the
+/// stay where they are (see [`TextChange::keep`]). A refusal skips the block's matches and leaves the
 /// page as it was. True when the block was rewritten.
 #[allow(clippy::too_many_arguments)]
 fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &[(usize, usize)], with: &str, listed: &[&search::Hit], out: &mut Outcome) -> bool {
@@ -478,15 +481,30 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
         }
     };
     // Each space that stood for a line end (not one a match swallows) is marked in the text it is in with
-    // the line that follows it, and found again in the new text's coordinates.
+    // the line that follows it, and so is each replacement; the marks are found again in the new text's
+    // coordinates. The text itself is kept as it is (double spaces, no-break spaces).
     let cant = "the lines of the block can't be kept where they are";
-    if !b.breaks.is_empty() && (all.contains(&END) || with.contains(END) || b.breaks.iter().any(|&(p, _)| all.get(p) != Some(&' '))) {
+    let marks = [END, OPEN, CLOSE];
+    if all.iter().chain(with.chars().collect::<Vec<_>>().iter()).any(|c| marks.contains(c)) || b.breaks.iter().any(|&(p, _)| all.get(p) != Some(&' ')) {
         skip_all(out, cant);
         return false;
     }
+    // A match that covers a dropped hyphen takes in the line after it, so its words after the match would
+    // join the first line: when a space follows the match, that space is where the second line goes on.
+    let mut breaks = b.breaks.clone();
+    let mut forced = Vec::new();
+    for (&j, &n) in b.joins.iter().zip(&b.join_lines) {
+        if let Some(&(_, e)) = spans.iter().find(|&&(s, e)| s < j && e >= j) {
+            if all.get(e + 1) == Some(&' ') && !breaks.iter().any(|&(p, _)| p == e + 1) {
+                breaks.push((e + 1, n));
+                forced.push(n);
+            }
+        }
+    }
+    breaks.sort_by_key(|&(p, _)| p);
     let mut specs = Vec::new();
     let (mut at, mut si) = (0usize, 0usize);
-    let (mut line_ends, mut now) = (Vec::new(), 0usize);
+    let (mut ends, mut changed, mut now): (Vec<(usize, usize)>, Vec<(usize, usize)>, usize) = (Vec::new(), Vec::new(), 0);
     for (ri, run) in b.runs.iter().enumerate() {
         let (mut t, mut hit) = (String::new(), false);
         let mut srcs = Vec::new();
@@ -500,11 +518,21 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
                 Some(&(s, e)) if g >= s && g <= e => {
                     hit = true;
                     if g == s {
-                        t.push_str(with);
+                        // Where it meets a space of the text, the replacement's own is not one more.
+                        let mut w = with;
+                        if s > 0 && all[s - 1].is_whitespace() {
+                            w = w.trim_start();
+                        }
+                        if all.get(e + 1).is_some_and(|c| c.is_whitespace()) {
+                            w = w.trim_end();
+                        }
+                        t.push(OPEN);
+                        t.push_str(w);
+                        t.push(CLOSE);
                     }
                 }
                 _ => {
-                    if let Some(&(_, src)) = b.breaks.iter().find(|&&(p, _)| p == g) {
+                    if let Some(&(_, src)) = breaks.iter().find(|&&(p, _)| p == g) {
                         t.push(END);
                         srcs.push(src);
                     }
@@ -513,25 +541,41 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
             }
         }
         if !hit {
-            line_ends.extend(b.breaks.iter().filter(|&&(p, _)| p >= at && p < at + n).map(|&(p, src)| (now + p - at, src)));
+            ends.extend(breaks.iter().filter(|&&(p, _)| p >= at && p < at + n).map(|&(p, src)| (now + p - at, src)));
             now += n;
             specs.push(RunChange { source: Some(ri), ..Default::default() });
         } else {
-            // The text as the rewrite will read it (spaces collapsed): the marks go, their places stay. A
-            // space just before a line end goes (a word replaced by nothing at a line's end).
-            let (mut plain, mut srcs) = (String::new(), srcs.into_iter());
-            for c in t.chars() {
-                if c == END {
-                    if plain.ends_with(' ') {
-                        plain.pop();
+            // The text as the rewrite will read it: the marks go, their places stay. A space just before a
+            // line end goes (a word replaced by nothing at a line's end), and so does one of the two that a
+            // replacement by nothing would leave side by side.
+            let (mut plain, mut srcs, mut open) = (String::new(), srcs.into_iter(), 0usize);
+            let mut chars = t.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    END => {
+                        if plain.ends_with(' ') {
+                            plain.pop();
+                            let len = now + plain.chars().count();
+                            for r in changed.iter_mut() {
+                                *r = (r.0.min(len), r.1.min(len));
+                            }
+                        }
+                        let (pos, src) = (now + plain.chars().count(), srcs.next().expect("a line for each mark"));
+                        ends.push((pos, src));
+                        // The line a replacement took the first word of is no longer as it was.
+                        if forced.contains(&src) {
+                            changed.push((pos, pos + 1));
+                        }
                     }
-                    line_ends.push((now + plain.chars().count(), srcs.next().expect("a line for each mark")));
-                } else if c != '\n' && paragraph_separator(c) {
-                    if !plain.ends_with(' ') {
-                        plain.push(' ');
+                    OPEN => open = plain.chars().count(),
+                    CLOSE => {
+                        let end = plain.chars().count();
+                        changed.push((now + open, now + end));
+                        if end == open && plain.ends_with(char::is_whitespace) && chars.peek().is_some_and(|c| c.is_whitespace()) {
+                            chars.next();
+                        }
                     }
-                } else {
-                    plain.push(c);
+                    c => plain.push(c),
                 }
             }
             now += plain.chars().count();
@@ -543,7 +587,7 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
     }
     // Two ends in one place (the words between them were replaced by nothing): the later line is the one that
     // stays; the gap the emptied line leaves is kept.
-    line_ends.dedup_by(|a, b| {
+    ends.dedup_by(|a, b| {
         let same = a.0 == b.0;
         if same {
             b.1 = a.1;
@@ -554,7 +598,7 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
         skip_all(out, "the replacement would leave no text in the block; delete the block's text with Edit text");
         return false;
     }
-    let change = TextChange { runs: Some(specs), line_ends, ..Default::default() };
+    let change = TextChange { runs: Some(specs), keep: Some(KeepLines { ends, changed }), ..Default::default() };
     match text::rewrite_block_expecting(d, page, index, &change, Some(&b.text)) {
         Ok(fallbacks) => {
             out.replaced += spans.len() as u32;

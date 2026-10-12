@@ -227,11 +227,16 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
 - **Replace all** (`at` unset) plans each page from one reading of it and applies it from the last block to the first;
   one `rewrite_block` per block, however many matches it holds. Runs a match does not touch keep their glyphs and
   kerning; a match across runs puts the replacement in the style of the run it starts in. The block's lines stay
-  where they were: each output line is set at the start (or middle, or end, by the block's alignment) of the line it
-  was, with that line's own baseline, so untouched lines don't move even with a first-line indent or uneven leading,
-  and each line of a justified block but the last is stretched to the block's right edge. A line that no longer
-  fits where it was is not wrapped or pushed down: its matches are skipped with "the replacement does not fit on its
-  line". The same goes for a block whose line ends can't be placed in its new text. A match across a line end drops
+  where they were. A line that holds no replacement is left exactly where and as wide as it was (it starts where it
+  did and its spaces take up its width, which is what its word spacing did); a line that holds one is set at
+  the start (or middle, or end, by the block's alignment) of the line it was, with that line's own baseline, so
+  nothing moves with a first-line indent or uneven leading; in a justified block it is stretched to the end that
+  line had, unless it is the last. The text of a run with a match is kept as it is (double and no-break spaces),
+  only a space the replacement would double at its edge goes. A single left-aligned line may grow to the right
+  as far as no other text or area on its line, else the page margin; any other line that no longer fits where it
+  was is not wrapped or pushed down: its matches are skipped with "the replacement does not fit on its line". The
+  same goes for a block whose line ends can't be placed in its new text, and for a match across a dropped hyphen
+  that leaves no space to start the second line again at. A match across a line end drops
   that one break. Edit text itself re-wraps the whole block to its widest line when its text is committed (its draft
   is one paragraph), so short lines can join. Nothing is searched again
   after a replacement, so a replacement that contains the find text is set once and never loops. The whole run is

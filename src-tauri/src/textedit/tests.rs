@@ -1741,17 +1741,19 @@ fn a_block_cut_by_the_cap_is_checked_for_hyphens_after_the_cut() {
     // which would lose the hyphen: the block is left alone, and the next run still has it to do.
     let two = "BT /F1 12 Tf 72 700 Td (lk well-) Tj ET\nBT /F1 12 Tf 72 686 Td (known) Tj ET\nBT /F1 12 Tf 72 400 Td (lk) Tj ET";
     let (eng, id, _) = open(&d, &pages_pdf(&[two]));
-    let mut r = req("lk", "XX", SearchOpts::default());
+    let mut r = req("lk", "X", SearchOpts::default());
     let cap = Limits { max: 2, ..Limits::default() };
     let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, cap).unwrap();
     assert_eq!((out.replaced, out.skipped_count), (1, 1), "{out:?}");
     assert!(out.stopped.is_some() && out.skipped[0].reason.contains("hyphen"), "{out:?}");
     assert_eq!(out.resume, Some(ReplaceFrom { page: 0, upto: Some(1) }), "{out:?}");
-    assert_eq!(all_text(&eng, id), "lk well- known XX");
-    // With room, the match across the hyphen covers it and the block is replaced.
+    assert_eq!(all_text(&eng, id), "lk well- known X");
+    // With room, the hyphen is no longer why: the match across it takes in the line after it, and the block's
+    // first line has no room for both, so it is listed for that.
     r.from = out.resume;
     let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, Limits::default()).unwrap();
-    assert_eq!((out.replaced, out.skipped_count), (2, 0), "{out:?}");
+    assert_eq!((out.replaced, out.skipped_count), (0, 2), "{out:?}");
+    assert!(out.skipped.iter().all(|s| s.reason.contains("does not fit")), "{out:?}");
 }
 
 #[test]
@@ -1922,6 +1924,74 @@ fn lines_keep_their_own_place_with_an_indent_and_uneven_leading() {
     }
     // The lines it did not change are as wide as they were.
     assert!((after[2][2] - before[2][2]).abs() < 0.05, "{after:?} vs {before:?}");
+}
+
+#[test]
+fn untouched_lines_keep_their_end_even_when_word_spacing_made_it() {
+    let d = dir("replace-keeps-word-spacing");
+    // The first line is spread by Tw, the others are not: a rewrite sets no Tw, so it must be kept by its width.
+    let page = "BT /F1 12 Tf 72 700 Td 14 TL 6 Tw (One cat sat) Tj T* 0 Tw (Two) Tj T* (Three long hats here) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let before = line_boxes(&eng, id);
+    assert_eq!(before.len(), 3);
+    let r = do_replace(&eng, id, &req("long hats", "long bats", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    let after = line_boxes(&eng, id);
+    assert_eq!(after.len(), 3);
+    for (a, b) in after.iter().zip(&before).take(2) {
+        assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.05), "{after:?} vs {before:?}");
+    }
+}
+
+#[test]
+fn a_centred_block_keeps_the_lines_a_replacement_does_not_touch() {
+    let d = dir("replace-centred-lines");
+    let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let long = "Centred text sits on the middle of its width, so each line is shorter than the one before it, more or less.";
+    let change = BlockChange { text: Some(long.into()), align: Some(Align::Center), width: Some(160.0), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 1, &change, EditSource::User).unwrap();
+    let before = blocks(&eng, id, 0).unwrap().blocks[1].lines.clone();
+    assert!(before.len() >= 4, "{before:?}");
+    let r = do_replace(&eng, id, &req("shorter", "smaller", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    let after = blocks(&eng, id, 0).unwrap().blocks[1].lines.clone();
+    assert_eq!(after.len(), before.len());
+    let line_of = |t: &str| blocks(&eng, id, 0).unwrap().blocks[1].text.find(t).is_some();
+    assert!(line_of("smaller"));
+    // Only the line that held the word may differ; the others are where and as wide as they were.
+    let same = after.iter().zip(&before).filter(|(a, b)| a.iter().zip(*b).all(|(x, y)| (x - y).abs() < 0.05)).count();
+    assert!(same >= before.len() - 1, "{after:?} vs {before:?}");
+}
+
+#[test]
+fn a_no_break_space_and_a_double_space_next_to_a_match_stay_as_they_were() {
+    let d = dir("replace-keeps-spaces");
+    let page = r"BT /F1 12 Tf 72 700 Td (One cat\240and  one more) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let before = all_text(&eng, id);
+    assert!(before.contains("and") && before.contains("  one more"), "{before:?}");
+    // The same width ("ant" is as wide as "cat"), so it fits.
+    let r = do_replace(&eng, id, &req("cat", "act", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    assert_eq!(all_text(&eng, id), before.replace("cat", "act"));
+    let r = do_replace(&eng, id, &req("one more", "two more", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    assert!(all_text(&eng, id).contains("and  two more"), "{}", all_text(&eng, id));
+}
+
+#[test]
+fn a_single_line_grows_only_as_far_as_nothing_is_in_the_way() {
+    let d = dir("replace-single-line-room");
+    // Two columns on one baseline: the left one may take the gap, not the right column.
+    let page = "BT /F1 12 Tf 72 700 Td (A cat) Tj ET BT /F1 12 Tf 150 700 Td (Right column) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let r = do_replace(&eng, id, &req("cat", "big cat", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    eng.undo(id).unwrap();
+    let r = do_replace(&eng, id, &req("cat", "cat in a very big fluffy hat", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    assert_eq!(r.skipped[0].reason, "skipped: the replacement does not fit on its line");
+    assert_eq!(all_text(&eng, id), "A cat Right column");
 }
 
 #[test]

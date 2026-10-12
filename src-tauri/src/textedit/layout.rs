@@ -690,14 +690,15 @@ fn stroke_of(fill: &[Op]) -> Vec<Op> {
         .collect()
 }
 
-/// The lines of a block whose line ends are kept (Find & Replace), one per source line in `at`'s order: `groups`
-/// are the items of each, split at the kept line ends. A line stands where the line it was is: at its start for
-/// left and justified text, on its middle or its end for centred and right-aligned text, and each but the last of
-/// a justified block is stretched to `right`. A line that no longer fits between `left` and `right` is an error:
+/// The lines of a block whose line ends are kept (Find & Replace), one per `(source line, items, changed)` in
+/// the block's order. A line that holds no change stays exactly as it was: it starts where it did and its spaces
+/// take up the width it had (what its word spacing did). A changed line is set at the start (or middle, or end,
+/// by the block's alignment) of the line it was; in a justified block it is stretched to the end that line had
+/// unless it is the block's last. A changed line that no longer fits between `left` and `right` gives `None`:
 /// nothing is moved to make room. `spans` are the (start, end, baseline) of the block's lines in the first line's
 /// text space.
 pub(crate) fn keep_lines(
-    groups: Vec<(usize, Vec<Item>)>,
+    groups: Vec<(usize, Vec<Item>, bool)>,
     spans: &[(f64, f64, f64)],
     align: Align,
     (left, right): (f64, f64),
@@ -707,7 +708,7 @@ pub(crate) fn keep_lines(
     let mut lines = Vec::new();
     let mut at = Vec::new();
     let last = groups.len().saturating_sub(1);
-    for (g, (src, mut items)) in groups.into_iter().enumerate() {
+    for (g, (src, mut items, changed)) in groups.into_iter().enumerate() {
         // A line starts with its first glyph: no spaces, no kerning against what came before.
         while items.first().is_some_and(is_space) {
             items.remove(0);
@@ -715,20 +716,25 @@ pub(crate) fn keep_lines(
         while items.last().is_some_and(is_space) {
             items.pop();
         }
-        let (x0, x1, y) = spans[src];
-        let used = m.line(&items);
-        let x = match align {
-            Align::Center => (x0 + x1) / 2.0 - used / 2.0,
-            Align::Right => x1 - used,
-            _ => x0,
-        };
-        if x + used > right + tol || x < left - tol {
-            return None;
-        }
         if let Some(first) = items.first_mut() {
             first.kern = 0.0;
         }
-        at.push(LineAt { x: x - left, down: spans[0].2 - y, width: right - x });
+        let (x0, x1, y) = spans[src];
+        let used = m.line(&items);
+        let (x, stretch) = if !changed {
+            (x0, true)
+        } else {
+            let x = match align {
+                Align::Center => (x0 + x1) / 2.0 - used / 2.0,
+                Align::Right => x1 - used,
+                _ => x0,
+            };
+            if x + used > right + tol || x < left - tol {
+                return None;
+            }
+            (x, align == Align::Justify && g != last)
+        };
+        at.push(LineAt { x: x - left, down: spans[0].2 - y, width: x1 - x, stretch });
         lines.push(LineOut { items, ends_para: g == last });
     }
     Some((lines, at))
@@ -753,11 +759,12 @@ pub(crate) struct Placement {
 }
 
 /// Where one line stands: its start along the block's first line, how far below that line's baseline it is, and
-/// the width a justified line is stretched to (all in text space).
+/// the width its spaces are stretched to fill when `stretch` is set (all in text space).
 pub(crate) struct LineAt {
     pub x: f64,
     pub down: f64,
     pub width: f64,
+    pub stretch: bool,
 }
 
 /// An underline or strikeout to draw: a filled rectangle in the text matrix's space (`x`, `y` its
@@ -821,7 +828,11 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
         }
         x = dx;
         let spaces = items.iter().filter(|i| is_space(i)).count();
-        let extra = if p.align == Align::Justify && !line.ends_para && spaces > 0 { free / spaces as f64 } else { 0.0 };
+        let stretch = match at {
+            Some(a) => a.stretch,
+            None => p.align == Align::Justify && !line.ends_para,
+        };
+        let extra = if stretch && spaces > 0 { free / spaces as f64 } else { 0.0 };
         let mut arr: Vec<Obj> = Vec::new();
         let mut text: Vec<u8> = Vec::new();
         let flush = |arr: &mut Vec<Obj>, text: &mut Vec<u8>| {
