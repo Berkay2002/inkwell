@@ -476,6 +476,33 @@ export interface Pick {
 export const samePick = (a: Pick, b: Pick): boolean => a.page === b.page && a.xref === b.xref;
 export const anchorOf = (picked: Pick[]): Pick | null => picked[picked.length - 1] ?? null;
 
+/**
+ * The picks a press on `pressed` drags along: the picked fields of its page when it is one of two or more picked fields
+ * (a selection across pages moves one page at a time), else null (a press on a field that is not picked drags just it).
+ */
+export function groupPicks(picked: Pick[], pressed: Pick): Pick[] | null {
+  if (picked.length < 2 || !picked.some((p) => samePick(p, pressed))) return null;
+  return picked.filter((p) => p.page === pressed.page);
+}
+
+/**
+ * How far a group drag moves, for a pointer that went `dx`, `dy` (page space): the engine's nudge rule, so the preview
+ * is what lands. The group moves as one block that stays inside the page; a block already past an edge may not go
+ * further past it.
+ */
+export function groupDelta(rects: Rect4[], dx: number, dy: number, page: [number, number]): [number, number] {
+  if (rects.length === 0) return [0, 0];
+  const g: Rect4 = [
+    Math.min(...rects.map((r) => r[0])),
+    Math.min(...rects.map((r) => r[1])),
+    Math.max(...rects.map((r) => r[2])),
+    Math.max(...rects.map((r) => r[3])),
+  ];
+  const ddx = dx < 0 ? Math.max(dx, Math.min(0 - g[0], 0)) : Math.min(dx, Math.max(page[0] - g[2], 0));
+  const ddy = dy < 0 ? Math.max(dy, Math.min(0 - g[1], 0)) : Math.min(dy, Math.max(page[1] - g[3], 0));
+  return [ddx, ddy];
+}
+
 /** A click picks one; Ctrl, Cmd or Shift adds the clicked field (it becomes the anchor), or takes it out if it was picked. */
 export function nextPicks(picked: Pick[], ref: Pick, additive: boolean): Pick[] {
   if (!additive) return [ref];
