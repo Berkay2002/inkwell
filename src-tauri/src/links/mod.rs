@@ -1022,8 +1022,9 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
                 return Ok(None);
             }
             let mut pages = Vec::new();
-            let mut inline = 0;
-            // An object can be listed by two pages: its structure entry and its object are dealt with once.
+            // Links as the pages list them (what the audit counts and the confirm showed): an object that two
+            // pages list is two, though its structure entry and its object are dealt with once.
+            let mut count = 0;
             let mut objects = Vec::new();
             let mut seen = HashSet::new();
             for page in 0..n as u32 {
@@ -1031,10 +1032,9 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
                 if links.is_empty() {
                     continue;
                 }
-                for (id, a) in &links {
-                    if *id < 0 {
-                        inline += 1;
-                    } else if seen.insert(*id) {
+                count += links.len() as u32;
+                for (id, a) in links.iter().filter(|(id, _)| *id > 0) {
+                    if seen.insert(*id) {
                         leave_structure(doc, a, *id)?;
                         objects.push(*id);
                     }
@@ -1045,7 +1045,6 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
             for id in &objects {
                 doc.delete_object(*id)?;
             }
-            let count = inline + objects.len() as u32;
             Ok(Some(Done { id: None, count, pages, name: None }))
         }
         LinkOp::FromUrls => {

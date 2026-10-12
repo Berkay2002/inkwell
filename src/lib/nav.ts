@@ -465,6 +465,8 @@ export const useNav = create<Store>((set, get) => {
     },
 
     removeAllLinks: async (doc) => {
+      // The count and the removal belong to one generation: a change while the dialog is open comes back stale.
+      const rev = docRev(doc);
       let total: number;
       try {
         total = (await api.linksAudit(doc)).total;
@@ -482,7 +484,7 @@ export const useNav = create<Store>((set, get) => {
         { title: "Remove all links", kind: "warning", buttons: { ok: "Remove", cancel: "Cancel" } },
       );
       if (r !== "Ok" && r !== "Remove") return false;
-      const done = await editLinks(doc, docRev(doc), { op: "removeAll" });
+      const done = await editLinks(doc, rev, { op: "removeAll" });
       if (done.kind === "stale") patch(doc, { notice: "The document changed while you were editing. Try that again." });
       if (done.kind !== "ok") return false;
       patch(doc, { selectedLink: null, pending: null, urls: null, notice: `${plural(done.value.count, "link")} removed.` });

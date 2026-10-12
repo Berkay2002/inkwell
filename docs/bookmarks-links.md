@@ -137,7 +137,7 @@ change.
   the bookmarks are not touched. The rail counts first (`links_audit`) and asks with the count; a document with no
   links says so and asks nothing. Every page is read before the first link goes: a page with more than the read
   caps (above), or a document of more than 100,000 pages, refuses the whole removal instead of doing part of it.
-  A link shared by two pages is counted and deleted once. It is a removal like Delete: an unsigned document's next
+  The count is the one the audit gives (a link two pages list is two); its object is deleted once. It is a removal like Delete: an unsigned document's next
   Save rewrites the file without the objects (the addresses are not left in it); a signed one stays incremental.
 - **Certified and signed**: `/P` 1 or 2 refuses every links change inside the closure (no step), and `links_list`
   returns `locked` (the reason) so the rail turns Draw, Change target, Delete, border, Highlight, Links from web

@@ -904,7 +904,8 @@ fn remove_all_links_takes_every_link_in_one_step_and_keeps_the_rest() {
     assert_eq!(outline, 1);
 
     let e = go(&eng, id, LinkOp::RemoveAll);
-    assert_eq!(e.count, 3, "two inline links and the shared one, once");
+    assert_eq!(e.count, 4, "as many as the audit counted: the shared one is on two pages");
+    assert_eq!(e.count, before.iter().map(|p| p.links.len() as u32).sum::<u32>());
     assert_eq!(e.state.undo.as_deref(), Some("Remove all links"));
     for p in 0..2 {
         assert!(list(&eng, id, p).unwrap().links.is_empty(), "page {p}");
