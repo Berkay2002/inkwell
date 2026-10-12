@@ -410,6 +410,16 @@ fn read_images(doc: &PdfDocument, page: u32) -> Result<PageImages> {
 
 const UNIT: [f64; 4] = [0.0, 0.0, 1.0, 1.0];
 
+/// The turn of a picture's bottom edge on the page, degrees clockwise as seen, for its placement in
+/// page space (y down). A picture shown mirrored (the page's y flip makes an upright one's
+/// determinant negative) is measured from its left-right mirror image, so turning it to 0 keeps it
+/// mirrored left-right rather than top-bottom.
+fn angle_of(placed: &Matrix) -> f32 {
+    let [a, b, c, d, ..] = placed.0;
+    let (x, y) = if a * d - b * c > 0.0 { (-a, -b) } else { (a, b) };
+    y.atan2(x).to_degrees() as f32
+}
+
 fn rect32(m: &Matrix, r: [f64; 4]) -> [f32; 4] {
     m.bbox(r).map(|v| v as f32)
 }
@@ -442,7 +452,7 @@ pub fn blocks(eng: &Engine, doc: DocId, page: u32) -> Result<ImageBlocks> {
                     rect: rect32(&m, shown),
                     full_rect: rect32(&m, full),
                     matrix: f.ctm.0.map(|v| v as f32),
-                    angle: placed.0[1].atan2(placed.0[0]).to_degrees() as f32,
+                    angle: angle_of(&placed),
                     quad,
                     width: f.width,
                     height: f.height,

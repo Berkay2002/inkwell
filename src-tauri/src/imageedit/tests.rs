@@ -989,3 +989,25 @@ fn a_paste_into_a_signed_document_comes_after_its_signed_bytes() {
     eng.save(id, None).unwrap();
     assert!(std::fs::read(&path).unwrap().starts_with(&bytes), "the signed bytes are not the start of the saved file");
 }
+
+#[test]
+fn a_mirrored_picture_reports_its_angle_from_the_left_right_mirror() {
+    let d = dir("mirrored-angle");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    change(&eng, id, Some(0), ImageChange::Flip { horizontal: true });
+    let b = list(&eng, id)[0].clone();
+    assert!(b.angle.abs() < 0.01, "a left-right flip reports {}", b.angle);
+    // The same picture flipped top to bottom is the mirror turned half a turn.
+    eng.undo(id).unwrap();
+    change(&eng, id, Some(0), ImageChange::Flip { horizontal: false });
+    let b = list(&eng, id)[0].clone();
+    assert!((b.angle.abs() - 180.0).abs() < 0.01, "a top-bottom flip reports {}", b.angle);
+    // Turned 30 from there it is 30 further on, and the box is that of the turned picture.
+    change(&eng, id, Some(0), ImageChange::Angle { degrees: 30.0 });
+    let b = list(&eng, id)[0].clone();
+    assert!((normalised(b.angle - 210.0)).abs() < 0.01, "{}", b.angle);
+}
+
+fn normalised(a: f32) -> f32 {
+    (a + 180.0).rem_euclid(360.0) - 180.0
+}
