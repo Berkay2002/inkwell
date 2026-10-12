@@ -149,7 +149,7 @@ describe("combine sheet", () => {
       const s = useCombine.getState().sheet!;
       expect(s.unlock).toBeNull();
       expect(s.entries[0]).toMatchObject({ password: "pw", locked: null, doc: 7, pages: 2 });
-      expect(requests().at(-1)).toEqual({ file: "tok-locked", range: "", title: null, password: "pw" });
+      expect(requests()[requests().length - 1]).toEqual({ file: "tok-locked", range: "", title: null, password: "pw" });
       // a file without one sends no password key at all
       expect(requests()[0]).toEqual({ file: "tok-locked", range: "", title: null });
     });
@@ -177,7 +177,7 @@ describe("combine sheet", () => {
       expect(s.entries[0].password).toBe("");
       expect(s.entries[0].locked).toBe(7);
       expect(api.openDocument).toHaveBeenCalledTimes(1);
-      expect(requests().at(-1)).toEqual({ file: "tok-locked", range: "", title: null });
+      expect(requests()[requests().length - 1]).toEqual({ file: "tok-locked", range: "", title: null });
     });
   });
 });

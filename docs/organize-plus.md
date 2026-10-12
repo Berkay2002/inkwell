@@ -21,11 +21,25 @@ Entry: Tools > Merge/Combine, Organize > "Combine files…", command palette "Co
   page), bookmark title (default the file name), reorder by dragging the grip, remove. A first-page thumbnail per row;
   "pages" expands page thumbnails that toggle on click and rewrite the range text. The text stays the source of truth.
 - **Options**: a bookmark per file, each file's own outline kept under its bookmark, a contents page in front
-  (one line per file with its first page number and a link).
+  (one line per file with its first page number and a link), and "Keep the source page labels" (on by default).
+- **Page labels** (PDF 32000 12.4.2): each source's `/PageLabels` go into the result, shifted to the page's place in
+  it and limited to the pages picked, in the order picked (`1-3, 6, 9-7` labels as the source labelled 1-3, 6, 9-7).
+  A source without labels gets plain decimal numbers that carry on the combined page numbers (a file of 3 pages
+  after 5 labelled ones shows 6, 7, 8), as Acrobat does. A contents page in front is plain decimal and counted. A
+  result whose pages are all plain decimal has no `/PageLabels` at all. A source whose labels cannot be read counts
+  as unlabelled; a hostile number tree (a node that is its own kid, a million entries) is read under a cap on the
+  total work, so it costs time but never hangs the sheet. Unticked: the result has no labels, as before.
 - **Form fields** are kept; a field whose name clashes with one already in the result is renamed the way Acrobat does
   ("Name", "Name (2)"). Root field names are the ones compared, as in Insert pages from file.
-- **Left out, with the reason shown on the row**: files that need a password ("locked.pdf is password protected"),
-  files whose owner allows no copying or page changes, files that are not PDFs. A range outside a file refuses the
+- **Locked files**: a row that needs a password says "Password needed" and has an Unlock button. It asks with the same
+  prompt as opening a file ("Password required", "x.pdf is protected."); a wrong password says so and changes nothing.
+  The password lives in the sheet and in the requests for the plan and the run only: it is not written to the
+  plan, the history or any log (`Secret` in Rust: zeroed on drop, never serialised or printed; the sheet drops it
+  when it closes and a failed run takes it away, so the row asks again). The combined file has no password, and the
+  sheet says so. Unlocking opens the file's own handle without starting a version history for it.
+- **Left out, with the reason shown on the row**: files that need a password and have not been given it ("Password
+  needed"), files whose owner allows no copying or page changes (even when the password opens them: the owner's
+  restriction still applies), files that are not PDFs. A range outside a file refuses the
   run and says which file and page ("Page 9 is not in a.pdf"). An open document's own file is never the output.
 - **Output**: a save token from the Save dialog; the result opens in a new tab and the sheet closes.
 - Dropping PDFs from Explorer on the app while the sheet is open adds them (same token route as drop-to-open).
@@ -97,7 +111,11 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
   `Error::is_stream_cap()`, not the message text.
 - The form fields of every source bring their `/DR` resources (fonts) along, merged key by key; where two files name
   a font the same, the first one's is kept.
-- The sources' page labels are not carried into a combined file (the result has none until set in Page labels).
+- A file opened with a password is not remembered between looks (the cache key holds no password), so such a
+  file is read again on every look. Combining never writes a source, so signed or certified sources need no
+  special handling; their signatures are not carried into the result.
+- Labels are carried page by page: a source's section that is cut by a page range or reordered becomes several
+  sections in the result, each with the number the page had in its source.
 - The attachments list does not show portfolio (collection) structure; a PDF Portfolio opens in its own file list (docs/portfolios.md).
 - Transitions are not previewed in the sheet itself, only in full screen.
 - Full screen uses the HTML Fullscreen API; if the platform refuses it, the page still fills the window.

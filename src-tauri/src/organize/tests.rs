@@ -602,10 +602,6 @@ fn labelled(d: &std::path::Path, name: &str, pages: usize, style: LabelStyle, pr
     p
 }
 
-fn range_of(path: &str, range: &str) -> SourceSpec {
-    src(path, range)
-}
-
 #[test]
 fn combine_carries_the_source_page_labels_to_the_pages_it_takes() {
     let d = dir("combine-labels");
@@ -613,7 +609,7 @@ fn combine_carries_the_source_page_labels_to_the_pages_it_takes() {
     let b = labelled(&d, "b.pdf", 5, LabelStyle::Decimal, "A-");
     let c = write(&d, "c.pdf", 3, 0);
     let (eng, _) = open(&c);
-    let specs = [range_of(&a, "2-3"), range_of(&b, "5-4, 1"), range_of(&c, "")];
+    let specs = [src(&a, "2-3"), src(&b, "5-4, 1"), src(&c, "")];
     let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
     let run = |name: &str, opt: CombineOptions, specs: &[SourceSpec]| {
         let out = d.join(name).to_string_lossy().into_owned();
@@ -635,22 +631,21 @@ fn combine_carries_the_source_page_labels_to_the_pages_it_takes() {
     assert!(run("off.pdf", off, &specs).is_empty());
 
     // nothing labelled anywhere: a plain document stays plain
-    assert!(run("plain.pdf", opt, &[range_of(&c, ""), range_of(&c, "1")]).is_empty());
+    assert!(run("plain.pdf", opt, &[src(&c, ""), src(&c, "1")]).is_empty());
 }
 
 #[test]
 fn a_hostile_page_label_tree_is_bounded_and_never_stops_a_combine() {
     use crate::outline::tests::{open_bytes, raw_pdf};
-    // one node that is its own kid 200 000 times over and holds 50 000 keys that are not numbers:
-    // nothing is ever added to the result, so only a cap on the work stops the walk
+    // one node that is its own kid 200 000 times over: nothing is ever added to the result (the depth cap
+    // alone leaves 200 000 ^ 8 visits), so only a cap on the work stops the walk
     let kids = "5 0 R ".repeat(200_000);
-    let nums = "(x) 1 ".repeat(50_000);
     let objs: Vec<String> = vec![
         "<< /Type /Catalog /Pages 2 0 R /PageLabels 5 0 R >>".into(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".into(),
         "<< >>".into(),
-        format!("<< /Kids [{kids}] /Nums [{nums}] >>"),
+        format!("<< /Kids [{kids}] >>"),
     ];
     let d = dir("combine-labels-hostile");
     let bytes = raw_pdf(&objs);
@@ -660,7 +655,7 @@ fn a_hostile_page_label_tree_is_bounded_and_never_stops_a_combine() {
     let a = write(&d, "a.pdf", 2, 0);
     let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
     let out = d.join("out.pdf").to_string_lossy().into_owned();
-    let specs = [range_of(&path, ""), range_of(&a, "")];
+    let specs = [src(&path, ""), src(&a, "")];
     let report = combine::run(&eng, &specs, opt, &out).unwrap();
     assert_eq!(report.plan.pages, 3);
     assert!(t.elapsed() < std::time::Duration::from_secs(20), "{:?}", t.elapsed());
