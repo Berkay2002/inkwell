@@ -648,7 +648,8 @@ pub struct ImageItem {
     pub change: ImageChange,
 }
 
-/// The most images one batch changes (each change parses the page's content again).
+/// The most images one batch changes (each change parses the page's content again). The UI's picks stop at the
+/// same number: keep `MAX_PICKS` in src/lib/imageEdit.ts equal to this.
 const MAX_BATCH: usize = 100;
 
 /// Applies one change to each of several images of `page` listed at `rev`: one undo step. Moves,

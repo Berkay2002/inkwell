@@ -253,7 +253,7 @@ export function quadTouches(q: ImageBlock["quad"], box: Rect4): boolean {
   return true;
 }
 
-/** The most pictures one change takes (the engine's `MAX_BATCH`): the picks stop here. */
+/** The most pictures one change takes: the picks stop here. Keep equal to `MAX_BATCH` in src-tauri/src/imageedit/mod.rs. */
 export const MAX_PICKS = 100;
 
 /** The box around several rectangles. */
