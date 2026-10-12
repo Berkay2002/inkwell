@@ -1759,6 +1759,37 @@ fn a_new_signature_box_takes_no_form_name_and_none_an_include_names() {
 }
 
 #[test]
+fn a_signature_reset_to_cover_the_whole_file_but_not_intact_locks_every_field() {
+    let b = lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Witness)]>>", "");
+    assert_eq!(locked_fields(&b), ["Witness"]);
+    // A later update strips the lock and points the byte range at the whole new file: it can't match, so it can't
+    // say what was locked.
+    let reset = |len: usize| {
+        append(&b, |d| {
+            let mut t = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap();
+            t.dict_delete("Lock").unwrap();
+            let br = t.get_dict("V").unwrap().unwrap().get_dict("ByteRange").unwrap().unwrap();
+            let at = |i| br.get_array(i).unwrap().unwrap().as_int().unwrap() as usize;
+            let (x, y) = (at(1), at(2));
+            let r = format!("[0 {x} {y} {}]", len.saturating_sub(y));
+            t.get_dict("V").unwrap().unwrap().dict_put("ByteRange", d.new_object_from_str(&r).unwrap()).unwrap();
+        })
+    };
+    // Rewrite until the range covers exactly the file it is in (its digits change the length).
+    let mut stripped = reset(0);
+    for _ in 0..4 {
+        stripped = reset(stripped.len());
+    }
+    let d = PdfDocument::from_bytes(&stripped).unwrap();
+    let br = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap();
+    let br = br.get_dict("V").unwrap().unwrap().get_dict("ByteRange").unwrap().unwrap();
+    let at = |i| br.get_array(i).unwrap().unwrap().as_int().unwrap() as usize;
+    assert_eq!(at(2) + at(3), stripped.len());
+    assert!(!field(&infos(&stripped), "Tenant").intact);
+    assert_eq!(locked_fields(&stripped), ["Witness", "Other"]);
+}
+
+#[test]
 fn a_signature_whose_signed_revision_cannot_be_read_locks_every_field() {
     let b = lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Witness)]>>", "");
     // A later update points the signature's byte range at bytes that are no revision at all.
