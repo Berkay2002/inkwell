@@ -59,6 +59,14 @@ pub const MAX_STR: usize = 1 << 20;
 /// Bytes one file may copy out of PDF objects in all. Objects can be shared (one string many entries refer
 /// to), so counts of items do not bound what is copied; this does.
 pub const MAX_COPIED: usize = 32 << 20;
+/// Longest text of a `<data>` (a file attachment) or `<appearance>` element: they are the only ones that may pass
+/// [`MAX_STR`]. One that is longer is not an error of the file: the element is marked [`Node::over`] and left empty.
+pub const MAX_BLOB_TEXT: usize = 9 << 20;
+/// Largest file attachment taken or written, decoded. Hex text doubles it, so it stays under [`MAX_BLOB_TEXT`].
+pub const MAX_ATTACHMENT: usize = 4 << 20;
+/// Attachments and appearance streams together, decoded, in one file read or written: over it they are left out and
+/// counted. In hex they come to about twice this, which stays well under [`MAX_FILE`], so Inkwell can read what it writes.
+pub const MAX_BLOBS: usize = 10 << 20;
 /// The same bound for an export: the document is the person's own, so real comments may hold more than a
 /// file we read, but a damaged one still must not multiply one shared string or array without end.
 pub const MAX_EXPORT_COPIED: usize = 256 << 20;
@@ -74,6 +82,8 @@ pub struct Budget {
     /// Indirect strings over [`MAX_STR`]: only the length is kept (they are dropped, so not charged).
     long: RefCell<HashMap<i32, usize>>,
     numbers: RefCell<HashMap<(i32, usize), Vec<f32>>>,
+    /// What is left of [`MAX_BLOBS`] for attachments and appearance streams.
+    blobs: Cell<usize>,
 }
 
 impl Budget {
@@ -82,7 +92,24 @@ impl Budget {
     }
 
     pub fn with_limit(bytes: usize) -> Budget {
-        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default() }
+        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default(), blobs: Cell::new(MAX_BLOBS) }
+    }
+
+    /// Charges `n` bytes of attachment or appearance data; false (nothing charged) when they are not there. Unlike
+    /// [`Budget::take`] the budget is not gone: the entry is left out and the file goes on.
+    pub fn take_blob(&self, n: usize) -> bool {
+        match self.blobs.get().checked_sub(n) {
+            Some(rest) => {
+                self.blobs.set(rest);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// What is left for attachments and appearance streams.
+    pub fn blobs_left(&self) -> usize {
+        self.blobs.get()
     }
 
     /// Charges `n` bytes. When they are not there the budget is gone for good and this says false: the
@@ -259,8 +286,14 @@ pub struct Node {
     /// Local name as written: plain form data XML names its fields by it.
     pub tag: String,
     pub attrs: Vec<(String, String)>,
-    /// The element's own text, in document order (children's text is not included).
+    /// The element's own text, in document order (children's text is not included): the text before its first child,
+    /// then each child's `tail`.
     pub text: String,
+    /// The text that follows this element inside its parent, before the next child or the parent's end (mixed content,
+    /// which rich text is made of). It is also part of the parent's `text`.
+    pub tail: String,
+    /// A `data` or `appearance` element whose text was over [`MAX_BLOB_TEXT`]: `text` is empty.
+    pub over: bool,
     pub kids: Vec<Node>,
 }
 
@@ -321,10 +354,22 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Node> {
     };
     let grow = |stack: &mut Vec<Node>, s: &str| -> Result<()> {
         if let Some(top) = stack.last_mut() {
-            if top.text.len() + s.len() > MAX_STR {
-                return Err(bad("A value in this file is longer than 1 MB."));
+            let blob = matches!(top.name.as_str(), "data" | "appearance");
+            if top.over {
+                return Ok(());
+            }
+            if top.text.len() + s.len() > if blob { MAX_BLOB_TEXT } else { MAX_STR } {
+                if !blob {
+                    return Err(bad("A value in this file is longer than 1 MB."));
+                }
+                top.over = true;
+                top.text = String::new();
+                return Ok(());
             }
             top.text.push_str(s);
+            if let Some(k) = top.kids.last_mut() {
+                k.tail.push_str(s);
+            }
         }
         Ok(())
     };

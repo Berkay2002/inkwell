@@ -3,24 +3,36 @@
 //!
 //! Export reads each comment's own dictionary, so geometry is in PDF user space (y up), which is what
 //! these files use; the list DTO is in page space. Import maps the file's points through the page
-//! transform, creates the comment with the same code the tools use (which draws our own appearance:
-//! no `/AP` or `<appearance>` of the file is used), then puts the file's name, author, dates and
-//! subject back. A comment is matched by its `name` (`/NM`): the one that exists is updated in place,
-//! the others are added, and a reply keeps its parent.
+//! transform, creates the comment with the same code the tools use (which draws our own appearance),
+//! then puts the file's name, author, dates and subject back. A comment is matched by its `name`
+//! (`/NM`): the one that exists is updated in place, the others are added, and a reply keeps its parent.
 //!
-//! Not carried: appearance streams, rich text, pop-up windows (a comment's pop-up is written, not read),
-//! attachments, sound, carets and redaction marks (skipped and counted), callout lines of free text.
+//! What only raw writes can set comes last (`finish`): the file's appearance (`<appearance>`, FDF `/AP`)
+//! becomes the comment's `/AP` when `ap` could read it, and the rich text (`<contents-richtext>`, `/RC`)
+//! its `/RC`; the plain `/Contents` is always kept. A part that cannot be carried is left out, the comment
+//! gets Inkwell's own drawing, and the report counts it. Carets and file attachments are comments of their
+//! own (`attach` holds the cap and the never-open rules for the file).
+//!
+//! Not carried: pop-up windows (a comment's pop-up is written, not read), sound, redaction marks and
+//! measurements (skipped and counted), callout lines of free text. Links of an attachment (`/F` that is not an
+//! embedded file) are never followed.
 
 use super::{Kind, NewAnnot, Style, add, bad, each, find, meta, parent_of, put_str, rgb};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use crate::exchange::{self, Budget, Format, MAX_DEPTH, MAX_EXPORT_COPIED, MAX_ITEMS, MAX_NODES, MAX_STR, esc, pdf_name, pdf_text};
 use crate::forms::{decode_text, get, parse_da, text};
+use ap::{Package, Why};
+use attach::AttachFile;
 use mupdf::pdf::{AnnotationFlags, PdfAnnotationType, PdfDocument, PdfObject};
 use mupdf::{Matrix, Point, Quad};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
+
+mod ap;
+mod attach;
+mod rich;
 
 type Result<T> = std::result::Result<T, EngineError>;
 
@@ -40,9 +52,11 @@ pub(crate) enum Sub {
     StrikeOut,
     Stamp,
     Ink,
+    Caret,
+    FileAttachment,
 }
 
-const SUBS: [(Sub, &str, &str); 13] = [
+const SUBS: [(Sub, &str, &str); 15] = [
     (Sub::Text, "text", "Text"),
     (Sub::FreeText, "freetext", "FreeText"),
     (Sub::Line, "line", "Line"),
@@ -56,6 +70,8 @@ const SUBS: [(Sub, &str, &str); 13] = [
     (Sub::StrikeOut, "strikeout", "StrikeOut"),
     (Sub::Stamp, "stamp", "Stamp"),
     (Sub::Ink, "ink", "Ink"),
+    (Sub::Caret, "caret", "Caret"),
+    (Sub::FileAttachment, "fileattachment", "FileAttachment"),
 ];
 
 impl Sub {
@@ -90,6 +106,8 @@ impl Sub {
             PdfAnnotationType::StrikeOut => Sub::StrikeOut,
             PdfAnnotationType::Stamp => Sub::Stamp,
             PdfAnnotationType::Ink => Sub::Ink,
+            PdfAnnotationType::Caret => Sub::Caret,
+            PdfAnnotationType::FileAttachment => Sub::FileAttachment,
             _ => return None,
         })
     }
@@ -157,6 +175,17 @@ pub(crate) struct Comment {
     pub popup: Option<([f32; 4], bool)>,
     /// A measurement (`/Measure`, or an intent that ends in `Dimension`): its scale data is not carried.
     pub measured: bool,
+    /// Rich text (`/RC`) as sanitized `<body>` XHTML; `contents` is its plain text.
+    pub rich: Option<String>,
+    /// A caret's `/RD` (XFDF `fringe`) and `/Sy`.
+    pub fringe: Option<[f32; 4]>,
+    pub symbol: String,
+    /// The appearance (`/AP /N`) as plain data. Read from a file always; from a document only for a stamp.
+    pub ap: Option<Package>,
+    /// A FileAttachment's file.
+    pub file: Option<AttachFile>,
+    /// Parts of the comment that were read but cannot be carried (each with why): the comment itself is kept.
+    pub notes: Vec<Why>,
 }
 
 impl Comment {
@@ -192,6 +221,12 @@ impl Comment {
             state: String::new(),
             popup: None,
             measured: false,
+            rich: None,
+            fringe: None,
+            symbol: String::new(),
+            ap: None,
+            file: None,
+            notes: Vec::new(),
         }
     }
 
@@ -307,9 +342,27 @@ fn is_measurement(o: &PdfObject) -> bool {
     get(o, "Measure").is_some() || get(o, "IT").filter(|t| t.is_name().unwrap_or(false)).and_then(|t| t.as_name().ok()).is_some_and(|t| t.ends_with(b"Dimension"))
 }
 
-/// Reads one comment dictionary. `/AP`, `/AA`, `/A`, `/F` file specifications and everything that is
-/// not listed here are never looked at.
-fn read(o: &PdfObject, sub: Sub, b: &Budget) -> Comment {
+/// The rich text of `/RC` (a string or a stream), sanitized.
+fn rich_of(o: &PdfObject, b: &Budget) -> Option<std::result::Result<rich::Rich, Why>> {
+    let v = get(o, "RC")?;
+    if v.is_stream().unwrap_or(false) {
+        let bytes = match v.read_stream_capped(rich::MAX_RICH * 4) {
+            Ok(x) => x,
+            Err(e) => return Some(Err(if e.is_stream_cap() { rich::TOO_BIG } else { rich::DAMAGED })),
+        };
+        if !b.take(bytes.len()) {
+            return None;
+        }
+        return Some(rich::from_bytes(&bytes));
+    }
+    let s = string(o, "RC", b);
+    (!s.is_empty()).then(|| rich::from_bytes(s.as_bytes()))
+}
+
+/// Reads one comment dictionary. `/AA`, `/A`, `/F` and everything that is not listed here are never looked
+/// at. `/AP` is read (into plain data, see `ap`) only when `want_ap`; `/FS` only for a FileAttachment, and
+/// only the embedded file, never a link.
+fn read(o: &PdfObject, sub: Sub, b: &Budget, want_ap: bool) -> Comment {
     let mut c = Comment::new(sub);
     c.name = string(o, "NM", b);
     c.contents = string(o, "Contents", b);
@@ -361,22 +414,67 @@ fn read(o: &PdfObject, sub: Sub, b: &Budget) -> Comment {
             c.popup = Some(([r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3])], open));
         }
     }
+    if sub == Sub::Caret {
+        let rd = get(o, "RD").map(|a| floats(&a, 4, b)).unwrap_or_default();
+        if rd.len() == 4 {
+            c.fringe = Some([rd[0], rd[1], rd[2], rd[3]]);
+        }
+        c.symbol = name_in(get(o, "Sy"), b);
+    }
+    match rich_of(o, b) {
+        Some(Ok(r)) => {
+            if c.contents.is_empty() {
+                c.contents = r.text;
+            }
+            c.rich = Some(r.xml);
+        }
+        Some(Err(w)) => c.notes.push(w),
+        None => {}
+    }
+    if want_ap {
+        match ap::read(o, b) {
+            Some(Ok(p)) => c.ap = Some(p),
+            Some(Err(w)) => c.notes.push(w),
+            None => {}
+        }
+    }
+    if sub == Sub::FileAttachment {
+        match attach::read(o, b) {
+            Some(Ok(f)) => c.file = Some(f),
+            Some(Err(w)) => c.notes.push(w),
+            None => c.notes.push(attach::EXTERNAL),
+        }
+    }
     c
 }
 
-/// Every comment of the document that has a type files can carry, in page order, and how many were
-/// left out for having another type (carets, attachments, sound, ...), and how many text entries were left empty for
-/// being over 1 MB (the importer refuses a file with a longer value, so writing one would make the file unreadable).
+/// What an export reads from a document.
+struct Collected {
+    /// Every comment of the document that has a type files can carry, in page order.
+    items: Vec<Comment>,
+    /// Comments left out: another type (sound, ...), a measurement or an attachment that cannot be written, and
+    /// their replies.
+    left: usize,
+    /// Text entries left empty for being over 1 MB (the importer refuses a file with a longer value, so writing
+    /// one would make the file unreadable).
+    long_text: usize,
+    /// Parts of kept comments, and attachments of left-out ones, that cannot be written, with why.
+    notes: BTreeMap<Why, usize>,
+}
+
 /// Unnamed comments get a stable name for this export only; nothing is written to the document.
-fn collect(doc: &PdfDocument) -> Result<(Vec<Comment>, usize, usize)> {
+fn collect(doc: &PdfDocument) -> Result<Collected> {
     collect_within(doc, MAX_EXPORT_COPIED)
 }
 
 /// [`collect`] with the copy bound given (a test uses a small one: a shape that fills the real bound is slow to build).
-fn collect_within(doc: &PdfDocument, limit: usize) -> Result<(Vec<Comment>, usize, usize)> {
+fn collect_within(doc: &PdfDocument, limit: usize) -> Result<Collected> {
     let budget = Budget::with_limit(limit);
     let mut left = 0usize;
+    let mut notes: BTreeMap<Why, usize> = BTreeMap::new();
     // Measurements are left out (their /Measure scale has no place in these files), and so are their replies.
+    // The same for an attachment whose file cannot be written (over the cap): a comment without its file is not
+    // the comment.
     let mut measured: HashSet<i32> = HashSet::new();
     let (all, _) = each(doc, |page, a| {
         let Some(sub) = Sub::of_type(a.r#type()?) else {
@@ -389,7 +487,16 @@ fn collect_within(doc: &PdfDocument, limit: usize) -> Result<(Vec<Comment>, usiz
             left += 1;
             return Ok(None);
         }
-        let mut c = read(&o, sub, &budget);
+        // Only a stamp's appearance is written: it is what makes a picture (the other types are drawn from their data).
+        let mut c = read(&o, sub, &budget, sub == Sub::Stamp);
+        if sub == Sub::FileAttachment && c.file.is_none() {
+            for w in c.notes {
+                *notes.entry(w).or_default() += 1;
+            }
+            measured.insert(a.xref()?);
+            left += 1;
+            return Ok(None);
+        }
         c.page = i64::from(page);
         c.xref = a.xref()?;
         c.parent_xref = parent_of(&o);
@@ -402,6 +509,15 @@ fn collect_within(doc: &PdfDocument, limit: usize) -> Result<(Vec<Comment>, usiz
     let kept = items.len();
     items.retain(|c| !c.parent_xref.is_some_and(|p| measured.contains(&p)));
     left += kept - items.len();
+    for c in &mut items {
+        // A reply is plain text: the files give it no rich text, and import makes none.
+        if c.parent_xref.is_some() {
+            c.rich = None;
+        }
+        for w in &c.notes {
+            *notes.entry(w).or_default() += 1;
+        }
+    }
     let names: HashMap<i32, String> = items
         .iter_mut()
         .map(|c| {
@@ -416,7 +532,7 @@ fn collect_within(doc: &PdfDocument, limit: usize) -> Result<(Vec<Comment>, usiz
             c.parent = names.get(&p).cloned().unwrap_or_default();
         }
     }
-    Ok((items, left, budget.too_long()))
+    Ok(Collected { items, left, long_text: budget.too_long(), notes })
 }
 
 // ---- export --------------------------------------------------------------------------------------
@@ -474,6 +590,13 @@ fn xfdf(items: &[Comment], file: &str) -> String {
         put("head", &c.head);
         put("tail", &c.tail);
         put("icon", &c.icon);
+        if let Some(r) = c.fringe {
+            put("fringe", &join(&r, ","));
+        }
+        put("symbol", &c.symbol);
+        if let Some(f) = &c.file {
+            put("file", &f.name);
+        }
         put("inreplyto", &c.parent);
         put("replyType", &c.reply_type);
         put("statemodel", &c.state_model);
@@ -481,6 +604,9 @@ fn xfdf(items: &[Comment], file: &str) -> String {
         let _ = write!(o, "<{tag}{at}>");
         if !c.contents.is_empty() {
             let _ = write!(o, "<contents>{}</contents>", esc(&c.contents));
+        }
+        if let Some(r) = &c.rich {
+            let _ = write!(o, "<contents-richtext>{r}</contents-richtext>");
         }
         if !c.da.is_empty() {
             let _ = write!(o, "<defaultappearance>{}</defaultappearance>", esc(&c.da));
@@ -500,20 +626,48 @@ fn xfdf(items: &[Comment], file: &str) -> String {
         if let Some((r, open)) = c.popup {
             let _ = write!(o, "<popup page=\"{}\" rect=\"{}\" open=\"{}\"/>", c.page, join(&r, ","), if open { "yes" } else { "no" });
         }
+        if let Some(p) = &c.ap {
+            use base64::Engine as _;
+            let _ = write!(o, "<appearance>{}</appearance>", base64::engine::general_purpose::STANDARD.encode(ap::to_fdf(p)));
+        }
+        if let Some(f) = &c.file {
+            o.push_str(&attach::to_data(f));
+        }
         let _ = writeln!(o, "</{tag}>");
     }
     o.push_str("</annots>\n</xfdf>\n");
     o
 }
 
-fn fdf(items: &[Comment], file: &str) -> Vec<u8> {
-    // Object 1 is the root; comment i is object i + 2, so a reply's /IRT points inside this file.
+/// An FDF file from whole objects, numbered 1.. in order (object 1 is the root).
+fn assemble_fdf(objs: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = b"%FDF-1.2\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets = Vec::with_capacity(objs.len());
+    for o in objs {
+        offsets.push(out.len());
+        out.extend_from_slice(o);
+    }
+    let xref = out.len();
+    let mut t = format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1);
+    for o in offsets {
+        let _ = writeln!(t, "{o:010} 00000 n ");
+    }
+    let _ = write!(t, "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1);
+    out.extend_from_slice(t.as_bytes());
+    out
+}
+
+fn fdf(items: &[Comment], file: &str) -> Result<Vec<u8>> {
+    // Object 1 is the root; comment i is object i + 2, so a reply's /IRT points inside this file. The objects of
+    // appearances and files follow the comments.
     let numbers: HashMap<&str, usize> = items.iter().enumerate().map(|(i, c)| (c.name.as_str(), i + 2)).collect();
-    let mut objs: Vec<String> = Vec::with_capacity(items.len() + 1);
+    let mut next = items.len() + 2;
+    let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(items.len());
+    let mut extra: Vec<Vec<u8>> = Vec::new();
     let refs: Vec<String> = (0..items.len()).map(|i| format!("{} 0 R", i + 2)).collect();
-    objs.push(format!("<< /FDF << /Annots [{}] /F {} >> >>", refs.join(" "), pdf_text(file)));
-    for c in items {
-        let mut d = format!("<< /Type /Annot /Subtype /{} /Page {}", c.sub.pdf(), c.page);
+    let root = format!("1 0 obj\n<< /FDF << /Annots [{}] /F {} >> >>\nendobj\n", refs.join(" "), pdf_text(file));
+    for (i, c) in items.iter().enumerate() {
+        let mut d = format!("{} 0 obj\n<< /Type /Annot /Subtype /{} /Page {}", i + 2, c.sub.pdf(), c.page);
         let mut put = |k: &str, v: String| {
             let _ = write!(d, " /{k} {v}");
         };
@@ -525,6 +679,9 @@ fn fdf(items: &[Comment], file: &str) -> Vec<u8> {
             if !v.is_empty() {
                 put(k, pdf_text(v));
             }
+        }
+        if let Some(r) = &c.rich {
+            put("RC", pdf_text(r));
         }
         if let Some(f) = c.flags {
             put("F", f.to_string());
@@ -560,6 +717,12 @@ fn fdf(items: &[Comment], file: &str) -> Vec<u8> {
         if !c.icon.is_empty() {
             put("Name", pdf_name(&c.icon));
         }
+        if let Some(r) = c.fringe {
+            put("RD", nums(&r));
+        }
+        if !c.symbol.is_empty() {
+            put("Sy", pdf_name(&c.symbol));
+        }
         if let Some(p) = numbers.get(c.parent.as_str()).filter(|_| !c.parent.is_empty()) {
             put("IRT", format!("{p} 0 R"));
         }
@@ -572,23 +735,23 @@ fn fdf(items: &[Comment], file: &str) -> Vec<u8> {
         if !c.state.is_empty() {
             put("State", pdf_text(&c.state));
         }
-        d.push_str(" >>");
-        objs.push(d);
+        if let Some(p) = &c.ap {
+            put("AP", format!("<< /N {} 0 R >>", next + p.root));
+            extra.extend(ap::write_objects(p, next));
+            next += p.objs.len();
+        }
+        if let Some(f) = &c.file {
+            put("FS", format!("{} 0 R", next + 1));
+            extra.extend(attach::write_objects(f, next)?);
+            next += 2;
+        }
+        d.push_str(" >>\nendobj\n");
+        bodies.push(d.into_bytes());
     }
-    let mut out = b"%FDF-1.2\n%\xE2\xE3\xCF\xD3\n".to_vec();
-    let mut offsets = Vec::with_capacity(objs.len());
-    for (i, body) in objs.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
-    }
-    let xref = out.len();
-    let mut t = format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1);
-    for o in offsets {
-        let _ = writeln!(t, "{o:010} 00000 n ");
-    }
-    let _ = write!(t, "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1);
-    out.extend_from_slice(t.as_bytes());
-    out
+    let mut objs = vec![root.into_bytes()];
+    objs.extend(bodies);
+    objs.extend(extra);
+    Ok(assemble_fdf(&objs))
 }
 
 /// What an export wrote.
@@ -596,20 +759,35 @@ fn fdf(items: &[Comment], file: &str) -> Vec<u8> {
 #[serde(rename_all = "camelCase")]
 pub struct Exported {
     pub count: usize,
-    /// Comments left out: types the files cannot carry (carets, attachments, sound), measurements and their replies.
+    /// Comments left out: types the files cannot carry (sound), measurements and attachments that are over their
+    /// limit, and their replies.
     pub left_out: usize,
     /// Text entries left empty for being over 1 MB, which a file Inkwell reads cannot hold.
     pub long_text: usize,
+    /// Appearances (of picture stamps) and attached files written.
+    pub appearances: usize,
+    pub files: usize,
+    /// Parts that could not be written (an appearance with a pattern or over the limit, rich text that is too big,
+    /// an attached file over its limit), with how many each.
+    pub notes: Vec<Skipped>,
 }
 
 /// The file bytes for every comment of the open document. Read-only: allowed on a signed or certified one.
 pub fn export(eng: &Engine, doc: DocId, format: Format, file_name: &str) -> Result<(Vec<u8>, Exported)> {
-    let (items, left_out, long_text) = eng.read_custom(doc, collect)?;
+    let Collected { items, left, long_text, notes } = eng.read_custom(doc, collect)?;
     let bytes = match format {
-        Format::Fdf => fdf(&items, file_name),
+        Format::Fdf => fdf(&items, file_name)?,
         _ => xfdf(&items, file_name).into_bytes(),
     };
-    Ok((bytes, Exported { count: items.len(), left_out, long_text }))
+    let report = Exported {
+        count: items.len(),
+        left_out: left,
+        long_text,
+        appearances: items.iter().filter(|c| c.ap.is_some()).count(),
+        files: items.iter().filter(|c| c.file.is_some()).count(),
+        notes: skipped(notes),
+    };
+    Ok((bytes, report))
 }
 
 // ---- parsing the files ---------------------------------------------------------------------------
@@ -654,6 +832,7 @@ pub fn parse_xfdf(bytes: &[u8]) -> Result<Parsed> {
         return Err(bad("This is not an XFDF file."));
     }
     let mut out = Parsed::default();
+    let budget = Budget::new();
     let Some(annots) = root.child("annots") else { return Ok(out) };
     for e in &annots.kids {
         if e.name == "popup" {
@@ -700,6 +879,40 @@ pub fn parse_xfdf(bytes: &[u8]) -> Result<Parsed> {
         c.state = a("state");
         c.contents = e.child("contents").map(|k| k.text.clone()).unwrap_or_default();
         c.da = e.child("defaultappearance").map(|k| k.text.clone()).unwrap_or_default();
+        let fringe = csv(e.attr("fringe").unwrap_or(""));
+        if sub == Sub::Caret && fringe.len() == 4 {
+            c.fringe = Some([fringe[0], fringe[1], fringe[2], fringe[3]]);
+        }
+        if sub == Sub::Caret {
+            c.symbol = a("symbol");
+        }
+        if let Some(r) = e.child("contents-richtext") {
+            // The element holds the `<body>` (any namespace prefix is dropped by the reader).
+            match r.child("body").ok_or(rich::DAMAGED).and_then(rich::sanitize) {
+                Ok(r) => {
+                    if c.contents.is_empty() {
+                        c.contents = r.text;
+                    }
+                    c.rich = Some(r.xml);
+                }
+                Err(w) => c.notes.push(w),
+            }
+        }
+        if let Some(p) = e.child("appearance") {
+            match ap::from_base64(&p.text, p.over, &budget) {
+                Ok(p) => c.ap = Some(p),
+                Err(w) => c.notes.push(w),
+            }
+        }
+        if sub == Sub::FileAttachment {
+            match e.child("data") {
+                Some(d) => match attach::from_data(d, &a("file"), &budget) {
+                    Ok(f) => c.file = Some(f),
+                    Err(w) => c.notes.push(w),
+                },
+                None => c.notes.push(attach::EXTERNAL),
+            }
+        }
         if let Some(v) = e.child("vertices") {
             c.vertices = points(&v.text).into_iter().take(MAX_NUMS).collect();
         }
@@ -746,7 +959,7 @@ pub fn parse_fdf(bytes: &[u8]) -> Result<Parsed> {
                 out.over += 1;
                 continue;
             }
-            let mut c = read(&e, sub, &budget);
+            let mut c = read(&e, sub, &budget, true);
             c.page = get(&e, "Page").and_then(|p| p.as_int().ok()).map_or(-1, i64::from);
             // The parent is named by its /NM: through the object the /IRT points at (this file's own
             // object number first), or the dictionary written in place.
@@ -783,6 +996,12 @@ pub struct Summary {
     pub updated: usize,
     /// Why comments were skipped, with how many each.
     pub skipped: Vec<Skipped>,
+    /// Comments that were made without a part of the file (its appearance, rich text or file), with how many each:
+    /// the comment has Inkwell's own drawing, or plain text only.
+    pub notes: Vec<Skipped>,
+    /// Comments that now have the appearance the file gave, and attached files that were added.
+    pub appearances: usize,
+    pub files: usize,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -790,6 +1009,10 @@ pub struct Summary {
 pub struct Skipped {
     pub reason: String,
     pub count: usize,
+}
+
+fn skipped(m: BTreeMap<&'static str, usize>) -> Vec<Skipped> {
+    m.into_iter().map(|(reason, count)| Skipped { reason: reason.to_string(), count }).collect()
 }
 
 /// The result of the import command: the summary, the document's edit state and whether it is signed
@@ -851,6 +1074,9 @@ fn arrow(c: &Comment) -> bool {
 enum Made {
     Tool(NewAnnot),
     PolyLine(Vec<[f32; 2]>),
+    /// A caret or a file attachment (the tools have neither), by its page-space rectangle.
+    Caret([f32; 4]),
+    File([f32; 4]),
 }
 
 /// What to create for `c`, in page space, or why it cannot be.
@@ -913,6 +1139,14 @@ fn make(c: &Comment, m: &Matrix) -> std::result::Result<(Made, Style), &'static 
             Made::PolyLine(tpairs(m, &c.vertices))
         }
         Sub::Stamp => Made::Tool(NewAnnot::Stamp { name: if c.icon.is_empty() { "Draft".into() } else { c.icon.clone() }, rect: page_rect }),
+        Sub::Caret => Made::Caret(page_rect),
+        Sub::FileAttachment => {
+            // Without its file it is not the comment: skipped, with the reason the file was refused.
+            if c.file.is_none() {
+                return Err(c.notes.first().copied().unwrap_or(attach::EXTERNAL));
+            }
+            Made::File(page_rect)
+        }
         _ => return Err(UNKNOWN),
     };
     Ok((what, st))
@@ -945,11 +1179,96 @@ fn stamp(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment) -> Result<()>
         }
         a.set_flags(f)?;
     }
-    if c.sub == Sub::Text && !c.icon.is_empty() {
+    if (c.sub == Sub::Text && !c.icon.is_empty()) || (c.sub == Sub::FileAttachment && ICONS.contains(&c.icon.as_str())) {
         a.set_icon_name(&c.icon)?;
     }
     a.update()?;
     Ok(())
+}
+
+/// The icons of a file attachment (PDF 32000-1, 12.5.6.15).
+const ICONS: [&str; 4] = ["Graph", "PushPin", "Paperclip", "Tag"];
+
+fn real_array(doc: &PdfDocument, v: &[f32]) -> Result<PdfObject> {
+    let mut a = doc.new_array()?;
+    for x in v {
+        a.array_push(PdfObject::new_real(*x)?)?;
+    }
+    Ok(a)
+}
+
+/// What only raw writes can set: the appearance the file gave (with the rectangle it was drawn for), rich text,
+/// and a caret's fringe and symbol. It comes after every setter: `set_contents` drops `/RC`, and a raw `/AP` is
+/// what MuPDF's own drawing must not replace afterwards (nothing flags it as stale; an edit by Inkwell's own
+/// code regenerates it). Returns whether the appearance was installed.
+fn finish(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment) -> Result<bool> {
+    let ap = c.ap.as_ref().zip(c.rect);
+    let symbol = ["P", "None"].contains(&c.symbol.as_str());
+    if c.rich.is_none() && c.fringe.is_none() && !symbol && ap.is_none() {
+        return Ok(false);
+    }
+    let root = match ap {
+        Some((p, _)) => Some(ap::install(doc, p)?),
+        None => None,
+    };
+    let (_p, mut a) = find(doc, page, xref)?;
+    let mut o = a.object();
+    if let Some(r) = &c.rich {
+        put_str(&a, "RC", r)?;
+    }
+    if c.sub == Sub::Caret {
+        if let Some(rd) = c.fringe {
+            o.dict_put("RD", real_array(doc, &rd)?)?;
+        }
+        if symbol {
+            o.dict_put("Sy", PdfObject::new_name(&c.symbol)?)?;
+        }
+    }
+    let Some((n, r)) = root.zip(c.rect) else { return Ok(false) };
+    let mut d = doc.new_dict()?;
+    d.dict_put("N", n)?;
+    o.dict_put("AP", d)?;
+    o.dict_put("Rect", real_array(doc, &r)?)?;
+    // So that the page shows the new appearance now, not after the document is reopened.
+    a.update()?;
+    Ok(true)
+}
+
+fn new_caret(doc: &mut PdfDocument, page: u32, r: [f32; 4], st: &Style, author: &str) -> Result<i32> {
+    let mut p = doc.load_pdf_page(page as i32)?;
+    let mut a = p.add_caret_annotation(super::rect_of(r))?;
+    a.set_color(rgb(st.color.unwrap_or([0.18, 0.294, 0.561])))?;
+    if let Some(o) = st.opacity {
+        a.set_opacity(o.clamp(0.0, 1.0))?;
+    }
+    meta(&mut a, author, true)?;
+    a.update()?;
+    Ok(a.xref()?)
+}
+
+fn new_file(doc: &mut PdfDocument, page: u32, r: [f32; 4], st: &Style, c: &Comment) -> Result<i32> {
+    let file = c.file.as_ref().ok_or_else(|| bad("this attachment has no file"))?;
+    let fs = attach::install(doc, file)?;
+    let mut p = doc.load_pdf_page(page as i32)?;
+    let mut a = p.create_annotation(PdfAnnotationType::FileAttachment)?;
+    let icon = if ICONS.contains(&c.icon.as_str()) { c.icon.as_str() } else { "PushPin" };
+    let made = (|| -> Result<()> {
+        a.set_rect(super::rect_of(r))?;
+        a.set_icon_name(icon)?;
+        a.set_color(rgb(st.color.unwrap_or([0.18, 0.294, 0.561])))?;
+        if let Some(o) = st.opacity {
+            a.set_opacity(o.clamp(0.0, 1.0))?;
+        }
+        a.object().dict_put("FS", fs)?;
+        meta(&mut a, &c.author, true)?;
+        a.update()?;
+        Ok(())
+    })();
+    if let Err(e) = made {
+        let _ = p.delete_annotation(a);
+        return Err(e);
+    }
+    Ok(a.xref()?)
 }
 
 fn new_polyline(doc: &mut PdfDocument, page: u32, pts: &[[f32; 2]], st: &Style, author: &str) -> Result<i32> {
@@ -1036,12 +1355,28 @@ fn update(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment, m: &Matrix) 
     stamp(doc, page, xref, c)
 }
 
+/// [`finish`] for a comment this import made or updated, and the report of what of it could not be carried.
+fn raw(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment, sum: &mut Summary, notes: &mut BTreeMap<&'static str, usize>) {
+    for w in &c.notes {
+        *notes.entry(w).or_default() += 1;
+    }
+    if c.ap.is_some() && c.rect.is_none() {
+        *notes.entry(ap::DAMAGED).or_default() += 1;
+    }
+    match finish(doc, page, xref, c) {
+        Ok(true) => sum.appearances += 1,
+        Ok(false) => {}
+        Err(_) => *notes.entry(ap::DAMAGED).or_default() += 1,
+    }
+}
+
 /// Applies the comments of a file to `doc`. The caller has checked that the document is not certified
 /// and runs this inside one edit step. Returns the summary and the pages touched.
 pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary, Vec<u32>)> {
     let pages = doc.page_count()?.max(0) as i64;
     let mut sum = Summary::default();
     let mut why: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut notes: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut touched: Vec<u32> = Vec::new();
     for (r, k) in [(UNKNOWN, parsed.unknown), (LIMIT, parsed.over)] {
         if k > 0 {
@@ -1107,6 +1442,7 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
                 Ok(()) => {
                     sum.updated += 1;
                     touched.push(kp);
+                    raw(doc, kp, kx, c, &mut sum, &mut notes);
                 }
                 Err(_) => *why.entry(FAILED).or_default() += 1,
             }
@@ -1116,6 +1452,8 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
             let r = match &what {
                 Made::Tool(w) => add(doc, page, w, &st, &c.author),
                 Made::PolyLine(points) => new_polyline(doc, page, points, &st, &c.author),
+                Made::Caret(r) => new_caret(doc, page, *r, &st, &c.author),
+                Made::File(r) => new_file(doc, page, *r, &st, c),
             };
             r.map_err(|_| FAILED)
         });
@@ -1129,7 +1467,9 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
                     known.insert(c.name.clone(), (page, xref, Some(c.sub)));
                 }
                 sum.added += 1;
+                sum.files += usize::from(c.sub == Sub::FileAttachment);
                 touched.push(page);
+                raw(doc, page, xref, c, &mut sum, &mut notes);
             }
             Err(r) => *why.entry(r).or_default() += 1,
         }
@@ -1198,7 +1538,8 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
     if !pending.is_empty() {
         *why.entry(NO_PARENT).or_default() += pending.len();
     }
-    sum.skipped = why.into_iter().map(|(reason, count)| Skipped { reason: reason.to_string(), count }).collect();
+    sum.skipped = skipped(why);
+    sum.notes = skipped(notes);
     touched.sort_unstable();
     touched.dedup();
     Ok((sum, touched))
@@ -1221,3 +1562,5 @@ pub fn import_one(eng: &Engine, doc: DocId, parsed: &Parsed, source: EditSource)
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_full;
