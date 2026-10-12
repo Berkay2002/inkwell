@@ -39,7 +39,7 @@ against a file from Acrobat; I had no Acrobat here, the shape is from memory of 
   before is carried (2.9999 ft with inches in hundredths is "3 ft 0.00 in", never "2 ft 12.00 in"; this runs up the
   whole chain). An array is at most 8 elements (`dict::MAX_CHAIN`); a longer one is not walked.
 - **A malformed `/D` or `/A`** (an element that is not a dictionary, a `/C` at or below zero, no or an empty `/U`, more
-  than 8 elements) is not used at all, because a chain with a unit missing in the middle would read the wrong unit. The
+  than 8 elements, or a value that is not an array such as a reference that loops back) is not used at all, because a chain with a unit missing in the middle would read the wrong unit. The
   value is then written in the `/X` format, as for a measure with no `/D`, the annotation stays listed, and its
   `quantity.note` says which array was left out (the Measure rail shows it). `/X` and `/Y` are lenient as before (a
   bad element is skipped; no usable `/X`, or more than 8, leaves the measure out).
