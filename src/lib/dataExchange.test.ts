@@ -48,7 +48,7 @@ describe("summary texts", () => {
   });
 
   it("export texts name the file and what was left out", () => {
-    expect(commentsExportText({ count: 1, leftOut: 2 }, "a.xfdf")).toBe("Exported 1 comment to a.xfdf. 2 comments of a kind the file cannot carry left out.");
+    expect(commentsExportText({ count: 1, leftOut: 2 }, "a.xfdf")).toBe("Exported 1 comment to a.xfdf. 2 comments left out: measurements, and kinds the file cannot carry.");
     expect(formExportText({ count: 4 }, "a.fdf")).toBe("Exported 4 fields to a.fdf.");
   });
 });

@@ -74,7 +74,7 @@ export function formImportText(s: FormSummary, signed: boolean): string {
 }
 
 export function commentsExportText(r: CommentsExported, file: string): string {
-  const left = r.leftOut ? ` ${plural(r.leftOut, "comment")} of a kind the file cannot carry left out.` : "";
+  const left = r.leftOut ? ` ${plural(r.leftOut, "comment")} left out: measurements, and kinds the file cannot carry.` : "";
   return `Exported ${plural(r.count, "comment")} to ${file}.${left}`;
 }
 

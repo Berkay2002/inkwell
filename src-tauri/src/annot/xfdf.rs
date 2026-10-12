@@ -155,6 +155,8 @@ pub(crate) struct Comment {
     pub state_model: String,
     pub state: String,
     pub popup: Option<([f32; 4], bool)>,
+    /// A measurement (`/Measure`, or an intent that ends in `Dimension`): its scale data is not carried.
+    pub measured: bool,
 }
 
 impl Comment {
@@ -189,6 +191,7 @@ impl Comment {
             state_model: String::new(),
             state: String::new(),
             popup: None,
+            measured: false,
         }
     }
 
@@ -238,6 +241,11 @@ fn pairs(v: &[f32]) -> Vec<f32> {
     v[..v.len() / 2 * 2].to_vec()
 }
 
+/// A measurement annotation (the Measure tool's, or Acrobat's): `/Measure` data, or a dimension intent.
+fn is_measurement(o: &PdfObject) -> bool {
+    get(o, "Measure").is_some() || get(o, "IT").as_ref().and_then(text).is_some_and(|t| t.ends_with("Dimension"))
+}
+
 /// Reads one comment dictionary. `/AP`, `/AA`, `/A`, `/F` file specifications and everything that is
 /// not listed here are never looked at.
 fn read(o: &PdfObject, sub: Sub) -> Comment {
@@ -254,6 +262,7 @@ fn read(o: &PdfObject, sub: Sub) -> Comment {
     c.icon = get(o, "Name").as_ref().and_then(text).unwrap_or_default();
     c.reply_type = get(o, "RT").as_ref().and_then(text).unwrap_or_default();
     c.flags = get(o, "F").and_then(|f| f.as_int().ok());
+    c.measured = is_measurement(o);
     let r = get(o, "Rect").map(|a| floats(&a, 4)).unwrap_or_default();
     if r.len() == 4 {
         c.rect = Some([r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3])]);
@@ -299,12 +308,19 @@ fn read(o: &PdfObject, sub: Sub) -> Comment {
 /// name for this export only; nothing is written to the document.
 fn collect(doc: &PdfDocument) -> Result<(Vec<Comment>, usize)> {
     let mut left = 0usize;
+    // Measurements are left out (their /Measure scale has no place in these files), and so are their replies.
+    let mut measured: HashSet<i32> = HashSet::new();
     let (all, _) = each(doc, |page, a| {
         let Some(sub) = Sub::of_type(a.r#type()?) else {
             left += 1;
             return Ok(None);
         };
         let o = a.object();
+        if is_measurement(&o) {
+            measured.insert(a.xref()?);
+            left += 1;
+            return Ok(None);
+        }
         let mut c = read(&o, sub);
         c.page = i64::from(page);
         c.xref = a.xref()?;
@@ -312,6 +328,9 @@ fn collect(doc: &PdfDocument) -> Result<(Vec<Comment>, usize)> {
         Ok(Some(c))
     })?;
     let mut items: Vec<Comment> = all.into_iter().flatten().collect();
+    let kept = items.len();
+    items.retain(|c| !c.parent_xref.is_some_and(|p| measured.contains(&p)));
+    left += kept - items.len();
     let names: HashMap<i32, String> = items
         .iter_mut()
         .map(|c| {
@@ -506,7 +525,7 @@ fn fdf(items: &[Comment], file: &str) -> Vec<u8> {
 #[serde(rename_all = "camelCase")]
 pub struct Exported {
     pub count: usize,
-    /// Comments of a type the files cannot carry (carets, attachments, sound).
+    /// Comments left out: types the files cannot carry (carets, attachments, sound), measurements and their replies.
     pub left_out: usize,
 }
 
@@ -583,6 +602,7 @@ pub fn parse_xfdf(bytes: &[u8]) -> Result<Parsed> {
             c.rect = Some([r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3])]);
         }
         c.name = a("name");
+        c.measured = e.child("measure").is_some() || a("intent").to_ascii_lowercase().ends_with("dimension");
         c.author = a("title");
         c.subject = a("subject");
         c.modified = a("date");
@@ -712,6 +732,8 @@ const NO_PARENT: &str = "reply to a comment that is not in the file or the docum
 const NOT_NOTE: &str = "reply that is not a note";
 const BAD_STATE: &str = "unknown review state";
 const FAILED: &str = "could not be created";
+const MEASURED: &str = "a measurement, whose scale these files cannot carry";
+const MEASURED_HERE: &str = "a measurement of the document has this name (the Measure tool changes it)";
 
 fn tp(m: &Matrix, x: f32, y: f32) -> [f32; 2] {
     [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f]
@@ -939,10 +961,15 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
     }
     // name -> (page, xref, type) of every comment the document has.
     let mut known: HashMap<String, (u32, i32, Option<Sub>)> = HashMap::new();
+    // Names of the document's measurements: an update would move them away from the /Measure they carry.
+    let mut measured_here: HashSet<String> = HashSet::new();
     each(doc, |p, a| {
         let o = a.object();
         let nm = string(&o, "NM");
         if !nm.is_empty() {
+            if is_measurement(&o) {
+                measured_here.insert(nm.clone());
+            }
             known.entry(nm).or_insert((p, a.xref()?, Sub::of_type(a.r#type()?)));
         }
         Ok(())
@@ -959,6 +986,15 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
 
     let mut pending: Vec<&Comment> = Vec::new();
     for c in &parsed.items {
+        if c.measured {
+            // Made without its /Measure it would be a plain line or polygon claiming to be one; not made at all.
+            *why.entry(MEASURED).or_default() += 1;
+            continue;
+        }
+        if measured_here.contains(&c.name) {
+            *why.entry(MEASURED_HERE).or_default() += 1;
+            continue;
+        }
         if !c.parent.is_empty() {
             pending.push(c);
             continue;

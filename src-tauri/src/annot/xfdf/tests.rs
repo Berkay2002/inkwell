@@ -283,3 +283,51 @@ fn a_rotated_page_with_an_offset_crop_box_still_gets_the_file_s_user_space_numbe
     let (bytes, _) = export(&eng, id, Format::Xfdf, "r.pdf").unwrap();
     close(&parse(&bytes).unwrap().items[0].rect.unwrap(), &[100.0, 600.0, 200.0, 700.0], "and back out");
 }
+
+#[test]
+fn measurements_are_left_out_of_a_file_and_are_neither_made_nor_changed_by_one() {
+    use crate::measure::{Kind as MKind, add_one as measure};
+    let (a, ida, _) = fresh("measure");
+    add(&a, ida, 0, &NewAnnot::Note { at: [100.0, 100.0], text: "keep".into() });
+    let (_, m, _) = measure(&a, ida, 0, MKind::Distance, &[[100.0, 300.0], [300.0, 300.0]], None, "Alex", EditSource::User).unwrap();
+    reply_one(&a, ida, 0, m, "Check the scale", "Sam", EditSource::User).unwrap();
+    for fmt in [Format::Xfdf, Format::Fdf] {
+        let (bytes, done) = export(&a, ida, fmt, "a.pdf").unwrap();
+        assert_eq!((done.count, done.left_out), (1, 2), "the measurement and its reply are counted, not dropped silently");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("Check the scale") && !text.contains("Measure"), "{fmt:?}");
+    }
+
+    // A measurement in a file (FDF with /Measure, XFDF with a dimension intent) is skipped and counted.
+    let fdf = b"%FDF-1.2\n1 0 obj\n<< /FDF << /Annots [ \
+        << /Subtype /Line /Page 0 /Rect [100 500 300 520] /L [100 510 300 510] /NM (m1) /IT /LineDimension \
+           /Measure << /Type /Measure /Subtype /RL /R (1 in = 1 ft) /X [<< /Type /NumberFormat /U (ft) /C 1 >>] >> >> \
+        << /Subtype /Text /Page 0 /Rect [100 100 120 120] /NM (n1) /Contents (kept) >> ] >> >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+    let xfdf = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots>
+        <line page="0" rect="100,500,300,520" start="100,510" end="300,510" intent="LineDimension" name="m2"/>
+        <polygon page="0" rect="100,500,300,520" name="m3" intent="PolygonDimension"><vertices>100,500;300,500;200,520</vertices></polygon>
+        <text page="0" rect="100,100,120,120" name="n2"><contents>kept</contents></text></annots></xfdf>"##;
+    for (what, file, skipped) in [("fdf", &fdf[..], 1), ("xfdf", &xfdf[..], 2)] {
+        let (b, idb, _) = fresh(&format!("measure-in-{what}"));
+        let r = import_one(&b, idb, &parse(file).unwrap(), EditSource::User).unwrap();
+        assert_eq!(r.summary.added, 1, "{what}: {:?}", r.summary);
+        assert_eq!(r.summary.skipped.iter().map(|s| s.count).sum::<usize>(), skipped, "{what}: {:?}", r.summary.skipped);
+        let list = list_all(&b, idb).unwrap();
+        assert!(list.iter().all(|d| d.kind == Kind::Note), "{what}: no line or polygon was made");
+    }
+
+    // A measurement of the document that a file's comment has the name of is not updated.
+    let (b, idb, _) = fresh("measure-name");
+    let (_, mx, _) = measure(&b, idb, 0, MKind::Distance, &[[100.0, 300.0], [300.0, 300.0]], None, "Alex", EditSource::User).unwrap();
+    b.apply_custom(idb, "Name".into(), EditSource::User, false, |d| {
+        let (_p, ann) = find(d, 0, mx)?;
+        put_str(&ann, "NM", "m-doc")?;
+        Ok(vec![0])
+    })
+    .unwrap();
+    let before = raw_rect(&b, idb, 0, mx);
+    let file = br##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots><line page="0" rect="10,10,50,50" start="10,10" end="50,50" name="m-doc"><contents>moved</contents></line></annots></xfdf>"##;
+    let r = import_one(&b, idb, &parse(file).unwrap(), EditSource::User).unwrap();
+    assert_eq!((r.summary.added, r.summary.updated), (0, 0), "{:?}", r.summary);
+    assert_eq!(raw_rect(&b, idb, 0, mx), before);
+}
