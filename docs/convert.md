@@ -30,7 +30,8 @@ one block per row (or several rows), one line per cell; lines that sit side by s
 paragraphs, so the table is found from where its cells are, not from the order they were drawn in. The
 pieces go back into the original block when no table takes them (a single pair of words with a wide gap),
 and a list label (a bullet, "1.", "a)") beside its text is never a cell; pieces a table leaves in a block it
-took from are one paragraph again, but only lines that stand directly below one another. The row pitch is
+took from are one paragraph again, but only lines that stand directly below one another (or the piece to the
+right on the same row, where a gap cut a line in two). The row pitch is
 a line plus the white space between rows (measured bottom to top, so a cell that wraps over several lines is
 not several pitches). Rows with more than 3 pitches of white space between them, or with text between them
 under the table's width, are separate tables (a running header and a footer are not one). The leading

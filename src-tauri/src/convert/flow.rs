@@ -130,10 +130,13 @@ fn merge(run: &[Block]) -> Block {
     b
 }
 
-/// Whether `next` is the line right below `prev`: its top within a line of `prev`'s bottom.
+/// Whether `next` continues `prev`: the line right below it (its top within a line of `prev`'s bottom), or the
+/// piece on the same row to its right (a redaction or a wide gap cut the line in two).
 fn stacked(prev: &Block, next: &Block) -> bool {
     let gap = prev.rect[1] - next.rect[3];
-    gap >= -0.5 * prev.size && gap <= prev.size
+    let overlap = prev.rect[3].min(next.rect[3]) - prev.rect[1].max(next.rect[1]);
+    let shorter = (prev.rect[3] - prev.rect[1]).min(next.rect[3] - next.rect[1]);
+    (gap >= -0.5 * prev.size && gap <= prev.size) || (overlap > 0.5 * shorter && next.rect[0] >= prev.rect[2] - COL_TOL)
 }
 
 /// Lines that sat side by side (`blocks[range]` of each group, ascending and disjoint, `orig` the block they came

@@ -1035,6 +1035,23 @@ fn pieces_a_table_leaves_are_one_paragraph_again() {
 }
 
 #[test]
+fn a_line_cut_by_a_gap_above_a_table_is_one_paragraph() {
+    use super::rtf::rtf;
+    let rows = |y: f64| [tight("a", 72.0, y), tight("b", 172.0, y), tight("c", 272.0, y)];
+    // One block's pieces: a line a gap cut in two (left, then right on the same row), then the first row of a table.
+    let mut blocks = vec![tight("Confidential: the project", 72.0, 540.0), tight("must not be disclosed.", 300.0, 540.0)];
+    blocks.extend(rows(500.0));
+    let orig = flow::Block { text: "whole".into(), rect: [72.0, 500.0, 400.0, 551.0], ..blocks[0].clone() };
+    let end = blocks.len();
+    blocks.extend(rows(480.0));
+    blocks.extend(rows(460.0));
+    flow::unsplit(&mut blocks, vec![(orig, 0..end)]);
+    let r = rtf(&[page_of(blocks)], "t");
+    assert!(rtf_plain(&rtf_tokens(&r.text)).contains("Confidential: the project must not be disclosed."), "{}", r.text);
+    assert_eq!(word_count(&rtf_tokens(&r.text), "trowd"), 3, "{}", r.text);
+}
+
+#[test]
 fn pieces_with_a_table_between_them_are_not_one_paragraph() {
     let rows = |y: f64| [tight("a", 72.0, y), tight("b", 172.0, y), tight("c", 272.0, y)];
     // One block's pieces in stream order: a row of a table, a line above the table, a line below it.
