@@ -7,8 +7,9 @@ import { applyState } from "./edit";
 import { useForms } from "./forms";
 
 /**
- * Comments (XFDF, FDF) and form data (FDF, XFDF, JSON) to and from files: src-tauri/src/annot/xfdf.rs and
- * forms/data.rs. The panels' menus and the command palette call these; every result is one toast.
+ * Comments (XFDF, FDF) and form data (FDF, XFDF, JSON, XML, CSV, tab text) to and from files: src-tauri/src/annot/xfdf.rs
+ * and forms/data.rs. The panels' menus and the command palette call these; every result is one toast. A CSV or tab
+ * text file with several records asks which one first (`picker`, shown by components/forms/RecordPicker.tsx).
  */
 
 export interface CommentsSummary {
@@ -37,6 +38,13 @@ export interface FormImported {
   summary: FormSummary;
   state: EditState;
   signed: boolean;
+}
+/** What a data file holds: more than one record asks the person which to import (labels are empty for one). */
+export interface FormRecords {
+  count: number;
+  labels: string[];
+  /** The line of each record in the file, as a spreadsheet numbers rows (the header is 1). */
+  rows: number[];
 }
 export interface FormExported {
   count: number;
@@ -115,7 +123,14 @@ interface Exchange {
   importComments: (doc: number) => Promise<void>;
   exportForm: (doc: number) => Promise<void>;
   importForm: (doc: number) => Promise<void>;
+  /** The data file is a table with several records: the person picks one (null while nothing is asked). */
+  picker: { name: string; labels: string[]; rows: number[] } | null;
+  /** The person's answer to `picker`: a record (0 is the first under the header), or null to cancel. */
+  chooseRecord: (row: number | null) => void;
 }
+
+/** Answers the question `picker` shows; one at a time. */
+let answer: ((row: number | null) => void) | null = null;
 
 export const useExchange = create<Exchange>((set, get) => {
   /** Whether an import may go on; a certification that does not allow it says why (nothing is picked or read). */
@@ -139,12 +154,33 @@ export const useExchange = create<Exchange>((set, get) => {
     }
   };
 
-  const importFrom = async <T extends { state: EditState }>(doc: number, kind: "comments" | "forms", cmd: string, done: (r: T) => string, reread: (doc: number) => Promise<void>) => {
+  /** The record of a table file to import: asks when there are several. `undefined` is "cancelled". */
+  const recordOf = async (file: FileRef): Promise<{ row: number | null } | undefined> => {
+    const recs = await invoke<FormRecords>("forms_import_records", { file: file.token });
+    if (recs.count <= 1) return { row: null };
+    const row = await new Promise<number | null>((resolve) => {
+      answer?.(null);
+      answer = resolve;
+      set({ picker: { name: baseName(file.path), labels: recs.labels, rows: recs.rows } });
+    });
+    return row === null ? undefined : { row };
+  };
+
+  const importFrom = async <T extends { state: EditState }>(
+    doc: number,
+    kind: "comments" | "forms",
+    cmd: string,
+    done: (r: T) => string,
+    reread: (doc: number) => Promise<void>,
+    extra?: (file: FileRef) => Promise<Record<string, unknown> | undefined>,
+  ) => {
     try {
       if (!(await mayImport(doc, kind))) return;
       const file = await invoke<FileRef | null>("pick_data_file", { doc });
       if (!file) return;
-      const r = await invoke<T>(cmd, { doc, file: file.token });
+      const more = extra ? await extra(file) : {};
+      if (!more) return;
+      const r = await invoke<T>(cmd, { doc, file: file.token, ...more });
       applyState(doc, r.state);
       await reread(doc);
       toast(done(r));
@@ -155,6 +191,13 @@ export const useExchange = create<Exchange>((set, get) => {
 
   return {
     gates: {},
+    picker: null,
+    chooseRecord: (row) => {
+      const resolve = answer;
+      answer = null;
+      set({ picker: null });
+      resolve?.(row);
+    },
     readGates: async (doc, fresh = false) => {
       const known = get().gates[doc];
       if (known && !fresh) return known;
@@ -172,6 +215,6 @@ export const useExchange = create<Exchange>((set, get) => {
       importFrom<CommentsImported>(doc, "comments", "annot_import", (r) => commentsImportText(r.summary, r.signed), (d) => useAnnot.getState().refresh(d)),
     exportForm: (doc) => exportTo<FormExported>(doc, "form data", "formData", "forms_export", formExportText),
     importForm: (doc) =>
-      importFrom<FormImported>(doc, "forms", "forms_import", (r) => formImportText(r.summary, r.signed), (d) => useForms.getState().refresh(d)),
+      importFrom<FormImported>(doc, "forms", "forms_import", (r) => formImportText(r.summary, r.signed), (d) => useForms.getState().refresh(d), recordOf),
   };
 });

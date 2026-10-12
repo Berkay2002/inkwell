@@ -85,7 +85,7 @@ enum SaveKind {
     Word,
     /// Comments: XFDF or FDF.
     Comments,
-    /// Form data: XFDF, FDF or JSON.
+    /// Form data: XFDF, FDF, JSON, CSV, tab text or XML.
     FormData,
     Csv,
     /// No filter: print-to-file output whose format the printer driver decides.
@@ -160,7 +160,13 @@ async fn pick_save(
             SaveKind::Xhtml => d.add_filter("XHTML", &["xhtml"]),
             SaveKind::Word => d.add_filter("Word document", &["docx"]),
             SaveKind::Comments => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]),
-            SaveKind::FormData => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]).add_filter("JSON", &["json"]),
+            SaveKind::FormData => d
+                .add_filter("XFDF", &["xfdf"])
+                .add_filter("FDF", &["fdf"])
+                .add_filter("JSON", &["json"])
+                .add_filter("CSV (spreadsheet)", &["csv"])
+                .add_filter("Tab-delimited text", &["txt"])
+                .add_filter("XML", &["xml"]),
             SaveKind::Csv => d.add_filter("CSV (spreadsheet)", &["csv"]),
             SaveKind::Any => d,
         };
@@ -203,12 +209,12 @@ async fn pick_source(window: Window, kind: SourceKind, multiple: bool) -> Result
     .await
 }
 
-/// Open dialog for an XFDF, FDF or JSON data file of open document `doc`; an open token comes back.
+/// Open dialog for a form data file (XFDF, FDF, JSON, XML, CSV or tab text) of open document `doc`; an open token comes back.
 #[tauri::command]
 async fn pick_data_file(window: Window, eng: Eng<'_>, doc: DocId) -> Result<Option<FileRef>, EngineError> {
     let near = eng.doc_entry(doc)?.path();
     blocking(move || {
-        let mut d = window.dialog().file().set_parent(&window).set_title("Choose a data file").add_filter("XFDF, FDF or JSON", &["xfdf", "fdf", "json", "xml"]);
+        let mut d = window.dialog().file().set_parent(&window).set_title("Choose a data file").add_filter("Form data", &["xfdf", "fdf", "json", "xml", "csv", "txt", "tsv", "tab"]);
         if let Some(dir) = std::path::Path::new(&near).parent() {
             d = d.set_directory(dir);
         }
@@ -1278,6 +1284,7 @@ pub fn run() {
             forms::app::forms_list,
             forms::app::forms_export,
             forms::app::forms_import,
+            forms::app::forms_import_records,
             forms::app::forms_set_value,
             forms::app::forms_reset,
             forms::app::forms_scripts,

@@ -36,3 +36,4 @@ Adapted files carry a header naming the pdfcraft path:
 - src-tauri/src/sign/pdf.rs        <- crates/sign/src/pdf.rs   (signature dictionary, /ByteRange and /Contents placeholders, DocMDP certification, validation checks; objects on MuPDF)
 - src-tauri/src/sign/crypto/mod.rs <- crates/sign/src/lib.rs   (module layout; the header names the sign crate, not a file)
 - src-tauri/src/fillsign/store.rs  <- crates/engine/src/signature_image.rs   (signature picture checks: PNG or JPEG limits, metadata dropped, paper knocked out)
+- src-tauri/src/forms/data.rs   <- crates/xfdf/src/lib.rs   (xml_name, xml_data: form data as plain XML, a field name as an element name with xfdf:original; the ", " cell of a multi-select list in XML, CSV and tab text)

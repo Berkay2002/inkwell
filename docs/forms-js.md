@@ -99,6 +99,21 @@ does not wait for a step that holds the edit lane; the window asks for it separa
 the switch appear at once) and `forms_scripts_enable(doc, on)` switches the file. Off means
 today's behaviour: an unrecognised script is kept untouched in the file and not run, and the field is marked.
 
+## Check boxes and list boxes
+A check box and a list box run their keystroke (`/K`) and validate (`/V`) scripts when the person changes them and when a
+form data import fills them, the way text and combo fields do (`event.rc = false` rejects, the change is not made and
+the message is the `app.alert` text or the default). What the script sees as `event.value`:
+- **Check box:** its export value when it is going on (`Yes` unless it was given another), `Off` when it is going off.
+  `event.target.value` is the same. A script cannot make the box hold something else: only `rc` and the changes it makes
+  to other fields count.
+- **List box:** the picked entry's export value. In a list box that takes several, the first pick: scripts see one
+  pick, and a validate script that rejects it rejects the whole selection. A keystroke script that sets `event.value`
+  to an entry of the list replaces the first pick, the others are kept; one that sets something that is not an entry is
+  not followed.
+- The AF format, mask and range calls (`AFNumber_Keystroke`, `AFRange_Validate` ...) are for text: on a check box or
+  list box they do nothing. Only a script of the field's own is run.
+- Radio buttons are not run (a group's scripts sit on its widgets, and an import fills it by its first one).
+
 ## Object model
 `event` (value, change, willCommit, rc, name, type, target, targetName, selStart, selEnd, changeEx), the document (`getField`,
 `numFields`, `getNthFieldName`, `numPages`, `pageNum`, `info`, `resetForm`, `calculateNow`, `print`, `submitForm`), field
@@ -112,7 +127,7 @@ scand), `console`, `display`, `color`, and the AF functions (`AFNumber_*`, `AFPe
 Anything else returns `undefined` and the log says "<name> is not supported": timers (`app.setTimeOut`/`setInterval` hand
 back a handle and never fire), `app.execMenuItem`, mail, `Net`, `SOAP`, `importDataObject`, page content scripts, `global`
 persistence across sessions, and the like. Also not run: button mouse-up scripts, `OpenAction`/page/document-event
-scripts, and the K/V scripts of check boxes and list boxes (only text and combo fields have a keystroke and validate step).
+scripts, and the K/V scripts of radio buttons.
 Authoring (`forms_edit`, `forms_add`) redraws a field with the native formatter only; the `/F` script of a field being
 authored is shown after the next fill or listing.
 
