@@ -28,6 +28,7 @@ vi.mock("./prepressApi", () => ({
     view: vi.fn(),
     ink: vi.fn(),
     inkAt: vi.fn(),
+    inspect: vi.fn(),
     convert: vi.fn(),
     saveOther: vi.fn(),
     protection: vi.fn(),
@@ -45,7 +46,7 @@ import { applyState } from "./edit";
 import { usePlates, viewFailed } from "./platesView";
 import { prepressApi, type PageBoxes } from "./prepressApi";
 import { toPt } from "./prepressLogic";
-import { currentSeps, newBox, usePrepress } from "./prepressStore";
+import { currentSeps, inspectCapture, newBox, usePrepress } from "./prepressStore";
 
 const flush = async () => {
   for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
@@ -194,6 +195,140 @@ describe("Output Preview", () => {
     await flush();
     expect(prepressApi.view).toHaveBeenCalledTimes(2);
     expect(usePlates.getState().view).toBe(2);
+  });
+});
+
+describe("object inspector", () => {
+  const found = [{ kind: "fill", colorSpace: "DeviceCMYK", model: "cmyk", colorants: [], values: [0, 0, 0, 1], cmyk: [0, 0, 0, 100], ink: 100, overprint: true, overprintMode: false, alpha: 1, bounds: [0, 0, 5, 5], font: null, image: null }];
+  const answers: ((v: unknown) => void)[] = [];
+  const ask = async () => {
+    st().setOpen(true);
+    await flush();
+    st().setInspecting(1, true);
+    answers.length = 0;
+    vi.mocked(prepressApi.inspect).mockImplementation(() => new Promise((r) => answers.push(r)) as never);
+  };
+
+  it("lists what a click finds with the point it was asked at, and keeps the document clean", async () => {
+    await ask();
+    const before = useStore.getState().docs[1];
+    const done = st().inspectAt(1, 2, 40, 50);
+    expect(st().get(1).inspect).toMatchObject({ on: true, at: { page: 2, rev: 3, x: 40, y: 50 }, found: null });
+    expect(prepressApi.inspect).toHaveBeenCalledWith(1, 2, 40, 50);
+    answers[0](found);
+    await done;
+    expect(st().get(1).inspect.found).toEqual(found);
+    // read-only: no edit, no new generation, not dirty
+    expect(applyState).not.toHaveBeenCalled();
+    expect(useStore.getState().docs[1]).toBe(before);
+    expect(useStore.getState().docs[1].dirty).toBe(false);
+  });
+
+  it("keeps an empty answer as an empty list", async () => {
+    await ask();
+    const done = st().inspectAt(1, 2, 1, 1);
+    answers[0]([]);
+    await done;
+    expect(st().get(1).inspect.found).toEqual([]);
+  });
+
+  it("drops the answer of an older click", async () => {
+    await ask();
+    const a = st().inspectAt(1, 2, 10, 10);
+    const b = st().inspectAt(1, 2, 20, 20);
+    answers[1](found);
+    await b;
+    answers[0]([]);
+    await a;
+    expect(st().get(1).inspect).toMatchObject({ at: { x: 20, y: 20 }, found });
+  });
+
+  it("drops an answer when the generation moved, the page went, or the mode ended, while it was asked", async () => {
+    await ask();
+    const a = st().inspectAt(1, 2, 10, 10);
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 4 } } });
+    answers[0](found);
+    await a;
+    expect(st().get(1).inspect).toMatchObject({ on: true, at: null, found: null });
+
+    const b = st().inspectAt(1, 2, 10, 10);
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], pageCount: 2 } } });
+    answers[1](found);
+    await b;
+    expect(st().get(1).inspect.at).toBeNull();
+
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], pageCount: 12 } } });
+    const c = st().inspectAt(1, 5, 10, 10);
+    st().setInspecting(1, false);
+    answers[2](found);
+    await c;
+    expect(st().get(1).inspect).toEqual({ on: false, at: null, found: null, error: null });
+    // and a click outside the mode asks nothing
+    await st().inspectAt(1, 5, 1, 1);
+    expect(prepressApi.inspect).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps a result on another page than the current one while the view scrolls", async () => {
+    await ask();
+    // continuous scroll: page 5 is clicked while page 2 is the current one, then the current page moves
+    const a = st().inspectAt(1, 5, 10, 10);
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], currentPage: 3 } } });
+    answers[0](found);
+    await a;
+    expect(st().get(1).inspect).toMatchObject({ at: { page: 5 }, found });
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], currentPage: 6 } } });
+    expect(st().get(1).inspect.found).toEqual(found);
+    // a new generation takes it, and so does losing its page
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 4 } } });
+    expect(st().get(1).inspect.at).toBeNull();
+    const b = st().inspectAt(1, 5, 10, 10);
+    answers[1](found);
+    await b;
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], pageCount: 5 } } });
+    expect(st().get(1).inspect.at).toBeNull();
+  });
+
+  it("clears the marker and keeps the mode; closing Output Preview leaves the mode", async () => {
+    await ask();
+    const a = st().inspectAt(1, 2, 10, 10);
+    answers[0](found);
+    await a;
+    st().clearInspect(1);
+    expect(st().get(1).inspect).toMatchObject({ on: true, at: null, found: null });
+    const b = st().inspectAt(1, 2, 10, 10);
+    answers[1](found);
+    await b;
+    st().setOpen(false);
+    expect(st().get(1).inspect).toEqual({ on: false, at: null, found: null, error: null });
+  });
+
+  it("takes a press before anything on the page hears it, and a click asks the engine", async () => {
+    await ask();
+    const ev = () => ({ stopPropagation: vi.fn(), preventDefault: vi.fn() });
+    const h = inspectCapture(1, 2, () => [7, 8]);
+    for (const down of [h.onPointerDownCapture, h.onMouseDownCapture]) {
+      const e = ev();
+      down(e);
+      expect(e.stopPropagation).toHaveBeenCalledOnce();
+      expect(e.preventDefault).toHaveBeenCalledOnce();
+    }
+    expect(prepressApi.inspect).not.toHaveBeenCalled();
+    const c = ev();
+    h.onClickCapture(c);
+    expect(c.stopPropagation).toHaveBeenCalledOnce();
+    expect(c.preventDefault).toHaveBeenCalledOnce();
+    expect(prepressApi.inspect).toHaveBeenCalledWith(1, 2, 7, 8);
+  });
+
+  it("shows the engine's refusal and still allows the next click", async () => {
+    await ask();
+    vi.mocked(prepressApi.inspect).mockRejectedValueOnce("the point is outside the page");
+    await st().inspectAt(1, 2, 10, 10);
+    expect(st().get(1).inspect).toMatchObject({ on: true, found: null, error: "the point is outside the page" });
+    const c = st().inspectAt(1, 2, 20, 20);
+    answers[0](found);
+    await c;
+    expect(st().get(1).inspect).toMatchObject({ error: null, found });
   });
 });
 
