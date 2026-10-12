@@ -244,8 +244,12 @@ fn a_page_that_takes_too_long_to_draw_is_aborted() {
         format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
     ]);
     assert!(err(render_pdf(&pdf, None, Duration::ZERO)).contains("too long"));
+    let stopped = LAST_PROGRESS.get();
     // The same page within the real limit draws.
     assert!(render_pdf(&pdf, None, RENDER_LIMIT).is_ok());
+    let full = LAST_PROGRESS.get();
+    // The abort reached the draw (not only the flag): it ran under half of the operators the whole page has.
+    assert!(full > 1000 && stopped < full / 2, "aborted run {stopped}, whole page {full}");
     // A time limit does not disturb a page that is quick.
     let quick = fixture::build(&Fixture { pages: 1, lines: 3, ..Default::default() });
     assert!(render_pdf(&quick, None, RENDER_LIMIT).is_ok());

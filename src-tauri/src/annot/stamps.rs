@@ -328,6 +328,13 @@ fn check_images(bytes: &[u8], page: i32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many operators the last `render_pdf` on this thread ran before it stopped: a test tells an aborted draw
+    /// from a finished one by it, without a clock.
+    static LAST_PROGRESS: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
 /// Page `page` (0-based, the first when None) of a PDF as pixels at [`PDF_DPI`], transparent where the page
 /// paints nothing, cut to the part that has something on it.
 // shortcut: a page with a white background shape keeps it (only an unpainted page is transparent); cropping to
@@ -370,6 +377,8 @@ fn render_pdf(bytes: &[u8], page: Option<u32>, limit: Duration) -> Result<image:
         drop(done);
         run
     });
+    #[cfg(test)]
+    LAST_PROGRESS.set(cookie.progress());
     if timed_out.load(Ordering::SeqCst) {
         return Err(bad("that page took too long to draw"));
     }
