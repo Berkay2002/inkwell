@@ -3206,3 +3206,38 @@ fn a_radio_button_may_not_join_a_group_a_signature_covers() {
     // A new field of its own is not a change to a covered one.
     add1(&eng, id, 0, nf(FieldKind::Text, "Fresh", [72.0, 250.0, 240.0, 270.0]));
 }
+
+/// Signs `Sig` with one FieldMDP `/Reference` entry whose `/TransformParams` is `params` builds.
+fn sign_params(eng: &Engine, id: DocId, params: impl Fn(&PdfDocument) -> Result<PdfObject>) {
+    sign_refs(eng, id, |d| {
+        let mut r = d.new_dict()?;
+        put_name(&mut r, "TransformMethod", "FieldMDP")?;
+        r.dict_put("TransformParams", params(d)?)?;
+        let mut refs = d.new_array()?;
+        refs.array_push(r)?;
+        Ok(refs)
+    });
+}
+
+#[test]
+fn a_lock_whose_fields_is_not_an_array_locks_every_field() {
+    for (i, action) in ["Include", "Exclude"].into_iter().enumerate() {
+        let (eng, id, _) = script_form(&format!("fieldmdp-fields-string-{i}"), &["Sum", "Other"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+        // `/Fields (Sum)`: a string where the array of names belongs.
+        sign_params(&eng, id, |d| {
+            let mut p = d.new_dict()?;
+            put_name(&mut p, "Action", action)?;
+            p.dict_put("Fields", PdfObject::new_string("Sum")?)?;
+            Ok(p)
+        });
+        let (n, rects) = (steps(&eng, id), all_rects(&eng, id));
+        for name in ["Sum", "Other"] {
+            for r in touch_field(&eng, id, name) {
+                let e = r.unwrap_err();
+                assert!(e.contains("locked by a signature") && e.contains(name), "{action} {name}: {e}");
+            }
+        }
+        assert_eq!((steps(&eng, id), all_rects(&eng, id)), (n, rects), "{action}: no step, nothing moved");
+    }
+}

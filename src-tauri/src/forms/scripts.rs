@@ -507,7 +507,8 @@ pub(crate) enum Lock {
 /// The names in a `/Lock /Fields` array, and whether all of them were read (the array is there, holds at most 4096
 /// entries, and each is a name or string).
 fn lock_names(lock: &PdfObject) -> (Vec<String>, bool) {
-    let Some(a) = get(lock, "Fields") else { return (Vec::new(), false) };
+    // Not an array (`/Fields (Sum)`): the names it meant are unknown, so the lock is not read in full.
+    let Some(a) = get(lock, "Fields").filter(|a| a.is_array().unwrap_or(false)) else { return (Vec::new(), false) };
     let len = a.len().unwrap_or(0);
     let names: Vec<String> = (0..len.min(4096) as i32).filter_map(|i| a.get_array(i).ok().flatten().as_ref().and_then(text)).collect();
     let complete = len <= 4096 && names.len() == len;
