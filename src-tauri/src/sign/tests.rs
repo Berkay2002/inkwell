@@ -1659,3 +1659,16 @@ fn a_locked_form_too_large_to_compare_reads_as_changed() {
     let s = field(&infos(&with_comment(&b)), "Tenant").clone();
     assert!(s.warnings.iter().any(|w| w.code == WarningCode::LockedChanged && w.text == "After this signature, a field it locks changed: the form."), "{s:?}");
 }
+
+#[test]
+fn a_huge_dotted_field_name_is_locked_and_cheap_to_check() {
+    use crate::forms::scripts::{Lock, name_locked};
+    let lock = [Lock::Include(["a".to_string()].into())];
+    let t = std::time::Instant::now();
+    assert!(name_locked(&lock, &".".repeat(200_000)));
+    assert!(name_locked(&lock, &format!("b{}", ".c".repeat(65))));
+    assert!(t.elapsed() < std::time::Duration::from_millis(100), "{:?}", t.elapsed());
+    // Ordinary names are looked up as before, and no lock covers nothing at any length.
+    assert!(name_locked(&lock, "a.b") && !name_locked(&lock, "b.a"));
+    assert!(!name_locked(&[], &".".repeat(200_000)));
+}

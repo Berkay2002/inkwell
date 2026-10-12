@@ -622,6 +622,10 @@ pub(crate) fn locked(locks: &[Lock], e: &Entry) -> bool {
 
 /// Whether a field with this full name is covered by a signature's lock (a field about to take the name, too).
 pub(crate) fn name_locked(locks: &[Lock], name: &str) -> bool {
+    // A name too long or too deep to look up cheaply (each level hashes its prefix) is covered: the safe side.
+    if !locks.is_empty() && (name.len() > 1024 || name.bytes().filter(|&b| b == b'.').count() > 64) {
+        return true;
+    }
     // The name itself or any field above it (`a` covers `a.b`): one lookup per level, however many names a lock has.
     let named = |names: &std::collections::HashSet<String>| name.match_indices('.').map(|(i, _)| &name[..i]).chain([name]).any(|n| names.contains(n));
     locks.iter().any(|l| match l {
