@@ -88,6 +88,9 @@ interface MeasureStore {
   /** By document: it is signed, so a change is saved as an update after the signature (read with the lock). */
   signed: Record<number, boolean>;
   ensureLock: (doc: number) => Promise<void>;
+  /** The value of the measurement being dragged, for the rail (the page's drag label has it first). */
+  live: { doc: number; xref: number; text: string } | null;
+  setLive: (live: MeasureStore["live"]) => void;
 
   docs: Record<number, DocMeasure>;
   get: (doc: number) => DocMeasure;
@@ -153,6 +156,8 @@ export const useMeasure = create<MeasureStore>((set, get) => {
     snaps: { endpoint: true, midpoint: true, intersection: true, line: true },
     toggleSnap: (k) => set((s) => ({ snaps: { ...s.snaps, [k]: !s.snaps[k] } })),
 
+    live: null,
+    setLive: (live) => set({ live }),
     locks: {},
     scaleLocks: {},
     signed: {},

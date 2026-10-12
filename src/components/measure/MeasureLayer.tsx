@@ -324,6 +324,15 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
   const editRemote = useRemoteLabel(edit?.moved && em && !ownLabel ? { doc: docId, page, kind: em.kind, pts: edit.pts, xref: em.xref } : null);
   const editLabel = !edit?.moved || !em ? null : ownLabel ? quantityOf(em.kind, edit.pts, em.scale!).text : editRemote;
 
+  // The value the rail shows while this layer's drag is on (cleared when it ends, only by the layer that set it).
+  const liveText = edit?.moved && editLabel ? editLabel : null;
+  const liveXref = edit?.xref;
+  useEffect(() => {
+    if (liveText === null || liveXref === undefined) return;
+    ms().setLive({ doc: docId, xref: liveXref, text: liveText });
+    return () => ms().setLive(null);
+  }, [docId, liveXref, liveText]);
+
   const style = (at: Pt) => ({ left: at[0], top: at[1] });
   const path = (p: Pt[]) => p.map((q) => `${q[0]},${q[1]}`).join(" ");
   const live = kind && pts.length > 0 && hover ? [...pts, hover.at] : pts;

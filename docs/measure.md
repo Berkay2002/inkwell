@@ -161,7 +161,7 @@ a release off the page (outside the window the pointer is clamped to the edge); 
   scale. Its scale (or unit) can be changed and Apply re-measures it (`measure_rescale`); Delete (key or button) removes
   it (`annot_delete`, one undo step). Re-measuring replaces the annotation, so replies to it go too and the new one is last
   in `/Annots` (undo brings them back). Undo, redo and a restored version re-read the list and the page scales.
-- **Rail:** the selected measurement, or the last value made; the cumulative value per kind and unit (never summed across
+- **Rail:** the selected measurement (its value follows a drag as the label does), or the last value made; the cumulative value per kind and unit (never summed across
   units); the list by page (click to jump to it); Export to CSV.
 - **Calibrate:** pick it from the scale chip, draw over a dimension printed on the drawing, type its real length and
   unit: the page scale becomes "1 in = n unit" (n = real length x 72 / the line's length in points).
