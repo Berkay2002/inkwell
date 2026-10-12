@@ -6,7 +6,7 @@ vi.mock("./edit", () => ({ applyState: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
 import { applyState } from "./edit";
 import {
-  type Identity, LOCKED_REASON, type Saved, type SignatureInfo, STATUS, sigFieldView, banner, changeNote, detailLines, imageRect, locked, otherWarnings, outcome, pdfDate, sigBox, statusWord, useSign,
+  type Identity, LOCKED_REASON, clickSigField, type Saved, type SignatureInfo, STATUS, sigFieldView, banner, changeNote, detailLines, imageRect, locked, otherWarnings, outcome, pdfDate, sigBox, statusWord, useSign,
 } from "./sign";
 
 const inv = vi.mocked(invoke);
@@ -217,14 +217,21 @@ describe("signature form fields on the page", () => {
   });
 
   it("an empty field click requests the sign flow with that field as the target, and signs nothing", () => {
-    s().signField(7, empty);
+    clickSigField(7, "Tenant", empty, [empty]);
     expect(s().get(7).draft).toEqual({ page: 1, rect: [10, 20, 110, 60], field: "Tenant" });
     expect(s().rail).toBe("sheet");
     expect(inv).not.toHaveBeenCalled();
   });
 
+  it("a refused field click does nothing", () => {
+    clickSigField(7, "Tenant", empty, [sig({ certify: 1 }), empty]);
+    expect(s().get(7).draft).toBeNull();
+    expect(s().rail).toBeNull();
+    expect(inv).not.toHaveBeenCalled();
+  });
+
   it("a signed field click opens the rail on that signature", () => {
-    s().showSignature(7, "Landlord");
+    clickSigField(7, "Landlord", done, [done]);
     expect(s().rail).toBe("list");
     expect(s().get(7).focus).toBe("Landlord");
     expect(s().get(7).draft).toBeNull();

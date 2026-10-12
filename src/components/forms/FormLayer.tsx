@@ -6,7 +6,7 @@ import {
   fontSize, groupDelta, groupDragEnd, groupPicks, isCalculated, marqueeHits, move, normBox, onPage, resetTargets, resize, samePick,
 } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
-import { type SignatureInfo, sigFieldView, useSign } from "../../lib/sign";
+import { type SignatureInfo, clickSigField, sigFieldView, useSign } from "../../lib/sign";
 import { useStore } from "../../store";
 import { ContextMenu } from "../PageMenu";
 import { layoutMenu, useCertified } from "./layoutTools";
@@ -247,17 +247,12 @@ function SigField({ docId, f, cls, css, label }: { docId: number; f: Field; cls:
   const list = useSign((s) => s.docs[docId]?.sigs) ?? EMPTY_SIGS;
   const sig = list.find((x) => x.field === f.name);
   const v = sigFieldView(label, sig, list);
-  const act = () => {
-    // The engine finds the field by the signature list's name and box, so those are sent, not the form's.
-    if (sig && v.state === "sign") useSign.getState().signField(docId, sig);
-    else if (sig && v.state === "signed") useSign.getState().showSignature(docId, sig.field);
-  };
   return (
     <div className="fm-cell" style={css} data-fm-xref={f.xref}>
       {v.state === "unknown" ? (
         <div className={cls} role="img" aria-label={v.title} title={v.title} />
       ) : (
-        <button className={cls} aria-label={v.title} title={v.title} aria-disabled={v.state === "locked" || undefined} onClick={act} />
+        <button className={cls} aria-label={v.title} title={v.title} aria-disabled={v.state === "locked" || undefined} onClick={() => clickSigField(docId, label, sig, list)} />
       )}
     </div>
   );
