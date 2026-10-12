@@ -448,13 +448,17 @@ pub(crate) fn read_page(doc: &PdfDocument, page: u32) -> Result<PageContent> {
     let advances = shown.iter().map(|s| (s.op, Advance { x: s.advance, em: s.em })).collect();
     // A run is underlined or struck out where one of our own decorations lies under or through it.
     let mut decos = Vec::new();
+    let invs: Vec<Option<Matrix>> = shown.iter().map(|s| s.tm.then(&s.state.ctm).invert()).collect();
     for d in &extra.decos {
-        let under: Vec<usize> = shown.iter().filter(|s| d.lies_on(s)).map(|s| s.op).collect();
-        for s in shown.iter_mut().filter(|s| under.contains(&s.op)) {
-            if d.strike {
-                s.strike = true;
-            } else {
-                s.underline = true;
+        let mut under = Vec::new();
+        for (s, inv) in shown.iter_mut().zip(&invs) {
+            if inv.as_ref().is_some_and(|inv| d.lies_on(s, inv)) {
+                under.push(s.op);
+                if d.strike {
+                    s.strike = true;
+                } else {
+                    s.underline = true;
+                }
             }
         }
         decos.push((d.first, d.last, under));
@@ -490,6 +494,9 @@ struct Extra {
     decos: Vec<DecoMark>,
 }
 
+/// How many decorations of ours a page is read for.
+const MAX_DECOS: usize = 10_000;
+
 /// One decoration of ours as read: its operators, and the middle of its left and right edge in
 /// user space.
 struct DecoMark {
@@ -503,8 +510,7 @@ struct DecoMark {
 impl DecoMark {
     /// Whether it lies where `s`'s decoration would be drawn: across its middle, at the offset
     /// the engine draws it at (from the baseline and the rise), in the shown text's own space.
-    fn lies_on(&self, s: &Shown) -> bool {
-        let Some(inv) = s.tm.then(&s.state.ctm).invert() else { return false };
+    fn lies_on(&self, s: &Shown, inv: &Matrix) -> bool {
         let (xa, ya) = inv.apply(self.a.0, self.a.1);
         let (xb, yb) = inv.apply(self.b.0, self.b.1);
         let size = s.state.size.abs();
@@ -664,7 +670,10 @@ fn interpret(
             }
             b"EMC" => {
                 if let Some((_, first, strike, Some((a, b)))) = deco.filter(|d| d.0 == marked.len()) {
-                    extra.decos.push(DecoMark { first, last: i, strike, a, b });
+                    // A page with more is read as far as this and no further (the rest are left as they are).
+                    if extra.decos.len() < MAX_DECOS {
+                        extra.decos.push(DecoMark { first, last: i, strike, a, b });
+                    }
                 }
                 if deco.is_some_and(|d| d.0 == marked.len()) {
                     deco = None;

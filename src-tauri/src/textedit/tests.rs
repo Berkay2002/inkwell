@@ -1318,3 +1318,23 @@ fn a_tagged_group_that_is_not_ours_is_left_alone() {
     // Only the one underline we drew counts as ours (the foreign group is not read as a decoration).
     assert_eq!(decorations(&ops).len(), 2, "the foreign group is still there, and one underline of ours");
 }
+
+#[test]
+fn a_page_of_tagged_groups_is_read_and_edited_fast() {
+    let d = dir("deco-flood");
+    // 12,000 complete groups of ours (more than a page is read for) and 50,000 that never close.
+    let group = "/Span <</IWDeco /U>> BDC q 1 0 0 1 400 100 cm 0 g 0 0 5 0.6 re f Q EMC\n";
+    let content = format!(
+        "BT /F1 12 Tf 72 700 Td (Hello) Tj ET\n{}{}",
+        group.repeat(12_000),
+        "/Span <</IWDeco /U>> BDC ".repeat(50_000)
+    );
+    let (eng, id, _) = open(&d, &pdf(&content, &[("F1", HELV)], &[]));
+    let started = std::time::Instant::now();
+    let tb = blocks(&eng, id, 0).unwrap();
+    assert_eq!(tb.blocks.len(), 1);
+    let c = BlockChange { underline: Some(true), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 0, &c, EditSource::User).unwrap();
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
+    assert!(text(&eng, id).contains("Hello"));
+}
