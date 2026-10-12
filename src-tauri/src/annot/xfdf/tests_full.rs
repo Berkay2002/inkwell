@@ -244,6 +244,8 @@ fn an_appearance_that_cannot_be_taken_falls_back_to_inkwells_drawing_and_is_coun
         obj(13, &freetext(4, 23)),
         obj(14, &freetext(5, 24)),
         obj(15, &freetext(6, 25)),
+        obj(16, &freetext(7, 26)),
+        obj(17, &freetext(8, 27)),
         stream_obj(20, RED_FORM, b"BT /F9 12 Tf (x) Tj ET"),
         stream_obj(21, RED_FORM, b"/P1 cs /P1 scn 0 0 100 50 re f"),
         stream_obj(22, RED_FORM, b"q BI /W 1 /H 1 /BPC 8 /CS /G ID \x00 EI Q"),
@@ -254,13 +256,16 @@ fn an_appearance_that_cannot_be_taken_falls_back_to_inkwells_drawing_and_is_coun
             b"BT /Q 12 Tf (x) Tj ET",
         ),
         stream_obj(25, &format!("{RED_FORM} /AA << /O << /S /JavaScript /JS (app.alert(1)) >> >> /OC 99 0 R"), b"0 1 0 rg 0 0 100 50 re f"),
+        // Form content is not a place for an image codec; nor is a chain that ends in a filter that eats white space.
+        stream_obj(26, &format!("{RED_FORM} /Filter /DCTDecode"), b"\xFF\xD8\xFF\xE0 not a picture"),
+        stream_obj(27, &format!("{RED_FORM} /Filter [/FlateDecode /ASCIIHexDecode]"), &zlib(b"0 1 0 rg 0 0 100 50 re f")),
     ];
-    let f = fdf_file("10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R", &objs);
+    let f = fdf_file("10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R", &objs);
     let (eng, id, _) = blank("ap-hostile");
     let s = run(&eng, id, &f);
-    assert_eq!((s.added, s.appearances), (6, 1), "{s:?}");
+    assert_eq!((s.added, s.appearances), (8, 1), "{s:?}");
     assert_eq!(s.skipped.len(), 0, "{s:?}");
-    let mut want = vec![(ap::TOO_BIG, 1), (ap::UNRESOLVED, 1), (ap::UNSUPPORTED, 3)];
+    let mut want = vec![(ap::TOO_BIG, 1), (ap::UNRESOLVED, 1), (ap::UNSUPPORTED, 3), (ap::FILTER, 2)];
     want.sort_unstable();
     let mut got = reasons(&s.notes);
     got.sort_unstable();
@@ -295,6 +300,94 @@ fn a_bad_appearance_in_xfdf_is_counted_and_the_comment_is_still_made() {
     let s = run(&eng, id, file);
     assert_eq!((s.added, s.appearances, s.skipped.len()), (2, 0, 0), "{s:?}");
     assert_eq!(reasons(&s.notes), [(ap::DAMAGED, 2)]);
+}
+
+/// `<appearance>` holding `xml` (base64), on a square, as XFDF.
+fn xfdf_with_appearances(xmls: &[&str]) -> String {
+    use base64::Engine as _;
+    let squares: String = xmls
+        .iter()
+        .enumerate()
+        .map(|(i, x)| format!("<square page=\"0\" rect=\"100,600,200,700\" name=\"x{i}\"><appearance>{}</appearance></square>", base64::engine::general_purpose::STANDARD.encode(x)))
+        .collect();
+    format!("<xfdf xmlns=\"http://ns.adobe.com/xfdf/\"><annots>{squares}</annots></xfdf>")
+}
+
+#[test]
+fn the_appearance_element_holds_the_xml_form_and_the_old_fdf_form_is_still_read() {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let d = dir("xfdf", "ap-xml");
+    let (_lib, s, png) = one_stamp(&d);
+    let (a, ida, _) = open_bytes(&d, "a.pdf", &one_page_pdf("", "", &[]));
+    place_one(&a, ida, 0, &s, &png, [300.0, 400.0], "Alex", EditSource::User).unwrap();
+    let (bytes, _) = export(&a, ida, Format::Xfdf, "a.pdf").unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    let enc = text.split("<appearance>").nth(1).unwrap().split("</appearance>").next().unwrap().to_string();
+    let xml = String::from_utf8(b64.decode(&enc).unwrap()).unwrap();
+    assert!(xml.starts_with("<?xml"), "{}", &xml[..80.min(xml.len())]);
+    assert!(xml.contains("<DICT KEY=\"AP\"><STREAM KEY=\"N\">") && xml.contains("<DATA MODE=\"RAW\" ENCODING=\"HEX\""), "{}", &xml[..300.min(xml.len())]);
+    // A file Inkwell wrote before: the base64 of an FDF file. Reads to the same appearance.
+    let want = read_all(&a, ida)[0].ap.clone().unwrap();
+    let old = text.replace(&enc, &b64.encode(ap::to_fdf(&want)));
+    assert_ne!(old, text);
+    let (b, idb, _) = blank("ap-xml-old");
+    let r = run(&b, idb, old.as_bytes());
+    assert_eq!((r.added, r.appearances, r.notes.len()), (1, 1, 0), "{r:?}");
+    assert_eq!(read_all(&b, idb)[0].ap.as_ref(), Some(&want));
+    let (c, idc, _) = blank("ap-xml-new");
+    let r = run(&c, idc, text.as_bytes());
+    assert_eq!((r.added, r.appearances, r.notes.len()), (1, 1, 0), "{r:?}");
+    assert_eq!(read_all(&c, idc)[0].ap.as_ref(), Some(&want));
+}
+
+#[test]
+fn a_hostile_xml_appearance_goes_through_the_same_whitelist_and_caps() {
+    let form = |extra: &str, data: &str| {
+        format!(
+            "<DICT KEY=\"AP\"><STREAM KEY=\"N\"><NAME KEY=\"Subtype\" VAL=\"Form\"/><ARRAY KEY=\"BBox\"><INT VAL=\"0\"/><INT VAL=\"0\"/><INT VAL=\"100\"/><FIXED VAL=\"50.5\"/></ARRAY>{extra}{data}</STREAM></DICT>"
+        )
+    };
+    let green = "<DATA ENCODING=\"ASCII\" MODE=\"RAW\">0 1 0 rg 0 0 100 50 re f</DATA>";
+    let hexed = |b: &[u8]| format!("<DATA ENCODING=\"HEX\" MODE=\"FILTERED\">{}</DATA>", hex(b));
+    let bomb = zlib(&vec![0u8; 100 << 20]);
+    let xs = [
+        form("", green),
+        form("<NAME KEY=\"Filter\" VAL=\"DCTDecode\"/>", &hexed(b"\xFF\xD8\xFF\xE0")),
+        form("<ARRAY KEY=\"Filter\"><NAME VAL=\"FlateDecode\"/><NAME VAL=\"ASCIIHexDecode\"/></ARRAY>", &hexed(&zlib(b"0 1 0 rg"))),
+        form("<NAME KEY=\"Filter\" VAL=\"FlateDecode\"/>", &hexed(&bomb)),
+        form("", "<DATA ENCODING=\"BASE64\">AAAA</DATA>"),
+        "<ARRAY KEY=\"AP\"/>".to_string(),
+        "<DICT KEY=\"AP\"><DICT KEY=\"D\"/></DICT>".to_string(),
+        form("<STRING KEY=\"Z\" VAL=\"ignored\"/><DICT KEY=\"AA\"><NAME KEY=\"S\" VAL=\"JavaScript\"/></DICT>", green),
+    ];
+    let refs: Vec<&str> = xs.iter().map(String::as_str).collect();
+    let (eng, id, _) = blank("ap-xml-hostile");
+    let s = run(&eng, id, xfdf_with_appearances(&refs).as_bytes());
+    assert_eq!((s.added, s.appearances), (8, 2), "{s:?}");
+    let mut got = reasons(&s.notes);
+    got.sort_unstable();
+    let mut want = vec![(ap::FILTER, 2), (ap::TOO_BIG, 1), (ap::DAMAGED, 2), (ap::NOT_STREAM, 1)];
+    want.sort_unstable();
+    assert_eq!(got, want, "{s:?}");
+    // A DOCTYPE in the appearance is as refused as in the file.
+    let (eng, id, _) = blank("ap-xml-doctype");
+    let s = run(&eng, id, xfdf_with_appearances(&["<!DOCTYPE x [<!ENTITY e \"y\">]><DICT KEY=\"AP\"/>"]).as_bytes());
+    assert_eq!((s.added, reasons(&s.notes)), (1, vec![(ap::DAMAGED, 1)]));
+}
+
+#[test]
+fn a_comment_that_fails_leaves_no_new_objects_in_the_document() {
+    let f = fdf_file("5 0 R", &[obj(5, &freetext(1, 6)), stream_obj(6, RED_FORM, b"1 0 0 rg 0 0 100 50 re f")]);
+    let (a, ida, _) = blank("orphans-src");
+    run(&a, ida, &f);
+    let c = read_all(&a, ida).remove(0);
+    assert!(c.ap.is_some());
+    let mut doc = PdfDocument::from_bytes(&one_page_pdf("", "", &[])).unwrap();
+    let before = doc.count_objects().unwrap();
+    // The comment it would be written to is not there: nothing may be written for it first.
+    assert!(finish(&mut doc, 0, 4242, &c).is_err());
+    assert_eq!(doc.count_objects().unwrap(), before);
 }
 
 #[test]
@@ -410,23 +503,54 @@ fn a_certified_document_refuses_an_import_with_appearances_and_a_signed_one_take
     assert!(parse(ONE).is_ok());
 }
 
-#[test]
-fn one_bomb_shared_by_many_comments_costs_a_bounded_amount_of_decoding() {
-    // 2000 comments whose /FS is the same file that inflates to 100 MB: each attempt stops at its cap and is not
-    // kept, so the file's decode allowance (not the 10 MB of kept bytes) is what ends the work.
-    let z = zlib(&vec![0u8; 100 << 20]);
-    let n = 2000;
-    let mut objs = vec![obj(5, "<< /Type /Filespec /F (b.bin) /EF << /F 6 0 R >> >>"), stream_obj(6, "/Type /EmbeddedFile /Filter /FlateDecode", &z)];
+/// `n` FileAttachment comments whose /FS is one file: its stream has the given /Filter and bytes. Returns the
+/// summary and how long the whole import took.
+fn shared_file(test: &str, n: usize, filter: &str, data: &[u8]) -> (Summary, std::time::Duration) {
+    let mut objs = vec![obj(5, "<< /Type /Filespec /F (b.bin) /EF << /F 6 0 R >> >>"), stream_obj(6, &format!("/Type /EmbeddedFile /Filter {filter}"), data)];
     let refs: String = (0..n).map(|i| format!("{} 0 R ", 10 + i)).collect();
     objs.extend((0..n).map(|i| obj(10 + i, &format!("<< /Type /Annot /Subtype /FileAttachment /Page 0 /Rect [100 600 120 620] /NM (b{i}) /FS 5 0 R >>"))));
-    let (eng, id, _) = blank("attach-shared-bomb");
+    let (eng, id, _) = blank(test);
+    let f = fdf_file(&refs, &objs);
     let t = std::time::Instant::now();
-    let s = run(&eng, id, &fdf_file(&refs, &objs));
+    let s = run(&eng, id, &f);
+    (s, t.elapsed())
+}
+
+#[test]
+fn one_bomb_shared_by_many_comments_is_decoded_once() {
+    // A file that inflates to 100 MB, shared by 2000 comments: decoded once (stopped at its cap), then refused from
+    // what was learned.
+    let z = zlib(&vec![0u8; 100 << 20]);
+    let (s, took) = shared_file("attach-shared-bomb", 2000, "/FlateDecode", &z);
     assert_eq!(s.added, 0, "{:?}", s.skipped);
-    assert_eq!(s.skipped.iter().map(|r| r.count).sum::<usize>(), n);
-    let over = s.skipped.iter().find(|r| r.reason == attach::OVER).map_or(0, |r| r.count);
-    assert!(over <= 64 + 1, "{over} full-size attempts: the allowance is 256 MB of 4 MB tries");
-    assert!(t.elapsed().as_secs() < 30, "{:?}", t.elapsed());
+    assert_eq!(reasons(&s.skipped), vec![(attach::OVER, 2000)]);
+    assert!(took.as_secs() < 2, "{took:?}");
+}
+
+#[test]
+fn a_white_space_bomb_behind_an_ascii_filter_is_not_decoded_at_all() {
+    // Flate then ASCII hex: the white space inflates to gigabytes and the filter returns one byte, which no cap on
+    // the result sees. The chain is refused before anything runs, however many comments share it.
+    let z = zlib(&vec![b' '; 100 << 20]);
+    for filter in ["[/FlateDecode /ASCIIHexDecode]", "[/Fl /AHx]", "[/Fl /A85]", "[/ASCIIHexDecode /ASCIIHexDecode]"] {
+        let (s, took) = shared_file("attach-ws-bomb", 2000, filter, &z);
+        assert_eq!(s.added, 0, "{filter}: {:?}", s.skipped);
+        assert_eq!(reasons(&s.skipped), vec![(attach::DAMAGED, 2000)], "{filter}");
+        assert!(took.as_secs() < 2, "{filter}: {took:?}");
+    }
+}
+
+#[test]
+fn filter_arrays_are_checked_to_the_end_and_a_stage_is_charged_where_it_runs() {
+    // More than three filters: refused whatever they are (the old check looked at the first 16 names only).
+    let long = format!("[{}/DCTDecode]", "/FlateDecode ".repeat(20));
+    let (s, _) = shared_file("attach-long-chain", 3, &long, b"x");
+    assert_eq!(reasons(&s.skipped), vec![(attach::DAMAGED, 3)]);
+    // ASCII hex first, then Flate: the shape that is carried.
+    let data = b"hello attached file";
+    let hexed = format!("{}>", hex(&zlib(data)));
+    let (s, _) = shared_file("attach-ahx-fl", 3, "[/ASCIIHexDecode /FlateDecode]", hexed.as_bytes());
+    assert_eq!((s.added, s.files), (3, 3), "{:?}", s.skipped);
 }
 
 #[test]

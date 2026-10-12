@@ -9,12 +9,20 @@
 //! (a compression bomb stops at the cap), and every name the content stream uses must resolve in the form's
 //! own `/Resources`, never in the page's.
 //!
-//! The file shape is Inkwell's own reading of "base64 of the appearance" in ISO 19444-1: an FDF file that holds one
-//! annotation with an `/AP`. It was not checked against a file Acrobat wrote.
+//! The file shape of `<appearance>` (ISO 19444-1 gives its content as a "Base64 encoded string"): the base64 of an XML
+//! tree that spells the PDF objects, as Apache PDFBox reads the ones Acrobat writes: `DICT KEY="AP"` holding
+//! `STREAM KEY="N"`; the entries of a dictionary or stream are `INT`, `FIXED`, `NAME`, `BOOL`, `ARRAY`, `DICT` and
+//! `STREAM` elements (`KEY` names the entry, `VAL` is a scalar) and a stream's bytes are its `DATA` element (`ENCODING`
+//! `HEX` or `ASCII`, `MODE`, `LENGTH`). The element and attribute names come from PDFBox's reader; the standard's
+//! text was not available (only its table of contents), and no file Acrobat wrote was. The XML is turned into the
+//! one-annotation FDF file below and read by the same code, so the whitelist and caps are the same. Files that
+//! Inkwell wrote before (base64 of that FDF file) are still read.
 
-use crate::engine::EngineError;
-use crate::exchange::{Budget, pdf_name};
+use super::attach::{hex, unhex};
+use super::stream;
+use crate::exchange::{self, Budget, Node, Unpack, esc, pdf_name};
 use crate::forms::get;
+use crate::engine::EngineError;
 use mupdf::Buffer;
 use mupdf::pdf::{PdfDocument, PdfObject};
 use std::collections::HashMap;
@@ -30,6 +38,7 @@ pub(super) const UNRESOLVED: Why = "appearance that uses a resource it does not 
 pub(super) const TOO_BIG: Why = "appearance over the size limit, or that unpacks to more than it";
 pub(super) const DAMAGED: Why = "appearance that is damaged or not understood";
 pub(super) const NO_ROOM: Why = "appearance past the limit for appearances and files in one file";
+pub(super) const FILTER: Why = "appearance with a stream filter that is not Flate or ASCII hex or 85";
 
 /// Stream bytes, decoded, in one appearance.
 pub(crate) const MAX_PACKAGE: usize = 4 << 20;
@@ -79,11 +88,11 @@ struct Reader<'a> {
     total: usize,
 }
 
-fn number_of(v: &PdfObject) -> Option<i32> {
+pub(super) fn number_of(v: &PdfObject) -> Option<i32> {
     if v.is_indirect().unwrap_or(false) { v.as_indirect().ok() } else { None }
 }
 
-fn name_of(v: Option<PdfObject>) -> Option<String> {
+pub(super) fn name_of(v: Option<PdfObject>) -> Option<String> {
     let v = v?;
     let v = v.resolve().ok().flatten().unwrap_or(v);
     if !v.is_name().unwrap_or(false) {
@@ -92,7 +101,7 @@ fn name_of(v: Option<PdfObject>) -> Option<String> {
     String::from_utf8(v.as_name().ok()?).ok()
 }
 
-fn int_of(v: Option<PdfObject>) -> Option<i32> {
+pub(super) fn int_of(v: Option<PdfObject>) -> Option<i32> {
     let v = v?;
     let v = v.resolve().ok().flatten().unwrap_or(v);
     if v.is_number().unwrap_or(false) { v.as_int().ok().or_else(|| v.as_float().ok().map(|f| f as i32)) } else { None }
@@ -110,7 +119,7 @@ fn bool_of(v: Option<PdfObject>) -> Option<bool> {
     if v.is_bool().unwrap_or(false) { v.as_bool().ok() } else { None }
 }
 
-fn dict_of(v: Option<PdfObject>) -> Option<PdfObject> {
+pub(super) fn dict_of(v: Option<PdfObject>) -> Option<PdfObject> {
     let v = v?;
     let v = v.resolve().ok().flatten().unwrap_or(v);
     v.is_dict().unwrap_or(false).then_some(v)
@@ -166,19 +175,20 @@ impl Reader<'_> {
         Ok(i)
     }
 
-    /// A stream's decoded bytes, stopped at what is left of the caps.
+    /// A stream's decoded bytes (form content and font programs: image codecs are only for an image's own stream, see
+    /// [`Reader::image`]), through the filters `stream` decodes, held to what is left of the caps.
     fn decoded(&mut self, s: &PdfObject) -> Result<Vec<u8>, Why> {
-        let room = self.room();
-        if room == 0 {
-            return Err(NO_ROOM);
+        let d = stream::unpack(s, MAX_PACKAGE, self.budget).map_err(|e| match e {
+            Unpack::Over => TOO_BIG,
+            Unpack::NoWork => NO_ROOM,
+            Unpack::Damaged => DAMAGED,
+            Unpack::Unsupported => FILTER,
+        })?;
+        if d.len() > MAX_PACKAGE.saturating_sub(self.total) {
+            return Err(TOO_BIG);
         }
-        let r = s.read_stream_capped(room);
-        self.budget.spend_work(r.as_ref().map_or(room, Vec::len));
-        // When what is left of the file's allowance (not this appearance's own limit) stopped it, it is not "too big".
-        let tight = room < MAX_PACKAGE.saturating_sub(self.total);
-        let b = r.map_err(|e| if !e.is_stream_cap() { DAMAGED } else if tight { NO_ROOM } else { TOO_BIG })?;
-        self.take(b.len())?;
-        Ok(b)
+        self.take(d.len())?;
+        Ok(d.to_vec())
     }
 
     /// A form XObject: the appearance's `/N`, or one it draws.
@@ -444,14 +454,15 @@ impl Reader<'_> {
             }
             d.push(("SMask".into(), Val::Ref(i)));
         }
-        // The filters, as the image is stored: Flate and DCT only.
+        // The filter, as the image is stored: Flate or DCT, one of them. (Chains are not carried: only a lone Flate
+        // can be checked for what it inflates to, and the codec runs at render time on what is stored.)
         let filters: Vec<String> = match get(im, "Filter") {
             None => Vec::new(),
             Some(f) => match name_of(Some(f.clone())) {
                 Some(n) => vec![n],
                 None => {
                     let a = f.resolve().ok().flatten().unwrap_or(f);
-                    if !a.is_array().unwrap_or(false) || a.len().unwrap_or(9) > 2 {
+                    if !a.is_array().unwrap_or(false) || a.len().unwrap_or(9) > 1 {
                         return Err(UNSUPPORTED);
                     }
                     (0..a.len().unwrap_or(0) as i32).map(|i| name_of(a.get_array(i).ok().flatten()).ok_or(UNSUPPORTED)).collect::<Result<_, _>>()?
@@ -469,19 +480,21 @@ impl Reader<'_> {
             return Err(TOO_BIG);
         }
         if flate_only && !filters.is_empty() {
-            // What it inflates to must be what the picture needs: a bomb is stopped here, not at render time.
-            let slack = (expected as usize + 65_536).min(self.budget.work_left());
-            if slack == 0 {
-                return Err(NO_ROOM);
-            }
-            let r = im.read_stream_capped(slack);
-            self.budget.spend_work(r.as_ref().map_or(slack, Vec::len));
-            r.map_err(|e| if e.is_stream_cap() { TOO_BIG } else { DAMAGED })?;
+            // What it inflates to must be what the picture needs (a predictor adds a byte a row): a bomb is stopped
+            // here, not at render time.
+            let cap = expected as usize + h as usize + 65_536;
+            stream::inflates_within(im, cap, self.budget).map_err(|e| match e {
+                Unpack::Over => TOO_BIG,
+                Unpack::NoWork => NO_ROOM,
+                _ => DAMAGED,
+            })?;
         }
         let data = im.read_raw_stream().map_err(|_| DAMAGED)?;
         if data.len() > self.room() {
             return Err(TOO_BIG);
         }
+        // Reading what is stored is work too: a picture many comments share is read once per comment.
+        self.budget.spend_work(data.len());
         self.take(data.len())?;
         if !filters.is_empty() {
             let names = filters.iter().map(|f| Val::Name(f.clone())).collect::<Vec<_>>();
@@ -527,9 +540,9 @@ fn val_cost(v: &Val) -> usize {
     }
 }
 
-/// The most an appearance may come to as the FDF file `<appearance>` holds (base64 of it stays under the reader's
-/// limit for one element). Export leaves out one over it, so an export never writes what import refuses.
-pub(super) const MAX_FDF: usize = 6 << 20;
+/// The most an appearance may come to as the XML (or the FDF file) `<appearance>` holds: base64 of it stays under the
+/// reader's limit for one element. Export leaves out one over it, so an export never writes what import refuses.
+pub(super) const MAX_XML: usize = 6 << 20;
 
 // ---- the content stream: which resources it names ----------------------------------------------
 
@@ -797,7 +810,77 @@ pub(super) fn write_objects(p: &Package, first: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// A small FDF file holding one annotation whose `/AP /N` is the package: what `<appearance>` carries, as base64.
+/// The package as the XML `<appearance>` holds (see the module's note), or `None` when it comes to more than
+/// [`MAX_XML`]: shared objects are written again where they are used, so a shape of many of them is cut short here.
+pub(super) fn to_xml(p: &Package) -> Option<String> {
+    let mut s = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DICT KEY=\"AP\">");
+    object(p, p.root, Some("N"), &mut s)?;
+    s.push_str("</DICT>");
+    (s.len() <= MAX_XML).then_some(s)
+}
+
+fn key_attr(key: Option<&str>) -> String {
+    key.map(|k| format!(" KEY=\"{}\"", esc(k))).unwrap_or_default()
+}
+
+fn object(p: &Package, i: usize, key: Option<&str>, out: &mut String) -> Option<()> {
+    if out.len() > MAX_XML {
+        return None;
+    }
+    let o = p.objs.get(i)?;
+    let (tag, k) = (if o.data.is_some() { "STREAM" } else { "DICT" }, key_attr(key));
+    let _ = write!(out, "<{tag}{k}>");
+    for (name, v) in &o.dict {
+        value(p, v, Some(name), out)?;
+    }
+    if let Some(d) = &o.data {
+        let mode = if o.dict.iter().any(|(k, _)| k == "Filter") { "FILTERED" } else { "RAW" };
+        let _ = write!(out, "<DATA MODE=\"{mode}\" ENCODING=\"HEX\" LENGTH=\"{}\">{}</DATA>", d.len(), hex(d));
+    }
+    let _ = write!(out, "</{tag}>");
+    Some(())
+}
+
+fn value(p: &Package, v: &Val, key: Option<&str>, out: &mut String) -> Option<()> {
+    if out.len() > MAX_XML {
+        return None;
+    }
+    let k = key_attr(key);
+    match v {
+        Val::Int(i) => {
+            let _ = write!(out, "<INT{k} VAL=\"{i}\"/>");
+        }
+        Val::Real(r) => {
+            let _ = write!(out, "<FIXED{k} VAL=\"{r}\"/>");
+        }
+        Val::Bool(b) => {
+            let _ = write!(out, "<BOOL{k} VAL=\"{b}\"/>");
+        }
+        Val::Name(n) => {
+            let _ = write!(out, "<NAME{k} VAL=\"{}\"/>", esc(n));
+        }
+        Val::Arr(a) => {
+            let _ = write!(out, "<ARRAY{k}>");
+            for x in a {
+                value(p, x, None, out)?;
+            }
+            out.push_str("</ARRAY>");
+        }
+        Val::Dict(d) => {
+            let _ = write!(out, "<DICT{k}>");
+            for (name, x) in d {
+                value(p, x, Some(name), out)?;
+            }
+            out.push_str("</DICT>");
+        }
+        Val::Ref(i) => object(p, *i, key, out)?,
+    }
+    Some(())
+}
+
+/// A small FDF file holding one annotation whose `/AP /N` is the package: the form that Inkwell's `<appearance>`
+/// had before the XML one, and what the XML is turned into to be read.
+#[cfg(test)]
 pub(super) fn to_fdf(p: &Package) -> Vec<u8> {
     let mut objs = vec![b"1 0 obj\n<< /FDF << /Annots [2 0 R] >> >>\nendobj\n".to_vec()];
     objs.push(format!("2 0 obj\n<< /Type /Annot /AP << /N {} 0 R >> >>\nendobj\n", 3 + p.root).into_bytes());
@@ -805,19 +888,131 @@ pub(super) fn to_fdf(p: &Package) -> Vec<u8> {
     super::assemble_fdf(&objs)
 }
 
+/// Streams in one `<appearance>` XML.
+const MAX_XML_STREAMS: usize = 256;
+
+/// The value of the element `n` as PDF syntax. `false`: it is not an element that holds a value (it is skipped, as
+/// `STRING` is: no appearance entry that is read is a string).
+fn xml_value(n: &Node, objs: &mut Vec<Vec<u8>>, out: &mut String) -> Result<bool, Why> {
+    let val = n.attr("VAL").unwrap_or("").trim();
+    match n.name.as_str() {
+        "int" => match val.parse::<i32>() {
+            Ok(i) => {
+                let _ = write!(out, "{i}");
+            }
+            Err(_) => return Ok(false),
+        },
+        "fixed" => match val.parse::<f32>().ok().filter(|f| f.is_finite()) {
+            Some(f) => {
+                let _ = write!(out, "{f}");
+            }
+            None => return Ok(false),
+        },
+        "name" => out.push_str(&pdf_name(val.strip_prefix('/').unwrap_or(val))),
+        "bool" => out.push_str(if val.eq_ignore_ascii_case("true") { "true" } else { "false" }),
+        "array" => {
+            out.push('[');
+            for k in &n.kids {
+                let mut item = String::new();
+                if xml_value(k, objs, &mut item)? {
+                    out.push_str(&item);
+                    out.push(' ');
+                }
+            }
+            out.push(']');
+        }
+        "dict" => {
+            out.push_str("<<");
+            xml_entries(n, objs, out, false)?;
+            out.push_str(" >>");
+        }
+        "stream" => {
+            let num = xml_stream(n, objs)?;
+            let _ = write!(out, "{num} 0 R");
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn xml_entries(n: &Node, objs: &mut Vec<Vec<u8>>, out: &mut String, in_stream: bool) -> Result<(), Why> {
+    for k in &n.kids {
+        let Some(key) = k.attr("KEY").filter(|s| !s.is_empty()) else { continue };
+        // The length is what the data is.
+        if in_stream && key == "Length" {
+            continue;
+        }
+        let mut v = String::new();
+        if xml_value(k, objs, &mut v)? {
+            let _ = write!(out, " {} {v}", pdf_name(key));
+        }
+    }
+    Ok(())
+}
+
+/// Writes the stream element as an object of the FDF being built and returns its number (3 and up).
+fn xml_stream(n: &Node, objs: &mut Vec<Vec<u8>>) -> Result<usize, Why> {
+    if objs.len() >= MAX_XML_STREAMS {
+        return Err(TOO_BIG);
+    }
+    let slot = objs.len();
+    objs.push(Vec::new());
+    let mut dict = String::from("<<");
+    xml_entries(n, objs, &mut dict, true)?;
+    let data = match n.child("data") {
+        None => Vec::new(),
+        Some(d) if d.over => return Err(TOO_BIG),
+        Some(d) => match d.attr("ENCODING").unwrap_or("HEX").to_ascii_uppercase().as_str() {
+            "HEX" => {
+                if d.text.len() / 2 > MAX_PACKAGE {
+                    return Err(TOO_BIG);
+                }
+                unhex(&d.text).ok_or(DAMAGED)?
+            }
+            "ASCII" => d.text.clone().into_bytes(),
+            _ => return Err(DAMAGED),
+        },
+    };
+    let num = 3 + slot;
+    let mut o = format!("{num} 0 obj\n{dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+    o.extend_from_slice(&data);
+    o.extend_from_slice(b"\nendstream\nendobj\n");
+    objs[slot] = o;
+    Ok(num)
+}
+
+/// The appearance in the XML of an `<appearance>` (see [`to_xml`]).
+fn from_xml(bytes: &[u8], b: &Budget) -> Result<Package, Why> {
+    let text = exchange::utf8_of(bytes).map_err(|_| DAMAGED)?;
+    let root = exchange::parse_xml_blobs(&text).map_err(|_| DAMAGED)?;
+    if root.name != "dict" {
+        return Err(DAMAGED);
+    }
+    let n = root.kids.iter().find(|k| k.name == "stream" && k.attr("KEY").is_some_and(|k| k == "N")).ok_or(NOT_STREAM)?;
+    let mut objs = Vec::new();
+    // The first stream is object 3.
+    let num = xml_stream(n, &mut objs)?;
+    let mut all = vec![b"1 0 obj\n<< /FDF << /Annots [2 0 R] >> >>\nendobj\n".to_vec(), format!("2 0 obj\n<< /Type /Annot /AP << /N {num} 0 R >> >>\nendobj\n").into_bytes()];
+    all.extend(objs);
+    from_fdf(&super::assemble_fdf(&all), b)
+}
+
 /// The appearance of an `<appearance>` element's text (`over`: it was longer than the reader's limit for it).
 pub(super) fn from_base64(text: &str, over: bool, b: &Budget) -> Result<Package, Why> {
     use base64::Engine as _;
-    if over || text.len() / 4 * 3 > MAX_FDF {
+    if over || text.len() / 4 * 3 > MAX_XML {
         return Err(TOO_BIG);
     }
     let t: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     let bytes = base64::engine::general_purpose::STANDARD.decode(t).map_err(|_| DAMAGED)?;
-    from_fdf(&bytes, b)
+    // `%FDF` is what Inkwell wrote before the XML form.
+    if bytes.starts_with(b"%") { from_fdf(&bytes, b) } else { from_xml(&bytes, b) }
 }
 
-/// The appearance in [`to_fdf`]'s bytes.
-pub(super) fn from_fdf(bytes: &[u8], b: &Budget) -> Result<Package, Why> {
+/// The appearance in the bytes of a one-annotation FDF file.
+fn from_fdf(bytes: &[u8], b: &Budget) -> Result<Package, Why> {
+    // Its object numbers are its own: a stream cached under one of them is not another file's.
+    b.next_file();
     let r = crate::exchange::with_fdf(bytes, |root| {
         let annots = get(root, "Annots").and_then(|a| a.resolve().ok().flatten()).filter(|a| a.is_array().unwrap_or(false));
         let first = annots.and_then(|a| a.get_array(0).ok().flatten());

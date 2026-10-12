@@ -10,17 +10,17 @@
 //! accepted: ascii and base64). It was not checked against a file Acrobat wrote.
 
 use super::ap::Why;
+use super::stream::{self, Stage};
 use crate::engine::EngineError;
-use crate::exchange::{self, Budget, MAX_ATTACHMENT, Node, pdf_name, pdf_text};
+use crate::exchange::{self, Budget, MAX_ATTACHMENT, Node, Unpack, pdf_name, pdf_text};
 use crate::forms::get;
 use crate::organize::attach::{clean_name, mime_for, stream_of, strip_invisible};
 use flate2::Compression;
-use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use mupdf::Buffer;
 use mupdf::pdf::{PdfDocument, PdfObject};
 use std::fmt::Write as _;
-use std::io::{Read, Write};
+use std::io::Write;
 
 pub(super) const EXTERNAL: Why = "attached file that is a link to a file outside the comment";
 pub(super) const OVER: Why = "attached file over 4 MB, or that unpacks to more than that";
@@ -74,30 +74,13 @@ fn date_ok(d: &str) -> bool {
     d.len() <= 24 && d.strip_prefix("D:").is_some_and(|r| r.len() >= 4 && r.chars().all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | 'Z' | '\'')))
 }
 
-/// What a file may be decoded to: the per-file cap, or what is left of the total.
-fn room(b: &Budget) -> usize {
-    MAX_ATTACHMENT.min(b.blobs_left())
-}
-
-/// [`room`], also held to what is left of the file's decode allowance.
-fn decode_room(b: &Budget) -> usize {
-    room(b).min(b.work_left())
-}
-
-/// Whether the stream's filters are ones that return the file's own bytes: an image codec would return pixels
-/// (and take the heavy decoder to do it).
-fn plain_filters(s: &PdfObject) -> bool {
-    let names = |v: PdfObject| -> Vec<String> {
-        let one = |o: &PdfObject| o.is_name().unwrap_or(false).then(|| o.as_name().ok()).flatten().map(|n| String::from_utf8_lossy(&n).into_owned());
-        let v = v.resolve().ok().flatten().unwrap_or(v);
-        if v.is_array().unwrap_or(false) {
-            (0..v.len().unwrap_or(0).min(16) as i32).filter_map(|i| v.get_array(i).ok().flatten().and_then(|o| one(&o))).collect()
-        } else {
-            one(&v).into_iter().collect()
-        }
-    };
-    let f = get(s, "Filter").map(names).unwrap_or_default();
-    !f.iter().any(|n| matches!(n.as_str(), "DCTDecode" | "DCT" | "JPXDecode" | "JBIG2Decode" | "CCITTFaxDecode" | "CCF" | "Crypt"))
+/// Why a stream that did not decode is not carried.
+fn refused(e: Unpack) -> Why {
+    match e {
+        Unpack::Over => OVER,
+        Unpack::NoWork => NO_ROOM,
+        Unpack::Damaged | Unpack::Unsupported => DAMAGED,
+    }
 }
 
 fn finish(f: AttachFile, b: &Budget) -> Result<AttachFile, Why> {
@@ -122,24 +105,10 @@ fn read_spec(fs: &PdfObject, b: &Budget) -> Result<AttachFile, Why> {
         return Err(EXTERNAL);
     }
     let stream = stream_of(fs).ok_or(EXTERNAL)?;
-    if !plain_filters(&stream) {
-        return Err(DAMAGED);
-    }
-    let cap = decode_room(b);
-    if cap == 0 {
+    if b.blobs_left() == 0 {
         return Err(NO_ROOM);
     }
-    let r = stream.read_stream_capped(cap);
-    b.spend_work(r.as_ref().map_or(cap, Vec::len));
-    let data = r.map_err(|e| {
-        if !e.is_stream_cap() {
-            DAMAGED
-        } else if cap < MAX_ATTACHMENT {
-            NO_ROOM
-        } else {
-            OVER
-        }
-    })?;
+    let data = stream::unpack(&stream, MAX_ATTACHMENT, b).map_err(refused)?.to_vec();
     let first = |k: &[&str]| k.iter().map(|k| super::string(&dict, k, b)).find(|s| !s.is_empty()).unwrap_or_default();
     let mime = get(&stream, "Subtype").filter(|s| s.is_name().unwrap_or(false)).and_then(|s| s.as_name().ok()).and_then(|n| String::from_utf8(n).ok()).filter(|m| mime_ok(m));
     let params = get(&stream, "Params").and_then(|p| p.resolve().ok().flatten().filter(|p| p.is_dict().unwrap_or(false)));
@@ -149,7 +118,7 @@ fn read_spec(fs: &PdfObject, b: &Budget) -> Result<AttachFile, Why> {
     finish(AttachFile { name, desc: desc_of(&super::string(&dict, "Desc", b)), mime, modified, data }, b)
 }
 
-fn unhex(s: &str) -> Option<Vec<u8>> {
+pub(super) fn unhex(s: &str) -> Option<Vec<u8>> {
     let digits: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
     if digits.len() % 2 != 0 {
         return None;
@@ -158,18 +127,12 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     digits.chunks_exact(2).map(|p| Some(v(p[0])? << 4 | v(p[1])?)).collect()
 }
 
-fn hex(d: &[u8]) -> String {
+pub(super) fn hex(d: &[u8]) -> String {
     let mut s = String::with_capacity(d.len() * 2);
     for b in d {
         let _ = write!(s, "{b:02X}");
     }
     s
-}
-
-fn inflate(z: &[u8], cap: usize) -> Result<Vec<u8>, Why> {
-    let mut out = Vec::new();
-    ZlibDecoder::new(z).take(cap as u64 + 1).read_to_end(&mut out).map_err(|_| DAMAGED)?;
-    if out.len() > cap { Err(OVER) } else { Ok(out) }
 }
 
 /// The file of a `<data>` element; `file` is the annotation's `file` attribute.
@@ -195,20 +158,7 @@ pub(super) fn from_data(e: &Node, file: &str, b: &Budget) -> Result<AttachFile, 
         _ => text.as_bytes().to_vec(),
     };
     let filtered = e.attr("mode").is_some_and(|m| m.eq_ignore_ascii_case("filtered"));
-    let cap = if filtered { decode_room(b) } else { room(b) };
-    if filtered && cap == 0 {
-        return Err(NO_ROOM);
-    }
-    let data = if filtered {
-        let r = inflate(&stored, cap);
-        b.spend_work(r.as_ref().map_or(cap, Vec::len));
-        r.map_err(|w| if w == OVER && cap < MAX_ATTACHMENT { NO_ROOM } else { w })?
-    } else {
-        stored
-    };
-    if data.len() > cap && cap < MAX_ATTACHMENT {
-        return Err(NO_ROOM);
-    }
+    let data = if filtered { stream::run(stored, &[Stage::Flate], MAX_ATTACHMENT, b).map_err(refused)? } else { stored };
     let name = name_of(file);
     let mime = e.attr("MIME-type").filter(|m| mime_ok(m)).map_or_else(|| mime_for(&name).to_string(), str::to_string);
     let modified = e.attr("modification").filter(|d| date_ok(d)).unwrap_or("").to_string();

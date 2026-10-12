@@ -20,7 +20,7 @@
 use super::{Kind, NewAnnot, Style, add, bad, each, find, meta, parent_of, put_str, rgb};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
-use crate::exchange::{self, Budget, Format, MAX_DEPTH, MAX_EXPORT_COPIED, MAX_ITEMS, MAX_NODES, MAX_STR, esc, pdf_name, pdf_text};
+use crate::exchange::{self, Budget, Format, Unpack, MAX_DEPTH, MAX_EXPORT_COPIED, MAX_ITEMS, MAX_NODES, MAX_STR, esc, pdf_name, pdf_text};
 use crate::forms::{decode_text, get, parse_da, text};
 use ap::{Package, Why};
 use attach::AttachFile;
@@ -33,6 +33,7 @@ use std::fmt::Write as _;
 mod ap;
 mod attach;
 mod rich;
+mod stream;
 
 type Result<T> = std::result::Result<T, EngineError>;
 
@@ -346,9 +347,11 @@ fn is_measurement(o: &PdfObject) -> bool {
 fn rich_of(o: &PdfObject, b: &Budget) -> Option<std::result::Result<rich::Rich, Why>> {
     let v = get(o, "RC")?;
     if v.is_stream().unwrap_or(false) {
-        let bytes = match v.read_stream_capped(rich::MAX_RICH * 4) {
+        // Through the same decoder as every stream (its filters, its allowance, its cache).
+        let bytes = match stream::unpack(&v, rich::MAX_RICH * 4, b) {
             Ok(x) => x,
-            Err(e) => return Some(Err(if e.is_stream_cap() { rich::TOO_BIG } else { rich::DAMAGED })),
+            Err(Unpack::Over | Unpack::NoWork) => return Some(Err(rich::TOO_BIG)),
+            Err(_) => return Some(Err(rich::DAMAGED)),
         };
         if !b.take(bytes.len()) {
             return None;
@@ -489,7 +492,7 @@ fn collect_within(doc: &PdfDocument, limit: usize) -> Result<Collected> {
         }
         // Only a stamp's appearance is written: it is what makes a picture (the other types are drawn from their data).
         let mut c = read(&o, sub, &budget, sub == Sub::Stamp);
-        if c.ap.as_ref().is_some_and(|p| ap::to_fdf(p).len() > ap::MAX_FDF) {
+        if c.ap.as_ref().is_some_and(|p| ap::to_xml(p).is_none()) {
             c.ap = None;
             c.notes.push(ap::TOO_BIG);
         }
@@ -631,9 +634,9 @@ fn xfdf(items: &[Comment], file: &str) -> String {
         if let Some((r, open)) = c.popup {
             let _ = write!(o, "<popup page=\"{}\" rect=\"{}\" open=\"{}\"/>", c.page, join(&r, ","), if open { "yes" } else { "no" });
         }
-        if let Some(p) = &c.ap {
+        if let Some(x) = c.ap.as_ref().and_then(ap::to_xml) {
             use base64::Engine as _;
-            let _ = write!(o, "<appearance>{}</appearance>", base64::engine::general_purpose::STANDARD.encode(ap::to_fdf(p)));
+            let _ = write!(o, "<appearance>{}</appearance>", base64::engine::general_purpose::STANDARD.encode(x));
         }
         if let Some(f) = &c.file {
             o.push_str(&attach::to_data(f));
@@ -1212,10 +1215,6 @@ fn finish(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment) -> Result<bo
     if c.rich.is_none() && c.fringe.is_none() && !symbol && ap.is_none() {
         return Ok(false);
     }
-    let root = match ap {
-        Some((p, _)) => Some(ap::install(doc, p)?),
-        None => None,
-    };
     let (_p, mut a) = find(doc, page, xref)?;
     let mut o = a.object();
     if let Some(r) = &c.rich {
@@ -1229,11 +1228,14 @@ fn finish(doc: &mut PdfDocument, page: u32, xref: i32, c: &Comment) -> Result<bo
             o.dict_put("Sy", PdfObject::new_name(&c.symbol)?)?;
         }
     }
-    let Some((n, r)) = root.zip(c.rect) else { return Ok(false) };
+    let Some((p, r)) = ap else { return Ok(false) };
+    let rect = real_array(doc, &r)?;
     let mut d = doc.new_dict()?;
-    d.dict_put("N", n)?;
+    // The appearance's objects are written last, after everything that can fail for this comment: a signed
+    // document's incremental save writes every new object, referenced or not.
+    d.dict_put("N", ap::install(doc, p)?)?;
     o.dict_put("AP", d)?;
-    o.dict_put("Rect", real_array(doc, &r)?)?;
+    o.dict_put("Rect", rect)?;
     // So that the page shows the new appearance now, not after the document is reopened.
     a.update()?;
     Ok(true)
@@ -1256,7 +1258,7 @@ fn new_file(doc: &mut PdfDocument, page: u32, r: [f32; 4], st: &Style, c: &Comme
     let mut p = doc.load_pdf_page(page as i32)?;
     let mut a = p.create_annotation(PdfAnnotationType::FileAttachment)?;
     let icon = if ICONS.contains(&c.icon.as_str()) { c.icon.as_str() } else { "PushPin" };
-    // The file is written after the annotation exists, so a failure above leaves no unreferenced stream behind.
+    // The file is written after everything else that can fail, so a failure leaves no unreferenced stream behind.
     let made = (|| -> Result<()> {
         a.set_rect(super::rect_of(r))?;
         a.set_icon_name(icon)?;
@@ -1264,9 +1266,11 @@ fn new_file(doc: &mut PdfDocument, page: u32, r: [f32; 4], st: &Style, c: &Comme
         if let Some(o) = st.opacity {
             a.set_opacity(o.clamp(0.0, 1.0))?;
         }
+        meta(&mut a, &c.author, true)?;
+        a.update()?;
+        // Last, for the same reason as the appearance's objects in `finish`.
         let fs = attach::install(doc, file)?;
         a.object().dict_put("FS", fs)?;
-        meta(&mut a, &c.author, true)?;
         a.update()?;
         Ok(())
     })();

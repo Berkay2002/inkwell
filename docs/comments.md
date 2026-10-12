@@ -71,17 +71,27 @@ data). The format of an export follows the file name: `.fdf` is FDF, anything el
   summary counts them.
   Page numbers and points are the file's (PDF user space, y up, 0-based page).
 - **Appearance (`/AP`)**: written for picture stamps only (the other types are drawn from their data, which any reader
-  can do). XFDF `<appearance>` holds base64 of a small FDF file with one annotation and its `/AP` (Inkwell's own
-  reading of "base64" in ISO 19444-1; not checked against Acrobat's file). An appearance is never copied as it is: it
-  is read through a whitelist into plain data (`annot/xfdf/ap.rs`): one form, at most 4 levels of forms, 64 objects,
-  simple Type 1 and TrueType fonts (their embedded font file included), graphics states with opacity and blend mode,
-  images up to 16 megapixels (Flate and DCT as stored, ICC profiles replaced by their device space). Actions, `/AA`,
-  `/OC`, metadata, patterns, shadings, inline images, soft masks of a graphics state, Type 3 and composite fonts are
-  not carried; an appearance that needs one of them is refused as a whole. Every name its content uses must resolve in
-  the form's own `/Resources`. Streams are decoded under a cap (4 MB per appearance; an image is stored compressed and checked up to its own pixel size, 16 megapixels at most), so a bomb stops there. Per file
-  there is also an allowance of 256 MB of decoding (what a cap stopped counts, so one bomb shared by thousands of comments
-  is not inflated again for each) and 64 MB for what appearances hold in memory (a font many comments share is a copy
-  each); past either, the rest get Inkwell's own drawing and are counted.
+  can do). XFDF `<appearance>` holds the base64 of an XML tree that spells the PDF objects: `<DICT KEY="AP">` with
+  `<STREAM KEY="N">`, whose entries are `INT`, `FIXED`, `NAME`, `BOOL`, `ARRAY`, `DICT` and `STREAM` elements (`KEY` is
+  the entry, `VAL` a scalar) and whose bytes are a `<DATA MODE ENCODING LENGTH>` element (`HEX` or `ASCII`). **These
+  element and attribute names are not confirmed against the standard or an Acrobat file**: the text of ISO 19444-1
+  was not available (only its table of contents), and the names come from Apache PDFBox's reader for the appearance
+  Acrobat writes. `STRING` elements are skipped and `MODE` is written but not needed to read. Files Inkwell wrote before
+  (base64 of a small FDF file with one annotation) are still read. An appearance is never copied as it is: the XML (or
+  FDF) is read through a whitelist into plain data (`annot/xfdf/ap.rs`): one form, at most 4 levels of forms, 64
+  objects, simple Type 1 and TrueType fonts (their embedded font file included), graphics states with opacity and
+  blend mode, images up to 16 megapixels (one Flate or DCT filter, as stored; ICC profiles replaced by their device
+  space). Actions, `/AA`, `/OC`, metadata, patterns, shadings, inline images, soft masks of a graphics state, Type 3
+  and composite fonts are not carried; an appearance that needs one of them is refused as a whole. Every name its
+  content uses must resolve in the form's own `/Resources`.
+  Streams (appearances, font programs, rich text and attached files) are decoded by `annot/xfdf/stream.rs`, one filter
+  stage at a time: Flate, ASCII hex and ASCII 85, as `[ASCII]? [Flate]{0,2}` (an ASCII filter only first, never after a
+  decompressor, and at most 3 filters). Every stage's output is held to the cap (4 MB per appearance or file) and
+  charged to a per-file allowance of 256 MB of decoding, so a bomb stops at the cap and a stream shared by thousands of
+  comments is decoded once and then refused from what was learned. DCT, JPX, JBIG2, CCITT, LZW, run length, `/Crypt`
+  and a Flate predictor are not decoded outside of an image (an LZW attachment is left out as "not understood").
+  There is also 64 MB for what appearances hold in memory (a font many comments share is a copy each); past either, the
+  rest get Inkwell's own drawing and are counted.
 - **Attached files**: a FileAttachment comment carries its file in XFDF `<data mode="raw" encoding="hex">` (a
   `filtered` mode is Flate; ascii and base64 are read too) or FDF `/FS` with `/EF`. At most 4 MB each and 10 MB for all
   attachments and appearances of one file; a larger one is left out and counted (a comment whose file cannot be written is
@@ -117,7 +127,7 @@ data). The format of an export follows the file name: `.fdf` is FDF, anything el
 - No file written by Acrobat was available while this was built: the shapes follow ISO 19444-1 and ISO 32000-2
   section 12.7.8, and are tested against our own exports and hand-written hostile files. A check against Acrobat's own
   XFDF and FDF is still to do. What is least certain: what Acrobat puts inside `<appearance>` (Inkwell reads and
-  writes an FDF file there), the exact attributes of `<data>`, and the caret attributes `fringe` and `symbol`.
+  writes the XML tree described above there, from PDFBox's reader), the exact attributes of `<data>`, and the caret attributes `fringe` and `symbol`.
 - Tests: `annot::xfdf::tests` and `annot::xfdf::tests_full` (round trips of carets, rich text, attachments and picture
   stamps in both formats and between two documents, the appearance drawing and replaced by an edit, a hostile file per
   new element, certified and signed documents), `src/lib/dataExchange.test.ts`.

@@ -73,8 +73,26 @@ pub const MAX_DECODE_WORK: usize = 256 << 20;
 /// Bytes of dictionaries, arrays and names of appearances one file may hold at once (an estimate of their size in
 /// memory): the same font read again by every comment is a copy each. Past it appearances are left out and counted.
 pub const MAX_AP_STRUCT: usize = 64 << 20;
-/// Least charged to [`MAX_DECODE_WORK`] for one decode: even a cap of 0 makes the decoder produce a chunk.
+/// Charged to [`MAX_DECODE_WORK`] for every decode on top of the bytes it moved: what setting one up costs.
 pub const MIN_DECODE_WORK: usize = 16 << 10;
+/// Decoded streams one file keeps for the next comment that shares them (failures are always kept: they are small).
+pub const MAX_CACHED_STREAMS: usize = 24 << 20;
+
+/// Why a stream was not decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unpack {
+    /// Its decoded size, or the size of one of its filters' output, is over the limit asked for.
+    Over,
+    /// What is left of the file's decode allowance is not enough.
+    NoWork,
+    /// A filter failed.
+    Damaged,
+    /// A filter or predictor that is not decoded (see `annot::xfdf::stream`).
+    Unsupported,
+}
+
+/// A decoded stream, shared by every comment that refers to the same object.
+pub type Unpacked = std::result::Result<std::rc::Rc<Vec<u8>>, Unpack>;
 /// The same bound for an export: the document is the person's own, so real comments may hold more than a
 /// file we read, but a damaged one still must not multiply one shared string or array without end.
 pub const MAX_EXPORT_COPIED: usize = 256 << 20;
@@ -96,6 +114,13 @@ pub struct Budget {
     work: Cell<usize>,
     /// What is left of [`MAX_AP_STRUCT`].
     structs: Cell<usize>,
+    /// Which file of the import is being read: object numbers mean something only inside one (an `<appearance>`
+    /// holds a file of its own).
+    scope: Cell<u32>,
+    /// Streams decoded already, by (file, object number, limit, predictors allowed): a stream many comments share is
+    /// decoded once, bombs included.
+    streams: RefCell<HashMap<(u32, i32, usize, bool), Unpacked>>,
+    cached: Cell<usize>,
 }
 
 impl Budget {
@@ -104,7 +129,7 @@ impl Budget {
     }
 
     pub fn with_limit(bytes: usize) -> Budget {
-        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default(), blobs: Cell::new(MAX_BLOBS), work: Cell::new(MAX_DECODE_WORK), structs: Cell::new(MAX_AP_STRUCT) }
+        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default(), blobs: Cell::new(MAX_BLOBS), work: Cell::new(MAX_DECODE_WORK), structs: Cell::new(MAX_AP_STRUCT), scope: Cell::new(0), streams: RefCell::default(), cached: Cell::new(0) }
     }
 
     /// Charges `n` bytes of attachment or appearance data; false (nothing charged) when they are not there. Unlike
@@ -140,9 +165,28 @@ impl Budget {
         self.work.get()
     }
 
-    /// Charges a decode that was tried: the bytes it produced, or its cap when it was stopped by it.
+    /// Charges `n` bytes a decoder moved: what it read or produced, or its cap when it was stopped by it.
     pub fn spend_work(&self, n: usize) {
-        self.work.set(self.work.get().saturating_sub(n.max(MIN_DECODE_WORK)));
+        self.work.set(self.work.get().saturating_sub(n));
+    }
+
+    /// From here on object numbers are those of another file.
+    pub fn next_file(&self) {
+        self.scope.set(self.scope.get() + 1);
+    }
+
+    pub fn stream_known(&self, object: i32, limit: usize, predictors: bool) -> Option<Unpacked> {
+        self.streams.borrow().get(&(self.scope.get(), object, limit, predictors)).cloned()
+    }
+
+    pub fn stream_keep(&self, object: i32, limit: usize, predictors: bool, r: &Unpacked) {
+        if let Ok(d) = r {
+            if self.cached.get() + d.len() > MAX_CACHED_STREAMS {
+                return;
+            }
+            self.cached.set(self.cached.get() + d.len());
+        }
+        self.streams.borrow_mut().insert((self.scope.get(), object, limit, predictors), r.clone());
     }
 
     /// What is left for attachments and appearance streams.
@@ -354,6 +398,16 @@ impl Node {
 /// external entities), only the five predefined entities and character references, at most
 /// [`MAX_NODES`] elements, [`MAX_DEPTH`] levels and [`MAX_STR`] bytes in any one string.
 pub fn parse_xml(bytes: &[u8]) -> Result<Node> {
+    parse_xml_in(bytes, false)
+}
+
+/// [`parse_xml`] for a file that is a comment's appearance on its own: a `data` element may be longer than
+/// [`MAX_STR`] anywhere in it.
+pub fn parse_xml_blobs(bytes: &[u8]) -> Result<Node> {
+    parse_xml_in(bytes, true)
+}
+
+fn parse_xml_in(bytes: &[u8], blobs: bool) -> Result<Node> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let err = |m: &str| bad(format!("This file is not valid XFDF: {m}."));
     let mut rd = Reader::from_reader(bytes);
@@ -391,7 +445,7 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Node> {
         Ok(n)
     };
     let grow = |stack: &mut Vec<Node>, s: &str| -> Result<()> {
-        let in_annots = stack.iter().any(|n| n.name == "annots");
+        let in_annots = blobs || stack.iter().any(|n| n.name == "annots");
         if let Some(top) = stack.last_mut() {
             // Only a comment's file or appearance may be longer than MAX_STR: not a form field that has this name.
             let blob = matches!(top.name.as_str(), "data" | "appearance") && in_annots;
