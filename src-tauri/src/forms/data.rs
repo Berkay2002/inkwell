@@ -41,7 +41,8 @@ fn is_password(e: &Entry) -> bool {
 /// Raw bytes of strings between 1 and 2 MB that one field's value may have decoded to be measured.
 const DECODE_BUDGET: usize = 8 << 20;
 
-/// String decodes `collect` made on this thread: tests count them rather than time them.
+/// Every string `collect` decoded on this thread (each value read through `values_by`, not only gray-zone ones):
+/// tests count them rather than time them.
 #[cfg(test)]
 thread_local!(static DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
@@ -52,7 +53,8 @@ enum Gray {
     Under(Option<String>),
 }
 
-/// The gray-zone strings of one `collect()`, by object number.
+/// The gray-zone strings of one `collect()`, by object number. Bounded by the file's own distinct strings between
+/// 1 and 2 MB raw (under 1 MB of text each), kept next to the copy in `Out`: not shared, the copy is a `String`.
 type Decoded = HashMap<i32, Gray>;
 
 fn obj_num(o: &PdfObject) -> Option<i32> {

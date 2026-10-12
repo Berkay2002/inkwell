@@ -526,11 +526,12 @@ fn shared_string_form(test: &str, n: usize, hex: &str) -> (Arc<Engine>, DocId) {
 
 #[test]
 fn many_fields_sharing_one_gray_zone_string_decode_it_once() {
-    // 500 fields on 1.9 MB of UTF-16BE kanji (2.85 MB of text): every one is over, and the string is read once.
-    let (eng, id) = shared_string_form("shared-over", 500, &format!("FEFF{}", "3042".repeat(950_000)));
+    // 10 fields on 1.9 MB of UTF-16BE kanji (2.85 MB of text): every one is over, and the string is read once.
+    // The counter covers forms/data.rs decodes only, not MuPDF's own per-widget load work (scan).
+    let (eng, id) = shared_string_form("shared-over", 10, &format!("FEFF{}", "3042".repeat(950_000)));
     DECODES.with(|d| d.set(0));
     let (_, done) = export(&eng, id, Format::Json, "s.pdf").unwrap();
-    assert_eq!((done.count, done.long_text), (0, 500));
+    assert_eq!((done.count, done.long_text), (0, 10));
     assert_eq!(DECODES.with(|d| d.get()), 1);
 
     // Under the limit (996 000 characters), the value each field exports comes from that one decode too.
