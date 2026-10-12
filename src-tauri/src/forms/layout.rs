@@ -302,7 +302,8 @@ fn replace_in_form(doc: &mut PdfDocument, parent: Option<&PdfObject>, old: i32, 
     Ok(())
 }
 
-fn detach(doc: &mut PdfDocument, parent: Option<&PdfObject>, num: i32) -> Result<()> {
+/// Takes the object out of its parent's /Kids (or /AcroForm /Fields); the calculation order is not touched.
+fn unlink(doc: &mut PdfDocument, parent: Option<&PdfObject>, num: i32) -> Result<()> {
     match parent {
         Some(p) => {
             if let Some(mut k) = get(p, "Kids") {
@@ -315,6 +316,12 @@ fn detach(doc: &mut PdfDocument, parent: Option<&PdfObject>, num: i32) -> Result
             }
         }
     }
+    Ok(())
+}
+
+/// [`unlink`], and out of the calculation order too: the object is gone from the form.
+fn detach(doc: &mut PdfDocument, parent: Option<&PdfObject>, num: i32) -> Result<()> {
+    unlink(doc, parent, num)?;
     if let Some(mut co) = get(&acro_form(doc)?, "CO") {
         remove_ref(&mut co, num)?;
     }
@@ -692,14 +699,8 @@ pub fn rename(doc: &mut PdfDocument, item: Item, name: &str, merge: bool) -> Res
         put_str(&mut f, "T", leaf)?;
         if !same_group {
             let num = field_num.ok_or_else(|| bad("this field is stored inside another object and cannot be moved"))?;
-            detach(doc, old_parent.as_ref(), num)?;
-            // Calculations keep their place: detach dropped the entry, so it goes back.
-            if let Some(co) = get(&acro_form(doc)?, "CO") {
-                if entries.iter().any(|o| o.node == e.node && aa_js(o, "C").is_some()) {
-                    let mut co = co;
-                    co.array_push(doc.new_indirect(num, 0)?)?;
-                }
-            }
+            // The field is the same one in a new group: its place in the calculation order stays.
+            unlink(doc, old_parent.as_ref(), num)?;
             match &owner {
                 Some(g) => {
                     f.dict_put("Parent", g.clone())?;

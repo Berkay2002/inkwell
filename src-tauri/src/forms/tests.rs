@@ -2566,6 +2566,30 @@ fn rename_keeps_dotted_names_valid_and_merges_only_fields_of_one_kind() {
 }
 
 #[test]
+fn renaming_a_calculated_field_into_a_group_keeps_its_place_in_the_calculation_order() {
+    let (eng, id, path) = script_form("layout-rename-co", &["X", "Y", "Z"]);
+    for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
+        let calc = Calculate::Custom(format!("event.value = {i};"));
+        patch_field(&eng, id, n, FieldPatch { calculate: Some(calc), ..Default::default() });
+    }
+    let nodes = |names: &[&str]| names.iter().map(|n| field(&eng, id, n).node).collect::<Vec<_>>();
+    let order = nodes(&["X", "Y", "Z"]);
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, order);
+    let x = items_of(&eng, id, &["X"])[0];
+    rename_one(&eng, id, x, "Grp.X", false, EditSource::User).unwrap();
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, order, "X is first still");
+    // Out of the group again, and the middle one into another.
+    let gx = items_of(&eng, id, &["Grp.X"])[0];
+    rename_one(&eng, id, gx, "X", false, EditSource::User).unwrap();
+    let y = items_of(&eng, id, &["Y"])[0];
+    rename_one(&eng, id, y, "Other.Y", false, EditSource::User).unwrap();
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, order);
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(list_all(&eng2, id2).unwrap().calc_order.len(), 3);
+}
+
+#[test]
 fn renaming_one_widget_of_a_field_renames_the_field() {
     let (eng, id, _) = open_bytes("layout-rename-kids", shared_widgets_form());
     let w = widgets_named(&eng, id, "agree");
