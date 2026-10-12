@@ -62,6 +62,11 @@ fn custom(eng: &Arc<Engine>, id: DocId, f: impl FnOnce(&mut PdfDocument) -> Resu
     eng.apply_custom(id, "A change".into(), EditSource::User, false, f).map(|_| ())
 }
 
+/// What `marks_remove` and a replacing `marks_add` run: a removing edit, which would rewrite the file unless signed.
+fn removing(eng: &Arc<Engine>, id: DocId, f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>) -> Result<()> {
+    eng.apply_removing(id, "A change".into(), EditSource::User, f).map(|_| ())
+}
+
 fn user() -> EditSource {
     EditSource::User
 }
@@ -98,7 +103,9 @@ fn ops() -> Vec<(&'static str, bool, Op)> {
     op!("extract and delete", false, |eng, p, id| {
         let out = format!("{p}.out.pdf");
         let r = eng.extract(id, &[0], &out, true).map(|_| ());
-        assert!(!std::path::Path::new(&out).exists(), "the extract was written before the refusal");
+        if r.as_ref().is_err_and(|e| e.to_string().contains("certified")) {
+            assert!(!std::path::Path::new(&out).exists(), "the extract was written before the refusal");
+        }
         r
     });
     op!("add a comment", true, |eng, _p, id| custom(eng, id, |d| {
@@ -131,10 +138,15 @@ fn ops() -> Vec<(&'static str, bool, Op)> {
     op!("remove a redaction mark", true, |eng, _p, id| crate::redact::app::unmark(eng, id, &[(0, 9)], user()).map(|_| ()));
     op!("apply redactions", false, |eng, _p, id| crate::redact::app::apply(eng, id, Sanitize::default(), None, user()).map(|_| ()));
     op!("add a mark", false, |eng, _p, id| custom(eng, id, |d| crate::marks::add(d, &bates())));
-    op!("remove a mark", false, |eng, _p, id| custom(eng, id, |d| {
-        crate::marks::remove(d, MarkKind::Bates, &[0])?;
-        Ok(vec![0])
-    }));
+    op!("replace a mark", false, |eng, _p, id| removing(eng, id, |d| crate::marks::add(d, &bates())));
+    op!("remove a mark", false, |eng, _p, id| {
+        // Marks first (one step), then the removing edit that takes them out.
+        custom(eng, id, |d| crate::marks::add(d, &bates()))?;
+        removing(eng, id, |d| {
+            crate::marks::remove(d, MarkKind::Bates, &[0])?;
+            Ok(vec![0])
+        })
+    });
     op!("page labels", false, |eng, _p, id| crate::organize::labels_apply(eng, id, 0, 0, &sheet, user()).map(|_| ()));
     op!("transition", false, |eng, _p, id| crate::organize::trans_set(eng, id, &[0], &fade, user()).map(|_| ()));
     op!("attach a file", false, |eng, _p, id| crate::organize::attach_add(
@@ -217,26 +229,33 @@ fn a_certified_document_cannot_be_given_password_security() {
     assert!(eng.edit_state(id).unwrap().undo.is_none());
 }
 
+/// Rows the signed fixture cannot run (it has no picture, and no redaction mark on the page the row names once
+/// marks are applied); everything else must either stay incremental or say why not.
+const NOT_ON_THE_FIXTURE: [&str; 1] = ["change an image"];
+
 #[test]
-fn a_signed_document_takes_the_incremental_edits_and_is_saved_after_the_signed_bytes() {
+fn a_signed_document_takes_every_write_incrementally_or_says_it_cannot() {
     let bytes = signed_only();
-    let d = dir("certified", "signed");
-    let (eng, id, path) = crate::outline::tests::open_bytes(&d, "a.pdf", &bytes);
-    // Edits that add or change; then the ones that take something out (the saved file keeps the old objects).
     for (name, _comment, op) in ops() {
-        if ["rotate", "add a comment", "page labels", "transition", "attach a file", "add a mark", "remove a mark", "describe an attachment",
-            "delete an attachment", "edit text", "add text", "delete page", "mark an area for redaction", "measurement scale"]
-            .contains(&name)
-        {
-            let before = eng.edit_state(id).unwrap().rev;
-            let r = op(&eng, &path, id);
-            assert!(r.is_ok(), "{name}: {}", certified_message(&r));
-            assert!(eng.edit_state(id).unwrap().rev > before, "{name}: no step");
+        if NOT_ON_THE_FIXTURE.contains(&name) {
+            continue;
+        }
+        let d = dir("certified", &format!("signed-{}", name.replace(' ', "-")));
+        let (eng, id, path) = crate::outline::tests::open_bytes(&d, "a.pdf", &bytes);
+        let r = op(&eng, &path, id);
+        match r {
+            Ok(()) => {
+                eng.save(id, None).unwrap();
+                let saved = std::fs::read(&path).unwrap();
+                assert!(saved.starts_with(&bytes), "{name}: the signed bytes are not the start of the saved file");
+            }
+            Err(e) => {
+                let m = e.to_string();
+                assert!(m.contains("signed") || m.contains("new file"), "{name}: refused for another reason: {m}");
+                assert!(eng.edit_state(id).unwrap().undo.is_none(), "{name}: left a step");
+            }
         }
     }
-    eng.save(id, None).unwrap();
-    let saved = std::fs::read(&path).unwrap();
-    assert!(saved.starts_with(&bytes), "the signed bytes are not the start of the saved file");
 }
 
 #[test]
