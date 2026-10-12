@@ -29,11 +29,25 @@ against a file from Acrobat; I had no Acrobat here, the shape is from memory of 
 - `/X` first element's `/C` = real distance (in `/U`) per user space unit; `/Y` (when present) scales the y axis, and
   `/CYX` (default 1) turns its units into the x axis units.
 - `/D` and `/A` first element's `/C` multiplies the result again (Acrobat writes 1). No `/D` or `/A`: the `/X` format is
-  used ("sq " + unit for an area). A later element's `/C` is how many of it make one of the previous (feet, then inches).
+  used ("sq " + unit for an area, from `/X`'s first element only: a later element's `/C` is a linear factor, so a chain
+  does not carry over to an area). A later element's `/C` is how many of it make one of the previous (feet, then inches).
 - Number formats keep `/U /C /F /D /FD /RT /RD /PS /SS /O`: decimal (D 100 is two decimals), fraction, round, truncate;
   our own are two decimals with trailing zeros, "," thousands, "." decimal. Absent `/PS` and `/SS` read as a single
   space (a trailing one is not shown); `/D` is clamped to 1..1e9. A malformed `/Measure` (not a dictionary, `/C` 0, no
   `/X`, junk elements) is left out of `measure_list`, never an error for the document.
+- **Chains** (`/D` or `/A` with several elements, `numfmt::chain_text`): all but the last element show whole units
+  (truncated), the last takes the remainder in its own style, and a remainder that rounds up to a whole unit of the one
+  before is carried (2.9999 ft with inches in hundredths is "3 ft 0.00 in", never "2 ft 12.00 in"; this runs up the
+  whole chain). An array is at most 8 elements (`dict::MAX_CHAIN`); a longer one is not walked.
+- **A malformed `/D` or `/A`** (an element that is not a dictionary, a `/C` at or below zero, no or an empty `/U`, more
+  than 8 elements, or a value that is not an array such as a reference that loops back) is not used at all, because a chain with a unit missing in the middle would read the wrong unit. The
+  value is then written in the `/X` format, as for a measure with no `/D`, the annotation stays listed, and its
+  `quantity.note` says which array was left out (the Measure rail shows it). `/X` and `/Y` are lenient as before (a
+  bad element is skipped; no usable `/X`, or more than 8, leaves the measure out).
+- **`plain`**: whether the UI's own live label (the page scale, two decimals, "," for thousands) reads exactly as the
+  engine does. It is true for what this app writes (`/X` of one element, `/D` and `/A` of one element at `/C` 1 in our
+  format, no `/Y`, no note) and for a page with at most one such viewport. `MeasureDto.plain` and `PageScale.plain`
+  carry it; when false the live label comes from `measure_value`.
 - `/R` is shown back as the scale when it parses ("1 in = 10 ft") and agrees with `/C`; otherwise the scale is derived
   from `/C` as "1 in = n unit". A unit we have no name for (km, mi) still gives values, with no `Scale`.
 - Page level: a `/VP` viewport array on the page, each `/Viewport` with `/BBox` and `/Measure`. The page's scale
@@ -51,7 +65,15 @@ copy, so the annotation keeps the scale it was made with), `/Subj` ("Distance Me
 ("25.00 ft"), print flag, author, dates. The appearance stream is ours: the shape in red (a polygon with a light wash),
 end ticks on a distance (no `/IC`: the wash exists only in the appearance, so a redraw elsewhere gives an outline, not
 a solid fill), and the label in Helvetica along the line (never upside down) with a white halo. `/Rect` and the
-form `/BBox` are the box of all that. An `annot_edit` colour change makes MuPDF redraw the shape without the label.
+form `/BBox` are the box of all that. A measurement from another app keeps its own look when a point is moved: `/C`,
+`/BS /W` (or `/Border`), `/LE` line endings (the arrows, butt, slash, square, diamond and circle styles at the first
+and last point), `/IC` for the area fill, and on a distance `/LL`, `/LLE` and `/LLO`: the dimension line, its label and
+its endings are drawn `/LL` from the points (clockwise on screen when positive), with leader lines from `/LLO` next to
+each point to `/LLE` past the dimension line. `/Rect` and `/BBox` take in the endings, the leaders and the wider
+stroke. A distance with no `/LE` gets our end ticks. Every move writes a new appearance stream and font and points
+`/AP /N` at them; it never edits the stream the annotation pointed at, because a file can share that form with other
+annotations or the page. The stream MuPDF's own `update` makes in between is deleted, but the previous appearance (and
+its font) stays in the file unused until a full save. An `annot_edit` colour change makes MuPDF redraw the shape without the label.
 `measure_list` lists every line, polyline or polygon with a readable `/Measure` and recomputes its value from its points
 and its own `/Measure`, so a file from Acrobat shows Acrobat's scale.
 
@@ -74,7 +96,15 @@ in the path callbacks; the index keeps what it has read (`truncated`).
 - `measure_scale_get(doc, page) -> {scale, defined, label}`; `measure_scale_set(doc, page, scale) -> EditState`.
 - `measure_add(doc, page, kind, points, scale?, author) -> {state, xref, quantity}`; one undo step
   ("Add distance measurement on p. 2"). `scale` absent: the page's.
-- `measure_value(doc, page, kind, points, scale?) -> quantity` (live readout, changes nothing).
+- `measure_value(doc, page, kind, points, scale?, xref?) -> quantity` (live readout, changes nothing). With `xref` the
+  points are valued under that annotation's own `/Measure` (its `/D`, `/A`, units; the readout while a point is
+  dragged); else under `scale`, else the viewport of the page at the first point.
+- `measure_move(doc, page, xref, points) -> {state, xref, quantity}`: the points of one measurement are replaced in
+  place, as one undo step ("Move a point of a measurement on p. 2"). The same annotation is kept (same xref, replies,
+  author, subject and its own `/Measure` stay); `/L` or `/Vertices` (user space), `/M`, the appearance with its label,
+  `/Rect` and `/Contents` are written again, and the value comes from its own `/Measure` (a file's own `/D` and `/A`
+  apply). Refused: certified at `/P` 1 or 2 (nothing changes, no step), a gone xref, the wrong number of points,
+  non-finite or far points. A signed file is saved after the signature as for any annotation edit.
 - `measure_list(doc) -> [{page, xref, kind, points, contents, author, quantity, scale}]`.
 - `measure_snap(doc, page, x, y, radius, kinds?) -> hit | null` (needs `Arc<SnapCache>` in managed state: done in `lib.rs`).
 - `measure_rescale(doc, page, xref, scale) -> {state, xref, quantity}`: the annotation is replaced by one with the same
@@ -87,6 +117,12 @@ in the path callbacks; the index keeps what it has read (`truncated`).
 by Save, in history). The assistant can call `add_one`, `scale_set` and the rest in `measure/mod.rs` with its turn.
 
 ## Tests (`cargo test --lib measure -- --test-threads=1`)
+Number formats (a mile, foot and inch chain with eighths, the carry up a chain, separators and styles), a file's own
+chained `/D` and `/A` in the label and in a move, a malformed `/D` falling back with a note (zero and negative `/C`,
+no `/U`, a bad link, nine elements), a nine-element `/X` left out, `plain`; a drag of each kind (same xref, `/L` or
+`/Vertices` in user space, `/Rect` around the points, label, one undo step, undo and redo, save and reopen), a drag
+under the scale the measurement was made with, a drag of an Acrobat measurement keeping its `/Measure`, refusals
+that leave no step, a signed file saved after the signature, certified at `/P` 1, 2 (refused) and 3 (allowed).
 Each kind and unit against hand-worked numbers (3-4-5 of 36 pt = 25 ft, a 2 sq in rectangle = 200 sq ft, ...), a rotated
 page (the file holds user-space points; the value is unchanged), a `/UserUnit 2` page (`/C` doubled, same value), an
 Acrobat-style `/Measure` and viewports (read, rewritten, read again equal; detail viewport wins inside its box), a unit
@@ -107,6 +143,16 @@ Comments does (opening one closes the other) and shows a floating bar over the p
   Enter; Backspace takes the last corner back and Esc drops the whole thing. A click on the first corner of an area
   (shown as a filled marker) closes it. Shift holds the line to 45 degrees from the last corner and turns snapping off.
   A label next to the pointer shows the running value and the snap that is hovered ("End point", "Midpoint", "On line").
+- **Drag to edit:** with Select and a measurement selected, each of its points shows a handle. Drag one to move that
+  point: it snaps as drawing does (end points, midpoints, crossings, the path), Shift holds it to 45 degrees from the
+  point before it (an area's first point to its last) and turns snapping off, and the label next to it shows the new
+  value while you drag. Release writes it (`measure_move`, one undo step). Esc during the drag puts it back; a click
+  without moving writes nothing. From the keyboard a handle takes focus (Tab), the arrow keys move it by 1 point
+  (Shift: 10) along the screen whatever the page rotation, and the move is written after a short pause, on Enter, when
+  focus leaves or the tool changes (a run of keys is one undo step); Esc drops it, and so does a pointer capture that is
+  lost before the button comes up. Handles have an aria label ("Area point 3 of 4").
+  Not shown on a certified file at `/P` 1 or 2 (it says why in the rail); a signed file shows the same note links and
+  outline give, and the change is saved after the signature.
 - **Result:** one `measure_add` (one undo step, saved by Save, in history). The page then draws the engine's own
   appearance with its label. With Select, a click on a measurement selects it: the rail shows its value, units and
   scale. Its scale (or unit) can be changed and Apply re-measures it (`measure_rescale`); Delete (key or button) removes
@@ -122,13 +168,22 @@ Comments does (opening one closes the other) and shows a floating bar over the p
   that is a `/VP` entry of the page dictionary, refused at any certification. A certification that cannot be read is
   refused too. The tools are greyed out with the reason (`measure_lock`); at `/P` 3 only the scale chip, the units and
   Calibrate are (the store reads `a11y_protection` for it). Select, the rail and Export to CSV still work.
-- **Shortcuts taken:** the live label is worked out in the UI from the page's scale (it does not apply a file's own `/D`
-  or `/A` multipliers or a detail viewport under the pointer: the label written by the engine is the exact one). The
-  crossings are found among the 64 segments nearest the pointer, and curves cross as their 12 pieces.
-  Editing a measurement means changing its scale or unit; its points are not dragged (delete and draw again).
+- **Live label:** where the page's measure is `plain` (our own scale, or none) the label is worked out in the UI from the
+  page scale. Where the file has its own `/D` or `/A` (or several viewports, a `/Y`), the UI asks `measure_value`
+  with the same points, one request at a time (the newest points are asked for when it lands), so the label and the
+  stored value use the same formats, chains included; nothing is shown until the first answer.
+- **Shortcuts taken:** the crossings are found among the 64 segments nearest the pointer, and curves cross as their 12
+  pieces. A dragged measurement keeps its own scale (re-measuring it is the scale field of the rail); the engine's
+  page still shows the old appearance under the highlight until the drag is released.
 
 ## Not done
-- Not opened in real Acrobat (see the `/D`, `/A` `/C` reading above, the one assumption to confirm).
+- Not opened in real Acrobat (see the `/D`, `/A` `/C` reading above, the one assumption to confirm). The same goes for
+  two number format entries whose spec text could not be checked here: `/FD` is read as "keep trailing zeros and do
+  not reduce a fraction" when true (pdfcraft writes it that way, and Acrobat's files carry `/FD true` with two-decimal
+  labels), and `/PS` and `/SS` surround the label after the number; with `/O /P` the label (`/PS` + unit + `/SS`)
+  comes before the number instead of after it.
+- The spec's own examples were not at hand (no copy of ISO 32000 on this machine); the number format tests use
+  hand-worked chains (mile, foot, inch in eighths; hours, minutes, seconds) instead.
 - `/O` (origin) is kept but unused; `/Y` and `/CYX` are read and applied but never written.
 - The polyline is "perimeter" as the brief says (the open path); closing it to a polygon's perimeter is a UI choice
   (add the first point again).

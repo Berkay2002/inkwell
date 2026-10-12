@@ -24,6 +24,11 @@ export const measureApi = {
   scaleSet: (doc: number, page: number, scale: Scale) => invoke<EditState>("measure_scale_set", { doc, page, scale }),
   add: (doc: number, page: number, kind: MeasureKind, points: Pt[], scale: Scale | null, author: string) =>
     invoke<{ state: EditState; xref: number; quantity: Quantity }>("measure_add", { doc, page, kind, points, scale, author }),
+  /** The value `points` would measure: under measurement `xref`'s own /Measure, else the page's at the first point. */
+  value: (doc: number, page: number, kind: MeasureKind, points: Pt[], xref: number | null) =>
+    invoke<Quantity>("measure_value", { doc, page, kind, points, scale: null, xref }),
+  move: (doc: number, page: number, xref: number, points: Pt[]) =>
+    invoke<{ state: EditState; xref: number; quantity: Quantity }>("measure_move", { doc, page, xref, points }),
   rescale: (doc: number, page: number, xref: number, scale: Scale) =>
     invoke<{ state: EditState; xref: number; quantity: Quantity }>("measure_rescale", { doc, page, xref, scale }),
   snap: (doc: number, page: number, x: number, y: number, radius: number, kinds: Snaps) =>
@@ -80,6 +85,8 @@ interface MeasureStore {
   locks: Record<number, string | null>;
   /** The same for the page scale (the bar's scale chip, units and Calibrate): also off on a certified file at /P 3. */
   scaleLocks: Record<number, string | null>;
+  /** By document: it is signed, so a change is saved as an update after the signature (read with the lock). */
+  signed: Record<number, boolean>;
   ensureLock: (doc: number) => Promise<void>;
 
   docs: Record<number, DocMeasure>;
@@ -93,6 +100,8 @@ interface MeasureStore {
   add: (doc: number, page: number, kind: MeasureKind, points: Pt[]) => Promise<number | null>;
   remove: (doc: number, ref: Ref) => Promise<void>;
   setPageScale: (doc: number, page: number, scale: Scale) => Promise<boolean>;
+  /** Moves the points of one measurement (one undo step, the same annotation); resolves to whether it was written. */
+  move: (doc: number, ref: Ref, points: Pt[]) => Promise<boolean>;
   /** Gives one measurement another scale: it is made again with the same points (one undo step). */
   rescale: (doc: number, ref: Ref, scale: Scale) => Promise<void>;
   /** Draws the calibration line in, then `finishCalib` sets the page scale from its real length. */
@@ -104,6 +113,8 @@ interface MeasureStore {
   snap: (doc: number, page: number, p: Pt, radius: number) => Promise<SnapHit | null>;
 }
 
+export const SIGNED_MEASURE =
+  "This document is signed. A change is saved as an update after the signature, which will show that the file was changed.";
 const SCALE_CERTIFIED = "This document is certified; a certification doesn't allow a page scale to be set.";
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
@@ -144,14 +155,27 @@ export const useMeasure = create<MeasureStore>((set, get) => {
 
     locks: {},
     scaleLocks: {},
+    signed: {},
     ensureLock: async (doc) => {
       if (get().locks[doc] !== undefined) return;
       try {
         const why = await measureApi.lock(doc);
         // Measurements are annotations (a /P 3 certification allows them), a page scale is not: no /P allows it.
+        let signed = false;
         const scaleWhy =
-          why ?? (await measureApi.protection(doc).then((p) => (p?.certified ? SCALE_CERTIFIED : null), (e) => msg(e)));
-        set((s) => ({ locks: { ...s.locks, [doc]: why }, scaleLocks: { ...s.scaleLocks, [doc]: scaleWhy } }));
+          why ??
+          (await measureApi.protection(doc).then(
+            (p) => {
+              signed = !!p?.signed;
+              return p?.certified ? SCALE_CERTIFIED : null;
+            },
+            (e) => msg(e),
+          ));
+        set((s) => ({
+          locks: { ...s.locks, [doc]: why },
+          scaleLocks: { ...s.scaleLocks, [doc]: scaleWhy },
+          signed: { ...s.signed, [doc]: signed },
+        }));
       } catch (e) {
         // an unreadable answer is a refusal: nothing is written until the check has said it is fine
         set((s) => ({ locks: { ...s.locks, [doc]: msg(e) }, scaleLocks: { ...s.scaleLocks, [doc]: msg(e) } }));
@@ -215,6 +239,10 @@ export const useMeasure = create<MeasureStore>((set, get) => {
       dropScales(doc);
       if (ok) await get().ensureScale(doc, page);
       return ok !== null;
+    },
+    move: async (doc, ref, points) => {
+      const r = await run(doc, () => measureApi.move(doc, ref.page, ref.xref, points), (x) => x.state);
+      return r !== null;
     },
     rescale: async (doc, ref, scale) => {
       if (!validScale(scale)) return patch(doc, { error: "A scale needs numbers above zero on both sides." });

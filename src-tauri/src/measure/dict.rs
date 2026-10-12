@@ -6,7 +6,9 @@
 //!   absent when both axes agree; when present, its `/C` scales the y axis.
 //! - `/D` (distance) and `/A` (area) say how the result reads. Their first element's `/C` multiplies the result of the
 //!   scaled geometry again (Acrobat writes 1). Without `/D` or `/A` the `/X` format is used ("sq " + unit for area).
-//! - A later element's `/C` is how many of it make one of the previous one (`/C 12` after "ft" is inches).
+//! - A later element's `/C` is how many of it make one of the previous one (`/C 12` after "ft" is inches). A chain is at
+//!   most [`MAX_CHAIN`] long. A `/D` or `/A` array that is malformed (an element that is not a dictionary, with a `/C`
+//!   at or below zero or no `/U`, or too long) is not used: the value reads in the `/X` format, with a `note`.
 //! - `/R` is the text of the ratio, "1 in = 10 ft". `/O` and `/CYX` are kept when read but not used.
 //! - `/UserUnit` is folded into `/X`'s `/C`: user space units are `user_unit` points, so a page with `/UserUnit 2`
 //!   writes twice the `/C` of one without, and reading divides it out again.
@@ -18,6 +20,9 @@ use mupdf::pdf::{PdfDocument, PdfObject};
 
 type Result<T> = std::result::Result<T, EngineError>;
 
+/// The most elements a number format array may have (miles, feet, inches, and a fraction of one are 3).
+pub const MAX_CHAIN: usize = 8;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeasureDict {
     pub r: String,
@@ -27,6 +32,8 @@ pub struct MeasureDict {
     pub a: Vec<NumberFormat>,
     pub o: Option<[f64; 2]>,
     pub cyx: Option<f64>,
+    /// Why a `/D` or `/A` of the file was not used, when it was not.
+    pub note: Option<String>,
 }
 
 impl MeasureDict {
@@ -41,7 +48,27 @@ impl MeasureDict {
             a: vec![NumberFormat::new(scale.real_unit.area_label(), 1.0)],
             o: Some([0.0, 0.0]),
             cyx: None,
+            note: None,
         }
+    }
+
+    /// Whether the UI's own label (the page scale, two decimals, "," for thousands) reads exactly as this measure does:
+    /// one `/X` and at most one `/D` and one `/A` in the format this app writes (`/C` 1 on `/D` and `/A`), no `/Y`.
+    pub fn is_plain(&self) -> bool {
+        let ours = |f: &NumberFormat| {
+            f.style == Style::Decimal && f.d == 100.0 && f.fixed && f.thousands == "," && f.decimal == "." && f.ps == " " && f.ss.trim().is_empty() && !f.prefix
+        };
+        let [x] = self.x.as_slice() else { return false };
+        let Some(unit) = Unit::parse(&x.unit) else { return false };
+        let area = unit.area_label();
+        ours(x)
+            && self.y.is_empty()
+            && self.cyx.is_none_or(|c| c == 1.0)
+            && self.note.is_none()
+            && self.d.iter().all(|f| ours(f) && f.c == 1.0 && f.unit == x.unit)
+            && self.d.len() <= 1
+            && self.a.iter().all(|f| ours(f) && f.c == 1.0 && f.unit == area)
+            && self.a.len() <= 1
     }
 
     /// The scale as the user would state it: `/R` when it parses and agrees with `/C`, else derived from `/C`
@@ -71,7 +98,8 @@ impl MeasureDict {
         let (formats, value) = match explicit.first() {
             Some(first) => (explicit.clone(), raw * first.c),
             None => {
-                let mut f = self.x.clone();
+                // An area has no chain to fall back on: the later elements' /C are linear factors between units.
+                let mut f = if kind == Kind::Area { self.x.iter().take(1).cloned().collect() } else { self.x.clone() };
                 if let Some(first) = f.first_mut() {
                     first.c = 1.0;
                     if kind == Kind::Area {
@@ -81,7 +109,7 @@ impl MeasureDict {
                 (f, raw)
             }
         };
-        Quantity { value, unit: formats.first().map(|f| f.unit.clone()).unwrap_or_default(), text: chain_text(value, &formats) }
+        Quantity { value, unit: formats.first().map(|f| f.unit.clone()).unwrap_or_default(), text: chain_text(value, &formats), note: self.note.clone() }
     }
 
     /// Adds the dictionary to the document and returns the reference to put in `/Measure`.
@@ -125,25 +153,29 @@ impl MeasureDict {
         {
             return Ok(None);
         }
-        let list = |key: &str| -> Result<Vec<NumberFormat>> {
-            let Some(arr) = o.get_dict(key)? else { return Ok(Vec::new()) };
+        // `strict`: an array with one bad element is not used at all (a chain without its middle unit would read the
+        // wrong unit); `None` then. `/X` and `/Y` are lenient: bad elements are left out.
+        let list = |key: &str, strict: bool| -> Result<Option<Vec<NumberFormat>>> {
+            let Some(arr) = o.get_dict(key)? else { return Ok(Some(Vec::new())) };
             if !arr.is_array()? {
-                return Ok(Vec::new());
+                // Present but not an array (a reference that loops back, a number): as malformed as a bad element.
+                return Ok(if strict { None } else { Some(Vec::new()) });
+            }
+            // Never walk an endless array.
+            if arr.len()? > MAX_CHAIN {
+                return Ok(None);
             }
             let mut out = Vec::new();
             for i in 0..arr.len()? {
-                if let Some(f) = arr.get_array(i as i32)?
-                    && let Some(f) = read_format(&f)?
-                {
-                    out.push(f);
+                match arr.get_array(i as i32)?.map(|f| read_format(&f)).transpose()?.flatten() {
+                    Some(f) if !strict || !f.unit.trim().is_empty() => out.push(f),
+                    _ if strict => return Ok(None),
+                    _ => {}
                 }
             }
-            Ok(out)
+            Ok(Some(out))
         };
-        let x = list("X")?;
-        if x.is_empty() {
-            return Ok(None);
-        }
+        let Some(x) = list("X", false)?.filter(|x| !x.is_empty()) else { return Ok(None) };
         let r = text(o, "R")?.unwrap_or_default();
         let origin = match o.get_dict("O")? {
             Some(a) if a.is_array()? && a.len()? >= 2 => match (num_at(&a, 0)?, num_at(&a, 1)?) {
@@ -152,7 +184,16 @@ impl MeasureDict {
             },
             _ => None,
         };
-        Ok(Some(MeasureDict { r, x, y: list("Y")?, d: list("D")?, a: list("A")?, o: origin, cyx: num(o, "CYX")? }))
+        let mut notes = Vec::new();
+        let mut strict = |key: &str, what: &str| -> Result<Vec<NumberFormat>> {
+            Ok(list(key, true)?.unwrap_or_else(|| {
+                notes.push(format!("The file's {what} number format (/{key}) is malformed, so it is not applied."));
+                Vec::new()
+            }))
+        };
+        let (d, a) = (strict("D", "distance")?, strict("A", "area")?);
+        let note = (!notes.is_empty()).then(|| notes.join(" "));
+        Ok(Some(MeasureDict { r, x, y: list("Y", false)?.unwrap_or_default(), d, a, o: origin, cyx: num(o, "CYX")?, note }))
     }
 }
 
@@ -277,6 +318,13 @@ fn viewports(page: &PdfObject) -> Result<Vec<Viewport>> {
         }
     }
     Ok(out)
+}
+
+/// Whether the page's scale and formats are ones the UI can show the live label for by itself ([`MeasureDict::is_plain`]):
+/// at most one viewport, and it is plain. A page with several (a detail at another scale) is valued by the engine.
+pub fn viewports_plain(page: &PdfObject) -> Result<bool> {
+    let all = viewports(page)?;
+    Ok(all.len() <= 1 && all.iter().all(|v| v.measure.is_plain()))
 }
 
 /// Whether a viewport box covers the whole page (it contains the crop box; a box of the media box or larger counts).
