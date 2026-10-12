@@ -295,6 +295,11 @@ no headings or tables); put a marker like [1] right after each statement the tex
 [\"p3.2\"]; a different number for each separate passage) and \"quote\" (a verbatim phrase of at most 25 words from the main supporting passage). \"followups\": three short \
 follow-up questions the document can answer.";
 
+/// Put before the next question when the document was edited since the model last read it (the
+/// assistant's own changes included): its earlier reads, page numbers and chunk ids may be stale.
+pub const CHANGED_NOTE: &str =
+    "The document changed since your earlier reads; re-read before relying on them.";
+
 /// What a turn's message says about the document and the viewer.
 pub struct TurnInfo<'a> {
     pub name: &'a str,

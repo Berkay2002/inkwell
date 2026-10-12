@@ -112,7 +112,7 @@ async function runTurn(id, p) {
   const tid = p.threadId;
   const prompt = p.input?.[0]?.text ?? "";
   const markers = prompt.match(/\[p\d+\.\d+\]/g) ?? [];
-  log(`turn ${tid} ${turn} effort=${p.effort ?? "-"} model=${p.model ?? "-"} schema=${p.outputSchema ? "yes" : "no"} excerpts=${markers.length}`);
+  log(`turn ${tid} ${turn} effort=${p.effort ?? "-"} model=${p.model ?? "-"} schema=${p.outputSchema ? "yes" : "no"} excerpts=${markers.length} changed=${prompt.includes("document changed since")}`);
   out({ id, result: { turn: { id: turn, status: "inProgress", items: [] } } });
   out({ method: "turn/started", params: { threadId: tid, turn: { id: turn, status: "inProgress", items: [] } } });
 

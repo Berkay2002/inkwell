@@ -1066,3 +1066,33 @@ fn hit_context_is_the_surrounding_line() {
     let hits = find(&doc, &Query::Pattern(Pattern::Email)).unwrap();
     assert!(hits.iter().all(|h| !(h.before.is_empty() && h.after.is_empty())));
 }
+
+/// The embedded search index is a compressed copy of every page's text, comments and bookmarks as they were:
+/// the byte check cannot see inside it, so redaction (and sanitize alone) removes it whatever the options.
+#[test]
+fn redaction_removes_the_embedded_search_index_with_every_option_off() {
+    use crate::search::catalog::embed;
+    let bytes = one_page(b"BT /F1 12 Tf 72 700 Td (INDEX-SECRET and other words) Tj ET", "", &[], "");
+    let with_index = |bytes: &[u8]| {
+        let mut doc = PdfDocument::from_bytes(bytes).unwrap();
+        embed::add(&mut doc).unwrap();
+        let doc = PdfDocument::from_bytes(&save_to_vec(&doc).unwrap()).unwrap();
+        assert!(embed::status(&doc).present, "the fixture carries an index");
+        doc
+    };
+    let mut doc = with_index(&bytes);
+    let hits = find(&doc, &Query::Text { needle: "INDEX-SECRET".into(), case_sensitive: true, whole_word: false }).unwrap();
+    mark_hits(&mut doc, &hits, &MarkStyle::default()).unwrap();
+    let rep = apply(&mut doc, &ApplyOptions { sanitize: Sanitize::NONE, ..Default::default() }).unwrap();
+    assert!(rep.verify.leaks.is_empty(), "{:?}", rep.verify);
+    let re = PdfDocument::from_bytes(&rep.bytes).unwrap();
+    assert!(!embed::status(&re).present, "no index stream is left after the redaction");
+    assert!(re.catalog().unwrap().get_dict("PieceInfo").unwrap().is_none());
+    assert!(!rep.bytes.windows(18).any(|w| w == b"InkwellSearchIndex"));
+
+    // Sanitize on its own (nothing marked) takes it out too.
+    let mut doc = with_index(&bytes);
+    let rep = sanitize(&mut doc, &Sanitize::NONE, &[]).unwrap();
+    assert_eq!(rep.metadata, 1);
+    assert!(!embed::status(&doc).present);
+}

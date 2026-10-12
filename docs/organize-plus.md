@@ -1,6 +1,6 @@
 # Organize-plus: combine files, attachments, page labels, page transitions
 
-PDF Portfolios (the collection view over the attachments) are in docs/portfolios.md.
+PDF Portfolios (the collection view over the attachments) are in docs/portfolios.md; article threads in docs/threads.md.
 
 Code: `src-tauri/src/organize/` (`combine.rs`, `attach.rs`, `labels.rs`, `trans.rs`, `app.rs` Tauri commands, `mod.rs`
 edit-lane entry points, `tests.rs`). UI: `src/components/CombineSheet.tsx` (+ `src/lib/combineStore.ts`,

@@ -19,7 +19,7 @@ import { Icon } from "./Icons";
 import "./organizePlus.css";
 
 /** Escape closes the sheet (before anything underneath hears it). */
-function useEscape(open: boolean, close: () => void) {
+export function useEscape(open: boolean, close: () => void) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -33,7 +33,7 @@ function useEscape(open: boolean, close: () => void) {
   }, [open, close]);
 }
 
-function Shell({ title, label, onClose, children }: { title: string; label: string; onClose: () => void; children: React.ReactNode }) {
+export function Shell({ title, label, onClose, children }: { title: string; label: string; onClose: () => void; children: React.ReactNode }) {
   return (
     <div className="scrim op-scrim" onMouseDown={onClose}>
       <section className="op-sheet" role="dialog" aria-label={label} onMouseDown={(e) => e.stopPropagation()}>

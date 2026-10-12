@@ -12,6 +12,7 @@ pub mod history_ipc;
 pub mod imageedit;
 pub mod links;
 pub mod marks;
+pub mod media;
 pub mod measure;
 pub mod ocr;
 pub mod organize;
@@ -453,12 +454,25 @@ fn after_save(window: &Window, app: &tauri::AppHandle, hist: &Arc<History>, doc:
     }
     match saved {
         // Save as: the document is another file now, with a history of its own
-        Some(s) if s.moved => hist.spawn_open(app.clone(), doc, state.path.clone()),
+        Some(s) if s.moved => {
+            hist.spawn_open(app.clone(), doc, state.path.clone());
+            // It may have replaced a file a catalog lists.
+            if s.redacts {
+                search::catalog::app::forget_saved(app, &state.path);
+            }
+        }
         // history errors never fail a save
-        Some(s) => match hist.saved(doc, &s) {
-            Ok(_) => drop(app.emit("history-changed", doc)),
-            Err(e) => eprintln!("inkwell history: {e}"),
-        },
+        Some(s) => {
+            match hist.saved(doc, &s) {
+                Ok(_) => drop(app.emit("history-changed", doc)),
+                Err(e) => eprintln!("inkwell history: {e}"),
+            }
+            // Text that was redacted must not stay in a catalog's index (or in its results) until a refresh.
+            // After the history's own purge, so nothing here can keep that from running.
+            if s.redacts {
+                search::catalog::app::forget_saved(app, &state.path);
+            }
+        }
         None => {}
     }
 }
@@ -896,23 +910,41 @@ pub fn run() {
     let autosave = (hist.clone(), engine.clone());
     let prepress = Arc::new(prepress::app::Prepress::default());
     let proto_prepress = prepress.clone();
+    let media = Arc::new(media::Cache::default());
+    let proto_media = media.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
-        .manage(ai::Assistant::new())
+        .manage(ai::Hub::new())
         .manage(Paths::default())
         .manage(Arc::new(tools::Jobs::default()))
         .manage(Arc::new(measure::SnapCache::default()))
         .manage(Arc::new(search::files::FolderSearches::default()))
+        .manage(Arc::new(search::catalog::app::Jobs::default()))
         .manage(hist)
         .manage(prepress)
+        .manage(media)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 on_drop(window, paths);
             }
         })
         .register_asynchronous_uri_scheme_protocol("inkwell", move |_ctx, request, responder| {
+            // `/m/<doc>/<token>/<asset>`: an embedded video or sound of an open document, with byte ranges
+            if let Some((doc, token, id)) = media::route::parse(request.uri().path()) {
+                let (eng, cache) = (proto_engine.clone(), proto_media.clone());
+                let range = request.headers().get("range").and_then(|v| v.to_str().ok()).map(str::to_owned);
+                tauri::async_runtime::spawn_blocking(move || {
+                    let r = media::serve(&eng, &cache, doc, &token, &id, range.as_deref());
+                    let mut b = tauri::http::Response::builder().status(r.status);
+                    for (k, v) in r.headers {
+                        b = b.header(k, v);
+                    }
+                    responder.respond(b.body(std::borrow::Cow::Owned(r.body)).unwrap());
+                });
+                return;
+            }
             // `/p/...`: a page tile in a print production view (plates, coverage)
             if let Some((key, view, stream, epoch, rank)) = prepress::app::parse_tile_request(request.uri()) {
                 proto_prepress.request_tile(
@@ -965,6 +997,17 @@ pub fn run() {
             search_files,
             cancel_search_files,
             search_file_token,
+            search::catalog::app::catalog_estimate,
+            search::catalog::app::catalog_create,
+            search::catalog::app::catalog_list,
+            search::catalog::app::catalog_delete,
+            search::catalog::app::catalog_stale,
+            search::catalog::app::catalog_build,
+            search::catalog::app::catalog_cancel,
+            search::catalog::app::catalog_search,
+            search::catalog::app::index_embedded,
+            search::catalog::app::index_embed,
+            search::catalog::app::index_unembed,
             engine_stats,
             set_cache_budget,
             initial_files,
@@ -1038,6 +1081,12 @@ pub fn run() {
             prepress::app::prepress_convert,
             prepress::app::prepress_boxes,
             prepress::app::prepress_marks,
+            prepress::app::prepress_page_boxes,
+            prepress::app::prepress_marks_preview,
+            prepress::app::prepress_ink_at,
+            prepress::app::prepress_pick_profile,
+            prepress::app::prepress_save_other,
+            prepress::app::prepress_protection,
             a11y::app::a11y_protection,
             a11y::app::a11y_reading_order,
             a11y::app::a11y_tags,
@@ -1093,6 +1142,9 @@ pub fn run() {
             organize::app::combine_run,
             organize::app::pick_attachments,
             organize::app::attachments_list,
+            media::app::media_list,
+            media::app::media_play,
+            media::app::media_release,
             organize::app::attachments_add,
             organize::app::attachment_save,
             organize::app::attachment_open,
@@ -1107,6 +1159,14 @@ pub fn run() {
             organize::app::labels_remove,
             organize::app::transitions_list,
             organize::app::transitions_set,
+            organize::app::threads_list,
+            organize::app::thread_start,
+            organize::app::thread_bead_add,
+            organize::app::thread_bead_move,
+            organize::app::thread_bead_delete,
+            organize::app::thread_remove,
+            organize::app::thread_describe,
+            organize::app::thread_move,
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
@@ -1147,6 +1207,9 @@ pub fn run() {
             ai::ai_cancel,
             ai::ai_tool_decision,
             ai::ai_set_permissions,
+            ai::ai_pick_claude_path,
+            ai::ai_claude_path,
+            ai::ai_clear_claude_path,
             ai::ai_close,
         ])
         .setup(move |app| {
@@ -1157,7 +1220,11 @@ pub fn run() {
                 app.state::<Paths>().learn_recents(&json);
             }
             app.manage(Arc::new(tools::paths::ToolPaths::load(app.handle())));
+            ai::restore_claude_path(app.handle(), &app.state::<Arc<ai::Hub>>());
             batch::app::sweep_at_startup(app.handle());
+            // A quit while a catalog was being built can have left a saved redaction's file to forget.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || search::catalog::app::replay_pending_at_startup(&handle));
             Ok(())
         })
         .run(tauri::generate_context!())

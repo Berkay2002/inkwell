@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { useStore } from "../store";
 import { pagesAreDark } from "./pageDark";
+import { usePlates } from "./platesView";
 
 const query = () => window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -15,10 +16,11 @@ export function useSystemDark(): boolean {
   return useSyncExternalStore(subscribe, () => query().matches);
 }
 
-/** Whether the pages show dark: the setting resolved against the app theme. */
+/** Whether the pages show dark: the setting resolved against the app theme. Never in Output Preview: inverted inks are the wrong inks. */
 export function usePagesDark(): boolean {
   const setting = useStore((s) => s.pageDark);
   const theme = useStore((s) => s.theme);
   const systemDark = useSystemDark();
-  return pagesAreDark(setting, theme, systemDark);
+  const plates = usePlates((s) => s.view !== null);
+  return !plates && pagesAreDark(setting, theme, systemDark);
 }

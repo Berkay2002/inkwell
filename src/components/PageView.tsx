@@ -12,12 +12,16 @@ import { AnnotLayer } from "./comments/AnnotLayer";
 import { MeasureLayer } from "./measure/MeasureLayer";
 import { OrderLayer } from "./a11y/OrderLayer";
 import { LinkLayer } from "./edit/LinkLayer";
+import { usePrepress } from "../lib/prepressStore";
 import { MarkPreview } from "./MarkPreview";
+import { MediaLayer } from "./MediaLayer";
+import { TacRegions } from "./prepress/TacRegions";
 import { ReadLinks } from "./ReadLinks";
 import { NaturalImage } from "./NaturalImage";
 import { ImageEditLayer } from "./edit/ImageEditLayer";
 import { TextEditLayer } from "./edit/TextEditLayer";
 import { FormLayer } from "./forms/FormLayer";
+import { ThreadLayer } from "./threads/ThreadLayer";
 import { TileCanvas } from "./TileCanvas";
 
 interface Props {
@@ -52,19 +56,21 @@ export const PageView = memo(function PageView(p: Props) {
 
   // Keep the previous render scale's tiles underneath until the new ones have painted, so a zoom
   // step never flashes back to the blurry preview.
-  const last = useRef({ scale, tiles });
+  const view = preview.view;
+  const last = useRef({ scale, tiles, view });
   const [under, setUnder] = useState<TileRef[] | null>(null);
   const drawn = useRef(new Set<string>());
   useLayoutEffect(() => {
-    if (last.current.scale !== scale) setUnder(last.current.tiles);
+    // a plate switched on or off stands in for itself the same way a zoom step does
+    if (last.current.scale !== scale || last.current.view !== view) setUnder(last.current.tiles);
     else if (under && tiles.length === 0) setUnder(null);
-    last.current = { scale, tiles };
+    last.current = { scale, tiles, view };
   });
   const onDrawn = (key: string) => {
     drawn.current.add(key);
     if (under && tiles.every((t) => drawn.current.has(tileKeyStr(docId, t)))) setUnder(null);
   };
-  const underTiles = under?.filter((u) => u.scale !== scale) ?? [];
+  const underTiles = under?.filter((u) => u.scale !== scale || u.view !== view) ?? [];
 
   const lines = usePageText(docId, p.rev, page, p.wantText);
   // Dark pages: the pictures on the page stay in their own colours.
@@ -88,8 +94,16 @@ export const PageView = memo(function PageView(p: Props) {
     return [Math.min(Math.max(q.x, 0), rawSize[0]), Math.min(Math.max(q.y, 0), rawSize[1])];
   };
 
+  // Output Preview: the ink under the pointer (page points as shown, one question at a time).
+  const probing = usePrepress((s) => s.open);
   return (
-    <div className="page" style={{ top: p.top, left: p.left, width: size[0] * zoom, height: size[1] * zoom }} data-page={page}>
+    <div
+      className="page"
+      style={{ top: p.top, left: p.left, width: size[0] * zoom, height: size[1] * zoom }}
+      data-page={page}
+      onPointerMove={probing ? (e) => usePrepress.getState().probe(docId, page, ...toPage(e)) : undefined}
+      onPointerLeave={probing ? () => usePrepress.getState().clearProbe(docId) : undefined}
+    >
       <TileCanvas docId={docId} tile={preview} size={size} zoom={zoom} cover />
       {underTiles.map((t) => (
         <TileCanvas key={tileKeyStr(docId, t)} docId={docId} tile={t} size={size} zoom={zoom} under />
@@ -106,6 +120,7 @@ export const PageView = memo(function PageView(p: Props) {
         style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom) }}
       >
         <MarkPreview docId={docId} page={page} size={rawSize} />
+        <TacRegions docId={docId} page={page} />
         {p.hits.map((r, i) => (
           <div key={i} className={p.currentHit.includes(r) ? "hit current" : "hit"} style={rectStyle(r)} />
         ))}
@@ -145,9 +160,11 @@ export const PageView = memo(function PageView(p: Props) {
       <FormLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <AnnotLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <MeasureLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
+      <MediaLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} />
       <ImageEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <TextEditLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
       <LinkLayer docId={docId} page={page} rev={p.rev} rot={rot} rawSize={rawSize} zoom={zoom} visible={p.wantText} />
+      <ThreadLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       <OrderLayer docId={docId} page={page} rot={rot} rawSize={rawSize} zoom={zoom} />
       {armed && (
         <div

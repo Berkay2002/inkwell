@@ -651,6 +651,9 @@ pub fn compress(
             catalog.dict_put("Version", mupdf::pdf::PdfObject::new_name("1.5")?)?;
         }
     }
+    // Dropped extras, flattened pages and unembedded fonts change what the file shows: an embedded search index that
+    // no longer matches would keep the old text, so it goes (one that still matches is kept).
+    crate::search::catalog::embed::drop_if_stale(&doc)?;
     let tmp = TempFile::new(&out_path)?;
     // What the user asked to take out or flatten is never undone by the size rule below.
     let changed = stripped.any() || unembedded.files > 0 || flat;
