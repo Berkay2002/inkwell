@@ -5,6 +5,7 @@
   z-index: 20;
 }
 .aw-sheet {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: min(1040px, 96vw);
@@ -717,4 +718,62 @@
 }
 .aw-result-sub.warn {
   color: var(--diff-chg);
+}
+
+/* a step that asks first, for each file */
+.aw-ask {
+  color: var(--accent);
+  font-size: 12.5px;
+}
+.aw-common {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.aw-prompt-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+.aw-prompt {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 92%);
+  max-height: 88%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-3);
+}
+.aw-prompt-title {
+  margin: 0;
+  padding: 14px 16px 2px;
+  font-size: 15px;
+}
+.aw-prompt-file {
+  margin: 0;
+  padding: 0 16px 8px;
+  overflow-wrap: anywhere;
+}
+.aw-prompt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 16px;
+  overflow-y: auto;
+}
+.aw-prompt-body p {
+  margin: 0;
+}
+.aw-prompt-foot {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
 }

@@ -19,6 +19,55 @@ A name, a description, ordered steps, an output rule and "on error". JSON, camel
   `exportText {layout}`, `setProperties {title, author, subject, keywords, creator, producer}`.
   There is no remove-security step. A file that names one, or any kind this build does not know, still loads (as an
   invalid step) so validation can say what is wrong; it cannot be saved or run.
+- **Per step, beside its own options** (flat in the step's JSON, left out when default): `pages` and `prompt`, below.
+
+### Page range per step
+`pages` is the range syntax of OCR and Convert (`1-3, 5, 8-`, one-based, `,` or `;`, at most 200 characters); empty or
+absent means every page. Only the steps that work page by page take one: `headerFooter`, `watermark`, `bates`, `redact`,
+`ocr`, `flattenForms` (`Step::takes_pages`). A range on any other step is an `invalid-step` issue ("This step works on
+the whole file: clear its page range."). Compress, Protect, Sanitize and Set properties act on the whole file; the two exports have no range (not done, see Gaps).
+- A range reaching past a file's last page is **clipped to the pages that exist**, and the report says so: a note
+  "the page range 3-9 reaches past the last page (5); used page(s) 3-5". A range wholly past the end does nothing to that
+  file: a warning "<step> (pages 8-9): the page range 8-9 is past the last page (the file has 5), so nothing was done."
+  (nothing at all: Redact's sanitize switches are not applied either). Neither fails the file: a batch holds files of different lengths.
+- Header/footer `<<1>>` counts from the first page of the range (the marks engine's own numbering), Bates numbers go on
+  the pages of the range in order, flatten forms leaves the fields of the other pages as fields, redact searches only the
+  range, OCR reads only the pages of the range that have no text (all of them with `force`).
+- **Redact with a range** (`redact::apply` takes every pending mark of the document, so the range is guarded):
+  - A file that already has a redaction mark on a page outside the range is **skipped**, not touched: "redaction marks
+    already on page(s) 7, outside the range 1-3". The mark is left where it is; apply it first, or include its page.
+    Marks inside the range are applied with the hits, as without a range.
+  - The sanitize switches that work page by page (comments and markups, hidden text, links) act on the pages of the
+    range only; a link or button on another page keeps its action. The file-level ones (document information, attached
+    files, bookmarks, and the script part of "scripts and actions": JavaScript code, additional actions (`/AA`),
+    OpenAction, XFA) still act on the whole file, and anything that quotes a redacted string is removed wherever it is. Hidden layers cannot be limited
+    to pages (the layer list is one for the file, and dropping it would show the hidden content of the pages left out):
+    a Redact step with a range and "Hidden layers" on is an `invalid-step` issue; untick it or clear the range.
+- Header/footer, watermark and Bates on a range replace the step's own earlier marks on those pages only; the marks of
+  an earlier run on the other pages stay.
+- Preview does not open the files for their page counts, so it cannot show clipping.
+
+### Prompt user per step
+`prompt: true` makes the run stop before that step **for each file** and show the step's own options sheet, prefilled
+with the saved ones (and its page range). The answer applies to that file only: the saved action is not changed.
+- **Continue** runs the step with the options as shown, **Skip this step** leaves it out for this file (the file ends as
+  it would without the step; no Bates numbers are used), **Stop** cancels the run (the report says `cancelled`).
+- Nothing waits for ever: the run polls for Cancel while it waits, and gives up after 30 minutes (`PROMPT_WAIT`), which
+  stops the run like Stop. A closed window or a dropped answer channel does the same.
+- Every answer is checked before it runs: it must be the same kind of step (a prompt cannot turn Compress into
+  Protect), the page-range rules above apply, and the step's own `validate` runs. An answer that fails is not run: the
+  prompt comes again with the reason (`problem`) and a new request id. Passwords never travel in a prompt: a Protect
+  step keeps the run's own, and the event carries none.
+- Each step keeps its own refusal paths: the file gate (signed, certified, restricted, a password) runs on the whole
+  action before step one, so prompting cannot reach a file the steps would refuse; a step's per-run checks run after the
+  answer.
+- Flow: the engine sends the `prompt` event `{request, index, name, step, steps, label, entry, problem}` and waits on
+  that `request`; the UI answers with `batch_prompt_answer(job, request, answer)`, `{kind: "continue", step}`,
+  `{kind: "skip"}` or `{kind: "stop"}`. The command returns `false` (and does nothing) for a request that is not the
+  open one: a second press, an answer after the run moved on, a stale sheet. The UI drops those too.
+- A run with a prompting step and no way to ask (`env.ask` unset) is refused at the start (`BatchError::Input`), so a
+  prompt never fails open. Preview works, and lists for each file the steps that will ask (`prompts`, positions in
+  `steps`).
 
 Each step reuses an engine as it is: `compress::compress`, `ocr::ocr_file_with`, `marks::add` (always as an update, so
 running an action over its own output does not stamp twice), `redact::find/mark_hits/apply` (the verified bytes are what
@@ -68,8 +117,11 @@ into the Action they pass to `batch_run`. Output of Protect is AES; sources are 
 ## Storage and files
 `<app data>/batch-actions/<id>.json` (`INKWELL_DATA_DIR` applies), one file per Action, written through a temp file
 (random name, `create_new`) and a rename. Id: `[a-z0-9-]`, at most 64 characters, so no path can come out of it. The file and the export format is the
-same envelope: `{"format": "inkwell-batch-action", "version": 1, "action": {...}}`. A newer `version` is refused
-(`TooNew`), a missing or zero one is invalid, an older one goes through `migrate` (nothing to migrate yet). Import reads an
+same envelope: `{"format": "inkwell-batch-action", "version": 2, "action": {...}}`. Version 2 is written only when a
+step has a page range or `prompt` (otherwise 1, so a build before this change still opens plain actions); a file without
+those fields imports as it always did. A newer `version` than the build's is refused (`TooNew`), a missing or zero one is
+invalid, an older one goes through `migrate` (nothing to migrate: the new fields are optional). A `pages` or `prompt` of the
+wrong type makes the step invalid rather than silently dropping it. Import reads an
 open token, always stores under a new id (never replaces) and renames a duplicate name "(imported)"; export writes to a
 `pick_save` token. The four built-ins live in code (read-only; save/delete on them is refused): *Prepare for email*
 (sanitize metadata and scripts, compress balanced), *Make searchable* (OCR), *Publish with watermark* (flatten forms,
@@ -79,9 +131,9 @@ metadata/layers/scripts/attachments only so comments and bookmarks stay).
 ## Commands
 `batch_list`, `batch_save(action)`, `batch_delete(id)`, `batch_import(file token)`, `batch_export(action, saveTo token)`,
 `batch_validate(action)`, `batch_preview(action, files[])`, `batch_folder_files(folder, recursive)`,
-`batch_run(job, action, files[], folder?, onEvent)`, `batch_cancel(job)`. Files are open tokens
+`batch_run(job, action, files[], folder?, onEvent)`, `batch_cancel(job)`, `batch_prompt_answer(job, request, answer)`. Files are open tokens
 and the result files come back as open tokens (`outputs[].token`), never as paths to use. Events (`event` tag):
-`started`, `fileStarted`, `step`, `fileDone {report}`, `finished`. The report has, per file, `status` (`ok`, `skipped`,
+`started`, `fileStarted`, `step`, `prompt`, `fileDone {report}`, `finished`. The report has, per file, `status` (`ok`, `skipped`,
 `error`), `reason`, `sizeBefore`, `sizeAfter`, `outputs`, `notes`, `stepsDone`, `ms`, and the run's counts, `cancelled`
 and `stopped`. `batch_cancel` uses the shared job ids (`tools::Jobs`).
 
@@ -121,19 +173,27 @@ Tools > Action Wizard, or "Action Wizard" in the command palette. One centred sh
   when the run ends. The editor never holds one, `batch_save` and `batch_export` are given the action with any password
   removed, and the engine drops them anyway. A Protect step with no password only waits (the editor shows "Password is typed
   when it runs"); Preview uses stand-in passwords when none are typed, since it writes nothing.
-- There is no "prompt user" switch per step: the engine has no such field (an invented one would be dropped on save), and
-  Protect already asks for its passwords at every run.
+- **Page range and "Ask before this step, for each file"** are fields under each step's options in the editor (Pages only
+  on the steps that take one). The sequence shows "(pages 1-3)" and "Asks before it runs, for each file" on the row; the
+  Run view's "What it does" list and each file's preview line ("asks before ...") show them too.
+- **Prompt sheet**: during a run, a dialog over the progress ("Step 2 of 4: Watermark", the file's name) with the step's
+  options and Pages field, the engine's reason when an answer was refused, and Continue / Skip this step / Stop. It is a
+  modal dialog over the whole sheet: Escape does nothing, so a stray key never stops the run, and Stop in the dialog is how
+  a run is cancelled while it waits (the footer's Cancel is behind it).
 
 Screens: `docs/screens/batch/` (light and dark), taken by `scripts/batch-shots.mjs` in headless Chrome against a mocked
 invoke layer, so they show the interface, not the engine. The runtime pass against the real exe is still to do on the PC.
 
 ## Gaps
-- No scheduling, no watch folders. No "prompt user" switch (above); no page ranges per step.
-- Watermark pictures are refused (their file token does not outlast a session). No page ranges on stamps; they go on all pages.
+- No scheduling, no watch folders. The two exports have no page range (an export of some pages is Convert's job); Compress,
+  Protect, Sanitize and Set properties never take one.
+- Watermark pictures are refused (their file token does not outlast a session).
+- A prompt answer changes one file's step options; there is no "apply to all remaining files" button.
 - Set properties writes the Info dictionary only; an existing XMP packet keeps its old values.
 - A password-protected source is skipped; there is no per-file password.
 - Steps do not run in parallel across files, and only compress/OCR/export stop in the middle of a step on cancel.
-- Redaction: marks already in a source (placed by hand) are applied too. Glyph boxes are taller than the font size, so a
+- Redaction: marks already in a source (placed by hand) are applied too (with a page range, a file with marks outside
+  the range is skipped instead). Glyph boxes are taller than the font size, so a
   mark on a line also takes the glyphs of a line closer than about 1.4 em with it (an engine behaviour; it errs towards
   removing too much, and `redact::apply` still verifies the result).
 - Tests run on Linux through a scratch crate that includes the engine modules without `history`/`print`/`ai` (the crate

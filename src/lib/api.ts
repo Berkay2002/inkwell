@@ -1696,8 +1696,16 @@ export interface BatchBates {
   margins: [number, number, number, number];
 }
 
+/** What every step carries besides its own options (they sit beside them in the JSON; absent = the default). */
+export interface BatchStepCommon {
+  /** Page range as typed (`1-3, 5, 8-`, one-based); empty or absent = every page. Only steps in `RANGE_KINDS` take one. */
+  pages?: string;
+  /** "Prompt user": the run stops before this step, for each file, and shows its options. */
+  prompt?: boolean;
+}
+
 /** One step. The engine's set is closed; `invalid` is what a file's unknown step reads as (never sent back). */
-export type BatchStep =
+export type BatchStep = BatchStepCommon & (
   | { kind: "compress"; preset: BatchPreset }
   | { kind: "ocr"; languages: string[]; force: boolean; backend: OcrBackend }
   | ({ kind: "headerFooter" } & BatchHeaderFooter)
@@ -1711,7 +1719,7 @@ export type BatchStep =
   | { kind: "exportImages"; format: ImageFormat; dpi: number; gray: boolean; quality: number }
   | { kind: "exportText"; layout: boolean }
   | { kind: "setProperties"; title: string | null; author: string | null; subject: string | null; keywords: string | null; creator: string | null; producer: string | null }
-  | { kind: "invalid"; name: string; why: string };
+  | { kind: "invalid"; name: string; why: string });
 
 export type BatchStepKind = Exclude<BatchStep["kind"], "invalid">;
 
@@ -1769,8 +1777,23 @@ export interface BatchReport {
   stopped: boolean;
 }
 
+/** The run is waiting: step `step` of file `index` asks first. `entry` is the step with its saved options. */
+export interface BatchPromptEvent {
+  event: "prompt";
+  request: number;
+  index: number;
+  name: string;
+  step: number;
+  steps: number;
+  label: string;
+  entry: BatchStep;
+  /** Why the last answer was not accepted (the options did not validate). */
+  problem: string | null;
+}
+
 export type BatchEvent =
   | { event: "started"; files: number }
+  | BatchPromptEvent
   | { event: "fileStarted"; index: number; total: number; name: string }
   | { event: "step"; index: number; step: number; steps: number; label: string }
   | { event: "fileDone"; index: number; report: BatchFileReport }
@@ -1783,6 +1806,8 @@ export interface BatchFilePreview {
   status: BatchStatus;
   reason: string | null;
   steps: string[];
+  /** Positions in `steps` of the ones that stop to ask first. */
+  prompts: number[];
   outputs: string[];
 }
 
@@ -1819,6 +1844,11 @@ export function batchRun(
   ch.onmessage = onEvent;
   return invoke<BatchReport>("batch_run", { job, action, files, folder, onEvent: ch });
 }
+/** What the person answers to a prompt: run the step with these options on this file, leave it out, or stop the run. */
+export type BatchAnswer = { kind: "continue"; step: BatchStep } | { kind: "skip" } | { kind: "stop" };
+/** Resolves false when nothing was waiting under `request` (stale: answered, cancelled or ended). */
+export const batchPromptAnswer = (job: number, request: number, answer: BatchAnswer) =>
+  invoke<boolean>("batch_prompt_answer", { job, request, answer });
 export const batchCancel = (job: number) => invoke<void>("batch_cancel", { job });
 
 /** Document JavaScript (src-tauri/src/forms/doc_js.rs). Nothing here runs a script. */
