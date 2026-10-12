@@ -116,7 +116,9 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
   file is read again on every look. Combining never writes a source, so signed or certified sources need no
   special handling. A signature field of a source arrives empty (its value and appearance are dropped, the
   field stays), so the result is never a signed document that fails to verify. The row says "x.pdf's signature
-  is not carried over". Insert pages from file does the same.
+  is not carried over". This is done in the shared page graft (`graft_pages`), so Insert pages from file, Extract
+  pages, Split and Merge files all drop the signature of the pages they copy too; only Combine shows a note for
+  it (the others have no place to put one). The document the pages come from is not changed.
 - A source's security is never carried over: a source with a password or owner restrictions goes in, the result
   has neither, and the row says "x.pdf's password and restrictions are not carried over", naming the rights
   its permission bits withheld (printing, editing, commenting, form filling and the like) when there are any. An
