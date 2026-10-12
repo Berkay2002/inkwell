@@ -257,6 +257,13 @@ export const useTextEdit = create<Store>((set, get) => {
     const d = of(doc);
     return d.selected ? (d.pages[d.selected.page]?.blocks[d.selected.index] ?? null) : null;
   };
+  /** Why a format change is refused before it is sent (a certified document), with the notice set; null when it may go. */
+  const lockedFor = (doc: number): string | null => {
+    const d = of(doc);
+    const why = d.selected ? (d.pages[d.selected.page]?.locked ?? null) : null;
+    if (why) patchDoc(doc, { notice: why });
+    return why;
+  };
   const docRev = (doc: number) => useStore.getState().docs[doc]?.rev ?? 0;
   /** Documents with a change in flight: that change settles its own selection. */
   const applying = new Set<number>();
@@ -405,6 +412,7 @@ export const useTextEdit = create<Store>((set, get) => {
 
     decorate: (doc, d) =>
       queued(doc, async () => {
+        if (lockedFor(doc)) return;
         // Typed text goes first, so the runs the change is cut from are the document's own.
         const typed = of(doc).draft?.text;
         await commitNow(doc);
@@ -416,7 +424,7 @@ export const useTextEdit = create<Store>((set, get) => {
       }),
 
     commit: (doc) => queued(doc, () => commitNow(doc)),
-    apply: (doc, patch) => queued(doc, () => applyNow(doc, patch)),
+    apply: (doc, patch) => queued(doc, () => (lockedFor(doc) ? Promise.resolve() : applyNow(doc, patch))),
     move: (doc, d) => get().apply(doc, { offset: d }),
 
     startAdding: (doc, page, at) => {

@@ -229,7 +229,7 @@ opening any of those closes it (`src/lib/commentRail.ts`).
   Format text: a one-line summary of what is selected, the font shown honestly (read-only) with B / I (standard face),
   size stepper, colour (presets and the system picker), alignment, line spacing; a quiet notice when a font was
   replaced; an **Effects** row with U, S, x² and x₂ toggles (pressed state from the selection's runs, else the whole
-  block; super and sub replace one another; disabled with the reason on a certified document; a hint under Format says
+  block; super and sub replace one another; on a certified document every Format control is disabled with the reason, and the store refuses a change without asking the engine; a hint under Format says
   when the file is signed and the edit is saved incrementally); the page's block list. Ctrl/Cmd+U toggles underline.
   With text selected in the editor the toggle applies to that selection (runs cut at its ends, one undo step), else to
   the whole block; typed text is sent first, and a selection made in text the engine then tidied is ignored. The

@@ -450,4 +450,18 @@ describe("store", () => {
     await te.select(1, { page: 0, index: 1 });
     expect(text().selection).toBeNull();
   });
+
+  it("refuses a format change on a certified document and says why, without asking the engine", async () => {
+    const why = "This document is certified, so its text cannot be changed.";
+    vi.mocked(api.textBlocks).mockResolvedValue({ ...list([block({ runs: [run(0, "Rent is due on the first.")] })]), locked: why });
+    const te = useTextEdit.getState();
+    await te.load(1, 0);
+    await te.select(1, { page: 0, index: 0 });
+    await te.apply(1, { bold: true });
+    await te.apply(1, { size: 14 });
+    await te.apply(1, { align: "center" });
+    await te.decorate(1, "underline");
+    expect(editText).not.toHaveBeenCalled();
+    expect(text().notice).toBe(why);
+  });
 });
