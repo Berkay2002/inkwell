@@ -158,10 +158,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
               style={style(f.rect)}
               title={`Sign in "${f.field}"`}
               onPointerDown={(e) => e.stopPropagation()}
-              onClick={() => {
-                sg().setDraft(docId, { page, rect: f.rect, field: f.field });
-                sg().setRail("sheet");
-              }}
+              onClick={() => sg().signField(docId, f)}
             >
               <span>Sign here</span>
             </button>
