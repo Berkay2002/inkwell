@@ -905,6 +905,33 @@ fn without(o: &PdfObject, keys: &[&str]) -> Option<String> {
     Some(o.to_string())
 }
 
+/// An update's /Size `after` is at least the signed revision's `before` and past every number the
+/// update lists.
+pub(super) fn size_covers(before: Option<i32>, after: Option<i32>, entries: &[(i32, u8, u64, u64)]) -> bool {
+    matches!((before, after), (Some(a), Some(b)) if b >= a && entries.iter().all(|e| e.0 < b))
+}
+
+/// The cross-reference stream dictionary `t` is unfiltered (what Inkwell writes), plain Flate (what
+/// MuPDF writes when compressing), or Flate with the PNG predictor over rows of exactly /W's width
+/// (what Acrobat writes).
+fn plain_xref_filter(t: &PdfObject) -> bool {
+    let width = || -> Option<i32> { t.get_dict("W").ok()??.array_iter().ok()?.map(|x| x.ok()?.as_int().ok()).sum() };
+    let flate = name_of(t, "Filter").as_deref() == Some(b"FlateDecode");
+    match (t.get_dict("Filter").ok(), t.get_dict("DecodeParms").ok()) {
+        (Some(None), Some(None)) => true,
+        (Some(Some(_)), Some(None)) => flate,
+        (Some(Some(_)), Some(Some(p))) => {
+            let int = |k: &str| p.get_dict(k).ok().flatten().and_then(|v| v.as_int().ok());
+            flate
+                && p.is_dict().unwrap_or(false)
+                && keys_within(&p, &["Predictor", "Columns"])
+                && int("Predictor") == Some(12)
+                && int("Columns").is_some_and(|c| Some(c) == width())
+        }
+        _ => false,
+    }
+}
+
 /// Every key of the dictionary `o` is one of `allowed`.
 fn keys_within(o: &PdfObject, allowed: &[&str]) -> bool {
     let Ok(n) = o.dict_len() else { return false };
@@ -942,10 +969,143 @@ fn hybrid_after(doc: &PdfDocument, after: &[u8]) -> bool {
 
 /// One cross-reference section: its entries `(number, type, field 2, field 3)`, types as in an
 /// xref stream (0 free, 1 at an offset, 2 in an object stream at an index), and its trailer's
-/// /Prev.
+/// /Prev and /XRefStm.
 pub(super) struct Section {
     pub entries: Vec<(i32, u8, u64, u64)>,
     pub prev: Option<u64>,
+    pub xref_stm: Option<u64>,
+    /// A cross-reference stream (not a classic table).
+    pub stream: bool,
+}
+
+/// Whether the dictionary at the first `<<` of `b` names each key once (keys compared with their
+/// `#xx` escapes decoded): MuPDF keeps the last of two, other readers the first. `None` if it
+/// doesn't parse.
+fn keys_unique(b: &[u8]) -> Option<bool> {
+    fn white(c: u8) -> bool {
+        matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x0c | 0)
+    }
+    fn ws(b: &[u8], mut i: usize) -> Option<usize> {
+        loop {
+            match *b.get(i)? {
+                c if white(c) => i += 1,
+                b'%' => i += b[i..].iter().take_while(|&&c| c != b'\r' && c != b'\n').count(),
+                _ => return Some(i),
+            }
+        }
+    }
+    fn regular(c: u8) -> bool {
+        !white(c) && !b"()<>[]{}/%".contains(&c)
+    }
+    // A name at `i` (its `/`), decoded, and the index after it.
+    fn name(b: &[u8], i: usize) -> Option<(Vec<u8>, usize)> {
+        let len = b.get(i + 1..)?.iter().take_while(|&&c| regular(c)).count();
+        let raw = &b[i + 1..i + 1 + len];
+        let mut out = Vec::new();
+        let mut k = 0;
+        while k < raw.len() {
+            let hex = raw.get(k + 1..k + 3).and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
+            match (raw[k], hex) {
+                (b'#', Some(h)) => {
+                    out.push(h);
+                    k += 3;
+                }
+                (c, _) => {
+                    out.push(c);
+                    k += 1;
+                }
+            }
+        }
+        Some((out, i + 1 + len))
+    }
+    // The dictionary whose `<<` is at `i`: the index after it, or `Err` on a repeated key.
+    fn dict(b: &[u8], mut i: usize, depth: u32) -> Option<std::result::Result<usize, ()>> {
+        let mut keys = std::collections::HashSet::new();
+        i += 2;
+        loop {
+            i = ws(b, i)?;
+            if b.get(i..i + 2)? == b">>" {
+                return Some(Ok(i + 2));
+            }
+            if b[i] != b'/' {
+                return None;
+            }
+            let (key, j) = name(b, i)?;
+            if !keys.insert(key) {
+                return Some(Err(()));
+            }
+            i = match value(b, j, depth)? {
+                Ok(j) => j,
+                e => return Some(e),
+            };
+        }
+    }
+    // The value at or after `i`: the index after it.
+    fn value(b: &[u8], i: usize, depth: u32) -> Option<std::result::Result<usize, ()>> {
+        if depth > 64 {
+            return None;
+        }
+        let mut i = ws(b, i)?;
+        match *b.get(i)? {
+            b'/' => Some(Ok(name(b, i)?.1)),
+            b'<' if b.get(i + 1) == Some(&b'<') => dict(b, i, depth + 1),
+            b'<' => Some(Ok(i + b[i..].iter().position(|&c| c == b'>')? + 1)),
+            b'(' => {
+                let mut open = 0u32;
+                loop {
+                    match *b.get(i)? {
+                        b'\\' => i += 1,
+                        b'(' => open += 1,
+                        b')' => {
+                            open -= 1;
+                            if open == 0 {
+                                return Some(Ok(i + 1));
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b'[' => {
+                i += 1;
+                loop {
+                    i = ws(b, i)?;
+                    if b[i] == b']' {
+                        return Some(Ok(i + 1));
+                    }
+                    i = match value(b, i, depth + 1)? {
+                        Ok(j) => j,
+                        e => return Some(e),
+                    };
+                }
+            }
+            c if regular(c) => {
+                let token = |at: usize| -> Option<(&[u8], usize)> {
+                    let at = ws(b, at)?;
+                    let len = b[at..].iter().take_while(|&&c| regular(c)).count();
+                    Some((&b[at..at + len], at + len))
+                };
+                let (t, end) = token(i)?;
+                if t.is_empty() {
+                    return None;
+                }
+                // `n g R` is one value.
+                let digits = |t: &[u8]| !t.is_empty() && t.iter().all(u8::is_ascii_digit);
+                if digits(t) {
+                    if let Some((_, e2)) = token(end).filter(|(g, _)| digits(g)) {
+                        if let Some((b"R", e3)) = token(e2) {
+                            return Some(Ok(e3));
+                        }
+                    }
+                }
+                Some(Ok(end))
+            }
+            _ => None,
+        }
+    }
+    let at = b.windows(2).position(|w| w == b"<<")?;
+    Some(dict(b, at, 0)?.is_ok())
 }
 
 /// The number after the last `startxref` in `b`.
@@ -962,6 +1122,15 @@ fn last_startxref(b: &[u8]) -> Option<u64> {
 /// object read here is the one MuPDF read there. `None` if it can't be read, or lists a number
 /// twice (readers differ on which entry counts).
 pub(super) fn xref_section(d: &PdfDocument, bytes: &[u8], off: u64) -> Option<Section> {
+    xref_section_in(d, bytes, off, &Default::default())
+}
+
+/// [`xref_section`] for a section further down a /Prev chain: `newer` holds the newest listing
+/// `(type, field 2, field 3)` of each number in the sections read before it (for a hybrid
+/// section's /XRefStm, the classic section too). MuPDF reads the stream's number from its newest
+/// listing, so that listing must be the stream at `off`: a newer one elsewhere (a decoy stream)
+/// gives `None`. With none newer, the stream must list itself at `off`.
+fn xref_section_in(d: &PdfDocument, bytes: &[u8], off: u64, newer: &std::collections::HashMap<i32, (u8, u64, u64)>) -> Option<Section> {
     let off = usize::try_from(off).ok().filter(|o| *o < bytes.len())?;
     let num = |s: &[u8]| -> Option<(u64, usize)> {
         let skip = s.iter().take_while(|c| c.is_ascii_whitespace()).count();
@@ -976,6 +1145,7 @@ pub(super) fn xref_section(d: &PdfDocument, bytes: &[u8], off: u64) -> Option<Se
     };
     let mut out = Vec::new();
     let prev;
+    let (mut xref_stm, mut stream) = (None, false);
     if bytes[off..].starts_with(b"xref") {
         let mut i = off + 4;
         loop {
@@ -984,10 +1154,13 @@ pub(super) fn xref_section(d: &PdfDocument, bytes: &[u8], off: u64) -> Option<Se
                 let start = i + 7;
                 let end = bytes[start..].windows(9).position(|w| w == b"startxref").map_or(bytes.len(), |q| start + q);
                 let t = d.new_object_from_str(String::from_utf8_lossy(&bytes[start..end]).trim()).ok()?;
-                if !t.is_dict().ok()? {
+                if !t.is_dict().ok()? || !keys_unique(&bytes[start..end])? {
                     return None;
                 }
                 prev = prev_of(&t)?;
+                if let Some(x) = t.get_dict("XRefStm").ok()? {
+                    xref_stm = Some(u64::try_from(x.as_int().ok()?).ok()?);
+                }
                 break;
             }
             let (start, l1) = num(&bytes[i..])?;
@@ -1041,16 +1214,18 @@ pub(super) fn xref_section(d: &PdfDocument, bytes: &[u8], off: u64) -> Option<Se
                 }
             }
         }
-        if !out.iter().any(|e| e.0 == n && e.1 == 1 && e.2 == off as u64) {
+        let listed = newer.get(&n).map(|&(kind, f2, _)| (kind, f2)).or_else(|| out.iter().find(|e| e.0 == n).map(|e| (e.1, e.2)));
+        if listed != Some((1, off as u64)) || !keys_unique(&bytes[off..])? {
             return None;
         }
         prev = prev_of(&xs)?;
+        stream = true;
     }
     let mut seen = std::collections::HashSet::new();
     if !out.iter().all(|e| seen.insert(e.0)) {
         return None;
     }
-    Some(Section { entries: out, prev })
+    Some(Section { entries: out, prev, xref_stm, stream })
 }
 
 /// The entries of the section the last `startxref` of `next` names, which must start at or after
@@ -1061,22 +1236,35 @@ pub(super) fn update_entries(b: &PdfDocument, next: &[u8], from: usize) -> Optio
 }
 
 /// The generation each object number has in the file `bytes` (`d` read from them), from the
-/// newest section that lists it along the /Prev chain. `None` if the chain can't be read.
+/// newest section that lists it along the /Prev chain, a hybrid section's /XRefStm read after the
+/// section itself. `None` if the chain can't be read.
 fn generations(d: &PdfDocument, bytes: &[u8]) -> Option<std::collections::HashMap<i32, u64>> {
-    let mut gens = std::collections::HashMap::new();
+    // The newest listing of each number so far, newest section first.
+    let mut newest = std::collections::HashMap::new();
+    let add = |newest: &mut std::collections::HashMap<i32, (u8, u64, u64)>, entries: &[(i32, u8, u64, u64)]| {
+        for &(n, kind, f2, f3) in entries {
+            newest.entry(n).or_insert((kind, f2, f3));
+        }
+    };
     let mut seen = std::collections::HashSet::new();
     let mut off = last_startxref(bytes);
     while let Some(o) = off {
         if !seen.insert(o) || seen.len() > 4096 {
             return None;
         }
-        let sec = xref_section(d, bytes, o)?;
-        for &(n, kind, _, f3) in &sec.entries {
-            gens.entry(n).or_insert(if kind == 2 { 0 } else { f3 });
+        let sec = xref_section_in(d, bytes, o, &newest)?;
+        add(&mut newest, &sec.entries);
+        match sec.xref_stm {
+            Some(x) if seen.insert(x) => {
+                let stm = xref_section_in(d, bytes, x, &newest)?;
+                add(&mut newest, &stm.entries);
+            }
+            Some(_) => return None,
+            None => {}
         }
         off = sec.prev;
     }
-    Some(gens)
+    Some(newest.into_iter().map(|(n, (kind, _, f3))| (n, if kind == 2 { 0 } else { f3 })).collect())
 }
 
 /// The `n g obj` header at `offset` of `b`.
@@ -1149,8 +1337,11 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8], intact: &std::co
         return Ok(false);
     }
     // The rest of the trailer too (/Info, ...): only the links between sections change.
+    // A cross-reference stream's dictionary is the trailer too; its own stream keys describe only it.
     const SECTION: &[&str] = &["Prev", "Size", "ID", "XRefStm"];
-    if without(&ta, SECTION).is_none() || without(&ta, SECTION) != without(&tb, SECTION) {
+    const STREAM: &[&str] = &["Prev", "Size", "ID", "XRefStm", "Type", "W", "Index", "Length", "Filter", "DecodeParms", "DL"];
+    let rest = |t: &PdfObject| without(t, if name_of(t, "Type").as_deref() == Some(b"XRef") { STREAM } else { SECTION });
+    if rest(&ta).is_none() || rest(&ta) != rest(&tb) {
         return Ok(false);
     }
     let get = |d: &PdfDocument, n: i32| d.xref_object(n).ok().flatten();
@@ -1286,6 +1477,16 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8], intact: &std::co
     if section.prev != Some(start_a) {
         return Ok(false);
     }
+    // Its /Size covers the signed revision's numbers and its own: a strict reader takes every
+    // number at or past /Size as missing (ISO 32000-1, table 15), MuPDF doesn't.
+    let size = |t: &PdfObject| t.get_dict("Size").ok().flatten().and_then(|s| s.as_int().ok());
+    if !size_covers(size(&ta), size(&tb), &section.entries) {
+        return Ok(false);
+    }
+    // A cross-reference stream is encoded as Inkwell writes one; readers differ on other filters.
+    if section.stream && !plain_xref_filter(&tb) {
+        return Ok(false);
+    }
     // What it lists. An object at an offset must be the object written there, number and
     // generation (MuPDF repairs a wrong number, caught above). An object placed in an object
     // stream must be the one at that index, since MuPDF takes the first copy of a number there and
@@ -1304,7 +1505,8 @@ pub(super) fn signature_only_revision(prev: &[u8], next: &[u8], intact: &std::co
             return Ok(false);
         }
         let used = n > 0 && n < count_a && get(&a, n).is_some_and(|x| x.to_string() != "null");
-        if used && kind != 0 && gens.get(&n).copied().unwrap_or(0) != if kind == 2 { 0 } else { f3 } {
+        // A number the signed revision used but no section lists can't be vouched for.
+        if used && kind != 0 && gens.get(&n) != Some(&if kind == 2 { 0 } else { f3 }) {
             return Ok(false);
         }
     }

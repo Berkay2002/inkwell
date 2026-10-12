@@ -1072,8 +1072,13 @@ fn as_xref_stream(out: &[u8], objs: &[u8], extra: &[(i32, u8, u64, u64)], drop: 
     if let Some(p) = prev {
         xs.dict_put("Prev", PdfObject::new_int(p as i32).unwrap()).unwrap();
     }
-    // (One past that again when `objs` may hold an object of its own numbered `size`.)
-    let num = extra.iter().map(|e| e.0 + 1).fold(size, i32::max) + i32::from(!objs.is_empty());
+    // Past every number listed or written in `objs`, and no further (a number skipped reads as a
+    // new null object, which is a change of its own).
+    let written = String::from_utf8_lossy(objs).lines().filter_map(|l| {
+        let t: Vec<&str> = l.split_ascii_whitespace().take(3).collect();
+        (t.len() == 3 && t[2] == "obj").then(|| t[0].parse::<i32>().ok()).flatten()
+    }).max();
+    let num = extra.iter().map(|e| e.0).chain(written).map(|n| n + 1).fold(size, i32::max);
     let at = x + objs.len();
     entries.retain(|e| e.0 != 0 && !drop.contains(&e.0) && !extra.iter().any(|f| f.0 == e.0));
     entries.extend_from_slice(extra);
@@ -1184,11 +1189,17 @@ fn forged_an_object_listed_again_with_another_generation() {
     let head = format!("\n{c} 0 obj");
     let from = v.windows(head.len()).rposition(|w| w == head.as_bytes()).unwrap() + 1;
     let to = from + v[from..].windows(6).position(|w| w == b"endobj").unwrap() + 6;
-    let copy = [format!("{c} 1 obj").as_bytes(), &v[from + head.len() - 1..to], b"\n"].concat();
     let x = startxref(&honest);
-    let mut out = as_xref_stream(&honest, &copy, &[(c, 1, x as u64, 1)], &[], None);
-    fix_range(&mut out);
-    let forged = resign(&out);
+    let relisted = |g: u64| {
+        let copy = [format!("{c} {g} obj").as_bytes(), &v[from + head.len() - 1..to], b"\n"].concat();
+        let mut out = as_xref_stream(&honest, &copy, &[(c, 1, x as u64, g)], &[], None);
+        fix_range(&mut out);
+        resign(&out)
+    };
+    // Listed again at its own generation it is the same object.
+    let (first, _) = verdicts(&relisted(0));
+    assert_eq!(first.changes, Changes::SignaturesOnly, "{first:?}");
+    let forged = relisted(1);
     let f = PdfDocument::from_bytes(&forged).unwrap();
     assert_eq!(page_contents(&f), page_contents(&d), "MuPDF shows the same page");
     assert!(f.can_be_saved_incrementally());
@@ -1206,6 +1217,187 @@ fn a_later_box_that_prints_but_is_not_viewed_is_flagged() {
     assert_eq!(second.status, Status::Valid, "{second:?}");
     assert_eq!(first.changes, Changes::SignaturesOnly, "{first:?}");
     assert!(codes(&first).contains(&WarningCode::LaterBoxLarge), "{first:?}");
+}
+
+// ---- sixth review ----------------------------------------------------------------------------------
+
+/// `page1()` with a hybrid revision on top: the page's contents moved to a new object `m 5 obj`
+/// that only the revision's /XRefStm lists (its classic section lists the page). The stream lists
+/// itself, or with `word` only the classic section lists it (as Word writes). Returns the bytes
+/// and `m`.
+fn hybrid(word: bool) -> (Vec<u8>, i32) {
+    let base = page1();
+    let d = PdfDocument::from_bytes(&base).unwrap();
+    let trailer = d.trailer().unwrap();
+    let m = trailer.get_dict("Size").unwrap().unwrap().as_int().unwrap();
+    let x = m + 1;
+    let page = d.find_page(0).unwrap();
+    let p = page.as_indirect().unwrap();
+    let content = page_contents(&d);
+    let mut out = base.clone();
+    let at_m = out.len();
+    out.extend_from_slice(format!("{m} 5 obj\n<</Length {}>>\nstream\n", content.len()).as_bytes());
+    out.extend_from_slice(&content);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let mut moved = d.new_object_from_str(&page.resolve().unwrap().unwrap().to_string()).unwrap();
+    moved.dict_put("Contents", d.new_indirect(m, 5).unwrap()).unwrap();
+    let at_p = out.len();
+    out.extend_from_slice(format!("{p} 0 obj\n{moved}\nendobj\n").as_bytes());
+    let at_x = out.len();
+    let rows = [(at_m as u32, 5u16), (at_x as u32, 0)];
+    let rows: Vec<u8> = rows[..2 - usize::from(word)].iter().flat_map(|&(f2, f3)| [vec![1], f2.to_be_bytes().to_vec(), f3.to_be_bytes().to_vec()].concat()).collect();
+    out.extend_from_slice(format!("{x} 0 obj\n<</Type/XRef/Size {}/W[1 4 2]/Index[{m} {}]/Length {}>>\nstream\n", x + 1, 2 - i32::from(word), rows.len()).as_bytes());
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let mut t = d.new_object_from_str(&trailer.to_string()).unwrap();
+    t.dict_put("Size", PdfObject::new_int(x + 1).unwrap()).unwrap();
+    t.dict_put("Prev", PdfObject::new_int(startxref(&base) as i32).unwrap()).unwrap();
+    t.dict_put("XRefStm", PdfObject::new_int(at_x as i32).unwrap()).unwrap();
+    let at = out.len();
+    let stm = if word { format!("{x} 1\n{at_x:010} 00000 n\r\n") } else { String::new() };
+    out.extend_from_slice(format!("xref\n{p} 1\n{at_p:010} 00000 n\r\n{stm}trailer\n{t}\nstartxref\n{at}\n%%EOF\n").as_bytes());
+    let h = PdfDocument::from_bytes(&out).unwrap();
+    assert!(h.can_be_saved_incrementally(), "MuPDF reads the hybrid file without repair");
+    assert_eq!(page_contents(&h), content);
+    (out, m)
+}
+
+#[test]
+fn forged_an_object_from_a_signed_xrefstm_listed_again_at_generation_0() {
+    // The victim signs a hybrid file whose page contents are `m 5 obj`, listed only in a /XRefStm.
+    // The attacker's revision lists a byte-identical `m 0 obj`: MuPDF ignores generations and
+    // shows the same page, a reader that honours them resolves `m 5 R` to nothing.
+    for word in [false, true] {
+        let (h, m) = hybrid(word);
+        relisted_from_a_signed_xrefstm(&h, m, Changes::SignaturesOnly);
+    }
+}
+
+#[test]
+fn forged_a_decoy_xrefstm_stream_listed_in_a_newer_section() {
+    // Before signing, a newer classic section lists the hybrid section's /XRefStm number at a
+    // decoy stream that gives the page contents `m` generation 0. MuPDF reads the real stream at
+    // the /XRefStm offset (generation 5); a check that read the stream by its number would take
+    // the decoy's, and the attacker's `m 0 obj` would pass as the same object. Since the stream
+    // can't be vouched for, even an honest later signature reads as a change.
+    let (h, m) = hybrid(true);
+    let x = m + 1;
+    let d = PdfDocument::from_bytes(&h).unwrap();
+    let head = format!("\n{m} 5 obj");
+    let at_m = h.windows(head.len()).rposition(|w| w == head.as_bytes()).unwrap() + 1;
+    let mut out = h.clone();
+    let y = out.len();
+    let row = [vec![1u8], (at_m as u32).to_be_bytes().to_vec(), 0u16.to_be_bytes().to_vec()].concat();
+    out.extend_from_slice(format!("{x} 0 obj\n<</Type/XRef/Size {}/W[1 4 2]/Index[{m} 1]/Length {}>>\nstream\n", x + 1, row.len()).as_bytes());
+    out.extend_from_slice(&row);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let mut t = d.new_object_from_str(&d.trailer().unwrap().to_string()).unwrap();
+    t.dict_delete("XRefStm").unwrap();
+    t.dict_put("Prev", PdfObject::new_int(startxref(&h) as i32).unwrap()).unwrap();
+    let at = out.len();
+    out.extend_from_slice(format!("xref\n{x} 1\n{y:010} 00000 n\r\ntrailer\n{t}\nstartxref\n{at}\n%%EOF\n").as_bytes());
+    let dd = PdfDocument::from_bytes(&out).unwrap();
+    assert!(dd.can_be_saved_incrementally(), "MuPDF reads the decoy layout without repair");
+    assert_eq!(page_contents(&dd), page_contents(&d));
+    relisted_from_a_signed_xrefstm(&out, m, Changes::Changed);
+}
+
+/// The victim signs `h` (page contents `m 5 obj`); the attacker's revision lists a byte-identical
+/// copy at generation 5 (`same` is how the victim's signature then reads, as it does after an
+/// honest second signature) and at generation 0 (always caught).
+fn relisted_from_a_signed_xrefstm(h: &[u8], m: i32, same: Changes) {
+    let v = victim(h);
+    assert_eq!(infos(&v)[0].changes, Changes::None, "{:?}", infos(&v));
+    let honest = attack(&v, &unseen(), |_, _| {});
+    let head = format!("\n{m} 5 obj");
+    let from = v.windows(head.len()).rposition(|w| w == head.as_bytes()).unwrap() + 1;
+    let to = from + v[from..].windows(6).position(|w| w == b"endobj").unwrap() + 6;
+    let x = startxref(&honest);
+    let relisted = |g: u64| {
+        let copy = [format!("{m} {g} obj").as_bytes(), &v[from + head.len() - 1..to], b"\n"].concat();
+        let mut out = as_xref_stream(&honest, &copy, &[(m, 1, x as u64, g)], &[], None);
+        fix_range(&mut out);
+        resign(&out)
+    };
+    // Listed again at its own generation it is the same object.
+    let (first, _) = verdicts(&relisted(5));
+    assert_eq!(first.changes, same, "{first:?}");
+    let (first, _) = verdicts(&honest);
+    assert_eq!(first.changes, same, "{first:?}");
+    let forged = relisted(0);
+    let f = PdfDocument::from_bytes(&forged).unwrap();
+    assert_eq!(page_contents(&f), page_contents(&PdfDocument::from_bytes(&v).unwrap()), "MuPDF shows the same page");
+    assert!(f.can_be_saved_incrementally());
+    assert_caught(&forged);
+}
+
+#[test]
+fn forged_a_trailer_with_two_prevs() {
+    // The attacker's trailer names /Prev twice: MuPDF keeps the last (the signed revision's), a
+    // reader that keeps the first skips the victim's revision.
+    let base = page1();
+    let v = victim(&base);
+    let mut out = attack(&v, &unseen(), |_, _| {});
+    let t = out.windows(7).rposition(|w| w == b"trailer").unwrap();
+    let open = t + out[t..].windows(2).position(|w| w == b"<<").unwrap() + 2;
+    out.splice(open..open, format!("/Prev {}", startxref(&base)).into_bytes());
+    fix_range(&mut out);
+    let forged = resign(&out);
+    assert!(PdfDocument::from_bytes(&forged).unwrap().can_be_saved_incrementally());
+    assert_caught(&forged);
+}
+
+#[test]
+fn forged_an_update_whose_size_hides_objects() {
+    // The attacker's trailer /Size stops short: a strict reader takes the numbers at or past /Size
+    // as missing. MuPDF repairs a file whose update lists numbers past its /Size (caught as
+    // damage too), so the case MuPDF reads as is, an update reusing low numbers under a /Size
+    // below the signed revision's, is checked on the rule itself.
+    let e = |n: i32| (n, 1u8, 0u64, 0u64);
+    assert!(pdf::size_covers(Some(40), Some(42), &[e(40), e(41)]));
+    assert!(pdf::size_covers(Some(40), Some(40), &[e(3)]));
+    assert!(!pdf::size_covers(Some(40), Some(10), &[e(3), e(9)]), "below the signed revision's");
+    assert!(!pdf::size_covers(Some(40), Some(41), &[e(40), e(41)]), "a listed number past it");
+    assert!(!pdf::size_covers(Some(40), None, &[]));
+    let v = victim(&page1());
+    let honest = attack(&v, &unseen(), |_, _| {});
+    let (first, _) = verdicts(&honest);
+    assert_eq!(first.changes, Changes::SignaturesOnly, "{first:?}");
+    let signed = PdfDocument::from_bytes(&v).unwrap().trailer().unwrap().get_dict("Size").unwrap().unwrap().as_int().unwrap();
+    for size in [signed, 2] {
+        let mut out = honest.clone();
+        let t = out.windows(7).rposition(|w| w == b"trailer").unwrap();
+        let at = t + out[t..].windows(6).position(|w| w == b"/Size ").unwrap() + 6;
+        let len = out[at..].iter().take_while(|c| c.is_ascii_digit()).count();
+        out.splice(at..at + len, size.to_string().into_bytes());
+        fix_range(&mut out);
+        // (Repaired, the attacker's own revision reads damaged too.)
+        let (first, _) = verdicts(&resign(&out));
+        assert_eq!(first.changes, Changes::Changed, "/Size {size}: {first:?}");
+    }
+}
+
+#[test]
+fn forged_an_xref_stream_with_another_filter() {
+    // The attacker's cross-reference stream is hex-encoded: a filter Inkwell never writes, which
+    // readers need not decode alike.
+    let v = victim(&page1());
+    let mut out = as_xref_stream(&attack(&v, &unseen(), |_, _| {}), b"", &[], &[], None);
+    fix_range(&mut out);
+    let (first, _) = verdicts(&resign(&out));
+    assert_eq!(first.changes, Changes::SignaturesOnly, "{first:?}");
+    let head = out.windows(10).rposition(|w| w == b"/Type/XRef").unwrap() + 10;
+    let from = head + out[head..].windows(7).position(|w| w == b"stream\n").unwrap() + 7;
+    let to = from + out[from..].windows(10).position(|w| w == b"\nendstream").unwrap();
+    let hex = out[from..to].iter().map(|b| format!("{b:02X}")).collect::<String>() + ">";
+    let len = format!("/Length {}", to - from);
+    let at = head + out[head..from].windows(len.len()).position(|w| w == len.as_bytes()).unwrap();
+    let dict = format!("/Filter/ASCIIHexDecode/Length {}", hex.len());
+    let mut forged = [&out[..at], dict.as_bytes(), &out[at + len.len()..from], hex.as_bytes(), &out[to..]].concat();
+    fix_range(&mut forged);
+    let forged = resign(&forged);
+    assert!(PdfDocument::from_bytes(&forged).unwrap().can_be_saved_incrementally());
+    assert_caught(&forged);
 }
 
 #[test]
