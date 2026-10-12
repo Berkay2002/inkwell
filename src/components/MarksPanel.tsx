@@ -4,9 +4,11 @@ import type { FontFamily, MarkStyle } from "../lib/api";
 import { formatRange } from "../lib/pageRange";
 import {
   batesText,
+  CERTIFIED_MARKS,
   DATE_FORMATS,
   expand,
   footerLine,
+  FOREIGN_NAME,
   fromHex,
   KIND_NAME,
   KIND_TITLE,
@@ -16,6 +18,8 @@ import {
   pagesOf,
   type PagesMode,
   readiness,
+  SHRINK_KEEPS_ANNOTATIONS,
+  SIGNED_MARKS,
   SLOTS,
   todayDate,
   toHex,
@@ -56,20 +60,24 @@ export function MarksPanel({ doc }: { doc: DocState }) {
 
 function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
   const kinds = useMarks((s) => s.info[doc.id]);
+  const more = useMarks((s) => s.more[doc.id]);
   const here = kinds?.find((k) => k.kind === sheet.kind);
   const pages = pagesOf(sheet.pagesMode, sheet.range, doc.pageCount);
   const existing = !!here && !!pages && pages.some((p) => here.pages.includes(p));
-  const why = readiness(sheet, doc.pageCount);
-  const sentence = outcome(sheet, doc.pageCount, existing);
   const numbering = sheet.kind === "bates" && sheet.btFiles.length > 0;
+  // A certified document is refused every change (numbered copies of other files are not this document).
+  const locked = !numbering && !!more?.certified;
+  const why = locked ? CERTIFIED_MARKS : readiness(sheet, doc.pageCount);
+  const foreign = more?.foreign ?? [];
+  const sentence = outcome(sheet, doc.pageCount, existing);
   const verb = numbering ? "Number the files…" : existing ? "Update" : "Add to the document";
   return (
     <>
       <div className="ax-body tl-body">
-        {kinds && kinds.length > 0 && (
+        {((kinds && kinds.length > 0) || foreign.length > 0) && (
           <div className="mk-has" aria-label="Marks in this document">
             <span className="tl-label">Has</span>
-            {kinds.map((k) => (
+            {(kinds ?? []).map((k) => (
               <div key={k.kind} className="mk-has-row">
                 <span className="mk-has-name">{KIND_NAME[k.kind]}</span>
                 <span className="dim small tl-mono">{k.pages.length === doc.pageCount ? "all pages" : `pp. ${formatRange(k.pages)}`}</span>
@@ -77,9 +85,24 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
                 <button className="tl-link" onClick={() => st().setKind(k.kind)}>
                   Update
                 </button>
-                <button className="tl-link" disabled={sheet.busy} onClick={() => void st().remove(k.kind)}>
+                <button className="tl-link" disabled={sheet.busy || locked} onClick={() => void st().remove(k.kind)}>
                   Remove
                 </button>
+              </div>
+            ))}
+            {foreign.map((f) => (
+              <div key={`other-${f.kind}`} className="mk-has-row mk-has-other">
+                <span className="mk-has-name">{FOREIGN_NAME[f.kind]}</span>
+                <span className="dim small tl-mono">{f.pages.length === doc.pageCount ? "all pages" : `pp. ${formatRange(f.pages)}`}</span>
+                <span className="grow" />
+                <button className="tl-link" disabled={sheet.busy || locked} onClick={() => void st().remove(f.kind, true)}>
+                  Remove
+                </button>
+                {f.stuck.length > 0 && (
+                  <p className="dim small mk-has-note">
+                    On {f.stuck.length === doc.pageCount ? "all pages" : `pp. ${formatRange(f.stuck)}`} it can't be taken out without changing the rest of the page, so it stays.
+                  </p>
+                )}
               </div>
             ))}
           </div>
@@ -93,12 +116,18 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
           ))}
         </div>
 
-        {sheet.kind === "headerFooter" && <HeaderFooterView sheet={sheet} />}
+        {sheet.kind === "headerFooter" && <HeaderFooterView sheet={sheet} count={doc.pageCount} />}
         {sheet.kind === "watermark" && <WatermarkView sheet={sheet} />}
         {sheet.kind === "background" && <BackgroundView sheet={sheet} />}
-        {sheet.kind === "bates" && <BatesView sheet={sheet} />}
+        {sheet.kind === "bates" && <BatesView sheet={sheet} count={doc.pageCount} />}
 
         {!numbering && <PagesRow sheet={sheet} count={doc.pageCount} />}
+
+        {more?.signed && !locked && (
+          <p className="dim small" role="note">
+            {SIGNED_MARKS}
+          </p>
+        )}
       </div>
       <div className="tl-foot">
         <p className="pr-outcome" aria-live="polite">
@@ -118,7 +147,7 @@ function Sheet({ sheet, doc }: { sheet: MarksSheet; doc: DocState }) {
           {sheet.busy ? "Working…" : verb}
         </button>
         {here && !numbering && (
-          <button className="ax-btn tl-wide pr-quiet" disabled={sheet.busy} onClick={() => void st().remove(sheet.kind)}>
+          <button className="ax-btn tl-wide pr-quiet" disabled={sheet.busy || locked} onClick={() => void st().remove(sheet.kind)}>
             Remove {KIND_NAME[sheet.kind]}
           </button>
         )}
@@ -272,7 +301,24 @@ const NUMBER_FORMATS: { token: string; label: string }[] = [
   { token: "<<1/n>>", label: "1/n" },
 ];
 
-function HeaderFooterView({ sheet }: { sheet: MarksSheet }) {
+/** "Shrink pages to fit the margins" (header and footer, and Bates): the page keeps its size. */
+function ShrinkRow({ sheet, count }: { sheet: MarksSheet; count: number }) {
+  const annotated = useMarks((s) => s.more[sheet.doc]?.annotated);
+  const pages = pagesOf(sheet.pagesMode, sheet.range, count);
+  // Several files are numbered from a list: their pages are not read here, so the note is not conditional.
+  const keeps = sheet.shrink && (sheet.kind === "bates" && sheet.btFiles.length > 0 ? true : !!pages && pages.some((p) => annotated?.includes(p)));
+  return (
+    <>
+      <label className="tl-switch">
+        <input type="checkbox" checked={sheet.shrink} onChange={(e) => set({ shrink: e.target.checked })} />
+        <span>Shrink pages to fit the margins</span>
+      </label>
+      {keeps && <p className="dim small">{SHRINK_KEEPS_ANNOTATIONS}</p>}
+    </>
+  );
+}
+
+function HeaderFooterView({ sheet, count }: { sheet: MarksSheet; count: number }) {
   // The slot the next inserted token goes into: the last one typed in, else bottom right.
   const [slot, setSlot] = useState(5);
   const today = todayDate();
@@ -330,6 +376,7 @@ function HeaderFooterView({ sheet }: { sheet: MarksSheet }) {
       </div>
       <StyleRow style={sheet.style} onChange={(style) => set({ style })} />
       <MarginsRow sheet={sheet} />
+      <ShrinkRow sheet={sheet} count={count} />
       <Field label="Number the first page">
         <Num label="Start number" value={sheet.startNumber} min={0} onChange={(startNumber) => set({ startNumber })} />
       </Field>
@@ -500,7 +547,7 @@ function BackgroundView({ sheet }: { sheet: MarksSheet }) {
 
 // ---- Bates ----
 
-function BatesView({ sheet }: { sheet: MarksSheet }) {
+function BatesView({ sheet, count }: { sheet: MarksSheet; count: number }) {
   const example = batesText(sheet.btPrefix, sheet.btDigits, sheet.btStart, sheet.btSuffix);
   return (
     <>
@@ -539,6 +586,7 @@ function BatesView({ sheet }: { sheet: MarksSheet }) {
       </div>
       <StyleRow style={sheet.style} onChange={(style) => set({ style })} />
       <MarginsRow sheet={sheet} />
+      <ShrinkRow sheet={sheet} count={count} />
       <span className="tl-label">Files</span>
       <p className="dim small">
         {sheet.btFiles.length === 0

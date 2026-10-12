@@ -22,12 +22,14 @@ use serde::{Deserialize, Serialize};
 
 pub mod app;
 mod apply;
+mod fit;
 mod geometry;
 mod text;
 #[cfg(test)]
 mod tests;
 
-pub use apply::{Info, KindInfo, add, bates_files, info, remove};
+pub use apply::{ForeignInfo, Info, KindInfo, add, bates_files, info, remove};
+pub use fit::remove_foreign;
 pub(crate) use apply::display_form;
 pub(crate) use geometry::n;
 
@@ -113,12 +115,15 @@ pub struct HeaderFooter {
     pub margins: [f64; 4],
     /// The number `<<1>>` shows on the first page of the range.
     pub start_number: u32,
+    /// Scale the page's own content down (never up) and centre it between the margin bands the text
+    /// uses, so the text does not overlap it. The page keeps its size.
+    pub shrink: bool,
 }
 
 impl Default for HeaderFooter {
     /// Acrobat's margins: 0.5 in top and bottom, 1 in left and right.
     fn default() -> Self {
-        HeaderFooter { text: Default::default(), style: Style::default(), margins: [36.0, 36.0, 72.0, 72.0], start_number: 1 }
+        HeaderFooter { text: Default::default(), style: Style::default(), margins: [36.0, 36.0, 72.0, 72.0], start_number: 1, shrink: false }
     }
 }
 
@@ -135,11 +140,22 @@ pub struct Bates {
     pub slot: u8,
     pub style: Style,
     pub margins: [f64; 4],
+    /// As [`HeaderFooter::shrink`].
+    pub shrink: bool,
 }
 
 impl Default for Bates {
     fn default() -> Self {
-        Bates { prefix: String::new(), suffix: String::new(), digits: 6, start: 1, slot: 5, style: Style::default(), margins: [36.0, 36.0, 72.0, 72.0] }
+        Bates {
+            prefix: String::new(),
+            suffix: String::new(),
+            digits: 6,
+            start: 1,
+            slot: 5,
+            style: Style::default(),
+            margins: [36.0, 36.0, 72.0, 72.0],
+            shrink: false,
+        }
     }
 }
 
