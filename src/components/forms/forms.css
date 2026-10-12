@@ -115,6 +115,18 @@ select.fm-w option {
   outline: calc(1.5px / var(--z, 1)) solid var(--accent);
   background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
+/* the anchor of a multiple selection: the align and size tools follow it */
+.fm-hit.anchor {
+  outline: calc(2.5px / var(--z, 1)) solid var(--accent);
+  outline-offset: calc(1.5px / var(--z, 1));
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+.fm-marquee {
+  position: absolute;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  outline: calc(1px / var(--z, 1)) dashed var(--accent);
+  pointer-events: none;
+}
 .fm-name {
   position: absolute;
   left: 0;
@@ -323,6 +335,47 @@ select.fm-w option {
 .fm-error {
   margin: 0;
   color: var(--danger);
+}
+.fm-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+}
+.fm-tools .sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--border);
+}
+.fm-tools .icon-btn[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: default;
+  background: none;
+  color: var(--text-2);
+}
+.fm-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.fm-dialog .fm-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.fm-rename {
+  width: 100%;
+}
+.fm-rename-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px;
 }
 .fm-check {
   display: flex;

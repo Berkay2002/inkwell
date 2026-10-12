@@ -393,8 +393,8 @@ export const commands: Command[] = [
       const th = useThreads.getState();
       if (th.tool && th.selected?.doc === d.id) return void th.removeBead(d.id, th.selected.thread, th.selected.bead);
       const f = useForms.getState();
-      const field = f.open && f.authoring ? f.get(d.id).selected : null;
-      if (field) return void f.remove(d.id, [field]);
+      const fields = f.open && f.authoring ? f.get(d.id).picked : [];
+      if (fields.length > 0) return void f.remove(d.id, fields);
       const m = useMeasure.getState();
       const measured = m.open ? m.get(d.id).selected : null;
       if (measured) return void m.remove(d.id, measured);
