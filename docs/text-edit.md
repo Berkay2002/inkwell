@@ -273,8 +273,9 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   block had, and a replacement that does not fit is not wrapped or pushed down but skipped with "the replacement
   does not fit on its line". A one-line block (heading, table cell) may grow to the right: up to the nearer of the
   next text or image box that starts to its right on its baseline band (less half its size) and the page's
-  margin (36 pt in), and never less than the room it had; past that it is skipped the same way. The columns of a
-  page are not known, so a column's edge counts only through the text beside it. The same goes for a block whose line ends can't
+  margin (36 pt in) or, when a block of two or more lines stands over its start (the nearest above or below), that
+  block's right edge, which is the column's; never less than the room it had; past that it is skipped the same
+  way. An image that can't be read, or a page whose images can't be listed, leaves the line as wide as it was. The same goes for a block whose line ends can't
   be placed in its new text, for a block whose lines have their own character spacing or scale, and for a match
   that stops inside a word a dropped hyphen split. A match across a line end
   drops

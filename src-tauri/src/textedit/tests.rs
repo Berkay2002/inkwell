@@ -2513,6 +2513,24 @@ fn a_ragged_line_whose_spaces_are_tj_gaps_is_not_stretched_back() {
 }
 
 #[test]
+fn a_one_line_block_in_a_column_stops_at_the_columns_edge() {
+    let d = dir("replace-column-edge");
+    // A heading over the left column of two; nothing is beside it, but the column's text ends near 250 pt.
+    let page = "BT /F1 12 Tf 72 700 Td (Heading) Tj ET\n\
+                BT /F1 12 Tf 72 670 Td 14 TL (The left column is set in a narrow measure) Tj T* (and it goes on for a few more lines) Tj ET\n\
+                BT /F1 12 Tf 330 670 Td 14 TL (The right column is the same width) Tj T* (and goes on below the left one too) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let edge = blocks(&eng, id, 0).unwrap().blocks.iter().find(|b| b.text.starts_with("The left")).unwrap().rect[2];
+    assert!(edge < 330.0, "{edge}");
+    let r = do_replace(&eng, id, &req("Heading", "A heading far too long for the column to hold", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    let r = do_replace(&eng, id, &req("Heading", "Headings", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    let grown = blocks(&eng, id, 0).unwrap().blocks.iter().find(|b| b.text == "Headings").unwrap().rect[2];
+    assert!(grown <= edge + 0.5, "{grown} vs {edge}");
+}
+
+#[test]
 fn a_style_or_a_move_leaves_the_lines_of_a_block_as_they_are() {
     let d = dir("edit-format-keeps-lines");
     let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));

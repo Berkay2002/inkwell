@@ -1038,6 +1038,16 @@ fn room_right(images: &[crate::imageedit::Placed], pc: &PageContent, l: &Line) -
     // Starts at or after the line's end (a mark that touches it, or text over it, is not a neighbour).
     let after = |x: f64| x >= x1 - l.size * 0.1;
     let mut near = pc.crop[2] - 36.0;
+    // The column: the text block of two or more lines nearest above or below that stands over the line's start
+    // ends where the column does (cells are one-line blocks, and stop at their neighbour).
+    let apart = |b: &Block| (b.rect[1].min(b.rect[3]) - hi).max(lo - b.rect[1].max(b.rect[3])).max(0.0);
+    let column = group_blocks(&pc.lines)
+        .into_iter()
+        .filter(|b| b.lines.len() > 1 && b.rect[0] <= x0 + 0.5 && b.rect[2] > x0 && b.rect[2] >= x1 - l.size * 0.1)
+        .min_by(|a, b| apart(a).total_cmp(&apart(b)));
+    if let Some(c) = column {
+        near = near.min(c.rect[2]);
+    }
     for o in &pc.lines {
         let [a, b, c, d] = o.rect;
         let same = (a - x0).abs() < 1e-6 && (c - x1).abs() < 1e-6 && (b - y0).abs() < 1e-6 && (d - y1).abs() < 1e-6;
@@ -1471,7 +1481,8 @@ fn rewrite_in(doc: &mut PdfDocument, page: u32, pc: &PageContent, b: &Block, cha
     }
     let st = &o.state;
     // The images a one-line block's growth must keep clear of (read before the setter takes the document).
-    let images = if members.len() == 1 && change.keep.as_ref().is_some_and(|k| !k.wrap) { crate::imageedit::placed_images(doc, page).unwrap_or_default() } else { Vec::new() };
+    // None when they can't be read: then the line does not grow.
+    let images = (members.len() == 1 && change.keep.as_ref().is_some_and(|k| !k.wrap)).then(|| crate::imageedit::placed_images(doc, page).ok()).flatten();
     let mut setter = Setter::new(doc, pc.page.clone());
     let mut items = Vec::new();
     // The size lines are spaced by: the first run that is not raised, and what it was.
@@ -1649,10 +1660,9 @@ fn rewrite_in(doc: &mut PdfDocument, page: u32, pc: &PageContent, b: &Block, cha
         }
         let grow = change.keep.as_ref().is_some_and(|k| k.wrap).then_some(lead);
         // A one-line block (a heading, a table cell) may take a longer word where nothing is beside it.
-        let right = if members.len() == 1 && grow.is_none() && align == Align::Left && upright {
-            right + (room_right(&images, pc, first) - first.rect[2]).max(0.0) / k
-        } else {
-            right
+        let right = match &images {
+            Some(images) if members.len() == 1 && grow.is_none() && align == Align::Left && upright => right + (room_right(images, pc, first) - first.rect[2]).max(0.0) / k,
+            _ => right,
         };
         let (lines, at) = keep_lines(groups, &spans, &full, align, (left, right), 0.5 / k, &m, grow)
             .ok_or_else(|| invalid("the replacement does not fit on its line"))?;
