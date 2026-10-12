@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
 import type { PageTrans } from "../lib/api";
+import { Icon } from "./Icons";
 import { rotated } from "../lib/layout";
 import { useSheets } from "../lib/organizePlus";
 import { autoAdvanceMs, effectFor, renderPage, transitionMs } from "../lib/present";
@@ -243,13 +244,13 @@ function Show({ doc, start }: { doc: number; start: number }) {
     >
       <div className="pres-hud" onClick={(e) => e.stopPropagation()}>
         <button aria-label="Previous page" disabled={page === 0} onClick={() => go(page - 1)}>
-          ◀
+          <Icon name="left" size={16} />
         </button>
         <span>
           {d && d.labels.length > 0 ? `${label} (${page + 1} of ${total})` : `${page + 1} of ${total}`}
         </span>
         <button aria-label="Next page" disabled={page >= total - 1} onClick={() => go(page + 1)}>
-          ▶
+          <Icon name="right" size={16} />
         </button>
         <button aria-label="Exit full screen" onClick={close}>
           Esc

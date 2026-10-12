@@ -25,7 +25,7 @@ import {
 } from "../../lib/preflightLogic";
 import { revealInFolder } from "../../recents";
 import { type DocState, useStore } from "../../store";
-import { Icon } from "../Icons";
+import { Icon, type IconName } from "../Icons";
 import "../a11y/a11y.css";
 import "./preflight.css";
 
@@ -359,7 +359,7 @@ function GroupView({ doc, group, plan, busy }: { doc: DocState; group: Group; pl
   );
 }
 
-const GLYPH: Record<RuleResult["status"], string> = { passed: "✓", failed: "✕", manual: "!", info: "i" };
+const GLYPH: Record<RuleResult["status"], IconName> = { passed: "check", failed: "close", manual: "warning", info: "info" };
 const MANUAL = "manual";
 
 /** "p. 3 · Font Arial" */
@@ -377,7 +377,7 @@ function Rule({ doc, x, plan, busy }: { doc: DocState; x: RuleResult; plan: Plan
     <li className={`a11y-rule ${x.status === "info" ? "passed" : x.status}`}>
       <div className="a11y-rule-head">
         <span className={`a11y-glyph ${x.status === "info" ? "skipped" : x.status}`} aria-hidden="true">
-          {GLYPH[x.status]}
+          <Icon name={GLYPH[x.status]} size={14} />
         </span>
         <span className="a11y-rule-name">{x.name}</span>
         <span className={`a11y-status ${x.status === "info" ? "skipped" : x.status}`}>{STATUS_WORD[x.status]}</span>

@@ -105,7 +105,7 @@ export function CommentTools({ doc }: { doc: DocState }) {
           aria-pressed={tool === t.tool}
           onClick={() => st().setTool(t.tool)}
         >
-          <Icon name={t.icon} />
+          <Icon name={t.icon} size={20} filled={tool === t.tool} />
         </button>
       ))}
       {tool === "stamp" && <StampPicker doc={doc} />}

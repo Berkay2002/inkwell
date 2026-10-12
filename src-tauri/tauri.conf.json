@@ -36,6 +36,7 @@
       "../third_party/THIRD-PARTY-NOTICES.txt": "licenses/THIRD-PARTY-NOTICES.txt",
       "../third_party/fonts/OFL-NotoSans.txt": "licenses/OFL-NotoSans.txt",
       "../third_party/fonts/OFL-NotoSansCJK.txt": "licenses/OFL-NotoSansCJK.txt",
+      "../third_party/fluent/LICENSE-MIT": "licenses/fluent/LICENSE-MIT",
       "../third_party/pdfcraft/LICENSE-MIT": "licenses/pdfcraft/LICENSE-MIT",
       "../third_party/pdfcraft/LICENSE-APACHE": "licenses/pdfcraft/LICENSE-APACHE",
       "../third_party/pdfcraft/NOTICE": "licenses/pdfcraft/NOTICE"
