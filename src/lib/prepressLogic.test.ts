@@ -14,6 +14,7 @@ import {
   convertSummary,
   convertedFileName,
   coverageText,
+  escapeClearsMarker,
   isSolo,
   marginsBetween,
   marksKey,
@@ -319,6 +320,14 @@ describe("object inspector", () => {
     const rgb = objectLines(hit({ model: "rgb", colorSpace: "DeviceRGB", values: [1, 0, 0.5], cmyk: [0, 99.6, 100, 0], ink: 199.6 }));
     expect(rgb.values).toBe("R 255 G 0 B 128");
     expect(rgb.cmyk).toBe("C 0% M 99.6% Y 100% K 0%, ink 200%");
+  });
+
+  it("lets Escape clear the marker only when nothing else used the key", () => {
+    expect(escapeClearsMarker({ key: "Escape", defaultPrevented: false }, false)).toBe(true);
+    // the find bar closed, or the assistant stepped down, on this press
+    expect(escapeClearsMarker({ key: "Escape", defaultPrevented: true }, false)).toBe(false);
+    expect(escapeClearsMarker({ key: "Escape", defaultPrevented: false }, true)).toBe(false);
+    expect(escapeClearsMarker({ key: "a", defaultPrevented: false }, false)).toBe(false);
   });
 
   it("says what an image or a shading has instead of colours", () => {

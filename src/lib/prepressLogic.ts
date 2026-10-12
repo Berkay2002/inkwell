@@ -218,6 +218,11 @@ export function objectLines(o: Inspected) {
   };
 }
 
+/** Escape clears the inspector's marker unless a field, menu, dialog, the find bar or the assistant already used it. */
+export function escapeClearsMarker(e: { key: string; defaultPrevented: boolean }, inField: boolean): boolean {
+  return e.key === "Escape" && !e.defaultPrevented && !inField;
+}
+
 // ---- pages ----
 
 export type Scope = "all" | "page" | "range";

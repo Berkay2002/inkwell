@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { type DocState } from "../../store";
 import type { Inspected } from "../../lib/prepressApi";
 import { currentSeps, usePrepress } from "../../lib/prepressStore";
-import { CERTIFIED_REASON, NOTHING_PAINTED, type Plate, coverageText, isSolo, objectLines, plateList, readout, showInk } from "../../lib/prepressLogic";
+import { CERTIFIED_REASON, NOTHING_PAINTED, type Plate, coverageText, escapeClearsMarker, isSolo, objectLines, plateList, readout, showInk } from "../../lib/prepressLogic";
 import { Icon } from "../Icons";
 import { PlateThumb } from "./PlateThumb";
 import "../a11y/a11y.css";
@@ -27,8 +27,8 @@ export function PrepressPanel({ doc }: { doc: DocState }) {
   useEffect(() => {
     if (!marked || sheetOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.defaultPrevented || (e.target as HTMLElement | null)?.closest("input, textarea, select, [role=dialog], [role=menu]")) return;
-      st().clearInspect(id);
+      const inField = !!(e.target as HTMLElement | null)?.closest("input, textarea, select, [role=dialog], [role=menu]");
+      if (escapeClearsMarker(e, inField)) st().clearInspect(id);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
