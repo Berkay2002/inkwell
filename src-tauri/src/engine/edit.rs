@@ -1798,3 +1798,7 @@ mod security;
 #[cfg(test)]
 #[path = "tests_edit.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_certified.rs"]
+mod tests_certified;

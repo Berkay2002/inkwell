@@ -445,7 +445,7 @@ fn outline_pdf(root: &str, items: &[String]) -> Vec<u8> {
 }
 
 /// `outline_pdf` with `catalog` more keys in the document catalog (built whole, so the xref stays exact).
-fn outline_pdf_with(catalog: &str, root: &str, items: &[String]) -> Vec<u8> {
+pub(crate) fn outline_pdf_with(catalog: &str, root: &str, items: &[String]) -> Vec<u8> {
     let content = "BT /F1 24 Tf 72 700 Td (Chapter One) Tj ET BT /F1 12 Tf 72 600 Td (Plain body text of the document, long enough.) Tj ET BT /F1 12 Tf 72 560 Td (More plain body text in the same size here.) Tj ET";
     let mut objs = vec![
         format!("<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R {catalog} >>"),
@@ -735,11 +735,11 @@ fn checked_certification_of(name: &str, catalog: &str, objs: &[&str]) -> (std::r
 }
 
 /// A signature value whose `/Reference` holds `refs` (raw dictionaries).
-fn sig_value(refs: &str) -> String {
+pub(crate) fn sig_value(refs: &str) -> String {
     format!("/V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> /Reference [ {refs} ] >>")
 }
 
-fn doc_mdp(params: &str) -> String {
+pub(crate) fn doc_mdp(params: &str) -> String {
     format!("<< /Type /SigRef /TransformMethod /DocMDP {params} >>")
 }
 
