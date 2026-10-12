@@ -394,6 +394,16 @@ describe("rules decided by hand", () => {
     expect(applyOverrides(sample, {})).toBe(sample);
   });
 
+  it("Fix all leaves a rule marked passed alone, as the button says", async () => {
+    reply({ a11y_check: sample, a11y_preview: { untagged: false } });
+    await a().check(1);
+    a().setMark(1, "title", "passed");
+    reply({ a11y_fix: state(4) });
+    await a().fixAll(1);
+    const call = inv.mock.calls.find((c) => c[0] === "a11y_fix")!;
+    expect((call[1] as { fix: unknown }).fix).toEqual({ fix: "many", fixes: [{ fix: "language", lang: a().lang }, { fix: "tabOrder" }] });
+  });
+
   it("export only the marks that name a rule of the report", () => {
     expect(marksIn(sample, marks)).toEqual({ title: "passed", "color-contrast": "skipped" });
   });

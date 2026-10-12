@@ -3,7 +3,7 @@
 //! same and that the tree passes the structure rules.
 
 use super::tests::{Spec, check_eng, file, open};
-use super::tests_tables::{at, autotag, grid, page};
+use super::tests_tables::{at, autotag, autotag_loose, grid, page};
 use super::*;
 
 /// An element and what is under it: `TOCI(Link*)`, `*` for an annotation and `#` for marked content.
@@ -273,6 +273,36 @@ fn a_line_that_is_far_long_or_a_sentence_is_not_a_caption() {
     }
     let t = autotag("caption-mid", &page(c));
     assert_eq!((t.count("Caption"), t.count("P")), (0, 1), "{:?}", t.types);
+}
+
+#[test]
+fn a_caption_is_only_moved_in_when_it_is_drawn_next_to_its_figure() {
+    // Drawn first although it is below the image: tag order would not be draw order inside the figure, so it
+    // stays a paragraph (the page's reading order is wrong for the checker either way).
+    let mut c = at("F1", 10, 72, 500, "Figure 1. Quarterly revenue by region");
+    c += IMAGE;
+    let t = autotag_loose("caption-order", &page(c));
+    assert_eq!((t.count("Caption"), t.count("Figure")), (0, 1), "{:?}", t.types);
+
+    // A paragraph drawn between the image and its caption (a sidebar) separates them.
+    let mut c = String::from(IMAGE);
+    c += &at("F1", 12, 320, 600, "A note set beside the figure.");
+    c += &at("F1", 10, 72, 500, "Figure 1. Quarterly revenue by region");
+    let t = autotag_loose("caption-between", &page(c));
+    assert_eq!(t.count("Caption"), 0, "{:?}", t.types);
+
+    // Only artifacts between them (a rule drawn under the image) do not.
+    let mut c = String::from(IMAGE);
+    c += "0.5 g 72 512 200 1 re f\n";
+    c += &at("F1", 10, 72, 500, "Figure 1. Quarterly revenue by region");
+    let t = autotag("caption-artifact", &page(c));
+    assert_eq!(t.count("Caption"), 1, "{:?}", t.types);
+
+    // A table label under its table, drawn before the table: not moved in either.
+    let mut c = at("F1", 10, 72, 640, "Table 3. Totals for the year");
+    c += &grid(&[&["Region", "Units", "Revenue"], &["North", "120", "4 800"], &["South", "95", "3 750"]], &[72, 200, 330], 700, 18, true);
+    let t = autotag_loose("caption-table-order", &page(c));
+    assert_eq!((t.count("Caption"), t.count("Table")), (0, 1), "{:?}", t.types);
 }
 
 // ---- signed and certified documents --------------------------------------------------------------

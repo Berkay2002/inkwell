@@ -4,7 +4,7 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import { type EditState, pickSave, toolCancel } from "./api";
 import { applyState, run } from "./edit";
-import { type A11yMark, type A11yMarks, type Finding, type Fix, type Preview, type Progress, type Rect4, type Report, marksIn, safeFixes, stem, suggestLang } from "./a11yLogic";
+import { type A11yMark, type A11yMarks, type Finding, type Fix, type Preview, type Progress, type Rect4, type Report, applyOverrides, marksIn, safeFixes, stem, suggestLang } from "./a11yLogic";
 import { useRecents } from "../recents";
 import {
   type Problem,
@@ -456,9 +456,10 @@ export const useA11y = create<A11yStore>((set, get) => {
     },
 
     fixAll: async (doc) => {
-      const r = get().get(doc).report;
-      if (!r) return;
-      const fixes = safeFixes(r, get().lang);
+      const d = get().get(doc);
+      if (!d.report) return;
+      // A rule the person decided by hand is not fixed, whatever the checker found.
+      const fixes = safeFixes(applyOverrides(d.report, d.marks), get().lang);
       if (!fixes.length) return;
       await get().fix(doc, fixes.length === 1 ? fixes[0] : { fix: "many", fixes });
     },

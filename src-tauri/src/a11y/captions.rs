@@ -46,7 +46,8 @@ pub struct Target {
 /// lines (nothing else may sit between).
 pub fn place(kind: Kind, cap: Rect, targets: &[Target], lines: &[Rect], own: &[usize]) -> Option<(usize, bool)> {
     let overlap = |a0: f32, a1: f32, b0: f32, b1: f32| (a1.min(b1) - a0.max(b0)).max(0.0);
-    let mut best: Option<(f32, usize, bool)> = None;
+    // The nearest target of the kind that is beside the caption within `MAX_GAP`...
+    let mut best: Option<(f32, usize, bool, f32, f32)> = None;
     for (i, t) in targets.iter().enumerate().filter(|(_, t)| t.kind == kind) {
         let b = t.bbox;
         let shared = overlap(cap.x0, cap.x1, b.x0, b.x1);
@@ -61,15 +62,17 @@ pub fn place(kind: Kind, cap: Rect, targets: &[Target], lines: &[Rect], own: &[u
         } else {
             continue;
         };
-        let between = lines
-            .iter()
-            .enumerate()
-            .any(|(n, o)| !own.contains(&n) && o.y0 < band.1 - 1.0 && o.y1 > band.0 + 1.0 && overlap(o.x0, o.x1, cap.x0, cap.x1) > 0.0);
-        if gap <= MAX_GAP && !between && best.is_none_or(|(g, ..)| gap < g) {
-            best = Some((gap, i, above));
+        if gap <= MAX_GAP && best.is_none_or(|(g, ..)| gap < g) {
+            best = Some((gap, i, above, band.0, band.1));
         }
     }
-    best.map(|(_, i, above)| (i, above))
+    // ...and nothing else may sit between them (one scan of the page's lines, for that target only).
+    let (_, i, above, lo, hi) = best?;
+    let between = lines
+        .iter()
+        .enumerate()
+        .any(|(n, o)| !own.contains(&n) && o.y0 < hi - 1.0 && o.y1 > lo + 1.0 && overlap(o.x0, o.x1, cap.x0, cap.x1) > 0.0);
+    (!between).then_some((i, above))
 }
 
 #[cfg(test)]

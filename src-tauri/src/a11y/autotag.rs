@@ -137,6 +137,19 @@ fn undisturbed(rs: &[Run], span: &[Option<(usize, usize)>], groups: &[Vec<usize>
         .collect()
 }
 
+/// Whether the runs `cap` are drawn right before (`above`) or after the runs `target`, with only artifacts between.
+fn adjacent(runs: &[Run], cap: &[usize], target: &[usize], above: bool) -> bool {
+    let (Some(&c0), Some(&c1), Some(&t0), Some(&t1)) = (cap.iter().min(), cap.iter().max(), target.iter().min(), target.iter().max()) else {
+        return false;
+    };
+    // All of the caption's runs on one side of all of the target's.
+    if if above { c1 >= t0 } else { t1 >= c0 } {
+        return false;
+    }
+    let mine: HashSet<usize> = cap.iter().chain(target).copied().collect();
+    (c0.min(t0)..=c1.max(t1)).all(|k| mine.contains(&k) || matches!(runs[k].target, Target::Artifact))
+}
+
 /// The tables and the tables of contents on page `p`. Only lines that get a marked-content run can
 /// be part of them (text that is already marked, or inside a form, is left alone), and form fields
 /// keep the text near them. A page with too many lines is not looked at (walking its content is the
@@ -590,7 +603,7 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
         let mut seen_toc = vec![false; t.tocs.len()];
         // Paragraphs that may turn out to be captions, and the boxes of the tables they may belong to.
         let mut paragraphs: Vec<(usize, Vec<usize>)> = Vec::new();
-        let mut table_boxes: Vec<(usize, Rect)> = Vec::new();
+        let mut table_boxes: Vec<(usize, Rect, Vec<usize>)> = Vec::new();
         let mut links = if t.tocs.is_empty() { Vec::new() } else { toc_links(doc, p, &page_obj)? };
         let mut claimed: HashSet<i32> = HashSet::new();
         for b in 0..t.blocks {
@@ -612,7 +625,7 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
                             }
                             let cells = || tb.rows.iter().flatten().map(|&l| t.lines[l].bbox);
                             let top_y = cells().map(|b| b.y0).fold(f32::MAX, f32::min);
-                            table_boxes.push((e, union(cells())));
+                            table_boxes.push((e, union(cells()), tb.rows.iter().flatten().copied().collect()));
                             top.push((e, top_y));
                         }
                     }
@@ -671,16 +684,24 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
         // Figures get their elements now, so a caption can go inside; they take their place in the
         // reading order below, with the run.
         let figure_of: Vec<Option<usize>> = runs.iter().map(|r| matches!(r.target, Target::Figure(_)).then(|| pg.add("Figure"))).collect();
-        let mut targets: Vec<(usize, captions::Target)> = table_boxes.into_iter().map(|(e, bbox)| (e, captions::Target { kind: captions::Kind::Table, bbox })).collect();
-        for (r, e) in runs.iter().zip(&figure_of) {
-            if let (Target::Figure(bbox), Some(e)) = (r.target, e) {
-                targets.push((*e, captions::Target { kind: captions::Kind::Figure, bbox }));
+        // The runs (in draw order) of every line, to know what a figure or a table is drawn next to.
+        let mut line_runs: Vec<Vec<usize>> = vec![Vec::new(); t.lines.len()];
+        for (k, r) in runs.iter().enumerate() {
+            if let Target::Line(l) = r.target {
+                line_runs[l].push(k);
             }
         }
-        // A caption is a short paragraph that opens with "Figure 2" or "Table 1" and sits right above
-        // or below a figure or table of that kind. It becomes a Caption inside it: first when above,
-        // last when below (the standard's text was not checked). A figure or table takes one of each.
-        let boxes: Vec<captions::Target> = targets.iter().map(|(_, t0)| captions::Target { kind: t0.kind, bbox: t0.bbox }).collect();
+        // (element, box, the runs it is drawn with)
+        let mut targets: Vec<(usize, captions::Target, Vec<usize>)> = table_boxes
+            .into_iter()
+            .map(|(e, bbox, ls)| (e, captions::Target { kind: captions::Kind::Table, bbox }, ls.iter().flat_map(|&l| line_runs[l].iter().copied()).collect()))
+            .collect();
+        for (k, (r, e)) in runs.iter().zip(&figure_of).enumerate() {
+            if let (Target::Figure(bbox), Some(e)) = (r.target, e) {
+                targets.push((*e, captions::Target { kind: captions::Kind::Figure, bbox }, vec![k]));
+            }
+        }
+        let boxes: Vec<captions::Target> = targets.iter().map(|(_, t0, _)| captions::Target { kind: t0.kind, bbox: t0.bbox }).collect();
         let cands: Vec<(usize, captions::Kind)> = paragraphs
             .iter()
             .enumerate()
@@ -699,7 +720,10 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
             let cap = union(idx.iter().map(|&i| t.lines[i].bbox));
             let Some((k, above)) = captions::place(kind, cap, &boxes, &line_boxes, idx) else { continue };
             let host = targets[k].0;
-            if !filled.insert((host, above)) {
+            // The caption must be drawn right before (above) or right after (below) its figure or table, with
+            // nothing but artifacts between: the Caption is a kid of it, so tag order has to be draw order.
+            let own: Vec<usize> = idx.iter().flat_map(|&l| line_runs[l].iter().copied()).collect();
+            if !adjacent(&runs, &own, &targets[k].2, above) || !filled.insert((host, above)) {
                 continue;
             }
             pg.els[*e].ty = "Caption".into();

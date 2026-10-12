@@ -330,10 +330,10 @@ function Summary({ report, checking }: { report: Report; checking: boolean }) {
   return (
     <div className="a11y-summary" aria-busy={checking}>
       <p className="a11y-result">{summaryLine(report)}</p>
-      <div className="a11y-seg" role="img" aria-label={`${c.failed} failed, ${c.manual} to check by hand, ${c.passed} passed of ${total}`}>
+      <div className="a11y-seg" role="img" aria-label={`${c.failed} failed, ${c.manual} to check by hand, ${c.passed} passed${c.passedManually ? `, ${c.passedManually} passed manually` : ""}${c.skipped ? `, ${c.skipped} skipped` : ""} of ${total}`}>
         {seg(c.failed, "failed")}
         {seg(c.manual, "manual")}
-        {seg(c.passed, "passed")}
+        {seg(c.passed + c.passedManually, "passed")}
         {seg(c.skipped, "skipped")}
       </div>
     </div>
