@@ -2354,6 +2354,29 @@ fn layout_in_a_signed_document_is_saved_after_the_signed_bytes() {
 }
 
 #[test]
+fn duplicate_copies_and_rename_in_a_signed_document_are_saved_after_the_signed_bytes() {
+    let (eng, id, path) = script_form("layout-signed-more", &["A", "B"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    sign(&eng, id, None, None);
+    eng.save(id, None).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert!(eng2.read_custom(id2, |d| Ok(crate::outline::signed(d))).unwrap());
+    let n = steps(&eng2, id2);
+    let a = items_of(&eng2, id2, &["A"])[0];
+    let b = items_of(&eng2, id2, &["B"])[0];
+    duplicate_one(&eng2, id2, a, &[1], EditSource::User).unwrap();
+    copies_one(&eng2, id2, b, 2, 2, (4.0, 4.0), EditSource::User).unwrap();
+    rename_one(&eng2, id2, a, "Renamed", false, EditSource::User).unwrap();
+    assert_eq!(steps(&eng2, id2), n + 3);
+    eng2.save(id2, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the file was rewritten: the signature would no longer verify");
+    let (eng3, id3) = reopen(&path);
+    assert_eq!(items_of(&eng3, id3, &["Renamed"]).len(), 1);
+}
+
+#[test]
 fn layout_tools_hold_their_caps() {
     let (eng, id, _) = script_form("layout-caps", &["A", "B"]);
     let a = items_of(&eng, id, &["A"])[0];
