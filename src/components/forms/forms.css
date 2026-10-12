@@ -368,6 +368,12 @@ select.fm-w option {
 .fm-rename {
   width: 100%;
 }
+.fm-rename-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px;
+}
 .fm-check {
   display: flex;
   align-items: center;
