@@ -563,9 +563,10 @@ fn xfdf(items: &[Comment], file: &str) -> String {
     for c in items {
         let tag = c.sub.tag();
         let mut at = String::new();
+        // A line break or tab in an attribute is a reference: the reader would read the raw one as a space.
         let mut put = |k: &str, v: &str| {
             if !v.is_empty() {
-                let _ = write!(at, " {k}=\"{}\"", esc(v));
+                let _ = write!(at, " {k}=\"{}\"", esc(v).replace('\n', "&#10;").replace('\t', "&#9;"));
             }
         };
         put("page", &c.page.to_string());
@@ -1248,10 +1249,10 @@ fn new_caret(doc: &mut PdfDocument, page: u32, r: [f32; 4], st: &Style, author: 
 
 fn new_file(doc: &mut PdfDocument, page: u32, r: [f32; 4], st: &Style, c: &Comment) -> Result<i32> {
     let file = c.file.as_ref().ok_or_else(|| bad("this attachment has no file"))?;
-    let fs = attach::install(doc, file)?;
     let mut p = doc.load_pdf_page(page as i32)?;
     let mut a = p.create_annotation(PdfAnnotationType::FileAttachment)?;
     let icon = if ICONS.contains(&c.icon.as_str()) { c.icon.as_str() } else { "PushPin" };
+    // The file is written after the annotation exists, so a failure above leaves no unreferenced stream behind.
     let made = (|| -> Result<()> {
         a.set_rect(super::rect_of(r))?;
         a.set_icon_name(icon)?;
@@ -1259,6 +1260,7 @@ fn new_file(doc: &mut PdfDocument, page: u32, r: [f32; 4], st: &Style, c: &Comme
         if let Some(o) = st.opacity {
             a.set_opacity(o.clamp(0.0, 1.0))?;
         }
+        let fs = attach::install(doc, file)?;
         a.object().dict_put("FS", fs)?;
         meta(&mut a, &c.author, true)?;
         a.update()?;

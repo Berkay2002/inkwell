@@ -70,6 +70,8 @@ pub const MAX_BLOBS: usize = 10 << 20;
 /// Bytes one file may make Inkwell decode in all, counting what a cap stopped: a bomb that fails is not in
 /// [`MAX_BLOBS`], so many comments sharing one would otherwise each cost a full cap of inflating.
 pub const MAX_DECODE_WORK: usize = 256 << 20;
+/// Least charged to [`MAX_DECODE_WORK`] for one decode: even a cap of 0 makes the decoder produce a chunk.
+pub const MIN_DECODE_WORK: usize = 16 << 10;
 /// The same bound for an export: the document is the person's own, so real comments may hold more than a
 /// file we read, but a damaged one still must not multiply one shared string or array without end.
 pub const MAX_EXPORT_COPIED: usize = 256 << 20;
@@ -112,16 +114,14 @@ impl Budget {
         }
     }
 
-    /// Charges `n` bytes of decoding that is about to be tried (whether or not it stays under its cap); false
-    /// (nothing charged) when the file's allowance is used up.
-    pub fn take_work(&self, n: usize) -> bool {
-        match self.work.get().checked_sub(n) {
-            Some(rest) => {
-                self.work.set(rest);
-                true
-            }
-            None => false,
-        }
+    /// What is left of the file's decode allowance: a decode is capped to it, and not tried at 0.
+    pub fn work_left(&self) -> usize {
+        self.work.get()
+    }
+
+    /// Charges a decode that was tried: the bytes it produced, or its cap when it was stopped by it.
+    pub fn spend_work(&self, n: usize) {
+        self.work.set(self.work.get().saturating_sub(n.max(MIN_DECODE_WORK)));
     }
 
     /// What is left for attachments and appearance streams.

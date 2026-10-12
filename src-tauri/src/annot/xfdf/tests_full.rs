@@ -428,3 +428,46 @@ fn one_bomb_shared_by_many_comments_costs_a_bounded_amount_of_decoding() {
     assert!(over <= 64 + 1, "{over} full-size attempts: the allowance is 256 MB of 4 MB tries");
     assert!(t.elapsed().as_secs() < 30, "{:?}", t.elapsed());
 }
+
+#[test]
+fn many_small_attachments_are_not_held_back_by_the_decode_allowance() {
+    let n = 300;
+    let refs: String = (0..n).map(|i| format!("{} 0 R ", 10 + 2 * i)).collect();
+    let mut objs = Vec::new();
+    for i in 0..n {
+        let spec = 11 + 2 * i;
+        objs.push(obj(10 + 2 * i, &format!("<< /Type /Annot /Subtype /FileAttachment /Page 0 /Rect [100 600 120 620] /NM (s{i}) /FS {spec} 0 R >>")));
+        objs.push(obj(spec, &format!("<< /Type /Filespec /F (s{i}.txt) /EF << /F {} 0 R >> >>", 10 + 2 * n + i)));
+    }
+    for i in 0..n {
+        objs.push(stream_obj(10 + 2 * n + i, "/Type /EmbeddedFile", format!("file {i}").as_bytes()));
+    }
+    let (eng, id, _) = blank("attach-many");
+    let s = run(&eng, id, &fdf_file(&refs, &objs));
+    assert_eq!((s.added, s.files, s.skipped.len()), (n, n, 0), "{s:?}");
+}
+
+#[test]
+fn an_embedded_image_codec_is_not_run_to_export_a_file_and_line_breaks_survive_xfdf() {
+    // A file stored as a JPEG stream would be exported as pixels: it is left out of the import instead.
+    let f = fdf_file(
+        "5 0 R",
+        &[
+            obj(5, "<< /Type /Annot /Subtype /FileAttachment /Page 0 /Rect [100 600 120 620] /NM (j) /FS 6 0 R >>"),
+            obj(6, "<< /Type /Filespec /F (p.jpg) /EF << /F 7 0 R >> >>"),
+            stream_obj(7, "/Type /EmbeddedFile /Filter /DCTDecode", b"\xFF\xD8\xFF\xE0 not a picture"),
+        ],
+    );
+    let (eng, id, _) = blank("attach-dct");
+    let s = run(&eng, id, &f);
+    assert_eq!((s.added, reasons(&s.skipped)), (0, vec![(attach::DAMAGED, 1)]), "{s:?}");
+
+    let file = "<xfdf xmlns=\"http://ns.adobe.com/xfdf/\"><annots><fileattachment page=\"0\" rect=\"100,600,120,620\" name=\"n\" file=\"a.txt\"><data mode=\"raw\" encoding=\"hex\" description=\"line one&#10;line two\">41</data></fileattachment></annots></xfdf>";
+    let (a, ida, _) = blank("attach-desc-a");
+    run(&a, ida, file.as_bytes());
+    assert_eq!(read_all(&a, ida)[0].file.as_ref().unwrap().desc, "line one\nline two");
+    let (bytes, _) = export(&a, ida, Format::Xfdf, "a.pdf").unwrap();
+    let (b, idb, _) = blank("attach-desc-b");
+    run(&b, idb, &bytes);
+    assert_eq!(read_all(&b, idb)[0].file.as_ref().unwrap().desc, "line one\nline two");
+}

@@ -75,6 +75,27 @@ fn room(b: &Budget) -> usize {
     MAX_ATTACHMENT.min(b.blobs_left())
 }
 
+/// [`room`], also held to what is left of the file's decode allowance.
+fn decode_room(b: &Budget) -> usize {
+    room(b).min(b.work_left())
+}
+
+/// Whether the stream's filters are ones that return the file's own bytes: an image codec would return pixels
+/// (and take the heavy decoder to do it).
+fn plain_filters(s: &PdfObject) -> bool {
+    let names = |v: PdfObject| -> Vec<String> {
+        let one = |o: &PdfObject| o.is_name().unwrap_or(false).then(|| o.as_name().ok()).flatten().map(|n| String::from_utf8_lossy(&n).into_owned());
+        let v = v.resolve().ok().flatten().unwrap_or(v);
+        if v.is_array().unwrap_or(false) {
+            (0..v.len().unwrap_or(0).min(16) as i32).filter_map(|i| v.get_array(i).ok().flatten().and_then(|o| one(&o))).collect()
+        } else {
+            one(&v).into_iter().collect()
+        }
+    };
+    let f = get(s, "Filter").map(names).unwrap_or_default();
+    !f.iter().any(|n| matches!(n.as_str(), "DCTDecode" | "DCT" | "JPXDecode" | "JBIG2Decode" | "CCITTFaxDecode" | "CCF" | "Crypt"))
+}
+
 fn finish(f: AttachFile, b: &Budget) -> Result<AttachFile, Why> {
     if f.data.len() > MAX_ATTACHMENT {
         return Err(OVER);
@@ -97,11 +118,16 @@ fn read_spec(fs: &PdfObject, b: &Budget) -> Result<AttachFile, Why> {
         return Err(EXTERNAL);
     }
     let stream = stream_of(fs).ok_or(EXTERNAL)?;
-    let cap = room(b);
-    if !b.take_work(cap) {
+    if !plain_filters(&stream) {
+        return Err(DAMAGED);
+    }
+    let cap = decode_room(b);
+    if cap == 0 {
         return Err(NO_ROOM);
     }
-    let data = stream.read_stream_capped(cap).map_err(|e| {
+    let r = stream.read_stream_capped(cap);
+    b.spend_work(r.as_ref().map_or(cap, Vec::len));
+    let data = r.map_err(|e| {
         if !e.is_stream_cap() {
             DAMAGED
         } else if cap < MAX_ATTACHMENT {
@@ -164,13 +190,15 @@ pub(super) fn from_data(e: &Node, file: &str, b: &Budget) -> Result<AttachFile, 
         }
         _ => text.as_bytes().to_vec(),
     };
-    let cap = room(b);
     let filtered = e.attr("mode").is_some_and(|m| m.eq_ignore_ascii_case("filtered"));
-    if filtered && !b.take_work(cap) {
+    let cap = if filtered { decode_room(b) } else { room(b) };
+    if filtered && cap == 0 {
         return Err(NO_ROOM);
     }
     let data = if filtered {
-        inflate(&stored, cap).map_err(|w| if w == OVER && cap < MAX_ATTACHMENT { NO_ROOM } else { w })?
+        let r = inflate(&stored, cap);
+        b.spend_work(r.as_ref().map_or(cap, Vec::len));
+        r.map_err(|w| if w == OVER && cap < MAX_ATTACHMENT { NO_ROOM } else { w })?
     } else {
         stored
     };
@@ -190,7 +218,8 @@ pub(super) fn to_data(f: &AttachFile) -> String {
         let _ = write!(s, " modification=\"{}\"", exchange::esc(&f.modified));
     }
     if !f.desc.is_empty() {
-        let _ = write!(s, " description=\"{}\"", exchange::esc(&f.desc));
+        // A line break in an attribute must be a reference, or the reader makes it a space.
+        let _ = write!(s, " description=\"{}\"", exchange::esc(&f.desc).replace('\n', "&#10;").replace('\t', "&#9;"));
     }
     let _ = write!(s, ">{}</data>", hex(&f.data));
     s
