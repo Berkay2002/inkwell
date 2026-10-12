@@ -1456,7 +1456,7 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
         None if grows => own.max(pc.crop[2] - 36.0 - b.rect[0]),
         None => own,
     };
-    let mut lines = wrap(items.clone(), (width + 0.5) / k, &m);
+    let mut lines = wrap(items.clone(), (width + 0.5) / k, &m, align == Align::Justify);
     if grows {
         width = lines.iter().map(|l| m.line(&l.items) * k).fold(own, f64::max).min(width);
     }
@@ -1470,7 +1470,7 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
             _ => {}
         }
         width = widest;
-        lines = wrap(items, (width + 0.5) / k, &m);
+        lines = wrap(items, (width + 0.5) / k, &m, align == Align::Justify);
     }
     let lead = if let Some(ls) = change.line_spacing {
         if !(ls.is_finite() && (0.5..=5.0).contains(&ls)) {
@@ -1730,7 +1730,7 @@ pub fn add_text(doc: &mut PdfDocument, page: u32, new: &NewText) -> Result<()> {
         Some(_) => return Err(invalid("the width must be a positive number")),
         None => f64::MAX,
     };
-    let lines = wrap(items, width, &m);
+    let lines = wrap(items, width, &m, false);
     // Text space: x along the line, y up as the page is shown. The first baseline sits under the
     // top of the box by about the font's ascent.
     let flip = Matrix([1.0, 0.0, 0.0, -1.0, 0.0, 0.0]);

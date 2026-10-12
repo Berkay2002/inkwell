@@ -618,9 +618,10 @@ fn is_space(it: &Item) -> bool {
 
 /// Wraps items into lines of at most `width` (text space). Breaks go at spaces (which end the
 /// line and are dropped), between CJK characters, and at hard breaks. A `Line` end keeps its line unless
-/// the line grew past the width: the words that no longer fit go on at the start of the next line, which
-/// takes them in as it would any text (and passes its own on in turn when it is full).
-pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
+/// the line grew past the width: the words that no longer fit go on a line of their own, or with `carry_over`
+/// (a justified block, whose lines must all stay full) at the start of the next line, which takes them in as it
+/// would any text and passes its own on in turn when it is full.
+pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure, carry_over: bool) -> Vec<LineOut> {
     type Words = Vec<(Vec<Item>, Vec<Item>)>;
     let mut out = Vec::new();
     // Each paragraph, and the space a `Line` end stood for (none: a hard break or the end).
@@ -665,6 +666,10 @@ pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
         if !carry.is_empty() {
             if let (Some(f), Some(j)) = (words.first_mut(), joint.take()) {
                 f.0 = vec![j];
+                // It no longer starts a line: what it was kerned from there is not wanted.
+                if let Some(first) = f.1.first_mut() {
+                    first.kern = 0.0;
+                }
             }
             carry.append(&mut words);
             words = std::mem::take(&mut carry);
@@ -698,7 +703,7 @@ pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
         }
         match ending {
             // The line grew: its last words go on to the next line.
-            Some(space) if out.len() > first => {
+            Some(space) if carry_over && out.len() > first => {
                 carry = words.split_off(from);
                 joint = Some(space);
             }

@@ -1864,16 +1864,14 @@ fn a_longer_replacement_wraps_only_its_own_line() {
     let after = line_boxes(&eng, id);
     assert_eq!(after.len(), 3);
     assert!(after.iter().zip(&before).all(|(a, b)| (a[1] - b[1]).abs() < 0.5), "{after:?}");
-    // Wider than the block: its overflow goes on at the start of the next line, which takes it in and
-    // stays a line of its own; the line below that keeps its words.
+    // Wider than the block: its overflow wraps onto a line of its own, and the lines below keep theirs.
     eng.undo(id).unwrap();
     do_replace(&eng, id, &req("cat", "cat on a big mat", SearchOpts::default())).unwrap();
     let lines = page_lines(&eng, id);
-    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines.len(), 4, "{lines:?}");
     assert!(lines[0].starts_with("One cat on"), "{lines:?}");
-    assert!(lines[1].ends_with("Two") && lines[1].len() > 3, "{lines:?}");
-    assert_eq!(lines[2], "Three long hats here", "{lines:?}");
-    assert_eq!(line_boxes(&eng, id).len(), 3);
+    assert_eq!(&lines[2..], ["Two", "Three long hats here"], "{lines:?}");
+    assert_eq!(line_boxes(&eng, id).len(), 4);
 }
 
 #[test]
