@@ -4,6 +4,7 @@ import {
   type Annot, type Handle, type Pt, type Rect4, COLORS, HANDLES, KIND_LABEL, clampRect, hitTest, isBoxed, moveRect,
   normRect, placePopover, rectToScreen, resizeRect, rgbHex, roots, stampSize, dateStampName,
 } from "../../lib/annotLogic";
+import { customId, fitAspect } from "../../lib/stampsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 import { Icon } from "../Icons";
 
@@ -87,7 +88,12 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     if (!drag) return;
     const q = toPage(e);
     const [dx, dy] = [q[0] - drag.start[0], q[1] - drag.start[1]];
-    const rect = drag.mode === "move" ? moveRect(drag.rect0, dx, dy) : resizeRect(drag.rect0, drag.mode.resize, dx, dy);
+    let rect = drag.mode === "move" ? moveRect(drag.rect0, dx, dy) : resizeRect(drag.rect0, drag.mode.resize, dx, dy);
+    // A picture stamp keeps its proportions while it is resized.
+    if (drag.mode !== "move" && mine.find((a) => a.xref === drag.ref.xref)?.picture) {
+      const [x0, y0, x1, y1] = drag.rect0;
+      rect = fitAspect(drag.rect0, clampRect(rect, rawSize), (x1 - x0) / Math.max(1e-3, y1 - y0));
+    }
     setDrag({ ...drag, rect, moved: drag.moved || Math.hypot(dx, dy) * zoom > 3 });
   };
   const onDragEnd = () => {
@@ -109,6 +115,11 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
       return done();
     }
     if (tool === "stamp") {
+      const custom = customId(stamp);
+      if (custom) {
+        void an().placeStamp(docId, page, custom, q);
+        return done();
+      }
       const name = stamp === "Date" ? dateStampName() : stamp;
       const [w, h] = stampSize(name);
       const r = clampRect([q[0] - w / 2, q[1] - h / 2, q[0] + w / 2, q[1] + h / 2], rawSize);

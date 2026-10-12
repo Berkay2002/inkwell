@@ -1,11 +1,13 @@
 //! Tauri commands for comments. The UI is the user; the assistant calls the functions in `super` with its turn.
 
+use super::stamps::{self, Gate, Library, Source, Stamp};
 use super::{AnnotList, NewAnnot, Patch, Style, add_one, delete_many, edit_one, list_status, reply_one, state_one};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use crate::exchange::{self, Format};
 use crate::paths::Paths;
 use serde::Serialize;
+use std::path::PathBuf;
 use tauri::{Manager, Window};
 
 type Result<T> = std::result::Result<T, EngineError>;
@@ -73,6 +75,68 @@ pub async fn annot_reply(eng: Eng<'_>, doc: DocId, page: u32, parent: i32, text:
 pub async fn annot_state(eng: Eng<'_>, doc: DocId, page: u32, parent: i32, state: String, author: String) -> Result<EditState> {
     let eng = eng.inner().clone();
     blocking(move || state_one(&eng, doc, page, parent, &state, &author, EditSource::User)).await
+}
+
+// ---- custom stamps (docs/comments.md "Custom stamps") ---------------------------------------------
+
+/// The library's folder: `<data dir>/stamps` (`INKWELL_DATA_DIR` moves it, like the recent list).
+fn stamps_dir(app: &tauri::AppHandle) -> Result<PathBuf> {
+    crate::recents::data_dir(app).map(|(d, _)| d.join("stamps")).map_err(EngineError::Io)
+}
+
+#[tauri::command]
+pub async fn stamp_list(app: tauri::AppHandle) -> Result<Library> {
+    let dir = stamps_dir(&app)?;
+    blocking(move || Ok(stamps::list(&dir))).await
+}
+
+/// Makes a stamp from a picture or PDF the user picked (`file` is an open token from `pick_source`); `page` is
+/// the 0-based page of a PDF.
+#[tauri::command]
+pub async fn stamp_create(window: Window, app: tauri::AppHandle, reg: tauri::State<'_, Paths>, file: String, name: String, category: String, page: Option<u32>) -> Result<Stamp> {
+    let path = reg.open(window.label(), &file)?;
+    let dir = stamps_dir(&app)?;
+    blocking(move || stamps::create(&dir, &Source { path: &path, page }, &name, &category)).await
+}
+
+#[tauri::command]
+pub async fn stamp_update(app: tauri::AppHandle, id: String, name: Option<String>, category: Option<String>) -> Result<Stamp> {
+    let dir = stamps_dir(&app)?;
+    blocking(move || stamps::update(&dir, &id, name.as_deref(), category.as_deref())).await
+}
+
+#[tauri::command]
+pub async fn stamp_delete(app: tauri::AppHandle, id: String) -> Result<()> {
+    let dir = stamps_dir(&app)?;
+    blocking(move || stamps::delete(&dir, &id)).await
+}
+
+/// A stamp's thumbnail as a `data:` URL (the webview cannot read the data folder).
+#[tauri::command]
+pub async fn stamp_thumb(app: tauri::AppHandle, id: String) -> Result<String> {
+    use base64::Engine as _;
+    let dir = stamps_dir(&app)?;
+    blocking(move || stamps::thumbnail(&dir, &id).map(|png| format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))).await
+}
+
+/// Places library stamp `id` centred on `at` of `page`: one undo step.
+#[tauri::command]
+pub async fn stamp_place(app: tauri::AppHandle, eng: Eng<'_>, doc: DocId, page: u32, id: String, at: [f32; 2], author: String) -> Result<Changed> {
+    let dir = stamps_dir(&app)?;
+    let eng = eng.inner().clone();
+    blocking(move || {
+        let (stamp, png) = stamps::picture(&dir, &id)?;
+        let (state, xref) = stamps::place_one(&eng, doc, page, &stamp, &png, at, &author, EditSource::User)?;
+        Ok(Changed { state, xref })
+    })
+    .await
+}
+
+/// Whether a stamp can be placed in `doc` (and why not), and whether it is signed.
+#[tauri::command]
+pub async fn stamp_gate(eng: Eng<'_>, doc: DocId) -> Result<Gate> {
+    let eng = eng.inner().clone();
+    blocking(move || stamps::gate(&eng, doc)).await
 }
 
 /// Writes every comment to `to` (a save token) as XFDF, or FDF when the name ends in `.fdf`.
