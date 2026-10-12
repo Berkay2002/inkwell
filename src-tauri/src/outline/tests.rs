@@ -496,7 +496,8 @@ fn a_string_destination_goes_to_the_key_the_viewer_forms_not_the_one_spelled_wit
 
 /// A link's own name goes the same way as a string: MuPDF's viewer makes it a string of its text and re-encodes that
 /// (`pdf_parse_link_dest`, `pdf_new_text_string`), so /Omega looks up the key FE FF 03 A9 and not its own bytes. A
-/// name that is not UTF-8 has no faithful text and is not judged.
+/// name that is not UTF-8 goes the same way, its bad byte U+FFFD (`fz_chartorune`): /caf#E9 is FE FF 00 63 .. FF FD,
+/// cut to FE FF, and finds that key.
 #[test]
 fn a_non_ascii_name_destination_goes_to_the_key_the_viewer_forms() {
     let d = dir("outline", "dests_name_viewer_key");
@@ -510,7 +511,7 @@ fn a_non_ascii_name_destination_goes_to_the_key_the_viewer_forms() {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    // keys: FE FF 03 A9 (U+03A9), FE FF (U+00E9, cut at the 0), the Latin-1 name caf\351 and c
+    // keys: FE FF 03 A9 (U+03A9), FE FF (U+00E9 and caf\351, cut at the 0), the Latin-1 name caf\351 and c
     let bytes = outline_pdf_with(
         "/Dests << /#FE#FF#03#A9 [5 0 R /Fit] /#FE#FF [5 0 R /Fit] /caf#E9 [5 0 R /Fit] /c [5 0 R /Fit] >>",
         "<< /Type /Outlines /First 7 0 R /Last 11 0 R /Count 5 >>",
@@ -520,9 +521,36 @@ fn a_non_ascii_name_destination_goes_to_the_key_the_viewer_forms() {
     let got: Vec<_> = list(&eng, id).unwrap().items.into_iter().map(|b| b.dest).collect();
     assert!(matches!(got[0], Dest::Page { page: 0, .. }), "{:?}", got[0]);
     assert!(matches!(got[1], Dest::Page { page: 0, .. }), "{:?}", got[1]);
-    assert!(matches!(&got[2], Dest::Other { what } if what == UNCHECKED_DEST), "{:?}", got[2]);
+    assert!(matches!(got[2], Dest::Page { page: 0, .. }), "{:?}", got[2]);
     assert!(matches!(got[3], Dest::Page { page: 0, .. }), "{:?}", got[3]);
     assert!(matches!(got[4], Dest::Broken { .. }), "{:?}", got[4]);
+}
+
+/// Every byte that starts no valid UTF-8 sequence is one U+FFFD in MuPDF's text (`fz_chartorune`, which takes one byte
+/// each time), not one per bad run as `String::from_utf8_lossy` has it: /#E2#82A is FE FF FF FD FF FD 00 41, cut to
+/// FE FF FF FD FF FD. A name that starts with a bad byte keeps FF FD in the key, so nothing finds FE FF there.
+#[test]
+fn a_name_destination_that_is_not_utf8_goes_to_the_key_mupdf_reads_from_it() {
+    let d = dir("outline", "dests_name_bad_bytes");
+    let items: Vec<String> = [
+        "<< /Title (Two) /Parent 4 0 R /Dest /#E2#82A /Next 8 0 R >>",
+        "<< /Title (First) /Parent 4 0 R /Dest /#E9x /Prev 7 0 R /Next 9 0 R >>",
+        "<< /Title (Latin1) /Parent 4 0 R /Dest /caf#E9 /Prev 8 0 R >>",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // only the key of /#E2#82A is there: FE FF is not (/caf#E9) and neither is FE FF FF FD (/#E9x)
+    let bytes = outline_pdf_with(
+        "/Dests << /#FE#FF#FF#FD#FF#FD [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 9 0 R /Count 3 >>",
+        &items,
+    );
+    let (eng, id, _p) = open_bytes(&d, "a.pdf", &bytes);
+    let got: Vec<_> = list(&eng, id).unwrap().items.into_iter().map(|b| b.dest).collect();
+    assert!(matches!(got[0], Dest::Page { page: 0, .. }), "{:?}", got[0]);
+    assert!(matches!(got[1], Dest::Broken { .. }), "{:?}", got[1]);
+    assert!(matches!(got[2], Dest::Broken { .. }), "{:?}", got[2]);
 }
 
 /// A `/Dests` value that is itself a string is a later hop: MuPDF looks it up by its own bytes as a C string

@@ -201,6 +201,15 @@ describe("sign store", () => {
     expect(s().get(1).certify).toBe(2);
   });
 
+  it("keeps each document's banner height apart, for what sits below its banner", () => {
+    s().setBannerHeight(1, 52);
+    s().setBannerHeight(2, 40);
+    expect([s().get(1).bannerHeight, s().get(2).bannerHeight]).toEqual([52, 40]);
+    s().setBannerHeight(1, null);
+    expect(s().get(1).bannerHeight).toBeNull();
+    expect(s().get(2).bannerHeight).toBe(40);
+  });
+
   it("keeps the level and says why when the signatures couldn't be checked, never 'not signed'", async () => {
     reply({ sign_list: { refused: "too many", certify: 1, signatures: [], error: "this document has more than 64 signatures, more than Inkwell checks" } });
     await s().refreshSigs(1, 1);

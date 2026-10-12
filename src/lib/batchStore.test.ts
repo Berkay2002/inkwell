@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BatchAction, BatchEvent, BatchFileReport } from "./api";
+import type { BatchAction, BatchEvent, BatchFileReport, BatchPromptEvent } from "./api";
 
 vi.mock("./api", () => ({
   batchList: vi.fn(),
@@ -12,6 +12,7 @@ vi.mock("./api", () => ({
   batchFolderFiles: vi.fn(),
   batchRun: vi.fn(),
   batchCancel: vi.fn(() => Promise.resolve()),
+  batchPromptAnswer: vi.fn(() => Promise.resolve(true)),
   pickOpen: vi.fn(),
   pickSave: vi.fn(),
   pickSource: vi.fn(),
@@ -444,5 +445,103 @@ describe("run state machine", () => {
     expect(st().run!.phase).toBe("running");
     st().cancel();
     expect(api.batchCancel).toHaveBeenCalledWith(job);
+  });
+});
+
+describe("prompt user", () => {
+  const prompt = (over: Partial<BatchPromptEvent> = {}): BatchPromptEvent => ({
+    event: "prompt",
+    request: 7,
+    index: 0,
+    name: "a.pdf",
+    step: 0,
+    steps: 1,
+    label: "Watermark",
+    entry: { kind: "watermark", text: "DRAFT", pages: "1-2", prompt: true } as never,
+    problem: null,
+    ...over,
+  });
+
+  /** A run that is waiting on the engine: returns the way to send it events and to end it. */
+  async function running() {
+    st().startRun(action({ steps: [{ kind: "watermark", prompt: true } as never] }));
+    vi.mocked(api.pickOpen).mockResolvedValue([ref("a")]);
+    await st().addFiles();
+    let send!: (e: BatchEvent) => void;
+    let end!: (r: Awaited<ReturnType<typeof api.batchRun>>) => void;
+    let job = 0;
+    vi.mocked(api.batchRun).mockImplementation((j, _a, _f, _o, onEvent) => {
+      job = j;
+      send = onEvent;
+      return new Promise((r) => (end = r));
+    });
+    const done = st().runNow();
+    await Promise.resolve();
+    await Promise.resolve();
+    return { send: (e: BatchEvent) => send(e), end: () => end({ action: "Mine", files: [], ok: 1, skipped: 0, errors: 0, cancelled: false, stopped: false }), job: () => job, done };
+  }
+
+  it("opens on the engine's question with the saved options, and a change stays in the prompt, not in the action", async () => {
+    const r = await running();
+    r.send(prompt());
+    const p = st().run!.prompt!;
+    expect(p).toMatchObject({ request: 7, step: 0, steps: 1, name: "a.pdf", problem: null, sending: false });
+    st().patchPrompt({ text: "FINAL" } as never);
+    expect(st().run!.prompt!.entry).toMatchObject({ text: "FINAL", pages: "1-2" });
+    expect(JSON.stringify(st().run!.action)).not.toContain("FINAL");
+    r.end();
+    await r.done;
+    expect(st().run!.prompt).toBeNull();
+  });
+
+  it("continue sends the changed step for this request, once", async () => {
+    const r = await running();
+    r.send(prompt());
+    st().patchPrompt({ text: "FINAL" } as never);
+    await st().answerPrompt(7, "continue");
+    expect(api.batchPromptAnswer).toHaveBeenCalledWith(r.job(), 7, { kind: "continue", step: expect.objectContaining({ text: "FINAL", pages: "1-2" }) });
+    // a second press while the answer is on its way sends nothing
+    await st().answerPrompt(7, "continue");
+    expect(api.batchPromptAnswer).toHaveBeenCalledTimes(1);
+    // the engine moves on: the question closes
+    r.send({ event: "step", index: 0, step: 0, steps: 1, label: "Watermark" });
+    expect(st().run!.prompt).toBeNull();
+    r.end();
+    await r.done;
+  });
+
+  it("skip and stop send their kind", async () => {
+    const r = await running();
+    r.send(prompt());
+    await st().answerPrompt(7, "skip");
+    expect(api.batchPromptAnswer).toHaveBeenLastCalledWith(r.job(), 7, { kind: "skip" });
+    r.send(prompt({ request: 8, step: 0 }));
+    await st().answerPrompt(8, "stop");
+    expect(api.batchPromptAnswer).toHaveBeenLastCalledWith(r.job(), 8, { kind: "stop" });
+    r.end();
+    await r.done;
+  });
+
+  it("drops an answer to a question that is no longer the open one", async () => {
+    const r = await running();
+    r.send(prompt());
+    // the engine asked again (the options were refused): request 7 is stale, 9 is current and shows why
+    r.send(prompt({ request: 9, problem: "Enter the watermark text." }));
+    expect(st().run!.prompt).toMatchObject({ request: 9, problem: "Enter the watermark text.", sending: false });
+    await st().answerPrompt(7, "continue");
+    expect(api.batchPromptAnswer).not.toHaveBeenCalled();
+    await st().answerPrompt(9, "skip");
+    expect(api.batchPromptAnswer).toHaveBeenCalledTimes(1);
+    r.end();
+    await r.done;
+  });
+
+  it("answers nothing once the run is over", async () => {
+    const r = await running();
+    r.send(prompt());
+    r.end();
+    await r.done;
+    await st().answerPrompt(7, "skip");
+    expect(api.batchPromptAnswer).not.toHaveBeenCalled();
   });
 });

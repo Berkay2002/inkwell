@@ -7,11 +7,11 @@ import {
   colorName,
   imageLabel,
   isQuarter,
+  ownSize,
   picksOf,
   ppi,
-  rectH,
-  rectW,
   roundAngle,
+  sizeRect,
   turnTo,
   useImageEdit,
 } from "../../lib/imageEdit";
@@ -143,7 +143,7 @@ export function ImageSection({ doc }: { doc: DocState }) {
           </ul>
           <p className="dim te-hint">
             Click a picture on the page to turn, crop, replace or delete it. Shift-click adds to the picks; Shift and a drag on the page
-            picks the pictures the box touches.
+            picks the pictures the box touches (up to 100 at once).
           </p>
         </>
       )}
@@ -162,23 +162,25 @@ function ClipRow({ id, page, picks, copyLocked, locked }: { id: number; page: nu
   const pageLocked = useImageEdit((s) => s.docs[id]?.pages[page]?.locked ?? locked);
   if (picks === 0 && !clip) return null;
   return (
-    <div className="te-row ie-actions">
-      {picks > 0 && (
-        <button className="te-btn" title={copyLocked ?? "Copy the picked pictures (Ctrl+C)"} disabled={copyLocked != null} onClick={() => void ie().copy(id)}>
-          <Icon name="copy" size={16} />
-          Copy
-        </button>
-      )}
-      {clip && (
-        <button
-          className="te-btn"
-          title={pageLocked ?? `Paste ${clip.info.count === 1 ? "the copied picture" : `the ${clip.info.count} copied pictures`} on page ${page + 1} (Ctrl+V)`}
-          disabled={pageLocked != null}
-          onClick={() => void ie().paste(id, page)}
-        >
-          Paste{clip.info.count > 1 ? ` ${clip.info.count}` : ""} on page {page + 1}
-        </button>
-      )}
+    <div className="te-format">
+      <div className="te-row ie-actions">
+        {picks > 0 && (
+          <button className="te-btn" title={copyLocked ?? "Copy the picked pictures (Ctrl+C)"} disabled={copyLocked != null} onClick={() => void ie().copy(id)}>
+            <Icon name="copy" size={16} />
+            Copy
+          </button>
+        )}
+        {clip && (
+          <button
+            className="te-btn"
+            title={pageLocked ?? `Paste ${clip.info.count === 1 ? "the copied picture" : `the ${clip.info.count} copied pictures`} on page ${page + 1} (Ctrl+V)`}
+            disabled={pageLocked != null}
+            onClick={() => void ie().paste(id, page)}
+          >
+            Paste{clip.info.count > 1 ? ` ${clip.info.count}` : ""} on page {page + 1}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -295,8 +297,8 @@ function GroupTools({ id, locked }: { id: number; locked: string | null }) {
 }
 
 function Format({ id, target, image, cropping, locked }: { id: number; target: ImageRef; image: ImageBlock; cropping: boolean; locked: string | null }) {
-  const w = rectW(image.fullRect);
-  const h = rectH(image.fullRect);
+  // The picture's own size, which a turn does not change (its frame's size is what turns).
+  const [w, h] = ownSize(image);
   const [width, setWidth] = useState(String(round1(w)));
   const [height, setHeight] = useState(String(round1(h)));
   const [keep, setKeep] = useState(true);
@@ -323,10 +325,9 @@ function Format({ id, target, image, cropping, locked }: { id: number; target: I
       setHeight(String(round1(h)));
       return;
     }
-    const [x, y] = image.fullRect;
     // A field commits as it loses focus, which is also when a click elsewhere selects another image: the
     // change is for the image this section shows.
-    void ie().resizeTo(id, [x, y, x + nw, y + nh], turned, target);
+    void ie().resizeTo(id, sizeRect(image, nw, nh), turned, target);
   };
 
   const crop = useImageEdit((s) => s.docs[id]?.crop ?? null);

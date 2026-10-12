@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::create::{self, CreateRequest, CreateSource, PageSize, RequestSource};
 use super::export::{ExportKind, ExportRequest, ImageFormat, Target};
+use super::flow;
 use super::*;
 use crate::engine::fixture::{build, Fixture};
 use crate::engine::Engine;
@@ -174,6 +175,296 @@ fn word_export_is_a_docx_with_the_text() {
     let xml = String::from_utf8(unzip(&z, "word/document.xml").expect("document.xml")).unwrap();
     assert!(xml.contains("Inkwell fixture page 1") && xml.contains("Inkwell fixture page 2"), "{xml}");
     assert!(unzip(&z, "[Content_Types].xml").is_some());
+}
+
+// ---------------------------------------------------------------- rtf
+
+#[derive(Debug, PartialEq)]
+enum Tok {
+    Open,
+    Close,
+    Word(String, Option<i32>),
+    Symbol(char),
+    Text(char),
+}
+
+/// A small RTF tokenizer: groups, control words with their numeric parameter, control symbols
+/// (`\\`, `\{`, `\}`, `\*`, `\'hh` as the byte's char) and plain characters (CR/LF are not text).
+fn rtf_tokens(s: &str) -> Vec<Tok> {
+    let c: Vec<char> = s.chars().collect();
+    let (mut i, mut out) = (0, Vec::new());
+    while i < c.len() {
+        match c[i] {
+            '{' => out.push(Tok::Open),
+            '}' => out.push(Tok::Close),
+            '\r' | '\n' => {}
+            '\\' => {
+                i += 1;
+                let n = c[i];
+                if n.is_ascii_alphabetic() {
+                    let start = i;
+                    while i < c.len() && c[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                    let name: String = c[start..i].iter().collect();
+                    let ds = i;
+                    if i < c.len() && c[i] == '-' {
+                        i += 1;
+                    }
+                    while i < c.len() && c[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    let num = c[ds..i].iter().collect::<String>().parse::<i32>().ok();
+                    if i < c.len() && c[i] == ' ' {
+                        i += 1; // the delimiter space belongs to the word
+                    }
+                    out.push(Tok::Word(name, num));
+                    continue;
+                } else if n == '\'' {
+                    let h: String = c[i + 1..i + 3].iter().collect();
+                    out.push(Tok::Text(u8::from_str_radix(&h, 16).unwrap() as char));
+                    i += 2;
+                } else {
+                    out.push(Tok::Symbol(n));
+                }
+            }
+            ch => out.push(Tok::Text(ch)),
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The braces balance and nothing is left open.
+fn balanced(toks: &[Tok]) -> bool {
+    let mut depth = 0i32;
+    for t in toks {
+        match t {
+            Tok::Open => depth += 1,
+            Tok::Close => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return false;
+        }
+    }
+    depth == 0
+}
+
+/// The document's text as a reader shows it: `\uN?` decoded (UTF-16 units joined), `\tab`, `\line` and
+/// `\par` as characters; the font, colour, style, info and picture groups left out.
+fn rtf_plain(toks: &[Tok]) -> String {
+    let mut out = String::new();
+    let mut units: Vec<u16> = Vec::new();
+    let mut skip: Vec<bool> = Vec::new();
+    let mut skip_fallback = false;
+    let flush = |out: &mut String, units: &mut Vec<u16>| {
+        out.push_str(&String::from_utf16(units).unwrap());
+        units.clear();
+    };
+    let mut k = 0;
+    while k < toks.len() {
+        let hidden = skip.last().copied().unwrap_or(false);
+        match &toks[k] {
+            Tok::Open => {
+                let kill = matches!(toks.get(k + 1), Some(Tok::Word(w, _)) if ["fonttbl", "colortbl", "stylesheet", "info", "pict"].contains(&w.as_str()));
+                skip.push(hidden || kill);
+            }
+            Tok::Close => {
+                skip.pop();
+            }
+            _ if hidden => {}
+            Tok::Word(w, Some(n)) if w == "u" => {
+                units.push(*n as i16 as u16);
+                skip_fallback = true;
+            }
+            Tok::Text(_) if skip_fallback => skip_fallback = false,
+            other => {
+                flush(&mut out, &mut units);
+                match other {
+                    Tok::Word(w, _) if w == "tab" => out.push('\t'),
+                    Tok::Word(w, _) if w == "line" || w == "par" || w == "page" => out.push('\n'),
+                    Tok::Symbol(c @ ('\\' | '{' | '}')) => out.push(*c),
+                    Tok::Text(c) => out.push(*c),
+                    _ => {}
+                }
+            }
+        }
+        k += 1;
+    }
+    flush(&mut out, &mut units);
+    out
+}
+
+fn has_word(toks: &[Tok], name: &str) -> bool {
+    toks.iter().any(|t| matches!(t, Tok::Word(w, _) if w == name))
+}
+
+fn word_count(toks: &[Tok], name: &str) -> usize {
+    toks.iter().filter(|t| matches!(t, Tok::Word(w, _) if w == name)).count()
+}
+
+fn model_block(t: &str, x: f64, y: f64, size: f64, bold: bool, color: [f64; 3]) -> flow::Block {
+    flow::Block { text: t.into(), rect: [x, y, x + 60.0, y + size], size, bold, italic: !bold, color }
+}
+
+fn model_png() -> Vec<u8> {
+    use image::ImageEncoder;
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png).write_image(&vec![200u8; 4 * 3 * 3], 4, 3, image::ExtendedColorType::Rgb8).unwrap();
+    png
+}
+
+/// Two pages: a heading, a sub-heading, body text, a 3 x 3 table and a PNG on the first.
+fn model_pages() -> Vec<flow::Page> {
+    let mut blocks = vec![
+        model_block("Årsrapport 日本語 😀 \\{x}", 72.0, 700.0, 24.0, true, [0.0; 3]),
+        model_block("Overview", 72.0, 660.0, 14.0, true, [0.8, 0.1, 0.1]),
+        model_block("Body text, long enough to be the main text size of this page ok.\tTabbed.", 72.0, 600.0, 11.0, false, [0.0; 3]),
+    ];
+    for r in 0..3 {
+        for c in 0..3 {
+            blocks.push(model_block(&format!("r{r}c{c}"), 72.0 + 100.0 * c as f64, 500.0 - 20.0 * r as f64, 11.0, r == 0, [0.0; 3]));
+        }
+    }
+    let p1 = flow::Page { width: 612.0, height: 792.0, blocks, images: vec![flow::Image { ext: "png", bytes: model_png(), rect: [72.0, 300.0, 272.0, 400.0] }] };
+    let p2 = flow::Page { width: 612.0, height: 792.0, blocks: vec![model_block("Second page", 72.0, 700.0, 11.0, false, [0.0, 0.0, 1.0])], images: vec![] };
+    vec![p1, p2]
+}
+
+#[test]
+fn rtf_escapes_follow_the_signed_16_bit_rule() {
+    use super::rtf::rtf;
+    let page = flow::Page {
+        width: 612.0,
+        height: 792.0,
+        blocks: vec![model_block("å日😀\\{}\u{1}", 72.0, 700.0, 11.0, false, [0.0; 3])],
+        images: vec![],
+    };
+    let r = rtf(&[page], "t");
+    // U+00E5 = 229, U+65E5 = 26085, U+1F600 = D83D DE00 = -10179 -8704; the C0 control is dropped.
+    assert!(r.text.contains("\\u229?\\u26085?\\u-10179?\\u-8704?\\\\\\{\\}\\par"), "{}", r.text);
+    assert!(r.text.is_ascii());
+}
+
+#[test]
+fn rtf_keeps_text_formatting_table_picture_and_page_break() {
+    use super::rtf::rtf;
+    let r = rtf(&model_pages(), "Report {1}");
+    assert_eq!(r.skipped_images, 0);
+    assert!(r.text.is_ascii());
+    let toks = rtf_tokens(&r.text);
+    assert!(balanced(&toks), "{}", r.text);
+    assert!(matches!(toks.first(), Some(Tok::Open)) && matches!(toks.get(1), Some(Tok::Word(w, Some(1))) if w == "rtf"));
+    for w in ["ansi", "ansicpg", "deff", "fonttbl", "colortbl", "stylesheet", "paperw", "margl", "trowd", "cellx", "cell", "row", "intbl", "pngblip", "pagebb", "b", "i"] {
+        assert!(has_word(&toks, w), "missing \\{w}\n{}", r.text);
+    }
+    assert!(r.text.contains("\\paperw12240\\paperh15840\\margl1440\\margr1440\\margt1440\\margb1440"), "{}", r.text);
+    // 24 pt heading: Heading 1 by style and directly, 48 half-points, bold; the red 14 pt line is Heading 2.
+    assert!(r.text.contains("\\s1\\sb240\\keepn\\outlinelevel0\\b\\fs48"), "{}", r.text);
+    assert!(r.text.contains("\\s2\\sb200\\keepn\\outlinelevel1\\b\\fs28\\cf2"), "{}", r.text);
+    assert!(r.text.contains("\\red204\\green26\\blue26;") && r.text.contains("\\red0\\green0\\blue255;"));
+    // The table: three rows of three cells, the picture 4 x 3 px placed 200 x 100 pt (4000 x 2000 twips).
+    assert_eq!(word_count(&toks, "trowd"), 3);
+    assert_eq!(word_count(&toks, "row"), 3);
+    assert_eq!(word_count(&toks, "cellx"), 9);
+    assert!(r.text.contains("\\picw4\\pich3\\picwgoal4000\\pichgoal2000"), "{}", r.text);
+    // The break is on the next page's first paragraph: no paragraph of its own, no \page.
+    assert!(r.text.contains("{\\pard\\plain\\pagebb\\sa120\\fs22\\i\\cf"), "{}", r.text);
+    assert_eq!(word_count(&toks, "pagebb"), 1);
+    assert!(!has_word(&toks, "page"));
+    assert!(!r.text.contains("\\pagebb\\par}"), "no empty paragraph for a break");
+    assert!(r.text.contains("\\cellx"));
+    // Hex of the PNG signature right after the picture header.
+    assert!(r.text.contains("89504e470d0a1a0a"));
+    let plain = rtf_plain(&toks);
+    for want in ["Årsrapport 日本語 😀 \\{x}", "Overview", "Tabbed.", "\t", "r0c0", "r2c2", "Second page"] {
+        assert!(plain.contains(want), "{want:?} not in {plain:?}");
+    }
+    assert!(plain.contains("Body text, long enough to be the main text size of this page ok.\tTabbed."));
+    assert!(!plain.contains("Report"), "the title stays in \\info");
+}
+
+#[test]
+fn rtf_grey_text_keeps_its_colour_and_a_blank_page_stays_a_page() {
+    use super::rtf::rtf;
+    let grey = 153.0 / 255.0;
+    let page = |blocks| flow::Page { width: 612.0, height: 792.0, blocks, images: vec![] };
+    let r = rtf(
+        &[
+            page(vec![model_block("Grey", 72.0, 700.0, 11.0, false, [grey; 3])]),
+            page(vec![]),
+            page(vec![model_block("Last", 72.0, 700.0, 11.0, false, [0.0; 3])]),
+        ],
+        "t",
+    );
+    // #999999 is colour table entry 1 (the border grey is the same colour), not black.
+    assert!(r.text.contains("\\fs22\\i\\cf1 Grey"), "{}", r.text);
+    assert!(r.text.contains("{\\colortbl;\\red153\\green153\\blue153;}"), "{}", r.text);
+    // Page 2 is empty: its own paragraph holds the break, page 3's text carries the next one.
+    let toks = rtf_tokens(&r.text);
+    assert_eq!(word_count(&toks, "pagebb"), 2, "{}", r.text);
+    assert!(r.text.contains("{\\pard\\plain\\pagebb\\par}\n{\\pard\\plain\\pagebb\\sa120\\fs22\\i Last"), "{}", r.text);
+}
+
+#[test]
+fn rtf_a_table_after_a_page_break_is_a_separate_table_and_the_break_is_not_in_a_row() {
+    use super::rtf::rtf;
+    let grid = |y: f64| -> Vec<flow::Block> {
+        (0..6).map(|i| model_block(&format!("t{i}"), 72.0 + 100.0 * (i % 3) as f64, y - 20.0 * (i / 3) as f64, 11.0, false, [0.0; 3])).collect()
+    };
+    let page = |blocks| flow::Page { width: 612.0, height: 792.0, blocks, images: vec![] };
+    let r = rtf(&[page(grid(700.0)), page(grid(700.0))], "t");
+    let toks = rtf_tokens(&r.text);
+    assert_eq!(word_count(&toks, "trowd"), 4, "{}", r.text);
+    // Between the first table's last \row and the second \trowd: a paragraph outside any table with the break.
+    assert!(r.text.contains("\\row\n{\\pard\\plain\\pagebb\\par}\n\\trowd"), "{}", r.text);
+    // No \pagebb inside a row: every row text, from \trowd to \row, is free of it.
+    for row in r.text.split("\\trowd").skip(1) {
+        let row = &row[..row.find("\\row").unwrap()];
+        assert!(!row.contains("pagebb") && row.contains("\\intbl"), "{row}");
+    }
+    assert_eq!(word_count(&toks, "pagebb"), 1);
+    assert!(balanced(&toks));
+}
+
+#[test]
+fn rtf_pictures_over_the_cap_are_skipped_and_counted() {
+    use super::rtf::{rtf, MAX_IMAGE_BYTES};
+    let mut big = model_png();
+    big.resize(MAX_IMAGE_BYTES - 10, 0); // a valid header, the rest is padding after IEND
+    let im = |bytes: Vec<u8>| flow::Image { ext: "png", bytes, rect: [72.0, 300.0, 272.0, 400.0] };
+    let page = flow::Page { width: 612.0, height: 792.0, blocks: vec![], images: vec![im(big), im(model_png()), im(b"not a png".to_vec())] };
+    let r = rtf(&[page], "t");
+    // The first fits, the small one would push past the cap (hex of 32 MB is written once), the text is not a PNG.
+    assert_eq!(word_count(&rtf_tokens(&r.text), "pngblip"), 1, "one picture is kept");
+    assert_eq!(r.skipped_images, 2);
+}
+
+#[test]
+fn rtf_export_writes_one_parsable_file_with_the_text() {
+    let d = dir("rtf");
+    let (eng, doc, _) = open_fixture(&d, 2);
+    let to = d.join("out.rtf");
+    let out = run_export(&eng, doc, ExportKind::Rtf, None, Target::File(to.clone())).unwrap();
+    assert_eq!(out.files.len(), 1);
+    assert!(out.warnings.is_empty());
+    assert_eq!(ExportKind::Rtf.extension(), "rtf");
+    assert!(!ExportKind::Rtf.is_folder());
+    let text = fs::read_to_string(&to).unwrap();
+    assert!(text.starts_with("{\\rtf1\\ansi\\ansicpg1252\\deff0"));
+    let toks = rtf_tokens(&text);
+    assert!(balanced(&toks));
+    let plain = rtf_plain(&toks);
+    assert!(plain.contains("Inkwell fixture page 1") && plain.contains("Inkwell fixture page 2"), "{plain:?}");
+    assert_eq!(word_count(&toks, "pagebb"), 1, "one break between two pages");
+    // macOS ships textutil: a real RTF reader must agree on the text (skipped where it is absent).
+    if let Ok(o) = std::process::Command::new("textutil").args(["-convert", "txt", "-stdout"]).arg(&to).output() {
+        if o.status.success() {
+            let t = String::from_utf8_lossy(&o.stdout);
+            assert!(t.contains("Inkwell fixture page 1") && t.contains("Inkwell fixture page 2"), "{t:?}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------- create

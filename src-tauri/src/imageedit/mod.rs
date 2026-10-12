@@ -648,7 +648,8 @@ pub struct ImageItem {
     pub change: ImageChange,
 }
 
-/// The most images one batch changes (each change parses the page's content again).
+/// The most images one batch changes (each change parses the page's content again). The UI's picks stop at the
+/// same number: keep `MAX_PICKS` in src/lib/imageEdit.ts equal to this.
 const MAX_BATCH: usize = 100;
 
 /// Applies one change to each of several images of `page` listed at `rev`: one undo step. Moves,
@@ -694,6 +695,17 @@ fn axis_aligned(m: &Matrix) -> bool {
     let [a, b, c, d, ..] = m.0;
     let eps = 1e-6 * (a.abs() + b.abs() + c.abs() + d.abs());
     (b.abs() <= eps && c.abs() <= eps) || (a.abs() <= eps && d.abs() <= eps)
+}
+
+/// A `cm` with its numbers kept to eight decimals. The change is written in the image's own unit square,
+/// where a turn's entries are small ratios: at four decimals a typed 30 degrees was stored as 30.0007.
+fn fine_cm(m: &Matrix) -> Op {
+    let n = |v: f64| {
+        let s = format!("{v:.8}");
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        if s.is_empty() || s == "-" || s == "-0" { "0".to_string() } else { s.to_string() }
+    };
+    Op::verbatim(format!("{} cm", m.0.map(n).join(" ")).as_bytes())
 }
 
 fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChange) -> Result<()> {
@@ -768,7 +780,7 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
         if !m.0.iter().all(|v| v.is_finite() && v.abs() < 1e9) {
             return Err(invalid("the image can't be moved that far"));
         }
-        let cm = Op::new("cm", m.0.iter().map(|v| num(*v)).collect());
+        let cm = fine_cm(&m);
         let new = if start == end {
             let mut wrapped = Some(vec![Op::new("q", vec![]), cm, original, Op::new("Q", vec![])]);
             splice(&pi.pieces, &pi.ops, |i| if i == f.op { (wrapped.take().unwrap_or_default(), false) } else { (Vec::new(), true) })

@@ -708,3 +708,11 @@
 .rl-link.idle:hover {
   background: transparent;
 }
+/* Named destinations: four actions do not fit the 380 px rail on one line, so the row wraps
+   and each label stays on one line inside its button. */
+.bm-dests .te-row {
+  flex-wrap: wrap;
+}
+.bm-dests .te-btn {
+  white-space: nowrap;
+}

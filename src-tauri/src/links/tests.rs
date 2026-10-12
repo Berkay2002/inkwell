@@ -582,6 +582,17 @@ fn a_utf16_string_destination_finds_its_key_in_the_old_dests_dictionary() {
 }
 
 #[test]
+fn a_name_destination_that_is_not_utf8_goes_to_the_key_mupdf_reads_from_it() {
+    // the viewer reads the bad byte as U+FFFD: /caf#E9 looks up FE FF (the text is cut at the 0 of "c"), /#E9x FE FF FF FD
+    let cat = "/Dests << /#FE#FF [3 0 R /Fit] >>";
+    let annots = vec![link_annot("/Dest /caf#E9"), link_annot("/Dest /#E9x")];
+    let (eng, id, _, _d) = opened("name_bad_byte", &page_with_annots("", cat, &annots, &[]));
+    let links = list(&eng, id, 0).unwrap().links;
+    assert!(matches!(links[0].target, Target::Page { page: 0, .. }), "{:?}", links[0].target);
+    assert!(matches!(&links[1].target, Target::Broken { .. }), "{:?}", links[1].target);
+}
+
+#[test]
 fn setting_a_named_link_to_the_page_it_resolves_to_writes_an_explicit_destination() {
     // /Dests maps n to page 3 0 R; the link names it, once as /Dest and once as the /D of a GoTo
     let cat = "/Dests << /n [3 0 R /Fit] >>";

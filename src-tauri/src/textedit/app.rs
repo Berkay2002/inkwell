@@ -1,6 +1,7 @@
 //! Tauri commands for editing existing text. The UI is the user; the assistant calls the
 //! functions in `super` with its turn.
 
+use super::replace::{ReplaceRequest, Replaced};
 use super::{BlockChange, FontInfo, NewTextBox, TextBlocks, TextEdited};
 use crate::engine::edit::EditSource;
 use crate::engine::edit::EditState;
@@ -32,6 +33,14 @@ pub async fn text_edit(eng: Eng<'_>, doc: DocId, rev: u32, page: u32, index: u32
 pub async fn text_add(eng: Eng<'_>, doc: DocId, rev: u32, page: u32, new: NewTextBox) -> Result<EditState> {
     let eng = eng.inner().clone();
     blocking(move || super::add(&eng, doc, rev, page, &new, EditSource::User)).await
+}
+
+/// Replaces the find text with `req.with` in every text block that holds it (`req.at` none), or in the one
+/// match at `req.at`: one undo step. See `replace.rs`.
+#[tauri::command]
+pub async fn text_replace(eng: Eng<'_>, doc: DocId, rev: u32, req: ReplaceRequest) -> Result<Replaced> {
+    let eng = eng.inner().clone();
+    blocking(move || super::replace::replace(&eng, doc, rev, &req, EditSource::User)).await
 }
 
 /// The fonts to offer for text: the document's, the standard 14 and the bundled faces.

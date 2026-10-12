@@ -3,7 +3,7 @@ import { commandFor } from "../../lib/commands";
 import { useForms } from "../../lib/forms";
 import {
   type ButtonAction, type Field, type FieldValue, type Handle, type Pick, type Rect4, HANDLES, KIND_LABEL, anchorOf, commitThenRun, cssColor, dragged,
-  fontSize, groupDelta, groupDragEnd, groupPicks, isCalculated, marqueeHits, move, normBox, onPage, resetTargets, resize, samePick,
+  bubbleAbove, fontSize, groupDelta, groupDragEnd, groupPicks, isCalculated, marqueeHits, move, normBox, onPage, resetTargets, resize, samePick,
 } from "../../lib/formsLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
 import { clickSigField, sigFieldView, useSign } from "../../lib/sign";
@@ -139,7 +139,7 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
       className={`fm-space${highlight ? " hl" : ""}${authoring ? " authoring" : ""}`}
       style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom), "--z": zoom } as React.CSSProperties}
     >
-      {!authoring && mine.filter((f) => !f.hidden).map((f) => <Fill key={`${f.xref}`} docId={docId} f={f} all={all} />)}
+      {!authoring && mine.filter((f) => !f.hidden).map((f) => <Fill key={`${f.xref}`} docId={docId} f={f} all={all} pageH={rawSize[1]} zoom={zoom} />)}
       {authoring && (
         <>
           {tool === "select" && (
@@ -258,8 +258,21 @@ function SigField({ docId, f, cls: base, css, label }: { docId: number; f: Field
   );
 }
 
-function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
+function Fill({ docId, f, all, pageH, zoom }: { docId: number; f: Field; all: Field[]; pageH: number; zoom: number }) {
   const [err, setErr] = useState<string | null>(null);
+  // A script's answer is about the try that got it: any edit re-reads the fields, so the next one drops it.
+  useEffect(() => setErr(null), [all]);
+  // ... and so does a press anywhere or Esc (the bubble of a field that lost focus is not tied to the field any more).
+  useEffect(() => {
+    if (!err) return;
+    const drop = (e: Event) => (e.type !== "keydown" || (e as KeyboardEvent).key === "Escape") && setErr(null);
+    window.addEventListener("pointerdown", drop, true);
+    window.addEventListener("keydown", drop, true);
+    return () => {
+      window.removeEventListener("pointerdown", drop, true);
+      window.removeEventListener("keydown", drop, true);
+    };
+  }, [err]);
   const locked = f.readOnly || isCalculated(f);
   const empty =
     f.kind === "radio" ? !all.some((x) => x.node === f.node && x.checked) : f.kind === "checkbox" ? !f.checked : f.values.every((v) => v === "");
@@ -283,11 +296,15 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
     return e;
   };
   const label = f.tooltip || f.name;
-  const bubble = err && <span className="fm-err" role="alert">{err}</span>;
+  const bubble = err && (
+    <span className={bubbleAbove(f.rect, pageH, zoom, err) ? "fm-err up" : "fm-err"} role="alert">{err}</span>
+  );
+  // Leaving the control ends the answer; a commit the blur starts answers after this (an error of that is new).
+  const leave = () => setErr(null);
 
   if (f.kind === "checkbox" || f.kind === "radio") {
     return (
-      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref} onBlur={leave}>
         <button
           className={cls}
           role={f.kind}
@@ -311,7 +328,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
   if (f.kind === "signature") return <SigField docId={docId} f={f} cls={cls} css={css} label={label} />;
   if (f.kind === "list") {
     return (
-      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref} onBlur={leave}>
         <select
           className={cls}
           multiple
@@ -335,7 +352,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
   if (f.kind === "combo" && !f.editable) {
     const cur = f.values[0] ?? "";
     return (
-      <div className="fm-cell" style={css} data-fm-xref={f.xref}>
+      <div className="fm-cell" style={css} data-fm-xref={f.xref} onBlur={leave}>
         <select className={cls} aria-label={label} title={label} disabled={locked} value={cur} onChange={(e) => void commit(e.target.value)}>
           <option value="" />
           {cur && !f.options.some((o) => o.export === cur) && <option value={cur}>{cur}</option>}
@@ -348,7 +365,7 @@ function Fill({ docId, f, all }: { docId: number; f: Field; all: Field[] }) {
     );
   }
   return (
-    <div className="fm-cell" style={css} data-fm-xref={f.xref}>
+    <div className="fm-cell" style={css} data-fm-xref={f.xref} onBlur={leave}>
       <TextEditor f={f} className={cls} label={label} locked={locked} onCommit={commit} onChange={() => setErr(null)} />
       {bubble}
     </div>

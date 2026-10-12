@@ -690,6 +690,56 @@ fn stroke_of(fill: &[Op]) -> Vec<Op> {
         .collect()
 }
 
+/// The lines of a block whose line ends are kept (Find & Replace), one per `(source line, items, changed)` in
+/// the block's order. A line that holds no change stays exactly as it was: it starts where it did and its spaces
+/// take up the width it had (what its word spacing did). A changed line is set at the start (or middle, or end,
+/// by the block's alignment) of the line it was; in a justified block it is stretched to the end that line had
+/// unless it is the block's last. A changed line that no longer fits between `left` and `right` gives `None`:
+/// nothing is moved to make room. `spans` are the (start, end, baseline) of the block's lines in the first line's
+/// text space.
+pub(crate) fn keep_lines(
+    groups: Vec<(usize, Vec<Item>, bool)>,
+    spans: &[(f64, f64, f64)],
+    align: Align,
+    (left, right): (f64, f64),
+    tol: f64,
+    m: &Measure,
+) -> Option<(Vec<LineOut>, Vec<LineAt>)> {
+    let mut lines = Vec::new();
+    let mut at = Vec::new();
+    let last = groups.len().saturating_sub(1);
+    for (g, (src, mut items, changed)) in groups.into_iter().enumerate() {
+        // A line starts with its first glyph: no spaces, no kerning against what came before.
+        while items.first().is_some_and(is_space) {
+            items.remove(0);
+        }
+        while items.last().is_some_and(is_space) {
+            items.pop();
+        }
+        if let Some(first) = items.first_mut() {
+            first.kern = 0.0;
+        }
+        let (x0, x1, y) = spans[src];
+        let used = m.line(&items);
+        let (x, stretch) = if !changed {
+            (x0, true)
+        } else {
+            let x = match align {
+                Align::Center => (x0 + x1) / 2.0 - used / 2.0,
+                Align::Right => x1 - used,
+                _ => x0,
+            };
+            if x + used > right + tol || x < left - tol {
+                return None;
+            }
+            (x, align == Align::Justify && g != last)
+        };
+        at.push(LineAt { x: x - left, down: spans[0].2 - y, width: x1 - x, stretch });
+        lines.push(LineOut { items, ends_para: g == last });
+    }
+    Some((lines, at))
+}
+
 /// How the lines are placed.
 pub(crate) struct Placement {
     pub align: Align,
@@ -703,6 +753,18 @@ pub(crate) struct Placement {
     pub stroke: f64,
     /// The render mode to return to after synthetic bold.
     pub render_mode: i64,
+    /// Where each line goes, when the lines are not stacked by `lead` (Find & Replace keeps each line where it
+    /// was): one entry per line.
+    pub at: Vec<LineAt>,
+}
+
+/// Where one line stands: its start along the block's first line, how far below that line's baseline it is, and
+/// the width its spaces are stretched to fill when `stretch` is set (all in text space).
+pub(crate) struct LineAt {
+    pub x: f64,
+    pub down: f64,
+    pub width: f64,
+    pub stretch: bool,
 }
 
 /// An underline or strikeout to draw: a filled rectangle in the text matrix's space (`x`, `y` its
@@ -743,24 +805,34 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
     for (li, line) in lines.iter().enumerate() {
         let items = &line.items;
         let used = m.line(items);
-        let free = (p.width - used).max(0.0);
-        let dx = match p.align {
-            Align::Center => free / 2.0,
-            Align::Right => free,
+        let at = p.at.get(li);
+        let free = (at.map_or(p.width, |a| a.width) - used).max(0.0);
+        let dx = match (at, p.align) {
+            (Some(a), _) => a.x,
+            (None, Align::Center) => free / 2.0,
+            (None, Align::Right) => free,
             _ => 0.0,
         };
         let biggest = items.iter().map(|i| setter.styles[i.style].size).fold(p.first_size, f64::max);
         // A line is set lower for its own largest text, and for half of the line above's (whose
         // descenders reach down), so smaller text under large text doesn't run into it.
-        let down = if li == 0 { 0.0 } else { p.lead * biggest.max((biggest + prev_biggest) / 2.0) / p.first_size.max(1e-9) };
+        let down = match at {
+            Some(a) => a.down + base,
+            None if li == 0 => 0.0,
+            None => p.lead * biggest.max((biggest + prev_biggest) / 2.0) / p.first_size.max(1e-9),
+        };
         prev_biggest = biggest;
         base -= down;
-        if li > 0 || dx != 0.0 {
+        if li > 0 || dx != 0.0 || down != 0.0 {
             ops.push(Op::new("Td", vec![num(dx - x), num(-down)]));
         }
         x = dx;
         let spaces = items.iter().filter(|i| is_space(i)).count();
-        let extra = if p.align == Align::Justify && !line.ends_para && spaces > 0 { free / spaces as f64 } else { 0.0 };
+        let stretch = match at {
+            Some(a) => a.stretch,
+            None => p.align == Align::Justify && !line.ends_para,
+        };
+        let extra = if stretch && spaces > 0 { free / spaces as f64 } else { 0.0 };
         let mut arr: Vec<Obj> = Vec::new();
         let mut text: Vec<u8> = Vec::new();
         let flush = |arr: &mut Vec<Obj>, text: &mut Vec<u8>| {

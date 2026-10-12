@@ -1,6 +1,7 @@
 // Pure logic of the version history panel and Compare mode (grouping, filters, change lists, stepper).
-import type { Change, ChangeKind, Comparison, PageMap, Rect4, TextRun, VersionInfo } from "./history";
+import type { Change, ChangeKind, Comparison, PageMap, Rect4, Source, TextRun, VersionInfo } from "./history";
 import { parseRange } from "./pageRange";
+import { keyOf } from "./recent";
 
 // ---- versions ---------------------------------------------------------------------------------------
 
@@ -275,6 +276,31 @@ export function rangeField(text: string, count: number | null): { pages: number[
   if (top > (count ?? RANGE_CAP)) return { pages: null, error: syntax };
   const pages = parseRange(text, count ?? RANGE_CAP);
   return pages?.length ? { pages, error: null } : { pages: null, error: syntax };
+}
+
+/** Which file or past version a side reads, by path plus version (a file picked twice is two tokens, one file). */
+const fileKey = (s: Source, docPath: string | null): string => {
+  if (s.kind === "version") return `v:${s.id}`;
+  const path = s.kind === "current" ? docPath : (s.path ?? null);
+  return path ? `f:${keyOf(path)}` : s.kind === "current" ? "current" : `p:${s.token}`;
+};
+
+/** Whether the two sides of a comparison are the same pages of the same file: comparing it with itself shows nothing.
+ *  `docPath` is the open document's file (what "current" is); each `pages` is a `rangeField` result (null = every page)
+ *  and each `count` the side's page count (null = not known). Different pages of one file, or a past version against
+ *  the current one, are not the same. */
+export function sameSides(
+  a: Source,
+  b: Source,
+  docPath: string | null,
+  pages: [number[] | null, number[] | null],
+  count: [number | null, number | null],
+): boolean {
+  if (fileKey(a, docPath) !== fileKey(b, docPath)) return false;
+  const all = (n: number | null) => (n === null ? null : Array.from({ length: n }, (_, i) => i));
+  const [pa, pb] = [pages[0] ?? all(count[0]), pages[1] ?? all(count[1])];
+  if (pa === null || pb === null) return pa === pb;
+  return pa.length === pb.length && pa.every((p, i) => p === pb[i]);
 }
 
 /** Page-level summary lines for the top of the change list: "Page 3 inserted", "Pages 5-6 moved to 9". */

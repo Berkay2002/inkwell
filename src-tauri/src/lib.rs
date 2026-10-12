@@ -83,6 +83,7 @@ enum SaveKind {
     Html,
     Xhtml,
     Word,
+    Rtf,
     /// Comments: XFDF or FDF.
     Comments,
     /// Form data: XFDF, FDF, JSON, CSV, tab text or XML.
@@ -159,12 +160,13 @@ async fn pick_save(
             SaveKind::Html => d.add_filter("HTML", &["html", "htm"]),
             SaveKind::Xhtml => d.add_filter("XHTML", &["xhtml"]),
             SaveKind::Word => d.add_filter("Word document", &["docx"]),
+            SaveKind::Rtf => d.add_filter("Rich Text Format", &["rtf"]),
             SaveKind::Comments => d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"]),
             SaveKind::FormData => d
-                .add_filter("XFDF", &["xfdf"])
+                .add_filter("Form data (XFDF)", &["xfdf"])
                 .add_filter("FDF", &["fdf"])
                 .add_filter("JSON", &["json"])
-                .add_filter("CSV (spreadsheet)", &["csv"])
+                .add_filter("CSV", &["csv"])
                 .add_filter("Tab-delimited text", &["txt"])
                 .add_filter("XML", &["xml"]),
             SaveKind::Csv => d.add_filter("CSV (spreadsheet)", &["csv"]),
@@ -1047,6 +1049,7 @@ pub fn run() {
         .manage(Paths::default())
         .manage(launch::Forwarded::default())
         .manage(Arc::new(tools::Jobs::default()))
+        .manage(Arc::new(batch::app::Prompts::default()))
         .manage(Arc::new(measure::SnapCache::default()))
         .manage(Arc::new(search::files::FolderSearches::default()))
         .manage(Arc::new(search::catalog::app::Jobs::default()))
@@ -1194,6 +1197,7 @@ pub fn run() {
             batch::app::batch_preview,
             batch::app::batch_folder_files,
             batch::app::batch_run,
+            batch::app::batch_prompt_answer,
             batch::app::batch_cancel,
             ocr_languages,
             ocr_choose_tesseract,
@@ -1346,8 +1350,11 @@ pub fn run() {
             textedit::app::text_blocks,
             textedit::app::text_edit,
             textedit::app::text_add,
+            textedit::app::text_replace,
             outline::app::bookmarks_list,
             outline::app::bookmarks_apply,
+            outline::app::dests_list,
+            outline::app::dests_apply,
             outline::app::bookmarks_headings,
             links::app::links_list,
             links::app::links_apply,

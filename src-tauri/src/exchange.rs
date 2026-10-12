@@ -178,16 +178,34 @@ pub enum Format {
 }
 
 impl Format {
-    /// By file extension (the person's choice in the save dialog); anything else is XFDF. `data` is form data, which
-    /// also has JSON, CSV, tab text and XML; comments are XFDF or FDF only.
-    pub fn of_path(path: &str, data: bool) -> Format {
+    /// By file extension (the person's choice in the save dialog); `None` for one that is not a format of this kind.
+    /// `data` is form data, which also has JSON, CSV, tab text and XML; comments are XFDF or FDF only.
+    pub fn of_ext(path: &str, data: bool) -> Option<Format> {
         match std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-            Some("fdf") => Format::Fdf,
-            Some("json") if data => Format::Json,
-            Some("csv") if data => Format::Csv,
-            Some("txt" | "tsv" | "tab") if data => Format::Tab,
-            Some("xml") if data => Format::Xml,
-            _ => Format::Xfdf,
+            Some("xfdf") => Some(Format::Xfdf),
+            Some("fdf") => Some(Format::Fdf),
+            Some("json") if data => Some(Format::Json),
+            Some("csv") if data => Some(Format::Csv),
+            Some("txt" | "tsv" | "tab") if data => Some(Format::Tab),
+            Some("xml") if data => Some(Format::Xml),
+            _ => None,
+        }
+    }
+
+    /// `of_ext`, with anything else read as XFDF (a hint for import, where the bytes decide; comments export).
+    pub fn of_path(path: &str, data: bool) -> Format {
+        Format::of_ext(path, data).unwrap_or(Format::Xfdf)
+    }
+
+    /// The extension a file of this format is saved with (the first of its save filter).
+    pub fn ext(self) -> &'static str {
+        match self {
+            Format::Xfdf => "xfdf",
+            Format::Fdf => "fdf",
+            Format::Json => "json",
+            Format::Csv => "csv",
+            Format::Tab => "txt",
+            Format::Xml => "xml",
         }
     }
 }
@@ -520,6 +538,26 @@ mod tests {
         // Comments stay XFDF or FDF.
         assert_eq!(Format::of_path("a.csv", false), Format::Xfdf);
         assert_eq!(Format::of_path("a.xml", false), Format::Xfdf);
+    }
+
+    #[test]
+    fn a_save_name_maps_to_a_format_and_back() {
+        const ALL: [Format; 6] = [Format::Xfdf, Format::Fdf, Format::Json, Format::Csv, Format::Tab, Format::Xml];
+        // each format's own extension names it again (what the save dialog's filters offer)
+        for f in ALL {
+            assert_eq!(Format::of_ext(&format!("C:\\x\\a.{}", f.ext()), true), Some(f));
+        }
+        // the import dialog's other spellings of tab text
+        assert_eq!(Format::of_ext("a.TSV", true), Some(Format::Tab));
+        assert_eq!(Format::of_ext("a.tab", true), Some(Format::Tab));
+        // comments carry no form data formats
+        assert_eq!(Format::of_ext("a.csv", false), None);
+        assert_eq!(Format::of_ext("a.fdf", false), Some(Format::Fdf));
+        // anything else, and no extension at all, is not a format
+        assert_eq!(Format::of_ext("a.pdf", true), None);
+        assert_eq!(Format::of_ext("a.html", true), None);
+        assert_eq!(Format::of_ext("a", true), None);
+        assert_eq!(Format::of_ext("C:\\x.d\\a", true), None);
     }
 
     #[test]

@@ -55,6 +55,7 @@ const WHAT: { id: ExportWhat; label: string; desc: string }[] = [
   { id: "html", label: "Web page", desc: "HTML or XHTML" },
   { id: "extractImages", label: "Embedded images", desc: "The pictures inside the PDF" },
   { id: "word", label: "Word", desc: "A flowing .docx, not layout-exact" },
+  { id: "rtf", label: "Rich Text", desc: "A flowing .rtf, not layout-exact" },
 ];
 
 const SCOPES: { id: Scope; label: string }[] = [

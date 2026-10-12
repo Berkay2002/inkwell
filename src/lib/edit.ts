@@ -133,6 +133,15 @@ export function editText(id: number, rev: number, page: number, index: number, c
   });
 }
 
+/** Find & Replace in the document's text (src-tauri/src/textedit/replace.rs): one undo step. */
+export function replaceText(id: number, rev: number, req: api.ReplaceRequest) {
+  return textResult(id, async () => {
+    const r = await api.textReplace(id, rev, req);
+    applyState(id, r.state);
+    return r;
+  });
+}
+
 /** Adds a text box to a page. */
 export function addText(id: number, rev: number, page: number, box: api.NewTextBox) {
   return textResult(id, async () => {
@@ -182,6 +191,15 @@ export function moveImagesToPage(id: number, rev: number, page: number, indices:
 export function editBookmarks(id: number, rev: number, op: api.BookmarkOp) {
   return textResult(id, async () => {
     const r = await api.bookmarksApply(id, rev, op);
+    applyState(id, r.state);
+    return r;
+  });
+}
+
+/** Changes the named destinations (src-tauri/src/outline/dests.rs). `rev`: the generation they were listed at. */
+export function editDests(id: number, rev: number, op: api.DestOp) {
+  return textResult(id, async () => {
+    const r = await api.destsApply(id, rev, op);
     applyState(id, r.state);
     return r;
   });

@@ -8,6 +8,11 @@
 //! `version` only goes up. A file with a newer one is refused (it may hold steps this build cannot run);
 //! an older one is brought forward by [`migrate`] before it is read. Passwords of a Protect step are
 //! never written (see `ProtectStep`).
+//!
+//! Version 2 added a page range (`pages`) and "prompt user" (`prompt`) to each step. A file is written as
+//! version 2 only when some step uses one of them: an older Inkwell would drop them silently and run the
+//! step on every page, without asking, so it must refuse the file instead (it does: `TooNew`). Every other
+//! action is still written as version 1 and opens in both.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,8 +26,8 @@ use crate::redact::{Pattern, Sanitize};
 use crate::tools::BackendChoice;
 
 pub const FORMAT: &str = "inkwell-batch-action";
-/// The schema this build writes and reads without migrating.
-pub const VERSION: u32 = 1;
+/// The newest schema this build reads (and writes, for an action that needs it): see the module notes.
+pub const VERSION: u32 = 2;
 /// An imported file bigger than this is not an Action.
 pub const MAX_FILE: u64 = 1 << 20;
 
@@ -54,7 +59,8 @@ type Result<T> = std::result::Result<T, StoreError>;
 pub fn to_file(action: &Action) -> Result<Vec<u8>> {
     let mut a = action.clone();
     a.built_in = false;
-    let v = json!({ "format": FORMAT, "version": VERSION, "action": a });
+    let version = if a.steps.iter().any(|s| s.has_range() || s.prompt) { VERSION } else { 1 };
+    let v = json!({ "format": FORMAT, "version": version, "action": a });
     serde_json::to_vec_pretty(&v).map_err(|e| StoreError::Io(e.to_string()))
 }
 
@@ -83,9 +89,10 @@ pub fn from_file(bytes: &[u8]) -> Result<Action> {
     Ok(a)
 }
 
-/// Brings an envelope written as version `from` up to [`VERSION`]. Version 1 is the first, so there is
-/// nothing to do yet; the next schema change adds a step for the old version here (and a test with a
-/// file of the old shape) instead of breaking the files people have saved.
+/// Brings an envelope written as version `from` up to [`VERSION`]. Version 2 only added optional step
+/// fields that default to "every page" and "do not ask", so a version 1 file reads as it is; the next
+/// schema change adds a step for the old version here (and a test with a file of the old shape) instead
+/// of breaking the files people have saved.
 fn migrate(v: Value, _from: u32) -> Value {
     v
 }
@@ -171,7 +178,7 @@ impl Store {
             return Err(StoreError::Invalid(format!("Give the action a name of 1 to {MAX_NAME} characters.")));
         }
         action.name = name;
-        if let Some(Step::Invalid { why, .. }) = action.steps.iter().find(|s| matches!(s, Step::Invalid { .. })) {
+        if let Some(Step::Invalid { why, .. }) = action.steps.iter().map(|s| &s.step).find(|s| matches!(s, Step::Invalid { .. })) {
             return Err(StoreError::Invalid(why.clone()));
         }
         if action.id.is_empty() {
@@ -244,7 +251,7 @@ fn builtin(id: &str, name: &str, description: &str, steps: Vec<Step>, suffix: &s
         id: id.into(),
         name: name.into(),
         description: description.into(),
-        steps,
+        steps: steps.into_iter().map(Into::into).collect(),
         output: OutputRule::NextToSource { suffix: suffix.into() },
         on_error: OnError::Skip,
         built_in: true,
