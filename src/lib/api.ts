@@ -801,6 +801,7 @@ export interface DiscardSettings {
   embeddedFiles: boolean;
   javascript: boolean;
   bookmarks: boolean;
+  invalidBookmarks: boolean;
   formActions: boolean;
   alternateImages: boolean;
   privateData: boolean;
@@ -883,6 +884,10 @@ export interface CompressReport {
   stripped: {
     metadata: boolean;
     bookmarks: boolean;
+    /** Outline items whose destination did not exist; the working ones under them moved up. */
+    invalidBookmarks: number;
+    /** Why the outline was left as it is, when invalid bookmarks were asked for and could not be judged. */
+    bookmarksUnchecked?: string | null;
     thumbnails: number;
     embeddedFiles: number;
     javascript: number;

@@ -217,6 +217,7 @@ describe("compress Advanced mode", () => {
       embeddedFiles: false,
       javascript: false,
       bookmarks: false,
+      invalidBookmarks: false,
       formActions: false,
       alternateImages: false,
       privateData: false,

@@ -665,6 +665,41 @@ fn passwords_are_normalised_and_control_characters_refused() {
     eng3.remove_security(id3, Some(owner_typed), EditSource::User).unwrap();
 }
 
+/// SASLprep's mapping step: a password typed with a non-ASCII space or an invisible mark opens a file written
+/// with the plain one (what Acrobat and qpdf hash); the form as typed is still tried first.
+#[test]
+fn a_password_with_odd_spaces_or_invisible_marks_opens_the_file_under_its_mapped_form() {
+    // NFKC leaves U+1680 and the B.1 characters alone, so only the mapping step reaches the plain form
+    assert_eq!(crate::protect::nfkc_form("ab\u{1680}cd\u{ad}-ef\u{200d}\u{fe0f}").as_deref().map(String::as_str), Some("ab cd-ef"));
+    assert_eq!(crate::protect::nfkc_form("a\u{a0}b\u{3000}c").as_deref().map(String::as_str), Some("a b c"));
+    assert_eq!(crate::protect::nfkc_form("a\u{200b}b").as_deref().map(String::as_str), Some("ab"), "U+200B is in B.1 and C.1.2: nothing");
+    assert!(crate::protect::nfkc_form("plain ascii-pass").is_none());
+    assert!(crate::protect::nfkc_form("\u{200b}\u{ad}").is_none(), "all invisible: nothing to retry with");
+
+    let d = dir("saslprep-map");
+    let src = fixture_at(&d, "a.pdf", 1);
+    let out = d.join("locked.pdf").to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = open(&eng, &src);
+    let plain = tweak(|s| {
+        (s.open_password, s.permissions_password, s.printing, s.changes, s.copy) =
+            (Some("ab cd-ef".into()), None, Printing::High, Changes::AllButExtract, true);
+    });
+    eng.protect(id, plain, None, EditSource::User).unwrap();
+    eng.save(id, Some(&out)).unwrap();
+
+    for typed in ["ab cd-ef", "ab\u{1680}cd\u{ad}-ef", "ab\u{200c}\u{a0}cd-ef\u{fe0f}"] {
+        let eng2 = Engine::new(2, 64 << 20);
+        let id2 = open_with(&eng2, &out, typed);
+        assert!(eng2.security_info(id2).unwrap().encrypted, "{typed:?}");
+        assert!(!eng2.page_text(id2, 0).unwrap().is_empty(), "{typed:?}");
+    }
+    // a different password is still wrong, and so is one that differs by more than the mapped characters
+    let eng2 = Engine::new(2, 64 << 20);
+    let (id2, _) = eng2.open_pending(&out);
+    assert!(matches!(eng2.authenticate(id2, "abcd-ef"), Err(EngineError::BadPassword)));
+}
+
 /// The step and the save of Protect are one operation under one lock: edits made at the same time
 /// neither get between them nor leave the step behind when the save fails.
 #[test]

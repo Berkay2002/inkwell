@@ -43,15 +43,34 @@ JSON). Defaults of every key are the Balanced preset, so an `Options` saved by a
 | Transparency: flatten | `transparency {flatten, ppi 36..=600}` | pages that use transparency are drawn once and replaced by the picture |
 | Discard: JavaScript | `strip.javascript` | JavaScript actions only (a reset action next to a script in `/AA` stays) |
 | Discard: thumbnails, bookmarks, attachments, metadata | `strip.thumbnails / bookmarks / embeddedFiles / metadata` | as before; metadata also takes the Info dictionary and `/PieceInfo` of catalog and pages |
+| Discard: invalid bookmarks | `strip.invalidBookmarks` | outline items whose `/Dest`, or the `/D` of a GoTo action, does not resolve (see below); off in every preset |
 | Discard: form actions | `strip.formActions` | SubmitForm, ResetForm, ImportData in `/A` and `/AA` (fields and values stay) |
 | Discard: alternate images | `strip.alternateImages` | `/Alternates` of image streams |
 | Discard: private data | `strip.privateData` | `/PieceInfo` of the catalog, pages and form XObjects |
 | Discard: all links / invalid links | `strip.links`, `strip.invalidLinks` | every Link annotation / those with no action, a page that does not exist, or an unknown named destination (URIs and other actions count as working) |
 | Clean up: object streams, Flate, unused objects | `objectStreams`, `compressStreams`, `garbage` 0..=4 | the writer's options |
 
-Not in MuPDF, so not here: linearization, JBIG2, invalid-bookmark removal (bookmarks go as a whole), object-level
+Not in MuPDF, so not here: linearization, JBIG2, object-level
 transparency flattening (a flattened page becomes a picture: its text is no longer text; the report lists the page
 numbers, rotated pages and pages with `/UserUnit` are left alone and listed as skipped).
+
+Invalid bookmarks (Acrobat's "Discard invalid bookmarks"): an item is invalid when its `/Dest`, or the `/D` of a
+GoTo `/A`, is an array whose page is not a page of this document (a reference to something that is not in the page
+tree, or to an object that does not exist, or no page at all), a name or string the catalog's `/Dests` or `/Names`
+`/Dests` tree does not define (or defines as something that is not a destination), or anything that is not a
+destination. A destination written as a dictionary is followed through its `/D` (up to four hops, so a loop ends), the
+same way for bookmarks and links. An integer page (the remote form) is kept while it is below the page count. Items
+with no destination (headings), a GoTo with no `/D` (the panel shows those as headings too) and items with another
+action (URI, GoToR, Launch, Named, JavaScript) are never judged. A link that is a GoTo with no `/D` still counts as
+invalid. A destination name is looked up by its bytes, so `/caf#E9` finds its `/Dests` key. An invalid item is
+removed and **its working children are lifted into its place**, in order, at any depth (Acrobat does the same; the
+other choice, removing the whole subtree, would lose working bookmarks). `/First /Last /Prev /Next /Parent /Count`
+are rewritten, an item's open or closed state is kept. The walk has the outline editor's limits (50 000 items, 48
+levels, each item once): an outline that is larger, or that reaches an item from two places, is left as it is with a
+warning (`stripped.bookmarksUnchecked`), as is one when the named destinations cannot be read; neither stops the run.
+`stripped.invalidBookmarks` is the count; the space audit's Bookmarks row shrinks by their bytes. With `strip.bookmarks`
+also on, the outline goes whole and the count is 0. A certified file is refused by the optimizer as for every option.
+The estimate does not predict it (it is a few bytes).
 
 Caveat: when the image pass runs (any image class that downsamples or re-encodes), MuPDF replaces the images and
 form XObjects it rewrites by new objects, which carry no `/Alternates` and no `/PieceInfo`. They are gone from such a
@@ -119,8 +138,8 @@ Reproduce: `cargo test --lib compress::tests::presets -- --nocapture --test-thre
   largest difference of 8 of 255, "Slightly different" above that, and "Looks different, check page N" (red) when
   `p999Diff` is above 64 or the PSNR is under 30. Stray pixels (an edge after a lossy pass) do not trip it; a changed
   line of text does. `worstPage` is the page furthest past either threshold.
-- A named-destination tree that cannot be read skips the invalid-links pass (warning), it does not make every named
-  link look broken. A signed document is flagged in the audit reply (`signed`) so the sheet warns before Start.
+- A named-destination tree that cannot be read skips the invalid-links and invalid-bookmarks passes (warning), it does
+  not make every named link or bookmark look broken. A signed document is flagged in the audit reply (`signed`) so the sheet warns before Start.
 - The presets file is read up to 1 MB; an out-of-range `visualPages` in it is clamped to 64.
 - Text-only PDFs do not grow; text of every study sample is identical after every preset.
 - Encrypted input needs the password (`needs-password`) and the output stays encrypted.

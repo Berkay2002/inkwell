@@ -734,6 +734,55 @@ fn delete_tree(doc: &mut PdfDocument, sh: &Shape, id: i32) -> Result<u32> {
     Ok(n)
 }
 
+/// What [`discard_where`] did.
+pub(crate) enum Discarded {
+    /// Items taken out (their children, where kept, now hang from the item's parent).
+    Removed(u32),
+    /// The outline was left as it is, for this reason (too large, shared items, unreadable).
+    Left(String),
+}
+
+/// Takes out the items `broken` says no longer lead anywhere. The kept items under a removed one move up into
+/// its place, in order (Acrobat's "Discard invalid bookmarks"), and `/First /Last /Prev /Next /Parent /Count`
+/// are made right. Bounded like every other read of the outline ([`shape`]); an outline that is too large, or
+/// that reaches items from two places, is left alone. The removed items are left unreferenced: the writer's
+/// garbage pass drops them.
+pub(crate) fn discard_where(doc: &PdfDocument, broken: &dyn Fn(&PdfObject) -> bool) -> Result<Discarded> {
+    let Some(mut root) = root(doc)? else { return Ok(Discarded::Removed(0)) };
+    let Ok(sh) = shape(&root) else { return Ok(Discarded::Left("the bookmarks could not be read".into())) };
+    if let Err(EngineError::Invalid(why)) = sh.editable() {
+        return Ok(Discarded::Left(why));
+    }
+    let bad: HashSet<i32> = sh.refs.iter().filter(|(_, item)| broken(item)).map(|(id, _)| *id).collect();
+    if bad.is_empty() {
+        return Ok(Discarded::Removed(0));
+    }
+    // The kept items that stand in `key`'s list now: a removed kid gives way to its own kept descendants.
+    fn kept(sh: &Shape, bad: &HashSet<i32>, key: Option<i32>, out: &mut Vec<i32>) {
+        for &id in sh.kid_ids(key) {
+            if bad.contains(&id) {
+                kept(sh, bad, Some(id), out);
+            } else {
+                out.push(id);
+            }
+        }
+    }
+    let parents = std::iter::once(None).chain(sh.refs.keys().filter(|id| !bad.contains(id)).map(|id| Some(*id)));
+    for key in parents {
+        let mut now = Vec::new();
+        kept(&sh, &bad, key, &mut now);
+        if now != sh.kid_ids(key) {
+            let kids: Vec<PdfObject> = now.iter().map(|id| sh.refs[id].clone()).collect();
+            match key {
+                Some(id) => relink(&mut sh.obj(id)?, &kids)?,
+                None => relink(&mut root, &kids)?,
+            }
+        }
+    }
+    recount(doc)?;
+    Ok(Discarded::Removed(bad.len() as u32))
+}
+
 fn label(op: &BookmarkOp) -> String {
     match op {
         BookmarkOp::Add { title, .. } => format!("Add bookmark \"{}\"", short(&clean_title(title))),
