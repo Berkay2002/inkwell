@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { pagesIn, securityDropped } from "../lib/combineLogic";
+import { pagesIn, planFiles, securityDropped } from "../lib/combineLogic";
 import { type CombineEntry, type CombineSheet as SheetState, pageUrl, useCombine } from "../lib/combineStore";
 import type { CombineFilePlan } from "../lib/api";
 import { Icon } from "./Icons";
@@ -60,7 +60,8 @@ export function CombineSheet() {
 }
 
 function Body({ sheet }: { sheet: SheetState }) {
-  const { entries, plan } = sheet;
+  const { entries, plan, planKeys } = sheet;
+  const planned = planFiles(entries, plan?.files ?? [], planKeys);
   const [drag, setDrag] = useState<{ from: number; to: number } | null>(null);
   const list = useRef<HTMLUListElement>(null);
 
@@ -113,7 +114,7 @@ function Body({ sheet }: { sheet: SheetState }) {
                 entry={e}
                 index={i}
                 count={entries.length}
-                plan={plan?.files[i] ?? null}
+                plan={planned[i] ?? null}
                 dropBefore={drag != null && drag.to === i && drag.from !== i && drag.to < drag.from}
                 dropAfter={drag != null && drag.to === i && drag.from !== i && drag.to > drag.from}
                 lifted={drag?.from === i}
@@ -312,7 +313,7 @@ function PageThumb({ entry, page, on }: { entry: CombineEntry; page: number; on:
 }
 
 function Footer({ sheet }: { sheet: SheetState }) {
-  const { options, plan, planning, planError, phase, error, entries } = sheet;
+  const { options, plan, planKeys, planning, planError, phase, error, entries } = sheet;
   const running = phase === "running";
   const outcome =
     entries.length === 0
@@ -337,7 +338,7 @@ function Footer({ sheet }: { sheet: SheetState }) {
         />
         <Check label="A contents page in front" checked={options.contentsPage} disabled={running} onChange={(v) => act().setOptions({ contentsPage: v })} />
         <Check label="Keep the source page labels" checked={options.keepLabels} disabled={running} onChange={(v) => act().setOptions({ keepLabels: v })} />
-        {securityDropped(entries, plan?.files ?? []) && (
+        {securityDropped(entries, planFiles(entries, plan?.files ?? [], planKeys)) && (
           <span className="cb-note dim">The combined file has no password and no restrictions.</span>
         )}
       </div>

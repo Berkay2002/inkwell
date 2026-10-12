@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatOrder, pagesIn, parseOrder, securityDropped, togglePage } from "./combineLogic";
+import { formatOrder, pagesIn, parseOrder, planFiles, securityDropped, togglePage } from "./combineLogic";
 
 describe("combine page ranges", () => {
   it("reads them in the order written, backwards ranges backwards", () => {
@@ -57,5 +57,25 @@ describe("the no-password footer", () => {
     expect(securityDropped([{ password: "", locked: 3 }, plain], [{ encrypted: false }, { encrypted: true }])).toBe(true);
     // unlocked, but its owner allows no copying: left out too, the plan says so
     expect(securityDropped([{ password: "pw", locked: null }], [{ encrypted: false }])).toBe(false);
+  });
+});
+
+describe("a plan made before the list changed", () => {
+  const row = (key: number, locked: number | null = null) => ({ key, password: "", locked });
+  const files = (...encrypted: boolean[]) => encrypted.map((e) => ({ encrypted: e }));
+  const dropped = (rows: ReturnType<typeof row>[], plan: { encrypted: boolean }[], planKeys: number[]) =>
+    securityDropped(rows, planFiles(rows, plan, planKeys));
+  it("follows a row that moved", () => {
+    // planned as [1 locked, 2 encrypted]; the rows were then swapped
+    expect(dropped([row(2), row(1, 3)], files(false, true), [1, 2])).toBe(true);
+    // planned as [1 encrypted, 2 plain]; the rows were then swapped
+    expect(dropped([row(2), row(1)], files(true, false), [1, 2])).toBe(true);
+  });
+  it("does not give a remaining row the security of a removed one", () => {
+    expect(dropped([row(2)], files(true, false), [1, 2])).toBe(false);
+  });
+  it("lets a row the plan has not seen stand on its password", () => {
+    expect(planFiles([{ key: 5 }], files(true), [1])).toEqual([undefined]);
+    expect(dropped([{ key: 5, password: "pw", locked: null }], files(false), [1])).toBe(true);
   });
 });

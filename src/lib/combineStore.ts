@@ -49,6 +49,8 @@ export interface CombineSheet {
   entries: CombineEntry[];
   options: CombineOptions;
   plan: CombinePlan | null;
+  /** The row keys `plan.files` was made for, in order: the list may have moved on since (see `planFiles`). */
+  planKeys: number[];
   planning: boolean;
   /** The engine could not plan (nothing usable in the list, a file named twice ...). */
   planError: string | null;
@@ -118,7 +120,7 @@ export const useCombine = create<CombineStore>((set, get) => {
     if (!sheet) return;
     if (sheet.entries.length === 0) {
       planSeq++;
-      patchSheet({ plan: null, planning: false, planError: null });
+      patchSheet({ plan: null, planKeys: [], planning: false, planError: null });
       return;
     }
     patchSheet({ planning: true });
@@ -132,10 +134,11 @@ export const useCombine = create<CombineStore>((set, get) => {
       }
       inFlight = true;
       const seq = ++planSeq;
+      const planKeys = cur.entries.map((e) => e.key);
       api
         .combineInspect(cur.entries.map(request), cur.options)
-        .then((plan) => seq === planSeq && patchSheet({ plan, planning: again, planError: null }))
-        .catch((e) => seq === planSeq && patchSheet({ plan: null, planning: again, planError: String(e) }))
+        .then((plan) => seq === planSeq && patchSheet({ plan, planKeys, planning: again, planError: null }))
+        .catch((e) => seq === planSeq && patchSheet({ plan: null, planKeys: [], planning: again, planError: String(e) }))
         .finally(() => {
           inFlight = false;
           if (again) {
@@ -215,7 +218,7 @@ export const useCombine = create<CombineStore>((set, get) => {
 
     open: (files) => {
       get().close();
-      set({ sheet: { entries: [], options: defaultCombineOptions(), plan: null, planning: false, planError: null, phase: "setup", error: null, unlock: null } });
+      set({ sheet: { entries: [], options: defaultCombineOptions(), plan: null, planKeys: [], planning: false, planError: null, phase: "setup", error: null, unlock: null } });
       if (files?.length) get().add(files);
     },
 
