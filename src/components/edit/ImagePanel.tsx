@@ -1,11 +1,29 @@
 import { useEffect, useState } from "react";
 import type { ImageBlock } from "../../lib/api";
-import { type ImageRef, codecName, colorName, imageLabel, ppi, rectH, rectW, useImageEdit } from "../../lib/imageEdit";
+import {
+  type AlignHow,
+  type ImageRef,
+  codecName,
+  colorName,
+  imageLabel,
+  isQuarter,
+  picksOf,
+  ppi,
+  rectH,
+  rectW,
+  roundAngle,
+  turnTo,
+  useImageEdit,
+} from "../../lib/imageEdit";
 import { type DocState } from "../../store";
 import { Icon } from "../Icons";
 import "./imageEdit.css";
 
 const ie = () => useImageEdit.getState();
+
+/** What a signed document's image edit says (the rail shows it under the controls). */
+const SIGNED_IMAGES =
+  "This document is signed. A change to its images is saved after the signature, which will show that the file was changed.";
 
 /** "Image" in Add content: choose a picture, then put it on a page by clicking or dragging a box. */
 export function AddImageButton({ id }: { id: number }) {
@@ -29,6 +47,9 @@ export function ImageSection({ doc }: { doc: DocState }) {
   const d = useImageEdit((s) => s.docs[id]);
   const placing = d?.placing ?? null;
   const selected = d?.selected ? (d.pages[d.selected.page]?.images[d.selected.index] ?? null) : null;
+  const count = d ? picksOf(d).length : 0;
+  const pageState = d?.selected ? d.pages[d.selected.page] : undefined;
+  const locked = pageState?.locked ?? null;
   const here = d?.pages[doc.currentPage]?.images ?? [];
 
   // Esc puts a chosen file back (the page's own keys are in the layer).
@@ -47,7 +68,9 @@ export function ImageSection({ doc }: { doc: DocState }) {
   if (!placing && !selected && here.length === 0 && !d?.notice) return null;
   return (
     <section className="te-sec" aria-label="Images">
-      <h3 className="te-h3">{selected ? "Format image" : placing ? "Add image" : `Images on page ${doc.currentPage + 1}`}</h3>
+      <h3 className="te-h3">
+        {count > 1 ? `${count} images picked` : selected ? "Format image" : placing ? "Add image" : `Images on page ${doc.currentPage + 1}`}
+      </h3>
       {placing && (
         <>
           <p className="te-summary">
@@ -62,7 +85,15 @@ export function ImageSection({ doc }: { doc: DocState }) {
           </div>
         </>
       )}
-      {!placing && selected && d?.selected && <Format key={`${d.selected.page}:${selected.index}`} id={id} target={d.selected} image={selected} cropping={d.crop != null} />}
+      {!placing && count > 1 && <GroupTools id={id} locked={locked} />}
+      {!placing && count <= 1 && selected && d?.selected && (
+        <Format key={`${d.selected.page}:${selected.index}`} id={id} target={d.selected} image={selected} cropping={d.crop != null} locked={locked} />
+      )}
+      {!placing && selected && (locked || pageState?.signed) && (
+        <p className="dim te-hint" role="note">
+          {locked ?? SIGNED_IMAGES}
+        </p>
+      )}
       {!placing && !selected && here.length > 0 && (
         <>
           <ul className="te-list">
@@ -84,7 +115,10 @@ export function ImageSection({ doc }: { doc: DocState }) {
               </li>
             ))}
           </ul>
-          <p className="dim te-hint">Click a picture on the page to turn, crop, replace or delete it.</p>
+          <p className="dim te-hint">
+            Click a picture on the page to turn, crop, replace or delete it. Shift-click adds to the picks; Shift and a drag on the page
+            picks the pictures the box touches.
+          </p>
         </>
       )}
       {d?.notice && (
@@ -98,12 +132,124 @@ export function ImageSection({ doc }: { doc: DocState }) {
 
 const round1 = (v: number) => Math.round(v * 10) / 10;
 
-function Format({ id, target, image, cropping }: { id: number; target: ImageRef; image: ImageBlock; cropping: boolean }) {
+const ALIGN: { how: AlignHow; label: string; icon: "layoutLeft" | "layoutHCenter" | "layoutRight" | "layoutTop" | "layoutVCenter" | "layoutBottom" }[] = [
+  { how: "left", label: "Align left edges", icon: "layoutLeft" },
+  { how: "hcenter", label: "Centre horizontally", icon: "layoutHCenter" },
+  { how: "right", label: "Align right edges", icon: "layoutRight" },
+  { how: "top", label: "Align top edges", icon: "layoutTop" },
+  { how: "vcenter", label: "Centre vertically", icon: "layoutVCenter" },
+  { how: "bottom", label: "Align bottom edges", icon: "layoutBottom" },
+];
+
+/** The angle field: the picture's angle as it is now, sent as the turn that gets it there. */
+function AngleField({ id, image, target, locked }: { id: number; image: ImageBlock; target: ImageRef; locked: string | null }) {
+  const now = roundAngle(image.angle);
+  const [text, setText] = useState(String(now));
+  useEffect(() => setText(String(now)), [now]);
+  const send = () => {
+    const v = parseFloat(text.replace(",", "."));
+    const d = Number.isFinite(v) ? turnTo(image.angle, v) : null;
+    if (d == null) return setText(String(now));
+    void ie().turn(id, d, target);
+  };
+  return (
+    <div className="te-row">
+      <span className="te-label">Angle</span>
+      <span className="ie-size">
+        <input
+          className="ie-num"
+          aria-label="Angle in degrees, clockwise"
+          inputMode="decimal"
+          value={text}
+          disabled={locked != null}
+          title={locked ?? "Turn the picture to this angle, about its centre"}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={send}
+          onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+        />
+        <span className="dim">°</span>
+      </span>
+    </div>
+  );
+}
+
+/** The rail for two or more picked images: align, turn, flip and delete them as one step each. */
+function GroupTools({ id, locked }: { id: number; locked: string | null }) {
+  const [by, setBy] = useState("");
+  const off = locked != null;
+  const send = () => {
+    const v = parseFloat(by.replace(",", "."));
+    setBy("");
+    const d = Number.isFinite(v) ? turnTo(0, v) : null;
+    if (d != null) void ie().turn(id, d);
+  };
+  return (
+    <div className="te-format">
+      <div className="te-row">
+        <span className="te-label">Align</span>
+        <span className="ie-tools ie-align">
+          {ALIGN.map((a) => (
+            <button key={a.how} className="te-btn ie-icon" title={locked ?? a.label} aria-label={a.label} disabled={off} onClick={() => void ie().align(id, a.how)}>
+              <Icon name={a.icon} size={16} />
+            </button>
+          ))}
+        </span>
+      </div>
+      <div className="te-row">
+        <span className="te-label">Turn</span>
+        <span className="ie-tools">
+          <button className="te-btn ie-icon" title={locked ?? "Turn each 90° to the left"} aria-label="Turn left" disabled={off} onClick={() => void ie().rotate(id, -1)}>
+            <Icon name="rotateLeft" size={16} />
+          </button>
+          <button className="te-btn ie-icon" title={locked ?? "Turn each 90° to the right"} aria-label="Turn right" disabled={off} onClick={() => void ie().rotate(id, 1)}>
+            <Icon name="rotate" size={16} />
+          </button>
+          <button className="te-btn ie-icon" title={locked ?? "Flip each left to right"} aria-label="Flip horizontally" disabled={off} onClick={() => void ie().flip(id, true)}>
+            <Icon name="flipH" size={16} />
+          </button>
+          <button className="te-btn ie-icon" title={locked ?? "Flip each top to bottom"} aria-label="Flip vertically" disabled={off} onClick={() => void ie().flip(id, false)}>
+            <Icon name="flipV" size={16} />
+          </button>
+        </span>
+      </div>
+      <div className="te-row">
+        <span className="te-label">Turn by</span>
+        <span className="ie-size">
+          <input
+            className="ie-num"
+            aria-label="Degrees to turn each picture, clockwise"
+            inputMode="decimal"
+            placeholder="0"
+            value={by}
+            disabled={off}
+            title={locked ?? "Turn each picture by this many degrees about its own centre"}
+            onChange={(e) => setBy(e.target.value)}
+            onBlur={send}
+            onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+          />
+          <span className="dim">°</span>
+        </span>
+      </div>
+      <div className="te-row ie-actions">
+        <button className="te-btn" title={locked ?? "Delete the picked pictures (Del)"} disabled={off} onClick={() => void ie().remove(id)}>
+          <Icon name="trash" size={16} />
+          Delete
+        </button>
+      </div>
+      <p className="dim te-hint">Drag any picked picture to move them all. Esc lets go.</p>
+    </div>
+  );
+}
+
+function Format({ id, target, image, cropping, locked }: { id: number; target: ImageRef; image: ImageBlock; cropping: boolean; locked: string | null }) {
   const w = rectW(image.fullRect);
   const h = rectH(image.fullRect);
   const [width, setWidth] = useState(String(round1(w)));
   const [height, setHeight] = useState(String(round1(h)));
   const [keep, setKeep] = useState(true);
+  // A picture turned by other than quarter turns is only scaled evenly.
+  const turned = !isQuarter(image.angle);
+  const off = locked != null;
   useEffect(() => {
     setWidth(String(round1(w)));
     setHeight(String(round1(h)));
@@ -117,8 +263,8 @@ function Format({ id, target, image, cropping }: { id: number; target: ImageRef;
       setHeight(String(round1(h)));
       return;
     }
-    const nw = which === "w" ? v : keep ? v * (w / Math.max(h, 1e-6)) : w;
-    const nh = which === "h" ? v : keep ? v * (h / Math.max(w, 1e-6)) : h;
+    const nw = which === "w" ? v : keep || turned ? v * (w / Math.max(h, 1e-6)) : w;
+    const nh = which === "h" ? v : keep || turned ? v * (h / Math.max(w, 1e-6)) : h;
     if (Math.abs(nw - w) < 0.05 && Math.abs(nh - h) < 0.05) {
       setWidth(String(round1(w)));
       setHeight(String(round1(h)));
@@ -127,7 +273,7 @@ function Format({ id, target, image, cropping }: { id: number; target: ImageRef;
     const [x, y] = image.fullRect;
     // A field commits as it loses focus, which is also when a click elsewhere selects another image: the
     // change is for the image this section shows.
-    void ie().resizeTo(id, [x, y, x + nw, y + nh], false, target);
+    void ie().resizeTo(id, [x, y, x + nw, y + nh], turned, target);
   };
 
   const crop = useImageEdit((s) => s.docs[id]?.crop ?? null);
@@ -173,10 +319,10 @@ function Format({ id, target, image, cropping }: { id: number; target: ImageRef;
           <div className="te-row">
             <span className="te-label">Turn</span>
             <span className="ie-tools">
-              <button className="te-btn ie-icon" title="Turn 90° to the left" aria-label="Turn left" onClick={() => void ie().rotate(id, -1)}>
+              <button className="te-btn ie-icon" title={locked ?? "Turn 90° to the left"} aria-label="Turn left" disabled={off} onClick={() => void ie().rotate(id, -1)}>
                 <Icon name="rotateLeft" size={16} />
               </button>
-              <button className="te-btn ie-icon" title="Turn 90° to the right" aria-label="Turn right" onClick={() => void ie().rotate(id, 1)}>
+              <button className="te-btn ie-icon" title={locked ?? "Turn 90° to the right"} aria-label="Turn right" disabled={off} onClick={() => void ie().rotate(id, 1)}>
                 <Icon name="rotate" size={16} />
               </button>
             </span>
@@ -184,14 +330,15 @@ function Format({ id, target, image, cropping }: { id: number; target: ImageRef;
           <div className="te-row">
             <span className="te-label">Flip</span>
             <span className="ie-tools">
-              <button className="te-btn ie-icon" title="Flip left to right" aria-label="Flip horizontally" onClick={() => void ie().flip(id, true)}>
+              <button className="te-btn ie-icon" title={locked ?? "Flip left to right"} aria-label="Flip horizontally" disabled={off} onClick={() => void ie().flip(id, true)}>
                 <Icon name="flipH" size={16} />
               </button>
-              <button className="te-btn ie-icon" title="Flip top to bottom" aria-label="Flip vertically" onClick={() => void ie().flip(id, false)}>
+              <button className="te-btn ie-icon" title={locked ?? "Flip top to bottom"} aria-label="Flip vertically" disabled={off} onClick={() => void ie().flip(id, false)}>
                 <Icon name="flipV" size={16} />
               </button>
             </span>
           </div>
+          <AngleField id={id} image={image} target={target} locked={locked} />
           <div className="te-row">
             <span className="te-label">Size</span>
             <span className="ie-size">
@@ -199,6 +346,8 @@ function Format({ id, target, image, cropping }: { id: number; target: ImageRef;
                 className="ie-num te-keep"
                 aria-label="Width in points"
                 inputMode="decimal"
+                disabled={off}
+                title={locked ?? undefined}
                 value={width}
                 onChange={(e) => setWidth(e.target.value)}
                 onBlur={() => sendSize("w")}
@@ -209,6 +358,8 @@ function Format({ id, target, image, cropping }: { id: number; target: ImageRef;
                 className="ie-num te-keep"
                 aria-label="Height in points"
                 inputMode="decimal"
+                disabled={off}
+                title={locked ?? undefined}
                 value={height}
                 onChange={(e) => setHeight(e.target.value)}
                 onBlur={() => sendSize("h")}
@@ -218,20 +369,20 @@ function Format({ id, target, image, cropping }: { id: number; target: ImageRef;
             </span>
           </div>
           <label className="ie-check">
-            <input type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
-            Keep proportions
+            <input type="checkbox" checked={keep || turned} disabled={off || turned} onChange={(e) => setKeep(e.target.checked)} />
+            Keep proportions{turned ? " (a turned picture is only scaled evenly)" : ""}
           </label>
           {note && <p className="dim te-hint">{note}</p>}
           <div className="te-row ie-actions">
-            <button className="te-btn" title="Choose another picture for this place" onClick={() => void ie().replace(id)}>
+            <button className="te-btn" title={locked ?? "Choose another picture for this place"} disabled={off} onClick={() => void ie().replace(id)}>
               <Icon name="swap" size={16} />
               Replace…
             </button>
-            <button className="te-btn" title="Show only part of the picture" onClick={() => ie().startCrop(id)}>
+            <button className="te-btn" title={locked ?? "Show only part of the picture"} disabled={off} onClick={() => ie().startCrop(id)}>
               <Icon name="crop" size={16} />
               Crop
             </button>
-            <button className="te-btn" title="Delete the picture (Del)" onClick={() => void ie().remove(id)}>
+            <button className="te-btn" title={locked ?? "Delete the picture (Del)"} disabled={off} onClick={() => void ie().remove(id)}>
               <Icon name="trash" size={16} />
               Delete
             </button>

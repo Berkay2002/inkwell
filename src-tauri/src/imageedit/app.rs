@@ -1,7 +1,7 @@
 //! Tauri commands for editing images. The UI is the user; the assistant calls the functions in
 //! `super` with its turn.
 
-use super::{ImageBlocks, ImageChange, ImageEdited};
+use super::{ImageBlocks, ImageChange, ImageEdited, ImageItem};
 use crate::engine::edit::EditSource;
 use crate::engine::{DocId, Engine, EngineError};
 use crate::paths::Paths;
@@ -39,4 +39,12 @@ pub async fn image_edit(
     }
     let eng = eng.inner().clone();
     blocking(move || super::edit(&eng, doc, rev, page, index, &change, EditSource::User)).await
+}
+
+/// One change to each of several images of `page` listed at `rev`, as one undo step (move, turn,
+/// flip or delete).
+#[tauri::command]
+pub async fn image_edit_many(eng: Eng<'_>, doc: DocId, rev: u32, page: u32, items: Vec<ImageItem>) -> Result<ImageEdited> {
+    let eng = eng.inner().clone();
+    blocking(move || super::edit_many(&eng, doc, rev, page, &items, EditSource::User)).await
 }

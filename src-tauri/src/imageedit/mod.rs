@@ -62,6 +62,13 @@ pub struct ImageBlock {
     pub full_rect: [f32; 4],
     /// The placement: the image's unit square → user space (the CTM at the `Do`).
     pub matrix: [f32; 6],
+    /// The turn of the image's bottom edge on the page, in degrees clockwise as seen (-180, 180]:
+    /// 0 for an upright image, 90 for one turned a quarter to the right.
+    pub angle: f32,
+    /// The image's corners in page space (bottom left, bottom right, top right, top left of the
+    /// picture itself): the box is this quadrilateral's bounding box, which a turned image fills
+    /// only partly.
+    pub quad: [f32; 8],
     /// Pixel size.
     pub width: u32,
     pub height: u32,
@@ -86,6 +93,11 @@ pub struct ImageBlocks {
     /// The generation the list belongs to.
     pub rev: u32,
     pub images: Vec<ImageBlock>,
+    /// Why the images can't be changed (a certified document): the controls say so.
+    pub locked: Option<String>,
+    pub signed: bool,
+    /// Why the images can't be copied out (the owner's permissions withhold it).
+    pub copy_locked: Option<String>,
 }
 
 /// A change to one image (or a new one). Page space; `file` is a path (the command swaps an open
@@ -107,6 +119,10 @@ pub enum ImageChange {
     /// Quarter turns clockwise (as seen) about the centre: 1, 2 or 3 (negative turns back).
     Rotate {
         quarter_turns: i32,
+    },
+    /// Turn by `degrees` clockwise (as seen) about the centre, any angle; the image keeps its shape.
+    Angle {
+        degrees: f64,
     },
     /// Mirror left-right (`horizontal`) or upside down, about the centre.
     Flip {
@@ -141,7 +157,7 @@ impl ImageChange {
         let what = match self {
             ImageChange::Move { .. } => "Move image",
             ImageChange::Resize { .. } => "Resize image",
-            ImageChange::Rotate { .. } => "Rotate image",
+            ImageChange::Rotate { .. } | ImageChange::Angle { .. } => "Rotate image",
             ImageChange::Flip { .. } => "Flip image",
             ImageChange::Delete => "Delete image",
             ImageChange::Replace { .. } => "Replace image",
@@ -149,6 +165,16 @@ impl ImageChange {
             ImageChange::Add { .. } => "Add image",
         };
         format!("{what} on p. {}", page + 1)
+    }
+
+    /// The label of this change made to `n` images at once.
+    fn label_many(&self, n: usize, page: u32) -> String {
+        if n == 1 {
+            return self.label(page);
+        }
+        let what = self.label(page);
+        let verb = what.split(" image").next().unwrap_or("Change");
+        format!("{verb} {n} images on p. {}", page + 1)
     }
 
     /// The image file this change reads, if any.
@@ -403,12 +429,21 @@ pub fn blocks(eng: &Engine, doc: DocId, page: u32) -> Result<ImageBlocks> {
                 let full = f.ctm.bbox(UNIT);
                 let shown = f.clip.map_or(full, |c| intersect(full, c));
                 let reason = (f.in_text).then(|| "it is drawn inside a text object".to_string());
+                let placed = f.ctm.then(&m);
+                let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(u, v)| placed.apply(u, v));
+                let mut quad = [0.0f32; 8];
+                for (k, (x, y)) in corners.iter().enumerate() {
+                    quad[2 * k] = *x as f32;
+                    quad[2 * k + 1] = *y as f32;
+                }
                 ImageBlock {
                     index: i as u32,
                     kind: f.kind,
                     rect: rect32(&m, shown),
                     full_rect: rect32(&m, full),
                     matrix: f.ctm.0.map(|v| v as f32),
+                    angle: placed.0[1].atan2(placed.0[0]).to_degrees() as f32,
+                    quad,
                     width: f.width,
                     height: f.height,
                     color_space: f.color_space.clone(),
@@ -422,7 +457,13 @@ pub fn blocks(eng: &Engine, doc: DocId, page: u32) -> Result<ImageBlocks> {
                 }
             })
             .collect();
-        Ok(ImageBlocks { rev, images })
+        let locked = match crate::outline::refuse_if_certified(d, "Changing its images") {
+            Err(EngineError::Invalid(m)) => Some(m),
+            _ => None,
+        };
+        let copy_locked = (!crate::protect::Rights::of(d).may_extract())
+            .then(|| "The owner of this document does not allow copying its pictures.".to_string());
+        Ok(ImageBlocks { rev, images, locked, signed: crate::outline::signed(d), copy_locked })
     })
 }
 
@@ -590,6 +631,61 @@ pub fn edit(
     Ok(ImageEdited { state })
 }
 
+/// One image of a batch: its `index` in the list and what is done to it.
+#[derive(Deserialize, Clone, Debug)]
+pub struct ImageItem {
+    pub index: u32,
+    pub change: ImageChange,
+}
+
+/// The most images one batch changes.
+const MAX_BATCH: usize = 500;
+
+/// Applies one change to each of several images of `page` listed at `rev`: one undo step. Moves,
+/// turns, flips or deletes only, and all of one kind of "delete or not"; a failing item changes
+/// nothing (the step is not taken).
+pub fn edit_many(eng: &Engine, doc: DocId, rev: u32, page: u32, items: &[ImageItem], source: EditSource) -> Result<ImageEdited> {
+    let (first, rest) = items.split_first().ok_or_else(|| invalid("which images?"))?;
+    if items.len() > MAX_BATCH {
+        return Err(invalid("too many images at once"));
+    }
+    let deleting = matches!(first.change, ImageChange::Delete);
+    let mut seen = HashSet::new();
+    for (i, c) in std::iter::once(first).chain(rest).map(|it| (it.index, &it.change)) {
+        if !seen.insert(i) {
+            return Err(invalid("an image is named twice"));
+        }
+        let ok = matches!(c, ImageChange::Move { .. } | ImageChange::Rotate { .. } | ImageChange::Angle { .. } | ImageChange::Flip { .. } | ImageChange::Delete);
+        if !ok || matches!(c, ImageChange::Delete) != deleting {
+            return Err(invalid("these changes can't be made to several images at once"));
+        }
+    }
+    let mut order: Vec<&ImageItem> = items.iter().collect();
+    // Deleting renumbers the images after the one removed: from the last one back.
+    if deleting {
+        order.sort_by(|a, b| b.index.cmp(&a.index));
+    }
+    let entry = eng.doc_entry(doc)?;
+    let state = eng.apply_removing(doc, first.change.label_many(items.len(), page), source, |d| {
+        if entry.generation() != rev {
+            return Err(EngineError::Stale);
+        }
+        crate::outline::refuse_if_certified(d, "Changing its images")?;
+        for it in order {
+            apply(d, page, Some(it.index), &it.change)?;
+        }
+        Ok(vec![page])
+    })?;
+    Ok(ImageEdited { state })
+}
+
+/// `m`'s linear part keeps the axes of the page: an upright or quarter-turned image.
+fn axis_aligned(m: &Matrix) -> bool {
+    let [a, b, c, d, ..] = m.0;
+    let eps = 1e-6 * (a.abs() + b.abs() + c.abs() + d.abs());
+    (b.abs() <= eps && c.abs() <= eps) || (a.abs() <= eps && d.abs() <= eps)
+}
+
 fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChange) -> Result<()> {
     let to_page = page_space(d, page)?;
     let to_user = to_page.invert().ok_or_else(|| invalid("the page has no area"))?;
@@ -615,6 +711,10 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
         ImageChange::Move { dx, dy } => Some(Matrix::translate(*dx, *dy)),
         ImageChange::Resize { rect, keep_aspect } => {
             let r = ordered(*rect)?;
+            // A box stretched unevenly would shear an image turned by other than quarter turns.
+            if !*keep_aspect && !axis_aligned(&f.ctm.then(&to_page)) {
+                return Err(invalid("a turned image can only be resized keeping its proportions"));
+            }
             let r = if *keep_aspect { fit_top_left(r, full[2] - full[0], full[3] - full[1]) } else { r };
             Some(rect_to_rect(full, r))
         }
@@ -627,6 +727,17 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
                 _ => [0.0, -1.0, 1.0, 0.0],
             };
             Some(Matrix::translate(-cx, -cy).then(&about_centre(m)))
+        }
+        ImageChange::Angle { degrees } => {
+            if !degrees.is_finite() {
+                return Err(invalid("the angle must be a number"));
+            }
+            let a = degrees.rem_euclid(360.0);
+            if a < 1e-6 || 360.0 - a < 1e-6 {
+                return Err(invalid("a rotation of 0 changes nothing"));
+            }
+            let (sin, cos) = a.to_radians().sin_cos();
+            Some(Matrix::translate(-cx, -cy).then(&about_centre([cos, sin, -sin, cos])))
         }
         ImageChange::Flip { horizontal } => {
             let m = if *horizontal { [-1.0, 0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0, -1.0] };

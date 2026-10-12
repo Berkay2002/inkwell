@@ -151,6 +151,15 @@ export function editImage(id: number, rev: number, page: number, index: number |
   });
 }
 
+/** Changes several images of one page at once as one undo step: src-tauri/src/imageedit. */
+export function editImages(id: number, rev: number, page: number, items: { index: number; change: api.ImageChange }[]) {
+  return textResult(id, async () => {
+    const r = await api.imageEditMany(id, rev, page, items);
+    applyState(id, r.state);
+    return r.state;
+  });
+}
+
 /** Changes the bookmarks (src-tauri/src/outline). `rev`: the generation the tree was listed at. */
 export function editBookmarks(id: number, rev: number, op: api.BookmarkOp) {
   return textResult(id, async () => {

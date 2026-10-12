@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { useStore } from "../store";
 import * as api from "./api";
 import type { ImageBlock, ImageChange } from "./api";
-import { editImage } from "./edit";
+import { editImage, editImages } from "./edit";
 import { useTextEdit } from "./textEdit";
 
 /**
@@ -23,6 +23,11 @@ interface PageImages {
   /** The document generation the list belongs to. */
   rev: number;
   images: ImageBlock[];
+  /** Why the page's images can't be changed (a certified document); the controls say so. */
+  locked: string | null;
+  signed: boolean;
+  /** Why they can't be copied out (the owner's permissions). */
+  copyLocked: string | null;
 }
 
 export interface Crop {
@@ -34,7 +39,10 @@ export interface Crop {
 
 export interface DocImageEdit {
   pages: Record<number, PageImages>;
+  /** The anchor: the picked image the rail and the handles belong to (the last one picked). */
   selected: ImageRef | null;
+  /** Further picked images, of the anchor's page (shift or cmd click, or a marquee). */
+  extra: number[];
   /** A quiet sentence in the rail: why an image is locked, or that the page changed under a change. */
   notice: string | null;
   crop: Crop | null;
@@ -42,7 +50,21 @@ export interface DocImageEdit {
   placing: { file: string; name: string } | null;
 }
 
-const empty = (): DocImageEdit => ({ pages: {}, selected: null, notice: null, crop: null, placing: null });
+const empty = (): DocImageEdit => ({ pages: {}, selected: null, extra: [], notice: null, crop: null, placing: null });
+
+/** Every picked image, the anchor last. */
+export function picksOf(d: Pick<DocImageEdit, "selected" | "extra">): ImageRef[] {
+  if (!d.selected) return [];
+  const page = d.selected.page;
+  return [...d.extra.map((index) => ({ page, index })), d.selected];
+}
+
+/** A click toggles `ref` in the picks of its page: an image that was picked goes, another becomes the anchor. */
+export function togglePick(d: Pick<DocImageEdit, "selected" | "extra">, ref: ImageRef): ImageRef[] {
+  const cur = picksOf(d);
+  if (cur.length === 0 || cur[0].page !== ref.page) return [ref];
+  return cur.some((p) => p.index === ref.index) ? cur.filter((p) => p.index !== ref.index) : [...cur, ref];
+}
 
 // ---- pure helpers (tested in imageEdit.test.ts) ----
 
@@ -140,6 +162,9 @@ export function expectedBox(b: ImageBlock, change: ImageChange): Rect4 | null {
       const hh = rectW(f) / 2;
       return [cx - hw, cy - hh, cx + hw, cy + hh];
     }
+    case "angle":
+      // The centre stays, which is what the list is searched by.
+      return f;
     case "crop":
       return change.pixels ? clampRect(change.rect, f) : f;
     case "add":
@@ -184,6 +209,119 @@ export function dims(outer: Rect4, inner: Rect4): Rect4[] {
     [outer[0], inner[1], inner[0], inner[3]],
     [inner[2], inner[1], outer[2], inner[3]],
   ];
+}
+
+// ---- several images: marquee, align, free angle ----
+
+/**
+ * The editable images of a page a marquee `box` touches. The rule is "touch": any overlap counts, which
+ * includes an image the box contains and one that contains the box (the forms marquee does the same).
+ * What shows of an image is tested, and a turned image by its own outline, not its bounding box.
+ */
+export function marqueeImages(images: ImageBlock[], box: Rect4): number[] {
+  const [x0, y0, x1, y1] = box;
+  return images
+    .filter((b) => {
+      if (!b.editable) return false;
+      const clipped = b.rect.some((v, i) => Math.abs(v - b.fullRect[i]) > 0.5);
+      return clipped || isQuarter(b.angle) ? b.rect[0] < x1 && b.rect[2] > x0 && b.rect[1] < y1 && b.rect[3] > y0 : quadTouches(b.quad, box);
+    })
+    .map((b) => b.index);
+}
+
+/** True when the convex quadrilateral `q` (x, y pairs) overlaps the axis-aligned `box` (separating axes). */
+export function quadTouches(q: ImageBlock["quad"], box: Rect4): boolean {
+  const pts: [number, number][] = [0, 1, 2, 3].map((i) => [q[2 * i], q[2 * i + 1]]);
+  const [bx0, by0, bx1, by1] = box;
+  if (Math.max(...pts.map((p) => p[0])) <= bx0 || Math.min(...pts.map((p) => p[0])) >= bx1) return false;
+  if (Math.max(...pts.map((p) => p[1])) <= by0 || Math.min(...pts.map((p) => p[1])) >= by1) return false;
+  const corners: [number, number][] = [
+    [bx0, by0],
+    [bx1, by0],
+    [bx1, by1],
+    [bx0, by1],
+  ];
+  for (let i = 0; i < 4; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % 4];
+    const n: [number, number] = [b[1] - a[1], a[0] - b[0]];
+    const proj = (p: [number, number]) => p[0] * n[0] + p[1] * n[1];
+    const [lo, hi] = [Math.min(...pts.map(proj)), Math.max(...pts.map(proj))];
+    const cs = corners.map(proj);
+    if (Math.max(...cs) <= lo || Math.min(...cs) >= hi) return false;
+  }
+  return true;
+}
+
+/** The box around several rectangles. */
+export function groupBox(rects: Rect4[]): Rect4 {
+  return [Math.min(...rects.map((r) => r[0])), Math.min(...rects.map((r) => r[1])), Math.max(...rects.map((r) => r[2])), Math.max(...rects.map((r) => r[3]))];
+}
+
+export type AlignHow = "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom";
+
+/** How far each rectangle moves to line up with the group's box (page space): one move per image. */
+export function alignDeltas(rects: Rect4[], how: AlignHow): [number, number][] {
+  if (rects.length === 0) return [];
+  const g = groupBox(rects);
+  return rects.map((r) => {
+    switch (how) {
+      case "left":
+        return [g[0] - r[0], 0];
+      case "right":
+        return [g[2] - r[2], 0];
+      case "hcenter":
+        return [(g[0] + g[2]) / 2 - (r[0] + r[2]) / 2, 0];
+      case "top":
+        return [0, g[1] - r[1]];
+      case "bottom":
+        return [0, g[3] - r[3]];
+      case "vcenter":
+        return [0, (g[1] + g[3]) / 2 - (r[1] + r[3]) / 2];
+    }
+  });
+}
+
+/** An angle brought into (-180, 180]. */
+export function normAngle(deg: number): number {
+  const a = ((((deg + 180) % 360) + 360) % 360) - 180;
+  return a === -180 ? 180 : a;
+}
+
+/** True for a multiple of 90 degrees (an upright or quarter-turned image: its box is its shape). */
+export const isQuarter = (deg: number) => Math.abs(deg / 90 - Math.round(deg / 90)) < 0.0002;
+
+/** Round to a hundredth of a degree: what the field shows and sends. */
+export const roundAngle = (deg: number) => Math.round(deg * 100) / 100;
+
+/** The turn (degrees clockwise) that takes an image now at `current` to `typed`: the shortest way, null when it is the same. */
+export function turnTo(current: number, typed: number): number | null {
+  const d = roundAngle(normAngle(typed - current));
+  return Math.abs(d) < 0.005 ? null : d;
+}
+
+/** The angle of `p` seen from `c` in page space (y down), degrees clockwise from straight up. */
+export function bearing(c: [number, number], p: [number, number]): number {
+  return (Math.atan2(p[0] - c[0], c[1] - p[1]) * 180) / Math.PI;
+}
+
+/** The turn a rotate-handle drag makes: from where the pointer started to where it is, snapped to 15 degrees with `snap`. */
+export function dragTurn(c: [number, number], from: [number, number], to: [number, number], snap: boolean): number {
+  const d = normAngle(bearing(c, to) - bearing(c, from));
+  return snap ? normAngle(Math.round(d / 15) * 15) : roundAngle(d);
+}
+
+/** `quad` turned `deg` degrees clockwise (as seen) about `c`: the preview of a turn. */
+export function turnQuad(quad: ImageBlock["quad"], c: [number, number], deg: number): ImageBlock["quad"] {
+  const [s, k] = [Math.sin((deg * Math.PI) / 180), Math.cos((deg * Math.PI) / 180)];
+  const out = quad.slice() as ImageBlock["quad"];
+  for (let i = 0; i < 4; i++) {
+    const x = quad[2 * i] - c[0];
+    const y = quad[2 * i + 1] - c[1];
+    out[2 * i] = c[0] + x * k - y * s;
+    out[2 * i + 1] = c[1] + x * s + y * k;
+  }
+  return out;
 }
 
 /** The same image's resolution in pixels per inch along its own width (a turned image included). */
@@ -247,6 +385,10 @@ interface Store {
   /** Lists the page's images for the document's current generation (cached; one call per page and generation). */
   load: (doc: number, page: number) => Promise<void>;
   select: (doc: number, ref: ImageRef | null) => void;
+  /** Shift or cmd click: adds the image to the picks of its page, or takes it out (one page at a time). */
+  toggle: (doc: number, ref: ImageRef) => void;
+  /** A marquee on `page`: the images it touched (added to the picks with `add`, else replacing them). */
+  pickMany: (doc: number, page: number, indices: number[], add: boolean) => void;
   setNotice: (doc: number, notice: string | null) => void;
 
   /**
@@ -260,6 +402,10 @@ interface Store {
   rotate: (doc: number, quarterTurns: number) => Promise<boolean>;
   flip: (doc: number, horizontal: boolean) => Promise<boolean>;
   remove: (doc: number) => Promise<boolean>;
+  /** Turns the picked images by `degrees` clockwise about their own centres. */
+  turn: (doc: number, degrees: number, target?: ImageRef) => Promise<boolean>;
+  /** Lines the picked images up with the edge or centre of the group, one undo step. */
+  align: (doc: number, how: AlignHow) => Promise<boolean>;
   /** Asks for an image file and draws it instead of the selected image. */
   replace: (doc: number) => Promise<boolean>;
 
@@ -285,6 +431,8 @@ function queued<T>(doc: number, f: () => Promise<T>): Promise<T> {
   return run;
 }
 
+const STALE = "The page changed under that change, so it was not applied. Try it again.";
+
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
 /**
@@ -296,7 +444,9 @@ const choices = new Map<number, number>();
 export const useImageEdit = create<Store>((set, get) => {
   const patchDoc = (doc: number, p: Partial<DocImageEdit>) => {
     if ("selected" in p) choices.set(doc, (choices.get(doc) ?? 0) + 1);
-    set((s) => ({ docs: { ...s.docs, [doc]: { ...(s.docs[doc] ?? empty()), ...p } } }));
+    // A new anchor starts a new pick unless the caller says which others stay.
+    const q: Partial<DocImageEdit> = "selected" in p && !("extra" in p) ? { ...p, extra: [] } : p;
+    set((s) => ({ docs: { ...s.docs, [doc]: { ...(s.docs[doc] ?? empty()), ...q } } }));
   };
   const of = (doc: number): DocImageEdit => get().docs[doc] ?? empty();
   const docRev = (doc: number) => useStore.getState().docs[doc]?.rev ?? 0;
@@ -309,7 +459,8 @@ export const useImageEdit = create<Store>((set, get) => {
 
   const fetchPage = async (doc: number, page: number) => {
     const r = await api.imageBlocks(doc, page);
-    patchDoc(doc, { pages: { ...of(doc).pages, [page]: { rev: r.rev, images: r.images } } });
+    const entry: PageImages = { rev: r.rev, images: r.images, locked: r.locked ?? null, signed: r.signed ?? false, copyLocked: r.copyLocked ?? null };
+    patchDoc(doc, { pages: { ...of(doc).pages, [page]: entry } });
     return r;
   };
 
@@ -321,6 +472,7 @@ export const useImageEdit = create<Store>((set, get) => {
     const before = of(doc);
     const sel = before.selected;
     const was = sel && sel.page === page ? (before.pages[page]?.images[sel.index] ?? null) : null;
+    const wasExtra = sel && sel.page === page ? before.extra.map((i) => before.pages[page]?.images[i] ?? null) : [];
     const choice = choices.get(doc) ?? 0;
     const r = await fetchPage(doc, page);
     // Only a selection nobody touched while this listing was on its way is remapped: a change of ours that
@@ -328,13 +480,77 @@ export const useImageEdit = create<Store>((set, get) => {
     if (sel && was && !applying.has(doc) && (choices.get(doc) ?? 0) === choice) {
       const now = of(doc);
       if (now.selected?.page === page && now.selected.index === sel.index) {
-        const same = closestImage(was.fullRect, r.images);
+        // Every pick follows its image by position; one that is gone is dropped, and two never land on one image.
+        const used = new Set<number>();
+        const find = (b: ImageBlock) => {
+          const m = closestImage(b.fullRect, r.images.filter((x) => !used.has(x.index)));
+          if (m) used.add(m.index);
+          return m;
+        };
+        const same = find(was);
+        const extra = wasExtra.flatMap((b) => (b ? [find(b)] : [])).flatMap((m) => (m ? [m.index] : []));
         if (!same) patchDoc(doc, { selected: null, crop: null });
-        else if (same.index !== sel.index) patchDoc(doc, { selected: { page, index: same.index } });
+        else if (same.index !== sel.index || extra.length !== now.extra.length || extra.some((v, i) => v !== now.extra[i])) {
+          patchDoc(doc, { selected: { page, index: same.index }, extra });
+        }
       }
     }
     return r;
   };
+
+  /** Why the page of the selected image takes no change (a certified document), with the notice set; null when it may go. */
+  const lockedFor = (doc: number): string | null => {
+    const d = of(doc);
+    const why = d.selected ? (d.pages[d.selected.page]?.locked ?? null) : null;
+    if (why) patchDoc(doc, { notice: why });
+    return why;
+  };
+
+  /**
+   * One change to each picked image (`make` gives them for the picked editable images, null skipping one) as one
+   * undo step. The picks are found again by position afterwards.
+   */
+  const applyGroupNow = async (doc: number, make: (images: ImageBlock[]) => (ImageChange | null)[]): Promise<boolean> => {
+    const d = of(doc);
+    const refs = picksOf(d);
+    const page = refs.length > 0 ? d.pages[refs[0].page] : undefined;
+    if (!page || refs.length === 0) return false;
+    if (lockedFor(doc)) return false;
+    const images = refs.map((r) => page.images[r.index]).filter((b): b is ImageBlock => !!b);
+    const changes = make(images);
+    const items = images.flatMap((b, i) => (b.editable && changes[i] ? [{ b, change: changes[i] as ImageChange }] : []));
+    if (items.length === 0) return false;
+    const pageNo = refs[0].page;
+    applying.add(doc);
+    try {
+      const r = await editImages(doc, page.rev, pageNo, items.map((it) => ({ index: it.b.index, change: it.change })));
+      if (r.kind === "error") {
+        patchDoc(doc, { notice: `This change could not be applied: ${r.message}` });
+        return false;
+      }
+      const fresh = await fetchPage(doc, pageNo);
+      const used = new Set<number>();
+      const find = (b: ImageBlock, c: ImageChange) => {
+        const box = expectedBox(b, c);
+        const m = box ? closestImage(box, fresh.images.filter((x) => !used.has(x.index))) : null;
+        if (m) used.add(m.index);
+        return m;
+      };
+      const found = r.kind === "ok" ? items.map((it) => find(it.b, it.change)) : items.map((it) => find(it.b, { op: "move", dx: 0, dy: 0 }));
+      const mine = found.flatMap((m) => (m ? [m.index] : []));
+      if (mine.length === 0) patchDoc(doc, { selected: null, crop: null, notice: r.kind === "stale" ? STALE : null });
+      else {
+        patchDoc(doc, { selected: { page: pageNo, index: mine[mine.length - 1] }, extra: mine.slice(0, -1), crop: null, notice: r.kind === "stale" ? STALE : null });
+      }
+      return r.kind === "ok";
+    } finally {
+      applying.delete(doc);
+    }
+  };
+
+  /** A group change when more than one image is picked (null: one or none, the caller sends it for the one). */
+  const grouped = (doc: number, make: (images: ImageBlock[]) => (ImageChange | null)[]): Promise<boolean> | null =>
+    picksOf(of(doc)).length > 1 ? queued(doc, () => applyGroupNow(doc, make)) : null;
 
   const applyNow = async (doc: number, change: ImageChange, target?: ImageRef): Promise<boolean> => {
     const d = of(doc);
@@ -342,6 +558,10 @@ export const useImageEdit = create<Store>((set, get) => {
     const page = ref ? d.pages[ref.page] : undefined;
     const image = ref ? (page?.images[ref.index] ?? null) : null;
     if (!ref || !image || !page) return false;
+    if (page.locked) {
+      patchDoc(doc, { notice: page.locked });
+      return false;
+    }
     applying.add(doc);
     try {
       const r = await editImage(doc, page.rev, ref.page, ref.index, change);
@@ -359,7 +579,7 @@ export const useImageEdit = create<Store>((set, get) => {
           const m = closestImage(was.fullRect, fresh.images);
           patchDoc(doc, { selected: m ? { page: cur.page, index: m.index } : null });
         }
-        if (r.kind === "stale") patchDoc(doc, { notice: "The page changed under that change, so it was not applied. Try it again." });
+        if (r.kind === "stale") patchDoc(doc, { notice: STALE });
         return r.kind === "ok";
       }
       if (r.kind === "stale") {
@@ -367,7 +587,7 @@ export const useImageEdit = create<Store>((set, get) => {
         patchDoc(doc, {
           selected: same ? { page: ref.page, index: same.index } : null,
           crop: null,
-          notice: "The page changed under that change, so it was not applied. Try it again.",
+          notice: STALE,
         });
         return false;
       }
@@ -414,14 +634,43 @@ export const useImageEdit = create<Store>((set, get) => {
       }
     },
 
+    toggle: (doc, ref) => {
+      const next = togglePick(of(doc), ref);
+      if (next.length === 0) return get().select(doc, null);
+      const anchor = next[next.length - 1];
+      patchDoc(doc, { selected: anchor, extra: next.slice(0, -1).map((p) => p.index), crop: null, notice: null });
+      const te = useTextEdit.getState();
+      if (te.docs[doc]?.selected) void te.select(doc, null);
+    },
+
+    pickMany: (doc, page, indices, add) => {
+      const keep = add && of(doc).selected?.page === page ? picksOf(of(doc)).map((p) => p.index) : [];
+      const all = [...keep.filter((i) => !indices.includes(i)), ...indices];
+      if (all.length === 0) {
+        if (!add) get().select(doc, null);
+        return;
+      }
+      patchDoc(doc, { selected: { page, index: all[all.length - 1] }, extra: all.slice(0, -1), crop: null, notice: null });
+      const te = useTextEdit.getState();
+      if (te.docs[doc]?.selected) void te.select(doc, null);
+    },
+
     setNotice: (doc, notice) => patchDoc(doc, { notice }),
 
     apply: (doc, change, target) => queued(doc, () => applyNow(doc, change, target)),
-    move: (doc, d) => get().apply(doc, { op: "move", dx: d[0], dy: d[1] }),
+    move: (doc, d) => grouped(doc, (im) => im.map(() => ({ op: "move", dx: d[0], dy: d[1] }))) ?? get().apply(doc, { op: "move", dx: d[0], dy: d[1] }),
     resizeTo: (doc, rect, keepAspect, target) => get().apply(doc, { op: "resize", rect, keepAspect }, target),
-    rotate: (doc, quarterTurns) => get().apply(doc, { op: "rotate", quarterTurns }),
-    flip: (doc, horizontal) => get().apply(doc, { op: "flip", horizontal }),
-    remove: (doc) => get().apply(doc, { op: "delete" }),
+    rotate: (doc, quarterTurns) => grouped(doc, (im) => im.map(() => ({ op: "rotate", quarterTurns }))) ?? get().apply(doc, { op: "rotate", quarterTurns }),
+    flip: (doc, horizontal) => grouped(doc, (im) => im.map(() => ({ op: "flip", horizontal }))) ?? get().apply(doc, { op: "flip", horizontal }),
+    remove: (doc) => grouped(doc, (im) => im.map(() => ({ op: "delete" }))) ?? get().apply(doc, { op: "delete" }),
+    turn: (doc, degrees, target) => grouped(doc, (im) => im.map(() => ({ op: "angle", degrees }))) ?? get().apply(doc, { op: "angle", degrees }, target),
+    align: (doc, how) => {
+      const run = (im: ImageBlock[]) => {
+        const deltas = alignDeltas(im.map((b) => b.fullRect), how);
+        return deltas.map(([dx, dy]): ImageChange | null => (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01 ? null : { op: "move", dx, dy }));
+      };
+      return grouped(doc, run) ?? Promise.resolve(false);
+    },
 
     replace: async (doc) => {
       if (!selectedImage(doc)) return false;

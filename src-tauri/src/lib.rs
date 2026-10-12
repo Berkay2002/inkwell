@@ -1350,6 +1350,7 @@ pub fn run() {
             textedit::app::text_fonts,
             imageedit::app::image_blocks,
             imageedit::app::image_edit,
+            imageedit::app::image_edit_many,
             redact::app::redact_find,
             redact::app::redact_mark,
             redact::app::redact_unmark,

@@ -15,6 +15,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn(), mess
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({}) }));
 vi.mock("./edit", () => ({
   editImage: vi.fn(),
+  editImages: vi.fn(),
   editText: vi.fn(),
   addText: vi.fn(),
   setLeaveGuard: vi.fn(),
@@ -28,7 +29,7 @@ vi.mock("./api", () => ({ imageBlocks: vi.fn(), pickSource: vi.fn(), textBlocks:
 import { useStore } from "../store";
 import * as api from "./api";
 import type { ImageBlock } from "./api";
-import { editImage } from "./edit";
+import { editImage, editImages } from "./edit";
 import {
   CLICK_BOX,
   MIN_SIDE,
@@ -44,6 +45,16 @@ import {
   moveRect,
   placement,
   ppi,
+  alignDeltas,
+  dragTurn,
+  groupBox,
+  isQuarter,
+  marqueeImages,
+  normAngle,
+  quadTouches,
+  togglePick,
+  turnQuad,
+  turnTo,
   useImageEdit,
 } from "./imageEdit";
 import { useTextEdit } from "./textEdit";
@@ -54,6 +65,8 @@ const image = (over: Partial<ImageBlock> = {}): ImageBlock => ({
   rect: [100, 100, 300, 200],
   fullRect: [100, 100, 300, 200],
   matrix: [200, 0, 0, 100, 100, 692],
+  angle: 0,
+  quad: [100, 200, 300, 200, 300, 100, 100, 100],
   width: 800,
   height: 400,
   colorSpace: "DeviceRGB",
@@ -169,7 +182,7 @@ describe("helpers", () => {
 });
 
 describe("store", () => {
-  const list = (images: ImageBlock[], rev = 1) => ({ rev, images });
+  const list = (images: ImageBlock[], rev = 1) => ({ rev, images, locked: null, signed: false, copyLocked: null });
   const ok = () => ({ kind: "ok" as const, value: {} as never });
   const st = () => useImageEdit.getState().docs[1];
   const bump = (rev: number) => useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev } } });
@@ -466,5 +479,219 @@ describe("store", () => {
     expect(st()).toBeDefined();
     useStore.setState({ docs: {}, order: [], active: null });
     expect(st()).toBeUndefined();
+  });
+});
+
+describe("several images", () => {
+  const at = (index: number, r: [number, number, number, number], over: Partial<ImageBlock> = {}) =>
+    image({ index, rect: r, fullRect: r, quad: [r[0], r[3], r[2], r[3], r[2], r[1], r[0], r[1]], ...over });
+
+  it("toggles a pick within one page, the last pick being the anchor", () => {
+    const a = { selected: { page: 0, index: 1 }, extra: [0] };
+    expect(togglePick(a, { page: 0, index: 2 })).toEqual([
+      { page: 0, index: 0 },
+      { page: 0, index: 1 },
+      { page: 0, index: 2 },
+    ]);
+    expect(togglePick(a, { page: 0, index: 0 })).toEqual([{ page: 0, index: 1 }]);
+    // Another page starts a new pick: a selection is one page's at a time.
+    expect(togglePick(a, { page: 1, index: 0 })).toEqual([{ page: 1, index: 0 }]);
+    expect(togglePick({ selected: null, extra: [] }, { page: 0, index: 3 })).toEqual([{ page: 0, index: 3 }]);
+  });
+
+  it("selects the editable images a marquee touches or contains", () => {
+    const images = [at(0, [0, 0, 50, 50]), at(1, [100, 0, 150, 50]), at(2, [40, 40, 120, 120], { editable: false }), at(3, [200, 200, 300, 300])];
+    // touches 0, contains nothing else; 2 is locked and never picked; 1 is only reached with a wider box
+    expect(marqueeImages(images, [45, 45, 60, 60])).toEqual([0]);
+    expect(marqueeImages(images, [10, 10, 140, 40])).toEqual([0, 1]);
+    // Inside an image's own box still touches it; edges that only meet do not.
+    expect(marqueeImages(images, [210, 210, 220, 220])).toEqual([3]);
+    expect(marqueeImages(images, [50, 0, 100, 50])).toEqual([]);
+  });
+
+  it("tests a turned image by its outline, not its bounding box", () => {
+    // A diamond with corners at the middle of a 100 pt box's sides: the box's corner is empty.
+    const quad: ImageBlock["quad"] = [50, 100, 100, 50, 50, 0, 0, 50];
+    expect(quadTouches(quad, [0, 0, 10, 10])).toBe(false);
+    expect(quadTouches(quad, [40, 40, 60, 60])).toBe(true);
+    expect(quadTouches(quad, [90, 90, 120, 120])).toBe(false);
+    const d = at(0, [0, 0, 100, 100], { angle: 45, quad });
+    expect(marqueeImages([d], [0, 0, 10, 10])).toEqual([]);
+    expect(marqueeImages([d], [0, 0, 30, 30])).toEqual([0]);
+  });
+
+  it("lines images up with the group's edges and centres", () => {
+    const rects: [number, number, number, number][] = [
+      [10, 10, 30, 30],
+      [50, 40, 100, 60],
+    ];
+    expect(groupBox(rects)).toEqual([10, 10, 100, 60]);
+    expect(alignDeltas(rects, "left")).toEqual([[0, 0], [-40, 0]]);
+    expect(alignDeltas(rects, "right")).toEqual([[70, 0], [0, 0]]);
+    expect(alignDeltas(rects, "hcenter")).toEqual([[35, 0], [-20, 0]]);
+    expect(alignDeltas(rects, "top")).toEqual([[0, 0], [0, -30]]);
+    expect(alignDeltas(rects, "bottom")).toEqual([[0, 30], [0, 0]]);
+    expect(alignDeltas(rects, "vcenter")).toEqual([[0, 15], [0, -15]]);
+  });
+
+  it("works out the turn a typed angle or a handle drag makes", () => {
+    expect(normAngle(190)).toBe(-170);
+    expect(normAngle(-180)).toBe(180);
+    expect(isQuarter(90)).toBe(true);
+    expect(isQuarter(-180)).toBe(true);
+    expect(isQuarter(30)).toBe(false);
+    expect(turnTo(0, 30)).toBe(30);
+    expect(turnTo(350, 10)).toBe(20);
+    expect(turnTo(30, 30)).toBeNull();
+    // Straight up to straight right is a quarter turn clockwise.
+    expect(dragTurn([100, 100], [100, 0], [200, 100], false)).toBeCloseTo(90);
+    // Snapped to 15: 20 degrees becomes 15.
+    expect(dragTurn([0, 0], [0, -100], [Math.sin((20 * Math.PI) / 180) * 100, -Math.cos((20 * Math.PI) / 180) * 100], true)).toBe(15);
+  });
+
+  it("turns a quad about a centre, clockwise as seen", () => {
+    // y points down: the point straight up from the centre goes to its right.
+    const q = turnQuad([0, -10, 0, -10, 0, -10, 0, -10], [0, 0], 90);
+    expect(q[0]).toBeCloseTo(10);
+    expect(q[1]).toBeCloseTo(0);
+  });
+});
+
+describe("several images: the store", () => {
+  const list = (images: ImageBlock[], rev = 1, locked: string | null = null) => ({ rev, images, locked, signed: false, copyLocked: null });
+  const ok = () => ({ kind: "ok" as const, value: {} as never });
+  const st = () => useImageEdit.getState().docs[1];
+  const box = (index: number, x: number): ImageBlock => image({ index, rect: [x, 100, x + 50, 150], fullRect: [x, 100, x + 50, 150] });
+  const three = () => [box(0, 0), box(1, 100), box(2, 200)];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useTextEdit.setState({ open: true, tool: "select", section: "text", docs: {} });
+    useImageEdit.setState({ docs: {} });
+    useStore.setState({
+      docs: { 1: { id: 1, path: "C:\\d\\a.pdf", name: "a.pdf", dirty: false, currentPage: 0, pageCount: 2, rev: 1, sizes: [[612, 792]] } as never },
+      order: [1],
+      active: 1,
+    });
+  });
+
+  const picked = async (indices: number[]) => {
+    vi.mocked(api.imageBlocks).mockResolvedValue(list(three()));
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.pickMany(1, 0, indices, false);
+    return ie;
+  };
+
+  it("sends one change for the whole group and keeps all of them picked", async () => {
+    const ie = await picked([0, 2]);
+    expect(st().selected).toEqual({ page: 0, index: 2 });
+    expect(st().extra).toEqual([0]);
+    vi.mocked(editImages).mockResolvedValue(ok());
+    vi.mocked(api.imageBlocks).mockResolvedValue(list([box(0, 10), box(1, 100), box(2, 210)], 2));
+    expect(await ie.move(1, [10, 0])).toBe(true);
+    expect(editImages).toHaveBeenCalledTimes(1);
+    expect(editImages).toHaveBeenCalledWith(1, 1, 0, [
+      { index: 0, change: { op: "move", dx: 10, dy: 0 } },
+      { index: 2, change: { op: "move", dx: 10, dy: 0 } },
+    ]);
+    expect(editImage).not.toHaveBeenCalled();
+    expect(st().selected).toEqual({ page: 0, index: 2 });
+    expect(st().extra).toEqual([0]);
+  });
+
+  it("deletes the group in one step and picks nothing after", async () => {
+    const ie = await picked([0, 1]);
+    vi.mocked(editImages).mockResolvedValue(ok());
+    vi.mocked(api.imageBlocks).mockResolvedValue(list([box(0, 200)], 2));
+    expect(await ie.remove(1)).toBe(true);
+    expect(editImages).toHaveBeenCalledWith(1, 1, 0, [
+      { index: 0, change: { op: "delete" } },
+      { index: 1, change: { op: "delete" } },
+    ]);
+    expect(st().selected).toBeNull();
+    expect(st().extra).toEqual([]);
+  });
+
+  it("aligns: one move per image that has to move", async () => {
+    const ie = await picked([0, 1, 2]);
+    vi.mocked(editImages).mockResolvedValue(ok());
+    vi.mocked(api.imageBlocks).mockResolvedValue(list([box(0, 0), box(1, 0), box(2, 0)], 2));
+    expect(await ie.align(1, "left")).toBe(true);
+    expect(editImages).toHaveBeenCalledWith(1, 1, 0, [
+      { index: 1, change: { op: "move", dx: -100, dy: 0 } },
+      { index: 2, change: { op: "move", dx: -200, dy: 0 } },
+    ]);
+  });
+
+  it("turns the group by an angle, each about its own centre", async () => {
+    const ie = await picked([0, 1]);
+    vi.mocked(editImages).mockResolvedValue(ok());
+    vi.mocked(api.imageBlocks).mockResolvedValue(list(three(), 2));
+    await ie.turn(1, 30);
+    expect(editImages).toHaveBeenCalledWith(1, 1, 0, [
+      { index: 0, change: { op: "angle", degrees: 30 } },
+      { index: 1, change: { op: "angle", degrees: 30 } },
+    ]);
+  });
+
+  it("a single pick still goes the one-image way", async () => {
+    vi.mocked(api.imageBlocks).mockResolvedValue(list(three()));
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.select(1, { page: 0, index: 1 });
+    vi.mocked(editImage).mockResolvedValue(ok());
+    await ie.turn(1, 30);
+    expect(editImage).toHaveBeenCalledWith(1, 1, 0, 1, { op: "angle", degrees: 30 });
+    expect(editImages).not.toHaveBeenCalled();
+  });
+
+  it("toggles picks with a click and a click elsewhere starts again", async () => {
+    vi.mocked(api.imageBlocks).mockResolvedValue(list(three()));
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.select(1, { page: 0, index: 0 });
+    ie.toggle(1, { page: 0, index: 2 });
+    expect(st().selected).toEqual({ page: 0, index: 2 });
+    expect(st().extra).toEqual([0]);
+    ie.toggle(1, { page: 0, index: 0 });
+    expect(st().selected).toEqual({ page: 0, index: 2 });
+    expect(st().extra).toEqual([]);
+    ie.select(1, { page: 0, index: 1 });
+    expect(st().extra).toEqual([]);
+  });
+
+  it("a marquee with shift adds to the picks", async () => {
+    const ie = await picked([0]);
+    ie.pickMany(1, 0, [2], true);
+    expect(st().selected).toEqual({ page: 0, index: 2 });
+    expect(st().extra).toEqual([0]);
+    ie.pickMany(1, 0, [], false);
+    expect(st().selected).toBeNull();
+  });
+
+  it("follows every pick by position after undo or redo, dropping the ones that are gone", async () => {
+    await picked([0, 2]);
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], rev: 2 } } });
+    // The first image went away: the others are 0 and 1 now.
+    vi.mocked(api.imageBlocks).mockResolvedValue(list([box(1, 100), box(2, 200)].map((b, i) => ({ ...b, index: i })), 2));
+    await useImageEdit.getState().load(1, 0);
+    expect(st().selected).toEqual({ page: 0, index: 1 });
+    expect(st().extra).toEqual([]);
+  });
+
+  it("refuses a group change in a certified document before sending it", async () => {
+    vi.mocked(api.imageBlocks).mockResolvedValue(list(three(), 1, "This document is certified."));
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.pickMany(1, 0, [0, 1], false);
+    expect(await ie.move(1, [5, 5])).toBe(false);
+    expect(await ie.turn(1, 30)).toBe(false);
+    expect(await ie.remove(1)).toBe(false);
+    expect(editImages).not.toHaveBeenCalled();
+    expect(st().notice).toContain("certified");
+    ie.select(1, { page: 0, index: 0 });
+    expect(await ie.turn(1, 30)).toBe(false);
+    expect(editImage).not.toHaveBeenCalled();
   });
 });

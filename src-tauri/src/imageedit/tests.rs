@@ -19,9 +19,14 @@ const PIXELS: [u8; 24] = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 0, 0, 
 /// inline 2 × 2 grey image at (400,600)-(450,650), and a line of text; other pages draw `Im1` too
 /// when `shared`.
 fn pdf(pages: usize, shared: bool) -> Vec<u8> {
+    pdf_with(pages, shared, "", &[])
+}
+
+/// [`pdf`] with `catalog` keys added and `extra` objects after the pages' (numbered from `5 + 2 * pages`).
+fn pdf_with(pages: usize, shared: bool, catalog: &str, extra: &[String]) -> Vec<u8> {
     let mut objs: Vec<Vec<u8>> = Vec::new();
     let kids: String = (0..pages).map(|i| format!("{} 0 R ", 5 + i * 2)).collect();
-    objs.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
+    objs.push(format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>").into_bytes());
     objs.push(format!("<< /Type /Pages /Kids [{kids}] /Count {pages} >>").into_bytes());
     let mut img = format!(
         "<< /Type /XObject /Subtype /Image /Width 4 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n",
@@ -50,6 +55,7 @@ fn pdf(pages: usize, shared: bool) -> Vec<u8> {
         s.extend_from_slice(b"\nendstream");
         objs.push(s);
     }
+    objs.extend(extra.iter().map(|o| o.clone().into_bytes()));
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (i, body) in objs.iter().enumerate() {
@@ -551,4 +557,185 @@ fn a_crop_of_a_turned_image_keeps_its_shape() {
     // And it still moves as one with its image.
     change(&eng, id, Some(0), ImageChange::Move { dx: 10.0, dy: 0.0 });
     assert!(near(list(&eng, id)[0].rect, [310.0, 300.0, 410.0, 360.0]));
+}
+
+// ---- several images at once, free rotation -----------------------------------------------------
+
+fn many(eng: &Engine, id: DocId, items: Vec<(u32, ImageChange)>) -> Result<ImageEdited> {
+    let rev = eng.edit_state(id).unwrap().rev;
+    let items: Vec<ImageItem> = items.into_iter().map(|(index, change)| ImageItem { index, change }).collect();
+    edit_many(eng, id, rev, 0, &items, EditSource::User)
+}
+
+#[test]
+fn moving_several_images_is_one_undo_step() {
+    let d = dir("many-move");
+    let (eng, id, path) = open(&d, &pdf(1, false));
+    let r = many(&eng, id, vec![(0, ImageChange::Move { dx: 10.0, dy: 20.0 }), (1, ImageChange::Move { dx: -100.0, dy: 0.0 })]).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Move 2 images on p. 1"));
+    let l = list(&eng, id);
+    assert!(near(l[0].rect, [110.0, 212.0, 310.0, 312.0]) && near(l[1].rect, [300.0, 142.0, 350.0, 192.0]), "{l:?}");
+    // One undo takes both back, one redo does both again.
+    eng.undo(id).unwrap();
+    let l = list(&eng, id);
+    assert!(near(l[0].rect, [100.0, 192.0, 300.0, 292.0]) && near(l[1].rect, [400.0, 142.0, 450.0, 192.0]), "{l:?}");
+    eng.redo(id).unwrap();
+    // Saved and reopened the same.
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let l = list(&eng, id);
+    assert!(near(l[0].rect, [110.0, 212.0, 310.0, 312.0]) && near(l[1].rect, [300.0, 142.0, 350.0, 192.0]), "{l:?}");
+}
+
+#[test]
+fn deleting_several_images_is_one_undo_step_whatever_the_order() {
+    let d = dir("many-delete");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    let r = many(&eng, id, vec![(0, ImageChange::Delete), (1, ImageChange::Delete)]).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Delete 2 images on p. 1"));
+    assert!(list(&eng, id).is_empty());
+    eng.undo(id).unwrap();
+    assert_eq!(list(&eng, id).len(), 2, "one undo brings both back");
+    // Just the first of two: the one after it keeps its place.
+    many(&eng, id, vec![(0, ImageChange::Delete)]).unwrap();
+    let l = list(&eng, id);
+    assert_eq!((l.len(), l[0].kind), (1, ImageKind::Inline));
+}
+
+#[test]
+fn a_batch_that_does_not_make_sense_changes_nothing() {
+    let d = dir("many-bad");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    let rev = eng.edit_state(id).unwrap().rev;
+    let bad: Vec<Vec<(u32, ImageChange)>> = vec![
+        vec![],
+        vec![(0, ImageChange::Move { dx: 1.0, dy: 1.0 }), (0, ImageChange::Move { dx: 2.0, dy: 2.0 })],
+        vec![(0, ImageChange::Delete), (1, ImageChange::Move { dx: 1.0, dy: 1.0 })],
+        vec![(0, ImageChange::Crop { rect: [0.0, 0.0, 10.0, 10.0], pixels: false })],
+        vec![(0, ImageChange::Replace { file: "x".into() })],
+        // The second item fails after the first was applied: the step is not taken at all.
+        vec![(0, ImageChange::Move { dx: 5.0, dy: 5.0 }), (7, ImageChange::Move { dx: 5.0, dy: 5.0 })],
+    ];
+    for items in bad {
+        let r = many(&eng, id, items.clone());
+        assert!(matches!(r, Err(EngineError::Invalid(_))), "{items:?}: {r:?}");
+        assert_eq!(eng.edit_state(id).unwrap().rev, rev, "{items:?}");
+    }
+    assert!(near(list(&eng, id)[0].rect, [100.0, 192.0, 300.0, 292.0]));
+    let items = [ImageItem { index: 0, change: ImageChange::Delete }];
+    assert!(matches!(edit_many(&eng, id, rev + 1, 0, &items, EditSource::User), Err(EngineError::Stale)));
+}
+
+#[test]
+fn turning_by_30_degrees_is_saved_and_reopened() {
+    let d = dir("angle");
+    let (eng, id, path) = open(&d, &pdf(1, false));
+    assert!(list(&eng, id)[0].angle.abs() < 0.01);
+    let r = change(&eng, id, Some(0), ImageChange::Angle { degrees: 30.0 });
+    assert_eq!(r.state.undo.as_deref(), Some("Rotate image on p. 1"));
+    // 200 × 100 about (200, 242): the box grows to (200 cos + 100 sin, 200 sin + 100 cos) = (223.2, 186.6).
+    let check = |b: &ImageBlock| {
+        assert!(near(b.full_rect, [200.0 - 111.603, 242.0 - 93.301, 200.0 + 111.603, 242.0 + 93.301]), "{b:?}");
+        assert!((b.angle - 30.0).abs() < 0.01, "{}", b.angle);
+        // The picture's own corners: its bottom left (0,0) was (100, 292); turned clockwise about the centre.
+        let (s, c) = (30f32.to_radians().sin(), 30f32.to_radians().cos());
+        let (x, y) = (-100.0f32, 50.0f32);
+        let want = (200.0 + x * c - y * s, 242.0 + x * s + y * c);
+        assert!((b.quad[0] - want.0).abs() < 0.05 && (b.quad[1] - want.1).abs() < 0.05, "{:?} vs {want:?}", &b.quad[..2]);
+    };
+    check(&list(&eng, id)[0]);
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let eng2 = Engine::new(2, 64 << 20);
+    let id2 = eng2.open(&path).unwrap().doc;
+    check(&list(&eng2, id2)[0]);
+    // Turned again by -30 it is upright, and the content did not grow a stack of transforms it can't undo.
+    change(&eng2, id2, Some(0), ImageChange::Angle { degrees: -30.0 });
+    let b = list(&eng2, id2)[0].clone();
+    assert!(near(b.full_rect, [100.0, 192.0, 300.0, 292.0]) && b.angle.abs() < 0.01, "{b:?}");
+    eng2.undo(id2).unwrap();
+    check(&list(&eng2, id2)[0]);
+    // 360 and a turn that is no turn change nothing, and are refused.
+    let rev = eng2.edit_state(id2).unwrap().rev;
+    for degrees in [0.0, 360.0, f64::NAN] {
+        let r = edit(&eng2, id2, rev, 0, Some(0), &ImageChange::Angle { degrees }, EditSource::User);
+        assert!(matches!(r, Err(EngineError::Invalid(_))), "{degrees}: {r:?}");
+    }
+}
+
+#[test]
+fn a_turned_image_is_only_scaled_evenly_and_its_inline_twin_turns_too() {
+    let d = dir("angle-resize");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    change(&eng, id, Some(0), ImageChange::Angle { degrees: 30.0 });
+    let rev = eng.edit_state(id).unwrap().rev;
+    let r = edit(&eng, id, rev, 0, Some(0), &ImageChange::Resize { rect: [0.0, 0.0, 100.0, 300.0], keep_aspect: false }, EditSource::User);
+    assert!(matches!(r, Err(EngineError::Invalid(_))), "{r:?}");
+    // Kept proportions: half the size, the same angle.
+    let b = list(&eng, id)[0].clone();
+    let (w, h) = (b.full_rect[2] - b.full_rect[0], b.full_rect[3] - b.full_rect[1]);
+    change(&eng, id, Some(0), ImageChange::Resize { rect: [0.0, 0.0, f64::from(w) / 2.0, f64::from(h) / 2.0], keep_aspect: true });
+    let b = list(&eng, id)[0].clone();
+    assert!((b.angle - 30.0).abs() < 0.01 && near(b.full_rect, [0.0, 0.0, w / 2.0, h / 2.0]), "{b:?}");
+    // The inline image turns by an angle with its bytes kept.
+    change(&eng, id, Some(1), ImageChange::Angle { degrees: -45.0 });
+    assert!((list(&eng, id)[1].angle + 45.0).abs() < 0.01);
+}
+
+#[test]
+fn a_group_turn_leaves_each_image_in_place() {
+    let d = dir("many-angle");
+    let (eng, id, _) = open(&d, &pdf(1, false));
+    let before = list(&eng, id);
+    many(&eng, id, vec![(0, ImageChange::Angle { degrees: 90.0 }), (1, ImageChange::Angle { degrees: 90.0 })]).unwrap();
+    let after = list(&eng, id);
+    for (a, b) in before.iter().zip(&after) {
+        let (ca, cb) = ((a.full_rect[0] + a.full_rect[2]) / 2.0, (b.full_rect[0] + b.full_rect[2]) / 2.0);
+        assert!((ca - cb).abs() < 0.05 && (b.angle - 90.0).abs() < 0.01, "{a:?} {b:?}");
+    }
+}
+
+/// A one-page file whose catalog and objects are those of [`pdf_with`]: certified with `/P` 2.
+fn certified_pdf() -> Vec<u8> {
+    let perms = "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 2 >> >> ] >> >>";
+    pdf_with(1, false, perms, &[])
+}
+
+#[test]
+fn a_certified_document_refuses_every_change_to_its_images() {
+    let d = dir("certified");
+    let (eng, id, _) = open(&d, &certified_pdf());
+    let rev = eng.edit_state(id).unwrap().rev;
+    let blocks = blocks(&eng, id, 0).unwrap();
+    assert!(blocks.locked.as_deref().is_some_and(|m| m.contains("certified")), "{:?}", blocks.locked);
+    let one = |c: ImageChange| edit(&eng, id, rev, 0, Some(0), &c, EditSource::User).map(|_| ());
+    let batch = |c: ImageChange| edit_many(&eng, id, rev, 0, &[ImageItem { index: 0, change: c }, ImageItem { index: 1, change: ImageChange::Move { dx: 1.0, dy: 1.0 } }], EditSource::User).map(|_| ());
+    let results = [
+        one(ImageChange::Angle { degrees: 30.0 }),
+        one(ImageChange::Move { dx: 1.0, dy: 1.0 }),
+        batch(ImageChange::Move { dx: 1.0, dy: 1.0 }),
+        edit_many(&eng, id, rev, 0, &[ImageItem { index: 0, change: ImageChange::Delete }], EditSource::User).map(|_| ()),
+    ];
+    for r in results {
+        match r {
+            Err(EngineError::Invalid(m)) => assert!(m.contains("certified"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(eng.edit_state(id).unwrap().rev, rev);
+    assert!(eng.edit_state(id).unwrap().undo.is_none());
+}
+
+#[test]
+fn a_signed_document_takes_a_group_change_after_its_signed_bytes() {
+    let d = dir("signed");
+    let field = format!("<< /FT /Sig /T (S) /Type /Annot /Subtype /Widget /Rect [0 0 0 0] {} >>", crate::outline::tests::sig_value(""));
+    let bytes = pdf_with(1, false, "/AcroForm << /SigFlags 3 /Fields [7 0 R] >>", &[field]);
+    let (eng, id, path) = open(&d, &bytes);
+    assert!(blocks(&eng, id, 0).unwrap().signed);
+    many(&eng, id, vec![(0, ImageChange::Move { dx: 5.0, dy: 5.0 }), (1, ImageChange::Angle { degrees: 20.0 })]).unwrap();
+    eng.save(id, None).unwrap();
+    assert!(std::fs::read(&path).unwrap().starts_with(&bytes), "the signed bytes are not the start of the saved file");
 }
