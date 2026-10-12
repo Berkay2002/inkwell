@@ -647,3 +647,42 @@ fn a_stamp_that_is_not_a_picture_is_not_flagged_and_is_left_to_mupdf() {
     // MuPDF re-fits a text stamp inside the box itself; we add no proportion rule of our own.
     assert!(r[0] >= 100.0 && r[2] <= 400.0 && (r[1] - 100.0).abs() < 0.01 && (r[3] - 130.0).abs() < 0.01, "{r:?}");
 }
+
+#[test]
+fn a_placed_custom_stamp_exports_to_xfdf_by_name_without_its_picture_and_reimports() {
+    use crate::annot::xfdf::{export, import_one, parse};
+    use crate::exchange::Format;
+    let d = dir("stamps", "xfdf");
+    let (_lib, s, png) = one_stamp(&d);
+    let (eng, id, _) = open_bytes(&d, "a.pdf", &plain());
+    place1(&eng, id, &s, &png, [300.0, 400.0]).unwrap();
+    let before = list_all(&eng, id).unwrap();
+    assert!(before[0].picture);
+
+    for fmt in [Format::Xfdf, Format::Fdf] {
+        let (bytes, done) = export(&eng, id, fmt, "a.pdf").unwrap();
+        assert_eq!((done.count, done.left_out), (1, 0));
+        let text = String::from_utf8_lossy(&bytes);
+        // (An FDF name object writes the spaces as #20.)
+        assert!(text.contains("Approved by me") || text.contains("Approved#20by#20me"), "the stamp is listed by its name: {text}");
+        // The picture is not in the file: a few hundred bytes of text, no image data.
+        assert!(bytes.len() < 4000 && !text.contains("PNG") && !text.contains("FlateDecode"), "{} bytes", bytes.len());
+
+        // Back into the same document: the stamp is matched by name and updated, still the same picture.
+        let parsed = parse(&bytes).unwrap();
+        assert_eq!(parsed.items.len(), 1);
+        let got = import_one(&eng, id, &parsed, user()).unwrap();
+        assert!(got.summary.skipped.is_empty(), "{:?}", got.summary);
+        let after = list_all(&eng, id).unwrap();
+        assert_eq!(after.len(), 1, "no second stamp");
+        assert!(after[0].picture, "the picture survives the update");
+        assert_eq!(after[0].icon.as_deref(), Some("Approved by me"));
+
+        // Into a document that has no such stamp: a stamp with that name is made (as MuPDF's own, not a picture).
+        let (eng2, id2, _) = open_bytes(&dir("stamps", "xfdf-b"), "b.pdf", &plain());
+        let got = import_one(&eng2, id2, &parsed, user()).unwrap();
+        assert_eq!((got.summary.added, got.summary.updated), (1, 0), "{:?}", got.summary);
+        let made = list_all(&eng2, id2).unwrap();
+        assert_eq!((made.len(), made[0].kind, made[0].icon.as_deref(), made[0].picture), (1, Kind::Stamp, Some("Approved by me"), false));
+    }
+}

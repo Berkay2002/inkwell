@@ -33,12 +33,19 @@ then one group per category) and the "Custom stamps" sheet (button beside the pi
   (metadata, extra chunks) is kept, and the picked file is never changed.
 - **Limits**: 200 stamps, 20 MB per source file, 50 megapixels per source, longest side shrunk to 4096 px, name 128
   characters (longer is refused, not cut), category 64, default category "Custom". A damaged `stamps.json` is moved
-  aside to `stamps.json.bad` and the library starts empty with a warning; unusable entries are dropped one by one.
+  aside to `stamps.json.bad` and the library starts empty with a warning; unusable entries are dropped one by one. An
+  index that cannot be opened or read (permissions, a disk fault) shows as empty with a warning but stops every write,
+  so it is never stored over. Only a regular file is read as a source. Drawing a PDF page stops after 20 seconds.
 - **Placing**: the click centres a stamp 150 pt wide with the picture's proportions, moved inside the page. The
   appearance is one Form XObject whose only content is the picture (with its alpha as a soft mask), so any PDF
   reader draws it, and MuPDF treats it as a standard stamp: move and resize redraw it in the new `/Rect`. Resize keeps
   the proportions (`fit_aspect`, mirrored in `src/lib/stampsLogic.ts` for the frame while dragging); the corner or edge
-  that did not move stays put. One placement is one undo step, kept by Save.
+  that did not move stays put. One placement is one undo step, kept by Save. On a page with `/Rotate` the picture's
+  pixels are stored turned back by the rotation (MuPDF rebuilds the appearance with an identity matrix on every move,
+  so a `/Matrix` would not last), and resize fits the proportions as the page shows them.
+- **XFDF and FDF**: a placed stamp is exported as a stamp with its name, without the picture. Imported into the same
+  document it updates the stamp in place (the picture stays); into another document it is made as a plain stamp
+  with that name, not a picture.
 - **Certified and signed**: placing uses `outline::refuse_unless_annotating_allowed` inside the edit, so a document
   certified with P1 or P2 refuses it with no history step and the picker is off with the reason; P3 allows it. A
   signed document takes the stamp as an incremental update and the picker says so. The library sheet never touches the
