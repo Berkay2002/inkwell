@@ -4,12 +4,14 @@ import { useAnnot } from "./annot";
 import { useConvert } from "./convertStore";
 import { useForms } from "./forms";
 import { useHistory } from "./historyStore";
+import { useMeasure } from "./measure";
 import { useMarks } from "./marksStore";
 import { usePreflight } from "./preflight";
 import { usePrepress } from "./prepressStore";
 import { useProtect } from "./protectStore";
 import { useRedact } from "./redact";
 import { useSearch } from "./searchStore";
+import { useSign } from "./sign";
 import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 
@@ -33,6 +35,10 @@ export function wirePrepressRail() {
     useA11y.getState().setOpen(false);
     usePreflight.getState().setOpen(false);
     useSearch.getState().setOpen(false);
+    // their tools place points and signatures on a click: not while the page answers the inspector
+    useMeasure.getState().setOpen(false);
+    useSign.getState().setOpen(false);
+    useSign.getState().setRail(null);
     if (useMarks.getState().sheet && !useMarks.getState().sheet?.busy) useMarks.setState({ sheet: null });
     const ai = useAi.getState();
     if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
@@ -56,5 +62,7 @@ export function wirePrepressRail() {
   useA11y.subscribe((s, prev) => s.open && !prev.open && yield_());
   usePreflight.subscribe((s, prev) => s.open && !prev.open && yield_());
   useSearch.subscribe((s, prev) => s.open && !prev.open && yield_());
+  useMeasure.subscribe((s, prev) => s.open && !prev.open && yield_());
+  useSign.subscribe((s, prev) => ((s.open && !prev.open) || (s.rail && !prev.rail)) && yield_());
   useAi.subscribe((s, prev) => s.open && !prev.open && s.settings.mode === "docked" && yield_());
 }

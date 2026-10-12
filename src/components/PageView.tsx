@@ -14,7 +14,7 @@ import { SignLayer } from "./sign/SignLayer";
 import { MeasureLayer } from "./measure/MeasureLayer";
 import { OrderLayer } from "./a11y/OrderLayer";
 import { LinkLayer } from "./edit/LinkLayer";
-import { usePrepress } from "../lib/prepressStore";
+import { inspectCapture, usePrepress } from "../lib/prepressStore";
 import { MarkPreview } from "./MarkPreview";
 import { MediaLayer } from "./MediaLayer";
 import { InspectMarker } from "./prepress/InspectMarker";
@@ -96,7 +96,8 @@ export const PageView = memo(function PageView(p: Props) {
 
   // Output Preview: the ink under the pointer (page points as shown, one question at a time).
   const probing = usePrepress((s) => s.open);
-  // The object inspector: a click asks what is painted there. Captured, so a link or a field underneath is not followed.
+  // The object inspector: a click asks what is painted there. Captured, so a link or a field underneath is not followed
+  // and an armed Sign or Measure tool places nothing.
   const inspecting = usePrepress((s) => s.open && s.docs[docId]?.inspect.on === true);
   return (
     <div
@@ -105,15 +106,7 @@ export const PageView = memo(function PageView(p: Props) {
       data-page={page}
       onPointerMove={probing ? (e) => usePrepress.getState().probe(docId, page, ...toPage(e)) : undefined}
       onPointerLeave={probing ? () => usePrepress.getState().clearProbe(docId) : undefined}
-      onClickCapture={
-        inspecting
-          ? (e) => {
-              e.stopPropagation();
-              e.preventDefault();
-              void usePrepress.getState().inspectAt(docId, page, ...toPage(e));
-            }
-          : undefined
-      }
+      {...(inspecting ? inspectCapture(docId, page, toPage) : {})}
     >
       <TileCanvas docId={docId} tile={preview} size={size} zoom={zoom} cover />
       {underTiles.map((t) => (

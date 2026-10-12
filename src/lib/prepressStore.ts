@@ -865,6 +865,26 @@ usePlates.subscribe((s, prev) => {
   if (s.lost !== prev.lost && s.doc !== null && s.view === prev.view) void usePrepress.getState().refresh(s.doc);
 });
 
+/**
+ * The handlers of a page while the object inspector is on. A press is taken before anything on the page hears it
+ * (a field acts on mousedown, Sign and Measure on pointerdown), and a click asks what is painted there instead of
+ * following a link. `at` maps the event to page points.
+ */
+export function inspectCapture<E extends { stopPropagation(): void; preventDefault(): void }>(doc: number, page: number, at: (e: E) => [number, number]) {
+  const take = (e: E) => {
+    e.stopPropagation();
+    e.preventDefault();
+  };
+  return {
+    onPointerDownCapture: take,
+    onMouseDownCapture: take,
+    onClickCapture: (e: E) => {
+      take(e);
+      void usePrepress.getState().inspectAt(doc, page, ...at(e));
+    },
+  };
+}
+
 /** Opens a tool on the active document (the tools list and the palette). */
 export const openOutputPreview = () => usePrepress.getState().setOpen(true);
 export const openConvertColors = () => usePrepress.getState().openConvert();

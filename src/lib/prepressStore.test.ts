@@ -46,7 +46,7 @@ import { applyState } from "./edit";
 import { usePlates, viewFailed } from "./platesView";
 import { prepressApi, type PageBoxes } from "./prepressApi";
 import { toPt } from "./prepressLogic";
-import { currentSeps, newBox, usePrepress } from "./prepressStore";
+import { currentSeps, inspectCapture, newBox, usePrepress } from "./prepressStore";
 
 const flush = async () => {
   for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
@@ -279,6 +279,24 @@ describe("object inspector", () => {
     await b;
     st().setOpen(false);
     expect(st().get(1).inspect).toEqual({ on: false, at: null, found: null, error: null });
+  });
+
+  it("takes a press before anything on the page hears it, and a click asks the engine", async () => {
+    await ask();
+    const ev = () => ({ stopPropagation: vi.fn(), preventDefault: vi.fn() });
+    const h = inspectCapture(1, 2, () => [7, 8]);
+    for (const down of [h.onPointerDownCapture, h.onMouseDownCapture]) {
+      const e = ev();
+      down(e);
+      expect(e.stopPropagation).toHaveBeenCalledOnce();
+      expect(e.preventDefault).toHaveBeenCalledOnce();
+    }
+    expect(prepressApi.inspect).not.toHaveBeenCalled();
+    const c = ev();
+    h.onClickCapture(c);
+    expect(c.stopPropagation).toHaveBeenCalledOnce();
+    expect(c.preventDefault).toHaveBeenCalledOnce();
+    expect(prepressApi.inspect).toHaveBeenCalledWith(1, 2, 7, 8);
   });
 
   it("shows the engine's refusal and still allows the next click", async () => {
