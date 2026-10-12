@@ -285,24 +285,39 @@ pub fn parse_xfdf(bytes: &[u8]) -> Result<Parsed> {
     }
     let mut out = Parsed::default();
     let Some(fields) = root.child("fields") else { return Ok(out) };
-    // Depth is bounded by the reader (64), so recursion here is too.
-    fn walk(n: &exchange::Node, prefix: &str, out: &mut Parsed) {
+    // Depth is bounded by the reader (64), so recursion here is too. Every name is built from its parent's,
+    // so each is charged: a long parent name over many leaves would otherwise be copied once per leaf.
+    fn walk(n: &exchange::Node, prefix: &str, out: &mut Parsed, b: &Budget) {
         for f in n.children("field") {
+            if b.gone() {
+                return;
+            }
             let Some(part) = f.attr("name") else { continue };
+            if prefix.len() + part.len() + 1 > MAX_STR {
+                // The field and what is under it (their names are longer still) are left out.
+                let shown: String = prefix.chars().chain(['.']).chain(part.chars()).take(60).collect();
+                out.leave_out(&shown, "the field name is longer than 1 MB");
+                continue;
+            }
             let name = if prefix.is_empty() { part.to_string() } else { format!("{prefix}.{part}") };
+            if !b.take(name.len()) {
+                return;
+            }
             let values: Vec<String> = f.children("value").map(|v| v.text.clone()).collect();
             if !values.is_empty() {
                 if out.fields.len() >= MAX_ITEMS {
                     out.leave_out(&name, OVER_LIMIT);
-                } else {
+                } else if b.take(name.len()) {
                     let v = if values.len() == 1 { Val::Text(values.into_iter().next().unwrap_or_default()) } else { Val::Many(values) };
                     out.fields.push((name.clone(), v));
                 }
             }
-            walk(f, &name, out);
+            walk(f, &name, out, b);
         }
     }
-    walk(fields, "", &mut out);
+    let budget = Budget::new();
+    walk(fields, "", &mut out, &budget);
+    budget.check()?;
     Ok(out)
 }
 
@@ -464,7 +479,8 @@ pub struct Imported {
 fn skip(sum: &mut Summary, name: &str, reason: impl Into<String>) {
     sum.skipped_total += 1;
     if sum.skipped.len() < LISTED {
-        sum.skipped.push(Skipped { name: name.to_string(), reason: reason.into() });
+        // A name can be as long as a file allows: the summary, the IPC and the toast get its start.
+        sum.skipped.push(Skipped { name: name.chars().take(60).collect(), reason: reason.into() });
     }
 }
 

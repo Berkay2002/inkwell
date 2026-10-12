@@ -347,3 +347,23 @@ fn one_kids_array_shared_by_many_parents_is_refused_before_the_stack_grows_past_
     let peak = PEAK_STACK.with(|p| p.get());
     assert!(peak > 0 && peak <= MAX_NODES, "the stack held {peak} entries");
 }
+
+#[test]
+fn xfdf_field_names_built_from_long_parents_are_charged_and_capped() {
+    let xf = |body: String| format!("<xfdf xmlns=\"http://ns.adobe.com/xfdf/\"><fields>{body}</fields></xfdf>").into_bytes();
+    // One 900 kB parent over many leaves: every leaf's full name is 900 kB, 90 MB in all.
+    let long = "a".repeat(900_000);
+    let leaves: String = (0..100).map(|i| format!("<field name=\"l{i}\"><value>x</value></field>")).collect();
+    let f = xf(format!("<field name=\"{long}\">{leaves}</field>"));
+    assert!(matches!(parse_xfdf(&f), Err(EngineError::Invalid(m)) if m.contains("same data")));
+    // A few are fine.
+    let ok = parse_xfdf(&xf(format!("<field name=\"{long}\"><field name=\"l\"><value>x</value></field></field>"))).unwrap();
+    assert_eq!(ok.fields.len(), 1);
+    // A name past 1 MB is left out, and named in the summary by its start.
+    let half = "b".repeat(600_000);
+    let f = xf(format!("<field name=\"{half}\"><field name=\"{half}\"><value>x</value></field></field>"));
+    let p = parse_xfdf(&f).unwrap();
+    assert!(p.fields.is_empty());
+    assert_eq!((p.over, p.left_out.len()), (1, 1));
+    assert_eq!(p.left_out[0].0.len(), 60);
+}
